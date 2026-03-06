@@ -1,0 +1,6 @@
+[deployment]
+run = ["python", "main.py"]
+
+[[ports]]
+localPort = 8080
+externalPort = 80
