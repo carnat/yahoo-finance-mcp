@@ -261,9 +261,12 @@ async function fetchTimeseries(
   baseTypes: string[]
 ): Promise<string> {
   const types = baseTypes.map((t) => `${prefix}${t}`);
+  // period1: 1985-08-20 (yfinance default); period2: now
+  const p2 = Math.floor(Date.now() / 1000);
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${enc(ticker)}` +
-      `?type=${types.join(",")}&period1=0&period2=9999999999`
+    `https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${enc(ticker)}` +
+      `?type=${types.join(",")}&period1=493590046&period2=${p2}` +
+      `&lang=en-US&region=US&corsDomain=finance.yahoo.com`
   )) as Record<string, unknown>;
 
   const results =
@@ -311,11 +314,15 @@ async function fetchTimeseries(
     const firstMeta = firstItem?.meta as Record<string, unknown> | undefined;
     const firstType = firstMeta?.type;
     const firstKey = Array.isArray(firstType) ? firstType[0] : firstType;
+    // Include raw response snippet so we can see the actual shape
+    const rawSnippet = JSON.stringify(d).slice(0, 1500);
     const debug = {
       resultsCount: results.length,
       firstItemType: firstType,
       firstItemKeys: firstItem ? Object.keys(firstItem) : null,
+      firstItemRaw: firstItem,  // full first item for structure inspection
       firstItemDataSample: firstItem && firstKey ? firstItem[firstKey as string] : null,
+      rawResponseSnippet: rawSnippet,
     };
     return JSON.stringify({ debug, data: [] });
   }
