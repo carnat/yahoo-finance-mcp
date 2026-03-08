@@ -266,46 +266,54 @@ async def get_financial_statement(ticker: str, financial_type: str) -> str:
         print(f"Error: getting financial statement for {ticker}: {e}")
         return f"Error: getting financial statement for {ticker}: {e}"
 
-    _stmt_map = {
-        FinancialType.income_stmt:            lambda c: c.income_stmt,
-        FinancialType.quarterly_income_stmt:  lambda c: c.quarterly_income_stmt,
-        FinancialType.balance_sheet:          lambda c: c.balance_sheet,
-        FinancialType.quarterly_balance_sheet: lambda c: c.quarterly_balance_sheet,
-        FinancialType.cashflow:               lambda c: c.cash_flow,
-        FinancialType.quarterly_cashflow:     lambda c: c.quarterly_cash_flow,
+    _freq_map = {
+        FinancialType.income_stmt:             ("yearly",    "income"),
+        FinancialType.quarterly_income_stmt:   ("quarterly", "income"),
+        FinancialType.balance_sheet:           ("yearly",    "balance"),
+        FinancialType.quarterly_balance_sheet: ("quarterly", "balance"),
+        FinancialType.cashflow:                ("yearly",    "cashflow"),
+        FinancialType.quarterly_cashflow:      ("quarterly", "cashflow"),
     }
-    if financial_type not in _stmt_map:
+    if financial_type not in _freq_map:
         return (
             f"Error: invalid financial type {financial_type}. Please use one of: "
             + ", ".join(e.value for e in FinancialType)
         )
 
+    freq, stmt_kind = _freq_map[financial_type]
+
+    def _fetch_stmt(c):
+        if stmt_kind == "income":
+            return c.get_income_stmt(freq=freq, pretty=True)
+        elif stmt_kind == "balance":
+            return c.get_balance_sheet(freq=freq, pretty=True)
+        else:
+            return c.get_cashflow(freq=freq, pretty=True)
+
     try:
-        financial_statement = await _fetch_with_retry(_stmt_map[financial_type], company)
+        df = await _fetch_with_retry(_fetch_stmt, company)
     except Exception as e:
         print(f"Error: getting financial statement for {ticker}: {e}")
         return f"Error: getting financial statement for {ticker}: {e}"
 
-    # DEBUG: diagnose why financial statements are returning empty
-    _df_debug = {
-        "is_none": financial_statement is None,
-        "type": str(type(financial_statement)),
-        "empty": financial_statement.empty if financial_statement is not None else "N/A",
-        "shape": list(financial_statement.shape) if financial_statement is not None else "N/A",
-        "index_sample": [str(i) for i in financial_statement.index.tolist()[:5]] if financial_statement is not None else "N/A",
-        "columns_sample": [str(c) for c in financial_statement.columns.tolist()[:4]] if financial_statement is not None else "N/A",
-        "first_row": financial_statement.iloc[0].to_dict() if financial_statement is not None and not financial_statement.empty else "N/A",
-    }
-    print(f"[DEBUG] financial_statement {ticker}/{financial_type}: {_df_debug}")
+    if df is None or df.empty:
+        return json.dumps([])
 
-    if financial_statement is None or financial_statement.empty:
-        return json.dumps({"debug": _df_debug, "data": []})
+    # CRITICAL: yfinance financial DataFrames have line items (e.g. "Gross
+    # Profit") as the INDEX, not as a column.  reset_index() promotes them
+    # into an ordinary column so they appear in the serialised output.
+    df = df.reset_index()
+    df = df.rename(columns={df.columns[0]: "lineItem"})
 
-    # Transpose so rows = dates, columns = metrics, then serialise with pandas
-    # (pandas to_json handles numpy int64/float64 and NaN correctly).
-    df = financial_statement.T
-    df.index.name = "date"
-    result = df.reset_index().to_json(orient="records", date_format="iso")
+    # Date columns are pandas Timestamps — convert to plain YYYY-MM-DD strings.
+    df.columns = [
+        c.strftime("%Y-%m-%d") if hasattr(c, "strftime") else str(c)
+        for c in df.columns
+    ]
+
+    # pandas uses NaN for missing values; replace with None for valid JSON.
+    df = df.where(pd.notnull(df), None)
+    result = json.dumps(df.to_dict(orient="records"))
 
     _cache_set(cache_key, result)
     return result
