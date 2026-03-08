@@ -1,4 +1,6 @@
+import asyncio
 import json
+import time
 from enum import Enum
 
 import pandas as pd
@@ -28,6 +30,37 @@ class HolderType(str, Enum):
 class RecommendationType(str, Enum):
     recommendations = "recommendations"
     upgrades_downgrades = "upgrades_downgrades"
+
+
+# ---------------------------------------------------------------------------
+# In-memory cache with TTL
+# ---------------------------------------------------------------------------
+_cache: dict[str, tuple[float, str]] = {}  # key -> (stored_at, json_str)
+_PRICE_TTL = 15 * 60        # 15 minutes for price / historical data
+_STMT_TTL  = 24 * 3600      # 24 hours for financial statements
+
+
+def _cache_get(key: str, ttl: float) -> str | None:
+    entry = _cache.get(key)
+    if entry and (time.monotonic() - entry[0]) < ttl:
+        return entry[1]
+    return None
+
+
+def _cache_set(key: str, value: str) -> None:
+    _cache[key] = (time.monotonic(), value)
+
+
+async def _fetch_with_retry(fn, *args, retries: int = 1, delay: float = 2.0):
+    """Call fn(*args) with one retry on exception, waiting `delay` seconds."""
+    for attempt in range(retries + 1):
+        try:
+            return fn(*args)
+        except Exception:
+            if attempt < retries:
+                await asyncio.sleep(delay)
+            else:
+                raise
 
 
 # Initialize FastMCP server
@@ -85,6 +118,11 @@ async def get_historical_stock_prices(
             Intraday data cannot extend last 60 days
             Default is "1d"
     """
+    cache_key = f"hist:{ticker}:{period}:{interval}"
+    cached = _cache_get(cache_key, _PRICE_TTL)
+    if cached is not None:
+        return cached
+
     company = yf.Ticker(ticker)
     try:
         if company.isin is None:
@@ -94,11 +132,16 @@ async def get_historical_stock_prices(
         print(f"Error: getting historical stock prices for {ticker}: {e}")
         return f"Error: getting historical stock prices for {ticker}: {e}"
 
-    # If the company is found, get the historical data
-    hist_data = company.history(period=period, interval=interval)
+    try:
+        hist_data = await _fetch_with_retry(company.history, period, interval)
+    except Exception as e:
+        print(f"Error: getting historical stock prices for {ticker}: {e}")
+        return f"Error: getting historical stock prices for {ticker}: {e}"
+
     hist_data = hist_data.reset_index(names="Date")
-    hist_data = hist_data.to_json(orient="records", date_format="iso")
-    return hist_data
+    result = hist_data.to_json(orient="records", date_format="iso")
+    _cache_set(cache_key, result)
+    return result
 
 
 @yfinance_server.tool(
@@ -208,6 +251,12 @@ Args:
 async def get_financial_statement(ticker: str, financial_type: str) -> str:
     """Get financial statement for a given ticker symbol"""
 
+    # Check cache first
+    cache_key = f"stmt:{ticker}:{financial_type}"
+    cached = _cache_get(cache_key, _STMT_TTL)
+    if cached is not None:
+        return cached
+
     company = yf.Ticker(ticker)
     try:
         if company.isin is None:
@@ -217,42 +266,37 @@ async def get_financial_statement(ticker: str, financial_type: str) -> str:
         print(f"Error: getting financial statement for {ticker}: {e}")
         return f"Error: getting financial statement for {ticker}: {e}"
 
-    if financial_type == FinancialType.income_stmt:
-        financial_statement = company.income_stmt
-    elif financial_type == FinancialType.quarterly_income_stmt:
-        financial_statement = company.quarterly_income_stmt
-    elif financial_type == FinancialType.balance_sheet:
-        financial_statement = company.balance_sheet
-    elif financial_type == FinancialType.quarterly_balance_sheet:
-        financial_statement = company.quarterly_balance_sheet
-    elif financial_type == FinancialType.cashflow:
-        financial_statement = company.cashflow
-    elif financial_type == FinancialType.quarterly_cashflow:
-        financial_statement = company.quarterly_cashflow
-    else:
-        return f"Error: invalid financial type {financial_type}. Please use one of the following: {FinancialType.income_stmt}, {FinancialType.quarterly_income_stmt}, {FinancialType.balance_sheet}, {FinancialType.quarterly_balance_sheet}, {FinancialType.cashflow}, {FinancialType.quarterly_cashflow}."
+    _stmt_map = {
+        FinancialType.income_stmt:            lambda c: c.income_stmt,
+        FinancialType.quarterly_income_stmt:  lambda c: c.quarterly_income_stmt,
+        FinancialType.balance_sheet:          lambda c: c.balance_sheet,
+        FinancialType.quarterly_balance_sheet: lambda c: c.quarterly_balance_sheet,
+        FinancialType.cashflow:               lambda c: c.cashflow,
+        FinancialType.quarterly_cashflow:     lambda c: c.quarterly_cashflow,
+    }
+    if financial_type not in _stmt_map:
+        return (
+            f"Error: invalid financial type {financial_type}. Please use one of: "
+            + ", ".join(e.value for e in FinancialType)
+        )
 
-    # Create a list to store all the json objects
-    result = []
+    try:
+        financial_statement = await _fetch_with_retry(_stmt_map[financial_type], company)
+    except Exception as e:
+        print(f"Error: getting financial statement for {ticker}: {e}")
+        return f"Error: getting financial statement for {ticker}: {e}"
 
-    # Loop through each column (date)
-    for column in financial_statement.columns:
-        if isinstance(column, pd.Timestamp):
-            date_str = column.strftime("%Y-%m-%d")  # Format as YYYY-MM-DD
-        else:
-            date_str = str(column)
+    if financial_statement is None or financial_statement.empty:
+        return json.dumps([])
 
-        # Create a dictionary for each date
-        date_obj = {"date": date_str}
+    # Transpose so rows = dates, columns = metrics, then serialise with pandas
+    # (pandas to_json handles numpy int64/float64 and NaN correctly).
+    df = financial_statement.T
+    df.index.name = "date"
+    result = df.reset_index().to_json(orient="records", date_format="iso")
 
-        # Add each metric as a key-value pair
-        for index, value in financial_statement[column].items():
-            # Add the value, handling NaN values
-            date_obj[index] = None if pd.isna(value) else value
-
-        result.append(date_obj)
-
-    return json.dumps(result)
+    _cache_set(cache_key, result)
+    return result
 
 
 @yfinance_server.tool(
