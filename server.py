@@ -72,7 +72,7 @@ yfinance_server = FastMCP(
 This server is used to get information about a given ticker symbol from yahoo finance.
 
 Available tools:
-- get_historical_stock_prices: Get historical stock prices for a given ticker symbol from yahoo finance. Include the following information: Date, Open, High, Low, Close, Volume, Adj Close.
+- get_historical_stock_prices: Get historical stock prices for a given ticker symbol from yahoo finance. Include the following information: Date, Open, High, Low, Close (adjusted), Volume.
 - get_stock_info: Get stock information for a given ticker symbol from yahoo finance. Include the following information: Stock Price & Trading Info, Company Information, Financial Metrics, Earnings & Revenue, Margins & Returns, Dividends, Balance Sheet, Ownership, Analyst Coverage, Risk Metrics, Other.
 - get_yahoo_finance_news: Get news for a given ticker symbol from yahoo finance.
 - get_stock_actions: Get stock dividends and stock splits for a given ticker symbol from yahoo finance.
@@ -87,7 +87,7 @@ Available tools:
 
 @yfinance_server.tool(
     name="get_historical_stock_prices",
-    description="""Get historical stock prices for a given ticker symbol from yahoo finance. Include the following information: Date, Open, High, Low, Close, Volume, Adj Close.
+    description="""Get historical stock prices for a given ticker symbol from yahoo finance. Include the following information: Date, Open, High, Low, Close (adjusted), Volume.
 Args:
     ticker: str
         The ticker symbol of the stock to get historical prices for, e.g. "AAPL"
@@ -125,7 +125,7 @@ async def get_historical_stock_prices(
 
     company = yf.Ticker(ticker)
     try:
-        if company.isin is None:
+        if company.fast_info.currency is None:
             print(f"Company ticker {ticker} not found.")
             return f"Company ticker {ticker} not found."
     except Exception as e:
@@ -158,7 +158,7 @@ async def get_stock_info(ticker: str) -> str:
     """Get stock information for a given ticker symbol"""
     company = yf.Ticker(ticker)
     try:
-        if company.isin is None:
+        if company.fast_info.currency is None:
             print(f"Company ticker {ticker} not found.")
             return f"Company ticker {ticker} not found."
     except Exception as e:
@@ -186,7 +186,7 @@ async def get_yahoo_finance_news(ticker: str) -> str:
     """
     company = yf.Ticker(ticker)
     try:
-        if company.isin is None:
+        if company.fast_info.currency is None:
             print(f"Company ticker {ticker} not found.")
             return f"Company ticker {ticker} not found."
     except Exception as e:
@@ -259,7 +259,7 @@ async def get_financial_statement(ticker: str, financial_type: str) -> str:
 
     company = yf.Ticker(ticker)
     try:
-        if company.isin is None:
+        if company.fast_info.currency is None:
             print(f"Company ticker {ticker} not found.")
             return f"Company ticker {ticker} not found."
     except Exception as e:
@@ -271,8 +271,8 @@ async def get_financial_statement(ticker: str, financial_type: str) -> str:
         FinancialType.quarterly_income_stmt:  lambda c: c.quarterly_income_stmt,
         FinancialType.balance_sheet:          lambda c: c.balance_sheet,
         FinancialType.quarterly_balance_sheet: lambda c: c.quarterly_balance_sheet,
-        FinancialType.cashflow:               lambda c: c.cashflow,
-        FinancialType.quarterly_cashflow:     lambda c: c.quarterly_cashflow,
+        FinancialType.cashflow:               lambda c: c.cash_flow,
+        FinancialType.quarterly_cashflow:     lambda c: c.quarterly_cash_flow,
     }
     if financial_type not in _stmt_map:
         return (
@@ -315,7 +315,7 @@ async def get_holder_info(ticker: str, holder_type: str) -> str:
 
     company = yf.Ticker(ticker)
     try:
-        if company.isin is None:
+        if company.fast_info.currency is None:
             print(f"Company ticker {ticker} not found.")
             return f"Company ticker {ticker} not found."
     except Exception as e:
@@ -352,7 +352,7 @@ async def get_option_expiration_dates(ticker: str) -> str:
 
     company = yf.Ticker(ticker)
     try:
-        if company.isin is None:
+        if company.fast_info.currency is None:
             print(f"Company ticker {ticker} not found.")
             return f"Company ticker {ticker} not found."
     except Exception as e:
@@ -388,7 +388,7 @@ async def get_option_chain(ticker: str, expiration_date: str, option_type: str) 
 
     company = yf.Ticker(ticker)
     try:
-        if company.isin is None:
+        if company.fast_info.currency is None:
             print(f"Company ticker {ticker} not found.")
             return f"Company ticker {ticker} not found."
     except Exception as e:
@@ -430,7 +430,7 @@ async def get_recommendations(ticker: str, recommendation_type: str, months_back
     """Get recommendations or upgrades/downgrades for a given ticker symbol"""
     company = yf.Ticker(ticker)
     try:
-        if company.isin is None:
+        if company.fast_info.currency is None:
             print(f"Company ticker {ticker} not found.")
             return f"Company ticker {ticker} not found."
     except Exception as e:
