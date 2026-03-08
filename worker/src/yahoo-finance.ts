@@ -305,6 +305,21 @@ async function fetchTimeseries(
     (b.date as string).localeCompare(a.date as string)
   );
 
+  // DEBUG: if byDate ended up empty, surface what the API actually returned
+  if (records.length === 0) {
+    const firstItem = results[0] as Record<string, unknown> | undefined;
+    const firstMeta = firstItem?.meta as Record<string, unknown> | undefined;
+    const firstType = firstMeta?.type;
+    const firstKey = Array.isArray(firstType) ? firstType[0] : firstType;
+    const debug = {
+      resultsCount: results.length,
+      firstItemType: firstType,
+      firstItemKeys: firstItem ? Object.keys(firstItem) : null,
+      firstItemDataSample: firstItem && firstKey ? firstItem[firstKey as string] : null,
+    };
+    return JSON.stringify({ debug, data: [] });
+  }
+
   return JSON.stringify(records);
 }
 

@@ -286,8 +286,20 @@ async def get_financial_statement(ticker: str, financial_type: str) -> str:
         print(f"Error: getting financial statement for {ticker}: {e}")
         return f"Error: getting financial statement for {ticker}: {e}"
 
+    # DEBUG: diagnose why financial statements are returning empty
+    _df_debug = {
+        "is_none": financial_statement is None,
+        "type": str(type(financial_statement)),
+        "empty": financial_statement.empty if financial_statement is not None else "N/A",
+        "shape": list(financial_statement.shape) if financial_statement is not None else "N/A",
+        "index_sample": [str(i) for i in financial_statement.index.tolist()[:5]] if financial_statement is not None else "N/A",
+        "columns_sample": [str(c) for c in financial_statement.columns.tolist()[:4]] if financial_statement is not None else "N/A",
+        "first_row": financial_statement.iloc[0].to_dict() if financial_statement is not None and not financial_statement.empty else "N/A",
+    }
+    print(f"[DEBUG] financial_statement {ticker}/{financial_type}: {_df_debug}")
+
     if financial_statement is None or financial_statement.empty:
-        return json.dumps([])
+        return json.dumps({"debug": _df_debug, "data": []})
 
     # Transpose so rows = dates, columns = metrics, then serialise with pandas
     # (pandas to_json handles numpy int64/float64 and NaN correctly).
