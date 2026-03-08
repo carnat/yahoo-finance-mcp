@@ -2,8 +2,9 @@
  * Yahoo Finance API client for Cloudflare Workers.
  * Calls Yahoo Finance HTTP endpoints directly (replacing yfinance + pandas).
  *
- * Endpoints that need a session crumb:   /v10/finance/quoteSummary/
- * Endpoints that work without auth:      /v8/finance/chart/, /v7/finance/options/, /v1/finance/search
+ * Endpoints that need a session crumb:   /v10/finance/quoteSummary/, /v7/finance/options/,
+ *                                        /ws/fundamentals-timeseries/
+ * Endpoints that work without auth:      /v8/finance/chart/, /v1/finance/search
  */
 
 const UA =
@@ -195,48 +196,125 @@ export async function getStockActions(ticker: string): Promise<string> {
   return JSON.stringify(rows);
 }
 
-const FS_CONFIG: Record<string, { mod: string; key: string }> = {
-  income_stmt: { mod: "incomeStatementHistory", key: "incomeStatementHistory" },
-  quarterly_income_stmt: {
-    mod: "incomeStatementHistoryQuarterly",
-    key: "incomeStatementHistory",
-  },
-  balance_sheet: { mod: "balanceSheetHistory", key: "balanceSheetStatements" },
-  quarterly_balance_sheet: {
-    mod: "balanceSheetHistoryQuarterly",
-    key: "balanceSheetStatements",
-  },
-  cashflow: { mod: "cashflowStatementHistory", key: "cashflowStatements" },
-  quarterly_cashflow: { mod: "cashflowStatementHistoryQuarterly", key: "cashflowStatements" },
+// ── Financial statements via fundamentals timeseries API ────────────────────
+//
+// The quoteSummary v10 API returns only a small subset of income/balance/cash
+// statement fields and frequently returns {raw:0} for fields it doesn't fully
+// populate (e.g. grossProfit, costOfRevenue, all balance sheet numerics).
+// Balance sheet results contain only the endDate — no numeric data.
+//
+// yfinance >= 0.2.x switched to the fundamentals-timeseries API for this
+// reason. We do the same here.
+
+const INCOME_BASE_TYPES = [
+  "TotalRevenue", "OperatingRevenue", "GrossProfit", "CostOfRevenue",
+  "OperatingExpense", "ResearchAndDevelopment", "SellingGeneralAndAdministration",
+  "OperatingIncome", "PretaxIncome", "TaxProvision", "NetIncome",
+  "EBITDA", "EBIT", "InterestExpense", "InterestIncome", "NetInterestIncome",
+  "DilutedEPS", "BasicEPS", "DilutedAverageShares", "BasicAverageShares",
+  "NormalizedEBITDA", "NormalizedIncome", "ReconciledCostOfRevenue",
+  "ReconciledDepreciation", "NetIncomeContinuousOperations",
+  "TotalExpenses", "NetIncomeIncludingNoncontrollingInterests",
+  "NetIncomeCommonStockholders", "MinorityInterests",
+  "TotalOperatingIncomeAsReported", "SpecialIncomeCharges",
+  "InterestExpenseNonOperating", "InterestIncomeNonOperating",
+  "OtherIncomeExpense", "OtherNonOperatingIncomeExpenses",
+];
+
+const BALANCE_BASE_TYPES = [
+  "TotalAssets", "CurrentAssets", "CashAndCashEquivalents",
+  "CashCashEquivalentsAndShortTermInvestments", "OtherShortTermInvestments",
+  "NetReceivables", "Inventory", "OtherCurrentAssets",
+  "TotalNonCurrentAssets", "NetPPE", "Goodwill", "OtherIntangibleAssets",
+  "OtherNonCurrentAssets", "TotalLiabilitiesNetMinorityInterest",
+  "CurrentLiabilities", "AccountsPayable", "CurrentDebt",
+  "OtherCurrentLiabilities", "LongTermDebt",
+  "OtherNonCurrentLiabilities", "MinorityInterest",
+  "StockholdersEquity", "CommonStock", "RetainedEarnings",
+  "TotalEquityGrossMinorityInterest", "WorkingCapital",
+  "TangibleBookValue", "TotalDebt", "NetDebt",
+  "CapitalLeaseObligations", "CommonStockEquity",
+];
+
+const CASHFLOW_BASE_TYPES = [
+  "OperatingCashFlow", "InvestingCashFlow", "FinancingCashFlow",
+  "EndCashPosition", "CapitalExpenditure", "FreeCashFlow",
+  "RepurchaseOfCapitalStock", "RepaymentOfDebt", "IssuanceOfDebt",
+  "DepreciationAndAmortization", "ChangeInWorkingCapital", "NetIncome",
+  "DeferredIncomeTax", "StockBasedCompensation",
+  "IssuanceOfCapitalStock", "ChangeInReceivables", "ChangeInInventory",
+  "ChangeInPayablesAndAccruedExpense", "OtherNonCashItems",
+];
+
+const TIMESERIES_FS_CONFIG: Record<string, { prefix: string; baseTypes: string[] }> = {
+  income_stmt:             { prefix: "annual",    baseTypes: INCOME_BASE_TYPES },
+  quarterly_income_stmt:   { prefix: "quarterly", baseTypes: INCOME_BASE_TYPES },
+  balance_sheet:           { prefix: "annual",    baseTypes: BALANCE_BASE_TYPES },
+  quarterly_balance_sheet: { prefix: "quarterly", baseTypes: BALANCE_BASE_TYPES },
+  cashflow:                { prefix: "annual",    baseTypes: CASHFLOW_BASE_TYPES },
+  quarterly_cashflow:      { prefix: "quarterly", baseTypes: CASHFLOW_BASE_TYPES },
 };
 
-export async function getFinancialStatement(ticker: string, type: string): Promise<string> {
-  const cfg = FS_CONFIG[type];
-  if (!cfg) return `Error: invalid financial type '${type}'`;
-
+async function fetchTimeseries(
+  ticker: string,
+  prefix: string,
+  baseTypes: string[]
+): Promise<string> {
+  const types = baseTypes.map((t) => `${prefix}${t}`);
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=${cfg.mod}`
+    `https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${enc(ticker)}` +
+      `?type=${types.join(",")}&period1=0&period2=9999999999`
   )) as Record<string, unknown>;
 
-  const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
-    | Record<string, unknown>
-    | undefined;
-  if (!result) return noData(ticker);
+  const results =
+    ((d?.timeseries as Record<string, unknown> | undefined)?.result as Record<
+      string,
+      unknown
+    >[]) ?? [];
 
-  const stmts = ((result[cfg.mod] as Record<string, unknown[]>)?.[cfg.key] ?? []) as Record<
-    string,
-    unknown
-  >[];
+  if (!results.length) return noData(ticker);
 
-  return JSON.stringify(
-    stmts.map((s) =>
-      Object.fromEntries(
-        Object.entries(s)
-          .filter(([k]) => k !== "maxAge")
-          .map(([k, v]) => [k, raw(v)])
-      )
-    )
+  // Merge all type arrays into a {date → {field: value}} map
+  const byDate: Record<string, Record<string, unknown>> = {};
+
+  for (const item of results) {
+    const typeName = ((item.meta as Record<string, string>) ?? {}).type ?? "";
+    // Strip the prefix (e.g. "annual" / "quarterly") → camelCase field key
+    // "annualGrossProfit" → "grossProfit"
+    const stripped = typeName.slice(prefix.length);
+    const key = stripped.charAt(0).toLowerCase() + stripped.slice(1);
+
+    const values = (
+      item[typeName] as
+        | Array<{ asOfDate: string; reportedValue?: { raw: unknown } } | null>
+        | undefined
+    ) ?? [];
+
+    for (const val of values) {
+      if (!val) continue;
+      const { asOfDate } = val;
+      if (!byDate[asOfDate]) byDate[asOfDate] = { date: asOfDate };
+      byDate[asOfDate][key] = val.reportedValue?.raw ?? null;
+    }
+  }
+
+  // Sort most-recent first
+  const records = Object.values(byDate).sort((a, b) =>
+    (b.date as string).localeCompare(a.date as string)
   );
+
+  return JSON.stringify(records);
+}
+
+export async function getFinancialStatement(ticker: string, type: string): Promise<string> {
+  const cfg = TIMESERIES_FS_CONFIG[type];
+  if (!cfg) return `Error: invalid financial type '${type}'`;
+
+  try {
+    return await fetchTimeseries(ticker, cfg.prefix, cfg.baseTypes);
+  } catch (e) {
+    return `Error fetching financial statement for ${ticker}: ${e instanceof Error ? e.message : String(e)}`;
+  }
 }
 
 const HOLDER_MOD: Record<string, string> = {
@@ -265,20 +343,25 @@ export async function getHolderInfo(ticker: string, type: string): Promise<strin
 }
 
 export async function getOptionExpirationDates(ticker: string): Promise<string> {
-  const d = (await yGet(
-    `https://query2.finance.yahoo.com/v7/finance/options/${enc(ticker)}`,
-    false
-  )) as Record<string, unknown>;
+  // auth=true (default): the v7 options endpoint now requires a crumb;
+  // passing false caused 401 → uncaught throw → "Error occurred during tool execution".
+  try {
+    const d = (await yGet(
+      `https://query2.finance.yahoo.com/v7/finance/options/${enc(ticker)}`
+    )) as Record<string, unknown>;
 
-  const result = (d?.optionChain as Record<string, unknown[]> | undefined)?.result?.[0] as
-    | Record<string, unknown>
-    | undefined;
-  if (!result) return noData(ticker);
+    const result = (d?.optionChain as Record<string, unknown[]> | undefined)?.result?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    if (!result) return noData(ticker);
 
-  const dates = ((result.expirationDates as number[]) ?? []).map((ts) =>
-    new Date(ts * 1000).toISOString().split("T")[0]
-  );
-  return JSON.stringify(dates);
+    const dates = ((result.expirationDates as number[]) ?? []).map((ts) =>
+      new Date(ts * 1000).toISOString().split("T")[0]
+    );
+    return JSON.stringify(dates);
+  } catch (e) {
+    return `Error fetching option expiration dates for ${ticker}: ${e instanceof Error ? e.message : String(e)}`;
+  }
 }
 
 export async function getOptionChain(
@@ -290,21 +373,25 @@ export async function getOptionChain(
     return `Error: option_type must be 'calls' or 'puts'`;
   }
 
-  const [y, m, day] = expDate.split("-").map(Number);
-  const ts = Math.floor(Date.UTC(y, m - 1, day) / 1000);
+  // auth=true (default): same crumb requirement as getOptionExpirationDates.
+  try {
+    const [y, m, day] = expDate.split("-").map(Number);
+    const ts = Math.floor(Date.UTC(y, m - 1, day) / 1000);
 
-  const d = (await yGet(
-    `https://query2.finance.yahoo.com/v7/finance/options/${enc(ticker)}?date=${ts}`,
-    false
-  )) as Record<string, unknown>;
+    const d = (await yGet(
+      `https://query2.finance.yahoo.com/v7/finance/options/${enc(ticker)}?date=${ts}`
+    )) as Record<string, unknown>;
 
-  const result = (d?.optionChain as Record<string, unknown[]> | undefined)?.result?.[0] as
-    | Record<string, unknown>
-    | undefined;
-  const opts = (result?.options as Record<string, unknown[]>[])?.[0];
-  if (!opts) return `Error: no options found for ${ticker} on ${expDate}`;
+    const result = (d?.optionChain as Record<string, unknown[]> | undefined)?.result?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    const opts = (result?.options as Record<string, unknown[]>[])?.[0];
+    if (!opts) return `Error: no options found for ${ticker} on ${expDate}`;
 
-  return JSON.stringify(opts[optType] ?? []);
+    return JSON.stringify(opts[optType] ?? []);
+  } catch (e) {
+    return `Error fetching option chain for ${ticker} on ${expDate}: ${e instanceof Error ? e.message : String(e)}`;
+  }
 }
 
 const REC_MOD: Record<string, string> = {
