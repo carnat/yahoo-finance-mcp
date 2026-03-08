@@ -278,7 +278,9 @@ async function fetchTimeseries(
   const byDate: Record<string, Record<string, unknown>> = {};
 
   for (const item of results) {
-    const typeName = ((item.meta as Record<string, string>) ?? {}).type ?? "";
+    // meta.type is a string in some API versions and an array in others
+    const rawType = ((item.meta as Record<string, unknown>) ?? {}).type;
+    const typeName = (Array.isArray(rawType) ? (rawType[0] ?? "") : (rawType ?? "")) as string;
     // Strip the prefix (e.g. "annual" / "quarterly") → camelCase field key
     // "annualGrossProfit" → "grossProfit"
     const stripped = typeName.slice(prefix.length);
