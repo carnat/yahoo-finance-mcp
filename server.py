@@ -560,7 +560,7 @@ async def get_option_chain(
     if max_strike is not None:
         df = df[df["strike"] <= max_strike]
     if in_the_money_only:
-        df = df[df["inTheMoney"] == True]  # noqa: E712
+        df = df[df["inTheMoney"]]
 
     return df.to_json(orient="records", date_format="iso")
 
@@ -659,7 +659,7 @@ Includes:
 - Current price, previous close, % change today
 - % distance from 52-week high and 52-week low
 - % distance from 50-day and 200-day moving averages
-- 30-day realized annualised volatility (from daily close returns)
+- 30-day realized annualized volatility (from daily close returns)
 - CAGR over 1y, 3y, 5y (where data is available)
 
 Args:
@@ -714,7 +714,7 @@ async def get_price_stats(ticker: str) -> str:
             # 30-day volatility (annualised)
             if len(daily_returns) >= 20:
                 vol_30d = daily_returns.tail(30).std() * (252 ** 0.5)
-                stats["annualisedVolatility30d"] = round(float(vol_30d) * 100, 4)
+                stats["annualizedVolatility30d"] = round(float(vol_30d) * 100, 4)
 
             # CAGR
             def _cagr(closes_series, years):
