@@ -423,6 +423,445 @@ const REC_MOD: Record<string, string> = {
   upgrades_downgrades: "upgradeDowngradeHistory",
 };
 
+// ── New tools ────────────────────────────────────────────────────────────────
+
+export async function getFastInfo(ticker: string): Promise<string> {
+  const d = (await yGet(
+    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price,summaryDetail,defaultKeyStatistics`
+  )) as Record<string, unknown>;
+
+  const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
+    | Record<string, unknown>
+    | undefined;
+  if (!result) return noData(ticker);
+
+  const price = (result.price as Record<string, unknown>) ?? {};
+  const detail = (result.summaryDetail as Record<string, unknown>) ?? {};
+  const ks = (result.defaultKeyStatistics as Record<string, unknown>) ?? {};
+
+  return JSON.stringify({
+    currency: raw(price.currency),
+    exchange: raw(price.exchangeName),
+    quoteType: raw(price.quoteType),
+    timezone: raw(price.exchangeTimezoneShortName),
+    lastPrice: raw(price.regularMarketPrice),
+    open: raw(price.regularMarketOpen),
+    previousClose: raw(price.regularMarketPreviousClose),
+    dayHigh: raw(price.regularMarketDayHigh),
+    dayLow: raw(price.regularMarketDayLow),
+    yearHigh: raw(detail.fiftyTwoWeekHigh),
+    yearLow: raw(detail.fiftyTwoWeekLow),
+    yearChange: raw(ks["52WeekChange" as keyof typeof ks]),
+    marketCap: raw(price.marketCap),
+    shares: raw(price.sharesOutstanding),
+    lastVolume: raw(price.regularMarketVolume),
+    tenDayAverageVolume: raw(detail.averageVolume10days),
+    threeMonthAverageVolume: raw(detail.averageVolume),
+    fiftyDayAverage: raw(detail.fiftyDayAverage),
+    twoHundredDayAverage: raw(detail.twoHundredDayAverage),
+  });
+}
+
+export async function getPriceStats(ticker: string): Promise<string> {
+  const [metaRaw, histRaw] = await Promise.all([
+    yGet(
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price,summaryDetail`
+    ),
+    yGet(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=5y&interval=1d`,
+      false
+    ),
+  ]);
+
+  const meta = metaRaw as Record<string, unknown>;
+  const result = (meta?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
+    | Record<string, unknown>
+    | undefined;
+  if (!result) return noData(ticker);
+
+  const price = (result.price as Record<string, unknown>) ?? {};
+  const detail = (result.summaryDetail as Record<string, unknown>) ?? {};
+
+  const lastPrice = raw(price.regularMarketPrice) as number | null;
+  const prevClose = raw(price.regularMarketPreviousClose) as number | null;
+  const yearHigh = raw(detail.fiftyTwoWeekHigh) as number | null;
+  const yearLow = raw(detail.fiftyTwoWeekLow) as number | null;
+  const fiftyDayAvg = raw(detail.fiftyDayAverage) as number | null;
+  const twoHundredDayAvg = raw(detail.twoHundredDayAverage) as number | null;
+
+  const pct = (v: number | null, ref: number | null): number | null =>
+    v != null && ref != null && ref !== 0 ? +((v - ref) / ref * 100).toFixed(4) : null;
+
+  const stats: Record<string, unknown> = {
+    ticker,
+    currency: raw(price.currency),
+    lastPrice,
+    previousClose: prevClose,
+    pctChangeTodayVsPrevClose: pct(lastPrice, prevClose),
+    yearHigh,
+    yearLow,
+    pctFromYearHigh: pct(lastPrice, yearHigh),
+    pctFromYearLow: pct(lastPrice, yearLow),
+    fiftyDayAverage: fiftyDayAvg,
+    twoHundredDayAverage: twoHundredDayAvg,
+    pctFromFiftyDayAvg: pct(lastPrice, fiftyDayAvg),
+    pctFromTwoHundredDayAvg: pct(lastPrice, twoHundredDayAvg),
+  };
+
+  try {
+    const hist = histRaw as Record<string, unknown>;
+    const chartResult = (hist?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    if (chartResult) {
+      const timestamps = (chartResult.timestamp as number[]) ?? [];
+      const adjClose =
+        ((chartResult.indicators as Record<string, unknown[]>)?.adjclose?.[0] as Record<
+          string,
+          (number | null)[]
+        >)?.adjclose ?? [];
+      const closes = adjClose.filter((v): v is number => v != null);
+
+      if (closes.length >= 20) {
+        const last31 = closes.slice(-31);
+        const returns = last31.slice(1).map((c, i) => Math.log(c / last31[i]));
+        const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+        const variance = returns.reduce((a, b) => a + (b - mean) ** 2, 0) / returns.length;
+        stats.annualizedVolatility30d = +(Math.sqrt(variance * 252) * 100).toFixed(4);
+      }
+
+      const cagr = (years: number): number | null => {
+        const cutoffMs = Date.now() - years * 365.25 * 86400 * 1000;
+        const idx = timestamps.findIndex((t) => t * 1000 >= cutoffMs);
+        if (idx < 0 || idx >= closes.length - 1) return null;
+        const start = adjClose[idx];
+        const end = closes[closes.length - 1];
+        if (start == null || start <= 0) return null;
+        return +((Math.pow(end / start, 1 / years) - 1) * 100).toFixed(4);
+      };
+
+      stats.cagr1y = cagr(1);
+      stats.cagr3y = cagr(3);
+      stats.cagr5y = cagr(5);
+    }
+  } catch {
+    // partial stats from fast_info are still returned
+  }
+
+  return JSON.stringify(stats);
+}
+
+export async function getAnalystConsensus(ticker: string): Promise<string> {
+  const d = (await yGet(
+    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=financialData,recommendationTrend,price`
+  )) as Record<string, unknown>;
+
+  const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
+    | Record<string, unknown>
+    | undefined;
+  if (!result) return noData(ticker);
+
+  const fd = (result.financialData as Record<string, unknown>) ?? {};
+  const rt = (result.recommendationTrend as Record<string, unknown>) ?? {};
+  const price = (result.price as Record<string, unknown>) ?? {};
+
+  const lastPrice = raw(price.regularMarketPrice) as number | null;
+  const targetMean = raw(fd.targetMeanPrice) as number | null;
+
+  const output: Record<string, unknown> = {
+    ticker,
+    priceTargets: {
+      current: targetMean,
+      low: raw(fd.targetLowPrice),
+      high: raw(fd.targetHighPrice),
+      mean: targetMean,
+      median: raw(fd.targetMedianPrice),
+      pctUpsideFromLastPrice:
+        targetMean != null && lastPrice != null && lastPrice !== 0
+          ? +((targetMean - lastPrice) / lastPrice * 100).toFixed(2)
+          : null,
+    },
+  };
+
+  const trend = (rt.trend as Record<string, unknown>[]) ?? [];
+  if (trend.length > 0) {
+    const latest = trend[0];
+    const cols = ["strongBuy", "buy", "hold", "sell", "strongSell"] as const;
+    const counts: Record<string, number> = Object.fromEntries(
+      cols.map((c) => [c, (raw(latest[c]) as number | null) ?? 0])
+    );
+    const dominant = cols.reduce((a, b) => ((counts[a] ?? 0) >= (counts[b] ?? 0) ? a : b));
+    output.recommendationSummary = trend.map((t) =>
+      Object.fromEntries(Object.entries(t).map(([k, v]) => [k, raw(v)]))
+    );
+    output.dominantRating = dominant;
+    output.ratingCounts = counts;
+  } else {
+    output.recommendationSummary = null;
+  }
+
+  return JSON.stringify(output);
+}
+
+export async function getEarningsAnalysis(ticker: string): Promise<string> {
+  const d = (await yGet(
+    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=earningsTrend,earningsHistory`
+  )) as Record<string, unknown>;
+
+  const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
+    | Record<string, unknown>
+    | undefined;
+  if (!result) return noData(ticker);
+
+  const et = (result.earningsTrend as Record<string, unknown>) ?? {};
+  const eh = (result.earningsHistory as Record<string, unknown>) ?? {};
+
+  const flatRaw = (obj: Record<string, unknown>): Record<string, unknown> =>
+    Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, raw(v)]));
+
+  const output: Record<string, unknown> = {
+    ticker,
+    earningsEstimate: null,
+    revenueEstimate: null,
+    epsTrend: null,
+    earningsHistory: null,
+    growthEstimates: null,
+  };
+
+  const trendArr = (et.trend as Record<string, unknown>[]) ?? [];
+  if (trendArr.length > 0) {
+    output.earningsEstimate = trendArr.map((p) => ({
+      period: p.period,
+      ...flatRaw((p.earningsEstimate as Record<string, unknown>) ?? {}),
+    }));
+    output.revenueEstimate = trendArr.map((p) => ({
+      period: p.period,
+      ...flatRaw((p.revenueEstimate as Record<string, unknown>) ?? {}),
+    }));
+    output.epsTrend = trendArr.map((p) => ({
+      period: p.period,
+      ...flatRaw((p.epsTrend as Record<string, unknown>) ?? {}),
+    }));
+    output.growthEstimates = trendArr.map((p) => ({
+      period: p.period,
+      stockGrowth: raw((p.growth as Record<string, unknown> | undefined)?.estimate ?? null),
+    }));
+  }
+
+  const histArr = (eh.history as Record<string, unknown>[]) ?? [];
+  if (histArr.length > 0) {
+    output.earningsHistory = histArr.map((h) => ({
+      quarter: h.quarter,
+      epsActual: raw(h.epsActual),
+      epsEstimate: raw(h.epsEstimate),
+      epsDifference: raw(h.epsDifference),
+      surprisePercent: raw(h.surprisePercent),
+    }));
+  }
+
+  return JSON.stringify(output);
+}
+
+export async function getFinancialRatios(ticker: string): Promise<string> {
+  const d = (await yGet(
+    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=summaryDetail,financialData,defaultKeyStatistics`
+  )) as Record<string, unknown>;
+
+  const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
+    | Record<string, unknown>
+    | undefined;
+  if (!result) return noData(ticker);
+
+  const sd = (result.summaryDetail as Record<string, unknown>) ?? {};
+  const fd = (result.financialData as Record<string, unknown>) ?? {};
+  const ks = (result.defaultKeyStatistics as Record<string, unknown>) ?? {};
+
+  const freeCashflow = raw(fd.freeCashflow) as number | null;
+  const marketCap = raw(sd.marketCap) as number | null;
+
+  return JSON.stringify({
+    ticker,
+    currency: raw(fd.financialCurrency),
+    trailingPE: raw(sd.trailingPE),
+    forwardPE: raw(sd.forwardPE),
+    pegRatio: raw(ks.pegRatio),
+    priceToSales: raw(sd.priceToSalesTrailing12Months),
+    priceToBook: raw(ks.priceToBook),
+    enterpriseToEbitda: raw(ks.enterpriseToEbitda),
+    enterpriseToRevenue: raw(ks.enterpriseToRevenue),
+    grossMargins: raw(fd.grossMargins),
+    operatingMargins: raw(fd.operatingMargins),
+    profitMargins: raw(ks.profitMargins),
+    returnOnEquity: raw(fd.returnOnEquity),
+    returnOnAssets: raw(fd.returnOnAssets),
+    debtToEquity: raw(fd.debtToEquity),
+    currentRatio: raw(fd.currentRatio),
+    quickRatio: raw(fd.quickRatio),
+    freeCashflow,
+    freeCashflowYield:
+      freeCashflow != null && marketCap != null && marketCap !== 0
+        ? +((freeCashflow / marketCap) * 100).toFixed(4)
+        : null,
+    dividendYield: raw(sd.dividendYield),
+    payoutRatio: raw(sd.payoutRatio),
+    earningsGrowth: raw(fd.earningsGrowth),
+    revenueGrowth: raw(fd.revenueGrowth),
+  });
+}
+
+export async function getCalendar(ticker: string): Promise<string> {
+  const d = (await yGet(
+    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=calendarEvents`
+  )) as Record<string, unknown>;
+
+  const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
+    | Record<string, unknown>
+    | undefined;
+  if (!result) return noData(ticker);
+
+  const cal = (result.calendarEvents as Record<string, unknown>) ?? {};
+  const earnings = (cal.earnings as Record<string, unknown>) ?? {};
+
+  const earningsDates = (
+    (earnings.earningsDate as Array<{ raw?: number } | null>) ?? []
+  ).map((d) => (d?.raw != null ? iso(d.raw) : null));
+
+  const exDiv = cal.exDividendDate as { raw?: number } | null | undefined;
+  const divDate = cal.dividendDate as { raw?: number } | null | undefined;
+
+  return JSON.stringify({
+    ticker,
+    calendar: {
+      earnings: {
+        earningsDate: earningsDates,
+        earningsAverage: raw(earnings.earningsAverage),
+        earningsLow: raw(earnings.earningsLow),
+        earningsHigh: raw(earnings.earningsHigh),
+        revenueAverage: raw(earnings.revenueAverage),
+        revenueLow: raw(earnings.revenueLow),
+        revenueHigh: raw(earnings.revenueHigh),
+      },
+      exDividendDate: exDiv?.raw != null ? iso(exDiv.raw) : null,
+      dividendDate: divDate?.raw != null ? iso(divDate.raw) : null,
+    },
+  });
+}
+
+export async function searchTicker(query: string, maxResults: number): Promise<string> {
+  const d = (await yGet(
+    `https://query1.finance.yahoo.com/v1/finance/search?q=${enc(query)}&quotesCount=${maxResults}&newsCount=0&enableFuzzyQuery=false`,
+    false
+  )) as Record<string, unknown>;
+
+  const quotes = (d?.quotes as Record<string, unknown>[]) ?? [];
+  const trimmed = quotes
+    .filter((q) => q.symbol)
+    .map((q) => ({
+      symbol: q.symbol ?? null,
+      shortname: (q.shortname ?? q.longname ?? null) as unknown,
+      exchange: q.exchange ?? null,
+      quoteType: q.quoteType ?? null,
+      score: q.score ?? null,
+    }));
+  return JSON.stringify(trimmed);
+}
+
+const VALID_SCREENERS = [
+  "aggressive_small_caps",
+  "day_gainers",
+  "day_losers",
+  "growth_technology_stocks",
+  "most_actives",
+  "most_shorted_stocks",
+  "small_cap_gainers",
+  "undervalued_growth_stocks",
+  "undervalued_large_caps",
+  "conservative_foreign_funds",
+  "high_yield_bond",
+  "portfolio_anchors",
+  "solid_large_growth_funds",
+  "solid_midcap_growth_funds",
+  "top_mutual_funds",
+] as const;
+
+type ScreenerName = (typeof VALID_SCREENERS)[number];
+
+export async function screenStocks(screenerName: string, count: number): Promise<string> {
+  if (!VALID_SCREENERS.includes(screenerName as ScreenerName)) {
+    return `Error: unknown screener '${screenerName}'. Valid options: ${VALID_SCREENERS.join(", ")}`;
+  }
+  const safeCount = Math.min(count, 250);
+  const d = (await yGet(
+    `https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=${enc(screenerName)}&count=${safeCount}&lang=en-US&region=US&corsDomain=finance.yahoo.com`
+  )) as Record<string, unknown>;
+
+  const financeResult = (d?.finance as Record<string, unknown>)?.result as
+    | Record<string, unknown>[]
+    | undefined;
+  const quotes = (financeResult?.[0]?.quotes as Record<string, unknown>[]) ?? [];
+
+  if (!quotes.length) return `Error: no results for screener '${screenerName}'`;
+
+  const trimmed = quotes.map((q) => ({
+    symbol: q.symbol ?? null,
+    shortName: q.shortName ?? null,
+    regularMarketPrice: q.regularMarketPrice ?? null,
+    regularMarketChangePercent: q.regularMarketChangePercent ?? null,
+    marketCap: q.marketCap ?? null,
+    regularMarketVolume: q.regularMarketVolume ?? null,
+    exchange: q.exchange ?? null,
+  }));
+  return JSON.stringify({ screener: screenerName, count: trimmed.length, results: trimmed });
+}
+
+export async function getSustainability(ticker: string): Promise<string> {
+  const d = (await yGet(
+    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=esgScores`
+  )) as Record<string, unknown>;
+
+  const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
+    | Record<string, unknown>
+    | undefined;
+  if (!result) return noData(ticker);
+
+  const esg = (result.esgScores as Record<string, unknown>) ?? {};
+  if (Object.keys(esg).length === 0) {
+    return JSON.stringify({ ticker, sustainability: null });
+  }
+
+  const sustainability: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(esg)) {
+    sustainability[k] = raw(v);
+  }
+  return JSON.stringify({ ticker, sustainability });
+}
+
+export async function getSecFilings(ticker: string): Promise<string> {
+  const d = (await yGet(
+    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=secFilings`
+  )) as Record<string, unknown>;
+
+  const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
+    | Record<string, unknown>
+    | undefined;
+  if (!result) return noData(ticker);
+
+  const sec = (result.secFilings as Record<string, unknown>) ?? {};
+  const filings = (sec.filings as Record<string, unknown>[]) ?? [];
+
+  if (!filings.length) {
+    return JSON.stringify({ ticker, filings: [] });
+  }
+
+  const out = filings.map((f) => ({
+    date: f.epochDate != null ? iso(f.epochDate as number) : null,
+    type: f.type ?? null,
+    title: f.title ?? null,
+    edgarUrl: f.edgarUrl ?? null,
+  }));
+  return JSON.stringify({ ticker, filings: out });
+}
+
 export async function getRecommendations(
   ticker: string,
   type: string,
