@@ -1,14 +1,8 @@
-[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/alex2yang97-yahoo-finance-mcp-badge.png)](https://mseep.ai/app/alex2yang97-yahoo-finance-mcp)
-
 # Yahoo Finance MCP Server
 
-<div align="right">
-  <a href="README.md">English</a> | <a href="README.zh.md">中文</a>
-</div>
+A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that gives any MCP-compatible AI client (Claude, Cursor, VS Code Copilot, etc.) direct access to live financial data from Yahoo Finance.
 
-This is a Model Context Protocol (MCP) server that provides comprehensive financial data from Yahoo Finance. It allows you to retrieve detailed information about stocks, including historical prices, company information, financial statements, options data, market news, analyst consensus, ESG scores, SEC filings, and market screening.
-
-[![smithery badge](https://smithery.ai/badge/@Alex2Yang97/yahoo-finance-mcp)](https://smithery.ai/server/@Alex2Yang97/yahoo-finance-mcp)
+19 tools cover the full research workflow — from a quick price check to earnings forecasts, ESG scores, SEC filings, and market screening — without leaving your chat window.
 
 ## Demo
 
@@ -126,7 +120,7 @@ With this MCP server, you can use Claude to:
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/Alex2Yang97/yahoo-finance-mcp.git
+   git clone https://github.com/carnat/yahoo-finance-mcp.git
    cd yahoo-finance-mcp
    ```
 
