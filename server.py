@@ -1138,35 +1138,7 @@ Args:
 )
 async def get_sustainability(ticker: str) -> str:
     """Get ESG sustainability scores for a ticker."""
-    cache_key = f"sustainability:{ticker}"
-    cached = _cache_get(cache_key, _STMT_TTL)
-    if cached is not None:
-        return cached
-
-    company = yf.Ticker(ticker)
-    try:
-        fi = company.fast_info
-        if fi.currency is None:
-            return f"Company ticker {ticker} not found."
-    except Exception as e:
-        print(f"Error: getting sustainability for {ticker}: {e}")
-        return f"Error: getting sustainability for {ticker}: {e}"
-
-    try:
-        sus = company.sustainability
-    except Exception as e:
-        print(f"Error: getting sustainability for {ticker}: {e}")
-        return f"Error: getting sustainability for {ticker}: {e}"
-
-    if sus is None or (hasattr(sus, "empty") and sus.empty):
-        return json.dumps({"ticker": ticker, "sustainability": None})
-
-    sus = sus.reset_index()
-    sus.columns = [str(c) for c in sus.columns]
-    sus = sus.where(pd.notnull(sus), None)
-    result = json.dumps({"ticker": ticker, "sustainability": sus.to_dict(orient="records")})
-    _cache_set(cache_key, result)
-    return result
+    return "Error: Yahoo Finance has discontinued the ESG/sustainability data endpoint. ESG scores are no longer available via this API."
 
 
 # ---------------------------------------------------------------------------
