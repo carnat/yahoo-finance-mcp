@@ -1,13 +1,23 @@
 import {
+  getAnalystConsensus,
+  getCalendar,
+  getEarningsAnalysis,
+  getFastInfo,
+  getFinancialRatios,
   getFinancialStatement,
   getHistoricalPrices,
   getHolderInfo,
   getNews,
   getOptionChain,
   getOptionExpirationDates,
+  getPriceStats,
   getRecommendations,
+  screenStocks,
+  searchTicker,
+  getSecFilings,
   getStockActions,
   getStockInfo,
+  getSustainability,
 } from "./yahoo-finance.js";
 
 export interface Tool {
@@ -180,6 +190,142 @@ export const TOOLS: Tool[] = [
       required: ["ticker", "recommendation_type"],
     },
   },
+  {
+    name: "get_fast_info",
+    description:
+      "Get lightweight real-time price and market data for a ticker. Returns ~20 high-signal fields: currency, exchange, quoteType, timezone, lastPrice, open, previousClose, dayHigh, dayLow, yearHigh, yearLow, yearChange, marketCap, shares, lastVolume, tenDayAverageVolume, threeMonthAverageVolume, fiftyDayAverage, twoHundredDayAverage. Prefer this over get_stock_info for price/market data queries — it uses far fewer tokens.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_price_stats",
+    description:
+      "Get pre-computed price statistics for a ticker: current price, % change vs previous close, % distance from 52-week high/low and 50/200-day moving averages, 30-day annualized volatility, and CAGR over 1y/3y/5y.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_analyst_consensus",
+    description:
+      "Get analyst consensus summary for a ticker: price targets (current, low, high, mean, median) with % upside from last price, recommendation breakdown (strongBuy, buy, hold, sell, strongSell counts), and dominant rating.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_earnings_analysis",
+    description:
+      "Get all analyst forward-looking data in one call: EPS estimates, revenue estimates, EPS trend (7/30/60/90-day revisions), earnings history (actual vs estimated EPS and surprise %), and growth estimates.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_financial_ratios",
+    description:
+      "Get pre-computed key financial ratios for a ticker. Includes: P/E (trailing & forward), P/S, P/B, EV/EBITDA, EV/Revenue, PEG; gross/operating/net margins, ROE, ROA; debt/equity, current ratio, quick ratio; FCF and FCF yield; dividend yield and payout ratio.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_calendar",
+    description:
+      "Get upcoming earnings and dividend schedule for a ticker: next earnings date range, EPS/revenue consensus estimates, ex-dividend date, and dividend pay date.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "search_ticker",
+    description:
+      "Search for ticker symbols by company name, partial name, or ISIN. Returns matching quotes with symbol, short name, exchange, and type. Use this to resolve a company name to a ticker before calling other tools.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Company name, partial name, or ISIN, e.g. 'Apple' or 'US0378331005'",
+        },
+        max_results: {
+          type: "number",
+          description: "Maximum number of results to return (default: 8).",
+          default: 8,
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "screen_stocks",
+    description:
+      "Screen the market for stocks matching predefined criteria. Screener names: aggressive_small_caps, day_gainers, day_losers, growth_technology_stocks, most_actives, most_shorted_stocks, small_cap_gainers, undervalued_growth_stocks, undervalued_large_caps, conservative_foreign_funds, high_yield_bond, portfolio_anchors, solid_large_growth_funds, solid_midcap_growth_funds, top_mutual_funds.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        screener_name: {
+          type: "string",
+          description: "Name of the predefined screener, e.g. 'day_gainers'",
+        },
+        count: {
+          type: "number",
+          description: "Number of results to return (default: 25, max: 250).",
+          default: 25,
+        },
+      },
+      required: ["screener_name"],
+    },
+  },
+  {
+    name: "get_sustainability",
+    description:
+      "Get ESG (Environmental, Social, Governance) sustainability scores for a ticker: environment, social, and governance scores, total ESG score, ESG performance category, controversy level, and peer group percentile.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_sec_filings",
+    description:
+      "Get recent SEC filings for a ticker (10-K, 10-Q, 8-K, etc.) with form type, filing date, and URL.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+      },
+      required: ["ticker"],
+    },
+  },
 ];
 
 const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
@@ -209,6 +355,26 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
         str(args.recommendation_type),
         num(args.months_back, 12)
       );
+    case "get_fast_info":
+      return getFastInfo(str(args.ticker));
+    case "get_price_stats":
+      return getPriceStats(str(args.ticker));
+    case "get_analyst_consensus":
+      return getAnalystConsensus(str(args.ticker));
+    case "get_earnings_analysis":
+      return getEarningsAnalysis(str(args.ticker));
+    case "get_financial_ratios":
+      return getFinancialRatios(str(args.ticker));
+    case "get_calendar":
+      return getCalendar(str(args.ticker));
+    case "search_ticker":
+      return searchTicker(str(args.query), num(args.max_results, 8));
+    case "screen_stocks":
+      return screenStocks(str(args.screener_name), num(args.count, 25));
+    case "get_sustainability":
+      return getSustainability(str(args.ticker));
+    case "get_sec_filings":
+      return getSecFilings(str(args.ticker));
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
