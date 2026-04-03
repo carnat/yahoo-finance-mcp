@@ -12,6 +12,8 @@ import {
   getOptionExpirationDates,
   getPriceStats,
   getRecommendations,
+  getShortInterest,
+  getTechnicalIndicators,
   screenStocks,
   searchTicker,
   getSecFilings,
@@ -313,6 +315,36 @@ export const TOOLS: Tool[] = [
       required: ["ticker"],
     },
   },
+  {
+    name: "get_short_interest",
+    description:
+      "Get short interest data for a ticker symbol. Returns structured short-selling metrics: sharesShort, sharesShortPriorMonth, shortRatio (days-to-cover), shortPercentOfFloat (0–1 scale), sharesPercentSharesOut, floatShares, sharesOutstanding, dateShortInterest, and sharesShortPreviousMonthDate. Short interest data is reported bi-monthly by exchanges and may be up to 2 weeks old.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_technical_indicators",
+    description:
+      "Get pre-computed technical / momentum indicators for a ticker. Computes indicators server-side from historical daily close prices so the LLM does NOT need to fetch raw OHLCV history and calculate manually. Returns: rsi14 (14-day RSI, Wilder smoothing; below 30 = oversold, above 70 = overbought), macd (MACD line: 12-day EMA minus 26-day EMA), macdSignal (9-day EMA of MACD), macdHistogram (MACD minus signal; positive = bullish momentum), lastClose, and dataDate.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+        period: {
+          type: "string",
+          description:
+            "Lookback period for fetching history (default '3mo'). Longer periods give more accurate indicator warm-up. Valid: 1mo, 3mo, 6mo, 1y, 2y, 5y.",
+          default: "3mo",
+        },
+      },
+      required: ["ticker"],
+    },
+  },
 ];
 
 const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
@@ -360,6 +392,10 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       return screenStocks(str(args.screener_name), num(args.count, 25));
     case "get_sec_filings":
       return getSecFilings(str(args.ticker));
+    case "get_short_interest":
+      return getShortInterest(str(args.ticker));
+    case "get_technical_indicators":
+      return getTechnicalIndicators(str(args.ticker), str(args.period, "3mo"));
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

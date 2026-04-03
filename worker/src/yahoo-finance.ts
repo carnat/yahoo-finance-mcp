@@ -884,3 +884,126 @@ export async function getRecommendations(
       }))
   );
 }
+
+// ── get_short_interest ───────────────────────────────────────────────────────
+
+const SHORT_FIELDS = [
+  "sharesShort",
+  "sharesShortPriorMonth",
+  "shortRatio",
+  "shortPercentOfFloat",
+  "sharesPercentSharesOut",
+  "floatShares",
+  "sharesOutstanding",
+  "dateShortInterest",
+  "sharesShortPreviousMonthDate",
+] as const;
+
+export async function getShortInterest(ticker: string): Promise<string> {
+  const d = (await yGet(
+    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=defaultKeyStatistics,price`
+  )) as Record<string, unknown>;
+
+  const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
+    | Record<string, unknown>
+    | undefined;
+  if (!result) return noData(ticker);
+
+  const ks = (result.defaultKeyStatistics as Record<string, unknown>) ?? {};
+  const price = (result.price as Record<string, unknown>) ?? {};
+
+  const data: Record<string, unknown> = { ticker };
+  for (const key of SHORT_FIELDS) {
+    const val = raw(ks[key]) ?? raw(price[key]);
+    if (val != null) data[key] = val;
+  }
+
+  return JSON.stringify(data);
+}
+
+// ── get_technical_indicators ─────────────────────────────────────────────────
+
+export async function getTechnicalIndicators(
+  ticker: string,
+  period: string
+): Promise<string> {
+  const d = (await yGet(
+    `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=${period}&interval=1d`,
+    false
+  )) as Record<string, unknown>;
+
+  const chartResult = (d?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
+    | Record<string, unknown>
+    | undefined;
+  if (!chartResult) return noData(ticker);
+
+  const adjCloseArr =
+    ((chartResult.indicators as Record<string, unknown[]>)?.adjclose?.[0] as Record<
+      string,
+      (number | null)[]
+    >)?.adjclose ??
+    ((chartResult.indicators as Record<string, unknown[]>)?.quote?.[0] as Record<
+      string,
+      (number | null)[]
+    >)?.close ??
+    [];
+
+  const timestamps = (chartResult.timestamp as number[]) ?? [];
+  const closes = adjCloseArr.filter((v): v is number => v != null);
+
+  if (closes.length < 26) {
+    return `Error: insufficient price history for ${ticker} (need ≥26 data points, got ${closes.length})`;
+  }
+
+  const output: Record<string, unknown> = { ticker };
+
+  // RSI-14 (Wilder smoothing via EWM with alpha=1/14)
+  try {
+    const deltas = closes.slice(1).map((c, i) => c - closes[i]);
+    const gains = deltas.map((d) => (d > 0 ? d : 0));
+    const losses = deltas.map((d) => (d < 0 ? -d : 0));
+    const alpha = 1 / 14;
+    let avgGain = gains.slice(0, 14).reduce((a, b) => a + b, 0) / 14;
+    let avgLoss = losses.slice(0, 14).reduce((a, b) => a + b, 0) / 14;
+    for (let i = 14; i < gains.length; i++) {
+      avgGain = alpha * gains[i] + (1 - alpha) * avgGain;
+      avgLoss = alpha * losses[i] + (1 - alpha) * avgLoss;
+    }
+    const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+    output.rsi14 = +(100 - 100 / (1 + rs)).toFixed(2);
+  } catch {
+    output.rsi14 = null;
+  }
+
+  // MACD (12, 26, 9)
+  try {
+    const ema = (data: number[], span: number): number[] => {
+      const k = 2 / (span + 1);
+      const result = [data[0]];
+      for (let i = 1; i < data.length; i++) {
+        result.push(data[i] * k + result[i - 1] * (1 - k));
+      }
+      return result;
+    };
+
+    const ema12 = ema(closes, 12);
+    const ema26 = ema(closes, 26);
+    const macdLine = ema12.map((v, i) => v - ema26[i]);
+    const signalLine = ema(macdLine, 9);
+    const last = macdLine.length - 1;
+
+    output.macd = +macdLine[last].toFixed(4);
+    output.macdSignal = +signalLine[last].toFixed(4);
+    output.macdHistogram = +(macdLine[last] - signalLine[last]).toFixed(4);
+  } catch {
+    output.macd = null;
+    output.macdSignal = null;
+    output.macdHistogram = null;
+  }
+
+  output.lastClose = +closes[closes.length - 1].toFixed(2);
+  const lastTs = timestamps[timestamps.length - 1];
+  output.dataDate = lastTs ? new Date(lastTs * 1000).toISOString().slice(0, 10) : null;
+
+  return JSON.stringify(output);
+}

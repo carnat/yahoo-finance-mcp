@@ -3,7 +3,7 @@ name: Deploy Cloudflare Worker
 on:
   push:
     branches: [main]
-    paths: ["worker/**"]
+    paths: ["worker/**", "server.py"]
   workflow_dispatch: # allow manual trigger from GitHub UI
 
 jobs:
@@ -18,8 +18,19 @@ jobs:
           cache: "npm"
           cache-dependency-path: worker/package-lock.json
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify tool lists are in sync
+        run: python scripts/check_tool_sync.py
+
       - name: Install dependencies
         run: npm install
+        working-directory: worker
+
+      - name: Type-check
+        run: npx tsc --noEmit
         working-directory: worker
 
       - name: Deploy to Cloudflare Workers
