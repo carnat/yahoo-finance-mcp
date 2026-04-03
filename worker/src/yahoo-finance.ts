@@ -120,7 +120,11 @@ export async function getHistoricalPrices(
   );
 }
 
-export async function getStockInfo(ticker: string): Promise<string> {
+export async function getStockInfo(ticker: string | string[]): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const results = await Promise.all(ticker.map((t) => getStockInfo(t)));
+    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+  }
   const modules = [
     "assetProfile",
     "summaryProfile",
@@ -425,7 +429,11 @@ const REC_MOD: Record<string, string> = {
 
 // ── New tools ────────────────────────────────────────────────────────────────
 
-export async function getFastInfo(ticker: string): Promise<string> {
+export async function getFastInfo(ticker: string | string[]): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const results = await Promise.all(ticker.map((t) => getFastInfo(t)));
+    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+  }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price,summaryDetail,defaultKeyStatistics`
   )) as Record<string, unknown>;
@@ -462,7 +470,11 @@ export async function getFastInfo(ticker: string): Promise<string> {
   });
 }
 
-export async function getPriceStats(ticker: string): Promise<string> {
+export async function getPriceStats(ticker: string | string[]): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const results = await Promise.all(ticker.map((t) => getPriceStats(t)));
+    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+  }
   const [metaRaw, histRaw] = await Promise.all([
     yGet(
       `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price,summaryDetail`
@@ -551,7 +563,11 @@ export async function getPriceStats(ticker: string): Promise<string> {
   return JSON.stringify(stats);
 }
 
-export async function getAnalystConsensus(ticker: string): Promise<string> {
+export async function getAnalystConsensus(ticker: string | string[]): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const results = await Promise.all(ticker.map((t) => getAnalystConsensus(t)));
+    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+  }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=financialData,recommendationTrend,price`
   )) as Record<string, unknown>;
@@ -662,7 +678,11 @@ export async function getEarningsAnalysis(ticker: string): Promise<string> {
   return JSON.stringify(output);
 }
 
-export async function getFinancialRatios(ticker: string): Promise<string> {
+export async function getFinancialRatios(ticker: string | string[]): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const results = await Promise.all(ticker.map((t) => getFinancialRatios(t)));
+    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+  }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=summaryDetail,financialData,defaultKeyStatistics`
   )) as Record<string, unknown>;
