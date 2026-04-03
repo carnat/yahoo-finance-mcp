@@ -188,6 +188,26 @@ To integrate this server with Claude for Desktop:
 
 4. Restart Claude for Desktop
 
+### Remote MCP (Replit / Claude.ai)
+
+If you deploy `main.py` to Replit (or any public host), the server exposes a Streamable HTTP endpoint at `/mcp`.
+
+**Claude.ai** (Settings → Integrations → Add integration):
+```
+https://<your-replit>.repl.co/mcp
+```
+
+**Claude Desktop** (`claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "yahoo-finance": {
+      "url": "https://<your-replit>.repl.co/mcp"
+    }
+  }
+}
+```
+
 ## License
 
 MIT
