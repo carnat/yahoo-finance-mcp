@@ -814,10 +814,6 @@ export async function screenStocks(screenerName: string, count: number): Promise
   return JSON.stringify({ screener: screenerName, count: trimmed.length, results: trimmed });
 }
 
-export async function getSustainability(_ticker: string): Promise<string> {
-  return "Error: Yahoo Finance has discontinued the ESG/sustainability data endpoint. ESG scores are no longer available via this API.";
-}
-
 export async function getSecFilings(ticker: string): Promise<string> {
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=secFilings`
