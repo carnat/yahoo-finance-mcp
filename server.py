@@ -74,22 +74,26 @@ yfinance_server = FastMCP(
 This server provides financial market data from Yahoo Finance.
 
 ## Tool selection guidance
-- **Prefer `get_fast_info`** over `get_stock_info` for current price, market cap, 52-week range, or moving averages — it returns ~15 fields instead of 120+ and uses far fewer tokens.
+- **Prefer `get_fast_info`** over `get_stock_info` for current price, market cap, 52-week range, or moving averages — it returns ~20 fields instead of 120+ and uses far fewer tokens. Also includes pre-market / after-hours prices when available.
 - Use `get_stock_info` only when you need deep fundamentals, business description, or fields not in fast_info.
 - **Prefer `get_financial_ratios`** over fetching full financial statements when you need valuation or profitability ratios — ratios are pre-computed server-side.
 - **Prefer `get_analyst_consensus`** over `get_recommendations` when you need a quick summary of analyst sentiment and price targets.
 - **Prefer `get_earnings_analysis`** to get all forward-looking analyst estimates in a single call instead of five separate calls.
+- Use `get_short_interest` for short-selling metrics (short % of float, days to cover, etc.).
+- Use `get_technical_indicators` for momentum signals (RSI-14, MACD) without fetching raw OHLCV history.
 - Use `search_ticker` to resolve a company name or ISIN to a ticker symbol before calling other tools.
 - Use `screen_stocks` to discover stocks matching criteria (e.g., day_gainers, most_actives) without iterating tickers manually.
+- Index tickers like `^VIX`, `^GSPC`, `^DJI` are supported by `get_fast_info`, `get_price_stats`, and `get_technical_indicators`.
 
 ## Available tools
 
 ### Price & market data
-- get_fast_info: **Lightweight** — current price, market cap, 52-week high/low, moving averages, volume (~15 fields). Prefer this for price lookups.
+- get_fast_info: **Lightweight** — current price, market cap, 52-week high/low, moving averages, volume (~20 fields), plus pre-market/after-hours prices when available. Prefer this for price lookups.
 - get_historical_stock_prices: OHLCV history. Supports period, interval, and optional columns filter to reduce output size.
 - get_stock_info: **Heavyweight** — full ~120-field company info dict. Use only when fast_info is insufficient. Supports optional fields filter.
 - get_price_stats: Pre-computed price statistics: % change vs 52-week high/low, distance from moving averages, 30-day volatility, and CAGR.
 - get_stock_actions: Dividend and split history.
+- get_short_interest: Short interest metrics: short % of float, shares short, days-to-cover ratio, float shares.
 
 ### Financials & ratios
 - get_financial_statement: Raw financial statements (income, balance sheet, cashflow). Supports ttm_income_stmt and ttm_cashflow for trailing-twelve-months data. Supports optional line_items filter.
@@ -111,6 +115,9 @@ This server provides financial market data from Yahoo Finance.
 ### News & filings
 - get_yahoo_finance_news: Latest news articles.
 - get_sec_filings: Recent SEC filings (10-K, 10-Q, 8-K) with dates and links.
+
+### Technical analysis
+- get_technical_indicators: Pre-computed RSI-14 and MACD (12,26,9) from historical daily prices. Use for momentum/oversold screening without fetching raw history.
 
 ### Discovery
 - search_ticker: Search by company name, partial name, or ISIN to get matching ticker symbols.
@@ -610,7 +617,8 @@ async def get_recommendations(ticker: str, recommendation_type: str, months_back
 
 @yfinance_server.tool(
     name="get_fast_info",
-    description="""Get lightweight real-time price and market data for a ticker symbol. Returns ~20 high-signal fields.
+    description="""Get lightweight real-time price and market data for a ticker symbol. Returns ~20 high-signal fields
+plus pre-market/after-hours prices when available.
 
 PREFER THIS over get_stock_info for any query involving current price, market cap, 52-week range,
 moving averages, or trading volume — it uses ~85-90% fewer tokens than get_stock_info.
@@ -618,6 +626,9 @@ moving averages, or trading volume — it uses ~85-90% fewer tokens than get_sto
 Fields returned: currency, exchange, quoteType, timezone, lastPrice, open, previousClose,
 dayHigh, dayLow, yearHigh, yearLow, yearChange, marketCap, shares, lastVolume,
 tenDayAverageVolume, threeMonthAverageVolume, fiftyDayAverage, twoHundredDayAverage.
+
+Extended-hours fields (included when available): preMarketPrice, preMarketChange,
+preMarketChangePercent, postMarketPrice, postMarketChange, postMarketChangePercent.
 
 Args:
     ticker: str
@@ -634,11 +645,96 @@ async def get_fast_info(ticker: str) -> str:
     company = yf.Ticker(ticker)
     try:
         fi = company.fast_info
-        result = json.dumps({k: getattr(fi, k, None) for k in fi.keys()})
+        data = {k: getattr(fi, k, None) for k in fi.keys()}
     except Exception as e:
         print(f"Error: getting fast info for {ticker}: {e}")
         return f"Error: getting fast info for {ticker}: {e}"
 
+    # Best-effort: include extended-hours (pre/post market) data from .info
+    try:
+        info = company.info
+        for key in (
+            "preMarketPrice", "preMarketChange", "preMarketChangePercent",
+            "postMarketPrice", "postMarketChange", "postMarketChangePercent",
+        ):
+            val = info.get(key)
+            if val is not None:
+                data[key] = val
+    except Exception:
+        pass  # Extended-hours data is optional; fast_info fields are still returned
+
+    result = json.dumps(data)
+    _cache_set(cache_key, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Group 1.2 — get_short_interest
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_short_interest",
+    description="""Get short interest data for a ticker symbol.
+
+Returns structured short-selling metrics sourced from yfinance .info, including the
+pre-computed short-interest-as-percentage-of-float ratio.
+
+Fields returned (when available):
+- sharesShort: Number of shares currently sold short
+- sharesShortPriorMonth: Shares short in the prior reporting period
+- shortRatio: Days-to-cover ratio (sharesShort / avg daily volume)
+- shortPercentOfFloat: Short interest as a fraction of float (0–1 scale)
+- sharesPercentSharesOut: Short shares as a fraction of shares outstanding
+- floatShares: Total shares in the public float
+- sharesOutstanding: Total shares outstanding
+- dateShortInterest: Date of the short interest data
+- sharesShortPreviousMonthDate: Date of the prior month data
+
+Note: Short interest data is reported bi-monthly by exchanges and may be up to 2 weeks old.
+
+Args:
+    ticker: str
+        The ticker symbol of the stock, e.g. "AAPL"
+""",
+)
+async def get_short_interest(ticker: str) -> str:
+    """Get short interest data for a ticker symbol."""
+    cache_key = f"short_interest:{ticker}"
+    cached = _cache_get(cache_key, _STMT_TTL)
+    if cached is not None:
+        return cached
+
+    company = yf.Ticker(ticker)
+    try:
+        info = company.info
+    except Exception as e:
+        print(f"Error: getting short interest for {ticker}: {e}")
+        return f"Error: getting short interest for {ticker}: {e}"
+
+    _SHORT_FIELDS = (
+        "sharesShort",
+        "sharesShortPriorMonth",
+        "shortRatio",
+        "shortPercentOfFloat",
+        "sharesPercentSharesOut",
+        "floatShares",
+        "sharesOutstanding",
+        "dateShortInterest",
+        "sharesShortPreviousMonthDate",
+    )
+
+    def _serialize(v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return v
+
+    data: dict = {"ticker": ticker}
+    for key in _SHORT_FIELDS:
+        val = info.get(key)
+        if val is not None:
+            data[key] = _serialize(val)
+
+    result = json.dumps(data)
     _cache_set(cache_key, result)
     return result
 
@@ -1162,6 +1258,99 @@ async def get_sec_filings(ticker: str) -> str:
         return {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in f.items()}
 
     result = json.dumps({"ticker": ticker, "filings": [_serialize_filing(f) for f in filings]})
+    _cache_set(cache_key, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Group 3.5 — get_technical_indicators
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_technical_indicators",
+    description="""Get pre-computed technical / momentum indicators for a ticker.
+
+Computes indicators server-side from historical daily close prices so the LLM
+does NOT need to fetch raw OHLCV history and calculate manually.
+
+Returns:
+- rsi14: 14-day Relative Strength Index (Wilder smoothing). Values below 30 are
+  typically considered oversold; above 70 overbought.
+- macd: MACD line (12-day EMA minus 26-day EMA)
+- macdSignal: 9-day EMA of the MACD line
+- macdHistogram: MACD minus signal (positive = bullish momentum)
+- lastClose: Most recent closing price used for the calculations
+- dataDate: Date of the most recent data point
+
+Args:
+    ticker: str
+        The ticker symbol, e.g. "AAPL"
+    period: str
+        Lookback period for fetching history (default "3mo"). Longer periods give
+        more accurate indicator warm-up. Valid: 1mo, 3mo, 6mo, 1y, 2y, 5y.
+""",
+)
+async def get_technical_indicators(ticker: str, period: str = "3mo") -> str:
+    """Get pre-computed technical indicators (RSI, MACD) for a ticker."""
+    cache_key = f"tech_indicators:{ticker}:{period}"
+    cached = _cache_get(cache_key, _PRICE_TTL)
+    if cached is not None:
+        return cached
+
+    company = yf.Ticker(ticker)
+    try:
+        hist = await _fetch_with_retry(company.history, period, "1d")
+    except Exception as e:
+        print(f"Error: getting technical indicators for {ticker}: {e}")
+        return f"Error: getting technical indicators for {ticker}: {e}"
+
+    if hist is None or hist.empty or "Close" not in hist.columns:
+        return f"Error: no price history available for {ticker}"
+
+    closes = hist["Close"].dropna()
+    if len(closes) < 26:
+        return (
+            f"Error: insufficient price history for {ticker} "
+            f"(need ≥26 data points, got {len(closes)})"
+        )
+
+    output: dict = {"ticker": ticker}
+
+    # --- RSI-14 (Wilder smoothing) ---
+    try:
+        delta = closes.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = (-delta).where(delta < 0, 0.0)
+        avg_gain = gain.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        output["rsi14"] = round(float(rsi.iloc[-1]), 2)
+    except Exception:
+        output["rsi14"] = None
+
+    # --- MACD (12, 26, 9) ---
+    try:
+        ema12 = closes.ewm(span=12, adjust=False).mean()
+        ema26 = closes.ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        histogram = macd_line - signal_line
+        output["macd"] = round(float(macd_line.iloc[-1]), 4)
+        output["macdSignal"] = round(float(signal_line.iloc[-1]), 4)
+        output["macdHistogram"] = round(float(histogram.iloc[-1]), 4)
+    except Exception:
+        output["macd"] = None
+        output["macdSignal"] = None
+        output["macdHistogram"] = None
+
+    output["lastClose"] = round(float(closes.iloc[-1]), 2)
+    last_idx = closes.index[-1]
+    output["dataDate"] = (
+        str(last_idx.date()) if hasattr(last_idx, "date") else str(last_idx)
+    )
+
+    result = json.dumps(output)
     _cache_set(cache_key, result)
     return result
 
