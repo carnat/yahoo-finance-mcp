@@ -210,7 +210,7 @@ async def get_historical_stock_prices(
 
 @yfinance_server.tool(
     name="get_stock_info",
-    description="""Get stock information for a given ticker symbol from yahoo finance. Include the following information:
+    description="""Get stock information for one or more ticker symbols from yahoo finance. Include the following information:
 Stock Price & Trading Info, Company Information, Financial Metrics, Earnings & Revenue, Margins & Returns, Dividends, Balance Sheet, Ownership, Analyst Coverage, Risk Metrics, Other.
 
 IMPORTANT: This tool returns 120+ fields and is token-heavy. Prefer get_fast_info for price/market-cap lookups.
@@ -218,15 +218,19 @@ Use this tool only when you need deep fundamentals, the business description, or
 Use the optional `fields` parameter to request only the fields you need.
 
 Args:
-    ticker: str
-        The ticker symbol of the stock to get information for, e.g. "AAPL"
+    ticker: str | list[str]
+        A single ticker symbol (e.g. "AAPL") or a list of symbols (e.g. ["AAPL", "MSFT"]).
+        When a list is provided, returns a dict keyed by symbol.
     fields: list[str] | None
         Optional list of field names to return, e.g. ["shortName", "sector", "industry", "fullTimeEmployees"].
         If omitted, all ~120+ fields are returned. Specify only what you need to reduce token usage.
 """,
 )
-async def get_stock_info(ticker: str, fields: list[str] | None = None) -> str:
+async def get_stock_info(ticker: str | list[str], fields: list[str] | None = None) -> str:
     """Get stock information for a given ticker symbol"""
+    if isinstance(ticker, list):
+        results = await asyncio.gather(*[get_stock_info(t, fields) for t in ticker])
+        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
     company = yf.Ticker(ticker)
     try:
         if company.fast_info.currency is None:
@@ -617,7 +621,7 @@ async def get_recommendations(ticker: str, recommendation_type: str, months_back
 
 @yfinance_server.tool(
     name="get_fast_info",
-    description="""Get lightweight real-time price and market data for a ticker symbol. Returns ~20 high-signal fields
+    description="""Get lightweight real-time price and market data for one or more ticker symbols. Returns ~20 high-signal fields
 plus pre-market/after-hours prices when available.
 
 PREFER THIS over get_stock_info for any query involving current price, market cap, 52-week range,
@@ -631,12 +635,16 @@ Extended-hours fields (included when available): preMarketPrice, preMarketChange
 preMarketChangePercent, postMarketPrice, postMarketChange, postMarketChangePercent.
 
 Args:
-    ticker: str
-        The ticker symbol of the stock, e.g. "AAPL"
+    ticker: str | list[str]
+        A single ticker symbol (e.g. "AAPL") or a list of symbols (e.g. ["AAPL", "MSFT"]).
+        When a list is provided, returns a dict keyed by symbol.
 """,
 )
-async def get_fast_info(ticker: str) -> str:
+async def get_fast_info(ticker: str | list[str]) -> str:
     """Get lightweight real-time price and market data for a ticker symbol."""
+    if isinstance(ticker, list):
+        results = await asyncio.gather(*[get_fast_info(t) for t in ticker])
+        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
     cache_key = f"fast_info:{ticker}"
     cached = _cache_get(cache_key, _PRICE_TTL)
     if cached is not None:
@@ -745,7 +753,7 @@ async def get_short_interest(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_price_stats",
-    description="""Get pre-computed price statistics for a ticker. Returns a compact summary so you do NOT
+    description="""Get pre-computed price statistics for one or more tickers. Returns a compact summary so you do NOT
 need to fetch raw history and compute these yourself.
 
 Includes:
@@ -756,12 +764,16 @@ Includes:
 - CAGR over 1y, 3y, 5y (where data is available)
 
 Args:
-    ticker: str
-        The ticker symbol, e.g. "AAPL"
+    ticker: str | list[str]
+        A single ticker symbol (e.g. "AAPL") or a list of symbols (e.g. ["AAPL", "MSFT"]).
+        When a list is provided, returns a dict keyed by symbol.
 """,
 )
-async def get_price_stats(ticker: str) -> str:
+async def get_price_stats(ticker: str | list[str]) -> str:
     """Get pre-computed price statistics for a ticker."""
+    if isinstance(ticker, list):
+        results = await asyncio.gather(*[get_price_stats(t) for t in ticker])
+        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
     cache_key = f"price_stats:{ticker}"
     cached = _cache_get(cache_key, _PRICE_TTL)
     if cached is not None:
@@ -841,7 +853,7 @@ async def get_price_stats(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_analyst_consensus",
-    description="""Get a compact analyst consensus summary for a ticker.
+    description="""Get a compact analyst consensus summary for one or more tickers.
 
 Returns pre-aggregated data so you do NOT need to call get_recommendations separately.
 Includes:
@@ -850,12 +862,16 @@ Includes:
 - Dominant consensus rating
 
 Args:
-    ticker: str
-        The ticker symbol, e.g. "AAPL"
+    ticker: str | list[str]
+        A single ticker symbol (e.g. "AAPL") or a list of symbols (e.g. ["AAPL", "MSFT"]).
+        When a list is provided, returns a dict keyed by symbol.
 """,
 )
-async def get_analyst_consensus(ticker: str) -> str:
+async def get_analyst_consensus(ticker: str | list[str]) -> str:
     """Get compact analyst consensus summary."""
+    if isinstance(ticker, list):
+        results = await asyncio.gather(*[get_analyst_consensus(t) for t in ticker])
+        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
     cache_key = f"analyst_consensus:{ticker}"
     cached = _cache_get(cache_key, _STMT_TTL)
     if cached is not None:
@@ -980,7 +996,7 @@ async def get_earnings_analysis(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_financial_ratios",
-    description="""Get pre-computed key financial ratios for a ticker.
+    description="""Get pre-computed key financial ratios for one or more tickers.
 
 PREFER THIS over fetching full financial statements when you need valuation or profitability ratios.
 Ratios are computed server-side from company.info so the LLM does not have to process raw statements.
@@ -993,12 +1009,16 @@ Includes:
 - Dividend: Yield, Payout ratio
 
 Args:
-    ticker: str
-        The ticker symbol, e.g. "AAPL"
+    ticker: str | list[str]
+        A single ticker symbol (e.g. "AAPL") or a list of symbols (e.g. ["AAPL", "MSFT"]).
+        When a list is provided, returns a dict keyed by symbol.
 """,
 )
-async def get_financial_ratios(ticker: str) -> str:
+async def get_financial_ratios(ticker: str | list[str]) -> str:
     """Get pre-computed key financial ratios."""
+    if isinstance(ticker, list):
+        results = await asyncio.gather(*[get_financial_ratios(t) for t in ticker])
+        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
     cache_key = f"financial_ratios:{ticker}"
     cached = _cache_get(cache_key, _STMT_TTL)
     if cached is not None:

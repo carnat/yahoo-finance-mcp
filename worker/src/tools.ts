@@ -58,11 +58,17 @@ export const TOOLS: Tool[] = [
   {
     name: "get_stock_info",
     description:
-      "Get comprehensive stock information for a ticker: price & trading info, company details, financial metrics, earnings, margins, dividends, balance sheet, ownership, analyst coverage, and risk metrics.",
+      "Get comprehensive stock information for one or more tickers: price & trading info, company details, financial metrics, earnings, margins, dividends, balance sheet, ownership, analyst coverage, and risk metrics. Pass an array of symbols to fetch multiple tickers in one call — returns a dict keyed by symbol.",
     inputSchema: {
       type: "object",
       properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+        ticker: {
+          description: "Stock ticker symbol (e.g. 'AAPL') or an array of symbols (e.g. ['AAPL', 'MSFT']) for batch fetching.",
+          oneOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } },
+          ],
+        },
       },
       required: ["ticker"],
     },
@@ -194,11 +200,17 @@ export const TOOLS: Tool[] = [
   {
     name: "get_fast_info",
     description:
-      "Get lightweight real-time price and market data for a ticker. Returns ~20 high-signal fields: currency, exchange, quoteType, timezone, lastPrice, open, previousClose, dayHigh, dayLow, yearHigh, yearLow, yearChange, marketCap, shares, lastVolume, tenDayAverageVolume, threeMonthAverageVolume, fiftyDayAverage, twoHundredDayAverage. Prefer this over get_stock_info for price/market data queries — it uses far fewer tokens.",
+      "Get lightweight real-time price and market data for one or more tickers. Returns ~20 high-signal fields: currency, exchange, quoteType, timezone, lastPrice, open, previousClose, dayHigh, dayLow, yearHigh, yearLow, yearChange, marketCap, shares, lastVolume, tenDayAverageVolume, threeMonthAverageVolume, fiftyDayAverage, twoHundredDayAverage. Prefer this over get_stock_info for price/market data queries — it uses far fewer tokens. Pass an array of symbols to fetch multiple tickers in one call — returns a dict keyed by symbol.",
     inputSchema: {
       type: "object",
       properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+        ticker: {
+          description: "Stock ticker symbol (e.g. 'AAPL') or an array of symbols (e.g. ['AAPL', 'MSFT']) for batch fetching.",
+          oneOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } },
+          ],
+        },
       },
       required: ["ticker"],
     },
@@ -206,11 +218,17 @@ export const TOOLS: Tool[] = [
   {
     name: "get_price_stats",
     description:
-      "Get pre-computed price statistics for a ticker: current price, % change vs previous close, % distance from 52-week high/low and 50/200-day moving averages, 30-day annualized volatility, and CAGR over 1y/3y/5y.",
+      "Get pre-computed price statistics for one or more tickers: current price, % change vs previous close, % distance from 52-week high/low and 50/200-day moving averages, 30-day annualized volatility, and CAGR over 1y/3y/5y. Pass an array of symbols to fetch multiple tickers in one call — returns a dict keyed by symbol.",
     inputSchema: {
       type: "object",
       properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+        ticker: {
+          description: "Stock ticker symbol (e.g. 'AAPL') or an array of symbols (e.g. ['AAPL', 'MSFT']) for batch fetching.",
+          oneOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } },
+          ],
+        },
       },
       required: ["ticker"],
     },
@@ -218,11 +236,17 @@ export const TOOLS: Tool[] = [
   {
     name: "get_analyst_consensus",
     description:
-      "Get analyst consensus summary for a ticker: price targets (current, low, high, mean, median) with % upside from last price, recommendation breakdown (strongBuy, buy, hold, sell, strongSell counts), and dominant rating.",
+      "Get analyst consensus summary for one or more tickers: price targets (current, low, high, mean, median) with % upside from last price, recommendation breakdown (strongBuy, buy, hold, sell, strongSell counts), and dominant rating. Pass an array of symbols to fetch multiple tickers in one call — returns a dict keyed by symbol.",
     inputSchema: {
       type: "object",
       properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+        ticker: {
+          description: "Stock ticker symbol (e.g. 'AAPL') or an array of symbols (e.g. ['AAPL', 'MSFT']) for batch fetching.",
+          oneOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } },
+          ],
+        },
       },
       required: ["ticker"],
     },
@@ -242,11 +266,17 @@ export const TOOLS: Tool[] = [
   {
     name: "get_financial_ratios",
     description:
-      "Get pre-computed key financial ratios for a ticker. Includes: P/E (trailing & forward), P/S, P/B, EV/EBITDA, EV/Revenue, PEG; gross/operating/net margins, ROE, ROA; debt/equity, current ratio, quick ratio; FCF and FCF yield; dividend yield and payout ratio.",
+      "Get pre-computed key financial ratios for one or more tickers. Includes: P/E (trailing & forward), P/S, P/B, EV/EBITDA, EV/Revenue, PEG; gross/operating/net margins, ROE, ROA; debt/equity, current ratio, quick ratio; FCF and FCF yield; dividend yield and payout ratio. Pass an array of symbols to fetch multiple tickers in one call — returns a dict keyed by symbol.",
     inputSchema: {
       type: "object",
       properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+        ticker: {
+          description: "Stock ticker symbol (e.g. 'AAPL') or an array of symbols (e.g. ['AAPL', 'MSFT']) for batch fetching.",
+          oneOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } },
+          ],
+        },
       },
       required: ["ticker"],
     },
@@ -349,13 +379,15 @@ export const TOOLS: Tool[] = [
 
 const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
 const num = (v: unknown, fallback: number): number => (typeof v === "number" ? v : fallback);
+const tickerArg = (v: unknown): string | string[] =>
+  Array.isArray(v) ? v.map(String) : str(v);
 
 export async function callTool(name: string, args: Record<string, unknown>): Promise<string> {
   switch (name) {
     case "get_historical_stock_prices":
       return getHistoricalPrices(str(args.ticker), str(args.period, "1mo"), str(args.interval, "1d"));
     case "get_stock_info":
-      return getStockInfo(str(args.ticker));
+      return getStockInfo(tickerArg(args.ticker));
     case "get_yahoo_finance_news":
       return getNews(str(args.ticker));
     case "get_stock_actions":
@@ -375,15 +407,15 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
         num(args.months_back, 12)
       );
     case "get_fast_info":
-      return getFastInfo(str(args.ticker));
+      return getFastInfo(tickerArg(args.ticker));
     case "get_price_stats":
-      return getPriceStats(str(args.ticker));
+      return getPriceStats(tickerArg(args.ticker));
     case "get_analyst_consensus":
-      return getAnalystConsensus(str(args.ticker));
+      return getAnalystConsensus(tickerArg(args.ticker));
     case "get_earnings_analysis":
       return getEarningsAnalysis(str(args.ticker));
     case "get_financial_ratios":
-      return getFinancialRatios(str(args.ticker));
+      return getFinancialRatios(tickerArg(args.ticker));
     case "get_calendar":
       return getCalendar(str(args.ticker));
     case "search_ticker":
