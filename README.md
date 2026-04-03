@@ -49,11 +49,10 @@ The server exposes the following tools through the Model Context Protocol:
 | `get_option_expiration_dates` | Get available options expiration dates. |
 | `get_option_chain` | Get options chain for a specific expiration date and type (calls/puts). Supports `min_strike`, `max_strike`, and `in_the_money_only` filters to reduce a 200-row chain to ~20 near-the-money rows. |
 
-### ESG & Filings
+### Filings
 
 | Tool | Description |
 |------|-------------|
-| `get_sustainability` | Get ESG scores: environment, social, governance, total ESG, controversy level, and peer-group percentile. |
 | `get_sec_filings` | Get recent SEC filings (10-K, 10-Q, 8-K) with form type, filing date, and URL. |
 
 ### Discovery
@@ -87,7 +86,6 @@ With this MCP server, you can use Claude to:
 - **Analyst Coverage**: "What is the analyst consensus price target for Amazon?" *(use `get_analyst_consensus`)*
 - **Earnings Outlook**: "What are the EPS and revenue estimates for Apple for the next two quarters?" *(use `get_earnings_analysis`)*
 - **Calendar**: "When is Microsoft's next earnings date and ex-dividend date?" *(use `get_calendar`)*
-- **ESG**: "What are Tesla's ESG scores and controversy level?" *(use `get_sustainability`)*
 - **SEC Filings**: "Show me Apple's most recent 10-K and 10-Q filings." *(use `get_sec_filings`)*
 
 ### Discovery & Screening

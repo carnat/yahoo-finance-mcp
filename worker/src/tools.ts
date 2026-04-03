@@ -17,7 +17,6 @@ import {
   getSecFilings,
   getStockActions,
   getStockInfo,
-  getSustainability,
 } from "./yahoo-finance.js";
 
 export interface Tool {
@@ -303,18 +302,6 @@ export const TOOLS: Tool[] = [
     },
   },
   {
-    name: "get_sustainability",
-    description:
-      "Get ESG (Environmental, Social, Governance) sustainability scores for a ticker: environment, social, and governance scores, total ESG score, ESG performance category, controversy level, and peer group percentile.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
     name: "get_sec_filings",
     description:
       "Get recent SEC filings for a ticker (10-K, 10-Q, 8-K, etc.) with form type, filing date, and URL.",
@@ -371,8 +358,6 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       return searchTicker(str(args.query), num(args.max_results, 8));
     case "screen_stocks":
       return screenStocks(str(args.screener_name), num(args.count, 25));
-    case "get_sustainability":
-      return getSustainability(str(args.ticker));
     case "get_sec_filings":
       return getSecFilings(str(args.ticker));
     default:

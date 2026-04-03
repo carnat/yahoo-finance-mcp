@@ -53,11 +53,10 @@
 | `get_option_expiration_dates` | 获取可用的期权到期日期。 |
 | `get_option_chain` | 获取特定到期日期和类型（看涨/看跌）的期权链。支持 `min_strike`、`max_strike` 及 `in_the_money_only` 过滤，将 200 行期权链缩减至约 20 行价内期权。 |
 
-### ESG 与文件
+### 文件
 
 | 工具 | 描述 |
 |------|-------------|
-| `get_sustainability` | 获取 ESG 评分：环境、社会、治理、总 ESG、争议等级及同行组百分位。 |
 | `get_sec_filings` | 获取近期 SEC 文件（10-K、10-Q、8-K），包含表单类型、申报日期和链接。 |
 
 ### 发现与筛选
@@ -91,7 +90,6 @@
 - **分析师共识**："亚马逊的分析师一致目标价是多少？"（使用 `get_analyst_consensus`）
 - **盈利展望**："苹果未来两个季度的 EPS 和营收预估是多少？"（使用 `get_earnings_analysis`）
 - **日历**："微软下一个财报日和除息日是何时？"（使用 `get_calendar`）
-- **ESG**："特斯拉的 ESG 评分和争议等级如何？"（使用 `get_sustainability`）
 - **SEC 文件**："显示苹果最近的 10-K 和 10-Q 文件。"（使用 `get_sec_filings`）
 
 ### 发现与筛选

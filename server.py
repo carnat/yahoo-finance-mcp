@@ -112,9 +112,6 @@ This server provides financial market data from Yahoo Finance.
 - get_yahoo_finance_news: Latest news articles.
 - get_sec_filings: Recent SEC filings (10-K, 10-Q, 8-K) with dates and links.
 
-### ESG
-- get_sustainability: ESG scores (environment, social, governance, controversy level).
-
 ### Discovery
 - search_ticker: Search by company name, partial name, or ISIN to get matching ticker symbols.
 - screen_stocks: Screen the market using predefined or custom criteria. Predefined: aggressive_small_caps, day_gainers, day_losers, growth_technology_stocks, most_actives, most_shorted_stocks, small_cap_gainers, undervalued_growth_stocks, undervalued_large_caps, conservative_foreign_funds, high_yield_bond, portfolio_anchors, solid_large_growth_funds, solid_midcap_growth_funds, top_mutual_funds.
@@ -1118,55 +1115,6 @@ async def screen_stocks(screener_name: str, count: int = 25) -> str:
     except Exception as e:
         print(f"Error: running screener '{screener_name}': {e}")
         return f"Error: running screener '{screener_name}': {e}"
-
-
-# ---------------------------------------------------------------------------
-# Group 3.3 — get_sustainability
-# ---------------------------------------------------------------------------
-
-@yfinance_server.tool(
-    name="get_sustainability",
-    description="""Get ESG (Environmental, Social, Governance) sustainability scores for a ticker.
-
-Returns environment score, social score, governance score, total ESG score,
-ESG performance category, controversy level, and peer group percentile.
-
-Args:
-    ticker: str
-        The ticker symbol, e.g. "AAPL"
-""",
-)
-async def get_sustainability(ticker: str) -> str:
-    """Get ESG sustainability scores for a ticker."""
-    cache_key = f"sustainability:{ticker}"
-    cached = _cache_get(cache_key, _STMT_TTL)
-    if cached is not None:
-        return cached
-
-    company = yf.Ticker(ticker)
-    try:
-        fi = company.fast_info
-        if fi.currency is None:
-            return f"Company ticker {ticker} not found."
-    except Exception as e:
-        print(f"Error: getting sustainability for {ticker}: {e}")
-        return f"Error: getting sustainability for {ticker}: {e}"
-
-    try:
-        sus = company.sustainability
-    except Exception as e:
-        print(f"Error: getting sustainability for {ticker}: {e}")
-        return f"Error: getting sustainability for {ticker}: {e}"
-
-    if sus is None or (hasattr(sus, "empty") and sus.empty):
-        return json.dumps({"ticker": ticker, "sustainability": None})
-
-    sus = sus.reset_index()
-    sus.columns = [str(c) for c in sus.columns]
-    sus = sus.where(pd.notnull(sus), None)
-    result = json.dumps({"ticker": ticker, "sustainability": sus.to_dict(orient="records")})
-    _cache_set(cache_key, result)
-    return result
 
 
 # ---------------------------------------------------------------------------
