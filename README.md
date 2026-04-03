@@ -2,7 +2,7 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that gives any MCP-compatible AI client (Claude, Cursor, VS Code Copilot, etc.) direct access to live financial data from Yahoo Finance.
 
-18 tools cover the full research workflow — from a quick price check to earnings forecasts, SEC filings, and market screening — without leaving your chat window.
+20 tools cover the full research workflow — from a quick price check to earnings forecasts, SEC filings, technical indicators, and market screening — without leaving your chat window.
 
 ## Demo
 
@@ -18,12 +18,13 @@ The server exposes the following tools through the Model Context Protocol:
 
 | Tool | Description |
 |------|-------------|
-| `get_fast_info` | **Lightweight.** Get current price, market cap, 52-week range, moving averages, and volume (~20 fields). Prefer this over `get_stock_info` for price lookups. |
+| `get_fast_info` | **Lightweight.** Get current price, market cap, 52-week range, moving averages, and volume (~20 fields). Also includes pre-market/after-hours prices when available. Prefer this over `get_stock_info` for price lookups. |
 | `get_historical_stock_prices` | Get historical OHLCV data with customizable period, interval, and optional `columns` filter (e.g. `["Close"]` to return only closing prices). |
 | `get_stock_info` | **Heavyweight.** Get the full ~120-field company info dict. Use only when deep fundamentals or the business description are needed. Supports an optional `fields` filter to request specific keys. |
-| `get_price_stats` | Get pre-computed price statistics: % change today, % distance from 52-week high/low and moving averages, 30-day annualized volatility, and CAGR over 1y/3y/5y. |
+| `get_price_stats` | Get pre-computed price statistics: % change today, % distance from 52-week high/low and moving averages, 30-day annualized volatility, and CAGR over 1y/3y/5y. Works with index tickers (e.g. `^VIX`, `^GSPC`). |
 | `get_stock_actions` | Get stock dividends and splits history. |
 | `get_yahoo_finance_news` | Get latest news articles for a stock. |
+| `get_short_interest` | Get short interest metrics: short % of float, shares short, days-to-cover ratio, prior-month comparison, and float shares. Data is reported bi-monthly by exchanges. |
 
 ### Financials & Ratios
 
@@ -61,6 +62,22 @@ The server exposes the following tools through the Model Context Protocol:
 |------|-------------|
 | `search_ticker` | Search by company name, partial name, or ISIN to resolve matching ticker symbols. Solves the "I know the company but not its ticker" problem. |
 | `screen_stocks` | Screen the market using predefined criteria. Available screeners: `aggressive_small_caps`, `day_gainers`, `day_losers`, `growth_technology_stocks`, `most_actives`, `most_shorted_stocks`, `small_cap_gainers`, `undervalued_growth_stocks`, `undervalued_large_caps`, `conservative_foreign_funds`, `high_yield_bond`, `portfolio_anchors`, `solid_large_growth_funds`, `solid_midcap_growth_funds`, `top_mutual_funds`. |
+
+### Technical Analysis
+
+| Tool | Description |
+|------|-------------|
+| `get_technical_indicators` | Get pre-computed RSI-14 (Wilder smoothing) and MACD (12, 26, 9) from historical daily prices. Use for momentum and oversold/overbought screening without fetching raw OHLCV history. Supports a configurable `period` parameter for lookback depth. |
+
+## Data Availability Notes
+
+| Data Point | Available? | Details |
+|-----------|-----------|---------|
+| Short interest % of float | ✅ Yes | Available via `get_short_interest`. Sourced from yfinance `.info`. |
+| Pre-market / after-hours prices | ✅ Yes (intermittent) | Included in `get_fast_info` when Yahoo Finance provides extended-hours data. Also available via `get_stock_info` with `fields=["preMarketPrice", "postMarketPrice"]`. |
+| RSI / MACD indicators | ✅ Yes | Computed server-side via `get_technical_indicators`. |
+| Index tickers (^VIX, ^GSPC) | ✅ Yes | Supported by `get_fast_info`, `get_price_stats`, and `get_technical_indicators`. Note: `get_price_stats` CAGR values for volatility indices like `^VIX` may not be meaningful as investment return metrics. |
+| Geographic revenue breakdown | ❌ No | Not available from yfinance. Requires manual SEC filing analysis (10-K). Use `get_sec_filings` to get filing URLs for manual review. |
 
 ## Real-World Use Cases
 
