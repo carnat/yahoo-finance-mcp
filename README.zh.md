@@ -4,9 +4,7 @@
   <a href="README.md">English</a> | <a href="README.zh.md">中文</a>
 </div>
 
-这是一个基于模型上下文协议（MCP）的服务器，提供来自 Yahoo Finance 的全面金融数据。它允许您获取股票的详细信息，包括历史价格、公司信息、财务报表、期权数据、市场新闻、分析师共识、ESG 评分、SEC 文件及市场筛选。
-
-[![smithery badge](https://smithery.ai/badge/@Alex2Yang97/yahoo-finance-mcp)](https://smithery.ai/server/@Alex2Yang97/yahoo-finance-mcp)
+这是一个基于模型上下文协议（MCP）的服务器，提供来自 Yahoo Finance 的全面金融数据。它允许您获取股票的详细信息，包括历史价格、公司信息、财务报表、期权数据、市场新闻、分析师共识、SEC 文件及市场筛选。
 
 ## 演示
 
@@ -122,7 +120,7 @@
 
 1. 克隆此仓库：
    ```bash
-   git clone https://github.com/Alex2Yang97/yahoo-finance-mcp.git
+   git clone https://github.com/carnat/yahoo-finance-mcp.git
    cd yahoo-finance-mcp
    ```
 

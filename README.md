@@ -2,7 +2,7 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that gives any MCP-compatible AI client (Claude, Cursor, VS Code Copilot, etc.) direct access to live financial data from Yahoo Finance.
 
-19 tools cover the full research workflow — from a quick price check to earnings forecasts, ESG scores, SEC filings, and market screening — without leaving your chat window.
+18 tools cover the full research workflow — from a quick price check to earnings forecasts, SEC filings, and market screening — without leaving your chat window.
 
 ## Demo
 
