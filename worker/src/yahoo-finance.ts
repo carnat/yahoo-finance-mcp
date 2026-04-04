@@ -1027,3 +1027,748 @@ export async function getTechnicalIndicators(
 
   return JSON.stringify(output);
 }
+
+// ── get_price_slope ──────────────────────────────────────────────────────────
+
+export async function getPriceSlope(ticker: string | string[], days: number): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const results: string[] = [];
+    for (const t of ticker) {
+      results.push(await getPriceSlope(t, days));
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+  }
+
+  const range = `${days + 10}d`;
+  try {
+    const d = (await yGet(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=${range}&interval=1d`,
+      false
+    )) as Record<string, unknown>;
+
+    const result = (d?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    if (!result) return JSON.stringify({ error: true, message: `No data for ${ticker}`, ticker });
+
+    const timestamps = (result.timestamp as number[]) ?? [];
+    const adjclose =
+      ((result.indicators as Record<string, unknown[]>)?.adjclose?.[0] as Record<string, (number | null)[]>)?.adjclose ??
+      ((result.indicators as Record<string, unknown[]>)?.quote?.[0] as Record<string, (number | null)[]>)?.close ??
+      [];
+
+    const closes = adjclose.filter((v): v is number => v != null);
+    if (closes.length < 2) return JSON.stringify({ error: true, message: `Insufficient data for ${ticker}`, ticker });
+
+    const tail = closes.slice(-days);
+    const startClose = tail[0];
+    const endClose = tail[tail.length - 1];
+    const slopePct = startClose !== 0 ? +((endClose - startClose) / startClose * 100).toFixed(2) : null;
+
+    let direction: string;
+    if (slopePct == null || Math.abs(slopePct) < 0.5) direction = "FLAT";
+    else if (slopePct > 0) direction = "UP";
+    else direction = "DOWN";
+
+    const lastTsVal = timestamps[timestamps.length - 1];
+    return JSON.stringify({
+      ticker,
+      days,
+      startClose: +startClose.toFixed(2),
+      endClose: +endClose.toFixed(2),
+      slopePct,
+      direction,
+      dataDate: lastTsVal ? new Date(lastTsVal * 1000).toISOString().slice(0, 10) : null,
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+  }
+}
+
+// ── get_volume_ratio ─────────────────────────────────────────────────────────
+
+export async function getVolumeRatio(ticker: string | string[], _period: number): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const results: string[] = [];
+    for (const t of ticker) {
+      results.push(await getVolumeRatio(t, _period));
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+  }
+
+  try {
+    const fi = JSON.parse(await getFastInfo(ticker));
+    const lastVolume = fi.lastVolume as number | null;
+    const avg10d = fi.tenDayAverageVolume as number | null;
+    const avg90d = fi.threeMonthAverageVolume as number | null;
+
+    const ratio10d = lastVolume != null && avg10d != null && avg10d !== 0 ? +(lastVolume / avg10d).toFixed(3) : null;
+    const ratio90d = lastVolume != null && avg90d != null && avg90d !== 0 ? +(lastVolume / avg90d).toFixed(3) : null;
+
+    let volumeFlag: string | null = null;
+    if (ratio10d != null) {
+      if (ratio10d > 1.5) volumeFlag = "HIGH";
+      else if (ratio10d < 0.7) volumeFlag = "LOW";
+      else volumeFlag = "NORMAL";
+    }
+
+    return JSON.stringify({
+      ticker,
+      lastVolume,
+      avgVolume10d: avg10d,
+      avgVolume90d: avg90d,
+      ratio10d,
+      ratio90d,
+      volumeFlag,
+      dataDate: new Date().toISOString().slice(0, 10),
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+  }
+}
+
+// ── get_ma_position ──────────────────────────────────────────────────────────
+
+export async function getMaPosition(ticker: string | string[]): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const results: string[] = [];
+    for (const t of ticker) {
+      results.push(await getMaPosition(t));
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+  }
+
+  try {
+    const fi = JSON.parse(await getFastInfo(ticker));
+    const lastPrice = fi.lastPrice as number | null;
+    const fiftyDma = fi.fiftyDayAverage as number | null;
+    const twoHundredDma = fi.twoHundredDayAverage as number | null;
+
+    const pctVs50 = lastPrice != null && fiftyDma != null && fiftyDma !== 0
+      ? +((lastPrice - fiftyDma) / fiftyDma * 100).toFixed(2) : null;
+    const pctVs200 = lastPrice != null && twoHundredDma != null && twoHundredDma !== 0
+      ? +((lastPrice - twoHundredDma) / twoHundredDma * 100).toFixed(2) : null;
+
+    const regime50 = pctVs50 != null ? (pctVs50 >= 0 ? "ABOVE" : "BELOW") : null;
+    const regime200 = pctVs200 != null ? (pctVs200 >= 0 ? "ABOVE" : "BELOW") : null;
+
+    let trend: string | null = null;
+    if (regime50 != null && regime200 != null) {
+      if (regime50 === "ABOVE" && regime200 === "ABOVE") trend = "BULLISH";
+      else if (regime50 === "BELOW" && regime200 === "BELOW") trend = "BEARISH";
+      else trend = "MIXED";
+    }
+
+    return JSON.stringify({
+      ticker,
+      lastPrice,
+      fiftyDayAverage: fiftyDma,
+      twoHundredDayAverage: twoHundredDma,
+      pctVs50dma: pctVs50,
+      pctVs200dma: pctVs200,
+      regime50,
+      regime200,
+      trend,
+      dataDate: new Date().toISOString().slice(0, 10),
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+  }
+}
+
+// ── get_credit_health ────────────────────────────────────────────────────────
+
+export async function getCreditHealth(ticker: string): Promise<string> {
+  try {
+    const [bsRaw, incRaw] = await Promise.all([
+      fetchTimeseries(ticker, "quarterly", ["TotalDebt", "CashAndCashEquivalents"]),
+      fetchTimeseries(ticker, "quarterly", ["EBITDA", "EBIT", "InterestExpense"]),
+    ]);
+
+    const bs = JSON.parse(bsRaw) as Record<string, unknown>[];
+    const inc = JSON.parse(incRaw) as Record<string, unknown>[];
+
+    if (!Array.isArray(bs) || !bs.length || !Array.isArray(inc) || !inc.length) {
+      return JSON.stringify({ error: true, message: "Insufficient financial data", ticker });
+    }
+
+    const bsLatest = bs[0];
+    const incLatest = inc[0];
+
+    const totalDebt = (bsLatest.totalDebt as number | null) ?? null;
+    const cash = (bsLatest.cashAndCashEquivalents as number | null) ?? null;
+    const ebitdaQ = (incLatest.eBITDA as number | null) ?? (incLatest.ebitda as number | null) ?? null;
+    const ebitQ = (incLatest.eBIT as number | null) ?? (incLatest.ebit as number | null) ?? null;
+    const interestQ = (incLatest.interestExpense as number | null) ?? null;
+
+    const netDebt = totalDebt != null && cash != null ? totalDebt - cash : null;
+    const ebitdaAnnual = ebitdaQ != null ? ebitdaQ * 4 : null;
+    const ebitAnnual = ebitQ != null ? ebitQ * 4 : null;
+    const interestAnnual = interestQ != null ? interestQ * 4 : null;
+
+    const netDebtToEbitda = netDebt != null && ebitdaAnnual != null && ebitdaAnnual !== 0
+      ? +(netDebt / ebitdaAnnual).toFixed(2) : null;
+    const interestCoverage = ebitAnnual != null && interestAnnual != null && interestAnnual !== 0
+      ? +(ebitAnnual / Math.abs(interestAnnual)).toFixed(2) : null;
+
+    let creditStressFlag: boolean | null = null;
+    if (netDebtToEbitda != null && interestCoverage != null) {
+      creditStressFlag = netDebtToEbitda > 2.5 && interestCoverage < 3;
+    }
+
+    let debtTier: string | null = null;
+    if (netDebtToEbitda != null) {
+      if (netDebtToEbitda < 1) debtTier = "CLEAN";
+      else if (netDebtToEbitda <= 2.5) debtTier = "MODERATE";
+      else if (netDebtToEbitda <= 4) debtTier = "ELEVATED";
+      else debtTier = "STRESSED";
+    }
+
+    const dataQuality = [totalDebt, cash, ebitdaQ, ebitQ, interestQ].some((v) => v == null) ? "PARTIAL" : "OK";
+    const quarterDate = (bsLatest.date as string) ?? (incLatest.date as string) ?? null;
+
+    return JSON.stringify({
+      ticker,
+      quarterDate,
+      totalDebtUsd: totalDebt,
+      cashUsd: cash,
+      netDebtUsd: netDebt,
+      ebitdaUsd: ebitdaAnnual,
+      ebitUsd: ebitAnnual,
+      interestExpenseUsd: interestAnnual,
+      netDebtToEbitda,
+      interestCoverage,
+      creditStressFlag,
+      debtTier,
+      dataQuality,
+      dataDate: new Date().toISOString().slice(0, 10),
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+  }
+}
+
+// ── get_short_momentum ───────────────────────────────────────────────────────
+
+export async function getShortMomentum(ticker: string): Promise<string> {
+  try {
+    const si = JSON.parse(await getShortInterest(ticker));
+    if (si.error) return JSON.stringify(si);
+
+    const sharesShort = si.sharesShort as number | null;
+    const sharesShortPrior = si.sharesShortPriorMonth as number | null;
+    const shortPctFloatRaw = si.shortPercentOfFloat as number | null;
+    const shortRatio = si.shortRatio as number | null;
+    const dateShort = si.dateShortInterest;
+
+    const shortPctFloat = shortPctFloatRaw != null ? +(shortPctFloatRaw * 100).toFixed(2) : null;
+
+    let momDeltaPct: number | null = null;
+    if (sharesShort != null && sharesShortPrior != null && sharesShortPrior !== 0) {
+      momDeltaPct = +((sharesShort - sharesShortPrior) / sharesShortPrior * 100).toFixed(2);
+    }
+
+    let momDirection: string | null = null;
+    if (momDeltaPct != null) {
+      if (Math.abs(momDeltaPct) < 2) momDirection = "FLAT";
+      else if (momDeltaPct > 0) momDirection = "RISING";
+      else momDirection = "FALLING";
+    }
+
+    let squeezeRisk: string | null = null;
+    if (shortPctFloat != null) {
+      if (shortPctFloat > 30 && shortRatio != null && shortRatio < 3) squeezeRisk = "HIGH";
+      else if (shortPctFloat > 20) squeezeRisk = "MODERATE";
+      else squeezeRisk = "LOW";
+    }
+
+    let flag: string | null = null;
+    if (shortPctFloat != null && shortPctFloat > 30) flag = "🔴 CRITICAL SHORT";
+    else if (shortPctFloat != null && shortPctFloat > 20) flag = "⚠️ HIGH SHORT";
+
+    return JSON.stringify({
+      ticker,
+      shortPctFloat,
+      daysToCover: shortRatio,
+      sharesShort,
+      sharesShortPriorMonth: sharesShortPrior,
+      momDeltaPct,
+      momDirection,
+      squeezeRisk,
+      flag,
+      dateShortInterest: dateShort,
+      dataDate: new Date().toISOString().slice(0, 10),
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+  }
+}
+
+// ── get_earnings_momentum ────────────────────────────────────────────────────
+
+export async function getEarningsMomentum(ticker: string): Promise<string> {
+  try {
+    const ea = JSON.parse(await getEarningsAnalysis(ticker));
+    if (typeof ea === "string" && ea.startsWith("Error")) {
+      return JSON.stringify({ error: true, message: ea, ticker });
+    }
+
+    const epsTrend = ea.epsTrend as Record<string, unknown>[] | null;
+    const earningsHistory = ea.earningsHistory as Record<string, unknown>[] | null;
+
+    let currentQtrEps: number | null = null;
+    let revision7d: number | null = null;
+    let revision30d: number | null = null;
+    let revision90d: number | null = null;
+
+    if (epsTrend && epsTrend.length > 0) {
+      // Find 0q (current quarter)
+      const q0 = epsTrend.find((p) => p.period === "0q") ?? epsTrend[0];
+      const current = q0.current as number | null;
+      const ago7d = q0["7daysAgo"] as number | null;
+      const ago30d = q0["30daysAgo"] as number | null;
+      const ago90d = q0["90daysAgo"] as number | null;
+      currentQtrEps = current;
+
+      // Math.abs() in denominator is intentional: when EPS goes from negative
+      // to less-negative (e.g. -0.50→-0.30), the revision is positive.
+      // Without abs(), (-0.30-(-0.50))/-0.50 = -40%, incorrectly signaling a downgrade.
+      if (current != null && ago7d != null && ago7d !== 0)
+        revision7d = +((current - ago7d) / Math.abs(ago7d) * 100).toFixed(2);
+      if (current != null && ago30d != null && ago30d !== 0)
+        revision30d = +((current - ago30d) / Math.abs(ago30d) * 100).toFixed(2);
+      if (current != null && ago90d != null && ago90d !== 0)
+        revision90d = +((current - ago90d) / Math.abs(ago90d) * 100).toFixed(2);
+    }
+
+    let revisionDirection: string | null = null;
+    if (revision30d != null) {
+      if (Math.abs(revision30d) < 3) revisionDirection = "STABLE";
+      else if (revision30d > 0) revisionDirection = "UPGRADING";
+      else revisionDirection = "DOWNGRADING";
+    }
+
+    let momentumFlag: string | null = null;
+    if (revision30d != null) {
+      if (revision30d > 10) momentumFlag = "STRONG";
+      else if (revision30d >= 0) momentumFlag = "POSITIVE";
+      else if (revision30d > -10) momentumFlag = "NEGATIVE";
+      else momentumFlag = "COLLAPSING";
+    }
+
+    let beatCount = 0;
+    let totalQuarters = 0;
+    const surprises: number[] = [];
+    let beatStreak = 0;
+
+    if (earningsHistory && earningsHistory.length > 0) {
+      for (const h of earningsHistory) {
+        const actual = h.epsActual as number | null;
+        const estimate = h.epsEstimate as number | null;
+        const surprise = h.surprisePercent as number | null;
+        if (actual != null && estimate != null) {
+          totalQuarters++;
+          if (actual > estimate) beatCount++;
+          if (surprise != null) surprises.push(Math.abs(surprise) < 1 ? surprise * 100 : surprise);
+        }
+      }
+      for (const h of earningsHistory) {
+        const actual = h.epsActual as number | null;
+        const estimate = h.epsEstimate as number | null;
+        if (actual != null && estimate != null) {
+          if (actual > estimate) beatStreak++;
+          else break;
+        }
+      }
+    }
+
+    const beatRate = totalQuarters > 0 ? +(beatCount / totalQuarters).toFixed(2) : null;
+    const avgSurprise = surprises.length > 0
+      ? +(surprises.reduce((a, b) => a + b, 0) / surprises.length).toFixed(2) : null;
+
+    const dataQuality = revision30d == null || beatRate == null ? "PARTIAL" : "OK";
+
+    return JSON.stringify({
+      ticker,
+      currentQtrEpsEstimate: currentQtrEps,
+      revision7d,
+      revision30d,
+      revision90d,
+      revisionDirection,
+      momentumFlag,
+      beatRate,
+      beatCount,
+      totalQuarters,
+      avgSurprisePct: avgSurprise,
+      currentBeatStreak: beatStreak,
+      dataQuality,
+      dataDate: new Date().toISOString().slice(0, 10),
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+  }
+}
+
+// ── get_options_flow_summary ─────────────────────────────────────────────────
+
+export async function getOptionsFlowSummary(ticker: string, expiryHint?: string): Promise<string> {
+  try {
+    // Get expiration dates
+    const datesRaw = JSON.parse(await getOptionExpirationDates(ticker));
+    if (typeof datesRaw === "string" && datesRaw.startsWith("Error")) {
+      return JSON.stringify({ error: true, message: datesRaw, ticker });
+    }
+    const dates = datesRaw as string[];
+    if (!dates || !dates.length) {
+      return JSON.stringify({ error: true, message: "No option expirations", ticker });
+    }
+
+    // Get last price
+    const fi = JSON.parse(await getFastInfo(ticker));
+    const lastPrice = fi.lastPrice as number | null;
+
+    // Select expiry
+    const selectedExpiry = expiryHint && dates.includes(expiryHint) ? expiryHint : dates[0];
+
+    // Fetch calls and puts
+    const [callsRaw, putsRaw] = await Promise.all([
+      getOptionChain(ticker, selectedExpiry, "calls"),
+      getOptionChain(ticker, selectedExpiry, "puts"),
+    ]);
+
+    const calls = JSON.parse(callsRaw) as Record<string, unknown>[];
+    const puts = JSON.parse(putsRaw) as Record<string, unknown>[];
+
+    if (!Array.isArray(calls) || !Array.isArray(puts)) {
+      return JSON.stringify({ error: true, message: "Failed to parse option chain", ticker });
+    }
+
+    const totalCallOI = calls.reduce((s, c) => s + ((c.openInterest as number) ?? 0), 0);
+    const totalPutOI = puts.reduce((s, p) => s + ((p.openInterest as number) ?? 0), 0);
+    const pcRatio = totalCallOI > 0 ? +(totalPutOI / totalCallOI).toFixed(3) : null;
+
+    let pcSentiment: string | null = null;
+    if (pcRatio != null) {
+      if (pcRatio > 1.5) pcSentiment = "PUT_HEAVY";
+      else if (pcRatio < 0.7) pcSentiment = "CALL_HEAVY";
+      else pcSentiment = "NEUTRAL";
+    }
+
+    // ATM strike
+    let atmStrike: number | null = null;
+    let atmIV: number | null = null;
+    if (lastPrice != null && calls.length > 0) {
+      let minDist = Infinity;
+      for (const c of calls) {
+        const strike = c.strike as number;
+        const iv = c.impliedVolatility as number | null;
+        if (strike != null && iv != null) {
+          const dist = Math.abs(strike - lastPrice);
+          if (dist < minDist) {
+            minDist = dist;
+            atmStrike = strike;
+            atmIV = +(iv).toFixed(3);
+          }
+        }
+      }
+    }
+
+    // IV percentile
+    const allIVs: number[] = [];
+    for (const c of calls) { const iv = c.impliedVolatility as number | null; if (iv != null) allIVs.push(iv); }
+    for (const p of puts) { const iv = p.impliedVolatility as number | null; if (iv != null) allIVs.push(iv); }
+
+    let ivPctile: number | null = null;
+    if (atmIV != null && allIVs.length > 0) {
+      const below = allIVs.filter((iv) => iv <= atmIV!).length;
+      ivPctile = Math.round((below / allIVs.length) * 100);
+    }
+    const ivFlag = ivPctile != null && ivPctile > 70 ? "⚠️ HIGH IV" : null;
+
+    // Max pain
+    let maxPainStrike: number | null = null;
+    const allStrikes = [...new Set([
+      ...calls.map((c) => c.strike as number).filter(Boolean),
+      ...puts.map((p) => p.strike as number).filter(Boolean),
+    ])].sort((a, b) => a - b);
+
+    if (allStrikes.length > 0) {
+      let minPain = Infinity;
+      for (const strike of allStrikes) {
+        let pain = 0;
+        for (const c of calls) {
+          pain += Math.max(0, strike - (c.strike as number)) * ((c.openInterest as number) ?? 0);
+        }
+        for (const p of puts) {
+          pain += Math.max(0, (p.strike as number) - strike) * ((p.openInterest as number) ?? 0);
+        }
+        if (pain < minPain) { minPain = pain; maxPainStrike = strike; }
+      }
+    }
+
+    // Highest OI strikes
+    let highestOICallStrike: number | null = null;
+    let highestOIPutStrike: number | null = null;
+    let maxCallOI = 0;
+    for (const c of calls) {
+      const oi = (c.openInterest as number) ?? 0;
+      if (oi > maxCallOI) { maxCallOI = oi; highestOICallStrike = c.strike as number; }
+    }
+    let maxPutOI = 0;
+    for (const p of puts) {
+      const oi = (p.openInterest as number) ?? 0;
+      if (oi > maxPutOI) { maxPutOI = oi; highestOIPutStrike = p.strike as number; }
+    }
+
+    return JSON.stringify({
+      ticker,
+      expiryDate: selectedExpiry,
+      totalCallOI,
+      totalPutOI,
+      pcRatio,
+      pcSentiment,
+      atmStrike,
+      atmIV,
+      ivPctile,
+      ivFlag,
+      maxPainStrike,
+      highestOICallStrike,
+      highestOIPutStrike,
+      dataDate: new Date().toISOString().slice(0, 10),
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+  }
+}
+
+// ── get_put_hedge_candidates ─────────────────────────────────────────────────
+
+export async function getPutHedgeCandidates(
+  ticker: string,
+  otmPctMin: number,
+  otmPctMax: number,
+  budgetUsd: number,
+  expiryAfter: string
+): Promise<string> {
+  try {
+    // Get last price
+    const fi = JSON.parse(await getFastInfo(ticker));
+    const currentPrice = fi.lastPrice as number | null;
+    if (currentPrice == null) {
+      return JSON.stringify({ error: true, message: `No price for ${ticker}`, ticker });
+    }
+
+    // Get expiration dates
+    const datesRaw = JSON.parse(await getOptionExpirationDates(ticker));
+    if (!Array.isArray(datesRaw) || !datesRaw.length) {
+      return JSON.stringify({ error: true, message: "No option expirations", ticker });
+    }
+    const dates = datesRaw as string[];
+
+    // Filter and select nearest 2
+    const qualifying = expiryAfter ? dates.filter((d) => d >= expiryAfter).slice(0, 2) : dates.slice(0, 2);
+    if (!qualifying.length) {
+      return JSON.stringify({ error: true, message: "No qualifying expiry dates", ticker });
+    }
+
+    const strikeMin = currentPrice * (1 - otmPctMax / 100);
+    const strikeMax = currentPrice * (1 - otmPctMin / 100);
+
+    interface Candidate {
+      expiry: string;
+      strike: number;
+      bid: number;
+      ask: number;
+      mid: number;
+      contractCost: number;
+      withinBudget: boolean;
+      openInterest: number;
+      ivPctile: number | null;
+      ivFlag: string | null;
+      otmPct: number;
+    }
+    const candidates: Candidate[] = [];
+
+    for (const exp of qualifying) {
+      try {
+        const putsRaw = JSON.parse(await getOptionChain(ticker, exp, "puts"));
+        if (!Array.isArray(putsRaw)) continue;
+
+        const allIVs = putsRaw
+          .map((p: Record<string, unknown>) => p.impliedVolatility as number | null)
+          .filter((v): v is number => v != null);
+
+        for (const p of putsRaw as Record<string, unknown>[]) {
+          const strike = p.strike as number;
+          if (strike == null || strike < strikeMin || strike > strikeMax) continue;
+
+          const bid = (p.bid as number) ?? 0;
+          const ask = (p.ask as number) ?? 0;
+          const mid = +((bid + ask) / 2).toFixed(2);
+          const contractCost = +(mid * 100).toFixed(2);
+          const oi = (p.openInterest as number) ?? 0;
+          const iv = (p.impliedVolatility as number) ?? 0;
+
+          let ivPctile: number | null = null;
+          if (allIVs.length > 0 && iv > 0) {
+            ivPctile = Math.round((allIVs.filter((v) => v <= iv).length / allIVs.length) * 100);
+          }
+
+          candidates.push({
+            expiry: exp,
+            strike,
+            bid,
+            ask,
+            mid,
+            contractCost,
+            withinBudget: contractCost <= budgetUsd,
+            openInterest: oi,
+            ivPctile,
+            ivFlag: ivPctile != null && ivPctile > 70 ? "⚠️ HIGH IV" : null,
+            otmPct: +((currentPrice - strike) / currentPrice * 100).toFixed(2),
+          });
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    candidates.sort((a, b) => a.expiry.localeCompare(b.expiry) || a.strike - b.strike);
+    const budgetFeasible = candidates.some((c) => c.withinBudget);
+
+    let note: string;
+    let budgetGapUsd: number | null = null;
+    if (!candidates.length) {
+      note = "No put options found in the specified OTM range.";
+    } else if (!budgetFeasible) {
+      const nearest = candidates.reduce((a, b) => (a.contractCost < b.contractCost ? a : b));
+      budgetGapUsd = +(nearest.contractCost - budgetUsd).toFixed(2);
+      note = `No candidates within budget. Nearest: $${nearest.strike} put at $${nearest.contractCost}/contract vs $${budgetUsd} budget.`;
+    } else {
+      const count = candidates.filter((c) => c.withinBudget).length;
+      note = `${count} candidate(s) within $${budgetUsd} budget.`;
+    }
+
+    return JSON.stringify({
+      ticker,
+      currentPrice: +currentPrice.toFixed(2),
+      strikeRangeMin: +strikeMin.toFixed(2),
+      strikeRangeMax: +strikeMax.toFixed(2),
+      budgetUsd,
+      candidates,
+      budgetFeasible,
+      budgetGapUsd,
+      note,
+      dataDate: new Date().toISOString().slice(0, 10),
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+  }
+}
+
+// ── get_analyst_upgrade_radar ────────────────────────────────────────────────
+
+export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack: number): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const results: string[] = [];
+    for (const t of ticker) {
+      results.push(await getAnalystUpgradeRadar(t, daysBack));
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+  }
+
+  try {
+    // Fetch upgrades/downgrades with enough history
+    const monthsBack = Math.max(Math.ceil(daysBack / 30), 2);
+    const udRaw = await getRecommendations(ticker, "upgrades_downgrades", monthsBack);
+    const ud = JSON.parse(udRaw) as Record<string, unknown>[];
+
+    if (!Array.isArray(ud) || !ud.length) {
+      return JSON.stringify({
+        ticker,
+        windowDays: daysBack,
+        netSentiment: 0,
+        changes: [],
+        summary: "NO CHANGES",
+        dataDate: new Date().toISOString().slice(0, 10),
+      });
+    }
+
+    const cutoffMs = Date.now() - daysBack * 86400 * 1000;
+    const upgradeGrades = new Set(["Buy", "Outperform", "Overweight", "Strong Buy", "Positive", "Market Outperform", "Top Pick"]);
+    const downgradeGrades = new Set(["Sell", "Underperform", "Underweight", "Strong Sell", "Negative", "Market Underperform", "Reduce"]);
+
+    const changes: Record<string, unknown>[] = [];
+    let upgradeCount = 0;
+    let downgradeCount = 0;
+
+    for (const entry of ud) {
+      const gradeDate = entry.GradeDate as string | undefined;
+      const epochDate = entry.epochGradeDate as number | undefined;
+
+      // Filter by date
+      if (epochDate != null && epochDate * 1000 < cutoffMs) continue;
+      if (gradeDate != null && new Date(gradeDate).getTime() < cutoffMs) continue;
+
+      const toGrade = (entry.toGrade ?? entry.ToGrade ?? "") as string;
+      const fromGrade = (entry.fromGrade ?? entry.FromGrade ?? "") as string;
+      const firm = (entry.firm ?? entry.Firm ?? "") as string;
+      const action = (entry.action ?? entry.Action ?? "") as string;
+
+      let signal: string;
+      if (["up", "upgrade", "Up", "Upgrade"].includes(action) || upgradeGrades.has(toGrade)) {
+        signal = "UPGRADE";
+        upgradeCount++;
+      } else if (["down", "downgrade", "Down", "Downgrade"].includes(action) || downgradeGrades.has(toGrade)) {
+        signal = "DOWNGRADE";
+        downgradeCount++;
+      } else {
+        signal = "MAINTAIN";
+      }
+
+      // Price target direction — yfinance doesn't expose price targets in
+      // upgrades_downgrades, so we can only detect "INITIATED".  mixedSignal
+      // is included for forward-compatibility but will be false for now.
+      const ptDirection: string | null = ["initiated", "Initiated", "init"].includes(action) ? "INITIATED" : null;
+      const mixedSignal = signal === "UPGRADE" && ptDirection === "LOWERED";
+
+      let strengthFlag: string;
+      if (signal === "UPGRADE" && !mixedSignal) strengthFlag = "BULLISH";
+      else if (signal === "DOWNGRADE") strengthFlag = "BEARISH";
+      else if (mixedSignal) strengthFlag = "MIXED";
+      else strengthFlag = "NEUTRAL";
+
+      changes.push({
+        date: gradeDate ?? (epochDate ? new Date(epochDate * 1000).toISOString().slice(0, 10) : null),
+        firm,
+        fromGrade,
+        toGrade,
+        signal,
+        ptDirection,
+        mixedSignal,
+        strengthFlag,
+      });
+    }
+
+    const netSentiment = upgradeCount - downgradeCount;
+    const parts: string[] = [];
+    if (upgradeCount) parts.push(`${upgradeCount} UPGRADE(s)`);
+    if (downgradeCount) parts.push(`${downgradeCount} DOWNGRADE(s)`);
+    const summary = parts.length > 0 ? parts.join(", ") : "NO CHANGES";
+
+    return JSON.stringify({
+      ticker,
+      windowDays: daysBack,
+      netSentiment,
+      changes,
+      summary,
+      dataDate: new Date().toISOString().slice(0, 10),
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+  }
+}
