@@ -1,19 +1,28 @@
 import {
   getAnalystConsensus,
+  getAnalystUpgradeRadar,
   getCalendar,
+  getCreditHealth,
   getEarningsAnalysis,
+  getEarningsMomentum,
   getFastInfo,
   getFinancialRatios,
   getFinancialStatement,
   getHistoricalPrices,
   getHolderInfo,
+  getMaPosition,
   getNews,
   getOptionChain,
   getOptionExpirationDates,
+  getOptionsFlowSummary,
+  getPriceSlope,
   getPriceStats,
+  getPutHedgeCandidates,
   getRecommendations,
   getShortInterest,
+  getShortMomentum,
   getTechnicalIndicators,
+  getVolumeRatio,
   screenStocks,
   searchTicker,
   getSecFilings,
@@ -375,6 +384,161 @@ export const TOOLS: Tool[] = [
       required: ["ticker"],
     },
   },
+  {
+    name: "get_price_slope",
+    description:
+      "Get N-day price slope (% change) and direction for one or more tickers. Returns startClose, endClose, slopePct, direction (UP/DOWN/FLAT). Batch supported.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: {
+          description: "Stock ticker symbol or array of symbols for batch.",
+          oneOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } },
+          ],
+        },
+        days: {
+          type: "number",
+          description: "Lookback window in trading days (default: 5).",
+          default: 5,
+        },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_volume_ratio",
+    description:
+      "Get last-session volume vs N-day average volume ratio. Returns ratio10d, ratio90d, volumeFlag (HIGH/NORMAL/LOW). Batch supported.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: {
+          description: "Stock ticker symbol or array of symbols for batch.",
+          oneOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } },
+          ],
+        },
+        period: {
+          type: "number",
+          description: "Averaging period in days (default: 10).",
+          default: 10,
+        },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_ma_position",
+    description:
+      "Get price position vs 50DMA and 200DMA with trend classification (BULLISH/BEARISH/MIXED). Batch supported.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: {
+          description: "Stock ticker symbol or array of symbols for batch.",
+          oneOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } },
+          ],
+        },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_credit_health",
+    description:
+      "Get pre-computed credit/leverage metrics: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag. Single ticker only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_short_momentum",
+    description:
+      "Get short interest with MoM delta, direction (RISING/FALLING/FLAT), squeeze risk (HIGH/MODERATE/LOW), and flag. Single ticker only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_earnings_momentum",
+    description:
+      "Get earnings revision momentum, beat rate, and estimate direction signals. Returns revision7d/30d/90d, momentumFlag, beatRate, currentBeatStreak. Single ticker only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_options_flow_summary",
+    description:
+      "Get options flow summary: P/C ratio, IV percentile, max pain strike, highest OI strikes for nearest liquid expiry. Single ticker only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+        expiry_hint: {
+          type: "string",
+          description: "Optional YYYY-MM-DD expiry date. If omitted, selects nearest liquid expiry.",
+        },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_put_hedge_candidates",
+    description:
+      "Get pre-filtered OTM put options within a strike range and budget with feasibility pre-computed. Single ticker only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+        otm_pct_min: { type: "number", description: "Minimum OTM % (default: 8).", default: 8 },
+        otm_pct_max: { type: "number", description: "Maximum OTM % (default: 12).", default: 12 },
+        budget_usd: { type: "number", description: "Max premium per contract in USD (default: 500).", default: 500 },
+        expiry_after: { type: "string", description: "YYYY-MM-DD minimum expiry date.", default: "" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_analyst_upgrade_radar",
+    description:
+      "Get recent analyst rating changes with signal classification (UPGRADE/DOWNGRADE/MAINTAIN), netSentiment, and summary. Batch supported.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: {
+          description: "Stock ticker symbol or array of symbols for batch.",
+          oneOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } },
+          ],
+        },
+        days_back: {
+          type: "number",
+          description: "Lookback window in calendar days (default: 30).",
+          default: 30,
+        },
+      },
+      required: ["ticker"],
+    },
+  },
 ];
 
 const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
@@ -428,6 +592,30 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       return getShortInterest(str(args.ticker));
     case "get_technical_indicators":
       return getTechnicalIndicators(str(args.ticker), str(args.period, "3mo"));
+    case "get_price_slope":
+      return getPriceSlope(tickerArg(args.ticker), num(args.days, 5));
+    case "get_volume_ratio":
+      return getVolumeRatio(tickerArg(args.ticker), num(args.period, 10));
+    case "get_ma_position":
+      return getMaPosition(tickerArg(args.ticker));
+    case "get_credit_health":
+      return getCreditHealth(str(args.ticker));
+    case "get_short_momentum":
+      return getShortMomentum(str(args.ticker));
+    case "get_earnings_momentum":
+      return getEarningsMomentum(str(args.ticker));
+    case "get_options_flow_summary":
+      return getOptionsFlowSummary(str(args.ticker), args.expiry_hint != null ? str(args.expiry_hint) : undefined);
+    case "get_put_hedge_candidates":
+      return getPutHedgeCandidates(
+        str(args.ticker),
+        num(args.otm_pct_min, 8),
+        num(args.otm_pct_max, 12),
+        num(args.budget_usd, 500),
+        str(args.expiry_after)
+      );
+    case "get_analyst_upgrade_radar":
+      return getAnalystUpgradeRadar(tickerArg(args.ticker), num(args.days_back, 30));
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

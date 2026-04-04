@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import json
 import time
 from enum import Enum
@@ -1373,6 +1374,942 @@ async def get_technical_indicators(ticker: str, period: str = "3mo") -> str:
     result = json.dumps(output)
     _cache_set(cache_key, result)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_price_slope
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_price_slope",
+    description="""Get N-day price slope (% change) and direction for one or more tickers. Pre-computed server-side.
+
+Returns: startClose, endClose, slopePct, direction (UP/DOWN/FLAT).
+
+Args:
+    ticker: str | list[str] — single or batch
+    days: int — lookback in trading days (default: 5)
+""",
+)
+async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
+    """Return N-day price slope for one or more tickers."""
+    if isinstance(ticker, list):
+        results = []
+        for t in ticker:
+            results.append(await get_price_slope(t, days))
+            await asyncio.sleep(0.1)
+        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+
+    company = yf.Ticker(ticker)
+    try:
+        # Fetch extra buffer for weekends/holidays
+        hist = company.history(period=f"{days + 10}d", interval="1d")
+    except Exception as e:
+        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
+
+    if hist is None or hist.empty or len(hist) < 2:
+        return json.dumps({"error": True, "message": f"Insufficient price data for {ticker}", "ticker": ticker})
+
+    closes = hist["Close"].dropna()
+    if len(closes) < 2:
+        return json.dumps({"error": True, "message": f"Insufficient close data for {ticker}", "ticker": ticker})
+
+    # Take last N trading days
+    closes = closes.tail(days)
+    start_close = float(closes.iloc[0])
+    end_close = float(closes.iloc[-1])
+    slope_pct = round((end_close - start_close) / start_close * 100, 2) if start_close != 0 else None
+
+    if slope_pct is None:
+        direction = "FLAT"
+    elif abs(slope_pct) < 0.5:
+        direction = "FLAT"
+    elif slope_pct > 0:
+        direction = "UP"
+    else:
+        direction = "DOWN"
+
+    last_idx = closes.index[-1]
+    data_date = str(last_idx.date()) if hasattr(last_idx, "date") else str(last_idx)
+
+    return json.dumps({
+        "ticker": ticker,
+        "days": days,
+        "startClose": round(start_close, 2),
+        "endClose": round(end_close, 2),
+        "slopePct": slope_pct,
+        "direction": direction,
+        "dataDate": data_date,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_volume_ratio
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_volume_ratio",
+    description="""Get last-session volume vs N-day average volume ratio. Pre-computed server-side.
+
+Returns: lastVolume, avgVolume10d, avgVolume90d, ratio10d, ratio90d, volumeFlag (HIGH/NORMAL/LOW).
+
+Args:
+    ticker: str | list[str] — single or batch
+    period: int — averaging period in days (default: 10, used for flag threshold)
+""",
+)
+async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
+    """Return volume ratio for one or more tickers."""
+    if isinstance(ticker, list):
+        results = []
+        for t in ticker:
+            results.append(await get_volume_ratio(t, period))
+            await asyncio.sleep(0.1)
+        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+
+    company = yf.Ticker(ticker)
+    try:
+        fi = company.fast_info
+        last_vol = getattr(fi, "lastVolume", None)
+        avg_10d = getattr(fi, "tenDayAverageVolume", None)
+        avg_90d = getattr(fi, "threeMonthAverageVolume", None)
+    except Exception as e:
+        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
+
+    ratio_10d = round(last_vol / avg_10d, 3) if last_vol and avg_10d else None
+    ratio_90d = round(last_vol / avg_90d, 3) if last_vol and avg_90d else None
+
+    ref_ratio = ratio_10d
+    if ref_ratio is not None:
+        if ref_ratio > 1.5:
+            volume_flag = "HIGH"
+        elif ref_ratio < 0.7:
+            volume_flag = "LOW"
+        else:
+            volume_flag = "NORMAL"
+    else:
+        volume_flag = None
+
+    return json.dumps({
+        "ticker": ticker,
+        "lastVolume": last_vol,
+        "avgVolume10d": avg_10d,
+        "avgVolume90d": avg_90d,
+        "ratio10d": ratio_10d,
+        "ratio90d": ratio_90d,
+        "volumeFlag": volume_flag,
+        "dataDate": str(datetime.date.today()),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_ma_position
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_ma_position",
+    description="""Get price position vs 50DMA and 200DMA with trend classification. Pre-computed server-side.
+
+Returns: lastPrice, fiftyDayAverage, twoHundredDayAverage, pctVs50dma, pctVs200dma, regime50, regime200, trend (BULLISH/BEARISH/MIXED).
+
+Args:
+    ticker: str | list[str] — single or batch
+""",
+)
+async def get_ma_position(ticker: str | list[str]) -> str:
+    """Return MA position for one or more tickers."""
+    if isinstance(ticker, list):
+        results = []
+        for t in ticker:
+            results.append(await get_ma_position(t))
+            await asyncio.sleep(0.1)
+        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+
+    company = yf.Ticker(ticker)
+    try:
+        fi = company.fast_info
+        last_price = getattr(fi, "lastPrice", None)
+        fifty_dma = getattr(fi, "fiftyDayAverage", None)
+        two_hundred_dma = getattr(fi, "twoHundredDayAverage", None)
+    except Exception as e:
+        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
+
+    pct_vs_50 = round((last_price - fifty_dma) / fifty_dma * 100, 2) if last_price and fifty_dma else None
+    pct_vs_200 = round((last_price - two_hundred_dma) / two_hundred_dma * 100, 2) if last_price and two_hundred_dma else None
+
+    regime_50 = "ABOVE" if pct_vs_50 is not None and pct_vs_50 >= 0 else ("BELOW" if pct_vs_50 is not None else None)
+    regime_200 = "ABOVE" if pct_vs_200 is not None and pct_vs_200 >= 0 else ("BELOW" if pct_vs_200 is not None else None)
+
+    if regime_50 == "ABOVE" and regime_200 == "ABOVE":
+        trend = "BULLISH"
+    elif regime_50 == "BELOW" and regime_200 == "BELOW":
+        trend = "BEARISH"
+    elif regime_50 is not None and regime_200 is not None:
+        trend = "MIXED"
+    else:
+        trend = None
+
+    return json.dumps({
+        "ticker": ticker,
+        "lastPrice": round(last_price, 2) if last_price else None,
+        "fiftyDayAverage": round(fifty_dma, 2) if fifty_dma else None,
+        "twoHundredDayAverage": round(two_hundred_dma, 2) if two_hundred_dma else None,
+        "pctVs50dma": pct_vs_50,
+        "pctVs200dma": pct_vs_200,
+        "regime50": regime_50,
+        "regime200": regime_200,
+        "trend": trend,
+        "dataDate": str(datetime.date.today()),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_credit_health
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_credit_health",
+    description="""Get pre-computed credit/leverage metrics: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag. Single ticker only.
+
+Args:
+    ticker: str — single ticker
+""",
+)
+async def get_credit_health(ticker: str) -> str:
+    """Return credit health metrics for a single ticker."""
+    company = yf.Ticker(ticker)
+
+    data_quality = "OK"
+
+    # Fetch quarterly balance sheet
+    try:
+        bs = company.quarterly_balance_sheet
+    except Exception as e:
+        return json.dumps({"error": True, "message": f"Balance sheet fetch failed: {e}", "ticker": ticker})
+
+    # Fetch quarterly income statement
+    try:
+        inc = company.quarterly_income_stmt
+    except Exception as e:
+        return json.dumps({"error": True, "message": f"Income statement fetch failed: {e}", "ticker": ticker})
+
+    if bs is None or bs.empty:
+        return json.dumps({"error": True, "message": "No balance sheet data available", "ticker": ticker})
+    if inc is None or inc.empty:
+        return json.dumps({"error": True, "message": "No income statement data available", "ticker": ticker})
+
+    # Most recent quarter column
+    bs_col = bs.columns[0]
+    inc_col = inc.columns[0]
+
+    def _safe_get(df, col, *row_names):
+        for name in row_names:
+            try:
+                val = df.loc[name, col]
+                if pd.notna(val):
+                    return float(val)
+            except (KeyError, TypeError):
+                continue
+        return None
+
+    total_debt = _safe_get(bs, bs_col, "Total Debt", "TotalDebt", "Long Term Debt")
+    cash = _safe_get(bs, bs_col, "Cash And Cash Equivalents", "CashAndCashEquivalents", "Cash")
+    ebitda = _safe_get(inc, inc_col, "EBITDA", "Normalized EBITDA", "NormalizedEBITDA")
+    ebit = _safe_get(inc, inc_col, "EBIT", "Operating Income", "OperatingIncome")
+    interest_expense = _safe_get(inc, inc_col, "Interest Expense", "InterestExpense", "Interest Expense Non Operating")
+
+    net_debt = (total_debt - cash) if total_debt is not None and cash is not None else None
+
+    # Annualize quarterly EBITDA/EBIT (multiply by 4)
+    ebitda_annual = ebitda * 4 if ebitda is not None else None
+    ebit_annual = ebit * 4 if ebit is not None else None
+    interest_annual = interest_expense * 4 if interest_expense is not None else None
+
+    net_debt_to_ebitda = round(net_debt / ebitda_annual, 2) if net_debt is not None and ebitda_annual else None
+    interest_coverage = round(ebit_annual / abs(interest_annual), 2) if ebit_annual is not None and interest_annual and interest_annual != 0 else None
+
+    credit_stress = None
+    if net_debt_to_ebitda is not None and interest_coverage is not None:
+        credit_stress = net_debt_to_ebitda > 2.5 and interest_coverage < 3
+
+    if net_debt_to_ebitda is not None:
+        if net_debt_to_ebitda < 1:
+            debt_tier = "CLEAN"
+        elif net_debt_to_ebitda <= 2.5:
+            debt_tier = "MODERATE"
+        elif net_debt_to_ebitda <= 4:
+            debt_tier = "ELEVATED"
+        else:
+            debt_tier = "STRESSED"
+    else:
+        debt_tier = None
+
+    # Check for partial data
+    if any(v is None for v in [total_debt, cash, ebitda, ebit, interest_expense]):
+        data_quality = "PARTIAL"
+
+    quarter_date = str(bs_col.date()) if hasattr(bs_col, "date") else str(bs_col)
+
+    return json.dumps({
+        "ticker": ticker,
+        "quarterDate": quarter_date,
+        "totalDebtUsd": total_debt,
+        "cashUsd": cash,
+        "netDebtUsd": net_debt,
+        "ebitdaUsd": ebitda_annual,
+        "ebitUsd": ebit_annual,
+        "interestExpenseUsd": interest_annual,
+        "netDebtToEbitda": net_debt_to_ebitda,
+        "interestCoverage": interest_coverage,
+        "creditStressFlag": credit_stress,
+        "debtTier": debt_tier,
+        "dataQuality": data_quality,
+        "dataDate": str(datetime.date.today()),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_short_momentum
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_short_momentum",
+    description="""Get short interest with pre-computed momentum: MoM delta, direction, squeeze risk, and flag. Single ticker only.
+
+Args:
+    ticker: str — single ticker
+""",
+)
+async def get_short_momentum(ticker: str) -> str:
+    """Return short interest momentum for a single ticker."""
+    company = yf.Ticker(ticker)
+    try:
+        info = company.info
+    except Exception as e:
+        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
+
+    shares_short = info.get("sharesShort")
+    shares_short_prior = info.get("sharesShortPriorMonth")
+    short_pct_float_raw = info.get("shortPercentOfFloat")
+    short_ratio = info.get("shortRatio")
+    date_short = info.get("dateShortInterest")
+
+    # Convert 0-1 to 0-100 scale
+    short_pct_float = round(short_pct_float_raw * 100, 2) if short_pct_float_raw is not None else None
+
+    # MoM delta
+    if shares_short is not None and shares_short_prior is not None and shares_short_prior != 0:
+        mom_delta_pct = round((shares_short - shares_short_prior) / shares_short_prior * 100, 2)
+    else:
+        mom_delta_pct = None
+
+    # MoM direction
+    if mom_delta_pct is not None:
+        if abs(mom_delta_pct) < 2:
+            mom_direction = "FLAT"
+        elif mom_delta_pct > 0:
+            mom_direction = "RISING"
+        else:
+            mom_direction = "FALLING"
+    else:
+        mom_direction = None
+
+    # Squeeze risk
+    if short_pct_float is not None:
+        if short_pct_float > 30 and short_ratio is not None and short_ratio < 3:
+            squeeze_risk = "HIGH"
+        elif short_pct_float > 20:
+            squeeze_risk = "MODERATE"
+        else:
+            squeeze_risk = "LOW"
+    else:
+        squeeze_risk = None
+
+    # Flag
+    if short_pct_float is not None and short_pct_float > 30:
+        flag = "🔴 CRITICAL SHORT"
+    elif short_pct_float is not None and short_pct_float > 20:
+        flag = "⚠️ HIGH SHORT"
+    else:
+        flag = None
+
+    def _ser(v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return v
+
+    return json.dumps({
+        "ticker": ticker,
+        "shortPctFloat": short_pct_float,
+        "daysToCover": short_ratio,
+        "sharesShort": shares_short,
+        "sharesShortPriorMonth": shares_short_prior,
+        "momDeltaPct": mom_delta_pct,
+        "momDirection": mom_direction,
+        "squeezeRisk": squeeze_risk,
+        "flag": flag,
+        "dateShortInterest": _ser(date_short),
+        "dataDate": str(datetime.date.today()),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_earnings_momentum
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_earnings_momentum",
+    description="""Get earnings revision momentum, beat rate, and estimate direction signals. Single ticker only.
+
+Returns: revision7d/30d/90d, revisionDirection, momentumFlag, beatRate, beatCount, avgSurprisePct, currentBeatStreak.
+
+Args:
+    ticker: str — single ticker
+""",
+)
+async def get_earnings_momentum(ticker: str) -> str:
+    """Return earnings momentum for a single ticker."""
+    company = yf.Ticker(ticker)
+    try:
+        fi = company.fast_info
+        if fi.currency is None:
+            return json.dumps({"error": True, "message": f"Ticker {ticker} not found", "ticker": ticker})
+    except Exception as e:
+        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
+
+    def _df_to_records(df):
+        if df is None or (hasattr(df, "empty") and df.empty):
+            return None
+        df = df.reset_index()
+        df.columns = [str(c) for c in df.columns]
+        df = df.where(pd.notnull(df), None)
+        return df.to_dict(orient="records")
+
+    # Fetch EPS trend and earnings history
+    eps_trend_records = None
+    earnings_history_records = None
+    try:
+        eps_trend_records = _df_to_records(company.eps_trend)
+    except Exception:
+        pass
+    try:
+        earnings_history_records = _df_to_records(company.earnings_history)
+    except Exception:
+        pass
+
+    output: dict = {"ticker": ticker}
+    data_quality = "OK"
+
+    # From epsTrend for current quarter (0q)
+    revision_7d = None
+    revision_30d = None
+    revision_90d = None
+    current_qtr_eps = None
+    if eps_trend_records:
+        # Find 0q row
+        q0 = None
+        for row in eps_trend_records:
+            period = row.get("index") or row.get("period") or row.get("0")
+            if period == "0q":
+                q0 = row
+                break
+        if q0 is None and len(eps_trend_records) > 0:
+            q0 = eps_trend_records[0]
+
+        if q0:
+            current = q0.get("current")
+            ago_7d = q0.get("7daysAgo")
+            ago_30d = q0.get("30daysAgo")
+            ago_90d = q0.get("90daysAgo")
+            current_qtr_eps = current
+
+            if current is not None and ago_7d is not None and ago_7d != 0:
+                revision_7d = round((current - ago_7d) / abs(ago_7d) * 100, 2)
+            if current is not None and ago_30d is not None and ago_30d != 0:
+                revision_30d = round((current - ago_30d) / abs(ago_30d) * 100, 2)
+            if current is not None and ago_90d is not None and ago_90d != 0:
+                revision_90d = round((current - ago_90d) / abs(ago_90d) * 100, 2)
+
+    # Revision direction
+    if revision_30d is not None:
+        if abs(revision_30d) < 3:
+            revision_direction = "STABLE"
+        elif revision_30d > 0:
+            revision_direction = "UPGRADING"
+        else:
+            revision_direction = "DOWNGRADING"
+    else:
+        revision_direction = None
+
+    # Momentum flag
+    if revision_30d is not None:
+        if revision_30d > 10:
+            momentum_flag = "STRONG"
+        elif revision_30d >= 0:
+            momentum_flag = "POSITIVE"
+        elif revision_30d > -10:
+            momentum_flag = "NEGATIVE"
+        else:
+            momentum_flag = "COLLAPSING"
+    else:
+        momentum_flag = None
+
+    # From earningsHistory (last 4 quarters)
+    beat_count = 0
+    total_quarters = 0
+    surprises = []
+    beat_streak = 0
+
+    if earnings_history_records:
+        for row in earnings_history_records:
+            actual = row.get("epsActual")
+            estimate = row.get("epsEstimate")
+            surprise_pct = row.get("surprisePercent")
+            if actual is not None and estimate is not None:
+                total_quarters += 1
+                if actual > estimate:
+                    beat_count += 1
+                if surprise_pct is not None:
+                    surprises.append(float(surprise_pct) * 100 if abs(float(surprise_pct)) < 1 else float(surprise_pct))
+
+        # Beat streak (consecutive from most recent)
+        for row in earnings_history_records:
+            actual = row.get("epsActual")
+            estimate = row.get("epsEstimate")
+            if actual is not None and estimate is not None:
+                if actual > estimate:
+                    beat_streak += 1
+                else:
+                    break
+
+    beat_rate = round(beat_count / total_quarters, 2) if total_quarters > 0 else None
+    avg_surprise = round(sum(surprises) / len(surprises), 2) if surprises else None
+
+    if any(v is None for v in [revision_30d, beat_rate]):
+        data_quality = "PARTIAL"
+
+    output.update({
+        "currentQtrEpsEstimate": current_qtr_eps,
+        "revision7d": revision_7d,
+        "revision30d": revision_30d,
+        "revision90d": revision_90d,
+        "revisionDirection": revision_direction,
+        "momentumFlag": momentum_flag,
+        "beatRate": beat_rate,
+        "beatCount": beat_count,
+        "totalQuarters": total_quarters,
+        "avgSurprisePct": avg_surprise,
+        "currentBeatStreak": beat_streak,
+        "dataQuality": data_quality,
+        "dataDate": str(datetime.date.today()),
+    })
+    return json.dumps(output)
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_options_flow_summary
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_options_flow_summary",
+    description="""Get options flow summary: P/C ratio, IV percentile, max pain strike, highest OI strikes. Single ticker only.
+
+Args:
+    ticker: str — single ticker
+    expiry_hint: str | None — optional YYYY-MM-DD; if omitted, selects nearest liquid expiry
+""",
+)
+async def get_options_flow_summary(ticker: str, expiry_hint: str | None = None) -> str:
+    """Return options flow summary for a single ticker."""
+    company = yf.Ticker(ticker)
+    try:
+        if company.fast_info.currency is None:
+            return json.dumps({"error": True, "message": f"Ticker {ticker} not found", "ticker": ticker})
+    except Exception as e:
+        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
+
+    try:
+        expirations = company.options
+    except Exception as e:
+        return json.dumps({"error": True, "message": f"No options data: {e}", "ticker": ticker})
+
+    if not expirations:
+        return json.dumps({"error": True, "message": "No options expirations available", "ticker": ticker})
+
+    last_price = getattr(company.fast_info, "lastPrice", None)
+
+    # Select expiry
+    selected_expiry = None
+    if expiry_hint and expiry_hint in expirations:
+        selected_expiry = expiry_hint
+    else:
+        # Select nearest expiry with sufficient OI
+        for exp in expirations:
+            try:
+                chain = company.option_chain(exp)
+                total_oi = chain.calls["openInterest"].sum() + chain.puts["openInterest"].sum()
+                if total_oi > 500:
+                    selected_expiry = exp
+                    break
+            except Exception:
+                continue
+
+    if selected_expiry is None:
+        selected_expiry = expirations[0]
+
+    try:
+        chain = company.option_chain(selected_expiry)
+    except Exception as e:
+        return json.dumps({"error": True, "message": f"Failed to fetch chain: {e}", "ticker": ticker})
+
+    calls = chain.calls
+    puts = chain.puts
+
+    total_call_oi = int(calls["openInterest"].sum()) if "openInterest" in calls.columns else 0
+    total_put_oi = int(puts["openInterest"].sum()) if "openInterest" in puts.columns else 0
+
+    pc_ratio = round(total_put_oi / total_call_oi, 3) if total_call_oi > 0 else None
+
+    if pc_ratio is not None:
+        if pc_ratio > 1.5:
+            pc_sentiment = "PUT_HEAVY"
+        elif pc_ratio < 0.7:
+            pc_sentiment = "CALL_HEAVY"
+        else:
+            pc_sentiment = "NEUTRAL"
+    else:
+        pc_sentiment = None
+
+    # ATM strike and IV
+    atm_strike = None
+    atm_iv = None
+    if last_price is not None and "strike" in calls.columns:
+        calls_valid = calls.dropna(subset=["impliedVolatility"])
+        if not calls_valid.empty:
+            atm_idx = (calls_valid["strike"] - last_price).abs().idxmin()
+            atm_strike = float(calls_valid.loc[atm_idx, "strike"])
+            atm_iv = round(float(calls_valid.loc[atm_idx, "impliedVolatility"]), 3)
+
+    # IV percentile
+    all_ivs = []
+    if "impliedVolatility" in calls.columns:
+        all_ivs.extend(calls["impliedVolatility"].dropna().tolist())
+    if "impliedVolatility" in puts.columns:
+        all_ivs.extend(puts["impliedVolatility"].dropna().tolist())
+
+    iv_pctile = None
+    if atm_iv is not None and all_ivs:
+        below = sum(1 for iv in all_ivs if iv <= atm_iv)
+        iv_pctile = int(round(below / len(all_ivs) * 100))
+
+    iv_flag = "⚠️ HIGH IV" if iv_pctile is not None and iv_pctile > 70 else None
+
+    # Max pain calculation
+    max_pain_strike = None
+    if "strike" in calls.columns and "openInterest" in calls.columns:
+        all_strikes = sorted(set(calls["strike"].tolist() + puts["strike"].tolist()))
+        if all_strikes:
+            min_pain = float("inf")
+            for strike in all_strikes:
+                call_pain = sum(
+                    max(0, strike - row_strike) * oi
+                    for row_strike, oi in zip(calls["strike"], calls["openInterest"].fillna(0))
+                )
+                put_pain = sum(
+                    max(0, row_strike - strike) * oi
+                    for row_strike, oi in zip(puts["strike"], puts["openInterest"].fillna(0))
+                )
+                total_pain = call_pain + put_pain
+                if total_pain < min_pain:
+                    min_pain = total_pain
+                    max_pain_strike = float(strike)
+
+    # Highest OI strikes
+    highest_oi_call = None
+    highest_oi_put = None
+    if "openInterest" in calls.columns and not calls.empty:
+        idx = calls["openInterest"].idxmax()
+        if pd.notna(idx):
+            highest_oi_call = float(calls.loc[idx, "strike"])
+    if "openInterest" in puts.columns and not puts.empty:
+        idx = puts["openInterest"].idxmax()
+        if pd.notna(idx):
+            highest_oi_put = float(puts.loc[idx, "strike"])
+
+    return json.dumps({
+        "ticker": ticker,
+        "expiryDate": selected_expiry,
+        "totalCallOI": total_call_oi,
+        "totalPutOI": total_put_oi,
+        "pcRatio": pc_ratio,
+        "pcSentiment": pc_sentiment,
+        "atmStrike": atm_strike,
+        "atmIV": atm_iv,
+        "ivPctile": iv_pctile,
+        "ivFlag": iv_flag,
+        "maxPainStrike": max_pain_strike,
+        "highestOICallStrike": highest_oi_call,
+        "highestOIPutStrike": highest_oi_put,
+        "dataDate": str(datetime.date.today()),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_put_hedge_candidates
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_put_hedge_candidates",
+    description="""Get pre-filtered OTM put options within a strike range and budget. Single ticker only.
+
+Args:
+    ticker: str — single ticker
+    otm_pct_min: float — minimum OTM % (default: 8)
+    otm_pct_max: float — maximum OTM % (default: 12)
+    budget_usd: float — max premium per contract (100 shares)
+    expiry_after: str — YYYY-MM-DD minimum expiry date
+""",
+)
+async def get_put_hedge_candidates(
+    ticker: str,
+    otm_pct_min: float = 8.0,
+    otm_pct_max: float = 12.0,
+    budget_usd: float = 500.0,
+    expiry_after: str = "",
+) -> str:
+    """Return filtered put hedge candidates."""
+    company = yf.Ticker(ticker)
+    try:
+        fi = company.fast_info
+        current_price = getattr(fi, "lastPrice", None)
+        if current_price is None:
+            return json.dumps({"error": True, "message": f"No price for {ticker}", "ticker": ticker})
+    except Exception as e:
+        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
+
+    try:
+        expirations = company.options
+    except Exception as e:
+        return json.dumps({"error": True, "message": f"No options: {e}", "ticker": ticker})
+
+    # Filter expiries >= expiry_after
+    if expiry_after:
+        qualifying_expiries = [e for e in expirations if e >= expiry_after]
+    else:
+        qualifying_expiries = list(expirations)
+
+    # Select nearest 2
+    qualifying_expiries = qualifying_expiries[:2]
+
+    if not qualifying_expiries:
+        return json.dumps({"error": True, "message": "No qualifying expiry dates", "ticker": ticker})
+
+    strike_min = current_price * (1 - otm_pct_max / 100)
+    strike_max = current_price * (1 - otm_pct_min / 100)
+
+    candidates = []
+    for exp in qualifying_expiries:
+        try:
+            chain = company.option_chain(exp)
+            puts_df = chain.puts
+        except Exception:
+            continue
+
+        # Filter strikes
+        filtered = puts_df[(puts_df["strike"] >= strike_min) & (puts_df["strike"] <= strike_max)]
+
+        # Collect IVs for percentile calculation
+        all_ivs = puts_df["impliedVolatility"].dropna().tolist() if "impliedVolatility" in puts_df.columns else []
+
+        for _, row in filtered.iterrows():
+            bid = float(row.get("bid", 0) or 0)
+            ask = float(row.get("ask", 0) or 0)
+            mid = round((bid + ask) / 2, 2)
+            contract_cost = round(mid * 100, 2)
+            within_budget = contract_cost <= budget_usd
+            strike = float(row["strike"])
+            oi = int(row.get("openInterest", 0) or 0)
+            iv = float(row.get("impliedVolatility", 0) or 0)
+
+            # IV percentile within chain
+            iv_pctile = None
+            if all_ivs and iv > 0:
+                below = sum(1 for v in all_ivs if v <= iv)
+                iv_pctile = int(round(below / len(all_ivs) * 100))
+
+            iv_flag = "⚠️ HIGH IV" if iv_pctile is not None and iv_pctile > 70 else None
+            otm_pct = round((current_price - strike) / current_price * 100, 2)
+
+            candidates.append({
+                "expiry": exp,
+                "strike": strike,
+                "bid": bid,
+                "ask": ask,
+                "mid": mid,
+                "contractCost": contract_cost,
+                "withinBudget": within_budget,
+                "openInterest": oi,
+                "ivPctile": iv_pctile,
+                "ivFlag": iv_flag,
+                "otmPct": otm_pct,
+            })
+
+    # Sort by expiry then strike
+    candidates.sort(key=lambda c: (c["expiry"], c["strike"]))
+
+    budget_feasible = any(c["withinBudget"] for c in candidates)
+
+    # Generate note
+    if not candidates:
+        note = "No put options found in the specified OTM range."
+        budget_gap = None
+    elif not budget_feasible:
+        nearest = min(candidates, key=lambda c: c["contractCost"])
+        budget_gap = round(nearest["contractCost"] - budget_usd, 2)
+        note = f"No candidates within budget. Nearest: ${nearest['strike']} put at ${nearest['contractCost']}/contract vs ${budget_usd} budget."
+    else:
+        budget_gap = None
+        count = sum(1 for c in candidates if c["withinBudget"])
+        note = f"{count} candidate(s) within ${budget_usd} budget."
+
+    return json.dumps({
+        "ticker": ticker,
+        "currentPrice": round(current_price, 2),
+        "strikeRangeMin": round(strike_min, 2),
+        "strikeRangeMax": round(strike_max, 2),
+        "budgetUsd": budget_usd,
+        "candidates": candidates,
+        "budgetFeasible": budget_feasible,
+        "budgetGapUsd": budget_gap,
+        "note": note,
+        "dataDate": str(datetime.date.today()),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_analyst_upgrade_radar
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_analyst_upgrade_radar",
+    description="""Get recent analyst rating changes with pre-computed signal classification. Batch supported.
+
+Returns: changes with signal, ptDirection, mixedSignal, strengthFlag; netSentiment, summary.
+
+Args:
+    ticker: str | list[str] — single or batch
+    days_back: int — lookback window in calendar days (default: 30)
+""",
+)
+async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30) -> str:
+    """Return recent analyst upgrades/downgrades with signals."""
+    if isinstance(ticker, list):
+        results = []
+        for t in ticker:
+            results.append(await get_analyst_upgrade_radar(t, days_back))
+            await asyncio.sleep(0.1)
+        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+
+    company = yf.Ticker(ticker)
+    try:
+        ud = company.upgrades_downgrades
+    except Exception as e:
+        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
+
+    if ud is None or (hasattr(ud, "empty") and ud.empty):
+        import datetime
+        return json.dumps({
+            "ticker": ticker,
+            "windowDays": days_back,
+            "netSentiment": 0,
+            "changes": [],
+            "summary": "NO CHANGES",
+            "dataDate": str(datetime.date.today()),
+        })
+
+    ud = ud.reset_index()
+    cutoff = pd.Timestamp.now() - pd.DateOffset(days=days_back)
+
+    # Filter to window
+    if "GradeDate" in ud.columns:
+        ud = ud[ud["GradeDate"] >= cutoff]
+    elif "Date" in ud.columns:
+        ud = ud[ud["Date"] >= cutoff]
+
+    ud = ud.sort_values(ud.columns[0], ascending=False)
+
+    changes = []
+    upgrade_count = 0
+    downgrade_count = 0
+
+    _upgrade_grades = {"Buy", "Outperform", "Overweight", "Strong Buy", "Positive", "Market Outperform", "Top Pick"}
+    _downgrade_grades = {"Sell", "Underperform", "Underweight", "Strong Sell", "Negative", "Market Underperform", "Reduce"}
+
+    for _, row in ud.iterrows():
+        from_grade = row.get("FromGrade", "")
+        to_grade = row.get("ToGrade", "")
+        firm = row.get("Firm", "")
+        action = row.get("Action", "")
+
+        date_val = row.get("GradeDate") or row.get("Date")
+        date_str = str(date_val.date()) if hasattr(date_val, "date") else str(date_val)
+
+        # Signal classification
+        if action in ("up", "upgrade", "Up", "Upgrade") or to_grade in _upgrade_grades:
+            signal = "UPGRADE"
+            upgrade_count += 1
+        elif action in ("down", "downgrade", "Down", "Downgrade") or to_grade in _downgrade_grades:
+            signal = "DOWNGRADE"
+            downgrade_count += 1
+        else:
+            signal = "MAINTAIN"
+
+        # Price target direction (not available in yfinance raw data, but derive from action)
+        pt_direction = None
+        if action in ("initiated", "Initiated", "init"):
+            pt_direction = "INITIATED"
+
+        mixed_signal = signal == "UPGRADE" and pt_direction == "LOWERED"
+
+        # Strength flag
+        if signal == "UPGRADE" and not mixed_signal:
+            strength_flag = "BULLISH"
+        elif signal == "DOWNGRADE":
+            strength_flag = "BEARISH"
+        elif mixed_signal:
+            strength_flag = "MIXED"
+        else:
+            strength_flag = "NEUTRAL"
+
+        changes.append({
+            "date": date_str,
+            "firm": firm,
+            "fromGrade": from_grade,
+            "toGrade": to_grade,
+            "signal": signal,
+            "ptDirection": pt_direction,
+            "mixedSignal": mixed_signal,
+            "strengthFlag": strength_flag,
+        })
+
+    net_sentiment = upgrade_count - downgrade_count
+
+    # Summary
+    parts = []
+    if upgrade_count:
+        parts.append(f"{upgrade_count} UPGRADE(s)")
+    if downgrade_count:
+        parts.append(f"{downgrade_count} DOWNGRADE(s)")
+    summary = ", ".join(parts) if parts else "NO CHANGES"
+
+    return json.dumps({
+        "ticker": ticker,
+        "windowDays": days_back,
+        "netSentiment": net_sentiment,
+        "changes": changes,
+        "summary": summary,
+        "dataDate": str(datetime.date.today()),
+    })
 
 
 if __name__ == "__main__":
