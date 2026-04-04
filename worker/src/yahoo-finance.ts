@@ -1333,6 +1333,9 @@ export async function getEarningsMomentum(ticker: string): Promise<string> {
       const ago90d = q0["90daysAgo"] as number | null;
       currentQtrEps = current;
 
+      // Math.abs() in denominator is intentional: when EPS goes from negative
+      // to less-negative (e.g. -0.50→-0.30), the revision is positive.
+      // Without abs(), (-0.30-(-0.50))/-0.50 = -40%, incorrectly signaling a downgrade.
       if (current != null && ago7d != null && ago7d !== 0)
         revision7d = +((current - ago7d) / Math.abs(ago7d) * 100).toFixed(2);
       if (current != null && ago30d != null && ago30d !== 0)
@@ -1727,6 +1730,9 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
         signal = "MAINTAIN";
       }
 
+      // Price target direction — yfinance doesn't expose price targets in
+      // upgrades_downgrades, so we can only detect "INITIATED".  mixedSignal
+      // is included for forward-compatibility but will be false for now.
       const ptDirection: string | null = ["initiated", "Initiated", "init"].includes(action) ? "INITIATED" : null;
       const mixedSignal = signal === "UPGRADE" && ptDirection === "LOWERED";
 

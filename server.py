@@ -1823,6 +1823,10 @@ async def get_earnings_momentum(ticker: str) -> str:
             ago_90d = q0.get("90daysAgo")
             current_qtr_eps = current
 
+            # abs() in denominator is intentional: when EPS goes from negative
+            # to less-negative (e.g. -0.50→-0.30), the revision is positive.
+            # Without abs(), (-0.30-(-0.50))/-0.50 = -40%, which incorrectly
+            # signals a downgrade.
             if current is not None and ago_7d is not None and ago_7d != 0:
                 revision_7d = round((current - ago_7d) / abs(ago_7d) * 100, 2)
             if current is not None and ago_30d is not None and ago_30d != 0:
@@ -2217,7 +2221,6 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
         return json.dumps({"error": True, "message": str(e), "ticker": ticker})
 
     if ud is None or (hasattr(ud, "empty") and ud.empty):
-        import datetime
         return json.dumps({
             "ticker": ticker,
             "windowDays": days_back,
@@ -2264,7 +2267,9 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
         else:
             signal = "MAINTAIN"
 
-        # Price target direction (not available in yfinance raw data, but derive from action)
+        # Price target direction — yfinance doesn't expose price targets in
+        # upgrades_downgrades, so we can only detect "INITIATED".  mixedSignal
+        # is included for forward-compatibility but will be False for now.
         pt_direction = None
         if action in ("initiated", "Initiated", "init"):
             pt_direction = "INITIATED"
