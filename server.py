@@ -654,7 +654,12 @@ async def get_fast_info(ticker: str | list[str]) -> str:
     company = yf.Ticker(ticker)
     try:
         fi = company.fast_info
-        data = {k: getattr(fi, k, None) for k in fi.keys()}
+        data = {}
+        for k in fi.keys():
+            try:
+                data[k] = fi[k]
+            except Exception:
+                data[k] = None
     except Exception as e:
         print(f"Error: getting fast info for {ticker}: {e}")
         return f"Error: getting fast info for {ticker}: {e}"
@@ -1470,9 +1475,9 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
     company = yf.Ticker(ticker)
     try:
         fi = company.fast_info
-        last_vol = getattr(fi, "lastVolume", None)
-        avg_10d = getattr(fi, "tenDayAverageVolume", None)
-        avg_90d = getattr(fi, "threeMonthAverageVolume", None)
+        last_vol = fi.last_volume
+        avg_10d = fi.ten_day_average_volume
+        avg_90d = fi.three_month_average_volume
     except Exception as e:
         return json.dumps({"error": True, "message": str(e), "ticker": ticker})
 
@@ -1528,9 +1533,9 @@ async def get_ma_position(ticker: str | list[str]) -> str:
     company = yf.Ticker(ticker)
     try:
         fi = company.fast_info
-        last_price = getattr(fi, "lastPrice", None)
-        fifty_dma = getattr(fi, "fiftyDayAverage", None)
-        two_hundred_dma = getattr(fi, "twoHundredDayAverage", None)
+        last_price = fi.last_price
+        fifty_dma = fi.fifty_day_average
+        two_hundred_dma = fi.two_hundred_day_average
     except Exception as e:
         return json.dumps({"error": True, "message": str(e), "ticker": ticker})
 
@@ -1940,7 +1945,7 @@ async def get_options_flow_summary(ticker: str, expiry_hint: str | None = None) 
     if not expirations:
         return json.dumps({"error": True, "message": "No options expirations available", "ticker": ticker})
 
-    last_price = getattr(company.fast_info, "lastPrice", None)
+    last_price = company.fast_info.last_price
 
     # Select expiry
     selected_expiry = None
@@ -2085,7 +2090,7 @@ async def get_put_hedge_candidates(
     company = yf.Ticker(ticker)
     try:
         fi = company.fast_info
-        current_price = getattr(fi, "lastPrice", None)
+        current_price = fi.last_price
         if current_price is None:
             return json.dumps({"error": True, "message": f"No price for {ticker}", "ticker": ticker})
     except Exception as e:
