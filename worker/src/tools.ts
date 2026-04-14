@@ -67,15 +67,15 @@ export const TOOLS: Tool[] = [
   {
     name: "get_stock_info",
     description:
-      "Get comprehensive stock information for one or more tickers: price & trading info, company details, financial metrics, earnings, margins, dividends, balance sheet, ownership, analyst coverage, and risk metrics. Pass an array of symbols to fetch multiple tickers in one call — returns a dict keyed by symbol.",
+      "Get comprehensive stock information for one or more tickers: price & trading info, company details, financial metrics, earnings, margins, dividends, balance sheet, ownership, analyst coverage, and risk metrics. Pass an array of symbols to fetch multiple tickers in one call — returns a dict keyed by symbol. Max 5 tickers per call; if you need more, split into multiple calls.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: {
-          description: "Stock ticker symbol (e.g. 'AAPL') or an array of symbols (e.g. ['AAPL', 'MSFT']) for batch fetching.",
+          description: "Stock ticker symbol (e.g. 'AAPL') or an array of up to 5 symbols (e.g. ['AAPL', 'MSFT']). If more than 5 are provided, only the first 5 are processed — split larger lists into multiple calls.",
           oneOf: [
             { type: "string" },
-            { type: "array", items: { type: "string" } },
+            { type: "array", items: { type: "string" }, maxItems: 5 },
           ],
         },
       },
@@ -209,15 +209,15 @@ export const TOOLS: Tool[] = [
   {
     name: "get_fast_info",
     description:
-      "Get lightweight real-time price and market data for one or more tickers. Returns ~20 high-signal fields: currency, exchange, quoteType, timezone, lastPrice, open, previousClose, dayHigh, dayLow, yearHigh, yearLow, yearChange, marketCap, shares, lastVolume, tenDayAverageVolume, threeMonthAverageVolume, fiftyDayAverage, twoHundredDayAverage. Prefer this over get_stock_info for price/market data queries — it uses far fewer tokens. Pass an array of symbols to fetch multiple tickers in one call — returns a dict keyed by symbol.",
+      "Get lightweight real-time price and market data for one or more tickers. Returns ~20 high-signal fields: currency, exchange, quoteType, timezone, lastPrice, open, previousClose, dayHigh, dayLow, yearHigh, yearLow, yearChange, marketCap, shares, lastVolume, tenDayAverageVolume, threeMonthAverageVolume, fiftyDayAverage, twoHundredDayAverage. Prefer this over get_stock_info for price/market data queries — it uses far fewer tokens. Max 5 tickers per call; if you need more, split into multiple calls.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: {
-          description: "Stock ticker symbol (e.g. 'AAPL') or an array of symbols (e.g. ['AAPL', 'MSFT']) for batch fetching.",
+          description: "Stock ticker symbol (e.g. 'AAPL') or an array of up to 5 symbols (e.g. ['AAPL', 'MSFT']). If more than 5 are provided, only the first 5 are processed — split larger lists into multiple calls.",
           oneOf: [
             { type: "string" },
-            { type: "array", items: { type: "string" } },
+            { type: "array", items: { type: "string" }, maxItems: 5 },
           ],
         },
       },
@@ -227,15 +227,15 @@ export const TOOLS: Tool[] = [
   {
     name: "get_price_stats",
     description:
-      "Get pre-computed price statistics for one or more tickers: current price, % change vs previous close, % distance from 52-week high/low and 50/200-day moving averages, 30-day annualized volatility, and CAGR over 1y/3y/5y. Pass an array of symbols to fetch multiple tickers in one call — returns a dict keyed by symbol.",
+      "Get pre-computed price statistics for one or more tickers: current price, % change vs previous close, % distance from 52-week high/low and 50/200-day moving averages, 30-day annualized volatility, and CAGR over 1y/3y/5y. Max 5 tickers per call; if you need more, split into multiple calls.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: {
-          description: "Stock ticker symbol (e.g. 'AAPL') or an array of symbols (e.g. ['AAPL', 'MSFT']) for batch fetching.",
+          description: "Stock ticker symbol (e.g. 'AAPL') or an array of up to 5 symbols (e.g. ['AAPL', 'MSFT']). If more than 5 are provided, only the first 5 are processed — split larger lists into multiple calls.",
           oneOf: [
             { type: "string" },
-            { type: "array", items: { type: "string" } },
+            { type: "array", items: { type: "string" }, maxItems: 5 },
           ],
         },
       },
@@ -245,15 +245,15 @@ export const TOOLS: Tool[] = [
   {
     name: "get_analyst_consensus",
     description:
-      "Get analyst consensus summary for one or more tickers: price targets (current, low, high, mean, median) with % upside from last price, recommendation breakdown (strongBuy, buy, hold, sell, strongSell counts), and dominant rating. Pass an array of symbols to fetch multiple tickers in one call — returns a dict keyed by symbol.",
+      "Get analyst consensus summary for one or more tickers: price targets (current, low, high, mean, median) with % upside from last price, recommendation breakdown (strongBuy, buy, hold, sell, strongSell counts), and dominant rating. Max 5 tickers per call; if you need more, split into multiple calls.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: {
-          description: "Stock ticker symbol (e.g. 'AAPL') or an array of symbols (e.g. ['AAPL', 'MSFT']) for batch fetching.",
+          description: "Stock ticker symbol (e.g. 'AAPL') or an array of up to 5 symbols (e.g. ['AAPL', 'MSFT']). If more than 5 are provided, only the first 5 are processed — split larger lists into multiple calls.",
           oneOf: [
             { type: "string" },
-            { type: "array", items: { type: "string" } },
+            { type: "array", items: { type: "string" }, maxItems: 5 },
           ],
         },
       },
@@ -275,15 +275,15 @@ export const TOOLS: Tool[] = [
   {
     name: "get_financial_ratios",
     description:
-      "Get pre-computed key financial ratios for one or more tickers. Includes: P/E (trailing & forward), P/S, P/B, EV/EBITDA, EV/Revenue, PEG; gross/operating/net margins, ROE, ROA; debt/equity, current ratio, quick ratio; FCF and FCF yield; dividend yield and payout ratio. Pass an array of symbols to fetch multiple tickers in one call — returns a dict keyed by symbol.",
+      "Get pre-computed key financial ratios for one or more tickers. Includes: P/E (trailing & forward), P/S, P/B, EV/EBITDA, EV/Revenue, PEG; gross/operating/net margins, ROE, ROA; debt/equity, current ratio, quick ratio; FCF and FCF yield; dividend yield and payout ratio. Max 5 tickers per call; if you need more, split into multiple calls.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: {
-          description: "Stock ticker symbol (e.g. 'AAPL') or an array of symbols (e.g. ['AAPL', 'MSFT']) for batch fetching.",
+          description: "Stock ticker symbol (e.g. 'AAPL') or an array of up to 5 symbols (e.g. ['AAPL', 'MSFT']). If more than 5 are provided, only the first 5 are processed — split larger lists into multiple calls.",
           oneOf: [
             { type: "string" },
-            { type: "array", items: { type: "string" } },
+            { type: "array", items: { type: "string" }, maxItems: 5 },
           ],
         },
       },
@@ -387,15 +387,15 @@ export const TOOLS: Tool[] = [
   {
     name: "get_price_slope",
     description:
-      "Get N-day price slope (% change) and direction for one or more tickers. Returns startClose, endClose, slopePct, direction (UP/DOWN/FLAT). Batch supported.",
+      "Get N-day price slope (% change) and direction for one or more tickers. Returns startClose, endClose, slopePct, direction (UP/DOWN/FLAT). Max 5 tickers per call.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: {
-          description: "Stock ticker symbol or array of symbols for batch.",
+          description: "Stock ticker symbol or array of up to 5 symbols. Split larger lists into multiple calls.",
           oneOf: [
             { type: "string" },
-            { type: "array", items: { type: "string" } },
+            { type: "array", items: { type: "string" }, maxItems: 5 },
           ],
         },
         days: {
@@ -410,15 +410,15 @@ export const TOOLS: Tool[] = [
   {
     name: "get_volume_ratio",
     description:
-      "Get last-session volume vs N-day average volume ratio. Returns ratio10d, ratio90d, volumeFlag (HIGH/NORMAL/LOW). Batch supported.",
+      "Get last-session volume vs N-day average volume ratio. Returns ratio10d, ratio90d, volumeFlag (HIGH/NORMAL/LOW). Max 5 tickers per call.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: {
-          description: "Stock ticker symbol or array of symbols for batch.",
+          description: "Stock ticker symbol or array of up to 5 symbols. Split larger lists into multiple calls.",
           oneOf: [
             { type: "string" },
-            { type: "array", items: { type: "string" } },
+            { type: "array", items: { type: "string" }, maxItems: 5 },
           ],
         },
         period: {
@@ -433,15 +433,15 @@ export const TOOLS: Tool[] = [
   {
     name: "get_ma_position",
     description:
-      "Get price position vs 50DMA and 200DMA with trend classification (BULLISH/BEARISH/MIXED). Batch supported.",
+      "Get price position vs 50DMA and 200DMA with trend classification (BULLISH/BEARISH/MIXED). Max 5 tickers per call.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: {
-          description: "Stock ticker symbol or array of symbols for batch.",
+          description: "Stock ticker symbol or array of up to 5 symbols. Split larger lists into multiple calls.",
           oneOf: [
             { type: "string" },
-            { type: "array", items: { type: "string" } },
+            { type: "array", items: { type: "string" }, maxItems: 5 },
           ],
         },
       },
@@ -519,15 +519,15 @@ export const TOOLS: Tool[] = [
   {
     name: "get_analyst_upgrade_radar",
     description:
-      "Get recent analyst rating changes with signal classification (UPGRADE/DOWNGRADE/MAINTAIN), netSentiment, and summary. Batch supported.",
+      "Get recent analyst rating changes with signal classification (UPGRADE/DOWNGRADE/MAINTAIN), netSentiment, and summary. Max 5 tickers per call.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: {
-          description: "Stock ticker symbol or array of symbols for batch.",
+          description: "Stock ticker symbol or array of up to 5 symbols. Split larger lists into multiple calls.",
           oneOf: [
             { type: "string" },
-            { type: "array", items: { type: "string" } },
+            { type: "array", items: { type: "string" }, maxItems: 5 },
           ],
         },
         days_back: {
