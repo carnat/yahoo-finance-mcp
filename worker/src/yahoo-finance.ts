@@ -10,6 +10,19 @@
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
+/**
+ * Maximum number of tickers allowed in a single batch call.
+ * Cloudflare Workers have a subrequest limit (50 on free, 1000 on paid).
+ * Each ticker requires 1-3 subrequests (crumb + API call + possible retry),
+ * so capping at 5 keeps a single tool invocation well within limits.
+ */
+const MAX_TICKERS = 5;
+
+function limitTickers(tickers: string[]): string[] {
+  if (tickers.length <= MAX_TICKERS) return tickers;
+  return tickers.slice(0, MAX_TICKERS);
+}
+
 // Module-level crumb cache — shared within a Cloudflare isolate session
 let _crumb: { value: string; cookie: string; exp: number } | null = null;
 
@@ -29,10 +42,18 @@ async function refreshCrumb(): Promise<{ value: string; cookie: string }> {
   }
   const cookie = cookies.join("; ");
 
+  // Cancel the response body — we only needed headers.
+  // Leaving it unconsumed stalls a Cloudflare HTTP slot and can trigger
+  // "stalled response canceled to prevent deadlock" warnings.
+  await init.body?.cancel();
+
   const crumbRes = await fetch("https://query2.finance.yahoo.com/v1/test/getcrumb", {
     headers: { "User-Agent": UA, Cookie: cookie },
   });
-  if (!crumbRes.ok) throw new Error(`Crumb fetch failed: ${crumbRes.status}`);
+  if (!crumbRes.ok) {
+    await crumbRes.body?.cancel();
+    throw new Error(`Crumb fetch failed: ${crumbRes.status}`);
+  }
 
   return { value: await crumbRes.text(), cookie };
 }
@@ -59,11 +80,16 @@ async function yGet(url: string, auth = true): Promise<unknown> {
 
   // Retry once with a fresh crumb on 401
   if (res.status === 401 && auth) {
+    // Cancel the unconsumed response body to free the HTTP slot
+    await res.body?.cancel();
     _crumb = null;
     res = await makeReq(await getCrumb());
   }
 
-  if (!res.ok) throw new Error(`Yahoo Finance API error ${res.status} for: ${url}`);
+  if (!res.ok) {
+    await res.body?.cancel();
+    throw new Error(`Yahoo Finance API error ${res.status} for: ${url}`);
+  }
   return res.json();
 }
 
@@ -122,8 +148,10 @@ export async function getHistoricalPrices(
 
 export async function getStockInfo(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const results = await Promise.all(ticker.map((t) => getStockInfo(t)));
-    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+    const tickers = limitTickers(ticker);
+    const results: string[] = [];
+    for (const t of tickers) results.push(await getStockInfo(t));
+    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
   }
   const modules = [
     "assetProfile",
@@ -422,6 +450,40 @@ export async function getOptionChain(
   }
 }
 
+/**
+ * Internal helper: fetch full options response in a single subrequest.
+ * Returns { dates: string[], calls: Record[], puts: Record[] }.
+ * The Yahoo Finance options endpoint returns expiration dates AND the full
+ * chain (calls + puts) for the specified date in one response, so we avoid
+ * making 3 separate calls (dates + calls + puts) which wastes subrequests.
+ */
+async function yGetFullOptions(
+  ticker: string,
+  expDate?: string
+): Promise<{ dates: string[]; calls: Record<string, unknown>[]; puts: Record<string, unknown>[] }> {
+  let url = `https://query2.finance.yahoo.com/v7/finance/options/${enc(ticker)}`;
+  if (expDate) {
+    const [y, m, day] = expDate.split("-").map(Number);
+    const ts = Math.floor(Date.UTC(y, m - 1, day) / 1000);
+    url += `?date=${ts}`;
+  }
+  const d = (await yGet(url)) as Record<string, unknown>;
+  const result = (d?.optionChain as Record<string, unknown[]> | undefined)?.result?.[0] as
+    | Record<string, unknown>
+    | undefined;
+  if (!result) throw new Error(`No options data for ${ticker}`);
+
+  const dates = ((result.expirationDates as number[]) ?? []).map((ts) =>
+    new Date(ts * 1000).toISOString().split("T")[0]
+  );
+  const opts = (result.options as Record<string, unknown[]>[])?.[0] ?? {};
+  return {
+    dates,
+    calls: (opts.calls ?? []) as Record<string, unknown>[],
+    puts: (opts.puts ?? []) as Record<string, unknown>[],
+  };
+}
+
 const REC_MOD: Record<string, string> = {
   recommendations: "recommendationTrend",
   upgrades_downgrades: "upgradeDowngradeHistory",
@@ -431,8 +493,10 @@ const REC_MOD: Record<string, string> = {
 
 export async function getFastInfo(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const results = await Promise.all(ticker.map((t) => getFastInfo(t)));
-    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+    const tickers = limitTickers(ticker);
+    const results: string[] = [];
+    for (const t of tickers) results.push(await getFastInfo(t));
+    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
   }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price,summaryDetail,defaultKeyStatistics`
@@ -472,8 +536,10 @@ export async function getFastInfo(ticker: string | string[]): Promise<string> {
 
 export async function getPriceStats(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const results = await Promise.all(ticker.map((t) => getPriceStats(t)));
-    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+    const tickers = limitTickers(ticker);
+    const results: string[] = [];
+    for (const t of tickers) results.push(await getPriceStats(t));
+    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
   }
   const [metaRaw, histRaw] = await Promise.all([
     yGet(
@@ -565,8 +631,10 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
 
 export async function getAnalystConsensus(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const results = await Promise.all(ticker.map((t) => getAnalystConsensus(t)));
-    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+    const tickers = limitTickers(ticker);
+    const results: string[] = [];
+    for (const t of tickers) results.push(await getAnalystConsensus(t));
+    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
   }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=financialData,recommendationTrend,price`
@@ -680,8 +748,10 @@ export async function getEarningsAnalysis(ticker: string): Promise<string> {
 
 export async function getFinancialRatios(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const results = await Promise.all(ticker.map((t) => getFinancialRatios(t)));
-    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+    const tickers = limitTickers(ticker);
+    const results: string[] = [];
+    for (const t of tickers) results.push(await getFinancialRatios(t));
+    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
   }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=summaryDetail,financialData,defaultKeyStatistics`
@@ -1032,12 +1102,12 @@ export async function getTechnicalIndicators(
 
 export async function getPriceSlope(ticker: string | string[], days: number): Promise<string> {
   if (Array.isArray(ticker)) {
+    const tickers = limitTickers(ticker);
     const results: string[] = [];
-    for (const t of ticker) {
+    for (const t of tickers) {
       results.push(await getPriceSlope(t, days));
-      await new Promise((r) => setTimeout(r, 100));
     }
-    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
   }
 
   const range = `${days + 10}d`;
@@ -1090,12 +1160,12 @@ export async function getPriceSlope(ticker: string | string[], days: number): Pr
 
 export async function getVolumeRatio(ticker: string | string[], _period: number): Promise<string> {
   if (Array.isArray(ticker)) {
+    const tickers = limitTickers(ticker);
     const results: string[] = [];
-    for (const t of ticker) {
+    for (const t of tickers) {
       results.push(await getVolumeRatio(t, _period));
-      await new Promise((r) => setTimeout(r, 100));
     }
-    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
   }
 
   try {
@@ -1133,12 +1203,12 @@ export async function getVolumeRatio(ticker: string | string[], _period: number)
 
 export async function getMaPosition(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
+    const tickers = limitTickers(ticker);
     const results: string[] = [];
-    for (const t of ticker) {
+    for (const t of tickers) {
       results.push(await getMaPosition(t));
-      await new Promise((r) => setTimeout(r, 100));
     }
-    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
   }
 
   try {
@@ -1416,31 +1486,32 @@ export async function getEarningsMomentum(ticker: string): Promise<string> {
 
 export async function getOptionsFlowSummary(ticker: string, expiryHint?: string): Promise<string> {
   try {
-    // Get expiration dates
-    const datesRaw = JSON.parse(await getOptionExpirationDates(ticker));
-    if (typeof datesRaw === "string" && datesRaw.startsWith("Error")) {
-      return JSON.stringify({ error: true, message: datesRaw, ticker });
-    }
-    const dates = datesRaw as string[];
+    // First fetch: get all expiry dates (and the default chain) in one subrequest
+    const firstFetch = await yGetFullOptions(ticker);
+    const dates = firstFetch.dates;
     if (!dates || !dates.length) {
       return JSON.stringify({ error: true, message: "No option expirations", ticker });
     }
 
-    // Get last price
+    // Get last price (1 subrequest)
     const fi = JSON.parse(await getFastInfo(ticker));
     const lastPrice = fi.lastPrice as number | null;
 
     // Select expiry
     const selectedExpiry = expiryHint && dates.includes(expiryHint) ? expiryHint : dates[0];
 
-    // Fetch calls and puts
-    const [callsRaw, putsRaw] = await Promise.all([
-      getOptionChain(ticker, selectedExpiry, "calls"),
-      getOptionChain(ticker, selectedExpiry, "puts"),
-    ]);
-
-    const calls = JSON.parse(callsRaw) as Record<string, unknown>[];
-    const puts = JSON.parse(putsRaw) as Record<string, unknown>[];
+    // If the selected expiry is the default (first), reuse firstFetch data;
+    // otherwise make one more subrequest for the specific date's chain
+    let calls: Record<string, unknown>[];
+    let puts: Record<string, unknown>[];
+    if (selectedExpiry === dates[0]) {
+      calls = firstFetch.calls;
+      puts = firstFetch.puts;
+    } else {
+      const specific = await yGetFullOptions(ticker, selectedExpiry);
+      calls = specific.calls;
+      puts = specific.puts;
+    }
 
     if (!Array.isArray(calls) || !Array.isArray(puts)) {
       return JSON.stringify({ error: true, message: "Failed to parse option chain", ticker });
@@ -1554,19 +1625,19 @@ export async function getPutHedgeCandidates(
   expiryAfter: string
 ): Promise<string> {
   try {
-    // Get last price
+    // Get last price (1 subrequest)
     const fi = JSON.parse(await getFastInfo(ticker));
     const currentPrice = fi.lastPrice as number | null;
     if (currentPrice == null) {
       return JSON.stringify({ error: true, message: `No price for ${ticker}`, ticker });
     }
 
-    // Get expiration dates
-    const datesRaw = JSON.parse(await getOptionExpirationDates(ticker));
-    if (!Array.isArray(datesRaw) || !datesRaw.length) {
+    // Get expiration dates + default chain in one subrequest
+    const firstFetch = await yGetFullOptions(ticker);
+    const dates = firstFetch.dates;
+    if (!dates || !dates.length) {
       return JSON.stringify({ error: true, message: "No option expirations", ticker });
     }
-    const dates = datesRaw as string[];
 
     // Filter and select nearest 2
     const qualifying = expiryAfter ? dates.filter((d) => d >= expiryAfter).slice(0, 2) : dates.slice(0, 2);
@@ -1594,7 +1665,14 @@ export async function getPutHedgeCandidates(
 
     for (const exp of qualifying) {
       try {
-        const putsRaw = JSON.parse(await getOptionChain(ticker, exp, "puts"));
+        // Reuse firstFetch data if this is the default expiry, otherwise fetch
+        let putsRaw: Record<string, unknown>[];
+        if (exp === dates[0]) {
+          putsRaw = firstFetch.puts;
+        } else {
+          const specific = await yGetFullOptions(ticker, exp);
+          putsRaw = specific.puts;
+        }
         if (!Array.isArray(putsRaw)) continue;
 
         const allIVs = putsRaw
@@ -1673,12 +1751,12 @@ export async function getPutHedgeCandidates(
 
 export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack: number): Promise<string> {
   if (Array.isArray(ticker)) {
+    const tickers = limitTickers(ticker);
     const results: string[] = [];
-    for (const t of ticker) {
+    for (const t of tickers) {
       results.push(await getAnalystUpgradeRadar(t, daysBack));
-      await new Promise((r) => setTimeout(r, 100));
     }
-    return JSON.stringify(Object.fromEntries(ticker.map((t, i) => [t, JSON.parse(results[i])])));
+    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
   }
 
   try {
