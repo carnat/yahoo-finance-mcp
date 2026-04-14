@@ -18,9 +18,35 @@ const UA =
  */
 const MAX_TICKERS = 5;
 
-function limitTickers(tickers: string[]): string[] {
-  if (tickers.length <= MAX_TICKERS) return tickers;
-  return tickers.slice(0, MAX_TICKERS);
+interface LimitResult {
+  tickers: string[];
+  truncatedFrom?: number;
+  dropped?: string[];
+}
+
+function limitTickers(tickers: string[]): LimitResult {
+  if (tickers.length <= MAX_TICKERS) return { tickers };
+  return {
+    tickers: tickers.slice(0, MAX_TICKERS),
+    truncatedFrom: tickers.length,
+    dropped: tickers.slice(MAX_TICKERS),
+  };
+}
+
+/** Adds a _truncated warning to the batch response object when tickers were dropped. */
+function wrapBatchResult(
+  result: Record<string, unknown>,
+  limit: LimitResult
+): string {
+  if (!limit.truncatedFrom) return JSON.stringify(result);
+  return JSON.stringify({
+    ...result,
+    _truncated: {
+      message: `Only the first ${MAX_TICKERS} of ${limit.truncatedFrom} tickers were processed. Call again with the remaining tickers: ${limit.dropped!.join(", ")}`,
+      processed: limit.tickers,
+      remaining: limit.dropped,
+    },
+  });
 }
 
 // Module-level crumb cache — shared within a Cloudflare isolate session
@@ -148,10 +174,10 @@ export async function getHistoricalPrices(
 
 export async function getStockInfo(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const tickers = limitTickers(ticker);
+    const limit = limitTickers(ticker);
     const results: string[] = [];
-    for (const t of tickers) results.push(await getStockInfo(t));
-    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
+    for (const t of limit.tickers) results.push(await getStockInfo(t));
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
   }
   const modules = [
     "assetProfile",
@@ -493,10 +519,10 @@ const REC_MOD: Record<string, string> = {
 
 export async function getFastInfo(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const tickers = limitTickers(ticker);
+    const limit = limitTickers(ticker);
     const results: string[] = [];
-    for (const t of tickers) results.push(await getFastInfo(t));
-    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
+    for (const t of limit.tickers) results.push(await getFastInfo(t));
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
   }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price,summaryDetail,defaultKeyStatistics`
@@ -536,10 +562,10 @@ export async function getFastInfo(ticker: string | string[]): Promise<string> {
 
 export async function getPriceStats(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const tickers = limitTickers(ticker);
+    const limit = limitTickers(ticker);
     const results: string[] = [];
-    for (const t of tickers) results.push(await getPriceStats(t));
-    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
+    for (const t of limit.tickers) results.push(await getPriceStats(t));
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
   }
   const [metaRaw, histRaw] = await Promise.all([
     yGet(
@@ -631,10 +657,10 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
 
 export async function getAnalystConsensus(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const tickers = limitTickers(ticker);
+    const limit = limitTickers(ticker);
     const results: string[] = [];
-    for (const t of tickers) results.push(await getAnalystConsensus(t));
-    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
+    for (const t of limit.tickers) results.push(await getAnalystConsensus(t));
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
   }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=financialData,recommendationTrend,price`
@@ -748,10 +774,10 @@ export async function getEarningsAnalysis(ticker: string): Promise<string> {
 
 export async function getFinancialRatios(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const tickers = limitTickers(ticker);
+    const limit = limitTickers(ticker);
     const results: string[] = [];
-    for (const t of tickers) results.push(await getFinancialRatios(t));
-    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
+    for (const t of limit.tickers) results.push(await getFinancialRatios(t));
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
   }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=summaryDetail,financialData,defaultKeyStatistics`
@@ -1102,12 +1128,12 @@ export async function getTechnicalIndicators(
 
 export async function getPriceSlope(ticker: string | string[], days: number): Promise<string> {
   if (Array.isArray(ticker)) {
-    const tickers = limitTickers(ticker);
+    const limit = limitTickers(ticker);
     const results: string[] = [];
-    for (const t of tickers) {
+    for (const t of limit.tickers) {
       results.push(await getPriceSlope(t, days));
     }
-    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
   }
 
   const range = `${days + 10}d`;
@@ -1160,12 +1186,12 @@ export async function getPriceSlope(ticker: string | string[], days: number): Pr
 
 export async function getVolumeRatio(ticker: string | string[], _period: number): Promise<string> {
   if (Array.isArray(ticker)) {
-    const tickers = limitTickers(ticker);
+    const limit = limitTickers(ticker);
     const results: string[] = [];
-    for (const t of tickers) {
+    for (const t of limit.tickers) {
       results.push(await getVolumeRatio(t, _period));
     }
-    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
   }
 
   try {
@@ -1203,12 +1229,12 @@ export async function getVolumeRatio(ticker: string | string[], _period: number)
 
 export async function getMaPosition(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const tickers = limitTickers(ticker);
+    const limit = limitTickers(ticker);
     const results: string[] = [];
-    for (const t of tickers) {
+    for (const t of limit.tickers) {
       results.push(await getMaPosition(t));
     }
-    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
   }
 
   try {
@@ -1751,12 +1777,12 @@ export async function getPutHedgeCandidates(
 
 export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack: number): Promise<string> {
   if (Array.isArray(ticker)) {
-    const tickers = limitTickers(ticker);
+    const limit = limitTickers(ticker);
     const results: string[] = [];
-    for (const t of tickers) {
+    for (const t of limit.tickers) {
       results.push(await getAnalystUpgradeRadar(t, daysBack));
     }
-    return JSON.stringify(Object.fromEntries(tickers.map((t, i) => [t, JSON.parse(results[i])])));
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
   }
 
   try {
