@@ -673,10 +673,27 @@ export async function getFastInfo(ticker: string | string[]): Promise<string> {
   const detail = (result.summaryDetail as Record<string, unknown>) ?? {};
   const ks = (result.defaultKeyStatistics as Record<string, unknown>) ?? {};
 
+  const quoteType = raw(price.quoteType) as string | null;
+  // Indices (^VIX, ^VVIX, ^SPX …) have no volume or outstanding shares.
+  // Yahoo Finance fills these fields with 0 rather than null, so we
+  // normalise them back to null to avoid misleading zero values.
+  const isIndex = quoteType === "INDEX";
+  const volOrNull = (v: unknown): number | null => {
+    const val = raw(v) as number | null;
+    return isIndex ? null : val;
+  };
+
+  // Shares: prefer price module; fall back to defaultKeyStatistics (fixes
+  // small-caps like ASTS where price.sharesOutstanding is missing).
+  const shares = isIndex
+    ? null
+    : ((raw(price.sharesOutstanding) as number | null) ??
+       (raw(ks.sharesOutstanding) as number | null));
+
   return JSON.stringify({
     currency: raw(price.currency),
     exchange: raw(price.exchangeName),
-    quoteType: raw(price.quoteType),
+    quoteType,
     timezone: raw(price.exchangeTimezoneShortName),
     lastPrice: raw(price.regularMarketPrice),
     open: raw(price.regularMarketOpen),
@@ -686,13 +703,14 @@ export async function getFastInfo(ticker: string | string[]): Promise<string> {
     yearHigh: raw(detail.fiftyTwoWeekHigh),
     yearLow: raw(detail.fiftyTwoWeekLow),
     yearChange: raw(ks["52WeekChange" as keyof typeof ks]),
-    marketCap: raw(price.marketCap),
-    shares: raw(price.sharesOutstanding),
-    lastVolume: raw(price.regularMarketVolume),
-    tenDayAverageVolume: raw(detail.averageVolume10days),
-    threeMonthAverageVolume: raw(detail.averageVolume),
+    marketCap: isIndex ? null : (raw(price.marketCap) as number | null),
+    shares,
+    lastVolume: volOrNull(price.regularMarketVolume),
+    tenDayAverageVolume: volOrNull(detail.averageVolume10days),
+    threeMonthAverageVolume: volOrNull(detail.averageVolume),
     fiftyDayAverage: raw(detail.fiftyDayAverage),
     twoHundredDayAverage: raw(detail.twoHundredDayAverage),
+    ...(isIndex ? { _note: "Index ticker — volume, shares, and marketCap are not applicable and are returned as null" } : {}),
   });
 }
 
