@@ -292,11 +292,11 @@ export async function getHistoricalPrices(
   );
 }
 
-export async function getStockInfo(ticker: string | string[]): Promise<string> {
+export async function getStockInfo(ticker: string | string[], includeAll = false): Promise<string> {
   if (Array.isArray(ticker)) {
     const limit = limitTickers(ticker);
     const results: string[] = [];
-    for (const t of limit.tickers) results.push(await getStockInfo(t));
+    for (const t of limit.tickers) results.push(await getStockInfo(t, includeAll));
     return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
   }
   const modules = [
@@ -327,6 +327,22 @@ export async function getStockInfo(ticker: string | string[]): Promise<string> {
         info[k] = raw(v);
       }
     }
+  }
+
+  if (!includeAll) {
+    const defaults = [
+      "shortName", "longName", "sector", "industry", "country", "website", "fullTimeEmployees",
+      "currentPrice", "previousClose", "marketCap", "enterpriseValue", "currency",
+      "trailingPE", "forwardPE", "priceToBook", "priceToSalesTrailing12Months", "enterpriseToEbitda",
+      "trailingEps", "forwardEps", "revenueGrowth", "earningsGrowth",
+      "grossMargins", "operatingMargins", "profitMargins", "returnOnEquity", "returnOnAssets",
+      "dividendYield", "payoutRatio",
+      "recommendationMean", "numberOfAnalystOpinions", "targetMeanPrice",
+      "longBusinessSummary",
+    ];
+    const filtered: Record<string, unknown> = {};
+    for (const k of defaults) if (k in info) filtered[k] = info[k];
+    return JSON.stringify(filtered);
   }
   return JSON.stringify(info);
 }

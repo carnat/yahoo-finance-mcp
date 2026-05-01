@@ -74,7 +74,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_stock_info",
     description:
-      "Get comprehensive stock information for one or more tickers: price & trading info, company details, financial metrics, earnings, margins, dividends, balance sheet, ownership, analyst coverage, and risk metrics. Pass an array of symbols to fetch multiple tickers in one call — returns a dict keyed by symbol. Max 5 tickers per call; if you need more, split into multiple calls. For ETFs or mutual funds, use get_etf_info instead.",
+      "Get stock fundamentals for one or more tickers. Returns ~30 key fields by default: identity (shortName, sector, industry, country), price (currentPrice, previousClose, marketCap, enterpriseValue), valuation (trailingPE, forwardPE, priceToBook, EV/EBITDA), earnings (EPS, revenueGrowth), margins (gross/operating/profit, ROE, ROA), dividends, analyst ratings, and longBusinessSummary. Pass include_all: true to get the full 120+ field payload. Pass an array of symbols to fetch multiple tickers in one call — returns a dict keyed by symbol. Max 5 tickers per call; if you need more, split into multiple calls. For ETFs or mutual funds, use get_etf_info instead.",
     inputSchema: {
       type: "object",
       properties: {
@@ -84,6 +84,10 @@ export const TOOLS: Tool[] = [
             { type: "string" },
             { type: "array", items: { type: "string" }, maxItems: 5 },
           ],
+        },
+        include_all: {
+          type: "boolean",
+          description: "Set to true to return the full 120+ field payload. Defaults to false (returns ~30 key fields).",
         },
       },
       required: ["ticker"],
@@ -600,7 +604,7 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
     case "get_historical_stock_prices":
       return getHistoricalPrices(str(args.ticker), str(args.period, "1mo"), str(args.interval, "1d"), args.prepost === true);
     case "get_stock_info":
-      return getStockInfo(tickerArg(args.ticker));
+      return getStockInfo(tickerArg(args.ticker), args.include_all === true);
     case "get_etf_info":
       return getEtfInfo(tickerArg(args.ticker));
     case "get_yahoo_finance_news":

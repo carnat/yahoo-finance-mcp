@@ -96,6 +96,38 @@ _EQUITY_EXCLUDED_FIELDS: frozenset[str] = frozenset({
     "fromCurrency", "toCurrency", "lastMarket", "lastCapGain",
 })
 
+# ~30-field default summary returned by get_stock_info when include_all=False and no fields filter.
+_STOCK_INFO_DEFAULT_FIELDS: tuple[str, ...] = (
+    # Identity
+    "shortName", "longName", "sector", "industry", "country", "website", "fullTimeEmployees",
+    # Price / market
+    "currentPrice", "previousClose", "marketCap", "enterpriseValue", "currency",
+    # Valuation
+    "trailingPE", "forwardPE", "priceToBook", "priceToSalesTrailing12Months", "enterpriseToEbitda",
+    # Earnings
+    "trailingEps", "forwardEps", "revenueGrowth", "earningsGrowth",
+    # Quality
+    "grossMargins", "operatingMargins", "profitMargins", "returnOnEquity", "returnOnAssets",
+    # Dividends
+    "dividendYield", "payoutRatio",
+    # Analyst
+    "recommendationMean", "numberOfAnalystOpinions", "targetMeanPrice",
+    # Description
+    "longBusinessSummary",
+)
+
+# Named field-group aliases accepted in the `fields` parameter.
+_STOCK_INFO_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
+    "identity":     ("shortName", "longName", "sector", "industry", "country", "website", "fullTimeEmployees"),
+    "pricing":      ("currentPrice", "previousClose", "marketCap", "enterpriseValue", "currency"),
+    "valuation":    ("trailingPE", "forwardPE", "priceToBook", "priceToSalesTrailing12Months", "enterpriseToEbitda"),
+    "earnings":     ("trailingEps", "forwardEps", "revenueGrowth", "earningsGrowth"),
+    "margins":      ("grossMargins", "operatingMargins", "profitMargins", "returnOnEquity", "returnOnAssets"),
+    "dividends":    ("dividendYield", "payoutRatio"),
+    "analyst":      ("recommendationMean", "numberOfAnalystOpinions", "targetMeanPrice"),
+    "description":  ("longBusinessSummary",),
+}
+
 
 # Initialize FastMCP server
 yfinance_server = FastMCP(
@@ -123,7 +155,7 @@ This server provides financial market data from Yahoo Finance.
 ### Price & market data
 - get_fast_info: **Lightweight** — current price, market cap, 52-week high/low, moving averages, volume (~20 fields), plus pre-market/after-hours prices when available. Prefer this for price lookups.
 - get_historical_stock_prices: OHLCV history. Supports period, interval, and optional columns filter to reduce output size.
-- get_stock_info: **Heavyweight** — full ~120-field company info dict. Use only when fast_info is insufficient. Supports optional fields filter. For ETFs/funds, use get_etf_info instead.
+- get_stock_info: **Fundamentals** — returns ~30 key fields by default (identity, price, valuation, earnings, margins, dividends, analyst ratings, business description). Pass include_all=true for the full ~120-field payload. Use only when fast_info is insufficient. For ETFs/funds, use get_etf_info instead.
 - get_etf_info: **ETF/fund data** — NAV, expense ratio, AUM, YTD return, 52-week stats, moving averages, top-10 holdings, and sector weights. Use for SPY, QQQ, VTI, ARKK, and any mutual fund ticker.
 - get_price_stats: Pre-computed price statistics: % change vs 52-week high/low, distance from moving averages, 30-day volatility, and CAGR.
 - get_stock_actions: Dividend and split history.
@@ -248,28 +280,50 @@ async def get_historical_stock_prices(
 
 @yfinance_server.tool(
     name="get_stock_info",
-    description="""Get stock information for one or more ticker symbols from yahoo finance. Include the following information:
-Stock Price & Trading Info, Company Information, Financial Metrics, Earnings & Revenue, Margins & Returns, Dividends, Balance Sheet, Ownership, Analyst Coverage, Risk Metrics, Other.
+    description="""Get stock fundamentals for one or more ticker symbols from Yahoo Finance.
 
-IMPORTANT: This tool returns 120+ fields and is token-heavy. Prefer get_fast_info for price/market-cap lookups.
-Use this tool only when you need deep fundamentals, the business description, or fields not available in get_fast_info.
-For ETFs or mutual funds (SPY, QQQ, VTI, ARKK, etc.), use get_etf_info instead — it returns fund-specific fields
-including NAV, expense ratio, top-10 holdings, and sector weights.
-Use the optional `fields` parameter to request only the fields you need.
+By default returns ~30 key fields covering identity, price, valuation, earnings, margins,
+dividends, analyst ratings, and the business description — enough for most queries at a
+fraction of the token cost of the full payload.
+
+Pass include_all=true only when you specifically need fields outside the default set (e.g.
+raw balance-sheet items, governance scores, or insider-ownership details).
+
+For ETFs or mutual funds (SPY, QQQ, VTI, ARKK, etc.), use get_etf_info instead — it returns
+fund-specific fields including NAV, expense ratio, top-10 holdings, and sector weights.
+
+Default fields (~30): shortName, longName, sector, industry, country, website,
+fullTimeEmployees, currentPrice, previousClose, marketCap, enterpriseValue, currency,
+trailingPE, forwardPE, priceToBook, priceToSalesTrailing12Months, enterpriseToEbitda,
+trailingEps, forwardEps, revenueGrowth, earningsGrowth, grossMargins, operatingMargins,
+profitMargins, returnOnEquity, returnOnAssets, dividendYield, payoutRatio,
+recommendationMean, numberOfAnalystOpinions, targetMeanPrice, longBusinessSummary.
 
 Args:
     ticker: str | list[str]
         A single ticker symbol (e.g. "AAPL") or a list of symbols (e.g. ["AAPL", "MSFT"]).
         When a list is provided, returns a dict keyed by symbol.
     fields: list[str] | None
-        Optional list of field names to return, e.g. ["shortName", "sector", "industry", "fullTimeEmployees"].
-        If omitted, all ~120+ fields are returned. Specify only what you need to reduce token usage.
+        Optional list of exact field names or group aliases to return.
+        Group aliases: "identity", "pricing", "valuation", "earnings", "margins",
+        "dividends", "analyst", "description".
+        Mixing aliases and exact names is supported, e.g. ["pricing", "trailingPE"].
+        Ignored when include_all=true.
+    include_all: bool
+        Set to true to return the full ~120-field payload. Default is false.
 """,
 )
-async def get_stock_info(ticker: str | list[str], fields: list[str] | None = None) -> str:
+async def get_stock_info(
+    ticker: str | list[str],
+    fields: list[str] | None = None,
+    include_all: bool = False,
+) -> str:
     """Get stock information for a given ticker symbol"""
     if isinstance(ticker, list):
-        results = await asyncio.gather(*[get_stock_info(t, fields) for t in ticker], return_exceptions=True)
+        results = await asyncio.gather(
+            *[get_stock_info(t, fields, include_all) for t in ticker],
+            return_exceptions=True,
+        )
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     company = yf.Ticker(ticker)
     try:
@@ -283,8 +337,21 @@ async def get_stock_info(ticker: str | list[str], fields: list[str] | None = Non
     # Strip ETF/crypto/fund fields from equity responses to reduce payload size
     if info.get("quoteType") == "EQUITY":
         info = {k: v for k, v in info.items() if k not in _EQUITY_EXCLUDED_FIELDS}
-    if fields:
-        info = {k: info[k] for k in fields if k in info}
+    if not include_all:
+        if fields:
+            # Expand any group aliases, then de-duplicate while preserving order
+            expanded: list[str] = []
+            seen: set[str] = set()
+            for f in fields:
+                group = _STOCK_INFO_FIELD_GROUPS.get(f)
+                items = group if group is not None else (f,)
+                for item in items:
+                    if item not in seen:
+                        seen.add(item)
+                        expanded.append(item)
+            info = {k: info[k] for k in expanded if k in info}
+        else:
+            info = {k: info[k] for k in _STOCK_INFO_DEFAULT_FIELDS if k in info}
     return json.dumps(info)
 
 
@@ -708,27 +775,25 @@ async def get_fast_info(ticker: str | list[str]) -> str:
         print(f"Error: getting fast info for {ticker}: {e}")
         return f"Error: getting fast info for {ticker}: {e}"
 
-    # Fallback for shares field which fast_info does not always populate
-    if data.get("shares") is None:
+    # Fallback for shares + extended-hours (pre/post market) data from .info.
+    # Fetch .info at most once; skip entirely if fast_info already has shares.
+    needs_shares = data.get("shares") is None
+    needs_extended = True  # always attempt extended-hours enrichment
+    if needs_shares or needs_extended:
         try:
             info = company.info
-            data["shares"] = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+            if needs_shares:
+                data["shares"] = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+            for key in (
+                "preMarketPrice", "preMarketChange", "preMarketChangePercent",
+                "postMarketPrice", "postMarketChange", "postMarketChangePercent",
+                "postMarketTime",
+            ):
+                val = info.get(key)
+                if val is not None:
+                    data[key] = val
         except Exception:
-            pass
-
-    # Best-effort: include extended-hours (pre/post market) data from .info
-    try:
-        info = company.info
-        for key in (
-            "preMarketPrice", "preMarketChange", "preMarketChangePercent",
-            "postMarketPrice", "postMarketChange", "postMarketChangePercent",
-            "postMarketTime",
-        ):
-            val = info.get(key)
-            if val is not None:
-                data[key] = val
-    except Exception:
-        pass  # Extended-hours data is optional; fast_info fields are still returned
+            pass  # Extended-hours data is optional; fast_info fields are still returned
 
     # For index tickers, volume and open are not meaningful — replace zeros with null
     if data.get("quoteType") == "INDEX":
