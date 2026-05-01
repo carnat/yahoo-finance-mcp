@@ -2,7 +2,7 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that gives any MCP-compatible AI client (Claude, Cursor, VS Code Copilot, etc.) direct access to live financial data from Yahoo Finance.
 
-29 tools cover the full research workflow — from a quick price check to earnings forecasts, SEC filings, technical indicators, options flow, and market screening — without leaving your chat window.
+30 tools cover the full research workflow — from a quick price check to earnings forecasts, SEC filings, technical indicators, options flow, and market screening — without leaving your chat window.
 
 ## Demo
 
@@ -10,7 +10,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that g
 
 ## MCP Tools
 
-> **Token-efficiency tip:** Prefer `get_fast_info` over `get_stock_info` for any price/valuation lookup — it returns ~20 fields instead of 120+ and uses 85–90% fewer tokens. Use `get_financial_ratios` instead of fetching full financial statements when you only need computed ratios. Use `get_analyst_consensus` instead of `get_recommendations` for a ready-made summary. Use the pre-computed signal tools (`get_price_slope`, `get_volume_ratio`, `get_ma_position`, `get_earnings_momentum`, `get_short_momentum`, `get_credit_health`, `get_options_flow_summary`, `get_put_hedge_candidates`, `get_analyst_upgrade_radar`) instead of fetching raw data and computing signals yourself.
+> **Token-efficiency tip:** `get_stock_info` now returns ~30 key fields by default — no need to enumerate fields for typical queries. Prefer `get_fast_info` for pure price/volume lookups (~20 fields, 85–90% fewer tokens). Use `get_financial_ratios` instead of fetching full financial statements when you only need computed ratios. Use `get_analyst_consensus` instead of `get_recommendations` for a ready-made summary. Use the pre-computed signal tools (`get_price_slope`, `get_volume_ratio`, `get_ma_position`, `get_earnings_momentum`, `get_short_momentum`, `get_credit_health`, `get_options_flow_summary`, `get_put_hedge_candidates`, `get_analyst_upgrade_radar`) instead of fetching raw data and computing signals yourself.
 
 The server exposes the following tools through the Model Context Protocol:
 
@@ -20,7 +20,8 @@ The server exposes the following tools through the Model Context Protocol:
 |------|-------------|
 | `get_fast_info` | **Lightweight.** Get current price, market cap, 52-week range, moving averages, and volume (~20 fields). Also includes pre-market/after-hours prices when available. Prefer this over `get_stock_info` for price lookups. |
 | `get_historical_stock_prices` | Get historical OHLCV data with customizable period, interval, and optional `columns` filter (e.g. `["Close"]` to return only closing prices). |
-| `get_stock_info` | **Heavyweight.** Get the full ~120-field company info dict. Use only when deep fundamentals or the business description are needed. Supports an optional `fields` filter to request specific keys. |
+| `get_stock_info` | **Fundamentals.** Returns ~30 key fields by default: identity (shortName, sector, industry, country), price (currentPrice, previousClose, marketCap, enterpriseValue), valuation (trailingPE, forwardPE, priceToBook, EV/EBITDA), earnings (EPS, growth rates), margins (gross/operating/profit, ROE, ROA), dividends, analyst ratings, and `longBusinessSummary`. Pass `include_all=true` for the full 120+ field payload. The `fields` parameter accepts exact field names **or** group aliases (`"identity"`, `"pricing"`, `"valuation"`, `"earnings"`, `"margins"`, `"dividends"`, `"analyst"`, `"description"`). For ETFs/funds, use `get_etf_info` instead. |
+| `get_etf_info` | Get ETF or mutual fund data: identity (shortName, category, fundFamily), pricing (navPrice, previousClose, dayHigh/Low, volume), AUM/costs (totalAssets, yield, expenseRatio, ytdReturn, beta3Year), 52-week stats, moving averages, top-10 holdings, and sector weights. Use for fund tickers: SPY, QQQ, VTI, ARKK, VFIAX, etc. |
 | `get_price_stats` | Get pre-computed price statistics: % change today, % distance from 52-week high/low and moving averages, 30-day annualized volatility, and CAGR over 1y/3y/5y. Works with index tickers (e.g. `^VIX`, `^GSPC`). |
 | `get_stock_actions` | Get stock dividends and splits history. |
 | `get_yahoo_finance_news` | Get latest news articles for a stock. |

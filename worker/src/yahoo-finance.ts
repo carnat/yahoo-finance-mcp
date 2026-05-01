@@ -131,17 +131,137 @@ const enc = encodeURIComponent;
 const iso = (ts: number) => new Date(ts * 1000).toISOString();
 const noData = (t: string) => `Error: no data found for ticker ${t}`;
 
-// ── Tool implementations ─────────────────────────────────────────────────────
+/** Parse a JSON string returned by a single-ticker handler, falling back to a
+ *  structured error object if the string is not valid JSON (e.g. plain error messages). */
+function safeJsonParse(s: string, ticker: string): Record<string, unknown> {
+  try {
+    return JSON.parse(s) as Record<string, unknown>;
+  } catch {
+    return { error: true, message: s, ticker };
+  }
+}
+
+
+// ── get_etf_info ─────────────────────────────────────────────────────────────
+
+export async function getEtfInfo(ticker: string | string[]): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const limit = limitTickers(ticker);
+    const results: string[] = [];
+    for (const t of limit.tickers) {
+      results.push(await getEtfInfo(t));
+    }
+    return wrapBatchResult(
+      Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])),
+      limit
+    );
+  }
+
+  try {
+    const modules = [
+      "summaryDetail",
+      "defaultKeyStatistics",
+      "topHoldings",
+      "fundPerformance",
+      "price",
+    ].join(",");
+
+    const d = (await yGet(
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=${modules}`
+    )) as Record<string, unknown>;
+
+    const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    if (!result) return noData(ticker);
+
+    const priceData = result.price as Record<string, unknown> | undefined;
+    const summary = result.summaryDetail as Record<string, unknown> | undefined;
+    const keyStats = result.defaultKeyStatistics as Record<string, unknown> | undefined;
+    const topHoldingsData = result.topHoldings as Record<string, unknown> | undefined;
+    const fundPerf = result.fundPerformance as Record<string, unknown> | undefined;
+
+    const pick = (src: Record<string, unknown> | undefined, key: string): unknown =>
+      src ? raw(src[key]) : null;
+
+    const data: Record<string, unknown> = {
+      // Identity
+      shortName: pick(priceData, "shortName"),
+      quoteType: pick(priceData, "quoteType"),
+      category: pick(summary, "category"),
+      fundFamily: pick(summary, "fundFamily"),
+      legalType: pick(keyStats, "legalType"),
+      fundInceptionDate: pick(keyStats, "fundInceptionDate"),
+      // Pricing
+      navPrice: pick(summary, "navPrice"),
+      previousClose: pick(summary, "previousClose"),
+      open: pick(summary, "open"),
+      dayHigh: pick(summary, "dayHigh"),
+      dayLow: pick(summary, "dayLow"),
+      volume: pick(summary, "volume"),
+      averageVolume: pick(summary, "averageVolume"),
+      // AUM / costs
+      totalAssets: pick(summary, "totalAssets"),
+      yield: pick(summary, "yield"),
+      annualReportExpenseRatio: pick(summary, "annualReportExpenseRatio"),
+      ytdReturn: pick(summary, "ytdReturn"),
+      beta3Year: pick(summary, "beta3Year"),
+      // 52-week
+      fiftyTwoWeekHigh: pick(summary, "fiftyTwoWeekHigh"),
+      fiftyTwoWeekLow: pick(summary, "fiftyTwoWeekLow"),
+      fiftyTwoWeekChange: pick(keyStats, "52WeekChange"),
+      // Moving averages
+      fiftyDayAverage: pick(summary, "fiftyDayAverage"),
+      twoHundredDayAverage: pick(summary, "twoHundredDayAverage"),
+    };
+
+    // Top holdings (up to 10)
+    if (topHoldingsData) {
+      const holdings = (topHoldingsData.holdings as Array<Record<string, unknown>> | undefined) ?? [];
+      data.topHoldings = holdings.slice(0, 10).map((h) => ({
+        symbol: h.symbol,
+        holdingName: h.holdingName,
+        pct: raw(h.holdingPercent),
+      }));
+
+      const sw = (topHoldingsData.sectorWeightings as Array<Record<string, unknown>> | undefined) ?? [];
+      data.sectorWeights = sw
+        .map((s) => {
+          const entries = Object.entries(s);
+          if (entries.length === 0) return null;
+          const [sector, rawWeight] = entries[0];
+          return { sector, weight: raw(rawWeight) };
+        })
+        .filter(Boolean);
+    }
+
+    // Annual returns from fundPerformance (most recent 5 years)
+    if (fundPerf) {
+      const annual = fundPerf.annualTotalReturns as Record<string, unknown> | undefined;
+      if (annual) {
+        const returns = (annual.returns as Array<Record<string, unknown>> | undefined) ?? [];
+        data.annualReturns = returns.slice(0, 5).map((r) => ({
+          year: r.year,
+          annualValue: raw(r.annualValue),
+        }));
+      }
+    }
+
+    return JSON.stringify(data);
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+  }
+}
+
 
 export async function getHistoricalPrices(
   ticker: string,
   period: string,
-  interval: string
+  interval: string,
+  prepost: boolean = false
 ): Promise<string> {
-  const d = (await yGet(
-    `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=${period}&interval=${interval}`,
-    false
-  )) as Record<string, unknown>;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=${period}&interval=${interval}${prepost ? "&includePrePost=true" : ""}`;
+  const d = (await yGet(url, false)) as Record<string, unknown>;
 
   const result = (d?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
     | Record<string, unknown>
@@ -172,11 +292,11 @@ export async function getHistoricalPrices(
   );
 }
 
-export async function getStockInfo(ticker: string | string[]): Promise<string> {
+export async function getStockInfo(ticker: string | string[], includeAll = false): Promise<string> {
   if (Array.isArray(ticker)) {
     const limit = limitTickers(ticker);
     const results: string[] = [];
-    for (const t of limit.tickers) results.push(await getStockInfo(t));
+    for (const t of limit.tickers) results.push(await getStockInfo(t, includeAll));
     return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
   }
   const modules = [
@@ -207,6 +327,22 @@ export async function getStockInfo(ticker: string | string[]): Promise<string> {
         info[k] = raw(v);
       }
     }
+  }
+
+  if (!includeAll) {
+    const defaults = [
+      "shortName", "longName", "sector", "industry", "country", "website", "fullTimeEmployees",
+      "currentPrice", "previousClose", "marketCap", "enterpriseValue", "currency",
+      "trailingPE", "forwardPE", "priceToBook", "priceToSalesTrailing12Months", "enterpriseToEbitda",
+      "trailingEps", "forwardEps", "revenueGrowth", "earningsGrowth",
+      "grossMargins", "operatingMargins", "profitMargins", "returnOnEquity", "returnOnAssets",
+      "dividendYield", "payoutRatio",
+      "recommendationMean", "numberOfAnalystOpinions", "targetMeanPrice",
+      "longBusinessSummary",
+    ];
+    const filtered: Record<string, unknown> = {};
+    for (const k of defaults) if (k in info) filtered[k] = info[k];
+    return JSON.stringify(filtered);
   }
   return JSON.stringify(info);
 }
@@ -1040,9 +1176,17 @@ export async function getShortInterest(ticker: string): Promise<string> {
 // ── get_technical_indicators ─────────────────────────────────────────────────
 
 export async function getTechnicalIndicators(
-  ticker: string,
+  ticker: string | string[],
   period: string
 ): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const limit = limitTickers(ticker);
+    const results: string[] = [];
+    for (const t of limit.tickers) {
+      results.push(await getTechnicalIndicators(t, period));
+    }
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])), limit);
+  }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=${period}&interval=1d`,
     false
@@ -1277,7 +1421,15 @@ export async function getMaPosition(ticker: string | string[]): Promise<string> 
 
 // ── get_credit_health ────────────────────────────────────────────────────────
 
-export async function getCreditHealth(ticker: string): Promise<string> {
+export async function getCreditHealth(ticker: string | string[]): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const limit = limitTickers(ticker);
+    const results: string[] = [];
+    for (const t of limit.tickers) {
+      results.push(await getCreditHealth(t));
+    }
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])), limit);
+  }
   try {
     const [bsRaw, incRaw] = await Promise.all([
       fetchTimeseries(ticker, "quarterly", ["TotalDebt", "CashAndCashEquivalents"]),
@@ -1349,7 +1501,15 @@ export async function getCreditHealth(ticker: string): Promise<string> {
 
 // ── get_short_momentum ───────────────────────────────────────────────────────
 
-export async function getShortMomentum(ticker: string): Promise<string> {
+export async function getShortMomentum(ticker: string | string[]): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const limit = limitTickers(ticker);
+    const results: string[] = [];
+    for (const t of limit.tickers) {
+      results.push(await getShortMomentum(t));
+    }
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])), limit);
+  }
   try {
     const si = JSON.parse(await getShortInterest(ticker));
     if (si.error) return JSON.stringify(si);
@@ -1405,7 +1565,15 @@ export async function getShortMomentum(ticker: string): Promise<string> {
 
 // ── get_earnings_momentum ────────────────────────────────────────────────────
 
-export async function getEarningsMomentum(ticker: string): Promise<string> {
+export async function getEarningsMomentum(ticker: string | string[]): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const limit = limitTickers(ticker);
+    const results: string[] = [];
+    for (const t of limit.tickers) {
+      results.push(await getEarningsMomentum(t));
+    }
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])), limit);
+  }
   try {
     const ea = JSON.parse(await getEarningsAnalysis(ticker));
     if (typeof ea === "string" && ea.startsWith("Error")) {

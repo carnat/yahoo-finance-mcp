@@ -54,16 +54,79 @@ def _cache_set(key: str, value: str) -> None:
     _cache[key] = (time.monotonic(), value)
 
 
-async def _fetch_with_retry(fn, *args, retries: int = 1, delay: float = 2.0):
-    """Call fn(*args) with one retry on exception, waiting `delay` seconds."""
+async def _fetch_with_retry(fn, *args, retries: int = 1, delay: float = 2.0, **kwargs):
+    """Call fn(*args, **kwargs) with one retry on exception, waiting `delay` seconds."""
     for attempt in range(retries + 1):
         try:
-            return fn(*args)
+            return fn(*args, **kwargs)
         except Exception:
             if attempt < retries:
                 await asyncio.sleep(delay)
             else:
                 raise
+
+
+def _safe_parse(result: object, ticker: str) -> object:
+    """Parse a JSON result string, returning a structured error dict on failure.
+
+    Handles both Exception objects returned by asyncio.gather(return_exceptions=True)
+    and plain error strings returned by single-ticker handlers.
+    """
+    if isinstance(result, Exception):
+        return {"error": True, "message": str(result), "ticker": ticker}
+    try:
+        return json.loads(result)  # type: ignore[arg-type]
+    except Exception:
+        return {"error": True, "message": str(result), "ticker": ticker}
+
+
+# Fields that only apply to ETFs, mutual funds, or crypto — stripped from EQUITY responses
+# to reduce payload size and prevent downstream misinterpretation.
+_EQUITY_EXCLUDED_FIELDS: frozenset[str] = frozenset({
+    "yield", "ytdReturn", "qtdReturn", "totalAssets", "expireDate",
+    "strikePrice", "openInterest", "navPrice", "volume24Hr",
+    "volumeAllCurrencies", "circulatingSupply", "algorithm", "maxSupply",
+    "totalSupply", "startDate", "fullyDilutedValue", "volume24HrMarketCapPercent",
+    "morningStarOverallRating", "morningStarRiskRating", "category",
+    "beta3Year", "fundFamily", "fundInceptionDate", "legalType",
+    "threeYearAverageReturn", "fiveYearAverageReturn", "annualHoldingsTurnover",
+    "annualReportExpenseRatio", "latestFundingDate", "latestAmountRaised",
+    "latestImpliedValuation", "latestShareClass", "leadInvestor",
+    "fundingToDate", "totalFundingRounds", "coinMarketCapLink",
+    "fromCurrency", "toCurrency", "lastMarket", "lastCapGain",
+})
+
+# ~30-field default summary returned by get_stock_info when include_all=False and no fields filter.
+_STOCK_INFO_DEFAULT_FIELDS: tuple[str, ...] = (
+    # Identity
+    "shortName", "longName", "sector", "industry", "country", "website", "fullTimeEmployees",
+    # Price / market
+    "currentPrice", "previousClose", "marketCap", "enterpriseValue", "currency",
+    # Valuation
+    "trailingPE", "forwardPE", "priceToBook", "priceToSalesTrailing12Months", "enterpriseToEbitda",
+    # Earnings
+    "trailingEps", "forwardEps", "revenueGrowth", "earningsGrowth",
+    # Quality
+    "grossMargins", "operatingMargins", "profitMargins", "returnOnEquity", "returnOnAssets",
+    # Dividends
+    "dividendYield", "payoutRatio",
+    # Analyst
+    "recommendationMean", "numberOfAnalystOpinions", "targetMeanPrice",
+    # Description
+    "longBusinessSummary",
+)
+
+# Named field-group aliases accepted in the `fields` parameter.
+_STOCK_INFO_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
+    "identity":     ("shortName", "longName", "sector", "industry", "country", "website", "fullTimeEmployees"),
+    "pricing":      ("currentPrice", "previousClose", "marketCap", "enterpriseValue", "currency"),
+    "valuation":    ("trailingPE", "forwardPE", "priceToBook", "priceToSalesTrailing12Months", "enterpriseToEbitda"),
+    "earnings":     ("trailingEps", "forwardEps", "revenueGrowth", "earningsGrowth"),
+    "margins":      ("grossMargins", "operatingMargins", "profitMargins", "returnOnEquity", "returnOnAssets"),
+    "dividends":    ("dividendYield", "payoutRatio"),
+    "analyst":      ("recommendationMean", "numberOfAnalystOpinions", "targetMeanPrice"),
+    "description":  ("longBusinessSummary",),
+}
 
 
 # Initialize FastMCP server
@@ -76,7 +139,8 @@ This server provides financial market data from Yahoo Finance.
 
 ## Tool selection guidance
 - **Prefer `get_fast_info`** over `get_stock_info` for current price, market cap, 52-week range, or moving averages — it returns ~20 fields instead of 120+ and uses far fewer tokens. Also includes pre-market / after-hours prices when available.
-- Use `get_stock_info` only when you need deep fundamentals, business description, or fields not in fast_info.
+- Use `get_stock_info` only when you need deep fundamentals, business description, or fields not in fast_info. For ETFs or mutual funds, use `get_etf_info` instead.
+- **Use `get_etf_info`** for ETFs and mutual funds — returns NAV, expense ratio, AUM, YTD return, top-10 holdings, and sector weights. Covers tickers like SPY, QQQ, VTI, ARKK, etc.
 - **Prefer `get_financial_ratios`** over fetching full financial statements when you need valuation or profitability ratios — ratios are pre-computed server-side.
 - **Prefer `get_analyst_consensus`** over `get_recommendations` when you need a quick summary of analyst sentiment and price targets.
 - **Prefer `get_earnings_analysis`** to get all forward-looking analyst estimates in a single call instead of five separate calls.
@@ -91,7 +155,8 @@ This server provides financial market data from Yahoo Finance.
 ### Price & market data
 - get_fast_info: **Lightweight** — current price, market cap, 52-week high/low, moving averages, volume (~20 fields), plus pre-market/after-hours prices when available. Prefer this for price lookups.
 - get_historical_stock_prices: OHLCV history. Supports period, interval, and optional columns filter to reduce output size.
-- get_stock_info: **Heavyweight** — full ~120-field company info dict. Use only when fast_info is insufficient. Supports optional fields filter.
+- get_stock_info: **Fundamentals** — returns ~30 key fields by default (identity, price, valuation, earnings, margins, dividends, analyst ratings, business description). Pass include_all=true for the full ~120-field payload. Use only when fast_info is insufficient. For ETFs/funds, use get_etf_info instead.
+- get_etf_info: **ETF/fund data** — NAV, expense ratio, AUM, YTD return, 52-week stats, moving averages, top-10 holdings, and sector weights. Use for SPY, QQQ, VTI, ARKK, and any mutual fund ticker.
 - get_price_stats: Pre-computed price statistics: % change vs 52-week high/low, distance from moving averages, 30-day volatility, and CAGR.
 - get_stock_actions: Dividend and split history.
 - get_short_interest: Short interest metrics: short % of float, shares short, days-to-cover ratio, float shares.
@@ -146,11 +211,15 @@ Args:
         Valid column names: Open, High, Low, Close, Volume, Dividends, Stock Splits.
         If omitted, all columns are returned.
         Tip: request only "Close" when you only need price trend data — this reduces response size significantly.
+    prepost : bool
+        If True, includes pre-market and after-hours data rows.
+        Only meaningful with intraday intervals (1m–90m) and period ≤ 60d.
+        Default is False.
 """,
 )
 async def get_historical_stock_prices(
     ticker: str, period: str = "1mo", interval: str = "1d",
-    columns: list[str] | None = None,
+    columns: list[str] | None = None, prepost: bool = False,
 ) -> str:
     """Get historical stock prices for a given ticker symbol
 
@@ -168,7 +237,7 @@ async def get_historical_stock_prices(
         columns : list[str] | None
             Optional subset of columns to return. If None, all columns are returned.
     """
-    cache_key = f"hist:{ticker}:{period}:{interval}"
+    cache_key = f"hist:{ticker}:{period}:{interval}:{prepost}"
     cached = _cache_get(cache_key, _PRICE_TTL)
     if cached is not None:
         if columns:
@@ -190,7 +259,7 @@ async def get_historical_stock_prices(
         return f"Error: getting historical stock prices for {ticker}: {e}"
 
     try:
-        hist_data = await _fetch_with_retry(company.history, period, interval)
+        hist_data = await _fetch_with_retry(company.history, period, interval, prepost=prepost)
     except Exception as e:
         print(f"Error: getting historical stock prices for {ticker}: {e}")
         return f"Error: getting historical stock prices for {ticker}: {e}"
@@ -211,27 +280,51 @@ async def get_historical_stock_prices(
 
 @yfinance_server.tool(
     name="get_stock_info",
-    description="""Get stock information for one or more ticker symbols from yahoo finance. Include the following information:
-Stock Price & Trading Info, Company Information, Financial Metrics, Earnings & Revenue, Margins & Returns, Dividends, Balance Sheet, Ownership, Analyst Coverage, Risk Metrics, Other.
+    description="""Get stock fundamentals for one or more ticker symbols from Yahoo Finance.
 
-IMPORTANT: This tool returns 120+ fields and is token-heavy. Prefer get_fast_info for price/market-cap lookups.
-Use this tool only when you need deep fundamentals, the business description, or fields not available in get_fast_info.
-Use the optional `fields` parameter to request only the fields you need.
+By default returns ~30 key fields covering identity, price, valuation, earnings, margins,
+dividends, analyst ratings, and the business description — enough for most queries at a
+fraction of the token cost of the full payload.
+
+Pass include_all=true only when you specifically need fields outside the default set (e.g.
+raw balance-sheet items, governance scores, or insider-ownership details).
+
+For ETFs or mutual funds (SPY, QQQ, VTI, ARKK, etc.), use get_etf_info instead — it returns
+fund-specific fields including NAV, expense ratio, top-10 holdings, and sector weights.
+
+Default fields (~30): shortName, longName, sector, industry, country, website,
+fullTimeEmployees, currentPrice, previousClose, marketCap, enterpriseValue, currency,
+trailingPE, forwardPE, priceToBook, priceToSalesTrailing12Months, enterpriseToEbitda,
+trailingEps, forwardEps, revenueGrowth, earningsGrowth, grossMargins, operatingMargins,
+profitMargins, returnOnEquity, returnOnAssets, dividendYield, payoutRatio,
+recommendationMean, numberOfAnalystOpinions, targetMeanPrice, longBusinessSummary.
 
 Args:
     ticker: str | list[str]
         A single ticker symbol (e.g. "AAPL") or a list of symbols (e.g. ["AAPL", "MSFT"]).
         When a list is provided, returns a dict keyed by symbol.
     fields: list[str] | None
-        Optional list of field names to return, e.g. ["shortName", "sector", "industry", "fullTimeEmployees"].
-        If omitted, all ~120+ fields are returned. Specify only what you need to reduce token usage.
+        Optional list of exact field names or group aliases to return.
+        Group aliases: "identity", "pricing", "valuation", "earnings", "margins",
+        "dividends", "analyst", "description".
+        Mixing aliases and exact names is supported, e.g. ["pricing", "trailingPE"].
+        Ignored when include_all=true.
+    include_all: bool
+        Set to true to return the full ~120-field payload. Default is false.
 """,
 )
-async def get_stock_info(ticker: str | list[str], fields: list[str] | None = None) -> str:
+async def get_stock_info(
+    ticker: str | list[str],
+    fields: list[str] | None = None,
+    include_all: bool = False,
+) -> str:
     """Get stock information for a given ticker symbol"""
     if isinstance(ticker, list):
-        results = await asyncio.gather(*[get_stock_info(t, fields) for t in ticker])
-        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+        results = await asyncio.gather(
+            *[get_stock_info(t, fields, include_all) for t in ticker],
+            return_exceptions=True,
+        )
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     company = yf.Ticker(ticker)
     try:
         if company.fast_info.currency is None:
@@ -241,8 +334,24 @@ async def get_stock_info(ticker: str | list[str], fields: list[str] | None = Non
         print(f"Error: getting stock information for {ticker}: {e}")
         return f"Error: getting stock information for {ticker}: {e}"
     info = company.info
-    if fields:
-        info = {k: info[k] for k in fields if k in info}
+    # Strip ETF/crypto/fund fields from equity responses to reduce payload size
+    if info.get("quoteType") == "EQUITY":
+        info = {k: v for k, v in info.items() if k not in _EQUITY_EXCLUDED_FIELDS}
+    if not include_all:
+        if fields:
+            # Expand any group aliases, then de-duplicate while preserving order
+            expanded: list[str] = []
+            seen: set[str] = set()
+            for f in fields:
+                group = _STOCK_INFO_FIELD_GROUPS.get(f)
+                items = group if group is not None else (f,)
+                for item in items:
+                    if item not in seen:
+                        seen.add(item)
+                        expanded.append(item)
+            info = {k: info[k] for k in expanded if k in info}
+        else:
+            info = {k: info[k] for k in _STOCK_INFO_DEFAULT_FIELDS if k in info}
     return json.dumps(info)
 
 
@@ -578,6 +687,8 @@ async def get_option_chain(
     name="get_recommendations",
     description="""Get recommendations or upgrades/downgrades for a given ticker symbol from yahoo finance. You can also specify the number of months back to get upgrades/downgrades for, default is 12.
 
+DEPRECATED: Use `get_analyst_upgrade_radar` instead, which supports batch tickers and includes pre-computed signal classification (UPGRADE/DOWNGRADE/MAINTAIN) and net sentiment score.
+
 Args:
     ticker: str
         The ticker symbol of the stock to get recommendations for, e.g. "AAPL"
@@ -644,8 +755,8 @@ Args:
 async def get_fast_info(ticker: str | list[str]) -> str:
     """Get lightweight real-time price and market data for a ticker symbol."""
     if isinstance(ticker, list):
-        results = await asyncio.gather(*[get_fast_info(t) for t in ticker])
-        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+        results = await asyncio.gather(*[get_fast_info(t) for t in ticker], return_exceptions=True)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     cache_key = f"fast_info:{ticker}"
     cached = _cache_get(cache_key, _PRICE_TTL)
     if cached is not None:
@@ -664,18 +775,28 @@ async def get_fast_info(ticker: str | list[str]) -> str:
         print(f"Error: getting fast info for {ticker}: {e}")
         return f"Error: getting fast info for {ticker}: {e}"
 
-    # Best-effort: include extended-hours (pre/post market) data from .info
+    # Fetch .info once to cover both the shares fallback and extended-hours enrichment.
     try:
         info = company.info
+        if data.get("shares") is None:
+            data["shares"] = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
         for key in (
             "preMarketPrice", "preMarketChange", "preMarketChangePercent",
             "postMarketPrice", "postMarketChange", "postMarketChangePercent",
+            "postMarketTime",
         ):
             val = info.get(key)
             if val is not None:
                 data[key] = val
     except Exception:
         pass  # Extended-hours data is optional; fast_info fields are still returned
+
+    # For index tickers, volume and open are not meaningful — replace zeros with null
+    if data.get("quoteType") == "INDEX":
+        for field in ("open", "lastVolume", "tenDayAverageVolume", "threeMonthAverageVolume"):
+            if data.get(field) == 0:
+                data[field] = None
+        data["_note"] = "Index ticker — volume and open fields not applicable"
 
     result = json.dumps(data)
     _cache_set(cache_key, result)
@@ -876,8 +997,8 @@ Args:
 async def get_analyst_consensus(ticker: str | list[str]) -> str:
     """Get compact analyst consensus summary."""
     if isinstance(ticker, list):
-        results = await asyncio.gather(*[get_analyst_consensus(t) for t in ticker])
-        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+        results = await asyncio.gather(*[get_analyst_consensus(t) for t in ticker], return_exceptions=True)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     cache_key = f"analyst_consensus:{ticker}"
     cached = _cache_get(cache_key, _STMT_TTL)
     if cached is not None:
@@ -1023,8 +1144,8 @@ Args:
 async def get_financial_ratios(ticker: str | list[str]) -> str:
     """Get pre-computed key financial ratios."""
     if isinstance(ticker, list):
-        results = await asyncio.gather(*[get_financial_ratios(t) for t in ticker])
-        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+        results = await asyncio.gather(*[get_financial_ratios(t) for t in ticker], return_exceptions=True)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     cache_key = f"financial_ratios:{ticker}"
     cached = _cache_get(cache_key, _STMT_TTL)
     if cached is not None:
@@ -1091,6 +1212,10 @@ async def get_financial_ratios(ticker: str | list[str]) -> str:
 @yfinance_server.tool(
     name="get_calendar",
     description="""Get upcoming earnings date and dividend schedule for a ticker.
+
+DEPRECATED: All fields returned by this tool (earnings date, EPS/revenue estimates,
+ex-dividend date, dividend pay date) are also available in `get_stock_info` under the
+`earnings` and dividend keys. Prefer `get_stock_info` to save a round-trip.
 
 Returns:
 - Next earnings date range and EPS/revenue estimates
@@ -1294,7 +1419,7 @@ async def get_sec_filings(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_technical_indicators",
-    description="""Get pre-computed technical / momentum indicators for a ticker.
+    description="""Get pre-computed technical / momentum indicators for one or more tickers.
 
 Computes indicators server-side from historical daily close prices so the LLM
 does NOT need to fetch raw OHLCV history and calculate manually.
@@ -1309,15 +1434,26 @@ Returns:
 - dataDate: Date of the most recent data point
 
 Args:
-    ticker: str
-        The ticker symbol, e.g. "AAPL"
+    ticker: str | list[str]
+        A single ticker symbol (e.g. "AAPL") or a list of up to 5 symbols.
+        When a list is provided, returns a dict keyed by symbol.
+        Max 5 tickers per call; split larger lists into multiple calls.
     period: str
         Lookback period for fetching history (default "3mo"). Longer periods give
         more accurate indicator warm-up. Valid: 1mo, 3mo, 6mo, 1y, 2y, 5y.
 """,
 )
-async def get_technical_indicators(ticker: str, period: str = "3mo") -> str:
-    """Get pre-computed technical indicators (RSI, MACD) for a ticker."""
+async def get_technical_indicators(ticker: str | list[str], period: str = "3mo") -> str:
+    """Get pre-computed technical indicators (RSI, MACD) for one or more tickers."""
+    if isinstance(ticker, list):
+        results = []
+        for t in ticker:
+            try:
+                results.append(await get_technical_indicators(t, period))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
+            await asyncio.sleep(0.1)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     cache_key = f"tech_indicators:{ticker}:{period}"
     cached = _cache_get(cache_key, _PRICE_TTL)
     if cached is not None:
@@ -1401,9 +1537,12 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
     if isinstance(ticker, list):
         results = []
         for t in ticker:
-            results.append(await get_price_slope(t, days))
+            try:
+                results.append(await get_price_slope(t, days))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
             await asyncio.sleep(0.1)
-        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
 
     company = yf.Ticker(ticker)
     try:
@@ -1468,9 +1607,12 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
     if isinstance(ticker, list):
         results = []
         for t in ticker:
-            results.append(await get_volume_ratio(t, period))
+            try:
+                results.append(await get_volume_ratio(t, period))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
             await asyncio.sleep(0.1)
-        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
 
     company = yf.Ticker(ticker)
     try:
@@ -1526,9 +1668,12 @@ async def get_ma_position(ticker: str | list[str]) -> str:
     if isinstance(ticker, list):
         results = []
         for t in ticker:
-            results.append(await get_ma_position(t))
+            try:
+                results.append(await get_ma_position(t))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
             await asyncio.sleep(0.1)
-        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
 
     company = yf.Ticker(ticker)
     try:
@@ -1574,14 +1719,26 @@ async def get_ma_position(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_credit_health",
-    description="""Get pre-computed credit/leverage metrics: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag. Single ticker only.
+    description="""Get pre-computed credit/leverage metrics: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag.
 
 Args:
-    ticker: str — single ticker
+    ticker: str | list[str]
+        A single ticker symbol (e.g. "AAPL") or a list of up to 5 symbols.
+        When a list is provided, returns a dict keyed by symbol.
+        Max 5 tickers per call; split larger lists into multiple calls.
 """,
 )
-async def get_credit_health(ticker: str) -> str:
-    """Return credit health metrics for a single ticker."""
+async def get_credit_health(ticker: str | list[str]) -> str:
+    """Return credit health metrics for one or more tickers."""
+    if isinstance(ticker, list):
+        results = []
+        for t in ticker:
+            try:
+                results.append(await get_credit_health(t))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
+            await asyncio.sleep(0.1)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     company = yf.Ticker(ticker)
 
     data_quality = "OK"
@@ -1679,14 +1836,26 @@ async def get_credit_health(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_short_momentum",
-    description="""Get short interest with pre-computed momentum: MoM delta, direction, squeeze risk, and flag. Single ticker only.
+    description="""Get short interest with pre-computed momentum: MoM delta, direction, squeeze risk, and flag.
 
 Args:
-    ticker: str — single ticker
+    ticker: str | list[str]
+        A single ticker symbol (e.g. "AAPL") or a list of up to 5 symbols.
+        When a list is provided, returns a dict keyed by symbol.
+        Max 5 tickers per call; split larger lists into multiple calls.
 """,
 )
-async def get_short_momentum(ticker: str) -> str:
-    """Return short interest momentum for a single ticker."""
+async def get_short_momentum(ticker: str | list[str]) -> str:
+    """Return short interest momentum for one or more tickers."""
+    if isinstance(ticker, list):
+        results = []
+        for t in ticker:
+            try:
+                results.append(await get_short_momentum(t))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
+            await asyncio.sleep(0.1)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     company = yf.Ticker(ticker)
     try:
         info = company.info
@@ -1764,16 +1933,28 @@ async def get_short_momentum(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_earnings_momentum",
-    description="""Get earnings revision momentum, beat rate, and estimate direction signals. Single ticker only.
+    description="""Get earnings revision momentum, beat rate, and estimate direction signals.
 
 Returns: revision7d/30d/90d, revisionDirection, momentumFlag, beatRate, beatCount, avgSurprisePct, currentBeatStreak.
 
 Args:
-    ticker: str — single ticker
+    ticker: str | list[str]
+        A single ticker symbol (e.g. "AAPL") or a list of up to 5 symbols.
+        When a list is provided, returns a dict keyed by symbol.
+        Max 5 tickers per call; split larger lists into multiple calls.
 """,
 )
-async def get_earnings_momentum(ticker: str) -> str:
-    """Return earnings momentum for a single ticker."""
+async def get_earnings_momentum(ticker: str | list[str]) -> str:
+    """Return earnings momentum for one or more tickers."""
+    if isinstance(ticker, list):
+        results = []
+        for t in ticker:
+            try:
+                results.append(await get_earnings_momentum(t))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
+            await asyncio.sleep(0.1)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     company = yf.Ticker(ticker)
     try:
         fi = company.fast_info
@@ -2215,9 +2396,12 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
     if isinstance(ticker, list):
         results = []
         for t in ticker:
-            results.append(await get_analyst_upgrade_radar(t, days_back))
+            try:
+                results.append(await get_analyst_upgrade_radar(t, days_back))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
             await asyncio.sleep(0.1)
-        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
 
     company = yf.Ticker(ticker)
     try:
@@ -2320,6 +2504,93 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
         "summary": summary,
         "dataDate": str(datetime.date.today()),
     })
+
+
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_etf_info
+# ---------------------------------------------------------------------------
+
+_ETF_INFO_FIELDS = [
+    "shortName", "quoteType", "category", "fundFamily", "legalType", "fundInceptionDate",
+    "navPrice", "previousClose", "open", "dayHigh", "dayLow", "volume", "averageVolume",
+    "totalAssets", "yield", "annualReportExpenseRatio", "ytdReturn", "beta3Year",
+    "fiftyTwoWeekHigh", "fiftyTwoWeekLow", "fiftyTwoWeekChange",
+    "fiftyDayAverage", "twoHundredDayAverage",
+]
+
+
+def _df_to_records(df) -> list | None:
+    """Convert a DataFrame to a JSON-serialisable list of records, or None if empty."""
+    if df is None or df.empty:
+        return None
+    return json.loads(df.reset_index().to_json(orient="records"))
+
+
+@yfinance_server.tool(
+    name="get_etf_info",
+    description="""Get ETF or mutual fund data for one or more ticker symbols.
+
+Returns identity (shortName, category, fundFamily, legalType, fundInceptionDate),
+pricing (navPrice, previousClose, open, dayHigh, dayLow, volume, averageVolume),
+AUM/costs (totalAssets, yield, annualReportExpenseRatio, ytdReturn, beta3Year),
+52-week stats (fiftyTwoWeekHigh, fiftyTwoWeekLow, fiftyTwoWeekChange),
+moving averages (fiftyDayAverage, twoHundredDayAverage),
+top-10 holdings (topHoldings), and sector weights (sectorWeights).
+
+Use this tool for ETF and fund tickers: SPY, QQQ, VTI, ARKK, VFIAX, etc.
+For individual stocks, use get_fast_info or get_stock_info instead.
+
+Args:
+    ticker: str | list[str]
+        A single ETF/fund ticker (e.g. "SPY") or a list of up to 5 symbols.
+        When a list is provided, returns a dict keyed by symbol.
+        Max 5 tickers per call; split larger lists into multiple calls.
+""",
+)
+async def get_etf_info(ticker: str | list[str]) -> str:
+    """Get ETF/fund information for one or more ticker symbols."""
+    if isinstance(ticker, list):
+        results = []
+        for t in ticker:
+            try:
+                results.append(await get_etf_info(t))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
+            await asyncio.sleep(0.1)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
+
+    cache_key = f"etf_info:{ticker}"
+    cached = _cache_get(cache_key, _PRICE_TTL)
+    if cached is not None:
+        return cached
+
+    company = yf.Ticker(ticker)
+    try:
+        info = company.info
+    except Exception as e:
+        return f"Error: getting ETF info for {ticker}: {e}"
+
+    data: dict = {k: info.get(k) for k in _ETF_INFO_FIELDS}
+
+    # Top-10 holdings from funds_top_holdings DataFrame
+    try:
+        holdings_df = company.funds_top_holdings
+        records = _df_to_records(None if holdings_df is None else holdings_df.head(10))
+        data["topHoldings"] = records
+    except Exception:
+        data["topHoldings"] = None
+
+    # Sector weights from funds_sector_weightings DataFrame
+    try:
+        data["sectorWeights"] = _df_to_records(company.funds_sector_weightings)
+    except Exception:
+        data["sectorWeights"] = None
+
+    result = json.dumps(data)
+    _cache_set(cache_key, result)
+    return result
 
 
 if __name__ == "__main__":
