@@ -54,16 +54,47 @@ def _cache_set(key: str, value: str) -> None:
     _cache[key] = (time.monotonic(), value)
 
 
-async def _fetch_with_retry(fn, *args, retries: int = 1, delay: float = 2.0):
-    """Call fn(*args) with one retry on exception, waiting `delay` seconds."""
+async def _fetch_with_retry(fn, *args, retries: int = 1, delay: float = 2.0, **kwargs):
+    """Call fn(*args, **kwargs) with one retry on exception, waiting `delay` seconds."""
     for attempt in range(retries + 1):
         try:
-            return fn(*args)
+            return fn(*args, **kwargs)
         except Exception:
             if attempt < retries:
                 await asyncio.sleep(delay)
             else:
                 raise
+
+
+def _safe_parse(result: object, ticker: str) -> object:
+    """Parse a JSON result string, returning a structured error dict on failure.
+
+    Handles both Exception objects returned by asyncio.gather(return_exceptions=True)
+    and plain error strings returned by single-ticker handlers.
+    """
+    if isinstance(result, Exception):
+        return {"error": True, "message": str(result), "ticker": ticker}
+    try:
+        return json.loads(result)  # type: ignore[arg-type]
+    except Exception:
+        return {"error": True, "message": str(result), "ticker": ticker}
+
+
+# Fields that only apply to ETFs, mutual funds, or crypto — stripped from EQUITY responses
+# to reduce payload size and prevent downstream misinterpretation.
+_EQUITY_EXCLUDED_FIELDS: frozenset[str] = frozenset({
+    "yield", "ytdReturn", "qtdReturn", "totalAssets", "expireDate",
+    "strikePrice", "openInterest", "navPrice", "volume24Hr",
+    "volumeAllCurrencies", "circulatingSupply", "algorithm", "maxSupply",
+    "totalSupply", "startDate", "fullyDilutedValue", "volume24HrMarketCapPercent",
+    "morningStarOverallRating", "morningStarRiskRating", "category",
+    "beta3Year", "fundFamily", "fundInceptionDate", "legalType",
+    "threeYearAverageReturn", "fiveYearAverageReturn", "annualHoldingsTurnover",
+    "annualReportExpenseRatio", "latestFundingDate", "latestAmountRaised",
+    "latestImpliedValuation", "latestShareClass", "leadInvestor",
+    "fundingToDate", "totalFundingRounds", "coinMarketCapLink",
+    "fromCurrency", "toCurrency", "lastMarket", "lastCapGain",
+})
 
 
 # Initialize FastMCP server
@@ -146,11 +177,15 @@ Args:
         Valid column names: Open, High, Low, Close, Volume, Dividends, Stock Splits.
         If omitted, all columns are returned.
         Tip: request only "Close" when you only need price trend data — this reduces response size significantly.
+    prepost : bool
+        If True, includes pre-market and after-hours data rows.
+        Only meaningful with intraday intervals (1m–90m) and period ≤ 60d.
+        Default is False.
 """,
 )
 async def get_historical_stock_prices(
     ticker: str, period: str = "1mo", interval: str = "1d",
-    columns: list[str] | None = None,
+    columns: list[str] | None = None, prepost: bool = False,
 ) -> str:
     """Get historical stock prices for a given ticker symbol
 
@@ -168,7 +203,7 @@ async def get_historical_stock_prices(
         columns : list[str] | None
             Optional subset of columns to return. If None, all columns are returned.
     """
-    cache_key = f"hist:{ticker}:{period}:{interval}"
+    cache_key = f"hist:{ticker}:{period}:{interval}:{prepost}"
     cached = _cache_get(cache_key, _PRICE_TTL)
     if cached is not None:
         if columns:
@@ -190,7 +225,7 @@ async def get_historical_stock_prices(
         return f"Error: getting historical stock prices for {ticker}: {e}"
 
     try:
-        hist_data = await _fetch_with_retry(company.history, period, interval)
+        hist_data = await _fetch_with_retry(company.history, period, interval, prepost=prepost)
     except Exception as e:
         print(f"Error: getting historical stock prices for {ticker}: {e}")
         return f"Error: getting historical stock prices for {ticker}: {e}"
@@ -230,8 +265,8 @@ Args:
 async def get_stock_info(ticker: str | list[str], fields: list[str] | None = None) -> str:
     """Get stock information for a given ticker symbol"""
     if isinstance(ticker, list):
-        results = await asyncio.gather(*[get_stock_info(t, fields) for t in ticker])
-        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+        results = await asyncio.gather(*[get_stock_info(t, fields) for t in ticker], return_exceptions=True)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     company = yf.Ticker(ticker)
     try:
         if company.fast_info.currency is None:
@@ -241,6 +276,9 @@ async def get_stock_info(ticker: str | list[str], fields: list[str] | None = Non
         print(f"Error: getting stock information for {ticker}: {e}")
         return f"Error: getting stock information for {ticker}: {e}"
     info = company.info
+    # Strip ETF/crypto/fund fields from equity responses to reduce payload size
+    if info.get("quoteType") == "EQUITY":
+        info = {k: v for k, v in info.items() if k not in _EQUITY_EXCLUDED_FIELDS}
     if fields:
         info = {k: info[k] for k in fields if k in info}
     return json.dumps(info)
@@ -578,6 +616,8 @@ async def get_option_chain(
     name="get_recommendations",
     description="""Get recommendations or upgrades/downgrades for a given ticker symbol from yahoo finance. You can also specify the number of months back to get upgrades/downgrades for, default is 12.
 
+DEPRECATED: Use `get_analyst_upgrade_radar` instead, which supports batch tickers and includes pre-computed signal classification (UPGRADE/DOWNGRADE/MAINTAIN) and net sentiment score.
+
 Args:
     ticker: str
         The ticker symbol of the stock to get recommendations for, e.g. "AAPL"
@@ -644,8 +684,8 @@ Args:
 async def get_fast_info(ticker: str | list[str]) -> str:
     """Get lightweight real-time price and market data for a ticker symbol."""
     if isinstance(ticker, list):
-        results = await asyncio.gather(*[get_fast_info(t) for t in ticker])
-        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+        results = await asyncio.gather(*[get_fast_info(t) for t in ticker], return_exceptions=True)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     cache_key = f"fast_info:{ticker}"
     cached = _cache_get(cache_key, _PRICE_TTL)
     if cached is not None:
@@ -664,18 +704,34 @@ async def get_fast_info(ticker: str | list[str]) -> str:
         print(f"Error: getting fast info for {ticker}: {e}")
         return f"Error: getting fast info for {ticker}: {e}"
 
+    # Fallback for shares field which fast_info does not always populate
+    if data.get("shares") is None:
+        try:
+            info = company.info
+            data["shares"] = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+        except Exception:
+            pass
+
     # Best-effort: include extended-hours (pre/post market) data from .info
     try:
         info = company.info
         for key in (
             "preMarketPrice", "preMarketChange", "preMarketChangePercent",
             "postMarketPrice", "postMarketChange", "postMarketChangePercent",
+            "postMarketTime",
         ):
             val = info.get(key)
             if val is not None:
                 data[key] = val
     except Exception:
         pass  # Extended-hours data is optional; fast_info fields are still returned
+
+    # For index tickers, volume and open are not meaningful — replace zeros with null
+    if data.get("quoteType") == "INDEX":
+        for field in ("open", "lastVolume", "tenDayAverageVolume", "threeMonthAverageVolume"):
+            if data.get(field) == 0:
+                data[field] = None
+        data["_note"] = "Index ticker — volume and open fields not applicable"
 
     result = json.dumps(data)
     _cache_set(cache_key, result)
@@ -876,8 +932,8 @@ Args:
 async def get_analyst_consensus(ticker: str | list[str]) -> str:
     """Get compact analyst consensus summary."""
     if isinstance(ticker, list):
-        results = await asyncio.gather(*[get_analyst_consensus(t) for t in ticker])
-        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+        results = await asyncio.gather(*[get_analyst_consensus(t) for t in ticker], return_exceptions=True)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     cache_key = f"analyst_consensus:{ticker}"
     cached = _cache_get(cache_key, _STMT_TTL)
     if cached is not None:
@@ -1023,8 +1079,8 @@ Args:
 async def get_financial_ratios(ticker: str | list[str]) -> str:
     """Get pre-computed key financial ratios."""
     if isinstance(ticker, list):
-        results = await asyncio.gather(*[get_financial_ratios(t) for t in ticker])
-        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+        results = await asyncio.gather(*[get_financial_ratios(t) for t in ticker], return_exceptions=True)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     cache_key = f"financial_ratios:{ticker}"
     cached = _cache_get(cache_key, _STMT_TTL)
     if cached is not None:
@@ -1091,6 +1147,10 @@ async def get_financial_ratios(ticker: str | list[str]) -> str:
 @yfinance_server.tool(
     name="get_calendar",
     description="""Get upcoming earnings date and dividend schedule for a ticker.
+
+DEPRECATED: All fields returned by this tool (earnings date, EPS/revenue estimates,
+ex-dividend date, dividend pay date) are also available in `get_stock_info` under the
+`earnings` and dividend keys. Prefer `get_stock_info` to save a round-trip.
 
 Returns:
 - Next earnings date range and EPS/revenue estimates
@@ -1294,7 +1354,7 @@ async def get_sec_filings(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_technical_indicators",
-    description="""Get pre-computed technical / momentum indicators for a ticker.
+    description="""Get pre-computed technical / momentum indicators for one or more tickers.
 
 Computes indicators server-side from historical daily close prices so the LLM
 does NOT need to fetch raw OHLCV history and calculate manually.
@@ -1309,15 +1369,26 @@ Returns:
 - dataDate: Date of the most recent data point
 
 Args:
-    ticker: str
-        The ticker symbol, e.g. "AAPL"
+    ticker: str | list[str]
+        A single ticker symbol (e.g. "AAPL") or a list of up to 5 symbols.
+        When a list is provided, returns a dict keyed by symbol.
+        Max 5 tickers per call; split larger lists into multiple calls.
     period: str
         Lookback period for fetching history (default "3mo"). Longer periods give
         more accurate indicator warm-up. Valid: 1mo, 3mo, 6mo, 1y, 2y, 5y.
 """,
 )
-async def get_technical_indicators(ticker: str, period: str = "3mo") -> str:
-    """Get pre-computed technical indicators (RSI, MACD) for a ticker."""
+async def get_technical_indicators(ticker: str | list[str], period: str = "3mo") -> str:
+    """Get pre-computed technical indicators (RSI, MACD) for one or more tickers."""
+    if isinstance(ticker, list):
+        results = []
+        for t in ticker:
+            try:
+                results.append(await get_technical_indicators(t, period))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
+            await asyncio.sleep(0.1)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     cache_key = f"tech_indicators:{ticker}:{period}"
     cached = _cache_get(cache_key, _PRICE_TTL)
     if cached is not None:
@@ -1401,9 +1472,12 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
     if isinstance(ticker, list):
         results = []
         for t in ticker:
-            results.append(await get_price_slope(t, days))
+            try:
+                results.append(await get_price_slope(t, days))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
             await asyncio.sleep(0.1)
-        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
 
     company = yf.Ticker(ticker)
     try:
@@ -1468,9 +1542,12 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
     if isinstance(ticker, list):
         results = []
         for t in ticker:
-            results.append(await get_volume_ratio(t, period))
+            try:
+                results.append(await get_volume_ratio(t, period))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
             await asyncio.sleep(0.1)
-        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
 
     company = yf.Ticker(ticker)
     try:
@@ -1526,9 +1603,12 @@ async def get_ma_position(ticker: str | list[str]) -> str:
     if isinstance(ticker, list):
         results = []
         for t in ticker:
-            results.append(await get_ma_position(t))
+            try:
+                results.append(await get_ma_position(t))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
             await asyncio.sleep(0.1)
-        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
 
     company = yf.Ticker(ticker)
     try:
@@ -1574,14 +1654,26 @@ async def get_ma_position(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_credit_health",
-    description="""Get pre-computed credit/leverage metrics: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag. Single ticker only.
+    description="""Get pre-computed credit/leverage metrics: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag.
 
 Args:
-    ticker: str — single ticker
+    ticker: str | list[str]
+        A single ticker symbol (e.g. "AAPL") or a list of up to 5 symbols.
+        When a list is provided, returns a dict keyed by symbol.
+        Max 5 tickers per call; split larger lists into multiple calls.
 """,
 )
-async def get_credit_health(ticker: str) -> str:
-    """Return credit health metrics for a single ticker."""
+async def get_credit_health(ticker: str | list[str]) -> str:
+    """Return credit health metrics for one or more tickers."""
+    if isinstance(ticker, list):
+        results = []
+        for t in ticker:
+            try:
+                results.append(await get_credit_health(t))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
+            await asyncio.sleep(0.1)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     company = yf.Ticker(ticker)
 
     data_quality = "OK"
@@ -1679,14 +1771,26 @@ async def get_credit_health(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_short_momentum",
-    description="""Get short interest with pre-computed momentum: MoM delta, direction, squeeze risk, and flag. Single ticker only.
+    description="""Get short interest with pre-computed momentum: MoM delta, direction, squeeze risk, and flag.
 
 Args:
-    ticker: str — single ticker
+    ticker: str | list[str]
+        A single ticker symbol (e.g. "AAPL") or a list of up to 5 symbols.
+        When a list is provided, returns a dict keyed by symbol.
+        Max 5 tickers per call; split larger lists into multiple calls.
 """,
 )
-async def get_short_momentum(ticker: str) -> str:
-    """Return short interest momentum for a single ticker."""
+async def get_short_momentum(ticker: str | list[str]) -> str:
+    """Return short interest momentum for one or more tickers."""
+    if isinstance(ticker, list):
+        results = []
+        for t in ticker:
+            try:
+                results.append(await get_short_momentum(t))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
+            await asyncio.sleep(0.1)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     company = yf.Ticker(ticker)
     try:
         info = company.info
@@ -1764,16 +1868,28 @@ async def get_short_momentum(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_earnings_momentum",
-    description="""Get earnings revision momentum, beat rate, and estimate direction signals. Single ticker only.
+    description="""Get earnings revision momentum, beat rate, and estimate direction signals.
 
 Returns: revision7d/30d/90d, revisionDirection, momentumFlag, beatRate, beatCount, avgSurprisePct, currentBeatStreak.
 
 Args:
-    ticker: str — single ticker
+    ticker: str | list[str]
+        A single ticker symbol (e.g. "AAPL") or a list of up to 5 symbols.
+        When a list is provided, returns a dict keyed by symbol.
+        Max 5 tickers per call; split larger lists into multiple calls.
 """,
 )
-async def get_earnings_momentum(ticker: str) -> str:
-    """Return earnings momentum for a single ticker."""
+async def get_earnings_momentum(ticker: str | list[str]) -> str:
+    """Return earnings momentum for one or more tickers."""
+    if isinstance(ticker, list):
+        results = []
+        for t in ticker:
+            try:
+                results.append(await get_earnings_momentum(t))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
+            await asyncio.sleep(0.1)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     company = yf.Ticker(ticker)
     try:
         fi = company.fast_info
@@ -2215,9 +2331,12 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
     if isinstance(ticker, list):
         results = []
         for t in ticker:
-            results.append(await get_analyst_upgrade_radar(t, days_back))
+            try:
+                results.append(await get_analyst_upgrade_radar(t, days_back))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
             await asyncio.sleep(0.1)
-        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
 
     company = yf.Ticker(ticker)
     try:

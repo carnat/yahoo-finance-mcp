@@ -136,12 +136,11 @@ const noData = (t: string) => `Error: no data found for ticker ${t}`;
 export async function getHistoricalPrices(
   ticker: string,
   period: string,
-  interval: string
+  interval: string,
+  prepost: boolean = false
 ): Promise<string> {
-  const d = (await yGet(
-    `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=${period}&interval=${interval}`,
-    false
-  )) as Record<string, unknown>;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=${period}&interval=${interval}${prepost ? "&includePrePost=true" : ""}`;
+  const d = (await yGet(url, false)) as Record<string, unknown>;
 
   const result = (d?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
     | Record<string, unknown>
@@ -1040,9 +1039,17 @@ export async function getShortInterest(ticker: string): Promise<string> {
 // ── get_technical_indicators ─────────────────────────────────────────────────
 
 export async function getTechnicalIndicators(
-  ticker: string,
+  ticker: string | string[],
   period: string
 ): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const limit = limitTickers(ticker);
+    const results: string[] = [];
+    for (const t of limit.tickers) {
+      results.push(await getTechnicalIndicators(t, period));
+    }
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
+  }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=${period}&interval=1d`,
     false
@@ -1277,7 +1284,15 @@ export async function getMaPosition(ticker: string | string[]): Promise<string> 
 
 // ── get_credit_health ────────────────────────────────────────────────────────
 
-export async function getCreditHealth(ticker: string): Promise<string> {
+export async function getCreditHealth(ticker: string | string[]): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const limit = limitTickers(ticker);
+    const results: string[] = [];
+    for (const t of limit.tickers) {
+      results.push(await getCreditHealth(t));
+    }
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
+  }
   try {
     const [bsRaw, incRaw] = await Promise.all([
       fetchTimeseries(ticker, "quarterly", ["TotalDebt", "CashAndCashEquivalents"]),
@@ -1349,7 +1364,15 @@ export async function getCreditHealth(ticker: string): Promise<string> {
 
 // ── get_short_momentum ───────────────────────────────────────────────────────
 
-export async function getShortMomentum(ticker: string): Promise<string> {
+export async function getShortMomentum(ticker: string | string[]): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const limit = limitTickers(ticker);
+    const results: string[] = [];
+    for (const t of limit.tickers) {
+      results.push(await getShortMomentum(t));
+    }
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
+  }
   try {
     const si = JSON.parse(await getShortInterest(ticker));
     if (si.error) return JSON.stringify(si);
@@ -1405,7 +1428,15 @@ export async function getShortMomentum(ticker: string): Promise<string> {
 
 // ── get_earnings_momentum ────────────────────────────────────────────────────
 
-export async function getEarningsMomentum(ticker: string): Promise<string> {
+export async function getEarningsMomentum(ticker: string | string[]): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const limit = limitTickers(ticker);
+    const results: string[] = [];
+    for (const t of limit.tickers) {
+      results.push(await getEarningsMomentum(t));
+    }
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
+  }
   try {
     const ea = JSON.parse(await getEarningsAnalysis(ticker));
     if (typeof ea === "string" && ea.startsWith("Error")) {

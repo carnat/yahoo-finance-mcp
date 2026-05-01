@@ -60,6 +60,12 @@ export const TOOLS: Tool[] = [
             "Valid intervals: 1m | 2m | 5m | 15m | 30m | 60m | 90m | 1h | 1d | 5d | 1wk | 1mo | 3mo. Intraday data cannot extend past 60 days.",
           default: "1d",
         },
+        prepost: {
+          type: "boolean",
+          description:
+            "If true, includes pre-market and after-hours rows. Only meaningful with intraday intervals (1m–90m) and period ≤ 60d. Default false.",
+          default: false,
+        },
       },
       required: ["ticker"],
     },
@@ -369,11 +375,17 @@ export const TOOLS: Tool[] = [
   {
     name: "get_technical_indicators",
     description:
-      "Get pre-computed technical / momentum indicators for a ticker. Computes indicators server-side from historical daily close prices so the LLM does NOT need to fetch raw OHLCV history and calculate manually. Returns: rsi14 (14-day RSI, Wilder smoothing; below 30 = oversold, above 70 = overbought), macd (MACD line: 12-day EMA minus 26-day EMA), macdSignal (9-day EMA of MACD), macdHistogram (MACD minus signal; positive = bullish momentum), lastClose, and dataDate.",
+      "Get pre-computed technical / momentum indicators for one or more tickers. Computes indicators server-side from historical daily close prices so the LLM does NOT need to fetch raw OHLCV history and calculate manually. Returns: rsi14 (14-day RSI, Wilder smoothing; below 30 = oversold, above 70 = overbought), macd (MACD line: 12-day EMA minus 26-day EMA), macdSignal (9-day EMA of MACD), macdHistogram (MACD minus signal; positive = bullish momentum), lastClose, and dataDate. Max 5 tickers per call; split larger lists into multiple calls.",
     inputSchema: {
       type: "object",
       properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+        ticker: {
+          description: "Stock ticker symbol or array of up to 5 symbols. Split larger lists into multiple calls.",
+          oneOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" }, maxItems: 5 },
+          ],
+        },
         period: {
           type: "string",
           description:
@@ -451,11 +463,17 @@ export const TOOLS: Tool[] = [
   {
     name: "get_credit_health",
     description:
-      "Get pre-computed credit/leverage metrics: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag. Single ticker only.",
+      "Get pre-computed credit/leverage metrics: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag. Max 5 tickers per call; split larger lists into multiple calls.",
     inputSchema: {
       type: "object",
       properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+        ticker: {
+          description: "Stock ticker symbol or array of up to 5 symbols. Split larger lists into multiple calls.",
+          oneOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" }, maxItems: 5 },
+          ],
+        },
       },
       required: ["ticker"],
     },
@@ -463,11 +481,17 @@ export const TOOLS: Tool[] = [
   {
     name: "get_short_momentum",
     description:
-      "Get short interest with MoM delta, direction (RISING/FALLING/FLAT), squeeze risk (HIGH/MODERATE/LOW), and flag. Single ticker only.",
+      "Get short interest with MoM delta, direction (RISING/FALLING/FLAT), squeeze risk (HIGH/MODERATE/LOW), and flag. Max 5 tickers per call; split larger lists into multiple calls.",
     inputSchema: {
       type: "object",
       properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+        ticker: {
+          description: "Stock ticker symbol or array of up to 5 symbols. Split larger lists into multiple calls.",
+          oneOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" }, maxItems: 5 },
+          ],
+        },
       },
       required: ["ticker"],
     },
@@ -475,11 +499,17 @@ export const TOOLS: Tool[] = [
   {
     name: "get_earnings_momentum",
     description:
-      "Get earnings revision momentum, beat rate, and estimate direction signals. Returns revision7d/30d/90d, momentumFlag, beatRate, currentBeatStreak. Single ticker only.",
+      "Get earnings revision momentum, beat rate, and estimate direction signals. Returns revision7d/30d/90d, momentumFlag, beatRate, currentBeatStreak. Max 5 tickers per call; split larger lists into multiple calls.",
     inputSchema: {
       type: "object",
       properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+        ticker: {
+          description: "Stock ticker symbol or array of up to 5 symbols. Split larger lists into multiple calls.",
+          oneOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" }, maxItems: 5 },
+          ],
+        },
       },
       required: ["ticker"],
     },
@@ -549,7 +579,7 @@ const tickerArg = (v: unknown): string | string[] =>
 export async function callTool(name: string, args: Record<string, unknown>): Promise<string> {
   switch (name) {
     case "get_historical_stock_prices":
-      return getHistoricalPrices(str(args.ticker), str(args.period, "1mo"), str(args.interval, "1d"));
+      return getHistoricalPrices(str(args.ticker), str(args.period, "1mo"), str(args.interval, "1d"), args.prepost === true);
     case "get_stock_info":
       return getStockInfo(tickerArg(args.ticker));
     case "get_yahoo_finance_news":
@@ -591,7 +621,7 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
     case "get_short_interest":
       return getShortInterest(str(args.ticker));
     case "get_technical_indicators":
-      return getTechnicalIndicators(str(args.ticker), str(args.period, "3mo"));
+      return getTechnicalIndicators(tickerArg(args.ticker), str(args.period, "3mo"));
     case "get_price_slope":
       return getPriceSlope(tickerArg(args.ticker), num(args.days, 5));
     case "get_volume_ratio":
@@ -599,11 +629,11 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
     case "get_ma_position":
       return getMaPosition(tickerArg(args.ticker));
     case "get_credit_health":
-      return getCreditHealth(str(args.ticker));
+      return getCreditHealth(tickerArg(args.ticker));
     case "get_short_momentum":
-      return getShortMomentum(str(args.ticker));
+      return getShortMomentum(tickerArg(args.ticker));
     case "get_earnings_momentum":
-      return getEarningsMomentum(str(args.ticker));
+      return getEarningsMomentum(tickerArg(args.ticker));
     case "get_options_flow_summary":
       return getOptionsFlowSummary(str(args.ticker), args.expiry_hint != null ? str(args.expiry_hint) : undefined);
     case "get_put_hedge_candidates":
