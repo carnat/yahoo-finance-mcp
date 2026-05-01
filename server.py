@@ -775,25 +775,21 @@ async def get_fast_info(ticker: str | list[str]) -> str:
         print(f"Error: getting fast info for {ticker}: {e}")
         return f"Error: getting fast info for {ticker}: {e}"
 
-    # Fallback for shares + extended-hours (pre/post market) data from .info.
-    # Fetch .info at most once; skip entirely if fast_info already has shares.
-    needs_shares = data.get("shares") is None
-    needs_extended = True  # always attempt extended-hours enrichment
-    if needs_shares or needs_extended:
-        try:
-            info = company.info
-            if needs_shares:
-                data["shares"] = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
-            for key in (
-                "preMarketPrice", "preMarketChange", "preMarketChangePercent",
-                "postMarketPrice", "postMarketChange", "postMarketChangePercent",
-                "postMarketTime",
-            ):
-                val = info.get(key)
-                if val is not None:
-                    data[key] = val
-        except Exception:
-            pass  # Extended-hours data is optional; fast_info fields are still returned
+    # Fetch .info once to cover both the shares fallback and extended-hours enrichment.
+    try:
+        info = company.info
+        if data.get("shares") is None:
+            data["shares"] = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+        for key in (
+            "preMarketPrice", "preMarketChange", "preMarketChangePercent",
+            "postMarketPrice", "postMarketChange", "postMarketChangePercent",
+            "postMarketTime",
+        ):
+            val = info.get(key)
+            if val is not None:
+                data[key] = val
+    except Exception:
+        pass  # Extended-hours data is optional; fast_info fields are still returned
 
     # For index tickers, volume and open are not meaningful — replace zeros with null
     if data.get("quoteType") == "INDEX":
