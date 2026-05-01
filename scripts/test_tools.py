@@ -64,7 +64,9 @@ TEST_CASES: list[tuple[str, dict[str, Any]]] = [
     ("get_options_flow_summary",    {"ticker": "AAPL"}),
     ("get_put_hedge_candidates",    {"ticker": "AAPL", "otm_pct_min": 8, "otm_pct_max": 12}),
     ("get_analyst_upgrade_radar",   {"ticker": "AAPL", "days_back": 30}),
-    # ── batch variants (array of tickers) ─────────────────────────────────
+    # ── batch variants: same tools called with an array of tickers ─────────
+    # These are intentional duplicates of single-ticker tests above to verify
+    # that multi-ticker batch dispatch works correctly end-to-end.
     ("get_fast_info",               {"ticker": ["AAPL", "MSFT"]}),
     ("get_etf_info",                {"ticker": ["SPY", "QQQ"]}),
 ]
