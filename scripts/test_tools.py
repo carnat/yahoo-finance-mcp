@@ -305,7 +305,7 @@ def _call(url: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
         except urllib.error.HTTPError as exc:
             last_exc = exc
             if exc.code in _RETRY_STATUSES and attempt < _MAX_RETRIES:
-                time.sleep(_RETRY_DELAY * attempt)
+                time.sleep(_RETRY_DELAY * (2 ** (attempt - 1)))
                 continue
             raise
         except urllib.error.URLError:
