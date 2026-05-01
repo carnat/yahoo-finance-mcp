@@ -5,6 +5,7 @@ import {
   getCreditHealth,
   getEarningsAnalysis,
   getEarningsMomentum,
+  getEtfInfo,
   getFastInfo,
   getFinancialRatios,
   getFinancialStatement,
@@ -73,12 +74,30 @@ export const TOOLS: Tool[] = [
   {
     name: "get_stock_info",
     description:
-      "Get comprehensive stock information for one or more tickers: price & trading info, company details, financial metrics, earnings, margins, dividends, balance sheet, ownership, analyst coverage, and risk metrics. Pass an array of symbols to fetch multiple tickers in one call — returns a dict keyed by symbol. Max 5 tickers per call; if you need more, split into multiple calls.",
+      "Get comprehensive stock information for one or more tickers: price & trading info, company details, financial metrics, earnings, margins, dividends, balance sheet, ownership, analyst coverage, and risk metrics. Pass an array of symbols to fetch multiple tickers in one call — returns a dict keyed by symbol. Max 5 tickers per call; if you need more, split into multiple calls. For ETFs or mutual funds, use get_etf_info instead.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: {
           description: "Stock ticker symbol (e.g. 'AAPL') or an array of up to 5 symbols (e.g. ['AAPL', 'MSFT']). If more than 5 are provided, only the first 5 are processed — split larger lists into multiple calls.",
+          oneOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" }, maxItems: 5 },
+          ],
+        },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_etf_info",
+    description:
+      "Get ETF or mutual fund data for one or more tickers. Returns identity (shortName, category, fundFamily, legalType, fundInceptionDate), pricing (navPrice, previousClose, open, dayHigh, dayLow, volume, averageVolume), AUM/costs (totalAssets, yield, annualReportExpenseRatio, ytdReturn, beta3Year), 52-week stats, moving averages, top-10 holdings (topHoldings), sector weights (sectorWeights), and recent annual returns. Use for ETF/fund tickers: SPY, QQQ, VTI, ARKK, VFIAX, etc. Max 5 tickers per call; split larger lists into multiple calls.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: {
+          description: "ETF or fund ticker symbol (e.g. 'SPY') or an array of up to 5 symbols (e.g. ['SPY', 'QQQ']). If more than 5 are provided, only the first 5 are processed — split larger lists into multiple calls.",
           oneOf: [
             { type: "string" },
             { type: "array", items: { type: "string" }, maxItems: 5 },
@@ -582,6 +601,8 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       return getHistoricalPrices(str(args.ticker), str(args.period, "1mo"), str(args.interval, "1d"), args.prepost === true);
     case "get_stock_info":
       return getStockInfo(tickerArg(args.ticker));
+    case "get_etf_info":
+      return getEtfInfo(tickerArg(args.ticker));
     case "get_yahoo_finance_news":
       return getNews(str(args.ticker));
     case "get_stock_actions":

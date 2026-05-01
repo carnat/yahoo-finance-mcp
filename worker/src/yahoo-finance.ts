@@ -141,7 +141,118 @@ function safeJsonParse(s: string, ticker: string): Record<string, unknown> {
   }
 }
 
-// ── Tool implementations ─────────────────────────────────────────────────────
+
+// ── get_etf_info ─────────────────────────────────────────────────────────────
+
+export async function getEtfInfo(ticker: string | string[]): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const limit = limitTickers(ticker);
+    const results: string[] = [];
+    for (const t of limit.tickers) {
+      results.push(await getEtfInfo(t));
+    }
+    return wrapBatchResult(
+      Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])),
+      limit
+    );
+  }
+
+  try {
+    const modules = [
+      "summaryDetail",
+      "defaultKeyStatistics",
+      "topHoldings",
+      "fundPerformance",
+      "price",
+    ].join(",");
+
+    const d = (await yGet(
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=${modules}`
+    )) as Record<string, unknown>;
+
+    const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    if (!result) return noData(ticker);
+
+    const priceData = result.price as Record<string, unknown> | undefined;
+    const summary = result.summaryDetail as Record<string, unknown> | undefined;
+    const keyStats = result.defaultKeyStatistics as Record<string, unknown> | undefined;
+    const topHoldingsData = result.topHoldings as Record<string, unknown> | undefined;
+    const fundPerf = result.fundPerformance as Record<string, unknown> | undefined;
+
+    const pick = (src: Record<string, unknown> | undefined, key: string): unknown =>
+      src ? raw(src[key]) : null;
+
+    const data: Record<string, unknown> = {
+      // Identity
+      shortName: pick(priceData, "shortName"),
+      quoteType: pick(priceData, "quoteType"),
+      category: pick(summary, "category"),
+      fundFamily: pick(summary, "fundFamily"),
+      legalType: pick(keyStats, "legalType"),
+      fundInceptionDate: pick(keyStats, "fundInceptionDate"),
+      // Pricing
+      navPrice: pick(summary, "navPrice"),
+      previousClose: pick(summary, "previousClose"),
+      open: pick(summary, "open"),
+      dayHigh: pick(summary, "dayHigh"),
+      dayLow: pick(summary, "dayLow"),
+      volume: pick(summary, "volume"),
+      averageVolume: pick(summary, "averageVolume"),
+      // AUM / costs
+      totalAssets: pick(summary, "totalAssets"),
+      yield: pick(summary, "yield"),
+      annualReportExpenseRatio: pick(summary, "annualReportExpenseRatio"),
+      ytdReturn: pick(summary, "ytdReturn"),
+      beta3Year: pick(summary, "beta3Year"),
+      // 52-week
+      fiftyTwoWeekHigh: pick(summary, "fiftyTwoWeekHigh"),
+      fiftyTwoWeekLow: pick(summary, "fiftyTwoWeekLow"),
+      fiftyTwoWeekChange: pick(keyStats, "52WeekChange"),
+      // Moving averages
+      fiftyDayAverage: pick(summary, "fiftyDayAverage"),
+      twoHundredDayAverage: pick(summary, "twoHundredDayAverage"),
+    };
+
+    // Top holdings (up to 10)
+    if (topHoldingsData) {
+      const holdings = (topHoldingsData.holdings as Array<Record<string, unknown>> | undefined) ?? [];
+      data.topHoldings = holdings.slice(0, 10).map((h) => ({
+        symbol: h.symbol,
+        holdingName: h.holdingName,
+        pct: raw(h.holdingPercent),
+      }));
+
+      const sw = (topHoldingsData.sectorWeightings as Array<Record<string, unknown>> | undefined) ?? [];
+      data.sectorWeights = sw
+        .map((s) => {
+          const entries = Object.entries(s);
+          if (entries.length === 0) return null;
+          const [sector, rawWeight] = entries[0];
+          return { sector, weight: raw(rawWeight) };
+        })
+        .filter(Boolean);
+    }
+
+    // Annual returns from fundPerformance (most recent 5 years)
+    if (fundPerf) {
+      const annual = fundPerf.annualTotalReturns as Record<string, unknown> | undefined;
+      if (annual) {
+        const returns = (annual.returns as Array<Record<string, unknown>> | undefined) ?? [];
+        data.annualReturns = returns.slice(0, 5).map((r) => ({
+          year: r.year,
+          annualValue: raw(r.annualValue),
+        }));
+      }
+    }
+
+    return JSON.stringify(data);
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+  }
+}
+
 
 export async function getHistoricalPrices(
   ticker: string,

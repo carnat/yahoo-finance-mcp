@@ -107,7 +107,8 @@ This server provides financial market data from Yahoo Finance.
 
 ## Tool selection guidance
 - **Prefer `get_fast_info`** over `get_stock_info` for current price, market cap, 52-week range, or moving averages — it returns ~20 fields instead of 120+ and uses far fewer tokens. Also includes pre-market / after-hours prices when available.
-- Use `get_stock_info` only when you need deep fundamentals, business description, or fields not in fast_info.
+- Use `get_stock_info` only when you need deep fundamentals, business description, or fields not in fast_info. For ETFs or mutual funds, use `get_etf_info` instead.
+- **Use `get_etf_info`** for ETFs and mutual funds — returns NAV, expense ratio, AUM, YTD return, top-10 holdings, and sector weights. Covers tickers like SPY, QQQ, VTI, ARKK, etc.
 - **Prefer `get_financial_ratios`** over fetching full financial statements when you need valuation or profitability ratios — ratios are pre-computed server-side.
 - **Prefer `get_analyst_consensus`** over `get_recommendations` when you need a quick summary of analyst sentiment and price targets.
 - **Prefer `get_earnings_analysis`** to get all forward-looking analyst estimates in a single call instead of five separate calls.
@@ -122,7 +123,8 @@ This server provides financial market data from Yahoo Finance.
 ### Price & market data
 - get_fast_info: **Lightweight** — current price, market cap, 52-week high/low, moving averages, volume (~20 fields), plus pre-market/after-hours prices when available. Prefer this for price lookups.
 - get_historical_stock_prices: OHLCV history. Supports period, interval, and optional columns filter to reduce output size.
-- get_stock_info: **Heavyweight** — full ~120-field company info dict. Use only when fast_info is insufficient. Supports optional fields filter.
+- get_stock_info: **Heavyweight** — full ~120-field company info dict. Use only when fast_info is insufficient. Supports optional fields filter. For ETFs/funds, use get_etf_info instead.
+- get_etf_info: **ETF/fund data** — NAV, expense ratio, AUM, YTD return, 52-week stats, moving averages, top-10 holdings, and sector weights. Use for SPY, QQQ, VTI, ARKK, and any mutual fund ticker.
 - get_price_stats: Pre-computed price statistics: % change vs 52-week high/low, distance from moving averages, 30-day volatility, and CAGR.
 - get_stock_actions: Dividend and split history.
 - get_short_interest: Short interest metrics: short % of float, shares short, days-to-cover ratio, float shares.
@@ -251,6 +253,8 @@ Stock Price & Trading Info, Company Information, Financial Metrics, Earnings & R
 
 IMPORTANT: This tool returns 120+ fields and is token-heavy. Prefer get_fast_info for price/market-cap lookups.
 Use this tool only when you need deep fundamentals, the business description, or fields not available in get_fast_info.
+For ETFs or mutual funds (SPY, QQQ, VTI, ARKK, etc.), use get_etf_info instead — it returns fund-specific fields
+including NAV, expense ratio, top-10 holdings, and sector weights.
 Use the optional `fields` parameter to request only the fields you need.
 
 Args:
@@ -2439,6 +2443,93 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
         "summary": summary,
         "dataDate": str(datetime.date.today()),
     })
+
+
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_etf_info
+# ---------------------------------------------------------------------------
+
+_ETF_INFO_FIELDS = [
+    "shortName", "quoteType", "category", "fundFamily", "legalType", "fundInceptionDate",
+    "navPrice", "previousClose", "open", "dayHigh", "dayLow", "volume", "averageVolume",
+    "totalAssets", "yield", "annualReportExpenseRatio", "ytdReturn", "beta3Year",
+    "fiftyTwoWeekHigh", "fiftyTwoWeekLow", "fiftyTwoWeekChange",
+    "fiftyDayAverage", "twoHundredDayAverage",
+]
+
+
+def _df_to_records(df) -> list | None:
+    """Convert a DataFrame to a JSON-serialisable list of records, or None if empty."""
+    if df is None or df.empty:
+        return None
+    return json.loads(df.reset_index().to_json(orient="records"))
+
+
+@yfinance_server.tool(
+    name="get_etf_info",
+    description="""Get ETF or mutual fund data for one or more ticker symbols.
+
+Returns identity (shortName, category, fundFamily, legalType, fundInceptionDate),
+pricing (navPrice, previousClose, open, dayHigh, dayLow, volume, averageVolume),
+AUM/costs (totalAssets, yield, annualReportExpenseRatio, ytdReturn, beta3Year),
+52-week stats (fiftyTwoWeekHigh, fiftyTwoWeekLow, fiftyTwoWeekChange),
+moving averages (fiftyDayAverage, twoHundredDayAverage),
+top-10 holdings (topHoldings), and sector weights (sectorWeights).
+
+Use this tool for ETF and fund tickers: SPY, QQQ, VTI, ARKK, VFIAX, etc.
+For individual stocks, use get_fast_info or get_stock_info instead.
+
+Args:
+    ticker: str | list[str]
+        A single ETF/fund ticker (e.g. "SPY") or a list of up to 5 symbols.
+        When a list is provided, returns a dict keyed by symbol.
+        Max 5 tickers per call; split larger lists into multiple calls.
+""",
+)
+async def get_etf_info(ticker: str | list[str]) -> str:
+    """Get ETF/fund information for one or more ticker symbols."""
+    if isinstance(ticker, list):
+        results = []
+        for t in ticker:
+            try:
+                results.append(await get_etf_info(t))
+            except Exception as e:
+                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
+            await asyncio.sleep(0.1)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
+
+    cache_key = f"etf_info:{ticker}"
+    cached = _cache_get(cache_key, _PRICE_TTL)
+    if cached is not None:
+        return cached
+
+    company = yf.Ticker(ticker)
+    try:
+        info = company.info
+    except Exception as e:
+        return f"Error: getting ETF info for {ticker}: {e}"
+
+    data: dict = {k: info.get(k) for k in _ETF_INFO_FIELDS}
+
+    # Top-10 holdings from funds_top_holdings DataFrame
+    try:
+        holdings_df = company.funds_top_holdings
+        records = _df_to_records(None if holdings_df is None else holdings_df.head(10))
+        data["topHoldings"] = records
+    except Exception:
+        data["topHoldings"] = None
+
+    # Sector weights from funds_sector_weightings DataFrame
+    try:
+        data["sectorWeights"] = _df_to_records(company.funds_sector_weightings)
+    except Exception:
+        data["sectorWeights"] = None
+
+    result = json.dumps(data)
+    _cache_set(cache_key, result)
+    return result
 
 
 if __name__ == "__main__":
