@@ -23,6 +23,7 @@ Defaults to https://yahoo-finance-mcp.artinatw.workers.dev/mcp
 import argparse
 import json
 import sys
+import traceback
 import urllib.error
 import urllib.request
 from typing import Any
@@ -391,7 +392,7 @@ def main() -> None:
         except urllib.error.URLError as exc:
             ok, detail = False, f"HTTP error: {exc}"
         except Exception as exc:  # noqa: BLE001
-            ok, detail = False, f"exception: {exc}"
+            ok, detail = False, f"exception: {exc}\n{traceback.format_exc()}"
 
         status = "✅ PASS" if ok else "❌ FAIL"
         if ok:

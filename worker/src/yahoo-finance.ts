@@ -680,7 +680,7 @@ export async function getFastInfo(ticker: string | string[]): Promise<string> {
   const isIndex = quoteType === "INDEX";
   const volOrNull = (v: unknown): number | null => {
     const val = raw(v) as number | null;
-    return isIndex || val === 0 ? null : val;
+    return isIndex ? null : val;
   };
 
   // Shares: prefer price module; fall back to defaultKeyStatistics (fixes
