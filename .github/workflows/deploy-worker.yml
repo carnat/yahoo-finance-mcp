@@ -57,7 +57,7 @@ jobs:
           python-version: "3.11"
 
       - name: Wait for worker propagation
-        run: sleep 10
+        run: sleep 30
 
       - name: Run end-to-end tool tests
         run: python scripts/test_tools.py --url https://yahoo-finance-mcp.artinatw.workers.dev/mcp

@@ -23,10 +23,14 @@ Defaults to https://yahoo-finance-mcp.artinatw.workers.dev/mcp
 import argparse
 import json
 import sys
+import time
 import traceback
 import urllib.error
 import urllib.request
 from typing import Any
+
+# Browser-like User-Agent to avoid Cloudflare bot-protection blocking Python-urllib
+_UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-test/1.0)"
 
 DEFAULT_URL = "https://yahoo-finance-mcp.artinatw.workers.dev/mcp"
 
@@ -274,6 +278,11 @@ TEST_CASES: list[TestCase] = [
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+_RETRY_STATUSES = {429, 503, 502, 504}
+_MAX_RETRIES = 3
+_RETRY_DELAY = 5  # seconds between retries
+
+
 def _call(url: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
     payload = {
         "jsonrpc": "2.0",
@@ -282,14 +291,50 @@ def _call(url: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
         "params": {"name": tool, "arguments": args},
     }
     data = json.dumps(payload).encode()
+    last_exc: Exception | None = None
+    for attempt in range(1, _MAX_RETRIES + 1):
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json", "User-Agent": _UA},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            last_exc = exc
+            if exc.code in _RETRY_STATUSES and attempt < _MAX_RETRIES:
+                time.sleep(_RETRY_DELAY * attempt)
+                continue
+            raise
+        except urllib.error.URLError:
+            raise
+    raise last_exc  # type: ignore[misc]
+
+
+def _health_check(base_url: str) -> tuple[bool, str]:
+    """GET the worker root to verify it's reachable before running all tests."""
+    health_url = base_url.replace("/mcp", "").rstrip("/") + "/"
     req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+        health_url,
+        headers={"User-Agent": _UA},
+        method="GET",
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.loads(resp.read())
+            return True, body.get("status", "ok")
+    except urllib.error.HTTPError as exc:
+        # Try to read the response body for diagnostic detail
+        try:
+            body_bytes = exc.read()
+            body_text = body_bytes[:200].decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            body_text = "(no body)"
+        return False, f"HTTP {exc.code}: {body_text}"
+    except urllib.error.URLError as exc:
+        return False, str(exc)
 
 
 def _get_path(obj: Any, path: str) -> Any:
@@ -378,6 +423,24 @@ def main() -> None:
 
     url = opts.url
     print(f"\nTarget: {url}\n")
+
+    # ── Pre-flight health check ────────────────────────────────────────────────
+    print("Checking worker health...", end=" ", flush=True)
+    healthy, health_detail = _health_check(url)
+    if healthy:
+        print(f"✅ {health_detail}\n")
+    else:
+        print(f"❌ {health_detail}\n")
+        print(
+            "ERROR: Worker is not reachable. All tests would fail.\n"
+            "Possible causes:\n"
+            "  • Cloudflare Access policy is blocking unauthenticated requests\n"
+            "  • The workers.dev subdomain is disabled for this worker\n"
+            "  • The worker was not deployed successfully\n"
+            "  • Rate-limiting or firewall rules are blocking the test runner\n"
+        )
+        sys.exit(2)
+
     print(f"{'Tool':<35} {'Args summary':<38} {'Result'}")
     print("-" * 112)
 
