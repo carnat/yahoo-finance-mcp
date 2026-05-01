@@ -131,6 +131,16 @@ const enc = encodeURIComponent;
 const iso = (ts: number) => new Date(ts * 1000).toISOString();
 const noData = (t: string) => `Error: no data found for ticker ${t}`;
 
+/** Parse a JSON string returned by a single-ticker handler, falling back to a
+ *  structured error object if the string is not valid JSON (e.g. plain error messages). */
+function safeJsonParse(s: string, ticker: string): Record<string, unknown> {
+  try {
+    return JSON.parse(s) as Record<string, unknown>;
+  } catch {
+    return { error: true, message: s, ticker };
+  }
+}
+
 // ── Tool implementations ─────────────────────────────────────────────────────
 
 export async function getHistoricalPrices(
@@ -1048,7 +1058,7 @@ export async function getTechnicalIndicators(
     for (const t of limit.tickers) {
       results.push(await getTechnicalIndicators(t, period));
     }
-    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])), limit);
   }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=${period}&interval=1d`,
@@ -1291,7 +1301,7 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
     for (const t of limit.tickers) {
       results.push(await getCreditHealth(t));
     }
-    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])), limit);
   }
   try {
     const [bsRaw, incRaw] = await Promise.all([
@@ -1371,7 +1381,7 @@ export async function getShortMomentum(ticker: string | string[]): Promise<strin
     for (const t of limit.tickers) {
       results.push(await getShortMomentum(t));
     }
-    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])), limit);
   }
   try {
     const si = JSON.parse(await getShortInterest(ticker));
@@ -1435,7 +1445,7 @@ export async function getEarningsMomentum(ticker: string | string[]): Promise<st
     for (const t of limit.tickers) {
       results.push(await getEarningsMomentum(t));
     }
-    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
+    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])), limit);
   }
   try {
     const ea = JSON.parse(await getEarningsAnalysis(ticker));
