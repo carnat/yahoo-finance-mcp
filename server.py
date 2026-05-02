@@ -3006,7 +3006,8 @@ source, confidence.
 confidence:
   CONFIRMED — sourced from income statement segment (satisfies DC-151 Rule 1 annual confirmation).
   NOT_DISCLOSED — company does not break out China separately in machine-readable form.
-  When NOT_DISCLOSED, filingDate and fiscalYear are still populated for manual 10-K lookup.
+  When NOT_DISCLOSED, _manualLookup is populated with direct EDGAR URLs and step-by-step
+  instructions to locate the geographic segment table in the 10-K.
 
 Args:
     ticker: str
@@ -3117,11 +3118,41 @@ async def get_china_revenue_pct(ticker: str) -> str:
     if china_revenue_usd is not None and total_revenue_usd and total_revenue_usd > 0:
         china_revenue_pct = round(china_revenue_usd / total_revenue_usd, 4)
 
-    note = (
-        "Geographic revenue breakdown is not available in machine-readable form via this data "
-        "pipeline. Verify against the most recent 10-K geographic segment note. "
-        "NOT_DISCLOSED confidence does NOT satisfy DC-151 Rule 1 annual confirmation requirement."
-    ) if confidence == "NOT_DISCLOSED" else None
+    # Build a precise LLM-actionable pointer when data could not be resolved automatically.
+    manual_lookup: dict | None = None
+    if confidence == "NOT_DISCLOSED":
+        t_upper = ticker.upper()
+        cik_padded = str(cik).zfill(10) if cik else None
+        edgar_search_url = (
+            f"https://efts.sec.gov/LATEST/search-index?q=%22China%22"
+            f"&forms=10-K&entity={t_upper}"
+        )
+        edgar_filings_url = (
+            f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany"
+            f"&CIK={cik_padded}&type=10-K&dateb=&owner=include&count=5"
+        ) if cik_padded else (
+            f"https://www.sec.gov/cgi-bin/browse-edgar?company={t_upper}"
+            f"&CIK=&type=10-K&dateb=&owner=include&count=5&search_text=&action=getcompany"
+        )
+        manual_lookup = {
+            "reason": (
+                "Geographic revenue breakdown is not available in machine-readable form via "
+                "this data pipeline. NOT_DISCLOSED does NOT satisfy DC-151 Rule 1 annual "
+                "confirmation requirement."
+            ),
+            "action": (
+                f"Open the most recent 10-K for {t_upper} and search for the section titled "
+                "'Geographic Information', 'Geographic Areas', or 'Segment Information'. "
+                "Look for a table that lists revenue by region including 'China', "
+                "'Greater China', or 'Mainland China'. Divide that figure by Total Revenue "
+                "to compute chinaRevenuePct."
+            ),
+            "edgarFullTextSearchUrl": edgar_search_url,
+            "edgarFilingsPageUrl": edgar_filings_url,
+            "cik": cik_padded,
+            "filingDate": filing_date,
+            "fiscalYear": fiscal_year,
+        }
 
     result = json.dumps({
         "ticker": ticker,
@@ -3133,7 +3164,7 @@ async def get_china_revenue_pct(ticker: str) -> str:
         "segmentLabel": segment_label,
         "source": source,
         "confidence": confidence,
-        "_note": note,
+        "_manualLookup": manual_lookup,
     })
     _cache_set(cache_key, result)
     return result
