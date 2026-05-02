@@ -3079,8 +3079,8 @@ async def get_china_revenue_pct(ticker: str) -> str:
 
     note = (
         "Geographic revenue breakdown is not available in machine-readable form via this data "
-        "pipeline. Verify against the most recent 10-K geographic segment note. ESTIMATED "
-        "confidence does NOT satisfy DC-151 Rule 1 annual confirmation requirement."
+        "pipeline. Verify against the most recent 10-K geographic segment note. "
+        "NOT_DISCLOSED confidence does NOT satisfy DC-151 Rule 1 annual confirmation requirement."
     ) if confidence == "NOT_DISCLOSED" else None
 
     result = json.dumps({
@@ -3254,7 +3254,7 @@ async def get_dc134_options_scan(ticker: str, window_day: str) -> str:
     if pc_ratio is not None:
         if pc_ratio >= 1.3 or (pc_ratio >= 1.0 and put_vol_trend == "INCREASING"):
             bracket = "UPPER"
-        elif pc_ratio <= 0.8 and put_vol_trend in ("STABLE", "DECREASING"):
+        elif pc_ratio <= 0.8 and put_vol_trend != "INCREASING":
             bracket = "LOWER"
         else:
             bracket = "MID"
