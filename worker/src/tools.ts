@@ -2,17 +2,17 @@ import {
   getAnalystConsensus,
   getAnalystUpgradeRadar,
   getCalendar,
-  getChinaRevenuePct,
+  getGeographicRevenue,
   getCreditHealth,
-  getDc134OptionsScan,
+  getOptionsFlowScan,
   getEarningsAnalysis,
   getEarningsMomentum,
-  getEqfBracket,
+  getPriceTargetBracket,
   getEtfInfo,
   getFastInfo,
   getFinancialRatios,
   getFinancialStatement,
-  getAdvGate,
+  getVolumeGate,
   getHistoricalPrices,
   getHolderInfo,
   getMaPosition,
@@ -29,7 +29,7 @@ import {
   getShortInterest,
   getShortMomentum,
   getTechnicalIndicators,
-  getTpsInputs,
+  getPositionScoreInputs,
   getVolumeRatio,
   screenStocks,
   searchTicker,
@@ -615,9 +615,84 @@ export const TOOLS: Tool[] = [
     },
   },
   {
-    name: "get_china_revenue_pct",
+    name: "get_geographic_revenue",
     description:
-      "Get China geographic revenue % from SEC EDGAR filing metadata and yfinance data. DC-151 classification: ≥20% BANNED (CLASS B) | 15–20% CHINA WATCH | ≤14.9% CLASS C eligible. Returns chinaRevenuePct, chinaRevenueUSD, fiscalYear, filingType, filingDate, segmentLabel, source, confidence (CONFIRMED | NOT_DISCLOSED). CONFIRMED satisfies DC-151 Rule 1 annual confirmation. Filing metadata (filingDate, fiscalYear) is always returned for manual 10-K lookup even when NOT_DISCLOSED.",
+      "Get geographic revenue % for a specified region from SEC EDGAR filing metadata and yfinance data. Default region is 'China'. DC-151 classification for China: ≥20% BANNED (CLASS B) | 15–20% CHINA WATCH | ≤14.9% CLASS C eligible. Returns region, regionRevenuePct, regionRevenueUSD, fiscalYear, filingType, filingDate, segmentLabel, source, confidence (CONFIRMED | NOT_DISCLOSED). CONFIRMED satisfies DC-151 Rule 1 annual confirmation. Filing metadata (filingDate, fiscalYear) is always returned for manual 10-K lookup even when NOT_DISCLOSED.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'MU'" },
+        region: {
+          type: "string",
+          description: "Geographic region to query, e.g. 'China', 'Europe', 'Americas', 'Asia Pacific', 'Japan'. Defaults to 'China'.",
+          default: "China",
+        },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_options_flow_scan",
+    description:
+      "Structured options flow scan for a binary event window. Returns pcRatio, ivPctile, putVolVs10dAvg, putVolTrend (INCREASING/STABLE/DECREASING), maxPainStrike, bracket (UPPER/MID/LOWER), formattedBlock (paste directly into session output), dataDate. Prior window-label readings cached server-side 72h for trend computation (e.g. T-14 → T-7 → T-2).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
+        window_label: {
+          type: "string",
+          description: "Free-form label for this reading, e.g. 'T-14', 'T-7', 'T-2', 'pre-earnings', 'week1'. Used as cache key for trend computation across readings.",
+        },
+      },
+      required: ["ticker", "window_label"],
+    },
+  },
+  {
+    name: "get_price_target_bracket",
+    description:
+      "Compute EQF bracket for a position. EQF = currentPrice / io_pt × 100. Brackets: ≤75% STRONG_BUY | 75–90% ACCEPTABLE | 90–100% CAUTION | >100% AVOID. Tags: <40% SPECULATIVE | 40–79% LONG | 80–99% NEAR | ≥100% INVERTED. Returns currentPrice, ioPt, eqfPct, bracket, tag, invertedFlag, dataDate.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
+        io_pt: { type: "number", description: "IO price target (Commander/IO-set, not analyst consensus)" },
+      },
+      required: ["ticker", "io_pt"],
+    },
+  },
+  {
+    name: "get_position_score_inputs",
+    description:
+      "Aggregate all position scoring inputs for T1, T2, T4, and T5 in a single call. T3 (PT proximity) and T2 (vs cost basis) require portfolio state — IO scores those manually. Runs 6 parallel data fetches. Returns t1_inputs (analyst sentiment), t2_inputs (price vs 52wk), t4_inputs (earnings momentum), t5_inputs (technical indicators), dataDate.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_volume_gate",
+    description:
+      "DC Section 6.2 Volume Gate: checks regularMarketVolume ≥ 0.5 × 20-day ADV. Returns lastVolume, adv10d, adv20d (computed from last 20 sessions), adv90d, ratio20d, gatePass (true = PASS), dataDate, note. Set foreign_exchange=true for DC-80 FX gate (daily notional ≥ $10M USD/day threshold).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
+        foreign_exchange: {
+          type: "boolean",
+          description: "Set true for DC-80 FX/ADR tickers to use $10M notional threshold. Default false.",
+          default: false,
+        },
+      },
+      required: ["ticker"],
+    },
+  },
+  // ── Deprecated aliases (backward compat — remove in next major version) ──────
+  {
+    name: "get_china_revenue_pct",
+    description: "[DEPRECATED] Use get_geographic_revenue instead. Alias preserved for backward compatibility.",
     inputSchema: {
       type: "object",
       properties: {
@@ -628,8 +703,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "get_dc134_options_scan",
-    description:
-      "DC-134 Rule 8 structured options flow scan for a binary event window. Returns pcRatio, ivPctile, putVolVs10dAvg, putVolTrend (INCREASING/STABLE/DECREASING), maxPainStrike, bracket (UPPER/MID/LOWER), formattedBlock (paste directly into session output), dataDate. Prior window-day readings cached server-side 72h for trend computation (T-14 → T-7 → T-2).",
+    description: "[DEPRECATED] Use get_options_flow_scan instead. Alias preserved for backward compatibility.",
     inputSchema: {
       type: "object",
       properties: {
@@ -645,21 +719,19 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "get_eqf_bracket",
-    description:
-      "Compute DC-126 Section 6.24 EQF bracket. EQF = currentPrice / io_pt × 100. Brackets: ≤75% STRONG_BUY | 75–90% ACCEPTABLE | 90–100% CAUTION | >100% AVOID. Tags (DC-123): <40% SPECULATIVE | 40–79% LONG | 80–99% NEAR | ≥100% INVERTED. Returns currentPrice, ioPt, eqfPct, bracket, tag, invertedFlag, dataDate.",
+    description: "[DEPRECATED] Use get_price_target_bracket instead. Alias preserved for backward compatibility.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
-        io_pt: { type: "number", description: "IO price target (Commander/IO-set, not analyst consensus)" },
+        io_pt: { type: "number", description: "IO price target" },
       },
       required: ["ticker", "io_pt"],
     },
   },
   {
     name: "get_tps_inputs",
-    description:
-      "Aggregate all TPS (Tactical Position Scoring) inputs for T1, T2, T4, and T5 in a single call. T3 (PT proximity) and T2 (vs cost basis) require portfolio state — IO scores those manually. Runs 6 parallel data fetches. Returns t1_inputs (analyst sentiment), t2_inputs (price vs 52wk), t4_inputs (earnings momentum), t5_inputs (technical indicators), dataDate.",
+    description: "[DEPRECATED] Use get_position_score_inputs instead. Alias preserved for backward compatibility.",
     inputSchema: {
       type: "object",
       properties: {
@@ -670,15 +742,14 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "get_adv_gate",
-    description:
-      "DC Section 6.2 Volume Gate: checks regularMarketVolume ≥ 0.5 × 20-day ADV. Returns lastVolume, adv10d, adv20d (computed from last 20 sessions), adv90d, ratio20d, gatePass (true = PASS), dataDate, note. Set foreign_exchange=true for DC-80 FX gate (daily notional ≥ $10M USD/day threshold).",
+    description: "[DEPRECATED] Use get_volume_gate instead. Alias preserved for backward compatibility.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
         foreign_exchange: {
           type: "boolean",
-          description: "Set true for DC-80 FX/ADR tickers to use $10M notional threshold. Default false.",
+          description: "Set true for DC-80 FX/ADR tickers. Default false.",
           default: false,
         },
       },
@@ -766,16 +837,27 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       return getAnalystUpgradeRadar(tickerArg(args.ticker), num(args.days_back, 30));
     case "get_overnight_quote":
       return getOvernightQuote(str(args.ticker));
+    case "get_geographic_revenue":
+      return getGeographicRevenue(str(args.ticker), args.region != null ? str(args.region) : "China");
+    case "get_options_flow_scan":
+      return getOptionsFlowScan(str(args.ticker), str(args.window_label));
+    case "get_price_target_bracket":
+      return getPriceTargetBracket(str(args.ticker), num(args.io_pt, 0));
+    case "get_position_score_inputs":
+      return getPositionScoreInputs(str(args.ticker));
+    case "get_volume_gate":
+      return getVolumeGate(str(args.ticker), args.foreign_exchange === true);
+    // ── Deprecated aliases (backward compat) ──────────────────────────────────
     case "get_china_revenue_pct":
-      return getChinaRevenuePct(str(args.ticker));
+      return getGeographicRevenue(str(args.ticker), "China");
     case "get_dc134_options_scan":
-      return getDc134OptionsScan(str(args.ticker), str(args.window_day));
+      return getOptionsFlowScan(str(args.ticker), str(args.window_day));
     case "get_eqf_bracket":
-      return getEqfBracket(str(args.ticker), num(args.io_pt, 0));
+      return getPriceTargetBracket(str(args.ticker), num(args.io_pt, 0));
     case "get_tps_inputs":
-      return getTpsInputs(str(args.ticker));
+      return getPositionScoreInputs(str(args.ticker));
     case "get_adv_gate":
-      return getAdvGate(str(args.ticker), args.foreign_exchange === true);
+      return getVolumeGate(str(args.ticker), args.foreign_exchange === true);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

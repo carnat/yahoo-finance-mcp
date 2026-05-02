@@ -49,6 +49,23 @@ function wrapBatchResult(
   });
 }
 
+/**
+ * Returns the last trading date as a YYYY-MM-DD string.
+ * If a unix-seconds timestamps array is provided, uses the last element.
+ * Falls back to the last weekday from the UTC system clock.
+ * Note: does not account for market holidays — weekday fallback only.
+ */
+function getLastTradingDate(timestamps?: number[]): string {
+  if (timestamps && timestamps.length > 0) {
+    return new Date(timestamps[timestamps.length - 1] * 1000).toISOString().slice(0, 10);
+  }
+  const d = new Date();
+  while (d.getUTCDay() === 0 || d.getUTCDay() === 6) {
+    d.setUTCDate(d.getUTCDate() - 1);
+  }
+  return d.toISOString().slice(0, 10);
+}
+
 // Module-level crumb cache — shared within a Cloudflare isolate session
 let _crumb: { value: string; cookie: string; exp: number } | null = null;
 
@@ -976,6 +993,7 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
     pctFromTwoHundredDayAvg: pct(lastPrice, twoHundredDayAvg),
   };
 
+  let chartTimestamps: number[] = [];
   try {
     const hist = histRaw as Record<string, unknown>;
     const chartResult = (hist?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -983,6 +1001,7 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
       | undefined;
     if (chartResult) {
       const timestamps = (chartResult.timestamp as number[]) ?? [];
+      chartTimestamps = timestamps;
       const adjClose =
         ((chartResult.indicators as Record<string, unknown[]>)?.adjclose?.[0] as Record<
           string,
@@ -1016,6 +1035,7 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
     // partial stats from fast_info are still returned
   }
 
+  stats.dataDate = getLastTradingDate(chartTimestamps);
   return JSON.stringify(stats);
 }
 
@@ -1751,7 +1771,7 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
       creditStressFlag,
       debtTier,
       dataQuality,
-      dataDate: new Date().toISOString().slice(0, 10),
+      dataDate: getLastTradingDate(),
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
@@ -1815,7 +1835,7 @@ export async function getShortMomentum(ticker: string | string[]): Promise<strin
       squeezeRisk,
       flag,
       dateShortInterest: dateShort,
-      dataDate: new Date().toISOString().slice(0, 10),
+      dataDate: getLastTradingDate(),
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
@@ -1928,7 +1948,7 @@ export async function getEarningsMomentum(ticker: string | string[]): Promise<st
       avgSurprisePct: avgSurprise,
       currentBeatStreak: beatStreak,
       dataQuality,
-      dataDate: new Date().toISOString().slice(0, 10),
+      dataDate: getLastTradingDate(),
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
@@ -2225,7 +2245,7 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
         netSentiment: 0,
         changes: [],
         summary: "NO CHANGES",
-        dataDate: new Date().toISOString().slice(0, 10),
+        dataDate: getLastTradingDate(),
       });
     }
 
@@ -2306,20 +2326,20 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
       netSentiment,
       changes,
       summary,
-      dataDate: new Date().toISOString().slice(0, 10),
+      dataDate: getLastTradingDate(),
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
   }
 }
 
-// Module-level in-memory cache for DC-134 window-day readings.
+// Module-level in-memory cache for options flow window-label readings.
 // Persists within a single Worker instance lifetime.
-const _dc134Cache = new Map<string, { data: Record<string, unknown>; storedAt: number }>();
+const _optionsFlowCache = new Map<string, { data: Record<string, unknown>; storedAt: number }>();
 
-// ── get_china_revenue_pct ─────────────────────────────────────────────────────
+// ── get_geographic_revenue ────────────────────────────────────────────────────
 
-export async function getChinaRevenuePct(ticker: string): Promise<string> {
+export async function getGeographicRevenue(ticker: string, region: string = "China"): Promise<string> {
   let cik: number | null = null;
   let filingDate: string | null = null;
   let fiscalYear: string | null = null;
@@ -2374,26 +2394,22 @@ export async function getChinaRevenuePct(ticker: string): Promise<string> {
 
   return JSON.stringify({
     ticker,
-    chinaRevenuePct: null,
-    chinaRevenueUSD: null,
+    region,
+    regionRevenuePct: null,
+    regionRevenueUSD: null,
     fiscalYear,
     filingType: "10-K",
     filingDate,
-    segmentLabel: "China",
+    segmentLabel: region,
     source: "not_available",
     confidence: "NOT_DISCLOSED",
     _note: note,
   });
 }
 
-// ── get_dc134_options_scan ────────────────────────────────────────────────────
+// ── get_options_flow_scan ─────────────────────────────────────────────────────
 
-export async function getDc134OptionsScan(ticker: string, windowDay: string): Promise<string> {
-  const validDays = ["T-14", "T-7", "T-2"];
-  if (!validDays.includes(windowDay)) {
-    return JSON.stringify({ error: true, message: `window_day must be one of ${validDays.join(", ")}`, ticker });
-  }
-
+export async function getOptionsFlowScan(ticker: string, windowLabel: string): Promise<string> {
   try {
     const { calls, puts } = await yGetFullOptions(ticker);
     if (!calls.length && !puts.length) {
@@ -2435,12 +2451,14 @@ export async function getDc134OptionsScan(ticker: string, windowDay: string): Pr
     }
 
     let ivPctile: number | null = null;
+    let chartTimestamps: number[] = [];
     try {
       const chartD = await yGet(
         `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=1y&interval=1d`,
         false
       ) as Record<string, unknown>;
       const chartRes = (chartD?.chart as Record<string, unknown[]>)?.result?.[0] as Record<string, unknown>;
+      chartTimestamps = (chartRes?.timestamp as number[]) ?? [];
       const adjclose =
         ((chartRes?.indicators as Record<string, unknown[]>)?.adjclose?.[0] as Record<string, (number | null)[]>)?.adjclose ??
         ((chartRes?.indicators as Record<string, unknown[]>)?.quote?.[0] as Record<string, (number | null)[]>)?.close ?? [];
@@ -2465,13 +2483,13 @@ export async function getDc134OptionsScan(ticker: string, windowDay: string): Pr
       }
     } catch { /* ignore */ }
 
-    const dataDate = new Date().toISOString().slice(0, 10);
+    const dataDate = getLastTradingDate(chartTimestamps);
 
     const prevWindowMap: Record<string, string> = { "T-7": "T-14", "T-2": "T-7" };
-    const prevWindow = prevWindowMap[windowDay];
+    const prevWindow = prevWindowMap[windowLabel];
     let prevData: Record<string, unknown> | null = null;
     if (prevWindow) {
-      const cacheEntry = _dc134Cache.get(`${ticker}:${prevWindow}`);
+      const cacheEntry = _optionsFlowCache.get(`${ticker}:${prevWindow}`);
       if (cacheEntry && Date.now() - cacheEntry.storedAt < 72 * 3600 * 1000) {
         prevData = cacheEntry.data;
       }
@@ -2507,24 +2525,24 @@ export async function getDc134OptionsScan(ticker: string, windowDay: string): Pr
     const ivStr = ivPctile != null ? `${ivPctile}th%ile` : "N/A";
     const pvStr = putVolVs10d != null ? `${putVolVs10d.toFixed(2)}x` : "N/A";
     const pcStr = pcRatio != null ? pcRatio.toFixed(2) : "N/A";
-    const formattedBlock = `DC-134 OPTIONS SCAN [${windowDay}] ${ticker} | P/C: ${pcStr} | IV: ${ivStr} | Put vol vs 10d avg: ${pvStr} | Trend: ${putVolTrend} | Advisory: ${bracket ?? "N/A"} bracket`;
+    const formattedBlock = `OPTIONS FLOW SCAN [${windowLabel}] ${ticker} | P/C: ${pcStr} | IV: ${ivStr} | Put vol vs 10d avg: ${pvStr} | Trend: ${putVolTrend} | Advisory: ${bracket ?? "N/A"} bracket`;
 
     const resultData: Record<string, unknown> = {
-      ticker, windowDay, dataDate,
+      ticker, windowLabel, dataDate,
       pcRatio, ivPctile, putVolVs10dAvg: putVolVs10d, putVolTrend,
       maxPainStrike, bracket, formattedBlock,
     };
 
-    _dc134Cache.set(`${ticker}:${windowDay}`, { data: resultData, storedAt: Date.now() });
+    _optionsFlowCache.set(`${ticker}:${windowLabel}`, { data: resultData, storedAt: Date.now() });
     return JSON.stringify(resultData);
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
   }
 }
 
-// ── get_eqf_bracket ───────────────────────────────────────────────────────────
+// ── get_price_target_bracket ──────────────────────────────────────────────────
 
-export async function getEqfBracket(ticker: string, ioPt: number): Promise<string> {
+export async function getPriceTargetBracket(ticker: string, ioPt: number): Promise<string> {
   if (ioPt <= 0) {
     return JSON.stringify({ error: true, message: "io_pt must be a positive number", ticker });
   }
@@ -2562,9 +2580,9 @@ export async function getEqfBracket(ticker: string, ioPt: number): Promise<strin
   }
 }
 
-// ── get_tps_inputs ────────────────────────────────────────────────────────────
+// ── get_position_score_inputs ─────────────────────────────────────────────────
 
-export async function getTpsInputs(ticker: string): Promise<string> {
+export async function getPositionScoreInputs(ticker: string): Promise<string> {
   try {
     const [upgradeRaw, consensusRaw, priceRaw, earningsRaw, techRaw, maRaw] = await Promise.all([
       getAnalystUpgradeRadar(ticker, 30),
@@ -2632,9 +2650,9 @@ export async function getTpsInputs(ticker: string): Promise<string> {
   }
 }
 
-// ── get_adv_gate ──────────────────────────────────────────────────────────────
+// ── get_volume_gate ───────────────────────────────────────────────────────────
 
-export async function getAdvGate(ticker: string, foreignExchange: boolean): Promise<string> {
+export async function getVolumeGate(ticker: string, foreignExchange: boolean): Promise<string> {
   try {
     const fi = JSON.parse(await getFastInfo(ticker)) as Record<string, unknown>;
     const lastVolume = fi.lastVolume as number | null;

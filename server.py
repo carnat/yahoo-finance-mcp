@@ -66,6 +66,20 @@ async def _fetch_with_retry(fn, *args, retries: int = 1, delay: float = 2.0, **k
                 raise
 
 
+def get_last_trading_date(df=None) -> str:
+    """Returns the last trading date as a YYYY-MM-DD string.
+    Uses the last DataFrame index row if provided.
+    Falls back to the last weekday from the UTC system clock.
+    Note: does not account for market holidays — weekday fallback only.
+    """
+    if df is not None and len(df) > 0:
+        return df.index[-1].strftime('%Y-%m-%d')
+    d = datetime.datetime.utcnow().date()
+    while d.weekday() >= 5:  # 5=Sat, 6=Sun
+        d -= datetime.timedelta(days=1)
+    return d.strftime('%Y-%m-%d')
+
+
 def _safe_parse(result: object, ticker: str) -> object:
     """Parse a JSON result string, returning a structured error dict on failure.
 
@@ -984,6 +998,7 @@ async def get_price_stats(ticker: str | list[str]) -> str:
     }
 
     # Compute 30-day realised volatility and CAGR from history
+    hist_5y = None
     try:
         hist_5y = await _fetch_with_retry(company.history, "5y", "1d")
         if hist_5y is not None and not hist_5y.empty and "Close" in hist_5y.columns:
@@ -1016,6 +1031,7 @@ async def get_price_stats(ticker: str | list[str]) -> str:
     except Exception:
         pass  # Stats from fast_info are still returned
 
+    stats["dataDate"] = get_last_trading_date(hist_5y)
     result = json.dumps(stats)
     _cache_set(cache_key, result)
     return result
@@ -1941,14 +1957,13 @@ async def get_credit_health(ticker: str | list[str]) -> str:
         "creditStressFlag": credit_stress,
         "debtTier": debt_tier,
         "dataQuality": data_quality,
-        "dataDate": str(datetime.date.today()),
+        "dataDate": get_last_trading_date(),
     })
 
 
 # ---------------------------------------------------------------------------
 # Tool: get_short_momentum
 # ---------------------------------------------------------------------------
-
 @yfinance_server.tool(
     name="get_short_momentum",
     description="""Get short interest with pre-computed momentum: MoM delta, direction, squeeze risk, and flag.
@@ -2038,14 +2053,13 @@ async def get_short_momentum(ticker: str | list[str]) -> str:
         "squeezeRisk": squeeze_risk,
         "flag": flag,
         "dateShortInterest": _ser(date_short),
-        "dataDate": str(datetime.date.today()),
+        "dataDate": get_last_trading_date(),
     })
 
 
 # ---------------------------------------------------------------------------
 # Tool: get_earnings_momentum
 # ---------------------------------------------------------------------------
-
 @yfinance_server.tool(
     name="get_earnings_momentum",
     description="""Get earnings revision momentum, beat rate, and estimate direction signals.
@@ -2206,7 +2220,7 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
         "avgSurprisePct": avg_surprise,
         "currentBeatStreak": beat_streak,
         "dataQuality": data_quality,
-        "dataDate": str(datetime.date.today()),
+        "dataDate": get_last_trading_date(),
     })
     return json.dumps(output)
 
@@ -2214,9 +2228,6 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
 # ---------------------------------------------------------------------------
 # Tool: get_options_flow_summary
 # ---------------------------------------------------------------------------
-
-@yfinance_server.tool(
-    name="get_options_flow_summary",
     description="""Get options flow summary: P/C ratio, IV percentile, max pain strike, highest OI strikes. Single ticker only.
 
 Args:
@@ -2535,10 +2546,7 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
             "netSentiment": 0,
             "changes": [],
             "summary": "NO CHANGES",
-            "dataDate": str(datetime.date.today()),
-        })
-
-    ud = ud.reset_index()
+            "dataDate": get_last_trading_date(),
     cutoff = pd.Timestamp.now() - pd.DateOffset(days=days_back)
 
     # Filter to window
@@ -2642,10 +2650,8 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
         "netSentiment": net_sentiment,
         "changes": changes,
         "summary": summary,
-        "dataDate": str(datetime.date.today()),
+        "dataDate": get_last_trading_date(),
     })
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -2974,7 +2980,7 @@ async def _edgar_get(url: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# CR-10 — get_china_revenue_pct
+# CR-10 — get_geographic_revenue
 # ---------------------------------------------------------------------------
 
 # Option C interim lookup table — confirmed values from 10-K annual filings.
@@ -2994,50 +3000,55 @@ _CHINA_REVENUE_CONFIRMED: dict[str, dict] = {
 }
 
 @yfinance_server.tool(
-    name="get_china_revenue_pct",
-    description="""Get China geographic revenue % from SEC EDGAR filing metadata and yfinance data.
+    name="get_geographic_revenue",
+    description="""Get geographic revenue % for a specified region from SEC EDGAR filing metadata and yfinance data.
 
-DC-151 CLASS A/B/C/D China Revenue Risk Classification:
+Default region is 'China'. DC-151 CLASS A/B/C/D China Revenue Risk Classification (when region='China'):
   ≥20% → BANNED (CLASS B) | 15–20% → CHINA WATCH | ≤14.9% CLASS C eligible (cap 30%)
 
-Returns: chinaRevenuePct, chinaRevenueUSD, fiscalYear, filingType, filingDate, segmentLabel,
+Returns: region, regionRevenuePct, regionRevenueUSD, fiscalYear, filingType, filingDate, segmentLabel,
 source, confidence.
 
 confidence:
   CONFIRMED — sourced from income statement segment (satisfies DC-151 Rule 1 annual confirmation).
-  NOT_DISCLOSED — company does not break out China separately in machine-readable form.
+  NOT_DISCLOSED — company does not break out the region separately in machine-readable form.
   When NOT_DISCLOSED, _manualLookup is populated with direct EDGAR URLs and step-by-step
   instructions to locate the geographic segment table in the 10-K.
 
 Args:
     ticker: str
         The ticker symbol, e.g. "MU", "AAPL", "QCOM"
+    region: str
+        Geographic region to query, e.g. "China", "Europe", "Americas", "Asia Pacific", "Japan".
+        Defaults to "China".
 """,
 )
-async def get_china_revenue_pct(ticker: str) -> str:
-    """Return China revenue % from SEC EDGAR / yfinance data."""
-    cache_key = f"china_revenue:{ticker}"
+async def get_geographic_revenue(ticker: str, region: str = "China") -> str:
+    """Return geographic revenue % from SEC EDGAR / yfinance data."""
+    cache_key = f"geographic_revenue:{ticker}:{region}"
     cached = _cache_get(cache_key, _EDGAR_TTL)
     if cached is not None:
         return cached
 
-    # Option C: check confirmed lookup table first
-    confirmed_entry = _CHINA_REVENUE_CONFIRMED.get(ticker.upper())
-    if confirmed_entry:
-        result = json.dumps({
-            "ticker": ticker,
-            "chinaRevenuePct": confirmed_entry["pct"],
-            "chinaRevenueUSD": None,
-            "fiscalYear": confirmed_entry["fiscalYear"],
-            "filingType": "10-K",
-            "filingDate": confirmed_entry["filingDate"],
-            "segmentLabel": "China",
-            "source": "confirmed_lookup_table",
-            "confidence": "CONFIRMED",
-            "_note": None,
-        })
-        _cache_set(cache_key, result)
-        return result
+    # Option C: check confirmed lookup table for China (China only — other regions not yet confirmed)
+    if region.lower() == "china":
+        confirmed_entry = _CHINA_REVENUE_CONFIRMED.get(ticker.upper())
+        if confirmed_entry:
+            result = json.dumps({
+                "ticker": ticker,
+                "region": region,
+                "regionRevenuePct": confirmed_entry["pct"],
+                "regionRevenueUSD": None,
+                "fiscalYear": confirmed_entry["fiscalYear"],
+                "filingType": "10-K",
+                "filingDate": confirmed_entry["filingDate"],
+                "segmentLabel": "China",
+                "source": "confirmed_lookup_table",
+                "confidence": "CONFIRMED",
+                "_note": None,
+            })
+            _cache_set(cache_key, result)
+            return result
 
     # Step 1: Get CIK and latest 10-K filing metadata from EDGAR
     cik: int | None = None
@@ -3071,10 +3082,10 @@ async def get_china_revenue_pct(ticker: str) -> str:
             pass
 
     # Step 2: Try yfinance income statement for geographic segment rows
-    china_revenue_usd: float | None = None
+    region_revenue_usd: float | None = None
     total_revenue_usd: float | None = None
-    china_revenue_pct: float | None = None
-    segment_label = "China"
+    region_revenue_pct: float | None = None
+    segment_label = region
     source = "not_available"
     confidence = "NOT_DISCLOSED"
 
@@ -3096,16 +3107,16 @@ async def get_china_revenue_pct(ticker: str) -> str:
                 except (KeyError, TypeError):
                     pass
 
-            # Geographic / segment rows that some companies surface in the income stmt
-            china_candidates = [
-                "China", "Greater China", "China Revenue", "Revenue from China",
-                "China and Other", "Mainland China", "China Segment",
-            ]
-            for row_name in china_candidates:
+            # Build region-specific candidate row names
+            r = region
+            region_candidates = [r, f"{r} Revenue", f"Revenue from {r}", f"{r} and Other", f"{r} Segment"]
+            if r.lower() == "china":
+                region_candidates += ["Greater China", "Mainland China", "China Segment"]
+            for row_name in region_candidates:
                 try:
                     val = inc.loc[row_name, latest_col]
                     if pd.notna(val):
-                        china_revenue_usd = float(val)
+                        region_revenue_usd = float(val)
                         segment_label = row_name
                         source = "income_statement_segment"
                         confidence = "CONFIRMED"
@@ -3115,8 +3126,8 @@ async def get_china_revenue_pct(ticker: str) -> str:
     except Exception:
         pass
 
-    if china_revenue_usd is not None and total_revenue_usd and total_revenue_usd > 0:
-        china_revenue_pct = round(china_revenue_usd / total_revenue_usd, 4)
+    if region_revenue_usd is not None and total_revenue_usd and total_revenue_usd > 0:
+        region_revenue_pct = round(region_revenue_usd / total_revenue_usd, 4)
 
     # Build a precise LLM-actionable pointer when data could not be resolved automatically.
     manual_lookup: dict | None = None
@@ -3124,7 +3135,7 @@ async def get_china_revenue_pct(ticker: str) -> str:
         t_upper = ticker.upper()
         cik_padded = str(cik).zfill(10) if cik else None
         edgar_search_url = (
-            f"https://efts.sec.gov/LATEST/search-index?q=%22China%22"
+            f"https://efts.sec.gov/LATEST/search-index?q=%22{region}%22"
             f"&forms=10-K&entity={t_upper}"
         )
         edgar_filings_url = (
@@ -3136,16 +3147,15 @@ async def get_china_revenue_pct(ticker: str) -> str:
         )
         manual_lookup = {
             "reason": (
-                "Geographic revenue breakdown is not available in machine-readable form via "
-                "this data pipeline. NOT_DISCLOSED does NOT satisfy DC-151 Rule 1 annual "
+                f"Geographic revenue breakdown for '{region}' is not available in machine-readable "
+                "form via this data pipeline. NOT_DISCLOSED does NOT satisfy DC-151 Rule 1 annual "
                 "confirmation requirement."
             ),
             "action": (
                 f"Open the most recent 10-K for {t_upper} and search for the section titled "
                 "'Geographic Information', 'Geographic Areas', or 'Segment Information'. "
-                "Look for a table that lists revenue by region including 'China', "
-                "'Greater China', or 'Mainland China'. Divide that figure by Total Revenue "
-                "to compute chinaRevenuePct."
+                f"Look for a table that lists revenue by region including '{region}'. "
+                "Divide that figure by Total Revenue to compute regionRevenuePct."
             ),
             "edgarFullTextSearchUrl": edgar_search_url,
             "edgarFilingsPageUrl": edgar_filings_url,
@@ -3156,8 +3166,9 @@ async def get_china_revenue_pct(ticker: str) -> str:
 
     result = json.dumps({
         "ticker": ticker,
-        "chinaRevenuePct": china_revenue_pct,
-        "chinaRevenueUSD": china_revenue_usd,
+        "region": region,
+        "regionRevenuePct": region_revenue_pct,
+        "regionRevenueUSD": region_revenue_usd,
         "fiscalYear": fiscal_year,
         "filingType": filing_type,
         "filingDate": filing_date,
@@ -3171,16 +3182,16 @@ async def get_china_revenue_pct(ticker: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# CR-12 — get_dc134_options_scan
+# CR-12 — get_options_flow_scan
 # ---------------------------------------------------------------------------
 
 @yfinance_server.tool(
-    name="get_dc134_options_scan",
-    description="""DC-134 Rule 8 structured options flow scan for a binary event window.
+    name="get_options_flow_scan",
+    description="""Structured options flow scan for a binary event window.
 
-Returns the exact DC-134 Rule 8 formatted output block. IO pastes formattedBlock directly into
-session output. Prior window-day readings are cached server-side (72 h TTL) to enable trend
-computation across T-14 → T-7 → T-2.
+Returns the formatted options flow output block. IO pastes formattedBlock directly into
+session output. Prior window-label readings are cached server-side (72 h TTL) to enable trend
+computation across readings (e.g. T-14 → T-7 → T-2).
 
 Returns: pcRatio, ivPctile, putVolVs10dAvg, putVolTrend (INCREASING/STABLE/DECREASING),
 maxPainStrike, bracket (UPPER/MID/LOWER), formattedBlock, dataDate.
@@ -3188,20 +3199,13 @@ maxPainStrike, bracket (UPPER/MID/LOWER), formattedBlock, dataDate.
 Args:
     ticker: str
         The ticker symbol, e.g. "ASTS"
-    window_day: str
-        Reading day in the binary event window: "T-14", "T-7", or "T-2"
+    window_label: str
+        Free-form label for this reading, e.g. "T-14", "T-7", "T-2", "pre-earnings", "week1".
+        Used as cache key for trend computation across readings.
 """,
 )
-async def get_dc134_options_scan(ticker: str, window_day: str) -> str:
-    """Return DC-134 Rule 8 options scan for the specified window day."""
-    valid_days = ("T-14", "T-7", "T-2")
-    if window_day not in valid_days:
-        return json.dumps({
-            "error": True,
-            "message": f"window_day must be one of {valid_days}",
-            "ticker": ticker,
-        })
-
+async def get_options_flow_scan(ticker: str, window_label: str) -> str:
+    """Return structured options flow scan for the specified window label."""
     company = yf.Ticker(ticker)
     try:
         fi = company.fast_info
@@ -3283,20 +3287,18 @@ async def get_dc134_options_scan(ticker: str, window_day: str) -> str:
         pass
 
     # Data date from history
-    data_date: str = str(datetime.date.today())
     try:
         _h = company.history(period="5d", interval="1d")
-        if _h is not None and not _h.empty:
-            data_date = str(_h.index[-1].date())
+        data_date = get_last_trading_date(_h)
     except Exception:
-        pass
+        data_date = get_last_trading_date()
 
     # Look up prior window reading for trend analysis
     prev_window_map = {"T-7": "T-14", "T-2": "T-7"}
-    prev_window = prev_window_map.get(window_day)
+    prev_window = prev_window_map.get(window_label)
     prev_data: dict | None = None
     if prev_window:
-        prev_cached = _cache_get(f"dc134:{ticker}:{prev_window}", 72 * 3600)
+        prev_cached = _cache_get(f"options_flow:{ticker}:{prev_window}", 72 * 3600)
         if prev_cached:
             try:
                 prev_data = json.loads(prev_cached)
@@ -3330,12 +3332,12 @@ async def get_dc134_options_scan(ticker: str, window_day: str) -> str:
         else:
             bracket = "MID"
 
-    # DC-134 formatted block
+    # Formatted block
     iv_str = f"{iv_pctile}th%ile" if iv_pctile is not None else "N/A"
     pv_str = f"{put_vol_vs_10d:.2f}x" if put_vol_vs_10d is not None else "N/A"
     pc_str = f"{pc_ratio:.2f}" if pc_ratio is not None else "N/A"
     formatted_block = (
-        f"DC-134 OPTIONS SCAN [{window_day}] {ticker} | "
+        f"OPTIONS FLOW SCAN [{window_label}] {ticker} | "
         f"P/C: {pc_str} | "
         f"IV: {iv_str} | "
         f"Put vol vs 10d avg: {pv_str} | "
@@ -3345,7 +3347,7 @@ async def get_dc134_options_scan(ticker: str, window_day: str) -> str:
 
     result_dict: dict = {
         "ticker": ticker,
-        "windowDay": window_day,
+        "windowLabel": window_label,
         "dataDate": data_date,
         "pcRatio": pc_ratio,
         "ivPctile": iv_pctile,
@@ -3357,17 +3359,17 @@ async def get_dc134_options_scan(ticker: str, window_day: str) -> str:
     }
 
     # Cache current reading for future trend comparison (72h TTL via 3-day window check)
-    _cache_set(f"dc134:{ticker}:{window_day}", json.dumps(result_dict))
+    _cache_set(f"options_flow:{ticker}:{window_label}", json.dumps(result_dict))
     return json.dumps(result_dict)
 
 
 # ---------------------------------------------------------------------------
-# CR-13 — get_eqf_bracket
+# CR-13 — get_price_target_bracket
 # ---------------------------------------------------------------------------
 
 @yfinance_server.tool(
-    name="get_eqf_bracket",
-    description="""Compute DC-126 Section 6.24 EQF bracket for a position.
+    name="get_price_target_bracket",
+    description="""Compute EQF bracket for a position.
 
 EQF = currentPrice / io_pt × 100. Used at every /snipe, /dca, and /thesis.
 
@@ -3384,7 +3386,7 @@ Args:
         IO's price target (Commander/IO-set, not analyst consensus)
 """,
 )
-async def get_eqf_bracket(ticker: str, io_pt: float) -> str:
+async def get_price_target_bracket(ticker: str, io_pt: float) -> str:
     """Return EQF bracket and tag for the current position."""
     if io_pt <= 0:
         return json.dumps({"error": True, "message": "io_pt must be a positive number", "ticker": ticker})
@@ -3441,12 +3443,12 @@ async def get_eqf_bracket(ticker: str, io_pt: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# CR-14 — get_tps_inputs
+# CR-14 — get_position_score_inputs
 # ---------------------------------------------------------------------------
 
 @yfinance_server.tool(
-    name="get_tps_inputs",
-    description="""Aggregate all TPS (Tactical Position Scoring) inputs for T1, T2, T4, and T5 components.
+    name="get_position_score_inputs",
+    description="""Aggregate all position scoring inputs for T1, T2, T4, and T5 components.
 
 T3 (PT proximity) and T2 (vs cost basis) require portfolio state (IO PT, cost basis) not available
 here — IO scores those manually from currentPrice in t2_inputs and stored values.
@@ -3461,8 +3463,8 @@ Args:
         Single ticker symbol, e.g. "ASTS"
 """,
 )
-async def get_tps_inputs(ticker: str) -> str:
-    """Return aggregated TPS inputs for T1, T2, T4, and T5 scoring components."""
+async def get_position_score_inputs(ticker: str) -> str:
+    """Return aggregated position scoring inputs for T1, T2, T4, and T5 components."""
     results = await asyncio.gather(
         get_analyst_upgrade_radar(ticker, days_back=30),
         get_analyst_consensus(ticker),
@@ -3530,7 +3532,7 @@ async def get_tps_inputs(ticker: str) -> str:
     }
 
     # Data date: prefer last OHLCV row from technical indicators (DC-05 clock discipline)
-    data_date = tech.get("dataDate") or ma.get("dataDate") or str(datetime.date.today())
+    data_date = tech.get("dataDate") or ma.get("dataDate") or get_last_trading_date()
 
     return json.dumps({
         "ticker": ticker,
@@ -3543,11 +3545,11 @@ async def get_tps_inputs(ticker: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# CR-15 — get_adv_gate
+# CR-15 — get_volume_gate
 # ---------------------------------------------------------------------------
 
 @yfinance_server.tool(
-    name="get_adv_gate",
+    name="get_volume_gate",
     description="""DC Section 6.2 Volume Gate check: regularMarketVolume ≥ 0.5 × 20-day ADV.
 
 Returns lastVolume, adv10d, adv20d (computed from last 20 daily sessions), adv90d, ratio20d,
@@ -3563,7 +3565,7 @@ Args:
         Set True for DC-80 foreign exchange / ADR tickers. Default False.
 """,
 )
-async def get_adv_gate(ticker: str, foreign_exchange: bool = False) -> str:
+async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
     """Return DC Section 6.2 volume gate assessment."""
     company = yf.Ticker(ticker)
     try:
@@ -3627,6 +3629,50 @@ async def get_adv_gate(ticker: str, foreign_exchange: bool = False) -> str:
         "dataDate": data_date,
         "note": note,
     })
+
+
+# ---------------------------------------------------------------------------
+# Deprecated aliases — backward compat (remove in next major version)
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_china_revenue_pct",
+    description="[DEPRECATED] Use get_geographic_revenue instead. Alias preserved for backward compatibility.",
+)
+async def _deprecated_get_china_revenue_pct(ticker: str) -> str:
+    return await get_geographic_revenue(ticker, region="China")
+
+
+@yfinance_server.tool(
+    name="get_dc134_options_scan",
+    description="[DEPRECATED] Use get_options_flow_scan instead. Alias preserved for backward compatibility.",
+)
+async def _deprecated_get_dc134_options_scan(ticker: str, window_day: str) -> str:
+    return await get_options_flow_scan(ticker, window_label=window_day)
+
+
+@yfinance_server.tool(
+    name="get_eqf_bracket",
+    description="[DEPRECATED] Use get_price_target_bracket instead. Alias preserved for backward compatibility.",
+)
+async def _deprecated_get_eqf_bracket(ticker: str, io_pt: float) -> str:
+    return await get_price_target_bracket(ticker, io_pt)
+
+
+@yfinance_server.tool(
+    name="get_tps_inputs",
+    description="[DEPRECATED] Use get_position_score_inputs instead. Alias preserved for backward compatibility.",
+)
+async def _deprecated_get_tps_inputs(ticker: str) -> str:
+    return await get_position_score_inputs(ticker)
+
+
+@yfinance_server.tool(
+    name="get_adv_gate",
+    description="[DEPRECATED] Use get_volume_gate instead. Alias preserved for backward compatibility.",
+)
+async def _deprecated_get_adv_gate(ticker: str, foreign_exchange: bool = False) -> str:
+    return await get_volume_gate(ticker, foreign_exchange)
 
 
 if __name__ == "__main__":
