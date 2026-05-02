@@ -606,7 +606,20 @@ export async function getOptionChain(
     const opts = (result?.options as Record<string, unknown[]>[])?.[0];
     if (!opts) return `Error: no options found for ${ticker} on ${expDate}`;
 
-    return JSON.stringify(opts[optType] ?? []);
+    // Derive dataDate from the quote's regularMarketTime (most recent trading session)
+    const quote = (result?.quote as Record<string, unknown>) ?? {};
+    const regMktTime = typeof quote.regularMarketTime === "number" ? quote.regularMarketTime : null;
+    const dataDate = regMktTime
+      ? new Date(regMktTime * 1000).toISOString().slice(0, 10)
+      : new Date().toISOString().slice(0, 10);
+
+    return JSON.stringify({
+      ticker,
+      expiration: expDate,
+      optionType: optType,
+      dataDate,
+      contracts: opts[optType] ?? [],
+    });
   } catch (e) {
     return `Error fetching option chain for ${ticker} on ${expDate}: ${e instanceof Error ? e.message : String(e)}`;
   }
@@ -735,10 +748,18 @@ function gapPctFromClose(price: number, prevClose: number): number {
 
 export async function getOvernightQuote(ticker: string): Promise<string> {
   try {
-    const d = (await yGet(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=5d&interval=1h&includePrePost=true`,
-      false
-    )) as Record<string, unknown>;
+    // Fetch chart data and quoteSummary price in parallel.
+    // The chart meta.regularMarketPreviousClose is often null for equities;
+    // the quoteSummary `price` module reliably has regularMarketPreviousClose.
+    const [d, priceD] = await Promise.all([
+      yGet(
+        `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=5d&interval=1h&includePrePost=true`,
+        false
+      ),
+      yGet(
+        `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price`
+      ).catch(() => null),
+    ]) as [Record<string, unknown>, Record<string, unknown> | null];
 
     const result = (d?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
       | Record<string, unknown>
@@ -747,9 +768,17 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
 
     const meta = (result.meta as Record<string, unknown>) ?? {};
     const tzName = (meta.exchangeTimezoneName as string | undefined) ?? "UTC";
-    const prevClose = typeof meta.regularMarketPreviousClose === "number"
+
+    // prevClose: chart meta first, then quoteSummary price module fallback
+    const chartPrevClose = typeof meta.regularMarketPreviousClose === "number"
       ? (meta.regularMarketPreviousClose as number)
       : null;
+    const priceResult = (priceD?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    const priceMod = (priceResult?.price as Record<string, unknown>) ?? {};
+    const qsPrevClose = raw(priceMod.regularMarketPreviousClose) as number | null;
+    const prevClose = chartPrevClose ?? qsPrevClose;
 
     const timestamps = (result.timestamp as number[]) ?? [];
     const quoteBlock = ((result.indicators as Record<string, unknown[]>)?.quote?.[0] as
@@ -1130,7 +1159,7 @@ export async function getFinancialRatios(ticker: string | string[]): Promise<str
   const freeCashflow = raw(fd.freeCashflow) as number | null;
   const marketCap = raw(sd.marketCap) as number | null;
 
-  return JSON.stringify({
+  const rawRatios: Record<string, unknown> = {
     ticker,
     currency: raw(fd.financialCurrency),
     trailingPE: raw(sd.trailingPE),
@@ -1157,7 +1186,19 @@ export async function getFinancialRatios(ticker: string | string[]): Promise<str
     payoutRatio: raw(sd.payoutRatio),
     earningsGrowth: raw(fd.earningsGrowth),
     revenueGrowth: raw(fd.revenueGrowth),
-  });
+  };
+
+  // Post-filter: replace any plain object values (e.g. empty {} wrappers from
+  // unavailable fields) with null. raw() only unwraps {raw,fmt}; a bare {}
+  // has no "raw" key and slips through as-is.
+  const filtered = Object.fromEntries(
+    Object.entries(rawRatios).map(([k, v]) => [
+      k,
+      v !== null && typeof v === "object" && !Array.isArray(v) ? null : v,
+    ])
+  );
+
+  return JSON.stringify(filtered);
 }
 
 export async function getCalendar(ticker: string): Promise<string> {
@@ -1182,6 +1223,13 @@ export async function getCalendar(ticker: string): Promise<string> {
 
   return JSON.stringify({
     ticker,
+    earningsDateConfirmed: earningsDates.filter(Boolean).length === new Set(earningsDates.filter(Boolean)).size
+      && new Set(earningsDates.filter(Boolean)).size === 1,
+    earningsDateSource: earningsDates.filter(Boolean).length === 0
+      ? "UNKNOWN"
+      : new Set(earningsDates.filter(Boolean)).size === 1
+        ? "IR_FILING"
+        : "ESTIMATE",
     calendar: {
       earnings: {
         earningsDate: earningsDates,
@@ -1198,14 +1246,14 @@ export async function getCalendar(ticker: string): Promise<string> {
   });
 }
 
-export async function searchTicker(query: string, maxResults: number): Promise<string> {
+export async function searchTicker(query: string, maxResults: number, exchange?: string | null): Promise<string> {
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v1/finance/search?q=${enc(query)}&quotesCount=${maxResults}&newsCount=0&enableFuzzyQuery=false`,
     false
   )) as Record<string, unknown>;
 
   const quotes = (d?.quotes as Record<string, unknown>[]) ?? [];
-  const trimmed = quotes
+  let trimmed = quotes
     .filter((q) => q.symbol)
     .map((q) => ({
       symbol: q.symbol ?? null,
@@ -1214,6 +1262,17 @@ export async function searchTicker(query: string, maxResults: number): Promise<s
       quoteType: q.quoteType ?? null,
       score: q.score ?? null,
     }));
+
+  if (exchange) {
+    const exch = exchange.toUpperCase();
+    if (exch === "US") {
+      const usExchanges = new Set(["NMS", "NYQ"]);
+      trimmed = trimmed.filter((r) => usExchanges.has(r.exchange as string));
+    } else {
+      trimmed = trimmed.filter((r) => r.exchange === exch);
+    }
+  }
+
   return JSON.stringify(trimmed);
 }
 
@@ -2201,10 +2260,17 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
         signal = "MAINTAIN";
       }
 
-      // Price target direction — yfinance doesn't expose price targets in
-      // upgrades_downgrades, so we can only detect "INITIATED".  mixedSignal
-      // is included for forward-compatibility but will be false for now.
-      const ptDirection: string | null = ["initiated", "Initiated", "init"].includes(action) ? "INITIATED" : null;
+      // Price target direction.
+      // yfinance/upgrades_downgrades doesn't expose numeric price targets, so ptFrom/ptTo are
+      // structural stubs (null). ptDirection is derived from action semantics:
+      //   INITIATED — new coverage (initiated/init action)
+      //   UNCHANGED — reiteration/maintain with no rating change
+      //   null     — signal genuinely unknown
+      const ptFrom: null = null;
+      const ptTo: null = null;
+      const ptDirection: string | null =
+        ["initiated", "Initiated", "init"].includes(action) ? "INITIATED" :
+        signal === "MAINTAIN" ? "UNCHANGED" : null;
       const mixedSignal = signal === "UPGRADE" && ptDirection === "LOWERED";
 
       let strengthFlag: string;
@@ -2219,6 +2285,8 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
         fromGrade,
         toGrade,
         signal,
+        ptFrom,
+        ptTo,
         ptDirection,
         mixedSignal,
         strengthFlag,
@@ -2238,6 +2306,384 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
       changes,
       summary,
       dataDate: new Date().toISOString().slice(0, 10),
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+  }
+}
+
+// Module-level in-memory cache for DC-134 window-day readings.
+// Persists within a single Worker instance lifetime.
+const _dc134Cache = new Map<string, { data: Record<string, unknown>; storedAt: number }>();
+
+// ── get_china_revenue_pct ─────────────────────────────────────────────────────
+
+export async function getChinaRevenuePct(ticker: string): Promise<string> {
+  let cik: number | null = null;
+  let filingDate: string | null = null;
+  let fiscalYear: string | null = null;
+
+  try {
+    const tickersResp = await fetch("https://www.sec.gov/files/company_tickers.json", {
+      headers: { "User-Agent": "yahoo-finance-mcp/1.0 (contact@example.com)" },
+    });
+    if (tickersResp.ok) {
+      const tickersData = await tickersResp.json() as Record<string, { ticker: string; cik_str: number }>;
+      for (const entry of Object.values(tickersData)) {
+        if (entry.ticker.toUpperCase() === ticker.toUpperCase()) {
+          cik = entry.cik_str;
+          break;
+        }
+      }
+    } else {
+      await tickersResp.body?.cancel();
+    }
+  } catch { /* EDGAR fetch failed */ }
+
+  if (cik != null) {
+    try {
+      const cikPadded = String(cik).padStart(10, "0");
+      const subsResp = await fetch(`https://data.sec.gov/submissions/CIK${cikPadded}.json`, {
+        headers: { "User-Agent": "yahoo-finance-mcp/1.0 (contact@example.com)" },
+      });
+      if (subsResp.ok) {
+        const subs = await subsResp.json() as Record<string, unknown>;
+        const filings = ((subs.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+        const forms = (filings.form as string[]) ?? [];
+        const dates = (filings.filingDate as string[]) ?? [];
+        const periods = (filings.reportDate as string[]) ?? [];
+        for (let i = 0; i < forms.length; i++) {
+          if (["10-K", "10-K405", "10-KSB"].includes(forms[i])) {
+            filingDate = dates[i] ?? null;
+            const period = periods[i];
+            if (period) fiscalYear = `FY${period.slice(0, 4)}`;
+            break;
+          }
+        }
+      } else {
+        await subsResp.body?.cancel();
+      }
+    } catch { /* submissions fetch failed */ }
+  }
+
+  const note =
+    "Geographic revenue breakdown is not available in machine-readable form via this data " +
+    "pipeline. Verify against the most recent 10-K geographic segment note. " +
+    "NOT_DISCLOSED does NOT satisfy DC-151 Rule 1 annual confirmation requirement.";
+
+  return JSON.stringify({
+    ticker,
+    chinaRevenuePct: null,
+    chinaRevenueUSD: null,
+    fiscalYear,
+    filingType: "10-K",
+    filingDate,
+    segmentLabel: "China",
+    source: "not_available",
+    confidence: "NOT_DISCLOSED",
+    _note: note,
+  });
+}
+
+// ── get_dc134_options_scan ────────────────────────────────────────────────────
+
+export async function getDc134OptionsScan(ticker: string, windowDay: string): Promise<string> {
+  const validDays = ["T-14", "T-7", "T-2"];
+  if (!validDays.includes(windowDay)) {
+    return JSON.stringify({ error: true, message: `window_day must be one of ${validDays.join(", ")}`, ticker });
+  }
+
+  try {
+    const { calls, puts } = await yGetFullOptions(ticker);
+    if (!calls.length && !puts.length) {
+      return JSON.stringify({ error: true, message: `No options data for ${ticker}`, ticker });
+    }
+
+    let currentPrice: number | null = null;
+    try {
+      const pd = await yGet(`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price`) as Record<string, unknown>;
+      const pr = ((pd?.quoteSummary as Record<string, unknown[]>)?.result?.[0] as Record<string, unknown>)?.price as Record<string, unknown>;
+      currentPrice = raw(pr?.regularMarketPrice) as number | null;
+    } catch { /* ignore */ }
+
+    const callVol = calls.reduce((s, c) => s + ((c.volume as number) || 0), 0);
+    const putVol = puts.reduce((s, p) => s + ((p.volume as number) || 0), 0);
+    const pcRatio = callVol > 0 ? +(putVol / callVol).toFixed(2) : null;
+
+    let maxPainStrike: number | null = null;
+    const oiByStrike = new Map<number, number>();
+    for (const c of [...calls, ...puts]) {
+      const strike = c.strike as number;
+      const oi = (c.openInterest as number) || 0;
+      oiByStrike.set(strike, (oiByStrike.get(strike) ?? 0) + oi);
+    }
+    if (oiByStrike.size > 0) {
+      let maxOi = -1;
+      for (const [strike, oi] of oiByStrike) {
+        if (oi > maxOi) { maxOi = oi; maxPainStrike = strike; }
+      }
+    }
+
+    let atmIv: number | null = null;
+    if (currentPrice != null) {
+      let minDist = Infinity;
+      for (const c of calls) {
+        const dist = Math.abs((c.strike as number) - currentPrice);
+        if (dist < minDist) { minDist = dist; atmIv = (c.impliedVolatility as number | null) ?? null; }
+      }
+    }
+
+    let ivPctile: number | null = null;
+    try {
+      const chartD = await yGet(
+        `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=1y&interval=1d`,
+        false
+      ) as Record<string, unknown>;
+      const chartRes = (chartD?.chart as Record<string, unknown[]>)?.result?.[0] as Record<string, unknown>;
+      const adjclose =
+        ((chartRes?.indicators as Record<string, unknown[]>)?.adjclose?.[0] as Record<string, (number | null)[]>)?.adjclose ??
+        ((chartRes?.indicators as Record<string, unknown[]>)?.quote?.[0] as Record<string, (number | null)[]>)?.close ?? [];
+      const closes = adjclose.filter((v): v is number => v != null);
+      if (closes.length >= 30 && atmIv != null) {
+        const rets: number[] = [];
+        for (let i = 1; i < closes.length; i++) rets.push((closes[i] - closes[i - 1]) / closes[i - 1]);
+        const rollVols: number[] = [];
+        for (let i = 29; i < rets.length; i++) {
+          const window = rets.slice(i - 29, i + 1);
+          const mean = window.reduce((a, b) => a + b, 0) / window.length;
+          const variance = window.reduce((a, b) => a + (b - mean) ** 2, 0) / window.length;
+          rollVols.push(Math.sqrt(variance * 252));
+        }
+        if (rollVols.length >= 5) {
+          const rvMin = Math.min(...rollVols);
+          const rvMax = Math.max(...rollVols);
+          if (rvMax > rvMin) {
+            ivPctile = Math.max(0, Math.min(100, Math.round((atmIv - rvMin) / (rvMax - rvMin) * 100)));
+          }
+        }
+      }
+    } catch { /* ignore */ }
+
+    const dataDate = new Date().toISOString().slice(0, 10);
+
+    const prevWindowMap: Record<string, string> = { "T-7": "T-14", "T-2": "T-7" };
+    const prevWindow = prevWindowMap[windowDay];
+    let prevData: Record<string, unknown> | null = null;
+    if (prevWindow) {
+      const cacheEntry = _dc134Cache.get(`${ticker}:${prevWindow}`);
+      if (cacheEntry && Date.now() - cacheEntry.storedAt < 72 * 3600 * 1000) {
+        prevData = cacheEntry.data;
+      }
+    }
+
+    let putVolVs10d: number | null = null;
+    try {
+      const fi = JSON.parse(await getFastInfo(ticker)) as Record<string, unknown>;
+      const adv10 = fi.tenDayAverageVolume as number | null;
+      if (adv10 && adv10 > 0 && putVol > 0) {
+        putVolVs10d = +(putVol / (adv10 * 0.01)).toFixed(2);
+      }
+    } catch { /* ignore */ }
+
+    let putVolTrend = "STABLE";
+    const cmpCurr = putVolVs10d ?? pcRatio;
+    const cmpPrev = prevData
+      ? ((prevData.putVolVs10dAvg as number | null) ?? (prevData.pcRatio as number | null))
+      : null;
+    if (cmpCurr != null && cmpPrev != null && cmpPrev > 0) {
+      const ratioChange = cmpCurr / cmpPrev;
+      if (ratioChange > 1.1) putVolTrend = "INCREASING";
+      else if (ratioChange < 0.9) putVolTrend = "DECREASING";
+    }
+
+    let bracket: string | null = null;
+    if (pcRatio != null) {
+      if (pcRatio >= 1.3 || (pcRatio >= 1.0 && putVolTrend === "INCREASING")) bracket = "UPPER";
+      else if (pcRatio <= 0.8 && putVolTrend !== "INCREASING") bracket = "LOWER";
+      else bracket = "MID";
+    }
+
+    const ivStr = ivPctile != null ? `${ivPctile}th%ile` : "N/A";
+    const pvStr = putVolVs10d != null ? `${putVolVs10d.toFixed(2)}x` : "N/A";
+    const pcStr = pcRatio != null ? pcRatio.toFixed(2) : "N/A";
+    const formattedBlock = `DC-134 OPTIONS SCAN [${windowDay}] ${ticker} | P/C: ${pcStr} | IV: ${ivStr} | Put vol vs 10d avg: ${pvStr} | Trend: ${putVolTrend} | Advisory: ${bracket ?? "N/A"} bracket`;
+
+    const resultData: Record<string, unknown> = {
+      ticker, windowDay, dataDate,
+      pcRatio, ivPctile, putVolVs10dAvg: putVolVs10d, putVolTrend,
+      maxPainStrike, bracket, formattedBlock,
+    };
+
+    _dc134Cache.set(`${ticker}:${windowDay}`, { data: resultData, storedAt: Date.now() });
+    return JSON.stringify(resultData);
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+  }
+}
+
+// ── get_eqf_bracket ───────────────────────────────────────────────────────────
+
+export async function getEqfBracket(ticker: string, ioPt: number): Promise<string> {
+  if (ioPt <= 0) {
+    return JSON.stringify({ error: true, message: "io_pt must be a positive number", ticker });
+  }
+  try {
+    const fi = JSON.parse(await getFastInfo(ticker)) as Record<string, unknown>;
+    const currentPrice = fi.lastPrice as number | null;
+    if (currentPrice == null) {
+      return JSON.stringify({ error: true, message: `No price data for ${ticker}`, ticker });
+    }
+
+    const eqfPct = +(currentPrice / ioPt * 100).toFixed(1);
+
+    const bracket =
+      eqfPct <= 75 ? "STRONG_BUY" :
+      eqfPct <= 90 ? "ACCEPTABLE" :
+      eqfPct <= 100 ? "CAUTION" : "AVOID";
+
+    const tag =
+      eqfPct < 40 ? "SPECULATIVE" :
+      eqfPct < 80 ? "LONG" :
+      eqfPct < 100 ? "NEAR" : "INVERTED";
+
+    return JSON.stringify({
+      ticker,
+      currentPrice: +currentPrice.toFixed(4),
+      ioPt,
+      eqfPct,
+      bracket,
+      tag,
+      invertedFlag: eqfPct >= 100,
+      dataDate: (fi.lastTradeDate as string | null) ?? new Date().toISOString().slice(0, 10),
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+  }
+}
+
+// ── get_tps_inputs ────────────────────────────────────────────────────────────
+
+export async function getTpsInputs(ticker: string): Promise<string> {
+  try {
+    const [upgradeRaw, consensusRaw, priceRaw, earningsRaw, techRaw, maRaw] = await Promise.all([
+      getAnalystUpgradeRadar(ticker, 30),
+      getAnalystConsensus(ticker),
+      getPriceStats(ticker),
+      getEarningsMomentum(ticker),
+      getTechnicalIndicators(ticker, "3mo"),
+      getMaPosition(ticker),
+    ]);
+
+    const parse = (s: string): Record<string, unknown> => {
+      try { return JSON.parse(s) as Record<string, unknown>; } catch { return {}; }
+    };
+
+    const upgrade = parse(upgradeRaw);
+    const consensus = parse(consensusRaw);
+    const price = parse(priceRaw);
+    const earnings = parse(earningsRaw);
+    const tech = parse(techRaw);
+    const ma = parse(maRaw);
+
+    const changes = (upgrade.changes as Record<string, unknown>[]) ?? [];
+    const t1 = {
+      analystNetSentiment: upgrade.netSentiment ?? null,
+      upgrades30d: changes.filter((c) => c.signal === "UPGRADE").length,
+      downgrades30d: changes.filter((c) => c.signal === "DOWNGRADE").length,
+      dominantRating: consensus.dominantRating ?? null,
+      analystCount: consensus.numberOfAnalysts ?? null,
+    };
+
+    const t2 = {
+      currentPrice: price.lastPrice ?? null,
+      fiftyTwoWeekHigh: price.yearHigh ?? null,
+      fiftyTwoWeekLow: price.yearLow ?? null,
+      pctFromYearHigh: price.pctFromYearHigh ?? null,
+      pctFromYearLow: price.pctFromYearLow ?? null,
+    };
+
+    const t4 = {
+      beatRate: earnings.beatRate ?? null,
+      currentBeatStreak: earnings.currentBeatStreak ?? null,
+      avgSurprisePct: earnings.avgSurprisePct ?? null,
+      momentumFlag: earnings.momentumFlag ?? null,
+    };
+
+    const t5 = {
+      rsi14: tech.rsi ?? null,
+      macdHistogram: tech.macdHistogram ?? null,
+      maPosition: ma.maPosition ?? null,
+      pctFrom50dma: ma.pctFrom50dma ?? null,
+      pctFrom200dma: ma.pctFrom200dma ?? null,
+    };
+
+    return JSON.stringify({
+      ticker,
+      dataDate: (price.dataDate as string | null) ?? new Date().toISOString().slice(0, 10),
+      t1_inputs: t1,
+      t2_inputs: t2,
+      t4_inputs: t4,
+      t5_inputs: t5,
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+  }
+}
+
+// ── get_adv_gate ──────────────────────────────────────────────────────────────
+
+export async function getAdvGate(ticker: string, foreignExchange: boolean): Promise<string> {
+  try {
+    const fi = JSON.parse(await getFastInfo(ticker)) as Record<string, unknown>;
+    const lastVolume = fi.lastVolume as number | null;
+    const adv10d = fi.tenDayAverageVolume as number | null;
+    const adv90d = fi.threeMonthAverageVolume as number | null;
+    const lastPrice = fi.lastPrice as number | null;
+
+    let adv20d: number | null = null;
+    let dataDate = new Date().toISOString().slice(0, 10);
+    try {
+      const chartD = await yGet(
+        `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=1mo&interval=1d`,
+        false
+      ) as Record<string, unknown>;
+      const chartRes = (chartD?.chart as Record<string, unknown[]>)?.result?.[0] as Record<string, unknown>;
+      const timestamps = (chartRes?.timestamp as number[]) ?? [];
+      const volumes = ((chartRes?.indicators as Record<string, unknown[]>)?.quote?.[0] as Record<string, (number | null)[]>)?.volume ?? [];
+      const vols = volumes.filter((v): v is number => v != null);
+      if (vols.length >= 5) {
+        const tail20 = vols.slice(-20);
+        adv20d = Math.round(tail20.reduce((a, b) => a + b, 0) / tail20.length);
+      }
+      if (timestamps.length > 0) {
+        dataDate = new Date(timestamps[timestamps.length - 1] * 1000).toISOString().slice(0, 10);
+      }
+    } catch { /* ignore */ }
+
+    let gatePass: boolean | null = null;
+    let ratio20d: number | null = null;
+    let note: string;
+
+    if (foreignExchange) {
+      if (lastVolume != null && lastPrice != null && lastPrice > 0) {
+        const dailyNotional = lastVolume * lastPrice;
+        gatePass = dailyNotional >= 10_000_000;
+        note = `Volume gate ${gatePass ? "PASS" : "FAIL"} (DC-80 FX) — $${(dailyNotional / 1_000_000).toFixed(1)}M daily notional (${gatePass ? "≥" : "<"} $10M threshold)`;
+      } else {
+        note = "Volume gate UNKNOWN — insufficient price/volume data for DC-80 FX check";
+      }
+    } else {
+      if (lastVolume != null && adv20d != null && adv20d > 0) {
+        ratio20d = +(lastVolume / adv20d).toFixed(2);
+        gatePass = ratio20d >= 0.5;
+        note = `Volume gate ${gatePass ? "PASS" : "FAIL"} — ${ratio20d.toFixed(2)}x 20d ADV`;
+      } else {
+        note = "Volume gate UNKNOWN — insufficient volume data for 20d ADV calculation";
+      }
+    }
+
+    return JSON.stringify({
+      ticker, lastVolume, adv10d, adv20d, adv90d, ratio20d, gatePass, dataDate, note,
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });

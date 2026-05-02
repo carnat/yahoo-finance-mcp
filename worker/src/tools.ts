@@ -2,13 +2,17 @@ import {
   getAnalystConsensus,
   getAnalystUpgradeRadar,
   getCalendar,
+  getChinaRevenuePct,
   getCreditHealth,
+  getDc134OptionsScan,
   getEarningsAnalysis,
   getEarningsMomentum,
+  getEqfBracket,
   getEtfInfo,
   getFastInfo,
   getFinancialRatios,
   getFinancialStatement,
+  getAdvGate,
   getHistoricalPrices,
   getHolderInfo,
   getMaPosition,
@@ -21,13 +25,14 @@ import {
   getPriceStats,
   getPutHedgeCandidates,
   getRecommendations,
+  getSecFilings,
   getShortInterest,
   getShortMomentum,
   getTechnicalIndicators,
+  getTpsInputs,
   getVolumeRatio,
   screenStocks,
   searchTicker,
-  getSecFilings,
   getStockActions,
   getStockInfo,
 } from "./yahoo-finance.js";
@@ -196,7 +201,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_option_chain",
     description:
-      "Get the options chain (calls or puts) for a ticker and expiration date. Use get_option_expiration_dates first to find valid dates.",
+      "Get the options chain (calls or puts) for a ticker and expiration date. Use get_option_expiration_dates first to find valid dates. Response is wrapped: { ticker, expiration, optionType, dataDate (YYYY-MM-DD last trading day), contracts: [...] }.",
     inputSchema: {
       type: "object",
       properties: {
@@ -323,7 +328,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_calendar",
     description:
-      "Get upcoming earnings and dividend schedule for a ticker: next earnings date range, EPS/revenue consensus estimates, ex-dividend date, and dividend pay date.",
+      "Get upcoming earnings and dividend schedule for a ticker: next earnings date range, EPS/revenue consensus estimates, ex-dividend date, and dividend pay date. Also returns earningsDateConfirmed (true = single fixed date from IR, false = analyst estimate range) and earningsDateSource ('IR_FILING' | 'ESTIMATE' | 'UNKNOWN'). DC-149 PCCE Rule 9 requires earningsDateConfirmed=true before entry.",
     inputSchema: {
       type: "object",
       properties: {
@@ -335,7 +340,7 @@ export const TOOLS: Tool[] = [
   {
     name: "search_ticker",
     description:
-      "Search for ticker symbols by company name, partial name, or ISIN. Returns matching quotes with symbol, short name, exchange, and type. Use this to resolve a company name to a ticker before calling other tools.",
+      "Search for ticker symbols by company name, partial name, or ISIN. Returns matching quotes with symbol, short name, exchange, and type. Use this to resolve a company name to a ticker before calling other tools. Use exchange='US' to restrict to NMS (NASDAQ) + NYQ (NYSE) — recommended for small/mid-cap US equity searches to avoid foreign listings. Valid exchange values: 'US' (NMS+NYQ), 'NMS', 'NYQ', or null (all).",
     inputSchema: {
       type: "object",
       properties: {
@@ -347,6 +352,10 @@ export const TOOLS: Tool[] = [
           type: "number",
           description: "Maximum number of results to return (default: 8).",
           default: 8,
+        },
+        exchange: {
+          type: "string",
+          description: "Optional exchange filter. 'US' for NMS+NYQ, or a specific code like 'NMS' or 'NYQ'. Omit to return all exchanges.",
         },
       },
       required: ["query"],
@@ -573,7 +582,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_analyst_upgrade_radar",
     description:
-      "Get recent analyst rating changes with signal classification (UPGRADE/DOWNGRADE/MAINTAIN), netSentiment, and summary. Max 5 tickers per call.",
+      "Get recent analyst rating changes with signal classification (UPGRADE/DOWNGRADE/MAINTAIN), netSentiment, and summary. Returns ptFrom, ptTo (null — price target data not exposed by yfinance), and ptDirection (RAISE/CUT/UNCHANGED/INITIATED/null). Max 5 tickers per call.",
     inputSchema: {
       type: "object",
       properties: {
@@ -601,6 +610,77 @@ export const TOOLS: Tool[] = [
       type: "object",
       properties: {
         ticker: { type: "string", description: "Ticker symbol, e.g. 'BTC-USD'" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_china_revenue_pct",
+    description:
+      "Get China geographic revenue % from SEC EDGAR filing metadata and yfinance data. DC-151 classification: ≥20% BANNED (CLASS B) | 15–20% CHINA WATCH | ≤14.9% CLASS C eligible. Returns chinaRevenuePct, chinaRevenueUSD, fiscalYear, filingType, filingDate, segmentLabel, source, confidence (CONFIRMED | NOT_DISCLOSED). CONFIRMED satisfies DC-151 Rule 1 annual confirmation. Filing metadata (filingDate, fiscalYear) is always returned for manual 10-K lookup even when NOT_DISCLOSED.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'MU'" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_dc134_options_scan",
+    description:
+      "DC-134 Rule 8 structured options flow scan for a binary event window. Returns pcRatio, ivPctile, putVolVs10dAvg, putVolTrend (INCREASING/STABLE/DECREASING), maxPainStrike, bracket (UPPER/MID/LOWER), formattedBlock (paste directly into session output), dataDate. Prior window-day readings cached server-side 72h for trend computation (T-14 → T-7 → T-2).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
+        window_day: {
+          type: "string",
+          enum: ["T-14", "T-7", "T-2"],
+          description: "Binary event window reading day",
+        },
+      },
+      required: ["ticker", "window_day"],
+    },
+  },
+  {
+    name: "get_eqf_bracket",
+    description:
+      "Compute DC-126 Section 6.24 EQF bracket. EQF = currentPrice / io_pt × 100. Brackets: ≤75% STRONG_BUY | 75–90% ACCEPTABLE | 90–100% CAUTION | >100% AVOID. Tags (DC-123): <40% SPECULATIVE | 40–79% LONG | 80–99% NEAR | ≥100% INVERTED. Returns currentPrice, ioPt, eqfPct, bracket, tag, invertedFlag, dataDate.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
+        io_pt: { type: "number", description: "IO price target (Commander/IO-set, not analyst consensus)" },
+      },
+      required: ["ticker", "io_pt"],
+    },
+  },
+  {
+    name: "get_tps_inputs",
+    description:
+      "Aggregate all TPS (Tactical Position Scoring) inputs for T1, T2, T4, and T5 in a single call. T3 (PT proximity) and T2 (vs cost basis) require portfolio state — IO scores those manually. Runs 6 parallel data fetches. Returns t1_inputs (analyst sentiment), t2_inputs (price vs 52wk), t4_inputs (earnings momentum), t5_inputs (technical indicators), dataDate.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_adv_gate",
+    description:
+      "DC Section 6.2 Volume Gate: checks regularMarketVolume ≥ 0.5 × 20-day ADV. Returns lastVolume, adv10d, adv20d (computed from last 20 sessions), adv90d, ratio20d, gatePass (true = PASS), dataDate, note. Set foreign_exchange=true for DC-80 FX gate (daily notional ≥ $10M USD/day threshold).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
+        foreign_exchange: {
+          type: "boolean",
+          description: "Set true for DC-80 FX/ADR tickers to use $10M notional threshold. Default false.",
+          default: false,
+        },
       },
       required: ["ticker"],
     },
@@ -651,7 +731,7 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
     case "get_calendar":
       return getCalendar(str(args.ticker));
     case "search_ticker":
-      return searchTicker(str(args.query), num(args.max_results, 8));
+      return searchTicker(str(args.query), num(args.max_results, 8), args.exchange != null ? str(args.exchange) : null);
     case "screen_stocks":
       return screenStocks(str(args.screener_name), num(args.count, 25));
     case "get_sec_filings":
@@ -686,6 +766,16 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       return getAnalystUpgradeRadar(tickerArg(args.ticker), num(args.days_back, 30));
     case "get_overnight_quote":
       return getOvernightQuote(str(args.ticker));
+    case "get_china_revenue_pct":
+      return getChinaRevenuePct(str(args.ticker));
+    case "get_dc134_options_scan":
+      return getDc134OptionsScan(str(args.ticker), str(args.window_day));
+    case "get_eqf_bracket":
+      return getEqfBracket(str(args.ticker), num(args.io_pt, 0));
+    case "get_tps_inputs":
+      return getTpsInputs(str(args.ticker));
+    case "get_adv_gate":
+      return getAdvGate(str(args.ticker), args.foreign_exchange === true);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
