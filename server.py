@@ -153,7 +153,7 @@ This server provides financial market data from Yahoo Finance.
 ## Available tools
 
 ### Price & market data
-- get_fast_info: **Lightweight** — current price, market cap, 52-week high/low, moving averages, volume (~20 fields), plus pre-market/after-hours prices when available. Prefer this for price lookups.
+- get_fast_info: **Lightweight** — current price, market cap, 52-week high/low, moving averages, volume, market state (marketOpen, lastTradeDate, postMarketTimestamp), plus pre-market/after-hours prices when available. Prefer this for price lookups.
 - get_historical_stock_prices: OHLCV history. Supports period, interval, and optional columns filter to reduce output size.
 - get_stock_info: **Fundamentals** — returns ~30 key fields by default (identity, price, valuation, earnings, margins, dividends, analyst ratings, business description). Pass include_all=true for the full ~120-field payload. Use only when fast_info is insufficient. For ETFs/funds, use get_etf_info instead.
 - get_etf_info: **ETF/fund data** — NAV, expense ratio, AUM, YTD return, 52-week stats, moving averages, top-10 holdings, and sector weights. Use for SPY, QQQ, VTI, ARKK, and any mutual fund ticker.
@@ -740,9 +740,16 @@ plus pre-market/after-hours prices when available.
 PREFER THIS over get_stock_info for any query involving current price, market cap, 52-week range,
 moving averages, or trading volume — it uses ~85-90% fewer tokens than get_stock_info.
 
-Fields returned: currency, exchange, quoteType, timezone, lastPrice, open, previousClose,
+Fields returned: currency, exchange, quoteType, lastPrice, open, previousClose,
 dayHigh, dayLow, yearHigh, yearLow, yearChange, marketCap, shares, lastVolume,
-tenDayAverageVolume, threeMonthAverageVolume, fiftyDayAverage, twoHundredDayAverage.
+tenDayAverageVolume, threeMonthAverageVolume, fiftyDayAverage, twoHundredDayAverage,
+marketOpen, lastTradeDate, postMarketTimestamp.
+
+marketOpen: true only during regular session hours (09:30–16:00 ET Mon–Fri). false
+pre-market, after-hours, weekends, and holidays. Always true for crypto (24/7 markets).
+lastTradeDate: YYYY-MM-DD date of the session that open/dayHigh/dayLow/lastVolume belong to.
+On weekends this is the prior Friday, not today.
+postMarketTimestamp: ISO8601 timestamp of postMarketPrice. null when no AH activity.
 
 Extended-hours fields (included when available): preMarketPrice, preMarketChange,
 preMarketChangePercent, postMarketPrice, postMarketChange, postMarketChangePercent.
@@ -789,15 +796,33 @@ async def get_fast_info(ticker: str | list[str]) -> str:
             val = info.get(key)
             if val is not None:
                 data[key] = val
+        # Market state fields (CR-03)
+        data["marketOpen"] = info.get("marketState") == "REGULAR"
+        reg_mkt_time = info.get("regularMarketTime")
+        data["lastTradeDate"] = (
+            datetime.datetime.utcfromtimestamp(reg_mkt_time).strftime('%Y-%m-%d')
+            if isinstance(reg_mkt_time, (int, float)) and reg_mkt_time
+            else None
+        )
+        post_mkt_time = info.get("postMarketTime")
+        data["postMarketTimestamp"] = (
+            datetime.datetime.fromtimestamp(post_mkt_time, tz=datetime.timezone.utc).isoformat()
+            if isinstance(post_mkt_time, (int, float)) and post_mkt_time
+            else None
+        )
     except Exception:
         pass  # Extended-hours data is optional; fast_info fields are still returned
 
-    # For index tickers, volume and open are not meaningful — replace zeros with null
+    # For index tickers, volume and open are not meaningful — replace zeros with null.
+    # lastTradeDate / marketOpen / postMarketTimestamp are still valid for indices.
     if data.get("quoteType") == "INDEX":
         for field in ("open", "lastVolume", "tenDayAverageVolume", "threeMonthAverageVolume"):
             if data.get(field) == 0:
                 data[field] = None
         data["_note"] = "Index ticker — volume and open fields not applicable"
+
+    # timezone is always null via yfinance and not useful — omit to reduce noise
+    data.pop("timezone", None)
 
     result = json.dumps(data)
     _cache_set(cache_key, result)
@@ -1638,6 +1663,16 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
     else:
         volume_flag = None
 
+    try:
+        _hist = company.history(period="5d", interval="1d")
+        data_date = (
+            str(_hist.index[-1].date())
+            if _hist is not None and not _hist.empty
+            else str(datetime.date.today())
+        )
+    except Exception:
+        data_date = str(datetime.date.today())
+
     return json.dumps({
         "ticker": ticker,
         "lastVolume": last_vol,
@@ -1646,7 +1681,7 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
         "ratio10d": ratio_10d,
         "ratio90d": ratio_90d,
         "volumeFlag": volume_flag,
-        "dataDate": str(datetime.date.today()),
+        "dataDate": data_date,
     })
 
 
@@ -1700,6 +1735,16 @@ async def get_ma_position(ticker: str | list[str]) -> str:
     else:
         trend = None
 
+    try:
+        _hist = company.history(period="5d", interval="1d")
+        data_date = (
+            str(_hist.index[-1].date())
+            if _hist is not None and not _hist.empty
+            else str(datetime.date.today())
+        )
+    except Exception:
+        data_date = str(datetime.date.today())
+
     return json.dumps({
         "ticker": ticker,
         "lastPrice": round(last_price, 2) if last_price else None,
@@ -1710,7 +1755,7 @@ async def get_ma_position(ticker: str | list[str]) -> str:
         "regime50": regime_50,
         "regime200": regime_200,
         "trend": trend,
-        "dataDate": str(datetime.date.today()),
+        "dataDate": data_date,
     })
 
 
@@ -2661,11 +2706,19 @@ async def get_overnight_quote(ticker: str) -> str:
         tz = zoneinfo.ZoneInfo("UTC")
         tz_name = "UTC"
 
-    # Previous close for gap calculation
+    # Previous close for gap calculation — primary: fast_info; fallback: company.info
     try:
         prev_close = company.fast_info.previous_close
     except Exception:
         prev_close = None
+    if prev_close is None:
+        try:
+            _info_pc = company.info
+            prev_close = (
+                _info_pc.get("regularMarketPreviousClose") or _info_pc.get("previousClose")
+            )
+        except Exception:
+            pass
 
     # UTC index — true overnight window is 00:00–08:00 UTC (= 20:00–04:00 ET)
     utc_index = hist.index.tz_convert("UTC")
@@ -2739,8 +2792,8 @@ async def get_overnight_quote(ticker: str) -> str:
     gap_pct = None
     gap_direction = None
     if prev_close and overnight_price:
-        gap_pct = round((overnight_price - prev_close) / prev_close * 100, 4)
-        gap_direction = "UP" if gap_pct > 0 else ("DOWN" if gap_pct < 0 else "FLAT")
+        gap_pct = round((overnight_price - prev_close) / prev_close * 100, 2)
+        gap_direction = "UP" if gap_pct > 0.1 else ("DOWN" if gap_pct < -0.1 else "FLAT")
 
     result = json.dumps({
         "ticker": ticker,

@@ -690,11 +690,13 @@ export async function getFastInfo(ticker: string | string[]): Promise<string> {
     : ((raw(price.sharesOutstanding) as number | null) ??
        (raw(ks.sharesOutstanding) as number | null));
 
+  const regMktTime = raw(price.regularMarketTime) as number | null;
+  const postMktTime = raw(price.postMarketTime) as number | null;
+
   return JSON.stringify({
     currency: raw(price.currency),
     exchange: raw(price.exchangeName),
     quoteType,
-    timezone: raw(price.exchangeTimezoneShortName),
     lastPrice: raw(price.regularMarketPrice),
     open: raw(price.regularMarketOpen),
     previousClose: raw(price.regularMarketPreviousClose),
@@ -712,6 +714,9 @@ export async function getFastInfo(ticker: string | string[]): Promise<string> {
     twoHundredDayAverage: raw(detail.twoHundredDayAverage),
     preMarketPrice: raw(price.preMarketPrice),
     postMarketPrice: raw(price.postMarketPrice),
+    marketOpen: (price.marketState as string | null) === "REGULAR",
+    lastTradeDate: regMktTime != null ? new Date(regMktTime * 1000).toISOString().slice(0, 10) : null,
+    postMarketTimestamp: postMktTime != null ? new Date(postMktTime * 1000).toISOString() : null,
     ...(isIndex ? { _note: "Index ticker — volume, shares, and marketCap are not applicable and are returned as null" } : {}),
   });
 }
@@ -723,7 +728,7 @@ function dataAgeHoursFromTs(tsSeconds: number, nowMs: number): number {
 }
 
 function gapPctFromClose(price: number, prevClose: number): number {
-  return Math.round(((price - prevClose) / prevClose * 100) * 10000) / 10000;
+  return Math.round(((price - prevClose) / prevClose * 100) * 100) / 100;
 }
 
 // ── get_overnight_quote ───────────────────────────────────────────────────────
@@ -835,7 +840,7 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
         timezone: tzName,
         previousClose: prevClose,
         gapPct: fbGapPct,
-        gapDirection: fbGapPct === null ? null : fbGapPct > 0 ? "UP" : fbGapPct < 0 ? "DOWN" : "FLAT",
+        gapDirection: fbGapPct === null ? null : fbGapPct > 0.1 ? "UP" : fbGapPct < -0.1 ? "DOWN" : "FLAT",
         dataSource: (typeof fbVol === "number" && fbVol > 0) ? "EXCHANGE" : "OTC_INDICATIVE",
         isBlueOceanWindow: false,
         isStale: fbDataAgeHours > 6,
@@ -877,7 +882,7 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
       timezone: tzName,
       previousClose: prevClose,
       gapPct,
-      gapDirection: gapPct === null ? null : gapPct > 0 ? "UP" : gapPct < 0 ? "DOWN" : "FLAT",
+      gapDirection: gapPct === null ? null : gapPct > 0.1 ? "UP" : gapPct < -0.1 ? "DOWN" : "FLAT",
       dataSource,
       isBlueOceanWindow,
       isStale: dataAgeHours != null ? dataAgeHours > 6 : null,
@@ -1556,7 +1561,7 @@ export async function getVolumeRatio(ticker: string | string[], _period: number)
       ratio10d,
       ratio90d,
       volumeFlag,
-      dataDate: new Date().toISOString().slice(0, 10),
+      dataDate: (fi.lastTradeDate as string | null) ?? new Date().toISOString().slice(0, 10),
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
@@ -1606,7 +1611,7 @@ export async function getMaPosition(ticker: string | string[]): Promise<string> 
       regime50,
       regime200,
       trend,
-      dataDate: new Date().toISOString().slice(0, 10),
+      dataDate: (fi.lastTradeDate as string | null) ?? new Date().toISOString().slice(0, 10),
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
