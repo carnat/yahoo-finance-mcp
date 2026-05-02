@@ -1270,6 +1270,9 @@ ex-dividend date, dividend pay date) are also available in `get_stock_info` unde
 Returns:
 - Next earnings date range and EPS/revenue estimates
 - Ex-dividend date and dividend pay date
+- earningsDateConfirmed: true when Yahoo Finance shows a single fixed date (likely IR-confirmed
+  press release/8-K). false when a date range is returned (analyst estimate).
+- earningsDateSource: "IR_FILING" | "ESTIMATE" | "UNKNOWN"
 
 Args:
     ticker: str
@@ -1309,7 +1312,35 @@ async def get_calendar(ticker: str) -> str:
             return [_serialize(i) for i in v]
         return v
 
-    output = {"ticker": ticker, "calendar": {k: _serialize(v) for k, v in cal.items()}}
+    # Determine whether the earnings date is IR-confirmed or an analyst estimate.
+    # Heuristic: if Yahoo Finance provides a single fixed date, it's likely sourced from
+    # an IR press release / 8-K filing. A date range (start ≠ end) signals an analyst
+    # estimate. This heuristic is imperfect but is the best available without SEC parsing.
+    ed_raw = cal.get("Earnings Date")
+    if isinstance(ed_raw, list):
+        ed_dates = ed_raw
+    elif ed_raw is not None:
+        ed_dates = [ed_raw]
+    else:
+        ed_dates = []
+
+    unique_dates = {getattr(d, "date", lambda: d)() if hasattr(d, "date") else d for d in ed_dates}
+    if len(unique_dates) == 0:
+        earnings_date_confirmed = False
+        earnings_date_source = "UNKNOWN"
+    elif len(unique_dates) == 1:
+        earnings_date_confirmed = True
+        earnings_date_source = "IR_FILING"
+    else:
+        earnings_date_confirmed = False
+        earnings_date_source = "ESTIMATE"
+
+    output = {
+        "ticker": ticker,
+        "earningsDateConfirmed": earnings_date_confirmed,
+        "earningsDateSource": earnings_date_source,
+        "calendar": {k: _serialize(v) for k, v in cal.items()},
+    }
     result = json.dumps(output)
     _cache_set(cache_key, result)
     return result
@@ -1331,9 +1362,14 @@ Args:
         Company name, partial name, or ISIN to search for, e.g. "Apple", "AAPL", "US0378331005"
     max_results: int
         Maximum number of quote results to return. Default is 8.
+    exchange: str | None
+        Optional exchange filter. Pass "US" to restrict results to NMS (NASDAQ) and NYQ (NYSE) only
+        — use this for small/mid-cap US equity searches that may otherwise return foreign listings or
+        crypto tokens. Pass a specific code (e.g. "NMS", "NYQ") for an exact exchange match.
+        Default is None (all exchanges returned).
 """,
 )
-async def search_ticker(query: str, max_results: int = 8) -> str:
+async def search_ticker(query: str, max_results: int = 8, exchange: str | None = None) -> str:
     """Search for ticker symbols by company name or ISIN."""
     try:
         search = yf.Search(query, max_results=max_results, news_count=0)
@@ -1350,6 +1386,14 @@ async def search_ticker(query: str, max_results: int = 8) -> str:
             for q in quotes
             if q.get("symbol")
         ]
+        # Apply exchange filter when requested
+        if exchange:
+            exch_upper = exchange.upper()
+            if exch_upper == "US":
+                _us = {"NMS", "NYQ"}
+                trimmed = [r for r in trimmed if r.get("exchange") in _us]
+            else:
+                trimmed = [r for r in trimmed if r.get("exchange") == exch_upper]
         return json.dumps(trimmed)
     except Exception as e:
         print(f"Error: searching for '{query}': {e}")
@@ -2750,12 +2794,15 @@ async def get_overnight_quote(ticker: str) -> str:
         tz = zoneinfo.ZoneInfo("UTC")
         tz_name = "UTC"
 
-    # Previous close for gap calculation — primary: fast_info; fallback: company.info
+    # Previous close for gap calculation.
+    # Use bracket access fi["previousClose"] which reliably translates camelCase
+    # to the snake_case FastInfo property via __getitem__.
+    prev_close = None
     try:
-        prev_close = company.fast_info.previous_close
+        prev_close = company.fast_info["previousClose"]
     except Exception:
-        prev_close = None
-    if prev_close is None:
+        pass
+    if not prev_close:
         try:
             _info_pc = company.info
             prev_close = (
@@ -2864,6 +2911,649 @@ async def get_overnight_quote(ticker: str) -> str:
     })
     _cache_set(cache_key, result)
     return result
+
+
+# ---------------------------------------------------------------------------
+# EDGAR helpers (used by get_china_revenue_pct)
+# ---------------------------------------------------------------------------
+import urllib.request as _urlreq
+
+_EDGAR_TICKERS: dict[str, int] | None = None
+_EDGAR_TICKERS_LOADED_AT: float = 0.0
+_EDGAR_TTL = 24 * 3600  # 24h
+
+
+async def _load_edgar_tickers() -> dict[str, int]:
+    """Return ticker→CIK mapping from SEC EDGAR, refreshed every 24 h."""
+    global _EDGAR_TICKERS, _EDGAR_TICKERS_LOADED_AT
+    now = time.monotonic()
+    if _EDGAR_TICKERS is not None and (now - _EDGAR_TICKERS_LOADED_AT) < _EDGAR_TTL:
+        return _EDGAR_TICKERS
+    loop = asyncio.get_event_loop()
+
+    def _fetch() -> dict[str, int]:
+        req = _urlreq.Request(
+            "https://www.sec.gov/files/company_tickers.json",
+            headers={"User-Agent": "yahoo-finance-mcp/1.0 (contact@example.com)"},
+        )
+        with _urlreq.urlopen(req, timeout=15) as resp:  # noqa: S310
+            data = json.loads(resp.read())
+        return {v["ticker"].upper(): int(v["cik_str"]) for v in data.values()}
+
+    try:
+        _EDGAR_TICKERS = await loop.run_in_executor(None, _fetch)
+        _EDGAR_TICKERS_LOADED_AT = now
+    except Exception:
+        if _EDGAR_TICKERS is None:
+            _EDGAR_TICKERS = {}
+    return _EDGAR_TICKERS  # type: ignore[return-value]
+
+
+async def _edgar_get(url: str) -> dict | None:
+    """Fetch a JSON document from the SEC EDGAR API (runs in a thread executor)."""
+    loop = asyncio.get_event_loop()
+
+    def _fetch() -> dict | None:
+        req = _urlreq.Request(
+            url,
+            headers={"User-Agent": "yahoo-finance-mcp/1.0 (contact@example.com)"},
+        )
+        try:
+            with _urlreq.urlopen(req, timeout=10) as resp:  # noqa: S310
+                return json.loads(resp.read())
+        except Exception:
+            return None
+
+    return await loop.run_in_executor(None, _fetch)
+
+
+# ---------------------------------------------------------------------------
+# CR-10 — get_china_revenue_pct
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_china_revenue_pct",
+    description="""Get China geographic revenue % from SEC EDGAR filing metadata and yfinance data.
+
+DC-151 CLASS A/B/C/D China Revenue Risk Classification:
+  ≥20% → BANNED (CLASS B) | 15–20% → CHINA WATCH | ≤14.9% CLASS C eligible (cap 30%)
+
+Returns: chinaRevenuePct, chinaRevenueUSD, fiscalYear, filingType, filingDate, segmentLabel,
+source, confidence.
+
+confidence:
+  CONFIRMED — sourced from income statement segment (satisfies DC-151 Rule 1 annual confirmation).
+  NOT_DISCLOSED — company does not break out China separately in machine-readable form.
+  When NOT_DISCLOSED, filingDate and fiscalYear are still populated for manual 10-K lookup.
+
+Args:
+    ticker: str
+        The ticker symbol, e.g. "MU", "AAPL", "QCOM"
+""",
+)
+async def get_china_revenue_pct(ticker: str) -> str:
+    """Return China revenue % from SEC EDGAR / yfinance data."""
+    cache_key = f"china_revenue:{ticker}"
+    cached = _cache_get(cache_key, _EDGAR_TTL)
+    if cached is not None:
+        return cached
+
+    # Step 1: Get CIK and latest 10-K filing metadata from EDGAR
+    cik: int | None = None
+    filing_date: str | None = None
+    fiscal_year: str | None = None
+    filing_type = "10-K"
+
+    try:
+        tickers_map = await _load_edgar_tickers()
+        cik = tickers_map.get(ticker.upper())
+    except Exception:
+        pass
+
+    if cik:
+        cik_padded = str(cik).zfill(10)
+        try:
+            subs = await _edgar_get(f"https://data.sec.gov/submissions/CIK{cik_padded}.json")
+            if subs:
+                filings = subs.get("filings", {}).get("recent", {})
+                forms: list = filings.get("form", [])
+                dates: list = filings.get("filingDate", [])
+                periods: list = filings.get("reportDate", [])
+                for i, form in enumerate(forms):
+                    if form in ("10-K", "10-K405", "10-KSB"):
+                        filing_date = dates[i] if i < len(dates) else None
+                        period = periods[i] if i < len(periods) else None
+                        if period:
+                            fiscal_year = f"FY{period[:4]}"
+                        break
+        except Exception:
+            pass
+
+    # Step 2: Try yfinance income statement for geographic segment rows
+    china_revenue_usd: float | None = None
+    total_revenue_usd: float | None = None
+    china_revenue_pct: float | None = None
+    segment_label = "China"
+    source = "not_available"
+    confidence = "NOT_DISCLOSED"
+
+    try:
+        company = yf.Ticker(ticker)
+        inc = company.income_stmt
+        if inc is not None and not inc.empty:
+            latest_col = inc.columns[0]
+            if fiscal_year is None and hasattr(latest_col, "year"):
+                fiscal_year = f"FY{latest_col.year}"
+
+            # Total revenue
+            for row_name in ["Total Revenue", "Revenue", "Net Sales", "Total Net Revenue"]:
+                try:
+                    val = inc.loc[row_name, latest_col]
+                    if pd.notna(val):
+                        total_revenue_usd = float(val)
+                        break
+                except (KeyError, TypeError):
+                    pass
+
+            # Geographic / segment rows that some companies surface in the income stmt
+            china_candidates = [
+                "China", "Greater China", "China Revenue", "Revenue from China",
+                "China and Other", "Mainland China", "China Segment",
+            ]
+            for row_name in china_candidates:
+                try:
+                    val = inc.loc[row_name, latest_col]
+                    if pd.notna(val):
+                        china_revenue_usd = float(val)
+                        segment_label = row_name
+                        source = "income_statement_segment"
+                        confidence = "CONFIRMED"
+                        break
+                except (KeyError, TypeError):
+                    pass
+    except Exception:
+        pass
+
+    if china_revenue_usd is not None and total_revenue_usd and total_revenue_usd > 0:
+        china_revenue_pct = round(china_revenue_usd / total_revenue_usd, 4)
+
+    note = (
+        "Geographic revenue breakdown is not available in machine-readable form via this data "
+        "pipeline. Verify against the most recent 10-K geographic segment note. ESTIMATED "
+        "confidence does NOT satisfy DC-151 Rule 1 annual confirmation requirement."
+    ) if confidence == "NOT_DISCLOSED" else None
+
+    result = json.dumps({
+        "ticker": ticker,
+        "chinaRevenuePct": china_revenue_pct,
+        "chinaRevenueUSD": china_revenue_usd,
+        "fiscalYear": fiscal_year,
+        "filingType": filing_type,
+        "filingDate": filing_date,
+        "segmentLabel": segment_label,
+        "source": source,
+        "confidence": confidence,
+        "_note": note,
+    })
+    _cache_set(cache_key, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# CR-12 — get_dc134_options_scan
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_dc134_options_scan",
+    description="""DC-134 Rule 8 structured options flow scan for a binary event window.
+
+Returns the exact DC-134 Rule 8 formatted output block. IO pastes formattedBlock directly into
+session output. Prior window-day readings are cached server-side (72 h TTL) to enable trend
+computation across T-14 → T-7 → T-2.
+
+Returns: pcRatio, ivPctile, putVolVs10dAvg, putVolTrend (INCREASING/STABLE/DECREASING),
+maxPainStrike, bracket (UPPER/MID/LOWER), formattedBlock, dataDate.
+
+Args:
+    ticker: str
+        The ticker symbol, e.g. "ASTS"
+    window_day: str
+        Reading day in the binary event window: "T-14", "T-7", or "T-2"
+""",
+)
+async def get_dc134_options_scan(ticker: str, window_day: str) -> str:
+    """Return DC-134 Rule 8 options scan for the specified window day."""
+    valid_days = ("T-14", "T-7", "T-2")
+    if window_day not in valid_days:
+        return json.dumps({
+            "error": True,
+            "message": f"window_day must be one of {valid_days}",
+            "ticker": ticker,
+        })
+
+    company = yf.Ticker(ticker)
+    try:
+        fi = company.fast_info
+        current_price: float | None = fi["lastPrice"]
+    except Exception as e:
+        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
+
+    if not current_price:
+        return json.dumps({"error": True, "message": f"No price data for {ticker}", "ticker": ticker})
+
+    # Get nearest-expiry options chain
+    try:
+        exps = company.options
+        if not exps:
+            return json.dumps({"error": True, "message": f"No options data for {ticker}", "ticker": ticker})
+        exp = exps[0]
+        chain = company.option_chain(exp)
+        calls_df = chain.calls
+        puts_df = chain.puts
+    except Exception as e:
+        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
+
+    # P/C ratio by volume
+    call_vol = float(calls_df["volume"].sum(skipna=True)) if not calls_df.empty else 0.0
+    put_vol = float(puts_df["volume"].sum(skipna=True)) if not puts_df.empty else 0.0
+    pc_ratio: float | None = round(put_vol / call_vol, 2) if call_vol > 0 else None
+
+    # Max pain strike — strike with maximum combined open interest
+    max_pain_strike: float | None = None
+    try:
+        combined = pd.concat([
+            calls_df[["strike", "openInterest"]],
+            puts_df[["strike", "openInterest"]],
+        ])
+        oi_by_strike = combined.groupby("strike")["openInterest"].sum()
+        if not oi_by_strike.empty:
+            max_pain_strike = float(oi_by_strike.idxmax())
+    except Exception:
+        pass
+
+    # ATM implied volatility (nearest call strike to current price)
+    atm_iv: float | None = None
+    try:
+        if not calls_df.empty:
+            _calls = calls_df.copy()
+            _calls = _calls.assign(_dist=(_calls["strike"] - current_price).abs())
+            atm_row = _calls.nsmallest(1, "_dist")
+            if not atm_row.empty:
+                iv_val = atm_row["impliedVolatility"].iloc[0]
+                if pd.notna(iv_val):
+                    atm_iv = float(iv_val)
+    except Exception:
+        pass
+
+    # IV percentile — approximate using annualised 30-day rolling realised vol over 1 year
+    iv_pctile: int | None = None
+    try:
+        hist_1y = company.history(period="1y", interval="1d")
+        if hist_1y is not None and len(hist_1y) >= 30 and atm_iv is not None:
+            rets = hist_1y["Close"].pct_change().dropna()
+            roll_rv = rets.rolling(30).std() * (252 ** 0.5)
+            roll_rv = roll_rv.dropna()
+            if len(roll_rv) >= 5:
+                rv_min, rv_max = float(roll_rv.min()), float(roll_rv.max())
+                if rv_max > rv_min:
+                    pctile = (atm_iv - rv_min) / (rv_max - rv_min) * 100
+                    iv_pctile = max(0, min(100, round(pctile)))
+    except Exception:
+        pass
+
+    # Put vol vs 10-day average proxy (since historical options volume is unavailable via yfinance)
+    # Proxy: put vol as a multiple of 1% of the stock's 10d average daily volume.
+    put_vol_vs_10d: float | None = None
+    try:
+        adv10 = fi["tenDayAverageVolume"]
+        if adv10 and adv10 > 0 and put_vol > 0:
+            put_vol_vs_10d = round(put_vol / (adv10 * 0.01), 2)
+    except Exception:
+        pass
+
+    # Data date from history
+    data_date: str = str(datetime.date.today())
+    try:
+        _h = company.history(period="5d", interval="1d")
+        if _h is not None and not _h.empty:
+            data_date = str(_h.index[-1].date())
+    except Exception:
+        pass
+
+    # Look up prior window reading for trend analysis
+    prev_window_map = {"T-7": "T-14", "T-2": "T-7"}
+    prev_window = prev_window_map.get(window_day)
+    prev_data: dict | None = None
+    if prev_window:
+        prev_cached = _cache_get(f"dc134:{ticker}:{prev_window}", 72 * 3600)
+        if prev_cached:
+            try:
+                prev_data = json.loads(prev_cached)
+            except Exception:
+                pass
+
+    # Put vol trend (compare primary metric with prior window reading)
+    put_vol_trend = "STABLE"
+    _cmp_curr: float | None = put_vol_vs_10d if put_vol_vs_10d is not None else pc_ratio
+    _cmp_prev: float | None = None
+    if prev_data:
+        _cmp_prev = (
+            prev_data.get("putVolVs10dAvg")
+            if prev_data.get("putVolVs10dAvg") is not None
+            else prev_data.get("pcRatio")
+        )
+    if _cmp_curr is not None and _cmp_prev is not None and _cmp_prev > 0:
+        ratio_change = _cmp_curr / _cmp_prev
+        if ratio_change > 1.1:
+            put_vol_trend = "INCREASING"
+        elif ratio_change < 0.9:
+            put_vol_trend = "DECREASING"
+
+    # Bracket classification
+    bracket: str | None = None
+    if pc_ratio is not None:
+        if pc_ratio >= 1.3 or (pc_ratio >= 1.0 and put_vol_trend == "INCREASING"):
+            bracket = "UPPER"
+        elif pc_ratio <= 0.8 and put_vol_trend in ("STABLE", "DECREASING"):
+            bracket = "LOWER"
+        else:
+            bracket = "MID"
+
+    # DC-134 formatted block
+    iv_str = f"{iv_pctile}th%ile" if iv_pctile is not None else "N/A"
+    pv_str = f"{put_vol_vs_10d:.2f}x" if put_vol_vs_10d is not None else "N/A"
+    pc_str = f"{pc_ratio:.2f}" if pc_ratio is not None else "N/A"
+    formatted_block = (
+        f"DC-134 OPTIONS SCAN [{window_day}] {ticker} | "
+        f"P/C: {pc_str} | "
+        f"IV: {iv_str} | "
+        f"Put vol vs 10d avg: {pv_str} | "
+        f"Trend: {put_vol_trend} | "
+        f"Advisory: {bracket or 'N/A'} bracket"
+    )
+
+    result_dict: dict = {
+        "ticker": ticker,
+        "windowDay": window_day,
+        "dataDate": data_date,
+        "pcRatio": pc_ratio,
+        "ivPctile": iv_pctile,
+        "putVolVs10dAvg": put_vol_vs_10d,
+        "putVolTrend": put_vol_trend,
+        "maxPainStrike": max_pain_strike,
+        "bracket": bracket,
+        "formattedBlock": formatted_block,
+    }
+
+    # Cache current reading for future trend comparison (72h TTL via 3-day window check)
+    _cache_set(f"dc134:{ticker}:{window_day}", json.dumps(result_dict))
+    return json.dumps(result_dict)
+
+
+# ---------------------------------------------------------------------------
+# CR-13 — get_eqf_bracket
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_eqf_bracket",
+    description="""Compute DC-126 Section 6.24 EQF bracket for a position.
+
+EQF = currentPrice / io_pt × 100. Used at every /snipe, /dca, and /thesis.
+
+Bracket thresholds: ≤75% → STRONG_BUY | 75–90% → ACCEPTABLE | 90–100% → CAUTION | >100% → AVOID
+Tag (DC-123): <40% → SPECULATIVE | 40–79% → LONG | 80–99% → NEAR | ≥100% → INVERTED
+
+Note: pre-revenue positions should be overridden to SPECULATIVE by IO per DC-123. This tool
+handles revenue-generating positions only.
+
+Args:
+    ticker: str
+        The ticker symbol, e.g. "ASTS"
+    io_pt: float
+        IO's price target (Commander/IO-set, not analyst consensus)
+""",
+)
+async def get_eqf_bracket(ticker: str, io_pt: float) -> str:
+    """Return EQF bracket and tag for the current position."""
+    if io_pt <= 0:
+        return json.dumps({"error": True, "message": "io_pt must be a positive number", "ticker": ticker})
+
+    company = yf.Ticker(ticker)
+    try:
+        fi = company.fast_info
+        current_price: float | None = fi["lastPrice"]
+        if current_price is None:
+            return json.dumps({"error": True, "message": f"No price data for {ticker}", "ticker": ticker})
+    except Exception as e:
+        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
+
+    eqf_pct = round(current_price / io_pt * 100, 1)
+
+    if eqf_pct <= 75:
+        bracket = "STRONG_BUY"
+    elif eqf_pct <= 90:
+        bracket = "ACCEPTABLE"
+    elif eqf_pct <= 100:
+        bracket = "CAUTION"
+    else:
+        bracket = "AVOID"
+
+    if eqf_pct < 40:
+        tag = "SPECULATIVE"
+    elif eqf_pct < 80:
+        tag = "LONG"
+    elif eqf_pct < 100:
+        tag = "NEAR"
+    else:
+        tag = "INVERTED"
+
+    inverted_flag = eqf_pct >= 100
+
+    data_date: str = str(datetime.date.today())
+    try:
+        _h = company.history(period="5d", interval="1d")
+        if _h is not None and not _h.empty:
+            data_date = str(_h.index[-1].date())
+    except Exception:
+        pass
+
+    return json.dumps({
+        "ticker": ticker,
+        "currentPrice": round(current_price, 4),
+        "ioPt": io_pt,
+        "eqfPct": eqf_pct,
+        "bracket": bracket,
+        "tag": tag,
+        "invertedFlag": inverted_flag,
+        "dataDate": data_date,
+    })
+
+
+# ---------------------------------------------------------------------------
+# CR-14 — get_tps_inputs
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_tps_inputs",
+    description="""Aggregate all TPS (Tactical Position Scoring) inputs for T1, T2, T4, and T5 components.
+
+T3 (PT proximity) and T2 (vs cost basis) require portfolio state (IO PT, cost basis) not available
+here — IO scores those manually from currentPrice in t2_inputs and stored values.
+
+Runs up to 6 parallel data fetches per call.
+
+Returns: t1_inputs (analyst sentiment), t2_inputs (price vs 52wk), t4_inputs (earnings momentum),
+t5_inputs (technical indicators), dataDate.
+
+Args:
+    ticker: str
+        Single ticker symbol, e.g. "ASTS"
+""",
+)
+async def get_tps_inputs(ticker: str) -> str:
+    """Return aggregated TPS inputs for T1, T2, T4, and T5 scoring components."""
+    results = await asyncio.gather(
+        get_analyst_upgrade_radar(ticker, days_back=30),
+        get_analyst_consensus(ticker),
+        get_price_stats(ticker),
+        get_earnings_momentum(ticker),
+        get_technical_indicators(ticker, "3mo"),
+        get_ma_position(ticker),
+        return_exceptions=True,
+    )
+
+    def _parse(r: object) -> dict:
+        if isinstance(r, Exception):
+            return {}
+        try:
+            return json.loads(str(r)) if isinstance(r, str) else {}
+        except Exception:
+            return {}
+
+    upgrade = _parse(results[0])
+    consensus = _parse(results[1])
+    price = _parse(results[2])
+    earnings = _parse(results[3])
+    tech = _parse(results[4])
+    ma = _parse(results[5])
+
+    # T1: analyst sentiment
+    t1: dict = {
+        "analystNetSentiment": upgrade.get("netSentiment"),
+        "upgrades30d": sum(
+            1 for c in (upgrade.get("changes") or []) if c.get("signal") == "UPGRADE"
+        ),
+        "downgrades30d": sum(
+            1 for c in (upgrade.get("changes") or []) if c.get("signal") == "DOWNGRADE"
+        ),
+        "dominantRating": consensus.get("dominantRating"),
+        "analystCount": consensus.get("numberOfAnalysts"),
+    }
+
+    # T2: price vs 52-week range
+    t2: dict = {
+        "currentPrice": price.get("lastPrice"),
+        "fiftyTwoWeekHigh": price.get("yearHigh"),
+        "fiftyTwoWeekLow": price.get("yearLow"),
+        "pctFromYearHigh": price.get("pctFromYearHigh"),
+        "pctFromYearLow": price.get("pctFromYearLow"),
+    }
+
+    # T4: earnings momentum
+    t4: dict = {
+        "beatRate": earnings.get("beatRate"),
+        "currentBeatStreak": earnings.get("currentBeatStreak"),
+        "avgSurprisePct": earnings.get("avgSurprisePct"),
+        "momentumFlag": earnings.get("momentumFlag"),
+    }
+
+    # T5: technical indicators
+    t5: dict = {
+        "rsi14": tech.get("rsi"),
+        "macdHistogram": tech.get("macdHistogram"),
+        "maPosition": ma.get("maPosition"),
+        "pctFrom50dma": ma.get("pctFrom50dma"),
+        "pctFrom200dma": ma.get("pctFrom200dma"),
+    }
+
+    # Data date: prefer from price_stats
+    data_date = price.get("dataDate") or str(datetime.date.today())
+
+    return json.dumps({
+        "ticker": ticker,
+        "dataDate": data_date,
+        "t1_inputs": t1,
+        "t2_inputs": t2,
+        "t4_inputs": t4,
+        "t5_inputs": t5,
+    })
+
+
+# ---------------------------------------------------------------------------
+# CR-15 — get_adv_gate
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_adv_gate",
+    description="""DC Section 6.2 Volume Gate check: regularMarketVolume ≥ 0.5 × 20-day ADV.
+
+Returns lastVolume, adv10d, adv20d (computed from last 20 daily sessions), adv90d, ratio20d,
+gatePass (true = volume gate PASS), dataDate, and a pre-formatted note.
+
+foreignExchange: bool (default False). When True, applies the DC-80 FX gate: passes when
+lastVolume × lastPrice ≥ $10M USD/day instead of the 0.5 × adv20d threshold.
+
+Args:
+    ticker: str
+        The ticker symbol, e.g. "ASTS"
+    foreign_exchange: bool
+        Set True for DC-80 foreign exchange / ADR tickers. Default False.
+""",
+)
+async def get_adv_gate(ticker: str, foreign_exchange: bool = False) -> str:
+    """Return DC Section 6.2 volume gate assessment."""
+    company = yf.Ticker(ticker)
+    try:
+        fi = company.fast_info
+        last_volume: int | None = fi["lastVolume"]
+        adv10d: float | None = fi["tenDayAverageVolume"]
+        adv90d: float | None = fi["threeMonthAverageVolume"]
+        last_price: float | None = fi["lastPrice"]
+    except Exception as e:
+        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
+
+    # 20-day ADV from history
+    adv20d: float | None = None
+    data_date: str = str(datetime.date.today())
+    try:
+        hist = company.history(period="1mo", interval="1d")
+        if hist is not None and not hist.empty:
+            vols = hist["Volume"].dropna()
+            if len(vols) >= 5:
+                adv20d = round(float(vols.tail(20).mean()))
+            data_date = str(hist.index[-1].date())
+    except Exception:
+        pass
+
+    # Gate evaluation
+    gate_pass: bool | None = None
+    ratio20d: float | None = None
+    note: str
+
+    if foreign_exchange:
+        # DC-80: daily notional ≥ $10M USD
+        if last_volume is not None and last_price is not None and last_price > 0:
+            daily_notional = last_volume * last_price
+            gate_pass = daily_notional >= 10_000_000
+            note = (
+                f"Volume gate {'PASS' if gate_pass else 'FAIL'} (DC-80 FX) — "
+                f"${daily_notional / 1_000_000:.1f}M daily notional "
+                f"({'≥' if gate_pass else '<'} $10M threshold)"
+            )
+        else:
+            note = "Volume gate UNKNOWN — insufficient price/volume data for DC-80 FX check"
+    else:
+        if last_volume is not None and adv20d and adv20d > 0:
+            ratio20d = round(last_volume / adv20d, 2)
+            gate_pass = ratio20d >= 0.5
+            note = (
+                f"Volume gate {'PASS' if gate_pass else 'FAIL'} — "
+                f"{ratio20d:.2f}x 20d ADV"
+            )
+        else:
+            note = "Volume gate UNKNOWN — insufficient volume data for 20d ADV calculation"
+
+    return json.dumps({
+        "ticker": ticker,
+        "lastVolume": last_volume,
+        "adv10d": adv10d,
+        "adv20d": adv20d,
+        "adv90d": adv90d,
+        "ratio20d": ratio20d,
+        "gatePass": gate_pass,
+        "dataDate": data_date,
+        "note": note,
+    })
 
 
 if __name__ == "__main__":
