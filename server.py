@@ -3115,9 +3115,11 @@ async def get_geographic_revenue(ticker: str, region: str = "China") -> str:
 
             # Build region-specific candidate row names
             r = region
-            region_candidates = [r, f"{r} Revenue", f"Revenue from {r}", f"{r} and Other", f"{r} Segment"]
+            region_candidates = [r, f"{r} Revenue", f"Revenue from {r}", f"{r} and Other"]
             if r.lower() == "china":
                 region_candidates += ["Greater China", "Mainland China", "China Segment"]
+            else:
+                region_candidates.append(f"{r} Segment")
             for row_name in region_candidates:
                 try:
                     val = inc.loc[row_name, latest_col]

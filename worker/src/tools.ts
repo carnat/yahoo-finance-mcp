@@ -838,7 +838,7 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
     case "get_overnight_quote":
       return getOvernightQuote(str(args.ticker));
     case "get_geographic_revenue":
-      return getGeographicRevenue(str(args.ticker), args.region != null ? str(args.region) : "China");
+      return getGeographicRevenue(str(args.ticker), args.region != null ? str(args.region) : undefined);
     case "get_options_flow_scan":
       return getOptionsFlowScan(str(args.ticker), str(args.window_label));
     case "get_price_target_bracket":

@@ -60,7 +60,8 @@ function getLastTradingDate(timestamps?: number[]): string {
     return new Date(timestamps[timestamps.length - 1] * 1000).toISOString().slice(0, 10);
   }
   const d = new Date();
-  while (d.getUTCDay() === 0 || d.getUTCDay() === 6) {
+  let safety = 0;
+  while ((d.getUTCDay() === 0 || d.getUTCDay() === 6) && safety++ < 7) {
     d.setUTCDate(d.getUTCDate() - 1);
   }
   return d.toISOString().slice(0, 10);
