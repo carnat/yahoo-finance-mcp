@@ -611,6 +611,9 @@ async def get_option_expiration_dates(ticker: str) -> str:
 Use the optional strike filters to narrow the results — a full options chain (e.g. AAPL) can have 200+ rows;
 filtering near-the-money reduces this to ~10-20 rows and dramatically cuts token usage.
 
+Returns a JSON object with top-level fields: ticker, expiration, optionType, dataDate (YYYY-MM-DD of
+the last trading session — use to detect weekend/holiday staleness), and contracts (array of option rows).
+
 Args:
     ticker: str
         The ticker symbol of the stock to get option chain for, e.g. "AAPL"
@@ -681,7 +684,25 @@ async def get_option_chain(
     if in_the_money_only:
         df = df[df["inTheMoney"]]
 
-    return df.to_json(orient="records", date_format="iso")
+    # Derive dataDate from the last trading session
+    try:
+        _hist = company.history(period="5d", interval="1d")
+        data_date = (
+            str(_hist.index[-1].date())
+            if _hist is not None and not _hist.empty
+            else str(datetime.date.today())
+        )
+    except Exception:
+        data_date = str(datetime.date.today())
+
+    contracts = json.loads(df.to_json(orient="records", date_format="iso"))
+    return json.dumps({
+        "ticker": ticker,
+        "expiration": expiration_date,
+        "optionType": option_type,
+        "dataDate": data_date,
+        "contracts": contracts,
+    })
 
 
 @yfinance_server.tool(
@@ -1225,6 +1246,9 @@ async def get_financial_ratios(ticker: str | list[str]) -> str:
         "earningsGrowth": _get("earningsGrowth"),
         "revenueGrowth": _get("revenueGrowth"),
     }
+
+    # Replace any dict values (empty {} or non-numeric wrappers) with None
+    ratios = {k: (None if isinstance(v, dict) else v) for k, v in ratios.items()}
 
     result = json.dumps(ratios)
     _cache_set(cache_key, result)
@@ -2430,7 +2454,11 @@ async def get_put_hedge_candidates(
     name="get_analyst_upgrade_radar",
     description="""Get recent analyst rating changes with pre-computed signal classification. Batch supported.
 
-Returns: changes with signal, ptDirection, mixedSignal, strengthFlag; netSentiment, summary.
+Returns: changes with signal, ptFrom, ptTo, ptDirection, mixedSignal, strengthFlag; netSentiment, summary.
+
+ptFrom / ptTo: prior and new price target (null — yfinance does not expose numeric targets; stubs for
+future compatibility). ptDirection: RAISE/CUT/UNCHANGED/INITIATED — derived from ptFrom→ptTo when
+both are available; INITIATED for new coverage; UNCHANGED for reiterations with no target change.
 
 Args:
     ticker: str | list[str] — single or batch
@@ -2502,14 +2530,28 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
         else:
             signal = "MAINTAIN"
 
-        # Price target direction — yfinance doesn't expose price targets in
-        # upgrades_downgrades, so we can only detect "INITIATED".  mixedSignal
-        # is included for forward-compatibility but will be False for now.
-        pt_direction = None
-        if action in ("initiated", "Initiated", "init"):
-            pt_direction = "INITIATED"
+        # Price target fields — yfinance upgrades_downgrades doesn't expose
+        # numeric price targets; stubs are included for forward-compatibility.
+        pt_from: float | None = None
+        pt_to: float | None = None
 
-        mixed_signal = signal == "UPGRADE" and pt_direction == "LOWERED"
+        # Derive ptDirection: use ptFrom/ptTo comparison when available;
+        # fall back to action type; UNCHANGED for reiterations.
+        if pt_from is not None and pt_to is not None:
+            if pt_to > pt_from:
+                pt_direction = "RAISE"
+            elif pt_to < pt_from:
+                pt_direction = "CUT"
+            else:
+                pt_direction = "UNCHANGED"
+        elif action in ("initiated", "Initiated", "init"):
+            pt_direction = "INITIATED"
+        elif signal == "MAINTAIN":
+            pt_direction = "UNCHANGED"
+        else:
+            pt_direction = None
+
+        mixed_signal = signal == "UPGRADE" and pt_direction == "CUT"
 
         # Strength flag
         if signal == "UPGRADE" and not mixed_signal:
@@ -2527,6 +2569,8 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
             "fromGrade": from_grade,
             "toGrade": to_grade,
             "signal": signal,
+            "ptFrom": pt_from,
+            "ptTo": pt_to,
             "ptDirection": pt_direction,
             "mixedSignal": mixed_signal,
             "strengthFlag": strength_flag,
