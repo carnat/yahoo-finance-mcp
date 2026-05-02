@@ -160,6 +160,7 @@ This server provides financial market data from Yahoo Finance.
 - get_price_stats: Pre-computed price statistics: % change vs 52-week high/low, distance from moving averages, 30-day volatility, and CAGR.
 - get_stock_actions: Dividend and split history.
 - get_short_interest: Short interest metrics: short % of float, shares short, days-to-cover ratio, float shares.
+- get_overnight_quote: Overnight session OHLCV (midnight to 7AM local exchange time). Useful for crypto (BTC-USD, ETH-USD) and futures; returns null fields for most equities.
 
 ### Financials & ratios
 - get_financial_statement: Raw financial statements (income, balance sheet, cashflow). Supports ttm_income_stmt and ttm_cashflow for trailing-twelve-months data. Supports optional line_items filter.
@@ -2589,6 +2590,134 @@ async def get_etf_info(ticker: str | list[str]) -> str:
         data["sectorWeights"] = None
 
     result = json.dumps(data)
+    _cache_set(cache_key, result)
+    return result
+
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_overnight_quote
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_overnight_quote",
+    description="""Get overnight trading data (midnight to 7AM local exchange time) for a ticker.
+
+Returns overnightPrice, overnightTime, overnightHigh, overnightLow, overnightOpen,
+overnightVolume, sessionDate, and timezone.
+
+Returns null fields if no overnight session exists for the ticker (e.g. most equities).
+Best for 24/7 assets like crypto (BTC-USD, ETH-USD) or index futures.
+
+Implementation: filters the 5-day hourly prepost chart for bars whose local hour falls
+in [0, 7) (midnight to 7 AM) and aggregates OHLCV across those bars for the most recent
+such session. No extra API calls — data comes from the same chart endpoint as history.
+
+Args:
+    ticker: str
+        The ticker symbol, e.g. "BTC-USD" or "ES=F"
+""",
+)
+async def get_overnight_quote(ticker: str) -> str:
+    """Get overnight (midnight to 7AM local time) OHLCV data for a ticker."""
+    import zoneinfo
+
+    cache_key = f"overnight_quote:{ticker}"
+    cached = _cache_get(cache_key, _PRICE_TTL)
+    if cached is not None:
+        return cached
+
+    company = yf.Ticker(ticker)
+    try:
+        hist = await _fetch_with_retry(
+            company.history, period="5d", interval="1h", prepost=True, auto_adjust=False
+        )
+    except Exception as e:
+        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
+
+    if hist is None or hist.empty:
+        return json.dumps({
+            "ticker": ticker,
+            "overnightPrice": None,
+            "overnightTime": None,
+            "overnightHigh": None,
+            "overnightLow": None,
+            "overnightOpen": None,
+            "overnightVolume": None,
+            "_note": "No price history available for this ticker",
+        })
+
+    # Determine exchange timezone
+    try:
+        tz_name = company.fast_info.timezone
+    except Exception:
+        tz_name = "UTC"
+
+    try:
+        tz = zoneinfo.ZoneInfo(tz_name)
+    except Exception:
+        tz = zoneinfo.ZoneInfo("UTC")
+        tz_name = "UTC"
+
+    # Convert index to the exchange's local timezone and filter for overnight hours (0 <= h < 7)
+    local_index = hist.index.tz_convert(tz)
+    overnight_mask = (local_index.hour >= 0) & (local_index.hour < 7)
+    overnight = hist[overnight_mask]
+
+    if overnight.empty:
+        result = json.dumps({
+            "ticker": ticker,
+            "overnightPrice": None,
+            "overnightTime": None,
+            "overnightHigh": None,
+            "overnightLow": None,
+            "overnightOpen": None,
+            "overnightVolume": None,
+            "_note": "No overnight trading data found for this ticker",
+        })
+        _cache_set(cache_key, result)
+        return result
+
+    # Use only the most recent calendar date that has overnight bars
+    overnight_local_index = local_index[overnight_mask]
+    local_dates = overnight_local_index.date
+    latest_date = max(local_dates)
+    day_mask = pd.to_datetime(overnight_local_index.date) == pd.Timestamp(latest_date)
+    day_bars = overnight[day_mask]
+
+    if day_bars.empty:
+        result = json.dumps({
+            "ticker": ticker,
+            "overnightPrice": None,
+            "overnightTime": None,
+            "overnightHigh": None,
+            "overnightLow": None,
+            "overnightOpen": None,
+            "overnightVolume": None,
+            "_note": "No overnight trading data found for this ticker",
+        })
+        _cache_set(cache_key, result)
+        return result
+
+    overnight_open   = float(day_bars["Open"].iloc[0])   if "Open"   in day_bars.columns else None
+    overnight_high   = float(day_bars["High"].max())      if "High"   in day_bars.columns else None
+    overnight_low    = float(day_bars["Low"].min())       if "Low"    in day_bars.columns else None
+    overnight_price  = float(day_bars["Close"].iloc[-1])  if "Close"  in day_bars.columns else None
+    overnight_volume = int(day_bars["Volume"].sum())      if "Volume" in day_bars.columns else None
+    last_ts = day_bars.index[-1]
+    overnight_time   = last_ts.isoformat() if hasattr(last_ts, "isoformat") else str(last_ts)
+
+    result = json.dumps({
+        "ticker": ticker,
+        "overnightPrice": overnight_price,
+        "overnightTime": overnight_time,
+        "overnightHigh": overnight_high,
+        "overnightLow": overnight_low,
+        "overnightOpen": overnight_open,
+        "overnightVolume": overnight_volume,
+        "sessionDate": str(latest_date),
+        "timezone": tz_name,
+    })
     _cache_set(cache_key, result)
     return result
 

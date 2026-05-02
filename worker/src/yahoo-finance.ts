@@ -710,8 +710,121 @@ export async function getFastInfo(ticker: string | string[]): Promise<string> {
     threeMonthAverageVolume: volOrNull(detail.averageVolume),
     fiftyDayAverage: raw(detail.fiftyDayAverage),
     twoHundredDayAverage: raw(detail.twoHundredDayAverage),
+    preMarketPrice: raw(price.preMarketPrice),
+    postMarketPrice: raw(price.postMarketPrice),
     ...(isIndex ? { _note: "Index ticker — volume, shares, and marketCap are not applicable and are returned as null" } : {}),
   });
+}
+
+// ── get_overnight_quote ───────────────────────────────────────────────────────
+
+export async function getOvernightQuote(ticker: string): Promise<string> {
+  try {
+    const d = (await yGet(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=5d&interval=1h&includePrePost=true`,
+      false
+    )) as Record<string, unknown>;
+
+    const result = (d?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    if (!result) return noData(ticker);
+
+    // Timezone from metadata — needed to determine local overnight hours
+    const meta = (result.meta as Record<string, unknown>) ?? {};
+    const tzName = (meta.exchangeTimezoneName as string | undefined) ?? "UTC";
+
+    const timestamps = (result.timestamp as number[]) ?? [];
+    const quoteBlock = ((result.indicators as Record<string, unknown[]>)?.quote?.[0] as
+      | Record<string, (number | null)[]>
+      | undefined) ?? {};
+
+    const opens   = quoteBlock.open   ?? [];
+    const highs   = quoteBlock.high   ?? [];
+    const lows    = quoteBlock.low    ?? [];
+    const closes  = quoteBlock.close  ?? [];
+    const volumes = quoteBlock.volume ?? [];
+
+    // Group bars by local calendar date, keeping only bars whose local hour is 0–6 (midnight to <7 AM).
+    // We find the most recent date that has any overnight bars.
+    // Cache the two formatters outside the loop for efficiency.
+    const dtfHour = new Intl.DateTimeFormat("en-US", { timeZone: tzName, hour: "numeric", hour12: false });
+    const dtfDate = new Intl.DateTimeFormat("en-CA", { timeZone: tzName }); // produces "YYYY-MM-DD"
+    const overnightByDate = new Map<string, {
+      opens: number[];
+      highs: number[];
+      lows: number[];
+      closes: number[];
+      volumes: number[];
+      times: number[];
+    }>();
+
+    for (let i = 0; i < timestamps.length; i++) {
+      const ts = timestamps[i];
+      // Use Intl.DateTimeFormat parts to extract hour and date in the exchange timezone
+      // without allocating a new formatter per iteration.
+      const parts = dtfHour.formatToParts(new Date(ts * 1000));
+      const hourStr = parts.find((p) => p.type === "hour")?.value;
+      if (!hourStr) continue;
+      let hour = parseInt(hourStr, 10);
+      // Some engines represent midnight as 24 — normalize to 0
+      if (hour === 24) hour = 0;
+      if (hour < 0 || hour >= 7) continue;
+
+      // Date key: YYYY-MM-DD in local timezone
+      const localDateStr = dtfDate.format(new Date(ts * 1000)); // "YYYY-MM-DD" via en-CA locale
+
+      if (!overnightByDate.has(localDateStr)) {
+        overnightByDate.set(localDateStr, { opens: [], highs: [], lows: [], closes: [], volumes: [], times: [] });
+      }
+      const bucket = overnightByDate.get(localDateStr)!;
+      if (opens[i] != null)   bucket.opens.push(opens[i]!);
+      if (highs[i] != null)   bucket.highs.push(highs[i]!);
+      if (lows[i] != null)    bucket.lows.push(lows[i]!);
+      if (closes[i] != null)  bucket.closes.push(closes[i]!);
+      if (volumes[i] != null) bucket.volumes.push(volumes[i]!);
+      bucket.times.push(ts);
+    }
+
+    if (overnightByDate.size === 0) {
+      // No overnight bars found — ticker has no overnight session (e.g. AAPL)
+      return JSON.stringify({
+        ticker,
+        overnightPrice: null,
+        overnightTime: null,
+        overnightHigh: null,
+        overnightLow: null,
+        overnightOpen: null,
+        overnightVolume: null,
+        _note: "No overnight trading data found for this ticker",
+      });
+    }
+
+    // Use the most recent date with overnight data
+    const latestDate = [...overnightByDate.keys()].sort().at(-1)!;
+    const bars = overnightByDate.get(latestDate)!;
+
+    const overnightOpen   = bars.opens.length   > 0 ? bars.opens[0]                               : null;
+    const overnightHigh   = bars.highs.length   > 0 ? Math.max(...bars.highs)                     : null;
+    const overnightLow    = bars.lows.length    > 0 ? Math.min(...bars.lows)                      : null;
+    const overnightPrice  = bars.closes.length  > 0 ? bars.closes[bars.closes.length - 1]         : null;
+    const overnightTime   = bars.times.length   > 0 ? iso(bars.times[bars.times.length - 1])      : null;
+    const overnightVolume = bars.volumes.length > 0 ? bars.volumes.reduce((a, b) => a + b, 0)     : null;
+
+    return JSON.stringify({
+      ticker,
+      overnightPrice,
+      overnightTime,
+      overnightHigh,
+      overnightLow,
+      overnightOpen,
+      overnightVolume,
+      sessionDate: latestDate,
+      timezone: tzName,
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+  }
 }
 
 export async function getPriceStats(ticker: string | string[]): Promise<string> {

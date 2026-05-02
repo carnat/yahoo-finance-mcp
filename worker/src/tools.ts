@@ -16,6 +16,7 @@ import {
   getOptionChain,
   getOptionExpirationDates,
   getOptionsFlowSummary,
+  getOvernightQuote,
   getPriceSlope,
   getPriceStats,
   getPutHedgeCandidates,
@@ -238,7 +239,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_fast_info",
     description:
-      "Get lightweight real-time price and market data for one or more tickers. Returns ~20 high-signal fields: currency, exchange, quoteType, timezone, lastPrice, open, previousClose, dayHigh, dayLow, yearHigh, yearLow, yearChange, marketCap, shares, lastVolume, tenDayAverageVolume, threeMonthAverageVolume, fiftyDayAverage, twoHundredDayAverage. Prefer this over get_stock_info for price/market data queries — it uses far fewer tokens. Max 5 tickers per call; if you need more, split into multiple calls.",
+      "Get lightweight real-time price and market data for one or more tickers. Returns ~20 high-signal fields: currency, exchange, quoteType, timezone, lastPrice, open, previousClose, dayHigh, dayLow, yearHigh, yearLow, yearChange, marketCap, shares, lastVolume, tenDayAverageVolume, threeMonthAverageVolume, fiftyDayAverage, twoHundredDayAverage, preMarketPrice, postMarketPrice. Prefer this over get_stock_info for price/market data queries — it uses far fewer tokens. Max 5 tickers per call; if you need more, split into multiple calls.",
     inputSchema: {
       type: "object",
       properties: {
@@ -592,6 +593,18 @@ export const TOOLS: Tool[] = [
       required: ["ticker"],
     },
   },
+  {
+    name: "get_overnight_quote",
+    description:
+      "Get overnight trading data (midnight to 7AM local exchange time) for a ticker. Returns overnightPrice, overnightTime, overnightHigh, overnightLow, overnightOpen, overnightVolume. Returns null fields if no overnight session exists for the ticker (e.g. most equities). Best for 24/7 assets like crypto (BTC-USD, ETH-USD) or index futures.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Ticker symbol, e.g. 'BTC-USD'" },
+      },
+      required: ["ticker"],
+    },
+  },
 ];
 
 const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
@@ -671,6 +684,8 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       );
     case "get_analyst_upgrade_radar":
       return getAnalystUpgradeRadar(tickerArg(args.ticker), num(args.days_back, 30));
+    case "get_overnight_quote":
+      return getOvernightQuote(str(args.ticker));
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
