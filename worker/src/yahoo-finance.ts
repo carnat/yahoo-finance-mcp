@@ -2213,7 +2213,7 @@ export async function getPutHedgeCandidates(
       budgetFeasible,
       budgetGapUsd,
       note,
-      dataDate: new Date().toISOString().slice(0, 10),
+      dataDate: getLastTradingDate(),
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });

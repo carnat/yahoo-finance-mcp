@@ -2228,6 +2228,9 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
 # ---------------------------------------------------------------------------
 # Tool: get_options_flow_summary
 # ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_options_flow_summary",
     description="""Get options flow summary: P/C ratio, IV percentile, max pain strike, highest OI strikes. Single ticker only.
 
 Args:
@@ -2498,7 +2501,7 @@ async def get_put_hedge_candidates(
         "budgetFeasible": budget_feasible,
         "budgetGapUsd": budget_gap,
         "note": note,
-        "dataDate": str(datetime.date.today()),
+        "dataDate": get_last_trading_date(),
     })
 
 
@@ -2547,6 +2550,9 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
             "changes": [],
             "summary": "NO CHANGES",
             "dataDate": get_last_trading_date(),
+        })
+
+    ud = ud.reset_index()
     cutoff = pd.Timestamp.now() - pd.DateOffset(days=days_back)
 
     # Filter to window
@@ -2926,7 +2932,7 @@ async def get_overnight_quote(ticker: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# EDGAR helpers (used by get_china_revenue_pct)
+# EDGAR helpers (used by get_geographic_revenue)
 # ---------------------------------------------------------------------------
 import urllib.request as _urlreq
 
