@@ -716,6 +716,16 @@ export async function getFastInfo(ticker: string | string[]): Promise<string> {
   });
 }
 
+// ── get_overnight_quote helpers ───────────────────────────────────────────────
+
+function dataAgeHoursFromTs(tsSeconds: number, nowMs: number): number {
+  return Math.round((nowMs - tsSeconds * 1000) / 3_600_000 * 10) / 10;
+}
+
+function gapPctFromClose(price: number, prevClose: number): number {
+  return Math.round(((price - prevClose) / prevClose * 100) * 10000) / 10000;
+}
+
 // ── get_overnight_quote ───────────────────────────────────────────────────────
 
 export async function getOvernightQuote(ticker: string): Promise<string> {
@@ -785,7 +795,8 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
       // Fallback: most recent prepost bar before 13:30 UTC (09:30 ET market open)
       let fallbackIdx = -1;
       for (let i = timestamps.length - 1; i >= 0; i--) {
-        if (new Date(timestamps[i] * 1000).getUTCHours() < 13) {
+        const utcHour = new Date(timestamps[i] * 1000).getUTCHours();
+        if (utcHour < 13) {
           fallbackIdx = i;
           break;
         }
@@ -807,9 +818,9 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
       const fbTs = timestamps[fallbackIdx];
       const fbClose = closes[fallbackIdx] ?? null;
       const fbVol = volumes[fallbackIdx] ?? 0;
-      const fbDataAgeHours = Math.round((nowMs - fbTs * 1000) / 3_600_000 * 10) / 10;
+      const fbDataAgeHours = dataAgeHoursFromTs(fbTs, nowMs);
       const fbGapPct = prevClose && fbClose != null
-        ? Math.round(((fbClose - prevClose) / prevClose * 100) * 10000) / 10000
+        ? gapPctFromClose(fbClose, prevClose)
         : null;
 
       return JSON.stringify({
@@ -846,12 +857,12 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
     const overnightVolume = bars.volumes.length > 0 ? bars.volumes.reduce((a, b) => a + b, 0)     : null;
 
     const lastTs = bars.times.length > 0 ? bars.times[bars.times.length - 1] : null;
-    const dataAgeHours = lastTs != null ? Math.round((nowMs - lastTs * 1000) / 3_600_000 * 10) / 10 : null;
+    const dataAgeHours = lastTs != null ? dataAgeHoursFromTs(lastTs, nowMs) : null;
     const lastUtcHour = lastTs != null ? new Date(lastTs * 1000).getUTCHours() : null;
     const isBlueOceanWindow = lastUtcHour != null ? lastUtcHour < 8 : false;
     const dataSource = (overnightVolume ?? 0) > 0 ? "EXCHANGE" : "OTC_INDICATIVE";
     const gapPct = prevClose && overnightPrice != null
-      ? Math.round(((overnightPrice - prevClose) / prevClose * 100) * 10000) / 10000
+      ? gapPctFromClose(overnightPrice, prevClose)
       : null;
 
     return JSON.stringify({
