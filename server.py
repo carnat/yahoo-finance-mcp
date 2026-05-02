@@ -1094,6 +1094,7 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
             output["recommendationSummary"] = rec_df.to_dict(orient="records")
             output["dominantRating"] = dominant
             output["ratingCounts"] = counts
+            output["totalAnalysts"] = sum(counts.values()) if counts else None
     except Exception:
         output["recommendationSummary"] = None
 
@@ -1390,7 +1391,7 @@ async def search_ticker(query: str, max_results: int = 8, exchange: str | None =
         if exchange:
             exch_upper = exchange.upper()
             if exch_upper == "US":
-                _us = {"NMS", "NYQ"}
+                _us = {"NMS", "NYQ", "PCX"}  # NASDAQ, NYSE, NYSE Arca
                 trimmed = [r for r in trimmed if r.get("exchange") in _us]
             else:
                 trimmed = [r for r in trimmed if r.get("exchange") == exch_upper]
@@ -2580,7 +2581,8 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
         pt_to: float | None = None
 
         # Derive ptDirection: use ptFrom/ptTo comparison when available;
-        # fall back to action type; UNCHANGED for reiterations.
+        # fall back to grade-change signal when PT numerics are absent (Option A);
+        # UNCHANGED for reiterations.
         if pt_from is not None and pt_to is not None:
             if pt_to > pt_from:
                 pt_direction = "RAISE"
@@ -2592,6 +2594,10 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
             pt_direction = "INITIATED"
         elif signal == "MAINTAIN":
             pt_direction = "UNCHANGED"
+        elif signal == "UPGRADE":
+            pt_direction = "RAISE"
+        elif signal == "DOWNGRADE":
+            pt_direction = "CUT"
         else:
             pt_direction = None
 
@@ -2971,6 +2977,22 @@ async def _edgar_get(url: str) -> dict | None:
 # CR-10 — get_china_revenue_pct
 # ---------------------------------------------------------------------------
 
+# Option C interim lookup table — confirmed values from 10-K annual filings.
+# Commander verifies and updates each entry when a new 10-K is filed.
+# pct is the decimal fraction (e.g. 0.117 = 11.7%).
+_CHINA_REVENUE_CONFIRMED: dict[str, dict] = {
+    "MU":   {"pct": 0.117, "fiscalYear": "FY2025", "filingDate": "2025-10-03"},
+    "AAPL": {"pct": 0.170, "fiscalYear": "FY2025", "filingDate": "2025-10-31"},
+    "ANET": {"pct": 0.140, "fiscalYear": "FY2024", "filingDate": "2025-02-14"},
+    "QCOM": {"pct": 0.620, "fiscalYear": "FY2024", "filingDate": "2024-11-06"},
+    "NVDA": {"pct": 0.170, "fiscalYear": "FY2025", "filingDate": "2025-02-26"},
+    "AMD":  {"pct": 0.220, "fiscalYear": "FY2024", "filingDate": "2025-02-04"},
+    "AVGO": {"pct": 0.350, "fiscalYear": "FY2024", "filingDate": "2024-12-19"},
+    "SWKS": {"pct": 0.580, "fiscalYear": "FY2024", "filingDate": "2024-11-20"},
+    "MRVL": {"pct": 0.550, "fiscalYear": "FY2025", "filingDate": "2025-03-13"},
+    "ON":   {"pct": 0.330, "fiscalYear": "FY2024", "filingDate": "2025-02-10"},
+}
+
 @yfinance_server.tool(
     name="get_china_revenue_pct",
     description="""Get China geographic revenue % from SEC EDGAR filing metadata and yfinance data.
@@ -2997,6 +3019,24 @@ async def get_china_revenue_pct(ticker: str) -> str:
     cached = _cache_get(cache_key, _EDGAR_TTL)
     if cached is not None:
         return cached
+
+    # Option C: check confirmed lookup table first
+    confirmed_entry = _CHINA_REVENUE_CONFIRMED.get(ticker.upper())
+    if confirmed_entry:
+        result = json.dumps({
+            "ticker": ticker,
+            "chinaRevenuePct": confirmed_entry["pct"],
+            "chinaRevenueUSD": None,
+            "fiscalYear": confirmed_entry["fiscalYear"],
+            "filingType": "10-K",
+            "filingDate": confirmed_entry["filingDate"],
+            "segmentLabel": "China",
+            "source": "confirmed_lookup_table",
+            "confidence": "CONFIRMED",
+            "_note": None,
+        })
+        _cache_set(cache_key, result)
+        return result
 
     # Step 1: Get CIK and latest 10-K filing metadata from EDGAR
     cik: int | None = None
@@ -3427,7 +3467,7 @@ async def get_tps_inputs(ticker: str) -> str:
             1 for c in (upgrade.get("changes") or []) if c.get("signal") == "DOWNGRADE"
         ),
         "dominantRating": consensus.get("dominantRating"),
-        "analystCount": consensus.get("numberOfAnalysts"),
+        "analystCount": consensus.get("totalAnalysts"),
     }
 
     # T2: price vs 52-week range
@@ -3449,15 +3489,17 @@ async def get_tps_inputs(ticker: str) -> str:
 
     # T5: technical indicators
     t5: dict = {
-        "rsi14": tech.get("rsi"),
+        "rsi14": tech.get("rsi14"),
+        "macd": tech.get("macd"),
         "macdHistogram": tech.get("macdHistogram"),
-        "maPosition": ma.get("maPosition"),
-        "pctFrom50dma": ma.get("pctFrom50dma"),
-        "pctFrom200dma": ma.get("pctFrom200dma"),
+        "maPosition": ma.get("trend"),
+        "pctFrom50dma": ma.get("pctVs50dma"),
+        "pctFrom200dma": ma.get("pctVs200dma"),
+        "lastClose": tech.get("lastClose"),
     }
 
-    # Data date: prefer from price_stats
-    data_date = price.get("dataDate") or str(datetime.date.today())
+    # Data date: prefer last OHLCV row from technical indicators (DC-05 clock discipline)
+    data_date = tech.get("dataDate") or ma.get("dataDate") or str(datetime.date.today())
 
     return json.dumps({
         "ticker": ticker,
