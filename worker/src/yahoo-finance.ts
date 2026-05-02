@@ -1070,6 +1070,7 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
     );
     output.dominantRating = dominant;
     output.ratingCounts = counts;
+    output.numberOfAnalysts = Object.values(counts).reduce((a, b) => a + b, 0);
   } else {
     output.recommendationSummary = null;
   }
@@ -2610,16 +2611,17 @@ export async function getTpsInputs(ticker: string): Promise<string> {
     };
 
     const t5 = {
-      rsi14: tech.rsi ?? null,
+      rsi14: tech.rsi14 ?? null,
       macdHistogram: tech.macdHistogram ?? null,
-      maPosition: ma.maPosition ?? null,
-      pctFrom50dma: ma.pctFrom50dma ?? null,
-      pctFrom200dma: ma.pctFrom200dma ?? null,
+      maPosition: ma.trend ?? null,
+      pctFrom50dma: ma.pctVs50dma ?? null,
+      pctFrom200dma: ma.pctVs200dma ?? null,
+      lastClose: tech.lastClose ?? null,
     };
 
     return JSON.stringify({
       ticker,
-      dataDate: (price.dataDate as string | null) ?? new Date().toISOString().slice(0, 10),
+      dataDate: (tech.dataDate as string | null) ?? (ma.dataDate as string | null) ?? new Date().toISOString().slice(0, 10),
       t1_inputs: t1,
       t2_inputs: t2,
       t4_inputs: t4,
