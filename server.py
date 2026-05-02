@@ -3678,11 +3678,13 @@ async def get_position_score_inputs(ticker: str) -> str:
     name="get_volume_gate",
     description="""DC Section 6.2 Volume Gate check: regularMarketVolume ≥ 0.5 × 20-day ADV.
 
-Returns lastVolume, adv10d, adv20d (computed from last 20 daily sessions), adv90d, ratio20d,
-gatePass (true = volume gate PASS), dataDate, and a pre-formatted note.
+Returns currency, fxRate, lastVolume, adv10d, adv20d (computed from last 20 daily sessions),
+adv90d, ratio20d (always computed when adv20d is available), gatePass (true = volume gate PASS),
+dataDate, and a pre-formatted note.
 
-foreignExchange: bool (default False). When True, applies the DC-80 FX gate: passes when
-lastVolume × lastPrice ≥ $10M USD/day instead of the 0.5 × adv20d threshold.
+foreignExchange: bool (default False). When True, applies the DC-80 FX gate: daily notional
+is converted to USD via a live {CCY}=X FX rate fetch before comparing to the $10M threshold.
+ratio20d is still computed and returned alongside the notional gate result.
 
 Args:
     ticker: str
@@ -3700,6 +3702,7 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
         adv10d: float | None = fi["tenDayAverageVolume"]
         adv90d: float | None = fi["threeMonthAverageVolume"]
         last_price: float | None = fi["lastPrice"]
+        currency: str | None = fi["currency"]
     except Exception as e:
         return json.dumps({"error": True, "message": str(e), "ticker": ticker})
 
@@ -3719,20 +3722,43 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
     # Gate evaluation
     gate_pass: bool | None = None
     ratio20d: float | None = None
+    fx_rate: float | None = None
     note: str
 
     if foreign_exchange:
-        # DC-80: daily notional ≥ $10M USD
+        # DC-80: daily notional ≥ $10M USD (convert to USD via live FX rate)
         if last_volume is not None and last_price is not None and last_price > 0:
-            daily_notional = last_volume * last_price
-            gate_pass = daily_notional >= 10_000_000
+            local_notional = last_volume * last_price
+            applied_fx_rate = 1.0
+            fx_conversion_note = ""
+
+            if currency and currency != "USD":
+                try:
+                    fx_ticker = yf.Ticker(f"{currency}=X")
+                    rate_val = fx_ticker.fast_info.last_price
+                    if rate_val and rate_val > 0:
+                        applied_fx_rate = rate_val
+                        fx_rate = round(float(rate_val), 4)
+                        fx_conversion_note = f" [{currency}\u2192USD at {rate_val:.2f}]"
+                    else:
+                        fx_conversion_note = f" [{currency}=X rate unavailable \u2014 notional in local currency]"
+                except Exception:
+                    fx_conversion_note = f" [{currency}=X fetch failed \u2014 notional in local currency]"
+            elif currency == "USD":
+                fx_rate = 1.0
+
+            daily_notional_usd = local_notional / applied_fx_rate
+            gate_pass = daily_notional_usd >= 10_000_000
             note = (
                 f"Volume gate {'PASS' if gate_pass else 'FAIL'} (DC-80 FX) — "
-                f"${daily_notional / 1_000_000:.1f}M daily notional "
-                f"({'≥' if gate_pass else '<'} $10M threshold)"
+                f"${daily_notional_usd / 1_000_000:.1f}M daily notional "
+                f"({'≥' if gate_pass else '<'} $10M threshold){fx_conversion_note}"
             )
         else:
             note = "Volume gate UNKNOWN — insufficient price/volume data for DC-80 FX check"
+        # Bug 5: compute ratio20d in FX branch too
+        if last_volume is not None and adv20d and adv20d > 0:
+            ratio20d = round(last_volume / adv20d, 2)
     else:
         if last_volume is not None and adv20d and adv20d > 0:
             ratio20d = round(last_volume / adv20d, 2)
@@ -3746,11 +3772,13 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
 
     return json.dumps({
         "ticker": ticker,
+        "currency": currency,
         "lastVolume": last_volume,
         "adv10d": adv10d,
         "adv20d": adv20d,
         "adv90d": adv90d,
         "ratio20d": ratio20d,
+        "fxRate": fx_rate,
         "gatePass": gate_pass,
         "dataDate": data_date,
         "note": note,

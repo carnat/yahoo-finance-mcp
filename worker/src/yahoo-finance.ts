@@ -2811,6 +2811,7 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
     const adv10d = fi.tenDayAverageVolume as number | null;
     const adv90d = fi.threeMonthAverageVolume as number | null;
     const lastPrice = fi.lastPrice as number | null;
+    const currency = fi.currency as string | null;
 
     let adv20d: number | null = null;
     let dataDate = new Date().toISOString().slice(0, 10);
@@ -2834,15 +2835,42 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
 
     let gatePass: boolean | null = null;
     let ratio20d: number | null = null;
+    let fxRate: number | null = null;
     let note: string;
 
     if (foreignExchange) {
       if (lastVolume != null && lastPrice != null && lastPrice > 0) {
-        const dailyNotional = lastVolume * lastPrice;
-        gatePass = dailyNotional >= 10_000_000;
-        note = `Volume gate ${gatePass ? "PASS" : "FAIL"} (DC-80 FX) — $${(dailyNotional / 1_000_000).toFixed(1)}M daily notional (${gatePass ? "≥" : "<"} $10M threshold)`;
+        const localNotional = lastVolume * lastPrice;
+        let appliedFxRate = 1.0;
+        let fxConversionNote = "";
+
+        if (currency && currency !== "USD") {
+          try {
+            const fxFi = JSON.parse(await getFastInfo(`${currency}=X`)) as Record<string, unknown>;
+            const rate = fxFi.lastPrice as number | null;
+            if (rate != null && rate > 0) {
+              appliedFxRate = rate;
+              fxRate = +rate.toFixed(4);
+              fxConversionNote = ` [${currency}→USD at ${rate.toFixed(2)}]`;
+            } else {
+              fxConversionNote = ` [${currency}=X rate unavailable — notional in local currency]`;
+            }
+          } catch {
+            fxConversionNote = ` [${currency}=X fetch failed — notional in local currency]`;
+          }
+        } else if (currency === "USD") {
+          fxRate = 1.0;
+        }
+
+        const dailyNotionalUSD = localNotional / appliedFxRate;
+        gatePass = dailyNotionalUSD >= 10_000_000;
+        note = `Volume gate ${gatePass ? "PASS" : "FAIL"} (DC-80 FX) — $${(dailyNotionalUSD / 1_000_000).toFixed(1)}M daily notional (${gatePass ? "≥" : "<"} $10M threshold)${fxConversionNote}`;
       } else {
         note = "Volume gate UNKNOWN — insufficient price/volume data for DC-80 FX check";
+      }
+      // Bug 5: also compute ratio20d in the FX branch
+      if (lastVolume != null && adv20d != null && adv20d > 0) {
+        ratio20d = +(lastVolume / adv20d).toFixed(2);
       }
     } else {
       if (lastVolume != null && adv20d != null && adv20d > 0) {
@@ -2855,7 +2883,7 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
     }
 
     return JSON.stringify({
-      ticker, lastVolume, adv10d, adv20d, adv90d, ratio20d, gatePass, dataDate, note,
+      ticker, currency, lastVolume, adv10d, adv20d, adv90d, ratio20d, fxRate, gatePass, dataDate, note,
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
