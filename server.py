@@ -160,7 +160,7 @@ This server provides financial market data from Yahoo Finance.
 - get_price_stats: Pre-computed price statistics: % change vs 52-week high/low, distance from moving averages, 30-day volatility, and CAGR.
 - get_stock_actions: Dividend and split history.
 - get_short_interest: Short interest metrics: short % of float, shares short, days-to-cover ratio, float shares.
-- get_overnight_quote: Overnight session OHLCV (midnight to 7AM local exchange time). Useful for crypto (BTC-USD, ETH-USD) and futures; returns null fields for most equities.
+- get_overnight_quote: Overnight session OHLCV. Filters for the true overnight window (20:00–04:00 ET / 00:00–08:00 UTC). Falls back to last pre-market bar for equities with a fallback flag. Returns dataSource (EXCHANGE or OTC_INDICATIVE), isBlueOceanWindow, isStale, dataAgeHours, gapPct, and gapDirection.
 
 ### Financials & ratios
 - get_financial_statement: Raw financial statements (income, balance sheet, cashflow). Supports ttm_income_stmt and ttm_cashflow for trailing-twelve-months data. Supports optional line_items filter.
@@ -2601,25 +2601,27 @@ async def get_etf_info(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_overnight_quote",
-    description="""Get overnight trading data (midnight to 7AM local exchange time) for a ticker.
+    description="""Get overnight trading data for a ticker.
 
-Returns overnightPrice, overnightTime, overnightHigh, overnightLow, overnightOpen,
-overnightVolume, sessionDate, and timezone.
+The true overnight window is 20:00–04:00 ET (00:00–08:00 UTC / Blue Ocean ATS).
+If no bars fall in that window, falls back to the most recent pre-market bar
+(04:00–09:30 ET / 08:00–13:30 UTC) with fallback=true and a note.
 
-Returns null fields if no overnight session exists for the ticker (e.g. most equities).
-Best for 24/7 assets like crypto (BTC-USD, ETH-USD) or index futures.
+For crypto/futures (24/7 markets), returns true exchange data with real volume
+(dataSource=EXCHANGE). For equities, OTC indicative quotes typically have Volume=0
+(dataSource=OTC_INDICATIVE).
 
-Implementation: filters the 5-day hourly prepost chart for bars whose local hour falls
-in [0, 7) (midnight to 7 AM) and aggregates OHLCV across those bars for the most recent
-such session. No extra API calls — data comes from the same chart endpoint as history.
+Returns: overnightPrice, overnightTime, overnightHigh, overnightLow, overnightOpen,
+overnightVolume, sessionDate, timezone, previousClose, gapPct, gapDirection,
+dataSource, isBlueOceanWindow, isStale, dataAgeHours, fallback, note.
 
 Args:
     ticker: str
-        The ticker symbol, e.g. "BTC-USD" or "ES=F"
+        The ticker symbol, e.g. "BTC-USD", "ASTS", or "ES=F"
 """,
 )
 async def get_overnight_quote(ticker: str) -> str:
-    """Get overnight (midnight to 7AM local time) OHLCV data for a ticker."""
+    """Get overnight (00:00–08:00 UTC) OHLCV data for a ticker with data quality flags."""
     import zoneinfo
 
     cache_key = f"overnight_quote:{ticker}"
@@ -2647,7 +2649,7 @@ async def get_overnight_quote(ticker: str) -> str:
             "_note": "No price history available for this ticker",
         })
 
-    # Determine exchange timezone
+    # Exchange timezone (used for sessionDate and tz label)
     try:
         tz_name = company.fast_info.timezone
     except Exception:
@@ -2659,53 +2661,86 @@ async def get_overnight_quote(ticker: str) -> str:
         tz = zoneinfo.ZoneInfo("UTC")
         tz_name = "UTC"
 
-    # Convert index to the exchange's local timezone and filter for overnight hours (0 <= h < 7)
-    local_index = hist.index.tz_convert(tz)
-    overnight_mask = (local_index.hour >= 0) & (local_index.hour < 7)
+    # Previous close for gap calculation
+    try:
+        prev_close = company.fast_info.previous_close
+    except Exception:
+        prev_close = None
+
+    # UTC index — true overnight window is 00:00–08:00 UTC (= 20:00–04:00 ET)
+    utc_index = hist.index.tz_convert("UTC")
+    overnight_mask = (utc_index.hour >= 0) & (utc_index.hour < 8)
     overnight = hist[overnight_mask]
 
+    is_fallback = False
     if overnight.empty:
-        result = json.dumps({
-            "ticker": ticker,
-            "overnightPrice": None,
-            "overnightTime": None,
-            "overnightHigh": None,
-            "overnightLow": None,
-            "overnightOpen": None,
-            "overnightVolume": None,
-            "_note": "No overnight trading data found for this ticker",
-        })
-        _cache_set(cache_key, result)
-        return result
-
-    # Use only the most recent calendar date that has overnight bars
-    overnight_local_index = local_index[overnight_mask]
-    local_dates = overnight_local_index.date
-    latest_date = max(local_dates)
-    day_mask = pd.to_datetime(overnight_local_index.date) == pd.Timestamp(latest_date)
-    day_bars = overnight[day_mask]
-
-    if day_bars.empty:
-        result = json.dumps({
-            "ticker": ticker,
-            "overnightPrice": None,
-            "overnightTime": None,
-            "overnightHigh": None,
-            "overnightLow": None,
-            "overnightOpen": None,
-            "overnightVolume": None,
-            "_note": "No overnight trading data found for this ticker",
-        })
-        _cache_set(cache_key, result)
-        return result
+        # Fallback: most recent prepost bar before 13:30 UTC (09:30 ET market open)
+        premarket_mask = utc_index.hour < 13
+        premarket = hist[premarket_mask]
+        if premarket.empty:
+            result = json.dumps({
+                "ticker": ticker,
+                "overnightPrice": None,
+                "overnightTime": None,
+                "overnightHigh": None,
+                "overnightLow": None,
+                "overnightOpen": None,
+                "overnightVolume": None,
+                "_note": "No overnight or pre-market data found for this ticker",
+            })
+            _cache_set(cache_key, result)
+            return result
+        # Single-bar fallback — last available pre-market candle
+        day_bars = premarket.iloc[[-1]]
+        is_fallback = True
+    else:
+        # Use only the most recent UTC date that has overnight bars
+        overnight_utc_index = utc_index[overnight_mask]
+        latest_utc_date = max(overnight_utc_index.date)
+        day_mask = pd.to_datetime(overnight_utc_index.date) == pd.Timestamp(latest_utc_date)
+        day_bars = overnight[day_mask]
+        if day_bars.empty:
+            result = json.dumps({
+                "ticker": ticker,
+                "overnightPrice": None,
+                "overnightTime": None,
+                "overnightHigh": None,
+                "overnightLow": None,
+                "overnightOpen": None,
+                "overnightVolume": None,
+                "_note": "No overnight trading data found for this ticker",
+            })
+            _cache_set(cache_key, result)
+            return result
 
     overnight_open   = float(day_bars["Open"].iloc[0])   if "Open"   in day_bars.columns else None
     overnight_high   = float(day_bars["High"].max())      if "High"   in day_bars.columns else None
     overnight_low    = float(day_bars["Low"].min())       if "Low"    in day_bars.columns else None
     overnight_price  = float(day_bars["Close"].iloc[-1])  if "Close"  in day_bars.columns else None
     overnight_volume = int(day_bars["Volume"].sum())      if "Volume" in day_bars.columns else None
+
     last_ts = day_bars.index[-1]
-    overnight_time   = last_ts.isoformat() if hasattr(last_ts, "isoformat") else str(last_ts)
+    last_ts_utc = pd.Timestamp(last_ts).tz_convert("UTC")
+    overnight_time = last_ts_utc.isoformat()
+
+    # sessionDate in exchange local timezone
+    session_date = str(last_ts_utc.tz_convert(tz).date())
+
+    # Data quality flags
+    is_blue_ocean = last_ts_utc.hour < 8  # 00:00–08:00 UTC = true overnight (20:00–04:00 ET)
+    data_source = "EXCHANGE" if (overnight_volume or 0) > 0 else "OTC_INDICATIVE"
+
+    # Staleness: >6 hours old is considered stale
+    now_utc = pd.Timestamp.now(tz="UTC")
+    data_age_hours = round((now_utc - last_ts_utc).total_seconds() / 3600, 1)
+    is_stale = data_age_hours > 6
+
+    # Gap vs previous close
+    gap_pct = None
+    gap_direction = None
+    if prev_close and overnight_price:
+        gap_pct = round((overnight_price - prev_close) / prev_close * 100, 4)
+        gap_direction = "UP" if gap_pct > 0 else ("DOWN" if gap_pct < 0 else "FLAT")
 
     result = json.dumps({
         "ticker": ticker,
@@ -2715,8 +2750,20 @@ async def get_overnight_quote(ticker: str) -> str:
         "overnightLow": overnight_low,
         "overnightOpen": overnight_open,
         "overnightVolume": overnight_volume,
-        "sessionDate": str(latest_date),
+        "sessionDate": session_date,
         "timezone": tz_name,
+        "previousClose": prev_close,
+        "gapPct": gap_pct,
+        "gapDirection": gap_direction,
+        "dataSource": data_source,
+        "isBlueOceanWindow": is_blue_ocean,
+        "isStale": is_stale,
+        "dataAgeHours": data_age_hours,
+        "fallback": is_fallback,
+        "note": (
+            "True overnight window (20:00–04:00 ET) unavailable via Yahoo Finance API. "
+            "Returning last pre-market OTC indicative quote as proxy."
+        ) if is_fallback else None,
     })
     _cache_set(cache_key, result)
     return result

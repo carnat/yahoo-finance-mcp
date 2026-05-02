@@ -596,7 +596,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_overnight_quote",
     description:
-      "Get overnight trading data (midnight to 7AM local exchange time) for a ticker. Returns overnightPrice, overnightTime, overnightHigh, overnightLow, overnightOpen, overnightVolume. Returns null fields if no overnight session exists for the ticker (e.g. most equities). Best for 24/7 assets like crypto (BTC-USD, ETH-USD) or index futures.",
+      "Get overnight trading data for a ticker. Filters for the true overnight window (20:00–04:00 ET / 00:00–08:00 UTC). If no data exists in that window, falls back to the most recent pre-market bar with fallback=true. Returns overnightPrice, overnightTime, overnightHigh, overnightLow, overnightOpen, overnightVolume, previousClose, gapPct, gapDirection, dataSource ('EXCHANGE' for crypto/futures with real volume, 'OTC_INDICATIVE' for equities with zero volume), isBlueOceanWindow, isStale, dataAgeHours, fallback, and note.",
     inputSchema: {
       type: "object",
       properties: {

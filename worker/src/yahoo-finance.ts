@@ -716,6 +716,16 @@ export async function getFastInfo(ticker: string | string[]): Promise<string> {
   });
 }
 
+// ── get_overnight_quote helpers ───────────────────────────────────────────────
+
+function dataAgeHoursFromTs(tsSeconds: number, nowMs: number): number {
+  return Math.round((nowMs - tsSeconds * 1000) / 3_600_000 * 10) / 10;
+}
+
+function gapPctFromClose(price: number, prevClose: number): number {
+  return Math.round(((price - prevClose) / prevClose * 100) * 10000) / 10000;
+}
+
 // ── get_overnight_quote ───────────────────────────────────────────────────────
 
 export async function getOvernightQuote(ticker: string): Promise<string> {
@@ -730,9 +740,11 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
       | undefined;
     if (!result) return noData(ticker);
 
-    // Timezone from metadata — needed to determine local overnight hours
     const meta = (result.meta as Record<string, unknown>) ?? {};
     const tzName = (meta.exchangeTimezoneName as string | undefined) ?? "UTC";
+    const prevClose = typeof meta.regularMarketPreviousClose === "number"
+      ? (meta.regularMarketPreviousClose as number)
+      : null;
 
     const timestamps = (result.timestamp as number[]) ?? [];
     const quoteBlock = ((result.indicators as Record<string, unknown[]>)?.quote?.[0] as
@@ -745,11 +757,8 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
     const closes  = quoteBlock.close  ?? [];
     const volumes = quoteBlock.volume ?? [];
 
-    // Group bars by local calendar date, keeping only bars whose local hour is 0–6 (midnight to <7 AM).
-    // We find the most recent date that has any overnight bars.
-    // Cache the two formatters outside the loop for efficiency.
-    const dtfHour = new Intl.DateTimeFormat("en-US", { timeZone: tzName, hour: "numeric", hour12: false });
-    const dtfDate = new Intl.DateTimeFormat("en-CA", { timeZone: tzName }); // produces "YYYY-MM-DD"
+    // TRUE overnight window: 00:00–08:00 UTC (= 20:00–04:00 ET / Blue Ocean ATS).
+    // Group bars by UTC calendar date, keeping only bars whose UTC hour is 0–7.
     const overnightByDate = new Map<string, {
       opens: number[];
       highs: number[];
@@ -761,23 +770,17 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
 
     for (let i = 0; i < timestamps.length; i++) {
       const ts = timestamps[i];
-      // Use Intl.DateTimeFormat parts to extract hour and date in the exchange timezone
-      // without allocating a new formatter per iteration.
-      const parts = dtfHour.formatToParts(new Date(ts * 1000));
-      const hourStr = parts.find((p) => p.type === "hour")?.value;
-      if (!hourStr) continue;
-      let hour = parseInt(hourStr, 10);
-      // Some engines represent midnight as 24 — normalize to 0
-      if (hour === 24) hour = 0;
-      if (hour < 0 || hour >= 7) continue;
+      const d = new Date(ts * 1000);
+      const utcHour = d.getUTCHours();
+      if (utcHour >= 8) continue; // outside 00:00–08:00 UTC overnight window
 
-      // Date key: YYYY-MM-DD in local timezone
-      const localDateStr = dtfDate.format(new Date(ts * 1000)); // "YYYY-MM-DD" via en-CA locale
+      // UTC date key "YYYY-MM-DD"
+      const utcDateStr = d.toISOString().slice(0, 10);
 
-      if (!overnightByDate.has(localDateStr)) {
-        overnightByDate.set(localDateStr, { opens: [], highs: [], lows: [], closes: [], volumes: [], times: [] });
+      if (!overnightByDate.has(utcDateStr)) {
+        overnightByDate.set(utcDateStr, { opens: [], highs: [], lows: [], closes: [], volumes: [], times: [] });
       }
-      const bucket = overnightByDate.get(localDateStr)!;
+      const bucket = overnightByDate.get(utcDateStr)!;
       if (opens[i] != null)   bucket.opens.push(opens[i]!);
       if (highs[i] != null)   bucket.highs.push(highs[i]!);
       if (lows[i] != null)    bucket.lows.push(lows[i]!);
@@ -786,21 +789,63 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
       bucket.times.push(ts);
     }
 
+    const nowMs = Date.now();
+
     if (overnightByDate.size === 0) {
-      // No overnight bars found — ticker has no overnight session (e.g. AAPL)
+      // Fallback: most recent prepost bar before 13:30 UTC (09:30 ET market open)
+      let fallbackIdx = -1;
+      for (let i = timestamps.length - 1; i >= 0; i--) {
+        const utcHour = new Date(timestamps[i] * 1000).getUTCHours();
+        if (utcHour < 13) {
+          fallbackIdx = i;
+          break;
+        }
+      }
+
+      if (fallbackIdx === -1) {
+        return JSON.stringify({
+          ticker,
+          overnightPrice: null,
+          overnightTime: null,
+          overnightHigh: null,
+          overnightLow: null,
+          overnightOpen: null,
+          overnightVolume: null,
+          _note: "No overnight or pre-market data found for this ticker",
+        });
+      }
+
+      const fbTs = timestamps[fallbackIdx];
+      const fbClose = closes[fallbackIdx] ?? null;
+      const fbVol = volumes[fallbackIdx] ?? 0;
+      const fbDataAgeHours = dataAgeHoursFromTs(fbTs, nowMs);
+      const fbGapPct = prevClose && fbClose != null
+        ? gapPctFromClose(fbClose, prevClose)
+        : null;
+
       return JSON.stringify({
         ticker,
-        overnightPrice: null,
-        overnightTime: null,
-        overnightHigh: null,
-        overnightLow: null,
-        overnightOpen: null,
-        overnightVolume: null,
-        _note: "No overnight trading data found for this ticker",
+        overnightPrice: fbClose,
+        overnightTime: iso(fbTs),
+        overnightHigh: highs[fallbackIdx] ?? null,
+        overnightLow: lows[fallbackIdx] ?? null,
+        overnightOpen: opens[fallbackIdx] ?? null,
+        overnightVolume: typeof fbVol === "number" ? Math.round(fbVol) : null,
+        sessionDate: new Date(fbTs * 1000).toISOString().slice(0, 10),
+        timezone: tzName,
+        previousClose: prevClose,
+        gapPct: fbGapPct,
+        gapDirection: fbGapPct === null ? null : fbGapPct > 0 ? "UP" : fbGapPct < 0 ? "DOWN" : "FLAT",
+        dataSource: (typeof fbVol === "number" && fbVol > 0) ? "EXCHANGE" : "OTC_INDICATIVE",
+        isBlueOceanWindow: false,
+        isStale: fbDataAgeHours > 6,
+        dataAgeHours: fbDataAgeHours,
+        fallback: true,
+        note: "True overnight window (20:00–04:00 ET) unavailable via Yahoo Finance API. Returning last pre-market OTC indicative quote as proxy.",
       });
     }
 
-    // Use the most recent date with overnight data
+    // Use the most recent UTC date with overnight data
     const latestDate = [...overnightByDate.keys()].sort().at(-1)!;
     const bars = overnightByDate.get(latestDate)!;
 
@@ -810,6 +855,15 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
     const overnightPrice  = bars.closes.length  > 0 ? bars.closes[bars.closes.length - 1]         : null;
     const overnightTime   = bars.times.length   > 0 ? iso(bars.times[bars.times.length - 1])      : null;
     const overnightVolume = bars.volumes.length > 0 ? bars.volumes.reduce((a, b) => a + b, 0)     : null;
+
+    const lastTs = bars.times.length > 0 ? bars.times[bars.times.length - 1] : null;
+    const dataAgeHours = lastTs != null ? dataAgeHoursFromTs(lastTs, nowMs) : null;
+    const lastUtcHour = lastTs != null ? new Date(lastTs * 1000).getUTCHours() : null;
+    const isBlueOceanWindow = lastUtcHour != null ? lastUtcHour < 8 : false;
+    const dataSource = (overnightVolume ?? 0) > 0 ? "EXCHANGE" : "OTC_INDICATIVE";
+    const gapPct = prevClose && overnightPrice != null
+      ? gapPctFromClose(overnightPrice, prevClose)
+      : null;
 
     return JSON.stringify({
       ticker,
@@ -821,6 +875,15 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
       overnightVolume,
       sessionDate: latestDate,
       timezone: tzName,
+      previousClose: prevClose,
+      gapPct,
+      gapDirection: gapPct === null ? null : gapPct > 0 ? "UP" : gapPct < 0 ? "DOWN" : "FLAT",
+      dataSource,
+      isBlueOceanWindow,
+      isStale: dataAgeHours != null ? dataAgeHours > 6 : null,
+      dataAgeHours,
+      fallback: false,
+      note: null,
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
