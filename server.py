@@ -2985,6 +2985,152 @@ async def _edgar_get(url: str) -> dict | None:
     return await loop.run_in_executor(None, _fetch)
 
 
+# In-process cache for EDGAR company facts (keyed by zero-padded CIK).
+_EDGAR_FACTS_CACHE: dict[str, tuple[dict, float]] = {}
+
+
+async def _edgar_get_company_facts(cik_padded: str) -> dict | None:
+    """Fetch the EDGAR XBRL company-facts JSON for a CIK, with 24 h in-process caching."""
+    now = time.monotonic()
+    cached_entry = _EDGAR_FACTS_CACHE.get(cik_padded)
+    if cached_entry is not None and (now - cached_entry[1]) < _EDGAR_TTL:
+        return cached_entry[0]
+    data = await _edgar_get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_padded}.json")
+    if data is not None:
+        _EDGAR_FACTS_CACHE[cik_padded] = (data, now)
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Region → XBRL segment-member mapping for geographic revenue extraction.
+# Keys are lowercase region names; values are ordered candidate member strings.
+# Substring fallback (region_lower in member.lower()) handles custom prefixes
+# such as "aapl:GreaterChinaMember".
+# ---------------------------------------------------------------------------
+_REGION_XBRL_MEMBERS: dict[str, list[str]] = {
+    "china": ["country:CN", "srt:ChinaMember"],
+    "united states": ["country:US", "srt:UnitedStatesMember"],
+    "europe": ["srt:EuropeMember", "srt:EuropeMiddleEastAndAfricaMember"],
+    "japan": ["country:JP", "srt:JapanMember"],
+    "asia pacific": ["srt:AsiaPacificMember", "srt:AsiaMember"],
+    "rest of world": ["srt:NonUsMember", "srt:OtherGeographicAreasMember"],
+}
+
+# Revenue concept names to probe, in priority order.
+_GEO_REVENUE_CONCEPTS = [
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "Revenues",
+    "SalesRevenueNet",
+    "RevenueFromContractWithCustomer",
+]
+
+_GEO_AXIS = "srt:StatementGeographicalAxis"
+
+
+def _extract_geographic_pct(
+    facts_data: dict,
+    region: str,
+    filing_date: str | None,
+) -> tuple[float | None, float | None, str, str, str]:
+    """Extract geographic revenue from EDGAR XBRL company-facts JSON.
+
+    Returns (regionRevenuePct, regionRevenueUSD, segmentLabel, source, confidence).
+    All-None/NOT_DISCLOSED on failure.
+    """
+    region_lower = region.lower()
+    candidate_members: list[str] = _REGION_XBRL_MEMBERS.get(region_lower, [])
+
+    def _member_matches(member_val: str) -> bool:
+        if any(m.lower() == member_val.lower() for m in candidate_members):
+            return True
+        # Substring fallback — catches custom prefixes like "aapl:GreaterChinaMember"
+        return region_lower in member_val.lower()
+
+    us_gaap: dict = facts_data.get("facts", {}).get("us-gaap", {})
+
+    for concept in _GEO_REVENUE_CONCEPTS:
+        concept_data = us_gaap.get(concept)
+        if not concept_data:
+            continue
+
+        usd_units: list[dict] = concept_data.get("units", {}).get("USD", [])
+        if not usd_units:
+            continue
+
+        # Pin facts to the specific 10-K by filing date (±10 days) or, when
+        # filing_date is unknown, accept any 10-K annual fact.
+        def _is_target_filing(fact: dict) -> bool:
+            if fact.get("form") not in ("10-K", "10-K405", "10-KSB"):
+                return False
+            if filing_date is None:
+                return True
+            try:
+                fd = datetime.date.fromisoformat(filing_date)
+                ff = datetime.date.fromisoformat(fact["filed"])
+                return abs((ff - fd).days) <= 10
+            except Exception:
+                return True
+
+        target_facts = [f for f in usd_units if _is_target_filing(f)]
+        if not target_facts:
+            # Relax: accept any 10-K fact for this concept if none match the date
+            target_facts = [
+                f for f in usd_units
+                if f.get("form") in ("10-K", "10-K405", "10-KSB")
+            ]
+        if not target_facts:
+            continue
+
+        # Group facts by period end-date to align regional vs. total rows
+        by_period: dict[str, list[dict]] = {}
+        for fact in target_facts:
+            end = fact.get("end", "")
+            by_period.setdefault(end, []).append(fact)
+
+        # Try each period (most-recent first)
+        for period_end in sorted(by_period.keys(), reverse=True):
+            period_facts = by_period[period_end]
+
+            regional_fact: dict | None = None
+            total_fact: dict | None = None
+
+            for fact in period_facts:
+                seg = fact.get("segment")
+                if seg is None:
+                    # No segment dimension → consolidated total
+                    total_fact = fact
+                elif (
+                    isinstance(seg, dict)
+                    and seg.get("dimension") == _GEO_AXIS
+                    and _member_matches(str(seg.get("member", "")))
+                ):
+                    regional_fact = fact
+                elif isinstance(seg, list):
+                    # Some filers encode segment as a list of {dimension, member} objects
+                    for dim_entry in seg:
+                        if (
+                            isinstance(dim_entry, dict)
+                            and dim_entry.get("dimension") == _GEO_AXIS
+                            and _member_matches(str(dim_entry.get("member", "")))
+                        ):
+                            regional_fact = fact
+                            break
+
+            if regional_fact is not None and total_fact is not None:
+                r_val = float(regional_fact["val"])
+                t_val = float(total_fact["val"])
+                if t_val > 0:
+                    pct = round(r_val / t_val, 4)
+                    seg_member = (
+                        regional_fact["segment"]["member"]
+                        if isinstance(regional_fact.get("segment"), dict)
+                        else region
+                    )
+                    return pct, r_val, seg_member, "edgar_xbrl", "CONFIRMED"
+
+    return None, None, region, "not_available", "NOT_DISCLOSED"
+
+
 # ---------------------------------------------------------------------------
 # CR-10 — get_geographic_revenue
 # ---------------------------------------------------------------------------
@@ -3016,7 +3162,7 @@ Returns: region, regionRevenuePct, regionRevenueUSD, fiscalYear, filingType, fil
 source, confidence.
 
 confidence:
-  CONFIRMED — sourced from income statement segment (satisfies DC-151 Rule 1 annual confirmation).
+  CONFIRMED — sourced from EDGAR XBRL company-facts (satisfies DC-151 Rule 1 annual confirmation).
   NOT_DISCLOSED — company does not break out the region separately in machine-readable form.
   When NOT_DISCLOSED, _manualLookup is populated with direct EDGAR URLs and step-by-step
   instructions to locate the geographic segment table in the 10-K.
@@ -3087,55 +3233,27 @@ async def get_geographic_revenue(ticker: str, region: str = "China") -> str:
         except Exception:
             pass
 
-    # Step 2: Try yfinance income statement for geographic segment rows
+    # Step 2: Extract geographic revenue from EDGAR XBRL company-facts API
     region_revenue_usd: float | None = None
-    total_revenue_usd: float | None = None
     region_revenue_pct: float | None = None
     segment_label = region
     source = "not_available"
     confidence = "NOT_DISCLOSED"
 
-    try:
-        company = yf.Ticker(ticker)
-        inc = company.income_stmt
-        if inc is not None and not inc.empty:
-            latest_col = inc.columns[0]
-            if fiscal_year is None and hasattr(latest_col, "year"):
-                fiscal_year = f"FY{latest_col.year}"
-
-            # Total revenue
-            for row_name in ["Total Revenue", "Revenue", "Net Sales", "Total Net Revenue"]:
-                try:
-                    val = inc.loc[row_name, latest_col]
-                    if pd.notna(val):
-                        total_revenue_usd = float(val)
-                        break
-                except (KeyError, TypeError):
-                    pass
-
-            # Build region-specific candidate row names
-            r = region
-            region_candidates = [r, f"{r} Revenue", f"Revenue from {r}", f"{r} and Other"]
-            if r.lower() == "china":
-                region_candidates += ["Greater China", "Mainland China", "China Segment"]
-            else:
-                region_candidates.append(f"{r} Segment")
-            for row_name in region_candidates:
-                try:
-                    val = inc.loc[row_name, latest_col]
-                    if pd.notna(val):
-                        region_revenue_usd = float(val)
-                        segment_label = row_name
-                        source = "income_statement_segment"
-                        confidence = "CONFIRMED"
-                        break
-                except (KeyError, TypeError):
-                    pass
-    except Exception:
-        pass
-
-    if region_revenue_usd is not None and total_revenue_usd and total_revenue_usd > 0:
-        region_revenue_pct = round(region_revenue_usd / total_revenue_usd, 4)
+    if cik:
+        try:
+            cik_padded = str(cik).zfill(10)
+            facts_data = await _edgar_get_company_facts(cik_padded)
+            if facts_data:
+                (
+                    region_revenue_pct,
+                    region_revenue_usd,
+                    segment_label,
+                    source,
+                    confidence,
+                ) = _extract_geographic_pct(facts_data, region, filing_date)
+        except Exception:
+            pass
 
     # Build a precise LLM-actionable pointer when data could not be resolved automatically.
     manual_lookup: dict | None = None

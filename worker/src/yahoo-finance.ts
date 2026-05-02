@@ -2388,23 +2388,174 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
     } catch { /* submissions fetch failed */ }
   }
 
-  const note =
-    "Geographic revenue breakdown is not available in machine-readable form via this data " +
-    "pipeline. Verify against the most recent 10-K geographic segment note. " +
-    "NOT_DISCLOSED does NOT satisfy DC-151 Rule 1 annual confirmation requirement.";
+  // ── Region → XBRL member mapping ──────────────────────────────────────────
+  const REGION_XBRL_MEMBERS: Record<string, string[]> = {
+    "china":         ["country:CN", "srt:ChinaMember"],
+    "united states": ["country:US", "srt:UnitedStatesMember"],
+    "europe":        ["srt:EuropeMember", "srt:EuropeMiddleEastAndAfricaMember"],
+    "japan":         ["country:JP", "srt:JapanMember"],
+    "asia pacific":  ["srt:AsiaPacificMember", "srt:AsiaMember"],
+    "rest of world": ["srt:NonUsMember", "srt:OtherGeographicAreasMember"],
+  };
+  const GEO_AXIS = "srt:StatementGeographicalAxis";
+  const GEO_CONCEPTS = [
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "Revenues",
+    "SalesRevenueNet",
+    "RevenueFromContractWithCustomer",
+  ];
+
+  const regionLower = region.toLowerCase();
+  const candidateMembers: string[] = REGION_XBRL_MEMBERS[regionLower] ?? [];
+
+  function memberMatches(memberVal: string): boolean {
+    if (candidateMembers.some(m => m.toLowerCase() === memberVal.toLowerCase())) return true;
+    return memberVal.toLowerCase().includes(regionLower);
+  }
+
+  // ── Step 2: EDGAR XBRL company-facts extraction ───────────────────────────
+  let regionRevenuePct: number | null = null;
+  let regionRevenueUSD: number | null = null;
+  let segmentLabel: string = region;
+  let source = "not_available";
+  let confidence = "NOT_DISCLOSED";
+
+  if (cik != null) {
+    try {
+      const cikPadded = String(cik).padStart(10, "0");
+      const factsResp = await fetch(
+        `https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`,
+        { headers: { "User-Agent": "yahoo-finance-mcp/1.0 (contact@example.com)" } },
+      );
+      if (factsResp.ok) {
+        type XbrlSegment = { dimension: string; member: string } | Array<{ dimension: string; member: string }>;
+        type XbrlFact = { val: number; end: string; filed: string; form: string; segment?: XbrlSegment };
+        type ConceptData = { units?: { USD?: XbrlFact[] } };
+        const factsJson = await factsResp.json() as { facts?: { "us-gaap"?: Record<string, ConceptData> } };
+        const usGaap = factsJson.facts?.["us-gaap"] ?? {};
+
+        const annualForms = new Set(["10-K", "10-K405", "10-KSB"]);
+
+        function isTargetFiling(fact: XbrlFact): boolean {
+          if (!annualForms.has(fact.form)) return false;
+          if (!filingDate) return true;
+          try {
+            const fd = new Date(filingDate).getTime();
+            const ff = new Date(fact.filed).getTime();
+            return Math.abs(ff - fd) <= 10 * 86400 * 1000;
+          } catch { return true; }
+        }
+
+        outer: for (const concept of GEO_CONCEPTS) {
+          const conceptData = usGaap[concept];
+          if (!conceptData) continue;
+          let facts = (conceptData.units?.USD ?? []).filter(isTargetFiling);
+          if (!facts.length) {
+            // Relax: accept any annual fact for this concept
+            facts = (conceptData.units?.USD ?? []).filter(f => annualForms.has(f.form));
+          }
+          if (!facts.length) continue;
+
+          // Group by period end-date
+          const byPeriod = new Map<string, XbrlFact[]>();
+          for (const fact of facts) {
+            const arr = byPeriod.get(fact.end) ?? [];
+            arr.push(fact);
+            byPeriod.set(fact.end, arr);
+          }
+
+          // Try periods most-recent first
+          for (const periodEnd of [...byPeriod.keys()].sort().reverse()) {
+            const periodFacts = byPeriod.get(periodEnd)!;
+            let regionalFact: XbrlFact | null = null;
+            let totalFact: XbrlFact | null = null;
+
+            for (const fact of periodFacts) {
+              if (!fact.segment) {
+                totalFact = fact;
+              } else if (Array.isArray(fact.segment)) {
+                for (const dimEntry of fact.segment) {
+                  if (dimEntry.dimension === GEO_AXIS && memberMatches(dimEntry.member)) {
+                    regionalFact = fact;
+                    break;
+                  }
+                }
+              } else if (
+                fact.segment.dimension === GEO_AXIS &&
+                memberMatches((fact.segment as { dimension: string; member: string }).member)
+              ) {
+                regionalFact = fact;
+              }
+            }
+
+            if (regionalFact != null && totalFact != null && totalFact.val > 0) {
+              regionRevenuePct = Math.round((regionalFact.val / totalFact.val) * 10000) / 10000;
+              regionRevenueUSD = regionalFact.val;
+              const seg = regionalFact.segment;
+              segmentLabel = (seg && !Array.isArray(seg) && seg.member)
+                ? seg.member
+                : region;
+              source = "edgar_xbrl";
+              confidence = "CONFIRMED";
+              break outer;
+            }
+          }
+        }
+      } else {
+        await factsResp.body?.cancel();
+      }
+    } catch { /* company-facts fetch/parse failed — fall through to manual lookup */ }
+  }
+
+  // ── Manual-lookup pointer when XBRL extraction did not succeed ────────────
+  type ManualLookup = {
+    reason: string;
+    action: string;
+    edgarFullTextSearchUrl: string;
+    edgarFilingsPageUrl: string;
+    cik: string | null;
+    filingDate: string | null;
+    fiscalYear: string | null;
+  } | null;
+
+  let manualLookup: ManualLookup = null;
+  if (confidence === "NOT_DISCLOSED") {
+    const tUpper = ticker.toUpperCase();
+    const cikPadded = cik != null ? String(cik).padStart(10, "0") : null;
+    const edgarSearchUrl =
+      `https://efts.sec.gov/LATEST/search-index?q=%22${encodeURIComponent(region)}%22&forms=10-K&entity=${tUpper}`;
+    const edgarFilingsUrl = cikPadded
+      ? `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${cikPadded}&type=10-K&dateb=&owner=include&count=5`
+      : `https://www.sec.gov/cgi-bin/browse-edgar?company=${tUpper}&CIK=&type=10-K&dateb=&owner=include&count=5&search_text=&action=getcompany`;
+    manualLookup = {
+      reason:
+        `Geographic revenue breakdown for '${region}' is not available in machine-readable form via this data pipeline. ` +
+        "NOT_DISCLOSED does NOT satisfy DC-151 Rule 1 annual confirmation requirement.",
+      action:
+        `Open the most recent 10-K for ${tUpper} and search for the section titled ` +
+        "'Geographic Information', 'Geographic Areas', or 'Segment Information'. " +
+        `Look for a table that lists revenue by region including '${region}'. ` +
+        "Divide that figure by Total Revenue to compute regionRevenuePct.",
+      edgarFullTextSearchUrl: edgarSearchUrl,
+      edgarFilingsPageUrl: edgarFilingsUrl,
+      cik: cikPadded,
+      filingDate,
+      fiscalYear,
+    };
+  }
 
   return JSON.stringify({
     ticker,
     region,
-    regionRevenuePct: null,
-    regionRevenueUSD: null,
+    regionRevenuePct,
+    regionRevenueUSD,
     fiscalYear,
     filingType: "10-K",
     filingDate,
-    segmentLabel: region,
-    source: "not_available",
-    confidence: "NOT_DISCLOSED",
-    _note: note,
+    segmentLabel,
+    source,
+    confidence,
+    _manualLookup: manualLookup,
   });
 }
 
