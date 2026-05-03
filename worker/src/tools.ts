@@ -675,7 +675,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_volume_gate",
     description:
-      "DC Section 6.2 Volume Gate: checks regularMarketVolume ≥ 0.5 × 20-day ADV. Returns lastVolume, adv10d, adv20d (computed from last 20 sessions), adv90d, ratio20d, gatePass (true = PASS), dataDate, note. Set foreign_exchange=true for DC-80 FX gate (daily notional ≥ $10M USD/day threshold).",
+      "DC Section 6.2 Volume Gate: checks regularMarketVolume ≥ 0.5 × 20-day ADV. Returns currency, fxRate, lastVolume, adv10d, adv20d (computed from last 20 sessions), adv90d, ratio20d, gatePass (true = PASS), dataDate, note. Set foreign_exchange=true for DC-80 FX gate: daily notional is converted to USD via live {CCY}=X rate before comparing to the $10M threshold. ratio20d is always computed when adv20d is available.",
     inputSchema: {
       type: "object",
       properties: {

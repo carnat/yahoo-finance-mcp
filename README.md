@@ -2,7 +2,7 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that gives any MCP-compatible AI client (Claude, Cursor, VS Code Copilot, etc.) direct access to live financial data from Yahoo Finance.
 
-30 tools cover the full research workflow — from a quick price check to earnings forecasts, SEC filings, technical indicators, options flow, and market screening — without leaving your chat window.
+36 tools cover the full research workflow — from a quick price check to earnings forecasts, SEC filings, technical indicators, options flow, geographic revenue intelligence, and market screening — without leaving your chat window.
 
 ## Demo
 
@@ -10,7 +10,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that g
 
 ## MCP Tools
 
-> **Token-efficiency tip:** `get_stock_info` now returns ~30 key fields by default — no need to enumerate fields for typical queries. Prefer `get_fast_info` for pure price/volume lookups (~20 fields, 85–90% fewer tokens). Use `get_financial_ratios` instead of fetching full financial statements when you only need computed ratios. Use `get_analyst_consensus` instead of `get_recommendations` for a ready-made summary. Use the pre-computed signal tools (`get_price_slope`, `get_volume_ratio`, `get_ma_position`, `get_earnings_momentum`, `get_short_momentum`, `get_credit_health`, `get_options_flow_summary`, `get_put_hedge_candidates`, `get_analyst_upgrade_radar`) instead of fetching raw data and computing signals yourself.
+> **Token-efficiency tip:** `get_stock_info` now returns ~30 key fields by default — no need to enumerate fields for typical queries. Prefer `get_fast_info` for pure price/volume lookups (~20 fields, 85–90% fewer tokens). Use `get_financial_ratios` instead of fetching full financial statements when you only need computed ratios. Use `get_analyst_consensus` instead of `get_recommendations` for a ready-made summary. Use the pre-computed signal tools (`get_price_slope`, `get_volume_ratio`, `get_ma_position`, `get_earnings_momentum`, `get_short_momentum`, `get_credit_health`, `get_options_flow_summary`, `get_put_hedge_candidates`, `get_analyst_upgrade_radar`) instead of fetching raw data and computing signals yourself. Use `get_position_score_inputs` to aggregate all T1/T2/T4/T5 scoring inputs in one call instead of chaining five separate tools.
 
 The server exposes the following tools through the Model Context Protocol:
 
@@ -27,6 +27,7 @@ The server exposes the following tools through the Model Context Protocol:
 | `get_yahoo_finance_news` | Get latest news articles for a stock. |
 | `get_short_interest` | Get short interest metrics: short % of float, shares short, days-to-cover ratio, prior-month comparison, and float shares. Data is reported bi-monthly by exchanges. |
 | `get_short_momentum` | Get short interest with pre-computed momentum: MoM delta, direction (RISING/FALLING/FLAT), squeeze risk (HIGH/MODERATE/LOW), and a critical-short flag. Single ticker only. |
+| `get_overnight_quote` | Get overnight trading data (20:00–04:00 ET). Returns overnightPrice, overnightHigh/Low/Open/Volume, previousClose, gapPct, gapDirection, dataSource (`EXCHANGE` for crypto/futures, `OTC_INDICATIVE` for equities), isBlueOceanWindow, isStale, dataAgeHours, and fallback flag. |
 
 ### Financials & Ratios
 
@@ -56,12 +57,14 @@ The server exposes the following tools through the Model Context Protocol:
 | `get_option_chain` | Get options chain for a specific expiration date and type (calls/puts). Supports `min_strike`, `max_strike`, and `in_the_money_only` filters to reduce a 200-row chain to ~20 near-the-money rows. |
 | `get_options_flow_summary` | **Pre-computed.** Get options flow summary for the nearest liquid expiry: put/call ratio, P/C sentiment (PUT_HEAVY/NEUTRAL/CALL_HEAVY), ATM IV, IV percentile, IV flag, max pain strike, and highest OI call/put strikes. Optional `expiry_hint` (YYYY-MM-DD). Single ticker only. |
 | `get_put_hedge_candidates` | Get pre-filtered OTM put options within a configurable strike range and budget. Args: `otm_pct_min` (default: 8), `otm_pct_max` (default: 12), `budget_usd` (default: 500), `expiry_after` (YYYY-MM-DD). Single ticker only. |
+| `get_options_flow_scan` | **Structured event-window scan.** Options flow snapshot for a binary event window. Returns pcRatio, ivPctile, putVolVs10dAvg, putVolTrend (INCREASING/STABLE/DECREASING), maxPainStrike, bracket (UPPER/MID/LOWER), and a formatted block for session output. Prior window-label readings are cached 72h server-side to enable trend computation (e.g. T-14 → T-7 → T-2). Args: `ticker`, `window_label` (free-form, e.g. `"T-14"`, `"pre-earnings"`). |
 
 ### Filings
 
 | Tool | Description |
 |------|-------------|
 | `get_sec_filings` | Get recent SEC filings (10-K, 10-Q, 8-K) with form type, filing date, and URL. |
+| `get_geographic_revenue` | Get geographic revenue % for a region from SEC EDGAR XBRL data. Default region is `China`. Returns regionRevenuePct, regionRevenueUSD, fiscalYear, filingType, filingDate, segmentLabel, source, and confidence (`CONFIRMED` \| `NOT_DISCLOSED`). DC-151 China classification: ≥20% BANNED | 15–20% CHINA WATCH | ≤14.9% CLASS C eligible. Filing metadata always returned for manual 10-K lookup. Args: `ticker`, `region` (default `"China"`). |
 
 ### Discovery
 
@@ -69,6 +72,14 @@ The server exposes the following tools through the Model Context Protocol:
 |------|-------------|
 | `search_ticker` | Search by company name, partial name, or ISIN to resolve matching ticker symbols. Solves the "I know the company but not its ticker" problem. |
 | `screen_stocks` | Screen the market using predefined criteria. Available screeners: `aggressive_small_caps`, `day_gainers`, `day_losers`, `growth_technology_stocks`, `most_actives`, `most_shorted_stocks`, `small_cap_gainers`, `undervalued_growth_stocks`, `undervalued_large_caps`, `conservative_foreign_funds`, `high_yield_bond`, `portfolio_anchors`, `solid_large_growth_funds`, `solid_midcap_growth_funds`, `top_mutual_funds`. |
+
+### Position Management
+
+| Tool | Description |
+|------|-------------|
+| `get_price_target_bracket` | Compute EQF bracket relative to an IO price target. EQF = currentPrice / io_pt × 100. Brackets: ≤75% STRONG_BUY \| 75–90% ACCEPTABLE \| 90–100% CAUTION \| >100% AVOID. Tags: <40% SPECULATIVE \| 40–79% LONG \| 80–99% NEAR \| ≥100% INVERTED. Returns currentPrice, ioPt, eqfPct, bracket, tag, invertedFlag, dataDate. Args: `ticker`, `io_pt`. |
+| `get_position_score_inputs` | Aggregate all T1, T2, T4, and T5 position-scoring inputs in a single call (6 parallel data fetches). Returns t1_inputs (analyst sentiment), t2_inputs (price vs 52-week range), t4_inputs (earnings momentum), t5_inputs (technical indicators), and dataDate. |
+| `get_volume_gate` | DC Section 6.2 Volume Gate: checks whether regularMarketVolume ≥ 0.5 × 20-day ADV. Returns currency, fxRate, lastVolume, adv10d/20d/90d, ratio20d, gatePass, dataDate, and note. Set `foreign_exchange=true` for DC-80 FX gate (daily notional converted to USD vs $10M threshold). |
 
 ### Technical Analysis
 
@@ -96,7 +107,7 @@ The server exposes the following tools through the Model Context Protocol:
 | OTM put hedge candidates | ✅ Yes | Available via `get_put_hedge_candidates` (filtered by OTM %, budget, expiry). |
 | Analyst upgrade/downgrade signals | ✅ Yes | Available via `get_analyst_upgrade_radar` (rating changes with signal classification, net sentiment). |
 | Index tickers (^VIX, ^GSPC) | ✅ Yes | Supported by `get_fast_info`, `get_price_stats`, and `get_technical_indicators`. Note: `get_price_stats` CAGR values for volatility indices like `^VIX` may not be meaningful as investment return metrics. |
-| Geographic revenue breakdown | ❌ No | Not available from yfinance. Requires manual SEC filing analysis (10-K). Use `get_sec_filings` to get filing URLs for manual review. |
+| Geographic revenue breakdown | ✅ Yes (partial) | Available via `get_geographic_revenue`. Pulls from SEC EDGAR XBRL company-facts API; returns `CONFIRMED` when segment data is found, `NOT_DISCLOSED` otherwise. Always returns filing metadata (filingDate, fiscalYear) for manual 10-K lookup. China revenue is additionally cross-checked against a curated lookup table. |
 
 ## Real-World Use Cases
 
@@ -115,6 +126,7 @@ With this MCP server, you can use Claude to:
 - **Price Slope**: "Which of these tickers have been trending up over the last 5 days?" *(use `get_price_slope` with a batch list)*
 - **Volume Spike**: "Is there unusual trading volume in TSLA today?" *(use `get_volume_ratio`)*
 - **MA Position**: "Is AAPL trading above its 50DMA and 200DMA?" *(use `get_ma_position`)*
+- **Overnight Gap**: "What was the overnight gap for BTC-USD and is the session data stale?" *(use `get_overnight_quote`)*
 - **Credit Health**: "How leveraged is Boeing, and is there a credit stress flag?" *(use `get_credit_health`)*
 
 ### Market Research
@@ -124,6 +136,7 @@ With this MCP server, you can use Claude to:
 - **Insider Trading**: "What are the recent insider transactions for Tesla?"
 - **Options Analysis**: "Get the in-the-money calls for SPY expiring 2024-06-21." *(use `in_the_money_only=True`)*
 - **Options Flow**: "What is the put/call ratio and max pain strike for SPY?" *(use `get_options_flow_summary`)*
+- **Options Event Scan**: "Run a T-7 options flow scan for ASTS ahead of the binary event." *(use `get_options_flow_scan`)*
 - **Put Hedge**: "Find 8–12% OTM puts for AAPL expiring after June with a budget under $400 per contract." *(use `get_put_hedge_candidates`)*
 - **Analyst Coverage**: "What is the analyst consensus price target for Amazon?" *(use `get_analyst_consensus`)*
 - **Analyst Upgrades**: "Have any analysts upgraded or downgraded NVDA in the last 30 days?" *(use `get_analyst_upgrade_radar`)*
@@ -132,6 +145,13 @@ With this MCP server, you can use Claude to:
 - **Short Squeeze**: "What is the short squeeze risk for GameStop?" *(use `get_short_momentum`)*
 - **Calendar**: "When is Microsoft's next earnings date and ex-dividend date?" *(use `get_calendar`)*
 - **SEC Filings**: "Show me Apple's most recent 10-K and 10-Q filings." *(use `get_sec_filings`)*
+- **Geographic Revenue**: "What percentage of MU's revenue comes from China, and how does it classify under DC-151?" *(use `get_geographic_revenue`)*
+
+### Position Management
+
+- **EQF Bracket**: "My IO price target for ASTS is $28. Is the current price in a buy zone?" *(use `get_price_target_bracket` with `io_pt=28`)*
+- **Position Score**: "Pull all scoring inputs for NVDA to evaluate my T1/T2/T4/T5 scores." *(use `get_position_score_inputs`)*
+- **Volume Gate**: "Does ASTS pass the DC volume gate today?" *(use `get_volume_gate`)*
 
 ### Discovery & Screening
 

@@ -2,5 +2,23 @@ name = "yahoo-finance-mcp"
 main = "src/index.ts"
 compatibility_date = "2024-11-01"
 
+# Smart Placement routes Worker execution to the Cloudflare PoP geographically
+# closest to its outbound dependencies (e.g. data.sec.gov in US-East), which
+# reduces latency and improves reliability of EDGAR fetch calls.
+[placement]
+mode = "smart"
+
 [observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
 enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1

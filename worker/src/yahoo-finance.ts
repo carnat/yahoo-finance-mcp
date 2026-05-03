@@ -2340,14 +2340,20 @@ const _optionsFlowCache = new Map<string, { data: Record<string, unknown>; store
 
 // ── get_geographic_revenue ────────────────────────────────────────────────────
 
+// EDGAR fair-access policy requires a reachable contact in the User-Agent.
+// Replace the URL/contact below with one owned by the operator, or inject
+// via the EDGAR_CONTACT_EMAIL Cloudflare secret / var.
+const EDGAR_UA = "yahoo-finance-mcp/1.0 (https://github.com/carnat/yahoo-finance-mcp)";
+
 export async function getGeographicRevenue(ticker: string, region: string = "China"): Promise<string> {
   let cik: number | null = null;
   let filingDate: string | null = null;
   let fiscalYear: string | null = null;
+  const edgarErrors: string[] = [];
 
   try {
     const tickersResp = await fetch("https://www.sec.gov/files/company_tickers.json", {
-      headers: { "User-Agent": "yahoo-finance-mcp/1.0 (contact@example.com)" },
+      headers: { "User-Agent": EDGAR_UA },
     });
     if (tickersResp.ok) {
       const tickersData = await tickersResp.json() as Record<string, { ticker: string; cik_str: number }>;
@@ -2360,13 +2366,15 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
     } else {
       await tickersResp.body?.cancel();
     }
-  } catch { /* EDGAR fetch failed */ }
+  } catch (e) {
+    edgarErrors.push(`tickers_fetch: ${e instanceof Error ? e.message : String(e)}`);
+  }
 
   if (cik != null) {
     try {
       const cikPadded = String(cik).padStart(10, "0");
       const subsResp = await fetch(`https://data.sec.gov/submissions/CIK${cikPadded}.json`, {
-        headers: { "User-Agent": "yahoo-finance-mcp/1.0 (contact@example.com)" },
+        headers: { "User-Agent": EDGAR_UA },
       });
       if (subsResp.ok) {
         const subs = await subsResp.json() as Record<string, unknown>;
@@ -2385,7 +2393,9 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
       } else {
         await subsResp.body?.cancel();
       }
-    } catch { /* submissions fetch failed */ }
+    } catch (e) {
+      edgarErrors.push(`submissions_fetch: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   // ── Region → XBRL member mapping ──────────────────────────────────────────
@@ -2425,7 +2435,7 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
       const cikPadded = String(cik).padStart(10, "0");
       const factsResp = await fetch(
         `https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`,
-        { headers: { "User-Agent": "yahoo-finance-mcp/1.0 (contact@example.com)" } },
+        { headers: { "User-Agent": EDGAR_UA } },
       );
       if (factsResp.ok) {
         type XbrlSegment = { dimension: string; member: string } | Array<{ dimension: string; member: string }>;
@@ -2504,7 +2514,17 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
       } else {
         await factsResp.body?.cancel();
       }
-    } catch { /* company-facts fetch/parse failed — fall through to manual lookup */ }
+    } catch (e) {
+      edgarErrors.push(`xbrl_fetch: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // Promote confidence to FETCH_ERROR when a network/parse failure prevented
+  // a definitive lookup — distinguishes infrastructure failures from genuine
+  // non-disclosures so downstream DC-151 logic can treat it as indeterminate.
+  const edgarError = edgarErrors.length > 0 ? edgarErrors.join("; ") : null;
+  if (edgarError != null && confidence === "NOT_DISCLOSED") {
+    confidence = "FETCH_ERROR";
   }
 
   // ── Manual-lookup pointer when XBRL extraction did not succeed ────────────
@@ -2555,6 +2575,7 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
     segmentLabel,
     source,
     confidence,
+    edgarError,
     _manualLookup: manualLookup,
   });
 }
@@ -2811,6 +2832,7 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
     const adv10d = fi.tenDayAverageVolume as number | null;
     const adv90d = fi.threeMonthAverageVolume as number | null;
     const lastPrice = fi.lastPrice as number | null;
+    const currency = fi.currency as string | null;
 
     let adv20d: number | null = null;
     let dataDate = new Date().toISOString().slice(0, 10);
@@ -2834,15 +2856,42 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
 
     let gatePass: boolean | null = null;
     let ratio20d: number | null = null;
+    let fxRate: number | null = null;
     let note: string;
 
     if (foreignExchange) {
       if (lastVolume != null && lastPrice != null && lastPrice > 0) {
-        const dailyNotional = lastVolume * lastPrice;
-        gatePass = dailyNotional >= 10_000_000;
-        note = `Volume gate ${gatePass ? "PASS" : "FAIL"} (DC-80 FX) — $${(dailyNotional / 1_000_000).toFixed(1)}M daily notional (${gatePass ? "≥" : "<"} $10M threshold)`;
+        const localNotional = lastVolume * lastPrice;
+        let appliedFxRate = 1.0;
+        let fxConversionNote = "";
+
+        if (currency && currency !== "USD") {
+          try {
+            const fxFi = JSON.parse(await getFastInfo(`${currency}=X`)) as Record<string, unknown>;
+            const rate = fxFi.lastPrice as number | null;
+            if (rate != null && rate > 0) {
+              appliedFxRate = rate;
+              fxRate = +rate.toFixed(4);
+              fxConversionNote = ` [${currency}→USD at ${rate.toFixed(2)}]`;
+            } else {
+              fxConversionNote = ` [${currency}=X rate unavailable — notional in local currency]`;
+            }
+          } catch {
+            fxConversionNote = ` [${currency}=X fetch failed — notional in local currency]`;
+          }
+        } else if (currency === "USD") {
+          fxRate = 1.0;
+        }
+
+        const dailyNotionalUSD = localNotional / appliedFxRate;
+        gatePass = dailyNotionalUSD >= 10_000_000;
+        note = `Volume gate ${gatePass ? "PASS" : "FAIL"} (DC-80 FX) — $${(dailyNotionalUSD / 1_000_000).toFixed(1)}M daily notional (${gatePass ? "≥" : "<"} $10M threshold)${fxConversionNote}`;
       } else {
         note = "Volume gate UNKNOWN — insufficient price/volume data for DC-80 FX check";
+      }
+      // Bug 5: also compute ratio20d in the FX branch
+      if (lastVolume != null && adv20d != null && adv20d > 0) {
+        ratio20d = +(lastVolume / adv20d).toFixed(2);
       }
     } else {
       if (lastVolume != null && adv20d != null && adv20d > 0) {
@@ -2855,7 +2904,7 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
     }
 
     return JSON.stringify({
-      ticker, lastVolume, adv10d, adv20d, adv90d, ratio20d, gatePass, dataDate, note,
+      ticker, currency, lastVolume, adv10d, adv20d, adv90d, ratio20d, fxRate, gatePass, dataDate, note,
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
