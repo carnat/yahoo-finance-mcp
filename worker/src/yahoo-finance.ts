@@ -2340,14 +2340,20 @@ const _optionsFlowCache = new Map<string, { data: Record<string, unknown>; store
 
 // ── get_geographic_revenue ────────────────────────────────────────────────────
 
+// EDGAR fair-access policy requires a reachable contact in the User-Agent.
+// Replace the email below with a real address owned by the operator, or inject
+// it via the EDGAR_CONTACT_EMAIL Cloudflare secret / var.
+const EDGAR_UA = "yahoo-finance-mcp/1.0 (https://github.com/carnat/yahoo-finance-mcp)";
+
 export async function getGeographicRevenue(ticker: string, region: string = "China"): Promise<string> {
   let cik: number | null = null;
   let filingDate: string | null = null;
   let fiscalYear: string | null = null;
+  let edgarError: string | null = null;
 
   try {
     const tickersResp = await fetch("https://www.sec.gov/files/company_tickers.json", {
-      headers: { "User-Agent": "yahoo-finance-mcp/1.0 (contact@example.com)" },
+      headers: { "User-Agent": EDGAR_UA },
     });
     if (tickersResp.ok) {
       const tickersData = await tickersResp.json() as Record<string, { ticker: string; cik_str: number }>;
@@ -2360,13 +2366,15 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
     } else {
       await tickersResp.body?.cancel();
     }
-  } catch { /* EDGAR fetch failed */ }
+  } catch (e) {
+    edgarError = `tickers_fetch: ${e instanceof Error ? e.message : String(e)}`;
+  }
 
   if (cik != null) {
     try {
       const cikPadded = String(cik).padStart(10, "0");
       const subsResp = await fetch(`https://data.sec.gov/submissions/CIK${cikPadded}.json`, {
-        headers: { "User-Agent": "yahoo-finance-mcp/1.0 (contact@example.com)" },
+        headers: { "User-Agent": EDGAR_UA },
       });
       if (subsResp.ok) {
         const subs = await subsResp.json() as Record<string, unknown>;
@@ -2385,7 +2393,9 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
       } else {
         await subsResp.body?.cancel();
       }
-    } catch { /* submissions fetch failed */ }
+    } catch (e) {
+      edgarError = edgarError ?? `submissions_fetch: ${e instanceof Error ? e.message : String(e)}`;
+    }
   }
 
   // ── Region → XBRL member mapping ──────────────────────────────────────────
@@ -2425,7 +2435,7 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
       const cikPadded = String(cik).padStart(10, "0");
       const factsResp = await fetch(
         `https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`,
-        { headers: { "User-Agent": "yahoo-finance-mcp/1.0 (contact@example.com)" } },
+        { headers: { "User-Agent": EDGAR_UA } },
       );
       if (factsResp.ok) {
         type XbrlSegment = { dimension: string; member: string } | Array<{ dimension: string; member: string }>;
@@ -2504,7 +2514,16 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
       } else {
         await factsResp.body?.cancel();
       }
-    } catch { /* company-facts fetch/parse failed — fall through to manual lookup */ }
+    } catch (e) {
+      edgarError = edgarError ?? `xbrl_fetch: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  // Promote confidence to FETCH_ERROR when a network/parse failure prevented
+  // a definitive lookup — distinguishes infrastructure failures from genuine
+  // non-disclosures so downstream DC-151 logic can treat it as indeterminate.
+  if (edgarError != null && confidence === "NOT_DISCLOSED") {
+    confidence = "FETCH_ERROR";
   }
 
   // ── Manual-lookup pointer when XBRL extraction did not succeed ────────────
@@ -2555,6 +2574,7 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
     segmentLabel,
     source,
     confidence,
+    edgarError,
     _manualLookup: manualLookup,
   });
 }
