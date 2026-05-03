@@ -2341,15 +2341,15 @@ const _optionsFlowCache = new Map<string, { data: Record<string, unknown>; store
 // ── get_geographic_revenue ────────────────────────────────────────────────────
 
 // EDGAR fair-access policy requires a reachable contact in the User-Agent.
-// Replace the email below with a real address owned by the operator, or inject
-// it via the EDGAR_CONTACT_EMAIL Cloudflare secret / var.
+// Replace the URL/contact below with one owned by the operator, or inject
+// via the EDGAR_CONTACT_EMAIL Cloudflare secret / var.
 const EDGAR_UA = "yahoo-finance-mcp/1.0 (https://github.com/carnat/yahoo-finance-mcp)";
 
 export async function getGeographicRevenue(ticker: string, region: string = "China"): Promise<string> {
   let cik: number | null = null;
   let filingDate: string | null = null;
   let fiscalYear: string | null = null;
-  let edgarError: string | null = null;
+  const edgarErrors: string[] = [];
 
   try {
     const tickersResp = await fetch("https://www.sec.gov/files/company_tickers.json", {
@@ -2367,7 +2367,7 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
       await tickersResp.body?.cancel();
     }
   } catch (e) {
-    edgarError = `tickers_fetch: ${e instanceof Error ? e.message : String(e)}`;
+    edgarErrors.push(`tickers_fetch: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   if (cik != null) {
@@ -2394,7 +2394,7 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
         await subsResp.body?.cancel();
       }
     } catch (e) {
-      edgarError = edgarError ?? `submissions_fetch: ${e instanceof Error ? e.message : String(e)}`;
+      edgarErrors.push(`submissions_fetch: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -2515,13 +2515,14 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
         await factsResp.body?.cancel();
       }
     } catch (e) {
-      edgarError = edgarError ?? `xbrl_fetch: ${e instanceof Error ? e.message : String(e)}`;
+      edgarErrors.push(`xbrl_fetch: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
   // Promote confidence to FETCH_ERROR when a network/parse failure prevented
   // a definitive lookup — distinguishes infrastructure failures from genuine
   // non-disclosures so downstream DC-151 logic can treat it as indeterminate.
+  const edgarError = edgarErrors.length > 0 ? edgarErrors.join("; ") : null;
   if (edgarError != null && confidence === "NOT_DISCLOSED") {
     confidence = "FETCH_ERROR";
   }
