@@ -2417,7 +2417,7 @@ async function edgarGetHtml(url: string, maxBytes = 5_000_000): Promise<string |
     if (!resp.ok) { await resp.body?.cancel(); return null; }
     const buf = await resp.arrayBuffer();
     const slice = buf.byteLength > maxBytes ? buf.slice(0, maxBytes) : buf;
-    return new TextDecoder("utf-8", { fatal: false, ignoreBOM: false }).decode(slice);
+    return new TextDecoder("utf-8", { fatal: false, ignoreBOM: true }).decode(slice);
   } catch {
     return null;
   }
@@ -2490,16 +2490,20 @@ async function edgarGetLatest10K(cik: number): Promise<{
 // ── HTML table parsing helpers ────────────────────────────────────────────────
 
 function stripHtmlTags(html: string): string {
-  return html
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&#\d+;/g, " ")
-    .replace(/&[a-z]+;/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  // Remove all HTML tags first, then decode entities in a single pass to avoid double-unescaping.
+  const noTags = html.replace(/<[^>]+>/g, " ");
+  const ENTITY_MAP: Record<string, string> = {
+    "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'",
+  };
+  const decoded = noTags.replace(/&(?:nbsp|amp|lt|gt|quot|apos|#\d+|[a-z]+);/gi, (entity) => {
+    if (entity in ENTITY_MAP) return ENTITY_MAP[entity];
+    if (entity.startsWith("&#")) {
+      const code = parseInt(entity.slice(2, -1), 10);
+      return isNaN(code) ? " " : String.fromCharCode(code);
+    }
+    return " ";
+  });
+  return decoded.replace(/\s+/g, " ").trim();
 }
 
 /** Parse a single HTML <table> into a list of rows (each row is a list of plain-text cells). */
@@ -2985,7 +2989,6 @@ export async function getFilingTextSearch(
       const tableParsed: unknown[] = [];
       if (returnTables) {
         const tblSearch = html.slice(Math.max(0, pos - 2_000), Math.min(html.length, pos + 60_000));
-        const tblSearchLower = tblSearch.toLowerCase();
         const tblRe = /<table[^>]*>/gi;
         let tblM: RegExpExecArray | null;
         while ((tblM = tblRe.exec(tblSearch)) !== null && tableParsed.length < 3) {
@@ -3000,7 +3003,6 @@ export async function getFilingTextSearch(
             if (o !== -1 && (c === -1 || o < c)) { depth++; i = o + 6; }
             else { depth--; if (depth === 0) { tableEnd = c + 8; break; } i = c + 8; }
           }
-          void tblSearchLower; // suppress unused warning
           const rows = parseHtmlTable(html.slice(absStart, tableEnd));
           if (rows.length >= 2) tableParsed.push({ rows });
         }

@@ -1,6 +1,8 @@
 import asyncio
 import datetime
+import html as _html_module
 import json
+import re as _re
 import time
 from enum import Enum
 
@@ -3112,8 +3114,6 @@ async def _edgar_get_html(url: str, max_bytes: int = 5_000_000) -> str | None:
 # ---------------------------------------------------------------------------
 # HTML table parsing helpers used by the HTML filing fallback layer.
 # ---------------------------------------------------------------------------
-import html as _html_module
-import re as _re
 
 
 def _strip_html_tags(html_str: str) -> str:
