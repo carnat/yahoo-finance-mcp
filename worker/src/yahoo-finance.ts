@@ -1363,12 +1363,64 @@ export async function getSecFilings(ticker: string): Promise<string> {
     return JSON.stringify({ ticker, filings: [] });
   }
 
-  const out = filings.map((f) => ({
-    date: f.epochDate != null ? iso(f.epochDate as number) : null,
-    type: f.type ?? null,
-    title: f.title ?? null,
-    edgarUrl: f.edgarUrl ?? null,
-  }));
+  // Fetch EDGAR submissions to enrich filings with direct EDGAR URLs
+  const edgarUrlMap = new Map<string, { accessionNumber: string; edgarIndexUrl: string; edgarPrimaryDocumentUrl: string | null }>();
+  try {
+    const cik = await edgarResolveCik(ticker);
+    if (cik != null) {
+      const cikPadded = String(cik).padStart(10, "0");
+      const subs = await edgarGetJson(`https://data.sec.gov/submissions/CIK${cikPadded}.json`);
+      if (subs) {
+        const recent = ((subs.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+        const forms = (recent.form as string[]) ?? [];
+        const dates = (recent.filingDate as string[]) ?? [];
+        const accessions = (recent.accessionNumber as string[]) ?? [];
+        const primaryDocs = (recent.primaryDocument as string[]) ?? [];
+        for (let i = 0; i < forms.length; i++) {
+          const acc = accessions[i];
+          const date = dates[i];
+          if (acc && date) {
+            const { edgarIndexUrl, edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(cik, acc, primaryDocs[i] ?? null);
+            edgarUrlMap.set(`${forms[i]}:${date}`, { accessionNumber: acc, edgarIndexUrl, edgarPrimaryDocumentUrl });
+          }
+        }
+      }
+    }
+  } catch { /* non-fatal */ }
+
+  const out = filings.map((f) => {
+    const date = f.epochDate != null ? iso(f.epochDate as number) : null;
+    const type = (f.type as string) ?? null;
+    const edgarInfo = date && type ? edgarUrlMap.get(`${type}:${date}`) : undefined;
+
+    // Fallback: extract accession from Yahoo's edgarUrl if it follows the Archives path pattern
+    let accessionNumber: string | null = edgarInfo?.accessionNumber ?? null;
+    let edgarIndexUrl: string | null = edgarInfo?.edgarIndexUrl ?? null;
+    let edgarPrimaryDocumentUrl: string | null = edgarInfo?.edgarPrimaryDocumentUrl ?? null;
+    if (!accessionNumber) {
+      const eu = (f.edgarUrl as string) ?? "";
+      const m = eu.match(/\/Archives\/edgar\/data\/(\d+)\/(\d{18})\//);
+      if (m) {
+        const cikFromUrl = parseInt(m[1], 10);
+        const noDash = m[2];
+        accessionNumber = `${noDash.slice(0, 10)}-${noDash.slice(10, 12)}-${noDash.slice(12)}`;
+        const fname = eu.split("/").pop()?.split("?")[0] ?? null;
+        const urls = edgarBuildFilingUrls(cikFromUrl, accessionNumber, fname);
+        edgarIndexUrl = urls.edgarIndexUrl;
+        edgarPrimaryDocumentUrl = urls.edgarPrimaryDocumentUrl;
+      }
+    }
+
+    return {
+      date,
+      type,
+      title: f.title ?? null,
+      edgarUrl: f.edgarUrl ?? null,
+      accessionNumber,
+      edgarIndexUrl,
+      edgarPrimaryDocumentUrl,
+    };
+  });
   return JSON.stringify({ ticker, filings: out });
 }
 
@@ -2345,53 +2397,300 @@ const _optionsFlowCache = new Map<string, { data: Record<string, unknown>; store
 // via the EDGAR_CONTACT_EMAIL Cloudflare secret / var.
 const EDGAR_UA = "yahoo-finance-mcp/1.0 (https://github.com/carnat/yahoo-finance-mcp)";
 
+// ── EDGAR helper utilities ────────────────────────────────────────────────────
+
+/** Fetch an EDGAR JSON endpoint using the required User-Agent header. */
+async function edgarGetJson(url: string): Promise<Record<string, unknown> | null> {
+  try {
+    const resp = await fetch(url, { headers: { "User-Agent": EDGAR_UA } });
+    if (!resp.ok) { await resp.body?.cancel(); return null; }
+    return await resp.json() as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/** Fetch an EDGAR HTML/text document. Returns at most maxBytes of content. */
+async function edgarGetHtml(url: string, maxBytes = 5_000_000): Promise<string | null> {
+  try {
+    const resp = await fetch(url, { headers: { "User-Agent": EDGAR_UA } });
+    if (!resp.ok) { await resp.body?.cancel(); return null; }
+    const buf = await resp.arrayBuffer();
+    const slice = buf.byteLength > maxBytes ? buf.slice(0, maxBytes) : buf;
+    return new TextDecoder("utf-8", { fatal: false, ignoreBOM: false }).decode(slice);
+  } catch {
+    return null;
+  }
+}
+
+/** Construct EDGAR filing index URL and primary document URL from CIK + accession + primaryDoc. */
+function edgarBuildFilingUrls(
+  cik: number,
+  accessionNumber: string,
+  primaryDoc: string | null
+): { edgarIndexUrl: string; edgarPrimaryDocumentUrl: string | null } {
+  const noDash = accessionNumber.replace(/-/g, "");
+  const edgarIndexUrl = `https://www.sec.gov/Archives/edgar/data/${cik}/${noDash}/${accessionNumber}-index.htm`;
+  const edgarPrimaryDocumentUrl = primaryDoc
+    ? `https://www.sec.gov/Archives/edgar/data/${cik}/${noDash}/${primaryDoc}`
+    : null;
+  return { edgarIndexUrl, edgarPrimaryDocumentUrl };
+}
+
+/** Resolve CIK for a ticker using the EDGAR company_tickers.json index. */
+async function edgarResolveCik(ticker: string): Promise<number | null> {
+  const data = await edgarGetJson("https://www.sec.gov/files/company_tickers.json");
+  if (!data) return null;
+  const upper = ticker.toUpperCase();
+  for (const entry of Object.values(data) as { ticker: string; cik_str: number }[]) {
+    if (entry.ticker.toUpperCase() === upper) return entry.cik_str;
+  }
+  return null;
+}
+
+/** Look up the most recent 10-K filing info for a CIK from EDGAR submissions. */
+async function edgarGetLatest10K(cik: number): Promise<{
+  filingDate: string | null;
+  fiscalYear: string | null;
+  accessionNumber: string | null;
+  primaryDocument: string | null;
+  edgarIndexUrl: string | null;
+  edgarPrimaryDocumentUrl: string | null;
+} | null> {
+  const cikPadded = String(cik).padStart(10, "0");
+  const subs = await edgarGetJson(`https://data.sec.gov/submissions/CIK${cikPadded}.json`);
+  if (!subs) return null;
+  const filings = ((subs.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+  const forms = (filings.form as string[]) ?? [];
+  const dates = (filings.filingDate as string[]) ?? [];
+  const periods = (filings.reportDate as string[]) ?? [];
+  const accessions = (filings.accessionNumber as string[]) ?? [];
+  const primaryDocs = (filings.primaryDocument as string[]) ?? [];
+  for (let i = 0; i < forms.length; i++) {
+    if (["10-K", "10-K405", "10-KSB"].includes(forms[i])) {
+      const acc = accessions[i] ?? null;
+      const pdoc = primaryDocs[i] ?? null;
+      const { edgarIndexUrl, edgarPrimaryDocumentUrl } = acc
+        ? edgarBuildFilingUrls(cik, acc, pdoc)
+        : { edgarIndexUrl: null, edgarPrimaryDocumentUrl: null };
+      const period = periods[i];
+      return {
+        filingDate: dates[i] ?? null,
+        fiscalYear: period ? `FY${period.slice(0, 4)}` : null,
+        accessionNumber: acc,
+        primaryDocument: pdoc,
+        edgarIndexUrl,
+        edgarPrimaryDocumentUrl,
+      };
+    }
+  }
+  return null;
+}
+
+// ── HTML table parsing helpers ────────────────────────────────────────────────
+
+function stripHtmlTags(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#\d+;/g, " ")
+    .replace(/&[a-z]+;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Parse a single HTML <table> into a list of rows (each row is a list of plain-text cells). */
+function parseHtmlTable(tableHtml: string): string[][] {
+  const rows: string[][] = [];
+  const trRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  const tdRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+  let trMatch: RegExpExecArray | null;
+  while ((trMatch = trRe.exec(tableHtml)) !== null) {
+    const row: string[] = [];
+    let tdMatch: RegExpExecArray | null;
+    while ((tdMatch = tdRe.exec(trMatch[1])) !== null) {
+      row.push(stripHtmlTags(tdMatch[1]));
+    }
+    if (row.length > 0) rows.push(row);
+  }
+  return rows;
+}
+
+/** Parse a numeric cell value, handling commas, parens, and $/%/scale suffixes. */
+function parseNumericCell(text: string): number | null {
+  let s = text.replace(/,/g, "").replace(/\s/g, "").replace(/\$/g, "").replace(/%/g, "");
+  if (s.startsWith("(") && s.endsWith(")")) s = "-" + s.slice(1, -1);
+  let mult = 1;
+  if (/b$/i.test(s)) { mult = 1e9; s = s.slice(0, -1); }
+  else if (/m$/i.test(s)) { mult = 1e6; s = s.slice(0, -1); }
+  else if (/k$/i.test(s)) { mult = 1e3; s = s.slice(0, -1); }
+  const n = parseFloat(s);
+  return isNaN(n) ? null : n * mult;
+}
+
+/** Detect the monetary unit multiplier from table HTML and surrounding context. */
+function detectUnitMultiplier(tableHtml: string, contextHtml: string): number {
+  const combined = (tableHtml + contextHtml).toLowerCase();
+  if (/in billions|\$ billions/.test(combined)) return 1e9;
+  if (/in thousands|\$ thousands/.test(combined)) return 1e3;
+  if (/in millions|\$ millions/.test(combined)) return 1e6;
+  return 1e6; // most common 10-K scale
+}
+
+const TOTAL_LABELS = new Set([
+  "total", "consolidated", "total revenues", "total net revenues",
+  "net revenues", "revenues", "total revenue",
+]);
+
+/**
+ * Search an SEC filing HTML document for a geographic revenue table.
+ * Returns { pct, usd, sectionHeading, parsedTables } or null if not found.
+ */
+function extractGeoRevenueFromHtml(
+  html: string,
+  region: string
+): { pct: number; usd: number | null; sectionHeading: string; parsedTables: unknown[] } | null {
+  const regionLower = region.toLowerCase();
+  const htmlLower = html.toLowerCase();
+
+  const searchTerms = [
+    "geographic information",
+    "geographic areas",
+    "geographic segment",
+    "revenue by region",
+    "revenues by geography",
+    regionLower,
+  ];
+
+  // Collect match positions (capped)
+  const positions: number[] = [];
+  for (const term of searchTerms) {
+    let idx = 0;
+    while (positions.length < 30) {
+      const pos = htmlLower.indexOf(term, idx);
+      if (pos === -1) break;
+      positions.push(pos);
+      idx = pos + 1;
+    }
+  }
+  if (positions.length === 0) return null;
+
+  const checkedTables = new Set<number>();
+  const candidateTables: { pos: number; tableHtml: string; rows: string[][] }[] = [];
+
+  for (const pos of [...new Set(positions)].slice(0, 20)) {
+    const searchStart = Math.max(0, pos - 1_000);
+    const searchEnd = Math.min(html.length, pos + 60_000);
+    const chunk = html.slice(searchStart, searchEnd);
+
+    const tblRe = /<table[^>]*>/gi;
+    let tblM: RegExpExecArray | null;
+    while ((tblM = tblRe.exec(chunk)) !== null) {
+      const absStart = searchStart + tblM.index;
+      if (checkedTables.has(absStart)) continue;
+      checkedTables.add(absStart);
+
+      // Walk forward tracking nesting depth to find matching </table>
+      let depth = 0;
+      let i = absStart;
+      let tableEnd = absStart;
+      while (i < Math.min(html.length, absStart + 200_000)) {
+        const o = htmlLower.indexOf("<table", i);
+        const c = htmlLower.indexOf("</table>", i);
+        if (o === -1 && c === -1) break;
+        if (o !== -1 && (c === -1 || o < c)) { depth++; i = o + 6; }
+        else { depth--; if (depth === 0) { tableEnd = c + 8; break; } i = c + 8; }
+      }
+
+      const tableHtml = html.slice(absStart, tableEnd);
+      if (!tableHtml.toLowerCase().includes(regionLower)) continue;
+      const rows = parseHtmlTable(tableHtml);
+      if (rows.length < 2) continue;
+      candidateTables.push({ pos: absStart, tableHtml, rows });
+    }
+  }
+
+  for (const tbl of candidateTables) {
+    const { rows, tableHtml } = tbl;
+
+    // Find region row
+    let regionRowIdx: number | null = null;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].some(c => c.toLowerCase().includes(regionLower))) { regionRowIdx = i; break; }
+    }
+    if (regionRowIdx === null) continue;
+
+    // Find total row
+    let totalRowIdx: number | null = null;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].some(c => TOTAL_LABELS.has(c.trim().toLowerCase()))) { totalRowIdx = i; break; }
+    }
+    if (totalRowIdx === null) {
+      for (let i = rows.length - 1; i >= 0; i--) {
+        if (rows[i].some(c => parseNumericCell(c) !== null)) { totalRowIdx = i; break; }
+      }
+    }
+    if (totalRowIdx === null || totalRowIdx === regionRowIdx) continue;
+
+    // Find value column
+    let valueCol: number | null = null;
+    for (let j = 0; j < rows[regionRowIdx].length; j++) {
+      const v = parseNumericCell(rows[regionRowIdx][j]);
+      if (v !== null && v > 0) { valueCol = j; break; }
+    }
+    if (valueCol === null) continue;
+
+    const regionVal = valueCol < rows[regionRowIdx].length
+      ? parseNumericCell(rows[regionRowIdx][valueCol])
+      : null;
+    const totalVal = valueCol < rows[totalRowIdx].length
+      ? parseNumericCell(rows[totalRowIdx][valueCol])
+      : null;
+    if (regionVal === null || totalVal === null || totalVal <= 0) continue;
+
+    const pct = Math.round((regionVal / totalVal) * 10000) / 10000;
+    const contextHtml = html.slice(Math.max(0, tbl.pos - 3_000), tbl.pos);
+    const unitMult = detectUnitMultiplier(tableHtml, contextHtml);
+    const usd = regionVal * unitMult;
+
+    // Find nearest section heading
+    const preHtml = html.slice(Math.max(0, tbl.pos - 6_000), tbl.pos);
+    const hMatches = [...preHtml.matchAll(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi)];
+    const sectionHeading = hMatches.length > 0
+      ? stripHtmlTags(hMatches[hMatches.length - 1][1])
+      : "";
+
+    return { pct, usd, sectionHeading, parsedTables: [{ rows }] };
+  }
+
+  return null;
+}
+
 export async function getGeographicRevenue(ticker: string, region: string = "China"): Promise<string> {
+  const edgarErrors: string[] = [];
+
+  // ── Step 1: Resolve CIK and latest 10-K filing metadata ──────────────────
   let cik: number | null = null;
   let filingDate: string | null = null;
   let fiscalYear: string | null = null;
-  const edgarErrors: string[] = [];
+  let primaryDocumentUrl: string | null = null;
 
   try {
-    const tickersResp = await fetch("https://www.sec.gov/files/company_tickers.json", {
-      headers: { "User-Agent": EDGAR_UA },
-    });
-    if (tickersResp.ok) {
-      const tickersData = await tickersResp.json() as Record<string, { ticker: string; cik_str: number }>;
-      for (const entry of Object.values(tickersData)) {
-        if (entry.ticker.toUpperCase() === ticker.toUpperCase()) {
-          cik = entry.cik_str;
-          break;
-        }
-      }
-    } else {
-      await tickersResp.body?.cancel();
-    }
+    cik = await edgarResolveCik(ticker);
   } catch (e) {
     edgarErrors.push(`tickers_fetch: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   if (cik != null) {
     try {
-      const cikPadded = String(cik).padStart(10, "0");
-      const subsResp = await fetch(`https://data.sec.gov/submissions/CIK${cikPadded}.json`, {
-        headers: { "User-Agent": EDGAR_UA },
-      });
-      if (subsResp.ok) {
-        const subs = await subsResp.json() as Record<string, unknown>;
-        const filings = ((subs.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
-        const forms = (filings.form as string[]) ?? [];
-        const dates = (filings.filingDate as string[]) ?? [];
-        const periods = (filings.reportDate as string[]) ?? [];
-        for (let i = 0; i < forms.length; i++) {
-          if (["10-K", "10-K405", "10-KSB"].includes(forms[i])) {
-            filingDate = dates[i] ?? null;
-            const period = periods[i];
-            if (period) fiscalYear = `FY${period.slice(0, 4)}`;
-            break;
-          }
-        }
-      } else {
-        await subsResp.body?.cancel();
+      const info = await edgarGetLatest10K(cik);
+      if (info) {
+        filingDate = info.filingDate;
+        fiscalYear = info.fiscalYear;
+        primaryDocumentUrl = info.edgarPrimaryDocumentUrl;
       }
     } catch (e) {
       edgarErrors.push(`submissions_fetch: ${e instanceof Error ? e.message : String(e)}`);
@@ -2519,6 +2818,26 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
     }
   }
 
+  // ── Step 3 (fallback): Parse primary 10-K HTML when XBRL is NOT_DISCLOSED ─
+  let htmlSectionHeading: string | null = null;
+  if (confidence === "NOT_DISCLOSED" && primaryDocumentUrl != null) {
+    try {
+      const htmlText = await edgarGetHtml(primaryDocumentUrl);
+      if (htmlText) {
+        const parsed = extractGeoRevenueFromHtml(htmlText, region);
+        if (parsed != null) {
+          regionRevenuePct = parsed.pct;
+          regionRevenueUSD = parsed.usd;
+          htmlSectionHeading = parsed.sectionHeading || null;
+          source = "edgar_html";
+          confidence = "PARSED_HTML";
+        }
+      }
+    } catch (e) {
+      edgarErrors.push(`html_fallback: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   // Promote confidence to FETCH_ERROR when a network/parse failure prevented
   // a definitive lookup — distinguishes infrastructure failures from genuine
   // non-disclosures so downstream DC-151 logic can treat it as indeterminate.
@@ -2527,7 +2846,7 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
     confidence = "FETCH_ERROR";
   }
 
-  // ── Manual-lookup pointer when XBRL extraction did not succeed ────────────
+  // ── Manual-lookup pointer when neither XBRL nor HTML extraction succeeded ─
   type ManualLookup = {
     reason: string;
     action: string;
@@ -2575,8 +2894,265 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
     segmentLabel,
     source,
     confidence,
+    sectionHeading: htmlSectionHeading,
+    primaryDocumentUrl,
     edgarError,
     _manualLookup: manualLookup,
+  });
+}
+
+// ── get_filing_text_search ────────────────────────────────────────────────────
+
+export async function getFilingTextSearch(
+  ticker: string,
+  accessionNumber: string,
+  searchTerms: string[],
+  contextChars: number = 1500,
+  returnTables: boolean = true,
+): Promise<string> {
+  // Resolve primary document URL from EDGAR submissions
+  let primaryDocUrl: string | null = null;
+  let fiscalYear: string | null = null;
+  try {
+    const cik = await edgarResolveCik(ticker);
+    if (cik != null) {
+      const cikPadded = String(cik).padStart(10, "0");
+      const subs = await edgarGetJson(`https://data.sec.gov/submissions/CIK${cikPadded}.json`);
+      if (subs) {
+        const recent = ((subs.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+        const accessions = (recent.accessionNumber as string[]) ?? [];
+        const primaryDocs = (recent.primaryDocument as string[]) ?? [];
+        const periods = (recent.reportDate as string[]) ?? [];
+        for (let i = 0; i < accessions.length; i++) {
+          if (accessions[i] === accessionNumber) {
+            const period = periods[i];
+            if (period) fiscalYear = `FY${period.slice(0, 4)}`;
+            const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(cik, accessions[i], primaryDocs[i] ?? null);
+            primaryDocUrl = edgarPrimaryDocumentUrl;
+            break;
+          }
+        }
+      }
+    }
+  } catch { /* non-fatal */ }
+
+  if (!primaryDocUrl) {
+    return JSON.stringify({
+      error: true,
+      message: `Could not resolve CIK for ticker '${ticker}'. Ensure the ticker is valid and retry.`,
+      accessionNumber,
+    });
+  }
+
+  const html = await edgarGetHtml(primaryDocUrl);
+  if (!html) {
+    return JSON.stringify({
+      error: true,
+      message: `Could not fetch filing document from ${primaryDocUrl}`,
+      filingUrl: primaryDocUrl,
+    });
+  }
+
+  const htmlLower = html.toLowerCase();
+  const matches: unknown[] = [];
+  const seenPositions = new Set<number>();
+  const half = Math.floor(contextChars / 2);
+
+  for (const term of searchTerms) {
+    const termLower = term.toLowerCase();
+    let idx = 0;
+    while (matches.length < 5) {
+      const pos = htmlLower.indexOf(termLower, idx);
+      if (pos === -1) break;
+      idx = pos + 1;
+
+      // Deduplicate nearby matches
+      if ([...seenPositions].some(sp => Math.abs(pos - sp) < 200)) continue;
+      seenPositions.add(pos);
+
+      const ctxStart = Math.max(0, pos - half);
+      const ctxEnd = Math.min(html.length, pos + half);
+      const contextText = stripHtmlTags(html.slice(ctxStart, ctxEnd));
+
+      // Nearest section heading
+      const preHtml = html.slice(Math.max(0, pos - 8_000), pos);
+      const hMatches = [...preHtml.matchAll(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi)];
+      const sectionHeading = hMatches.length > 0
+        ? stripHtmlTags(hMatches[hMatches.length - 1][1])
+        : null;
+
+      // Parse nearby tables
+      const tableParsed: unknown[] = [];
+      if (returnTables) {
+        const tblSearch = html.slice(Math.max(0, pos - 2_000), Math.min(html.length, pos + 60_000));
+        const tblSearchLower = tblSearch.toLowerCase();
+        const tblRe = /<table[^>]*>/gi;
+        let tblM: RegExpExecArray | null;
+        while ((tblM = tblRe.exec(tblSearch)) !== null && tableParsed.length < 3) {
+          const absStart = Math.max(0, pos - 2_000) + tblM.index;
+          let depth = 0;
+          let i = absStart;
+          let tableEnd = absStart;
+          while (i < Math.min(html.length, absStart + 200_000)) {
+            const o = htmlLower.indexOf("<table", i);
+            const c = htmlLower.indexOf("</table>", i);
+            if (o === -1 && c === -1) break;
+            if (o !== -1 && (c === -1 || o < c)) { depth++; i = o + 6; }
+            else { depth--; if (depth === 0) { tableEnd = c + 8; break; } i = c + 8; }
+          }
+          void tblSearchLower; // suppress unused warning
+          const rows = parseHtmlTable(html.slice(absStart, tableEnd));
+          if (rows.length >= 2) tableParsed.push({ rows });
+        }
+      }
+
+      matches.push({ term, sectionHeading, contextText, tableParsed: returnTables ? tableParsed : null });
+    }
+  }
+
+  return JSON.stringify({
+    ticker,
+    accessionNumber,
+    filingUrl: primaryDocUrl,
+    fiscalYear,
+    searchTerms,
+    matches,
+    matchCount: matches.length,
+  });
+}
+
+// ── get_filing_document ───────────────────────────────────────────────────────
+
+export async function getFilingDocument(
+  ticker: string,
+  accessionNumber: string,
+  sectionHint: string | null = null,
+  filingType: string = "10-K",
+): Promise<string> {
+  let primaryDocUrl: string | null = null;
+  let fiscalYear: string | null = null;
+  try {
+    const cik = await edgarResolveCik(ticker);
+    if (cik != null) {
+      const cikPadded = String(cik).padStart(10, "0");
+      const subs = await edgarGetJson(`https://data.sec.gov/submissions/CIK${cikPadded}.json`);
+      if (subs) {
+        const recent = ((subs.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+        const accessions = (recent.accessionNumber as string[]) ?? [];
+        const primaryDocs = (recent.primaryDocument as string[]) ?? [];
+        const periods = (recent.reportDate as string[]) ?? [];
+        for (let i = 0; i < accessions.length; i++) {
+          if (accessions[i] === accessionNumber) {
+            const period = periods[i];
+            if (period) fiscalYear = `FY${period.slice(0, 4)}`;
+            const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(cik, accessions[i], primaryDocs[i] ?? null);
+            primaryDocUrl = edgarPrimaryDocumentUrl;
+            break;
+          }
+        }
+      }
+    }
+  } catch { /* non-fatal */ }
+
+  if (!primaryDocUrl) {
+    return JSON.stringify({
+      error: true,
+      message: `Could not resolve CIK for ticker '${ticker}'. Ensure the ticker is valid and retry.`,
+      accessionNumber,
+    });
+  }
+
+  const html = await edgarGetHtml(primaryDocUrl);
+  if (!html) {
+    return JSON.stringify({
+      error: true,
+      message: `Could not fetch filing document from ${primaryDocUrl}`,
+      documentUrl: primaryDocUrl,
+    });
+  }
+
+  // Extract section headings
+  const sectionsFound = [...html.matchAll(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi)]
+    .map(m => stripHtmlTags(m[1]))
+    .filter(h => h.length > 0);
+
+  if (!sectionHint) {
+    return JSON.stringify({
+      ticker,
+      accessionNumber,
+      documentUrl: primaryDocUrl,
+      fiscalYear,
+      filingType,
+      sectionsFound,
+      sectionContent: null,
+      tablesInSection: null,
+      _note: "Provide section_hint to retrieve specific section content.",
+    });
+  }
+
+  const hintLower = sectionHint.toLowerCase();
+  const htmlLower = html.toLowerCase();
+  let matchPos: number | null = null;
+
+  // Try heading tags first
+  for (const m of html.matchAll(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi)) {
+    if (stripHtmlTags(m[1]).toLowerCase().includes(hintLower)) {
+      matchPos = m.index ?? null;
+      break;
+    }
+  }
+
+  // Fallback: any occurrence
+  if (matchPos === null) {
+    const p = htmlLower.indexOf(hintLower);
+    if (p !== -1) matchPos = p;
+  }
+
+  if (matchPos === null) {
+    return JSON.stringify({
+      ticker,
+      accessionNumber,
+      documentUrl: primaryDocUrl,
+      fiscalYear,
+      filingType,
+      sectionsFound,
+      sectionContent: null,
+      tablesInSection: null,
+      _note: `Section hint '${sectionHint}' not found in the filing document.`,
+    });
+  }
+
+  const sectionContent = stripHtmlTags(html.slice(matchPos, Math.min(html.length, matchPos + 5_000)));
+
+  const tablesInSection: unknown[] = [];
+  const wideHtml = html.slice(matchPos, Math.min(html.length, matchPos + 60_000));
+  const tblRe = /<table[^>]*>/gi;
+  let tblM: RegExpExecArray | null;
+  while ((tblM = tblRe.exec(wideHtml)) !== null && tablesInSection.length < 5) {
+    const absStart = matchPos + tblM.index;
+    let depth = 0;
+    let i = absStart;
+    let tableEnd = absStart;
+    while (i < Math.min(html.length, absStart + 200_000)) {
+      const o = htmlLower.indexOf("<table", i);
+      const c = htmlLower.indexOf("</table>", i);
+      if (o === -1 && c === -1) break;
+      if (o !== -1 && (c === -1 || o < c)) { depth++; i = o + 6; }
+      else { depth--; if (depth === 0) { tableEnd = c + 8; break; } i = c + 8; }
+    }
+    const rows = parseHtmlTable(html.slice(absStart, tableEnd));
+    if (rows.length >= 2) tablesInSection.push({ rows });
+  }
+
+  return JSON.stringify({
+    ticker,
+    accessionNumber,
+    documentUrl: primaryDocUrl,
+    fiscalYear,
+    filingType,
+    sectionsFound,
+    sectionContent,
+    tablesInSection,
   });
 }
 
