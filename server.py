@@ -3107,9 +3107,11 @@ def _edgar_cik_from_accession(accession_number: str) -> int | None:
     """Derive CIK from the accession number prefix (e.g. '0000024741-26-000124' → 24741).
 
     The first 10 digits of an EDGAR accession number are the zero-padded filer CIK.
+    Returns None for any non-positive result (EDGAR CIKs start at 1).
     """
     try:
         prefix = accession_number.split("-")[0].lstrip("0")
+        # Empty string means all zeros (CIK 0 is invalid in EDGAR).
         return int(prefix) if prefix else None
     except Exception:
         return None

@@ -2474,9 +2474,11 @@ function edgarBuildFilingUrls(
  */
 function edgarCikFromAccession(accessionNumber: string): number | null {
   try {
-    const prefix = accessionNumber.split("-")[0].replace(/^0+/, "") || "0";
-    const n = parseInt(prefix, 10);
-    return isNaN(n) ? null : n;
+    // Strip leading zeros; empty string ("") is falsy so "|| '0'" handles the
+    // all-zeros edge case without producing NaN from parseInt("", 10).
+    const stripped = accessionNumber.split("-")[0].replace(/^0+/, "") || "0";
+    const n = parseInt(stripped, 10);
+    return isNaN(n) || n === 0 ? null : n;
   } catch {
     return null;
   }
