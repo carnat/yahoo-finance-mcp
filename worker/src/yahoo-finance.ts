@@ -1393,12 +1393,14 @@ export async function getSecFilings(ticker: string): Promise<string> {
     const type = (f.type as string) ?? null;
     const edgarInfo = date && type ? edgarUrlMap.get(`${type}:${date}`) : undefined;
 
-    // Fallback: extract accession from Yahoo's edgarUrl if it follows the Archives path pattern
+    // Fallback: extract accession + CIK from Yahoo's edgarUrl when not found via EDGAR submissions.
     let accessionNumber: string | null = edgarInfo?.accessionNumber ?? null;
     let edgarIndexUrl: string | null = edgarInfo?.edgarIndexUrl ?? null;
     let edgarPrimaryDocumentUrl: string | null = edgarInfo?.edgarPrimaryDocumentUrl ?? null;
     if (!accessionNumber) {
       const eu = (f.edgarUrl as string) ?? "";
+      // Pattern 1: direct EDGAR Archives URL
+      // e.g. https://www.sec.gov/Archives/edgar/data/1234/000123456724000001/...
       const m = eu.match(/\/Archives\/edgar\/data\/(\d+)\/(\d{18})\//);
       if (m) {
         const cikFromUrl = parseInt(m[1], 10);
@@ -1408,6 +1410,18 @@ export async function getSecFilings(ticker: string): Promise<string> {
         const urls = edgarBuildFilingUrls(cikFromUrl, accessionNumber, fname);
         edgarIndexUrl = urls.edgarIndexUrl;
         edgarPrimaryDocumentUrl = urls.edgarPrimaryDocumentUrl;
+      } else {
+        // Pattern 2: Yahoo Finance sec-filing proxy URL
+        // e.g. https://finance.yahoo.com/sec-filing/GLW/0000024741-26-000124_24741
+        const m2 = eu.match(/\/sec-filing\/[^/]+\/(\d{10}-\d{2}-\d{6})_(\d+)/);
+        if (m2) {
+          accessionNumber = m2[1];
+          const cikFromUrl = parseInt(m2[2], 10);
+          const urls = edgarBuildFilingUrls(cikFromUrl, accessionNumber, null);
+          edgarIndexUrl = urls.edgarIndexUrl;
+          // Primary document filename is not embedded in the Yahoo URL; leave null for lazy resolution.
+          edgarPrimaryDocumentUrl = null;
+        }
       }
     }
 
@@ -2397,6 +2411,22 @@ const _optionsFlowCache = new Map<string, { data: Record<string, unknown>; store
 // via the EDGAR_CONTACT_EMAIL Cloudflare secret / var.
 const EDGAR_UA = "yahoo-finance-mcp/1.0 (https://github.com/carnat/yahoo-finance-mcp)";
 
+// Confirmed China revenue figures from manually verified 10-K filings.
+// Mirrors the _CHINA_REVENUE_CONFIRMED lookup in server.py.
+// pct is the decimal fraction (e.g. 0.620 = 62%).
+const CHINA_REVENUE_CONFIRMED: Record<string, { pct: number; fiscalYear: string; filingDate: string }> = {
+  "MU":   { pct: 0.117, fiscalYear: "FY2025", filingDate: "2025-10-03" },
+  "AAPL": { pct: 0.170, fiscalYear: "FY2025", filingDate: "2025-10-31" },
+  "ANET": { pct: 0.140, fiscalYear: "FY2024", filingDate: "2025-02-14" },
+  "QCOM": { pct: 0.620, fiscalYear: "FY2024", filingDate: "2024-11-06" },
+  "NVDA": { pct: 0.170, fiscalYear: "FY2025", filingDate: "2025-02-26" },
+  "AMD":  { pct: 0.220, fiscalYear: "FY2024", filingDate: "2025-02-04" },
+  "AVGO": { pct: 0.350, fiscalYear: "FY2024", filingDate: "2024-12-19" },
+  "SWKS": { pct: 0.580, fiscalYear: "FY2024", filingDate: "2024-11-20" },
+  "MRVL": { pct: 0.550, fiscalYear: "FY2025", filingDate: "2025-03-13" },
+  "ON":   { pct: 0.330, fiscalYear: "FY2024", filingDate: "2025-02-10" },
+};
+
 // ── EDGAR helper utilities ────────────────────────────────────────────────────
 
 /** Fetch an EDGAR JSON endpoint using the required User-Agent header. */
@@ -2435,6 +2465,23 @@ function edgarBuildFilingUrls(
     ? `https://www.sec.gov/Archives/edgar/data/${cik}/${noDash}/${primaryDoc}`
     : null;
   return { edgarIndexUrl, edgarPrimaryDocumentUrl };
+}
+
+/**
+ * Derive the EDGAR CIK from an accession number.
+ * The first 10 digits of an accession number are the zero-padded filer CIK.
+ * e.g. "0000024741-26-000124" → 24741
+ */
+function edgarCikFromAccession(accessionNumber: string): number | null {
+  try {
+    // Strip leading zeros; empty string ("") is falsy so "|| '0'" handles the
+    // all-zeros edge case without producing NaN from parseInt("", 10).
+    const stripped = accessionNumber.split("-")[0].replace(/^0+/, "") || "0";
+    const n = parseInt(stripped, 10);
+    return isNaN(n) || n === 0 ? null : n;
+  } catch {
+    return null;
+  }
 }
 
 /** Resolve CIK for a ticker using the EDGAR company_tickers.json index. */
@@ -2674,6 +2721,29 @@ function extractGeoRevenueFromHtml(
 }
 
 export async function getGeographicRevenue(ticker: string, region: string = "China"): Promise<string> {
+  // ── Confirmed lookup table for China (fast path, no network call) ─────────
+  if (region.toLowerCase() === "china") {
+    const confirmedEntry = CHINA_REVENUE_CONFIRMED[ticker.toUpperCase()];
+    if (confirmedEntry) {
+      return JSON.stringify({
+        ticker,
+        region,
+        regionRevenuePct: confirmedEntry.pct,
+        regionRevenueUSD: null,
+        fiscalYear: confirmedEntry.fiscalYear,
+        filingType: "10-K",
+        filingDate: confirmedEntry.filingDate,
+        segmentLabel: "China",
+        source: "confirmed_lookup_table",
+        confidence: "CONFIRMED",
+        sectionHeading: null,
+        primaryDocumentUrl: null,
+        edgarError: null,
+        _manualLookup: null,
+      });
+    }
+  }
+
   const edgarErrors: string[] = [];
 
   // ── Step 1: Resolve CIK and latest 10-K filing metadata ──────────────────
@@ -2940,10 +3010,37 @@ export async function getFilingTextSearch(
     }
   } catch { /* non-fatal */ }
 
+  // Fallback: derive CIK from the accession number prefix when ticker→CIK lookup failed
+  // or when the accession is not present in the most-recent submissions window.
+  if (!primaryDocUrl) {
+    const derivedCik = edgarCikFromAccession(accessionNumber);
+    if (derivedCik != null) {
+      try {
+        const cikPadded = String(derivedCik).padStart(10, "0");
+        const subs = await edgarGetJson(`https://data.sec.gov/submissions/CIK${cikPadded}.json`);
+        if (subs) {
+          const recent = ((subs.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+          const accessions = (recent.accessionNumber as string[]) ?? [];
+          const primaryDocs = (recent.primaryDocument as string[]) ?? [];
+          const periods = (recent.reportDate as string[]) ?? [];
+          for (let i = 0; i < accessions.length; i++) {
+            if (accessions[i] === accessionNumber) {
+              const period = periods[i];
+              if (period && !fiscalYear) fiscalYear = `FY${period.slice(0, 4)}`;
+              const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(derivedCik, accessions[i], primaryDocs[i] ?? null);
+              primaryDocUrl = edgarPrimaryDocumentUrl;
+              break;
+            }
+          }
+        }
+      } catch { /* non-fatal */ }
+    }
+  }
+
   if (!primaryDocUrl) {
     return JSON.stringify({
       error: true,
-      message: `Could not resolve CIK for ticker '${ticker}'. Ensure the ticker is valid and retry.`,
+      message: `Could not resolve the primary document URL for accession '${accessionNumber}' (ticker '${ticker}'). The filing may be older than the EDGAR submissions window. Verify the accession number and ticker are correct.`,
       accessionNumber,
     });
   }
@@ -3056,10 +3153,37 @@ export async function getFilingDocument(
     }
   } catch { /* non-fatal */ }
 
+  // Fallback: derive CIK from the accession number prefix when ticker→CIK lookup failed
+  // or when the accession is not present in the most-recent submissions window.
+  if (!primaryDocUrl) {
+    const derivedCik = edgarCikFromAccession(accessionNumber);
+    if (derivedCik != null) {
+      try {
+        const cikPadded = String(derivedCik).padStart(10, "0");
+        const subs = await edgarGetJson(`https://data.sec.gov/submissions/CIK${cikPadded}.json`);
+        if (subs) {
+          const recent = ((subs.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+          const accessions = (recent.accessionNumber as string[]) ?? [];
+          const primaryDocs = (recent.primaryDocument as string[]) ?? [];
+          const periods = (recent.reportDate as string[]) ?? [];
+          for (let i = 0; i < accessions.length; i++) {
+            if (accessions[i] === accessionNumber) {
+              const period = periods[i];
+              if (period && !fiscalYear) fiscalYear = `FY${period.slice(0, 4)}`;
+              const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(derivedCik, accessions[i], primaryDocs[i] ?? null);
+              primaryDocUrl = edgarPrimaryDocumentUrl;
+              break;
+            }
+          }
+        }
+      } catch { /* non-fatal */ }
+    }
+  }
+
   if (!primaryDocUrl) {
     return JSON.stringify({
       error: true,
-      message: `Could not resolve CIK for ticker '${ticker}'. Ensure the ticker is valid and retry.`,
+      message: `Could not resolve the primary document URL for accession '${accessionNumber}' (ticker '${ticker}'). The filing may be older than the EDGAR submissions window. Verify the accession number and ticker are correct.`,
       accessionNumber,
     });
   }
