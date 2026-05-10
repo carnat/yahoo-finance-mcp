@@ -3151,19 +3151,19 @@ async def _edgar_primary_doc_from_index(index_url: str) -> str | None:
         cell_html = _re.findall(r"<t[dh][^>]*>([\s\S]*?)</t[dh]>", row_html, _re.IGNORECASE)
         if not cell_html:
             continue
-        seq = _strip_html_tags(cell_html[0]) if cell_html else ""
+        seq = _strip_html_tags(cell_html[0])
         doc_type = _strip_html_tags(cell_html[1]) if len(cell_html) > 1 else ""
         if seq == "1" or doc_type.upper().startswith("10-K"):
             href_m = _re.search(r'<a[^>]+href=["\']([^"\']+)["\']', row_html, _re.IGNORECASE)
             if href_m:
                 fname = _normalize_href(href_m.group(1))
-                if fname and not fname.lower().endswith("-index.htm"):
+                if fname and not fname.lower().endswith(("-index.htm", "-index.html")):
                     return fname
 
     # Fallback: return the first document-like link that is not the index file itself.
     for href_m in _re.finditer(r'href=["\']([^"\']+)["\']', html, _re.IGNORECASE):
         fname = _normalize_href(href_m.group(1))
-        if fname and fname.lower().endswith((".htm", ".html")) and not fname.lower().endswith("-index.htm"):
+        if fname and fname.lower().endswith((".htm", ".html")) and not fname.lower().endswith(("-index.htm", "-index.html")):
             return fname
     return None
 

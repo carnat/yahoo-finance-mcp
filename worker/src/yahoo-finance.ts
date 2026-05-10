@@ -2510,7 +2510,7 @@ async function edgarPrimaryDocFromIndex(indexUrl: string): Promise<string | null
       const hrefM = rowHtml.match(/<a[^>]+href=["']([^"']+)["']/i);
       if (hrefM) {
         const fname = normalizeHref(hrefM[1]);
-        if (fname && !fname.toLowerCase().endsWith("-index.htm")) {
+        if (fname && !fname.toLowerCase().endsWith("-index.htm") && !fname.toLowerCase().endsWith("-index.html")) {
           return fname;
         }
       }
@@ -2521,7 +2521,7 @@ async function edgarPrimaryDocFromIndex(indexUrl: string): Promise<string | null
   const allHrefs = [...html.matchAll(/href=["']([^"']+)["']/gi)].map(m => m[1]);
   for (const href of allHrefs) {
     const fname = normalizeHref(href);
-    if (fname && /\.(html?)$/i.test(fname) && !fname.toLowerCase().endsWith("-index.htm")) return fname;
+    if (fname && /\.(html?)$/i.test(fname) && !fname.toLowerCase().endsWith("-index.htm") && !fname.toLowerCase().endsWith("-index.html")) return fname;
   }
   return null;
 }
