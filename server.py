@@ -1561,8 +1561,10 @@ async def get_sec_filings(ticker: str) -> str:
             base["edgarIndexUrl"] = edgar_info["edgarIndexUrl"]
             base["edgarPrimaryDocumentUrl"] = edgar_info["edgarPrimaryDocumentUrl"]
         else:
-            # Fallback: try to extract accession from the edgarUrl if it follows the Archives pattern
+            # Fallback: try to extract accession + CIK from the edgarUrl.
             edge_url = str(base.get("edgarUrl") or base.get("url") or "")
+            # Pattern 1: direct EDGAR Archives URL
+            # e.g. https://www.sec.gov/Archives/edgar/data/1234/000123456724000001/...
             m = _re.search(r"/Archives/edgar/data/(\d+)/(\d{18})/", edge_url)
             if m:
                 cik_from_url = int(m.group(1))
@@ -1574,6 +1576,18 @@ async def get_sec_filings(ticker: str) -> str:
                 base["accessionNumber"] = acc
                 base["edgarIndexUrl"] = idx_url
                 base["edgarPrimaryDocumentUrl"] = pdoc_url
+            else:
+                # Pattern 2: Yahoo Finance sec-filing proxy URL
+                # e.g. https://finance.yahoo.com/sec-filing/GLW/0000024741-26-000124_24741
+                m2 = _re.search(r"/sec-filing/[^/]+/(\d{10}-\d{2}-\d{6})_(\d+)", edge_url)
+                if m2:
+                    acc = m2.group(1)
+                    cik_from_url = int(m2.group(2))
+                    idx_url, _ = _edgar_build_filing_urls(cik_from_url, acc, None)
+                    base["accessionNumber"] = acc
+                    base["edgarIndexUrl"] = idx_url
+                    # Primary document filename is not in the Yahoo URL; set null for lazy resolution
+                    base["edgarPrimaryDocumentUrl"] = None
         return base
 
     result = json.dumps({"ticker": ticker, "filings": [_serialize_filing(f) for f in filings]})
@@ -3089,6 +3103,18 @@ def _edgar_build_filing_urls(cik: int, accession_number: str, primary_doc: str |
     return index_url, primary_url
 
 
+def _edgar_cik_from_accession(accession_number: str) -> int | None:
+    """Derive CIK from the accession number prefix (e.g. '0000024741-26-000124' → 24741).
+
+    The first 10 digits of an EDGAR accession number are the zero-padded filer CIK.
+    """
+    try:
+        prefix = accession_number.split("-")[0].lstrip("0")
+        return int(prefix) if prefix else None
+    except Exception:
+        return None
+
+
 async def _edgar_get_html(url: str, max_bytes: int = 5_000_000) -> str | None:
     """Fetch an HTML document from EDGAR, reading at most max_bytes uncompressed bytes."""
     loop = asyncio.get_event_loop()
@@ -4205,16 +4231,37 @@ async def get_filing_text_search(
     except Exception:
         pass
 
-    # Fall back: reconstruct URL directly from accession number if CIK lookup failed
+    # Fallback: derive CIK from the accession number prefix when ticker→CIK lookup failed
+    # or when the accession is not present in the most-recent submissions window.
     if primary_doc_url is None:
-        # We can at minimum return the index URL
-        clean = accession_number.replace("-", "")
-        # CIK unknown without EDGAR lookup — return helpful error
+        derived_cik = _edgar_cik_from_accession(accession_number)
+        if derived_cik:
+            try:
+                cik_padded = str(derived_cik).zfill(10)
+                subs = await _edgar_get_submissions(cik_padded)
+                if subs:
+                    recent = subs.get("filings", {}).get("recent", {})
+                    acc_list: list = recent.get("accessionNumber", [])
+                    pdoc_list: list = recent.get("primaryDocument", [])
+                    period_list: list = recent.get("reportDate", [])
+                    for i, acc in enumerate(acc_list):
+                        if acc == accession_number:
+                            pdoc = pdoc_list[i] if i < len(pdoc_list) else None
+                            period = period_list[i] if i < len(period_list) else None
+                            if period and fiscal_year is None:
+                                fiscal_year = f"FY{period[:4]}"
+                            _, primary_doc_url = _edgar_build_filing_urls(derived_cik, acc, pdoc)
+                            break
+            except Exception:
+                pass
+
+    if primary_doc_url is None:
         return json.dumps({
             "error": True,
             "message": (
-                f"Could not resolve CIK for ticker '{ticker}'. "
-                "Ensure the ticker is valid and retry."
+                f"Could not resolve the primary document URL for accession '{accession_number}' "
+                f"(ticker '{ticker}'). The filing may be older than the EDGAR submissions window. "
+                "Verify the accession number and ticker are correct."
             ),
             "accessionNumber": accession_number,
         })
@@ -4368,12 +4415,37 @@ async def get_filing_document(
     except Exception:
         pass
 
+    # Fallback: derive CIK from the accession number prefix when ticker→CIK lookup failed
+    # or when the accession is not present in the most-recent submissions window.
+    if primary_doc_url is None:
+        derived_cik = _edgar_cik_from_accession(accession_number)
+        if derived_cik:
+            try:
+                cik_padded = str(derived_cik).zfill(10)
+                subs = await _edgar_get_submissions(cik_padded)
+                if subs:
+                    recent = subs.get("filings", {}).get("recent", {})
+                    acc_list: list = recent.get("accessionNumber", [])
+                    pdoc_list: list = recent.get("primaryDocument", [])
+                    period_list: list = recent.get("reportDate", [])
+                    for i, acc in enumerate(acc_list):
+                        if acc == accession_number:
+                            pdoc = pdoc_list[i] if i < len(pdoc_list) else None
+                            period = period_list[i] if i < len(period_list) else None
+                            if period and fiscal_year is None:
+                                fiscal_year = f"FY{period[:4]}"
+                            _, primary_doc_url = _edgar_build_filing_urls(derived_cik, acc, pdoc)
+                            break
+            except Exception:
+                pass
+
     if primary_doc_url is None:
         return json.dumps({
             "error": True,
             "message": (
-                f"Could not resolve CIK for ticker '{ticker}'. "
-                "Ensure the ticker is valid and retry."
+                f"Could not resolve the primary document URL for accession '{accession_number}' "
+                f"(ticker '{ticker}'). The filing may be older than the EDGAR submissions window. "
+                "Verify the accession number and ticker are correct."
             ),
             "accessionNumber": accession_number,
         })
