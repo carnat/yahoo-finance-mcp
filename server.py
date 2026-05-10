@@ -1,6 +1,8 @@
 import asyncio
 import datetime
+import html as _html_module
 import json
+import re as _re
 import time
 from enum import Enum
 
@@ -1483,7 +1485,12 @@ async def screen_stocks(screener_name: str, count: int = 25) -> str:
     name="get_sec_filings",
     description="""Get recent SEC filings for a ticker (10-K, 10-Q, 8-K, etc.).
 
-Returns a list of recent filings with form type, filing date, and URL.
+Returns a list of recent filings with form type, filing date, Yahoo URL, accession number,
+and direct EDGAR document URLs (edgarIndexUrl, edgarPrimaryDocumentUrl).
+
+edgarIndexUrl — full index page for the filing on SEC.gov (always resolvable).
+edgarPrimaryDocumentUrl — the primary HTM filing document; pass to get_filing_document
+  or get_filing_text_search for in-filing research.
 
 Args:
     ticker: str
@@ -1512,12 +1519,62 @@ async def get_sec_filings(ticker: str) -> str:
         print(f"Error: getting SEC filings for {ticker}: {e}")
         return f"Error: getting SEC filings for {ticker}: {e}"
 
+    # Build EDGAR submission index keyed by (form_type, filing_date) for URL enrichment.
+    edgar_url_map: dict[str, dict] = {}
+    try:
+        tickers_map = await _load_edgar_tickers()
+        cik = tickers_map.get(ticker.upper())
+        if cik:
+            cik_padded = str(cik).zfill(10)
+            subs = await _edgar_get_submissions(cik_padded)
+            if subs:
+                recent = subs.get("filings", {}).get("recent", {})
+                forms: list = recent.get("form", [])
+                dates: list = recent.get("filingDate", [])
+                accessions: list = recent.get("accessionNumber", [])
+                primary_docs: list = recent.get("primaryDocument", [])
+                for i, form in enumerate(forms):
+                    acc = accessions[i] if i < len(accessions) else None
+                    pdoc = primary_docs[i] if i < len(primary_docs) else None
+                    date = dates[i] if i < len(dates) else None
+                    if acc and date:
+                        idx_url, pdoc_url = _edgar_build_filing_urls(cik, acc, pdoc)
+                        edgar_url_map[f"{form}:{date}"] = {
+                            "accessionNumber": acc,
+                            "edgarIndexUrl": idx_url,
+                            "edgarPrimaryDocumentUrl": pdoc_url,
+                        }
+    except Exception:
+        pass
+
     if not filings:
         return json.dumps({"ticker": ticker, "filings": []})
 
-    # sec_filings is a list of dicts; ensure dates are serialisable
-    def _serialize_filing(f):
-        return {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in f.items()}
+    def _serialize_filing(f: dict) -> dict:
+        base = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in f.items()}
+        # Try to enrich with EDGAR URLs: match by (type, date)
+        form_type = str(base.get("type", ""))
+        date_str = str(base.get("date", ""))
+        edgar_info = edgar_url_map.get(f"{form_type}:{date_str}")
+        if edgar_info:
+            base["accessionNumber"] = edgar_info["accessionNumber"]
+            base["edgarIndexUrl"] = edgar_info["edgarIndexUrl"]
+            base["edgarPrimaryDocumentUrl"] = edgar_info["edgarPrimaryDocumentUrl"]
+        else:
+            # Fallback: try to extract accession from the edgarUrl if it follows the Archives pattern
+            edge_url = str(base.get("edgarUrl") or base.get("url") or "")
+            m = _re.search(r"/Archives/edgar/data/(\d+)/(\d{18})/", edge_url)
+            if m:
+                cik_from_url = int(m.group(1))
+                nodash = m.group(2)
+                acc = f"{nodash[:10]}-{nodash[10:12]}-{nodash[12:]}"
+                # Derive primary doc from the URL filename if available
+                fname = edge_url.split("/")[-1].split("?")[0] or None
+                idx_url, pdoc_url = _edgar_build_filing_urls(cik_from_url, acc, fname if fname else None)
+                base["accessionNumber"] = acc
+                base["edgarIndexUrl"] = idx_url
+                base["edgarPrimaryDocumentUrl"] = pdoc_url
+        return base
 
     result = json.dumps({"ticker": ticker, "filings": [_serialize_filing(f) for f in filings]})
     _cache_set(cache_key, result)
@@ -2988,6 +3045,9 @@ async def _edgar_get(url: str) -> dict | None:
 # In-process cache for EDGAR company facts (keyed by zero-padded CIK).
 _EDGAR_FACTS_CACHE: dict[str, tuple[dict, float]] = {}
 
+# In-process cache for EDGAR submissions JSON (keyed by zero-padded CIK).
+_EDGAR_SUBS_CACHE: dict[str, tuple[dict, float]] = {}
+
 
 async def _edgar_get_company_facts(cik_padded: str) -> dict | None:
     """Fetch the EDGAR XBRL company-facts JSON for a CIK, with 24 h in-process caching."""
@@ -2999,6 +3059,276 @@ async def _edgar_get_company_facts(cik_padded: str) -> dict | None:
     if data is not None:
         _EDGAR_FACTS_CACHE[cik_padded] = (data, now)
     return data
+
+
+async def _edgar_get_submissions(cik_padded: str) -> dict | None:
+    """Fetch the EDGAR submissions JSON for a CIK, with 24 h in-process caching."""
+    now = time.monotonic()
+    cached_entry = _EDGAR_SUBS_CACHE.get(cik_padded)
+    if cached_entry is not None and (now - cached_entry[1]) < _EDGAR_TTL:
+        return cached_entry[0]
+    data = await _edgar_get(f"https://data.sec.gov/submissions/CIK{cik_padded}.json")
+    if data is not None:
+        _EDGAR_SUBS_CACHE[cik_padded] = (data, now)
+    return data
+
+
+def _edgar_build_filing_urls(cik: int, accession_number: str, primary_doc: str | None) -> tuple[str, str | None]:
+    """Build the EDGAR index URL and primary document URL for a filing."""
+    accession_nodash = accession_number.replace("-", "")
+    index_url = (
+        f"https://www.sec.gov/Archives/edgar/data/{cik}"
+        f"/{accession_nodash}/{accession_number}-index.htm"
+    )
+    primary_url: str | None = None
+    if primary_doc:
+        primary_url = (
+            f"https://www.sec.gov/Archives/edgar/data/{cik}"
+            f"/{accession_nodash}/{primary_doc}"
+        )
+    return index_url, primary_url
+
+
+async def _edgar_get_html(url: str, max_bytes: int = 5_000_000) -> str | None:
+    """Fetch an HTML document from EDGAR, reading at most max_bytes uncompressed bytes."""
+    loop = asyncio.get_event_loop()
+
+    def _fetch() -> str | None:
+        req = _urlreq.Request(
+            url,
+            headers={"User-Agent": "yahoo-finance-mcp/1.0 (contact@example.com)"},
+        )
+        try:
+            with _urlreq.urlopen(req, timeout=30) as resp:  # noqa: S310
+                raw = resp.read(max_bytes)
+            try:
+                return raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return raw.decode("latin-1", errors="replace")
+        except Exception:
+            return None
+
+    return await loop.run_in_executor(None, _fetch)
+
+
+# ---------------------------------------------------------------------------
+# HTML table parsing helpers used by the HTML filing fallback layer.
+# ---------------------------------------------------------------------------
+
+
+def _strip_html_tags(html_str: str) -> str:
+    """Remove HTML tags and decode entities to produce plain text."""
+    text = _re.sub(r"<[^>]+>", " ", html_str)
+    text = _html_module.unescape(text)
+    return _re.sub(r"\s+", " ", text).strip()
+
+
+def _parse_html_table(table_html: str) -> list[list[str]]:
+    """Parse an HTML table into a list of rows, each a list of plain-text cell strings."""
+    rows: list[list[str]] = []
+    tr_pat = _re.compile(r"<tr[^>]*>(.*?)</tr>", _re.IGNORECASE | _re.DOTALL)
+    td_pat = _re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", _re.IGNORECASE | _re.DOTALL)
+    for tr_m in tr_pat.finditer(table_html):
+        row = [_strip_html_tags(td_m.group(1)) for td_m in td_pat.finditer(tr_m.group(1))]
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _parse_numeric_cell(text: str) -> float | None:
+    """Parse a table cell's text as a number. Returns None when not parseable."""
+    s = text.strip().replace(",", "").replace(" ", "").replace("$", "").replace("%", "")
+    # Parentheses → negative value: (123) → -123
+    if s.startswith("(") and s.endswith(")"):
+        s = "-" + s[1:-1]
+    multiplier = 1.0
+    if s.upper().endswith("B"):
+        multiplier, s = 1_000_000_000.0, s[:-1]
+    elif s.upper().endswith("M"):
+        multiplier, s = 1_000_000.0, s[:-1]
+    elif s.upper().endswith("K"):
+        multiplier, s = 1_000.0, s[:-1]
+    try:
+        return float(s) * multiplier
+    except ValueError:
+        return None
+
+
+def _detect_unit_multiplier(table_html: str, context_html: str) -> float:
+    """Detect the monetary unit scale from a table caption/nearby headings.
+
+    Returns 1_000_000 (millions) if not found — the most common 10-K scale.
+    """
+    combined = (table_html + context_html).lower()
+    if "in billions" in combined or "$ billions" in combined:
+        return 1_000_000_000.0
+    if "in thousands" in combined or "$ thousands" in combined or "in thousands)" in combined:
+        return 1_000.0
+    if "in millions" in combined or "$ millions" in combined or "in millions)" in combined:
+        return 1_000_000.0
+    # Default assumption for 10-K financials: millions
+    return 1_000_000.0
+
+
+def _extract_geo_revenue_from_html(
+    html_text: str,
+    region: str,
+) -> tuple[float | None, float | None, str, list[dict]]:
+    """Search an SEC filing HTML document for a geographic revenue table.
+
+    Returns (regionRevenuePct, regionRevenueUSD, sectionHeading, parsedTables).
+    Parses the first table that contains the target region and a numeric total row.
+    """
+    region_lower = region.lower()
+    html_lower = html_text.lower()
+
+    # Candidate search terms ordered by specificity
+    search_terms = [
+        "geographic information",
+        "geographic areas",
+        "geographic segment",
+        "revenue by region",
+        "revenues by geography",
+        region_lower,
+    ]
+
+    # Collect positions of all search-term matches (cap to keep runtime bounded)
+    term_positions: list[int] = []
+    for term in search_terms:
+        idx = 0
+        while len(term_positions) < 30:
+            pos = html_lower.find(term, idx)
+            if pos == -1:
+                break
+            term_positions.append(pos)
+            idx = pos + 1
+
+    if not term_positions:
+        return None, None, "", []
+
+    # For each match, find the nearest enclosing or following <table>
+    checked_tables: set[int] = set()
+    candidate_tables: list[dict] = []
+
+    for pos in sorted(set(term_positions))[:20]:
+        # Search window: 1 000 chars before match → 60 000 chars after
+        search_start = max(0, pos - 1_000)
+        search_end = min(len(html_text), pos + 60_000)
+        chunk = html_text[search_start:search_end]
+
+        for tbl_m in _re.finditer(r"<table[^>]*>", chunk, _re.IGNORECASE):
+            abs_start = search_start + tbl_m.start()
+            if abs_start in checked_tables:
+                continue
+            checked_tables.add(abs_start)
+
+            # Walk forward tracking nested table depth to find matching </table>
+            depth = 0
+            i = abs_start
+            table_end = abs_start
+            while i < min(len(html_text), abs_start + 200_000):
+                o = html_lower.find("<table", i)
+                c = html_lower.find("</table>", i)
+                if o == -1 and c == -1:
+                    break
+                if o != -1 and (c == -1 or o < c):
+                    depth += 1
+                    i = o + 6
+                else:
+                    depth -= 1
+                    if depth == 0:
+                        table_end = c + 8
+                        break
+                    i = c + 8
+
+            table_html = html_text[abs_start:table_end]
+            if region_lower not in table_html.lower():
+                continue
+
+            parsed = _parse_html_table(table_html)
+            if len(parsed) < 2:
+                continue
+
+            candidate_tables.append({
+                "pos": abs_start,
+                "table_html": table_html,
+                "rows": parsed,
+            })
+
+    if not candidate_tables:
+        return None, None, "", []
+
+    _TOTAL_LABELS = frozenset({
+        "total", "consolidated", "total revenues", "total net revenues",
+        "net revenues", "revenues", "total revenue",
+    })
+
+    for tbl in candidate_tables:
+        rows: list[list[str]] = tbl["rows"]
+
+        # Find the row index for the target region
+        region_row_idx: int | None = None
+        for i, row in enumerate(rows):
+            if any(region_lower in cell.lower() for cell in row):
+                region_row_idx = i
+                break
+        if region_row_idx is None:
+            continue
+
+        # Find a "Total" row
+        total_row_idx: int | None = None
+        for i, row in enumerate(rows):
+            if any(cell.strip().lower() in _TOTAL_LABELS for cell in row):
+                total_row_idx = i
+                break
+        if total_row_idx is None:
+            # Fall back: last row that has any numeric value
+            for i in range(len(rows) - 1, -1, -1):
+                if any(_parse_numeric_cell(c) is not None for c in rows[i]):
+                    total_row_idx = i
+                    break
+
+        if total_row_idx is None or total_row_idx == region_row_idx:
+            continue
+
+        # Find the first numeric column in the region row (skip label column)
+        region_row = rows[region_row_idx]
+        value_col: int | None = None
+        for j, cell in enumerate(region_row):
+            v = _parse_numeric_cell(cell)
+            if v is not None and v > 0:
+                value_col = j
+                break
+        if value_col is None:
+            continue
+
+        region_val = _parse_numeric_cell(
+            rows[region_row_idx][value_col] if value_col < len(rows[region_row_idx]) else ""
+        )
+        total_val = _parse_numeric_cell(
+            rows[total_row_idx][value_col] if value_col < len(rows[total_row_idx]) else ""
+        )
+
+        if region_val is None or total_val is None or total_val <= 0:
+            continue
+
+        pct = round(region_val / total_val, 4)
+
+        # Detect unit scale for USD conversion
+        context_html = html_text[max(0, tbl["pos"] - 3_000): tbl["pos"]]
+        unit_mult = _detect_unit_multiplier(tbl["table_html"], context_html)
+        region_usd = region_val * unit_mult
+
+        # Extract nearest section heading (last <h*> tag before the table)
+        heading = ""
+        pre_html = html_text[max(0, tbl["pos"] - 6_000): tbl["pos"]]
+        h_matches = _re.findall(r"<h[1-6][^>]*>(.*?)</h[1-6]>", pre_html, _re.IGNORECASE | _re.DOTALL)
+        if h_matches:
+            heading = _strip_html_tags(h_matches[-1])
+
+        return pct, region_usd, heading, [{"rows": rows}]
+
+    return None, None, "", []
 
 
 # ---------------------------------------------------------------------------
@@ -3159,13 +3489,13 @@ Default region is 'China'. DC-151 CLASS A/B/C/D China Revenue Risk Classificatio
   ≥20% → BANNED (CLASS B) | 15–20% → CHINA WATCH | ≤14.9% CLASS C eligible (cap 30%)
 
 Returns: region, regionRevenuePct, regionRevenueUSD, fiscalYear, filingType, filingDate, segmentLabel,
-source, confidence.
+source, confidence, sectionHeading (when HTML-parsed), primaryDocumentUrl.
 
-confidence:
-  CONFIRMED — sourced from EDGAR XBRL company-facts (satisfies DC-151 Rule 1 annual confirmation).
-  NOT_DISCLOSED — company does not break out the region separately in machine-readable form.
-  When NOT_DISCLOSED, _manualLookup is populated with direct EDGAR URLs and step-by-step
-  instructions to locate the geographic segment table in the 10-K.
+confidence levels:
+  CONFIRMED   — sourced from EDGAR XBRL company-facts (satisfies DC-151 Rule 1 annual confirmation).
+  PARSED_HTML — extracted from 10-K filing HTML table (DC-151 Rule 1 satisfied; human-equivalent read).
+  NOT_DISCLOSED — not found by any method (Rule 1 NOT satisfied). _manualLookup is populated with
+                  direct EDGAR URLs and step-by-step instructions to locate the geographic segment table.
 
 Args:
     ticker: str
@@ -3207,6 +3537,7 @@ async def get_geographic_revenue(ticker: str, region: str = "China") -> str:
     filing_date: str | None = None
     fiscal_year: str | None = None
     filing_type = "10-K"
+    primary_doc_url: str | None = None
 
     try:
         tickers_map = await _load_edgar_tickers()
@@ -3217,18 +3548,24 @@ async def get_geographic_revenue(ticker: str, region: str = "China") -> str:
     if cik:
         cik_padded = str(cik).zfill(10)
         try:
-            subs = await _edgar_get(f"https://data.sec.gov/submissions/CIK{cik_padded}.json")
+            subs = await _edgar_get_submissions(cik_padded)
             if subs:
                 filings = subs.get("filings", {}).get("recent", {})
                 forms: list = filings.get("form", [])
                 dates: list = filings.get("filingDate", [])
                 periods: list = filings.get("reportDate", [])
+                accessions: list = filings.get("accessionNumber", [])
+                pdocs: list = filings.get("primaryDocument", [])
                 for i, form in enumerate(forms):
                     if form in ("10-K", "10-K405", "10-KSB"):
                         filing_date = dates[i] if i < len(dates) else None
                         period = periods[i] if i < len(periods) else None
                         if period:
                             fiscal_year = f"FY{period[:4]}"
+                        acc = accessions[i] if i < len(accessions) else None
+                        pdoc = pdocs[i] if i < len(pdocs) else None
+                        if acc and pdoc:
+                            _, primary_doc_url = _edgar_build_filing_urls(cik, acc, pdoc)
                         break
         except Exception:
             pass
@@ -3252,6 +3589,25 @@ async def get_geographic_revenue(ticker: str, region: str = "China") -> str:
                     source,
                     confidence,
                 ) = _extract_geographic_pct(facts_data, region, filing_date)
+        except Exception:
+            pass
+
+    # Step 3 (fallback): When XBRL is NOT_DISCLOSED, attempt to parse the primary 10-K HTML.
+    html_section_heading: str = ""
+    html_parsed_tables: list = []
+    if confidence == "NOT_DISCLOSED" and primary_doc_url:
+        try:
+            html_text = await _edgar_get_html(primary_doc_url)
+            if html_text:
+                (
+                    region_revenue_pct,
+                    region_revenue_usd,
+                    html_section_heading,
+                    html_parsed_tables,
+                ) = _extract_geo_revenue_from_html(html_text, region)
+                if region_revenue_pct is not None:
+                    source = "edgar_html"
+                    confidence = "PARSED_HTML"
         except Exception:
             pass
 
@@ -3301,6 +3657,8 @@ async def get_geographic_revenue(ticker: str, region: str = "China") -> str:
         "segmentLabel": segment_label,
         "source": source,
         "confidence": confidence,
+        "sectionHeading": html_section_heading or None,
+        "primaryDocumentUrl": primary_doc_url,
         "_manualLookup": manual_lookup,
     })
     _cache_set(cache_key, result)
@@ -3782,6 +4140,341 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
         "gatePass": gate_pass,
         "dataDate": data_date,
         "note": note,
+    })
+
+
+# ---------------------------------------------------------------------------
+# get_filing_text_search — full-text search within a specific SEC filing HTML
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_filing_text_search",
+    description="""Full-text search within a specific SEC filing HTML document.
+
+Fetches the filing's primary HTM document from EDGAR and searches for one or more
+keywords/phrases. Returns surrounding context text and any HTML tables found near each match.
+
+Typical use: find geographic revenue tables, specific note disclosures, or any term in a 10-K.
+Get accession_number from get_sec_filings (accessionNumber field).
+
+Returns: matches (term, sectionHeading, contextText, tableParsed), filingUrl, fiscalYear.
+
+Args:
+    ticker: str
+        The ticker symbol, e.g. "GLW"
+    accession_number: str
+        Accession number from get_sec_filings, e.g. "0000024741-26-000124"
+    search_terms: list[str]
+        Keywords/phrases to search for, e.g. ["China", "geographic information"]
+    context_chars: int
+        Characters of surrounding context around each match (default 1500)
+    return_tables: bool
+        If true, parse any HTML tables within the context window (default true)
+""",
+)
+async def get_filing_text_search(
+    ticker: str,
+    accession_number: str,
+    search_terms: list[str],
+    context_chars: int = 1500,
+    return_tables: bool = True,
+) -> str:
+    """Search for keywords within an SEC filing HTML document."""
+    # Resolve primary document URL
+    primary_doc_url: str | None = None
+    fiscal_year: str | None = None
+    try:
+        tickers_map = await _load_edgar_tickers()
+        cik = tickers_map.get(ticker.upper())
+        if cik:
+            cik_padded = str(cik).zfill(10)
+            subs = await _edgar_get_submissions(cik_padded)
+            if subs:
+                recent = subs.get("filings", {}).get("recent", {})
+                accessions: list = recent.get("accessionNumber", [])
+                pdocs: list = recent.get("primaryDocument", [])
+                periods: list = recent.get("reportDate", [])
+                for i, acc in enumerate(accessions):
+                    if acc == accession_number:
+                        pdoc = pdocs[i] if i < len(pdocs) else None
+                        period = periods[i] if i < len(periods) else None
+                        if period:
+                            fiscal_year = f"FY{period[:4]}"
+                        _, primary_doc_url = _edgar_build_filing_urls(cik, acc, pdoc)
+                        break
+    except Exception:
+        pass
+
+    # Fall back: reconstruct URL directly from accession number if CIK lookup failed
+    if primary_doc_url is None:
+        # We can at minimum return the index URL
+        clean = accession_number.replace("-", "")
+        # CIK unknown without EDGAR lookup — return helpful error
+        return json.dumps({
+            "error": True,
+            "message": (
+                f"Could not resolve CIK for ticker '{ticker}'. "
+                "Ensure the ticker is valid and retry."
+            ),
+            "accessionNumber": accession_number,
+        })
+
+    html_text = await _edgar_get_html(primary_doc_url)
+    if not html_text:
+        return json.dumps({
+            "error": True,
+            "message": f"Could not fetch filing document from {primary_doc_url}",
+            "filingUrl": primary_doc_url,
+        })
+
+    html_lower = html_text.lower()
+    matches = []
+    seen_positions: set[int] = set()
+
+    for term in search_terms:
+        term_lower = term.lower()
+        idx = 0
+        while True:
+            pos = html_lower.find(term_lower, idx)
+            if pos == -1:
+                break
+            idx = pos + 1
+
+            # Deduplicate matches that are very close together
+            if any(abs(pos - sp) < 200 for sp in seen_positions):
+                continue
+            seen_positions.add(pos)
+
+            # Extract context window (strip tags to plain text)
+            ctx_start = max(0, pos - context_chars // 2)
+            ctx_end = min(len(html_text), pos + context_chars // 2)
+            context_html = html_text[ctx_start:ctx_end]
+            context_text = _strip_html_tags(context_html)
+
+            # Find nearest section heading
+            pre_html = html_text[max(0, pos - 8_000): pos]
+            h_matches = _re.findall(
+                r"<h[1-6][^>]*>(.*?)</h[1-6]>", pre_html, _re.IGNORECASE | _re.DOTALL
+            )
+            section_heading = _strip_html_tags(h_matches[-1]) if h_matches else ""
+
+            # Parse nearby tables
+            table_parsed: list[dict] = []
+            if return_tables:
+                tbl_search = html_text[max(0, pos - 2_000): min(len(html_text), pos + 60_000)]
+                for tbl_m in _re.finditer(r"<table[^>]*>", tbl_search, _re.IGNORECASE):
+                    abs_start = max(0, pos - 2_000) + tbl_m.start()
+                    # Find matching </table>
+                    depth = 0
+                    i = abs_start
+                    table_end = abs_start
+                    while i < min(len(html_text), abs_start + 200_000):
+                        o = html_lower.find("<table", i)
+                        c = html_lower.find("</table>", i)
+                        if o == -1 and c == -1:
+                            break
+                        if o != -1 and (c == -1 or o < c):
+                            depth += 1
+                            i = o + 6
+                        else:
+                            depth -= 1
+                            if depth == 0:
+                                table_end = c + 8
+                                break
+                            i = c + 8
+                    rows = _parse_html_table(html_text[abs_start:table_end])
+                    if len(rows) >= 2:
+                        table_parsed.append({"rows": rows})
+                    if len(table_parsed) >= 3:
+                        break  # Return at most 3 tables per match
+
+            matches.append({
+                "term": term,
+                "sectionHeading": section_heading or None,
+                "contextText": context_text,
+                "tableParsed": table_parsed if return_tables else None,
+            })
+
+            if len(matches) >= 5:  # Cap total matches per term
+                break
+
+    return json.dumps({
+        "ticker": ticker,
+        "accessionNumber": accession_number,
+        "filingUrl": primary_doc_url,
+        "fiscalYear": fiscal_year,
+        "searchTerms": search_terms,
+        "matches": matches,
+        "matchCount": len(matches),
+    })
+
+
+# ---------------------------------------------------------------------------
+# get_filing_document — retrieve a section of an SEC filing document
+# ---------------------------------------------------------------------------
+
+@yfinance_server.tool(
+    name="get_filing_document",
+    description="""Retrieve the readable text/HTML of a specific SEC filing document with smart section targeting.
+
+Fetches the primary HTM document from EDGAR (not the raw XBRL file). When section_hint is
+provided, returns only the matching section and surrounding context (~5 000 chars).
+When no hint is given, returns the filing table of contents (all <h*> section headings).
+
+Get accession_number from get_sec_filings (accessionNumber field).
+
+Returns: documentUrl, sectionsFound, sectionContent, tablesInSection, fiscalYear.
+
+Args:
+    ticker: str
+        The ticker symbol, e.g. "GLW"
+    accession_number: str
+        Accession number from get_sec_filings, e.g. "0000024741-26-000124"
+    section_hint: str
+        Optional keyword to target a specific section, e.g. "geographic", "China",
+        "risk factors", "segment information"
+    filing_type: str
+        "10-K" (default), "10-Q", or "8-K" — used only for display purposes
+""",
+)
+async def get_filing_document(
+    ticker: str,
+    accession_number: str,
+    section_hint: str | None = None,
+    filing_type: str = "10-K",
+) -> str:
+    """Retrieve a section of an SEC filing document."""
+    primary_doc_url: str | None = None
+    fiscal_year: str | None = None
+    try:
+        tickers_map = await _load_edgar_tickers()
+        cik = tickers_map.get(ticker.upper())
+        if cik:
+            cik_padded = str(cik).zfill(10)
+            subs = await _edgar_get_submissions(cik_padded)
+            if subs:
+                recent = subs.get("filings", {}).get("recent", {})
+                accessions: list = recent.get("accessionNumber", [])
+                pdocs: list = recent.get("primaryDocument", [])
+                periods: list = recent.get("reportDate", [])
+                for i, acc in enumerate(accessions):
+                    if acc == accession_number:
+                        pdoc = pdocs[i] if i < len(pdocs) else None
+                        period = periods[i] if i < len(periods) else None
+                        if period:
+                            fiscal_year = f"FY{period[:4]}"
+                        _, primary_doc_url = _edgar_build_filing_urls(cik, acc, pdoc)
+                        break
+    except Exception:
+        pass
+
+    if primary_doc_url is None:
+        return json.dumps({
+            "error": True,
+            "message": (
+                f"Could not resolve CIK for ticker '{ticker}'. "
+                "Ensure the ticker is valid and retry."
+            ),
+            "accessionNumber": accession_number,
+        })
+
+    html_text = await _edgar_get_html(primary_doc_url)
+    if not html_text:
+        return json.dumps({
+            "error": True,
+            "message": f"Could not fetch filing document from {primary_doc_url}",
+            "documentUrl": primary_doc_url,
+        })
+
+    # Extract all section headings from the document
+    html_lower = html_text.lower()
+    heading_matches = _re.findall(
+        r"<h[1-6][^>]*>(.*?)</h[1-6]>", html_text, _re.IGNORECASE | _re.DOTALL
+    )
+    sections_found = [_strip_html_tags(h) for h in heading_matches if _strip_html_tags(h)]
+
+    if not section_hint:
+        return json.dumps({
+            "ticker": ticker,
+            "accessionNumber": accession_number,
+            "documentUrl": primary_doc_url,
+            "fiscalYear": fiscal_year,
+            "filingType": filing_type,
+            "sectionsFound": sections_found,
+            "sectionContent": None,
+            "tablesInSection": None,
+            "_note": "Provide section_hint to retrieve specific section content.",
+        })
+
+    # Find the section matching the hint
+    hint_lower = section_hint.lower()
+    match_pos: int | None = None
+
+    # First: try heading tags
+    for h_m in _re.finditer(r"<h[1-6][^>]*>(.*?)</h[1-6]>", html_text, _re.IGNORECASE | _re.DOTALL):
+        heading_text = _strip_html_tags(h_m.group(1)).lower()
+        if hint_lower in heading_text:
+            match_pos = h_m.start()
+            break
+
+    # Fallback: any occurrence of the hint in the document
+    if match_pos is None:
+        match_pos = html_lower.find(hint_lower)
+
+    if match_pos is None:
+        return json.dumps({
+            "ticker": ticker,
+            "accessionNumber": accession_number,
+            "documentUrl": primary_doc_url,
+            "fiscalYear": fiscal_year,
+            "filingType": filing_type,
+            "sectionsFound": sections_found,
+            "sectionContent": None,
+            "tablesInSection": None,
+            "_note": f"Section hint '{section_hint}' not found in the filing document.",
+        })
+
+    # Extract ~5 000 chars of content after the match
+    section_html = html_text[match_pos: min(len(html_text), match_pos + 5_000)]
+    section_content = _strip_html_tags(section_html)
+
+    # Parse tables within a wider window (up to 60 000 chars)
+    tables_in_section: list[dict] = []
+    wide_html = html_text[match_pos: min(len(html_text), match_pos + 60_000)]
+    for tbl_m in _re.finditer(r"<table[^>]*>", wide_html, _re.IGNORECASE):
+        abs_start = match_pos + tbl_m.start()
+        depth = 0
+        i = abs_start
+        table_end = abs_start
+        while i < min(len(html_text), abs_start + 200_000):
+            o = html_lower.find("<table", i)
+            c = html_lower.find("</table>", i)
+            if o == -1 and c == -1:
+                break
+            if o != -1 and (c == -1 or o < c):
+                depth += 1
+                i = o + 6
+            else:
+                depth -= 1
+                if depth == 0:
+                    table_end = c + 8
+                    break
+                i = c + 8
+        rows = _parse_html_table(html_text[abs_start:table_end])
+        if len(rows) >= 2:
+            tables_in_section.append({"rows": rows})
+        if len(tables_in_section) >= 5:
+            break
+
+    return json.dumps({
+        "ticker": ticker,
+        "accessionNumber": accession_number,
+        "documentUrl": primary_doc_url,
+        "fiscalYear": fiscal_year,
+        "filingType": filing_type,
+        "sectionsFound": sections_found,
+        "sectionContent": section_content,
+        "tablesInSection": tables_in_section,
     })
 
 

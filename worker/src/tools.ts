@@ -10,6 +10,8 @@ import {
   getPriceTargetBracket,
   getEtfInfo,
   getFastInfo,
+  getFilingDocument,
+  getFilingTextSearch,
   getFinancialRatios,
   getFinancialStatement,
   getVolumeGate,
@@ -384,7 +386,9 @@ export const TOOLS: Tool[] = [
   {
     name: "get_sec_filings",
     description:
-      "Get recent SEC filings for a ticker (10-K, 10-Q, 8-K, etc.) with form type, filing date, and URL.",
+      "Get recent SEC filings for a ticker (10-K, 10-Q, 8-K, etc.) with form type, filing date, Yahoo URL, and direct EDGAR document URLs. " +
+      "Each filing now includes: accessionNumber, edgarIndexUrl (full index page on SEC.gov, always resolvable), " +
+      "edgarPrimaryDocumentUrl (direct HTM filing document — pass to get_filing_document or get_filing_text_search for in-filing research).",
     inputSchema: {
       type: "object",
       properties: {
@@ -617,7 +621,10 @@ export const TOOLS: Tool[] = [
   {
     name: "get_geographic_revenue",
     description:
-      "Get geographic revenue % for a specified region from SEC EDGAR filing metadata and yfinance data. Default region is 'China'. DC-151 classification for China: ≥20% BANNED (CLASS B) | 15–20% CHINA WATCH | ≤14.9% CLASS C eligible. Returns region, regionRevenuePct, regionRevenueUSD, fiscalYear, filingType, filingDate, segmentLabel, source, confidence (CONFIRMED | NOT_DISCLOSED). CONFIRMED satisfies DC-151 Rule 1 annual confirmation. Filing metadata (filingDate, fiscalYear) is always returned for manual 10-K lookup even when NOT_DISCLOSED.",
+      "Get geographic revenue % for a specified region from SEC EDGAR filing metadata and yfinance data. Default region is 'China'. DC-151 classification for China: ≥20% BANNED (CLASS B) | 15–20% CHINA WATCH | ≤14.9% CLASS C eligible. " +
+      "Returns region, regionRevenuePct, regionRevenueUSD, fiscalYear, filingType, filingDate, segmentLabel, source, confidence, sectionHeading (when HTML-parsed), primaryDocumentUrl. " +
+      "confidence levels: CONFIRMED (EDGAR XBRL — satisfies DC-151 Rule 1); PARSED_HTML (extracted from 10-K HTML table — DC-151 Rule 1 satisfied, human-equivalent read); NOT_DISCLOSED (not found — Rule 1 NOT satisfied). " +
+      "When NOT_DISCLOSED, _manualLookup is populated with direct EDGAR URLs and step-by-step instructions to locate the geographic segment table in the 10-K.",
     inputSchema: {
       type: "object",
       properties: {
@@ -687,6 +694,71 @@ export const TOOLS: Tool[] = [
         },
       },
       required: ["ticker"],
+    },
+  },
+  {
+    name: "get_filing_text_search",
+    description:
+      "Full-text search within a specific SEC filing HTML document for one or more keywords/phrases. " +
+      "Fetches the filing's primary HTM document from EDGAR and returns surrounding context text and any HTML tables found near each match. " +
+      "Typical use: find geographic revenue tables, specific note disclosures, or any term in a 10-K. " +
+      "Get accession_number from get_sec_filings (accessionNumber field). " +
+      "Returns: matches (term, sectionHeading, contextText, tableParsed), filingUrl, fiscalYear, matchCount.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'GLW'" },
+        accession_number: {
+          type: "string",
+          description: "Accession number from get_sec_filings, e.g. '0000024741-26-000124'",
+        },
+        search_terms: {
+          type: "array",
+          items: { type: "string" },
+          description: "Keywords/phrases to search for, e.g. ['China', 'geographic information']",
+        },
+        context_chars: {
+          type: "number",
+          description: "Characters of surrounding context around each match (default 1500)",
+          default: 1500,
+        },
+        return_tables: {
+          type: "boolean",
+          description: "If true, parse any HTML tables within the context window (default true)",
+          default: true,
+        },
+      },
+      required: ["ticker", "accession_number", "search_terms"],
+    },
+  },
+  {
+    name: "get_filing_document",
+    description:
+      "Retrieve the readable text of a specific SEC filing document with smart section targeting. " +
+      "Fetches the primary HTM document from EDGAR (not the raw XBRL file). " +
+      "When section_hint is provided, returns the matching section content and nearby tables (~5 000 chars). " +
+      "When no hint is given, returns the full list of section headings (table of contents). " +
+      "Get accession_number from get_sec_filings (accessionNumber field). " +
+      "Returns: documentUrl, sectionsFound, sectionContent, tablesInSection, fiscalYear.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'GLW'" },
+        accession_number: {
+          type: "string",
+          description: "Accession number from get_sec_filings, e.g. '0000024741-26-000124'",
+        },
+        section_hint: {
+          type: "string",
+          description: "Optional keyword to target a specific section, e.g. 'geographic', 'China', 'risk factors', 'segment information'",
+        },
+        filing_type: {
+          type: "string",
+          description: "'10-K' (default), '10-Q', or '8-K'",
+          default: "10-K",
+        },
+      },
+      required: ["ticker", "accession_number"],
     },
   },
   // ── Deprecated aliases (backward compat — remove in next major version) ──────
@@ -839,6 +911,21 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       return getOvernightQuote(str(args.ticker));
     case "get_geographic_revenue":
       return getGeographicRevenue(str(args.ticker), args.region != null ? str(args.region) : undefined);
+    case "get_filing_text_search":
+      return getFilingTextSearch(
+        str(args.ticker),
+        str(args.accession_number),
+        (args.search_terms as string[]) ?? [],
+        num(args.context_chars, 1500),
+        args.return_tables !== false,
+      );
+    case "get_filing_document":
+      return getFilingDocument(
+        str(args.ticker),
+        str(args.accession_number),
+        args.section_hint != null ? str(args.section_hint) : null,
+        str(args.filing_type, "10-K"),
+      );
     case "get_options_flow_scan":
       return getOptionsFlowScan(str(args.ticker), str(args.window_label));
     case "get_price_target_bracket":

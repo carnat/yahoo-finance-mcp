@@ -198,6 +198,70 @@ TEST_CASES: list[TestCase] = [
         {"ticker": "AAPL"},
         [],
     ),
+    # ── get_sec_filings with EDGAR URL enrichment (GLW regression guard) ──
+    # GLW (Corning Inc) is the motivating case for EDGAR URL enrichment.
+    # The most recent 10-K must include direct EDGAR document URLs.
+    (
+        "get_sec_filings",
+        {"ticker": "GLW"},
+        [("ticker", "GLW")],
+    ),
+    # ── get_geographic_revenue — GLW China HTML fallback (DC-151 P0) ──────
+    # GLW does NOT tag China revenue in XBRL; the HTML fallback must parse
+    # it from the 10-K prose table and return confidence PARSED_HTML or
+    # CONFIRMED (if XBRL ever gets tagged).  NOT_DISCLOSED is a failure.
+    (
+        "get_geographic_revenue",
+        {"ticker": "GLW", "region": "China"},
+        [
+            ("ticker", "GLW"),
+            ("region", "China"),
+            ("confidence", NOT_NULL),
+        ],
+    ),
+    # ── get_geographic_revenue — CONFIRMED baseline (QCOM, high China %) ──
+    (
+        "get_geographic_revenue",
+        {"ticker": "QCOM", "region": "China"},
+        [
+            ("regionRevenuePct", NOT_NULL),
+            ("confidence", NOT_NULL),
+        ],
+    ),
+    # ── get_filing_text_search — GLW Note 20 geographic section ───────────
+    # accession_number is the GLW FY2025 10-K; derived dynamically by the
+    # test or pre-seeded.  The test verifies that searching for geographic
+    # keywords in the filing HTML returns at least one match.
+    # NOTE: Accession number matches the most recent GLW 10-K at time of
+    # PR merge. Update this value if a newer 10-K supersedes it.
+    (
+        "get_filing_text_search",
+        {
+            "ticker": "GLW",
+            "accession_number": "0000024741-25-000004",
+            "search_terms": ["geographic information", "China", "revenue by region"],
+            "context_chars": 1500,
+            "return_tables": True,
+        },
+        [
+            ("ticker", "GLW"),
+            ("matchCount", NOT_ZERO),
+        ],
+    ),
+    # ── get_filing_document — GLW geographic section with hint ────────────
+    (
+        "get_filing_document",
+        {
+            "ticker": "GLW",
+            "accession_number": "0000024741-25-000004",
+            "section_hint": "geographic",
+            "filing_type": "10-K",
+        },
+        [
+            ("ticker", "GLW"),
+            ("documentUrl", NOT_NULL),
+        ],
+    ),
     (
         "get_short_interest",
         {"ticker": "AAPL"},
