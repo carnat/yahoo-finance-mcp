@@ -2488,12 +2488,12 @@ async function edgarPrimaryDocFromIndex(indexUrl: string): Promise<string | null
   );
   if (seq1) {
     const href = seq1[1].trim();
-    return href.includes("/") ? href.split("/").pop()! : href;
+    return href.includes("/") ? (href.split("/").pop() ?? href) : href;
   }
   // Fallback: return the first .htm link that is not the index file itself.
   const allHrefs = [...html.matchAll(/href=["']([^"']+\.htm)["']/gi)].map(m => m[1]);
   for (const href of allHrefs) {
-    const fname = href.includes("/") ? href.split("/").pop()! : href;
+    const fname = href.includes("/") ? (href.split("/").pop() ?? href) : href;
     if (!fname.toLowerCase().endsWith("-index.htm")) return fname;
   }
   return null;
