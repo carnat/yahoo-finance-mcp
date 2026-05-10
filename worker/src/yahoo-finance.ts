@@ -2505,8 +2505,8 @@ async function edgarPrimaryDocFromIndex(indexUrl: string): Promise<string | null
     const cells = [...rowHtml.matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(m => stripHtmlTags(m[1]));
     if (cells.length === 0) continue;
     const seq = (cells[0] ?? "").trim();
-    const docType = (cells[1] ?? "").trim().toUpperCase();
-    if (seq === "1" || docType.startsWith("10-K")) {
+    const documentType = (cells[1] ?? "").trim().toUpperCase();
+    if (seq === "1" || documentType.startsWith("10-K")) {
       const hrefM = rowHtml.match(/<a[^>]+href=["']([^"']+)["']/i);
       if (hrefM) {
         const fname = normalizeHref(hrefM[1]);

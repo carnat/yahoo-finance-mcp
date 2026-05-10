@@ -3151,8 +3151,8 @@ async def _edgar_primary_doc_from_index(index_url: str) -> str | None:
         cell_html = _re.findall(r"<t[dh][^>]*>([\s\S]*?)</t[dh]>", row_html, _re.IGNORECASE)
         if not cell_html:
             continue
-        seq = _strip_html_tags(cell_html[0]) if len(cell_html) >= 1 else ""
-        doc_type = _strip_html_tags(cell_html[1]) if len(cell_html) >= 2 else ""
+        seq = _strip_html_tags(cell_html[0]) if cell_html else ""
+        doc_type = _strip_html_tags(cell_html[1]) if len(cell_html) > 1 else ""
         if seq == "1" or doc_type.upper().startswith("10-K"):
             href_m = _re.search(r'<a[^>]+href=["\']([^"\']+)["\']', row_html, _re.IGNORECASE)
             if href_m:
