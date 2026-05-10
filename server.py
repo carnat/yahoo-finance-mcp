@@ -3117,6 +3117,39 @@ def _edgar_cik_from_accession(accession_number: str) -> int | None:
         return None
 
 
+async def _edgar_primary_doc_from_index(index_url: str) -> str | None:
+    """Fetch the EDGAR filing index HTM and return the primary document filename.
+
+    The EDGAR filing index page (e.g. ``0000024741-26-000124-index.htm``) contains a
+    table listing all documents for a filing.  The sequence-1 entry is the primary
+    document (e.g. ``glw-20251231.htm``).  This function is ticker- and naming-
+    convention-agnostic and works regardless of the EDGAR submissions window.
+
+    Returns the bare filename (suitable for passing to ``_edgar_build_filing_urls``),
+    or ``None`` if the page cannot be fetched or parsed.
+    """
+    html = await _edgar_get_html(index_url, max_bytes=500_000)
+    if not html:
+        return None
+    # The index table rows look like:
+    #   <td>1</td> <td>Description</td> <td><a href="primary.htm">primary.htm</a></td> ...
+    # Match the Seq=1 row and extract the href from the Document cell.
+    m = _re.search(
+        r"<tr[^>]*>[\s\S]*?<td[^>]*>\s*1\s*</td>[\s\S]*?<a[^>]+href=[\"']([^\"'#?]+)[\"']",
+        html,
+        _re.IGNORECASE,
+    )
+    if m:
+        href = m.group(1).strip()
+        return href.rsplit("/", 1)[-1]
+    # Fallback: return the first .htm link that is not the index file itself.
+    for href_m in _re.finditer(r'href=["\']([^"\']+\.htm)["\']', html, _re.IGNORECASE):
+        fname = href_m.group(1).rsplit("/", 1)[-1]
+        if not fname.lower().endswith("-index.htm"):
+            return fname
+    return None
+
+
 async def _edgar_get_html(url: str, max_bytes: int = 5_000_000) -> str | None:
     """Fetch an HTML document from EDGAR, reading at most max_bytes uncompressed bytes."""
     loop = asyncio.get_event_loop()
@@ -4257,6 +4290,21 @@ async def get_filing_text_search(
             except Exception:
                 pass
 
+    # Third fallback: derive CIK directly from the accession number and parse the primary
+    # document from the EDGAR filing index HTM.  This approach is ticker-agnostic and works
+    # even when the filing falls outside the EDGAR submissions window or when the submissions
+    # JSON has an empty/missing primaryDocument field.
+    if primary_doc_url is None:
+        fb_cik = _edgar_cik_from_accession(accession_number)
+        if fb_cik:
+            try:
+                idx_url, _ = _edgar_build_filing_urls(fb_cik, accession_number, None)
+                pdoc_fname = await _edgar_primary_doc_from_index(idx_url)
+                if pdoc_fname:
+                    _, primary_doc_url = _edgar_build_filing_urls(fb_cik, accession_number, pdoc_fname)
+            except Exception:
+                pass
+
     if primary_doc_url is None:
         return json.dumps({
             "error": True,
@@ -4441,6 +4489,21 @@ async def get_filing_document(
             except Exception:
                 pass
 
+    # Third fallback: derive CIK directly from the accession number and parse the primary
+    # document from the EDGAR filing index HTM.  This approach is ticker-agnostic and works
+    # even when the filing falls outside the EDGAR submissions window or when the submissions
+    # JSON has an empty/missing primaryDocument field.
+    if primary_doc_url is None:
+        fb_cik = _edgar_cik_from_accession(accession_number)
+        if fb_cik:
+            try:
+                idx_url, _ = _edgar_build_filing_urls(fb_cik, accession_number, None)
+                pdoc_fname = await _edgar_primary_doc_from_index(idx_url)
+                if pdoc_fname:
+                    _, primary_doc_url = _edgar_build_filing_urls(fb_cik, accession_number, pdoc_fname)
+            except Exception:
+                pass
+
     if primary_doc_url is None:
         return json.dumps({
             "error": True,
@@ -4452,6 +4515,7 @@ async def get_filing_document(
             "accessionNumber": accession_number,
         })
 
+    # Extract all section headings from the document
     html_text = await _edgar_get_html(primary_doc_url)
     if not html_text:
         return json.dumps({
@@ -4460,7 +4524,6 @@ async def get_filing_document(
             "documentUrl": primary_doc_url,
         })
 
-    # Extract all section headings from the document
     html_lower = html_text.lower()
     heading_matches = _re.findall(
         r"<h[1-6][^>]*>(.*?)</h[1-6]>", html_text, _re.IGNORECASE | _re.DOTALL

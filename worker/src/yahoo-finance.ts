@@ -2468,6 +2468,38 @@ function edgarBuildFilingUrls(
 }
 
 /**
+ * Fetch the EDGAR filing index HTM and return the primary document filename.
+ *
+ * The EDGAR filing index page (e.g. ``0000024741-26-000124-index.htm``) lists all
+ * documents for a filing. The sequence-1 entry is the primary document (e.g.
+ * ``glw-20251231.htm``). This function is ticker- and naming-convention-agnostic and
+ * works regardless of the EDGAR submissions window size.
+ *
+ * Returns the bare filename (suitable for passing to edgarBuildFilingUrls), or null on
+ * failure.
+ */
+async function edgarPrimaryDocFromIndex(indexUrl: string): Promise<string | null> {
+  const html = await edgarGetHtml(indexUrl);
+  if (!html) return null;
+  // The index table row for the primary document looks like:
+  //   <td>1</td> ... <a href="primary.htm">primary.htm</a>
+  const seq1 = html.match(
+    /<tr[^>]*>[\s\S]*?<td[^>]*>\s*1\s*<\/td>[\s\S]*?<a[^>]+href=["']([^"'#?]+)["']/i
+  );
+  if (seq1) {
+    const href = seq1[1].trim();
+    return href.includes("/") ? (href.split("/").pop() ?? href) : href;
+  }
+  // Fallback: return the first .htm link that is not the index file itself.
+  const allHrefs = [...html.matchAll(/href=["']([^"']+\.htm)["']/gi)].map(m => m[1]);
+  for (const href of allHrefs) {
+    const fname = href.includes("/") ? (href.split("/").pop() ?? href) : href;
+    if (!fname.toLowerCase().endsWith("-index.htm")) return fname;
+  }
+  return null;
+}
+
+/**
  * Derive the EDGAR CIK from an accession number.
  * The first 10 digits of an accession number are the zero-padded filer CIK.
  * e.g. "0000024741-26-000124" → 24741
@@ -3037,6 +3069,24 @@ export async function getFilingTextSearch(
     }
   }
 
+  // Third fallback: derive CIK directly from the accession number and parse the primary
+  // document from the EDGAR filing index HTM. This approach is ticker-agnostic and works
+  // even when the filing falls outside the EDGAR submissions window or when the submissions
+  // JSON has an empty/missing primaryDocument field.
+  if (!primaryDocUrl) {
+    const fbCik = edgarCikFromAccession(accessionNumber);
+    if (fbCik != null) {
+      try {
+        const { edgarIndexUrl } = edgarBuildFilingUrls(fbCik, accessionNumber, null);
+        const pdocFname = await edgarPrimaryDocFromIndex(edgarIndexUrl);
+        if (pdocFname) {
+          const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(fbCik, accessionNumber, pdocFname);
+          primaryDocUrl = edgarPrimaryDocumentUrl;
+        }
+      } catch { /* non-fatal */ }
+    }
+  }
+
   if (!primaryDocUrl) {
     return JSON.stringify({
       error: true,
@@ -3175,6 +3225,24 @@ export async function getFilingDocument(
               break;
             }
           }
+        }
+      } catch { /* non-fatal */ }
+    }
+  }
+
+  // Third fallback: derive CIK directly from the accession number and parse the primary
+  // document from the EDGAR filing index HTM. This approach is ticker-agnostic and works
+  // even when the filing falls outside the EDGAR submissions window or when the submissions
+  // JSON has an empty/missing primaryDocument field.
+  if (!primaryDocUrl) {
+    const fbCik = edgarCikFromAccession(accessionNumber);
+    if (fbCik != null) {
+      try {
+        const { edgarIndexUrl } = edgarBuildFilingUrls(fbCik, accessionNumber, null);
+        const pdocFname = await edgarPrimaryDocFromIndex(edgarIndexUrl);
+        if (pdocFname) {
+          const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(fbCik, accessionNumber, pdocFname);
+          primaryDocUrl = edgarPrimaryDocumentUrl;
         }
       } catch { /* non-fatal */ }
     }
