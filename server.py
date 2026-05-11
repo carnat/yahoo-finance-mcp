@@ -4282,6 +4282,10 @@ Args:
     text_only: bool
         If true, run keyword search on stripped plain text only (no table parsing),
         useful for LLM-first extraction workflows.
+    document_url: str
+        Optional. Pre-resolved primary document URL from get_sec_filings
+        (edgarPrimaryDocumentUrl field). When provided, skips all EDGAR resolution
+        and fetches the document directly.
 """,
 )
 async def get_filing_text_search(
@@ -4291,33 +4295,36 @@ async def get_filing_text_search(
     context_chars: int = 1500,
     return_tables: bool = True,
     text_only: bool = False,
+    document_url: str | None = None,
 ) -> str:
     """Search for keywords within an SEC filing HTML document."""
-    # Resolve primary document URL
-    primary_doc_url: str | None = None
+    # When the caller already provides the resolved document URL (e.g. from
+    # get_sec_filings edgarPrimaryDocumentUrl), skip all EDGAR resolution calls.
+    primary_doc_url: str | None = document_url if document_url else None
     fiscal_year: str | None = None
     fallback_index_url: str | None = None
-    try:
-        tickers_map = await _load_edgar_tickers()
-        cik = tickers_map.get(ticker.upper())
-        if cik:
-            cik_padded = str(cik).zfill(10)
-            subs = await _edgar_get_submissions(cik_padded)
-            if subs:
-                recent = subs.get("filings", {}).get("recent", {})
-                accessions: list = recent.get("accessionNumber", [])
-                pdocs: list = recent.get("primaryDocument", [])
-                periods: list = recent.get("reportDate", [])
-                for i, acc in enumerate(accessions):
-                    if acc == accession_number:
-                        pdoc = pdocs[i] if i < len(pdocs) else None
-                        period = periods[i] if i < len(periods) else None
-                        if period:
-                            fiscal_year = f"FY{period[:4]}"
-                        _, primary_doc_url = _edgar_build_filing_urls(cik, acc, pdoc)
-                        break
-    except Exception:
-        pass
+    if not primary_doc_url:
+        try:
+            tickers_map = await _load_edgar_tickers()
+            cik = tickers_map.get(ticker.upper())
+            if cik:
+                cik_padded = str(cik).zfill(10)
+                subs = await _edgar_get_submissions(cik_padded)
+                if subs:
+                    recent = subs.get("filings", {}).get("recent", {})
+                    accessions: list = recent.get("accessionNumber", [])
+                    pdocs: list = recent.get("primaryDocument", [])
+                    periods: list = recent.get("reportDate", [])
+                    for i, acc in enumerate(accessions):
+                        if acc == accession_number:
+                            pdoc = pdocs[i] if i < len(pdocs) else None
+                            period = periods[i] if i < len(periods) else None
+                            if period:
+                                fiscal_year = f"FY{period[:4]}"
+                            _, primary_doc_url = _edgar_build_filing_urls(cik, acc, pdoc)
+                            break
+        except Exception:
+            pass
 
     # Fallback: derive CIK from the accession number prefix when ticker→CIK lookup failed
     # or when the accession is not present in the most-recent submissions window.
@@ -4532,6 +4539,10 @@ Args:
         "risk factors", "segment information"
     filing_type: str
         "10-K" (default), "10-Q", or "8-K" — used only for display purposes
+    document_url: str
+        Optional. Pre-resolved primary document URL from get_sec_filings
+        (edgarPrimaryDocumentUrl field). When provided, skips all EDGAR resolution
+        and fetches the document directly.
 """,
 )
 async def get_filing_document(
@@ -4539,31 +4550,35 @@ async def get_filing_document(
     accession_number: str,
     section_hint: str | None = None,
     filing_type: str = "10-K",
+    document_url: str | None = None,
 ) -> str:
     """Retrieve a section of an SEC filing document."""
-    primary_doc_url: str | None = None
+    # When the caller already provides the resolved document URL (e.g. from
+    # get_sec_filings edgarPrimaryDocumentUrl), skip all EDGAR resolution calls.
+    primary_doc_url: str | None = document_url if document_url else None
     fiscal_year: str | None = None
-    try:
-        tickers_map = await _load_edgar_tickers()
-        cik = tickers_map.get(ticker.upper())
-        if cik:
-            cik_padded = str(cik).zfill(10)
-            subs = await _edgar_get_submissions(cik_padded)
-            if subs:
-                recent = subs.get("filings", {}).get("recent", {})
-                accessions: list = recent.get("accessionNumber", [])
-                pdocs: list = recent.get("primaryDocument", [])
-                periods: list = recent.get("reportDate", [])
-                for i, acc in enumerate(accessions):
-                    if acc == accession_number:
-                        pdoc = pdocs[i] if i < len(pdocs) else None
-                        period = periods[i] if i < len(periods) else None
-                        if period:
-                            fiscal_year = f"FY{period[:4]}"
-                        _, primary_doc_url = _edgar_build_filing_urls(cik, acc, pdoc)
-                        break
-    except Exception:
-        pass
+    if not primary_doc_url:
+        try:
+            tickers_map = await _load_edgar_tickers()
+            cik = tickers_map.get(ticker.upper())
+            if cik:
+                cik_padded = str(cik).zfill(10)
+                subs = await _edgar_get_submissions(cik_padded)
+                if subs:
+                    recent = subs.get("filings", {}).get("recent", {})
+                    accessions: list = recent.get("accessionNumber", [])
+                    pdocs: list = recent.get("primaryDocument", [])
+                    periods: list = recent.get("reportDate", [])
+                    for i, acc in enumerate(accessions):
+                        if acc == accession_number:
+                            pdoc = pdocs[i] if i < len(pdocs) else None
+                            period = periods[i] if i < len(periods) else None
+                            if period:
+                                fiscal_year = f"FY{period[:4]}"
+                            _, primary_doc_url = _edgar_build_filing_urls(cik, acc, pdoc)
+                            break
+        except Exception:
+            pass
 
     # Fallback: derive CIK from the accession number prefix when ticker→CIK lookup failed
     # or when the accession is not present in the most-recent submissions window.

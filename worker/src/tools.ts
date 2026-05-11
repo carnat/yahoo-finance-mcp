@@ -734,6 +734,10 @@ export const TOOLS: Tool[] = [
           description: "If true, keyword search runs on stripped plain text (no HTML table parsing), useful for LLM parsing.",
           default: false,
         },
+        document_url: {
+          type: "string",
+          description: "Optional: pre-resolved primary document URL from get_sec_filings (edgarPrimaryDocumentUrl field). When provided, skips EDGAR resolution and fetches directly.",
+        },
       },
       required: ["ticker", "accession_number", "search_terms"],
     },
@@ -764,6 +768,10 @@ export const TOOLS: Tool[] = [
           type: "string",
           description: "'10-K' (default), '10-Q', or '8-K'",
           default: "10-K",
+        },
+        document_url: {
+          type: "string",
+          description: "Optional: pre-resolved primary document URL from get_sec_filings (edgarPrimaryDocumentUrl field). When provided, skips EDGAR resolution and fetches directly.",
         },
       },
       required: ["ticker", "accession_number"],
@@ -927,6 +935,7 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
         num(args.context_chars, 1500),
         args.return_tables !== false,
         args.text_only === true,
+        args.document_url != null ? str(args.document_url) : null,
       );
     case "get_filing_document":
       return getFilingDocument(
@@ -934,6 +943,7 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
         str(args.accession_number),
         args.section_hint != null ? str(args.section_hint) : null,
         str(args.filing_type, "10-K"),
+        args.document_url != null ? str(args.document_url) : null,
       );
     case "get_options_flow_scan":
       return getOptionsFlowScan(str(args.ticker), str(args.window_label));

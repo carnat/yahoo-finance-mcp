@@ -229,9 +229,10 @@ TEST_CASES: list[TestCase] = [
         ],
     ),
     # ── get_filing_text_search — GLW Note 20 geographic section ───────────
-    # accession_number is resolved dynamically in main() by calling
-    # get_sec_filings for GLW and finding the latest 10-K accession.
-    # The placeholder "_DYNAMIC_GLW_10K_" is replaced before running the test.
+    # accession_number and document_url are resolved dynamically in main() by calling
+    # get_sec_filings for GLW and finding the latest 10-K filing.
+    # The placeholders "_DYNAMIC_GLW_10K_" and "_DYNAMIC_GLW_DOC_URL_" are replaced
+    # before running the test.
     (
         "get_filing_text_search",
         {
@@ -240,6 +241,7 @@ TEST_CASES: list[TestCase] = [
             "search_terms": ["geographic information", "China", "revenue by region"],
             "context_chars": 1500,
             "return_tables": True,
+            "document_url": "_DYNAMIC_GLW_DOC_URL_",
         },
         [
             ("ticker", "GLW"),
@@ -254,6 +256,7 @@ TEST_CASES: list[TestCase] = [
             "accession_number": "_DYNAMIC_GLW_10K_",
             "section_hint": "geographic",
             "filing_type": "10-K",
+            "document_url": "_DYNAMIC_GLW_DOC_URL_",
         },
         [
             ("ticker", "GLW"),
@@ -480,25 +483,31 @@ def _is_ok(
 
 # ── Dynamic accession lookup ──────────────────────────────────────────────────
 
-_DYNAMIC_GLW_10K = "_DYNAMIC_GLW_10K_"  # sentinel used in TEST_CASES
+_DYNAMIC_GLW_10K = "_DYNAMIC_GLW_10K_"        # sentinel for accession number
+_DYNAMIC_GLW_DOC_URL = "_DYNAMIC_GLW_DOC_URL_"  # sentinel for document URL
 
 
-def _resolve_glw_10k_accession(url: str) -> str | None:
-    """Call get_sec_filings for GLW and return the latest 10-K accession number."""
+def _resolve_glw_10k_accession(url: str) -> tuple[str | None, str | None]:
+    """Call get_sec_filings for GLW and return (accessionNumber, edgarPrimaryDocumentUrl)
+    for the latest 10-K filing.  The document URL lets filing tools skip EDGAR
+    re-resolution and use the already-resolved URL directly."""
     try:
         resp = _call(url, "get_sec_filings", {"ticker": "GLW"})
         result = resp.get("result", {})
         content = result.get("content", [])
         if not content:
-            return None
+            return None, None
         text = content[0].get("text", "") if isinstance(content[0], dict) else ""
         data = json.loads(text)
         for filing in data.get("filings", []):
             if filing.get("type") == "10-K" and filing.get("accessionNumber"):
-                return filing["accessionNumber"]
+                return (
+                    filing["accessionNumber"],
+                    filing.get("edgarPrimaryDocumentUrl"),  # may be None
+                )
     except Exception:  # noqa: BLE001
         pass
-    return None
+    return None, None
 
 
 def main() -> None:
@@ -527,15 +536,22 @@ def main() -> None:
         sys.exit(2)
 
     # ── Resolve dynamic test parameters ───────────────────────────────────────
-    # Look up the latest GLW 10-K accession so the filing tests always use a
-    # current accession that is within EDGAR's submissions window.
+    # Look up the latest GLW 10-K accession and pre-resolved document URL so the
+    # filing tests always use a current accession and can bypass EDGAR re-resolution.
     print("Resolving latest GLW 10-K accession...", end=" ", flush=True)
-    glw_acc = _resolve_glw_10k_accession(url)
+    glw_acc, glw_doc_url = _resolve_glw_10k_accession(url)
     if glw_acc:
-        print(f"✅ {glw_acc}")
+        doc_url_label = glw_doc_url or "(null — EDGAR will re-resolve)"
+        print(f"✅ {glw_acc}  doc={doc_url_label}")
         for _, tool_args, _ in TEST_CASES:
             if tool_args.get("accession_number") == _DYNAMIC_GLW_10K:
                 tool_args["accession_number"] = glw_acc
+            if tool_args.get("document_url") == _DYNAMIC_GLW_DOC_URL:
+                if glw_doc_url:
+                    tool_args["document_url"] = glw_doc_url
+                else:
+                    # Remove the key so the tool falls back to EDGAR resolution
+                    tool_args.pop("document_url", None)
     else:
         print("⚠️  could not resolve — filing tests will be skipped")
     print()
