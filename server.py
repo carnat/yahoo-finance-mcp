@@ -1609,7 +1609,7 @@ async def get_sec_filings(ticker: str) -> str:
 
     result = json.dumps({
         "ticker": ticker,
-        "filings": [await _serialize_filing(f) for f in filings],
+        "filings": list(await asyncio.gather(*[_serialize_filing(f) for f in filings])),
     })
     _cache_set(cache_key, result)
     return result
