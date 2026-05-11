@@ -701,9 +701,11 @@ export const TOOLS: Tool[] = [
     description:
       "Full-text search within a specific SEC filing HTML document for one or more keywords/phrases. " +
       "Fetches the filing's primary HTM document from EDGAR and returns surrounding context text and any HTML tables found near each match. " +
+      "Set text_only=true for an alternative plain-text keyword search mode optimized for LLM parsing. " +
       "Typical use: find geographic revenue tables, specific note disclosures, or any term in a 10-K. " +
       "Get accession_number from get_sec_filings (accessionNumber field). " +
-      "Returns: matches (term, sectionHeading, contextText, tableParsed), filingUrl, fiscalYear, matchCount.",
+      "Returns: matches (term, sectionHeading, contextText, tableParsed), filingUrl, fiscalYear, matchCount. " +
+      "On EDGAR resolution/fetch issues, returns structured fallback payload with _note instead of error=true.",
     inputSchema: {
       type: "object",
       properties: {
@@ -727,6 +729,11 @@ export const TOOLS: Tool[] = [
           description: "If true, parse any HTML tables within the context window (default true)",
           default: true,
         },
+        text_only: {
+          type: "boolean",
+          description: "If true, keyword search runs on stripped plain text (no HTML table parsing), useful for LLM parsing.",
+          default: false,
+        },
       },
       required: ["ticker", "accession_number", "search_terms"],
     },
@@ -739,7 +746,8 @@ export const TOOLS: Tool[] = [
       "When section_hint is provided, returns the matching section content and nearby tables (~5 000 chars). " +
       "When no hint is given, returns the full list of section headings (table of contents). " +
       "Get accession_number from get_sec_filings (accessionNumber field). " +
-      "Returns: documentUrl, sectionsFound, sectionContent, tablesInSection, fiscalYear.",
+      "Returns: documentUrl, sectionsFound, sectionContent, tablesInSection, fiscalYear. " +
+      "On EDGAR resolution/fetch issues, returns structured fallback payload with _note instead of error=true.",
     inputSchema: {
       type: "object",
       properties: {
@@ -918,6 +926,7 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
         (args.search_terms as string[]) ?? [],
         num(args.context_chars, 1500),
         args.return_tables !== false,
+        args.text_only === true,
       );
     case "get_filing_document":
       return getFilingDocument(

@@ -3032,16 +3032,52 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
 
 // ── get_filing_text_search ────────────────────────────────────────────────────
 
+type FilingTextSearchMatch = {
+  term: string;
+  sectionHeading: string | null;
+  contextText: string;
+  tableParsed: unknown[] | null;
+};
+
+function filingTextOnlyMatches(text: string, searchTerms: string[], contextChars: number): FilingTextSearchMatch[] {
+  const textLower = text.toLowerCase();
+  const matches: FilingTextSearchMatch[] = [];
+  const seenPositions = new Set<number>();
+  const half = Math.floor(contextChars / 2);
+  for (const term of searchTerms) {
+    const termLower = term.toLowerCase();
+    let idx = 0;
+    while (matches.length < 5) {
+      const pos = textLower.indexOf(termLower, idx);
+      if (pos === -1) break;
+      idx = pos + 1;
+      if ([...seenPositions].some(sp => Math.abs(pos - sp) < 200)) continue;
+      seenPositions.add(pos);
+      const ctxStart = Math.max(0, pos - half);
+      const ctxEnd = Math.min(text.length, pos + half);
+      matches.push({
+        term,
+        sectionHeading: null,
+        contextText: text.slice(ctxStart, ctxEnd).trim(),
+        tableParsed: null,
+      });
+    }
+  }
+  return matches;
+}
+
 export async function getFilingTextSearch(
   ticker: string,
   accessionNumber: string,
   searchTerms: string[],
   contextChars: number = 1500,
   returnTables: boolean = true,
+  textOnly: boolean = false,
 ): Promise<string> {
   // Resolve primary document URL from EDGAR submissions
   let primaryDocUrl: string | null = null;
   let fiscalYear: string | null = null;
+  let fallbackIndexUrl: string | null = null;
   try {
     const cik = await edgarResolveCik(ticker);
     if (cik != null) {
@@ -3101,6 +3137,7 @@ export async function getFilingTextSearch(
     if (fbCik != null) {
       try {
         const { edgarIndexUrl } = edgarBuildFilingUrls(fbCik, accessionNumber, null);
+        fallbackIndexUrl = edgarIndexUrl;
         const pdocFname = await edgarPrimaryDocFromIndex(edgarIndexUrl);
         if (pdocFname) {
           const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(fbCik, accessionNumber, pdocFname);
@@ -3111,19 +3148,60 @@ export async function getFilingTextSearch(
   }
 
   if (!primaryDocUrl) {
+    const indexHtml = fallbackIndexUrl ? await edgarGetHtml(fallbackIndexUrl, 500_000) : null;
+    const indexText = indexHtml ? stripHtmlTags(indexHtml) : null;
+    const fallbackMatches = indexText
+      ? filingTextOnlyMatches(indexText, searchTerms, Math.max(contextChars, 1200))
+      : [];
     return JSON.stringify({
-      error: true,
-      message: `Could not resolve the primary document URL for accession '${accessionNumber}' (ticker '${ticker}'). The filing may be older than the EDGAR submissions window. Verify the accession number and ticker are correct.`,
+      ticker,
       accessionNumber,
+      filingUrl: null,
+      indexUrl: fallbackIndexUrl,
+      fiscalYear,
+      searchTerms,
+      matches: fallbackMatches,
+      matchCount: fallbackMatches.length,
+      searchMode: "index_text_fallback",
+      _note: `Primary document URL could not be resolved for accession '${accessionNumber}'. Returned text-only fallback from filing index page when available.`,
     });
   }
 
   const html = await edgarGetHtml(primaryDocUrl);
   if (!html) {
+    const indexHtml = fallbackIndexUrl ? await edgarGetHtml(fallbackIndexUrl, 500_000) : null;
+    const indexText = indexHtml ? stripHtmlTags(indexHtml) : null;
+    const fallbackMatches = indexText
+      ? filingTextOnlyMatches(indexText, searchTerms, Math.max(contextChars, 1200))
+      : [];
     return JSON.stringify({
-      error: true,
-      message: `Could not fetch filing document from ${primaryDocUrl}`,
+      ticker,
+      accessionNumber,
       filingUrl: primaryDocUrl,
+      indexUrl: fallbackIndexUrl,
+      fiscalYear,
+      searchTerms,
+      matches: fallbackMatches,
+      matchCount: fallbackMatches.length,
+      searchMode: "index_text_fallback",
+      _note: `Could not fetch filing document from ${primaryDocUrl}. Returned text-only fallback from filing index page when available.`,
+    });
+  }
+
+  if (textOnly) {
+    const plainText = stripHtmlTags(html);
+    const matches = filingTextOnlyMatches(plainText, searchTerms, contextChars);
+    return JSON.stringify({
+      ticker,
+      accessionNumber,
+      filingUrl: primaryDocUrl,
+      indexUrl: fallbackIndexUrl,
+      fiscalYear,
+      searchTerms,
+      matches,
+      matchCount: matches.length,
+      searchMode: "text_only",
+      _note: "Keyword search executed over stripped filing text (table parsing disabled).",
     });
   }
 
@@ -3186,10 +3264,12 @@ export async function getFilingTextSearch(
     ticker,
     accessionNumber,
     filingUrl: primaryDocUrl,
+    indexUrl: fallbackIndexUrl,
     fiscalYear,
     searchTerms,
     matches,
     matchCount: matches.length,
+    searchMode: "html_context",
   });
 }
 
@@ -3272,19 +3352,51 @@ export async function getFilingDocument(
   }
 
   if (!primaryDocUrl) {
+    const fbCik = edgarCikFromAccession(accessionNumber);
+    const indexUrl = fbCik != null
+      ? edgarBuildFilingUrls(fbCik, accessionNumber, null).edgarIndexUrl
+      : null;
+    const indexHtml = indexUrl ? await edgarGetHtml(indexUrl, 500_000) : null;
+    const indexText = indexHtml ? stripHtmlTags(indexHtml) : null;
+    const fallbackContent = sectionHint && indexText
+      ? filingTextOnlyMatches(indexText, [sectionHint], 5_000)[0]?.contextText ?? null
+      : null;
     return JSON.stringify({
-      error: true,
-      message: `Could not resolve the primary document URL for accession '${accessionNumber}' (ticker '${ticker}'). The filing may be older than the EDGAR submissions window. Verify the accession number and ticker are correct.`,
+      ticker,
       accessionNumber,
+      documentUrl: null,
+      indexUrl,
+      fiscalYear,
+      filingType,
+      sectionsFound: [],
+      sectionContent: fallbackContent,
+      tablesInSection: null,
+      _note: `Primary document URL could not be resolved for accession '${accessionNumber}'. Returned text-only fallback from filing index page when available.`,
     });
   }
 
   const html = await edgarGetHtml(primaryDocUrl);
   if (!html) {
+    const fbCik = edgarCikFromAccession(accessionNumber);
+    const indexUrl = fbCik != null
+      ? edgarBuildFilingUrls(fbCik, accessionNumber, null).edgarIndexUrl
+      : null;
+    const indexHtml = indexUrl ? await edgarGetHtml(indexUrl, 500_000) : null;
+    const indexText = indexHtml ? stripHtmlTags(indexHtml) : null;
+    const fallbackContent = sectionHint && indexText
+      ? filingTextOnlyMatches(indexText, [sectionHint], 5_000)[0]?.contextText ?? null
+      : null;
     return JSON.stringify({
-      error: true,
-      message: `Could not fetch filing document from ${primaryDocUrl}`,
+      ticker,
+      accessionNumber,
       documentUrl: primaryDocUrl,
+      indexUrl,
+      fiscalYear,
+      filingType,
+      sectionsFound: [],
+      sectionContent: fallbackContent,
+      tablesInSection: null,
+      _note: `Could not fetch filing document from ${primaryDocUrl}. Returned text-only fallback from filing index page when available.`,
     });
   }
 
