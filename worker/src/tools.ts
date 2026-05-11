@@ -2,7 +2,6 @@ import {
   getAnalystConsensus,
   getAnalystUpgradeRadar,
   getCalendar,
-  getGeographicRevenue,
   getCreditHealth,
   getOptionsFlowScan,
   getEarningsAnalysis,
@@ -10,8 +9,7 @@ import {
   getPriceTargetBracket,
   getEtfInfo,
   getFastInfo,
-  getFilingDocument,
-  getFilingTextSearch,
+  getFilingData,
   getFinancialRatios,
   getFinancialStatement,
   getVolumeGate,
@@ -27,11 +25,11 @@ import {
   getPriceStats,
   getPutHedgeCandidates,
   getRecommendations,
-  getSecFilings,
   getShortInterest,
   getShortMomentum,
   getTechnicalIndicators,
   getPositionScoreInputs,
+  searchFilingText,
   getVolumeRatio,
   screenStocks,
   searchTicker,
@@ -385,10 +383,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "get_sec_filings",
-    description:
-      "Get recent SEC filings for a ticker (10-K, 10-Q, 8-K, etc.) with form type, filing date, Yahoo URL, and direct EDGAR document URLs. " +
-      "Each filing now includes: accessionNumber, edgarIndexUrl (full index page on SEC.gov, always resolvable), " +
-      "edgarPrimaryDocumentUrl (direct HTM filing document — pass to get_filing_document or get_filing_text_search for in-filing research).",
+    description: "[DEPRECATED] Internal-only helper retired. Use get_filing_data or search_filing_text.",
     inputSchema: {
       type: "object",
       properties: {
@@ -620,11 +615,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "get_geographic_revenue",
-    description:
-      "Get geographic revenue % for a specified region from SEC EDGAR filing metadata and yfinance data. Default region is 'China'. DC-151 classification for China: ≥20% BANNED (CLASS B) | 15–20% CHINA WATCH | ≤14.9% CLASS C eligible. " +
-      "Returns region, regionRevenuePct, regionRevenueUSD, fiscalYear, filingType, filingDate, segmentLabel, source, confidence, sectionHeading (when HTML-parsed), primaryDocumentUrl. " +
-      "confidence levels: CONFIRMED (EDGAR XBRL — satisfies DC-151 Rule 1); PARSED_HTML (extracted from 10-K HTML table — DC-151 Rule 1 satisfied, human-equivalent read); NOT_DISCLOSED (not found — Rule 1 NOT satisfied). " +
-      "When NOT_DISCLOSED, _manualLookup is populated with direct EDGAR URLs and step-by-step instructions to locate the geographic segment table in the 10-K.",
+    description: "[DEPRECATED] Use get_filing_data with fact_type='geographic_revenue'.",
     inputSchema: {
       type: "object",
       properties: {
@@ -633,6 +624,85 @@ export const TOOLS: Tool[] = [
           type: "string",
           description: "Geographic region to query, e.g. 'China', 'Europe', 'Americas', 'Asia Pacific', 'Japan'. Defaults to 'China'.",
           default: "China",
+        },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_filing_data",
+    description:
+      "Retrieve structured XBRL-tagged financial facts from EDGAR. Try this tool before search_filing_text for GAAP line items and geographic revenue.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Ticker symbol, e.g. 'GLW'" },
+        fact_type: {
+          type: "string",
+          enum: [
+            "geographic_revenue",
+            "segment_revenue",
+            "capex",
+            "rd_expense",
+            "operating_income",
+            "net_income",
+            "total_revenue",
+            "long_term_debt",
+            "cash",
+          ],
+          description: "Fact type to retrieve from EDGAR companyconcept.",
+        },
+        region: {
+          type: "string",
+          description: "Required for fact_type='geographic_revenue'.",
+        },
+        filing_type: {
+          type: "string",
+          enum: ["10-K", "10-Q"],
+          default: "10-K",
+        },
+        period: {
+          type: "string",
+          enum: ["latest", "all"],
+          default: "latest",
+        },
+      },
+      required: ["ticker", "fact_type"],
+    },
+  },
+  {
+    name: "search_filing_text",
+    description:
+      "Full-text search or section retrieval from SEC filing HTML. Use only when get_filing_data returns NOT_DISCLOSED or the fact is not XBRL-tagged.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Ticker symbol, e.g. 'GLW'" },
+        search_terms: {
+          type: "array",
+          items: { type: "string" },
+          description: "Keywords to search for in filing text.",
+        },
+        section_hint: {
+          type: "string",
+          description: "Optional section/heading hint.",
+        },
+        filing_type: {
+          type: "string",
+          enum: ["10-K", "10-Q", "8-K"],
+          default: "10-K",
+        },
+        accession_number: {
+          type: "string",
+          description: "Optional accession number; if omitted latest filing is selected from submissions.",
+        },
+        context_chars: {
+          type: "number",
+          default: 1500,
+        },
+        return_tables: {
+          type: "boolean",
+          default: true,
         },
       },
       required: ["ticker"],
@@ -698,14 +768,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "get_filing_text_search",
-    description:
-      "Full-text search within a specific SEC filing HTML document for one or more keywords/phrases. " +
-      "Fetches the filing's primary HTM document from EDGAR and returns surrounding context text and any HTML tables found near each match. " +
-      "Set text_only=true for an alternative plain-text keyword search mode optimized for LLM parsing. " +
-      "Typical use: find geographic revenue tables, specific note disclosures, or any term in a 10-K. " +
-      "Get accession_number from get_sec_filings (accessionNumber field). " +
-      "Returns: matches (term, sectionHeading, contextText, tableParsed), filingUrl, fiscalYear, matchCount. " +
-      "On EDGAR resolution/fetch issues, returns structured fallback payload with _note instead of error=true.",
+    description: "[DEPRECATED] Use search_filing_text (search_terms).",
     inputSchema: {
       type: "object",
       properties: {
@@ -744,14 +807,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "get_filing_document",
-    description:
-      "Retrieve the readable text of a specific SEC filing document with smart section targeting. " +
-      "Fetches the primary HTM document from EDGAR (not the raw XBRL file). " +
-      "When section_hint is provided, returns the matching section content and nearby tables (~5 000 chars). " +
-      "When no hint is given, returns the full list of section headings (table of contents). " +
-      "Get accession_number from get_sec_filings (accessionNumber field). " +
-      "Returns: documentUrl, sectionsFound, sectionContent, tablesInSection, fiscalYear. " +
-      "On EDGAR resolution/fetch issues, returns structured fallback payload with _note instead of error=true.",
+    description: "[DEPRECATED] Use search_filing_text (section_hint).",
     inputSchema: {
       type: "object",
       properties: {
@@ -894,7 +950,7 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
     case "screen_stocks":
       return screenStocks(str(args.screener_name), num(args.count, 25));
     case "get_sec_filings":
-      return getSecFilings(str(args.ticker));
+      return JSON.stringify({ deprecated: true, useInstead: "search_filing_text" });
     case "get_short_interest":
       return getShortInterest(str(args.ticker));
     case "get_technical_indicators":
@@ -926,25 +982,29 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
     case "get_overnight_quote":
       return getOvernightQuote(str(args.ticker));
     case "get_geographic_revenue":
-      return getGeographicRevenue(str(args.ticker), args.region != null ? str(args.region) : undefined);
-    case "get_filing_text_search":
-      return getFilingTextSearch(
+      return JSON.stringify({ deprecated: true, useInstead: "get_filing_data" });
+    case "get_filing_data":
+      return getFilingData(
         str(args.ticker),
-        str(args.accession_number),
-        (args.search_terms as string[]) ?? [],
-        num(args.context_chars, 1500),
-        args.return_tables !== false,
-        args.text_only === true,
-        args.document_url != null ? str(args.document_url) : null,
+        str(args.fact_type),
+        args.region != null ? str(args.region) : null,
+        str(args.filing_type, "10-K"),
+        str(args.period, "latest"),
       );
-    case "get_filing_document":
-      return getFilingDocument(
+    case "search_filing_text":
+      return searchFilingText(
         str(args.ticker),
-        str(args.accession_number),
+        (args.search_terms as string[]) ?? [],
         args.section_hint != null ? str(args.section_hint) : null,
         str(args.filing_type, "10-K"),
-        args.document_url != null ? str(args.document_url) : null,
+        args.accession_number != null ? str(args.accession_number) : null,
+        num(args.context_chars, 1500),
+        args.return_tables !== false,
       );
+    case "get_filing_text_search":
+      return JSON.stringify({ deprecated: true, useInstead: "search_filing_text" });
+    case "get_filing_document":
+      return JSON.stringify({ deprecated: true, useInstead: "search_filing_text" });
     case "get_options_flow_scan":
       return getOptionsFlowScan(str(args.ticker), str(args.window_label));
     case "get_price_target_bracket":
@@ -955,7 +1015,7 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       return getVolumeGate(str(args.ticker), args.foreign_exchange === true);
     // ── Deprecated aliases (backward compat) ──────────────────────────────────
     case "get_china_revenue_pct":
-      return getGeographicRevenue(str(args.ticker), "China");
+      return getFilingData(str(args.ticker), "geographic_revenue", "China", "10-K", "latest");
     case "get_dc134_options_scan":
       return getOptionsFlowScan(str(args.ticker), str(args.window_day));
     case "get_eqf_bracket":

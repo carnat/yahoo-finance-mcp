@@ -2426,7 +2426,22 @@ const _optionsFlowCache = new Map<string, { data: Record<string, unknown>; store
 // EDGAR fair-access policy requires a reachable contact in the User-Agent.
 // Replace the URL/contact below with one owned by the operator, or inject
 // via the EDGAR_CONTACT_EMAIL Cloudflare secret / var.
-const EDGAR_UA = "yahoo-finance-mcp/1.0 (https://github.com/carnat/yahoo-finance-mcp)";
+const EDGAR_UA = "yahoo-finance-mcp contact@example.com";
+
+const filingCikCache = new Map<string, string>();
+const filingSubmissionsCache = new Map<string, Record<string, unknown>>();
+
+const FILING_FACT_CONCEPTS: Record<string, { primary: string; fallback?: string }> = {
+  geographic_revenue: { primary: "RevenueFromContractWithCustomerExcludingAssessedTax", fallback: "Revenues" },
+  segment_revenue: { primary: "RevenueFromContractWithCustomerExcludingAssessedTax", fallback: "Revenues" },
+  capex: { primary: "PaymentsToAcquirePropertyPlantAndEquipment" },
+  rd_expense: { primary: "ResearchAndDevelopmentExpense" },
+  operating_income: { primary: "OperatingIncomeLoss" },
+  net_income: { primary: "NetIncomeLoss" },
+  total_revenue: { primary: "RevenueFromContractWithCustomerExcludingAssessedTax", fallback: "Revenues" },
+  long_term_debt: { primary: "LongTermDebt" },
+  cash: { primary: "CashAndCashEquivalentsAtCarryingValue" },
+};
 
 // Confirmed China revenue figures from manually verified 10-K filings.
 // Mirrors the _CHINA_REVENUE_CONFIRMED lookup in server.py.
@@ -2592,6 +2607,64 @@ async function edgarResolveCik(ticker: string): Promise<number | null> {
     if (entry.ticker.toUpperCase() === upper) return entry.cik_str;
   }
   return null;
+}
+
+async function resolveCikForTicker(ticker: string): Promise<string | null> {
+  const key = ticker.toUpperCase();
+  const cached = filingCikCache.get(key);
+  if (cached) return cached;
+
+  try {
+    const sec = await yGet(
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=secFilings`
+    ) as Record<string, unknown>;
+    const result = (sec?.quoteSummary as Record<string, unknown[]>)?.result?.[0] as Record<string, unknown> | undefined;
+    const secFilings = result?.secFilings as Record<string, unknown> | undefined;
+    const cikFromYahoo = secFilings?.cik as string | number | undefined;
+    if (cikFromYahoo != null) {
+      const cik = String(cikFromYahoo).replace(/\D/g, "").padStart(10, "0");
+      filingCikCache.set(key, cik);
+      return cik;
+    }
+  } catch { /* non-fatal */ }
+
+  const cikFromTickerFile = await edgarResolveCik(ticker);
+  if (cikFromTickerFile != null) {
+    const cik = String(cikFromTickerFile).padStart(10, "0");
+    filingCikCache.set(key, cik);
+    return cik;
+  }
+
+  try {
+    const atom = await fetch(
+      `https://www.sec.gov/cgi-bin/browse-edgar?company=${encodeURIComponent(ticker)}&action=getcompany&output=atom`,
+      { headers: { "User-Agent": EDGAR_UA } }
+    );
+    if (atom.ok) {
+      const text = await atom.text();
+      const m = text.match(/CIK=(\d{1,10})/);
+      if (m) {
+        const cik = m[1].padStart(10, "0");
+        filingCikCache.set(key, cik);
+        return cik;
+      }
+    } else {
+      await atom.body?.cancel();
+    }
+  } catch { /* non-fatal */ }
+
+  return null;
+}
+
+async function getSubmissionsForTicker(ticker: string): Promise<{ cikPadded: string | null; submissions: Record<string, unknown> | null }> {
+  const key = ticker.toUpperCase();
+  const cachedSubmissions = filingSubmissionsCache.get(key) ?? null;
+  const cikPadded = await resolveCikForTicker(ticker);
+  if (!cikPadded) return { cikPadded: null, submissions: null };
+  if (cachedSubmissions) return { cikPadded, submissions: cachedSubmissions };
+  const submissions = await edgarGetJson(`https://data.sec.gov/submissions/CIK${cikPadded}.json`);
+  if (submissions) filingSubmissionsCache.set(key, submissions);
+  return { cikPadded, submissions };
 }
 
 /** Look up the most recent 10-K filing info for a CIK from EDGAR submissions. */
@@ -2817,6 +2890,349 @@ function extractGeoRevenueFromHtml(
   }
 
   return null;
+}
+
+function normalizeSegmentLabel(segment: unknown): string {
+  if (segment == null) return "";
+  if (Array.isArray(segment)) return segment.map((s) => normalizeSegmentLabel(s)).join(" ").trim();
+  if (typeof segment === "object") return Object.values(segment as Record<string, unknown>).map(String).join(" ").trim();
+  return String(segment).trim();
+}
+
+function regionMatches(segmentLabel: string, region: string, includeAsiaFallback = false): boolean {
+  const label = segmentLabel.toLowerCase();
+  const regionLower = region.toLowerCase();
+  if (label.includes(regionLower)) return true;
+  if (regionLower === "china") {
+    if (["country:cn", "greater china", "srt:chinamember"].some((t) => label.includes(t))) return true;
+    return includeAsiaFallback && label.includes("asiapacificmember");
+  }
+  return false;
+}
+
+function filingManualLookup(ticker: string, cikPadded: string | null, filingType: string): Record<string, unknown> {
+  const edgarIndexUrl = cikPadded
+    ? `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${cikPadded}&type=${filingType}&owner=include&count=10`
+    : `https://www.sec.gov/cgi-bin/browse-edgar?company=${encodeURIComponent(ticker)}&action=getcompany&type=${filingType}&owner=include&count=10`;
+  const eftsSearchUrl = `https://efts.sec.gov/LATEST/search-index?q=${encodeURIComponent(ticker)}&forms=${encodeURIComponent(filingType)}`;
+  return {
+    edgarIndexUrl,
+    eftsSearchUrl,
+    note: "Fact not XBRL-tagged. Use search_filing_text instead.",
+  };
+}
+
+export async function getFilingData(
+  ticker: string,
+  factType: string,
+  region: string | null = null,
+  filingType = "10-K",
+  period = "latest",
+): Promise<string> {
+  const config = FILING_FACT_CONCEPTS[factType];
+  if (!config) return JSON.stringify({ error: true, message: `Unsupported fact_type '${factType}'`, ticker });
+  if (factType === "geographic_revenue" && !region) {
+    return JSON.stringify({ error: true, message: "region is required for fact_type='geographic_revenue'", ticker });
+  }
+
+  const cikPadded = await resolveCikForTicker(ticker);
+  if (!cikPadded) {
+    return JSON.stringify({
+      ticker,
+      factType,
+      concept: config.primary,
+      value: null,
+      confidence: "NOT_DISCLOSED",
+      _manualLookup: filingManualLookup(ticker, null, filingType),
+    });
+  }
+
+  const fetchConcept = async (concept: string): Promise<Record<string, unknown> | null> =>
+    edgarGetJson(`https://data.sec.gov/api/xbrl/companyconcept/CIK${cikPadded}/us-gaap/${concept}.json`);
+
+  let concept = config.primary;
+  let conceptData = await fetchConcept(config.primary);
+  let facts = (((conceptData?.units as Record<string, unknown>)?.USD as Record<string, unknown>[]) ?? []);
+  if (!facts.length && config.fallback) {
+    const fb = await fetchConcept(config.fallback);
+    const fbFacts = (((fb?.units as Record<string, unknown>)?.USD as Record<string, unknown>[]) ?? []);
+    if (fbFacts.length) {
+      concept = config.fallback;
+      conceptData = fb;
+      facts = fbFacts;
+    }
+  }
+
+  let filtered = facts.filter((f) => String(f.form ?? "").toUpperCase() === filingType.toUpperCase());
+  if (!filtered.length) {
+    return JSON.stringify({
+      ticker,
+      factType,
+      concept,
+      value: null,
+      confidence: "NOT_DISCLOSED",
+      _manualLookup: filingManualLookup(ticker, cikPadded, filingType),
+    });
+  }
+  if (period === "latest") {
+    const latestFiled = filtered.map((f) => String(f.filed ?? "")).sort().slice(-1)[0];
+    filtered = filtered.filter((f) => String(f.filed ?? "") === latestFiled);
+  }
+
+  if (factType === "segment_revenue") {
+    const allSegments = filtered
+      .map((f) => {
+        const segmentLabel = normalizeSegmentLabel(f.segment);
+        if (!segmentLabel) return null;
+        return {
+          segmentLabel,
+          value: f.val ?? null,
+          fiscalYear: String(f.fy ?? ""),
+          fiscalPeriod: String(f.fp ?? ""),
+          filingDate: String(f.filed ?? ""),
+          accessionNumber: String(f.accn ?? ""),
+        };
+      })
+      .filter((v) => v != null);
+    return JSON.stringify({
+      ticker,
+      factType,
+      concept,
+      value: allSegments[0]?.value ?? null,
+      fiscalYear: allSegments[0]?.fiscalYear ?? null,
+      fiscalPeriod: allSegments[0]?.fiscalPeriod ?? null,
+      filingType,
+      filingDate: allSegments[0]?.filingDate ?? null,
+      accessionNumber: allSegments[0]?.accessionNumber ?? null,
+      source: "XBRL_COMPANYCONCEPT",
+      confidence: "CONFIRMED",
+      allSegments,
+    });
+  }
+
+  let picked: Record<string, unknown> | null = null;
+  let valuePct: number | null = null;
+  let segmentLabel: string | null = null;
+  if (factType === "geographic_revenue") {
+    picked = filtered.find((f) => {
+      const label = normalizeSegmentLabel(f.segment);
+      if (!label) return false;
+      if (regionMatches(label, region ?? "", false)) {
+        segmentLabel = label;
+        return true;
+      }
+      return false;
+    }) ?? null;
+    if (!picked && (region ?? "").toLowerCase() === "china") {
+      picked = filtered.find((f) => {
+        const label = normalizeSegmentLabel(f.segment);
+        if (!label) return false;
+        if (regionMatches(label, region ?? "", true)) {
+          segmentLabel = label;
+          return true;
+        }
+        return false;
+      }) ?? null;
+    }
+    if (picked) {
+      const accn = String(picked.accn ?? "");
+      const total = filtered.find((f) => String(f.accn ?? "") === accn && f.segment == null) ?? null;
+      const totalVal = total ? Number(total.val ?? 0) : 0;
+      const partVal = Number(picked.val ?? 0);
+      if (totalVal > 0) valuePct = partVal / totalVal;
+    }
+  } else {
+    picked = filtered.find((f) => f.segment == null) ?? filtered[0] ?? null;
+  }
+
+  if (!picked) {
+    return JSON.stringify({
+      ticker,
+      factType,
+      concept,
+      value: null,
+      confidence: "NOT_DISCLOSED",
+      _manualLookup: filingManualLookup(ticker, cikPadded, filingType),
+    });
+  }
+
+  return JSON.stringify({
+    ticker,
+    factType,
+    concept,
+    value: picked.val ?? null,
+    valuePct: factType === "geographic_revenue" ? valuePct : undefined,
+    fiscalYear: String(picked.fy ?? ""),
+    fiscalPeriod: String(picked.fp ?? ""),
+    filingType,
+    filingDate: String(picked.filed ?? ""),
+    segmentLabel,
+    accessionNumber: String(picked.accn ?? ""),
+    source: "XBRL_COMPANYCONCEPT",
+    confidence: "CONFIRMED",
+  });
+}
+
+export async function searchFilingText(
+  ticker: string,
+  searchTerms: string[] = [],
+  sectionHint: string | null = null,
+  filingType = "10-K",
+  accessionNumber: string | null = null,
+  contextChars = 1500,
+  returnTables = true,
+): Promise<string> {
+  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
+  if (!cikPadded || !submissions) {
+    return JSON.stringify({
+      ticker,
+      accessionNumber,
+      documentUrl: null,
+      fiscalYear: null,
+      filingType,
+      filingDate: null,
+      matches: [],
+      matchCount: 0,
+      confidence: "PARSED_HTML",
+      _note: "Could not resolve SEC submissions for ticker.",
+    });
+  }
+
+  const recent = ((submissions.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+  const forms = (recent.form as string[]) ?? [];
+  const accessions = (recent.accessionNumber as string[]) ?? [];
+  const primaryDocs = (recent.primaryDocument as string[]) ?? [];
+  const filingDates = (recent.filingDate as string[]) ?? [];
+  const reportDates = (recent.reportDate as string[]) ?? [];
+
+  let targetIndex = -1;
+  if (accessionNumber) {
+    targetIndex = accessions.findIndex((a) => a === accessionNumber);
+  } else {
+    targetIndex = forms.findIndex((f) => String(f).toUpperCase() === filingType.toUpperCase());
+    if (targetIndex >= 0) accessionNumber = accessions[targetIndex] ?? null;
+  }
+  if (targetIndex < 0 || !accessionNumber) {
+    return JSON.stringify({
+      ticker,
+      accessionNumber,
+      documentUrl: null,
+      fiscalYear: null,
+      filingType,
+      filingDate: null,
+      matches: [],
+      matchCount: 0,
+      confidence: "PARSED_HTML",
+      _note: `No ${filingType} filing found in submissions JSON.`,
+    });
+  }
+
+  const primaryDocument = primaryDocs[targetIndex] ?? null;
+  if (!primaryDocument) {
+    return JSON.stringify({
+      ticker,
+      accessionNumber,
+      documentUrl: null,
+      fiscalYear: null,
+      filingType,
+      filingDate: filingDates[targetIndex] ?? null,
+      matches: [],
+      matchCount: 0,
+      confidence: "PARSED_HTML",
+      _note: "primaryDocument missing in submissions JSON.",
+    });
+  }
+
+  const cik = parseInt(cikPadded, 10);
+  const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(cik, accessionNumber, primaryDocument);
+  if (!edgarPrimaryDocumentUrl) {
+    return JSON.stringify({
+      ticker,
+      accessionNumber,
+      documentUrl: null,
+      fiscalYear: null,
+      filingType,
+      filingDate: filingDates[targetIndex] ?? null,
+      matches: [],
+      matchCount: 0,
+      confidence: "PARSED_HTML",
+      _note: "Failed constructing filing document URL.",
+    });
+  }
+
+  const html = await edgarGetHtml(edgarPrimaryDocumentUrl, 5_000_000);
+  if (!html) {
+    return JSON.stringify({
+      ticker,
+      accessionNumber,
+      documentUrl: edgarPrimaryDocumentUrl,
+      fiscalYear: reportDates[targetIndex] ? `FY${String(reportDates[targetIndex]).slice(0, 4)}` : null,
+      filingType,
+      filingDate: filingDates[targetIndex] ?? null,
+      matches: [],
+      matchCount: 0,
+      confidence: "PARSED_HTML",
+      _note: "Unable to fetch filing HTML.",
+    });
+  }
+
+  const htmlLower = html.toLowerCase();
+  const size = Math.max(200, Math.min(Math.floor(contextChars), 4000));
+  const matches: Record<string, unknown>[] = [];
+  const seen = new Set<number>();
+
+  const addMatch = (term: string, pos: number) => {
+    if ([...seen].some((p) => Math.abs(p - pos) < 150)) return;
+    seen.add(pos);
+    const start = Math.max(0, pos - Math.floor(size / 2));
+    const end = Math.min(html.length, pos + Math.floor(size / 2));
+    const contextHtml = html.slice(start, end);
+    const preHtml = html.slice(Math.max(0, pos - 8_000), pos);
+    const headingMatches = [...preHtml.matchAll(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi)];
+    const sectionHeading = headingMatches.length ? stripHtmlTags(headingMatches[headingMatches.length - 1][1]) : "";
+    const match: Record<string, unknown> = {
+      term,
+      sectionHeading,
+      contextText: stripHtmlTags(contextHtml),
+    };
+    if (returnTables) {
+      const tableParsed: Record<string, unknown>[] = [];
+      for (const m of contextHtml.matchAll(/<table[^>]*>([\s\S]*?)<\/table>/gi)) {
+        const rows = parseHtmlTable(m[0]);
+        if (rows.length >= 2) tableParsed.push({ rows });
+        if (tableParsed.length >= 3) break;
+      }
+      match.tableParsed = tableParsed;
+    }
+    matches.push(match);
+  };
+
+  if (sectionHint) {
+    const pos = htmlLower.indexOf(sectionHint.toLowerCase());
+    if (pos >= 0) addMatch(sectionHint, pos);
+  }
+  for (const term of searchTerms) {
+    let idx = 0;
+    const termLower = term.toLowerCase();
+    while (matches.length < 10) {
+      const pos = htmlLower.indexOf(termLower, idx);
+      if (pos < 0) break;
+      addMatch(term, pos);
+      idx = pos + 1;
+    }
+  }
+
+  return JSON.stringify({
+    ticker,
+    accessionNumber,
+    documentUrl: edgarPrimaryDocumentUrl,
+    fiscalYear: reportDates[targetIndex] ? `FY${String(reportDates[targetIndex]).slice(0, 4)}` : null,
+    filingType,
+    filingDate: filingDates[targetIndex] ?? null,
+    matches,
+    matchCount: matches.length,
+    confidence: "PARSED_HTML",
+  });
 }
 
 export async function getGeographicRevenue(ticker: string, region: string = "China"): Promise<string> {

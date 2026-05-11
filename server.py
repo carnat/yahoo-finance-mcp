@@ -4,6 +4,7 @@ import html as _html_module
 import json
 import re as _re
 import time
+import urllib.parse as _urlparse
 from enum import Enum
 
 import pandas as pd
@@ -35,6 +36,18 @@ class HolderType(str, Enum):
 class RecommendationType(str, Enum):
     recommendations = "recommendations"
     upgrades_downgrades = "upgrades_downgrades"
+
+
+class FilingFactType(str, Enum):
+    geographic_revenue = "geographic_revenue"
+    segment_revenue = "segment_revenue"
+    capex = "capex"
+    rd_expense = "rd_expense"
+    operating_income = "operating_income"
+    net_income = "net_income"
+    total_revenue = "total_revenue"
+    long_term_debt = "long_term_debt"
+    cash = "cash"
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +210,8 @@ This server provides financial market data from Yahoo Finance.
 
 ### News & filings
 - get_yahoo_finance_news: Latest news articles.
-- get_sec_filings: Recent SEC filings (10-K, 10-Q, 8-K) with dates and links.
+- get_filing_data: Structured XBRL-tagged SEC filing facts (try this first for GAAP line items and geographic revenue).
+- search_filing_text: Full-text search/section retrieval on SEC filing HTML (use when facts are not XBRL-tagged).
 
 ### Technical analysis
 - get_technical_indicators: Pre-computed RSI-14 and MACD (12,26,9) from historical daily prices. Use for momentum/oversold screening without fetching raw history.
@@ -1483,136 +1497,453 @@ async def screen_stocks(screener_name: str, count: int = 25) -> str:
 
 @yfinance_server.tool(
     name="get_sec_filings",
-    description="""Get recent SEC filings for a ticker (10-K, 10-Q, 8-K, etc.).
-
-Returns a list of recent filings with form type, filing date, Yahoo URL, accession number,
-and direct EDGAR document URLs (edgarIndexUrl, edgarPrimaryDocumentUrl).
-
-edgarIndexUrl — full index page for the filing on SEC.gov (always resolvable).
-edgarPrimaryDocumentUrl — the primary HTM filing document; pass to get_filing_document
-  or get_filing_text_search for in-filing research.
-
-Args:
-    ticker: str
-        The ticker symbol, e.g. "AAPL"
-""",
+    description="[DEPRECATED] Internal-only helper retired. Use get_filing_data or search_filing_text.",
 )
 async def get_sec_filings(ticker: str) -> str:
-    """Get recent SEC filings for a ticker."""
-    cache_key = f"sec_filings:{ticker}"
-    cached = _cache_get(cache_key, _STMT_TTL)
-    if cached is not None:
+    return json.dumps({"deprecated": True, "useInstead": "search_filing_text"})
+
+
+# ---------------------------------------------------------------------------
+# Group 3.4b — get_filing_data / search_filing_text
+# ---------------------------------------------------------------------------
+
+_SEC_REQUIRED_UA = "yahoo-finance-mcp contact@example.com"
+_FILING_CIK_CACHE: dict[str, str] = {}
+_FILING_SUBMISSIONS_BY_TICKER: dict[str, dict] = {}
+
+_FILING_FACT_CONCEPTS: dict[FilingFactType, tuple[str, str | None]] = {
+    FilingFactType.geographic_revenue: ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"),
+    FilingFactType.segment_revenue: ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"),
+    FilingFactType.capex: ("PaymentsToAcquirePropertyPlantAndEquipment", None),
+    FilingFactType.rd_expense: ("ResearchAndDevelopmentExpense", None),
+    FilingFactType.operating_income: ("OperatingIncomeLoss", None),
+    FilingFactType.net_income: ("NetIncomeLoss", None),
+    FilingFactType.total_revenue: ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"),
+    FilingFactType.long_term_debt: ("LongTermDebt", None),
+    FilingFactType.cash: ("CashAndCashEquivalentsAtCarryingValue", None),
+}
+
+
+def _deprecated_payload(use_instead: str) -> str:
+    return json.dumps({"deprecated": True, "useInstead": use_instead})
+
+
+async def _resolve_cik_for_ticker(ticker: str) -> str | None:
+    t_upper = ticker.upper()
+    cached = _FILING_CIK_CACHE.get(t_upper)
+    if cached:
         return cached
-
-    company = yf.Ticker(ticker)
+    cik_raw = None
     try:
-        fi = company.fast_info
-        if fi.currency is None:
-            return f"Company ticker {ticker} not found."
-    except Exception as e:
-        print(f"Error: getting SEC filings for {ticker}: {e}")
-        return f"Error: getting SEC filings for {ticker}: {e}"
-
-    try:
-        filings = company.sec_filings
-    except Exception as e:
-        print(f"Error: getting SEC filings for {ticker}: {e}")
-        return f"Error: getting SEC filings for {ticker}: {e}"
-
-    # Build EDGAR submission index keyed by (form_type, filing_date) for URL enrichment.
-    edgar_url_map: dict[str, dict] = {}
-    try:
-        tickers_map = await _load_edgar_tickers()
-        cik = tickers_map.get(ticker.upper())
-        if cik:
-            cik_padded = str(cik).zfill(10)
-            subs = await _edgar_get_submissions(cik_padded)
-            if subs:
-                recent = subs.get("filings", {}).get("recent", {})
-                forms: list = recent.get("form", [])
-                dates: list = recent.get("filingDate", [])
-                accessions: list = recent.get("accessionNumber", [])
-                primary_docs: list = recent.get("primaryDocument", [])
-                for i, form in enumerate(forms):
-                    acc = accessions[i] if i < len(accessions) else None
-                    pdoc = primary_docs[i] if i < len(primary_docs) else None
-                    date = dates[i] if i < len(dates) else None
-                    if acc and date:
-                        idx_url, pdoc_url = _edgar_build_filing_urls(cik, acc, pdoc)
-                        edgar_url_map[f"{form}:{date}"] = {
-                            "accessionNumber": acc,
-                            "edgarIndexUrl": idx_url,
-                            "edgarPrimaryDocumentUrl": pdoc_url,
-                        }
+        cik_raw = yf.Ticker(ticker).info.get("cik")
     except Exception:
-        pass
+        cik_raw = None
+    if cik_raw:
+        cik_padded = str(cik_raw).strip().zfill(10)
+        _FILING_CIK_CACHE[t_upper] = cik_padded
+        return cik_padded
 
-    if not filings:
-        return json.dumps({"ticker": ticker, "filings": []})
+    atom_url = (
+        "https://www.sec.gov/cgi-bin/browse-edgar?"
+        f"company={_urlparse.quote(ticker)}&action=getcompany&output=atom"
+    )
+    loop = asyncio.get_event_loop()
 
-    async def _serialize_filing(f: dict) -> dict:
-        base = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in f.items()}
-        # Try to enrich with EDGAR URLs: match by (type, date).
-        # Use only the date portion (YYYY-MM-DD) in case yfinance returns a
-        # datetime whose isoformat() includes a time component.
-        form_type = str(base.get("type", ""))
-        date_str = str(base.get("date", ""))[:10]
-        edgar_info = edgar_url_map.get(f"{form_type}:{date_str}")
-        if edgar_info:
-            base["accessionNumber"] = edgar_info["accessionNumber"]
-            base["edgarIndexUrl"] = edgar_info["edgarIndexUrl"]
-            base["edgarPrimaryDocumentUrl"] = edgar_info["edgarPrimaryDocumentUrl"]
-        else:
-            # Fallback: try to extract accession + CIK from the edgarUrl.
-            edge_url = str(base.get("edgarUrl") or base.get("url") or "")
-            # Pattern 1: direct EDGAR Archives URL
-            # e.g. https://www.sec.gov/Archives/edgar/data/1234/000123456724000001/...
-            m = _re.search(r"/Archives/edgar/data/(\d+)/(\d{18})/", edge_url)
-            if m:
-                cik_from_url = int(m.group(1))
-                nodash = m.group(2)
-                acc = f"{nodash[:10]}-{nodash[10:12]}-{nodash[12:]}"
-                # Derive primary doc from the URL filename if available
-                fname = edge_url.split("/")[-1].split("?")[0] or None
-                idx_url, pdoc_url = _edgar_build_filing_urls(cik_from_url, acc, fname if fname else None)
-                base["accessionNumber"] = acc
-                base["edgarIndexUrl"] = idx_url
-                base["edgarPrimaryDocumentUrl"] = pdoc_url
-            else:
-                # Pattern 2: Yahoo Finance sec-filing proxy URL
-                # e.g. https://finance.yahoo.com/sec-filing/GLW/0000024741-26-000124_24741
-                m2 = _re.search(r"/sec-filing/[^/]+/(\d{10}-\d{2}-\d{6})_(\d+)", edge_url)
-                if m2:
-                    acc = m2.group(1)
-                    cik_from_url = int(m2.group(2))
-                    idx_url, _ = _edgar_build_filing_urls(cik_from_url, acc, None)
-                    base["accessionNumber"] = acc
-                    base["edgarIndexUrl"] = idx_url
-                    base["edgarPrimaryDocumentUrl"] = None
+    def _fetch_atom() -> str | None:
+        req = _urlreq.Request(atom_url, headers={"User-Agent": _SEC_REQUIRED_UA})
+        try:
+            with _urlreq.urlopen(req, timeout=15) as resp:  # noqa: S310
+                text = resp.read().decode("utf-8", errors="replace")
+            m = _re.search(r"CIK=(\d{1,10})", text)
+            return m.group(1).zfill(10) if m else None
+        except Exception:
+            return None
 
-        # For annual (10-K) filings: eagerly resolve the primary document URL from the
-        # EDGAR index page when it could not be determined from the submissions JSON or
-        # the Yahoo URL.  This avoids a second round-trip inside get_filing_document /
-        # get_filing_text_search.
-        if not base.get("edgarPrimaryDocumentUrl") and base.get("edgarIndexUrl") and form_type == "10-K":
+    cik_padded = await loop.run_in_executor(None, _fetch_atom)
+    if cik_padded:
+        _FILING_CIK_CACHE[t_upper] = cik_padded
+    return cik_padded
+
+
+async def _get_submissions_for_ticker(ticker: str) -> tuple[str | None, dict | None]:
+    t_upper = ticker.upper()
+    cached_subs = _FILING_SUBMISSIONS_BY_TICKER.get(t_upper)
+    if cached_subs is not None:
+        cik = _FILING_CIK_CACHE.get(t_upper)
+        return cik, cached_subs
+    cik_padded = await _resolve_cik_for_ticker(ticker)
+    if not cik_padded:
+        return None, None
+    subs = await _edgar_get_submissions(cik_padded)
+    if subs is not None:
+        _FILING_SUBMISSIONS_BY_TICKER[t_upper] = subs
+    return cik_padded, subs
+
+
+def _normalize_segment_label(segment: object) -> str:
+    if isinstance(segment, dict):
+        return " ".join(str(v) for v in segment.values() if v is not None)
+    if isinstance(segment, list):
+        return " ".join(_normalize_segment_label(s) for s in segment)
+    return str(segment or "")
+
+
+def _region_matches(label: str, region: str, include_asia_fallback: bool = False) -> bool:
+    label_low = label.lower()
+    region_low = region.lower()
+    if region_low in label_low:
+        return True
+    if region_low == "china":
+        base_tokens = ("country:cn", "greater china", "srt:chinamember")
+        if any(token in label_low for token in base_tokens):
+            return True
+        return include_asia_fallback and "asiapacificmember" in label_low
+    return False
+
+
+def _manual_lookup_payload(ticker: str, cik_padded: str | None, filing_type: str, note: str) -> dict:
+    edgar_index_url = (
+        f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik_padded}&type={filing_type}&owner=include&count=10"
+        if cik_padded
+        else f"https://www.sec.gov/cgi-bin/browse-edgar?company={ticker}&action=getcompany&type={filing_type}&owner=include&count=10"
+    )
+    efts_url = (
+        "https://efts.sec.gov/LATEST/search-index"
+        f"?q={_urlparse.quote(ticker)}&forms={_urlparse.quote(filing_type)}"
+    )
+    return {
+        "edgarIndexUrl": edgar_index_url,
+        "eftsSearchUrl": efts_url,
+        "note": note,
+    }
+
+
+@yfinance_server.tool(
+    name="get_filing_data",
+    description="""Retrieve structured XBRL-tagged financial facts from EDGAR.
+
+Try this tool before search_filing_text for GAAP line items or geographic revenue.
+""",
+)
+async def get_filing_data(
+    ticker: str,
+    fact_type: FilingFactType,
+    region: str | None = None,
+    filing_type: str = "10-K",
+    period: str = "latest",
+) -> str:
+    if fact_type == FilingFactType.geographic_revenue and not region:
+        return json.dumps({"error": True, "message": "region is required for fact_type='geographic_revenue'"})
+
+    concept_primary, concept_fallback = _FILING_FACT_CONCEPTS[fact_type]
+    cik_padded = await _resolve_cik_for_ticker(ticker)
+    if not cik_padded:
+        return json.dumps({
+            "ticker": ticker,
+            "factType": fact_type.value,
+            "concept": concept_primary,
+            "value": None,
+            "confidence": "NOT_DISCLOSED",
+            "_manualLookup": _manual_lookup_payload(
+                ticker, None, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."
+            ),
+        })
+
+    async def _concept_json(concept_name: str) -> dict | None:
+        return await _edgar_get(
+            f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik_padded}/us-gaap/{concept_name}.json"
+        )
+
+    concept_used = concept_primary
+    concept_data = await _concept_json(concept_primary)
+    usd_facts: list[dict] = (
+        concept_data.get("units", {}).get("USD", [])  # type: ignore[union-attr]
+        if concept_data else []
+    )
+    if not usd_facts and concept_fallback:
+        fallback_data = await _concept_json(concept_fallback)
+        fallback_usd = fallback_data.get("units", {}).get("USD", []) if fallback_data else []
+        if fallback_usd:
+            concept_used = concept_fallback
+            concept_data = fallback_data
+            usd_facts = fallback_usd
+
+    filtered = [f for f in usd_facts if str(f.get("form", "")).upper() == filing_type.upper()]
+    if not filtered:
+        return json.dumps({
+            "ticker": ticker,
+            "factType": fact_type.value,
+            "concept": concept_used,
+            "value": None,
+            "confidence": "NOT_DISCLOSED",
+            "_manualLookup": _manual_lookup_payload(
+                ticker, cik_padded, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."
+            ),
+        })
+
+    if period == "latest":
+        latest_filed = max(str(f.get("filed", "")) for f in filtered)
+        filtered = [f for f in filtered if str(f.get("filed", "")) == latest_filed]
+
+    if fact_type == FilingFactType.segment_revenue:
+        seg_rows = []
+        for f in filtered:
+            seg_label = _normalize_segment_label(f.get("segment"))
+            if not seg_label:
+                continue
+            seg_rows.append({
+                "segmentLabel": seg_label,
+                "value": f.get("val"),
+                "fiscalYear": str(f.get("fy") or ""),
+                "fiscalPeriod": str(f.get("fp") or ""),
+                "filingDate": str(f.get("filed") or ""),
+                "accessionNumber": str(f.get("accn") or ""),
+            })
+        return json.dumps({
+            "ticker": ticker,
+            "factType": fact_type.value,
+            "concept": concept_used,
+            "value": seg_rows[0]["value"] if seg_rows else None,
+            "fiscalYear": seg_rows[0]["fiscalYear"] if seg_rows else "",
+            "fiscalPeriod": seg_rows[0]["fiscalPeriod"] if seg_rows else "",
+            "filingType": filing_type,
+            "filingDate": seg_rows[0]["filingDate"] if seg_rows else "",
+            "accessionNumber": seg_rows[0]["accessionNumber"] if seg_rows else "",
+            "source": "XBRL_COMPANYCONCEPT",
+            "confidence": "CONFIRMED",
+            "allSegments": seg_rows,
+        })
+
+    picked: dict | None = None
+    value_pct: float | None = None
+    segment_label: str | None = None
+    if fact_type == FilingFactType.geographic_revenue:
+        for f in filtered:
+            seg_label = _normalize_segment_label(f.get("segment"))
+            if seg_label and _region_matches(seg_label, region or "", include_asia_fallback=False):
+                picked = f
+                segment_label = seg_label
+                break
+        if picked is None and (region or "").lower() == "china":
+            for f in filtered:
+                seg_label = _normalize_segment_label(f.get("segment"))
+                if seg_label and _region_matches(seg_label, region or "", include_asia_fallback=True):
+                    picked = f
+                    segment_label = seg_label
+                    break
+        if picked is not None:
+            accn = str(picked.get("accn") or "")
+            total_fact = next(
+                (
+                    f for f in filtered
+                    if str(f.get("accn") or "") == accn and not f.get("segment")
+                ),
+                None,
+            )
             try:
-                fname = await _edgar_primary_doc_from_index(base["edgarIndexUrl"])
-                if fname:
-                    acc = base.get("accessionNumber") or ""
-                    cik_part = int(acc.replace("-", "")[:10]) if acc else 0
-                    if cik_part:
-                        _, pdoc_url = _edgar_build_filing_urls(cik_part, acc, fname)
-                        base["edgarPrimaryDocumentUrl"] = pdoc_url
+                if total_fact and float(total_fact.get("val", 0)) > 0:
+                    value_pct = float(picked.get("val", 0)) / float(total_fact.get("val", 0))
             except Exception:
-                pass
-        return base
+                value_pct = None
+    else:
+        picked = next((f for f in filtered if not f.get("segment")), filtered[0] if filtered else None)
 
-    result = json.dumps({
+    if picked is None:
+        return json.dumps({
+            "ticker": ticker,
+            "factType": fact_type.value,
+            "concept": concept_used,
+            "value": None,
+            "confidence": "NOT_DISCLOSED",
+            "_manualLookup": _manual_lookup_payload(
+                ticker, cik_padded, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."
+            ),
+        })
+
+    return json.dumps({
         "ticker": ticker,
-        "filings": list(await asyncio.gather(*[_serialize_filing(f) for f in filings])),
+        "factType": fact_type.value,
+        "concept": concept_used,
+        "value": picked.get("val"),
+        "valuePct": value_pct if fact_type == FilingFactType.geographic_revenue else None,
+        "fiscalYear": str(picked.get("fy") or ""),
+        "fiscalPeriod": str(picked.get("fp") or ""),
+        "filingType": filing_type,
+        "filingDate": str(picked.get("filed") or ""),
+        "segmentLabel": segment_label,
+        "accessionNumber": str(picked.get("accn") or ""),
+        "source": "XBRL_COMPANYCONCEPT",
+        "confidence": "CONFIRMED",
     })
-    _cache_set(cache_key, result)
-    return result
+
+
+@yfinance_server.tool(
+    name="search_filing_text",
+    description="""Search filing narrative text by keyword or section hint.
+
+Use this only when get_filing_data returns NOT_DISCLOSED or the fact is not XBRL-tagged.
+""",
+)
+async def search_filing_text(
+    ticker: str,
+    search_terms: list[str] | None = None,
+    section_hint: str | None = None,
+    filing_type: str = "10-K",
+    accession_number: str | None = None,
+    context_chars: int = 1500,
+    return_tables: bool = True,
+) -> str:
+    cik_padded, subs = await _get_submissions_for_ticker(ticker)
+    if not cik_padded or not subs:
+        return json.dumps({
+            "ticker": ticker,
+            "accessionNumber": accession_number,
+            "documentUrl": None,
+            "fiscalYear": None,
+            "filingType": filing_type,
+            "filingDate": None,
+            "matches": [],
+            "matchCount": 0,
+            "confidence": "PARSED_HTML",
+            "_note": "Could not resolve SEC submissions for ticker.",
+        })
+
+    recent = subs.get("filings", {}).get("recent", {})
+    forms: list[str] = recent.get("form", [])
+    accessions: list[str] = recent.get("accessionNumber", [])
+    primary_docs: list[str] = recent.get("primaryDocument", [])
+    filing_dates: list[str] = recent.get("filingDate", [])
+    report_dates: list[str] = recent.get("reportDate", [])
+
+    target_idx: int | None = None
+    if accession_number:
+        for i, acc in enumerate(accessions):
+            if acc == accession_number:
+                target_idx = i
+                break
+    else:
+        for i, form in enumerate(forms):
+            if str(form).upper() == filing_type.upper():
+                target_idx = i
+                accession_number = accessions[i] if i < len(accessions) else None
+                break
+
+    if target_idx is None or not accession_number:
+        return json.dumps({
+            "ticker": ticker,
+            "accessionNumber": accession_number,
+            "documentUrl": None,
+            "fiscalYear": None,
+            "filingType": filing_type,
+            "filingDate": None,
+            "matches": [],
+            "matchCount": 0,
+            "confidence": "PARSED_HTML",
+            "_note": f"No {filing_type} filing found in submissions JSON.",
+        })
+
+    primary_doc = primary_docs[target_idx] if target_idx < len(primary_docs) else None
+    if not primary_doc:
+        return json.dumps({
+            "ticker": ticker,
+            "accessionNumber": accession_number,
+            "documentUrl": None,
+            "fiscalYear": None,
+            "filingType": filing_type,
+            "filingDate": filing_dates[target_idx] if target_idx < len(filing_dates) else None,
+            "matches": [],
+            "matchCount": 0,
+            "confidence": "PARSED_HTML",
+            "_note": "primaryDocument missing in submissions JSON.",
+        })
+
+    cik_int = int(cik_padded)
+    _, document_url = _edgar_build_filing_urls(cik_int, accession_number, primary_doc)
+    if not document_url:
+        return json.dumps({
+            "ticker": ticker,
+            "accessionNumber": accession_number,
+            "documentUrl": None,
+            "fiscalYear": None,
+            "filingType": filing_type,
+            "filingDate": filing_dates[target_idx] if target_idx < len(filing_dates) else None,
+            "matches": [],
+            "matchCount": 0,
+            "confidence": "PARSED_HTML",
+            "_note": "Failed constructing filing document URL.",
+        })
+
+    html_text = await _edgar_get_html(document_url, max_bytes=5_000_000)
+    if not html_text:
+        return json.dumps({
+            "ticker": ticker,
+            "accessionNumber": accession_number,
+            "documentUrl": document_url,
+            "fiscalYear": f"FY{str(report_dates[target_idx])[:4]}" if target_idx < len(report_dates) and report_dates[target_idx] else None,
+            "filingType": filing_type,
+            "filingDate": filing_dates[target_idx] if target_idx < len(filing_dates) else None,
+            "matches": [],
+            "matchCount": 0,
+            "confidence": "PARSED_HTML",
+            "_note": "Unable to fetch filing HTML.",
+        })
+
+    html_low = html_text.lower()
+    context_window = max(200, min(int(context_chars), 4000))
+    matches: list[dict] = []
+    seen: set[int] = set()
+
+    def _append_match(term: str, pos: int) -> None:
+        if any(abs(pos - p) < 150 for p in seen):
+            return
+        seen.add(pos)
+        start = max(0, pos - context_window // 2)
+        end = min(len(html_text), pos + context_window // 2)
+        context_html = html_text[start:end]
+        pre_html = html_text[max(0, pos - 8_000):pos]
+        h_matches = _re.findall(r"<h[1-6][^>]*>(.*?)</h[1-6]>", pre_html, _re.IGNORECASE | _re.DOTALL)
+        section_heading = _strip_html_tags(h_matches[-1]) if h_matches else ""
+        item = {
+            "term": term,
+            "sectionHeading": section_heading,
+            "contextText": _strip_html_tags(context_html),
+        }
+        if return_tables:
+            parsed_tables: list[dict] = []
+            for tbl_m in _re.finditer(r"<table[^>]*>([\s\S]*?)</table>", context_html, _re.IGNORECASE):
+                rows = _parse_html_table(tbl_m.group(0))
+                if len(rows) >= 2:
+                    parsed_tables.append({"rows": rows})
+                if len(parsed_tables) >= 3:
+                    break
+            item["tableParsed"] = parsed_tables
+        matches.append(item)
+
+    if section_hint:
+        pos = html_low.find(section_hint.lower())
+        if pos >= 0:
+            _append_match(section_hint, pos)
+    for term in (search_terms or []):
+        pos = 0
+        term_low = term.lower()
+        while len(matches) < 10:
+            found = html_low.find(term_low, pos)
+            if found < 0:
+                break
+            _append_match(term, found)
+            pos = found + 1
+
+    return json.dumps({
+        "ticker": ticker,
+        "accessionNumber": accession_number,
+        "documentUrl": document_url,
+        "fiscalYear": f"FY{str(report_dates[target_idx])[:4]}" if target_idx < len(report_dates) and report_dates[target_idx] else None,
+        "filingType": filing_type,
+        "filingDate": filing_dates[target_idx] if target_idx < len(filing_dates) else None,
+        "matches": matches,
+        "matchCount": len(matches),
+        "confidence": "PARSED_HTML",
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -3043,7 +3374,7 @@ async def _load_edgar_tickers() -> dict[str, int]:
     def _fetch() -> dict[str, int]:
         req = _urlreq.Request(
             "https://www.sec.gov/files/company_tickers.json",
-            headers={"User-Agent": "yahoo-finance-mcp/1.0 (contact@example.com)"},
+            headers={"User-Agent": _SEC_REQUIRED_UA},
         )
         with _urlreq.urlopen(req, timeout=15) as resp:  # noqa: S310
             data = json.loads(resp.read())
@@ -3065,7 +3396,7 @@ async def _edgar_get(url: str) -> dict | None:
     def _fetch() -> dict | None:
         req = _urlreq.Request(
             url,
-            headers={"User-Agent": "yahoo-finance-mcp/1.0 (contact@example.com)"},
+            headers={"User-Agent": _SEC_REQUIRED_UA},
         )
         try:
             with _urlreq.urlopen(req, timeout=10) as resp:  # noqa: S310
@@ -3195,7 +3526,7 @@ async def _edgar_get_html(url: str, max_bytes: int = 5_000_000) -> str | None:
     def _fetch() -> str | None:
         req = _urlreq.Request(
             url,
-            headers={"User-Agent": "yahoo-finance-mcp/1.0 (contact@example.com)"},
+            headers={"User-Agent": _SEC_REQUIRED_UA},
         )
         try:
             with _urlreq.urlopen(req, timeout=30) as resp:  # noqa: S310
@@ -3582,186 +3913,10 @@ _CHINA_REVENUE_CONFIRMED: dict[str, dict] = {
 
 @yfinance_server.tool(
     name="get_geographic_revenue",
-    description="""Get geographic revenue % for a specified region from SEC EDGAR filing metadata and yfinance data.
-
-Default region is 'China'. DC-151 CLASS A/B/C/D China Revenue Risk Classification (when region='China'):
-  ≥20% → BANNED (CLASS B) | 15–20% → CHINA WATCH | ≤14.9% CLASS C eligible (cap 30%)
-
-Returns: region, regionRevenuePct, regionRevenueUSD, fiscalYear, filingType, filingDate, segmentLabel,
-source, confidence, sectionHeading (when HTML-parsed), primaryDocumentUrl.
-
-confidence levels:
-  CONFIRMED   — sourced from EDGAR XBRL company-facts (satisfies DC-151 Rule 1 annual confirmation).
-  PARSED_HTML — extracted from 10-K filing HTML table (DC-151 Rule 1 satisfied; human-equivalent read).
-  NOT_DISCLOSED — not found by any method (Rule 1 NOT satisfied). _manualLookup is populated with
-                  direct EDGAR URLs and step-by-step instructions to locate the geographic segment table.
-
-Args:
-    ticker: str
-        The ticker symbol, e.g. "MU", "AAPL", "QCOM"
-    region: str
-        Geographic region to query, e.g. "China", "Europe", "Americas", "Asia Pacific", "Japan".
-        Defaults to "China".
-""",
+    description="[DEPRECATED] Use get_filing_data with fact_type='geographic_revenue'.",
 )
 async def get_geographic_revenue(ticker: str, region: str = "China") -> str:
-    """Return geographic revenue % from SEC EDGAR / yfinance data."""
-    cache_key = f"geographic_revenue:{ticker}:{region}"
-    cached = _cache_get(cache_key, _EDGAR_TTL)
-    if cached is not None:
-        return cached
-
-    # Option C: check confirmed lookup table for China (China only — other regions not yet confirmed)
-    if region.lower() == "china":
-        confirmed_entry = _CHINA_REVENUE_CONFIRMED.get(ticker.upper())
-        if confirmed_entry:
-            result = json.dumps({
-                "ticker": ticker,
-                "region": region,
-                "regionRevenuePct": confirmed_entry["pct"],
-                "regionRevenueUSD": None,
-                "fiscalYear": confirmed_entry["fiscalYear"],
-                "filingType": "10-K",
-                "filingDate": confirmed_entry["filingDate"],
-                "segmentLabel": "China",
-                "source": "confirmed_lookup_table",
-                "confidence": "CONFIRMED",
-                "_note": None,
-            })
-            _cache_set(cache_key, result)
-            return result
-
-    # Step 1: Get CIK and latest 10-K filing metadata from EDGAR
-    cik: int | None = None
-    filing_date: str | None = None
-    fiscal_year: str | None = None
-    filing_type = "10-K"
-    primary_doc_url: str | None = None
-
-    try:
-        tickers_map = await _load_edgar_tickers()
-        cik = tickers_map.get(ticker.upper())
-    except Exception:
-        pass
-
-    if cik:
-        cik_padded = str(cik).zfill(10)
-        try:
-            subs = await _edgar_get_submissions(cik_padded)
-            if subs:
-                filings = subs.get("filings", {}).get("recent", {})
-                forms: list = filings.get("form", [])
-                dates: list = filings.get("filingDate", [])
-                periods: list = filings.get("reportDate", [])
-                accessions: list = filings.get("accessionNumber", [])
-                pdocs: list = filings.get("primaryDocument", [])
-                for i, form in enumerate(forms):
-                    if form in ("10-K", "10-K405", "10-KSB"):
-                        filing_date = dates[i] if i < len(dates) else None
-                        period = periods[i] if i < len(periods) else None
-                        if period:
-                            fiscal_year = f"FY{period[:4]}"
-                        acc = accessions[i] if i < len(accessions) else None
-                        pdoc = pdocs[i] if i < len(pdocs) else None
-                        if acc and pdoc:
-                            _, primary_doc_url = _edgar_build_filing_urls(cik, acc, pdoc)
-                        break
-        except Exception:
-            pass
-
-    # Step 2: Extract geographic revenue from EDGAR XBRL company-facts API
-    region_revenue_usd: float | None = None
-    region_revenue_pct: float | None = None
-    segment_label = region
-    source = "not_available"
-    confidence = "NOT_DISCLOSED"
-
-    if cik:
-        try:
-            cik_padded = str(cik).zfill(10)
-            facts_data = await _edgar_get_company_facts(cik_padded)
-            if facts_data:
-                (
-                    region_revenue_pct,
-                    region_revenue_usd,
-                    segment_label,
-                    source,
-                    confidence,
-                ) = _extract_geographic_pct(facts_data, region, filing_date)
-        except Exception:
-            pass
-
-    # Step 3 (fallback): When XBRL is NOT_DISCLOSED, attempt to parse the primary 10-K HTML.
-    html_section_heading: str = ""
-    html_parsed_tables: list = []
-    if confidence == "NOT_DISCLOSED" and primary_doc_url:
-        try:
-            html_text = await _edgar_get_html(primary_doc_url)
-            if html_text:
-                (
-                    region_revenue_pct,
-                    region_revenue_usd,
-                    html_section_heading,
-                    html_parsed_tables,
-                ) = _extract_geo_revenue_from_html(html_text, region)
-                if region_revenue_pct is not None:
-                    source = "edgar_html"
-                    confidence = "PARSED_HTML"
-        except Exception:
-            pass
-
-    # Build a precise LLM-actionable pointer when data could not be resolved automatically.
-    manual_lookup: dict | None = None
-    if confidence == "NOT_DISCLOSED":
-        t_upper = ticker.upper()
-        cik_padded = str(cik).zfill(10) if cik else None
-        edgar_search_url = (
-            f"https://efts.sec.gov/LATEST/search-index?q=%22{region}%22"
-            f"&forms=10-K&entity={t_upper}"
-        )
-        edgar_filings_url = (
-            f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany"
-            f"&CIK={cik_padded}&type=10-K&dateb=&owner=include&count=5"
-        ) if cik_padded else (
-            f"https://www.sec.gov/cgi-bin/browse-edgar?company={t_upper}"
-            f"&CIK=&type=10-K&dateb=&owner=include&count=5&search_text=&action=getcompany"
-        )
-        manual_lookup = {
-            "reason": (
-                f"Geographic revenue breakdown for '{region}' is not available in machine-readable "
-                "form via this data pipeline. NOT_DISCLOSED does NOT satisfy DC-151 Rule 1 annual "
-                "confirmation requirement."
-            ),
-            "action": (
-                f"Open the most recent 10-K for {t_upper} and search for the section titled "
-                "'Geographic Information', 'Geographic Areas', or 'Segment Information'. "
-                f"Look for a table that lists revenue by region including '{region}'. "
-                "Divide that figure by Total Revenue to compute regionRevenuePct."
-            ),
-            "edgarFullTextSearchUrl": edgar_search_url,
-            "edgarFilingsPageUrl": edgar_filings_url,
-            "cik": cik_padded,
-            "filingDate": filing_date,
-            "fiscalYear": fiscal_year,
-        }
-
-    result = json.dumps({
-        "ticker": ticker,
-        "region": region,
-        "regionRevenuePct": region_revenue_pct,
-        "regionRevenueUSD": region_revenue_usd,
-        "fiscalYear": fiscal_year,
-        "filingType": filing_type,
-        "filingDate": filing_date,
-        "segmentLabel": segment_label,
-        "source": source,
-        "confidence": confidence,
-        "sectionHeading": html_section_heading or None,
-        "primaryDocumentUrl": primary_doc_url,
-        "_manualLookup": manual_lookup,
-    })
-    _cache_set(cache_key, result)
-    return result
+    return _deprecated_payload("get_filing_data")
 
 
 # ---------------------------------------------------------------------------
@@ -4276,37 +4431,7 @@ def _filing_text_only_matches(text: str, search_terms: list[str], context_chars:
 
 @yfinance_server.tool(
     name="get_filing_text_search",
-    description="""Full-text search within a specific SEC filing HTML document.
-
-Fetches the filing's primary HTM document from EDGAR and searches for one or more
-keywords/phrases. Returns surrounding context text and any HTML tables found near each match.
-
-Typical use: find geographic revenue tables, specific note disclosures, or any term in a 10-K.
-Get accession_number from get_sec_filings (accessionNumber field).
-
-Returns: matches (term, sectionHeading, contextText, tableParsed), filingUrl, fiscalYear.
-On EDGAR resolution/fetch issues, returns a structured fallback payload with _note
-instead of error=true.
-
-Args:
-    ticker: str
-        The ticker symbol, e.g. "GLW"
-    accession_number: str
-        Accession number from get_sec_filings, e.g. "0000024741-26-000124"
-    search_terms: list[str]
-        Keywords/phrases to search for, e.g. ["China", "geographic information"]
-    context_chars: int
-        Characters of surrounding context around each match (default 1500)
-    return_tables: bool
-        If true, parse any HTML tables within the context window (default true)
-    text_only: bool
-        If true, run keyword search on stripped plain text only (no table parsing),
-        useful for LLM-first extraction workflows.
-    document_url: str
-        Optional. Pre-resolved primary document URL from get_sec_filings
-        (edgarPrimaryDocumentUrl field). When provided, skips all EDGAR resolution
-        and fetches the document directly.
-""",
+    description="[DEPRECATED] Use search_filing_text.",
 )
 async def get_filing_text_search(
     ticker: str,
@@ -4317,220 +4442,7 @@ async def get_filing_text_search(
     text_only: bool = False,
     document_url: str | None = None,
 ) -> str:
-    """Search for keywords within an SEC filing HTML document."""
-    # When the caller already provides the resolved document URL (e.g. from
-    # get_sec_filings edgarPrimaryDocumentUrl), skip all EDGAR resolution calls.
-    primary_doc_url: str | None = document_url if document_url else None
-    fiscal_year: str | None = None
-    fallback_index_url: str | None = None
-    if not primary_doc_url:
-        try:
-            tickers_map = await _load_edgar_tickers()
-            cik = tickers_map.get(ticker.upper())
-            if cik:
-                cik_padded = str(cik).zfill(10)
-                subs = await _edgar_get_submissions(cik_padded)
-                if subs:
-                    recent = subs.get("filings", {}).get("recent", {})
-                    accessions: list = recent.get("accessionNumber", [])
-                    pdocs: list = recent.get("primaryDocument", [])
-                    periods: list = recent.get("reportDate", [])
-                    for i, acc in enumerate(accessions):
-                        if acc == accession_number:
-                            pdoc = pdocs[i] if i < len(pdocs) else None
-                            period = periods[i] if i < len(periods) else None
-                            if period:
-                                fiscal_year = f"FY{period[:4]}"
-                            _, primary_doc_url = _edgar_build_filing_urls(cik, acc, pdoc)
-                            break
-        except Exception:
-            pass
-
-    # Fallback: derive CIK from the accession number prefix when ticker→CIK lookup failed
-    # or when the accession is not present in the most-recent submissions window.
-    if primary_doc_url is None:
-        derived_cik = _edgar_cik_from_accession(accession_number)
-        if derived_cik:
-            try:
-                cik_padded = str(derived_cik).zfill(10)
-                subs = await _edgar_get_submissions(cik_padded)
-                if subs:
-                    recent = subs.get("filings", {}).get("recent", {})
-                    acc_list: list = recent.get("accessionNumber", [])
-                    pdoc_list: list = recent.get("primaryDocument", [])
-                    period_list: list = recent.get("reportDate", [])
-                    for i, acc in enumerate(acc_list):
-                        if acc == accession_number:
-                            pdoc = pdoc_list[i] if i < len(pdoc_list) else None
-                            period = period_list[i] if i < len(period_list) else None
-                            if period and fiscal_year is None:
-                                fiscal_year = f"FY{period[:4]}"
-                            _, primary_doc_url = _edgar_build_filing_urls(derived_cik, acc, pdoc)
-                            break
-            except Exception:
-                pass
-
-    # Third fallback: derive CIK directly from the accession number and parse the primary
-    # document from the EDGAR filing index HTM.  This approach is ticker-agnostic and works
-    # even when the filing falls outside the EDGAR submissions window or when the submissions
-    # JSON has an empty/missing primaryDocument field.
-    if primary_doc_url is None:
-        fb_cik = _edgar_cik_from_accession(accession_number)
-        if fb_cik:
-            try:
-                idx_url, _ = _edgar_build_filing_urls(fb_cik, accession_number, None)
-                fallback_index_url = idx_url
-                pdoc_fname = await _edgar_primary_doc_from_index(idx_url)
-                if pdoc_fname:
-                    _, primary_doc_url = _edgar_build_filing_urls(fb_cik, accession_number, pdoc_fname)
-            except Exception:
-                pass
-
-    if primary_doc_url is None:
-        index_html = await _edgar_get_html(fallback_index_url, max_bytes=500_000) if fallback_index_url else None
-        index_text = _strip_html_tags(index_html) if index_html else None
-        fallback_matches = (
-            _filing_text_only_matches(index_text, search_terms, max(context_chars, 1200))
-            if index_text else []
-        )
-        return json.dumps({
-            "ticker": ticker,
-            "accessionNumber": accession_number,
-            "filingUrl": None,
-            "indexUrl": fallback_index_url,
-            "fiscalYear": fiscal_year,
-            "searchTerms": search_terms,
-            "matches": fallback_matches,
-            "matchCount": len(fallback_matches),
-            "searchMode": "index_text_fallback",
-            "_note": (
-                f"Primary document URL could not be resolved for accession '{accession_number}'. "
-                "Returned text-only fallback from filing index page when available."
-            ),
-        })
-
-    html_text = await _edgar_get_html(primary_doc_url)
-    if not html_text:
-        index_html = await _edgar_get_html(fallback_index_url, max_bytes=500_000) if fallback_index_url else None
-        index_text = _strip_html_tags(index_html) if index_html else None
-        fallback_matches = (
-            _filing_text_only_matches(index_text, search_terms, max(context_chars, 1200))
-            if index_text else []
-        )
-        return json.dumps({
-            "ticker": ticker,
-            "accessionNumber": accession_number,
-            "filingUrl": primary_doc_url,
-            "indexUrl": fallback_index_url,
-            "fiscalYear": fiscal_year,
-            "searchTerms": search_terms,
-            "matches": fallback_matches,
-            "matchCount": len(fallback_matches),
-            "searchMode": "index_text_fallback",
-            "_note": (
-                f"Could not fetch filing document from {primary_doc_url}. "
-                "Returned text-only fallback from filing index page when available."
-            ),
-        })
-
-    if text_only:
-        plain_text = _strip_html_tags(html_text)
-        matches = _filing_text_only_matches(plain_text, search_terms, context_chars)
-        return json.dumps({
-            "ticker": ticker,
-            "accessionNumber": accession_number,
-            "filingUrl": primary_doc_url,
-            "indexUrl": fallback_index_url,
-            "fiscalYear": fiscal_year,
-            "searchTerms": search_terms,
-            "matches": matches,
-            "matchCount": len(matches),
-            "searchMode": "text_only",
-            "_note": "Keyword search executed over stripped filing text (table parsing disabled).",
-        })
-
-    html_lower = html_text.lower()
-    matches = []
-    seen_positions: set[int] = set()
-
-    for term in search_terms:
-        term_lower = term.lower()
-        idx = 0
-        while True:
-            pos = html_lower.find(term_lower, idx)
-            if pos == -1:
-                break
-            idx = pos + 1
-
-            # Deduplicate matches that are very close together
-            if any(abs(pos - sp) < 200 for sp in seen_positions):
-                continue
-            seen_positions.add(pos)
-
-            # Extract context window (strip tags to plain text)
-            ctx_start = max(0, pos - context_chars // 2)
-            ctx_end = min(len(html_text), pos + context_chars // 2)
-            context_html = html_text[ctx_start:ctx_end]
-            context_text = _strip_html_tags(context_html)
-
-            # Find nearest section heading
-            pre_html = html_text[max(0, pos - 8_000): pos]
-            h_matches = _re.findall(
-                r"<h[1-6][^>]*>(.*?)</h[1-6]>", pre_html, _re.IGNORECASE | _re.DOTALL
-            )
-            section_heading = _strip_html_tags(h_matches[-1]) if h_matches else ""
-
-            # Parse nearby tables
-            table_parsed: list[dict] = []
-            if return_tables:
-                tbl_search = html_text[max(0, pos - 2_000): min(len(html_text), pos + 60_000)]
-                for tbl_m in _re.finditer(r"<table[^>]*>", tbl_search, _re.IGNORECASE):
-                    abs_start = max(0, pos - 2_000) + tbl_m.start()
-                    # Find matching </table>
-                    depth = 0
-                    i = abs_start
-                    table_end = abs_start
-                    while i < min(len(html_text), abs_start + 200_000):
-                        o = html_lower.find("<table", i)
-                        c = html_lower.find("</table>", i)
-                        if o == -1 and c == -1:
-                            break
-                        if o != -1 and (c == -1 or o < c):
-                            depth += 1
-                            i = o + 6
-                        else:
-                            depth -= 1
-                            if depth == 0:
-                                table_end = c + 8
-                                break
-                            i = c + 8
-                    rows = _parse_html_table(html_text[abs_start:table_end])
-                    if len(rows) >= 2:
-                        table_parsed.append({"rows": rows})
-                    if len(table_parsed) >= 3:
-                        break  # Return at most 3 tables per match
-
-            matches.append({
-                "term": term,
-                "sectionHeading": section_heading or None,
-                "contextText": context_text,
-                "tableParsed": table_parsed if return_tables else None,
-            })
-
-            if len(matches) >= 5:  # Cap total matches per term
-                break
-
-    return json.dumps({
-        "ticker": ticker,
-        "accessionNumber": accession_number,
-        "filingUrl": primary_doc_url,
-        "indexUrl": fallback_index_url,
-        "fiscalYear": fiscal_year,
-        "searchTerms": search_terms,
-        "matches": matches,
-        "matchCount": len(matches),
-        "searchMode": "html_context",
-    })
+    return _deprecated_payload("search_filing_text")
 
 
 # ---------------------------------------------------------------------------
@@ -4539,31 +4451,7 @@ async def get_filing_text_search(
 
 @yfinance_server.tool(
     name="get_filing_document",
-    description="""Retrieve the readable text/HTML of a specific SEC filing document with smart section targeting.
-
-Fetches the primary HTM document from EDGAR (not the raw XBRL file). When section_hint is
-provided, returns only the matching section and surrounding context (~5 000 chars).
-When no hint is given, returns the filing table of contents (all <h*> section headings).
-
-Get accession_number from get_sec_filings (accessionNumber field).
-
-Returns: documentUrl, sectionsFound, sectionContent, tablesInSection, fiscalYear.
-
-Args:
-    ticker: str
-        The ticker symbol, e.g. "GLW"
-    accession_number: str
-        Accession number from get_sec_filings, e.g. "0000024741-26-000124"
-    section_hint: str
-        Optional keyword to target a specific section, e.g. "geographic", "China",
-        "risk factors", "segment information"
-    filing_type: str
-        "10-K" (default), "10-Q", or "8-K" — used only for display purposes
-    document_url: str
-        Optional. Pre-resolved primary document URL from get_sec_filings
-        (edgarPrimaryDocumentUrl field). When provided, skips all EDGAR resolution
-        and fetches the document directly.
-""",
+    description="[DEPRECATED] Use search_filing_text with section_hint.",
 )
 async def get_filing_document(
     ticker: str,
@@ -4572,214 +4460,7 @@ async def get_filing_document(
     filing_type: str = "10-K",
     document_url: str | None = None,
 ) -> str:
-    """Retrieve a section of an SEC filing document."""
-    # When the caller already provides the resolved document URL (e.g. from
-    # get_sec_filings edgarPrimaryDocumentUrl), skip all EDGAR resolution calls.
-    primary_doc_url: str | None = document_url if document_url else None
-    fiscal_year: str | None = None
-    if not primary_doc_url:
-        try:
-            tickers_map = await _load_edgar_tickers()
-            cik = tickers_map.get(ticker.upper())
-            if cik:
-                cik_padded = str(cik).zfill(10)
-                subs = await _edgar_get_submissions(cik_padded)
-                if subs:
-                    recent = subs.get("filings", {}).get("recent", {})
-                    accessions: list = recent.get("accessionNumber", [])
-                    pdocs: list = recent.get("primaryDocument", [])
-                    periods: list = recent.get("reportDate", [])
-                    for i, acc in enumerate(accessions):
-                        if acc == accession_number:
-                            pdoc = pdocs[i] if i < len(pdocs) else None
-                            period = periods[i] if i < len(periods) else None
-                            if period:
-                                fiscal_year = f"FY{period[:4]}"
-                            _, primary_doc_url = _edgar_build_filing_urls(cik, acc, pdoc)
-                            break
-        except Exception:
-            pass
-
-    # Fallback: derive CIK from the accession number prefix when ticker→CIK lookup failed
-    # or when the accession is not present in the most-recent submissions window.
-    if primary_doc_url is None:
-        derived_cik = _edgar_cik_from_accession(accession_number)
-        if derived_cik:
-            try:
-                cik_padded = str(derived_cik).zfill(10)
-                subs = await _edgar_get_submissions(cik_padded)
-                if subs:
-                    recent = subs.get("filings", {}).get("recent", {})
-                    acc_list: list = recent.get("accessionNumber", [])
-                    pdoc_list: list = recent.get("primaryDocument", [])
-                    period_list: list = recent.get("reportDate", [])
-                    for i, acc in enumerate(acc_list):
-                        if acc == accession_number:
-                            pdoc = pdoc_list[i] if i < len(pdoc_list) else None
-                            period = period_list[i] if i < len(period_list) else None
-                            if period and fiscal_year is None:
-                                fiscal_year = f"FY{period[:4]}"
-                            _, primary_doc_url = _edgar_build_filing_urls(derived_cik, acc, pdoc)
-                            break
-            except Exception:
-                pass
-
-    # Third fallback: derive CIK directly from the accession number and parse the primary
-    # document from the EDGAR filing index HTM.  This approach is ticker-agnostic and works
-    # even when the filing falls outside the EDGAR submissions window or when the submissions
-    # JSON has an empty/missing primaryDocument field.
-    if primary_doc_url is None:
-        fb_cik = _edgar_cik_from_accession(accession_number)
-        if fb_cik:
-            try:
-                idx_url, _ = _edgar_build_filing_urls(fb_cik, accession_number, None)
-                pdoc_fname = await _edgar_primary_doc_from_index(idx_url)
-                if pdoc_fname:
-                    _, primary_doc_url = _edgar_build_filing_urls(fb_cik, accession_number, pdoc_fname)
-            except Exception:
-                pass
-
-    if primary_doc_url is None:
-        fb_cik = _edgar_cik_from_accession(accession_number)
-        index_url = _edgar_build_filing_urls(fb_cik, accession_number, None)[0] if fb_cik else None
-        index_html = await _edgar_get_html(index_url, max_bytes=500_000) if index_url else None
-        index_text = _strip_html_tags(index_html) if index_html else None
-        fallback_content = None
-        if section_hint and index_text:
-            fallback_matches = _filing_text_only_matches(index_text, [section_hint], 5000)
-            fallback_content = fallback_matches[0]["contextText"] if fallback_matches else None
-        return json.dumps({
-            "ticker": ticker,
-            "accessionNumber": accession_number,
-            "documentUrl": None,
-            "indexUrl": index_url,
-            "fiscalYear": fiscal_year,
-            "filingType": filing_type,
-            "sectionsFound": [],
-            "sectionContent": fallback_content,
-            "tablesInSection": None,
-            "_note": (
-                f"Primary document URL could not be resolved for accession '{accession_number}'. "
-                "Returned text-only fallback from filing index page when available."
-            ),
-        })
-
-    # Extract all section headings from the document
-    html_text = await _edgar_get_html(primary_doc_url)
-    if not html_text:
-        fb_cik = _edgar_cik_from_accession(accession_number)
-        index_url = _edgar_build_filing_urls(fb_cik, accession_number, None)[0] if fb_cik else None
-        index_html = await _edgar_get_html(index_url, max_bytes=500_000) if index_url else None
-        index_text = _strip_html_tags(index_html) if index_html else None
-        fallback_content = None
-        if section_hint and index_text:
-            fallback_matches = _filing_text_only_matches(index_text, [section_hint], 5000)
-            fallback_content = fallback_matches[0]["contextText"] if fallback_matches else None
-        return json.dumps({
-            "ticker": ticker,
-            "accessionNumber": accession_number,
-            "documentUrl": primary_doc_url,
-            "indexUrl": index_url,
-            "fiscalYear": fiscal_year,
-            "filingType": filing_type,
-            "sectionsFound": [],
-            "sectionContent": fallback_content,
-            "tablesInSection": None,
-            "_note": (
-                f"Could not fetch filing document from {primary_doc_url}. "
-                "Returned text-only fallback from filing index page when available."
-            ),
-        })
-
-    html_lower = html_text.lower()
-    heading_matches = _re.findall(
-        r"<h[1-6][^>]*>(.*?)</h[1-6]>", html_text, _re.IGNORECASE | _re.DOTALL
-    )
-    sections_found = [_strip_html_tags(h) for h in heading_matches if _strip_html_tags(h)]
-
-    if not section_hint:
-        return json.dumps({
-            "ticker": ticker,
-            "accessionNumber": accession_number,
-            "documentUrl": primary_doc_url,
-            "fiscalYear": fiscal_year,
-            "filingType": filing_type,
-            "sectionsFound": sections_found,
-            "sectionContent": None,
-            "tablesInSection": None,
-            "_note": "Provide section_hint to retrieve specific section content.",
-        })
-
-    # Find the section matching the hint
-    hint_lower = section_hint.lower()
-    match_pos: int | None = None
-
-    # First: try heading tags
-    for h_m in _re.finditer(r"<h[1-6][^>]*>(.*?)</h[1-6]>", html_text, _re.IGNORECASE | _re.DOTALL):
-        heading_text = _strip_html_tags(h_m.group(1)).lower()
-        if hint_lower in heading_text:
-            match_pos = h_m.start()
-            break
-
-    # Fallback: any occurrence of the hint in the document
-    if match_pos is None:
-        match_pos = html_lower.find(hint_lower)
-
-    if match_pos is None:
-        return json.dumps({
-            "ticker": ticker,
-            "accessionNumber": accession_number,
-            "documentUrl": primary_doc_url,
-            "fiscalYear": fiscal_year,
-            "filingType": filing_type,
-            "sectionsFound": sections_found,
-            "sectionContent": None,
-            "tablesInSection": None,
-            "_note": f"Section hint '{section_hint}' not found in the filing document.",
-        })
-
-    # Extract ~5 000 chars of content after the match
-    section_html = html_text[match_pos: min(len(html_text), match_pos + 5_000)]
-    section_content = _strip_html_tags(section_html)
-
-    # Parse tables within a wider window (up to 60 000 chars)
-    tables_in_section: list[dict] = []
-    wide_html = html_text[match_pos: min(len(html_text), match_pos + 60_000)]
-    for tbl_m in _re.finditer(r"<table[^>]*>", wide_html, _re.IGNORECASE):
-        abs_start = match_pos + tbl_m.start()
-        depth = 0
-        i = abs_start
-        table_end = abs_start
-        while i < min(len(html_text), abs_start + 200_000):
-            o = html_lower.find("<table", i)
-            c = html_lower.find("</table>", i)
-            if o == -1 and c == -1:
-                break
-            if o != -1 and (c == -1 or o < c):
-                depth += 1
-                i = o + 6
-            else:
-                depth -= 1
-                if depth == 0:
-                    table_end = c + 8
-                    break
-                i = c + 8
-        rows = _parse_html_table(html_text[abs_start:table_end])
-        if len(rows) >= 2:
-            tables_in_section.append({"rows": rows})
-        if len(tables_in_section) >= 5:
-            break
-
-    return json.dumps({
-        "ticker": ticker,
-        "accessionNumber": accession_number,
-        "documentUrl": primary_doc_url,
-        "fiscalYear": fiscal_year,
-        "filingType": filing_type,
-        "sectionsFound": sections_found,
-        "sectionContent": section_content,
-        "tablesInSection": tables_in_section,
-    })
+    return _deprecated_payload("search_filing_text")
 
 
 # ---------------------------------------------------------------------------
