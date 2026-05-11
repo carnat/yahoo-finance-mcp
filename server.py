@@ -1749,6 +1749,56 @@ async def get_filing_data(
         picked = next((f for f in filtered if not f.get("segment")), filtered[0] if filtered else None)
 
     if picked is None:
+        # ── HTML fallback for geographic_revenue ──────────────────────────────
+        # Some companies (e.g. GLW) do not XBRL-tag geographic-revenue segments.
+        # Fall through to the same HTML-parsing path used by search_filing_text.
+        if fact_type == FilingFactType.geographic_revenue:
+            _, subs = await _get_submissions_for_ticker(ticker)
+            if subs:
+                recent = subs.get("filings", {}).get("recent", {})
+                forms: list[str] = recent.get("form", [])
+                accessions_list: list[str] = recent.get("accessionNumber", [])
+                primary_docs_list: list[str] = recent.get("primaryDocument", [])
+                filing_dates_list: list[str] = recent.get("filingDate", [])
+                report_dates_list: list[str] = recent.get("reportDate", [])
+                idx: int | None = None
+                for i, form in enumerate(forms):
+                    if str(form).upper() == filing_type.upper():
+                        idx = i
+                        break
+                if idx is not None:
+                    primary_doc = primary_docs_list[idx] if idx < len(primary_docs_list) else None
+                    if primary_doc:
+                        cik_int = int(cik_padded)
+                        _, doc_url = _edgar_build_filing_urls(cik_int, accessions_list[idx], primary_doc)
+                        if doc_url:
+                            html_text = await _edgar_get_html(doc_url, max_bytes=5_000_000)
+                            if html_text:
+                                geo_pct, geo_usd, geo_heading, geo_tables = _extract_geo_revenue_from_html(
+                                    html_text, region or ""
+                                )
+                                if geo_pct is not None:
+                                    acc_num = accessions_list[idx] if idx < len(accessions_list) else ""
+                                    filing_date_str = filing_dates_list[idx] if idx < len(filing_dates_list) else ""
+                                    report_date_str = report_dates_list[idx] if idx < len(report_dates_list) else ""
+                                    fiscal_year = f"FY{report_date_str[:4]}" if report_date_str else ""
+                                    return json.dumps({
+                                        "ticker": ticker,
+                                        "factType": fact_type.value,
+                                        "concept": concept_used,
+                                        "value": geo_usd,
+                                        "valuePct": geo_pct,
+                                        "fiscalYear": fiscal_year,
+                                        "fiscalPeriod": "FY",
+                                        "filingType": filing_type,
+                                        "filingDate": filing_date_str,
+                                        "segmentLabel": region,
+                                        "accessionNumber": acc_num,
+                                        "sectionHeading": geo_heading,
+                                        "primaryDocumentUrl": doc_url,
+                                        "source": "PARSED_HTML",
+                                        "confidence": "PARSED_HTML",
+                                    })
         return json.dumps({
             "ticker": ticker,
             "factType": fact_type.value,
@@ -3916,7 +3966,8 @@ _CHINA_REVENUE_CONFIRMED: dict[str, dict] = {
     description="[DEPRECATED] Use get_filing_data with fact_type='geographic_revenue'.",
 )
 async def get_geographic_revenue(ticker: str, region: str = "China") -> str:
-    return _deprecated_payload("get_filing_data")
+    # Proxy to get_filing_data so existing callers still receive useful data.
+    return await get_filing_data(ticker, FilingFactType.geographic_revenue, region=region)
 
 
 # ---------------------------------------------------------------------------
