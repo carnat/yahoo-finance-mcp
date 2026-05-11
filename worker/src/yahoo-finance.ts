@@ -3100,11 +3100,16 @@ export async function getFilingTextSearch(
   contextChars: number = 1500,
   returnTables: boolean = true,
   textOnly: boolean = false,
+  documentUrl: string | null = null,
 ): Promise<string> {
   // Resolve primary document URL from EDGAR submissions
-  let primaryDocUrl: string | null = null;
+  // When the caller already provides the resolved document URL (e.g. from
+  // get_sec_filings edgarPrimaryDocumentUrl), skip all EDGAR resolution calls
+  // and use it directly.  This is the fast path that avoids EDGAR API failures.
+  let primaryDocUrl: string | null = documentUrl ?? null;
   let fiscalYear: string | null = null;
   let fallbackIndexUrl: string | null = null;
+  if (!primaryDocUrl) {
   try {
     const cik = await edgarResolveCik(ticker);
     if (cik != null) {
@@ -3173,6 +3178,7 @@ export async function getFilingTextSearch(
       } catch { /* non-fatal */ }
     }
   }
+  } // end if (!primaryDocUrl) — EDGAR resolution block
 
   if (!primaryDocUrl) {
     const indexHtml = fallbackIndexUrl ? await edgarGetHtml(fallbackIndexUrl, 500_000) : null;
@@ -3307,9 +3313,13 @@ export async function getFilingDocument(
   accessionNumber: string,
   sectionHint: string | null = null,
   filingType: string = "10-K",
+  documentUrl: string | null = null,
 ): Promise<string> {
-  let primaryDocUrl: string | null = null;
+  // When the caller already provides the resolved document URL (e.g. from
+  // get_sec_filings edgarPrimaryDocumentUrl), skip all EDGAR resolution calls.
+  let primaryDocUrl: string | null = documentUrl ?? null;
   let fiscalYear: string | null = null;
+  if (!primaryDocUrl) {
   try {
     const cik = await edgarResolveCik(ticker);
     if (cik != null) {
@@ -3377,6 +3387,7 @@ export async function getFilingDocument(
       } catch { /* non-fatal */ }
     }
   }
+  } // end if (!primaryDocUrl) — EDGAR resolution block
 
   if (!primaryDocUrl) {
     const fbCik = edgarCikFromAccession(accessionNumber);
