@@ -63,8 +63,12 @@ The server exposes the following tools through the Model Context Protocol:
 
 | Tool | Description |
 |------|-------------|
-| `get_sec_filings` | Get recent SEC filings (10-K, 10-Q, 8-K) with form type, filing date, and URL. |
-| `get_geographic_revenue` | Get geographic revenue % for a region from SEC EDGAR XBRL data. Default region is `China`. Returns regionRevenuePct, regionRevenueUSD, fiscalYear, filingType, filingDate, segmentLabel, source, and confidence (`CONFIRMED` \| `NOT_DISCLOSED`). DC-151 China classification: ≥20% BANNED | 15–20% CHINA WATCH | ≤14.9% CLASS C eligible. Filing metadata always returned for manual 10-K lookup. Args: `ticker`, `region` (default `"China"`). |
+| `get_filing_data` | Retrieve structured XBRL-tagged EDGAR facts for known GAAP line items and geographic/segment revenue. Use this first for filing-derived metrics. Args: `ticker`, `fact_type`, optional `region`, `filing_type` (`10-K`/`10-Q`), `period` (`latest`/`all`). |
+| `search_filing_text` | Search narrative filing HTML text or retrieve section-context snippets when a fact is not XBRL-tagged. Args: `ticker`, optional `search_terms`, `section_hint`, `filing_type`, `accession_number`, `context_chars`, `return_tables`. |
+| `get_geographic_revenue` | **Deprecated.** Use `get_filing_data` with `fact_type="geographic_revenue"`. |
+| `get_sec_filings` | **Deprecated.** Internal-only legacy helper; use `search_filing_text` (or `get_filing_data` first). |
+| `get_filing_text_search` | **Deprecated.** Use `search_filing_text`. |
+| `get_filing_document` | **Deprecated.** Use `search_filing_text` with `section_hint`. |
 
 ### Discovery
 
@@ -107,7 +111,7 @@ The server exposes the following tools through the Model Context Protocol:
 | OTM put hedge candidates | ✅ Yes | Available via `get_put_hedge_candidates` (filtered by OTM %, budget, expiry). |
 | Analyst upgrade/downgrade signals | ✅ Yes | Available via `get_analyst_upgrade_radar` (rating changes with signal classification, net sentiment). |
 | Index tickers (^VIX, ^GSPC) | ✅ Yes | Supported by `get_fast_info`, `get_price_stats`, and `get_technical_indicators`. Note: `get_price_stats` CAGR values for volatility indices like `^VIX` may not be meaningful as investment return metrics. |
-| Geographic revenue breakdown | ✅ Yes (partial) | Available via `get_geographic_revenue`. Pulls from SEC EDGAR XBRL company-facts API; returns `CONFIRMED` when segment data is found, `NOT_DISCLOSED` otherwise. Always returns filing metadata (filingDate, fiscalYear) for manual 10-K lookup. China revenue is additionally cross-checked against a curated lookup table. |
+| Geographic revenue breakdown | ✅ Yes (partial) | Use `get_filing_data` with `fact_type="geographic_revenue"` first (XBRL companyconcept). If `confidence=NOT_DISCLOSED`, use `search_filing_text` for narrative table/section retrieval. |
 
 ## Real-World Use Cases
 
@@ -144,8 +148,8 @@ With this MCP server, you can use Claude to:
 - **Earnings Momentum**: "Has analyst EPS consensus for MSFT been revised up or down over the last 30 days?" *(use `get_earnings_momentum`)*
 - **Short Squeeze**: "What is the short squeeze risk for GameStop?" *(use `get_short_momentum`)*
 - **Calendar**: "When is Microsoft's next earnings date and ex-dividend date?" *(use `get_calendar`)*
-- **SEC Filings**: "Show me Apple's most recent 10-K and 10-Q filings." *(use `get_sec_filings`)*
-- **Geographic Revenue**: "What percentage of MU's revenue comes from China, and how does it classify under DC-151?" *(use `get_geographic_revenue`)*
+- **SEC Filing GAAP Fact**: "Get Corning's latest capex from SEC filings." *(use `get_filing_data` with `fact_type="capex"`)*
+- **Geographic Revenue**: "What percentage of GLW revenue comes from China?" *(try `get_filing_data` first, then `search_filing_text` only if not XBRL-tagged)*
 
 ### Position Management
 
@@ -276,5 +280,4 @@ https://<your-replit>.repl.co/mcp
 ## License
 
 MIT
-
 
