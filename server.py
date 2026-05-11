@@ -4226,6 +4226,34 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
 # get_filing_text_search — full-text search within a specific SEC filing HTML
 # ---------------------------------------------------------------------------
 
+def _filing_text_only_matches(text: str, search_terms: list[str], context_chars: int) -> list[dict]:
+    """Return plain-text keyword matches with context windows (no HTML/table parsing)."""
+    text_lower = text.lower()
+    matches: list[dict] = []
+    seen_positions: set[int] = set()
+    half = max(1, context_chars // 2)
+    for term in search_terms:
+        term_lower = term.lower()
+        idx = 0
+        while len(matches) < 5:
+            pos = text_lower.find(term_lower, idx)
+            if pos == -1:
+                break
+            idx = pos + 1
+            if any(abs(pos - sp) < 200 for sp in seen_positions):
+                continue
+            seen_positions.add(pos)
+            ctx_start = max(0, pos - half)
+            ctx_end = min(len(text), pos + half)
+            matches.append({
+                "term": term,
+                "sectionHeading": None,
+                "contextText": text[ctx_start:ctx_end].strip(),
+                "tableParsed": None,
+            })
+    return matches
+
+
 @yfinance_server.tool(
     name="get_filing_text_search",
     description="""Full-text search within a specific SEC filing HTML document.
@@ -4237,6 +4265,8 @@ Typical use: find geographic revenue tables, specific note disclosures, or any t
 Get accession_number from get_sec_filings (accessionNumber field).
 
 Returns: matches (term, sectionHeading, contextText, tableParsed), filingUrl, fiscalYear.
+On EDGAR resolution/fetch issues, returns a structured fallback payload with _note
+instead of error=true.
 
 Args:
     ticker: str
@@ -4249,6 +4279,9 @@ Args:
         Characters of surrounding context around each match (default 1500)
     return_tables: bool
         If true, parse any HTML tables within the context window (default true)
+    text_only: bool
+        If true, run keyword search on stripped plain text only (no table parsing),
+        useful for LLM-first extraction workflows.
 """,
 )
 async def get_filing_text_search(
@@ -4257,11 +4290,13 @@ async def get_filing_text_search(
     search_terms: list[str],
     context_chars: int = 1500,
     return_tables: bool = True,
+    text_only: bool = False,
 ) -> str:
     """Search for keywords within an SEC filing HTML document."""
     # Resolve primary document URL
     primary_doc_url: str | None = None
     fiscal_year: str | None = None
+    fallback_index_url: str | None = None
     try:
         tickers_map = await _load_edgar_tickers()
         cik = tickers_map.get(ticker.upper())
@@ -4317,6 +4352,7 @@ async def get_filing_text_search(
         if fb_cik:
             try:
                 idx_url, _ = _edgar_build_filing_urls(fb_cik, accession_number, None)
+                fallback_index_url = idx_url
                 pdoc_fname = await _edgar_primary_doc_from_index(idx_url)
                 if pdoc_fname:
                     _, primary_doc_url = _edgar_build_filing_urls(fb_cik, accession_number, pdoc_fname)
@@ -4324,22 +4360,66 @@ async def get_filing_text_search(
                 pass
 
     if primary_doc_url is None:
+        index_html = await _edgar_get_html(fallback_index_url, max_bytes=500_000) if fallback_index_url else None
+        index_text = _strip_html_tags(index_html) if index_html else None
+        fallback_matches = (
+            _filing_text_only_matches(index_text, search_terms, max(context_chars, 1200))
+            if index_text else []
+        )
         return json.dumps({
-            "error": True,
-            "message": (
-                f"Could not resolve the primary document URL for accession '{accession_number}' "
-                f"(ticker '{ticker}'). The filing may be older than the EDGAR submissions window. "
-                "Verify the accession number and ticker are correct."
-            ),
+            "ticker": ticker,
             "accessionNumber": accession_number,
+            "filingUrl": None,
+            "indexUrl": fallback_index_url,
+            "fiscalYear": fiscal_year,
+            "searchTerms": search_terms,
+            "matches": fallback_matches,
+            "matchCount": len(fallback_matches),
+            "searchMode": "index_text_fallback",
+            "_note": (
+                f"Primary document URL could not be resolved for accession '{accession_number}'. "
+                "Returned text-only fallback from filing index page when available."
+            ),
         })
 
     html_text = await _edgar_get_html(primary_doc_url)
     if not html_text:
+        index_html = await _edgar_get_html(fallback_index_url, max_bytes=500_000) if fallback_index_url else None
+        index_text = _strip_html_tags(index_html) if index_html else None
+        fallback_matches = (
+            _filing_text_only_matches(index_text, search_terms, max(context_chars, 1200))
+            if index_text else []
+        )
         return json.dumps({
-            "error": True,
-            "message": f"Could not fetch filing document from {primary_doc_url}",
+            "ticker": ticker,
+            "accessionNumber": accession_number,
             "filingUrl": primary_doc_url,
+            "indexUrl": fallback_index_url,
+            "fiscalYear": fiscal_year,
+            "searchTerms": search_terms,
+            "matches": fallback_matches,
+            "matchCount": len(fallback_matches),
+            "searchMode": "index_text_fallback",
+            "_note": (
+                f"Could not fetch filing document from {primary_doc_url}. "
+                "Returned text-only fallback from filing index page when available."
+            ),
+        })
+
+    if text_only:
+        plain_text = _strip_html_tags(html_text)
+        matches = _filing_text_only_matches(plain_text, search_terms, context_chars)
+        return json.dumps({
+            "ticker": ticker,
+            "accessionNumber": accession_number,
+            "filingUrl": primary_doc_url,
+            "indexUrl": fallback_index_url,
+            "fiscalYear": fiscal_year,
+            "searchTerms": search_terms,
+            "matches": matches,
+            "matchCount": len(matches),
+            "searchMode": "text_only",
+            "_note": "Keyword search executed over stripped filing text (table parsing disabled).",
         })
 
     html_lower = html_text.lower()
@@ -4417,10 +4497,12 @@ async def get_filing_text_search(
         "ticker": ticker,
         "accessionNumber": accession_number,
         "filingUrl": primary_doc_url,
+        "indexUrl": fallback_index_url,
         "fiscalYear": fiscal_year,
         "searchTerms": search_terms,
         "matches": matches,
         "matchCount": len(matches),
+        "searchMode": "html_context",
     })
 
 
@@ -4523,23 +4605,55 @@ async def get_filing_document(
                 pass
 
     if primary_doc_url is None:
+        fb_cik = _edgar_cik_from_accession(accession_number)
+        index_url = _edgar_build_filing_urls(fb_cik, accession_number, None)[0] if fb_cik else None
+        index_html = await _edgar_get_html(index_url, max_bytes=500_000) if index_url else None
+        index_text = _strip_html_tags(index_html) if index_html else None
+        fallback_content = None
+        if section_hint and index_text:
+            fallback_matches = _filing_text_only_matches(index_text, [section_hint], 5000)
+            fallback_content = fallback_matches[0]["contextText"] if fallback_matches else None
         return json.dumps({
-            "error": True,
-            "message": (
-                f"Could not resolve the primary document URL for accession '{accession_number}' "
-                f"(ticker '{ticker}'). The filing may be older than the EDGAR submissions window. "
-                "Verify the accession number and ticker are correct."
-            ),
+            "ticker": ticker,
             "accessionNumber": accession_number,
+            "documentUrl": None,
+            "indexUrl": index_url,
+            "fiscalYear": fiscal_year,
+            "filingType": filing_type,
+            "sectionsFound": [],
+            "sectionContent": fallback_content,
+            "tablesInSection": None,
+            "_note": (
+                f"Primary document URL could not be resolved for accession '{accession_number}'. "
+                "Returned text-only fallback from filing index page when available."
+            ),
         })
 
     # Extract all section headings from the document
     html_text = await _edgar_get_html(primary_doc_url)
     if not html_text:
+        fb_cik = _edgar_cik_from_accession(accession_number)
+        index_url = _edgar_build_filing_urls(fb_cik, accession_number, None)[0] if fb_cik else None
+        index_html = await _edgar_get_html(index_url, max_bytes=500_000) if index_url else None
+        index_text = _strip_html_tags(index_html) if index_html else None
+        fallback_content = None
+        if section_hint and index_text:
+            fallback_matches = _filing_text_only_matches(index_text, [section_hint], 5000)
+            fallback_content = fallback_matches[0]["contextText"] if fallback_matches else None
         return json.dumps({
-            "error": True,
-            "message": f"Could not fetch filing document from {primary_doc_url}",
+            "ticker": ticker,
+            "accessionNumber": accession_number,
             "documentUrl": primary_doc_url,
+            "indexUrl": index_url,
+            "fiscalYear": fiscal_year,
+            "filingType": filing_type,
+            "sectionsFound": [],
+            "sectionContent": fallback_content,
+            "tablesInSection": None,
+            "_note": (
+                f"Could not fetch filing document from {primary_doc_url}. "
+                "Returned text-only fallback from filing index page when available."
+            ),
         })
 
     html_lower = html_text.lower()

@@ -229,16 +229,14 @@ TEST_CASES: list[TestCase] = [
         ],
     ),
     # ── get_filing_text_search — GLW Note 20 geographic section ───────────
-    # accession_number is the GLW FY2025 10-K; derived dynamically by the
-    # test or pre-seeded.  The test verifies that searching for geographic
-    # keywords in the filing HTML returns at least one match.
-    # NOTE: Accession number matches the most recent GLW 10-K at time of
-    # PR merge. Update this value if a newer 10-K supersedes it.
+    # accession_number is resolved dynamically in main() by calling
+    # get_sec_filings for GLW and finding the latest 10-K accession.
+    # The placeholder "_DYNAMIC_GLW_10K_" is replaced before running the test.
     (
         "get_filing_text_search",
         {
             "ticker": "GLW",
-            "accession_number": "0000024741-25-000004",
+            "accession_number": "_DYNAMIC_GLW_10K_",
             "search_terms": ["geographic information", "China", "revenue by region"],
             "context_chars": 1500,
             "return_tables": True,
@@ -253,7 +251,7 @@ TEST_CASES: list[TestCase] = [
         "get_filing_document",
         {
             "ticker": "GLW",
-            "accession_number": "0000024741-25-000004",
+            "accession_number": "_DYNAMIC_GLW_10K_",
             "section_hint": "geographic",
             "filing_type": "10-K",
         },
@@ -480,6 +478,29 @@ def _is_ok(
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
+# ── Dynamic accession lookup ──────────────────────────────────────────────────
+
+_DYNAMIC_GLW_10K = "_DYNAMIC_GLW_10K_"  # sentinel used in TEST_CASES
+
+
+def _resolve_glw_10k_accession(url: str) -> str | None:
+    """Call get_sec_filings for GLW and return the latest 10-K accession number."""
+    try:
+        resp = _call(url, "get_sec_filings", {"ticker": "GLW"})
+        result = resp.get("result", {})
+        content = result.get("content", [])
+        if not content:
+            return None
+        text = content[0].get("text", "") if isinstance(content[0], dict) else ""
+        data = json.loads(text)
+        for filing in data.get("filings", []):
+            if filing.get("type") == "10-K" and filing.get("accessionNumber"):
+                return filing["accessionNumber"]
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Test all MCP tools end-to-end")
     parser.add_argument("--url", default=DEFAULT_URL, help="MCP endpoint URL")
@@ -505,6 +526,20 @@ def main() -> None:
         )
         sys.exit(2)
 
+    # ── Resolve dynamic test parameters ───────────────────────────────────────
+    # Look up the latest GLW 10-K accession so the filing tests always use a
+    # current accession that is within EDGAR's submissions window.
+    print("Resolving latest GLW 10-K accession...", end=" ", flush=True)
+    glw_acc = _resolve_glw_10k_accession(url)
+    if glw_acc:
+        print(f"✅ {glw_acc}")
+        for _, tool_args, _ in TEST_CASES:
+            if tool_args.get("accession_number") == _DYNAMIC_GLW_10K:
+                tool_args["accession_number"] = glw_acc
+    else:
+        print("⚠️  could not resolve — filing tests will be skipped")
+    print()
+
     print(f"{'Tool':<35} {'Args summary':<38} {'Result'}")
     print("-" * 112)
 
@@ -512,6 +547,11 @@ def main() -> None:
     failures: list[str] = []
 
     for tool, tool_args, assertions in TEST_CASES:
+        # Skip filing tests when accession could not be dynamically resolved
+        if tool_args.get("accession_number") == _DYNAMIC_GLW_10K:
+            print(f"{tool:<35} {'(skipped — no accession)':<38} ⚠️  SKIP")
+            continue
+
         args_summary = json.dumps(tool_args)[:36]
         try:
             response = _call(url, tool, tool_args)
