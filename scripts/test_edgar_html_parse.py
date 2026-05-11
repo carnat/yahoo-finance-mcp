@@ -164,6 +164,51 @@ MOCK_FILING_INDEX_IXVIEWER = """\
 </body></html>
 """
 
+# Real EDGAR 5-column format: Seq | Description | Document | Type | Size
+# The Description column contains a verbose human-readable label (NOT the type).
+# The href lives in the Document (3rd) column, not the Description column.
+MOCK_FILING_INDEX_REAL_FORMAT = """\
+<html><body>
+<table class="tableFile" summary="Document Format Files">
+  <tr>
+    <th>Seq</th><th>Description</th><th>Document</th><th>Type</th><th>Size</th>
+  </tr>
+  <tr>
+    <td>1</td>
+    <td>Annual report [Section 13 or 15(d), file no. 1-03083]</td>
+    <td><a href="/Archives/edgar/data/24741/000002474126000124/glw-20251231.htm">glw-20251231.htm</a></td>
+    <td>10-K</td>
+    <td>27.3 MB</td>
+  </tr>
+  <tr>
+    <td>2</td>
+    <td>Exhibit 21</td>
+    <td><a href="glw-ex21.htm">glw-ex21.htm</a></td>
+    <td>EX-21</td>
+    <td>10 KB</td>
+  </tr>
+</table>
+</body></html>
+"""
+
+# Real EDGAR format with iXviewer link in the Document column
+MOCK_FILING_INDEX_REAL_FORMAT_IXVIEWER = """\
+<html><body>
+<table class="tableFile" summary="Document Format Files">
+  <tr>
+    <th>Seq</th><th>Description</th><th>Document</th><th>Type</th><th>Size</th>
+  </tr>
+  <tr>
+    <td>1</td>
+    <td>Annual report [Section 13 or 15(d), file no. 1-03083]</td>
+    <td><a href="/ixviewer/ix.html?doc=/Archives/edgar/data/24741/000002474126000124/glw-20251231.htm">glw-20251231.htm</a></td>
+    <td>10-K</td>
+    <td>27.3 MB</td>
+  </tr>
+</table>
+</body></html>
+"""
+
 
 # ── Test class ────────────────────────────────────────────────────────────────
 
@@ -380,6 +425,16 @@ class TestEdgarPrimaryDocFromIndex(unittest.TestCase):
 
     def test_parses_ixviewer_doc_query_param(self):
         fname = self._run_with_html(MOCK_FILING_INDEX_IXVIEWER)
+        self.assertEqual(fname, "glw-20251231.htm")
+
+    def test_real_edgar_5col_format(self):
+        """Real EDGAR table: Seq | Description | Document | Type | Size — seq=1 row."""
+        fname = self._run_with_html(MOCK_FILING_INDEX_REAL_FORMAT)
+        self.assertEqual(fname, "glw-20251231.htm")
+
+    def test_real_edgar_5col_format_ixviewer(self):
+        """Real EDGAR 5-col with iXviewer link in Document column."""
+        fname = self._run_with_html(MOCK_FILING_INDEX_REAL_FORMAT_IXVIEWER)
         self.assertEqual(fname, "glw-20251231.htm")
 
 

@@ -1388,10 +1388,12 @@ export async function getSecFilings(ticker: string): Promise<string> {
     }
   } catch { /* non-fatal */ }
 
-  const out = filings.map((f) => {
+  const out = await Promise.all(filings.map(async (f) => {
     const date = f.epochDate != null ? iso(f.epochDate as number) : null;
     const type = (f.type as string) ?? null;
-    const edgarInfo = date && type ? edgarUrlMap.get(`${type}:${date}`) : undefined;
+    // EDGAR filingDate is "YYYY-MM-DD"; Yahoo epochDate converts to a full ISO
+    // string — use only the date portion for the map lookup.
+    const edgarInfo = date && type ? edgarUrlMap.get(`${type}:${date.slice(0, 10)}`) : undefined;
 
     // Fallback: extract accession + CIK from Yahoo's edgarUrl when not found via EDGAR submissions.
     let accessionNumber: string | null = edgarInfo?.accessionNumber ?? null;
@@ -1419,10 +1421,25 @@ export async function getSecFilings(ticker: string): Promise<string> {
           const cikFromUrl = parseInt(m2[2], 10);
           const urls = edgarBuildFilingUrls(cikFromUrl, accessionNumber, null);
           edgarIndexUrl = urls.edgarIndexUrl;
-          // Primary document filename is not embedded in the Yahoo URL; leave null for lazy resolution.
           edgarPrimaryDocumentUrl = null;
         }
       }
+    }
+
+    // For annual (10-K) filings: eagerly resolve the primary document URL from the
+    // EDGAR index page when it could not be determined from the submissions JSON or the
+    // Yahoo URL.  This avoids a second round-trip inside getFilingDocument / getFilingTextSearch.
+    if (!edgarPrimaryDocumentUrl && edgarIndexUrl && type === "10-K") {
+      try {
+        const fname = await edgarPrimaryDocFromIndex(edgarIndexUrl);
+        if (fname && accessionNumber) {
+          const cikFromIndex = edgarCikFromAccession(accessionNumber);
+          if (cikFromIndex != null) {
+            const { edgarPrimaryDocumentUrl: resolved } = edgarBuildFilingUrls(cikFromIndex, accessionNumber, fname);
+            edgarPrimaryDocumentUrl = resolved;
+          }
+        }
+      } catch { /* non-fatal */ }
     }
 
     return {
@@ -1434,7 +1451,7 @@ export async function getSecFilings(ticker: string): Promise<string> {
       edgarIndexUrl,
       edgarPrimaryDocumentUrl,
     };
-  });
+  }));
   return JSON.stringify({ ticker, filings: out });
 }
 

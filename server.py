@@ -1550,11 +1550,13 @@ async def get_sec_filings(ticker: str) -> str:
     if not filings:
         return json.dumps({"ticker": ticker, "filings": []})
 
-    def _serialize_filing(f: dict) -> dict:
+    async def _serialize_filing(f: dict) -> dict:
         base = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in f.items()}
-        # Try to enrich with EDGAR URLs: match by (type, date)
+        # Try to enrich with EDGAR URLs: match by (type, date).
+        # Use only the date portion (YYYY-MM-DD) in case yfinance returns a
+        # datetime whose isoformat() includes a time component.
         form_type = str(base.get("type", ""))
-        date_str = str(base.get("date", ""))
+        date_str = str(base.get("date", ""))[:10]
         edgar_info = edgar_url_map.get(f"{form_type}:{date_str}")
         if edgar_info:
             base["accessionNumber"] = edgar_info["accessionNumber"]
@@ -1586,11 +1588,29 @@ async def get_sec_filings(ticker: str) -> str:
                     idx_url, _ = _edgar_build_filing_urls(cik_from_url, acc, None)
                     base["accessionNumber"] = acc
                     base["edgarIndexUrl"] = idx_url
-                    # Primary document filename is not in the Yahoo URL; set null for lazy resolution
                     base["edgarPrimaryDocumentUrl"] = None
+
+        # For annual (10-K) filings: eagerly resolve the primary document URL from the
+        # EDGAR index page when it could not be determined from the submissions JSON or
+        # the Yahoo URL.  This avoids a second round-trip inside get_filing_document /
+        # get_filing_text_search.
+        if not base.get("edgarPrimaryDocumentUrl") and base.get("edgarIndexUrl") and form_type == "10-K":
+            try:
+                fname = await _edgar_primary_doc_from_index(base["edgarIndexUrl"])
+                if fname:
+                    acc = base.get("accessionNumber") or ""
+                    cik_part = int(acc.replace("-", "")[:10]) if acc else 0
+                    if cik_part:
+                        _, pdoc_url = _edgar_build_filing_urls(cik_part, acc, fname)
+                        base["edgarPrimaryDocumentUrl"] = pdoc_url
+            except Exception:
+                pass
         return base
 
-    result = json.dumps({"ticker": ticker, "filings": [_serialize_filing(f) for f in filings]})
+    result = json.dumps({
+        "ticker": ticker,
+        "filings": [await _serialize_filing(f) for f in filings],
+    })
     _cache_set(cache_key, result)
     return result
 
