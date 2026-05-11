@@ -193,75 +193,81 @@ TEST_CASES: list[TestCase] = [
         [],
     ),
     # ── filings / short interest ──────────────────────────────────────────
+    # search_filing_text smoke test (replaces the retired get_sec_filings smoke test)
     (
-        "get_sec_filings",
-        {"ticker": "AAPL"},
+        "search_filing_text",
+        {"ticker": "AAPL", "filing_type": "10-K"},
         [],
     ),
-    # ── get_sec_filings with EDGAR URL enrichment (GLW regression guard) ──
-    # GLW (Corning Inc) is the motivating case for EDGAR URL enrichment.
-    # The most recent 10-K must include direct EDGAR document URLs.
+    # ── get_filing_data — GLW total revenue (regression guard, replaces get_sec_filings(GLW)) ──
+    # Verifies that get_filing_data can resolve CIK and return structured XBRL facts for GLW.
     (
-        "get_sec_filings",
-        {"ticker": "GLW"},
-        [("ticker", "GLW")],
-    ),
-    # ── get_geographic_revenue — GLW China HTML fallback (DC-151 P0) ──────
-    # GLW does NOT tag China revenue in XBRL; the HTML fallback must parse
-    # it from the 10-K prose table and return confidence PARSED_HTML or
-    # CONFIRMED (if XBRL ever gets tagged).  NOT_DISCLOSED is a failure.
-    (
-        "get_geographic_revenue",
-        {"ticker": "GLW", "region": "China"},
+        "get_filing_data",
+        {"ticker": "GLW", "fact_type": "total_revenue"},
         [
             ("ticker", "GLW"),
-            ("region", "China"),
             ("confidence", NOT_NULL),
         ],
     ),
-    # ── get_geographic_revenue — CONFIRMED baseline (QCOM, high China %) ──
+    # ── get_filing_data — GLW geographic revenue / China HTML fallback (DC-151 P0) ──
+    # GLW does NOT tag China revenue in XBRL; the HTML fallback inside get_filing_data
+    # must parse it from the 10-K prose table and return confidence PARSED_HTML or
+    # CONFIRMED.  NOT_DISCLOSED is a failure.
     (
-        "get_geographic_revenue",
-        {"ticker": "QCOM", "region": "China"},
+        "get_filing_data",
+        {"ticker": "GLW", "fact_type": "geographic_revenue", "region": "China"},
         [
-            ("regionRevenuePct", NOT_NULL),
+            ("ticker", "GLW"),
             ("confidence", NOT_NULL),
         ],
     ),
-    # ── get_filing_text_search — GLW Note 20 geographic section ───────────
-    # accession_number and document_url are resolved dynamically in main() by calling
-    # get_sec_filings for GLW and finding the latest 10-K filing.
-    # The placeholders "_DYNAMIC_GLW_10K_" and "_DYNAMIC_GLW_DOC_URL_" are replaced
-    # before running the test.
+    # ── get_filing_data — QCOM geographic revenue CONFIRMED baseline ──────
+    # QCOM has XBRL-tagged China revenue; valuePct must be present.
     (
-        "get_filing_text_search",
+        "get_filing_data",
+        {"ticker": "QCOM", "fact_type": "geographic_revenue", "region": "China"},
+        [
+            ("valuePct", NOT_NULL),
+            ("confidence", NOT_NULL),
+        ],
+    ),
+    # ── search_filing_text — GLW Note 20 geographic section ───────────────
+    # accession_number is resolved dynamically in main() by calling
+    # search_filing_text for GLW and extracting accessionNumber from the response.
+    # The placeholder "_DYNAMIC_GLW_10K_" is replaced before running the test.
+    (
+        "search_filing_text",
         {
             "ticker": "GLW",
             "accession_number": "_DYNAMIC_GLW_10K_",
             "search_terms": ["geographic information", "China", "revenue by region"],
             "context_chars": 1500,
             "return_tables": True,
-            "document_url": "_DYNAMIC_GLW_DOC_URL_",
         },
         [
             ("ticker", "GLW"),
             ("matchCount", NOT_ZERO),
         ],
     ),
-    # ── get_filing_document — GLW geographic section with hint ────────────
+    # ── get_filing_text_search deprecated stub — must return {deprecated:true} ──
+    (
+        "get_filing_text_search",
+        {
+            "ticker": "GLW",
+            "accession_number": "_DYNAMIC_GLW_10K_",
+            "search_terms": ["geographic"],
+        },
+        [("deprecated", NOT_NULL)],
+    ),
+    # ── get_filing_document deprecated stub — must return {deprecated:true} ──
     (
         "get_filing_document",
         {
             "ticker": "GLW",
             "accession_number": "_DYNAMIC_GLW_10K_",
             "section_hint": "geographic",
-            "filing_type": "10-K",
-            "document_url": "_DYNAMIC_GLW_DOC_URL_",
         },
-        [
-            ("ticker", "GLW"),
-            ("documentUrl", NOT_NULL),
-        ],
+        [("deprecated", NOT_NULL)],
     ),
     (
         "get_short_interest",
@@ -484,27 +490,28 @@ def _is_ok(
 # ── Dynamic accession lookup ──────────────────────────────────────────────────
 
 _DYNAMIC_GLW_10K = "_DYNAMIC_GLW_10K_"        # sentinel for accession number
-_DYNAMIC_GLW_DOC_URL = "_DYNAMIC_GLW_DOC_URL_"  # sentinel for document URL
 
 
 def _resolve_glw_10k_accession(url: str) -> tuple[str | None, str | None]:
-    """Call get_sec_filings for GLW and return (accessionNumber, edgarPrimaryDocumentUrl)
-    for the latest 10-K filing.  The document URL lets filing tools skip EDGAR
-    re-resolution and use the already-resolved URL directly."""
+    """Resolve the latest GLW 10-K accession number and document URL.
+
+    Calls search_filing_text for GLW 10-K, which performs the full EDGAR
+    submissions-JSON lookup and returns accessionNumber + documentUrl directly.
+    Returns (accessionNumber, documentUrl).  documentUrl may be None if EDGAR
+    URL resolution fails, in which case filing tests will attempt re-resolution.
+    """
     try:
-        resp = _call(url, "get_sec_filings", {"ticker": "GLW"})
+        resp = _call(url, "search_filing_text", {"ticker": "GLW", "filing_type": "10-K"})
         result = resp.get("result", {})
         content = result.get("content", [])
         if not content:
             return None, None
         text = content[0].get("text", "") if isinstance(content[0], dict) else ""
         data = json.loads(text)
-        for filing in data.get("filings", []):
-            if filing.get("type") == "10-K" and filing.get("accessionNumber"):
-                return (
-                    filing["accessionNumber"],
-                    filing.get("edgarPrimaryDocumentUrl"),  # may be None
-                )
+        acc = data.get("accessionNumber")
+        doc_url = data.get("documentUrl")
+        if acc:
+            return acc, doc_url
     except Exception:  # noqa: BLE001
         pass
     return None, None
@@ -536,22 +543,15 @@ def main() -> None:
         sys.exit(2)
 
     # ── Resolve dynamic test parameters ───────────────────────────────────────
-    # Look up the latest GLW 10-K accession and pre-resolved document URL so the
-    # filing tests always use a current accession and can bypass EDGAR re-resolution.
+    # Look up the latest GLW 10-K accession via search_filing_text so the
+    # filing tests always use a current accession number.
     print("Resolving latest GLW 10-K accession...", end=" ", flush=True)
-    glw_acc, glw_doc_url = _resolve_glw_10k_accession(url)
+    glw_acc, _glw_doc_url = _resolve_glw_10k_accession(url)
     if glw_acc:
-        doc_url_label = glw_doc_url or "(null — EDGAR will re-resolve)"
-        print(f"✅ {glw_acc}  doc={doc_url_label}")
+        print(f"✅ {glw_acc}")
         for _, tool_args, _ in TEST_CASES:
             if tool_args.get("accession_number") == _DYNAMIC_GLW_10K:
                 tool_args["accession_number"] = glw_acc
-            if tool_args.get("document_url") == _DYNAMIC_GLW_DOC_URL:
-                if glw_doc_url:
-                    tool_args["document_url"] = glw_doc_url
-                else:
-                    # Remove the key so the tool falls back to EDGAR resolution
-                    tool_args.pop("document_url", None)
     else:
         print("⚠️  could not resolve — filing tests will be skipped")
     print()

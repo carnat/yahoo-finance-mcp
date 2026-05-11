@@ -3046,6 +3046,55 @@ export async function getFilingData(
   }
 
   if (!picked) {
+    // ── HTML fallback for geographic_revenue ────────────────────────────────
+    // Some companies (e.g. GLW) do not XBRL-tag geographic-revenue segments.
+    // Fall through to the same HTML-parsing path used by searchFilingText.
+    if (factType === "geographic_revenue") {
+      const { cikPadded: subsCik, submissions } = await getSubmissionsForTicker(ticker);
+      if (subsCik && submissions) {
+        const recent = ((submissions.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+        const sforms = (recent.form as string[]) ?? [];
+        const saccessions = (recent.accessionNumber as string[]) ?? [];
+        const sprimaryDocs = (recent.primaryDocument as string[]) ?? [];
+        const sfilingDates = (recent.filingDate as string[]) ?? [];
+        const sreportDates = (recent.reportDate as string[]) ?? [];
+        const idx = sforms.findIndex((f) => String(f).toUpperCase() === filingType.toUpperCase());
+        if (idx >= 0) {
+          const primaryDoc = sprimaryDocs[idx] ?? null;
+          if (primaryDoc) {
+            const cikInt = parseInt(subsCik, 10);
+            const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(cikInt, saccessions[idx], primaryDoc);
+            if (edgarPrimaryDocumentUrl) {
+              const htmlText = await edgarGetHtml(edgarPrimaryDocumentUrl, 5_000_000);
+              if (htmlText) {
+                const geo = extractGeoRevenueFromHtml(htmlText, region ?? "");
+                if (geo) {
+                  const reportDate = sreportDates[idx] ?? "";
+                  const fiscalYear = reportDate ? `FY${String(reportDate).slice(0, 4)}` : "";
+                  return JSON.stringify({
+                    ticker,
+                    factType,
+                    concept,
+                    value: geo.usd ?? null,
+                    valuePct: geo.pct,
+                    fiscalYear,
+                    fiscalPeriod: "FY",
+                    filingType,
+                    filingDate: sfilingDates[idx] ?? null,
+                    segmentLabel: region,
+                    accessionNumber: saccessions[idx] ?? null,
+                    sectionHeading: geo.sectionHeading,
+                    primaryDocumentUrl: edgarPrimaryDocumentUrl,
+                    source: "PARSED_HTML",
+                    confidence: "PARSED_HTML",
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
+    }
     return JSON.stringify({
       ticker,
       factType,
