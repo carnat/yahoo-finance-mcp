@@ -18,6 +18,8 @@ Run:
 import sys
 import os
 import unittest
+import asyncio
+from unittest import mock
 
 # Allow importing from repo root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -28,6 +30,7 @@ from server import (  # type: ignore[import]
     _parse_numeric_cell,
     _detect_unit_multiplier,
     _extract_geo_revenue_from_html,
+    _edgar_primary_doc_from_index,
 )
 
 
@@ -123,6 +126,40 @@ MOCK_NESTED_TABLES = """\
       <tr><td>Total</td><td>15,630</td></tr>
     </table>
   </td></tr>
+</table>
+</body></html>
+"""
+
+MOCK_FILING_INDEX_SEQ1 = """\
+<html><body>
+<table>
+  <tr>
+    <td>1</td>
+    <td>10-K</td>
+    <td><a href="glw-20251231.htm">glw-20251231.htm</a></td>
+  </tr>
+  <tr>
+    <td>2</td>
+    <td>EX-21</td>
+    <td><a href="glw-ex21.htm">glw-ex21.htm</a></td>
+  </tr>
+</table>
+</body></html>
+"""
+
+MOCK_FILING_INDEX_IXVIEWER = """\
+<html><body>
+<table>
+  <tr>
+    <td>8</td>
+    <td>EX-31.1</td>
+    <td><a href="ex31.htm">ex31.htm</a></td>
+  </tr>
+  <tr>
+    <td>9</td>
+    <td>10-K</td>
+    <td><a href="/ixviewer/ix.html?doc=/Archives/edgar/data/24741/000002474126000124/glw-20251231.htm">view</a></td>
+  </tr>
 </table>
 </body></html>
 """
@@ -330,6 +367,20 @@ class TestExtractGeoRevenueFromHtml(unittest.TestCase):
         pct, _, _, _ = _extract_geo_revenue_from_html(html, "China")
         self.assertIsNotNone(pct)
         self.assertAlmostEqual(pct, 2840 / 15630, places=3)
+
+
+class TestEdgarPrimaryDocFromIndex(unittest.TestCase):
+    def _run_with_html(self, html: str) -> str | None:
+        with mock.patch("server._edgar_get_html", new=mock.AsyncMock(return_value=html)):
+            return asyncio.run(_edgar_primary_doc_from_index("https://example.com/index.htm"))
+
+    def test_prefers_seq1_or_10k_row(self):
+        fname = self._run_with_html(MOCK_FILING_INDEX_SEQ1)
+        self.assertEqual(fname, "glw-20251231.htm")
+
+    def test_parses_ixviewer_doc_query_param(self):
+        fname = self._run_with_html(MOCK_FILING_INDEX_IXVIEWER)
+        self.assertEqual(fname, "glw-20251231.htm")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

@@ -2481,20 +2481,47 @@ function edgarBuildFilingUrls(
 async function edgarPrimaryDocFromIndex(indexUrl: string): Promise<string | null> {
   const html = await edgarGetHtml(indexUrl);
   if (!html) return null;
-  // The index table row for the primary document looks like:
-  //   <td>1</td> ... <a href="primary.htm">primary.htm</a>
-  const seq1 = html.match(
-    /<tr[^>]*>[\s\S]*?<td[^>]*>\s*1\s*<\/td>[\s\S]*?<a[^>]+href=["']([^"'#?]+)["']/i
-  );
-  if (seq1) {
-    const href = seq1[1].trim();
-    return href.includes("/") ? (href.split("/").pop() ?? href) : href;
+  const normalizeHref = (rawHref: string): string | null => {
+    let href = rawHref.trim();
+    if (!href) return null;
+    // SEC often wraps filing docs as /ixviewer/ix.html?doc=/Archives/.../file.htm
+    const docParam = href.match(/[?&]doc=([^&#]+)/i);
+    if (docParam) {
+      try {
+        href = decodeURIComponent(docParam[1]);
+      } catch {
+        href = docParam[1];
+      }
+    }
+    href = href.split("#", 1)[0].split("?", 1)[0];
+    if (!href) return null;
+    const fname = href.includes("/") ? (href.split("/").pop() ?? "") : href;
+    return fname.trim() || null;
+  };
+
+  // Prefer the first row matching Sequence=1 OR Type=10-K.
+  for (const rowM of html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)) {
+    const rowHtml = rowM[1];
+    const cells = [...rowHtml.matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(m => stripHtmlTags(m[1]));
+    if (cells.length === 0) continue;
+    const seq = (cells[0] ?? "").trim();
+    const documentType = (cells[1] ?? "").trim().toUpperCase();
+    if (seq === "1" || documentType.startsWith("10-K")) {
+      const hrefM = rowHtml.match(/<a[^>]+href=["']([^"']+)["']/i);
+      if (hrefM) {
+        const fname = normalizeHref(hrefM[1]);
+        if (fname && !fname.toLowerCase().endsWith("-index.htm") && !fname.toLowerCase().endsWith("-index.html")) {
+          return fname;
+        }
+      }
+    }
   }
-  // Fallback: return the first .htm link that is not the index file itself.
-  const allHrefs = [...html.matchAll(/href=["']([^"']+\.htm)["']/gi)].map(m => m[1]);
+
+  // Fallback: return the first document-like link that is not the index file itself.
+  const allHrefs = [...html.matchAll(/href=["']([^"']+)["']/gi)].map(m => m[1]);
   for (const href of allHrefs) {
-    const fname = href.includes("/") ? (href.split("/").pop() ?? href) : href;
-    if (!fname.toLowerCase().endsWith("-index.htm")) return fname;
+    const fname = normalizeHref(href);
+    if (fname && /\.(html?)$/i.test(fname) && !fname.toLowerCase().endsWith("-index.htm") && !fname.toLowerCase().endsWith("-index.html")) return fname;
   }
   return null;
 }
