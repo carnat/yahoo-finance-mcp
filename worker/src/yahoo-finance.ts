@@ -3106,7 +3106,7 @@ export async function getFilingTextSearch(
   // When the caller already provides the resolved document URL (e.g. from
   // get_sec_filings edgarPrimaryDocumentUrl), skip all EDGAR resolution calls
   // and use it directly.  This is the fast path that avoids EDGAR API failures.
-  let primaryDocUrl: string | null = documentUrl ?? null;
+  let primaryDocUrl: string | null = documentUrl;
   let fiscalYear: string | null = null;
   let fallbackIndexUrl: string | null = null;
   if (!primaryDocUrl) {
@@ -3317,7 +3317,7 @@ export async function getFilingDocument(
 ): Promise<string> {
   // When the caller already provides the resolved document URL (e.g. from
   // get_sec_filings edgarPrimaryDocumentUrl), skip all EDGAR resolution calls.
-  let primaryDocUrl: string | null = documentUrl ?? null;
+  let primaryDocUrl: string | null = documentUrl;
   let fiscalYear: string | null = null;
   if (!primaryDocUrl) {
   try {

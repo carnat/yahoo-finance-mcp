@@ -4300,7 +4300,7 @@ async def get_filing_text_search(
     """Search for keywords within an SEC filing HTML document."""
     # When the caller already provides the resolved document URL (e.g. from
     # get_sec_filings edgarPrimaryDocumentUrl), skip all EDGAR resolution calls.
-    primary_doc_url: str | None = document_url or None
+    primary_doc_url: str | None = document_url if document_url else None
     fiscal_year: str | None = None
     fallback_index_url: str | None = None
     if not primary_doc_url:
@@ -4555,7 +4555,7 @@ async def get_filing_document(
     """Retrieve a section of an SEC filing document."""
     # When the caller already provides the resolved document URL (e.g. from
     # get_sec_filings edgarPrimaryDocumentUrl), skip all EDGAR resolution calls.
-    primary_doc_url: str | None = document_url or None
+    primary_doc_url: str | None = document_url if document_url else None
     fiscal_year: str | None = None
     if not primary_doc_url:
         try:
