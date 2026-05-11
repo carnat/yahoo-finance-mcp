@@ -2440,14 +2440,37 @@ async function edgarGetJson(url: string): Promise<Record<string, unknown> | null
   }
 }
 
-/** Fetch an EDGAR HTML/text document. Returns at most maxBytes of content. */
+/** Fetch an EDGAR HTML/text document. Reads at most maxBytes from the response
+ *  stream and cancels the rest, avoiding large memory allocations for big filings. */
 async function edgarGetHtml(url: string, maxBytes = 5_000_000): Promise<string | null> {
   try {
     const resp = await fetch(url, { headers: { "User-Agent": EDGAR_UA } });
-    if (!resp.ok) { await resp.body?.cancel(); return null; }
-    const buf = await resp.arrayBuffer();
-    const slice = buf.byteLength > maxBytes ? buf.slice(0, maxBytes) : buf;
-    return new TextDecoder("utf-8", { fatal: false, ignoreBOM: true }).decode(slice);
+    if (!resp.ok || !resp.body) { await resp.body?.cancel(); return null; }
+    const reader = resp.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        const remaining = maxBytes - totalBytes;
+        if (value.byteLength <= remaining) {
+          chunks.push(value);
+          totalBytes += value.byteLength;
+        } else {
+          if (remaining > 0) {
+            chunks.push(value.slice(0, remaining));
+            totalBytes = maxBytes;
+          }
+          await reader.cancel();
+          break;
+        }
+      }
+    }
+    const combined = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) { combined.set(chunk, offset); offset += chunk.byteLength; }
+    return new TextDecoder("utf-8", { fatal: false, ignoreBOM: true }).decode(combined);
   } catch {
     return null;
   }
