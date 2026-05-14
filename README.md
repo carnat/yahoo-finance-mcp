@@ -65,10 +65,6 @@ The server exposes the following tools through the Model Context Protocol:
 |------|-------------|
 | `get_filing_data` | Retrieve structured XBRL-tagged EDGAR facts for known GAAP line items and geographic/segment revenue. Use this first for filing-derived metrics. Args: `ticker`, `fact_type`, optional `region`, `filing_type` (`10-K`/`10-Q`), `period` (`latest`/`all`). |
 | `search_filing_text` | Search narrative filing HTML text or retrieve section-context snippets when a fact is not XBRL-tagged. Args: `ticker`, optional `search_terms`, `section_hint`, `filing_type`, `accession_number`, `context_chars`, `return_tables`. |
-| `get_geographic_revenue` | **Deprecated.** Use `get_filing_data` with `fact_type="geographic_revenue"`. |
-| `get_sec_filings` | **Deprecated.** Internal-only legacy helper; use `search_filing_text` (or `get_filing_data` first). |
-| `get_filing_text_search` | **Deprecated.** Use `search_filing_text`. |
-| `get_filing_document` | **Deprecated.** Use `search_filing_text` with `section_hint`. |
 
 ### Discovery
 
@@ -280,4 +276,3 @@ https://<your-replit>.repl.co/mcp
 ## License
 
 MIT
-

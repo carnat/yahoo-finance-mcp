@@ -223,8 +223,199 @@ This server provides financial market data from Yahoo Finance.
 )
 
 
+
+
+_TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {'get_historical_stock_prices': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_stock_info': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_yahoo_finance_news': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_stock_actions': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_financial_statement': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_holder_info': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_option_expiration_dates': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_option_chain': {'type': 'object',
+                      'properties': {'ticker': {'type': 'string'},
+                                     'expiration': {'type': 'string'},
+                                     'optionType': {'type': 'string'},
+                                     'dataDate': {'type': 'string'},
+                                     'contracts': {'type': 'array'}},
+                      'additionalProperties': True},
+ 'get_recommendations': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_fast_info': {'type': 'object',
+                   'properties': {'ticker': {'type': 'string'},
+                                  'lastPrice': {'type': 'number'},
+                                  'currency': {'type': 'string'},
+                                  'exchange': {'type': 'string'},
+                                  'quoteType': {'type': 'string'},
+                                  'marketCap': {'type': ['number', 'null']},
+                                  'shares': {'type': ['number', 'null']},
+                                  'dayHigh': {'type': 'number'},
+                                  'dayLow': {'type': 'number'},
+                                  'yearHigh': {'type': 'number'},
+                                  'yearLow': {'type': 'number'},
+                                  'yearChange': {'type': 'number'},
+                                  'preMarketPrice': {'type': ['number', 'null']},
+                                  'postMarketPrice': {'type': ['number', 'null']},
+                                  'marketOpen': {'type': 'boolean'},
+                                  'lastTradeDate': {'type': 'string'}},
+                   'additionalProperties': True},
+ 'get_short_interest': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_price_stats': {'type': 'object',
+                     'properties': {'ticker': {'type': 'string'},
+                                    'lastPrice': {'type': 'number'},
+                                    'changePct': {'type': 'number'},
+                                    'distFromHigh52wPct': {'type': 'number'},
+                                    'distFromLow52wPct': {'type': 'number'},
+                                    'distFrom50dmaPct': {'type': 'number'},
+                                    'distFrom200dmaPct': {'type': 'number'},
+                                    'volatility30d': {'type': 'number'},
+                                    'cagr1y': {'type': 'number'},
+                                    'cagr3y': {'type': 'number'},
+                                    'cagr5y': {'type': 'number'},
+                                    'dataDate': {'type': 'string'}},
+                     'additionalProperties': True},
+ 'get_analyst_consensus': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_earnings_analysis': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_financial_ratios': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_calendar': {'type': 'object',
+                  'properties': {'ticker': {'type': 'string'},
+                                 'earningsDateConfirmed': {'type': ['boolean', 'null']},
+                                 'earningsDateSource': {'type': ['string', 'null']}},
+                  'additionalProperties': True},
+ 'search_ticker': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'screen_stocks': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_filing_data': {'type': 'object',
+                     'properties': {'ticker': {'type': 'string'},
+                                    'factType': {'type': 'string'},
+                                    'source': {'type': 'string'},
+                                    'confidence': {'type': 'string'},
+                                    'value': {},
+                                    'currency': {'type': ['string', 'null']},
+                                    'period': {'type': ['string', 'null']},
+                                    'filingType': {'type': ['string', 'null']}},
+                     'additionalProperties': True},
+ 'search_filing_text': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_technical_indicators': {'type': 'object',
+                              'properties': {'ticker': {'type': 'string'},
+                                             'rsi14': {'type': ['number', 'null']},
+                                             'macd': {'type': ['number', 'null']},
+                                             'macdSignal': {'type': ['number', 'null']},
+                                             'macdHistogram': {'type': ['number', 'null']},
+                                             'lastClose': {'type': ['number', 'null']},
+                                             'dataDate': {'type': 'string'}},
+                              'additionalProperties': True},
+ 'get_price_slope': {'type': 'object',
+                     'properties': {'ticker': {'type': 'string'},
+                                    'startClose': {'type': ['number', 'null']},
+                                    'endClose': {'type': ['number', 'null']},
+                                    'slopePct': {'type': ['number', 'null']},
+                                    'direction': {'type': 'string'},
+                                    'dataDate': {'type': 'string'}},
+                     'additionalProperties': True},
+ 'get_volume_ratio': {'type': 'object',
+                      'properties': {'ticker': {'type': 'string'},
+                                     'ratio10d': {'type': ['number', 'null']},
+                                     'ratio90d': {'type': ['number', 'null']},
+                                     'volumeFlag': {'type': ['string', 'null']},
+                                     'dataDate': {'type': 'string'}},
+                      'additionalProperties': True},
+ 'get_ma_position': {'type': 'object',
+                     'properties': {'ticker': {'type': 'string'},
+                                    'lastClose': {'type': ['number', 'null']},
+                                    'sma50': {'type': ['number', 'null']},
+                                    'sma200': {'type': ['number', 'null']},
+                                    'distFrom50dmaPct': {'type': ['number', 'null']},
+                                    'distFrom200dmaPct': {'type': ['number', 'null']},
+                                    'trend': {'type': 'string'},
+                                    'dataDate': {'type': 'string'}},
+                     'additionalProperties': True},
+ 'get_credit_health': {'type': 'object',
+                       'properties': {'ticker': {'type': 'string'},
+                                      'netDebtToEbitda': {'type': ['number', 'null']},
+                                      'interestCoverage': {'type': ['number', 'null']},
+                                      'debtTier': {'type': ['string', 'null']},
+                                      'creditStress': {'type': ['boolean', 'null']},
+                                      'dataDate': {'type': 'string'}},
+                       'additionalProperties': True},
+ 'get_short_momentum': {'type': 'object',
+                        'properties': {'ticker': {'type': 'string'},
+                                       'sharesShort': {'type': ['number', 'null']},
+                                       'shortPctOfFloat': {'type': ['number', 'null']},
+                                       'momDelta': {'type': ['number', 'null']},
+                                       'direction': {'type': ['string', 'null']},
+                                       'squeezeRisk': {'type': ['string', 'null']},
+                                       'flag': {'type': ['string', 'null']},
+                                       'dataDate': {'type': 'string'}},
+                        'additionalProperties': True},
+ 'get_earnings_momentum': {'type': 'object',
+                           'properties': {'ticker': {'type': 'string'},
+                                          'revision7d': {'type': ['number', 'null']},
+                                          'revision30d': {'type': ['number', 'null']},
+                                          'revision90d': {'type': ['number', 'null']},
+                                          'momentumFlag': {'type': ['string', 'null']},
+                                          'beatRate': {'type': ['number', 'null']},
+                                          'avgSurprisePct': {'type': ['number', 'null']},
+                                          'currentBeatStreak': {'type': ['number', 'null']},
+                                          'dataDate': {'type': 'string'}},
+                           'additionalProperties': True},
+ 'get_options_flow_summary': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_put_hedge_candidates': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_analyst_upgrade_radar': {'type': 'object',
+                               'properties': {'ticker': {'type': 'string'},
+                                              'netSentiment': {'type': ['number', 'null']},
+                                              'mixedSignal': {'type': ['boolean', 'null']},
+                                              'upgrades': {'type': ['number', 'null']},
+                                              'downgrades': {'type': ['number', 'null']},
+                                              'dataDate': {'type': 'string'}},
+                               'additionalProperties': True},
+ 'get_etf_info': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_overnight_quote': {'type': 'object', 'properties': {}, 'additionalProperties': True},
+ 'get_options_flow_scan': {'type': 'object',
+                           'properties': {'ticker': {'type': 'string'},
+                                          'windowLabel': {'type': 'string'},
+                                          'pcRatio': {'type': ['number', 'null']},
+                                          'ivPctile': {'type': ['number', 'null']},
+                                          'putVolVs10dAvg': {'type': ['number', 'null']},
+                                          'putVolTrend': {'type': ['string', 'null']},
+                                          'maxPainStrike': {'type': ['number', 'null']},
+                                          'bracket': {'type': ['string', 'null']},
+                                          'formattedBlock': {'type': ['string', 'null']},
+                                          'dataDate': {'type': 'string'}},
+                           'additionalProperties': True},
+ 'get_price_target_bracket': {'type': 'object',
+                              'properties': {'ticker': {'type': 'string'},
+                                             'currentPrice': {'type': ['number', 'null']},
+                                             'ioPt': {'type': ['number', 'null']},
+                                             'eqfPct': {'type': ['number', 'null']},
+                                             'bracket': {'type': ['string', 'null']},
+                                             'tag': {'type': ['string', 'null']},
+                                             'invertedFlag': {'type': ['boolean', 'null']},
+                                             'dataDate': {'type': 'string'}},
+                              'additionalProperties': True},
+ 'get_position_score_inputs': {'type': 'object',
+                               'properties': {'ticker': {'type': 'string'},
+                                              't1_inputs': {'type': 'object'},
+                                              't2_inputs': {'type': 'object'},
+                                              't4_inputs': {'type': 'object'},
+                                              't5_inputs': {'type': 'object'},
+                                              'dataDate': {'type': 'string'}},
+                               'additionalProperties': True},
+ 'get_volume_gate': {'type': 'object',
+                     'properties': {'ticker': {'type': 'string'},
+                                    'currency': {'type': ['string', 'null']},
+                                    'fxRate': {'type': ['number', 'null']},
+                                    'lastVolume': {'type': ['number', 'null']},
+                                    'adv10d': {'type': ['number', 'null']},
+                                    'adv20d': {'type': ['number', 'null']},
+                                    'adv90d': {'type': ['number', 'null']},
+                                    'ratio20d': {'type': ['number', 'null']},
+                                    'gatePass': {'type': ['boolean', 'null']},
+                                    'dataDate': {'type': 'string'},
+                                    'note': {'type': ['string', 'null']}},
+                     'additionalProperties': True}}
+
 @yfinance_server.tool(
     name="get_historical_stock_prices",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_historical_stock_prices"],
     description="""Get historical stock prices for a given ticker symbol from yahoo finance. Include the following information: Date, Open, High, Low, Close (adjusted), Volume.
 Args:
     ticker: str
@@ -311,6 +502,7 @@ async def get_historical_stock_prices(
 
 @yfinance_server.tool(
     name="get_stock_info",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_info"],
     description="""Get stock fundamentals for one or more ticker symbols from Yahoo Finance.
 
 By default returns ~30 key fields covering identity, price, valuation, earnings, margins,
@@ -388,6 +580,7 @@ async def get_stock_info(
 
 @yfinance_server.tool(
     name="get_yahoo_finance_news",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_yahoo_finance_news"],
     description="""Get news for a given ticker symbol from yahoo finance.
 
 Args:
@@ -436,6 +629,7 @@ async def get_yahoo_finance_news(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_stock_actions",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_actions"],
     description="""Get stock dividends and stock splits for a given ticker symbol from yahoo finance.
 
 Args:
@@ -457,6 +651,7 @@ async def get_stock_actions(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_financial_statement",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_financial_statement"],
     description="""Get financial statement for a given ticker symbol from yahoo finance.
 
 Financial statement types:
@@ -574,6 +769,7 @@ async def get_financial_statement(
 
 @yfinance_server.tool(
     name="get_holder_info",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_holder_info"],
     description="""Get holder information for a given ticker symbol from yahoo finance. You can choose from the following holder types: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders.
 
 Args:
@@ -613,6 +809,7 @@ async def get_holder_info(ticker: str, holder_type: str) -> str:
 
 @yfinance_server.tool(
     name="get_option_expiration_dates",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_option_expiration_dates"],
     description="""Fetch the available options expiration dates for a given ticker symbol.
 
 Args:
@@ -636,6 +833,7 @@ async def get_option_expiration_dates(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_option_chain",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_option_chain"],
     description="""Fetch the option chain for a given ticker symbol, expiration date, and option type.
 
 Use the optional strike filters to narrow the results — a full options chain (e.g. AAPL) can have 200+ rows;
@@ -737,9 +935,8 @@ async def get_option_chain(
 
 @yfinance_server.tool(
     name="get_recommendations",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_recommendations"],
     description="""Get recommendations or upgrades/downgrades for a given ticker symbol from yahoo finance. You can also specify the number of months back to get upgrades/downgrades for, default is 12.
-
-DEPRECATED: Use `get_analyst_upgrade_radar` instead, which supports batch tickers and includes pre-computed signal classification (UPGRADE/DOWNGRADE/MAINTAIN) and net sentiment score.
 
 Args:
     ticker: str
@@ -785,6 +982,7 @@ async def get_recommendations(ticker: str, recommendation_type: str, months_back
 
 @yfinance_server.tool(
     name="get_fast_info",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_fast_info"],
     description="""Get lightweight real-time price and market data for one or more ticker symbols. Returns ~20 high-signal fields
 plus pre-market/after-hours prices when available.
 
@@ -886,6 +1084,7 @@ async def get_fast_info(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_short_interest",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_short_interest"],
     description="""Get short interest data for a ticker symbol.
 
 Returns structured short-selling metrics sourced from yfinance .info, including the
@@ -957,6 +1156,7 @@ async def get_short_interest(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_price_stats",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_stats"],
     description="""Get pre-computed price statistics for one or more tickers. Returns a compact summary so you do NOT
 need to fetch raw history and compute these yourself.
 
@@ -1059,6 +1259,7 @@ async def get_price_stats(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_analyst_consensus",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_analyst_consensus"],
     description="""Get a compact analyst consensus summary for one or more tickers.
 
 Returns pre-aggregated data so you do NOT need to call get_recommendations separately.
@@ -1141,6 +1342,7 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_earnings_analysis",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_analysis"],
     description="""Get all analyst forward-looking data in a single call — replaces 5 separate tool calls.
 
 Returns:
@@ -1203,6 +1405,7 @@ async def get_earnings_analysis(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_financial_ratios",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_financial_ratios"],
     description="""Get pre-computed key financial ratios for one or more tickers.
 
 PREFER THIS over fetching full financial statements when you need valuation or profitability ratios.
@@ -1294,11 +1497,8 @@ async def get_financial_ratios(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_calendar",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_calendar"],
     description="""Get upcoming earnings date and dividend schedule for a ticker.
-
-DEPRECATED: All fields returned by this tool (earnings date, EPS/revenue estimates,
-ex-dividend date, dividend pay date) are also available in `get_stock_info` under the
-`earnings` and dividend keys. Prefer `get_stock_info` to save a round-trip.
 
 Returns:
 - Next earnings date range and EPS/revenue estimates
@@ -1385,6 +1585,7 @@ async def get_calendar(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="search_ticker",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["search_ticker"],
     description="""Search for ticker symbols by company name, partial name, or ISIN.
 
 Use this tool to resolve a company name to a ticker symbol before calling other tools.
@@ -1439,6 +1640,7 @@ async def search_ticker(query: str, max_results: int = 8, exchange: str | None =
 
 @yfinance_server.tool(
     name="screen_stocks",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["screen_stocks"],
     description="""Screen the market for stocks matching predefined criteria.
 
 Use this tool to discover stocks without iterating over individual tickers.
@@ -1491,17 +1693,6 @@ async def screen_stocks(screener_name: str, count: int = 25) -> str:
         return f"Error: running screener '{screener_name}': {e}"
 
 
-# ---------------------------------------------------------------------------
-# Group 3.4 — get_sec_filings
-# ---------------------------------------------------------------------------
-
-@yfinance_server.tool(
-    name="get_sec_filings",
-    description="[DEPRECATED] Internal-only helper retired. Use get_filing_data or search_filing_text.",
-)
-async def get_sec_filings(ticker: str) -> str:
-    return json.dumps({"deprecated": True, "useInstead": "search_filing_text"})
-
 
 # ---------------------------------------------------------------------------
 # Group 3.4b — get_filing_data / search_filing_text
@@ -1523,9 +1714,6 @@ _FILING_FACT_CONCEPTS: dict[FilingFactType, tuple[str, str | None]] = {
     FilingFactType.cash: ("CashAndCashEquivalentsAtCarryingValue", None),
 }
 
-
-def _deprecated_payload(use_instead: str) -> str:
-    return json.dumps({"deprecated": True, "useInstead": use_instead})
 
 
 async def _resolve_cik_for_ticker(ticker: str) -> str | None:
@@ -1620,6 +1808,7 @@ def _manual_lookup_payload(ticker: str, cik_padded: str | None, filing_type: str
 
 @yfinance_server.tool(
     name="get_filing_data",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_data"],
     description="""Retrieve structured XBRL-tagged financial facts from EDGAR.
 
 Try this tool before search_filing_text for GAAP line items or geographic revenue.
@@ -1829,6 +2018,7 @@ async def get_filing_data(
 
 @yfinance_server.tool(
     name="search_filing_text",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["search_filing_text"],
     description="""Search filing narrative text by keyword or section hint.
 
 Use this only when get_filing_data returns NOT_DISCLOSED or the fact is not XBRL-tagged.
@@ -2002,6 +2192,7 @@ async def search_filing_text(
 
 @yfinance_server.tool(
     name="get_technical_indicators",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_technical_indicators"],
     description="""Get pre-computed technical / momentum indicators for one or more tickers.
 
 Computes indicators server-side from historical daily close prices so the LLM
@@ -2106,6 +2297,7 @@ async def get_technical_indicators(ticker: str | list[str], period: str = "3mo")
 
 @yfinance_server.tool(
     name="get_price_slope",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_slope"],
     description="""Get N-day price slope (% change) and direction for one or more tickers. Pre-computed server-side.
 
 Returns: startClose, endClose, slopePct, direction (UP/DOWN/FLAT).
@@ -2176,6 +2368,7 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
 
 @yfinance_server.tool(
     name="get_volume_ratio",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_ratio"],
     description="""Get last-session volume vs N-day average volume ratio. Pre-computed server-side.
 
 Returns: lastVolume, avgVolume10d, avgVolume90d, ratio10d, ratio90d, volumeFlag (HIGH/NORMAL/LOW).
@@ -2248,6 +2441,7 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
 
 @yfinance_server.tool(
     name="get_ma_position",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_ma_position"],
     description="""Get price position vs 50DMA and 200DMA with trend classification. Pre-computed server-side.
 
 Returns: lastPrice, fiftyDayAverage, twoHundredDayAverage, pctVs50dma, pctVs200dma, regime50, regime200, trend (BULLISH/BEARISH/MIXED).
@@ -2322,6 +2516,7 @@ async def get_ma_position(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_credit_health",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_credit_health"],
     description="""Get pre-computed credit/leverage metrics: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag.
 
 Args:
@@ -2438,6 +2633,7 @@ async def get_credit_health(ticker: str | list[str]) -> str:
 # ---------------------------------------------------------------------------
 @yfinance_server.tool(
     name="get_short_momentum",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_short_momentum"],
     description="""Get short interest with pre-computed momentum: MoM delta, direction, squeeze risk, and flag.
 
 Args:
@@ -2534,6 +2730,7 @@ async def get_short_momentum(ticker: str | list[str]) -> str:
 # ---------------------------------------------------------------------------
 @yfinance_server.tool(
     name="get_earnings_momentum",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_momentum"],
     description="""Get earnings revision momentum, beat rate, and estimate direction signals.
 
 Returns: revision7d/30d/90d, revisionDirection, momentumFlag, beatRate, beatCount, avgSurprisePct, currentBeatStreak.
@@ -2703,6 +2900,7 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_options_flow_summary",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_flow_summary"],
     description="""Get options flow summary: P/C ratio, IV percentile, max pain strike, highest OI strikes. Single ticker only.
 
 Args:
@@ -2851,6 +3049,7 @@ async def get_options_flow_summary(ticker: str, expiry_hint: str | None = None) 
 
 @yfinance_server.tool(
     name="get_put_hedge_candidates",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_put_hedge_candidates"],
     description="""Get pre-filtered OTM put options within a strike range and budget. Single ticker only.
 
 Args:
@@ -2983,6 +3182,7 @@ async def get_put_hedge_candidates(
 
 @yfinance_server.tool(
     name="get_analyst_upgrade_radar",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_analyst_upgrade_radar"],
     description="""Get recent analyst rating changes with pre-computed signal classification. Batch supported.
 
 Returns: changes with signal, ptFrom, ptTo, ptDirection, mixedSignal, strengthFlag; netSentiment, summary.
@@ -3154,6 +3354,7 @@ def _df_to_records(df) -> list | None:
 
 @yfinance_server.tool(
     name="get_etf_info",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_etf_info"],
     description="""Get ETF or mutual fund data for one or more ticker symbols.
 
 Returns identity (shortName, category, fundFamily, legalType, fundInceptionDate),
@@ -3224,6 +3425,7 @@ async def get_etf_info(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_overnight_quote",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_overnight_quote"],
     description="""Get overnight trading data for a ticker.
 
 The true overnight window is 20:00–04:00 ET (00:00–08:00 UTC / Blue Ocean ATS).
@@ -3942,40 +4144,12 @@ def _extract_geographic_pct(
 
 
 # ---------------------------------------------------------------------------
-# CR-10 — get_geographic_revenue
-# ---------------------------------------------------------------------------
-
-# Option C interim lookup table — confirmed values from 10-K annual filings.
-# Commander verifies and updates each entry when a new 10-K is filed.
-# pct is the decimal fraction (e.g. 0.117 = 11.7%).
-_CHINA_REVENUE_CONFIRMED: dict[str, dict] = {
-    "MU":   {"pct": 0.117, "fiscalYear": "FY2025", "filingDate": "2025-10-03"},
-    "AAPL": {"pct": 0.170, "fiscalYear": "FY2025", "filingDate": "2025-10-31"},
-    "ANET": {"pct": 0.140, "fiscalYear": "FY2024", "filingDate": "2025-02-14"},
-    "QCOM": {"pct": 0.620, "fiscalYear": "FY2024", "filingDate": "2024-11-06"},
-    "NVDA": {"pct": 0.170, "fiscalYear": "FY2025", "filingDate": "2025-02-26"},
-    "AMD":  {"pct": 0.220, "fiscalYear": "FY2024", "filingDate": "2025-02-04"},
-    "AVGO": {"pct": 0.350, "fiscalYear": "FY2024", "filingDate": "2024-12-19"},
-    "SWKS": {"pct": 0.580, "fiscalYear": "FY2024", "filingDate": "2024-11-20"},
-    "MRVL": {"pct": 0.550, "fiscalYear": "FY2025", "filingDate": "2025-03-13"},
-    "ON":   {"pct": 0.330, "fiscalYear": "FY2024", "filingDate": "2025-02-10"},
-}
-
-@yfinance_server.tool(
-    name="get_geographic_revenue",
-    description="[DEPRECATED] Use get_filing_data with fact_type='geographic_revenue'.",
-)
-async def get_geographic_revenue(ticker: str, region: str = "China") -> str:
-    # Proxy to get_filing_data so existing callers still receive useful data.
-    return await get_filing_data(ticker, FilingFactType.geographic_revenue, region=region)
-
-
-# ---------------------------------------------------------------------------
 # CR-12 — get_options_flow_scan
 # ---------------------------------------------------------------------------
 
 @yfinance_server.tool(
     name="get_options_flow_scan",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_flow_scan"],
     description="""Structured options flow scan for a binary event window.
 
 Returns the formatted options flow output block. IO pastes formattedBlock directly into
@@ -4158,6 +4332,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
 
 @yfinance_server.tool(
     name="get_price_target_bracket",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"],
     description="""Compute EQF bracket for a position.
 
 EQF = currentPrice / io_pt × 100. Used at every /snipe, /dca, and /thesis.
@@ -4237,6 +4412,7 @@ async def get_price_target_bracket(ticker: str, io_pt: float) -> str:
 
 @yfinance_server.tool(
     name="get_position_score_inputs",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"],
     description="""Aggregate all position scoring inputs for T1, T2, T4, and T5 components.
 
 T3 (PT proximity) and T2 (vs cost basis) require portfolio state (IO PT, cost basis) not available
@@ -4339,6 +4515,7 @@ async def get_position_score_inputs(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_volume_gate",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_gate"],
     description="""DC Section 6.2 Volume Gate check: regularMarketVolume ≥ 0.5 × 20-day ADV.
 
 Returns currency, fxRate, lastVolume, adv10d, adv20d (computed from last 20 daily sessions),
@@ -4447,115 +4624,6 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
         "note": note,
     })
 
-
-# ---------------------------------------------------------------------------
-# get_filing_text_search — full-text search within a specific SEC filing HTML
-# ---------------------------------------------------------------------------
-
-def _filing_text_only_matches(text: str, search_terms: list[str], context_chars: int) -> list[dict]:
-    """Return plain-text keyword matches with context windows (no HTML/table parsing)."""
-    text_lower = text.lower()
-    matches: list[dict] = []
-    seen_positions: set[int] = set()
-    half = max(1, context_chars // 2)
-    for term in search_terms:
-        term_lower = term.lower()
-        idx = 0
-        while len(matches) < 5:
-            pos = text_lower.find(term_lower, idx)
-            if pos == -1:
-                break
-            idx = pos + 1
-            if any(abs(pos - sp) < 200 for sp in seen_positions):
-                continue
-            seen_positions.add(pos)
-            ctx_start = max(0, pos - half)
-            ctx_end = min(len(text), pos + half)
-            matches.append({
-                "term": term,
-                "sectionHeading": None,
-                "contextText": text[ctx_start:ctx_end].strip(),
-                "tableParsed": None,
-            })
-    return matches
-
-
-@yfinance_server.tool(
-    name="get_filing_text_search",
-    description="[DEPRECATED] Use search_filing_text.",
-)
-async def get_filing_text_search(
-    ticker: str,
-    accession_number: str,
-    search_terms: list[str],
-    context_chars: int = 1500,
-    return_tables: bool = True,
-    text_only: bool = False,
-    document_url: str | None = None,
-) -> str:
-    return _deprecated_payload("search_filing_text")
-
-
-# ---------------------------------------------------------------------------
-# get_filing_document — retrieve a section of an SEC filing document
-# ---------------------------------------------------------------------------
-
-@yfinance_server.tool(
-    name="get_filing_document",
-    description="[DEPRECATED] Use search_filing_text with section_hint.",
-)
-async def get_filing_document(
-    ticker: str,
-    accession_number: str,
-    section_hint: str | None = None,
-    filing_type: str = "10-K",
-    document_url: str | None = None,
-) -> str:
-    return _deprecated_payload("search_filing_text")
-
-
-# ---------------------------------------------------------------------------
-# Deprecated aliases — backward compat (remove in next major version)
-# ---------------------------------------------------------------------------
-
-@yfinance_server.tool(
-    name="get_china_revenue_pct",
-    description="[DEPRECATED] Use get_geographic_revenue instead. Alias preserved for backward compatibility.",
-)
-async def _deprecated_get_china_revenue_pct(ticker: str) -> str:
-    return await get_geographic_revenue(ticker, region="China")
-
-
-@yfinance_server.tool(
-    name="get_dc134_options_scan",
-    description="[DEPRECATED] Use get_options_flow_scan instead. Alias preserved for backward compatibility.",
-)
-async def _deprecated_get_dc134_options_scan(ticker: str, window_day: str) -> str:
-    return await get_options_flow_scan(ticker, window_label=window_day)
-
-
-@yfinance_server.tool(
-    name="get_eqf_bracket",
-    description="[DEPRECATED] Use get_price_target_bracket instead. Alias preserved for backward compatibility.",
-)
-async def _deprecated_get_eqf_bracket(ticker: str, io_pt: float) -> str:
-    return await get_price_target_bracket(ticker, io_pt)
-
-
-@yfinance_server.tool(
-    name="get_tps_inputs",
-    description="[DEPRECATED] Use get_position_score_inputs instead. Alias preserved for backward compatibility.",
-)
-async def _deprecated_get_tps_inputs(ticker: str) -> str:
-    return await get_position_score_inputs(ticker)
-
-
-@yfinance_server.tool(
-    name="get_adv_gate",
-    description="[DEPRECATED] Use get_volume_gate instead. Alias preserved for backward compatibility.",
-)
-async def _deprecated_get_adv_gate(ticker: str, foreign_exchange: bool = False) -> str:
-    return await get_volume_gate(ticker, foreign_exchange)
 
 
 if __name__ == "__main__":
