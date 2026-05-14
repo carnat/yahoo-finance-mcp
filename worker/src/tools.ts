@@ -1063,7 +1063,6 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       return searchTicker(str(args.query), num(args.max_results, 8), args.exchange != null ? str(args.exchange) : null);
     case "screen_stocks":
       return screenStocks(str(args.screener_name), num(args.count, 25));
-
     case "get_short_interest":
       return getShortInterest(str(args.ticker));
     case "get_technical_indicators":
@@ -1113,8 +1112,6 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
         num(args.context_chars, 1500),
         args.return_tables !== false,
       );
-
-
     case "get_options_flow_scan":
       return getOptionsFlowScan(str(args.ticker), str(args.window_label));
     case "get_price_target_bracket":
@@ -1123,11 +1120,6 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       return getPositionScoreInputs(str(args.ticker));
     case "get_volume_gate":
       return getVolumeGate(str(args.ticker), args.foreign_exchange === true);
-
-
-
-
-
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
