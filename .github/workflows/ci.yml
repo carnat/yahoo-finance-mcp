@@ -17,9 +17,9 @@ jobs:
     name: Verify tool lists in sync
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -30,9 +30,9 @@ jobs:
     name: Type-check Worker
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
           cache: "npm"
@@ -45,3 +45,54 @@ jobs:
       - name: Type-check
         run: npx tsc --noEmit
         working-directory: worker
+
+  acceptance-suite:
+    name: Acceptance suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install worker deps
+        run: npm ci
+        working-directory: worker
+
+      - name: Install Python deps
+        run: pip install mcp yfinance pandas pydantic
+
+      - name: Tool sync
+        run: python scripts/check_tool_sync.py
+
+      - name: Phase 1 tests
+        run: python scripts/test_phase1.py
+
+      - name: Phase 3 tests
+        run: python scripts/test_phase3.py
+
+      - name: Phase 4 tests
+        run: python scripts/test_phase4.py
+
+      - name: Universal alias tests
+        run: python scripts/test_universal_aliases.py
+
+      - name: Deployed discovery tests
+        run: python scripts/test_deployed_discovery.py
+
+      - name: Geographic revenue schema tests
+        run: python scripts/test_geographic_revenue_schema.py
+
+      - name: Worker type-check
+        run: npx tsc --noEmit
+        working-directory: worker
+
+      - name: Python syntax check
+        run: python -m py_compile server.py

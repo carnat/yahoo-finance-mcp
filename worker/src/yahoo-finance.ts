@@ -159,20 +159,75 @@ function safeJsonParse(s: string, ticker: string): Record<string, unknown> {
   }
 }
 
+function toBatchError(message: string, code = "PROVIDER_ERROR", retryable = false): Record<string, unknown> {
+  return { code, message, retryable };
+}
+
+function normalizeBatchSymbolResult(parsed: unknown, ticker: string): Record<string, unknown> {
+  if (parsed != null && typeof parsed === "object") {
+    const p = parsed as Record<string, unknown>;
+    if (p.error === true || p.error != null) {
+      const message = typeof p.message === "string" ? p.message : (typeof p.error === "string" ? p.error : `Error for ${ticker}`);
+      const lower = message.toLowerCase();
+      if (lower.includes("no data found for ticker") || lower.includes("not found")) {
+        return { ok: false, data: null, error: toBatchError(message, "TICKER_NOT_FOUND", false) };
+      }
+      if (lower.includes("timeout")) {
+        return { ok: false, data: null, error: toBatchError(message, "PROVIDER_TIMEOUT", true) };
+      }
+      return { ok: false, data: null, error: toBatchError(message, "PROVIDER_ERROR", false) };
+    }
+    return { ok: true, data: p, error: null };
+  }
+  return { ok: false, data: null, error: toBatchError(`Malformed response for ${ticker}`, "PROVIDER_ERROR", false) };
+}
+
+async function runPartialBatch(
+  tickers: string[],
+  perTicker: (ticker: string) => Promise<string>
+): Promise<string> {
+  if (tickers.length > MAX_TICKERS) {
+    return JSON.stringify({
+      error: true,
+      code: "INPUT_VALIDATION_ERROR",
+      message: `Too many tickers: ${tickers.length}. Maximum is ${MAX_TICKERS} per call.`,
+    });
+  }
+  const out: Record<string, unknown> = {};
+  let successCount = 0;
+  let errorCount = 0;
+  for (const t of tickers) {
+    try {
+      const raw = await perTicker(t);
+      const parsed = safeJsonParse(raw, t);
+      const shaped = normalizeBatchSymbolResult(parsed, t);
+      if (shaped.ok === true) successCount += 1;
+      else errorCount += 1;
+      out[t] = shaped;
+    } catch (e) {
+      errorCount += 1;
+      const message = e instanceof Error ? e.message : String(e);
+      out[t] = {
+        ok: false,
+        data: null,
+        error: toBatchError(message, message.toLowerCase().includes("timeout") ? "PROVIDER_TIMEOUT" : "PROVIDER_ERROR", message.toLowerCase().includes("timeout")),
+      };
+    }
+  }
+  out.__batchMeta = {
+    partialSuccess: successCount > 0 && errorCount > 0,
+    successCount,
+    errorCount,
+  };
+  return JSON.stringify(out);
+}
+
 
 // ── get_etf_info ─────────────────────────────────────────────────────────────
 
 export async function getEtfInfo(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const limit = limitTickers(ticker);
-    const results: string[] = [];
-    for (const t of limit.tickers) {
-      results.push(await getEtfInfo(t));
-    }
-    return wrapBatchResult(
-      Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])),
-      limit
-    );
+    return runPartialBatch(ticker, (t) => getEtfInfo(t));
   }
 
   try {
@@ -312,10 +367,7 @@ export async function getHistoricalPrices(
 
 export async function getStockInfo(ticker: string | string[], includeAll = false): Promise<string> {
   if (Array.isArray(ticker)) {
-    const limit = limitTickers(ticker);
-    const results: string[] = [];
-    for (const t of limit.tickers) results.push(await getStockInfo(t, includeAll));
-    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
+    return runPartialBatch(ticker, (t) => getStockInfo(t, includeAll));
   }
   const modules = [
     "assetProfile",
@@ -607,6 +659,10 @@ export async function getOptionChain(
   maxContracts: number = 50,
   minOpenInterest: number = 0,
   minVolume: number = 0,
+  strikeMin: number | null = null,
+  strikeMax: number | null = null,
+  moneyness: string = "all",
+  sortBy: string = "strike",
 ): Promise<string> {
   if (!["calls", "puts"].includes(optType)) {
     return `Error: option_type must be 'calls' or 'puts'`;
@@ -632,14 +688,41 @@ export async function getOptionChain(
     const regMktTime = typeof quote.regularMarketTime === "number" ? quote.regularMarketTime : null;
     const dataDate = regMktTime
       ? new Date(regMktTime * 1000).toISOString().slice(0, 10)
-      : new Date().toISOString().slice(0, 10);
+      : getLastTradingDate();
 
     let contracts = (opts[optType] ?? []) as Record<string, unknown>[];
+    if (strikeMin != null) {
+      contracts = contracts.filter(c => ((c.strike as number) || 0) >= strikeMin);
+    }
+    if (strikeMax != null) {
+      contracts = contracts.filter(c => ((c.strike as number) || 0) <= strikeMax);
+    }
+    if (moneyness !== "all") {
+      contracts = contracts.filter(c => {
+        const itm = c.inTheMoney === true;
+        if (moneyness === "itm") return itm;
+        if (moneyness === "otm") return !itm;
+        if (moneyness === "near_money") {
+          const strike = (c.strike as number) || 0;
+          const underlying = (quote.regularMarketPrice as number) || strike;
+          if (underlying <= 0) return false;
+          return Math.abs(strike - underlying) / underlying <= 0.05;
+        }
+        return true;
+      });
+    }
     if (minOpenInterest > 0) {
       contracts = contracts.filter(c => ((c.openInterest as number) || 0) >= minOpenInterest);
     }
     if (minVolume > 0) {
       contracts = contracts.filter(c => ((c.volume as number) || 0) >= minVolume);
+    }
+    if (sortBy === "volume") {
+      contracts = contracts.sort((a, b) => (((b.volume as number) || 0) - ((a.volume as number) || 0)));
+    } else if (sortBy === "openInterest") {
+      contracts = contracts.sort((a, b) => (((b.openInterest as number) || 0) - ((a.openInterest as number) || 0)));
+    } else {
+      contracts = contracts.sort((a, b) => (((a.strike as number) || 0) - ((b.strike as number) || 0)));
     }
     const totalContracts = contracts.length;
     if (maxContracts > 0) {
@@ -655,6 +738,15 @@ export async function getOptionChain(
       totalContracts,
       returnedContracts,
       truncated: returnedContracts < totalContracts,
+      filtersApplied: {
+        max_contracts: maxContracts,
+        min_open_interest: minOpenInterest,
+        min_volume: minVolume,
+        strike_min: strikeMin,
+        strike_max: strikeMax,
+        moneyness,
+        sort_by: sortBy,
+      },
       contracts,
     });
   } catch (e) {
@@ -705,10 +797,7 @@ const REC_MOD: Record<string, string> = {
 
 export async function getFastInfo(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const limit = limitTickers(ticker);
-    const results: string[] = [];
-    for (const t of limit.tickers) results.push(await getFastInfo(t));
-    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
+    return runPartialBatch(ticker, (t) => getFastInfo(t));
   }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price,summaryDetail,defaultKeyStatistics`
@@ -963,10 +1052,7 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
 
 export async function getPriceStats(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const limit = limitTickers(ticker);
-    const results: string[] = [];
-    for (const t of limit.tickers) results.push(await getPriceStats(t));
-    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
+    return runPartialBatch(ticker, (t) => getPriceStats(t));
   }
   const [metaRaw, histRaw] = await Promise.all([
     yGet(
@@ -1061,10 +1147,7 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
 
 export async function getAnalystConsensus(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const limit = limitTickers(ticker);
-    const results: string[] = [];
-    for (const t of limit.tickers) results.push(await getAnalystConsensus(t));
-    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
+    return runPartialBatch(ticker, (t) => getAnalystConsensus(t));
   }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=financialData,recommendationTrend,price`
@@ -1179,10 +1262,7 @@ export async function getEarningsAnalysis(ticker: string): Promise<string> {
 
 export async function getFinancialRatios(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const limit = limitTickers(ticker);
-    const results: string[] = [];
-    for (const t of limit.tickers) results.push(await getFinancialRatios(t));
-    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
+    return runPartialBatch(ticker, (t) => getFinancialRatios(t));
   }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=summaryDetail,financialData,defaultKeyStatistics`
@@ -1712,12 +1792,7 @@ export async function getPriceSlope(ticker: string | string[], days: number): Pr
 
 export async function getVolumeRatio(ticker: string | string[], _period: number): Promise<string> {
   if (Array.isArray(ticker)) {
-    const limit = limitTickers(ticker);
-    const results: string[] = [];
-    for (const t of limit.tickers) {
-      results.push(await getVolumeRatio(t, _period));
-    }
-    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
+    return runPartialBatch(ticker, (t) => getVolumeRatio(t, _period));
   }
 
   try {
@@ -1755,12 +1830,7 @@ export async function getVolumeRatio(ticker: string | string[], _period: number)
 
 export async function getMaPosition(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const limit = limitTickers(ticker);
-    const results: string[] = [];
-    for (const t of limit.tickers) {
-      results.push(await getMaPosition(t));
-    }
-    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
+    return runPartialBatch(ticker, (t) => getMaPosition(t));
   }
 
   try {
@@ -1805,12 +1875,7 @@ export async function getMaPosition(ticker: string | string[]): Promise<string> 
 
 export async function getCreditHealth(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const limit = limitTickers(ticker);
-    const results: string[] = [];
-    for (const t of limit.tickers) {
-      results.push(await getCreditHealth(t));
-    }
-    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])), limit);
+    return runPartialBatch(ticker, (t) => getCreditHealth(t));
   }
   try {
     const [bsRaw, incRaw] = await Promise.all([
@@ -1885,12 +1950,7 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
 
 export async function getShortMomentum(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const limit = limitTickers(ticker);
-    const results: string[] = [];
-    for (const t of limit.tickers) {
-      results.push(await getShortMomentum(t));
-    }
-    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])), limit);
+    return runPartialBatch(ticker, (t) => getShortMomentum(t));
   }
   try {
     const si = JSON.parse(await getShortInterest(ticker));
@@ -1949,12 +2009,7 @@ export async function getShortMomentum(ticker: string | string[]): Promise<strin
 
 export async function getEarningsMomentum(ticker: string | string[]): Promise<string> {
   if (Array.isArray(ticker)) {
-    const limit = limitTickers(ticker);
-    const results: string[] = [];
-    for (const t of limit.tickers) {
-      results.push(await getEarningsMomentum(t));
-    }
-    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])), limit);
+    return runPartialBatch(ticker, (t) => getEarningsMomentum(t));
   }
   try {
     const ea = JSON.parse(await getEarningsAnalysis(ticker));
@@ -2327,12 +2382,7 @@ export async function getPutHedgeCandidates(
 
 export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack: number): Promise<string> {
   if (Array.isArray(ticker)) {
-    const limit = limitTickers(ticker);
-    const results: string[] = [];
-    for (const t of limit.tickers) {
-      results.push(await getAnalystUpgradeRadar(t, daysBack));
-    }
-    return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
+    return runPartialBatch(ticker, (t) => getAnalystUpgradeRadar(t, daysBack));
   }
 
   try {
@@ -2728,8 +2778,13 @@ async function edgarGetLatest10K(cik: number): Promise<{
 // ── HTML table parsing helpers ────────────────────────────────────────────────
 
 function stripHtmlTags(html: string): string {
+  const sanitizedHtml = html
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script[^>]*>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style[^>]*>/gi, " ")
+    .replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, " ");
   // Remove all HTML tags first, then decode entities in a single pass to avoid double-unescaping.
-  const noTags = html.replace(/<[^>]+>/g, " ");
+  const noTags = sanitizedHtml.replace(/<[^>]+>/g, " ");
   const ENTITY_MAP: Record<string, string> = {
     "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'",
   };
@@ -2742,6 +2797,14 @@ function stripHtmlTags(html: string): string {
     return " ";
   });
   return decoded.replace(/\s+/g, " ").trim();
+}
+
+function sanitizeFilingHtml(html: string): string {
+  return html
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script[^>]*>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style[^>]*>/gi, " ")
+    .replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, " ");
 }
 
 /** Parse a single HTML <table> into a list of rows (each row is a list of plain-text cells). */
@@ -2948,6 +3011,28 @@ export async function getFilingData(
   filingType = "10-K",
   period = "latest",
 ): Promise<string> {
+  const withGeoShape = (payload: Record<string, unknown>, addDenominatorWarning = false): string => {
+    if (factType !== "geographic_revenue") return JSON.stringify(payload);
+    const shaped: Record<string, unknown> = {
+      ...payload,
+      value: payload.value ?? null,
+      totalRevenue: payload.totalRevenue ?? null,
+      valuePct: payload.valuePct ?? null,
+    };
+    if (addDenominatorWarning && shaped.value !== null && shaped.totalRevenue === null) {
+      const existing = Array.isArray(shaped.warnings) ? shaped.warnings : [];
+      shaped.warnings = [
+        ...existing,
+        {
+          code: "DENOMINATOR_NOT_FOUND",
+          message: "Could not compute geographic revenue percentage.",
+          severity: "warning",
+        },
+      ];
+    }
+    return JSON.stringify(shaped);
+  };
+
   const config = FILING_FACT_CONCEPTS[factType];
   if (!config) return JSON.stringify({ error: true, message: `Unsupported fact_type '${factType}'`, ticker });
   if (factType === "geographic_revenue" && !region) {
@@ -2956,7 +3041,7 @@ export async function getFilingData(
 
   const cikPadded = await resolveCikForTicker(ticker);
   if (!cikPadded) {
-    return JSON.stringify({
+    return withGeoShape({
       ticker,
       factType,
       concept: config.primary,
@@ -2984,7 +3069,7 @@ export async function getFilingData(
 
   let filtered = facts.filter((f) => String(f.form ?? "").toUpperCase() === filingType.toUpperCase());
   if (!filtered.length) {
-    return JSON.stringify({
+    return withGeoShape({
       ticker,
       factType,
       concept,
@@ -3059,6 +3144,7 @@ export async function getFilingData(
       const totalVal = total ? Number(total.val ?? 0) : 0;
       const partVal = Number(picked.val ?? 0);
       if (totalVal > 0) valuePct = partVal / totalVal;
+      (picked as Record<string, unknown>).totalRevenue = total && totalVal > 0 ? totalVal : null;
     }
   } else {
     picked = filtered.find((f) => f.segment == null) ?? filtered[0] ?? null;
@@ -3090,11 +3176,12 @@ export async function getFilingData(
                 if (geo) {
                   const reportDate = sreportDates[idx] ?? "";
                   const fiscalYear = reportDate ? `FY${String(reportDate).slice(0, 4)}` : "";
-                  return JSON.stringify({
+                  return withGeoShape({
                     ticker,
                     factType,
                     concept,
                     value: geo.usd ?? null,
+                    totalRevenue: null,
                     valuePct: geo.pct,
                     fiscalYear,
                     fiscalPeriod: "FY",
@@ -3114,7 +3201,7 @@ export async function getFilingData(
         }
       }
     }
-    return JSON.stringify({
+    return withGeoShape({
       ticker,
       factType,
       concept,
@@ -3124,12 +3211,13 @@ export async function getFilingData(
     });
   }
 
-  return JSON.stringify({
+  return withGeoShape({
     ticker,
     factType,
     concept,
     value: picked.val ?? null,
-    valuePct: factType === "geographic_revenue" ? valuePct : undefined,
+    totalRevenue: factType === "geographic_revenue" ? ((picked as Record<string, unknown>).totalRevenue ?? null) : null,
+    valuePct: factType === "geographic_revenue" ? valuePct : null,
     fiscalYear: String(picked.fy ?? ""),
     fiscalPeriod: String(picked.fp ?? ""),
     filingType,
@@ -3138,7 +3226,7 @@ export async function getFilingData(
     accessionNumber: String(picked.accn ?? ""),
     source: "XBRL_COMPANYCONCEPT",
     confidence: "CONFIRMED",
-  });
+  }, factType === "geographic_revenue" && valuePct == null);
 }
 
 export async function searchFilingText(
@@ -3244,7 +3332,8 @@ export async function searchFilingText(
     });
   }
 
-  const htmlLower = html.toLowerCase();
+  const cleanedHtml = sanitizeFilingHtml(html);
+  const htmlLower = cleanedHtml.toLowerCase();
   const size = Math.max(200, Math.min(Math.floor(contextChars), 4000));
   const matches: Record<string, unknown>[] = [];
   const seen = new Set<number>();
@@ -3253,24 +3342,33 @@ export async function searchFilingText(
     if ([...seen].some((p) => Math.abs(p - pos) < 150)) return;
     seen.add(pos);
     const start = Math.max(0, pos - Math.floor(size / 2));
-    const end = Math.min(html.length, pos + Math.floor(size / 2));
-    const contextHtml = html.slice(start, end);
-    const preHtml = html.slice(Math.max(0, pos - 8_000), pos);
+    const end = Math.min(cleanedHtml.length, pos + Math.floor(size / 2));
+    const contextHtml = cleanedHtml.slice(start, end);
+    const preHtml = cleanedHtml.slice(Math.max(0, pos - 8_000), pos);
     const headingMatches = [...preHtml.matchAll(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi)];
     const sectionHeading = headingMatches.length ? stripHtmlTags(headingMatches[headingMatches.length - 1][1]) : "";
     const match: Record<string, unknown> = {
       term,
       sectionHeading,
       contextText: stripHtmlTags(contextHtml),
+      confidence: "LOW",
     };
     if (returnTables) {
       const tableParsed: Record<string, unknown>[] = [];
-      for (const m of contextHtml.matchAll(/<table[^>]*>([\s\S]*?)<\/table>/gi)) {
+      const tableWindow = cleanedHtml.slice(Math.max(0, pos - 12_000), Math.min(cleanedHtml.length, pos + 12_000));
+      for (const m of tableWindow.matchAll(/<table[^>]*>([\s\S]*?)<\/table>/gi)) {
         const rows = parseHtmlTable(m[0]);
-        if (rows.length >= 2) tableParsed.push({ rows });
+        if (rows.length >= 2 && rows.some(r => r.length > 0 && r.some(c => c.length > 0))) {
+          tableParsed.push({ rows });
+        }
         if (tableParsed.length >= 3) break;
       }
       match.tableParsed = tableParsed;
+      if (tableParsed.length > 0) {
+        match.confidence = "HIGH";
+      } else if ((match.contextText as string).length > 0) {
+        match.confidence = "MEDIUM";
+      }
     }
     matches.push(match);
   };
@@ -3299,7 +3397,12 @@ export async function searchFilingText(
     filingDate: filingDates[targetIndex] ?? null,
     matches,
     matchCount: matches.length,
-    confidence: "PARSED_HTML",
+    confidence: matches.length === 0 ? "NOT_DISCLOSED" : (matches.some(m => ((m.tableParsed as unknown[]) ?? []).length > 0) ? "HIGH" : "MEDIUM"),
+    warnings: matches.length > 0 ? [{
+      code: "RAW_FILING_TEXT",
+      message: "Returned text is sanitized filing context, not structured fact extraction.",
+      severity: "info",
+    }] : [],
   });
 }
 
@@ -4199,7 +4302,10 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number): Promi
 
 // ── get_position_score_inputs ─────────────────────────────────────────────────
 
-export async function getPositionScoreInputs(ticker: string): Promise<string> {
+export async function getPositionScoreInputs(ticker: string | string[]): Promise<string> {
+  if (Array.isArray(ticker)) {
+    return runPartialBatch(ticker, (t) => getPositionScoreInputs(t));
+  }
   try {
     const [upgradeRaw, consensusRaw, priceRaw, earningsRaw, techRaw, maRaw] = await Promise.all([
       getAnalystUpgradeRadar(ticker, 30),
