@@ -110,8 +110,8 @@ def assert_no_unknown_tool(payload: dict, tool: str) -> None:
         raise AssertionError(f"{tool} returned non-callable error: {payload}")
 
 
-def _check_pr50_aaoi(data: dict) -> None:
-    """AAOI PR50 schema check: denominator/valueRatio/valuePct normalization."""
+def _check_aaoi_geographic_revenue_schema(data: dict) -> None:
+    """AAOI geographic revenue schema check: denominator/valueRatio/valuePct normalization."""
     if data.get("valuePct") is not None:
         if data.get("denominator") is None:
             raise AssertionError(f"AAOI: valuePct present but denominator is null: {data}")
@@ -131,8 +131,8 @@ def _check_pr50_aaoi(data: dict) -> None:
         raise AssertionError(f"AAOI: neither documentUrl nor primaryDocumentUrl present: {data}")
 
 
-def _check_pr50_axti(data: dict) -> None:
-    """AXTI NOT_DISCLOSED schema check: stable null keys."""
+def _check_axti_not_disclosed_schema(data: dict) -> None:
+    """AXTI NOT_DISCLOSED schema check: stable null keys for undisclosed geographic revenue."""
     stable_null_keys = ("value", "denominator", "valueRatio", "valuePct")
     for k in stable_null_keys:
         if k in data and data[k] is not None:
@@ -286,12 +286,12 @@ def main() -> int:
         if name == "extract_sec_filing_fact" and args.get("ticker") == "AAOI":
             data = extract_data(payload)
             if isinstance(data, dict):
-                _check_pr50_aaoi(data)
-                print("  PASS AAOI PR50 schema check")
+                _check_aaoi_geographic_revenue_schema(data)
+                print("  PASS AAOI geographic revenue schema check")
         if name == "extract_sec_filing_fact" and args.get("ticker") == "AXTI":
             data = extract_data(payload)
             if isinstance(data, dict):
-                _check_pr50_axti(data)
+                _check_axti_not_disclosed_schema(data)
                 print("  PASS AXTI NOT_DISCLOSED schema check")
         if name == "get_company_news":
             data = extract_data(payload)

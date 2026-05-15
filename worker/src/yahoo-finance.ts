@@ -5372,14 +5372,31 @@ function _stripHtmlTagsIdx(html: string): string {
   return html.replace(/<[^>]+>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Strip <script> and <style> blocks from HTML, applying the regex repeatedly
+ * until stable to prevent bypass via nested/malformed patterns.
+ * Event-handler attributes (onX=...) are also removed.
+ */
+function _sanitizeFilingHtml(html: string): string {
+  const SCRIPT_RE = /<script\b[^>]*>[\s\S]*?<\/\s*script[^>]*>/gi;
+  const STYLE_RE = /<style\b[^>]*>[\s\S]*?<\/\s*style[^>]*>/gi;
+  let result = html;
+  let prev: string;
+  do {
+    prev = result;
+    // Recreate RegExp objects each iteration to reset lastIndex (global flag).
+    result = result
+      .replace(new RegExp(SCRIPT_RE.source, "gi"), "")
+      .replace(new RegExp(STYLE_RE.source, "gi"), "");
+  } while (result !== prev);
+  return result.replace(/\s+on\w+=(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, " ");
+}
+
 function _buildFilingIndexFromHtml(
   html: string,
 ): { sections: Record<string, unknown>[]; tables: Record<string, unknown>[]; keywordMap: Record<string, string[]> } {
   // Remove scripts/styles/event handlers to reduce noise.
-  // Use \s* before element names in closing tags to handle whitespace variants (</script >, </style >).
-  let sanitized = html.replace(/<script\b[^>]*>[\s\S]*?<\/\s*script[^>]*>/gi, "");
-  sanitized = sanitized.replace(/<style\b[^>]*>[\s\S]*?<\/\s*style[^>]*>/gi, "");
-  sanitized = sanitized.replace(/\s+on\w+=(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, " ");
+  const sanitized = _sanitizeFilingHtml(html);
 
   // --- Section extraction ---
   const sections: Record<string, unknown>[] = [];
@@ -5602,9 +5619,9 @@ async function _indexSecFilingImpl(
 }
 
 // indexSecFiling and getSecFilingIndex are separate exports for API symmetry:
-// index_sec_filing always (re-)builds and caches; get_sec_filing_index returns
-// cached results and is the preferred read path. Both currently delegate to the
-// same impl, but may diverge in future (e.g. force-refresh vs cache-first).
+// Both currently delegate to the same impl (cache-first). They may diverge in a
+// future release (e.g. force-refresh vs strict cache-only), so the separation
+// is preserved at the API level while the implementation remains shared.
 export async function indexSecFiling(
   ticker: string,
   filingType: string = "10-K",
