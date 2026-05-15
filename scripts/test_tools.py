@@ -45,6 +45,8 @@ class _Sentinel:
 NOT_ZERO = _Sentinel("NOT_ZERO")   # field exists and is not 0 / not null
 IS_NULL  = _Sentinel("IS_NULL")    # field is JSON null
 NOT_NULL = _Sentinel("NOT_NULL")   # field is present and not null
+KEY_PRESENT = _Sentinel("KEY_PRESENT")  # field key exists (value may be null)
+NUMBER_OR_NULL = _Sentinel("NUMBER_OR_NULL")  # field is number or null
 
 
 # ── Test case type ─────────────────────────────────────────────────────────────
@@ -222,13 +224,42 @@ TEST_CASES: list[TestCase] = [
         ],
     ),
     # ── get_filing_data — QCOM geographic revenue CONFIRMED baseline ──────
-    # QCOM has XBRL-tagged China revenue; valuePct must be present.
+    # QCOM has XBRL-tagged China revenue; schema keys must always be present.
     (
         "get_filing_data",
         {"ticker": "QCOM", "fact_type": "geographic_revenue", "region": "China"},
         [
-            ("valuePct", NOT_NULL),
+            ("value", KEY_PRESENT),
+            ("totalRevenue", KEY_PRESENT),
+            ("valuePct", KEY_PRESENT),
+            ("totalRevenue", NUMBER_OR_NULL),
+            ("valuePct", NUMBER_OR_NULL),
             ("confidence", NOT_NULL),
+        ],
+    ),
+    # ── geographic_revenue denominator-missing/nullable schema regression ───
+    (
+        "get_filing_data",
+        {"ticker": "GLW", "fact_type": "geographic_revenue", "region": "China"},
+        [
+            ("value", KEY_PRESENT),
+            ("totalRevenue", KEY_PRESENT),
+            ("valuePct", KEY_PRESENT),
+            ("totalRevenue", NUMBER_OR_NULL),
+            ("valuePct", NUMBER_OR_NULL),
+        ],
+    ),
+    # ── geographic_revenue NOT_DISCLOSED path must still include keys ───────
+    (
+        "get_filing_data",
+        {"ticker": "ZZZZINVALID", "fact_type": "geographic_revenue", "region": "China"},
+        [
+            ("confidence", "NOT_DISCLOSED"),
+            ("value", KEY_PRESENT),
+            ("totalRevenue", KEY_PRESENT),
+            ("valuePct", KEY_PRESENT),
+            ("totalRevenue", IS_NULL),
+            ("valuePct", IS_NULL),
         ],
     ),
     # ── search_filing_text — GLW Note 20 geographic section ───────────────
@@ -422,6 +453,11 @@ def _check_assertions(
         elif expected is NOT_ZERO:
             if actual is None or actual == 0:
                 failures.append(f"assertion '{path}': expected non-zero/non-null, got {actual!r}")
+        elif expected is KEY_PRESENT:
+            pass
+        elif expected is NUMBER_OR_NULL:
+            if actual is not None and not isinstance(actual, (int, float)):
+                failures.append(f"assertion '{path}': expected number|null, got {type(actual).__name__}")
         else:
             if actual != expected:
                 failures.append(f"assertion '{path}': expected {expected!r}, got {actual!r}")

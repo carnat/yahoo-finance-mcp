@@ -78,11 +78,12 @@ class ErrorCode:
 # ---------------------------------------------------------------------------
 class ToolMeta(TypedDict):
     tool: str
+    canonicalTool: str | None
     source: str
     dataDate: str | None
     serverVersion: str
     cacheHit: bool
-    warnings: list[str]
+    warnings: list[object]
 
 
 class ErrorDetail(TypedDict):
@@ -104,10 +105,11 @@ def _mcp_success(
     tool: str,
     data: object,
     *,
+    canonical_tool: str | None = None,
     source: str = "yahoo_finance",
     data_date: str | None = None,
     cache_hit: bool = False,
-    warnings: list[str] | None = None,
+    warnings: list[object] | None = None,
 ) -> str:
     if not _ENVELOPE_V2:
         return data if isinstance(data, str) else json.dumps(data)
@@ -116,6 +118,7 @@ def _mcp_success(
         "data": data if not isinstance(data, str) else json.loads(data),
         "meta": {
             "tool": tool,
+            "canonicalTool": canonical_tool,
             "source": source,
             "dataDate": data_date,
             "serverVersion": SERVER_VERSION,
@@ -157,6 +160,7 @@ def _mcp_warning(
     data: object,
     message: str,
     *,
+    canonical_tool: str | None = None,
     source: str = "yahoo_finance",
     data_date: str | None = None,
 ) -> str:
@@ -168,6 +172,7 @@ def _mcp_warning(
         "data": parsed,
         "meta": {
             "tool": tool,
+            "canonicalTool": canonical_tool,
             "source": source,
             "dataDate": data_date,
             "serverVersion": SERVER_VERSION,
@@ -513,6 +518,8 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
                         'source': {'type': 'string'},
                         'confidence': {'type': 'string'},
                         'value': {},
+                        'totalRevenue': {'type': ['number', 'null']},
+                        'valuePct': {'type': ['number', 'null']},
                         'currency': {'type': ['string', 'null']},
                         'period': {'type': ['string', 'null']},
                         'filingType': {'type': ['string', 'null']}},
@@ -661,7 +668,52 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
     "get_filing_table": _SIMPLE_OUTPUT_SCHEMA,
     "extract_filing_fact": _SIMPLE_OUTPUT_SCHEMA,
 }
-# Deprecated tools should use: _mcp_failure(tool, ErrorCode.DEPRECATED_TOOL, f"Use {canonical} instead")
+
+TOOL_ALIASES: dict[str, str] = {
+    "get_fast_info": "get_market_quote",
+    "get_historical_stock_prices": "get_historical_prices",
+    "get_stock_info": "get_company_profile",
+    "get_etf_info": "get_fund_profile",
+    "get_stock_actions": "get_corporate_actions",
+    "get_holder_info": "get_ownership_holders",
+    "get_price_stats": "analyze_price_performance",
+    "get_ma_position": "analyze_moving_average_position",
+    "get_volume_ratio": "analyze_volume_ratio",
+    "get_volume_gate": "check_volume_liquidity_threshold",
+    "get_adv_gate": "check_volume_liquidity_threshold",
+    "get_financial_ratios": "analyze_financial_ratios",
+    "get_credit_health": "analyze_credit_health",
+    "get_recommendations": "get_analyst_recommendations",
+    "get_analyst_upgrade_radar": "get_analyst_rating_changes",
+    "get_earnings_momentum": "analyze_earnings_momentum",
+    "get_calendar": "get_company_events_calendar",
+    "get_yahoo_finance_news": "get_company_news",
+    "get_options_flow_summary": "summarize_options_flow",
+    "get_options_summary": "summarize_options_flow",
+    "get_options_flow_scan": "analyze_options_flow_window",
+    "get_dc134_options_scan": "analyze_options_flow_window",
+    "get_put_hedge_candidates": "find_put_hedge_candidates",
+    "get_price_target_bracket": "calculate_price_target_distance",
+    "get_eqf_bracket": "calculate_price_target_distance",
+    "get_position_score_inputs": "analyze_position_signals",
+    "get_tps_inputs": "analyze_position_signals",
+    "list_sec_filings": "list_sec_company_filings",
+    "get_filing_outline": "get_sec_filing_outline",
+    "get_filing_section": "get_sec_filing_section",
+    "list_filing_tables": "list_sec_filing_tables",
+    "get_filing_table": "get_sec_filing_table",
+    "get_filing_data": "extract_sec_filing_fact",
+    "extract_filing_fact": "extract_sec_filing_fact",
+    "get_geographic_revenue": "extract_sec_filing_fact",
+    "get_china_revenue_pct": "extract_sec_filing_fact",
+    "search_filing_text": "search_sec_filing_text",
+    "get_filing_text_search": "search_sec_filing_text",
+    "get_filing_document": "get_sec_filing_section",
+}
+
+for _alias_name, _canonical_name in TOOL_ALIASES.items():
+    if _canonical_name in _TOOL_OUTPUT_SCHEMAS and _alias_name not in _TOOL_OUTPUT_SCHEMAS:
+        _TOOL_OUTPUT_SCHEMAS[_alias_name] = _TOOL_OUTPUT_SCHEMAS[_canonical_name]
 
 @yfinance_server.tool(
     name="get_historical_stock_prices",
@@ -2487,13 +2539,31 @@ async def get_filing_data(
     filing_type: str = "10-K",
     period: str = "latest",
 ) -> str:
+    def _geo_shape(payload: dict, *, warn_denominator: bool = False) -> str:
+        if fact_type != FilingFactType.geographic_revenue:
+            return json.dumps(payload)
+        shaped = dict(payload)
+        shaped["value"] = shaped.get("value", None)
+        shaped["totalRevenue"] = shaped.get("totalRevenue", None)
+        shaped["valuePct"] = shaped.get("valuePct", None)
+        if warn_denominator and shaped.get("value") is not None and shaped.get("totalRevenue") is None:
+            warnings = shaped.get("warnings")
+            warning_list = list(warnings) if isinstance(warnings, list) else []
+            warning_list.append({
+                "code": "DENOMINATOR_NOT_FOUND",
+                "message": "Could not compute geographic revenue percentage.",
+                "severity": "warning",
+            })
+            shaped["warnings"] = warning_list
+        return json.dumps(shaped)
+
     if fact_type == FilingFactType.geographic_revenue and not region:
         return json.dumps({"error": True, "message": "region is required for fact_type='geographic_revenue'"})
 
     concept_primary, concept_fallback = _FILING_FACT_CONCEPTS[fact_type]
     cik_padded = await _resolve_cik_for_ticker(ticker)
     if not cik_padded:
-        return json.dumps({
+        return _geo_shape({
             "ticker": ticker,
             "factType": fact_type.value,
             "concept": concept_primary,
@@ -2525,7 +2595,7 @@ async def get_filing_data(
 
     filtered = [f for f in usd_facts if str(f.get("form", "")).upper() == filing_type.upper()]
     if not filtered:
-        return json.dumps({
+        return _geo_shape({
             "ticker": ticker,
             "factType": fact_type.value,
             "concept": concept_used,
@@ -2571,6 +2641,7 @@ async def get_filing_data(
 
     picked: dict | None = None
     value_pct: float | None = None
+    total_revenue: float | None = None
     segment_label: str | None = None
     if fact_type == FilingFactType.geographic_revenue:
         for f in filtered:
@@ -2597,8 +2668,10 @@ async def get_filing_data(
             )
             try:
                 if total_fact and float(total_fact.get("val", 0)) > 0:
-                    value_pct = float(picked.get("val", 0)) / float(total_fact.get("val", 0))
+                    total_revenue = float(total_fact.get("val", 0))
+                    value_pct = float(picked.get("val", 0)) / total_revenue
             except Exception:
+                total_revenue = None
                 value_pct = None
     else:
         picked = next((f for f in filtered if not f.get("segment")), filtered[0] if filtered else None)
@@ -2637,11 +2710,12 @@ async def get_filing_data(
                                     filing_date_str = filing_dates_list[idx] if idx < len(filing_dates_list) else ""
                                     report_date_str = report_dates_list[idx] if idx < len(report_dates_list) else ""
                                     fiscal_year = f"FY{report_date_str[:4]}" if report_date_str else ""
-                                    return json.dumps({
+                                    return _geo_shape({
                                         "ticker": ticker,
                                         "factType": fact_type.value,
                                         "concept": concept_used,
                                         "value": geo_usd,
+                                        "totalRevenue": None,
                                         "valuePct": geo_pct,
                                         "fiscalYear": fiscal_year,
                                         "fiscalPeriod": "FY",
@@ -2654,7 +2728,7 @@ async def get_filing_data(
                                         "source": "PARSED_HTML",
                                         "confidence": "PARSED_HTML",
                                     })
-        return json.dumps({
+        return _geo_shape({
             "ticker": ticker,
             "factType": fact_type.value,
             "concept": concept_used,
@@ -2665,11 +2739,12 @@ async def get_filing_data(
             ),
         })
 
-    return json.dumps({
+    return _geo_shape({
         "ticker": ticker,
         "factType": fact_type.value,
         "concept": concept_used,
         "value": picked.get("val"),
+        "totalRevenue": total_revenue if fact_type == FilingFactType.geographic_revenue else None,
         "valuePct": value_pct if fact_type == FilingFactType.geographic_revenue else None,
         "fiscalYear": str(picked.get("fy") or ""),
         "fiscalPeriod": str(picked.get("fp") or ""),
@@ -2679,7 +2754,7 @@ async def get_filing_data(
         "accessionNumber": str(picked.get("accn") or ""),
         "source": "XBRL_COMPANYCONCEPT",
         "confidence": "CONFIRMED",
-    })
+    }, warn_denominator=(fact_type == FilingFactType.geographic_revenue and value_pct is None))
 
 
 @yfinance_server.tool(
@@ -5289,6 +5364,254 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
         "dataDate": data_date,
         "note": note,
     })
+
+
+def _deprecated_alias_response(alias_tool: str, canonical_tool: str, raw: str) -> str:
+    warning_obj = {
+        "code": "DEPRECATED_ALIAS",
+        "message": f"Use {canonical_tool} instead.",
+        "severity": "info",
+    }
+    if not _ENVELOPE_V2:
+        return raw
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        payload = raw
+    if isinstance(payload, dict) and "ok" in payload and "meta" in payload:
+        meta = payload.get("meta")
+        if isinstance(meta, dict):
+            meta["tool"] = alias_tool
+            meta["canonicalTool"] = canonical_tool
+            warnings = meta.get("warnings")
+            warning_list = list(warnings) if isinstance(warnings, list) else []
+            warning_list.append(warning_obj)
+            meta["warnings"] = warning_list
+        return json.dumps(payload)
+    return _mcp_success(alias_tool, payload, canonical_tool=canonical_tool, warnings=[warning_obj])
+
+
+@yfinance_server.tool(name="health_check", output_schema=_SIMPLE_OUTPUT_SCHEMA, description="Return runtime health metadata.")
+async def health_check() -> str:
+    return json.dumps({
+        "serverVersion": SERVER_VERSION,
+        "envelopeV2": _ENVELOPE_V2,
+        "nodeVersion": None,
+        "workerVersion": os.environ.get("WORKER_VERSION"),
+    })
+
+
+@yfinance_server.tool(name="get_market_quote", output_schema=_TOOL_OUTPUT_SCHEMAS["get_fast_info"], description="Canonical alias for get_fast_info.")
+async def get_market_quote(ticker: str | list[str]) -> str:
+    return await get_fast_info(ticker)
+
+
+@yfinance_server.tool(name="get_historical_prices", output_schema=_TOOL_OUTPUT_SCHEMAS["get_historical_stock_prices"], description="Canonical alias for get_historical_stock_prices.")
+async def get_historical_prices(ticker: str, period: str = "1mo", interval: str = "1d", prepost: bool = False) -> str:
+    return await get_historical_stock_prices(ticker=ticker, period=period, interval=interval, prepost=prepost)
+
+
+@yfinance_server.tool(name="analyze_price_performance", output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_stats"], description="Canonical alias for get_price_stats.")
+async def analyze_price_performance(ticker: str | list[str]) -> str:
+    return await get_price_stats(ticker)
+
+
+@yfinance_server.tool(name="analyze_moving_average_position", output_schema=_TOOL_OUTPUT_SCHEMAS["get_ma_position"], description="Canonical alias for get_ma_position.")
+async def analyze_moving_average_position(ticker: str | list[str]) -> str:
+    return await get_ma_position(ticker)
+
+
+@yfinance_server.tool(name="analyze_volume_ratio", output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_ratio"], description="Canonical alias for get_volume_ratio.")
+async def analyze_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
+    return await get_volume_ratio(ticker, period)
+
+
+@yfinance_server.tool(name="check_volume_liquidity_threshold", output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_gate"], description="Canonical alias for get_volume_gate.")
+async def check_volume_liquidity_threshold(ticker: str, foreign_exchange: bool = False) -> str:
+    return await get_volume_gate(ticker, foreign_exchange)
+
+
+@yfinance_server.tool(name="get_company_profile", output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_info"], description="Canonical alias for get_stock_info.")
+async def get_company_profile(ticker: str | list[str], include_all: bool = False) -> str:
+    return await get_stock_info(ticker, include_all=include_all)
+
+
+@yfinance_server.tool(name="get_fund_profile", output_schema=_TOOL_OUTPUT_SCHEMAS["get_etf_info"], description="Canonical alias for get_etf_info.")
+async def get_fund_profile(ticker: str | list[str]) -> str:
+    return await get_etf_info(ticker)
+
+
+@yfinance_server.tool(name="analyze_financial_ratios", output_schema=_TOOL_OUTPUT_SCHEMAS["get_financial_ratios"], description="Canonical alias for get_financial_ratios.")
+async def analyze_financial_ratios(ticker: str | list[str]) -> str:
+    return await get_financial_ratios(ticker)
+
+
+@yfinance_server.tool(name="analyze_credit_health", output_schema=_TOOL_OUTPUT_SCHEMAS["get_credit_health"], description="Canonical alias for get_credit_health.")
+async def analyze_credit_health(ticker: str | list[str]) -> str:
+    return await get_credit_health(ticker)
+
+
+@yfinance_server.tool(name="get_corporate_actions", output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_actions"], description="Canonical alias for get_stock_actions.")
+async def get_corporate_actions(ticker: str) -> str:
+    return await get_stock_actions(ticker)
+
+
+@yfinance_server.tool(name="get_ownership_holders", output_schema=_TOOL_OUTPUT_SCHEMAS["get_holder_info"], description="Canonical alias for get_holder_info.")
+async def get_ownership_holders(ticker: str, holder_type: HolderType) -> str:
+    return await get_holder_info(ticker, holder_type)
+
+
+@yfinance_server.tool(name="get_analyst_recommendations", output_schema=_TOOL_OUTPUT_SCHEMAS["get_recommendations"], description="Canonical alias for get_recommendations.")
+async def get_analyst_recommendations(ticker: str, recommendation_type: RecommendationType, months_back: int = 12) -> str:
+    return await get_recommendations(ticker, recommendation_type, months_back)
+
+
+@yfinance_server.tool(name="get_analyst_rating_changes", output_schema=_TOOL_OUTPUT_SCHEMAS["get_analyst_upgrade_radar"], description="Canonical alias for get_analyst_upgrade_radar.")
+async def get_analyst_rating_changes(ticker: str | list[str], days_back: int = 30) -> str:
+    return await get_analyst_upgrade_radar(ticker, days_back)
+
+
+@yfinance_server.tool(name="analyze_earnings_momentum", output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_momentum"], description="Canonical alias for get_earnings_momentum.")
+async def analyze_earnings_momentum(ticker: str | list[str]) -> str:
+    return await get_earnings_momentum(ticker)
+
+
+@yfinance_server.tool(name="get_company_events_calendar", output_schema=_TOOL_OUTPUT_SCHEMAS["get_calendar"], description="Canonical alias for get_calendar.")
+async def get_company_events_calendar(ticker: str) -> str:
+    return await get_calendar(ticker)
+
+
+@yfinance_server.tool(name="get_company_news", output_schema=_TOOL_OUTPUT_SCHEMAS["get_yahoo_finance_news"], description="Canonical alias for get_yahoo_finance_news.")
+async def get_company_news(ticker: str) -> str:
+    return await get_yahoo_finance_news(ticker)
+
+
+@yfinance_server.tool(name="summarize_options_flow", output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_summary"], description="Canonical alias for get_options_summary/get_options_flow_summary.")
+async def summarize_options_flow(ticker: str, expiry_hint: str | None = None) -> str:
+    return await get_options_flow_summary(ticker=ticker, expiry_hint=expiry_hint)
+
+
+@yfinance_server.tool(name="analyze_options_flow_window", output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_flow_scan"], description="Canonical alias for get_options_flow_scan.")
+async def analyze_options_flow_window(ticker: str, window_label: str) -> str:
+    return await get_options_flow_scan(ticker, window_label)
+
+
+@yfinance_server.tool(name="find_put_hedge_candidates", output_schema=_TOOL_OUTPUT_SCHEMAS["get_put_hedge_candidates"], description="Canonical alias for get_put_hedge_candidates.")
+async def find_put_hedge_candidates(ticker: str, otm_pct_min: float = 8, otm_pct_max: float = 12, budget_usd: float = 500, expiry_after: str = "") -> str:
+    return await get_put_hedge_candidates(ticker, otm_pct_min, otm_pct_max, budget_usd, expiry_after)
+
+
+@yfinance_server.tool(name="calculate_price_target_distance", output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"], description="Canonical alias for get_price_target_bracket.")
+async def calculate_price_target_distance(ticker: str, io_pt: float) -> str:
+    return await get_price_target_bracket(ticker, io_pt)
+
+
+@yfinance_server.tool(name="analyze_position_signals", output_schema=_TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"], description="Canonical alias for get_position_score_inputs.")
+async def analyze_position_signals(ticker: str) -> str:
+    return await get_position_score_inputs(ticker)
+
+
+@yfinance_server.tool(name="list_sec_company_filings", output_schema=_TOOL_OUTPUT_SCHEMAS["list_sec_filings"], description="Canonical alias for list_sec_filings.")
+async def list_sec_company_filings(ticker: str, form_type: str = "10-K", max_filings: int = 5) -> str:
+    return await list_sec_filings(ticker, form_type, max_filings)
+
+
+@yfinance_server.tool(name="get_sec_filing_outline", output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_outline"], description="Canonical alias for get_filing_outline.")
+async def get_sec_filing_outline(ticker: str, accession_number: str | None = None, document_url: str | None = None) -> str:
+    return await get_filing_outline(ticker, accession_number, document_url)
+
+
+@yfinance_server.tool(name="get_sec_filing_section", output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_section"], description="Canonical alias for get_filing_section.")
+async def get_sec_filing_section(ticker: str, section_name: str, document_url: str, context_chars: int = 3000) -> str:
+    return await get_filing_section(ticker, section_name, document_url, context_chars)
+
+
+@yfinance_server.tool(name="list_sec_filing_tables", output_schema=_TOOL_OUTPUT_SCHEMAS["list_filing_tables"], description="Canonical alias for list_filing_tables.")
+async def list_sec_filing_tables(ticker: str, document_url: str) -> str:
+    return await list_filing_tables(ticker, document_url)
+
+
+@yfinance_server.tool(name="get_sec_filing_table", output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_table"], description="Canonical alias for get_filing_table.")
+async def get_sec_filing_table(ticker: str, document_url: str, table_index: int, max_rows: int = 30) -> str:
+    return await get_filing_table(ticker, document_url, table_index, max_rows)
+
+
+@yfinance_server.tool(name="extract_sec_filing_fact", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_filing_fact"], description="Canonical SEC fact extractor (routes to get_filing_data or extract_filing_fact).")
+async def extract_sec_filing_fact(
+    ticker: str,
+    fact_name: str | None = None,
+    fact_type: FilingFactType | None = None,
+    region: str | None = None,
+    filing_type: str = "10-K",
+    period: str = "latest",
+    document_url: str | None = None,
+    accession_number: str | None = None,
+) -> str:
+    if fact_type is not None or region is not None or fact_name is None:
+        routed_fact_type = fact_type or FilingFactType.geographic_revenue
+        return await get_filing_data(ticker=ticker, fact_type=routed_fact_type, region=region, filing_type=filing_type, period=period)
+    return await extract_filing_fact(ticker=ticker, fact_name=fact_name, document_url=document_url, accession_number=accession_number)
+
+
+@yfinance_server.tool(name="search_sec_filing_text", output_schema=_TOOL_OUTPUT_SCHEMAS["search_filing_text"], description="Canonical alias for search_filing_text.")
+async def search_sec_filing_text(
+    ticker: str,
+    search_terms: list[str] | None = None,
+    section_hint: str | None = None,
+    filing_type: str = "10-K",
+    accession_number: str | None = None,
+    context_chars: int = 1500,
+    return_tables: bool = True,
+) -> str:
+    return await search_filing_text(ticker, search_terms, section_hint, filing_type, accession_number, context_chars, return_tables)
+
+
+@yfinance_server.tool(name="get_tps_inputs", output_schema=_TOOL_OUTPUT_SCHEMAS["get_tps_inputs"], description="Deprecated alias for analyze_position_signals.")
+async def get_tps_inputs(ticker: str) -> str:
+    return _deprecated_alias_response("get_tps_inputs", "analyze_position_signals", await analyze_position_signals(ticker))
+
+
+@yfinance_server.tool(name="get_eqf_bracket", output_schema=_TOOL_OUTPUT_SCHEMAS["get_eqf_bracket"], description="Deprecated alias for calculate_price_target_distance.")
+async def get_eqf_bracket(ticker: str, io_pt: float) -> str:
+    return _deprecated_alias_response("get_eqf_bracket", "calculate_price_target_distance", await calculate_price_target_distance(ticker, io_pt))
+
+
+@yfinance_server.tool(name="get_adv_gate", output_schema=_TOOL_OUTPUT_SCHEMAS["get_adv_gate"], description="Deprecated alias for check_volume_liquidity_threshold.")
+async def get_adv_gate(ticker: str, foreign_exchange: bool = False) -> str:
+    return _deprecated_alias_response("get_adv_gate", "check_volume_liquidity_threshold", await check_volume_liquidity_threshold(ticker, foreign_exchange))
+
+
+@yfinance_server.tool(name="get_dc134_options_scan", output_schema=_TOOL_OUTPUT_SCHEMAS["get_dc134_options_scan"], description="Deprecated alias for analyze_options_flow_window.")
+async def get_dc134_options_scan(ticker: str, window_label: str) -> str:
+    return _deprecated_alias_response("get_dc134_options_scan", "analyze_options_flow_window", await analyze_options_flow_window(ticker, window_label))
+
+
+@yfinance_server.tool(name="get_china_revenue_pct", output_schema=_TOOL_OUTPUT_SCHEMAS["get_china_revenue_pct"], description="Deprecated alias for extract_sec_filing_fact.")
+async def get_china_revenue_pct(ticker: str) -> str:
+    return _deprecated_alias_response("get_china_revenue_pct", "extract_sec_filing_fact", await extract_sec_filing_fact(ticker=ticker, fact_type=FilingFactType.geographic_revenue, region="China"))
+
+
+@yfinance_server.tool(name="get_geographic_revenue", output_schema=_TOOL_OUTPUT_SCHEMAS["get_geographic_revenue"], description="Deprecated alias for extract_sec_filing_fact.")
+async def get_geographic_revenue(ticker: str, region: str = "China") -> str:
+    return _deprecated_alias_response("get_geographic_revenue", "extract_sec_filing_fact", await extract_sec_filing_fact(ticker=ticker, fact_type=FilingFactType.geographic_revenue, region=region))
+
+
+@yfinance_server.tool(name="get_filing_text_search", output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_text_search"], description="Deprecated alias for search_sec_filing_text.")
+async def get_filing_text_search(
+    ticker: str,
+    search_terms: list[str] | None = None,
+    section_hint: str | None = None,
+    filing_type: str = "10-K",
+    accession_number: str | None = None,
+    context_chars: int = 1500,
+    return_tables: bool = True,
+) -> str:
+    return _deprecated_alias_response("get_filing_text_search", "search_sec_filing_text", await search_sec_filing_text(ticker, search_terms, section_hint, filing_type, accession_number, context_chars, return_tables))
+
+
+@yfinance_server.tool(name="get_filing_document", output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_document"], description="Deprecated alias for get_sec_filing_section.")
+async def get_filing_document(ticker: str, section_name: str, document_url: str, context_chars: int = 3000) -> str:
+    return _deprecated_alias_response("get_filing_document", "get_sec_filing_section", await get_sec_filing_section(ticker, section_name, document_url, context_chars))
 
 
 

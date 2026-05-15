@@ -2948,6 +2948,28 @@ export async function getFilingData(
   filingType = "10-K",
   period = "latest",
 ): Promise<string> {
+  const withGeoShape = (payload: Record<string, unknown>, warnDenominator = false): string => {
+    if (factType !== "geographic_revenue") return JSON.stringify(payload);
+    const shaped: Record<string, unknown> = {
+      ...payload,
+      value: (payload.value as unknown) ?? null,
+      totalRevenue: (payload.totalRevenue as unknown) ?? null,
+      valuePct: (payload.valuePct as unknown) ?? null,
+    };
+    if (warnDenominator && shaped.value !== null && shaped.totalRevenue === null) {
+      const existing = Array.isArray(shaped.warnings) ? (shaped.warnings as unknown[]) : [];
+      shaped.warnings = [
+        ...existing,
+        {
+          code: "DENOMINATOR_NOT_FOUND",
+          message: "Could not compute geographic revenue percentage.",
+          severity: "warning",
+        },
+      ];
+    }
+    return JSON.stringify(shaped);
+  };
+
   const config = FILING_FACT_CONCEPTS[factType];
   if (!config) return JSON.stringify({ error: true, message: `Unsupported fact_type '${factType}'`, ticker });
   if (factType === "geographic_revenue" && !region) {
@@ -2956,7 +2978,7 @@ export async function getFilingData(
 
   const cikPadded = await resolveCikForTicker(ticker);
   if (!cikPadded) {
-    return JSON.stringify({
+    return withGeoShape({
       ticker,
       factType,
       concept: config.primary,
@@ -2984,7 +3006,7 @@ export async function getFilingData(
 
   let filtered = facts.filter((f) => String(f.form ?? "").toUpperCase() === filingType.toUpperCase());
   if (!filtered.length) {
-    return JSON.stringify({
+    return withGeoShape({
       ticker,
       factType,
       concept,
@@ -3059,6 +3081,7 @@ export async function getFilingData(
       const totalVal = total ? Number(total.val ?? 0) : 0;
       const partVal = Number(picked.val ?? 0);
       if (totalVal > 0) valuePct = partVal / totalVal;
+      (picked as Record<string, unknown>).totalRevenue = total && totalVal > 0 ? totalVal : null;
     }
   } else {
     picked = filtered.find((f) => f.segment == null) ?? filtered[0] ?? null;
@@ -3090,11 +3113,12 @@ export async function getFilingData(
                 if (geo) {
                   const reportDate = sreportDates[idx] ?? "";
                   const fiscalYear = reportDate ? `FY${String(reportDate).slice(0, 4)}` : "";
-                  return JSON.stringify({
+                  return withGeoShape({
                     ticker,
                     factType,
                     concept,
                     value: geo.usd ?? null,
+                    totalRevenue: null,
                     valuePct: geo.pct,
                     fiscalYear,
                     fiscalPeriod: "FY",
@@ -3114,7 +3138,7 @@ export async function getFilingData(
         }
       }
     }
-    return JSON.stringify({
+    return withGeoShape({
       ticker,
       factType,
       concept,
@@ -3124,11 +3148,12 @@ export async function getFilingData(
     });
   }
 
-  return JSON.stringify({
+  return withGeoShape({
     ticker,
     factType,
     concept,
     value: picked.val ?? null,
+    totalRevenue: factType === "geographic_revenue" ? ((picked as Record<string, unknown>).totalRevenue ?? null) : undefined,
     valuePct: factType === "geographic_revenue" ? valuePct : undefined,
     fiscalYear: String(picked.fy ?? ""),
     fiscalPeriod: String(picked.fp ?? ""),
@@ -3138,7 +3163,7 @@ export async function getFilingData(
     accessionNumber: String(picked.accn ?? ""),
     source: "XBRL_COMPANYCONCEPT",
     confidence: "CONFIRMED",
-  });
+  }, factType === "geographic_revenue" && valuePct == null);
 }
 
 export async function searchFilingText(
