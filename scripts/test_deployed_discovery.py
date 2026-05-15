@@ -134,6 +134,7 @@ def main() -> int:
         assert_no_unknown_tool(payload, name)
         if name == "health_check":
             health = extract_data(payload)
+            print(f"  health_check response: {json.dumps(payload)}")
             if isinstance(health, dict) and health.get("envelopeV2") is not True:
                 raise AssertionError(f"health_check envelopeV2 expected true, got: {health}")
         if name == "get_option_chain":

@@ -21,6 +21,13 @@
  */
 
 import { handleMcp } from "./mcp.js";
+import { setWorkerEnv } from "./response.js";
+
+export interface Env {
+  MCP_ENVELOPE_V2?: string;
+  SERVER_VERSION?: string;
+  WORKER_VERSION?: string;
+}
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -37,7 +44,10 @@ function json(data: unknown, status = 200): Response {
 }
 
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    // Populate module-level env store so response wrappers and tools
+    // can read Cloudflare runtime bindings (e.g. MCP_ENVELOPE_V2).
+    setWorkerEnv(env as unknown as Record<string, string>);
     const { method } = request;
     const { pathname } = new URL(request.url);
 

@@ -1,5 +1,17 @@
 export const SERVER_VERSION = "1.0.0";
 
+// Module-level Worker env store — populated by setWorkerEnv() in index.ts
+// on each incoming request before tool dispatch.
+let _workerEnv: Record<string, string> = {};
+
+export function setWorkerEnv(env: Record<string, string>): void {
+  _workerEnv = env;
+}
+
+export function getWorkerVar(name: string): string | undefined {
+  return _workerEnv[name];
+}
+
 export interface ToolMeta {
   tool: string;
   canonicalTool?: string;
@@ -38,18 +50,6 @@ export const ErrorCode = {
 
 export type ErrorCodeValue = (typeof ErrorCode)[keyof typeof ErrorCode];
 
-// Cloudflare Workers env binding — read at module init time.
-function _isEnvelopeV2(): boolean {
-  try {
-    const g = globalThis as unknown as Record<string, unknown>;
-    return typeof g["MCP_ENVELOPE_V2"] === "string" && g["MCP_ENVELOPE_V2"] === "true";
-  } catch {
-    return false;
-  }
-}
-
-const ENVELOPE_V2 = _isEnvelopeV2();
-
 export function mcpSuccess(
   tool: string,
   rawData: string,
@@ -64,7 +64,7 @@ export function mcpSuccess(
     warnings?: unknown[];
   }
 ): string {
-  if (!ENVELOPE_V2) return rawData;
+  if (_workerEnv["MCP_ENVELOPE_V2"] !== "true") return rawData;
   let data: unknown;
   try {
     data = JSON.parse(rawData);
@@ -97,7 +97,7 @@ export function mcpFailure(
   message: string,
   opts?: { source?: string }
 ): string {
-  if (!ENVELOPE_V2) return JSON.stringify({ error: true, code, message });
+  if (_workerEnv["MCP_ENVELOPE_V2"] !== "true") return JSON.stringify({ error: true, code, message });
   const resp: McpResponse = {
     ok: false,
     data: null,
