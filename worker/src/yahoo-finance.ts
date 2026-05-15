@@ -5378,16 +5378,16 @@ function _stripHtmlTagsIdx(html: string): string {
  * Event-handler attributes (onX=...) are also removed.
  */
 function _sanitizeFilingHtml(html: string): string {
+  // Patterns are defined once and reused across loop iterations.
+  // String.prototype.replace() with global regex always starts from position 0,
+  // so no lastIndex reset is needed here.
   const SCRIPT_RE = /<script\b[^>]*>[\s\S]*?<\/\s*script[^>]*>/gi;
   const STYLE_RE = /<style\b[^>]*>[\s\S]*?<\/\s*style[^>]*>/gi;
   let result = html;
   let prev: string;
   do {
     prev = result;
-    // Recreate RegExp objects each iteration to reset lastIndex (global flag).
-    result = result
-      .replace(new RegExp(SCRIPT_RE.source, "gi"), "")
-      .replace(new RegExp(STYLE_RE.source, "gi"), "");
+    result = result.replace(SCRIPT_RE, "").replace(STYLE_RE, "");
   } while (result !== prev);
   return result.replace(/\s+on\w+=(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, " ");
 }
