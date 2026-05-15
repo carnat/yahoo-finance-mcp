@@ -4986,11 +4986,12 @@ function eventTypeFromKeywords(title: string, summary: string): string {
 }
 
 function makeDupGroupId(title: string, dateStr: string): string {
-  // Simple hash from title+date — stable dedup key
+  // djb2-variant hash: h = h * 33 - h + char, accumulated over title+date string.
+  // Yields a 32-bit unsigned integer → 8 hex digits, used as a stable dedup key.
   let h = 0;
   const s = `${dateStr}::${title.toLowerCase().replace(/\s+/g, " ").trim()}`;
   for (let i = 0; i < s.length; i++) { h = ((h << 5) - h + s.charCodeAt(i)) | 0; }
-  return (h >>> 0).toString(16).padStart(16, "0");
+  return (h >>> 0).toString(16).padStart(8, "0");
 }
 
 function buildYfEventItem(item: Record<string, unknown>): Record<string, unknown> {
@@ -4998,7 +4999,8 @@ function buildYfEventItem(item: Record<string, unknown>): Record<string, unknown
   const rawPublishedAt = typeof item.providerPublishTime === "number"
     ? iso(item.providerPublishTime as number)
     : _str(item.publishedAt);
-  const publishedAt = rawPublishedAt || new Date(0).toISOString();
+  // Preserve null when publishedAt is genuinely unknown — do not substitute epoch sentinel.
+  const publishedAt = rawPublishedAt || null;
   return {
     source: "Yahoo Finance",
     sourceType: "yahoo_finance",
@@ -5009,7 +5011,7 @@ function buildYfEventItem(item: Record<string, unknown>): Record<string, unknown
     retrievedAt: new Date().toISOString(),
     eventType: eventTypeFromKeywords(title, _str(item.summary)),
     confidence: "MEDIUM",
-    duplicateGroupId: makeDupGroupId(title, publishedAt.slice(0, 10)),
+    duplicateGroupId: makeDupGroupId(title, (publishedAt ?? "").slice(0, 10)),
   };
 }
 

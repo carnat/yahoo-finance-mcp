@@ -1173,9 +1173,13 @@ def _event_type_from_form(form_type: str) -> str:
     return "other"
 
 
+_DEDUP_TITLE_MAX_LEN = 80   # Normalize title to this length for dedup hashing
+_STALE_EVENT_DAYS = 90      # Events older than this many days are flagged STALE
+
+
 def _make_duplicate_group_id(ticker: str, title: str, published_at: str | None) -> str:
     """Deterministic dedup hash from (ticker, normalized_title, date)."""
-    key = f"{ticker.upper()}|{title.strip().lower()[:80]}|{(published_at or '')[:10]}"
+    key = f"{ticker.upper()}|{title.strip().lower()[:_DEDUP_TITLE_MAX_LEN]}|{(published_at or '')[:10]}"
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
@@ -1496,7 +1500,7 @@ async def verify_company_event(ticker: str, event_query: str, start_date: str = 
     query_lower = event_query.lower()
     best_evidence: list[dict] = []
     sources_checked: list[str] = []
-    stale_threshold = (datetime.date.today() - datetime.timedelta(days=90)).isoformat()
+    stale_threshold = (datetime.date.today() - datetime.timedelta(days=_STALE_EVENT_DAYS)).isoformat()
 
     # SEC search
     if "sec" in sources:

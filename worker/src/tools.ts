@@ -1580,18 +1580,17 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       const version = getWorkerVar("SERVER_VERSION") ?? "1.0.0";
       const toolCount = TOOLS.length;
       const manifestHash = await computeHash(JSON.stringify(TOOLS.map(t => t.name)));
-      const buildShaHash = await computeHash(buildSha);
       return JSON.stringify({
         status: "ok",
         serverVersion: version,
         envelopeV2: getWorkerVar("MCP_ENVELOPE_V2") === "true",
         nodeVersion: "cloudflare-worker",
         toolCount,
-        manifestHash,
+        schemaHash: manifestHash,
+        runtimeHash: await computeHash(version + String(toolCount)),
         buildSha,
-        buildShaHash,
-        privacyScope: "public",
         generatedAt: new Date().toISOString(),
+        privacyScope: "public_market_data_only",
       });
     }
     case "get_options_summary":
