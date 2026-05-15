@@ -249,26 +249,6 @@ TEST_CASES: list[TestCase] = [
             ("matchCount", NOT_ZERO),
         ],
     ),
-    # ── get_filing_text_search deprecated stub — must return {deprecated:true} ──
-    (
-        "get_filing_text_search",
-        {
-            "ticker": "GLW",
-            "accession_number": "_DYNAMIC_GLW_10K_",
-            "search_terms": ["geographic"],
-        },
-        [("deprecated", NOT_NULL)],
-    ),
-    # ── get_filing_document deprecated stub — must return {deprecated:true} ──
-    (
-        "get_filing_document",
-        {
-            "ticker": "GLW",
-            "accession_number": "_DYNAMIC_GLW_10K_",
-            "section_hint": "geographic",
-        },
-        [("deprecated", NOT_NULL)],
-    ),
     (
         "get_short_interest",
         {"ticker": "AAPL"},
@@ -601,4 +581,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

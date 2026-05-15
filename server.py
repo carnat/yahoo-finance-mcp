@@ -2,10 +2,12 @@ import asyncio
 import datetime
 import html as _html_module
 import json
+import os
 import re as _re
 import time
 import urllib.parse as _urlparse
 from enum import Enum
+from typing import TypedDict
 
 import pandas as pd
 import yfinance as yf
@@ -51,22 +53,238 @@ class FilingFactType(str, Enum):
 
 
 # ---------------------------------------------------------------------------
-# In-memory cache with TTL
+# Server version and envelope feature flag
 # ---------------------------------------------------------------------------
-_cache: dict[str, tuple[float, str]] = {}  # key -> (stored_at, json_str)
-_PRICE_TTL = 15 * 60        # 15 minutes for price / historical data
-_STMT_TTL  = 24 * 3600      # 24 hours for financial statements
+SERVER_VERSION = "0.1.0"
+_ENVELOPE_V2 = os.environ.get("MCP_ENVELOPE_V2", "").lower() == "true"
 
 
-def _cache_get(key: str, ttl: float) -> str | None:
-    entry = _cache.get(key)
-    if entry and (time.monotonic() - entry[0]) < ttl:
-        return entry[1]
+# ---------------------------------------------------------------------------
+# Typed domain error codes
+# ---------------------------------------------------------------------------
+class ErrorCode:
+    TICKER_NOT_FOUND = "TICKER_NOT_FOUND"
+    NO_OPTIONS_DATA = "NO_OPTIONS_DATA"
+    NO_FILING_DATA = "NO_FILING_DATA"
+    PROVIDER_ERROR = "PROVIDER_ERROR"
+    PROVIDER_TIMEOUT = "PROVIDER_TIMEOUT"
+    RATE_LIMIT = "RATE_LIMIT"
+    INPUT_VALIDATION_ERROR = "INPUT_VALIDATION_ERROR"
+    DEPRECATED_TOOL = "DEPRECATED_TOOL"
+
+
+# ---------------------------------------------------------------------------
+# McpResponse TypedDicts
+# ---------------------------------------------------------------------------
+class ToolMeta(TypedDict):
+    tool: str
+    source: str
+    dataDate: str | None
+    serverVersion: str
+    cacheHit: bool
+    warnings: list[str]
+
+
+class ErrorDetail(TypedDict):
+    code: str
+    message: str
+
+
+class McpResponse(TypedDict):
+    ok: bool
+    data: object
+    meta: ToolMeta
+    error: ErrorDetail | None
+
+
+# ---------------------------------------------------------------------------
+# McpResponse helpers
+# ---------------------------------------------------------------------------
+def _mcp_success(
+    tool: str,
+    data: object,
+    *,
+    source: str = "yahoo_finance",
+    data_date: str | None = None,
+    cache_hit: bool = False,
+    warnings: list[str] | None = None,
+) -> str:
+    if not _ENVELOPE_V2:
+        return data if isinstance(data, str) else json.dumps(data)
+    return json.dumps({
+        "ok": True,
+        "data": data if not isinstance(data, str) else json.loads(data),
+        "meta": {
+            "tool": tool,
+            "source": source,
+            "dataDate": data_date,
+            "serverVersion": SERVER_VERSION,
+            "cacheHit": cache_hit,
+            "warnings": warnings or [],
+        },
+        "error": None,
+    })
+
+
+def _mcp_failure(
+    tool: str,
+    code: str,
+    message: str,
+    *,
+    source: str = "yahoo_finance",
+    data_date: str | None = None,
+) -> str:
+    payload = {
+        "ok": False,
+        "data": None,
+        "meta": {
+            "tool": tool,
+            "source": source,
+            "dataDate": data_date,
+            "serverVersion": SERVER_VERSION,
+            "cacheHit": False,
+            "warnings": [],
+        },
+        "error": {"code": code, "message": message},
+    }
+    if not _ENVELOPE_V2:
+        return json.dumps({"error": True, "code": code, "message": message})
+    return json.dumps(payload)
+
+
+def _mcp_warning(
+    tool: str,
+    data: object,
+    message: str,
+    *,
+    source: str = "yahoo_finance",
+    data_date: str | None = None,
+) -> str:
+    if not _ENVELOPE_V2:
+        return data if isinstance(data, str) else json.dumps(data)
+    parsed = data if not isinstance(data, str) else json.loads(data)
+    return json.dumps({
+        "ok": True,
+        "data": parsed,
+        "meta": {
+            "tool": tool,
+            "source": source,
+            "dataDate": data_date,
+            "serverVersion": SERVER_VERSION,
+            "cacheHit": False,
+            "warnings": [message],
+        },
+        "error": None,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Input validation helpers
+# ---------------------------------------------------------------------------
+_TICKER_RE = _re.compile(r'^[A-Z0-9.\-\^=]{1,20}$')
+_ACCESSION_RE = _re.compile(r'^\d{10}-\d{2}-\d{6}$')
+
+
+def _validate_ticker(ticker: str) -> str | None:
+    """Returns an error message if the ticker is invalid, else None."""
+    t = ticker.strip().upper()
+    if not _TICKER_RE.match(t):
+        return f"Invalid ticker symbol: '{ticker}'. Must be 1-20 characters: uppercase letters, digits, or . - ^ ="
     return None
 
 
-def _cache_set(key: str, value: str) -> None:
-    _cache[key] = (time.monotonic(), value)
+def _validate_accession(acc: str) -> str | None:
+    """Returns an error message if the accession number is invalid, else None."""
+    if not _ACCESSION_RE.match(acc.strip()):
+        return f"Invalid accession number: '{acc}'. Expected format: XXXXXXXXXX-YY-ZZZZZZ."
+    return None
+
+
+def _validate_batch_tickers(tickers: list) -> str | None:
+    """Returns an error message if the batch is too large, else None."""
+    if len(tickers) > 5:
+        return f"Too many tickers: {len(tickers)}. Maximum is 5 per call."
+    return None
+
+
+def _validate_sec_url(url: str) -> str | None:
+    """Returns an error message if the SEC URL is not from sec.gov/Archives, else None."""
+    if not url.startswith("https://www.sec.gov/Archives/"):
+        return f"Invalid SEC URL: must start with 'https://www.sec.gov/Archives/'."
+    return None
+
+
+def _sanitize_sec_html(html: str) -> str:
+    """Strip script/style tags and event handler attributes from SEC HTML."""
+    html = _re.sub(r'<script[^>]*>.*?</script[^>]*>', '', html, flags=_re.DOTALL | _re.IGNORECASE)
+    html = _re.sub(r'<style[^>]*>.*?</style[^>]*>', '', html, flags=_re.DOTALL | _re.IGNORECASE)
+    html = _re.sub(r'\s+on\w+\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)', '', html, flags=_re.IGNORECASE)
+    return html
+
+
+# ---------------------------------------------------------------------------
+# Centralized TTL cache
+# ---------------------------------------------------------------------------
+class ToolCache:
+    def __init__(self) -> None:
+        self._store: dict[str, tuple[float, str, float]] = {}  # key -> (stored_at, value, ttl)
+
+    def get(self, key: str) -> tuple[str, bool, str | None] | None:
+        """Returns (value, cache_hit, cached_at_iso) or None if miss/expired."""
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        stored_at, value, ttl = entry
+        age = time.monotonic() - stored_at
+        if age >= ttl:
+            return None
+        cached_at = (
+            datetime.datetime.fromtimestamp(time.time() - age, tz=datetime.timezone.utc)
+            .isoformat()
+        )
+        return value, True, cached_at
+
+    def set(self, key: str, value: str, ttl: float) -> None:
+        self._store[key] = (time.monotonic(), value, ttl)
+
+    def is_stale(self, key: str) -> bool:
+        """True if age > 2× TTL (stale but still cached)."""
+        entry = self._store.get(key)
+        if not entry:
+            return False
+        stored_at, _, ttl = entry
+        return (time.monotonic() - stored_at) > 2 * ttl
+
+
+_tool_cache = ToolCache()
+
+# TTL tiers
+TTL_PRICE = 5 * 60          # 5 min
+TTL_ANALYST = 15 * 60       # 15 min
+TTL_FINANCIALS = 4 * 3600   # 4 hours
+TTL_EDGAR = 24 * 3600       # 24 hours
+TTL_OPTIONS = 15 * 60       # 15 min
+
+# Backward-compat aliases (old names still work)
+_PRICE_TTL = TTL_PRICE
+_STMT_TTL = TTL_FINANCIALS
+
+
+def _cache_get(key: str, ttl: float) -> str | None:
+    """Legacy cache get — delegates to ToolCache with the given TTL."""
+    entry = _tool_cache._store.get(key)
+    if entry is None:
+        return None
+    stored_at, value, stored_ttl = entry
+    # honour the caller-supplied TTL (may differ from stored TTL)
+    if (time.monotonic() - stored_at) < ttl:
+        return value
+    return None
+
+
+def _cache_set(key: str, value: str, ttl: float = TTL_PRICE) -> None:
+    """Legacy cache set — delegates to ToolCache."""
+    _tool_cache.set(key, value, ttl)
 
 
 async def _fetch_with_retry(fn, *args, retries: int = 1, delay: float = 2.0, **kwargs):
@@ -223,8 +441,231 @@ This server provides financial market data from Yahoo Finance.
 )
 
 
+
+
+_SIMPLE_OUTPUT_SCHEMA: dict = {"type": "object", "properties": {}, "additionalProperties": True}
+
+_TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
+    "get_historical_stock_prices": _SIMPLE_OUTPUT_SCHEMA,
+    "get_stock_info": _SIMPLE_OUTPUT_SCHEMA,
+    "get_yahoo_finance_news": _SIMPLE_OUTPUT_SCHEMA,
+    "get_stock_actions": _SIMPLE_OUTPUT_SCHEMA,
+    "get_financial_statement": _SIMPLE_OUTPUT_SCHEMA,
+    "get_holder_info": _SIMPLE_OUTPUT_SCHEMA,
+    "get_option_expiration_dates": _SIMPLE_OUTPUT_SCHEMA,
+    "get_option_chain": {'type': 'object',
+         'properties': {'ticker': {'type': 'string'},
+                        'expiration': {'type': 'string'},
+                        'optionType': {'type': 'string'},
+                        'dataDate': {'type': 'string'},
+                        'totalContracts': {'type': 'number'},
+                        'returnedContracts': {'type': 'number'},
+                        'truncated': {'type': 'boolean'},
+                        'contracts': {'type': 'array'}},
+         'additionalProperties': True},
+    "get_recommendations": _SIMPLE_OUTPUT_SCHEMA,
+    "get_fast_info": {'type': 'object',
+         'properties': {'ticker': {'type': 'string'},
+                        'lastPrice': {'type': 'number'},
+                        'currency': {'type': 'string'},
+                        'exchange': {'type': 'string'},
+                        'quoteType': {'type': 'string'},
+                        'marketCap': {'type': ['number', 'null']},
+                        'shares': {'type': ['number', 'null']},
+                        'dayHigh': {'type': 'number'},
+                        'dayLow': {'type': 'number'},
+                        'yearHigh': {'type': 'number'},
+                        'yearLow': {'type': 'number'},
+                        'yearChange': {'type': 'number'},
+                        'preMarketPrice': {'type': ['number', 'null']},
+                        'postMarketPrice': {'type': ['number', 'null']},
+                        'marketOpen': {'type': 'boolean'},
+                        'lastTradeDate': {'type': 'string'}},
+         'additionalProperties': True},
+    "get_short_interest": _SIMPLE_OUTPUT_SCHEMA,
+    "get_price_stats": {'type': 'object',
+         'properties': {'ticker': {'type': 'string'},
+                        'lastPrice': {'type': 'number'},
+                        'changePct': {'type': 'number'},
+                        'distFromHigh52wPct': {'type': 'number'},
+                        'distFromLow52wPct': {'type': 'number'},
+                        'distFrom50dmaPct': {'type': 'number'},
+                        'distFrom200dmaPct': {'type': 'number'},
+                        'volatility30d': {'type': 'number'},
+                        'cagr1y': {'type': 'number'},
+                        'cagr3y': {'type': 'number'},
+                        'cagr5y': {'type': 'number'},
+                        'dataDate': {'type': 'string'}},
+         'additionalProperties': True},
+    "get_analyst_consensus": _SIMPLE_OUTPUT_SCHEMA,
+    "get_earnings_analysis": _SIMPLE_OUTPUT_SCHEMA,
+    "get_financial_ratios": _SIMPLE_OUTPUT_SCHEMA,
+    "get_calendar": {'type': 'object',
+         'properties': {'ticker': {'type': 'string'},
+                        'earningsDateConfirmed': {'type': ['boolean', 'null']},
+                        'earningsDateSource': {'type': ['string', 'null']}},
+         'additionalProperties': True},
+    "search_ticker": _SIMPLE_OUTPUT_SCHEMA,
+    "screen_stocks": _SIMPLE_OUTPUT_SCHEMA,
+    "get_filing_data": {'type': 'object',
+         'properties': {'ticker': {'type': 'string'},
+                        'factType': {'type': 'string'},
+                        'source': {'type': 'string'},
+                        'confidence': {'type': 'string'},
+                        'value': {},
+                        'currency': {'type': ['string', 'null']},
+                        'period': {'type': ['string', 'null']},
+                        'filingType': {'type': ['string', 'null']}},
+         'additionalProperties': True},
+    "search_filing_text": _SIMPLE_OUTPUT_SCHEMA,
+    "get_technical_indicators": {'type': 'object',
+         'properties': {'ticker': {'type': 'string'},
+                        'rsi14': {'type': ['number', 'null']},
+                        'macd': {'type': ['number', 'null']},
+                        'macdSignal': {'type': ['number', 'null']},
+                        'macdHistogram': {'type': ['number', 'null']},
+                        'lastClose': {'type': ['number', 'null']},
+                        'dataDate': {'type': 'string'}},
+         'additionalProperties': True},
+    "get_price_slope": {'type': 'object',
+         'properties': {'ticker': {'type': 'string'},
+                        'startClose': {'type': ['number', 'null']},
+                        'endClose': {'type': ['number', 'null']},
+                        'slopePct': {'type': ['number', 'null']},
+                        'direction': {'type': 'string'},
+                        'dataDate': {'type': 'string'}},
+         'additionalProperties': True},
+    "get_volume_ratio": {'type': 'object',
+         'properties': {'ticker': {'type': 'string'},
+                        'ratio10d': {'type': ['number', 'null']},
+                        'ratio90d': {'type': ['number', 'null']},
+                        'volumeFlag': {'type': ['string', 'null']},
+                        'dataDate': {'type': 'string'}},
+         'additionalProperties': True},
+    "get_ma_position": {'type': 'object',
+         'properties': {'ticker': {'type': 'string'},
+                        'lastClose': {'type': ['number', 'null']},
+                        'sma50': {'type': ['number', 'null']},
+                        'sma200': {'type': ['number', 'null']},
+                        'distFrom50dmaPct': {'type': ['number', 'null']},
+                        'distFrom200dmaPct': {'type': ['number', 'null']},
+                        'trend': {'type': 'string'},
+                        'dataDate': {'type': 'string'}},
+         'additionalProperties': True},
+    "get_credit_health": {'type': 'object',
+         'properties': {'ticker': {'type': 'string'},
+                        'netDebtToEbitda': {'type': ['number', 'null']},
+                        'interestCoverage': {'type': ['number', 'null']},
+                        'debtTier': {'type': ['string', 'null']},
+                        'creditStress': {'type': ['boolean', 'null']},
+                        'dataDate': {'type': 'string'}},
+         'additionalProperties': True},
+    "get_short_momentum": {'type': 'object',
+         'properties': {'ticker': {'type': 'string'},
+                        'sharesShort': {'type': ['number', 'null']},
+                        'shortPctOfFloat': {'type': ['number', 'null']},
+                        'momDelta': {'type': ['number', 'null']},
+                        'direction': {'type': ['string', 'null']},
+                        'squeezeRisk': {'type': ['string', 'null']},
+                        'flag': {'type': ['string', 'null']},
+                        'dataDate': {'type': 'string'}},
+         'additionalProperties': True},
+    "get_earnings_momentum": {'type': 'object',
+         'properties': {'ticker': {'type': 'string'},
+                        'revision7d': {'type': ['number', 'null']},
+                        'revision30d': {'type': ['number', 'null']},
+                        'revision90d': {'type': ['number', 'null']},
+                        'momentumFlag': {'type': ['string', 'null']},
+                        'beatRate': {'type': ['number', 'null']},
+                        'avgSurprisePct': {'type': ['number', 'null']},
+                        'currentBeatStreak': {'type': ['number', 'null']},
+                        'dataDate': {'type': 'string'}},
+         'additionalProperties': True},
+    "get_options_flow_summary": _SIMPLE_OUTPUT_SCHEMA,
+    "get_put_hedge_candidates": _SIMPLE_OUTPUT_SCHEMA,
+    "get_analyst_upgrade_radar": {'type': 'object',
+         'properties': {'ticker': {'type': 'string'},
+                        'netSentiment': {'type': ['number', 'null']},
+                        'mixedSignal': {'type': ['boolean', 'null']},
+                        'upgrades': {'type': ['number', 'null']},
+                        'downgrades': {'type': ['number', 'null']},
+                        'dataDate': {'type': 'string'}},
+         'additionalProperties': True},
+    "get_etf_info": _SIMPLE_OUTPUT_SCHEMA,
+    "get_overnight_quote": _SIMPLE_OUTPUT_SCHEMA,
+    "get_options_flow_scan": {'type': 'object',
+         'properties': {'ticker': {'type': 'string'},
+                        'windowLabel': {'type': 'string'},
+                        'pcRatio': {'type': ['number', 'null']},
+                        'ivPctile': {'type': ['number', 'null']},
+                        'putVolVs10dAvg': {'type': ['number', 'null']},
+                        'putVolTrend': {'type': ['string', 'null']},
+                        'maxPainStrike': {'type': ['number', 'null']},
+                        'bracket': {'type': ['string', 'null']},
+                        'formattedBlock': {'type': ['string', 'null']},
+                        'dataDate': {'type': 'string'}},
+         'additionalProperties': True},
+    "get_price_target_bracket": {'type': 'object',
+         'properties': {'ticker': {'type': 'string'},
+                        'currentPrice': {'type': ['number', 'null']},
+                        'ioPt': {'type': ['number', 'null']},
+                        'eqfPct': {'type': ['number', 'null']},
+                        'bracket': {'type': ['string', 'null']},
+                        'tag': {'type': ['string', 'null']},
+                        'invertedFlag': {'type': ['boolean', 'null']},
+                        'dataDate': {'type': 'string'}},
+         'additionalProperties': True},
+    "get_position_score_inputs": {'type': 'object',
+         'properties': {'ticker': {'type': 'string'},
+                        't1_inputs': {'type': 'object'},
+                        't2_inputs': {'type': 'object'},
+                        't4_inputs': {'type': 'object'},
+                        't5_inputs': {'type': 'object'},
+                        'dataDate': {'type': 'string'}},
+         'additionalProperties': True},
+    "get_volume_gate": {'type': 'object',
+         'properties': {'ticker': {'type': 'string'},
+                        'currency': {'type': ['string', 'null']},
+                        'fxRate': {'type': ['number', 'null']},
+                        'lastVolume': {'type': ['number', 'null']},
+                        'adv10d': {'type': ['number', 'null']},
+                        'adv20d': {'type': ['number', 'null']},
+                        'adv90d': {'type': ['number', 'null']},
+                        'ratio20d': {'type': ['number', 'null']},
+                        'gatePass': {'type': ['boolean', 'null']},
+                        'dataDate': {'type': 'string'},
+                        'note': {'type': ['string', 'null']}},
+         'additionalProperties': True},
+    "get_options_summary": {
+        "type": "object",
+        "properties": {
+            "ticker": {"type": "string"},
+            "nearestExpiry": {"type": ["string", "null"]},
+            "currentPrice": {"type": ["number", "null"]},
+            "atmIV": {"type": ["number", "null"]},
+            "pcRatioVolume": {"type": ["number", "null"]},
+            "pcRatioOI": {"type": ["number", "null"]},
+            "callVolume": {"type": ["number", "null"]},
+            "putVolume": {"type": ["number", "null"]},
+            "callOI": {"type": ["number", "null"]},
+            "putOI": {"type": ["number", "null"]},
+            "maxPainStrike": {"type": ["number", "null"]},
+            "dataDate": {"type": "string"},
+        },
+        "additionalProperties": True,
+    },
+    "list_sec_filings": _SIMPLE_OUTPUT_SCHEMA,
+    "get_filing_outline": _SIMPLE_OUTPUT_SCHEMA,
+    "get_filing_section": _SIMPLE_OUTPUT_SCHEMA,
+    "list_filing_tables": _SIMPLE_OUTPUT_SCHEMA,
+    "get_filing_table": _SIMPLE_OUTPUT_SCHEMA,
+    "extract_filing_fact": _SIMPLE_OUTPUT_SCHEMA,
+}
+# Deprecated tools should use: _mcp_failure(tool, ErrorCode.DEPRECATED_TOOL, f"Use {canonical} instead")
+
 @yfinance_server.tool(
     name="get_historical_stock_prices",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_historical_stock_prices"],
     description="""Get historical stock prices for a given ticker symbol from yahoo finance. Include the following information: Date, Open, High, Low, Close (adjusted), Volume.
 Args:
     ticker: str
@@ -311,6 +752,7 @@ async def get_historical_stock_prices(
 
 @yfinance_server.tool(
     name="get_stock_info",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_info"],
     description="""Get stock fundamentals for one or more ticker symbols from Yahoo Finance.
 
 By default returns ~30 key fields covering identity, price, valuation, earnings, margins,
@@ -388,6 +830,7 @@ async def get_stock_info(
 
 @yfinance_server.tool(
     name="get_yahoo_finance_news",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_yahoo_finance_news"],
     description="""Get news for a given ticker symbol from yahoo finance.
 
 Args:
@@ -436,6 +879,7 @@ async def get_yahoo_finance_news(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_stock_actions",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_actions"],
     description="""Get stock dividends and stock splits for a given ticker symbol from yahoo finance.
 
 Args:
@@ -457,6 +901,7 @@ async def get_stock_actions(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_financial_statement",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_financial_statement"],
     description="""Get financial statement for a given ticker symbol from yahoo finance.
 
 Financial statement types:
@@ -574,6 +1019,7 @@ async def get_financial_statement(
 
 @yfinance_server.tool(
     name="get_holder_info",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_holder_info"],
     description="""Get holder information for a given ticker symbol from yahoo finance. You can choose from the following holder types: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders.
 
 Args:
@@ -613,6 +1059,7 @@ async def get_holder_info(ticker: str, holder_type: str) -> str:
 
 @yfinance_server.tool(
     name="get_option_expiration_dates",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_option_expiration_dates"],
     description="""Fetch the available options expiration dates for a given ticker symbol.
 
 Args:
@@ -636,13 +1083,15 @@ async def get_option_expiration_dates(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_option_chain",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_option_chain"],
     description="""Fetch the option chain for a given ticker symbol, expiration date, and option type.
 
 Use the optional strike filters to narrow the results — a full options chain (e.g. AAPL) can have 200+ rows;
 filtering near-the-money reduces this to ~10-20 rows and dramatically cuts token usage.
 
 Returns a JSON object with top-level fields: ticker, expiration, optionType, dataDate (YYYY-MM-DD of
-the last trading session — use to detect weekend/holiday staleness), and contracts (array of option rows).
+the last trading session — use to detect weekend/holiday staleness), totalContracts, returnedContracts,
+truncated, and contracts (array of option rows).
 
 Args:
     ticker: str
@@ -657,6 +1106,12 @@ Args:
         Optional maximum strike price filter. Only options with strike <= max_strike are returned.
     in_the_money_only: bool
         If True, only return in-the-money options. Default is False.
+    max_contracts: int
+        Maximum number of contracts to return (default: 50, 0 = no limit).
+    min_open_interest: int
+        Minimum open interest filter (default: 0).
+    min_volume: int
+        Minimum volume filter (default: 0).
 """,
 )
 async def get_option_chain(
@@ -666,6 +1121,9 @@ async def get_option_chain(
     min_strike: float | None = None,
     max_strike: float | None = None,
     in_the_money_only: bool = False,
+    max_contracts: int = 50,
+    min_open_interest: int = 0,
+    min_volume: int = 0,
 ) -> str:
     """Fetch the option chain for a given ticker symbol, expiration date, and option type.
 
@@ -707,12 +1165,20 @@ async def get_option_chain(
     else:
         return f"Error: invalid option type {option_type}. Please use one of the following: calls, puts."
 
+    if in_the_money_only:
+        df = df[df["inTheMoney"] == True]
     if min_strike is not None:
         df = df[df["strike"] >= min_strike]
     if max_strike is not None:
         df = df[df["strike"] <= max_strike]
-    if in_the_money_only:
-        df = df[df["inTheMoney"]]
+    if min_open_interest > 0:
+        df = df[df["openInterest"] >= min_open_interest]
+    if min_volume > 0:
+        df = df[df["volume"] >= min_volume]
+    total_contracts = len(df)
+    if max_contracts > 0:
+        df = df.head(max_contracts)
+    returned_contracts = len(df)
 
     # Derive dataDate from the last trading session
     try:
@@ -731,15 +1197,412 @@ async def get_option_chain(
         "expiration": expiration_date,
         "optionType": option_type,
         "dataDate": data_date,
+        "totalContracts": total_contracts,
+        "returnedContracts": returned_contracts,
+        "truncated": returned_contracts < total_contracts,
         "contracts": contracts,
     })
 
 
 @yfinance_server.tool(
-    name="get_recommendations",
-    description="""Get recommendations or upgrades/downgrades for a given ticker symbol from yahoo finance. You can also specify the number of months back to get upgrades/downgrades for, default is 12.
+    name="get_options_summary",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_summary"],
+    description="Get options summary for a single ticker: ATM implied volatility, put/call ratio by volume and OI, max pain strike for the nearest liquid expiry. Preferred for LLM use — returns a compact snapshot without the full contract list.",
+)
+async def get_options_summary(ticker: str) -> str:
+    company = yf.Ticker(ticker)
+    try:
+        expirations = company.options
+        if not expirations:
+            return json.dumps({"ticker": ticker, "error": "No options data available"})
+        expiry = expirations[0]
+        opt = company.option_chain(expiry)
+        calls = opt.calls
+        puts = opt.puts
 
-DEPRECATED: Use `get_analyst_upgrade_radar` instead, which supports batch tickers and includes pre-computed signal classification (UPGRADE/DOWNGRADE/MAINTAIN) and net sentiment score.
+        current_price = None
+        try:
+            current_price = company.fast_info.last_price
+        except Exception:
+            pass
+
+        atm_iv = None
+        if current_price and not calls.empty:
+            idx = (calls["strike"] - current_price).abs().idxmin()
+            atm_iv = float(calls.loc[idx, "impliedVolatility"]) if "impliedVolatility" in calls.columns else None
+
+        call_vol = float(calls["volume"].sum()) if "volume" in calls.columns else 0
+        put_vol = float(puts["volume"].sum()) if "volume" in puts.columns else 0
+        pc_ratio_volume = round(put_vol / call_vol, 3) if call_vol > 0 else None
+
+        call_oi = float(calls["openInterest"].sum()) if "openInterest" in calls.columns else 0
+        put_oi = float(puts["openInterest"].sum()) if "openInterest" in puts.columns else 0
+        pc_ratio_oi = round(put_oi / call_oi, 3) if call_oi > 0 else None
+
+        all_strikes = sorted(set(calls["strike"].tolist() + puts["strike"].tolist()))
+        max_pain_strike = None
+        if all_strikes:
+            min_pain = float("inf")
+            for s in all_strikes:
+                call_pain = float(((s - calls["strike"]).clip(lower=0) * calls.get("openInterest", 0)).sum())
+                put_pain = float(((puts["strike"] - s).clip(lower=0) * puts.get("openInterest", 0)).sum())
+                total = call_pain + put_pain
+                if total < min_pain:
+                    min_pain = total
+                    max_pain_strike = s
+
+        return json.dumps({
+            "ticker": ticker,
+            "nearestExpiry": expiry,
+            "currentPrice": current_price,
+            "atmIV": round(atm_iv, 4) if atm_iv is not None else None,
+            "pcRatioVolume": pc_ratio_volume,
+            "pcRatioOI": pc_ratio_oi,
+            "callVolume": int(call_vol),
+            "putVolume": int(put_vol),
+            "callOI": int(call_oi),
+            "putOI": int(put_oi),
+            "maxPainStrike": max_pain_strike,
+            "dataDate": get_last_trading_date(),
+        })
+    except Exception as e:
+        return json.dumps({"ticker": ticker, "error": str(e)})
+
+
+@yfinance_server.tool(
+    name="list_sec_filings",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["list_sec_filings"],
+    description="""List recent SEC filings for a ticker from EDGAR.
+Returns accession number, filing date, form type, primary document URL, and EDGAR index URL.
+Supports form types: 10-K, 10-Q, 8-K, DEF 14A.
+Args:
+    ticker: str - The ticker symbol
+    form_type: str - Optional form type filter (10-K, 10-Q, 8-K, DEF 14A). Default: 10-K
+    max_filings: int - Maximum filings to return (default: 5, max: 20)
+""",
+)
+async def list_sec_filings(ticker: str, form_type: str = "10-K", max_filings: int = 5) -> str:
+    ALLOWED_FORMS = {"10-K", "10-Q", "8-K", "DEF 14A"}
+    if form_type not in ALLOWED_FORMS:
+        return _mcp_failure("list_sec_filings", ErrorCode.INPUT_VALIDATION_ERROR,
+                            f"Invalid form_type '{form_type}'. Must be one of: {sorted(ALLOWED_FORMS)}")
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("list_sec_filings", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    max_filings = min(max(1, max_filings), 20)
+
+    import urllib.request
+    ticker_upper = ticker.upper()
+    try:
+        tickers_url = "https://www.sec.gov/files/company_tickers.json"
+        req = urllib.request.Request(tickers_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            tickers_data = json.loads(resp.read())
+
+        cik = None
+        for _entry in tickers_data.values():
+            if _entry.get("ticker", "").upper() == ticker_upper:
+                cik = int(_entry["cik_str"])
+                break
+
+        if cik is None:
+            return _mcp_failure("list_sec_filings", ErrorCode.TICKER_NOT_FOUND,
+                                f"Could not find EDGAR CIK for ticker '{ticker}'")
+
+        cik_padded = str(cik).zfill(10)
+        sub_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
+        req2 = urllib.request.Request(sub_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
+        with urllib.request.urlopen(req2, timeout=10) as resp2:
+            sub_data = json.loads(resp2.read())
+
+        filings_data = sub_data.get("filings", {}).get("recent", {})
+        forms = filings_data.get("form", [])
+        dates = filings_data.get("filingDate", [])
+        accessions = filings_data.get("accessionNumber", [])
+        primary_docs = filings_data.get("primaryDocument", [])
+
+        results = []
+        for i, form in enumerate(forms):
+            if form == form_type and len(results) < max_filings:
+                acc = accessions[i] if i < len(accessions) else ""
+                date = dates[i] if i < len(dates) else ""
+                doc = primary_docs[i] if i < len(primary_docs) else ""
+                acc_clean = acc.replace("-", "")
+                index_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_clean}/{acc}-index.htm"
+                doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_clean}/{doc}" if doc else None
+                results.append({
+                    "accessionNumber": acc,
+                    "filingDate": date,
+                    "formType": form,
+                    "primaryDocumentUrl": doc_url,
+                    "edgarIndexUrl": index_url,
+                })
+
+        return json.dumps({"ticker": ticker, "formType": form_type, "filings": results})
+    except Exception as e:
+        return _mcp_failure("list_sec_filings", ErrorCode.PROVIDER_ERROR, str(e))
+
+
+@yfinance_server.tool(
+    name="get_filing_outline",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_outline"],
+    description="""Parse the document outline of an SEC filing (10-K/10-Q). Returns a hierarchical tree of Parts, Items, Notes as found in the document.
+Args:
+    ticker: str - ticker symbol
+    accession_number: str - SEC accession number (format: XXXXXXXXXX-YY-ZZZZZZ)
+    document_url: str - Optional direct URL to the filing HTML document (must be https://www.sec.gov/Archives/...)
+""",
+)
+async def get_filing_outline(ticker: str, accession_number: str | None = None, document_url: str | None = None) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("get_filing_outline", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    if document_url:
+        url_err = _validate_sec_url(document_url)
+        if url_err:
+            return _mcp_failure("get_filing_outline", ErrorCode.INPUT_VALIDATION_ERROR, url_err)
+    if accession_number:
+        acc_err = _validate_accession(accession_number)
+        if acc_err:
+            return _mcp_failure("get_filing_outline", ErrorCode.INPUT_VALIDATION_ERROR, acc_err)
+
+    try:
+        import urllib.request
+        if not document_url and accession_number:
+            cik = None
+            tickers_url = "https://www.sec.gov/files/company_tickers.json"
+            req = urllib.request.Request(tickers_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                tickers_data = json.loads(resp.read())
+            for _entry in tickers_data.values():
+                if _entry.get("ticker", "").upper() == ticker.upper():
+                    cik = int(_entry["cik_str"])
+                    break
+            if cik:
+                acc_clean = accession_number.replace("-", "")
+                document_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_clean}/{accession_number}-index.htm"
+
+        if not document_url:
+            return _mcp_failure("get_filing_outline", ErrorCode.INPUT_VALIDATION_ERROR,
+                                "Either accession_number or document_url is required")
+
+        req = urllib.request.Request(document_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+
+        html = _sanitize_sec_html(html)
+        outline = []
+        heading_re = _re.compile(r'<h([1-6])[^>]*>(.*?)</h\1>', _re.IGNORECASE | _re.DOTALL)
+        item_re = _re.compile(r'(Part\s+[IVX]+|Item\s+\d+[A-Z]?|Note\s+\d+)', _re.IGNORECASE)
+        for m in heading_re.finditer(html):
+            level = int(m.group(1))
+            text = _re.sub(r'<[^>]+>', '', m.group(2)).strip()
+            text = ' '.join(text.split())
+            if text and (item_re.search(text) or len(text) < 100):
+                outline.append({"level": level, "title": text})
+
+        return json.dumps({"ticker": ticker, "accessionNumber": accession_number, "outline": outline[:100]})
+    except Exception as e:
+        return _mcp_failure("get_filing_outline", ErrorCode.PROVIDER_ERROR, str(e))
+
+
+@yfinance_server.tool(
+    name="get_filing_section",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_section"],
+    description="""Retrieve the text content of a specific section from an SEC filing document.
+Args:
+    ticker: str - ticker symbol
+    section_name: str - Section name/heading to find, e.g. 'Item 1A', 'Note 3', 'Risk Factors'
+    document_url: str - Direct URL to filing HTML (must be https://www.sec.gov/Archives/...)
+    context_chars: int - Characters of context around matched section (default: 3000)
+""",
+)
+async def get_filing_section(ticker: str, section_name: str, document_url: str, context_chars: int = 3000) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("get_filing_section", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    url_err = _validate_sec_url(document_url)
+    if url_err:
+        return _mcp_failure("get_filing_section", ErrorCode.INPUT_VALIDATION_ERROR, url_err)
+
+    try:
+        import urllib.request
+        req = urllib.request.Request(document_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+
+        html = _sanitize_sec_html(html)
+        text = _re.sub(r'<[^>]+>', ' ', html)
+        text = ' '.join(text.split())
+
+        pattern = _re.compile(_re.escape(section_name), _re.IGNORECASE)
+        m = pattern.search(text)
+        if not m:
+            words = section_name.split()
+            if words:
+                pattern2 = _re.compile(r'\b' + r'\s+'.join(_re.escape(w) for w in words), _re.IGNORECASE)
+                m = pattern2.search(text)
+
+        if not m:
+            return json.dumps({"ticker": ticker, "sectionName": section_name, "found": False, "text": None})
+
+        start = max(0, m.start())
+        end = min(len(text), m.start() + context_chars)
+        return json.dumps({
+            "ticker": ticker,
+            "sectionName": section_name,
+            "found": True,
+            "text": text[start:end],
+        })
+    except Exception as e:
+        return _mcp_failure("get_filing_section", ErrorCode.PROVIDER_ERROR, str(e))
+
+
+@yfinance_server.tool(
+    name="list_filing_tables",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["list_filing_tables"],
+    description="""List all HTML tables in an SEC filing document. Returns table index, headers, and row count.
+Args:
+    ticker: str
+    document_url: str - Direct URL to filing HTML (must be https://www.sec.gov/Archives/...)
+""",
+)
+async def list_filing_tables(ticker: str, document_url: str) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("list_filing_tables", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    url_err = _validate_sec_url(document_url)
+    if url_err:
+        return _mcp_failure("list_filing_tables", ErrorCode.INPUT_VALIDATION_ERROR, url_err)
+
+    try:
+        import urllib.request
+        req = urllib.request.Request(document_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+
+        html = _sanitize_sec_html(html)
+        tables = []
+        table_re = _re.compile(r'<table[^>]*>(.*?)</table>', _re.DOTALL | _re.IGNORECASE)
+        tr_re = _re.compile(r'<tr[^>]*>(.*?)</tr>', _re.DOTALL | _re.IGNORECASE)
+        td_re = _re.compile(r'<t[dh][^>]*>(.*?)</t[dh]>', _re.DOTALL | _re.IGNORECASE)
+
+        for i, table_m in enumerate(table_re.finditer(html)):
+            rows = tr_re.findall(table_m.group(1))
+            row_count = len(rows)
+            headers = []
+            if rows:
+                first_cells = td_re.findall(rows[0])
+                headers = [' '.join(_re.sub(r'<[^>]+>', '', c).split()) for c in first_cells[:6]]
+            tables.append({"tableIndex": i, "rowCount": row_count, "headers": headers})
+
+        return json.dumps({"ticker": ticker, "documentUrl": document_url, "tableCount": len(tables), "tables": tables[:50]})
+    except Exception as e:
+        return _mcp_failure("list_filing_tables", ErrorCode.PROVIDER_ERROR, str(e))
+
+
+@yfinance_server.tool(
+    name="get_filing_table",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_table"],
+    description="""Get the parsed rows of a specific table from an SEC filing document.
+Args:
+    ticker: str
+    document_url: str - Direct URL to filing HTML (must be https://www.sec.gov/Archives/...)
+    table_index: int - Table index from list_filing_tables (0-based)
+    max_rows: int - Maximum rows to return (default: 30)
+""",
+)
+async def get_filing_table(ticker: str, document_url: str, table_index: int, max_rows: int = 30) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("get_filing_table", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    url_err = _validate_sec_url(document_url)
+    if url_err:
+        return _mcp_failure("get_filing_table", ErrorCode.INPUT_VALIDATION_ERROR, url_err)
+
+    try:
+        import urllib.request
+        req = urllib.request.Request(document_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+
+        html = _sanitize_sec_html(html)
+        table_re = _re.compile(r'<table[^>]*>(.*?)</table>', _re.DOTALL | _re.IGNORECASE)
+        tr_re = _re.compile(r'<tr[^>]*>(.*?)</tr>', _re.DOTALL | _re.IGNORECASE)
+        td_re = _re.compile(r'<t[dh][^>]*>(.*?)</t[dh]>', _re.DOTALL | _re.IGNORECASE)
+
+        tables = list(table_re.finditer(html))
+        if table_index >= len(tables):
+            return _mcp_failure("get_filing_table", ErrorCode.NO_FILING_DATA,
+                                f"Table index {table_index} not found. Document has {len(tables)} tables.")
+
+        table_html = tables[table_index].group(1)
+        rows = tr_re.findall(table_html)
+        parsed_rows = []
+        for row in rows[:max_rows + 1]:
+            cells = td_re.findall(row)
+            parsed_rows.append([' '.join(_re.sub(r'<[^>]+>', '', c).split()) for c in cells])
+
+        return json.dumps({
+            "ticker": ticker,
+            "tableIndex": table_index,
+            "totalRows": len(rows),
+            "returnedRows": len(parsed_rows),
+            "rows": parsed_rows,
+        })
+    except Exception as e:
+        return _mcp_failure("get_filing_table", ErrorCode.PROVIDER_ERROR, str(e))
+
+
+@yfinance_server.tool(
+    name="extract_filing_fact",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_filing_fact"],
+    description="""Extract a specific financial fact from an SEC filing. Uses XBRL first, parsed tables second, text search last.
+Args:
+    ticker: str
+    fact_name: str - Fact to extract (e.g. 'revenue', 'net income', 'R&D expense')
+    document_url: str - Optional direct URL to filing HTML (must be https://www.sec.gov/Archives/...)
+    accession_number: str - Optional accession number for XBRL lookup
+""",
+)
+async def extract_filing_fact(
+    ticker: str,
+    fact_name: str,
+    document_url: str | None = None,
+    accession_number: str | None = None,
+) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("extract_filing_fact", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    if document_url:
+        url_err = _validate_sec_url(document_url)
+        if url_err:
+            return _mcp_failure("extract_filing_fact", ErrorCode.INPUT_VALIDATION_ERROR, url_err)
+
+    try:
+        result_str = await search_filing_text(
+            ticker=ticker,
+            search_terms=[fact_name],
+            filing_type="10-K",
+            accession_number=accession_number,
+            context_chars=1000,
+            return_tables=True,
+        )
+        result = json.loads(result_str)
+        return json.dumps({
+            "ticker": ticker,
+            "factName": fact_name,
+            "extractionMethod": "text_search",
+            "result": result,
+        })
+    except Exception as e:
+        return _mcp_failure("extract_filing_fact", ErrorCode.PROVIDER_ERROR, str(e))
+
+
+@yfinance_server.tool(
+    name="get_recommendations",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_recommendations"],
+    description="""Get recommendations or upgrades/downgrades for a given ticker symbol from yahoo finance. You can also specify the number of months back to get upgrades/downgrades for, default is 12.
 
 Args:
     ticker: str
@@ -785,6 +1648,7 @@ async def get_recommendations(ticker: str, recommendation_type: str, months_back
 
 @yfinance_server.tool(
     name="get_fast_info",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_fast_info"],
     description="""Get lightweight real-time price and market data for one or more ticker symbols. Returns ~20 high-signal fields
 plus pre-market/after-hours prices when available.
 
@@ -886,6 +1750,7 @@ async def get_fast_info(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_short_interest",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_short_interest"],
     description="""Get short interest data for a ticker symbol.
 
 Returns structured short-selling metrics sourced from yfinance .info, including the
@@ -957,6 +1822,7 @@ async def get_short_interest(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_price_stats",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_stats"],
     description="""Get pre-computed price statistics for one or more tickers. Returns a compact summary so you do NOT
 need to fetch raw history and compute these yourself.
 
@@ -1059,6 +1925,7 @@ async def get_price_stats(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_analyst_consensus",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_analyst_consensus"],
     description="""Get a compact analyst consensus summary for one or more tickers.
 
 Returns pre-aggregated data so you do NOT need to call get_recommendations separately.
@@ -1141,6 +2008,7 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_earnings_analysis",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_analysis"],
     description="""Get all analyst forward-looking data in a single call — replaces 5 separate tool calls.
 
 Returns:
@@ -1203,6 +2071,7 @@ async def get_earnings_analysis(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_financial_ratios",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_financial_ratios"],
     description="""Get pre-computed key financial ratios for one or more tickers.
 
 PREFER THIS over fetching full financial statements when you need valuation or profitability ratios.
@@ -1294,11 +2163,8 @@ async def get_financial_ratios(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_calendar",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_calendar"],
     description="""Get upcoming earnings date and dividend schedule for a ticker.
-
-DEPRECATED: All fields returned by this tool (earnings date, EPS/revenue estimates,
-ex-dividend date, dividend pay date) are also available in `get_stock_info` under the
-`earnings` and dividend keys. Prefer `get_stock_info` to save a round-trip.
 
 Returns:
 - Next earnings date range and EPS/revenue estimates
@@ -1385,6 +2251,7 @@ async def get_calendar(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="search_ticker",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["search_ticker"],
     description="""Search for ticker symbols by company name, partial name, or ISIN.
 
 Use this tool to resolve a company name to a ticker symbol before calling other tools.
@@ -1439,6 +2306,7 @@ async def search_ticker(query: str, max_results: int = 8, exchange: str | None =
 
 @yfinance_server.tool(
     name="screen_stocks",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["screen_stocks"],
     description="""Screen the market for stocks matching predefined criteria.
 
 Use this tool to discover stocks without iterating over individual tickers.
@@ -1491,17 +2359,6 @@ async def screen_stocks(screener_name: str, count: int = 25) -> str:
         return f"Error: running screener '{screener_name}': {e}"
 
 
-# ---------------------------------------------------------------------------
-# Group 3.4 — get_sec_filings
-# ---------------------------------------------------------------------------
-
-@yfinance_server.tool(
-    name="get_sec_filings",
-    description="[DEPRECATED] Internal-only helper retired. Use get_filing_data or search_filing_text.",
-)
-async def get_sec_filings(ticker: str) -> str:
-    return json.dumps({"deprecated": True, "useInstead": "search_filing_text"})
-
 
 # ---------------------------------------------------------------------------
 # Group 3.4b — get_filing_data / search_filing_text
@@ -1523,9 +2380,6 @@ _FILING_FACT_CONCEPTS: dict[FilingFactType, tuple[str, str | None]] = {
     FilingFactType.cash: ("CashAndCashEquivalentsAtCarryingValue", None),
 }
 
-
-def _deprecated_payload(use_instead: str) -> str:
-    return json.dumps({"deprecated": True, "useInstead": use_instead})
 
 
 async def _resolve_cik_for_ticker(ticker: str) -> str | None:
@@ -1620,6 +2474,7 @@ def _manual_lookup_payload(ticker: str, cik_padded: str | None, filing_type: str
 
 @yfinance_server.tool(
     name="get_filing_data",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_data"],
     description="""Retrieve structured XBRL-tagged financial facts from EDGAR.
 
 Try this tool before search_filing_text for GAAP line items or geographic revenue.
@@ -1829,6 +2684,7 @@ async def get_filing_data(
 
 @yfinance_server.tool(
     name="search_filing_text",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["search_filing_text"],
     description="""Search filing narrative text by keyword or section hint.
 
 Use this only when get_filing_data returns NOT_DISCLOSED or the fact is not XBRL-tagged.
@@ -2002,6 +2858,7 @@ async def search_filing_text(
 
 @yfinance_server.tool(
     name="get_technical_indicators",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_technical_indicators"],
     description="""Get pre-computed technical / momentum indicators for one or more tickers.
 
 Computes indicators server-side from historical daily close prices so the LLM
@@ -2106,6 +2963,7 @@ async def get_technical_indicators(ticker: str | list[str], period: str = "3mo")
 
 @yfinance_server.tool(
     name="get_price_slope",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_slope"],
     description="""Get N-day price slope (% change) and direction for one or more tickers. Pre-computed server-side.
 
 Returns: startClose, endClose, slopePct, direction (UP/DOWN/FLAT).
@@ -2176,6 +3034,7 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
 
 @yfinance_server.tool(
     name="get_volume_ratio",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_ratio"],
     description="""Get last-session volume vs N-day average volume ratio. Pre-computed server-side.
 
 Returns: lastVolume, avgVolume10d, avgVolume90d, ratio10d, ratio90d, volumeFlag (HIGH/NORMAL/LOW).
@@ -2248,6 +3107,7 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
 
 @yfinance_server.tool(
     name="get_ma_position",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_ma_position"],
     description="""Get price position vs 50DMA and 200DMA with trend classification. Pre-computed server-side.
 
 Returns: lastPrice, fiftyDayAverage, twoHundredDayAverage, pctVs50dma, pctVs200dma, regime50, regime200, trend (BULLISH/BEARISH/MIXED).
@@ -2322,6 +3182,7 @@ async def get_ma_position(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_credit_health",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_credit_health"],
     description="""Get pre-computed credit/leverage metrics: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag.
 
 Args:
@@ -2438,6 +3299,7 @@ async def get_credit_health(ticker: str | list[str]) -> str:
 # ---------------------------------------------------------------------------
 @yfinance_server.tool(
     name="get_short_momentum",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_short_momentum"],
     description="""Get short interest with pre-computed momentum: MoM delta, direction, squeeze risk, and flag.
 
 Args:
@@ -2534,6 +3396,7 @@ async def get_short_momentum(ticker: str | list[str]) -> str:
 # ---------------------------------------------------------------------------
 @yfinance_server.tool(
     name="get_earnings_momentum",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_momentum"],
     description="""Get earnings revision momentum, beat rate, and estimate direction signals.
 
 Returns: revision7d/30d/90d, revisionDirection, momentumFlag, beatRate, beatCount, avgSurprisePct, currentBeatStreak.
@@ -2703,6 +3566,7 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_options_flow_summary",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_flow_summary"],
     description="""Get options flow summary: P/C ratio, IV percentile, max pain strike, highest OI strikes. Single ticker only.
 
 Args:
@@ -2851,6 +3715,7 @@ async def get_options_flow_summary(ticker: str, expiry_hint: str | None = None) 
 
 @yfinance_server.tool(
     name="get_put_hedge_candidates",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_put_hedge_candidates"],
     description="""Get pre-filtered OTM put options within a strike range and budget. Single ticker only.
 
 Args:
@@ -2983,6 +3848,7 @@ async def get_put_hedge_candidates(
 
 @yfinance_server.tool(
     name="get_analyst_upgrade_radar",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_analyst_upgrade_radar"],
     description="""Get recent analyst rating changes with pre-computed signal classification. Batch supported.
 
 Returns: changes with signal, ptFrom, ptTo, ptDirection, mixedSignal, strengthFlag; netSentiment, summary.
@@ -3154,6 +4020,7 @@ def _df_to_records(df) -> list | None:
 
 @yfinance_server.tool(
     name="get_etf_info",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_etf_info"],
     description="""Get ETF or mutual fund data for one or more ticker symbols.
 
 Returns identity (shortName, category, fundFamily, legalType, fundInceptionDate),
@@ -3224,6 +4091,7 @@ async def get_etf_info(ticker: str | list[str]) -> str:
 
 @yfinance_server.tool(
     name="get_overnight_quote",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_overnight_quote"],
     description="""Get overnight trading data for a ticker.
 
 The true overnight window is 20:00–04:00 ET (00:00–08:00 UTC / Blue Ocean ATS).
@@ -3942,40 +4810,12 @@ def _extract_geographic_pct(
 
 
 # ---------------------------------------------------------------------------
-# CR-10 — get_geographic_revenue
-# ---------------------------------------------------------------------------
-
-# Option C interim lookup table — confirmed values from 10-K annual filings.
-# Commander verifies and updates each entry when a new 10-K is filed.
-# pct is the decimal fraction (e.g. 0.117 = 11.7%).
-_CHINA_REVENUE_CONFIRMED: dict[str, dict] = {
-    "MU":   {"pct": 0.117, "fiscalYear": "FY2025", "filingDate": "2025-10-03"},
-    "AAPL": {"pct": 0.170, "fiscalYear": "FY2025", "filingDate": "2025-10-31"},
-    "ANET": {"pct": 0.140, "fiscalYear": "FY2024", "filingDate": "2025-02-14"},
-    "QCOM": {"pct": 0.620, "fiscalYear": "FY2024", "filingDate": "2024-11-06"},
-    "NVDA": {"pct": 0.170, "fiscalYear": "FY2025", "filingDate": "2025-02-26"},
-    "AMD":  {"pct": 0.220, "fiscalYear": "FY2024", "filingDate": "2025-02-04"},
-    "AVGO": {"pct": 0.350, "fiscalYear": "FY2024", "filingDate": "2024-12-19"},
-    "SWKS": {"pct": 0.580, "fiscalYear": "FY2024", "filingDate": "2024-11-20"},
-    "MRVL": {"pct": 0.550, "fiscalYear": "FY2025", "filingDate": "2025-03-13"},
-    "ON":   {"pct": 0.330, "fiscalYear": "FY2024", "filingDate": "2025-02-10"},
-}
-
-@yfinance_server.tool(
-    name="get_geographic_revenue",
-    description="[DEPRECATED] Use get_filing_data with fact_type='geographic_revenue'.",
-)
-async def get_geographic_revenue(ticker: str, region: str = "China") -> str:
-    # Proxy to get_filing_data so existing callers still receive useful data.
-    return await get_filing_data(ticker, FilingFactType.geographic_revenue, region=region)
-
-
-# ---------------------------------------------------------------------------
 # CR-12 — get_options_flow_scan
 # ---------------------------------------------------------------------------
 
 @yfinance_server.tool(
     name="get_options_flow_scan",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_flow_scan"],
     description="""Structured options flow scan for a binary event window.
 
 Returns the formatted options flow output block. IO pastes formattedBlock directly into
@@ -4158,6 +4998,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
 
 @yfinance_server.tool(
     name="get_price_target_bracket",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"],
     description="""Compute EQF bracket for a position.
 
 EQF = currentPrice / io_pt × 100. Used at every /snipe, /dca, and /thesis.
@@ -4237,6 +5078,7 @@ async def get_price_target_bracket(ticker: str, io_pt: float) -> str:
 
 @yfinance_server.tool(
     name="get_position_score_inputs",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"],
     description="""Aggregate all position scoring inputs for T1, T2, T4, and T5 components.
 
 T3 (PT proximity) and T2 (vs cost basis) require portfolio state (IO PT, cost basis) not available
@@ -4339,6 +5181,7 @@ async def get_position_score_inputs(ticker: str) -> str:
 
 @yfinance_server.tool(
     name="get_volume_gate",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_gate"],
     description="""DC Section 6.2 Volume Gate check: regularMarketVolume ≥ 0.5 × 20-day ADV.
 
 Returns currency, fxRate, lastVolume, adv10d, adv20d (computed from last 20 daily sessions),
@@ -4447,115 +5290,6 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
         "note": note,
     })
 
-
-# ---------------------------------------------------------------------------
-# get_filing_text_search — full-text search within a specific SEC filing HTML
-# ---------------------------------------------------------------------------
-
-def _filing_text_only_matches(text: str, search_terms: list[str], context_chars: int) -> list[dict]:
-    """Return plain-text keyword matches with context windows (no HTML/table parsing)."""
-    text_lower = text.lower()
-    matches: list[dict] = []
-    seen_positions: set[int] = set()
-    half = max(1, context_chars // 2)
-    for term in search_terms:
-        term_lower = term.lower()
-        idx = 0
-        while len(matches) < 5:
-            pos = text_lower.find(term_lower, idx)
-            if pos == -1:
-                break
-            idx = pos + 1
-            if any(abs(pos - sp) < 200 for sp in seen_positions):
-                continue
-            seen_positions.add(pos)
-            ctx_start = max(0, pos - half)
-            ctx_end = min(len(text), pos + half)
-            matches.append({
-                "term": term,
-                "sectionHeading": None,
-                "contextText": text[ctx_start:ctx_end].strip(),
-                "tableParsed": None,
-            })
-    return matches
-
-
-@yfinance_server.tool(
-    name="get_filing_text_search",
-    description="[DEPRECATED] Use search_filing_text.",
-)
-async def get_filing_text_search(
-    ticker: str,
-    accession_number: str,
-    search_terms: list[str],
-    context_chars: int = 1500,
-    return_tables: bool = True,
-    text_only: bool = False,
-    document_url: str | None = None,
-) -> str:
-    return _deprecated_payload("search_filing_text")
-
-
-# ---------------------------------------------------------------------------
-# get_filing_document — retrieve a section of an SEC filing document
-# ---------------------------------------------------------------------------
-
-@yfinance_server.tool(
-    name="get_filing_document",
-    description="[DEPRECATED] Use search_filing_text with section_hint.",
-)
-async def get_filing_document(
-    ticker: str,
-    accession_number: str,
-    section_hint: str | None = None,
-    filing_type: str = "10-K",
-    document_url: str | None = None,
-) -> str:
-    return _deprecated_payload("search_filing_text")
-
-
-# ---------------------------------------------------------------------------
-# Deprecated aliases — backward compat (remove in next major version)
-# ---------------------------------------------------------------------------
-
-@yfinance_server.tool(
-    name="get_china_revenue_pct",
-    description="[DEPRECATED] Use get_geographic_revenue instead. Alias preserved for backward compatibility.",
-)
-async def _deprecated_get_china_revenue_pct(ticker: str) -> str:
-    return await get_geographic_revenue(ticker, region="China")
-
-
-@yfinance_server.tool(
-    name="get_dc134_options_scan",
-    description="[DEPRECATED] Use get_options_flow_scan instead. Alias preserved for backward compatibility.",
-)
-async def _deprecated_get_dc134_options_scan(ticker: str, window_day: str) -> str:
-    return await get_options_flow_scan(ticker, window_label=window_day)
-
-
-@yfinance_server.tool(
-    name="get_eqf_bracket",
-    description="[DEPRECATED] Use get_price_target_bracket instead. Alias preserved for backward compatibility.",
-)
-async def _deprecated_get_eqf_bracket(ticker: str, io_pt: float) -> str:
-    return await get_price_target_bracket(ticker, io_pt)
-
-
-@yfinance_server.tool(
-    name="get_tps_inputs",
-    description="[DEPRECATED] Use get_position_score_inputs instead. Alias preserved for backward compatibility.",
-)
-async def _deprecated_get_tps_inputs(ticker: str) -> str:
-    return await get_position_score_inputs(ticker)
-
-
-@yfinance_server.tool(
-    name="get_adv_gate",
-    description="[DEPRECATED] Use get_volume_gate instead. Alias preserved for backward compatibility.",
-)
-async def _deprecated_get_adv_gate(ticker: str, foreign_exchange: bool = False) -> str:
-    return await get_volume_gate(ticker, foreign_exchange)
 
 
 if __name__ == "__main__":

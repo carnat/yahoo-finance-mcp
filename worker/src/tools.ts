@@ -1,3 +1,4 @@
+import { mcpSuccess } from "./response.js";
 import {
   getAnalystConsensus,
   getAnalystUpgradeRadar,
@@ -35,6 +36,13 @@ import {
   searchTicker,
   getStockActions,
   getStockInfo,
+  getOptionsSummary,
+  listSecFilings,
+  getFilingOutline,
+  getFilingSection,
+  listFilingTables,
+  getFilingTable,
+  extractFilingFact,
 } from "./yahoo-finance.js";
 
 export interface Tool {
@@ -45,6 +53,14 @@ export interface Tool {
     properties: Record<string, unknown>;
     required?: string[];
   };
+  outputSchema?: {
+    type: "object";
+    properties: Record<string, unknown>;
+    required?: string[];
+    additionalProperties?: boolean;
+  };
+  deprecated?: boolean;
+  useInstead?: string;
 }
 
 export const TOOLS: Tool[] = [
@@ -201,7 +217,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_option_chain",
     description:
-      "Get the options chain (calls or puts) for a ticker and expiration date. Use get_option_expiration_dates first to find valid dates. Response is wrapped: { ticker, expiration, optionType, dataDate (YYYY-MM-DD last trading day), contracts: [...] }.",
+      "Get the options chain (calls or puts) for a ticker and expiration date. Use get_option_expiration_dates first to find valid dates. Response is wrapped: { ticker, expiration, optionType, dataDate (YYYY-MM-DD last trading day), totalContracts, returnedContracts, truncated, contracts: [...] }.",
     inputSchema: {
       type: "object",
       properties: {
@@ -215,6 +231,9 @@ export const TOOLS: Tool[] = [
           description: "The type of options to retrieve.",
           enum: ["calls", "puts"],
         },
+        min_open_interest: { type: "number", description: "Minimum open interest filter.", default: 0 },
+        min_volume: { type: "number", description: "Minimum volume filter.", default: 0 },
+        max_contracts: { type: "number", description: "Maximum number of contracts to return.", default: 50 },
       },
       required: ["ticker", "expiration_date", "option_type"],
     },
@@ -379,17 +398,6 @@ export const TOOLS: Tool[] = [
         },
       },
       required: ["screener_name"],
-    },
-  },
-  {
-    name: "get_sec_filings",
-    description: "[DEPRECATED] Internal-only helper retired. Use get_filing_data or search_filing_text.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
-      },
-      required: ["ticker"],
     },
   },
   {
@@ -614,22 +622,6 @@ export const TOOLS: Tool[] = [
     },
   },
   {
-    name: "get_geographic_revenue",
-    description: "[DEPRECATED] Use get_filing_data with fact_type='geographic_revenue'.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'MU'" },
-        region: {
-          type: "string",
-          description: "Geographic region to query, e.g. 'China', 'Europe', 'Americas', 'Asia Pacific', 'Japan'. Defaults to 'China'.",
-          default: "China",
-        },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
     name: "get_filing_data",
     description:
       "Retrieve structured XBRL-tagged financial facts from EDGAR. Try this tool before search_filing_text for GAAP line items and geographic revenue.",
@@ -767,140 +759,376 @@ export const TOOLS: Tool[] = [
     },
   },
   {
-    name: "get_filing_text_search",
-    description: "[DEPRECATED] Use search_filing_text (search_terms).",
+    name: "get_options_summary",
+    description: "Get options summary for a single ticker: ATM implied volatility, put/call ratio by volume and OI, max pain strike for the nearest liquid expiry. Preferred for LLM use — returns a compact snapshot without the full contract list.",
     inputSchema: {
       type: "object",
       properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'GLW'" },
-        accession_number: {
-          type: "string",
-          description: "Accession number from get_sec_filings, e.g. '0000024741-26-000124'",
-        },
-        search_terms: {
-          type: "array",
-          items: { type: "string" },
-          description: "Keywords/phrases to search for, e.g. ['China', 'geographic information']",
-        },
-        context_chars: {
-          type: "number",
-          description: "Characters of surrounding context around each match (default 1500)",
-          default: 1500,
-        },
-        return_tables: {
-          type: "boolean",
-          description: "If true, parse any HTML tables within the context window (default true)",
-          default: true,
-        },
-        text_only: {
-          type: "boolean",
-          description: "If true, keyword search runs on stripped plain text (no HTML table parsing), useful for LLM parsing.",
-          default: false,
-        },
-        document_url: {
-          type: "string",
-          description: "Optional: pre-resolved primary document URL from get_sec_filings (edgarPrimaryDocumentUrl field). When provided, skips EDGAR resolution and fetches directly.",
-        },
-      },
-      required: ["ticker", "accession_number", "search_terms"],
-    },
-  },
-  {
-    name: "get_filing_document",
-    description: "[DEPRECATED] Use search_filing_text (section_hint).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'GLW'" },
-        accession_number: {
-          type: "string",
-          description: "Accession number from get_sec_filings, e.g. '0000024741-26-000124'",
-        },
-        section_hint: {
-          type: "string",
-          description: "Optional keyword to target a specific section, e.g. 'geographic', 'China', 'risk factors', 'segment information'",
-        },
-        filing_type: {
-          type: "string",
-          description: "'10-K' (default), '10-Q', or '8-K'",
-          default: "10-K",
-        },
-        document_url: {
-          type: "string",
-          description: "Optional: pre-resolved primary document URL from get_sec_filings (edgarPrimaryDocumentUrl field). When provided, skips EDGAR resolution and fetches directly.",
-        },
-      },
-      required: ["ticker", "accession_number"],
-    },
-  },
-  // ── Deprecated aliases (backward compat — remove in next major version) ──────
-  {
-    name: "get_china_revenue_pct",
-    description: "[DEPRECATED] Use get_geographic_revenue instead. Alias preserved for backward compatibility.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'MU'" },
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
       },
       required: ["ticker"],
     },
   },
   {
-    name: "get_dc134_options_scan",
-    description: "[DEPRECATED] Use get_options_flow_scan instead. Alias preserved for backward compatibility.",
+    name: "list_sec_filings",
+    description: "List recent SEC filings for a ticker from EDGAR. Returns accession number, filing date, form type, primary document URL, and EDGAR index URL.",
     inputSchema: {
       type: "object",
       properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
-        window_day: {
-          type: "string",
-          enum: ["T-14", "T-7", "T-2"],
-          description: "Binary event window reading day",
-        },
-      },
-      required: ["ticker", "window_day"],
-    },
-  },
-  {
-    name: "get_eqf_bracket",
-    description: "[DEPRECATED] Use get_price_target_bracket instead. Alias preserved for backward compatibility.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
-        io_pt: { type: "number", description: "IO price target" },
-      },
-      required: ["ticker", "io_pt"],
-    },
-  },
-  {
-    name: "get_tps_inputs",
-    description: "[DEPRECATED] Use get_position_score_inputs instead. Alias preserved for backward compatibility.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
+        ticker: { type: "string" },
+        form_type: { type: "string", enum: ["10-K", "10-Q", "8-K", "DEF 14A"], default: "10-K" },
+        max_filings: { type: "number", default: 5 },
       },
       required: ["ticker"],
     },
   },
   {
-    name: "get_adv_gate",
-    description: "[DEPRECATED] Use get_volume_gate instead. Alias preserved for backward compatibility.",
+    name: "get_filing_outline",
+    description: "Parse the document outline of an SEC filing. Returns a hierarchical tree of Parts, Items, and Notes.",
     inputSchema: {
       type: "object",
       properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
-        foreign_exchange: {
-          type: "boolean",
-          description: "Set true for DC-80 FX/ADR tickers. Default false.",
-          default: false,
-        },
+        ticker: { type: "string" },
+        accession_number: { type: "string" },
+        document_url: { type: "string" },
       },
       required: ["ticker"],
+    },
+  },
+  {
+    name: "get_filing_section",
+    description: "Retrieve the text content of a specific section from an SEC filing document.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string" },
+        section_name: { type: "string" },
+        document_url: { type: "string" },
+        context_chars: { type: "number", default: 3000 },
+      },
+      required: ["ticker", "section_name", "document_url"],
+    },
+  },
+  {
+    name: "list_filing_tables",
+    description: "List all HTML tables in an SEC filing document. Returns table index, headers, and row count.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string" },
+        document_url: { type: "string" },
+      },
+      required: ["ticker", "document_url"],
+    },
+  },
+  {
+    name: "get_filing_table",
+    description: "Get the parsed rows of a specific table from an SEC filing document.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string" },
+        document_url: { type: "string" },
+        table_index: { type: "number" },
+        max_rows: { type: "number", default: 30 },
+      },
+      required: ["ticker", "document_url", "table_index"],
+    },
+  },
+  {
+    name: "extract_filing_fact",
+    description: "Extract a specific financial fact from an SEC filing. Uses XBRL first, parsed tables second, text search last.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string" },
+        fact_name: { type: "string" },
+        document_url: { type: "string" },
+        accession_number: { type: "string" },
+      },
+      required: ["ticker", "fact_name"],
     },
   },
 ];
+
+const SIMPLE_OBJECT_SCHEMA: Tool["outputSchema"] = {
+  type: "object",
+  properties: {},
+  additionalProperties: true,
+};
+
+const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
+  get_historical_stock_prices: SIMPLE_OBJECT_SCHEMA,
+  get_stock_info: SIMPLE_OBJECT_SCHEMA,
+  get_etf_info: SIMPLE_OBJECT_SCHEMA,
+  get_yahoo_finance_news: SIMPLE_OBJECT_SCHEMA,
+  get_stock_actions: SIMPLE_OBJECT_SCHEMA,
+  get_financial_statement: SIMPLE_OBJECT_SCHEMA,
+  get_holder_info: SIMPLE_OBJECT_SCHEMA,
+  get_option_expiration_dates: SIMPLE_OBJECT_SCHEMA,
+  get_option_chain: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      expiration: { type: "string" },
+      optionType: { type: "string" },
+      dataDate: { type: "string" },
+      totalContracts: { type: "number" },
+      returnedContracts: { type: "number" },
+      truncated: { type: "boolean" },
+      contracts: { type: "array" },
+    },
+    additionalProperties: true,
+  },
+  get_recommendations: SIMPLE_OBJECT_SCHEMA,
+  get_fast_info: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      lastPrice: { type: "number" },
+      currency: { type: "string" },
+      exchange: { type: "string" },
+      quoteType: { type: "string" },
+      marketCap: { type: ["number", "null"] },
+      shares: { type: ["number", "null"] },
+      dayHigh: { type: "number" },
+      dayLow: { type: "number" },
+      yearHigh: { type: "number" },
+      yearLow: { type: "number" },
+      yearChange: { type: "number" },
+      preMarketPrice: { type: ["number", "null"] },
+      postMarketPrice: { type: ["number", "null"] },
+      marketOpen: { type: "boolean" },
+      lastTradeDate: { type: "string" },
+    },
+    additionalProperties: true,
+  },
+  get_short_interest: SIMPLE_OBJECT_SCHEMA,
+  get_price_stats: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      lastPrice: { type: "number" },
+      changePct: { type: "number" },
+      distFromHigh52wPct: { type: "number" },
+      distFromLow52wPct: { type: "number" },
+      distFrom50dmaPct: { type: "number" },
+      distFrom200dmaPct: { type: "number" },
+      volatility30d: { type: "number" },
+      cagr1y: { type: "number" },
+      cagr3y: { type: "number" },
+      cagr5y: { type: "number" },
+      dataDate: { type: "string" },
+    },
+    additionalProperties: true,
+  },
+  get_analyst_consensus: SIMPLE_OBJECT_SCHEMA,
+  get_earnings_analysis: SIMPLE_OBJECT_SCHEMA,
+  get_financial_ratios: SIMPLE_OBJECT_SCHEMA,
+  get_calendar: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      earningsDateConfirmed: { type: ["boolean", "null"] },
+      earningsDateSource: { type: ["string", "null"] },
+    },
+    additionalProperties: true,
+  },
+  search_ticker: SIMPLE_OBJECT_SCHEMA,
+  screen_stocks: SIMPLE_OBJECT_SCHEMA,
+  get_technical_indicators: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      rsi14: { type: ["number", "null"] },
+      macd: { type: ["number", "null"] },
+      macdSignal: { type: ["number", "null"] },
+      macdHistogram: { type: ["number", "null"] },
+      lastClose: { type: ["number", "null"] },
+      dataDate: { type: "string" },
+    },
+    additionalProperties: true,
+  },
+  get_price_slope: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      startClose: { type: ["number", "null"] },
+      endClose: { type: ["number", "null"] },
+      slopePct: { type: ["number", "null"] },
+      direction: { type: "string" },
+      dataDate: { type: "string" },
+    },
+    additionalProperties: true,
+  },
+  get_volume_ratio: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      ratio10d: { type: ["number", "null"] },
+      ratio90d: { type: ["number", "null"] },
+      volumeFlag: { type: ["string", "null"] },
+      dataDate: { type: "string" },
+    },
+    additionalProperties: true,
+  },
+  get_ma_position: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      lastClose: { type: ["number", "null"] },
+      sma50: { type: ["number", "null"] },
+      sma200: { type: ["number", "null"] },
+      distFrom50dmaPct: { type: ["number", "null"] },
+      distFrom200dmaPct: { type: ["number", "null"] },
+      trend: { type: "string" },
+      dataDate: { type: "string" },
+    },
+    additionalProperties: true,
+  },
+  get_credit_health: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      netDebtToEbitda: { type: ["number", "null"] },
+      interestCoverage: { type: ["number", "null"] },
+      debtTier: { type: ["string", "null"] },
+      creditStress: { type: ["boolean", "null"] },
+      dataDate: { type: "string" },
+    },
+    additionalProperties: true,
+  },
+  get_short_momentum: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      sharesShort: { type: ["number", "null"] },
+      shortPctOfFloat: { type: ["number", "null"] },
+      momDelta: { type: ["number", "null"] },
+      direction: { type: ["string", "null"] },
+      squeezeRisk: { type: ["string", "null"] },
+      flag: { type: ["string", "null"] },
+      dataDate: { type: "string" },
+    },
+    additionalProperties: true,
+  },
+  get_earnings_momentum: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      revision7d: { type: ["number", "null"] },
+      revision30d: { type: ["number", "null"] },
+      revision90d: { type: ["number", "null"] },
+      momentumFlag: { type: ["string", "null"] },
+      beatRate: { type: ["number", "null"] },
+      avgSurprisePct: { type: ["number", "null"] },
+      currentBeatStreak: { type: ["number", "null"] },
+      dataDate: { type: "string" },
+    },
+    additionalProperties: true,
+  },
+  get_options_flow_summary: SIMPLE_OBJECT_SCHEMA,
+  get_put_hedge_candidates: SIMPLE_OBJECT_SCHEMA,
+  get_analyst_upgrade_radar: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      netSentiment: { type: ["number", "null"] },
+      mixedSignal: { type: ["boolean", "null"] },
+      upgrades: { type: ["number", "null"] },
+      downgrades: { type: ["number", "null"] },
+      dataDate: { type: "string" },
+    },
+    additionalProperties: true,
+  },
+  get_overnight_quote: SIMPLE_OBJECT_SCHEMA,
+  get_filing_data: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      factType: { type: "string" },
+      source: { type: "string" },
+      confidence: { type: "string" },
+      value: {},
+      currency: { type: ["string", "null"] },
+      period: { type: ["string", "null"] },
+      filingType: { type: ["string", "null"] },
+    },
+    additionalProperties: true,
+  },
+  search_filing_text: SIMPLE_OBJECT_SCHEMA,
+  get_options_flow_scan: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      windowLabel: { type: "string" },
+      pcRatio: { type: ["number", "null"] },
+      ivPctile: { type: ["number", "null"] },
+      putVolVs10dAvg: { type: ["number", "null"] },
+      putVolTrend: { type: ["string", "null"] },
+      maxPainStrike: { type: ["number", "null"] },
+      bracket: { type: ["string", "null"] },
+      formattedBlock: { type: ["string", "null"] },
+      dataDate: { type: "string" },
+    },
+    additionalProperties: true,
+  },
+  get_price_target_bracket: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      currentPrice: { type: ["number", "null"] },
+      ioPt: { type: ["number", "null"] },
+      eqfPct: { type: ["number", "null"] },
+      bracket: { type: ["string", "null"] },
+      tag: { type: ["string", "null"] },
+      invertedFlag: { type: ["boolean", "null"] },
+      dataDate: { type: "string" },
+    },
+    additionalProperties: true,
+  },
+  get_position_score_inputs: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      t1_inputs: { type: "object" },
+      t2_inputs: { type: "object" },
+      t4_inputs: { type: "object" },
+      t5_inputs: { type: "object" },
+      dataDate: { type: "string" },
+    },
+    additionalProperties: true,
+  },
+  get_volume_gate: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      currency: { type: ["string", "null"] },
+      fxRate: { type: ["number", "null"] },
+      lastVolume: { type: ["number", "null"] },
+      adv10d: { type: ["number", "null"] },
+      adv20d: { type: ["number", "null"] },
+      adv90d: { type: ["number", "null"] },
+      ratio20d: { type: ["number", "null"] },
+      gatePass: { type: ["boolean", "null"] },
+      dataDate: { type: "string" },
+      note: { type: ["string", "null"] },
+    },
+    additionalProperties: true,
+  },
+  get_options_summary: SIMPLE_OBJECT_SCHEMA,
+  list_sec_filings: SIMPLE_OBJECT_SCHEMA,
+  get_filing_outline: SIMPLE_OBJECT_SCHEMA,
+  get_filing_section: SIMPLE_OBJECT_SCHEMA,
+  list_filing_tables: SIMPLE_OBJECT_SCHEMA,
+  get_filing_table: SIMPLE_OBJECT_SCHEMA,
+  extract_filing_fact: SIMPLE_OBJECT_SCHEMA,
+};
+
+for (const tool of TOOLS) {
+  tool.outputSchema = OUTPUT_SCHEMAS[tool.name] ?? SIMPLE_OBJECT_SCHEMA;
+}
+
 
 const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
 const num = (v: unknown, fallback: number): number => (typeof v === "number" ? v : fallback);
@@ -908,6 +1136,11 @@ const tickerArg = (v: unknown): string | string[] =>
   Array.isArray(v) ? v.map(String) : str(v);
 
 export async function callTool(name: string, args: Record<string, unknown>): Promise<string> {
+  const raw = await _dispatchTool(name, args);
+  return mcpSuccess(name, raw);
+}
+
+async function _dispatchTool(name: string, args: Record<string, unknown>): Promise<string> {
   switch (name) {
     case "get_historical_stock_prices":
       return getHistoricalPrices(str(args.ticker), str(args.period, "1mo"), str(args.interval, "1d"), args.prepost === true);
@@ -926,7 +1159,8 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
     case "get_option_expiration_dates":
       return getOptionExpirationDates(str(args.ticker));
     case "get_option_chain":
-      return getOptionChain(str(args.ticker), str(args.expiration_date), str(args.option_type));
+      return getOptionChain(str(args.ticker), str(args.expiration_date), str(args.option_type),
+        num(args.max_contracts, 50), num(args.min_open_interest, 0), num(args.min_volume, 0));
     case "get_recommendations":
       return getRecommendations(
         str(args.ticker),
@@ -949,8 +1183,6 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       return searchTicker(str(args.query), num(args.max_results, 8), args.exchange != null ? str(args.exchange) : null);
     case "screen_stocks":
       return screenStocks(str(args.screener_name), num(args.count, 25));
-    case "get_sec_filings":
-      return JSON.stringify({ deprecated: true, useInstead: "search_filing_text" });
     case "get_short_interest":
       return getShortInterest(str(args.ticker));
     case "get_technical_indicators":
@@ -981,8 +1213,7 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       return getAnalystUpgradeRadar(tickerArg(args.ticker), num(args.days_back, 30));
     case "get_overnight_quote":
       return getOvernightQuote(str(args.ticker));
-    case "get_geographic_revenue":
-      return JSON.stringify({ deprecated: true, useInstead: "get_filing_data" });
+
     case "get_filing_data":
       return getFilingData(
         str(args.ticker),
@@ -1001,10 +1232,6 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
         num(args.context_chars, 1500),
         args.return_tables !== false,
       );
-    case "get_filing_text_search":
-      return JSON.stringify({ deprecated: true, useInstead: "search_filing_text" });
-    case "get_filing_document":
-      return JSON.stringify({ deprecated: true, useInstead: "search_filing_text" });
     case "get_options_flow_scan":
       return getOptionsFlowScan(str(args.ticker), str(args.window_label));
     case "get_price_target_bracket":
@@ -1013,17 +1240,20 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       return getPositionScoreInputs(str(args.ticker));
     case "get_volume_gate":
       return getVolumeGate(str(args.ticker), args.foreign_exchange === true);
-    // ── Deprecated aliases (backward compat) ──────────────────────────────────
-    case "get_china_revenue_pct":
-      return getFilingData(str(args.ticker), "geographic_revenue", "China", "10-K", "latest");
-    case "get_dc134_options_scan":
-      return getOptionsFlowScan(str(args.ticker), str(args.window_day));
-    case "get_eqf_bracket":
-      return getPriceTargetBracket(str(args.ticker), num(args.io_pt, 0));
-    case "get_tps_inputs":
-      return getPositionScoreInputs(str(args.ticker));
-    case "get_adv_gate":
-      return getVolumeGate(str(args.ticker), args.foreign_exchange === true);
+    case "get_options_summary":
+      return getOptionsSummary(str(args.ticker));
+    case "list_sec_filings":
+      return listSecFilings(str(args.ticker), str(args.form_type, "10-K"), num(args.max_filings, 5));
+    case "get_filing_outline":
+      return getFilingOutline(str(args.ticker), args.accession_number != null ? str(args.accession_number) : null, args.document_url != null ? str(args.document_url) : null);
+    case "get_filing_section":
+      return getFilingSection(str(args.ticker), str(args.section_name), str(args.document_url), num(args.context_chars, 3000));
+    case "list_filing_tables":
+      return listFilingTables(str(args.ticker), str(args.document_url));
+    case "get_filing_table":
+      return getFilingTable(str(args.ticker), str(args.document_url), num(args.table_index, 0), num(args.max_rows, 30));
+    case "extract_filing_fact":
+      return extractFilingFact(str(args.ticker), str(args.fact_name), args.document_url != null ? str(args.document_url) : null, args.accession_number != null ? str(args.accession_number) : null);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

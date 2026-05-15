@@ -603,7 +603,10 @@ export async function getOptionExpirationDates(ticker: string): Promise<string> 
 export async function getOptionChain(
   ticker: string,
   expDate: string,
-  optType: string
+  optType: string,
+  maxContracts: number = 50,
+  minOpenInterest: number = 0,
+  minVolume: number = 0,
 ): Promise<string> {
   if (!["calls", "puts"].includes(optType)) {
     return `Error: option_type must be 'calls' or 'puts'`;
@@ -631,12 +634,28 @@ export async function getOptionChain(
       ? new Date(regMktTime * 1000).toISOString().slice(0, 10)
       : new Date().toISOString().slice(0, 10);
 
+    let contracts = (opts[optType] ?? []) as Record<string, unknown>[];
+    if (minOpenInterest > 0) {
+      contracts = contracts.filter(c => ((c.openInterest as number) || 0) >= minOpenInterest);
+    }
+    if (minVolume > 0) {
+      contracts = contracts.filter(c => ((c.volume as number) || 0) >= minVolume);
+    }
+    const totalContracts = contracts.length;
+    if (maxContracts > 0) {
+      contracts = contracts.slice(0, maxContracts);
+    }
+    const returnedContracts = contracts.length;
+
     return JSON.stringify({
       ticker,
       expiration: expDate,
       optionType: optType,
       dataDate,
-      contracts: opts[optType] ?? [],
+      totalContracts,
+      returnedContracts,
+      truncated: returnedContracts < totalContracts,
+      contracts,
     });
   } catch (e) {
     return `Error fetching option chain for ${ticker} on ${expDate}: ${e instanceof Error ? e.message : String(e)}`;
@@ -4333,5 +4352,262 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+  }
+}
+
+// ── get_options_summary ───────────────────────────────────────────────────────
+
+export async function getOptionsSummary(ticker: string): Promise<string> {
+  try {
+    const expData = JSON.parse(await getOptionExpirationDates(ticker)) as string[];
+    if (!expData || expData.length === 0) {
+      return JSON.stringify({ ticker, error: "No options data available" });
+    }
+    const expiry = expData[0];
+    const callsRaw = JSON.parse(await getOptionChain(ticker, expiry, "calls", 200, 0, 0)) as Record<string, unknown>;
+    const putsRaw = JSON.parse(await getOptionChain(ticker, expiry, "puts", 200, 0, 0)) as Record<string, unknown>;
+    const calls = (callsRaw.contracts ?? []) as Record<string, unknown>[];
+    const puts = (putsRaw.contracts ?? []) as Record<string, unknown>[];
+
+    const fi = JSON.parse(await getFastInfo(ticker)) as Record<string, unknown>;
+    const currentPrice = fi.lastPrice as number | null;
+
+    let atmIV: number | null = null;
+    if (currentPrice != null && calls.length > 0) {
+      let minDist = Infinity;
+      for (const c of calls) {
+        const strike = c.strike as number;
+        const dist = Math.abs(strike - currentPrice);
+        if (dist < minDist) {
+          minDist = dist;
+          atmIV = c.impliedVolatility as number | null;
+        }
+      }
+      if (atmIV != null) atmIV = +atmIV.toFixed(4);
+    }
+
+    const callVol = calls.reduce((s, c) => s + ((c.volume as number) || 0), 0);
+    const putVol = puts.reduce((s, c) => s + ((c.volume as number) || 0), 0);
+    const callOI = calls.reduce((s, c) => s + ((c.openInterest as number) || 0), 0);
+    const putOI = puts.reduce((s, c) => s + ((c.openInterest as number) || 0), 0);
+    const pcRatioVolume = callVol > 0 ? +(putVol / callVol).toFixed(3) : null;
+    const pcRatioOI = callOI > 0 ? +(putOI / callOI).toFixed(3) : null;
+
+    const strikeSet = new Set([...calls.map(c => c.strike as number), ...puts.map(p => p.strike as number)]);
+    const allStrikes = Array.from(strikeSet).sort((a, b) => a - b);
+    let maxPainStrike: number | null = null;
+    let minPain = Infinity;
+    for (const s of allStrikes) {
+      const callPain = calls.reduce((sum, c) => sum + Math.max(0, s - (c.strike as number)) * ((c.openInterest as number) || 0), 0);
+      const putPain = puts.reduce((sum, p) => sum + Math.max(0, (p.strike as number) - s) * ((p.openInterest as number) || 0), 0);
+      const total = callPain + putPain;
+      if (total < minPain) { minPain = total; maxPainStrike = s; }
+    }
+
+    return JSON.stringify({
+      ticker, nearestExpiry: expiry, currentPrice,
+      atmIV, pcRatioVolume, pcRatioOI,
+      callVolume: callVol, putVolume: putVol, callOI, putOI,
+      maxPainStrike, dataDate: getLastTradingDate(),
+    });
+  } catch (e) {
+    return JSON.stringify({ ticker, error: `${e instanceof Error ? e.message : String(e)}` });
+  }
+}
+
+// ── list_sec_filings ──────────────────────────────────────────────────────────
+
+export async function listSecFilings(ticker: string, formType: string = "10-K", maxFilings: number = 5): Promise<string> {
+  try {
+    const tickersResp = await fetch("https://www.sec.gov/files/company_tickers.json", {
+      headers: { "User-Agent": "yahoo-finance-mcp/1.0 admin@example.com" }
+    });
+    if (!tickersResp.ok) return JSON.stringify({ error: true, message: "Failed to fetch EDGAR tickers" });
+    const tickersData = await tickersResp.json() as Record<string, { ticker: string; cik_str: string }>;
+
+    let cik: number | null = null;
+    for (const entry of Object.values(tickersData)) {
+      if (entry.ticker.toUpperCase() === ticker.toUpperCase()) {
+        cik = parseInt(entry.cik_str, 10);
+        break;
+      }
+    }
+    if (!cik) return JSON.stringify({ error: true, message: `Could not find EDGAR CIK for ticker '${ticker}'` });
+
+    const cikPadded = String(cik).padStart(10, "0");
+    const subResp = await fetch(`https://data.sec.gov/submissions/CIK${cikPadded}.json`, {
+      headers: { "User-Agent": "yahoo-finance-mcp/1.0 admin@example.com" }
+    });
+    if (!subResp.ok) return JSON.stringify({ error: true, message: "Failed to fetch EDGAR submissions" });
+    const subData = await subResp.json() as Record<string, unknown>;
+    const recent = (subData.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>;
+
+    const forms = (recent?.form ?? []) as string[];
+    const dates = (recent?.filingDate ?? []) as string[];
+    const accessions = (recent?.accessionNumber ?? []) as string[];
+    const primaryDocs = (recent?.primaryDocument ?? []) as string[];
+
+    const results: unknown[] = [];
+    const limit = Math.min(Math.max(1, maxFilings), 20);
+    for (let i = 0; i < forms.length && results.length < limit; i++) {
+      if (forms[i] === formType) {
+        const acc = accessions[i] ?? "";
+        const accClean = acc.replace(/-/g, "");
+        const docUrl = primaryDocs[i] ? `https://www.sec.gov/Archives/edgar/data/${cik}/${accClean}/${primaryDocs[i]}` : null;
+        const indexUrl = `https://www.sec.gov/Archives/edgar/data/${cik}/${accClean}/${acc}-index.htm`;
+        results.push({ accessionNumber: acc, filingDate: dates[i] ?? "", formType: forms[i], primaryDocumentUrl: docUrl, edgarIndexUrl: indexUrl });
+      }
+    }
+    return JSON.stringify({ ticker, formType, filings: results });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
+  }
+}
+
+// ── get_filing_outline ────────────────────────────────────────────────────────
+
+export async function getFilingOutline(ticker: string, _accessionNumber: string | null, documentUrl: string | null): Promise<string> {
+  try {
+    if (!documentUrl) return JSON.stringify({ error: true, message: "document_url is required" });
+    if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
+      return JSON.stringify({ error: true, message: "Invalid SEC URL" });
+    }
+    const resp = await fetch(documentUrl, { headers: { "User-Agent": "yahoo-finance-mcp/1.0 admin@example.com" } });
+    if (!resp.ok) return JSON.stringify({ error: true, message: `HTTP ${resp.status}` });
+    const html = await resp.text();
+
+    const outline: { level: number; title: string }[] = [];
+    const headingRe = /<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi;
+    const itemRe = /Part\s+[IVX]+|Item\s+\d+[A-Z]?|Note\s+\d+/i;
+    let m: RegExpExecArray | null;
+    while ((m = headingRe.exec(html)) !== null && outline.length < 100) {
+      const level = parseInt(m[1], 10);
+      const text = m[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+      if (text && (itemRe.test(text) || text.length < 100)) {
+        outline.push({ level, title: text });
+      }
+    }
+    return JSON.stringify({ ticker, documentUrl, outline });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
+  }
+}
+
+// ── get_filing_section ────────────────────────────────────────────────────────
+
+export async function getFilingSection(ticker: string, sectionName: string, documentUrl: string, contextChars: number = 3000): Promise<string> {
+  try {
+    if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
+      return JSON.stringify({ error: true, message: "Invalid SEC URL" });
+    }
+    const resp = await fetch(documentUrl, { headers: { "User-Agent": "yahoo-finance-mcp/1.0 admin@example.com" } });
+    if (!resp.ok) return JSON.stringify({ error: true, message: `HTTP ${resp.status}` });
+    const html = await resp.text();
+    const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+    const idx = text.toLowerCase().indexOf(sectionName.toLowerCase());
+    if (idx === -1) return JSON.stringify({ ticker, sectionName, found: false, text: null });
+    return JSON.stringify({ ticker, sectionName, found: true, text: text.slice(idx, idx + contextChars) });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
+  }
+}
+
+// ── list_filing_tables ────────────────────────────────────────────────────────
+
+export async function listFilingTables(ticker: string, documentUrl: string): Promise<string> {
+  try {
+    if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
+      return JSON.stringify({ error: true, message: "Invalid SEC URL" });
+    }
+    const resp = await fetch(documentUrl, { headers: { "User-Agent": "yahoo-finance-mcp/1.0 admin@example.com" } });
+    if (!resp.ok) return JSON.stringify({ error: true, message: `HTTP ${resp.status}` });
+    const html = await resp.text();
+
+    const tables: { tableIndex: number; rowCount: number; headers: string[] }[] = [];
+    const tableRe = /<table[^>]*>([\s\S]*?)<\/table>/gi;
+    const tdRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+    let tm: RegExpExecArray | null;
+    let idx = 0;
+    while ((tm = tableRe.exec(html)) !== null && tables.length < 50) {
+      const tableHtml = tm[1];
+      const rows = tableHtml.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) ?? [];
+      const headers: string[] = [];
+      if (rows.length > 0) {
+        const firstRow = rows[0] ?? "";
+        let hm: RegExpExecArray | null;
+        tdRe.lastIndex = 0;
+        while ((hm = tdRe.exec(firstRow)) !== null && headers.length < 6) {
+          headers.push(hm[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+        }
+      }
+      tables.push({ tableIndex: idx++, rowCount: rows.length, headers });
+    }
+    return JSON.stringify({ ticker, documentUrl, tableCount: tables.length, tables });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
+  }
+}
+
+// ── get_filing_table ──────────────────────────────────────────────────────────
+
+export async function getFilingTable(ticker: string, documentUrl: string, tableIndex: number, maxRows: number = 30): Promise<string> {
+  try {
+    if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
+      return JSON.stringify({ error: true, message: "Invalid SEC URL" });
+    }
+    const resp = await fetch(documentUrl, { headers: { "User-Agent": "yahoo-finance-mcp/1.0 admin@example.com" } });
+    if (!resp.ok) return JSON.stringify({ error: true, message: `HTTP ${resp.status}` });
+    const html = await resp.text();
+
+    const tableRe = /<table[^>]*>([\s\S]*?)<\/table>/gi;
+    const tables: string[] = [];
+    let tm: RegExpExecArray | null;
+    while ((tm = tableRe.exec(html)) !== null) tables.push(tm[1]);
+
+    if (tableIndex >= tables.length) {
+      return JSON.stringify({ error: true, message: `Table index ${tableIndex} not found. Document has ${tables.length} tables.` });
+    }
+
+    const tdRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+    const tableHtml = tables[tableIndex];
+    const rowMatches = tableHtml.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) ?? [];
+    const parsedRows: string[][] = [];
+
+    for (let r = 0; r < Math.min(rowMatches.length, maxRows + 1); r++) {
+      const cells: string[] = [];
+      let cm: RegExpExecArray | null;
+      tdRe.lastIndex = 0;
+      while ((cm = tdRe.exec(rowMatches[r])) !== null && cells.length < 10) {
+        cells.push(cm[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+      }
+      parsedRows.push(cells);
+    }
+
+    return JSON.stringify({ ticker, tableIndex, totalRows: rowMatches.length, returnedRows: parsedRows.length, rows: parsedRows });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
+  }
+}
+
+// ── extract_filing_fact ───────────────────────────────────────────────────────
+
+export async function extractFilingFact(ticker: string, factName: string, _documentUrl: string | null, _accessionNumber: string | null): Promise<string> {
+  try {
+    const searchResult = JSON.parse(await searchFilingText(
+      ticker,
+      [factName],
+      null,
+      "10-K",
+      _accessionNumber,
+      1000,
+      true,
+    )) as Record<string, unknown>;
+    return JSON.stringify({
+      ticker, factName,
+      extractionMethod: "text_search",
+      result: searchResult,
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
   }
 }
