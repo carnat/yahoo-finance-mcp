@@ -2780,8 +2780,8 @@ async function edgarGetLatest10K(cik: number): Promise<{
 function stripHtmlTags(html: string): string {
   const sanitizedHtml = html
     .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script[^>]*>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style[^>]*>/gi, " ")
     .replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, " ");
   // Remove all HTML tags first, then decode entities in a single pass to avoid double-unescaping.
   const noTags = sanitizedHtml.replace(/<[^>]+>/g, " ");
@@ -2802,8 +2802,8 @@ function stripHtmlTags(html: string): string {
 function sanitizeFilingHtml(html: string): string {
   return html
     .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script[^>]*>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style[^>]*>/gi, " ")
     .replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, " ");
 }
 
