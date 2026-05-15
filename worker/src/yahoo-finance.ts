@@ -3251,14 +3251,18 @@ export async function getFilingData(
   filingType = "10-K",
   period = "latest",
 ): Promise<string> {
+  const FLOATING_POINT_EPSILON = 1e-9;
+  const RATIO_SCALE = 10000;
+  const PCT_SCALE = 100;
   const formatRawNumber = (n: number | null | undefined): string | null => {
     if (n == null || !Number.isFinite(n)) return null;
-    if (Math.abs(n - Math.round(n)) < 1e-9) return Math.round(n).toLocaleString("en-US");
+    if (Math.abs(n - Math.round(n)) < FLOATING_POINT_EPSILON) return Math.round(n).toLocaleString("en-US");
     return n.toLocaleString("en-US", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
   };
   const withGeoShape = (payload: Record<string, unknown>, addDenominatorWarning = false): string => {
     if (factType !== "geographic_revenue") return JSON.stringify(payload);
     const warnings = Array.isArray(payload.warnings) ? [...payload.warnings] : [];
+    const hasDenominator = payload.denominator != null;
     const shaped: Record<string, unknown> = {
       ticker: payload.ticker ?? ticker,
       factType: payload.factType ?? "geographic_revenue",
@@ -3270,8 +3274,8 @@ export async function getFilingData(
       unitScale: payload.unitScale ?? "actual",
       value: payload.value ?? null,
       denominator: payload.denominator ?? null,
-      valueRatio: payload.denominator == null ? null : (payload.valueRatio ?? null),
-      valuePct: payload.denominator == null ? null : (payload.valuePct ?? null),
+      valueRatio: hasDenominator ? (payload.valueRatio ?? null) : null,
+      valuePct: hasDenominator ? (payload.valuePct ?? null) : null,
       extractionMethod: payload.extractionMethod ?? "NONE",
       source: payload.source ?? "NOT_DISCLOSED",
       confidence: payload.confidence ?? "NOT_DISCLOSED",
@@ -3420,8 +3424,8 @@ export async function getFilingData(
       const partVal = Number(picked.val ?? 0);
       if (totalVal > 0) {
         denominator = totalVal;
-        valueRatio = Math.round((partVal / totalVal) * 10000) / 10000;
-        valuePct = Math.round(valueRatio * 10000) / 100;
+        valueRatio = Math.round((partVal / totalVal) * RATIO_SCALE) / RATIO_SCALE;
+        valuePct = Math.round(valueRatio * RATIO_SCALE) / PCT_SCALE;
       }
     }
   } else {
@@ -3466,7 +3470,7 @@ export async function getFilingData(
                     value: geo.usd ?? null,
                     denominator: geo.denominator ?? null,
                     valueRatio: geo.pct,
-                    valuePct: geo.denominator != null ? Math.round(geo.pct * 10000) / 100 : null,
+                    valuePct: geo.denominator != null ? Math.round(geo.pct * RATIO_SCALE) / PCT_SCALE : null,
                     extractionMethod: "PARSED_TABLE",
                     source: "PARSED_TABLE",
                     confidence: geo.denominator != null ? "HIGH" : "LOW",
@@ -3486,7 +3490,7 @@ export async function getFilingData(
                           formula: "value / denominator * 100",
                           valueSource: "sourceRows[0]",
                           denominatorSource: "sourceRows[1]",
-                          resultPct: Math.round(geo.pct * 10000) / 100,
+                          resultPct: Math.round(geo.pct * RATIO_SCALE) / PCT_SCALE,
                         }
                       : null,
                     warnings: [],

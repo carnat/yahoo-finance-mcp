@@ -3329,12 +3329,17 @@ async def get_filing_data(
     filing_type: str = "10-K",
     period: str = "latest",
 ) -> str:
+    FLOATING_POINT_EPSILON = 1e-9
+    RATIO_DECIMALS = 4
+    PCT_DECIMALS = 2
+    PCT_MULTIPLIER = 100
+
     def _format_raw_number(n: float | int | None) -> str | None:
         if n is None:
             return None
         try:
             f = float(n)
-            if abs(f - round(f)) < 1e-9:
+            if abs(f - round(f)) < FLOATING_POINT_EPSILON:
                 return f"{int(round(f)):,}"
             return f"{f:,.2f}"
         except Exception:
@@ -3376,10 +3381,11 @@ async def get_filing_data(
             "calculation": payload.get("calculation"),
             "warnings": list(payload.get("warnings", [])) if isinstance(payload.get("warnings"), list) else [],
         }
-        if shaped["denominator"] is None:
+        has_denominator = shaped["denominator"] is not None
+        if not has_denominator:
             shaped["valueRatio"] = None
             shaped["valuePct"] = None
-        if warn_denominator and shaped.get("value") is not None and shaped.get("denominator") is None:
+        if warn_denominator and shaped.get("value") is not None and not has_denominator:
             shaped["warnings"].append({
                 "code": "DENOMINATOR_NOT_FOUND",
                 "message": "Could not compute geographic revenue percentage due to missing denominator.",
@@ -3513,8 +3519,8 @@ async def get_filing_data(
             try:
                 if total_fact and float(total_fact.get("val", 0)) > 0:
                     denominator = float(total_fact.get("val", 0))
-                    value_ratio = round(float(picked.get("val", 0)) / denominator, 4)
-                    value_pct = round(value_ratio * 100, 2)
+                    value_ratio = round(float(picked.get("val", 0)) / denominator, RATIO_DECIMALS)
+                    value_pct = round(value_ratio * PCT_MULTIPLIER, PCT_DECIMALS)
             except Exception:
                 denominator = None
                 value_ratio = None
@@ -3583,7 +3589,7 @@ async def get_filing_data(
                                         "value": geo_usd,
                                         "denominator": geo_denominator,
                                         "valueRatio": geo_ratio,
-                                        "valuePct": round(float(geo_ratio) * 100, 2) if geo_ratio is not None else None,
+                                        "valuePct": round(float(geo_ratio) * PCT_MULTIPLIER, PCT_DECIMALS) if geo_ratio is not None else None,
                                         "extractionMethod": "PARSED_TABLE",
                                         "source": "PARSED_TABLE",
                                         "confidence": "HIGH" if geo_denominator is not None else "LOW",
@@ -3603,7 +3609,7 @@ async def get_filing_data(
                                                 "formula": "value / denominator * 100",
                                                 "valueSource": "sourceRows[0]",
                                                 "denominatorSource": "sourceRows[1]",
-                                                "resultPct": round(float(geo_ratio) * 100, 2),
+                                                "resultPct": round(float(geo_ratio) * PCT_MULTIPLIER, PCT_DECIMALS),
                                             }
                                             if geo_ratio is not None and geo_denominator is not None else None
                                         ),
@@ -5557,13 +5563,19 @@ def _extract_geo_revenue_from_html(
             "tableTitle": None,
             "sourceTableId": 1,
             "sourceRows": [
-                [str(rows[region_row_idx][0] if rows[region_row_idx] else region), str(rows[region_row_idx][value_col])],
-                [str(rows[total_row_idx][0] if rows[total_row_idx] else "Total revenue"), str(rows[total_row_idx][value_col])],
+                [
+                    str(rows[region_row_idx][0] if rows[region_row_idx] else region),
+                    str(rows[region_row_idx][value_col]) if value_col < len(rows[region_row_idx]) else "",
+                ],
+                [
+                    str(rows[total_row_idx][0] if rows[total_row_idx] else "Total revenue"),
+                    str(rows[total_row_idx][value_col]) if value_col < len(rows[total_row_idx]) else "",
+                ],
             ],
             "sourceColumns": [source_col] if source_col else [],
             "unitScale": unit_scale,
-            "rawValue": str(rows[region_row_idx][value_col]),
-            "rawDenominator": str(rows[total_row_idx][value_col]),
+            "rawValue": str(rows[region_row_idx][value_col]) if value_col < len(rows[region_row_idx]) else None,
+            "rawDenominator": str(rows[total_row_idx][value_col]) if value_col < len(rows[total_row_idx]) else None,
         }
         return ratio, region_usd, total_usd, heading, evidence
 
