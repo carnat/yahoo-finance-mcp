@@ -61,6 +61,8 @@ jobs:
 
       - name: Verify deployed MCP live discovery
         run: python scripts/test_deployed_discovery.py
+        env:
+          ALLOW_NETWORK_SKIP: "0"
 
       - name: Verify alias behavior
         run: python scripts/test_universal_aliases.py
