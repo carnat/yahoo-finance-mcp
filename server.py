@@ -1811,7 +1811,7 @@ async def get_fast_info(ticker: str | list[str]) -> str:
             "postMarketTime",
         ):
             val = info.get(key)
-            if val is not None:
+            if val is not None and val != {}:
                 data[key] = val
         # Market state fields (CR-03)
         data["marketOpen"] = info.get("marketState") == "REGULAR"
@@ -1840,6 +1840,9 @@ async def get_fast_info(ticker: str | list[str]) -> str:
 
     # timezone is always null via yfinance and not useful — omit to reduce noise
     data.pop("timezone", None)
+
+    # Normalize any empty-dict values (Yahoo API sometimes returns {} for missing scalars)
+    data = {k: (None if isinstance(v, dict) and not v else v) for k, v in data.items()}
 
     result = json.dumps(data)
     _cache_set(cache_key, result)
