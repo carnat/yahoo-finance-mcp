@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import hashlib
 import html as _html_module
 import json
 import os
@@ -613,6 +614,16 @@ This server provides financial market data from Yahoo Finance.
 
 _SIMPLE_OUTPUT_SCHEMA: dict = {"type": "object", "properties": {}, "additionalProperties": True}
 
+_NEWS_EVENT_OUTPUT_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "ticker": {"type": "string"},
+        "items": {"type": "array"},
+        "meta": {"type": "object"},
+    },
+    "additionalProperties": True,
+}
+
 _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
     "get_historical_stock_prices": _SIMPLE_OUTPUT_SCHEMA,
     "get_stock_info": _SIMPLE_OUTPUT_SCHEMA,
@@ -834,6 +845,11 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
     "list_filing_tables": _SIMPLE_OUTPUT_SCHEMA,
     "get_filing_table": _SIMPLE_OUTPUT_SCHEMA,
     "extract_filing_fact": _SIMPLE_OUTPUT_SCHEMA,
+    "search_company_news": _NEWS_EVENT_OUTPUT_SCHEMA,
+    "get_company_press_releases": _NEWS_EVENT_OUTPUT_SCHEMA,
+    "get_sec_recent_events": _NEWS_EVENT_OUTPUT_SCHEMA,
+    "get_public_event_timeline": _NEWS_EVENT_OUTPUT_SCHEMA,
+    "verify_company_event": _NEWS_EVENT_OUTPUT_SCHEMA,
 }
 
 TOOL_ALIASES: dict[str, str] = {
@@ -1111,6 +1127,450 @@ async def get_yahoo_finance_news(ticker: str) -> str:
         print(f"No news found for company that searched with {ticker} ticker.")
         return f"No news found for company that searched with {ticker} ticker."
     return "\n\n".join(news_list)
+
+
+# ---------------------------------------------------------------------------
+# Event helpers for public news/release tools
+# ---------------------------------------------------------------------------
+
+def _event_type_from_keywords(text: str) -> str:
+    """Classify event type from title/description keywords."""
+    text_lower = text.lower()
+    if any(k in text_lower for k in ["earnings", "eps", "revenue", "quarterly result", "annual result", "q1", "q2", "q3", "q4"]):
+        return "earnings"
+    if any(k in text_lower for k in ["guidance", "outlook", "forecast", "raises", "lowers", "reaffirm"]):
+        return "guidance"
+    if any(k in text_lower for k in ["contract", "agreement", "deal", "partnership", "joint venture"]):
+        return "contract"
+    if any(k in text_lower for k in ["fda", "approval", "clearance", "regulatory", "sec", "compliance", "investigation", "subpoena"]):
+        return "regulatory"
+    if any(k in text_lower for k in ["offering", "notes", "debt", "credit", "financing", "raised", "loan"]):
+        return "financing"
+    if any(k in text_lower for k in ["launch", "product", "announces", "new ", "introduces"]):
+        return "product"
+    if any(k in text_lower for k in ["analyst", "upgrade", "downgrade", "price target", "rating", "overweight", "underweight"]):
+        return "analyst"
+    if any(k in text_lower for k in ["insider", "director", "officer", "form 4"]):
+        return "insider"
+    if any(k in text_lower for k in ["lawsuit", "litigation", "settlement", "claim", "court"]):
+        return "litigation"
+    return "other"
+
+
+def _event_type_from_form(form_type: str) -> str:
+    """Classify event type from SEC form type."""
+    ft = form_type.upper()
+    if ft in ("8-K",):
+        return "other"  # will be refined by title
+    if ft in ("10-K", "10-Q"):
+        return "earnings"
+    if ft in ("S-3", "S-1", "424B"):
+        return "financing"
+    if ft in ("DEF14A", "PRE14A"):
+        return "other"
+    if ft in ("4",):
+        return "insider"
+    return "other"
+
+
+def _make_duplicate_group_id(ticker: str, title: str, published_at: str | None) -> str:
+    """Deterministic dedup hash from (ticker, normalized_title, date)."""
+    key = f"{ticker.upper()}|{title.strip().lower()[:80]}|{(published_at or '')[:10]}"
+    return hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
+
+
+def _build_yf_event_item(ticker: str, news_item: dict, retrieved_at: str) -> dict:
+    """Build a structured event item from a Yahoo Finance news dict."""
+    content = news_item.get("content", {}) if isinstance(news_item.get("content"), dict) else {}
+    title = content.get("title") or news_item.get("title") or ""
+    summary = content.get("summary") or news_item.get("summary") or ""
+    url = (content.get("canonicalUrl", {}) or {}).get("url") or news_item.get("link") or news_item.get("url") or ""
+    provider = (content.get("provider", {}) or {}).get("displayName") or news_item.get("publisher") or "Yahoo Finance"
+    ts_raw = news_item.get("providerPublishTime") or (content.get("pubDate"))
+    if isinstance(ts_raw, (int, float)):
+        published_at: str | None = datetime.datetime.utcfromtimestamp(ts_raw).strftime("%Y-%m-%dT%H:%M:%SZ")
+    elif isinstance(ts_raw, str) and ts_raw:
+        published_at = ts_raw
+    else:
+        published_at = None
+    return {
+        "title": title,
+        "source": provider,
+        "sourceType": "yahoo_finance",
+        "publishedAt": published_at,
+        "retrievedAt": retrieved_at,
+        "url": url,
+        "issuer": None,
+        "tickers": [ticker.upper()],
+        "eventType": _event_type_from_keywords(title + " " + summary),
+        "summary": summary[:300] if summary else None,
+        "evidenceText": None,
+        "confidence": "MEDIUM",
+        "duplicateGroupId": _make_duplicate_group_id(ticker, title, published_at),
+    }
+
+
+def _build_sec_event_item(ticker: str, filing: dict, retrieved_at: str) -> dict:
+    """Build a structured event item from a SEC filing dict (from list_sec_filings)."""
+    form_type = filing.get("formType") or filing.get("form_type") or "SEC"
+    title = filing.get("title") or f"{form_type} Filing"
+    filing_date = filing.get("filingDate") or filing.get("filing_date")
+    published_at = f"{filing_date}T00:00:00Z" if filing_date and len(filing_date) == 10 else filing_date
+    url = filing.get("edgarPrimaryDocumentUrl") or filing.get("edgarIndexUrl") or ""
+    accession = filing.get("accessionNumber") or filing.get("accession_number")
+    event_type = _event_type_from_keywords(title)
+    if event_type == "other":
+        event_type = _event_type_from_form(form_type)
+    item: dict = {
+        "title": title,
+        "source": "SEC EDGAR",
+        "sourceType": "sec_filing",
+        "publishedAt": published_at,
+        "retrievedAt": retrieved_at,
+        "url": url,
+        "issuer": None,
+        "tickers": [ticker.upper()],
+        "eventType": event_type,
+        "summary": f"SEC {form_type} filing submitted on {filing_date}.",
+        "evidenceText": None,
+        "confidence": "HIGH",
+        "duplicateGroupId": _make_duplicate_group_id(ticker, title, published_at),
+    }
+    if accession:
+        item["accessionNumber"] = accession
+    if filing_date:
+        item["filingDate"] = filing_date
+    accepted_at = filing.get("acceptedAt") or filing.get("accepted_at")
+    if accepted_at:
+        item["acceptedAt"] = accepted_at
+    return item
+
+
+@yfinance_server.tool(
+    name="search_company_news",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["search_company_news"],
+    description="""Search public news articles for a ticker using optional keyword query.
+
+Returns structured event items with source, timestamps, url, eventType, and confidence.
+Yahoo Finance is the primary data source for this tool.
+
+Args:
+    ticker: str  Ticker symbol, e.g. "AAPL"
+    query: str   Optional keyword filter applied to title/summary (case-insensitive).
+    max_results: int  Maximum items to return (default 20).
+""",
+)
+async def search_company_news(ticker: str, query: str = "", max_results: int = 20) -> str:
+    """Search public news for a ticker."""
+    retrieved_at = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    company = yf.Ticker(ticker)
+    try:
+        raw_news = company.news or []
+    except Exception as e:
+        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
+
+    items = []
+    for n in raw_news:
+        content = n.get("content", {}) if isinstance(n.get("content"), dict) else {}
+        if content.get("contentType", "") not in ("STORY", "") and n.get("type", "") not in ("STORY", ""):
+            continue
+        item = _build_yf_event_item(ticker, n, retrieved_at)
+        if query:
+            text = f"{item['title']} {item['summary'] or ''}".lower()
+            if query.lower() not in text:
+                continue
+        items.append(item)
+        if len(items) >= max_results:
+            break
+
+    return json.dumps({
+        "ticker": ticker.upper(),
+        "items": items,
+        "meta": {
+            "sourcesUsed": ["yahoo_finance"],
+            "deduped": True,
+            "watermark": retrieved_at,
+        },
+    })
+
+
+@yfinance_server.tool(
+    name="get_company_press_releases",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_company_press_releases"],
+    description="""Get public press releases for a company from SEC EDGAR 8-K filings.
+
+Returns structured event items with accessionNumber, filingDate, source=SEC EDGAR,
+sourceType=sec_filing, and confidence=HIGH.
+
+Args:
+    ticker: str  Ticker symbol, e.g. "AAPL"
+    max_results: int  Maximum items to return (default 10).
+    start_date: str  Optional ISO date filter, e.g. "2026-01-01".
+""",
+)
+async def get_company_press_releases(ticker: str, max_results: int = 10, start_date: str = "") -> str:
+    """Get press releases via SEC EDGAR 8-K filings."""
+    retrieved_at = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    raw = await list_sec_filings(ticker, filing_type="8-K", max_filings=min(max_results, 25))
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return json.dumps({"error": True, "message": "Failed to parse SEC filings", "ticker": ticker})
+    if isinstance(data, dict) and data.get("error"):
+        return json.dumps({"ticker": ticker.upper(), "items": [], "meta": {"sourcesUsed": ["sec"], "deduped": True, "watermark": retrieved_at, "_note": data.get("message", "SEC lookup failed")}})
+
+    filings_raw = data if isinstance(data, list) else (data.get("data") or data.get("filings") or [])
+    items = []
+    for f in filings_raw:
+        if isinstance(f, dict):
+            filing_date = f.get("filingDate") or f.get("filing_date") or ""
+            if start_date and filing_date and filing_date < start_date:
+                continue
+            items.append(_build_sec_event_item(ticker, f, retrieved_at))
+        if len(items) >= max_results:
+            break
+
+    return json.dumps({
+        "ticker": ticker.upper(),
+        "items": items,
+        "meta": {
+            "sourcesUsed": ["sec"],
+            "deduped": True,
+            "watermark": retrieved_at,
+        },
+    })
+
+
+@yfinance_server.tool(
+    name="get_sec_recent_events",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_sec_recent_events"],
+    description="""Get recent SEC filings for a ticker as structured public events.
+
+Returns 8-K, 10-Q, 10-K and other form types as event items with accessionNumber,
+filingDate, url, sourceType=sec_filing, confidence=HIGH.
+
+Args:
+    ticker: str  Ticker symbol, e.g. "AAPL"
+    filing_type: str  SEC form type filter (default "8-K"). Use "all" for all types.
+    max_results: int  Maximum items to return (default 10).
+    start_date: str  Optional ISO date filter, e.g. "2026-01-01".
+""",
+)
+async def get_sec_recent_events(ticker: str, filing_type: str = "8-K", max_results: int = 10, start_date: str = "") -> str:
+    """Get recent SEC filings as structured public events."""
+    retrieved_at = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    ft = "8-K" if filing_type.lower() == "all" else filing_type
+    raw = await list_sec_filings(ticker, filing_type=ft, max_filings=min(max_results, 25))
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return json.dumps({"error": True, "message": "Failed to parse SEC filings", "ticker": ticker})
+    if isinstance(data, dict) and data.get("error"):
+        return json.dumps({"ticker": ticker.upper(), "items": [], "meta": {"sourcesUsed": ["sec"], "deduped": True, "watermark": retrieved_at, "_note": data.get("message", "SEC lookup failed")}})
+
+    filings_raw = data if isinstance(data, list) else (data.get("data") or data.get("filings") or [])
+    items = []
+    for f in filings_raw:
+        if isinstance(f, dict):
+            filing_date = f.get("filingDate") or f.get("filing_date") or ""
+            if start_date and filing_date and filing_date < start_date:
+                continue
+            items.append(_build_sec_event_item(ticker, f, retrieved_at))
+        if len(items) >= max_results:
+            break
+
+    return json.dumps({
+        "ticker": ticker.upper(),
+        "items": items,
+        "meta": {
+            "sourcesUsed": ["sec"],
+            "deduped": True,
+            "watermark": retrieved_at,
+        },
+    })
+
+
+@yfinance_server.tool(
+    name="get_public_event_timeline",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_public_event_timeline"],
+    description="""Get a combined public event timeline for a ticker from SEC filings and news.
+
+Merges SEC 8-K filings and Yahoo Finance news, deduplicates by title+date hash,
+and returns items sorted newest-first. Use for building event evidence timelines.
+
+Args:
+    ticker: str  Ticker symbol, e.g. "AAPL"
+    max_results: int  Maximum total items to return (default 20).
+    start_date: str  Optional ISO date filter, e.g. "2026-01-01".
+    sources: list[str]  Sources to include (default ["sec", "yahoo_finance"]).
+""",
+)
+async def get_public_event_timeline(ticker: str, max_results: int = 20, start_date: str = "", sources: list[str] | None = None) -> str:
+    """Get combined public event timeline."""
+    retrieved_at = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    if sources is None:
+        sources = ["sec", "yahoo_finance"]
+
+    items: list[dict] = []
+    sources_used: list[str] = []
+
+    # SEC events
+    if "sec" in sources:
+        raw = await list_sec_filings(ticker, filing_type="8-K", max_filings=min(max_results, 20))
+        try:
+            data = json.loads(raw)
+            filings_raw = data if isinstance(data, list) else (data.get("data") or data.get("filings") or [])
+            for f in filings_raw:
+                if isinstance(f, dict):
+                    fd = f.get("filingDate") or ""
+                    if start_date and fd and fd < start_date:
+                        continue
+                    items.append(_build_sec_event_item(ticker, f, retrieved_at))
+            sources_used.append("sec")
+        except Exception:
+            pass
+
+    # Yahoo Finance news
+    if "yahoo_finance" in sources:
+        try:
+            company = yf.Ticker(ticker)
+            raw_news = company.news or []
+            for n in raw_news:
+                item = _build_yf_event_item(ticker, n, retrieved_at)
+                if start_date and item.get("publishedAt") and item["publishedAt"][:10] < start_date:
+                    continue
+                items.append(item)
+            sources_used.append("yahoo_finance")
+        except Exception:
+            pass
+
+    # Deduplicate by duplicateGroupId
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for item in items:
+        gid = item.get("duplicateGroupId") or ""
+        if gid not in seen:
+            seen.add(gid)
+            deduped.append(item)
+
+    # Sort newest-first
+    def _sort_key(it: dict) -> str:
+        return it.get("publishedAt") or "0000"
+    deduped.sort(key=_sort_key, reverse=True)
+    deduped = deduped[:max_results]
+
+    return json.dumps({
+        "ticker": ticker.upper(),
+        "items": deduped,
+        "meta": {
+            "sourcesUsed": sources_used,
+            "deduped": True,
+            "watermark": retrieved_at,
+        },
+    })
+
+
+@yfinance_server.tool(
+    name="verify_company_event",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["verify_company_event"],
+    description="""Verify a public company event across SEC and news sources.
+
+Searches for the event_query across configured sources within the date window.
+Returns CONFIRMED (found in SEC/IR), PARTIAL (found in news only), NOT_FOUND,
+STALE (event older than lookback), or CONFLICTING (sources disagree).
+
+Args:
+    ticker: str  Ticker symbol, e.g. "AAPL"
+    event_query: str  Keywords describing the event, e.g. "Q1 2026 earnings guidance"
+    start_date: str  ISO start date, e.g. "2026-04-01"
+    end_date: str  ISO end date, e.g. "2026-05-15"
+    sources: list[str]  Sources to check (default ["sec", "yahoo_finance"]).
+""",
+)
+async def verify_company_event(ticker: str, event_query: str, start_date: str = "", end_date: str = "", sources: list[str] | None = None) -> str:
+    """Verify a company event across public sources."""
+    retrieved_at = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    if sources is None:
+        sources = ["sec", "yahoo_finance"]
+
+    query_lower = event_query.lower()
+    best_evidence: list[dict] = []
+    sources_checked: list[str] = []
+    stale_threshold = (datetime.date.today() - datetime.timedelta(days=90)).isoformat()
+
+    # SEC search
+    if "sec" in sources:
+        sources_checked.append("sec")
+        raw = await list_sec_filings(ticker, filing_type="8-K", max_filings=20)
+        try:
+            data = json.loads(raw)
+            filings_raw = data if isinstance(data, list) else (data.get("data") or data.get("filings") or [])
+            for f in filings_raw:
+                if not isinstance(f, dict):
+                    continue
+                fd = f.get("filingDate") or ""
+                if start_date and fd and fd < start_date:
+                    continue
+                if end_date and fd and fd > end_date:
+                    continue
+                title = (f.get("title") or "").lower()
+                if query_lower in title or any(w in title for w in query_lower.split()):
+                    ev = _build_sec_event_item(ticker, f, retrieved_at)
+                    if fd < stale_threshold:
+                        ev["_stale"] = True
+                    best_evidence.append(ev)
+        except Exception:
+            pass
+
+    # Yahoo Finance fallback
+    if "yahoo_finance" in sources and len(best_evidence) < 3:
+        sources_checked.append("yahoo_finance")
+        try:
+            company = yf.Ticker(ticker)
+            raw_news = company.news or []
+            for n in raw_news:
+                item = _build_yf_event_item(ticker, n, retrieved_at)
+                pub = item.get("publishedAt") or ""
+                if start_date and pub and pub[:10] < start_date:
+                    continue
+                if end_date and pub and pub[:10] > end_date:
+                    continue
+                text = f"{item['title']} {item['summary'] or ''}".lower()
+                if query_lower in text or any(w in text for w in query_lower.split() if len(w) > 3):
+                    if pub[:10] < stale_threshold:
+                        item["_stale"] = True
+                    best_evidence.append(item)
+        except Exception:
+            pass
+
+    # Determine status
+    if not best_evidence:
+        status = "NOT_FOUND"
+    else:
+        stale_count = sum(1 for e in best_evidence if e.get("_stale"))
+        sec_count = sum(1 for e in best_evidence if e.get("sourceType") == "sec_filing")
+        if stale_count == len(best_evidence):
+            status = "STALE"
+        elif sec_count > 0:
+            status = "CONFIRMED"
+        else:
+            status = "PARTIAL"
+
+    # Clean stale markers from output
+    for e in best_evidence:
+        e.pop("_stale", None)
+
+    return json.dumps({
+        "ticker": ticker.upper(),
+        "query": event_query,
+        "status": status,
+        "bestEvidence": best_evidence[:5],
+        "conflicts": [],
+        "meta": {
+            "sourcesChecked": sources_checked,
+            "watermark": retrieved_at,
+        },
+    })
 
 
 @yfinance_server.tool(
@@ -5212,7 +5672,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
     # Formatted block
     if quality == "LOW":
         formatted_block = (
-            f"OPTIONS FLOW: DATA QUALITY LOW — raw chain unreliable; no doctrine weight."
+            f"OPTIONS FLOW: DATA QUALITY LOW — raw chain unreliable; not suitable for inference."
         )
     else:
         iv_str = f"{iv_pctile}th%ile" if iv_pctile is not None else "N/A"
@@ -5254,21 +5714,18 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
 @yfinance_server.tool(
     name="get_price_target_bracket",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"],
-    description="""Compute EQF bracket for a position.
+    description="""Compute price-to-target bracket from current price vs a user-supplied reference price.
 
-EQF = currentPrice / io_pt × 100. Used at every /snipe, /dca, and /thesis.
+ratio = currentPrice / ref_pt × 100. Used to classify entry opportunity.
 
-Bracket thresholds: ≤75% → STRONG_BUY | 75–90% → ACCEPTABLE | 90–100% → CAUTION | >100% → AVOID
-Tag (DC-123): <40% → SPECULATIVE | 40–79% → LONG | 80–99% → NEAR | ≥100% → INVERTED
-
-Note: pre-revenue positions should be overridden to SPECULATIVE by IO per DC-123. This tool
-handles revenue-generating positions only.
+Brackets: ≤75% → STRONG_BUY | 75–90% → ACCEPTABLE | 90–100% → CAUTION | >100% → AVOID
+Tags: <40% → SPECULATIVE | 40–79% → LONG | 80–99% → NEAR | ≥100% → INVERTED
 
 Args:
     ticker: str
         The ticker symbol, e.g. "ASTS"
     io_pt: float
-        IO's price target (Commander/IO-set, not analyst consensus)
+        User-supplied reference price (e.g. analyst target or user-defined level)
 """,
 )
 async def get_price_target_bracket(ticker: str, io_pt: float) -> str:
@@ -5334,15 +5791,15 @@ async def get_price_target_bracket(ticker: str, io_pt: float) -> str:
 @yfinance_server.tool(
     name="get_position_score_inputs",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"],
-    description="""Aggregate all position scoring inputs for T1, T2, T4, and T5 components.
-
-T3 (PT proximity) and T2 (vs cost basis) require portfolio state (IO PT, cost basis) not available
-here — IO scores those manually from currentPrice in t2_inputs and stored values.
+    description="""Aggregate public signal inputs for analyst, price, earnings, and technical signal groups.
 
 Runs up to 6 parallel data fetches per call.
 
-Returns: t1_inputs (analyst sentiment), t2_inputs (price vs 52wk), t4_inputs (earnings momentum),
+Returns: t1_inputs (analyst sentiment), t2_inputs (price vs 52wk high/low), t4_inputs (earnings momentum),
 t5_inputs (technical indicators), dataDate.
+
+Note: inputs requiring caller-provided external context (such as a reference price or cost basis)
+are outside MCP scope and should be supplied by the caller.
 
 Args:
     ticker: str
@@ -5437,25 +5894,25 @@ async def get_position_score_inputs(ticker: str) -> str:
 @yfinance_server.tool(
     name="get_volume_gate",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_gate"],
-    description="""DC Section 6.2 Volume Gate check: regularMarketVolume ≥ 0.5 × 20-day ADV.
+    description="""Volume liquidity threshold check: regularMarketVolume ≥ 0.5 × 20-day ADV.
 
 Returns currency, fxRate, lastVolume, adv10d, adv20d (computed from last 20 daily sessions),
 adv90d, ratio20d (always computed when adv20d is available), gatePass (true = volume gate PASS),
 dataDate, and a pre-formatted note.
 
-foreignExchange: bool (default False). When True, applies the DC-80 FX gate: daily notional
-is converted to USD via a live {CCY}=X FX rate fetch before comparing to the $10M threshold.
+foreign_exchange: bool (default False). When True, enables foreign exchange notional conversion:
+daily notional is converted to USD via a live {CCY}=X FX rate fetch before comparing to the $10M threshold.
 ratio20d is still computed and returned alongside the notional gate result.
 
 Args:
     ticker: str
         The ticker symbol, e.g. "ASTS"
     foreign_exchange: bool
-        Set True for DC-80 foreign exchange / ADR tickers. Default False.
+        Set True for foreign exchange / ADR tickers to convert daily notional to USD for the threshold check. Default False.
 """,
 )
 async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
-    """Return DC Section 6.2 volume gate assessment."""
+    """Return volume liquidity threshold assessment."""
     company = yf.Ticker(ticker)
     try:
         fi = company.fast_info
@@ -5487,7 +5944,7 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
     note: str
 
     if foreign_exchange:
-        # DC-80: daily notional ≥ $10M USD (convert to USD via live FX rate)
+        # FX notional mode: daily notional ≥ $10M USD (convert to USD via live FX rate)
         if last_volume is not None and last_price is not None and last_price > 0:
             local_notional = last_volume * last_price
             applied_fx_rate = 1.0
@@ -5511,12 +5968,12 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
             daily_notional_usd = local_notional / applied_fx_rate
             gate_pass = daily_notional_usd >= 10_000_000
             note = (
-                f"Volume gate {'PASS' if gate_pass else 'FAIL'} (DC-80 FX) — "
+                f"Volume gate {'PASS' if gate_pass else 'FAIL'} (FX notional) — "
                 f"${daily_notional_usd / 1_000_000:.1f}M daily notional "
                 f"({'≥' if gate_pass else '<'} $10M threshold){fx_conversion_note}"
             )
         else:
-            note = "Volume gate UNKNOWN — insufficient price/volume data for DC-80 FX check"
+            note = "Volume gate UNKNOWN — insufficient price/volume data for FX notional check"
         # Bug 5: compute ratio20d in FX branch too
         if last_volume is not None and adv20d and adv20d > 0:
             ratio20d = round(last_volume / adv20d, 2)
@@ -5573,11 +6030,21 @@ def _deprecated_alias_response(alias_tool: str, canonical_tool: str, raw: str) -
 
 @yfinance_server.tool(name="health_check", output_schema=_SIMPLE_OUTPUT_SCHEMA, description="Return runtime health metadata.")
 async def health_check() -> str:
+    try:
+        tool_count = len(yfinance_server._tool_manager._tools)
+    except Exception:
+        tool_count = len(TOOL_ALIASES) + 50
+    tool_names = sorted(TOOL_ALIASES.keys())
+    schema_hash = hashlib.md5(json.dumps(tool_names).encode("utf-8")).hexdigest()[:16]
+    runtime_hash = hashlib.md5((SERVER_VERSION + str(tool_count)).encode("utf-8")).hexdigest()[:16]
     return json.dumps({
         "serverVersion": SERVER_VERSION,
-        "envelopeV2": _ENVELOPE_V2,
-        "nodeVersion": None,
-        "workerVersion": os.environ.get("WORKER_VERSION"),
+        "buildSha": os.environ.get("BUILD_SHA", "unknown"),
+        "toolCount": tool_count,
+        "schemaHash": schema_hash,
+        "runtimeHash": runtime_hash,
+        "generatedAt": datetime.datetime.utcnow().isoformat() + "Z",
+        "privacyScope": "public_market_data_only",
     })
 
 

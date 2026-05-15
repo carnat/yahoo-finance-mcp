@@ -2,7 +2,7 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that gives any MCP-compatible AI client (Claude, Cursor, VS Code Copilot, etc.) direct access to live financial data from Yahoo Finance.
 
-36 tools cover the full research workflow — from a quick price check to earnings forecasts, SEC filings, technical indicators, options flow, geographic revenue intelligence, and market screening — without leaving your chat window.
+36 tools (40+ including aliases) cover the full research workflow — from a quick price check to earnings forecasts, SEC filings, technical indicators, options flow, geographic revenue intelligence, and market screening — without leaving your chat window.
 
 ## Demo
 
@@ -24,7 +24,7 @@ The server exposes the following tools through the Model Context Protocol:
 | `check_volume_liquidity_threshold` | `get_adv_gate` |
 | `analyze_options_flow_window` | `get_dc134_options_scan` |
 
-Doctrine/internal names are maintained as aliases for migration but are not preferred in new integrations.
+Older names are maintained as aliases for migration but are not preferred in new integrations.
 
 ### Price & Market Data
 
@@ -90,8 +90,18 @@ Doctrine/internal names are maintained as aliases for migration but are not pref
 | Tool | Description |
 |------|-------------|
 | `calculate_price_target_distance` | Compute price-target distance (alias: `get_price_target_bracket`). |
-| `analyze_position_signals` | Aggregate T1/T2/T4/T5 position-scoring inputs (alias: `get_position_score_inputs`). |
+| `analyze_position_signals` | Aggregate position-scoring inputs in one call (alias: `get_position_score_inputs`). |
 | `check_volume_liquidity_threshold` | Volume liquidity threshold assessment (alias: `get_volume_gate`). |
+
+### Public News & Events
+
+| Tool | Description |
+|------|-------------|
+| `search_company_news` | Search public Yahoo Finance news for a ticker with optional keyword filter. Returns structured event items. |
+| `get_company_press_releases` | Get 8-K press releases from SEC EDGAR as structured public events (confidence: HIGH). |
+| `get_sec_recent_events` | Get recent SEC filings (any form type) as structured public events. |
+| `get_public_event_timeline` | Combined deduplicated timeline from SEC filings + Yahoo Finance news, sorted newest-first. |
+| `verify_company_event` | Cross-validate a company event across SEC EDGAR and news; returns CONFIRMED / PARTIAL / NOT_FOUND. |
 
 ### Technical Analysis
 
@@ -101,6 +111,20 @@ Doctrine/internal names are maintained as aliases for migration but are not pref
 | `get_price_slope` | **Pre-computed.** Get N-day price slope (% change) and direction (UP/DOWN/FLAT) for one or more tickers. Args: `days` (default: 5). Supports batch. |
 | `get_volume_ratio` | **Pre-computed.** Get last-session volume vs 10-day and 90-day average volume ratios, with a volumeFlag (HIGH/NORMAL/LOW). Args: `period` (default: 10). Supports batch. |
 | `get_ma_position` | **Pre-computed.** Get price position vs 50DMA and 200DMA with % distance and trend classification (BULLISH/BEARISH/MIXED). Supports batch. |
+
+## Privacy & Scope
+
+All tools in this server operate exclusively on **publicly available** data:
+
+- **Yahoo Finance** — public market data, news, analyst estimates, options data.
+- **SEC EDGAR** — public filings (10-K, 10-Q, 8-K, proxy statements, etc.) via the official EDGAR API.
+
+No private portfolio data, user accounts, or proprietary datasets are accessed.  
+Tool descriptions use neutral public terminology. Deprecated alias names that referenced internal naming schemes are preserved for backward compatibility only — prefer the canonical names for new integrations.
+
+### Audit endpoint
+
+The worker exposes a `GET /audit/mcp` endpoint that returns tool count, manifest hash, build SHA, and privacy scope metadata. If the `AUDIT_TOKEN` environment variable is set, requests must include `Authorization: Bearer <token>`.
 
 ## Data Availability Notes
 

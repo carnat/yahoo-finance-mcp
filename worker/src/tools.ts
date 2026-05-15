@@ -42,6 +42,11 @@ import {
   listFilingTables,
   getFilingTable,
   extractFilingFact,
+  searchCompanyNews,
+  getCompanyPressReleases,
+  getSecRecentEvents,
+  getPublicEventTimeline,
+  verifyCompanyEvent,
 } from "./yahoo-finance.js";
 
 export interface Tool {
@@ -370,7 +375,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_calendar",
     description:
-      "Get upcoming earnings and dividend schedule for a ticker: next earnings date range, EPS/revenue consensus estimates, ex-dividend date, and dividend pay date. Also returns earningsDateConfirmed (true = single fixed date from IR, false = analyst estimate range) and earningsDateSource ('IR_FILING' | 'ESTIMATE' | 'UNKNOWN'). DC-149 PCCE Rule 9 requires earningsDateConfirmed=true before entry.",
+      "Get upcoming earnings and dividend schedule for a ticker: next earnings date range, EPS/revenue consensus estimates, ex-dividend date, and dividend pay date. Also returns earningsDateConfirmed (true = single fixed date from IR, false = analyst estimate range) and earningsDateSource ('IR_FILING' | 'ESTIMATE' | 'UNKNOWN'). Use earningsDateConfirmed to distinguish a confirmed single date (from IR/filing) vs an estimated date range.",
     inputSchema: {
       type: "object",
       properties: {
@@ -742,12 +747,12 @@ export const TOOLS: Tool[] = [
   {
     name: "get_price_target_bracket",
     description:
-      "Compute EQF bracket for a position. EQF = currentPrice / io_pt × 100. Brackets: ≤75% STRONG_BUY | 75–90% ACCEPTABLE | 90–100% CAUTION | >100% AVOID. Tags: <40% SPECULATIVE | 40–79% LONG | 80–99% NEAR | ≥100% INVERTED. Returns currentPrice, ioPt, eqfPct, bracket, tag, invertedFlag, dataDate.",
+      "Compute price-to-target bracket from current price vs a user-supplied reference price. ratio = currentPrice / ref_pt × 100. Brackets: ≤75% STRONG_BUY | 75–90% ACCEPTABLE | 90–100% CAUTION | >100% AVOID. Tags: <40% SPECULATIVE | 40–79% LONG | 80–99% NEAR | ≥100% INVERTED. Returns currentPrice, ioPt, eqfPct, bracket, tag, invertedFlag, dataDate.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
-        io_pt: { type: "number", description: "IO price target (Commander/IO-set, not analyst consensus)" },
+        io_pt: { type: "number", description: "User-supplied reference price (e.g. analyst target or user-defined level)" },
       },
       required: ["ticker", "io_pt"],
     },
@@ -755,7 +760,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_position_score_inputs",
     description:
-      "Aggregate all position scoring inputs for T1, T2, T4, and T5 in a single call. T3 (PT proximity) and T2 (vs cost basis) require portfolio state — IO scores those manually. Runs 6 parallel data fetches. Returns t1_inputs (analyst sentiment), t2_inputs (price vs 52wk), t4_inputs (earnings momentum), t5_inputs (technical indicators), dataDate.",
+      "Aggregate public signal inputs for analyst, price, earnings, and technical signal groups in a single call. Runs 6 parallel data fetches. Returns t1_inputs (analyst sentiment), t2_inputs (price vs 52wk high/low), t4_inputs (earnings momentum), t5_inputs (technical indicators), dataDate. Inputs requiring caller-provided external context are outside MCP scope.",
     inputSchema: {
       type: "object",
       properties: {
@@ -767,14 +772,14 @@ export const TOOLS: Tool[] = [
   {
     name: "get_volume_gate",
     description:
-      "DC Section 6.2 Volume Gate: checks regularMarketVolume ≥ 0.5 × 20-day ADV. Returns currency, fxRate, lastVolume, adv10d, adv20d (computed from last 20 sessions), adv90d, ratio20d, gatePass (true = PASS), dataDate, note. Set foreign_exchange=true for DC-80 FX gate: daily notional is converted to USD via live {CCY}=X rate before comparing to the $10M threshold. ratio20d is always computed when adv20d is available.",
+      "Volume liquidity threshold check: regularMarketVolume ≥ 0.5 × 20-day ADV. Returns currency, fxRate, lastVolume, adv10d, adv20d (computed from last 20 sessions), adv90d, ratio20d, gatePass (true = PASS), dataDate, note. Set foreign_exchange=true to enable foreign exchange notional conversion: daily notional is converted to USD via live {CCY}=X rate before comparing to the $10M threshold. ratio20d is always computed when adv20d is available.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
         foreign_exchange: {
           type: "boolean",
-          description: "Set true for DC-80 FX/ADR tickers to use $10M notional threshold. Default false.",
+          description: "Set true for foreign exchange / ADR tickers to convert daily notional to USD for the $10M threshold check. Default false.",
           default: false,
         },
       },
@@ -954,6 +959,11 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "analyze_position_signals", description: "Analyze position scoring signals.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
   { name: "calculate_price_target_distance", description: "Calculate price target distance.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, io_pt: { type: "number" } }, required: ["ticker", "io_pt"] } },
   { name: "get_company_news", description: "Get company news.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+  { name: "search_company_news", description: "Search public news articles for a ticker using optional keyword query. Returns structured event items with source, sourceType, publishedAt, retrievedAt, url, eventType, confidence, and duplicateGroupId. Yahoo Finance is the data source.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Ticker symbol, e.g. 'AAPL'" }, query: { type: "string", description: "Optional keyword filter applied to title/summary (case-insensitive).", default: "" }, max_results: { type: "number", description: "Maximum items to return.", default: 20 } }, required: ["ticker"] } },
+  { name: "get_company_press_releases", description: "Get public press releases from SEC EDGAR 8-K filings. Returns structured event items with accessionNumber, filingDate, source=SEC EDGAR, sourceType=sec_filing, confidence=HIGH.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, max_results: { type: "number", default: 10 }, start_date: { type: "string", description: "ISO date filter, e.g. '2026-01-01'", default: "" } }, required: ["ticker"] } },
+  { name: "get_sec_recent_events", description: "Get recent SEC filings as structured public events. Returns 8-K and other form types as event items with accessionNumber, filingDate, url, sourceType=sec_filing, confidence=HIGH.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", description: "SEC form type filter, e.g. '8-K', '10-K'. Use 'all' for mixed.", default: "8-K" }, max_results: { type: "number", default: 10 }, start_date: { type: "string", default: "" } }, required: ["ticker"] } },
+  { name: "get_public_event_timeline", description: "Get a combined public event timeline for a ticker from SEC filings and Yahoo Finance news. Items are deduplicated by title+date hash and sorted newest-first.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, max_results: { type: "number", default: 20 }, start_date: { type: "string", default: "" }, sources: { type: "array", items: { type: "string" }, description: "Sources to include. Supported: 'sec', 'yahoo_finance'.", default: ["sec", "yahoo_finance"] } }, required: ["ticker"] } },
+  { name: "verify_company_event", description: "Verify a public company event across SEC EDGAR and news sources. Returns CONFIRMED (SEC evidence), PARTIAL (news only), NOT_FOUND, STALE, or CONFLICTING. Best evidence items include source, timestamps, url, and confidence.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, event_query: { type: "string", description: "Keywords describing the event, e.g. 'Q1 2026 earnings guidance'" }, start_date: { type: "string", default: "" }, end_date: { type: "string", default: "" }, sources: { type: "array", items: { type: "string" }, default: ["sec", "yahoo_finance"] } }, required: ["ticker", "event_query"] } },
   { name: "health_check", description: "Return runtime and deployment health metadata.", inputSchema: { type: "object", properties: {} } },
 ];
 
@@ -1312,6 +1322,12 @@ const num = (v: unknown, fallback: number): number => (typeof v === "number" ? v
 const tickerArg = (v: unknown): string | string[] =>
   Array.isArray(v) ? v.map(String) : str(v);
 
+async function computeHash(data: string): Promise<string> {
+  const encoded = new TextEncoder().encode(data);
+  const buf = await crypto.subtle.digest("SHA-256", encoded);
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
 async function resolveSecDocumentUrl(
   ticker: string,
   filingType: string,
@@ -1549,13 +1565,35 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       return getPositionScoreInputs(tickerArg(args.ticker));
     case "check_volume_liquidity_threshold":
       return getVolumeGate(str(args.ticker), args.foreign_exchange === true);
-    case "health_check":
+    case "search_company_news":
+      return searchCompanyNews(str(args.ticker), str(args.query, ""), num(args.max_results, 20));
+    case "get_company_press_releases":
+      return getCompanyPressReleases(str(args.ticker), num(args.max_results, 10), str(args.start_date, ""));
+    case "get_sec_recent_events":
+      return getSecRecentEvents(str(args.ticker), str(args.filing_type, "8-K"), num(args.max_results, 10), str(args.start_date, ""));
+    case "get_public_event_timeline":
+      return getPublicEventTimeline(str(args.ticker), num(args.max_results, 20), str(args.start_date, ""), Array.isArray(args.sources) ? args.sources.map(String) : ["sec", "yahoo_finance"]);
+    case "verify_company_event":
+      return verifyCompanyEvent(str(args.ticker), str(args.event_query), str(args.start_date, ""), str(args.end_date, ""), Array.isArray(args.sources) ? args.sources.map(String) : ["sec", "yahoo_finance"]);
+    case "health_check": {
+      const buildSha = getWorkerVar("BUILD_SHA") ?? "unknown";
+      const version = getWorkerVar("SERVER_VERSION") ?? "1.0.0";
+      const toolCount = TOOLS.length;
+      const manifestHash = await computeHash(JSON.stringify(TOOLS.map(t => t.name)));
+      const buildShaHash = await computeHash(buildSha);
       return JSON.stringify({
-        serverVersion: getWorkerVar("SERVER_VERSION") ?? "1.0.0",
+        status: "ok",
+        serverVersion: version,
         envelopeV2: getWorkerVar("MCP_ENVELOPE_V2") === "true",
         nodeVersion: "cloudflare-worker",
-        workerVersion: getWorkerVar("WORKER_VERSION") ?? null,
+        toolCount,
+        manifestHash,
+        buildSha,
+        buildShaHash,
+        privacyScope: "public",
+        generatedAt: new Date().toISOString(),
       });
+    }
     case "get_options_summary":
       return getOptionsSummary(str(args.ticker));
     case "get_filing_data":

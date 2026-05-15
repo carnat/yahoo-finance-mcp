@@ -44,6 +44,11 @@ EXPECTED_CANONICAL = {
     "analyze_position_signals",
     "calculate_price_target_distance",
     "get_company_news",
+    "search_company_news",
+    "get_company_press_releases",
+    "get_sec_recent_events",
+    "get_public_event_timeline",
+    "verify_company_event",
     "health_check",
 }
 
