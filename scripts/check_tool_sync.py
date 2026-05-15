@@ -41,6 +41,8 @@ EXPECTED_CANONICAL = {
     "get_sec_filing_table",
     "extract_sec_filing_fact",
     "search_sec_filing_text",
+    "index_sec_filing",
+    "get_sec_filing_index",
     "analyze_position_signals",
     "calculate_price_target_distance",
     "get_company_news",

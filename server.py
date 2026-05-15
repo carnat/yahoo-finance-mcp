@@ -859,6 +859,52 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
     "list_filing_tables": _SIMPLE_OUTPUT_SCHEMA,
     "get_filing_table": _SIMPLE_OUTPUT_SCHEMA,
     "extract_filing_fact": _SIMPLE_OUTPUT_SCHEMA,
+    "index_sec_filing": {
+        "type": "object",
+        "properties": {
+            "ticker": {"type": "string"},
+            "cik": {"type": "string"},
+            "filingType": {"type": "string"},
+            "filingDate": {"type": ["string", "null"]},
+            "acceptedAt": {"type": ["string", "null"]},
+            "accessionNumber": {"type": "string"},
+            "documentUrl": {"type": "string"},
+            "index": {
+                "type": "object",
+                "properties": {
+                    "sections": {"type": "array"},
+                    "tables": {"type": "array"},
+                    "keywordMap": {"type": "object"},
+                },
+                "additionalProperties": True,
+            },
+            "meta": {"type": "object"},
+        },
+        "additionalProperties": True,
+    },
+    "get_sec_filing_index": {
+        "type": "object",
+        "properties": {
+            "ticker": {"type": "string"},
+            "cik": {"type": "string"},
+            "filingType": {"type": "string"},
+            "filingDate": {"type": ["string", "null"]},
+            "acceptedAt": {"type": ["string", "null"]},
+            "accessionNumber": {"type": "string"},
+            "documentUrl": {"type": "string"},
+            "index": {
+                "type": "object",
+                "properties": {
+                    "sections": {"type": "array"},
+                    "tables": {"type": "array"},
+                    "keywordMap": {"type": "object"},
+                },
+                "additionalProperties": True,
+            },
+            "meta": {"type": "object"},
+        },
+        "additionalProperties": True,
+    },
     "search_company_news": _NEWS_EVENT_OUTPUT_SCHEMA,
     "get_company_press_releases": _NEWS_EVENT_OUTPUT_SCHEMA,
     "get_sec_recent_events": _NEWS_EVENT_OUTPUT_SCHEMA,
@@ -975,6 +1021,10 @@ async def get_historical_stock_prices(
         columns : list[str] | None
             Optional subset of columns to return. If None, all columns are returned.
     """
+    ticker_err = _validate_ticker(ticker)
+    if ticker_err:
+        return _mcp_failure("get_historical_stock_prices", ErrorCode.INPUT_VALIDATION_ERROR, ticker_err)
+
     cache_key = f"hist:{ticker}:{period}:{interval}:{prepost}"
     cached = _cache_get(cache_key, _PRICE_TTL)
     if cached is not None:
@@ -6541,6 +6591,263 @@ async def search_sec_filing_text(
     terms = search_terms or ([search_query] if search_query else [])
     hint = section_hint or (selector or {}).get("item")
     return await search_filing_text(ticker, terms, hint, filing_type, accession_number, context_chars, return_tables)
+
+
+# ---------------------------------------------------------------------------
+# SEC Filing Index helpers
+# ---------------------------------------------------------------------------
+
+_INDEX_KEYWORDS = [
+    "china", "greater china", "prc", "geographic", "segment", "revenue",
+    "customers", "long-lived assets", "risk factors", "americas", "europe",
+    "japan", "asia", "rest of asia",
+]
+
+
+def _build_filing_index_from_html(html: str) -> dict:
+    """Parse an SEC filing HTML and return a structured index (sections, tables, keywordMap)."""
+    # Sanitize: remove scripts/styles/event handlers
+    sanitized = _re.sub(r'<script[^>]*>[\s\S]*?</script>', '', html, flags=_re.IGNORECASE)
+    sanitized = _re.sub(r'<style[^>]*>[\s\S]*?</style>', '', sanitized, flags=_re.IGNORECASE)
+    sanitized = _re.sub(r'\s+on\w+=(?:"[^"]*"|\'[^\']*\'|[^\s>]+)', ' ', sanitized, flags=_re.IGNORECASE)
+
+    # Section extraction
+    sections: list[dict] = []
+    heading_re = _re.compile(r'<h([1-6])[^>]*>(.*?)</h\1>', _re.DOTALL | _re.IGNORECASE)
+    for h_match in heading_re.finditer(sanitized):
+        if len(sections) >= 50:
+            break
+        level = int(h_match.group(1))
+        raw_text = _strip_html_tags(h_match.group(2))
+        if not raw_text or len(raw_text) > 200:
+            continue
+        normalized = raw_text.lower().strip()
+        keywords = [kw for kw in _INDEX_KEYWORDS if kw in normalized]
+        section_id = _re.sub(r'[^a-z0-9]+', '_', normalized)[:60]
+        sections.append({
+            "sectionId": section_id,
+            "heading": raw_text,
+            "normalizedHeading": normalized,
+            "level": level,
+            "keywords": keywords,
+            "startChar": h_match.start(),
+            "endChar": h_match.end(),
+        })
+
+    # Table extraction
+    tables: list[dict] = []
+    table_re = _re.compile(r'<table[^>]*>(.*?)</table>', _re.DOTALL | _re.IGNORECASE)
+    tr_re = _re.compile(r'<tr[^>]*>(.*?)</tr>', _re.DOTALL | _re.IGNORECASE)
+    td_re = _re.compile(r'<t[dh][^>]*>(.*?)</t[dh]>', _re.DOTALL | _re.IGNORECASE)
+
+    for table_idx, t_match in enumerate(table_re.finditer(sanitized)):
+        if table_idx >= 100:
+            break
+        table_start = t_match.start()
+        table_html = t_match.group(0)
+
+        # Nearest section starting before this table
+        nearby_section_id: str | None = None
+        nearby_heading = ""
+        for sec in reversed(sections):
+            if sec["startChar"] <= table_start:
+                nearby_section_id = sec["sectionId"]
+                nearby_heading = sec["heading"]
+                break
+
+        rows = tr_re.findall(t_match.group(1))
+        if not rows:
+            continue
+
+        # Headers from first row
+        first_cells = td_re.findall(rows[0])
+        headers = [_strip_html_tags(c) for c in first_cells[:10]]
+
+        # Row labels from first column of subsequent rows
+        row_labels: list[str] = []
+        for row in rows[1:20]:
+            cells = td_re.findall(row)
+            if cells:
+                label = _strip_html_tags(cells[0])
+                if label and len(label) < 100:
+                    row_labels.append(label)
+
+        # Unit scale
+        pre_context = sanitized[max(0, table_start - 2000):table_start].lower()
+        table_context = (table_html + pre_context).lower()
+        unit_scale = "millions"
+        if "billion" in table_context or "in billions" in table_context:
+            unit_scale = "billions"
+        elif "thousand" in table_context or "in thousands" in table_context:
+            unit_scale = "thousands"
+
+        # Confidence
+        has_year_headers = any(_re.search(r'\b20\d\d\b', h) for h in headers)
+        has_row_labels = bool(row_labels)
+        confidence = "HIGH" if (has_year_headers and has_row_labels) else ("MEDIUM" if (has_year_headers or has_row_labels) else "LOW")
+
+        # Infer title from preceding text
+        pre_text = _strip_html_tags(sanitized[max(0, table_start - 500):table_start])
+        lines = [ln.strip() for ln in pre_text.split('\n') if ln.strip()]
+        title = ""
+        if lines:
+            candidate = lines[-1]
+            if 10 < len(candidate) < 200:
+                title = candidate
+
+        tables.append({
+            "tableId": table_idx,
+            "sectionId": nearby_section_id,
+            "title": title or nearby_heading,
+            "headers": headers,
+            "rowLabels": row_labels,
+            "unit": "USD",
+            "unitScale": unit_scale,
+            "confidence": confidence,
+        })
+
+    # Keyword map
+    keyword_map: dict[str, list[str]] = {}
+    for kw in _INDEX_KEYWORDS:
+        refs: list[str] = []
+        for sec in sections:
+            if kw in sec["normalizedHeading"]:
+                ref = f"sectionId:{sec['sectionId']}"
+                if ref not in refs:
+                    refs.append(ref)
+        for tbl in tables:
+            haystack = " ".join(tbl["rowLabels"] + tbl["headers"] + [tbl["title"]]).lower()
+            if kw in haystack:
+                ref = f"tableId:{tbl['tableId']}"
+                if ref not in refs:
+                    refs.append(ref)
+        if refs:
+            keyword_map[kw] = refs
+
+    return {"sections": sections, "tables": tables, "keywordMap": keyword_map}
+
+
+async def _index_sec_filing_impl(
+    ticker: str,
+    filing_type: str = "10-K",
+    accession_number: str | None = None,
+) -> str:
+    """Shared implementation for index_sec_filing and get_sec_filing_index."""
+    cik_padded, subs = await _get_submissions_for_ticker(ticker)
+    if not cik_padded or not subs:
+        return _mcp_failure("index_sec_filing", ErrorCode.TICKER_NOT_FOUND,
+                            f"Could not resolve EDGAR submissions for ticker '{ticker}'")
+
+    cik_int = int(cik_padded)
+    recent = subs.get("filings", {}).get("recent", {})
+    forms: list[str] = recent.get("form", [])
+    accessions: list[str] = recent.get("accessionNumber", [])
+    primary_docs: list[str] = recent.get("primaryDocument", [])
+    filing_dates: list[str] = recent.get("filingDate", [])
+    accepted_dts: list[str] = recent.get("acceptanceDateTime", [])
+
+    target_idx: int | None = None
+    if accession_number:
+        for i, acc in enumerate(accessions):
+            if acc == accession_number:
+                target_idx = i
+                break
+    else:
+        for i, form in enumerate(forms):
+            if str(form).upper() == filing_type.upper():
+                target_idx = i
+                accession_number = accessions[i] if i < len(accessions) else None
+                break
+
+    if target_idx is None or not accession_number:
+        return _mcp_failure("index_sec_filing", ErrorCode.NO_FILING_DATA,
+                            f"No {filing_type} filing found for '{ticker}'")
+
+    filing_date = filing_dates[target_idx] if target_idx < len(filing_dates) else ""
+    accepted_at = accepted_dts[target_idx] if target_idx < len(accepted_dts) else None
+    primary_doc = primary_docs[target_idx] if target_idx < len(primary_docs) else None
+
+    _, document_url = _edgar_build_filing_urls(cik_int, accession_number, primary_doc)
+    if not document_url:
+        return _mcp_failure("index_sec_filing", ErrorCode.NO_FILING_DATA,
+                            f"primaryDocument missing for {accession_number}")
+
+    # Check cache
+    cache_key = f"secidx:{ticker.upper()}:{accession_number}:{filing_type}"
+    cached = _tool_cache.get(cache_key)
+    if cached is not None:
+        return cached[0]
+
+    # Fetch filing HTML
+    html = await _edgar_get_html(document_url, max_bytes=5_000_000)
+    if not html:
+        return _mcp_failure("index_sec_filing", ErrorCode.PROVIDER_ERROR,
+                            f"Failed to fetch filing document: {document_url}")
+
+    index = _build_filing_index_from_html(html)
+    indexed_at = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+
+    result = json.dumps({
+        "ticker": ticker,
+        "cik": cik_padded,
+        "filingType": filing_type,
+        "filingDate": filing_date,
+        "acceptedAt": accepted_at,
+        "accessionNumber": accession_number,
+        "documentUrl": document_url,
+        "index": index,
+        "meta": {
+            "indexedAt": indexed_at,
+            "source": "sec",
+            "cacheKey": f"{ticker.upper()}:{accession_number}",
+            "cacheTtlHours": 24,
+        },
+    })
+
+    _tool_cache.set(cache_key, result, TTL_EDGAR)
+    return result
+
+
+@yfinance_server.tool(
+    name="index_sec_filing",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["index_sec_filing"],
+    description="Build a deterministic section/table index for an SEC filing. Identifies headings, tables, row labels, and units, enabling subsequent queries without re-fetching the filing.",
+)
+async def index_sec_filing(
+    ticker: str,
+    filing_type: str = "10-K",
+    period: str = "latest",
+    accession_number: str | None = None,
+) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("index_sec_filing", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    if accession_number:
+        acc_err = _validate_accession(accession_number)
+        if acc_err:
+            return _mcp_failure("index_sec_filing", ErrorCode.INPUT_VALIDATION_ERROR, acc_err)
+    return await _index_sec_filing_impl(ticker, filing_type, accession_number)
+
+
+@yfinance_server.tool(
+    name="get_sec_filing_index",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_sec_filing_index"],
+    description="Get the pre-built section/table index for an SEC filing. Returns cached index when available; builds and caches on first call.",
+)
+async def get_sec_filing_index(
+    ticker: str,
+    filing_type: str = "10-K",
+    period: str = "latest",
+    accession_number: str | None = None,
+) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("get_sec_filing_index", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    if accession_number:
+        acc_err = _validate_accession(accession_number)
+        if acc_err:
+            return _mcp_failure("get_sec_filing_index", ErrorCode.INPUT_VALIDATION_ERROR, acc_err)
+    return await _index_sec_filing_impl(ticker, filing_type, accession_number)
 
 
 @yfinance_server.tool(name="get_tps_inputs", output_schema=_TOOL_OUTPUT_SCHEMAS["get_tps_inputs"], description="Deprecated alias for analyze_position_signals.")

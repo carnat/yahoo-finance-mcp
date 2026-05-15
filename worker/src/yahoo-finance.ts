@@ -2707,6 +2707,8 @@ const EDGAR_UA = "yahoo-finance-mcp contact@example.com";
 
 const filingCikCache = new Map<string, string>();
 const filingSubmissionsCache = new Map<string, Record<string, unknown>>();
+const filingIndexCache = new Map<string, { value: string; storedAt: number }>();
+const FILING_INDEX_TTL_MS = 24 * 60 * 60 * 1000;
 
 const FILING_FACT_CONCEPTS: Record<string, { primary: string; fallback?: string }> = {
   geographic_revenue: { primary: "RevenueFromContractWithCustomerExcludingAssessedTax", fallback: "Revenues" },
@@ -5355,5 +5357,267 @@ export async function verifyCompanyEvent(ticker: string, eventQuery: string, sta
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
+  }
+}
+
+// ── index_sec_filing / get_sec_filing_index ────────────────────────────────────
+
+const _INDEX_KEYWORDS = [
+  "china", "greater china", "prc", "geographic", "segment", "revenue",
+  "customers", "long-lived assets", "risk factors", "americas", "europe",
+  "japan", "asia", "rest of asia",
+];
+
+function _stripHtmlTagsIdx(html: string): string {
+  return html.replace(/<[^>]+>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function _buildFilingIndexFromHtml(
+  html: string,
+): { sections: Record<string, unknown>[]; tables: Record<string, unknown>[]; keywordMap: Record<string, string[]> } {
+  // Remove scripts/styles/event handlers to reduce noise
+  let sanitized = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "");
+  sanitized = sanitized.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
+  sanitized = sanitized.replace(/\s+on\w+=(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, " ");
+
+  // --- Section extraction ---
+  const sections: Record<string, unknown>[] = [];
+  const headingRe = /<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi;
+  let hm: RegExpExecArray | null;
+  while ((hm = headingRe.exec(sanitized)) !== null && sections.length < 50) {
+    const level = parseInt(hm[1], 10);
+    const rawText = _stripHtmlTagsIdx(hm[2]);
+    if (!rawText || rawText.length > 200) continue;
+    const normalized = rawText.toLowerCase().trim();
+    const keywords = _INDEX_KEYWORDS.filter(kw => normalized.includes(kw));
+    const sectionId = normalized.replace(/[^a-z0-9]+/g, "_").slice(0, 60);
+    sections.push({ sectionId, heading: rawText, normalizedHeading: normalized, level, keywords, startChar: hm.index, endChar: hm.index + hm[0].length });
+  }
+
+  // --- Table extraction ---
+  const tables: Record<string, unknown>[] = [];
+  const tableRe = /<table[^>]*>([\s\S]*?)<\/table>/gi;
+  const tdRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+  let tm: RegExpExecArray | null;
+  let tableIdx = 0;
+  while ((tm = tableRe.exec(sanitized)) !== null && tableIdx < 100) {
+    const tableStart = tm.index;
+    const tableHtml = tm[0];
+
+    // Nearby section (last section starting before this table)
+    let nearbySectionId: string | null = null;
+    let nearbyHeading = "";
+    for (let si = sections.length - 1; si >= 0; si--) {
+      if ((sections[si]!.startChar as number) <= tableStart) {
+        nearbySectionId = sections[si]!.sectionId as string;
+        nearbyHeading = sections[si]!.heading as string;
+        break;
+      }
+    }
+
+    // Parse rows
+    const rowMatches = tableHtml.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) ?? [];
+    if (rowMatches.length === 0) { tableIdx++; continue; }
+
+    // Headers from first row
+    const headers: string[] = [];
+    tdRe.lastIndex = 0;
+    let hd: RegExpExecArray | null;
+    while ((hd = tdRe.exec(rowMatches[0] ?? "")) !== null && headers.length < 10) {
+      headers.push(_stripHtmlTagsIdx(hd[1]));
+    }
+
+    // Row labels from first column of subsequent rows (up to 19 data rows)
+    const rowLabels: string[] = [];
+    for (let r = 1; r < Math.min(rowMatches.length, 20); r++) {
+      tdRe.lastIndex = 0;
+      const cellMatch = tdRe.exec(rowMatches[r] ?? "");
+      if (cellMatch) {
+        const label = _stripHtmlTagsIdx(cellMatch[1]);
+        if (label && label.length < 100) rowLabels.push(label);
+      }
+    }
+
+    // Detect unit scale
+    const preContext = sanitized.slice(Math.max(0, tableStart - 2000), tableStart).toLowerCase();
+    const tableContext = (tableHtml + preContext).toLowerCase();
+    let unitScale = "millions";
+    if (/billion|in billions/.test(tableContext)) unitScale = "billions";
+    else if (/thousand|in thousands/.test(tableContext)) unitScale = "thousands";
+
+    // Confidence
+    const hasYearHeaders = headers.some(h => /\b20\d\d\b/.test(h));
+    const hasRowLabels = rowLabels.length > 0;
+    const confidence = hasYearHeaders && hasRowLabels ? "HIGH" : (hasYearHeaders || hasRowLabels ? "MEDIUM" : "LOW");
+
+    // Infer title from pre-context
+    const preText = _stripHtmlTagsIdx(sanitized.slice(Math.max(0, tableStart - 500), tableStart));
+    const lines = preText.split("\n").map(l => l.trim()).filter(Boolean);
+    let title = "";
+    const candidate = lines[lines.length - 1] ?? "";
+    if (candidate.length > 10 && candidate.length < 200) title = candidate;
+
+    tables.push({ tableId: tableIdx, sectionId: nearbySectionId, title: title || nearbyHeading, headers, rowLabels, unit: "USD", unitScale, confidence });
+    tableIdx++;
+  }
+
+  // --- Keyword map ---
+  const keywordMap: Record<string, string[]> = {};
+  for (const kw of _INDEX_KEYWORDS) {
+    const refs: string[] = [];
+    for (const sec of sections) {
+      if ((sec.normalizedHeading as string).includes(kw)) {
+        const ref = `sectionId:${sec.sectionId}`;
+        if (!refs.includes(ref)) refs.push(ref);
+      }
+    }
+    for (const tbl of tables) {
+      const haystack = [
+        ...(tbl.rowLabels as string[]),
+        ...(tbl.headers as string[]),
+        tbl.title as string,
+      ].join(" ").toLowerCase();
+      if (haystack.includes(kw)) {
+        const ref = `tableId:${tbl.tableId}`;
+        if (!refs.includes(ref)) refs.push(ref);
+      }
+    }
+    if (refs.length > 0) keywordMap[kw] = refs;
+  }
+
+  return { sections, tables, keywordMap };
+}
+
+async function _indexSecFilingImpl(
+  ticker: string,
+  filingType: string,
+  _period: string,
+  accessionNumber: string | null,
+): Promise<string> {
+  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
+  if (!cikPadded || !submissions) {
+    return JSON.stringify({ ok: false, error: { code: "TICKER_NOT_FOUND", message: `Could not resolve EDGAR submissions for ticker '${ticker}'` } });
+  }
+
+  const recent = ((submissions.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+  const forms = (recent.form as string[]) ?? [];
+  const accessions = (recent.accessionNumber as string[]) ?? [];
+  const primaryDocs = (recent.primaryDocument as string[]) ?? [];
+  const filingDates = (recent.filingDate as string[]) ?? [];
+  const acceptedDts = (recent.acceptanceDateTime as string[]) ?? [];
+
+  // Find target filing
+  let targetIdx: number | null = null;
+  if (accessionNumber) {
+    for (let i = 0; i < accessions.length; i++) {
+      if (accessions[i] === accessionNumber) { targetIdx = i; break; }
+    }
+  } else {
+    for (let i = 0; i < forms.length; i++) {
+      if (forms[i]!.toUpperCase() === filingType.toUpperCase()) {
+        targetIdx = i;
+        accessionNumber = accessions[i] ?? null;
+        break;
+      }
+    }
+  }
+
+  if (targetIdx === null || !accessionNumber) {
+    return JSON.stringify({ ok: false, error: { code: "NO_FILING_DATA", message: `No ${filingType} filing found for '${ticker}'` } });
+  }
+
+  const filingDate = filingDates[targetIdx] ?? "";
+  const acceptedAt = acceptedDts[targetIdx] ?? null;
+  const primaryDoc = primaryDocs[targetIdx] ?? null;
+
+  if (!primaryDoc) {
+    return JSON.stringify({ ok: false, error: { code: "NO_FILING_DATA", message: `primaryDocument missing for ${accessionNumber}` } });
+  }
+
+  const cikInt = parseInt(cikPadded, 10);
+  const accClean = accessionNumber.replace(/-/g, "");
+  const documentUrl = `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accClean}/${primaryDoc}`;
+
+  // Check cache
+  const cacheKey = `secidx:${ticker.toUpperCase()}:${accessionNumber}:${filingType}`;
+  const cached = filingIndexCache.get(cacheKey);
+  if (cached && Date.now() - cached.storedAt < FILING_INDEX_TTL_MS) {
+    return cached.value;
+  }
+
+  // Fetch filing HTML
+  const resp = await fetch(documentUrl, { headers: { "User-Agent": EDGAR_UA } });
+  if (!resp.ok) {
+    return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: `Failed to fetch filing: HTTP ${resp.status}` } });
+  }
+
+  // Read up to 5 MB to avoid memory issues on large filings
+  const reader = resp.body?.getReader();
+  if (!reader) {
+    return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: "Failed to read filing response body" } });
+  }
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  const MAX_BYTES = 5_000_000;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      chunks.push(value);
+      totalBytes += value.byteLength;
+      if (totalBytes >= MAX_BYTES) { await reader.cancel(); break; }
+    }
+  }
+  const html = new TextDecoder().decode(
+    chunks.reduce((acc, c) => { const r = new Uint8Array(acc.byteLength + c.byteLength); r.set(acc); r.set(c, acc.byteLength); return r; }, new Uint8Array(0))
+  );
+
+  const index = _buildFilingIndexFromHtml(html);
+  const indexedAt = new Date().toISOString();
+
+  const result = JSON.stringify({
+    ticker,
+    cik: cikPadded,
+    filingType,
+    filingDate,
+    acceptedAt,
+    accessionNumber,
+    documentUrl,
+    index,
+    meta: {
+      indexedAt,
+      source: "sec",
+      cacheKey: `${ticker.toUpperCase()}:${accessionNumber}`,
+      cacheTtlHours: 24,
+    },
+  });
+
+  filingIndexCache.set(cacheKey, { value: result, storedAt: Date.now() });
+  return result;
+}
+
+export async function indexSecFiling(
+  ticker: string,
+  filingType: string = "10-K",
+  period: string = "latest",
+  accessionNumber: string | null = null,
+): Promise<string> {
+  try {
+    return await _indexSecFilingImpl(ticker, filingType, period, accessionNumber);
+  } catch (e) {
+    return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: `${e instanceof Error ? e.message : String(e)}` } });
+  }
+}
+
+export async function getSecFilingIndex(
+  ticker: string,
+  filingType: string = "10-K",
+  period: string = "latest",
+  accessionNumber: string | null = null,
+): Promise<string> {
+  try {
+    return await _indexSecFilingImpl(ticker, filingType, period, accessionNumber);
+  } catch (e) {
+    return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: `${e instanceof Error ? e.message : String(e)}` } });
   }
 }
