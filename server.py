@@ -6606,9 +6606,10 @@ _INDEX_KEYWORDS = [
 
 def _build_filing_index_from_html(html: str) -> dict:
     """Parse an SEC filing HTML and return a structured index (sections, tables, keywordMap)."""
-    # Sanitize: remove scripts/styles/event handlers
-    sanitized = _re.sub(r'<script[^>]*>[\s\S]*?</script>', '', html, flags=_re.IGNORECASE)
-    sanitized = _re.sub(r'<style[^>]*>[\s\S]*?</style>', '', sanitized, flags=_re.IGNORECASE)
+    # Sanitize: remove scripts/styles/event handlers.
+    # Use \s* before the element name in closing tags to handle whitespace variants (</script >, </style >).
+    sanitized = _re.sub(r'<script\b[^>]*>[\s\S]*?</\s*script[^>]*>', '', html, flags=_re.IGNORECASE)
+    sanitized = _re.sub(r'<style\b[^>]*>[\s\S]*?</\s*style[^>]*>', '', sanitized, flags=_re.IGNORECASE)
     sanitized = _re.sub(r'\s+on\w+=(?:"[^"]*"|\'[^\']*\'|[^\s>]+)', ' ', sanitized, flags=_re.IGNORECASE)
 
     # Section extraction

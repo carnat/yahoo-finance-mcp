@@ -321,8 +321,17 @@ def main() -> int:
     # Invalid-args validation test: get_historical_stock_prices({}) must not cause provider 404
     bad_payload = call_tool("get_historical_stock_prices", {}, 902)
     bad_str = json.dumps(bad_payload)
-    # Must return a validation error, not a provider 404 from Yahoo chart URL
-    if "query1.finance.yahoo.com" in bad_str and "404" in bad_str:
+    # Must return a validation error. The specific check is whether we see a Yahoo chart 404
+    # (which indicates the provider was called with no ticker before validation occurred).
+    # We detect this by checking whether the error is a provider HTTP 404 on the chart endpoint,
+    # NOT just any mention of those strings.
+    is_provider_404 = (
+        "chart" in bad_str.lower()
+        and "404" in bad_str
+        and ("yahoo" in bad_str.lower() or "finance" in bad_str.lower())
+        and "INPUT_VALIDATION_ERROR" not in bad_str
+    )
+    if is_provider_404:
         raise AssertionError(
             f"get_historical_stock_prices({{}}) caused provider 404 instead of INPUT_VALIDATION_ERROR.\n"
             f"Response: {bad_str[:400]}"

@@ -5375,9 +5375,10 @@ function _stripHtmlTagsIdx(html: string): string {
 function _buildFilingIndexFromHtml(
   html: string,
 ): { sections: Record<string, unknown>[]; tables: Record<string, unknown>[]; keywordMap: Record<string, string[]> } {
-  // Remove scripts/styles/event handlers to reduce noise
-  let sanitized = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "");
-  sanitized = sanitized.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
+  // Remove scripts/styles/event handlers to reduce noise.
+  // Use \s* before element names in closing tags to handle whitespace variants (</script >, </style >).
+  let sanitized = html.replace(/<script\b[^>]*>[\s\S]*?<\/\s*script[^>]*>/gi, "");
+  sanitized = sanitized.replace(/<style\b[^>]*>[\s\S]*?<\/\s*style[^>]*>/gi, "");
   sanitized = sanitized.replace(/\s+on\w+=(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, " ");
 
   // --- Section extraction ---
@@ -5491,6 +5492,8 @@ function _buildFilingIndexFromHtml(
 async function _indexSecFilingImpl(
   ticker: string,
   filingType: string,
+  // `period` is reserved for future multi-period support (e.g. "2024", "prior").
+  // Currently only "latest" is supported; the field is kept for API stability.
   _period: string,
   accessionNumber: string | null,
 ): Promise<string> {
@@ -5568,9 +5571,11 @@ async function _indexSecFilingImpl(
       if (totalBytes >= MAX_BYTES) { await reader.cancel(); break; }
     }
   }
-  const html = new TextDecoder().decode(
-    chunks.reduce((acc, c) => { const r = new Uint8Array(acc.byteLength + c.byteLength); r.set(acc); r.set(c, acc.byteLength); return r; }, new Uint8Array(0))
-  );
+  // Pre-allocate a single buffer and copy chunks at correct offsets (avoids O(n²) reduce).
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.byteLength; }
+  const html = new TextDecoder().decode(merged);
 
   const index = _buildFilingIndexFromHtml(html);
   const indexedAt = new Date().toISOString();
@@ -5596,6 +5601,10 @@ async function _indexSecFilingImpl(
   return result;
 }
 
+// indexSecFiling and getSecFilingIndex are separate exports for API symmetry:
+// index_sec_filing always (re-)builds and caches; get_sec_filing_index returns
+// cached results and is the preferred read path. Both currently delegate to the
+// same impl, but may diverge in future (e.g. force-refresh vs cache-first).
 export async function indexSecFiling(
   ticker: string,
   filingType: string = "10-K",
