@@ -137,10 +137,15 @@ async function yGet(url: string, auth = true): Promise<unknown> {
   return res.json();
 }
 
-// Extract the `raw` numeric value from Yahoo Finance's {raw, fmt} wrapper objects
+// Extract the `raw` numeric value from Yahoo Finance's {raw, fmt} wrapper objects.
+// Empty objects {} are treated as missing values and normalized to null.
 function raw(v: unknown): unknown {
-  if (v !== null && v !== undefined && typeof v === "object" && "raw" in (v as object)) {
-    return (v as { raw: unknown }).raw;
+  if (v !== null && v !== undefined && typeof v === "object") {
+    if ("raw" in (v as object)) {
+      return (v as { raw: unknown }).raw;
+    }
+    // Yahoo Finance sometimes returns {} for fields that have no value — treat as null.
+    if (Object.keys(v as object).length === 0) return null;
   }
   return v ?? null;
 }
@@ -169,7 +174,7 @@ function normalizeBatchSymbolResult(parsed: unknown, ticker: string): Record<str
     if (p.error === true || p.error != null) {
       const message = typeof p.message === "string" ? p.message : (typeof p.error === "string" ? p.error : `Error for ${ticker}`);
       const lower = message.toLowerCase();
-      if (lower.includes("no data found for ticker") || lower.includes("not found")) {
+      if (lower.includes("no data found for ticker") || lower.includes("not found") || lower.includes("api error 404")) {
         return { ok: false, data: null, error: toBatchError(message, "TICKER_NOT_FOUND", false) };
       }
       if (lower.includes("timeout")) {
@@ -207,10 +212,14 @@ async function runPartialBatch(
     } catch (e) {
       errorCount += 1;
       const message = e instanceof Error ? e.message : String(e);
+      const lower = message.toLowerCase();
+      const code = lower.includes("timeout") ? "PROVIDER_TIMEOUT"
+        : lower.includes("api error 404") ? "TICKER_NOT_FOUND"
+        : "PROVIDER_ERROR";
       out[t] = {
         ok: false,
         data: null,
-        error: toBatchError(message, message.toLowerCase().includes("timeout") ? "PROVIDER_TIMEOUT" : "PROVIDER_ERROR", message.toLowerCase().includes("timeout")),
+        error: toBatchError(message, code, lower.includes("timeout")),
       };
     }
   }

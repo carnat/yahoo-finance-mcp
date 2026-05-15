@@ -1,4 +1,4 @@
-import { mcpSuccess } from "./response.js";
+import { mcpSuccess, getWorkerVar } from "./response.js";
 import {
   getAnalystConsensus,
   getAnalystUpgradeRadar,
@@ -1495,10 +1495,10 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       return getVolumeGate(str(args.ticker), args.foreign_exchange === true);
     case "health_check":
       return JSON.stringify({
-        serverVersion: "1.0.0",
-        envelopeV2: (globalThis as unknown as Record<string, unknown>).MCP_ENVELOPE_V2 === "true",
-        nodeVersion: (globalThis as unknown as { process?: { version?: string } }).process?.version ?? null,
-        workerVersion: (globalThis as unknown as Record<string, unknown>).WORKER_VERSION ?? null,
+        serverVersion: getWorkerVar("SERVER_VERSION") ?? "1.0.0",
+        envelopeV2: getWorkerVar("MCP_ENVELOPE_V2") === "true",
+        nodeVersion: "cloudflare-worker",
+        workerVersion: getWorkerVar("WORKER_VERSION") ?? null,
       });
     case "get_options_summary":
       return getOptionsSummary(str(args.ticker));
