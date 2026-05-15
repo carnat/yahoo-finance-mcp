@@ -1487,37 +1487,52 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
           str(args.filing_type, "10-K"),
           str(args.period, "latest"),
         );
+        let parsed: Record<string, unknown> = {};
         try {
-          const parsed = JSON.parse(raw) as Record<string, unknown>;
-          return JSON.stringify({
-            fact,
-            region: args.region != null ? str(args.region) : null,
-            value: parsed.value ?? null,
-            denominator: parsed.denominator ?? null,
-            valueRatio: parsed.valueRatio ?? null,
-            valuePct: parsed.valuePct ?? null,
-            rawValue: parsed.rawValue ?? null,
-            rawDenominator: parsed.rawDenominator ?? null,
-            unit: "USD",
-            unitScale: parsed.unitScale ?? null,
-            period: parsed.period ?? null,
-            filingType: parsed.filingType ?? str(args.filing_type, "10-K"),
-            filingDate: parsed.filingDate ?? null,
-            accessionNumber: parsed.accessionNumber ?? null,
-            extractionMethod: parsed.extractionMethod ?? "NONE",
-            source: parsed.source ?? "NOT_DISCLOSED",
-            confidence: parsed.confidence ?? "NOT_DISCLOSED",
-            documentUrl: parsed.documentUrl ?? null,
-            indexUrl: parsed.indexUrl ?? null,
-            primaryDocumentUrl: parsed.primaryDocumentUrl ?? null,
-            evidence: parsed.evidence ?? null,
-            calculation: parsed.calculation ?? null,
-            warnings: parsed.warnings ?? [],
-            ticker: parsed.ticker ?? str(args.ticker),
-          });
+          let parsedAny: unknown = JSON.parse(raw);
+          if (
+            parsedAny != null &&
+            typeof parsedAny === "object" &&
+            "ok" in (parsedAny as Record<string, unknown>) &&
+            "data" in (parsedAny as Record<string, unknown>)
+          ) {
+            parsedAny = (parsedAny as Record<string, unknown>).data;
+          }
+          if (typeof parsedAny === "string") {
+            parsedAny = JSON.parse(parsedAny);
+          }
+          if (parsedAny != null && typeof parsedAny === "object") {
+            parsed = parsedAny as Record<string, unknown>;
+          }
         } catch {
-          return raw;
+          parsed = {};
         }
+        return JSON.stringify({
+          fact,
+          region: args.region != null ? str(args.region) : null,
+          value: parsed.value ?? null,
+          denominator: parsed.denominator ?? null,
+          valueRatio: parsed.valueRatio ?? null,
+          valuePct: parsed.valuePct ?? null,
+          rawValue: parsed.rawValue ?? null,
+          rawDenominator: parsed.rawDenominator ?? null,
+          unit: "USD",
+          unitScale: parsed.unitScale ?? null,
+          period: parsed.period ?? null,
+          filingType: parsed.filingType ?? str(args.filing_type, "10-K"),
+          filingDate: parsed.filingDate ?? null,
+          accessionNumber: parsed.accessionNumber ?? null,
+          extractionMethod: parsed.extractionMethod ?? "NONE",
+          source: parsed.source ?? "NOT_DISCLOSED",
+          confidence: parsed.confidence ?? "NOT_DISCLOSED",
+          documentUrl: parsed.documentUrl ?? null,
+          indexUrl: parsed.indexUrl ?? null,
+          primaryDocumentUrl: parsed.primaryDocumentUrl ?? null,
+          evidence: parsed.evidence ?? null,
+          calculation: parsed.calculation ?? null,
+          warnings: parsed.warnings ?? [],
+          ticker: parsed.ticker ?? str(args.ticker),
+        });
       }
       return extractFilingFact(str(args.ticker), str(args.fact_name), args.document_url != null ? str(args.document_url) : null, args.accession_number != null ? str(args.accession_number) : null);
     case "list_sec_company_filings":

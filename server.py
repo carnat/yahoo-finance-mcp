@@ -6486,36 +6486,43 @@ async def extract_sec_filing_fact(
     if routed_fact_type is not None or region is not None or fact_name is None:
         routed_fact_type = routed_fact_type or FilingFactType.geographic_revenue
         raw = await get_filing_data(ticker=ticker, fact_type=routed_fact_type, region=region, filing_type=filing_type, period=period)
+        parsed_payload: dict = {}
         try:
-            parsed = json.loads(raw)
-            return json.dumps({
-                "fact": routed_fact_type.value,
-                "region": region,
-                "value": parsed.get("value"),
-                "denominator": parsed.get("denominator"),
-                "valueRatio": parsed.get("valueRatio"),
-                "valuePct": parsed.get("valuePct"),
-                "rawValue": parsed.get("rawValue"),
-                "rawDenominator": parsed.get("rawDenominator"),
-                "unit": "USD",
-                "unitScale": parsed.get("unitScale"),
-                "period": parsed.get("period"),
-                "filingType": parsed.get("filingType", filing_type),
-                "filingDate": parsed.get("filingDate"),
-                "accessionNumber": parsed.get("accessionNumber"),
-                "extractionMethod": parsed.get("extractionMethod", "NONE"),
-                "source": parsed.get("source", "NOT_DISCLOSED"),
-                "confidence": parsed.get("confidence", "NOT_DISCLOSED"),
-                "documentUrl": parsed.get("documentUrl"),
-                "indexUrl": parsed.get("indexUrl"),
-                "primaryDocumentUrl": parsed.get("primaryDocumentUrl"),
-                "evidence": parsed.get("evidence"),
-                "calculation": parsed.get("calculation"),
-                "warnings": parsed.get("warnings", []),
-                "ticker": parsed.get("ticker", ticker),
-            })
+            parsed_any = json.loads(raw)
+            if isinstance(parsed_any, dict) and "ok" in parsed_any and "data" in parsed_any:
+                parsed_any = parsed_any.get("data")
+            if isinstance(parsed_any, str):
+                parsed_any = json.loads(parsed_any)
+            if isinstance(parsed_any, dict):
+                parsed_payload = parsed_any
         except Exception:
-            return raw
+            parsed_payload = {}
+        return json.dumps({
+            "fact": routed_fact_type.value,
+            "region": region,
+            "value": parsed_payload.get("value"),
+            "denominator": parsed_payload.get("denominator"),
+            "valueRatio": parsed_payload.get("valueRatio"),
+            "valuePct": parsed_payload.get("valuePct"),
+            "rawValue": parsed_payload.get("rawValue"),
+            "rawDenominator": parsed_payload.get("rawDenominator"),
+            "unit": "USD",
+            "unitScale": parsed_payload.get("unitScale"),
+            "period": parsed_payload.get("period"),
+            "filingType": parsed_payload.get("filingType", filing_type),
+            "filingDate": parsed_payload.get("filingDate"),
+            "accessionNumber": parsed_payload.get("accessionNumber"),
+            "extractionMethod": parsed_payload.get("extractionMethod", "NONE"),
+            "source": parsed_payload.get("source", "NOT_DISCLOSED"),
+            "confidence": parsed_payload.get("confidence", "NOT_DISCLOSED"),
+            "documentUrl": parsed_payload.get("documentUrl"),
+            "indexUrl": parsed_payload.get("indexUrl"),
+            "primaryDocumentUrl": parsed_payload.get("primaryDocumentUrl"),
+            "evidence": parsed_payload.get("evidence"),
+            "calculation": parsed_payload.get("calculation"),
+            "warnings": parsed_payload.get("warnings", []),
+            "ticker": parsed_payload.get("ticker", ticker),
+        })
     return await extract_filing_fact(ticker=ticker, fact_name=fact_name, document_url=document_url, accession_number=accession_number)
 
 

@@ -33,7 +33,15 @@ def call(name: str, args: dict, req_id: int) -> dict:
 
 def data_of(payload: dict) -> dict:
     if isinstance(payload, dict) and "ok" in payload and "data" in payload:
-        return payload.get("data") or {}
+        data = payload.get("data")
+        if isinstance(data, str):
+            try:
+                parsed = json.loads(data)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                return {}
+        return data or {}
     return payload
 
 
@@ -63,6 +71,7 @@ def assert_geo_shape(data: dict) -> None:
 def main() -> int:
     aaoi = call("extract_sec_filing_fact", {"ticker": "AAOI", "fact": "geographic_revenue", "region": "China"}, 0)
     aaoi_data = data_of(aaoi)
+    print(f"AAOI payload: {json.dumps(aaoi_data, sort_keys=True)}")
     assert_geo_shape(aaoi_data)
     if aaoi_data.get("value") is not None and aaoi_data.get("denominator") is not None:
         if aaoi_data.get("valueRatio") != 0.5752:
