@@ -4969,3 +4969,212 @@ export async function extractFilingFact(ticker: string, factName: string, _docum
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
   }
 }
+
+// ─── Public news / event helpers ──────────────────────────────────────────────
+
+const _str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
+
+function eventTypeFromKeywords(title: string, summary: string): string {
+  const text = `${title} ${summary}`.toLowerCase();
+  if (/earnings|quarterly results|q[1-4] \d{4}/.test(text)) return "EARNINGS";
+  if (/dividend|ex-div/.test(text)) return "DIVIDEND";
+  if (/merger|acquisition|acqui/.test(text)) return "M&A";
+  if (/guidance|outlook|forecast/.test(text)) return "GUIDANCE";
+  if (/press release|announcement/.test(text)) return "PRESS_RELEASE";
+  if (/sec filing|form 8-k|form 10/.test(text)) return "SEC_FILING";
+  return "NEWS";
+}
+
+function makeDupGroupId(title: string, dateStr: string): string {
+  // djb2-variant hash: h = h * 33 - h + char, accumulated over title+date string.
+  // Yields a 32-bit unsigned integer → 8 hex digits, used as a stable dedup key.
+  let h = 0;
+  const s = `${dateStr}::${title.toLowerCase().replace(/\s+/g, " ").trim()}`;
+  for (let i = 0; i < s.length; i++) { h = ((h << 5) - h + s.charCodeAt(i)) | 0; }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+function buildYfEventItem(item: Record<string, unknown>): Record<string, unknown> {
+  const title = _str(item.title);
+  const rawPublishedAt = typeof item.providerPublishTime === "number"
+    ? iso(item.providerPublishTime as number)
+    : _str(item.publishedAt);
+  // Preserve null when publishedAt is genuinely unknown — do not substitute epoch sentinel.
+  const publishedAt = rawPublishedAt || null;
+  return {
+    source: "Yahoo Finance",
+    sourceType: "yahoo_finance",
+    title,
+    summary: _str(item.summary),
+    url: _str(item.link),
+    publishedAt,
+    retrievedAt: new Date().toISOString(),
+    eventType: eventTypeFromKeywords(title, _str(item.summary)),
+    confidence: "MEDIUM",
+    duplicateGroupId: makeDupGroupId(title, (publishedAt ?? "").slice(0, 10)),
+  };
+}
+
+function buildSecEventItem(filing: Record<string, unknown>): Record<string, unknown> {
+  const title = _str(filing.description || filing.formType || "SEC Filing");
+  const filingDate = _str(filing.filingDate || filing.date || "");
+  return {
+    source: "SEC EDGAR",
+    sourceType: "sec_filing",
+    title,
+    accessionNumber: _str(filing.accessionNumber),
+    url: _str(filing.primaryDocumentUrl || filing.filingUrl),
+    publishedAt: filingDate,
+    retrievedAt: new Date().toISOString(),
+    eventType: eventTypeFromKeywords(title, _str(filing.formType)),
+    confidence: "HIGH",
+    formType: _str(filing.formType),
+    duplicateGroupId: makeDupGroupId(title, filingDate.slice(0, 10)),
+  };
+}
+
+// ─── Public event / news tools ─────────────────────────────────────────────────
+
+export async function searchCompanyNews(ticker: string, query = "", maxResults = 20): Promise<string> {
+  try {
+    const raw = JSON.parse(await getNews(ticker)) as Record<string, unknown>;
+    let items = (raw.news as Record<string, unknown>[]) ?? [];
+    if (query) {
+      const q = query.toLowerCase();
+      items = items.filter(n =>
+        _str(n.title).toLowerCase().includes(q) ||
+        _str(n.summary).toLowerCase().includes(q)
+      );
+    }
+    items = items.slice(0, maxResults);
+    return JSON.stringify({
+      ticker,
+      query,
+      count: items.length,
+      items: items.map(buildYfEventItem),
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
+  }
+}
+
+export async function getCompanyPressReleases(ticker: string, maxResults = 10, startDate = ""): Promise<string> {
+  try {
+    const raw = JSON.parse(await listSecFilings(ticker, "8-K", maxResults + 5)) as Record<string, unknown>;
+    let filings = (raw.filings as Record<string, unknown>[]) ?? [];
+    if (startDate) {
+      filings = filings.filter(f => _str(f.filingDate || f.date) >= startDate);
+    }
+    filings = filings.slice(0, maxResults);
+    return JSON.stringify({
+      ticker,
+      count: filings.length,
+      items: filings.map(buildSecEventItem),
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
+  }
+}
+
+export async function getSecRecentEvents(ticker: string, filingType = "8-K", maxResults = 10, startDate = ""): Promise<string> {
+  try {
+    const raw = JSON.parse(await listSecFilings(ticker, filingType === "all" ? "8-K" : filingType, maxResults + 5)) as Record<string, unknown>;
+    let filings = (raw.filings as Record<string, unknown>[]) ?? [];
+    if (startDate) {
+      filings = filings.filter(f => _str(f.filingDate || f.date) >= startDate);
+    }
+    filings = filings.slice(0, maxResults);
+    return JSON.stringify({
+      ticker,
+      filingType,
+      count: filings.length,
+      items: filings.map(buildSecEventItem),
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
+  }
+}
+
+export async function getPublicEventTimeline(ticker: string, maxResults = 20, startDate = "", sources: string[] = ["sec", "yahoo_finance"]): Promise<string> {
+  try {
+    const items: Record<string, unknown>[] = [];
+    const seen = new Set<string>();
+
+    if (sources.includes("sec")) {
+      const raw = JSON.parse(await listSecFilings(ticker, "8-K", maxResults)) as Record<string, unknown>;
+      for (const f of (raw.filings as Record<string, unknown>[]) ?? []) {
+        if (startDate && _str(f.filingDate || f.date) < startDate) continue;
+        const item = buildSecEventItem(f);
+        const key = _str(item.duplicateGroupId);
+        if (!seen.has(key)) { seen.add(key); items.push(item); }
+      }
+    }
+
+    if (sources.includes("yahoo_finance")) {
+      const raw = JSON.parse(await getNews(ticker)) as Record<string, unknown>;
+      for (const n of (raw.news as Record<string, unknown>[]) ?? []) {
+        const item = buildYfEventItem(n);
+        if (startDate && _str(item.publishedAt).slice(0, 10) < startDate) continue;
+        const key = _str(item.duplicateGroupId);
+        if (!seen.has(key)) { seen.add(key); items.push(item); }
+      }
+    }
+
+    items.sort((a, b) => _str(b.publishedAt).localeCompare(_str(a.publishedAt)));
+    return JSON.stringify({
+      ticker,
+      count: Math.min(items.length, maxResults),
+      items: items.slice(0, maxResults),
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
+  }
+}
+
+export async function verifyCompanyEvent(ticker: string, eventQuery: string, startDate = "", endDate = "", sources: string[] = ["sec", "yahoo_finance"]): Promise<string> {
+  try {
+    const q = eventQuery.toLowerCase();
+    const secItems: Record<string, unknown>[] = [];
+    const newsItems: Record<string, unknown>[] = [];
+
+    if (sources.includes("sec")) {
+      const raw = JSON.parse(await listSecFilings(ticker, "8-K", 20)) as Record<string, unknown>;
+      for (const f of (raw.filings as Record<string, unknown>[]) ?? []) {
+        const date = _str(f.filingDate || f.date);
+        if (startDate && date < startDate) continue;
+        if (endDate && date > endDate) continue;
+        const title = _str(f.description || f.formType);
+        if (!q || title.toLowerCase().includes(q)) secItems.push(buildSecEventItem(f));
+      }
+    }
+
+    if (sources.includes("yahoo_finance")) {
+      const raw = JSON.parse(await getNews(ticker)) as Record<string, unknown>;
+      for (const n of (raw.news as Record<string, unknown>[]) ?? []) {
+        const item = buildYfEventItem(n);
+        const date = _str(item.publishedAt).slice(0, 10);
+        if (startDate && date < startDate) continue;
+        if (endDate && date > endDate) continue;
+        const title = _str(item.title).toLowerCase();
+        const summary = _str(item.summary).toLowerCase();
+        if (!q || title.includes(q) || summary.includes(q)) newsItems.push(item);
+      }
+    }
+
+    let verificationStatus: string;
+    if (secItems.length > 0) verificationStatus = "CONFIRMED";
+    else if (newsItems.length > 0) verificationStatus = "PARTIAL";
+    else verificationStatus = "NOT_FOUND";
+
+    return JSON.stringify({
+      ticker,
+      eventQuery,
+      verificationStatus,
+      secEvidenceCount: secItems.length,
+      newsEvidenceCount: newsItems.length,
+      bestEvidence: [...secItems.slice(0, 3), ...newsItems.slice(0, 3)],
+    });
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
+  }
+}

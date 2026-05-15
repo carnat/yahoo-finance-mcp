@@ -1,13 +1,43 @@
 #!/usr/bin/env python3
-"""Validate canonical/alias routing parity on deployed MCP."""
+"""Validate canonical/alias routing invariants on deployed MCP.
+
+Asserts routing metadata (ok, meta.canonicalTool, DEPRECATED_ALIAS warning,
+stable key presence) WITHOUT exact-comparing volatile live payload values
+(prices, timestamps, volume). This avoids false failures when the market is open
+or when two sequential calls return slightly different quotes.
+
+Stable keys checked per tool (only keys that are structurally guaranteed):
+  get_market_quote / get_fast_info   → currency, quoteType, lastPrice, previousClose
+  check_volume_liquidity_threshold    → ticker, gatePass, dataDate
+  summarize_options_flow              → ticker, dataQuality
+  analyze_options_flow_window         → ticker, dataQuality (or windowLabel)
+  analyze_position_signals            → t1_inputs, t2_inputs, t4_inputs, t5_inputs
+  calculate_price_target_distance     → ticker, currentPrice, bracket
+
+Note: get_market_quote/get_fast_info returns yfinance fast_info fields directly
+and does not inject a "ticker" key, so "ticker" is not a stable key for that tool.
+"""
 
 from __future__ import annotations
 
 import json
+import sys
 import urllib.request
 
 URL = "https://yahoo-finance-mcp.artinatw.workers.dev/mcp"
 UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-universal-aliases/1.0)"
+
+# (canonical, args, alias, required_stable_keys_in_data)
+ALIAS_PAIRS: list[tuple[str, dict, str, set[str]]] = [
+    # get_fast_info returns yfinance fast_info fields directly (no "ticker" key injected)
+    ("get_market_quote", {"ticker": "AAPL"}, "get_fast_info", {"currency", "quoteType", "lastPrice", "previousClose"}),
+    ("check_volume_liquidity_threshold", {"ticker": "AAPL"}, "get_adv_gate", {"ticker", "gatePass", "dataDate"}),
+    ("summarize_options_flow", {"ticker": "AAPL"}, "get_options_summary", {"ticker", "dataQuality"}),
+    ("summarize_options_flow", {"ticker": "AAPL"}, "get_options_flow_summary", {"ticker", "dataQuality"}),
+    ("analyze_options_flow_window", {"ticker": "AAPL", "window_label": "audit"}, "get_dc134_options_scan", {"ticker", "dataQuality"}),
+    ("analyze_position_signals", {"ticker": "AAPL"}, "get_tps_inputs", {"t1_inputs", "t2_inputs", "t4_inputs", "t5_inputs"}),
+    ("calculate_price_target_distance", {"ticker": "AAPL", "io_pt": 200}, "get_eqf_bracket", {"ticker", "currentPrice", "bracket"}),
+]
 
 
 def rpc(name: str, args: dict, req_id: int) -> dict:
@@ -34,42 +64,67 @@ def rpc(name: str, args: dict, req_id: int) -> dict:
 def data_of(payload: dict) -> dict:
     if isinstance(payload, dict) and "ok" in payload and "data" in payload:
         return payload.get("data") or {}
-    return payload
+    # Fallback: if no V2 envelope, payload is the data directly
+    return payload if isinstance(payload, dict) else {}
 
 
 def meta_of(payload: dict) -> dict:
-    if isinstance(payload, dict) and "ok" in payload and "meta" in payload:
+    if isinstance(payload, dict) and "ok" in payload:
         return payload.get("meta") or {}
     return {}
 
 
 def main() -> int:
-    pairs: list[tuple[str, dict, str]] = [
-        ("get_market_quote", {"ticker": "ASTS"}, "get_fast_info"),
-        ("analyze_position_signals", {"ticker": "ASTS"}, "get_tps_inputs"),
-        ("calculate_price_target_distance", {"ticker": "ASTS", "io_pt": 95}, "get_eqf_bracket"),
-        ("check_volume_liquidity_threshold", {"ticker": "ASTS"}, "get_adv_gate"),
-        ("analyze_options_flow_window", {"ticker": "ASTS", "window_label": "audit"}, "get_dc134_options_scan"),
-        ("summarize_options_flow", {"ticker": "ASTS"}, "get_options_summary"),
-        ("summarize_options_flow", {"ticker": "ASTS"}, "get_options_flow_summary"),
-    ]
+    failures: list[str] = []
+    for i, (canonical, args, alias, stable_keys) in enumerate(ALIAS_PAIRS, start=1):
+        try:
+            can_payload = rpc(canonical, args, i)
+            ali_payload = rpc(alias, args, i + 100)
+            can_data = data_of(can_payload)
+            ali_data = data_of(ali_payload)
 
-    for i, (canonical, args, alias) in enumerate(pairs, start=1):
-        can_payload = rpc(canonical, args, i)
-        ali_payload = rpc(alias, args, i + 100)
-        can_data = data_of(can_payload)
-        ali_data = data_of(ali_payload)
-        if can_data != ali_data:
-            raise AssertionError(f"Alias data mismatch: {alias} != {canonical}")
-        meta = meta_of(ali_payload)
-        if meta:
-            if meta.get("canonicalTool") != canonical:
-                raise AssertionError(f"{alias} missing canonicalTool={canonical}")
-            warnings = meta.get("warnings") or []
-            if not any(isinstance(w, dict) and w.get("code") == "DEPRECATED_ALIAS" for w in warnings):
-                raise AssertionError(f"{alias} missing DEPRECATED_ALIAS warning")
+            # Check V2 envelope on canonical
+            if isinstance(can_payload, dict) and "ok" in can_payload:
+                if can_payload.get("ok") is not True:
+                    failures.append(f"{canonical}: ok != true")
+                    continue
 
-    print("PASS universal aliases")
+            # Check stable keys present in both (not comparing volatile values)
+            for key in stable_keys:
+                if key not in can_data:
+                    failures.append(f"{canonical}: missing stable key {key!r}")
+                if key not in ali_data:
+                    failures.append(f"{alias}: missing stable key {key!r}")
+
+            # Check alias routing metadata
+            meta = meta_of(ali_payload)
+            if meta:
+                canon_tool = meta.get("canonicalTool")
+                if canon_tool != canonical:
+                    failures.append(f"{alias}: meta.canonicalTool={canon_tool!r}, expected {canonical!r}")
+                warnings = meta.get("warnings") or []
+                if not any(isinstance(w, dict) and w.get("code") == "DEPRECATED_ALIAS" for w in warnings):
+                    failures.append(f"{alias}: missing DEPRECATED_ALIAS warning in meta.warnings")
+
+            # Check structure parity (same top-level keys, ignoring deprecation markers)
+            _alias_extra_keys = {"_deprecatedAlias", "_canonicalTool"}
+            can_keys = set(can_data.keys())
+            ali_keys = set(ali_data.keys()) - _alias_extra_keys
+            missing = can_keys - ali_keys
+            if missing:
+                print(f"  [!] {alias}: alias missing keys vs canonical: {missing} (may vary when market is open)", file=sys.stderr)
+
+            print(f"  PASS  {alias} → {canonical}")
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"{alias}: {exc}")
+
+    if failures:
+        print("\nFAILURES:", file=sys.stderr)
+        for f in failures:
+            print(f"  {f}", file=sys.stderr)
+        return 1
+
+    print("\nPASS — all universal aliases routing invariants verified")
     return 0
 
 

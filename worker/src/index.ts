@@ -21,12 +21,15 @@
  */
 
 import { handleMcp } from "./mcp.js";
-import { setWorkerEnv } from "./response.js";
+import { setWorkerEnv, getWorkerVar } from "./response.js";
+import { TOOLS, callTool } from "./tools.js";
 
 export interface Env {
   MCP_ENVELOPE_V2?: string;
   SERVER_VERSION?: string;
   WORKER_VERSION?: string;
+  AUDIT_TOKEN?: string;
+  BUILD_SHA?: string;
   [key: string]: string | undefined;
 }
 
@@ -60,6 +63,21 @@ export default {
     // Health check
     if (pathname === "/" || pathname === "/health") {
       return json({ name: "yahoo-finance-mcp", status: "ok", transport: "streamable-http" });
+    }
+
+    // Audit endpoint
+    if (pathname === "/audit/mcp") {
+      if (method !== "GET") {
+        return new Response("Method Not Allowed", { status: 405, headers: CORS_HEADERS });
+      }
+      const token = getWorkerVar("AUDIT_TOKEN");
+      if (token) {
+        const authHeader = request.headers.get("Authorization") ?? "";
+        if (authHeader !== `Bearer ${token}`) {
+          return new Response("Unauthorized", { status: 401, headers: CORS_HEADERS });
+        }
+      }
+      return json(await runAudit());
     }
 
     // MCP endpoint
@@ -99,3 +117,16 @@ export default {
     return new Response("Not Found", { status: 404 });
   },
 };
+
+async function runAudit(): Promise<Record<string, unknown>> {
+  const healthRaw = await callTool("health_check", {});
+  let health: Record<string, unknown> = {};
+  try { health = JSON.parse(healthRaw) as Record<string, unknown>; } catch { /* ignore */ }
+  return {
+    auditVersion: "1",
+    generatedAt: new Date().toISOString(),
+    toolCount: TOOLS.length,
+    tools: TOOLS.map(t => ({ name: t.name })),
+    health,
+  };
+}
