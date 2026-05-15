@@ -318,6 +318,150 @@ def get_last_trading_date(df=None) -> str:
     return d.strftime('%Y-%m-%d')
 
 
+_PLACEHOLDER_IV_THRESHOLD = 0.0001
+
+
+def _compute_data_quality(
+    contracts: list[dict],
+    data_date: str,
+    stale_days_threshold: int = 5,
+) -> dict:
+    """Compute dataQuality metrics for a list of option contracts.
+
+    Returns a dict with counts and a quality label of "HIGH", "MEDIUM", or "LOW".
+    """
+    n = len(contracts)
+    if n == 0:
+        return {
+            "zeroBidAskCount": 0,
+            "zeroOpenInterestCount": 0,
+            "placeholderIvCount": 0,
+            "staleLastTradeCount": 0,
+            "returnedContracts": 0,
+            "quality": "LOW",
+            "warnings": ["NO_CONTRACTS_RETURNED"],
+        }
+
+    try:
+        data_date_obj = datetime.date.fromisoformat(data_date)
+    except Exception:
+        data_date_obj = None
+
+    zero_bid_ask = 0
+    zero_oi = 0
+    placeholder_iv = 0
+    stale_trade = 0
+
+    for c in contracts:
+        bid = float(c.get("bid") or 0)
+        ask = float(c.get("ask") or 0)
+        if bid <= 0 or ask <= 0:
+            zero_bid_ask += 1
+
+        oi = float(c.get("openInterest") or 0)
+        if oi <= 0:
+            zero_oi += 1
+
+        iv = float(c.get("impliedVolatility") or 0)
+        if iv <= _PLACEHOLDER_IV_THRESHOLD:
+            placeholder_iv += 1
+
+        if data_date_obj is not None:
+            ltd = c.get("lastTradeDate")
+            if ltd:
+                try:
+                    if isinstance(ltd, str):
+                        ltd_date = datetime.date.fromisoformat(ltd[:10])
+                    else:
+                        ltd_date = datetime.datetime.utcfromtimestamp(int(ltd) / 1000).date()
+                    if (data_date_obj - ltd_date).days > stale_days_threshold:
+                        stale_trade += 1
+                except Exception:
+                    pass
+
+    warnings: list[str] = []
+    pct_bad = (zero_bid_ask + zero_oi + placeholder_iv) / (3 * n)
+
+    if n == 0:
+        quality = "LOW"
+    elif pct_bad >= 0.60:
+        quality = "LOW"
+    elif pct_bad >= 0.30:
+        quality = "MEDIUM"
+    else:
+        quality = "HIGH"
+
+    if zero_bid_ask > n * 0.5:
+        warnings.append("MAJORITY_ZERO_BID_ASK")
+    if zero_oi > n * 0.5:
+        warnings.append("MAJORITY_ZERO_OPEN_INTEREST")
+    if placeholder_iv > n * 0.5:
+        warnings.append("MAJORITY_PLACEHOLDER_IV")
+    if stale_trade > n * 0.5:
+        warnings.append("MAJORITY_STALE_LAST_TRADE")
+
+    return {
+        "zeroBidAskCount": zero_bid_ask,
+        "zeroOpenInterestCount": zero_oi,
+        "placeholderIvCount": placeholder_iv,
+        "staleLastTradeCount": stale_trade,
+        "returnedContracts": n,
+        "quality": quality,
+        "warnings": warnings,
+    }
+
+
+def _sort_by_relevance(
+    contracts: list[dict],
+    underlying_price: float | None,
+) -> list[dict]:
+    """Sort contracts by relevance for LLM/Robot use.
+
+    Priority (desc):
+      1. validQuote (bid > 0 AND ask > 0)
+      2. hasLiquidity (openInterest > 0 OR volume > 0)
+      3. validIv (impliedVolatility > 0.0001)
+      4. distancePct asc (closer to ATM first)
+      5. openInterest desc
+      6. volume desc
+      7. spreadPct asc (nulls last)
+    """
+    def _key(c: dict):
+        bid = float(c.get("bid") or 0)
+        ask = float(c.get("ask") or 0)
+        oi = float(c.get("openInterest") or 0)
+        vol = float(c.get("volume") or 0)
+        iv = float(c.get("impliedVolatility") or 0)
+        strike = float(c.get("strike") or 0)
+
+        valid_quote = 1 if (bid > 0 and ask > 0) else 0
+        has_liquidity = 1 if (oi > 0 or vol > 0) else 0
+        valid_iv = 1 if iv > _PLACEHOLDER_IV_THRESHOLD else 0
+
+        if underlying_price and underlying_price > 0:
+            dist_pct = abs(strike - underlying_price) / underlying_price
+        else:
+            dist_pct = 0.0
+
+        if bid > 0 and ask > 0:
+            spread_pct = (ask - bid) / ((bid + ask) / 2)
+            spread_sort = spread_pct
+        else:
+            spread_sort = 9999.0
+
+        return (
+            -valid_quote,
+            -has_liquidity,
+            -valid_iv,
+            dist_pct,
+            -oi,
+            -vol,
+            spread_sort,
+        )
+
+    return sorted(contracts, key=_key)
+
+
 def _safe_parse(result: object, ticker: str) -> object:
     """Parse a JSON result string, returning a structured error dict on failure.
 
@@ -466,6 +610,7 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
                         'totalContracts': {'type': 'number'},
                         'returnedContracts': {'type': 'number'},
                         'truncated': {'type': 'boolean'},
+                        'dataQuality': {'type': 'object'},
                         'filtersApplied': {'type': 'object'},
                         'contracts': {'type': 'array'}},
          'additionalProperties': True},
@@ -611,7 +756,9 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
                         'maxPainStrike': {'type': ['number', 'null']},
                         'bracket': {'type': ['string', 'null']},
                         'formattedBlock': {'type': ['string', 'null']},
-                        'dataDate': {'type': 'string'}},
+                        'dataDate': {'type': 'string'},
+                        'dataQuality': {'type': 'object'},
+                        'warnings': {'type': 'array'}},
          'additionalProperties': True},
     "get_price_target_bracket": {'type': 'object',
          'properties': {'ticker': {'type': 'string'},
@@ -1161,7 +1308,7 @@ liquidity significantly reduces output size.
 
 Returns a JSON object with top-level fields: ticker, expiration, optionType, dataDate (YYYY-MM-DD of
 the last trading session — use to detect weekend/holiday staleness), totalContracts, returnedContracts,
-truncated, and contracts (array of option rows).
+truncated, dataQuality, and contracts (array of option rows).
 
 Args:
     ticker: str
@@ -1175,15 +1322,19 @@ Args:
     strike_max: float | None
         Optional maximum strike price filter. Only options with strike <= strike_max are returned.
     moneyness: str
-        "all" | "itm" | "otm" | "near_money".
+        "all" | "itm" | "otm" | "near_money". Default "near_money".
+    moneyness_window_pct: float
+        Half-width of the near-money window as a percentage of the underlying price (default: 20).
     sort_by: str
-        "strike" | "volume" | "openInterest".
+        "strike" | "volume" | "openInterest" | "relevance". Default "relevance".
     max_contracts: int
         Maximum number of contracts to return (default: 50, 0 = no limit).
     min_open_interest: int
         Minimum open interest filter (default: 0).
     min_volume: int
         Minimum volume filter (default: 0).
+    include_illiquid: bool
+        When False (default), contracts with zero bid/ask AND zero openInterest are excluded.
 """,
 )
 async def get_option_chain(
@@ -1195,8 +1346,10 @@ async def get_option_chain(
     min_volume: int = 0,
     strike_min: float | None = None,
     strike_max: float | None = None,
-    moneyness: str = "all",
-    sort_by: str = "strike",
+    moneyness: str = "near_money",
+    moneyness_window_pct: float = 20.0,
+    sort_by: str = "relevance",
+    include_illiquid: bool = False,
     min_strike: float | None = None,  # legacy alias
     max_strike: float | None = None,  # legacy alias
     in_the_money_only: bool = False,  # legacy alias
@@ -1246,18 +1399,25 @@ async def get_option_chain(
     if in_the_money_only and moneyness == "all":
         moneyness = "itm"
 
+    # Get underlying price once (needed for near_money and relevance sort)
+    underlying_price: float | None = None
+    try:
+        underlying_price = float(company.fast_info.last_price)
+        if underlying_price <= 0:
+            underlying_price = None
+    except Exception:
+        pass
+
     if moneyness == "itm":
         df = df[df["inTheMoney"] == True]
     elif moneyness == "otm":
         df = df[df["inTheMoney"] == False]
     elif moneyness == "near_money":
-        try:
-            u = float(company.fast_info.last_price)
-            if u > 0:
-                low, high = u * 0.95, u * 1.05
-                df = df[(df["strike"] >= low) & (df["strike"] <= high)]
-        except Exception:
-            pass
+        if underlying_price:
+            half_window = moneyness_window_pct / 100.0
+            low = underlying_price * (1 - half_window)
+            high = underlying_price * (1 + half_window)
+            df = df[(df["strike"] >= low) & (df["strike"] <= high)]
     if effective_strike_min is not None:
         df = df[df["strike"] >= effective_strike_min]
     if effective_strike_max is not None:
@@ -1266,12 +1426,30 @@ async def get_option_chain(
         df = df[df["openInterest"] >= min_open_interest]
     if min_volume > 0:
         df = df[df["volume"] >= min_volume]
-    if sort_by in {"volume", "openInterest", "strike"} and sort_by in df.columns:
-        df = df.sort_values(by=sort_by, ascending=False if sort_by in {"volume", "openInterest"} else True)
-    total_contracts = len(df)
-    if max_contracts > 0:
-        df = df.head(max_contracts)
-    returned_contracts = len(df)
+
+    # include_illiquid=False: drop contracts that have zero bid/ask AND zero OI
+    if not include_illiquid:
+        bid_col = df["bid"].fillna(0).astype(float) if "bid" in df.columns else pd.Series([0.0] * len(df), index=df.index)
+        ask_col = df["ask"].fillna(0).astype(float) if "ask" in df.columns else pd.Series([0.0] * len(df), index=df.index)
+        oi_col = df["openInterest"].fillna(0).astype(float) if "openInterest" in df.columns else pd.Series([0.0] * len(df), index=df.index)
+        liquid_mask = (bid_col > 0) | (ask_col > 0) | (oi_col > 0)
+        df = df[liquid_mask]
+
+    if sort_by == "relevance":
+        contracts_list = json.loads(df.to_json(orient="records", date_format="iso"))
+        contracts_list = _sort_by_relevance(contracts_list, underlying_price)
+        total_contracts = len(contracts_list)
+        if max_contracts > 0:
+            contracts_list = contracts_list[:max_contracts]
+        returned_contracts = len(contracts_list)
+    else:
+        if sort_by in {"volume", "openInterest", "strike"} and sort_by in df.columns:
+            df = df.sort_values(by=sort_by, ascending=False if sort_by in {"volume", "openInterest"} else True)
+        total_contracts = len(df)
+        if max_contracts > 0:
+            df = df.head(max_contracts)
+        returned_contracts = len(df)
+        contracts_list = json.loads(df.to_json(orient="records", date_format="iso"))
 
     # Derive dataDate from the last trading session
     try:
@@ -1284,7 +1462,8 @@ async def get_option_chain(
     except Exception:
         data_date = get_last_trading_date()
 
-    contracts = json.loads(df.to_json(orient="records", date_format="iso"))
+    data_quality = _compute_data_quality(contracts_list, data_date)
+
     return json.dumps({
         "ticker": ticker,
         "expiration": expiration_date,
@@ -1293,6 +1472,7 @@ async def get_option_chain(
         "totalContracts": total_contracts,
         "returnedContracts": returned_contracts,
         "truncated": returned_contracts < total_contracts,
+        "dataQuality": data_quality,
         "filtersApplied": {
             "max_contracts": max_contracts,
             "min_open_interest": min_open_interest,
@@ -1300,9 +1480,11 @@ async def get_option_chain(
             "strike_min": effective_strike_min,
             "strike_max": effective_strike_max,
             "moneyness": moneyness,
+            "moneyness_window_pct": moneyness_window_pct,
             "sort_by": sort_by,
+            "include_illiquid": include_illiquid,
         },
-        "contracts": contracts,
+        "contracts": contracts_list,
     })
 
 
@@ -1331,7 +1513,9 @@ async def get_options_summary(ticker: str) -> str:
         atm_iv = None
         if current_price and not calls.empty:
             idx = (calls["strike"] - current_price).abs().idxmin()
-            atm_iv = float(calls.loc[idx, "impliedVolatility"]) if "impliedVolatility" in calls.columns else None
+            raw_atm_iv = float(calls.loc[idx, "impliedVolatility"]) if "impliedVolatility" in calls.columns else None
+            if raw_atm_iv is not None and raw_atm_iv > _PLACEHOLDER_IV_THRESHOLD:
+                atm_iv = raw_atm_iv
 
         call_vol = float(calls["volume"].sum()) if "volume" in calls.columns else 0
         put_vol = float(puts["volume"].sum()) if "volume" in puts.columns else 0
@@ -1343,7 +1527,10 @@ async def get_options_summary(ticker: str) -> str:
 
         all_strikes = sorted(set(calls["strike"].tolist() + puts["strike"].tolist()))
         max_pain_strike = None
-        if all_strikes:
+        flow_warnings: list[str] = []
+        if call_oi + put_oi <= 0:
+            flow_warnings.append("MAX_PAIN_UNAVAILABLE_ZERO_OI")
+        elif all_strikes:
             min_pain = float("inf")
             for s in all_strikes:
                 call_pain = float(((s - calls["strike"]).clip(lower=0) * calls.get("openInterest", 0)).sum())
@@ -1352,6 +1539,14 @@ async def get_options_summary(ticker: str) -> str:
                 if total < min_pain:
                     min_pain = total
                     max_pain_strike = s
+
+        if atm_iv is None:
+            flow_warnings.append("ATM_IV_PLACEHOLDER")
+
+        # dataQuality over the full nearest-expiry chain
+        calls_list = json.loads(calls.to_json(orient="records", date_format="iso"))
+        puts_list = json.loads(puts.to_json(orient="records", date_format="iso"))
+        data_quality = _compute_data_quality(calls_list + puts_list, get_last_trading_date())
 
         return json.dumps({
             "ticker": ticker,
@@ -1366,6 +1561,8 @@ async def get_options_summary(ticker: str) -> str:
             "putOI": int(put_oi),
             "maxPainStrike": max_pain_strike,
             "dataDate": get_last_trading_date(),
+            "dataQuality": data_quality,
+            "warnings": flow_warnings,
         })
     except Exception as e:
         return json.dumps({"ticker": ticker, "error": str(e)})
@@ -4860,18 +5057,26 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
     put_vol = float(puts_df["volume"].sum(skipna=True)) if not puts_df.empty else 0.0
     pc_ratio: float | None = round(put_vol / call_vol, 2) if call_vol > 0 else None
 
+    # Total OI for max pain guard
+    call_oi_total = float(calls_df["openInterest"].sum(skipna=True)) if "openInterest" in calls_df.columns else 0.0
+    put_oi_total = float(puts_df["openInterest"].sum(skipna=True)) if "openInterest" in puts_df.columns else 0.0
+
     # Max pain strike — strike with maximum combined open interest
     max_pain_strike: float | None = None
-    try:
-        combined = pd.concat([
-            calls_df[["strike", "openInterest"]],
-            puts_df[["strike", "openInterest"]],
-        ])
-        oi_by_strike = combined.groupby("strike")["openInterest"].sum()
-        if not oi_by_strike.empty:
-            max_pain_strike = float(oi_by_strike.idxmax())
-    except Exception:
-        pass
+    scan_warnings: list[str] = []
+    if call_oi_total + put_oi_total <= 0:
+        scan_warnings.append("MAX_PAIN_UNAVAILABLE_ZERO_OI")
+    else:
+        try:
+            combined = pd.concat([
+                calls_df[["strike", "openInterest"]],
+                puts_df[["strike", "openInterest"]],
+            ])
+            oi_by_strike = combined.groupby("strike")["openInterest"].sum()
+            if not oi_by_strike.empty:
+                max_pain_strike = float(oi_by_strike.idxmax())
+        except Exception:
+            pass
 
     # ATM implied volatility (nearest call strike to current price)
     atm_iv: float | None = None
@@ -4882,26 +5087,38 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
             atm_row = _calls.nsmallest(1, "_dist")
             if not atm_row.empty:
                 iv_val = atm_row["impliedVolatility"].iloc[0]
-                if pd.notna(iv_val):
+                if pd.notna(iv_val) and float(iv_val) > _PLACEHOLDER_IV_THRESHOLD:
                     atm_iv = float(iv_val)
     except Exception:
         pass
 
+    if atm_iv is None:
+        scan_warnings.append("ATM_IV_PLACEHOLDER")
+
+    # dataQuality over the full nearest-expiry chain
+    calls_list = json.loads(calls_df.to_json(orient="records", date_format="iso"))
+    puts_list = json.loads(puts_df.to_json(orient="records", date_format="iso"))
+    data_quality = _compute_data_quality(calls_list + puts_list, get_last_trading_date())
+    quality = data_quality.get("quality", "HIGH")
+
     # IV percentile — approximate using annualised 30-day rolling realised vol over 1 year
     iv_pctile: int | None = None
-    try:
-        hist_1y = company.history(period="1y", interval="1d")
-        if hist_1y is not None and len(hist_1y) >= 30 and atm_iv is not None:
-            rets = hist_1y["Close"].pct_change().dropna()
-            roll_rv = rets.rolling(30).std() * (252 ** 0.5)
-            roll_rv = roll_rv.dropna()
-            if len(roll_rv) >= 5:
-                rv_min, rv_max = float(roll_rv.min()), float(roll_rv.max())
-                if rv_max > rv_min:
-                    pctile = (atm_iv - rv_min) / (rv_max - rv_min) * 100
-                    iv_pctile = max(0, min(100, round(pctile)))
-    except Exception:
-        pass
+    if quality == "LOW" and data_quality.get("placeholderIvCount", 0) > len(calls_list + puts_list) * 0.5:
+        scan_warnings.append("IV_PERCENTILE_UNAVAILABLE_PLACEHOLDER_IV")
+    else:
+        try:
+            hist_1y = company.history(period="1y", interval="1d")
+            if hist_1y is not None and len(hist_1y) >= 30 and atm_iv is not None:
+                rets = hist_1y["Close"].pct_change().dropna()
+                roll_rv = rets.rolling(30).std() * (252 ** 0.5)
+                roll_rv = roll_rv.dropna()
+                if len(roll_rv) >= 5:
+                    rv_min, rv_max = float(roll_rv.min()), float(roll_rv.max())
+                    if rv_max > rv_min:
+                        pctile = (atm_iv - rv_min) / (rv_max - rv_min) * 100
+                        iv_pctile = max(0, min(100, round(pctile)))
+        except Exception:
+            pass
 
     # Put vol vs 10-day average proxy (since historical options volume is unavailable via yfinance)
     # Proxy: put vol as a multiple of 1% of the stock's 10d average daily volume.
@@ -4949,9 +5166,9 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
         elif ratio_change < 0.9:
             put_vol_trend = "DECREASING"
 
-    # Bracket classification
+    # Bracket classification — suppressed when data quality is LOW
     bracket: str | None = None
-    if pc_ratio is not None:
+    if quality != "LOW" and pc_ratio is not None:
         if pc_ratio >= 1.3 or (pc_ratio >= 1.0 and put_vol_trend == "INCREASING"):
             bracket = "UPPER"
         elif pc_ratio <= 0.8 and put_vol_trend != "INCREASING":
@@ -4960,17 +5177,22 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
             bracket = "MID"
 
     # Formatted block
-    iv_str = f"{iv_pctile}th%ile" if iv_pctile is not None else "N/A"
-    pv_str = f"{put_vol_vs_10d:.2f}x" if put_vol_vs_10d is not None else "N/A"
-    pc_str = f"{pc_ratio:.2f}" if pc_ratio is not None else "N/A"
-    formatted_block = (
-        f"OPTIONS FLOW SCAN [{window_label}] {ticker} | "
-        f"P/C: {pc_str} | "
-        f"IV: {iv_str} | "
-        f"Put vol vs 10d avg: {pv_str} | "
-        f"Trend: {put_vol_trend} | "
-        f"Advisory: {bracket or 'N/A'} bracket"
-    )
+    if quality == "LOW":
+        formatted_block = (
+            f"OPTIONS FLOW: DATA QUALITY LOW — raw chain unreliable; no doctrine weight."
+        )
+    else:
+        iv_str = f"{iv_pctile}th%ile" if iv_pctile is not None else "N/A"
+        pv_str = f"{put_vol_vs_10d:.2f}x" if put_vol_vs_10d is not None else "N/A"
+        pc_str = f"{pc_ratio:.2f}" if pc_ratio is not None else "N/A"
+        formatted_block = (
+            f"OPTIONS FLOW SCAN [{window_label}] {ticker} | "
+            f"P/C: {pc_str} | "
+            f"IV: {iv_str} | "
+            f"Put vol vs 10d avg: {pv_str} | "
+            f"Trend: {put_vol_trend} | "
+            f"Advisory: {bracket or 'N/A'} bracket"
+        )
 
     result_dict: dict = {
         "ticker": ticker,
@@ -4983,6 +5205,8 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
         "maxPainStrike": max_pain_strike,
         "bracket": bracket,
         "formattedBlock": formatted_block,
+        "dataQuality": data_quality,
+        "warnings": scan_warnings,
     }
 
     # Cache current reading for future trend comparison (72h TTL via 3-day window check)
