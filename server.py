@@ -458,6 +458,9 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
                         'expiration': {'type': 'string'},
                         'optionType': {'type': 'string'},
                         'dataDate': {'type': 'string'},
+                        'totalContracts': {'type': 'number'},
+                        'returnedContracts': {'type': 'number'},
+                        'truncated': {'type': 'boolean'},
                         'contracts': {'type': 'array'}},
          'additionalProperties': True},
     "get_recommendations": _SIMPLE_OUTPUT_SCHEMA,
@@ -633,7 +636,32 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
                         'dataDate': {'type': 'string'},
                         'note': {'type': ['string', 'null']}},
          'additionalProperties': True},
+    "get_options_summary": {
+        "type": "object",
+        "properties": {
+            "ticker": {"type": "string"},
+            "nearestExpiry": {"type": ["string", "null"]},
+            "currentPrice": {"type": ["number", "null"]},
+            "atmIV": {"type": ["number", "null"]},
+            "pcRatioVolume": {"type": ["number", "null"]},
+            "pcRatioOI": {"type": ["number", "null"]},
+            "callVolume": {"type": ["number", "null"]},
+            "putVolume": {"type": ["number", "null"]},
+            "callOI": {"type": ["number", "null"]},
+            "putOI": {"type": ["number", "null"]},
+            "maxPainStrike": {"type": ["number", "null"]},
+            "dataDate": {"type": "string"},
+        },
+        "additionalProperties": True,
+    },
+    "list_sec_filings": _SIMPLE_OUTPUT_SCHEMA,
+    "get_filing_outline": _SIMPLE_OUTPUT_SCHEMA,
+    "get_filing_section": _SIMPLE_OUTPUT_SCHEMA,
+    "list_filing_tables": _SIMPLE_OUTPUT_SCHEMA,
+    "get_filing_table": _SIMPLE_OUTPUT_SCHEMA,
+    "extract_filing_fact": _SIMPLE_OUTPUT_SCHEMA,
 }
+# Deprecated tools should use: _mcp_failure(tool, ErrorCode.DEPRECATED_TOOL, f"Use {canonical} instead")
 
 @yfinance_server.tool(
     name="get_historical_stock_prices",
@@ -1062,7 +1090,8 @@ Use the optional strike filters to narrow the results — a full options chain (
 filtering near-the-money reduces this to ~10-20 rows and dramatically cuts token usage.
 
 Returns a JSON object with top-level fields: ticker, expiration, optionType, dataDate (YYYY-MM-DD of
-the last trading session — use to detect weekend/holiday staleness), and contracts (array of option rows).
+the last trading session — use to detect weekend/holiday staleness), totalContracts, returnedContracts,
+truncated, and contracts (array of option rows).
 
 Args:
     ticker: str
@@ -1077,6 +1106,12 @@ Args:
         Optional maximum strike price filter. Only options with strike <= max_strike are returned.
     in_the_money_only: bool
         If True, only return in-the-money options. Default is False.
+    max_contracts: int
+        Maximum number of contracts to return (default: 50, 0 = no limit).
+    min_open_interest: int
+        Minimum open interest filter (default: 0).
+    min_volume: int
+        Minimum volume filter (default: 0).
 """,
 )
 async def get_option_chain(
@@ -1086,6 +1121,9 @@ async def get_option_chain(
     min_strike: float | None = None,
     max_strike: float | None = None,
     in_the_money_only: bool = False,
+    max_contracts: int = 50,
+    min_open_interest: int = 0,
+    min_volume: int = 0,
 ) -> str:
     """Fetch the option chain for a given ticker symbol, expiration date, and option type.
 
@@ -1127,12 +1165,20 @@ async def get_option_chain(
     else:
         return f"Error: invalid option type {option_type}. Please use one of the following: calls, puts."
 
+    if in_the_money_only:
+        df = df[df["inTheMoney"] == True]
     if min_strike is not None:
         df = df[df["strike"] >= min_strike]
     if max_strike is not None:
         df = df[df["strike"] <= max_strike]
-    if in_the_money_only:
-        df = df[df["inTheMoney"]]
+    if min_open_interest > 0:
+        df = df[df["openInterest"] >= min_open_interest]
+    if min_volume > 0:
+        df = df[df["volume"] >= min_volume]
+    total_contracts = len(df)
+    if max_contracts > 0:
+        df = df.head(max_contracts)
+    returned_contracts = len(df)
 
     # Derive dataDate from the last trading session
     try:
@@ -1151,8 +1197,406 @@ async def get_option_chain(
         "expiration": expiration_date,
         "optionType": option_type,
         "dataDate": data_date,
+        "totalContracts": total_contracts,
+        "returnedContracts": returned_contracts,
+        "truncated": returned_contracts < total_contracts,
         "contracts": contracts,
     })
+
+
+@yfinance_server.tool(
+    name="get_options_summary",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_summary"],
+    description="Get options summary for a single ticker: ATM implied volatility, put/call ratio by volume and OI, max pain strike for the nearest liquid expiry. Preferred for LLM use — returns a compact snapshot without the full contract list.",
+)
+async def get_options_summary(ticker: str) -> str:
+    company = yf.Ticker(ticker)
+    try:
+        expirations = company.options
+        if not expirations:
+            return json.dumps({"ticker": ticker, "error": "No options data available"})
+        expiry = expirations[0]
+        opt = company.option_chain(expiry)
+        calls = opt.calls
+        puts = opt.puts
+
+        current_price = None
+        try:
+            current_price = company.fast_info.last_price
+        except Exception:
+            pass
+
+        atm_iv = None
+        if current_price and not calls.empty:
+            idx = (calls["strike"] - current_price).abs().idxmin()
+            atm_iv = float(calls.loc[idx, "impliedVolatility"]) if "impliedVolatility" in calls.columns else None
+
+        call_vol = float(calls["volume"].sum()) if "volume" in calls.columns else 0
+        put_vol = float(puts["volume"].sum()) if "volume" in puts.columns else 0
+        pc_ratio_volume = round(put_vol / call_vol, 3) if call_vol > 0 else None
+
+        call_oi = float(calls["openInterest"].sum()) if "openInterest" in calls.columns else 0
+        put_oi = float(puts["openInterest"].sum()) if "openInterest" in puts.columns else 0
+        pc_ratio_oi = round(put_oi / call_oi, 3) if call_oi > 0 else None
+
+        all_strikes = sorted(set(calls["strike"].tolist() + puts["strike"].tolist()))
+        max_pain_strike = None
+        if all_strikes:
+            min_pain = float("inf")
+            for s in all_strikes:
+                call_pain = float(((s - calls["strike"]).clip(lower=0) * calls.get("openInterest", 0)).sum())
+                put_pain = float(((puts["strike"] - s).clip(lower=0) * puts.get("openInterest", 0)).sum())
+                total = call_pain + put_pain
+                if total < min_pain:
+                    min_pain = total
+                    max_pain_strike = s
+
+        return json.dumps({
+            "ticker": ticker,
+            "nearestExpiry": expiry,
+            "currentPrice": current_price,
+            "atmIV": round(atm_iv, 4) if atm_iv is not None else None,
+            "pcRatioVolume": pc_ratio_volume,
+            "pcRatioOI": pc_ratio_oi,
+            "callVolume": int(call_vol),
+            "putVolume": int(put_vol),
+            "callOI": int(call_oi),
+            "putOI": int(put_oi),
+            "maxPainStrike": max_pain_strike,
+            "dataDate": get_last_trading_date(),
+        })
+    except Exception as e:
+        return json.dumps({"ticker": ticker, "error": str(e)})
+
+
+@yfinance_server.tool(
+    name="list_sec_filings",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["list_sec_filings"],
+    description="""List recent SEC filings for a ticker from EDGAR.
+Returns accession number, filing date, form type, primary document URL, and EDGAR index URL.
+Supports form types: 10-K, 10-Q, 8-K, DEF 14A.
+Args:
+    ticker: str - The ticker symbol
+    form_type: str - Optional form type filter (10-K, 10-Q, 8-K, DEF 14A). Default: 10-K
+    max_filings: int - Maximum filings to return (default: 5, max: 20)
+""",
+)
+async def list_sec_filings(ticker: str, form_type: str = "10-K", max_filings: int = 5) -> str:
+    ALLOWED_FORMS = {"10-K", "10-Q", "8-K", "DEF 14A"}
+    if form_type not in ALLOWED_FORMS:
+        return _mcp_failure("list_sec_filings", ErrorCode.INPUT_VALIDATION_ERROR,
+                            f"Invalid form_type '{form_type}'. Must be one of: {sorted(ALLOWED_FORMS)}")
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("list_sec_filings", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    max_filings = min(max(1, max_filings), 20)
+
+    import urllib.request
+    ticker_upper = ticker.upper()
+    try:
+        tickers_url = "https://www.sec.gov/files/company_tickers.json"
+        req = urllib.request.Request(tickers_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            tickers_data = json.loads(resp.read())
+
+        cik = None
+        for _entry in tickers_data.values():
+            if _entry.get("ticker", "").upper() == ticker_upper:
+                cik = int(_entry["cik_str"])
+                break
+
+        if cik is None:
+            return _mcp_failure("list_sec_filings", ErrorCode.TICKER_NOT_FOUND,
+                                f"Could not find EDGAR CIK for ticker '{ticker}'")
+
+        cik_padded = str(cik).zfill(10)
+        sub_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
+        req2 = urllib.request.Request(sub_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
+        with urllib.request.urlopen(req2, timeout=10) as resp2:
+            sub_data = json.loads(resp2.read())
+
+        filings_data = sub_data.get("filings", {}).get("recent", {})
+        forms = filings_data.get("form", [])
+        dates = filings_data.get("filingDate", [])
+        accessions = filings_data.get("accessionNumber", [])
+        primary_docs = filings_data.get("primaryDocument", [])
+
+        results = []
+        for i, form in enumerate(forms):
+            if form == form_type and len(results) < max_filings:
+                acc = accessions[i] if i < len(accessions) else ""
+                date = dates[i] if i < len(dates) else ""
+                doc = primary_docs[i] if i < len(primary_docs) else ""
+                acc_clean = acc.replace("-", "")
+                index_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_clean}/{acc}-index.htm"
+                doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_clean}/{doc}" if doc else None
+                results.append({
+                    "accessionNumber": acc,
+                    "filingDate": date,
+                    "formType": form,
+                    "primaryDocumentUrl": doc_url,
+                    "edgarIndexUrl": index_url,
+                })
+
+        return json.dumps({"ticker": ticker, "formType": form_type, "filings": results})
+    except Exception as e:
+        return _mcp_failure("list_sec_filings", ErrorCode.PROVIDER_ERROR, str(e))
+
+
+@yfinance_server.tool(
+    name="get_filing_outline",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_outline"],
+    description="""Parse the document outline of an SEC filing (10-K/10-Q). Returns a hierarchical tree of Parts, Items, Notes as found in the document.
+Args:
+    ticker: str - ticker symbol
+    accession_number: str - SEC accession number (format: XXXXXXXXXX-YY-ZZZZZZ)
+    document_url: str - Optional direct URL to the filing HTML document (must be https://www.sec.gov/Archives/...)
+""",
+)
+async def get_filing_outline(ticker: str, accession_number: str | None = None, document_url: str | None = None) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("get_filing_outline", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    if document_url:
+        url_err = _validate_sec_url(document_url)
+        if url_err:
+            return _mcp_failure("get_filing_outline", ErrorCode.INPUT_VALIDATION_ERROR, url_err)
+    if accession_number:
+        acc_err = _validate_accession(accession_number)
+        if acc_err:
+            return _mcp_failure("get_filing_outline", ErrorCode.INPUT_VALIDATION_ERROR, acc_err)
+
+    try:
+        import urllib.request
+        if not document_url and accession_number:
+            cik = None
+            tickers_url = "https://www.sec.gov/files/company_tickers.json"
+            req = urllib.request.Request(tickers_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                tickers_data = json.loads(resp.read())
+            for _entry in tickers_data.values():
+                if _entry.get("ticker", "").upper() == ticker.upper():
+                    cik = int(_entry["cik_str"])
+                    break
+            if cik:
+                acc_clean = accession_number.replace("-", "")
+                document_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_clean}/{accession_number}-index.htm"
+
+        if not document_url:
+            return _mcp_failure("get_filing_outline", ErrorCode.INPUT_VALIDATION_ERROR,
+                                "Either accession_number or document_url is required")
+
+        req = urllib.request.Request(document_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+
+        html = _sanitize_sec_html(html)
+        outline = []
+        heading_re = _re.compile(r'<h([1-6])[^>]*>(.*?)</h\1>', _re.IGNORECASE | _re.DOTALL)
+        item_re = _re.compile(r'(Part\s+[IVX]+|Item\s+\d+[A-Z]?|Note\s+\d+)', _re.IGNORECASE)
+        for m in heading_re.finditer(html):
+            level = int(m.group(1))
+            text = _re.sub(r'<[^>]+>', '', m.group(2)).strip()
+            text = ' '.join(text.split())
+            if text and (item_re.search(text) or len(text) < 100):
+                outline.append({"level": level, "title": text})
+
+        return json.dumps({"ticker": ticker, "accessionNumber": accession_number, "outline": outline[:100]})
+    except Exception as e:
+        return _mcp_failure("get_filing_outline", ErrorCode.PROVIDER_ERROR, str(e))
+
+
+@yfinance_server.tool(
+    name="get_filing_section",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_section"],
+    description="""Retrieve the text content of a specific section from an SEC filing document.
+Args:
+    ticker: str - ticker symbol
+    section_name: str - Section name/heading to find, e.g. 'Item 1A', 'Note 3', 'Risk Factors'
+    document_url: str - Direct URL to filing HTML (must be https://www.sec.gov/Archives/...)
+    context_chars: int - Characters of context around matched section (default: 3000)
+""",
+)
+async def get_filing_section(ticker: str, section_name: str, document_url: str, context_chars: int = 3000) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("get_filing_section", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    url_err = _validate_sec_url(document_url)
+    if url_err:
+        return _mcp_failure("get_filing_section", ErrorCode.INPUT_VALIDATION_ERROR, url_err)
+
+    try:
+        import urllib.request
+        req = urllib.request.Request(document_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+
+        html = _sanitize_sec_html(html)
+        text = _re.sub(r'<[^>]+>', ' ', html)
+        text = ' '.join(text.split())
+
+        pattern = _re.compile(_re.escape(section_name), _re.IGNORECASE)
+        m = pattern.search(text)
+        if not m:
+            words = section_name.split()
+            if words:
+                pattern2 = _re.compile(r'\b' + r'\s+'.join(_re.escape(w) for w in words), _re.IGNORECASE)
+                m = pattern2.search(text)
+
+        if not m:
+            return json.dumps({"ticker": ticker, "sectionName": section_name, "found": False, "text": None})
+
+        start = max(0, m.start())
+        end = min(len(text), m.start() + context_chars)
+        return json.dumps({
+            "ticker": ticker,
+            "sectionName": section_name,
+            "found": True,
+            "text": text[start:end],
+        })
+    except Exception as e:
+        return _mcp_failure("get_filing_section", ErrorCode.PROVIDER_ERROR, str(e))
+
+
+@yfinance_server.tool(
+    name="list_filing_tables",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["list_filing_tables"],
+    description="""List all HTML tables in an SEC filing document. Returns table index, headers, and row count.
+Args:
+    ticker: str
+    document_url: str - Direct URL to filing HTML (must be https://www.sec.gov/Archives/...)
+""",
+)
+async def list_filing_tables(ticker: str, document_url: str) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("list_filing_tables", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    url_err = _validate_sec_url(document_url)
+    if url_err:
+        return _mcp_failure("list_filing_tables", ErrorCode.INPUT_VALIDATION_ERROR, url_err)
+
+    try:
+        import urllib.request
+        req = urllib.request.Request(document_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+
+        html = _sanitize_sec_html(html)
+        tables = []
+        table_re = _re.compile(r'<table[^>]*>(.*?)</table>', _re.DOTALL | _re.IGNORECASE)
+        tr_re = _re.compile(r'<tr[^>]*>(.*?)</tr>', _re.DOTALL | _re.IGNORECASE)
+        td_re = _re.compile(r'<t[dh][^>]*>(.*?)</t[dh]>', _re.DOTALL | _re.IGNORECASE)
+
+        for i, table_m in enumerate(table_re.finditer(html)):
+            rows = tr_re.findall(table_m.group(1))
+            row_count = len(rows)
+            headers = []
+            if rows:
+                first_cells = td_re.findall(rows[0])
+                headers = [' '.join(_re.sub(r'<[^>]+>', '', c).split()) for c in first_cells[:6]]
+            tables.append({"tableIndex": i, "rowCount": row_count, "headers": headers})
+
+        return json.dumps({"ticker": ticker, "documentUrl": document_url, "tableCount": len(tables), "tables": tables[:50]})
+    except Exception as e:
+        return _mcp_failure("list_filing_tables", ErrorCode.PROVIDER_ERROR, str(e))
+
+
+@yfinance_server.tool(
+    name="get_filing_table",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_table"],
+    description="""Get the parsed rows of a specific table from an SEC filing document.
+Args:
+    ticker: str
+    document_url: str - Direct URL to filing HTML (must be https://www.sec.gov/Archives/...)
+    table_index: int - Table index from list_filing_tables (0-based)
+    max_rows: int - Maximum rows to return (default: 30)
+""",
+)
+async def get_filing_table(ticker: str, document_url: str, table_index: int, max_rows: int = 30) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("get_filing_table", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    url_err = _validate_sec_url(document_url)
+    if url_err:
+        return _mcp_failure("get_filing_table", ErrorCode.INPUT_VALIDATION_ERROR, url_err)
+
+    try:
+        import urllib.request
+        req = urllib.request.Request(document_url, headers={"User-Agent": "yahoo-finance-mcp/1.0 admin@example.com"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+
+        html = _sanitize_sec_html(html)
+        table_re = _re.compile(r'<table[^>]*>(.*?)</table>', _re.DOTALL | _re.IGNORECASE)
+        tr_re = _re.compile(r'<tr[^>]*>(.*?)</tr>', _re.DOTALL | _re.IGNORECASE)
+        td_re = _re.compile(r'<t[dh][^>]*>(.*?)</t[dh]>', _re.DOTALL | _re.IGNORECASE)
+
+        tables = list(table_re.finditer(html))
+        if table_index >= len(tables):
+            return _mcp_failure("get_filing_table", ErrorCode.NO_FILING_DATA,
+                                f"Table index {table_index} not found. Document has {len(tables)} tables.")
+
+        table_html = tables[table_index].group(1)
+        rows = tr_re.findall(table_html)
+        parsed_rows = []
+        for row in rows[:max_rows + 1]:
+            cells = td_re.findall(row)
+            parsed_rows.append([' '.join(_re.sub(r'<[^>]+>', '', c).split()) for c in cells])
+
+        return json.dumps({
+            "ticker": ticker,
+            "tableIndex": table_index,
+            "totalRows": len(rows),
+            "returnedRows": len(parsed_rows),
+            "rows": parsed_rows,
+        })
+    except Exception as e:
+        return _mcp_failure("get_filing_table", ErrorCode.PROVIDER_ERROR, str(e))
+
+
+@yfinance_server.tool(
+    name="extract_filing_fact",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_filing_fact"],
+    description="""Extract a specific financial fact from an SEC filing. Uses XBRL first, parsed tables second, text search last.
+Args:
+    ticker: str
+    fact_name: str - Fact to extract (e.g. 'revenue', 'net income', 'R&D expense')
+    document_url: str - Optional direct URL to filing HTML (must be https://www.sec.gov/Archives/...)
+    accession_number: str - Optional accession number for XBRL lookup
+""",
+)
+async def extract_filing_fact(
+    ticker: str,
+    fact_name: str,
+    document_url: str | None = None,
+    accession_number: str | None = None,
+) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("extract_filing_fact", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    if document_url:
+        url_err = _validate_sec_url(document_url)
+        if url_err:
+            return _mcp_failure("extract_filing_fact", ErrorCode.INPUT_VALIDATION_ERROR, url_err)
+
+    try:
+        result_str = await search_filing_text(
+            ticker=ticker,
+            search_terms=[fact_name],
+            filing_type="10-K",
+            accession_number=accession_number,
+            context_chars=1000,
+            return_tables=True,
+        )
+        result = json.loads(result_str)
+        return json.dumps({
+            "ticker": ticker,
+            "factName": fact_name,
+            "extractionMethod": "text_search",
+            "result": result,
+        })
+    except Exception as e:
+        return _mcp_failure("extract_filing_fact", ErrorCode.PROVIDER_ERROR, str(e))
 
 
 @yfinance_server.tool(

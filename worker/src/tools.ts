@@ -36,6 +36,13 @@ import {
   searchTicker,
   getStockActions,
   getStockInfo,
+  getOptionsSummary,
+  listSecFilings,
+  getFilingOutline,
+  getFilingSection,
+  listFilingTables,
+  getFilingTable,
+  extractFilingFact,
 } from "./yahoo-finance.js";
 
 export interface Tool {
@@ -52,6 +59,8 @@ export interface Tool {
     required?: string[];
     additionalProperties?: boolean;
   };
+  deprecated?: boolean;
+  useInstead?: string;
 }
 
 export const TOOLS: Tool[] = [
@@ -208,7 +217,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_option_chain",
     description:
-      "Get the options chain (calls or puts) for a ticker and expiration date. Use get_option_expiration_dates first to find valid dates. Response is wrapped: { ticker, expiration, optionType, dataDate (YYYY-MM-DD last trading day), contracts: [...] }.",
+      "Get the options chain (calls or puts) for a ticker and expiration date. Use get_option_expiration_dates first to find valid dates. Response is wrapped: { ticker, expiration, optionType, dataDate (YYYY-MM-DD last trading day), totalContracts, returnedContracts, truncated, contracts: [...] }.",
     inputSchema: {
       type: "object",
       properties: {
@@ -222,6 +231,9 @@ export const TOOLS: Tool[] = [
           description: "The type of options to retrieve.",
           enum: ["calls", "puts"],
         },
+        min_open_interest: { type: "number", description: "Minimum open interest filter.", default: 0 },
+        min_volume: { type: "number", description: "Minimum volume filter.", default: 0 },
+        max_contracts: { type: "number", description: "Maximum number of contracts to return.", default: 50 },
       },
       required: ["ticker", "expiration_date", "option_type"],
     },
@@ -746,6 +758,97 @@ export const TOOLS: Tool[] = [
       required: ["ticker"],
     },
   },
+  {
+    name: "get_options_summary",
+    description: "Get options summary for a single ticker: ATM implied volatility, put/call ratio by volume and OI, max pain strike for the nearest liquid expiry. Preferred for LLM use — returns a compact snapshot without the full contract list.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "list_sec_filings",
+    description: "List recent SEC filings for a ticker from EDGAR. Returns accession number, filing date, form type, primary document URL, and EDGAR index URL.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string" },
+        form_type: { type: "string", enum: ["10-K", "10-Q", "8-K", "DEF 14A"], default: "10-K" },
+        max_filings: { type: "number", default: 5 },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_filing_outline",
+    description: "Parse the document outline of an SEC filing. Returns a hierarchical tree of Parts, Items, and Notes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string" },
+        accession_number: { type: "string" },
+        document_url: { type: "string" },
+      },
+      required: ["ticker"],
+    },
+  },
+  {
+    name: "get_filing_section",
+    description: "Retrieve the text content of a specific section from an SEC filing document.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string" },
+        section_name: { type: "string" },
+        document_url: { type: "string" },
+        context_chars: { type: "number", default: 3000 },
+      },
+      required: ["ticker", "section_name", "document_url"],
+    },
+  },
+  {
+    name: "list_filing_tables",
+    description: "List all HTML tables in an SEC filing document. Returns table index, headers, and row count.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string" },
+        document_url: { type: "string" },
+      },
+      required: ["ticker", "document_url"],
+    },
+  },
+  {
+    name: "get_filing_table",
+    description: "Get the parsed rows of a specific table from an SEC filing document.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string" },
+        document_url: { type: "string" },
+        table_index: { type: "number" },
+        max_rows: { type: "number", default: 30 },
+      },
+      required: ["ticker", "document_url", "table_index"],
+    },
+  },
+  {
+    name: "extract_filing_fact",
+    description: "Extract a specific financial fact from an SEC filing. Uses XBRL first, parsed tables second, text search last.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ticker: { type: "string" },
+        fact_name: { type: "string" },
+        document_url: { type: "string" },
+        accession_number: { type: "string" },
+      },
+      required: ["ticker", "fact_name"],
+    },
+  },
 ];
 
 const SIMPLE_OBJECT_SCHEMA: Tool["outputSchema"] = {
@@ -770,6 +873,9 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       expiration: { type: "string" },
       optionType: { type: "string" },
       dataDate: { type: "string" },
+      totalContracts: { type: "number" },
+      returnedContracts: { type: "number" },
+      truncated: { type: "boolean" },
       contracts: { type: "array" },
     },
     additionalProperties: true,
@@ -1010,6 +1116,13 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     },
     additionalProperties: true,
   },
+  get_options_summary: SIMPLE_OBJECT_SCHEMA,
+  list_sec_filings: SIMPLE_OBJECT_SCHEMA,
+  get_filing_outline: SIMPLE_OBJECT_SCHEMA,
+  get_filing_section: SIMPLE_OBJECT_SCHEMA,
+  list_filing_tables: SIMPLE_OBJECT_SCHEMA,
+  get_filing_table: SIMPLE_OBJECT_SCHEMA,
+  extract_filing_fact: SIMPLE_OBJECT_SCHEMA,
 };
 
 for (const tool of TOOLS) {
@@ -1046,7 +1159,8 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_option_expiration_dates":
       return getOptionExpirationDates(str(args.ticker));
     case "get_option_chain":
-      return getOptionChain(str(args.ticker), str(args.expiration_date), str(args.option_type));
+      return getOptionChain(str(args.ticker), str(args.expiration_date), str(args.option_type),
+        num(args.max_contracts, 50), num(args.min_open_interest, 0), num(args.min_volume, 0));
     case "get_recommendations":
       return getRecommendations(
         str(args.ticker),
@@ -1126,6 +1240,20 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       return getPositionScoreInputs(str(args.ticker));
     case "get_volume_gate":
       return getVolumeGate(str(args.ticker), args.foreign_exchange === true);
+    case "get_options_summary":
+      return getOptionsSummary(str(args.ticker));
+    case "list_sec_filings":
+      return listSecFilings(str(args.ticker), str(args.form_type, "10-K"), num(args.max_filings, 5));
+    case "get_filing_outline":
+      return getFilingOutline(str(args.ticker), args.accession_number != null ? str(args.accession_number) : null, args.document_url != null ? str(args.document_url) : null);
+    case "get_filing_section":
+      return getFilingSection(str(args.ticker), str(args.section_name), str(args.document_url), num(args.context_chars, 3000));
+    case "list_filing_tables":
+      return listFilingTables(str(args.ticker), str(args.document_url));
+    case "get_filing_table":
+      return getFilingTable(str(args.ticker), str(args.document_url), num(args.table_index, 0), num(args.max_rows, 30));
+    case "extract_filing_fact":
+      return extractFilingFact(str(args.ticker), str(args.fact_name), args.document_url != null ? str(args.document_url) : null, args.accession_number != null ? str(args.accession_number) : null);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
