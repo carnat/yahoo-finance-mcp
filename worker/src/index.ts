@@ -27,6 +27,7 @@ export interface Env {
   MCP_ENVELOPE_V2?: string;
   SERVER_VERSION?: string;
   WORKER_VERSION?: string;
+  [key: string]: string | undefined;
 }
 
 const CORS_HEADERS: Record<string, string> = {
@@ -47,7 +48,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     // Populate module-level env store so response wrappers and tools
     // can read Cloudflare runtime bindings (e.g. MCP_ENVELOPE_V2).
-    setWorkerEnv(env as unknown as Record<string, string>);
+    setWorkerEnv(env);
     const { method } = request;
     const { pathname } = new URL(request.url);
 

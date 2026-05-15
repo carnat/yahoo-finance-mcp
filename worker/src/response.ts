@@ -2,9 +2,13 @@ export const SERVER_VERSION = "1.0.0";
 
 // Module-level Worker env store — populated by setWorkerEnv() in index.ts
 // on each incoming request before tool dispatch.
-let _workerEnv: Record<string, string> = {};
+//
+// Note: although this module-level store is shared across concurrent requests,
+// Cloudflare Worker [vars] bindings are static deploy-time values identical for
+// every request to the same Worker instance, so concurrent overwrites are safe.
+let _workerEnv: Record<string, string | undefined> = {};
 
-export function setWorkerEnv(env: Record<string, string>): void {
+export function setWorkerEnv(env: Record<string, string | undefined>): void {
   _workerEnv = env;
 }
 
