@@ -67,6 +67,145 @@ function getLastTradingDate(timestamps?: number[]): string {
   return d.toISOString().slice(0, 10);
 }
 
+const PLACEHOLDER_IV_THRESHOLD = 0.0001;
+
+interface DataQuality {
+  zeroBidAskCount: number;
+  zeroOpenInterestCount: number;
+  placeholderIvCount: number;
+  staleLastTradeCount: number;
+  returnedContracts: number;
+  quality: "HIGH" | "MEDIUM" | "LOW";
+  warnings: string[];
+}
+
+function computeDataQuality(
+  contracts: Record<string, unknown>[],
+  dataDate: string,
+  staleDaysThreshold: number = 5
+): DataQuality {
+  const n = contracts.length;
+  if (n === 0) {
+    return {
+      zeroBidAskCount: 0, zeroOpenInterestCount: 0, placeholderIvCount: 0,
+      staleLastTradeCount: 0, returnedContracts: 0, quality: "LOW",
+      warnings: ["NO_CONTRACTS_RETURNED"],
+    };
+  }
+
+  let dataDateMs: number | null = null;
+  try {
+    dataDateMs = new Date(dataDate).getTime();
+    if (isNaN(dataDateMs)) dataDateMs = null;
+  } catch { dataDateMs = null; }
+
+  let zeroBidAsk = 0, zeroOI = 0, placeholderIv = 0, staleTrade = 0;
+
+  for (const c of contracts) {
+    const bid = Number(c.bid ?? 0);
+    const ask = Number(c.ask ?? 0);
+    if (bid <= 0 || ask <= 0) zeroBidAsk++;
+
+    const oi = Number(c.openInterest ?? 0);
+    if (oi <= 0) zeroOI++;
+
+    const iv = Number(c.impliedVolatility ?? 0);
+    if (iv <= PLACEHOLDER_IV_THRESHOLD) placeholderIv++;
+
+    if (dataDateMs != null) {
+      const ltd = c.lastTradeDate;
+      if (ltd != null) {
+        let ltdMs: number | null = null;
+        if (typeof ltd === "number") {
+          // Yahoo Finance returns epoch seconds (×1000 to get ms) or epoch ms
+          ltdMs = ltd > 1e10 ? ltd : ltd * 1000;
+        } else if (typeof ltd === "string") {
+          ltdMs = new Date(ltd).getTime();
+        }
+        if (ltdMs != null && !isNaN(ltdMs)) {
+          const ageDays = (dataDateMs - ltdMs) / 86400000;
+          if (ageDays > staleDaysThreshold) staleTrade++;
+        }
+      }
+    }
+  }
+
+  const warnings: string[] = [];
+
+  // Per-dimension thresholds (any single dimension can trigger LOW/MEDIUM)
+  let quality: "HIGH" | "MEDIUM" | "LOW";
+  const zeroBAFrac = zeroBidAsk / n;
+  const zeroOIFrac = zeroOI / n;
+  const placeholderIvFrac = placeholderIv / n;
+  const staleFrac = staleTrade / n;
+
+  if (
+    zeroBAFrac > 0.50 ||
+    zeroOIFrac > 0.80 ||
+    placeholderIvFrac > 0.50 ||
+    staleFrac > 0.50
+  ) {
+    quality = "LOW";
+  } else if (
+    zeroBAFrac > 0.30 ||
+    zeroOIFrac > 0.50 ||
+    placeholderIvFrac > 0.30 ||
+    staleFrac > 0.30
+  ) {
+    quality = "MEDIUM";
+  } else {
+    quality = "HIGH";
+  }
+
+  if (zeroBidAsk > n * 0.5) warnings.push("MAJORITY_ZERO_BID_ASK");
+  if (zeroOI > n * 0.5) warnings.push("MAJORITY_ZERO_OPEN_INTEREST");
+  if (placeholderIv > n * 0.5) warnings.push("MAJORITY_PLACEHOLDER_IV");
+  if (staleTrade > n * 0.5) warnings.push("MAJORITY_STALE_LAST_TRADE");
+
+  return { zeroBidAskCount: zeroBidAsk, zeroOpenInterestCount: zeroOI, placeholderIvCount: placeholderIv,
+           staleLastTradeCount: staleTrade, returnedContracts: n, quality, warnings };
+}
+
+function sortByRelevance(
+  contracts: Record<string, unknown>[],
+  underlyingPrice: number | null
+): Record<string, unknown>[] {
+  return [...contracts].sort((a, b) => {
+    const aBid = Number(a.bid ?? 0), aAsk = Number(a.ask ?? 0);
+    const bBid = Number(b.bid ?? 0), bAsk = Number(b.ask ?? 0);
+    const aOI = Number(a.openInterest ?? 0), aVol = Number(a.volume ?? 0);
+    const bOI = Number(b.openInterest ?? 0), bVol = Number(b.volume ?? 0);
+    const aIV = Number(a.impliedVolatility ?? 0);
+    const bIV = Number(b.impliedVolatility ?? 0);
+    const aStrike = Number(a.strike ?? 0), bStrike = Number(b.strike ?? 0);
+
+    const aValidQuote = aBid > 0 && aAsk > 0 ? 1 : 0;
+    const bValidQuote = bBid > 0 && bAsk > 0 ? 1 : 0;
+    if (bValidQuote !== aValidQuote) return bValidQuote - aValidQuote;
+
+    const aLiquidity = (aOI > 0 || aVol > 0) ? 1 : 0;
+    const bLiquidity = (bOI > 0 || bVol > 0) ? 1 : 0;
+    if (bLiquidity !== aLiquidity) return bLiquidity - aLiquidity;
+
+    const aValidIv = aIV > PLACEHOLDER_IV_THRESHOLD ? 1 : 0;
+    const bValidIv = bIV > PLACEHOLDER_IV_THRESHOLD ? 1 : 0;
+    if (bValidIv !== aValidIv) return bValidIv - aValidIv;
+
+    if (underlyingPrice != null && underlyingPrice > 0) {
+      const aDist = Math.abs(aStrike - underlyingPrice) / underlyingPrice;
+      const bDist = Math.abs(bStrike - underlyingPrice) / underlyingPrice;
+      if (Math.abs(aDist - bDist) > 1e-9) return aDist - bDist;
+    }
+
+    if (bOI !== aOI) return bOI - aOI;
+    if (bVol !== aVol) return bVol - aVol;
+
+    const aSpread = aBid > 0 && aAsk > 0 ? (aAsk - aBid) / ((aBid + aAsk) / 2) : 9999;
+    const bSpread = bBid > 0 && bAsk > 0 ? (bAsk - bBid) / ((bBid + bAsk) / 2) : 9999;
+    return aSpread - bSpread;
+  });
+}
+
 // Module-level crumb cache — shared within a Cloudflare isolate session
 let _crumb: { value: string; cookie: string; exp: number } | null = null;
 
@@ -670,8 +809,10 @@ export async function getOptionChain(
   minVolume: number = 0,
   strikeMin: number | null = null,
   strikeMax: number | null = null,
-  moneyness: string = "all",
-  sortBy: string = "strike",
+  moneyness: string = "near_money",
+  sortBy: string = "relevance",
+  moneynessWindowPct: number = 20,
+  includeIlliquid: boolean = false,
 ): Promise<string> {
   if (!["calls", "puts"].includes(optType)) {
     return `Error: option_type must be 'calls' or 'puts'`;
@@ -699,6 +840,8 @@ export async function getOptionChain(
       ? new Date(regMktTime * 1000).toISOString().slice(0, 10)
       : getLastTradingDate();
 
+    const underlyingPrice = typeof quote.regularMarketPrice === "number" ? quote.regularMarketPrice : null;
+
     let contracts = (opts[optType] ?? []) as Record<string, unknown>[];
     if (strikeMin != null) {
       contracts = contracts.filter(c => ((c.strike as number) || 0) >= strikeMin);
@@ -713,9 +856,10 @@ export async function getOptionChain(
         if (moneyness === "otm") return !itm;
         if (moneyness === "near_money") {
           const strike = (c.strike as number) || 0;
-          const underlying = (quote.regularMarketPrice as number) || strike;
+          const underlying = underlyingPrice ?? ((quote.regularMarketPrice as number) || strike);
           if (underlying <= 0) return false;
-          return Math.abs(strike - underlying) / underlying <= 0.05;
+          const windowFraction = moneynessWindowPct / 100;
+          return Math.abs(strike - underlying) / underlying <= windowFraction;
         }
         return true;
       });
@@ -726,7 +870,20 @@ export async function getOptionChain(
     if (minVolume > 0) {
       contracts = contracts.filter(c => ((c.volume as number) || 0) >= minVolume);
     }
-    if (sortBy === "volume") {
+
+    // include_illiquid=false: drop contracts with zero bid/ask AND zero OI
+    if (!includeIlliquid) {
+      contracts = contracts.filter(c => {
+        const bid = Number(c.bid ?? 0);
+        const ask = Number(c.ask ?? 0);
+        const oi = Number(c.openInterest ?? 0);
+        return bid > 0 || ask > 0 || oi > 0;
+      });
+    }
+
+    if (sortBy === "relevance") {
+      contracts = sortByRelevance(contracts, underlyingPrice);
+    } else if (sortBy === "volume") {
       contracts = contracts.sort((a, b) => (((b.volume as number) || 0) - ((a.volume as number) || 0)));
     } else if (sortBy === "openInterest") {
       contracts = contracts.sort((a, b) => (((b.openInterest as number) || 0) - ((a.openInterest as number) || 0)));
@@ -738,6 +895,7 @@ export async function getOptionChain(
       contracts = contracts.slice(0, maxContracts);
     }
     const returnedContracts = contracts.length;
+    const dataQuality = computeDataQuality(contracts, dataDate);
 
     return JSON.stringify({
       ticker,
@@ -747,6 +905,7 @@ export async function getOptionChain(
       totalContracts,
       returnedContracts,
       truncated: returnedContracts < totalContracts,
+      dataQuality,
       filtersApplied: {
         max_contracts: maxContracts,
         min_open_interest: minOpenInterest,
@@ -754,7 +913,9 @@ export async function getOptionChain(
         strike_min: strikeMin,
         strike_max: strikeMax,
         moneyness,
+        moneyness_window_pct: moneynessWindowPct,
         sort_by: sortBy,
+        include_illiquid: includeIlliquid,
       },
       contracts,
     });
@@ -2168,22 +2329,33 @@ export async function getOptionsFlowSummary(ticker: string, expiryHint?: string)
       else pcSentiment = "NEUTRAL";
     }
 
-    // ATM strike
+    // ATM strike — reject placeholder IV
     let atmStrike: number | null = null;
     let atmIV: number | null = null;
-    if (lastPrice != null && calls.length > 0) {
+    const flowWarnings: string[] = [];
+    if (lastPrice == null) {
+      flowWarnings.push("ATM_IV_UNAVAILABLE_NO_PRICE");
+    } else if (calls.length === 0) {
+      flowWarnings.push("ATM_IV_UNAVAILABLE_NO_CALLS");
+    } else {
       let minDist = Infinity;
+      let rawAtmIV: number | null = null;
       for (const c of calls) {
         const strike = c.strike as number;
         const iv = c.impliedVolatility as number | null;
-        if (strike != null && iv != null) {
+        if (strike != null) {
           const dist = Math.abs(strike - lastPrice);
           if (dist < minDist) {
             minDist = dist;
             atmStrike = strike;
-            atmIV = +(iv).toFixed(3);
+            rawAtmIV = iv ?? null;
           }
         }
+      }
+      if (rawAtmIV != null && rawAtmIV > PLACEHOLDER_IV_THRESHOLD) {
+        atmIV = +rawAtmIV.toFixed(3);
+      } else {
+        flowWarnings.push("ATM_IV_PLACEHOLDER");
       }
     }
 
@@ -2199,24 +2371,28 @@ export async function getOptionsFlowSummary(ticker: string, expiryHint?: string)
     }
     const ivFlag = ivPctile != null && ivPctile > 70 ? "⚠️ HIGH IV" : null;
 
-    // Max pain
+    // Max pain — suppress when OI is all-zero
     let maxPainStrike: number | null = null;
-    const allStrikes = [...new Set([
-      ...calls.map((c) => c.strike as number).filter(Boolean),
-      ...puts.map((p) => p.strike as number).filter(Boolean),
-    ])].sort((a, b) => a - b);
+    if (totalCallOI + totalPutOI <= 0) {
+      flowWarnings.push("MAX_PAIN_UNAVAILABLE_ZERO_OI");
+    } else {
+      const allStrikes = [...new Set([
+        ...calls.map((c) => c.strike as number).filter(Boolean),
+        ...puts.map((p) => p.strike as number).filter(Boolean),
+      ])].sort((a, b) => a - b);
 
-    if (allStrikes.length > 0) {
-      let minPain = Infinity;
-      for (const strike of allStrikes) {
-        let pain = 0;
-        for (const c of calls) {
-          pain += Math.max(0, strike - (c.strike as number)) * ((c.openInterest as number) ?? 0);
+      if (allStrikes.length > 0) {
+        let minPain = Infinity;
+        for (const strike of allStrikes) {
+          let pain = 0;
+          for (const c of calls) {
+            pain += Math.max(0, strike - (c.strike as number)) * ((c.openInterest as number) ?? 0);
+          }
+          for (const p of puts) {
+            pain += Math.max(0, (p.strike as number) - strike) * ((p.openInterest as number) ?? 0);
+          }
+          if (pain < minPain) { minPain = pain; maxPainStrike = strike; }
         }
-        for (const p of puts) {
-          pain += Math.max(0, (p.strike as number) - strike) * ((p.openInterest as number) ?? 0);
-        }
-        if (pain < minPain) { minPain = pain; maxPainStrike = strike; }
       }
     }
 
@@ -2234,6 +2410,9 @@ export async function getOptionsFlowSummary(ticker: string, expiryHint?: string)
       if (oi > maxPutOI) { maxPutOI = oi; highestOIPutStrike = p.strike as number; }
     }
 
+    const dataDate = getLastTradingDate();
+    const dataQuality = computeDataQuality([...calls, ...puts], dataDate);
+
     return JSON.stringify({
       ticker,
       expiryDate: selectedExpiry,
@@ -2248,7 +2427,9 @@ export async function getOptionsFlowSummary(ticker: string, expiryHint?: string)
       maxPainStrike,
       highestOICallStrike,
       highestOIPutStrike,
-      dataDate: new Date().toISOString().slice(0, 10),
+      dataDate,
+      dataQuality,
+      warnings: flowWarnings,
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
@@ -4156,61 +4337,95 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
     const putVol = puts.reduce((s, p) => s + ((p.volume as number) || 0), 0);
     const pcRatio = callVol > 0 ? +(putVol / callVol).toFixed(2) : null;
 
+    // Total OI guard for max pain
+    const totalCallOI = calls.reduce((s, c) => s + ((c.openInterest as number) || 0), 0);
+    const totalPutOI = puts.reduce((s, p) => s + ((p.openInterest as number) || 0), 0);
+
     let maxPainStrike: number | null = null;
-    const oiByStrike = new Map<number, number>();
-    for (const c of [...calls, ...puts]) {
-      const strike = c.strike as number;
-      const oi = (c.openInterest as number) || 0;
-      oiByStrike.set(strike, (oiByStrike.get(strike) ?? 0) + oi);
-    }
-    if (oiByStrike.size > 0) {
-      let maxOi = -1;
-      for (const [strike, oi] of oiByStrike) {
-        if (oi > maxOi) { maxOi = oi; maxPainStrike = strike; }
+    const scanWarnings: string[] = [];
+    if (totalCallOI + totalPutOI <= 0) {
+      scanWarnings.push("MAX_PAIN_UNAVAILABLE_ZERO_OI");
+    } else {
+      const oiByStrike = new Map<number, number>();
+      for (const c of [...calls, ...puts]) {
+        const strike = c.strike as number;
+        const oi = (c.openInterest as number) || 0;
+        oiByStrike.set(strike, (oiByStrike.get(strike) ?? 0) + oi);
+      }
+      if (oiByStrike.size > 0) {
+        let maxOi = -1;
+        for (const [strike, oi] of oiByStrike) {
+          if (oi > maxOi) { maxOi = oi; maxPainStrike = strike; }
+        }
       }
     }
 
+    // ATM IV — reject placeholder
     let atmIv: number | null = null;
-    if (currentPrice != null) {
+    if (currentPrice == null) {
+      scanWarnings.push("ATM_IV_UNAVAILABLE_NO_PRICE");
+    } else if (calls.length === 0) {
+      scanWarnings.push("ATM_IV_UNAVAILABLE_NO_CALLS");
+    } else {
       let minDist = Infinity;
+      let rawAtmIv: number | null = null;
       for (const c of calls) {
         const dist = Math.abs((c.strike as number) - currentPrice);
-        if (dist < minDist) { minDist = dist; atmIv = (c.impliedVolatility as number | null) ?? null; }
+        const iv = (c.impliedVolatility as number | null) ?? null;
+        if (dist < minDist) {
+          minDist = dist;
+          rawAtmIv = iv;
+        }
+      }
+      if (rawAtmIv != null && rawAtmIv > PLACEHOLDER_IV_THRESHOLD) {
+        atmIv = rawAtmIv;
+      } else {
+        scanWarnings.push("ATM_IV_PLACEHOLDER");
       }
     }
+
+    // dataQuality
+    const dataQuality = computeDataQuality([...calls, ...puts], getLastTradingDate());
+    const quality = dataQuality.quality;
+    const allContracts = calls.length + puts.length;
+    const placeholderIvCount = dataQuality.placeholderIvCount;
 
     let ivPctile: number | null = null;
     let chartTimestamps: number[] = [];
-    try {
-      const chartD = await yGet(
-        `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=1y&interval=1d`,
-        false
-      ) as Record<string, unknown>;
-      const chartRes = (chartD?.chart as Record<string, unknown[]>)?.result?.[0] as Record<string, unknown>;
-      chartTimestamps = (chartRes?.timestamp as number[]) ?? [];
-      const adjclose =
-        ((chartRes?.indicators as Record<string, unknown[]>)?.adjclose?.[0] as Record<string, (number | null)[]>)?.adjclose ??
-        ((chartRes?.indicators as Record<string, unknown[]>)?.quote?.[0] as Record<string, (number | null)[]>)?.close ?? [];
-      const closes = adjclose.filter((v): v is number => v != null);
-      if (closes.length >= 30 && atmIv != null) {
-        const rets: number[] = [];
-        for (let i = 1; i < closes.length; i++) rets.push((closes[i] - closes[i - 1]) / closes[i - 1]);
-        const rollVols: number[] = [];
-        for (let i = 29; i < rets.length; i++) {
-          const window = rets.slice(i - 29, i + 1);
-          const mean = window.reduce((a, b) => a + b, 0) / window.length;
-          const variance = window.reduce((a, b) => a + (b - mean) ** 2, 0) / window.length;
-          rollVols.push(Math.sqrt(variance * 252));
-        }
-        if (rollVols.length >= 5) {
-          const rvMin = Math.min(...rollVols);
-          const rvMax = Math.max(...rollVols);
-          if (rvMax > rvMin) {
-            ivPctile = Math.max(0, Math.min(100, Math.round((atmIv - rvMin) / (rvMax - rvMin) * 100)));
+    if (quality === "LOW" && placeholderIvCount > allContracts * 0.5) {
+      scanWarnings.push("IV_PERCENTILE_UNAVAILABLE_PLACEHOLDER_IV");
+    } else {
+      try {
+        const chartD = await yGet(
+          `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=1y&interval=1d`,
+          false
+        ) as Record<string, unknown>;
+        const chartRes = (chartD?.chart as Record<string, unknown[]>)?.result?.[0] as Record<string, unknown>;
+        chartTimestamps = (chartRes?.timestamp as number[]) ?? [];
+        const adjclose =
+          ((chartRes?.indicators as Record<string, unknown[]>)?.adjclose?.[0] as Record<string, (number | null)[]>)?.adjclose ??
+          ((chartRes?.indicators as Record<string, unknown[]>)?.quote?.[0] as Record<string, (number | null)[]>)?.close ?? [];
+        const closes = adjclose.filter((v): v is number => v != null);
+        if (closes.length >= 30 && atmIv != null) {
+          const rets: number[] = [];
+          for (let i = 1; i < closes.length; i++) rets.push((closes[i] - closes[i - 1]) / closes[i - 1]);
+          const rollVols: number[] = [];
+          for (let i = 29; i < rets.length; i++) {
+            const windowSlice = rets.slice(i - 29, i + 1);
+            const mean = windowSlice.reduce((a, b) => a + b, 0) / windowSlice.length;
+            const variance = windowSlice.reduce((a, b) => a + (b - mean) ** 2, 0) / windowSlice.length;
+            rollVols.push(Math.sqrt(variance * 252));
+          }
+          if (rollVols.length >= 5) {
+            const rvMin = Math.min(...rollVols);
+            const rvMax = Math.max(...rollVols);
+            if (rvMax > rvMin) {
+              ivPctile = Math.max(0, Math.min(100, Math.round((atmIv - rvMin) / (rvMax - rvMin) * 100)));
+            }
           }
         }
-      }
-    } catch { /* ignore */ }
+      } catch { /* ignore */ }
+    }
 
     const dataDate = getLastTradingDate(chartTimestamps);
 
@@ -4244,22 +4459,29 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
       else if (ratioChange < 0.9) putVolTrend = "DECREASING";
     }
 
+    // Bracket suppressed when data quality is LOW
     let bracket: string | null = null;
-    if (pcRatio != null) {
+    if (quality !== "LOW" && pcRatio != null) {
       if (pcRatio >= 1.3 || (pcRatio >= 1.0 && putVolTrend === "INCREASING")) bracket = "UPPER";
       else if (pcRatio <= 0.8 && putVolTrend !== "INCREASING") bracket = "LOWER";
       else bracket = "MID";
     }
 
-    const ivStr = ivPctile != null ? `${ivPctile}th%ile` : "N/A";
-    const pvStr = putVolVs10d != null ? `${putVolVs10d.toFixed(2)}x` : "N/A";
-    const pcStr = pcRatio != null ? pcRatio.toFixed(2) : "N/A";
-    const formattedBlock = `OPTIONS FLOW SCAN [${windowLabel}] ${ticker} | P/C: ${pcStr} | IV: ${ivStr} | Put vol vs 10d avg: ${pvStr} | Trend: ${putVolTrend} | Advisory: ${bracket ?? "N/A"} bracket`;
+    let formattedBlock: string;
+    if (quality === "LOW") {
+      formattedBlock = "OPTIONS FLOW: DATA QUALITY LOW — raw chain unreliable; no doctrine weight.";
+    } else {
+      const ivStr = ivPctile != null ? `${ivPctile}th%ile` : "N/A";
+      const pvStr = putVolVs10d != null ? `${putVolVs10d.toFixed(2)}x` : "N/A";
+      const pcStr = pcRatio != null ? pcRatio.toFixed(2) : "N/A";
+      formattedBlock = `OPTIONS FLOW SCAN [${windowLabel}] ${ticker} | P/C: ${pcStr} | IV: ${ivStr} | Put vol vs 10d avg: ${pvStr} | Trend: ${putVolTrend} | Advisory: ${bracket ?? "N/A"} bracket`;
+    }
 
     const resultData: Record<string, unknown> = {
       ticker, windowLabel, dataDate,
       pcRatio, ivPctile, putVolVs10dAvg: putVolVs10d, putVolTrend,
       maxPainStrike, bracket, formattedBlock,
+      dataQuality, warnings: scanWarnings,
     };
 
     _optionsFlowCache.set(`${ticker}:${windowLabel}`, { data: resultData, storedAt: Date.now() });
@@ -4479,26 +4701,38 @@ export async function getOptionsSummary(ticker: string): Promise<string> {
       return JSON.stringify({ ticker, error: "No options data available" });
     }
     const expiry = expData[0];
-    const callsRaw = JSON.parse(await getOptionChain(ticker, expiry, "calls", 200, 0, 0)) as Record<string, unknown>;
-    const putsRaw = JSON.parse(await getOptionChain(ticker, expiry, "puts", 200, 0, 0)) as Record<string, unknown>;
+    // Fetch all contracts without illiquid filtering and with strike sort so we get the full chain
+    const callsRaw = JSON.parse(await getOptionChain(ticker, expiry, "calls", 200, 0, 0, null, null, "all", "strike", 20, true)) as Record<string, unknown>;
+    const putsRaw = JSON.parse(await getOptionChain(ticker, expiry, "puts", 200, 0, 0, null, null, "all", "strike", 20, true)) as Record<string, unknown>;
     const calls = (callsRaw.contracts ?? []) as Record<string, unknown>[];
     const puts = (putsRaw.contracts ?? []) as Record<string, unknown>[];
 
     const fi = JSON.parse(await getFastInfo(ticker)) as Record<string, unknown>;
     const currentPrice = fi.lastPrice as number | null;
 
+    const summaryWarnings: string[] = [];
+
     let atmIV: number | null = null;
-    if (currentPrice != null && calls.length > 0) {
+    if (currentPrice == null) {
+      summaryWarnings.push("ATM_IV_UNAVAILABLE_NO_PRICE");
+    } else if (calls.length === 0) {
+      summaryWarnings.push("ATM_IV_UNAVAILABLE_NO_CALLS");
+    } else {
       let minDist = Infinity;
+      let rawAtmIV: number | null = null;
       for (const c of calls) {
         const strike = c.strike as number;
         const dist = Math.abs(strike - currentPrice);
         if (dist < minDist) {
           minDist = dist;
-          atmIV = c.impliedVolatility as number | null;
+          rawAtmIV = (c.impliedVolatility as number | null) ?? null;
         }
       }
-      if (atmIV != null) atmIV = +atmIV.toFixed(4);
+      if (rawAtmIV != null && rawAtmIV > PLACEHOLDER_IV_THRESHOLD) {
+        atmIV = +rawAtmIV.toFixed(4);
+      } else {
+        summaryWarnings.push("ATM_IV_PLACEHOLDER");
+      }
     }
 
     const callVol = calls.reduce((s, c) => s + ((c.volume as number) || 0), 0);
@@ -4508,22 +4742,31 @@ export async function getOptionsSummary(ticker: string): Promise<string> {
     const pcRatioVolume = callVol > 0 ? +(putVol / callVol).toFixed(3) : null;
     const pcRatioOI = callOI > 0 ? +(putOI / callOI).toFixed(3) : null;
 
-    const strikeSet = new Set([...calls.map(c => c.strike as number), ...puts.map(p => p.strike as number)]);
-    const allStrikes = Array.from(strikeSet).sort((a, b) => a - b);
     let maxPainStrike: number | null = null;
-    let minPain = Infinity;
-    for (const s of allStrikes) {
-      const callPain = calls.reduce((sum, c) => sum + Math.max(0, s - (c.strike as number)) * ((c.openInterest as number) || 0), 0);
-      const putPain = puts.reduce((sum, p) => sum + Math.max(0, (p.strike as number) - s) * ((p.openInterest as number) || 0), 0);
-      const total = callPain + putPain;
-      if (total < minPain) { minPain = total; maxPainStrike = s; }
+    if (callOI + putOI <= 0) {
+      summaryWarnings.push("MAX_PAIN_UNAVAILABLE_ZERO_OI");
+    } else {
+      const strikeSet = new Set([...calls.map(c => c.strike as number), ...puts.map(p => p.strike as number)]);
+      const allStrikes = Array.from(strikeSet).sort((a, b) => a - b);
+      let minPain = Infinity;
+      for (const s of allStrikes) {
+        const callPain = calls.reduce((sum, c) => sum + Math.max(0, s - (c.strike as number)) * ((c.openInterest as number) || 0), 0);
+        const putPain = puts.reduce((sum, p) => sum + Math.max(0, (p.strike as number) - s) * ((p.openInterest as number) || 0), 0);
+        const total = callPain + putPain;
+        if (total < minPain) { minPain = total; maxPainStrike = s; }
+      }
     }
+
+    const dataDate = getLastTradingDate();
+    const dataQuality = computeDataQuality([...calls, ...puts], dataDate);
 
     return JSON.stringify({
       ticker, nearestExpiry: expiry, currentPrice,
       atmIV, pcRatioVolume, pcRatioOI,
       callVolume: callVol, putVolume: putVol, callOI, putOI,
-      maxPainStrike, dataDate: getLastTradingDate(),
+      maxPainStrike, dataDate,
+      dataQuality,
+      warnings: summaryWarnings,
     });
   } catch (e) {
     return JSON.stringify({ ticker, error: `${e instanceof Error ? e.message : String(e)}` });
