@@ -373,6 +373,10 @@ def _compute_data_quality(
                     if isinstance(ltd, str):
                         ltd_date = datetime.date.fromisoformat(ltd[:10])
                     else:
+                        # Yahoo Finance returns epoch seconds (< 1e10); some
+                        # sources return epoch milliseconds (> 1e10). Divide
+                        # by 1000 only for the ms case, mirroring TypeScript:
+                        # ltdMs = ltd > 1e10 ? ltd : ltd * 1000
                         raw_ts = float(ltd)
                         ltd_seconds = raw_ts / 1000 if raw_ts > 1e10 else raw_ts
                         ltd_date = datetime.datetime.utcfromtimestamp(ltd_seconds).date()

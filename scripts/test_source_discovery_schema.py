@@ -20,6 +20,11 @@ TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
 SERVER_PY = ROOT / "server.py"
 
 
+# Generous slice of source after the tool name declaration; 4000 chars is
+# sufficient to cover the entire inputSchema block for any single tool.
+_TOOL_BLOCK_SIZE = 4000
+
+
 def _ts_source() -> str:
     return TOOLS_TS.read_text()
 
@@ -38,7 +43,7 @@ class TestGetOptionChainWorkerSchema(unittest.TestCase):
         m = re.search(r'name:\s*"get_option_chain"', self.src)
         self.assertIsNotNone(m, "get_option_chain not found in tools.ts")
         # Capture a generous slice of source after the tool name declaration
-        self.block = self.src[m.start() : m.start() + 4000]
+        self.block = self.src[m.start() : m.start() + _TOOL_BLOCK_SIZE]
 
     def test_moneyness_window_pct_present(self) -> None:
         self.assertIn("moneyness_window_pct", self.block,
