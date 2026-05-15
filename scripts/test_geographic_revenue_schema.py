@@ -38,15 +38,19 @@ def data_of(payload: dict) -> dict:
 
 
 def assert_geo_shape(data: dict) -> None:
-    for key in ("value", "totalRevenue", "valuePct"):
+    for key in ("value", "denominator", "valueRatio", "valuePct", "extractionMethod", "confidence"):
         if key not in data:
             raise AssertionError(f"missing key: {key}")
         if data[key] == {}:
             raise AssertionError(f"{key} must be null/number, not object")
-    if data["totalRevenue"] is not None and not isinstance(data["totalRevenue"], (int, float)):
-        raise AssertionError("totalRevenue must be number|null")
+    if data["denominator"] is not None and not isinstance(data["denominator"], (int, float)):
+        raise AssertionError("denominator must be number|null")
+    if data["valueRatio"] is not None and not isinstance(data["valueRatio"], (int, float)):
+        raise AssertionError("valueRatio must be number|null")
     if data["valuePct"] is not None and not isinstance(data["valuePct"], (int, float)):
         raise AssertionError("valuePct must be number|null")
+    if data["valuePct"] is not None and data["denominator"] is None:
+        raise AssertionError("valuePct requires denominator")
 
 
 def main() -> int:
@@ -66,4 +70,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

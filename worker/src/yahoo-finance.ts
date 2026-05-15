@@ -566,17 +566,35 @@ export async function getStockInfo(ticker: string | string[], includeAll = false
 }
 
 export async function getNews(ticker: string): Promise<string> {
+  const retrievedAt = new Date().toISOString();
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v1/finance/search?q=${enc(ticker)}&quotesCount=0&newsCount=20&enableFuzzyQuery=false`,
     false
   )) as Record<string, unknown>;
 
   const news = (d?.news as Record<string, unknown>[]) ?? [];
-  const items = news.map(
-    (n) =>
-      `Title: ${n.title ?? ""}\nPublisher: ${n.publisher ?? ""}\nURL: ${n.link ?? ""}\nDate: ${n.providerPublishTime ? iso(n.providerPublishTime as number) : ""}`
-  );
-  return items.length > 0 ? items.join("\n\n") : `No news found for ${ticker}`;
+  const tickerUpper = ticker.toUpperCase();
+  const items = news.map((n) => {
+    const title = String(n.title ?? "");
+    return {
+      title,
+      publisher: String(n.publisher ?? ""),
+      url: String(n.link ?? ""),
+      publishedAt: n.providerPublishTime ? iso(Number(n.providerPublishTime)) : null,
+      retrievedAt,
+      sourceType: "yahoo_finance",
+      tickerRelevance: title.toUpperCase().includes(tickerUpper) ? "HIGH" : "UNKNOWN",
+    };
+  });
+  return JSON.stringify({
+    ticker,
+    items,
+    meta: {
+      source: "yahoo_finance",
+      watermark: retrievedAt,
+      itemCount: items.length,
+    },
+  });
 }
 
 export async function getStockActions(ticker: string): Promise<string> {
@@ -3047,7 +3065,18 @@ const TOTAL_LABELS = new Set([
 function extractGeoRevenueFromHtml(
   html: string,
   region: string
-): { pct: number; usd: number | null; sectionHeading: string; parsedTables: unknown[] } | null {
+): {
+  pct: number;
+  usd: number | null;
+  denominator: number | null;
+  sectionHeading: string;
+  parsedTables: unknown[];
+  unitScale: "thousands" | "millions" | "actual";
+  rawValue: string | null;
+  rawDenominator: string | null;
+  sourceRows: string[][];
+  sourceColumns: string[];
+} | null {
   const regionLower = region.toLowerCase();
   const htmlLower = html.toLowerCase();
 
@@ -3150,6 +3179,8 @@ function extractGeoRevenueFromHtml(
     const contextHtml = html.slice(Math.max(0, tbl.pos - 3_000), tbl.pos);
     const unitMult = detectUnitMultiplier(tableHtml, contextHtml);
     const usd = regionVal * unitMult;
+    const denominator = totalVal * unitMult;
+    const unitScale = unitMult === 1e3 ? "thousands" : unitMult === 1e6 ? "millions" : "actual";
 
     // Find nearest section heading
     const preHtml = html.slice(Math.max(0, tbl.pos - 6_000), tbl.pos);
@@ -3158,7 +3189,26 @@ function extractGeoRevenueFromHtml(
       ? stripHtmlTags(hMatches[hMatches.length - 1][1])
       : "";
 
-    return { pct, usd, sectionHeading, parsedTables: [{ rows }] };
+    const headerRow = rows[0] ?? [];
+    const sourceColumn = valueCol < headerRow.length ? String(headerRow[valueCol]).trim() : "";
+    const rawValue = valueCol < rows[regionRowIdx].length ? String(rows[regionRowIdx][valueCol]) : null;
+    const rawDenominator = valueCol < rows[totalRowIdx].length ? String(rows[totalRowIdx][valueCol]) : null;
+    const sourceRows = [
+      [String(rows[regionRowIdx][0] ?? region), rawValue ?? ""],
+      [String(rows[totalRowIdx][0] ?? "Total revenue"), rawDenominator ?? ""],
+    ];
+    return {
+      pct,
+      usd,
+      denominator,
+      sectionHeading,
+      parsedTables: [{ rows }],
+      unitScale,
+      rawValue,
+      rawDenominator,
+      sourceRows,
+      sourceColumns: sourceColumn ? [sourceColumn] : [],
+    };
   }
 
   return null;
@@ -3201,24 +3251,44 @@ export async function getFilingData(
   filingType = "10-K",
   period = "latest",
 ): Promise<string> {
+  const formatRawNumber = (n: number | null | undefined): string | null => {
+    if (n == null || !Number.isFinite(n)) return null;
+    if (Math.abs(n - Math.round(n)) < 1e-9) return Math.round(n).toLocaleString("en-US");
+    return n.toLocaleString("en-US", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+  };
   const withGeoShape = (payload: Record<string, unknown>, addDenominatorWarning = false): string => {
     if (factType !== "geographic_revenue") return JSON.stringify(payload);
+    const warnings = Array.isArray(payload.warnings) ? [...payload.warnings] : [];
     const shaped: Record<string, unknown> = {
-      ...payload,
+      ticker: payload.ticker ?? ticker,
+      factType: payload.factType ?? "geographic_revenue",
+      region: payload.region ?? region,
+      period: payload.period ?? null,
+      rawValue: payload.rawValue ?? null,
+      rawDenominator: payload.rawDenominator ?? null,
+      unit: payload.unit ?? "USD",
+      unitScale: payload.unitScale ?? "actual",
       value: payload.value ?? null,
-      totalRevenue: payload.totalRevenue ?? null,
-      valuePct: payload.valuePct ?? null,
+      denominator: payload.denominator ?? null,
+      valueRatio: payload.denominator == null ? null : (payload.valueRatio ?? null),
+      valuePct: payload.denominator == null ? null : (payload.valuePct ?? null),
+      extractionMethod: payload.extractionMethod ?? "NONE",
+      source: payload.source ?? "NOT_DISCLOSED",
+      confidence: payload.confidence ?? "NOT_DISCLOSED",
+      filingType: payload.filingType ?? filingType,
+      filingDate: payload.filingDate ?? null,
+      accessionNumber: payload.accessionNumber ?? null,
+      documentUrl: payload.documentUrl ?? null,
+      evidence: payload.evidence ?? {},
+      calculation: payload.calculation ?? null,
+      warnings,
     };
-    if (addDenominatorWarning && shaped.value !== null && shaped.totalRevenue === null) {
-      const existing = Array.isArray(shaped.warnings) ? shaped.warnings : [];
-      shaped.warnings = [
-        ...existing,
-        {
-          code: "DENOMINATOR_NOT_FOUND",
-          message: "Could not compute geographic revenue percentage.",
-          severity: "warning",
-        },
-      ];
+    if (addDenominatorWarning && shaped.value != null && shaped.denominator == null) {
+      (shaped.warnings as unknown[]).push({
+        code: "DENOMINATOR_NOT_FOUND",
+        message: "Could not compute geographic revenue percentage due to missing denominator.",
+        severity: "warning",
+      });
     }
     return JSON.stringify(shaped);
   };
@@ -3234,9 +3304,15 @@ export async function getFilingData(
     return withGeoShape({
       ticker,
       factType,
-      concept: config.primary,
       value: null,
+      denominator: null,
+      valueRatio: null,
+      valuePct: null,
+      extractionMethod: "NONE",
+      source: "NOT_DISCLOSED",
       confidence: "NOT_DISCLOSED",
+      evidence: {},
+      warnings: [],
       _manualLookup: filingManualLookup(ticker, null, filingType),
     });
   }
@@ -3262,9 +3338,15 @@ export async function getFilingData(
     return withGeoShape({
       ticker,
       factType,
-      concept,
       value: null,
+      denominator: null,
+      valueRatio: null,
+      valuePct: null,
+      extractionMethod: "NONE",
+      source: "NOT_DISCLOSED",
       confidence: "NOT_DISCLOSED",
+      evidence: {},
+      warnings: [],
       _manualLookup: filingManualLookup(ticker, cikPadded, filingType),
     });
   }
@@ -3298,14 +3380,17 @@ export async function getFilingData(
       filingType,
       filingDate: allSegments[0]?.filingDate ?? null,
       accessionNumber: allSegments[0]?.accessionNumber ?? null,
-      source: "XBRL_COMPANYCONCEPT",
-      confidence: "CONFIRMED",
+      extractionMethod: "XBRL",
+      source: "XBRL",
+      confidence: "HIGH",
       allSegments,
     });
   }
 
   let picked: Record<string, unknown> | null = null;
+  let valueRatio: number | null = null;
   let valuePct: number | null = null;
+  let denominator: number | null = null;
   let segmentLabel: string | null = null;
   if (factType === "geographic_revenue") {
     picked = filtered.find((f) => {
@@ -3333,8 +3418,11 @@ export async function getFilingData(
       const total = filtered.find((f) => String(f.accn ?? "") === accn && f.segment == null) ?? null;
       const totalVal = total ? Number(total.val ?? 0) : 0;
       const partVal = Number(picked.val ?? 0);
-      if (totalVal > 0) valuePct = partVal / totalVal;
-      (picked as Record<string, unknown>).totalRevenue = total && totalVal > 0 ? totalVal : null;
+      if (totalVal > 0) {
+        denominator = totalVal;
+        valueRatio = Math.round((partVal / totalVal) * 10000) / 10000;
+        valuePct = Math.round(valueRatio * 10000) / 100;
+      }
     }
   } else {
     picked = filtered.find((f) => f.segment == null) ?? filtered[0] ?? null;
@@ -3369,20 +3457,39 @@ export async function getFilingData(
                   return withGeoShape({
                     ticker,
                     factType,
-                    concept,
+                    region,
+                    period: fiscalYear || null,
+                    rawValue: geo.rawValue ?? formatRawNumber(geo.usd ?? null),
+                    rawDenominator: geo.rawDenominator ?? formatRawNumber(geo.denominator ?? null),
+                    unit: "USD",
+                    unitScale: geo.unitScale,
                     value: geo.usd ?? null,
-                    totalRevenue: null,
-                    valuePct: geo.pct,
-                    fiscalYear,
-                    fiscalPeriod: "FY",
+                    denominator: geo.denominator ?? null,
+                    valueRatio: geo.pct,
+                    valuePct: geo.denominator != null ? Math.round(geo.pct * 10000) / 100 : null,
+                    extractionMethod: "PARSED_TABLE",
+                    source: "PARSED_TABLE",
+                    confidence: geo.denominator != null ? "HIGH" : "LOW",
                     filingType,
                     filingDate: sfilingDates[idx] ?? null,
-                    segmentLabel: region,
                     accessionNumber: saccessions[idx] ?? null,
-                    sectionHeading: geo.sectionHeading,
-                    primaryDocumentUrl: edgarPrimaryDocumentUrl,
-                    source: "PARSED_HTML",
-                    confidence: "PARSED_HTML",
+                    documentUrl: edgarPrimaryDocumentUrl,
+                    evidence: {
+                      sectionHeading: geo.sectionHeading || null,
+                      tableTitle: null,
+                      sourceTableId: 1,
+                      sourceRows: geo.sourceRows,
+                      sourceColumns: geo.sourceColumns.length > 0 ? geo.sourceColumns : [fiscalYear],
+                    },
+                    calculation: geo.denominator != null
+                      ? {
+                          formula: "value / denominator * 100",
+                          valueSource: "sourceRows[0]",
+                          denominatorSource: "sourceRows[1]",
+                          resultPct: Math.round(geo.pct * 10000) / 100,
+                        }
+                      : null,
+                    warnings: [],
                   });
                 }
               }
@@ -3394,29 +3501,67 @@ export async function getFilingData(
     return withGeoShape({
       ticker,
       factType,
-      concept,
       value: null,
+      denominator: null,
+      valueRatio: null,
+      valuePct: null,
+      extractionMethod: "NONE",
+      source: "NOT_DISCLOSED",
       confidence: "NOT_DISCLOSED",
+      evidence: {},
+      warnings: [],
       _manualLookup: filingManualLookup(ticker, cikPadded, filingType),
     });
   }
 
+  const accessionNumber = String(picked.accn ?? "") || null;
+  const documentUrl = accessionNumber ? edgarBuildFilingUrls(parseInt(cikPadded, 10), accessionNumber, null).edgarIndexUrl : null;
+  const periodLabelRaw = String(picked.fy ?? "");
+  const periodLabel = periodLabelRaw && !periodLabelRaw.startsWith("FY") ? `FY${periodLabelRaw}` : periodLabelRaw;
+  const valueNum = picked.val != null ? Number(picked.val) : null;
+  const rawValue = formatRawNumber(valueNum);
+  const rawDenominator = formatRawNumber(denominator);
+
   return withGeoShape({
     ticker,
     factType,
-    concept,
-    value: picked.val ?? null,
-    totalRevenue: factType === "geographic_revenue" ? ((picked as Record<string, unknown>).totalRevenue ?? null) : null,
+    region,
+    period: periodLabel || null,
+    rawValue,
+    rawDenominator,
+    unit: "USD",
+    unitScale: "actual",
+    value: valueNum,
+    denominator: factType === "geographic_revenue" ? denominator : null,
+    valueRatio: factType === "geographic_revenue" ? valueRatio : null,
     valuePct: factType === "geographic_revenue" ? valuePct : null,
-    fiscalYear: String(picked.fy ?? ""),
-    fiscalPeriod: String(picked.fp ?? ""),
+    extractionMethod: "XBRL",
+    source: "XBRL",
+    confidence: factType !== "geographic_revenue" || denominator != null ? "HIGH" : "LOW",
     filingType,
     filingDate: String(picked.filed ?? ""),
-    segmentLabel,
-    accessionNumber: String(picked.accn ?? ""),
-    source: "XBRL_COMPANYCONCEPT",
-    confidence: "CONFIRMED",
-  }, factType === "geographic_revenue" && valuePct == null);
+    accessionNumber,
+    documentUrl,
+    evidence: {
+      sectionHeading: segmentLabel,
+      tableTitle: null,
+      sourceTableId: null,
+      sourceRows: [
+        [segmentLabel ?? (region ?? "Region"), rawValue ?? ""],
+        ["Total revenue", rawDenominator ?? ""],
+      ],
+      sourceColumns: [periodLabel || String(picked.fp ?? "")],
+    },
+    calculation: factType === "geographic_revenue" && denominator != null
+      ? {
+          formula: "value / denominator * 100",
+          valueSource: "sourceRows[0]",
+          denominatorSource: "sourceRows[1]",
+          resultPct: valuePct,
+        }
+      : null,
+    warnings: [],
+  }, factType === "geographic_revenue" && denominator == null);
 }
 
 export async function searchFilingText(

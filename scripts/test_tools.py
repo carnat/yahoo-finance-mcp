@@ -213,8 +213,7 @@ TEST_CASES: list[TestCase] = [
     ),
     # ── get_filing_data — GLW geographic revenue / China HTML fallback (DC-151 P0) ──
     # GLW does NOT tag China revenue in XBRL; the HTML fallback inside get_filing_data
-    # must parse it from the 10-K prose table and return confidence PARSED_HTML or
-    # CONFIRMED.  NOT_DISCLOSED is a failure.
+    # must parse it from the 10-K prose table and return a non-NOT_DISCLOSED confidence.
     (
         "get_filing_data",
         {"ticker": "GLW", "fact_type": "geographic_revenue", "region": "China"},
@@ -230,9 +229,11 @@ TEST_CASES: list[TestCase] = [
         {"ticker": "QCOM", "fact_type": "geographic_revenue", "region": "China"},
         [
             ("value", KEY_PRESENT),
-            ("totalRevenue", KEY_PRESENT),
+            ("denominator", KEY_PRESENT),
+            ("valueRatio", KEY_PRESENT),
             ("valuePct", KEY_PRESENT),
-            ("totalRevenue", NUMBER_OR_NULL),
+            ("denominator", NUMBER_OR_NULL),
+            ("valueRatio", NUMBER_OR_NULL),
             ("valuePct", NUMBER_OR_NULL),
             ("confidence", NOT_NULL),
         ],
@@ -243,9 +244,11 @@ TEST_CASES: list[TestCase] = [
         {"ticker": "GLW", "fact_type": "geographic_revenue", "region": "China"},
         [
             ("value", KEY_PRESENT),
-            ("totalRevenue", KEY_PRESENT),
+            ("denominator", KEY_PRESENT),
+            ("valueRatio", KEY_PRESENT),
             ("valuePct", KEY_PRESENT),
-            ("totalRevenue", NUMBER_OR_NULL),
+            ("denominator", NUMBER_OR_NULL),
+            ("valueRatio", NUMBER_OR_NULL),
             ("valuePct", NUMBER_OR_NULL),
         ],
     ),
@@ -256,9 +259,11 @@ TEST_CASES: list[TestCase] = [
         [
             ("confidence", "NOT_DISCLOSED"),
             ("value", KEY_PRESENT),
-            ("totalRevenue", KEY_PRESENT),
+            ("denominator", KEY_PRESENT),
+            ("valueRatio", KEY_PRESENT),
             ("valuePct", KEY_PRESENT),
-            ("totalRevenue", IS_NULL),
+            ("denominator", IS_NULL),
+            ("valueRatio", IS_NULL),
             ("valuePct", IS_NULL),
         ],
     ),

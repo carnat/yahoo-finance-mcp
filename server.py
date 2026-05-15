@@ -627,7 +627,7 @@ _NEWS_EVENT_OUTPUT_SCHEMA: dict = {
 _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
     "get_historical_stock_prices": _SIMPLE_OUTPUT_SCHEMA,
     "get_stock_info": _SIMPLE_OUTPUT_SCHEMA,
-    "get_yahoo_finance_news": _SIMPLE_OUTPUT_SCHEMA,
+    "get_yahoo_finance_news": _NEWS_EVENT_OUTPUT_SCHEMA,
     "get_stock_actions": _SIMPLE_OUTPUT_SCHEMA,
     "get_financial_statement": _SIMPLE_OUTPUT_SCHEMA,
     "get_holder_info": _SIMPLE_OUTPUT_SCHEMA,
@@ -691,14 +691,26 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
     "get_filing_data": {'type': 'object',
          'properties': {'ticker': {'type': 'string'},
                         'factType': {'type': 'string'},
+                        'region': {'type': ['string', 'null']},
+                        'period': {'type': ['string', 'null']},
+                        'rawValue': {'type': ['string', 'null']},
+                        'rawDenominator': {'type': ['string', 'null']},
+                        'unit': {'type': ['string', 'null']},
+                        'unitScale': {'type': ['string', 'null']},
+                        'value': {'type': ['number', 'null']},
+                        'denominator': {'type': ['number', 'null']},
+                        'valueRatio': {'type': ['number', 'null']},
+                        'valuePct': {'type': ['number', 'null']},
+                        'extractionMethod': {'type': 'string'},
                         'source': {'type': 'string'},
                         'confidence': {'type': 'string'},
-                        'value': {},
-                        'totalRevenue': {'type': ['number', 'null']},
-                        'valuePct': {'type': ['number', 'null']},
-                        'currency': {'type': ['string', 'null']},
-                        'period': {'type': ['string', 'null']},
-                        'filingType': {'type': ['string', 'null']}},
+                        'filingType': {'type': ['string', 'null']},
+                        'filingDate': {'type': ['string', 'null']},
+                        'accessionNumber': {'type': ['string', 'null']},
+                        'documentUrl': {'type': ['string', 'null']},
+                        'evidence': {'type': ['object', 'null']},
+                        'calculation': {'type': ['object', 'null']},
+                        'warnings': {'type': 'array'}},
          'additionalProperties': True},
     "search_filing_text": _SIMPLE_OUTPUT_SCHEMA,
     "get_technical_indicators": {'type': 'object',
@@ -1098,13 +1110,23 @@ async def get_yahoo_finance_news(ticker: str) -> str:
             The ticker symbol of the stock to get news for, e.g. "AAPL"
     """
     company = yf.Ticker(ticker)
+    retrieved_at = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
     try:
         if company.fast_info.currency is None:
             print(f"Company ticker {ticker} not found.")
-            return f"Company ticker {ticker} not found."
+            return json.dumps({
+                "ticker": ticker,
+                "items": [],
+                "meta": {"source": "yahoo_finance", "watermark": retrieved_at, "itemCount": 0},
+            })
     except Exception as e:
         print(f"Error: getting news for {ticker}: {e}")
-        return f"Error: getting news for {ticker}: {e}"
+        return json.dumps({
+            "ticker": ticker,
+            "items": [],
+            "meta": {"source": "yahoo_finance", "watermark": retrieved_at, "itemCount": 0},
+            "_note": f"Error: getting news for {ticker}: {e}",
+        })
 
     # If the company is found, get the news
     try:
@@ -1113,20 +1135,48 @@ async def get_yahoo_finance_news(ticker: str) -> str:
         print(f"Error: getting news for {ticker}: {e}")
         return f"Error: getting news for {ticker}: {e}"
 
-    news_list = []
-    for news in company.news:
-        if news.get("content", {}).get("contentType", "") == "STORY":
-            title = news.get("content", {}).get("title", "")
-            summary = news.get("content", {}).get("summary", "")
-            description = news.get("content", {}).get("description", "")
-            url = news.get("content", {}).get("canonicalUrl", {}).get("url", "")
-            news_list.append(
-                f"Title: {title}\nSummary: {summary}\nDescription: {description}\nURL: {url}"
-            )
-    if not news_list:
-        print(f"No news found for company that searched with {ticker} ticker.")
-        return f"No news found for company that searched with {ticker} ticker."
-    return "\n\n".join(news_list)
+    items = []
+    ticker_u = ticker.upper()
+    for article in news or []:
+        content = article.get("content", {}) if isinstance(article, dict) else {}
+        if content.get("contentType", "") != "STORY":
+            continue
+        title = str(content.get("title", "") or "")
+        publisher = str(content.get("provider", {}).get("displayName", "") or content.get("publisher", "") or "")
+        url = str(content.get("canonicalUrl", {}).get("url", "") or "")
+        pub_raw = (
+            content.get("pubDate")
+            or article.get("providerPublishTime")
+            or content.get("providerPublishTime")
+        )
+        published_at = None
+        if isinstance(pub_raw, (int, float)):
+            published_at = datetime.datetime.fromtimestamp(float(pub_raw), datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        elif isinstance(pub_raw, str) and pub_raw.strip():
+            try:
+                published_at = datetime.datetime.fromisoformat(pub_raw.replace("Z", "+00:00")).astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+            except Exception:
+                published_at = None
+
+        items.append({
+            "title": title,
+            "publisher": publisher,
+            "url": url,
+            "publishedAt": published_at,
+            "retrievedAt": retrieved_at,
+            "sourceType": "yahoo_finance",
+            "tickerRelevance": "HIGH" if ticker_u in title.upper() else "UNKNOWN",
+        })
+
+    return json.dumps({
+        "ticker": ticker,
+        "items": items,
+        "meta": {
+            "source": "yahoo_finance",
+            "watermark": retrieved_at,
+            "itemCount": len(items),
+        },
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -3279,22 +3329,62 @@ async def get_filing_data(
     filing_type: str = "10-K",
     period: str = "latest",
 ) -> str:
+    def _format_raw_number(n: float | int | None) -> str | None:
+        if n is None:
+            return None
+        try:
+            f = float(n)
+            if abs(f - round(f)) < 1e-9:
+                return f"{int(round(f)):,}"
+            return f"{f:,.2f}"
+        except Exception:
+            return None
+
+    def _scale_label(multiplier: float | None) -> str:
+        if multiplier == 1_000.0:
+            return "thousands"
+        if multiplier == 1_000_000.0:
+            return "millions"
+        if multiplier == 1.0:
+            return "actual"
+        return "actual"
+
     def _geo_shape(payload: dict, *, warn_denominator: bool = False) -> str:
         if fact_type != FilingFactType.geographic_revenue:
             return json.dumps(payload)
-        shaped = dict(payload)
-        shaped["value"] = shaped.get("value", None)
-        shaped["totalRevenue"] = shaped.get("totalRevenue", None)
-        shaped["valuePct"] = shaped.get("valuePct", None)
-        if warn_denominator and shaped.get("value") is not None and shaped.get("totalRevenue") is None:
-            warnings = shaped.get("warnings")
-            warning_list = list(warnings) if isinstance(warnings, list) else []
-            warning_list.append({
+        shaped = {
+            "ticker": payload.get("ticker", ticker),
+            "factType": payload.get("factType", FilingFactType.geographic_revenue.value),
+            "region": payload.get("region", region),
+            "period": payload.get("period"),
+            "rawValue": payload.get("rawValue"),
+            "rawDenominator": payload.get("rawDenominator"),
+            "unit": payload.get("unit", "USD"),
+            "unitScale": payload.get("unitScale", "actual"),
+            "value": payload.get("value"),
+            "denominator": payload.get("denominator"),
+            "valueRatio": payload.get("valueRatio"),
+            "valuePct": payload.get("valuePct"),
+            "extractionMethod": payload.get("extractionMethod", "NONE"),
+            "source": payload.get("source", "NOT_DISCLOSED"),
+            "confidence": payload.get("confidence", "NOT_DISCLOSED"),
+            "filingType": payload.get("filingType", filing_type),
+            "filingDate": payload.get("filingDate"),
+            "accessionNumber": payload.get("accessionNumber"),
+            "documentUrl": payload.get("documentUrl"),
+            "evidence": payload.get("evidence", {}),
+            "calculation": payload.get("calculation"),
+            "warnings": list(payload.get("warnings", [])) if isinstance(payload.get("warnings"), list) else [],
+        }
+        if shaped["denominator"] is None:
+            shaped["valueRatio"] = None
+            shaped["valuePct"] = None
+        if warn_denominator and shaped.get("value") is not None and shaped.get("denominator") is None:
+            shaped["warnings"].append({
                 "code": "DENOMINATOR_NOT_FOUND",
-                "message": "Could not compute geographic revenue percentage.",
+                "message": "Could not compute geographic revenue percentage due to missing denominator.",
                 "severity": "warning",
             })
-            shaped["warnings"] = warning_list
         return json.dumps(shaped)
 
     if fact_type == FilingFactType.geographic_revenue and not region:
@@ -3306,9 +3396,15 @@ async def get_filing_data(
         return _geo_shape({
             "ticker": ticker,
             "factType": fact_type.value,
-            "concept": concept_primary,
             "value": None,
+            "denominator": None,
+            "valueRatio": None,
+            "valuePct": None,
+            "extractionMethod": "NONE",
+            "source": "NOT_DISCLOSED",
             "confidence": "NOT_DISCLOSED",
+            "evidence": {},
+            "warnings": [],
             "_manualLookup": _manual_lookup_payload(
                 ticker, None, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."
             ),
@@ -3338,9 +3434,15 @@ async def get_filing_data(
         return _geo_shape({
             "ticker": ticker,
             "factType": fact_type.value,
-            "concept": concept_used,
             "value": None,
+            "denominator": None,
+            "valueRatio": None,
+            "valuePct": None,
+            "extractionMethod": "NONE",
+            "source": "NOT_DISCLOSED",
             "confidence": "NOT_DISCLOSED",
+            "evidence": {},
+            "warnings": [],
             "_manualLookup": _manual_lookup_payload(
                 ticker, cik_padded, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."
             ),
@@ -3374,14 +3476,16 @@ async def get_filing_data(
             "filingType": filing_type,
             "filingDate": seg_rows[0]["filingDate"] if seg_rows else "",
             "accessionNumber": seg_rows[0]["accessionNumber"] if seg_rows else "",
-            "source": "XBRL_COMPANYCONCEPT",
-            "confidence": "CONFIRMED",
+            "extractionMethod": "XBRL",
+            "source": "XBRL",
+            "confidence": "HIGH",
             "allSegments": seg_rows,
         })
 
     picked: dict | None = None
+    value_ratio: float | None = None
     value_pct: float | None = None
-    total_revenue: float | None = None
+    denominator: float | None = None
     segment_label: str | None = None
     if fact_type == FilingFactType.geographic_revenue:
         for f in filtered:
@@ -3408,10 +3512,12 @@ async def get_filing_data(
             )
             try:
                 if total_fact and float(total_fact.get("val", 0)) > 0:
-                    total_revenue = float(total_fact.get("val", 0))
-                    value_pct = float(picked.get("val", 0)) / total_revenue
+                    denominator = float(total_fact.get("val", 0))
+                    value_ratio = round(float(picked.get("val", 0)) / denominator, 4)
+                    value_pct = round(value_ratio * 100, 2)
             except Exception:
-                total_revenue = None
+                denominator = None
+                value_ratio = None
                 value_pct = None
     else:
         picked = next((f for f in filtered if not f.get("segment")), filtered[0] if filtered else None)
@@ -3442,59 +3548,137 @@ async def get_filing_data(
                         if doc_url:
                             html_text = await _edgar_get_html(doc_url, max_bytes=5_000_000)
                             if html_text:
-                                geo_pct, geo_usd, geo_heading, geo_tables = _extract_geo_revenue_from_html(
+                                geo_ratio, geo_usd, geo_denominator, geo_heading, geo_evidence = _extract_geo_revenue_from_html(
                                     html_text, region or ""
                                 )
-                                if geo_pct is not None:
+                                if geo_usd is not None:
                                     acc_num = accessions_list[idx] if idx < len(accessions_list) else ""
                                     filing_date_str = filing_dates_list[idx] if idx < len(filing_dates_list) else ""
                                     report_date_str = report_dates_list[idx] if idx < len(report_dates_list) else ""
                                     fiscal_year = f"FY{report_date_str[:4]}" if report_date_str else ""
+                                    raw_value = (
+                                        geo_evidence.get("rawValue") if isinstance(geo_evidence, dict) else None
+                                    ) or _format_raw_number(geo_usd)
+                                    raw_den = (
+                                        geo_evidence.get("rawDenominator") if isinstance(geo_evidence, dict) else None
+                                    ) or _format_raw_number(geo_denominator)
+                                    source_rows = (
+                                        geo_evidence.get("sourceRows") if isinstance(geo_evidence, dict) else None
+                                    ) or [
+                                        [region or "Region", raw_value],
+                                        ["Total revenue", raw_den],
+                                    ]
+                                    source_cols = (
+                                        geo_evidence.get("sourceColumns") if isinstance(geo_evidence, dict) else None
+                                    ) or [fiscal_year]
                                     return _geo_shape({
                                         "ticker": ticker,
                                         "factType": fact_type.value,
-                                        "concept": concept_used,
+                                        "region": region,
+                                        "period": fiscal_year or None,
+                                        "rawValue": raw_value,
+                                        "rawDenominator": raw_den,
+                                        "unit": "USD",
+                                        "unitScale": (geo_evidence.get("unitScale") if isinstance(geo_evidence, dict) else "actual") or "actual",
                                         "value": geo_usd,
-                                        "totalRevenue": None,
-                                        "valuePct": geo_pct,
-                                        "fiscalYear": fiscal_year,
-                                        "fiscalPeriod": "FY",
+                                        "denominator": geo_denominator,
+                                        "valueRatio": geo_ratio,
+                                        "valuePct": round(float(geo_ratio) * 100, 2) if geo_ratio is not None else None,
+                                        "extractionMethod": "PARSED_TABLE",
+                                        "source": "PARSED_TABLE",
+                                        "confidence": "HIGH" if geo_denominator is not None else "LOW",
                                         "filingType": filing_type,
                                         "filingDate": filing_date_str,
-                                        "segmentLabel": region,
                                         "accessionNumber": acc_num,
-                                        "sectionHeading": geo_heading,
-                                        "primaryDocumentUrl": doc_url,
-                                        "source": "PARSED_HTML",
-                                        "confidence": "PARSED_HTML",
+                                        "documentUrl": doc_url,
+                                        "evidence": {
+                                            "sectionHeading": geo_heading or (geo_evidence.get("sectionHeading") if isinstance(geo_evidence, dict) else None),
+                                            "tableTitle": geo_evidence.get("tableTitle") if isinstance(geo_evidence, dict) else None,
+                                            "sourceTableId": geo_evidence.get("sourceTableId") if isinstance(geo_evidence, dict) else 1,
+                                            "sourceRows": source_rows,
+                                            "sourceColumns": source_cols,
+                                        },
+                                        "calculation": (
+                                            {
+                                                "formula": "value / denominator * 100",
+                                                "valueSource": "sourceRows[0]",
+                                                "denominatorSource": "sourceRows[1]",
+                                                "resultPct": round(float(geo_ratio) * 100, 2),
+                                            }
+                                            if geo_ratio is not None and geo_denominator is not None else None
+                                        ),
+                                        "warnings": [],
                                     })
         return _geo_shape({
             "ticker": ticker,
             "factType": fact_type.value,
-            "concept": concept_used,
             "value": None,
+            "denominator": None,
+            "valueRatio": None,
+            "valuePct": None,
+            "extractionMethod": "NONE",
+            "source": "NOT_DISCLOSED",
             "confidence": "NOT_DISCLOSED",
+            "evidence": {},
+            "warnings": [],
             "_manualLookup": _manual_lookup_payload(
                 ticker, cik_padded, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."
             ),
         })
 
+    accession_number = str(picked.get("accn") or "")
+    document_url = None
+    if accession_number and cik_padded:
+        index_url, _ = _edgar_build_filing_urls(int(cik_padded), accession_number, None)
+        document_url = index_url
+    value_num = float(picked.get("val", 0)) if picked.get("val") is not None else None
+    raw_value = _format_raw_number(value_num)
+    raw_denominator = _format_raw_number(denominator)
+    period_label = str(picked.get("fy") or "")
+    if period_label and not period_label.startswith("FY"):
+        period_label = f"FY{period_label}"
+
     return _geo_shape({
         "ticker": ticker,
         "factType": fact_type.value,
-        "concept": concept_used,
-        "value": picked.get("val"),
-        "totalRevenue": total_revenue if fact_type == FilingFactType.geographic_revenue else None,
+        "region": region,
+        "period": period_label or None,
+        "rawValue": raw_value,
+        "rawDenominator": raw_denominator,
+        "unit": "USD",
+        "unitScale": "actual",
+        "value": value_num,
+        "denominator": denominator if fact_type == FilingFactType.geographic_revenue else None,
+        "valueRatio": value_ratio if fact_type == FilingFactType.geographic_revenue else None,
         "valuePct": value_pct if fact_type == FilingFactType.geographic_revenue else None,
-        "fiscalYear": str(picked.get("fy") or ""),
-        "fiscalPeriod": str(picked.get("fp") or ""),
+        "extractionMethod": "XBRL",
+        "source": "XBRL",
+        "confidence": "HIGH" if fact_type != FilingFactType.geographic_revenue or denominator is not None else "LOW",
         "filingType": filing_type,
         "filingDate": str(picked.get("filed") or ""),
-        "segmentLabel": segment_label,
-        "accessionNumber": str(picked.get("accn") or ""),
-        "source": "XBRL_COMPANYCONCEPT",
-        "confidence": "CONFIRMED",
-    }, warn_denominator=(fact_type == FilingFactType.geographic_revenue and value_pct is None))
+        "accessionNumber": accession_number or None,
+        "documentUrl": document_url,
+        "evidence": {
+            "sectionHeading": segment_label,
+            "tableTitle": None,
+            "sourceTableId": None,
+            "sourceRows": [
+                [segment_label or (region or "Region"), raw_value],
+                ["Total revenue", raw_denominator],
+            ],
+            "sourceColumns": [period_label or str(picked.get("fp") or "")],
+        },
+        "calculation": (
+            {
+                "formula": "value / denominator * 100",
+                "valueSource": "sourceRows[0]",
+                "denominatorSource": "sourceRows[1]",
+                "resultPct": value_pct,
+            }
+            if fact_type == FilingFactType.geographic_revenue and denominator is not None else None
+        ),
+        "warnings": [],
+    }, warn_denominator=(fact_type == FilingFactType.geographic_revenue and denominator is None))
 
 
 @yfinance_server.tool(
@@ -5206,10 +5390,10 @@ def _detect_unit_multiplier(table_html: str, context_html: str) -> float:
 def _extract_geo_revenue_from_html(
     html_text: str,
     region: str,
-) -> tuple[float | None, float | None, str, list[dict]]:
+) -> tuple[float | None, float | None, float | None, str, dict | None]:
     """Search an SEC filing HTML document for a geographic revenue table.
 
-    Returns (regionRevenuePct, regionRevenueUSD, sectionHeading, parsedTables).
+    Returns (regionRevenueRatio, regionRevenueUSD, totalRevenueUSD, sectionHeading, evidence).
     Parses the first table that contains the target region and a numeric total row.
     """
     region_lower = region.lower()
@@ -5237,7 +5421,7 @@ def _extract_geo_revenue_from_html(
             idx = pos + 1
 
     if not term_positions:
-        return None, None, "", []
+        return None, None, None, "", None
 
     # For each match, find the nearest enclosing or following <table>
     checked_tables: set[int] = set()
@@ -5289,7 +5473,7 @@ def _extract_geo_revenue_from_html(
             })
 
     if not candidate_tables:
-        return None, None, "", []
+        return None, None, None, "", None
 
     _TOTAL_LABELS = frozenset({
         "total", "consolidated", "total revenues", "total net revenues",
@@ -5345,12 +5529,13 @@ def _extract_geo_revenue_from_html(
         if region_val is None or total_val is None or total_val <= 0:
             continue
 
-        pct = round(region_val / total_val, 4)
+        ratio = round(region_val / total_val, 4)
 
         # Detect unit scale for USD conversion
         context_html = html_text[max(0, tbl["pos"] - 3_000): tbl["pos"]]
         unit_mult = _detect_unit_multiplier(tbl["table_html"], context_html)
         region_usd = region_val * unit_mult
+        total_usd = total_val * unit_mult
 
         # Extract nearest section heading (last <h*> tag before the table)
         heading = ""
@@ -5359,9 +5544,30 @@ def _extract_geo_revenue_from_html(
         if h_matches:
             heading = _strip_html_tags(h_matches[-1])
 
-        return pct, region_usd, heading, [{"rows": rows}]
+        header_row = rows[0] if rows else []
+        source_col = str(header_row[value_col]).strip() if value_col < len(header_row) else ""
+        unit_scale = (
+            "thousands" if unit_mult == 1_000.0
+            else "millions" if unit_mult == 1_000_000.0
+            else "actual" if unit_mult == 1.0
+            else "actual"
+        )
+        evidence = {
+            "sectionHeading": heading or None,
+            "tableTitle": None,
+            "sourceTableId": 1,
+            "sourceRows": [
+                [str(rows[region_row_idx][0] if rows[region_row_idx] else region), str(rows[region_row_idx][value_col])],
+                [str(rows[total_row_idx][0] if rows[total_row_idx] else "Total revenue"), str(rows[total_row_idx][value_col])],
+            ],
+            "sourceColumns": [source_col] if source_col else [],
+            "unitScale": unit_scale,
+            "rawValue": str(rows[region_row_idx][value_col]),
+            "rawDenominator": str(rows[total_row_idx][value_col]),
+        }
+        return ratio, region_usd, total_usd, heading, evidence
 
-    return None, None, "", []
+    return None, None, None, "", None
 
 
 # ---------------------------------------------------------------------------
@@ -5503,8 +5709,8 @@ def _extract_geographic_pct(
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_flow_scan"],
     description="""Structured options flow scan for a binary event window.
 
-Returns the formatted options flow output block. IO pastes formattedBlock directly into
-session output. Prior window-label readings are cached server-side (72 h TTL) to enable trend
+Returns the formatted options flow output block. Callers can paste formattedBlock directly into
+client output. Prior window-label readings are cached server-side (72 h TTL) to enable trend
 computation across readings (e.g. T-14 → T-7 → T-2).
 
 Returns: pcRatio, ivPctile, putVolVs10dAvg, putVolTrend (INCREASING/STABLE/DECREASING),
@@ -6235,31 +6441,28 @@ async def extract_sec_filing_fact(
         raw = await get_filing_data(ticker=ticker, fact_type=routed_fact_type, region=region, filing_type=filing_type, period=period)
         try:
             parsed = json.loads(raw)
-            source_raw = str(parsed.get("source") or parsed.get("confidence") or "NOT_DISCLOSED")
-            source = (
-                "XBRL" if source_raw == "XBRL_COMPANYCONCEPT"
-                else "PARSED_TABLE" if source_raw == "PARSED_HTML"
-                else "NOT_DISCLOSED" if source_raw == "NOT_DISCLOSED"
-                else "TEXT_SEARCH"
-            )
             return json.dumps({
                 "fact": routed_fact_type.value,
                 "region": region,
                 "value": parsed.get("value"),
-                "totalRevenue": parsed.get("totalRevenue"),
+                "denominator": parsed.get("denominator"),
+                "valueRatio": parsed.get("valueRatio"),
                 "valuePct": parsed.get("valuePct"),
+                "rawValue": parsed.get("rawValue"),
+                "rawDenominator": parsed.get("rawDenominator"),
                 "unit": "USD",
-                "period": parsed.get("fiscalYear"),
+                "unitScale": parsed.get("unitScale"),
+                "period": parsed.get("period"),
                 "filingType": parsed.get("filingType", filing_type),
                 "filingDate": parsed.get("filingDate"),
                 "accessionNumber": parsed.get("accessionNumber"),
-                "source": source,
+                "extractionMethod": parsed.get("extractionMethod", "NONE"),
+                "source": parsed.get("source", "NOT_DISCLOSED"),
                 "confidence": parsed.get("confidence", "NOT_DISCLOSED"),
-                "evidence": [{
-                    "accessionNumber": parsed.get("accessionNumber"),
-                    "location": parsed.get("primaryDocumentUrl"),
-                    "sectionHeading": parsed.get("sectionHeading") or parsed.get("segmentLabel"),
-                }],
+                "documentUrl": parsed.get("documentUrl"),
+                "evidence": parsed.get("evidence"),
+                "calculation": parsed.get("calculation"),
+                "warnings": parsed.get("warnings", []),
                 "ticker": parsed.get("ticker", ticker),
             })
         except Exception:
