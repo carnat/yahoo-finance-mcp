@@ -1,3 +1,4 @@
+import { mcpSuccess } from "./response.js";
 import {
   getAnalystConsensus,
   getAnalystUpgradeRadar,
@@ -1022,6 +1023,11 @@ const tickerArg = (v: unknown): string | string[] =>
   Array.isArray(v) ? v.map(String) : str(v);
 
 export async function callTool(name: string, args: Record<string, unknown>): Promise<string> {
+  const raw = await _dispatchTool(name, args);
+  return mcpSuccess(name, raw);
+}
+
+async function _dispatchTool(name: string, args: Record<string, unknown>): Promise<string> {
   switch (name) {
     case "get_historical_stock_prices":
       return getHistoricalPrices(str(args.ticker), str(args.period, "1mo"), str(args.interval, "1d"), args.prepost === true);

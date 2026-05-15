@@ -2,10 +2,12 @@ import asyncio
 import datetime
 import html as _html_module
 import json
+import os
 import re as _re
 import time
 import urllib.parse as _urlparse
 from enum import Enum
+from typing import TypedDict
 
 import pandas as pd
 import yfinance as yf
@@ -51,22 +53,235 @@ class FilingFactType(str, Enum):
 
 
 # ---------------------------------------------------------------------------
-# In-memory cache with TTL
+# Server version and envelope feature flag
 # ---------------------------------------------------------------------------
-_cache: dict[str, tuple[float, str]] = {}  # key -> (stored_at, json_str)
-_PRICE_TTL = 15 * 60        # 15 minutes for price / historical data
-_STMT_TTL  = 24 * 3600      # 24 hours for financial statements
+SERVER_VERSION = "0.1.0"
+_ENVELOPE_V2 = os.environ.get("MCP_ENVELOPE_V2", "").lower() == "true"
 
 
-def _cache_get(key: str, ttl: float) -> str | None:
-    entry = _cache.get(key)
-    if entry and (time.monotonic() - entry[0]) < ttl:
-        return entry[1]
+# ---------------------------------------------------------------------------
+# Typed domain error codes
+# ---------------------------------------------------------------------------
+class ErrorCode:
+    TICKER_NOT_FOUND = "TICKER_NOT_FOUND"
+    NO_OPTIONS_DATA = "NO_OPTIONS_DATA"
+    NO_FILING_DATA = "NO_FILING_DATA"
+    PROVIDER_ERROR = "PROVIDER_ERROR"
+    PROVIDER_TIMEOUT = "PROVIDER_TIMEOUT"
+    RATE_LIMIT = "RATE_LIMIT"
+    INPUT_VALIDATION_ERROR = "INPUT_VALIDATION_ERROR"
+    DEPRECATED_TOOL = "DEPRECATED_TOOL"
+
+
+# ---------------------------------------------------------------------------
+# McpResponse TypedDicts
+# ---------------------------------------------------------------------------
+class ToolMeta(TypedDict):
+    tool: str
+    source: str
+    dataDate: str | None
+    serverVersion: str
+    cacheHit: bool
+    warnings: list[str]
+
+
+class ErrorDetail(TypedDict):
+    code: str
+    message: str
+
+
+class McpResponse(TypedDict):
+    ok: bool
+    data: object
+    meta: ToolMeta
+    error: ErrorDetail | None
+
+
+# ---------------------------------------------------------------------------
+# McpResponse helpers
+# ---------------------------------------------------------------------------
+def _mcp_success(
+    tool: str,
+    data: object,
+    *,
+    source: str = "yahoo_finance",
+    data_date: str | None = None,
+    cache_hit: bool = False,
+    warnings: list[str] | None = None,
+) -> str:
+    if not _ENVELOPE_V2:
+        return data if isinstance(data, str) else json.dumps(data)
+    return json.dumps({
+        "ok": True,
+        "data": data if not isinstance(data, str) else json.loads(data),
+        "meta": {
+            "tool": tool,
+            "source": source,
+            "dataDate": data_date,
+            "serverVersion": SERVER_VERSION,
+            "cacheHit": cache_hit,
+            "warnings": warnings or [],
+        },
+        "error": None,
+    })
+
+
+def _mcp_failure(
+    tool: str,
+    code: str,
+    message: str,
+    *,
+    source: str = "yahoo_finance",
+    data_date: str | None = None,
+) -> str:
+    payload = {
+        "ok": False,
+        "data": None,
+        "meta": {
+            "tool": tool,
+            "source": source,
+            "dataDate": data_date,
+            "serverVersion": SERVER_VERSION,
+            "cacheHit": False,
+            "warnings": [],
+        },
+        "error": {"code": code, "message": message},
+    }
+    if not _ENVELOPE_V2:
+        return json.dumps({"error": True, "code": code, "message": message})
+    return json.dumps(payload)
+
+
+def _mcp_warning(
+    tool: str,
+    data: object,
+    message: str,
+    *,
+    source: str = "yahoo_finance",
+    data_date: str | None = None,
+) -> str:
+    if not _ENVELOPE_V2:
+        return data if isinstance(data, str) else json.dumps(data)
+    parsed = data if not isinstance(data, str) else json.loads(data)
+    return json.dumps({
+        "ok": True,
+        "data": parsed,
+        "meta": {
+            "tool": tool,
+            "source": source,
+            "dataDate": data_date,
+            "serverVersion": SERVER_VERSION,
+            "cacheHit": False,
+            "warnings": [message],
+        },
+        "error": None,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Input validation helpers
+# ---------------------------------------------------------------------------
+_TICKER_RE = _re.compile(r'^[A-Z0-9.\-\^=]{1,20}$')
+_ACCESSION_RE = _re.compile(r'^\d{10}-\d{2}-\d{6}$')
+
+
+def _validate_ticker(ticker: str) -> str | None:
+    """Returns an error message if the ticker is invalid, else None."""
+    t = ticker.strip().upper()
+    if not _TICKER_RE.match(t):
+        return f"Invalid ticker symbol: '{ticker}'. Must be 1-20 uppercase alphanumeric characters."
     return None
 
 
-def _cache_set(key: str, value: str) -> None:
-    _cache[key] = (time.monotonic(), value)
+def _validate_accession(acc: str) -> str | None:
+    """Returns an error message if the accession number is invalid, else None."""
+    if not _ACCESSION_RE.match(acc.strip()):
+        return f"Invalid accession number: '{acc}'. Expected format: XXXXXXXXXX-YY-ZZZZZZ."
+    return None
+
+
+def _validate_batch_tickers(tickers: list) -> str | None:
+    """Returns an error message if the batch is too large, else None."""
+    if len(tickers) > 5:
+        return f"Too many tickers: {len(tickers)}. Maximum is 5 per call."
+    return None
+
+
+def _validate_sec_url(url: str) -> str | None:
+    """Returns an error message if the SEC URL is not from sec.gov/Archives, else None."""
+    if not url.startswith("https://www.sec.gov/Archives/"):
+        return f"Invalid SEC URL: must start with 'https://www.sec.gov/Archives/'."
+    return None
+
+
+def _sanitize_sec_html(html: str) -> str:
+    """Strip script/style tags and event handler attributes from SEC HTML."""
+    html = _re.sub(r'<script[^>]*>.*?</script>', '', html, flags=_re.DOTALL | _re.IGNORECASE)
+    html = _re.sub(r'<style[^>]*>.*?</style>', '', html, flags=_re.DOTALL | _re.IGNORECASE)
+    html = _re.sub(r'\s+on\w+\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)', '', html, flags=_re.IGNORECASE)
+    return html
+
+
+# ---------------------------------------------------------------------------
+# Centralized TTL cache
+# ---------------------------------------------------------------------------
+class ToolCache:
+    def __init__(self) -> None:
+        self._store: dict[str, tuple[float, str, float]] = {}  # key -> (stored_at, value, ttl)
+
+    def get(self, key: str) -> tuple[str, bool, str | None] | None:
+        """Returns (value, cache_hit, cached_at_iso) or None if miss/expired."""
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        stored_at, value, ttl = entry
+        age = time.monotonic() - stored_at
+        if age >= ttl:
+            return None
+        cached_at = datetime.datetime.utcfromtimestamp(time.time() - age).isoformat() + "Z"
+        return value, True, cached_at
+
+    def set(self, key: str, value: str, ttl: float) -> None:
+        self._store[key] = (time.monotonic(), value, ttl)
+
+    def is_stale(self, key: str) -> bool:
+        """True if age > 2× TTL (stale but still cached)."""
+        entry = self._store.get(key)
+        if not entry:
+            return False
+        stored_at, _, ttl = entry
+        return (time.monotonic() - stored_at) > 2 * ttl
+
+
+_tool_cache = ToolCache()
+
+# TTL tiers
+TTL_PRICE = 5 * 60          # 5 min
+TTL_ANALYST = 15 * 60       # 15 min
+TTL_FINANCIALS = 4 * 3600   # 4 hours
+TTL_EDGAR = 24 * 3600       # 24 hours
+TTL_OPTIONS = 15 * 60       # 15 min
+
+# Backward-compat aliases (old names still work)
+_PRICE_TTL = TTL_PRICE
+_STMT_TTL = TTL_FINANCIALS
+
+
+def _cache_get(key: str, ttl: float) -> str | None:
+    """Legacy cache get — delegates to ToolCache with the given TTL."""
+    entry = _tool_cache._store.get(key)
+    if entry is None:
+        return None
+    stored_at, value, stored_ttl = entry
+    # honour the caller-supplied TTL (may differ from stored TTL)
+    if (time.monotonic() - stored_at) < ttl:
+        return value
+    return None
+
+
+def _cache_set(key: str, value: str, ttl: float = TTL_PRICE) -> None:
+    """Legacy cache set — delegates to ToolCache."""
+    _tool_cache.set(key, value, ttl)
 
 
 async def _fetch_with_retry(fn, *args, retries: int = 1, delay: float = 2.0, **kwargs):
