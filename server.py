@@ -1427,9 +1427,9 @@ async def get_option_chain(
         df = df[df["inTheMoney"] == False]
     elif moneyness == "near_money":
         if underlying_price:
-            half_window = moneyness_window_pct / 100.0
-            low = underlying_price * (1 - half_window)
-            high = underlying_price * (1 + half_window)
+            window_fraction = moneyness_window_pct / 100.0
+            low = underlying_price * (1 - window_fraction)
+            high = underlying_price * (1 + window_fraction)
             df = df[(df["strike"] >= low) & (df["strike"] <= high)]
     if effective_strike_min is not None:
         df = df[df["strike"] >= effective_strike_min]

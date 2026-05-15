@@ -98,7 +98,9 @@ class TestComputeDataQuality(unittest.TestCase):
             _make_contract(strike=float(s), bid=0, ask=0, open_interest=0, implied_volatility=0.0)
             for s in range(7, 11)  # 4 bad
         ]
-        # pct_bad = (4+4+4)/(3*10) = 12/30 = 0.40 => MEDIUM
+        # Each bad contract has zeroBidAsk=1, zeroOI=1, placeholderIv=1
+        # Fractions: zeroBidAsk=4/10=0.40, zeroOI=4/10=0.40, placeholderIV=4/10=0.40
+        # Each > 0.30 (MEDIUM threshold) but < 0.50 (LOW threshold) => MEDIUM quality
         dq = srv._compute_data_quality(good + bad, "2025-05-15")
         self.assertEqual(dq["quality"], "MEDIUM")
 

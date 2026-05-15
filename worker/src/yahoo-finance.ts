@@ -858,8 +858,8 @@ export async function getOptionChain(
           const strike = (c.strike as number) || 0;
           const underlying = underlyingPrice ?? ((quote.regularMarketPrice as number) || strike);
           if (underlying <= 0) return false;
-          const halfWindow = moneynessWindowPct / 100;
-          return Math.abs(strike - underlying) / underlying <= halfWindow;
+          const windowFraction = moneynessWindowPct / 100;
+          return Math.abs(strike - underlying) / underlying <= windowFraction;
         }
         return true;
       });

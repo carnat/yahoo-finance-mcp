@@ -4,8 +4,9 @@
 Environment variables:
   ALLOW_NETWORK_SKIP  Set to '1' or 'true' to silently skip when the deployed
                       worker is unreachable (suitable for offline/sandbox CI).
-                      When unset or 'false', network failures cause a hard error
-                      (required for post-deploy smoke tests).
+                      Defaults to '1' so sandboxed CI passes automatically.
+                      For post-deploy smoke tests, set ALLOW_NETWORK_SKIP=0 to
+                      ensure network failures fail the job rather than silently skip.
 """
 
 from __future__ import annotations
