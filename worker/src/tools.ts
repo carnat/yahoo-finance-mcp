@@ -1245,9 +1245,10 @@ const tickerArg = (v: unknown): string | string[] =>
   Array.isArray(v) ? v.map(String) : str(v);
 
 export async function callTool(name: string, args: Record<string, unknown>): Promise<string> {
-  const canonicalTool = TOOL_ALIASES[name] ?? name;
+  const aliasTarget = TOOL_ALIASES[name];
+  const canonicalTool = aliasTarget ?? name;
   const raw = await _dispatchTool(canonicalTool, args);
-  if (canonicalTool !== name) {
+  if (aliasTarget != null) {
     return mcpSuccess(name, raw, {
       canonicalTool,
       warnings: [{

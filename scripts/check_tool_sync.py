@@ -80,6 +80,13 @@ def parse_alias_pairs(source: str) -> dict[str, str]:
     }
 
 
+def validate_alias_targets(aliases: dict[str, str], tools: set[str], source_name: str) -> tuple[bool, str | None]:
+    for alias, canonical in aliases.items():
+        if alias in tools and canonical not in tools:
+            return False, f"ERROR: {source_name} alias '{alias}' maps to missing canonical '{canonical}'"
+    return True, None
+
+
 def main():
     py_source = SERVER_PY.read_text()
     ts_source = TOOLS_TS.read_text()
@@ -134,14 +141,14 @@ def main():
             print("  Missing in worker/src/tools.ts:", ", ".join(missing_ts_alias), file=sys.stderr)
         return 1
 
-    for alias, canonical in ts_aliases.items():
-        if alias in ts_tools and canonical not in ts_tools:
-            print(f"ERROR: worker alias '{alias}' maps to missing canonical '{canonical}'", file=sys.stderr)
-            return 1
-    for alias, canonical in py_aliases.items():
-        if alias in py_tools and canonical not in py_tools:
-            print(f"ERROR: server alias '{alias}' maps to missing canonical '{canonical}'", file=sys.stderr)
-            return 1
+    ok, msg = validate_alias_targets(ts_aliases, ts_tools, "worker")
+    if not ok:
+        print(msg, file=sys.stderr)
+        return 1
+    ok, msg = validate_alias_targets(py_aliases, py_tools, "server")
+    if not ok:
+        print(msg, file=sys.stderr)
+        return 1
 
     print(f"OK: {len(py_tools)} tools in sync with canonical/alias checks")
     return 0

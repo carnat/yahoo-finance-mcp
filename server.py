@@ -118,7 +118,7 @@ def _mcp_success(
         "data": data if not isinstance(data, str) else json.loads(data),
         "meta": {
             "tool": tool,
-            "canonicalTool": canonical_tool,
+            **({"canonicalTool": canonical_tool} if canonical_tool is not None else {}),
             "source": source,
             "dataDate": data_date,
             "serverVersion": SERVER_VERSION,
@@ -172,7 +172,7 @@ def _mcp_warning(
         "data": parsed,
         "meta": {
             "tool": tool,
-            "canonicalTool": canonical_tool,
+            **({"canonicalTool": canonical_tool} if canonical_tool is not None else {}),
             "source": source,
             "dataDate": data_date,
             "serverVersion": SERVER_VERSION,

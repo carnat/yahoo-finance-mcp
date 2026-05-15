@@ -109,8 +109,8 @@ def main() -> int:
     _assert_any(tool_names, ("extract_filing_fact", "extract_sec_filing_fact"), errors)
     _assert_any(tool_names, ("get_options_summary", "summarize_options_flow"), errors)
 
-    if "health_check" in tool_names:
-        pass
+    if "health_check" not in tool_names:
+        errors.append("missing health_check in discovery")
 
     option_tool = next((t for t in tools if isinstance(t, dict) and t.get("name") == "get_option_chain"), None)
     if option_tool is None:
@@ -154,4 +154,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

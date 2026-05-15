@@ -2948,16 +2948,16 @@ export async function getFilingData(
   filingType = "10-K",
   period = "latest",
 ): Promise<string> {
-  const withGeoShape = (payload: Record<string, unknown>, warnDenominator = false): string => {
+  const withGeoShape = (payload: Record<string, unknown>, addDenominatorWarning = false): string => {
     if (factType !== "geographic_revenue") return JSON.stringify(payload);
     const shaped: Record<string, unknown> = {
       ...payload,
-      value: (payload.value as unknown) ?? null,
-      totalRevenue: (payload.totalRevenue as unknown) ?? null,
-      valuePct: (payload.valuePct as unknown) ?? null,
+      value: payload.value ?? null,
+      totalRevenue: payload.totalRevenue ?? null,
+      valuePct: payload.valuePct ?? null,
     };
-    if (warnDenominator && shaped.value !== null && shaped.totalRevenue === null) {
-      const existing = Array.isArray(shaped.warnings) ? (shaped.warnings as unknown[]) : [];
+    if (addDenominatorWarning && shaped.value !== null && shaped.totalRevenue === null) {
+      const existing = Array.isArray(shaped.warnings) ? shaped.warnings : [];
       shaped.warnings = [
         ...existing,
         {
@@ -3153,8 +3153,8 @@ export async function getFilingData(
     factType,
     concept,
     value: picked.val ?? null,
-    totalRevenue: factType === "geographic_revenue" ? ((picked as Record<string, unknown>).totalRevenue ?? null) : undefined,
-    valuePct: factType === "geographic_revenue" ? valuePct : undefined,
+    totalRevenue: factType === "geographic_revenue" ? ((picked as Record<string, unknown>).totalRevenue ?? null) : null,
+    valuePct: factType === "geographic_revenue" ? valuePct : null,
     fiscalYear: String(picked.fy ?? ""),
     fiscalPeriod: String(picked.fp ?? ""),
     filingType,
