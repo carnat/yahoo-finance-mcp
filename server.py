@@ -216,8 +216,8 @@ def _validate_sec_url(url: str) -> str | None:
 
 def _sanitize_sec_html(html: str) -> str:
     """Strip script/style tags and event handler attributes from SEC HTML."""
-    html = _re.sub(r'<script[^>]*>.*?</script>', '', html, flags=_re.DOTALL | _re.IGNORECASE)
-    html = _re.sub(r'<style[^>]*>.*?</style>', '', html, flags=_re.DOTALL | _re.IGNORECASE)
+    html = _re.sub(r'<script[^>]*>.*?</script\s*>', '', html, flags=_re.DOTALL | _re.IGNORECASE)
+    html = _re.sub(r'<style[^>]*>.*?</style\s*>', '', html, flags=_re.DOTALL | _re.IGNORECASE)
     html = _re.sub(r'\s+on\w+\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)', '', html, flags=_re.IGNORECASE)
     return html
 
@@ -238,7 +238,10 @@ class ToolCache:
         age = time.monotonic() - stored_at
         if age >= ttl:
             return None
-        cached_at = datetime.datetime.utcfromtimestamp(time.time() - age).isoformat() + "Z"
+        cached_at = (
+            datetime.datetime.fromtimestamp(time.time() - age, tz=datetime.timezone.utc)
+            .isoformat()
+        )
         return value, True, cached_at
 
     def set(self, key: str, value: str, ttl: float) -> None:

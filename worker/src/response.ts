@@ -85,6 +85,7 @@ export function mcpFailure(
   message: string,
   opts?: { source?: string }
 ): string {
+  if (!ENVELOPE_V2) return JSON.stringify({ error: true, code, message });
   const resp: McpResponse = {
     ok: false,
     data: null,
@@ -98,6 +99,5 @@ export function mcpFailure(
     },
     error: { code, message },
   };
-  if (!ENVELOPE_V2) return JSON.stringify({ error: true, code, message });
   return JSON.stringify(resp);
 }
