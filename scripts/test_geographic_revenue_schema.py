@@ -1,16 +1,62 @@
 #!/usr/bin/env python3
-"""Validate geographic revenue schema guarantees on deployed MCP."""
+"""Validate geographic revenue schema guarantees.
+
+Default mode validates the local server.py tool path.
+Set MCP_URL to validate a deployed MCP endpoint instead.
+"""
 
 from __future__ import annotations
 
 import json
+import os
+import sys
+import asyncio
 import urllib.request
 
-URL = "https://yahoo-finance-mcp.artinatw.workers.dev/mcp"
+URL = os.environ.get("MCP_URL", "").strip()
 UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-geo-schema/1.0)"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _patch_fastmcp_tool() -> None:
+    from mcp.server.fastmcp import FastMCP as _FastMCP  # noqa: E402
+
+    orig_tool = _FastMCP.tool
+
+    def _patched_tool(self, name=None, output_schema=None, **kwargs):  # type: ignore[override]
+        return orig_tool(self, name=name, **kwargs)
+
+    _FastMCP.tool = _patched_tool  # type: ignore[method-assign]
+
+
+def _call_local(args: dict) -> dict:
+    _patch_fastmcp_tool()
+    import importlib  # noqa: E402
+    import server as srv  # noqa: E402
+
+    importlib.reload(srv)
+    raw = asyncio.run(
+        srv.extract_sec_filing_fact(
+            ticker=str(args.get("ticker", "")),
+            fact=str(args.get("fact")) if args.get("fact") is not None else None,
+            fact_name=str(args.get("fact_name")) if args.get("fact_name") is not None else None,
+            fact_type=args.get("fact_type"),
+            region=str(args.get("region")) if args.get("region") is not None else None,
+            filing_type=str(args.get("filing_type", "10-K")),
+            period=str(args.get("period", "latest")),
+            document_url=str(args.get("document_url")) if args.get("document_url") is not None else None,
+            accession_number=str(args.get("accession_number")) if args.get("accession_number") is not None else None,
+        )
+    )
+    return json.loads(raw)
 
 
 def call(name: str, args: dict, req_id: int) -> dict:
+    if not URL:
+        if name != "extract_sec_filing_fact":
+            raise AssertionError(f"Unsupported local call: {name}")
+        return _call_local(args)
+
     payload = {
         "jsonrpc": "2.0",
         "id": req_id,
@@ -69,6 +115,7 @@ def assert_geo_shape(data: dict) -> None:
 
 
 def main() -> int:
+    print(f"Geo schema target: {URL or 'local-server.py'}")
     aaoi = call("extract_sec_filing_fact", {"ticker": "AAOI", "fact": "geographic_revenue", "region": "China"}, 0)
     aaoi_data = data_of(aaoi)
     print(f"AAOI payload: {json.dumps(aaoi_data, sort_keys=True)}")
