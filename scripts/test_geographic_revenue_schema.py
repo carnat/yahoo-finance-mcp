@@ -115,7 +115,7 @@ def assert_geo_shape(data: dict) -> None:
 
 
 def main() -> int:
-    print(f"Geo schema target: {URL or 'local-server.py'}")
+    print(f"Geo schema target: {URL or 'local server.py module path'}")
     aaoi = call("extract_sec_filing_fact", {"ticker": "AAOI", "fact": "geographic_revenue", "region": "China"}, 0)
     aaoi_data = data_of(aaoi)
     print(f"AAOI payload: {json.dumps(aaoi_data, sort_keys=True)}")
