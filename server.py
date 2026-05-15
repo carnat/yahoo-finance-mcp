@@ -382,9 +382,7 @@ def _compute_data_quality(
     warnings: list[str] = []
     pct_bad = (zero_bid_ask + zero_oi + placeholder_iv) / (3 * n)
 
-    if n == 0:
-        quality = "LOW"
-    elif pct_bad >= 0.60:
+    if pct_bad >= 0.60:
         quality = "LOW"
     elif pct_bad >= 0.30:
         quality = "MEDIUM"
