@@ -373,7 +373,9 @@ def _compute_data_quality(
                     if isinstance(ltd, str):
                         ltd_date = datetime.date.fromisoformat(ltd[:10])
                     else:
-                        ltd_date = datetime.datetime.utcfromtimestamp(int(ltd) / 1000).date()
+                        raw_ts = float(ltd)
+                        ltd_seconds = raw_ts / 1000 if raw_ts > 1e10 else raw_ts
+                        ltd_date = datetime.datetime.utcfromtimestamp(ltd_seconds).date()
                     if (data_date_obj - ltd_date).days > stale_days_threshold:
                         stale_trade += 1
                 except Exception:

@@ -124,6 +124,34 @@ class TestComputeDataQuality(unittest.TestCase):
         dq = srv._compute_data_quality(contracts, "2025-05-15", stale_days_threshold=5)
         self.assertIn("MAJORITY_STALE_LAST_TRADE", dq["warnings"])
 
+    def test_epoch_seconds_lasttradedate_not_falsely_stale(self):
+        """Yahoo Finance returns epoch seconds (e.g. 1746057600).
+        Must NOT be treated as 1970-era stale after the /1000 bug."""
+        import datetime as dt
+        # 2026-04-01 in epoch seconds
+        epoch_seconds = int(dt.datetime(2026, 4, 1, tzinfo=dt.timezone.utc).timestamp())
+        self.assertLess(epoch_seconds, 1e10, "Epoch-seconds fixture must be < 1e10")
+        c = _make_contract(strike=10.0, bid=1.0, ask=1.1, open_interest=100, implied_volatility=0.4)
+        c["lastTradeDate"] = epoch_seconds
+        # data_date 2026-05-15; age ~44 days; stale threshold 60 => NOT stale
+        dq = srv._compute_data_quality([c], "2026-05-15", stale_days_threshold=60)
+        self.assertEqual(dq["staleLastTradeCount"], 0,
+            "Epoch-second lastTradeDate (< 1e10) must not be treated as 1970-era stale")
+
+    def test_epoch_milliseconds_lasttradedate_not_falsely_stale(self):
+        """Some sources return epoch milliseconds (> 1e10).
+        Must be divided by 1000 before converting to a date."""
+        import datetime as dt
+        # 2026-04-01 in epoch milliseconds
+        epoch_ms = int(dt.datetime(2026, 4, 1, tzinfo=dt.timezone.utc).timestamp()) * 1000
+        self.assertGreater(epoch_ms, 1e10, "Epoch-ms fixture must be > 1e10")
+        c = _make_contract(strike=10.0, bid=1.0, ask=1.1, open_interest=100, implied_volatility=0.4)
+        c["lastTradeDate"] = epoch_ms
+        # data_date 2026-05-15; age ~44 days; stale threshold 60 => NOT stale
+        dq = srv._compute_data_quality([c], "2026-05-15", stale_days_threshold=60)
+        self.assertEqual(dq["staleLastTradeCount"], 0,
+            "Epoch-ms lastTradeDate (> 1e10) must be divided by 1000 before date conversion")
+
 
 class TestMaxPainZeroOI(unittest.TestCase):
     """maxPainStrike should be null when all OI is zero."""
