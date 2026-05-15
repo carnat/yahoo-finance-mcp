@@ -6,13 +6,16 @@ stable key presence) WITHOUT exact-comparing volatile live payload values
 (prices, timestamps, volume). This avoids false failures when the market is open
 or when two sequential calls return slightly different quotes.
 
-Stable keys checked per tool:
-  get_market_quote / get_fast_info   → ticker, lastPrice, currency
+Stable keys checked per tool (only keys that are structurally guaranteed):
+  get_market_quote / get_fast_info   → currency, quoteType, lastPrice, previousClose
   check_volume_liquidity_threshold    → ticker, gatePass, dataDate
   summarize_options_flow              → ticker, dataQuality
   analyze_options_flow_window         → ticker, dataQuality (or windowLabel)
   analyze_position_signals            → t1_inputs, t2_inputs, t4_inputs, t5_inputs
   calculate_price_target_distance     → ticker, currentPrice, bracket
+
+Note: get_market_quote/get_fast_info returns yfinance fast_info fields directly
+and does not inject a "ticker" key, so "ticker" is not a stable key for that tool.
 """
 
 from __future__ import annotations
@@ -26,7 +29,8 @@ UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-universal-aliases/1.0)"
 
 # (canonical, args, alias, required_stable_keys_in_data)
 ALIAS_PAIRS: list[tuple[str, dict, str, set[str]]] = [
-    ("get_market_quote", {"ticker": "AAPL"}, "get_fast_info", {"ticker", "lastPrice", "currency"}),
+    # get_fast_info returns yfinance fast_info fields directly (no "ticker" key injected)
+    ("get_market_quote", {"ticker": "AAPL"}, "get_fast_info", {"currency", "quoteType", "lastPrice", "previousClose"}),
     ("check_volume_liquidity_threshold", {"ticker": "AAPL"}, "get_adv_gate", {"ticker", "gatePass", "dataDate"}),
     ("summarize_options_flow", {"ticker": "AAPL"}, "get_options_summary", {"ticker", "dataQuality"}),
     ("summarize_options_flow", {"ticker": "AAPL"}, "get_options_flow_summary", {"ticker", "dataQuality"}),
