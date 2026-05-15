@@ -131,11 +131,31 @@ function computeDataQuality(
   }
 
   const warnings: string[] = [];
-  const pctBad = (zeroBidAsk + zeroOI + placeholderIv) / (3 * n);
+
+  // Per-dimension thresholds (any single dimension can trigger LOW/MEDIUM)
   let quality: "HIGH" | "MEDIUM" | "LOW";
-  if (pctBad >= 0.60) quality = "LOW";
-  else if (pctBad >= 0.30) quality = "MEDIUM";
-  else quality = "HIGH";
+  const zeroBAFrac = zeroBidAsk / n;
+  const zeroOIFrac = zeroOI / n;
+  const placeholderIvFrac = placeholderIv / n;
+  const staleFrac = staleTrade / n;
+
+  if (
+    zeroBAFrac > 0.50 ||
+    zeroOIFrac > 0.80 ||
+    placeholderIvFrac > 0.50 ||
+    staleFrac > 0.50
+  ) {
+    quality = "LOW";
+  } else if (
+    zeroBAFrac > 0.30 ||
+    zeroOIFrac > 0.50 ||
+    placeholderIvFrac > 0.30 ||
+    staleFrac > 0.30
+  ) {
+    quality = "MEDIUM";
+  } else {
+    quality = "HIGH";
+  }
 
   if (zeroBidAsk > n * 0.5) warnings.push("MAJORITY_ZERO_BID_ASK");
   if (zeroOI > n * 0.5) warnings.push("MAJORITY_ZERO_OPEN_INTEREST");
@@ -2313,7 +2333,11 @@ export async function getOptionsFlowSummary(ticker: string, expiryHint?: string)
     let atmStrike: number | null = null;
     let atmIV: number | null = null;
     const flowWarnings: string[] = [];
-    if (lastPrice != null && calls.length > 0) {
+    if (lastPrice == null) {
+      flowWarnings.push("ATM_IV_UNAVAILABLE_NO_PRICE");
+    } else if (calls.length === 0) {
+      flowWarnings.push("ATM_IV_UNAVAILABLE_NO_CALLS");
+    } else {
       let minDist = Infinity;
       let rawAtmIV: number | null = null;
       for (const c of calls) {
@@ -2330,9 +2354,10 @@ export async function getOptionsFlowSummary(ticker: string, expiryHint?: string)
       }
       if (rawAtmIV != null && rawAtmIV > PLACEHOLDER_IV_THRESHOLD) {
         atmIV = +rawAtmIV.toFixed(3);
+      } else {
+        flowWarnings.push("ATM_IV_PLACEHOLDER");
       }
     }
-    if (atmIV === null) flowWarnings.push("ATM_IV_PLACEHOLDER");
 
     // IV percentile
     const allIVs: number[] = [];
@@ -4337,18 +4362,27 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
 
     // ATM IV — reject placeholder
     let atmIv: number | null = null;
-    if (currentPrice != null) {
+    if (currentPrice == null) {
+      scanWarnings.push("ATM_IV_UNAVAILABLE_NO_PRICE");
+    } else if (calls.length === 0) {
+      scanWarnings.push("ATM_IV_UNAVAILABLE_NO_CALLS");
+    } else {
       let minDist = Infinity;
+      let rawAtmIv: number | null = null;
       for (const c of calls) {
         const dist = Math.abs((c.strike as number) - currentPrice);
         const iv = (c.impliedVolatility as number | null) ?? null;
         if (dist < minDist) {
           minDist = dist;
-          atmIv = iv != null && iv > PLACEHOLDER_IV_THRESHOLD ? iv : null;
+          rawAtmIv = iv;
         }
       }
+      if (rawAtmIv != null && rawAtmIv > PLACEHOLDER_IV_THRESHOLD) {
+        atmIv = rawAtmIv;
+      } else {
+        scanWarnings.push("ATM_IV_PLACEHOLDER");
+      }
     }
-    if (atmIv === null) scanWarnings.push("ATM_IV_PLACEHOLDER");
 
     // dataQuality
     const dataQuality = computeDataQuality([...calls, ...puts], getLastTradingDate());
@@ -4679,7 +4713,11 @@ export async function getOptionsSummary(ticker: string): Promise<string> {
     const summaryWarnings: string[] = [];
 
     let atmIV: number | null = null;
-    if (currentPrice != null && calls.length > 0) {
+    if (currentPrice == null) {
+      summaryWarnings.push("ATM_IV_UNAVAILABLE_NO_PRICE");
+    } else if (calls.length === 0) {
+      summaryWarnings.push("ATM_IV_UNAVAILABLE_NO_CALLS");
+    } else {
       let minDist = Infinity;
       let rawAtmIV: number | null = null;
       for (const c of calls) {
@@ -4692,9 +4730,10 @@ export async function getOptionsSummary(ticker: string): Promise<string> {
       }
       if (rawAtmIV != null && rawAtmIV > PLACEHOLDER_IV_THRESHOLD) {
         atmIV = +rawAtmIV.toFixed(4);
+      } else {
+        summaryWarnings.push("ATM_IV_PLACEHOLDER");
       }
     }
-    if (atmIV === null) summaryWarnings.push("ATM_IV_PLACEHOLDER");
 
     const callVol = calls.reduce((s, c) => s + ((c.volume as number) || 0), 0);
     const putVol = puts.reduce((s, c) => s + ((c.volume as number) || 0), 0);

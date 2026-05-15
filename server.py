@@ -380,11 +380,26 @@ def _compute_data_quality(
                     pass
 
     warnings: list[str] = []
-    pct_bad = (zero_bid_ask + zero_oi + placeholder_iv) / (3 * n)
 
-    if pct_bad >= 0.60:
+    # Per-dimension thresholds (any single dimension can trigger LOW/MEDIUM)
+    zero_ba_frac = zero_bid_ask / n
+    zero_oi_frac = zero_oi / n
+    placeholder_iv_frac = placeholder_iv / n
+    stale_frac = stale_trade / n
+
+    if (
+        zero_ba_frac > 0.50
+        or zero_oi_frac > 0.80
+        or placeholder_iv_frac > 0.50
+        or stale_frac > 0.50
+    ):
         quality = "LOW"
-    elif pct_bad >= 0.30:
+    elif (
+        zero_ba_frac > 0.30
+        or zero_oi_frac > 0.50
+        or placeholder_iv_frac > 0.30
+        or stale_frac > 0.30
+    ):
         quality = "MEDIUM"
     else:
         quality = "HIGH"
@@ -1509,11 +1524,18 @@ async def get_options_summary(ticker: str) -> str:
             pass
 
         atm_iv = None
-        if current_price and not calls.empty:
+        atm_iv_reason: str | None = None
+        if not current_price:
+            atm_iv_reason = "ATM_IV_UNAVAILABLE_NO_PRICE"
+        elif calls.empty:
+            atm_iv_reason = "ATM_IV_UNAVAILABLE_NO_CALLS"
+        else:
             idx = (calls["strike"] - current_price).abs().idxmin()
             raw_atm_iv = float(calls.loc[idx, "impliedVolatility"]) if "impliedVolatility" in calls.columns else None
             if raw_atm_iv is not None and raw_atm_iv > _PLACEHOLDER_IV_THRESHOLD:
                 atm_iv = raw_atm_iv
+            else:
+                atm_iv_reason = "ATM_IV_PLACEHOLDER"
 
         call_vol = float(calls["volume"].sum()) if "volume" in calls.columns else 0
         put_vol = float(puts["volume"].sum()) if "volume" in puts.columns else 0
@@ -1538,8 +1560,8 @@ async def get_options_summary(ticker: str) -> str:
                     min_pain = total
                     max_pain_strike = s
 
-        if atm_iv is None:
-            flow_warnings.append("ATM_IV_PLACEHOLDER")
+        if atm_iv_reason is not None:
+            flow_warnings.append(atm_iv_reason)
 
         # dataQuality over the full nearest-expiry chain
         calls_list = json.loads(calls.to_json(orient="records", date_format="iso"))
@@ -5078,8 +5100,13 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
 
     # ATM implied volatility (nearest call strike to current price)
     atm_iv: float | None = None
-    try:
-        if not calls_df.empty:
+    atm_iv_reason: str | None = None
+    if current_price is None:
+        atm_iv_reason = "ATM_IV_UNAVAILABLE_NO_PRICE"
+    elif calls_df.empty:
+        atm_iv_reason = "ATM_IV_UNAVAILABLE_NO_CALLS"
+    else:
+        try:
             _calls = calls_df.copy()
             _calls = _calls.assign(_dist=(_calls["strike"] - current_price).abs())
             atm_row = _calls.nsmallest(1, "_dist")
@@ -5087,11 +5114,13 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
                 iv_val = atm_row["impliedVolatility"].iloc[0]
                 if pd.notna(iv_val) and float(iv_val) > _PLACEHOLDER_IV_THRESHOLD:
                     atm_iv = float(iv_val)
-    except Exception:
-        pass
+                else:
+                    atm_iv_reason = "ATM_IV_PLACEHOLDER"
+        except Exception:
+            atm_iv_reason = "ATM_IV_PLACEHOLDER"
 
-    if atm_iv is None:
-        scan_warnings.append("ATM_IV_PLACEHOLDER")
+    if atm_iv_reason is not None:
+        scan_warnings.append(atm_iv_reason)
 
     # dataQuality over the full nearest-expiry chain
     calls_list = json.loads(calls_df.to_json(orient="records", date_format="iso"))

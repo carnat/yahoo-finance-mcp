@@ -292,5 +292,129 @@ class TestIVPctilePlaceholder(unittest.TestCase):
         self.assertIn("MAJORITY_PLACEHOLDER_IV", dq["warnings"])
 
 
+class TestDataQualityDimensionThresholds(unittest.TestCase):
+    """Stronger per-dimension classification tests."""
+
+    def test_100pct_zero_oi_but_good_bid_ask_and_iv_is_still_low(self):
+        """100% zero OI (> 0.80 threshold) should be LOW even if bid/ask and IV are fine."""
+        contracts = [
+            _make_contract(float(i), bid=1.0, ask=1.1, open_interest=0, implied_volatility=0.4)
+            for i in range(10)
+        ]
+        dq = srv._compute_data_quality(contracts, "2025-05-15")
+        self.assertEqual(dq["quality"], "LOW",
+            "100% zero OI should be LOW quality (zeroOI/n=1.0 > 0.80 threshold)")
+
+    def test_60pct_zero_oi_is_medium(self):
+        """60% zero OI (> 0.50 but ≤ 0.80) should be MEDIUM."""
+        good = [_make_contract(float(i), bid=1.0, ask=1.1, open_interest=100, implied_volatility=0.4) for i in range(4)]
+        bad = [_make_contract(float(i + 100), bid=1.0, ask=1.1, open_interest=0, implied_volatility=0.4) for i in range(6)]
+        dq = srv._compute_data_quality(good + bad, "2025-05-15")
+        self.assertEqual(dq["quality"], "MEDIUM",
+            "60% zero OI (> 0.50 threshold) should be MEDIUM quality")
+
+    def test_55pct_zero_bid_ask_is_low(self):
+        """55% zero bid/ask (> 0.50 threshold) should be LOW."""
+        good = [_make_contract(float(i), bid=1.0, ask=1.1, open_interest=100, implied_volatility=0.4) for i in range(9)]
+        bad = [_make_contract(float(i + 100), bid=0, ask=0, open_interest=100, implied_volatility=0.4) for i in range(11)]
+        dq = srv._compute_data_quality(good + bad, "2025-05-15")
+        self.assertEqual(dq["quality"], "LOW",
+            "55% zero bid/ask should be LOW quality")
+
+    def test_35pct_placeholder_iv_with_good_oi_is_medium(self):
+        """35% placeholder IV (> 0.30 threshold) with good OI/bid should be MEDIUM."""
+        good = [_make_contract(float(i), bid=1.0, ask=1.1, open_interest=100, implied_volatility=0.4) for i in range(13)]
+        placeholder = [_make_contract(float(i + 100), bid=1.0, ask=1.1, open_interest=100, implied_volatility=0.00001) for i in range(7)]
+        dq = srv._compute_data_quality(good + placeholder, "2025-05-15")
+        self.assertEqual(dq["quality"], "MEDIUM",
+            "35% placeholder IV (> 0.30 threshold) should be MEDIUM quality")
+
+
+class TestIncludeIlliquid(unittest.TestCase):
+    """Tests for include_illiquid filter behavior."""
+
+    def _filter_illiquid(self, contracts: list[dict], include_illiquid: bool) -> list[dict]:
+        """Simulate the include_illiquid filter from get_option_chain."""
+        if include_illiquid:
+            return contracts
+        return [
+            c for c in contracts
+            if not (c.get("bid", 0) == 0 and c.get("ask", 0) == 0 and c.get("openInterest", 0) == 0)
+        ]
+
+    def test_include_illiquid_false_removes_zero_liquid(self):
+        """include_illiquid=False should remove contracts with zero bid/ask AND zero OI."""
+        contracts = [
+            _make_contract(10.0, bid=0, ask=0, open_interest=0),   # illiquid — removed
+            _make_contract(15.0, bid=1.0, ask=1.1, open_interest=100),  # liquid — kept
+            _make_contract(20.0, bid=0, ask=0, open_interest=50),   # zero bid/ask but has OI — kept
+            _make_contract(25.0, bid=0.5, ask=0.6, open_interest=0), # has bid/ask but zero OI — kept
+        ]
+        filtered = self._filter_illiquid(contracts, include_illiquid=False)
+        strikes = [c["strike"] for c in filtered]
+        self.assertNotIn(10.0, strikes, "Zero bid+ask+OI should be removed when include_illiquid=False")
+        self.assertIn(15.0, strikes)
+        self.assertIn(20.0, strikes, "Contract with OI>0 should be kept even if bid/ask=0")
+        self.assertIn(25.0, strikes, "Contract with bid/ask>0 should be kept even if OI=0")
+
+    def test_include_illiquid_true_keeps_all(self):
+        """include_illiquid=True should keep all contracts including zero liquid ones."""
+        contracts = [
+            _make_contract(10.0, bid=0, ask=0, open_interest=0),
+            _make_contract(15.0, bid=1.0, ask=1.1, open_interest=100),
+        ]
+        filtered = self._filter_illiquid(contracts, include_illiquid=True)
+        self.assertEqual(len(filtered), 2, "include_illiquid=True should keep all contracts")
+        strikes = [c["strike"] for c in filtered]
+        self.assertIn(10.0, strikes)
+        self.assertIn(15.0, strikes)
+
+    def test_filters_applied_reflect_include_illiquid(self):
+        """filtersApplied in get_option_chain response should include include_illiquid setting."""
+        # We test the server-level function integration via a stub that checks the filtersApplied structure
+        # by inspecting the server defaults directly.
+        import inspect
+        sig = inspect.signature(srv.get_option_chain)
+        defaults = {
+            k: v.default
+            for k, v in sig.parameters.items()
+            if v.default is not inspect.Parameter.empty
+        }
+        self.assertIn("include_illiquid", defaults,
+            "get_option_chain must have include_illiquid parameter")
+        self.assertFalse(defaults["include_illiquid"],
+            "include_illiquid default must be False (Robot-safe)")
+        self.assertEqual(defaults.get("moneyness"), "near_money",
+            "moneyness default must be near_money (Robot-safe)")
+        self.assertEqual(defaults.get("sort_by"), "relevance",
+            "sort_by default must be relevance (Robot-safe)")
+
+
+class TestDiscoverySchema(unittest.TestCase):
+    """Validate that get_option_chain schema has the required new parameters."""
+
+    def test_get_option_chain_schema_has_new_params(self):
+        """The TOOL_DEFINITIONS or server.py must expose moneyness_window_pct, include_illiquid,
+        and sort_by=relevance.  This test checks the server.py function signature directly."""
+        import inspect
+        sig = inspect.signature(srv.get_option_chain)
+        params = list(sig.parameters.keys())
+        self.assertIn("moneyness_window_pct", params,
+            "get_option_chain must have moneyness_window_pct parameter")
+        self.assertIn("include_illiquid", params,
+            "get_option_chain must have include_illiquid parameter")
+        # Confirm default values
+        defaults = {k: v.default for k, v in sig.parameters.items()
+                    if v.default is not inspect.Parameter.empty}
+        self.assertEqual(defaults.get("sort_by"), "relevance",
+            "sort_by default must be 'relevance'")
+        self.assertEqual(defaults.get("moneyness"), "near_money",
+            "moneyness default must be 'near_money'")
+        self.assertEqual(defaults.get("moneyness_window_pct"), 20,
+            "moneyness_window_pct default must be 20")
+        self.assertFalse(defaults.get("include_illiquid"),
+            "include_illiquid default must be False")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

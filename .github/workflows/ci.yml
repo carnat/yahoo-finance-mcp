@@ -81,6 +81,9 @@ jobs:
       - name: Phase 4 tests
         run: python scripts/test_phase4.py
 
+      - name: Options data quality tests
+        run: python scripts/test_options_quality.py
+
       - name: Universal alias tests
         run: python scripts/test_universal_aliases.py
 
