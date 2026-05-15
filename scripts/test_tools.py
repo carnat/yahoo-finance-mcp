@@ -78,8 +78,19 @@ TEST_CASES: list[TestCase] = [
     ),
     (
         "get_yahoo_finance_news",
-        {"ticker": "NVDA"},
-        [],
+        {"ticker": "AAPL"},
+        [
+            ("ticker", "AAPL"),
+            ("items", NOT_NULL),
+            ("meta.source", "yahoo_finance"),
+            ("meta.itemCount", NOT_NULL),
+            ("items.0.title", NOT_NULL),
+            ("items.0.publisher", NOT_NULL),
+            ("items.0.url", NOT_NULL),
+            ("items.0.publishedAt", NOT_NULL),
+            ("items.0.retrievedAt", NOT_NULL),
+            ("items.0.sourceType", "yahoo_finance"),
+        ],
     ),
     (
         "get_stock_actions",
@@ -236,6 +247,30 @@ TEST_CASES: list[TestCase] = [
             ("valueRatio", NUMBER_OR_NULL),
             ("valuePct", NUMBER_OR_NULL),
             ("confidence", NOT_NULL),
+        ],
+    ),
+    # ── AAOI geographic_revenue known-scale regression ─────────────────────
+    (
+        "get_filing_data",
+        {"ticker": "AAOI", "fact_type": "geographic_revenue", "region": "China", "filing_type": "10-K", "period": "latest"},
+        [
+            ("value", 262140000),
+            ("denominator", NOT_NULL),
+            ("valueRatio", 0.5752),
+            ("valuePct", 57.52),
+        ],
+    ),
+    # ── AXTI geographic_revenue NOT_DISCLOSED path ─────────────────────────
+    (
+        "get_filing_data",
+        {"ticker": "AXTI", "fact_type": "geographic_revenue", "region": "China", "filing_type": "10-K", "period": "latest"},
+        [
+            ("confidence", "NOT_DISCLOSED"),
+            ("value", IS_NULL),
+            ("denominator", IS_NULL),
+            ("valueRatio", IS_NULL),
+            ("valuePct", IS_NULL),
+            ("extractionMethod", "NONE"),
         ],
     ),
     # ── geographic_revenue denominator-missing/nullable schema regression ───
@@ -429,11 +464,21 @@ def _get_path(obj: Any, path: str) -> Any:
     parts = path.split(".")
     cur: Any = obj
     for p in parts:
-        if not isinstance(cur, dict):
-            raise KeyError(f"Expected dict at '{p}', got {type(cur).__name__}")
-        if p not in cur:
-            raise KeyError(f"Key '{p}' not found")
-        cur = cur[p]
+        if isinstance(cur, list):
+            try:
+                idx = int(p)
+            except ValueError as exc:
+                raise KeyError(f"Expected list index at '{p}', got non-integer key") from exc
+            if idx < 0 or idx >= len(cur):
+                raise KeyError(f"Index '{idx}' out of range")
+            cur = cur[idx]
+            continue
+        if isinstance(cur, dict):
+            if p not in cur:
+                raise KeyError(f"Key '{p}' not found")
+            cur = cur[p]
+            continue
+        raise KeyError(f"Expected dict/list at '{p}', got {type(cur).__name__}")
     return cur
 
 
@@ -501,6 +546,24 @@ def _is_ok(
         fails = _check_assertions(inner, assertions)
         if fails:
             return False, "; ".join(fails)
+
+    # Global geographic revenue guardrails
+    if isinstance(inner, dict) and inner.get("factType") == "geographic_revenue":
+        value = inner.get("value")
+        denominator = inner.get("denominator")
+        ratio = inner.get("valueRatio")
+        pct = inner.get("valuePct")
+        warnings = inner.get("warnings") if isinstance(inner.get("warnings"), list) else []
+        if value is not None and denominator is None:
+            if ratio is not None or pct is not None:
+                return False, "geographic_revenue denominator missing but valueRatio/valuePct not null"
+            codes = {str(w.get("code")) for w in warnings if isinstance(w, dict)}
+            if "DENOMINATOR_NOT_FOUND" not in codes:
+                return False, "geographic_revenue missing denominator without DENOMINATOR_NOT_FOUND warning"
+        if denominator is not None and ratio is not None and pct is not None:
+            expected_pct = round(float(ratio) * 100, 2)
+            if abs(float(pct) - expected_pct) > 1e-9:
+                return False, f"geographic_revenue valuePct/valueRatio mismatch: pct={pct}, ratio={ratio}"
 
     snippet = text[:100].replace("\n", " ")
     return True, snippet

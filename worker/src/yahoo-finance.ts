@@ -3283,6 +3283,8 @@ export async function getFilingData(
       filingDate: payload.filingDate ?? null,
       accessionNumber: payload.accessionNumber ?? null,
       documentUrl: payload.documentUrl ?? null,
+      indexUrl: payload.indexUrl ?? null,
+      primaryDocumentUrl: payload.primaryDocumentUrl ?? null,
       evidence: payload.evidence ?? {},
       calculation: payload.calculation ?? null,
       warnings,
@@ -3458,6 +3460,13 @@ export async function getFilingData(
                 if (geo) {
                   const reportDate = sreportDates[idx] ?? "";
                   const fiscalYear = reportDate ? `FY${String(reportDate).slice(0, 4)}` : "";
+                  const warnings = geo.denominator == null && geo.usd != null
+                    ? [{
+                        code: "DENOMINATOR_NOT_FOUND",
+                        message: "Could not compute geographic revenue percentage due to missing denominator.",
+                        severity: "warning",
+                      }]
+                    : [];
                   return withGeoShape({
                     ticker,
                     factType,
@@ -3478,6 +3487,8 @@ export async function getFilingData(
                     filingDate: sfilingDates[idx] ?? null,
                     accessionNumber: saccessions[idx] ?? null,
                     documentUrl: edgarPrimaryDocumentUrl,
+                    indexUrl: null,
+                    primaryDocumentUrl: edgarPrimaryDocumentUrl,
                     evidence: {
                       sectionHeading: geo.sectionHeading || null,
                       tableTitle: null,
@@ -3493,7 +3504,7 @@ export async function getFilingData(
                           resultPct: Math.round(geo.pct * RATIO_SCALE) / PCT_SCALE,
                         }
                       : null,
-                    warnings: [],
+                    warnings,
                   });
                 }
               }
@@ -3519,7 +3530,22 @@ export async function getFilingData(
   }
 
   const accessionNumber = String(picked.accn ?? "") || null;
-  const documentUrl = accessionNumber ? edgarBuildFilingUrls(parseInt(cikPadded, 10), accessionNumber, null).edgarIndexUrl : null;
+  let indexUrl: string | null = null;
+  let primaryDocumentUrl: string | null = null;
+  if (accessionNumber) {
+    const baseUrls = edgarBuildFilingUrls(parseInt(cikPadded, 10), accessionNumber, null);
+    indexUrl = baseUrls.edgarIndexUrl;
+    const { submissions } = await getSubmissionsForTicker(ticker);
+    const recent = (((submissions?.filings as Record<string, unknown>)?.recent) as Record<string, unknown[]> | undefined) ?? {};
+    const accessions = (recent.accessionNumber as string[]) ?? [];
+    const primaryDocs = (recent.primaryDocument as string[]) ?? [];
+    const idx = accessions.findIndex((a) => String(a) === accessionNumber);
+    const primaryDoc = idx >= 0 && idx < primaryDocs.length ? primaryDocs[idx] : null;
+    if (primaryDoc) {
+      primaryDocumentUrl = edgarBuildFilingUrls(parseInt(cikPadded, 10), accessionNumber, primaryDoc).edgarPrimaryDocumentUrl;
+    }
+  }
+  const documentUrl = primaryDocumentUrl ?? indexUrl;
   const periodLabelRaw = String(picked.fy ?? "");
   const periodLabel = periodLabelRaw && !periodLabelRaw.startsWith("FY") ? `FY${periodLabelRaw}` : periodLabelRaw;
   const valueNum = picked.val != null ? Number(picked.val) : null;
@@ -3546,6 +3572,8 @@ export async function getFilingData(
     filingDate: String(picked.filed ?? ""),
     accessionNumber,
     documentUrl,
+    indexUrl,
+    primaryDocumentUrl,
     evidence: {
       sectionHeading: segmentLabel,
       tableTitle: null,

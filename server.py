@@ -708,6 +708,8 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
                         'filingDate': {'type': ['string', 'null']},
                         'accessionNumber': {'type': ['string', 'null']},
                         'documentUrl': {'type': ['string', 'null']},
+                        'indexUrl': {'type': ['string', 'null']},
+                        'primaryDocumentUrl': {'type': ['string', 'null']},
                         'evidence': {'type': ['object', 'null']},
                         'calculation': {'type': ['object', 'null']},
                         'warnings': {'type': 'array'}},
@@ -3377,6 +3379,8 @@ async def get_filing_data(
             "filingDate": payload.get("filingDate"),
             "accessionNumber": payload.get("accessionNumber"),
             "documentUrl": payload.get("documentUrl"),
+            "indexUrl": payload.get("indexUrl"),
+            "primaryDocumentUrl": payload.get("primaryDocumentUrl"),
             "evidence": payload.get("evidence", {}),
             "calculation": payload.get("calculation"),
             "warnings": list(payload.get("warnings", [])) if isinstance(payload.get("warnings"), list) else [],
@@ -3392,6 +3396,27 @@ async def get_filing_data(
                 "severity": "warning",
             })
         return json.dumps(shaped)
+
+    async def _resolve_filing_urls_for_accession(accn: str) -> tuple[str | None, str | None]:
+        if not accn:
+            return None, None
+        if not cik_padded:
+            return None, None
+        index_url, primary_url = _edgar_build_filing_urls(int(cik_padded), accn, None)
+        _, subs = await _get_submissions_for_ticker(ticker)
+        if not subs:
+            return index_url, primary_url
+        recent = subs.get("filings", {}).get("recent", {})
+        accessions: list[str] = recent.get("accessionNumber", [])
+        primary_docs: list[str] = recent.get("primaryDocument", [])
+        try:
+            idx = accessions.index(accn)
+            primary_doc = primary_docs[idx] if idx < len(primary_docs) else None
+            if primary_doc:
+                _, primary_url = _edgar_build_filing_urls(int(cik_padded), accn, primary_doc)
+        except Exception:
+            pass
+        return index_url, primary_url
 
     if fact_type == FilingFactType.geographic_revenue and not region:
         return json.dumps({"error": True, "message": "region is required for fact_type='geographic_revenue'"})
@@ -3577,6 +3602,13 @@ async def get_filing_data(
                                     source_cols = (
                                         geo_evidence.get("sourceColumns") if isinstance(geo_evidence, dict) else None
                                     ) or [fiscal_year]
+                                    warnings = []
+                                    if geo_denominator is None and geo_usd is not None:
+                                        warnings.append({
+                                            "code": "DENOMINATOR_NOT_FOUND",
+                                            "message": "Could not compute geographic revenue percentage due to missing denominator.",
+                                            "severity": "warning",
+                                        })
                                     return _geo_shape({
                                         "ticker": ticker,
                                         "factType": fact_type.value,
@@ -3597,6 +3629,8 @@ async def get_filing_data(
                                         "filingDate": filing_date_str,
                                         "accessionNumber": acc_num,
                                         "documentUrl": doc_url,
+                                        "indexUrl": None,
+                                        "primaryDocumentUrl": doc_url,
                                         "evidence": {
                                             "sectionHeading": geo_heading or (geo_evidence.get("sectionHeading") if isinstance(geo_evidence, dict) else None),
                                             "tableTitle": geo_evidence.get("tableTitle") if isinstance(geo_evidence, dict) else None,
@@ -3613,7 +3647,7 @@ async def get_filing_data(
                                             }
                                             if geo_ratio is not None and geo_denominator is not None else None
                                         ),
-                                        "warnings": [],
+                                        "warnings": warnings,
                                     })
         return _geo_shape({
             "ticker": ticker,
@@ -3633,10 +3667,8 @@ async def get_filing_data(
         })
 
     accession_number = str(picked.get("accn") or "")
-    document_url = None
-    if accession_number and cik_padded:
-        index_url, _ = _edgar_build_filing_urls(int(cik_padded), accession_number, None)
-        document_url = index_url
+    index_url, primary_document_url = await _resolve_filing_urls_for_accession(accession_number)
+    document_url = primary_document_url or index_url
     value_num = float(picked.get("val", 0)) if picked.get("val") is not None else None
     raw_value = _format_raw_number(value_num)
     raw_denominator = _format_raw_number(denominator)
@@ -3664,6 +3696,8 @@ async def get_filing_data(
         "filingDate": str(picked.get("filed") or ""),
         "accessionNumber": accession_number or None,
         "documentUrl": document_url,
+        "indexUrl": index_url,
+        "primaryDocumentUrl": primary_document_url,
         "evidence": {
             "sectionHeading": segment_label,
             "tableTitle": None,
@@ -5940,7 +5974,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
 
 ratio = currentPrice / ref_pt × 100. Used to classify entry opportunity.
 
-Brackets: ≤75% → STRONG_BUY | 75–90% → ACCEPTABLE | 90–100% → CAUTION | >100% → AVOID
+Brackets: ≤75% → STRONG_BUY | 75–90% → ACCEPTABLE | 90–100% → caution | >100% → avoid
 Tags: <40% → SPECULATIVE | 40–79% → LONG | 80–99% → NEAR | ≥100% → INVERTED
 
 Args:
@@ -6096,7 +6130,7 @@ async def get_position_score_inputs(ticker: str) -> str:
         "lastClose": tech.get("lastClose"),
     }
 
-    # Data date: prefer last OHLCV row from technical indicators (DC-05 clock discipline)
+    # Data date: prefer last OHLCV row from technical indicators for consistent timing.
     data_date = tech.get("dataDate") or ma.get("dataDate") or get_last_trading_date()
 
     return json.dumps({
@@ -6472,6 +6506,8 @@ async def extract_sec_filing_fact(
                 "source": parsed.get("source", "NOT_DISCLOSED"),
                 "confidence": parsed.get("confidence", "NOT_DISCLOSED"),
                 "documentUrl": parsed.get("documentUrl"),
+                "indexUrl": parsed.get("indexUrl"),
+                "primaryDocumentUrl": parsed.get("primaryDocumentUrl"),
                 "evidence": parsed.get("evidence"),
                 "calculation": parsed.get("calculation"),
                 "warnings": parsed.get("warnings", []),

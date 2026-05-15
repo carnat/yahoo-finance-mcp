@@ -56,6 +56,21 @@ def assert_geo_shape(data: dict) -> None:
 
 
 def main() -> int:
+    aaoi = call("extract_sec_filing_fact", {"ticker": "AAOI", "fact": "geographic_revenue", "region": "China"}, 0)
+    aaoi_data = data_of(aaoi)
+    assert_geo_shape(aaoi_data)
+    if aaoi_data.get("value") is not None and aaoi_data.get("denominator") is not None:
+        if aaoi_data.get("valueRatio") != 0.5752:
+            raise AssertionError(f"AAOI valueRatio mismatch: {aaoi_data.get('valueRatio')!r}")
+        if aaoi_data.get("valuePct") != 57.52:
+            raise AssertionError(f"AAOI valuePct mismatch: {aaoi_data.get('valuePct')!r}")
+
+    axti = call("extract_sec_filing_fact", {"ticker": "AXTI", "fact": "geographic_revenue", "region": "China"}, 5)
+    axti_data = data_of(axti)
+    assert_geo_shape(axti_data)
+    if axti_data.get("confidence") != "NOT_DISCLOSED":
+        raise AssertionError(f"AXTI expected NOT_DISCLOSED confidence, got {axti_data.get('confidence')!r}")
+
     qcom = call("extract_sec_filing_fact", {"ticker": "QCOM", "fact": "geographic_revenue", "region": "China"}, 1)
     qcom_data = data_of(qcom)
     assert_geo_shape(qcom_data)

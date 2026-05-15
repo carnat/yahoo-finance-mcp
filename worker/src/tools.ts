@@ -747,7 +747,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_price_target_bracket",
     description:
-      "Compute price-to-target bracket from current price vs a user-supplied reference price. ratio = currentPrice / ref_pt × 100. Brackets: ≤75% STRONG_BUY | 75–90% ACCEPTABLE | 90–100% CAUTION | >100% AVOID. Tags: <40% SPECULATIVE | 40–79% LONG | 80–99% NEAR | ≥100% INVERTED. Returns currentPrice, ioPt, eqfPct, bracket, tag, invertedFlag, dataDate.",
+      "Compute price-to-target bracket from current price vs a user-supplied reference price. ratio = currentPrice / ref_pt × 100. Brackets: ≤75% STRONG_BUY | 75–90% ACCEPTABLE | 90–100% caution | >100% avoid. Tags: <40% SPECULATIVE | 40–79% LONG | 80–99% NEAR | ≥100% INVERTED. Returns currentPrice, ioPt, eqfPct, bracket, tag, invertedFlag, dataDate.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1233,6 +1233,8 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       filingDate: { type: ["string", "null"] },
       accessionNumber: { type: ["string", "null"] },
       documentUrl: { type: ["string", "null"] },
+      indexUrl: { type: ["string", "null"] },
+      primaryDocumentUrl: { type: ["string", "null"] },
       evidence: { type: ["object", "null"] },
       calculation: { type: ["object", "null"] },
       warnings: { type: "array" },
@@ -1506,6 +1508,8 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
             source: parsed.source ?? "NOT_DISCLOSED",
             confidence: parsed.confidence ?? "NOT_DISCLOSED",
             documentUrl: parsed.documentUrl ?? null,
+            indexUrl: parsed.indexUrl ?? null,
+            primaryDocumentUrl: parsed.primaryDocumentUrl ?? null,
             evidence: parsed.evidence ?? null,
             calculation: parsed.calculation ?? null,
             warnings: parsed.warnings ?? [],
