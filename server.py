@@ -3542,9 +3542,10 @@ async def get_filing_data(
                 None,
             )
             try:
-                if total_fact and float(total_fact.get("val", 0)) > 0:
+                picked_val = picked.get("val")
+                if total_fact and picked_val is not None and float(total_fact.get("val", 0)) > 0:
                     denominator = float(total_fact.get("val", 0))
-                    value_ratio = round(float(picked.get("val", 0)) / denominator, RATIO_DECIMALS)
+                    value_ratio = round(float(picked_val) / denominator, RATIO_DECIMALS)
                     value_pct = round(value_ratio * PCT_MULTIPLIER, PCT_DECIMALS)
             except Exception:
                 denominator = None
@@ -3621,7 +3622,7 @@ async def get_filing_data(
                                         "value": geo_usd,
                                         "denominator": geo_denominator,
                                         "valueRatio": geo_ratio,
-                                        "valuePct": round(float(geo_ratio) * PCT_MULTIPLIER, PCT_DECIMALS) if geo_ratio is not None else None,
+                                        "valuePct": round(geo_ratio * PCT_MULTIPLIER, PCT_DECIMALS) if geo_ratio is not None else None,
                                         "extractionMethod": "PARSED_TABLE",
                                         "source": "PARSED_TABLE",
                                         "confidence": "HIGH" if geo_denominator is not None else "LOW",
@@ -3643,7 +3644,7 @@ async def get_filing_data(
                                                 "formula": "value / denominator * 100",
                                                 "valueSource": "sourceRows[0]",
                                                 "denominatorSource": "sourceRows[1]",
-                                                "resultPct": round(float(geo_ratio) * PCT_MULTIPLIER, PCT_DECIMALS),
+                                                "resultPct": round(geo_ratio * PCT_MULTIPLIER, PCT_DECIMALS),
                                             }
                                             if geo_ratio is not None and geo_denominator is not None else None
                                         ),
@@ -5974,7 +5975,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
 
 ratio = currentPrice / ref_pt × 100. Used to classify entry opportunity.
 
-Brackets: ≤75% → STRONG_BUY | 75–90% → ACCEPTABLE | 90–100% → caution | >100% → avoid
+Brackets: ≤75% → STRONG_BUY | 75–90% → ACCEPTABLE | 90–100% → RISK | >100% → ABOVE_TARGET
 Tags: <40% → SPECULATIVE | 40–79% → LONG | 80–99% → NEAR | ≥100% → INVERTED
 
 Args:

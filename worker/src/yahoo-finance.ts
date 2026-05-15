@@ -3254,6 +3254,8 @@ export async function getFilingData(
   const FLOATING_POINT_EPSILON = 1e-9;
   const RATIO_SCALE = 10000;
   const PCT_SCALE = 100;
+  const PCT_MULTIPLIER = 100;
+  const ratioToPct = (ratio: number): number => Math.round(ratio * PCT_MULTIPLIER * PCT_SCALE) / PCT_SCALE;
   const formatRawNumber = (n: number | null | undefined): string | null => {
     if (n == null || !Number.isFinite(n)) return null;
     if (Math.abs(n - Math.round(n)) < FLOATING_POINT_EPSILON) return Math.round(n).toLocaleString("en-US");
@@ -3423,11 +3425,11 @@ export async function getFilingData(
       const accn = String(picked.accn ?? "");
       const total = filtered.find((f) => String(f.accn ?? "") === accn && f.segment == null) ?? null;
       const totalVal = total ? Number(total.val ?? 0) : 0;
-      const partVal = Number(picked.val ?? 0);
-      if (totalVal > 0) {
+      const partVal = picked.val != null ? Number(picked.val) : null;
+      if (partVal != null && totalVal > 0) {
         denominator = totalVal;
         valueRatio = Math.round((partVal / totalVal) * RATIO_SCALE) / RATIO_SCALE;
-        valuePct = Math.round(valueRatio * RATIO_SCALE) / PCT_SCALE;
+        valuePct = ratioToPct(valueRatio);
       }
     }
   } else {
@@ -3479,7 +3481,7 @@ export async function getFilingData(
                     value: geo.usd ?? null,
                     denominator: geo.denominator ?? null,
                     valueRatio: geo.pct,
-                    valuePct: geo.denominator != null ? Math.round(geo.pct * RATIO_SCALE) / PCT_SCALE : null,
+                    valuePct: geo.denominator != null ? ratioToPct(geo.pct) : null,
                     extractionMethod: "PARSED_TABLE",
                     source: "PARSED_TABLE",
                     confidence: geo.denominator != null ? "HIGH" : "LOW",
@@ -3501,7 +3503,7 @@ export async function getFilingData(
                           formula: "value / denominator * 100",
                           valueSource: "sourceRows[0]",
                           denominatorSource: "sourceRows[1]",
-                          resultPct: Math.round(geo.pct * RATIO_SCALE) / PCT_SCALE,
+                          resultPct: ratioToPct(geo.pct),
                         }
                       : null,
                     warnings,

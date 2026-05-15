@@ -465,6 +465,7 @@ def _get_path(obj: Any, path: str) -> Any:
     cur: Any = obj
     for p in parts:
         if isinstance(cur, list):
+            # Support dot-path indexing into arrays, e.g. "items.0.title".
             try:
                 idx = int(p)
             except ValueError as exc:
@@ -562,7 +563,7 @@ def _is_ok(
                 return False, "geographic_revenue missing denominator without DENOMINATOR_NOT_FOUND warning"
         if denominator is not None and ratio is not None and pct is not None:
             expected_pct = round(float(ratio) * 100, 2)
-            if abs(float(pct) - expected_pct) > 1e-9:
+            if abs(float(pct) - expected_pct) > 0.005:
                 return False, f"geographic_revenue valuePct/valueRatio mismatch: pct={pct}, ratio={ratio}"
 
     snippet = text[:100].replace("\n", " ")

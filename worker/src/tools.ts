@@ -747,7 +747,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_price_target_bracket",
     description:
-      "Compute price-to-target bracket from current price vs a user-supplied reference price. ratio = currentPrice / ref_pt × 100. Brackets: ≤75% STRONG_BUY | 75–90% ACCEPTABLE | 90–100% caution | >100% avoid. Tags: <40% SPECULATIVE | 40–79% LONG | 80–99% NEAR | ≥100% INVERTED. Returns currentPrice, ioPt, eqfPct, bracket, tag, invertedFlag, dataDate.",
+      "Compute price-to-target bracket from current price vs a user-supplied reference price. ratio = currentPrice / ref_pt × 100. Brackets: ≤75% STRONG_BUY | 75–90% ACCEPTABLE | 90–100% RISK | >100% ABOVE_TARGET. Tags: <40% SPECULATIVE | 40–79% LONG | 80–99% NEAR | ≥100% INVERTED. Returns currentPrice, ioPt, eqfPct, bracket, tag, invertedFlag, dataDate.",
     inputSchema: {
       type: "object",
       properties: {

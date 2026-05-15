@@ -53,6 +53,11 @@ def assert_geo_shape(data: dict) -> None:
         raise AssertionError("valuePct requires denominator")
     if data["denominator"] is None and data["valueRatio"] is not None:
         raise AssertionError("valueRatio must be null when denominator is null")
+    if data["denominator"] is not None:
+        if data["valueRatio"] is None:
+            raise AssertionError("valueRatio must be non-null when denominator is non-null")
+        if data["valuePct"] is None:
+            raise AssertionError("valuePct must be non-null when denominator is non-null")
 
 
 def main() -> int:
