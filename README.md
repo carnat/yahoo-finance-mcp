@@ -10,18 +10,30 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that g
 
 ## MCP Tools
 
-> **Token-efficiency tip:** `get_stock_info` now returns ~30 key fields by default — no need to enumerate fields for typical queries. Prefer `get_fast_info` for pure price/volume lookups (~20 fields, 85–90% fewer tokens). Use `get_financial_ratios` instead of fetching full financial statements when you only need computed ratios. Use `get_analyst_consensus` instead of `get_recommendations` for a ready-made summary. Use the pre-computed signal tools (`get_price_slope`, `get_volume_ratio`, `get_ma_position`, `get_earnings_momentum`, `get_short_momentum`, `get_credit_health`, `get_options_flow_summary`, `get_put_hedge_candidates`, `get_analyst_upgrade_radar`) instead of fetching raw data and computing signals yourself. Use `get_position_score_inputs` to aggregate all T1/T2/T4/T5 scoring inputs in one call instead of chaining five separate tools.
+> **Token-efficiency tip:** `get_company_profile` now returns ~30 key fields by default — no need to enumerate fields for typical queries. Prefer `get_market_quote` for pure price/volume lookups (~20 fields, 85–90% fewer tokens). Use `analyze_financial_ratios` instead of fetching full financial statements when you only need computed ratios. Use `get_analyst_consensus` instead of `get_analyst_recommendations` for a ready-made summary. Use pre-computed signal tools (`get_price_slope`, `analyze_volume_ratio`, `analyze_moving_average_position`, `analyze_earnings_momentum`, `get_short_momentum`, `analyze_credit_health`, `summarize_options_flow`, `find_put_hedge_candidates`, `get_analyst_rating_changes`) instead of fetching raw data and computing signals yourself. Use `analyze_position_signals` to aggregate all T1/T2/T4/T5 scoring inputs in one call instead of chaining five separate tools.
 
 The server exposes the following tools through the Model Context Protocol:
+
+### Canonical vs alias naming
+
+| Canonical | Common alias |
+|---|---|
+| `get_market_quote` | `get_fast_info` |
+| `analyze_position_signals` | `get_tps_inputs` |
+| `calculate_price_target_distance` | `get_eqf_bracket` |
+| `check_volume_liquidity_threshold` | `get_adv_gate` |
+| `analyze_options_flow_window` | `get_dc134_options_scan` |
+
+Doctrine/internal names are maintained as aliases for migration but are not preferred in new integrations.
 
 ### Price & Market Data
 
 | Tool | Description |
 |------|-------------|
-| `get_fast_info` | **Lightweight.** Get current price, market cap, 52-week range, moving averages, and volume (~20 fields). Also includes pre-market/after-hours prices when available. Prefer this over `get_stock_info` for price lookups. |
+| `get_market_quote` | **Lightweight.** Get current price, market cap, 52-week range, moving averages, and volume (~20 fields). Also includes pre-market/after-hours prices when available. Alias: `get_fast_info`. |
 | `get_historical_stock_prices` | Get historical OHLCV data with customizable period, interval, and optional `columns` filter (e.g. `["Close"]` to return only closing prices). |
-| `get_stock_info` | **Fundamentals.** Returns ~30 key fields by default: identity (shortName, sector, industry, country), price (currentPrice, previousClose, marketCap, enterpriseValue), valuation (trailingPE, forwardPE, priceToBook, EV/EBITDA), earnings (EPS, growth rates), margins (gross/operating/profit, ROE, ROA), dividends, analyst ratings, and `longBusinessSummary`. Pass `include_all=true` for the full 120+ field payload. The `fields` parameter accepts exact field names **or** group aliases (`"identity"`, `"pricing"`, `"valuation"`, `"earnings"`, `"margins"`, `"dividends"`, `"analyst"`, `"description"`). For ETFs/funds, use `get_etf_info` instead. |
-| `get_etf_info` | Get ETF or mutual fund data: identity (shortName, category, fundFamily), pricing (navPrice, previousClose, dayHigh/Low, volume), AUM/costs (totalAssets, yield, expenseRatio, ytdReturn, beta3Year), 52-week stats, moving averages, top-10 holdings, and sector weights. Use for fund tickers: SPY, QQQ, VTI, ARKK, VFIAX, etc. |
+| `get_company_profile` | **Fundamentals.** Returns ~30 key fields by default. Alias: `get_stock_info`. |
+| `get_fund_profile` | Get ETF or mutual fund data (alias: `get_etf_info`). |
 | `get_price_stats` | Get pre-computed price statistics: % change today, % distance from 52-week high/low and moving averages, 30-day annualized volatility, and CAGR over 1y/3y/5y. Works with index tickers (e.g. `^VIX`, `^GSPC`). |
 | `get_stock_actions` | Get stock dividends and splits history. |
 | `get_yahoo_finance_news` | Get latest news articles for a stock. |
@@ -77,9 +89,9 @@ The server exposes the following tools through the Model Context Protocol:
 
 | Tool | Description |
 |------|-------------|
-| `get_price_target_bracket` | Compute EQF bracket relative to an IO price target. EQF = currentPrice / io_pt × 100. Brackets: ≤75% STRONG_BUY \| 75–90% ACCEPTABLE \| 90–100% CAUTION \| >100% AVOID. Tags: <40% SPECULATIVE \| 40–79% LONG \| 80–99% NEAR \| ≥100% INVERTED. Returns currentPrice, ioPt, eqfPct, bracket, tag, invertedFlag, dataDate. Args: `ticker`, `io_pt`. |
-| `get_position_score_inputs` | Aggregate all T1, T2, T4, and T5 position-scoring inputs in a single call (6 parallel data fetches). Returns t1_inputs (analyst sentiment), t2_inputs (price vs 52-week range), t4_inputs (earnings momentum), t5_inputs (technical indicators), and dataDate. |
-| `get_volume_gate` | DC Section 6.2 Volume Gate: checks whether regularMarketVolume ≥ 0.5 × 20-day ADV. Returns currency, fxRate, lastVolume, adv10d/20d/90d, ratio20d, gatePass, dataDate, and note. Set `foreign_exchange=true` for DC-80 FX gate (daily notional converted to USD vs $10M threshold). |
+| `calculate_price_target_distance` | Compute price-target distance (alias: `get_price_target_bracket`). |
+| `analyze_position_signals` | Aggregate T1/T2/T4/T5 position-scoring inputs (alias: `get_position_score_inputs`). |
+| `check_volume_liquidity_threshold` | Volume liquidity threshold assessment (alias: `get_volume_gate`). |
 
 ### Technical Analysis
 
@@ -116,7 +128,7 @@ With this MCP server, you can use Claude to:
 ### Stock Analysis
 
 - **Price Analysis**: "Show me the historical closing prices for AAPL over the last 6 months." *(use `columns=["Close"]` to reduce tokens)*
-- **Quick Price Lookup**: "What is Apple's current price, market cap, and 52-week range?" *(use `get_fast_info`)*
+- **Quick Price Lookup**: "What is Apple's current price, market cap, and 52-week range?" *(use `get_market_quote`)*
 - **Financial Health**: "Get the quarterly balance sheet for Microsoft."
 - **TTM Financials**: "Show me Apple's trailing-twelve-months income statement." *(use `ttm_income_stmt` for a single compact column)*
 - **Key Ratios**: "What are Tesla's P/E ratio, profit margins, and debt-to-equity?" *(use `get_financial_ratios`)*
@@ -136,7 +148,7 @@ With this MCP server, you can use Claude to:
 - **Insider Trading**: "What are the recent insider transactions for Tesla?"
 - **Options Analysis**: "Get the in-the-money calls for SPY expiring 2024-06-21." *(use `in_the_money_only=True`)*
 - **Options Flow**: "What is the put/call ratio and max pain strike for SPY?" *(use `get_options_flow_summary`)*
-- **Options Event Scan**: "Run a T-7 options flow scan for ASTS ahead of the binary event." *(use `get_options_flow_scan`)*
+- **Options Event Scan**: "Run a T-7 options flow scan for ASTS ahead of the binary event." *(use `analyze_options_flow_window`)*
 - **Put Hedge**: "Find 8–12% OTM puts for AAPL expiring after June with a budget under $400 per contract." *(use `get_put_hedge_candidates`)*
 - **Analyst Coverage**: "What is the analyst consensus price target for Amazon?" *(use `get_analyst_consensus`)*
 - **Analyst Upgrades**: "Have any analysts upgraded or downgraded NVDA in the last 30 days?" *(use `get_analyst_upgrade_radar`)*
@@ -149,9 +161,9 @@ With this MCP server, you can use Claude to:
 
 ### Position Management
 
-- **EQF Bracket**: "My IO price target for ASTS is $28. Is the current price in a buy zone?" *(use `get_price_target_bracket` with `io_pt=28`)*
-- **Position Score**: "Pull all scoring inputs for NVDA to evaluate my T1/T2/T4/T5 scores." *(use `get_position_score_inputs`)*
-- **Volume Gate**: "Does ASTS pass the DC volume gate today?" *(use `get_volume_gate`)*
+- **Price Target Distance**: "My target for ASTS is $28. Is the current price in a buy zone?" *(use `calculate_price_target_distance` with `io_pt=28`)*
+- **Position Signals**: "Pull all scoring inputs for NVDA to evaluate T1/T2/T4/T5." *(use `analyze_position_signals`)*
+- **Volume Liquidity**: "Does ASTS pass volume threshold today?" *(use `check_volume_liquidity_threshold`)*
 
 ### Discovery & Screening
 

@@ -13,15 +13,15 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
           cache: "npm"
           cache-dependency-path: worker/package-lock.json
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -50,9 +50,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -60,7 +60,13 @@ jobs:
         run: sleep 30
 
       - name: Verify deployed MCP live discovery
-        run: python scripts/test_live_discovery.py --url https://yahoo-finance-mcp.artinatw.workers.dev/mcp
+        run: python scripts/test_deployed_discovery.py
+
+      - name: Verify alias behavior
+        run: python scripts/test_universal_aliases.py
+
+      - name: Verify geographic revenue schema
+        run: python scripts/test_geographic_revenue_schema.py
 
       - name: Run end-to-end tool tests
         run: python scripts/test_tools.py --url https://yahoo-finance-mcp.artinatw.workers.dev/mcp

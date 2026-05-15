@@ -3,6 +3,9 @@ export const SERVER_VERSION = "1.0.0";
 export interface ToolMeta {
   tool: string;
   canonicalTool?: string;
+  partialSuccess?: boolean;
+  successCount?: number;
+  errorCount?: number;
   source: string;
   dataDate: string | null;
   serverVersion: string;
@@ -52,6 +55,9 @@ export function mcpSuccess(
   rawData: string,
   opts?: {
     canonicalTool?: string;
+    partialSuccess?: boolean;
+    successCount?: number;
+    errorCount?: number;
     source?: string;
     dataDate?: string | null;
     cacheHit?: boolean;
@@ -71,6 +77,9 @@ export function mcpSuccess(
     meta: {
       tool,
       ...(opts?.canonicalTool ? { canonicalTool: opts.canonicalTool } : {}),
+      ...(opts?.partialSuccess != null ? { partialSuccess: opts.partialSuccess } : {}),
+      ...(opts?.successCount != null ? { successCount: opts.successCount } : {}),
+      ...(opts?.errorCount != null ? { errorCount: opts.errorCount } : {}),
       source: opts?.source ?? "yahoo_finance",
       dataDate: opts?.dataDate ?? null,
       serverVersion: SERVER_VERSION,

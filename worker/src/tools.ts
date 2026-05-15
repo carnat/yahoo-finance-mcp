@@ -20,7 +20,6 @@ import {
   getNews,
   getOptionChain,
   getOptionExpirationDates,
-  getOptionsFlowSummary,
   getOvernightQuote,
   getPriceSlope,
   getPriceStats,
@@ -234,6 +233,20 @@ export const TOOLS: Tool[] = [
         min_open_interest: { type: "number", description: "Minimum open interest filter.", default: 0 },
         min_volume: { type: "number", description: "Minimum volume filter.", default: 0 },
         max_contracts: { type: "number", description: "Maximum number of contracts to return.", default: 50 },
+        strike_min: { type: "number", description: "Minimum strike filter." },
+        strike_max: { type: "number", description: "Maximum strike filter." },
+        moneyness: {
+          type: "string",
+          enum: ["all", "itm", "otm", "near_money"],
+          default: "all",
+          description: "Moneyness filter.",
+        },
+        sort_by: {
+          type: "string",
+          enum: ["strike", "volume", "openInterest"],
+          default: "strike",
+          description: "Sort field for returned contracts.",
+        },
       },
       required: ["ticker", "expiration_date", "option_type"],
     },
@@ -921,13 +934,13 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "summarize_options_flow", description: "Summarize options flow.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, expiry_hint: { type: "string" } }, required: ["ticker"] } },
   { name: "analyze_options_flow_window", description: "Analyze options flow in an event window.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, window_label: { type: "string" } }, required: ["ticker", "window_label"] } },
   { name: "find_put_hedge_candidates", description: "Find put hedge candidates.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, otm_pct_min: { type: "number", default: 8 }, otm_pct_max: { type: "number", default: 12 }, budget_usd: { type: "number", default: 500 }, expiry_after: { type: "string" } }, required: ["ticker"] } },
-  { name: "list_sec_company_filings", description: "List SEC company filings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, form_type: { type: "string", default: "10-K" }, max_filings: { type: "number", default: 5 } }, required: ["ticker"] } },
-  { name: "get_sec_filing_outline", description: "Get SEC filing outline.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, accession_number: { type: "string" }, document_url: { type: "string" } }, required: ["ticker"] } },
-  { name: "get_sec_filing_section", description: "Get SEC filing section text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, section_name: { type: "string" }, document_url: { type: "string" }, context_chars: { type: "number", default: 3000 } }, required: ["ticker", "section_name", "document_url"] } },
-  { name: "list_sec_filing_tables", description: "List SEC filing tables.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, document_url: { type: "string" } }, required: ["ticker", "document_url"] } },
-  { name: "get_sec_filing_table", description: "Get SEC filing table.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, document_url: { type: "string" }, table_index: { type: "number" }, max_rows: { type: "number", default: 30 } }, required: ["ticker", "document_url", "table_index"] } },
-  { name: "extract_sec_filing_fact", description: "Extract SEC filing fact.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, fact_name: { type: "string" }, fact_type: { type: "string" }, region: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, document_url: { type: "string" }, accession_number: { type: "string" } }, required: ["ticker"] } },
-  { name: "search_sec_filing_text", description: "Search SEC filing text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, search_terms: { type: "array", items: { type: "string" } }, section_hint: { type: "string" }, filing_type: { type: "string", default: "10-K" }, accession_number: { type: "string" }, context_chars: { type: "number", default: 1500 }, return_tables: { type: "boolean", default: true } }, required: ["ticker"] } },
+  { name: "list_sec_company_filings", description: "List SEC company filings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, form_type: { type: "string", default: "10-K" }, limit: { type: "number", default: 5 }, max_filings: { type: "number", default: 5 } }, required: ["ticker"] } },
+  { name: "get_sec_filing_outline", description: "Get SEC filing outline.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, document_url: { type: "string" } }, required: ["ticker"] } },
+  { name: "get_sec_filing_section", description: "Get SEC filing section text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, selector: { type: "object" }, section_name: { type: "string" }, document_url: { type: "string" }, context_chars: { type: "number", default: 3000 } }, required: ["ticker"] } },
+  { name: "list_sec_filing_tables", description: "List SEC filing tables.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, document_url: { type: "string" } }, required: ["ticker"] } },
+  { name: "get_sec_filing_table", description: "Get SEC filing table.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, document_url: { type: "string" }, table_index: { type: "number" }, max_rows: { type: "number", default: 30 } }, required: ["ticker", "table_index"] } },
+  { name: "extract_sec_filing_fact", description: "Extract SEC filing fact.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, fact: { type: "string" }, fact_name: { type: "string" }, fact_type: { type: "string" }, region: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, document_url: { type: "string" }, accession_number: { type: "string" } }, required: ["ticker"] } },
+  { name: "search_sec_filing_text", description: "Search SEC filing text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, search_terms: { type: "array", items: { type: "string" } }, search_query: { type: "string" }, section_hint: { type: "string" }, selector: { type: "object" }, filing_type: { type: "string", default: "10-K" }, accession_number: { type: "string" }, context_chars: { type: "number", default: 1500 }, return_tables: { type: "boolean", default: true } }, required: ["ticker"] } },
   { name: "analyze_position_signals", description: "Analyze position scoring signals.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
   { name: "calculate_price_target_distance", description: "Calculate price target distance.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, io_pt: { type: "number" } }, required: ["ticker", "io_pt"] } },
   { name: "get_company_news", description: "Get company news.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
@@ -979,6 +992,7 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       totalContracts: { type: "number" },
       returnedContracts: { type: "number" },
       truncated: { type: "boolean" },
+      filtersApplied: { type: "object" },
       contracts: { type: "array" },
     },
     additionalProperties: true,
@@ -1244,13 +1258,42 @@ const num = (v: unknown, fallback: number): number => (typeof v === "number" ? v
 const tickerArg = (v: unknown): string | string[] =>
   Array.isArray(v) ? v.map(String) : str(v);
 
+async function resolveSecDocumentUrl(
+  ticker: string,
+  filingType: string,
+  limit: number
+): Promise<string | null> {
+  const listed = JSON.parse(await listSecFilings(ticker, filingType, limit)) as Record<string, unknown>;
+  const filings = (listed.filings as Record<string, unknown>[]) ?? [];
+  const first = filings[0] ?? {};
+  return (first.primaryDocumentUrl as string | null) ?? null;
+}
+
 export async function callTool(name: string, args: Record<string, unknown>): Promise<string> {
   const aliasTarget = TOOL_ALIASES[name];
   const canonicalTool = aliasTarget ?? name;
-  const raw = await _dispatchTool(canonicalTool, args);
+  let raw = await _dispatchTool(canonicalTool, args);
+  let batchMeta: { partialSuccess?: boolean; successCount?: number; errorCount?: number } | undefined;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const metaRaw = parsed.__batchMeta;
+    if (metaRaw != null && typeof metaRaw === "object") {
+      const bm = metaRaw as Record<string, unknown>;
+      batchMeta = {
+        partialSuccess: bm.partialSuccess === true,
+        successCount: typeof bm.successCount === "number" ? bm.successCount : undefined,
+        errorCount: typeof bm.errorCount === "number" ? bm.errorCount : undefined,
+      };
+      delete parsed.__batchMeta;
+      raw = JSON.stringify(parsed);
+    }
+  } catch {
+    // non-JSON payload
+  }
   if (aliasTarget != null) {
     return mcpSuccess(name, raw, {
       canonicalTool,
+      ...(batchMeta ?? {}),
       warnings: [{
         code: "DEPRECATED_ALIAS",
         message: `Use ${canonicalTool} instead.`,
@@ -1258,7 +1301,7 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       }],
     });
   }
-  return mcpSuccess(name, raw);
+  return mcpSuccess(name, raw, batchMeta);
 }
 
 async function _dispatchTool(name: string, args: Record<string, unknown>): Promise<string> {
@@ -1281,7 +1324,11 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       return getOptionExpirationDates(str(args.ticker));
     case "get_option_chain":
       return getOptionChain(str(args.ticker), str(args.expiration_date), str(args.option_type),
-        num(args.max_contracts, 50), num(args.min_open_interest, 0), num(args.min_volume, 0));
+        num(args.max_contracts, 50), num(args.min_open_interest, 0), num(args.min_volume, 0),
+        args.strike_min != null ? num(args.strike_min, 0) : null,
+        args.strike_max != null ? num(args.strike_max, 0) : null,
+        str(args.moneyness, "all"),
+        str(args.sort_by, "strike"));
     case "get_analyst_recommendations":
       return getRecommendations(
         str(args.ticker),
@@ -1321,7 +1368,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "analyze_earnings_momentum":
       return getEarningsMomentum(tickerArg(args.ticker));
     case "summarize_options_flow":
-      return getOptionsFlowSummary(str(args.ticker), args.expiry_hint != null ? str(args.expiry_hint) : undefined);
+      return getOptionsSummary(str(args.ticker));
     case "find_put_hedge_candidates":
       return getPutHedgeCandidates(
         str(args.ticker),
@@ -1336,31 +1383,93 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       return getOvernightQuote(str(args.ticker));
 
     case "extract_sec_filing_fact":
-      if (args.fact_type != null || args.region != null || args.fact_name == null) {
-        return getFilingData(
+      if (args.fact_type != null || args.region != null || args.fact_name == null || args.fact != null) {
+        const fact = str(args.fact_type ?? args.fact, args.region != null ? "geographic_revenue" : "total_revenue");
+        const raw = await getFilingData(
           str(args.ticker),
-          str(args.fact_type, args.region != null ? "geographic_revenue" : "total_revenue"),
+          fact,
           args.region != null ? str(args.region) : null,
           str(args.filing_type, "10-K"),
           str(args.period, "latest"),
         );
+        try {
+          const parsed = JSON.parse(raw) as Record<string, unknown>;
+          const sourceRaw = str(parsed.source, str(parsed.confidence, "NOT_DISCLOSED"));
+          const source = sourceRaw === "XBRL_COMPANYCONCEPT"
+            ? "XBRL"
+            : sourceRaw === "PARSED_HTML"
+              ? "PARSED_TABLE"
+              : sourceRaw === "NOT_DISCLOSED"
+                ? "NOT_DISCLOSED"
+                : "TEXT_SEARCH";
+          const confidence = str(parsed.confidence, "NOT_DISCLOSED");
+          return JSON.stringify({
+            fact,
+            region: args.region != null ? str(args.region) : null,
+            value: parsed.value ?? null,
+            totalRevenue: parsed.totalRevenue ?? null,
+            valuePct: parsed.valuePct ?? null,
+            unit: "USD",
+            period: parsed.fiscalYear ?? null,
+            filingType: parsed.filingType ?? str(args.filing_type, "10-K"),
+            filingDate: parsed.filingDate ?? null,
+            accessionNumber: parsed.accessionNumber ?? null,
+            source,
+            confidence,
+            evidence: [{
+              accessionNumber: parsed.accessionNumber ?? null,
+              sectionHeading: parsed.sectionHeading ?? parsed.segmentLabel ?? null,
+              location: parsed.primaryDocumentUrl ?? null,
+            }],
+            ticker: parsed.ticker ?? str(args.ticker),
+          });
+        } catch {
+          return raw;
+        }
       }
       return extractFilingFact(str(args.ticker), str(args.fact_name), args.document_url != null ? str(args.document_url) : null, args.accession_number != null ? str(args.accession_number) : null);
     case "list_sec_company_filings":
-      return listSecFilings(str(args.ticker), str(args.form_type, "10-K"), num(args.max_filings, 5));
-    case "get_sec_filing_outline":
-      return getFilingOutline(str(args.ticker), args.accession_number != null ? str(args.accession_number) : null, args.document_url != null ? str(args.document_url) : null);
-    case "get_sec_filing_section":
-      return getFilingSection(str(args.ticker), str(args.section_name), str(args.document_url), num(args.context_chars, 3000));
-    case "list_sec_filing_tables":
-      return listFilingTables(str(args.ticker), str(args.document_url));
-    case "get_sec_filing_table":
-      return getFilingTable(str(args.ticker), str(args.document_url), num(args.table_index, 0), num(args.max_rows, 30));
+      return listSecFilings(str(args.ticker), str(args.filing_type ?? args.form_type, "10-K"), num(args.limit ?? args.max_filings, 5));
+    case "get_sec_filing_outline": {
+      const ticker = str(args.ticker);
+      const filingType = str(args.filing_type ?? args.form_type, "10-K");
+      const docUrl = args.document_url != null
+        ? str(args.document_url)
+        : await resolveSecDocumentUrl(ticker, filingType, 1);
+      return getFilingOutline(ticker, args.accession_number != null ? str(args.accession_number) : null, docUrl);
+    }
+    case "get_sec_filing_section": {
+      const ticker = str(args.ticker);
+      const filingType = str(args.filing_type ?? args.form_type, "10-K");
+      const sectionName = args.section_name != null
+        ? str(args.section_name)
+        : str((args.selector as Record<string, unknown> | undefined)?.item, "Item 1A");
+      const docUrl = args.document_url != null
+        ? str(args.document_url)
+        : await resolveSecDocumentUrl(ticker, filingType, 1);
+      return getFilingSection(ticker, sectionName, str(docUrl), num(args.context_chars, 3000));
+    }
+    case "list_sec_filing_tables": {
+      const ticker = str(args.ticker);
+      const filingType = str(args.filing_type ?? args.form_type, "10-K");
+      const docUrl = args.document_url != null
+        ? str(args.document_url)
+        : await resolveSecDocumentUrl(ticker, filingType, 1);
+      return listFilingTables(ticker, str(docUrl));
+    }
+    case "get_sec_filing_table": {
+      const ticker = str(args.ticker);
+      const filingType = str(args.filing_type ?? args.form_type, "10-K");
+      const docUrl = args.document_url != null
+        ? str(args.document_url)
+        : await resolveSecDocumentUrl(ticker, filingType, 1);
+      return getFilingTable(ticker, str(docUrl), num(args.table_index, 0), num(args.max_rows, 30));
+    }
     case "search_sec_filing_text":
       return searchFilingText(
         str(args.ticker),
-        (args.search_terms as string[]) ?? [],
-        args.section_hint != null ? str(args.section_hint) : null,
+        (args.search_terms as string[]) ?? (args.search_query != null ? [str(args.search_query)] : []),
+        args.section_hint != null ? str(args.section_hint) : (args.selector != null ? str((args.selector as Record<string, unknown>).item, "") : null),
         str(args.filing_type, "10-K"),
         args.accession_number != null ? str(args.accession_number) : null,
         num(args.context_chars, 1500),
@@ -1381,7 +1490,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "calculate_price_target_distance":
       return getPriceTargetBracket(str(args.ticker), num(args.io_pt, 0));
     case "analyze_position_signals":
-      return getPositionScoreInputs(str(args.ticker));
+      return getPositionScoreInputs(tickerArg(args.ticker));
     case "check_volume_liquidity_threshold":
       return getVolumeGate(str(args.ticker), args.foreign_exchange === true);
     case "health_check":
@@ -1396,15 +1505,15 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_filing_data":
       return getFilingData(str(args.ticker), str(args.fact_type), args.region != null ? str(args.region) : null, str(args.filing_type, "10-K"), str(args.period, "latest"));
     case "list_sec_filings":
-      return listSecFilings(str(args.ticker), str(args.form_type, "10-K"), num(args.max_filings, 5));
+      return listSecFilings(str(args.ticker), str(args.filing_type ?? args.form_type, "10-K"), num(args.limit ?? args.max_filings, 5));
     case "get_filing_outline":
-      return getFilingOutline(str(args.ticker), args.accession_number != null ? str(args.accession_number) : null, args.document_url != null ? str(args.document_url) : null);
+      return _dispatchTool("get_sec_filing_outline", args);
     case "get_filing_section":
-      return getFilingSection(str(args.ticker), str(args.section_name), str(args.document_url), num(args.context_chars, 3000));
+      return _dispatchTool("get_sec_filing_section", args);
     case "list_filing_tables":
-      return listFilingTables(str(args.ticker), str(args.document_url));
+      return _dispatchTool("list_sec_filing_tables", args);
     case "get_filing_table":
-      return getFilingTable(str(args.ticker), str(args.document_url), num(args.table_index, 0), num(args.max_rows, 30));
+      return _dispatchTool("get_sec_filing_table", args);
     case "extract_filing_fact":
       return extractFilingFact(str(args.ticker), str(args.fact_name), args.document_url != null ? str(args.document_url) : null, args.accession_number != null ? str(args.accession_number) : null);
     case "get_fast_info":
@@ -1442,7 +1551,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_yahoo_finance_news":
       return getNews(str(args.ticker));
     case "get_options_flow_summary":
-      return getOptionsFlowSummary(str(args.ticker), args.expiry_hint != null ? str(args.expiry_hint) : undefined);
+      return getOptionsSummary(str(args.ticker));
     case "get_options_flow_scan":
       return getOptionsFlowScan(str(args.ticker), str(args.window_label));
     case "get_put_hedge_candidates":
@@ -1450,7 +1559,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_price_target_bracket":
       return getPriceTargetBracket(str(args.ticker), num(args.io_pt, 0));
     case "get_position_score_inputs":
-      return getPositionScoreInputs(str(args.ticker));
+      return getPositionScoreInputs(tickerArg(args.ticker));
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

@@ -466,6 +466,7 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
                         'totalContracts': {'type': 'number'},
                         'returnedContracts': {'type': 'number'},
                         'truncated': {'type': 'boolean'},
+                        'filtersApplied': {'type': 'object'},
                         'contracts': {'type': 'array'}},
          'additionalProperties': True},
     "get_recommendations": _SIMPLE_OUTPUT_SCHEMA,
@@ -714,6 +715,23 @@ TOOL_ALIASES: dict[str, str] = {
 for _alias_name, _canonical_name in TOOL_ALIASES.items():
     if _canonical_name in _TOOL_OUTPUT_SCHEMAS and _alias_name not in _TOOL_OUTPUT_SCHEMAS:
         _TOOL_OUTPUT_SCHEMAS[_alias_name] = _TOOL_OUTPUT_SCHEMAS[_canonical_name]
+
+# Canonical/alias schemas that route to existing base implementations.
+_TOOL_OUTPUT_SCHEMAS.setdefault("analyze_position_signals", _TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("calculate_price_target_distance", _TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("check_volume_liquidity_threshold", _TOOL_OUTPUT_SCHEMAS["get_volume_gate"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("analyze_options_flow_window", _TOOL_OUTPUT_SCHEMAS["get_options_flow_scan"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("summarize_options_flow", _TOOL_OUTPUT_SCHEMAS["get_options_summary"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("extract_sec_filing_fact", _TOOL_OUTPUT_SCHEMAS["extract_filing_fact"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("search_sec_filing_text", _TOOL_OUTPUT_SCHEMAS["search_filing_text"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("get_tps_inputs", _TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("get_eqf_bracket", _TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("get_adv_gate", _TOOL_OUTPUT_SCHEMAS["get_volume_gate"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("get_dc134_options_scan", _TOOL_OUTPUT_SCHEMAS["get_options_flow_scan"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("get_china_revenue_pct", _TOOL_OUTPUT_SCHEMAS["get_filing_data"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("get_geographic_revenue", _TOOL_OUTPUT_SCHEMAS["get_filing_data"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("get_filing_text_search", _TOOL_OUTPUT_SCHEMAS["search_filing_text"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("get_filing_document", _TOOL_OUTPUT_SCHEMAS["get_filing_section"])
 
 @yfinance_server.tool(
     name="get_historical_stock_prices",
@@ -1138,8 +1156,8 @@ async def get_option_expiration_dates(ticker: str) -> str:
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_option_chain"],
     description="""Fetch the option chain for a given ticker symbol, expiration date, and option type.
 
-Use the optional strike filters to narrow the results — a full options chain (e.g. AAPL) can have 200+ rows;
-filtering near-the-money reduces this to ~10-20 rows and dramatically cuts token usage.
+Use optional filters to narrow results — a full chain can have 200+ rows; filtering near-the-money and/or
+liquidity significantly reduces output size.
 
 Returns a JSON object with top-level fields: ticker, expiration, optionType, dataDate (YYYY-MM-DD of
 the last trading session — use to detect weekend/holiday staleness), totalContracts, returnedContracts,
@@ -1152,12 +1170,14 @@ Args:
         The expiration date for the options chain (format: 'YYYY-MM-DD')
     option_type: str
         The type of option to fetch ('calls' or 'puts')
-    min_strike: float | None
-        Optional minimum strike price filter. Only options with strike >= min_strike are returned.
-    max_strike: float | None
-        Optional maximum strike price filter. Only options with strike <= max_strike are returned.
-    in_the_money_only: bool
-        If True, only return in-the-money options. Default is False.
+    strike_min: float | None
+        Optional minimum strike price filter. Only options with strike >= strike_min are returned.
+    strike_max: float | None
+        Optional maximum strike price filter. Only options with strike <= strike_max are returned.
+    moneyness: str
+        "all" | "itm" | "otm" | "near_money".
+    sort_by: str
+        "strike" | "volume" | "openInterest".
     max_contracts: int
         Maximum number of contracts to return (default: 50, 0 = no limit).
     min_open_interest: int
@@ -1170,12 +1190,16 @@ async def get_option_chain(
     ticker: str,
     expiration_date: str,
     option_type: str,
-    min_strike: float | None = None,
-    max_strike: float | None = None,
-    in_the_money_only: bool = False,
     max_contracts: int = 50,
     min_open_interest: int = 0,
     min_volume: int = 0,
+    strike_min: float | None = None,
+    strike_max: float | None = None,
+    moneyness: str = "all",
+    sort_by: str = "strike",
+    min_strike: float | None = None,  # legacy alias
+    max_strike: float | None = None,  # legacy alias
+    in_the_money_only: bool = False,  # legacy alias
 ) -> str:
     """Fetch the option chain for a given ticker symbol, expiration date, and option type.
 
@@ -1217,16 +1241,33 @@ async def get_option_chain(
     else:
         return f"Error: invalid option type {option_type}. Please use one of the following: calls, puts."
 
-    if in_the_money_only:
+    effective_strike_min = strike_min if strike_min is not None else min_strike
+    effective_strike_max = strike_max if strike_max is not None else max_strike
+    if in_the_money_only and moneyness == "all":
+        moneyness = "itm"
+
+    if moneyness == "itm":
         df = df[df["inTheMoney"] == True]
-    if min_strike is not None:
-        df = df[df["strike"] >= min_strike]
-    if max_strike is not None:
-        df = df[df["strike"] <= max_strike]
+    elif moneyness == "otm":
+        df = df[df["inTheMoney"] == False]
+    elif moneyness == "near_money":
+        try:
+            u = float(company.fast_info.last_price)
+            if u > 0:
+                low, high = u * 0.95, u * 1.05
+                df = df[(df["strike"] >= low) & (df["strike"] <= high)]
+        except Exception:
+            pass
+    if effective_strike_min is not None:
+        df = df[df["strike"] >= effective_strike_min]
+    if effective_strike_max is not None:
+        df = df[df["strike"] <= effective_strike_max]
     if min_open_interest > 0:
         df = df[df["openInterest"] >= min_open_interest]
     if min_volume > 0:
         df = df[df["volume"] >= min_volume]
+    if sort_by in {"volume", "openInterest", "strike"} and sort_by in df.columns:
+        df = df.sort_values(by=sort_by, ascending=False if sort_by in {"volume", "openInterest"} else True)
     total_contracts = len(df)
     if max_contracts > 0:
         df = df.head(max_contracts)
@@ -1238,10 +1279,10 @@ async def get_option_chain(
         data_date = (
             str(_hist.index[-1].date())
             if _hist is not None and not _hist.empty
-            else str(datetime.date.today())
+            else get_last_trading_date()
         )
     except Exception:
-        data_date = str(datetime.date.today())
+        data_date = get_last_trading_date()
 
     contracts = json.loads(df.to_json(orient="records", date_format="iso"))
     return json.dumps({
@@ -1252,6 +1293,15 @@ async def get_option_chain(
         "totalContracts": total_contracts,
         "returnedContracts": returned_contracts,
         "truncated": returned_contracts < total_contracts,
+        "filtersApplied": {
+            "max_contracts": max_contracts,
+            "min_open_interest": min_open_interest,
+            "min_volume": min_volume,
+            "strike_min": effective_strike_min,
+            "strike_max": effective_strike_max,
+            "moneyness": moneyness,
+            "sort_by": sort_by,
+        },
         "contracts": contracts,
     })
 
@@ -3650,138 +3700,8 @@ Args:
 """,
 )
 async def get_options_flow_summary(ticker: str, expiry_hint: str | None = None) -> str:
-    """Return options flow summary for a single ticker."""
-    company = yf.Ticker(ticker)
-    try:
-        if company.fast_info.currency is None:
-            return json.dumps({"error": True, "message": f"Ticker {ticker} not found", "ticker": ticker})
-    except Exception as e:
-        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
-
-    try:
-        expirations = company.options
-    except Exception as e:
-        return json.dumps({"error": True, "message": f"No options data: {e}", "ticker": ticker})
-
-    if not expirations:
-        return json.dumps({"error": True, "message": "No options expirations available", "ticker": ticker})
-
-    last_price = company.fast_info.last_price
-
-    # Select expiry
-    selected_expiry = None
-    if expiry_hint and expiry_hint in expirations:
-        selected_expiry = expiry_hint
-    else:
-        # Select nearest expiry with sufficient OI
-        for exp in expirations:
-            try:
-                chain = company.option_chain(exp)
-                total_oi = chain.calls["openInterest"].sum() + chain.puts["openInterest"].sum()
-                if total_oi > 500:
-                    selected_expiry = exp
-                    break
-            except Exception:
-                continue
-
-    if selected_expiry is None:
-        selected_expiry = expirations[0]
-
-    try:
-        chain = company.option_chain(selected_expiry)
-    except Exception as e:
-        return json.dumps({"error": True, "message": f"Failed to fetch chain: {e}", "ticker": ticker})
-
-    calls = chain.calls
-    puts = chain.puts
-
-    total_call_oi = int(calls["openInterest"].sum()) if "openInterest" in calls.columns else 0
-    total_put_oi = int(puts["openInterest"].sum()) if "openInterest" in puts.columns else 0
-
-    pc_ratio = round(total_put_oi / total_call_oi, 3) if total_call_oi > 0 else None
-
-    if pc_ratio is not None:
-        if pc_ratio > 1.5:
-            pc_sentiment = "PUT_HEAVY"
-        elif pc_ratio < 0.7:
-            pc_sentiment = "CALL_HEAVY"
-        else:
-            pc_sentiment = "NEUTRAL"
-    else:
-        pc_sentiment = None
-
-    # ATM strike and IV
-    atm_strike = None
-    atm_iv = None
-    if last_price is not None and "strike" in calls.columns:
-        calls_valid = calls.dropna(subset=["impliedVolatility"])
-        if not calls_valid.empty:
-            atm_idx = (calls_valid["strike"] - last_price).abs().idxmin()
-            atm_strike = float(calls_valid.loc[atm_idx, "strike"])
-            atm_iv = round(float(calls_valid.loc[atm_idx, "impliedVolatility"]), 3)
-
-    # IV percentile
-    all_ivs = []
-    if "impliedVolatility" in calls.columns:
-        all_ivs.extend(calls["impliedVolatility"].dropna().tolist())
-    if "impliedVolatility" in puts.columns:
-        all_ivs.extend(puts["impliedVolatility"].dropna().tolist())
-
-    iv_pctile = None
-    if atm_iv is not None and all_ivs:
-        below = sum(1 for iv in all_ivs if iv <= atm_iv)
-        iv_pctile = int(round(below / len(all_ivs) * 100))
-
-    iv_flag = "⚠️ HIGH IV" if iv_pctile is not None and iv_pctile > 70 else None
-
-    # Max pain calculation
-    max_pain_strike = None
-    if "strike" in calls.columns and "openInterest" in calls.columns:
-        all_strikes = sorted(set(calls["strike"].tolist() + puts["strike"].tolist()))
-        if all_strikes:
-            min_pain = float("inf")
-            for strike in all_strikes:
-                call_pain = sum(
-                    max(0, strike - row_strike) * oi
-                    for row_strike, oi in zip(calls["strike"], calls["openInterest"].fillna(0))
-                )
-                put_pain = sum(
-                    max(0, row_strike - strike) * oi
-                    for row_strike, oi in zip(puts["strike"], puts["openInterest"].fillna(0))
-                )
-                total_pain = call_pain + put_pain
-                if total_pain < min_pain:
-                    min_pain = total_pain
-                    max_pain_strike = float(strike)
-
-    # Highest OI strikes
-    highest_oi_call = None
-    highest_oi_put = None
-    if "openInterest" in calls.columns and not calls.empty:
-        idx = calls["openInterest"].idxmax()
-        if pd.notna(idx):
-            highest_oi_call = float(calls.loc[idx, "strike"])
-    if "openInterest" in puts.columns and not puts.empty:
-        idx = puts["openInterest"].idxmax()
-        if pd.notna(idx):
-            highest_oi_put = float(puts.loc[idx, "strike"])
-
-    return json.dumps({
-        "ticker": ticker,
-        "expiryDate": selected_expiry,
-        "totalCallOI": total_call_oi,
-        "totalPutOI": total_put_oi,
-        "pcRatio": pc_ratio,
-        "pcSentiment": pc_sentiment,
-        "atmStrike": atm_strike,
-        "atmIV": atm_iv,
-        "ivPctile": iv_pctile,
-        "ivFlag": iv_flag,
-        "maxPainStrike": max_pain_strike,
-        "highestOICallStrike": highest_oi_call,
-        "highestOIPutStrike": highest_oi_put,
-        "dataDate": str(datetime.date.today()),
-    })
+    # Consolidated naming: route to the same payload implementation as get_options_summary.
+    return await get_options_summary(ticker)
 
 
 # ---------------------------------------------------------------------------
@@ -5488,7 +5408,7 @@ async def get_company_news(ticker: str) -> str:
 
 @yfinance_server.tool(name="summarize_options_flow", output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_summary"], description="Canonical alias for get_options_summary/get_options_flow_summary.")
 async def summarize_options_flow(ticker: str, expiry_hint: str | None = None) -> str:
-    return await get_options_flow_summary(ticker=ticker, expiry_hint=expiry_hint)
+    return await get_options_summary(ticker=ticker)
 
 
 @yfinance_server.tool(name="analyze_options_flow_window", output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_flow_scan"], description="Canonical alias for get_options_flow_scan.")
@@ -5512,33 +5432,59 @@ async def analyze_position_signals(ticker: str) -> str:
 
 
 @yfinance_server.tool(name="list_sec_company_filings", output_schema=_TOOL_OUTPUT_SCHEMAS["list_sec_filings"], description="Canonical alias for list_sec_filings.")
-async def list_sec_company_filings(ticker: str, form_type: str = "10-K", max_filings: int = 5) -> str:
-    return await list_sec_filings(ticker, form_type, max_filings)
+async def list_sec_company_filings(ticker: str, filing_type: str = "10-K", limit: int = 5, form_type: str | None = None, max_filings: int | None = None) -> str:
+    return await list_sec_filings(ticker, form_type or filing_type, max_filings or limit)
+
+
+async def _resolve_latest_sec_doc_url(ticker: str, filing_type: str = "10-K") -> str | None:
+    listed_raw = await list_sec_filings(ticker=ticker, form_type=filing_type, max_filings=1)
+    try:
+        listed = json.loads(listed_raw)
+        filings = listed.get("filings") if isinstance(listed, dict) else None
+        if isinstance(filings, list) and filings:
+            first = filings[0] if isinstance(filings[0], dict) else {}
+            return first.get("primaryDocumentUrl")
+    except Exception:
+        return None
+    return None
 
 
 @yfinance_server.tool(name="get_sec_filing_outline", output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_outline"], description="Canonical alias for get_filing_outline.")
-async def get_sec_filing_outline(ticker: str, accession_number: str | None = None, document_url: str | None = None) -> str:
-    return await get_filing_outline(ticker, accession_number, document_url)
+async def get_sec_filing_outline(ticker: str, filing_type: str = "10-K", period: str = "latest", accession_number: str | None = None, document_url: str | None = None) -> str:
+    resolved_doc_url = document_url or (await _resolve_latest_sec_doc_url(ticker, filing_type) if period == "latest" else None)
+    return await get_filing_outline(ticker, accession_number, resolved_doc_url)
 
 
 @yfinance_server.tool(name="get_sec_filing_section", output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_section"], description="Canonical alias for get_filing_section.")
-async def get_sec_filing_section(ticker: str, section_name: str, document_url: str, context_chars: int = 3000) -> str:
-    return await get_filing_section(ticker, section_name, document_url, context_chars)
+async def get_sec_filing_section(
+    ticker: str,
+    filing_type: str = "10-K",
+    selector: dict | None = None,
+    section_name: str | None = None,
+    document_url: str | None = None,
+    context_chars: int = 3000,
+) -> str:
+    resolved_doc_url = document_url or await _resolve_latest_sec_doc_url(ticker, filing_type)
+    section = section_name or (selector or {}).get("item") or "Item 1A"
+    return await get_filing_section(ticker, str(section), str(resolved_doc_url), context_chars)
 
 
 @yfinance_server.tool(name="list_sec_filing_tables", output_schema=_TOOL_OUTPUT_SCHEMAS["list_filing_tables"], description="Canonical alias for list_filing_tables.")
-async def list_sec_filing_tables(ticker: str, document_url: str) -> str:
-    return await list_filing_tables(ticker, document_url)
+async def list_sec_filing_tables(ticker: str, filing_type: str = "10-K", document_url: str | None = None) -> str:
+    resolved_doc_url = document_url or await _resolve_latest_sec_doc_url(ticker, filing_type)
+    return await list_filing_tables(ticker, str(resolved_doc_url))
 
 
 @yfinance_server.tool(name="get_sec_filing_table", output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_table"], description="Canonical alias for get_filing_table.")
-async def get_sec_filing_table(ticker: str, document_url: str, table_index: int, max_rows: int = 30) -> str:
-    return await get_filing_table(ticker, document_url, table_index, max_rows)
+async def get_sec_filing_table(ticker: str, table_index: int, filing_type: str = "10-K", document_url: str | None = None, max_rows: int = 30) -> str:
+    resolved_doc_url = document_url or await _resolve_latest_sec_doc_url(ticker, filing_type)
+    return await get_filing_table(ticker, str(resolved_doc_url), table_index, max_rows)
 
 
 @yfinance_server.tool(name="extract_sec_filing_fact", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_filing_fact"], description="Canonical SEC fact extractor (routes to get_filing_data or extract_filing_fact).")
 async def extract_sec_filing_fact(
     ticker: str,
+    fact: str | None = None,
     fact_name: str | None = None,
     fact_type: FilingFactType | None = None,
     region: str | None = None,
@@ -5547,9 +5493,46 @@ async def extract_sec_filing_fact(
     document_url: str | None = None,
     accession_number: str | None = None,
 ) -> str:
-    if fact_type is not None or region is not None or fact_name is None:
-        routed_fact_type = fact_type or FilingFactType.geographic_revenue
-        return await get_filing_data(ticker=ticker, fact_type=routed_fact_type, region=region, filing_type=filing_type, period=period)
+    routed_fact_type = fact_type
+    if routed_fact_type is None and fact is not None:
+        try:
+            routed_fact_type = FilingFactType(fact)
+        except Exception:
+            routed_fact_type = FilingFactType.geographic_revenue if region is not None else None
+    if routed_fact_type is not None or region is not None or fact_name is None:
+        routed_fact_type = routed_fact_type or FilingFactType.geographic_revenue
+        raw = await get_filing_data(ticker=ticker, fact_type=routed_fact_type, region=region, filing_type=filing_type, period=period)
+        try:
+            parsed = json.loads(raw)
+            source_raw = str(parsed.get("source") or parsed.get("confidence") or "NOT_DISCLOSED")
+            source = (
+                "XBRL" if source_raw == "XBRL_COMPANYCONCEPT"
+                else "PARSED_TABLE" if source_raw == "PARSED_HTML"
+                else "NOT_DISCLOSED" if source_raw == "NOT_DISCLOSED"
+                else "TEXT_SEARCH"
+            )
+            return json.dumps({
+                "fact": routed_fact_type.value,
+                "region": region,
+                "value": parsed.get("value"),
+                "totalRevenue": parsed.get("totalRevenue"),
+                "valuePct": parsed.get("valuePct"),
+                "unit": "USD",
+                "period": parsed.get("fiscalYear"),
+                "filingType": parsed.get("filingType", filing_type),
+                "filingDate": parsed.get("filingDate"),
+                "accessionNumber": parsed.get("accessionNumber"),
+                "source": source,
+                "confidence": parsed.get("confidence", "NOT_DISCLOSED"),
+                "evidence": [{
+                    "accessionNumber": parsed.get("accessionNumber"),
+                    "location": parsed.get("primaryDocumentUrl"),
+                    "sectionHeading": parsed.get("sectionHeading") or parsed.get("segmentLabel"),
+                }],
+                "ticker": parsed.get("ticker", ticker),
+            })
+        except Exception:
+            return raw
     return await extract_filing_fact(ticker=ticker, fact_name=fact_name, document_url=document_url, accession_number=accession_number)
 
 
@@ -5557,13 +5540,17 @@ async def extract_sec_filing_fact(
 async def search_sec_filing_text(
     ticker: str,
     search_terms: list[str] | None = None,
+    search_query: str | None = None,
+    selector: dict | None = None,
     section_hint: str | None = None,
     filing_type: str = "10-K",
     accession_number: str | None = None,
     context_chars: int = 1500,
     return_tables: bool = True,
 ) -> str:
-    return await search_filing_text(ticker, search_terms, section_hint, filing_type, accession_number, context_chars, return_tables)
+    terms = search_terms or ([search_query] if search_query else [])
+    hint = section_hint or (selector or {}).get("item")
+    return await search_filing_text(ticker, terms, hint, filing_type, accession_number, context_chars, return_tables)
 
 
 @yfinance_server.tool(name="get_tps_inputs", output_schema=_TOOL_OUTPUT_SCHEMAS["get_tps_inputs"], description="Deprecated alias for analyze_position_signals.")
