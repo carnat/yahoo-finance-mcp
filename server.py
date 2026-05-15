@@ -1176,7 +1176,7 @@ def _event_type_from_form(form_type: str) -> str:
 def _make_duplicate_group_id(ticker: str, title: str, published_at: str | None) -> str:
     """Deterministic dedup hash from (ticker, normalized_title, date)."""
     key = f"{ticker.upper()}|{title.strip().lower()[:80]}|{(published_at or '')[:10]}"
-    return hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
 def _build_yf_event_item(ticker: str, news_item: dict, retrieved_at: str) -> dict:
@@ -6035,8 +6035,8 @@ async def health_check() -> str:
     except Exception:
         tool_count = len(TOOL_ALIASES) + 50
     tool_names = sorted(TOOL_ALIASES.keys())
-    schema_hash = hashlib.md5(json.dumps(tool_names).encode("utf-8")).hexdigest()[:16]
-    runtime_hash = hashlib.md5((SERVER_VERSION + str(tool_count)).encode("utf-8")).hexdigest()[:16]
+    schema_hash = hashlib.sha256(json.dumps(tool_names).encode("utf-8")).hexdigest()[:16]
+    runtime_hash = hashlib.sha256((SERVER_VERSION + str(tool_count)).encode("utf-8")).hexdigest()[:16]
     return json.dumps({
         "serverVersion": SERVER_VERSION,
         "buildSha": os.environ.get("BUILD_SHA", "unknown"),

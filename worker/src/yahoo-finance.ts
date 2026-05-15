@@ -4990,14 +4990,15 @@ function makeDupGroupId(title: string, dateStr: string): string {
   let h = 0;
   const s = `${dateStr}::${title.toLowerCase().replace(/\s+/g, " ").trim()}`;
   for (let i = 0; i < s.length; i++) { h = ((h << 5) - h + s.charCodeAt(i)) | 0; }
-  return (h >>> 0).toString(16).padStart(8, "0");
+  return (h >>> 0).toString(16).padStart(16, "0");
 }
 
 function buildYfEventItem(item: Record<string, unknown>): Record<string, unknown> {
   const title = _str(item.title);
-  const publishedAt = typeof item.providerPublishTime === "number"
+  const rawPublishedAt = typeof item.providerPublishTime === "number"
     ? iso(item.providerPublishTime as number)
     : _str(item.publishedAt);
+  const publishedAt = rawPublishedAt || new Date(0).toISOString();
   return {
     source: "Yahoo Finance",
     sourceType: "yahoo_finance",
