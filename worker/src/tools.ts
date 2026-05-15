@@ -747,7 +747,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_price_target_bracket",
     description:
-      "Compute price-to-target bracket from current price vs a user-supplied reference price. ratio = currentPrice / ref_pt × 100. Brackets: ≤75% STRONG_BUY | 75–90% ACCEPTABLE | 90–100% CAUTION | >100% AVOID. Tags: <40% SPECULATIVE | 40–79% LONG | 80–99% NEAR | ≥100% INVERTED. Returns currentPrice, ioPt, eqfPct, bracket, tag, invertedFlag, dataDate.",
+      "Compute price-to-target bracket from current price vs a user-supplied reference price. ratio = currentPrice / ref_pt × 100. Brackets: ≤75% STRONG_BUY | 75–90% ACCEPTABLE | 90–100% RISK | >100% ABOVE_TARGET. Tags: <40% SPECULATIVE | 40–79% LONG | 80–99% NEAR | ≥100% INVERTED. Returns currentPrice, ioPt, eqfPct, bracket, tag, invertedFlag, dataDate.",
     inputSchema: {
       type: "object",
       properties: {
@@ -992,12 +992,21 @@ const SIMPLE_OBJECT_SCHEMA: Tool["outputSchema"] = {
   properties: {},
   additionalProperties: true,
 };
+const NEWS_OUTPUT_SCHEMA: Tool["outputSchema"] = {
+  type: "object",
+  properties: {
+    ticker: { type: "string" },
+    items: { type: "array" },
+    meta: { type: "object" },
+  },
+  additionalProperties: true,
+};
 
 const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   get_historical_stock_prices: SIMPLE_OBJECT_SCHEMA,
   get_stock_info: SIMPLE_OBJECT_SCHEMA,
   get_etf_info: SIMPLE_OBJECT_SCHEMA,
-  get_yahoo_finance_news: SIMPLE_OBJECT_SCHEMA,
+  get_yahoo_finance_news: NEWS_OUTPUT_SCHEMA,
   get_stock_actions: SIMPLE_OBJECT_SCHEMA,
   get_financial_statement: SIMPLE_OBJECT_SCHEMA,
   get_holder_info: SIMPLE_OBJECT_SCHEMA,
@@ -1207,14 +1216,28 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     properties: {
       ticker: { type: "string" },
       factType: { type: "string" },
+      region: { type: ["string", "null"] },
+      period: { type: ["string", "null"] },
+      rawValue: { type: ["string", "null"] },
+      rawDenominator: { type: ["string", "null"] },
+      unit: { type: ["string", "null"] },
+      unitScale: { type: ["string", "null"] },
+      value: { type: ["number", "null"] },
+      denominator: { type: ["number", "null"] },
+      valueRatio: { type: ["number", "null"] },
+      valuePct: { type: ["number", "null"] },
+      extractionMethod: { type: "string" },
       source: { type: "string" },
       confidence: { type: "string" },
-      value: {},
-      totalRevenue: { type: ["number", "null"] },
-      valuePct: { type: ["number", "null"] },
-      currency: { type: ["string", "null"] },
-      period: { type: ["string", "null"] },
       filingType: { type: ["string", "null"] },
+      filingDate: { type: ["string", "null"] },
+      accessionNumber: { type: ["string", "null"] },
+      documentUrl: { type: ["string", "null"] },
+      indexUrl: { type: ["string", "null"] },
+      primaryDocumentUrl: { type: ["string", "null"] },
+      evidence: { type: ["object", "null"] },
+      calculation: { type: ["object", "null"] },
+      warnings: { type: "array" },
     },
     additionalProperties: true,
   },
@@ -1464,40 +1487,52 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
           str(args.filing_type, "10-K"),
           str(args.period, "latest"),
         );
+        let parsed: Record<string, unknown> = {};
         try {
-          const parsed = JSON.parse(raw) as Record<string, unknown>;
-          const sourceRaw = str(parsed.source, str(parsed.confidence, "NOT_DISCLOSED"));
-          const source = sourceRaw === "XBRL_COMPANYCONCEPT"
-            ? "XBRL"
-            : sourceRaw === "PARSED_HTML"
-              ? "PARSED_TABLE"
-              : sourceRaw === "NOT_DISCLOSED"
-                ? "NOT_DISCLOSED"
-                : "TEXT_SEARCH";
-          const confidence = str(parsed.confidence, "NOT_DISCLOSED");
-          return JSON.stringify({
-            fact,
-            region: args.region != null ? str(args.region) : null,
-            value: parsed.value ?? null,
-            totalRevenue: parsed.totalRevenue ?? null,
-            valuePct: parsed.valuePct ?? null,
-            unit: "USD",
-            period: parsed.fiscalYear ?? null,
-            filingType: parsed.filingType ?? str(args.filing_type, "10-K"),
-            filingDate: parsed.filingDate ?? null,
-            accessionNumber: parsed.accessionNumber ?? null,
-            source,
-            confidence,
-            evidence: [{
-              accessionNumber: parsed.accessionNumber ?? null,
-              sectionHeading: parsed.sectionHeading ?? parsed.segmentLabel ?? null,
-              location: parsed.primaryDocumentUrl ?? null,
-            }],
-            ticker: parsed.ticker ?? str(args.ticker),
-          });
+          let parsedAny: unknown = JSON.parse(raw);
+          if (
+            parsedAny != null &&
+            typeof parsedAny === "object" &&
+            "ok" in (parsedAny as Record<string, unknown>) &&
+            "data" in (parsedAny as Record<string, unknown>)
+          ) {
+            parsedAny = (parsedAny as Record<string, unknown>).data;
+          }
+          if (typeof parsedAny === "string") {
+            parsedAny = JSON.parse(parsedAny);
+          }
+          if (parsedAny != null && typeof parsedAny === "object") {
+            parsed = parsedAny as Record<string, unknown>;
+          }
         } catch {
-          return raw;
+          parsed = {};
         }
+        return JSON.stringify({
+          fact,
+          region: args.region != null ? str(args.region) : null,
+          value: parsed.value ?? null,
+          denominator: parsed.denominator ?? null,
+          valueRatio: parsed.valueRatio ?? null,
+          valuePct: parsed.valuePct ?? null,
+          rawValue: parsed.rawValue ?? null,
+          rawDenominator: parsed.rawDenominator ?? null,
+          unit: "USD",
+          unitScale: parsed.unitScale ?? null,
+          period: parsed.period ?? null,
+          filingType: parsed.filingType ?? str(args.filing_type, "10-K"),
+          filingDate: parsed.filingDate ?? null,
+          accessionNumber: parsed.accessionNumber ?? null,
+          extractionMethod: parsed.extractionMethod ?? "NONE",
+          source: parsed.source ?? "NOT_DISCLOSED",
+          confidence: parsed.confidence ?? "NOT_DISCLOSED",
+          documentUrl: parsed.documentUrl ?? null,
+          indexUrl: parsed.indexUrl ?? null,
+          primaryDocumentUrl: parsed.primaryDocumentUrl ?? null,
+          evidence: parsed.evidence ?? null,
+          calculation: parsed.calculation ?? null,
+          warnings: parsed.warnings ?? [],
+          ticker: parsed.ticker ?? str(args.ticker),
+        });
       }
       return extractFilingFact(str(args.ticker), str(args.fact_name), args.document_url != null ? str(args.document_url) : null, args.accession_number != null ? str(args.accession_number) : null);
     case "list_sec_company_filings":

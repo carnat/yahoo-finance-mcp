@@ -163,6 +163,7 @@ def main() -> int:
         ("get_sec_filing_table", {"ticker": "AAPL", "filing_type": "10-K", "table_index": 0}),
         ("extract_sec_filing_fact", {"ticker": "QCOM", "fact": "geographic_revenue", "region": "China"}),
         ("search_sec_filing_text", {"ticker": "AAPL", "search_terms": ["Greater China"], "filing_type": "10-K"}),
+        ("get_company_news", {"ticker": "AAPL"}),
     ]
     if doc_url:
         calls.extend([
@@ -203,6 +204,14 @@ def main() -> int:
                 raise AssertionError("extract_sec_filing_fact returned non-object")
             if "valuePct" not in data:
                 raise AssertionError("extract_sec_filing_fact missing valuePct")
+        if name == "get_company_news":
+            data = extract_data(payload)
+            if not isinstance(data, dict):
+                raise AssertionError("get_company_news returned non-object")
+            if "items" not in data or not isinstance(data.get("items"), list):
+                raise AssertionError("get_company_news missing items[]")
+            if "meta" not in data or not isinstance(data.get("meta"), dict):
+                raise AssertionError("get_company_news missing meta object")
 
     for idx, t in enumerate(tools, start=1000):
         if not isinstance(t, dict):
@@ -219,4 +228,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
