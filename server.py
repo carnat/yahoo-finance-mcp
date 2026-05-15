@@ -189,7 +189,7 @@ def _validate_ticker(ticker: str) -> str | None:
     """Returns an error message if the ticker is invalid, else None."""
     t = ticker.strip().upper()
     if not _TICKER_RE.match(t):
-        return f"Invalid ticker symbol: '{ticker}'. Must be 1-20 uppercase alphanumeric characters."
+        return f"Invalid ticker symbol: '{ticker}'. Must be 1-20 characters: uppercase letters, digits, or . - ^ ="
     return None
 
 
@@ -216,8 +216,8 @@ def _validate_sec_url(url: str) -> str | None:
 
 def _sanitize_sec_html(html: str) -> str:
     """Strip script/style tags and event handler attributes from SEC HTML."""
-    html = _re.sub(r'<script[^>]*>.*?</script\s*>', '', html, flags=_re.DOTALL | _re.IGNORECASE)
-    html = _re.sub(r'<style[^>]*>.*?</style\s*>', '', html, flags=_re.DOTALL | _re.IGNORECASE)
+    html = _re.sub(r'<script[^>]*>.*?</script[^>]*>', '', html, flags=_re.DOTALL | _re.IGNORECASE)
+    html = _re.sub(r'<style[^>]*>.*?</style[^>]*>', '', html, flags=_re.DOTALL | _re.IGNORECASE)
     html = _re.sub(r'\s+on\w+\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)', '', html, flags=_re.IGNORECASE)
     return html
 

@@ -4,7 +4,7 @@ const SEC_URL_PREFIX = "https://www.sec.gov/Archives/";
 export function validateTicker(ticker: string): string | null {
   const t = ticker.trim().toUpperCase();
   if (!TICKER_RE.test(t)) {
-    return `Invalid ticker symbol: '${ticker}'. Must be 1-20 uppercase alphanumeric characters.`;
+    return `Invalid ticker symbol: '${ticker}'. Must be 1-20 characters: uppercase letters, digits, or . - ^ =`;
   }
   return null;
 }
