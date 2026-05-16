@@ -8867,7 +8867,7 @@ async def get_adv_gate(ticker: str, foreign_exchange: bool = False) -> str:
     return _deprecated_alias_response("get_adv_gate", "check_volume_liquidity_threshold", await check_volume_liquidity_threshold(ticker, foreign_exchange))
 
 
-@yfinance_server.tool(name="get_dc134_options_scan", output_schema=_TOOL_OUTPUT_SCHEMAS["get_dc134_options_scan"], description="Deprecated alias for analyze_options_flow_window.")
+@yfinance_server.tool(name="get_dc134_options_scan", output_schema=_TOOL_OUTPUT_SCHEMAS["get_dc134_options_scan"], description="Deprecated alias for get_options_flow_scan.")
 async def get_dc134_options_scan(ticker: str, window_label: str) -> str:
     return _deprecated_alias_response("get_dc134_options_scan", "analyze_options_flow_window", await analyze_options_flow_window(ticker, window_label))
 
