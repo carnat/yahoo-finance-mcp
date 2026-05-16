@@ -69,6 +69,14 @@ jobs:
 
       - name: Verify geographic revenue schema
         run: python scripts/test_geographic_revenue_schema.py
+        env:
+          MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
+
+      - name: Verify Phase 3 extractor tools
+        run: python scripts/test_deployed_phase3_extractors.py
+        env:
+          MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
+          ALLOW_NETWORK_SKIP: "0"
 
       - name: Run end-to-end tool tests
         run: python scripts/test_tools.py --url https://yahoo-finance-mcp.artinatw.workers.dev/mcp
