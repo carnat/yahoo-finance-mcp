@@ -2877,17 +2877,20 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
         return f"Error: getting analyst consensus for {ticker}: {e}"
 
     output: dict = {"ticker": ticker}
+    warnings: list[dict[str, str]] = []
 
     # Price targets
+    target_mean = None
     try:
         targets = company.analyst_price_targets
         if targets:
             current_target = targets.get("current")
+            target_mean = targets.get("mean")
             output["priceTargets"] = {
                 "current": current_target,
                 "low": targets.get("low"),
                 "high": targets.get("high"),
-                "mean": targets.get("mean"),
+                "mean": target_mean,
                 "median": targets.get("median"),
                 "pctUpsideFromLastPrice": (
                     round((current_target - last_price) / last_price * 100, 2)
@@ -2897,6 +2900,49 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
             }
     except Exception:
         output["priceTargets"] = None
+
+    # Recent upgrades (last 30d) to flag potential target lag
+    recent_upgrade_count_30d = None
+    try:
+        upgrades = company.upgrades_downgrades
+        if upgrades is not None and not upgrades.empty:
+            u = upgrades.reset_index()
+            cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=30)
+            date_col = next(
+                (
+                    c
+                    for c in ("GradeDate", "Date", "date", "epochGradeDate", "index")
+                    if c in u.columns
+                ),
+                None,
+            )
+
+            def _to_dt(v):
+                if v is None:
+                    return None
+                if isinstance(v, (int, float)):
+                    ts = float(v)
+                    if ts > 1_000_000_000_000:
+                        ts /= 1000.0
+                    return datetime.datetime.fromtimestamp(ts, tz=datetime.UTC)
+                dt = pd.to_datetime(v, utc=True, errors="coerce")
+                if pd.isna(dt):
+                    return None
+                return dt.to_pydatetime()
+
+            count = 0
+            for _, row in u.iterrows():
+                dt = _to_dt(row.get(date_col)) if date_col else None
+                if dt is None or dt < cutoff:
+                    continue
+                action = str(row.get("Action") or row.get("action") or "").lower()
+                to_grade = str(row.get("ToGrade") or row.get("toGrade") or "").lower()
+                from_grade = str(row.get("FromGrade") or row.get("fromGrade") or "").lower()
+                if ("up" in action) or ("upgrade" in action) or ("buy" in to_grade and "buy" not in from_grade):
+                    count += 1
+            recent_upgrade_count_30d = count
+    except Exception:
+        recent_upgrade_count_30d = None
 
     # Recommendation summary (period breakdown)
     try:
@@ -2914,6 +2960,24 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
             output["totalAnalysts"] = sum(counts.values()) if counts else None
     except Exception:
         output["recommendationSummary"] = None
+
+    target_lag_signal = "UNKNOWN"
+    if target_mean is not None and last_price is not None:
+        if target_mean >= last_price:
+            target_lag_signal = "CURRENT"
+        elif recent_upgrade_count_30d is not None and recent_upgrade_count_30d > 0:
+            target_lag_signal = "LIKELY_STALE_OR_LAGGING"
+            warnings.append({
+                "code": "CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES",
+                "message": "Consensus price target may lag recent market or analyst sentiment changes.",
+            })
+        else:
+            target_lag_signal = "POSSIBLY_STALE"
+
+    output["currentPrice"] = last_price
+    output["recentUpgradeCount30d"] = recent_upgrade_count_30d
+    output["targetLagSignal"] = target_lag_signal
+    output["warnings"] = warnings
 
     result = json.dumps(output)
     _cache_set(cache_key, result)
@@ -4384,8 +4448,47 @@ async def get_credit_health(ticker: str | list[str]) -> str:
     else:
         debt_tier = None
 
+    missing_components = []
+    if total_debt is None:
+        missing_components.append("totalDebtUsd")
+    if cash is None:
+        missing_components.append("cashUsd")
+    if ebitda_annual is None:
+        missing_components.append("ebitdaUsd")
+    if ebit_annual is None:
+        missing_components.append("ebitUsd")
+    if interest_annual is None:
+        missing_components.append("interestExpenseUsd")
+
+    unavailable_metrics = []
+    if net_debt_to_ebitda is None:
+        unavailable_metrics.append("netDebtToEbitda")
+    if interest_coverage is None:
+        unavailable_metrics.append("interestCoverage")
+    if credit_stress is None:
+        unavailable_metrics.append("creditStressFlag")
+
+    computed_metrics = []
+    if net_debt is not None:
+        computed_metrics.append("netDebtUsd")
+    if net_debt_to_ebitda is not None:
+        computed_metrics.append("netDebtToEbitda")
+    if interest_coverage is not None:
+        computed_metrics.append("interestCoverage")
+    if credit_stress is not None:
+        computed_metrics.append("creditStressFlag")
+    if debt_tier is not None:
+        computed_metrics.append("debtTier")
+
+    warnings = []
+    if interest_annual is None:
+        warnings.append({
+            "code": "INTEREST_EXPENSE_UNAVAILABLE",
+            "message": "Interest coverage cannot be computed from available provider data.",
+        })
+
     # Check for partial data
-    if any(v is None for v in [total_debt, cash, ebitda, ebit, interest_expense]):
+    if missing_components:
         data_quality = "PARTIAL"
 
     quarter_date = str(bs_col.date()) if hasattr(bs_col, "date") else str(bs_col)
@@ -4404,6 +4507,10 @@ async def get_credit_health(ticker: str | list[str]) -> str:
         "creditStressFlag": credit_stress,
         "debtTier": debt_tier,
         "dataQuality": data_quality,
+        "missingComponents": missing_components,
+        "unavailableMetrics": unavailable_metrics,
+        "computedMetrics": computed_metrics,
+        "warnings": warnings,
         "dataDate": get_last_trading_date(),
     })
 
@@ -4562,6 +4669,7 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
         pass
 
     output: dict = {"ticker": ticker}
+    warnings: list[dict[str, str]] = []
     data_quality = "OK"
 
     # From epsTrend for current quarter (0q)
@@ -4653,6 +4761,58 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
     beat_rate = round(beat_count / total_quarters, 2) if total_quarters > 0 else None
     avg_surprise = round(sum(surprises) / len(surprises), 2) if surprises else None
 
+    if beat_rate is None:
+        historical_surprise_signal = "UNKNOWN"
+    elif beat_rate >= 0.75:
+        historical_surprise_signal = "STRONG"
+    elif beat_rate >= 0.55:
+        historical_surprise_signal = "POSITIVE"
+    elif beat_rate >= 0.40:
+        historical_surprise_signal = "NEUTRAL"
+    else:
+        historical_surprise_signal = "NEGATIVE"
+
+    revs = [r for r in (revision_30d, revision_90d) if r is not None]
+    if not revs:
+        forward_revision_signal = "UNKNOWN"
+    elif any(r <= -3 for r in revs):
+        forward_revision_signal = "NEGATIVE"
+    elif any(r >= 3 for r in revs):
+        forward_revision_signal = "POSITIVE"
+    else:
+        forward_revision_signal = "NEUTRAL"
+
+    mixed_negative_revision = beat_rate is not None and beat_rate >= 0.75 and any(
+        r is not None and r < 0 for r in (revision_30d, revision_90d)
+    )
+    if mixed_negative_revision:
+        warnings.append({
+            "code": "MIXED_EARNINGS_SIGNAL",
+            "message": "Historical beat streak is positive, but forward estimates were revised down.",
+        })
+
+    if historical_surprise_signal == "UNKNOWN" and forward_revision_signal == "UNKNOWN":
+        composite_momentum_signal = "UNKNOWN"
+    elif forward_revision_signal == "NEGATIVE" and historical_surprise_signal in {"STRONG", "POSITIVE"}:
+        composite_momentum_signal = "MIXED_NEGATIVE_REVISION"
+    elif forward_revision_signal == "POSITIVE" and historical_surprise_signal == "NEGATIVE":
+        composite_momentum_signal = "MIXED_POSITIVE_REVISION"
+    elif forward_revision_signal == "POSITIVE" and historical_surprise_signal in {"STRONG", "POSITIVE"}:
+        composite_momentum_signal = "STRONG_POSITIVE"
+    elif forward_revision_signal == "NEGATIVE":
+        composite_momentum_signal = "NEGATIVE"
+    else:
+        composite_momentum_signal = "NEUTRAL"
+
+    interpretation_note_map = {
+        "STRONG_POSITIVE": "Historical earnings surprises and forward estimate revisions are both supportive.",
+        "MIXED_NEGATIVE_REVISION": "Historical beat performance is strong, but forward revisions are negative.",
+        "MIXED_POSITIVE_REVISION": "Historical surprise trend is weak, but forward revisions are improving.",
+        "NEGATIVE": "Both historical surprise trend and forward revisions indicate weakness.",
+        "NEUTRAL": "Signals are mixed or modest without a strong directional bias.",
+        "UNKNOWN": "Insufficient data to classify both historical and forward signals.",
+    }
+
     if any(v is None for v in [revision_30d, beat_rate]):
         data_quality = "PARTIAL"
 
@@ -4665,9 +4825,15 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
         "momentumFlag": momentum_flag,
         "beatRate": beat_rate,
         "beatCount": beat_count,
+        "beatSample": total_quarters,
         "totalQuarters": total_quarters,
         "avgSurprisePct": avg_surprise,
         "currentBeatStreak": beat_streak,
+        "historicalSurpriseSignal": historical_surprise_signal,
+        "forwardRevisionSignal": forward_revision_signal,
+        "compositeMomentumSignal": composite_momentum_signal,
+        "interpretationNote": interpretation_note_map[composite_momentum_signal],
+        "warnings": warnings,
         "dataQuality": data_quality,
         "dataDate": get_last_trading_date(),
     })

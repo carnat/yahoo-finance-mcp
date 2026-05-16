@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import os
 import re
@@ -274,6 +275,90 @@ class TestPublicWording(unittest.TestCase):
                 self.assertNotRegex(t_win, re.escape(term))
 
 
+class TestSemanticQualityFixes(unittest.TestCase):
+    def test_get_earnings_momentum_mixed_signal_metadata(self):
+        class _FastInfo:
+            currency = "USD"
+
+        class _Ticker:
+            def __init__(self):
+                self.fast_info = _FastInfo()
+                self.eps_trend = srv.pd.DataFrame(
+                    [{"current": 1.0, "7daysAgo": 1.0, "30daysAgo": 1.2, "90daysAgo": 1.4}],
+                    index=["0q"],
+                )
+                self.earnings_history = srv.pd.DataFrame(
+                    [
+                        {"epsActual": 1.1, "epsEstimate": 1.0, "surprisePercent": 0.10},
+                        {"epsActual": 1.0, "epsEstimate": 0.9, "surprisePercent": 0.11},
+                        {"epsActual": 0.9, "epsEstimate": 0.8, "surprisePercent": 0.12},
+                        {"epsActual": 0.8, "epsEstimate": 0.7, "surprisePercent": 0.13},
+                    ]
+                )
+
+        with patch("server.yf.Ticker", return_value=_Ticker()):
+            data = _parse(_run(srv.get_earnings_momentum("VRT")))
+        self.assertEqual(data.get("historicalSurpriseSignal"), "STRONG")
+        self.assertEqual(data.get("forwardRevisionSignal"), "NEGATIVE")
+        self.assertEqual(data.get("compositeMomentumSignal"), "MIXED_NEGATIVE_REVISION")
+        self.assertEqual(data.get("beatSample"), 4)
+        warning_codes = [w.get("code") for w in data.get("warnings", []) if isinstance(w, dict)]
+        self.assertIn("MIXED_EARNINGS_SIGNAL", warning_codes)
+
+    def test_get_credit_health_partial_data_metadata(self):
+        class _Ticker:
+            def __init__(self):
+                col = srv.pd.Timestamp("2026-03-31")
+                self.quarterly_balance_sheet = srv.pd.DataFrame(
+                    {col: {"Total Debt": 510.0, "Cash And Cash Equivalents": 10.0}}
+                )
+                self.quarterly_income_stmt = srv.pd.DataFrame(
+                    {col: {"EBITDA": 250.0, "EBIT": 200.0}}
+                )
+
+        with patch("server.yf.Ticker", return_value=_Ticker()):
+            data = _parse(_run(srv.get_credit_health("VRT")))
+        self.assertEqual(data.get("dataQuality"), "PARTIAL")
+        self.assertIn("interestExpenseUsd", data.get("missingComponents", []))
+        self.assertIn("interestCoverage", data.get("unavailableMetrics", []))
+        self.assertIn("netDebtToEbitda", data.get("computedMetrics", []))
+        warning_codes = [w.get("code") for w in data.get("warnings", []) if isinstance(w, dict)]
+        self.assertIn("INTEREST_EXPENSE_UNAVAILABLE", warning_codes)
+
+    def test_get_analyst_consensus_target_lag_metadata(self):
+        class _FastInfo:
+            last_price = 370.94
+
+        class _Ticker:
+            def __init__(self):
+                now = datetime.datetime.now(datetime.UTC)
+                self.fast_info = _FastInfo()
+                self.analyst_price_targets = {
+                    "current": 355.52,
+                    "low": 320.0,
+                    "high": 410.0,
+                    "mean": 355.52,
+                    "median": 360.0,
+                }
+                self.recommendations_summary = srv.pd.DataFrame(
+                    [{"strongBuy": 4, "buy": 7, "hold": 2, "sell": 0, "strongSell": 0}],
+                    index=["0m"],
+                )
+                self.upgrades_downgrades = srv.pd.DataFrame(
+                    [{"Action": "up", "ToGrade": "Buy", "FromGrade": "Hold"}],
+                    index=[now - datetime.timedelta(days=3)],
+                )
+
+        with patch("server.yf.Ticker", return_value=_Ticker()):
+            data = _parse(_run(srv.get_analyst_consensus("VRT")))
+        self.assertEqual(data.get("targetLagSignal"), "LIKELY_STALE_OR_LAGGING")
+        self.assertEqual(data.get("recentUpgradeCount30d"), 1)
+        self.assertEqual(data.get("priceTargets", {}).get("mean"), 355.52)
+        self.assertAlmostEqual(data.get("priceTargets", {}).get("pctUpsideFromLastPrice"), -4.16, places=2)
+        warning_codes = [w.get("code") for w in data.get("warnings", []) if isinstance(w, dict)]
+        self.assertIn("CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES", warning_codes)
+
+
 if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
@@ -285,6 +370,7 @@ if __name__ == "__main__":
         TestExtractManagementCommentary,
         TestCompareActualVsEstimate,
         TestPublicWording,
+        TestSemanticQualityFixes,
     ]
     for cls in classes:
         suite.addTests(loader.loadTestsFromTestCase(cls))
