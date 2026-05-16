@@ -6738,12 +6738,12 @@ def _build_filing_index_from_html(html: str) -> dict:
 
         # Unit scale: default to "unknown"; detect explicitly from context.
         pre_context = sanitized[max(0, table_start - 2000):table_start].lower()
-        table_context = (table_html + pre_context).lower()
-        if "billion" in table_context or "in billions" in table_context:
+        table_context = table_html.lower() + pre_context
+        if "billion" in table_context:
             unit_scale = "billions"
-        elif "million" in table_context or "in millions" in table_context:
+        elif "million" in table_context:
             unit_scale = "millions"
-        elif "thousand" in table_context or "in thousands" in table_context:
+        elif "thousand" in table_context:
             unit_scale = "thousands"
         else:
             unit_scale = "unknown"

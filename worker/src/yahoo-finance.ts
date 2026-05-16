@@ -5432,7 +5432,7 @@ function _sanitizeFilingHtml(html: string): string {
   let prev: string;
   do {
     prev = result;
-    result = result.replace(SCRIPT_RE, "").replace(STYLE_RE, "");
+    result = result.replace(SCRIPT_RE, "<!--removed-->").replace(STYLE_RE, "<!--removed-->");
   } while (result !== prev);
   return result.replace(/\s+on\w+=(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, " ");
 }
@@ -5502,12 +5502,13 @@ function _buildFilingIndexFromHtml(
     }
 
     // Detect unit scale: default to "unknown"; detect explicitly from context.
+    // preContext is already lowercased; lowercase tableHtml separately to avoid redundant call.
     const preContext = sanitized.slice(Math.max(0, tableStart - 2000), tableStart).toLowerCase();
-    const tableContext = (tableHtml + preContext).toLowerCase();
+    const tableContext = tableHtml.toLowerCase() + preContext;
     let unitScale: string;
-    if (/billion|in billions/.test(tableContext)) unitScale = "billions";
-    else if (/million|in millions/.test(tableContext)) unitScale = "millions";
-    else if (/thousand|in thousands/.test(tableContext)) unitScale = "thousands";
+    if (/billion/.test(tableContext)) unitScale = "billions";
+    else if (/million/.test(tableContext)) unitScale = "millions";
+    else if (/thousand/.test(tableContext)) unitScale = "thousands";
     else unitScale = "unknown";
 
     // Confidence: also lower when unitScale is unknown
