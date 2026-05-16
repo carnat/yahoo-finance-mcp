@@ -6668,8 +6668,8 @@ def _build_filing_index_from_html(html: str) -> dict:
     _style_re = _re.compile(r'<style\b[^>]*>[\s\S]*?</\s*style[^>]*>', _re.IGNORECASE)
     sanitized = html
     while True:
-        next_s = _script_re.sub('', sanitized)
-        next_s = _style_re.sub('', next_s)
+        next_s = _script_re.sub('<!--removed-->', sanitized)
+        next_s = _style_re.sub('<!--removed-->', next_s)
         if next_s == sanitized:
             break
         sanitized = next_s

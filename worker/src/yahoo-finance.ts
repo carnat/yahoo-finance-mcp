@@ -5502,7 +5502,8 @@ function _buildFilingIndexFromHtml(
     }
 
     // Detect unit scale: default to "unknown"; detect explicitly from context.
-    // preContext is already lowercased; lowercase tableHtml separately to avoid redundant call.
+    // Lowercase tableHtml separately since preContext is already lowercased,
+    // then concatenate to build the search context.
     const preContext = sanitized.slice(Math.max(0, tableStart - 2000), tableStart).toLowerCase();
     const tableContext = tableHtml.toLowerCase() + preContext;
     let unitScale: string;
