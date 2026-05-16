@@ -43,6 +43,7 @@ CANONICAL_TOOLS = {
     "extract_china_exposure",
     "extract_risk_factor_mentions",
     "extract_customer_concentration",
+    "query_sec_filing_index",
     "health_check",
 }
 
@@ -325,6 +326,7 @@ def main() -> int:
         ("extract_china_exposure", {"ticker": "AXTI", "filing_type": "10-K", "period": "latest"}),
         ("extract_risk_factor_mentions", {"ticker": "AXTI", "terms": ["China", "tariff"], "filing_type": "10-K", "period": "latest"}),
         ("extract_customer_concentration", {"ticker": "AAOI", "filing_type": "10-K", "period": "latest"}),
+        ("query_sec_filing_index", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest", "query_type": "geographic_revenue_share", "params": {"region": "Greater China"}}),
     ]
     if doc_url:
         calls.extend([
@@ -427,6 +429,14 @@ def main() -> int:
             if "status" not in data or "customers" not in data:
                 raise AssertionError("extract_customer_concentration missing status/customers")
             print(f"  PASS extract_customer_concentration dispatch ({args.get('ticker')})")
+        if name == "query_sec_filing_index":
+            data = extract_data(payload)
+            if not isinstance(data, dict):
+                raise AssertionError(f"query_sec_filing_index returned non-object: {data!r}")
+            for field in ("status", "queryType", "answer", "confidence", "evidence"):
+                if field not in data:
+                    raise AssertionError(f"query_sec_filing_index missing field: {field}")
+            print(f"  PASS query_sec_filing_index dispatch ({args.get('ticker')}/{args.get('query_type')})")
 
     # Chained option-chain smoke (AAPL)
     aapl_exp_payload = call_tool("get_option_expiration_dates", {"ticker": "AAPL"}, 900)

@@ -973,6 +973,7 @@ _TOOL_OUTPUT_SCHEMAS.setdefault("extract_revenue_exposure", _SIMPLE_OUTPUT_SCHEM
 _TOOL_OUTPUT_SCHEMAS.setdefault("extract_china_exposure", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("extract_risk_factor_mentions", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("extract_customer_concentration", _SIMPLE_OUTPUT_SCHEMA)
+_TOOL_OUTPUT_SCHEMAS.setdefault("query_sec_filing_index", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("get_tps_inputs", _TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"])
 _TOOL_OUTPUT_SCHEMAS.setdefault("get_eqf_bracket", _TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"])
 _TOOL_OUTPUT_SCHEMAS.setdefault("get_adv_gate", _TOOL_OUTPUT_SCHEMAS["get_volume_gate"])
@@ -7339,6 +7340,297 @@ async def extract_china_exposure(
     if str(detailLevel).lower() == "raw":
         out["rawContext"] = {"filingIndex": idx}
     return json.dumps(out)
+
+
+@yfinance_server.tool(
+    name="query_sec_filing_index",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["query_sec_filing_index"],
+    description="Deterministically route supported SEC filing index query types to extractor tools.",
+)
+async def query_sec_filing_index(
+    ticker: str,
+    filing_type: str = "10-K",
+    period: str = "latest",
+    accession_number: str | None = None,
+    query_type: str = "",
+    params: dict | None = None,
+    return_evidence: bool = True,
+    detailLevel: str = "compact",
+) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("query_sec_filing_index", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    if accession_number:
+        acc_err = _validate_accession(accession_number)
+        if acc_err:
+            return _mcp_failure("query_sec_filing_index", ErrorCode.INPUT_VALIDATION_ERROR, acc_err)
+
+    allowed_detail = {"compact", "evidence", "raw"}
+    detail = str(detailLevel or "compact").lower()
+    if detail not in allowed_detail:
+        return json.dumps({
+            "status": "INPUT_VALIDATION_ERROR",
+            "queryType": query_type,
+            "ticker": ticker,
+            "filingType": filing_type,
+            "period": period,
+            "answer": None,
+            "confidence": "NOT_DISCLOSED",
+            "evidence": [],
+            "warnings": [{"code": "INPUT_VALIDATION_ERROR", "message": "detailLevel must be one of: compact, evidence, raw"}],
+        })
+
+    query = str(query_type or "").strip()
+    routed_params = params if isinstance(params, dict) else {}
+
+    def _shape_evidence(ev: dict) -> dict:
+        shaped = {
+            "filingDate": ev.get("filingDate"),
+            "acceptedAt": ev.get("acceptedAt"),
+            "accessionNumber": ev.get("accessionNumber"),
+            "documentUrl": ev.get("documentUrl"),
+            "sectionHeading": ev.get("sectionHeading"),
+            "tableTitle": ev.get("tableTitle"),
+            "sourceTableId": ev.get("sourceTableId"),
+        }
+        if detail in {"evidence", "raw"}:
+            shaped["sourceRows"] = ev.get("sourceRows") if isinstance(ev.get("sourceRows"), list) else []
+            shaped["sourceColumns"] = ev.get("sourceColumns") if isinstance(ev.get("sourceColumns"), list) else []
+            if ev.get("excerpt") is not None:
+                shaped["excerpt"] = ev.get("excerpt")
+        return shaped
+
+    def _result(status: str, answer: dict | None, confidence: str, evidence_items: list[dict] | None = None, warnings: list[dict] | None = None) -> str:
+        return json.dumps({
+            "status": status,
+            "queryType": query,
+            "ticker": ticker,
+            "filingType": filing_type,
+            "period": period,
+            "answer": answer,
+            "confidence": confidence,
+            "evidence": evidence_items if return_evidence else [],
+            "warnings": warnings or [],
+        })
+
+    def _missing_param(name: str) -> str:
+        return _result(
+            "INPUT_VALIDATION_ERROR",
+            None,
+            "NOT_DISCLOSED",
+            [],
+            [{"code": "INPUT_VALIDATION_ERROR", "message": f"Missing required params.{name} for query_type={query}"}],
+        )
+
+    supported = {
+        "geographic_revenue_share",
+        "revenue_exposure",
+        "china_exposure",
+        "risk_factor_mentions",
+        "customer_concentration",
+        "total_revenue",
+        "segment_revenue",
+    }
+    if query not in supported:
+        return _result(
+            "UNSUPPORTED_BY_INDEX",
+            None,
+            "NOT_DISCLOSED",
+            [],
+            [{"code": "UNSUPPORTED_QUERY_TYPE", "message": "Use one of the supported query_type values."}],
+        )
+
+    warnings: list[dict] = []
+
+    if query == "geographic_revenue_share":
+        region = str(routed_params.get("region") or "").strip()
+        if not region:
+            return _missing_param("region")
+        geo = _safe_json_loads(await extract_geographic_revenue(
+            ticker=ticker,
+            region=region,
+            filing_type=filing_type,
+            period=period,
+            accession_number=accession_number,
+            detailLevel=detail,
+        ))
+        evidence_obj = geo.get("evidence") if isinstance(geo.get("evidence"), dict) else {}
+        evidence = [_shape_evidence(evidence_obj)] if evidence_obj else []
+        status = "ANSWERED" if geo.get("value") is not None else _as_status(geo)
+        if status == "ANSWERED" and not evidence:
+            status = "NOT_FOUND"
+            warnings.append({"code": "EVIDENCE_REQUIRED", "message": "ANSWERED responses require evidence."})
+        answer = {
+            "region": region,
+            "value": geo.get("value"),
+            "denominator": geo.get("denominator"),
+            "valueRatio": geo.get("valueRatio"),
+            "valuePct": geo.get("valuePct"),
+            "unit": geo.get("unit", "USD"),
+        }
+        confidence = str(geo.get("confidence") or ("HIGH" if status == "ANSWERED" else "NOT_DISCLOSED"))
+        if status == "NOT_FOUND":
+            confidence = "NOT_DISCLOSED" if str(geo.get("confidence") or "").upper() == "NOT_DISCLOSED" else "LOW"
+        return _result(status, answer, confidence, evidence, warnings)
+
+    if query == "revenue_exposure":
+        exposure_query = str(routed_params.get("exposure_query") or "").strip()
+        if not exposure_query:
+            return _missing_param("exposure_query")
+        rex = _safe_json_loads(await extract_revenue_exposure(
+            ticker=ticker,
+            exposure_query=exposure_query,
+            filing_type=filing_type,
+            period=period,
+            detailLevel=detail,
+        ))
+        matches = rex.get("matches") if isinstance(rex.get("matches"), list) else []
+        first = matches[0] if matches and isinstance(matches[0], dict) else {}
+        evidence_obj = first.get("evidence") if isinstance(first.get("evidence"), dict) else {}
+        evidence = [_shape_evidence(evidence_obj)] if evidence_obj else []
+        status = "ANSWERED" if bool(matches) and str(rex.get("status")) == "FOUND_REVENUE_EXPOSURE" else str(rex.get("status") or "NOT_FOUND")
+        if status == "ANSWERED" and not evidence:
+            status = "NOT_FOUND"
+            warnings.append({"code": "EVIDENCE_REQUIRED", "message": "ANSWERED responses require evidence."})
+        answer = {
+            "exposureQuery": exposure_query,
+            "value": first.get("value"),
+            "denominator": first.get("denominator"),
+            "valueRatio": first.get("valueRatio"),
+            "valuePct": first.get("valuePct"),
+            "period": first.get("period"),
+        }
+        confidence = str(first.get("confidence") or ("HIGH" if status == "ANSWERED" else "NOT_DISCLOSED"))
+        return _result(status, answer, confidence, evidence, warnings)
+
+    if query == "china_exposure":
+        china = _safe_json_loads(await extract_china_exposure(
+            ticker=ticker,
+            filing_type=filing_type,
+            period=period,
+            accession_number=accession_number,
+            detailLevel=detail,
+        ))
+        overall = str(china.get("overallStatus") or "NOT_FOUND")
+        answer = {
+            "revenueExposure": china.get("revenueExposure"),
+            "manufacturingExposure": china.get("manufacturingExposure"),
+            "entityExposure": china.get("entityExposure"),
+            "bankExposure": china.get("bankExposure"),
+            "riskFactorExposure": china.get("riskFactorExposure"),
+            "overallStatus": overall,
+        }
+        evidence: list[dict] = []
+        for key in ("revenueExposure", "manufacturingExposure", "entityExposure", "bankExposure", "riskFactorExposure"):
+            block = china.get(key)
+            if not isinstance(block, dict):
+                continue
+            ev = block.get("evidence")
+            if isinstance(ev, dict):
+                evidence.append(_shape_evidence(ev))
+            elif isinstance(ev, list):
+                for item in ev:
+                    if isinstance(item, dict):
+                        evidence.append(_shape_evidence(item))
+        status = "ANSWERED" if overall in {"FOUND_REVENUE_EXPOSURE", "FOUND_NON_REVENUE_EXPOSURE"} else overall
+        if status == "ANSWERED" and not evidence:
+            status = "NOT_FOUND"
+            warnings.append({"code": "EVIDENCE_REQUIRED", "message": "ANSWERED responses require evidence."})
+        confidence = "HIGH" if status == "ANSWERED" else ("NOT_DISCLOSED" if overall == "NOT_DISCLOSED" else "LOW")
+        return _result(status, answer, confidence, evidence, warnings)
+
+    if query == "risk_factor_mentions":
+        terms = routed_params.get("terms")
+        terms_list = [str(t) for t in terms] if isinstance(terms, list) else []
+        if not terms_list:
+            return _missing_param("terms")
+        risk = _safe_json_loads(await extract_risk_factor_mentions(
+            ticker=ticker,
+            terms=terms_list,
+            filing_type=filing_type,
+            period=period,
+            detailLevel=detail,
+        ))
+        matches = [m for m in (risk.get("matches") if isinstance(risk.get("matches"), list) else []) if isinstance(m, dict)]
+        evidence = [_shape_evidence(m.get("evidence")) for m in matches if isinstance(m.get("evidence"), dict)]
+        status = "ANSWERED" if matches else str(risk.get("status") or "NOT_FOUND")
+        if status == "ANSWERED" and not evidence:
+            status = "NOT_FOUND"
+            warnings.append({"code": "EVIDENCE_REQUIRED", "message": "ANSWERED responses require evidence."})
+        return _result(
+            status,
+            {"terms": terms_list, "matches": matches},
+            "MEDIUM" if status == "ANSWERED" else "LOW",
+            evidence,
+            warnings,
+        )
+
+    if query == "customer_concentration":
+        customer_label = str(routed_params.get("customer_label") or "").strip()
+        cust = _safe_json_loads(await extract_customer_concentration(
+            ticker=ticker,
+            filing_type=filing_type,
+            period=period,
+            detailLevel=detail,
+        ))
+        customers = [c for c in (cust.get("customers") if isinstance(cust.get("customers"), list) else []) if isinstance(c, dict)]
+        if customer_label:
+            customers = [c for c in customers if str(c.get("label") or "").lower() == customer_label.lower()]
+        evidence = [_shape_evidence(c.get("evidence")) for c in customers if isinstance(c.get("evidence"), dict)]
+        status = "ANSWERED" if customers else str(cust.get("status") or "NOT_FOUND")
+        if status == "ANSWERED" and not evidence:
+            status = "NOT_FOUND"
+            warnings.append({"code": "EVIDENCE_REQUIRED", "message": "ANSWERED responses require evidence."})
+        return _result(
+            status,
+            {"customerLabel": customer_label or None, "customers": customers},
+            "HIGH" if status == "ANSWERED" else ("NOT_DISCLOSED" if status == "NOT_DISCLOSED" else "LOW"),
+            evidence,
+            warnings,
+        )
+
+    if query == "total_revenue":
+        total = _safe_json_loads(await extract_total_revenue(
+            ticker=ticker,
+            filing_type=filing_type,
+            period=period,
+        ))
+        evidence_obj = total.get("evidence") if isinstance(total.get("evidence"), dict) else {}
+        evidence = [_shape_evidence(evidence_obj)] if evidence_obj else []
+        status = "ANSWERED" if total.get("value") is not None else str(total.get("status") or "NOT_FOUND")
+        if status == "ANSWERED" and not evidence:
+            status = "NOT_FOUND"
+            warnings.append({"code": "EVIDENCE_REQUIRED", "message": "ANSWERED responses require evidence."})
+        return _result(
+            status,
+            {"value": total.get("value"), "period": total.get("period"), "unit": "USD"},
+            str(total.get("confidence") or ("HIGH" if status == "ANSWERED" else "NOT_DISCLOSED")),
+            evidence,
+            warnings,
+        )
+
+    segment_name = str(routed_params.get("segment") or "").strip()
+    seg = _safe_json_loads(await extract_segment_revenue(
+        ticker=ticker,
+        filing_type=filing_type,
+        period=period,
+        detailLevel=detail,
+    ))
+    segments = [s for s in (seg.get("segments") if isinstance(seg.get("segments"), list) else []) if isinstance(s, dict)]
+    if segment_name:
+        segments = [s for s in segments if str(s.get("label") or "").lower() == segment_name.lower()]
+    evidence = [_shape_evidence(s.get("evidence")) for s in segments if isinstance(s.get("evidence"), dict)]
+    status = "ANSWERED" if segments else ("NOT_FOUND" if segment_name else str(seg.get("status") or "NOT_FOUND"))
+    if status == "ANSWERED" and not evidence:
+        status = "NOT_FOUND"
+        warnings.append({"code": "EVIDENCE_REQUIRED", "message": "ANSWERED responses require evidence."})
+    return _result(
+        status,
+        {"segment": segment_name or None, "segments": segments},
+        "HIGH" if status == "ANSWERED" else ("NOT_DISCLOSED" if status == "NOT_DISCLOSED" else "LOW"),
+        evidence,
+        warnings,
+    )
 
 
 @yfinance_server.tool(name="get_tps_inputs", output_schema=_TOOL_OUTPUT_SCHEMAS["get_tps_inputs"], description="Deprecated alias for analyze_position_signals.")
