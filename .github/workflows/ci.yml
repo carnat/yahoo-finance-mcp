@@ -84,6 +84,9 @@ jobs:
       - name: Phase 4 tests
         run: python scripts/test_phase4.py
 
+      - name: Phase 5 tests
+        run: python scripts/test_phase5.py
+
       - name: Options data quality tests
         run: python scripts/test_options_quality.py
 

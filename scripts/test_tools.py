@@ -377,6 +377,56 @@ TEST_CASES: list[TestCase] = [
         {"ticker": "AAPL", "days_back": 30},
         [],
     ),
+    # ── Phase 5 earnings/report checking ──────────────────────────────────────
+    (
+        "get_latest_earnings_release",
+        {"ticker": "AAPL", "period": "latest"},
+        [("ticker", "AAPL"), ("sources", NOT_NULL), ("confidence", NOT_NULL)],
+    ),
+    (
+        "index_earnings_release",
+        {"ticker": "AAPL", "period": "latest"},
+        [
+            ("ticker", "AAPL"),
+            ("index.sections", NOT_NULL),
+            ("index.tables", NOT_NULL),
+            ("index.keywordMap", NOT_NULL),
+        ],
+    ),
+    (
+        "extract_earnings_metrics",
+        {"ticker": "AAPL", "period": "latest"},
+        [
+            ("ticker", "AAPL"),
+            ("metrics.revenue", NOT_NULL),
+            ("metrics.epsDiluted", NOT_NULL),
+            ("metrics.grossMargin", NOT_NULL),
+        ],
+    ),
+    (
+        "extract_guidance",
+        {"ticker": "AAPL", "period": "latest"},
+        [
+            ("ticker", "AAPL"),
+            ("guidance.revenue.status", NOT_NULL),
+            ("guidance.grossMargin.status", NOT_NULL),
+            ("guidance.eps.status", NOT_NULL),
+        ],
+    ),
+    (
+        "extract_management_commentary",
+        {"ticker": "AAPL", "period": "latest", "topics": ["demand", "China", "AI"]},
+        [("ticker", "AAPL"), ("topics", NOT_NULL)],
+    ),
+    (
+        "compare_earnings_actual_vs_estimate",
+        {"ticker": "AAPL", "period": "latest"},
+        [
+            ("ticker", "AAPL"),
+            ("estimate.revenue.source", "yahoo"),
+            ("estimate.eps.source", "yahoo"),
+        ],
+    ),
     # ── batch variants: same tools with an array of tickers ───────────────
     # Intentional re-tests of single-ticker tools to verify batch dispatch.
     (

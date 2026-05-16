@@ -6280,3 +6280,480 @@ export async function querySecFilingIndex(
   const confidence = status === "ANSWERED" ? "HIGH" : (status === "NOT_DISCLOSED" ? "NOT_DISCLOSED" : "LOW");
   return result(status, { segment: segmentName || null, segments }, confidence, evidence, warnings);
 }
+
+function nowIsoUtc(): string {
+  return new Date().toISOString();
+}
+
+function toIsoUtc(ts: unknown): string | null {
+  if (typeof ts !== "string" || !ts.trim()) return null;
+  const s = ts.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return `${s}T00:00:00Z`;
+  const d = new Date(s);
+  return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+}
+
+function deriveFiscalPeriod(dateStr: unknown): string | null {
+  if (typeof dateStr !== "string" || !dateStr.trim()) return null;
+  const d = new Date(dateStr);
+  if (!Number.isFinite(d.getTime())) return null;
+  const q = Math.floor(d.getUTCMonth() / 3) + 1;
+  return `FY${d.getUTCFullYear()} Q${q}`;
+}
+
+function isPaywalledUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return new Set([
+      "seekingalpha.com",
+      "www.seekingalpha.com",
+      "wsj.com",
+      "www.wsj.com",
+      "bloomberg.com",
+      "www.bloomberg.com",
+    ]).has(host);
+  } catch {
+    return false;
+  }
+}
+
+function classifyEarningsSourceUrl(url: string): { sourceType: "sec_8k" | "company_ir" | null; error: string | null } {
+  if (!url || !url.trim()) return { sourceType: null, error: "source_url must be a non-empty string" };
+  let u: URL;
+  try {
+    u = new URL(url.trim());
+  } catch {
+    return { sourceType: null, error: "source_url must be a valid URL" };
+  }
+  if (u.protocol !== "https:") return { sourceType: null, error: "source_url must use https" };
+  if (isPaywalledUrl(u.toString())) return { sourceType: null, error: "source_url appears paywalled and is not allowed" };
+  if (u.toString().startsWith("https://www.sec.gov/Archives/")) return { sourceType: "sec_8k", error: null };
+  return { sourceType: "company_ir", error: null };
+}
+
+async function fetchPublicHtml(url: string, maxBytes = 3_000_000): Promise<string | null> {
+  try {
+    const resp = await fetch(url, { headers: { "User-Agent": UA } });
+    if (!resp.ok) return null;
+    const reader = resp.body?.getReader();
+    if (!reader) return await resp.text();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      chunks.push(value);
+      total += value.byteLength;
+      if (total >= maxBytes) { await reader.cancel(); break; }
+    }
+    const merged = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) { merged.set(c, off); off += c.byteLength; }
+    return new TextDecoder().decode(merged);
+  } catch {
+    return null;
+  }
+}
+
+function scaleNumberFromText(raw: unknown): number | null {
+  if (typeof raw !== "string" && typeof raw !== "number") return null;
+  const s = String(raw).trim().replace(/,/g, "");
+  const m = s.match(/[-+]?\d+(?:\.\d+)?/);
+  if (!m) return null;
+  let n = Number(m[0]);
+  if (!Number.isFinite(n)) return null;
+  const low = s.toLowerCase();
+  if (low.includes("billion") || /\bbn\b/.test(low) || /b$/.test(low)) n *= 1_000_000_000;
+  else if (low.includes("million") || /m$/.test(low)) n *= 1_000_000;
+  else if (low.includes("thousand") || /k$/.test(low)) n *= 1_000;
+  return n;
+}
+
+function extractMetricNumber(
+  text: string,
+  patterns: RegExp[],
+): { value: number | null; rawValue: string | null; excerpt: string | null } {
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (!m) continue;
+    const rawValue = m[1] ?? null;
+    const value = scaleNumberFromText(rawValue);
+    if (value != null) {
+      return { value, rawValue, excerpt: compactExcerpt(m[0] ?? "", 220) };
+    }
+  }
+  return { value: null, rawValue: null, excerpt: null };
+}
+
+function sentenceForTopic(text: string, topic: string): string | null {
+  const topicLower = topic.toLowerCase();
+  for (const s of text.split(/(?<=[.!?])\s+/)) {
+    if (s.toLowerCase().includes(topicLower)) return compactExcerpt(s, 220);
+  }
+  return null;
+}
+
+async function resolveLatestEarningsSecSource(ticker: string): Promise<Record<string, unknown> | null> {
+  const listed = parseObjectJson(await listSecCompanyFilings(ticker, "8-K", 10));
+  const filings = Array.isArray(listed.filings) ? listed.filings : [];
+  for (const row of filings) {
+    if (!row || typeof row !== "object") continue;
+    const filing = row as Record<string, unknown>;
+    const url = String(filing.documentUrl ?? "");
+    if (!url.startsWith("https://www.sec.gov/Archives/")) continue;
+    return {
+      sourceType: "sec_8k",
+      url,
+      filingDate: filing.filingDate ?? null,
+      acceptedAt: filing.acceptedAt ?? null,
+      accessionNumber: filing.accessionNumber ?? null,
+      confidence: "HIGH",
+    };
+  }
+  return null;
+}
+
+async function resolveLatestEarningsRelease(ticker: string): Promise<Record<string, unknown>> {
+  const sec = await resolveLatestEarningsSecSource(ticker);
+  if (sec) {
+    const reportingTs = toIsoUtc((sec.acceptedAt as string | null) ?? null) ?? toIsoUtc((sec.filingDate as string | null) ?? null);
+    return {
+      ticker: ticker.toUpperCase(),
+      eventType: "earnings_release",
+      period: deriveFiscalPeriod(sec.filingDate) ?? "latest",
+      reportedAt: reportingTs,
+      sources: [sec],
+      confidence: "HIGH",
+      warnings: [],
+    };
+  }
+
+  const calendar = parseObjectJson(await getCalendar(ticker));
+  const earningsDates = ((((calendar.calendar as Record<string, unknown> | undefined)?.earnings as Record<string, unknown> | undefined)?.earningsDate as unknown[]) ?? [])
+    .filter((d) => typeof d === "string") as string[];
+  const first = earningsDates[0] ?? null;
+  if (first) {
+    return {
+      ticker: ticker.toUpperCase(),
+      eventType: "earnings_release",
+      period: deriveFiscalPeriod(first) ?? "latest",
+      reportedAt: toIsoUtc(first),
+      sources: [
+        {
+          sourceType: "yahoo_estimate",
+          url: `https://finance.yahoo.com/quote/${ticker.toUpperCase()}/analysis`,
+          publishedAt: toIsoUtc(first),
+          retrievedAt: nowIsoUtc(),
+          confidence: "MEDIUM",
+        },
+      ],
+      confidence: "MEDIUM",
+      warnings: [{ code: "SEC_8K_NOT_FOUND", message: "SEC 8-K earnings release source not found" }],
+    };
+  }
+
+  return {
+    ticker: ticker.toUpperCase(),
+    eventType: "earnings_release",
+    period: "latest",
+    reportedAt: null,
+    sources: [],
+    confidence: "NOT_FOUND",
+    warnings: [],
+  };
+}
+
+export async function getLatestEarningsRelease(ticker: string, _period = "latest"): Promise<string> {
+  return JSON.stringify(await resolveLatestEarningsRelease(ticker));
+}
+
+export async function indexEarningsRelease(ticker: string, period = "latest", sourceUrl: string | null = null): Promise<string> {
+  let sourceType: string | null = null;
+  let sourceMeta: Record<string, unknown> = {};
+  if (sourceUrl) {
+    const classified = classifyEarningsSourceUrl(sourceUrl);
+    if (classified.error) return JSON.stringify({ ok: false, error: { code: "INPUT_VALIDATION_ERROR", message: classified.error } });
+    sourceType = classified.sourceType;
+    sourceMeta = { sourceType, url: sourceUrl };
+  } else {
+    const latest = await resolveLatestEarningsRelease(ticker);
+    const sources = Array.isArray(latest.sources) ? latest.sources : [];
+    const src = (sources[0] && typeof sources[0] === "object") ? sources[0] as Record<string, unknown> : {};
+    sourceType = String(src.sourceType ?? "");
+    sourceUrl = String(src.url ?? "");
+    sourceMeta = src;
+  }
+
+  if (!sourceUrl) {
+    return JSON.stringify({
+      ticker: ticker.toUpperCase(),
+      period,
+      source: { sourceType: sourceType ?? "unknown", url: null },
+      index: { sections: [], tables: [], keywordMap: {} },
+      meta: { indexedAt: nowIsoUtc(), cacheKey: `earnidx:${ticker.toUpperCase()}:none`, cacheTtlHours: 24 },
+      warnings: [{ code: "SOURCE_NOT_FOUND", message: "No public earnings release source found" }],
+    });
+  }
+
+  const cacheId = String(sourceMeta.accessionNumber ?? sourceUrl);
+  const cacheKey = `earnidx:${ticker.toUpperCase()}:${cacheId}`;
+  const cached = filingIndexCache.get(cacheKey);
+  if (cached && Date.now() - cached.storedAt < FILING_INDEX_TTL_MS) return cached.value;
+
+  const html = sourceUrl.startsWith("https://www.sec.gov/Archives/")
+    ? await edgarGetHtml(sourceUrl, 5_000_000)
+    : await fetchPublicHtml(sourceUrl);
+  if (!html) return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: `Failed to fetch source: ${sourceUrl}` } });
+
+  const index = _buildFilingIndexFromHtml(_sanitizeFilingHtml(html));
+  const out = {
+    ticker: ticker.toUpperCase(),
+    period: deriveFiscalPeriod(sourceMeta.filingDate ?? sourceMeta.publishedAt) ?? period,
+    source: {
+      sourceType: sourceType ?? sourceMeta.sourceType ?? "company_ir",
+      url: sourceUrl,
+      publishedAt: sourceMeta.publishedAt ?? null,
+      retrievedAt: nowIsoUtc(),
+      filingDate: sourceMeta.filingDate ?? null,
+      acceptedAt: sourceMeta.acceptedAt ?? null,
+      accessionNumber: sourceMeta.accessionNumber ?? null,
+    },
+    index,
+    meta: { indexedAt: nowIsoUtc(), cacheKey, cacheTtlHours: 24 },
+  };
+  const encoded = JSON.stringify(out);
+  filingIndexCache.set(cacheKey, { value: encoded, storedAt: Date.now() });
+  return encoded;
+}
+
+export async function extractEarningsMetrics(
+  ticker: string,
+  period = "latest",
+  _sourcePreference: string[] = ["sec_8k", "company_ir", "10-q", "yahoo"],
+): Promise<string> {
+  const release = await resolveLatestEarningsRelease(ticker);
+  const defaultMetric = (unit: string): Record<string, unknown> => ({ value: null, unit, confidence: "NOT_DISCLOSED", evidence: null });
+  const metrics: Record<string, unknown> = {
+    revenue: defaultMetric("USD"),
+    epsDiluted: defaultMetric("USD/share"),
+    grossMargin: { valueRatio: null, valuePct: null, rawValue: null, confidence: "NOT_DISCLOSED", evidence: null },
+    operatingIncome: defaultMetric("USD"),
+    freeCashFlow: defaultMetric("USD"),
+    capex: defaultMetric("USD"),
+  };
+  const evidence: Record<string, unknown>[] = [];
+  const warnings: Record<string, unknown>[] = [];
+  const src = Array.isArray(release.sources) && release.sources[0] && typeof release.sources[0] === "object"
+    ? release.sources[0] as Record<string, unknown>
+    : {};
+  const srcUrl = String(src.url ?? "");
+  const srcType = String(src.sourceType ?? "yahoo");
+  const publishedAt = toIsoUtc((src.filingDate as string | null) ?? (src.publishedAt as string | null) ?? null);
+  const retrievedAt = nowIsoUtc();
+
+  const metricEvidence = (excerpt: string | null): Record<string, unknown> | null => excerpt ? {
+    url: srcUrl,
+    sourceType: srcType,
+    publishedAt,
+    retrievedAt,
+    excerpt,
+  } : null;
+
+  if (srcUrl && srcUrl.startsWith("https://www.sec.gov/Archives/")) {
+    const html = await edgarGetHtml(srcUrl, 5_000_000);
+    const text = _stripHtmlTagsIdx(_sanitizeFilingHtml(html ?? ""));
+    const rev = extractMetricNumber(text, [/(?:net sales|revenue(?:s)?)\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
+    const eps = extractMetricNumber(text, [/(?:diluted (?:earnings per share|eps)|eps \(diluted\))\D{0,20}\$?\s*([0-9]+(?:\.[0-9]+)?)/i]);
+    const gm = extractMetricNumber(text, [/gross margin\D{0,15}([0-9]{1,2}(?:\.[0-9]+)?)\s*%/i]);
+    const op = extractMetricNumber(text, [/operating income\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
+    const fcf = extractMetricNumber(text, [/free cash flow\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
+    const capex = extractMetricNumber(text, [/(?:capital expenditures|capex)\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
+
+    if (rev.value != null) metrics.revenue = { value: rev.value, unit: "USD", rawValue: rev.rawValue, confidence: "HIGH", evidence: metricEvidence(rev.excerpt) };
+    if (eps.value != null) metrics.epsDiluted = { value: eps.value, unit: "USD/share", rawValue: eps.rawValue ? `$${eps.rawValue}` : null, confidence: "HIGH", evidence: metricEvidence(eps.excerpt) };
+    if (gm.value != null) {
+      const pct = Number(gm.value);
+      metrics.grossMargin = { valueRatio: Number((pct / 100).toFixed(6)), valuePct: pct, rawValue: gm.rawValue, confidence: "HIGH", evidence: metricEvidence(gm.excerpt) };
+    }
+    if (op.value != null) metrics.operatingIncome = { value: op.value, unit: "USD", rawValue: op.rawValue, confidence: "HIGH", evidence: metricEvidence(op.excerpt) };
+    if (fcf.value != null) metrics.freeCashFlow = { value: fcf.value, unit: "USD", rawValue: fcf.rawValue, confidence: "HIGH", evidence: metricEvidence(fcf.excerpt) };
+    if (capex.value != null) metrics.capex = { value: capex.value, unit: "USD", rawValue: capex.rawValue, confidence: "HIGH", evidence: metricEvidence(capex.excerpt) };
+    for (const key of ["revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex"]) {
+      const v = metrics[key] as Record<string, unknown>;
+      if (v.confidence === "HIGH" && v.evidence && typeof v.evidence === "object") evidence.push(v.evidence as Record<string, unknown>);
+    }
+  } else {
+    warnings.push({ code: "PUBLIC_RELEASE_NOT_FOUND", message: "No SEC 8-K earnings release source available" });
+  }
+
+  let confidence = "NOT_DISCLOSED";
+  for (const key of ["revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex"]) {
+    const conf = String((metrics[key] as Record<string, unknown>).confidence ?? "");
+    if (conf === "HIGH") { confidence = "HIGH"; break; }
+  }
+  if (confidence !== "HIGH" && (release.confidence === "MEDIUM" || release.confidence === "LOW")) confidence = String(release.confidence);
+
+  return JSON.stringify({
+    ticker: ticker.toUpperCase(),
+    eventType: "earnings_release",
+    period: release.period ?? period,
+    reportedAt: release.reportedAt ?? null,
+    source: srcType || "yahoo",
+    metrics,
+    evidence,
+    confidence,
+    warnings,
+  });
+}
+
+export async function extractGuidance(ticker: string, period = "latest"): Promise<string> {
+  const release = await resolveLatestEarningsRelease(ticker);
+  const guidance: Record<string, unknown> = {
+    revenue: { status: "NOT_DISCLOSED", low: null, high: null, midpoint: null, unit: "USD", evidence: [] },
+    grossMargin: { status: "NOT_DISCLOSED", lowPct: null, highPct: null, midpointPct: null, evidence: [] },
+    eps: { status: "NOT_DISCLOSED", low: null, high: null, midpoint: null, unit: "USD/share", evidence: [] },
+  };
+  const src = Array.isArray(release.sources) && release.sources[0] && typeof release.sources[0] === "object"
+    ? release.sources[0] as Record<string, unknown>
+    : {};
+  const srcUrl = String(src.url ?? "");
+  if (!srcUrl.startsWith("https://www.sec.gov/Archives/")) {
+    return JSON.stringify({ ticker: ticker.toUpperCase(), period: release.period ?? period, guidance, confidence: "NOT_DISCLOSED", warnings: [] });
+  }
+  const html = await edgarGetHtml(srcUrl, 5_000_000);
+  const text = _stripHtmlTagsIdx(_sanitizeFilingHtml(html ?? ""));
+  const rev = text.match(/(?:expects|guidance|outlook)[^.\n]{0,120}revenue[^$]{0,25}\$?\s*([0-9.,]+(?:\s*(?:billion|million|thousand|bn|m|k))?)\s*(?:to|-)\s*\$?\s*([0-9.,]+(?:\s*(?:billion|million|thousand|bn|m|k))?)/i);
+  const gm = text.match(/gross margin[^0-9]{0,20}([0-9]{1,2}(?:\.[0-9]+)?)\s*%\s*(?:to|-)\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%/i);
+  const eps = text.match(/(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per share)[^$]{0,25}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|-)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)/i);
+
+  const ev = (excerpt: string): Record<string, unknown> => ({
+    url: srcUrl,
+    sourceType: src.sourceType ?? "sec_8k",
+    publishedAt: toIsoUtc((src.filingDate as string | null) ?? null),
+    retrievedAt: nowIsoUtc(),
+    excerpt: compactExcerpt(excerpt),
+  });
+
+  if (rev) {
+    const low = scaleNumberFromText(rev[1]);
+    const high = scaleNumberFromText(rev[2]);
+    if (low != null && high != null) {
+      guidance.revenue = { status: "FOUND", low, high, midpoint: (low + high) / 2, unit: "USD", evidence: [ev(rev[0])] };
+    }
+  }
+  if (gm) {
+    const lowPct = Number(gm[1]);
+    const highPct = Number(gm[2]);
+    guidance.grossMargin = { status: "FOUND", lowPct, highPct, midpointPct: (lowPct + highPct) / 2, evidence: [ev(gm[0])] };
+  }
+  if (eps) {
+    const low = Number(eps[1]);
+    const high = Number(eps[2]);
+    guidance.eps = { status: "FOUND", low, high, midpoint: (low + high) / 2, unit: "USD/share", evidence: [ev(eps[0])] };
+  }
+  const found = ["revenue", "grossMargin", "eps"].some((k) => ((guidance[k] as Record<string, unknown>).status === "FOUND"));
+  return JSON.stringify({
+    ticker: ticker.toUpperCase(),
+    period: release.period ?? period,
+    guidance,
+    confidence: found ? "HIGH" : "NOT_DISCLOSED",
+    warnings: [],
+  });
+}
+
+export async function extractManagementCommentary(
+  ticker: string,
+  period = "latest",
+  topics: string[] = [],
+): Promise<string> {
+  const release = await resolveLatestEarningsRelease(ticker);
+  const src = Array.isArray(release.sources) && release.sources[0] && typeof release.sources[0] === "object"
+    ? release.sources[0] as Record<string, unknown>
+    : {};
+  const srcUrl = String(src.url ?? "");
+  let text = "";
+  if (srcUrl.startsWith("https://www.sec.gov/Archives/")) {
+    text = _stripHtmlTagsIdx(_sanitizeFilingHtml((await edgarGetHtml(srcUrl, 5_000_000)) ?? ""));
+  } else if (srcUrl) {
+    text = _stripHtmlTagsIdx(_sanitizeFilingHtml((await fetchPublicHtml(srcUrl)) ?? ""));
+  }
+  const outTopics = (topics ?? []).map((topic) => {
+    const excerpt = text ? sentenceForTopic(text, topic) : null;
+    if (!excerpt) {
+      return { topic, status: "NOT_FOUND", summary: "", evidence: [], confidence: "LOW" };
+    }
+    return {
+      topic,
+      status: "FOUND",
+      summary: excerpt,
+      evidence: [{
+        sourceType: src.sourceType ?? "company_ir",
+        url: srcUrl,
+        publishedAt: toIsoUtc((src.filingDate as string | null) ?? (src.publishedAt as string | null) ?? null),
+        retrievedAt: nowIsoUtc(),
+        excerpt: excerpt.slice(0, 240),
+      }],
+      confidence: src.sourceType === "sec_8k" ? "HIGH" : "MEDIUM",
+    };
+  });
+  return JSON.stringify({
+    ticker: ticker.toUpperCase(),
+    period: release.period ?? period,
+    topics: outTopics,
+    warnings: [],
+  });
+}
+
+export async function compareEarningsActualVsEstimate(ticker: string, period = "latest"): Promise<string> {
+  const metrics = parseObjectJson(await extractEarningsMetrics(ticker, period));
+  const ea = parseObjectJson(await getEarningsAnalysis(ticker));
+  const m = (metrics.metrics && typeof metrics.metrics === "object") ? metrics.metrics as Record<string, unknown> : {};
+  const revenueMetric = (m.revenue && typeof m.revenue === "object") ? m.revenue as Record<string, unknown> : {};
+  const epsMetric = (m.epsDiluted && typeof m.epsDiluted === "object") ? m.epsDiluted as Record<string, unknown> : {};
+  const actualRevenue = typeof revenueMetric.value === "number" ? revenueMetric.value : null;
+  const actualEps = typeof epsMetric.value === "number" ? epsMetric.value : null;
+  let estRevenue: number | null = null;
+  const revenueEstimate = Array.isArray(ea.revenueEstimate) ? ea.revenueEstimate as Record<string, unknown>[] : [];
+  for (const row of revenueEstimate) {
+    if (String(row.period ?? "") === "0q" && typeof row.avg === "number") {
+      estRevenue = row.avg as number;
+      break;
+    }
+  }
+  let estEps: number | null = null;
+  const earningsHistory = Array.isArray(ea.earningsHistory) ? ea.earningsHistory as Record<string, unknown>[] : [];
+  if (earningsHistory.length > 0 && typeof earningsHistory[0]?.epsEstimate === "number") estEps = earningsHistory[0].epsEstimate as number;
+
+  const out: Record<string, unknown> = {
+    ticker: ticker.toUpperCase(),
+    period: metrics.period ?? period,
+    actual: {
+      revenue: { value: actualRevenue, unit: "USD" },
+      eps: { value: actualEps, unit: "USD/share" },
+    },
+    estimate: {
+      revenue: { value: estRevenue, unit: "USD", source: "yahoo" },
+      eps: { value: estEps, unit: "USD/share", source: "yahoo" },
+    },
+    surprise: {
+      revenueSurprisePct: null,
+      epsSurprisePct: null,
+    },
+    confidence: "NOT_DISCLOSED",
+    warnings: [] as Record<string, unknown>[],
+  };
+  if (actualRevenue == null || actualEps == null || estRevenue == null || estRevenue === 0 || estEps == null || estEps === 0) {
+    return JSON.stringify(out);
+  }
+  out.surprise = {
+    revenueSurprisePct: Number((((actualRevenue - estRevenue) / Math.abs(estRevenue)) * 100).toFixed(2)),
+    epsSurprisePct: Number((((actualEps - estEps) / Math.abs(estEps)) * 100).toFixed(2)),
+  };
+  out.confidence = "HIGH";
+  if (!metrics.period) {
+    (out.warnings as Record<string, unknown>[]).push({ code: "PERIOD_MISMATCH", message: "Actual and estimate periods could not be aligned" });
+    out.confidence = "LOW";
+  }
+  return JSON.stringify(out);
+}
