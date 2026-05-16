@@ -70,6 +70,7 @@ jobs:
       - name: Verify geographic revenue schema
         run: python scripts/test_geographic_revenue_schema.py
         env:
+          GEO_SCHEMA_TARGET: remote
           MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
 
       - name: Verify Phase 3 extractor tools

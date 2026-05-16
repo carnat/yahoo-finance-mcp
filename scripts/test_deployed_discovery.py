@@ -50,14 +50,14 @@ CANONICAL_TOOLS = {
 # Tools not listed here are validated via discovery/schema only; no runtime call with {}.
 SMOKE_ARGS: dict[str, dict] = {
     "health_check": {},
-    "get_fast_info": {"ticker": "AAPL"},
-    "get_historical_stock_prices": {"ticker": "AAPL", "period": "5d", "interval": "1d"},
-    "get_stock_info": {"ticker": "AAPL", "include_all": False},
-    "get_etf_info": {"ticker": "SPY"},
-    "get_yahoo_finance_news": {"ticker": "AAPL"},
+    "get_market_quote": {"ticker": "AAPL"},
+    "get_historical_prices": {"ticker": "AAPL", "period": "5d", "interval": "1d"},
+    "get_company_profile": {"ticker": "AAPL", "include_all": False},
+    "get_fund_profile": {"ticker": "SPY"},
+    "get_company_news": {"ticker": "AAPL"},
     "search_ticker": {"query": "Apple", "exchange": "US", "max_results": 3},
     "get_option_expiration_dates": {"ticker": "AAPL"},
-    "get_filing_data": {
+    "extract_sec_filing_fact": {
         "ticker": "AAOI",
         "fact_type": "geographic_revenue",
         "region": "China",
@@ -301,8 +301,6 @@ def main() -> int:
 
     calls: list[tuple[str, dict]] = [
         ("health_check", {}),
-        ("get_market_quote", {"ticker": "ASTS"}),
-        ("get_fast_info", {"ticker": "ASTS"}),
         ("analyze_position_signals", {"ticker": "ASTS"}),
         ("calculate_price_target_distance", {"ticker": "ASTS", "io_pt": 95}),
         ("check_volume_liquidity_threshold", {"ticker": "ASTS"}),

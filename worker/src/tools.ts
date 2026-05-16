@@ -997,6 +997,16 @@ const DEPRECATED_ALIAS_TOOLS: Tool[] = [
   { name: "get_filing_text_search", description: "Deprecated alias for search_sec_filing_text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, search_terms: { type: "array", items: { type: "string" } } }, required: ["ticker"] }, deprecated: true, useInstead: "search_sec_filing_text" },
   { name: "get_filing_document", description: "Deprecated alias for get_sec_filing_section.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, section_name: { type: "string" }, document_url: { type: "string" }, context_chars: { type: "number", default: 3000 } }, required: ["ticker", "section_name", "document_url"] }, deprecated: true, useInstead: "get_sec_filing_section" },
 ];
+const DEPRECATED_ALIAS_NAMES = new Set<string>([
+  "get_adv_gate",
+  "get_dc134_options_scan",
+  "get_eqf_bracket",
+  "get_tps_inputs",
+  "get_geographic_revenue",
+  "get_china_revenue_pct",
+  "get_filing_text_search",
+  "get_filing_document",
+]);
 
 TOOLS.push(...CANONICAL_ADDITIONS, ...DEPRECATED_ALIAS_TOOLS);
 for (const tool of TOOLS) {
@@ -1373,6 +1383,13 @@ const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : 
 const num = (v: unknown, fallback: number): number => (typeof v === "number" ? v : fallback);
 const tickerArg = (v: unknown): string | string[] =>
   Array.isArray(v) ? v.map(String) : str(v);
+type AliasSuccessOptions = {
+  canonicalTool: string;
+  partialSuccess?: boolean;
+  successCount?: number;
+  errorCount?: number;
+  warnings?: { code: string; message: string; severity: string }[];
+};
 
 async function computeHash(data: string): Promise<string> {
   const encoded = new TextEncoder().encode(data);
@@ -1413,15 +1430,18 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
     // non-JSON payload
   }
   if (aliasTarget != null) {
-    return mcpSuccess(name, raw, {
+    const opts: AliasSuccessOptions = {
       canonicalTool,
       ...(batchMeta ?? {}),
-      warnings: [{
+    };
+    if (DEPRECATED_ALIAS_NAMES.has(name)) {
+      opts.warnings = [{
         code: "DEPRECATED_ALIAS",
         message: `Use ${canonicalTool} instead.`,
         severity: "info",
-      }],
-    });
+      }];
+    }
+    return mcpSuccess(name, raw, opts);
   }
   return mcpSuccess(name, raw, batchMeta);
 }

@@ -27,16 +27,16 @@ import urllib.request
 URL = "https://yahoo-finance-mcp.artinatw.workers.dev/mcp"
 UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-universal-aliases/1.0)"
 
-# (canonical, args, alias, required_stable_keys_in_data)
-ALIAS_PAIRS: list[tuple[str, dict, str, set[str]]] = [
+# (canonical, args, alias, required_stable_keys_in_data, expect_deprecated_warning)
+ALIAS_PAIRS: list[tuple[str, dict, str, set[str], bool]] = [
     # get_fast_info returns yfinance fast_info fields directly (no "ticker" key injected)
-    ("get_market_quote", {"ticker": "AAPL"}, "get_fast_info", {"currency", "quoteType", "lastPrice", "previousClose"}),
-    ("check_volume_liquidity_threshold", {"ticker": "AAPL"}, "get_adv_gate", {"ticker", "gatePass", "dataDate"}),
-    ("summarize_options_flow", {"ticker": "AAPL"}, "get_options_summary", {"ticker", "dataQuality"}),
-    ("summarize_options_flow", {"ticker": "AAPL"}, "get_options_flow_summary", {"ticker", "dataQuality"}),
-    ("analyze_options_flow_window", {"ticker": "AAPL", "window_label": "audit"}, "get_dc134_options_scan", {"ticker", "dataQuality"}),
-    ("analyze_position_signals", {"ticker": "AAPL"}, "get_tps_inputs", {"t1_inputs", "t2_inputs", "t4_inputs", "t5_inputs"}),
-    ("calculate_price_target_distance", {"ticker": "AAPL", "io_pt": 200}, "get_eqf_bracket", {"ticker", "currentPrice", "bracket"}),
+    ("get_market_quote", {"ticker": "AAPL"}, "get_fast_info", {"currency", "quoteType", "lastPrice", "previousClose"}, False),
+    ("check_volume_liquidity_threshold", {"ticker": "AAPL"}, "get_adv_gate", {"ticker", "gatePass", "dataDate"}, True),
+    ("summarize_options_flow", {"ticker": "AAPL"}, "get_options_summary", {"ticker", "dataQuality"}, False),
+    ("summarize_options_flow", {"ticker": "AAPL"}, "get_options_flow_summary", {"ticker", "dataQuality"}, False),
+    ("analyze_options_flow_window", {"ticker": "AAPL", "window_label": "audit"}, "get_dc134_options_scan", {"ticker", "dataQuality"}, True),
+    ("analyze_position_signals", {"ticker": "AAPL"}, "get_tps_inputs", {"t1_inputs", "t2_inputs", "t4_inputs", "t5_inputs"}, True),
+    ("calculate_price_target_distance", {"ticker": "AAPL", "io_pt": 200}, "get_eqf_bracket", {"ticker", "currentPrice", "bracket"}, True),
 ]
 
 
@@ -76,7 +76,7 @@ def meta_of(payload: dict) -> dict:
 
 def main() -> int:
     failures: list[str] = []
-    for i, (canonical, args, alias, stable_keys) in enumerate(ALIAS_PAIRS, start=1):
+    for i, (canonical, args, alias, stable_keys, expect_warning) in enumerate(ALIAS_PAIRS, start=1):
         try:
             can_payload = rpc(canonical, args, i)
             ali_payload = rpc(alias, args, i + 100)
@@ -103,8 +103,13 @@ def main() -> int:
                 if canon_tool != canonical:
                     failures.append(f"{alias}: meta.canonicalTool={canon_tool!r}, expected {canonical!r}")
                 warnings = meta.get("warnings") or []
-                if not any(isinstance(w, dict) and w.get("code") == "DEPRECATED_ALIAS" for w in warnings):
+                has_deprecated_alias_warning = any(
+                    isinstance(w, dict) and w.get("code") == "DEPRECATED_ALIAS" for w in warnings
+                )
+                if expect_warning and not has_deprecated_alias_warning:
                     failures.append(f"{alias}: missing DEPRECATED_ALIAS warning in meta.warnings")
+                if (not expect_warning) and has_deprecated_alias_warning:
+                    failures.append(f"{alias}: unexpected DEPRECATED_ALIAS warning in meta.warnings")
 
             # Check structure parity (same top-level keys, ignoring deprecation markers)
             _alias_extra_keys = {"_deprecatedAlias", "_canonicalTool"}
@@ -130,4 +135,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
