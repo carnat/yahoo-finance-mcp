@@ -57,6 +57,7 @@ import {
   extractChinaExposure,
   extractRiskFactorMentions,
   extractCustomerConcentration,
+  querySecFilingIndex,
 } from "./yahoo-finance.js";
 import { validateTicker } from "./validate.js";
 
@@ -984,6 +985,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "extract_china_exposure", description: "Extract China exposure with separate revenue and non-revenue classifications.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker"] } },
   { name: "extract_risk_factor_mentions", description: "Extract concise risk-factor term mentions from SEC filings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, terms: { type: "array", items: { type: "string" } }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker", "terms"] } },
   { name: "extract_customer_concentration", description: "Extract customer concentration percentages from SEC filings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker"] } },
+  { name: "query_sec_filing_index", description: "Deterministically route supported SEC filing query types to index-backed extractor tools.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, query_type: { type: "string" }, params: { type: "object", default: {} }, return_evidence: { type: "boolean", default: true }, detailLevel: { type: "string", default: "compact", enum: ["compact", "evidence", "raw"] } }, required: ["ticker", "query_type"] } },
   { name: "health_check", description: "Return runtime and deployment health metadata.", inputSchema: { type: "object", properties: {} } },
 ];
 
@@ -1657,6 +1659,17 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       return extractRiskFactorMentions(str(args.ticker), Array.isArray(args.terms) ? args.terms.map(String) : [], str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
     case "extract_customer_concentration":
       return extractCustomerConcentration(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
+    case "query_sec_filing_index":
+      return querySecFilingIndex(
+        str(args.ticker),
+        str(args.filing_type, "10-K"),
+        str(args.period, "latest"),
+        args.accession_number != null ? str(args.accession_number) : null,
+        str(args.query_type),
+        (args.params && typeof args.params === "object" && !Array.isArray(args.params)) ? args.params as Record<string, unknown> : {},
+        args.return_evidence !== false,
+        str(args.detailLevel, "compact"),
+      );
     case "search_filing_text":
       return searchFilingText(
         str(args.ticker),

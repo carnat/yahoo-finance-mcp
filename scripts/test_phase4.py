@@ -9,6 +9,9 @@ import os
 import sys
 import time
 import unittest
+import asyncio
+import json
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -83,9 +86,98 @@ class TestToolCache(unittest.TestCase):
         self.assertIsNone(srv._cache_get("exp_legacy", 0.01))
 
 
+class TestQuerySecFilingIndex(unittest.TestCase):
+    def _call(self, **kwargs):
+        return json.loads(asyncio.run(srv.query_sec_filing_index(**kwargs)))
+
+    def test_unsupported_query_type(self):
+        res = self._call(ticker="AAPL", query_type="is_this_investable", params={})
+        self.assertEqual(res.get("status"), "UNSUPPORTED_BY_INDEX")
+        self.assertEqual(res.get("queryType"), "is_this_investable")
+
+    def test_missing_required_param_region(self):
+        with patch("server.extract_geographic_revenue", new_callable=AsyncMock) as mocked:
+            res = self._call(
+                ticker="AAPL",
+                query_type="geographic_revenue_share",
+                params={},
+            )
+            self.assertEqual(res.get("status"), "INPUT_VALIDATION_ERROR")
+            codes = [w.get("code") for w in res.get("warnings", []) if isinstance(w, dict)]
+            self.assertIn("INPUT_VALIDATION_ERROR", codes)
+            mocked.assert_not_called()
+
+    def test_answered_requires_evidence(self):
+        geo = {
+            "value": 1,
+            "denominator": 10,
+            "valueRatio": 0.1,
+            "valuePct": 10.0,
+            "confidence": "HIGH",
+            "evidence": {},
+            "unit": "USD",
+        }
+        with patch("server.extract_geographic_revenue", new_callable=AsyncMock, return_value=json.dumps(geo)):
+            res = self._call(
+                ticker="AAPL",
+                query_type="geographic_revenue_share",
+                params={"region": "Greater China"},
+            )
+            self.assertNotEqual(res.get("status"), "ANSWERED")
+            codes = [w.get("code") for w in res.get("warnings", []) if isinstance(w, dict)]
+            self.assertIn("EVIDENCE_REQUIRED", codes)
+
+    def test_geographic_answered_shape(self):
+        geo = {
+            "value": 64377000000,
+            "denominator": 416161000000,
+            "valueRatio": 0.1547,
+            "valuePct": 15.47,
+            "confidence": "HIGH",
+            "unit": "USD",
+            "evidence": {
+                "filingDate": "2025-10-31",
+                "accessionNumber": "0000320193-25-000079",
+                "documentUrl": "https://www.sec.gov/Archives/example",
+                "sourceRows": [["Greater China", "64,377"], ["Total net sales", "416,161"]],
+            },
+        }
+        with patch("server.extract_geographic_revenue", new_callable=AsyncMock, return_value=json.dumps(geo)):
+            res = self._call(
+                ticker="AAPL",
+                query_type="geographic_revenue_share",
+                params={"region": "Greater China"},
+            )
+            self.assertEqual(res.get("status"), "ANSWERED")
+            ans = res.get("answer") or {}
+            self.assertEqual(ans.get("valuePct"), 15.47)
+            self.assertEqual(ans.get("denominator"), 416161000000)
+            self.assertTrue(isinstance(res.get("evidence"), list) and len(res.get("evidence")) > 0)
+
+    def test_not_disclosed_preserved(self):
+        geo = {
+            "value": None,
+            "denominator": None,
+            "valueRatio": None,
+            "valuePct": None,
+            "confidence": "NOT_DISCLOSED",
+            "evidence": {},
+            "unit": "USD",
+        }
+        with patch("server.extract_geographic_revenue", new_callable=AsyncMock, return_value=json.dumps(geo)):
+            res = self._call(
+                ticker="AXTI",
+                query_type="geographic_revenue_share",
+                params={"region": "China"},
+            )
+            self.assertEqual(res.get("status"), "NOT_DISCLOSED")
+
+
 if __name__ == "__main__":
     loader = unittest.TestLoader()
-    suite = loader.loadTestsFromTestCase(TestToolCache)
+    suite = unittest.TestSuite()
+    suite.addTests(loader.loadTestsFromTestCase(TestToolCache))
+    suite.addTests(loader.loadTestsFromTestCase(TestQuerySecFilingIndex))
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
     sys.exit(0 if result.wasSuccessful() else 1)
