@@ -107,7 +107,8 @@ class TestCompactExcerpt(unittest.TestCase):
     def test_long_text_truncated(self):
         t = "x" * 300
         result = srv._compact_excerpt(t)
-        self.assertLessEqual(len(result), 244)
+        # max_len=240, truncated form is at most 240 chars + "..." (3) = 243 chars; allow 1 extra margin
+        self.assertLessEqual(len(result), 240 + len("...") + 1)
         self.assertTrue(result.endswith("..."))
 
     def test_whitespace_collapsed(self):
@@ -118,7 +119,8 @@ class TestCompactExcerpt(unittest.TestCase):
     def test_custom_max_len(self):
         t = "a" * 100
         result = srv._compact_excerpt(t, max_len=50)
-        self.assertLessEqual(len(result), 54)
+        # truncated form is at most max_len + len("...") = 50 + 3 = 53 chars; allow 1 extra margin
+        self.assertLessEqual(len(result), 50 + len("...") + 1)
 
 
 class TestAsStatus(unittest.TestCase):

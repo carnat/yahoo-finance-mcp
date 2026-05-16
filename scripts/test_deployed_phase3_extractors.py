@@ -151,8 +151,10 @@ def main() -> int:
         raise AssertionError(f"Missing Phase 3 tools in tools/list: {missing_p3}")
     print(f"  PASS tools/list exposes all Phase 2+3 tools ({len(names)} total)")
 
-    # Check descriptions for private terms
+    # Check descriptions for private terms (require at least one description to avoid silent pass)
     descriptions = [str(t.get("description", "")) for t in tools if isinstance(t, dict)]
+    if not descriptions:
+        raise AssertionError("tools/list returned no tool descriptions — cannot validate private term policy")
     _check_private_terms(descriptions, list(names))
     print("  PASS no private/internal terms in public tool descriptions")
 
