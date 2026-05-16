@@ -86,9 +86,11 @@ def rpc(method: str, params: dict | None = None, req_id: int = 1) -> dict:
     raise last_exc or RuntimeError("RPC failed")
 
 
-def call_tool(name: str, arguments: dict, req_id: int) -> dict:
+def call_tool(name: str, arguments: dict, req_id: int, allow_jsonrpc_error: bool = False) -> dict:
     resp = rpc("tools/call", {"name": name, "arguments": arguments}, req_id=req_id)
-    if "error" in resp:
+    if "error" in resp and resp["error"]:
+        if allow_jsonrpc_error:
+            return resp
         raise AssertionError(f"{name} JSON-RPC error: {resp['error']}")
     text = ((((resp.get("result") or {}).get("content") or [{}])[0]) or {}).get("text", "")
     try:
@@ -170,6 +172,38 @@ def _check_yahoo_news_structured(data: dict) -> None:
         raise AssertionError("get_company_news returned raw text blob instead of structured JSON")
 
 
+def _assert_sec_index_shape(data: dict, tool_name: str) -> None:
+    if not isinstance(data, dict):
+        raise AssertionError(f"{tool_name} returned non-object: {data!r}")
+    doc_url = data.get("documentUrl")
+    if not isinstance(doc_url, str) or not doc_url.startswith("https://www.sec.gov/Archives/"):
+        raise AssertionError(f"{tool_name} invalid documentUrl: {doc_url!r}")
+    idx = data.get("index")
+    if not isinstance(idx, dict):
+        raise AssertionError(f"{tool_name} missing index object")
+    sections = idx.get("sections")
+    tables = idx.get("tables")
+    keyword_map = idx.get("keywordMap")
+    if not isinstance(sections, list):
+        raise AssertionError(f"{tool_name} index.sections must be list")
+    if not isinstance(tables, list):
+        raise AssertionError(f"{tool_name} index.tables must be list")
+    if not isinstance(keyword_map, dict):
+        raise AssertionError(f"{tool_name} index.keywordMap must be object")
+    if not sections and not tables:
+        raise AssertionError(f"{tool_name} expected sections or tables, got neither")
+    if tables:
+        scale_counts = {}
+        for tbl in tables:
+            if isinstance(tbl, dict):
+                scale = str(tbl.get("unitScale", ""))
+                scale_counts[scale] = scale_counts.get(scale, 0) + 1
+        if scale_counts.get("millions", 0) == len(tables):
+            raise AssertionError(
+                f"{tool_name} all tables reported unitScale='millions'; expected unknown unless detected"
+            )
+
+
 def main() -> int:
     try:
         listed = rpc("tools/list")
@@ -216,13 +250,41 @@ def main() -> int:
             f"get_option_chain sort_by default must be 'relevance', got: {sort_by_default!r}"
         )
 
-    filings = call_tool("list_sec_company_filings", {"ticker": "AAPL", "filing_type": "10-K", "limit": 3}, 20)
+    filings = call_tool("list_sec_company_filings", {"ticker": "AAPL", "filing_type": "10-K", "limit": 5}, 20)
     assert_no_unknown_tool(filings, "list_sec_company_filings")
     filings_data = extract_data(filings)
     filing_list = filings_data.get("filings") if isinstance(filings_data, dict) else None
+    if not isinstance(filing_list, list) or not filing_list:
+        raise AssertionError("list_sec_company_filings expected non-empty filings[]")
+    first_filing = filing_list[0] if isinstance(filing_list[0], dict) else {}
+    if not first_filing.get("accessionNumber"):
+        raise AssertionError(f"list_sec_company_filings missing accessionNumber: {first_filing}")
+    if not first_filing.get("filingDate"):
+        raise AssertionError(f"list_sec_company_filings missing filingDate: {first_filing}")
+    if not str(first_filing.get("documentUrl", "")).startswith("https://www.sec.gov/Archives/"):
+        raise AssertionError(f"list_sec_company_filings invalid documentUrl: {first_filing}")
     doc_url = None
     if isinstance(filing_list, list) and filing_list:
-        doc_url = (filing_list[0] or {}).get("primaryDocumentUrl")
+        doc_url = (filing_list[0] or {}).get("documentUrl")
+
+    aapl_index = call_tool("index_sec_filing", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}, 22)
+    assert_no_unknown_tool(aapl_index, "index_sec_filing")
+    _assert_sec_index_shape(extract_data(aapl_index), "index_sec_filing")
+
+    aapl_cached_index = call_tool("get_sec_filing_index", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}, 23)
+    assert_no_unknown_tool(aapl_cached_index, "get_sec_filing_index")
+    _assert_sec_index_shape(extract_data(aapl_cached_index), "get_sec_filing_index")
+
+    for req_id, ticker in ((24, "AAOI"), (25, "AXTI")):
+        idx_payload = call_tool("get_sec_filing_index", {"ticker": ticker, "filing_type": "10-K", "period": "latest"}, req_id)
+        assert_no_unknown_tool(idx_payload, "get_sec_filing_index")
+        idx_data = extract_data(idx_payload)
+        _assert_sec_index_shape(idx_data, f"get_sec_filing_index:{ticker}")
+        if ticker == "AXTI":
+            index = (idx_data or {}).get("index") if isinstance(idx_data, dict) else {}
+            key_map = index.get("keywordMap") if isinstance(index, dict) else {}
+            if isinstance(key_map, dict) and not any("china" in str(k).lower() for k in key_map):
+                print("  WARN AXTI index keywordMap has no explicit China keyword")
 
     exp = call_tool("get_option_expiration_dates", {"ticker": "ASTS"}, 21)
     assert_no_unknown_tool(exp, "get_option_expiration_dates")
@@ -319,7 +381,7 @@ def main() -> int:
     print("  PASS chained option-chain smoke (AAPL)")
 
     # Invalid-args validation test: get_historical_stock_prices({}) must not cause provider 404
-    bad_payload = call_tool("get_historical_stock_prices", {}, 902)
+    bad_payload = call_tool("get_historical_stock_prices", {}, 902, allow_jsonrpc_error=True)
     bad_str = json.dumps(bad_payload)
     # Must return a validation error. The specific check is whether we see a Yahoo chart 404
     # (which indicates the provider was called with no ticker before validation occurred).

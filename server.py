@@ -966,6 +966,13 @@ _TOOL_OUTPUT_SCHEMAS.setdefault("analyze_options_flow_window", _TOOL_OUTPUT_SCHE
 _TOOL_OUTPUT_SCHEMAS.setdefault("summarize_options_flow", _TOOL_OUTPUT_SCHEMAS["get_options_summary"])
 _TOOL_OUTPUT_SCHEMAS.setdefault("extract_sec_filing_fact", _TOOL_OUTPUT_SCHEMAS["extract_filing_fact"])
 _TOOL_OUTPUT_SCHEMAS.setdefault("search_sec_filing_text", _TOOL_OUTPUT_SCHEMAS["search_filing_text"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("extract_geographic_revenue", _TOOL_OUTPUT_SCHEMAS["get_filing_data"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("extract_segment_revenue", _TOOL_OUTPUT_SCHEMAS["get_filing_data"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("extract_total_revenue", _TOOL_OUTPUT_SCHEMAS["get_filing_data"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("extract_revenue_exposure", _SIMPLE_OUTPUT_SCHEMA)
+_TOOL_OUTPUT_SCHEMAS.setdefault("extract_china_exposure", _SIMPLE_OUTPUT_SCHEMA)
+_TOOL_OUTPUT_SCHEMAS.setdefault("extract_risk_factor_mentions", _SIMPLE_OUTPUT_SCHEMA)
+_TOOL_OUTPUT_SCHEMAS.setdefault("extract_customer_concentration", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("get_tps_inputs", _TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"])
 _TOOL_OUTPUT_SCHEMAS.setdefault("get_eqf_bracket", _TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"])
 _TOOL_OUTPUT_SCHEMAS.setdefault("get_adv_gate", _TOOL_OUTPUT_SCHEMAS["get_volume_gate"])
@@ -1021,6 +1028,14 @@ async def get_historical_stock_prices(
         columns : list[str] | None
             Optional subset of columns to return. If None, all columns are returned.
     """
+    if ticker is None or str(ticker).strip() == "":
+        return _mcp_failure(
+            "get_historical_stock_prices",
+            ErrorCode.INPUT_VALIDATION_ERROR,
+            "ticker is required",
+        )
+
+    ticker = str(ticker).strip().upper()
     ticker_err = _validate_ticker(ticker)
     if ticker_err:
         return _mcp_failure("get_historical_stock_prices", ErrorCode.INPUT_VALIDATION_ERROR, ticker_err)
@@ -6940,6 +6955,390 @@ async def get_sec_filing_index(
         if acc_err:
             return _mcp_failure("get_sec_filing_index", ErrorCode.INPUT_VALIDATION_ERROR, acc_err)
     return await _index_sec_filing_impl(ticker, filing_type, accession_number)
+
+
+def _safe_json_loads(payload: str) -> dict:
+    try:
+        parsed = json.loads(payload)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _compact_excerpt(text: str, max_len: int = 240) -> str:
+    cleaned = _re.sub(r"\s+", " ", str(text or "")).strip()
+    return cleaned if len(cleaned) <= max_len else cleaned[:max_len].rstrip() + "..."
+
+
+def _as_status(source_payload: dict) -> str:
+    confidence = str(source_payload.get("confidence") or "").upper()
+    source = str(source_payload.get("source") or "").upper()
+    if source in {"NOT_DISCLOSED"} or confidence in {"NOT_DISCLOSED"}:
+        return "NOT_DISCLOSED"
+    if source in {"CONFLICTING"} or confidence in {"CONFLICTING"}:
+        return "CONFLICTING"
+    return "NOT_FOUND"
+
+
+async def _extract_geo_payload(
+    ticker: str,
+    region: str,
+    filing_type: str,
+    period: str,
+) -> dict:
+    raw = await get_filing_data(
+        ticker=ticker,
+        fact_type=FilingFactType.geographic_revenue,
+        region=region,
+        filing_type=filing_type,
+        period=period,
+    )
+    payload = _safe_json_loads(raw)
+    warnings = payload.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = []
+    if payload.get("value") is not None and payload.get("denominator") is None:
+        payload["valueRatio"] = None
+        payload["valuePct"] = None
+        if not any(isinstance(w, dict) and w.get("code") == "DENOMINATOR_NOT_FOUND" for w in warnings):
+            warnings.append({
+                "code": "DENOMINATOR_NOT_FOUND",
+                "message": "Could not compute geographic revenue percentage due to missing denominator.",
+                "severity": "warning",
+            })
+    payload["warnings"] = warnings
+    return payload
+
+
+@yfinance_server.tool(
+    name="extract_geographic_revenue",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_geographic_revenue"],
+    description="Deterministically extract geographic revenue exposure from SEC filing data and filing index.",
+)
+async def extract_geographic_revenue(
+    ticker: str,
+    region: str,
+    filing_type: str = "10-K",
+    period: str = "latest",
+    accession_number: str | None = None,
+    detailLevel: str = "compact",
+) -> str:
+    if not region or not str(region).strip():
+        return json.dumps({
+            "ticker": ticker,
+            "factType": "geographic_revenue",
+            "region": region,
+            "period": None,
+            "rawValue": None,
+            "rawDenominator": None,
+            "unit": "USD",
+            "unitScale": "unknown",
+            "value": None,
+            "denominator": None,
+            "valueRatio": None,
+            "valuePct": None,
+            "extractionMethod": "NONE",
+            "confidence": "NOT_DISCLOSED",
+            "evidence": {},
+            "calculation": None,
+            "warnings": [{"code": "INPUT_VALIDATION_ERROR", "message": "region is required", "severity": "error"}],
+        })
+
+    payload = await _extract_geo_payload(ticker, region, filing_type, period)
+    idx_payload = _safe_json_loads(await get_sec_filing_index(ticker, filing_type, period, accession_number))
+    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+    shaped = {
+        "ticker": ticker,
+        "factType": "geographic_revenue",
+        "region": region,
+        "period": payload.get("period"),
+        "rawValue": payload.get("rawValue"),
+        "rawDenominator": payload.get("rawDenominator"),
+        "unit": payload.get("unit", "USD"),
+        "unitScale": payload.get("unitScale", "unknown"),
+        "value": payload.get("value"),
+        "denominator": payload.get("denominator"),
+        "valueRatio": payload.get("valueRatio"),
+        "valuePct": payload.get("valuePct"),
+        "extractionMethod": payload.get("extractionMethod", "NONE"),
+        "confidence": payload.get("confidence", "NOT_DISCLOSED"),
+        "evidence": {
+            "filingType": idx_payload.get("filingType") or payload.get("filingType") or filing_type,
+            "filingDate": idx_payload.get("filingDate") or payload.get("filingDate"),
+            "acceptedAt": idx_payload.get("acceptedAt"),
+            "accessionNumber": idx_payload.get("accessionNumber") or payload.get("accessionNumber"),
+            "documentUrl": idx_payload.get("documentUrl") or payload.get("documentUrl"),
+            "sectionHeading": evidence.get("sectionHeading"),
+            "tableTitle": evidence.get("tableTitle"),
+            "sourceTableId": evidence.get("sourceTableId"),
+            "sourceRows": evidence.get("sourceRows") if isinstance(evidence.get("sourceRows"), list) else [],
+            "sourceColumns": evidence.get("sourceColumns") if isinstance(evidence.get("sourceColumns"), list) else [],
+        },
+        "calculation": payload.get("calculation"),
+        "warnings": payload.get("warnings") if isinstance(payload.get("warnings"), list) else [],
+    }
+    if shaped["denominator"] is None:
+        shaped["valueRatio"] = None
+        shaped["valuePct"] = None
+    if str(detailLevel).lower() == "raw":
+        shaped["rawContext"] = {"filingIndex": idx_payload}
+    return json.dumps(shaped)
+
+
+@yfinance_server.tool(name="extract_segment_revenue", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_segment_revenue"], description="Extract segment revenue rows from SEC filing facts with evidence metadata.")
+async def extract_segment_revenue(
+    ticker: str,
+    filing_type: str = "10-K",
+    period: str = "latest",
+    detailLevel: str = "compact",
+) -> str:
+    payload = _safe_json_loads(await get_filing_data(ticker=ticker, fact_type=FilingFactType.segment_revenue, filing_type=filing_type, period=period))
+    segments = payload.get("allSegments") if isinstance(payload.get("allSegments"), list) else []
+    rows = []
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        rows.append({
+            "label": seg.get("segmentLabel"),
+            "value": seg.get("value"),
+            "period": f"FY{seg.get('fiscalYear')}" if seg.get("fiscalYear") else None,
+            "confidence": "HIGH",
+            "evidence": {
+                "filingDate": seg.get("filingDate"),
+                "accessionNumber": seg.get("accessionNumber"),
+            },
+        })
+    out = {"ticker": ticker, "factType": "segment_revenue", "segments": rows, "status": "FOUND" if rows else "NOT_DISCLOSED"}
+    if str(detailLevel).lower() == "raw":
+        out["rawContext"] = payload
+    return json.dumps(out)
+
+
+@yfinance_server.tool(name="extract_total_revenue", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_total_revenue"], description="Extract total revenue from SEC filing facts with stable null fields.")
+async def extract_total_revenue(
+    ticker: str,
+    filing_type: str = "10-K",
+    period: str = "latest",
+) -> str:
+    payload = _safe_json_loads(await get_filing_data(ticker=ticker, fact_type=FilingFactType.total_revenue, filing_type=filing_type, period=period))
+    val = payload.get("value")
+    return json.dumps({
+        "ticker": ticker,
+        "factType": "total_revenue",
+        "value": val,
+        "period": payload.get("period"),
+        "confidence": payload.get("confidence", "NOT_DISCLOSED" if val is None else "HIGH"),
+        "evidence": {
+            "filingType": payload.get("filingType", filing_type),
+            "filingDate": payload.get("filingDate"),
+            "accessionNumber": payload.get("accessionNumber"),
+            "documentUrl": payload.get("documentUrl"),
+        },
+        "status": "FOUND" if val is not None else _as_status(payload),
+    })
+
+
+@yfinance_server.tool(name="extract_revenue_exposure", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_revenue_exposure"], description="Extract revenue exposure for a region/customer/segment query with deterministic status codes.")
+async def extract_revenue_exposure(
+    ticker: str,
+    exposure_query: str,
+    filing_type: str = "10-K",
+    period: str = "latest",
+    detailLevel: str = "compact",
+) -> str:
+    geo = _safe_json_loads(await extract_geographic_revenue(ticker=ticker, region=exposure_query, filing_type=filing_type, period=period, detailLevel=detailLevel))
+    found = geo.get("value") is not None
+    status = "FOUND_REVENUE_EXPOSURE" if found else _as_status(geo)
+    matches = []
+    if found:
+        matches.append({
+            "exposureType": "geographic_revenue",
+            "label": exposure_query,
+            "value": geo.get("value"),
+            "denominator": geo.get("denominator"),
+            "valueRatio": geo.get("valueRatio"),
+            "valuePct": geo.get("valuePct"),
+            "period": geo.get("period"),
+            "confidence": geo.get("confidence", "HIGH"),
+            "evidence": geo.get("evidence", {}),
+        })
+    return json.dumps({"ticker": ticker, "query": exposure_query, "matches": matches, "status": status})
+
+
+@yfinance_server.tool(name="extract_risk_factor_mentions", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_risk_factor_mentions"], description="Extract concise risk-factor mentions for explicit terms from a filing.")
+async def extract_risk_factor_mentions(
+    ticker: str,
+    terms: list[str],
+    filing_type: str = "10-K",
+    period: str = "latest",
+    detailLevel: str = "compact",
+) -> str:
+    matches: list[dict] = []
+    for term in (terms or []):
+        search = _safe_json_loads(await search_sec_filing_text(
+            ticker=ticker,
+            search_terms=[str(term)],
+            section_hint="Risk Factors",
+            filing_type=filing_type,
+        ))
+        for m in (search.get("matches") if isinstance(search.get("matches"), list) else [])[:3]:
+            if not isinstance(m, dict):
+                continue
+            matches.append({
+                "term": term,
+                "sectionHeading": m.get("sectionHeading") or "Risk Factors",
+                "excerpt": _compact_excerpt(str(m.get("context") or m.get("excerpt") or "")),
+                "confidence": "MEDIUM",
+                "evidence": {
+                    "filingDate": search.get("filingDate"),
+                    "accessionNumber": search.get("accessionNumber"),
+                    "documentUrl": search.get("documentUrl"),
+                },
+            })
+    result = {"ticker": ticker, "matches": matches, "status": "FOUND" if matches else "NOT_FOUND"}
+    if str(detailLevel).lower() == "raw":
+        result["rawTerms"] = terms or []
+    return json.dumps(result)
+
+
+@yfinance_server.tool(name="extract_customer_concentration", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_customer_concentration"], description="Extract customer concentration percentages from SEC filing text evidence.")
+async def extract_customer_concentration(
+    ticker: str,
+    filing_type: str = "10-K",
+    period: str = "latest",
+    detailLevel: str = "compact",
+) -> str:
+    search = _safe_json_loads(await search_sec_filing_text(
+        ticker=ticker,
+        search_terms=["major customer", "customers", "customer accounted", "percent of revenue"],
+        filing_type=filing_type,
+    ))
+    customers: list[dict] = []
+    seen: set[str] = set()
+    for m in (search.get("matches") if isinstance(search.get("matches"), list) else []):
+        if not isinstance(m, dict):
+            continue
+        ctx = str(m.get("context") or "")
+        pct_match = _re.search(r"(\d{1,2}(?:\.\d+)?)\s*%", ctx)
+        if not pct_match:
+            continue
+        pct = float(pct_match.group(1))
+        key = f"{pct:.2f}"
+        if key in seen:
+            continue
+        seen.add(key)
+        customers.append({
+            "label": f"Customer {chr(64 + len(customers) + 1)}",
+            "valuePct": pct,
+            "period": f"FY{str(search.get('fiscalYear') or '')}".rstrip(),
+            "confidence": "HIGH",
+            "evidence": {
+                "sectionHeading": m.get("sectionHeading"),
+                "excerpt": _compact_excerpt(ctx),
+                "filingDate": search.get("filingDate"),
+                "accessionNumber": search.get("accessionNumber"),
+                "documentUrl": search.get("documentUrl"),
+            },
+        })
+        if len(customers) >= 5:
+            break
+    status = "FOUND" if customers else ("NOT_DISCLOSED" if (search.get("matchCount") or 0) > 0 else "NOT_FOUND")
+    result = {"ticker": ticker, "customers": customers, "status": status}
+    if str(detailLevel).lower() == "raw":
+        result["rawMatchCount"] = search.get("matchCount", 0)
+    return json.dumps(result)
+
+
+@yfinance_server.tool(name="extract_china_exposure", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_china_exposure"], description="Extract China exposure with separate revenue and non-revenue classifications.")
+async def extract_china_exposure(
+    ticker: str,
+    filing_type: str = "10-K",
+    period: str = "latest",
+    accession_number: str | None = None,
+    detailLevel: str = "compact",
+) -> str:
+    idx = _safe_json_loads(await get_sec_filing_index(ticker=ticker, filing_type=filing_type, period=period, accession_number=accession_number))
+    revenue = _safe_json_loads(await extract_revenue_exposure(ticker=ticker, exposure_query="China", filing_type=filing_type, period=period))
+    revenue_status = "FOUND" if revenue.get("status") == "FOUND_REVENUE_EXPOSURE" else revenue.get("status", "NOT_FOUND")
+
+    index = idx.get("index") if isinstance(idx.get("index"), dict) else {}
+    sections = index.get("sections") if isinstance(index.get("sections"), list) else []
+    tables = index.get("tables") if isinstance(index.get("tables"), list) else []
+
+    def _collect(term_list: list[str]) -> list[dict]:
+        found = []
+        for sec in sections:
+            if not isinstance(sec, dict):
+                continue
+            heading = str(sec.get("heading") or "")
+            low = heading.lower()
+            for term in term_list:
+                if term.lower() in low:
+                    found.append({"source": "section", "term": term, "sectionHeading": heading})
+        for tbl in tables:
+            if not isinstance(tbl, dict):
+                continue
+            hay = " ".join([str(tbl.get("title") or ""), *[str(x) for x in (tbl.get("rowLabels") or [])]]).lower()
+            for term in term_list:
+                if term.lower() in hay:
+                    found.append({
+                        "source": "table",
+                        "term": term,
+                        "tableTitle": tbl.get("title"),
+                        "sourceTableId": tbl.get("tableId"),
+                        "sectionId": tbl.get("sectionId"),
+                    })
+        return found
+
+    entity_terms = ["Tongmei", "JinMei", "BoYu"]
+    bank_terms = ["Bank of China"]
+    manuf_terms = ["manufacturing", "production", "supply chain", "fab"]
+    risk_terms = ["China", "tariff", "export control"]
+
+    entity_evidence = _collect(entity_terms)
+    bank_evidence = _collect(bank_terms)
+    manu_evidence = _collect(manuf_terms)
+    risk_mentions = _safe_json_loads(await extract_risk_factor_mentions(ticker=ticker, terms=risk_terms, filing_type=filing_type, period=period))
+    risk_evidence = risk_mentions.get("matches") if isinstance(risk_mentions.get("matches"), list) else []
+
+    non_revenue_found = bool(entity_evidence or bank_evidence or manu_evidence or risk_evidence)
+    if revenue.get("status") == "FOUND_REVENUE_EXPOSURE":
+        overall = "FOUND_REVENUE_EXPOSURE"
+    elif non_revenue_found:
+        overall = "FOUND_NON_REVENUE_EXPOSURE"
+    elif revenue.get("status") == "NOT_DISCLOSED":
+        overall = "NOT_DISCLOSED"
+    elif revenue.get("status") == "CONFLICTING":
+        overall = "CONFLICTING"
+    else:
+        overall = "NOT_FOUND"
+
+    out = {
+        "ticker": ticker,
+        "exposureType": "china_exposure",
+        "filingType": idx.get("filingType", filing_type),
+        "filingDate": idx.get("filingDate"),
+        "accessionNumber": idx.get("accessionNumber"),
+        "documentUrl": idx.get("documentUrl"),
+        "revenueExposure": {
+            "status": revenue_status,
+            "value": revenue.get("matches", [{}])[0].get("value") if revenue.get("matches") else None,
+            "denominator": revenue.get("matches", [{}])[0].get("denominator") if revenue.get("matches") else None,
+            "valueRatio": revenue.get("matches", [{}])[0].get("valueRatio") if revenue.get("matches") else None,
+            "valuePct": revenue.get("matches", [{}])[0].get("valuePct") if revenue.get("matches") else None,
+            "confidence": "HIGH" if revenue_status == "FOUND" else ("NOT_DISCLOSED" if revenue_status == "NOT_DISCLOSED" else "LOW"),
+            "evidence": revenue.get("matches", [{}])[0].get("evidence") if revenue.get("matches") else [],
+        },
+        "manufacturingExposure": {"status": "FOUND" if manu_evidence else "NOT_FOUND", "confidence": "MEDIUM", "evidence": manu_evidence},
+        "entityExposure": {"status": "FOUND" if entity_evidence else "NOT_FOUND", "entities": entity_terms if entity_evidence else [], "confidence": "MEDIUM", "evidence": entity_evidence},
+        "bankExposure": {"status": "FOUND" if bank_evidence else "NOT_FOUND", "entities": bank_terms if bank_evidence else [], "confidence": "MEDIUM", "evidence": bank_evidence},
+        "riskFactorExposure": {"status": "FOUND" if risk_evidence else "NOT_FOUND", "confidence": "MEDIUM", "evidence": risk_evidence},
+        "overallStatus": overall,
+        "warnings": [],
+    }
+    if str(detailLevel).lower() == "raw":
+        out["rawContext"] = {"filingIndex": idx}
+    return json.dumps(out)
 
 
 @yfinance_server.tool(name="get_tps_inputs", output_schema=_TOOL_OUTPUT_SCHEMAS["get_tps_inputs"], description="Deprecated alias for analyze_position_signals.")
