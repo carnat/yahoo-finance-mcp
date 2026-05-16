@@ -555,8 +555,8 @@ def _is_ok(
     try:
         inner_payload = json.loads(text)
         if is_error_payload(inner_payload):
-            payload_error = inner_payload.get("error") if isinstance(inner_payload, dict) else None
-            if payload_error is None and isinstance(inner_payload, dict) and inner_payload.get("ok") is False:
+            payload_error = inner_payload.get("error")
+            if payload_error is None:
                 payload_error = "ok=false"
             return False, f"tool returned error: {payload_error}"
         inner = extract_data(inner_payload)
