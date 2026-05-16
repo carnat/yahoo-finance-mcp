@@ -58,6 +58,12 @@ import {
   extractRiskFactorMentions,
   extractCustomerConcentration,
   querySecFilingIndex,
+  getLatestEarningsRelease,
+  indexEarningsRelease,
+  extractEarningsMetrics,
+  extractGuidance,
+  extractManagementCommentary,
+  compareEarningsActualVsEstimate,
 } from "./yahoo-finance.js";
 import { validateTicker } from "./validate.js";
 
@@ -986,6 +992,12 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "extract_risk_factor_mentions", description: "Extract concise risk-factor term mentions from SEC filings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, terms: { type: "array", items: { type: "string" } }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker", "terms"] } },
   { name: "extract_customer_concentration", description: "Extract customer concentration percentages from SEC filings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker"] } },
   { name: "query_sec_filing_index", description: "Deterministically route supported SEC filing query types to index-backed extractor tools.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, query_type: { type: "string" }, params: { type: "object", default: {} }, return_evidence: { type: "boolean", default: true }, detailLevel: { type: "string", default: "compact", enum: ["compact", "evidence", "raw"] } }, required: ["ticker", "query_type"] } },
+  { name: "get_latest_earnings_release", description: "Find the latest public earnings release evidence from SEC 8-K, company IR, or Yahoo earnings calendars.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "latest" } }, required: ["ticker"] } },
+  { name: "index_earnings_release", description: "Build a compact section/table index for an earnings release/report source for deterministic follow-up extraction.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "latest" }, source_url: { type: "string" } }, required: ["ticker"] } },
+  { name: "extract_earnings_metrics", description: "Extract reported earnings metrics (revenue, EPS, gross margin, operating income, free cash flow, capex) from public sources.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "latest" }, source_preference: { type: "array", items: { type: "string" }, default: ["sec_8k", "company_ir", "10-q", "yahoo"] } }, required: ["ticker"] } },
+  { name: "extract_guidance", description: "Extract company-provided guidance/outlook ranges from public earnings release/report sources.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "latest" } }, required: ["ticker"] } },
+  { name: "extract_management_commentary", description: "Extract neutral topic-specific management commentary with short evidence excerpts from public earnings release/report sources.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "latest" }, topics: { type: "array", items: { type: "string" } } }, required: ["ticker"] } },
+  { name: "compare_earnings_actual_vs_estimate", description: "Compare reported actual earnings metrics versus public analyst estimates and return surprise percentages.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "latest" } }, required: ["ticker"] } },
   { name: "health_check", description: "Return runtime and deployment health metadata.", inputSchema: { type: "object", properties: {} } },
 ];
 
@@ -1370,6 +1382,12 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   extract_china_exposure: SIMPLE_OBJECT_SCHEMA,
   extract_risk_factor_mentions: SIMPLE_OBJECT_SCHEMA,
   extract_customer_concentration: SIMPLE_OBJECT_SCHEMA,
+  get_latest_earnings_release: SIMPLE_OBJECT_SCHEMA,
+  index_earnings_release: SIMPLE_OBJECT_SCHEMA,
+  extract_earnings_metrics: SIMPLE_OBJECT_SCHEMA,
+  extract_guidance: SIMPLE_OBJECT_SCHEMA,
+  extract_management_commentary: SIMPLE_OBJECT_SCHEMA,
+  compare_earnings_actual_vs_estimate: SIMPLE_OBJECT_SCHEMA,
 };
 
 for (const [alias, canonical] of Object.entries(TOOL_ALIASES)) {
@@ -1670,6 +1688,26 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         args.return_evidence !== false,
         str(args.detailLevel, "compact"),
       );
+    case "get_latest_earnings_release":
+      return getLatestEarningsRelease(str(args.ticker), str(args.period, "latest"));
+    case "index_earnings_release":
+      return indexEarningsRelease(str(args.ticker), str(args.period, "latest"), args.source_url != null ? str(args.source_url) : null);
+    case "extract_earnings_metrics":
+      return extractEarningsMetrics(
+        str(args.ticker),
+        str(args.period, "latest"),
+        Array.isArray(args.source_preference) ? args.source_preference.map(String) : ["sec_8k", "company_ir", "10-q", "yahoo"],
+      );
+    case "extract_guidance":
+      return extractGuidance(str(args.ticker), str(args.period, "latest"));
+    case "extract_management_commentary":
+      return extractManagementCommentary(
+        str(args.ticker),
+        str(args.period, "latest"),
+        Array.isArray(args.topics) ? args.topics.map(String) : [],
+      );
+    case "compare_earnings_actual_vs_estimate":
+      return compareEarningsActualVsEstimate(str(args.ticker), str(args.period, "latest"));
     case "search_filing_text":
       return searchFilingText(
         str(args.ticker),

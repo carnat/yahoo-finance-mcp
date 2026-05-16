@@ -7,6 +7,8 @@ import os
 import re as _re
 import time
 import urllib.parse as _urlparse
+import urllib.request as _urlrequest
+import urllib.error as _urlerror
 from enum import Enum
 from typing import TypedDict
 
@@ -910,6 +912,12 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
     "get_sec_recent_events": _NEWS_EVENT_OUTPUT_SCHEMA,
     "get_public_event_timeline": _NEWS_EVENT_OUTPUT_SCHEMA,
     "verify_company_event": _NEWS_EVENT_OUTPUT_SCHEMA,
+    "get_latest_earnings_release": _SIMPLE_OUTPUT_SCHEMA,
+    "index_earnings_release": _SIMPLE_OUTPUT_SCHEMA,
+    "extract_earnings_metrics": _SIMPLE_OUTPUT_SCHEMA,
+    "extract_guidance": _SIMPLE_OUTPUT_SCHEMA,
+    "extract_management_commentary": _SIMPLE_OUTPUT_SCHEMA,
+    "compare_earnings_actual_vs_estimate": _SIMPLE_OUTPUT_SCHEMA,
 }
 
 TOOL_ALIASES: dict[str, str] = {
@@ -7631,6 +7639,602 @@ async def query_sec_filing_index(
         evidence,
         warnings,
     )
+
+
+def _utc_now_z() -> str:
+    return datetime.datetime.now(tz=datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _to_iso_utc(ts: str | None) -> str | None:
+    if not ts:
+        return None
+    s = str(ts).strip()
+    if not s:
+        return None
+    try:
+        if len(s) == 10 and _re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+            return f"{s}T00:00:00Z"
+        return datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(
+            datetime.timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+    except Exception:
+        return None
+
+
+def _derive_fiscal_period_from_date(date_str: str | None) -> str | None:
+    if not date_str:
+        return None
+    try:
+        d = datetime.datetime.fromisoformat(str(date_str)[:10]).date()
+    except Exception:
+        return None
+    q = ((d.month - 1) // 3) + 1
+    return f"FY{d.year} Q{q}"
+
+
+def _is_paywalled_url(url: str) -> bool:
+    host = (_urlparse.urlparse(url).hostname or "").lower()
+    blocked = {
+        "seekingalpha.com",
+        "www.seekingalpha.com",
+        "wsj.com",
+        "www.wsj.com",
+        "bloomberg.com",
+        "www.bloomberg.com",
+    }
+    return host in blocked
+
+
+def _classify_earnings_source_url(url: str) -> tuple[str | None, str | None]:
+    if not isinstance(url, str) or not url.strip():
+        return None, "source_url must be a non-empty string"
+    parsed = _urlparse.urlparse(url.strip())
+    if parsed.scheme != "https":
+        return None, "source_url must use https"
+    if _is_paywalled_url(url):
+        return None, "source_url appears paywalled and is not allowed"
+    if url.startswith("https://www.sec.gov/Archives/"):
+        return "sec_8k", None
+    return "company_ir", None
+
+
+def _fetch_public_html(url: str, max_bytes: int = 3_000_000) -> str | None:
+    req = _urlrequest.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; yahoo-finance-mcp-earnings/1.0)"},
+        method="GET",
+    )
+    try:
+        with _urlrequest.urlopen(req, timeout=60) as resp:
+            data = resp.read(max_bytes)
+            return data.decode("utf-8", errors="ignore")
+    except (_urlerror.URLError, ValueError):
+        return None
+
+
+def _scale_number_from_text(raw: str) -> float | None:
+    if raw is None:
+        return None
+    s = str(raw).strip().replace(",", "")
+    if not s:
+        return None
+    m = _re.search(r"[-+]?\d+(?:\.\d+)?", s)
+    if not m:
+        return None
+    n = float(m.group(0))
+    low = s.lower()
+    if "billion" in low or low.endswith("b") or " bn" in low:
+        n *= 1_000_000_000
+    elif "million" in low or low.endswith("m"):
+        n *= 1_000_000
+    elif "thousand" in low or low.endswith("k"):
+        n *= 1_000
+    return n
+
+
+def _first_sentence_for_topic(text: str, topic: str) -> str | None:
+    topic_l = topic.lower()
+    for sent in _re.split(r"(?<=[.!?])\s+", text):
+        if topic_l in sent.lower():
+            return _compact_excerpt(sent, max_len=220)
+    return None
+
+
+def _extract_metric_number(text: str, patterns: list[str]) -> tuple[float | None, str | None, str | None]:
+    for pat in patterns:
+        m = _re.search(pat, text, flags=_re.IGNORECASE)
+        if m:
+            raw = m.group(1)
+            val = _scale_number_from_text(raw)
+            if val is not None:
+                return val, raw, _compact_excerpt(m.group(0), max_len=220)
+    return None, None, None
+
+
+async def _resolve_latest_earnings_sec_source(ticker: str) -> dict | None:
+    raw = await list_sec_company_filings(ticker=ticker, filing_type="8-K", limit=10)
+    payload = _safe_json_loads(raw)
+    filings = payload.get("filings") if isinstance(payload.get("filings"), list) else []
+    if not filings:
+        return None
+    for filing in filings:
+        if not isinstance(filing, dict):
+            continue
+        doc_url = str(filing.get("documentUrl") or "")
+        if not doc_url.startswith("https://www.sec.gov/Archives/"):
+            continue
+        return {
+            "sourceType": "sec_8k",
+            "url": doc_url,
+            "filingDate": filing.get("filingDate"),
+            "acceptedAt": filing.get("acceptedAt"),
+            "accessionNumber": filing.get("accessionNumber"),
+            "confidence": "HIGH",
+        }
+    return None
+
+
+async def _resolve_latest_earnings_release(ticker: str) -> dict:
+    sec = await _resolve_latest_earnings_sec_source(ticker)
+    if sec:
+        reporting_ts = _to_iso_utc(sec.get("acceptedAt")) or _to_iso_utc(sec.get("filingDate"))
+        period = _derive_fiscal_period_from_date(sec.get("filingDate")) or "latest"
+        return {
+            "ticker": ticker.upper(),
+            "eventType": "earnings_release",
+            "period": period,
+            "reportedAt": reporting_ts,
+            "sources": [sec],
+            "confidence": "HIGH",
+            "warnings": [],
+        }
+
+    yahoo_url = f"https://finance.yahoo.com/quote/{ticker.upper()}/analysis"
+    cal_raw = await get_calendar(ticker=ticker.upper())
+    cal = _safe_json_loads(cal_raw)
+    earnings_dates = (((cal.get("calendar") or {}).get("earnings") or {}).get("earningsDate") or [])
+    published = earnings_dates[0] if isinstance(earnings_dates, list) and earnings_dates else None
+    if published:
+        period = _derive_fiscal_period_from_date(published) or "latest"
+        return {
+            "ticker": ticker.upper(),
+            "eventType": "earnings_release",
+            "period": period,
+            "reportedAt": _to_iso_utc(published),
+            "sources": [
+                {
+                    "sourceType": "yahoo_estimate",
+                    "url": yahoo_url,
+                    "publishedAt": _to_iso_utc(published),
+                    "retrievedAt": _utc_now_z(),
+                    "confidence": "MEDIUM",
+                }
+            ],
+            "confidence": "MEDIUM",
+            "warnings": [{"code": "SEC_8K_NOT_FOUND", "message": "SEC 8-K earnings release source not found"}],
+        }
+
+    return {
+        "ticker": ticker.upper(),
+        "eventType": "earnings_release",
+        "period": "latest",
+        "reportedAt": None,
+        "sources": [],
+        "confidence": "NOT_FOUND",
+        "warnings": [],
+    }
+
+
+@yfinance_server.tool(
+    name="get_latest_earnings_release",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_latest_earnings_release"],
+    description="Find the latest public earnings release evidence from SEC 8-K, company IR, or Yahoo earnings calendars.",
+)
+async def get_latest_earnings_release(ticker: str, period: str = "latest") -> str:
+    _ = period  # reserved for future explicit periods
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("get_latest_earnings_release", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    return json.dumps(await _resolve_latest_earnings_release(ticker))
+
+
+@yfinance_server.tool(
+    name="index_earnings_release",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["index_earnings_release"],
+    description="Build a compact section/table index for the latest public earnings release to support deterministic extraction.",
+)
+async def index_earnings_release(ticker: str, period: str = "latest", source_url: str | None = None) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("index_earnings_release", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    source_type = None
+    source_meta: dict = {}
+    if source_url:
+        source_type, source_err = _classify_earnings_source_url(source_url)
+        if source_err:
+            return _mcp_failure("index_earnings_release", ErrorCode.INPUT_VALIDATION_ERROR, source_err)
+        source_meta = {"sourceType": source_type, "url": source_url}
+    else:
+        latest = await _resolve_latest_earnings_release(ticker)
+        sources = latest.get("sources") if isinstance(latest.get("sources"), list) else []
+        src = sources[0] if sources and isinstance(sources[0], dict) else {}
+        source_type = str(src.get("sourceType") or "")
+        source_url = str(src.get("url") or "")
+        source_meta = src
+
+    if not source_url:
+        return json.dumps({
+            "ticker": ticker.upper(),
+            "period": period,
+            "source": {"sourceType": source_type or "unknown", "url": None},
+            "index": {"sections": [], "tables": [], "keywordMap": {}},
+            "meta": {"indexedAt": _utc_now_z(), "cacheKey": f"earnidx:{ticker.upper()}:none", "cacheTtlHours": 24},
+            "warnings": [{"code": "SOURCE_NOT_FOUND", "message": "No public earnings release source found"}],
+        })
+
+    cache_id = str(source_meta.get("accessionNumber") or source_url)
+    cache_key = f"earnidx:{ticker.upper()}:{cache_id}"
+    cached = _tool_cache.get(cache_key)
+    if cached is not None:
+        return cached[0]
+
+    html = await _edgar_get_html(source_url, max_bytes=5_000_000) if source_url.startswith(
+        "https://www.sec.gov/Archives/"
+    ) else _fetch_public_html(source_url)
+    if not html:
+        return _mcp_failure("index_earnings_release", ErrorCode.PROVIDER_ERROR, f"Failed to fetch source: {source_url}")
+
+    idx = _build_filing_index_from_html(_sanitize_sec_html(html))
+    out = {
+        "ticker": ticker.upper(),
+        "period": _derive_fiscal_period_from_date(source_meta.get("filingDate") or source_meta.get("publishedAt")) or period,
+        "source": {
+            "sourceType": source_type or source_meta.get("sourceType") or "company_ir",
+            "url": source_url,
+            "publishedAt": source_meta.get("publishedAt"),
+            "retrievedAt": _utc_now_z(),
+            "filingDate": source_meta.get("filingDate"),
+            "acceptedAt": source_meta.get("acceptedAt"),
+            "accessionNumber": source_meta.get("accessionNumber"),
+        },
+        "index": idx,
+        "meta": {"indexedAt": _utc_now_z(), "cacheKey": cache_key, "cacheTtlHours": 24},
+    }
+    encoded = json.dumps(out)
+    _tool_cache.set(cache_key, encoded, TTL_EDGAR)
+    return encoded
+
+
+@yfinance_server.tool(
+    name="extract_earnings_metrics",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_earnings_metrics"],
+    description="Extract reported earnings metrics (revenue, EPS, margin, operating income, free cash flow, capex) from public earnings sources.",
+)
+async def extract_earnings_metrics(
+    ticker: str,
+    period: str = "latest",
+    source_preference: list[str] | None = None,
+) -> str:
+    _ = source_preference or ["sec_8k", "company_ir", "10-q", "yahoo"]
+    release = await _resolve_latest_earnings_release(ticker)
+    default_metric = lambda unit: {  # noqa: E731
+        "value": None,
+        "unit": unit,
+        "confidence": "NOT_DISCLOSED",
+        "evidence": None,
+    }
+    metrics: dict = {
+        "revenue": default_metric("USD"),
+        "epsDiluted": default_metric("USD/share"),
+        "grossMargin": {
+            "valueRatio": None,
+            "valuePct": None,
+            "rawValue": None,
+            "confidence": "NOT_DISCLOSED",
+            "evidence": None,
+        },
+        "operatingIncome": default_metric("USD"),
+        "freeCashFlow": default_metric("USD"),
+        "capex": default_metric("USD"),
+    }
+    evidence_items: list[dict] = []
+    warnings: list[dict] = []
+    sources = release.get("sources") if isinstance(release.get("sources"), list) else []
+    src = sources[0] if sources and isinstance(sources[0], dict) else {}
+    src_url = str(src.get("url") or "")
+    src_type = str(src.get("sourceType") or "yahoo")
+    src_published = _to_iso_utc(src.get("filingDate") or src.get("publishedAt"))
+    retrieved_at = _utc_now_z()
+
+    if src_url and src_url.startswith("https://www.sec.gov/Archives/"):
+        html = await _edgar_get_html(src_url, max_bytes=5_000_000)
+        text = _strip_html_tags(_sanitize_sec_html(html or ""))
+        revenue_val, revenue_raw, revenue_ex = _extract_metric_number(
+            text,
+            [
+                r"(?:net sales|revenue(?:s)?)\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)",
+            ],
+        )
+        eps_val, eps_raw, eps_ex = _extract_metric_number(
+            text,
+            [
+                r"(?:diluted (?:earnings per share|eps)|eps \(diluted\))\D{0,20}\$?\s*([0-9]+(?:\.[0-9]+)?)",
+            ],
+        )
+        gm_val, gm_raw, gm_ex = _extract_metric_number(
+            text,
+            [r"gross margin\D{0,15}([0-9]{1,2}(?:\.[0-9]+)?)\s*%"],
+        )
+        op_val, op_raw, op_ex = _extract_metric_number(
+            text,
+            [r"operating income\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)"],
+        )
+        fcf_val, fcf_raw, fcf_ex = _extract_metric_number(
+            text,
+            [r"free cash flow\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)"],
+        )
+        capex_val, capex_raw, capex_ex = _extract_metric_number(
+            text,
+            [r"(?:capital expenditures|capex)\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)"],
+        )
+
+        def _ev(excerpt: str | None) -> dict | None:
+            if not excerpt:
+                return None
+            return {
+                "url": src_url,
+                "sourceType": src_type,
+                "publishedAt": src_published,
+                "retrievedAt": retrieved_at,
+                "excerpt": excerpt,
+            }
+
+        if revenue_val is not None:
+            metrics["revenue"] = {
+                "value": revenue_val,
+                "unit": "USD",
+                "rawValue": revenue_raw,
+                "confidence": "HIGH",
+                "evidence": _ev(revenue_ex),
+            }
+        if eps_val is not None:
+            metrics["epsDiluted"] = {
+                "value": eps_val,
+                "unit": "USD/share",
+                "rawValue": f"${eps_raw}" if eps_raw else None,
+                "confidence": "HIGH",
+                "evidence": _ev(eps_ex),
+            }
+        if gm_val is not None:
+            gm_pct = float(gm_val)
+            metrics["grossMargin"] = {
+                "valueRatio": round(gm_pct / 100.0, 6),
+                "valuePct": gm_pct,
+                "rawValue": f"{gm_raw}%" if gm_raw and "%" not in gm_raw else gm_raw,
+                "confidence": "HIGH",
+                "evidence": _ev(gm_ex),
+            }
+        if op_val is not None:
+            metrics["operatingIncome"] = {
+                "value": op_val,
+                "unit": "USD",
+                "rawValue": op_raw,
+                "confidence": "HIGH",
+                "evidence": _ev(op_ex),
+            }
+        if fcf_val is not None:
+            metrics["freeCashFlow"] = {
+                "value": fcf_val,
+                "unit": "USD",
+                "rawValue": fcf_raw,
+                "confidence": "HIGH",
+                "evidence": _ev(fcf_ex),
+            }
+        if capex_val is not None:
+            metrics["capex"] = {
+                "value": capex_val,
+                "unit": "USD",
+                "rawValue": capex_raw,
+                "confidence": "HIGH",
+                "evidence": _ev(capex_ex),
+            }
+        for key in ("revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex"):
+            ev = metrics[key].get("evidence") if isinstance(metrics[key], dict) else None
+            conf = str(metrics[key].get("confidence") or "")
+            if conf == "HIGH" and isinstance(ev, dict):
+                evidence_items.append(ev)
+    else:
+        warnings.append({"code": "PUBLIC_RELEASE_NOT_FOUND", "message": "No SEC 8-K earnings release source available"})
+
+    overall_conf = "NOT_DISCLOSED"
+    if any(str((metrics[k] or {}).get("confidence")) == "HIGH" for k in ("revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex")):
+        overall_conf = "HIGH"
+    elif release.get("confidence") in {"MEDIUM", "LOW"}:
+        overall_conf = str(release.get("confidence"))
+
+    return json.dumps({
+        "ticker": ticker.upper(),
+        "eventType": "earnings_release",
+        "period": release.get("period") or period,
+        "reportedAt": release.get("reportedAt"),
+        "source": src_type if src_type else "yahoo",
+        "metrics": metrics,
+        "evidence": evidence_items,
+        "confidence": overall_conf,
+        "warnings": warnings,
+    })
+
+
+@yfinance_server.tool(
+    name="extract_guidance",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_guidance"],
+    description="Extract company-provided earnings guidance/outlook ranges from public SEC 8-K or IR release text.",
+)
+async def extract_guidance(ticker: str, period: str = "latest") -> str:
+    release = await _resolve_latest_earnings_release(ticker)
+    base = {
+        "revenue": {"status": "NOT_DISCLOSED", "low": None, "high": None, "midpoint": None, "unit": "USD", "evidence": []},
+        "grossMargin": {"status": "NOT_DISCLOSED", "lowPct": None, "highPct": None, "midpointPct": None, "evidence": []},
+        "eps": {"status": "NOT_DISCLOSED", "low": None, "high": None, "midpoint": None, "unit": "USD/share", "evidence": []},
+    }
+    sources = release.get("sources") if isinstance(release.get("sources"), list) else []
+    src = sources[0] if sources and isinstance(sources[0], dict) else {}
+    src_url = str(src.get("url") or "")
+    if not src_url.startswith("https://www.sec.gov/Archives/"):
+        return json.dumps({"ticker": ticker.upper(), "period": release.get("period") or period, "guidance": base, "confidence": "NOT_DISCLOSED", "warnings": []})
+
+    html = await _edgar_get_html(src_url, max_bytes=5_000_000)
+    text = _strip_html_tags(_sanitize_sec_html(html or ""))
+    patterns = {
+        "revenue": _re.search(r"(?:expects|guidance|outlook)[^.\n]{0,120}revenue[^$]{0,25}\$?\s*([0-9.,]+(?:\s*(?:billion|million|thousand|bn|m|k))?)\s*(?:to|-)\s*\$?\s*([0-9.,]+(?:\s*(?:billion|million|thousand|bn|m|k))?)", text, flags=_re.IGNORECASE),
+        "grossMargin": _re.search(r"gross margin[^0-9]{0,20}([0-9]{1,2}(?:\.[0-9]+)?)\s*%\s*(?:to|-)\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%", text, flags=_re.IGNORECASE),
+        "eps": _re.search(r"(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per share)[^$]{0,25}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|-)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", text, flags=_re.IGNORECASE),
+    }
+    if patterns["revenue"]:
+        lo = _scale_number_from_text(patterns["revenue"].group(1))
+        hi = _scale_number_from_text(patterns["revenue"].group(2))
+        if lo is not None and hi is not None:
+            base["revenue"] = {
+                "status": "FOUND",
+                "low": lo,
+                "high": hi,
+                "midpoint": (lo + hi) / 2.0,
+                "unit": "USD",
+                "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_z(), "excerpt": _compact_excerpt(patterns["revenue"].group(0))}],
+            }
+    if patterns["grossMargin"]:
+        lo = float(patterns["grossMargin"].group(1))
+        hi = float(patterns["grossMargin"].group(2))
+        base["grossMargin"] = {
+            "status": "FOUND",
+            "lowPct": lo,
+            "highPct": hi,
+            "midpointPct": (lo + hi) / 2.0,
+            "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_z(), "excerpt": _compact_excerpt(patterns["grossMargin"].group(0))}],
+        }
+    if patterns["eps"]:
+        lo = float(patterns["eps"].group(1))
+        hi = float(patterns["eps"].group(2))
+        base["eps"] = {
+            "status": "FOUND",
+            "low": lo,
+            "high": hi,
+            "midpoint": (lo + hi) / 2.0,
+            "unit": "USD/share",
+            "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_z(), "excerpt": _compact_excerpt(patterns["eps"].group(0))}],
+        }
+    found = any(base[k]["status"] == "FOUND" for k in ("revenue", "grossMargin", "eps"))
+    return json.dumps({
+        "ticker": ticker.upper(),
+        "period": release.get("period") or period,
+        "guidance": base,
+        "confidence": "HIGH" if found else "NOT_DISCLOSED",
+        "warnings": [],
+    })
+
+
+@yfinance_server.tool(
+    name="extract_management_commentary",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_management_commentary"],
+    description="Extract neutral, topic-specific management commentary snippets from public earnings release sources.",
+)
+async def extract_management_commentary(ticker: str, period: str = "latest", topics: list[str] | None = None) -> str:
+    topic_list = [str(t).strip() for t in (topics or []) if str(t).strip()]
+    release = await _resolve_latest_earnings_release(ticker)
+    sources = release.get("sources") if isinstance(release.get("sources"), list) else []
+    src = sources[0] if sources and isinstance(sources[0], dict) else {}
+    src_url = str(src.get("url") or "")
+    text = ""
+    if src_url.startswith("https://www.sec.gov/Archives/"):
+        html = await _edgar_get_html(src_url, max_bytes=5_000_000)
+        text = _strip_html_tags(_sanitize_sec_html(html or ""))
+    elif src_url:
+        text = _strip_html_tags(_sanitize_sec_html(_fetch_public_html(src_url) or ""))
+    out_topics: list[dict] = []
+    for topic in topic_list:
+        excerpt = _first_sentence_for_topic(text, topic) if text else None
+        if excerpt:
+            out_topics.append({
+                "topic": topic,
+                "status": "FOUND",
+                "summary": excerpt,
+                "evidence": [{
+                    "sourceType": src.get("sourceType", "company_ir"),
+                    "url": src_url,
+                    "publishedAt": _to_iso_utc(src.get("filingDate") or src.get("publishedAt")),
+                    "retrievedAt": _utc_now_z(),
+                    "excerpt": excerpt[:240],
+                }],
+                "confidence": "MEDIUM" if src.get("sourceType") != "sec_8k" else "HIGH",
+            })
+        else:
+            out_topics.append({
+                "topic": topic,
+                "status": "NOT_FOUND",
+                "summary": "",
+                "evidence": [],
+                "confidence": "LOW",
+            })
+    return json.dumps({"ticker": ticker.upper(), "period": release.get("period") or period, "topics": out_topics, "warnings": []})
+
+
+@yfinance_server.tool(
+    name="compare_earnings_actual_vs_estimate",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["compare_earnings_actual_vs_estimate"],
+    description="Compare reported actual earnings metrics against public Yahoo analyst estimates and return surprise percentages.",
+)
+async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest") -> str:
+    metrics = _safe_json_loads(await extract_earnings_metrics(ticker=ticker, period=period))
+    ea = _safe_json_loads(await get_earnings_analysis(ticker=ticker))
+    actual_rev = (((metrics.get("metrics") or {}).get("revenue") or {}).get("value")
+                  if isinstance((metrics.get("metrics") or {}).get("revenue"), dict) else None)
+    actual_eps = (((metrics.get("metrics") or {}).get("epsDiluted") or {}).get("value")
+                  if isinstance((metrics.get("metrics") or {}).get("epsDiluted"), dict) else None)
+
+    revenue_est = None
+    rev_est_arr = ea.get("revenueEstimate") if isinstance(ea.get("revenueEstimate"), list) else []
+    for row in rev_est_arr:
+        if isinstance(row, dict) and str(row.get("period")) == "0q":
+            revenue_est = row.get("avg")
+            break
+    eps_est = None
+    hist = ea.get("earningsHistory") if isinstance(ea.get("earningsHistory"), list) else []
+    if hist and isinstance(hist[0], dict):
+        eps_est = hist[0].get("epsEstimate")
+
+    warnings: list[dict] = []
+    result = {
+        "ticker": ticker.upper(),
+        "period": metrics.get("period") or period,
+        "actual": {
+            "revenue": {"value": actual_rev, "unit": "USD"},
+            "eps": {"value": actual_eps, "unit": "USD/share"},
+        },
+        "estimate": {
+            "revenue": {"value": revenue_est, "unit": "USD", "source": "yahoo"},
+            "eps": {"value": eps_est, "unit": "USD/share", "source": "yahoo"},
+        },
+        "surprise": {
+            "revenueSurprisePct": None,
+            "epsSurprisePct": None,
+        },
+        "confidence": "NOT_DISCLOSED",
+        "warnings": warnings,
+    }
+    if actual_rev is None or actual_eps is None or revenue_est in (None, 0) or eps_est in (None, 0):
+        return json.dumps(result)
+
+    try:
+        result["surprise"]["revenueSurprisePct"] = round(((float(actual_rev) - float(revenue_est)) / abs(float(revenue_est))) * 100, 2)
+        result["surprise"]["epsSurprisePct"] = round(((float(actual_eps) - float(eps_est)) / abs(float(eps_est))) * 100, 2)
+    except Exception:
+        return json.dumps(result)
+    result["confidence"] = "HIGH"
+    actual_period = str(metrics.get("period") or "")
+    if not actual_period:
+        warnings.append({"code": "PERIOD_MISMATCH", "message": "Actual and estimate periods could not be aligned"})
+        result["confidence"] = "LOW"
+    return json.dumps(result)
 
 
 @yfinance_server.tool(name="get_tps_inputs", output_schema=_TOOL_OUTPUT_SCHEMAS["get_tps_inputs"], description="Deprecated alias for analyze_position_signals.")

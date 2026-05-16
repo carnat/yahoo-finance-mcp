@@ -44,6 +44,12 @@ CANONICAL_TOOLS = {
     "extract_risk_factor_mentions",
     "extract_customer_concentration",
     "query_sec_filing_index",
+    "get_latest_earnings_release",
+    "index_earnings_release",
+    "extract_earnings_metrics",
+    "extract_guidance",
+    "extract_management_commentary",
+    "compare_earnings_actual_vs_estimate",
     "health_check",
 }
 
@@ -65,6 +71,16 @@ SMOKE_ARGS: dict[str, dict] = {
         "filing_type": "10-K",
         "period": "latest",
     },
+    "get_latest_earnings_release": {"ticker": "AAPL", "period": "latest"},
+    "index_earnings_release": {"ticker": "AAPL", "period": "latest"},
+    "extract_earnings_metrics": {"ticker": "AAPL", "period": "latest"},
+    "extract_guidance": {"ticker": "AAPL", "period": "latest"},
+    "extract_management_commentary": {
+        "ticker": "AAPL",
+        "period": "latest",
+        "topics": ["demand", "China", "AI"],
+    },
+    "compare_earnings_actual_vs_estimate": {"ticker": "AAPL", "period": "latest"},
 }
 
 _ALLOW_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in ("1", "true", "yes")
