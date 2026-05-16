@@ -6465,9 +6465,65 @@ async def analyze_position_signals(ticker: str) -> str:
     return await get_position_score_inputs(ticker)
 
 
-@yfinance_server.tool(name="list_sec_company_filings", output_schema=_TOOL_OUTPUT_SCHEMAS["list_sec_filings"], description="Canonical alias for list_sec_filings.")
+@yfinance_server.tool(name="list_sec_company_filings", output_schema=_TOOL_OUTPUT_SCHEMAS["list_sec_filings"], description="""List SEC filings for a company from EDGAR submissions.
+
+Returns compact metadata for each filing including accession number, filing date, accepted timestamp, and a direct document URL.
+
+Args:
+    ticker: Ticker symbol.
+    filing_type: SEC form type, e.g. "10-K", "10-Q", "8-K". Defaults to "10-K".
+    limit: Maximum number of filings to return (1-20). Defaults to 5.
+""")
 async def list_sec_company_filings(ticker: str, filing_type: str = "10-K", limit: int = 5, form_type: str | None = None, max_filings: int | None = None) -> str:
-    return await list_sec_filings(ticker, form_type or filing_type, max_filings or limit)
+    resolved_type = form_type or filing_type
+    resolved_limit = min(max(1, max_filings or limit), 20)
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("list_sec_company_filings", ErrorCode.INPUT_VALIDATION_ERROR, err)
+
+    cik_padded, subs = await _get_submissions_for_ticker(ticker)
+    if not cik_padded or not subs:
+        return _mcp_failure("list_sec_company_filings", ErrorCode.TICKER_NOT_FOUND,
+                            f"Could not find EDGAR submissions for ticker '{ticker}'")
+
+    cik_int = int(cik_padded)
+    recent = subs.get("filings", {}).get("recent", {})
+    forms: list[str] = recent.get("form", [])
+    dates: list[str] = recent.get("filingDate", [])
+    accessions: list[str] = recent.get("accessionNumber", [])
+    primary_docs: list[str] = recent.get("primaryDocument", [])
+    accepted_dts: list[str] = recent.get("acceptanceDateTime", [])
+
+    results: list[dict] = []
+    for i, form in enumerate(forms):
+        if len(results) >= resolved_limit:
+            break
+        if str(form).upper() != resolved_type.upper():
+            continue
+        acc = accessions[i] if i < len(accessions) else ""
+        date = dates[i] if i < len(dates) else ""
+        accepted_at = accepted_dts[i] if i < len(accepted_dts) else None
+        primary_doc = primary_docs[i] if i < len(primary_docs) else ""
+        _, doc_url = _edgar_build_filing_urls(cik_int, acc, primary_doc)
+        results.append({
+            "filingType": form,
+            "filingDate": date,
+            "acceptedAt": accepted_at,
+            "accessionNumber": acc,
+            "primaryDocument": primary_doc,
+            "documentUrl": doc_url,
+        })
+
+    retrieved_at = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+    return json.dumps({
+        "ticker": ticker,
+        "cik": cik_padded,
+        "filings": results,
+        "meta": {
+            "source": "sec_submissions",
+            "retrievedAt": retrieved_at,
+        },
+    })
 
 
 async def _resolve_latest_sec_doc_url(ticker: str, filing_type: str = "10-K") -> str | None:
@@ -6680,19 +6736,27 @@ def _build_filing_index_from_html(html: str) -> dict:
                 if label and len(label) < 100:
                     row_labels.append(label)
 
-        # Unit scale
+        # Unit scale: default to "unknown"; detect explicitly from context.
         pre_context = sanitized[max(0, table_start - 2000):table_start].lower()
         table_context = (table_html + pre_context).lower()
-        unit_scale = "millions"
         if "billion" in table_context or "in billions" in table_context:
             unit_scale = "billions"
+        elif "million" in table_context or "in millions" in table_context:
+            unit_scale = "millions"
         elif "thousand" in table_context or "in thousands" in table_context:
             unit_scale = "thousands"
+        else:
+            unit_scale = "unknown"
 
-        # Confidence
+        # Confidence: also lower when unitScale is unknown
         has_year_headers = any(_re.search(r'\b20\d\d\b', h) for h in headers)
         has_row_labels = bool(row_labels)
-        confidence = "HIGH" if (has_year_headers and has_row_labels) else ("MEDIUM" if (has_year_headers or has_row_labels) else "LOW")
+        if has_year_headers and has_row_labels and unit_scale != "unknown":
+            confidence = "HIGH"
+        elif has_year_headers or has_row_labels:
+            confidence = "MEDIUM"
+        else:
+            confidence = "LOW"
 
         # Infer title from preceding text
         pre_text = _strip_html_tags(sanitized[max(0, table_start - 500):table_start])
@@ -6819,7 +6883,17 @@ async def _index_sec_filing_impl(
 @yfinance_server.tool(
     name="index_sec_filing",
     output_schema=_TOOL_OUTPUT_SCHEMAS["index_sec_filing"],
-    description="Build a deterministic section/table index for an SEC filing. Identifies headings, tables, row labels, and units, enabling subsequent queries without re-fetching the filing.",
+    description="""Build a deterministic section/table index for an SEC filing.
+Identifies headings, tables, row labels, and units, enabling subsequent queries without re-fetching the filing.
+
+Args:
+    ticker: Ticker symbol.
+    filing_type: SEC form type, e.g. "10-K" or "10-Q". Defaults to "10-K".
+    period: Reserved for future multi-period support. Currently only "latest" is supported.
+        When accession_number is provided, the specific filing is indexed regardless of period.
+    accession_number: Optional SEC accession number (format XXXXXXXXXX-YY-ZZZZZZ).
+        If omitted, the most recent filing matching filing_type is indexed.
+""",
 )
 async def index_sec_filing(
     ticker: str,
@@ -6840,7 +6914,17 @@ async def index_sec_filing(
 @yfinance_server.tool(
     name="get_sec_filing_index",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_sec_filing_index"],
-    description="Get the pre-built section/table index for an SEC filing. Returns cached index when available; builds and caches on first call.",
+    description="""Get the pre-built section/table index for an SEC filing.
+Returns cached index when available; builds and caches on first call.
+
+Args:
+    ticker: Ticker symbol.
+    filing_type: SEC form type, e.g. "10-K" or "10-Q". Defaults to "10-K".
+    period: Reserved for future multi-period support. Currently only "latest" is supported.
+        When accession_number is provided, the specific filing is returned regardless of period.
+    accession_number: Optional SEC accession number (format XXXXXXXXXX-YY-ZZZZZZ).
+        If omitted, the most recent filing matching filing_type is used.
+""",
 )
 async def get_sec_filing_index(
     ticker: str,

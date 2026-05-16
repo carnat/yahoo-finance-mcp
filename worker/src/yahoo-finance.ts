@@ -5003,6 +5003,51 @@ export async function listSecFilings(ticker: string, formType: string = "10-K", 
   }
 }
 
+// ── list_sec_company_filings ──────────────────────────────────────────────────
+
+/** Phase 2 canonical listing: returns cik, filingType, acceptedAt, primaryDocument, documentUrl, meta. */
+export async function listSecCompanyFilings(ticker: string, filingType: string = "10-K", limit: number = 5): Promise<string> {
+  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
+  if (!cikPadded || !submissions) {
+    return JSON.stringify({ ok: false, error: { code: "TICKER_NOT_FOUND", message: `Could not find EDGAR submissions for ticker '${ticker}'` } });
+  }
+
+  const cikInt = parseInt(cikPadded, 10);
+  const recent = ((submissions.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+  const forms = (recent.form as string[]) ?? [];
+  const dates = (recent.filingDate as string[]) ?? [];
+  const accessions = (recent.accessionNumber as string[]) ?? [];
+  const primaryDocs = (recent.primaryDocument as string[]) ?? [];
+  const acceptedDts = (recent.acceptanceDateTime as string[]) ?? [];
+
+  const cap = Math.min(Math.max(1, limit), 20);
+  const results: Record<string, unknown>[] = [];
+  for (let i = 0; i < forms.length && results.length < cap; i++) {
+    if ((forms[i] ?? "").toUpperCase() !== filingType.toUpperCase()) continue;
+    const acc = accessions[i] ?? "";
+    const primaryDoc = primaryDocs[i] ?? "";
+    const accClean = acc.replace(/-/g, "");
+    const documentUrl = primaryDoc
+      ? `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accClean}/${primaryDoc}`
+      : null;
+    results.push({
+      filingType: forms[i],
+      filingDate: dates[i] ?? "",
+      acceptedAt: acceptedDts[i] ?? null,
+      accessionNumber: acc,
+      primaryDocument: primaryDoc,
+      documentUrl,
+    });
+  }
+
+  return JSON.stringify({
+    ticker,
+    cik: cikPadded,
+    filings: results,
+    meta: { source: "sec_submissions", retrievedAt: new Date().toISOString() },
+  });
+}
+
 // ── get_filing_outline ────────────────────────────────────────────────────────
 
 export async function getFilingOutline(ticker: string, _accessionNumber: string | null, documentUrl: string | null): Promise<string> {
@@ -5456,17 +5501,21 @@ function _buildFilingIndexFromHtml(
       }
     }
 
-    // Detect unit scale
+    // Detect unit scale: default to "unknown"; detect explicitly from context.
     const preContext = sanitized.slice(Math.max(0, tableStart - 2000), tableStart).toLowerCase();
     const tableContext = (tableHtml + preContext).toLowerCase();
-    let unitScale = "millions";
+    let unitScale: string;
     if (/billion|in billions/.test(tableContext)) unitScale = "billions";
+    else if (/million|in millions/.test(tableContext)) unitScale = "millions";
     else if (/thousand|in thousands/.test(tableContext)) unitScale = "thousands";
+    else unitScale = "unknown";
 
-    // Confidence
+    // Confidence: also lower when unitScale is unknown
     const hasYearHeaders = headers.some(h => /\b20\d\d\b/.test(h));
     const hasRowLabels = rowLabels.length > 0;
-    const confidence = hasYearHeaders && hasRowLabels ? "HIGH" : (hasYearHeaders || hasRowLabels ? "MEDIUM" : "LOW");
+    const confidence = (hasYearHeaders && hasRowLabels && unitScale !== "unknown") ? "HIGH"
+      : (hasYearHeaders || hasRowLabels) ? "MEDIUM"
+      : "LOW";
 
     // Infer title from pre-context
     const preText = _stripHtmlTagsIdx(sanitized.slice(Math.max(0, tableStart - 500), tableStart));
