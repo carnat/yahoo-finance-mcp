@@ -228,8 +228,10 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
 class TestPhase6BPublicWording(unittest.TestCase):
     def test_no_private_terms_in_public_descriptions(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        server_text = open(os.path.join(root, "server.py"), encoding="utf-8").read()
-        tools_text = open(os.path.join(root, "worker", "src", "tools.ts"), encoding="utf-8").read()
+        with open(os.path.join(root, "server.py"), encoding="utf-8") as f:
+            server_text = f.read()
+        with open(os.path.join(root, "worker", "src", "tools.ts"), encoding="utf-8") as f:
+            tools_text = f.read()
         private_terms = ("Commander", "portfolio state", "doctrine", "DC-", "TPS", "PCCE")
         names = [
             "get_company_news",
