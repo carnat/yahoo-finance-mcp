@@ -21,11 +21,18 @@ and does not inject a "ticker" key, so "ticker" is not a stable key for that too
 from __future__ import annotations
 
 import json
+import os
 import sys
+import urllib.error
 import urllib.request
 
 URL = "https://yahoo-finance-mcp.artinatw.workers.dev/mcp"
 UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-universal-aliases/1.0)"
+
+# Set ALLOW_NETWORK_SKIP=1 (or "true"/"yes") to skip gracefully when the
+# deployed worker is unreachable or behind (e.g. pre-deployment CI runs).
+# The deployed smoke-test (deploy-worker.yml) always sets ALLOW_NETWORK_SKIP=0.
+_ALLOW_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "0").lower() in ("1", "true", "yes")
 
 # (canonical, args, alias, required_stable_keys_in_data, expect_deprecated_warning)
 ALIAS_PAIRS: list[tuple[str, dict, str, set[str], bool]] = [
@@ -80,6 +87,13 @@ def main() -> int:
         try:
             can_payload = rpc(canonical, args, i)
             ali_payload = rpc(alias, args, i + 100)
+        except urllib.error.URLError as exc:
+            if _ALLOW_SKIP:
+                print(f"SKIP universal alias tests: worker unreachable ({exc})")
+                return 0
+            failures.append(f"{alias}: network error — {exc}")
+            continue
+        try:
             can_data = data_of(can_payload)
             ali_data = data_of(ali_payload)
 
