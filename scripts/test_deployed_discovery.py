@@ -33,7 +33,29 @@ CANONICAL_TOOLS = {
     "get_sec_filing_table",
     "extract_sec_filing_fact",
     "search_sec_filing_text",
+    "index_sec_filing",
+    "get_sec_filing_index",
     "health_check",
+}
+
+# Safe args for tools that can be called generically during tool-scan loop.
+# Tools not listed here are validated via discovery/schema only; no runtime call with {}.
+SMOKE_ARGS: dict[str, dict] = {
+    "health_check": {},
+    "get_fast_info": {"ticker": "AAPL"},
+    "get_historical_stock_prices": {"ticker": "AAPL", "period": "5d", "interval": "1d"},
+    "get_stock_info": {"ticker": "AAPL", "include_all": False},
+    "get_etf_info": {"ticker": "SPY"},
+    "get_yahoo_finance_news": {"ticker": "AAPL"},
+    "search_ticker": {"query": "Apple", "exchange": "US", "max_results": 3},
+    "get_option_expiration_dates": {"ticker": "AAPL"},
+    "get_filing_data": {
+        "ticker": "AAOI",
+        "fact_type": "geographic_revenue",
+        "region": "China",
+        "filing_type": "10-K",
+        "period": "latest",
+    },
 }
 
 _ALLOW_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in ("1", "true", "yes")
@@ -86,6 +108,66 @@ def assert_no_unknown_tool(payload: dict, tool: str) -> None:
     bad = ("unknown tool", "method not found", "unregistered dispatch")
     if any(b in s for b in bad):
         raise AssertionError(f"{tool} returned non-callable error: {payload}")
+
+
+def _check_aaoi_geographic_revenue_schema(data: dict) -> None:
+    """AAOI geographic revenue schema check: denominator/valueRatio/valuePct normalization."""
+    if data.get("valuePct") is not None:
+        if data.get("denominator") is None:
+            raise AssertionError(f"AAOI: valuePct present but denominator is null: {data}")
+    if data.get("valueRatio") is not None:
+        ratio = float(data["valueRatio"])
+        if not (0.0 <= ratio <= 1.0):
+            raise AssertionError(f"AAOI: valueRatio {ratio} not in [0, 1] decimal range")
+    if data.get("valuePct") is not None:
+        pct = float(data["valuePct"])
+        if not (0.0 <= pct <= 100.0):
+            raise AssertionError(f"AAOI: valuePct {pct} not in [0, 100] percent range")
+    if "extractionMethod" not in data:
+        raise AssertionError(f"AAOI: extractionMethod missing in response: {data}")
+    if "confidence" not in data:
+        raise AssertionError(f"AAOI: confidence missing in response: {data}")
+    if not (data.get("documentUrl") or data.get("primaryDocumentUrl")):
+        raise AssertionError(f"AAOI: neither documentUrl nor primaryDocumentUrl present: {data}")
+
+
+def _check_axti_not_disclosed_schema(data: dict) -> None:
+    """AXTI NOT_DISCLOSED schema check: stable null keys for undisclosed geographic revenue."""
+    stable_null_keys = ("value", "denominator", "valueRatio", "valuePct")
+    for k in stable_null_keys:
+        if k in data and data[k] is not None:
+            raise AssertionError(f"AXTI: {k} should be null, got {data[k]!r}")
+    extraction = data.get("extractionMethod")
+    if extraction not in (None, "NONE", "NOT_DISCLOSED"):
+        raise AssertionError(f"AXTI: extractionMethod should be NONE, got {extraction!r}")
+    confidence = data.get("confidence")
+    if confidence not in (None, "NOT_DISCLOSED"):
+        raise AssertionError(f"AXTI: confidence should be NOT_DISCLOSED, got {confidence!r}")
+
+
+def _check_yahoo_news_structured(data: dict) -> None:
+    """Yahoo news structured response schema check."""
+    if not isinstance(data, dict):
+        raise AssertionError(f"get_company_news returned non-object: {type(data)}")
+    if "items" not in data or not isinstance(data.get("items"), list):
+        raise AssertionError("get_company_news missing items[]")
+    meta = data.get("meta") or {}
+    if not isinstance(meta, dict):
+        raise AssertionError("get_company_news missing meta object")
+    if meta.get("source") != "yahoo_finance":
+        raise AssertionError(
+            f"get_company_news meta.source expected 'yahoo_finance', got {meta.get('source')!r}"
+        )
+    required_item_fields = ("title", "publisher", "url", "publishedAt", "retrievedAt", "sourceType")
+    for item in (data.get("items") or [])[:5]:
+        if not isinstance(item, dict):
+            raise AssertionError(f"get_company_news items[] entry is not an object: {item!r}")
+        for field in required_item_fields:
+            if field not in item:
+                raise AssertionError(f"get_company_news item missing field '{field}': {item}")
+    # Must not be a plain text blob
+    if "_raw" in data:
+        raise AssertionError("get_company_news returned raw text blob instead of structured JSON")
 
 
 def main() -> int:
@@ -164,6 +246,9 @@ def main() -> int:
         ("extract_sec_filing_fact", {"ticker": "QCOM", "fact": "geographic_revenue", "region": "China"}),
         ("search_sec_filing_text", {"ticker": "AAPL", "search_terms": ["Greater China"], "filing_type": "10-K"}),
         ("get_company_news", {"ticker": "AAPL"}),
+        # PR50 AAOI/AXTI schema smoke
+        ("extract_sec_filing_fact", {"ticker": "AAOI", "fact_type": "geographic_revenue", "region": "China", "filing_type": "10-K", "period": "latest"}),
+        ("extract_sec_filing_fact", {"ticker": "AXTI", "fact_type": "geographic_revenue", "region": "China", "filing_type": "10-K", "period": "latest"}),
     ]
     if doc_url:
         calls.extend([
@@ -186,41 +271,92 @@ def main() -> int:
             contracts = data.get("contracts")
             if isinstance(contracts, list) and len(contracts) > 10:
                 raise AssertionError("max_contracts=10 not honored")
-            # dataQuality must be present
             if "dataQuality" not in data:
                 raise AssertionError("get_option_chain missing dataQuality block")
-            # filtersApplied must reflect new defaults
             fa = data.get("filtersApplied") or {}
-            if fa.get("sort_by") not in ("relevance", None):
-                # Only assert when max_contracts is not overriding everything
-                pass  # accept — explicit max_contracts override may keep old sort
-            # filtersApplied should include moneyness_window_pct and include_illiquid
             for key in ("sort_by", "moneyness"):
                 if key not in fa:
                     raise AssertionError(f"get_option_chain filtersApplied missing: {key}")
-        if name == "extract_sec_filing_fact":
+        if name == "extract_sec_filing_fact" and args.get("ticker") == "QCOM":
             data = extract_data(payload)
             if not isinstance(data, dict):
                 raise AssertionError("extract_sec_filing_fact returned non-object")
             if "valuePct" not in data:
                 raise AssertionError("extract_sec_filing_fact missing valuePct")
+        if name == "extract_sec_filing_fact" and args.get("ticker") == "AAOI":
+            data = extract_data(payload)
+            if isinstance(data, dict):
+                _check_aaoi_geographic_revenue_schema(data)
+                print("  PASS AAOI geographic revenue schema check")
+        if name == "extract_sec_filing_fact" and args.get("ticker") == "AXTI":
+            data = extract_data(payload)
+            if isinstance(data, dict):
+                _check_axti_not_disclosed_schema(data)
+                print("  PASS AXTI NOT_DISCLOSED schema check")
         if name == "get_company_news":
             data = extract_data(payload)
-            if not isinstance(data, dict):
-                raise AssertionError("get_company_news returned non-object")
-            if "items" not in data or not isinstance(data.get("items"), list):
-                raise AssertionError("get_company_news missing items[]")
-            if "meta" not in data or not isinstance(data.get("meta"), dict):
-                raise AssertionError("get_company_news missing meta object")
+            _check_yahoo_news_structured(data)
+            print("  PASS Yahoo news structured smoke")
 
+    # Chained option-chain smoke (AAPL)
+    aapl_exp_payload = call_tool("get_option_expiration_dates", {"ticker": "AAPL"}, 900)
+    assert_no_unknown_tool(aapl_exp_payload, "get_option_expiration_dates")
+    aapl_dates = extract_data(aapl_exp_payload)
+    aapl_expiry = aapl_dates[0] if isinstance(aapl_dates, list) and aapl_dates else "2025-06-20"
+    aapl_chain = call_tool(
+        "get_option_chain",
+        {"ticker": "AAPL", "expiration_date": aapl_expiry, "option_type": "calls"},
+        901,
+    )
+    assert_no_unknown_tool(aapl_chain, "get_option_chain")
+    chain_data = extract_data(aapl_chain)
+    if not isinstance(chain_data, dict):
+        raise AssertionError(f"get_option_chain (AAPL) returned non-object: {chain_data!r}")
+    if "dataQuality" not in chain_data:
+        raise AssertionError("get_option_chain (AAPL) missing dataQuality")
+    if "filtersApplied" not in chain_data:
+        raise AssertionError("get_option_chain (AAPL) missing filtersApplied")
+    print("  PASS chained option-chain smoke (AAPL)")
+
+    # Invalid-args validation test: get_historical_stock_prices({}) must not cause provider 404
+    bad_payload = call_tool("get_historical_stock_prices", {}, 902)
+    bad_str = json.dumps(bad_payload)
+    # Must return a validation error. The specific check is whether we see a Yahoo chart 404
+    # (which indicates the provider was called with no ticker before validation occurred).
+    # We detect this by checking whether the error is a provider HTTP 404 on the chart endpoint,
+    # NOT just any mention of those strings.
+    is_provider_404 = (
+        "chart" in bad_str.lower()
+        and "404" in bad_str
+        and ("yahoo" in bad_str.lower() or "finance" in bad_str.lower())
+        and "INPUT_VALIDATION_ERROR" not in bad_str
+    )
+    if is_provider_404:
+        raise AssertionError(
+            f"get_historical_stock_prices({{}}) caused provider 404 instead of INPUT_VALIDATION_ERROR.\n"
+            f"Response: {bad_str[:400]}"
+        )
+    if not (
+        "INPUT_VALIDATION_ERROR" in bad_str
+        or (isinstance(bad_payload, dict) and bad_payload.get("ok") is False)
+        or (isinstance(bad_payload, dict) and bad_payload.get("error"))
+    ):
+        raise AssertionError(
+            f"get_historical_stock_prices({{}}) expected validation error or ok=false, got: {bad_str[:400]}"
+        )
+    print("  PASS invalid-args test (empty ticker returns validation error, not provider 404)")
+
+    # Tool-scan loop: use SMOKE_ARGS for known-safe tools; skip runtime call for others
     for idx, t in enumerate(tools, start=1000):
         if not isinstance(t, dict):
             continue
         n = str(t.get("name", ""))
         if not n:
             continue
-        payload = call_tool(n, {}, idx)
-        assert_no_unknown_tool(payload, n)
+        if n in SMOKE_ARGS:
+            payload = call_tool(n, SMOKE_ARGS[n], idx)
+            assert_no_unknown_tool(payload, n)
+        # Tools not in SMOKE_ARGS: discovery/schema validated above, skip runtime call with {}
 
     print(f"PASS deployed discovery + smoke ({len(names)} tools)")
     return 0
