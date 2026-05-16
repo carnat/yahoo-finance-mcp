@@ -483,6 +483,21 @@ def _get_path(obj: Any, path: str) -> Any:
     return cur
 
 
+def is_error_payload(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("ok") is False:
+        return True
+    err = payload.get("error")
+    return err is not None
+
+
+def extract_data(payload: Any) -> Any:
+    if isinstance(payload, dict) and "data" in payload and "ok" in payload:
+        return payload.get("data")
+    return payload
+
+
 def _check_assertions(
     inner: Any, assertions: list[tuple[str, Any]]
 ) -> list[str]:
@@ -520,8 +535,9 @@ def _is_ok(
     assertions: list[tuple[str, Any]],
 ) -> tuple[bool, str]:
     """Return (passed, detail_message)."""
-    if "error" in response:
-        return False, f"JSON-RPC error: {response['error']}"
+    rpc_error = response.get("error")
+    if rpc_error is not None:
+        return False, f"JSON-RPC error: {rpc_error}"
 
     result = response.get("result", {})
     content = result.get("content", [])
@@ -534,11 +550,16 @@ def _is_ok(
         return False, "empty text in content[0]"
 
     # Parse inner text for assertion checking
+    inner_payload: Any = None
     inner: Any = None
     try:
-        inner = json.loads(text)
-        if isinstance(inner, dict) and "error" in inner:
-            return False, f"tool returned error: {inner['error']}"
+        inner_payload = json.loads(text)
+        if is_error_payload(inner_payload):
+            payload_error = inner_payload.get("error") if isinstance(inner_payload, dict) else None
+            if payload_error is None and isinstance(inner_payload, dict) and inner_payload.get("ok") is False:
+                payload_error = "ok=false"
+            return False, f"tool returned error: {payload_error}"
+        inner = extract_data(inner_payload)
     except json.JSONDecodeError:
         pass  # non-JSON text is fine (e.g. "No data found")
 
@@ -592,7 +613,9 @@ def _resolve_glw_10k_accession(url: str) -> tuple[str | None, str | None]:
         if not content:
             return None, None
         text = content[0].get("text", "") if isinstance(content[0], dict) else ""
-        data = json.loads(text)
+        data = extract_data(json.loads(text))
+        if not isinstance(data, dict):
+            return None, None
         acc = data.get("accessionNumber")
         doc_url = data.get("documentUrl")
         if acc:
