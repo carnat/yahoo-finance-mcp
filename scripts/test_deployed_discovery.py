@@ -35,6 +35,14 @@ CANONICAL_TOOLS = {
     "search_sec_filing_text",
     "index_sec_filing",
     "get_sec_filing_index",
+    # Phase 3 extractor tools
+    "extract_geographic_revenue",
+    "extract_segment_revenue",
+    "extract_total_revenue",
+    "extract_revenue_exposure",
+    "extract_china_exposure",
+    "extract_risk_factor_mentions",
+    "extract_customer_concentration",
     "health_check",
 }
 
@@ -311,6 +319,14 @@ def main() -> int:
         # PR50 AAOI/AXTI schema smoke
         ("extract_sec_filing_fact", {"ticker": "AAOI", "fact_type": "geographic_revenue", "region": "China", "filing_type": "10-K", "period": "latest"}),
         ("extract_sec_filing_fact", {"ticker": "AXTI", "fact_type": "geographic_revenue", "region": "China", "filing_type": "10-K", "period": "latest"}),
+        # Phase 3 extractor tools — dispatch smoke (schema-only, no deep value assertions)
+        ("extract_geographic_revenue", {"ticker": "AAPL", "region": "Greater China", "filing_type": "10-K", "period": "latest"}),
+        ("extract_segment_revenue", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}),
+        ("extract_total_revenue", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}),
+        ("extract_revenue_exposure", {"ticker": "AAOI", "exposure_query": "China", "filing_type": "10-K", "period": "latest"}),
+        ("extract_china_exposure", {"ticker": "AXTI", "filing_type": "10-K", "period": "latest"}),
+        ("extract_risk_factor_mentions", {"ticker": "AXTI", "terms": ["China", "tariff"], "filing_type": "10-K", "period": "latest"}),
+        ("extract_customer_concentration", {"ticker": "AAOI", "filing_type": "10-K", "period": "latest"}),
     ]
     if doc_url:
         calls.extend([
@@ -359,6 +375,60 @@ def main() -> int:
             data = extract_data(payload)
             _check_yahoo_news_structured(data)
             print("  PASS Yahoo news structured smoke")
+        # Phase 3 extractor tool dispatch checks
+        if name == "extract_geographic_revenue":
+            data = extract_data(payload)
+            if not isinstance(data, dict):
+                raise AssertionError(f"extract_geographic_revenue returned non-object: {data!r}")
+            for field in ("value", "denominator", "valueRatio", "valuePct", "confidence", "extractionMethod"):
+                if field not in data:
+                    raise AssertionError(f"extract_geographic_revenue missing field: {field}")
+            print(f"  PASS extract_geographic_revenue dispatch ({args.get('ticker')}/{args.get('region')})")
+        if name == "extract_segment_revenue":
+            data = extract_data(payload)
+            if not isinstance(data, dict):
+                raise AssertionError(f"extract_segment_revenue returned non-object: {data!r}")
+            if "status" not in data:
+                raise AssertionError("extract_segment_revenue missing status")
+            print(f"  PASS extract_segment_revenue dispatch ({args.get('ticker')})")
+        if name == "extract_total_revenue":
+            data = extract_data(payload)
+            if not isinstance(data, dict):
+                raise AssertionError(f"extract_total_revenue returned non-object: {data!r}")
+            if "status" not in data and "value" not in data:
+                raise AssertionError("extract_total_revenue missing value/status")
+            print(f"  PASS extract_total_revenue dispatch ({args.get('ticker')})")
+        if name == "extract_revenue_exposure":
+            data = extract_data(payload)
+            if not isinstance(data, dict):
+                raise AssertionError(f"extract_revenue_exposure returned non-object: {data!r}")
+            if "status" not in data:
+                raise AssertionError("extract_revenue_exposure missing status")
+            if "matches" not in data:
+                raise AssertionError("extract_revenue_exposure missing matches")
+            print(f"  PASS extract_revenue_exposure dispatch ({args.get('ticker')}/{args.get('exposure_query')})")
+        if name == "extract_china_exposure":
+            data = extract_data(payload)
+            if not isinstance(data, dict):
+                raise AssertionError(f"extract_china_exposure returned non-object: {data!r}")
+            for field in ("revenueExposure", "overallStatus"):
+                if field not in data:
+                    raise AssertionError(f"extract_china_exposure missing field: {field}")
+            print(f"  PASS extract_china_exposure dispatch ({args.get('ticker')})")
+        if name == "extract_risk_factor_mentions":
+            data = extract_data(payload)
+            if not isinstance(data, dict):
+                raise AssertionError(f"extract_risk_factor_mentions returned non-object: {data!r}")
+            if "status" not in data or "matches" not in data:
+                raise AssertionError("extract_risk_factor_mentions missing status/matches")
+            print(f"  PASS extract_risk_factor_mentions dispatch ({args.get('ticker')})")
+        if name == "extract_customer_concentration":
+            data = extract_data(payload)
+            if not isinstance(data, dict):
+                raise AssertionError(f"extract_customer_concentration returned non-object: {data!r}")
+            if "status" not in data or "customers" not in data:
+                raise AssertionError("extract_customer_concentration missing status/customers")
+            print(f"  PASS extract_customer_concentration dispatch ({args.get('ticker')})")
 
     # Chained option-chain smoke (AAPL)
     aapl_exp_payload = call_tool("get_option_expiration_dates", {"ticker": "AAPL"}, 900)

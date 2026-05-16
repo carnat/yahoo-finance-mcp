@@ -78,6 +78,9 @@ jobs:
       - name: Phase 3 tests
         run: python scripts/test_phase3.py
 
+      - name: Phase 3 extractor schema tests
+        run: python scripts/test_phase3_extractors.py
+
       - name: Phase 4 tests
         run: python scripts/test_phase4.py
 
