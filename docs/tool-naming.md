@@ -36,7 +36,7 @@
 Canonical tool names are designed for general financial callers. Doctrine-specific names remain supported as aliases but are not preferred. Aliases may be removed in a future major version after migration notice.
 
 - Canonical names are first-class in discovery and documentation.
-- Alias calls remain callable and emit `DEPRECATED_ALIAS` warnings in V2 envelope mode.
+- Alias calls remain callable. Legacy doctrine aliases emit `DEPRECATED_ALIAS` warnings in V2 envelope mode.
 
 ## Examples
 
@@ -45,4 +45,3 @@ Canonical tool names are designed for general financial callers. Doctrine-specif
 - Use `calculate_price_target_distance` instead of `get_eqf_bracket`.
 - Use `check_volume_liquidity_threshold` instead of `get_adv_gate`.
 - Use `analyze_options_flow_window` instead of `get_dc134_options_scan`.
-

@@ -310,6 +310,16 @@ function toBatchError(message: string, code = "PROVIDER_ERROR", retryable = fals
 function normalizeBatchSymbolResult(parsed: unknown, ticker: string): Record<string, unknown> {
   if (parsed != null && typeof parsed === "object") {
     const p = parsed as Record<string, unknown>;
+    if (typeof p.ok === "boolean" && ("data" in p || "error" in p)) {
+      if (p.ok === true) {
+        return { ok: true, data: p.data ?? null, error: null };
+      }
+      const errObj = p.error as Record<string, unknown> | null | undefined;
+      const code = typeof errObj?.code === "string" ? errObj.code : "PROVIDER_ERROR";
+      const message = typeof errObj?.message === "string" ? errObj.message : `Error for ${ticker}`;
+      const retryable = errObj?.retryable === true || code === "PROVIDER_TIMEOUT";
+      return { ok: false, data: null, error: toBatchError(message, code, retryable) };
+    }
     if (p.error === true || p.error != null) {
       const message = typeof p.message === "string" ? p.message : (typeof p.error === "string" ? p.error : `Error for ${ticker}`);
       const lower = message.toLowerCase();
@@ -347,7 +357,12 @@ async function runPartialBatch(
       const shaped = normalizeBatchSymbolResult(parsed, t);
       if (shaped.ok === true) successCount += 1;
       else errorCount += 1;
-      out[t] = shaped;
+      out[t] = shaped.ok === true
+        ? (shaped.data as Record<string, unknown> | null)
+        : {
+            error: true,
+            ...(shaped.error as Record<string, unknown>),
+          };
     } catch (e) {
       errorCount += 1;
       const message = e instanceof Error ? e.message : String(e);

@@ -997,6 +997,7 @@ const DEPRECATED_ALIAS_TOOLS: Tool[] = [
   { name: "get_filing_text_search", description: "Deprecated alias for search_sec_filing_text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, search_terms: { type: "array", items: { type: "string" } } }, required: ["ticker"] }, deprecated: true, useInstead: "search_sec_filing_text" },
   { name: "get_filing_document", description: "Deprecated alias for get_sec_filing_section.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, section_name: { type: "string" }, document_url: { type: "string" }, context_chars: { type: "number", default: 3000 } }, required: ["ticker", "section_name", "document_url"] }, deprecated: true, useInstead: "get_sec_filing_section" },
 ];
+const DEPRECATED_ALIAS_NAMES = new Set(DEPRECATED_ALIAS_TOOLS.map((t) => t.name));
 
 TOOLS.push(...CANONICAL_ADDITIONS, ...DEPRECATED_ALIAS_TOOLS);
 for (const tool of TOOLS) {
@@ -1413,15 +1414,24 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
     // non-JSON payload
   }
   if (aliasTarget != null) {
-    return mcpSuccess(name, raw, {
+    const opts: {
+      canonicalTool: string;
+      partialSuccess?: boolean;
+      successCount?: number;
+      errorCount?: number;
+      warnings?: { code: string; message: string; severity: string }[];
+    } = {
       canonicalTool,
       ...(batchMeta ?? {}),
-      warnings: [{
+    };
+    if (DEPRECATED_ALIAS_NAMES.has(name)) {
+      opts.warnings = [{
         code: "DEPRECATED_ALIAS",
         message: `Use ${canonicalTool} instead.`,
         severity: "info",
-      }],
-    });
+      }];
+    }
+    return mcpSuccess(name, raw, opts);
   }
   return mcpSuccess(name, raw, batchMeta);
 }
