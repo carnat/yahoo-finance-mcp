@@ -50,6 +50,12 @@ CANONICAL_TOOLS = {
     "extract_guidance",
     "extract_management_commentary",
     "compare_earnings_actual_vs_estimate",
+    "get_company_news",
+    "search_company_news",
+    "get_company_press_releases",
+    "get_sec_recent_events",
+    "get_public_event_timeline",
+    "verify_company_event",
     "health_check",
 }
 
@@ -62,6 +68,11 @@ SMOKE_ARGS: dict[str, dict] = {
     "get_company_profile": {"ticker": "AAPL", "include_all": False},
     "get_fund_profile": {"ticker": "SPY"},
     "get_company_news": {"ticker": "AAPL"},
+    "search_company_news": {"ticker": "AAPL", "query": "earnings", "max_results": 5},
+    "get_company_press_releases": {"ticker": "AAPL", "max_results": 5},
+    "get_sec_recent_events": {"ticker": "AAPL", "filing_types": ["8-K"], "max_results": 5},
+    "get_public_event_timeline": {"ticker": "AAPL", "max_results": 10},
+    "verify_company_event": {"ticker": "AAPL", "event_query": "quarterly results"},
     "search_ticker": {"query": "Apple", "exchange": "US", "max_results": 3},
     "get_option_expiration_dates": {"ticker": "AAPL"},
     "extract_sec_filing_fact": {
@@ -181,11 +192,21 @@ def _check_yahoo_news_structured(data: dict) -> None:
     meta = data.get("meta") or {}
     if not isinstance(meta, dict):
         raise AssertionError("get_company_news missing meta object")
-    if meta.get("source") != "yahoo_finance":
-        raise AssertionError(
-            f"get_company_news meta.source expected 'yahoo_finance', got {meta.get('source')!r}"
-        )
-    required_item_fields = ("title", "publisher", "url", "publishedAt", "retrievedAt", "sourceType")
+    if "sourcesUsed" not in meta:
+        raise AssertionError("get_company_news meta.sourcesUsed missing")
+    if "deduped" not in meta:
+        raise AssertionError("get_company_news meta.deduped missing")
+    required_item_fields = (
+        "title",
+        "source",
+        "sourceType",
+        "publishedAt",
+        "retrievedAt",
+        "url",
+        "confidence",
+        "eventType",
+        "duplicateGroupId",
+    )
     for item in (data.get("items") or [])[:5]:
         if not isinstance(item, dict):
             raise AssertionError(f"get_company_news items[] entry is not an object: {item!r}")
@@ -331,6 +352,11 @@ def main() -> int:
         ("extract_sec_filing_fact", {"ticker": "QCOM", "fact": "geographic_revenue", "region": "China"}),
         ("search_sec_filing_text", {"ticker": "AAPL", "search_terms": ["Greater China"], "filing_type": "10-K"}),
         ("get_company_news", {"ticker": "AAPL"}),
+        ("search_company_news", {"ticker": "AAPL", "query": "earnings", "max_results": 5}),
+        ("get_company_press_releases", {"ticker": "AAPL", "max_results": 5}),
+        ("get_sec_recent_events", {"ticker": "AAPL", "filing_types": ["8-K"], "max_results": 5}),
+        ("get_public_event_timeline", {"ticker": "AAPL", "max_results": 10}),
+        ("verify_company_event", {"ticker": "AAPL", "event_query": "quarterly results"}),
         # PR50 AAOI/AXTI schema smoke
         ("extract_sec_filing_fact", {"ticker": "AAOI", "fact_type": "geographic_revenue", "region": "China", "filing_type": "10-K", "period": "latest"}),
         ("extract_sec_filing_fact", {"ticker": "AXTI", "fact_type": "geographic_revenue", "region": "China", "filing_type": "10-K", "period": "latest"}),

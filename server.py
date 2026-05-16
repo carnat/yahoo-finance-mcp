@@ -1256,450 +1256,809 @@ async def get_yahoo_finance_news(ticker: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Event helpers for public news/release tools
+# Phase 6B public event helpers (multi-source, source-backed, deduped)
 # ---------------------------------------------------------------------------
 
+_DEDUP_TITLE_MAX_LEN = 80
+_STALE_EVENT_DAYS = 90
+_PHASE6B_SUPPORTED_SOURCES = {"sec", "company_ir", "newswire", "yahoo_finance"}
+_OFFICIAL_SOURCE_TYPES = {"sec_filing", "company_ir", "press_release", "newswire"}
+_SOURCE_PRIORITY = {
+    "sec_filing": 0,
+    "company_ir": 1,
+    "press_release": 2,
+    "newswire": 3,
+    "yahoo_finance": 4,
+    "other": 5,
+}
+_NEWSWIRE_HINTS = ("businesswire", "globenewswire", "prnewswire")
+
+
+def _utc_now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _to_iso_utc(raw: object) -> str | None:
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        try:
+            return datetime.datetime.fromtimestamp(float(raw), datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        except Exception:
+            return None
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    if value.isdigit() and len(value) in (8, 14):
+        if len(value) == 8:
+            return f"{value[0:4]}-{value[4:6]}-{value[6:8]}T00:00:00Z"
+        return f"{value[0:4]}-{value[4:6]}-{value[6:8]}T{value[8:10]}:{value[10:12]}:{value[12:14]}Z"
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    except Exception:
+        return None
+
+
+def _coerce_max_results(value: int, default_value: int) -> int:
+    return min(max(1, int(value or default_value)), 100)
+
+
+def _coerce_lookback_days(value: int, default_value: int) -> int:
+    return min(max(1, int(value or default_value)), 3650)
+
+
+def _normalize_event_sources(sources: list[str] | None, default_sources: list[str]) -> tuple[list[str], list[dict]]:
+    warnings: list[dict] = []
+    source_list = [str(s).strip().lower() for s in (sources or default_sources) if str(s).strip()]
+    if not source_list:
+        source_list = list(default_sources)
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for src in source_list:
+        if src not in _PHASE6B_SUPPORTED_SOURCES:
+            warnings.append({
+                "code": "SOURCE_UNSUPPORTED",
+                "message": f"Source '{src}' is not supported.",
+                "severity": "warning",
+            })
+            continue
+        if src not in seen:
+            seen.add(src)
+            normalized.append(src)
+    if not normalized:
+        normalized = [s for s in default_sources if s in _PHASE6B_SUPPORTED_SOURCES]
+    return normalized, warnings
+
+
 def _event_type_from_keywords(text: str) -> str:
-    """Classify event type from title/description keywords."""
-    text_lower = text.lower()
-    if any(k in text_lower for k in ["earnings", "eps", "revenue", "quarterly result", "annual result", "q1", "q2", "q3", "q4"]):
+    t = (text or "").lower()
+    if any(k in t for k in ("earnings", "eps", "quarterly", "10-q", "10-k", "annual report")):
         return "earnings"
-    if any(k in text_lower for k in ["guidance", "outlook", "forecast", "raises", "lowers", "reaffirm"]):
+    if any(k in t for k in ("guidance", "outlook", "forecast", "reaffirm", "raises", "lowers")):
         return "guidance"
-    if any(k in text_lower for k in ["contract", "agreement", "deal", "partnership", "joint venture"]):
+    if any(k in t for k in ("contract", "agreement", "deal", "partnership")):
         return "contract"
-    if any(k in text_lower for k in ["fda", "approval", "clearance", "regulatory", "sec", "compliance", "investigation", "subpoena"]):
-        return "regulatory"
-    if any(k in text_lower for k in ["offering", "notes", "debt", "credit", "financing", "raised", "loan"]):
+    if any(k in t for k in ("offering", "financing", "debt", "credit facility", "note")):
         return "financing"
-    if any(k in text_lower for k in ["launch", "product", "announces", "new ", "introduces"]):
+    if any(k in t for k in ("launch", "product", "introduce", "announces new")):
         return "product"
-    if any(k in text_lower for k in ["analyst", "upgrade", "downgrade", "price target", "rating", "overweight", "underweight"]):
+    if any(k in t for k in ("analyst", "rating", "upgrade", "downgrade", "price target")):
         return "analyst"
-    if any(k in text_lower for k in ["insider", "director", "officer", "form 4"]):
-        return "insider"
-    if any(k in text_lower for k in ["lawsuit", "litigation", "settlement", "claim", "court"]):
+    if any(k in t for k in ("macro", "inflation", "rates", "fomc", "cpi")):
+        return "macro"
+    if any(k in t for k in ("lawsuit", "litigation", "court", "settlement")):
         return "litigation"
+    if any(k in t for k in ("insider", "director", "officer", "form 4")):
+        return "insider"
+    if any(k in t for k in ("sec", "regulatory", "8-k", "10-q", "10-k", "filing")):
+        return "regulatory"
     return "other"
 
 
 def _event_type_from_form(form_type: str) -> str:
-    """Classify event type from SEC form type."""
-    ft = form_type.upper()
-    if ft in ("8-K",):
-        return "other"  # will be refined by title
-    if ft in ("10-K", "10-Q"):
+    ft = (form_type or "").upper()
+    if ft in ("10-Q", "10-K"):
         return "earnings"
     if ft in ("S-3", "S-1", "424B"):
         return "financing"
-    if ft in ("DEF14A", "PRE14A"):
-        return "other"
-    if ft in ("4",):
+    if ft in ("8-K", "DEF14A", "PRE14A"):
+        return "regulatory"
+    if ft == "4":
         return "insider"
     return "other"
 
 
-_DEDUP_TITLE_MAX_LEN = 80   # Normalize title to this length for dedup hashing
-_STALE_EVENT_DAYS = 90      # Events older than this many days are flagged STALE
+def _short_text(text: object, max_chars: int = 220) -> str | None:
+    value = " ".join(str(text or "").split())
+    if not value:
+        return None
+    return value[:max_chars]
 
 
-def _make_duplicate_group_id(ticker: str, title: str, published_at: str | None) -> str:
-    """Deterministic dedup hash from (ticker, normalized_title, date)."""
-    key = f"{ticker.upper()}|{title.strip().lower()[:_DEDUP_TITLE_MAX_LEN]}|{(published_at or '')[:10]}"
+def _canonicalize_event_url(url: str | None) -> str | None:
+    raw = str(url or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = _urlparse.urlparse(raw)
+        if parsed.scheme not in ("http", "https"):
+            return None
+        normalized = parsed._replace(
+            scheme=parsed.scheme.lower(),
+            netloc=parsed.netloc.lower(),
+            params="",
+            query="",
+            fragment="",
+        )
+        return _urlparse.urlunparse(normalized)
+    except Exception:
+        return None
+
+
+def _make_duplicate_group_id(
+    ticker: str,
+    title: str | None,
+    published_at: str | None,
+    issuer: str | None,
+    url: str | None,
+) -> str | None:
+    norm_title = " ".join((title or "").lower().split())[:_DEDUP_TITLE_MAX_LEN]
+    event_day = (published_at or "")[:10]
+    entity = (issuer or ticker or "").upper().strip()
+    canon_url = _canonicalize_event_url(url) or ""
+    if not norm_title and not event_day and not canon_url:
+        return None
+    key = f"{norm_title}|{event_day}|{entity}|{canon_url}"
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
-def _build_yf_event_item(ticker: str, news_item: dict, retrieved_at: str) -> dict:
-    """Build a structured event item from a Yahoo Finance news dict."""
+def _source_rank(source_type: object) -> int:
+    return _SOURCE_PRIORITY.get(str(source_type or "other"), _SOURCE_PRIORITY["other"])
+
+
+def _safe_sec_url(candidate: object) -> str | None:
+    url = str(candidate or "").strip()
+    return url if url.startswith("https://www.sec.gov/Archives/") else None
+
+
+def _within_date_window(
+    iso_ts: str | None,
+    start_date: str = "",
+    end_date: str = "",
+    lookback_days: int | None = None,
+) -> bool:
+    if not iso_ts:
+        return False
+    day = iso_ts[:10]
+    if start_date and day < start_date:
+        return False
+    if end_date and day > end_date:
+        return False
+    if lookback_days is not None:
+        cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+        if day < cutoff:
+            return False
+    return True
+
+
+def _build_yahoo_event_item(ticker: str, news_item: dict, retrieved_at: str) -> tuple[dict, list[dict]]:
+    warnings: list[dict] = []
     content = news_item.get("content", {}) if isinstance(news_item.get("content"), dict) else {}
-    title = content.get("title") or news_item.get("title") or ""
-    summary = content.get("summary") or news_item.get("summary") or ""
-    url = (content.get("canonicalUrl", {}) or {}).get("url") or news_item.get("link") or news_item.get("url") or ""
-    provider = (content.get("provider", {}) or {}).get("displayName") or news_item.get("publisher") or "Yahoo Finance"
-    ts_raw = news_item.get("providerPublishTime") or (content.get("pubDate"))
-    if isinstance(ts_raw, (int, float)):
-        published_at: str | None = datetime.datetime.utcfromtimestamp(ts_raw).strftime("%Y-%m-%dT%H:%M:%SZ")
-    elif isinstance(ts_raw, str) and ts_raw:
-        published_at = ts_raw
-    else:
-        published_at = None
-    return {
+    title = str(content.get("title") or news_item.get("title") or "").strip()
+    summary = str(content.get("summary") or news_item.get("summary") or "").strip()
+    url = str((content.get("canonicalUrl", {}) or {}).get("url") or news_item.get("link") or news_item.get("url") or "").strip()
+    provider = str((content.get("provider", {}) or {}).get("displayName") or news_item.get("publisher") or "Yahoo Finance").strip()
+    source_type = "newswire" if any(h in provider.lower() for h in _NEWSWIRE_HINTS) else "yahoo_finance"
+    published_at = _to_iso_utc(news_item.get("providerPublishTime") or content.get("pubDate"))
+    if not published_at:
+        warnings.append({
+            "code": "PUBLISHED_AT_UNAVAILABLE",
+            "message": f"Published timestamp unavailable for source '{provider or 'Yahoo Finance'}'.",
+            "severity": "warning",
+        })
+    ticker_u = ticker.upper()
+    text_blob = f"{title} {summary}".upper()
+    ticker_relevance = "HIGH" if ticker_u in text_blob else ("LOW" if source_type == "yahoo_finance" else "UNKNOWN")
+    confidence = "MEDIUM"
+    if not url:
+        confidence = "LOW"
+    if ticker_relevance in ("LOW", "UNKNOWN") and source_type == "yahoo_finance":
+        confidence = "LOW"
+    issuer = None
+    duplicate_group_id = _make_duplicate_group_id(ticker, title, published_at, issuer, url)
+    if duplicate_group_id is None:
+        warnings.append({"code": "DEDUPE_WEAK_KEY", "message": "Weak dedupe key for at least one item.", "severity": "warning"})
+    item = {
         "title": title,
-        "source": provider,
-        "sourceType": "yahoo_finance",
+        "source": provider or "Yahoo Finance",
+        "sourceType": source_type,
         "publishedAt": published_at,
         "retrievedAt": retrieved_at,
-        "url": url,
-        "issuer": None,
-        "tickers": [ticker.upper()],
-        "eventType": _event_type_from_keywords(title + " " + summary),
-        "summary": summary[:300] if summary else None,
-        "evidenceText": None,
-        "confidence": "MEDIUM",
-        "duplicateGroupId": _make_duplicate_group_id(ticker, title, published_at),
+        "url": url or None,
+        "issuer": issuer,
+        "tickers": [ticker_u],
+        "eventType": _event_type_from_keywords(f"{title} {summary}"),
+        "summary": _short_text(summary or title, 240),
+        "evidenceText": _short_text(summary or title, 180),
+        "confidence": confidence,
+        "tickerRelevance": ticker_relevance,
+        "duplicateGroupId": duplicate_group_id,
     }
+    return item, warnings
 
 
-def _build_sec_event_item(ticker: str, filing: dict, retrieved_at: str) -> dict:
-    """Build a structured event item from a SEC filing dict (from list_sec_filings)."""
-    form_type = filing.get("formType") or filing.get("form_type") or "SEC"
-    title = filing.get("title") or f"{form_type} Filing"
-    filing_date = filing.get("filingDate") or filing.get("filing_date")
-    published_at = f"{filing_date}T00:00:00Z" if filing_date and len(filing_date) == 10 else filing_date
-    url = filing.get("edgarPrimaryDocumentUrl") or filing.get("edgarIndexUrl") or ""
-    accession = filing.get("accessionNumber") or filing.get("accession_number")
-    event_type = _event_type_from_keywords(title)
-    if event_type == "other":
-        event_type = _event_type_from_form(form_type)
-    item: dict = {
+def _build_sec_event_item(ticker: str, filing: dict, retrieved_at: str, issuer: str | None = None) -> tuple[dict, list[dict]]:
+    warnings: list[dict] = []
+    filing_type = str(filing.get("filingType") or filing.get("formType") or filing.get("form") or "").upper()
+    filing_date = str(filing.get("filingDate") or "").strip()
+    accepted_at = _to_iso_utc(filing.get("acceptedAt") or filing.get("acceptanceDateTime"))
+    published_at = accepted_at
+    if not published_at and filing_date:
+        published_at = f"{filing_date}T00:00:00Z"
+        warnings.append({
+            "code": "PUBLISHED_AT_ESTIMATED",
+            "message": f"acceptedAt unavailable for {filing_type or 'SEC filing'}; filingDate used.",
+            "severity": "warning",
+        })
+    accession = str(filing.get("accessionNumber") or "").strip()
+    cik_int = str(filing.get("cikInt") or filing.get("cik") or "").strip()
+    acc_clean = accession.replace("-", "")
+    primary_document = str(filing.get("primaryDocument") or "").strip()
+    url = _safe_sec_url(filing.get("documentUrl")) or _safe_sec_url(filing.get("primaryDocumentUrl"))
+    if not url and cik_int and accession and primary_document:
+        url = _safe_sec_url(f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{primary_document}")
+    if not url and cik_int and accession:
+        url = _safe_sec_url(f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{accession}-index.htm")
+    confidence = "HIGH" if (accession and accepted_at and url) else ("MEDIUM" if accession and url else "LOW")
+    title = f"{filing_type} filed" if filing_type else "SEC filing"
+    event_type = _event_type_from_form(filing_type)
+    duplicate_group_id = _make_duplicate_group_id(ticker, title, published_at, issuer, url)
+    if duplicate_group_id is None:
+        warnings.append({"code": "DEDUPE_WEAK_KEY", "message": "Weak dedupe key for at least one item.", "severity": "warning"})
+    item = {
         "title": title,
-        "source": "SEC EDGAR",
+        "source": "SEC",
         "sourceType": "sec_filing",
+        "filingType": filing_type or None,
+        "filingDate": filing_date or None,
+        "acceptedAt": accepted_at,
+        "accessionNumber": accession or None,
+        "url": url,
         "publishedAt": published_at,
         "retrievedAt": retrieved_at,
-        "url": url,
-        "issuer": None,
+        "issuer": issuer,
         "tickers": [ticker.upper()],
-        "eventType": event_type,
-        "summary": f"SEC {form_type} filing submitted on {filing_date}.",
-        "evidenceText": None,
-        "confidence": "HIGH",
-        "duplicateGroupId": _make_duplicate_group_id(ticker, title, published_at),
+        "eventType": event_type or _event_type_from_keywords(title),
+        "summary": _short_text(f"SEC {filing_type} filing for {ticker.upper()}"),
+        "evidenceText": _short_text(f"{filing_type} accepted by SEC on {accepted_at or filing_date}"),
+        "confidence": confidence,
+        "tickerRelevance": "HIGH",
+        "duplicateGroupId": duplicate_group_id,
     }
-    if accession:
-        item["accessionNumber"] = accession
-    if filing_date:
-        item["filingDate"] = filing_date
-    accepted_at = filing.get("acceptedAt") or filing.get("accepted_at")
-    if accepted_at:
-        item["acceptedAt"] = accepted_at
-    return item
+    return item, warnings
+
+
+async def _collect_sec_events(
+    ticker: str,
+    *,
+    filing_types: list[str],
+    retrieved_at: str,
+    max_results: int,
+    start_date: str = "",
+    end_date: str = "",
+    lookback_days: int | None = None,
+) -> tuple[list[dict], list[dict], bool]:
+    warnings: list[dict] = []
+    events: list[dict] = []
+    cik_padded, submissions = await _get_submissions_for_ticker(ticker)
+    if not cik_padded or not submissions:
+        warnings.append({"code": "SOURCE_UNAVAILABLE", "message": "SEC submissions source unavailable.", "severity": "warning"})
+        return events, warnings, False
+    recent = ((submissions.get("filings") or {}).get("recent") or {}) if isinstance(submissions, dict) else {}
+    forms = list(recent.get("form") or [])
+    filing_dates = list(recent.get("filingDate") or [])
+    accepted = list(recent.get("acceptanceDateTime") or [])
+    accessions = list(recent.get("accessionNumber") or [])
+    primary_docs = list(recent.get("primaryDocument") or [])
+    issuer = str(submissions.get("name") or "").strip() or None if isinstance(submissions, dict) else None
+    desired = {f.upper() for f in filing_types}
+    cik_int = str(int(cik_padded))
+    for i, form in enumerate(forms):
+        form_str = str(form or "").upper()
+        if desired and form_str not in desired:
+            continue
+        filing_date = str(filing_dates[i] or "") if i < len(filing_dates) else ""
+        accepted_at = str(accepted[i] or "") if i < len(accepted) else ""
+        accession = str(accessions[i] or "") if i < len(accessions) else ""
+        primary_doc = str(primary_docs[i] or "") if i < len(primary_docs) else ""
+        filing_obj = {
+            "filingType": form_str,
+            "filingDate": filing_date,
+            "acceptedAt": accepted_at,
+            "accessionNumber": accession,
+            "primaryDocument": primary_doc,
+            "cikInt": cik_int,
+        }
+        item, item_warnings = _build_sec_event_item(ticker, filing_obj, retrieved_at, issuer=issuer)
+        if not _within_date_window(item.get("publishedAt"), start_date=start_date, end_date=end_date, lookback_days=lookback_days):
+            continue
+        events.append(item)
+        warnings.extend(item_warnings)
+        if len(events) >= max_results:
+            break
+    return events, warnings, True
+
+
+async def _collect_yahoo_events(
+    ticker: str,
+    *,
+    retrieved_at: str,
+    max_results: int,
+    start_date: str = "",
+    end_date: str = "",
+    lookback_days: int | None = None,
+) -> tuple[list[dict], list[dict], bool]:
+    warnings: list[dict] = []
+    items: list[dict] = []
+    try:
+        company = yf.Ticker(ticker)
+        raw_news = company.news or []
+    except Exception as exc:
+        warnings.append({"code": "SOURCE_UNAVAILABLE", "message": f"Yahoo Finance source unavailable: {exc}", "severity": "warning"})
+        return items, warnings, False
+    for n in raw_news:
+        if not isinstance(n, dict):
+            continue
+        content = n.get("content", {}) if isinstance(n.get("content"), dict) else {}
+        if content.get("contentType", "") not in ("", "STORY"):
+            continue
+        item, item_warnings = _build_yahoo_event_item(ticker, n, retrieved_at)
+        if not _within_date_window(item.get("publishedAt"), start_date=start_date, end_date=end_date, lookback_days=lookback_days):
+            continue
+        items.append(item)
+        warnings.extend(item_warnings)
+        if len(items) >= max_results:
+            break
+    return items, warnings, True
+
+
+def _dedupe_event_items(items: list[dict], warnings: list[dict]) -> list[dict]:
+    grouped: dict[str, dict] = {}
+    passthrough: list[dict] = []
+    for item in items:
+        gid = item.get("duplicateGroupId")
+        if not gid:
+            passthrough.append(item)
+            continue
+        existing = grouped.get(gid)
+        if existing is None:
+            grouped[gid] = item
+            continue
+        existing_rank = _source_rank(existing.get("sourceType"))
+        current_rank = _source_rank(item.get("sourceType"))
+        keep_new = current_rank < existing_rank
+        if current_rank == existing_rank:
+            keep_new = str(item.get("publishedAt") or "") > str(existing.get("publishedAt") or "")
+        if str(existing.get("publishedAt") or "") != str(item.get("publishedAt") or ""):
+            warnings.append({
+                "code": "TIMESTAMP_CONFLICT",
+                "message": f"Conflicting source timestamps observed for duplicateGroupId={gid}.",
+                "severity": "warning",
+            })
+        preferred = item if keep_new else existing
+        alternate = existing if keep_new else item
+        refs = list(preferred.get("sourceRefs") or [])
+        refs.append({
+            "source": alternate.get("source"),
+            "sourceType": alternate.get("sourceType"),
+            "publishedAt": alternate.get("publishedAt"),
+            "url": alternate.get("url"),
+        })
+        preferred["sourceRefs"] = refs
+        grouped[gid] = preferred
+    deduped = list(grouped.values()) + passthrough
+    deduped.sort(key=lambda it: str(it.get("publishedAt") or ""), reverse=True)
+    return deduped
+
+
+def _build_collection_status(items: list[dict], sources_used: list[str], warnings: list[dict]) -> str | None:
+    if items and any(w.get("code") == "SOURCE_UNAVAILABLE" for w in warnings if isinstance(w, dict)):
+        return "PARTIAL"
+    if not items and sources_used:
+        return "NOT_FOUND"
+    if not items and not sources_used:
+        return "PROVIDER_ERROR"
+    return None
+
+
+async def _collect_company_events(
+    ticker: str,
+    *,
+    max_results: int,
+    lookback_days: int,
+    start_date: str = "",
+    end_date: str = "",
+    sources: list[str] | None = None,
+    sec_filing_types: list[str] | None = None,
+) -> tuple[list[dict], list[str], list[dict], str]:
+    retrieved_at = _utc_now_iso()
+    selected_sources, warnings = _normalize_event_sources(
+        sources,
+        ["sec", "company_ir", "newswire", "yahoo_finance"],
+    )
+    items: list[dict] = []
+    sources_used: list[str] = []
+    max_cap = _coerce_max_results(max_results, 10)
+    lookback = _coerce_lookback_days(lookback_days, 14)
+
+    if "sec" in selected_sources:
+        sec_items, sec_warnings, used = await _collect_sec_events(
+            ticker,
+            filing_types=sec_filing_types or ["8-K", "10-Q", "10-K", "S-3", "DEF14A"],
+            retrieved_at=retrieved_at,
+            max_results=max_cap,
+            start_date=start_date,
+            end_date=end_date,
+            lookback_days=lookback,
+        )
+        if used:
+            sources_used.append("sec")
+        items.extend(sec_items)
+        warnings.extend(sec_warnings)
+
+    if "company_ir" in selected_sources:
+        warnings.append({
+            "code": "SOURCE_UNAVAILABLE",
+            "message": "Company IR source is not configured; skipped.",
+            "severity": "warning",
+        })
+
+    if "newswire" in selected_sources:
+        warnings.append({
+            "code": "SOURCE_UNAVAILABLE",
+            "message": "Newswire source is not configured; skipped.",
+            "severity": "warning",
+        })
+
+    if "yahoo_finance" in selected_sources:
+        yf_items, yf_warnings, used = await _collect_yahoo_events(
+            ticker,
+            retrieved_at=retrieved_at,
+            max_results=max_cap,
+            start_date=start_date,
+            end_date=end_date,
+            lookback_days=lookback,
+        )
+        if used:
+            sources_used.append("yahoo_finance")
+        items.extend(yf_items)
+        warnings.extend(yf_warnings)
+
+    deduped = _dedupe_event_items(items, warnings)
+    deduped = deduped[:max_cap]
+    seen_warning_keys: set[str] = set()
+    unique_warnings: list[dict] = []
+    for w in warnings:
+        if not isinstance(w, dict):
+            continue
+        key = f"{w.get('code')}|{w.get('message')}"
+        if key in seen_warning_keys:
+            continue
+        seen_warning_keys.add(key)
+        unique_warnings.append(w)
+    return deduped, sources_used, unique_warnings, retrieved_at
 
 
 @yfinance_server.tool(
     name="search_company_news",
     output_schema=_TOOL_OUTPUT_SCHEMAS["search_company_news"],
-    description="""Search public news articles for a ticker using optional keyword query.
+    description="""Search public company news/events for a ticker and query string.
 
-Returns structured event items with source, timestamps, url, eventType, and confidence.
-Yahoo Finance is the primary data source for this tool.
-
-Args:
-    ticker: str  Ticker symbol, e.g. "AAPL"
-    query: str   Optional keyword filter applied to title/summary (case-insensitive).
-    max_results: int  Maximum items to return (default 20).
+Returns source-backed, deduplicated event items with source type, published/retrieved timestamps,
+URL, confidence, relevance, and short evidence excerpts.
 """,
 )
-async def search_company_news(ticker: str, query: str = "", max_results: int = 20) -> str:
-    """Search public news for a ticker."""
-    retrieved_at = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    company = yf.Ticker(ticker)
-    try:
-        raw_news = company.news or []
-    except Exception as e:
-        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
-
-    items = []
-    for n in raw_news:
-        content = n.get("content", {}) if isinstance(n.get("content"), dict) else {}
-        if content.get("contentType", "") not in ("STORY", "") and n.get("type", "") not in ("STORY", ""):
-            continue
-        item = _build_yf_event_item(ticker, n, retrieved_at)
-        if query:
-            text = f"{item['title']} {item['summary'] or ''}".lower()
-            if query.lower() not in text:
-                continue
-        items.append(item)
-        if len(items) >= max_results:
-            break
-
-    return json.dumps({
-        "ticker": ticker.upper(),
-        "items": items,
-        "meta": {
-            "sourcesUsed": ["yahoo_finance"],
-            "deduped": True,
-            "watermark": retrieved_at,
-        },
-    })
-
-
-@yfinance_server.tool(
-    name="get_company_press_releases",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_company_press_releases"],
-    description="""Get public press releases for a company from SEC EDGAR 8-K filings.
-
-Returns structured event items with accessionNumber, filingDate, source=SEC EDGAR,
-sourceType=sec_filing, and confidence=HIGH.
-
-Args:
-    ticker: str  Ticker symbol, e.g. "AAPL"
-    max_results: int  Maximum items to return (default 10).
-    start_date: str  Optional ISO date filter, e.g. "2026-01-01".
-""",
-)
-async def get_company_press_releases(ticker: str, max_results: int = 10, start_date: str = "") -> str:
-    """Get press releases via SEC EDGAR 8-K filings."""
-    retrieved_at = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    raw = await list_sec_filings(ticker, filing_type="8-K", max_filings=min(max_results, 25))
-    try:
-        data = json.loads(raw)
-    except Exception:
-        return json.dumps({"error": True, "message": "Failed to parse SEC filings", "ticker": ticker})
-    if isinstance(data, dict) and data.get("error"):
-        return json.dumps({"ticker": ticker.upper(), "items": [], "meta": {"sourcesUsed": ["sec"], "deduped": True, "watermark": retrieved_at, "_note": data.get("message", "SEC lookup failed")}})
-
-    filings_raw = data if isinstance(data, list) else (data.get("data") or data.get("filings") or [])
-    items = []
-    for f in filings_raw:
-        if isinstance(f, dict):
-            filing_date = f.get("filingDate") or f.get("filing_date") or ""
-            if start_date and filing_date and filing_date < start_date:
-                continue
-            items.append(_build_sec_event_item(ticker, f, retrieved_at))
-        if len(items) >= max_results:
-            break
-
-    return json.dumps({
-        "ticker": ticker.upper(),
-        "items": items,
-        "meta": {
-            "sourcesUsed": ["sec"],
-            "deduped": True,
-            "watermark": retrieved_at,
-        },
-    })
-
-
-@yfinance_server.tool(
-    name="get_sec_recent_events",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_sec_recent_events"],
-    description="""Get recent SEC filings for a ticker as structured public events.
-
-Returns 8-K, 10-Q, 10-K and other form types as event items with accessionNumber,
-filingDate, url, sourceType=sec_filing, confidence=HIGH.
-
-Args:
-    ticker: str  Ticker symbol, e.g. "AAPL"
-    filing_type: str  SEC form type filter (default "8-K"). Use "all" for all types.
-    max_results: int  Maximum items to return (default 10).
-    start_date: str  Optional ISO date filter, e.g. "2026-01-01".
-""",
-)
-async def get_sec_recent_events(ticker: str, filing_type: str = "8-K", max_results: int = 10, start_date: str = "") -> str:
-    """Get recent SEC filings as structured public events."""
-    retrieved_at = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    ft = "8-K" if filing_type.lower() == "all" else filing_type
-    raw = await list_sec_filings(ticker, filing_type=ft, max_filings=min(max_results, 25))
-    try:
-        data = json.loads(raw)
-    except Exception:
-        return json.dumps({"error": True, "message": "Failed to parse SEC filings", "ticker": ticker})
-    if isinstance(data, dict) and data.get("error"):
-        return json.dumps({"ticker": ticker.upper(), "items": [], "meta": {"sourcesUsed": ["sec"], "deduped": True, "watermark": retrieved_at, "_note": data.get("message", "SEC lookup failed")}})
-
-    filings_raw = data if isinstance(data, list) else (data.get("data") or data.get("filings") or [])
-    items = []
-    for f in filings_raw:
-        if isinstance(f, dict):
-            filing_date = f.get("filingDate") or f.get("filing_date") or ""
-            if start_date and filing_date and filing_date < start_date:
-                continue
-            items.append(_build_sec_event_item(ticker, f, retrieved_at))
-        if len(items) >= max_results:
-            break
-
-    return json.dumps({
-        "ticker": ticker.upper(),
-        "items": items,
-        "meta": {
-            "sourcesUsed": ["sec"],
-            "deduped": True,
-            "watermark": retrieved_at,
-        },
-    })
-
-
-@yfinance_server.tool(
-    name="get_public_event_timeline",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_public_event_timeline"],
-    description="""Get a combined public event timeline for a ticker from SEC filings and news.
-
-Merges SEC 8-K filings and Yahoo Finance news, deduplicates by title+date hash,
-and returns items sorted newest-first. Use for building event evidence timelines.
-
-Args:
-    ticker: str  Ticker symbol, e.g. "AAPL"
-    max_results: int  Maximum total items to return (default 20).
-    start_date: str  Optional ISO date filter, e.g. "2026-01-01".
-    sources: list[str]  Sources to include (default ["sec", "yahoo_finance"]).
-""",
-)
-async def get_public_event_timeline(ticker: str, max_results: int = 20, start_date: str = "", sources: list[str] | None = None) -> str:
-    """Get combined public event timeline."""
-    retrieved_at = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    if sources is None:
-        sources = ["sec", "yahoo_finance"]
-
-    items: list[dict] = []
-    sources_used: list[str] = []
-
-    # SEC events
-    if "sec" in sources:
-        raw = await list_sec_filings(ticker, filing_type="8-K", max_filings=min(max_results, 20))
-        try:
-            data = json.loads(raw)
-            filings_raw = data if isinstance(data, list) else (data.get("data") or data.get("filings") or [])
-            for f in filings_raw:
-                if isinstance(f, dict):
-                    fd = f.get("filingDate") or ""
-                    if start_date and fd and fd < start_date:
-                        continue
-                    items.append(_build_sec_event_item(ticker, f, retrieved_at))
-            sources_used.append("sec")
-        except Exception:
-            pass
-
-    # Yahoo Finance news
-    if "yahoo_finance" in sources:
-        try:
-            company = yf.Ticker(ticker)
-            raw_news = company.news or []
-            for n in raw_news:
-                item = _build_yf_event_item(ticker, n, retrieved_at)
-                if start_date and item.get("publishedAt") and item["publishedAt"][:10] < start_date:
-                    continue
-                items.append(item)
-            sources_used.append("yahoo_finance")
-        except Exception:
-            pass
-
-    # Deduplicate by duplicateGroupId
-    seen: set[str] = set()
-    deduped: list[dict] = []
+async def search_company_news(
+    ticker: str,
+    query: str,
+    start_date: str = "",
+    end_date: str = "",
+    sources: list[str] | None = None,
+    max_results: int = 10,
+) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("search_company_news", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    if not str(query or "").strip():
+        return _mcp_failure("search_company_news", ErrorCode.INPUT_VALIDATION_ERROR, "query is required")
+    items, sources_used, warnings, retrieved_at = await _collect_company_events(
+        ticker,
+        max_results=max_results,
+        lookback_days=14,
+        start_date=start_date,
+        end_date=end_date,
+        sources=sources,
+    )
+    q = query.strip().lower()
+    filtered: list[dict] = []
     for item in items:
-        gid = item.get("duplicateGroupId") or ""
-        if gid not in seen:
-            seen.add(gid)
-            deduped.append(item)
-
-    # Sort newest-first
-    def _sort_key(it: dict) -> str:
-        return it.get("publishedAt") or "0000"
-    deduped.sort(key=_sort_key, reverse=True)
-    deduped = deduped[:max_results]
-
-    return json.dumps({
+        text = " ".join([
+            str(item.get("title") or ""),
+            str(item.get("summary") or ""),
+            str(item.get("source") or ""),
+            str(item.get("eventType") or ""),
+            str(item.get("evidenceText") or ""),
+        ]).lower()
+        if q in text:
+            filtered.append(item)
+    status = _build_collection_status(filtered, sources_used, warnings)
+    payload = {
         "ticker": ticker.upper(),
-        "items": deduped,
+        "query": query,
+        "items": filtered[:_coerce_max_results(max_results, 10)],
         "meta": {
             "sourcesUsed": sources_used,
             "deduped": True,
             "watermark": retrieved_at,
         },
-    })
+        "warnings": warnings,
+    }
+    if status:
+        payload["status"] = status
+    return json.dumps(payload)
+
+
+@yfinance_server.tool(
+    name="get_company_press_releases",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_company_press_releases"],
+    description="""Get company-originated or official release-style public events.
+
+Prefers SEC 8-K and other official release channels. Returns structured source-backed event metadata
+with short evidence excerpts only.
+""",
+)
+async def get_company_press_releases(
+    ticker: str,
+    lookback_days: int = 90,
+    max_results: int = 20,
+    sources: list[str] | None = None,
+) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("get_company_press_releases", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    selected_sources, source_warnings = _normalize_event_sources(sources, ["company_ir", "newswire", "sec"])
+    items, sources_used, warnings, retrieved_at = await _collect_company_events(
+        ticker,
+        max_results=max_results,
+        lookback_days=lookback_days,
+        sources=selected_sources,
+        sec_filing_types=["8-K"],
+    )
+    warnings = source_warnings + warnings
+    release_types = {"company_ir", "press_release", "newswire", "sec_filing"}
+    release_items = [it for it in items if str(it.get("sourceType")) in release_types]
+    if not release_items:
+        warnings.append({
+            "code": "NO_OFFICIAL_RELEASE_SOURCE",
+            "message": "No company-originated or official release source found in requested window.",
+            "severity": "warning",
+        })
+    status = _build_collection_status(release_items, sources_used, warnings)
+    payload = {
+        "ticker": ticker.upper(),
+        "items": release_items[:_coerce_max_results(max_results, 20)],
+        "meta": {
+            "sourcesUsed": sources_used,
+            "deduped": True,
+            "watermark": retrieved_at,
+        },
+        "warnings": warnings,
+    }
+    if status:
+        payload["status"] = status
+    return json.dumps(payload)
+
+
+@yfinance_server.tool(
+    name="get_sec_recent_events",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_sec_recent_events"],
+    description="""Get recent SEC filing events with filing metadata and SEC archive URLs.
+
+Uses SEC submissions as the primary source and returns structured event records for requested filing types.
+""",
+)
+async def get_sec_recent_events(
+    ticker: str,
+    filing_types: list[str] | None = None,
+    lookback_days: int = 90,
+    max_results: int = 20,
+) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("get_sec_recent_events", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    selected_types = [str(ft).upper() for ft in (filing_types or ["8-K", "10-Q", "10-K"]) if str(ft).strip()]
+    if not selected_types:
+        return _mcp_failure("get_sec_recent_events", ErrorCode.INPUT_VALIDATION_ERROR, "filing_types must not be empty")
+    retrieved_at = _utc_now_iso()
+    items, warnings, used = await _collect_sec_events(
+        ticker,
+        filing_types=selected_types,
+        retrieved_at=retrieved_at,
+        max_results=_coerce_max_results(max_results, 20),
+        lookback_days=_coerce_lookback_days(lookback_days, 90),
+    )
+    for item in items:
+        if not _safe_sec_url(item.get("url")):
+            item["confidence"] = "LOW"
+            warnings.append({
+                "code": "SEC_URL_INVALID",
+                "message": "SEC event URL missing or invalid SEC Archives URL.",
+                "severity": "warning",
+            })
+    status = _build_collection_status(items, ["sec"] if used else [], warnings)
+    payload = {
+        "ticker": ticker.upper(),
+        "items": items,
+        "meta": {
+            "sourcesUsed": ["sec"] if used else [],
+            "watermark": retrieved_at,
+        },
+        "warnings": warnings,
+    }
+    if status:
+        payload["status"] = status
+    return json.dumps(payload)
+
+
+@yfinance_server.tool(
+    name="get_public_event_timeline",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_public_event_timeline"],
+    description="""Get a deduplicated chronological timeline of public company events.
+
+Combines selected public sources, deduplicates related items, and returns timeline entries ordered by time.
+""",
+)
+async def get_public_event_timeline(
+    ticker: str,
+    start_date: str = "",
+    end_date: str = "",
+    sources: list[str] | None = None,
+    max_results: int = 50,
+    newest_first: bool = False,
+) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("get_public_event_timeline", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    items, sources_used, warnings, retrieved_at = await _collect_company_events(
+        ticker,
+        max_results=max_results,
+        lookback_days=365,
+        start_date=start_date,
+        end_date=end_date,
+        sources=sources,
+    )
+    timeline = [{
+        "timestamp": it.get("publishedAt"),
+        "eventType": it.get("eventType"),
+        "title": it.get("title"),
+        "source": it.get("source"),
+        "sourceType": it.get("sourceType"),
+        "url": it.get("url"),
+        "confidence": it.get("confidence"),
+        "duplicateGroupId": it.get("duplicateGroupId"),
+    } for it in items if it.get("publishedAt")]
+    timeline.sort(key=lambda ev: str(ev.get("timestamp") or ""), reverse=bool(newest_first))
+    timeline = timeline[:_coerce_max_results(max_results, 50)]
+    status = _build_collection_status(items, sources_used, warnings)
+    payload = {
+        "ticker": ticker.upper(),
+        "timeline": timeline,
+        "meta": {
+            "sourcesUsed": sources_used,
+            "deduped": True,
+            "watermark": retrieved_at,
+        },
+        "warnings": warnings,
+    }
+    if status:
+        payload["status"] = status
+    return json.dumps(payload)
 
 
 @yfinance_server.tool(
     name="verify_company_event",
     output_schema=_TOOL_OUTPUT_SCHEMAS["verify_company_event"],
-    description="""Verify a public company event across SEC and news sources.
+    description="""Verify whether a public company event has source-backed evidence.
 
-Searches for the event_query across configured sources within the date window.
-Returns CONFIRMED (found in SEC/IR), PARTIAL (found in news only), NOT_FOUND,
-STALE (event older than lookback), or CONFLICTING (sources disagree).
-
-Args:
-    ticker: str  Ticker symbol, e.g. "AAPL"
-    event_query: str  Keywords describing the event, e.g. "Q1 2026 earnings guidance"
-    start_date: str  ISO start date, e.g. "2026-04-01"
-    end_date: str  ISO end date, e.g. "2026-05-15"
-    sources: list[str]  Sources to check (default ["sec", "yahoo_finance"]).
+Returns CONFIRMED, PARTIAL, NOT_FOUND, STALE, or CONFLICTING with best source evidence and metadata.
 """,
 )
-async def verify_company_event(ticker: str, event_query: str, start_date: str = "", end_date: str = "", sources: list[str] | None = None) -> str:
-    """Verify a company event across public sources."""
-    retrieved_at = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    if sources is None:
-        sources = ["sec", "yahoo_finance"]
+async def verify_company_event(
+    ticker: str,
+    event_query: str,
+    start_date: str = "",
+    end_date: str = "",
+    sources: list[str] | None = None,
+) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("verify_company_event", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    if not str(event_query or "").strip():
+        return _mcp_failure("verify_company_event", ErrorCode.INPUT_VALIDATION_ERROR, "event_query is required")
+    items, sources_used, warnings, retrieved_at = await _collect_company_events(
+        ticker,
+        max_results=50,
+        lookback_days=365,
+        sources=sources,
+    )
+    query_text = event_query.strip().lower()
+    query_tokens = [tok for tok in _re.split(r"\s+", query_text) if tok]
 
-    query_lower = event_query.lower()
-    best_evidence: list[dict] = []
-    sources_checked: list[str] = []
-    stale_threshold = (datetime.date.today() - datetime.timedelta(days=_STALE_EVENT_DAYS)).isoformat()
+    def _is_match(item: dict) -> bool:
+        hay = " ".join([
+            str(item.get("title") or ""),
+            str(item.get("summary") or ""),
+            str(item.get("evidenceText") or ""),
+            str(item.get("eventType") or ""),
+            str(item.get("source") or ""),
+        ]).lower()
+        if query_text in hay:
+            return True
+        return any(len(tok) >= 4 and tok in hay for tok in query_tokens)
 
-    # SEC search
-    if "sec" in sources:
-        sources_checked.append("sec")
-        raw = await list_sec_filings(ticker, filing_type="8-K", max_filings=20)
-        try:
-            data = json.loads(raw)
-            filings_raw = data if isinstance(data, list) else (data.get("data") or data.get("filings") or [])
-            for f in filings_raw:
-                if not isinstance(f, dict):
-                    continue
-                fd = f.get("filingDate") or ""
-                if start_date and fd and fd < start_date:
-                    continue
-                if end_date and fd and fd > end_date:
-                    continue
-                title = (f.get("title") or "").lower()
-                if query_lower in title or any(w in title for w in query_lower.split()):
-                    ev = _build_sec_event_item(ticker, f, retrieved_at)
-                    if fd < stale_threshold:
-                        ev["_stale"] = True
-                    best_evidence.append(ev)
-        except Exception:
-            pass
+    matched = [it for it in items if _is_match(it)]
+    matched_in_range = [
+        it for it in matched
+        if _within_date_window(it.get("publishedAt"), start_date=start_date, end_date=end_date)
+        or (not start_date and not end_date)
+    ]
+    official_in_range = [
+        it for it in matched_in_range
+        if str(it.get("sourceType") or "") in _OFFICIAL_SOURCE_TYPES
+        and bool(it.get("url"))
+        and str(it.get("confidence") or "") in ("HIGH", "MEDIUM")
+    ]
+    stale_cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=_STALE_EVENT_DAYS)).strftime("%Y-%m-%d")
+    stale_only = bool(matched) and all(str(it.get("publishedAt") or "")[:10] < stale_cutoff for it in matched if it.get("publishedAt"))
+    conflicts: list[dict] = []
+    if any(w.get("code") == "TIMESTAMP_CONFLICT" for w in warnings if isinstance(w, dict)):
+        conflicts.append({"type": "timestamp", "message": "Conflicting timestamps observed across sources for related events."})
 
-    # Yahoo Finance fallback
-    if "yahoo_finance" in sources and len(best_evidence) < 3:
-        sources_checked.append("yahoo_finance")
-        try:
-            company = yf.Ticker(ticker)
-            raw_news = company.news or []
-            for n in raw_news:
-                item = _build_yf_event_item(ticker, n, retrieved_at)
-                pub = item.get("publishedAt") or ""
-                if start_date and pub and pub[:10] < start_date:
-                    continue
-                if end_date and pub and pub[:10] > end_date:
-                    continue
-                text = f"{item['title']} {item['summary'] or ''}".lower()
-                if query_lower in text or any(w in text for w in query_lower.split() if len(w) > 3):
-                    if pub[:10] < stale_threshold:
-                        item["_stale"] = True
-                    best_evidence.append(item)
-        except Exception:
-            pass
-
-    # Determine status
-    if not best_evidence:
-        status = "NOT_FOUND"
+    if conflicts:
+        status = "CONFLICTING"
+    elif official_in_range:
+        status = "CONFIRMED"
+    elif matched_in_range:
+        status = "PARTIAL"
+    elif stale_only:
+        status = "STALE"
     else:
-        stale_count = sum(1 for e in best_evidence if e.get("_stale"))
-        sec_count = sum(1 for e in best_evidence if e.get("sourceType") == "sec_filing")
-        if stale_count == len(best_evidence):
-            status = "STALE"
-        elif sec_count > 0:
-            status = "CONFIRMED"
-        else:
-            status = "PARTIAL"
+        status = "NOT_FOUND"
 
-    # Clean stale markers from output
-    for e in best_evidence:
-        e.pop("_stale", None)
+    best = official_in_range or matched_in_range or matched
+    best_evidence = [{
+        "source": ev.get("source"),
+        "sourceType": ev.get("sourceType"),
+        "publishedAt": ev.get("publishedAt"),
+        "retrievedAt": ev.get("retrievedAt"),
+        "url": ev.get("url"),
+        "confidence": ev.get("confidence"),
+        "evidenceText": _short_text(ev.get("evidenceText") or ev.get("summary") or ev.get("title")),
+    } for ev in best[:5]]
 
     return json.dumps({
         "ticker": ticker.upper(),
         "query": event_query,
         "status": status,
-        "bestEvidence": best_evidence[:5],
-        "conflicts": [],
+        "bestEvidence": best_evidence,
+        "conflicts": conflicts,
         "meta": {
-            "sourcesChecked": sources_checked,
+            "sourcesChecked": sources_used,
             "watermark": retrieved_at,
         },
+        "warnings": warnings,
     })
 
 
@@ -6625,9 +6984,44 @@ async def get_company_events_calendar(ticker: str) -> str:
     return await get_calendar(ticker)
 
 
-@yfinance_server.tool(name="get_company_news", output_schema=_TOOL_OUTPUT_SCHEMAS["get_yahoo_finance_news"], description="Canonical alias for get_yahoo_finance_news.")
-async def get_company_news(ticker: str) -> str:
-    return await get_yahoo_finance_news(ticker)
+@yfinance_server.tool(
+    name="get_company_news",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_yahoo_finance_news"],
+    description="""Get recent public company news/events from selected public sources.
+
+Returns deduplicated source-backed items with source type, timestamps, URL, event classification,
+confidence, ticker relevance, and short evidence excerpts.
+""",
+)
+async def get_company_news(
+    ticker: str,
+    max_results: int = 10,
+    lookback_days: int = 14,
+    sources: list[str] | None = None,
+) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("get_company_news", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    items, sources_used, warnings, retrieved_at = await _collect_company_events(
+        ticker,
+        max_results=max_results,
+        lookback_days=lookback_days,
+        sources=sources,
+    )
+    status = _build_collection_status(items, sources_used, warnings)
+    payload = {
+        "ticker": ticker.upper(),
+        "items": items,
+        "meta": {
+            "sourcesUsed": sources_used,
+            "deduped": True,
+            "watermark": retrieved_at,
+        },
+        "warnings": warnings,
+    }
+    if status:
+        payload["status"] = status
+    return json.dumps(payload)
 
 
 @yfinance_server.tool(name="summarize_options_flow", output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_summary"], description="Canonical alias for get_options_summary/get_options_flow_summary.")

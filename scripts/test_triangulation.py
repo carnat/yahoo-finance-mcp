@@ -57,7 +57,7 @@ def main() -> int:
     tools_under_test = [
         ("search_company_news", {"ticker": TICKER, "query": "earnings", "max_results": 5}),
         ("get_company_press_releases", {"ticker": TICKER, "max_results": 5}),
-        ("get_sec_recent_events", {"ticker": TICKER, "filing_type": "8-K", "max_results": 5}),
+        ("get_sec_recent_events", {"ticker": TICKER, "filing_types": ["8-K"], "max_results": 5}),
         ("get_public_event_timeline", {"ticker": TICKER, "max_results": 10}),
         ("verify_company_event", {"ticker": TICKER, "event_query": "quarterly results"}),
     ]
@@ -77,8 +77,8 @@ def main() -> int:
     # 2. Timeline count >= sec items for same ticker
     timeline = results.get("get_public_event_timeline", {})
     sec_events = results.get("get_sec_recent_events", {})
-    timeline_count = timeline.get("count", 0)
-    sec_count = sec_events.get("count", 0)
+    timeline_count = len(timeline.get("timeline", []))
+    sec_count = len(sec_events.get("items", []))
     if not failures and timeline_count < sec_count:
         failures.append(
             f"Timeline count ({timeline_count}) < SEC events count ({sec_count}) — "
@@ -89,7 +89,7 @@ def main() -> int:
 
     # 3. verify_company_event returns CONFIRMED or PARTIAL for known query
     verify = results.get("verify_company_event", {})
-    status = verify.get("verificationStatus", "")
+    status = verify.get("status", "")
     if not failures and status not in ("CONFIRMED", "PARTIAL"):
         failures.append(
             f"verify_company_event returned {status!r} for 'quarterly results' on {TICKER}; "
@@ -99,7 +99,7 @@ def main() -> int:
         print(f"  PASS  verify_company_event status={status!r}")
 
     # 4. No duplicate duplicateGroupId in timeline items
-    items = timeline.get("items", [])
+    items = timeline.get("timeline", [])
     seen_ids: set[str] = set()
     dups: list[str] = []
     for item in items:
