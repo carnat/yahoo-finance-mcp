@@ -5348,210 +5348,571 @@ export async function extractFilingFact(ticker: string, factName: string, _docum
 // ─── Public news / event helpers ──────────────────────────────────────────────
 
 const _str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
+const OFFICIAL_SOURCE_TYPES = new Set(["sec_filing", "company_ir", "press_release", "newswire"]);
+const SUPPORTED_EVENT_SOURCES = new Set(["sec", "company_ir", "newswire", "yahoo_finance"]);
+const SOURCE_PRIORITY: Record<string, number> = {
+  sec_filing: 0,
+  company_ir: 1,
+  press_release: 2,
+  newswire: 3,
+  yahoo_finance: 4,
+  other: 5,
+};
+
+function clampInt(value: number, fallback: number, min: number, max: number): number {
+  const n = Number.isFinite(value) ? Math.trunc(value) : fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function normalizeSources(sources: string[] | undefined, defaults: string[]): { selected: string[]; warnings: Record<string, unknown>[] } {
+  const warnings: Record<string, unknown>[] = [];
+  const input = (sources && sources.length > 0 ? sources : defaults).map(s => _str(s).toLowerCase().trim()).filter(Boolean);
+  const seen = new Set<string>();
+  const selected: string[] = [];
+  for (const src of input) {
+    if (!SUPPORTED_EVENT_SOURCES.has(src)) {
+      warnings.push({ code: "SOURCE_UNSUPPORTED", message: `Source '${src}' is not supported.`, severity: "warning" });
+      continue;
+    }
+    if (!seen.has(src)) {
+      seen.add(src);
+      selected.push(src);
+    }
+  }
+  return { selected: selected.length ? selected : defaults, warnings };
+}
+
+function normalizeIso(raw: unknown): string | null {
+  if (raw == null) return null;
+  if (typeof raw === "number" && Number.isFinite(raw)) return iso(raw);
+  if (typeof raw !== "string") return null;
+  const v = raw.trim();
+  if (!v) return null;
+  if (/^\d{14}$/.test(v)) return `${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}T${v.slice(8, 10)}:${v.slice(10, 12)}:${v.slice(12, 14)}Z`;
+  if (/^\d{8}$/.test(v)) return `${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}T00:00:00Z`;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+function shortText(value: unknown, maxLen = 220): string | null {
+  const s = _str(value).replace(/\s+/g, " ").trim();
+  return s ? s.slice(0, maxLen) : null;
+}
 
 function eventTypeFromKeywords(title: string, summary: string): string {
   const text = `${title} ${summary}`.toLowerCase();
-  if (/earnings|quarterly results|q[1-4] \d{4}/.test(text)) return "EARNINGS";
-  if (/dividend|ex-div/.test(text)) return "DIVIDEND";
-  if (/merger|acquisition|acqui/.test(text)) return "M&A";
-  if (/guidance|outlook|forecast/.test(text)) return "GUIDANCE";
-  if (/press release|announcement/.test(text)) return "PRESS_RELEASE";
-  if (/sec filing|form 8-k|form 10/.test(text)) return "SEC_FILING";
-  return "NEWS";
+  if (/earnings|eps|quarterly|10-q|10-k/.test(text)) return "earnings";
+  if (/guidance|outlook|forecast|reaffirm|raises|lowers/.test(text)) return "guidance";
+  if (/contract|agreement|deal|partnership/.test(text)) return "contract";
+  if (/offering|financing|debt|notes?/.test(text)) return "financing";
+  if (/launch|product|introduce/.test(text)) return "product";
+  if (/analyst|rating|upgrade|downgrade|price target/.test(text)) return "analyst";
+  if (/macro|inflation|rates|fomc|cpi/.test(text)) return "macro";
+  if (/lawsuit|litigation|court|settlement/.test(text)) return "litigation";
+  if (/insider|director|officer|form 4/.test(text)) return "insider";
+  if (/sec|regulatory|8-k|filing/.test(text)) return "regulatory";
+  return "other";
 }
 
-function makeDupGroupId(title: string, dateStr: string): string {
-  // djb2-variant hash: h = h * 33 - h + char, accumulated over title+date string.
-  // Yields a 32-bit unsigned integer → 8 hex digits, used as a stable dedup key.
+function eventTypeFromForm(formType: string): string {
+  const f = formType.toUpperCase();
+  if (f === "10-Q" || f === "10-K") return "earnings";
+  if (f === "S-3" || f === "S-1" || f === "424B") return "financing";
+  if (f === "8-K" || f === "DEF14A" || f === "PRE14A") return "regulatory";
+  if (f === "4") return "insider";
+  return "other";
+}
+
+function canonicalUrl(url: string | null): string | null {
+  const u = _str(url).trim();
+  if (!u) return null;
+  try {
+    const parsed = new URL(u);
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function makeDupGroupId(ticker: string, title: string | null, publishedAt: string | null, issuer: string | null, url: string | null): string | null {
+  const normTitle = _str(title).toLowerCase().replace(/\s+/g, " ").trim().slice(0, 80);
+  const day = _str(publishedAt).slice(0, 10);
+  const entity = (_str(issuer) || ticker).toUpperCase();
+  const canon = canonicalUrl(url) ?? "";
+  if (!normTitle && !day && !canon) return null;
   let h = 0;
-  const s = `${dateStr}::${title.toLowerCase().replace(/\s+/g, " ").trim()}`;
-  for (let i = 0; i < s.length; i++) { h = ((h << 5) - h + s.charCodeAt(i)) | 0; }
+  const s = `${normTitle}|${day}|${entity}|${canon}`;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
   return (h >>> 0).toString(16).padStart(8, "0");
 }
 
-function buildYfEventItem(item: Record<string, unknown>): Record<string, unknown> {
-  const title = _str(item.title);
-  const rawPublishedAt = typeof item.providerPublishTime === "number"
-    ? iso(item.providerPublishTime as number)
-    : _str(item.publishedAt);
-  // Preserve null when publishedAt is genuinely unknown — do not substitute epoch sentinel.
-  const publishedAt = rawPublishedAt || null;
+function withinDateWindow(publishedAt: string | null, startDate = "", endDate = "", lookbackDays?: number): boolean {
+  if (!publishedAt) return false;
+  const day = publishedAt.slice(0, 10);
+  if (startDate && day < startDate) return false;
+  if (endDate && day > endDate) return false;
+  if (lookbackDays != null) {
+    const cutoff = new Date(Date.now() - lookbackDays * 86400000).toISOString().slice(0, 10);
+    if (day < cutoff) return false;
+  }
+  return true;
+}
+
+function buildYfEventItem(ticker: string, raw: Record<string, unknown>, retrievedAt: string): { item: Record<string, unknown>; warnings: Record<string, unknown>[] } {
+  const warnings: Record<string, unknown>[] = [];
+  const content = (raw.content && typeof raw.content === "object") ? raw.content as Record<string, unknown> : {};
+  const title = _str(content.title || raw.title).trim();
+  const summary = _str(content.summary || raw.summary).trim();
+  const source = _str((content.provider as Record<string, unknown> | undefined)?.displayName || raw.publisher || "Yahoo Finance");
+  const url = _str((content.canonicalUrl as Record<string, unknown> | undefined)?.url || raw.link || raw.url) || null;
+  const publishedAt = normalizeIso(raw.providerPublishTime ?? content.pubDate);
+  if (!publishedAt) {
+    warnings.push({ code: "PUBLISHED_AT_UNAVAILABLE", message: `Published timestamp unavailable for source '${source}'.`, severity: "warning" });
+  }
+  const sourceType = /businesswire|globenewswire|prnewswire/i.test(source) ? "newswire" : "yahoo_finance";
+  const relevance = `${title} ${summary}`.toUpperCase().includes(ticker.toUpperCase()) ? "HIGH" : (sourceType === "yahoo_finance" ? "LOW" : "UNKNOWN");
+  const confidence = !url || relevance !== "HIGH" ? "LOW" : "MEDIUM";
+  const duplicateGroupId = makeDupGroupId(ticker, title, publishedAt, null, url);
+  if (!duplicateGroupId) {
+    warnings.push({ code: "DEDUPE_WEAK_KEY", message: "Weak dedupe key for at least one item.", severity: "warning" });
+  }
   return {
-    source: "Yahoo Finance",
-    sourceType: "yahoo_finance",
-    title,
-    summary: _str(item.summary),
-    url: _str(item.link),
-    publishedAt,
-    retrievedAt: new Date().toISOString(),
-    eventType: eventTypeFromKeywords(title, _str(item.summary)),
-    confidence: "MEDIUM",
-    duplicateGroupId: makeDupGroupId(title, (publishedAt ?? "").slice(0, 10)),
+    item: {
+      title,
+      source,
+      sourceType,
+      publishedAt,
+      retrievedAt,
+      url,
+      issuer: null,
+      tickers: [ticker.toUpperCase()],
+      eventType: eventTypeFromKeywords(title, summary),
+      summary: shortText(summary || title, 240),
+      evidenceText: shortText(summary || title, 180),
+      confidence,
+      tickerRelevance: relevance,
+      duplicateGroupId,
+    },
+    warnings,
   };
 }
 
-function buildSecEventItem(filing: Record<string, unknown>): Record<string, unknown> {
-  const title = _str(filing.description || filing.formType || "SEC Filing");
-  const filingDate = _str(filing.filingDate || filing.date || "");
+function buildSecEventItem(
+  ticker: string,
+  filing: Record<string, unknown>,
+  retrievedAt: string,
+  issuer: string | null
+): { item: Record<string, unknown>; warnings: Record<string, unknown>[] } {
+  const warnings: Record<string, unknown>[] = [];
+  const filingType = _str(filing.filingType || filing.formType || filing.form).toUpperCase();
+  const filingDate = _str(filing.filingDate);
+  const acceptedAt = normalizeIso(filing.acceptedAt ?? filing.acceptanceDateTime);
+  let publishedAt = acceptedAt;
+  if (!publishedAt && filingDate) {
+    publishedAt = `${filingDate}T00:00:00Z`;
+    warnings.push({
+      code: "PUBLISHED_AT_ESTIMATED",
+      message: `acceptedAt unavailable for ${filingType || "SEC filing"}; filingDate used.`,
+      severity: "warning",
+    });
+  }
+  const accessionNumber = _str(filing.accessionNumber);
+  const cikInt = _str(filing.cikInt || filing.cik);
+  const accClean = accessionNumber.replace(/-/g, "");
+  const primaryDocument = _str(filing.primaryDocument);
+  let url = _str(filing.documentUrl || filing.primaryDocumentUrl);
+  if (!url && cikInt && accessionNumber && primaryDocument) {
+    url = `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accClean}/${primaryDocument}`;
+  }
+  if (!url && cikInt && accessionNumber) {
+    url = `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accClean}/${accessionNumber}-index.htm`;
+  }
+  if (!url.startsWith("https://www.sec.gov/Archives/")) {
+    url = "";
+    warnings.push({ code: "SEC_URL_INVALID", message: "SEC event URL missing or invalid SEC Archives URL.", severity: "warning" });
+  }
+  const duplicateGroupId = makeDupGroupId(ticker, `${filingType} filed`, publishedAt, issuer, url || null);
+  if (!duplicateGroupId) {
+    warnings.push({ code: "DEDUPE_WEAK_KEY", message: "Weak dedupe key for at least one item.", severity: "warning" });
+  }
+  const confidence = accessionNumber && acceptedAt && url ? "HIGH" : (accessionNumber && url ? "MEDIUM" : "LOW");
   return {
-    source: "SEC EDGAR",
-    sourceType: "sec_filing",
-    title,
-    accessionNumber: _str(filing.accessionNumber),
-    url: _str(filing.primaryDocumentUrl || filing.filingUrl),
-    publishedAt: filingDate,
-    retrievedAt: new Date().toISOString(),
-    eventType: eventTypeFromKeywords(title, _str(filing.formType)),
-    confidence: "HIGH",
-    formType: _str(filing.formType),
-    duplicateGroupId: makeDupGroupId(title, filingDate.slice(0, 10)),
+    item: {
+      title: `${filingType || "SEC"} filed`,
+      source: "SEC",
+      sourceType: "sec_filing",
+      filingType: filingType || null,
+      filingDate: filingDate || null,
+      acceptedAt: acceptedAt || null,
+      accessionNumber: accessionNumber || null,
+      url: url || null,
+      publishedAt,
+      retrievedAt,
+      issuer,
+      tickers: [ticker.toUpperCase()],
+      eventType: eventTypeFromForm(filingType),
+      summary: shortText(`SEC ${filingType} filing for ${ticker.toUpperCase()}`),
+      evidenceText: shortText(`${filingType} accepted by SEC on ${acceptedAt || filingDate}`),
+      confidence,
+      tickerRelevance: "HIGH",
+      duplicateGroupId,
+    },
+    warnings,
   };
+}
+
+function dedupeEventItems(items: Record<string, unknown>[], warnings: Record<string, unknown>[]): Record<string, unknown>[] {
+  const grouped = new Map<string, Record<string, unknown>>();
+  const passthrough: Record<string, unknown>[] = [];
+  for (const item of items) {
+    const gid = _str(item.duplicateGroupId);
+    if (!gid) {
+      passthrough.push(item);
+      continue;
+    }
+    const existing = grouped.get(gid);
+    if (!existing) {
+      grouped.set(gid, item);
+      continue;
+    }
+    const existingRank = SOURCE_PRIORITY[_str(existing.sourceType, "other")] ?? SOURCE_PRIORITY.other;
+    const currentRank = SOURCE_PRIORITY[_str(item.sourceType, "other")] ?? SOURCE_PRIORITY.other;
+    let keepNew = currentRank < existingRank;
+    if (currentRank === existingRank) {
+      keepNew = _str(item.publishedAt) > _str(existing.publishedAt);
+    }
+    if (_str(existing.publishedAt) !== _str(item.publishedAt)) {
+      warnings.push({ code: "TIMESTAMP_CONFLICT", message: `Conflicting source timestamps observed for duplicateGroupId=${gid}.`, severity: "warning" });
+    }
+    const preferred = keepNew ? item : existing;
+    const alternate = keepNew ? existing : item;
+    const refs = Array.isArray(preferred.sourceRefs) ? preferred.sourceRefs as Record<string, unknown>[] : [];
+    refs.push({
+      source: alternate.source,
+      sourceType: alternate.sourceType,
+      publishedAt: alternate.publishedAt,
+      url: alternate.url,
+    });
+    preferred.sourceRefs = refs;
+    grouped.set(gid, preferred);
+  }
+  const deduped = [...grouped.values(), ...passthrough];
+  deduped.sort((a, b) => _str(b.publishedAt).localeCompare(_str(a.publishedAt)));
+  return deduped;
+}
+
+function collectionStatus(items: Record<string, unknown>[], sourcesUsed: string[], warnings: Record<string, unknown>[]): string | null {
+  if (items.length > 0 && warnings.some(w => _str(w.code) === "SOURCE_UNAVAILABLE")) return "PARTIAL";
+  if (items.length === 0 && sourcesUsed.length > 0) return "NOT_FOUND";
+  if (items.length === 0 && sourcesUsed.length === 0) return "PROVIDER_ERROR";
+  return null;
+}
+
+async function collectSecEvents(
+  ticker: string,
+  filingTypes: string[],
+  maxResults: number,
+  retrievedAt: string,
+  startDate = "",
+  endDate = "",
+  lookbackDays?: number
+): Promise<{ items: Record<string, unknown>[]; warnings: Record<string, unknown>[]; used: boolean }> {
+  const warnings: Record<string, unknown>[] = [];
+  const items: Record<string, unknown>[] = [];
+  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
+  if (!cikPadded || !submissions) {
+    warnings.push({ code: "SOURCE_UNAVAILABLE", message: "SEC submissions source unavailable.", severity: "warning" });
+    return { items, warnings, used: false };
+  }
+  const recent = ((submissions.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+  const forms = (recent.form ?? []) as string[];
+  const filingDates = (recent.filingDate ?? []) as string[];
+  const accepted = (recent.acceptanceDateTime ?? []) as string[];
+  const accessions = (recent.accessionNumber ?? []) as string[];
+  const primaryDocs = (recent.primaryDocument ?? []) as string[];
+  const issuer = _str(submissions.name) || null;
+  const wanted = new Set(filingTypes.map(f => f.toUpperCase()));
+  const cikInt = String(parseInt(cikPadded, 10));
+  for (let i = 0; i < forms.length && items.length < maxResults; i++) {
+    const form = _str(forms[i]).toUpperCase();
+    if (wanted.size > 0 && !wanted.has(form)) continue;
+    const { item, warnings: w } = buildSecEventItem(ticker, {
+      filingType: form,
+      filingDate: filingDates[i] ?? "",
+      acceptedAt: accepted[i] ?? "",
+      accessionNumber: accessions[i] ?? "",
+      primaryDocument: primaryDocs[i] ?? "",
+      cikInt,
+    }, retrievedAt, issuer);
+    if (!withinDateWindow(_str(item.publishedAt) || null, startDate, endDate, lookbackDays)) continue;
+    items.push(item);
+    warnings.push(...w);
+  }
+  return { items, warnings, used: true };
+}
+
+async function collectYahooEvents(
+  ticker: string,
+  maxResults: number,
+  retrievedAt: string,
+  startDate = "",
+  endDate = "",
+  lookbackDays?: number
+): Promise<{ items: Record<string, unknown>[]; warnings: Record<string, unknown>[]; used: boolean }> {
+  const warnings: Record<string, unknown>[] = [];
+  const items: Record<string, unknown>[] = [];
+  try {
+    const raw = JSON.parse(await getNews(ticker)) as Record<string, unknown>;
+    const news = (raw.items as Record<string, unknown>[]) ?? [];
+    for (const n of news) {
+      const { item, warnings: w } = buildYfEventItem(ticker, n, retrievedAt);
+      if (!withinDateWindow(_str(item.publishedAt) || null, startDate, endDate, lookbackDays)) continue;
+      items.push(item);
+      warnings.push(...w);
+      if (items.length >= maxResults) break;
+    }
+  } catch (e) {
+    warnings.push({ code: "SOURCE_UNAVAILABLE", message: `Yahoo Finance source unavailable: ${e instanceof Error ? e.message : String(e)}`, severity: "warning" });
+    return { items, warnings, used: false };
+  }
+  return { items, warnings, used: true };
+}
+
+async function collectCompanyEvents(
+  ticker: string,
+  {
+    maxResults = 10,
+    lookbackDays = 14,
+    startDate = "",
+    endDate = "",
+    sources,
+    secFilingTypes = ["8-K", "10-Q", "10-K", "S-3", "DEF14A"],
+  }: {
+    maxResults?: number;
+    lookbackDays?: number;
+    startDate?: string;
+    endDate?: string;
+    sources?: string[];
+    secFilingTypes?: string[];
+  } = {}
+): Promise<{ items: Record<string, unknown>[]; sourcesUsed: string[]; warnings: Record<string, unknown>[]; watermark: string }> {
+  const safeMax = clampInt(maxResults, 10, 1, 100);
+  const safeLookback = clampInt(lookbackDays, 14, 1, 3650);
+  const watermark = new Date().toISOString();
+  const { selected, warnings: sourceWarnings } = normalizeSources(sources, ["sec", "company_ir", "newswire", "yahoo_finance"]);
+  const warnings: Record<string, unknown>[] = [...sourceWarnings];
+  const items: Record<string, unknown>[] = [];
+  const sourcesUsed: string[] = [];
+
+  if (selected.includes("sec")) {
+    const sec = await collectSecEvents(ticker, secFilingTypes, safeMax, watermark, startDate, endDate, safeLookback);
+    if (sec.used) sourcesUsed.push("sec");
+    items.push(...sec.items);
+    warnings.push(...sec.warnings);
+  }
+  if (selected.includes("company_ir")) {
+    warnings.push({ code: "SOURCE_UNAVAILABLE", message: "Company IR source is not configured; skipped.", severity: "warning" });
+  }
+  if (selected.includes("newswire")) {
+    warnings.push({ code: "SOURCE_UNAVAILABLE", message: "Newswire source is not configured; skipped.", severity: "warning" });
+  }
+  if (selected.includes("yahoo_finance")) {
+    const yf = await collectYahooEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback);
+    if (yf.used) sourcesUsed.push("yahoo_finance");
+    items.push(...yf.items);
+    warnings.push(...yf.warnings);
+  }
+
+  const deduped = dedupeEventItems(items, warnings).slice(0, safeMax);
+  const uniqueWarnings: Record<string, unknown>[] = [];
+  const warningKeys = new Set<string>();
+  for (const w of warnings) {
+    const key = `${_str(w.code)}|${_str(w.message)}`;
+    if (warningKeys.has(key)) continue;
+    warningKeys.add(key);
+    uniqueWarnings.push(w);
+  }
+  return { items: deduped, sourcesUsed, warnings: uniqueWarnings, watermark };
 }
 
 // ─── Public event / news tools ─────────────────────────────────────────────────
 
-export async function searchCompanyNews(ticker: string, query = "", maxResults = 20): Promise<string> {
-  try {
-    const raw = JSON.parse(await getNews(ticker)) as Record<string, unknown>;
-    let items = (raw.news as Record<string, unknown>[]) ?? [];
-    if (query) {
-      const q = query.toLowerCase();
-      items = items.filter(n =>
-        _str(n.title).toLowerCase().includes(q) ||
-        _str(n.summary).toLowerCase().includes(q)
-      );
-    }
-    items = items.slice(0, maxResults);
-    return JSON.stringify({
-      ticker,
-      query,
-      count: items.length,
-      items: items.map(buildYfEventItem),
-    });
-  } catch (e) {
-    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
-  }
+export async function getCompanyNews(ticker: string, maxResults = 10, lookbackDays = 14, sources: string[] = ["sec", "company_ir", "newswire", "yahoo_finance"]): Promise<string> {
+  const out = await collectCompanyEvents(ticker, { maxResults, lookbackDays, sources });
+  const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
+  const payload: Record<string, unknown> = {
+    ticker: ticker.toUpperCase(),
+    items: out.items,
+    meta: { sourcesUsed: out.sourcesUsed, deduped: true, watermark: out.watermark },
+    warnings: out.warnings,
+  };
+  if (status) payload.status = status;
+  return JSON.stringify(payload);
 }
 
-export async function getCompanyPressReleases(ticker: string, maxResults = 10, startDate = ""): Promise<string> {
-  try {
-    const raw = JSON.parse(await listSecFilings(ticker, "8-K", maxResults + 5)) as Record<string, unknown>;
-    let filings = (raw.filings as Record<string, unknown>[]) ?? [];
-    if (startDate) {
-      filings = filings.filter(f => _str(f.filingDate || f.date) >= startDate);
-    }
-    filings = filings.slice(0, maxResults);
-    return JSON.stringify({
-      ticker,
-      count: filings.length,
-      items: filings.map(buildSecEventItem),
-    });
-  } catch (e) {
-    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
-  }
+export async function searchCompanyNews(
+  ticker: string,
+  query: string,
+  startDate = "",
+  endDate = "",
+  sources: string[] = ["sec", "company_ir", "newswire", "yahoo_finance"],
+  maxResults = 10
+): Promise<string> {
+  const out = await collectCompanyEvents(ticker, { maxResults, lookbackDays: 14, startDate, endDate, sources });
+  const q = query.toLowerCase().trim();
+  const matched = q
+    ? out.items.filter(item => `${_str(item.title)} ${_str(item.summary)} ${_str(item.source)} ${_str(item.eventType)} ${_str(item.evidenceText)}`.toLowerCase().includes(q))
+    : out.items;
+  const status = collectionStatus(matched, out.sourcesUsed, out.warnings);
+  const payload: Record<string, unknown> = {
+    ticker: ticker.toUpperCase(),
+    query,
+    items: matched.slice(0, clampInt(maxResults, 10, 1, 100)),
+    meta: { sourcesUsed: out.sourcesUsed, deduped: true, watermark: out.watermark },
+    warnings: out.warnings,
+  };
+  if (status) payload.status = status;
+  return JSON.stringify(payload);
 }
 
-export async function getSecRecentEvents(ticker: string, filingType = "8-K", maxResults = 10, startDate = ""): Promise<string> {
-  try {
-    const raw = JSON.parse(await listSecFilings(ticker, filingType === "all" ? "8-K" : filingType, maxResults + 5)) as Record<string, unknown>;
-    let filings = (raw.filings as Record<string, unknown>[]) ?? [];
-    if (startDate) {
-      filings = filings.filter(f => _str(f.filingDate || f.date) >= startDate);
-    }
-    filings = filings.slice(0, maxResults);
-    return JSON.stringify({
-      ticker,
-      filingType,
-      count: filings.length,
-      items: filings.map(buildSecEventItem),
+export async function getCompanyPressReleases(
+  ticker: string,
+  lookbackDays = 90,
+  maxResults = 20,
+  sources: string[] = ["company_ir", "newswire", "sec"]
+): Promise<string> {
+  const out = await collectCompanyEvents(ticker, {
+    maxResults,
+    lookbackDays,
+    sources,
+    secFilingTypes: ["8-K"],
+  });
+  const items = out.items.filter(it => ["company_ir", "press_release", "newswire", "sec_filing"].includes(_str(it.sourceType)));
+  const warnings = [...out.warnings];
+  if (items.length === 0) {
+    warnings.push({
+      code: "NO_OFFICIAL_RELEASE_SOURCE",
+      message: "No company-originated or official release source found in requested window.",
+      severity: "warning",
     });
-  } catch (e) {
-    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
   }
+  const status = collectionStatus(items, out.sourcesUsed, warnings);
+  const payload: Record<string, unknown> = {
+    ticker: ticker.toUpperCase(),
+    items: items.slice(0, clampInt(maxResults, 20, 1, 100)),
+    meta: { sourcesUsed: out.sourcesUsed, deduped: true, watermark: out.watermark },
+    warnings,
+  };
+  if (status) payload.status = status;
+  return JSON.stringify(payload);
 }
 
-export async function getPublicEventTimeline(ticker: string, maxResults = 20, startDate = "", sources: string[] = ["sec", "yahoo_finance"]): Promise<string> {
-  try {
-    const items: Record<string, unknown>[] = [];
-    const seen = new Set<string>();
-
-    if (sources.includes("sec")) {
-      const raw = JSON.parse(await listSecFilings(ticker, "8-K", maxResults)) as Record<string, unknown>;
-      for (const f of (raw.filings as Record<string, unknown>[]) ?? []) {
-        if (startDate && _str(f.filingDate || f.date) < startDate) continue;
-        const item = buildSecEventItem(f);
-        const key = _str(item.duplicateGroupId);
-        if (!seen.has(key)) { seen.add(key); items.push(item); }
-      }
-    }
-
-    if (sources.includes("yahoo_finance")) {
-      const raw = JSON.parse(await getNews(ticker)) as Record<string, unknown>;
-      for (const n of (raw.news as Record<string, unknown>[]) ?? []) {
-        const item = buildYfEventItem(n);
-        if (startDate && _str(item.publishedAt).slice(0, 10) < startDate) continue;
-        const key = _str(item.duplicateGroupId);
-        if (!seen.has(key)) { seen.add(key); items.push(item); }
-      }
-    }
-
-    items.sort((a, b) => _str(b.publishedAt).localeCompare(_str(a.publishedAt)));
-    return JSON.stringify({
-      ticker,
-      count: Math.min(items.length, maxResults),
-      items: items.slice(0, maxResults),
-    });
-  } catch (e) {
-    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
-  }
+export async function getSecRecentEvents(
+  ticker: string,
+  filingTypes: string[] = ["8-K", "10-Q", "10-K"],
+  lookbackDays = 90,
+  maxResults = 20
+): Promise<string> {
+  const watermark = new Date().toISOString();
+  const sec = await collectSecEvents(ticker, filingTypes, clampInt(maxResults, 20, 1, 100), watermark, "", "", clampInt(lookbackDays, 90, 1, 3650));
+  const status = collectionStatus(sec.items, sec.used ? ["sec"] : [], sec.warnings);
+  const payload: Record<string, unknown> = {
+    ticker: ticker.toUpperCase(),
+    items: sec.items,
+    meta: { sourcesUsed: sec.used ? ["sec"] : [], watermark },
+    warnings: sec.warnings,
+  };
+  if (status) payload.status = status;
+  return JSON.stringify(payload);
 }
 
-export async function verifyCompanyEvent(ticker: string, eventQuery: string, startDate = "", endDate = "", sources: string[] = ["sec", "yahoo_finance"]): Promise<string> {
-  try {
-    const q = eventQuery.toLowerCase();
-    const secItems: Record<string, unknown>[] = [];
-    const newsItems: Record<string, unknown>[] = [];
+export async function getPublicEventTimeline(
+  ticker: string,
+  startDate = "",
+  endDate = "",
+  sources: string[] = ["sec", "company_ir", "newswire", "yahoo_finance"],
+  maxResults = 50,
+  newestFirst = false
+): Promise<string> {
+  const out = await collectCompanyEvents(ticker, { maxResults, lookbackDays: 365, startDate, endDate, sources });
+  const timeline = out.items
+    .filter(item => _str(item.publishedAt))
+    .map(item => ({
+      timestamp: item.publishedAt,
+      eventType: item.eventType,
+      title: item.title,
+      source: item.source,
+      sourceType: item.sourceType,
+      url: item.url,
+      confidence: item.confidence,
+      duplicateGroupId: item.duplicateGroupId,
+    }))
+    .sort((a, b) => newestFirst
+      ? _str(b.timestamp).localeCompare(_str(a.timestamp))
+      : _str(a.timestamp).localeCompare(_str(b.timestamp)))
+    .slice(0, clampInt(maxResults, 50, 1, 100));
+  const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
+  const payload: Record<string, unknown> = {
+    ticker: ticker.toUpperCase(),
+    timeline,
+    meta: { sourcesUsed: out.sourcesUsed, deduped: true, watermark: out.watermark },
+    warnings: out.warnings,
+  };
+  if (status) payload.status = status;
+  return JSON.stringify(payload);
+}
 
-    if (sources.includes("sec")) {
-      const raw = JSON.parse(await listSecFilings(ticker, "8-K", 20)) as Record<string, unknown>;
-      for (const f of (raw.filings as Record<string, unknown>[]) ?? []) {
-        const date = _str(f.filingDate || f.date);
-        if (startDate && date < startDate) continue;
-        if (endDate && date > endDate) continue;
-        const title = _str(f.description || f.formType);
-        if (!q || title.toLowerCase().includes(q)) secItems.push(buildSecEventItem(f));
-      }
-    }
-
-    if (sources.includes("yahoo_finance")) {
-      const raw = JSON.parse(await getNews(ticker)) as Record<string, unknown>;
-      for (const n of (raw.news as Record<string, unknown>[]) ?? []) {
-        const item = buildYfEventItem(n);
-        const date = _str(item.publishedAt).slice(0, 10);
-        if (startDate && date < startDate) continue;
-        if (endDate && date > endDate) continue;
-        const title = _str(item.title).toLowerCase();
-        const summary = _str(item.summary).toLowerCase();
-        if (!q || title.includes(q) || summary.includes(q)) newsItems.push(item);
-      }
-    }
-
-    let verificationStatus: string;
-    if (secItems.length > 0) verificationStatus = "CONFIRMED";
-    else if (newsItems.length > 0) verificationStatus = "PARTIAL";
-    else verificationStatus = "NOT_FOUND";
-
-    return JSON.stringify({
-      ticker,
-      eventQuery,
-      verificationStatus,
-      secEvidenceCount: secItems.length,
-      newsEvidenceCount: newsItems.length,
-      bestEvidence: [...secItems.slice(0, 3), ...newsItems.slice(0, 3)],
-    });
-  } catch (e) {
-    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
-  }
+export async function verifyCompanyEvent(
+  ticker: string,
+  eventQuery: string,
+  startDate = "",
+  endDate = "",
+  sources: string[] = ["sec", "company_ir", "newswire", "yahoo_finance"]
+): Promise<string> {
+  const out = await collectCompanyEvents(ticker, { maxResults: 50, lookbackDays: 365, sources });
+  const q = eventQuery.toLowerCase().trim();
+  const tokens = q.split(/\s+/).filter(Boolean);
+  const isMatch = (item: Record<string, unknown>): boolean => {
+    const text = `${_str(item.title)} ${_str(item.summary)} ${_str(item.evidenceText)} ${_str(item.eventType)} ${_str(item.source)}`.toLowerCase();
+    if (q && text.includes(q)) return true;
+    return tokens.some(t => t.length >= 4 && text.includes(t));
+  };
+  const matched = out.items.filter(isMatch);
+  const inRange = matched.filter(item => {
+    if (!startDate && !endDate) return true;
+    return withinDateWindow(_str(item.publishedAt) || null, startDate, endDate);
+  });
+  const official = inRange.filter(item => OFFICIAL_SOURCE_TYPES.has(_str(item.sourceType)) && !!_str(item.url) && ["HIGH", "MEDIUM"].includes(_str(item.confidence)));
+  const staleCutoff = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
+  const staleOnly = matched.length > 0 && matched.every(item => _str(item.publishedAt).slice(0, 10) < staleCutoff);
+  const conflicts: Record<string, unknown>[] = out.warnings.some(w => _str(w.code) === "TIMESTAMP_CONFLICT")
+    ? [{ type: "timestamp", message: "Conflicting timestamps observed across sources for related events." }]
+    : [];
+  let status = "NOT_FOUND";
+  if (conflicts.length > 0) status = "CONFLICTING";
+  else if (official.length > 0) status = "CONFIRMED";
+  else if (inRange.length > 0) status = "PARTIAL";
+  else if (staleOnly) status = "STALE";
+  const best = (official.length > 0 ? official : (inRange.length > 0 ? inRange : matched)).slice(0, 5).map(ev => ({
+    source: ev.source,
+    sourceType: ev.sourceType,
+    publishedAt: ev.publishedAt,
+    retrievedAt: ev.retrievedAt,
+    url: ev.url,
+    confidence: ev.confidence,
+    evidenceText: shortText(ev.evidenceText || ev.summary || ev.title, 180),
+  }));
+  return JSON.stringify({
+    ticker: ticker.toUpperCase(),
+    query: eventQuery,
+    status,
+    bestEvidence: best,
+    conflicts,
+    meta: { sourcesChecked: out.sourcesUsed, watermark: out.watermark },
+    warnings: out.warnings,
+  });
 }
 
 // ── index_sec_filing / get_sec_filing_index ────────────────────────────────────

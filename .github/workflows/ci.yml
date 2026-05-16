@@ -87,6 +87,9 @@ jobs:
       - name: Phase 5 tests
         run: python scripts/test_phase5.py
 
+      - name: Phase 6B tests
+        run: python scripts/test_phase6b.py
+
       - name: Options data quality tests
         run: python scripts/test_options_quality.py
 
