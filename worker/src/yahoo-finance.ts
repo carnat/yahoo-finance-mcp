@@ -312,7 +312,7 @@ function normalizeBatchSymbolResult(parsed: unknown, ticker: string): Record<str
     const p = parsed as Record<string, unknown>;
     if (typeof p.ok === "boolean" && ("data" in p || "error" in p)) {
       if (p.ok === true) {
-        return { ok: true, data: p.data ?? null, error: null };
+        return { ok: true, data: p.data ?? null };
       }
       const errObj = p.error as Record<string, unknown> | null | undefined;
       const code = typeof errObj?.code === "string" ? errObj.code : "PROVIDER_ERROR";
@@ -358,10 +358,16 @@ async function runPartialBatch(
       if (shaped.ok === true) successCount += 1;
       else errorCount += 1;
       out[t] = shaped.ok === true
-        ? (shaped.data as Record<string, unknown> | null)
+        ? (shaped.data ?? null)
         : {
             error: true,
-            ...(shaped.error as Record<string, unknown>),
+            code: typeof (shaped.error as Record<string, unknown> | undefined)?.code === "string"
+              ? (shaped.error as Record<string, unknown>).code
+              : "PROVIDER_ERROR",
+            message: typeof (shaped.error as Record<string, unknown> | undefined)?.message === "string"
+              ? (shaped.error as Record<string, unknown>).message
+              : `Error for ${t}`,
+            retryable: (shaped.error as Record<string, unknown> | undefined)?.retryable === true,
           };
     } catch (e) {
       errorCount += 1;

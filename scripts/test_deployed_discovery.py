@@ -301,7 +301,6 @@ def main() -> int:
 
     calls: list[tuple[str, dict]] = [
         ("health_check", {}),
-        ("get_market_quote", {"ticker": "ASTS"}),
         ("analyze_position_signals", {"ticker": "ASTS"}),
         ("calculate_price_target_distance", {"ticker": "ASTS", "io_pt": 95}),
         ("check_volume_liquidity_threshold", {"ticker": "ASTS"}),

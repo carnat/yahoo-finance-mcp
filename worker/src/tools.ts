@@ -1374,6 +1374,13 @@ const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : 
 const num = (v: unknown, fallback: number): number => (typeof v === "number" ? v : fallback);
 const tickerArg = (v: unknown): string | string[] =>
   Array.isArray(v) ? v.map(String) : str(v);
+type AliasSuccessOptions = {
+  canonicalTool: string;
+  partialSuccess?: boolean;
+  successCount?: number;
+  errorCount?: number;
+  warnings?: { code: string; message: string; severity: string }[];
+};
 
 async function computeHash(data: string): Promise<string> {
   const encoded = new TextEncoder().encode(data);
@@ -1414,13 +1421,7 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
     // non-JSON payload
   }
   if (aliasTarget != null) {
-    const opts: {
-      canonicalTool: string;
-      partialSuccess?: boolean;
-      successCount?: number;
-      errorCount?: number;
-      warnings?: { code: string; message: string; severity: string }[];
-    } = {
+    const opts: AliasSuccessOptions = {
       canonicalTool,
       ...(batchMeta ?? {}),
     };
