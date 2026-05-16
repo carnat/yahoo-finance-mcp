@@ -2880,15 +2880,17 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
     warnings: list[dict[str, str]] = []
 
     # Price targets
+    target_mean = None
     try:
         targets = company.analyst_price_targets
         if targets:
             current_target = targets.get("current")
+            target_mean = targets.get("mean")
             output["priceTargets"] = {
                 "current": current_target,
                 "low": targets.get("low"),
                 "high": targets.get("high"),
-                "mean": targets.get("mean"),
+                "mean": target_mean,
                 "median": targets.get("median"),
                 "pctUpsideFromLastPrice": (
                     round((current_target - last_price) / last_price * 100, 2)

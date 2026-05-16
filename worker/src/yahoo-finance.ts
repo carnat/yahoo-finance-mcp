@@ -1358,8 +1358,9 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
   if (Array.isArray(ticker)) {
     return runPartialBatch(ticker, (t) => getAnalystConsensus(t));
   }
+  const modules = "financialData,recommendationTrend,price,upgradeDowngradeHistory";
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=financialData,recommendationTrend,price,upgradeDowngradeHistory`
+    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=${modules}`
   )) as Record<string, unknown>;
 
   const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
