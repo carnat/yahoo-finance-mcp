@@ -5698,3 +5698,328 @@ export async function getSecFilingIndex(
     return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: `${e instanceof Error ? e.message : String(e)}` } });
   }
 }
+
+function parseObjectJson(raw: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function compactExcerpt(text: unknown, maxLen = 240): string {
+  const cleaned = String(text ?? "").replace(/\s+/g, " ").trim();
+  return cleaned.length <= maxLen ? cleaned : `${cleaned.slice(0, maxLen).trimEnd()}...`;
+}
+
+function normalizeStatus(payload: Record<string, unknown>): string {
+  const source = String(payload.source ?? "").toUpperCase();
+  const confidence = String(payload.confidence ?? "").toUpperCase();
+  if (source === "NOT_DISCLOSED" || confidence === "NOT_DISCLOSED") return "NOT_DISCLOSED";
+  if (source === "CONFLICTING" || confidence === "CONFLICTING") return "CONFLICTING";
+  return "NOT_FOUND";
+}
+
+export async function extractGeographicRevenue(
+  ticker: string,
+  region: string,
+  filingType = "10-K",
+  period = "latest",
+  accessionNumber: string | null = null,
+  detailLevel = "compact",
+): Promise<string> {
+  if (!region || !region.trim()) {
+    return JSON.stringify({
+      ticker,
+      factType: "geographic_revenue",
+      region,
+      period: null,
+      rawValue: null,
+      rawDenominator: null,
+      unit: "USD",
+      unitScale: "unknown",
+      value: null,
+      denominator: null,
+      valueRatio: null,
+      valuePct: null,
+      extractionMethod: "NONE",
+      confidence: "NOT_DISCLOSED",
+      evidence: {},
+      calculation: null,
+      warnings: [{ code: "INPUT_VALIDATION_ERROR", message: "region is required", severity: "error" }],
+    });
+  }
+  const payload = parseObjectJson(await getFilingData(ticker, "geographic_revenue", region, filingType, period));
+  const idx = parseObjectJson(await getSecFilingIndex(ticker, filingType, period, accessionNumber));
+  const evidence = payload.evidence && typeof payload.evidence === "object" ? payload.evidence as Record<string, unknown> : {};
+  const warnings = Array.isArray(payload.warnings) ? [...payload.warnings] : [];
+  if (payload.value != null && payload.denominator == null && !warnings.some((w) => typeof w === "object" && w != null && (w as Record<string, unknown>).code === "DENOMINATOR_NOT_FOUND")) {
+    warnings.push({ code: "DENOMINATOR_NOT_FOUND", message: "Could not compute geographic revenue percentage due to missing denominator.", severity: "warning" });
+  }
+  const out: Record<string, unknown> = {
+    ticker,
+    factType: "geographic_revenue",
+    region,
+    period: payload.period ?? null,
+    rawValue: payload.rawValue ?? null,
+    rawDenominator: payload.rawDenominator ?? null,
+    unit: payload.unit ?? "USD",
+    unitScale: payload.unitScale ?? "unknown",
+    value: payload.value ?? null,
+    denominator: payload.denominator ?? null,
+    valueRatio: payload.denominator != null ? (payload.valueRatio ?? null) : null,
+    valuePct: payload.denominator != null ? (payload.valuePct ?? null) : null,
+    extractionMethod: payload.extractionMethod ?? "NONE",
+    confidence: payload.confidence ?? "NOT_DISCLOSED",
+    evidence: {
+      filingType: idx.filingType ?? payload.filingType ?? filingType,
+      filingDate: idx.filingDate ?? payload.filingDate ?? null,
+      acceptedAt: idx.acceptedAt ?? null,
+      accessionNumber: idx.accessionNumber ?? payload.accessionNumber ?? null,
+      documentUrl: idx.documentUrl ?? payload.documentUrl ?? null,
+      sectionHeading: evidence.sectionHeading ?? null,
+      tableTitle: evidence.tableTitle ?? null,
+      sourceTableId: evidence.sourceTableId ?? null,
+      sourceRows: Array.isArray(evidence.sourceRows) ? evidence.sourceRows : [],
+      sourceColumns: Array.isArray(evidence.sourceColumns) ? evidence.sourceColumns : [],
+    },
+    calculation: payload.calculation ?? null,
+    warnings,
+  };
+  if (String(detailLevel).toLowerCase() === "raw") out.rawContext = { filingIndex: idx };
+  return JSON.stringify(out);
+}
+
+export async function extractSegmentRevenue(ticker: string, filingType = "10-K", period = "latest", detailLevel = "compact"): Promise<string> {
+  const payload = parseObjectJson(await getFilingData(ticker, "segment_revenue", null, filingType, period));
+  const segsRaw = Array.isArray(payload.allSegments) ? payload.allSegments : [];
+  const segments = segsRaw
+    .filter((s) => typeof s === "object" && s != null)
+    .map((s) => {
+      const row = s as Record<string, unknown>;
+      return {
+        label: row.segmentLabel ?? null,
+        value: row.value ?? null,
+        period: row.fiscalYear ? `FY${String(row.fiscalYear)}` : null,
+        confidence: "HIGH",
+        evidence: {
+          filingDate: row.filingDate ?? null,
+          accessionNumber: row.accessionNumber ?? null,
+        },
+      };
+    });
+  const out: Record<string, unknown> = { ticker, factType: "segment_revenue", segments, status: segments.length > 0 ? "FOUND" : "NOT_DISCLOSED" };
+  if (String(detailLevel).toLowerCase() === "raw") out.rawContext = payload;
+  return JSON.stringify(out);
+}
+
+export async function extractTotalRevenue(ticker: string, filingType = "10-K", period = "latest"): Promise<string> {
+  const payload = parseObjectJson(await getFilingData(ticker, "total_revenue", null, filingType, period));
+  const value = payload.value ?? null;
+  return JSON.stringify({
+    ticker,
+    factType: "total_revenue",
+    value,
+    period: payload.period ?? null,
+    confidence: payload.confidence ?? (value != null ? "HIGH" : "NOT_DISCLOSED"),
+    evidence: {
+      filingType: payload.filingType ?? filingType,
+      filingDate: payload.filingDate ?? null,
+      accessionNumber: payload.accessionNumber ?? null,
+      documentUrl: payload.documentUrl ?? null,
+    },
+    status: value != null ? "FOUND" : normalizeStatus(payload),
+  });
+}
+
+export async function extractRevenueExposure(
+  ticker: string,
+  exposureQuery: string,
+  filingType = "10-K",
+  period = "latest",
+  detailLevel = "compact",
+): Promise<string> {
+  const geo = parseObjectJson(await extractGeographicRevenue(ticker, exposureQuery, filingType, period, null, detailLevel));
+  const found = geo.value != null;
+  const status = found ? "FOUND_REVENUE_EXPOSURE" : normalizeStatus(geo);
+  const matches = found
+    ? [{
+        exposureType: "geographic_revenue",
+        label: exposureQuery,
+        value: geo.value ?? null,
+        denominator: geo.denominator ?? null,
+        valueRatio: geo.valueRatio ?? null,
+        valuePct: geo.valuePct ?? null,
+        period: geo.period ?? null,
+        confidence: geo.confidence ?? "HIGH",
+        evidence: geo.evidence ?? {},
+      }]
+    : [];
+  return JSON.stringify({ ticker, query: exposureQuery, matches, status });
+}
+
+export async function extractRiskFactorMentions(
+  ticker: string,
+  terms: string[],
+  filingType = "10-K",
+  _period = "latest",
+  detailLevel = "compact",
+): Promise<string> {
+  const matches: Record<string, unknown>[] = [];
+  for (const term of terms ?? []) {
+    const search = parseObjectJson(await searchFilingText(ticker, [term], "Risk Factors", filingType, null, 1200, false));
+    const list = Array.isArray(search.matches) ? search.matches : [];
+    for (const row of list.slice(0, 3)) {
+      if (!row || typeof row !== "object") continue;
+      const item = row as Record<string, unknown>;
+      matches.push({
+        term,
+        sectionHeading: item.sectionHeading ?? "Risk Factors",
+        excerpt: compactExcerpt(item.context ?? item.excerpt ?? ""),
+        confidence: "MEDIUM",
+        evidence: {
+          filingDate: search.filingDate ?? null,
+          accessionNumber: search.accessionNumber ?? null,
+          documentUrl: search.documentUrl ?? null,
+        },
+      });
+    }
+  }
+  const out: Record<string, unknown> = { ticker, matches, status: matches.length > 0 ? "FOUND" : "NOT_FOUND" };
+  if (String(detailLevel).toLowerCase() === "raw") out.rawTerms = terms ?? [];
+  return JSON.stringify(out);
+}
+
+export async function extractCustomerConcentration(
+  ticker: string,
+  filingType = "10-K",
+  _period = "latest",
+  detailLevel = "compact",
+): Promise<string> {
+  const search = parseObjectJson(await searchFilingText(ticker, ["major customer", "customers", "customer accounted", "percent of revenue"], null, filingType, null, 1200, false));
+  const list = Array.isArray(search.matches) ? search.matches : [];
+  const customers: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  for (const row of list) {
+    if (!row || typeof row !== "object") continue;
+    const item = row as Record<string, unknown>;
+    const ctx = String(item.context ?? "");
+    const m = ctx.match(/(\d{1,2}(?:\.\d+)?)\s*%/);
+    if (!m) continue;
+    const pct = Number(m[1]);
+    if (!Number.isFinite(pct)) continue;
+    const key = pct.toFixed(2);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    customers.push({
+      label: `Customer ${String.fromCharCode(65 + customers.length)}`,
+      valuePct: pct,
+      period: search.fiscalYear ? `FY${String(search.fiscalYear)}` : null,
+      confidence: "HIGH",
+      evidence: {
+        sectionHeading: item.sectionHeading ?? null,
+        excerpt: compactExcerpt(ctx),
+        filingDate: search.filingDate ?? null,
+        accessionNumber: search.accessionNumber ?? null,
+        documentUrl: search.documentUrl ?? null,
+      },
+    });
+    if (customers.length >= 5) break;
+  }
+  const status = customers.length > 0 ? "FOUND" : ((Number(search.matchCount ?? 0) > 0) ? "NOT_DISCLOSED" : "NOT_FOUND");
+  const out: Record<string, unknown> = { ticker, customers, status };
+  if (String(detailLevel).toLowerCase() === "raw") out.rawMatchCount = search.matchCount ?? 0;
+  return JSON.stringify(out);
+}
+
+export async function extractChinaExposure(
+  ticker: string,
+  filingType = "10-K",
+  period = "latest",
+  accessionNumber: string | null = null,
+  detailLevel = "compact",
+): Promise<string> {
+  const idx = parseObjectJson(await getSecFilingIndex(ticker, filingType, period, accessionNumber));
+  const revenue = parseObjectJson(await extractRevenueExposure(ticker, "China", filingType, period, "compact"));
+  const index = idx.index && typeof idx.index === "object" ? idx.index as Record<string, unknown> : {};
+  const sections = Array.isArray(index.sections) ? index.sections : [];
+  const tables = Array.isArray(index.tables) ? index.tables : [];
+
+  const collect = (terms: string[]): Record<string, unknown>[] => {
+    const found: Record<string, unknown>[] = [];
+    for (const sec of sections) {
+      if (!sec || typeof sec !== "object") continue;
+      const s = sec as Record<string, unknown>;
+      const heading = String(s.heading ?? "");
+      const low = heading.toLowerCase();
+      for (const term of terms) {
+        if (low.includes(term.toLowerCase())) found.push({ source: "section", term, sectionHeading: heading });
+      }
+    }
+    for (const tbl of tables) {
+      if (!tbl || typeof tbl !== "object") continue;
+      const t = tbl as Record<string, unknown>;
+      const rowLabels = Array.isArray(t.rowLabels) ? t.rowLabels.map((v) => String(v)) : [];
+      const haystack = `${String(t.title ?? "")} ${rowLabels.join(" ")}`.toLowerCase();
+      for (const term of terms) {
+        if (haystack.includes(term.toLowerCase())) {
+          found.push({ source: "table", term, tableTitle: t.title ?? null, sourceTableId: t.tableId ?? null, sectionId: t.sectionId ?? null });
+        }
+      }
+    }
+    return found;
+  };
+
+  const entityTerms = ["Tongmei", "JinMei", "BoYu"];
+  const bankTerms = ["Bank of China"];
+  const manuTerms = ["manufacturing", "production", "supply chain", "fab"];
+  const riskMentions = parseObjectJson(await extractRiskFactorMentions(ticker, ["China", "tariff", "export control", "Bank of China"], filingType, period, "compact"));
+
+  const entityEvidence = collect(entityTerms);
+  const bankEvidence = collect(bankTerms);
+  const manuEvidence = collect(manuTerms);
+  const riskEvidence = Array.isArray(riskMentions.matches) ? riskMentions.matches : [];
+  const nonRevenueFound = entityEvidence.length > 0 || bankEvidence.length > 0 || manuEvidence.length > 0 || riskEvidence.length > 0;
+  const revStatus = String(revenue.status ?? "NOT_FOUND");
+  const revFound = revStatus === "FOUND_REVENUE_EXPOSURE";
+
+  const revenueMatches = Array.isArray(revenue.matches) ? revenue.matches : [];
+  const firstRevenue = revenueMatches.length > 0 && typeof revenueMatches[0] === "object" ? revenueMatches[0] as Record<string, unknown> : {};
+
+  const overallStatus = revFound
+    ? "FOUND_REVENUE_EXPOSURE"
+    : nonRevenueFound
+      ? "FOUND_NON_REVENUE_EXPOSURE"
+      : revStatus === "NOT_DISCLOSED"
+        ? "NOT_DISCLOSED"
+        : revStatus === "CONFLICTING"
+          ? "CONFLICTING"
+          : "NOT_FOUND";
+
+  const out: Record<string, unknown> = {
+    ticker,
+    exposureType: "china_exposure",
+    filingType: idx.filingType ?? filingType,
+    filingDate: idx.filingDate ?? null,
+    accessionNumber: idx.accessionNumber ?? null,
+    documentUrl: idx.documentUrl ?? null,
+    revenueExposure: {
+      status: revFound ? "FOUND" : (revStatus as string),
+      value: firstRevenue.value ?? null,
+      denominator: firstRevenue.denominator ?? null,
+      valueRatio: firstRevenue.valueRatio ?? null,
+      valuePct: firstRevenue.valuePct ?? null,
+      confidence: revFound ? "HIGH" : (revStatus === "NOT_DISCLOSED" ? "NOT_DISCLOSED" : "LOW"),
+      evidence: firstRevenue.evidence ?? [],
+    },
+    manufacturingExposure: { status: manuEvidence.length > 0 ? "FOUND" : "NOT_FOUND", confidence: "MEDIUM", evidence: manuEvidence },
+    entityExposure: { status: entityEvidence.length > 0 ? "FOUND" : "NOT_FOUND", entities: entityEvidence.length > 0 ? entityTerms : [], confidence: "MEDIUM", evidence: entityEvidence },
+    bankExposure: { status: bankEvidence.length > 0 ? "FOUND" : "NOT_FOUND", entities: bankEvidence.length > 0 ? bankTerms : [], confidence: "MEDIUM", evidence: bankEvidence },
+    riskFactorExposure: { status: riskEvidence.length > 0 ? "FOUND" : "NOT_FOUND", confidence: "MEDIUM", evidence: riskEvidence },
+    overallStatus,
+    warnings: [],
+  };
+  if (String(detailLevel).toLowerCase() === "raw") out.rawContext = { filingIndex: idx };
+  return JSON.stringify(out);
+}

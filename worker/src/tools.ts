@@ -50,6 +50,13 @@ import {
   getSecRecentEvents,
   getPublicEventTimeline,
   verifyCompanyEvent,
+  extractGeographicRevenue,
+  extractSegmentRevenue,
+  extractTotalRevenue,
+  extractRevenueExposure,
+  extractChinaExposure,
+  extractRiskFactorMentions,
+  extractCustomerConcentration,
 } from "./yahoo-finance.js";
 import { validateTicker } from "./validate.js";
 
@@ -970,6 +977,13 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_sec_recent_events", description: "Get recent SEC filings as structured public events. Returns 8-K and other form types as event items with accessionNumber, filingDate, url, sourceType=sec_filing, confidence=HIGH.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", description: "SEC form type filter, e.g. '8-K', '10-K'. Use 'all' for mixed.", default: "8-K" }, max_results: { type: "number", default: 10 }, start_date: { type: "string", default: "" } }, required: ["ticker"] } },
   { name: "get_public_event_timeline", description: "Get a combined public event timeline for a ticker from SEC filings and Yahoo Finance news. Items are deduplicated by title+date hash and sorted newest-first.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, max_results: { type: "number", default: 20 }, start_date: { type: "string", default: "" }, sources: { type: "array", items: { type: "string" }, description: "Sources to include. Supported: 'sec', 'yahoo_finance'.", default: ["sec", "yahoo_finance"] } }, required: ["ticker"] } },
   { name: "verify_company_event", description: "Verify a public company event across SEC EDGAR and news sources. Returns CONFIRMED (SEC evidence), PARTIAL (news only), NOT_FOUND, STALE, or CONFLICTING. Best evidence items include source, timestamps, url, and confidence.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, event_query: { type: "string", description: "Keywords describing the event, e.g. 'Q1 2026 earnings guidance'" }, start_date: { type: "string", default: "" }, end_date: { type: "string", default: "" }, sources: { type: "array", items: { type: "string" }, default: ["sec", "yahoo_finance"] } }, required: ["ticker", "event_query"] } },
+  { name: "extract_geographic_revenue", description: "Extract geographic revenue exposure with compact evidence-backed output.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, region: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker", "region"] } },
+  { name: "extract_segment_revenue", description: "Extract segment revenue rows from SEC filing facts.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker"] } },
+  { name: "extract_total_revenue", description: "Extract total revenue from SEC filing facts.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" } }, required: ["ticker"] } },
+  { name: "extract_revenue_exposure", description: "Extract revenue exposure for a region/customer/segment query.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, exposure_query: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker", "exposure_query"] } },
+  { name: "extract_china_exposure", description: "Extract China exposure with separate revenue and non-revenue classifications.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker"] } },
+  { name: "extract_risk_factor_mentions", description: "Extract concise risk-factor term mentions from SEC filings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, terms: { type: "array", items: { type: "string" } }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker", "terms"] } },
+  { name: "extract_customer_concentration", description: "Extract customer concentration percentages from SEC filings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker"] } },
   { name: "health_check", description: "Return runtime and deployment health metadata.", inputSchema: { type: "object", properties: {} } },
 ];
 
@@ -1337,6 +1351,13 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   extract_filing_fact: SIMPLE_OBJECT_SCHEMA,
   index_sec_filing: SIMPLE_OBJECT_SCHEMA,
   get_sec_filing_index: SIMPLE_OBJECT_SCHEMA,
+  extract_geographic_revenue: SIMPLE_OBJECT_SCHEMA,
+  extract_segment_revenue: SIMPLE_OBJECT_SCHEMA,
+  extract_total_revenue: SIMPLE_OBJECT_SCHEMA,
+  extract_revenue_exposure: SIMPLE_OBJECT_SCHEMA,
+  extract_china_exposure: SIMPLE_OBJECT_SCHEMA,
+  extract_risk_factor_mentions: SIMPLE_OBJECT_SCHEMA,
+  extract_customer_concentration: SIMPLE_OBJECT_SCHEMA,
 };
 
 for (const [alias, canonical] of Object.entries(TOOL_ALIASES)) {
@@ -1407,8 +1428,16 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
 
 async function _dispatchTool(name: string, args: Record<string, unknown>): Promise<string> {
   switch (name) {
-    case "get_historical_prices":
-      return getHistoricalPrices(str(args.ticker), str(args.period, "1mo"), str(args.interval, "1d"), args.prepost === true);
+    case "get_historical_prices": {
+      const rawTicker = args.ticker;
+      if (rawTicker == null || String(rawTicker).trim() === "") {
+        return mcpFailure("get_historical_prices", ErrorCode.INPUT_VALIDATION_ERROR, "ticker is required");
+      }
+      const tickerStr = String(rawTicker).trim().toUpperCase();
+      const tickerErr = validateTicker(tickerStr);
+      if (tickerErr) return mcpFailure("get_historical_prices", ErrorCode.INPUT_VALIDATION_ERROR, tickerErr);
+      return getHistoricalPrices(tickerStr, str(args.period, "1mo"), str(args.interval, "1d"), args.prepost === true);
+    }
     case "get_company_profile":
       return getStockInfo(tickerArg(args.ticker), args.include_all === true);
     case "get_fund_profile":
@@ -1594,6 +1623,20 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       return indexSecFiling(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null);
     case "get_sec_filing_index":
       return getSecFilingIndex(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null);
+    case "extract_geographic_revenue":
+      return extractGeographicRevenue(str(args.ticker), str(args.region), str(args.filing_type, "10-K"), str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null, str(args.detailLevel, "compact"));
+    case "extract_segment_revenue":
+      return extractSegmentRevenue(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
+    case "extract_total_revenue":
+      return extractTotalRevenue(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"));
+    case "extract_revenue_exposure":
+      return extractRevenueExposure(str(args.ticker), str(args.exposure_query), str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
+    case "extract_china_exposure":
+      return extractChinaExposure(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null, str(args.detailLevel, "compact"));
+    case "extract_risk_factor_mentions":
+      return extractRiskFactorMentions(str(args.ticker), Array.isArray(args.terms) ? args.terms.map(String) : [], str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
+    case "extract_customer_concentration":
+      return extractCustomerConcentration(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
     case "search_filing_text":
       return searchFilingText(
         str(args.ticker),
@@ -1659,7 +1702,11 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_fast_info":
       return getFastInfo(tickerArg(args.ticker));
     case "get_historical_stock_prices": {
-      const tickerStr = str(args.ticker);
+      const rawTicker = args.ticker;
+      if (rawTicker == null || String(rawTicker).trim() === "") {
+        return mcpFailure("get_historical_stock_prices", ErrorCode.INPUT_VALIDATION_ERROR, "ticker is required");
+      }
+      const tickerStr = String(rawTicker).trim().toUpperCase();
       const tickerErr = validateTicker(tickerStr);
       if (tickerErr) return mcpFailure("get_historical_stock_prices", ErrorCode.INPUT_VALIDATION_ERROR, tickerErr);
       return getHistoricalPrices(tickerStr, str(args.period, "1mo"), str(args.interval, "1d"), args.prepost === true);
