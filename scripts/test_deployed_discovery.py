@@ -76,9 +76,9 @@ SMOKE_ARGS: dict[str, dict] = {
     "search_ticker": {"query": "Apple", "exchange": "US", "max_results": 3},
     "get_option_expiration_dates": {"ticker": "AAPL"},
     "extract_sec_filing_fact": {
-        "ticker": "AAOI",
+        "ticker": "AAPL",
         "fact_type": "geographic_revenue",
-        "region": "China",
+        "region": "Greater China",
         "filing_type": "10-K",
         "period": "latest",
     },
@@ -149,38 +149,112 @@ def assert_no_unknown_tool(payload: dict, tool: str) -> None:
 
 
 def _check_aaoi_geographic_revenue_schema(data: dict) -> None:
-    """AAOI geographic revenue schema check: denominator/valueRatio/valuePct normalization."""
-    if data.get("valuePct") is not None:
-        if data.get("denominator") is None:
-            raise AssertionError(f"AAOI: valuePct present but denominator is null: {data}")
-    if data.get("valueRatio") is not None:
-        ratio = float(data["valueRatio"])
-        if not (0.0 <= ratio <= 1.0):
-            raise AssertionError(f"AAOI: valueRatio {ratio} not in [0, 1] decimal range")
-    if data.get("valuePct") is not None:
-        pct = float(data["valuePct"])
-        if not (0.0 <= pct <= 100.0):
-            raise AssertionError(f"AAOI: valuePct {pct} not in [0, 100] percent range")
-    if "extractionMethod" not in data:
-        raise AssertionError(f"AAOI: extractionMethod missing in response: {data}")
-    if "confidence" not in data:
-        raise AssertionError(f"AAOI: confidence missing in response: {data}")
-    if not (data.get("documentUrl") or data.get("primaryDocumentUrl")):
-        raise AssertionError(f"AAOI: neither documentUrl nor primaryDocumentUrl present: {data}")
+    """Backward-compatible AAOI wrapper around unified geographic revenue schema checks."""
+    _check_geographic_revenue_schema(data, label="AAOI", require_positive=False)
 
 
 def _check_axti_not_disclosed_schema(data: dict) -> None:
     """AXTI NOT_DISCLOSED schema check: stable null keys for undisclosed geographic revenue."""
-    stable_null_keys = ("value", "denominator", "valueRatio", "valuePct")
-    for k in stable_null_keys:
-        if k in data and data[k] is not None:
-            raise AssertionError(f"AXTI: {k} should be null, got {data[k]!r}")
+    has_positive = _check_geographic_revenue_schema(data, label="AXTI", require_positive=False)
+    if has_positive:
+        raise AssertionError(f"AXTI: expected NOT_DISCLOSED payload, got extracted value: {data}")
     extraction = data.get("extractionMethod")
     if extraction not in (None, "NONE", "NOT_DISCLOSED"):
-        raise AssertionError(f"AXTI: extractionMethod should be NONE, got {extraction!r}")
+        raise AssertionError(f"AXTI: extractionMethod should be NONE/NOT_DISCLOSED, got {extraction!r}")
     confidence = data.get("confidence")
-    if confidence not in (None, "NOT_DISCLOSED"):
+    if confidence != "NOT_DISCLOSED":
         raise AssertionError(f"AXTI: confidence should be NOT_DISCLOSED, got {confidence!r}")
+
+
+def _check_geographic_revenue_schema(data: dict, label: str, require_positive: bool = False) -> bool:
+    """Validate geographic revenue payload shape and semantics.
+
+    Returns True when payload contains a positive extracted value, False for NOT_DISCLOSED/NOT_FOUND payloads.
+    """
+    required_keys = (
+        "value",
+        "denominator",
+        "valueRatio",
+        "valuePct",
+        "extractionMethod",
+        "confidence",
+        "documentUrl",
+        "primaryDocumentUrl",
+        "warnings",
+    )
+    for key in required_keys:
+        if key not in data:
+            raise AssertionError(f"{label}: missing required key '{key}': {data}")
+    if not isinstance(data.get("warnings"), list):
+        raise AssertionError(f"{label}: warnings must be a list")
+
+    numeric_or_null_keys = ("value", "denominator", "valueRatio", "valuePct")
+    for key in numeric_or_null_keys:
+        val = data.get(key)
+        if val is not None and not isinstance(val, (int, float)):
+            raise AssertionError(f"{label}: {key} must be number|null, got {type(val).__name__}")
+        if val == {}:
+            raise AssertionError(f"{label}: {key} must not be object")
+
+    if data.get("valuePct") is not None and data.get("denominator") is None:
+        raise AssertionError(f"{label}: valuePct present but denominator is null: {data}")
+
+    if data.get("valueRatio") is not None:
+        ratio = float(data["valueRatio"])
+        if not (0.0 <= ratio <= 1.0):
+            raise AssertionError(f"{label}: valueRatio {ratio} not in [0, 1] decimal range")
+    if data.get("valuePct") is not None:
+        pct = float(data["valuePct"])
+        if not (0.0 <= pct <= 100.0):
+            raise AssertionError(f"{label}: valuePct {pct} not in [0, 100] percent range")
+
+    if data.get("value") is not None:
+        if data.get("denominator") is None:
+            raise AssertionError(f"{label}: value present but denominator is null: {data}")
+        if not (data.get("documentUrl") or data.get("primaryDocumentUrl")):
+            raise AssertionError(f"{label}: positive extraction missing documentUrl/primaryDocumentUrl: {data}")
+        evidence = data.get("evidence")
+        if not isinstance(evidence, dict) or not evidence:
+            raise AssertionError(f"{label}: positive extraction must include non-empty evidence object")
+        return True
+
+    if require_positive:
+        raise AssertionError(f"{label}: expected positive extraction but got NOT_DISCLOSED/NOT_FOUND: {data}")
+
+    confidence = data.get("confidence")
+    if confidence not in ("NOT_DISCLOSED", "NOT_FOUND"):
+        raise AssertionError(f"{label}: expected NOT_DISCLOSED/NOT_FOUND confidence, got {confidence!r}")
+
+    stable_null_keys = (
+        "value",
+        "denominator",
+        "valueRatio",
+        "valuePct",
+        "rawValue",
+        "rawDenominator",
+        "filingDate",
+        "accessionNumber",
+    )
+    for key in stable_null_keys:
+        if key in data and data.get(key) is not None:
+            raise AssertionError(f"{label}: {key} should be null in NOT_DISCLOSED/NOT_FOUND payload")
+    return False
+
+
+def _assert_filing_resolution(payload: dict, ticker: str) -> tuple[list[dict], str]:
+    filings_data = extract_data(payload)
+    filing_list = filings_data.get("filings") if isinstance(filings_data, dict) else None
+    if not isinstance(filing_list, list) or not filing_list:
+        raise AssertionError(f"{ticker}: list_sec_company_filings expected non-empty filings[]")
+    first_filing = filing_list[0] if isinstance(filing_list[0], dict) else {}
+    if not first_filing.get("accessionNumber"):
+        raise AssertionError(f"{ticker}: missing accessionNumber: {first_filing}")
+    if not first_filing.get("filingDate"):
+        raise AssertionError(f"{ticker}: missing filingDate: {first_filing}")
+    doc_url = str(first_filing.get("documentUrl", ""))
+    if not doc_url.startswith("https://www.sec.gov/Archives/"):
+        raise AssertionError(f"{ticker}: invalid documentUrl: {first_filing}")
+    return filing_list, doc_url
 
 
 def _check_yahoo_news_structured(data: dict) -> None:
@@ -298,20 +372,12 @@ def main() -> int:
 
     filings = call_tool("list_sec_company_filings", {"ticker": "AAPL", "filing_type": "10-K", "limit": 5}, 20)
     assert_no_unknown_tool(filings, "list_sec_company_filings")
-    filings_data = extract_data(filings)
-    filing_list = filings_data.get("filings") if isinstance(filings_data, dict) else None
-    if not isinstance(filing_list, list) or not filing_list:
-        raise AssertionError("list_sec_company_filings expected non-empty filings[]")
-    first_filing = filing_list[0] if isinstance(filing_list[0], dict) else {}
-    if not first_filing.get("accessionNumber"):
-        raise AssertionError(f"list_sec_company_filings missing accessionNumber: {first_filing}")
-    if not first_filing.get("filingDate"):
-        raise AssertionError(f"list_sec_company_filings missing filingDate: {first_filing}")
-    if not str(first_filing.get("documentUrl", "")).startswith("https://www.sec.gov/Archives/"):
-        raise AssertionError(f"list_sec_company_filings invalid documentUrl: {first_filing}")
-    doc_url = None
-    if isinstance(filing_list, list) and filing_list:
-        doc_url = (filing_list[0] or {}).get("documentUrl")
+    filing_list, doc_url = _assert_filing_resolution(filings, "AAPL")
+
+    aaoi_filings = call_tool("list_sec_company_filings", {"ticker": "AAOI", "filing_type": "10-K", "limit": 3}, 21)
+    assert_no_unknown_tool(aaoi_filings, "list_sec_company_filings")
+    _assert_filing_resolution(aaoi_filings, "AAOI")
+    print("  PASS AAOI filing-resolution smoke")
 
     aapl_index = call_tool("index_sec_filing", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}, 22)
     assert_no_unknown_tool(aapl_index, "index_sec_filing")
@@ -332,7 +398,7 @@ def main() -> int:
             if isinstance(key_map, dict) and not any("china" in str(k).lower() for k in key_map):
                 print("  WARN AXTI index keywordMap has no explicit China keyword")
 
-    exp = call_tool("get_option_expiration_dates", {"ticker": "ASTS"}, 21)
+    exp = call_tool("get_option_expiration_dates", {"ticker": "ASTS"}, 26)
     assert_no_unknown_tool(exp, "get_option_expiration_dates")
     expiry_dates = extract_data(exp)
     expiry = expiry_dates[0] if isinstance(expiry_dates, list) and expiry_dates else "2025-06-20"
@@ -361,6 +427,7 @@ def main() -> int:
         ("extract_sec_filing_fact", {"ticker": "AAOI", "fact_type": "geographic_revenue", "region": "China", "filing_type": "10-K", "period": "latest"}),
         ("extract_sec_filing_fact", {"ticker": "AXTI", "fact_type": "geographic_revenue", "region": "China", "filing_type": "10-K", "period": "latest"}),
         # Phase 3 extractor tools — dispatch smoke (schema-only, no deep value assertions)
+        ("extract_geographic_revenue", {"ticker": "AAOI", "region": "China", "filing_type": "10-K", "period": "latest"}),
         ("extract_geographic_revenue", {"ticker": "AAPL", "region": "Greater China", "filing_type": "10-K", "period": "latest"}),
         ("extract_segment_revenue", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}),
         ("extract_total_revenue", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}),
@@ -406,8 +473,13 @@ def main() -> int:
         if name == "extract_sec_filing_fact" and args.get("ticker") == "AAOI":
             data = extract_data(payload)
             if isinstance(data, dict):
-                _check_aaoi_geographic_revenue_schema(data)
-                print("  PASS AAOI geographic revenue schema check")
+                aaoi_has_value = _check_geographic_revenue_schema(
+                    data, label="AAOI extract_sec_filing_fact", require_positive=False
+                )
+                if aaoi_has_value:
+                    print("  PASS AAOI geographic revenue extracted with value")
+                else:
+                    print("  WARN AAOI geographic revenue returned NOT_DISCLOSED/NOT_FOUND (allowed)")
         if name == "extract_sec_filing_fact" and args.get("ticker") == "AXTI":
             data = extract_data(payload)
             if isinstance(data, dict):
@@ -422,10 +494,26 @@ def main() -> int:
             data = extract_data(payload)
             if not isinstance(data, dict):
                 raise AssertionError(f"extract_geographic_revenue returned non-object: {data!r}")
-            for field in ("value", "denominator", "valueRatio", "valuePct", "confidence", "extractionMethod"):
-                if field not in data:
-                    raise AssertionError(f"extract_geographic_revenue missing field: {field}")
-            print(f"  PASS extract_geographic_revenue dispatch ({args.get('ticker')}/{args.get('region')})")
+            ticker = str(args.get("ticker", ""))
+            region = str(args.get("region", ""))
+            if ticker == "AAPL" and region == "Greater China":
+                _check_geographic_revenue_schema(
+                    data, label="AAPL extract_geographic_revenue", require_positive=True
+                )
+                print("  PASS extract_geographic_revenue positive fixture (AAPL/Greater China)")
+            elif ticker == "AAOI" and region == "China":
+                aaoi_geo_has_value = _check_geographic_revenue_schema(
+                    data, label="AAOI extract_geographic_revenue", require_positive=False
+                )
+                if aaoi_geo_has_value:
+                    print("  PASS extract_geographic_revenue AAOI extracted value")
+                else:
+                    print("  WARN extract_geographic_revenue AAOI returned NOT_DISCLOSED/NOT_FOUND (allowed)")
+            else:
+                _check_geographic_revenue_schema(
+                    data, label=f"extract_geographic_revenue:{ticker}/{region}", require_positive=False
+                )
+                print(f"  PASS extract_geographic_revenue dispatch ({ticker}/{region})")
         if name == "extract_segment_revenue":
             data = extract_data(payload)
             if not isinstance(data, dict):
