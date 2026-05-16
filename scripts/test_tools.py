@@ -613,7 +613,10 @@ def _resolve_glw_10k_accession(url: str) -> tuple[str | None, str | None]:
         if not content:
             return None, None
         text = content[0].get("text", "") if isinstance(content[0], dict) else ""
-        data = extract_data(json.loads(text))
+        payload = json.loads(text)
+        if is_error_payload(payload):
+            return None, None
+        data = extract_data(payload)
         if not isinstance(data, dict):
             return None, None
         acc = data.get("accessionNumber")
