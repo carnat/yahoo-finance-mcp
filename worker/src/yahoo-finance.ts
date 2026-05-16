@@ -1359,7 +1359,7 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
     return runPartialBatch(ticker, (t) => getAnalystConsensus(t));
   }
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=financialData,recommendationTrend,price`
+    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=financialData,recommendationTrend,price,upgradeDowngradeHistory`
   )) as Record<string, unknown>;
 
   const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -1373,6 +1373,7 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
 
   const lastPrice = raw(price.regularMarketPrice) as number | null;
   const targetMean = raw(fd.targetMeanPrice) as number | null;
+  const warnings: Array<{ code: string; message: string }> = [];
 
   const output: Record<string, unknown> = {
     ticker,
@@ -1406,6 +1407,39 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
   } else {
     output.recommendationSummary = null;
   }
+
+  const cutoffSec = Date.now() / 1000 - 30 * 86400;
+  const upgradeHistory = (result.upgradeDowngradeHistory as Record<string, unknown>) ?? {};
+  const history = (upgradeHistory.history as Record<string, unknown>[]) ?? [];
+  const recentUpgradeCount30d = history.filter((h) => {
+    const tsRaw = raw(h.epochGradeDate) as number | null;
+    if (tsRaw == null || tsRaw < cutoffSec) return false;
+    const action = String(h.action ?? h.Action ?? "").toLowerCase();
+    const toGrade = String(h.toGrade ?? h.ToGrade ?? "").toLowerCase();
+    const fromGrade = String(h.fromGrade ?? h.FromGrade ?? "").toLowerCase();
+    return action.includes("up") || action.includes("upgrade")
+      || (toGrade.includes("buy") && !fromGrade.includes("buy"));
+  }).length;
+
+  let targetLagSignal = "UNKNOWN";
+  if (targetMean != null && lastPrice != null) {
+    if (targetMean >= lastPrice) {
+      targetLagSignal = "CURRENT";
+    } else if (recentUpgradeCount30d > 0) {
+      targetLagSignal = "LIKELY_STALE_OR_LAGGING";
+      warnings.push({
+        code: "CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES",
+        message: "Consensus price target may lag recent market or analyst sentiment changes.",
+      });
+    } else {
+      targetLagSignal = "POSSIBLY_STALE";
+    }
+  }
+
+  output.currentPrice = lastPrice;
+  output.recentUpgradeCount30d = recentUpgradeCount30d;
+  output.targetLagSignal = targetLagSignal;
+  output.warnings = warnings;
 
   return JSON.stringify(output);
 }
@@ -2131,7 +2165,34 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
       else debtTier = "STRESSED";
     }
 
-    const dataQuality = [totalDebt, cash, ebitdaQ, ebitQ, interestQ].some((v) => v == null) ? "PARTIAL" : "OK";
+    const missingComponents: string[] = [];
+    if (totalDebt == null) missingComponents.push("totalDebtUsd");
+    if (cash == null) missingComponents.push("cashUsd");
+    if (ebitdaAnnual == null) missingComponents.push("ebitdaUsd");
+    if (ebitAnnual == null) missingComponents.push("ebitUsd");
+    if (interestAnnual == null) missingComponents.push("interestExpenseUsd");
+
+    const unavailableMetrics: string[] = [];
+    if (netDebtToEbitda == null) unavailableMetrics.push("netDebtToEbitda");
+    if (interestCoverage == null) unavailableMetrics.push("interestCoverage");
+    if (creditStressFlag == null) unavailableMetrics.push("creditStressFlag");
+
+    const computedMetrics: string[] = [];
+    if (netDebt != null) computedMetrics.push("netDebtUsd");
+    if (netDebtToEbitda != null) computedMetrics.push("netDebtToEbitda");
+    if (interestCoverage != null) computedMetrics.push("interestCoverage");
+    if (creditStressFlag != null) computedMetrics.push("creditStressFlag");
+    if (debtTier != null) computedMetrics.push("debtTier");
+
+    const warnings: Array<{ code: string; message: string }> = [];
+    if (interestAnnual == null) {
+      warnings.push({
+        code: "INTEREST_EXPENSE_UNAVAILABLE",
+        message: "Interest coverage cannot be computed from available provider data.",
+      });
+    }
+
+    const dataQuality = missingComponents.length > 0 ? "PARTIAL" : "OK";
     const quarterDate = (bsLatest.date as string) ?? (incLatest.date as string) ?? null;
 
     return JSON.stringify({
@@ -2148,6 +2209,10 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
       creditStressFlag,
       debtTier,
       dataQuality,
+      missingComponents,
+      unavailableMetrics,
+      computedMetrics,
+      warnings,
       dataDate: getLastTradingDate(),
     });
   } catch (e) {
@@ -2298,6 +2363,62 @@ export async function getEarningsMomentum(ticker: string | string[]): Promise<st
     const beatRate = totalQuarters > 0 ? +(beatCount / totalQuarters).toFixed(2) : null;
     const avgSurprise = surprises.length > 0
       ? +(surprises.reduce((a, b) => a + b, 0) / surprises.length).toFixed(2) : null;
+    const warnings: Array<{ code: string; message: string }> = [];
+
+    let historicalSurpriseSignal = "UNKNOWN";
+    if (beatRate != null) {
+      if (beatRate >= 0.75) historicalSurpriseSignal = "STRONG";
+      else if (beatRate >= 0.55) historicalSurpriseSignal = "POSITIVE";
+      else if (beatRate >= 0.4) historicalSurpriseSignal = "NEUTRAL";
+      else historicalSurpriseSignal = "NEGATIVE";
+    }
+
+    const revisions = [revision30d, revision90d].filter((v): v is number => v != null);
+    let forwardRevisionSignal = "UNKNOWN";
+    if (revisions.length > 0) {
+      if (revisions.some((r) => r <= -3)) forwardRevisionSignal = "NEGATIVE";
+      else if (revisions.some((r) => r >= 3)) forwardRevisionSignal = "POSITIVE";
+      else forwardRevisionSignal = "NEUTRAL";
+    }
+
+    const mixedNegativeRevision = beatRate != null && beatRate >= 0.75
+      && [revision30d, revision90d].some((r) => r != null && r < 0);
+    if (mixedNegativeRevision) {
+      warnings.push({
+        code: "MIXED_EARNINGS_SIGNAL",
+        message: "Historical beat streak is positive, but forward estimates were revised down.",
+      });
+    }
+
+    let compositeMomentumSignal = "UNKNOWN";
+    if (historicalSurpriseSignal === "UNKNOWN" && forwardRevisionSignal === "UNKNOWN") {
+      compositeMomentumSignal = "UNKNOWN";
+    } else if (
+      forwardRevisionSignal === "NEGATIVE"
+      && (historicalSurpriseSignal === "STRONG" || historicalSurpriseSignal === "POSITIVE")
+    ) {
+      compositeMomentumSignal = "MIXED_NEGATIVE_REVISION";
+    } else if (forwardRevisionSignal === "POSITIVE" && historicalSurpriseSignal === "NEGATIVE") {
+      compositeMomentumSignal = "MIXED_POSITIVE_REVISION";
+    } else if (
+      forwardRevisionSignal === "POSITIVE"
+      && (historicalSurpriseSignal === "STRONG" || historicalSurpriseSignal === "POSITIVE")
+    ) {
+      compositeMomentumSignal = "STRONG_POSITIVE";
+    } else if (forwardRevisionSignal === "NEGATIVE") {
+      compositeMomentumSignal = "NEGATIVE";
+    } else {
+      compositeMomentumSignal = "NEUTRAL";
+    }
+
+    const interpretationNoteBySignal: Record<string, string> = {
+      STRONG_POSITIVE: "Historical earnings surprises and forward estimate revisions are both supportive.",
+      MIXED_NEGATIVE_REVISION: "Historical beat performance is strong, but forward revisions are negative.",
+      MIXED_POSITIVE_REVISION: "Historical surprise trend is weak, but forward revisions are improving.",
+      NEGATIVE: "Both historical surprise trend and forward revisions indicate weakness.",
+      NEUTRAL: "Signals are mixed or modest without a strong directional bias.",
+      UNKNOWN: "Insufficient data to classify both historical and forward signals.",
+    };
 
     const dataQuality = revision30d == null || beatRate == null ? "PARTIAL" : "OK";
 
@@ -2311,9 +2432,15 @@ export async function getEarningsMomentum(ticker: string | string[]): Promise<st
       momentumFlag,
       beatRate,
       beatCount,
+      beatSample: totalQuarters,
       totalQuarters,
       avgSurprisePct: avgSurprise,
       currentBeatStreak: beatStreak,
+      historicalSurpriseSignal,
+      forwardRevisionSignal,
+      compositeMomentumSignal,
+      interpretationNote: interpretationNoteBySignal[compositeMomentumSignal],
+      warnings,
       dataQuality,
       dataDate: getLastTradingDate(),
     });
