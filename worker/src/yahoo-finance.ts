@@ -4799,7 +4799,7 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
 
     let formattedBlock: string;
     if (quality === "LOW") {
-      formattedBlock = "OPTIONS FLOW: DATA QUALITY LOW — raw chain unreliable; no doctrine weight.";
+      formattedBlock = "OPTIONS FLOW: DATA QUALITY LOW — raw chain unreliable; bracket not assigned.";
     } else {
       const ivStr = ivPctile != null ? `${ivPctile}th%ile` : "N/A";
       const pvStr = putVolVs10d != null ? `${putVolVs10d.toFixed(2)}x` : "N/A";
@@ -4825,7 +4825,11 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
 
 export async function getPriceTargetBracket(ticker: string, ioPt: number): Promise<string> {
   if (ioPt <= 0) {
-    return JSON.stringify({ error: true, message: "io_pt must be a positive number", ticker });
+    return JSON.stringify({
+      error: true,
+      message: "reference_target_price (or io_pt alias) must be a positive number",
+      ticker,
+    });
   }
   try {
     const fi = JSON.parse(await getFastInfo(ticker)) as Record<string, unknown>;
@@ -4834,26 +4838,28 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number): Promi
       return JSON.stringify({ error: true, message: `No price data for ${ticker}`, ticker });
     }
 
-    const eqfPct = +(currentPrice / ioPt * 100).toFixed(1);
+    const referenceTargetPct = +(currentPrice / ioPt * 100).toFixed(1);
 
     const bracket =
-      eqfPct <= 75 ? "STRONG_BUY" :
-      eqfPct <= 90 ? "ACCEPTABLE" :
-      eqfPct <= 100 ? "CAUTION" : "AVOID";
+      referenceTargetPct <= 75 ? "STRONG_BUY" :
+      referenceTargetPct <= 90 ? "ACCEPTABLE" :
+      referenceTargetPct <= 100 ? "CAUTION" : "AVOID";
 
     const tag =
-      eqfPct < 40 ? "SPECULATIVE" :
-      eqfPct < 80 ? "LONG" :
-      eqfPct < 100 ? "NEAR" : "INVERTED";
+      referenceTargetPct < 40 ? "SPECULATIVE" :
+      referenceTargetPct < 80 ? "LONG" :
+      referenceTargetPct < 100 ? "NEAR" : "INVERTED";
 
     return JSON.stringify({
       ticker,
       currentPrice: +currentPrice.toFixed(4),
+      referenceTargetPrice: ioPt,
+      referenceTargetPct,
       ioPt,
-      eqfPct,
+      eqfPct: referenceTargetPct,
       bracket,
       tag,
-      invertedFlag: eqfPct >= 100,
+      invertedFlag: referenceTargetPct >= 100,
       dataDate: (fi.lastTradeDate as string | null) ?? new Date().toISOString().slice(0, 10),
     });
   } catch (e) {
@@ -4996,9 +5002,9 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
 
         const dailyNotionalUSD = localNotional / appliedFxRate;
         gatePass = dailyNotionalUSD >= 10_000_000;
-        note = `Volume gate ${gatePass ? "PASS" : "FAIL"} (DC-80 FX) — $${(dailyNotionalUSD / 1_000_000).toFixed(1)}M daily notional (${gatePass ? "≥" : "<"} $10M threshold)${fxConversionNote}`;
+        note = `Volume gate ${gatePass ? "PASS" : "FAIL"} (FX notional) — $${(dailyNotionalUSD / 1_000_000).toFixed(1)}M daily notional (${gatePass ? "≥" : "<"} $10M threshold)${fxConversionNote}`;
       } else {
-        note = "Volume gate UNKNOWN — insufficient price/volume data for DC-80 FX check";
+        note = "Volume gate UNKNOWN — insufficient price/volume data for FX notional check";
       }
       // Bug 5: also compute ratio20d in the FX branch
       if (lastVolume != null && adv20d != null && adv20d > 0) {

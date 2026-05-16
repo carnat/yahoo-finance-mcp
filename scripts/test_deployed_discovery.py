@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -95,6 +96,20 @@ SMOKE_ARGS: dict[str, dict] = {
 }
 
 _ALLOW_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in ("1", "true", "yes")
+_FORBIDDEN_PUBLIC_TERMS = (
+    r"\bIO\b",
+    r"Commander",
+    r"portfolio state",
+    r"doctrine",
+    r"DC-",
+    r"DC Section",
+    r"DC-80",
+    r"DC-149",
+    r"TPS",
+    r"PCCE",
+    r"EQF",
+    r"\bT[1-5]\b",
+)
 
 
 def rpc(method: str, params: dict | None = None, req_id: int = 1) -> dict:
@@ -324,6 +339,53 @@ def _assert_sec_index_shape(data: dict, tool_name: str) -> None:
             )
 
 
+def _check_public_description_terms(tools: list[dict]) -> None:
+    descriptions = [str(t.get("description", "")) for t in tools if isinstance(t, dict)]
+    if not descriptions:
+        raise AssertionError("tools/list returned no descriptions")
+    for desc in descriptions:
+        for pattern in _FORBIDDEN_PUBLIC_TERMS:
+            if re.search(pattern, desc, flags=re.IGNORECASE):
+                raise AssertionError(f"Forbidden private term matched /{pattern}/ in description: {desc[:200]!r}")
+
+
+def _assert_deprecated_alias_metadata(tools: list[dict]) -> None:
+    by_name = {str(t.get("name")): t for t in tools if isinstance(t, dict)}
+    expected = {
+        "get_dc134_options_scan": "get_options_flow_scan",
+        "get_eqf_bracket": "calculate_price_target_distance",
+        "get_tps_inputs": "analyze_position_signals",
+        "get_adv_gate": "check_volume_liquidity_threshold",
+    }
+    for alias, use_instead in expected.items():
+        tool = by_name.get(alias)
+        if not isinstance(tool, dict):
+            raise AssertionError(f"Missing expected deprecated alias in tools/list: {alias}")
+        if tool.get("deprecated") is not True:
+            raise AssertionError(f"{alias}: expected deprecated=true")
+        if tool.get("useInstead") != use_instead:
+            raise AssertionError(f"{alias}: expected useInstead={use_instead!r}, got {tool.get('useInstead')!r}")
+        if tool.get("deprecationReason") != "Use the canonical public tool name.":
+            raise AssertionError(f"{alias}: missing/invalid deprecationReason")
+
+
+def _assert_public_tool_wording(tools: list[dict]) -> None:
+    by_name = {str(t.get("name")): str(t.get("description", "")) for t in tools if isinstance(t, dict)}
+    checks = {
+        "get_company_events_calendar": ("earnings", "estimate"),
+        "calculate_price_target_distance": ("reference price target",),
+        "analyze_position_signals": ("does not access holdings",),
+        "check_volume_liquidity_threshold": ("liquidity thresholds",),
+    }
+    for name, snippets in checks.items():
+        desc = by_name.get(name, "")
+        if not desc:
+            raise AssertionError(f"Missing description for {name}")
+        for snippet in snippets:
+            if snippet.lower() not in desc.lower():
+                raise AssertionError(f"{name}: description missing expected phrase {snippet!r}")
+
+
 def main() -> int:
     try:
         listed = rpc("tools/list")
@@ -336,6 +398,12 @@ def main() -> int:
             f"Deployed worker unreachable and ALLOW_NETWORK_SKIP is not set: {exc}"
         ) from exc
     tools = ((listed.get("result") or {}).get("tools")) or []
+    if not all(isinstance(t, dict) for t in tools):
+        raise AssertionError("tools/list returned non-object tool entries")
+    _check_public_description_terms([t for t in tools if isinstance(t, dict)])
+    _assert_deprecated_alias_metadata([t for t in tools if isinstance(t, dict)])
+    _assert_public_tool_wording([t for t in tools if isinstance(t, dict)])
+    print("  PASS public description and deprecated alias metadata checks")
     names = {str(t.get("name")) for t in tools if isinstance(t, dict)}
     missing = sorted(CANONICAL_TOOLS - names)
     if missing:
@@ -451,6 +519,23 @@ def main() -> int:
             print(f"  health_check response: {json.dumps(payload)}")
             if isinstance(health, dict) and health.get("envelopeV2") is not True:
                 raise AssertionError(f"health_check envelopeV2 expected true, got: {health}")
+            if isinstance(health, dict):
+                for field in (
+                    "toolCount",
+                    "manifestVersion",
+                    "manifestHash",
+                    "buildSha",
+                    "deployedAt",
+                    "privacyScope",
+                ):
+                    if field not in health:
+                        raise AssertionError(f"health_check missing field: {field}")
+                if health.get("toolCount") != len(names):
+                    raise AssertionError(
+                        f"health_check toolCount mismatch: {health.get('toolCount')} != tools/list {len(names)}"
+                    )
+                if health.get("privacyScope") != "public_market_data_only":
+                    raise AssertionError(f"health_check privacyScope mismatch: {health.get('privacyScope')!r}")
         if name == "get_option_chain":
             data = extract_data(payload)
             if not isinstance(data, dict) or "filtersApplied" not in data:

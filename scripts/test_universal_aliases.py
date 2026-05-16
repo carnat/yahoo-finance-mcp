@@ -110,6 +110,16 @@ def main() -> int:
                     failures.append(f"{alias}: missing DEPRECATED_ALIAS warning in meta.warnings")
                 if (not expect_warning) and has_deprecated_alias_warning:
                     failures.append(f"{alias}: unexpected DEPRECATED_ALIAS warning in meta.warnings")
+                deprecated_tool = meta.get("deprecatedTool")
+                use_instead = meta.get("useInstead")
+                if expect_warning:
+                    if deprecated_tool is not True:
+                        failures.append(f"{alias}: expected meta.deprecatedTool=true, got {deprecated_tool!r}")
+                    if not isinstance(use_instead, str) or not use_instead:
+                        failures.append(f"{alias}: expected non-empty meta.useInstead, got {use_instead!r}")
+                else:
+                    if deprecated_tool is True:
+                        failures.append(f"{alias}: unexpected meta.deprecatedTool=true")
 
             # Check structure parity (same top-level keys, ignoring deprecation markers)
             _alias_extra_keys = {"_deprecatedAlias", "_canonicalTool"}

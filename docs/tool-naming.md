@@ -5,6 +5,17 @@
 - Canonical tools use clear, general financial verbs: `get_`, `list_`, `search_`, `screen_`, `analyze_`, `summarize_`, `check_`, `find_`, `calculate_`.
 - Canonical names avoid doctrine/internal terms (TPS, EQF, ADV gate, DC-*).
 - Aliases remain available for backward compatibility.
+- Inputs must be public-data oriented and must not require holdings, cost basis, position size, or private workflow state.
+- Output contracts should keep provider values, computed ratios, confidence/data-quality flags, warnings, and evidence/source metadata clearly separated.
+
+## Public naming and description policy
+
+1. Tool names must describe public financial data access or public computations.
+2. Tool names must not encode private workflow labels.
+3. Tool descriptions must be understandable by any external caller.
+4. Inputs must not ask for holdings, cost basis, position size, or private workflow state.
+5. Caller-defined thresholds are allowed via generic parameter names only (no private rule labels).
+6. Output should separate raw provider values, computed public ratios, confidence/data quality, warnings, and evidence/source metadata.
 
 ## Canonical tool groups
 
@@ -37,6 +48,10 @@ Canonical tool names are designed for general financial callers. Doctrine-specif
 
 - Canonical names are first-class in discovery and documentation.
 - Alias calls remain callable. Legacy doctrine aliases emit `DEPRECATED_ALIAS` warnings in V2 envelope mode.
+- Deprecated aliases should expose standardized manifest metadata:
+  - `deprecated: true`
+  - `useInstead: "<canonical_or_preferred_public_tool_name>"`
+  - `deprecationReason: "Use the canonical public tool name."`
 
 ## Examples
 

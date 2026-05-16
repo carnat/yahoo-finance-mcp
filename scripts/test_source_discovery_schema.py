@@ -130,6 +130,78 @@ class TestGetOptionChainServerPySchema(unittest.TestCase):
                          f"server.py: include_illiquid default must be False, got {m.group(1)!r}")
 
 
+class TestPublicConnectorSurfaceSource(unittest.TestCase):
+    def setUp(self) -> None:
+        self.ts = _ts_source()
+        self.py = _py_source()
+
+    def _window(self, text: str, marker: str, span: int = 500) -> str:
+        idx = text.find(marker)
+        self.assertGreaterEqual(idx, 0, f"missing marker: {marker}")
+        return text[max(0, idx - span): idx + span]
+
+    def test_key_public_descriptions_are_clean(self) -> None:
+        forbidden = (
+            r"\bIO\b",
+            r"Commander",
+            r"portfolio state",
+            r"doctrine",
+            r"DC-",
+            r"DC Section",
+            r"DC-80",
+            r"DC-149",
+            r"TPS",
+            r"PCCE",
+            r"EQF",
+            r"\bT[1-5]\b",
+        )
+        names = [
+            "get_calendar",
+            "get_company_events_calendar",
+            "get_price_target_bracket",
+            "calculate_price_target_distance",
+            "get_position_score_inputs",
+            "analyze_position_signals",
+            "get_volume_gate",
+            "check_volume_liquidity_threshold",
+        ]
+        for name in names:
+            py_win = self._window(self.py, f'name="{name}"')
+            ts_win = self._window(self.ts, f'name: "{name}"')
+            for pattern in forbidden:
+                self.assertIsNone(re.search(pattern, py_win, re.IGNORECASE), f"{name} server.py hit /{pattern}/")
+                self.assertIsNone(re.search(pattern, ts_win, re.IGNORECASE), f"{name} tools.ts hit /{pattern}/")
+
+    def test_reference_target_parameter_is_exposed(self) -> None:
+        ts_win = self._window(self.ts, 'name: "calculate_price_target_distance"', span=900)
+        self.assertIn("reference_target_price", ts_win)
+        self.assertIn("io_pt", ts_win)
+        py_sig_win = self._window(self.py, "async def calculate_price_target_distance", span=260)
+        self.assertIn("reference_target_price", py_sig_win)
+        self.assertIn("io_pt", py_sig_win)
+
+    def test_deprecated_aliases_have_standard_metadata(self) -> None:
+        expected_aliases = [
+            "get_dc134_options_scan",
+            "get_eqf_bracket",
+            "get_tps_inputs",
+            "get_adv_gate",
+        ]
+        for alias in expected_aliases:
+            win = self._window(self.ts, f'name: "{alias}"', span=700)
+            self.assertIn("deprecated: true", win, f"{alias}: missing deprecated=true")
+            self.assertIn("useInstead:", win, f"{alias}: missing useInstead")
+            self.assertIn('deprecationReason: "Use the canonical public tool name."', win, f"{alias}: missing deprecationReason")
+
+    def test_health_check_manifest_fields_exist(self) -> None:
+        ts_health = self._window(self.ts, 'case "health_check"', span=900)
+        for field in ("manifestVersion", "manifestHash", "deployedAt", "canonicalToolCount", "deprecatedAliasCount"):
+            self.assertIn(field, ts_health, f"worker health_check missing {field}")
+        py_health = self._window(self.py, "async def health_check", span=900)
+        for field in ("manifestVersion", "manifestHash", "deployedAt", "canonicalToolCount", "deprecatedAliasCount"):
+            self.assertIn(field, py_health, f"server health_check missing {field}")
+
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)
