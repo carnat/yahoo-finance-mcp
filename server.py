@@ -6888,17 +6888,19 @@ def _deprecated_alias_response(alias_tool: str, canonical_tool: str, raw: str) -
         payload = json.loads(raw)
     except Exception:
         payload = raw
-    if isinstance(payload, dict) and "ok" in payload and "meta" in payload:
+    if isinstance(payload, dict) and "ok" in payload:
         meta = payload.get("meta")
-        if isinstance(meta, dict):
-            meta["tool"] = alias_tool
-            meta["canonicalTool"] = canonical_tool
-            meta["deprecatedTool"] = True
-            meta["useInstead"] = canonical_tool
-            warnings = meta.get("warnings")
-            warning_list = list(warnings) if isinstance(warnings, list) else []
-            warning_list.append(warning_obj)
-            meta["warnings"] = warning_list
+        if not isinstance(meta, dict):
+            meta = {}
+            payload["meta"] = meta
+        meta["tool"] = alias_tool
+        meta["canonicalTool"] = canonical_tool
+        meta["deprecatedTool"] = True
+        meta["useInstead"] = canonical_tool
+        warnings = meta.get("warnings")
+        warning_list = list(warnings) if isinstance(warnings, list) else []
+        warning_list.append(warning_obj)
+        meta["warnings"] = warning_list
         return json.dumps(payload)
     return _mcp_success(
         alias_tool,
