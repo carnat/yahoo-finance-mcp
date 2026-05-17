@@ -352,7 +352,7 @@ def _check_public_description_terms(tools: list[dict]) -> None:
 def _assert_deprecated_alias_metadata(tools: list[dict]) -> None:
     by_name = {str(t.get("name")): t for t in tools if isinstance(t, dict)}
     expected = {
-        "get_dc134_options_scan": "get_options_flow_scan",
+        "get_dc134_options_scan": "analyze_options_flow_window",
         "get_eqf_bracket": "calculate_price_target_distance",
         "get_tps_inputs": "analyze_position_signals",
         "get_adv_gate": "check_volume_liquidity_threshold",
