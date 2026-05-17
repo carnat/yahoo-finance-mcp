@@ -1,5 +1,10 @@
 # Yahoo Finance MCP Server
 
+> [!WARNING]
+> This README is stale and may not reflect the current callable MCP tool names, argument schemas, or aliases.
+>
+> The codebase and live MCP tool manifest are canonical. When integrating with this server, inspect the tools exposed by the running MCP server and treat that callable schema as the source of truth. README examples and tool tables are retained for historical context only until the docs are regenerated from the implementation.
+
 A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that gives any MCP-compatible AI client (Claude, Cursor, VS Code Copilot, etc.) direct access to live financial data from Yahoo Finance.
 
 36 tools (40+ including aliases) cover the full research workflow — from a quick price check to earnings forecasts, SEC filings, technical indicators, options flow, geographic revenue intelligence, and market screening — without leaving your chat window.
@@ -10,13 +15,19 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that g
 
 ## MCP Tools
 
+> [!IMPORTANT]
+> The tool list below is stale. The callable MCP tool registry exposed by the running server is canonical for tool names, schemas, aliases, and deprecation status.
+
 > **Token-efficiency tip:** `get_company_profile` now returns ~30 key fields by default — no need to enumerate fields for typical queries. Prefer `get_market_quote` for pure price/volume lookups (~20 fields, 85–90% fewer tokens). Use `analyze_financial_ratios` instead of fetching full financial statements when you only need computed ratios. Use `get_analyst_consensus` instead of `get_analyst_recommendations` for a ready-made summary. Use pre-computed signal tools (`get_price_slope`, `analyze_volume_ratio`, `analyze_moving_average_position`, `analyze_earnings_momentum`, `get_short_momentum`, `analyze_credit_health`, `summarize_options_flow`, `find_put_hedge_candidates`, `get_analyst_rating_changes`) instead of fetching raw data and computing signals yourself. Use `analyze_position_signals` to aggregate analyst/price/earnings/technical inputs in one call instead of chaining five separate tools.
 
-The server exposes the following tools through the Model Context Protocol:
+The server exposes tools through the Model Context Protocol. The implementation and live MCP manifest are the source of truth; the table below may contain stale names or stale argument details.
 
 ### Canonical vs alias naming
 
-| Canonical | Common alias |
+> [!CAUTION]
+> This section is stale. Do not use it to determine canonical tool names. Use the callable MCP tool registry exposed by the running server instead.
+
+| Historical README name | Historical alias |
 |---|---|
 | `get_market_quote` | `get_fast_info` |
 | `analyze_position_signals` | `get_tps_inputs` |
@@ -24,7 +35,7 @@ The server exposes the following tools through the Model Context Protocol:
 | `check_volume_liquidity_threshold` | `get_adv_gate` |
 | `analyze_options_flow_window` | `get_dc134_options_scan` |
 
-Older names are maintained as aliases for migration but are not preferred in new integrations.
+Older README naming guidance is retained only for context and may not match the callable server contract.
 
 ### Price & Market Data
 
