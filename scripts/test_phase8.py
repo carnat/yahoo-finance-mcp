@@ -100,12 +100,12 @@ class TestFreshnessClassifier(unittest.TestCase):
         self.assertEqual(result, "FRESH")
 
     def test_weekend_expected_stale_sunday_friday_data(self):
-        # Sunday 2026-05-17 (UTC day=6), data from Friday 2026-05-15 (UTC day=4)
+        # Sunday 2026-05-17 (Python weekday=6), data from Friday 2026-05-15 (Python weekday=4)
         result = self._classify("2026-05-15", "2026-05-17T12:00:00Z")
         self.assertEqual(result, "WEEKEND_EXPECTED_STALE")
 
     def test_weekend_expected_stale_saturday_friday_data(self):
-        # Saturday 2026-05-16 (UTC day=5), data from Friday 2026-05-15
+        # Saturday 2026-05-16 (Python weekday=5), data from Friday 2026-05-15 (Python weekday=4)
         result = self._classify("2026-05-15", "2026-05-16T12:00:00Z")
         self.assertEqual(result, "WEEKEND_EXPECTED_STALE")
 

@@ -4951,10 +4951,11 @@ function classifyFreshness(dataDate: string | null, retrievedAt: string): string
     const diffMs = now.getTime() - data.getTime();
     if (diffMs < 0) return "UNKNOWN"; // future date
     const diffHours = diffMs / (1000 * 60 * 60);
-    const nowDay = now.getUTCDay(); // 0=Sun, 6=Sat
+    // JS getUTCDay(): 0=Sunday, 1=Monday, ..., 5=Friday, 6=Saturday
+    const nowDay = now.getUTCDay();  // 0=Sun, 6=Sat
     const dataDay = data.getUTCDay(); // 5=Fri
-    // Weekend: current day is Sat(6) or Sun(0), data is from Friday
-    if ((nowDay === 0 || nowDay === 6) && dataDay === 5 && diffHours <= 72) {
+    // Weekend: current day is Saturday(6) or Sunday(0), data is from last Friday(5)
+    if ((nowDay === 6 || nowDay === 0) && dataDay === 5 && diffHours <= 72) {
       return "WEEKEND_EXPECTED_STALE";
     }
     if (diffHours <= 28) return "FRESH";

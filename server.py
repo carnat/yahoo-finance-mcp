@@ -6966,9 +6966,10 @@ def _classify_freshness(data_date: str | None, retrieved_at: str) -> str:
         if diff_ms < 0:
             return "UNKNOWN"
         diff_hours = diff_ms / (1000 * 60 * 60)
-        now_day = now.weekday()   # 0=Mon..6=Sun (Python)
+        # Python weekday(): 0=Monday, 1=Tuesday, ..., 4=Friday, 5=Saturday, 6=Sunday
+        now_day = now.weekday()    # 0=Mon, 4=Fri, 5=Sat, 6=Sun
         data_day = data_dt.weekday()
-        # Weekend: Sat(5) or Sun(6) in Python, data from Friday(4)
+        # Weekend: current day is Saturday(5) or Sunday(6), data from Friday(4)
         if now_day in (5, 6) and data_day == 4 and diff_hours <= 72:
             return "WEEKEND_EXPECTED_STALE"
         if diff_hours <= 28:
