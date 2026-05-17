@@ -1204,8 +1204,9 @@ _SOURCE_PRIORITY = {
     "company_ir": 1,
     "press_release": 2,
     "newswire": 3,
-    "yahoo_finance": 4,
-    "other": 5,
+    "company_news": 4,
+    "yahoo_finance": 5,
+    "other": 6,
 }
 _NEWSWIRE_HINTS = ("businesswire", "globenewswire", "prnewswire")
 _FINNHUB_NEWS_API = "https://finnhub.io/api/v1/company-news"
@@ -1616,10 +1617,38 @@ async def _collect_finnhub_events(
 
     try:
         raw_items = await loop.run_in_executor(None, _fetch)
+    except _urlerror.HTTPError as exc:
+        if exc.code in (401, 403):
+            warnings.append({
+                "code": "SOURCE_UNAVAILABLE",
+                "message": f"Finnhub auth error: HTTP {exc.code}",
+                "severity": "warning",
+            })
+        elif exc.code == 429:
+            warnings.append({
+                "code": "SOURCE_UNAVAILABLE",
+                "message": "Finnhub rate limited: HTTP 429",
+                "severity": "warning",
+            })
+        else:
+            warnings.append({
+                "code": "SOURCE_UNAVAILABLE",
+                "message": f"Finnhub source unavailable: {exc}",
+                "severity": "warning",
+            })
+        return items, warnings, False
     except Exception as exc:
         warnings.append({
             "code": "SOURCE_UNAVAILABLE",
             "message": f"Finnhub source unavailable: {exc}",
+            "severity": "warning",
+        })
+        return items, warnings, False
+
+    if not isinstance(raw_items, list):
+        warnings.append({
+            "code": "SOURCE_UNAVAILABLE",
+            "message": "Finnhub provider changed: unexpected response format",
             "severity": "warning",
         })
         return items, warnings, False
@@ -1630,7 +1659,7 @@ async def _collect_finnhub_events(
             continue
         title = str(row.get("headline") or "").strip()
         summary = str(row.get("summary") or "").strip()
-        source = str(row.get("source") or "Finnhub").strip() or "Finnhub"
+        original_source = str(row.get("source") or "").strip() or None
         item_url = str(row.get("url") or "").strip() or None
         published_at = _to_iso_utc(row.get("datetime"))
         duplicate_group_id = _make_duplicate_group_id(ticker_u, title, published_at, None, item_url)
@@ -1643,8 +1672,9 @@ async def _collect_finnhub_events(
         blob = f"{title} {summary}".upper()
         item = {
             "title": title,
-            "source": source,
-            "sourceType": "finnhub",
+            "source": "finnhub",
+            "originalSource": original_source,
+            "sourceType": "company_news",
             "publishedAt": published_at,
             "retrievedAt": retrieved_at,
             "url": item_url,
@@ -1733,7 +1763,7 @@ def _compute_source_status(
     warning_msgs = [w.get("message", "") for w in warnings if isinstance(w, dict) and w.get("code") == "SOURCE_UNAVAILABLE"]
     sec_items = [it for it in items if "sec" in str(it.get("sourceType", "")).lower()]
     yf_items = [it for it in items if str(it.get("sourceType", "")) == "yahoo_finance"]
-    finnhub_items = [it for it in items if str(it.get("sourceType", "")) == "finnhub"]
+    finnhub_items = [it for it in items if str(it.get("source", "")) == "finnhub"]
     sources = selected_sources or ["sec", "company_ir", "newswire", "yahoo_finance", "finnhub"]
 
     result: dict = {}
@@ -1756,6 +1786,12 @@ def _compute_source_status(
             result["finnhub"] = {"status": "OK" if finnhub_items else "EMPTY_RESULT", "rawCount": len(finnhub_items), "filteredCount": len(finnhub_items)}
         elif any("finnhub company-news source is not configured" in m.lower() for m in warning_msgs):
             result["finnhub"] = {"status": "UNCONFIGURED"}
+        elif any("finnhub auth error" in m.lower() for m in warning_msgs):
+            result["finnhub"] = {"status": "AUTH_ERROR", "rawCount": 0, "filteredCount": 0}
+        elif any("finnhub rate limited" in m.lower() for m in warning_msgs):
+            result["finnhub"] = {"status": "RATE_LIMITED", "rawCount": 0, "filteredCount": 0}
+        elif any("finnhub provider changed" in m.lower() for m in warning_msgs):
+            result["finnhub"] = {"status": "PROVIDER_CHANGED", "rawCount": 0, "filteredCount": 0}
         elif any("finnhub" in m.lower() for m in warning_msgs):
             result["finnhub"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
         else:

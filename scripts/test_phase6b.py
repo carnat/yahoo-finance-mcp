@@ -147,8 +147,9 @@ class TestPhase6BCompanyNews(unittest.TestCase):
     def test_get_company_news_finnhub_source_status_ok(self):
         finnhub_items = [{
             "title": "Apple announces update",
-            "source": "Finnhub",
-            "sourceType": "finnhub",
+            "source": "finnhub",
+            "originalSource": "Reuters",
+            "sourceType": "company_news",
             "publishedAt": "2026-05-15T12:30:00Z",
             "retrievedAt": "2026-05-15T13:01:22Z",
             "url": "https://example.com/finnhub-news",

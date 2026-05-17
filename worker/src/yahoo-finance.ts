@@ -5580,7 +5580,7 @@ const SOURCE_PRIORITY: Record<string, number> = {
   company_ir: 1,
   press_release: 2,
   newswire: 3,
-  finnhub: 4,
+  company_news: 4,
   yahoo_finance: 5,
   other: 6,
 };
@@ -5850,7 +5850,7 @@ function computeSourceStatus(
     .map(w => _str(w.message).toLowerCase());
   const secItems = items.filter(it => _str(it.sourceType).includes("sec"));
   const yfItems = items.filter(it => _str(it.sourceType) === "yahoo_finance");
-  const finnhubItems = items.filter(it => _str(it.sourceType) === "finnhub");
+  const finnhubItems = items.filter(it => _str(it.source) === "finnhub");
   const result: Record<string, unknown> = {};
   if (selectedSources.includes("sec")) {
     if (sourcesUsed.includes("sec")) {
@@ -5875,6 +5875,12 @@ function computeSourceStatus(
       result.finnhub = { status: finnhubItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: finnhubItems.length, filteredCount: finnhubItems.length };
     } else if (warningMsgs.some(m => m.includes("finnhub company-news source is not configured"))) {
       result.finnhub = { status: "UNCONFIGURED" };
+    } else if (warningMsgs.some(m => m.includes("finnhub auth error"))) {
+      result.finnhub = { status: "AUTH_ERROR", rawCount: 0, filteredCount: 0 };
+    } else if (warningMsgs.some(m => m.includes("finnhub rate limited"))) {
+      result.finnhub = { status: "RATE_LIMITED", rawCount: 0, filteredCount: 0 };
+    } else if (warningMsgs.some(m => m.includes("finnhub provider changed"))) {
+      result.finnhub = { status: "PROVIDER_CHANGED", rawCount: 0, filteredCount: 0 };
     } else if (warningMsgs.some(m => m.includes("finnhub"))) {
       result.finnhub = { status: "PROVIDER_ERROR", rawCount: 0, filteredCount: 0 };
     } else {
@@ -5989,14 +5995,24 @@ async function collectFinnhubEvents(
     const resp = await fetch(url, { headers: { "User-Agent": UA, "X-Finnhub-Token": token } });
     if (!resp.ok) {
       await resp.body?.cancel();
-      throw new Error(`HTTP ${resp.status}`);
+      if (resp.status === 401 || resp.status === 403) {
+        throw new Error(`FINNHUB_AUTH_ERROR:${resp.status}`);
+      } else if (resp.status === 429) {
+        throw new Error("FINNHUB_RATE_LIMITED");
+      } else {
+        throw new Error(`HTTP ${resp.status}`);
+      }
     }
-    const news = await resp.json() as Record<string, unknown>[];
+    const rawJson = await resp.json();
+    if (!Array.isArray(rawJson)) {
+      throw new Error(`FINNHUB_PROVIDER_CHANGED: expected array, got ${typeof rawJson}`);
+    }
+    const news = rawJson as Record<string, unknown>[];
     const tickerU = ticker.toUpperCase();
     for (const n of news) {
       const title = _str(n.headline).trim();
       const summary = _str(n.summary).trim();
-      const source = _str(n.source).trim() || "Finnhub";
+      const originalSource = _str(n.source).trim() || null;
       const urlStr = _str(n.url).trim() || null;
       const publishedAt = normalizeIso(n.datetime);
       const duplicateGroupId = makeDupGroupId(tickerU, title, publishedAt, null, urlStr);
@@ -6006,8 +6022,9 @@ async function collectFinnhubEvents(
       const relevance = `${title} ${summary}`.toUpperCase().includes(tickerU) ? "HIGH" : "LOW";
       const item: Record<string, unknown> = {
         title,
-        source,
-        sourceType: "finnhub",
+        source: "finnhub",
+        originalSource,
+        sourceType: "company_news",
         publishedAt,
         retrievedAt,
         url: urlStr,
@@ -6025,7 +6042,16 @@ async function collectFinnhubEvents(
       if (items.length >= maxResults) break;
     }
   } catch (e) {
-    warnings.push({ code: "SOURCE_UNAVAILABLE", message: `Finnhub source unavailable: ${e instanceof Error ? e.message : String(e)}`, severity: "warning" });
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.startsWith("FINNHUB_AUTH_ERROR")) {
+      warnings.push({ code: "SOURCE_UNAVAILABLE", message: `Finnhub auth error: ${msg}`, severity: "warning" });
+    } else if (msg.startsWith("FINNHUB_RATE_LIMITED")) {
+      warnings.push({ code: "SOURCE_UNAVAILABLE", message: "Finnhub rate limited: HTTP 429", severity: "warning" });
+    } else if (msg.startsWith("FINNHUB_PROVIDER_CHANGED")) {
+      warnings.push({ code: "SOURCE_UNAVAILABLE", message: `Finnhub provider changed: ${msg}`, severity: "warning" });
+    } else {
+      warnings.push({ code: "SOURCE_UNAVAILABLE", message: `Finnhub source unavailable: ${msg}`, severity: "warning" });
+    }
     return { items, warnings, used: false };
   }
   return { items, warnings, used: true };
