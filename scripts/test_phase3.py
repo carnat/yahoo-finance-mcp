@@ -5,9 +5,11 @@ These are offline/unit tests — no network calls required.
 Run: PYTHONPATH=. python scripts/test_phase3.py
 """
 
+import asyncio
 import os
 import sys
 import unittest
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -107,11 +109,27 @@ class TestHtmlSanitization(unittest.TestCase):
         self.assertIn("Net Income", result)
 
 
+class TestSecCikResolutionFallbacks(unittest.TestCase):
+    def test_smoke_fixture_cik_fallback_applies_without_network_sources(self):
+        with patch("server.yf.Ticker") as mock_ticker, patch("server._load_edgar_tickers", new_callable=AsyncMock) as mock_load:
+            mock_ticker.return_value.info = {}
+            mock_load.return_value = {}
+            cik = asyncio.run(srv._resolve_cik_for_ticker("AAPL"))
+        self.assertEqual(cik, "0000320193")
+
+    def test_smoke_fixture_cik_fallback_handles_lowercase(self):
+        with patch("server.yf.Ticker") as mock_ticker, patch("server._load_edgar_tickers", new_callable=AsyncMock) as mock_load:
+            mock_ticker.return_value.info = {}
+            mock_load.return_value = {}
+            cik = asyncio.run(srv._resolve_cik_for_ticker("axti"))
+        self.assertEqual(cik, "0001051627")
+
+
 if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     for cls in [TestTickerValidation, TestAccessionValidation, TestBatchValidation,
-                TestSecUrlValidation, TestHtmlSanitization]:
+                TestSecUrlValidation, TestHtmlSanitization, TestSecCikResolutionFallbacks]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)

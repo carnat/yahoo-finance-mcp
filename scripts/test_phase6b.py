@@ -133,6 +133,38 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             codes = [w.get("code") for w in data.get("warnings", []) if isinstance(w, dict)]
             self.assertIn("NO_OFFICIAL_RELEASE_SOURCE", codes)
 
+    def test_get_company_news_finnhub_source_status_unconfigured(self):
+        finnhub_warning = [{
+            "code": "SOURCE_UNAVAILABLE",
+            "message": "Finnhub company-news source is not configured; skipped.",
+            "severity": "warning",
+        }]
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+            mocked.return_value = ([], [], finnhub_warning, "2026-05-15T13:01:22Z")
+            data = _parse(_run(srv.get_company_news("AAPL", sources=["finnhub"])))
+            self.assertEqual(data.get("sourceStatus", {}).get("finnhub", {}).get("status"), "UNCONFIGURED")
+
+    def test_get_company_news_finnhub_source_status_ok(self):
+        finnhub_items = [{
+            "title": "Apple announces update",
+            "source": "Finnhub",
+            "sourceType": "finnhub",
+            "publishedAt": "2026-05-15T12:30:00Z",
+            "retrievedAt": "2026-05-15T13:01:22Z",
+            "url": "https://example.com/finnhub-news",
+            "tickers": ["AAPL"],
+            "eventType": "product",
+            "summary": "summary",
+            "evidenceText": "summary",
+            "confidence": "MEDIUM",
+            "tickerRelevance": "HIGH",
+            "duplicateGroupId": "fh1",
+        }]
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+            mocked.return_value = (finnhub_items, ["finnhub"], [], "2026-05-15T13:01:22Z")
+            data = _parse(_run(srv.get_company_news("AAPL", sources=["finnhub"])))
+            self.assertEqual(data.get("sourceStatus", {}).get("finnhub", {}).get("status"), "OK")
+
 
 class TestPhase6BSecEvents(unittest.TestCase):
     def test_get_sec_recent_events_accepted_at_used_as_published(self):
