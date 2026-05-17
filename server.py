@@ -391,7 +391,7 @@ def _compute_data_quality(
                         ltd_date = datetime.datetime.utcfromtimestamp(ltd_seconds).date()
                     if (data_date_obj - ltd_date).days > stale_days_threshold:
                         stale_trade += 1
-                except Exception:
+                except (ValueError, TypeError):
                     pass
 
     warnings: list[str] = []
@@ -1209,6 +1209,9 @@ _SOURCE_PRIORITY = {
     "other": 6,
 }
 _NEWSWIRE_HINTS = ("businesswire", "globenewswire", "prnewswire")
+_COMPANY_IR_URL_MARKERS = ("investor.", "investors.", "/investor", "/news-releases", "/press-release")
+_YAHOO_ALLOWED_CONTENT_TYPES = {"STORY", "ARTICLE", "PRESS_RELEASE"}
+_PRE_REVENUE_EPS_EPSILON = 1e-9
 _FINNHUB_NEWS_API = "https://finnhub.io/api/v1/company-news"
 _SMOKE_TICKER_CIK_FALLBACKS: dict[str, str] = {
     "AAPL": "0000320193",
@@ -1407,7 +1410,7 @@ def _build_yahoo_event_item(ticker: str, news_item: dict, retrieved_at: str) -> 
     if any(h in provider_l for h in _NEWSWIRE_HINTS):
         source_type = "newswire"
     elif any(marker in provider_l for marker in ("investor relations", "ir team")) or any(
-        marker in url_l for marker in ("investor.", "investors.", "/investor", "/news-releases", "/press-release")
+        marker in url_l for marker in _COMPANY_IR_URL_MARKERS
     ):
         source_type = "company_ir"
     published_at = _to_iso_utc(news_item.get("providerPublishTime") or content.get("pubDate") or news_item.get("publishedAt"))
@@ -1572,7 +1575,7 @@ async def _collect_yahoo_events(
             continue
         content = n.get("content", {}) if isinstance(n.get("content"), dict) else {}
         content_type = str(content.get("contentType") or n.get("contentType") or "").upper()
-        if content_type and content_type not in ("STORY", "ARTICLE", "PRESS_RELEASE"):
+        if content_type and content_type not in _YAHOO_ALLOWED_CONTENT_TYPES:
             continue
         item, item_warnings = _build_yahoo_event_item(ticker, n, retrieved_at)
         if not _within_date_window(item.get("publishedAt"), start_date=start_date, end_date=end_date, lookback_days=lookback_days):
@@ -5349,7 +5352,7 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
     beat_rate = round(beat_count / total_quarters, 2) if total_quarters > 0 else None
     avg_surprise = round(sum(surprises) / len(surprises), 2) if surprises else None
     pre_revenue = (total_quarters == 0 and not earnings_history_records) or (
-        bool(actual_eps_values) and all(abs(v) < 1e-9 for v in actual_eps_values)
+        bool(actual_eps_values) and all(abs(v) < _PRE_REVENUE_EPS_EPSILON for v in actual_eps_values)
     )
     if pre_revenue:
         momentum_flag = "NO_HISTORY"

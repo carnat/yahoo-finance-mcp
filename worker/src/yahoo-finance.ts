@@ -2390,7 +2390,7 @@ export async function getEarningsMomentum(ticker: string | string[]): Promise<st
       ? +(surprises.reduce((a, b) => a + b, 0) / surprises.length).toFixed(2) : null;
     const warnings: Array<{ code: string; message: string }> = [];
     const preRevenue = (totalQuarters === 0 && (!earningsHistory || earningsHistory.length === 0))
-      || (actualEpsValues.length > 0 && actualEpsValues.every(v => Math.abs(v) < 1e-9));
+      || (actualEpsValues.length > 0 && actualEpsValues.every(v => Math.abs(v) < PRE_REVENUE_EPS_EPSILON));
     if (preRevenue) {
       momentumFlag = "NO_HISTORY";
       warnings.push({
@@ -5588,6 +5588,8 @@ export async function extractFilingFact(ticker: string, factName: string, _docum
 const _str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
 const OFFICIAL_SOURCE_TYPES = new Set(["sec_filing", "company_ir", "press_release", "newswire"]);
 const SUPPORTED_EVENT_SOURCES = new Set(["sec", "company_ir", "newswire", "yahoo_finance", "finnhub"]);
+const COMPANY_IR_URL_MARKERS = ["investor.", "investors.", "/investor", "/news-releases", "/press-release"] as const;
+const PRE_REVENUE_EPS_EPSILON = 1e-9;
 const SOURCE_PRIORITY: Record<string, number> = {
   sec_filing: 0,
   company_ir: 1,
@@ -5706,6 +5708,7 @@ function buildYfEventItem(ticker: string, raw: Record<string, unknown>, retrieve
   const summary = _str(content.summary || raw.summary).trim();
   const source = _str((content.provider as Record<string, unknown> | undefined)?.displayName || raw.publisher || "Yahoo Finance");
   const url = _str((content.canonicalUrl as Record<string, unknown> | undefined)?.url || raw.link || raw.url) || null;
+  // Prefer native Yahoo publish timestamps, then normalized fallback from getNews().
   const publishedAt = normalizeIso(raw.providerPublishTime ?? content.pubDate ?? raw.publishedAt);
   if (!publishedAt) {
     warnings.push({ code: "PUBLISHED_AT_UNAVAILABLE", message: `Published timestamp unavailable for source '${source}'.`, severity: "warning" });
@@ -5718,7 +5721,7 @@ function buildYfEventItem(ticker: string, raw: Record<string, unknown>, retrieve
   } else if (
     sourceLower.includes("investor relations")
     || sourceLower.includes("ir team")
-    || ["investor.", "investors.", "/investor", "/news-releases", "/press-release"].some(marker => urlLower.includes(marker))
+    || COMPANY_IR_URL_MARKERS.some(marker => urlLower.includes(marker))
   ) {
     sourceType = "company_ir";
   }
@@ -6663,6 +6666,10 @@ function normalizeStatus(payload: Record<string, unknown>): string {
   return "NOT_FOUND";
 }
 
+function hasWarningCode(warnings: unknown[], code: string): boolean {
+  return warnings.some((w) => typeof w === "object" && w != null && (w as Record<string, unknown>).code === code);
+}
+
 async function mayBe20FFiler(ticker: string): Promise<boolean> {
   const { submissions } = await getSubmissionsForTicker(ticker);
   if (!submissions || typeof submissions !== "object") return false;
@@ -6705,7 +6712,7 @@ export async function extractGeographicRevenue(
   const idx = parseObjectJson(await getSecFilingIndex(ticker, filingType, period, accessionNumber));
   const evidence = payload.evidence && typeof payload.evidence === "object" ? payload.evidence as Record<string, unknown> : {};
   const warnings = Array.isArray(payload.warnings) ? [...payload.warnings] : [];
-  if (payload.value != null && payload.denominator == null && !warnings.some((w) => typeof w === "object" && w != null && (w as Record<string, unknown>).code === "DENOMINATOR_NOT_FOUND")) {
+  if (payload.value != null && payload.denominator == null && !hasWarningCode(warnings, "DENOMINATOR_NOT_FOUND")) {
     warnings.push({ code: "DENOMINATOR_NOT_FOUND", message: "Could not compute geographic revenue percentage due to missing denominator.", severity: "warning" });
   }
   const out: Record<string, unknown> = {
@@ -6745,7 +6752,7 @@ export async function extractGeographicRevenue(
     if (!possible20F && (evidenceFilingType === "" || evidenceFilingType === "10-K")) {
       possible20F = await mayBe20FFiler(ticker);
     }
-    if (possible20F && !warnings.some((w) => typeof w === "object" && w != null && (w as Record<string, unknown>).code === "POSSIBLE_20F_FILER")) {
+    if (possible20F && !hasWarningCode(warnings, "POSSIBLE_20F_FILER")) {
       warnings.push({
         code: "POSSIBLE_20F_FILER",
         message: "POSSIBLE_20F_FILER: Ticker may file 20-F. Retry with filing_type='20-F' or use IR web search.",
