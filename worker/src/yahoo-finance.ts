@@ -2192,6 +2192,12 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
         message: "Interest coverage cannot be computed from available provider data.",
       });
     }
+    if ((ebitdaAnnual != null && ebitdaAnnual < 0) || (ebitAnnual != null && ebitAnnual < 0)) {
+      warnings.push({
+        code: "NEGATIVE_EARNINGS_BASE",
+        message: "Company has negative EBIT/EBITDA; leverage metrics may understate operating credit risk despite net cash or low net debt.",
+      });
+    }
 
     const dataQuality = missingComponents.length > 0 ? "PARTIAL" : "OK";
     const quarterDate = (bsLatest.date as string) ?? (incLatest.date as string) ?? null;
@@ -3065,7 +3071,7 @@ async function resolveCikForTicker(ticker: string): Promise<string | null> {
 
   try {
     const atom = await fetch(
-      `https://www.sec.gov/cgi-bin/browse-edgar?company=${encodeURIComponent(ticker)}&action=getcompany&output=atom`,
+      `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${encodeURIComponent(ticker)}&type=&dateb=&owner=include&count=10&output=atom`,
       { headers: { "User-Agent": EDGAR_UA } }
     );
     if (atom.ok) {
@@ -3376,9 +3382,15 @@ function regionMatches(segmentLabel: string, region: string, includeAsiaFallback
   const label = segmentLabel.toLowerCase();
   const regionLower = region.toLowerCase();
   if (label.includes(regionLower)) return true;
+  // Also try compact (no-space) matching for XBRL member names like "GreaterChinaMember"
+  const regionCompact = regionLower.replace(/\s+/g, "");
+  if (regionCompact && label.includes(regionCompact)) return true;
   if (regionLower === "china") {
-    if (["country:cn", "greater china", "srt:chinamember"].some((t) => label.includes(t))) return true;
+    if (["country:cn", "greater china", "srt:chinamember", "greaterchina"].some((t) => label.includes(t))) return true;
     return includeAsiaFallback && label.includes("asiapacificmember");
+  }
+  if (regionLower === "greater china") {
+    if (label.includes("greaterchina") || label.includes("greater china")) return true;
   }
   return false;
 }
@@ -3494,22 +3506,25 @@ export async function getFilingData(
 
   let filtered = facts.filter((f) => String(f.form ?? "").toUpperCase() === filingType.toUpperCase());
   if (!filtered.length) {
-    return withGeoShape({
-      ticker,
-      factType,
-      value: null,
-      denominator: null,
-      valueRatio: null,
-      valuePct: null,
-      extractionMethod: "NONE",
-      source: "NOT_DISCLOSED",
-      confidence: "NOT_DISCLOSED",
-      evidence: {},
-      warnings: [],
-      _manualLookup: filingManualLookup(ticker, cikPadded, filingType),
-    });
+    if (factType !== "geographic_revenue") {
+      return withGeoShape({
+        ticker,
+        factType,
+        value: null,
+        denominator: null,
+        valueRatio: null,
+        valuePct: null,
+        extractionMethod: "NONE",
+        source: "NOT_DISCLOSED",
+        confidence: "NOT_DISCLOSED",
+        evidence: {},
+        warnings: [],
+        _manualLookup: filingManualLookup(ticker, cikPadded, filingType),
+      });
+    }
+    // For geographic_revenue, fall through to HTML fallback below (picked remains null)
   }
-  if (period === "latest") {
+  if (filtered.length && period === "latest") {
     const latestFiled = filtered.map((f) => String(f.filed ?? "")).sort().slice(-1)[0];
     filtered = filtered.filter((f) => String(f.filed ?? "") === latestFiled);
   }
@@ -5781,9 +5796,57 @@ function dedupeEventItems(items: Record<string, unknown>[], warnings: Record<str
 
 function collectionStatus(items: Record<string, unknown>[], sourcesUsed: string[], warnings: Record<string, unknown>[]): string | null {
   if (items.length > 0 && warnings.some(w => _str(w.code) === "SOURCE_UNAVAILABLE")) return "PARTIAL";
-  if (items.length === 0 && sourcesUsed.length > 0) return "NOT_FOUND";
-  if (items.length === 0 && sourcesUsed.length === 0) return "PROVIDER_ERROR";
+  if (items.length === 0) {
+    if (warnings.some(w => _str(w.code) === "SOURCE_UNAVAILABLE")) return "SOURCE_LIMITED_NOT_FOUND";
+    if (sourcesUsed.length > 0) return "NOT_FOUND";
+    return "PROVIDER_ERROR";
+  }
   return null;
+}
+
+function computeSourceStatus(
+  sourcesUsed: string[],
+  warnings: Record<string, unknown>[],
+  items: Record<string, unknown>[],
+  selectedSources: string[]
+): Record<string, unknown> {
+  const warningMsgs = warnings
+    .filter(w => _str(w.code) === "SOURCE_UNAVAILABLE")
+    .map(w => _str(w.message).toLowerCase());
+  const secItems = items.filter(it => _str(it.sourceType).includes("sec"));
+  const yfItems = items.filter(it => _str(it.sourceType) === "yahoo_finance");
+  const result: Record<string, unknown> = {};
+  if (selectedSources.includes("sec")) {
+    if (sourcesUsed.includes("sec")) {
+      result.sec = { status: secItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: secItems.length, filteredCount: secItems.length };
+    } else if (warningMsgs.some(m => m.includes("sec submissions"))) {
+      result.sec = { status: "PROVIDER_ERROR", rawCount: 0, filteredCount: 0 };
+    } else {
+      result.sec = { status: "EMPTY_RESULT", rawCount: 0, filteredCount: 0 };
+    }
+  }
+  if (selectedSources.includes("yahoo_finance")) {
+    if (sourcesUsed.includes("yahoo_finance")) {
+      result.yahoo_finance = { status: yfItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: yfItems.length, filteredCount: yfItems.length };
+    } else if (warningMsgs.some(m => m.includes("yahoo finance"))) {
+      result.yahoo_finance = { status: "PROVIDER_ERROR", rawCount: 0, filteredCount: 0 };
+    } else {
+      result.yahoo_finance = { status: "EMPTY_RESULT", rawCount: 0, filteredCount: 0 };
+    }
+  }
+  if (selectedSources.includes("company_ir")) result.company_ir = { status: "UNCONFIGURED" };
+  if (selectedSources.includes("newswire")) result.newswire = { status: "UNCONFIGURED" };
+  return result;
+}
+
+function computeSourceCoverage(sourceStatus: Record<string, unknown>): string {
+  const limitedStatuses = new Set(["UNCONFIGURED", "PROVIDER_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED"]);
+  for (const info of Object.values(sourceStatus)) {
+    if (info && typeof info === "object" && limitedStatuses.has(_str((info as Record<string, unknown>).status))) {
+      return "PARTIAL";
+    }
+  }
+  return "FULL";
 }
 
 async function collectSecEvents(
@@ -5918,11 +5981,15 @@ async function collectCompanyEvents(
 export async function getCompanyNews(ticker: string, maxResults = 10, lookbackDays = 14, sources: string[] = ["sec", "company_ir", "newswire", "yahoo_finance"]): Promise<string> {
   const out = await collectCompanyEvents(ticker, { maxResults, lookbackDays, sources });
   const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
+  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources);
+  const sourceCoverage = computeSourceCoverage(sourceStatus);
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
     items: out.items,
     meta: { sourcesUsed: out.sourcesUsed, deduped: true, watermark: out.watermark },
     warnings: out.warnings,
+    sourceCoverage,
+    sourceStatus,
   };
   if (status) payload.status = status;
   return JSON.stringify(payload);

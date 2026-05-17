@@ -260,7 +260,10 @@ def _assert_filing_resolution(payload: dict, ticker: str) -> tuple[list[dict], s
     filings_data = extract_data(payload)
     filing_list = filings_data.get("filings") if isinstance(filings_data, dict) else None
     if not isinstance(filing_list, list) or not filing_list:
-        raise AssertionError(f"{ticker}: list_sec_company_filings expected non-empty filings[]")
+        diag = json.dumps(filings_data, sort_keys=True)[:2000] if isinstance(filings_data, dict) else repr(filings_data)[:2000]
+        raise AssertionError(
+            f"{ticker}: list_sec_company_filings expected non-empty filings[]\n{diag}"
+        )
     first_filing = filing_list[0] if isinstance(filing_list[0], dict) else {}
     if not first_filing.get("accessionNumber"):
         raise AssertionError(f"{ticker}: missing accessionNumber: {first_filing}")
@@ -285,6 +288,25 @@ def _check_yahoo_news_structured(data: dict) -> None:
         raise AssertionError("get_company_news meta.sourcesUsed missing")
     if "deduped" not in meta:
         raise AssertionError("get_company_news meta.deduped missing")
+    # sourceStatus and sourceCoverage are required
+    if "sourceStatus" not in data:
+        raise AssertionError("get_company_news missing sourceStatus")
+    if "sourceCoverage" not in data:
+        raise AssertionError("get_company_news missing sourceCoverage")
+    source_status = data.get("sourceStatus") or {}
+    if not isinstance(source_status, dict):
+        raise AssertionError(f"get_company_news sourceStatus must be an object, got: {type(source_status)}")
+    # If company_ir or newswire are UNCONFIGURED and items=[], status must be SOURCE_LIMITED_NOT_FOUND
+    items = data.get("items") or []
+    company_ir_status = (source_status.get("company_ir") or {}).get("status", "")
+    newswire_status = (source_status.get("newswire") or {}).get("status", "")
+    if not items and (company_ir_status == "UNCONFIGURED" or newswire_status == "UNCONFIGURED"):
+        top_status = data.get("status", "")
+        if top_status == "NOT_FOUND":
+            raise AssertionError(
+                "get_company_news: items=[] with UNCONFIGURED source(s) must return "
+                f"SOURCE_LIMITED_NOT_FOUND, got NOT_FOUND; sourceStatus={source_status}"
+            )
     required_item_fields = (
         "title",
         "source",
