@@ -17,7 +17,6 @@ import {
   getHistoricalPrices,
   getHolderInfo,
   getMaPosition,
-  getNews,
   getOptionChain,
   getOptionExpirationDates,
   getOvernightQuote,
@@ -1915,7 +1914,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_calendar":
       return getCalendar(str(args.ticker));
     case "get_yahoo_finance_news":
-      return getNews(str(args.ticker));
+      return getCompanyNews(str(args.ticker));
     case "get_options_flow_summary":
       return getOptionsSummary(str(args.ticker));
     case "get_options_flow_scan":

@@ -1187,80 +1187,8 @@ Args:
 """,
 )
 async def get_yahoo_finance_news(ticker: str) -> str:
-    """Get news for a given ticker symbol
-
-    Args:
-        ticker: str
-            The ticker symbol of the stock to get news for, e.g. "AAPL"
-    """
-    company = yf.Ticker(ticker)
-    retrieved_at = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-    try:
-        if company.fast_info.currency is None:
-            print(f"Company ticker {ticker} not found.")
-            return json.dumps({
-                "ticker": ticker,
-                "items": [],
-                "meta": {"source": "yahoo_finance", "watermark": retrieved_at, "itemCount": 0},
-            })
-    except Exception as e:
-        print(f"Error: getting news for {ticker}: {e}")
-        return json.dumps({
-            "ticker": ticker,
-            "items": [],
-            "meta": {"source": "yahoo_finance", "watermark": retrieved_at, "itemCount": 0},
-            "_note": f"Error: getting news for {ticker}: {e}",
-        })
-
-    # If the company is found, get the news
-    try:
-        news = company.news
-    except Exception as e:
-        print(f"Error: getting news for {ticker}: {e}")
-        return f"Error: getting news for {ticker}: {e}"
-
-    items = []
-    ticker_u = ticker.upper()
-    for article in news or []:
-        content = article.get("content", {}) if isinstance(article, dict) else {}
-        if content.get("contentType", "") != "STORY":
-            continue
-        title = str(content.get("title", "") or "")
-        publisher = str(content.get("provider", {}).get("displayName", "") or content.get("publisher", "") or "")
-        url = str(content.get("canonicalUrl", {}).get("url", "") or "")
-        pub_raw = (
-            content.get("pubDate")
-            or article.get("providerPublishTime")
-            or content.get("providerPublishTime")
-        )
-        published_at = None
-        if isinstance(pub_raw, (int, float)):
-            published_at = datetime.datetime.fromtimestamp(float(pub_raw), datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-        elif isinstance(pub_raw, str) and pub_raw.strip():
-            try:
-                published_at = datetime.datetime.fromisoformat(pub_raw.replace("Z", "+00:00")).astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-            except Exception:
-                published_at = None
-
-        items.append({
-            "title": title,
-            "publisher": publisher,
-            "url": url,
-            "publishedAt": published_at,
-            "retrievedAt": retrieved_at,
-            "sourceType": "yahoo_finance",
-            "tickerRelevance": "HIGH" if ticker_u in title.upper() else "UNKNOWN",
-        })
-
-    return json.dumps({
-        "ticker": ticker,
-        "items": items,
-        "meta": {
-            "source": "yahoo_finance",
-            "watermark": retrieved_at,
-            "itemCount": len(items),
-        },
-    })
+    """Alias for get_company_news. Routes to the canonical multi-source news tool."""
+    return await get_company_news(ticker)
 
 
 # ---------------------------------------------------------------------------
@@ -1674,11 +1602,58 @@ def _dedupe_event_items(items: list[dict], warnings: list[dict]) -> list[dict]:
 def _build_collection_status(items: list[dict], sources_used: list[str], warnings: list[dict]) -> str | None:
     if items and any(w.get("code") == "SOURCE_UNAVAILABLE" for w in warnings if isinstance(w, dict)):
         return "PARTIAL"
-    if not items and sources_used:
-        return "NOT_FOUND"
-    if not items and not sources_used:
+    if not items:
+        # If any source is unconfigured/provider-error/rate-limited, report SOURCE_LIMITED_NOT_FOUND
+        # so callers know the empty result may be due to missing coverage, not genuine absence.
+        if any(w.get("code") == "SOURCE_UNAVAILABLE" for w in warnings if isinstance(w, dict)):
+            return "SOURCE_LIMITED_NOT_FOUND"
+        if sources_used:
+            return "NOT_FOUND"
         return "PROVIDER_ERROR"
     return None
+
+
+def _compute_source_status(
+    sources_used: list[str],
+    warnings: list[dict],
+    items: list[dict],
+    selected_sources: list[str] | None = None,
+) -> dict:
+    """Build per-source status dict from collection results."""
+    warning_msgs = [w.get("message", "") for w in warnings if isinstance(w, dict) and w.get("code") == "SOURCE_UNAVAILABLE"]
+    sec_items = [it for it in items if "sec" in str(it.get("sourceType", "")).lower()]
+    yf_items = [it for it in items if str(it.get("sourceType", "")) == "yahoo_finance"]
+    sources = selected_sources or ["sec", "company_ir", "newswire", "yahoo_finance"]
+
+    result: dict = {}
+    if "sec" in sources:
+        if "sec" in sources_used:
+            result["sec"] = {"status": "OK" if sec_items else "EMPTY_RESULT", "rawCount": len(sec_items), "filteredCount": len(sec_items)}
+        elif any("sec submissions" in m.lower() for m in warning_msgs):
+            result["sec"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
+        else:
+            result["sec"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+    if "yahoo_finance" in sources:
+        if "yahoo_finance" in sources_used:
+            result["yahoo_finance"] = {"status": "OK" if yf_items else "EMPTY_RESULT", "rawCount": len(yf_items), "filteredCount": len(yf_items)}
+        elif any("yahoo finance" in m.lower() for m in warning_msgs):
+            result["yahoo_finance"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
+        else:
+            result["yahoo_finance"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+    if "company_ir" in sources:
+        result["company_ir"] = {"status": "UNCONFIGURED"}
+    if "newswire" in sources:
+        result["newswire"] = {"status": "UNCONFIGURED"}
+    return result
+
+
+def _compute_source_coverage(source_status: dict) -> str:
+    """Return PARTIAL if any source is UNCONFIGURED or has an error, else FULL."""
+    for info in source_status.values():
+        s = info.get("status", "") if isinstance(info, dict) else ""
+        if s in ("UNCONFIGURED", "PROVIDER_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED"):
+            return "PARTIAL"
+    return "FULL"
 
 
 async def _collect_company_events(
@@ -3746,9 +3721,21 @@ async def _resolve_cik_for_ticker(ticker: str) -> str | None:
         _FILING_CIK_CACHE[t_upper] = cik_padded
         return cik_padded
 
+    # Fallback: look up from SEC EDGAR company_tickers.json
+    try:
+        tickers_map = await _load_edgar_tickers()
+        cik_int = tickers_map.get(t_upper)
+        if cik_int:
+            cik_padded = str(cik_int).zfill(10)
+            _FILING_CIK_CACHE[t_upper] = cik_padded
+            return cik_padded
+    except Exception:
+        pass
+
+    # Final fallback: EDGAR CIK lookup by ticker symbol
     atom_url = (
         "https://www.sec.gov/cgi-bin/browse-edgar?"
-        f"company={_urlparse.quote(ticker)}&action=getcompany&output=atom"
+        f"action=getcompany&CIK={_urlparse.quote(ticker)}&type=&dateb=&owner=include&count=10&output=atom"
     )
     loop = asyncio.get_event_loop()
 
@@ -3796,11 +3783,18 @@ def _region_matches(label: str, region: str, include_asia_fallback: bool = False
     region_low = region.lower()
     if region_low in label_low:
         return True
+    # Also try compact (no-space) region for XBRL member names like "GreaterChinaMember"
+    region_compact = region_low.replace(" ", "")
+    if region_compact and region_compact in label_low:
+        return True
     if region_low == "china":
-        base_tokens = ("country:cn", "greater china", "srt:chinamember")
+        base_tokens = ("country:cn", "greater china", "srt:chinamember", "greaterchina")
         if any(token in label_low for token in base_tokens):
             return True
         return include_asia_fallback and "asiapacificmember" in label_low
+    if region_low == "greater china":
+        if "greaterchina" in label_low or "greater china" in label_low:
+            return True
     return False
 
 
@@ -3967,24 +3961,26 @@ async def get_filing_data(
 
     filtered = [f for f in usd_facts if str(f.get("form", "")).upper() == filing_type.upper()]
     if not filtered:
-        return _geo_shape({
-            "ticker": ticker,
-            "factType": fact_type.value,
-            "value": None,
-            "denominator": None,
-            "valueRatio": None,
-            "valuePct": None,
-            "extractionMethod": "NONE",
-            "source": "NOT_DISCLOSED",
-            "confidence": "NOT_DISCLOSED",
-            "evidence": {},
-            "warnings": [],
-            "_manualLookup": _manual_lookup_payload(
-                ticker, cik_padded, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."
-            ),
-        })
+        if fact_type != FilingFactType.geographic_revenue:
+            return _geo_shape({
+                "ticker": ticker,
+                "factType": fact_type.value,
+                "value": None,
+                "denominator": None,
+                "valueRatio": None,
+                "valuePct": None,
+                "extractionMethod": "NONE",
+                "source": "NOT_DISCLOSED",
+                "confidence": "NOT_DISCLOSED",
+                "evidence": {},
+                "warnings": [],
+                "_manualLookup": _manual_lookup_payload(
+                    ticker, cik_padded, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."
+                ),
+            })
+        # For geographic_revenue, fall through to HTML fallback below (picked remains None)
 
-    if period == "latest":
+    if filtered and period == "latest":
         latest_filed = max(str(f.get("filed", "")) for f in filtered)
         filtered = [f for f in filtered if str(f.get("filed", "")) == latest_filed]
 
@@ -4852,6 +4848,11 @@ async def get_credit_health(ticker: str | list[str]) -> str:
         warnings.append({
             "code": "INTEREST_EXPENSE_UNAVAILABLE",
             "message": "Interest coverage cannot be computed from available provider data.",
+        })
+    if ebitda_annual is not None and ebitda_annual < 0 or ebit_annual is not None and ebit_annual < 0:
+        warnings.append({
+            "code": "NEGATIVE_EARNINGS_BASE",
+            "message": "Company has negative EBIT/EBITDA; leverage metrics may understate operating credit risk despite net cash or low net debt.",
         })
 
     # Check for partial data
@@ -7309,6 +7310,9 @@ async def get_company_news(
         sources=sources,
     )
     status = _build_collection_status(items, sources_used, warnings)
+    selected = sources or ["sec", "company_ir", "newswire", "yahoo_finance"]
+    source_status = _compute_source_status(sources_used, warnings, items, selected)
+    source_coverage = _compute_source_coverage(source_status)
     payload = {
         "ticker": ticker.upper(),
         "items": items,
@@ -7318,6 +7322,8 @@ async def get_company_news(
             "watermark": retrieved_at,
         },
         "warnings": warnings,
+        "sourceCoverage": source_coverage,
+        "sourceStatus": source_status,
     }
     if status:
         payload["status"] = status
