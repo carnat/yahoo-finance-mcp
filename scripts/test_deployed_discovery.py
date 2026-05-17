@@ -96,6 +96,7 @@ SMOKE_ARGS: dict[str, dict] = {
 }
 
 _ALLOW_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in ("1", "true", "yes")
+_FINNHUB_KEY_CONFIGURED = bool(os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_TOKEN"))
 _FORBIDDEN_PUBLIC_TERMS = (
     r"\bIO\b",
     r"Commander",
@@ -329,7 +330,21 @@ def _check_yahoo_news_structured(data: dict) -> None:
         raise AssertionError("get_company_news returned raw text blob instead of structured JSON")
 
 
-def _assert_sec_index_shape(data: dict, tool_name: str) -> None:
+def _check_finnhub_item_shape(item: dict) -> None:
+    """Validate the shape of a Finnhub news item."""
+    for field in ("source", "originalSource", "sourceType", "publishedAt", "retrievedAt",
+                  "url", "summary", "eventType", "duplicateGroupId"):
+        if field not in item:
+            raise AssertionError(f"Finnhub item missing field '{field}': {item}")
+    if item.get("source") != "finnhub":
+        raise AssertionError(f"Finnhub item source expected 'finnhub', got: {item.get('source')!r}")
+    if item.get("sourceType") != "company_news":
+        raise AssertionError(f"Finnhub item sourceType expected 'company_news', got: {item.get('sourceType')!r}")
+    if "retrievedAt" in item and not isinstance(item["retrievedAt"], str):
+        raise AssertionError(f"Finnhub item retrievedAt must be a string: {item['retrievedAt']!r}")
+
+
+
     if not isinstance(data, dict):
         raise AssertionError(f"{tool_name} returned non-object: {data!r}")
     doc_url = data.get("documentUrl")
@@ -734,6 +749,46 @@ def main() -> int:
             payload = call_tool(n, SMOKE_ARGS[n], idx)
             assert_no_unknown_tool(payload, n)
         # Tools not in SMOKE_ARGS: discovery/schema validated above, skip runtime call with {}
+
+    # Conditional Finnhub deployed smoke
+    # When FINNHUB_API_KEY is absent the Worker returns UNCONFIGURED; when present it calls the API.
+    fh_resp = call_tool(
+        "get_company_news",
+        {"ticker": "AAPL", "sources": ["finnhub"], "max_results": 5, "lookback_days": 14},
+        2000,
+    )
+    assert_no_unknown_tool(fh_resp, "get_company_news (finnhub)")
+    fh_data = extract_data(fh_resp)
+    if not isinstance(fh_data, dict):
+        raise AssertionError(f"get_company_news(finnhub) returned non-object: {type(fh_data)}")
+    fh_source_status = (fh_data.get("sourceStatus") or {}).get("finnhub") or {}
+    actual_fh_status = fh_source_status.get("status")
+    if _FINNHUB_KEY_CONFIGURED:
+        _allowed = {"OK", "EMPTY_RESULT", "RATE_LIMITED", "AUTH_ERROR", "PROVIDER_ERROR", "PROVIDER_CHANGED"}
+        if actual_fh_status not in _allowed:
+            raise AssertionError(
+                f"Finnhub sourceStatus.status unexpected when key configured: {actual_fh_status!r}"
+            )
+        if "rawCount" not in fh_source_status:
+            raise AssertionError("Finnhub sourceStatus missing rawCount")
+        if "filteredCount" not in fh_source_status:
+            raise AssertionError("Finnhub sourceStatus missing filteredCount")
+        # Verify key is not echoed anywhere in the response
+        _key_val = os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_TOKEN") or ""
+        if _key_val and _key_val in json.dumps(fh_resp):
+            raise AssertionError("SECURITY: Finnhub API key found in tool output")
+        # If items were returned, validate the first item shape
+        _fh_items = fh_data.get("items") or []
+        if actual_fh_status == "OK" and _fh_items:
+            _check_finnhub_item_shape(_fh_items[0])
+            print(f"  PASS Finnhub item shape check (sourceType=company_news, source=finnhub)")
+        print(f"  PASS Finnhub deployed smoke (key configured, status={actual_fh_status!r})")
+    else:
+        if actual_fh_status != "UNCONFIGURED":
+            raise AssertionError(
+                f"Finnhub expected UNCONFIGURED when key absent, got: {actual_fh_status!r}"
+            )
+        print("  PASS Finnhub deployed smoke (key absent, sourceStatus.finnhub=UNCONFIGURED)")
 
     print(f"PASS deployed discovery + smoke ({len(names)} tools)")
     return 0
