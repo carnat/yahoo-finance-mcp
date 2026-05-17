@@ -2361,6 +2361,7 @@ export async function getEarningsMomentum(ticker: string | string[]): Promise<st
     let totalQuarters = 0;
     const surprises: number[] = [];
     let beatStreak = 0;
+    const actualEpsValues: number[] = [];
 
     if (earningsHistory && earningsHistory.length > 0) {
       for (const h of earningsHistory) {
@@ -2368,6 +2369,7 @@ export async function getEarningsMomentum(ticker: string | string[]): Promise<st
         const estimate = h.epsEstimate as number | null;
         const surprise = h.surprisePercent as number | null;
         if (actual != null && estimate != null) {
+          actualEpsValues.push(actual);
           totalQuarters++;
           if (actual > estimate) beatCount++;
           if (surprise != null) surprises.push(Math.abs(surprise) < 1 ? surprise * 100 : surprise);
@@ -2387,6 +2389,15 @@ export async function getEarningsMomentum(ticker: string | string[]): Promise<st
     const avgSurprise = surprises.length > 0
       ? +(surprises.reduce((a, b) => a + b, 0) / surprises.length).toFixed(2) : null;
     const warnings: Array<{ code: string; message: string }> = [];
+    const preRevenue = (totalQuarters === 0 && (!earningsHistory || earningsHistory.length === 0))
+      || (actualEpsValues.length > 0 && actualEpsValues.every(v => Math.abs(v) < 1e-9));
+    if (preRevenue) {
+      momentumFlag = "NO_HISTORY";
+      warnings.push({
+        code: "PRE_REVENUE_NO_HISTORY",
+        message: "Earnings history appears pre-revenue or unavailable; momentum fields are not reliable.",
+      });
+    }
 
     let historicalSurpriseSignal = "UNKNOWN";
     if (beatRate != null) {
@@ -2457,7 +2468,8 @@ export async function getEarningsMomentum(ticker: string | string[]): Promise<st
       beatCount,
       beatSample: totalQuarters,
       totalQuarters,
-      avgSurprisePct: avgSurprise,
+      avgSurprisePct: preRevenue ? null : avgSurprise,
+      preRevenue,
       currentBeatStreak: beatStreak,
       historicalSurpriseSignal,
       forwardRevisionSignal,
@@ -4963,8 +4975,9 @@ export async function getPositionScoreInputs(ticker: string | string[]): Promise
     const t4 = {
       beatRate: earnings.beatRate ?? null,
       currentBeatStreak: earnings.currentBeatStreak ?? null,
-      avgSurprisePct: earnings.avgSurprisePct ?? null,
+      avgSurprisePct: earnings.preRevenue ? null : (earnings.avgSurprisePct ?? null),
       momentumFlag: earnings.momentumFlag ?? null,
+      preRevenue: Boolean(earnings.preRevenue),
     };
 
     const t5 = {
@@ -5693,11 +5706,22 @@ function buildYfEventItem(ticker: string, raw: Record<string, unknown>, retrieve
   const summary = _str(content.summary || raw.summary).trim();
   const source = _str((content.provider as Record<string, unknown> | undefined)?.displayName || raw.publisher || "Yahoo Finance");
   const url = _str((content.canonicalUrl as Record<string, unknown> | undefined)?.url || raw.link || raw.url) || null;
-  const publishedAt = normalizeIso(raw.providerPublishTime ?? content.pubDate);
+  const publishedAt = normalizeIso(raw.providerPublishTime ?? content.pubDate ?? raw.publishedAt);
   if (!publishedAt) {
     warnings.push({ code: "PUBLISHED_AT_UNAVAILABLE", message: `Published timestamp unavailable for source '${source}'.`, severity: "warning" });
   }
-  const sourceType = /businesswire|globenewswire|prnewswire/i.test(source) ? "newswire" : "yahoo_finance";
+  const sourceLower = source.toLowerCase();
+  const urlLower = _str(url).toLowerCase();
+  let sourceType = "yahoo_finance";
+  if (/businesswire|globenewswire|prnewswire/i.test(source)) {
+    sourceType = "newswire";
+  } else if (
+    sourceLower.includes("investor relations")
+    || sourceLower.includes("ir team")
+    || ["investor.", "investors.", "/investor", "/news-releases", "/press-release"].some(marker => urlLower.includes(marker))
+  ) {
+    sourceType = "company_ir";
+  }
   const relevance = `${title} ${summary}`.toUpperCase().includes(ticker.toUpperCase()) ? "HIGH" : (sourceType === "yahoo_finance" ? "LOW" : "UNKNOWN");
   const confidence = !url || relevance !== "HIGH" ? "LOW" : "MEDIUM";
   const duplicateGroupId = makeDupGroupId(ticker, title, publishedAt, null, url);
@@ -5850,6 +5874,8 @@ function computeSourceStatus(
     .map(w => _str(w.message).toLowerCase());
   const secItems = items.filter(it => _str(it.sourceType).includes("sec"));
   const yfItems = items.filter(it => _str(it.sourceType) === "yahoo_finance");
+  const newswireItems = items.filter(it => _str(it.sourceType) === "newswire");
+  const companyIrItems = items.filter(it => ["company_ir", "press_release"].includes(_str(it.sourceType)));
   const finnhubItems = items.filter(it => _str(it.source) === "finnhub");
   const result: Record<string, unknown> = {};
   if (selectedSources.includes("sec")) {
@@ -5887,8 +5913,24 @@ function computeSourceStatus(
       result.finnhub = { status: "EMPTY_RESULT", rawCount: 0, filteredCount: 0 };
     }
   }
-  if (selectedSources.includes("company_ir")) result.company_ir = { status: "UNCONFIGURED" };
-  if (selectedSources.includes("newswire")) result.newswire = { status: "UNCONFIGURED" };
+  if (selectedSources.includes("company_ir")) {
+    if (sourcesUsed.includes("company_ir")) {
+      result.company_ir = { status: companyIrItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: companyIrItems.length, filteredCount: companyIrItems.length };
+    } else if (warningMsgs.some(m => m.includes("yahoo finance"))) {
+      result.company_ir = { status: "PROVIDER_ERROR", rawCount: 0, filteredCount: 0 };
+    } else {
+      result.company_ir = { status: "EMPTY_RESULT", rawCount: 0, filteredCount: 0 };
+    }
+  }
+  if (selectedSources.includes("newswire")) {
+    if (sourcesUsed.includes("newswire")) {
+      result.newswire = { status: newswireItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: newswireItems.length, filteredCount: newswireItems.length };
+    } else if (warningMsgs.some(m => m.includes("yahoo finance"))) {
+      result.newswire = { status: "PROVIDER_ERROR", rawCount: 0, filteredCount: 0 };
+    } else {
+      result.newswire = { status: "EMPTY_RESULT", rawCount: 0, filteredCount: 0 };
+    }
+  }
   return result;
 }
 
@@ -6089,16 +6131,19 @@ async function collectCompanyEvents(
     items.push(...sec.items);
     warnings.push(...sec.warnings);
   }
-  if (selected.includes("company_ir")) {
-    warnings.push({ code: "SOURCE_UNAVAILABLE", message: "Company IR source is not configured; skipped.", severity: "warning" });
-  }
-  if (selected.includes("newswire")) {
-    warnings.push({ code: "SOURCE_UNAVAILABLE", message: "Newswire source is not configured; skipped.", severity: "warning" });
-  }
-  if (selected.includes("yahoo_finance")) {
+  if (selected.some(src => ["yahoo_finance", "company_ir", "newswire"].includes(src))) {
     const yf = await collectYahooEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback);
-    if (yf.used) sourcesUsed.push("yahoo_finance");
-    items.push(...yf.items);
+    if (yf.used) {
+      if (selected.includes("yahoo_finance")) sourcesUsed.push("yahoo_finance");
+      if (selected.includes("company_ir")) sourcesUsed.push("company_ir");
+      if (selected.includes("newswire")) sourcesUsed.push("newswire");
+    }
+    for (const item of yf.items) {
+      const sourceType = _str(item.sourceType);
+      if (sourceType === "yahoo_finance" && selected.includes("yahoo_finance")) items.push(item);
+      else if (sourceType === "company_ir" && selected.includes("company_ir")) items.push(item);
+      else if (sourceType === "newswire" && selected.includes("newswire")) items.push(item);
+    }
     warnings.push(...yf.warnings);
   }
   if (selected.includes("finnhub")) {
@@ -6618,6 +6663,15 @@ function normalizeStatus(payload: Record<string, unknown>): string {
   return "NOT_FOUND";
 }
 
+async function mayBe20FFiler(ticker: string): Promise<boolean> {
+  const { submissions } = await getSubmissionsForTicker(ticker);
+  if (!submissions || typeof submissions !== "object") return false;
+  const filings = (submissions.filings as Record<string, unknown>) ?? {};
+  const recent = (filings.recent as Record<string, unknown>) ?? {};
+  const forms = Array.isArray(recent.form) ? recent.form : [];
+  return forms.some((form: unknown) => String(form ?? "").toUpperCase() === "20-F");
+}
+
 export async function extractGeographicRevenue(
   ticker: string,
   region: string,
@@ -6684,6 +6738,21 @@ export async function extractGeographicRevenue(
     calculation: payload.calculation ?? null,
     warnings,
   };
+  if (filingType.toUpperCase() === "10-K" && String(out.confidence ?? "").toUpperCase() === "NOT_DISCLOSED") {
+    const evidence = out.evidence as Record<string, unknown>;
+    const evidenceFilingType = String(evidence?.filingType ?? "").toUpperCase();
+    let possible20F = evidenceFilingType === "20-F";
+    if (!possible20F && (evidenceFilingType === "" || evidenceFilingType === "10-K")) {
+      possible20F = await mayBe20FFiler(ticker);
+    }
+    if (possible20F && !warnings.some((w) => typeof w === "object" && w != null && (w as Record<string, unknown>).code === "POSSIBLE_20F_FILER")) {
+      warnings.push({
+        code: "POSSIBLE_20F_FILER",
+        message: "POSSIBLE_20F_FILER: Ticker may file 20-F. Retry with filing_type='20-F' or use IR web search.",
+        severity: "warning",
+      });
+    }
+  }
   if (String(detailLevel).toLowerCase() === "raw") out.rawContext = { filingIndex: idx };
   return JSON.stringify(out);
 }

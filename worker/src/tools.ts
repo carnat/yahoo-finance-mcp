@@ -159,7 +159,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "get_yahoo_finance_news",
-    description: "Get the latest news articles for a given stock ticker.",
+    description: "Deprecated alias for get_company_news.",
     inputSchema: {
       type: "object",
       properties: {
@@ -311,7 +311,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_fast_info",
     description:
-      "Get lightweight real-time price and market data for one or more tickers. Returns high-signal fields: currency, exchange, quoteType, lastPrice, open, previousClose, dayHigh, dayLow, yearHigh, yearLow, yearChange, marketCap, shares, lastVolume, tenDayAverageVolume, threeMonthAverageVolume, fiftyDayAverage, twoHundredDayAverage, preMarketPrice, postMarketPrice, marketOpen (true only during regular session hours), lastTradeDate (YYYY-MM-DD date of the session the OHLCV data belongs to — use this to detect weekend/holiday staleness), postMarketTimestamp (ISO8601 timestamp of postMarketPrice, null if no AH activity). Prefer this over get_stock_info for price/market data queries — it uses far fewer tokens. Max 5 tickers per call; if you need more, split into multiple calls.",
+      "Alias for get_market_quote. Get lightweight real-time price and market data for one or more tickers. Returns high-signal fields: currency, exchange, quoteType, lastPrice, open, previousClose, dayHigh, dayLow, yearHigh, yearLow, yearChange, marketCap, shares, lastVolume, tenDayAverageVolume, threeMonthAverageVolume, fiftyDayAverage, twoHundredDayAverage, preMarketPrice, postMarketPrice, marketOpen (true only during regular session hours), lastTradeDate (YYYY-MM-DD date of the session the OHLCV data belongs to — use this to detect weekend/holiday staleness), postMarketTimestamp (ISO8601 timestamp of postMarketPrice, null if no AH activity). Prefer this over get_stock_info for price/market data queries — it uses far fewer tokens. Max 5 tickers per call; if you need more, split into multiple calls.",
     inputSchema: {
       type: "object",
       properties: {
@@ -587,7 +587,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_earnings_momentum",
     description:
-      "Get earnings revision momentum, beat rate, and estimate direction signals. Returns revision7d/30d/90d, momentumFlag, beatRate, currentBeatStreak. Max 5 tickers per call; split larger lists into multiple calls.",
+      "Deprecated alias for analyze_earnings_momentum. Get earnings revision momentum, beat rate, and estimate direction signals. Returns revision7d/30d/90d, momentumFlag, beatRate, currentBeatStreak. Max 5 tickers per call; split larger lists into multiple calls.",
     inputSchema: {
       type: "object",
       properties: {
@@ -793,7 +793,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_volume_gate",
     description:
-      "Check current trading volume and dollar-notional liquidity against configurable public liquidity thresholds.",
+      "Deprecated alias for check_volume_liquidity_threshold. Check current trading volume and dollar-notional liquidity against configurable public liquidity thresholds.",
     inputSchema: {
       type: "object",
       properties: {
