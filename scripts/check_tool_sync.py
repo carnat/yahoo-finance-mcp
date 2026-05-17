@@ -65,6 +65,8 @@ EXPECTED_CANONICAL = {
     "get_sec_recent_events",
     "get_public_event_timeline",
     "verify_company_event",
+    "get_manifest_diagnostics",
+    "get_market_snapshot",
     "health_check",
 }
 

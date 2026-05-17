@@ -65,6 +65,7 @@ import {
   extractGuidance,
   extractManagementCommentary,
   compareEarningsActualVsEstimate,
+  getMarketSnapshot,
 } from "./yahoo-finance.js";
 import { validateTicker } from "./validate.js";
 
@@ -1001,6 +1002,8 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "extract_guidance", description: "Extract company-provided guidance/outlook ranges from public earnings release/report sources.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "latest" } }, required: ["ticker"] } },
   { name: "extract_management_commentary", description: "Extract neutral topic-specific management commentary with short evidence excerpts from public earnings release/report sources.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "latest" }, topics: { type: "array", items: { type: "string" } } }, required: ["ticker"] } },
   { name: "compare_earnings_actual_vs_estimate", description: "Compare reported actual earnings metrics versus public analyst estimates and return surprise percentages.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "latest" } }, required: ["ticker"] } },
+  { name: "get_manifest_diagnostics", description: "Return deployment and manifest diagnostics: tool counts, manifest version, hash, build SHA, deploy timestamp, privacy scope, and connector-staleness advisory.", inputSchema: { type: "object", properties: {} } },
+  { name: "get_market_snapshot", description: "Compact market-state packet composing quote, price performance, moving-average trend, volume ratios, liquidity gate, and technical indicators in one call. Supports compact (default) and full modes, and optional batch of tickers.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, mode: { type: "string", enum: ["compact", "full"], default: "compact" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] } },
   { name: "health_check", description: "Return runtime and deployment health metadata.", inputSchema: { type: "object", properties: {} } },
 ];
 
@@ -1821,6 +1824,39 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         generatedAt: new Date().toISOString(),
         privacyScope: "public_market_data_only",
       });
+    }
+    case "get_manifest_diagnostics": {
+      const buildSha = getWorkerVar("BUILD_SHA") ?? "unknown";
+      const version = getWorkerVar("SERVER_VERSION") ?? "1.0.0";
+      const toolCount = TOOLS.length;
+      const canonicalToolCount = TOOLS.filter((t) => t.deprecated !== true).length;
+      const deprecatedAliasCount = TOOLS.filter((t) => t.deprecated === true).length;
+      const manifestVersion = getWorkerVar("MANIFEST_VERSION") ?? null;
+      const deployedAt = getWorkerVar("DEPLOYED_AT") ?? null;
+      const manifestHash = await computeHash(JSON.stringify(TOOLS.map(t => t.name)));
+      const workerSchemaGeneratedAt = new Date().toISOString();
+      return JSON.stringify({
+        toolCount,
+        manifestVersion,
+        manifestHash,
+        buildSha,
+        deployedAt,
+        privacyScope: "public_market_data_only",
+        canonicalToolCount,
+        deprecatedAliasCount,
+        publicSchemaGeneratedAt: null,
+        workerSchemaGeneratedAt,
+        manifestMismatch: null,
+        staleConnectorWarning: "ChatGPT connector schema may lag the deployed Worker schema. Direct Worker tools/list and get_manifest_diagnostics are source of truth.",
+        serverVersion: version,
+      });
+    }
+    case "get_market_snapshot": {
+      const t = args.ticker;
+      const ticker = Array.isArray(t) ? (t as string[]) : str(t);
+      const mode = str(args.mode, "compact") === "full" ? "full" : "compact";
+      const foreignExchange = args.foreign_exchange === true;
+      return getMarketSnapshot(ticker, mode, foreignExchange);
     }
     case "get_options_summary":
       return getOptionsSummary(str(args.ticker));
