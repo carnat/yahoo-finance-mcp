@@ -84,6 +84,7 @@ export interface Tool {
   };
   deprecated?: boolean;
   useInstead?: string;
+  deprecationReason?: string;
 }
 
 export const TOOLS: Tool[] = [
@@ -766,20 +767,21 @@ export const TOOLS: Tool[] = [
   {
     name: "get_price_target_bracket",
     description:
-      "Compute price-to-target bracket from current price vs a user-supplied reference price. ratio = currentPrice / ref_pt × 100. Brackets: ≤75% STRONG_BUY | 75–90% ACCEPTABLE | 90–100% RISK | >100% ABOVE_TARGET. Tags: <40% SPECULATIVE | 40–79% LONG | 80–99% NEAR | ≥100% INVERTED. Returns currentPrice, ioPt, eqfPct, bracket, tag, invertedFlag, dataDate.",
+      "Compare current market price to a user-supplied reference price target and return percentage distance and bracket labels. Preferred input is reference_target_price; io_pt is accepted as a backward-compatible alias.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
-        io_pt: { type: "number", description: "User-supplied reference price (e.g. analyst target or user-defined level)" },
+        reference_target_price: { type: "number", description: "Preferred user-supplied reference target price." },
+        io_pt: { type: "number", description: "Backward-compatible alias for reference_target_price." },
       },
-      required: ["ticker", "io_pt"],
+      required: ["ticker"],
     },
   },
   {
     name: "get_position_score_inputs",
     description:
-      "Aggregate public signal inputs for analyst, price, earnings, and technical signal groups in a single call. Runs 6 parallel data fetches. Returns t1_inputs (analyst sentiment), t2_inputs (price vs 52wk high/low), t4_inputs (earnings momentum), t5_inputs (technical indicators), dataDate. Inputs requiring caller-provided external context are outside MCP scope.",
+      "Aggregate public market, analyst, earnings, and technical inputs that may be useful for a caller-defined scoring model. This tool does not access holdings, cost basis, position size, or private scoring rules.",
     inputSchema: {
       type: "object",
       properties: {
@@ -791,7 +793,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_volume_gate",
     description:
-      "Volume liquidity threshold check: regularMarketVolume ≥ 0.5 × 20-day ADV. Returns currency, fxRate, lastVolume, adv10d, adv20d (computed from last 20 sessions), adv90d, ratio20d, gatePass (true = PASS), dataDate, note. Set foreign_exchange=true to enable foreign exchange notional conversion: daily notional is converted to USD via live {CCY}=X rate before comparing to the $10M threshold. ratio20d is always computed when adv20d is available.",
+      "Check current trading volume and dollar-notional liquidity against configurable public liquidity thresholds.",
     inputSchema: {
       type: "object",
       properties: {
@@ -954,7 +956,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "analyze_price_performance", description: "Analyze price performance metrics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
   { name: "analyze_moving_average_position", description: "Analyze moving-average position.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
   { name: "analyze_volume_ratio", description: "Analyze volume ratio signals.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, period: { type: "number", default: 10 } }, required: ["ticker"] } },
-  { name: "check_volume_liquidity_threshold", description: "Check volume liquidity threshold.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] } },
+  { name: "check_volume_liquidity_threshold", description: "Check current trading volume and dollar-notional liquidity against configurable public liquidity thresholds.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] } },
   { name: "get_company_profile", description: "Get company profile/fundamentals.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, include_all: { type: "boolean" } }, required: ["ticker"] } },
   { name: "get_fund_profile", description: "Get ETF/fund profile.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
   { name: "analyze_financial_ratios", description: "Analyze financial ratios.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
@@ -964,7 +966,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_analyst_recommendations", description: "Get analyst recommendations and changes.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, recommendation_type: { type: "string" }, months_back: { type: "number", default: 12 } }, required: ["ticker", "recommendation_type"] } },
   { name: "get_analyst_rating_changes", description: "Get analyst rating changes radar.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, days_back: { type: "number", default: 30 } }, required: ["ticker"] } },
   { name: "analyze_earnings_momentum", description: "Analyze earnings momentum.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
-  { name: "get_company_events_calendar", description: "Get company events calendar.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+  { name: "get_company_events_calendar", description: "Get upcoming earnings and dividend schedule for a ticker, including whether the earnings date appears confirmed by company filing/IR source or is an estimate.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
   { name: "summarize_options_flow", description: "Summarize options flow.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, expiry_hint: { type: "string" } }, required: ["ticker"] } },
   { name: "analyze_options_flow_window", description: "Analyze options flow in an event window.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, window_label: { type: "string" } }, required: ["ticker", "window_label"] } },
   { name: "find_put_hedge_candidates", description: "Find put hedge candidates.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, otm_pct_min: { type: "number", default: 8 }, otm_pct_max: { type: "number", default: 12 }, budget_usd: { type: "number", default: 500 }, expiry_after: { type: "string" } }, required: ["ticker"] } },
@@ -977,8 +979,8 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "search_sec_filing_text", description: "Search SEC filing text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, search_terms: { type: "array", items: { type: "string" } }, search_query: { type: "string" }, section_hint: { type: "string" }, selector: { type: "object" }, filing_type: { type: "string", default: "10-K" }, accession_number: { type: "string" }, context_chars: { type: "number", default: 1500 }, return_tables: { type: "boolean", default: true } }, required: ["ticker"] } },
   { name: "index_sec_filing", description: "Build a deterministic section/table index for an SEC filing. Identifies headings, tables, row labels, and units. period is reserved for future multi-period support; currently only 'latest' is supported unless accession_number is provided.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest", description: "Reserved. Only 'latest' supported currently." }, accession_number: { type: "string" } }, required: ["ticker"] } },
   { name: "get_sec_filing_index", description: "Get the pre-built section/table index for an SEC filing. Returns cached index when available; builds and caches on first call. period is reserved for future multi-period support; currently only 'latest' is supported unless accession_number is provided.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest", description: "Reserved. Only 'latest' supported currently." }, accession_number: { type: "string" } }, required: ["ticker"] } },
-  { name: "analyze_position_signals", description: "Analyze position scoring signals.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
-  { name: "calculate_price_target_distance", description: "Calculate price target distance.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, io_pt: { type: "number" } }, required: ["ticker", "io_pt"] } },
+  { name: "analyze_position_signals", description: "Aggregate public market, analyst, earnings, and technical inputs that may be useful for a caller-defined scoring model. This tool does not access holdings, cost basis, position size, or private scoring rules.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+  { name: "calculate_price_target_distance", description: "Compare current market price to a user-supplied reference price target and return percentage distance and bracket labels.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, reference_target_price: { type: "number", description: "Preferred: user-supplied reference target price." }, io_pt: { type: "number", description: "Backward-compatible alias for reference_target_price." } }, required: ["ticker"] } },
   { name: "get_company_news", description: "Get recent public company news/events from selected public sources with source metadata, timestamps, URL, dedupe metadata, and short evidence text.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Ticker symbol, e.g. 'AAPL'" }, max_results: { type: "number", default: 10 }, lookback_days: { type: "number", default: 14 }, sources: { type: "array", items: { type: "string" }, default: ["sec", "company_ir", "newswire", "yahoo_finance"] } }, required: ["ticker"] } },
   { name: "search_company_news", description: "Search public company news/events for a ticker and query across allowed source metadata and short snippets only.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Ticker symbol, e.g. 'AAPL'" }, query: { type: "string", description: "Required search query string." }, start_date: { type: "string", default: "" }, end_date: { type: "string", default: "" }, sources: { type: "array", items: { type: "string" }, default: ["sec", "company_ir", "newswire", "yahoo_finance"] }, max_results: { type: "number", default: 10 } }, required: ["ticker", "query"] } },
   { name: "get_company_press_releases", description: "Get company-originated or official release-style events from configured public sources, favoring SEC and official release channels.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, lookback_days: { type: "number", default: 90 }, max_results: { type: "number", default: 20 }, sources: { type: "array", items: { type: "string" }, default: ["company_ir", "newswire", "sec"] } }, required: ["ticker"] } },
@@ -1003,14 +1005,14 @@ const CANONICAL_ADDITIONS: Tool[] = [
 ];
 
 const DEPRECATED_ALIAS_TOOLS: Tool[] = [
-  { name: "get_adv_gate", description: "Deprecated alias for check_volume_liquidity_threshold.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] }, deprecated: true, useInstead: "check_volume_liquidity_threshold" },
-  { name: "get_dc134_options_scan", description: "Deprecated alias for analyze_options_flow_window.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, window_label: { type: "string" } }, required: ["ticker", "window_label"] }, deprecated: true, useInstead: "analyze_options_flow_window" },
-  { name: "get_eqf_bracket", description: "Deprecated alias for calculate_price_target_distance.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, io_pt: { type: "number" } }, required: ["ticker", "io_pt"] }, deprecated: true, useInstead: "calculate_price_target_distance" },
-  { name: "get_tps_inputs", description: "Deprecated alias for analyze_position_signals.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] }, deprecated: true, useInstead: "analyze_position_signals" },
-  { name: "get_geographic_revenue", description: "Deprecated alias for extract_sec_filing_fact.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, region: { type: "string", default: "China" } }, required: ["ticker"] }, deprecated: true, useInstead: "extract_sec_filing_fact" },
-  { name: "get_china_revenue_pct", description: "Deprecated alias for extract_sec_filing_fact.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] }, deprecated: true, useInstead: "extract_sec_filing_fact" },
-  { name: "get_filing_text_search", description: "Deprecated alias for search_sec_filing_text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, search_terms: { type: "array", items: { type: "string" } } }, required: ["ticker"] }, deprecated: true, useInstead: "search_sec_filing_text" },
-  { name: "get_filing_document", description: "Deprecated alias for get_sec_filing_section.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, section_name: { type: "string" }, document_url: { type: "string" }, context_chars: { type: "number", default: 3000 } }, required: ["ticker", "section_name", "document_url"] }, deprecated: true, useInstead: "get_sec_filing_section" },
+  { name: "get_adv_gate", description: "Deprecated alias for check_volume_liquidity_threshold.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] }, deprecated: true, useInstead: "check_volume_liquidity_threshold", deprecationReason: "Use the canonical public tool name." },
+  { name: "get_dc134_options_scan", description: "Deprecated alias for analyze_options_flow_window.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, window_label: { type: "string" } }, required: ["ticker", "window_label"] }, deprecated: true, useInstead: "analyze_options_flow_window", deprecationReason: "Use the canonical public tool name." },
+  { name: "get_eqf_bracket", description: "Deprecated alias for calculate_price_target_distance.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, reference_target_price: { type: "number" }, io_pt: { type: "number" } }, required: ["ticker"] }, deprecated: true, useInstead: "calculate_price_target_distance", deprecationReason: "Use the canonical public tool name." },
+  { name: "get_tps_inputs", description: "Deprecated alias for analyze_position_signals.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] }, deprecated: true, useInstead: "analyze_position_signals", deprecationReason: "Use the canonical public tool name." },
+  { name: "get_geographic_revenue", description: "Deprecated alias for extract_sec_filing_fact.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, region: { type: "string", default: "China" } }, required: ["ticker"] }, deprecated: true, useInstead: "extract_sec_filing_fact", deprecationReason: "Use the canonical public tool name." },
+  { name: "get_china_revenue_pct", description: "Deprecated alias for extract_sec_filing_fact.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] }, deprecated: true, useInstead: "extract_sec_filing_fact", deprecationReason: "Use the canonical public tool name." },
+  { name: "get_filing_text_search", description: "Deprecated alias for search_sec_filing_text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, search_terms: { type: "array", items: { type: "string" } } }, required: ["ticker"] }, deprecated: true, useInstead: "search_sec_filing_text", deprecationReason: "Use the canonical public tool name." },
+  { name: "get_filing_document", description: "Deprecated alias for get_sec_filing_section.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, section_name: { type: "string" }, document_url: { type: "string" }, context_chars: { type: "number", default: 3000 } }, required: ["ticker", "section_name", "document_url"] }, deprecated: true, useInstead: "get_sec_filing_section", deprecationReason: "Use the canonical public tool name." },
 ];
 const DEPRECATED_ALIAS_NAMES = new Set<string>([
   "get_adv_gate",
@@ -1029,6 +1031,7 @@ for (const tool of TOOLS) {
   if (canonical && tool.name !== canonical) {
     tool.deprecated = true;
     tool.useInstead = canonical;
+    tool.deprecationReason ??= "Use the canonical public tool name.";
   }
 }
 
@@ -1310,6 +1313,8 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     properties: {
       ticker: { type: "string" },
       currentPrice: { type: ["number", "null"] },
+      referenceTargetPrice: { type: ["number", "null"] },
+      referenceTargetPct: { type: ["number", "null"] },
       ioPt: { type: ["number", "null"] },
       eqfPct: { type: ["number", "null"] },
       bracket: { type: ["string", "null"] },
@@ -1406,6 +1411,8 @@ const tickerArg = (v: unknown): string | string[] =>
   Array.isArray(v) ? v.map(String) : str(v);
 type AliasSuccessOptions = {
   canonicalTool: string;
+  deprecatedTool?: boolean;
+  useInstead?: string;
   partialSuccess?: boolean;
   successCount?: number;
   errorCount?: number;
@@ -1451,8 +1458,15 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
     // non-JSON payload
   }
   if (aliasTarget != null) {
+    const aliasToolDef = TOOLS.find((t) => t.name === name);
     const opts: AliasSuccessOptions = {
       canonicalTool,
+      ...(DEPRECATED_ALIAS_NAMES.has(name)
+        ? {
+            deprecatedTool: true,
+            useInstead: aliasToolDef?.useInstead ?? TOOL_ALIASES[name] ?? canonicalTool,
+          }
+        : {}),
       ...(batchMeta ?? {}),
     };
     if (DEPRECATED_ALIAS_NAMES.has(name)) {
@@ -1727,7 +1741,10 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "analyze_options_flow_window":
       return getOptionsFlowScan(str(args.ticker), str(args.window_label));
     case "calculate_price_target_distance":
-      return getPriceTargetBracket(str(args.ticker), num(args.io_pt, 0));
+      return getPriceTargetBracket(
+        str(args.ticker),
+        num(args.reference_target_price ?? args.io_pt, 0),
+      );
     case "analyze_position_signals":
       return getPositionScoreInputs(tickerArg(args.ticker));
     case "check_volume_liquidity_threshold":
@@ -1782,6 +1799,10 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       const buildSha = getWorkerVar("BUILD_SHA") ?? "unknown";
       const version = getWorkerVar("SERVER_VERSION") ?? "1.0.0";
       const toolCount = TOOLS.length;
+      const canonicalToolCount = TOOLS.filter((t) => t.deprecated !== true).length;
+      const deprecatedAliasCount = TOOLS.filter((t) => t.deprecated === true).length;
+      const manifestVersion = getWorkerVar("MANIFEST_VERSION") ?? "1";
+      const deployedAt = getWorkerVar("DEPLOYED_AT") ?? new Date().toISOString();
       const manifestHash = await computeHash(JSON.stringify(TOOLS.map(t => t.name)));
       return JSON.stringify({
         status: "ok",
@@ -1789,9 +1810,14 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         envelopeV2: getWorkerVar("MCP_ENVELOPE_V2") === "true",
         nodeVersion: "cloudflare-worker",
         toolCount,
+        canonicalToolCount,
+        deprecatedAliasCount,
+        manifestVersion,
+        manifestHash,
         schemaHash: manifestHash,
         runtimeHash: await computeHash(version + String(toolCount)),
         buildSha,
+        deployedAt,
         generatedAt: new Date().toISOString(),
         privacyScope: "public_market_data_only",
       });

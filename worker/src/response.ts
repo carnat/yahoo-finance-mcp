@@ -19,6 +19,8 @@ export function getWorkerVar(name: string): string | undefined {
 export interface ToolMeta {
   tool: string;
   canonicalTool?: string;
+  deprecatedTool?: boolean;
+  useInstead?: string;
   partialSuccess?: boolean;
   successCount?: number;
   errorCount?: number;
@@ -59,6 +61,8 @@ export function mcpSuccess(
   rawData: string,
   opts?: {
     canonicalTool?: string;
+    deprecatedTool?: boolean;
+    useInstead?: string;
     partialSuccess?: boolean;
     successCount?: number;
     errorCount?: number;
@@ -81,6 +85,8 @@ export function mcpSuccess(
     meta: {
       tool,
       ...(opts?.canonicalTool ? { canonicalTool: opts.canonicalTool } : {}),
+      ...(opts?.deprecatedTool != null ? { deprecatedTool: opts.deprecatedTool } : {}),
+      ...(opts?.useInstead ? { useInstead: opts.useInstead } : {}),
       ...(opts?.partialSuccess != null ? { partialSuccess: opts.partialSuccess } : {}),
       ...(opts?.successCount != null ? { successCount: opts.successCount } : {}),
       ...(opts?.errorCount != null ? { errorCount: opts.errorCount } : {}),

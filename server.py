@@ -82,6 +82,8 @@ class ErrorCode:
 class ToolMeta(TypedDict):
     tool: str
     canonicalTool: str | None
+    deprecatedTool: bool
+    useInstead: str
     source: str
     dataDate: str | None
     serverVersion: str
@@ -109,6 +111,8 @@ def _mcp_success(
     data: object,
     *,
     canonical_tool: str | None = None,
+    deprecated_tool: bool | None = None,
+    use_instead: str | None = None,
     source: str = "yahoo_finance",
     data_date: str | None = None,
     cache_hit: bool = False,
@@ -122,6 +126,8 @@ def _mcp_success(
         "meta": {
             "tool": tool,
             **({"canonicalTool": canonical_tool} if canonical_tool is not None else {}),
+            **({"deprecatedTool": deprecated_tool} if deprecated_tool is not None else {}),
+            **({"useInstead": use_instead} if use_instead is not None else {}),
             "source": source,
             "dataDate": data_date,
             "serverVersion": SERVER_VERSION,
@@ -809,6 +815,8 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
     "get_price_target_bracket": {'type': 'object',
          'properties': {'ticker': {'type': 'string'},
                         'currentPrice': {'type': ['number', 'null']},
+                        'referenceTargetPrice': {'type': ['number', 'null']},
+                        'referenceTargetPct': {'type': ['number', 'null']},
                         'ioPt': {'type': ['number', 'null']},
                         'eqfPct': {'type': ['number', 'null']},
                         'bracket': {'type': ['string', 'null']},
@@ -3505,13 +3513,13 @@ async def get_financial_ratios(ticker: str | list[str]) -> str:
 @yfinance_server.tool(
     name="get_calendar",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_calendar"],
-    description="""Get upcoming earnings date and dividend schedule for a ticker.
+    description="""Get upcoming earnings and dividend schedule for a ticker.
 
 Returns:
 - Next earnings date range and EPS/revenue estimates
 - Ex-dividend date and dividend pay date
-- earningsDateConfirmed: true when Yahoo Finance shows a single fixed date (likely IR-confirmed
-  press release/8-K). false when a date range is returned (analyst estimate).
+- earningsDateConfirmed: true when Yahoo Finance shows a single fixed date (likely confirmed
+  by company filing/IR source); false when a date range is returned (estimate).
 - earningsDateSource: "IR_FILING" | "ESTIMATE" | "UNKNOWN"
 
 Args:
@@ -6570,9 +6578,9 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
 @yfinance_server.tool(
     name="get_price_target_bracket",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"],
-    description="""Compute price-to-target bracket from current price vs a user-supplied reference price.
+    description="""Compare current market price to a user-supplied reference target price and return distance/bracket labels.
 
-ratio = currentPrice / ref_pt × 100. Used to classify entry opportunity.
+ratio = currentPrice / reference_target_price × 100.
 
 Brackets: ≤75% → STRONG_BUY | 75–90% → ACCEPTABLE | 90–100% → RISK | >100% → ABOVE_TARGET
 Tags: <40% → SPECULATIVE | 40–79% → LONG | 80–99% → NEAR | ≥100% → INVERTED
@@ -6580,14 +6588,23 @@ Tags: <40% → SPECULATIVE | 40–79% → LONG | 80–99% → NEAR | ≥100% →
 Args:
     ticker: str
         The ticker symbol, e.g. "ASTS"
-    io_pt: float
-        User-supplied reference price (e.g. analyst target or user-defined level)
+    reference_target_price: float | None
+        Preferred user-supplied reference target price.
+    io_pt: float | None
+        Backward-compatible alias for reference_target_price.
 """,
 )
-async def get_price_target_bracket(ticker: str, io_pt: float) -> str:
-    """Return EQF bracket and tag for the current position."""
-    if io_pt <= 0:
-        return json.dumps({"error": True, "message": "io_pt must be a positive number", "ticker": ticker})
+async def get_price_target_bracket(
+    ticker: str, reference_target_price: float | None = None, io_pt: float | None = None
+) -> str:
+    """Return bracket and distance fields for current price vs reference target."""
+    target_price = reference_target_price if reference_target_price is not None else io_pt
+    if target_price is None or target_price <= 0:
+        return json.dumps({
+            "error": True,
+            "message": "reference_target_price (or io_pt alias) must be a positive number",
+            "ticker": ticker,
+        })
 
     company = yf.Ticker(ticker)
     try:
@@ -6598,27 +6615,27 @@ async def get_price_target_bracket(ticker: str, io_pt: float) -> str:
     except Exception as e:
         return json.dumps({"error": True, "message": str(e), "ticker": ticker})
 
-    eqf_pct = round(current_price / io_pt * 100, 1)
+    reference_target_pct = round(current_price / target_price * 100, 1)
 
-    if eqf_pct <= 75:
+    if reference_target_pct <= 75:
         bracket = "STRONG_BUY"
-    elif eqf_pct <= 90:
+    elif reference_target_pct <= 90:
         bracket = "ACCEPTABLE"
-    elif eqf_pct <= 100:
+    elif reference_target_pct <= 100:
         bracket = "CAUTION"
     else:
         bracket = "AVOID"
 
-    if eqf_pct < 40:
+    if reference_target_pct < 40:
         tag = "SPECULATIVE"
-    elif eqf_pct < 80:
+    elif reference_target_pct < 80:
         tag = "LONG"
-    elif eqf_pct < 100:
+    elif reference_target_pct < 100:
         tag = "NEAR"
     else:
         tag = "INVERTED"
 
-    inverted_flag = eqf_pct >= 100
+    inverted_flag = reference_target_pct >= 100
 
     data_date: str = str(datetime.date.today())
     try:
@@ -6631,8 +6648,10 @@ async def get_price_target_bracket(ticker: str, io_pt: float) -> str:
     return json.dumps({
         "ticker": ticker,
         "currentPrice": round(current_price, 4),
-        "ioPt": io_pt,
-        "eqfPct": eqf_pct,
+        "referenceTargetPrice": target_price,
+        "referenceTargetPct": reference_target_pct,
+        "ioPt": target_price,
+        "eqfPct": reference_target_pct,
         "bracket": bracket,
         "tag": tag,
         "invertedFlag": inverted_flag,
@@ -6647,15 +6666,13 @@ async def get_price_target_bracket(ticker: str, io_pt: float) -> str:
 @yfinance_server.tool(
     name="get_position_score_inputs",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"],
-    description="""Aggregate public signal inputs for analyst, price, earnings, and technical signal groups.
+    description="""Aggregate public market, analyst, earnings, and technical inputs for caller-defined scoring models.
 
 Runs up to 6 parallel data fetches per call.
 
-Returns: t1_inputs (analyst sentiment), t2_inputs (price vs 52wk high/low), t4_inputs (earnings momentum),
-t5_inputs (technical indicators), dataDate.
+Returns grouped analyst, price/range, earnings-momentum, and technical indicator inputs plus dataDate.
 
-Note: inputs requiring caller-provided external context (such as a reference price or cost basis)
-are outside MCP scope and should be supplied by the caller.
+This tool does not access holdings, cost basis, position size, or private scoring rules.
 
 Args:
     ticker: str
@@ -6663,7 +6680,7 @@ Args:
 """,
 )
 async def get_position_score_inputs(ticker: str) -> str:
-    """Return aggregated position scoring inputs for T1, T2, T4, and T5 components."""
+    """Return grouped public inputs for caller-defined scoring workflows."""
     results = await asyncio.gather(
         get_analyst_upgrade_radar(ticker, days_back=30),
         get_analyst_consensus(ticker),
@@ -6750,10 +6767,10 @@ async def get_position_score_inputs(ticker: str) -> str:
 @yfinance_server.tool(
     name="get_volume_gate",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_gate"],
-    description="""Volume liquidity threshold check: regularMarketVolume ≥ 0.5 × 20-day ADV.
+    description="""Check current trading volume and dollar-notional liquidity against public liquidity thresholds.
 
 Returns currency, fxRate, lastVolume, adv10d, adv20d (computed from last 20 daily sessions),
-adv90d, ratio20d (always computed when adv20d is available), gatePass (true = volume gate PASS),
+adv90d, ratio20d (always computed when adv20d is available), gatePass,
 dataDate, and a pre-formatted note.
 
 foreign_exchange: bool (default False). When True, enables foreign exchange notional conversion:
@@ -6871,17 +6888,28 @@ def _deprecated_alias_response(alias_tool: str, canonical_tool: str, raw: str) -
         payload = json.loads(raw)
     except Exception:
         payload = raw
-    if isinstance(payload, dict) and "ok" in payload and "meta" in payload:
+    if isinstance(payload, dict) and "ok" in payload:
         meta = payload.get("meta")
-        if isinstance(meta, dict):
-            meta["tool"] = alias_tool
-            meta["canonicalTool"] = canonical_tool
-            warnings = meta.get("warnings")
-            warning_list = list(warnings) if isinstance(warnings, list) else []
-            warning_list.append(warning_obj)
-            meta["warnings"] = warning_list
+        if not isinstance(meta, dict):
+            meta = {}
+            payload["meta"] = meta
+        meta["tool"] = alias_tool
+        meta["canonicalTool"] = canonical_tool
+        meta["deprecatedTool"] = True
+        meta["useInstead"] = canonical_tool
+        warnings = meta.get("warnings")
+        warning_list = list(warnings) if isinstance(warnings, list) else []
+        warning_list.append(warning_obj)
+        meta["warnings"] = warning_list
         return json.dumps(payload)
-    return _mcp_success(alias_tool, payload, canonical_tool=canonical_tool, warnings=[warning_obj])
+    return _mcp_success(
+        alias_tool,
+        payload,
+        canonical_tool=canonical_tool,
+        deprecated_tool=True,
+        use_instead=canonical_tool,
+        warnings=[warning_obj],
+    )
 
 
 @yfinance_server.tool(name="health_check", output_schema=_SIMPLE_OUTPUT_SCHEMA, description="Return runtime health metadata.")
@@ -6891,14 +6919,33 @@ async def health_check() -> str:
     except Exception:
         tool_count = len(TOOL_ALIASES) + 50
     tool_names = sorted(TOOL_ALIASES.keys())
-    schema_hash = hashlib.sha256(json.dumps(tool_names).encode("utf-8")).hexdigest()[:16]
+    manifest_hash = hashlib.sha256(json.dumps(tool_names).encode("utf-8")).hexdigest()[:16]
+    manifest_version = os.environ.get("MANIFEST_VERSION", "1")
+    deployed_at = os.environ.get("DEPLOYED_AT", datetime.datetime.utcnow().isoformat() + "Z")
     runtime_hash = hashlib.sha256((SERVER_VERSION + str(tool_count)).encode("utf-8")).hexdigest()[:16]
+    deprecated_alias_count = len(
+        {
+            "get_tps_inputs",
+            "get_eqf_bracket",
+            "get_adv_gate",
+            "get_dc134_options_scan",
+            "get_china_revenue_pct",
+            "get_geographic_revenue",
+            "get_filing_text_search",
+            "get_filing_document",
+        }
+    )
     return json.dumps({
         "serverVersion": SERVER_VERSION,
         "buildSha": os.environ.get("BUILD_SHA", "unknown"),
         "toolCount": tool_count,
-        "schemaHash": schema_hash,
+        "canonicalToolCount": max(tool_count - deprecated_alias_count, 0),
+        "deprecatedAliasCount": deprecated_alias_count,
+        "manifestVersion": manifest_version,
+        "manifestHash": manifest_hash,
+        "schemaHash": manifest_hash,
         "runtimeHash": runtime_hash,
+        "deployedAt": deployed_at,
         "generatedAt": datetime.datetime.utcnow().isoformat() + "Z",
         "privacyScope": "public_market_data_only",
     })
@@ -7040,8 +7087,14 @@ async def find_put_hedge_candidates(ticker: str, otm_pct_min: float = 8, otm_pct
 
 
 @yfinance_server.tool(name="calculate_price_target_distance", output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"], description="Canonical alias for get_price_target_bracket.")
-async def calculate_price_target_distance(ticker: str, io_pt: float) -> str:
-    return await get_price_target_bracket(ticker, io_pt)
+async def calculate_price_target_distance(
+    ticker: str,
+    reference_target_price: float | None = None,
+    io_pt: float | None = None,
+) -> str:
+    return await get_price_target_bracket(
+        ticker, reference_target_price=reference_target_price, io_pt=io_pt
+    )
 
 
 @yfinance_server.tool(name="analyze_position_signals", output_schema=_TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"], description="Canonical alias for get_position_score_inputs.")
@@ -8804,7 +8857,11 @@ async def get_tps_inputs(ticker: str) -> str:
 
 @yfinance_server.tool(name="get_eqf_bracket", output_schema=_TOOL_OUTPUT_SCHEMAS["get_eqf_bracket"], description="Deprecated alias for calculate_price_target_distance.")
 async def get_eqf_bracket(ticker: str, io_pt: float) -> str:
-    return _deprecated_alias_response("get_eqf_bracket", "calculate_price_target_distance", await calculate_price_target_distance(ticker, io_pt))
+    return _deprecated_alias_response(
+        "get_eqf_bracket",
+        "calculate_price_target_distance",
+        await calculate_price_target_distance(ticker, io_pt=io_pt),
+    )
 
 
 @yfinance_server.tool(name="get_adv_gate", output_schema=_TOOL_OUTPUT_SCHEMAS["get_adv_gate"], description="Deprecated alias for check_volume_liquidity_threshold.")
@@ -8812,7 +8869,7 @@ async def get_adv_gate(ticker: str, foreign_exchange: bool = False) -> str:
     return _deprecated_alias_response("get_adv_gate", "check_volume_liquidity_threshold", await check_volume_liquidity_threshold(ticker, foreign_exchange))
 
 
-@yfinance_server.tool(name="get_dc134_options_scan", output_schema=_TOOL_OUTPUT_SCHEMAS["get_dc134_options_scan"], description="Deprecated alias for analyze_options_flow_window.")
+@yfinance_server.tool(name="get_dc134_options_scan", output_schema=_TOOL_OUTPUT_SCHEMAS["get_dc134_options_scan"], description="Deprecated alias for get_options_flow_scan.")
 async def get_dc134_options_scan(ticker: str, window_label: str) -> str:
     return _deprecated_alias_response("get_dc134_options_scan", "analyze_options_flow_window", await analyze_options_flow_window(ticker, window_label))
 

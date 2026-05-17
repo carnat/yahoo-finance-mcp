@@ -95,6 +95,8 @@ jobs:
 
       - name: Universal alias tests
         run: python scripts/test_universal_aliases.py
+        env:
+          ALLOW_NETWORK_SKIP: "1"
 
       - name: Source discovery schema tests
         run: python scripts/test_source_discovery_schema.py

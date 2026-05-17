@@ -10,7 +10,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that g
 
 ## MCP Tools
 
-> **Token-efficiency tip:** `get_company_profile` now returns ~30 key fields by default — no need to enumerate fields for typical queries. Prefer `get_market_quote` for pure price/volume lookups (~20 fields, 85–90% fewer tokens). Use `analyze_financial_ratios` instead of fetching full financial statements when you only need computed ratios. Use `get_analyst_consensus` instead of `get_analyst_recommendations` for a ready-made summary. Use pre-computed signal tools (`get_price_slope`, `analyze_volume_ratio`, `analyze_moving_average_position`, `analyze_earnings_momentum`, `get_short_momentum`, `analyze_credit_health`, `summarize_options_flow`, `find_put_hedge_candidates`, `get_analyst_rating_changes`) instead of fetching raw data and computing signals yourself. Use `analyze_position_signals` to aggregate all T1/T2/T4/T5 scoring inputs in one call instead of chaining five separate tools.
+> **Token-efficiency tip:** `get_company_profile` now returns ~30 key fields by default — no need to enumerate fields for typical queries. Prefer `get_market_quote` for pure price/volume lookups (~20 fields, 85–90% fewer tokens). Use `analyze_financial_ratios` instead of fetching full financial statements when you only need computed ratios. Use `get_analyst_consensus` instead of `get_analyst_recommendations` for a ready-made summary. Use pre-computed signal tools (`get_price_slope`, `analyze_volume_ratio`, `analyze_moving_average_position`, `analyze_earnings_momentum`, `get_short_momentum`, `analyze_credit_health`, `summarize_options_flow`, `find_put_hedge_candidates`, `get_analyst_rating_changes`) instead of fetching raw data and computing signals yourself. Use `analyze_position_signals` to aggregate analyst/price/earnings/technical inputs in one call instead of chaining five separate tools.
 
 The server exposes the following tools through the Model Context Protocol:
 
@@ -185,8 +185,8 @@ With this MCP server, you can use Claude to:
 
 ### Position Management
 
-- **Price Target Distance**: "My target for ASTS is $28. Is the current price in a buy zone?" *(use `calculate_price_target_distance` with `io_pt=28`)*
-- **Position Signals**: "Pull all scoring inputs for NVDA to evaluate T1/T2/T4/T5." *(use `analyze_position_signals`)*
+- **Price Target Distance**: "My target for ASTS is $28. Is the current price in a buy zone?" *(use `calculate_price_target_distance` with `reference_target_price=28`; `io_pt` is still accepted for backward compatibility)*
+- **Position Signals**: "Pull all public analyst, price/range, earnings-momentum, and technical inputs for NVDA." *(use `analyze_position_signals`)*
 - **Volume Liquidity**: "Does ASTS pass volume threshold today?" *(use `check_volume_liquidity_threshold`)*
 
 ### Discovery & Screening
