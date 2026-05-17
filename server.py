@@ -6951,6 +6951,258 @@ async def health_check() -> str:
     })
 
 
+def _classify_freshness(data_date: str | None, retrieved_at: str) -> str:
+    """Classify data freshness based on data date and retrieval time."""
+    if not data_date:
+        return "UNKNOWN"
+    try:
+        now = datetime.datetime.fromisoformat(retrieved_at.replace("Z", "+00:00"))
+        # Approximate US market close as 21:00 UTC (4pm ET / 5pm EDT)
+        data_dt = datetime.datetime(
+            int(data_date[:4]), int(data_date[5:7]), int(data_date[8:10]),
+            21, 0, 0, tzinfo=datetime.timezone.utc
+        )
+        diff_ms = (now - data_dt).total_seconds() * 1000
+        if diff_ms < 0:
+            return "UNKNOWN"
+        diff_hours = diff_ms / (1000 * 60 * 60)
+        now_day = now.weekday()   # 0=Mon..6=Sun (Python)
+        data_day = data_dt.weekday()
+        # Weekend: Sat(5) or Sun(6) in Python, data from Friday(4)
+        if now_day in (5, 6) and data_day == 4 and diff_hours <= 72:
+            return "WEEKEND_EXPECTED_STALE"
+        if diff_hours <= 28:
+            return "FRESH"
+        if diff_hours <= 56:
+            return "MARKET_CLOSED_EXPECTED_STALE"
+        if diff_hours <= 168:
+            return "STALE"
+        return "VERY_STALE"
+    except Exception:
+        return "UNKNOWN"
+
+
+_MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "toolCount": {"type": "number"},
+        "manifestVersion": {"type": ["string", "null"]},
+        "manifestHash": {"type": ["string", "null"]},
+        "buildSha": {"type": ["string", "null"]},
+        "deployedAt": {"type": ["string", "null"]},
+        "privacyScope": {"type": "string"},
+        "canonicalToolCount": {"type": "number"},
+        "deprecatedAliasCount": {"type": "number"},
+        "publicSchemaGeneratedAt": {"type": ["string", "null"]},
+        "workerSchemaGeneratedAt": {"type": ["string", "null"]},
+        "manifestMismatch": {"type": ["boolean", "null"]},
+        "staleConnectorWarning": {"type": ["string", "null"]},
+    },
+}
+
+_MARKET_SNAPSHOT_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ticker": {"type": "string"},
+        "price": {"type": "object"},
+        "range": {"type": "object"},
+        "trend": {"type": "object"},
+        "volume": {"type": "object"},
+        "risk": {"type": "object"},
+        "freshness": {"type": "object"},
+        "componentStatus": {"type": "object"},
+        "partialSuccess": {"type": "boolean"},
+        "failedComponents": {"type": "array"},
+        "warnings": {"type": "array"},
+    },
+    "additionalProperties": True,
+}
+
+
+@yfinance_server.tool(name="get_manifest_diagnostics", output_schema=_MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA, description="Return deployment and manifest diagnostics: tool counts, manifest version, hash, build SHA, deploy timestamp, privacy scope, and connector-staleness advisory.")
+async def get_manifest_diagnostics() -> str:
+    try:
+        tool_count = len(yfinance_server._tool_manager._tools)
+    except Exception:
+        tool_count = len(TOOL_ALIASES) + 50
+    tool_names = sorted(TOOL_ALIASES.keys())
+    manifest_hash = hashlib.sha256(json.dumps(tool_names).encode("utf-8")).hexdigest()[:16]
+    manifest_version = os.environ.get("MANIFEST_VERSION", None)
+    deployed_at = os.environ.get("DEPLOYED_AT", None)
+    deprecated_alias_set = {
+        "get_tps_inputs",
+        "get_eqf_bracket",
+        "get_adv_gate",
+        "get_dc134_options_scan",
+        "get_china_revenue_pct",
+        "get_geographic_revenue",
+        "get_filing_text_search",
+        "get_filing_document",
+    }
+    deprecated_alias_count = len(deprecated_alias_set)
+    canonical_tool_count = max(tool_count - deprecated_alias_count, 0)
+    worker_schema_generated_at = datetime.datetime.utcnow().isoformat() + "Z"
+    return json.dumps({
+        "toolCount": tool_count,
+        "manifestVersion": manifest_version,
+        "manifestHash": manifest_hash,
+        "buildSha": os.environ.get("BUILD_SHA", "unknown"),
+        "deployedAt": deployed_at,
+        "privacyScope": "public_market_data_only",
+        "canonicalToolCount": canonical_tool_count,
+        "deprecatedAliasCount": deprecated_alias_count,
+        "publicSchemaGeneratedAt": None,
+        "workerSchemaGeneratedAt": worker_schema_generated_at,
+        "manifestMismatch": None,
+        "staleConnectorWarning": "ChatGPT connector schema may lag the deployed Worker schema. Direct Worker tools/list and get_manifest_diagnostics are source of truth.",
+        "serverVersion": SERVER_VERSION,
+    })
+
+
+@yfinance_server.tool(name="get_market_snapshot", output_schema=_MARKET_SNAPSHOT_OUTPUT_SCHEMA, description="Compact market-state packet composing quote, price performance, moving-average trend, volume ratios, liquidity gate, and technical indicators in one call. Supports compact (default) and full modes, and optional batch of tickers.")
+async def get_market_snapshot(
+    ticker: str | list[str],
+    mode: str = "compact",
+    foreign_exchange: bool = False,
+) -> str:
+    """Return a compact or full market-state snapshot for one or more tickers."""
+    if isinstance(ticker, list):
+        cap = 2 if mode == "full" else 5
+        limited = ticker[:cap]
+        results = {}
+        for t in limited:
+            try:
+                results[t] = json.loads(await get_market_snapshot(t, mode, foreign_exchange))
+            except Exception as e:
+                results[t] = {"error": True, "message": str(e)}
+        return json.dumps({
+            "tickers": results,
+            "truncated": len(ticker) > cap,
+            **({"droppedTickers": ticker[cap:]} if len(ticker) > cap else {}),
+        })
+
+    retrieved_at = datetime.datetime.utcnow().isoformat() + "Z"
+
+    component_status: dict[str, str] = {}
+    failed_components: list[str] = []
+    warnings_list: list[dict] = []
+
+    component_results = await asyncio.gather(
+        get_fast_info(ticker),
+        get_price_stats(ticker),
+        get_ma_position(ticker),
+        get_volume_ratio(ticker, 10),
+        get_volume_gate(ticker, foreign_exchange),
+        get_technical_indicators(ticker, "3mo"),
+        return_exceptions=True,
+    )
+
+    names = ["quote", "priceStats", "maPosition", "volumeRatio", "volumeGate", "technicalIndicators"]
+
+    def _parse_component(raw, name: str) -> dict | None:
+        if isinstance(raw, Exception):
+            component_status[name] = "FAILED"
+            failed_components.append(name)
+            warnings_list.append({"code": "COMPONENT_FAILED", "component": name, "message": str(raw)})
+            return None
+        try:
+            parsed = json.loads(str(raw))
+            if isinstance(parsed, dict) and parsed.get("error"):
+                component_status[name] = "FAILED"
+                failed_components.append(name)
+                warnings_list.append({"code": "COMPONENT_FAILED", "component": name, "message": parsed.get("message", "error in response")})
+                return None
+            component_status[name] = "OK"
+            return parsed if isinstance(parsed, dict) else None
+        except Exception as e:
+            component_status[name] = "FAILED"
+            failed_components.append(name)
+            warnings_list.append({"code": "COMPONENT_FAILED", "component": name, "message": str(e)})
+            return None
+
+    quote, price_stats, ma, volume_ratio, volume_gate, tech = (
+        _parse_component(r, n) for r, n in zip(component_results, names)
+    )
+
+    data_date = (
+        (quote.get("lastTradeDate") if quote else None)
+        or (price_stats.get("dataDate") if price_stats else None)
+    )
+
+    last_price = quote.get("lastPrice") if quote else None
+    prev_close = quote.get("previousClose") if quote else None
+    change_pct = (
+        (price_stats.get("pctChangeTodayVsPrevClose") if price_stats else None)
+        or (
+            round((last_price - prev_close) / prev_close * 100, 2)
+            if last_price is not None and prev_close is not None and prev_close != 0
+            else None
+        )
+    )
+
+    snapshot: dict = {
+        "ticker": ticker,
+        "price": {
+            "last": last_price,
+            "previousClose": prev_close,
+            "changePct": change_pct,
+            "lastTradeDate": data_date,
+            "marketOpen": quote.get("marketOpen") if quote else None,
+        },
+        "range": {
+            "yearHigh": quote.get("yearHigh") if quote else None,
+            "yearLow": quote.get("yearLow") if quote else None,
+            "pctFromYearHigh": price_stats.get("pctFromYearHigh") if price_stats else None,
+            "pctFromYearLow": price_stats.get("pctFromYearLow") if price_stats else None,
+        },
+        "trend": {
+            "fiftyDayAverage": quote.get("fiftyDayAverage") if quote else None,
+            "twoHundredDayAverage": quote.get("twoHundredDayAverage") if quote else None,
+            "pctFrom50dma": ma.get("pctVs50dma") if ma else None,
+            "pctFrom200dma": ma.get("pctVs200dma") if ma else None,
+            "maTrend": ma.get("trend") if ma else None,
+            "rsi14": tech.get("rsi14") if tech else None,
+            "macdHistogram": tech.get("macdHistogram") if tech else None,
+        },
+        "volume": {
+            "lastVolume": quote.get("lastVolume") if quote else None,
+            "avgVolume10d": quote.get("tenDayAverageVolume") if quote else None,
+            "avgVolume20d": volume_gate.get("adv20d") if volume_gate else None,
+            "avgVolume90d": quote.get("threeMonthAverageVolume") if quote else None,
+            "ratio10d": volume_ratio.get("ratio10d") if volume_ratio else None,
+            "ratio20d": volume_gate.get("ratio20d") if volume_gate else None,
+            "ratio90d": volume_ratio.get("ratio90d") if volume_ratio else None,
+            "volumeFlag": volume_ratio.get("volumeFlag") if volume_ratio else None,
+            "liquidityGatePass": volume_gate.get("gatePass") if volume_gate else None,
+        },
+        "risk": {
+            "annualizedVolatility30d": price_stats.get("annualizedVolatility30d") if price_stats else None,
+        },
+        "freshness": {
+            "dataDate": data_date,
+            "retrievedAt": retrieved_at,
+            "marketSessionAware": True,
+            "freshnessClass": _classify_freshness(data_date, retrieved_at),
+        },
+        "componentStatus": component_status,
+        "partialSuccess": len(failed_components) > 0 and len(failed_components) < 6,
+        "failedComponents": failed_components,
+        "warnings": warnings_list,
+    }
+
+    if mode == "full":
+        snapshot["_components"] = {
+            "quote": quote,
+            "priceStats": price_stats,
+            "maPosition": ma,
+            "volumeRatio": volume_ratio,
+            "volumeGate": volume_gate,
+            "technicalIndicators": tech,
+        }
+
+    return json.dumps(snapshot)
+
+
 @yfinance_server.tool(name="get_market_quote", output_schema=_TOOL_OUTPUT_SCHEMAS["get_fast_info"], description="Canonical alias for get_fast_info.")
 async def get_market_quote(ticker: str | list[str]) -> str:
     return await get_fast_info(ticker)

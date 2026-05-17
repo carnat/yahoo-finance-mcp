@@ -4940,6 +4940,32 @@ export async function getPositionScoreInputs(ticker: string | string[]): Promise
   }
 }
 
+// ── freshness classifier ──────────────────────────────────────────────────────
+
+function classifyFreshness(dataDate: string | null, retrievedAt: string): string {
+  if (!dataDate) return "UNKNOWN";
+  try {
+    const now = new Date(retrievedAt);
+    // Approximate US market close as 21:00 UTC (4pm ET / 5pm EDT)
+    const data = new Date(dataDate + "T21:00:00Z");
+    const diffMs = now.getTime() - data.getTime();
+    if (diffMs < 0) return "UNKNOWN"; // future date
+    const diffHours = diffMs / (1000 * 60 * 60);
+    const nowDay = now.getUTCDay(); // 0=Sun, 6=Sat
+    const dataDay = data.getUTCDay(); // 5=Fri
+    // Weekend: current day is Sat(6) or Sun(0), data is from Friday
+    if ((nowDay === 0 || nowDay === 6) && dataDay === 5 && diffHours <= 72) {
+      return "WEEKEND_EXPECTED_STALE";
+    }
+    if (diffHours <= 28) return "FRESH";
+    if (diffHours <= 56) return "MARKET_CLOSED_EXPECTED_STALE";
+    if (diffHours <= 168) return "STALE";
+    return "VERY_STALE";
+  } catch {
+    return "UNKNOWN";
+  }
+}
+
 // ── get_volume_gate ───────────────────────────────────────────────────────────
 
 export async function getVolumeGate(ticker: string, foreignExchange: boolean): Promise<string> {
@@ -5026,6 +5052,149 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
   }
+}
+
+// ── get_market_snapshot ───────────────────────────────────────────────────────
+
+export async function getMarketSnapshot(
+  ticker: string | string[],
+  mode: "compact" | "full",
+  foreignExchange: boolean
+): Promise<string> {
+  if (Array.isArray(ticker)) {
+    const cap = mode === "full" ? 2 : 5;
+    const limited = ticker.slice(0, cap);
+    const results: Record<string, unknown> = {};
+    for (const t of limited) {
+      try {
+        results[t] = JSON.parse(await getMarketSnapshot(t, mode, foreignExchange));
+      } catch (e) {
+        results[t] = { error: true, message: e instanceof Error ? e.message : String(e) };
+      }
+    }
+    return JSON.stringify({
+      tickers: results,
+      truncated: ticker.length > cap,
+      ...(ticker.length > cap ? { droppedTickers: ticker.slice(cap) } : {}),
+    });
+  }
+
+  const retrievedAt = new Date().toISOString();
+
+  const [quoteResult, priceStatsResult, maResult, volumeRatioResult, volumeGateResult, techResult] =
+    await Promise.allSettled([
+      getFastInfo(ticker).then((r) => JSON.parse(r) as Record<string, unknown>),
+      getPriceStats(ticker).then((r) => JSON.parse(r) as Record<string, unknown>),
+      getMaPosition(ticker).then((r) => JSON.parse(r) as Record<string, unknown>),
+      getVolumeRatio(ticker, 10).then((r) => JSON.parse(r) as Record<string, unknown>),
+      getVolumeGate(ticker, foreignExchange).then((r) => JSON.parse(r) as Record<string, unknown>),
+      getTechnicalIndicators(ticker, "3mo").then((r) => JSON.parse(r) as Record<string, unknown>),
+    ]);
+
+  const componentStatus: Record<string, string> = {};
+  const failedComponents: string[] = [];
+  const warnings: Record<string, unknown>[] = [];
+
+  const getVal = (
+    result: PromiseSettledResult<Record<string, unknown>>,
+    name: string
+  ): Record<string, unknown> | null => {
+    if (result.status === "fulfilled" && !result.value?.error) {
+      componentStatus[name] = "OK";
+      return result.value;
+    }
+    componentStatus[name] = "FAILED";
+    failedComponents.push(name);
+    const msg =
+      result.status === "rejected"
+        ? String(result.reason)
+        : String((result.value as Record<string, unknown>)?.message ?? "error in response");
+    warnings.push({ code: "COMPONENT_FAILED", component: name, message: msg });
+    return null;
+  };
+
+  const quote = getVal(quoteResult, "quote");
+  const priceStats = getVal(priceStatsResult, "priceStats");
+  const ma = getVal(maResult, "maPosition");
+  const volumeRatio = getVal(volumeRatioResult, "volumeRatio");
+  const volumeGate = getVal(volumeGateResult, "volumeGate");
+  const tech = getVal(techResult, "technicalIndicators");
+
+  const dataDate =
+    (quote?.lastTradeDate as string | null) ??
+    (priceStats?.dataDate as string | null) ??
+    null;
+
+  const lastPrice = (quote?.lastPrice as number | null) ?? null;
+  const prevClose = (quote?.previousClose as number | null) ?? null;
+  const changePct =
+    (priceStats?.pctChangeTodayVsPrevClose as number | null) ??
+    (lastPrice != null && prevClose != null && prevClose !== 0
+      ? +((lastPrice - prevClose) / prevClose * 100).toFixed(2)
+      : null);
+
+  const snapshot: Record<string, unknown> = {
+    ticker,
+    price: {
+      last: lastPrice,
+      previousClose: prevClose,
+      changePct,
+      lastTradeDate: dataDate,
+      marketOpen: (quote?.marketOpen as boolean | null) ?? null,
+    },
+    range: {
+      yearHigh: (quote?.yearHigh as number | null) ?? null,
+      yearLow: (quote?.yearLow as number | null) ?? null,
+      pctFromYearHigh: (priceStats?.pctFromYearHigh as number | null) ?? null,
+      pctFromYearLow: (priceStats?.pctFromYearLow as number | null) ?? null,
+    },
+    trend: {
+      fiftyDayAverage: (quote?.fiftyDayAverage as number | null) ?? null,
+      twoHundredDayAverage: (quote?.twoHundredDayAverage as number | null) ?? null,
+      pctFrom50dma: (ma?.pctVs50dma as number | null) ?? null,
+      pctFrom200dma: (ma?.pctVs200dma as number | null) ?? null,
+      maTrend: (ma?.trend as string | null) ?? null,
+      rsi14: (tech?.rsi14 as number | null) ?? null,
+      macdHistogram: (tech?.macdHistogram as number | null) ?? null,
+    },
+    volume: {
+      lastVolume: (quote?.lastVolume as number | null) ?? null,
+      avgVolume10d: (quote?.tenDayAverageVolume as number | null) ?? null,
+      avgVolume20d: (volumeGate?.adv20d as number | null) ?? null,
+      avgVolume90d: (quote?.threeMonthAverageVolume as number | null) ?? null,
+      ratio10d: (volumeRatio?.ratio10d as number | null) ?? null,
+      ratio20d: (volumeGate?.ratio20d as number | null) ?? null,
+      ratio90d: (volumeRatio?.ratio90d as number | null) ?? null,
+      volumeFlag: (volumeRatio?.volumeFlag as string | null) ?? null,
+      liquidityGatePass: (volumeGate?.gatePass as boolean | null) ?? null,
+    },
+    risk: {
+      annualizedVolatility30d: (priceStats?.annualizedVolatility30d as number | null) ?? null,
+    },
+    freshness: {
+      dataDate,
+      retrievedAt,
+      marketSessionAware: true,
+      freshnessClass: classifyFreshness(dataDate, retrievedAt),
+    },
+    componentStatus,
+    partialSuccess: failedComponents.length > 0 && failedComponents.length < 6,
+    failedComponents,
+    warnings,
+  };
+
+  if (mode === "full") {
+    snapshot._components = {
+      quote,
+      priceStats,
+      maPosition: ma,
+      volumeRatio,
+      volumeGate,
+      technicalIndicators: tech,
+    };
+  }
+
+  return JSON.stringify(snapshot);
 }
 
 // ── get_options_summary ───────────────────────────────────────────────────────

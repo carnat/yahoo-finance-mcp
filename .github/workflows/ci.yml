@@ -90,6 +90,9 @@ jobs:
       - name: Phase 6B tests
         run: python scripts/test_phase6b.py
 
+      - name: Phase 8 tests
+        run: python scripts/test_phase8.py
+
       - name: Options data quality tests
         run: python scripts/test_options_quality.py
 
