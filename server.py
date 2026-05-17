@@ -1602,13 +1602,15 @@ async def _collect_finnhub_events(
         "symbol": ticker.upper(),
         "from": from_day,
         "to": to_day,
-        "token": api_key,
     })
     url = f"{_FINNHUB_NEWS_API}?{query}"
     loop = asyncio.get_event_loop()
 
     def _fetch() -> list[dict]:
-        req = _urlrequest.Request(url, headers={"User-Agent": _SEC_REQUIRED_UA})
+        req = _urlrequest.Request(
+            url,
+            headers={"User-Agent": _SEC_REQUIRED_UA, "X-Finnhub-Token": api_key},
+        )
         with _urlrequest.urlopen(req, timeout=20) as resp:  # noqa: S310
             return json.loads(resp.read().decode("utf-8", errors="replace"))
 

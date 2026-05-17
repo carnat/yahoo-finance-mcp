@@ -5985,8 +5985,8 @@ async function collectFinnhubEvents(
     const now = new Date();
     const from = new Date(now.getTime() - (lookbackDays ?? 14) * 86400000).toISOString().slice(0, 10);
     const to = now.toISOString().slice(0, 10);
-    const url = `${FINNHUB_COMPANY_NEWS_API}?symbol=${encodeURIComponent(ticker.toUpperCase())}&from=${from}&to=${to}&token=${encodeURIComponent(token)}`;
-    const resp = await fetch(url, { headers: { "User-Agent": UA } });
+    const url = `${FINNHUB_COMPANY_NEWS_API}?symbol=${encodeURIComponent(ticker.toUpperCase())}&from=${from}&to=${to}`;
+    const resp = await fetch(url, { headers: { "User-Agent": UA, "X-Finnhub-Token": token } });
     if (!resp.ok) {
       await resp.body?.cancel();
       throw new Error(`HTTP ${resp.status}`);
