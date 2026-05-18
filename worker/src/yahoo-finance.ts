@@ -5876,7 +5876,18 @@ function computeSourceStatus(
     .filter(w => _str(w.code) === "SOURCE_UNAVAILABLE")
     .map(w => _str(w.message).toLowerCase());
   const secItems = items.filter(it => _str(it.sourceType).includes("sec"));
-  const yfItems = items.filter(it => _str(it.sourceType) === "yahoo_finance");
+  // When yahoo_finance is the selected source, all items from the Yahoo Finance
+  // feed (including sub-classified newswire/company_ir types) count toward the
+  // yahoo_finance status. Only segregate by sub-type when those sub-types are
+  // also explicitly present as separate selected sources.
+  const yfFeedTypes = new Set<string>(["yahoo_finance"]);
+  if (selectedSources.includes("yahoo_finance")) {
+    // Also count newswire/company_ir items from the Yahoo feed toward
+    // yahoo_finance when those sub-types are not separately requested.
+    if (!selectedSources.includes("company_ir")) yfFeedTypes.add("company_ir");
+    if (!selectedSources.includes("newswire")) yfFeedTypes.add("newswire");
+  }
+  const yfItems = items.filter(it => yfFeedTypes.has(_str(it.sourceType)));
   const newswireItems = items.filter(it => _str(it.sourceType) === "newswire");
   const companyIrItems = items.filter(it => ["company_ir", "press_release"].includes(_str(it.sourceType)));
   const finnhubItems = items.filter(it => _str(it.source) === "finnhub");
@@ -6143,9 +6154,13 @@ async function collectCompanyEvents(
     }
     for (const item of yf.items) {
       const sourceType = _str(item.sourceType);
+      // When yahoo_finance is selected, include all items from the Yahoo Finance
+      // feed regardless of sub-classification (newswire/company_ir articles served
+      // through Yahoo's feed are still Yahoo Finance results). Only separately gate
+      // on company_ir or newswire when yahoo_finance is NOT selected.
       if (sourceType === "yahoo_finance" && selected.includes("yahoo_finance")) items.push(item);
-      else if (sourceType === "company_ir" && selected.includes("company_ir")) items.push(item);
-      else if (sourceType === "newswire" && selected.includes("newswire")) items.push(item);
+      else if (sourceType === "company_ir" && (selected.includes("company_ir") || selected.includes("yahoo_finance"))) items.push(item);
+      else if (sourceType === "newswire" && (selected.includes("newswire") || selected.includes("yahoo_finance"))) items.push(item);
     }
     warnings.push(...yf.warnings);
   }
