@@ -69,47 +69,59 @@ jobs:
       - name: Install Python deps
         run: pip install mcp yfinance pandas pydantic
 
+      # ── 1. Fastest sanity gates (no deps) ────────────────────────────────
+      - name: Python syntax check
+        run: python -m py_compile server.py
+
       - name: Tool sync
         run: python scripts/check_tool_sync.py
 
-      - name: Phase 1 tests
+      # ── 2. Core contracts: envelope, validation, security ─────────────────
+      - name: Phase 1 tests (MCP envelope)
         run: python scripts/test_phase1.py
 
-      - name: Phase 3 tests
+      - name: Phase 3 tests (input validation + security)
         run: python scripts/test_phase3.py
 
+      # ── 3. Foundational helpers (used across all tools) ───────────────────
+      - name: Helper utilities tests
+        run: python scripts/test_helpers.py
+
+      # ── 4. Infrastructure: cache layer ────────────────────────────────────
+      - name: Phase 4 tests (cache)
+        run: python scripts/test_phase4.py
+
+      # ── 5. Schema validation ──────────────────────────────────────────────
       - name: Phase 3 extractor schema tests
         run: python scripts/test_phase3_extractors.py
 
-      - name: Phase 4 tests
-        run: python scripts/test_phase4.py
+      # ── 6. Feature areas: manifest, news, earnings, options ───────────────
+      - name: Phase 8 tests (manifest diagnostics + freshness)
+        run: python scripts/test_phase8.py
 
-      - name: Phase 5 tests
-        run: python scripts/test_phase5.py
-
-      - name: Phase 6B tests
+      - name: Phase 6B tests (multi-source news/events)
         run: python scripts/test_phase6b.py
 
-      - name: Phase 8 tests
-        run: python scripts/test_phase8.py
+      - name: Phase 5 tests (earnings tools)
+        run: python scripts/test_phase5.py
 
       - name: Options data quality tests
         run: python scripts/test_options_quality.py
 
-      - name: Universal alias tests
-        run: python scripts/test_universal_aliases.py
-        env:
-          ALLOW_NETWORK_SKIP: "1"
-
+      # ── 7. Domain-specific schema tests ──────────────────────────────────
       - name: Source discovery schema tests
         run: python scripts/test_source_discovery_schema.py
 
       - name: Geographic revenue schema tests
         run: python scripts/test_geographic_revenue_schema.py
 
+      # ── 8. Integration / alias routing (network-optional) ─────────────────
+      - name: Universal alias tests
+        run: python scripts/test_universal_aliases.py
+        env:
+          ALLOW_NETWORK_SKIP: "1"
+
+      # ── 9. Worker type-check (last: slowest step) ─────────────────────────
       - name: Worker type-check
         run: npx tsc --noEmit
         working-directory: worker
-
-      - name: Python syntax check
-        run: python -m py_compile server.py
