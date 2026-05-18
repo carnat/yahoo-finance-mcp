@@ -391,7 +391,7 @@ def _compute_data_quality(
                         ltd_date = datetime.datetime.utcfromtimestamp(ltd_seconds).date()
                     if (data_date_obj - ltd_date).days > stale_days_threshold:
                         stale_trade += 1
-                except Exception:
+                except (ValueError, TypeError):
                     pass
 
     warnings: list[str] = []
@@ -1179,7 +1179,7 @@ async def get_stock_info(
 @yfinance_server.tool(
     name="get_yahoo_finance_news",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_yahoo_finance_news"],
-    description="""Get news for a given ticker symbol from yahoo finance.
+    description="""Deprecated alias for get_company_news.
 
 Args:
     ticker: str
@@ -1209,6 +1209,9 @@ _SOURCE_PRIORITY = {
     "other": 6,
 }
 _NEWSWIRE_HINTS = ("businesswire", "globenewswire", "prnewswire")
+_COMPANY_IR_URL_MARKERS = ("investor.", "investors.", "/investor", "/news-releases", "/press-release")
+_YAHOO_ALLOWED_CONTENT_TYPES = {"STORY", "ARTICLE", "PRESS_RELEASE"}
+_PRE_REVENUE_EPS_EPSILON = 1e-9
 _FINNHUB_NEWS_API = "https://finnhub.io/api/v1/company-news"
 _SMOKE_TICKER_CIK_FALLBACKS: dict[str, str] = {
     "AAPL": "0000320193",
@@ -1401,8 +1404,16 @@ def _build_yahoo_event_item(ticker: str, news_item: dict, retrieved_at: str) -> 
     summary = str(content.get("summary") or news_item.get("summary") or "").strip()
     url = str((content.get("canonicalUrl", {}) or {}).get("url") or news_item.get("link") or news_item.get("url") or "").strip()
     provider = str((content.get("provider", {}) or {}).get("displayName") or news_item.get("publisher") or "Yahoo Finance").strip()
-    source_type = "newswire" if any(h in provider.lower() for h in _NEWSWIRE_HINTS) else "yahoo_finance"
-    published_at = _to_iso_utc(news_item.get("providerPublishTime") or content.get("pubDate"))
+    provider_l = provider.lower()
+    url_l = url.lower()
+    source_type = "yahoo_finance"
+    if any(h in provider_l for h in _NEWSWIRE_HINTS):
+        source_type = "newswire"
+    elif any(marker in provider_l for marker in ("investor relations", "ir team")) or any(
+        marker in url_l for marker in _COMPANY_IR_URL_MARKERS
+    ):
+        source_type = "company_ir"
+    published_at = _to_iso_utc(news_item.get("providerPublishTime") or content.get("pubDate") or news_item.get("publishedAt"))
     if not published_at:
         warnings.append({
             "code": "PUBLISHED_AT_UNAVAILABLE",
@@ -1563,7 +1574,8 @@ async def _collect_yahoo_events(
         if not isinstance(n, dict):
             continue
         content = n.get("content", {}) if isinstance(n.get("content"), dict) else {}
-        if content.get("contentType", "") not in ("", "STORY"):
+        content_type = str(content.get("contentType") or n.get("contentType") or "").upper()
+        if content_type and content_type not in _YAHOO_ALLOWED_CONTENT_TYPES:
             continue
         item, item_warnings = _build_yahoo_event_item(ticker, n, retrieved_at)
         if not _within_date_window(item.get("publishedAt"), start_date=start_date, end_date=end_date, lookback_days=lookback_days):
@@ -1763,6 +1775,8 @@ def _compute_source_status(
     warning_msgs = [w.get("message", "") for w in warnings if isinstance(w, dict) and w.get("code") == "SOURCE_UNAVAILABLE"]
     sec_items = [it for it in items if "sec" in str(it.get("sourceType", "")).lower()]
     yf_items = [it for it in items if str(it.get("sourceType", "")) == "yahoo_finance"]
+    newswire_items = [it for it in items if str(it.get("sourceType", "")) == "newswire"]
+    company_ir_items = [it for it in items if str(it.get("sourceType", "")) in ("company_ir", "press_release")]
     finnhub_items = [it for it in items if str(it.get("source", "")) == "finnhub"]
     sources = selected_sources or ["sec", "company_ir", "newswire", "yahoo_finance", "finnhub"]
 
@@ -1797,9 +1811,19 @@ def _compute_source_status(
         else:
             result["finnhub"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
     if "company_ir" in sources:
-        result["company_ir"] = {"status": "UNCONFIGURED"}
+        if "company_ir" in sources_used:
+            result["company_ir"] = {"status": "OK" if company_ir_items else "EMPTY_RESULT", "rawCount": len(company_ir_items), "filteredCount": len(company_ir_items)}
+        elif any("yahoo finance" in m.lower() for m in warning_msgs):
+            result["company_ir"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
+        else:
+            result["company_ir"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
     if "newswire" in sources:
-        result["newswire"] = {"status": "UNCONFIGURED"}
+        if "newswire" in sources_used:
+            result["newswire"] = {"status": "OK" if newswire_items else "EMPTY_RESULT", "rawCount": len(newswire_items), "filteredCount": len(newswire_items)}
+        elif any("yahoo finance" in m.lower() for m in warning_msgs):
+            result["newswire"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
+        else:
+            result["newswire"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
     return result
 
 
@@ -1847,21 +1871,7 @@ async def _collect_company_events(
         items.extend(sec_items)
         warnings.extend(sec_warnings)
 
-    if "company_ir" in selected_sources:
-        warnings.append({
-            "code": "SOURCE_UNAVAILABLE",
-            "message": "Company IR source is not configured; skipped.",
-            "severity": "warning",
-        })
-
-    if "newswire" in selected_sources:
-        warnings.append({
-            "code": "SOURCE_UNAVAILABLE",
-            "message": "Newswire source is not configured; skipped.",
-            "severity": "warning",
-        })
-
-    if "yahoo_finance" in selected_sources:
+    if any(src in selected_sources for src in ("yahoo_finance", "company_ir", "newswire")):
         yf_items, yf_warnings, used = await _collect_yahoo_events(
             ticker,
             retrieved_at=retrieved_at,
@@ -1871,8 +1881,20 @@ async def _collect_company_events(
             lookback_days=lookback,
         )
         if used:
-            sources_used.append("yahoo_finance")
-        items.extend(yf_items)
+            if "yahoo_finance" in selected_sources:
+                sources_used.append("yahoo_finance")
+            if "company_ir" in selected_sources:
+                sources_used.append("company_ir")
+            if "newswire" in selected_sources:
+                sources_used.append("newswire")
+        for item in yf_items:
+            source_type = str(item.get("sourceType") or "")
+            if source_type == "yahoo_finance" and "yahoo_finance" in selected_sources:
+                items.append(item)
+            elif source_type == "company_ir" and "company_ir" in selected_sources:
+                items.append(item)
+            elif source_type == "newswire" and "newswire" in selected_sources:
+                items.append(item)
         warnings.extend(yf_warnings)
 
     if "finnhub" in selected_sources:
@@ -3076,7 +3098,7 @@ async def get_recommendations(ticker: str, recommendation_type: str, months_back
 @yfinance_server.tool(
     name="get_fast_info",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_fast_info"],
-    description="""Get lightweight real-time price and market data for one or more ticker symbols. Returns ~20 high-signal fields
+    description="""Alias for get_market_quote. Get lightweight real-time price and market data for one or more ticker symbols. Returns ~20 high-signal fields
 plus pre-market/after-hours prices when available.
 
 PREFER THIS over get_stock_info for any query involving current price, market cap, 52-week range,
@@ -5182,7 +5204,7 @@ async def get_short_momentum(ticker: str | list[str]) -> str:
 @yfinance_server.tool(
     name="get_earnings_momentum",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_momentum"],
-    description="""Get earnings revision momentum, beat rate, and estimate direction signals.
+    description="""Deprecated alias for analyze_earnings_momentum. Get earnings revision momentum, beat rate, and estimate direction signals.
 
 Returns: revision7d/30d/90d, revisionDirection, momentumFlag, beatRate, beatCount, avgSurprisePct, currentBeatStreak.
 
@@ -5299,6 +5321,7 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
     total_quarters = 0
     surprises = []
     beat_streak = 0
+    actual_eps_values: list[float] = []
 
     if earnings_history_records:
         for row in earnings_history_records:
@@ -5306,6 +5329,10 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
             estimate = row.get("epsEstimate")
             surprise_pct = row.get("surprisePercent")
             if actual is not None and estimate is not None:
+                try:
+                    actual_eps_values.append(float(actual))
+                except Exception:
+                    pass
                 total_quarters += 1
                 if actual > estimate:
                     beat_count += 1
@@ -5324,6 +5351,16 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
 
     beat_rate = round(beat_count / total_quarters, 2) if total_quarters > 0 else None
     avg_surprise = round(sum(surprises) / len(surprises), 2) if surprises else None
+    pre_revenue = (total_quarters == 0 and not earnings_history_records) or (
+        bool(actual_eps_values) and all(abs(v) < _PRE_REVENUE_EPS_EPSILON for v in actual_eps_values)
+    )
+    if pre_revenue:
+        momentum_flag = "NO_HISTORY"
+        avg_surprise = None
+        warnings.append({
+            "code": "PRE_REVENUE_NO_HISTORY",
+            "message": "Earnings history appears pre-revenue or unavailable; momentum fields are not reliable.",
+        })
 
     if beat_rate is None:
         historical_surprise_signal = "UNKNOWN"
@@ -5392,6 +5429,7 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
         "beatSample": total_quarters,
         "totalQuarters": total_quarters,
         "avgSurprisePct": avg_surprise,
+        "preRevenue": pre_revenue,
         "currentBeatStreak": beat_streak,
         "historicalSurpriseSignal": historical_surprise_signal,
         "forwardRevisionSignal": forward_revision_signal,
@@ -6929,8 +6967,9 @@ async def get_position_score_inputs(ticker: str) -> str:
     t4: dict = {
         "beatRate": earnings.get("beatRate"),
         "currentBeatStreak": earnings.get("currentBeatStreak"),
-        "avgSurprisePct": earnings.get("avgSurprisePct"),
+        "avgSurprisePct": None if earnings.get("preRevenue") else earnings.get("avgSurprisePct"),
         "momentumFlag": earnings.get("momentumFlag"),
+        "preRevenue": bool(earnings.get("preRevenue")),
     }
 
     # T5: technical indicators
@@ -6964,7 +7003,7 @@ async def get_position_score_inputs(ticker: str) -> str:
 @yfinance_server.tool(
     name="get_volume_gate",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_gate"],
-    description="""Check current trading volume and dollar-notional liquidity against public liquidity thresholds.
+    description="""Deprecated alias for check_volume_liquidity_threshold. Check current trading volume and dollar-notional liquidity against public liquidity thresholds.
 
 Returns currency, fxRate, lastVolume, adv10d, adv20d (computed from last 20 daily sessions),
 adv90d, ratio20d (always computed when adv20d is available), gatePass,
@@ -8087,6 +8126,14 @@ async def _extract_geo_payload(
     return payload
 
 
+async def _may_be_20f_filer(ticker: str) -> bool:
+    _, submissions = await _get_submissions_for_ticker(ticker)
+    if not isinstance(submissions, dict):
+        return False
+    forms = (((submissions.get("filings") or {}).get("recent") or {}).get("form") or [])
+    return any(str(form or "").upper() == "20-F" for form in forms)
+
+
 @yfinance_server.tool(
     name="extract_geographic_revenue",
     output_schema=_TOOL_OUTPUT_SCHEMAS["extract_geographic_revenue"],
@@ -8157,6 +8204,25 @@ async def extract_geographic_revenue(
     if shaped["denominator"] is None:
         shaped["valueRatio"] = None
         shaped["valuePct"] = None
+    if (
+        str(filing_type or "").upper() == "10-K"
+        and str(shaped.get("confidence") or "").upper() == "NOT_DISCLOSED"
+    ):
+        evidence_filing_type = str((shaped.get("evidence") or {}).get("filingType") or "").upper()
+        maybe_20f = evidence_filing_type == "20-F"
+        if not maybe_20f and evidence_filing_type in ("", "10-K"):
+            maybe_20f = await _may_be_20f_filer(ticker)
+        if maybe_20f:
+            warnings = shaped.get("warnings")
+            if not isinstance(warnings, list):
+                warnings = []
+            if not any(isinstance(w, dict) and w.get("code") == "POSSIBLE_20F_FILER" for w in warnings):
+                warnings.append({
+                    "code": "POSSIBLE_20F_FILER",
+                    "message": "POSSIBLE_20F_FILER: Ticker may file 20-F. Retry with filing_type='20-F' or use IR web search.",
+                    "severity": "warning",
+                })
+            shaped["warnings"] = warnings
     if str(detailLevel).lower() == "raw":
         shaped["rawContext"] = {"filingIndex": idx_payload}
     return json.dumps(shaped)
