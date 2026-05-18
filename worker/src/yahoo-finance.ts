@@ -5881,8 +5881,12 @@ function computeSourceStatus(
   // yahoo_finance status. Only segregate by sub-type when those sub-types are
   // also explicitly present as separate selected sources.
   const yfFeedTypes = new Set<string>(["yahoo_finance"]);
-  if (!selectedSources.includes("company_ir")) yfFeedTypes.add("company_ir");
-  if (!selectedSources.includes("newswire")) yfFeedTypes.add("newswire");
+  if (selectedSources.includes("yahoo_finance")) {
+    // Also count newswire/company_ir items from the Yahoo feed toward
+    // yahoo_finance when those sub-types are not separately requested.
+    if (!selectedSources.includes("company_ir")) yfFeedTypes.add("company_ir");
+    if (!selectedSources.includes("newswire")) yfFeedTypes.add("newswire");
+  }
   const yfItems = items.filter(it => yfFeedTypes.has(_str(it.sourceType)));
   const newswireItems = items.filter(it => _str(it.sourceType) === "newswire");
   const companyIrItems = items.filter(it => ["company_ir", "press_release"].includes(_str(it.sourceType)));

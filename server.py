@@ -1780,10 +1780,13 @@ def _compute_source_status(
     # are also explicitly present as separate selected sources.
     sources = selected_sources or ["yahoo_finance", "finnhub"]
     _yf_feed_types: set[str] = {"yahoo_finance"}
-    if "company_ir" not in sources:
-        _yf_feed_types.add("company_ir")
-    if "newswire" not in sources:
-        _yf_feed_types.add("newswire")
+    if "yahoo_finance" in sources:
+        # Also count newswire/company_ir items from the Yahoo feed toward
+        # yahoo_finance when those sub-types are not separately requested.
+        if "company_ir" not in sources:
+            _yf_feed_types.add("company_ir")
+        if "newswire" not in sources:
+            _yf_feed_types.add("newswire")
     yf_items = [it for it in items if str(it.get("sourceType", "")) in _yf_feed_types]
     newswire_items = [it for it in items if str(it.get("sourceType", "")) == "newswire"]
     company_ir_items = [it for it in items if str(it.get("sourceType", "")) in ("company_ir", "press_release")]
