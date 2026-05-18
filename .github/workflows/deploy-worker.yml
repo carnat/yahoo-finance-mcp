@@ -46,8 +46,10 @@ jobs:
       # Wire optional FINNHUB_API_KEY as a Worker secret so it is available at runtime.
       # If not using CI, run manually: wrangler secret put FINNHUB_API_KEY
       - name: Wire FINNHUB_API_KEY secret
-        if: "${{ secrets.FINNHUB_API_KEY != '' }}"
-        run: printf '%s' "$FINNHUB_API_KEY" | npx wrangler secret put FINNHUB_API_KEY
+        run: |
+          if [ -n "$FINNHUB_API_KEY" ]; then
+            printf '%s' "$FINNHUB_API_KEY" | npx wrangler secret put FINNHUB_API_KEY
+          fi
         working-directory: worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
