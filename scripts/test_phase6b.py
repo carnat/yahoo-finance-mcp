@@ -282,6 +282,170 @@ class TestPhase6BCompanyNews(unittest.TestCase):
                 self.assertNotIn("newswire", called_sources)
                 self.assertIn("yahoo_finance", called_sources)
 
+    def test_yahoo_newswire_items_included_when_yahoo_finance_selected(self):
+        """Regression: newswire-subtype items from Yahoo feed must be returned when yahoo_finance is selected."""
+        # Simulate what _collect_company_events returns after the fix:
+        # items from Yahoo Finance feed that were sub-classified as newswire/company_ir
+        yf_feed_items = [
+            {
+                "title": "Apple Q2 Results Press Release",
+                "source": "Business Wire",
+                "sourceType": "newswire",
+                "publishedAt": "2026-05-16T16:00:00Z",
+                "retrievedAt": "2026-05-16T16:01:00Z",
+                "url": "https://www.businesswire.com/news/apple-q2",
+                "tickers": ["AAPL"],
+                "eventType": "earnings",
+                "summary": "Apple reports Q2 results",
+                "evidenceText": "Q2 results",
+                "confidence": "MEDIUM",
+                "tickerRelevance": "HIGH",
+                "duplicateGroupId": "nw1",
+            },
+            {
+                "title": "Apple IR: Share Buyback Program",
+                "source": "Apple Investor Relations",
+                "sourceType": "company_ir",
+                "publishedAt": "2026-05-15T10:00:00Z",
+                "retrievedAt": "2026-05-15T10:01:00Z",
+                "url": "https://investor.apple.com/news/detail",
+                "tickers": ["AAPL"],
+                "eventType": "financing",
+                "summary": "buyback",
+                "evidenceText": "buyback",
+                "confidence": "MEDIUM",
+                "tickerRelevance": "HIGH",
+                "duplicateGroupId": "ir1",
+            },
+            {
+                "title": "AAPL analyst upgrade",
+                "source": "Yahoo Finance",
+                "sourceType": "yahoo_finance",
+                "publishedAt": "2026-05-14T08:00:00Z",
+                "retrievedAt": "2026-05-14T08:01:00Z",
+                "url": "https://finance.yahoo.com/news/aapl-upgrade",
+                "tickers": ["AAPL"],
+                "eventType": "analyst",
+                "summary": "upgrade",
+                "evidenceText": "upgrade",
+                "confidence": "LOW",
+                "tickerRelevance": "HIGH",
+                "duplicateGroupId": "yf3",
+            },
+        ]
+        finnhub_warning = [{
+            "code": "SOURCE_UNAVAILABLE",
+            "message": "Finnhub company-news source is not configured; skipped.",
+            "severity": "warning",
+        }]
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+            mocked.return_value = (yf_feed_items, ["yahoo_finance"], finnhub_warning, "2026-05-16T16:01:00Z")
+            data = _parse(_run(srv.get_company_news("AAPL")))
+            # All 3 items (including newswire + company_ir sub-types) must appear
+            self.assertEqual(len(data.get("items", [])), 3)
+            # sourceStatus.yahoo_finance must report OK with rawCount=3
+            yf_status = data.get("sourceStatus", {}).get("yahoo_finance", {})
+            self.assertEqual(yf_status.get("status"), "OK")
+            self.assertEqual(yf_status.get("rawCount"), 3)
+            # sec/company_ir/newswire must NOT appear as separate top-level status keys
+            source_status = data.get("sourceStatus", {})
+            self.assertNotIn("sec", source_status)
+            self.assertNotIn("company_ir", source_status)
+            self.assertNotIn("newswire", source_status)
+
+    def test_collect_company_events_includes_newswire_when_yahoo_selected(self):
+        """Unit test: _collect_company_events includes newswire items from Yahoo feed when yahoo_finance is selected."""
+        import datetime
+
+        newswire_item = {
+            "title": "Tesla raises guidance",
+            "source": "PR Newswire",
+            "sourceType": "newswire",
+            "publishedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "retrievedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "url": "https://www.prnewswire.com/news/tesla-guidance",
+            "tickers": ["TSLA"],
+            "eventType": "guidance",
+            "summary": "guidance raise",
+            "evidenceText": "guidance raise",
+            "confidence": "MEDIUM",
+            "tickerRelevance": "HIGH",
+            "duplicateGroupId": "nw2",
+        }
+        company_ir_item = {
+            "title": "Tesla investor update",
+            "source": "Tesla IR",
+            "sourceType": "company_ir",
+            "publishedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "retrievedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "url": "https://investor.tesla.com/update",
+            "tickers": ["TSLA"],
+            "eventType": "other",
+            "summary": "investor update",
+            "evidenceText": "investor update",
+            "confidence": "MEDIUM",
+            "tickerRelevance": "HIGH",
+            "duplicateGroupId": "ir2",
+        }
+
+        with patch("server._collect_yahoo_events", new_callable=AsyncMock) as mock_yf, \
+             patch("server._collect_finnhub_events", new_callable=AsyncMock) as mock_fh:
+            mock_yf.return_value = ([newswire_item, company_ir_item], [], True)
+            mock_fh.return_value = ([], [{"code": "SOURCE_UNAVAILABLE", "message": "Finnhub company-news source is not configured; skipped.", "severity": "warning"}], False)
+            items, sources_used, warnings, _ = _run(
+                srv._collect_company_events("TSLA", max_results=10, lookback_days=14, sources=["yahoo_finance", "finnhub"])
+            )
+            # Both newswire and company_ir items from Yahoo feed must be included
+            self.assertEqual(len(items), 2)
+            source_types = {it["sourceType"] for it in items}
+            self.assertIn("newswire", source_types)
+            self.assertIn("company_ir", source_types)
+
+    def test_compute_source_status_counts_all_yahoo_feed_types(self):
+        """Unit test: _compute_source_status counts newswire/company_ir items toward yahoo_finance when not separately selected."""
+        items = [
+            {"sourceType": "newswire", "source": "Business Wire"},
+            {"sourceType": "company_ir", "source": "Apple IR"},
+            {"sourceType": "yahoo_finance", "source": "Yahoo Finance"},
+        ]
+        # Only yahoo_finance and finnhub are selected (default path)
+        status = srv._compute_source_status(
+            sources_used=["yahoo_finance"],
+            warnings=[{"code": "SOURCE_UNAVAILABLE", "message": "Finnhub company-news source is not configured; skipped.", "severity": "warning"}],
+            items=items,
+            selected_sources=["yahoo_finance", "finnhub"],
+        )
+        # All 3 items must count toward yahoo_finance
+        self.assertEqual(status.get("yahoo_finance", {}).get("status"), "OK")
+        self.assertEqual(status.get("yahoo_finance", {}).get("rawCount"), 3)
+        # company_ir and newswire must NOT appear as separate keys
+        self.assertNotIn("company_ir", status)
+        self.assertNotIn("newswire", status)
+        # finnhub must be UNCONFIGURED
+        self.assertEqual(status.get("finnhub", {}).get("status"), "UNCONFIGURED")
+
+    def test_yahoo_empty_finnhub_unavailable_no_sec_default_behavior(self):
+        """Regression: Yahoo empty + Finnhub unavailable must NOT surface SEC-only defaults."""
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+            mocked.return_value = (
+                [],
+                [],
+                [{"code": "SOURCE_UNAVAILABLE", "message": "Finnhub company-news source is not configured; skipped.", "severity": "warning"}],
+                "2026-05-16T10:00:00Z",
+            )
+            data = _parse(_run(srv.get_yahoo_finance_news("NVDA")))
+            source_status = data.get("sourceStatus", {})
+            # sec must not appear in source status
+            self.assertNotIn("sec", source_status)
+            # company_ir and newswire must not appear
+            self.assertNotIn("company_ir", source_status)
+            self.assertNotIn("newswire", source_status)
+            # yahoo_finance must appear with EMPTY_RESULT (not OK)
+            self.assertIn("yahoo_finance", source_status)
+            self.assertEqual(source_status["yahoo_finance"].get("status"), "EMPTY_RESULT")
+            # finnhub must be UNCONFIGURED
+            self.assertEqual(source_status.get("finnhub", {}).get("status"), "UNCONFIGURED")
+
 
 class TestPhase6BSecEvents(unittest.TestCase):
     def test_get_sec_recent_events_accepted_at_used_as_published(self):

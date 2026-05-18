@@ -1774,11 +1774,20 @@ def _compute_source_status(
     """Build per-source status dict from collection results."""
     warning_msgs = [w.get("message", "") for w in warnings if isinstance(w, dict) and w.get("code") == "SOURCE_UNAVAILABLE"]
     sec_items = [it for it in items if "sec" in str(it.get("sourceType", "")).lower()]
-    yf_items = [it for it in items if str(it.get("sourceType", "")) == "yahoo_finance"]
+    # When yahoo_finance is the source, all items from the Yahoo Finance feed
+    # (including sub-classified newswire/company_ir types) count toward the
+    # yahoo_finance status. Only segregate by sub-type when those sub-types
+    # are also explicitly present as separate selected sources.
+    sources = selected_sources or ["yahoo_finance", "finnhub"]
+    _yf_feed_types: set[str] = {"yahoo_finance"}
+    if "company_ir" not in sources:
+        _yf_feed_types.add("company_ir")
+    if "newswire" not in sources:
+        _yf_feed_types.add("newswire")
+    yf_items = [it for it in items if str(it.get("sourceType", "")) in _yf_feed_types]
     newswire_items = [it for it in items if str(it.get("sourceType", "")) == "newswire"]
     company_ir_items = [it for it in items if str(it.get("sourceType", "")) in ("company_ir", "press_release")]
     finnhub_items = [it for it in items if str(it.get("source", "")) == "finnhub"]
-    sources = selected_sources or ["yahoo_finance", "finnhub"]
 
     result: dict = {}
     if "sec" in sources:
@@ -1889,11 +1898,16 @@ async def _collect_company_events(
                 sources_used.append("newswire")
         for item in yf_items:
             source_type = str(item.get("sourceType") or "")
+            # When yahoo_finance is selected, include all items from the Yahoo Finance
+            # feed regardless of their sub-classification (newswire/company_ir articles
+            # served through Yahoo's feed are still Yahoo Finance results). Only
+            # separately gate on company_ir or newswire when yahoo_finance is NOT
+            # selected (e.g. get_company_press_releases).
             if source_type == "yahoo_finance" and "yahoo_finance" in selected_sources:
                 items.append(item)
-            elif source_type == "company_ir" and "company_ir" in selected_sources:
+            elif source_type == "company_ir" and ("company_ir" in selected_sources or "yahoo_finance" in selected_sources):
                 items.append(item)
-            elif source_type == "newswire" and "newswire" in selected_sources:
+            elif source_type == "newswire" and ("newswire" in selected_sources or "yahoo_finance" in selected_sources):
                 items.append(item)
         warnings.extend(yf_warnings)
 
