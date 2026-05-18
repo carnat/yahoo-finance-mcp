@@ -981,8 +981,8 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_sec_filing_index", description: "Get the pre-built section/table index for an SEC filing. Returns cached index when available; builds and caches on first call. period is reserved for future multi-period support; currently only 'latest' is supported unless accession_number is provided.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest", description: "Reserved. Only 'latest' supported currently." }, accession_number: { type: "string" } }, required: ["ticker"] } },
   { name: "analyze_position_signals", description: "Aggregate public market, analyst, earnings, and technical inputs that may be useful for a caller-defined scoring model. This tool does not access holdings, cost basis, position size, or private scoring rules.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
   { name: "calculate_price_target_distance", description: "Compare current market price to a user-supplied reference price target and return percentage distance and bracket labels.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, reference_target_price: { type: "number", description: "Preferred: user-supplied reference target price." }, io_pt: { type: "number", description: "Backward-compatible alias for reference_target_price." } }, required: ["ticker"] } },
-  { name: "get_company_news", description: "Get recent public company news/events from selected public sources with source metadata, timestamps, URL, dedupe metadata, and short evidence text.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Ticker symbol, e.g. 'AAPL'" }, max_results: { type: "number", default: 10 }, lookback_days: { type: "number", default: 14 }, sources: { type: "array", items: { type: "string" }, default: ["sec", "company_ir", "newswire", "yahoo_finance", "finnhub"] } }, required: ["ticker"] } },
-  { name: "search_company_news", description: "Search public company news/events for a ticker and query across allowed source metadata and short snippets only.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Ticker symbol, e.g. 'AAPL'" }, query: { type: "string", description: "Required search query string." }, start_date: { type: "string", default: "" }, end_date: { type: "string", default: "" }, sources: { type: "array", items: { type: "string" }, default: ["sec", "company_ir", "newswire", "yahoo_finance", "finnhub"] }, max_results: { type: "number", default: 10 } }, required: ["ticker", "query"] } },
+  { name: "get_company_news", description: "Get recent public company news/events from selected public sources with source metadata, timestamps, URL, dedupe metadata, and short evidence text.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Ticker symbol, e.g. 'AAPL'" }, max_results: { type: "number", default: 10 }, lookback_days: { type: "number", default: 14 }, sources: { type: "array", items: { type: "string" }, default: ["yahoo_finance", "finnhub"] } }, required: ["ticker"] } },
+  { name: "search_company_news", description: "Search public company news/events for a ticker and query across allowed source metadata and short snippets only.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Ticker symbol, e.g. 'AAPL'" }, query: { type: "string", description: "Required search query string." }, start_date: { type: "string", default: "" }, end_date: { type: "string", default: "" }, sources: { type: "array", items: { type: "string" }, default: ["yahoo_finance", "finnhub"] }, max_results: { type: "number", default: 10 } }, required: ["ticker", "query"] } },
   { name: "get_company_press_releases", description: "Get company-originated or official release-style events from configured public sources, favoring SEC and official release channels.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, lookback_days: { type: "number", default: 90 }, max_results: { type: "number", default: 20 }, sources: { type: "array", items: { type: "string" }, default: ["company_ir", "newswire", "sec"] } }, required: ["ticker"] } },
   { name: "get_sec_recent_events", description: "Get recent SEC filing events with filing type, filing date, accepted timestamp, accession number, SEC archive URL, and event metadata.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_types: { type: "array", items: { type: "string" }, default: ["8-K", "10-Q", "10-K"] }, lookback_days: { type: "number", default: 90 }, max_results: { type: "number", default: 20 } }, required: ["ticker"] } },
   { name: "get_public_event_timeline", description: "Get a deduplicated chronological timeline of public company events across selected public sources.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, start_date: { type: "string", default: "" }, end_date: { type: "string", default: "" }, sources: { type: "array", items: { type: "string" }, default: ["sec", "company_ir", "newswire", "yahoo_finance", "finnhub"] }, max_results: { type: "number", default: 50 }, newest_first: { type: "boolean", default: false } }, required: ["ticker"] } },
@@ -1504,7 +1504,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         str(args.ticker),
         num(args.max_results, 10),
         num(args.lookback_days, 14),
-        Array.isArray(args.sources) ? args.sources.map(String) : ["sec", "company_ir", "newswire", "yahoo_finance"],
+        Array.isArray(args.sources) ? args.sources.map(String) : ["yahoo_finance", "finnhub"],
       );
     case "get_corporate_actions":
       return getStockActions(str(args.ticker));
@@ -1760,7 +1760,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         str(args.query),
         str(args.start_date, ""),
         str(args.end_date, ""),
-        Array.isArray(args.sources) ? args.sources.map(String) : ["sec", "company_ir", "newswire", "yahoo_finance"],
+        Array.isArray(args.sources) ? args.sources.map(String) : ["yahoo_finance", "finnhub"],
         num(args.max_results, 10),
       );
     case "get_company_press_releases":
@@ -1914,7 +1914,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_calendar":
       return getCalendar(str(args.ticker));
     case "get_yahoo_finance_news":
-      return getCompanyNews(str(args.ticker));
+      return getCompanyNews(str(args.ticker), 10, 14, ["yahoo_finance", "finnhub"]);
     case "get_options_flow_summary":
       return getOptionsSummary(str(args.ticker));
     case "get_options_flow_scan":

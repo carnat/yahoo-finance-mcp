@@ -6170,7 +6170,7 @@ async function collectCompanyEvents(
 
 // ─── Public event / news tools ─────────────────────────────────────────────────
 
-export async function getCompanyNews(ticker: string, maxResults = 10, lookbackDays = 14, sources: string[] = ["sec", "company_ir", "newswire", "yahoo_finance", "finnhub"]): Promise<string> {
+export async function getCompanyNews(ticker: string, maxResults = 10, lookbackDays = 14, sources: string[] = ["yahoo_finance", "finnhub"]): Promise<string> {
   const out = await collectCompanyEvents(ticker, { maxResults, lookbackDays, sources });
   const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources);
@@ -6192,7 +6192,7 @@ export async function searchCompanyNews(
   query: string,
   startDate = "",
   endDate = "",
-  sources: string[] = ["sec", "company_ir", "newswire", "yahoo_finance", "finnhub"],
+  sources: string[] = ["yahoo_finance", "finnhub"],
   maxResults = 10
 ): Promise<string> {
   const out = await collectCompanyEvents(ticker, { maxResults, lookbackDays: 14, startDate, endDate, sources });

@@ -1187,8 +1187,8 @@ Args:
 """,
 )
 async def get_yahoo_finance_news(ticker: str) -> str:
-    """Alias for get_company_news. Routes to the canonical multi-source news tool."""
-    return await get_company_news(ticker)
+    """Alias for get_company_news. Routes to the canonical news tool with Yahoo Finance + Finnhub sources."""
+    return await get_company_news(ticker, sources=["yahoo_finance", "finnhub"])
 
 
 # ---------------------------------------------------------------------------
@@ -1778,7 +1778,7 @@ def _compute_source_status(
     newswire_items = [it for it in items if str(it.get("sourceType", "")) == "newswire"]
     company_ir_items = [it for it in items if str(it.get("sourceType", "")) in ("company_ir", "press_release")]
     finnhub_items = [it for it in items if str(it.get("source", "")) == "finnhub"]
-    sources = selected_sources or ["sec", "company_ir", "newswire", "yahoo_finance", "finnhub"]
+    sources = selected_sources or ["yahoo_finance", "finnhub"]
 
     result: dict = {}
     if "sec" in sources:
@@ -1948,13 +1948,14 @@ async def search_company_news(
         return _mcp_failure("search_company_news", ErrorCode.INPUT_VALIDATION_ERROR, err)
     if not str(query or "").strip():
         return _mcp_failure("search_company_news", ErrorCode.INPUT_VALIDATION_ERROR, "query is required")
+    effective_sources = sources or ["yahoo_finance", "finnhub"]
     items, sources_used, warnings, retrieved_at = await _collect_company_events(
         ticker,
         max_results=max_results,
         lookback_days=14,
         start_date=start_date,
         end_date=end_date,
-        sources=sources,
+        sources=effective_sources,
     )
     q = query.strip().lower()
     filtered: list[dict] = []
@@ -7538,15 +7539,15 @@ async def get_company_news(
     err = _validate_ticker(ticker)
     if err:
         return _mcp_failure("get_company_news", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    effective_sources = sources or ["yahoo_finance", "finnhub"]
     items, sources_used, warnings, retrieved_at = await _collect_company_events(
         ticker,
         max_results=max_results,
         lookback_days=lookback_days,
-        sources=sources,
+        sources=effective_sources,
     )
     status = _build_collection_status(items, sources_used, warnings)
-    selected = sources or ["sec", "company_ir", "newswire", "yahoo_finance", "finnhub"]
-    source_status = _compute_source_status(sources_used, warnings, items, selected)
+    source_status = _compute_source_status(sources_used, warnings, items, effective_sources)
     source_coverage = _compute_source_coverage(source_status)
     payload = {
         "ticker": ticker.upper(),
