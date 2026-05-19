@@ -5586,17 +5586,24 @@ export async function extractFilingFact(ticker: string, factName: string, _docum
 // ─── Public news / event helpers ──────────────────────────────────────────────
 
 const _str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
-const OFFICIAL_SOURCE_TYPES = new Set(["sec_filing", "company_ir", "press_release", "newswire"]);
-const SUPPORTED_EVENT_SOURCES = new Set(["sec", "company_ir", "newswire", "yahoo_finance", "finnhub"]);
-const COMPANY_IR_URL_MARKERS = ["investor.", "investors.", "/investor", "/news-releases", "/press-release"] as const;
+const OFFICIAL_SOURCE_TYPES = new Set(["sec_filing", "company_ir", "press_release", "newswire", "yahoo_finance_press_releases"]);
+const SUPPORTED_EVENT_SOURCES = new Set([
+  "sec", "company_ir", "newswire",
+  "yahoo_finance",                  // legacy: aggregates news + press releases
+  "yahoo_finance_news",             // Yahoo Finance general news tab
+  "yahoo_finance_press_releases",   // Yahoo Finance press releases tab
+  "finnhub",
+]);
 const PRE_REVENUE_EPS_EPSILON = 1e-9;
 const SOURCE_PRIORITY: Record<string, number> = {
   sec_filing: 0,
   company_ir: 1,
   press_release: 2,
+  yahoo_finance_press_releases: 2,
   newswire: 3,
   company_news: 4,
   yahoo_finance: 5,
+  yahoo_finance_news: 5,
   other: 6,
 };
 
@@ -5701,31 +5708,34 @@ function withinDateWindow(publishedAt: string | null, startDate = "", endDate = 
   return true;
 }
 
-function buildYfEventItem(ticker: string, raw: Record<string, unknown>, retrievedAt: string): { item: Record<string, unknown>; warnings: Record<string, unknown>[] } {
+function buildYfEventItem(
+  ticker: string,
+  raw: Record<string, unknown>,
+  retrievedAt: string,
+  feedSource?: string,
+): { item: Record<string, unknown>; warnings: Record<string, unknown>[] } {
   const warnings: Record<string, unknown>[] = [];
   const content = (raw.content && typeof raw.content === "object") ? raw.content as Record<string, unknown> : {};
   const title = _str(content.title || raw.title).trim();
   const summary = _str(content.summary || raw.summary).trim();
-  const source = _str((content.provider as Record<string, unknown> | undefined)?.displayName || raw.publisher || "Yahoo Finance");
+  const originalSource = _str((content.provider as Record<string, unknown> | undefined)?.displayName || raw.publisher || "Yahoo Finance");
   const url = _str((content.canonicalUrl as Record<string, unknown> | undefined)?.url || raw.link || raw.url) || null;
   // Prefer native Yahoo publish timestamps, then normalized fallback from getNews().
   const publishedAt = normalizeIso(raw.providerPublishTime ?? content.pubDate ?? raw.publishedAt);
   if (!publishedAt) {
-    warnings.push({ code: "PUBLISHED_AT_UNAVAILABLE", message: `Published timestamp unavailable for source '${source}'.`, severity: "warning" });
+    warnings.push({ code: "PUBLISHED_AT_UNAVAILABLE", message: `Published timestamp unavailable for source '${originalSource}'.`, severity: "warning" });
   }
-  const sourceLower = source.toLowerCase();
-  const urlLower = _str(url).toLowerCase();
-  let sourceType = "yahoo_finance";
-  if (/businesswire|globenewswire|prnewswire/i.test(source)) {
-    sourceType = "newswire";
-  } else if (
-    sourceLower.includes("investor relations")
-    || sourceLower.includes("ir team")
-    || COMPANY_IR_URL_MARKERS.some(marker => urlLower.includes(marker))
-  ) {
-    sourceType = "company_ir";
+
+  // Determine the precise source label.
+  let sourceKey: string;
+  if (feedSource === "yahoo_finance_news" || feedSource === "yahoo_finance_press_releases") {
+    sourceKey = feedSource;
+  } else {
+    const contentType = _str(content.contentType || raw.contentType).toUpperCase();
+    sourceKey = contentType === "PRESS_RELEASE" ? "yahoo_finance_press_releases" : "yahoo_finance_news";
   }
-  const relevance = `${title} ${summary}`.toUpperCase().includes(ticker.toUpperCase()) ? "HIGH" : (sourceType === "yahoo_finance" ? "LOW" : "UNKNOWN");
+
+  const relevance = `${title} ${summary}`.toUpperCase().includes(ticker.toUpperCase()) ? "HIGH" : "LOW";
   const confidence = !url || relevance !== "HIGH" ? "LOW" : "MEDIUM";
   const duplicateGroupId = makeDupGroupId(ticker, title, publishedAt, null, url);
   if (!duplicateGroupId) {
@@ -5734,8 +5744,9 @@ function buildYfEventItem(ticker: string, raw: Record<string, unknown>, retrieve
   return {
     item: {
       title,
-      source,
-      sourceType,
+      source: sourceKey,
+      originalSource,
+      sourceType: sourceKey,
       publishedAt,
       retrievedAt,
       url,
@@ -5875,19 +5886,13 @@ function computeSourceStatus(
   const warningMsgs = warnings
     .filter(w => _str(w.code) === "SOURCE_UNAVAILABLE")
     .map(w => _str(w.message).toLowerCase());
+  const isYfError = warningMsgs.some(m => m.includes("yahoo finance"));
   const secItems = items.filter(it => _str(it.sourceType).includes("sec"));
-  // When yahoo_finance is the selected source, all items from the Yahoo Finance
-  // feed (including sub-classified newswire/company_ir types) count toward the
-  // yahoo_finance status. Only segregate by sub-type when those sub-types are
-  // also explicitly present as separate selected sources.
-  const yfFeedTypes = new Set<string>(["yahoo_finance"]);
-  if (selectedSources.includes("yahoo_finance")) {
-    // Also count newswire/company_ir items from the Yahoo feed toward
-    // yahoo_finance when those sub-types are not separately requested.
-    if (!selectedSources.includes("company_ir")) yfFeedTypes.add("company_ir");
-    if (!selectedSources.includes("newswire")) yfFeedTypes.add("newswire");
-  }
-  const yfItems = items.filter(it => yfFeedTypes.has(_str(it.sourceType)));
+  // Fine-grained Yahoo Finance items
+  const yfNewsItems = items.filter(it => _str(it.source) === "yahoo_finance_news");
+  const yfPrItems = items.filter(it => _str(it.source) === "yahoo_finance_press_releases");
+  // Legacy yahoo_finance aggregates both
+  const yfLegacyItems = items.filter(it => ["yahoo_finance_news", "yahoo_finance_press_releases"].includes(_str(it.source)));
   const newswireItems = items.filter(it => _str(it.sourceType) === "newswire");
   const companyIrItems = items.filter(it => ["company_ir", "press_release"].includes(_str(it.sourceType)));
   const finnhubItems = items.filter(it => _str(it.source) === "finnhub");
@@ -5901,10 +5906,30 @@ function computeSourceStatus(
       result.sec = { status: "EMPTY_RESULT", rawCount: 0, filteredCount: 0 };
     }
   }
+  // Fine-grained Yahoo Finance sources
+  if (selectedSources.includes("yahoo_finance_news")) {
+    if (sourcesUsed.includes("yahoo_finance_news")) {
+      result.yahoo_finance_news = { status: yfNewsItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: yfNewsItems.length, filteredCount: yfNewsItems.length };
+    } else if (isYfError) {
+      result.yahoo_finance_news = { status: "PROVIDER_ERROR", rawCount: 0, filteredCount: 0 };
+    } else {
+      result.yahoo_finance_news = { status: "EMPTY_RESULT", rawCount: 0, filteredCount: 0 };
+    }
+  }
+  if (selectedSources.includes("yahoo_finance_press_releases")) {
+    if (sourcesUsed.includes("yahoo_finance_press_releases")) {
+      result.yahoo_finance_press_releases = { status: yfPrItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: yfPrItems.length, filteredCount: yfPrItems.length };
+    } else if (isYfError) {
+      result.yahoo_finance_press_releases = { status: "PROVIDER_ERROR", rawCount: 0, filteredCount: 0 };
+    } else {
+      result.yahoo_finance_press_releases = { status: "EMPTY_RESULT", rawCount: 0, filteredCount: 0 };
+    }
+  }
+  // Legacy yahoo_finance aggregate
   if (selectedSources.includes("yahoo_finance")) {
     if (sourcesUsed.includes("yahoo_finance")) {
-      result.yahoo_finance = { status: yfItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: yfItems.length, filteredCount: yfItems.length };
-    } else if (warningMsgs.some(m => m.includes("yahoo finance"))) {
+      result.yahoo_finance = { status: yfLegacyItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: yfLegacyItems.length, filteredCount: yfLegacyItems.length };
+    } else if (isYfError) {
       result.yahoo_finance = { status: "PROVIDER_ERROR", rawCount: 0, filteredCount: 0 };
     } else {
       result.yahoo_finance = { status: "EMPTY_RESULT", rawCount: 0, filteredCount: 0 };
@@ -5930,7 +5955,7 @@ function computeSourceStatus(
   if (selectedSources.includes("company_ir")) {
     if (sourcesUsed.includes("company_ir")) {
       result.company_ir = { status: companyIrItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: companyIrItems.length, filteredCount: companyIrItems.length };
-    } else if (warningMsgs.some(m => m.includes("yahoo finance"))) {
+    } else if (isYfError) {
       result.company_ir = { status: "PROVIDER_ERROR", rawCount: 0, filteredCount: 0 };
     } else {
       result.company_ir = { status: "EMPTY_RESULT", rawCount: 0, filteredCount: 0 };
@@ -5939,7 +5964,7 @@ function computeSourceStatus(
   if (selectedSources.includes("newswire")) {
     if (sourcesUsed.includes("newswire")) {
       result.newswire = { status: newswireItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: newswireItems.length, filteredCount: newswireItems.length };
-    } else if (warningMsgs.some(m => m.includes("yahoo finance"))) {
+    } else if (isYfError) {
       result.newswire = { status: "PROVIDER_ERROR", rawCount: 0, filteredCount: 0 };
     } else {
       result.newswire = { status: "EMPTY_RESULT", rawCount: 0, filteredCount: 0 };
@@ -6007,15 +6032,43 @@ async function collectYahooEvents(
   retrievedAt: string,
   startDate = "",
   endDate = "",
-  lookbackDays?: number
+  lookbackDays?: number,
+  feed: "news" | "press_releases" = "news",
 ): Promise<{ items: Record<string, unknown>[]; warnings: Record<string, unknown>[]; used: boolean }> {
   const warnings: Record<string, unknown>[] = [];
   const items: Record<string, unknown>[] = [];
+  const feedSource = feed === "press_releases" ? "yahoo_finance_press_releases" : "yahoo_finance_news";
   try {
-    const raw = JSON.parse(await getNews(ticker)) as Record<string, unknown>;
-    const news = (raw.items as Record<string, unknown>[]) ?? [];
-    for (const n of news) {
-      const { item, warnings: w } = buildYfEventItem(ticker, n, retrievedAt);
+    let newsRaw: Record<string, unknown>[];
+    if (feed === "press_releases") {
+      // Attempt the Yahoo Finance v2 news endpoint with category filter for press releases.
+      // Falls back gracefully to empty if unavailable.
+      try {
+        const enc = encodeURIComponent;
+        const prUrl = `https://query2.finance.yahoo.com/v2/finance/news?symbols=${enc(ticker.toUpperCase())}&category=press-release&newsCount=${maxResults}`;
+        const resp = await fetch(prUrl, { headers: { "User-Agent": UA } });
+        if (!resp.ok) {
+          await resp.body?.cancel();
+          newsRaw = [];
+        } else {
+          const prJson = await resp.json() as Record<string, unknown>;
+          newsRaw = (prJson.items as Record<string, unknown>[]) ?? [];
+        }
+      } catch {
+        newsRaw = [];
+      }
+    } else {
+      const raw = JSON.parse(await getNews(ticker)) as Record<string, unknown>;
+      newsRaw = (raw.items as Record<string, unknown>[]) ?? [];
+    }
+    for (const n of newsRaw) {
+      // For press_releases feed, skip items that are known to not be press releases.
+      if (feed === "press_releases") {
+        const content = (n.content && typeof n.content === "object") ? n.content as Record<string, unknown> : {};
+        const ct = _str(content.contentType || n.contentType).toUpperCase();
+        if (ct && ct !== "PRESS_RELEASE") continue;
+      }
+      const { item, warnings: w } = buildYfEventItem(ticker, n, retrievedAt, feedSource);
       if (!withinDateWindow(_str(item.publishedAt) || null, startDate, endDate, lookbackDays)) continue;
       items.push(item);
       warnings.push(...w);
@@ -6027,6 +6080,7 @@ async function collectYahooEvents(
   }
   return { items, warnings, used: true };
 }
+
 
 async function collectFinnhubEvents(
   ticker: string,
@@ -6134,7 +6188,11 @@ async function collectCompanyEvents(
   const safeMax = clampInt(maxResults, 10, 1, 100);
   const safeLookback = clampInt(lookbackDays, 14, 1, 3650);
   const watermark = new Date().toISOString();
-  const { selected, warnings: sourceWarnings } = normalizeSources(sources, ["sec", "company_ir", "newswire", "yahoo_finance", "finnhub"]);
+  const { selected, warnings: sourceWarnings } = normalizeSources(sources, [
+    "sec", "company_ir", "newswire",
+    "yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases",
+    "finnhub",
+  ]);
   const warnings: Record<string, unknown>[] = [...sourceWarnings];
   const items: Record<string, unknown>[] = [];
   const sourcesUsed: string[] = [];
@@ -6145,25 +6203,37 @@ async function collectCompanyEvents(
     items.push(...sec.items);
     warnings.push(...sec.warnings);
   }
-  if (selected.some(src => ["yahoo_finance", "company_ir", "newswire"].includes(src))) {
-    const yf = await collectYahooEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback);
+
+  // Yahoo Finance news tab (explicit or via legacy yahoo_finance or legacy sub-sources)
+  const needYfNews = selected.includes("yahoo_finance_news")
+    || selected.includes("yahoo_finance")
+    || selected.some(s => ["company_ir", "newswire"].includes(s));
+  if (needYfNews) {
+    const yf = await collectYahooEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, "news");
     if (yf.used) {
-      if (selected.includes("yahoo_finance")) sourcesUsed.push("yahoo_finance");
-      if (selected.includes("company_ir")) sourcesUsed.push("company_ir");
-      if (selected.includes("newswire")) sourcesUsed.push("newswire");
+      if (selected.includes("yahoo_finance_news")) sourcesUsed.push("yahoo_finance_news");
+      if (selected.includes("yahoo_finance") && !sourcesUsed.includes("yahoo_finance")) sourcesUsed.push("yahoo_finance");
+      for (const leg of ["company_ir", "newswire"] as const) {
+        if (selected.includes(leg) && !sourcesUsed.includes(leg)) sourcesUsed.push(leg);
+      }
     }
     for (const item of yf.items) {
-      const sourceType = _str(item.sourceType);
-      // When yahoo_finance is selected, include all items from the Yahoo Finance
-      // feed regardless of sub-classification (newswire/company_ir articles served
-      // through Yahoo's feed are still Yahoo Finance results). Only separately gate
-      // on company_ir or newswire when yahoo_finance is NOT selected.
-      if (sourceType === "yahoo_finance" && selected.includes("yahoo_finance")) items.push(item);
-      else if (sourceType === "company_ir" && (selected.includes("company_ir") || selected.includes("yahoo_finance"))) items.push(item);
-      else if (sourceType === "newswire" && (selected.includes("newswire") || selected.includes("yahoo_finance"))) items.push(item);
+      const src = _str(item.source);
+      if (selected.includes("yahoo_finance_news") && src === "yahoo_finance_news") items.push(item);
+      else if (selected.includes("yahoo_finance") && ["yahoo_finance_news", "yahoo_finance_press_releases"].includes(src)) items.push(item);
+      else if (selected.some(s => ["company_ir", "newswire"].includes(s)) && ["yahoo_finance_news", "yahoo_finance_press_releases"].includes(src)) items.push(item);
     }
     warnings.push(...yf.warnings);
   }
+
+  // Yahoo Finance press releases tab (explicit or via legacy yahoo_finance)
+  if (selected.includes("yahoo_finance_press_releases")) {
+    const pr = await collectYahooEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, "press_releases");
+    if (pr.used && !sourcesUsed.includes("yahoo_finance_press_releases")) sourcesUsed.push("yahoo_finance_press_releases");
+    items.push(...pr.items);
+    warnings.push(...pr.warnings);
+  }
+
   if (selected.includes("finnhub")) {
     const finnhub = await collectFinnhubEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback);
     if (finnhub.used) sourcesUsed.push("finnhub");
@@ -6185,7 +6255,12 @@ async function collectCompanyEvents(
 
 // ─── Public event / news tools ─────────────────────────────────────────────────
 
-export async function getCompanyNews(ticker: string, maxResults = 10, lookbackDays = 14, sources: string[] = ["yahoo_finance", "finnhub"]): Promise<string> {
+export async function getCompanyNews(
+  ticker: string,
+  maxResults = 10,
+  lookbackDays = 14,
+  sources: string[] = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
+): Promise<string> {
   const out = await collectCompanyEvents(ticker, { maxResults, lookbackDays, sources });
   const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources);
@@ -6207,7 +6282,7 @@ export async function searchCompanyNews(
   query: string,
   startDate = "",
   endDate = "",
-  sources: string[] = ["yahoo_finance", "finnhub"],
+  sources: string[] = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
   maxResults = 10
 ): Promise<string> {
   const out = await collectCompanyEvents(ticker, { maxResults, lookbackDays: 14, startDate, endDate, sources });
@@ -6231,7 +6306,7 @@ export async function getCompanyPressReleases(
   ticker: string,
   lookbackDays = 90,
   maxResults = 20,
-  sources: string[] = ["company_ir", "newswire", "sec"]
+  sources: string[] = ["yahoo_finance_press_releases", "company_ir", "newswire", "sec"]
 ): Promise<string> {
   const out = await collectCompanyEvents(ticker, {
     maxResults,
@@ -6239,7 +6314,8 @@ export async function getCompanyPressReleases(
     sources,
     secFilingTypes: ["8-K"],
   });
-  const items = out.items.filter(it => ["company_ir", "press_release", "newswire", "sec_filing"].includes(_str(it.sourceType)));
+  const releaseTypes = new Set(["company_ir", "press_release", "newswire", "sec_filing", "yahoo_finance_press_releases"]);
+  const items = out.items.filter(it => releaseTypes.has(_str(it.sourceType)));
   const warnings = [...out.warnings];
   if (items.length === 0) {
     warnings.push({
@@ -6282,7 +6358,7 @@ export async function getPublicEventTimeline(
   ticker: string,
   startDate = "",
   endDate = "",
-  sources: string[] = ["sec", "company_ir", "newswire", "yahoo_finance", "finnhub"],
+  sources: string[] = ["sec", "company_ir", "newswire", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
   maxResults = 50,
   newestFirst = false
 ): Promise<string> {
@@ -6319,7 +6395,7 @@ export async function verifyCompanyEvent(
   eventQuery: string,
   startDate = "",
   endDate = "",
-  sources: string[] = ["sec", "company_ir", "newswire", "yahoo_finance", "finnhub"]
+  sources: string[] = ["sec", "company_ir", "newswire", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]
 ): Promise<string> {
   const out = await collectCompanyEvents(ticker, { maxResults: 50, lookbackDays: 365, sources });
   const q = eventQuery.toLowerCase().trim();

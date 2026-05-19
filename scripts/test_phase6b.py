@@ -166,13 +166,14 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             data = _parse(_run(srv.get_company_news("AAPL", sources=["finnhub"])))
             self.assertEqual(data.get("sourceStatus", {}).get("finnhub", {}).get("status"), "OK")
 
-    def test_get_company_news_default_sources_yahoo_and_finnhub_only(self):
-        """Regression: default sources must be yahoo_finance + finnhub only, not sec/company_ir/newswire."""
+    def test_get_company_news_default_sources_uses_fine_grained_yahoo(self):
+        """Regression: default sources must be yahoo_finance_news + yahoo_finance_press_releases + finnhub only."""
         yf_items = [
             {
                 "title": "Apple reports record sales",
-                "source": "Yahoo Finance",
-                "sourceType": "yahoo_finance",
+                "source": "yahoo_finance_news",
+                "originalSource": "Yahoo Finance",
+                "sourceType": "yahoo_finance_news",
                 "publishedAt": "2026-05-15T12:30:00Z",
                 "retrievedAt": "2026-05-15T13:01:22Z",
                 "url": "https://finance.yahoo.com/news/apple-record-sales",
@@ -186,8 +187,9 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             },
             {
                 "title": "Apple launches new iPhone",
-                "source": "Yahoo Finance",
-                "sourceType": "yahoo_finance",
+                "source": "yahoo_finance_news",
+                "originalSource": "Yahoo Finance",
+                "sourceType": "yahoo_finance_news",
                 "publishedAt": "2026-05-14T10:00:00Z",
                 "retrievedAt": "2026-05-14T10:01:00Z",
                 "url": "https://finance.yahoo.com/news/apple-new-iphone",
@@ -206,20 +208,23 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             "severity": "warning",
         }]
         with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
-            mocked.return_value = (yf_items, ["yahoo_finance"], finnhub_unconfigured_warning, "2026-05-15T13:01:22Z")
+            mocked.return_value = (yf_items, ["yahoo_finance_news"], finnhub_unconfigured_warning, "2026-05-15T13:01:22Z")
             data = _parse(_run(srv.get_company_news("AAPL")))
             # Must return 2 items from Yahoo even though Finnhub is absent
             self.assertEqual(len(data.get("items", [])), 2)
-            # sourceStatus must include yahoo_finance and finnhub only
+            # sourceStatus must include yahoo_finance_news, yahoo_finance_press_releases, and finnhub only
             source_status = data.get("sourceStatus", {})
-            self.assertIn("yahoo_finance", source_status)
+            self.assertIn("yahoo_finance_news", source_status)
+            self.assertIn("yahoo_finance_press_releases", source_status)
             self.assertIn("finnhub", source_status)
-            # sec, company_ir, newswire must NOT appear in default sourceStatus
+            # sec, company_ir, newswire, legacy yahoo_finance must NOT appear in default sourceStatus
             self.assertNotIn("sec", source_status)
             self.assertNotIn("company_ir", source_status)
             self.assertNotIn("newswire", source_status)
-            # Yahoo returned items so its status is OK; Finnhub is UNCONFIGURED
-            self.assertEqual(source_status.get("yahoo_finance", {}).get("status"), "OK")
+            self.assertNotIn("yahoo_finance", source_status)
+            # Yahoo news returned items so its status is OK; Finnhub is UNCONFIGURED
+            self.assertEqual(source_status.get("yahoo_finance_news", {}).get("status"), "OK")
+            self.assertEqual(source_status.get("yahoo_finance_press_releases", {}).get("status"), "EMPTY_RESULT")
             self.assertEqual(source_status.get("finnhub", {}).get("status"), "UNCONFIGURED")
             # Top-level status: items present + SOURCE_UNAVAILABLE warning → PARTIAL (not SOURCE_LIMITED_NOT_FOUND)
             self.assertIn(data.get("status"), ("PARTIAL", None))
@@ -229,8 +234,9 @@ class TestPhase6BCompanyNews(unittest.TestCase):
         yf_items = [
             {
                 "title": "Apple hits all-time high",
-                "source": "Yahoo Finance",
-                "sourceType": "yahoo_finance",
+                "source": "yahoo_finance_news",
+                "originalSource": "Yahoo Finance",
+                "sourceType": "yahoo_finance_news",
                 "publishedAt": "2026-05-16T08:00:00Z",
                 "retrievedAt": "2026-05-16T08:01:00Z",
                 "url": "https://finance.yahoo.com/news/apple-ath",
@@ -244,8 +250,9 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             },
             {
                 "title": "Apple dividend increase",
-                "source": "Yahoo Finance",
-                "sourceType": "yahoo_finance",
+                "source": "yahoo_finance_news",
+                "originalSource": "Yahoo Finance",
+                "sourceType": "yahoo_finance_news",
                 "publishedAt": "2026-05-15T09:00:00Z",
                 "retrievedAt": "2026-05-15T09:01:00Z",
                 "url": "https://finance.yahoo.com/news/apple-dividend",
@@ -264,7 +271,7 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             "severity": "warning",
         }]
         with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
-            mocked.return_value = (yf_items, ["yahoo_finance"], finnhub_unconfigured_warning, "2026-05-16T08:01:00Z")
+            mocked.return_value = (yf_items, ["yahoo_finance_news"], finnhub_unconfigured_warning, "2026-05-16T08:01:00Z")
             data = _parse(_run(srv.get_yahoo_finance_news("AAPL")))
             # Must return 2 Yahoo items even with no Finnhub key
             self.assertEqual(len(data.get("items", [])), 2)
@@ -273,24 +280,28 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             self.assertNotIn("sec", source_status)
             self.assertNotIn("company_ir", source_status)
             self.assertNotIn("newswire", source_status)
-            # _collect_company_events must have been called with sources containing only news sources
+            # _collect_company_events must have been called with fine-grained Yahoo sources
             call_kwargs = mocked.call_args
             called_sources = call_kwargs.kwargs.get("sources") or (call_kwargs.args[1] if len(call_kwargs.args) > 1 else None)
             if called_sources is not None:
                 self.assertNotIn("sec", called_sources)
                 self.assertNotIn("company_ir", called_sources)
                 self.assertNotIn("newswire", called_sources)
-                self.assertIn("yahoo_finance", called_sources)
+                # Must include at least one Yahoo Finance source
+                self.assertTrue(
+                    any(s in called_sources for s in ("yahoo_finance_news", "yahoo_finance_press_releases", "yahoo_finance")),
+                    f"Expected a Yahoo Finance source in {called_sources}",
+                )
 
     def test_yahoo_newswire_items_included_when_yahoo_finance_selected(self):
-        """Regression: newswire-subtype items from Yahoo feed must be returned when yahoo_finance is selected."""
-        # Simulate what _collect_company_events returns after the fix:
-        # items from Yahoo Finance feed that were sub-classified as newswire/company_ir
+        """Regression: all Yahoo feed items must be returned when yahoo_finance (legacy) is selected."""
+        # Items now use the new fine-grained source labels even when fetched via the legacy 'yahoo_finance' source.
         yf_feed_items = [
             {
                 "title": "Apple Q2 Results Press Release",
-                "source": "Business Wire",
-                "sourceType": "newswire",
+                "source": "yahoo_finance_press_releases",
+                "originalSource": "Business Wire",
+                "sourceType": "yahoo_finance_press_releases",
                 "publishedAt": "2026-05-16T16:00:00Z",
                 "retrievedAt": "2026-05-16T16:01:00Z",
                 "url": "https://www.businesswire.com/news/apple-q2",
@@ -304,8 +315,9 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             },
             {
                 "title": "Apple IR: Share Buyback Program",
-                "source": "Apple Investor Relations",
-                "sourceType": "company_ir",
+                "source": "yahoo_finance_news",
+                "originalSource": "Apple Investor Relations",
+                "sourceType": "yahoo_finance_news",
                 "publishedAt": "2026-05-15T10:00:00Z",
                 "retrievedAt": "2026-05-15T10:01:00Z",
                 "url": "https://investor.apple.com/news/detail",
@@ -319,8 +331,9 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             },
             {
                 "title": "AAPL analyst upgrade",
-                "source": "Yahoo Finance",
-                "sourceType": "yahoo_finance",
+                "source": "yahoo_finance_news",
+                "originalSource": "Yahoo Finance",
+                "sourceType": "yahoo_finance_news",
                 "publishedAt": "2026-05-14T08:00:00Z",
                 "retrievedAt": "2026-05-14T08:01:00Z",
                 "url": "https://finance.yahoo.com/news/aapl-upgrade",
@@ -340,27 +353,29 @@ class TestPhase6BCompanyNews(unittest.TestCase):
         }]
         with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
             mocked.return_value = (yf_feed_items, ["yahoo_finance"], finnhub_warning, "2026-05-16T16:01:00Z")
-            data = _parse(_run(srv.get_company_news("AAPL")))
-            # All 3 items (including newswire + company_ir sub-types) must appear
+            # Call with legacy yahoo_finance source explicitly
+            data = _parse(_run(srv.get_company_news("AAPL", sources=["yahoo_finance", "finnhub"])))
+            # All 3 items must appear
             self.assertEqual(len(data.get("items", [])), 3)
-            # sourceStatus.yahoo_finance must report OK with rawCount=3
-            yf_status = data.get("sourceStatus", {}).get("yahoo_finance", {})
+            # sourceStatus.yahoo_finance (legacy) must report OK with rawCount=3
+            source_status = data.get("sourceStatus", {})
+            yf_status = source_status.get("yahoo_finance", {})
             self.assertEqual(yf_status.get("status"), "OK")
             self.assertEqual(yf_status.get("rawCount"), 3)
             # sec/company_ir/newswire must NOT appear as separate top-level status keys
-            source_status = data.get("sourceStatus", {})
             self.assertNotIn("sec", source_status)
             self.assertNotIn("company_ir", source_status)
             self.assertNotIn("newswire", source_status)
 
-    def test_collect_company_events_includes_newswire_when_yahoo_selected(self):
-        """Unit test: _collect_company_events includes newswire items from Yahoo feed when yahoo_finance is selected."""
+    def test_collect_company_events_includes_all_yahoo_items_when_yahoo_selected(self):
+        """Unit test: _collect_company_events includes all Yahoo feed items when yahoo_finance is selected."""
         import datetime
 
-        newswire_item = {
+        news_item = {
             "title": "Tesla raises guidance",
-            "source": "PR Newswire",
-            "sourceType": "newswire",
+            "source": "yahoo_finance_news",
+            "originalSource": "PR Newswire",
+            "sourceType": "yahoo_finance_news",
             "publishedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "retrievedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "url": "https://www.prnewswire.com/news/tesla-guidance",
@@ -372,10 +387,11 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             "tickerRelevance": "HIGH",
             "duplicateGroupId": "nw2",
         }
-        company_ir_item = {
+        pr_item = {
             "title": "Tesla investor update",
-            "source": "Tesla IR",
-            "sourceType": "company_ir",
+            "source": "yahoo_finance_press_releases",
+            "originalSource": "Tesla IR",
+            "sourceType": "yahoo_finance_press_releases",
             "publishedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "retrievedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "url": "https://investor.tesla.com/update",
@@ -390,39 +406,68 @@ class TestPhase6BCompanyNews(unittest.TestCase):
 
         with patch("server._collect_yahoo_events", new_callable=AsyncMock) as mock_yf, \
              patch("server._collect_finnhub_events", new_callable=AsyncMock) as mock_fh:
-            mock_yf.return_value = ([newswire_item, company_ir_item], [], True)
+            mock_yf.return_value = ([news_item, pr_item], [], True)
             mock_fh.return_value = ([], [{"code": "SOURCE_UNAVAILABLE", "message": "Finnhub company-news source is not configured; skipped.", "severity": "warning"}], False)
             items, sources_used, warnings, _ = _run(
                 srv._collect_company_events("TSLA", max_results=10, lookback_days=14, sources=["yahoo_finance", "finnhub"])
             )
-            # Both newswire and company_ir items from Yahoo feed must be included
+            # Both yahoo_finance_news and yahoo_finance_press_releases items from the Yahoo feed must be included
             self.assertEqual(len(items), 2)
-            source_types = {it["sourceType"] for it in items}
-            self.assertIn("newswire", source_types)
-            self.assertIn("company_ir", source_types)
+            sources = {it["source"] for it in items}
+            self.assertIn("yahoo_finance_news", sources)
+            self.assertIn("yahoo_finance_press_releases", sources)
 
-    def test_compute_source_status_counts_all_yahoo_feed_types(self):
-        """Unit test: _compute_source_status counts newswire/company_ir items toward yahoo_finance when not separately selected."""
+    def test_compute_source_status_with_new_yahoo_sources(self):
+        """Unit test: _compute_source_status reports fine-grained Yahoo Finance source statuses."""
         items = [
-            {"sourceType": "newswire", "source": "Business Wire"},
-            {"sourceType": "company_ir", "source": "Apple IR"},
-            {"sourceType": "yahoo_finance", "source": "Yahoo Finance"},
+            {"sourceType": "yahoo_finance_news", "source": "yahoo_finance_news", "originalSource": "Reuters"},
+            {"sourceType": "yahoo_finance_press_releases", "source": "yahoo_finance_press_releases", "originalSource": "BusinessWire"},
+            {"sourceType": "yahoo_finance_news", "source": "yahoo_finance_news", "originalSource": "Yahoo Finance"},
         ]
-        # Only yahoo_finance and finnhub are selected (default path)
+        # Fine-grained sources selected
+        status = srv._compute_source_status(
+            sources_used=["yahoo_finance_news", "yahoo_finance_press_releases"],
+            warnings=[{"code": "SOURCE_UNAVAILABLE", "message": "Finnhub company-news source is not configured; skipped.", "severity": "warning"}],
+            items=items,
+            selected_sources=["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
+        )
+        # yahoo_finance_news has 2 items
+        self.assertEqual(status.get("yahoo_finance_news", {}).get("status"), "OK")
+        self.assertEqual(status.get("yahoo_finance_news", {}).get("rawCount"), 2)
+        # yahoo_finance_press_releases has 1 item
+        self.assertEqual(status.get("yahoo_finance_press_releases", {}).get("status"), "OK")
+        self.assertEqual(status.get("yahoo_finance_press_releases", {}).get("rawCount"), 1)
+        # finnhub must be UNCONFIGURED
+        self.assertEqual(status.get("finnhub", {}).get("status"), "UNCONFIGURED")
+        # legacy yahoo_finance must NOT appear
+        self.assertNotIn("yahoo_finance", status)
+
+    def test_compute_source_status_legacy_yahoo_finance_aggregates(self):
+        """Unit test: _compute_source_status aggregates both yahoo sub-sources under legacy yahoo_finance key."""
+        items = [
+            {"sourceType": "yahoo_finance_news", "source": "yahoo_finance_news", "originalSource": "Business Wire"},
+            {"sourceType": "yahoo_finance_press_releases", "source": "yahoo_finance_press_releases", "originalSource": "Apple IR"},
+            {"sourceType": "yahoo_finance_news", "source": "yahoo_finance_news", "originalSource": "Yahoo Finance"},
+        ]
+        # Legacy yahoo_finance source selected
         status = srv._compute_source_status(
             sources_used=["yahoo_finance"],
             warnings=[{"code": "SOURCE_UNAVAILABLE", "message": "Finnhub company-news source is not configured; skipped.", "severity": "warning"}],
             items=items,
             selected_sources=["yahoo_finance", "finnhub"],
         )
-        # All 3 items must count toward yahoo_finance
+        # All 3 items must count toward yahoo_finance legacy aggregate
         self.assertEqual(status.get("yahoo_finance", {}).get("status"), "OK")
         self.assertEqual(status.get("yahoo_finance", {}).get("rawCount"), 3)
-        # company_ir and newswire must NOT appear as separate keys
+        # fine-grained keys must NOT appear when only legacy source is selected
+        self.assertNotIn("yahoo_finance_news", status)
+        self.assertNotIn("yahoo_finance_press_releases", status)
+        # company_ir and newswire must NOT appear
         self.assertNotIn("company_ir", status)
         self.assertNotIn("newswire", status)
         # finnhub must be UNCONFIGURED
         self.assertEqual(status.get("finnhub", {}).get("status"), "UNCONFIGURED")
+
 
     def test_yahoo_empty_finnhub_unavailable_no_sec_default_behavior(self):
         """Regression: Yahoo empty + Finnhub unavailable must NOT surface SEC-only defaults."""
@@ -440,9 +485,11 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             # company_ir and newswire must not appear
             self.assertNotIn("company_ir", source_status)
             self.assertNotIn("newswire", source_status)
-            # yahoo_finance must appear with EMPTY_RESULT (not OK)
-            self.assertIn("yahoo_finance", source_status)
-            self.assertEqual(source_status["yahoo_finance"].get("status"), "EMPTY_RESULT")
+            # yahoo_finance_news and yahoo_finance_press_releases must appear with EMPTY_RESULT
+            self.assertIn("yahoo_finance_news", source_status)
+            self.assertEqual(source_status["yahoo_finance_news"].get("status"), "EMPTY_RESULT")
+            self.assertIn("yahoo_finance_press_releases", source_status)
+            self.assertEqual(source_status["yahoo_finance_press_releases"].get("status"), "EMPTY_RESULT")
             # finnhub must be UNCONFIGURED
             self.assertEqual(source_status.get("finnhub", {}).get("status"), "UNCONFIGURED")
 
@@ -538,7 +585,260 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
             self.assertEqual(data.get("status"), "CONFLICTING")
 
 
-class TestPhase6BPublicWording(unittest.TestCase):
+class TestPhase6BYahooFinanceSources(unittest.TestCase):
+    """Tests for the new yahoo_finance_news / yahoo_finance_press_releases split."""
+
+    def _make_news_item(self, dup_id: str, source: str, source_type: str, original_source: str = "Yahoo Finance") -> dict:
+        import datetime
+        return {
+            "title": f"Headline for {dup_id}",
+            "source": source,
+            "originalSource": original_source,
+            "sourceType": source_type,
+            "publishedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "retrievedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "url": f"https://finance.yahoo.com/news/{dup_id}",
+            "tickers": ["AAPL"],
+            "eventType": "other",
+            "summary": f"summary {dup_id}",
+            "evidenceText": f"text {dup_id}",
+            "confidence": "MEDIUM",
+            "tickerRelevance": "HIGH",
+            "duplicateGroupId": dup_id,
+        }
+
+    # ------------------------------------------------------------------
+    # _build_yahoo_event_item unit tests
+    # ------------------------------------------------------------------
+
+    def test_build_yahoo_event_item_story_labeled_yahoo_finance_news(self):
+        """STORY contentType → source=yahoo_finance_news, sourceType=yahoo_finance_news."""
+        raw = {
+            "content": {
+                "title": "NVDA beats estimates",
+                "summary": "Strong quarter",
+                "contentType": "STORY",
+                "pubDate": "2026-05-15T12:00:00.000Z",
+                "provider": {"displayName": "Reuters"},
+                "canonicalUrl": {"url": "https://reuters.com/nvda"},
+            },
+            "providerPublishTime": 1747310400,
+        }
+        import server as srv_mod
+        item, _ = srv_mod._build_yahoo_event_item("NVDA", raw, "2026-05-15T13:00:00Z")
+        self.assertEqual(item["source"], "yahoo_finance_news")
+        self.assertEqual(item["sourceType"], "yahoo_finance_news")
+        self.assertEqual(item["originalSource"], "Reuters")
+
+    def test_build_yahoo_event_item_press_release_labeled_yahoo_finance_press_releases(self):
+        """PRESS_RELEASE contentType → source=yahoo_finance_press_releases."""
+        raw = {
+            "content": {
+                "title": "AAPL declares special dividend",
+                "summary": "Apple board approves dividend",
+                "contentType": "PRESS_RELEASE",
+                "pubDate": "2026-05-10T16:00:00.000Z",
+                "provider": {"displayName": "BusinessWire"},
+                "canonicalUrl": {"url": "https://businesswire.com/aapl-div"},
+            },
+            "providerPublishTime": 1746892800,
+        }
+        import server as srv_mod
+        item, _ = srv_mod._build_yahoo_event_item("AAPL", raw, "2026-05-10T17:00:00Z")
+        self.assertEqual(item["source"], "yahoo_finance_press_releases")
+        self.assertEqual(item["sourceType"], "yahoo_finance_press_releases")
+        self.assertEqual(item["originalSource"], "BusinessWire")
+
+    def test_build_yahoo_event_item_feed_source_override(self):
+        """feed_source parameter forces the source label regardless of contentType."""
+        raw = {
+            "title": "Tesla Q1",
+            "summary": "Beat estimates",
+            "publisher": "PR Newswire",
+            "link": "https://prnewswire.com/tsla",
+            "providerPublishTime": 1747310400,
+        }
+        import server as srv_mod
+        item_pr, _ = srv_mod._build_yahoo_event_item("TSLA", raw, "2026-05-15T13:00:00Z", feed_source="yahoo_finance_press_releases")
+        self.assertEqual(item_pr["source"], "yahoo_finance_press_releases")
+        self.assertEqual(item_pr["originalSource"], "PR Newswire")
+
+        item_news, _ = srv_mod._build_yahoo_event_item("TSLA", raw, "2026-05-15T13:00:00Z", feed_source="yahoo_finance_news")
+        self.assertEqual(item_news["source"], "yahoo_finance_news")
+
+    def test_build_yahoo_event_item_has_original_source(self):
+        """originalSource field is always populated."""
+        raw = {
+            "content": {
+                "title": "AAPL news",
+                "contentType": "ARTICLE",
+                "provider": {"displayName": "Motley Fool"},
+                "canonicalUrl": {"url": "https://fool.com/aapl"},
+            },
+            "providerPublishTime": 1747310400,
+        }
+        import server as srv_mod
+        item, _ = srv_mod._build_yahoo_event_item("AAPL", raw, "2026-05-15T13:00:00Z")
+        self.assertIn("originalSource", item)
+        self.assertEqual(item["originalSource"], "Motley Fool")
+
+    # ------------------------------------------------------------------
+    # get_company_news acceptance tests
+    # ------------------------------------------------------------------
+
+    def test_get_company_news_merged_output_preserves_source_identity(self):
+        """get_company_news merged result preserves distinct source labels per item."""
+        items = [
+            self._make_news_item("n1", "yahoo_finance_news", "yahoo_finance_news", "Reuters"),
+            self._make_news_item("pr1", "yahoo_finance_press_releases", "yahoo_finance_press_releases", "BusinessWire"),
+            self._make_news_item("fh1", "finnhub", "company_news", "Barron's"),
+        ]
+        items[-1]["originalSource"] = "Barron's"
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+            mocked.return_value = (items, ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"], [], "2026-05-15T12:00:00Z")
+            data = _parse(_run(srv.get_company_news("AAPL")))
+            returned_sources = {it["source"] for it in data.get("items", [])}
+            self.assertIn("yahoo_finance_news", returned_sources)
+            self.assertIn("yahoo_finance_press_releases", returned_sources)
+            self.assertIn("finnhub", returned_sources)
+            # original sources preserved
+            original_sources = {it.get("originalSource") for it in data.get("items", [])}
+            self.assertIn("Reuters", original_sources)
+            self.assertIn("BusinessWire", original_sources)
+
+    def test_get_company_news_source_status_distinguishes_all_three(self):
+        """sourceStatus has distinct keys for yahoo_finance_news, yahoo_finance_press_releases, finnhub."""
+        news_items = [self._make_news_item("n1", "yahoo_finance_news", "yahoo_finance_news")]
+        pr_items = [self._make_news_item("pr1", "yahoo_finance_press_releases", "yahoo_finance_press_releases")]
+        finnhub_items = [self._make_news_item("fh1", "finnhub", "company_news")]
+
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+            mocked.return_value = (
+                news_items + pr_items + finnhub_items,
+                ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
+                [],
+                "2026-05-15T12:00:00Z",
+            )
+            data = _parse(_run(srv.get_company_news("AAPL")))
+            ss = data.get("sourceStatus", {})
+            self.assertEqual(ss.get("yahoo_finance_news", {}).get("status"), "OK")
+            self.assertEqual(ss.get("yahoo_finance_press_releases", {}).get("status"), "OK")
+            self.assertEqual(ss.get("finnhub", {}).get("status"), "OK")
+            # Legacy yahoo_finance must NOT appear by default
+            self.assertNotIn("yahoo_finance", ss)
+
+    # ------------------------------------------------------------------
+    # get_company_press_releases acceptance tests
+    # ------------------------------------------------------------------
+
+    def test_get_company_press_releases_yahoo_pr_as_first_class_source(self):
+        """get_company_press_releases returns yahoo_finance_press_releases items."""
+        pr_item = self._make_news_item("pr1", "yahoo_finance_press_releases", "yahoo_finance_press_releases", "PR Newswire")
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+            mocked.return_value = ([pr_item], ["yahoo_finance_press_releases"], [], "2026-05-15T12:00:00Z")
+            data = _parse(_run(srv.get_company_press_releases("AAPL")))
+            sources = {it["source"] for it in data.get("items", [])}
+            self.assertIn("yahoo_finance_press_releases", sources)
+            self.assertNotIn("NO_OFFICIAL_RELEASE_SOURCE", [w.get("code") for w in data.get("warnings", [])])
+
+    def test_get_company_press_releases_default_includes_yahoo_pr_source(self):
+        """get_company_press_releases default sources include yahoo_finance_press_releases."""
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+            mocked.return_value = ([], [], [], "2026-05-15T12:00:00Z")
+            _run(srv.get_company_press_releases("AAPL"))
+            call_kwargs = mocked.call_args
+            called_sources = call_kwargs.kwargs.get("sources") or []
+            self.assertIn("yahoo_finance_press_releases", called_sources)
+
+    # ------------------------------------------------------------------
+    # _build_yahoo_event_item: item schema
+    # ------------------------------------------------------------------
+
+    def test_yahoo_item_schema_has_required_fields(self):
+        """Yahoo news items contain all required schema fields."""
+        raw = {
+            "content": {
+                "title": "NVDA earnings beat",
+                "summary": "Revenue up 20%",
+                "contentType": "STORY",
+                "pubDate": "2026-05-15T12:00:00.000Z",
+                "provider": {"displayName": "Yahoo Finance"},
+                "canonicalUrl": {"url": "https://finance.yahoo.com/nvda-earnings"},
+            },
+            "providerPublishTime": 1747310400,
+        }
+        import server as srv_mod
+        item, _ = srv_mod._build_yahoo_event_item("NVDA", raw, "2026-05-15T13:00:00Z")
+        for field in ("source", "sourceType", "originalSource", "publishedAt", "retrievedAt", "url", "title", "summary", "tickers", "eventType"):
+            self.assertIn(field, item, f"Missing field: {field}")
+
+    # ------------------------------------------------------------------
+    # Dedupe: same story from Yahoo + Finnhub preserves both sources
+    # ------------------------------------------------------------------
+
+    def test_dedupe_preserves_source_identity_when_story_appears_in_multiple_sources(self):
+        """Dedupe keeps items even when the same story is seen from Yahoo and Finnhub (different duplicateGroupId)."""
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        yf_item = {
+            "title": "AAPL new product launch",
+            "source": "yahoo_finance_news",
+            "originalSource": "Reuters",
+            "sourceType": "yahoo_finance_news",
+            "publishedAt": now,
+            "retrievedAt": now,
+            "url": "https://reuters.com/aapl-launch",
+            "tickers": ["AAPL"],
+            "eventType": "product",
+            "summary": "new product",
+            "evidenceText": "product launch",
+            "confidence": "MEDIUM",
+            "tickerRelevance": "HIGH",
+            "duplicateGroupId": "aapl-launch-yf",
+        }
+        fh_item = {
+            "title": "AAPL new product launch",
+            "source": "finnhub",
+            "originalSource": "Reuters",
+            "sourceType": "company_news",
+            "publishedAt": now,
+            "retrievedAt": now,
+            "url": "https://reuters.com/aapl-launch",
+            "tickers": ["AAPL"],
+            "eventType": "product",
+            "summary": "new product",
+            "evidenceText": "product launch",
+            "confidence": "MEDIUM",
+            "tickerRelevance": "HIGH",
+            "duplicateGroupId": "aapl-launch-fh",
+        }
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+            mocked.return_value = ([yf_item, fh_item], ["yahoo_finance_news", "finnhub"], [], now)
+            data = _parse(_run(srv.get_company_news("AAPL")))
+            items = data.get("items", [])
+            # Both items must be present (different duplicateGroupId → not deduped)
+            item_sources = {it["source"] for it in items}
+            self.assertIn("yahoo_finance_news", item_sources)
+            self.assertIn("finnhub", item_sources)
+
+    # ------------------------------------------------------------------
+    # Backward-compat: legacy yahoo_finance source still works
+    # ------------------------------------------------------------------
+
+    def test_legacy_yahoo_finance_source_still_accepted(self):
+        """Passing sources=['yahoo_finance', 'finnhub'] still works without errors."""
+        items = [self._make_news_item("n1", "yahoo_finance_news", "yahoo_finance_news")]
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+            mocked.return_value = (items, ["yahoo_finance"], [], "2026-05-15T12:00:00Z")
+            data = _parse(_run(srv.get_company_news("AAPL", sources=["yahoo_finance", "finnhub"])))
+            self.assertEqual(len(data.get("items", [])), 1)
+            # Legacy source status key should appear
+            ss = data.get("sourceStatus", {})
+            self.assertIn("yahoo_finance", ss)
+            self.assertIn("finnhub", ss)
+
+
+
     def test_no_private_terms_in_public_descriptions(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(root, "server.py"), encoding="utf-8") as f:
