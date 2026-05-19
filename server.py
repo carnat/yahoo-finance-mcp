@@ -1603,12 +1603,16 @@ async def _collect_yahoo_events(
         company = yf.Ticker(ticker)
         if feed == "press_releases":
             try:
+                # ``get_news(tab=...)`` was introduced in yfinance ≥ 0.2.x.
+                # Falls back to company.news (all-tabs) on older versions.
                 raw_news = company.get_news(tab="press releases") or []
             except Exception:
                 # Fall back to filtering from the general feed if tab API unavailable
                 raw_news = company.news or []
         else:
             try:
+                # ``get_news(tab=...)`` was introduced in yfinance ≥ 0.2.x.
+                # Falls back to company.news on older versions.
                 raw_news = company.get_news(tab="news") or []
             except Exception:
                 raw_news = company.news or []

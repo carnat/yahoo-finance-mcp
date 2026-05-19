@@ -6042,10 +6042,12 @@ async function collectYahooEvents(
     let newsRaw: Record<string, unknown>[];
     if (feed === "press_releases") {
       // Attempt the Yahoo Finance v2 news endpoint with category filter for press releases.
+      // `newsCount` is the query parameter accepted by this API version.
       // Falls back gracefully to empty if unavailable.
       try {
         const enc = encodeURIComponent;
-        const prUrl = `https://query2.finance.yahoo.com/v2/finance/news?symbols=${enc(ticker.toUpperCase())}&category=press-release&newsCount=${maxResults}`;
+        const count = Math.min(Math.max(1, maxResults), 100);
+        const prUrl = `https://query2.finance.yahoo.com/v2/finance/news?symbols=${enc(ticker.toUpperCase())}&category=press-release&newsCount=${count}`;
         const resp = await fetch(prUrl, { headers: { "User-Agent": UA } });
         if (!resp.ok) {
           await resp.body?.cancel();
