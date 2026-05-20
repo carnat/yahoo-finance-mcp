@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import email.utils as _email_utils
 import hashlib
 import html as _html_module
 import json
@@ -9,6 +10,7 @@ import time
 import urllib.parse as _urlparse
 import urllib.request as _urlrequest
 import urllib.error as _urlerror
+import xml.etree.ElementTree as _ET
 from enum import Enum
 from typing import TypedDict
 
@@ -1277,7 +1279,6 @@ def _parse_rss_date(raw: str) -> str | None:
     if not raw:
         return None
     try:
-        import email.utils as _email_utils
         dt = _email_utils.parsedate_to_datetime(raw.strip())
         return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     except Exception:
@@ -1692,8 +1693,6 @@ async def _collect_globenewswire_events(
     company's ``shortName`` / ``longName`` from yfinance.  By default items
     whose relevance cannot be confirmed (**LOW**) are filtered out.
     """
-    import xml.etree.ElementTree as _ET  # stdlib — safe for trusted URLs
-
     warnings: list[dict] = []
     items: list[dict] = []
     ticker_u = ticker.upper()
