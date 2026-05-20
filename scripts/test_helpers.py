@@ -536,6 +536,31 @@ class TestComputeSourceStatus(unittest.TestCase):
         self.assertEqual(result["yahoo_finance"]["status"], "OK")
         self.assertEqual(result["yahoo_finance"]["rawCount"], 1)
 
+    def test_yahoo_finance_ok_when_legacy_source_key_present(self):
+        items = [{"source": "yahoo_finance"}]
+        result = srv._compute_source_status(["yahoo_finance"], [], items, ["yahoo_finance"])
+        self.assertEqual(result["yahoo_finance"]["status"], "OK")
+        self.assertEqual(result["yahoo_finance"]["rawCount"], 1)
+
+    def test_yahoo_finance_news_ok_when_source_type_present(self):
+        items = [{"sourceType": "yahoo_finance_news"}]
+        result = srv._compute_source_status(
+            ["yahoo_finance_news"], [], items, ["yahoo_finance_news"]
+        )
+        self.assertEqual(result["yahoo_finance_news"]["status"], "OK")
+        self.assertEqual(result["yahoo_finance_news"]["rawCount"], 1)
+
+    def test_yahoo_finance_press_releases_ok_when_source_type_present(self):
+        items = [{"sourceType": "yahoo_finance_press_releases"}]
+        result = srv._compute_source_status(
+            ["yahoo_finance_press_releases"],
+            [],
+            items,
+            ["yahoo_finance_press_releases"],
+        )
+        self.assertEqual(result["yahoo_finance_press_releases"]["status"], "OK")
+        self.assertEqual(result["yahoo_finance_press_releases"]["rawCount"], 1)
+
     def test_yahoo_finance_empty_when_no_items(self):
         result = srv._compute_source_status(["yahoo_finance"], [], [], ["yahoo_finance"])
         self.assertEqual(result["yahoo_finance"]["status"], "EMPTY_RESULT")
