@@ -1188,7 +1188,7 @@ Args:
 )
 async def get_yahoo_finance_news(ticker: str) -> str:
     """Alias for get_company_news. Routes to the canonical news tool with Yahoo Finance + Finnhub sources."""
-    return await get_company_news(ticker, sources=["yahoo_finance", "finnhub"])
+    return await get_company_news(ticker, sources=["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"])
 
 
 # ---------------------------------------------------------------------------
@@ -1197,15 +1197,23 @@ async def get_yahoo_finance_news(ticker: str) -> str:
 
 _DEDUP_TITLE_MAX_LEN = 80
 _STALE_EVENT_DAYS = 90
-_PHASE6B_SUPPORTED_SOURCES = {"sec", "company_ir", "newswire", "yahoo_finance", "finnhub"}
-_OFFICIAL_SOURCE_TYPES = {"sec_filing", "company_ir", "press_release", "newswire"}
+_PHASE6B_SUPPORTED_SOURCES = {
+    "sec", "company_ir", "newswire",
+    "yahoo_finance",                  # legacy: aggregates news + press releases
+    "yahoo_finance_news",             # Yahoo Finance general news tab
+    "yahoo_finance_press_releases",   # Yahoo Finance press releases tab
+    "finnhub",
+}
+_OFFICIAL_SOURCE_TYPES = {"sec_filing", "company_ir", "press_release", "newswire", "yahoo_finance_press_releases"}
 _SOURCE_PRIORITY = {
     "sec_filing": 0,
     "company_ir": 1,
     "press_release": 2,
+    "yahoo_finance_press_releases": 2,
     "newswire": 3,
     "company_news": 4,
     "yahoo_finance": 5,
+    "yahoo_finance_news": 5,
     "other": 6,
 }
 _NEWSWIRE_HINTS = ("businesswire", "globenewswire", "prnewswire")
@@ -1397,22 +1405,35 @@ def _within_date_window(
     return True
 
 
-def _build_yahoo_event_item(ticker: str, news_item: dict, retrieved_at: str) -> tuple[dict, list[dict]]:
+def _build_yahoo_event_item(
+    ticker: str,
+    news_item: dict,
+    retrieved_at: str,
+    feed_source: str | None = None,
+) -> tuple[dict, list[dict]]:
+    """Build a standardised event item from a Yahoo Finance news entry.
+
+    feed_source, when provided, sets the ``source`` / ``sourceType`` explicitly
+    (``"yahoo_finance_news"`` or ``"yahoo_finance_press_releases"``).  When
+    omitted the label is inferred from the item's ``contentType`` field:
+    ``PRESS_RELEASE`` → ``yahoo_finance_press_releases``, anything else →
+    ``yahoo_finance_news``.  The original publisher name is preserved in
+    ``originalSource``.
+    """
     warnings: list[dict] = []
     content = news_item.get("content", {}) if isinstance(news_item.get("content"), dict) else {}
     title = str(content.get("title") or news_item.get("title") or "").strip()
     summary = str(content.get("summary") or news_item.get("summary") or "").strip()
     url = str((content.get("canonicalUrl", {}) or {}).get("url") or news_item.get("link") or news_item.get("url") or "").strip()
     provider = str((content.get("provider", {}) or {}).get("displayName") or news_item.get("publisher") or "Yahoo Finance").strip()
-    provider_l = provider.lower()
-    url_l = url.lower()
-    source_type = "yahoo_finance"
-    if any(h in provider_l for h in _NEWSWIRE_HINTS):
-        source_type = "newswire"
-    elif any(marker in provider_l for marker in ("investor relations", "ir team")) or any(
-        marker in url_l for marker in _COMPANY_IR_URL_MARKERS
-    ):
-        source_type = "company_ir"
+
+    # Determine the precise source label.
+    if feed_source in ("yahoo_finance_news", "yahoo_finance_press_releases"):
+        source_key = feed_source
+    else:
+        content_type = str(content.get("contentType") or news_item.get("contentType") or "").upper()
+        source_key = "yahoo_finance_press_releases" if content_type == "PRESS_RELEASE" else "yahoo_finance_news"
+
     published_at = _to_iso_utc(news_item.get("providerPublishTime") or content.get("pubDate") or news_item.get("publishedAt"))
     if not published_at:
         warnings.append({
@@ -1422,11 +1443,11 @@ def _build_yahoo_event_item(ticker: str, news_item: dict, retrieved_at: str) -> 
         })
     ticker_u = ticker.upper()
     text_blob = f"{title} {summary}".upper()
-    ticker_relevance = "HIGH" if ticker_u in text_blob else ("LOW" if source_type == "yahoo_finance" else "UNKNOWN")
+    ticker_relevance = "HIGH" if ticker_u in text_blob else "LOW"
     confidence = "MEDIUM"
     if not url:
         confidence = "LOW"
-    if ticker_relevance in ("LOW", "UNKNOWN") and source_type == "yahoo_finance":
+    if ticker_relevance == "LOW":
         confidence = "LOW"
     issuer = None
     duplicate_group_id = _make_duplicate_group_id(ticker, title, published_at, issuer, url)
@@ -1434,8 +1455,9 @@ def _build_yahoo_event_item(ticker: str, news_item: dict, retrieved_at: str) -> 
         warnings.append({"code": "DEDUPE_WEAK_KEY", "message": "Weak dedupe key for at least one item.", "severity": "warning"})
     item = {
         "title": title,
-        "source": provider or "Yahoo Finance",
-        "sourceType": source_type,
+        "source": source_key,
+        "originalSource": provider or "Yahoo Finance",
+        "sourceType": source_key,
         "publishedAt": published_at,
         "retrievedAt": retrieved_at,
         "url": url or None,
@@ -1561,15 +1583,52 @@ async def _collect_yahoo_events(
     start_date: str = "",
     end_date: str = "",
     lookback_days: int | None = None,
+    feed: str = "news",
 ) -> tuple[list[dict], list[dict], bool]:
+    """Fetch Yahoo Finance items for the given *feed*.
+
+    ``feed="news"`` fetches the general news tab and labels items as
+    ``yahoo_finance_news`` (press-release items from that feed are labelled
+    ``yahoo_finance_press_releases`` automatically via their ``contentType``).
+
+    ``feed="press_releases"`` fetches the press-releases tab directly
+    (requires yfinance ≥ 0.2.x with ``get_news(tab=…)`` support) and labels
+    all returned items as ``yahoo_finance_press_releases``.
+    """
     warnings: list[dict] = []
     items: list[dict] = []
+    feed_source_override: str | None = "yahoo_finance_press_releases" if feed == "press_releases" else None
+
     try:
         company = yf.Ticker(ticker)
-        raw_news = company.news or []
+        if feed == "press_releases":
+            try:
+                # ``get_news(tab=...)`` was introduced in yfinance ≥ 0.2.x.
+                raw_news = company.get_news(tab="press releases") or []
+            except Exception:
+                # Do NOT fall back to the general feed — mislabeling generic
+                # news items as press releases would corrupt source fidelity.
+                # The yahoo_finance_news path fetches the general feed separately.
+                warnings.append({
+                    "code": "PRESS_RELEASE_TAB_UNAVAILABLE",
+                    "message": (
+                        "Yahoo Finance press-releases tab unavailable "
+                        "(requires yfinance ≥ 0.2.x with get_news(tab=...) support)."
+                    ),
+                    "severity": "warning",
+                })
+                return items, warnings, False
+        else:
+            try:
+                # ``get_news(tab=...)`` was introduced in yfinance ≥ 0.2.x.
+                # Falls back to company.news on older versions.
+                raw_news = company.get_news(tab="news") or []
+            except Exception:
+                raw_news = company.news or []
     except Exception as exc:
         warnings.append({"code": "SOURCE_UNAVAILABLE", "message": f"Yahoo Finance source unavailable: {exc}", "severity": "warning"})
         return items, warnings, False
+
     for n in raw_news:
         if not isinstance(n, dict):
             continue
@@ -1577,7 +1636,10 @@ async def _collect_yahoo_events(
         content_type = str(content.get("contentType") or n.get("contentType") or "").upper()
         if content_type and content_type not in _YAHOO_ALLOWED_CONTENT_TYPES:
             continue
-        item, item_warnings = _build_yahoo_event_item(ticker, n, retrieved_at)
+        # For press_releases feed: only keep PRESS_RELEASE items (when contentType is known)
+        if feed == "press_releases" and content_type and content_type != "PRESS_RELEASE":
+            continue
+        item, item_warnings = _build_yahoo_event_item(ticker, n, retrieved_at, feed_source=feed_source_override)
         if not _within_date_window(item.get("publishedAt"), start_date=start_date, end_date=end_date, lookback_days=lookback_days):
             continue
         items.append(item)
@@ -1585,6 +1647,7 @@ async def _collect_yahoo_events(
         if len(items) >= max_results:
             break
     return items, warnings, True
+
 
 
 async def _collect_finnhub_events(
@@ -1771,26 +1834,29 @@ def _compute_source_status(
     items: list[dict],
     selected_sources: list[str] | None = None,
 ) -> dict:
-    """Build per-source status dict from collection results."""
+    """Build per-source status dict from collection results.
+
+    Supports both the new fine-grained source names (``yahoo_finance_news``,
+    ``yahoo_finance_press_releases``) and the legacy ``yahoo_finance`` aggregate
+    name for backward compatibility.
+    """
     warning_msgs = [w.get("message", "") for w in warnings if isinstance(w, dict) and w.get("code") == "SOURCE_UNAVAILABLE"]
     sec_items = [it for it in items if "sec" in str(it.get("sourceType", "")).lower()]
-    # When yahoo_finance is the source, all items from the Yahoo Finance feed
-    # (including sub-classified newswire/company_ir types) count toward the
-    # yahoo_finance status. Only segregate by sub-type when those sub-types
-    # are also explicitly present as separate selected sources.
-    sources = selected_sources or ["yahoo_finance", "finnhub"]
-    _yf_feed_types: set[str] = {"yahoo_finance"}
-    if "yahoo_finance" in sources:
-        # Also count newswire/company_ir items from the Yahoo feed toward
-        # yahoo_finance when those sub-types are not separately requested.
-        if "company_ir" not in sources:
-            _yf_feed_types.add("company_ir")
-        if "newswire" not in sources:
-            _yf_feed_types.add("newswire")
-    yf_items = [it for it in items if str(it.get("sourceType", "")) in _yf_feed_types]
+    sources = selected_sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]
+
+    # Per-source item counts
+    yf_news_items = [it for it in items if str(it.get("source", "")) == "yahoo_finance_news"]
+    yf_pr_items = [it for it in items if str(it.get("source", "")) == "yahoo_finance_press_releases"]
+    # Legacy yahoo_finance aggregates both
+    yf_legacy_items = [it for it in items if str(it.get("source", "")) in ("yahoo_finance_news", "yahoo_finance_press_releases")]
     newswire_items = [it for it in items if str(it.get("sourceType", "")) == "newswire"]
     company_ir_items = [it for it in items if str(it.get("sourceType", "")) in ("company_ir", "press_release")]
     finnhub_items = [it for it in items if str(it.get("source", "")) == "finnhub"]
+
+    def _yf_error_status(warn_msgs: list[str]) -> str | None:
+        if any("yahoo finance" in m.lower() for m in warn_msgs):
+            return "PROVIDER_ERROR"
+        return None
 
     result: dict = {}
     if "sec" in sources:
@@ -1800,13 +1866,35 @@ def _compute_source_status(
             result["sec"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
         else:
             result["sec"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+
+    # Fine-grained Yahoo Finance sources
+    if "yahoo_finance_news" in sources:
+        err = _yf_error_status(warning_msgs)
+        if "yahoo_finance_news" in sources_used:
+            result["yahoo_finance_news"] = {"status": "OK" if yf_news_items else "EMPTY_RESULT", "rawCount": len(yf_news_items), "filteredCount": len(yf_news_items)}
+        elif err:
+            result["yahoo_finance_news"] = {"status": err, "rawCount": 0, "filteredCount": 0}
+        else:
+            result["yahoo_finance_news"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+    if "yahoo_finance_press_releases" in sources:
+        err = _yf_error_status(warning_msgs)
+        if "yahoo_finance_press_releases" in sources_used:
+            result["yahoo_finance_press_releases"] = {"status": "OK" if yf_pr_items else "EMPTY_RESULT", "rawCount": len(yf_pr_items), "filteredCount": len(yf_pr_items)}
+        elif err:
+            result["yahoo_finance_press_releases"] = {"status": err, "rawCount": 0, "filteredCount": 0}
+        else:
+            result["yahoo_finance_press_releases"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+
+    # Legacy yahoo_finance aggregate source
     if "yahoo_finance" in sources:
+        err = _yf_error_status(warning_msgs)
         if "yahoo_finance" in sources_used:
-            result["yahoo_finance"] = {"status": "OK" if yf_items else "EMPTY_RESULT", "rawCount": len(yf_items), "filteredCount": len(yf_items)}
-        elif any("yahoo finance" in m.lower() for m in warning_msgs):
-            result["yahoo_finance"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
+            result["yahoo_finance"] = {"status": "OK" if yf_legacy_items else "EMPTY_RESULT", "rawCount": len(yf_legacy_items), "filteredCount": len(yf_legacy_items)}
+        elif err:
+            result["yahoo_finance"] = {"status": err, "rawCount": 0, "filteredCount": 0}
         else:
             result["yahoo_finance"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+
     if "finnhub" in sources:
         if "finnhub" in sources_used:
             result["finnhub"] = {"status": "OK" if finnhub_items else "EMPTY_RESULT", "rawCount": len(finnhub_items), "filteredCount": len(finnhub_items)}
@@ -1825,14 +1913,14 @@ def _compute_source_status(
     if "company_ir" in sources:
         if "company_ir" in sources_used:
             result["company_ir"] = {"status": "OK" if company_ir_items else "EMPTY_RESULT", "rawCount": len(company_ir_items), "filteredCount": len(company_ir_items)}
-        elif any("yahoo finance" in m.lower() for m in warning_msgs):
+        elif _yf_error_status(warning_msgs):
             result["company_ir"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
         else:
             result["company_ir"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
     if "newswire" in sources:
         if "newswire" in sources_used:
             result["newswire"] = {"status": "OK" if newswire_items else "EMPTY_RESULT", "rawCount": len(newswire_items), "filteredCount": len(newswire_items)}
-        elif any("yahoo finance" in m.lower() for m in warning_msgs):
+        elif _yf_error_status(warning_msgs):
             result["newswire"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
         else:
             result["newswire"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
@@ -1861,7 +1949,7 @@ async def _collect_company_events(
     retrieved_at = _utc_now_iso()
     selected_sources, warnings = _normalize_event_sources(
         sources,
-        ["sec", "company_ir", "newswire", "yahoo_finance", "finnhub"],
+        ["sec", "company_ir", "newswire", "yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
     )
     items: list[dict] = []
     sources_used: list[str] = []
@@ -1883,7 +1971,17 @@ async def _collect_company_events(
         items.extend(sec_items)
         warnings.extend(sec_warnings)
 
-    if any(src in selected_sources for src in ("yahoo_finance", "company_ir", "newswire")):
+    # --- Yahoo Finance news ---
+    # ``yahoo_finance_news`` fetches the news tab explicitly.
+    # ``yahoo_finance`` (legacy) fetches news tab and also the press-releases tab;
+    # items are labelled with their specific source (yahoo_finance_news / _press_releases).
+    _need_yf_news = "yahoo_finance_news" in selected_sources or "yahoo_finance" in selected_sources
+    _need_yf_pr = "yahoo_finance_press_releases" in selected_sources or "yahoo_finance" in selected_sources
+    # Also satisfy old company_ir / newswire sources via the Yahoo feed when
+    # they are requested but yahoo_finance* is not.
+    _need_yf_news = _need_yf_news or any(src in selected_sources for src in ("company_ir", "newswire"))
+
+    if _need_yf_news:
         yf_items, yf_warnings, used = await _collect_yahoo_events(
             ticker,
             retrieved_at=retrieved_at,
@@ -1891,28 +1989,41 @@ async def _collect_company_events(
             start_date=start_date,
             end_date=end_date,
             lookback_days=lookback,
+            feed="news",
         )
         if used:
-            if "yahoo_finance" in selected_sources:
+            if "yahoo_finance_news" in selected_sources:
+                sources_used.append("yahoo_finance_news")
+            if "yahoo_finance" in selected_sources and "yahoo_finance" not in sources_used:
                 sources_used.append("yahoo_finance")
-            if "company_ir" in selected_sources:
-                sources_used.append("company_ir")
-            if "newswire" in selected_sources:
-                sources_used.append("newswire")
+            # Legacy sub-sources resolved via Yahoo feed
+            for legacy in ("company_ir", "newswire"):
+                if legacy in selected_sources and legacy not in sources_used:
+                    sources_used.append(legacy)
         for item in yf_items:
-            source_type = str(item.get("sourceType") or "")
-            # When yahoo_finance is selected, include all items from the Yahoo Finance
-            # feed regardless of their sub-classification (newswire/company_ir articles
-            # served through Yahoo's feed are still Yahoo Finance results). Only
-            # separately gate on company_ir or newswire when yahoo_finance is NOT
-            # selected (e.g. get_company_press_releases).
-            if source_type == "yahoo_finance" and "yahoo_finance" in selected_sources:
+            src = str(item.get("source") or "")
+            if "yahoo_finance_news" in selected_sources and src == "yahoo_finance_news":
                 items.append(item)
-            elif source_type == "company_ir" and ("company_ir" in selected_sources or "yahoo_finance" in selected_sources):
+            elif "yahoo_finance" in selected_sources and src in ("yahoo_finance_news", "yahoo_finance_press_releases"):
                 items.append(item)
-            elif source_type == "newswire" and ("newswire" in selected_sources or "yahoo_finance" in selected_sources):
+            elif any(leg in selected_sources for leg in ("company_ir", "newswire")) and src in ("yahoo_finance_news", "yahoo_finance_press_releases"):
                 items.append(item)
         warnings.extend(yf_warnings)
+
+    if _need_yf_pr:
+        pr_items, pr_warnings, used = await _collect_yahoo_events(
+            ticker,
+            retrieved_at=retrieved_at,
+            max_results=max_cap,
+            start_date=start_date,
+            end_date=end_date,
+            lookback_days=lookback,
+            feed="press_releases",
+        )
+        if used and "yahoo_finance_press_releases" in selected_sources and "yahoo_finance_press_releases" not in sources_used:
+            sources_used.append("yahoo_finance_press_releases")
+        items.extend(pr_items)
+        warnings.extend(pr_warnings)
 
     if "finnhub" in selected_sources:
         finnhub_items, finnhub_warnings, used = await _collect_finnhub_events(
@@ -1965,7 +2076,7 @@ async def search_company_news(
         return _mcp_failure("search_company_news", ErrorCode.INPUT_VALIDATION_ERROR, err)
     if not str(query or "").strip():
         return _mcp_failure("search_company_news", ErrorCode.INPUT_VALIDATION_ERROR, "query is required")
-    effective_sources = sources or ["yahoo_finance", "finnhub"]
+    effective_sources = sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]
     items, sources_used, warnings, retrieved_at = await _collect_company_events(
         ticker,
         max_results=max_results,
@@ -2006,10 +2117,15 @@ async def search_company_news(
 @yfinance_server.tool(
     name="get_company_press_releases",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_company_press_releases"],
-    description="""Get company-originated or official release-style public events.
+    description="""Get company press releases and official release-style public events.
 
-Prefers SEC 8-K and other official release channels. Returns structured source-backed event metadata
-with short evidence excerpts only.
+Returns Yahoo Finance press releases (``yahoo_finance_press_releases``) as a
+first-class source alongside SEC 8-K filings, company IR, and newswire content.
+Items are labelled with precise source identifiers so callers can distinguish
+their origin.
+
+Supported sources: ``yahoo_finance_press_releases``, ``company_ir``,
+``newswire``, ``sec``.
 """,
 )
 async def get_company_press_releases(
@@ -2021,7 +2137,9 @@ async def get_company_press_releases(
     err = _validate_ticker(ticker)
     if err:
         return _mcp_failure("get_company_press_releases", ErrorCode.INPUT_VALIDATION_ERROR, err)
-    selected_sources, source_warnings = _normalize_event_sources(sources, ["company_ir", "newswire", "sec"])
+    selected_sources, source_warnings = _normalize_event_sources(
+        sources, ["yahoo_finance_press_releases", "company_ir", "newswire", "sec"]
+    )
     items, sources_used, warnings, retrieved_at = await _collect_company_events(
         ticker,
         max_results=max_results,
@@ -2030,7 +2148,7 @@ async def get_company_press_releases(
         sec_filing_types=["8-K"],
     )
     warnings = source_warnings + warnings
-    release_types = {"company_ir", "press_release", "newswire", "sec_filing"}
+    release_types = {"company_ir", "press_release", "newswire", "sec_filing", "yahoo_finance_press_releases"}
     release_items = [it for it in items if str(it.get("sourceType")) in release_types]
     if not release_items:
         warnings.append({
@@ -7541,10 +7659,16 @@ async def get_company_events_calendar(ticker: str) -> str:
 @yfinance_server.tool(
     name="get_company_news",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_yahoo_finance_news"],
-    description="""Get recent public company news/events from selected public sources.
+    description="""Get recent public company news and press releases from selected public sources.
 
-Returns deduplicated source-backed items with source type, timestamps, URL, event classification,
-confidence, ticker relevance, and short evidence excerpts.
+Returns deduplicated source-backed items with precise source labels
+(``yahoo_finance_news``, ``yahoo_finance_press_releases``, ``finnhub``),
+timestamps, URL, event classification, confidence, ticker relevance,
+and short evidence excerpts.
+
+Supported sources: ``yahoo_finance_news``, ``yahoo_finance_press_releases``,
+``finnhub``, ``sec``, ``company_ir``, ``newswire``, and the legacy
+``yahoo_finance`` aggregate alias.
 """,
 )
 async def get_company_news(
@@ -7556,7 +7680,7 @@ async def get_company_news(
     err = _validate_ticker(ticker)
     if err:
         return _mcp_failure("get_company_news", ErrorCode.INPUT_VALIDATION_ERROR, err)
-    effective_sources = sources or ["yahoo_finance", "finnhub"]
+    effective_sources = sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]
     items, sources_used, warnings, retrieved_at = await _collect_company_events(
         ticker,
         max_results=max_results,
