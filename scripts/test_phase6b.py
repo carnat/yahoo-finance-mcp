@@ -837,6 +837,124 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
             self.assertIn("yahoo_finance", ss)
             self.assertIn("finnhub", ss)
 
+    # ------------------------------------------------------------------
+    # Fix 1: press-release fallback must NOT mislabel generic news
+    # ------------------------------------------------------------------
+
+    def test_press_release_tab_unavailable_returns_empty_not_general_feed(self):
+        """If get_news(tab='press releases') fails, return empty + warning (no fallback to general feed)."""
+        import server as srv_mod
+
+        class _BadTicker:
+            """Simulates a yfinance Ticker where get_news(tab='press releases') raises."""
+            def get_news(self, tab="news"):
+                if tab == "press releases":
+                    raise AttributeError("tab parameter not supported in this yfinance version")
+                return []
+
+        import datetime
+        retrieved = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        with patch("server.yf") as mock_yf:
+            mock_yf.Ticker.return_value = _BadTicker()
+            items, warnings, used = _run(
+                srv_mod._collect_yahoo_events(
+                    "AAPL",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                    feed="press_releases",
+                )
+            )
+
+        # Must return empty items — no mislabeled generic news
+        self.assertEqual(items, [])
+        self.assertFalse(used)
+        # Must emit a warning explaining why
+        codes = [w.get("code") for w in warnings]
+        self.assertIn("PRESS_RELEASE_TAB_UNAVAILABLE", codes)
+
+    def test_press_release_tab_success_labels_items_correctly(self):
+        """Successful get_news(tab='press releases') labels all items as yahoo_finance_press_releases."""
+        import server as srv_mod
+        import datetime
+
+        retrieved = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        pr_item = {
+            "content": {
+                "title": "AAPL declares dividend",
+                "summary": "Board approves quarterly dividend",
+                "contentType": "PRESS_RELEASE",
+                # Use a string ISO pubDate (not an int providerPublishTime) so the
+                # active _to_iso_utc implementation can parse it correctly.
+                "pubDate": retrieved,
+                "provider": {"displayName": "BusinessWire"},
+                "canonicalUrl": {"url": "https://businesswire.com/aapl-div"},
+            },
+            # Omit providerPublishTime (integer) — would be mis-parsed by the string-only
+            # _to_iso_utc and produce publishedAt=None, causing the item to be date-filtered.
+        }
+
+        class _GoodTicker:
+            def get_news(self, tab="news"):
+                return [pr_item]
+
+        with patch("server.yf") as mock_yf:
+            mock_yf.Ticker.return_value = _GoodTicker()
+            items, warnings, used = _run(
+                srv_mod._collect_yahoo_events(
+                    "AAPL",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                    feed="press_releases",
+                )
+            )
+
+        self.assertTrue(used)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["source"], "yahoo_finance_press_releases")
+
+    def test_press_release_tab_no_fallback_means_no_mislabeled_items(self):
+        """Items without contentType must not be labeled yahoo_finance_press_releases via fallback."""
+        import server as srv_mod
+
+        generic_news_item = {
+            "title": "AAPL generic news without contentType",
+            "publisher": "Some Publisher",
+            "link": "https://example.com/news",
+            "providerPublishTime": 1747310400,
+            # No content/contentType — typical of older yfinance company.news format
+        }
+
+        class _FallbackTicker:
+            """Simulates get_news(tab=...) failing; has company.news with generic items."""
+            @property
+            def news(self):
+                return [generic_news_item]
+
+            def get_news(self, tab="news"):
+                if tab == "press releases":
+                    raise AttributeError("tab not supported")
+                return []
+
+        import datetime
+        retrieved = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        with patch("server.yf") as mock_yf:
+            mock_yf.Ticker.return_value = _FallbackTicker()
+            items, warnings, used = _run(
+                srv_mod._collect_yahoo_events(
+                    "AAPL",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                    feed="press_releases",
+                )
+            )
+
+        # Must not contain the generic item labeled as press release
+        pr_labeled = [it for it in items if it.get("source") == "yahoo_finance_press_releases"]
+        self.assertEqual(pr_labeled, [], "Generic news items must not be mislabeled as press releases")
+        self.assertFalse(used)
 
 
     def test_no_private_terms_in_public_descriptions(self):

@@ -1604,11 +1604,20 @@ async def _collect_yahoo_events(
         if feed == "press_releases":
             try:
                 # ``get_news(tab=...)`` was introduced in yfinance ≥ 0.2.x.
-                # Falls back to company.news (all-tabs) on older versions.
                 raw_news = company.get_news(tab="press releases") or []
             except Exception:
-                # Fall back to filtering from the general feed if tab API unavailable
-                raw_news = company.news or []
+                # Do NOT fall back to the general feed — mislabeling generic
+                # news items as press releases would corrupt source fidelity.
+                # The yahoo_finance_news path fetches the general feed separately.
+                warnings.append({
+                    "code": "PRESS_RELEASE_TAB_UNAVAILABLE",
+                    "message": (
+                        "Yahoo Finance press-releases tab unavailable "
+                        "(requires yfinance ≥ 0.2.x with get_news(tab=...) support)."
+                    ),
+                    "severity": "warning",
+                })
+                return items, warnings, False
         else:
             try:
                 # ``get_news(tab=...)`` was introduced in yfinance ≥ 0.2.x.

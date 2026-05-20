@@ -6041,20 +6041,34 @@ async function collectYahooEvents(
   try {
     let newsRaw: Record<string, unknown>[];
     if (feed === "press_releases") {
-      // Attempt the Yahoo Finance v2 news endpoint with category filter for press releases.
-      // `newsCount` is the query parameter accepted by this API version.
-      // Falls back gracefully to empty if unavailable.
+      // Mirror yfinance Ticker.get_news(tab="press releases"):
+      // POST https://finance.yahoo.com/xhr/ncp?queryRef=pressRelease&serviceKey=ncp_fin
+      // Body: { serviceConfig: { snippetCount: count, s: [ticker] } }
+      // Response: data.data.tickerStream.stream (filter out ad items)
       try {
-        const enc = encodeURIComponent;
+        const { cookie } = await getCrumb();
         const count = Math.min(Math.max(1, maxResults), 100);
-        const prUrl = `https://query2.finance.yahoo.com/v2/finance/news?symbols=${enc(ticker.toUpperCase())}&category=press-release&newsCount=${count}`;
-        const resp = await fetch(prUrl, { headers: { "User-Agent": UA } });
+        const prUrl = "https://finance.yahoo.com/xhr/ncp?queryRef=pressRelease&serviceKey=ncp_fin";
+        const resp = await fetch(prUrl, {
+          method: "POST",
+          headers: {
+            "User-Agent": UA,
+            "Content-Type": "application/json",
+            Cookie: cookie,
+          },
+          body: JSON.stringify({ serviceConfig: { snippetCount: count, s: [ticker.toUpperCase()] } }),
+        });
         if (!resp.ok) {
           await resp.body?.cancel();
           newsRaw = [];
         } else {
           const prJson = await resp.json() as Record<string, unknown>;
-          newsRaw = (prJson.items as Record<string, unknown>[]) ?? [];
+          const stream = (
+            (prJson.data as Record<string, unknown> | undefined)?.tickerStream as Record<string, unknown> | undefined
+          )?.stream;
+          const raw = Array.isArray(stream) ? (stream as Record<string, unknown>[]) : [];
+          // Filter out ad items, exactly as yfinance does
+          newsRaw = raw.filter(item => !item.ad || (Array.isArray(item.ad) && item.ad.length === 0));
         }
       } catch {
         newsRaw = [];
