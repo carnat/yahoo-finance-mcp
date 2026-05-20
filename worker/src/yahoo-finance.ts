@@ -6243,9 +6243,12 @@ async function collectCompanyEvents(
   }
 
   // Yahoo Finance press releases tab (explicit or via legacy yahoo_finance)
-  if (selected.includes("yahoo_finance_press_releases")) {
+  const needYfPr = selected.includes("yahoo_finance_press_releases") || selected.includes("yahoo_finance");
+  if (needYfPr) {
     const pr = await collectYahooEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, "press_releases");
-    if (pr.used && !sourcesUsed.includes("yahoo_finance_press_releases")) sourcesUsed.push("yahoo_finance_press_releases");
+    if (pr.used && selected.includes("yahoo_finance_press_releases") && !sourcesUsed.includes("yahoo_finance_press_releases")) {
+      sourcesUsed.push("yahoo_finance_press_releases");
+    }
     items.push(...pr.items);
     warnings.push(...pr.warnings);
   }

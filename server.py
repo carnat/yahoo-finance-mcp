@@ -2010,7 +2010,7 @@ async def _collect_company_events(
                 items.append(item)
         warnings.extend(yf_warnings)
 
-    if _need_yf_pr and "yahoo_finance_press_releases" in selected_sources:
+    if _need_yf_pr:
         pr_items, pr_warnings, used = await _collect_yahoo_events(
             ticker,
             retrieved_at=retrieved_at,
@@ -2020,7 +2020,7 @@ async def _collect_company_events(
             lookback_days=lookback,
             feed="press_releases",
         )
-        if used and "yahoo_finance_press_releases" not in sources_used:
+        if used and "yahoo_finance_press_releases" in selected_sources and "yahoo_finance_press_releases" not in sources_used:
             sources_used.append("yahoo_finance_press_releases")
         items.extend(pr_items)
         warnings.extend(pr_warnings)
