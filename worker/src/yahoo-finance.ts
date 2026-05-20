@@ -5888,22 +5888,22 @@ function computeSourceStatus(
     .map(w => _str(w.message).toLowerCase());
   const isYfError = warningMsgs.some(m => m.includes("yahoo finance"));
   const secItems = items.filter(it => _str(it.sourceType).includes("sec"));
-  const itemSource = (it: Record<string, unknown>): string => _str(it.source);
-  const itemSourceType = (it: Record<string, unknown>): string => _str(it.sourceType);
+  const getItemSource = (it: Record<string, unknown>): string => _str(it.source);
+  const getItemSourceType = (it: Record<string, unknown>): string => _str(it.sourceType);
   // Fine-grained Yahoo Finance items
   const yfNewsItems = items.filter(
-    it => itemSource(it) === "yahoo_finance_news" || itemSourceType(it) === "yahoo_finance_news"
+    it => getItemSource(it) === "yahoo_finance_news" || getItemSourceType(it) === "yahoo_finance_news"
   );
   const yfPrItems = items.filter(
     it =>
-      itemSource(it) === "yahoo_finance_press_releases"
-      || itemSourceType(it) === "yahoo_finance_press_releases"
+      getItemSource(it) === "yahoo_finance_press_releases"
+      || getItemSourceType(it) === "yahoo_finance_press_releases"
   );
   // Legacy yahoo_finance aggregates both fine-grained sources plus legacy-tagged items
   const yfLegacyItems = items.filter(
     it =>
-      ["yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases"].includes(itemSource(it))
-      || ["yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases"].includes(itemSourceType(it))
+      ["yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases"].includes(getItemSource(it))
+      || ["yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases"].includes(getItemSourceType(it))
   );
   const newswireItems = items.filter(it => _str(it.sourceType) === "newswire");
   const companyIrItems = items.filter(it => ["company_ir", "press_release"].includes(_str(it.sourceType)));

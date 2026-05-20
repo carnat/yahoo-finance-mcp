@@ -1844,7 +1844,7 @@ def _compute_source_status(
     sec_items = [it for it in items if "sec" in str(it.get("sourceType", "")).lower()]
     sources = selected_sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]
 
-    def _item_source_key(it: dict) -> str:
+    def _item_source(it: dict) -> str:
         return str(it.get("source") or "")
 
     def _item_source_type(it: dict) -> str:
@@ -1854,20 +1854,20 @@ def _compute_source_status(
     yf_news_items = [
         it
         for it in items
-        if _item_source_key(it) == "yahoo_finance_news"
+        if _item_source(it) == "yahoo_finance_news"
         or _item_source_type(it) == "yahoo_finance_news"
     ]
     yf_pr_items = [
         it
         for it in items
-        if _item_source_key(it) == "yahoo_finance_press_releases"
+        if _item_source(it) == "yahoo_finance_press_releases"
         or _item_source_type(it) == "yahoo_finance_press_releases"
     ]
     # Legacy yahoo_finance aggregates both fine-grained sources plus legacy-tagged items
     yf_legacy_items = [
         it
         for it in items
-        if _item_source_key(it)
+        if _item_source(it)
         in ("yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases")
         or _item_source_type(it)
         in ("yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases")
