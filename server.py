@@ -1221,6 +1221,11 @@ _COMPANY_IR_URL_MARKERS = ("investor.", "investors.", "/investor", "/news-releas
 _YAHOO_ALLOWED_CONTENT_TYPES = {"STORY", "ARTICLE", "PRESS_RELEASE"}
 _PRE_REVENUE_EPS_EPSILON = 1e-9
 _FINNHUB_NEWS_API = "https://finnhub.io/api/v1/company-news"
+_GLOBENEWSWIRE_RSS_URL = (
+    "https://www.globenewswire.com/RssFeed/orgclass/1/feedTitle/"
+    "GlobeNewswire%20-%20News%20about%20Public%20Companies"
+)
+TTL_NEWS = 15 * 60  # 15 min — RSS feed cache
 _SMOKE_TICKER_CIK_FALLBACKS: dict[str, str] = {
     "AAPL": "0000320193",
     "MSFT": "0000789019",
@@ -1261,6 +1266,22 @@ def _to_iso_utc(raw: object) -> str | None:
         return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
     except Exception:
         return None
+
+
+def _parse_rss_date(raw: str) -> str | None:
+    """Parse an RSS pubDate (RFC 2822) string to ISO 8601 UTC.
+
+    Falls back to :func:`_to_iso_utc` for non-RFC-2822 strings so that
+    alternative date formats found in some feeds are handled gracefully.
+    """
+    if not raw:
+        return None
+    try:
+        import email.utils as _email_utils
+        dt = _email_utils.parsedate_to_datetime(raw.strip())
+        return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return _to_iso_utc(raw)
 
 
 def _coerce_max_results(value: int, default_value: int) -> int:
@@ -1649,6 +1670,151 @@ async def _collect_yahoo_events(
     return items, warnings, True
 
 
+async def _collect_globenewswire_events(
+    ticker: str,
+    *,
+    retrieved_at: str,
+    max_results: int,
+    start_date: str = "",
+    end_date: str = "",
+    lookback_days: int | None = None,
+    filter_low_relevance: bool = True,
+) -> tuple[list[dict], list[dict], bool]:
+    """Fetch the GlobeNewswire public RSS feed and return items relevant to *ticker*.
+
+    Items are labelled with ``source="newswire"``, ``sourceType="newswire"``,
+    ``originalSource="GlobeNewswire"``, ``provider="globenewswire"``, and
+    ``discoveredVia="globenewswire_rss"``.  The feed is cached globally for
+    :data:`TTL_NEWS` seconds so multiple simultaneous per-ticker requests do
+    not trigger repeated network fetches.
+
+    Relevance matching uses the ticker symbol and, when available, the
+    company's ``shortName`` / ``longName`` from yfinance.  By default items
+    whose relevance cannot be confirmed (**LOW**) are filtered out.
+    """
+    import xml.etree.ElementTree as _ET  # stdlib — safe for trusted URLs
+
+    warnings: list[dict] = []
+    items: list[dict] = []
+    ticker_u = ticker.upper()
+
+    # Build relevance search terms (ticker + company names from yfinance).
+    search_terms: list[str] = [ticker_u]
+    try:
+        info = yf.Ticker(ticker).info or {}
+        for field in ("shortName", "longName"):
+            val = str(info.get(field) or "").strip()
+            if val:
+                search_terms.append(val.upper())
+    except Exception:
+        pass
+
+    # --- Fetch / cache the RSS feed (global, not per-ticker) ---
+    cache_key = "gnw_rss:global"
+    xml_content: str | None = None
+    cached_entry = _tool_cache.get(cache_key)
+    if cached_entry is not None:
+        xml_content = cached_entry[0]
+
+    if xml_content is None:
+        loop = asyncio.get_event_loop()
+
+        def _fetch_rss() -> str:
+            req = _urlrequest.Request(
+                _GLOBENEWSWIRE_RSS_URL,
+                headers={"User-Agent": _SEC_REQUIRED_UA},
+            )
+            with _urlrequest.urlopen(req, timeout=20) as resp:  # noqa: S310
+                return resp.read().decode("utf-8", errors="replace")
+
+        try:
+            xml_content = await loop.run_in_executor(None, _fetch_rss)
+            _tool_cache.set(cache_key, xml_content, TTL_NEWS)
+        except Exception as exc:
+            warnings.append({
+                "code": "SOURCE_UNAVAILABLE",
+                "message": f"GlobeNewswire RSS unavailable: {exc}",
+                "severity": "warning",
+            })
+            return items, warnings, False
+
+    # --- Parse RSS/XML ---
+    try:
+        root = _ET.fromstring(xml_content)  # noqa: S314 (trusted source)
+        channel = root.find("channel") if root.tag != "channel" else root
+        rss_items = channel.findall("item") if channel is not None else []
+    except Exception as exc:
+        warnings.append({
+            "code": "SOURCE_UNAVAILABLE",
+            "message": f"GlobeNewswire RSS parse error: {exc}",
+            "severity": "warning",
+        })
+        return items, warnings, False
+
+    # --- Normalize and filter ---
+    for rss_item in rss_items:
+        title = (rss_item.findtext("title") or "").strip()
+        description = (rss_item.findtext("description") or "").strip()
+        link = (rss_item.findtext("link") or "").strip() or None
+        published_at = _parse_rss_date((rss_item.findtext("pubDate") or "").strip())
+
+        blob = f"{title} {description}".upper()
+        relevance = "LOW"
+        for term in search_terms:
+            if term and term in blob:
+                relevance = "HIGH"
+                break
+
+        if filter_low_relevance and relevance == "LOW":
+            continue
+        if not _within_date_window(
+            published_at,
+            start_date=start_date,
+            end_date=end_date,
+            lookback_days=lookback_days,
+        ):
+            continue
+
+        if not published_at:
+            warnings.append({
+                "code": "PUBLISHED_AT_UNAVAILABLE",
+                "message": "Published timestamp unavailable for GlobeNewswire item.",
+                "severity": "warning",
+            })
+
+        duplicate_group_id = _make_duplicate_group_id(ticker_u, title, published_at, None, link)
+        if duplicate_group_id is None:
+            warnings.append({
+                "code": "DEDUPE_WEAK_KEY",
+                "message": "Weak dedupe key for at least one GlobeNewswire item.",
+                "severity": "warning",
+            })
+
+        item = {
+            "title": title,
+            "source": "newswire",
+            "originalSource": "GlobeNewswire",
+            "sourceType": "newswire",
+            "provider": "globenewswire",
+            "discoveredVia": "globenewswire_rss",
+            "publishedAt": published_at,
+            "retrievedAt": retrieved_at,
+            "url": link,
+            "issuer": None,
+            "tickers": [ticker_u],
+            "eventType": _event_type_from_keywords(f"{title} {description}"),
+            "summary": _short_text(description or title, 240),
+            "evidenceText": _short_text(description or title, 180),
+            "confidence": "HIGH" if (relevance == "HIGH" and link) else "MEDIUM",
+            "tickerRelevance": relevance,
+            "duplicateGroupId": duplicate_group_id,
+        }
+        items.append(item)
+        if len(items) >= max_results:
+            break
+
+    return items, warnings, True
+
 
 async def _collect_finnhub_events(
     ticker: str,
@@ -1943,7 +2109,7 @@ def _compute_source_status(
     if "newswire" in sources:
         if "newswire" in sources_used:
             result["newswire"] = {"status": "OK" if newswire_items else "EMPTY_RESULT", "rawCount": len(newswire_items), "filteredCount": len(newswire_items)}
-        elif _yf_error_status(warning_msgs):
+        elif any("globenewswire" in m.lower() for m in warning_msgs):
             result["newswire"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
         else:
             result["newswire"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
@@ -2000,9 +2166,10 @@ async def _collect_company_events(
     # items are labelled with their specific source (yahoo_finance_news / _press_releases).
     _need_yf_news = "yahoo_finance_news" in selected_sources or "yahoo_finance" in selected_sources
     _need_yf_pr = "yahoo_finance_press_releases" in selected_sources or "yahoo_finance" in selected_sources
-    # Also satisfy old company_ir / newswire sources via the Yahoo feed when
-    # they are requested but yahoo_finance* is not.
-    _need_yf_news = _need_yf_news or any(src in selected_sources for src in ("company_ir", "newswire"))
+    # Also satisfy old company_ir source via the Yahoo feed when it is requested
+    # but yahoo_finance* is not.  ``newswire`` is now served by the direct
+    # GlobeNewswire RSS fetcher below and is intentionally excluded here.
+    _need_yf_news = _need_yf_news or "company_ir" in selected_sources
 
     if _need_yf_news:
         yf_items, yf_warnings, used = await _collect_yahoo_events(
@@ -2019,17 +2186,16 @@ async def _collect_company_events(
                 sources_used.append("yahoo_finance_news")
             if "yahoo_finance" in selected_sources and "yahoo_finance" not in sources_used:
                 sources_used.append("yahoo_finance")
-            # Legacy sub-sources resolved via Yahoo feed
-            for legacy in ("company_ir", "newswire"):
-                if legacy in selected_sources and legacy not in sources_used:
-                    sources_used.append(legacy)
+            # Legacy sub-source resolved via Yahoo feed
+            if "company_ir" in selected_sources and "company_ir" not in sources_used:
+                sources_used.append("company_ir")
         for item in yf_items:
             src = str(item.get("source") or "")
             if "yahoo_finance_news" in selected_sources and src == "yahoo_finance_news":
                 items.append(item)
             elif "yahoo_finance" in selected_sources and src in ("yahoo_finance_news", "yahoo_finance_press_releases"):
                 items.append(item)
-            elif any(leg in selected_sources for leg in ("company_ir", "newswire")) and src in ("yahoo_finance_news", "yahoo_finance_press_releases"):
+            elif "company_ir" in selected_sources and src in ("yahoo_finance_news", "yahoo_finance_press_releases"):
                 items.append(item)
         warnings.extend(yf_warnings)
 
@@ -2047,6 +2213,20 @@ async def _collect_company_events(
             sources_used.append("yahoo_finance_press_releases")
         items.extend(pr_items)
         warnings.extend(pr_warnings)
+
+    if "newswire" in selected_sources:
+        gnw_items, gnw_warnings, gnw_used = await _collect_globenewswire_events(
+            ticker,
+            retrieved_at=retrieved_at,
+            max_results=max_cap,
+            start_date=start_date,
+            end_date=end_date,
+            lookback_days=lookback,
+        )
+        if gnw_used:
+            sources_used.append("newswire")
+        items.extend(gnw_items)
+        warnings.extend(gnw_warnings)
 
     if "finnhub" in selected_sources:
         finnhub_items, finnhub_warnings, used = await _collect_finnhub_events(
