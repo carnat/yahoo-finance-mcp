@@ -1010,6 +1010,72 @@ _MOCK_RSS_EMPTY = """\
 </rss>
 """
 
+_MOCK_RSS_AMBIGUOUS_WORDS = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>Unrelated company launches AI platform on Monday</title>
+      <description>It will focus on analytics for public companies.</description>
+      <link>https://www.globenewswire.com/news-release/2026/05/15/003.html</link>
+      <pubDate>Thu, 15 May 2026 13:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
+"""
+
+_MOCK_RSS_AMBIGUOUS_MARKER = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>C3.ai Announces Product Update</title>
+      <description>C3.ai (NYSE: AI) released a new enterprise AI application.</description>
+      <link>https://www.globenewswire.com/news-release/2026/05/15/004.html</link>
+      <pubDate>Thu, 15 May 2026 13:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
+"""
+
+_MOCK_RSS_DATED_MANY = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>Apple AAPL First Item</title>
+      <description>Apple AAPL announces item one.</description>
+      <link>https://www.globenewswire.com/news-release/2026/05/15/005.html</link>
+      <pubDate>Thu, 15 May 2026 13:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Apple AAPL Second Item</title>
+      <description>Apple AAPL announces item two.</description>
+      <link>https://www.globenewswire.com/news-release/2026/05/14/006.html</link>
+      <pubDate>Wed, 14 May 2026 13:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Apple AAPL Old Item</title>
+      <description>Apple AAPL announces an older item.</description>
+      <link>https://www.globenewswire.com/news-release/2026/04/01/007.html</link>
+      <pubDate>Wed, 01 Apr 2026 13:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
+"""
+
+_MOCK_RSS_DOCTYPE = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE rss [<!ENTITY x "blocked">]>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>&x;</title>
+    </item>
+  </channel>
+</rss>
+"""
+
 
 class TestGlobeNewswireRSS(unittest.TestCase):
     """Tests for the direct GlobeNewswire RSS fetcher."""
@@ -1021,6 +1087,21 @@ class TestGlobeNewswireRSS(unittest.TestCase):
     def _retrieved(self):
         import datetime
         return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _mock_urlopen(self, content):
+        payload = content if isinstance(content, bytes) else content.encode("utf-8")
+
+        def _fake_urlopen(req, timeout=20):
+            class _Resp:
+                def read(self, size=-1):
+                    return payload if size is None or size < 0 else payload[:size]
+                def __enter__(self):
+                    return self
+                def __exit__(self, *a):
+                    pass
+            return _Resp()
+
+        return patch("server._urlrequest.urlopen", side_effect=_fake_urlopen)
 
     def _mock_yf_no_info(self):
         """yfinance stub that returns no company info."""
@@ -1038,7 +1119,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
 
         def _fake_urlopen(req, timeout=20):
             class _Resp:
-                def read(self):
+                def read(self, size=-1):
                     return _MOCK_RSS_RELEVANT.encode("utf-8")
                 def __enter__(self):
                     return self
@@ -1080,7 +1161,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
 
         def _fake_urlopen(req, timeout=20):
             class _Resp:
-                def read(self):
+                def read(self, size=-1):
                     return _MOCK_RSS_RELEVANT.encode("utf-8")
                 def __enter__(self):
                     return self
@@ -1107,6 +1188,191 @@ class TestGlobeNewswireRSS(unittest.TestCase):
 
         self.assertTrue(used)
         self.assertEqual(len(items), 2)
+
+    def test_ambiguous_ticker_words_do_not_match_without_marker(self):
+        """Common words like AI/ON/IT must not be treated as ticker hits."""
+        srv_mod = self._get_srv()
+        retrieved = self._retrieved()
+
+        with patch("server.yf") as mock_yf, \
+             self._mock_urlopen(_MOCK_RSS_AMBIGUOUS_WORDS), \
+             patch("server._tool_cache") as mock_cache:
+            mock_yf.Ticker.return_value.info = {}
+            mock_cache.get.return_value = None
+            mock_cache.set.return_value = None
+
+            items, warnings, used = _run(
+                srv_mod._collect_globenewswire_events(
+                    "AI",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                )
+            )
+
+        self.assertTrue(used)
+        self.assertEqual(warnings, [])
+        self.assertEqual(items, [])
+
+    def test_ambiguous_ticker_matches_exchange_marker(self):
+        """Ambiguous tickers still match when the feed uses a ticker marker."""
+        srv_mod = self._get_srv()
+        retrieved = self._retrieved()
+
+        with patch("server.yf") as mock_yf, \
+             self._mock_urlopen(_MOCK_RSS_AMBIGUOUS_MARKER), \
+             patch("server._tool_cache") as mock_cache:
+            mock_yf.Ticker.return_value.info = {}
+            mock_cache.get.return_value = None
+            mock_cache.set.return_value = None
+
+            items, warnings, used = _run(
+                srv_mod._collect_globenewswire_events(
+                    "AI",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                )
+            )
+
+        self.assertTrue(used)
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["tickerRelevance"], "HIGH")
+
+    def test_ambiguous_ticker_matches_company_name(self):
+        """Company names from yfinance still establish relevance for short tickers."""
+        srv_mod = self._get_srv()
+        retrieved = self._retrieved()
+        rss = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>ON Semiconductor Corporation Announces Results</title>
+      <description>ON Semiconductor Corporation reported quarterly results.</description>
+      <link>https://www.globenewswire.com/news-release/2026/05/15/008.html</link>
+      <pubDate>Thu, 15 May 2026 13:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
+"""
+
+        with patch("server.yf") as mock_yf, \
+             self._mock_urlopen(rss), \
+             patch("server._tool_cache") as mock_cache:
+            mock_yf.Ticker.return_value.info = {"shortName": "ON Semiconductor Corporation"}
+            mock_cache.get.return_value = None
+            mock_cache.set.return_value = None
+
+            items, warnings, used = _run(
+                srv_mod._collect_globenewswire_events(
+                    "ON",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                )
+            )
+
+        self.assertTrue(used)
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(items), 1)
+
+    def test_date_window_filters_globenewswire_items(self):
+        """start_date/end_date filters apply to GlobeNewswire RSS items."""
+        srv_mod = self._get_srv()
+        retrieved = self._retrieved()
+
+        with patch("server.yf") as mock_yf, \
+             self._mock_urlopen(_MOCK_RSS_DATED_MANY), \
+             patch("server._tool_cache") as mock_cache:
+            mock_yf.Ticker.return_value.info = {}
+            mock_cache.get.return_value = None
+            mock_cache.set.return_value = None
+
+            items, warnings, used = _run(
+                srv_mod._collect_globenewswire_events(
+                    "AAPL",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                    start_date="2026-05-14",
+                    end_date="2026-05-15",
+                )
+            )
+
+        self.assertTrue(used)
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(items), 2)
+        self.assertNotIn("Old Item", " ".join(item["title"] for item in items))
+
+    def test_max_results_limits_globenewswire_items(self):
+        """max_results truncates relevant GlobeNewswire RSS items."""
+        srv_mod = self._get_srv()
+        retrieved = self._retrieved()
+
+        with patch("server.yf") as mock_yf, \
+             self._mock_urlopen(_MOCK_RSS_DATED_MANY), \
+             patch("server._tool_cache") as mock_cache:
+            mock_yf.Ticker.return_value.info = {}
+            mock_cache.get.return_value = None
+            mock_cache.set.return_value = None
+
+            items, warnings, used = _run(
+                srv_mod._collect_globenewswire_events(
+                    "AAPL",
+                    retrieved_at=retrieved,
+                    max_results=2,
+                )
+            )
+
+        self.assertTrue(used)
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(items), 2)
+
+    def test_provider_error_on_oversized_xml(self):
+        """Oversized RSS responses fail closed before XML parsing."""
+        srv_mod = self._get_srv()
+        retrieved = self._retrieved()
+        oversized = b"x" * (srv_mod._GLOBENEWSWIRE_MAX_BYTES + 1)
+
+        with patch("server.yf") as mock_yf, \
+             self._mock_urlopen(oversized), \
+             patch("server._tool_cache") as mock_cache:
+            mock_yf.Ticker.return_value.info = {}
+            mock_cache.get.return_value = None
+
+            items, warnings, used = _run(
+                srv_mod._collect_globenewswire_events(
+                    "AAPL",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                )
+            )
+
+        self.assertFalse(used)
+        self.assertEqual(items, [])
+        self.assertIn("SOURCE_UNAVAILABLE", [w.get("code") for w in warnings])
+
+    def test_provider_error_on_blocked_xml_declaration(self):
+        """DOCTYPE/entity declarations are rejected for external RSS content."""
+        srv_mod = self._get_srv()
+        retrieved = self._retrieved()
+
+        with patch("server.yf") as mock_yf, \
+             self._mock_urlopen(_MOCK_RSS_DOCTYPE), \
+             patch("server._tool_cache") as mock_cache:
+            mock_yf.Ticker.return_value.info = {}
+            mock_cache.get.return_value = None
+            mock_cache.set.return_value = None
+
+            items, warnings, used = _run(
+                srv_mod._collect_globenewswire_events(
+                    "AAPL",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                )
+            )
+
+        self.assertFalse(used)
+        self.assertEqual(items, [])
+        self.assertIn("SOURCE_UNAVAILABLE", [w.get("code") for w in warnings])
 
     def test_provider_error_on_fetch_failure(self):
         """Network errors must result in used=False and a SOURCE_UNAVAILABLE warning."""
@@ -1146,7 +1412,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
 
         def _fake_urlopen(req, timeout=20):
             class _Resp:
-                def read(self):
+                def read(self, size=-1):
                     return b"<not valid xml <<<<"
                 def __enter__(self):
                     return self
@@ -1181,7 +1447,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
 
         def _fake_urlopen(req, timeout=20):
             class _Resp:
-                def read(self):
+                def read(self, size=-1):
                     return _MOCK_RSS_EMPTY.encode("utf-8")
                 def __enter__(self):
                     return self
@@ -1216,7 +1482,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         def _fake_urlopen(req, timeout=20):
             fetch_count["n"] += 1
             class _Resp:
-                def read(self):
+                def read(self, size=-1):
                     return _MOCK_RSS_RELEVANT.encode("utf-8")
                 def __enter__(self):
                     return self
