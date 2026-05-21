@@ -1228,6 +1228,16 @@ _GLOBENEWSWIRE_RSS_URL = (
     "GlobeNewswire%20-%20News%20about%20Public%20Companies"
 )
 TTL_NEWS = 15 * 60  # 15 min — RSS feed cache
+_GLOBENEWSWIRE_MAX_BYTES = 2 * 1024 * 1024
+_GLOBENEWSWIRE_BLOCKED_XML_MARKERS = ("<!doctype", "<!entity")
+_GLOBENEWSWIRE_EXCHANGE_RE = (
+    r"(?:NASDAQ|NYSE|NYSEAMERICAN|NYSEARCA|AMEX|OTC|OTCQB|OTCQX|TSX|TSXV|CSE|LSE)"
+)
+_AMBIGUOUS_TICKER_SYMBOLS = {
+    "A", "AI", "AM", "AN", "AS", "AT", "BE", "BY", "DO", "GO", "HE",
+    "I", "IF", "IN", "IS", "IT", "ME", "NO", "OF", "ON", "OR", "SO",
+    "TO", "UP", "US", "WE",
+}
 _SMOKE_TICKER_CIK_FALLBACKS: dict[str, str] = {
     "AAPL": "0000320193",
     "MSFT": "0000789019",
@@ -1283,6 +1293,35 @@ def _parse_rss_date(raw: str) -> str | None:
         return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     except Exception:
         return _to_iso_utc(raw)
+
+
+def _globenewswire_xml_is_safe(xml_content: str) -> bool:
+    lowered = xml_content.lower()
+    return not any(marker in lowered for marker in _GLOBENEWSWIRE_BLOCKED_XML_MARKERS)
+
+
+def _matches_globenewswire_ticker_symbol(ticker: str, blob: str) -> bool:
+    """Match ticker symbols without treating common words as ticker hits."""
+    ticker_u = ticker.upper()
+    ticker_re = _re.escape(ticker_u)
+    strict_patterns = (
+        rf"\${ticker_re}(?![A-Z0-9])",
+        rf"\b{_GLOBENEWSWIRE_EXCHANGE_RE}\s*[:.-]?\s*{ticker_re}(?![A-Z0-9])",
+        rf"\(\s*(?:{_GLOBENEWSWIRE_EXCHANGE_RE}\s*[:.-]?\s*)?{ticker_re}\s*\)",
+        rf"\b(?:TICKER|SYMBOL)\s*[:=]?\s*{ticker_re}(?![A-Z0-9])",
+    )
+    if any(_re.search(pattern, blob) for pattern in strict_patterns):
+        return True
+    if ticker_u in _AMBIGUOUS_TICKER_SYMBOLS:
+        return False
+    return _re.search(rf"(?<![A-Z0-9]){ticker_re}(?![A-Z0-9])", blob) is not None
+
+
+def _matches_globenewswire_relevance(ticker: str, text: str, company_terms: list[str]) -> bool:
+    blob = (text or "").upper()
+    if _matches_globenewswire_ticker_symbol(ticker, blob):
+        return True
+    return any(term and term in blob for term in company_terms)
 
 
 def _coerce_max_results(value: int, default_value: int) -> int:
@@ -1697,14 +1736,14 @@ async def _collect_globenewswire_events(
     items: list[dict] = []
     ticker_u = ticker.upper()
 
-    # Build relevance search terms (ticker + company names from yfinance).
-    search_terms: list[str] = [ticker_u]
+    # Build relevance search terms from company names supplied by yfinance.
+    company_terms: list[str] = []
     try:
         info = yf.Ticker(ticker).info or {}
         for field in ("shortName", "longName"):
             val = str(info.get(field) or "").strip()
             if val:
-                search_terms.append(val.upper())
+                company_terms.append(val.upper())
     except Exception:
         pass
 
@@ -1724,7 +1763,10 @@ async def _collect_globenewswire_events(
                 headers={"User-Agent": _SEC_REQUIRED_UA},
             )
             with _urlrequest.urlopen(req, timeout=20) as resp:  # noqa: S310
-                return resp.read().decode("utf-8", errors="replace")
+                raw = resp.read(_GLOBENEWSWIRE_MAX_BYTES + 1)
+                if len(raw) > _GLOBENEWSWIRE_MAX_BYTES:
+                    raise ValueError("GlobeNewswire RSS response exceeded size limit")
+                return raw.decode("utf-8", errors="replace")
 
         try:
             xml_content = await loop.run_in_executor(None, _fetch_rss)
@@ -1739,6 +1781,8 @@ async def _collect_globenewswire_events(
 
     # --- Parse RSS/XML ---
     try:
+        if not _globenewswire_xml_is_safe(xml_content):
+            raise ValueError("unsupported XML declaration in GlobeNewswire RSS")
         root = _ET.fromstring(xml_content)  # noqa: S314 (trusted source)
         channel = root.find("channel") if root.tag != "channel" else root
         rss_items = channel.findall("item") if channel is not None else []
@@ -1758,11 +1802,11 @@ async def _collect_globenewswire_events(
         published_at = _parse_rss_date((rss_item.findtext("pubDate") or "").strip())
 
         blob = f"{title} {description}".upper()
-        relevance = "LOW"
-        for term in search_terms:
-            if term and term in blob:
-                relevance = "HIGH"
-                break
+        relevance = (
+            "HIGH"
+            if _matches_globenewswire_relevance(ticker_u, blob, company_terms)
+            else "LOW"
+        )
 
         if filter_low_relevance and relevance == "LOW":
             continue
