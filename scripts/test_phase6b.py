@@ -914,6 +914,49 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["source"], "yahoo_finance_press_releases")
 
+    def test_press_release_tab_story_items_are_accepted(self):
+        """Yahoo press-release tab items can arrive as STORY and must still be kept."""
+        import server as srv_mod
+        import datetime
+
+        retrieved = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        pr_item = {
+            "content": {
+                "title": "REX Shares Launches T-REX 2X ASTS (ASUP) & 2X LITE (LITU) ETFs",
+                "summary": "REX Shares announces leveraged ETFs tied to ASTS and LITE.",
+                "contentType": "STORY",
+                "pubDate": retrieved,
+                "provider": {"displayName": "Business Wire"},
+                "canonicalUrl": {"url": "https://finance.yahoo.com/markets/options/articles/rex-shares-launches-t-rex-120000327.html"},
+            },
+        }
+
+        class _GoodTicker:
+            def get_news(self, tab="news"):
+                self.tab = tab
+                return [pr_item]
+
+        ticker = _GoodTicker()
+        with patch("server.yf") as mock_yf:
+            mock_yf.Ticker.return_value = ticker
+            items, warnings, used = _run(
+                srv_mod._collect_yahoo_events(
+                    "ASTS",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                    feed="press_releases",
+                )
+            )
+
+        self.assertTrue(used)
+        self.assertEqual(ticker.tab, "press releases")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["source"], "yahoo_finance_press_releases")
+        self.assertEqual(items[0]["sourceType"], "yahoo_finance_press_releases")
+        self.assertEqual(items[0]["originalSource"], "Business Wire")
+        self.assertEqual(warnings, [])
+
     def test_press_release_tab_no_fallback_means_no_mislabeled_items(self):
         """Items without contentType must not be labeled yahoo_finance_press_releases via fallback."""
         import server as srv_mod
@@ -1747,6 +1790,17 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         self.assertIn(fine_grained_default, tools_text)
         self.assertNotIn('["yahoo_finance", "finnhub"]', tools_text)
         self.assertNotIn('["sec", "company_ir", "newswire", "yahoo_finance"]', tools_text)
+
+    def test_worker_press_release_tab_accepts_story_items(self):
+        """Worker must not require PRESS_RELEASE contentType for pressRelease queryRef items."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+            worker_text = f.read()
+
+        self.assertIn("queryRef=pressRelease", worker_text)
+        self.assertIn("YAHOO_ALLOWED_CONTENT_TYPES", worker_text)
+        self.assertNotIn('ct !== "PRESS_RELEASE"', worker_text)
+        self.assertNotIn("ct !== 'PRESS_RELEASE'", worker_text)
 
 
 if __name__ == "__main__":
