@@ -1504,7 +1504,9 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         str(args.ticker),
         num(args.max_results, 10),
         num(args.lookback_days, 14),
-        Array.isArray(args.sources) ? args.sources.map(String) : ["yahoo_finance", "finnhub"],
+        Array.isArray(args.sources)
+          ? args.sources.map(String)
+          : ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
       );
     case "get_corporate_actions":
       return getStockActions(str(args.ticker));
@@ -1760,7 +1762,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         str(args.query),
         str(args.start_date, ""),
         str(args.end_date, ""),
-        Array.isArray(args.sources) ? args.sources.map(String) : ["yahoo_finance", "finnhub"],
+        Array.isArray(args.sources) ? args.sources.map(String) : ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
         num(args.max_results, 10),
       );
     case "get_company_press_releases":
@@ -1768,7 +1770,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         str(args.ticker),
         num(args.lookback_days, 90),
         num(args.max_results, 20),
-        Array.isArray(args.sources) ? args.sources.map(String) : ["company_ir", "newswire", "sec"],
+        Array.isArray(args.sources) ? args.sources.map(String) : ["yahoo_finance_press_releases", "company_ir", "newswire", "sec"],
       );
     case "get_sec_recent_events":
       return getSecRecentEvents(
@@ -1782,7 +1784,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         str(args.ticker),
         str(args.start_date, ""),
         str(args.end_date, ""),
-        Array.isArray(args.sources) ? args.sources.map(String) : ["sec", "company_ir", "newswire", "yahoo_finance"],
+        Array.isArray(args.sources) ? args.sources.map(String) : ["sec", "company_ir", "newswire", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
         num(args.max_results, 50),
         args.newest_first === true,
       );
@@ -1795,7 +1797,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         str(args.event_query),
         str(args.start_date, ""),
         str(args.end_date, ""),
-        Array.isArray(args.sources) ? args.sources.map(String) : ["sec", "company_ir", "newswire", "yahoo_finance"],
+        Array.isArray(args.sources) ? args.sources.map(String) : ["sec", "company_ir", "newswire", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
       );
     case "health_check": {
       const buildSha = getWorkerVar("BUILD_SHA") ?? "unknown";
@@ -1914,7 +1916,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_calendar":
       return getCalendar(str(args.ticker));
     case "get_yahoo_finance_news":
-      return getCompanyNews(str(args.ticker), 10, 14, ["yahoo_finance", "finnhub"]);
+      return getCompanyNews(str(args.ticker), 10, 14, ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]);
     case "get_options_flow_summary":
       return getOptionsSummary(str(args.ticker));
     case "get_options_flow_scan":

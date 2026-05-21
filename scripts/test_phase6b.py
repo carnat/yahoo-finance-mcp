@@ -983,16 +983,24 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
 _MOCK_RSS_RELEVANT = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
-  <channel>
+  <channel xmlns:dc="http://purl.org/dc/elements/1.1/">
     <title>GlobeNewswire - News about Public Companies</title>
     <item>
       <title>Apple Inc. Announces New Product Launch</title>
+      <category domain="https://www.globenewswire.com/rss/stock">Nasdaq:AAPL</category>
+      <category domain="https://www.globenewswire.com/rss/ISIN">US0378331005</category>
       <description>Apple AAPL unveils its latest innovation at its annual event.</description>
       <link>https://www.globenewswire.com/news-release/2026/05/15/001.html</link>
       <pubDate>Thu, 15 May 2026 13:00:00 GMT</pubDate>
+      <dc:identifier>001</dc:identifier>
+      <dc:language>en</dc:language>
+      <dc:contributor>Apple Inc.</dc:contributor>
+      <dc:subject>Product / Services Announcement</dc:subject>
+      <dc:keyword>Apple</dc:keyword>
     </item>
     <item>
       <title>Unrelated Company Raises Capital</title>
+      <category domain="https://www.globenewswire.com/rss/stock">Nasdaq:XYZ</category>
       <description>XYZ Corp completes a Series C round.</description>
       <link>https://www.globenewswire.com/news-release/2026/05/15/002.html</link>
       <pubDate>Thu, 15 May 2026 12:00:00 GMT</pubDate>
@@ -1030,7 +1038,8 @@ _MOCK_RSS_AMBIGUOUS_MARKER = """\
   <channel>
     <item>
       <title>C3.ai Announces Product Update</title>
-      <description>C3.ai (NYSE: AI) released a new enterprise AI application.</description>
+      <category domain="https://www.globenewswire.com/rss/stock">NYSE:AI</category>
+      <description>C3.ai released a new enterprise AI application.</description>
       <link>https://www.globenewswire.com/news-release/2026/05/15/004.html</link>
       <pubDate>Thu, 15 May 2026 13:00:00 GMT</pubDate>
     </item>
@@ -1044,21 +1053,91 @@ _MOCK_RSS_DATED_MANY = """\
   <channel>
     <item>
       <title>Apple AAPL First Item</title>
+      <category domain="https://www.globenewswire.com/rss/stock">Nasdaq:AAPL</category>
       <description>Apple AAPL announces item one.</description>
       <link>https://www.globenewswire.com/news-release/2026/05/15/005.html</link>
       <pubDate>Thu, 15 May 2026 13:00:00 GMT</pubDate>
     </item>
     <item>
       <title>Apple AAPL Second Item</title>
+      <category domain="https://www.globenewswire.com/rss/stock">Nasdaq:AAPL</category>
       <description>Apple AAPL announces item two.</description>
       <link>https://www.globenewswire.com/news-release/2026/05/14/006.html</link>
       <pubDate>Wed, 14 May 2026 13:00:00 GMT</pubDate>
     </item>
     <item>
       <title>Apple AAPL Old Item</title>
+      <category domain="https://www.globenewswire.com/rss/stock">Nasdaq:AAPL</category>
       <description>Apple AAPL announces an older item.</description>
       <link>https://www.globenewswire.com/news-release/2026/04/01/007.html</link>
       <pubDate>Wed, 01 Apr 2026 13:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
+"""
+
+_MOCK_RSS_EXACT_TICKERS = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <item>
+      <title>NVIDIA Corporation Announces Data Center Update</title>
+      <category domain="https://www.globenewswire.com/rss/stock">Nasdaq:NVDA</category>
+      <description><![CDATA[<p>NVIDIA Corporation published a direct company update.</p>]]></description>
+      <link>https://www.globenewswire.com/news-release/2026/05/15/nvda.html</link>
+      <pubDate>Thu, 15 May 2026 13:00:00 GMT</pubDate>
+      <dc:identifier>nvda-1</dc:identifier>
+      <dc:language>en</dc:language>
+      <dc:contributor>NVIDIA Corporation</dc:contributor>
+      <dc:subject>Company Announcement</dc:subject>
+      <dc:keyword>GPU</dc:keyword>
+    </item>
+    <item>
+      <title>AST SpaceMobile Announces Satellite Update</title>
+      <category domain="https://www.globenewswire.com/rss/stock">Nasdaq:ASTS</category>
+      <description>AST SpaceMobile published a direct company update.</description>
+      <link>https://www.globenewswire.com/news-release/2026/05/15/asts.html</link>
+      <pubDate>Thu, 15 May 2026 12:00:00 GMT</pubDate>
+      <dc:contributor>AST SpaceMobile, Inc.</dc:contributor>
+      <dc:subject>Product / Services Announcement</dc:subject>
+    </item>
+    <item>
+      <title>Lumentum Announces Optical Networking Update</title>
+      <category domain="https://www.globenewswire.com/rss/stock">NYSE:LITE</category>
+      <category domain="https://www.globenewswire.com/rss/ISIN">US55024U1097</category>
+      <description>Lumentum published a direct company update.</description>
+      <link>https://www.globenewswire.com/news-release/2026/05/15/lite.html</link>
+      <pubDate>Thu, 15 May 2026 11:00:00 GMT</pubDate>
+      <dc:contributor>Lumentum Holdings Inc.</dc:contributor>
+      <dc:subject>Company Announcement</dc:subject>
+    </item>
+  </channel>
+</rss>
+"""
+
+_MOCK_RSS_TEXT_FALSE_POSITIVES = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>GOWIN Participates in NVIDIA APAC Robotics and Edge AI Partner Day</title>
+      <description>GOWIN is invited by NVIDIA to participate in an event.</description>
+      <link>https://www.globenewswire.com/news-release/2026/05/15/gowin.html</link>
+      <pubDate>Thu, 15 May 2026 13:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Company Hosts Webcasts and Forecasts</title>
+      <category domain="https://www.globenewswire.com/rss/stock">Nasdaq:AMBA</category>
+      <description>The word webcasts contains ASTS as a substring.</description>
+      <link>https://www.globenewswire.com/news-release/2026/05/15/webcasts.html</link>
+      <pubDate>Thu, 15 May 2026 12:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Satellite Provider Highlights Light Equipment</title>
+      <category domain="https://www.globenewswire.com/rss/stock">Nasdaq:GILT</category>
+      <description>The words satellite and light should not match LITE.</description>
+      <link>https://www.globenewswire.com/news-release/2026/05/15/lite-false.html</link>
+      <pubDate>Thu, 15 May 2026 11:00:00 GMT</pubDate>
     </item>
   </channel>
 </rss>
@@ -1113,7 +1192,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         return mock_yf
 
     def test_relevant_item_returned_filtered_out_unrelated(self):
-        """Only items mentioning the ticker or company name should be returned."""
+        """Only items with an exact GlobeNewswire stock category should be returned."""
         srv_mod = self._get_srv()
         retrieved = self._retrieved()
 
@@ -1153,9 +1232,17 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         self.assertEqual(item["discoveredVia"], "globenewswire_rss")
         self.assertEqual(item["tickerRelevance"], "HIGH")
         self.assertIn("AAPL", item["tickers"])
+        self.assertEqual(item["stockCategories"], ["Nasdaq:AAPL"])
+        self.assertEqual(item["isin"], "US0378331005")
+        self.assertEqual(item["issuer"], "Apple Inc.")
+        self.assertEqual(item["subject"], "Product / Services Announcement")
+        self.assertEqual(item["keywords"], ["Apple"])
+        self.assertEqual(item["language"], "en")
+        self.assertEqual(item["globenewswireId"], "001")
+        self.assertIn(item["feedSource"], {name for name, _url in srv_mod._GLOBENEWSWIRE_RSS_FEEDS})
 
-    def test_all_items_returned_when_filter_disabled(self):
-        """With filter_low_relevance=False all feed items are returned."""
+    def test_filter_disabled_still_requires_exact_stock_category(self):
+        """filter_low_relevance cannot turn unrelated stock tags into newswire hits."""
         srv_mod = self._get_srv()
         retrieved = self._retrieved()
 
@@ -1187,7 +1274,67 @@ class TestGlobeNewswireRSS(unittest.TestCase):
             )
 
         self.assertTrue(used)
-        self.assertEqual(len(items), 2)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["stockCategories"], ["Nasdaq:AAPL"])
+
+    def test_exact_stock_categories_match_nvda_asts_lite(self):
+        """NVDA, ASTS, and LITE match only their exact RSS stock categories."""
+        srv_mod = self._get_srv()
+        retrieved = self._retrieved()
+        expected = {
+            "NVDA": "Nasdaq:NVDA",
+            "ASTS": "Nasdaq:ASTS",
+            "LITE": "NYSE:LITE",
+        }
+
+        for ticker, category in expected.items():
+            with self.subTest(ticker=ticker), \
+                 patch("server.yf") as mock_yf, \
+                 self._mock_urlopen(_MOCK_RSS_EXACT_TICKERS), \
+                 patch("server._tool_cache") as mock_cache:
+                mock_yf.Ticker.return_value.info = {}
+                mock_cache.get.return_value = None
+                mock_cache.set.return_value = None
+
+                items, warnings, used = _run(
+                    srv_mod._collect_globenewswire_events(
+                        ticker,
+                        retrieved_at=retrieved,
+                        max_results=10,
+                    )
+                )
+
+            self.assertTrue(used)
+            self.assertEqual(warnings, [])
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["tickerRelevance"], "HIGH")
+            self.assertEqual(items[0]["stockCategories"], [category])
+
+    def test_text_false_positives_ignored_for_nvda_asts_lite(self):
+        """Text mentions and substrings are ignored when the exact stock tag is absent."""
+        srv_mod = self._get_srv()
+        retrieved = self._retrieved()
+
+        for ticker in ("NVDA", "ASTS", "LITE"):
+            with self.subTest(ticker=ticker), \
+                 patch("server.yf") as mock_yf, \
+                 self._mock_urlopen(_MOCK_RSS_TEXT_FALSE_POSITIVES), \
+                 patch("server._tool_cache") as mock_cache:
+                mock_yf.Ticker.return_value.info = {}
+                mock_cache.get.return_value = None
+                mock_cache.set.return_value = None
+
+                items, warnings, used = _run(
+                    srv_mod._collect_globenewswire_events(
+                        ticker,
+                        retrieved_at=retrieved,
+                        max_results=10,
+                    )
+                )
+
+            self.assertTrue(used)
+            self.assertEqual(warnings, [])
+            self.assertEqual(items, [])
 
     def test_ambiguous_ticker_words_do_not_match_without_marker(self):
         """Common words like AI/ON/IT must not be treated as ticker hits."""
@@ -1213,8 +1360,8 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual(items, [])
 
-    def test_ambiguous_ticker_matches_exchange_marker(self):
-        """Ambiguous tickers still match when the feed uses a ticker marker."""
+    def test_ambiguous_ticker_matches_exact_stock_category(self):
+        """Ambiguous tickers still match when the feed uses an exact stock category."""
         srv_mod = self._get_srv()
         retrieved = self._retrieved()
 
@@ -1237,9 +1384,10 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["tickerRelevance"], "HIGH")
+        self.assertEqual(items[0]["stockCategories"], ["NYSE:AI"])
 
-    def test_ambiguous_ticker_matches_company_name(self):
-        """Company names from yfinance still establish relevance for short tickers."""
+    def test_company_name_without_stock_category_is_ignored(self):
+        """Company names from yfinance do not establish newswire relevance."""
         srv_mod = self._get_srv()
         retrieved = self._retrieved()
         rss = """\
@@ -1273,7 +1421,7 @@ class TestGlobeNewswireRSS(unittest.TestCase):
 
         self.assertTrue(used)
         self.assertEqual(warnings, [])
-        self.assertEqual(len(items), 1)
+        self.assertEqual(items, [])
 
     def test_date_window_filters_globenewswire_items(self):
         """start_date/end_date filters apply to GlobeNewswire RSS items."""
@@ -1494,8 +1642,10 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         with patch("server.yf") as mock_yf, \
              patch("server._urlrequest.urlopen", side_effect=_fake_urlopen):
             mock_yf.Ticker.return_value.info = {}
-            srv_mod._tool_cache._store.pop("gnw_rss:global", None)
-            _run(srv_mod._collect_globenewswire_events(
+            for key in list(srv_mod._tool_cache._store):
+                if key.startswith("gnw_rss:"):
+                    srv_mod._tool_cache._store.pop(key, None)
+            first_items, _, _ = _run(srv_mod._collect_globenewswire_events(
                 "AAPL", retrieved_at=retrieved, max_results=10, lookback_days=365,
             ))
 
@@ -1509,8 +1659,9 @@ class TestGlobeNewswireRSS(unittest.TestCase):
                 "TSLA", retrieved_at=retrieved, max_results=10, lookback_days=365,
             ))
 
-        self.assertEqual(first_count, 1)
-        self.assertEqual(fetch_count["n"], 1, "Feed must not be re-fetched on cache hit")
+        self.assertEqual(len(first_items), 1)
+        self.assertEqual(first_count, len(srv_mod._GLOBENEWSWIRE_RSS_FEEDS))
+        self.assertEqual(fetch_count["n"], first_count, "Feeds must not be re-fetched on cache hit")
 
     def test_compute_source_status_newswire_ok(self):
         """_compute_source_status reports OK for newswire when items exist."""
@@ -1576,6 +1727,26 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         self.assertIn("yahoo_finance_news", src)
         self.assertIn("yahoo_finance_press_releases", src)
         self.assertIn("finnhub", src)
+
+    def test_worker_newswire_uses_globenewswire_not_yahoo_backfill(self):
+        """Worker newswire path must use GlobeNewswire RSS and not Yahoo backfill."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+            worker_text = f.read()
+        with open(os.path.join(root, "worker", "src", "tools.ts"), encoding="utf-8") as f:
+            tools_text = f.read()
+
+        self.assertIn("const GLOBENEWSWIRE_RSS_FEEDS", worker_text)
+        self.assertIn("collectGlobeNewswireEvents", worker_text)
+        self.assertIn("GLOBENEWSWIRE_STOCK_CATEGORY_DOMAIN", worker_text)
+        self.assertIn('warningMsgs.some(m => m.includes("globenewswire"))', worker_text)
+        self.assertIn('if (selected.includes("newswire"))', worker_text)
+        self.assertNotIn('selected.includes("newswire")\n    || selected.includes("company_ir")', worker_text)
+
+        fine_grained_default = '["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]'
+        self.assertIn(fine_grained_default, tools_text)
+        self.assertNotIn('["yahoo_finance", "finnhub"]', tools_text)
+        self.assertNotIn('["sec", "company_ir", "newswire", "yahoo_finance"]', tools_text)
 
 
 if __name__ == "__main__":
