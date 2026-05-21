@@ -980,6 +980,338 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
             self.assertNotIn(term, blob)
 
 
+_MOCK_RSS_RELEVANT = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>GlobeNewswire - News about Public Companies</title>
+    <item>
+      <title>Apple Inc. Announces New Product Launch</title>
+      <description>Apple AAPL unveils its latest innovation at its annual event.</description>
+      <link>https://www.globenewswire.com/news-release/2026/05/15/001.html</link>
+      <pubDate>Thu, 15 May 2026 13:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Unrelated Company Raises Capital</title>
+      <description>XYZ Corp completes a Series C round.</description>
+      <link>https://www.globenewswire.com/news-release/2026/05/15/002.html</link>
+      <pubDate>Thu, 15 May 2026 12:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
+"""
+
+_MOCK_RSS_EMPTY = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>GlobeNewswire - News about Public Companies</title>
+  </channel>
+</rss>
+"""
+
+
+class TestGlobeNewswireRSS(unittest.TestCase):
+    """Tests for the direct GlobeNewswire RSS fetcher."""
+
+    def _get_srv(self):
+        import server as srv_mod  # noqa: PLC0415
+        return srv_mod
+
+    def _retrieved(self):
+        import datetime
+        return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _mock_yf_no_info(self):
+        """yfinance stub that returns no company info."""
+        class _NoInfo:
+            @property
+            def info(self):
+                return {}
+        mock_yf = patch("server.yf").__enter__()
+        return mock_yf
+
+    def test_relevant_item_returned_filtered_out_unrelated(self):
+        """Only items mentioning the ticker or company name should be returned."""
+        srv_mod = self._get_srv()
+        retrieved = self._retrieved()
+
+        def _fake_urlopen(req, timeout=20):
+            class _Resp:
+                def read(self):
+                    return _MOCK_RSS_RELEVANT.encode("utf-8")
+                def __enter__(self):
+                    return self
+                def __exit__(self, *a):
+                    pass
+            return _Resp()
+
+        with patch("server.yf") as mock_yf, \
+             patch("server._urlrequest.urlopen", side_effect=_fake_urlopen), \
+             patch("server._tool_cache") as mock_cache:
+            mock_yf.Ticker.return_value.info = {"shortName": "Apple Inc.", "longName": "Apple Inc."}
+            mock_cache.get.return_value = None
+            mock_cache.set.return_value = None
+
+            items, warnings, used = _run(
+                srv_mod._collect_globenewswire_events(
+                    "AAPL",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                    lookback_days=365,
+                )
+            )
+
+        self.assertTrue(used)
+        self.assertEqual(len(items), 1, "Should return only the AAPL-relevant item")
+        item = items[0]
+        self.assertEqual(item["source"], "newswire")
+        self.assertEqual(item["sourceType"], "newswire")
+        self.assertEqual(item["originalSource"], "GlobeNewswire")
+        self.assertEqual(item["provider"], "globenewswire")
+        self.assertEqual(item["discoveredVia"], "globenewswire_rss")
+        self.assertEqual(item["tickerRelevance"], "HIGH")
+        self.assertIn("AAPL", item["tickers"])
+
+    def test_all_items_returned_when_filter_disabled(self):
+        """With filter_low_relevance=False all feed items are returned."""
+        srv_mod = self._get_srv()
+        retrieved = self._retrieved()
+
+        def _fake_urlopen(req, timeout=20):
+            class _Resp:
+                def read(self):
+                    return _MOCK_RSS_RELEVANT.encode("utf-8")
+                def __enter__(self):
+                    return self
+                def __exit__(self, *a):
+                    pass
+            return _Resp()
+
+        with patch("server.yf") as mock_yf, \
+             patch("server._urlrequest.urlopen", side_effect=_fake_urlopen), \
+             patch("server._tool_cache") as mock_cache:
+            mock_yf.Ticker.return_value.info = {}
+            mock_cache.get.return_value = None
+            mock_cache.set.return_value = None
+
+            items, warnings, used = _run(
+                srv_mod._collect_globenewswire_events(
+                    "AAPL",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                    lookback_days=365,
+                    filter_low_relevance=False,
+                )
+            )
+
+        self.assertTrue(used)
+        self.assertEqual(len(items), 2)
+
+    def test_provider_error_on_fetch_failure(self):
+        """Network errors must result in used=False and a SOURCE_UNAVAILABLE warning."""
+        srv_mod = self._get_srv()
+        retrieved = self._retrieved()
+
+        def _raise_error(req, timeout=20):
+            raise OSError("connection refused")
+
+        with patch("server.yf") as mock_yf, \
+             patch("server._urlrequest.urlopen", side_effect=_raise_error), \
+             patch("server._tool_cache") as mock_cache:
+            mock_yf.Ticker.return_value.info = {}
+            mock_cache.get.return_value = None
+
+            items, warnings, used = _run(
+                srv_mod._collect_globenewswire_events(
+                    "AAPL",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                )
+            )
+
+        self.assertFalse(used)
+        self.assertEqual(items, [])
+        codes = [w.get("code") for w in warnings]
+        self.assertIn("SOURCE_UNAVAILABLE", codes)
+        # Warning message must mention globenewswire so _compute_source_status
+        # can map it to PROVIDER_ERROR for the newswire source.
+        msgs = " ".join(w.get("message", "") for w in warnings).lower()
+        self.assertIn("globenewswire", msgs)
+
+    def test_provider_error_on_bad_xml(self):
+        """Malformed XML must result in used=False and a SOURCE_UNAVAILABLE warning."""
+        srv_mod = self._get_srv()
+        retrieved = self._retrieved()
+
+        def _fake_urlopen(req, timeout=20):
+            class _Resp:
+                def read(self):
+                    return b"<not valid xml <<<<"
+                def __enter__(self):
+                    return self
+                def __exit__(self, *a):
+                    pass
+            return _Resp()
+
+        with patch("server.yf") as mock_yf, \
+             patch("server._urlrequest.urlopen", side_effect=_fake_urlopen), \
+             patch("server._tool_cache") as mock_cache:
+            mock_yf.Ticker.return_value.info = {}
+            mock_cache.get.return_value = None
+            mock_cache.set.return_value = None
+
+            items, warnings, used = _run(
+                srv_mod._collect_globenewswire_events(
+                    "AAPL",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                )
+            )
+
+        self.assertFalse(used)
+        self.assertEqual(items, [])
+        codes = [w.get("code") for w in warnings]
+        self.assertIn("SOURCE_UNAVAILABLE", codes)
+
+    def test_empty_feed_returns_empty_items_used_true(self):
+        """An empty but valid RSS feed must return used=True with zero items."""
+        srv_mod = self._get_srv()
+        retrieved = self._retrieved()
+
+        def _fake_urlopen(req, timeout=20):
+            class _Resp:
+                def read(self):
+                    return _MOCK_RSS_EMPTY.encode("utf-8")
+                def __enter__(self):
+                    return self
+                def __exit__(self, *a):
+                    pass
+            return _Resp()
+
+        with patch("server.yf") as mock_yf, \
+             patch("server._urlrequest.urlopen", side_effect=_fake_urlopen), \
+             patch("server._tool_cache") as mock_cache:
+            mock_yf.Ticker.return_value.info = {}
+            mock_cache.get.return_value = None
+            mock_cache.set.return_value = None
+
+            items, warnings, used = _run(
+                srv_mod._collect_globenewswire_events(
+                    "AAPL",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                )
+            )
+
+        self.assertTrue(used)
+        self.assertEqual(items, [])
+
+    def test_rss_cache_used_on_second_call(self):
+        """The RSS feed must not be fetched again when the cache holds a valid entry."""
+        srv_mod = self._get_srv()
+        retrieved = self._retrieved()
+        fetch_count = {"n": 0}
+
+        def _fake_urlopen(req, timeout=20):
+            fetch_count["n"] += 1
+            class _Resp:
+                def read(self):
+                    return _MOCK_RSS_RELEVANT.encode("utf-8")
+                def __enter__(self):
+                    return self
+                def __exit__(self, *a):
+                    pass
+            return _Resp()
+
+        # First call: cache miss → fetch
+        with patch("server.yf") as mock_yf, \
+             patch("server._urlrequest.urlopen", side_effect=_fake_urlopen):
+            mock_yf.Ticker.return_value.info = {}
+            srv_mod._tool_cache._store.pop("gnw_rss:global", None)
+            _run(srv_mod._collect_globenewswire_events(
+                "AAPL", retrieved_at=retrieved, max_results=10, lookback_days=365,
+            ))
+
+        first_count = fetch_count["n"]
+
+        # Second call: cache hit → no fetch
+        with patch("server.yf") as mock_yf, \
+             patch("server._urlrequest.urlopen", side_effect=_fake_urlopen):
+            mock_yf.Ticker.return_value.info = {}
+            _run(srv_mod._collect_globenewswire_events(
+                "TSLA", retrieved_at=retrieved, max_results=10, lookback_days=365,
+            ))
+
+        self.assertEqual(first_count, 1)
+        self.assertEqual(fetch_count["n"], 1, "Feed must not be re-fetched on cache hit")
+
+    def test_compute_source_status_newswire_ok(self):
+        """_compute_source_status reports OK for newswire when items exist."""
+        srv_mod = self._get_srv()
+        item = {
+            "source": "newswire",
+            "sourceType": "newswire",
+            "originalSource": "GlobeNewswire",
+        }
+        status = srv_mod._compute_source_status(
+            sources_used=["newswire"],
+            warnings=[],
+            items=[item],
+            selected_sources=["newswire"],
+        )
+        self.assertEqual(status.get("newswire", {}).get("status"), "OK")
+
+    def test_compute_source_status_newswire_empty_result(self):
+        """_compute_source_status reports EMPTY_RESULT when newswire used but no items."""
+        srv_mod = self._get_srv()
+        status = srv_mod._compute_source_status(
+            sources_used=["newswire"],
+            warnings=[],
+            items=[],
+            selected_sources=["newswire"],
+        )
+        self.assertEqual(status.get("newswire", {}).get("status"), "EMPTY_RESULT")
+
+    def test_compute_source_status_newswire_provider_error(self):
+        """PROVIDER_ERROR is reported when a GlobeNewswire warning message is present."""
+        srv_mod = self._get_srv()
+        w = {
+            "code": "SOURCE_UNAVAILABLE",
+            "message": "GlobeNewswire RSS unavailable: connection refused",
+        }
+        status = srv_mod._compute_source_status(
+            sources_used=[],
+            warnings=[w],
+            items=[],
+            selected_sources=["newswire"],
+        )
+        self.assertEqual(status.get("newswire", {}).get("status"), "PROVIDER_ERROR")
+
+    def test_yahoo_items_not_reclassified_as_newswire(self):
+        """Items fetched from Yahoo Finance must never carry sourceType='newswire'."""
+        srv_mod = self._get_srv()
+        yf_item = {
+            "source": "yahoo_finance_press_releases",
+            "sourceType": "yahoo_finance_press_releases",
+            "originalSource": "GlobeNewswire",
+            "title": "AAPL press release via Yahoo",
+            "publishedAt": "2026-05-15T12:00:00Z",
+        }
+        self.assertNotEqual(yf_item.get("sourceType"), "newswire")
+        self.assertNotEqual(yf_item.get("source"), "newswire")
+
+    def test_newswire_not_in_default_get_company_news_sources(self):
+        """get_company_news must not include 'newswire' in its default sources."""
+        import inspect
+        srv_mod = self._get_srv()
+        src = inspect.getsource(srv_mod.get_company_news)
+        # The default call must reference the three canonical defaults.
+        self.assertIn("yahoo_finance_news", src)
+        self.assertIn("yahoo_finance_press_releases", src)
+        self.assertIn("finnhub", src)
+
+
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
     sys.exit(0 if result.result.wasSuccessful() else 1)
