@@ -67,6 +67,7 @@ const GLOBENEWSWIRE_TTL_MS = 15 * 60 * 1000;
 const GLOBENEWSWIRE_STOCK_CATEGORY_DOMAIN = "https://www.globenewswire.com/rss/stock";
 const GLOBENEWSWIRE_ISIN_CATEGORY_DOMAIN = "https://www.globenewswire.com/rss/ISIN";
 const globenewswireCache = new Map<string, { value: string; storedAt: number }>();
+const YAHOO_ALLOWED_CONTENT_TYPES = new Set(["STORY", "ARTICLE", "PRESS_RELEASE"]);
 const SMOKE_TICKER_CIK_FALLBACKS: Record<string, string> = {
   AAPL: "0000320193",
   MSFT: "0000789019",
@@ -6192,12 +6193,11 @@ async function collectYahooEvents(
       newsRaw = (raw.items as Record<string, unknown>[]) ?? [];
     }
     for (const n of newsRaw) {
-      // For press_releases feed, skip items that are known to not be press releases.
-      if (feed === "press_releases") {
-        const content = (n.content && typeof n.content === "object") ? n.content as Record<string, unknown> : {};
-        const ct = _str(content.contentType || n.contentType).toUpperCase();
-        if (ct && ct !== "PRESS_RELEASE") continue;
-      }
+      const content = (n.content && typeof n.content === "object") ? n.content as Record<string, unknown> : {};
+      const ct = _str(content.contentType || n.contentType).toUpperCase();
+      if (ct && !YAHOO_ALLOWED_CONTENT_TYPES.has(ct)) continue;
+      // For the press-releases feed, Yahoo tab membership is authoritative:
+      // valid press-release tab items may still arrive as STORY/ARTICLE.
       const { item, warnings: w } = buildYfEventItem(ticker, n, retrievedAt, feedSource);
       if (!withinDateWindow(_str(item.publishedAt) || null, startDate, endDate, lookbackDays)) continue;
       items.push(item);

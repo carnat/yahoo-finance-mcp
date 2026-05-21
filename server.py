@@ -1767,9 +1767,8 @@ async def _collect_yahoo_events(
         content_type = str(content.get("contentType") or n.get("contentType") or "").upper()
         if content_type and content_type not in _YAHOO_ALLOWED_CONTENT_TYPES:
             continue
-        # For press_releases feed: only keep PRESS_RELEASE items (when contentType is known)
-        if feed == "press_releases" and content_type and content_type != "PRESS_RELEASE":
-            continue
+        # For the press-releases feed, Yahoo tab membership is authoritative:
+        # valid press-release tab items may still arrive as STORY/ARTICLE.
         item, item_warnings = _build_yahoo_event_item(ticker, n, retrieved_at, feed_source=feed_source_override)
         if not _within_date_window(item.get("publishedAt"), start_date=start_date, end_date=end_date, lookback_days=lookback_days):
             continue
