@@ -8688,16 +8688,67 @@ async def extract_geographic_revenue(
         if not maybe_20f and evidence_filing_type in ("", "10-K"):
             maybe_20f = await _may_be_20f_filer(ticker)
         if maybe_20f:
-            warnings = shaped.get("warnings")
-            if not isinstance(warnings, list):
-                warnings = []
-            if not any(isinstance(w, dict) and w.get("code") == "POSSIBLE_20F_FILER" for w in warnings):
-                warnings.append({
-                    "code": "POSSIBLE_20F_FILER",
-                    "message": "POSSIBLE_20F_FILER: Ticker may file 20-F. Retry with filing_type='20-F' or use IR web search.",
-                    "severity": "warning",
+            # Automatic 20-F fallback: retry extraction with 20-F filing type
+            fallback_payload = await _extract_geo_payload(ticker, region, "20-F", period)
+            fallback_idx = _safe_json_loads(await get_sec_filing_index(ticker, "20-F", period, accession_number))
+            if fallback_payload.get("value") is not None:
+                # 20-F extraction succeeded — replace shaped with fallback data
+                fallback_evidence = fallback_payload.get("evidence") if isinstance(fallback_payload.get("evidence"), dict) else {}
+                shaped = {
+                    "ticker": ticker,
+                    "factType": "geographic_revenue",
+                    "region": region,
+                    "period": fallback_payload.get("period"),
+                    "rawValue": fallback_payload.get("rawValue"),
+                    "rawDenominator": fallback_payload.get("rawDenominator"),
+                    "unit": fallback_payload.get("unit", "USD"),
+                    "unitScale": fallback_payload.get("unitScale", "unknown"),
+                    "value": fallback_payload.get("value"),
+                    "denominator": fallback_payload.get("denominator"),
+                    "valueRatio": fallback_payload.get("valueRatio"),
+                    "valuePct": fallback_payload.get("valuePct"),
+                    "extractionMethod": fallback_payload.get("extractionMethod", "NONE"),
+                    "confidence": fallback_payload.get("confidence", "HIGH"),
+                    "evidence": {
+                        "filingType": fallback_idx.get("filingType") or fallback_payload.get("filingType") or "20-F",
+                        "filingDate": fallback_idx.get("filingDate") or fallback_payload.get("filingDate"),
+                        "acceptedAt": fallback_idx.get("acceptedAt"),
+                        "accessionNumber": fallback_idx.get("accessionNumber") or fallback_payload.get("accessionNumber"),
+                        "documentUrl": fallback_idx.get("documentUrl") or fallback_payload.get("documentUrl"),
+                        "sectionHeading": fallback_evidence.get("sectionHeading"),
+                        "tableTitle": fallback_evidence.get("tableTitle"),
+                        "sourceTableId": fallback_evidence.get("sourceTableId"),
+                        "sourceRows": fallback_evidence.get("sourceRows") if isinstance(fallback_evidence.get("sourceRows"), list) else [],
+                        "sourceColumns": fallback_evidence.get("sourceColumns") if isinstance(fallback_evidence.get("sourceColumns"), list) else [],
+                    },
+                    "calculation": fallback_payload.get("calculation"),
+                    "warnings": fallback_payload.get("warnings") if isinstance(fallback_payload.get("warnings"), list) else [],
+                }
+                if shaped["denominator"] is None:
+                    shaped["valueRatio"] = None
+                    shaped["valuePct"] = None
+                # Append advisory warning noting automatic 20-F selection
+                shaped_warnings = shaped.get("warnings")
+                if not isinstance(shaped_warnings, list):
+                    shaped_warnings = []
+                shaped_warnings.append({
+                    "code": "AUTO_20F_FALLBACK",
+                    "message": "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).",
+                    "severity": "info",
                 })
-            shaped["warnings"] = warnings
+                shaped["warnings"] = shaped_warnings
+            else:
+                # 20-F extraction also failed — keep original shaped and add advisory warning
+                warnings = shaped.get("warnings")
+                if not isinstance(warnings, list):
+                    warnings = []
+                if not any(isinstance(w, dict) and w.get("code") == "POSSIBLE_20F_FILER" for w in warnings):
+                    warnings.append({
+                        "code": "POSSIBLE_20F_FILER",
+                        "message": "POSSIBLE_20F_FILER: Ticker may file 20-F. Retry with filing_type='20-F' or use IR web search.",
+                        "severity": "warning",
+                    })
+                shaped["warnings"] = warnings
     if str(detailLevel).lower() == "raw":
         shaped["rawContext"] = {"filingIndex": idx_payload}
     return json.dumps(shaped)
@@ -8727,6 +8778,43 @@ async def extract_segment_revenue(
             },
         })
     out = {"ticker": ticker, "factType": "segment_revenue", "segments": rows, "status": "FOUND" if rows else "NOT_DISCLOSED"}
+    warnings: list[dict] = []
+    # Automatic 20-F fallback for foreign private issuers
+    if not rows and str(filing_type or "").upper() == "10-K":
+        maybe_20f = await _may_be_20f_filer(ticker)
+        if maybe_20f:
+            fb_payload = _safe_json_loads(await get_filing_data(ticker=ticker, fact_type=FilingFactType.segment_revenue, filing_type="20-F", period=period))
+            fb_segments = fb_payload.get("allSegments") if isinstance(fb_payload.get("allSegments"), list) else []
+            fb_rows = []
+            for seg in fb_segments:
+                if not isinstance(seg, dict):
+                    continue
+                fb_rows.append({
+                    "label": seg.get("segmentLabel"),
+                    "value": seg.get("value"),
+                    "period": f"FY{seg.get('fiscalYear')}" if seg.get("fiscalYear") else None,
+                    "confidence": "HIGH",
+                    "evidence": {
+                        "filingDate": seg.get("filingDate"),
+                        "accessionNumber": seg.get("accessionNumber"),
+                    },
+                })
+            if fb_rows:
+                rows = fb_rows
+                out = {"ticker": ticker, "factType": "segment_revenue", "segments": rows, "status": "FOUND"}
+                warnings.append({
+                    "code": "AUTO_20F_FALLBACK",
+                    "message": "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).",
+                    "severity": "info",
+                })
+            else:
+                warnings.append({
+                    "code": "POSSIBLE_20F_FILER",
+                    "message": "POSSIBLE_20F_FILER: Ticker may file 20-F. Retry with filing_type='20-F' or use IR web search.",
+                    "severity": "warning",
+                })
+    if warnings:
+        out["warnings"] = warnings
     if str(detailLevel).lower() == "raw":
         out["rawContext"] = payload
     return json.dumps(out)
