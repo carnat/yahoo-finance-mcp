@@ -68,7 +68,19 @@ def _run(coro):  # type: ignore[no-untyped-def]
 
 
 def _parse(raw: str) -> dict:
-    return json.loads(raw)
+    parsed = json.loads(raw)
+    # Unwrap Envelope V2 responses
+    if isinstance(parsed, dict) and "ok" in parsed and "data" in parsed and "meta" in parsed:
+        if parsed.get("ok") and isinstance(parsed.get("data"), dict):
+            result = dict(parsed["data"])
+            # Expose meta.warnings at top level for test assertions
+            meta = parsed.get("meta") or {}
+            if "warnings" not in result and meta.get("warnings"):
+                result["warnings"] = meta["warnings"]
+            elif "warnings" not in result:
+                result["warnings"] = []
+            return result
+    return parsed
 
 
 class TestGetLatestEarningsRelease(unittest.TestCase):

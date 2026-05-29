@@ -995,12 +995,12 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "extract_risk_factor_mentions", description: "Extract concise risk-factor term mentions from SEC filings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, terms: { type: "array", items: { type: "string" } }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker", "terms"] } },
   { name: "extract_customer_concentration", description: "Extract customer concentration percentages from SEC filings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker"] } },
   { name: "query_sec_filing_index", description: "Deterministically route supported SEC filing query types to index-backed extractor tools.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, query_type: { type: "string" }, params: { type: "object", default: {} }, return_evidence: { type: "boolean", default: true }, detailLevel: { type: "string", default: "compact", enum: ["compact", "evidence", "raw"] } }, required: ["ticker", "query_type"] } },
-  { name: "get_latest_earnings_release", description: "Find the latest public earnings release evidence from SEC 8-K, company IR, or Yahoo earnings calendars.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "latest" } }, required: ["ticker"] } },
-  { name: "index_earnings_release", description: "Build a compact section/table index for an earnings release/report source for deterministic follow-up extraction.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "latest" }, source_url: { type: "string" } }, required: ["ticker"] } },
-  { name: "extract_earnings_metrics", description: "Extract reported earnings metrics (revenue, EPS, gross margin, operating income, free cash flow, capex) from public sources.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "latest" }, source_preference: { type: "array", items: { type: "string" }, default: ["sec_8k", "company_ir", "10-q", "yahoo"] } }, required: ["ticker"] } },
-  { name: "extract_guidance", description: "Extract company-provided guidance/outlook ranges from public earnings release/report sources.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "latest" } }, required: ["ticker"] } },
-  { name: "extract_management_commentary", description: "Extract neutral topic-specific management commentary with short evidence excerpts from public earnings release/report sources.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "latest" }, topics: { type: "array", items: { type: "string" } } }, required: ["ticker"] } },
-  { name: "compare_earnings_actual_vs_estimate", description: "Compare reported actual earnings metrics versus public analyst estimates and return surprise percentages.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "latest" } }, required: ["ticker"] } },
+  { name: "get_latest_earnings_release", description: "Resolve the latest public earnings release source for a ticker. Returns SEC 8-K URL with HIGH confidence, or Yahoo calendar estimate with MEDIUM confidence.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" }, period: { type: "string", enum: ["latest"], default: "latest", description: "Period selector. Only 'latest' is supported." } }, required: ["ticker"] } },
+  { name: "index_earnings_release", description: "Build a compact section/table index of the latest public earnings release for deterministic metric extraction.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, period: { type: "string", enum: ["latest"], default: "latest" }, source_url: { type: "string", description: "Optional override URL (must be https://www.sec.gov/Archives/ or company IR). Paywalled sources are blocked." } }, required: ["ticker"] } },
+  { name: "extract_earnings_metrics", description: "Extract reported earnings metrics (revenue, EPS diluted, gross margin, operating income, FCF, capex) from SEC 8-K or public IR source.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" }, source_preference: { type: "array", items: { type: "string", enum: ["sec_8k", "company_ir", "10-q", "yahoo"] }, description: "Ordered preference list for source resolution.", default: ["sec_8k", "company_ir", "10-q", "yahoo"] } }, required: ["ticker"] } },
+  { name: "extract_guidance", description: "Extract company-provided forward guidance ranges (revenue, gross margin, EPS) from the latest SEC 8-K or IR release.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" } }, required: ["ticker"] } },
+  { name: "extract_management_commentary", description: "Extract topic-keyed management commentary snippets from the latest earnings release. Returns first relevant sentence per topic.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" }, topics: { type: "array", items: { type: "string" }, description: "Topics to search for, e.g. ['AI', 'margins', 'guidance', 'supply chain']" } }, required: ["ticker"] } },
+  { name: "compare_earnings_actual_vs_estimate", description: "Compare reported actual earnings (from SEC 8-K) vs Yahoo analyst consensus estimates. Returns revenue and EPS surprise percentages.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" } }, required: ["ticker"] } },
   { name: "get_manifest_diagnostics", description: "Return deployment and manifest diagnostics: tool counts, manifest version, hash, build SHA, deploy timestamp, privacy scope, and connector-staleness advisory.", inputSchema: { type: "object", properties: {} } },
   { name: "get_market_snapshot", description: "Compact market-state packet composing quote, price performance, moving-average trend, volume ratios, liquidity gate, and technical indicators in one call. Supports compact (default) and full modes, and optional batch of tickers.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, mode: { type: "string", enum: ["compact", "full"], default: "compact" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] } },
   { name: "health_check", description: "Return runtime and deployment health metadata.", inputSchema: { type: "object", properties: {} } },
@@ -1050,6 +1050,21 @@ const NEWS_OUTPUT_SCHEMA: Tool["outputSchema"] = {
     meta: { type: "object" },
   },
   additionalProperties: true,
+};
+const ENVELOPE_V2_OUTPUT_SCHEMA: Tool["outputSchema"] = {
+  type: "object",
+  properties: {
+    ok: { type: "boolean" },
+    data: { type: "object" },
+    meta: {
+      type: "object",
+      properties: {
+        tool: { type: "string" },
+        generatedAt: { type: "string" },
+        warnings: { type: "array", items: { type: "object" } },
+      },
+    },
+  },
 };
 
 const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
@@ -1390,12 +1405,12 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   extract_china_exposure: SIMPLE_OBJECT_SCHEMA,
   extract_risk_factor_mentions: SIMPLE_OBJECT_SCHEMA,
   extract_customer_concentration: SIMPLE_OBJECT_SCHEMA,
-  get_latest_earnings_release: SIMPLE_OBJECT_SCHEMA,
-  index_earnings_release: SIMPLE_OBJECT_SCHEMA,
-  extract_earnings_metrics: SIMPLE_OBJECT_SCHEMA,
-  extract_guidance: SIMPLE_OBJECT_SCHEMA,
-  extract_management_commentary: SIMPLE_OBJECT_SCHEMA,
-  compare_earnings_actual_vs_estimate: SIMPLE_OBJECT_SCHEMA,
+  get_latest_earnings_release: ENVELOPE_V2_OUTPUT_SCHEMA,
+  index_earnings_release: ENVELOPE_V2_OUTPUT_SCHEMA,
+  extract_earnings_metrics: ENVELOPE_V2_OUTPUT_SCHEMA,
+  extract_guidance: ENVELOPE_V2_OUTPUT_SCHEMA,
+  extract_management_commentary: ENVELOPE_V2_OUTPUT_SCHEMA,
+  compare_earnings_actual_vs_estimate: ENVELOPE_V2_OUTPUT_SCHEMA,
 };
 
 for (const [alias, canonical] of Object.entries(TOOL_ALIASES)) {

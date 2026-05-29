@@ -195,6 +195,61 @@ def _mcp_warning(
 
 
 # ---------------------------------------------------------------------------
+# Envelope V2 standardization helper
+# ---------------------------------------------------------------------------
+def _wrap_envelope_v2(
+    tool_name: str,
+    data: dict | list | None,
+    *,
+    warnings: list[dict] | None = None,
+    error: str | None = None,
+    error_code: str | None = None,
+    meta_extra: dict | None = None,
+) -> str:
+    """
+    Returns a JSON-encoded MCP Envelope V2 string.
+
+    Shape:
+    {
+      "ok": true | false,
+      "data": <payload>,          # present when ok=true
+      "error": "<message>",       # present when ok=false
+      "errorCode": "<CODE>",      # present when ok=false
+      "meta": {
+        "tool": "<tool_name>",
+        "generatedAt": "<ISO-UTC>",
+        "warnings": [ { "code": str, "message": str } ]
+      }
+    }
+    """
+    generated_at = datetime.datetime.now(tz=datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    meta: dict = {
+        "tool": tool_name,
+        "generatedAt": generated_at,
+        "warnings": warnings or [],
+    }
+    if meta_extra:
+        meta.update(meta_extra)
+
+    if error is not None:
+        return json.dumps({
+            "ok": False,
+            "error": error,
+            "errorCode": error_code or "UNKNOWN_ERROR",
+            "data": None,
+            "meta": meta,
+        })
+
+    return json.dumps({
+        "ok": True,
+        "data": data,
+        "error": None,
+        "errorCode": None,
+        "meta": meta,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Input validation helpers
 # ---------------------------------------------------------------------------
 _TICKER_RE = _re.compile(r'^[A-Z0-9.\-\^=]{1,20}$')
@@ -9531,8 +9586,9 @@ async def get_latest_earnings_release(ticker: str, period: str = "latest") -> st
     _ = period  # reserved for future explicit periods
     err = _validate_ticker(ticker)
     if err:
-        return _mcp_failure("get_latest_earnings_release", ErrorCode.INPUT_VALIDATION_ERROR, err)
-    return json.dumps(await _resolve_latest_earnings_release(ticker))
+        return _wrap_envelope_v2("get_latest_earnings_release", None, error=err, error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+    data = await _resolve_latest_earnings_release(ticker)
+    return _wrap_envelope_v2("get_latest_earnings_release", data)
 
 
 @yfinance_server.tool(
@@ -9543,13 +9599,13 @@ async def get_latest_earnings_release(ticker: str, period: str = "latest") -> st
 async def index_earnings_release(ticker: str, period: str = "latest", source_url: str | None = None) -> str:
     err = _validate_ticker(ticker)
     if err:
-        return _mcp_failure("index_earnings_release", ErrorCode.INPUT_VALIDATION_ERROR, err)
+        return _wrap_envelope_v2("index_earnings_release", None, error=err, error_code=ErrorCode.INPUT_VALIDATION_ERROR)
     source_type = None
     source_meta: dict = {}
     if source_url:
         source_type, source_err = _classify_earnings_source_url(source_url)
         if source_err:
-            return _mcp_failure("index_earnings_release", ErrorCode.INPUT_VALIDATION_ERROR, source_err)
+            return _wrap_envelope_v2("index_earnings_release", None, error=source_err, error_code=ErrorCode.INPUT_VALIDATION_ERROR)
         source_meta = {"sourceType": source_type, "url": source_url}
     else:
         latest = await _resolve_latest_earnings_release(ticker)
@@ -9560,14 +9616,13 @@ async def index_earnings_release(ticker: str, period: str = "latest", source_url
         source_meta = src
 
     if not source_url:
-        return json.dumps({
+        data = {
             "ticker": ticker.upper(),
             "period": period,
             "source": {"sourceType": source_type or "unknown", "url": None},
             "index": {"sections": [], "tables": [], "keywordMap": {}},
-            "meta": {"indexedAt": _utc_now_z(), "cacheKey": f"earnidx:{ticker.upper()}:none", "cacheTtlHours": 24},
-            "warnings": [{"code": "SOURCE_NOT_FOUND", "message": "No public earnings release source found"}],
-        })
+        }
+        return _wrap_envelope_v2("index_earnings_release", data, warnings=[{"code": "SOURCE_NOT_FOUND", "message": "No public earnings release source found"}])
 
     cache_id = str(source_meta.get("accessionNumber") or source_url)
     cache_key = f"earnidx:{ticker.upper()}:{cache_id}"
@@ -9579,10 +9634,10 @@ async def index_earnings_release(ticker: str, period: str = "latest", source_url
         "https://www.sec.gov/Archives/"
     ) else _fetch_public_html(source_url)
     if not html:
-        return _mcp_failure("index_earnings_release", ErrorCode.PROVIDER_ERROR, f"Failed to fetch source: {source_url}")
+        return _wrap_envelope_v2("index_earnings_release", None, error=f"Failed to fetch source: {source_url}", error_code=ErrorCode.PROVIDER_ERROR)
 
     idx = _build_filing_index_from_html(_sanitize_sec_html(html))
-    out = {
+    out_data = {
         "ticker": ticker.upper(),
         "period": _derive_fiscal_period_from_date(source_meta.get("filingDate") or source_meta.get("publishedAt")) or period,
         "source": {
@@ -9595,11 +9650,10 @@ async def index_earnings_release(ticker: str, period: str = "latest", source_url
             "accessionNumber": source_meta.get("accessionNumber"),
         },
         "index": idx,
-        "meta": {"indexedAt": _utc_now_z(), "cacheKey": cache_key, "cacheTtlHours": 24},
     }
-    encoded = json.dumps(out)
-    _tool_cache.set(cache_key, encoded, TTL_EDGAR)
-    return encoded
+    result = _wrap_envelope_v2("index_earnings_release", out_data, meta_extra={"cacheKey": cache_key, "cacheTtlHours": 24})
+    _tool_cache.set(cache_key, result, TTL_EDGAR)
+    return result
 
 
 @yfinance_server.tool(
@@ -9749,7 +9803,7 @@ async def extract_earnings_metrics(
     elif release.get("confidence") in {"MEDIUM", "LOW"}:
         overall_conf = str(release.get("confidence"))
 
-    return json.dumps({
+    return _wrap_envelope_v2("extract_earnings_metrics", {
         "ticker": ticker.upper(),
         "eventType": "earnings_release",
         "period": release.get("period") or period,
@@ -9758,8 +9812,7 @@ async def extract_earnings_metrics(
         "metrics": metrics,
         "evidence": evidence_items,
         "confidence": overall_conf,
-        "warnings": warnings,
-    })
+    }, warnings=warnings)
 
 
 @yfinance_server.tool(
@@ -9778,7 +9831,7 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
     src = sources[0] if sources and isinstance(sources[0], dict) else {}
     src_url = str(src.get("url") or "")
     if not src_url.startswith("https://www.sec.gov/Archives/"):
-        return json.dumps({"ticker": ticker.upper(), "period": release.get("period") or period, "guidance": base, "confidence": "NOT_DISCLOSED", "warnings": []})
+        return _wrap_envelope_v2("extract_guidance", {"ticker": ticker.upper(), "period": release.get("period") or period, "guidance": base, "confidence": "NOT_DISCLOSED"})
 
     html = await _edgar_get_html(src_url, max_bytes=5_000_000)
     text = _strip_html_tags(_sanitize_sec_html(html or ""))
@@ -9821,12 +9874,11 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
             "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_z(), "excerpt": _compact_excerpt(patterns["eps"].group(0))}],
         }
     found = any(base[k]["status"] == "FOUND" for k in ("revenue", "grossMargin", "eps"))
-    return json.dumps({
+    return _wrap_envelope_v2("extract_guidance", {
         "ticker": ticker.upper(),
         "period": release.get("period") or period,
         "guidance": base,
         "confidence": "HIGH" if found else "NOT_DISCLOSED",
-        "warnings": [],
     })
 
 
@@ -9872,7 +9924,7 @@ async def extract_management_commentary(ticker: str, period: str = "latest", top
                 "evidence": [],
                 "confidence": "LOW",
             })
-    return json.dumps({"ticker": ticker.upper(), "period": release.get("period") or period, "topics": out_topics, "warnings": []})
+    return _wrap_envelope_v2("extract_management_commentary", {"ticker": ticker.upper(), "period": release.get("period") or period, "topics": out_topics})
 
 
 @yfinance_server.tool(
@@ -9881,7 +9933,9 @@ async def extract_management_commentary(ticker: str, period: str = "latest", top
     description="Compare reported actual earnings metrics against public Yahoo analyst estimates and return surprise percentages.",
 )
 async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest") -> str:
-    metrics = _safe_json_loads(await extract_earnings_metrics(ticker=ticker, period=period))
+    raw_metrics = _safe_json_loads(await extract_earnings_metrics(ticker=ticker, period=period))
+    # extract_earnings_metrics now returns Envelope V2; unwrap data
+    metrics = raw_metrics.get("data") if isinstance(raw_metrics.get("data"), dict) else raw_metrics
     ea = _safe_json_loads(await get_earnings_analysis(ticker=ticker))
     actual_rev = (((metrics.get("metrics") or {}).get("revenue") or {}).get("value")
                   if isinstance((metrics.get("metrics") or {}).get("revenue"), dict) else None)
@@ -9916,22 +9970,21 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
             "epsSurprisePct": None,
         },
         "confidence": "NOT_DISCLOSED",
-        "warnings": warnings,
     }
     if actual_rev is None or actual_eps is None or revenue_est in (None, 0) or eps_est in (None, 0):
-        return json.dumps(result)
+        return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
 
     try:
         result["surprise"]["revenueSurprisePct"] = round(((float(actual_rev) - float(revenue_est)) / abs(float(revenue_est))) * 100, 2)
         result["surprise"]["epsSurprisePct"] = round(((float(actual_eps) - float(eps_est)) / abs(float(eps_est))) * 100, 2)
     except Exception:
-        return json.dumps(result)
+        return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
     result["confidence"] = "HIGH"
     actual_period = str(metrics.get("period") or "")
     if not actual_period:
         warnings.append({"code": "PERIOD_MISMATCH", "message": "Actual and estimate periods could not be aligned"})
         result["confidence"] = "LOW"
-    return json.dumps(result)
+    return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
 
 
 @yfinance_server.tool(name="get_tps_inputs", output_schema=_TOOL_OUTPUT_SCHEMAS["get_tps_inputs"], description="Deprecated alias for analyze_position_signals.")
