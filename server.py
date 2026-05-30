@@ -983,6 +983,10 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
     "extract_guidance": _SIMPLE_OUTPUT_SCHEMA,
     "extract_management_commentary": _SIMPLE_OUTPUT_SCHEMA,
     "compare_earnings_actual_vs_estimate": _SIMPLE_OUTPUT_SCHEMA,
+    "list_sec_filing_exhibits": _SIMPLE_OUTPUT_SCHEMA,
+    "get_sec_filing_exhibit_content": _SIMPLE_OUTPUT_SCHEMA,
+    "parse_public_transcript": _SIMPLE_OUTPUT_SCHEMA,
+    "get_earnings_call_transcript": _SIMPLE_OUTPUT_SCHEMA,
 }
 
 TOOL_ALIASES: dict[str, str] = {
@@ -6662,6 +6666,66 @@ def _edgar_cik_from_accession(accession_number: str) -> int | None:
         return None
 
 
+async def _edgar_list_exhibits_from_index(index_url: str) -> list[dict]:
+    """Fetch the EDGAR filing index HTM and return a list of all document/exhibit entries.
+
+    Each entry dict contains: sequence, description, document (filename), type, size.
+    Returns an empty list if the page cannot be fetched or parsed.
+    """
+    html = await _edgar_get_html(index_url, max_bytes=500_000)
+    if not html:
+        return []
+    exhibits: list[dict] = []
+    for row_m in _re.finditer(r"<tr[^>]*>([\s\S]*?)</tr>", html, _re.IGNORECASE):
+        row_html = row_m.group(1)
+        cells = _re.findall(r"<t[dh][^>]*>([\s\S]*?)</t[dh]>", row_html, _re.IGNORECASE)
+        if len(cells) < 3:
+            continue
+        seq = _strip_html_tags(cells[0]).strip()
+        if not seq or not seq[0].isdigit():
+            continue
+        desc = _strip_html_tags(cells[1]).strip() if len(cells) > 1 else ""
+        # Extract filename from <a> href if present, else raw text
+        href_m = _re.search(r'href=["\']([^"\']+)["\']', cells[2], _re.IGNORECASE)
+        if href_m:
+            raw_href = _html_module.unescape(href_m.group(1)).strip()
+            doc_name = raw_href.rsplit("/", 1)[-1].split("?", 1)[0].split("#", 1)[0]
+        else:
+            doc_name = _strip_html_tags(cells[2]).strip()
+        doc_type = _strip_html_tags(cells[3]).strip() if len(cells) > 3 else ""
+        size = _strip_html_tags(cells[4]).strip() if len(cells) > 4 else ""
+        exhibits.append({
+            "sequence": seq,
+            "description": desc,
+            "document": doc_name,
+            "type": doc_type,
+            "size": size,
+        })
+    return exhibits
+
+
+def _filter_paragraphs_by_topics(text: str, topics: list[str], context_chars: int = 200) -> list[dict]:
+    """Split text into paragraphs and return those matching any of the given topics/keywords.
+
+    Returns a list of dicts with keys: paragraph, matchedTopics.
+    If topics is empty, returns nothing (caller should use full text).
+    """
+    if not topics:
+        return []
+    # Split on double-newlines or single newlines with enough content
+    paragraphs = [p.strip() for p in _re.split(r"\n\s*\n|\n", text) if p.strip() and len(p.strip()) > 20]
+    results: list[dict] = []
+    topic_patterns = [(t, _re.compile(_re.escape(t), _re.IGNORECASE)) for t in topics]
+    for para in paragraphs:
+        matched: list[str] = []
+        for topic_name, pattern in topic_patterns:
+            if pattern.search(para):
+                matched.append(topic_name)
+        if matched:
+            results.append({"paragraph": para[:context_chars * 5] if len(para) > context_chars * 5 else para, "matchedTopics": matched})
+    return results
+
+
 async def _edgar_primary_doc_from_index(index_url: str) -> str | None:
     """Fetch the EDGAR filing index HTM and return the primary document filename.
 
@@ -9985,6 +10049,278 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
         warnings.append({"code": "PERIOD_MISMATCH", "message": "Actual and estimate periods could not be aligned"})
         result["confidence"] = "LOW"
     return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5B: Earnings Call Transcript & SEC Exhibit Tools
+# ---------------------------------------------------------------------------
+
+
+@yfinance_server.tool(
+    name="list_sec_filing_exhibits",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["list_sec_filing_exhibits"],
+    description="List all exhibits/documents attached to a specific SEC filing by accession number.",
+)
+async def list_sec_filing_exhibits(ticker: str, accessionNumber: str) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _wrap_envelope_v2("list_sec_filing_exhibits", None, error=err, error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+    if not accessionNumber or not accessionNumber.strip():
+        return _wrap_envelope_v2("list_sec_filing_exhibits", None, error="accessionNumber is required.", error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+
+    cik = _edgar_cik_from_accession(accessionNumber)
+    if not cik:
+        # Fall back to ticker-based CIK resolution
+        cik_padded, _ = await _get_submissions_for_ticker(ticker)
+        cik = int(cik_padded) if cik_padded else None
+    if not cik:
+        return _wrap_envelope_v2("list_sec_filing_exhibits", None, error=f"Could not resolve CIK for ticker '{ticker}'.", error_code=ErrorCode.TICKER_NOT_FOUND)
+
+    index_url, _ = _edgar_build_filing_urls(cik, accessionNumber, None)
+    exhibits = await _edgar_list_exhibits_from_index(index_url)
+    return _wrap_envelope_v2("list_sec_filing_exhibits", {
+        "ticker": ticker.upper(),
+        "accessionNumber": accessionNumber,
+        "indexUrl": index_url,
+        "exhibits": exhibits,
+    })
+
+
+@yfinance_server.tool(
+    name="get_sec_filing_exhibit_content",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_sec_filing_exhibit_content"],
+    description="Fetch and return the text content of a specific exhibit from an SEC filing. Supports topic-based paragraph filtering to reduce token usage.",
+)
+async def get_sec_filing_exhibit_content(ticker: str, accessionNumber: str, fileName: str, topics: list[str] | None = None) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _wrap_envelope_v2("get_sec_filing_exhibit_content", None, error=err, error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+    if not accessionNumber or not accessionNumber.strip():
+        return _wrap_envelope_v2("get_sec_filing_exhibit_content", None, error="accessionNumber is required.", error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+    if not fileName or not fileName.strip():
+        return _wrap_envelope_v2("get_sec_filing_exhibit_content", None, error="fileName is required.", error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+
+    cik = _edgar_cik_from_accession(accessionNumber)
+    if not cik:
+        cik_padded, _ = await _get_submissions_for_ticker(ticker)
+        cik = int(cik_padded) if cik_padded else None
+    if not cik:
+        return _wrap_envelope_v2("get_sec_filing_exhibit_content", None, error=f"Could not resolve CIK for ticker '{ticker}'.", error_code=ErrorCode.TICKER_NOT_FOUND)
+
+    accession_nodash = accessionNumber.replace("-", "")
+    doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{fileName}"
+    html = await _edgar_get_html(doc_url, max_bytes=5_000_000)
+    if not html:
+        return _wrap_envelope_v2("get_sec_filing_exhibit_content", None, error=f"Could not fetch exhibit '{fileName}'.", error_code="FETCH_ERROR")
+
+    clean_text = _strip_html_tags(_sanitize_sec_html(html))
+
+    warnings: list[dict] = []
+    if topics:
+        filtered = _filter_paragraphs_by_topics(clean_text, topics)
+        if not filtered:
+            warnings.append({"code": "NO_TOPIC_MATCHES", "message": f"No paragraphs matched the provided topics: {topics}"})
+        return _wrap_envelope_v2("get_sec_filing_exhibit_content", {
+            "ticker": ticker.upper(),
+            "accessionNumber": accessionNumber,
+            "fileName": fileName,
+            "documentUrl": doc_url,
+            "filteredByTopics": topics,
+            "matchedParagraphs": filtered,
+            "totalTextLength": len(clean_text),
+        }, warnings=warnings)
+
+    # No topics: return full text truncated at safe threshold
+    max_chars = 50_000
+    truncated = len(clean_text) > max_chars
+    if truncated:
+        warnings.append({"code": "TEXT_TRUNCATED", "message": f"Text truncated from {len(clean_text)} to {max_chars} characters."})
+    return _wrap_envelope_v2("get_sec_filing_exhibit_content", {
+        "ticker": ticker.upper(),
+        "accessionNumber": accessionNumber,
+        "fileName": fileName,
+        "documentUrl": doc_url,
+        "filteredByTopics": None,
+        "text": clean_text[:max_chars],
+        "totalTextLength": len(clean_text),
+        "truncated": truncated,
+    }, warnings=warnings)
+
+
+@yfinance_server.tool(
+    name="parse_public_transcript",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["parse_public_transcript"],
+    description="Fetch and parse a public transcript page (Motley Fool, company IR, etc.). Supports topic-based paragraph filtering to reduce token usage.",
+)
+async def parse_public_transcript(url: str, topics: list[str] | None = None) -> str:
+    if not url or not url.startswith("https://"):
+        return _wrap_envelope_v2("parse_public_transcript", None, error="A valid HTTPS URL is required.", error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+
+    loop = asyncio.get_event_loop()
+
+    def _fetch_page() -> str | None:
+        req = _urlrequest.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
+        )
+        try:
+            with _urlrequest.urlopen(req, timeout=30) as resp:  # noqa: S310
+                raw = resp.read(5_000_000)
+            try:
+                return raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return raw.decode("latin-1", errors="replace")
+        except Exception:
+            return None
+
+    html = await loop.run_in_executor(None, _fetch_page)
+    if not html:
+        return _wrap_envelope_v2("parse_public_transcript", None, error=f"Could not fetch URL: {url}", error_code="FETCH_ERROR")
+
+    clean_text = _strip_html_tags(_sanitize_sec_html(html))
+
+    warnings: list[dict] = []
+    if topics:
+        filtered = _filter_paragraphs_by_topics(clean_text, topics)
+        if not filtered:
+            warnings.append({"code": "NO_TOPIC_MATCHES", "message": f"No paragraphs matched the provided topics: {topics}"})
+        return _wrap_envelope_v2("parse_public_transcript", {
+            "url": url,
+            "filteredByTopics": topics,
+            "matchedParagraphs": filtered,
+            "totalTextLength": len(clean_text),
+        }, warnings=warnings)
+
+    max_chars = 50_000
+    truncated = len(clean_text) > max_chars
+    if truncated:
+        warnings.append({"code": "TEXT_TRUNCATED", "message": f"Text truncated from {len(clean_text)} to {max_chars} characters."})
+    return _wrap_envelope_v2("parse_public_transcript", {
+        "url": url,
+        "filteredByTopics": None,
+        "text": clean_text[:max_chars],
+        "totalTextLength": len(clean_text),
+        "truncated": truncated,
+    }, warnings=warnings)
+
+
+@yfinance_server.tool(
+    name="get_earnings_call_transcript",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_call_transcript"],
+    description="High-level tool to retrieve earnings call transcript content from SEC 8-K exhibits. Falls back with instructions if not available via SEC.",
+)
+async def get_earnings_call_transcript(ticker: str, period: str = "latest", topics: list[str] | None = None) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _wrap_envelope_v2("get_earnings_call_transcript", None, error=err, error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+
+    # Step 1: Find the latest 8-K filing
+    sec_source = await _resolve_latest_earnings_sec_source(ticker)
+    if not sec_source:
+        return _wrap_envelope_v2("get_earnings_call_transcript", {
+            "ticker": ticker.upper(),
+            "period": period,
+            "status": "SEC_8K_NOT_FOUND",
+            "message": "No recent SEC 8-K filing found for this ticker. Use web_search to find the transcript on Motley Fool or the company IR page, then call parse_public_transcript with the URL.",
+            "content": None,
+        })
+
+    accession = sec_source.get("accessionNumber", "")
+    cik = _edgar_cik_from_accession(accession)
+    if not cik:
+        cik_padded, _ = await _get_submissions_for_ticker(ticker)
+        cik = int(cik_padded) if cik_padded else None
+    if not cik:
+        return _wrap_envelope_v2("get_earnings_call_transcript", {
+            "ticker": ticker.upper(),
+            "period": period,
+            "status": "CIK_RESOLUTION_FAILED",
+            "message": "Could not resolve CIK for ticker.",
+            "content": None,
+        })
+
+    # Step 2: List exhibits
+    index_url, _ = _edgar_build_filing_urls(cik, accession, None)
+    exhibits = await _edgar_list_exhibits_from_index(index_url)
+
+    # Step 3: Search for transcript exhibit
+    transcript_exhibit: dict | None = None
+    transcript_keywords = ("TRANSCRIPT", "CONFERENCE CALL", "PROCEEDINGS", "EARNINGS CALL")
+    for ex in exhibits:
+        ex_type = str(ex.get("type", "")).upper()
+        ex_desc = str(ex.get("description", "")).upper()
+        if ex_type in ("EX-99.2", "EX-99.3"):
+            transcript_exhibit = ex
+            break
+        if any(kw in ex_desc for kw in transcript_keywords):
+            transcript_exhibit = ex
+            break
+
+    if not transcript_exhibit:
+        return _wrap_envelope_v2("get_earnings_call_transcript", {
+            "ticker": ticker.upper(),
+            "period": period,
+            "status": "SEC_EXHIBIT_NOT_FOUND",
+            "accessionNumber": accession,
+            "filingDate": sec_source.get("filingDate"),
+            "availableExhibits": [{"type": ex.get("type"), "description": ex.get("description"), "document": ex.get("document")} for ex in exhibits],
+            "message": "8-K filing found but no transcript exhibit detected. Use web_search to find the transcript on Motley Fool or the company IR page, then call parse_public_transcript with the URL.",
+            "content": None,
+        })
+
+    # Step 4: Fetch and parse the exhibit
+    file_name = transcript_exhibit.get("document", "")
+    accession_nodash = accession.replace("-", "")
+    doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{file_name}"
+    html = await _edgar_get_html(doc_url, max_bytes=5_000_000)
+    if not html:
+        return _wrap_envelope_v2("get_earnings_call_transcript", {
+            "ticker": ticker.upper(),
+            "period": period,
+            "status": "FETCH_ERROR",
+            "documentUrl": doc_url,
+            "message": f"Could not fetch exhibit document '{file_name}'.",
+            "content": None,
+        })
+
+    clean_text = _strip_html_tags(_sanitize_sec_html(html))
+    warnings: list[dict] = []
+
+    if topics:
+        filtered = _filter_paragraphs_by_topics(clean_text, topics)
+        if not filtered:
+            warnings.append({"code": "NO_TOPIC_MATCHES", "message": f"No paragraphs matched the provided topics: {topics}"})
+        return _wrap_envelope_v2("get_earnings_call_transcript", {
+            "ticker": ticker.upper(),
+            "period": period,
+            "status": "OK",
+            "accessionNumber": accession,
+            "filingDate": sec_source.get("filingDate"),
+            "exhibitType": transcript_exhibit.get("type"),
+            "documentUrl": doc_url,
+            "filteredByTopics": topics,
+            "matchedParagraphs": filtered,
+            "totalTextLength": len(clean_text),
+            "content": None,
+        }, warnings=warnings)
+
+    max_chars = 50_000
+    truncated = len(clean_text) > max_chars
+    if truncated:
+        warnings.append({"code": "TEXT_TRUNCATED", "message": f"Text truncated from {len(clean_text)} to {max_chars} characters."})
+    return _wrap_envelope_v2("get_earnings_call_transcript", {
+        "ticker": ticker.upper(),
+        "period": period,
+        "status": "OK",
+        "accessionNumber": accession,
+        "filingDate": sec_source.get("filingDate"),
+        "exhibitType": transcript_exhibit.get("type"),
+        "documentUrl": doc_url,
+        "filteredByTopics": None,
+        "content": clean_text[:max_chars],
+        "totalTextLength": len(clean_text),
+        "truncated": truncated,
+    }, warnings=warnings)
 
 
 @yfinance_server.tool(name="get_tps_inputs", output_schema=_TOOL_OUTPUT_SCHEMAS["get_tps_inputs"], description="Deprecated alias for analyze_position_signals.")
