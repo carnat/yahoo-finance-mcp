@@ -7119,18 +7119,62 @@ export async function extractGeographicRevenue(
     warnings,
   };
   if (filingType.toUpperCase() === "10-K" && String(out.confidence ?? "").toUpperCase() === "NOT_DISCLOSED") {
-    const evidence = out.evidence as Record<string, unknown>;
-    const evidenceFilingType = String(evidence?.filingType ?? "").toUpperCase();
+    const evidenceObj = out.evidence as Record<string, unknown>;
+    const evidenceFilingType = String(evidenceObj?.filingType ?? "").toUpperCase();
     let possible20F = evidenceFilingType === "20-F";
     if (!possible20F && (evidenceFilingType === "" || evidenceFilingType === "10-K")) {
       possible20F = await mayBe20FFiler(ticker);
     }
-    if (possible20F && !hasWarningCode(warnings, "POSSIBLE_20F_FILER")) {
-      warnings.push({
-        code: "POSSIBLE_20F_FILER",
-        message: "POSSIBLE_20F_FILER: Ticker may file 20-F. Retry with filing_type='20-F' or use IR web search.",
-        severity: "warning",
-      });
+    if (possible20F) {
+      // Automatic 20-F fallback: retry extraction with 20-F filing type
+      const fallbackPayload = parseObjectJson(await getFilingData(ticker, "geographic_revenue", region, "20-F", period));
+      const fallbackIdx = parseObjectJson(await getSecFilingIndex(ticker, "20-F", period, accessionNumber));
+      if (fallbackPayload.value != null) {
+        // 20-F extraction succeeded — replace output with fallback data
+        const fbEvidence = fallbackPayload.evidence && typeof fallbackPayload.evidence === "object"
+          ? fallbackPayload.evidence as Record<string, unknown> : {};
+        const fbWarnings = Array.isArray(fallbackPayload.warnings) ? [...fallbackPayload.warnings] : [];
+        out.period = fallbackPayload.period ?? null;
+        out.rawValue = fallbackPayload.rawValue ?? null;
+        out.rawDenominator = fallbackPayload.rawDenominator ?? null;
+        out.unit = fallbackPayload.unit ?? "USD";
+        out.unitScale = fallbackPayload.unitScale ?? "unknown";
+        out.value = fallbackPayload.value ?? null;
+        out.denominator = fallbackPayload.denominator ?? null;
+        out.valueRatio = fallbackPayload.denominator != null ? (fallbackPayload.valueRatio ?? null) : null;
+        out.valuePct = fallbackPayload.denominator != null ? (fallbackPayload.valuePct ?? null) : null;
+        out.extractionMethod = fallbackPayload.extractionMethod ?? "NONE";
+        out.confidence = fallbackPayload.confidence ?? "HIGH";
+        out.evidence = {
+          filingType: fallbackIdx.filingType ?? fallbackPayload.filingType ?? "20-F",
+          filingDate: fallbackIdx.filingDate ?? fallbackPayload.filingDate ?? null,
+          acceptedAt: fallbackIdx.acceptedAt ?? null,
+          accessionNumber: fallbackIdx.accessionNumber ?? fallbackPayload.accessionNumber ?? null,
+          documentUrl: fallbackIdx.documentUrl ?? fallbackPayload.documentUrl ?? null,
+          sectionHeading: fbEvidence.sectionHeading ?? null,
+          tableTitle: fbEvidence.tableTitle ?? null,
+          sourceTableId: fbEvidence.sourceTableId ?? null,
+          sourceRows: Array.isArray(fbEvidence.sourceRows) ? fbEvidence.sourceRows : [],
+          sourceColumns: Array.isArray(fbEvidence.sourceColumns) ? fbEvidence.sourceColumns : [],
+        };
+        out.calculation = fallbackPayload.calculation ?? null;
+        // Append advisory warning noting automatic 20-F selection
+        fbWarnings.push({
+          code: "AUTO_20F_FALLBACK",
+          message: "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).",
+          severity: "info",
+        });
+        out.warnings = fbWarnings;
+      } else {
+        // 20-F extraction also failed — add advisory warning
+        if (!hasWarningCode(warnings, "POSSIBLE_20F_FILER")) {
+          warnings.push({
+            code: "POSSIBLE_20F_FILER",
+            message: "POSSIBLE_20F_FILER: Ticker may file 20-F. Retry with filing_type='20-F' or use IR web search.",
+            severity: "warning",
+          });
+        }
+      }
     }
   }
   if (String(detailLevel).toLowerCase() === "raw") out.rawContext = { filingIndex: idx };
@@ -7140,7 +7184,7 @@ export async function extractGeographicRevenue(
 export async function extractSegmentRevenue(ticker: string, filingType = "10-K", period = "latest", detailLevel = "compact"): Promise<string> {
   const payload = parseObjectJson(await getFilingData(ticker, "segment_revenue", null, filingType, period));
   const segsRaw = Array.isArray(payload.allSegments) ? payload.allSegments : [];
-  const segments = segsRaw
+  let segments = segsRaw
     .filter((s) => typeof s === "object" && s != null)
     .map((s) => {
       const row = s as Record<string, unknown>;
@@ -7155,7 +7199,46 @@ export async function extractSegmentRevenue(ticker: string, filingType = "10-K",
         },
       };
     });
+  const warnings: Array<Record<string, unknown>> = [];
+  // Automatic 20-F fallback for foreign private issuers
+  if (segments.length === 0 && filingType.toUpperCase() === "10-K") {
+    const possible20F = await mayBe20FFiler(ticker);
+    if (possible20F) {
+      const fbPayload = parseObjectJson(await getFilingData(ticker, "segment_revenue", null, "20-F", period));
+      const fbSegsRaw = Array.isArray(fbPayload.allSegments) ? fbPayload.allSegments : [];
+      const fbSegments = fbSegsRaw
+        .filter((s) => typeof s === "object" && s != null)
+        .map((s) => {
+          const row = s as Record<string, unknown>;
+          return {
+            label: row.segmentLabel ?? null,
+            value: row.value ?? null,
+            period: row.fiscalYear ? `FY${String(row.fiscalYear)}` : null,
+            confidence: "HIGH",
+            evidence: {
+              filingDate: row.filingDate ?? null,
+              accessionNumber: row.accessionNumber ?? null,
+            },
+          };
+        });
+      if (fbSegments.length > 0) {
+        segments = fbSegments;
+        warnings.push({
+          code: "AUTO_20F_FALLBACK",
+          message: "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).",
+          severity: "info",
+        });
+      } else {
+        warnings.push({
+          code: "POSSIBLE_20F_FILER",
+          message: "POSSIBLE_20F_FILER: Ticker may file 20-F. Retry with filing_type='20-F' or use IR web search.",
+          severity: "warning",
+        });
+      }
+    }
+  }
   const out: Record<string, unknown> = { ticker, factType: "segment_revenue", segments, status: segments.length > 0 ? "FOUND" : "NOT_DISCLOSED" };
+  if (warnings.length > 0) out.warnings = warnings;
   if (String(detailLevel).toLowerCase() === "raw") out.rawContext = payload;
   return JSON.stringify(out);
 }
