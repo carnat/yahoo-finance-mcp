@@ -58,9 +58,10 @@ Canonical tool names use neutral public language. Legacy aliases are preserved f
 | `analyze_position_signals` | `get_tps_inputs` |
 | `calculate_price_target_distance` | `get_eqf_bracket` |
 | `analyze_options_flow_window` | `get_dc134_options_scan` |
-| `extract_sec_filing_fact` | `get_geographic_revenue`, `get_china_revenue_pct` |
+| `extract_sec_filing_fact` | `get_filing_data`, `get_geographic_revenue`, `get_china_revenue_pct` |
 | `search_sec_filing_text` | `get_filing_text_search` |
 | `get_sec_filing_section` | `get_filing_document` |
+| `get_company_news` | `get_yahoo_finance_news` |
 
 ---
 
@@ -147,7 +148,7 @@ Tools that return enriched metadata include some or all of these fields:
 | `valuePct` | Percentage (e.g., `15.47`). **Never emitted without a `denominator`.** |
 | `evidence` | Source metadata: filing URL, section, matched text or table row |
 
-**Workflow:** Use `get_filing_data` (XBRL companyconcept) first. If `status=NOT_DISCLOSED`, use `search_sec_filing_text` with `return_tables=true` to locate narrative tables. `valuePct` is only emitted when a denominator is available.
+**Workflow:** Use `extract_sec_filing_fact` (XBRL companyconcept) first. If `status=NOT_DISCLOSED`, use `search_sec_filing_text` with `return_tables=true` to locate narrative tables. `valuePct` is only emitted when a denominator is available.
 
 ---
 
@@ -265,6 +266,7 @@ ChatGPT (and other connector-based clients) cache the connector schema independe
 | `extract_guidance` | Extract company-provided guidance ranges. |
 | `extract_management_commentary` | Extract topic-specific management commentary with evidence excerpts. |
 | `compare_earnings_actual_vs_estimate` | Compare actual earnings vs analyst estimates with surprise %. |
+| `get_earnings_call_transcript` | Retrieve earnings call transcript content from SEC 8-K exhibits with optional topic filter. |
 
 ### Discovery & Position
 
@@ -295,7 +297,7 @@ ChatGPT (and other connector-based clients) cache the connector schema independe
 | 5 | ✅ Complete | Earnings intelligence (release, metrics, guidance, commentary) |
 | 6 | ✅ Complete | Public event/news multi-source schema |
 | 7 | ✅ Complete | Semantic quality metadata, SEC query router, smoke infrastructure |
-| 8 | 🚧 In progress | README + manifest diagnostics + `get_market_snapshot` snapshot tool |
+| 8 | ✅ Complete | README + manifest diagnostics + `get_market_snapshot` snapshot tool |
 
 **Phase 8 follow-on TODOs (PR63–PR66):**
 - PR63: `get_company_quality_snapshot` — profile + ratios + credit + earnings + analyst + calendar
