@@ -10161,7 +10161,7 @@ async def parse_public_transcript(url: str, topics: list[str] | None = None) -> 
     def _fetch_page() -> str | None:
         req = _urlrequest.Request(
             url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"},
         )
         try:
             with _urlrequest.urlopen(req, timeout=30) as resp:  # noqa: S310
