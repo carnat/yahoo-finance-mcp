@@ -616,61 +616,109 @@ yfinance_server = FastMCP(
     instructions="""
 # Yahoo Finance MCP Server
 
-This server provides financial market data from Yahoo Finance.
+This server provides financial market data from Yahoo Finance and SEC EDGAR via canonical tool names.
 
 ## Tool selection guidance
-- **Prefer `get_fast_info`** over `get_stock_info` for current price, market cap, 52-week range, or moving averages — it returns ~20 fields instead of 120+ and uses far fewer tokens. Also includes pre-market / after-hours prices when available.
-- Use `get_stock_info` only when you need deep fundamentals, business description, or fields not in fast_info. For ETFs or mutual funds, use `get_etf_info` instead.
-- **Use `get_etf_info`** for ETFs and mutual funds — returns NAV, expense ratio, AUM, YTD return, top-10 holdings, and sector weights. Covers tickers like SPY, QQQ, VTI, ARKK, etc.
-- **Prefer `get_financial_ratios`** over fetching full financial statements when you need valuation or profitability ratios — ratios are pre-computed server-side.
-- **Prefer `get_analyst_consensus`** over `get_recommendations` when you need a quick summary of analyst sentiment and price targets.
+- **Prefer `get_market_snapshot`** for a one-call market overview (price, range, MA trend, volume, RSI, MACD, liquidity gate, freshness). Supports compact (max 5 tickers) and full (max 2 tickers) modes.
+- **Prefer `get_market_quote`** over `get_company_profile` for current price, market cap, 52-week range, or moving averages — it returns ~20 fields instead of 120+ and uses far fewer tokens.
+- Use `get_company_profile` only when you need deep fundamentals, business description, or fields not in get_market_quote. For ETFs or mutual funds, use `get_fund_profile` instead.
+- **Prefer `analyze_financial_ratios`** over fetching full financial statements when you need valuation or profitability ratios — ratios are pre-computed server-side.
+- **Prefer `get_analyst_consensus`** over `get_analyst_recommendations` when you need a quick summary of analyst sentiment and price targets.
 - **Prefer `get_earnings_analysis`** to get all forward-looking analyst estimates in a single call instead of five separate calls.
-- Use `get_short_interest` for short-selling metrics (short % of float, days to cover, etc.).
+- Use `get_short_interest` or `get_short_momentum` for short-selling metrics.
 - Use `get_technical_indicators` for momentum signals (RSI-14, MACD) without fetching raw OHLCV history.
 - Use `search_ticker` to resolve a company name or ISIN to a ticker symbol before calling other tools.
 - Use `screen_stocks` to discover stocks matching criteria (e.g., day_gainers, most_actives) without iterating tickers manually.
-- Index tickers like `^VIX`, `^GSPC`, `^DJI` are supported by `get_fast_info`, `get_price_stats`, and `get_technical_indicators`.
+- Index tickers like `^VIX`, `^GSPC`, `^DJI` are supported by `get_market_quote`, `analyze_price_performance`, and `get_technical_indicators`.
+- For SEC data: use `extract_sec_filing_fact` first for XBRL-tagged facts. If it returns NOT_DISCLOSED, use `search_sec_filing_text` with `return_tables=true` as fallback.
+- For news: use `get_company_news` (multi-source) instead of `get_yahoo_finance_news` (legacy single-source).
 
 ## Available tools
 
-### Price & market data
-- get_fast_info: **Lightweight** — current price, market cap, 52-week high/low, moving averages, volume, market state (marketOpen, lastTradeDate, postMarketTimestamp), plus pre-market/after-hours prices when available. Prefer this for price lookups.
-- get_historical_stock_prices: OHLCV history. Supports period, interval, and optional columns filter to reduce output size.
-- get_stock_info: **Fundamentals** — returns ~30 key fields by default (identity, price, valuation, earnings, margins, dividends, analyst ratings, business description). Pass include_all=true for the full ~120-field payload. Use only when fast_info is insufficient. For ETFs/funds, use get_etf_info instead.
-- get_etf_info: **ETF/fund data** — NAV, expense ratio, AUM, YTD return, 52-week stats, moving averages, top-10 holdings, and sector weights. Use for SPY, QQQ, VTI, ARKK, and any mutual fund ticker.
-- get_price_stats: Pre-computed price statistics: % change vs 52-week high/low, distance from moving averages, 30-day volatility, and CAGR.
-- get_stock_actions: Dividend and split history.
-- get_short_interest: Short interest metrics: short % of float, shares short, days-to-cover ratio, float shares.
-- get_overnight_quote: Overnight session OHLCV. Filters for the true overnight window (20:00–04:00 ET / 00:00–08:00 UTC). Falls back to last pre-market bar for equities with a fallback flag. Returns dataSource (EXCHANGE or OTC_INDICATIVE), isBlueOceanWindow, isStale, dataAgeHours, gapPct, and gapDirection.
+### Snapshot & diagnostics
+- get_market_snapshot: One-call market-state packet: price, range, MA trend, volume, RSI, MACD, liquidity gate, freshness. Compact (default, max 5 tickers) or full (max 2) modes.
+- get_manifest_diagnostics: Deployment diagnostics: tool count, manifest hash, build SHA, deploy time, canonical/deprecated counts, connector-staleness advisory.
+- health_check: Runtime health metadata: server version, tool count, manifest hash, envelope V2 status.
 
-### Financials & ratios
-- get_financial_statement: Raw financial statements (income, balance sheet, cashflow). Supports ttm_income_stmt and ttm_cashflow for trailing-twelve-months data. Supports optional line_items filter.
-- get_financial_ratios: **Pre-computed** valuation, profitability, and leverage ratios (P/E, P/S, P/B, EV/EBITDA, margins, ROE, D/E, etc.). Prefer over fetching full statements.
+### Price & market data
+- get_market_quote: Current price, market cap, 52-week range, moving averages, volume (~20 fields). Pre/after-market prices when available.
+- get_historical_prices: Historical OHLCV data with configurable period, interval, and optional columns filter.
+- analyze_price_performance: % distance from 52w high/low and MAs, 30d annualised volatility, CAGR.
+- analyze_moving_average_position: % vs 50DMA/200DMA, trend (BULLISH/BEARISH/MIXED).
+- analyze_volume_ratio: Volume vs 10d/90d averages, volumeFlag (HIGH/NORMAL/LOW).
+- check_volume_liquidity_threshold: 20d ADV liquidity gate pass/fail. FX notional mode via foreign_exchange=true.
+- get_technical_indicators: Pre-computed RSI-14 (Wilder) and MACD (12,26,9) from daily closes.
+- get_price_slope: N-day price slope (% change) and direction (UP/DOWN/FLAT).
+- get_short_interest: Short % of float, shares short, days-to-cover, prior-month comparison.
+- get_short_momentum: Short interest with MoM delta, direction (RISING/FALLING/FLAT), squeeze risk.
+- get_overnight_quote: Overnight trading data (20:00–04:00 ET). Returns price, gap %, data source, and staleness flag.
+
+### Company fundamentals
+- get_company_profile: ~30 key fundamental fields by default. Pass include_all=true for full ~120-field payload. For ETFs/funds, use get_fund_profile instead.
+- get_fund_profile: ETF/mutual fund data — NAV, expense ratio, AUM, YTD return, top-10 holdings, sector weights.
+- get_financial_statement: Income statement, balance sheet, or cash flow (annual/quarterly/TTM). Optional line_items filter.
+- analyze_financial_ratios: Pre-computed P/E, PEG, P/S, P/B, EV/EBITDA, margins, ROE, ROA, debt ratios.
+- analyze_credit_health: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag.
+- get_corporate_actions: Dividends and splits history.
+- get_ownership_holders: Major holders, institutional holders, mutual funds, or insider transactions.
 
 ### Analyst & forecasts
-- get_analyst_consensus: Compact analyst price targets + recommendation breakdown. Prefer over get_recommendations.
-- get_earnings_analysis: All analyst forward estimates in one call: EPS/revenue estimates, EPS trend, earnings history, growth estimates.
-- get_recommendations: Raw recommendations or upgrades/downgrades table.
-- get_calendar: Next earnings date, EPS/revenue guidance, and next dividend dates.
-
-### Holders & ownership
-- get_holder_info: Major, institutional, mutual fund holders; insider transactions and purchases.
+- get_analyst_consensus: Compact analyst price targets (current/low/high/mean/median + % upside) and rating breakdown.
+- get_earnings_analysis: All analyst forward-looking data: EPS/revenue estimates, trend, history, growth.
+- get_analyst_recommendations: Raw analyst recommendations or upgrades/downgrades history.
+- get_analyst_rating_changes: Recent rating changes with signal (UPGRADE/DOWNGRADE/MAINTAIN), price target direction, net sentiment.
+- analyze_earnings_momentum: EPS revision momentum (7/30/90d), revision direction, beat rate, beat streak.
+- get_company_events_calendar: Next earnings date (confirmed vs estimated), ex-dividend/pay dates.
 
 ### Options
-- get_option_expiration_dates: Available expiration dates for options.
-- get_option_chain: Option chain (calls or puts). Supports min_strike, max_strike, and in_the_money_only filters to reduce output size.
+- get_option_expiration_dates: Available options expiration dates.
+- get_option_chain: Options chain for a specific expiry and type. Supports strike filters and in_the_money_only.
+- summarize_options_flow: Put/call ratio, P/C sentiment, ATM IV, IV percentile, max pain, highest OI strikes.
+- find_put_hedge_candidates: Pre-filtered OTM puts within configurable OTM % range and budget.
+- analyze_options_flow_window: Structured event-window options scan with 72h cached trend.
 
-### News & filings
-- get_yahoo_finance_news: Latest news articles.
-- get_filing_data: Structured XBRL-tagged SEC filing facts (try this first for GAAP line items and geographic revenue).
-- search_filing_text: Full-text search/section retrieval on SEC filing HTML (use when facts are not XBRL-tagged).
+### SEC filings
+- list_sec_company_filings: List SEC filings from EDGAR submissions. Returns filing type, date, accession number, document URL.
+- get_sec_filing_outline: Section/heading outline of an SEC filing.
+- get_sec_filing_section: Text of a specific filing section.
+- list_sec_filing_tables: Tables present in an SEC filing.
+- get_sec_filing_table: Specific table from an SEC filing by index.
+- extract_sec_filing_fact: Extract a specific XBRL fact from a filing (try this first for GAAP line items).
+- search_sec_filing_text: Search narrative filing HTML text. Use as fallback when extract_sec_filing_fact returns NOT_DISCLOSED.
+- index_sec_filing: Build a deterministic section/table index for a filing (cached 24h).
+- get_sec_filing_index: Get the pre-built filing index.
+- query_sec_filing_index: Route SEC filing query types to index-backed extractors.
 
-### Technical analysis
-- get_technical_indicators: Pre-computed RSI-14 and MACD (12,26,9) from historical daily prices. Use for momentum/oversold screening without fetching raw history.
+### SEC structured extractors
+- extract_geographic_revenue: Geographic revenue exposure with evidence.
+- extract_segment_revenue: Segment revenue rows from SEC facts.
+- extract_total_revenue: Total revenue from SEC facts.
+- extract_revenue_exposure: Revenue exposure for a region/customer/segment query.
+- extract_china_exposure: China exposure with revenue and non-revenue classifications.
+- extract_risk_factor_mentions: Risk-factor term mentions from SEC filings.
+- extract_customer_concentration: Customer concentration percentages.
 
-### Discovery
-- search_ticker: Search by company name, partial name, or ISIN to get matching ticker symbols.
-- screen_stocks: Screen the market using predefined or custom criteria. Predefined: aggressive_small_caps, day_gainers, day_losers, growth_technology_stocks, most_actives, most_shorted_stocks, small_cap_gainers, undervalued_growth_stocks, undervalued_large_caps, conservative_foreign_funds, high_yield_bond, portfolio_anchors, solid_large_growth_funds, solid_midcap_growth_funds, top_mutual_funds.
+### Public news & events
+- get_company_news: Recent public company news from Yahoo Finance, Finnhub, and SEC sources. Multi-source with sourceStatus.
+- search_company_news: Search news with keyword filter.
+- get_company_press_releases: 8-K press releases as structured public events.
+- get_sec_recent_events: Recent SEC filings as structured public events.
+- get_public_event_timeline: Deduplicated chronological timeline across all sources.
+- verify_company_event: Cross-validate an event across sources: CONFIRMED/PARTIAL/NOT_FOUND/STALE/CONFLICTING.
+
+### Earnings intelligence
+- get_latest_earnings_release: Find the latest earnings release evidence from SEC 8-K, IR, or Yahoo.
+- index_earnings_release: Build a section/table index for an earnings release.
+- extract_earnings_metrics: Extract reported revenue, EPS, gross margin, operating income, FCF, capex.
+- extract_guidance: Extract company-provided guidance ranges.
+- extract_management_commentary: Extract topic-specific management commentary with evidence excerpts.
+- compare_earnings_actual_vs_estimate: Compare actual earnings vs analyst estimates with surprise %.
+
+### Discovery & position
+- search_ticker: Resolve company name or ISIN to ticker symbol.
+- screen_stocks: Screen with predefined criteria (day_gainers, most_actives, undervalued_large_caps, etc.).
+- analyze_position_signals: Aggregate public market, analyst, earnings, and technical inputs for caller-defined scoring.
+- calculate_price_target_distance: Compare current price to a user-supplied reference target.
 """,
 )
 
@@ -983,6 +1031,10 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
     "extract_guidance": _SIMPLE_OUTPUT_SCHEMA,
     "extract_management_commentary": _SIMPLE_OUTPUT_SCHEMA,
     "compare_earnings_actual_vs_estimate": _SIMPLE_OUTPUT_SCHEMA,
+    "list_sec_filing_exhibits": _SIMPLE_OUTPUT_SCHEMA,
+    "get_sec_filing_exhibit_content": _SIMPLE_OUTPUT_SCHEMA,
+    "parse_public_transcript": _SIMPLE_OUTPUT_SCHEMA,
+    "get_earnings_call_transcript": _SIMPLE_OUTPUT_SCHEMA,
 }
 
 TOOL_ALIASES: dict[str, str] = {
@@ -6662,6 +6714,66 @@ def _edgar_cik_from_accession(accession_number: str) -> int | None:
         return None
 
 
+async def _edgar_list_exhibits_from_index(index_url: str) -> list[dict]:
+    """Fetch the EDGAR filing index HTM and return a list of all document/exhibit entries.
+
+    Each entry dict contains: sequence, description, document (filename), type, size.
+    Returns an empty list if the page cannot be fetched or parsed.
+    """
+    html = await _edgar_get_html(index_url, max_bytes=500_000)
+    if not html:
+        return []
+    exhibits: list[dict] = []
+    for row_m in _re.finditer(r"<tr[^>]*>([\s\S]*?)</tr>", html, _re.IGNORECASE):
+        row_html = row_m.group(1)
+        cells = _re.findall(r"<t[dh][^>]*>([\s\S]*?)</t[dh]>", row_html, _re.IGNORECASE)
+        if len(cells) < 3:
+            continue
+        seq = _strip_html_tags(cells[0]).strip()
+        if not seq or not seq[0].isdigit():
+            continue
+        desc = _strip_html_tags(cells[1]).strip() if len(cells) > 1 else ""
+        # Extract filename from <a> href if present, else raw text
+        href_m = _re.search(r'href=["\']([^"\']+)["\']', cells[2], _re.IGNORECASE)
+        if href_m:
+            raw_href = _html_module.unescape(href_m.group(1)).strip()
+            doc_name = raw_href.rsplit("/", 1)[-1].split("?", 1)[0].split("#", 1)[0]
+        else:
+            doc_name = _strip_html_tags(cells[2]).strip()
+        doc_type = _strip_html_tags(cells[3]).strip() if len(cells) > 3 else ""
+        size = _strip_html_tags(cells[4]).strip() if len(cells) > 4 else ""
+        exhibits.append({
+            "sequence": seq,
+            "description": desc,
+            "document": doc_name,
+            "type": doc_type,
+            "size": size,
+        })
+    return exhibits
+
+
+def _filter_paragraphs_by_topics(text: str, topics: list[str], context_chars: int = 200) -> list[dict]:
+    """Split text into paragraphs and return those matching any of the given topics/keywords.
+
+    Returns a list of dicts with keys: paragraph, matchedTopics.
+    If topics is empty, returns nothing (caller should use full text).
+    """
+    if not topics:
+        return []
+    # Split on double-newlines or single newlines with enough content
+    paragraphs = [p.strip() for p in _re.split(r"\n\s*\n|\n", text) if p.strip() and len(p.strip()) > 20]
+    results: list[dict] = []
+    topic_patterns = [(t, _re.compile(_re.escape(t), _re.IGNORECASE)) for t in topics]
+    for para in paragraphs:
+        matched: list[str] = []
+        for topic_name, pattern in topic_patterns:
+            if pattern.search(para):
+                matched.append(topic_name)
+        if matched:
+            results.append({"paragraph": para[:context_chars * 5] if len(para) > context_chars * 5 else para, "matchedTopics": matched})
+    return results
+
+
 async def _edgar_primary_doc_from_index(index_url: str) -> str | None:
     """Fetch the EDGAR filing index HTM and return the primary document filename.
 
@@ -9985,6 +10097,278 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
         warnings.append({"code": "PERIOD_MISMATCH", "message": "Actual and estimate periods could not be aligned"})
         result["confidence"] = "LOW"
     return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5B: Earnings Call Transcript & SEC Exhibit Tools
+# ---------------------------------------------------------------------------
+
+
+@yfinance_server.tool(
+    name="list_sec_filing_exhibits",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["list_sec_filing_exhibits"],
+    description="List all exhibits/documents attached to a specific SEC filing by accession number.",
+)
+async def list_sec_filing_exhibits(ticker: str, accessionNumber: str) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _wrap_envelope_v2("list_sec_filing_exhibits", None, error=err, error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+    if not accessionNumber or not accessionNumber.strip():
+        return _wrap_envelope_v2("list_sec_filing_exhibits", None, error="accessionNumber is required.", error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+
+    cik = _edgar_cik_from_accession(accessionNumber)
+    if not cik:
+        # Fall back to ticker-based CIK resolution
+        cik_padded, _ = await _get_submissions_for_ticker(ticker)
+        cik = int(cik_padded) if cik_padded else None
+    if not cik:
+        return _wrap_envelope_v2("list_sec_filing_exhibits", None, error=f"Could not resolve CIK for ticker '{ticker}'.", error_code=ErrorCode.TICKER_NOT_FOUND)
+
+    index_url, _ = _edgar_build_filing_urls(cik, accessionNumber, None)
+    exhibits = await _edgar_list_exhibits_from_index(index_url)
+    return _wrap_envelope_v2("list_sec_filing_exhibits", {
+        "ticker": ticker.upper(),
+        "accessionNumber": accessionNumber,
+        "indexUrl": index_url,
+        "exhibits": exhibits,
+    })
+
+
+@yfinance_server.tool(
+    name="get_sec_filing_exhibit_content",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_sec_filing_exhibit_content"],
+    description="Fetch and return the text content of a specific exhibit from an SEC filing. Supports topic-based paragraph filtering to reduce token usage.",
+)
+async def get_sec_filing_exhibit_content(ticker: str, accessionNumber: str, fileName: str, topics: list[str] | None = None) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _wrap_envelope_v2("get_sec_filing_exhibit_content", None, error=err, error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+    if not accessionNumber or not accessionNumber.strip():
+        return _wrap_envelope_v2("get_sec_filing_exhibit_content", None, error="accessionNumber is required.", error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+    if not fileName or not fileName.strip():
+        return _wrap_envelope_v2("get_sec_filing_exhibit_content", None, error="fileName is required.", error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+
+    cik = _edgar_cik_from_accession(accessionNumber)
+    if not cik:
+        cik_padded, _ = await _get_submissions_for_ticker(ticker)
+        cik = int(cik_padded) if cik_padded else None
+    if not cik:
+        return _wrap_envelope_v2("get_sec_filing_exhibit_content", None, error=f"Could not resolve CIK for ticker '{ticker}'.", error_code=ErrorCode.TICKER_NOT_FOUND)
+
+    accession_nodash = accessionNumber.replace("-", "")
+    doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{fileName}"
+    html = await _edgar_get_html(doc_url, max_bytes=5_000_000)
+    if not html:
+        return _wrap_envelope_v2("get_sec_filing_exhibit_content", None, error=f"Could not fetch exhibit '{fileName}'.", error_code="FETCH_ERROR")
+
+    clean_text = _strip_html_tags(_sanitize_sec_html(html))
+
+    warnings: list[dict] = []
+    if topics:
+        filtered = _filter_paragraphs_by_topics(clean_text, topics)
+        if not filtered:
+            warnings.append({"code": "NO_TOPIC_MATCHES", "message": f"No paragraphs matched the provided topics: {topics}"})
+        return _wrap_envelope_v2("get_sec_filing_exhibit_content", {
+            "ticker": ticker.upper(),
+            "accessionNumber": accessionNumber,
+            "fileName": fileName,
+            "documentUrl": doc_url,
+            "filteredByTopics": topics,
+            "matchedParagraphs": filtered,
+            "totalTextLength": len(clean_text),
+        }, warnings=warnings)
+
+    # No topics: return full text truncated at safe threshold
+    max_chars = 50_000
+    truncated = len(clean_text) > max_chars
+    if truncated:
+        warnings.append({"code": "TEXT_TRUNCATED", "message": f"Text truncated from {len(clean_text)} to {max_chars} characters."})
+    return _wrap_envelope_v2("get_sec_filing_exhibit_content", {
+        "ticker": ticker.upper(),
+        "accessionNumber": accessionNumber,
+        "fileName": fileName,
+        "documentUrl": doc_url,
+        "filteredByTopics": None,
+        "text": clean_text[:max_chars],
+        "totalTextLength": len(clean_text),
+        "truncated": truncated,
+    }, warnings=warnings)
+
+
+@yfinance_server.tool(
+    name="parse_public_transcript",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["parse_public_transcript"],
+    description="Fetch and parse a public transcript page (Motley Fool, company IR, etc.). Supports topic-based paragraph filtering to reduce token usage.",
+)
+async def parse_public_transcript(url: str, topics: list[str] | None = None) -> str:
+    if not url or not url.startswith("https://"):
+        return _wrap_envelope_v2("parse_public_transcript", None, error="A valid https:// URL is required.", error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+
+    loop = asyncio.get_event_loop()
+
+    def _fetch_page() -> str | None:
+        req = _urlrequest.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"},
+        )
+        try:
+            with _urlrequest.urlopen(req, timeout=30) as resp:  # noqa: S310
+                raw = resp.read(5_000_000)
+            try:
+                return raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return raw.decode("latin-1", errors="replace")
+        except Exception:
+            return None
+
+    html = await loop.run_in_executor(None, _fetch_page)
+    if not html:
+        return _wrap_envelope_v2("parse_public_transcript", None, error=f"Could not fetch URL: {url}", error_code="FETCH_ERROR")
+
+    clean_text = _strip_html_tags(_sanitize_sec_html(html))
+
+    warnings: list[dict] = []
+    if topics:
+        filtered = _filter_paragraphs_by_topics(clean_text, topics)
+        if not filtered:
+            warnings.append({"code": "NO_TOPIC_MATCHES", "message": f"No paragraphs matched the provided topics: {topics}"})
+        return _wrap_envelope_v2("parse_public_transcript", {
+            "url": url,
+            "filteredByTopics": topics,
+            "matchedParagraphs": filtered,
+            "totalTextLength": len(clean_text),
+        }, warnings=warnings)
+
+    max_chars = 50_000
+    truncated = len(clean_text) > max_chars
+    if truncated:
+        warnings.append({"code": "TEXT_TRUNCATED", "message": f"Text truncated from {len(clean_text)} to {max_chars} characters."})
+    return _wrap_envelope_v2("parse_public_transcript", {
+        "url": url,
+        "filteredByTopics": None,
+        "text": clean_text[:max_chars],
+        "totalTextLength": len(clean_text),
+        "truncated": truncated,
+    }, warnings=warnings)
+
+
+@yfinance_server.tool(
+    name="get_earnings_call_transcript",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_call_transcript"],
+    description="High-level tool to retrieve earnings call transcript content from SEC 8-K exhibits. Falls back with instructions if not available via SEC.",
+)
+async def get_earnings_call_transcript(ticker: str, period: str = "latest", topics: list[str] | None = None) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _wrap_envelope_v2("get_earnings_call_transcript", None, error=err, error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+
+    # Step 1: Find the latest 8-K filing
+    sec_source = await _resolve_latest_earnings_sec_source(ticker)
+    if not sec_source:
+        return _wrap_envelope_v2("get_earnings_call_transcript", {
+            "ticker": ticker.upper(),
+            "period": period,
+            "status": "SEC_8K_NOT_FOUND",
+            "message": "No recent SEC 8-K filing found for this ticker. Use web_search to find the transcript on Motley Fool or the company IR page, then call parse_public_transcript with the URL.",
+            "content": None,
+        })
+
+    accession = sec_source.get("accessionNumber", "")
+    cik = _edgar_cik_from_accession(accession)
+    if not cik:
+        cik_padded, _ = await _get_submissions_for_ticker(ticker)
+        cik = int(cik_padded) if cik_padded else None
+    if not cik:
+        return _wrap_envelope_v2("get_earnings_call_transcript", {
+            "ticker": ticker.upper(),
+            "period": period,
+            "status": "CIK_RESOLUTION_FAILED",
+            "message": "Could not resolve CIK for ticker.",
+            "content": None,
+        })
+
+    # Step 2: List exhibits
+    index_url, _ = _edgar_build_filing_urls(cik, accession, None)
+    exhibits = await _edgar_list_exhibits_from_index(index_url)
+
+    # Step 3: Search for transcript exhibit
+    transcript_exhibit: dict | None = None
+    transcript_keywords = ("TRANSCRIPT", "CONFERENCE CALL", "PROCEEDINGS", "EARNINGS CALL")
+    for ex in exhibits:
+        ex_type = str(ex.get("type", "")).upper()
+        ex_desc = str(ex.get("description", "")).upper()
+        if ex_type in ("EX-99.2", "EX-99.3"):
+            transcript_exhibit = ex
+            break
+        if any(kw in ex_desc for kw in transcript_keywords):
+            transcript_exhibit = ex
+            break
+
+    if not transcript_exhibit:
+        return _wrap_envelope_v2("get_earnings_call_transcript", {
+            "ticker": ticker.upper(),
+            "period": period,
+            "status": "SEC_EXHIBIT_NOT_FOUND",
+            "accessionNumber": accession,
+            "filingDate": sec_source.get("filingDate"),
+            "availableExhibits": [{"type": ex.get("type"), "description": ex.get("description"), "document": ex.get("document")} for ex in exhibits],
+            "message": "8-K filing found but no transcript exhibit detected. Use web_search to find the transcript on Motley Fool or the company IR page, then call parse_public_transcript with the URL.",
+            "content": None,
+        })
+
+    # Step 4: Fetch and parse the exhibit
+    file_name = transcript_exhibit.get("document", "")
+    accession_nodash = accession.replace("-", "")
+    doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{file_name}"
+    html = await _edgar_get_html(doc_url, max_bytes=5_000_000)
+    if not html:
+        return _wrap_envelope_v2("get_earnings_call_transcript", {
+            "ticker": ticker.upper(),
+            "period": period,
+            "status": "FETCH_ERROR",
+            "documentUrl": doc_url,
+            "message": f"Could not fetch exhibit document '{file_name}'.",
+            "content": None,
+        })
+
+    clean_text = _strip_html_tags(_sanitize_sec_html(html))
+    warnings: list[dict] = []
+
+    if topics:
+        filtered = _filter_paragraphs_by_topics(clean_text, topics)
+        if not filtered:
+            warnings.append({"code": "NO_TOPIC_MATCHES", "message": f"No paragraphs matched the provided topics: {topics}"})
+        return _wrap_envelope_v2("get_earnings_call_transcript", {
+            "ticker": ticker.upper(),
+            "period": period,
+            "status": "OK",
+            "accessionNumber": accession,
+            "filingDate": sec_source.get("filingDate"),
+            "exhibitType": transcript_exhibit.get("type"),
+            "documentUrl": doc_url,
+            "filteredByTopics": topics,
+            "matchedParagraphs": filtered,
+            "totalTextLength": len(clean_text),
+            "content": None,
+        }, warnings=warnings)
+
+    max_chars = 50_000
+    truncated = len(clean_text) > max_chars
+    if truncated:
+        warnings.append({"code": "TEXT_TRUNCATED", "message": f"Text truncated from {len(clean_text)} to {max_chars} characters."})
+    return _wrap_envelope_v2("get_earnings_call_transcript", {
+        "ticker": ticker.upper(),
+        "period": period,
+        "status": "OK",
+        "accessionNumber": accession,
+        "filingDate": sec_source.get("filingDate"),
+        "exhibitType": transcript_exhibit.get("type"),
+        "documentUrl": doc_url,
+        "filteredByTopics": None,
+        "content": clean_text[:max_chars],
+        "totalTextLength": len(clean_text),
+        "truncated": truncated,
+    }, warnings=warnings)
 
 
 @yfinance_server.tool(name="get_tps_inputs", output_schema=_TOOL_OUTPUT_SCHEMAS["get_tps_inputs"], description="Deprecated alias for analyze_position_signals.")

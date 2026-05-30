@@ -19,12 +19,16 @@
 
 ## Canonical tool groups
 
-- Market: `get_market_quote`, `get_historical_prices`, `analyze_price_performance`, `analyze_moving_average_position`, `analyze_volume_ratio`, `check_volume_liquidity_threshold`
-- Fundamentals: `get_company_profile`, `get_fund_profile`, `analyze_financial_ratios`, `analyze_credit_health`, `get_corporate_actions`, `get_ownership_holders`
+- Market: `get_market_quote`, `get_historical_prices`, `analyze_price_performance`, `analyze_moving_average_position`, `analyze_volume_ratio`, `check_volume_liquidity_threshold`, `get_technical_indicators`, `get_price_slope`, `get_short_interest`, `get_short_momentum`, `get_overnight_quote`
+- Snapshot: `get_market_snapshot`, `get_manifest_diagnostics`, `health_check`
+- Fundamentals: `get_company_profile`, `get_fund_profile`, `get_financial_statement`, `analyze_financial_ratios`, `analyze_credit_health`, `get_corporate_actions`, `get_ownership_holders`
 - Analyst/earnings: `get_analyst_consensus`, `get_analyst_recommendations`, `get_analyst_rating_changes`, `get_earnings_analysis`, `analyze_earnings_momentum`, `get_company_events_calendar`
 - Options: `get_option_expiration_dates`, `get_option_chain`, `summarize_options_flow`, `analyze_options_flow_window`, `find_put_hedge_candidates`
-- SEC: `list_sec_company_filings`, `get_sec_filing_outline`, `get_sec_filing_section`, `list_sec_filing_tables`, `get_sec_filing_table`, `extract_sec_filing_fact`, `search_sec_filing_text`
-- Position: `analyze_position_signals`, `calculate_price_target_distance`
+- SEC: `list_sec_company_filings`, `get_sec_filing_outline`, `get_sec_filing_section`, `list_sec_filing_tables`, `get_sec_filing_table`, `extract_sec_filing_fact`, `search_sec_filing_text`, `index_sec_filing`, `get_sec_filing_index`, `query_sec_filing_index`
+- SEC extractors: `extract_geographic_revenue`, `extract_segment_revenue`, `extract_total_revenue`, `extract_revenue_exposure`, `extract_china_exposure`, `extract_risk_factor_mentions`, `extract_customer_concentration`
+- News/events: `get_company_news`, `search_company_news`, `get_company_press_releases`, `get_sec_recent_events`, `get_public_event_timeline`, `verify_company_event`
+- Earnings intelligence: `get_latest_earnings_release`, `index_earnings_release`, `extract_earnings_metrics`, `extract_guidance`, `extract_management_commentary`, `compare_earnings_actual_vs_estimate`, `get_earnings_call_transcript`
+- Position/discovery: `analyze_position_signals`, `calculate_price_target_distance`, `search_ticker`, `screen_stocks`
 
 ## Alias map
 
