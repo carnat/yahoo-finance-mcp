@@ -10154,7 +10154,7 @@ async def get_sec_filing_exhibit_content(ticker: str, accessionNumber: str, file
 )
 async def parse_public_transcript(url: str, topics: list[str] | None = None) -> str:
     if not url or not url.startswith("https://"):
-        return _wrap_envelope_v2("parse_public_transcript", None, error="A valid HTTPS URL is required.", error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+        return _wrap_envelope_v2("parse_public_transcript", None, error="A valid https:// URL is required.", error_code=ErrorCode.INPUT_VALIDATION_ERROR)
 
     loop = asyncio.get_event_loop()
 
