@@ -232,7 +232,7 @@ TOOL_GROUPS: dict[str, dict[str, Any]] = {
             "- search_ticker: Resolve name/ISIN to ticker. Params: query\n"
             "- screen_stocks: Predefined screens. Params: predefined_screen\n"
             "- analyze_position_signals: Aggregate inputs. Params: ticker\n"
-            "- calculate_price_target_distance: Price vs target. Params: ticker, io_pt"
+            "- calculate_price_target_distance: Price vs target. Params: ticker, reference_target_price (or io_pt)"
         ),
         "actions": {
             "search_ticker": "search_ticker",

@@ -65,6 +65,46 @@ Canonical tool names use neutral public language. Legacy aliases are preserved f
 
 ---
 
+## Grouped Meta-Tools Mode (LLM Token Optimization)
+
+Set `TOOL_MODE=grouped` to expose **10 domain-level meta-tools** instead of 111 individual tools, reducing LLM tool-schema token overhead by ~80–85%.
+
+| Env var | Value | Behavior |
+|---------|-------|----------|
+| `TOOL_MODE` | `expanded` (default) | 111 individual tools registered as normal |
+| `TOOL_MODE` | `grouped` | 10 domain meta-tools with `action` + `params` routing |
+
+**Grouped meta-tools:**
+
+| Meta-tool | Domain | Actions |
+|-----------|--------|---------|
+| `stock_pricing` | Price, volume, technicals | `get_market_quote`, `get_historical_prices`, `analyze_price_performance`, `analyze_moving_average_position`, `analyze_volume_ratio`, `check_volume_liquidity_threshold`, `get_technical_indicators`, `get_price_slope`, `get_short_interest`, `get_short_momentum`, `get_overnight_quote`, `get_market_snapshot` |
+| `stock_fundamentals` | Company fundamentals | `get_company_profile`, `get_fund_profile`, `get_financial_statement`, `analyze_financial_ratios`, `analyze_credit_health`, `get_corporate_actions`, `get_ownership_holders` |
+| `analyst_data` | Analyst ratings, forecasts | `get_analyst_consensus`, `get_earnings_analysis`, `get_analyst_recommendations`, `get_analyst_rating_changes`, `analyze_earnings_momentum`, `get_company_events_calendar` |
+| `options_analysis` | Options chain, flow, hedging | `get_option_expiration_dates`, `get_option_chain`, `summarize_options_flow`, `find_put_hedge_candidates`, `analyze_options_flow_window` |
+| `sec_filings` | SEC EDGAR access, indexing | `list_sec_company_filings`, `list_sec_material_filings`, `get_sec_filing_outline`, `get_sec_filing_section`, `get_sec_filing_section_markdown`, `list_sec_filing_tables`, `get_sec_filing_table`, `extract_sec_filing_fact`, `search_sec_filing_text`, `index_sec_filing`, `get_sec_filing_index`, `get_sec_filing_intelligence`, `query_sec_filing_index`, `list_sec_filing_exhibits`, `get_sec_filing_exhibit_content` |
+| `sec_extractors` | Structured SEC extraction | `extract_geographic_revenue`, `extract_segment_revenue`, `extract_total_revenue`, `extract_revenue_exposure`, `extract_china_exposure`, `extract_risk_factor_mentions`, `extract_customer_concentration` |
+| `news_events` | News, events, timeline | `get_company_news`, `search_company_news`, `get_company_press_releases`, `get_yahoo_finance_news`, `get_sec_recent_events`, `get_public_event_timeline`, `verify_company_event` |
+| `earnings_intelligence` | Earnings analysis | `get_latest_earnings_release`, `index_earnings_release`, `extract_earnings_metrics`, `extract_guidance`, `extract_management_commentary`, `compare_earnings_actual_vs_estimate`, `get_earnings_call_transcript`, `parse_public_transcript` |
+| `screening` | Discovery, screening | `search_ticker`, `screen_stocks`, `analyze_position_signals`, `calculate_price_target_distance` |
+| `system` | Diagnostics | `health_check`, `get_manifest_diagnostics` |
+
+**Usage in grouped mode:**
+
+```json
+{
+  "tool": "stock_pricing",
+  "arguments": {
+    "action": "get_market_quote",
+    "params": { "ticker": "AAPL" }
+  }
+}
+```
+
+All canonical action names and response schemas remain identical to expanded mode — only the routing interface changes.
+
+---
+
 ## Atomic Tools vs Snapshot Tools
 
 **Atomic tools** return one focused data category per call. Use them for targeted queries or when you need to inspect a specific metric.
@@ -377,6 +417,12 @@ cd yahoo-finance-mcp
 uv venv && source .venv/bin/activate
 uv pip install -e .
 uv run server.py
+```
+
+To use grouped meta-tools mode (recommended for LLM token efficiency):
+
+```bash
+TOOL_MODE=grouped uv run server.py
 ```
 
 ### Claude Desktop integration
