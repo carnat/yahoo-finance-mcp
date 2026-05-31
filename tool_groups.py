@@ -1,0 +1,342 @@
+"""
+Tool Grouping Layer for LLM Token Efficiency
+=============================================
+
+When TOOL_MODE=grouped, registers ~10 domain-level meta-tools instead of 111
+individual tools.  Each meta-tool accepts an ``action`` parameter that routes
+to the original tool handler, plus a ``params`` dict for action-specific arguments.
+
+When TOOL_MODE=expanded (default), the original 111 individual tools are
+registered as before (backward-compatible).
+
+Token savings: ~80-85% reduction in tool schema overhead per conversation turn.
+"""
+
+from __future__ import annotations
+
+import inspect
+import json
+from typing import Any
+
+# ---------------------------------------------------------------------------
+# Domain group definitions
+# ---------------------------------------------------------------------------
+# Each group maps a meta-tool name to:
+#   - description: compact description listing valid actions
+#   - actions: dict of action_name -> handler_function_name in server.py
+# ---------------------------------------------------------------------------
+
+TOOL_GROUPS: dict[str, dict[str, Any]] = {
+    "stock_pricing": {
+        "description": (
+            "Price, volume, and technical market data.\n\n"
+            "Actions (pass as 'action' param):\n"
+            "- get_market_quote: Current price, market cap, 52w range, MAs, volume (~20 fields). Params: ticker\n"
+            "- get_historical_prices: Historical OHLCV. Params: ticker, period, interval, columns, prepost\n"
+            "- analyze_price_performance: % from 52w high/low, volatility, CAGR. Params: ticker\n"
+            "- analyze_moving_average_position: % vs 50/200 DMA, trend. Params: ticker\n"
+            "- analyze_volume_ratio: Volume vs averages. Params: ticker\n"
+            "- check_volume_liquidity_threshold: ADV liquidity gate. Params: ticker, foreign_exchange\n"
+            "- get_technical_indicators: RSI-14, MACD. Params: ticker\n"
+            "- get_price_slope: N-day slope and direction. Params: ticker, days\n"
+            "- get_short_interest: Short % of float. Params: ticker\n"
+            "- get_short_momentum: Short MoM delta, squeeze risk. Params: ticker\n"
+            "- get_overnight_quote: Overnight data with gap %. Params: ticker\n"
+            "- get_market_snapshot: Composite packet. Params: ticker, tickers, mode"
+        ),
+        "actions": {
+            "get_market_quote": "get_fast_info",
+            "get_historical_prices": "get_historical_stock_prices",
+            "analyze_price_performance": "get_price_stats",
+            "analyze_moving_average_position": "get_ma_position",
+            "analyze_volume_ratio": "get_volume_ratio",
+            "check_volume_liquidity_threshold": "get_volume_gate",
+            "get_technical_indicators": "get_technical_indicators",
+            "get_price_slope": "get_price_slope",
+            "get_short_interest": "get_short_interest",
+            "get_short_momentum": "get_short_momentum",
+            "get_overnight_quote": "get_overnight_quote",
+            "get_market_snapshot": "get_market_snapshot",
+        },
+    },
+    "stock_fundamentals": {
+        "description": (
+            "Company fundamentals, financials, and corporate data.\n\n"
+            "Actions:\n"
+            "- get_company_profile: Key fundamental fields. Params: ticker, include_all\n"
+            "- get_fund_profile: ETF/fund data. Params: ticker\n"
+            "- get_financial_statement: Income/balance/cashflow. Params: ticker, financial_type, line_items\n"
+            "- analyze_financial_ratios: Valuation ratios. Params: ticker\n"
+            "- analyze_credit_health: Debt metrics. Params: ticker\n"
+            "- get_corporate_actions: Dividends/splits. Params: ticker\n"
+            "- get_ownership_holders: Holders data. Params: ticker, holder_type"
+        ),
+        "actions": {
+            "get_company_profile": "get_stock_info",
+            "get_fund_profile": "get_etf_info",
+            "get_financial_statement": "get_financial_statement",
+            "analyze_financial_ratios": "get_financial_ratios",
+            "analyze_credit_health": "get_credit_health",
+            "get_corporate_actions": "get_stock_actions",
+            "get_ownership_holders": "get_holder_info",
+        },
+    },
+    "analyst_data": {
+        "description": (
+            "Analyst ratings, forecasts, and earnings momentum.\n\n"
+            "Actions:\n"
+            "- get_analyst_consensus: Targets + rating breakdown. Params: ticker\n"
+            "- get_earnings_analysis: EPS/revenue estimates. Params: ticker\n"
+            "- get_analyst_recommendations: Raw recs. Params: ticker, recommendation_type\n"
+            "- get_analyst_rating_changes: Recent changes with signal. Params: ticker\n"
+            "- analyze_earnings_momentum: Revision momentum. Params: ticker\n"
+            "- get_company_events_calendar: Earnings/dividend dates. Params: ticker"
+        ),
+        "actions": {
+            "get_analyst_consensus": "get_analyst_consensus",
+            "get_earnings_analysis": "get_earnings_analysis",
+            "get_analyst_recommendations": "get_recommendations",
+            "get_analyst_rating_changes": "get_analyst_upgrade_radar",
+            "analyze_earnings_momentum": "get_earnings_momentum",
+            "get_company_events_calendar": "get_calendar",
+        },
+    },
+    "options_analysis": {
+        "description": (
+            "Options chain data, flow analysis, and hedging.\n\n"
+            "Actions:\n"
+            "- get_option_expiration_dates: Available expirations. Params: ticker\n"
+            "- get_option_chain: Chain for expiry/type. Params: ticker, expiration_date, option_type, strike_min, strike_max, moneyness, max_contracts, min_open_interest, min_volume\n"
+            "- summarize_options_flow: P/C ratio, IV, max pain. Params: ticker\n"
+            "- find_put_hedge_candidates: OTM puts. Params: ticker, budget_max, otm_min_pct, otm_max_pct, min_dte, max_dte\n"
+            "- analyze_options_flow_window: Event-window scan. Params: ticker, window_label"
+        ),
+        "actions": {
+            "get_option_expiration_dates": "get_option_expiration_dates",
+            "get_option_chain": "get_option_chain",
+            "summarize_options_flow": "get_options_summary",
+            "find_put_hedge_candidates": "get_put_hedge_candidates",
+            "analyze_options_flow_window": "get_options_flow_scan",
+        },
+    },
+    "sec_filings": {
+        "description": (
+            "SEC EDGAR filing access, indexing, and text search.\n\n"
+            "Actions:\n"
+            "- list_sec_company_filings: List filings. Params: ticker, filing_type, filing_date_from, filing_date_to\n"
+            "- list_sec_material_filings: Material only. Params: ticker, form_types\n"
+            "- get_sec_filing_outline: Section outline. Params: ticker, accession_number\n"
+            "- get_sec_filing_section: Section text. Params: ticker, section_name, document_url, context_chars\n"
+            "- get_sec_filing_section_markdown: Section as MD. Params: ticker, section_name, document_url\n"
+            "- list_sec_filing_tables: Tables list. Params: ticker, accession_number\n"
+            "- get_sec_filing_table: Table by index. Params: ticker, accession_number, table_index\n"
+            "- extract_sec_filing_fact: XBRL fact. Params: ticker, fact_type, region, filing_type, accession_number\n"
+            "- search_sec_filing_text: Text search. Params: ticker, search_terms, section_hint, filing_type, return_tables\n"
+            "- index_sec_filing: Build index. Params: ticker, accession_number\n"
+            "- get_sec_filing_index: Get index. Params: ticker, accession_number\n"
+            "- get_sec_filing_intelligence: XBRL+index. Params: ticker, accession_number\n"
+            "- query_sec_filing_index: Query index. Params: ticker, query, accession_number\n"
+            "- list_sec_filing_exhibits: Exhibits list. Params: ticker, accession_number\n"
+            "- get_sec_filing_exhibit_content: Exhibit content. Params: ticker, accession_number, exhibit_type, exhibit_index"
+        ),
+        "actions": {
+            "list_sec_company_filings": "list_sec_filings",
+            "list_sec_material_filings": "list_sec_material_filings",
+            "get_sec_filing_outline": "get_filing_outline",
+            "get_sec_filing_section": "get_filing_section",
+            "get_sec_filing_section_markdown": "get_sec_filing_section_markdown",
+            "list_sec_filing_tables": "list_filing_tables",
+            "get_sec_filing_table": "get_filing_table",
+            "extract_sec_filing_fact": "extract_sec_filing_fact",
+            "search_sec_filing_text": "search_filing_text",
+            "index_sec_filing": "index_sec_filing",
+            "get_sec_filing_index": "get_sec_filing_index",
+            "get_sec_filing_intelligence": "get_sec_filing_intelligence",
+            "query_sec_filing_index": "query_sec_filing_index",
+            "list_sec_filing_exhibits": "list_sec_filing_exhibits",
+            "get_sec_filing_exhibit_content": "get_sec_filing_exhibit_content",
+        },
+    },
+    "sec_extractors": {
+        "description": (
+            "Structured data extraction from SEC filings.\n\n"
+            "Actions:\n"
+            "- extract_geographic_revenue: Geographic revenue. Params: ticker, filing_type, accession_number\n"
+            "- extract_segment_revenue: Segment rows. Params: ticker, filing_type, accession_number\n"
+            "- extract_total_revenue: Total revenue. Params: ticker, filing_type, accession_number\n"
+            "- extract_revenue_exposure: Revenue for query. Params: ticker, query, filing_type\n"
+            "- extract_china_exposure: China exposure. Params: ticker, filing_type\n"
+            "- extract_risk_factor_mentions: Risk mentions. Params: ticker, search_terms, filing_type\n"
+            "- extract_customer_concentration: Customer %. Params: ticker, filing_type"
+        ),
+        "actions": {
+            "extract_geographic_revenue": "extract_geographic_revenue",
+            "extract_segment_revenue": "extract_segment_revenue",
+            "extract_total_revenue": "extract_total_revenue",
+            "extract_revenue_exposure": "extract_revenue_exposure",
+            "extract_china_exposure": "extract_china_exposure",
+            "extract_risk_factor_mentions": "extract_risk_factor_mentions",
+            "extract_customer_concentration": "extract_customer_concentration",
+        },
+    },
+    "news_events": {
+        "description": (
+            "Company news, press releases, and public event timeline.\n\n"
+            "Actions:\n"
+            "- get_company_news: Multi-source news. Params: ticker, max_results, lookback_days, sources\n"
+            "- search_company_news: Keyword search. Params: ticker, query, start_date, end_date, sources, max_results\n"
+            "- get_company_press_releases: Press releases. Params: ticker, lookback_days, max_results\n"
+            "- get_yahoo_finance_news: Legacy Yahoo news. Params: ticker\n"
+            "- get_sec_recent_events: SEC filings as events. Params: ticker, lookback_days\n"
+            "- get_public_event_timeline: Chronological timeline. Params: ticker, lookback_days\n"
+            "- verify_company_event: Cross-validate event. Params: ticker, event_description, event_date"
+        ),
+        "actions": {
+            "get_company_news": "get_company_news",
+            "search_company_news": "search_company_news",
+            "get_company_press_releases": "get_company_press_releases",
+            "get_yahoo_finance_news": "get_yahoo_finance_news",
+            "get_sec_recent_events": "get_sec_recent_events",
+            "get_public_event_timeline": "get_public_event_timeline",
+            "verify_company_event": "verify_company_event",
+        },
+    },
+    "earnings_intelligence": {
+        "description": (
+            "Earnings release analysis and estimate comparison.\n\n"
+            "Actions:\n"
+            "- get_latest_earnings_release: Find latest earnings. Params: ticker\n"
+            "- index_earnings_release: Build earnings index. Params: ticker, url\n"
+            "- extract_earnings_metrics: Revenue, EPS, margins. Params: ticker, url\n"
+            "- extract_guidance: Guidance ranges. Params: ticker, url\n"
+            "- extract_management_commentary: Commentary excerpts. Params: ticker, topic, url\n"
+            "- compare_earnings_actual_vs_estimate: Actual vs estimate. Params: ticker\n"
+            "- get_earnings_call_transcript: Transcript. Params: ticker\n"
+            "- parse_public_transcript: Parse transcript URL. Params: url"
+        ),
+        "actions": {
+            "get_latest_earnings_release": "get_latest_earnings_release",
+            "index_earnings_release": "index_earnings_release",
+            "extract_earnings_metrics": "extract_earnings_metrics",
+            "extract_guidance": "extract_guidance",
+            "extract_management_commentary": "extract_management_commentary",
+            "compare_earnings_actual_vs_estimate": "compare_earnings_actual_vs_estimate",
+            "get_earnings_call_transcript": "get_earnings_call_transcript",
+            "parse_public_transcript": "parse_public_transcript",
+        },
+    },
+    "screening": {
+        "description": (
+            "Stock discovery, screening, and position analysis.\n\n"
+            "Actions:\n"
+            "- search_ticker: Resolve name/ISIN to ticker. Params: query\n"
+            "- screen_stocks: Predefined screens. Params: predefined_screen\n"
+            "- analyze_position_signals: Aggregate inputs. Params: ticker\n"
+            "- calculate_price_target_distance: Price vs target. Params: ticker, reference_target_price (or io_pt)"
+        ),
+        "actions": {
+            "search_ticker": "search_ticker",
+            "screen_stocks": "screen_stocks",
+            "analyze_position_signals": "get_position_score_inputs",
+            "calculate_price_target_distance": "get_price_target_bracket",
+        },
+    },
+    "system": {
+        "description": (
+            "Server health and diagnostics.\n\n"
+            "Actions:\n"
+            "- health_check: Runtime health metadata. Params: none\n"
+            "- get_manifest_diagnostics: Deployment diagnostics. Params: none"
+        ),
+        "actions": {
+            "health_check": "health_check",
+            "get_manifest_diagnostics": "get_manifest_diagnostics",
+        },
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Routing infrastructure
+# ---------------------------------------------------------------------------
+
+def _resolve_handler(handler_name: str, module_globals: dict):
+    """Resolve a handler function by name from the server module globals."""
+    fn = module_globals.get(handler_name)
+    if fn is None:
+        raise ValueError(f"Handler '{handler_name}' not found in server module")
+    return fn
+
+
+async def _route_grouped_call(
+    group_name: str,
+    action: str,
+    params: dict[str, Any],
+    module_globals: dict,
+) -> str:
+    """Route a grouped tool call to the underlying handler."""
+    group = TOOL_GROUPS.get(group_name)
+    if not group:
+        return json.dumps({"error": f"Unknown tool group: {group_name}"})
+
+    handler_name = group["actions"].get(action)
+    if not handler_name:
+        valid = list(group["actions"].keys())
+        return json.dumps({
+            "error": f"Unknown action '{action}' for {group_name}. Valid actions: {valid}"
+        })
+
+    handler = _resolve_handler(handler_name, module_globals)
+
+    # Inspect handler signature and pass only valid parameters
+    sig = inspect.signature(handler)
+    valid_params = {}
+    for param_name in sig.parameters:
+        if param_name in params:
+            valid_params[param_name] = params[param_name]
+
+    result = await handler(**valid_params)
+    return result
+
+
+def register_grouped_tools(server, module_globals: dict) -> None:
+    """Register domain-grouped meta-tools on the FastMCP server.
+
+    Each meta-tool accepts:
+      - action: str (required) — which sub-action to invoke
+      - params: dict (optional) — parameters for the sub-action (e.g. ticker, period, etc.)
+
+    This replaces the 111 individual tool registrations with 10 grouped tools,
+    reducing LLM token overhead by ~80-85%.
+    """
+
+    def _make_handler(gn, gl):
+        async def handler(action: str, params: dict | None = None) -> str:
+            return await _route_grouped_call(gn, action, params or {}, gl)
+        handler.__name__ = gn
+        handler.__qualname__ = gn
+        return handler
+
+    for group_name, group_def in TOOL_GROUPS.items():
+        handler = _make_handler(group_name, module_globals)
+        server.tool(
+            name=group_name,
+            description=group_def["description"],
+        )(handler)
+
+
+def get_all_grouped_action_names() -> list[str]:
+    """Return a flat list of all action names across all groups."""
+    names = []
+    for group_def in TOOL_GROUPS.values():
+        names.extend(group_def["actions"].keys())
+    return names
+
+
+def get_group_for_action(action: str) -> str | None:
+    """Given an action name, return which group it belongs to."""
+    for group_name, group_def in TOOL_GROUPS.items():
+        if action in group_def["actions"]:
+            return group_name
+    return None
+

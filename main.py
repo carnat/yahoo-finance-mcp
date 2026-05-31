@@ -20,15 +20,17 @@ import os
 
 import uvicorn
 
-from server import yfinance_server
+from server import get_server
 
 PORT = int(os.environ.get("PORT", 8080))
 
+server = get_server()
+
 # Disable DNS rebinding protection so the server is reachable from Claude.ai
 # on a public Replit URL (the default FastMCP setting restricts to localhost).
-yfinance_server.settings.transport_security = None
+server.settings.transport_security = None
 
-app = yfinance_server.streamable_http_app()
+app = server.streamable_http_app()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)

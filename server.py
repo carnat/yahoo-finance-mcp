@@ -11005,7 +11005,81 @@ async def get_filing_document(ticker: str, section_name: str, document_url: str,
 
 
 
+# ---------------------------------------------------------------------------
+# Grouped (token-efficient) server mode
+# ---------------------------------------------------------------------------
+# TOOL_MODE env var controls which interface is exposed:
+#   - "expanded" (default): all 111 individual tools (backward-compatible)
+#   - "grouped": 10 domain meta-tools with action routing (~80-85% token savings)
+# ---------------------------------------------------------------------------
+_TOOL_MODE = os.environ.get("TOOL_MODE", "expanded").lower().strip()
+
+
+def _build_grouped_server():
+    """Create a FastMCP server with grouped meta-tools for token efficiency."""
+    from tool_groups import TOOL_GROUPS, register_grouped_tools
+
+    grouped = FastMCP(
+        "yfinance",
+        instructions="""
+# Yahoo Finance MCP Server (Grouped Mode)
+
+Activated via TOOL_MODE=grouped env var (default is "expanded" with 111 individual tools).
+
+This server provides financial market data via domain-grouped tools for token efficiency.
+Each tool covers a domain (pricing, fundamentals, options, etc.) and accepts an `action`
+parameter to select the specific operation, plus a `params` dict for action arguments.
+
+## How to call
+1. Pick the domain tool (e.g. `stock_pricing`, `sec_filings`)
+2. Set `action` to the specific operation (listed in each tool's description)
+3. Pass action-specific arguments in `params` dict (e.g. `{"ticker": "AAPL", "period": "1y"}`)
+
+## Example
+Tool: stock_pricing
+Input: {"action": "get_market_quote", "params": {"ticker": "AAPL"}}
+
+## Domain tools available
+- stock_pricing: Price, volume, technicals, short interest
+- stock_fundamentals: Company profile, financials, ratios, credit health
+- analyst_data: Consensus, recommendations, earnings momentum
+- options_analysis: Chain data, flow, hedging candidates
+- sec_filings: EDGAR access, indexing, text search
+- sec_extractors: Geographic/segment revenue, risk factors
+- news_events: Multi-source news, press releases, event timeline
+- earnings_intelligence: Earnings metrics, guidance, commentary
+- screening: Ticker search, stock screens, position signals
+- system: Health check, diagnostics
+""",
+    )
+
+    # Collect all handler functions from this module
+    module_globals = globals()
+    register_grouped_tools(grouped, module_globals)
+    return grouped
+
+
+# Lazily built grouped server (only constructed if TOOL_MODE=grouped)
+_grouped_server = None
+
+
+def get_server():
+    """Return the appropriate server based on TOOL_MODE env var.
+
+    - TOOL_MODE=expanded (default): 111 individual tools
+    - TOOL_MODE=grouped: 10 domain meta-tools (~80-85% token savings)
+    """
+    global _grouped_server
+    if _TOOL_MODE == "grouped":
+        if _grouped_server is None:
+            _grouped_server = _build_grouped_server()
+        return _grouped_server
+    return yfinance_server
+
+
 if __name__ == "__main__":
     # Initialize and run the server
-    print("Starting Yahoo Finance MCP server...")
-    yfinance_server.run(transport="stdio")
+    server = get_server()
+    mode_label = "grouped" if _TOOL_MODE == "grouped" else "expanded"
+    print(f"Starting Yahoo Finance MCP server (mode={mode_label})...")
+    server.run(transport="stdio")

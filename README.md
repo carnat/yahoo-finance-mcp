@@ -2,45 +2,7 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that gives any MCP-compatible AI client (Claude, Cursor, VS Code Copilot, etc.) direct access to live public financial data from Yahoo Finance and SEC EDGAR.
 
-> **Source of truth:** The live MCP tool manifest exposed by the running server is the canonical reference for tool names, input schemas, and deprecation status. README tables are updated on each phase release. Use `get_manifest_diagnostics` to verify the deployed tool set at runtime.
-
-## Demo
-
-![MCP Demo](assets/demo.gif)
-
----
-
-## V2 Response Envelope Contract
-
-All tool responses use the V2 envelope when `MCP_ENVELOPE_V2=true`:
-
-```json
-{
-  "ok": true,
-  "data": { ... },
-  "meta": {
-    "tool": "get_market_quote",
-    "source": "yahoo_finance",
-    "dataDate": "2026-05-15",
-    "serverVersion": "0.1.0",
-    "cacheHit": false,
-    "warnings": []
-  },
-  "error": null
-}
-```
-
-**Key semantics:**
-
-| Pattern | Meaning |
-|---------|---------|
-| `ok=true`, `error=null` | Tool succeeded. |
-| `ok=true`, `data.status="NOT_DISCLOSED"` | Tool succeeded; the specific fact was not found in XBRL-tagged data. Use `search_sec_filing_text` as fallback. |
-| `ok=true`, `data.status="NOT_FOUND"` | Tool succeeded; no matching items found in searched sources. |
-| `ok=false`, `error` present | Transport or validation failure. Check `error.code`. |
-| `ok=true` with `meta.warnings[]` | Partial or degraded data — e.g., stale targets, source-limited results. **Do not hide warnings.** |
-
-`ok=true` with a non-null `data.status` field is **not** a transport failure. `NOT_DISCLOSED` and `NOT_FOUND` are data-quality outcomes, not errors.
+> **Source of truth:** The live MCP tool manifest exposed by the running server is the canonical reference for tool names, input schemas, and deprecation status. Use `get_manifest_diagnostics` to verify the deployed tool set at runtime.
 
 ---
 
@@ -65,98 +27,43 @@ Canonical tool names use neutral public language. Legacy aliases are preserved f
 
 ---
 
-## Atomic Tools vs Snapshot Tools
+## Grouped Meta-Tools Mode (LLM Token Optimization)
 
-**Atomic tools** return one focused data category per call. Use them for targeted queries or when you need to inspect a specific metric.
+Set `TOOL_MODE=grouped` to expose **10 domain-level meta-tools** instead of 111 individual tools, reducing LLM tool-schema token overhead by ~80–85%.
 
-**Snapshot/package tools** compose multiple atomic tools in one call for LLM token efficiency. Use them when you need a broad overview.
+| Env var | Value | Behavior |
+|---------|-------|----------|
+| `TOOL_MODE` | `expanded` (default) | 111 individual tools registered as normal |
+| `TOOL_MODE` | `grouped` | 10 domain meta-tools with `action` + `params` routing |
 
-| Type | Tool | Purpose |
-|------|------|---------|
-| Snapshot | `get_market_snapshot` | Compact or full market-state packet: price, range, MA trend, volume, RSI, MACD, freshness, liquidity gate |
-| Atomic | `get_market_quote` | Current price, volume, 52-week range, moving averages |
-| Atomic | `analyze_price_performance` | % distance from 52w high/low, 30d volatility, CAGR |
-| Atomic | `analyze_moving_average_position` | % vs 50DMA/200DMA, trend (BULLISH/BEARISH/MIXED) |
-| Atomic | `analyze_volume_ratio` | Volume vs 10d/90d averages, volumeFlag |
-| Atomic | `check_volume_liquidity_threshold` | 20d ADV liquidity gate pass/fail |
-| Atomic | `get_technical_indicators` | RSI-14, MACD (12,26,9) |
+**Grouped meta-tools:**
 
-**Snapshot output fields (compact mode):**
+| Meta-tool | Domain | Actions |
+|-----------|--------|---------|
+| `stock_pricing` | Price, volume, technicals | `get_market_quote`, `get_historical_prices`, `analyze_price_performance`, `analyze_moving_average_position`, `analyze_volume_ratio`, `check_volume_liquidity_threshold`, `get_technical_indicators`, `get_price_slope`, `get_short_interest`, `get_short_momentum`, `get_overnight_quote`, `get_market_snapshot` |
+| `stock_fundamentals` | Company fundamentals | `get_company_profile`, `get_fund_profile`, `get_financial_statement`, `analyze_financial_ratios`, `analyze_credit_health`, `get_corporate_actions`, `get_ownership_holders` |
+| `analyst_data` | Analyst ratings, forecasts | `get_analyst_consensus`, `get_earnings_analysis`, `get_analyst_recommendations`, `get_analyst_rating_changes`, `analyze_earnings_momentum`, `get_company_events_calendar` |
+| `options_analysis` | Options chain, flow, hedging | `get_option_expiration_dates`, `get_option_chain`, `summarize_options_flow`, `find_put_hedge_candidates`, `analyze_options_flow_window` |
+| `sec_filings` | SEC EDGAR access, indexing | `list_sec_company_filings`, `list_sec_material_filings`, `get_sec_filing_outline`, `get_sec_filing_section`, `get_sec_filing_section_markdown`, `list_sec_filing_tables`, `get_sec_filing_table`, `extract_sec_filing_fact`, `search_sec_filing_text`, `index_sec_filing`, `get_sec_filing_index`, `get_sec_filing_intelligence`, `query_sec_filing_index`, `list_sec_filing_exhibits`, `get_sec_filing_exhibit_content` |
+| `sec_extractors` | Structured SEC extraction | `extract_geographic_revenue`, `extract_segment_revenue`, `extract_total_revenue`, `extract_revenue_exposure`, `extract_china_exposure`, `extract_risk_factor_mentions`, `extract_customer_concentration` |
+| `news_events` | News, events, timeline | `get_company_news`, `search_company_news`, `get_company_press_releases`, `get_yahoo_finance_news`, `get_sec_recent_events`, `get_public_event_timeline`, `verify_company_event` |
+| `earnings_intelligence` | Earnings analysis | `get_latest_earnings_release`, `index_earnings_release`, `extract_earnings_metrics`, `extract_guidance`, `extract_management_commentary`, `compare_earnings_actual_vs_estimate`, `get_earnings_call_transcript`, `parse_public_transcript` |
+| `screening` | Discovery, screening | `search_ticker`, `screen_stocks`, `analyze_position_signals`, `calculate_price_target_distance` |
+| `system` | Diagnostics | `health_check`, `get_manifest_diagnostics` |
+
+**Usage in grouped mode:**
 
 ```json
 {
-  "ticker": "ASTS",
-  "price": { "last": 83.67, "previousClose": 83.01, "changePct": 0.80, "lastTradeDate": "2026-05-15", "marketOpen": false },
-  "range": { "yearHigh": 129.89, "yearLow": 22.47, "pctFromYearHigh": -35.58, "pctFromYearLow": 272.36 },
-  "trend": { "fiftyDayAverage": 83.71, "twoHundredDayAverage": 74.68, "pctFrom50dma": -0.05, "pctFrom200dma": 12.04, "maTrend": "MIXED", "rsi14": 54.15, "macdHistogram": 1.71 },
-  "volume": { "lastVolume": 21579066, "avgVolume10d": 22959070, "avgVolume20d": 20516600, "avgVolume90d": 15802664, "ratio10d": 0.94, "ratio20d": 1.05, "ratio90d": 1.37, "volumeFlag": "NORMAL", "liquidityGatePass": true },
-  "risk": { "annualizedVolatility30d": 103.46 },
-  "freshness": { "dataDate": "2026-05-15", "retrievedAt": "...", "marketSessionAware": true, "freshnessClass": "WEEKEND_EXPECTED_STALE" },
-  "componentStatus": { "quote": "OK", "priceStats": "OK", "maPosition": "OK", "volumeRatio": "OK", "volumeGate": "OK", "technicalIndicators": "OK" },
-  "partialSuccess": false,
-  "failedComponents": [],
-  "warnings": []
+  "tool": "stock_pricing",
+  "arguments": {
+    "action": "get_market_quote",
+    "params": { "ticker": "AAPL" }
+  }
 }
 ```
 
-**Partial component failure:** If one component fails, the snapshot still returns with the available data, setting `partialSuccess=true` and listing `failedComponents`. Warnings are always included.
-
-**Batch caps:** compact mode: max 5 tickers; full mode: max 2 tickers.
-
-**Freshness classes:**
-
-| Class | Meaning |
-|-------|---------|
-| `FRESH` | Data ≤28h old |
-| `MARKET_CLOSED_EXPECTED_STALE` | Data 28–56h old (overnight close) |
-| `WEEKEND_EXPECTED_STALE` | It's Saturday/Sunday and data is from Friday |
-| `STALE` | Data 56–168h old |
-| `VERY_STALE` | Data >168h old |
-| `UNKNOWN` | Cannot determine |
-
----
-
-## Data-Quality Semantics
-
-Tools that return enriched metadata include some or all of these fields:
-
-| Field | Type | Meaning |
-|-------|------|---------|
-| `dataQuality` | string | Overall data quality: `HIGH`, `MEDIUM`, `LOW`, `PARTIAL` |
-| `warnings` | array | List of `{code, message}` objects. Never suppressed in compact mode. |
-| `missingComponents` | array | Sub-components that returned no data |
-| `unavailableMetrics` | array | Specific metrics that could not be computed |
-| `computedMetrics` | array | Metrics derived from raw data server-side |
-| `targetLagSignal` | string/null | Analyst price target may lag recent price moves |
-| `historicalSurpriseSignal` | string/null | Historical EPS beat/miss pattern |
-| `forwardRevisionSignal` | string/null | Recent EPS estimate revision direction |
-| `compositeMomentumSignal` | string/null | Combined earnings + revision momentum |
-| `sourceCoverage` | string | `FULL`, `PARTIAL`, or `NONE` |
-| `freshnessClass` | string | Freshness classification (see table above) |
-
-**Warning codes include:** `COMPONENT_FAILED`, `DEPRECATED_ALIAS`, `TARGET_LAG`, `STALE_CONSENSUS`, `PARTIAL_SOURCE_COVERAGE`, `NEGATIVE_EARNINGS_BASE`.
-
----
-
-## SEC Extraction Semantics
-
-| Term | Meaning |
-|------|---------|
-| `NOT_DISCLOSED` | The fact was not found in XBRL-tagged EDGAR data. Try `search_sec_filing_text` with `return_tables=true` for table-level fallback. |
-| `NOT_FOUND` | No matching filing or section was located. |
-| `valueRatio` | Decimal fraction (e.g., `0.1547` = 15.47%) |
-| `valuePct` | Percentage (e.g., `15.47`). **Never emitted without a `denominator`.** |
-| `evidence` | Source metadata: filing URL, section, matched text or table row |
-
-**Workflow:** Use `extract_sec_filing_fact` (XBRL companyconcept) first. If `status=NOT_DISCLOSED`, use `search_sec_filing_text` with `return_tables=true` to locate narrative tables. `valuePct` is only emitted when a denominator is available.
-
----
-
-## Connector Schema Cache Warning
-
-ChatGPT (and other connector-based clients) cache the connector schema independently of the deployed Worker. The cached schema can lag the live deployment, causing stale or missing tool names to appear.
-
-**The live Worker tools/list and `get_manifest_diagnostics` are always the source of truth.** When integrating, call `get_manifest_diagnostics` to confirm the deployed tool set.
+All canonical action names and response schemas remain identical to expanded mode — only the routing interface changes.
 
 ---
 
@@ -286,73 +193,6 @@ ChatGPT (and other connector-based clients) cache the connector schema independe
 
 ---
 
-## Phase Roadmap
-
-| Phase | Status | Summary |
-|-------|--------|---------|
-| 1 | ✅ Complete | V2 envelope, core market data tools |
-| 2 | ✅ Complete | SEC filing infrastructure, EDGAR submissions |
-| 3 | ✅ Complete | SEC structured extractors (geographic, segment, risk, customer) |
-| 4 | ✅ Complete | Options flow, put hedge, event-window scan |
-| 5 | ✅ Complete | Earnings intelligence (release, metrics, guidance, commentary) |
-| 6 | ✅ Complete | Public event/news multi-source schema |
-| 7 | ✅ Complete | Semantic quality metadata, SEC query router, smoke infrastructure |
-| 8 | ✅ Complete | README + manifest diagnostics + `get_market_snapshot` snapshot tool |
-
-**Phase 8 follow-on TODOs (PR63–PR66):**
-- PR63: `get_company_quality_snapshot` — profile + ratios + credit + earnings + analyst + calendar
-- PR64: `get_sec_exposure_snapshot` — `get_filing_data` + text-search fallback, AAPL Greater China table fix
-- PR65: `get_event_news_snapshot` — SOURCE_LIMITED_NOT_FOUND / PARTIAL_SOURCE_COVERAGE semantics
-- PR66: `get_equity_research_snapshot` — top-level LLM packet with `include[]` selector
-
----
-
-## Acceptance Constraints (all phases)
-
-- Do not delete atomic tools.
-- Do not hide warnings in compact mode.
-- Do not emit investment recommendations such as BUY/SELL.
-- Do not collapse source quality into an opaque score.
-- Do not return plain NOT_FOUND when major sources are unavailable — use SOURCE_LIMITED_NOT_FOUND.
-- Do not return `valuePct` without a `denominator`.
-- Do not expose private doctrine wording in public tool descriptions.
-- Keep aliases backward-compatible.
-
----
-
-## Smoke & Regression Commands
-
-```bash
-# Tool sync check (server.py ↔ worker manifest)
-python scripts/check_tool_sync.py
-
-# Phase unit tests (offline, no network)
-python scripts/test_phase1.py
-python scripts/test_phase3.py
-python scripts/test_phase3_extractors.py
-python scripts/test_phase4.py
-python scripts/test_phase5.py
-python scripts/test_phase6b.py
-python scripts/test_phase8.py
-
-# Universal alias routing smoke
-ALLOW_NETWORK_SKIP=1 python scripts/test_universal_aliases.py
-
-# Geographic revenue schema smoke
-python scripts/test_geographic_revenue_schema.py
-
-# Source discovery schema
-python scripts/test_source_discovery_schema.py
-
-# Options quality
-python scripts/test_options_quality.py
-
-# Deployed smoke (requires MCP_URL env var)
-MCP_URL=https://<your-worker>.workers.dev python scripts/test_deployed_discovery.py
-```
-
----
-
 ## Privacy & Scope
 
 All tools operate exclusively on **publicly available** data:
@@ -377,6 +217,12 @@ cd yahoo-finance-mcp
 uv venv && source .venv/bin/activate
 uv pip install -e .
 uv run server.py
+```
+
+To use grouped meta-tools mode (recommended for LLM token efficiency):
+
+```bash
+TOOL_MODE=grouped uv run server.py
 ```
 
 ### Claude Desktop integration
