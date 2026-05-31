@@ -7237,13 +7237,18 @@ export async function getSecFilingSectionMarkdown(
 
   // Convert to markdown (basic fallback — no sec2md in worker)
   let sectionHtml = html.slice(sectionStart, sectionEnd);
-  // Strip scripts/styles
-  sectionHtml = sectionHtml.replace(/<script[^>]*>[\s\S]*?<\/script[^>]*>/gi, "");
-  sectionHtml = sectionHtml.replace(/<style[^>]*>[\s\S]*?<\/style[^>]*>/gi, "");
+  // Strip scripts/styles iteratively to handle nested/malformed patterns
+  const MAX_CELL_CHARS = 60;
+  let prevHtml = "";
+  while (prevHtml !== sectionHtml) {
+    prevHtml = sectionHtml;
+    sectionHtml = sectionHtml.replace(/<script\b[^>]*>[\s\S]*?<\/script[^>]*>/gi, "");
+    sectionHtml = sectionHtml.replace(/<style\b[^>]*>[\s\S]*?<\/style[^>]*>/gi, "");
+  }
   // Convert headers
   for (let lvl = 1; lvl <= 6; lvl++) {
     const prefix = "#".repeat(lvl);
-    sectionHtml = sectionHtml.replace(new RegExp(`<h${lvl}[^>]*>([\\s\\S]*?)<\\/h${lvl}>`, "gi"), (_, content) => `\n${prefix} ${content.replace(/<[^>]+>/g, " ").replace(/\\s+/g, " ").trim()}\n`);
+    sectionHtml = sectionHtml.replace(new RegExp(`<h${lvl}[^>]*>([\\s\\S]*?)<\\/h${lvl}>`, "gi"), (_, content) => `\n${prefix} ${(content as string).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()}\n`);
   }
   // Convert tables to pipe-delimited
   sectionHtml = sectionHtml.replace(/<table[^>]*>[\s\S]*?<\/table>/gi, (tableHtml) => {
@@ -7255,7 +7260,7 @@ export async function getSecFilingSectionMarkdown(
       const tdRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
       let tdMatch: RegExpExecArray | null;
       while ((tdMatch = tdRe.exec(trMatch[1])) !== null) {
-        cells.push(tdMatch[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 60));
+        cells.push(tdMatch[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, MAX_CELL_CHARS));
       }
       if (cells.length > 0) rows.push(cells);
       if (rows.length >= 50) break;

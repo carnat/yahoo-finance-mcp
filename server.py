@@ -8870,7 +8870,8 @@ async def list_sec_material_filings(
         primary_doc = primary_docs[i] if i < len(primary_docs) else ""
         _, doc_url = _edgar_build_filing_urls(cik_int, acc, primary_doc)
 
-        # Check if XBRL is available via companyfacts (quick check from cache)
+        # XBRL availability: true if companyfacts have been fetched for this CIK.
+        # This is a fast cache check; call get_sec_filing_intelligence for precise status.
         xbrl_available = _EDGAR_FACTS_CACHE.get(cik_padded) is not None
 
         results.append({
@@ -9075,6 +9076,9 @@ async def get_sec_filing_intelligence(
 # SEC Filing Section Markdown - HTML to Markdown conversion
 # ---------------------------------------------------------------------------
 
+_MD_MAX_CELL_CHARS = 60
+
+
 def _html_table_to_markdown(table_html: str) -> str:
     """Convert an HTML table to a pipe-delimited Markdown table."""
     rows = _parse_html_table(table_html)
@@ -9083,7 +9087,7 @@ def _html_table_to_markdown(table_html: str) -> str:
     # Build pipe-separated rows
     md_lines: list[str] = []
     for i, row in enumerate(rows[:50]):  # Limit to 50 rows
-        line = "| " + " | ".join(cell[:60] for cell in row) + " |"
+        line = "| " + " | ".join(cell[:_MD_MAX_CELL_CHARS] for cell in row) + " |"
         md_lines.append(line)
         if i == 0:
             # Add separator after header
