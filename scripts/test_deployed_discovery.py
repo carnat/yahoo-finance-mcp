@@ -345,6 +345,7 @@ def _check_finnhub_item_shape(item: dict) -> None:
 
 
 
+def _assert_sec_index_shape(data: dict, tool_name: str) -> None:
     if not isinstance(data, dict):
         raise AssertionError(f"{tool_name} returned non-object: {data!r}")
     doc_url = data.get("documentUrl")
