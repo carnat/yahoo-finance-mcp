@@ -2,13 +2,12 @@
 Tool Grouping Layer for LLM Token Efficiency
 =============================================
 
-When TOOL_MODE=grouped (default), registers ~10 domain-level meta-tools instead
-of 111 individual tools.  Each meta-tool accepts an ``action`` parameter that
-routes to the original tool handler, plus a ``params`` dict for action-specific
-arguments.
+When TOOL_MODE=grouped, registers ~10 domain-level meta-tools instead of 111
+individual tools.  Each meta-tool accepts an ``action`` parameter that routes
+to the original tool handler, plus a ``params`` dict for action-specific arguments.
 
-When TOOL_MODE=expanded, the original 111 individual tools are registered as
-before (backward-compatible).
+When TOOL_MODE=expanded (default), the original 111 individual tools are
+registered as before (backward-compatible).
 
 Token savings: ~80-85% reduction in tool schema overhead per conversation turn.
 """
@@ -312,8 +311,8 @@ def register_grouped_tools(server, module_globals: dict) -> None:
     """
 
     def _make_handler(gn, gl):
-        async def handler(action: str, params: dict = {}) -> str:
-            return await _route_grouped_call(gn, action, params, gl)
+        async def handler(action: str, params: dict | None = None) -> str:
+            return await _route_grouped_call(gn, action, params or {}, gl)
         handler.__name__ = gn
         handler.__qualname__ = gn
         return handler

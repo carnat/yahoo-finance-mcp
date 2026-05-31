@@ -11024,6 +11024,8 @@ def _build_grouped_server():
         instructions="""
 # Yahoo Finance MCP Server (Grouped Mode)
 
+Activated via TOOL_MODE=grouped env var (default is "expanded" with 111 individual tools).
+
 This server provides financial market data via domain-grouped tools for token efficiency.
 Each tool covers a domain (pricing, fundamentals, options, etc.) and accepts an `action`
 parameter to select the specific operation, plus a `params` dict for action arguments.
