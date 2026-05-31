@@ -65,6 +65,9 @@ import {
   extractManagementCommentary,
   compareEarningsActualVsEstimate,
   getMarketSnapshot,
+  listSecMaterialFilings,
+  getSecFilingIntelligence,
+  getSecFilingSectionMarkdown,
 } from "./yahoo-finance.js";
 import { validateTicker } from "./validate.js";
 
@@ -979,6 +982,9 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "search_sec_filing_text", description: "Search SEC filing text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, search_terms: { type: "array", items: { type: "string" } }, search_query: { type: "string" }, section_hint: { type: "string" }, selector: { type: "object" }, filing_type: { type: "string", default: "10-K" }, accession_number: { type: "string" }, context_chars: { type: "number", default: 1500 }, return_tables: { type: "boolean", default: true } }, required: ["ticker"] } },
   { name: "index_sec_filing", description: "Build a deterministic section/table index for an SEC filing. Identifies headings, tables, row labels, and units. period is reserved for future multi-period support; currently only 'latest' is supported unless accession_number is provided.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest", description: "Reserved. Only 'latest' supported currently." }, accession_number: { type: "string" } }, required: ["ticker"] } },
   { name: "get_sec_filing_index", description: "Get the pre-built section/table index for an SEC filing. Returns cached index when available; builds and caches on first call. period is reserved for future multi-period support; currently only 'latest' is supported unless accession_number is provided.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest", description: "Reserved. Only 'latest' supported currently." }, accession_number: { type: "string" } }, required: ["ticker"] } },
+  { name: "list_sec_material_filings", description: "List latest material SEC filings for a ticker, filtering out noise (Form 4, 144, SC 13G, etc.). Returns only significant filings (10-K, 10-Q, 8-K, S-1, 424B, DEF 14A, 20-F, 6-K by default).", inputSchema: { type: "object", properties: { ticker: { type: "string" }, forms: { type: "array", items: { type: "string" }, default: ["10-K", "10-Q", "8-K", "S-1", "424B", "DEF 14A", "20-F", "6-K"] }, limit: { type: "number", default: 5 } }, required: ["ticker"] } },
+  { name: "get_sec_filing_intelligence", description: "Get a comprehensive intelligence map of a company's SEC filing — XBRL facts snapshot, section/table index summary, and recommended queries — in a single call.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, filing_index: { type: "number", default: 0 } }, required: ["ticker"] } },
+  { name: "get_sec_filing_section_markdown", description: "Return a specific SEC filing section as LLM-ready Markdown. Converts filing HTML to clean Markdown with preserved section headers and pipe-delimited tables.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, section: { type: "string", default: "Item 1A" }, filing_type: { type: "string", default: "10-K" }, filing_index: { type: "number", default: 0 }, max_chars: { type: "number", default: 50000 } }, required: ["ticker"] } },
   { name: "analyze_position_signals", description: "Aggregate public market, analyst, earnings, and technical inputs that may be useful for a caller-defined scoring model. This tool does not access holdings, cost basis, position size, or private scoring rules.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
   { name: "calculate_price_target_distance", description: "Compare current market price to a user-supplied reference price target and return percentage distance and bracket labels.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, reference_target_price: { type: "number", description: "Preferred: user-supplied reference target price." }, io_pt: { type: "number", description: "Backward-compatible alias for reference_target_price." } }, required: ["ticker"] } },
   { name: "get_company_news", description: "Get recent public company news and press releases from selected public sources with precise source labels (yahoo_finance_news, yahoo_finance_press_releases, finnhub), timestamps, URL, dedupe metadata, and short evidence text.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Ticker symbol, e.g. 'AAPL'" }, max_results: { type: "number", default: 10 }, lookback_days: { type: "number", default: 14 }, sources: { type: "array", items: { type: "string" }, default: ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"] } }, required: ["ticker"] } },
@@ -1419,6 +1425,9 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   get_sec_filing_exhibit_content: ENVELOPE_V2_OUTPUT_SCHEMA,
   parse_public_transcript: ENVELOPE_V2_OUTPUT_SCHEMA,
   get_earnings_call_transcript: ENVELOPE_V2_OUTPUT_SCHEMA,
+  list_sec_material_filings: ENVELOPE_V2_OUTPUT_SCHEMA,
+  get_sec_filing_intelligence: ENVELOPE_V2_OUTPUT_SCHEMA,
+  get_sec_filing_section_markdown: ENVELOPE_V2_OUTPUT_SCHEMA,
 };
 
 for (const [alias, canonical] of Object.entries(TOOL_ALIASES)) {
@@ -1710,6 +1719,12 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       return indexSecFiling(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null);
     case "get_sec_filing_index":
       return getSecFilingIndex(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null);
+    case "list_sec_material_filings":
+      return listSecMaterialFilings(str(args.ticker), Array.isArray(args.forms) ? args.forms.map(String) : null, num(args.limit, 5));
+    case "get_sec_filing_intelligence":
+      return getSecFilingIntelligence(str(args.ticker), str(args.filing_type, "10-K"), num(args.filing_index, 0));
+    case "get_sec_filing_section_markdown":
+      return getSecFilingSectionMarkdown(str(args.ticker), str(args.section, "Item 1A"), str(args.filing_type, "10-K"), num(args.filing_index, 0), num(args.max_chars, 50000));
     case "extract_geographic_revenue":
       return extractGeographicRevenue(str(args.ticker), str(args.region), str(args.filing_type, "10-K"), str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null, str(args.detailLevel, "compact"));
     case "extract_segment_revenue":

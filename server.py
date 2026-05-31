@@ -1035,6 +1035,42 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
     "get_sec_filing_exhibit_content": _SIMPLE_OUTPUT_SCHEMA,
     "parse_public_transcript": _SIMPLE_OUTPUT_SCHEMA,
     "get_earnings_call_transcript": _SIMPLE_OUTPUT_SCHEMA,
+    "list_sec_material_filings": {
+        "type": "object",
+        "properties": {
+            "ticker": {"type": "string"},
+            "cik": {"type": "string"},
+            "filings": {"type": "array"},
+            "meta": {"type": "object"},
+        },
+        "additionalProperties": True,
+    },
+    "get_sec_filing_intelligence": {
+        "type": "object",
+        "properties": {
+            "ticker": {"type": "string"},
+            "filing": {"type": "object"},
+            "xbrl_available": {"type": "boolean"},
+            "xbrl_facts": {"type": "object"},
+            "index": {"type": "object"},
+            "recommended_queries": {"type": "array"},
+            "status": {"type": "object"},
+        },
+        "additionalProperties": True,
+    },
+    "get_sec_filing_section_markdown": {
+        "type": "object",
+        "properties": {
+            "section": {"type": "string"},
+            "markdown": {"type": "string"},
+            "tables_in_section": {"type": "number"},
+            "word_count": {"type": "number"},
+            "confidence": {"type": "string"},
+            "source": {"type": "string"},
+            "truncated": {"type": "boolean"},
+        },
+        "additionalProperties": True,
+    },
 }
 
 TOOL_ALIASES: dict[str, str] = {
@@ -8344,6 +8380,55 @@ async def get_sec_filing_table(ticker: str, table_index: int, filing_type: str =
     return await get_filing_table(ticker, str(resolved_doc_url), table_index, max_rows)
 
 
+# ---------------------------------------------------------------------------
+# Retrieval path and alternative query helpers for extract_sec_filing_fact
+# ---------------------------------------------------------------------------
+
+def _map_extraction_to_retrieval_path(extraction_method: str) -> str:
+    """Map extractionMethod to a semantic retrieval path label."""
+    method_upper = str(extraction_method or "").upper()
+    if method_upper in ("XBRL", "COMPANYFACTS", "XBRL_COMPANYFACTS"):
+        return "XBRL"
+    elif method_upper in ("HTML_TABLE", "INDEXED_TABLE", "TABLE_PARSE"):
+        return "INDEXED_TABLE"
+    elif method_upper in ("TEXT_SEARCH", "SECTION_TEXT", "TARGETED_TEXT"):
+        return "SECTION_TEXT"
+    elif method_upper in ("FULL_DOC_SEARCH", "FULL_TEXT", "FALLBACK"):
+        return "FULL_DOC_SEARCH"
+    elif method_upper == "NONE":
+        return "NONE"
+    return "UNKNOWN"
+
+
+def _suggest_alternative_queries(fact_type: str, region: str | None, payload: dict) -> list[str]:
+    """Suggest alternative queries when confidence is low or result is NOT_DISCLOSED."""
+    source = str(payload.get("source") or "").upper()
+    confidence = str(payload.get("confidence") or "").upper()
+
+    if source not in ("NOT_DISCLOSED", "CONFLICTING") and confidence not in ("NOT_DISCLOSED", "LOW"):
+        return []
+
+    suggestions: list[str] = []
+    if fact_type == "geographic_revenue" and region:
+        suggestions.append(f"search_sec_filing_text with search_terms=['{region}', 'revenue'] and section_hint='geographic'")
+        suggestions.append("Try extract_revenue_exposure for broader region matching")
+    elif fact_type == "segment_revenue":
+        suggestions.append("search_sec_filing_text with search_terms=['segment', 'revenue'] and section_hint='segment'")
+    elif fact_type in ("total_revenue", "net_income", "operating_income"):
+        suggestions.append(f"search_sec_filing_text with search_terms=['{fact_type.replace('_', ' ')}']")
+        suggestions.append("Try get_sec_filing_table with the financial statements table")
+    elif fact_type in ("long_term_debt", "cash"):
+        suggestions.append("search_sec_filing_text with search_terms=['debt', 'borrowings'] and section_hint='balance sheet'")
+    elif fact_type in ("capex", "rd_expense"):
+        suggestions.append(f"search_sec_filing_text with search_terms=['{fact_type.replace('_', ' ')}']")
+
+    if not suggestions:
+        suggestions.append("Use get_sec_filing_intelligence to check available data sources")
+        suggestions.append("Try get_sec_filing_section_markdown for the relevant section")
+
+    return suggestions
+
+
 @yfinance_server.tool(name="extract_sec_filing_fact", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_filing_fact"], description="Canonical SEC fact extractor (routes to get_filing_data or extract_filing_fact).")
 async def extract_sec_filing_fact(
     ticker: str,
@@ -8394,12 +8479,14 @@ async def extract_sec_filing_fact(
             "extractionMethod": parsed_payload.get("extractionMethod", "NONE"),
             "source": parsed_payload.get("source", "NOT_DISCLOSED"),
             "confidence": parsed_payload.get("confidence", "NOT_DISCLOSED"),
+            "retrieval_path": _map_extraction_to_retrieval_path(parsed_payload.get("extractionMethod", "NONE")),
             "documentUrl": parsed_payload.get("documentUrl"),
             "indexUrl": parsed_payload.get("indexUrl"),
             "primaryDocumentUrl": parsed_payload.get("primaryDocumentUrl"),
             "evidence": parsed_payload.get("evidence"),
             "calculation": parsed_payload.get("calculation"),
             "warnings": parsed_payload.get("warnings", []),
+            "alternative_queries": _suggest_alternative_queries(routed_fact_type.value, region, parsed_payload),
             "ticker": parsed_payload.get("ticker", ticker),
         })
     return await extract_filing_fact(ticker=ticker, fact_name=fact_name, document_url=document_url, accession_number=accession_number)
@@ -8713,6 +8800,500 @@ async def get_sec_filing_index(
         if acc_err:
             return _mcp_failure("get_sec_filing_index", ErrorCode.INPUT_VALIDATION_ERROR, acc_err)
     return await _index_sec_filing_impl(ticker, filing_type, accession_number)
+
+
+# ---------------------------------------------------------------------------
+# SEC Material Filing Forms (non-noisy filings for intelligence layer)
+# ---------------------------------------------------------------------------
+_SEC_MATERIAL_FORMS_DEFAULT: list[str] = [
+    "10-K", "10-Q", "8-K", "S-1", "424B", "DEF 14A", "20-F", "6-K",
+]
+
+_SEC_NOISY_FORMS: set[str] = {
+    "4", "3", "5", "SC 13G", "SC 13G/A", "SC 13D", "SC 13D/A",
+    "144", "SD", "CORRESP", "UPLOAD", "CT ORDER",
+}
+
+
+@yfinance_server.tool(
+    name="list_sec_material_filings",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["list_sec_material_filings"],
+    description="""List latest material SEC filings for a ticker, filtering out noise (Form 4, 144, SC 13G, etc.).
+Returns only significant filings (10-K, 10-Q, 8-K, S-1, 424B, DEF 14A, 20-F, 6-K by default).
+
+Args:
+    ticker: Ticker symbol.
+    forms: List of form types to include (default: ["10-K", "10-Q", "8-K", "S-1", "424B", "DEF 14A", "20-F", "6-K"]).
+    limit: Maximum number of filings to return (default: 5, max: 20).
+""",
+)
+async def list_sec_material_filings(
+    ticker: str,
+    forms: list[str] | None = None,
+    limit: int = 5,
+) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("list_sec_material_filings", ErrorCode.INPUT_VALIDATION_ERROR, err)
+
+    resolved_limit = min(max(1, limit), 20)
+    allowed_forms: set[str] = set(f.upper() for f in (forms or _SEC_MATERIAL_FORMS_DEFAULT))
+
+    cik_padded, subs = await _get_submissions_for_ticker(ticker)
+    if not cik_padded or not subs:
+        return _mcp_failure("list_sec_material_filings", ErrorCode.TICKER_NOT_FOUND,
+                            f"Could not find EDGAR submissions for ticker '{ticker}'")
+
+    cik_int = int(cik_padded)
+    recent = subs.get("filings", {}).get("recent", {})
+    forms_list: list[str] = recent.get("form", [])
+    dates: list[str] = recent.get("filingDate", [])
+    accessions: list[str] = recent.get("accessionNumber", [])
+    primary_docs: list[str] = recent.get("primaryDocument", [])
+    accepted_dts: list[str] = recent.get("acceptanceDateTime", [])
+
+    results: list[dict] = []
+    for i, form in enumerate(forms_list):
+        if len(results) >= resolved_limit:
+            break
+        form_upper = str(form).upper()
+        # Filter: must match allowed forms and not be in noisy set
+        if form_upper in _SEC_NOISY_FORMS:
+            continue
+        # Check if form matches any of the allowed prefixes (e.g. "424B" matches "424B4")
+        matched = any(form_upper == af or form_upper.startswith(af) for af in allowed_forms)
+        if not matched:
+            continue
+        acc = accessions[i] if i < len(accessions) else ""
+        date = dates[i] if i < len(dates) else ""
+        accepted_at = accepted_dts[i] if i < len(accepted_dts) else None
+        primary_doc = primary_docs[i] if i < len(primary_docs) else ""
+        _, doc_url = _edgar_build_filing_urls(cik_int, acc, primary_doc)
+
+        # XBRL availability: true if companyfacts have been fetched for this CIK.
+        # This is a fast cache check; call get_sec_filing_intelligence for precise status.
+        xbrl_available = _EDGAR_FACTS_CACHE.get(cik_padded) is not None
+
+        results.append({
+            "filingType": form,
+            "filingDate": date,
+            "acceptedAt": accepted_at,
+            "accessionNumber": acc,
+            "primaryDocument": primary_doc,
+            "documentUrl": doc_url,
+            "xbrl_available": xbrl_available,
+        })
+
+    retrieved_at = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+    return json.dumps({
+        "ticker": ticker,
+        "cik": cik_padded,
+        "filings": results,
+        "meta": {
+            "source": "sec_submissions",
+            "materialFormsFilter": sorted(allowed_forms),
+            "retrievedAt": retrieved_at,
+        },
+    })
+
+
+# ---------------------------------------------------------------------------
+# SEC Filing Intelligence - composite tool
+# ---------------------------------------------------------------------------
+
+# XBRL concept names for the intelligence snapshot
+_XBRL_INTELLIGENCE_CONCEPTS: dict[str, list[str]] = {
+    "revenue": ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet"],
+    "net_income": ["NetIncomeLoss", "ProfitLoss"],
+    "cash": ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsAndShortTermInvestments"],
+    "long_term_debt": ["LongTermDebt", "LongTermDebtNoncurrent"],
+    "total_assets": ["Assets"],
+    "operating_income": ["OperatingIncomeLoss"],
+}
+
+
+def _extract_xbrl_latest_annual(facts_data: dict, concept_names: list[str]) -> dict | None:
+    """Extract the most recent annual (10-K/20-F) value for a set of XBRL concept names.
+
+    Tries each concept name in order, returning the first match found.
+    Returns a dict with keys: value, unit, period, form, filed, confidence.
+    Returns None if no matching XBRL concept has annual data.
+    """
+    us_gaap: dict = facts_data.get("facts", {}).get("us-gaap", {})
+    for concept in concept_names:
+        concept_data = us_gaap.get(concept)
+        if not concept_data:
+            continue
+        usd_units: list[dict] = concept_data.get("units", {}).get("USD", [])
+        if not usd_units:
+            continue
+        # Find most recent 10-K fact
+        annual_facts = [
+            f for f in usd_units
+            if f.get("form") in ("10-K", "10-K405", "10-KSB", "20-F")
+            and f.get("end")
+            and f.get("val") is not None
+        ]
+        if not annual_facts:
+            continue
+        latest = max(annual_facts, key=lambda f: f.get("end", ""))
+        return {
+            "value": latest.get("val"),
+            "unit": "USD",
+            "period": latest.get("end"),
+            "form": latest.get("form"),
+            "filed": latest.get("filed"),
+            "confidence": "HIGH",
+        }
+    return None
+
+
+@yfinance_server.tool(
+    name="get_sec_filing_intelligence",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_sec_filing_intelligence"],
+    description="""Get a comprehensive intelligence map of a company's SEC filing — XBRL facts snapshot, section/table index summary, and recommended queries — in a single call.
+Gives the LLM a filing "map" so it knows what data is available and can make targeted follow-up calls.
+
+Args:
+    ticker: Ticker symbol.
+    filing_type: SEC form type (default: "10-K").
+    filing_index: 0 = latest, 1 = previous (default: 0).
+""",
+)
+async def get_sec_filing_intelligence(
+    ticker: str,
+    filing_type: str = "10-K",
+    filing_index: int = 0,
+) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("get_sec_filing_intelligence", ErrorCode.INPUT_VALIDATION_ERROR, err)
+
+    filing_index = max(0, min(filing_index, 9))
+
+    cik_padded, subs = await _get_submissions_for_ticker(ticker)
+    if not cik_padded or not subs:
+        return _mcp_failure("get_sec_filing_intelligence", ErrorCode.TICKER_NOT_FOUND,
+                            f"Could not find EDGAR submissions for ticker '{ticker}'")
+
+    cik_int = int(cik_padded)
+    recent = subs.get("filings", {}).get("recent", {})
+    forms_list: list[str] = recent.get("form", [])
+    dates: list[str] = recent.get("filingDate", [])
+    accessions: list[str] = recent.get("accessionNumber", [])
+    primary_docs: list[str] = recent.get("primaryDocument", [])
+    accepted_dts: list[str] = recent.get("acceptanceDateTime", [])
+
+    # Find the Nth matching filing
+    match_count = 0
+    target_idx: int | None = None
+    for i, form in enumerate(forms_list):
+        if str(form).upper() == filing_type.upper():
+            if match_count == filing_index:
+                target_idx = i
+                break
+            match_count += 1
+
+    if target_idx is None:
+        return _mcp_failure("get_sec_filing_intelligence", ErrorCode.NO_FILING_DATA,
+                            f"No {filing_type} filing at index {filing_index} for '{ticker}'")
+
+    accession_number = accessions[target_idx] if target_idx < len(accessions) else ""
+    filing_date = dates[target_idx] if target_idx < len(dates) else ""
+    accepted_at = accepted_dts[target_idx] if target_idx < len(accepted_dts) else None
+    primary_doc = primary_docs[target_idx] if target_idx < len(primary_docs) else ""
+    _, document_url = _edgar_build_filing_urls(cik_int, accession_number, primary_doc)
+
+    # --- XBRL facts snapshot ---
+    xbrl_available = False
+    xbrl_facts: dict[str, dict | None] = {}
+    xbrl_status = "UNAVAILABLE"
+    try:
+        facts_data = await _edgar_get_company_facts(cik_padded)
+        if facts_data and facts_data.get("facts"):
+            xbrl_available = True
+            xbrl_status = "OK"
+            for fact_key, concepts in _XBRL_INTELLIGENCE_CONCEPTS.items():
+                xbrl_facts[fact_key] = _extract_xbrl_latest_annual(facts_data, concepts)
+    except Exception:
+        xbrl_status = "ERROR"
+
+    # --- Filing index (sections/tables) ---
+    index_status = "UNAVAILABLE"
+    sections_list: list[str] = []
+    sections_count = 0
+    tables_count = 0
+    exhibits_count = 0
+    try:
+        index_raw = await _index_sec_filing_impl(ticker, filing_type, accession_number)
+        index_data = json.loads(index_raw)
+        if isinstance(index_data, dict) and "index" in index_data:
+            idx = index_data["index"]
+            sections_count = len(idx.get("sections", []))
+            tables_count = len(idx.get("tables", []))
+            sections_list = [s.get("heading", "") for s in idx.get("sections", [])[:20]]
+            index_status = "OK"
+    except Exception:
+        index_status = "ERROR"
+
+    # Recommended queries based on filing type
+    recommended_queries = [
+        "revenue by segment",
+        "risk factors",
+        "liquidity and capital resources",
+        "customer concentration",
+        "long-term debt",
+    ]
+    if filing_type.upper() in ("10-K", "20-F"):
+        recommended_queries.extend(["geographic revenue", "R&D expense", "guidance"])
+    elif filing_type.upper() == "10-Q":
+        recommended_queries.extend(["quarter-over-quarter revenue", "material events"])
+    elif filing_type.upper() == "8-K":
+        recommended_queries = ["material event", "exhibit content", "financial results"]
+
+    return json.dumps({
+        "ticker": ticker,
+        "filing": {
+            "type": filing_type,
+            "accessionNumber": accession_number,
+            "filedAt": filing_date,
+            "acceptedAt": accepted_at,
+            "documentUrl": document_url,
+        },
+        "xbrl_available": xbrl_available,
+        "xbrl_facts": {k: v for k, v in xbrl_facts.items() if v is not None},
+        "index": {
+            "sections_count": sections_count,
+            "tables_count": tables_count,
+            "sections": sections_list,
+            "exhibits_count": exhibits_count,
+        },
+        "recommended_queries": recommended_queries,
+        "status": {
+            "xbrl": xbrl_status,
+            "index": index_status,
+            "sections": "AVAILABLE" if sections_count > 0 else "EMPTY",
+        },
+    })
+
+
+# ---------------------------------------------------------------------------
+# SEC Filing Section Markdown - HTML to Markdown conversion
+# ---------------------------------------------------------------------------
+
+_MD_MAX_CELL_CHARS = 60
+
+
+def _html_table_to_markdown(table_html: str) -> str:
+    """Convert an HTML table to a pipe-delimited Markdown table."""
+    rows = _parse_html_table(table_html)
+    if not rows:
+        return ""
+    # Build pipe-separated rows
+    md_lines: list[str] = []
+    for i, row in enumerate(rows[:50]):  # Limit to 50 rows
+        line = "| " + " | ".join(cell[:_MD_MAX_CELL_CHARS] for cell in row) + " |"
+        md_lines.append(line)
+        if i == 0:
+            # Add separator after header
+            md_lines.append("| " + " | ".join("---" for _ in row) + " |")
+    return "\n".join(md_lines)
+
+
+def _html_to_markdown_fallback(html: str, section_start: int, section_end: int) -> str:
+    """Convert a section of HTML to basic Markdown using built-in parser."""
+    section_html = html[section_start:section_end]
+
+    # Remove scripts/styles iteratively to prevent nested/malformed pattern bypass
+    _script_re = _re.compile(r'<script\b[^>]*>[\s\S]*?</\s*script[^>]*>', _re.IGNORECASE)
+    _style_re = _re.compile(r'<style\b[^>]*>[\s\S]*?</\s*style[^>]*>', _re.IGNORECASE)
+    while True:
+        next_s = _script_re.sub('', section_html)
+        next_s = _style_re.sub('', next_s)
+        if next_s == section_html:
+            break
+        section_html = next_s
+
+    # Convert headers
+    for level in range(1, 7):
+        prefix = "#" * level
+        section_html = _re.sub(
+            rf'<h{level}[^>]*>(.*?)</h{level}>',
+            lambda m, p=prefix: f"\n{p} {_strip_html_tags(m.group(1))}\n",
+            section_html,
+            flags=_re.IGNORECASE | _re.DOTALL,
+        )
+
+    # Convert tables to markdown
+    table_re = _re.compile(r'<table[^>]*>[\s\S]*?</table>', _re.IGNORECASE)
+    for t_match in table_re.finditer(section_html):
+        md_table = _html_table_to_markdown(t_match.group(0))
+        if md_table:
+            section_html = section_html.replace(t_match.group(0), f"\n{md_table}\n")
+
+    # Convert list items
+    section_html = _re.sub(r'<li[^>]*>(.*?)</li>', r'- \1', section_html, flags=_re.IGNORECASE | _re.DOTALL)
+
+    # Convert paragraphs/divs to newlines
+    section_html = _re.sub(r'<(?:p|div|br)[^>]*/?\s*>', '\n', section_html, flags=_re.IGNORECASE)
+    section_html = _re.sub(r'</(?:p|div)>', '\n', section_html, flags=_re.IGNORECASE)
+
+    # Strip remaining HTML tags
+    text = _strip_html_tags(section_html)
+
+    # Clean up whitespace
+    text = _re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+@yfinance_server.tool(
+    name="get_sec_filing_section_markdown",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_sec_filing_section_markdown"],
+    description="""Return a specific SEC filing section as LLM-ready Markdown.
+Converts filing HTML to clean Markdown with preserved section headers and pipe-delimited tables.
+Use after get_sec_filing_intelligence to drill into a specific section.
+
+Args:
+    ticker: Ticker symbol.
+    filing_type: SEC form type (default: "10-K").
+    section: Section name to extract (e.g. "Risk Factors", "Item 7", "MD&A", "Item 1A").
+    filing_index: 0 = latest, 1 = previous (default: 0).
+    max_chars: Maximum characters to return (default: 50000).
+""",
+)
+async def get_sec_filing_section_markdown(
+    ticker: str,
+    section: str = "Item 1A",
+    filing_type: str = "10-K",
+    filing_index: int = 0,
+    max_chars: int = 50000,
+) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("get_sec_filing_section_markdown", ErrorCode.INPUT_VALIDATION_ERROR, err)
+
+    filing_index = max(0, min(filing_index, 9))
+    max_chars = min(max(1000, max_chars), 100000)
+
+    cik_padded, subs = await _get_submissions_for_ticker(ticker)
+    if not cik_padded or not subs:
+        return _mcp_failure("get_sec_filing_section_markdown", ErrorCode.TICKER_NOT_FOUND,
+                            f"Could not find EDGAR submissions for ticker '{ticker}'")
+
+    cik_int = int(cik_padded)
+    recent = subs.get("filings", {}).get("recent", {})
+    forms_list: list[str] = recent.get("form", [])
+    accessions: list[str] = recent.get("accessionNumber", [])
+    primary_docs: list[str] = recent.get("primaryDocument", [])
+
+    # Find the Nth matching filing
+    match_count = 0
+    target_idx: int | None = None
+    for i, form in enumerate(forms_list):
+        if str(form).upper() == filing_type.upper():
+            if match_count == filing_index:
+                target_idx = i
+                break
+            match_count += 1
+
+    if target_idx is None:
+        return _mcp_failure("get_sec_filing_section_markdown", ErrorCode.NO_FILING_DATA,
+                            f"No {filing_type} filing at index {filing_index} for '{ticker}'")
+
+    accession_number = accessions[target_idx] if target_idx < len(accessions) else ""
+    primary_doc = primary_docs[target_idx] if target_idx < len(primary_docs) else ""
+    _, document_url = _edgar_build_filing_urls(cik_int, accession_number, primary_doc)
+
+    if not document_url:
+        return _mcp_failure("get_sec_filing_section_markdown", ErrorCode.NO_FILING_DATA,
+                            f"No document URL for {accession_number}")
+
+    # Fetch the filing HTML
+    html = await _edgar_get_html(document_url, max_bytes=5_000_000)
+    if not html:
+        return _mcp_failure("get_sec_filing_section_markdown", ErrorCode.PROVIDER_ERROR,
+                            f"Failed to fetch filing document: {document_url}")
+
+    # Find the section boundaries using heading patterns
+    section_lower = section.lower().strip()
+    heading_re = _re.compile(r'<h([1-6])[^>]*>(.*?)</h\1>', _re.DOTALL | _re.IGNORECASE)
+
+    section_start: int | None = None
+    section_end: int | None = None
+    section_level: int | None = None
+    found_heading = ""
+
+    for h_match in heading_re.finditer(html):
+        heading_text = _strip_html_tags(h_match.group(2)).lower().strip()
+        level = int(h_match.group(1))
+
+        if section_start is not None:
+            # End section at next heading of same or higher level
+            if level <= section_level:  # type: ignore[operator]
+                section_end = h_match.start()
+                break
+        elif section_lower in heading_text or heading_text in section_lower:
+            section_start = h_match.start()
+            section_level = level
+            found_heading = _strip_html_tags(h_match.group(2)).strip()
+
+    # Also try item-based pattern (e.g. "Item 1A" in bold/span)
+    if section_start is None:
+        item_re = _re.compile(
+            rf'(?:<b[^>]*>|<span[^>]*font-weight:\s*bold[^>]*>)\s*{_re.escape(section)}\b',
+            _re.IGNORECASE,
+        )
+        item_match = item_re.search(html)
+        if item_match:
+            section_start = item_match.start()
+            found_heading = section
+            # Find next Item pattern for end boundary
+            _MIN_SECTION_SPACING = 100  # minimum chars to skip before next section boundary
+            next_item = item_re.search(html, item_match.end() + _MIN_SECTION_SPACING)
+            if next_item:
+                section_end = next_item.start()
+
+    if section_start is None:
+        return _mcp_failure("get_sec_filing_section_markdown", ErrorCode.NO_FILING_DATA,
+                            f"Section '{section}' not found in filing")
+
+    if section_end is None:
+        section_end = min(section_start + max_chars * 3, len(html))
+
+    # Try sec2md first (optional dependency)
+    parser_source = "html_parser_fallback"
+    try:
+        import sec2md  # type: ignore[import-untyped]
+        section_html = html[section_start:section_end]
+        markdown = sec2md.convert(section_html)
+        parser_source = "sec2md"
+    except (ImportError, Exception):
+        markdown = _html_to_markdown_fallback(html, section_start, section_end)
+
+    # Count tables in the section
+    section_slice = html[section_start:section_end]
+    tables_in_section = len(_re.findall(r'<table[^>]*>', section_slice, _re.IGNORECASE))
+
+    # Truncate if needed
+    truncated = False
+    if len(markdown) > max_chars:
+        markdown = markdown[:max_chars].rstrip()
+        truncated = True
+
+    word_count = len(markdown.split())
+
+    return json.dumps({
+        "ticker": ticker,
+        "section": found_heading or section,
+        "filingType": filing_type,
+        "accessionNumber": accession_number,
+        "markdown": markdown,
+        "tables_in_section": tables_in_section,
+        "word_count": word_count,
+        "confidence": "HIGH" if parser_source == "sec2md" else "MEDIUM",
+        "source": parser_source,
+        "truncated": truncated,
+    })
 
 
 def _safe_json_loads(payload: str) -> dict:

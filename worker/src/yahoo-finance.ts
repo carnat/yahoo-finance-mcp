@@ -7017,6 +7017,292 @@ export async function getSecFilingIndex(
   }
 }
 
+
+const SEC_MATERIAL_FORMS_DEFAULT = ["10-K", "10-Q", "8-K", "S-1", "424B", "DEF 14A", "20-F", "6-K"];
+const SEC_NOISY_FORMS = new Set(["4", "3", "5", "SC 13G", "SC 13G/A", "SC 13D", "SC 13D/A", "144", "SD", "CORRESP", "UPLOAD", "CT ORDER"]);
+
+export async function listSecMaterialFilings(
+  ticker: string,
+  forms: string[] | null = null,
+  limit: number = 5,
+): Promise<string> {
+  const resolvedLimit = Math.min(Math.max(1, limit), 20);
+  const allowedForms = new Set((forms ?? SEC_MATERIAL_FORMS_DEFAULT).map(f => f.toUpperCase()));
+
+  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
+  if (!cikPadded || !submissions) {
+    return JSON.stringify({ ok: false, error: { code: "TICKER_NOT_FOUND", message: `Could not find EDGAR submissions for ticker '${ticker}'` } });
+  }
+
+  const recent = ((submissions.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+  const formsList: string[] = (recent.form as string[]) ?? [];
+  const dates: string[] = (recent.filingDate as string[]) ?? [];
+  const accessions: string[] = (recent.accessionNumber as string[]) ?? [];
+  const primaryDocs: string[] = (recent.primaryDocument as string[]) ?? [];
+  const acceptedDts: string[] = (recent.acceptanceDateTime as string[]) ?? [];
+
+  const results: Record<string, unknown>[] = [];
+  const cikInt = parseInt(cikPadded, 10);
+  for (let i = 0; i < formsList.length && results.length < resolvedLimit; i++) {
+    const formUpper = String(formsList[i]).toUpperCase();
+    if (SEC_NOISY_FORMS.has(formUpper)) continue;
+    const matched = Array.from(allowedForms).some(af => formUpper === af || formUpper.startsWith(af));
+    if (!matched) continue;
+
+    const acc = accessions[i] ?? "";
+    const accClean = acc.replace(/-/g, "");
+    const primaryDoc = primaryDocs[i] ?? "";
+    const docUrl = primaryDoc ? `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accClean}/${primaryDoc}` : null;
+
+    results.push({
+      filingType: formsList[i],
+      filingDate: dates[i] ?? "",
+      acceptedAt: acceptedDts[i] ?? null,
+      accessionNumber: acc,
+      primaryDocument: primaryDoc,
+      documentUrl: docUrl,
+      xbrl_available: false,
+    });
+  }
+
+  return JSON.stringify({
+    ticker,
+    cik: cikPadded,
+    filings: results,
+    meta: { source: "sec_submissions", materialFormsFilter: Array.from(allowedForms).sort(), retrievedAt: new Date().toISOString() },
+  });
+}
+
+export async function getSecFilingIntelligence(
+  ticker: string,
+  filingType: string = "10-K",
+  filingIndex: number = 0,
+): Promise<string> {
+  filingIndex = Math.max(0, Math.min(filingIndex, 9));
+
+  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
+  if (!cikPadded || !submissions) {
+    return JSON.stringify({ ok: false, error: { code: "TICKER_NOT_FOUND", message: `Could not find EDGAR submissions for ticker '${ticker}'` } });
+  }
+
+  const recent = ((submissions.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+  const formsList: string[] = (recent.form as string[]) ?? [];
+  const dates: string[] = (recent.filingDate as string[]) ?? [];
+  const accessions: string[] = (recent.accessionNumber as string[]) ?? [];
+  const primaryDocs: string[] = (recent.primaryDocument as string[]) ?? [];
+  const acceptedDts: string[] = (recent.acceptanceDateTime as string[]) ?? [];
+
+  let matchCount = 0;
+  let targetIdx: number | null = null;
+  for (let i = 0; i < formsList.length; i++) {
+    if (String(formsList[i]).toUpperCase() === filingType.toUpperCase()) {
+      if (matchCount === filingIndex) { targetIdx = i; break; }
+      matchCount++;
+    }
+  }
+
+  if (targetIdx === null) {
+    return JSON.stringify({ ok: false, error: { code: "NO_FILING_DATA", message: `No ${filingType} filing at index ${filingIndex} for '${ticker}'` } });
+  }
+
+  const accessionNumber = accessions[targetIdx] ?? "";
+  const filingDate = dates[targetIdx] ?? "";
+  const acceptedAt = acceptedDts[targetIdx] ?? null;
+  const primaryDoc = primaryDocs[targetIdx] ?? "";
+  const cikInt = parseInt(cikPadded, 10);
+  const accClean = accessionNumber.replace(/-/g, "");
+  const documentUrl = primaryDoc ? `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accClean}/${primaryDoc}` : null;
+
+  // Attempt to get filing index
+  let indexStatus = "UNAVAILABLE";
+  let sectionsCount = 0;
+  let tablesCount = 0;
+  const sectionsList: string[] = [];
+  try {
+    const indexRaw = await _indexSecFilingImpl(ticker, filingType, "latest", accessionNumber);
+    const indexData = JSON.parse(indexRaw) as Record<string, unknown>;
+    if (indexData.index) {
+      const idx = indexData.index as Record<string, unknown[]>;
+      sectionsCount = (idx.sections ?? []).length;
+      tablesCount = (idx.tables ?? []).length;
+      for (const s of (idx.sections ?? []).slice(0, 20)) {
+        const sec = s as Record<string, unknown>;
+        if (sec.heading) sectionsList.push(String(sec.heading));
+      }
+      indexStatus = "OK";
+    }
+  } catch { indexStatus = "ERROR"; }
+
+  let recommendedQueries = ["revenue by segment", "risk factors", "liquidity and capital resources", "customer concentration", "long-term debt"];
+  if (filingType.toUpperCase() === "10-K" || filingType.toUpperCase() === "20-F") {
+    recommendedQueries.push("geographic revenue", "R&D expense", "guidance");
+  } else if (filingType.toUpperCase() === "10-Q") {
+    recommendedQueries.push("quarter-over-quarter revenue", "material events");
+  } else if (filingType.toUpperCase() === "8-K") {
+    recommendedQueries = ["material event", "exhibit content", "financial results"];
+  }
+
+  return JSON.stringify({
+    ticker,
+    filing: { type: filingType, accessionNumber, filedAt: filingDate, acceptedAt, documentUrl },
+    xbrl_available: false,
+    xbrl_facts: {},
+    index: { sections_count: sectionsCount, tables_count: tablesCount, sections: sectionsList, exhibits_count: 0 },
+    recommended_queries: recommendedQueries,
+    status: { xbrl: "UNAVAILABLE", index: indexStatus, sections: sectionsCount > 0 ? "AVAILABLE" : "EMPTY" },
+  });
+}
+
+export async function getSecFilingSectionMarkdown(
+  ticker: string,
+  section: string = "Item 1A",
+  filingType: string = "10-K",
+  filingIndex: number = 0,
+  maxChars: number = 50000,
+): Promise<string> {
+  filingIndex = Math.max(0, Math.min(filingIndex, 9));
+  maxChars = Math.min(Math.max(1000, maxChars), 100000);
+
+  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
+  if (!cikPadded || !submissions) {
+    return JSON.stringify({ ok: false, error: { code: "TICKER_NOT_FOUND", message: `Could not find EDGAR submissions for ticker '${ticker}'` } });
+  }
+
+  const recent = ((submissions.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+  const formsList: string[] = (recent.form as string[]) ?? [];
+  const accessions: string[] = (recent.accessionNumber as string[]) ?? [];
+  const primaryDocs: string[] = (recent.primaryDocument as string[]) ?? [];
+
+  let matchCount = 0;
+  let targetIdx: number | null = null;
+  for (let i = 0; i < formsList.length; i++) {
+    if (String(formsList[i]).toUpperCase() === filingType.toUpperCase()) {
+      if (matchCount === filingIndex) { targetIdx = i; break; }
+      matchCount++;
+    }
+  }
+
+  if (targetIdx === null) {
+    return JSON.stringify({ ok: false, error: { code: "NO_FILING_DATA", message: `No ${filingType} filing at index ${filingIndex} for '${ticker}'` } });
+  }
+
+  const accessionNumber = accessions[targetIdx] ?? "";
+  const primaryDoc = primaryDocs[targetIdx] ?? "";
+  const cikInt = parseInt(cikPadded, 10);
+  const accClean = accessionNumber.replace(/-/g, "");
+  const documentUrl = primaryDoc ? `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accClean}/${primaryDoc}` : null;
+
+  if (!documentUrl) {
+    return JSON.stringify({ ok: false, error: { code: "NO_FILING_DATA", message: `No document URL for ${accessionNumber}` } });
+  }
+
+  // Fetch filing HTML
+  const html = await edgarGetHtml(documentUrl);
+  if (!html) {
+    return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: `Failed to fetch filing document: ${documentUrl}` } });
+  }
+
+  // Find section boundaries
+  const sectionLower = section.toLowerCase().trim();
+  const headingRe = /<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi;
+  let sectionStart: number | null = null;
+  let sectionEnd: number | null = null;
+  let sectionLevel: number | null = null;
+  let foundHeading = "";
+
+  let hMatch: RegExpExecArray | null;
+  while ((hMatch = headingRe.exec(html)) !== null) {
+    const headingText = hMatch[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+    const level = parseInt(hMatch[1], 10);
+
+    if (sectionStart !== null) {
+      if (level <= sectionLevel!) {
+        sectionEnd = hMatch.index;
+        break;
+      }
+    } else if (sectionLower.includes(headingText) || headingText.includes(sectionLower)) {
+      sectionStart = hMatch.index;
+      sectionLevel = level;
+      foundHeading = hMatch[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    }
+  }
+
+  if (sectionStart === null) {
+    return JSON.stringify({ ok: false, error: { code: "NO_FILING_DATA", message: `Section '${section}' not found in filing` } });
+  }
+
+  if (sectionEnd === null) {
+    sectionEnd = Math.min(sectionStart + maxChars * 3, html.length);
+  }
+
+  // Convert to markdown (basic fallback — no sec2md in worker)
+  let sectionHtml = html.slice(sectionStart, sectionEnd);
+  // Strip scripts/styles iteratively to handle nested/malformed patterns
+  const MAX_CELL_CHARS = 60;
+  let prevHtml = "";
+  while (prevHtml !== sectionHtml) {
+    prevHtml = sectionHtml;
+    sectionHtml = sectionHtml.replace(/<script\b[^>]*>[\s\S]*?<\/script[^>]*>/gi, "");
+    sectionHtml = sectionHtml.replace(/<style\b[^>]*>[\s\S]*?<\/style[^>]*>/gi, "");
+  }
+  // Convert headers
+  for (let lvl = 1; lvl <= 6; lvl++) {
+    const prefix = "#".repeat(lvl);
+    sectionHtml = sectionHtml.replace(new RegExp(`<h${lvl}[^>]*>([\\s\\S]*?)<\\/h${lvl}>`, "gi"), (_, content) => `\n${prefix} ${(content as string).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()}\n`);
+  }
+  // Convert tables to pipe-delimited
+  sectionHtml = sectionHtml.replace(/<table[^>]*>[\s\S]*?<\/table>/gi, (tableHtml) => {
+    const rows: string[][] = [];
+    const trRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+    let trMatch: RegExpExecArray | null;
+    while ((trMatch = trRe.exec(tableHtml)) !== null) {
+      const cells: string[] = [];
+      const tdRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+      let tdMatch: RegExpExecArray | null;
+      while ((tdMatch = tdRe.exec(trMatch[1])) !== null) {
+        cells.push(tdMatch[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, MAX_CELL_CHARS));
+      }
+      if (cells.length > 0) rows.push(cells);
+      if (rows.length >= 50) break;
+    }
+    if (rows.length === 0) return "";
+    const lines: string[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      lines.push("| " + rows[i].join(" | ") + " |");
+      if (i === 0) lines.push("| " + rows[i].map(() => "---").join(" | ") + " |");
+    }
+    return "\n" + lines.join("\n") + "\n";
+  });
+  // Convert paragraphs/divs
+  sectionHtml = sectionHtml.replace(/<(?:p|div|br)[^>]*\/?>/gi, "\n");
+  sectionHtml = sectionHtml.replace(/<\/(?:p|div)>/gi, "\n");
+  // Strip remaining tags
+  let markdown = sectionHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  markdown = markdown.replace(/\n{3,}/g, "\n\n");
+
+  // Count tables
+  const tablesInSection = (html.slice(sectionStart, sectionEnd).match(/<table[^>]*>/gi) ?? []).length;
+
+  let truncated = false;
+  if (markdown.length > maxChars) {
+    markdown = markdown.slice(0, maxChars).trimEnd();
+    truncated = true;
+  }
+
+  return JSON.stringify({
+    ticker,
+    section: foundHeading || section,
+    filingType,
+    accessionNumber,
+    markdown,
+    tables_in_section: tablesInSection,
+    word_count: markdown.split(/\s+/).length,
+    confidence: "MEDIUM",
+    source: "html_parser_fallback",
+    truncated,
+  });
+}
+
 function parseObjectJson(raw: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(raw) as unknown;
