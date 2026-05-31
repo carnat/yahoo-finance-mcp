@@ -8913,7 +8913,12 @@ _XBRL_INTELLIGENCE_CONCEPTS: dict[str, list[str]] = {
 
 
 def _extract_xbrl_latest_annual(facts_data: dict, concept_names: list[str]) -> dict | None:
-    """Extract the most recent annual (10-K) value for a set of XBRL concept names."""
+    """Extract the most recent annual (10-K/20-F) value for a set of XBRL concept names.
+
+    Tries each concept name in order, returning the first match found.
+    Returns a dict with keys: value, unit, period, form, filed, confidence.
+    Returns None if no matching XBRL concept has annual data.
+    """
     us_gaap: dict = facts_data.get("facts", {}).get("us-gaap", {})
     for concept in concept_names:
         concept_data = us_gaap.get(concept)
@@ -9099,9 +9104,15 @@ def _html_to_markdown_fallback(html: str, section_start: int, section_end: int) 
     """Convert a section of HTML to basic Markdown using built-in parser."""
     section_html = html[section_start:section_end]
 
-    # Remove scripts/styles
-    section_html = _re.sub(r'<script[^>]*>[\s\S]*?</script[^>]*>', '', section_html, flags=_re.IGNORECASE)
-    section_html = _re.sub(r'<style[^>]*>[\s\S]*?</style[^>]*>', '', section_html, flags=_re.IGNORECASE)
+    # Remove scripts/styles iteratively to prevent nested/malformed pattern bypass
+    _script_re = _re.compile(r'<script\b[^>]*>[\s\S]*?</\s*script[^>]*>', _re.IGNORECASE)
+    _style_re = _re.compile(r'<style\b[^>]*>[\s\S]*?</\s*style[^>]*>', _re.IGNORECASE)
+    while True:
+        next_s = _script_re.sub('', section_html)
+        next_s = _style_re.sub('', next_s)
+        if next_s == section_html:
+            break
+        section_html = next_s
 
     # Convert headers
     for level in range(1, 7):
@@ -9237,7 +9248,8 @@ async def get_sec_filing_section_markdown(
             section_start = item_match.start()
             found_heading = section
             # Find next Item pattern for end boundary
-            next_item = item_re.search(html, item_match.end() + 100)
+            _MIN_SECTION_SPACING = 100  # minimum chars to skip before next section boundary
+            next_item = item_re.search(html, item_match.end() + _MIN_SECTION_SPACING)
             if next_item:
                 section_end = next_item.start()
 
