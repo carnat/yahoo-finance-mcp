@@ -12,6 +12,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+sec = [
+    "sec2md>=0.1.0",
+]
 dev = [
     "pre-commit>=3.6.0",
     "black>=24.2.0",
