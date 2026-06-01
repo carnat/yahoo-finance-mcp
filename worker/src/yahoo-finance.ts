@@ -3091,6 +3091,31 @@ async function edgarPrimaryDocFromIndex(indexUrl: string): Promise<string | null
   return null;
 }
 
+async function edgarListExhibitsFromIndex(indexUrl: string): Promise<Record<string, unknown>[]> {
+  const html = await edgarGetHtml(indexUrl, 500_000);
+  if (!html) return [];
+  const exhibits: Record<string, unknown>[] = [];
+  for (const rowM of html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)) {
+    const rowHtml = rowM[1];
+    const cells = [...rowHtml.matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map((m) => m[1]);
+    if (cells.length < 3) continue;
+    const sequence = stripHtmlTags(cells[0]).trim();
+    if (!/^\d/.test(sequence)) continue;
+    const hrefMatch = cells[2].match(/href=["']([^"']+)["']/i);
+    const document = hrefMatch
+      ? hrefMatch[1].trim().split("/").pop()?.split("?", 1)[0].split("#", 1)[0] ?? ""
+      : stripHtmlTags(cells[2] ?? "").trim();
+    exhibits.push({
+      sequence,
+      description: stripHtmlTags(cells[1] ?? "").trim(),
+      document,
+      type: stripHtmlTags(cells[3] ?? "").trim(),
+      size: stripHtmlTags(cells[4] ?? "").trim(),
+    });
+  }
+  return exhibits;
+}
+
 /**
  * Derive the EDGAR CIK from an accession number.
  * The first 10 digits of an accession number are the zero-padded filer CIK.
@@ -3264,6 +3289,59 @@ function sanitizeFilingHtml(html: string): string {
     .replace(/<script\b[^>]*>[\s\S]*?<\/script[^>]*>/gi, " ")
     .replace(/<style\b[^>]*>[\s\S]*?<\/style[^>]*>/gi, " ")
     .replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, " ");
+}
+
+function htmlToReadableText(html: string): string {
+  const blockBroken = sanitizeFilingHtml(html)
+    .replace(/<(?:br|\/p|\/div|\/li|\/tr|\/h[1-6]|\/section)\b[^>]*>/gi, "\n")
+    .replace(/<(?:p|div|li|tr|h[1-6]|section)\b[^>]*>/gi, "\n");
+  const withoutTags = blockBroken.replace(/<[^>]+>/g, " ");
+  const entityMap: Record<string, string> = {
+    "&nbsp;": " ",
+    "&amp;": "&",
+    "&lt;": "<",
+    "&gt;": ">",
+    "&quot;": '"',
+    "&apos;": "'",
+  };
+  const decoded = withoutTags.replace(/&(?:nbsp|amp|lt|gt|quot|apos|#\d+|[a-z]+);/gi, (entity) => {
+    if (entity in entityMap) return entityMap[entity];
+    if (entity.startsWith("&#")) {
+      const code = parseInt(entity.slice(2, -1), 10);
+      return Number.isNaN(code) ? " " : String.fromCharCode(code);
+    }
+    return " ";
+  });
+  return decoded
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function filterParagraphsByTopics(text: string, topics: string[], maxChars = 1000): Record<string, unknown>[] {
+  if (!topics.length) return [];
+  const paragraphs = text
+    .split(/\n\s*\n|\n/)
+    .map((paragraph) => paragraph.trim())
+    .filter((paragraph) => paragraph.length > 20);
+  const topicPatterns = topics.map((topic) => ({
+    topic,
+    pattern: new RegExp(topic.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"),
+  }));
+  const results: Record<string, unknown>[] = [];
+  for (const paragraph of paragraphs) {
+    const matchedTopics = topicPatterns
+      .filter(({ pattern }) => pattern.test(paragraph))
+      .map(({ topic }) => topic);
+    if (matchedTopics.length) {
+      results.push({
+        paragraph: paragraph.length > maxChars ? `${paragraph.slice(0, maxChars).trimEnd()}...` : paragraph,
+        matchedTopics,
+      });
+    }
+  }
+  return results;
 }
 
 /** Parse a single HTML <table> into a list of rows (each row is a list of plain-text cells). */
@@ -7300,6 +7378,256 @@ export async function getSecFilingSectionMarkdown(
     confidence: "MEDIUM",
     source: "html_parser_fallback",
     truncated,
+  });
+}
+
+export async function listSecFilingExhibits(ticker: string, accessionNumber: string): Promise<string> {
+  if (!accessionNumber.trim()) {
+    return JSON.stringify({ ok: false, error: { code: "INPUT_VALIDATION_ERROR", message: "accessionNumber is required." } });
+  }
+
+  let cik = edgarCikFromAccession(accessionNumber);
+  if (!cik) {
+    const { cikPadded } = await getSubmissionsForTicker(ticker);
+    cik = cikPadded ? parseInt(cikPadded, 10) : null;
+  }
+  if (!cik) {
+    return JSON.stringify({ ok: false, error: { code: "TICKER_NOT_FOUND", message: `Could not resolve CIK for ticker '${ticker}'.` } });
+  }
+
+  const { edgarIndexUrl } = edgarBuildFilingUrls(cik, accessionNumber, null);
+  return JSON.stringify({
+    ticker: ticker.toUpperCase(),
+    accessionNumber,
+    indexUrl: edgarIndexUrl,
+    exhibits: await edgarListExhibitsFromIndex(edgarIndexUrl),
+  });
+}
+
+export async function getSecFilingExhibitContent(
+  ticker: string,
+  accessionNumber: string,
+  fileName: string,
+  topics: string[] | null = null,
+): Promise<string> {
+  if (!accessionNumber.trim()) {
+    return JSON.stringify({ ok: false, error: { code: "INPUT_VALIDATION_ERROR", message: "accessionNumber is required." } });
+  }
+  if (!fileName.trim()) {
+    return JSON.stringify({ ok: false, error: { code: "INPUT_VALIDATION_ERROR", message: "fileName is required." } });
+  }
+
+  let cik = edgarCikFromAccession(accessionNumber);
+  if (!cik) {
+    const { cikPadded } = await getSubmissionsForTicker(ticker);
+    cik = cikPadded ? parseInt(cikPadded, 10) : null;
+  }
+  if (!cik) {
+    return JSON.stringify({ ok: false, error: { code: "TICKER_NOT_FOUND", message: `Could not resolve CIK for ticker '${ticker}'.` } });
+  }
+
+  const documentUrl = `https://www.sec.gov/Archives/edgar/data/${cik}/${accessionNumber.replace(/-/g, "")}/${fileName}`;
+  const html = await edgarGetHtml(documentUrl, 5_000_000);
+  if (!html) {
+    return JSON.stringify({ ok: false, error: { code: "FETCH_ERROR", message: `Could not fetch exhibit '${fileName}'.` } });
+  }
+
+  const cleanText = htmlToReadableText(html);
+  const warnings: Record<string, unknown>[] = [];
+  const topicList = (topics ?? []).filter((topic) => typeof topic === "string" && topic.trim()).map((topic) => topic.trim());
+
+  if (topicList.length) {
+    const matchedParagraphs = filterParagraphsByTopics(cleanText, topicList);
+    if (!matchedParagraphs.length) {
+      warnings.push({ code: "NO_TOPIC_MATCHES", message: `No paragraphs matched the provided topics: ${topicList.join(", ")}` });
+    }
+    return JSON.stringify({
+      ticker: ticker.toUpperCase(),
+      accessionNumber,
+      fileName,
+      documentUrl,
+      filteredByTopics: topicList,
+      matchedParagraphs,
+      totalTextLength: cleanText.length,
+      warnings,
+    });
+  }
+
+  const maxChars = 50_000;
+  const truncated = cleanText.length > maxChars;
+  if (truncated) {
+    warnings.push({ code: "TEXT_TRUNCATED", message: `Text truncated from ${cleanText.length} to ${maxChars} characters.` });
+  }
+  return JSON.stringify({
+    ticker: ticker.toUpperCase(),
+    accessionNumber,
+    fileName,
+    documentUrl,
+    filteredByTopics: null,
+    text: cleanText.slice(0, maxChars),
+    totalTextLength: cleanText.length,
+    truncated,
+    warnings,
+  });
+}
+
+export async function parsePublicTranscript(url: string, topics: string[] | null = null): Promise<string> {
+  if (!url.startsWith("https://")) {
+    return JSON.stringify({ ok: false, error: { code: "INPUT_VALIDATION_ERROR", message: "A valid https:// URL is required." } });
+  }
+
+  const html = await fetchPublicHtml(url, 5_000_000);
+  if (!html) {
+    return JSON.stringify({ ok: false, error: { code: "FETCH_ERROR", message: `Could not fetch URL: ${url}` } });
+  }
+
+  const cleanText = htmlToReadableText(html);
+  const warnings: Record<string, unknown>[] = [];
+  const topicList = (topics ?? []).filter((topic) => typeof topic === "string" && topic.trim()).map((topic) => topic.trim());
+
+  if (topicList.length) {
+    const matchedParagraphs = filterParagraphsByTopics(cleanText, topicList);
+    if (!matchedParagraphs.length) {
+      warnings.push({ code: "NO_TOPIC_MATCHES", message: `No paragraphs matched the provided topics: ${topicList.join(", ")}` });
+    }
+    return JSON.stringify({
+      url,
+      filteredByTopics: topicList,
+      matchedParagraphs,
+      totalTextLength: cleanText.length,
+      warnings,
+    });
+  }
+
+  const maxChars = 50_000;
+  const truncated = cleanText.length > maxChars;
+  if (truncated) {
+    warnings.push({ code: "TEXT_TRUNCATED", message: `Text truncated from ${cleanText.length} to ${maxChars} characters.` });
+  }
+  return JSON.stringify({
+    url,
+    filteredByTopics: null,
+    text: cleanText.slice(0, maxChars),
+    totalTextLength: cleanText.length,
+    truncated,
+    warnings,
+  });
+}
+
+export async function getEarningsCallTranscript(
+  ticker: string,
+  period: string = "latest",
+  topics: string[] | null = null,
+): Promise<string> {
+  const secSource = await resolveLatestEarningsSecSource(ticker);
+  if (!secSource) {
+    return JSON.stringify({
+      ticker: ticker.toUpperCase(),
+      period,
+      status: "SEC_8K_NOT_FOUND",
+      message: "No recent SEC 8-K filing found for this ticker. Use web_search to find the transcript on Motley Fool or the company IR page, then call parse_public_transcript with the URL.",
+      content: null,
+    });
+  }
+
+  const accessionNumber = String(secSource.accessionNumber ?? "");
+  let cik = edgarCikFromAccession(accessionNumber);
+  if (!cik) {
+    const { cikPadded } = await getSubmissionsForTicker(ticker);
+    cik = cikPadded ? parseInt(cikPadded, 10) : null;
+  }
+  if (!cik) {
+    return JSON.stringify({
+      ticker: ticker.toUpperCase(),
+      period,
+      status: "CIK_RESOLUTION_FAILED",
+      message: "Could not resolve CIK for ticker.",
+      content: null,
+    });
+  }
+
+  const { edgarIndexUrl } = edgarBuildFilingUrls(cik, accessionNumber, null);
+  const exhibits = await edgarListExhibitsFromIndex(edgarIndexUrl);
+  const transcriptKeywords = ["TRANSCRIPT", "CONFERENCE CALL", "PROCEEDINGS", "EARNINGS CALL"];
+  const transcriptExhibit = exhibits.find((exhibit) => {
+    const exhibitType = String(exhibit.type ?? "").toUpperCase();
+    const description = String(exhibit.description ?? "").toUpperCase();
+    return exhibitType === "EX-99.2" || exhibitType === "EX-99.3" || transcriptKeywords.some((keyword) => description.includes(keyword));
+  });
+
+  if (!transcriptExhibit) {
+    return JSON.stringify({
+      ticker: ticker.toUpperCase(),
+      period,
+      status: "SEC_EXHIBIT_NOT_FOUND",
+      accessionNumber,
+      filingDate: secSource.filingDate ?? null,
+      availableExhibits: exhibits.map((exhibit) => ({
+        type: exhibit.type ?? "",
+        description: exhibit.description ?? "",
+        document: exhibit.document ?? "",
+      })),
+      message: "8-K filing found but no transcript exhibit detected. Use web_search to find the transcript on Motley Fool or the company IR page, then call parse_public_transcript with the URL.",
+      content: null,
+    });
+  }
+
+  const fileName = String(transcriptExhibit.document ?? "");
+  const documentUrl = `https://www.sec.gov/Archives/edgar/data/${cik}/${accessionNumber.replace(/-/g, "")}/${fileName}`;
+  const html = await edgarGetHtml(documentUrl, 5_000_000);
+  if (!html) {
+    return JSON.stringify({
+      ticker: ticker.toUpperCase(),
+      period,
+      status: "FETCH_ERROR",
+      documentUrl,
+      message: `Could not fetch exhibit document '${fileName}'.`,
+      content: null,
+    });
+  }
+
+  const cleanText = htmlToReadableText(html);
+  const warnings: Record<string, unknown>[] = [];
+  const topicList = (topics ?? []).filter((topic) => typeof topic === "string" && topic.trim()).map((topic) => topic.trim());
+  if (topicList.length) {
+    const matchedParagraphs = filterParagraphsByTopics(cleanText, topicList);
+    if (!matchedParagraphs.length) {
+      warnings.push({ code: "NO_TOPIC_MATCHES", message: `No paragraphs matched the provided topics: ${topicList.join(", ")}` });
+    }
+    return JSON.stringify({
+      ticker: ticker.toUpperCase(),
+      period,
+      status: "OK",
+      accessionNumber,
+      filingDate: secSource.filingDate ?? null,
+      exhibitType: transcriptExhibit.type ?? null,
+      documentUrl,
+      filteredByTopics: topicList,
+      matchedParagraphs,
+      totalTextLength: cleanText.length,
+      content: null,
+      warnings,
+    });
+  }
+
+  const maxChars = 50_000;
+  const truncated = cleanText.length > maxChars;
+  if (truncated) {
+    warnings.push({ code: "TEXT_TRUNCATED", message: `Text truncated from ${cleanText.length} to ${maxChars} characters.` });
+  }
+  return JSON.stringify({
+    ticker: ticker.toUpperCase(),
+    period,
+    status: "OK",
+    accessionNumber,
+    filingDate: secSource.filingDate ?? null,
+    exhibitType: transcriptExhibit.type ?? null,
+    documentUrl,
+    filteredByTopics: null,
+    content: cleanText.slice(0, maxChars),
+    totalTextLength: cleanText.length,
+    truncated,
+    warnings,
   });
 }
 
