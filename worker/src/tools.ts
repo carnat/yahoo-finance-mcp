@@ -68,6 +68,10 @@ import {
   listSecMaterialFilings,
   getSecFilingIntelligence,
   getSecFilingSectionMarkdown,
+  listSecFilingExhibits,
+  getSecFilingExhibitContent,
+  parsePublicTranscript,
+  getEarningsCallTranscript,
 } from "./yahoo-finance.js";
 import { validateTicker } from "./validate.js";
 
@@ -1725,6 +1729,23 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       return getSecFilingIntelligence(str(args.ticker), str(args.filing_type, "10-K"), num(args.filing_index, 0));
     case "get_sec_filing_section_markdown":
       return getSecFilingSectionMarkdown(str(args.ticker), str(args.section, "Item 1A"), str(args.filing_type, "10-K"), num(args.filing_index, 0), num(args.max_chars, 50000));
+    case "list_sec_filing_exhibits":
+      return listSecFilingExhibits(str(args.ticker), str(args.accessionNumber));
+    case "get_sec_filing_exhibit_content":
+      return getSecFilingExhibitContent(
+        str(args.ticker),
+        str(args.accessionNumber),
+        str(args.fileName),
+        Array.isArray(args.topics) ? args.topics.map(String) : null,
+      );
+    case "parse_public_transcript":
+      return parsePublicTranscript(str(args.url), Array.isArray(args.topics) ? args.topics.map(String) : null);
+    case "get_earnings_call_transcript":
+      return getEarningsCallTranscript(
+        str(args.ticker),
+        str(args.period, "latest"),
+        Array.isArray(args.topics) ? args.topics.map(String) : null,
+      );
     case "extract_geographic_revenue":
       return extractGeographicRevenue(str(args.ticker), str(args.region), str(args.filing_type, "10-K"), str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null, str(args.detailLevel, "compact"));
     case "extract_segment_revenue":
