@@ -3,6 +3,7 @@ import datetime
 import email.utils as _email_utils
 import hashlib
 import html as _html_module
+import inspect
 import json
 import os
 import re as _re
@@ -12,11 +13,27 @@ import urllib.request as _urlrequest
 import urllib.error as _urlerror
 import xml.etree.ElementTree as _ET
 from enum import Enum
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import pandas as pd
 import yfinance as yf
 from mcp.server.fastmcp import FastMCP
+
+
+# Backward-compatible FastMCP decorator shim: ignore unsupported output_schema kwarg.
+_FASTMCP_TOOL_PARAMS = inspect.signature(FastMCP.tool).parameters
+_FASTMCP_TOOL_SUPPORTS_OUTPUT_SCHEMA = "output_schema" in _FASTMCP_TOOL_PARAMS or any(
+    _param.kind == inspect.Parameter.VAR_KEYWORD for _param in _FASTMCP_TOOL_PARAMS.values()
+)
+if not _FASTMCP_TOOL_SUPPORTS_OUTPUT_SCHEMA:
+    _ORIGINAL_FASTMCP_TOOL = FastMCP.tool
+
+    def _fastmcp_tool_compat(self: FastMCP, *args: Any, **kwargs: Any):
+        """Strip unsupported output_schema kwarg for FastMCP SDK compatibility."""
+        kwargs.pop("output_schema", None)
+        return _ORIGINAL_FASTMCP_TOOL(self, *args, **kwargs)
+
+    FastMCP.tool = _fastmcp_tool_compat
 
 
 # Define an enum for the type of financial statement

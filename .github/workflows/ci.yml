@@ -73,6 +73,9 @@ jobs:
       - name: Python syntax check
         run: python -m py_compile server.py
 
+      - name: Python import check
+        run: python -c "import server"
+
       - name: Tool sync
         run: python scripts/check_tool_sync.py
 
