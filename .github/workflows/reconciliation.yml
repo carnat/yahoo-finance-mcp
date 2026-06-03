@@ -9,25 +9,31 @@ on:
 permissions:
   contents: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   reconcile:
     name: Reconcile tool manifests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Check tool sync (server.py ↔ tools.ts)
         run: python scripts/check_tool_sync.py
+
+      - name: Validate workflow SDK versions
+        run: python scripts/test_workflow_sdk_versions.py
 
       - name: Type-check worker
         working-directory: worker
