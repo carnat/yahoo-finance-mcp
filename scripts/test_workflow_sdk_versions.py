@@ -17,7 +17,8 @@ REQUIRED_ACTION_VERSIONS = {
     "actions/setup-node": "v5",
 }
 
-NODE_VERSION_PATTERN = re.compile(r'node-version:\s*"(\d+)"')
+ACTION_USE_PATTERN = re.compile(r"^\s*-\s*uses:\s*(actions/[a-zA-Z0-9_-]+)@([vV][0-9]+)\s*$", re.MULTILINE)
+NODE_VERSION_PATTERN = re.compile(r'^\s*node-version:\s*"?(\d+)(?:\.\d+)?(?:\.x)?"?\s*$', re.MULTILINE)
 
 
 class TestWorkflowSdkVersions(unittest.TestCase):
@@ -26,10 +27,12 @@ class TestWorkflowSdkVersions(unittest.TestCase):
         self.assertTrue(workflows, "No workflow files found")
         for wf in workflows:
             content = wf.read_text(encoding="utf-8")
-            for action, version in REQUIRED_ACTION_VERSIONS.items():
-                if action in content:
-                    expected = f"{action}@{version}"
-                    self.assertIn(expected, content, f"{wf.name}: expected {expected}")
+            uses = ACTION_USE_PATTERN.findall(content)
+            for action, major in uses:
+                required = REQUIRED_ACTION_VERSIONS.get(action)
+                if required is None:
+                    continue
+                self.assertEqual(major.lower(), required, f"{wf.name}: {action} must use {required}, got {major}")
 
     def test_node_version_is_24_when_declared(self) -> None:
         workflows = sorted(WORKFLOWS_DIR.glob("*.yml"))
