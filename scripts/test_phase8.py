@@ -131,7 +131,97 @@ class TestFreshnessClassifier(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 3. get_market_snapshot schema smoke (offline, mocked components)
+# 3. Overnight guardrails unit tests
+# ---------------------------------------------------------------------------
+
+class TestOvernightSessionGuardrails(unittest.TestCase):
+    def setUp(self):
+        self.srv = _reload_server()
+
+    def test_overnight_session_status_classifier(self):
+        self.assertEqual(
+            self.srv._classify_overnight_session(self.srv.pd.Timestamp("2026-06-08T07:00:00Z")),
+            "ACTIVE",
+        )
+        self.assertEqual(
+            self.srv._classify_overnight_session(self.srv.pd.Timestamp("2026-06-08T15:00:00Z")),
+            "ENDED",
+        )
+        self.assertEqual(
+            self.srv._classify_overnight_session(self.srv.pd.Timestamp("2026-06-08T23:00:00Z")),
+            "NOT_STARTED",
+        )
+
+    def test_dst_window_shift_winter_vs_summer(self):
+        summer_start, summer_end = self.srv._overnight_window_utc(
+            self.srv.pd.Timestamp("2026-06-08T07:00:00Z")
+        )
+        winter_start, winter_end = self.srv._overnight_window_utc(
+            self.srv.pd.Timestamp("2026-12-08T08:00:00Z")
+        )
+
+        self.assertEqual(summer_start.hour, 0)   # EDT => 00:00–08:00 UTC
+        self.assertEqual(summer_end.hour, 8)
+        self.assertEqual(winter_start.hour, 1)   # EST => 01:00–09:00 UTC
+        self.assertEqual(winter_end.hour, 9)
+
+    def test_get_overnight_quote_includes_session_fields(self):
+        import unittest.mock as mock
+
+        class _FastInfo:
+            timezone = "America/New_York"
+
+            def __getitem__(self, key):
+                if key == "previousClose":
+                    return 100.0
+                raise KeyError(key)
+
+            def __getattr__(self, name):
+                raise AttributeError(name)
+
+        class _Company:
+            def __init__(self):
+                self.fast_info = _FastInfo()
+                self.info = {}
+
+            def history(self, *args, **kwargs):
+                raise RuntimeError("history should be mocked")
+
+        idx = self.srv.pd.to_datetime(
+            ["2026-06-08T01:00:00Z", "2026-06-08T02:00:00Z"], utc=True
+        )
+        hist = self.srv.pd.DataFrame(
+            {
+                "Open": [101.0, 102.0],
+                "High": [103.0, 104.0],
+                "Low": [100.0, 101.0],
+                "Close": [102.0, 103.0],
+                "Volume": [10, 20],
+            },
+            index=idx,
+        )
+
+        async def _fake_fetch(*args, **kwargs):
+            return hist
+
+        with (
+            mock.patch.object(self.srv.yf, "Ticker", return_value=_Company()),
+            mock.patch.object(self.srv, "_fetch_with_retry", _fake_fetch),
+            mock.patch.object(
+                self.srv.pd.Timestamp,
+                "now",
+                return_value=self.srv.pd.Timestamp("2026-06-08T07:00:00Z"),
+            ),
+        ):
+            out = json.loads(_run(self.srv.get_overnight_quote("ZZTEST")))
+
+        self.assertIn("sessionStatus", out)
+        self.assertIn("requestedAt", out)
+        self.assertEqual(out["sessionStatus"], "ACTIVE")
+
+
+# ---------------------------------------------------------------------------
+# 4. get_market_snapshot schema smoke (offline, mocked components)
 # ---------------------------------------------------------------------------
 
 class TestMarketSnapshotSchema(unittest.TestCase):
