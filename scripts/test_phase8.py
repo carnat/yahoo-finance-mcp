@@ -160,10 +160,10 @@ class TestOvernightSessionGuardrails(unittest.TestCase):
             self.srv.pd.Timestamp("2026-12-08T08:00:00Z")
         )
 
-        self.assertEqual(summer_start.hour, 0)   # EDT => 00:00–08:00 UTC
-        self.assertEqual(summer_end.hour, 8)
-        self.assertEqual(winter_start.hour, 1)   # EST => 01:00–09:00 UTC
-        self.assertEqual(winter_end.hour, 9)
+        self.assertEqual(str(summer_start), "2026-06-08 00:00:00+00:00")  # EDT => 00:00–08:00 UTC
+        self.assertEqual(str(summer_end), "2026-06-08 08:00:00+00:00")
+        self.assertEqual(str(winter_start), "2026-12-08 01:00:00+00:00")  # EST => 01:00–09:00 UTC
+        self.assertEqual(str(winter_end), "2026-12-08 09:00:00+00:00")
 
     def test_get_overnight_quote_includes_session_fields(self):
         import unittest.mock as mock

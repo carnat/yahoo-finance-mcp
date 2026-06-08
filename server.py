@@ -6472,6 +6472,25 @@ async def get_etf_info(ticker: str | list[str]) -> str:
 # ---------------------------------------------------------------------------
 
 _NY_TZ = zoneinfo.ZoneInfo("America/New_York")
+_ENDED_SESSION_STALE_HOURS = 12
+
+
+def _overnight_window_utc_for_session_end_date(
+    session_end_date_et: datetime.date,
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Return UTC overnight window for a given ET session-end date (04:00 ET boundary)."""
+    start_et = pd.Timestamp(
+        datetime.datetime.combine(
+            session_end_date_et - datetime.timedelta(days=1),
+            datetime.time(hour=20),
+        ),
+        tz=_NY_TZ,
+    )
+    end_et = pd.Timestamp(
+        datetime.datetime.combine(session_end_date_et, datetime.time(hour=4)),
+        tz=_NY_TZ,
+    )
+    return start_et.tz_convert("UTC"), end_et.tz_convert("UTC")
 
 
 def _overnight_window_utc(now_utc: pd.Timestamp) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -6481,14 +6500,11 @@ def _overnight_window_utc(now_utc: pd.Timestamp) -> tuple[pd.Timestamp, pd.Times
 
     if now_et.hour < 12:
         # Overnight session that ended (or is ending) this ET morning.
-        end_et = now_et.normalize() + pd.Timedelta(hours=4)
-        start_et = end_et - pd.Timedelta(hours=8)
+        session_end_date_et = now_et.date()
     else:
         # Upcoming overnight session for tonight (or currently active after 20:00 ET).
-        start_et = now_et.normalize() + pd.Timedelta(hours=20)
-        end_et = start_et + pd.Timedelta(hours=8)
-
-    return start_et.tz_convert("UTC"), end_et.tz_convert("UTC")
+        session_end_date_et = now_et.date() + datetime.timedelta(days=1)
+    return _overnight_window_utc_for_session_end_date(session_end_date_et)
 
 
 def _classify_overnight_session(now_utc: pd.Timestamp) -> Literal["ACTIVE", "ENDED", "NOT_STARTED"]:
@@ -6593,8 +6609,9 @@ async def get_overnight_quote(ticker: str) -> str:
     target_end_utc = session_end_utc
     note: str | None = None
     if session_status == "NOT_STARTED":
-        target_start_utc -= pd.Timedelta(days=1)
-        target_end_utc -= pd.Timedelta(days=1)
+        target_start_utc, target_end_utc = _overnight_window_utc_for_session_end_date(
+            now_utc.tz_convert(_NY_TZ).date()
+        )
         note = (
             "Overnight session has not started yet for current ET day. "
             "Returning prior overnight session data."
@@ -6633,10 +6650,7 @@ async def get_overnight_quote(ticker: str) -> str:
     day_bars = None
     last_ts_utc = None
     overnight_open = overnight_high = overnight_low = overnight_price = overnight_volume = None
-    if fast_info_payload is not None and (
-        target_start_utc <= fast_info_payload["time_utc"] < target_end_utc
-        or session_status == "NOT_STARTED"
-    ):
+    if fast_info_payload is not None and target_start_utc <= fast_info_payload["time_utc"] < target_end_utc:
         overnight_open = fast_info_payload["open"]
         overnight_high = fast_info_payload["high"]
         overnight_low = fast_info_payload["low"]
@@ -6727,7 +6741,7 @@ async def get_overnight_quote(ticker: str) -> str:
     if session_status == "ACTIVE":
         is_stale = data_age_hours > 2
     elif session_status == "ENDED":
-        is_stale = now_utc > (target_end_utc + pd.Timedelta(hours=12))
+        is_stale = now_utc > (target_end_utc + pd.Timedelta(hours=_ENDED_SESSION_STALE_HOURS))
     else:
         is_stale = True
 
