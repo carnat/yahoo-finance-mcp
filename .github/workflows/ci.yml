@@ -79,6 +79,9 @@ jobs:
       - name: Tool sync
         run: python scripts/check_tool_sync.py
 
+      - name: Workflow SDK version guard
+        run: python scripts/test_workflow_sdk_versions.py
+
       # ── 2. Core contracts: envelope, validation, security ─────────────────
       - name: Phase 1 tests (MCP envelope)
         run: python scripts/test_phase1.py
