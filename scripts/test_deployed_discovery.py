@@ -226,7 +226,7 @@ def _check_geographic_revenue_schema(data: dict, label: str, require_positive: b
         if data.get("denominator") is None:
             raise AssertionError(f"{label}: value present but denominator is null: {data}")
         evidence = data.get("evidence")
-        if not isinstance(evidence, dict):
+        if not isinstance(evidence, dict) or not evidence:
             raise AssertionError(f"{label}: positive extraction must include non-empty evidence object")
         evidence_doc_url = evidence.get("documentUrl")
         evidence_primary_doc_url = evidence.get("primaryDocumentUrl")
@@ -237,8 +237,6 @@ def _check_geographic_revenue_schema(data: dict, label: str, require_positive: b
             or evidence_primary_doc_url
         ):
             raise AssertionError(f"{label}: positive extraction missing documentUrl/primaryDocumentUrl: {data}")
-        if not evidence:
-            raise AssertionError(f"{label}: positive extraction must include non-empty evidence object")
         return True
 
     if require_positive:
