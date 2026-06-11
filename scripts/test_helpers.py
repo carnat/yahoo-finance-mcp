@@ -131,7 +131,14 @@ class TestGetLastTradingDate(unittest.TestCase):
 
 
 class TestToIsoUtc(unittest.TestCase):
-    """Tests for the active _to_iso_utc (the earnings-layer version at line ~8783)."""
+    """Tests for the unified _to_iso_utc.
+
+    server.py historically had two competing definitions (a news-layer one
+    handling epoch seconds and compact timestamps, and an earnings-layer one
+    handling date-only strings) where the later definition shadowed the
+    earlier at runtime. These tests pin the merged behavior covering both
+    input domains.
+    """
 
     def test_none_returns_none(self):
         self.assertIsNone(srv._to_iso_utc(None))
@@ -156,6 +163,27 @@ class TestToIsoUtc(unittest.TestCase):
 
     def test_invalid_string_returns_none(self):
         self.assertIsNone(srv._to_iso_utc("not-a-date"))
+
+    def test_epoch_int(self):
+        # Yahoo providerPublishTime and Finnhub datetime are epoch seconds.
+        self.assertEqual(srv._to_iso_utc(1747312200), "2025-05-15T12:30:00Z")
+
+    def test_epoch_float(self):
+        self.assertEqual(srv._to_iso_utc(1747312200.0), "2025-05-15T12:30:00Z")
+
+    def test_compact_8_digit_date(self):
+        self.assertEqual(srv._to_iso_utc("20260515"), "2026-05-15T00:00:00Z")
+
+    def test_compact_14_digit_timestamp(self):
+        self.assertEqual(srv._to_iso_utc("20260515123000"), "2026-05-15T12:30:00Z")
+
+    def test_non_string_non_numeric_returns_none(self):
+        self.assertIsNone(srv._to_iso_utc({"date": "2026-05-15"}))
+
+    def test_utc_now_iso_format(self):
+        result = srv._utc_now_iso()
+        self.assertTrue(result.endswith("Z"))
+        self.assertIsNotNone(srv._to_iso_utc(result))
 
 
 class TestDeriveFiscalPeriod(unittest.TestCase):

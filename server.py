@@ -1463,6 +1463,16 @@ def _utc_now_iso() -> str:
 
 
 def _to_iso_utc(raw: object) -> str | None:
+    """Normalize a timestamp to ISO 8601 UTC with a Z suffix.
+
+    Accepts epoch seconds (int/float), 8/14-digit compact timestamps
+    (YYYYMMDD[HHMMSS]), date-only strings (YYYY-MM-DD), and ISO 8601
+    strings. Returns None for anything unparseable.
+
+    Date-only and compact inputs are normalized without going through
+    datetime.fromisoformat, which would treat them as naive local time
+    and shift the result on non-UTC hosts.
+    """
     if raw is None:
         return None
     if isinstance(raw, (int, float)):
@@ -1479,6 +1489,8 @@ def _to_iso_utc(raw: object) -> str | None:
         if len(value) == 8:
             return f"{value[0:4]}-{value[4:6]}-{value[6:8]}T00:00:00Z"
         return f"{value[0:4]}-{value[4:6]}-{value[6:8]}T{value[8:10]}:{value[10:12]}:{value[12:14]}Z"
+    if len(value) == 10 and _re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+        return f"{value}T00:00:00Z"
     try:
         return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
     except Exception:
@@ -10232,26 +10244,6 @@ async def query_sec_filing_index(
     )
 
 
-def _utc_now_z() -> str:
-    return datetime.datetime.now(tz=datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _to_iso_utc(ts: str | None) -> str | None:
-    if not ts:
-        return None
-    s = str(ts).strip()
-    if not s:
-        return None
-    try:
-        if len(s) == 10 and _re.match(r"^\d{4}-\d{2}-\d{2}$", s):
-            return f"{s}T00:00:00Z"
-        return datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(
-            datetime.timezone.utc
-        ).isoformat().replace("+00:00", "Z")
-    except Exception:
-        return None
-
-
 def _derive_fiscal_period_from_date(date_str: str | None) -> str | None:
     if not date_str:
         return None
@@ -10397,7 +10389,7 @@ async def _resolve_latest_earnings_release(ticker: str) -> dict:
                     "sourceType": "yahoo_estimate",
                     "url": yahoo_url,
                     "publishedAt": _to_iso_utc(published),
-                    "retrievedAt": _utc_now_z(),
+                    "retrievedAt": _utc_now_iso(),
                     "confidence": "MEDIUM",
                 }
             ],
@@ -10483,7 +10475,7 @@ async def index_earnings_release(ticker: str, period: str = "latest", source_url
             "sourceType": source_type or source_meta.get("sourceType") or "company_ir",
             "url": source_url,
             "publishedAt": source_meta.get("publishedAt"),
-            "retrievedAt": _utc_now_z(),
+            "retrievedAt": _utc_now_iso(),
             "filingDate": source_meta.get("filingDate"),
             "acceptedAt": source_meta.get("acceptedAt"),
             "accessionNumber": source_meta.get("accessionNumber"),
@@ -10534,7 +10526,7 @@ async def extract_earnings_metrics(
     src_url = str(src.get("url") or "")
     src_type = str(src.get("sourceType") or "yahoo")
     src_published = _to_iso_utc(src.get("filingDate") or src.get("publishedAt"))
-    retrieved_at = _utc_now_z()
+    retrieved_at = _utc_now_iso()
 
     if src_url and src_url.startswith("https://www.sec.gov/Archives/"):
         html = await _edgar_get_html(src_url, max_bytes=5_000_000)
@@ -10689,7 +10681,7 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
                 "high": hi,
                 "midpoint": (lo + hi) / 2.0,
                 "unit": "USD",
-                "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_z(), "excerpt": _compact_excerpt(patterns["revenue"].group(0))}],
+                "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["revenue"].group(0))}],
             }
     if patterns["grossMargin"]:
         lo = float(patterns["grossMargin"].group(1))
@@ -10699,7 +10691,7 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
             "lowPct": lo,
             "highPct": hi,
             "midpointPct": (lo + hi) / 2.0,
-            "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_z(), "excerpt": _compact_excerpt(patterns["grossMargin"].group(0))}],
+            "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["grossMargin"].group(0))}],
         }
     if patterns["eps"]:
         lo = float(patterns["eps"].group(1))
@@ -10710,7 +10702,7 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
             "high": hi,
             "midpoint": (lo + hi) / 2.0,
             "unit": "USD/share",
-            "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_z(), "excerpt": _compact_excerpt(patterns["eps"].group(0))}],
+            "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["eps"].group(0))}],
         }
     found = any(base[k]["status"] == "FOUND" for k in ("revenue", "grossMargin", "eps"))
     return _wrap_envelope_v2("extract_guidance", {
@@ -10750,7 +10742,7 @@ async def extract_management_commentary(ticker: str, period: str = "latest", top
                     "sourceType": src.get("sourceType", "company_ir"),
                     "url": src_url,
                     "publishedAt": _to_iso_utc(src.get("filingDate") or src.get("publishedAt")),
-                    "retrievedAt": _utc_now_z(),
+                    "retrievedAt": _utc_now_iso(),
                     "excerpt": excerpt[:240],
                 }],
                 "confidence": "MEDIUM" if src.get("sourceType") != "sec_8k" else "HIGH",

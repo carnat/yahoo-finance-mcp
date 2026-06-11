@@ -1,0 +1,10 @@
+# Commits to skip in `git blame` — bulk mechanical changes (code moves,
+# reformatting) that would otherwise bury the real authorship history.
+#
+# Enable locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# GitHub's blame view picks this file up automatically.
+#
+# Append the full 40-character SHA of each mechanical-move commit from the
+# refactoring phases (see REFACTORING_PLAN.md) below, one per line.
