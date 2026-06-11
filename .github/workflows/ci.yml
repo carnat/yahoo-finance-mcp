@@ -93,6 +93,9 @@ jobs:
       - name: Helper utilities tests
         run: python scripts/test_helpers.py
 
+      - name: Grouped-mode handler registry tests
+        run: python scripts/test_grouped_registry.py
+
       # ── 4. Infrastructure: cache layer ────────────────────────────────────
       - name: Phase 4 tests (cache)
         run: python scripts/test_phase4.py

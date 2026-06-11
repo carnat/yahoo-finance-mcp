@@ -20,9 +20,9 @@ import pandas as pd
 import yfinance as yf
 from mcp.server.fastmcp import FastMCP
 
-# Phase 2b: yfmcp.app owns the FastMCP compat shim, yfinance_server instance, and TOOL_ALIASES.
-# Import it first so the compat shim is applied before any @yfinance_server.tool decorator runs.
-from yfmcp.app import yfinance_server, TOOL_ALIASES
+# Phase 2b: yfmcp.app owns the FastMCP compat shim, yfinance_server instance, TOOL_ALIASES, and
+# build_handler_registry.  Import first so the compat shim fires before any decorator runs.
+from yfmcp.app import yfinance_server, TOOL_ALIASES, build_handler_registry
 
 
 # Define an enum for the type of financial statement
@@ -9560,9 +9560,11 @@ Input: {"action": "get_market_quote", "params": {"ticker": "AAPL"}}
 """,
     )
 
-    # Collect all handler functions from this module
-    module_globals = globals()
-    register_grouped_tools(grouped, module_globals)
+    # Resolve handlers from the shared FastMCP instance (single source of truth)
+    # rather than this module's globals, so the mapping holds as handlers move
+    # into yfmcp.tools.* during the Phase 2 split.
+    handler_registry = build_handler_registry(yfinance_server)
+    register_grouped_tools(grouped, handler_registry)
     return grouped
 
 
