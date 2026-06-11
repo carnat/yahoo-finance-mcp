@@ -30,7 +30,13 @@ def _ts_source() -> str:
 
 
 def _py_source() -> str:
-    return SERVER_PY.read_text()
+    """Return combined Python source covering server.py and all yfmcp/tools/*.py modules."""
+    parts = [SERVER_PY.read_text()]
+    tools_dir = ROOT / "yfmcp" / "tools"
+    if tools_dir.is_dir():
+        for path in sorted(tools_dir.glob("*.py")):
+            parts.append(path.read_text())
+    return "\n".join(parts)
 
 
 class TestGetOptionChainWorkerSchema(unittest.TestCase):

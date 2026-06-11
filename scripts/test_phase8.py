@@ -26,7 +26,14 @@ _FastMCP.tool = _patched_tool  # type: ignore[method-assign]
 
 def _reload_server():
     import importlib
-    import server as srv
+    import sys
+    # Trigger the first import so all submodules are in sys.modules.
+    import server as srv  # noqa: F401 (may be first import)
+    # Reload in dependency order: app → domain modules → server,
+    # so @yfinance_server.tool decorators always re-register on a fresh instance.
+    for _mod in ("yfmcp.app", "yfmcp.tools.system"):
+        if _mod in sys.modules:
+            importlib.reload(sys.modules[_mod])
     importlib.reload(srv)
     return srv
 
@@ -425,23 +432,37 @@ class TestPublicWording(unittest.TestCase):
         self.srv = _reload_server()
 
     def _get_canonical_tool_names(self):
+        import glob
         import re
-        source = open(
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server.py"),
-            encoding="utf-8",
-        ).read()
-        return {m.group(1) for m in re.finditer(r'@yfinance_server\.tool\(\s*name\s*=\s*"([^"]+)"', source)}
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        sources = [os.path.join(root, "server.py")]
+        tools_dir = os.path.join(root, "yfmcp", "tools")
+        if os.path.isdir(tools_dir):
+            sources.extend(sorted(glob.glob(os.path.join(tools_dir, "*.py"))))
+        names = set()
+        for path in sources:
+            with open(path, encoding="utf-8") as fh:
+                names.update(
+                    m.group(1)
+                    for m in re.finditer(r'@yfinance_server\.tool\(\s*name\s*=\s*"([^"]+)"', fh.read())
+                )
+        return names
 
     def _get_tool_descriptions(self):
-        """Extract all tool descriptions from server.py @yfinance_server.tool decorators."""
+        """Extract all tool descriptions from @yfinance_server.tool decorators."""
+        import glob
         import re
-        source = open(
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server.py"),
-            encoding="utf-8",
-        ).read()
-        # Find description= strings in @yfinance_server.tool(...)
-        descs = re.findall(r'description\s*=\s*"""(.*?)"""', source, re.DOTALL)
-        descs += re.findall(r'description\s*=\s*"([^"]+)"', source)
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        sources = [os.path.join(root, "server.py")]
+        tools_dir = os.path.join(root, "yfmcp", "tools")
+        if os.path.isdir(tools_dir):
+            sources.extend(sorted(glob.glob(os.path.join(tools_dir, "*.py"))))
+        descs = []
+        for path in sources:
+            with open(path, encoding="utf-8") as fh:
+                source = fh.read()
+            descs += re.findall(r'description\s*=\s*"""(.*?)"""', source, re.DOTALL)
+            descs += re.findall(r'description\s*=\s*"([^"]+)"', source)
         return descs
 
     def test_no_private_wording_in_descriptions(self):
@@ -465,12 +486,21 @@ class TestToolRegistration(unittest.TestCase):
         self.srv = _reload_server()
 
     def _get_registered_tool_names(self):
+        import glob
         import re
-        source = open(
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server.py"),
-            encoding="utf-8",
-        ).read()
-        return {m.group(1) for m in re.finditer(r'@yfinance_server\.tool\(\s*name\s*=\s*"([^"]+)"', source)}
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        sources = [os.path.join(root, "server.py")]
+        tools_dir = os.path.join(root, "yfmcp", "tools")
+        if os.path.isdir(tools_dir):
+            sources.extend(sorted(glob.glob(os.path.join(tools_dir, "*.py"))))
+        names = set()
+        for path in sources:
+            with open(path, encoding="utf-8") as fh:
+                names.update(
+                    m.group(1)
+                    for m in re.finditer(r'@yfinance_server\.tool\(\s*name\s*=\s*"([^"]+)"', fh.read())
+                )
+        return names
 
     def test_get_manifest_diagnostics_registered(self):
         self.assertIn("get_manifest_diagnostics", self._get_registered_tool_names())

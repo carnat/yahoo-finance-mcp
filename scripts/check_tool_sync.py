@@ -86,11 +86,19 @@ EXPECTED_ALIASES = {
 
 
 def get_python_tools() -> set:
-    """Extract tool names from @yfinance_server.tool(name=...) decorators."""
-    source = SERVER_PY.read_text()
+    """Extract tool names from @yfinance_server.tool(name=...) decorators.
+
+    Scans server.py and all yfmcp/tools/*.py domain modules so the check
+    remains correct once handlers are progressively moved out of server.py.
+    """
+    sources = [SERVER_PY]
+    tools_dir = ROOT / "yfmcp" / "tools"
+    if tools_dir.is_dir():
+        sources.extend(sorted(tools_dir.glob("*.py")))
     names = set()
-    for match in re.finditer(r'@yfinance_server\.tool\(\s*name\s*=\s*"([^"]+)"', source):
-        names.add(match.group(1))
+    for path in sources:
+        for match in re.finditer(r'@yfinance_server\.tool\(\s*name\s*=\s*"([^"]+)"', path.read_text()):
+            names.add(match.group(1))
     return names
 
 
