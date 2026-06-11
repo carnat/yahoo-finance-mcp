@@ -99,25 +99,26 @@ class TestPhase1Envelope(unittest.TestCase):
 
     def test_flag_off_returns_raw(self):
         """When _ENVELOPE_V2 is False, _mcp_success returns the raw JSON string."""
-        # Temporarily disable the flag
-        original = self.srv._ENVELOPE_V2
-        self.srv._ENVELOPE_V2 = False
+        import yfmcp.envelope as _env
+        original_env = _env._ENVELOPE_V2
+        _env._ENVELOPE_V2 = False
         try:
             raw = json.dumps({"k": "v"})
             result = self.srv._mcp_success("t", raw)
             self.assertEqual(result, raw)
         finally:
-            self.srv._ENVELOPE_V2 = original
+            _env._ENVELOPE_V2 = original_env
 
     def test_flag_off_failure_returns_compat_format(self):
-        original = self.srv._ENVELOPE_V2
-        self.srv._ENVELOPE_V2 = False
+        import yfmcp.envelope as _env
+        original_env = _env._ENVELOPE_V2
+        _env._ENVELOPE_V2 = False
         try:
             result = json.loads(self.srv._mcp_failure("t", "TICKER_NOT_FOUND", "msg"))
             self.assertTrue(result.get("error"))
             self.assertEqual(result["code"], "TICKER_NOT_FOUND")
         finally:
-            self.srv._ENVELOPE_V2 = original
+            _env._ENVELOPE_V2 = original_env
 
     # ── SERVER_VERSION ──────────────────────────────────────────────────────
 
