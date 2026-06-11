@@ -81,6 +81,7 @@ if not getattr(_FastMCP, "_output_schema_patched", False):
     _FastMCP._output_schema_patched = True  # type: ignore[attr-defined]
 
 import server as srv  # noqa: E402
+import yfmcp.envelope as _envelope_mod  # noqa: E402
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -812,11 +813,11 @@ class TestCompactExcerpt(unittest.TestCase):
 
 class TestDeprecatedAliasResponse(unittest.TestCase):
     def setUp(self):
-        self._orig = srv._ENVELOPE_V2
-        srv._ENVELOPE_V2 = True
+        self._orig = _envelope_mod._ENVELOPE_V2
+        _envelope_mod._ENVELOPE_V2 = True
 
     def tearDown(self):
-        srv._ENVELOPE_V2 = self._orig
+        _envelope_mod._ENVELOPE_V2 = self._orig
 
     def test_injects_deprecated_alias_warning(self):
         inner = json.dumps(srv._mcp_success("canonical_tool", json.dumps({"x": 1})))
@@ -845,7 +846,7 @@ class TestDeprecatedAliasResponse(unittest.TestCase):
         self.assertEqual(result["meta"]["useInstead"], "canonical_tool")
 
     def test_envelope_off_returns_raw(self):
-        srv._ENVELOPE_V2 = False
+        _envelope_mod._ENVELOPE_V2 = False
         raw = '{"raw": "data"}'
         result = srv._deprecated_alias_response("alias_tool", "canonical_tool", raw)
         self.assertEqual(result, raw)

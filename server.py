@@ -78,6 +78,7 @@ class FilingFactType(str, Enum):
 # ---------------------------------------------------------------------------
 # Phase 1: yfmcp infrastructure imports
 # ---------------------------------------------------------------------------
+import yfmcp.envelope as _envelope
 from yfmcp.envelope import (
     SERVER_VERSION, _ENVELOPE_V2, ErrorCode, ToolMeta, ErrorDetail, McpResponse,
     _mcp_success, _mcp_failure, _mcp_warning, _wrap_envelope_v2,
@@ -4012,125 +4013,6 @@ _FILING_FACT_CONCEPTS: dict[FilingFactType, tuple[str, str | None]] = {
 }
 
 
-
-async def _resolve_cik_for_ticker(ticker: str) -> str | None:
-    t_upper = ticker.upper()
-    cached = _FILING_CIK_CACHE.get(t_upper)
-    if cached:
-        return cached
-    cik_raw = None
-    try:
-        cik_raw = yf.Ticker(ticker).info.get("cik")
-    except Exception:
-        cik_raw = None
-    if cik_raw:
-        cik_padded = str(cik_raw).strip().zfill(10)
-        _FILING_CIK_CACHE[t_upper] = cik_padded
-        return cik_padded
-
-    # Fallback: look up from SEC EDGAR company_tickers.json
-    try:
-        tickers_map = await _load_edgar_tickers()
-        cik_int = tickers_map.get(t_upper)
-        if cik_int:
-            cik_padded = str(cik_int).zfill(10)
-            _FILING_CIK_CACHE[t_upper] = cik_padded
-            return cik_padded
-    except Exception:
-        pass
-
-    # Stable fixture fallback map for smoke/regression-critical tickers.
-    fixture_cik = _SMOKE_TICKER_CIK_FALLBACKS.get(t_upper)
-    if fixture_cik:
-        _FILING_CIK_CACHE[t_upper] = fixture_cik
-        return fixture_cik
-
-    def _extract_cik_from_edgar_atom(text: str) -> str | None:
-        for pattern in (
-            r"CIK=(\d{1,10})",
-            r"/CIK0*([1-9]\d{0,9})\.json",
-            r"/edgar/data/0*([1-9]\d{0,9})/",
-        ):
-            m = _re.search(pattern, text, flags=_re.IGNORECASE)
-            if m:
-                return m.group(1).zfill(10)
-        return None
-
-    # Final fallback: EDGAR CIK lookup by ticker symbol
-    atom_urls = [
-        (
-            "https://www.sec.gov/cgi-bin/browse-edgar?"
-            f"action=getcompany&CIK={_urlparse.quote(ticker)}&type=&dateb=&owner=include&count=10&output=atom"
-        ),
-        (
-            "https://www.sec.gov/cgi-bin/browse-edgar?"
-            f"action=getcompany&company={_urlparse.quote(ticker)}&CIK=&type=&dateb=&owner=include&count=10&output=atom"
-        ),
-    ]
-    loop = asyncio.get_event_loop()
-
-    def _fetch_atom() -> str | None:
-        for atom_url in atom_urls:
-            req = _urlreq.Request(atom_url, headers={"User-Agent": _SEC_REQUIRED_UA})
-            try:
-                with _urlreq.urlopen(req, timeout=15) as resp:  # noqa: S310
-                    text = resp.read().decode("utf-8", errors="replace")
-                cik = _extract_cik_from_edgar_atom(text)
-                if cik:
-                    return cik
-            except Exception:
-                continue
-        return None
-
-    cik_padded = await loop.run_in_executor(None, _fetch_atom)
-    if cik_padded:
-        _FILING_CIK_CACHE[t_upper] = cik_padded
-    return cik_padded
-
-
-async def _get_submissions_for_ticker(ticker: str) -> tuple[str | None, dict | None]:
-    t_upper = ticker.upper()
-    cached_subs = _FILING_SUBMISSIONS_BY_TICKER.get(t_upper)
-    if cached_subs is not None:
-        cik = _FILING_CIK_CACHE.get(t_upper)
-        return cik, cached_subs
-    cik_padded = await _resolve_cik_for_ticker(ticker)
-    if not cik_padded:
-        return None, None
-    subs = await _edgar_get_submissions(cik_padded)
-    if subs is not None:
-        _FILING_SUBMISSIONS_BY_TICKER[t_upper] = subs
-    return cik_padded, subs
-
-
-def _normalize_segment_label(segment: object) -> str:
-    if isinstance(segment, dict):
-        return " ".join(str(v) for v in segment.values() if v is not None)
-    if isinstance(segment, list):
-        return " ".join(_normalize_segment_label(s) for s in segment)
-    return str(segment or "")
-
-
-def _region_matches(label: str, region: str, include_asia_fallback: bool = False) -> bool:
-    label_low = label.lower()
-    region_low = region.lower()
-    if region_low in label_low:
-        return True
-    # Also try compact (no-space) region for XBRL member names like "GreaterChinaMember"
-    region_compact = region_low.replace(" ", "")
-    if region_compact and region_compact in label_low:
-        return True
-    if region_low == "china":
-        base_tokens = ("country:cn", "greater china", "srt:chinamember", "greaterchina")
-        if any(token in label_low for token in base_tokens):
-            return True
-        return include_asia_fallback and "asiapacificmember" in label_low
-    if region_low == "greater china":
-        if "greaterchina" in label_low or "greater china" in label_low:
-            return True
-    return False
-
-
 def _manual_lookup_payload(ticker: str, cik_padded: str | None, filing_type: str, note: str) -> dict:
     edgar_index_url = (
         f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik_padded}&type={filing_type}&owner=include&count=10"
@@ -6795,7 +6677,7 @@ def _deprecated_alias_response(alias_tool: str, canonical_tool: str, raw: str) -
         "message": f"Use {canonical_tool} instead.",
         "severity": "info",
     }
-    if not _ENVELOPE_V2:
+    if not _envelope._ENVELOPE_V2:
         return raw
     try:
         payload = json.loads(raw)
