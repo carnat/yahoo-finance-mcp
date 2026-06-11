@@ -4131,7 +4131,6 @@ def _region_matches(label: str, region: str, include_asia_fallback: bool = False
     return False
 
 
-
 def _manual_lookup_payload(ticker: str, cik_padded: str | None, filing_type: str, note: str) -> dict:
     edgar_index_url = (
         f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik_padded}&type={filing_type}&owner=include&count=10"
