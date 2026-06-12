@@ -31,7 +31,7 @@ def _reload_server():
     import server as srv  # noqa: F401 (may be first import)
     # Reload in dependency order: app → domain modules → server,
     # so @yfinance_server.tool decorators always re-register on a fresh instance.
-    for _mod in ("yfmcp.app", "yfmcp.tools.system"):
+    for _mod in ("yfmcp.app", "yfmcp.tools.system", "yfmcp.tools.pricing"):
         if _mod in sys.modules:
             importlib.reload(sys.modules[_mod])
     importlib.reload(srv)
@@ -39,7 +39,12 @@ def _reload_server():
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +179,7 @@ class TestOvernightSessionGuardrails(unittest.TestCase):
 
     def test_get_overnight_quote_includes_session_fields(self):
         import unittest.mock as mock
+        import yfmcp.tools.pricing as pricing_tools
 
         class _FastInfo:
             timezone = "America/New_York"
@@ -213,7 +219,7 @@ class TestOvernightSessionGuardrails(unittest.TestCase):
 
         with (
             mock.patch.object(self.srv.yf, "Ticker", return_value=_Company()),
-            mock.patch.object(self.srv, "_fetch_with_retry", _fake_fetch),
+            mock.patch.object(pricing_tools, "_fetch_with_retry", _fake_fetch),
             mock.patch.object(
                 self.srv.pd.Timestamp,
                 "now",
@@ -240,6 +246,7 @@ class TestMarketSnapshotSchema(unittest.TestCase):
     def _mock_all_components(self, srv):
         """Replace atomic tool functions with lightweight stubs."""
         import unittest.mock as mock
+        import yfmcp.tools.pricing as pricing_tools
 
         async def _fast_info(ticker, *a, **kw):
             return json.dumps({
@@ -301,7 +308,7 @@ class TestMarketSnapshotSchema(unittest.TestCase):
             })
 
         patcher = mock.patch.multiple(
-            srv,
+            pricing_tools,
             get_fast_info=_fast_info,
             get_price_stats=_price_stats,
             get_ma_position=_ma_position,
@@ -373,7 +380,7 @@ class TestMarketSnapshotSchema(unittest.TestCase):
         async def _failing_tech(ticker, period="3mo", *a, **kw):
             raise RuntimeError("simulated failure")
 
-        with mock.patch.object(self.srv, "get_technical_indicators", _failing_tech):
+        with mock.patch.object(__import__("yfmcp.tools.pricing", fromlist=["get_technical_indicators"]), "get_technical_indicators", _failing_tech):
             result = json.loads(_run(self.srv.get_market_snapshot("ASTS")))
 
         self.assertTrue(result["partialSuccess"])
