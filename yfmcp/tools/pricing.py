@@ -74,14 +74,34 @@ async def get_historical_stock_prices(
     if ticker_err:
         return _mcp_failure("get_historical_stock_prices", ErrorCode.INPUT_VALIDATION_ERROR, ticker_err)
 
-    cache_key = f"hist:{ticker}:{period}:{interval}:{prepost}"
+    cache_key = f"hist:{ticker}:{period}:{interval}:{prepost}:camel-v2"
+    column_map = {
+        "Date": "date",
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+        "Volume": "volume",
+        "Adj Close": "adjClose",
+        "Dividends": "dividends",
+        "Stock Splits": "stockSplits",
+    }
+
+    def _filter_rows(rows: list[dict]) -> list[dict]:
+        if not columns:
+            return rows
+        wanted = {"date"}
+        for col in columns:
+            key = column_map.get(str(col), str(col))
+            wanted.add(key)
+        return [{k: r[k] for k in wanted if k in r} for r in rows]
+
     cached = _cache_get(cache_key, _PRICE_TTL)
     if cached is not None:
         if columns:
             try:
                 rows = json.loads(cached)
-                filtered = [{k: r[k] for k in ["Date"] + columns if k in r} for r in rows]
-                return json.dumps(filtered)
+                return json.dumps(_filter_rows(rows))
             except Exception:
                 pass
         return cached
@@ -101,15 +121,14 @@ async def get_historical_stock_prices(
         print(f"Error: getting historical stock prices for {ticker}: {e}")
         return f"Error: getting historical stock prices for {ticker}: {e}"
 
-    hist_data = hist_data.reset_index(names="Date")
+    hist_data = hist_data.reset_index(names="Date").rename(columns=column_map)
     full_result = hist_data.to_json(orient="records", date_format="iso")
     _cache_set(cache_key, full_result)
 
     if columns:
         try:
             rows = json.loads(full_result)
-            filtered = [{k: r[k] for k in ["Date"] + columns if k in r} for r in rows]
-            return json.dumps(filtered)
+            return json.dumps(_filter_rows(rows))
         except Exception:
             pass
     return full_result

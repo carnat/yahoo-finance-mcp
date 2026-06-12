@@ -98,7 +98,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_historical_stock_prices",
     description:
-      "Get historical stock prices for a given ticker symbol. Returns Date, Open, High, Low, Close, Volume, and Adj Close.",
+      "Get historical stock prices for a given ticker symbol. Returns camelCase fields: date, open, high, low, close, volume, and adjClose.",
     inputSchema: {
       type: "object",
       properties: {
@@ -558,7 +558,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_credit_health",
     description:
-      "Get pre-computed credit/leverage metrics: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag. Max 5 tickers per call; split larger lists into multiple calls.",
+      "Get pre-computed credit/leverage metrics: Net Debt/EBITDA, EBIT and EBITDA interest coverage, debt tier, credit stress flag. Max 5 tickers per call; split larger lists into multiple calls.",
     inputSchema: {
       type: "object",
       properties: {
@@ -816,11 +816,12 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "get_options_summary",
-    description: "Get options summary for a single ticker: ATM implied volatility, put/call ratio by volume and OI, max pain strike for the nearest liquid expiry. Preferred for LLM use — returns a compact snapshot without the full contract list.",
+    description: "Get options summary for a single ticker: ATM implied volatility, put/call ratio by volume and OI, max pain strike for the nearest or requested expiry. Preferred for data-source use because it returns a compact snapshot without the full contract list.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+        expiry_hint: { type: "string", description: "Optional YYYY-MM-DD expiry. Must be one of get_option_expiration_dates." },
       },
       required: ["ticker"],
     },
@@ -1218,6 +1219,8 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       ticker: { type: "string" },
       netDebtToEbitda: { type: ["number", "null"] },
       interestCoverage: { type: ["number", "null"] },
+      interestCoverageEbit: { type: ["number", "null"] },
+      interestCoverageEbitda: { type: ["number", "null"] },
       debtTier: { type: ["string", "null"] },
       creditStress: { type: ["boolean", "null"] },
       dataDate: { type: "string" },
@@ -1249,6 +1252,9 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       beatRate: { type: ["number", "null"] },
       avgSurprisePct: { type: ["number", "null"] },
       currentBeatStreak: { type: ["number", "null"] },
+      forwardRevisionSignal: { type: ["string", "null"] },
+      compositeMomentumSignal: { type: ["string", "null"] },
+      compositeMethodNote: { type: ["string", "null"] },
       dataDate: { type: "string" },
     },
     additionalProperties: true,
@@ -1349,7 +1355,9 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       ioPt: { type: ["number", "null"] },
       eqfPct: { type: ["number", "null"] },
       bracket: { type: ["string", "null"] },
+      inferredTag: { type: ["string", "null"] },
       tag: { type: ["string", "null"] },
+      tagNote: { type: ["string", "null"] },
       invertedFlag: { type: ["boolean", "null"] },
       dataDate: { type: "string" },
     },
@@ -1600,7 +1608,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "analyze_earnings_momentum":
       return getEarningsMomentum(tickerArg(args.ticker));
     case "summarize_options_flow":
-      return getOptionsSummary(str(args.ticker));
+      return getOptionsSummary(str(args.ticker), args.expiry_hint != null ? str(args.expiry_hint) : undefined);
     case "find_put_hedge_candidates":
       return getPutHedgeCandidates(
         str(args.ticker),
@@ -1919,7 +1927,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       return getMarketSnapshot(ticker, mode, foreignExchange);
     }
     case "get_options_summary":
-      return getOptionsSummary(str(args.ticker));
+      return getOptionsSummary(str(args.ticker), args.expiry_hint != null ? str(args.expiry_hint) : undefined);
     case "get_filing_data":
       return getFilingData(str(args.ticker), str(args.fact_type), args.region != null ? str(args.region) : null, str(args.filing_type, "10-K"), str(args.period, "latest"));
     case "list_sec_filings":
@@ -1977,13 +1985,13 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_yahoo_finance_news":
       return getCompanyNews(str(args.ticker), 10, 14, ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]);
     case "get_options_flow_summary":
-      return getOptionsSummary(str(args.ticker));
+      return getOptionsSummary(str(args.ticker), args.expiry_hint != null ? str(args.expiry_hint) : undefined);
     case "get_options_flow_scan":
       return getOptionsFlowScan(str(args.ticker), str(args.window_label));
     case "get_put_hedge_candidates":
       return getPutHedgeCandidates(str(args.ticker), num(args.otm_pct_min, 8), num(args.otm_pct_max, 12), num(args.budget_usd, 500), str(args.expiry_after));
     case "get_price_target_bracket":
-      return getPriceTargetBracket(str(args.ticker), num(args.io_pt, 0));
+      return getPriceTargetBracket(str(args.ticker), num(args.reference_target_price ?? args.io_pt, 0));
     case "get_position_score_inputs":
       return getPositionScoreInputs(tickerArg(args.ticker));
     default:

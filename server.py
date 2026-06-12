@@ -446,6 +446,21 @@ def _event_type_from_keywords(text: str) -> str:
     return "other"
 
 
+def _normalized_event_title_stem(ticker: str, title: str | None) -> str:
+    text = _html_module.unescape(str(title or "")).lower()
+    text = _re.sub(r"https?://\S+", " ", text)
+    text = _re.sub(r"[^a-z0-9]+", " ", text)
+    ticker_l = str(ticker or "").lower()
+    if ticker_l:
+        text = _re.sub(rf"\b{_re.escape(ticker_l)}\b", " ", text)
+    stop_terms = {
+        "yahoo", "finance", "finnhub", "globenewswire", "press", "release",
+        "inc", "corp", "corporation", "company", "plc", "ltd", "llc",
+    }
+    words = [w for w in text.split() if w not in stop_terms]
+    return " ".join(words)[:_DEDUP_TITLE_MAX_LEN]
+
+
 def _event_type_from_form(form_type: str) -> str:
     ft = (form_type or "").upper()
     if ft in ("10-Q", "10-K"):
@@ -493,14 +508,112 @@ def _make_duplicate_group_id(
     issuer: str | None,
     url: str | None,
 ) -> str | None:
-    norm_title = " ".join((title or "").lower().split())[:_DEDUP_TITLE_MAX_LEN]
+    norm_title = _normalized_event_title_stem(ticker, title)
     event_day = (published_at or "")[:10]
     entity = (issuer or ticker or "").upper().strip()
-    canon_url = _canonicalize_event_url(url) or ""
-    if not norm_title and not event_day and not canon_url:
+    if not norm_title and not event_day:
         return None
-    key = f"{norm_title}|{event_day}|{entity}|{canon_url}"
+    key = f"{norm_title}|{event_day}|{entity}"
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
+def _xml_text(root: _ET.Element, path: str) -> str | None:
+    found = root.find(path)
+    if found is not None and found.text:
+        text = found.text.strip()
+        return text or None
+    return None
+
+
+def _strip_xml_namespaces(xml_text: str) -> str:
+    return _re.sub(r'\sxmlns(:\w+)?="[^"]*"', "", xml_text)
+
+
+def _parse_form4_transaction(xml_text: str) -> dict | None:
+    try:
+        root = _ET.fromstring(_strip_xml_namespaces(xml_text))
+    except Exception:
+        return None
+    owner_name = _xml_text(root, ".//reportingOwnerId/rptOwnerName")
+    officer_title = _xml_text(root, ".//reportingOwnerRelationship/officerTitle")
+    roles: list[str] = []
+    for flag, label in (
+        ("isDirector", "director"),
+        ("isOfficer", "officer"),
+        ("isTenPercentOwner", "ten_percent_owner"),
+        ("isOther", "other"),
+    ):
+        if (_xml_text(root, f".//reportingOwnerRelationship/{flag}") or "").lower() in {"1", "true"}:
+            roles.append(label)
+    tx = root.find(".//nonDerivativeTransaction")
+    if tx is None:
+        tx = root.find(".//derivativeTransaction")
+    if tx is None:
+        return None
+    code = _xml_text(tx, ".//transactionCoding/transactionCode")
+    shares_text = _xml_text(tx, ".//transactionAmounts/transactionShares/value")
+    price_text = _xml_text(tx, ".//transactionAmounts/transactionPricePerShare/value")
+    def _num(value: str | None) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value.replace(",", ""))
+        except Exception:
+            return None
+    shares = _num(shares_text)
+    price = _num(price_text)
+    value = round(shares * price, 2) if shares is not None and price is not None else None
+    labels = {
+        "P": "Purchase",
+        "S": "Sale",
+        "A": "Grant/Award",
+        "D": "Disposition",
+        "M": "Option exercise/conversion",
+        "F": "Tax withholding/payment",
+    }
+    return {
+        "owner": owner_name,
+        "role": officer_title or ", ".join(roles) or None,
+        "transactionCode": code,
+        "transactionLabel": labels.get(str(code or "").upper(), "Other/Unclassified"),
+        "shares": shares,
+        "price": price,
+        "value": value,
+        "ownershipForm": _xml_text(tx, ".//ownershipNature/directOrIndirectOwnership/value"),
+        "transactionDate": _xml_text(tx, ".//transactionDate/value"),
+    }
+
+
+async def _try_attach_form4_transaction(item: dict, filing: dict, warnings: list[dict]) -> None:
+    if str(filing.get("filingType") or "").upper() != "4":
+        return
+    url = _safe_sec_url(item.get("url"))
+    if not url:
+        warnings.append({
+            "code": "FORM4_PARSE_UNAVAILABLE",
+            "message": "Form 4 primary document URL is unavailable.",
+            "severity": "warning",
+        })
+        return
+    xml_text = await _edgar_get_html(url, max_bytes=2_000_000)
+    parsed = _parse_form4_transaction(xml_text or "")
+    if not parsed:
+        warnings.append({
+            "code": "FORM4_PARSE_UNAVAILABLE",
+            "message": "Form 4 transaction details could not be parsed from the primary document.",
+            "severity": "warning",
+        })
+        return
+    item["insiderTransaction"] = parsed
+    label = parsed.get("transactionLabel") or "Insider transaction"
+    owner = parsed.get("owner") or "reporting owner"
+    shares = parsed.get("shares")
+    value = parsed.get("value")
+    value_part = f", value ${value:,.0f}" if isinstance(value, (int, float)) else ""
+    shares_part = f"{shares:,.0f} shares" if isinstance(shares, (int, float)) else "shares unavailable"
+    item["title"] = f"Form 4: {label} by {owner}"
+    item["summary"] = _short_text(f"{label} by {owner}: {shares_part}{value_part}.")
+    item["evidenceText"] = _short_text(f"SEC Form 4 transaction code {parsed.get('transactionCode') or 'unknown'} on {parsed.get('transactionDate') or item.get('filingDate')}.")
 
 
 def _source_rank(source_type: object) -> int:
@@ -693,6 +806,7 @@ async def _collect_sec_events(
             "cikInt": cik_int,
         }
         item, item_warnings = _build_sec_event_item(ticker, filing_obj, retrieved_at, issuer=issuer)
+        await _try_attach_form4_transaction(item, filing_obj, item_warnings)
         if not _within_date_window(item.get("publishedAt"), start_date=start_date, end_date=end_date, lookback_days=lookback_days):
             continue
         events.append(item)
@@ -1588,6 +1702,7 @@ async def get_public_event_timeline(
         "url": it.get("url"),
         "confidence": it.get("confidence"),
         "duplicateGroupId": it.get("duplicateGroupId"),
+        "sourceRefs": it.get("sourceRefs") or [],
     } for it in items if it.get("publishedAt")]
     timeline.sort(key=lambda ev: str(ev.get("timestamp") or ""), reverse=bool(newest_first))
     timeline = timeline[:_coerce_max_results(max_results, 50)]
@@ -2099,15 +2214,39 @@ async def get_option_chain(
 @yfinance_server.tool(
     name="get_options_summary",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_summary"],
-    description="Get options summary for a single ticker: ATM implied volatility, put/call ratio by volume and OI, max pain strike for the nearest liquid expiry. Preferred for LLM use — returns a compact snapshot without the full contract list.",
+    description="Get options summary for a single ticker: ATM implied volatility, put/call ratio by volume and OI, max pain strike for the nearest or requested expiry. Preferred for data-source use because it returns a compact snapshot without the full contract list.",
 )
-async def get_options_summary(ticker: str) -> str:
+def _invalid_expiry_payload(ticker: str, requested: str, expirations: list[str]) -> dict:
+    nearest = None
+    if expirations:
+        nearest = expirations[0]
+        if _re.match(r"^\d{4}-\d{2}-\d{2}$", requested or ""):
+            try:
+                req_date = datetime.date.fromisoformat(requested)
+                nearest = min(expirations, key=lambda d: abs((datetime.date.fromisoformat(d) - req_date).days))
+            except Exception:
+                nearest = expirations[0]
+    return {
+        "error": True,
+        "code": "INVALID_EXPIRY_DATE",
+        "message": f"{requested} is not in the options calendar for {ticker.upper()}",
+        "ticker": ticker.upper(),
+        "requestedExpiration": requested,
+        "nearestExpiration": nearest,
+        "validExpirations": expirations,
+        "hint": "Call get_option_expiration_dates first and pass one of the returned dates.",
+    }
+
+
+async def get_options_summary(ticker: str, expiry_hint: str | None = None) -> str:
     company = yf.Ticker(ticker)
     try:
-        expirations = company.options
+        expirations = list(company.options or [])
         if not expirations:
             return json.dumps({"ticker": ticker, "error": "No options data available"})
-        expiry = expirations[0]
+        expiry = expiry_hint or expirations[0]
+        if expiry not in expirations:
+            return json.dumps(_invalid_expiry_payload(ticker, expiry, expirations))
         opt = company.option_chain(expiry)
         calls = opt.calls
         puts = opt.puts
@@ -2143,7 +2282,14 @@ async def get_options_summary(ticker: str) -> str:
         all_strikes = sorted(set(calls["strike"].tolist() + puts["strike"].tolist()))
         max_pain_strike = None
         flow_warnings: list[str] = []
-        if call_oi + put_oi <= 0:
+        zero_oi_contracts = 0
+        total_contracts = 0
+        for df in (calls, puts):
+            if "openInterest" in df.columns:
+                total_contracts += len(df)
+                zero_oi_contracts += int((df["openInterest"].fillna(0) <= 0).sum())
+        majority_zero_oi = total_contracts > 0 and zero_oi_contracts / total_contracts > 0.5
+        if call_oi + put_oi <= 0 or majority_zero_oi:
             flow_warnings.append("MAX_PAIN_UNAVAILABLE_ZERO_OI")
         elif all_strikes:
             min_pain = float("inf")
@@ -3749,11 +3895,13 @@ async def get_credit_health(ticker: str | list[str]) -> str:
     interest_annual = interest_expense * 4 if interest_expense is not None else None
 
     net_debt_to_ebitda = round(net_debt / ebitda_annual, 2) if net_debt is not None and ebitda_annual else None
-    interest_coverage = round(ebit_annual / abs(interest_annual), 2) if ebit_annual is not None and interest_annual and interest_annual != 0 else None
+    interest_coverage_ebit = round(ebit_annual / abs(interest_annual), 2) if ebit_annual is not None and interest_annual and interest_annual != 0 else None
+    interest_coverage_ebitda = round(ebitda_annual / abs(interest_annual), 2) if ebitda_annual is not None and interest_annual and interest_annual != 0 else None
+    interest_coverage = interest_coverage_ebit
 
     credit_stress = None
-    if net_debt_to_ebitda is not None and interest_coverage is not None:
-        credit_stress = net_debt_to_ebitda > 2.5 and interest_coverage < 3
+    if net_debt_to_ebitda is not None and interest_coverage_ebit is not None:
+        credit_stress = net_debt_to_ebitda > 2.5 and interest_coverage_ebit < 3
 
     if net_debt_to_ebitda is not None:
         if net_debt_to_ebitda < 1:
@@ -3784,6 +3932,10 @@ async def get_credit_health(ticker: str | list[str]) -> str:
         unavailable_metrics.append("netDebtToEbitda")
     if interest_coverage is None:
         unavailable_metrics.append("interestCoverage")
+    if interest_coverage_ebit is None:
+        unavailable_metrics.append("interestCoverageEbit")
+    if interest_coverage_ebitda is None:
+        unavailable_metrics.append("interestCoverageEbitda")
     if credit_stress is None:
         unavailable_metrics.append("creditStressFlag")
 
@@ -3794,6 +3946,10 @@ async def get_credit_health(ticker: str | list[str]) -> str:
         computed_metrics.append("netDebtToEbitda")
     if interest_coverage is not None:
         computed_metrics.append("interestCoverage")
+    if interest_coverage_ebit is not None:
+        computed_metrics.append("interestCoverageEbit")
+    if interest_coverage_ebitda is not None:
+        computed_metrics.append("interestCoverageEbitda")
     if credit_stress is not None:
         computed_metrics.append("creditStressFlag")
     if debt_tier is not None:
@@ -3828,6 +3984,8 @@ async def get_credit_health(ticker: str | list[str]) -> str:
         "interestExpenseUsd": interest_annual,
         "netDebtToEbitda": net_debt_to_ebitda,
         "interestCoverage": interest_coverage,
+        "interestCoverageEbit": interest_coverage_ebit,
+        "interestCoverageEbitda": interest_coverage_ebitda,
         "creditStressFlag": credit_stress,
         "debtTier": debt_tier,
         "dataQuality": data_quality,
@@ -4014,18 +4172,52 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
     else:
         historical_surprise_signal = "NEGATIVE"
 
-    revs = [r for r in (revision_30d, revision_90d) if r is not None]
-    if not revs:
-        forward_revision_signal = "UNKNOWN"
-    elif any(r <= -3 for r in revs):
-        forward_revision_signal = "NEGATIVE"
-    elif any(r >= 3 for r in revs):
-        forward_revision_signal = "POSITIVE"
+    revision_driver = "none"
+    if revision_30d is not None:
+        revision_driver = "30d"
+        if revision_30d <= -3:
+            forward_revision_signal = "NEGATIVE"
+        elif revision_30d >= 3:
+            forward_revision_signal = "POSITIVE"
+        elif revision_7d is not None and revision_7d <= -3:
+            revision_driver = "30d_neutral_7d"
+            forward_revision_signal = "NEGATIVE"
+        elif revision_7d is not None and revision_7d >= 3:
+            revision_driver = "30d_neutral_7d"
+            forward_revision_signal = "POSITIVE"
+        else:
+            forward_revision_signal = "NEUTRAL"
+    elif revision_7d is not None:
+        revision_driver = "7d"
+        if revision_7d <= -3:
+            forward_revision_signal = "NEGATIVE"
+        elif revision_7d >= 3:
+            forward_revision_signal = "POSITIVE"
+        else:
+            forward_revision_signal = "NEUTRAL"
+    elif revision_90d is not None:
+        revision_driver = "90d_fallback"
+        if revision_90d <= -3:
+            forward_revision_signal = "NEGATIVE"
+        elif revision_90d >= 3:
+            forward_revision_signal = "POSITIVE"
+        else:
+            forward_revision_signal = "NEUTRAL"
     else:
-        forward_revision_signal = "NEUTRAL"
+        forward_revision_signal = "UNKNOWN"
+
+    composite_method_note = (
+        "Forward revision signal uses 30d revision as primary, 7d as confirmation when 30d is neutral or missing, "
+        "and 90d only as fallback/context; a negative 90d revision does not override positive recent revisions."
+    )
+    if revision_30d is not None and revision_30d >= 3 and revision_90d is not None and revision_90d <= -3:
+        warnings.append({
+            "code": "LONGER_LOOKBACK_REVISION_DIVERGENCE",
+            "message": "Recent EPS revisions are positive while the 90d revision remains negative.",
+        })
 
     mixed_negative_revision = beat_rate is not None and beat_rate >= 0.75 and any(
-        r is not None and r < 0 for r in (revision_30d, revision_90d)
+        r is not None and r <= -3 for r in (revision_30d, revision_7d)
     )
     if mixed_negative_revision:
         warnings.append({
@@ -4076,6 +4268,8 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
         "forwardRevisionSignal": forward_revision_signal,
         "compositeMomentumSignal": composite_momentum_signal,
         "interpretationNote": interpretation_note_map[composite_momentum_signal],
+        "compositeMethodNote": composite_method_note,
+        "revisionSignalDriver": revision_driver,
         "warnings": warnings,
         "dataQuality": data_quality,
         "dataDate": get_last_trading_date(),
@@ -4099,7 +4293,7 @@ Args:
 )
 async def get_options_flow_summary(ticker: str, expiry_hint: str | None = None) -> str:
     # Consolidated naming: route to the same payload implementation as get_options_summary.
-    return await get_options_summary(ticker)
+    return await get_options_summary(ticker, expiry_hint=expiry_hint)
 
 
 # ---------------------------------------------------------------------------
@@ -4751,13 +4945,13 @@ async def get_price_target_bracket(
         bracket = "AVOID"
 
     if reference_target_pct < 40:
-        tag = "SPECULATIVE"
+        inferred_tag = "SPECULATIVE"
     elif reference_target_pct < 80:
-        tag = "LONG"
+        inferred_tag = "LONG"
     elif reference_target_pct < 100:
-        tag = "NEAR"
+        inferred_tag = "NEAR"
     else:
-        tag = "INVERTED"
+        inferred_tag = "INVERTED"
 
     inverted_flag = reference_target_pct >= 100
 
@@ -4777,7 +4971,9 @@ async def get_price_target_bracket(
         "ioPt": target_price,
         "eqfPct": reference_target_pct,
         "bracket": bracket,
-        "tag": tag,
+        "inferredTag": inferred_tag,
+        "tag": inferred_tag,
+        "tagNote": "Deprecated: tag is inferred from currentPrice/referenceTargetPrice distance. Use inferredTag.",
         "invertedFlag": inverted_flag,
         "dataDate": data_date,
     })
@@ -5061,7 +5257,7 @@ async def get_company_news(
 
 @yfinance_server.tool(name="summarize_options_flow", output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_summary"], description="Canonical alias for get_options_summary/get_options_flow_summary.")
 async def summarize_options_flow(ticker: str, expiry_hint: str | None = None) -> str:
-    return await get_options_summary(ticker=ticker)
+    return await get_options_summary(ticker=ticker, expiry_hint=expiry_hint)
 
 
 @yfinance_server.tool(name="analyze_options_flow_window", output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_flow_scan"], description="Canonical alias for get_options_flow_scan.")
@@ -6350,10 +6546,12 @@ async def extract_risk_factor_mentions(
         for m in (search.get("matches") if isinstance(search.get("matches"), list) else [])[:3]:
             if not isinstance(m, dict):
                 continue
+            excerpt = _compact_excerpt(str(m.get("context") or m.get("excerpt") or ""))
             matches.append({
                 "term": term,
                 "sectionHeading": m.get("sectionHeading") or "Risk Factors",
-                "excerpt": _compact_excerpt(str(m.get("context") or m.get("excerpt") or "")),
+                "excerpt": excerpt,
+                "excerptAvailable": bool(excerpt),
                 "confidence": "MEDIUM",
                 "evidence": {
                     "filingDate": search.get("filingDate"),
@@ -6440,19 +6638,30 @@ async def extract_china_exposure(
             low = heading.lower()
             for term in term_list:
                 if term.lower() in low:
-                    found.append({"source": "section", "term": term, "sectionHeading": heading})
+                    excerpt = _compact_excerpt(heading)
+                    found.append({
+                        "source": "section",
+                        "term": term,
+                        "sectionHeading": heading,
+                        "excerpt": excerpt,
+                        "excerptAvailable": bool(excerpt),
+                    })
         for tbl in tables:
             if not isinstance(tbl, dict):
                 continue
-            hay = " ".join([str(tbl.get("title") or ""), *[str(x) for x in (tbl.get("rowLabels") or [])]]).lower()
+            hay_source = " ".join([str(tbl.get("title") or ""), *[str(x) for x in (tbl.get("rowLabels") or [])]])
+            hay = hay_source.lower()
             for term in term_list:
                 if term.lower() in hay:
+                    excerpt = _compact_excerpt(hay_source)
                     found.append({
                         "source": "table",
                         "term": term,
                         "tableTitle": tbl.get("title"),
                         "sourceTableId": tbl.get("tableId"),
                         "sectionId": tbl.get("sectionId"),
+                        "excerpt": excerpt,
+                        "excerptAvailable": bool(excerpt),
                     })
         return found
 
@@ -6466,6 +6675,15 @@ async def extract_china_exposure(
     manu_evidence = _collect(manuf_terms)
     risk_mentions = _safe_json_loads(await extract_risk_factor_mentions(ticker=ticker, terms=risk_terms, filing_type=filing_type, period=period))
     risk_evidence = risk_mentions.get("matches") if isinstance(risk_mentions.get("matches"), list) else []
+    for ev in risk_evidence:
+        if isinstance(ev, dict):
+            excerpt = _compact_excerpt(str(ev.get("excerpt") or ev.get("context") or ""))
+            if excerpt:
+                ev["excerpt"] = excerpt
+                ev["excerptAvailable"] = True
+            else:
+                ev.pop("excerpt", None)
+                ev["excerptAvailable"] = False
 
     non_revenue_found = bool(entity_evidence or bank_evidence or manu_evidence or risk_evidence)
     if revenue.get("status") == "FOUND_REVENUE_EXPOSURE":

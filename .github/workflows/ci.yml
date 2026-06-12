@@ -117,6 +117,9 @@ jobs:
       - name: Options data quality tests
         run: python scripts/test_options_quality.py
 
+      - name: PR2 data quality regressions
+        run: python scripts/test_pr2_data_quality.py
+
       # ── 7. Domain-specific schema tests ──────────────────────────────────
       - name: Source discovery schema tests
         run: python scripts/test_source_discovery_schema.py
