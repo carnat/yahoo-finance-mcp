@@ -4,6 +4,7 @@ This module is the single source of truth for:
 - The FastMCP compat shim (strips unsupported output_schema kwarg on older SDKs)
 - The shared ``yfinance_server`` FastMCP instance that all domain modules register on
 - ``TOOL_ALIASES``: the canonical mapping of deprecated/alternate tool names to canonical ones
+- ``build_handler_registry``: derives the handler map from the live tool manager for grouped mode
 
 All ``yfmcp/tools/*.py`` domain modules import ``yfinance_server`` from here.
 ``server.py`` also imports it from here (never the reverse) to avoid circular imports.
@@ -12,7 +13,7 @@ All ``yfmcp/tools/*.py`` domain modules import ``yfinance_server`` from here.
 from __future__ import annotations
 
 import inspect
-from typing import Any
+from typing import Any, Callable
 
 from mcp.server.fastmcp import FastMCP
 
@@ -199,3 +200,22 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - calculate_price_target_distance: Compare current price to a user-supplied reference target.
 """,
 )
+
+
+def build_handler_registry(server: FastMCP) -> dict[str, Callable[..., Any]]:
+    """Map handler function name -> function for every tool registered on ``server``.
+
+    Reads the FastMCP tool manager so the mapping always reflects the live set
+    of registered tools, independent of where the handlers are defined. Used by
+    grouped mode to route action names (e.g. "get_market_quote") to their
+    underlying handler functions (e.g. ``get_fast_info``).
+    """
+    registry: dict[str, Callable[..., Any]] = {}
+    manager = getattr(server, "_tool_manager", None)
+    tools = getattr(manager, "_tools", None) if manager is not None else None
+    if tools:
+        for tool in tools.values():
+            fn = getattr(tool, "fn", None)
+            if fn is not None:
+                registry[fn.__name__] = fn
+    return registry

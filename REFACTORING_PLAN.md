@@ -60,18 +60,19 @@ work can stop or pause after any phase with the repo in a healthy state.
 
 ```
 yfmcp/
-  app.py            # FastMCP instance, TOOL_MODE switch, get_server()
-  envelope.py       # ErrorCode, ToolMeta, _mcp_success/_mcp_failure/_mcp_warning, _wrap_envelope_v2
-  validation.py     # ticker/accession/URL validators, HTML sanitization
-  cache.py          # ToolCache, _cache_get/_cache_set, TTLs
-  util.py           # retry, date/ISO helpers (single _to_iso_utc), data quality, relevance sort
+  app.py            # ✅ FastMCP instance + output_schema compat shim + build_handler_registry()
+                    #    (get_server()/TOOL_MODE switch remain in server.py as the entry point)
+  envelope.py       # ✅ ErrorCode, ToolMeta, _mcp_success/_mcp_failure/_mcp_warning, _wrap_envelope_v2
+  validation.py     # ✅ ticker/accession/URL validators, HTML sanitization
+  cache.py          # ✅ ToolCache, _cache_get/_cache_set, TTLs
+  util.py           # ✅ retry, date/ISO helpers (single _to_iso_utc), data quality, relevance sort
   clients/
-    edgar.py        # _edgar_get*, CIK resolution, filing URL builders, exhibit listing
-    yahoo.py        # yfinance access patterns, _safe_parse, batch helpers
+    edgar.py        # ✅ _edgar_get*, CIK resolution, filing URL builders, exhibit listing
+    yahoo.py        # ✅ yfinance access patterns, _safe_parse, batch helpers
   parsing/
-    html.py         # strip/sanitize, table parsing, unit detection, markdown fallback
-    extractors.py   # geo revenue, segment revenue, XBRL concept extraction
-  tools/
+    html.py         # ✅ strip/sanitize, table parsing, unit detection, markdown fallback
+    extractors.py   # ✅ geo revenue, segment revenue, XBRL concept extraction
+  tools/            # ⬜ Phase 2b+ — handlers still in server.py
     pricing.py      # quotes, history, technicals, short interest, overnight, snapshot
     fundamentals.py # profile, statements, ratios, credit health, holders, actions
     analyst.py      # consensus, recommendations, upgrades, earnings momentum, calendar
@@ -121,33 +122,55 @@ python scripts/test_phase1.py ... (full script list, or `pytest` once Phase 5 la
 cd worker && npx tsc --noEmit
 ```
 
-### Phase 0 — Quick wins and safety net (small)
+### Phase 0 — Quick wins and safety net (small) — ✅ DONE (PR #85)
 
-- Unify the two `_to_iso_utc` definitions into one function covering both input domains
-  (epoch numbers, 8/14-digit compact timestamps, date-only strings, ISO strings); delete
-  `_utc_now_z` in favor of `_utc_now_iso`. Add a focused regression test for the merged function.
-- Fix the bandit configuration (replace the fictional `B101–B999` list with defaults or a real
-  skip list) or delete it.
-- Add `.git-blame-ignore-revs` and document it, so the mechanical-move commits in later phases
-  don't destroy `git blame`.
+- ✅ Unified the two `_to_iso_utc` definitions into one covering both input domains (epoch
+  numbers, 8/14-digit compact timestamps, date-only strings, ISO strings); deleted `_utc_now_z`
+  in favor of `_utc_now_iso`. This fixed a latent bug: the earnings-layer definition shadowed the
+  news-layer one at runtime, dropping epoch-seconds timestamps. Regression tests added.
+- ✅ Removed the dead `[tool.bandit]` config (not wired into CI/pre-commit; check list was mostly
+  fictional IDs).
+- ✅ Added `.git-blame-ignore-revs` with usage docs.
 
-### Phase 1 — Extract Python infrastructure (medium)
+### Phase 1 — Extract Python infrastructure (medium) — ✅ DONE (PR #86)
 
-Move envelope, validation, cache, util, `clients/`, and `parsing/` out of `server.py` into the
-`yfmcp` package. Pure mechanical moves; `server.py` imports them back into its namespace
-(`from yfmcp.envelope import *`-style with explicit names) so `globals()`-based grouped
-registration and any test that reaches into `server._mcp_success` keep working.
+Moved envelope, validation, cache, util, `clients/`, and `parsing/` out of `server.py` into the
+`yfmcp` package; `server.py` re-imports them by name. Two move-discipline bugs were caught in
+review and fixed before merge: stale duplicate `_resolve_cik_for_ticker`/`_get_submissions_for_ticker`
+left shadowing the imports (referencing a relocated constant → `NameError`), and `_ENVELOPE_V2`
+becoming two independent module globals (fixed by single-sourcing it in `yfmcp.envelope`).
 
-### Phase 2 — Split Python tool domains (large, mechanical)
+**Lesson carried forward:** a `from x import name` binds a *snapshot*; mutable module-level state
+(flags, caches) must live in exactly one module and be read live, never re-imported as a value.
 
-- Move the FastMCP instance to `yfmcp/app.py`; each `yfmcp/tools/*.py` module imports it and
-  registers its handlers with the same decorators.
-- `server.py` becomes a facade: import every domain module (registration happens on import),
-  re-export all handler functions by name.
-- Replace the `globals()` lookup in `tool_groups.py` with an explicit handler registry that each
-  domain module contributes to (`yfmcp/manifest.py` collects `{tool_name: handler}`), keeping the
-  `module_globals` parameter as a deprecated fallback for one release.
-- Update `scripts/check_tool_sync.py` to scan `yfmcp/tools/*.py` in addition to `server.py`.
+### Phase 2 — Split Python tool domains (large)
+
+#### Phase 2a — Shared app instance + grouped registry — ✅ DONE (this PR)
+
+- Moved the FastMCP instance, the `output_schema` compat shim, and the server instructions into
+  `yfmcp/app.py`. Domain modules will import `yfinance_server` from there.
+- **Registry design:** the FastMCP instance is the single source of truth. `build_handler_registry(server)`
+  reads the live tool manager (`{fn.__name__: fn}` for every registered tool) and grouped mode
+  resolves handlers from it instead of `server.py` globals. This auto-includes any tool registered
+  on the shared instance from any module — no separate per-module bookkeeping that could drift.
+  Chosen over a decorator-side-effect registry specifically to avoid touching the
+  `@yfinance_server.tool(...)` decorator text, which `check_tool_sync.py` and `test_phase8.py`
+  both regex-scan.
+- `tool_groups.py` parameter renamed `module_globals` → `handler_registry` (same dict contract).
+- Added `scripts/test_grouped_registry.py` (wired into CI) asserting every `TOOL_GROUPS` handler
+  resolves — closing the plan's top risk, which previously had **zero** test coverage.
+- No handlers moved yet; `server.py` still holds all 111 decorators.
+
+#### Phase 2b+ — Mechanical domain moves (remaining)
+
+Move handler groups into `yfmcp/tools/*.py`, each doing `from yfmcp.app import yfinance_server`
+and keeping the identical `@yfinance_server.tool(...)` decorators. `server.py` becomes a facade
+that imports every domain module (registration happens on import) and re-exports all handler
+functions by name (required for `import server` and the 14 test scripts that reach into
+`server.<helper>`). The grouped registry needs no further change — it reads whatever is registered.
+
+When the first domain moves, **`check_tool_sync.py` and `test_phase8.py` must be updated in the
+same PR** to scan `yfmcp/tools/*.py` in addition to `server.py` (both regex-scan `server.py` today).
 
 Suggested sub-PR ordering (each independently green): pricing + fundamentals + analyst →
 options + screening + system → SEC filings + extractors → news/events + earnings → aliases.

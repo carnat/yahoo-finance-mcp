@@ -260,11 +260,11 @@ TOOL_GROUPS: dict[str, dict[str, Any]] = {
 # Routing infrastructure
 # ---------------------------------------------------------------------------
 
-def _resolve_handler(handler_name: str, module_globals: dict):
-    """Resolve a handler function by name from the server module globals."""
-    fn = module_globals.get(handler_name)
+def _resolve_handler(handler_name: str, handler_registry: dict):
+    """Resolve a handler function by name from the handler registry."""
+    fn = handler_registry.get(handler_name)
     if fn is None:
-        raise ValueError(f"Handler '{handler_name}' not found in server module")
+        raise ValueError(f"Handler '{handler_name}' not found in handler registry")
     return fn
 
 
@@ -272,7 +272,7 @@ async def _route_grouped_call(
     group_name: str,
     action: str,
     params: dict[str, Any],
-    module_globals: dict,
+    handler_registry: dict,
 ) -> str:
     """Route a grouped tool call to the underlying handler."""
     group = TOOL_GROUPS.get(group_name)
@@ -286,7 +286,7 @@ async def _route_grouped_call(
             "error": f"Unknown action '{action}' for {group_name}. Valid actions: {valid}"
         })
 
-    handler = _resolve_handler(handler_name, module_globals)
+    handler = _resolve_handler(handler_name, handler_registry)
 
     # Inspect handler signature and pass only valid parameters
     sig = inspect.signature(handler)
@@ -299,26 +299,27 @@ async def _route_grouped_call(
     return result
 
 
-def register_grouped_tools(server, module_globals: dict) -> None:
+def register_grouped_tools(server, handler_registry: dict) -> None:
     """Register domain-grouped meta-tools on the FastMCP server.
 
     Each meta-tool accepts:
       - action: str (required) — which sub-action to invoke
       - params: dict (optional) — parameters for the sub-action (e.g. ticker, period, etc.)
 
-    This replaces the 111 individual tool registrations with 10 grouped tools,
-    reducing LLM token overhead by ~80-85%.
+    ``handler_registry`` maps handler function name -> function (see
+    ``yfmcp.app.build_handler_registry``). This replaces the 111 individual tool
+    registrations with 10 grouped tools, reducing LLM token overhead by ~80-85%.
     """
 
-    def _make_handler(gn, gl):
+    def _make_handler(gn, registry):
         async def handler(action: str, params: dict | None = None) -> str:
-            return await _route_grouped_call(gn, action, params or {}, gl)
+            return await _route_grouped_call(gn, action, params or {}, registry)
         handler.__name__ = gn
         handler.__qualname__ = gn
         return handler
 
     for group_name, group_def in TOOL_GROUPS.items():
-        handler = _make_handler(group_name, module_globals)
+        handler = _make_handler(group_name, handler_registry)
         server.tool(
             name=group_name,
             description=group_def["description"],
