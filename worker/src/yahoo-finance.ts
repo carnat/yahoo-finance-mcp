@@ -161,6 +161,27 @@ function normalizeContractIv(c: Record<string, unknown>): Record<string, unknown
   return c;
 }
 
+function invalidExpiryPayload(ticker: string, requested: string, expirations: string[]): Record<string, unknown> {
+  let nearest: string | null = expirations[0] ?? null;
+  const requestedMs = Date.parse(`${requested}T00:00:00Z`);
+  if (Number.isFinite(requestedMs) && expirations.length) {
+    nearest = [...expirations].sort((a, b) =>
+      Math.abs(Date.parse(`${a}T00:00:00Z`) - requestedMs)
+      - Math.abs(Date.parse(`${b}T00:00:00Z`) - requestedMs)
+    )[0] ?? null;
+  }
+  return {
+    error: true,
+    code: "INVALID_EXPIRY_DATE",
+    message: `${requested} is not in the options calendar for ${ticker.toUpperCase()}`,
+    ticker: ticker.toUpperCase(),
+    requestedExpiration: requested,
+    nearestExpiration: nearest,
+    validExpirations: expirations,
+    hint: "Call get_option_expiration_dates first and pass one of the returned dates.",
+  };
+}
+
 function zeroOpenInterestRatio(contracts: Record<string, unknown>[]): number {
   if (contracts.length === 0) return 1;
   return contracts.filter(c => Number(c.openInterest ?? 0) <= 0).length / contracts.length;
@@ -623,13 +644,13 @@ export async function getHistoricalPrices(
 
   return JSON.stringify(
     timestamps.map((t, i) => ({
-      Date: iso(t),
-      Open: quote.open?.[i] ?? null,
-      High: quote.high?.[i] ?? null,
-      Low: quote.low?.[i] ?? null,
-      Close: quote.close?.[i] ?? null,
-      Volume: quote.volume?.[i] ?? null,
-      "Adj Close": adjclose[i] ?? null,
+      date: iso(t),
+      open: quote.open?.[i] ?? null,
+      high: quote.high?.[i] ?? null,
+      low: quote.low?.[i] ?? null,
+      close: quote.close?.[i] ?? null,
+      volume: quote.volume?.[i] ?? null,
+      adjClose: adjclose[i] ?? null,
     }))
   );
 }
@@ -2307,12 +2328,15 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
 
     const netDebtToEbitda = netDebt != null && ebitdaAnnual != null && ebitdaAnnual !== 0
       ? +(netDebt / ebitdaAnnual).toFixed(2) : null;
-    const interestCoverage = ebitAnnual != null && interestAnnual != null && interestAnnual !== 0
+    const interestCoverageEbit = ebitAnnual != null && interestAnnual != null && interestAnnual !== 0
       ? +(ebitAnnual / Math.abs(interestAnnual)).toFixed(2) : null;
+    const interestCoverageEbitda = ebitdaAnnual != null && interestAnnual != null && interestAnnual !== 0
+      ? +(ebitdaAnnual / Math.abs(interestAnnual)).toFixed(2) : null;
+    const interestCoverage = interestCoverageEbit;
 
     let creditStressFlag: boolean | null = null;
-    if (netDebtToEbitda != null && interestCoverage != null) {
-      creditStressFlag = netDebtToEbitda > 2.5 && interestCoverage < 3;
+    if (netDebtToEbitda != null && interestCoverageEbit != null) {
+      creditStressFlag = netDebtToEbitda > 2.5 && interestCoverageEbit < 3;
     }
 
     let debtTier: string | null = null;
@@ -2333,12 +2357,16 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
     const unavailableMetrics: string[] = [];
     if (netDebtToEbitda == null) unavailableMetrics.push("netDebtToEbitda");
     if (interestCoverage == null) unavailableMetrics.push("interestCoverage");
+    if (interestCoverageEbit == null) unavailableMetrics.push("interestCoverageEbit");
+    if (interestCoverageEbitda == null) unavailableMetrics.push("interestCoverageEbitda");
     if (creditStressFlag == null) unavailableMetrics.push("creditStressFlag");
 
     const computedMetrics: string[] = [];
     if (netDebt != null) computedMetrics.push("netDebtUsd");
     if (netDebtToEbitda != null) computedMetrics.push("netDebtToEbitda");
     if (interestCoverage != null) computedMetrics.push("interestCoverage");
+    if (interestCoverageEbit != null) computedMetrics.push("interestCoverageEbit");
+    if (interestCoverageEbitda != null) computedMetrics.push("interestCoverageEbitda");
     if (creditStressFlag != null) computedMetrics.push("creditStressFlag");
     if (debtTier != null) computedMetrics.push("debtTier");
 
@@ -2370,6 +2398,8 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
       interestExpenseUsd: interestAnnual,
       netDebtToEbitda,
       interestCoverage,
+      interestCoverageEbit,
+      interestCoverageEbitda,
       creditStressFlag,
       debtTier,
       dataQuality,
@@ -2548,16 +2578,40 @@ export async function getEarningsMomentum(ticker: string | string[]): Promise<st
       else historicalSurpriseSignal = "NEGATIVE";
     }
 
-    const revisions = [revision30d, revision90d].filter((v): v is number => v != null);
     let forwardRevisionSignal = "UNKNOWN";
-    if (revisions.length > 0) {
-      if (revisions.some((r) => r <= -3)) forwardRevisionSignal = "NEGATIVE";
-      else if (revisions.some((r) => r >= 3)) forwardRevisionSignal = "POSITIVE";
+    let revisionSignalDriver = "none";
+    if (revision30d != null) {
+      revisionSignalDriver = "30d";
+      if (revision30d <= -3) forwardRevisionSignal = "NEGATIVE";
+      else if (revision30d >= 3) forwardRevisionSignal = "POSITIVE";
+      else if (revision7d != null && revision7d <= -3) {
+        revisionSignalDriver = "30d_neutral_7d";
+        forwardRevisionSignal = "NEGATIVE";
+      } else if (revision7d != null && revision7d >= 3) {
+        revisionSignalDriver = "30d_neutral_7d";
+        forwardRevisionSignal = "POSITIVE";
+      } else forwardRevisionSignal = "NEUTRAL";
+    } else if (revision7d != null) {
+      revisionSignalDriver = "7d";
+      if (revision7d <= -3) forwardRevisionSignal = "NEGATIVE";
+      else if (revision7d >= 3) forwardRevisionSignal = "POSITIVE";
       else forwardRevisionSignal = "NEUTRAL";
+    } else if (revision90d != null) {
+      revisionSignalDriver = "90d_fallback";
+      if (revision90d <= -3) forwardRevisionSignal = "NEGATIVE";
+      else if (revision90d >= 3) forwardRevisionSignal = "POSITIVE";
+      else forwardRevisionSignal = "NEUTRAL";
+    }
+    const compositeMethodNote = "Forward revision signal uses 30d revision as primary, 7d as confirmation when 30d is neutral or missing, and 90d only as fallback/context; a negative 90d revision does not override positive recent revisions.";
+    if (revision30d != null && revision30d >= 3 && revision90d != null && revision90d <= -3) {
+      warnings.push({
+        code: "LONGER_LOOKBACK_REVISION_DIVERGENCE",
+        message: "Recent EPS revisions are positive while the 90d revision remains negative.",
+      });
     }
 
     const mixedNegativeRevision = beatRate != null && beatRate >= 0.75
-      && [revision30d, revision90d].some((r) => r != null && r < 0);
+      && [revision30d, revision7d].some((r) => r != null && r <= -3);
     if (mixedNegativeRevision) {
       warnings.push({
         code: "MIXED_EARNINGS_SIGNAL",
@@ -2616,6 +2670,8 @@ export async function getEarningsMomentum(ticker: string | string[]): Promise<st
       forwardRevisionSignal,
       compositeMomentumSignal,
       interpretationNote: interpretationNoteBySignal[compositeMomentumSignal],
+      compositeMethodNote,
+      revisionSignalDriver,
       warnings,
       dataQuality,
       dataDate: getLastTradingDate(),
@@ -2641,7 +2697,10 @@ export async function getOptionsFlowSummary(ticker: string, expiryHint?: string)
     const lastPrice = fi.lastPrice as number | null;
 
     // Select expiry
-    const selectedExpiry = expiryHint && dates.includes(expiryHint) ? expiryHint : dates[0];
+    const selectedExpiry = expiryHint || dates[0];
+    if (!dates.includes(selectedExpiry)) {
+      return JSON.stringify(invalidExpiryPayload(ticker, selectedExpiry, dates));
+    }
 
     // If the selected expiry is the default (first), reuse firstFetch data;
     // otherwise make one more subrequest for the specific date's chain
@@ -5129,7 +5188,7 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number): Promi
       referenceTargetPct <= 90 ? "ACCEPTABLE" :
       referenceTargetPct <= 100 ? "CAUTION" : "AVOID";
 
-    const tag =
+    const inferredTag =
       referenceTargetPct < 40 ? "SPECULATIVE" :
       referenceTargetPct < 80 ? "LONG" :
       referenceTargetPct < 100 ? "NEAR" : "INVERTED";
@@ -5142,7 +5201,9 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number): Promi
       ioPt,
       eqfPct: referenceTargetPct,
       bracket,
-      tag,
+      inferredTag,
+      tag: inferredTag,
+      tagNote: "Deprecated: tag is inferred from currentPrice/referenceTargetPrice distance. Use inferredTag.",
       invertedFlag: referenceTargetPct >= 100,
       dataDate: (fi.lastTradeDate as string | null) ?? new Date().toISOString().slice(0, 10),
     });
@@ -5485,13 +5546,16 @@ export async function getMarketSnapshot(
 
 // ── get_options_summary ───────────────────────────────────────────────────────
 
-export async function getOptionsSummary(ticker: string): Promise<string> {
+export async function getOptionsSummary(ticker: string, expiryHint?: string): Promise<string> {
   try {
     const expData = JSON.parse(await getOptionExpirationDates(ticker)) as string[];
     if (!expData || expData.length === 0) {
       return JSON.stringify({ ticker, error: "No options data available" });
     }
-    const expiry = expData[0];
+    const expiry = expiryHint || expData[0];
+    if (!expData.includes(expiry)) {
+      return JSON.stringify(invalidExpiryPayload(ticker, expiry, expData));
+    }
     // Fetch all contracts without illiquid filtering and with strike sort so we get the full chain
     const callsRaw = JSON.parse(await getOptionChain(ticker, expiry, "calls", 200, 0, 0, null, null, "all", "strike", 20, true)) as Record<string, unknown>;
     const putsRaw = JSON.parse(await getOptionChain(ticker, expiry, "puts", 200, 0, 0, null, null, "all", "strike", 20, true)) as Record<string, unknown>;
@@ -5893,6 +5957,19 @@ function eventTypeFromKeywords(title: string, summary: string): string {
   return "other";
 }
 
+function normalizedEventTitleStem(ticker: string, title: string | null): string {
+  const stop = new Set(["yahoo", "finance", "finnhub", "globenewswire", "press", "release", "inc", "corp", "corporation", "company", "plc", "ltd", "llc"]);
+  const tickerLower = ticker.toLowerCase();
+  return _str(title)
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(/\s+/)
+    .filter((word) => word && word !== tickerLower && !stop.has(word))
+    .join(" ")
+    .slice(0, 80);
+}
+
 function eventTypeFromForm(formType: string): string {
   const f = formType.toUpperCase();
   if (f === "10-Q" || f === "10-K") return "earnings";
@@ -5902,29 +5979,92 @@ function eventTypeFromForm(formType: string): string {
   return "other";
 }
 
-function canonicalUrl(url: string | null): string | null {
-  const u = _str(url).trim();
-  if (!u) return null;
-  try {
-    const parsed = new URL(u);
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString();
-  } catch {
-    return null;
-  }
-}
-
-function makeDupGroupId(ticker: string, title: string | null, publishedAt: string | null, issuer: string | null, url: string | null): string | null {
-  const normTitle = _str(title).toLowerCase().replace(/\s+/g, " ").trim().slice(0, 80);
+function makeDupGroupId(ticker: string, title: string | null, publishedAt: string | null, issuer: string | null): string | null {
+  const normTitle = normalizedEventTitleStem(ticker, title);
   const day = _str(publishedAt).slice(0, 10);
   const entity = (_str(issuer) || ticker).toUpperCase();
-  const canon = canonicalUrl(url) ?? "";
-  if (!normTitle && !day && !canon) return null;
+  if (!normTitle && !day) return null;
   let h = 0;
-  const s = `${normTitle}|${day}|${entity}|${canon}`;
+  const s = `${normTitle}|${day}|${entity}`;
   for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
   return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+function xmlTag(xml: string, path: string[]): string | null {
+  let scope = xml;
+  for (const tag of path) {
+    const re = new RegExp(`<(?:\\w+:)?${tag}\\b[^>]*>([\\s\\S]*?)<\\/(?:\\w+:)?${tag}>`, "i");
+    const m = scope.match(re);
+    if (!m) return null;
+    scope = m[1];
+  }
+  return scope.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() || null;
+}
+
+function xmlBlock(xml: string, tag: string): string | null {
+  const m = xml.match(new RegExp(`<(?:\\w+:)?${tag}\\b[^>]*>([\\s\\S]*?)<\\/(?:\\w+:)?${tag}>`, "i"));
+  return m ? m[1] : null;
+}
+
+function parseForm4Transaction(xml: string): Record<string, unknown> | null {
+  const tx = xmlBlock(xml, "nonDerivativeTransaction") ?? xmlBlock(xml, "derivativeTransaction");
+  if (!tx) return null;
+  const owner = xmlTag(xml, ["reportingOwnerId", "rptOwnerName"]);
+  const officerTitle = xmlTag(xml, ["reportingOwnerRelationship", "officerTitle"]);
+  const roles: string[] = [];
+  for (const [tag, label] of [["isDirector", "director"], ["isOfficer", "officer"], ["isTenPercentOwner", "ten_percent_owner"], ["isOther", "other"]]) {
+    if (["1", "true"].includes(_str(xmlTag(xml, ["reportingOwnerRelationship", tag])).toLowerCase())) roles.push(label);
+  }
+  const num = (value: string | null): number | null => {
+    if (value == null) return null;
+    const n = Number(value.replace(/,/g, ""));
+    return Number.isFinite(n) ? n : null;
+  };
+  const code = xmlTag(tx, ["transactionCoding", "transactionCode"]);
+  const shares = num(xmlTag(tx, ["transactionAmounts", "transactionShares", "value"]));
+  const price = num(xmlTag(tx, ["transactionAmounts", "transactionPricePerShare", "value"]));
+  const labels: Record<string, string> = {
+    P: "Purchase",
+    S: "Sale",
+    A: "Grant/Award",
+    D: "Disposition",
+    M: "Option exercise/conversion",
+    F: "Tax withholding/payment",
+  };
+  return {
+    owner,
+    role: officerTitle || roles.join(", ") || null,
+    transactionCode: code,
+    transactionLabel: labels[_str(code).toUpperCase()] ?? "Other/Unclassified",
+    shares,
+    price,
+    value: shares != null && price != null ? Math.round(shares * price * 100) / 100 : null,
+    ownershipForm: xmlTag(tx, ["ownershipNature", "directOrIndirectOwnership", "value"]),
+    transactionDate: xmlTag(tx, ["transactionDate", "value"]),
+  };
+}
+
+async function tryAttachForm4Transaction(item: Record<string, unknown>, filing: Record<string, unknown>, warnings: Record<string, unknown>[]): Promise<void> {
+  if (_str(filing.filingType).toUpperCase() !== "4") return;
+  const url = _str(item.url);
+  if (!url.startsWith("https://www.sec.gov/Archives/")) {
+    warnings.push({ code: "FORM4_PARSE_UNAVAILABLE", message: "Form 4 primary document URL is unavailable.", severity: "warning" });
+    return;
+  }
+  const xml = await edgarGetHtml(url, 2_000_000);
+  const parsed = parseForm4Transaction(xml ?? "");
+  if (!parsed) {
+    warnings.push({ code: "FORM4_PARSE_UNAVAILABLE", message: "Form 4 transaction details could not be parsed from the primary document.", severity: "warning" });
+    return;
+  }
+  item.insiderTransaction = parsed;
+  const label = _str(parsed.transactionLabel) || "Insider transaction";
+  const owner = _str(parsed.owner) || "reporting owner";
+  const shares = typeof parsed.shares === "number" ? `${Math.round(parsed.shares).toLocaleString("en-US")} shares` : "shares unavailable";
+  const value = typeof parsed.value === "number" ? `, value $${Math.round(parsed.value).toLocaleString("en-US")}` : "";
+  item.title = `Form 4: ${label} by ${owner}`;
+  item.summary = shortText(`${label} by ${owner}: ${shares}${value}.`);
+  item.evidenceText = shortText(`SEC Form 4 transaction code ${_str(parsed.transactionCode) || "unknown"} on ${_str(parsed.transactionDate) || _str(item.filingDate)}.`);
 }
 
 function withinDateWindow(publishedAt: string | null, startDate = "", endDate = "", lookbackDays?: number): boolean {
@@ -6023,7 +6163,7 @@ function buildYfEventItem(
 
   const relevance = `${title} ${summary}`.toUpperCase().includes(ticker.toUpperCase()) ? "HIGH" : "LOW";
   const confidence = !url || relevance !== "HIGH" ? "LOW" : "MEDIUM";
-  const duplicateGroupId = makeDupGroupId(ticker, title, publishedAt, null, url);
+  const duplicateGroupId = makeDupGroupId(ticker, title, publishedAt, null);
   if (!duplicateGroupId) {
     warnings.push({ code: "DEDUPE_WEAK_KEY", message: "Weak dedupe key for at least one item.", severity: "warning" });
   }
@@ -6083,7 +6223,7 @@ function buildSecEventItem(
     url = "";
     warnings.push({ code: "SEC_URL_INVALID", message: "SEC event URL missing or invalid SEC Archives URL.", severity: "warning" });
   }
-  const duplicateGroupId = makeDupGroupId(ticker, `${filingType} filed`, publishedAt, issuer, url || null);
+  const duplicateGroupId = makeDupGroupId(ticker, `${filingType} filed`, publishedAt, issuer);
   if (!duplicateGroupId) {
     warnings.push({ code: "DEDUPE_WEAK_KEY", message: "Weak dedupe key for at least one item.", severity: "warning" });
   }
@@ -6309,14 +6449,16 @@ async function collectSecEvents(
   for (let i = 0; i < forms.length && items.length < maxResults; i++) {
     const form = _str(forms[i]).toUpperCase();
     if (wanted.size > 0 && !wanted.has(form)) continue;
-    const { item, warnings: w } = buildSecEventItem(ticker, {
+    const filing = {
       filingType: form,
       filingDate: filingDates[i] ?? "",
       acceptedAt: accepted[i] ?? "",
       accessionNumber: accessions[i] ?? "",
       primaryDocument: primaryDocs[i] ?? "",
       cikInt,
-    }, retrievedAt, issuer);
+    };
+    const { item, warnings: w } = buildSecEventItem(ticker, filing, retrievedAt, issuer);
+    await tryAttachForm4Transaction(item, filing, w);
     if (!withinDateWindow(_str(item.publishedAt) || null, startDate, endDate, lookbackDays)) continue;
     items.push(item);
     warnings.push(...w);
@@ -6488,7 +6630,7 @@ async function collectGlobeNewswireEvents(
           });
         }
 
-        const duplicateGroupId = makeDupGroupId(tickerU, title, publishedAt, issuer, link || guid);
+        const duplicateGroupId = makeDupGroupId(tickerU, title, publishedAt, issuer);
         if (!duplicateGroupId) {
           warnings.push({ code: "DEDUPE_WEAK_KEY", message: "Weak dedupe key for at least one GlobeNewswire item.", severity: "warning" });
         }
@@ -6580,7 +6722,7 @@ async function collectFinnhubEvents(
       const originalSource = _str(n.source).trim() || null;
       const urlStr = _str(n.url).trim() || null;
       const publishedAt = normalizeIso(n.datetime);
-      const duplicateGroupId = makeDupGroupId(tickerU, title, publishedAt, null, urlStr);
+      const duplicateGroupId = makeDupGroupId(tickerU, title, publishedAt, null);
       if (!duplicateGroupId) {
         warnings.push({ code: "DEDUPE_WEAK_KEY", message: "Weak dedupe key for at least one item.", severity: "warning" });
       }
@@ -6839,6 +6981,7 @@ export async function getPublicEventTimeline(
       url: item.url,
       confidence: item.confidence,
       duplicateGroupId: item.duplicateGroupId,
+      sourceRefs: item.sourceRefs ?? [],
     }))
     .sort((a, b) => newestFirst
       ? _str(b.timestamp).localeCompare(_str(a.timestamp))
@@ -8025,10 +8168,12 @@ export async function extractRiskFactorMentions(
     for (const row of list.slice(0, 3)) {
       if (!row || typeof row !== "object") continue;
       const item = row as Record<string, unknown>;
+      const excerpt = compactExcerpt(item.context ?? item.excerpt ?? "");
       matches.push({
         term,
         sectionHeading: item.sectionHeading ?? "Risk Factors",
-        excerpt: compactExcerpt(item.context ?? item.excerpt ?? ""),
+        excerpt,
+        excerptAvailable: excerpt.length > 0,
         confidence: "MEDIUM",
         evidence: {
           filingDate: search.filingDate ?? null,
@@ -8106,17 +8251,22 @@ export async function extractChinaExposure(
       const heading = String(s.heading ?? "");
       const low = heading.toLowerCase();
       for (const term of terms) {
-        if (low.includes(term.toLowerCase())) found.push({ source: "section", term, sectionHeading: heading });
+        if (low.includes(term.toLowerCase())) {
+          const excerpt = compactExcerpt(heading);
+          found.push({ source: "section", term, sectionHeading: heading, excerpt, excerptAvailable: excerpt.length > 0 });
+        }
       }
     }
     for (const tbl of tables) {
       if (!tbl || typeof tbl !== "object") continue;
       const t = tbl as Record<string, unknown>;
       const rowLabels = Array.isArray(t.rowLabels) ? t.rowLabels.map((v) => String(v)) : [];
-      const haystack = `${String(t.title ?? "")} ${rowLabels.join(" ")}`.toLowerCase();
+      const haystackRaw = `${String(t.title ?? "")} ${rowLabels.join(" ")}`;
+      const haystack = haystackRaw.toLowerCase();
       for (const term of terms) {
         if (haystack.includes(term.toLowerCase())) {
-          found.push({ source: "table", term, tableTitle: t.title ?? null, sourceTableId: t.tableId ?? null, sectionId: t.sectionId ?? null });
+          const excerpt = compactExcerpt(haystackRaw);
+          found.push({ source: "table", term, tableTitle: t.title ?? null, sourceTableId: t.tableId ?? null, sectionId: t.sectionId ?? null, excerpt, excerptAvailable: excerpt.length > 0 });
         }
       }
     }
@@ -8132,6 +8282,19 @@ export async function extractChinaExposure(
   const bankEvidence = collect(bankTerms);
   const manuEvidence = collect(manuTerms);
   const riskEvidence = Array.isArray(riskMentions.matches) ? riskMentions.matches : [];
+  for (const ev of riskEvidence) {
+    if (ev && typeof ev === "object") {
+      const item = ev as Record<string, unknown>;
+      const excerpt = compactExcerpt(item.excerpt ?? item.context ?? "");
+      if (excerpt) {
+        item.excerpt = excerpt;
+        item.excerptAvailable = true;
+      } else {
+        delete item.excerpt;
+        item.excerptAvailable = false;
+      }
+    }
+  }
   const nonRevenueFound = entityEvidence.length > 0 || bankEvidence.length > 0 || manuEvidence.length > 0 || riskEvidence.length > 0;
   const revStatus = String(revenue.status ?? "NOT_FOUND");
   const revFound = revStatus === "FOUND_REVENUE_EXPOSURE";
