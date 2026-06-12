@@ -131,7 +131,7 @@ function getLastTradingDate(timestamps?: number[]): string {
   return d.toISOString().slice(0, 10);
 }
 
-const PLACEHOLDER_IV_THRESHOLD = 0.0001;
+const PLACEHOLDER_IV_THRESHOLD = 0.10;
 
 interface DataQuality {
   zeroBidAskCount: number;
@@ -139,8 +139,35 @@ interface DataQuality {
   placeholderIvCount: number;
   staleLastTradeCount: number;
   returnedContracts: number;
+  overall: "HIGH" | "MEDIUM" | "LOW" | "PARTIAL";
   quality: "HIGH" | "MEDIUM" | "LOW";
+  volumeQuality: "OK" | "UNAVAILABLE";
+  oiQuality: "OK" | "STALE" | "UNAVAILABLE";
+  ivQuality: "OK" | "PARTIAL" | "UNAVAILABLE";
+  priceQuality: "OK";
   warnings: string[];
+}
+
+function isPlaceholderIv(v: unknown): boolean {
+  if (v == null) return true;
+  const n = Number(v);
+  return !Number.isFinite(n) || n <= PLACEHOLDER_IV_THRESHOLD;
+}
+
+function normalizeContractIv(c: Record<string, unknown>): Record<string, unknown> {
+  if ("impliedVolatility" in c && isPlaceholderIv(c.impliedVolatility)) {
+    return { ...c, impliedVolatility: null };
+  }
+  return c;
+}
+
+function zeroOpenInterestRatio(contracts: Record<string, unknown>[]): number {
+  if (contracts.length === 0) return 1;
+  return contracts.filter(c => Number(c.openInterest ?? 0) <= 0).length / contracts.length;
+}
+
+function majorityZeroOpenInterest(contracts: Record<string, unknown>[]): boolean {
+  return contracts.length > 0 && zeroOpenInterestRatio(contracts) > 0.5;
 }
 
 function computeDataQuality(
@@ -153,6 +180,11 @@ function computeDataQuality(
     return {
       zeroBidAskCount: 0, zeroOpenInterestCount: 0, placeholderIvCount: 0,
       staleLastTradeCount: 0, returnedContracts: 0, quality: "LOW",
+      overall: "LOW",
+      volumeQuality: "UNAVAILABLE",
+      oiQuality: "UNAVAILABLE",
+      ivQuality: "UNAVAILABLE",
+      priceQuality: "OK",
       warnings: ["NO_CONTRACTS_RETURNED"],
     };
   }
@@ -173,8 +205,7 @@ function computeDataQuality(
     const oi = Number(c.openInterest ?? 0);
     if (oi <= 0) zeroOI++;
 
-    const iv = Number(c.impliedVolatility ?? 0);
-    if (iv <= PLACEHOLDER_IV_THRESHOLD) placeholderIv++;
+    if (isPlaceholderIv(c.impliedVolatility)) placeholderIv++;
 
     if (dataDateMs != null) {
       const ltd = c.lastTradeDate;
@@ -227,7 +258,14 @@ function computeDataQuality(
   if (staleTrade > n * 0.5) warnings.push("MAJORITY_STALE_LAST_TRADE");
 
   return { zeroBidAskCount: zeroBidAsk, zeroOpenInterestCount: zeroOI, placeholderIvCount: placeholderIv,
-           staleLastTradeCount: staleTrade, returnedContracts: n, quality, warnings };
+           staleLastTradeCount: staleTrade, returnedContracts: n,
+           overall: quality === "LOW" ? "PARTIAL" : quality,
+           quality,
+           volumeQuality: n > 0 ? "OK" : "UNAVAILABLE",
+           oiQuality: zeroOI > n * 0.5 ? "STALE" : "OK",
+           ivQuality: placeholderIv > n * 0.5 ? "UNAVAILABLE" : (placeholderIv > 0 ? "PARTIAL" : "OK"),
+           priceQuality: "OK",
+           warnings };
 }
 
 function sortByRelevance(
@@ -239,8 +277,6 @@ function sortByRelevance(
     const bBid = Number(b.bid ?? 0), bAsk = Number(b.ask ?? 0);
     const aOI = Number(a.openInterest ?? 0), aVol = Number(a.volume ?? 0);
     const bOI = Number(b.openInterest ?? 0), bVol = Number(b.volume ?? 0);
-    const aIV = Number(a.impliedVolatility ?? 0);
-    const bIV = Number(b.impliedVolatility ?? 0);
     const aStrike = Number(a.strike ?? 0), bStrike = Number(b.strike ?? 0);
 
     const aValidQuote = aBid > 0 && aAsk > 0 ? 1 : 0;
@@ -251,8 +287,8 @@ function sortByRelevance(
     const bLiquidity = (bOI > 0 || bVol > 0) ? 1 : 0;
     if (bLiquidity !== aLiquidity) return bLiquidity - aLiquidity;
 
-    const aValidIv = aIV > PLACEHOLDER_IV_THRESHOLD ? 1 : 0;
-    const bValidIv = bIV > PLACEHOLDER_IV_THRESHOLD ? 1 : 0;
+    const aValidIv = !isPlaceholderIv(a.impliedVolatility) ? 1 : 0;
+    const bValidIv = !isPlaceholderIv(b.impliedVolatility) ? 1 : 0;
     if (bValidIv !== aValidIv) return bValidIv - aValidIv;
 
     if (underlyingPrice != null && underlyingPrice > 0) {
@@ -923,6 +959,35 @@ export async function getOptionChain(
 
   // auth=true (default): same crumb requirement as getOptionExpirationDates.
   try {
+    const expirationDates = JSON.parse(await getOptionExpirationDates(ticker)) as string[];
+    if (!Array.isArray(expirationDates) || expirationDates.length === 0) {
+      return JSON.stringify({
+        error: true,
+        code: "NO_OPTIONS_DATA",
+        message: `No options calendar available for ${ticker}`,
+        ticker,
+      });
+    }
+    if (!expirationDates.includes(expDate)) {
+      const targetMs = new Date(`${expDate}T00:00:00.000Z`).getTime();
+      const nearestExpiration = Number.isFinite(targetMs)
+        ? [...expirationDates].sort((a, b) =>
+            Math.abs(new Date(`${a}T00:00:00.000Z`).getTime() - targetMs) -
+            Math.abs(new Date(`${b}T00:00:00.000Z`).getTime() - targetMs)
+          )[0]
+        : null;
+      return JSON.stringify({
+        error: true,
+        code: "INVALID_EXPIRY_DATE",
+        message: `${expDate} is not in the options calendar for ${ticker}`,
+        hint: "Call get_option_expiration_dates first and pass one of the returned dates.",
+        ticker,
+        requestedExpiration: expDate,
+        nearestExpiration,
+        validExpirations: expirationDates,
+      });
+    }
+
     const [y, m, day] = expDate.split("-").map(Number);
     const ts = Math.floor(Date.UTC(y, m - 1, day) / 1000);
 
@@ -945,7 +1010,8 @@ export async function getOptionChain(
 
     const underlyingPrice = typeof quote.regularMarketPrice === "number" ? quote.regularMarketPrice : null;
 
-    let contracts = (opts[optType] ?? []) as Record<string, unknown>[];
+    const warnings: string[] = [];
+    let contracts = ((opts[optType] ?? []) as Record<string, unknown>[]).map(normalizeContractIv);
     if (strikeMin != null) {
       contracts = contracts.filter(c => ((c.strike as number) || 0) >= strikeMin);
     }
@@ -976,12 +1042,16 @@ export async function getOptionChain(
 
     // include_illiquid=false: drop contracts with zero bid/ask AND zero OI
     if (!includeIlliquid) {
+      const beforeLiquidityFilter = contracts.length;
       contracts = contracts.filter(c => {
         const bid = Number(c.bid ?? 0);
         const ask = Number(c.ask ?? 0);
         const oi = Number(c.openInterest ?? 0);
         return bid > 0 || ask > 0 || oi > 0;
       });
+      if (beforeLiquidityFilter > 0 && contracts.length === 0) {
+        warnings.push("ALL_CONTRACTS_EXCLUDED_BY_LIQUIDITY_FILTER");
+      }
     }
 
     if (sortBy === "relevance") {
@@ -1009,6 +1079,10 @@ export async function getOptionChain(
       returnedContracts,
       truncated: returnedContracts < totalContracts,
       dataQuality,
+      warnings,
+      ...(warnings.includes("ALL_CONTRACTS_EXCLUDED_BY_LIQUIDITY_FILTER")
+        ? { note: "Zero contracts returned after liquidity filtering. During pre-market or T+1 OI lag windows, retry with include_illiquid=true." }
+        : {}),
       filtersApplied: {
         max_contracts: maxContracts,
         min_open_interest: minOpenInterest,
@@ -1056,8 +1130,8 @@ async function yGetFullOptions(
   const opts = (result.options as Record<string, unknown[]>[])?.[0] ?? {};
   return {
     dates,
-    calls: (opts.calls ?? []) as Record<string, unknown>[],
-    puts: (opts.puts ?? []) as Record<string, unknown>[],
+    calls: ((opts.calls ?? []) as Record<string, unknown>[]).map(normalizeContractIv),
+    puts: ((opts.puts ?? []) as Record<string, unknown>[]).map(normalizeContractIv),
   };
 }
 
@@ -1142,6 +1216,11 @@ function dataAgeHoursFromTs(tsSeconds: number, nowMs: number): number {
 function gapPctFromClose(price: number, prevClose: number): number {
   return Math.round(((price - prevClose) / prevClose * 100) * 100) / 100;
 }
+
+const OVERNIGHT_SUSPENSION_REASON =
+  "True overnight window (20:00-04:00 ET) unavailable via Yahoo Finance API";
+const OVERNIGHT_RELIABILITY_WARNING =
+  "OTC_INDICATIVE data may lag actual price materially; use with extreme caution.";
 
 // ── get_overnight_quote ───────────────────────────────────────────────────────
 
@@ -1238,6 +1317,9 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
       if (fallbackIdx === -1) {
         return JSON.stringify({
           ticker,
+          status: "SUSPENDED",
+          suspensionReason: OVERNIGHT_SUSPENSION_REASON,
+          reliabilityWarning: OVERNIGHT_RELIABILITY_WARNING,
           overnightPrice: null,
           overnightTime: null,
           overnightHigh: null,
@@ -1258,6 +1340,9 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
 
       return JSON.stringify({
         ticker,
+        status: "SUSPENDED",
+        suspensionReason: OVERNIGHT_SUSPENSION_REASON,
+        reliabilityWarning: OVERNIGHT_RELIABILITY_WARNING,
         overnightPrice: fbClose,
         overnightTime: iso(fbTs),
         overnightHigh: highs[fallbackIdx] ?? null,
@@ -1297,9 +1382,17 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
     const gapPct = prevClose && overnightPrice != null
       ? gapPctFromClose(overnightPrice, prevClose)
       : null;
+    const suspendedOvernight = dataSource === "OTC_INDICATIVE" && dataAgeHours != null && dataAgeHours > 6;
 
     return JSON.stringify({
       ticker,
+      ...(suspendedOvernight
+        ? {
+            status: "SUSPENDED",
+            suspensionReason: OVERNIGHT_SUSPENSION_REASON,
+            reliabilityWarning: OVERNIGHT_RELIABILITY_WARNING,
+          }
+        : { status: "OK" }),
       overnightPrice,
       overnightTime,
       overnightHigh,
@@ -2555,12 +2648,12 @@ export async function getOptionsFlowSummary(ticker: string, expiryHint?: string)
     let calls: Record<string, unknown>[];
     let puts: Record<string, unknown>[];
     if (selectedExpiry === dates[0]) {
-      calls = firstFetch.calls;
-      puts = firstFetch.puts;
+      calls = firstFetch.calls.map(normalizeContractIv);
+      puts = firstFetch.puts.map(normalizeContractIv);
     } else {
       const specific = await yGetFullOptions(ticker, selectedExpiry);
-      calls = specific.calls;
-      puts = specific.puts;
+      calls = specific.calls.map(normalizeContractIv);
+      puts = specific.puts.map(normalizeContractIv);
     }
 
     if (!Array.isArray(calls) || !Array.isArray(puts)) {
@@ -2601,8 +2694,8 @@ export async function getOptionsFlowSummary(ticker: string, expiryHint?: string)
           }
         }
       }
-      if (rawAtmIV != null && rawAtmIV > PLACEHOLDER_IV_THRESHOLD) {
-        atmIV = +rawAtmIV.toFixed(3);
+      if (!isPlaceholderIv(rawAtmIV)) {
+        atmIV = +Number(rawAtmIV).toFixed(3);
       } else {
         flowWarnings.push("ATM_IV_PLACEHOLDER");
       }
@@ -2622,7 +2715,8 @@ export async function getOptionsFlowSummary(ticker: string, expiryHint?: string)
 
     // Max pain — suppress when OI is all-zero
     let maxPainStrike: number | null = null;
-    if (totalCallOI + totalPutOI <= 0) {
+    const allContracts = [...calls, ...puts];
+    if (totalCallOI + totalPutOI <= 0 || majorityZeroOpenInterest(allContracts)) {
       flowWarnings.push("MAX_PAIN_UNAVAILABLE_ZERO_OI");
     } else {
       const allStrikes = [...new Set([
@@ -2660,7 +2754,7 @@ export async function getOptionsFlowSummary(ticker: string, expiryHint?: string)
     }
 
     const dataDate = getLastTradingDate();
-    const dataQuality = computeDataQuality([...calls, ...puts], dataDate);
+    const dataQuality = computeDataQuality(allContracts, dataDate);
 
     return JSON.stringify({
       ticker,
@@ -4838,7 +4932,9 @@ export async function getFilingDocument(
 
 export async function getOptionsFlowScan(ticker: string, windowLabel: string): Promise<string> {
   try {
-    const { calls, puts } = await yGetFullOptions(ticker);
+    const fullOptions = await yGetFullOptions(ticker);
+    const calls = fullOptions.calls.map(normalizeContractIv);
+    const puts = fullOptions.puts.map(normalizeContractIv);
     if (!calls.length && !puts.length) {
       return JSON.stringify({ error: true, message: `No options data for ${ticker}`, ticker });
     }
@@ -4857,10 +4953,11 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
     // Total OI guard for max pain
     const totalCallOI = calls.reduce((s, c) => s + ((c.openInterest as number) || 0), 0);
     const totalPutOI = puts.reduce((s, p) => s + ((p.openInterest as number) || 0), 0);
+    const allContracts = [...calls, ...puts];
 
     let maxPainStrike: number | null = null;
     const scanWarnings: string[] = [];
-    if (totalCallOI + totalPutOI <= 0) {
+    if (totalCallOI + totalPutOI <= 0 || majorityZeroOpenInterest(allContracts)) {
       scanWarnings.push("MAX_PAIN_UNAVAILABLE_ZERO_OI");
     } else {
       const oiByStrike = new Map<number, number>();
@@ -4894,7 +4991,7 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
           rawAtmIv = iv;
         }
       }
-      if (rawAtmIv != null && rawAtmIv > PLACEHOLDER_IV_THRESHOLD) {
+      if (!isPlaceholderIv(rawAtmIv)) {
         atmIv = rawAtmIv;
       } else {
         scanWarnings.push("ATM_IV_PLACEHOLDER");
@@ -4902,14 +4999,14 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
     }
 
     // dataQuality
-    const dataQuality = computeDataQuality([...calls, ...puts], getLastTradingDate());
+    const dataQuality = computeDataQuality(allContracts, getLastTradingDate());
     const quality = dataQuality.quality;
-    const allContracts = calls.length + puts.length;
+    const allContractCount = calls.length + puts.length;
     const placeholderIvCount = dataQuality.placeholderIvCount;
 
     let ivPctile: number | null = null;
     let chartTimestamps: number[] = [];
-    if (quality === "LOW" && placeholderIvCount > allContracts * 0.5) {
+    if (quality === "LOW" && placeholderIvCount > allContractCount * 0.5) {
       scanWarnings.push("IV_PERCENTILE_UNAVAILABLE_PLACEHOLDER_IV");
     } else {
       try {
@@ -5398,8 +5495,8 @@ export async function getOptionsSummary(ticker: string): Promise<string> {
     // Fetch all contracts without illiquid filtering and with strike sort so we get the full chain
     const callsRaw = JSON.parse(await getOptionChain(ticker, expiry, "calls", 200, 0, 0, null, null, "all", "strike", 20, true)) as Record<string, unknown>;
     const putsRaw = JSON.parse(await getOptionChain(ticker, expiry, "puts", 200, 0, 0, null, null, "all", "strike", 20, true)) as Record<string, unknown>;
-    const calls = (callsRaw.contracts ?? []) as Record<string, unknown>[];
-    const puts = (putsRaw.contracts ?? []) as Record<string, unknown>[];
+    const calls = ((callsRaw.contracts ?? []) as Record<string, unknown>[]).map(normalizeContractIv);
+    const puts = ((putsRaw.contracts ?? []) as Record<string, unknown>[]).map(normalizeContractIv);
 
     const fi = JSON.parse(await getFastInfo(ticker)) as Record<string, unknown>;
     const currentPrice = fi.lastPrice as number | null;
@@ -5422,8 +5519,8 @@ export async function getOptionsSummary(ticker: string): Promise<string> {
           rawAtmIV = (c.impliedVolatility as number | null) ?? null;
         }
       }
-      if (rawAtmIV != null && rawAtmIV > PLACEHOLDER_IV_THRESHOLD) {
-        atmIV = +rawAtmIV.toFixed(4);
+      if (!isPlaceholderIv(rawAtmIV)) {
+        atmIV = +Number(rawAtmIV).toFixed(4);
       } else {
         summaryWarnings.push("ATM_IV_PLACEHOLDER");
       }
@@ -5435,9 +5532,12 @@ export async function getOptionsSummary(ticker: string): Promise<string> {
     const putOI = puts.reduce((s, c) => s + ((c.openInterest as number) || 0), 0);
     const pcRatioVolume = callVol > 0 ? +(putVol / callVol).toFixed(3) : null;
     const pcRatioOI = callOI > 0 ? +(putOI / callOI).toFixed(3) : null;
+    const allContracts = [...calls, ...puts];
+    const dataDate = getLastTradingDate();
+    const dataQuality = computeDataQuality(allContracts, dataDate);
 
     let maxPainStrike: number | null = null;
-    if (callOI + putOI <= 0) {
+    if (callOI + putOI <= 0 || majorityZeroOpenInterest(allContracts)) {
       summaryWarnings.push("MAX_PAIN_UNAVAILABLE_ZERO_OI");
     } else {
       const strikeSet = new Set([...calls.map(c => c.strike as number), ...puts.map(p => p.strike as number)]);
@@ -5450,9 +5550,6 @@ export async function getOptionsSummary(ticker: string): Promise<string> {
         if (total < minPain) { minPain = total; maxPainStrike = s; }
       }
     }
-
-    const dataDate = getLastTradingDate();
-    const dataQuality = computeDataQuality([...calls, ...puts], dataDate);
 
     return JSON.stringify({
       ticker, nearestExpiry: expiry, currentPrice,
@@ -5732,6 +5829,14 @@ const SOURCE_PRIORITY: Record<string, number> = {
   yahoo_finance_news: 5,
   other: 6,
 };
+
+function confidenceForSourceType(sourceType: unknown, fallback: unknown = "LOW"): string {
+  const src = _str(sourceType);
+  if (src === "sec_filing" || src === "company_ir") return "HIGH";
+  if (src === "press_release" || src === "yahoo_finance_press_releases" || src === "newswire") return "MEDIUM";
+  if (src === "company_news" || src === "yahoo_finance_news" || src === "yahoo_finance" || src === "finnhub") return "LOW";
+  return _str(fallback, "LOW");
+}
 
 function clampInt(value: number, fallback: number, min: number, max: number): number {
   const n = Number.isFinite(value) ? Math.trunc(value) : fallback;
@@ -6770,7 +6875,11 @@ export async function verifyCompanyEvent(
     if (!startDate && !endDate) return true;
     return withinDateWindow(_str(item.publishedAt) || null, startDate, endDate);
   });
-  const official = inRange.filter(item => OFFICIAL_SOURCE_TYPES.has(_str(item.sourceType)) && !!_str(item.url) && ["HIGH", "MEDIUM"].includes(_str(item.confidence)));
+  const official = inRange.filter(item =>
+    OFFICIAL_SOURCE_TYPES.has(_str(item.sourceType)) &&
+    !!_str(item.url) &&
+    ["HIGH", "MEDIUM"].includes(confidenceForSourceType(item.sourceType, item.confidence))
+  );
   const staleCutoff = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
   const staleOnly = matched.length > 0 && matched.every(item => _str(item.publishedAt).slice(0, 10) < staleCutoff);
   const conflicts: Record<string, unknown>[] = out.warnings.some(w => _str(w.code) === "TIMESTAMP_CONFLICT")
@@ -6787,7 +6896,7 @@ export async function verifyCompanyEvent(
     publishedAt: ev.publishedAt,
     retrievedAt: ev.retrievedAt,
     url: ev.url,
-    confidence: ev.confidence,
+    confidence: confidenceForSourceType(ev.sourceType, ev.confidence),
     evidenceText: shortText(ev.evidenceText || ev.summary || ev.title, 180),
   }));
   return JSON.stringify({
