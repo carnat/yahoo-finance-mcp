@@ -27,7 +27,14 @@ _FastMCP.tool = _patched_tool  # type: ignore[method-assign]
 def _reload_server():
     """Reload server module so the env var is picked up."""
     import importlib
-    import server as srv
+    import sys
+    # Trigger the first import so all submodules are in sys.modules.
+    import server as srv  # noqa: F401 (may be first import)
+    # Reload in dependency order: app → domain modules → server,
+    # so @yfinance_server.tool decorators always re-register on a fresh instance.
+    for _mod in ("yfmcp.app", "yfmcp.tools.system"):
+        if _mod in sys.modules:
+            importlib.reload(sys.modules[_mod])
     importlib.reload(srv)
     return srv
 

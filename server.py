@@ -20,21 +20,9 @@ import pandas as pd
 import yfinance as yf
 from mcp.server.fastmcp import FastMCP
 
-
-# Backward-compatible FastMCP decorator shim: ignore unsupported output_schema kwarg.
-_FASTMCP_TOOL_PARAMS = inspect.signature(FastMCP.tool).parameters
-_FASTMCP_TOOL_SUPPORTS_OUTPUT_SCHEMA = "output_schema" in _FASTMCP_TOOL_PARAMS or any(
-    _param.kind == inspect.Parameter.VAR_KEYWORD for _param in _FASTMCP_TOOL_PARAMS.values()
-)
-if not _FASTMCP_TOOL_SUPPORTS_OUTPUT_SCHEMA:
-    _ORIGINAL_FASTMCP_TOOL = FastMCP.tool
-
-    def _fastmcp_tool_compat(self: FastMCP, *args: Any, **kwargs: Any):
-        """Strip unsupported output_schema kwarg for FastMCP SDK compatibility."""
-        kwargs.pop("output_schema", None)
-        return _ORIGINAL_FASTMCP_TOOL(self, *args, **kwargs)
-
-    FastMCP.tool = _fastmcp_tool_compat
+# Phase 2b: yfmcp.app owns the FastMCP compat shim, yfinance_server instance, and TOOL_ALIASES.
+# Import it first so the compat shim is applied before any @yfinance_server.tool decorator runs.
+from yfmcp.app import yfinance_server, TOOL_ALIASES
 
 
 # Define an enum for the type of financial statement
@@ -124,6 +112,12 @@ from yfmcp.parsing.extractors import (
     _extract_xbrl_latest_annual,
 )
 
+# ---------------------------------------------------------------------------
+# Phase 2b: domain tool modules — import triggers @yfinance_server.tool registration
+# ---------------------------------------------------------------------------
+import yfmcp.tools.system  # noqa: F401 (side-effect import)
+from yfmcp.tools.system import health_check, get_manifest_diagnostics  # re-export for grouped routing
+
 
 # Fields that only apply to ETFs, mutual funds, or crypto — stripped from EQUITY responses
 # to reduce payload size and prevent downstream misinterpretation.
@@ -172,121 +166,6 @@ _STOCK_INFO_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
     "analyst":      ("recommendationMean", "numberOfAnalystOpinions", "targetMeanPrice"),
     "description":  ("longBusinessSummary",),
 }
-
-
-# Initialize FastMCP server
-yfinance_server = FastMCP(
-    "yfinance",
-    instructions="""
-# Yahoo Finance MCP Server
-
-This server provides financial market data from Yahoo Finance and SEC EDGAR via canonical tool names.
-
-## Tool selection guidance
-- **Prefer `get_market_snapshot`** for a one-call market overview (price, range, MA trend, volume, RSI, MACD, liquidity gate, freshness). Supports compact (max 5 tickers) and full (max 2 tickers) modes.
-- **Prefer `get_market_quote`** over `get_company_profile` for current price, market cap, 52-week range, or moving averages — it returns ~20 fields instead of 120+ and uses far fewer tokens.
-- Use `get_company_profile` only when you need deep fundamentals, business description, or fields not in get_market_quote. For ETFs or mutual funds, use `get_fund_profile` instead.
-- **Prefer `analyze_financial_ratios`** over fetching full financial statements when you need valuation or profitability ratios — ratios are pre-computed server-side.
-- **Prefer `get_analyst_consensus`** over `get_analyst_recommendations` when you need a quick summary of analyst sentiment and price targets.
-- **Prefer `get_earnings_analysis`** to get all forward-looking analyst estimates in a single call instead of five separate calls.
-- Use `get_short_interest` or `get_short_momentum` for short-selling metrics.
-- Use `get_technical_indicators` for momentum signals (RSI-14, MACD) without fetching raw OHLCV history.
-- Use `search_ticker` to resolve a company name or ISIN to a ticker symbol before calling other tools.
-- Use `screen_stocks` to discover stocks matching criteria (e.g., day_gainers, most_actives) without iterating tickers manually.
-- Index tickers like `^VIX`, `^GSPC`, `^DJI` are supported by `get_market_quote`, `analyze_price_performance`, and `get_technical_indicators`.
-- For SEC data: use `extract_sec_filing_fact` first for XBRL-tagged facts. If it returns NOT_DISCLOSED, use `search_sec_filing_text` with `return_tables=true` as fallback.
-- For news: use `get_company_news` (multi-source) instead of `get_yahoo_finance_news` (legacy single-source).
-
-## Available tools
-
-### Snapshot & diagnostics
-- get_market_snapshot: One-call market-state packet: price, range, MA trend, volume, RSI, MACD, liquidity gate, freshness. Compact (default, max 5 tickers) or full (max 2) modes.
-- get_manifest_diagnostics: Deployment diagnostics: tool count, manifest hash, build SHA, deploy time, canonical/deprecated counts, connector-staleness advisory.
-- health_check: Runtime health metadata: server version, tool count, manifest hash, envelope V2 status.
-
-### Price & market data
-- get_market_quote: Current price, market cap, 52-week range, moving averages, volume (~20 fields). Pre/after-market prices when available.
-- get_historical_prices: Historical OHLCV data with configurable period, interval, and optional columns filter.
-- analyze_price_performance: % distance from 52w high/low and MAs, 30d annualised volatility, CAGR.
-- analyze_moving_average_position: % vs 50DMA/200DMA, trend (BULLISH/BEARISH/MIXED).
-- analyze_volume_ratio: Volume vs 10d/90d averages, volumeFlag (HIGH/NORMAL/LOW).
-- check_volume_liquidity_threshold: 20d ADV liquidity gate pass/fail. FX notional mode via foreign_exchange=true.
-- get_technical_indicators: Pre-computed RSI-14 (Wilder) and MACD (12,26,9) from daily closes.
-- get_price_slope: N-day price slope (% change) and direction (UP/DOWN/FLAT).
-- get_short_interest: Short % of float, shares short, days-to-cover, prior-month comparison.
-- get_short_momentum: Short interest with MoM delta, direction (RISING/FALLING/FLAT), squeeze risk.
-- get_overnight_quote: Overnight trading data (20:00–04:00 ET). Returns price, gap %, data source, and staleness flag.
-
-### Company fundamentals
-- get_company_profile: ~30 key fundamental fields by default. Pass include_all=true for full ~120-field payload. For ETFs/funds, use get_fund_profile instead.
-- get_fund_profile: ETF/mutual fund data — NAV, expense ratio, AUM, YTD return, top-10 holdings, sector weights.
-- get_financial_statement: Income statement, balance sheet, or cash flow (annual/quarterly/TTM). Optional line_items filter.
-- analyze_financial_ratios: Pre-computed P/E, PEG, P/S, P/B, EV/EBITDA, margins, ROE, ROA, debt ratios.
-- analyze_credit_health: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag.
-- get_corporate_actions: Dividends and splits history.
-- get_ownership_holders: Major holders, institutional holders, mutual funds, or insider transactions.
-
-### Analyst & forecasts
-- get_analyst_consensus: Compact analyst price targets (current/low/high/mean/median + % upside) and rating breakdown.
-- get_earnings_analysis: All analyst forward-looking data: EPS/revenue estimates, trend, history, growth.
-- get_analyst_recommendations: Raw analyst recommendations or upgrades/downgrades history.
-- get_analyst_rating_changes: Recent rating changes with signal (UPGRADE/DOWNGRADE/MAINTAIN), price target direction, net sentiment.
-- analyze_earnings_momentum: EPS revision momentum (7/30/90d), revision direction, beat rate, beat streak.
-- get_company_events_calendar: Next earnings date (confirmed vs estimated), ex-dividend/pay dates.
-
-### Options
-- get_option_expiration_dates: Available options expiration dates.
-- get_option_chain: Options chain for a specific expiry and type. Supports strike filters and in_the_money_only.
-- summarize_options_flow: Put/call ratio, P/C sentiment, ATM IV, IV percentile, max pain, highest OI strikes.
-- find_put_hedge_candidates: Pre-filtered OTM puts within configurable OTM % range and budget.
-- analyze_options_flow_window: Structured event-window options scan with 72h cached trend.
-
-### SEC filings
-- list_sec_company_filings: List SEC filings from EDGAR submissions. Returns filing type, date, accession number, document URL.
-- get_sec_filing_outline: Section/heading outline of an SEC filing.
-- get_sec_filing_section: Text of a specific filing section.
-- list_sec_filing_tables: Tables present in an SEC filing.
-- get_sec_filing_table: Specific table from an SEC filing by index.
-- extract_sec_filing_fact: Extract a specific XBRL fact from a filing (try this first for GAAP line items).
-- search_sec_filing_text: Search narrative filing HTML text. Use as fallback when extract_sec_filing_fact returns NOT_DISCLOSED.
-- index_sec_filing: Build a deterministic section/table index for a filing (cached 24h).
-- get_sec_filing_index: Get the pre-built filing index.
-- query_sec_filing_index: Route SEC filing query types to index-backed extractors.
-
-### SEC structured extractors
-- extract_geographic_revenue: Geographic revenue exposure with evidence.
-- extract_segment_revenue: Segment revenue rows from SEC facts.
-- extract_total_revenue: Total revenue from SEC facts.
-- extract_revenue_exposure: Revenue exposure for a region/customer/segment query.
-- extract_china_exposure: China exposure with revenue and non-revenue classifications.
-- extract_risk_factor_mentions: Risk-factor term mentions from SEC filings.
-- extract_customer_concentration: Customer concentration percentages.
-
-### Public news & events
-- get_company_news: Recent public company news from Yahoo Finance, Finnhub, and SEC sources. Multi-source with sourceStatus.
-- search_company_news: Search news with keyword filter.
-- get_company_press_releases: 8-K press releases as structured public events.
-- get_sec_recent_events: Recent SEC filings as structured public events.
-- get_public_event_timeline: Deduplicated chronological timeline across all sources.
-- verify_company_event: Cross-validate an event across sources: CONFIRMED/PARTIAL/NOT_FOUND/STALE/CONFLICTING.
-
-### Earnings intelligence
-- get_latest_earnings_release: Find the latest earnings release evidence from SEC 8-K, IR, or Yahoo.
-- index_earnings_release: Build a section/table index for an earnings release.
-- extract_earnings_metrics: Extract reported revenue, EPS, gross margin, operating income, FCF, capex.
-- extract_guidance: Extract company-provided guidance ranges.
-- extract_management_commentary: Extract topic-specific management commentary with evidence excerpts.
-- compare_earnings_actual_vs_estimate: Compare actual earnings vs analyst estimates with surprise %.
-
-### Discovery & position
-- search_ticker: Resolve company name or ISIN to ticker symbol.
-- screen_stocks: Screen with predefined criteria (day_gainers, most_actives, undervalued_large_caps, etc.).
-- analyze_position_signals: Aggregate public market, analyst, earnings, and technical inputs for caller-defined scoring.
-- calculate_price_target_distance: Compare current price to a user-supplied reference target.
-""",
-)
-
-
 
 
 _SIMPLE_OUTPUT_SCHEMA: dict = {"type": "object", "properties": {}, "additionalProperties": True}
@@ -635,48 +514,6 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
         },
         "additionalProperties": True,
     },
-}
-
-TOOL_ALIASES: dict[str, str] = {
-    "get_fast_info": "get_market_quote",
-    "get_historical_stock_prices": "get_historical_prices",
-    "get_stock_info": "get_company_profile",
-    "get_etf_info": "get_fund_profile",
-    "get_stock_actions": "get_corporate_actions",
-    "get_holder_info": "get_ownership_holders",
-    "get_price_stats": "analyze_price_performance",
-    "get_ma_position": "analyze_moving_average_position",
-    "get_volume_ratio": "analyze_volume_ratio",
-    "get_volume_gate": "check_volume_liquidity_threshold",
-    "get_adv_gate": "check_volume_liquidity_threshold",
-    "get_financial_ratios": "analyze_financial_ratios",
-    "get_credit_health": "analyze_credit_health",
-    "get_recommendations": "get_analyst_recommendations",
-    "get_analyst_upgrade_radar": "get_analyst_rating_changes",
-    "get_earnings_momentum": "analyze_earnings_momentum",
-    "get_calendar": "get_company_events_calendar",
-    "get_yahoo_finance_news": "get_company_news",
-    "get_options_flow_summary": "summarize_options_flow",
-    "get_options_summary": "summarize_options_flow",
-    "get_options_flow_scan": "analyze_options_flow_window",
-    "get_dc134_options_scan": "analyze_options_flow_window",
-    "get_put_hedge_candidates": "find_put_hedge_candidates",
-    "get_price_target_bracket": "calculate_price_target_distance",
-    "get_eqf_bracket": "calculate_price_target_distance",
-    "get_position_score_inputs": "analyze_position_signals",
-    "get_tps_inputs": "analyze_position_signals",
-    "list_sec_filings": "list_sec_company_filings",
-    "get_filing_outline": "get_sec_filing_outline",
-    "get_filing_section": "get_sec_filing_section",
-    "list_filing_tables": "list_sec_filing_tables",
-    "get_filing_table": "get_sec_filing_table",
-    "get_filing_data": "extract_sec_filing_fact",
-    "extract_filing_fact": "extract_sec_filing_fact",
-    "get_geographic_revenue": "extract_sec_filing_fact",
-    "get_china_revenue_pct": "extract_sec_filing_fact",
-    "search_filing_text": "search_sec_filing_text",
-    "get_filing_text_search": "search_sec_filing_text",
-    "get_filing_document": "get_sec_filing_section",
 }
 
 for _alias_name, _canonical_name in TOOL_ALIASES.items():
@@ -6707,43 +6544,6 @@ def _deprecated_alias_response(alias_tool: str, canonical_tool: str, raw: str) -
     )
 
 
-@yfinance_server.tool(name="health_check", output_schema=_SIMPLE_OUTPUT_SCHEMA, description="Return runtime health metadata.")
-async def health_check() -> str:
-    try:
-        tool_count = len(yfinance_server._tool_manager._tools)
-    except Exception:
-        tool_count = len(TOOL_ALIASES) + 50
-    tool_names = sorted(TOOL_ALIASES.keys())
-    manifest_hash = hashlib.sha256(json.dumps(tool_names).encode("utf-8")).hexdigest()[:16]
-    manifest_version = os.environ.get("MANIFEST_VERSION", "1")
-    deployed_at = os.environ.get("DEPLOYED_AT", datetime.datetime.utcnow().isoformat() + "Z")
-    runtime_hash = hashlib.sha256((SERVER_VERSION + str(tool_count)).encode("utf-8")).hexdigest()[:16]
-    deprecated_alias_count = len(
-        {
-            "get_tps_inputs",
-            "get_eqf_bracket",
-            "get_adv_gate",
-            "get_dc134_options_scan",
-            "get_china_revenue_pct",
-            "get_geographic_revenue",
-            "get_filing_text_search",
-            "get_filing_document",
-        }
-    )
-    return json.dumps({
-        "serverVersion": SERVER_VERSION,
-        "buildSha": os.environ.get("BUILD_SHA", "unknown"),
-        "toolCount": tool_count,
-        "canonicalToolCount": max(tool_count - deprecated_alias_count, 0),
-        "deprecatedAliasCount": deprecated_alias_count,
-        "manifestVersion": manifest_version,
-        "manifestHash": manifest_hash,
-        "schemaHash": manifest_hash,
-        "runtimeHash": runtime_hash,
-        "deployedAt": deployed_at,
-        "generatedAt": datetime.datetime.utcnow().isoformat() + "Z",
-        "privacyScope": "public_market_data_only",
-    })
 
 
 def _classify_freshness(data_date: str | None, retrieved_at: str) -> str:
@@ -6778,24 +6578,6 @@ def _classify_freshness(data_date: str | None, retrieved_at: str) -> str:
         return "UNKNOWN"
 
 
-_MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "toolCount": {"type": "number"},
-        "manifestVersion": {"type": ["string", "null"]},
-        "manifestHash": {"type": ["string", "null"]},
-        "buildSha": {"type": ["string", "null"]},
-        "deployedAt": {"type": ["string", "null"]},
-        "privacyScope": {"type": "string"},
-        "canonicalToolCount": {"type": "number"},
-        "deprecatedAliasCount": {"type": "number"},
-        "publicSchemaGeneratedAt": {"type": ["string", "null"]},
-        "workerSchemaGeneratedAt": {"type": ["string", "null"]},
-        "manifestMismatch": {"type": ["boolean", "null"]},
-        "staleConnectorWarning": {"type": ["string", "null"]},
-    },
-}
-
 _MARKET_SNAPSHOT_OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -6815,44 +6597,6 @@ _MARKET_SNAPSHOT_OUTPUT_SCHEMA = {
 }
 
 
-@yfinance_server.tool(name="get_manifest_diagnostics", output_schema=_MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA, description="Return deployment and manifest diagnostics: tool counts, manifest version, hash, build SHA, deploy timestamp, privacy scope, and connector-staleness advisory.")
-async def get_manifest_diagnostics() -> str:
-    try:
-        tool_count = len(yfinance_server._tool_manager._tools)
-    except Exception:
-        tool_count = len(TOOL_ALIASES) + 50
-    tool_names = sorted(TOOL_ALIASES.keys())
-    manifest_hash = hashlib.sha256(json.dumps(tool_names).encode("utf-8")).hexdigest()[:16]
-    manifest_version = os.environ.get("MANIFEST_VERSION", None)
-    deployed_at = os.environ.get("DEPLOYED_AT", None)
-    deprecated_alias_set = {
-        "get_tps_inputs",
-        "get_eqf_bracket",
-        "get_adv_gate",
-        "get_dc134_options_scan",
-        "get_china_revenue_pct",
-        "get_geographic_revenue",
-        "get_filing_text_search",
-        "get_filing_document",
-    }
-    deprecated_alias_count = len(deprecated_alias_set)
-    canonical_tool_count = max(tool_count - deprecated_alias_count, 0)
-    worker_schema_generated_at = datetime.datetime.utcnow().isoformat() + "Z"
-    return json.dumps({
-        "toolCount": tool_count,
-        "manifestVersion": manifest_version,
-        "manifestHash": manifest_hash,
-        "buildSha": os.environ.get("BUILD_SHA", "unknown"),
-        "deployedAt": deployed_at,
-        "privacyScope": "public_market_data_only",
-        "canonicalToolCount": canonical_tool_count,
-        "deprecatedAliasCount": deprecated_alias_count,
-        "publicSchemaGeneratedAt": None,
-        "workerSchemaGeneratedAt": worker_schema_generated_at,
-        "manifestMismatch": None,
-        "staleConnectorWarning": "ChatGPT connector schema may lag the deployed Worker schema. Direct Worker tools/list and get_manifest_diagnostics are source of truth.",
-        "serverVersion": SERVER_VERSION,
-    })
 
 
 @yfinance_server.tool(name="get_market_snapshot", output_schema=_MARKET_SNAPSHOT_OUTPUT_SCHEMA, description="Compact market-state packet composing quote, price performance, moving-average trend, volume ratios, liquidity gate, and technical indicators in one call. Supports compact (default) and full modes, and optional batch of tickers.")

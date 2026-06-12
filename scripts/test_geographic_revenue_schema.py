@@ -89,8 +89,12 @@ def _call_local(name: str, args: dict) -> dict:
     _ensure_mcp_available()
     _patch_fastmcp_tool()
     import importlib  # noqa: E402
-    import server as srv  # noqa: E402
+    import sys  # noqa: E402
+    import server as srv  # noqa: E402, F401 (may be first import)
 
+    for _mod in ("yfmcp.app", "yfmcp.tools.system"):
+        if _mod in sys.modules:
+            importlib.reload(sys.modules[_mod])
     importlib.reload(srv)
     if name == "extract_sec_filing_fact":
         raw = asyncio.run(
