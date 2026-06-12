@@ -15,26 +15,7 @@ import os
 
 from yfmcp.app import TOOL_ALIASES, yfinance_server
 from yfmcp.envelope import SERVER_VERSION
-
-_SIMPLE_OUTPUT_SCHEMA: dict = {"type": "object", "properties": {}, "additionalProperties": True}
-
-_MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "toolCount": {"type": "number"},
-        "manifestVersion": {"type": ["string", "null"]},
-        "manifestHash": {"type": ["string", "null"]},
-        "buildSha": {"type": ["string", "null"]},
-        "deployedAt": {"type": ["string", "null"]},
-        "privacyScope": {"type": "string"},
-        "canonicalToolCount": {"type": "number"},
-        "deprecatedAliasCount": {"type": "number"},
-        "publicSchemaGeneratedAt": {"type": ["string", "null"]},
-        "workerSchemaGeneratedAt": {"type": ["string", "null"]},
-        "manifestMismatch": {"type": ["boolean", "null"]},
-        "staleConnectorWarning": {"type": ["string", "null"]},
-    },
-}
+from yfmcp.schemas import _MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA, _SIMPLE_OUTPUT_SCHEMA
 
 
 @yfinance_server.tool(name="health_check", output_schema=_SIMPLE_OUTPUT_SCHEMA, description="Return runtime health metadata.")
