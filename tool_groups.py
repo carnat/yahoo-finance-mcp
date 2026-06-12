@@ -114,7 +114,7 @@ TOOL_GROUPS: dict[str, dict[str, Any]] = {
         "actions": {
             "get_option_expiration_dates": "get_option_expiration_dates",
             "get_option_chain": "get_option_chain",
-            "summarize_options_flow": "get_options_summary",
+            "summarize_options_flow": "summarize_options_flow",
             "find_put_hedge_candidates": "get_put_hedge_candidates",
             "analyze_options_flow_window": "get_options_flow_scan",
         },

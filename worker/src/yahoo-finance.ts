@@ -5979,20 +5979,7 @@ function eventTypeFromForm(formType: string): string {
   return "other";
 }
 
-function canonicalUrl(url: string | null): string | null {
-  const u = _str(url).trim();
-  if (!u) return null;
-  try {
-    const parsed = new URL(u);
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString();
-  } catch {
-    return null;
-  }
-}
-
-function makeDupGroupId(ticker: string, title: string | null, publishedAt: string | null, issuer: string | null, url: string | null): string | null {
+function makeDupGroupId(ticker: string, title: string | null, publishedAt: string | null, issuer: string | null): string | null {
   const normTitle = normalizedEventTitleStem(ticker, title);
   const day = _str(publishedAt).slice(0, 10);
   const entity = (_str(issuer) || ticker).toUpperCase();
@@ -6176,7 +6163,7 @@ function buildYfEventItem(
 
   const relevance = `${title} ${summary}`.toUpperCase().includes(ticker.toUpperCase()) ? "HIGH" : "LOW";
   const confidence = !url || relevance !== "HIGH" ? "LOW" : "MEDIUM";
-  const duplicateGroupId = makeDupGroupId(ticker, title, publishedAt, null, url);
+  const duplicateGroupId = makeDupGroupId(ticker, title, publishedAt, null);
   if (!duplicateGroupId) {
     warnings.push({ code: "DEDUPE_WEAK_KEY", message: "Weak dedupe key for at least one item.", severity: "warning" });
   }
@@ -6236,7 +6223,7 @@ function buildSecEventItem(
     url = "";
     warnings.push({ code: "SEC_URL_INVALID", message: "SEC event URL missing or invalid SEC Archives URL.", severity: "warning" });
   }
-  const duplicateGroupId = makeDupGroupId(ticker, `${filingType} filed`, publishedAt, issuer, url || null);
+  const duplicateGroupId = makeDupGroupId(ticker, `${filingType} filed`, publishedAt, issuer);
   if (!duplicateGroupId) {
     warnings.push({ code: "DEDUPE_WEAK_KEY", message: "Weak dedupe key for at least one item.", severity: "warning" });
   }
@@ -6643,7 +6630,7 @@ async function collectGlobeNewswireEvents(
           });
         }
 
-        const duplicateGroupId = makeDupGroupId(tickerU, title, publishedAt, issuer, link || guid);
+        const duplicateGroupId = makeDupGroupId(tickerU, title, publishedAt, issuer);
         if (!duplicateGroupId) {
           warnings.push({ code: "DEDUPE_WEAK_KEY", message: "Weak dedupe key for at least one GlobeNewswire item.", severity: "warning" });
         }
@@ -6735,7 +6722,7 @@ async function collectFinnhubEvents(
       const originalSource = _str(n.source).trim() || null;
       const urlStr = _str(n.url).trim() || null;
       const publishedAt = normalizeIso(n.datetime);
-      const duplicateGroupId = makeDupGroupId(tickerU, title, publishedAt, null, urlStr);
+      const duplicateGroupId = makeDupGroupId(tickerU, title, publishedAt, null);
       if (!duplicateGroupId) {
         warnings.push({ code: "DEDUPE_WEAK_KEY", message: "Weak dedupe key for at least one item.", severity: "warning" });
       }
