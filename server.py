@@ -2706,6 +2706,36 @@ async def get_recommendations(ticker: str, recommendation_type: str, months_back
 # Group 1.1 — get_fast_info
 # ---------------------------------------------------------------------------
 
+_ANALYST_UPGRADE_GRADES = {
+    "buy", "outperform", "overweight", "strong buy", "positive",
+    "market outperform", "top pick",
+}
+_ANALYST_DOWNGRADE_GRADES = {
+    "sell", "underperform", "underweight", "strong sell", "negative",
+    "market underperform", "reduce",
+}
+_ANALYST_INITIATION_ACTIONS = {"initiated", "init", "initiation", "new coverage"}
+
+
+def _classify_analyst_change(action: object, from_grade: object, to_grade: object) -> str:
+    action_l = str(action or "").strip().lower()
+    from_l = str(from_grade or "").strip().lower()
+    to_l = str(to_grade or "").strip().lower()
+    if action_l in _ANALYST_INITIATION_ACTIONS or action_l.startswith("init"):
+        return "INITIATED"
+    if "downgrade" in action_l or action_l == "down":
+        return "DOWNGRADE"
+    if "upgrade" in action_l or action_l == "up":
+        return "UPGRADE"
+    if to_l in _ANALYST_DOWNGRADE_GRADES and from_l not in _ANALYST_DOWNGRADE_GRADES:
+        return "DOWNGRADE"
+    if to_l in _ANALYST_UPGRADE_GRADES and from_l and from_l not in _ANALYST_UPGRADE_GRADES:
+        return "UPGRADE"
+    if to_l and not from_l:
+        return "INITIATED"
+    return "MAINTAIN"
+
+
 @yfinance_server.tool(
     name="get_analyst_consensus",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_analyst_consensus"],
@@ -2800,10 +2830,10 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
                 dt = _to_dt(row.get(date_col)) if date_col else None
                 if dt is None or dt < cutoff:
                     continue
-                action = str(row.get("Action") or row.get("action") or "").lower()
-                to_grade = str(row.get("ToGrade") or row.get("toGrade") or "").lower()
-                from_grade = str(row.get("FromGrade") or row.get("fromGrade") or "").lower()
-                if ("up" in action) or ("upgrade" in action) or ("buy" in to_grade and "buy" not in from_grade):
+                action = row.get("Action") or row.get("action") or ""
+                to_grade = row.get("ToGrade") or row.get("toGrade") or ""
+                from_grade = row.get("FromGrade") or row.get("fromGrade") or ""
+                if _classify_analyst_change(action, from_grade, to_grade) == "UPGRADE":
                     count += 1
             recent_upgrade_count_30d = count
     except Exception:
@@ -3826,7 +3856,7 @@ async def search_filing_text(
 @yfinance_server.tool(
     name="get_credit_health",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_credit_health"],
-    description="""Get pre-computed credit/leverage metrics: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag.
+    description="""Get pre-computed credit/leverage metrics using operational EBITDA when available: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag, and source fields.
 
 Args:
     ticker: str | list[str]
@@ -3881,22 +3911,60 @@ async def get_credit_health(ticker: str | list[str]) -> str:
                 continue
         return None
 
+    def _safe_get_with_source(df, col, *row_names):
+        for name in row_names:
+            try:
+                val = df.loc[name, col]
+                if pd.notna(val):
+                    return float(val), str(name)
+            except (KeyError, TypeError):
+                continue
+        return None, None
+
     total_debt = _safe_get(bs, bs_col, "Total Debt", "TotalDebt", "Long Term Debt")
     cash = _safe_get(bs, bs_col, "Cash And Cash Equivalents", "CashAndCashEquivalents", "Cash")
-    ebitda = _safe_get(inc, inc_col, "EBITDA", "Normalized EBITDA", "NormalizedEBITDA")
+    ebitda, ebitda_source_row = _safe_get_with_source(inc, inc_col, "EBITDA", "Normalized EBITDA", "NormalizedEBITDA")
     ebit = _safe_get(inc, inc_col, "EBIT", "Operating Income", "OperatingIncome")
-    interest_expense = _safe_get(inc, inc_col, "Interest Expense", "InterestExpense", "Interest Expense Non Operating")
+    depreciation_amortization, da_source_row = _safe_get_with_source(
+        inc,
+        inc_col,
+        "Reconciled Depreciation",
+        "ReconciledDepreciation",
+        "Depreciation And Amortization",
+        "DepreciationAndAmortization",
+        "Depreciation Amortization Depletion Income Statement",
+        "DepreciationAmortizationDepletionIncomeStatement",
+    )
+    interest_expense, interest_source_row = _safe_get_with_source(
+        inc,
+        inc_col,
+        "Interest Expense Non Operating",
+        "InterestExpenseNonOperating",
+        "Interest Expense",
+        "InterestExpense",
+    )
 
     net_debt = (total_debt - cash) if total_debt is not None and cash is not None else None
 
-    # Annualize quarterly EBITDA/EBIT (multiply by 4)
+    operational_ebitda = None
+    operational_ebitda_source = None
+    if ebit is not None and depreciation_amortization is not None:
+        operational_ebitda = ebit + depreciation_amortization
+        operational_ebitda_source = "quarterly_ebit_plus_depreciation_and_amortization"
+    elif ebitda is not None:
+        operational_ebitda = ebitda
+        operational_ebitda_source = "provider_ebitda_fallback"
+
+    # Annualize latest-quarter statement values exactly once.
     ebitda_annual = ebitda * 4 if ebitda is not None else None
     ebit_annual = ebit * 4 if ebit is not None else None
+    depreciation_amortization_annual = depreciation_amortization * 4 if depreciation_amortization is not None else None
+    operational_ebitda_annual = operational_ebitda * 4 if operational_ebitda is not None else None
     interest_annual = interest_expense * 4 if interest_expense is not None else None
 
-    net_debt_to_ebitda = round(net_debt / ebitda_annual, 2) if net_debt is not None and ebitda_annual else None
+    net_debt_to_ebitda = round(net_debt / operational_ebitda_annual, 2) if net_debt is not None and operational_ebitda_annual else None
     interest_coverage_ebit = round(ebit_annual / abs(interest_annual), 2) if ebit_annual is not None and interest_annual and interest_annual != 0 else None
-    interest_coverage_ebitda = round(ebitda_annual / abs(interest_annual), 2) if ebitda_annual is not None and interest_annual and interest_annual != 0 else None
+    interest_coverage_ebitda = round(operational_ebitda_annual / abs(interest_annual), 2) if operational_ebitda_annual is not None and interest_annual and interest_annual != 0 else None
     interest_coverage = interest_coverage_ebit
 
     credit_stress = None
@@ -3922,6 +3990,8 @@ async def get_credit_health(ticker: str | list[str]) -> str:
         missing_components.append("cashUsd")
     if ebitda_annual is None:
         missing_components.append("ebitdaUsd")
+    if operational_ebitda_annual is None:
+        missing_components.append("operationalEbitdaUsd")
     if ebit_annual is None:
         missing_components.append("ebitUsd")
     if interest_annual is None:
@@ -3942,6 +4012,8 @@ async def get_credit_health(ticker: str | list[str]) -> str:
     computed_metrics = []
     if net_debt is not None:
         computed_metrics.append("netDebtUsd")
+    if operational_ebitda_annual is not None:
+        computed_metrics.append("operationalEbitdaUsd")
     if net_debt_to_ebitda is not None:
         computed_metrics.append("netDebtToEbitda")
     if interest_coverage is not None:
@@ -3961,7 +4033,19 @@ async def get_credit_health(ticker: str | list[str]) -> str:
             "code": "INTEREST_EXPENSE_UNAVAILABLE",
             "message": "Interest coverage cannot be computed from available provider data.",
         })
-    if ebitda_annual is not None and ebitda_annual < 0 or ebit_annual is not None and ebit_annual < 0:
+    if operational_ebitda_source == "provider_ebitda_fallback":
+        warnings.append({
+            "code": "OPERATIONAL_EBITDA_UNAVAILABLE",
+            "message": "Operational EBITDA could not be computed from EBIT plus depreciation and amortization; provider EBITDA is used as a fallback.",
+        })
+    if ebitda_annual is not None and operational_ebitda_annual is not None:
+        basis = max(abs(operational_ebitda_annual), 1.0)
+        if abs(ebitda_annual - operational_ebitda_annual) / basis >= 0.25 and abs(ebitda_annual - operational_ebitda_annual) >= 100_000_000:
+            warnings.append({
+                "code": "NON_OPERATING_EBITDA_DIVERGENCE",
+                "message": "Provider EBITDA materially differs from EBIT plus depreciation and amortization; leverage metrics use operational EBITDA.",
+            })
+    if (operational_ebitda_annual is not None and operational_ebitda_annual < 0) or (ebit_annual is not None and ebit_annual < 0):
         warnings.append({
             "code": "NEGATIVE_EARNINGS_BASE",
             "message": "Company has negative EBIT/EBITDA; leverage metrics may understate operating credit risk despite net cash or low net debt.",
@@ -3980,8 +4064,14 @@ async def get_credit_health(ticker: str | list[str]) -> str:
         "cashUsd": cash,
         "netDebtUsd": net_debt,
         "ebitdaUsd": ebitda_annual,
+        "ebitdaSource": ebitda_source_row,
+        "operationalEbitdaUsd": operational_ebitda_annual,
+        "operationalEbitdaSource": operational_ebitda_source,
+        "depreciationAmortizationUsd": depreciation_amortization_annual,
+        "depreciationAmortizationSource": da_source_row,
         "ebitUsd": ebit_annual,
         "interestExpenseUsd": interest_annual,
+        "interestExpenseSource": interest_source_row,
         "netDebtToEbitda": net_debt_to_ebitda,
         "interestCoverage": interest_coverage,
         "interestCoverageEbit": interest_coverage_ebit,
@@ -4436,9 +4526,9 @@ async def get_put_hedge_candidates(
 @yfinance_server.tool(
     name="get_analyst_upgrade_radar",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_analyst_upgrade_radar"],
-    description="""Get recent analyst rating changes with pre-computed signal classification. Batch supported.
+    description="""Get recent analyst rating changes with canonical signal classification. Batch supported.
 
-Returns: changes with signal, ptFrom, ptTo, ptDirection, mixedSignal, strengthFlag; netSentiment, summary.
+Returns: changes with signal (UPGRADE/DOWNGRADE/INITIATED/MAINTAIN), separate upgrade/downgrade/initiation counts, ptFrom, ptTo, ptDirection, mixedSignal, strengthFlag; netSentiment, summary.
 
 ptFrom / ptTo: prior and new price target (null — yfinance does not expose numeric targets; stubs for
 future compatibility). ptDirection: RAISE/CUT/UNCHANGED/INITIATED — derived from ptFrom→ptTo when
@@ -4472,6 +4562,12 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
             "ticker": ticker,
             "windowDays": days_back,
             "netSentiment": 0,
+            "upgrades": 0,
+            "upgrades30d": 0 if days_back == 30 else None,
+            "downgrades": 0,
+            "downgrades30d": 0 if days_back == 30 else None,
+            "initiations": 0,
+            "initiations30d": 0 if days_back == 30 else None,
             "changes": [],
             "summary": "NO CHANGES",
             "dataDate": get_last_trading_date(),
@@ -4491,9 +4587,7 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
     changes = []
     upgrade_count = 0
     downgrade_count = 0
-
-    _upgrade_grades = {"Buy", "Outperform", "Overweight", "Strong Buy", "Positive", "Market Outperform", "Top Pick"}
-    _downgrade_grades = {"Sell", "Underperform", "Underweight", "Strong Sell", "Negative", "Market Underperform", "Reduce"}
+    initiation_count = 0
 
     for _, row in ud.iterrows():
         from_grade = row.get("FromGrade", "")
@@ -4504,15 +4598,13 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
         date_val = row.get("GradeDate") or row.get("Date")
         date_str = str(date_val.date()) if hasattr(date_val, "date") else str(date_val)
 
-        # Signal classification
-        if action in ("up", "upgrade", "Up", "Upgrade") or to_grade in _upgrade_grades:
-            signal = "UPGRADE"
+        signal = _classify_analyst_change(action, from_grade, to_grade)
+        if signal == "UPGRADE":
             upgrade_count += 1
-        elif action in ("down", "downgrade", "Down", "Downgrade") or to_grade in _downgrade_grades:
-            signal = "DOWNGRADE"
+        elif signal == "DOWNGRADE":
             downgrade_count += 1
-        else:
-            signal = "MAINTAIN"
+        elif signal == "INITIATED":
+            initiation_count += 1
 
         # Price target fields — yfinance upgrades_downgrades doesn't expose
         # numeric price targets; stubs are included for forward-compatibility.
@@ -4529,7 +4621,7 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
                 pt_direction = "CUT"
             else:
                 pt_direction = "UNCHANGED"
-        elif action in ("initiated", "Initiated", "init"):
+        elif signal == "INITIATED":
             pt_direction = "INITIATED"
         elif signal == "MAINTAIN":
             pt_direction = "UNCHANGED"
@@ -4573,12 +4665,20 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
         parts.append(f"{upgrade_count} UPGRADE(s)")
     if downgrade_count:
         parts.append(f"{downgrade_count} DOWNGRADE(s)")
+    if initiation_count:
+        parts.append(f"{initiation_count} INITIATION(s)")
     summary = ", ".join(parts) if parts else "NO CHANGES"
 
     return json.dumps({
         "ticker": ticker,
         "windowDays": days_back,
         "netSentiment": net_sentiment,
+        "upgrades": upgrade_count,
+        "upgrades30d": upgrade_count if days_back == 30 else None,
+        "downgrades": downgrade_count,
+        "downgrades30d": downgrade_count if days_back == 30 else None,
+        "initiations": initiation_count,
+        "initiations30d": initiation_count if days_back == 30 else None,
         "changes": changes,
         "summary": summary,
         "dataDate": get_last_trading_date(),
@@ -5029,12 +5129,9 @@ async def get_position_score_inputs(ticker: str) -> str:
     # T1: analyst sentiment
     t1: dict = {
         "analystNetSentiment": upgrade.get("netSentiment"),
-        "upgrades30d": sum(
-            1 for c in (upgrade.get("changes") or []) if c.get("signal") == "UPGRADE"
-        ),
-        "downgrades30d": sum(
-            1 for c in (upgrade.get("changes") or []) if c.get("signal") == "DOWNGRADE"
-        ),
+        "upgrades30d": upgrade.get("upgrades30d") if upgrade.get("upgrades30d") is not None else upgrade.get("upgrades"),
+        "downgrades30d": upgrade.get("downgrades30d") if upgrade.get("downgrades30d") is not None else upgrade.get("downgrades"),
+        "initiations30d": upgrade.get("initiations30d") if upgrade.get("initiations30d") is not None else upgrade.get("initiations"),
         "dominantRating": consensus.get("dominantRating"),
         "analystCount": consensus.get("totalAnalysts"),
     }
@@ -7533,33 +7630,101 @@ async def extract_management_commentary(ticker: str, period: str = "latest", top
 @yfinance_server.tool(
     name="compare_earnings_actual_vs_estimate",
     output_schema=_TOOL_OUTPUT_SCHEMAS["compare_earnings_actual_vs_estimate"],
-    description="Compare reported actual earnings metrics against public Yahoo analyst estimates and return surprise percentages.",
+    description="Compare the latest reported quarter with non-null actual EPS against Yahoo's historical estimate for that same reported quarter/date.",
 )
 async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest") -> str:
     raw_metrics = _safe_json_loads(await extract_earnings_metrics(ticker=ticker, period=period))
     # extract_earnings_metrics now returns Envelope V2; unwrap data
     metrics = raw_metrics.get("data") if isinstance(raw_metrics.get("data"), dict) else raw_metrics
     ea = _safe_json_loads(await get_earnings_analysis(ticker=ticker))
+
+    def _num(v: object) -> float | None:
+        if v is None:
+            return None
+        try:
+            if pd.isna(v):
+                return None
+        except Exception:
+            pass
+        try:
+            return float(v)
+        except Exception:
+            return None
+
+    def _row_period(row: dict | None) -> str | None:
+        if not row:
+            return None
+        for key in ("reportedPeriod", "period", "quarter", "index"):
+            val = row.get(key)
+            if val is not None and str(val).strip():
+                return str(val)
+        return None
+
+    def _row_date(row: dict | None) -> str | None:
+        if not row:
+            return None
+        for key in ("reportedDate", "quarter", "date", "earningsDate", "index"):
+            val = row.get(key)
+            if val is None:
+                continue
+            if isinstance(val, (int, float)):
+                ts = float(val)
+                if ts > 1_000_000_000_000:
+                    ts /= 1000.0
+                try:
+                    return datetime.datetime.fromtimestamp(ts, tz=datetime.UTC).date().isoformat()
+                except Exception:
+                    continue
+            parsed = pd.to_datetime(val, utc=True, errors="coerce")
+            if not pd.isna(parsed):
+                return parsed.date().isoformat()
+            text = str(val).strip()
+            if text:
+                return text
+        return None
+
+    hist = ea.get("earningsHistory") if isinstance(ea.get("earningsHistory"), list) else []
+    reported_rows = [row for row in hist if isinstance(row, dict) and _num(row.get("epsActual")) is not None]
+
+    def _sort_key(row: dict) -> tuple[int, str]:
+        date_text = _row_date(row)
+        parsed = pd.to_datetime(date_text, utc=True, errors="coerce") if date_text else pd.NaT
+        if pd.isna(parsed):
+            return (0, "")
+        return (1, parsed.isoformat())
+
+    selected = sorted(reported_rows, key=_sort_key, reverse=True)[0] if reported_rows else None
+    reported_period = _row_period(selected)
+    reported_date = _row_date(selected) or metrics.get("reportedAt")
+
     actual_rev = (((metrics.get("metrics") or {}).get("revenue") or {}).get("value")
                   if isinstance((metrics.get("metrics") or {}).get("revenue"), dict) else None)
-    actual_eps = (((metrics.get("metrics") or {}).get("epsDiluted") or {}).get("value")
-                  if isinstance((metrics.get("metrics") or {}).get("epsDiluted"), dict) else None)
+    actual_eps = _num(selected.get("epsActual")) if selected else None
+    if actual_eps is None:
+        actual_eps = (((metrics.get("metrics") or {}).get("epsDiluted") or {}).get("value")
+                      if isinstance((metrics.get("metrics") or {}).get("epsDiluted"), dict) else None)
+    eps_est = _num(selected.get("epsEstimate")) if selected else None
 
     revenue_est = None
     rev_est_arr = ea.get("revenueEstimate") if isinstance(ea.get("revenueEstimate"), list) else []
     for row in rev_est_arr:
-        if isinstance(row, dict) and str(row.get("period")) == "0q":
-            revenue_est = row.get("avg")
+        if not isinstance(row, dict):
+            continue
+        row_period = str(row.get("period") or row.get("reportedPeriod") or "")
+        row_date = _row_date(row)
+        if (
+            (reported_period and row_period == reported_period)
+            or (reported_date and row_date == reported_date)
+        ):
+            revenue_est = _num(row.get("avg"))
             break
-    eps_est = None
-    hist = ea.get("earningsHistory") if isinstance(ea.get("earningsHistory"), list) else []
-    if hist and isinstance(hist[0], dict):
-        eps_est = hist[0].get("epsEstimate")
 
     warnings: list[dict] = []
     result = {
         "ticker": ticker.upper(),
-        "period": metrics.get("period") or period,
+        "period": reported_period or metrics.get("period") or period,
+        "reportedPeriod": reported_period,
+        "reportedDate": reported_date,
         "actual": {
             "revenue": {"value": actual_rev, "unit": "USD"},
             "eps": {"value": actual_eps, "unit": "USD/share"},
@@ -7574,19 +7739,37 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
         },
         "confidence": "NOT_DISCLOSED",
     }
-    if actual_rev is None or actual_eps is None or revenue_est in (None, 0) or eps_est in (None, 0):
+
+    if selected is None:
+        warnings.append({
+            "code": "NO_REPORTED_QUARTER",
+            "message": "Yahoo earningsHistory did not include a quarter with non-null actual EPS.",
+        })
+        return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
+
+    if actual_rev is not None and revenue_est not in (None, 0):
+        try:
+            result["surprise"]["revenueSurprisePct"] = round(((float(actual_rev) - float(revenue_est)) / abs(float(revenue_est))) * 100, 2)
+        except Exception:
+            result["surprise"]["revenueSurprisePct"] = None
+    elif actual_rev is not None:
+        warnings.append({
+            "code": "REVENUE_ESTIMATE_UNAVAILABLE",
+            "message": "No Yahoo revenue estimate was available for the selected reported quarter.",
+        })
+
+    if actual_eps is None or eps_est in (None, 0):
+        warnings.append({
+            "code": "EPS_ESTIMATE_UNAVAILABLE",
+            "message": "No Yahoo EPS estimate was available for the selected reported quarter.",
+        })
         return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
 
     try:
-        result["surprise"]["revenueSurprisePct"] = round(((float(actual_rev) - float(revenue_est)) / abs(float(revenue_est))) * 100, 2)
         result["surprise"]["epsSurprisePct"] = round(((float(actual_eps) - float(eps_est)) / abs(float(eps_est))) * 100, 2)
     except Exception:
         return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
-    result["confidence"] = "HIGH"
-    actual_period = str(metrics.get("period") or "")
-    if not actual_period:
-        warnings.append({"code": "PERIOD_MISMATCH", "message": "Actual and estimate periods could not be aligned"})
-        result["confidence"] = "LOW"
+    result["confidence"] = "HIGH" if result["surprise"]["revenueSurprisePct"] is not None else "MEDIUM"
     return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
 
 

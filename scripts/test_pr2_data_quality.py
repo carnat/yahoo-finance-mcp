@@ -97,6 +97,175 @@ class TestPr2DataQuality(unittest.TestCase):
         self.assertEqual(data["interestCoverageEbit"], 4.0)
         self.assertEqual(data["interestCoverageEbitda"], 8.0)
 
+    def test_credit_health_annualizes_latest_quarter_interest_once_and_uses_operational_ebitda(self):
+        col = pd.Timestamp("2026-03-31")
+
+        class FakeTicker:
+            quarterly_balance_sheet = pd.DataFrame(
+                {col: [1_000_000_000.0, 100_000_000.0]},
+                index=["Total Debt", "Cash And Cash Equivalents"],
+            )
+            quarterly_income_stmt = pd.DataFrame(
+                {col: [920_000_000.0, 100_000_000.0, 40_000_000.0, 52_800_000.0, 256_000_000.0]},
+                index=[
+                    "EBITDA",
+                    "EBIT",
+                    "Depreciation And Amortization",
+                    "Interest Expense Non Operating",
+                    "Interest Expense",
+                ],
+            )
+
+        srv.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
+        data = json.loads(_run(srv.get_credit_health("MRVL")))
+        self.assertEqual(data["interestExpenseUsd"], 211_200_000.0)
+        self.assertEqual(data["ebitdaUsd"], 3_680_000_000.0)
+        self.assertEqual(data["operationalEbitdaUsd"], 560_000_000.0)
+        self.assertEqual(data["netDebtToEbitda"], 1.61)
+        self.assertEqual(data["interestCoverageEbitda"], 2.65)
+        self.assertEqual(data["operationalEbitdaSource"], "quarterly_ebit_plus_depreciation_and_amortization")
+        warning_codes = [w.get("code") for w in data.get("warnings", []) if isinstance(w, dict)]
+        self.assertIn("NON_OPERATING_EBITDA_DIVERGENCE", warning_codes)
+
+    def test_credit_health_falls_back_to_provider_ebitda_when_da_missing(self):
+        col = pd.Timestamp("2026-03-31")
+
+        class FakeTicker:
+            quarterly_balance_sheet = pd.DataFrame(
+                {col: [500.0, 100.0]},
+                index=["Total Debt", "Cash And Cash Equivalents"],
+            )
+            quarterly_income_stmt = pd.DataFrame(
+                {col: [150.0, 100.0, 10.0]},
+                index=["EBITDA", "EBIT", "Interest Expense Non Operating"],
+            )
+
+        srv.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
+        data = json.loads(_run(srv.get_credit_health("NBIS")))
+        self.assertEqual(data["operationalEbitdaUsd"], 600.0)
+        self.assertEqual(data["operationalEbitdaSource"], "provider_ebitda_fallback")
+        warning_codes = [w.get("code") for w in data.get("warnings", []) if isinstance(w, dict)]
+        self.assertIn("OPERATIONAL_EBITDA_UNAVAILABLE", warning_codes)
+
+    def test_earnings_compare_skips_upcoming_null_actual_quarter(self):
+        async def fake_metrics(**kwargs):
+            return json.dumps({
+                "period": "FY2026 Q2",
+                "reportedAt": "2026-06-10",
+                "metrics": {"revenue": {"value": 123_000_000_000}, "epsDiluted": {"value": 2.31}},
+            })
+
+        async def fake_ea(**kwargs):
+            return json.dumps({
+                "revenueEstimate": [{"period": "FY2026 Q2", "avg": 121_000_000_000}],
+                "earningsHistory": [
+                    {"quarter": "2026-09-30", "epsActual": None, "epsEstimate": 2.40},
+                    {"quarter": "2026-06-30", "period": "FY2026 Q2", "epsActual": 2.31, "epsEstimate": 2.25},
+                ],
+            })
+
+        old_metrics = srv.extract_earnings_metrics
+        old_ea = srv.get_earnings_analysis
+        try:
+            srv.extract_earnings_metrics = fake_metrics
+            srv.get_earnings_analysis = fake_ea
+            parsed = json.loads(_run(srv.compare_earnings_actual_vs_estimate("AAPL")))
+        finally:
+            srv.extract_earnings_metrics = old_metrics
+            srv.get_earnings_analysis = old_ea
+        data = parsed["data"] if parsed.get("ok") else parsed
+        self.assertEqual(data["reportedPeriod"], "FY2026 Q2")
+        self.assertEqual(data["reportedDate"], "2026-06-30")
+        self.assertEqual(data["actual"]["eps"]["value"], 2.31)
+        self.assertEqual(data["estimate"]["eps"]["value"], 2.25)
+        self.assertAlmostEqual(data["surprise"]["epsSurprisePct"], 2.67, places=2)
+
+    def test_earnings_compare_no_reported_quarter_warning(self):
+        async def fake_metrics(**kwargs):
+            return json.dumps({"period": "FY2026 Q3", "metrics": {"revenue": {"value": 100.0}, "epsDiluted": {"value": None}}})
+
+        async def fake_ea(**kwargs):
+            return json.dumps({"earningsHistory": [{"quarter": "2026-09-30", "epsActual": None, "epsEstimate": 1.2}]})
+
+        old_metrics = srv.extract_earnings_metrics
+        old_ea = srv.get_earnings_analysis
+        try:
+            srv.extract_earnings_metrics = fake_metrics
+            srv.get_earnings_analysis = fake_ea
+            parsed = json.loads(_run(srv.compare_earnings_actual_vs_estimate("AAPL")))
+        finally:
+            srv.extract_earnings_metrics = old_metrics
+            srv.get_earnings_analysis = old_ea
+        data = parsed["data"] if parsed.get("ok") else parsed
+        warnings = (parsed.get("meta") or {}).get("warnings") or data.get("warnings") or []
+        self.assertEqual(data["confidence"], "NOT_DISCLOSED")
+        self.assertIn("NO_REPORTED_QUARTER", [w.get("code") for w in warnings])
+
+    def test_upgrade_counts_exclude_initiations_and_position_uses_canonical_radar(self):
+        now = pd.Timestamp.now()
+
+        class FakeTicker:
+            upgrades_downgrades = pd.DataFrame(
+                [
+                    {"GradeDate": now, "Action": "initiated", "ToGrade": "Buy", "FromGrade": "", "Firm": "A"},
+                    {"GradeDate": now, "Action": "up", "ToGrade": "Buy", "FromGrade": "Hold", "Firm": "B"},
+                    {"GradeDate": now, "Action": "down", "ToGrade": "Hold", "FromGrade": "Buy", "Firm": "C"},
+                    {"GradeDate": now, "Action": "main", "ToGrade": "Hold", "FromGrade": "Hold", "Firm": "D"},
+                ]
+            )
+
+        srv.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
+        radar = json.loads(_run(srv.get_analyst_upgrade_radar("TST", days_back=30)))
+        self.assertEqual(radar["upgrades30d"], 1)
+        self.assertEqual(radar["downgrades30d"], 1)
+        self.assertEqual(radar["initiations30d"], 1)
+
+        async def fake_radar(ticker, days_back=30):
+            return json.dumps(radar)
+
+        async def fake_consensus(ticker):
+            return json.dumps({"dominantRating": "buy", "totalAnalysts": 10})
+
+        async def fake_price(ticker):
+            return json.dumps({})
+
+        async def fake_earnings(ticker):
+            return json.dumps({})
+
+        async def fake_tech(ticker, period="3mo"):
+            return json.dumps({})
+
+        async def fake_ma(ticker):
+            return json.dumps({})
+
+        originals = (
+            srv.get_analyst_upgrade_radar,
+            srv.get_analyst_consensus,
+            srv.get_price_stats,
+            srv.get_earnings_momentum,
+            srv.get_technical_indicators,
+            srv.get_ma_position,
+        )
+        try:
+            srv.get_analyst_upgrade_radar = fake_radar
+            srv.get_analyst_consensus = fake_consensus
+            srv.get_price_stats = fake_price
+            srv.get_earnings_momentum = fake_earnings
+            srv.get_technical_indicators = fake_tech
+            srv.get_ma_position = fake_ma
+            position = json.loads(_run(srv.analyze_position_signals("TST")))
+        finally:
+            (
+                srv.get_analyst_upgrade_radar,
+                srv.get_analyst_consensus,
+                srv.get_price_stats,
+                srv.get_earnings_momentum,
+                srv.get_technical_indicators,
+                srv.get_ma_position,
+            ) = originals
+        self.assertEqual(position["t1_inputs"]["upgrades30d"], 1)
+        self.assertEqual(position["t1_inputs"]["initiations30d"], 1)
+
     def test_recent_revision_signal_beats_negative_90d_context(self):
         class FakeTicker:
             fast_info = _FastInfo()

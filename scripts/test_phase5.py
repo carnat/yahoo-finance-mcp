@@ -235,8 +235,11 @@ class TestCompareActualVsEstimate(unittest.TestCase):
             "metrics": {"revenue": {"value": 123_000_000_000}, "epsDiluted": {"value": 2.31}},
         }
         ea_payload = {
-            "revenueEstimate": [{"period": "0q", "avg": 121_000_000_000}],
-            "earningsHistory": [{"epsEstimate": 2.25}],
+            "revenueEstimate": [{"period": "FY2026 Q2", "avg": 121_000_000_000}],
+            "earningsHistory": [
+                {"quarter": "2026-09-30", "epsActual": None, "epsEstimate": 2.40},
+                {"period": "FY2026 Q2", "quarter": "2026-06-30", "epsActual": 2.31, "epsEstimate": 2.25},
+            ],
         }
         with patch("server.extract_earnings_metrics", new_callable=AsyncMock) as mocked_metrics, patch(
             "server.get_earnings_analysis", new_callable=AsyncMock
@@ -244,21 +247,23 @@ class TestCompareActualVsEstimate(unittest.TestCase):
             mocked_metrics.return_value = json.dumps(metrics_payload)
             mocked_ea.return_value = json.dumps(ea_payload)
             data = _parse(_run(srv.compare_earnings_actual_vs_estimate("AAPL")))
+            self.assertEqual(data["reportedPeriod"], "FY2026 Q2")
+            self.assertEqual(data["reportedDate"], "2026-06-30")
             self.assertEqual(data["estimate"]["revenue"]["source"], "yahoo")
             self.assertEqual(data["estimate"]["eps"]["source"], "yahoo")
             self.assertAlmostEqual(data["surprise"]["revenueSurprisePct"], 1.65, places=2)
             self.assertAlmostEqual(data["surprise"]["epsSurprisePct"], 2.67, places=2)
 
-    def test_period_mismatch_warning(self):
+    def test_no_reported_quarter_warning(self):
         with patch("server.extract_earnings_metrics", new_callable=AsyncMock) as mocked_metrics, patch(
             "server.get_earnings_analysis", new_callable=AsyncMock
         ) as mocked_ea:
-            mocked_metrics.return_value = json.dumps({"period": None, "metrics": {"revenue": {"value": 100.0}, "epsDiluted": {"value": 1.0}}})
-            mocked_ea.return_value = json.dumps({"revenueEstimate": [{"period": "0q", "avg": 90.0}], "earningsHistory": [{"epsEstimate": 0.9}]})
+            mocked_metrics.return_value = json.dumps({"period": None, "metrics": {"revenue": {"value": 100.0}, "epsDiluted": {"value": None}}})
+            mocked_ea.return_value = json.dumps({"revenueEstimate": [{"period": "0q", "avg": 90.0}], "earningsHistory": [{"epsActual": None, "epsEstimate": 0.9}]})
             data = _parse(_run(srv.compare_earnings_actual_vs_estimate("AAPL")))
             codes = [w.get("code") for w in data.get("warnings", []) if isinstance(w, dict)]
-            self.assertIn("PERIOD_MISMATCH", codes)
-            self.assertEqual(data.get("confidence"), "LOW")
+            self.assertIn("NO_REPORTED_QUARTER", codes)
+            self.assertEqual(data.get("confidence"), "NOT_DISCLOSED")
 
 
 class TestPublicWording(unittest.TestCase):
