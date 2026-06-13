@@ -414,6 +414,29 @@ const enc = encodeURIComponent;
 const iso = (ts: number) => new Date(ts * 1000).toISOString();
 const noData = (t: string) => `Error: no data found for ticker ${t}`;
 
+const ANALYST_UPGRADE_GRADES = new Set([
+  "buy", "outperform", "overweight", "strong buy", "positive",
+  "market outperform", "top pick",
+]);
+const ANALYST_DOWNGRADE_GRADES = new Set([
+  "sell", "underperform", "underweight", "strong sell", "negative",
+  "market underperform", "reduce",
+]);
+const ANALYST_INITIATION_ACTIONS = new Set(["initiated", "init", "initiation", "new coverage"]);
+
+function classifyAnalystChange(action: unknown, fromGrade: unknown, toGrade: unknown): string {
+  const actionLower = String(action ?? "").trim().toLowerCase();
+  const fromLower = String(fromGrade ?? "").trim().toLowerCase();
+  const toLower = String(toGrade ?? "").trim().toLowerCase();
+  if (ANALYST_INITIATION_ACTIONS.has(actionLower) || actionLower.startsWith("init")) return "INITIATED";
+  if (actionLower.includes("downgrade") || actionLower === "down") return "DOWNGRADE";
+  if (actionLower.includes("upgrade") || actionLower === "up") return "UPGRADE";
+  if (ANALYST_DOWNGRADE_GRADES.has(toLower) && !ANALYST_DOWNGRADE_GRADES.has(fromLower)) return "DOWNGRADE";
+  if (ANALYST_UPGRADE_GRADES.has(toLower) && fromLower && !ANALYST_UPGRADE_GRADES.has(fromLower)) return "UPGRADE";
+  if (toLower && !fromLower) return "INITIATED";
+  return "MAINTAIN";
+}
+
 /** Parse a JSON string returned by a single-ticker handler, falling back to a
  *  structured error object if the string is not valid JSON (e.g. plain error messages). */
 function safeJsonParse(s: string, ticker: string): Record<string, unknown> {
@@ -1593,11 +1616,10 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
   const recentUpgradeCount30d = history.filter((h) => {
     const tsRaw = raw(h.epochGradeDate) as number | null;
     if (tsRaw == null || tsRaw < cutoffSec) return false;
-    const action = String(h.action ?? h.Action ?? "").toLowerCase();
-    const toGrade = String(h.toGrade ?? h.ToGrade ?? "").toLowerCase();
-    const fromGrade = String(h.fromGrade ?? h.FromGrade ?? "").toLowerCase();
-    return action.includes("up") || action.includes("upgrade")
-      || (toGrade.includes("buy") && !fromGrade.includes("buy"));
+    const action = h.action ?? h.Action ?? "";
+    const toGrade = h.toGrade ?? h.ToGrade ?? "";
+    const fromGrade = h.fromGrade ?? h.FromGrade ?? "";
+    return classifyAnalystChange(action, fromGrade, toGrade) === "UPGRADE";
   }).length;
 
   let targetLagSignal = "UNKNOWN";
@@ -2302,7 +2324,17 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
   try {
     const [bsRaw, incRaw] = await Promise.all([
       fetchTimeseries(ticker, "quarterly", ["TotalDebt", "CashAndCashEquivalents"]),
-      fetchTimeseries(ticker, "quarterly", ["EBITDA", "EBIT", "InterestExpense"]),
+      fetchTimeseries(ticker, "quarterly", [
+        "EBITDA",
+        "NormalizedEBITDA",
+        "EBIT",
+        "OperatingIncome",
+        "InterestExpenseNonOperating",
+        "InterestExpense",
+        "ReconciledDepreciation",
+        "DepreciationAndAmortization",
+        "DepreciationAmortizationDepletionIncomeStatement",
+      ]),
     ]);
 
     const bs = JSON.parse(bsRaw) as Record<string, unknown>[];
@@ -2315,23 +2347,51 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
     const bsLatest = bs[0];
     const incLatest = inc[0];
 
+    const firstNumber = (obj: Record<string, unknown>, keys: string[]): { value: number | null; source: string | null } => {
+      for (const key of keys) {
+        const v = obj[key];
+        if (typeof v === "number" && Number.isFinite(v)) return { value: v, source: key };
+      }
+      return { value: null, source: null };
+    };
+
     const totalDebt = (bsLatest.totalDebt as number | null) ?? null;
     const cash = (bsLatest.cashAndCashEquivalents as number | null) ?? null;
-    const ebitdaQ = (incLatest.eBITDA as number | null) ?? (incLatest.ebitda as number | null) ?? null;
-    const ebitQ = (incLatest.eBIT as number | null) ?? (incLatest.ebit as number | null) ?? null;
-    const interestQ = (incLatest.interestExpense as number | null) ?? null;
+    const providerEbitda = firstNumber(incLatest, ["eBITDA", "ebitda", "normalizedEBITDA", "normalizedEbitda"]);
+    const ebit = firstNumber(incLatest, ["eBIT", "ebit", "operatingIncome"]);
+    const da = firstNumber(incLatest, [
+      "reconciledDepreciation",
+      "depreciationAndAmortization",
+      "depreciationAmortizationDepletionIncomeStatement",
+    ]);
+    const interest = firstNumber(incLatest, ["interestExpenseNonOperating", "interestExpense"]);
+    const ebitdaQ = providerEbitda.value;
+    const ebitQ = ebit.value;
+    const daQ = da.value;
+    const interestQ = interest.value;
 
     const netDebt = totalDebt != null && cash != null ? totalDebt - cash : null;
+    let operationalEbitdaQ: number | null = null;
+    let operationalEbitdaSource: string | null = null;
+    if (ebitQ != null && daQ != null) {
+      operationalEbitdaQ = ebitQ + daQ;
+      operationalEbitdaSource = "quarterly_ebit_plus_depreciation_and_amortization";
+    } else if (ebitdaQ != null) {
+      operationalEbitdaQ = ebitdaQ;
+      operationalEbitdaSource = "provider_ebitda_fallback";
+    }
     const ebitdaAnnual = ebitdaQ != null ? ebitdaQ * 4 : null;
     const ebitAnnual = ebitQ != null ? ebitQ * 4 : null;
+    const depreciationAmortizationAnnual = daQ != null ? daQ * 4 : null;
+    const operationalEbitdaAnnual = operationalEbitdaQ != null ? operationalEbitdaQ * 4 : null;
     const interestAnnual = interestQ != null ? interestQ * 4 : null;
 
-    const netDebtToEbitda = netDebt != null && ebitdaAnnual != null && ebitdaAnnual !== 0
-      ? +(netDebt / ebitdaAnnual).toFixed(2) : null;
+    const netDebtToEbitda = netDebt != null && operationalEbitdaAnnual != null && operationalEbitdaAnnual !== 0
+      ? +(netDebt / operationalEbitdaAnnual).toFixed(2) : null;
     const interestCoverageEbit = ebitAnnual != null && interestAnnual != null && interestAnnual !== 0
       ? +(ebitAnnual / Math.abs(interestAnnual)).toFixed(2) : null;
-    const interestCoverageEbitda = ebitdaAnnual != null && interestAnnual != null && interestAnnual !== 0
-      ? +(ebitdaAnnual / Math.abs(interestAnnual)).toFixed(2) : null;
+    const interestCoverageEbitda = operationalEbitdaAnnual != null && interestAnnual != null && interestAnnual !== 0
+      ? +(operationalEbitdaAnnual / Math.abs(interestAnnual)).toFixed(2) : null;
     const interestCoverage = interestCoverageEbit;
 
     let creditStressFlag: boolean | null = null;
@@ -2351,6 +2411,7 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
     if (totalDebt == null) missingComponents.push("totalDebtUsd");
     if (cash == null) missingComponents.push("cashUsd");
     if (ebitdaAnnual == null) missingComponents.push("ebitdaUsd");
+    if (operationalEbitdaAnnual == null) missingComponents.push("operationalEbitdaUsd");
     if (ebitAnnual == null) missingComponents.push("ebitUsd");
     if (interestAnnual == null) missingComponents.push("interestExpenseUsd");
 
@@ -2363,6 +2424,7 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
 
     const computedMetrics: string[] = [];
     if (netDebt != null) computedMetrics.push("netDebtUsd");
+    if (operationalEbitdaAnnual != null) computedMetrics.push("operationalEbitdaUsd");
     if (netDebtToEbitda != null) computedMetrics.push("netDebtToEbitda");
     if (interestCoverage != null) computedMetrics.push("interestCoverage");
     if (interestCoverageEbit != null) computedMetrics.push("interestCoverageEbit");
@@ -2377,7 +2439,22 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
         message: "Interest coverage cannot be computed from available provider data.",
       });
     }
-    if ((ebitdaAnnual != null && ebitdaAnnual < 0) || (ebitAnnual != null && ebitAnnual < 0)) {
+    if (operationalEbitdaSource === "provider_ebitda_fallback") {
+      warnings.push({
+        code: "OPERATIONAL_EBITDA_UNAVAILABLE",
+        message: "Operational EBITDA could not be computed from EBIT plus depreciation and amortization; provider EBITDA is used as a fallback.",
+      });
+    }
+    if (ebitdaAnnual != null && operationalEbitdaAnnual != null) {
+      const basis = Math.max(Math.abs(operationalEbitdaAnnual), 1);
+      if (Math.abs(ebitdaAnnual - operationalEbitdaAnnual) / basis >= 0.25 && Math.abs(ebitdaAnnual - operationalEbitdaAnnual) >= 100_000_000) {
+        warnings.push({
+          code: "NON_OPERATING_EBITDA_DIVERGENCE",
+          message: "Provider EBITDA materially differs from EBIT plus depreciation and amortization; leverage metrics use operational EBITDA.",
+        });
+      }
+    }
+    if ((operationalEbitdaAnnual != null && operationalEbitdaAnnual < 0) || (ebitAnnual != null && ebitAnnual < 0)) {
       warnings.push({
         code: "NEGATIVE_EARNINGS_BASE",
         message: "Company has negative EBIT/EBITDA; leverage metrics may understate operating credit risk despite net cash or low net debt.",
@@ -2394,8 +2471,14 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
       cashUsd: cash,
       netDebtUsd: netDebt,
       ebitdaUsd: ebitdaAnnual,
+      ebitdaSource: providerEbitda.source,
+      operationalEbitdaUsd: operationalEbitdaAnnual,
+      operationalEbitdaSource,
+      depreciationAmortizationUsd: depreciationAmortizationAnnual,
+      depreciationAmortizationSource: da.source,
       ebitUsd: ebitAnnual,
       interestExpenseUsd: interestAnnual,
+      interestExpenseSource: interest.source,
       netDebtToEbitda,
       interestCoverage,
       interestCoverageEbit,
@@ -2988,6 +3071,12 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
         ticker,
         windowDays: daysBack,
         netSentiment: 0,
+        upgrades: 0,
+        upgrades30d: daysBack === 30 ? 0 : null,
+        downgrades: 0,
+        downgrades30d: daysBack === 30 ? 0 : null,
+        initiations: 0,
+        initiations30d: daysBack === 30 ? 0 : null,
         changes: [],
         summary: "NO CHANGES",
         dataDate: getLastTradingDate(),
@@ -2995,12 +3084,11 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
     }
 
     const cutoffMs = Date.now() - daysBack * 86400 * 1000;
-    const upgradeGrades = new Set(["Buy", "Outperform", "Overweight", "Strong Buy", "Positive", "Market Outperform", "Top Pick"]);
-    const downgradeGrades = new Set(["Sell", "Underperform", "Underweight", "Strong Sell", "Negative", "Market Underperform", "Reduce"]);
 
     const changes: Record<string, unknown>[] = [];
     let upgradeCount = 0;
     let downgradeCount = 0;
+    let initiationCount = 0;
 
     for (const entry of ud) {
       const gradeDate = entry.GradeDate as string | undefined;
@@ -3015,16 +3103,10 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
       const firm = (entry.firm ?? entry.Firm ?? "") as string;
       const action = (entry.action ?? entry.Action ?? "") as string;
 
-      let signal: string;
-      if (["up", "upgrade", "Up", "Upgrade"].includes(action) || upgradeGrades.has(toGrade)) {
-        signal = "UPGRADE";
-        upgradeCount++;
-      } else if (["down", "downgrade", "Down", "Downgrade"].includes(action) || downgradeGrades.has(toGrade)) {
-        signal = "DOWNGRADE";
-        downgradeCount++;
-      } else {
-        signal = "MAINTAIN";
-      }
+      const signal = classifyAnalystChange(action, fromGrade, toGrade);
+      if (signal === "UPGRADE") upgradeCount++;
+      else if (signal === "DOWNGRADE") downgradeCount++;
+      else if (signal === "INITIATED") initiationCount++;
 
       // Price target direction.
       // yfinance/upgrades_downgrades doesn't expose numeric price targets, so ptFrom/ptTo are
@@ -3035,7 +3117,7 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
       const ptFrom: null = null;
       const ptTo: null = null;
       const ptDirection: string | null =
-        ["initiated", "Initiated", "init"].includes(action) ? "INITIATED" :
+        signal === "INITIATED" ? "INITIATED" :
         signal === "MAINTAIN" ? "UNCHANGED" : null;
       const mixedSignal = signal === "UPGRADE" && ptDirection === "LOWERED";
 
@@ -3063,12 +3145,19 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
     const parts: string[] = [];
     if (upgradeCount) parts.push(`${upgradeCount} UPGRADE(s)`);
     if (downgradeCount) parts.push(`${downgradeCount} DOWNGRADE(s)`);
+    if (initiationCount) parts.push(`${initiationCount} INITIATION(s)`);
     const summary = parts.length > 0 ? parts.join(", ") : "NO CHANGES";
 
     return JSON.stringify({
       ticker,
       windowDays: daysBack,
       netSentiment,
+      upgrades: upgradeCount,
+      upgrades30d: daysBack === 30 ? upgradeCount : null,
+      downgrades: downgradeCount,
+      downgrades30d: daysBack === 30 ? downgradeCount : null,
+      initiations: initiationCount,
+      initiations30d: daysBack === 30 ? initiationCount : null,
       changes,
       summary,
       dataDate: getLastTradingDate(),
@@ -5239,11 +5328,11 @@ export async function getPositionScoreInputs(ticker: string | string[]): Promise
     const tech = parse(techRaw);
     const ma = parse(maRaw);
 
-    const changes = (upgrade.changes as Record<string, unknown>[]) ?? [];
     const t1 = {
       analystNetSentiment: upgrade.netSentiment ?? null,
-      upgrades30d: changes.filter((c) => c.signal === "UPGRADE").length,
-      downgrades30d: changes.filter((c) => c.signal === "DOWNGRADE").length,
+      upgrades30d: upgrade.upgrades30d ?? upgrade.upgrades ?? null,
+      downgrades30d: upgrade.downgrades30d ?? upgrade.downgrades ?? null,
+      initiations30d: upgrade.initiations30d ?? upgrade.initiations ?? null,
       dominantRating: consensus.dominantRating ?? null,
       analystCount: consensus.numberOfAnalysts ?? null,
     };
@@ -9113,22 +9202,61 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
   const revenueMetric = (m.revenue && typeof m.revenue === "object") ? m.revenue as Record<string, unknown> : {};
   const epsMetric = (m.epsDiluted && typeof m.epsDiluted === "object") ? m.epsDiluted as Record<string, unknown> : {};
   const actualRevenue = typeof revenueMetric.value === "number" ? revenueMetric.value : null;
-  const actualEps = typeof epsMetric.value === "number" ? epsMetric.value : null;
+
+  const toNumber = (value: unknown): number | null =>
+    typeof value === "number" && Number.isFinite(value) ? value : null;
+  const rowPeriod = (row: Record<string, unknown> | null): string | null => {
+    if (!row) return null;
+    for (const key of ["reportedPeriod", "period", "quarter", "index"]) {
+      const value = row[key];
+      if (value != null && String(value).trim()) return String(value);
+    }
+    return null;
+  };
+  const rowDate = (row: Record<string, unknown> | null): string | null => {
+    if (!row) return null;
+    for (const key of ["reportedDate", "quarter", "date", "earningsDate", "index"]) {
+      const value = row[key];
+      if (value == null) continue;
+      if (typeof value === "number" && Number.isFinite(value)) {
+        const ts = value > 1_000_000_000_000 ? value : value * 1000;
+        return new Date(ts).toISOString().slice(0, 10);
+      }
+      const parsed = new Date(String(value));
+      if (!Number.isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
+      const text = String(value).trim();
+      if (text) return text;
+    }
+    return null;
+  };
+
+  const earningsHistory = Array.isArray(ea.earningsHistory) ? ea.earningsHistory as Record<string, unknown>[] : [];
+  const reportedRows = earningsHistory.filter((row) => toNumber(row.epsActual) != null);
+  const selected = reportedRows.sort((a, b) => String(rowDate(b) ?? "").localeCompare(String(rowDate(a) ?? "")))[0] ?? null;
+  const reportedPeriod = rowPeriod(selected);
+  const reportedDate = rowDate(selected) ?? (metrics.reportedAt as string | null) ?? null;
+  const actualEps = toNumber(selected?.epsActual) ?? (typeof epsMetric.value === "number" ? epsMetric.value : null);
+  const estEps = toNumber(selected?.epsEstimate);
+
   let estRevenue: number | null = null;
   const revenueEstimate = Array.isArray(ea.revenueEstimate) ? ea.revenueEstimate as Record<string, unknown>[] : [];
   for (const row of revenueEstimate) {
-    if (String(row.period ?? "") === "0q" && typeof row.avg === "number") {
+    const candidatePeriod = String(row.period ?? row.reportedPeriod ?? "");
+    if (
+      ((reportedPeriod != null && candidatePeriod === reportedPeriod)
+        || (reportedDate != null && rowDate(row) === reportedDate))
+      && typeof row.avg === "number"
+    ) {
       estRevenue = row.avg as number;
       break;
     }
   }
-  let estEps: number | null = null;
-  const earningsHistory = Array.isArray(ea.earningsHistory) ? ea.earningsHistory as Record<string, unknown>[] : [];
-  if (earningsHistory.length > 0 && typeof earningsHistory[0]?.epsEstimate === "number") estEps = earningsHistory[0].epsEstimate as number;
 
   const out: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
-    period: metrics.period ?? period,
+    period: reportedPeriod ?? metrics.period ?? period,
+    reportedPeriod,
+    reportedDate,
     actual: {
       revenue: { value: actualRevenue, unit: "USD" },
       eps: { value: actualEps, unit: "USD/share" },
@@ -9144,17 +9272,37 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
     confidence: "NOT_DISCLOSED",
     warnings: [] as Record<string, unknown>[],
   };
-  if (actualRevenue == null || actualEps == null || estRevenue == null || estRevenue === 0 || estEps == null || estEps === 0) {
+
+  if (!selected) {
+    (out.warnings as Record<string, unknown>[]).push({
+      code: "NO_REPORTED_QUARTER",
+      message: "Yahoo earningsHistory did not include a quarter with non-null actual EPS.",
+    });
     return JSON.stringify(out);
   }
+
+  if (actualRevenue != null && estRevenue != null && estRevenue !== 0) {
+    (out.surprise as Record<string, unknown>).revenueSurprisePct =
+      Number((((actualRevenue - estRevenue) / Math.abs(estRevenue)) * 100).toFixed(2));
+  } else if (actualRevenue != null) {
+    (out.warnings as Record<string, unknown>[]).push({
+      code: "REVENUE_ESTIMATE_UNAVAILABLE",
+      message: "No Yahoo revenue estimate was available for the selected reported quarter.",
+    });
+  }
+
+  if (actualEps == null || estEps == null || estEps === 0) {
+    (out.warnings as Record<string, unknown>[]).push({
+      code: "EPS_ESTIMATE_UNAVAILABLE",
+      message: "No Yahoo EPS estimate was available for the selected reported quarter.",
+    });
+    return JSON.stringify(out);
+  }
+
   out.surprise = {
-    revenueSurprisePct: Number((((actualRevenue - estRevenue) / Math.abs(estRevenue)) * 100).toFixed(2)),
+    revenueSurprisePct: (out.surprise as Record<string, unknown>).revenueSurprisePct ?? null,
     epsSurprisePct: Number((((actualEps - estEps) / Math.abs(estEps)) * 100).toFixed(2)),
   };
-  out.confidence = "HIGH";
-  if (!metrics.period) {
-    (out.warnings as Record<string, unknown>[]).push({ code: "PERIOD_MISMATCH", message: "Actual and estimate periods could not be aligned" });
-    out.confidence = "LOW";
-  }
+  out.confidence = (out.surprise as Record<string, unknown>).revenueSurprisePct != null ? "HIGH" : "MEDIUM";
   return JSON.stringify(out);
 }

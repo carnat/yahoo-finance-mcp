@@ -558,7 +558,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_credit_health",
     description:
-      "Get pre-computed credit/leverage metrics: Net Debt/EBITDA, EBIT and EBITDA interest coverage, debt tier, credit stress flag. Max 5 tickers per call; split larger lists into multiple calls.",
+      "Get pre-computed credit/leverage metrics using operational EBITDA (EBIT plus depreciation/amortization when available), EBIT and EBITDA interest coverage, debt tier, credit stress flag, and source fields. Max 5 tickers per call; split larger lists into multiple calls.",
     inputSchema: {
       type: "object",
       properties: {
@@ -644,7 +644,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_analyst_upgrade_radar",
     description:
-      "Get recent analyst rating changes with signal classification (UPGRADE/DOWNGRADE/MAINTAIN), netSentiment, and summary. Returns ptFrom, ptTo (null — price target data not exposed by yfinance), and ptDirection (RAISE/CUT/UNCHANGED/INITIATED/null). Max 5 tickers per call.",
+      "Get recent analyst rating changes with canonical signal classification (UPGRADE/DOWNGRADE/INITIATED/MAINTAIN), separate upgrade/downgrade/initiation counts, netSentiment, and summary. Returns ptFrom, ptTo (null — price target data not exposed by yfinance), and ptDirection (RAISE/CUT/UNCHANGED/INITIATED/null). Max 5 tickers per call.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1011,7 +1011,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "extract_earnings_metrics", description: "Extract reported earnings metrics (revenue, EPS diluted, gross margin, operating income, FCF, capex) from SEC 8-K or public IR source.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" }, source_preference: { type: "array", items: { type: "string", enum: ["sec_8k", "company_ir", "10-q", "yahoo"] }, description: "Ordered preference list for source resolution.", default: ["sec_8k", "company_ir", "10-q", "yahoo"] } }, required: ["ticker"] } },
   { name: "extract_guidance", description: "Extract company-provided forward guidance ranges (revenue, gross margin, EPS) from the latest SEC 8-K or IR release.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" } }, required: ["ticker"] } },
   { name: "extract_management_commentary", description: "Extract topic-keyed management commentary snippets from the latest earnings release. Returns first relevant sentence per topic.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" }, topics: { type: "array", items: { type: "string" }, description: "Topics to search for, e.g. ['AI', 'margins', 'guidance', 'supply chain']" } }, required: ["ticker"] } },
-  { name: "compare_earnings_actual_vs_estimate", description: "Compare reported actual earnings (from SEC 8-K) vs Yahoo analyst consensus estimates. Returns revenue and EPS surprise percentages.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" } }, required: ["ticker"] } },
+  { name: "compare_earnings_actual_vs_estimate", description: "Compare the latest reported quarter with non-null actual EPS against Yahoo's historical estimate for that same reported quarter/date. Returns reportedPeriod, reportedDate, actual, estimate, surprise, confidence, and warnings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" } }, required: ["ticker"] } },
   { name: "list_sec_filing_exhibits", description: "List all exhibits/documents attached to a specific SEC filing by accession number.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, accessionNumber: { type: "string", description: "SEC filing accession number, e.g. '0000320193-24-000081'" } }, required: ["ticker", "accessionNumber"] } },
   { name: "get_sec_filing_exhibit_content", description: "Fetch and return the text content of a specific exhibit from an SEC filing. Supports topic-based paragraph filtering to reduce token usage.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, accessionNumber: { type: "string", description: "SEC filing accession number" }, fileName: { type: "string", description: "Exhibit filename from the filing index" }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" } }, required: ["ticker", "accessionNumber", "fileName"] } },
   { name: "parse_public_transcript", description: "Fetch and parse a public transcript page (Motley Fool, company IR, etc.). Supports topic-based paragraph filtering to reduce token usage.", inputSchema: { type: "object", properties: { url: { type: "string", description: "Public https URL of the transcript page" }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" } }, required: ["url"] } },
@@ -1217,12 +1217,20 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     type: "object",
     properties: {
       ticker: { type: "string" },
+      ebitdaUsd: { type: ["number", "null"] },
+      ebitdaSource: { type: ["string", "null"] },
+      operationalEbitdaUsd: { type: ["number", "null"] },
+      operationalEbitdaSource: { type: ["string", "null"] },
+      depreciationAmortizationUsd: { type: ["number", "null"] },
+      interestExpenseUsd: { type: ["number", "null"] },
+      interestExpenseSource: { type: ["string", "null"] },
       netDebtToEbitda: { type: ["number", "null"] },
       interestCoverage: { type: ["number", "null"] },
       interestCoverageEbit: { type: ["number", "null"] },
       interestCoverageEbitda: { type: ["number", "null"] },
       debtTier: { type: ["string", "null"] },
       creditStress: { type: ["boolean", "null"] },
+      creditStressFlag: { type: ["boolean", "null"] },
       dataDate: { type: "string" },
     },
     additionalProperties: true,
@@ -1290,7 +1298,11 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       netSentiment: { type: ["number", "null"] },
       mixedSignal: { type: ["boolean", "null"] },
       upgrades: { type: ["number", "null"] },
+      upgrades30d: { type: ["number", "null"] },
       downgrades: { type: ["number", "null"] },
+      downgrades30d: { type: ["number", "null"] },
+      initiations: { type: ["number", "null"] },
+      initiations30d: { type: ["number", "null"] },
       dataDate: { type: "string" },
     },
     additionalProperties: true,
@@ -1432,7 +1444,21 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   extract_earnings_metrics: ENVELOPE_V2_OUTPUT_SCHEMA,
   extract_guidance: ENVELOPE_V2_OUTPUT_SCHEMA,
   extract_management_commentary: ENVELOPE_V2_OUTPUT_SCHEMA,
-  compare_earnings_actual_vs_estimate: ENVELOPE_V2_OUTPUT_SCHEMA,
+  compare_earnings_actual_vs_estimate: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      period: { type: ["string", "null"] },
+      reportedPeriod: { type: ["string", "null"] },
+      reportedDate: { type: ["string", "null"] },
+      actual: { type: "object" },
+      estimate: { type: "object" },
+      surprise: { type: "object" },
+      confidence: { type: "string" },
+      warnings: { type: "array" },
+    },
+    additionalProperties: true,
+  },
   list_sec_filing_exhibits: ENVELOPE_V2_OUTPUT_SCHEMA,
   get_sec_filing_exhibit_content: ENVELOPE_V2_OUTPUT_SCHEMA,
   parse_public_transcript: ENVELOPE_V2_OUTPUT_SCHEMA,
