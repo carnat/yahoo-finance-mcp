@@ -59,6 +59,7 @@ if not getattr(_FastMCP, "_output_schema_patched", False):
     _FastMCP._output_schema_patched = True  # type: ignore[attr-defined]
 
 import server as srv  # noqa: E402
+import yfmcp.clients.edgar as edgar_client  # noqa: E402
 
 
 def _run(coro):  # type: ignore[no-untyped-def]
@@ -102,9 +103,9 @@ MOCK_INDEX_HTML = """
 
 class TestEdgarListExhibitsFromIndex(unittest.TestCase):
     def test_parses_exhibit_table(self):
-        with patch("server._edgar_get_html", new_callable=AsyncMock) as mock_get:
+        with patch("yfmcp.clients.edgar._edgar_get_html", new_callable=AsyncMock) as mock_get:
             mock_get.return_value = MOCK_INDEX_HTML
-            exhibits = _run(srv._edgar_list_exhibits_from_index("https://www.sec.gov/Archives/edgar/data/12345/0000123450-24-000001-index.htm"))
+            exhibits = _run(edgar_client._edgar_list_exhibits_from_index("https://www.sec.gov/Archives/edgar/data/12345/0000123450-24-000001-index.htm"))
         self.assertEqual(len(exhibits), 3)
         self.assertEqual(exhibits[0]["sequence"], "1")
         self.assertEqual(exhibits[0]["type"], "EX-99.1")
@@ -115,9 +116,9 @@ class TestEdgarListExhibitsFromIndex(unittest.TestCase):
         self.assertEqual(exhibits[1]["description"], "CONFERENCE CALL TRANSCRIPT")
 
     def test_empty_on_fetch_failure(self):
-        with patch("server._edgar_get_html", new_callable=AsyncMock) as mock_get:
+        with patch("yfmcp.clients.edgar._edgar_get_html", new_callable=AsyncMock) as mock_get:
             mock_get.return_value = None
-            exhibits = _run(srv._edgar_list_exhibits_from_index("https://www.sec.gov/invalid"))
+            exhibits = _run(edgar_client._edgar_list_exhibits_from_index("https://www.sec.gov/invalid"))
         self.assertEqual(exhibits, [])
 
 
@@ -217,6 +218,12 @@ class TestGetEarningsCallTranscript(unittest.TestCase):
         data = _parse(raw)
         self.assertEqual(data["status"], "SEC_8K_NOT_FOUND")
         self.assertIsNone(data["content"])
+        self.assertEqual(data["attemptedSources"][0]["sourceType"], "sec_8k_exhibit")
+        self.assertEqual(data["attemptedSources"][0]["status"], "NOT_FOUND")
+        self.assertEqual(data["attemptedSources"][1]["sourceType"], "company_ir")
+        self.assertEqual(data["attemptedSources"][2]["sourceType"], "public_transcript_url")
+        self.assertEqual(data["attemptedSources"][3]["sourceType"], "alpha_vantage")
+        self.assertIsInstance(data["nextRecommendedFallback"], dict)
 
     def test_returns_exhibit_not_found_when_no_transcript(self):
         mock_sec = {"accessionNumber": "0000320193-24-000081", "filingDate": "2024-01-25", "acceptedAt": "2024-01-25T16:00:00"}
@@ -231,6 +238,56 @@ class TestGetEarningsCallTranscript(unittest.TestCase):
         data = _parse(raw)
         self.assertEqual(data["status"], "SEC_EXHIBIT_NOT_FOUND")
         self.assertIn("availableExhibits", data)
+        self.assertEqual(data["attemptedSources"][0]["sourceType"], "sec_8k_exhibit")
+        self.assertEqual(data["attemptedSources"][0]["status"], "NOT_FOUND")
+        self.assertEqual(data["attemptedSources"][0]["exhibitsSearched"], 1)
+        self.assertEqual(data["attemptedSources"][-1]["sourceType"], "alpha_vantage")
+        self.assertIsInstance(data["nextRecommendedFallback"], dict)
+
+    def test_returns_structured_metadata_when_sec_fetch_fails(self):
+        mock_sec = {"accessionNumber": "0000320193-24-000081", "filingDate": "2024-01-25", "acceptedAt": "2024-01-25T16:00:00"}
+        with patch("server._resolve_latest_earnings_sec_source", new_callable=AsyncMock, return_value=mock_sec), \
+             patch("server._edgar_cik_from_accession", return_value=320193), \
+             patch("server._edgar_list_exhibits_from_index", new_callable=AsyncMock) as mock_list, \
+             patch("server._edgar_get_html", new_callable=AsyncMock) as mock_get:
+            mock_list.return_value = [
+                {"sequence": "2", "description": "EARNINGS CALL TRANSCRIPT", "document": "ex99-2.htm", "type": "EX-99.2", "size": "120000"},
+            ]
+            mock_get.return_value = None
+            raw = _run(srv.get_earnings_call_transcript(ticker="AAPL"))
+        data = _parse(raw)
+        self.assertEqual(data["status"], "FETCH_ERROR")
+        self.assertEqual(data["attemptedSources"][0]["status"], "FETCH_ERROR")
+        self.assertIn("documentUrl", data)
+        self.assertIsInstance(data["nextRecommendedFallback"], dict)
+
+    def test_alpha_vantage_fallback_success_when_sec_exhibit_missing(self):
+        mock_sec = {"accessionNumber": "0000320193-24-000081", "filingDate": "2024-01-25", "acceptedAt": "2024-01-25T16:00:00"}
+        alpha_payload = {
+            "sourceType": "alpha_vantage",
+            "status": "OK",
+            "filteredByTopics": None,
+            "content": "Operator: Welcome to the call.",
+            "totalTextLength": 30,
+            "truncated": False,
+            "warnings": [],
+        }
+        alpha_attempt = {"sourceType": "alpha_vantage", "status": "SUCCESS", "quarter": "2024Q1", "rateLimit": {"provider": "alpha_vantage", "used": True}}
+        with patch("server._resolve_latest_earnings_sec_source", new_callable=AsyncMock, return_value=mock_sec), \
+             patch("server._edgar_cik_from_accession", return_value=320193), \
+             patch("server._edgar_list_exhibits_from_index", new_callable=AsyncMock) as mock_list, \
+             patch("server._fetch_alpha_vantage_transcript", new_callable=AsyncMock) as mock_alpha:
+            mock_list.return_value = [
+                {"sequence": "1", "description": "PRESS RELEASE", "document": "ex99-1.htm", "type": "EX-99.1", "size": "50000"},
+            ]
+            mock_alpha.return_value = (alpha_payload, alpha_attempt)
+            raw = _run(srv.get_earnings_call_transcript(ticker="AAPL"))
+        data = _parse(raw)
+        self.assertEqual(data["status"], "OK")
+        self.assertEqual(data["sourceType"], "alpha_vantage")
+        self.assertIn("Welcome to the call", data["content"])
+        self.assertIsNone(data["nextRecommendedFallback"])
+        self.assertEqual(data["attemptedSources"][-1]["status"], "SUCCESS")
 
     def test_returns_transcript_content_when_found(self):
         mock_sec = {"accessionNumber": "0000320193-24-000081", "filingDate": "2024-01-25", "acceptedAt": "2024-01-25T16:00:00"}
@@ -249,6 +306,8 @@ class TestGetEarningsCallTranscript(unittest.TestCase):
         self.assertEqual(data["status"], "OK")
         self.assertIn("earnings call", data["content"])
         self.assertEqual(data["exhibitType"], "EX-99.2")
+        self.assertEqual(data["attemptedSources"][0]["status"], "SUCCESS")
+        self.assertIsNone(data["nextRecommendedFallback"])
 
     def test_topic_filtering(self):
         mock_sec = {"accessionNumber": "0000320193-24-000081", "filingDate": "2024-01-25", "acceptedAt": "2024-01-25T16:00:00"}
@@ -268,6 +327,8 @@ class TestGetEarningsCallTranscript(unittest.TestCase):
         self.assertIsInstance(data["matchedParagraphs"], list)
         # Content should be None when filtering by topics
         self.assertIsNone(data["content"])
+        self.assertEqual(data["attemptedSources"][0]["status"], "SUCCESS")
+        self.assertIsNone(data["nextRecommendedFallback"])
 
 
 if __name__ == "__main__":
