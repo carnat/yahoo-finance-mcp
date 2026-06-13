@@ -169,6 +169,64 @@ class TestPr2DataQuality(unittest.TestCase):
         self.assertEqual(parsed["transactionLabel"], "Purchase")
         self.assertEqual(parsed["value"], 12500.0)
 
+    def test_form4_transformed_html_parser_extracts_transaction(self):
+        html = """
+        <html><body>
+          <table width="100%" border="1">
+            <tr>
+              <td rowspan="4">
+                <span class="MedSmallFormText">1. Name and Address of Reporting Person</span>
+                <table><tr><td><a href="/cgi-bin/browse-edgar?action=getcompany&amp;CIK=1">LEVINSON ARTHUR D</a></td></tr></table>
+              </td>
+              <td>
+                <span class="MedSmallFormText">2. Issuer Name and Ticker or Trading Symbol</span>
+                <br>Apple Inc. [ <span class="FormData">AAPL</span> ]
+              </td>
+              <td rowspan="2">
+                <span class="MedSmallFormText">5. Relationship of Reporting Person(s) to Issuer</span>
+                <table>
+                  <tr><td><span class="FormData">X</span></td><td>Director</td><td></td><td>10% Owner</td></tr>
+                  <tr><td></td><td>Officer (give title below)</td><td></td><td>Other (specify below)</td></tr>
+                </table>
+              </td>
+            </tr>
+            <tr><td><span class="MedSmallFormText">6. Individual or Joint/Group Filing</span></td></tr>
+          </table>
+          <table width="100%" border="1" cellspacing="0" cellpadding="4">
+            <thead>
+              <tr><th colspan="11">Table I - Non-Derivative Securities Acquired, Disposed of, or Beneficially Owned</th></tr>
+              <tr><th>1. Title of Security</th><th>2. Transaction Date</th><th>2A.</th><th colspan="2">3. Transaction Code</th><th colspan="3">4. Securities Acquired (A) or Disposed Of (D)</th><th>5. Amount Owned</th><th>6. Ownership Form</th><th>7. Nature</th></tr>
+              <tr><th></th><th></th><th></th><th>Code</th><th>V</th><th>Amount</th><th>(A) or (D)</th><th>Price</th><th></th><th></th><th></th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="FormData">Common Stock</span></td>
+                <td><span class="FormData">05/27/2026</span></td>
+                <td></td>
+                <td><span class="SmallFormData">S</span></td>
+                <td></td>
+                <td><span class="FormData">50,000</span></td>
+                <td><span class="FormData">D</span></td>
+                <td><span class="FormText">$</span><span class="FormData">311.02</span><span class="FootnoteData"><sup>(1)</sup></span></td>
+                <td><span class="FormData">3,764,576</span></td>
+                <td><span class="FormData">D</span></td>
+                <td></td>
+              </tr>
+            </tbody>
+          </table>
+        </body></html>
+        """
+        parsed = srv._parse_form4_transaction(html)
+        self.assertEqual(parsed["owner"], "LEVINSON ARTHUR D")
+        self.assertEqual(parsed["role"], "director")
+        self.assertEqual(parsed["transactionCode"], "S")
+        self.assertEqual(parsed["transactionLabel"], "Sale")
+        self.assertEqual(parsed["shares"], 50000.0)
+        self.assertEqual(parsed["price"], 311.02)
+        self.assertEqual(parsed["value"], 15551000.0)
+        self.assertEqual(parsed["ownershipForm"], "D")
+        self.assertEqual(parsed["transactionDate"], "2026-05-27")
+
     def test_china_exposure_evidence_has_excerpt_availability(self):
         async def fake_index(**kwargs):
             return json.dumps({
