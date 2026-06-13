@@ -529,11 +529,152 @@ def _strip_xml_namespaces(xml_text: str) -> str:
     return _re.sub(r'\sxmlns(:\w+)?="[^"]*"', "", xml_text)
 
 
+_FORM4_TRANSACTION_LABELS = {
+    "P": "Purchase",
+    "S": "Sale",
+    "A": "Grant/Award",
+    "D": "Disposition",
+    "M": "Option exercise/conversion",
+    "F": "Tax withholding/payment",
+    "G": "Gift",
+}
+
+
+def _form4_num(value: str | None) -> float | None:
+    if value is None:
+        return None
+    text = _strip_html_tags(value)
+    match = _re.search(r"-?\$?\s*\(?\d[\d,]*(?:\.\d+)?\)?", text)
+    if not match:
+        return None
+    s = match.group(0).replace("$", "").replace(",", "").replace(" ", "")
+    negative = s.startswith("(") and s.endswith(")")
+    s = s.strip("()")
+    try:
+        n = float(s)
+    except Exception:
+        return None
+    return -n if negative else n
+
+
+def _form4_date(value: str | None) -> str | None:
+    text = _strip_html_tags(value or "")
+    if not text:
+        return None
+    if _re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return text
+    m = _re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", text)
+    if not m:
+        return text
+    month, day, year = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def _form4_owner_from_html(html_text: str) -> str | None:
+    m = _re.search(
+        r"Name and Address of Reporting Person[\s\S]*?<a\b[^>]*>([\s\S]*?)</a>",
+        html_text,
+        _re.IGNORECASE,
+    )
+    return _strip_html_tags(m.group(1)) if m else None
+
+
+def _form4_role_from_html(html_text: str) -> str | None:
+    m = _re.search(
+        r"Relationship of Reporting Person\(s\) to Issuer([\s\S]*?)Individual or Joint/Group Filing",
+        html_text,
+        _re.IGNORECASE,
+    )
+    if not m:
+        return None
+    roles: list[str] = []
+    for row in _parse_html_table(m.group(1)):
+        for i, cell in enumerate(row[:-1]):
+            if cell.strip().upper() == "X":
+                label = row[i + 1].strip().lower()
+                if "director" in label:
+                    roles.append("director")
+                elif "officer" in label:
+                    roles.append("officer")
+                elif "10%" in label or "owner" in label:
+                    roles.append("ten_percent_owner")
+                elif "other" in label:
+                    roles.append("other")
+    return ", ".join(dict.fromkeys(roles)) or None
+
+
+def _parse_form4_html_transaction(html_text: str) -> dict | None:
+    owner_name = _form4_owner_from_html(html_text)
+    role = _form4_role_from_html(html_text)
+    for table_m in _re.finditer(r"<table[^>]*>([\s\S]*?)</table>", html_text, _re.IGNORECASE):
+        table_html = table_m.group(0)
+        table_text = _strip_html_tags(table_html).lower()
+        if "non-derivative securities" in table_text:
+            for row in _parse_html_table(table_html):
+                if len(row) < 10:
+                    continue
+                code = row[3].strip().upper()
+                shares = _form4_num(row[5])
+                if not code or shares is None:
+                    continue
+                price = _form4_num(row[7])
+                return _form4_transaction_payload(
+                    owner_name=owner_name,
+                    role=role,
+                    code=code,
+                    shares=shares,
+                    price=price,
+                    ownership_form=row[9].strip() or None,
+                    transaction_date=_form4_date(row[1]),
+                )
+        if "derivative securities" in table_text:
+            for row in _parse_html_table(table_html):
+                if len(row) < 15:
+                    continue
+                code = row[4].strip().upper()
+                shares = _form4_num(row[6])
+                if not code or shares is None:
+                    continue
+                return _form4_transaction_payload(
+                    owner_name=owner_name,
+                    role=role,
+                    code=code,
+                    shares=shares,
+                    price=_form4_num(row[1]),
+                    ownership_form=row[14].strip() or None,
+                    transaction_date=_form4_date(row[2]),
+                )
+    return None
+
+
+def _form4_transaction_payload(
+    *,
+    owner_name: str | None,
+    role: str | None,
+    code: str | None,
+    shares: float | None,
+    price: float | None,
+    ownership_form: str | None,
+    transaction_date: str | None,
+) -> dict:
+    return {
+        "owner": owner_name,
+        "role": role,
+        "transactionCode": code,
+        "transactionLabel": _FORM4_TRANSACTION_LABELS.get(str(code or "").upper(), "Other/Unclassified"),
+        "shares": shares,
+        "price": price,
+        "value": round(shares * price, 2) if shares is not None and price is not None else None,
+        "ownershipForm": ownership_form,
+        "transactionDate": transaction_date,
+    }
+
+
 def _parse_form4_transaction(xml_text: str) -> dict | None:
     try:
         root = _ET.fromstring(_strip_xml_namespaces(xml_text))
     except Exception:
-        return None
+        return _parse_form4_html_transaction(xml_text)
     owner_name = _xml_text(root, ".//reportingOwnerId/rptOwnerName")
     officer_title = _xml_text(root, ".//reportingOwnerRelationship/officerTitle")
     roles: list[str] = []
@@ -553,35 +694,17 @@ def _parse_form4_transaction(xml_text: str) -> dict | None:
     code = _xml_text(tx, ".//transactionCoding/transactionCode")
     shares_text = _xml_text(tx, ".//transactionAmounts/transactionShares/value")
     price_text = _xml_text(tx, ".//transactionAmounts/transactionPricePerShare/value")
-    def _num(value: str | None) -> float | None:
-        if value is None:
-            return None
-        try:
-            return float(value.replace(",", ""))
-        except Exception:
-            return None
-    shares = _num(shares_text)
-    price = _num(price_text)
-    value = round(shares * price, 2) if shares is not None and price is not None else None
-    labels = {
-        "P": "Purchase",
-        "S": "Sale",
-        "A": "Grant/Award",
-        "D": "Disposition",
-        "M": "Option exercise/conversion",
-        "F": "Tax withholding/payment",
-    }
-    return {
-        "owner": owner_name,
-        "role": officer_title or ", ".join(roles) or None,
-        "transactionCode": code,
-        "transactionLabel": labels.get(str(code or "").upper(), "Other/Unclassified"),
-        "shares": shares,
-        "price": price,
-        "value": value,
-        "ownershipForm": _xml_text(tx, ".//ownershipNature/directOrIndirectOwnership/value"),
-        "transactionDate": _xml_text(tx, ".//transactionDate/value"),
-    }
+    shares = _form4_num(shares_text)
+    price = _form4_num(price_text)
+    return _form4_transaction_payload(
+        owner_name=owner_name,
+        role=officer_title or ", ".join(roles) or None,
+        code=code,
+        shares=shares,
+        price=price,
+        ownership_form=_xml_text(tx, ".//ownershipNature/directOrIndirectOwnership/value"),
+        transaction_date=_form4_date(_xml_text(tx, ".//transactionDate/value")),
+    )
 
 
 async def _try_attach_form4_transaction(item: dict, filing: dict, warnings: list[dict]) -> None:

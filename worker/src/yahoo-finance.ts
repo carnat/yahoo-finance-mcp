@@ -6006,42 +6006,149 @@ function xmlBlock(xml: string, tag: string): string | null {
   return m ? m[1] : null;
 }
 
+const FORM4_TRANSACTION_LABELS: Record<string, string> = {
+  P: "Purchase",
+  S: "Sale",
+  A: "Grant/Award",
+  D: "Disposition",
+  M: "Option exercise/conversion",
+  F: "Tax withholding/payment",
+  G: "Gift",
+};
+
+function form4Num(value: string | null): number | null {
+  if (value == null) return null;
+  const text = stripHtmlTags(value);
+  const m = text.match(/-?\$?\s*\(?\d[\d,]*(?:\.\d+)?\)?/);
+  if (!m) return null;
+  let s = m[0].replace(/\$/g, "").replace(/,/g, "").replace(/\s+/g, "");
+  const negative = s.startsWith("(") && s.endsWith(")");
+  s = s.replace(/[()]/g, "");
+  const n = Number(s);
+  if (!Number.isFinite(n)) return null;
+  return negative ? -n : n;
+}
+
+function form4Date(value: string | null): string | null {
+  const text = stripHtmlTags(value ?? "");
+  if (!text) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  const m = text.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/);
+  if (!m) return text;
+  return `${m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`;
+}
+
+function form4Payload(
+  owner: string | null,
+  role: string | null,
+  code: string | null,
+  shares: number | null,
+  price: number | null,
+  ownershipForm: string | null,
+  transactionDate: string | null,
+): Record<string, unknown> {
+  return {
+    owner,
+    role,
+    transactionCode: code,
+    transactionLabel: FORM4_TRANSACTION_LABELS[_str(code).toUpperCase()] ?? "Other/Unclassified",
+    shares,
+    price,
+    value: shares != null && price != null ? Math.round(shares * price * 100) / 100 : null,
+    ownershipForm,
+    transactionDate,
+  };
+}
+
+function form4OwnerFromHtml(html: string): string | null {
+  const m = html.match(/Name and Address of Reporting Person[\s\S]*?<a\b[^>]*>([\s\S]*?)<\/a>/i);
+  return m ? stripHtmlTags(m[1]) || null : null;
+}
+
+function form4RoleFromHtml(html: string): string | null {
+  const m = html.match(/Relationship of Reporting Person\(s\) to Issuer([\s\S]*?)Individual or Joint\/Group Filing/i);
+  if (!m) return null;
+  const roles: string[] = [];
+  for (const row of parseHtmlTable(m[1])) {
+    for (let i = 0; i < row.length - 1; i++) {
+      if (row[i].trim().toUpperCase() !== "X") continue;
+      const label = row[i + 1].toLowerCase();
+      if (label.includes("director")) roles.push("director");
+      else if (label.includes("officer")) roles.push("officer");
+      else if (label.includes("10%") || label.includes("owner")) roles.push("ten_percent_owner");
+      else if (label.includes("other")) roles.push("other");
+    }
+  }
+  return [...new Set(roles)].join(", ") || null;
+}
+
+function parseForm4HtmlTransaction(html: string): Record<string, unknown> | null {
+  const owner = form4OwnerFromHtml(html);
+  const role = form4RoleFromHtml(html);
+  const tableRe = /<table[^>]*>[\s\S]*?<\/table>/gi;
+  let tableM: RegExpExecArray | null;
+  while ((tableM = tableRe.exec(html)) !== null) {
+    const tableHtml = tableM[0];
+    const tableText = stripHtmlTags(tableHtml).toLowerCase();
+    if (tableText.includes("non-derivative securities")) {
+      for (const row of parseHtmlTable(tableHtml)) {
+        if (row.length < 10) continue;
+        const code = row[3].trim().toUpperCase();
+        const shares = form4Num(row[5]);
+        if (!code || shares == null) continue;
+        return form4Payload(
+          owner,
+          role,
+          code,
+          shares,
+          form4Num(row[7]),
+          row[9].trim() || null,
+          form4Date(row[1]),
+        );
+      }
+    }
+    if (tableText.includes("derivative securities")) {
+      for (const row of parseHtmlTable(tableHtml)) {
+        if (row.length < 15) continue;
+        const code = row[4].trim().toUpperCase();
+        const shares = form4Num(row[6]);
+        if (!code || shares == null) continue;
+        return form4Payload(
+          owner,
+          role,
+          code,
+          shares,
+          form4Num(row[1]),
+          row[14].trim() || null,
+          form4Date(row[2]),
+        );
+      }
+    }
+  }
+  return null;
+}
+
 function parseForm4Transaction(xml: string): Record<string, unknown> | null {
   const tx = xmlBlock(xml, "nonDerivativeTransaction") ?? xmlBlock(xml, "derivativeTransaction");
-  if (!tx) return null;
+  if (!tx) return parseForm4HtmlTransaction(xml);
   const owner = xmlTag(xml, ["reportingOwnerId", "rptOwnerName"]);
   const officerTitle = xmlTag(xml, ["reportingOwnerRelationship", "officerTitle"]);
   const roles: string[] = [];
   for (const [tag, label] of [["isDirector", "director"], ["isOfficer", "officer"], ["isTenPercentOwner", "ten_percent_owner"], ["isOther", "other"]]) {
     if (["1", "true"].includes(_str(xmlTag(xml, ["reportingOwnerRelationship", tag])).toLowerCase())) roles.push(label);
   }
-  const num = (value: string | null): number | null => {
-    if (value == null) return null;
-    const n = Number(value.replace(/,/g, ""));
-    return Number.isFinite(n) ? n : null;
-  };
   const code = xmlTag(tx, ["transactionCoding", "transactionCode"]);
-  const shares = num(xmlTag(tx, ["transactionAmounts", "transactionShares", "value"]));
-  const price = num(xmlTag(tx, ["transactionAmounts", "transactionPricePerShare", "value"]));
-  const labels: Record<string, string> = {
-    P: "Purchase",
-    S: "Sale",
-    A: "Grant/Award",
-    D: "Disposition",
-    M: "Option exercise/conversion",
-    F: "Tax withholding/payment",
-  };
-  return {
+  const shares = form4Num(xmlTag(tx, ["transactionAmounts", "transactionShares", "value"]));
+  const price = form4Num(xmlTag(tx, ["transactionAmounts", "transactionPricePerShare", "value"]));
+  return form4Payload(
     owner,
-    role: officerTitle || roles.join(", ") || null,
-    transactionCode: code,
-    transactionLabel: labels[_str(code).toUpperCase()] ?? "Other/Unclassified",
+    officerTitle || roles.join(", ") || null,
+    code,
     shares,
     price,
-    value: shares != null && price != null ? Math.round(shares * price * 100) / 100 : null,
-    ownershipForm: xmlTag(tx, ["ownershipNature", "directOrIndirectOwnership", "value"]),
-    transactionDate: xmlTag(tx, ["transactionDate", "value"]),
-  };
+    xmlTag(tx, ["ownershipNature", "directOrIndirectOwnership", "value"]),
+    form4Date(xmlTag(tx, ["transactionDate", "value"])),
+  );
 }
 
 async function tryAttachForm4Transaction(item: Record<string, unknown>, filing: Record<string, unknown>, warnings: Record<string, unknown>[]): Promise<void> {
