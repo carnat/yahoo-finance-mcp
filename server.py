@@ -8049,25 +8049,168 @@ async def parse_public_transcript(url: str, topics: list[str] | None = None) -> 
     }, warnings=warnings)
 
 
+def _transcript_attempt(source_type: str, status: str, **extra: object) -> dict:
+    attempt = {"sourceType": source_type, "status": status}
+    attempt.update({k: v for k, v in extra.items() if v is not None})
+    return attempt
+
+
+def _next_transcript_fallback(attempted_sources: list[dict]) -> dict | None:
+    statuses = {str(a.get("sourceType")): str(a.get("status")) for a in attempted_sources}
+    if statuses.get("company_ir") in {None, "SKIPPED"}:
+        return {
+            "sourceType": "company_ir",
+            "action": "Provide or discover a company IR earnings-call/transcript URL, then call parse_public_transcript.",
+        }
+    if statuses.get("public_transcript_url") in {None, "SKIPPED"}:
+        return {
+            "sourceType": "public_transcript_url",
+            "action": "Call parse_public_transcript with a verified public transcript URL.",
+        }
+    if statuses.get("alpha_vantage") in {None, "SKIPPED"}:
+        return {
+            "sourceType": "alpha_vantage",
+            "action": "Configure ALPHA_VANTAGE_API_KEY and retry when a fiscal quarter is known.",
+        }
+    return None
+
+
+def _alpha_vantage_quarter(period: str, filing_date: object | None = None) -> str | None:
+    text = str(period or "").strip()
+    m = _re.search(r"(\d{4})\s*Q([1-4])", text, flags=_re.IGNORECASE)
+    if m:
+        return f"{m.group(1)}Q{m.group(2)}"
+    if filing_date:
+        try:
+            d = datetime.datetime.fromisoformat(str(filing_date)[:10]).date()
+            return f"{d.year}Q{((d.month - 1) // 3) + 1}"
+        except Exception:
+            return None
+    return None
+
+
+async def _fetch_alpha_vantage_transcript(ticker: str, quarter: str, topics: list[str] | None = None) -> tuple[dict | None, dict]:
+    api_key = os.environ.get("ALPHA_VANTAGE_API_KEY") or os.environ.get("ALPHAVANTAGE_API_KEY")
+    if not api_key:
+        return None, _transcript_attempt(
+            "alpha_vantage",
+            "SKIPPED",
+            reason="ALPHA_VANTAGE_API_KEY not configured.",
+            rateLimit={"provider": "alpha_vantage", "used": False},
+        )
+
+    url = (
+        "https://www.alphavantage.co/query?"
+        + _urlparse.urlencode({
+            "function": "EARNINGS_CALL_TRANSCRIPT",
+            "symbol": ticker.upper(),
+            "quarter": quarter,
+            "apikey": api_key,
+        })
+    )
+    loop = asyncio.get_event_loop()
+
+    def _fetch_json() -> dict | None:
+        req = _urlrequest.Request(url, headers={"User-Agent": "yahoo-finance-mcp/1.0"})
+        try:
+            with _urlrequest.urlopen(req, timeout=30) as resp:  # noqa: S310
+                raw = resp.read(5_000_000)
+            return json.loads(raw.decode("utf-8", errors="replace"))
+        except Exception:
+            return None
+
+    payload = await loop.run_in_executor(None, _fetch_json)
+    public_url = url.replace(api_key, "REDACTED")
+    rate_limit = {
+        "provider": "alpha_vantage",
+        "used": True,
+        "note": "Alpha Vantage free-tier rate limits may apply.",
+    }
+    if not payload:
+        return None, _transcript_attempt("alpha_vantage", "FETCH_ERROR", url=public_url, quarter=quarter, rateLimit=rate_limit)
+    if payload.get("Note") or payload.get("Information"):
+        return None, _transcript_attempt(
+            "alpha_vantage",
+            "RATE_LIMITED_OR_UNAVAILABLE",
+            url=public_url,
+            quarter=quarter,
+            message=payload.get("Note") or payload.get("Information"),
+            rateLimit=rate_limit,
+        )
+
+    rows = payload.get("transcript") if isinstance(payload.get("transcript"), list) else []
+    paragraphs: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        speaker = str(row.get("speaker") or row.get("speaker_name") or "").strip()
+        content = str(row.get("content") or row.get("text") or "").strip()
+        if content:
+            paragraphs.append(f"{speaker}: {content}" if speaker else content)
+    if not paragraphs:
+        return None, _transcript_attempt("alpha_vantage", "NOT_FOUND", url=public_url, quarter=quarter, rateLimit=rate_limit)
+
+    clean_text = "\n\n".join(paragraphs)
+    max_chars = 50_000
+    warnings: list[dict] = []
+    if topics:
+        matched = _filter_paragraphs_by_topics(clean_text, topics)
+        return {
+            "sourceType": "alpha_vantage",
+            "status": "OK",
+            "filteredByTopics": topics,
+            "matchedParagraphs": matched,
+            "content": None,
+            "totalTextLength": len(clean_text),
+            "truncated": False,
+            "warnings": warnings if matched else [{"code": "NO_TOPIC_MATCHES", "message": f"No paragraphs matched the provided topics: {topics}"}],
+        }, _transcript_attempt("alpha_vantage", "SUCCESS", url=public_url, quarter=quarter, rateLimit=rate_limit)
+    truncated = len(clean_text) > max_chars
+    if truncated:
+        warnings.append({"code": "TEXT_TRUNCATED", "message": f"Text truncated from {len(clean_text)} to {max_chars} characters."})
+    return {
+        "sourceType": "alpha_vantage",
+        "status": "OK",
+        "filteredByTopics": None,
+        "content": clean_text[:max_chars],
+        "totalTextLength": len(clean_text),
+        "truncated": truncated,
+        "warnings": warnings,
+    }, _transcript_attempt("alpha_vantage", "SUCCESS", url=public_url, quarter=quarter, rateLimit=rate_limit)
+
+
 @yfinance_server.tool(
     name="get_earnings_call_transcript",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_call_transcript"],
-    description="High-level tool to retrieve earnings call transcript content from SEC 8-K exhibits. Falls back with instructions if not available via SEC.",
+    description="High-level tool to retrieve earnings call transcript content from SEC 8-K exhibits, then structured fallback metadata for company IR, public transcript URLs, and optional Alpha Vantage.",
 )
 async def get_earnings_call_transcript(ticker: str, period: str = "latest", topics: list[str] | None = None) -> str:
     err = _validate_ticker(ticker)
     if err:
         return _wrap_envelope_v2("get_earnings_call_transcript", None, error=err, error_code=ErrorCode.INPUT_VALIDATION_ERROR)
 
+    attempted_sources: list[dict] = []
+
     # Step 1: Find the latest 8-K filing
     sec_source = await _resolve_latest_earnings_sec_source(ticker)
     if not sec_source:
+        attempted_sources.append(_transcript_attempt("sec_8k_exhibit", "NOT_FOUND"))
+        attempted_sources.append(_transcript_attempt("company_ir", "SKIPPED", reason="No company IR transcript/call page URL was discoverable."))
+        attempted_sources.append(_transcript_attempt("public_transcript_url", "SKIPPED", reason="No public transcript URL was provided to parse_public_transcript."))
+        alpha_payload, alpha_attempt = await _fetch_alpha_vantage_transcript(ticker, _alpha_vantage_quarter(period) or "", topics) if _alpha_vantage_quarter(period) else (None, _transcript_attempt("alpha_vantage", "SKIPPED", reason="No fiscal quarter available for Alpha Vantage transcript lookup."))
+        attempted_sources.append(alpha_attempt)
+        if alpha_payload:
+            alpha_payload.update({"ticker": ticker.upper(), "period": period, "attemptedSources": attempted_sources, "nextRecommendedFallback": None})
+            warnings = alpha_payload.pop("warnings", [])
+            return _wrap_envelope_v2("get_earnings_call_transcript", alpha_payload, warnings=warnings)
         return _wrap_envelope_v2("get_earnings_call_transcript", {
             "ticker": ticker.upper(),
             "period": period,
             "status": "SEC_8K_NOT_FOUND",
-            "message": "No recent SEC 8-K filing found for this ticker. Use web_search to find the transcript on Motley Fool or the company IR page, then call parse_public_transcript with the URL.",
+            "message": "No recent SEC 8-K filing found for this ticker.",
             "content": None,
+            "attemptedSources": attempted_sources,
+            "nextRecommendedFallback": _next_transcript_fallback(attempted_sources),
         })
 
     accession = sec_source.get("accessionNumber", "")
@@ -8076,12 +8219,15 @@ async def get_earnings_call_transcript(ticker: str, period: str = "latest", topi
         cik_padded, _ = await _get_submissions_for_ticker(ticker)
         cik = int(cik_padded) if cik_padded else None
     if not cik:
+        attempted_sources.append(_transcript_attempt("sec_8k_exhibit", "FAILED", accessionNumber=accession, reason="CIK resolution failed."))
         return _wrap_envelope_v2("get_earnings_call_transcript", {
             "ticker": ticker.upper(),
             "period": period,
             "status": "CIK_RESOLUTION_FAILED",
             "message": "Could not resolve CIK for ticker.",
             "content": None,
+            "attemptedSources": attempted_sources,
+            "nextRecommendedFallback": _next_transcript_fallback(attempted_sources),
         })
 
     # Step 2: List exhibits
@@ -8102,6 +8248,33 @@ async def get_earnings_call_transcript(ticker: str, period: str = "latest", topi
             break
 
     if not transcript_exhibit:
+        attempted_sources.append(_transcript_attempt(
+            "sec_8k_exhibit",
+            "NOT_FOUND",
+            url=index_url,
+            accessionNumber=accession,
+            filingDate=sec_source.get("filingDate"),
+            exhibitsSearched=len(exhibits),
+        ))
+        attempted_sources.append(_transcript_attempt("company_ir", "SKIPPED", reason="No company IR transcript/call page URL was discoverable."))
+        attempted_sources.append(_transcript_attempt("public_transcript_url", "SKIPPED", reason="No public transcript URL was provided to parse_public_transcript."))
+        alpha_payload, alpha_attempt = await _fetch_alpha_vantage_transcript(
+            ticker,
+            _alpha_vantage_quarter(period, sec_source.get("filingDate")) or "",
+            topics,
+        ) if _alpha_vantage_quarter(period, sec_source.get("filingDate")) else (None, _transcript_attempt("alpha_vantage", "SKIPPED", reason="No fiscal quarter available for Alpha Vantage transcript lookup."))
+        attempted_sources.append(alpha_attempt)
+        if alpha_payload:
+            alpha_payload.update({
+                "ticker": ticker.upper(),
+                "period": period,
+                "accessionNumber": accession,
+                "filingDate": sec_source.get("filingDate"),
+                "attemptedSources": attempted_sources,
+                "nextRecommendedFallback": None,
+            })
+            warnings = alpha_payload.pop("warnings", [])
+            return _wrap_envelope_v2("get_earnings_call_transcript", alpha_payload, warnings=warnings)
         return _wrap_envelope_v2("get_earnings_call_transcript", {
             "ticker": ticker.upper(),
             "period": period,
@@ -8109,8 +8282,10 @@ async def get_earnings_call_transcript(ticker: str, period: str = "latest", topi
             "accessionNumber": accession,
             "filingDate": sec_source.get("filingDate"),
             "availableExhibits": [{"type": ex.get("type"), "description": ex.get("description"), "document": ex.get("document")} for ex in exhibits],
-            "message": "8-K filing found but no transcript exhibit detected. Use web_search to find the transcript on Motley Fool or the company IR page, then call parse_public_transcript with the URL.",
+            "message": "8-K filing found but no transcript exhibit detected.",
             "content": None,
+            "attemptedSources": attempted_sources,
+            "nextRecommendedFallback": _next_transcript_fallback(attempted_sources),
         })
 
     # Step 4: Fetch and parse the exhibit
@@ -8119,6 +8294,24 @@ async def get_earnings_call_transcript(ticker: str, period: str = "latest", topi
     doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{file_name}"
     html = await _edgar_get_html(doc_url, max_bytes=5_000_000)
     if not html:
+        attempted_sources.append(_transcript_attempt("sec_8k_exhibit", "FETCH_ERROR", url=doc_url, accessionNumber=accession, filingDate=sec_source.get("filingDate")))
+        attempted_sources.append(_transcript_attempt("company_ir", "SKIPPED", reason="No company IR transcript/call page URL was discoverable."))
+        attempted_sources.append(_transcript_attempt("public_transcript_url", "SKIPPED", reason="No public transcript URL was provided to parse_public_transcript."))
+        alpha_payload, alpha_attempt = await _fetch_alpha_vantage_transcript(
+            ticker,
+            _alpha_vantage_quarter(period, sec_source.get("filingDate")) or "",
+            topics,
+        ) if _alpha_vantage_quarter(period, sec_source.get("filingDate")) else (None, _transcript_attempt("alpha_vantage", "SKIPPED", reason="No fiscal quarter available for Alpha Vantage transcript lookup."))
+        attempted_sources.append(alpha_attempt)
+        if alpha_payload:
+            alpha_payload.update({
+                "ticker": ticker.upper(),
+                "period": period,
+                "attemptedSources": attempted_sources,
+                "nextRecommendedFallback": None,
+            })
+            warnings = alpha_payload.pop("warnings", [])
+            return _wrap_envelope_v2("get_earnings_call_transcript", alpha_payload, warnings=warnings)
         return _wrap_envelope_v2("get_earnings_call_transcript", {
             "ticker": ticker.upper(),
             "period": period,
@@ -8126,10 +8319,13 @@ async def get_earnings_call_transcript(ticker: str, period: str = "latest", topi
             "documentUrl": doc_url,
             "message": f"Could not fetch exhibit document '{file_name}'.",
             "content": None,
+            "attemptedSources": attempted_sources,
+            "nextRecommendedFallback": _next_transcript_fallback(attempted_sources),
         })
 
     clean_text = _strip_html_tags(_sanitize_sec_html(html))
     warnings: list[dict] = []
+    attempted_sources.append(_transcript_attempt("sec_8k_exhibit", "SUCCESS", url=doc_url, accessionNumber=accession, filingDate=sec_source.get("filingDate")))
 
     if topics:
         filtered = _filter_paragraphs_by_topics(clean_text, topics)
@@ -8147,6 +8343,8 @@ async def get_earnings_call_transcript(ticker: str, period: str = "latest", topi
             "matchedParagraphs": filtered,
             "totalTextLength": len(clean_text),
             "content": None,
+            "attemptedSources": attempted_sources,
+            "nextRecommendedFallback": None,
         }, warnings=warnings)
 
     max_chars = 50_000
@@ -8165,6 +8363,8 @@ async def get_earnings_call_transcript(ticker: str, period: str = "latest", topi
         "content": clean_text[:max_chars],
         "totalTextLength": len(clean_text),
         "truncated": truncated,
+        "attemptedSources": attempted_sources,
+        "nextRecommendedFallback": None,
     }, warnings=warnings)
 
 

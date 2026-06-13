@@ -7962,19 +7962,149 @@ export async function parsePublicTranscript(url: string, topics: string[] | null
   });
 }
 
+function transcriptAttempt(sourceType: string, status: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return Object.fromEntries(Object.entries({ sourceType, status, ...extra }).filter(([, v]) => v != null));
+}
+
+function nextTranscriptFallback(attemptedSources: Record<string, unknown>[]): Record<string, unknown> | null {
+  const statusBySource = new Map(attemptedSources.map((a) => [String(a.sourceType), String(a.status)]));
+  if (!statusBySource.has("company_ir") || statusBySource.get("company_ir") === "SKIPPED") {
+    return { sourceType: "company_ir", action: "Provide or discover a company IR earnings-call/transcript URL, then call parse_public_transcript." };
+  }
+  if (!statusBySource.has("public_transcript_url") || statusBySource.get("public_transcript_url") === "SKIPPED") {
+    return { sourceType: "public_transcript_url", action: "Call parse_public_transcript with a verified public transcript URL." };
+  }
+  if (!statusBySource.has("alpha_vantage") || statusBySource.get("alpha_vantage") === "SKIPPED") {
+    return { sourceType: "alpha_vantage", action: "Configure ALPHA_VANTAGE_API_KEY and retry when a fiscal quarter is known." };
+  }
+  return null;
+}
+
+function alphaVantageQuarter(period: string, filingDate: unknown = null): string | null {
+  const match = String(period ?? "").match(/(\d{4})\s*Q([1-4])/i);
+  if (match) return `${match[1]}Q${match[2]}`;
+  if (typeof filingDate === "string" && filingDate.trim()) {
+    const d = new Date(filingDate.slice(0, 10));
+    if (Number.isFinite(d.getTime())) return `${d.getUTCFullYear()}Q${Math.floor(d.getUTCMonth() / 3) + 1}`;
+  }
+  return null;
+}
+
+async function fetchAlphaVantageTranscript(
+  ticker: string,
+  quarter: string,
+  topics: string[] | null = null,
+): Promise<{ payload: Record<string, unknown> | null; attempt: Record<string, unknown> }> {
+  const apiKey = getWorkerVar("ALPHA_VANTAGE_API_KEY") ?? getWorkerVar("ALPHAVANTAGE_API_KEY");
+  if (!apiKey) {
+    return {
+      payload: null,
+      attempt: transcriptAttempt("alpha_vantage", "SKIPPED", {
+        reason: "ALPHA_VANTAGE_API_KEY not configured.",
+        rateLimit: { provider: "alpha_vantage", used: false },
+      }),
+    };
+  }
+  const params = new URLSearchParams({
+    function: "EARNINGS_CALL_TRANSCRIPT",
+    symbol: ticker.toUpperCase(),
+    quarter,
+    apikey: apiKey,
+  });
+  const url = `https://www.alphavantage.co/query?${params.toString()}`;
+  const safeUrl = url.replace(apiKey, "REDACTED");
+  const rateLimit = { provider: "alpha_vantage", used: true, note: "Alpha Vantage free-tier rate limits may apply." };
+  let json: Record<string, unknown> | null = null;
+  try {
+    const resp = await fetch(url, { headers: { "User-Agent": UA } });
+    if (!resp.ok) {
+      await resp.body?.cancel();
+      return { payload: null, attempt: transcriptAttempt("alpha_vantage", "FETCH_ERROR", { url: safeUrl, quarter, httpStatus: resp.status, rateLimit }) };
+    }
+    json = await resp.json() as Record<string, unknown>;
+  } catch {
+    return { payload: null, attempt: transcriptAttempt("alpha_vantage", "FETCH_ERROR", { url: safeUrl, quarter, rateLimit }) };
+  }
+  if (json.Note || json.Information) {
+    return { payload: null, attempt: transcriptAttempt("alpha_vantage", "RATE_LIMITED_OR_UNAVAILABLE", { url: safeUrl, quarter, message: json.Note ?? json.Information, rateLimit }) };
+  }
+  const rows = Array.isArray(json.transcript) ? json.transcript as Record<string, unknown>[] : [];
+  const paragraphs = rows
+    .map((row) => {
+      const speaker = String(row.speaker ?? row.speaker_name ?? "").trim();
+      const content = String(row.content ?? row.text ?? "").trim();
+      return content ? (speaker ? `${speaker}: ${content}` : content) : "";
+    })
+    .filter(Boolean);
+  if (!paragraphs.length) {
+    return { payload: null, attempt: transcriptAttempt("alpha_vantage", "NOT_FOUND", { url: safeUrl, quarter, rateLimit }) };
+  }
+  const cleanText = paragraphs.join("\n\n");
+  const warnings: Record<string, unknown>[] = [];
+  const topicList = (topics ?? []).filter((topic) => typeof topic === "string" && topic.trim()).map((topic) => topic.trim());
+  if (topicList.length) {
+    const matchedParagraphs = filterParagraphsByTopics(cleanText, topicList);
+    if (!matchedParagraphs.length) warnings.push({ code: "NO_TOPIC_MATCHES", message: `No paragraphs matched the provided topics: ${topicList.join(", ")}` });
+    return {
+      payload: {
+        sourceType: "alpha_vantage",
+        status: "OK",
+        filteredByTopics: topicList,
+        matchedParagraphs,
+        content: null,
+        totalTextLength: cleanText.length,
+        truncated: false,
+        warnings,
+      },
+      attempt: transcriptAttempt("alpha_vantage", "SUCCESS", { url: safeUrl, quarter, rateLimit }),
+    };
+  }
+  const maxChars = 50_000;
+  const truncated = cleanText.length > maxChars;
+  if (truncated) warnings.push({ code: "TEXT_TRUNCATED", message: `Text truncated from ${cleanText.length} to ${maxChars} characters.` });
+  return {
+    payload: {
+      sourceType: "alpha_vantage",
+      status: "OK",
+      filteredByTopics: null,
+      content: cleanText.slice(0, maxChars),
+      totalTextLength: cleanText.length,
+      truncated,
+      warnings,
+    },
+    attempt: transcriptAttempt("alpha_vantage", "SUCCESS", { url: safeUrl, quarter, rateLimit }),
+  };
+}
+
 export async function getEarningsCallTranscript(
   ticker: string,
   period: string = "latest",
   topics: string[] | null = null,
 ): Promise<string> {
+  const attemptedSources: Record<string, unknown>[] = [];
   const secSource = await resolveLatestEarningsSecSource(ticker);
   if (!secSource) {
+    attemptedSources.push(transcriptAttempt("sec_8k_exhibit", "NOT_FOUND"));
+    attemptedSources.push(transcriptAttempt("company_ir", "SKIPPED", { reason: "No company IR transcript/call page URL was discoverable." }));
+    attemptedSources.push(transcriptAttempt("public_transcript_url", "SKIPPED", { reason: "No public transcript URL was provided to parse_public_transcript." }));
+    const quarter = alphaVantageQuarter(period);
+    if (quarter) {
+      const alpha = await fetchAlphaVantageTranscript(ticker, quarter, topics);
+      attemptedSources.push(alpha.attempt);
+      if (alpha.payload) {
+        return JSON.stringify({ ticker: ticker.toUpperCase(), period, ...alpha.payload, attemptedSources, nextRecommendedFallback: null });
+      }
+    } else {
+      attemptedSources.push(transcriptAttempt("alpha_vantage", "SKIPPED", { reason: "No fiscal quarter available for Alpha Vantage transcript lookup." }));
+    }
     return JSON.stringify({
       ticker: ticker.toUpperCase(),
       period,
       status: "SEC_8K_NOT_FOUND",
-      message: "No recent SEC 8-K filing found for this ticker. Use web_search to find the transcript on Motley Fool or the company IR page, then call parse_public_transcript with the URL.",
+      message: "No recent SEC 8-K filing found for this ticker.",
       content: null,
+      attemptedSources,
+      nextRecommendedFallback: nextTranscriptFallback(attemptedSources),
     });
   }
 
@@ -7985,12 +8115,15 @@ export async function getEarningsCallTranscript(
     cik = cikPadded ? parseInt(cikPadded, 10) : null;
   }
   if (!cik) {
+    attemptedSources.push(transcriptAttempt("sec_8k_exhibit", "FAILED", { accessionNumber, reason: "CIK resolution failed." }));
     return JSON.stringify({
       ticker: ticker.toUpperCase(),
       period,
       status: "CIK_RESOLUTION_FAILED",
       message: "Could not resolve CIK for ticker.",
       content: null,
+      attemptedSources,
+      nextRecommendedFallback: nextTranscriptFallback(attemptedSources),
     });
   }
 
@@ -8004,6 +8137,32 @@ export async function getEarningsCallTranscript(
   });
 
   if (!transcriptExhibit) {
+    attemptedSources.push(transcriptAttempt("sec_8k_exhibit", "NOT_FOUND", {
+      url: edgarIndexUrl,
+      accessionNumber,
+      filingDate: secSource.filingDate ?? null,
+      exhibitsSearched: exhibits.length,
+    }));
+    attemptedSources.push(transcriptAttempt("company_ir", "SKIPPED", { reason: "No company IR transcript/call page URL was discoverable." }));
+    attemptedSources.push(transcriptAttempt("public_transcript_url", "SKIPPED", { reason: "No public transcript URL was provided to parse_public_transcript." }));
+    const quarter = alphaVantageQuarter(period, secSource.filingDate ?? null);
+    if (quarter) {
+      const alpha = await fetchAlphaVantageTranscript(ticker, quarter, topics);
+      attemptedSources.push(alpha.attempt);
+      if (alpha.payload) {
+        return JSON.stringify({
+          ticker: ticker.toUpperCase(),
+          period,
+          accessionNumber,
+          filingDate: secSource.filingDate ?? null,
+          ...alpha.payload,
+          attemptedSources,
+          nextRecommendedFallback: null,
+        });
+      }
+    } else {
+      attemptedSources.push(transcriptAttempt("alpha_vantage", "SKIPPED", { reason: "No fiscal quarter available for Alpha Vantage transcript lookup." }));
+    }
     return JSON.stringify({
       ticker: ticker.toUpperCase(),
       period,
@@ -8015,8 +8174,10 @@ export async function getEarningsCallTranscript(
         description: exhibit.description ?? "",
         document: exhibit.document ?? "",
       })),
-      message: "8-K filing found but no transcript exhibit detected. Use web_search to find the transcript on Motley Fool or the company IR page, then call parse_public_transcript with the URL.",
+      message: "8-K filing found but no transcript exhibit detected.",
       content: null,
+      attemptedSources,
+      nextRecommendedFallback: nextTranscriptFallback(attemptedSources),
     });
   }
 
@@ -8024,6 +8185,19 @@ export async function getEarningsCallTranscript(
   const documentUrl = `https://www.sec.gov/Archives/edgar/data/${cik}/${accessionNumber.replace(/-/g, "")}/${fileName}`;
   const html = await edgarGetHtml(documentUrl, 5_000_000);
   if (!html) {
+    attemptedSources.push(transcriptAttempt("sec_8k_exhibit", "FETCH_ERROR", { url: documentUrl, accessionNumber, filingDate: secSource.filingDate ?? null }));
+    attemptedSources.push(transcriptAttempt("company_ir", "SKIPPED", { reason: "No company IR transcript/call page URL was discoverable." }));
+    attemptedSources.push(transcriptAttempt("public_transcript_url", "SKIPPED", { reason: "No public transcript URL was provided to parse_public_transcript." }));
+    const quarter = alphaVantageQuarter(period, secSource.filingDate ?? null);
+    if (quarter) {
+      const alpha = await fetchAlphaVantageTranscript(ticker, quarter, topics);
+      attemptedSources.push(alpha.attempt);
+      if (alpha.payload) {
+        return JSON.stringify({ ticker: ticker.toUpperCase(), period, ...alpha.payload, attemptedSources, nextRecommendedFallback: null });
+      }
+    } else {
+      attemptedSources.push(transcriptAttempt("alpha_vantage", "SKIPPED", { reason: "No fiscal quarter available for Alpha Vantage transcript lookup." }));
+    }
     return JSON.stringify({
       ticker: ticker.toUpperCase(),
       period,
@@ -8031,11 +8205,14 @@ export async function getEarningsCallTranscript(
       documentUrl,
       message: `Could not fetch exhibit document '${fileName}'.`,
       content: null,
+      attemptedSources,
+      nextRecommendedFallback: nextTranscriptFallback(attemptedSources),
     });
   }
 
   const cleanText = htmlToReadableText(html);
   const warnings: Record<string, unknown>[] = [];
+  attemptedSources.push(transcriptAttempt("sec_8k_exhibit", "SUCCESS", { url: documentUrl, accessionNumber, filingDate: secSource.filingDate ?? null }));
   const topicList = (topics ?? []).filter((topic) => typeof topic === "string" && topic.trim()).map((topic) => topic.trim());
   if (topicList.length) {
     const matchedParagraphs = filterParagraphsByTopics(cleanText, topicList);
@@ -8054,6 +8231,8 @@ export async function getEarningsCallTranscript(
       matchedParagraphs,
       totalTextLength: cleanText.length,
       content: null,
+      attemptedSources,
+      nextRecommendedFallback: null,
       warnings,
     });
   }
@@ -8075,6 +8254,8 @@ export async function getEarningsCallTranscript(
     content: cleanText.slice(0, maxChars),
     totalTextLength: cleanText.length,
     truncated,
+    attemptedSources,
+    nextRecommendedFallback: null,
     warnings,
   });
 }
