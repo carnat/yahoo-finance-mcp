@@ -14,7 +14,7 @@ import json
 import os
 
 from yfmcp.app import TOOL_ALIASES, yfinance_server
-from yfmcp.envelope import SERVER_VERSION
+from yfmcp.envelope import BUILD_DATE, SERVER_VERSION
 from yfmcp.schemas import _MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA, _SIMPLE_OUTPUT_SCHEMA
 
 
@@ -43,6 +43,7 @@ async def health_check() -> str:
     )
     return json.dumps({
         "serverVersion": SERVER_VERSION,
+        "buildDate": BUILD_DATE,
         "buildSha": os.environ.get("BUILD_SHA", "unknown"),
         "toolCount": tool_count,
         "canonicalToolCount": max(tool_count - deprecated_alias_count, 0),
@@ -85,6 +86,7 @@ async def get_manifest_diagnostics() -> str:
         "manifestVersion": manifest_version,
         "manifestHash": manifest_hash,
         "buildSha": os.environ.get("BUILD_SHA", "unknown"),
+        "buildDate": BUILD_DATE,
         "deployedAt": deployed_at,
         "privacyScope": "public_market_data_only",
         "canonicalToolCount": canonical_tool_count,

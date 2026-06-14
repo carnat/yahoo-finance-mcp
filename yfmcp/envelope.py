@@ -13,7 +13,8 @@ from typing import TypedDict
 # ---------------------------------------------------------------------------
 # Server version and envelope feature flag
 # ---------------------------------------------------------------------------
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
+BUILD_DATE = "2026-06-14"  # date of this release; update on each deploy
 _ENVELOPE_V2 = os.environ.get("MCP_ENVELOPE_V2", "").lower() == "true"
 
 
