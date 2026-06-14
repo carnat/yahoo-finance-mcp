@@ -2992,7 +2992,12 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
         else:
             target_lag_signal = "POSSIBLY_STALE"
 
+    pct_below_current_price = None
+    if target_mean is not None and last_price is not None and last_price > 0:
+        pct_below_current_price = round((last_price - target_mean) / last_price * 100, 2)
+
     output["currentPrice"] = last_price
+    output["pctBelowCurrentPrice"] = pct_below_current_price
     output["recentUpgradeCount30d"] = recent_upgrade_count_30d
     output["targetLagSignal"] = target_lag_signal
     output["warnings"] = warnings
@@ -4020,9 +4025,12 @@ async def get_credit_health(ticker: str | list[str]) -> str:
     if inc is None or inc.empty:
         return json.dumps({"error": True, "message": "No income statement data available", "ticker": ticker})
 
-    # Most recent quarter column
+    # Balance sheet: single most-recent quarter (point-in-time, no TTM needed)
     bs_col = bs.columns[0]
-    inc_col = inc.columns[0]
+
+    # Income statement: up to 4 most-recent quarters for TTM
+    inc_cols = list(inc.columns[:4])
+    n_inc_quarters = len(inc_cols)
 
     def _safe_get(df, col, *row_names):
         for name in row_names:
@@ -4044,13 +4052,56 @@ async def get_credit_health(ticker: str | list[str]) -> str:
                 continue
         return None, None
 
+    def _ttm_sum(df, cols, *row_names):
+        """Sum first matching row across quarterly cols for TTM. Returns (total, source_row, n_quarters_used)."""
+        for name in row_names:
+            try:
+                vals = []
+                for col in cols:
+                    try:
+                        v = df.loc[name, col]
+                        if pd.notna(v):
+                            vals.append(float(v))
+                    except (KeyError, TypeError):
+                        pass
+                if vals:
+                    return sum(vals), str(name), len(vals)
+            except Exception:
+                continue
+        return None, None, 0
+
+    def _ttm_quarterly_vals(df, cols, *row_names):
+        """Return per-quarter list (newest first) for the first matching row."""
+        for name in row_names:
+            try:
+                vals = []
+                for col in cols:
+                    try:
+                        v = df.loc[name, col]
+                        if pd.notna(v):
+                            vals.append(float(v))
+                    except (KeyError, TypeError):
+                        pass
+                if vals:
+                    return vals
+            except Exception:
+                continue
+        return []
+
+    # Balance sheet values (point-in-time)
     total_debt = _safe_get(bs, bs_col, "Total Debt", "TotalDebt", "Long Term Debt")
     cash = _safe_get(bs, bs_col, "Cash And Cash Equivalents", "CashAndCashEquivalents", "Cash")
-    ebitda, ebitda_source_row = _safe_get_with_source(inc, inc_col, "EBITDA", "Normalized EBITDA", "NormalizedEBITDA")
-    ebit = _safe_get(inc, inc_col, "EBIT", "Operating Income", "OperatingIncome")
-    depreciation_amortization, da_source_row = _safe_get_with_source(
+
+    # Income statement: TTM sums (sum of up to 4 most-recent quarters)
+    ebitda_ttm, ebitda_source_row, _ = _ttm_sum(inc, inc_cols, "EBITDA", "Normalized EBITDA", "NormalizedEBITDA")
+    # BUG-03: prefer operatingIncome over Yahoo's EBIT field, which can include non-cash
+    # non-operating items (warrant fair value changes, convertible note adjustments)
+    ebit_ttm, ebit_source_row, _ = _ttm_sum(
+        inc, inc_cols, "Operating Income", "OperatingIncome", "EBIT"
+    )
+    da_ttm, da_source_row, _ = _ttm_sum(
         inc,
-        inc_col,
+        inc_cols,
         "Reconciled Depreciation",
         "ReconciledDepreciation",
         "Depreciation And Amortization",
@@ -4058,9 +4109,17 @@ async def get_credit_health(ticker: str | list[str]) -> str:
         "Depreciation Amortization Depletion Income Statement",
         "DepreciationAmortizationDepletionIncomeStatement",
     )
-    interest_expense, interest_source_row = _safe_get_with_source(
+    interest_ttm, interest_source_row, _ = _ttm_sum(
         inc,
-        inc_col,
+        inc_cols,
+        "Interest Expense Non Operating",
+        "InterestExpenseNonOperating",
+        "Interest Expense",
+        "InterestExpense",
+    )
+    interest_quarterly_vals = _ttm_quarterly_vals(
+        inc,
+        inc_cols,
         "Interest Expense Non Operating",
         "InterestExpenseNonOperating",
         "Interest Expense",
@@ -4069,21 +4128,25 @@ async def get_credit_health(ticker: str | list[str]) -> str:
 
     net_debt = (total_debt - cash) if total_debt is not None and cash is not None else None
 
-    operational_ebitda = None
+    # Prefer operating income + D&A (TTM) over provider EBITDA
+    operational_ebitda_annual = None
     operational_ebitda_source = None
-    if ebit is not None and depreciation_amortization is not None:
-        operational_ebitda = ebit + depreciation_amortization
-        operational_ebitda_source = "quarterly_ebit_plus_depreciation_and_amortization"
-    elif ebitda is not None:
-        operational_ebitda = ebitda
+    if ebit_ttm is not None and da_ttm is not None:
+        operational_ebitda_annual = ebit_ttm + da_ttm
+        operational_ebitda_source = "ttm_operating_income_plus_da"
+    elif ebitda_ttm is not None:
+        operational_ebitda_annual = ebitda_ttm
         operational_ebitda_source = "provider_ebitda_fallback"
 
-    # Annualize latest-quarter statement values exactly once.
-    ebitda_annual = ebitda * 4 if ebitda is not None else None
-    ebit_annual = ebit * 4 if ebit is not None else None
-    depreciation_amortization_annual = depreciation_amortization * 4 if depreciation_amortization is not None else None
-    operational_ebitda_annual = operational_ebitda * 4 if operational_ebitda is not None else None
-    interest_annual = interest_expense * 4 if interest_expense is not None else None
+    # TTM sums are the annualized figures — no × 4 multiplication needed
+    ebitda_annual = ebitda_ttm
+    ebit_annual = ebit_ttm
+    depreciation_amortization_annual = da_ttm
+    interest_annual = interest_ttm
+
+    # Flag partial data quality when fewer than 4 income quarters are available
+    if n_inc_quarters < 4:
+        data_quality = "PARTIAL"
 
     net_debt_to_ebitda = round(net_debt / operational_ebitda_annual, 2) if net_debt is not None and operational_ebitda_annual else None
     interest_coverage_ebit = round(ebit_annual / abs(interest_annual), 2) if ebit_annual is not None and interest_annual and interest_annual != 0 else None
@@ -4156,6 +4219,23 @@ async def get_credit_health(ticker: str | list[str]) -> str:
             "code": "INTEREST_EXPENSE_UNAVAILABLE",
             "message": "Interest coverage cannot be computed from available provider data.",
         })
+    # BUG-02: flag when most-recent quarter interest is anomalously large vs prior quarters
+    if len(interest_quarterly_vals) >= 2:
+        most_recent_q = abs(interest_quarterly_vals[0])
+        prior_abs = [abs(v) for v in interest_quarterly_vals[1:]]
+        prior_avg = sum(prior_abs) / len(prior_abs)
+        if prior_avg > 0 and most_recent_q > prior_avg * 2.0:
+            ratio = most_recent_q / prior_avg
+            warnings.append({
+                "code": "INTEREST_EXPENSE_ANOMALY",
+                "message": (
+                    f"Most recent quarter interest expense ({most_recent_q:,.0f}) is "
+                    f"{ratio:.1f}× prior {len(prior_abs)}-quarter average ({prior_avg:,.0f}). "
+                    "May include one-time items. Coverage ratios may not reflect ongoing debt service capacity."
+                ),
+                "mostRecentQuarter": most_recent_q,
+                "prior3QAverage": prior_avg,
+            })
     if operational_ebitda_source == "provider_ebitda_fallback":
         warnings.append({
             "code": "OPERATIONAL_EBITDA_UNAVAILABLE",
