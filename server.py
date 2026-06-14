@@ -993,6 +993,30 @@ async def _collect_yahoo_events(
         warnings.append({"code": "SOURCE_UNAVAILABLE", "message": f"Yahoo Finance source unavailable: {exc}", "severity": "warning"})
         return items, warnings, False
 
+    # Build company-name tokens for headline relevance filtering (BUG-08).
+    # Yahoo's news feed returns sector/peer articles tagged with a ticker but
+    # mentioning unrelated companies. We reject items where neither the ticker
+    # symbol nor any significant company-name word appears in the headline.
+    _HEADLINE_STOPWORDS = frozenset({
+        "corp", "corporation", "inc", "ltd", "llc", "plc", "co",
+        "group", "holdings", "technology", "technologies", "solutions",
+        "services", "systems", "international", "global",
+        # Common sector nouns that appear in peer/sector articles
+        "energy", "capital", "financial", "finance", "resources",
+    })
+    short_name = ""
+    try:
+        info = company.info
+        short_name = str(info.get("shortName") or info.get("longName") or "").strip()
+    except Exception:
+        pass
+    _name_tokens: frozenset[str] = frozenset(
+        w for w in _re.sub(r"[^a-z0-9]", " ", short_name.lower()).split()
+        if len(w) >= 4 and w not in _HEADLINE_STOPWORDS
+    )
+    _ticker_upper = ticker.upper()
+    _ticker_pat = _re.compile(r"\b" + _re.escape(_ticker_upper) + r"\b")
+
     for n in raw_news:
         if not isinstance(n, dict):
             continue
@@ -1003,6 +1027,19 @@ async def _collect_yahoo_events(
         # For the press-releases feed, Yahoo tab membership is authoritative:
         # valid press-release tab items may still arrive as STORY/ARTICLE.
         item, item_warnings = _build_yahoo_event_item(ticker, n, retrieved_at, feed_source=feed_source_override)
+
+        # Headline relevance filter: keep only items that mention the ticker
+        # symbol or a significant company-name word in the title/summary.
+        hay = f"{item.get('title') or ''} {item.get('evidenceText') or ''}"
+        ticker_found = bool(_ticker_pat.search(hay))
+        name_found = bool(_name_tokens and any(
+            _re.search(r"\b" + _re.escape(tok) + r"\b", hay, _re.IGNORECASE)
+            for tok in _name_tokens
+        ))
+        item["sourceTickerMatch"] = ticker_found or name_found
+        if not item["sourceTickerMatch"]:
+            continue
+
         if not _within_date_window(item.get("publishedAt"), start_date=start_date, end_date=end_date, lookback_days=lookback_days):
             continue
         items.append(item)
