@@ -1894,7 +1894,8 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       );
     case "health_check": {
       const buildSha = getWorkerVar("BUILD_SHA") ?? "unknown";
-      const version = getWorkerVar("SERVER_VERSION") ?? "1.0.0";
+      const buildDate = getWorkerVar("BUILD_DATE") ?? "unknown";
+      const version = getWorkerVar("SERVER_VERSION") ?? "1.1.0";
       const toolCount = TOOLS.length;
       const canonicalToolCount = TOOLS.filter((t) => t.deprecated !== true).length;
       const deprecatedAliasCount = TOOLS.filter((t) => t.deprecated === true).length;
@@ -1914,6 +1915,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         schemaHash: manifestHash,
         runtimeHash: await computeHash(version + String(toolCount)),
         buildSha,
+        buildDate,
         deployedAt,
         generatedAt: new Date().toISOString(),
         privacyScope: "public_market_data_only",
