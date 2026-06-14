@@ -83,11 +83,11 @@ jobs:
         run: python scripts/test_workflow_sdk_versions.py
 
       # ── 2. Core contracts: envelope, validation, security ─────────────────
-      - name: Phase 1 tests (MCP envelope)
-        run: python scripts/test_phase1.py
+      - name: MCP envelope tests
+        run: python scripts/test_mcp_envelope.py
 
-      - name: Phase 3 tests (input validation + security)
-        run: python scripts/test_phase3.py
+      - name: Input validation and security tests
+        run: python scripts/test_input_validation.py
 
       # ── 3. Foundational helpers (used across all tools) ───────────────────
       - name: Helper utilities tests
@@ -97,28 +97,28 @@ jobs:
         run: python scripts/test_grouped_registry.py
 
       # ── 4. Infrastructure: cache layer ────────────────────────────────────
-      - name: Phase 4 tests (cache)
-        run: python scripts/test_phase4.py
+      - name: Cache layer tests
+        run: python scripts/test_cache_layer.py
 
       # ── 5. Schema validation ──────────────────────────────────────────────
-      - name: Phase 3 extractor schema tests
-        run: python scripts/test_phase3_extractors.py
+      - name: Extractor schema tests
+        run: python scripts/test_extractor_schemas.py
 
       # ── 6. Feature areas: manifest, news, earnings, options ───────────────
-      - name: Phase 8 tests (manifest diagnostics + freshness)
-        run: python scripts/test_phase8.py
+      - name: Manifest diagnostics and freshness tests
+        run: python scripts/test_manifest_diagnostics.py
 
-      - name: Phase 6B tests (multi-source news/events)
-        run: python scripts/test_phase6b.py
+      - name: News and events tests
+        run: python scripts/test_news_events.py
 
-      - name: Phase 5 tests (earnings tools)
-        run: python scripts/test_phase5.py
+      - name: Earnings tools tests
+        run: python scripts/test_earnings_tools.py
 
       - name: Options data quality tests
         run: python scripts/test_options_quality.py
 
-      - name: PR2 data quality regressions
-        run: python scripts/test_pr2_data_quality.py
+      - name: Data quality regression tests
+        run: python scripts/test_data_quality.py
 
       # ── 7. Domain-specific schema tests ──────────────────────────────────
       - name: Source discovery schema tests

@@ -98,15 +98,23 @@ class TestPr2DataQuality(unittest.TestCase):
         self.assertEqual(data["interestCoverageEbitda"], 8.0)
 
     def test_credit_health_annualizes_latest_quarter_interest_once_and_uses_operational_ebitda(self):
-        col = pd.Timestamp("2026-03-31")
+        col1 = pd.Timestamp("2026-03-31")
+        col2 = pd.Timestamp("2025-12-31")
+        col3 = pd.Timestamp("2025-09-30")
+        col4 = pd.Timestamp("2025-06-30")
 
         class FakeTicker:
             quarterly_balance_sheet = pd.DataFrame(
-                {col: [1_000_000_000.0, 100_000_000.0]},
+                {col1: [1_000_000_000.0, 100_000_000.0]},
                 index=["Total Debt", "Cash And Cash Equivalents"],
             )
             quarterly_income_stmt = pd.DataFrame(
-                {col: [920_000_000.0, 100_000_000.0, 40_000_000.0, 52_800_000.0, 256_000_000.0]},
+                {
+                    col1: [920_000_000.0, 100_000_000.0, 40_000_000.0, 52_800_000.0, 256_000_000.0],
+                    col2: [920_000_000.0, 100_000_000.0, 40_000_000.0, 52_800_000.0, 256_000_000.0],
+                    col3: [920_000_000.0, 100_000_000.0, 40_000_000.0, 52_800_000.0, 256_000_000.0],
+                    col4: [920_000_000.0, 100_000_000.0, 40_000_000.0, 52_800_000.0, 256_000_000.0],
+                },
                 index=[
                     "EBITDA",
                     "EBIT",
@@ -123,20 +131,28 @@ class TestPr2DataQuality(unittest.TestCase):
         self.assertEqual(data["operationalEbitdaUsd"], 560_000_000.0)
         self.assertEqual(data["netDebtToEbitda"], 1.61)
         self.assertEqual(data["interestCoverageEbitda"], 2.65)
-        self.assertEqual(data["operationalEbitdaSource"], "quarterly_ebit_plus_depreciation_and_amortization")
+        self.assertEqual(data["operationalEbitdaSource"], "ttm_operating_income_plus_da")
         warning_codes = [w.get("code") for w in data.get("warnings", []) if isinstance(w, dict)]
         self.assertIn("NON_OPERATING_EBITDA_DIVERGENCE", warning_codes)
 
     def test_credit_health_falls_back_to_provider_ebitda_when_da_missing(self):
-        col = pd.Timestamp("2026-03-31")
+        col1 = pd.Timestamp("2026-03-31")
+        col2 = pd.Timestamp("2025-12-31")
+        col3 = pd.Timestamp("2025-09-30")
+        col4 = pd.Timestamp("2025-06-30")
 
         class FakeTicker:
             quarterly_balance_sheet = pd.DataFrame(
-                {col: [500.0, 100.0]},
+                {col1: [500.0, 100.0]},
                 index=["Total Debt", "Cash And Cash Equivalents"],
             )
             quarterly_income_stmt = pd.DataFrame(
-                {col: [150.0, 100.0, 10.0]},
+                {
+                    col1: [150.0, 100.0, 10.0],
+                    col2: [150.0, 100.0, 10.0],
+                    col3: [150.0, 100.0, 10.0],
+                    col4: [150.0, 100.0, 10.0],
+                },
                 index=["EBITDA", "EBIT", "Interest Expense Non Operating"],
             )
 
