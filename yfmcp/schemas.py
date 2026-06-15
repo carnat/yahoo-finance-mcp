@@ -441,6 +441,7 @@ _TOOL_OUTPUT_SCHEMAS.setdefault("extract_revenue_exposure", _SIMPLE_OUTPUT_SCHEM
 _TOOL_OUTPUT_SCHEMAS.setdefault("extract_china_exposure", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("extract_risk_factor_mentions", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("extract_customer_concentration", _SIMPLE_OUTPUT_SCHEMA)
+_TOOL_OUTPUT_SCHEMAS.setdefault("extract_exposure", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("query_sec_filing_index", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("get_tps_inputs", _TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"])
 _TOOL_OUTPUT_SCHEMAS.setdefault("get_eqf_bracket", _TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"])

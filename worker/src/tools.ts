@@ -57,6 +57,7 @@ import {
   extractChinaExposure,
   extractRiskFactorMentions,
   extractCustomerConcentration,
+  extractExposure,
   querySecFilingIndex,
   getLatestEarningsRelease,
   indexEarningsRelease,
@@ -1005,6 +1006,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "extract_china_exposure", description: "Extract China exposure with separate revenue and non-revenue classifications.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker"] } },
   { name: "extract_risk_factor_mentions", description: "Extract concise risk-factor term mentions from SEC filings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, terms: { type: "array", items: { type: "string" } }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker", "terms"] } },
   { name: "extract_customer_concentration", description: "Extract customer concentration percentages from SEC filings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker"] } },
+  { name: "extract_exposure", description: "Extract multi-dimensional exposure for any geographic region or named entity/topic from the latest SEC 10-K (or 20-F) filing. Returns revenue exposure (XBRL + HTML fallback), operational evidence, named-entity mentions, and risk-factor excerpts in one call. Replaces extract_geographic_revenue, extract_china_exposure, and extract_revenue_exposure.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Ticker symbol, e.g. 'AAPL'" }, topic: { type: "string", description: "Geographic region or entity to search for, e.g. 'china', 'russia', 'europe', 'huawei'. Case-insensitive." }, filing_type: { type: "string", default: "10-K", description: "SEC filing type: '10-K' or '20-F'." }, period: { type: "string", default: "latest" }, include_risk_factors: { type: "boolean", default: true } }, required: ["ticker", "topic"] } },
   { name: "query_sec_filing_index", description: "Deterministically route supported SEC filing query types to index-backed extractor tools.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, query_type: { type: "string" }, params: { type: "object", default: {} }, return_evidence: { type: "boolean", default: true }, detailLevel: { type: "string", default: "compact", enum: ["compact", "evidence", "raw"] } }, required: ["ticker", "query_type"] } },
   { name: "get_latest_earnings_release", description: "Resolve the latest public earnings release source for a ticker. Returns SEC 8-K URL with HIGH confidence, or Yahoo calendar estimate with MEDIUM confidence.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" }, period: { type: "string", enum: ["latest"], default: "latest", description: "Period selector. Only 'latest' is supported." } }, required: ["ticker"] } },
   { name: "index_earnings_release", description: "Build a compact section/table index of the latest public earnings release for deterministic metric extraction.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, period: { type: "string", enum: ["latest"], default: "latest" }, source_url: { type: "string", description: "Optional override URL (must be https://www.sec.gov/Archives/ or company IR). Paywalled sources are blocked." } }, required: ["ticker"] } },
@@ -1439,6 +1441,7 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   extract_china_exposure: SIMPLE_OBJECT_SCHEMA,
   extract_risk_factor_mentions: SIMPLE_OBJECT_SCHEMA,
   extract_customer_concentration: SIMPLE_OBJECT_SCHEMA,
+  extract_exposure: SIMPLE_OBJECT_SCHEMA,
   get_latest_earnings_release: ENVELOPE_V2_OUTPUT_SCHEMA,
   index_earnings_release: ENVELOPE_V2_OUTPUT_SCHEMA,
   extract_earnings_metrics: ENVELOPE_V2_OUTPUT_SCHEMA,
@@ -1794,6 +1797,8 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       return extractRiskFactorMentions(str(args.ticker), Array.isArray(args.terms) ? args.terms.map(String) : [], str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
     case "extract_customer_concentration":
       return extractCustomerConcentration(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
+    case "extract_exposure":
+      return extractExposure(str(args.ticker), str(args.topic), str(args.filing_type, "10-K"), str(args.period, "latest"), args.include_risk_factors !== false);
     case "query_sec_filing_index":
       return querySecFilingIndex(
         str(args.ticker),

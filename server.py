@@ -7063,6 +7063,206 @@ async def extract_china_exposure(
 
 
 @yfinance_server.tool(
+    name="extract_exposure",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_exposure"],
+    description="Extract multi-dimensional exposure for any geographic region or named entity/topic from the latest SEC 10-K (or 20-F) filing. Returns revenue exposure (XBRL + HTML fallback), operational evidence, named-entity mentions, and risk-factor excerpts in one call. Replaces extract_geographic_revenue, extract_china_exposure, and extract_revenue_exposure.",
+)
+async def extract_exposure(
+    ticker: str,
+    topic: str,
+    filing_type: str = "10-K",
+    period: str = "latest",
+    include_risk_factors: bool = True,
+) -> str:
+    err = _validate_ticker(ticker)
+    if err:
+        return _mcp_failure("extract_exposure", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    if not topic or not topic.strip():
+        return json.dumps({"ticker": ticker, "topic": topic, "overallStatus": "NOT_FOUND", "warnings": [{"code": "INPUT_VALIDATION_ERROR", "message": "topic is required"}]})
+
+    topic_lower = topic.strip().lower()
+
+    EXPOSURE_SYNONYMS = {
+        "china": ["china", "greaterchinese", "greaterchina", "prc", "hongkong", "taiwan"],
+        "greater china": ["greaterchina", "greaterchinese", "china", "hongkong", "taiwan"],
+        "europe": ["europe", "emea", "europeanunion"],
+        "japan": ["japan"],
+        "americas": ["americas", "northamerica", "unitedstates", "us"],
+        "russia": ["russia", "russianfederation"],
+        "india": ["india"],
+        "rest of asia": ["restofasia", "asiapacific", "asiaxjapan"],
+    }
+    CHINA_NAMED_ENTITIES = ["foxconn", "tsmc", "luxshare", "catl", "byd", "tongmei", "catcher", "pegatron"]
+    OPERATIONAL_TERMS = ["manufacturing", "assembly", "supply chain", "factory", "production facility"]
+
+    is_china = topic_lower in ("china", "greater china")
+    synonym_entry = EXPOSURE_SYNONYMS.get(topic_lower)
+    region_label = "Greater China" if topic_lower == "china" else topic
+
+    warnings: list[dict] = []
+
+    # Get filing index for metadata
+    idx = _safe_json_loads(await get_sec_filing_index(ticker=ticker, filing_type=filing_type, period=period))
+
+    filing_date = idx.get("filingDate")
+    accession_number = idx.get("accessionNumber")
+    document_url = idx.get("documentUrl")
+
+    # Revenue extraction
+    try:
+        geo = _safe_json_loads(await extract_geographic_revenue(ticker=ticker, region=region_label, filing_type=filing_type, period=period, detailLevel="compact"))
+    except Exception as e:
+        warnings.append({"code": "REVENUE_EXTRACTION_ERROR", "message": str(e), "severity": "warning"})
+        geo = {}
+
+    geo_value = geo.get("value")
+    geo_denominator = geo.get("denominator")
+    geo_conf = str(geo.get("confidence") or "LOW").upper()
+    geo_method = str(geo.get("extractionMethod") or "NONE").upper()
+    geo_evidence = geo.get("evidence") or {}
+    if isinstance(geo_evidence, dict):
+        pass
+    else:
+        geo_evidence = {}
+
+    if geo_value is not None:
+        rev_status = "FOUND"
+    elif geo_conf == "NOT_DISCLOSED":
+        rev_status = "NOT_DISCLOSED"
+    else:
+        rev_status = "NOT_FOUND"
+
+    revenue_exposure = {
+        "status": rev_status,
+        "value": geo_value,
+        "denominator": geo_denominator,
+        "valuePct": geo.get("valuePct") if geo_denominator is not None else None,
+        "valueRatio": geo.get("valueRatio") if geo_denominator is not None else None,
+        "unit": geo.get("unit", "USD"),
+        "region": geo_evidence.get("sectionHeading") or region_label,
+        "period": geo.get("period"),
+        "extractionMethod": geo_method,
+        "confidence": "LOW" if geo_conf == "NOT_DISCLOSED" else (geo_conf if geo_value is not None else "LOW"),
+        "evidence": {
+            "sectionHeading": geo_evidence.get("sectionHeading"),
+            "sourceRows": geo_evidence.get("sourceRows") if isinstance(geo_evidence.get("sourceRows"), list) else [],
+            "sourceColumns": geo_evidence.get("sourceColumns") if isinstance(geo_evidence.get("sourceColumns"), list) else [],
+        },
+    }
+
+    # Operational scan via existing search
+    try:
+        ops_raw = _safe_json_loads(await search_sec_filing_text(ticker=ticker, search_terms=[topic_lower], filing_type=filing_type, context_chars=600, return_tables=False))
+        ops_matches = ops_raw.get("matches") or []
+    except Exception:
+        ops_matches = []
+
+    ops_evidence: list[dict] = []
+    found_op_terms: set[str] = set()
+    for m in ops_matches:
+        if not isinstance(m, dict):
+            continue
+        context_text = str(m.get("contextText") or m.get("context") or "").lower()
+        for op_term in OPERATIONAL_TERMS:
+            if op_term in context_text:
+                found_op_terms.add(op_term)
+                if len(ops_evidence) < 5:
+                    ops_evidence.append({
+                        "term": op_term,
+                        "excerpt": _compact_excerpt(str(m.get("contextText") or m.get("context") or ""), 200),
+                        "section": str(m.get("sectionHeading") or ""),
+                    })
+                break
+        if len(ops_evidence) >= 5:
+            break
+
+    operational_exposure = {
+        "status": "FOUND" if ops_evidence else "NOT_FOUND",
+        "terms": list(found_op_terms),
+        "evidence": ops_evidence,
+    }
+
+    # Entity scan (China only)
+    if is_china:
+        try:
+            ent_raw = _safe_json_loads(await search_sec_filing_text(ticker=ticker, search_terms=CHINA_NAMED_ENTITIES[:3], filing_type=filing_type, context_chars=400, return_tables=False))
+            ent_matches = ent_raw.get("matches") or []
+        except Exception:
+            ent_matches = []
+        found_entities: set[str] = set()
+        ent_evidence: list[dict] = []
+        for m in ent_matches:
+            if not isinstance(m, dict):
+                continue
+            term_low = str(m.get("term") or "").lower()
+            if term_low and term_low not in found_entities:
+                found_entities.add(term_low)
+                if len(ent_evidence) < 5:
+                    ent_evidence.append({
+                        "entity": str(m.get("term") or ""),
+                        "excerpt": _compact_excerpt(str(m.get("contextText") or m.get("context") or ""), 200),
+                        "section": str(m.get("sectionHeading") or ""),
+                    })
+            if len(ent_evidence) >= 5:
+                break
+        entity_exposure = {
+            "status": "FOUND" if ent_evidence else "NOT_FOUND",
+            "entities": list(found_entities),
+            "evidence": ent_evidence,
+        }
+    else:
+        entity_exposure = {"status": "NOT_FOUND", "entities": [], "evidence": []}
+
+    # Risk factor scan
+    if include_risk_factors:
+        try:
+            risk_raw = _safe_json_loads(await extract_risk_factor_mentions(ticker=ticker, terms=[topic_lower], filing_type=filing_type, period=period, detailLevel="compact"))
+            risk_matches = risk_raw.get("matches") or []
+        except Exception:
+            risk_matches = []
+        risk_evidence = [
+            {
+                "excerpt": _compact_excerpt(str(m.get("excerpt") or m.get("context") or m.get("contextText") or ""), 200),
+                "section": str(m.get("sectionHeading") or "Risk Factors"),
+            }
+            for m in risk_matches[:5] if isinstance(m, dict)
+        ]
+        risk_factor_exposure = {
+            "status": "FOUND" if risk_evidence else "NOT_FOUND",
+            "mentionCount": len(risk_matches),
+            "evidence": risk_evidence,
+        }
+    else:
+        risk_factor_exposure = {"status": "NOT_FOUND", "mentionCount": 0, "evidence": []}
+
+    # Overall status
+    non_revenue_found = bool(ops_evidence or entity_exposure.get("evidence") or risk_factor_exposure.get("evidence"))
+    if rev_status == "FOUND":
+        overall_status = "FOUND_REVENUE_EXPOSURE"
+    elif non_revenue_found:
+        overall_status = "FOUND_NON_REVENUE_EXPOSURE"
+    elif rev_status == "NOT_DISCLOSED":
+        overall_status = "NOT_DISCLOSED"
+    else:
+        overall_status = "NOT_FOUND"
+
+    return json.dumps({
+        "ticker": ticker,
+        "topic": topic_lower,
+        "filingType": idx.get("filingType", filing_type),
+        "filingDate": filing_date,
+        "accessionNumber": accession_number,
+        "documentUrl": document_url,
+        "revenueExposure": revenue_exposure,
+        "operationalExposure": operational_exposure,
+        "entityExposure": entity_exposure,
+        "riskFactorExposure": risk_factor_exposure,
+        "overallStatus": overall_status,
+        "warnings": warnings,
+    })
+
+
+@yfinance_server.tool(
     name="query_sec_filing_index",
     output_schema=_TOOL_OUTPUT_SCHEMAS["query_sec_filing_index"],
     description="Deterministically route supported SEC filing index query types to extractor tools.",
