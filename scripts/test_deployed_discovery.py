@@ -400,22 +400,16 @@ def _check_public_description_terms(tools: list[dict]) -> None:
 
 def _assert_deprecated_alias_metadata(tools: list[dict]) -> None:
     by_name = {str(t.get("name")): t for t in tools if isinstance(t, dict)}
-    expected = {
-        "get_dc134_options_scan": "analyze_options_flow_window",
-        "get_eqf_bracket": "calculate_price_target_distance",
-        "get_tps_inputs": "analyze_position_signals",
-        "get_adv_gate": "check_volume_liquidity_threshold",
+    # Since deprecated aliases are filtered from tools/list, verify they are absent.
+    expected_absent = {
+        "get_dc134_options_scan",
+        "get_eqf_bracket",
+        "get_tps_inputs",
+        "get_adv_gate",
     }
-    for alias, use_instead in expected.items():
-        tool = by_name.get(alias)
-        if not isinstance(tool, dict):
-            raise AssertionError(f"Missing expected deprecated alias in tools/list: {alias}")
-        if tool.get("deprecated") is not True:
-            raise AssertionError(f"{alias}: expected deprecated=true")
-        if tool.get("useInstead") != use_instead:
-            raise AssertionError(f"{alias}: expected useInstead={use_instead!r}, got {tool.get('useInstead')!r}")
-        if tool.get("deprecationReason") != "Use the canonical public tool name.":
-            raise AssertionError(f"{alias}: missing/invalid deprecationReason")
+    for alias in expected_absent:
+        if alias in by_name:
+            raise AssertionError(f"Deprecated alias should NOT appear in tools/list: {alias}")
 
 
 def _assert_public_tool_wording(tools: list[dict]) -> None:
