@@ -1638,6 +1638,10 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
   }
 
   output.currentPrice = lastPrice;
+  output.pctBelowCurrentPrice =
+    targetMean != null && lastPrice != null && lastPrice > 0
+      ? +((lastPrice - targetMean) / lastPrice * 100).toFixed(2)
+      : null;
   output.recentUpgradeCount30d = recentUpgradeCount30d;
   output.targetLagSignal = targetLagSignal;
   output.warnings = warnings;
@@ -2345,46 +2349,51 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
     }
 
     const bsLatest = bs[0];
-    const incLatest = inc[0];
+    // TTM: sum up to 4 most-recent quarterly income rows (newest first)
+    const incRows = inc.slice(0, 4);
 
-    const firstNumber = (obj: Record<string, unknown>, keys: string[]): { value: number | null; source: string | null } => {
+    // Sum the first matching key across quarterly rows for TTM
+    const ttmSum = (keys: string[]): { value: number | null; source: string | null; values: number[] } => {
       for (const key of keys) {
-        const v = obj[key];
-        if (typeof v === "number" && Number.isFinite(v)) return { value: v, source: key };
+        const vals: number[] = [];
+        for (const row of incRows) {
+          const v = row[key];
+          if (typeof v === "number" && Number.isFinite(v)) vals.push(v);
+        }
+        if (vals.length > 0) {
+          return { value: vals.reduce((a, b) => a + b, 0), source: key, values: vals };
+        }
       }
-      return { value: null, source: null };
+      return { value: null, source: null, values: [] };
     };
 
     const totalDebt = (bsLatest.totalDebt as number | null) ?? null;
     const cash = (bsLatest.cashAndCashEquivalents as number | null) ?? null;
-    const providerEbitda = firstNumber(incLatest, ["eBITDA", "ebitda", "normalizedEBITDA", "normalizedEbitda"]);
-    const ebit = firstNumber(incLatest, ["eBIT", "ebit", "operatingIncome"]);
-    const da = firstNumber(incLatest, [
+    const providerEbitda = ttmSum(["eBITDA", "ebitda", "normalizedEBITDA", "normalizedEbitda"]);
+    // BUG-03: prefer operatingIncome over Yahoo's EBIT to avoid non-cash fair-value items
+    const ebit = ttmSum(["operatingIncome", "eBIT", "ebit"]);
+    const da = ttmSum([
       "reconciledDepreciation",
       "depreciationAndAmortization",
       "depreciationAmortizationDepletionIncomeStatement",
     ]);
-    const interest = firstNumber(incLatest, ["interestExpenseNonOperating", "interestExpense"]);
-    const ebitdaQ = providerEbitda.value;
-    const ebitQ = ebit.value;
-    const daQ = da.value;
-    const interestQ = interest.value;
+    const interest = ttmSum(["interestExpenseNonOperating", "interestExpense"]);
 
+    // TTM sums are already annualized — no × 4 needed
+    const ebitdaAnnual = providerEbitda.value;
+    const ebitAnnual = ebit.value;
+    const depreciationAmortizationAnnual = da.value;
     const netDebt = totalDebt != null && cash != null ? totalDebt - cash : null;
-    let operationalEbitdaQ: number | null = null;
+    let operationalEbitdaAnnual: number | null = null;
     let operationalEbitdaSource: string | null = null;
-    if (ebitQ != null && daQ != null) {
-      operationalEbitdaQ = ebitQ + daQ;
-      operationalEbitdaSource = "quarterly_ebit_plus_depreciation_and_amortization";
-    } else if (ebitdaQ != null) {
-      operationalEbitdaQ = ebitdaQ;
+    if (ebitAnnual != null && depreciationAmortizationAnnual != null) {
+      operationalEbitdaAnnual = ebitAnnual + depreciationAmortizationAnnual;
+      operationalEbitdaSource = "ttm_operating_income_plus_da";
+    } else if (ebitdaAnnual != null) {
+      operationalEbitdaAnnual = ebitdaAnnual;
       operationalEbitdaSource = "provider_ebitda_fallback";
     }
-    const ebitdaAnnual = ebitdaQ != null ? ebitdaQ * 4 : null;
-    const ebitAnnual = ebitQ != null ? ebitQ * 4 : null;
-    const depreciationAmortizationAnnual = daQ != null ? daQ * 4 : null;
-    const operationalEbitdaAnnual = operationalEbitdaQ != null ? operationalEbitdaQ * 4 : null;
-    const interestAnnual = interestQ != null ? interestQ * 4 : null;
+    const interestAnnual = interest.value;
 
     const netDebtToEbitda = netDebt != null && operationalEbitdaAnnual != null && operationalEbitdaAnnual !== 0
       ? +(netDebt / operationalEbitdaAnnual).toFixed(2) : null;
@@ -2432,7 +2441,7 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
     if (creditStressFlag != null) computedMetrics.push("creditStressFlag");
     if (debtTier != null) computedMetrics.push("debtTier");
 
-    const warnings: Array<{ code: string; message: string }> = [];
+    const warnings: Record<string, unknown>[] = [];
     if (interestAnnual == null) {
       warnings.push({
         code: "INTEREST_EXPENSE_UNAVAILABLE",
@@ -2460,9 +2469,24 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
         message: "Company has negative EBIT/EBITDA; leverage metrics may understate operating credit risk despite net cash or low net debt.",
       });
     }
+    // BUG-02: flag anomalous interest spike in most-recent quarter vs prior-quarter average
+    if (interest.values.length >= 2) {
+      const mostRecentQ = Math.abs(interest.values[0]);
+      const priorAbs = interest.values.slice(1).map(v => Math.abs(v));
+      const priorAvg = priorAbs.reduce((a, b) => a + b, 0) / priorAbs.length;
+      if (priorAvg > 0 && mostRecentQ > priorAvg * 2.0) {
+        const ratio = +(mostRecentQ / priorAvg).toFixed(1);
+        warnings.push({
+          code: "INTEREST_EXPENSE_ANOMALY",
+          message: `Most recent quarter interest expense (${Math.round(mostRecentQ).toLocaleString()}) is ${ratio}× prior ${priorAbs.length}-quarter average (${Math.round(priorAvg).toLocaleString()}). May include one-time items. Coverage ratios may not reflect ongoing debt service capacity.`,
+          mostRecentQuarter: mostRecentQ,
+          prior3QAverage: priorAvg,
+        });
+      }
+    }
 
     const dataQuality = missingComponents.length > 0 ? "PARTIAL" : "OK";
-    const quarterDate = (bsLatest.date as string) ?? (incLatest.date as string) ?? null;
+    const quarterDate = (bsLatest.date as string) ?? (incRows[0]?.date as string) ?? null;
 
     return JSON.stringify({
       ticker,
@@ -6670,6 +6694,7 @@ async function collectYahooEvents(
   endDate = "",
   lookbackDays?: number,
   feed: "news" | "press_releases" = "news",
+  nameTokens: string[] = [],
 ): Promise<{ items: Record<string, unknown>[]; warnings: Record<string, unknown>[]; used: boolean }> {
   const warnings: Record<string, unknown>[] = [];
   const items: Record<string, unknown>[] = [];
@@ -6721,6 +6746,17 @@ async function collectYahooEvents(
       // valid press-release tab items may still arrive as STORY/ARTICLE.
       const { item, warnings: w } = buildYfEventItem(ticker, n, retrievedAt, feedSource);
       if (!withinDateWindow(_str(item.publishedAt) || null, startDate, endDate, lookbackDays)) continue;
+      // BUG-08: drop articles that don't mention the ticker or company name
+      if (feed === "news") {
+        const hay = `${_str(item.title)} ${_str(item.evidenceText)}`;
+        const tickerEsc = ticker.toUpperCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const tickerFound = new RegExp(`\\b${tickerEsc}\\b`).test(hay.toUpperCase());
+        const nameFound = nameTokens.some(tok =>
+          new RegExp(`\\b${tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(hay)
+        );
+        if (!tickerFound && !nameFound) continue;
+        item.sourceTickerMatch = true;
+      }
       items.push(item);
       warnings.push(...w);
       if (items.length >= maxResults) break;
@@ -6997,12 +7033,34 @@ async function collectCompanyEvents(
     warnings.push(...sec.warnings);
   }
 
+  // Fetch company short name once for news relevance filtering (BUG-08)
+  const _yfHeadlineStopwords = new Set([
+    "corp","corporation","inc","ltd","llc","plc","co","group","holdings",
+    "technology","technologies","solutions","services","systems",
+    "international","global","energy","capital","financial","finance","resources",
+  ]);
+  let companyNameTokens: string[] = [];
+  try {
+    const priceD = await yGet(
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price`
+    ) as Record<string, unknown>;
+    const priceResult = ((priceD?.quoteSummary as Record<string, unknown> | undefined)
+      ?.result as Record<string, unknown>[] | undefined)?.[0]?.price as Record<string, unknown> | undefined;
+    const shortName = _str(priceResult?.shortName || priceResult?.longName);
+    if (shortName) {
+      companyNameTokens = shortName.toLowerCase()
+        .replace(/[^a-z0-9]/g, " ")
+        .split(/\s+/)
+        .filter(w => w.length >= 4 && !_yfHeadlineStopwords.has(w));
+    }
+  } catch { /* non-fatal */ }
+
   // Yahoo Finance news tab (explicit or via legacy yahoo_finance or company_ir)
   const needYfNews = selected.includes("yahoo_finance_news")
     || selected.includes("yahoo_finance")
     || selected.includes("company_ir");
   if (needYfNews) {
-    const yf = await collectYahooEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, "news");
+    const yf = await collectYahooEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, "news", companyNameTokens);
     if (yf.used) {
       if (selected.includes("yahoo_finance_news")) sourcesUsed.push("yahoo_finance_news");
       if (selected.includes("yahoo_finance") && !sourcesUsed.includes("yahoo_finance")) sourcesUsed.push("yahoo_finance");

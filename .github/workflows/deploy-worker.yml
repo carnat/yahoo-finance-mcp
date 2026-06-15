@@ -87,8 +87,8 @@ jobs:
           GEO_SCHEMA_TARGET: remote
           MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
 
-      - name: Verify Phase 3 extractor tools
-        run: python scripts/test_deployed_phase3_extractors.py
+      - name: Verify deployed extractor tools
+        run: python scripts/test_deployed_extractors.py
         env:
           MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
           ALLOW_NETWORK_SKIP: "0"
