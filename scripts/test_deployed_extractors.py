@@ -32,7 +32,9 @@ def rpc(method: str, params: dict | None = None, req_id: int = 1) -> dict:
         payload["params"] = params
     data = json.dumps(payload).encode("utf-8")
     last_exc: Exception | None = None
-    for i in range(3):
+    # 5 attempts: sleeps of 5, 10, 20, 40 s between attempts (handles transient 503s)
+    delays = [5, 10, 20, 40]
+    for i in range(5):
         req = urllib.request.Request(
             MCP_URL,
             data=data,
@@ -42,10 +44,16 @@ def rpc(method: str, params: dict | None = None, req_id: int = 1) -> dict:
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            last_exc = e
+            if e.code in (429, 502, 503, 504) and i < len(delays):
+                time.sleep(delays[i])
+                continue
+            raise
         except urllib.error.URLError as e:
             last_exc = e
-            if i < 2:
-                time.sleep(3 * (i + 1))
+            if i < len(delays):
+                time.sleep(delays[i])
                 continue
             raise
     raise last_exc or RuntimeError("RPC failed")
