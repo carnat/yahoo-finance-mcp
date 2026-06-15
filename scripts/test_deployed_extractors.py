@@ -32,7 +32,9 @@ def rpc(method: str, params: dict | None = None, req_id: int = 1) -> dict:
         payload["params"] = params
     data = json.dumps(payload).encode("utf-8")
     last_exc: Exception | None = None
-    for i in range(3):
+    # 5 attempts: sleeps of 5, 10, 20, 40 s between attempts (handles transient 503s)
+    delays = [5, 10, 20, 40]
+    for i in range(5):
         req = urllib.request.Request(
             MCP_URL,
             data=data,
@@ -42,10 +44,16 @@ def rpc(method: str, params: dict | None = None, req_id: int = 1) -> dict:
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            last_exc = e
+            if e.code in (429, 502, 503, 504) and i < len(delays):
+                time.sleep(delays[i])
+                continue
+            raise
         except urllib.error.URLError as e:
             last_exc = e
-            if i < 2:
-                time.sleep(3 * (i + 1))
+            if i < len(delays):
+                time.sleep(delays[i])
                 continue
             raise
     raise last_exc or RuntimeError("RPC failed")
@@ -379,6 +387,35 @@ def main() -> int:
         if len(labels) == 1:
             print("  WARN LITE has single segment — may have reorganized into single reporting segment (FY2026 Q1)")
     print(f"  PASS extract_segment_revenue LITE (status={lite_seg_data.get('status')!r})")
+
+    # --- Phase 3B-13: extract_exposure ---
+
+    aaoi_exp = call_tool("extract_exposure", {
+        "ticker": "AAOI", "topic": "china",
+    }, 50)
+    assert_no_unknown_tool(aaoi_exp, "extract_exposure")
+    data = extract_data(aaoi_exp)
+    for field in ("ticker", "topic", "overallStatus", "revenueExposure", "operationalExposure", "entityExposure", "riskFactorExposure"):
+        if field not in data:
+            raise AssertionError(f"extract_exposure AAOI china: missing field '{field}'")
+    if data.get("overallStatus") not in ("FOUND_REVENUE_EXPOSURE", "FOUND_NON_REVENUE_EXPOSURE", "NOT_DISCLOSED", "NOT_FOUND"):
+        raise AssertionError(f"extract_exposure AAOI china: unexpected overallStatus={data.get('overallStatus')!r}")
+    rev = data.get("revenueExposure") or {}
+    if rev.get("status") not in ("FOUND", "NOT_DISCLOSED", "NOT_FOUND"):
+        raise AssertionError(f"extract_exposure AAOI china: unexpected revenueExposure.status={rev.get('status')!r}")
+    print(f"  PASS extract_exposure AAOI china (overallStatus={data.get('overallStatus')!r}, rev.status={rev.get('status')!r})")
+
+    exp_null = call_tool("extract_exposure", {
+        "ticker": "AAPL", "topic": "atlantis",
+    }, 51)
+    assert_no_unknown_tool(exp_null, "extract_exposure")
+    data_null = extract_data(exp_null)
+    for field in ("ticker", "topic", "overallStatus"):
+        if field not in data_null:
+            raise AssertionError(f"extract_exposure AAPL atlantis: missing field '{field}'")
+    if data_null.get("overallStatus") != "NOT_FOUND":
+        raise AssertionError(f"extract_exposure AAPL atlantis: expected NOT_FOUND but got {data_null.get('overallStatus')!r}")
+    print(f"  PASS extract_exposure AAPL atlantis (overallStatus={data_null.get('overallStatus')!r})")
 
     # --- Phase 3B-12: Backward compatibility ---
 

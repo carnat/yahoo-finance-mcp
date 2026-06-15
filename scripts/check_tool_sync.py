@@ -50,6 +50,7 @@ EXPECTED_CANONICAL = {
     "extract_china_exposure",
     "extract_risk_factor_mentions",
     "extract_customer_concentration",
+    "extract_exposure",
     "query_sec_filing_index",
     "get_latest_earnings_release",
     "index_earnings_release",

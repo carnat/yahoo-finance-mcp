@@ -8776,6 +8776,235 @@ export async function extractChinaExposure(
   return JSON.stringify(out);
 }
 
+// XBRL synonym lookup for extractExposure
+const EXPOSURE_SYNONYMS: Record<string, string[]> = {
+  china:          ["china", "greaterchinese", "greaterchina", "prc", "hongkong", "taiwan", "chinesesimplified"],
+  "greater china":["greaterchina", "greaterchinese", "china", "hongkong", "taiwan"],
+  europe:         ["europe", "emea", "europeanunion"],
+  japan:          ["japan"],
+  americas:       ["americas", "northamerica", "unitedstates", "us"],
+  russia:         ["russia", "russianfederation"],
+  india:          ["india"],
+  "rest of asia": ["restofasia", "asiapacific", "asiaxjapan"],
+};
+
+// Named entities known to be associated with China manufacturing / supply chain
+const CHINA_NAMED_ENTITIES = ["foxconn", "tsmc", "luxshare", "catl", "byd", "tongmei", "catcher", "pegatron"];
+
+// Operational terms for geographic exposure scanning
+const OPERATIONAL_TERMS = ["manufacturing", "assembly", "supply chain", "factory", "production facility"];
+
+export async function extractExposure(
+  ticker: string,
+  topic: string,
+  filingType = "10-K",
+  period = "latest",
+  includeRiskFactors = true,
+): Promise<string> {
+  if (!ticker || !ticker.trim()) {
+    return JSON.stringify({ ticker, topic, overallStatus: "NOT_FOUND", warnings: [{ code: "INPUT_VALIDATION_ERROR", message: "ticker is required" }] });
+  }
+  if (!topic || !topic.trim()) {
+    return JSON.stringify({ ticker, topic, overallStatus: "NOT_FOUND", warnings: [{ code: "INPUT_VALIDATION_ERROR", message: "topic is required" }] });
+  }
+
+  const topicLower = topic.trim().toLowerCase();
+  const warnings: Record<string, unknown>[] = [];
+
+  // Resolve filing metadata via index
+  const idx = parseObjectJson(await getSecFilingIndex(ticker, filingType, period, null));
+
+  const filingDate: string | null = typeof idx.filingDate === "string" ? idx.filingDate : null;
+  const accessionNumber: string | null = typeof idx.accessionNumber === "string" ? idx.accessionNumber : null;
+  const documentUrl: string | null = typeof idx.documentUrl === "string" ? idx.documentUrl : null;
+
+  // Determine the region name to use for XBRL lookup (try synonym table, otherwise use raw topic)
+  const synonymEntry = Object.entries(EXPOSURE_SYNONYMS).find(([key]) => key === topicLower);
+  const regionLabel = synonymEntry ? (topicLower === "china" ? "Greater China" : topic) : topic;
+
+  // --- Fan-out: revenue extraction, operational scan, risk factor scan (all parallel) ---
+
+  // 1. Revenue extraction via existing geographic revenue logic
+  const revenuePromise = extractGeographicRevenue(ticker, regionLabel, filingType, period, null, "compact");
+
+  // 2. Operational/entity scan via searchFilingText
+  const operationalPromise = searchFilingText(ticker, [topicLower], null, filingType, null, 600, false);
+
+  // 3. Entity scan — only for China topic
+  const isChina = synonymEntry != null && topicLower === "china" || (synonymEntry?.includes("china") ?? false);
+  const entityPromise = isChina
+    ? searchFilingText(ticker, CHINA_NAMED_ENTITIES.slice(0, 3), null, filingType, null, 400, false)
+    : Promise.resolve(null as string | null);
+
+  // 4. Risk factor scan
+  const riskPromise = includeRiskFactors
+    ? extractRiskFactorMentions(ticker, [topicLower], filingType, period, "compact")
+    : Promise.resolve(null as string | null);
+
+  const [revenueResult, operationalResult, entityResult, riskResult] = await Promise.allSettled([
+    revenuePromise,
+    operationalPromise,
+    entityPromise,
+    riskPromise,
+  ]);
+
+  // --- Process revenue ---
+  const geo = revenueResult.status === "fulfilled" ? parseObjectJson(revenueResult.value) : {};
+  const geoValue: number | null = typeof geo.value === "number" ? geo.value : null;
+  const geoDenominator: number | null = typeof geo.denominator === "number" ? geo.denominator : null;
+  const geoConf = String(geo.confidence ?? "LOW").toUpperCase();
+  const geoMethod = String(geo.extractionMethod ?? "NONE").toUpperCase();
+  const geoEvidence = geo.evidence && typeof geo.evidence === "object" ? geo.evidence as Record<string, unknown> : {};
+  let revStatus: string;
+  if (geoValue != null) {
+    revStatus = "FOUND";
+  } else if (geoConf === "NOT_DISCLOSED") {
+    revStatus = "NOT_DISCLOSED";
+  } else {
+    revStatus = "NOT_FOUND";
+  }
+
+  const revenueExposure: Record<string, unknown> = {
+    status: revStatus,
+    value: geoValue,
+    denominator: geoDenominator,
+    valuePct: geoDenominator != null ? (geo.valuePct ?? null) : null,
+    valueRatio: geoDenominator != null ? (geo.valueRatio ?? null) : null,
+    unit: geo.unit ?? "USD",
+    region: geoEvidence.sectionHeading ?? regionLabel,
+    period: geo.period ?? null,
+    extractionMethod: geoMethod === "NONE" ? "NONE" : geoMethod,
+    confidence: geoConf === "NOT_DISCLOSED" ? "LOW" : (geoValue != null ? (geoConf || "MEDIUM") : "LOW"),
+    evidence: {
+      sectionHeading: geoEvidence.sectionHeading ?? null,
+      sourceRows: Array.isArray(geoEvidence.sourceRows) ? geoEvidence.sourceRows : [],
+      sourceColumns: Array.isArray(geoEvidence.sourceColumns) ? geoEvidence.sourceColumns : [],
+    },
+  };
+
+  // --- Process operational exposure ---
+  const opsRaw = operationalResult.status === "fulfilled" && operationalResult.value
+    ? parseObjectJson(operationalResult.value)
+    : {};
+  const opsMatches: Record<string, unknown>[] = Array.isArray(opsRaw.matches)
+    ? (opsRaw.matches as Record<string, unknown>[]).filter((m) => m && typeof m === "object")
+    : [];
+
+  // Scan for operational keyword co-occurrence in text excerpts
+  const opsEvidence: Record<string, unknown>[] = [];
+  const foundOpTerms = new Set<string>();
+  for (const m of opsMatches) {
+    const contextText = String(m.contextText ?? m.context ?? "").toLowerCase();
+    for (const opTerm of OPERATIONAL_TERMS) {
+      if (contextText.includes(opTerm)) {
+        foundOpTerms.add(opTerm);
+        if (opsEvidence.length < 5) {
+          opsEvidence.push({
+            term: opTerm,
+            excerpt: compactExcerpt(m.contextText ?? m.context ?? "", 200),
+            section: String(m.sectionHeading ?? ""),
+          });
+        }
+        break;
+      }
+    }
+    if (opsEvidence.length >= 5) break;
+  }
+
+  const operationalExposure: Record<string, unknown> = {
+    status: opsEvidence.length > 0 ? "FOUND" : "NOT_FOUND",
+    terms: Array.from(foundOpTerms),
+    evidence: opsEvidence,
+  };
+
+  // --- Process entity exposure (China only) ---
+  let entityExposure: Record<string, unknown>;
+  if (isChina && entityResult.status === "fulfilled" && entityResult.value) {
+    const entRaw = parseObjectJson(entityResult.value);
+    const entMatches: Record<string, unknown>[] = Array.isArray(entRaw.matches)
+      ? (entRaw.matches as Record<string, unknown>[]).filter((m) => m && typeof m === "object")
+      : [];
+    const foundEntities = new Set<string>();
+    const entEvidence: Record<string, unknown>[] = [];
+    for (const m of entMatches) {
+      const termLow = String(m.term ?? "").toLowerCase();
+      if (termLow && !foundEntities.has(termLow)) {
+        foundEntities.add(termLow);
+        if (entEvidence.length < 5) {
+          entEvidence.push({
+            entity: String(m.term ?? ""),
+            excerpt: compactExcerpt(m.contextText ?? m.context ?? "", 200),
+            section: String(m.sectionHeading ?? ""),
+          });
+        }
+      }
+      if (entEvidence.length >= 5) break;
+    }
+    entityExposure = {
+      status: entEvidence.length > 0 ? "FOUND" : "NOT_FOUND",
+      entities: Array.from(foundEntities),
+      evidence: entEvidence,
+    };
+  } else {
+    entityExposure = { status: "NOT_FOUND", entities: [], evidence: [] };
+  }
+
+  // --- Process risk factor exposure ---
+  let riskFactorExposure: Record<string, unknown>;
+  if (includeRiskFactors && riskResult.status === "fulfilled" && riskResult.value) {
+    const riskRaw = parseObjectJson(riskResult.value);
+    const riskMatches: Record<string, unknown>[] = Array.isArray(riskRaw.matches)
+      ? (riskRaw.matches as Record<string, unknown>[]).filter((m) => m && typeof m === "object")
+      : [];
+    const riskEvidence = riskMatches.slice(0, 5).map((m) => ({
+      excerpt: compactExcerpt(m.excerpt ?? m.context ?? m.contextText ?? "", 200),
+      section: String(m.sectionHeading ?? "Risk Factors"),
+    }));
+    riskFactorExposure = {
+      status: riskEvidence.length > 0 ? "FOUND" : "NOT_FOUND",
+      mentionCount: riskMatches.length,
+      evidence: riskEvidence,
+    };
+  } else {
+    riskFactorExposure = { status: "NOT_FOUND", mentionCount: 0, evidence: [] };
+  }
+
+  // --- Determine overallStatus ---
+  const nonRevenueFound = (opsEvidence.length > 0) ||
+    (Array.isArray(entityExposure.evidence) && (entityExposure.evidence as unknown[]).length > 0) ||
+    (Array.isArray(riskFactorExposure.evidence) && (riskFactorExposure.evidence as unknown[]).length > 0);
+
+  let overallStatus: string;
+  if (revStatus === "FOUND") {
+    overallStatus = "FOUND_REVENUE_EXPOSURE";
+  } else if (nonRevenueFound) {
+    overallStatus = "FOUND_NON_REVENUE_EXPOSURE";
+  } else if (revStatus === "NOT_DISCLOSED") {
+    overallStatus = "NOT_DISCLOSED";
+  } else {
+    overallStatus = "NOT_FOUND";
+  }
+
+  // Propagate any errors as warnings
+  if (revenueResult.status === "rejected") warnings.push({ code: "REVENUE_EXTRACTION_ERROR", message: String(revenueResult.reason), severity: "warning" });
+  if (operationalResult.status === "rejected") warnings.push({ code: "OPERATIONAL_SCAN_ERROR", message: String(operationalResult.reason), severity: "warning" });
+
+  return JSON.stringify({
+    ticker,
+    topic: topicLower,
+    filingType: idx.filingType ?? filingType,
+    filingDate,
+    accessionNumber,
+    documentUrl,
+    revenueExposure,
+    operationalExposure,
+    entityExposure,
+    riskFactorExposure,
+    overallStatus,
+    warnings,
+  });
+}
+
 export async function querySecFilingIndex(
   ticker: string,
   filingType = "10-K",
