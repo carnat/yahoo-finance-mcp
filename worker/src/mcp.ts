@@ -75,7 +75,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return {};
 
     case "tools/list":
-      return { tools: TOOLS };
+      return { tools: TOOLS.filter(t => !t.deprecated) };
 
     case "tools/call": {
       const p = params as { name?: string; arguments?: Record<string, unknown> };

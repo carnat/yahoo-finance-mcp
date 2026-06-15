@@ -143,13 +143,11 @@ def main() -> int:
 
     required_phase2 = {"list_sec_company_filings", "index_sec_filing", "get_sec_filing_index"}
     required_phase3 = {
-        "extract_geographic_revenue",
         "extract_segment_revenue",
         "extract_total_revenue",
-        "extract_revenue_exposure",
-        "extract_china_exposure",
         "extract_risk_factor_mentions",
         "extract_customer_concentration",
+        "extract_exposure",
     }
     missing_p2 = sorted(required_phase2 - names)
     missing_p3 = sorted(required_phase3 - names)
