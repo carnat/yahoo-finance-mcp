@@ -6746,8 +6746,10 @@ async function collectYahooEvents(
       // valid press-release tab items may still arrive as STORY/ARTICLE.
       const { item, warnings: w } = buildYfEventItem(ticker, n, retrievedAt, feedSource);
       if (!withinDateWindow(_str(item.publishedAt) || null, startDate, endDate, lookbackDays)) continue;
-      // BUG-08: drop articles that don't mention the ticker or company name
-      if (feed === "news") {
+      // BUG-08: drop articles that don't mention the ticker or company name.
+      // Only filter when nameTokens is populated; if company name lookup failed,
+      // fall back to permissive (no filtering) to avoid over-dropping.
+      if (feed === "news" && nameTokens.length > 0) {
         const hay = `${_str(item.title)} ${_str(item.evidenceText)}`;
         const tickerEsc = ticker.toUpperCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
         const tickerFound = new RegExp(`\\b${tickerEsc}\\b`).test(hay.toUpperCase());

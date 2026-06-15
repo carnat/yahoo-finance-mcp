@@ -80,16 +80,16 @@ TEST_CASES: list[TestCase] = [
         "get_yahoo_finance_news",
         {"ticker": "AAPL"},
         [
+            # get_yahoo_finance_news is a deprecated alias for get_company_news,
+            # so the response follows the getCompanyNews schema (not the old getNews schema).
             ("ticker", "AAPL"),
             ("items", NOT_NULL),
-            ("meta.source", "yahoo_finance"),
-            ("meta.itemCount", NOT_NULL),
+            ("meta.sourcesUsed", NOT_NULL),
             ("items.0.title", NOT_NULL),
-            ("items.0.publisher", NOT_NULL),
             ("items.0.url", NOT_NULL),
             ("items.0.publishedAt", NOT_NULL),
             ("items.0.retrievedAt", NOT_NULL),
-            ("items.0.sourceType", "yahoo_finance"),
+            ("items.0.sourceType", NOT_NULL),
         ],
     ),
     (
