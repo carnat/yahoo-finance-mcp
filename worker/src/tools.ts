@@ -957,6 +957,11 @@ export const TOOL_ALIASES: Record<string, string> = {
   search_filing_text: "search_sec_filing_text",
   get_filing_text_search: "search_sec_filing_text",
   get_filing_document: "get_sec_filing_section",
+
+  // superseded by extract_exposure
+  extract_geographic_revenue: "extract_exposure",
+  extract_china_exposure: "extract_exposure",
+  extract_revenue_exposure: "extract_exposure",
 };
 
 const CANONICAL_ADDITIONS: Tool[] = [
@@ -1901,24 +1906,23 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       const buildSha = getWorkerVar("BUILD_SHA") ?? "unknown";
       const buildDate = getWorkerVar("BUILD_DATE") ?? "unknown";
       const version = getWorkerVar("SERVER_VERSION") ?? "1.1.0";
-      const toolCount = TOOLS.length;
       const canonicalToolCount = TOOLS.filter((t) => t.deprecated !== true).length;
       const deprecatedAliasCount = TOOLS.filter((t) => t.deprecated === true).length;
       const manifestVersion = getWorkerVar("MANIFEST_VERSION") ?? "1";
       const deployedAt = getWorkerVar("DEPLOYED_AT") ?? new Date().toISOString();
-      const manifestHash = await computeHash(JSON.stringify(TOOLS.map(t => t.name)));
+      const manifestHash = await computeHash(JSON.stringify(TOOLS.filter(t => !t.deprecated).map(t => t.name)));
       return JSON.stringify({
         status: "ok",
         serverVersion: version,
         envelopeV2: getWorkerVar("MCP_ENVELOPE_V2") === "true",
         nodeVersion: "cloudflare-worker",
-        toolCount,
+        toolCount: canonicalToolCount,
         canonicalToolCount,
         deprecatedAliasCount,
         manifestVersion,
         manifestHash,
         schemaHash: manifestHash,
-        runtimeHash: await computeHash(version + String(toolCount)),
+        runtimeHash: await computeHash(version + String(canonicalToolCount)),
         buildSha,
         buildDate,
         deployedAt,
@@ -1929,15 +1933,14 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_manifest_diagnostics": {
       const buildSha = getWorkerVar("BUILD_SHA") ?? "unknown";
       const version = getWorkerVar("SERVER_VERSION") ?? "1.0.0";
-      const toolCount = TOOLS.length;
       const canonicalToolCount = TOOLS.filter((t) => t.deprecated !== true).length;
       const deprecatedAliasCount = TOOLS.filter((t) => t.deprecated === true).length;
       const manifestVersion = getWorkerVar("MANIFEST_VERSION") ?? null;
       const deployedAt = getWorkerVar("DEPLOYED_AT") ?? null;
-      const manifestHash = await computeHash(JSON.stringify(TOOLS.map(t => t.name)));
+      const manifestHash = await computeHash(JSON.stringify(TOOLS.filter(t => !t.deprecated).map(t => t.name)));
       const workerSchemaGeneratedAt = new Date().toISOString();
       return JSON.stringify({
-        toolCount,
+        toolCount: canonicalToolCount,
         manifestVersion,
         manifestHash,
         buildSha,
