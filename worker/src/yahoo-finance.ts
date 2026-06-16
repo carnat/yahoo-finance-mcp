@@ -9354,22 +9354,83 @@ function sentenceForTopic(text: string, topic: string): string | null {
   return null;
 }
 
+/** Resolve the EX-99.1 exhibit URL from an 8-K filing index page. */
+async function resolveEx991Url(cikInt: number, accessionNumber: string): Promise<string | null> {
+  const noDash = accessionNumber.replace(/-/g, "");
+  const indexUrl = `https://www.sec.gov/Archives/edgar/data/${cikInt}/${noDash}/${accessionNumber}-index.htm`;
+  const html = await edgarGetHtml(indexUrl, 100_000);
+  if (!html) return null;
+  // Match an EX-99.1 row in the filing index and capture its document link
+  const re = /EX-99\.1[^<]{0,300}<[^>]+href="(\/Archives\/edgar\/data\/[^"]+\.(?:htm|html))"/i;
+  const m = re.exec(html);
+  if (m) return `https://www.sec.gov${m[1]}`;
+  return null;
+}
+
+/** Parse inline XBRL (iXBRL) numeric tags from an HTML document.
+ *  Returns a Map of lowercased concept name → scaled numeric value. */
+function parseIxbrlConceptValues(html: string): Map<string, number> {
+  const result = new Map<string, number>();
+  // Match ix:nonFraction and ix:nonfraction (case-insensitive tag name)
+  const re = /<ix:non[Ff]raction\b([^>]*)>([\s\S]*?)<\/ix:non[Ff]raction>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const attrStr = m[1];
+    const rawText = m[2].replace(/,/g, "").replace(/\s/g, "").trim();
+    if (!rawText) continue;
+    const nameMx = /\bname="([^"]+)"/i.exec(attrStr);
+    if (!nameMx) continue;
+    const conceptKey = nameMx[1].toLowerCase();
+    let num = parseFloat(rawText);
+    if (!Number.isFinite(num)) continue;
+    const scaleMx = /\bscale="(-?\d+)"/i.exec(attrStr);
+    if (scaleMx) num *= Math.pow(10, parseInt(scaleMx[1], 10));
+    if (/\bsign="-"/i.test(attrStr)) num = -num;
+    // Keep first occurrence per concept (consolidated figure appears first)
+    if (!result.has(conceptKey)) result.set(conceptKey, num);
+  }
+  return result;
+}
+
 async function resolveLatestEarningsSecSource(ticker: string): Promise<Record<string, unknown> | null> {
-  const listed = parseObjectJson(await listSecCompanyFilings(ticker, "8-K", 10));
-  const filings = Array.isArray(listed.filings) ? listed.filings : [];
-  for (const row of filings) {
-    if (!row || typeof row !== "object") continue;
-    const filing = row as Record<string, unknown>;
-    const url = String(filing.documentUrl ?? "");
-    if (!url.startsWith("https://www.sec.gov/Archives/")) continue;
-    return {
-      sourceType: "sec_8k",
-      url,
-      filingDate: filing.filingDate ?? null,
-      acceptedAt: filing.acceptedAt ?? null,
-      accessionNumber: filing.accessionNumber ?? null,
-      confidence: "HIGH",
-    };
+  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
+  if (!cikPadded || !submissions) return null;
+
+  const cikInt = parseInt(cikPadded, 10);
+  const recent = ((submissions.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+  const forms = (recent.form as string[]) ?? [];
+  const dates = (recent.filingDate as string[]) ?? [];
+  const accessions = (recent.accessionNumber as string[]) ?? [];
+  const primaryDocs = (recent.primaryDocument as string[]) ?? [];
+  const acceptedDts = (recent.acceptanceDateTime as string[]) ?? [];
+  const items = (recent.items as string[]) ?? [];
+  const isInlineXBRL = (recent.isInlineXBRL as (number | boolean)[]) ?? [];
+
+  // Two passes: prefer item-2.02 (earnings) 8-Ks; fall back to any 8-K
+  for (const requireItem202 of [true, false]) {
+    let checked = 0;
+    for (let i = 0; i < forms.length && checked < 20; i++) {
+      if ((forms[i] ?? "").toUpperCase() !== "8-K") continue;
+      checked++;
+      const itemStr = String(items[i] ?? "");
+      if (requireItem202 && !itemStr.includes("2.02")) continue;
+      const acc = accessions[i] ?? "";
+      const primaryDoc = primaryDocs[i] ?? "";
+      if (!acc || !primaryDoc) continue;
+      const accClean = acc.replace(/-/g, "");
+      const documentUrl = `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accClean}/${primaryDoc}`;
+      return {
+        sourceType: "sec_8k",
+        url: documentUrl,
+        filingDate: dates[i] ?? null,
+        acceptedAt: acceptedDts[i] ?? null,
+        accessionNumber: acc,
+        cikPadded,
+        items: itemStr,
+        isInlineXBRL: !!(isInlineXBRL[i]),
+        confidence: "HIGH",
+      };
+    }
   }
   return null;
 }
@@ -9509,41 +9570,171 @@ export async function extractEarningsMetrics(
     : {};
   const srcUrl = String(src.url ?? "");
   const srcType = String(src.sourceType ?? "yahoo");
+  const srcAccession = String(src.accessionNumber ?? "");
+  const srcCikPadded = String(src.cikPadded ?? "");
   const publishedAt = toIsoUtc((src.filingDate as string | null) ?? (src.publishedAt as string | null) ?? null);
   const retrievedAt = nowIsoUtc();
 
-  const metricEvidence = (excerpt: string | null): Record<string, unknown> | null => excerpt ? {
-    url: srcUrl,
-    sourceType: srcType,
-    publishedAt,
-    retrievedAt,
-    excerpt,
-  } : null;
+  const hasHighConfidence = (): boolean =>
+    Object.values(metrics).some((m) => (m as Record<string, unknown>).confidence === "HIGH");
 
-  if (srcUrl && srcUrl.startsWith("https://www.sec.gov/Archives/")) {
-    const html = await edgarGetHtml(srcUrl, 5_000_000);
-    const text = _stripHtmlTagsIdx(_sanitizeFilingHtml(html ?? ""));
-    const rev = extractMetricNumber(text, [/(?:net sales|revenue(?:s)?)\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
-    const eps = extractMetricNumber(text, [/(?:diluted (?:earnings per share|eps)|eps \(diluted\))\D{0,20}\$?\s*([0-9]+(?:\.[0-9]+)?)/i]);
-    const gm = extractMetricNumber(text, [/gross margin\D{0,15}([0-9]{1,2}(?:\.[0-9]+)?)\s*%/i]);
-    const op = extractMetricNumber(text, [/operating income\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
-    const fcf = extractMetricNumber(text, [/free cash flow\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
-    const capex = extractMetricNumber(text, [/(?:capital expenditures|capex)\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
+  // ── Tier 1: XBRL CompanyConcept API (confirmed 10-Q data) ────────────────
+  // Fetches the most recent 10-Q fact for each concept. Covers periods where
+  // the 10-Q is already filed (~40 days after earnings).
+  const cikPadded = srcCikPadded || (await resolveCikForTicker(ticker)) || "";
+  if (cikPadded) {
+    const fetchQuarterlyFact = async (
+      primary: string,
+      fallback?: string,
+      unitType: "USD" | "USD/shares" = "USD",
+    ): Promise<{ value: number; end: string; concept: string } | null> => {
+      for (const concept of [primary, ...(fallback ? [fallback] : [])]) {
+        const d = await edgarGetJson(
+          `https://data.sec.gov/api/xbrl/companyconcept/CIK${cikPadded}/us-gaap/${concept}.json`,
+        );
+        const facts =
+          (((d?.units as Record<string, unknown>) ?? {})[unitType] as Record<string, unknown>[] | undefined) ?? [];
+        // Exclude segment-level (non-consolidated) facts; take most recent 10-Q
+        const quarterly = facts
+          .filter((f) => String(f.form ?? "").toUpperCase() === "10-Q" && !f.segment)
+          .sort((a, b) => String(b.end ?? "").localeCompare(String(a.end ?? "")));
+        const latest = quarterly[0];
+        if (latest?.val != null && typeof latest.val === "number") {
+          return { value: latest.val, end: String(latest.end ?? ""), concept };
+        }
+      }
+      return null;
+    };
 
-    if (rev.value != null) metrics.revenue = { value: rev.value, unit: "USD", rawValue: rev.rawValue, confidence: "HIGH", evidence: metricEvidence(rev.excerpt) };
-    if (eps.value != null) metrics.epsDiluted = { value: eps.value, unit: "USD/share", rawValue: eps.rawValue ? `$${eps.rawValue}` : null, confidence: "HIGH", evidence: metricEvidence(eps.excerpt) };
-    if (gm.value != null) {
-      const pct = Number(gm.value);
-      metrics.grossMargin = { valueRatio: Number((pct / 100).toFixed(6)), valuePct: pct, rawValue: gm.rawValue, confidence: "HIGH", evidence: metricEvidence(gm.excerpt) };
+    const [xRev, xEps, xGp, xOi, xCapex, xOcf] = await Promise.all([
+      fetchQuarterlyFact("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"),
+      fetchQuarterlyFact("EarningsPerShareDiluted", undefined, "USD/shares"),
+      fetchQuarterlyFact("GrossProfit"),
+      fetchQuarterlyFact("OperatingIncomeLoss"),
+      fetchQuarterlyFact("PaymentsToAcquirePropertyPlantAndEquipment", "CapitalExpenditures"),
+      fetchQuarterlyFact("NetCashProvidedByUsedInOperatingActivities"),
+    ]);
+
+    // Only apply Tier 1 if the most recent period is within 4 months (10-Q lag window)
+    const XBRL_MAX_AGE_MS = 120 * 24 * 60 * 60 * 1000;
+    const xbrlPeriodEnd = xRev?.end ?? xEps?.end ?? null;
+    const xbrlIsRecent = xbrlPeriodEnd
+      ? Date.now() - new Date(xbrlPeriodEnd).getTime() < XBRL_MAX_AGE_MS
+      : false;
+
+    if (xbrlIsRecent) {
+      const xbrlEv = (concept: string, end: string): Record<string, unknown> => ({
+        url: `https://data.sec.gov/api/xbrl/companyconcept/CIK${cikPadded}/us-gaap/${concept}.json`,
+        sourceType: "sec_xbrl_10q",
+        publishedAt: null,
+        retrievedAt,
+        excerpt: `XBRL ${concept} period ending ${end}`,
+      });
+      const setM = (key: string, val: Record<string, unknown>): void => {
+        metrics[key] = val;
+        if (val.evidence) evidence.push(val.evidence as Record<string, unknown>);
+      };
+      if (xRev) setM("revenue", { value: xRev.value, unit: "USD", rawValue: null, confidence: "HIGH", evidence: xbrlEv(xRev.concept, xRev.end) });
+      if (xEps) setM("epsDiluted", { value: xEps.value, unit: "USD/share", rawValue: null, confidence: "HIGH", evidence: xbrlEv(xEps.concept, xEps.end) });
+      if (xGp && xRev && xRev.value !== 0) {
+        const pct = Number(((xGp.value / xRev.value) * 100).toFixed(2));
+        setM("grossMargin", { valueRatio: Number((xGp.value / xRev.value).toFixed(6)), valuePct: pct, rawValue: null, confidence: "HIGH", evidence: xbrlEv(xGp.concept, xGp.end) });
+      }
+      if (xOi) setM("operatingIncome", { value: xOi.value, unit: "USD", rawValue: null, confidence: "HIGH", evidence: xbrlEv(xOi.concept, xOi.end) });
+      if (xCapex) setM("capex", { value: Math.abs(xCapex.value), unit: "USD", rawValue: null, confidence: "HIGH", evidence: xbrlEv(xCapex.concept, xCapex.end) });
+      if (xOcf && xCapex) setM("freeCashFlow", { value: xOcf.value - Math.abs(xCapex.value), unit: "USD", rawValue: null, confidence: "HIGH", evidence: xbrlEv(xOcf.concept, xOcf.end) });
     }
-    if (op.value != null) metrics.operatingIncome = { value: op.value, unit: "USD", rawValue: op.rawValue, confidence: "HIGH", evidence: metricEvidence(op.excerpt) };
-    if (fcf.value != null) metrics.freeCashFlow = { value: fcf.value, unit: "USD", rawValue: fcf.rawValue, confidence: "HIGH", evidence: metricEvidence(fcf.excerpt) };
-    if (capex.value != null) metrics.capex = { value: capex.value, unit: "USD", rawValue: capex.rawValue, confidence: "HIGH", evidence: metricEvidence(capex.excerpt) };
-    for (const key of ["revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex"]) {
-      const v = metrics[key] as Record<string, unknown>;
-      if (v.confidence === "HIGH" && v.evidence && typeof v.evidence === "object") evidence.push(v.evidence as Record<string, unknown>);
+  }
+
+  // ── Tier 2 + 3: SEC 8-K press release (iXBRL → regex fallback) ───────────
+  if (!hasHighConfidence() && srcUrl.startsWith("https://www.sec.gov/Archives/")) {
+    const cikInt = parseInt(cikPadded || "0", 10);
+
+    // Resolve EX-99.1 exhibit URL — the actual earnings press release document.
+    // Modern 8-Ks put financial details in EX-99.1, not in the primary 8-K wrapper.
+    let contentUrl = srcUrl;
+    if (srcAccession && cikInt) {
+      const ex991 = await resolveEx991Url(cikInt, srcAccession);
+      if (ex991) contentUrl = ex991;
     }
-  } else {
+    const contentSourceType = contentUrl !== srcUrl ? "sec_8k_ex991" : "sec_8k";
+
+    const html = await edgarGetHtml(contentUrl, 5_000_000);
+    if (html) {
+      const contentEv = (excerpt: string | null): Record<string, unknown> | null =>
+        excerpt ? { url: contentUrl, sourceType: contentSourceType, publishedAt, retrievedAt, excerpt } : null;
+
+      // Tier 2: iXBRL — structured data embedded in modern press releases
+      const conceptValues = parseIxbrlConceptValues(html);
+      if (conceptValues.size > 0) {
+        const getConcept = (...names: string[]): number | undefined => {
+          for (const n of names) {
+            const v = conceptValues.get(n);
+            if (v != null) return v;
+          }
+          return undefined;
+        };
+        const ixEv = (label: string): Record<string, unknown> => ({
+          url: contentUrl,
+          sourceType: "sec_8k_ixbrl",
+          publishedAt,
+          retrievedAt,
+          excerpt: `iXBRL: ${label}`,
+        });
+        const setIx = (key: string, val: Record<string, unknown>): void => {
+          metrics[key] = val;
+          evidence.push(val.evidence as Record<string, unknown>);
+        };
+
+        const ixRev = getConcept(
+          "us-gaap:revenuesfromcontractwithcustomerexcludingassessedtax",
+          "us-gaap:revenues",
+        );
+        const ixEps = getConcept("us-gaap:earningspersharediluted");
+        const ixGp = getConcept("us-gaap:grossprofit");
+        const ixOi = getConcept("us-gaap:operatingincomeloss");
+        const ixCapex = getConcept(
+          "us-gaap:paymentstoacquirepropertyplantandequipment",
+          "us-gaap:capitalexpenditures",
+        );
+        const ixOcf = getConcept("us-gaap:netcashprovidedbyusedinoperatingactivities");
+
+        if (ixRev != null) setIx("revenue", { value: ixRev, unit: "USD", rawValue: null, confidence: "HIGH", evidence: ixEv("Revenues") });
+        if (ixEps != null) setIx("epsDiluted", { value: ixEps, unit: "USD/share", rawValue: null, confidence: "HIGH", evidence: ixEv("EarningsPerShareDiluted") });
+        const gmRev = ixRev ?? (typeof (metrics.revenue as Record<string, unknown>).value === "number"
+          ? (metrics.revenue as Record<string, unknown>).value as number : null);
+        if (ixGp != null && gmRev != null && gmRev !== 0) {
+          const pct = Number(((ixGp / gmRev) * 100).toFixed(2));
+          setIx("grossMargin", { valueRatio: Number((ixGp / gmRev).toFixed(6)), valuePct: pct, rawValue: null, confidence: "HIGH", evidence: ixEv("GrossProfit") });
+        }
+        if (ixOi != null) setIx("operatingIncome", { value: ixOi, unit: "USD", rawValue: null, confidence: "HIGH", evidence: ixEv("OperatingIncomeLoss") });
+        if (ixCapex != null) setIx("capex", { value: Math.abs(ixCapex), unit: "USD", rawValue: null, confidence: "HIGH", evidence: ixEv("CapEx") });
+        if (ixOcf != null && ixCapex != null) setIx("freeCashFlow", { value: ixOcf - Math.abs(ixCapex), unit: "USD", rawValue: null, confidence: "HIGH", evidence: ixEv("FreeCashFlow") });
+      }
+
+      // Tier 3 (regex fallback): plain-text extraction for non-iXBRL press releases
+      if (!hasHighConfidence()) {
+        const text = _stripHtmlTagsIdx(_sanitizeFilingHtml(html));
+        const rev = extractMetricNumber(text, [/(?:net sales|revenue(?:s)?)\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
+        const eps = extractMetricNumber(text, [/(?:diluted (?:earnings per share|eps)|eps \(diluted\))\D{0,20}\$?\s*([0-9]+(?:\.[0-9]+)?)/i]);
+        const gm = extractMetricNumber(text, [/gross margin\D{0,15}([0-9]{1,2}(?:\.[0-9]+)?)\s*%/i]);
+        const op = extractMetricNumber(text, [/operating income\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
+        const fcf = extractMetricNumber(text, [/free cash flow\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
+        const capex = extractMetricNumber(text, [/(?:capital expenditures|capex)\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
+
+        if (rev.value != null) { metrics.revenue = { value: rev.value, unit: "USD", rawValue: rev.rawValue, confidence: "HIGH", evidence: contentEv(rev.excerpt) }; evidence.push(metrics.revenue as Record<string, unknown>); }
+        if (eps.value != null) { metrics.epsDiluted = { value: eps.value, unit: "USD/share", rawValue: eps.rawValue ? `$${eps.rawValue}` : null, confidence: "HIGH", evidence: contentEv(eps.excerpt) }; evidence.push(metrics.epsDiluted as Record<string, unknown>); }
+        if (gm.value != null) {
+          const pct = Number(gm.value);
+          metrics.grossMargin = { valueRatio: Number((pct / 100).toFixed(6)), valuePct: pct, rawValue: gm.rawValue, confidence: "HIGH", evidence: contentEv(gm.excerpt) };
+          evidence.push(metrics.grossMargin as Record<string, unknown>);
+        }
+        if (op.value != null) { metrics.operatingIncome = { value: op.value, unit: "USD", rawValue: op.rawValue, confidence: "HIGH", evidence: contentEv(op.excerpt) }; evidence.push(metrics.operatingIncome as Record<string, unknown>); }
+        if (fcf.value != null) { metrics.freeCashFlow = { value: fcf.value, unit: "USD", rawValue: fcf.rawValue, confidence: "HIGH", evidence: contentEv(fcf.excerpt) }; evidence.push(metrics.freeCashFlow as Record<string, unknown>); }
+        if (capex.value != null) { metrics.capex = { value: capex.value, unit: "USD", rawValue: capex.rawValue, confidence: "HIGH", evidence: contentEv(capex.excerpt) }; evidence.push(metrics.capex as Record<string, unknown>); }
+      }
+    }
+  } else if (!hasHighConfidence() && !srcUrl.startsWith("https://www.sec.gov/Archives/")) {
     warnings.push({ code: "PUBLIC_RELEASE_NOT_FOUND", message: "No SEC 8-K earnings release source available" });
   }
 
@@ -9678,16 +9869,30 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
   const rowPeriod = (row: Record<string, unknown> | null): string | null => {
     if (!row) return null;
     for (const key of ["reportedPeriod", "period", "quarter", "index"]) {
-      const value = row[key];
-      if (value != null && String(value).trim()) return String(value);
+      let value: unknown = row[key];
+      if (value == null) continue;
+      // Unwrap Yahoo Finance {raw, fmt} nested objects (e.g. quarter: {raw: 1617148800, fmt: "3/31/2021"})
+      if (typeof value === "object" && value !== null) {
+        const obj = value as Record<string, unknown>;
+        value = obj.fmt ?? obj.raw ?? obj.label ?? null;
+        if (value == null) continue;
+      }
+      const str = String(value).trim();
+      if (str) return str;
     }
     return null;
   };
   const rowDate = (row: Record<string, unknown> | null): string | null => {
     if (!row) return null;
     for (const key of ["reportedDate", "quarter", "date", "earningsDate", "index"]) {
-      const value = row[key];
+      let value: unknown = row[key];
       if (value == null) continue;
+      // Unwrap Yahoo Finance {raw, fmt} nested objects; prefer raw (often a Unix timestamp number)
+      if (typeof value === "object" && value !== null) {
+        const obj = value as Record<string, unknown>;
+        value = obj.raw ?? obj.fmt ?? null;
+        if (value == null) continue;
+      }
       if (typeof value === "number" && Number.isFinite(value)) {
         const ts = value > 1_000_000_000_000 ? value : value * 1000;
         return new Date(ts).toISOString().slice(0, 10);
