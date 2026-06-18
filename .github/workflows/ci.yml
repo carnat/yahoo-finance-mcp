@@ -99,6 +99,9 @@ jobs:
       - name: Worker grouped-mode routing tests
         run: python scripts/test_worker_grouped_mode.py
 
+      - name: Worker SEC reliability tests
+        run: python scripts/test_sec_reliability_worker.py
+
       # ── 4. Infrastructure: cache layer ────────────────────────────────────
       - name: Cache layer tests
         run: python scripts/test_cache_layer.py

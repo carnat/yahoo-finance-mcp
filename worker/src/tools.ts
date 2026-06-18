@@ -975,10 +975,10 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "list_sec_company_filings", description: "List SEC filings for a company from EDGAR submissions. Returns cik, filingType, filingDate, acceptedAt, accessionNumber, primaryDocument, documentUrl, and meta.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, form_type: { type: "string", default: "10-K" }, limit: { type: "number", default: 5 }, max_filings: { type: "number", default: 5 } }, required: ["ticker"] } },
   { name: "get_sec_filing_outline", description: "Get SEC filing outline.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, document_url: { type: "string" } }, required: ["ticker"] } },
   { name: "get_sec_filing_section", description: "Get SEC filing section text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, selector: { type: "object" }, section_name: { type: "string" }, document_url: { type: "string" }, context_chars: { type: "number", default: 3000 } }, required: ["ticker"] } },
-  { name: "list_sec_filing_tables", description: "List SEC filing tables.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, document_url: { type: "string" } }, required: ["ticker"] } },
+  { name: "list_sec_filing_tables", description: "List SEC filing tables.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, document_url: { type: "string" }, offset: { type: "number", default: 0 }, limit: { type: "number", default: 50 } }, required: ["ticker"] } },
   { name: "get_sec_filing_table", description: "Get SEC filing table.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, document_url: { type: "string" }, table_index: { type: "number" }, max_rows: { type: "number", default: 30 } }, required: ["ticker", "table_index"] } },
   { name: "extract_sec_filing_fact", description: "Extract SEC filing fact.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, fact: { type: "string" }, fact_name: { type: "string" }, fact_type: { type: "string" }, region: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, document_url: { type: "string" }, accession_number: { type: "string" } }, required: ["ticker"] } },
-  { name: "search_sec_filing_text", description: "Search SEC filing text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, search_terms: { type: "array", items: { type: "string" } }, search_query: { type: "string" }, section_hint: { type: "string" }, selector: { type: "object" }, filing_type: { type: "string", default: "10-K" }, accession_number: { type: "string" }, context_chars: { type: "number", default: 1500 }, return_tables: { type: "boolean", default: true } }, required: ["ticker"] } },
+  { name: "search_sec_filing_text", description: "Search SEC filing text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, search_terms: { type: "array", items: { type: "string" } }, search_query: { type: "string" }, section_hint: { type: "string" }, selector: { type: "object" }, filing_type: { type: "string", default: "10-K" }, accession_number: { type: "string" }, document_url: { type: "string" }, context_chars: { type: "number", default: 1500 }, return_tables: { type: "boolean", default: true } }, required: ["ticker"] } },
   { name: "index_sec_filing", description: "Build a deterministic section/table index for an SEC filing. Identifies headings, tables, row labels, and units. period is reserved for future multi-period support; currently only 'latest' is supported unless accession_number is provided.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest", description: "Reserved. Only 'latest' supported currently." }, accession_number: { type: "string" } }, required: ["ticker"] } },
   { name: "get_sec_filing_index", description: "Get the pre-built section/table index for an SEC filing. Returns cached index when available; builds and caches on first call. period is reserved for future multi-period support; currently only 'latest' is supported unless accession_number is provided.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest", description: "Reserved. Only 'latest' supported currently." }, accession_number: { type: "string" } }, required: ["ticker"] } },
   { name: "list_sec_material_filings", description: "List latest material SEC filings for a ticker, filtering out noise (Form 4, 144, SC 13G, etc.). Returns only significant filings (10-K, 10-Q, 8-K, S-1, 424B, DEF 14A, 20-F, 6-K by default).", inputSchema: { type: "object", properties: { ticker: { type: "string" }, forms: { type: "array", items: { type: "string" }, default: ["10-K", "10-Q", "8-K", "S-1", "424B", "DEF 14A", "20-F", "6-K"] }, limit: { type: "number", default: 5 } }, required: ["ticker"] } },
@@ -1505,10 +1505,42 @@ async function resolveSecDocumentUrl(
   filingType: string,
   limit: number
 ): Promise<string | null> {
-  const listed = JSON.parse(await listSecFilings(ticker, filingType, limit)) as Record<string, unknown>;
+  const listed = JSON.parse(await listSecCompanyFilings(ticker, filingType, limit)) as Record<string, unknown>;
   const filings = (listed.filings as Record<string, unknown>[]) ?? [];
   const first = filings[0] ?? {};
-  return (first.primaryDocumentUrl as string | null) ?? null;
+  return (first.documentUrl as string | null) ?? (first.primaryDocumentUrl as string | null) ?? null;
+}
+
+function secIndexTablesPayload(indexPayload: Record<string, unknown>, offset: number, limit: number): string {
+  if (indexPayload.ok === false || indexPayload.error) return JSON.stringify(indexPayload);
+  const safeOffset = Math.max(0, Math.trunc(offset));
+  const safeLimit = Math.min(100, Math.max(1, Math.trunc(limit || 50)));
+  const index = indexPayload.index && typeof indexPayload.index === "object"
+    ? indexPayload.index as Record<string, unknown>
+    : {};
+  const allTables = Array.isArray(index.tables) ? index.tables as Record<string, unknown>[] : [];
+  const tables = allTables.slice(safeOffset, safeOffset + safeLimit).map((table, i) => ({
+    tableIndex: table.tableId ?? safeOffset + i,
+    title: table.title ?? null,
+    headers: Array.isArray(table.headers) ? table.headers : [],
+    rowLabels: Array.isArray(table.rowLabels) ? table.rowLabels : [],
+    sectionId: table.sectionId ?? null,
+    unitScale: table.unitScale ?? "unknown",
+    confidence: table.confidence ?? "LOW",
+  }));
+  return JSON.stringify({
+    ticker: indexPayload.ticker,
+    filingType: indexPayload.filingType,
+    filingDate: indexPayload.filingDate ?? null,
+    accessionNumber: indexPayload.accessionNumber ?? null,
+    documentUrl: indexPayload.documentUrl ?? null,
+    tableCount: allTables.length,
+    returnedCount: tables.length,
+    offset: safeOffset,
+    limit: safeLimit,
+    hasMore: safeOffset + tables.length < allTables.length,
+    tables,
+  });
 }
 
 export async function callTool(name: string, args: Record<string, unknown>): Promise<string> {
@@ -1754,17 +1786,21 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "list_sec_filing_tables": {
       const ticker = str(args.ticker);
       const filingType = str(args.filing_type ?? args.form_type, "10-K");
-      const docUrl = args.document_url != null
-        ? str(args.document_url)
-        : await resolveSecDocumentUrl(ticker, filingType, 1);
-      return listFilingTables(ticker, str(docUrl));
+      const offset = num(args.offset, 0);
+      const limit = num(args.limit, 50);
+      if (args.document_url != null) {
+        return listFilingTables(ticker, str(args.document_url), offset, limit);
+      }
+      const idx = JSON.parse(await getSecFilingIndex(ticker, filingType, str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null)) as Record<string, unknown>;
+      return secIndexTablesPayload(idx, offset, limit);
     }
     case "get_sec_filing_table": {
       const ticker = str(args.ticker);
       const filingType = str(args.filing_type ?? args.form_type, "10-K");
       const docUrl = args.document_url != null
         ? str(args.document_url)
-        : await resolveSecDocumentUrl(ticker, filingType, 1);
+        : (JSON.parse(await getSecFilingIndex(ticker, filingType, str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null)) as Record<string, unknown>).documentUrl;
+      if (!docUrl) return JSON.stringify({ ok: false, error: { code: "FILING_NOT_FOUND_TRY_OTHER_TYPE", message: `No ${filingType} filing document found for '${ticker}'` } });
       return getFilingTable(ticker, str(docUrl), num(args.table_index, 0), num(args.max_rows, 30));
     }
     case "search_sec_filing_text":
@@ -1776,6 +1812,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         args.accession_number != null ? str(args.accession_number) : null,
         num(args.context_chars, 1500),
         args.return_tables !== false,
+        args.document_url != null ? str(args.document_url) : null,
       );
     case "index_sec_filing":
       return indexSecFiling(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null);
