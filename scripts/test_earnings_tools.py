@@ -85,7 +85,7 @@ def _parse(raw: str) -> dict:
 
 class TestGetLatestEarningsRelease(unittest.TestCase):
     def test_not_found_stable_shape(self):
-        with patch("server._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked:
             mocked.return_value = {
                 "ticker": "AAPL",
                 "eventType": "earnings_release",
@@ -101,7 +101,7 @@ class TestGetLatestEarningsRelease(unittest.TestCase):
             self.assertIn("warnings", data)
 
     def test_found_has_url_and_timestamps(self):
-        with patch("server._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked:
             mocked.return_value = {
                 "ticker": "AAPL",
                 "eventType": "earnings_release",
@@ -131,8 +131,8 @@ class TestIndexEarningsRelease(unittest.TestCase):
         <h2>Financial Highlights</h2>
         <table><tr><th>Three Months Ended</th></tr><tr><td>Net sales</td><td>10,000</td></tr></table>
         """
-        with patch("server._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked_release, patch(
-            "server._edgar_get_html", new_callable=AsyncMock
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked_release, patch(
+            "yfmcp.tools.earnings._edgar_get_html", new_callable=AsyncMock
         ) as mocked_html:
             mocked_release.return_value = {
                 "ticker": "AAPL",
@@ -159,8 +159,8 @@ class TestIndexEarningsRelease(unittest.TestCase):
 class TestExtractEarningsMetrics(unittest.TestCase):
     def test_stable_keys_and_evidence(self):
         html = "Revenue was $123.0 billion. Diluted earnings per share $2.31. Gross margin 47.8%."
-        with patch("server._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked_release, patch(
-            "server._edgar_get_html", new_callable=AsyncMock
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked_release, patch(
+            "yfmcp.tools.earnings._edgar_get_html", new_callable=AsyncMock
         ) as mocked_html:
             mocked_release.return_value = {
                 "ticker": "AAPL",
@@ -182,8 +182,8 @@ class TestExtractEarningsMetrics(unittest.TestCase):
 
 class TestExtractGuidance(unittest.TestCase):
     def test_not_disclosed_when_absent(self):
-        with patch("server._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked_release, patch(
-            "server._edgar_get_html", new_callable=AsyncMock
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked_release, patch(
+            "yfmcp.tools.earnings._edgar_get_html", new_callable=AsyncMock
         ) as mocked_html:
             mocked_release.return_value = {
                 "ticker": "AAPL",
@@ -196,7 +196,7 @@ class TestExtractGuidance(unittest.TestCase):
             self.assertEqual(data["guidance"]["revenue"]["status"], "NOT_DISCLOSED")
 
     def test_does_not_infer_from_estimates(self):
-        with patch("server._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked_release:
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked_release:
             mocked_release.return_value = {
                 "ticker": "AAPL",
                 "period": "latest",
@@ -210,8 +210,8 @@ class TestExtractGuidance(unittest.TestCase):
 class TestExtractManagementCommentary(unittest.TestCase):
     def test_topic_summary_has_evidence_and_short_excerpt(self):
         html = "<p>Management said demand in China improved sequentially.</p><p>AI features expanded in iPhone.</p>"
-        with patch("server._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked_release, patch(
-            "server._edgar_get_html", new_callable=AsyncMock
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked_release, patch(
+            "yfmcp.tools.earnings._edgar_get_html", new_callable=AsyncMock
         ) as mocked_html:
             mocked_release.return_value = {
                 "ticker": "AAPL",
@@ -241,7 +241,7 @@ class TestCompareActualVsEstimate(unittest.TestCase):
                 {"period": "FY2026 Q2", "quarter": "2026-06-30", "epsActual": 2.31, "epsEstimate": 2.25},
             ],
         }
-        with patch("server.extract_earnings_metrics", new_callable=AsyncMock) as mocked_metrics, patch(
+        with patch("yfmcp.tools.earnings.extract_earnings_metrics", new_callable=AsyncMock) as mocked_metrics, patch(
             "server.get_earnings_analysis", new_callable=AsyncMock
         ) as mocked_ea:
             mocked_metrics.return_value = json.dumps(metrics_payload)
@@ -255,7 +255,7 @@ class TestCompareActualVsEstimate(unittest.TestCase):
             self.assertAlmostEqual(data["surprise"]["epsSurprisePct"], 2.67, places=2)
 
     def test_no_reported_quarter_warning(self):
-        with patch("server.extract_earnings_metrics", new_callable=AsyncMock) as mocked_metrics, patch(
+        with patch("yfmcp.tools.earnings.extract_earnings_metrics", new_callable=AsyncMock) as mocked_metrics, patch(
             "server.get_earnings_analysis", new_callable=AsyncMock
         ) as mocked_ea:
             mocked_metrics.return_value = json.dumps({"period": None, "metrics": {"revenue": {"value": 100.0}, "epsDiluted": {"value": None}}})
@@ -269,8 +269,12 @@ class TestCompareActualVsEstimate(unittest.TestCase):
 class TestPublicWording(unittest.TestCase):
     def test_no_private_terms_in_new_tool_descriptions(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        server_text = open(os.path.join(root, "server.py"), encoding="utf-8").read()
-        tools_text = open(os.path.join(root, "worker", "src", "tools.ts"), encoding="utf-8").read()
+        with open(os.path.join(root, "server.py"), encoding="utf-8") as fh:
+            server_text = fh.read()
+        with open(os.path.join(root, "yfmcp", "tools", "earnings.py"), encoding="utf-8") as fh:
+            earnings_text = fh.read()
+        with open(os.path.join(root, "worker", "src", "tools.ts"), encoding="utf-8") as fh:
+            tools_text = fh.read()
         private_terms = ("Commander", "portfolio state", "doctrine", "DC-", "TPS", "PCCE")
         names = [
             "get_latest_earnings_release",
@@ -285,7 +289,7 @@ class TestPublicWording(unittest.TestCase):
             self.assertGreaterEqual(idx, 0)
             return text[max(0, idx - span): idx + span]
         for name in names:
-            s_win = _window(server_text, f'name="{name}"')
+            s_win = _window(server_text + "\n" + earnings_text, f'name="{name}"')
             t_win = _window(tools_text, f'name: "{name}"')
             for term in private_terms:
                 self.assertNotRegex(s_win, re.escape(term))

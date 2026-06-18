@@ -9721,17 +9721,21 @@ export async function extractEarningsMetrics(
         const op = extractMetricNumber(text, [/operating income\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
         const fcf = extractMetricNumber(text, [/free cash flow\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
         const capex = extractMetricNumber(text, [/(?:capital expenditures|capex)\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
+        const setFallbackMetric = (key: string, val: Record<string, unknown>): void => {
+          metrics[key] = val;
+          const ev = val.evidence;
+          if (ev && typeof ev === "object") evidence.push(ev as Record<string, unknown>);
+        };
 
-        if (rev.value != null) { metrics.revenue = { value: rev.value, unit: "USD", rawValue: rev.rawValue, confidence: "HIGH", evidence: contentEv(rev.excerpt) }; evidence.push(metrics.revenue as Record<string, unknown>); }
-        if (eps.value != null) { metrics.epsDiluted = { value: eps.value, unit: "USD/share", rawValue: eps.rawValue ? `$${eps.rawValue}` : null, confidence: "HIGH", evidence: contentEv(eps.excerpt) }; evidence.push(metrics.epsDiluted as Record<string, unknown>); }
+        if (rev.value != null) setFallbackMetric("revenue", { value: rev.value, unit: "USD", rawValue: rev.rawValue, confidence: "HIGH", evidence: contentEv(rev.excerpt) });
+        if (eps.value != null) setFallbackMetric("epsDiluted", { value: eps.value, unit: "USD/share", rawValue: eps.rawValue ? `$${eps.rawValue}` : null, confidence: "HIGH", evidence: contentEv(eps.excerpt) });
         if (gm.value != null) {
           const pct = Number(gm.value);
-          metrics.grossMargin = { valueRatio: Number((pct / 100).toFixed(6)), valuePct: pct, rawValue: gm.rawValue, confidence: "HIGH", evidence: contentEv(gm.excerpt) };
-          evidence.push(metrics.grossMargin as Record<string, unknown>);
+          setFallbackMetric("grossMargin", { valueRatio: Number((pct / 100).toFixed(6)), valuePct: pct, rawValue: gm.rawValue, confidence: "HIGH", evidence: contentEv(gm.excerpt) });
         }
-        if (op.value != null) { metrics.operatingIncome = { value: op.value, unit: "USD", rawValue: op.rawValue, confidence: "HIGH", evidence: contentEv(op.excerpt) }; evidence.push(metrics.operatingIncome as Record<string, unknown>); }
-        if (fcf.value != null) { metrics.freeCashFlow = { value: fcf.value, unit: "USD", rawValue: fcf.rawValue, confidence: "HIGH", evidence: contentEv(fcf.excerpt) }; evidence.push(metrics.freeCashFlow as Record<string, unknown>); }
-        if (capex.value != null) { metrics.capex = { value: capex.value, unit: "USD", rawValue: capex.rawValue, confidence: "HIGH", evidence: contentEv(capex.excerpt) }; evidence.push(metrics.capex as Record<string, unknown>); }
+        if (op.value != null) setFallbackMetric("operatingIncome", { value: op.value, unit: "USD", rawValue: op.rawValue, confidence: "HIGH", evidence: contentEv(op.excerpt) });
+        if (fcf.value != null) setFallbackMetric("freeCashFlow", { value: fcf.value, unit: "USD", rawValue: fcf.rawValue, confidence: "HIGH", evidence: contentEv(fcf.excerpt) });
+        if (capex.value != null) setFallbackMetric("capex", { value: capex.value, unit: "USD", rawValue: capex.rawValue, confidence: "HIGH", evidence: contentEv(capex.excerpt) });
       }
     }
   } else if (!hasHighConfidence() && !srcUrl.startsWith("https://www.sec.gov/Archives/")) {
