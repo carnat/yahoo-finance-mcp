@@ -8,11 +8,13 @@ preventing accidental desync when new tools are added.
 
 import re
 import sys
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SERVER_PY = ROOT / "server.py"
 TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
+TOOL_CATALOG = ROOT / "tool_catalog.json"
 
 EXPECTED_CANONICAL = {
     "get_market_quote",
@@ -75,11 +77,15 @@ EXPECTED_CANONICAL = {
     "health_check",
 }
 
-EXPECTED_ALIASES = {
+PRIVATE_ALIASES = {
     "get_tps_inputs",
     "get_eqf_bracket",
     "get_adv_gate",
     "get_dc134_options_scan",
+    "get_china_revenue_pct",
+    "get_geographic_revenue",
+    "get_filing_text_search",
+    "get_filing_document",
 }
 
 
@@ -167,14 +173,32 @@ def main():
             print("  Missing in worker/src/tools.ts:", ", ".join(missing_ts_canonical), file=sys.stderr)
         return 1
 
-    missing_py_alias = sorted(EXPECTED_ALIASES - py_tools)
-    missing_ts_alias = sorted(EXPECTED_ALIASES - ts_tools)
-    if missing_py_alias or missing_ts_alias:
-        print("ERROR: Missing expected backward-compatible alias tool(s).", file=sys.stderr)
-        if missing_py_alias:
-            print("  Missing in server.py:", ", ".join(missing_py_alias), file=sys.stderr)
-        if missing_ts_alias:
-            print("  Missing in worker/src/tools.ts:", ", ".join(missing_ts_alias), file=sys.stderr)
+    private_py = sorted(PRIVATE_ALIASES & py_tools)
+    private_ts = sorted(PRIVATE_ALIASES & ts_tools)
+    if private_py or private_ts:
+        print("ERROR: Private deprecated aliases should not be registered.", file=sys.stderr)
+        if private_py:
+            print("  Still registered in server.py:", ", ".join(private_py), file=sys.stderr)
+        if private_ts:
+            print("  Still registered in worker/src/tools.ts:", ", ".join(private_ts), file=sys.stderr)
+        return 1
+
+    catalog = json.loads(TOOL_CATALOG.read_text(encoding="utf-8"))
+    groups = catalog.get("groups", {})
+    if not isinstance(groups, dict) or len(groups) != 10:
+        print("ERROR: tool_catalog.json must define exactly 10 grouped tools", file=sys.stderr)
+        return 1
+    grouped_actions = {
+        action
+        for group in groups.values()
+        for action in (group.get("actions") or {}).keys()
+        if isinstance(group, dict)
+    }
+    missing_group_actions = sorted(grouped_actions - py_tools)
+    if missing_group_actions:
+        print("ERROR: Grouped catalog action(s) missing from Python tools:", file=sys.stderr)
+        for name in missing_group_actions:
+            print(f"    - {name}", file=sys.stderr)
         return 1
 
     ok, msg = validate_alias_targets(ts_aliases, ts_tools, "worker")

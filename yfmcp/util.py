@@ -10,6 +10,19 @@ import json
 import re as _re
 
 
+def _safe_json_loads(payload: str) -> dict:
+    try:
+        data = json.loads(payload)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _compact_excerpt(text: object, max_len: int = 240) -> str:
+    value = _re.sub(r"\s+", " ", str(text or "")).strip()
+    return value if len(value) <= max_len else value[:max_len].rstrip() + "..."
+
+
 # ---------------------------------------------------------------------------
 # Async retry helper
 # ---------------------------------------------------------------------------

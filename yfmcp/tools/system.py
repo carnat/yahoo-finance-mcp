@@ -18,35 +18,30 @@ from yfmcp.envelope import BUILD_DATE, SERVER_VERSION
 from yfmcp.schemas import _MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA, _SIMPLE_OUTPUT_SCHEMA
 
 
+def _tool_counts() -> tuple[int, int, int, list[str]]:
+    try:
+        names = sorted(yfinance_server._tool_manager._tools.keys())
+    except Exception:
+        names = sorted(TOOL_ALIASES.keys())
+    deprecated_alias_count = len([name for name in names if name in TOOL_ALIASES])
+    canonical_tool_count = max(len(names) - deprecated_alias_count, 0)
+    canonical_names = [name for name in names if name not in TOOL_ALIASES]
+    return len(names), canonical_tool_count, deprecated_alias_count, canonical_names
+
+
 @yfinance_server.tool(name="health_check", output_schema=_SIMPLE_OUTPUT_SCHEMA, description="Return runtime health metadata.")
 async def health_check() -> str:
-    try:
-        tool_count = len(yfinance_server._tool_manager._tools)
-    except Exception:
-        tool_count = len(TOOL_ALIASES) + 50
-    tool_names = sorted(TOOL_ALIASES.keys())
-    manifest_hash = hashlib.sha256(json.dumps(tool_names).encode("utf-8")).hexdigest()[:16]
+    tool_count, canonical_tool_count, deprecated_alias_count, canonical_names = _tool_counts()
+    manifest_hash = hashlib.sha256(json.dumps(canonical_names).encode("utf-8")).hexdigest()[:16]
     manifest_version = os.environ.get("MANIFEST_VERSION", "1")
     deployed_at = os.environ.get("DEPLOYED_AT", datetime.datetime.utcnow().isoformat() + "Z")
-    runtime_hash = hashlib.sha256((SERVER_VERSION + str(tool_count)).encode("utf-8")).hexdigest()[:16]
-    deprecated_alias_count = len(
-        {
-            "get_tps_inputs",
-            "get_eqf_bracket",
-            "get_adv_gate",
-            "get_dc134_options_scan",
-            "get_china_revenue_pct",
-            "get_geographic_revenue",
-            "get_filing_text_search",
-            "get_filing_document",
-        }
-    )
+    runtime_hash = hashlib.sha256((SERVER_VERSION + str(canonical_tool_count)).encode("utf-8")).hexdigest()[:16]
     return json.dumps({
         "serverVersion": SERVER_VERSION,
         "buildDate": BUILD_DATE,
         "buildSha": os.environ.get("BUILD_SHA", "unknown"),
         "toolCount": tool_count,
-        "canonicalToolCount": max(tool_count - deprecated_alias_count, 0),
+        "canonicalToolCount": canonical_tool_count,
         "deprecatedAliasCount": deprecated_alias_count,
         "manifestVersion": manifest_version,
         "manifestHash": manifest_hash,
@@ -60,26 +55,10 @@ async def health_check() -> str:
 
 @yfinance_server.tool(name="get_manifest_diagnostics", output_schema=_MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA, description="Return deployment and manifest diagnostics: tool counts, manifest version, hash, build SHA, deploy timestamp, privacy scope, and connector-staleness advisory.")
 async def get_manifest_diagnostics() -> str:
-    try:
-        tool_count = len(yfinance_server._tool_manager._tools)
-    except Exception:
-        tool_count = len(TOOL_ALIASES) + 50
-    tool_names = sorted(TOOL_ALIASES.keys())
-    manifest_hash = hashlib.sha256(json.dumps(tool_names).encode("utf-8")).hexdigest()[:16]
+    tool_count, canonical_tool_count, deprecated_alias_count, canonical_names = _tool_counts()
+    manifest_hash = hashlib.sha256(json.dumps(canonical_names).encode("utf-8")).hexdigest()[:16]
     manifest_version = os.environ.get("MANIFEST_VERSION", None)
     deployed_at = os.environ.get("DEPLOYED_AT", None)
-    deprecated_alias_set = {
-        "get_tps_inputs",
-        "get_eqf_bracket",
-        "get_adv_gate",
-        "get_dc134_options_scan",
-        "get_china_revenue_pct",
-        "get_geographic_revenue",
-        "get_filing_text_search",
-        "get_filing_document",
-    }
-    deprecated_alias_count = len(deprecated_alias_set)
-    canonical_tool_count = max(tool_count - deprecated_alias_count, 0)
     worker_schema_generated_at = datetime.datetime.utcnow().isoformat() + "Z"
     return json.dumps({
         "toolCount": tool_count,

@@ -55,7 +55,6 @@ TOOL_ALIASES: dict[str, str] = {
     "get_ma_position": "analyze_moving_average_position",
     "get_volume_ratio": "analyze_volume_ratio",
     "get_volume_gate": "check_volume_liquidity_threshold",
-    "get_adv_gate": "check_volume_liquidity_threshold",
     "get_financial_ratios": "analyze_financial_ratios",
     "get_credit_health": "analyze_credit_health",
     "get_recommendations": "get_analyst_recommendations",
@@ -66,12 +65,9 @@ TOOL_ALIASES: dict[str, str] = {
     "get_options_flow_summary": "summarize_options_flow",
     "get_options_summary": "summarize_options_flow",
     "get_options_flow_scan": "analyze_options_flow_window",
-    "get_dc134_options_scan": "analyze_options_flow_window",
     "get_put_hedge_candidates": "find_put_hedge_candidates",
     "get_price_target_bracket": "calculate_price_target_distance",
-    "get_eqf_bracket": "calculate_price_target_distance",
     "get_position_score_inputs": "analyze_position_signals",
-    "get_tps_inputs": "analyze_position_signals",
     "list_sec_filings": "list_sec_company_filings",
     "get_filing_outline": "get_sec_filing_outline",
     "get_filing_section": "get_sec_filing_section",
@@ -79,11 +75,7 @@ TOOL_ALIASES: dict[str, str] = {
     "get_filing_table": "get_sec_filing_table",
     "get_filing_data": "extract_sec_filing_fact",
     "extract_filing_fact": "extract_sec_filing_fact",
-    "get_geographic_revenue": "extract_sec_filing_fact",
-    "get_china_revenue_pct": "extract_sec_filing_fact",
     "search_filing_text": "search_sec_filing_text",
-    "get_filing_text_search": "search_sec_filing_text",
-    "get_filing_document": "get_sec_filing_section",
 }
 
 

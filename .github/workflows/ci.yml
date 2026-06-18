@@ -71,7 +71,7 @@ jobs:
 
       # ── 1. Fastest sanity gates (no deps) ────────────────────────────────
       - name: Python syntax check
-        run: python -m py_compile server.py
+        run: python -m py_compile server.py tool_groups.py yfmcp/*.py yfmcp/tools/*.py scripts/*.py
 
       - name: Python import check
         run: python -c "import server"
@@ -95,6 +95,9 @@ jobs:
 
       - name: Grouped-mode handler registry tests
         run: python scripts/test_grouped_registry.py
+
+      - name: Worker grouped-mode routing tests
+        run: python scripts/test_worker_grouped_mode.py
 
       # ── 4. Infrastructure: cache layer ────────────────────────────────────
       - name: Cache layer tests

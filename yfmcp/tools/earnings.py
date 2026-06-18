@@ -21,7 +21,13 @@ from yfmcp.schemas import _TOOL_OUTPUT_SCHEMAS
 from yfmcp.envelope import ErrorCode, _wrap_envelope_v2
 from yfmcp.validation import _validate_ticker, _sanitize_sec_html
 from yfmcp.cache import TTL_EDGAR, _tool_cache
-from yfmcp.util import _utc_now_iso, _to_iso_utc, _filter_paragraphs_by_topics
+from yfmcp.util import (
+    _utc_now_iso,
+    _to_iso_utc,
+    _filter_paragraphs_by_topics,
+    _safe_json_loads,
+    _compact_excerpt,
+)
 from yfmcp.clients.edgar import (
     _edgar_build_filing_urls,
     _edgar_cik_from_accession,
@@ -35,19 +41,6 @@ from yfmcp.parsing.html import _strip_html_tags
 def _server_attr(name: str):
     import server as _server  # local import avoids module-load circularity
     return getattr(_server, name)
-
-
-def _safe_json_loads(payload: str) -> dict:
-    try:
-        data = json.loads(payload)
-    except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _compact_excerpt(text: object, max_len: int = 240) -> str:
-    value = _re.sub(r"\s+", " ", str(text or "")).strip()
-    return value if len(value) <= max_len else value[:max_len].rstrip() + "..."
 
 
 def _derive_fiscal_period_from_date(date_str: str | None) -> str | None:

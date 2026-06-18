@@ -3195,7 +3195,7 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
 // Persists within a single Worker instance lifetime.
 const _optionsFlowCache = new Map<string, { data: Record<string, unknown>; storedAt: number }>();
 
-// ── get_geographic_revenue ────────────────────────────────────────────────────
+// ── SEC geographic revenue extraction ─────────────────────────────────────────
 
 // EDGAR fair-access policy requires a reachable contact in the User-Agent.
 // Replace the URL/contact below with one owned by the operator, or inject
@@ -4634,7 +4634,7 @@ export async function getGeographicRevenue(ticker: string, region: string = "Chi
   });
 }
 
-// ── get_filing_text_search ────────────────────────────────────────────────────
+// ── SEC filing text search ────────────────────────────────────────────────────
 
 type FilingTextSearchMatch = {
   term: string;
@@ -4883,7 +4883,7 @@ export async function getFilingTextSearch(
   });
 }
 
-// ── get_filing_document ───────────────────────────────────────────────────────
+// ── SEC filing document/section retrieval ─────────────────────────────────────
 
 export async function getFilingDocument(
   ticker: string,
@@ -7318,27 +7318,11 @@ const _INDEX_KEYWORDS = [
 ];
 
 function _stripHtmlTagsIdx(html: string): string {
-  return html.replace(/<[^>]+>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
+  return stripHtmlTags(html);
 }
 
-/**
- * Strip <script> and <style> blocks from HTML, applying the regex repeatedly
- * until stable to prevent bypass via nested/malformed patterns.
- * Event-handler attributes (onX=...) are also removed.
- */
 function _sanitizeFilingHtml(html: string): string {
-  // Patterns are defined once and reused across loop iterations.
-  // String.prototype.replace() with global regex always starts from position 0,
-  // so no lastIndex reset is needed here.
-  const SCRIPT_RE = /<script\b[^>]*>[\s\S]*?<\/\s*script[^>]*>/gi;
-  const STYLE_RE = /<style\b[^>]*>[\s\S]*?<\/\s*style[^>]*>/gi;
-  let result = html;
-  let prev: string;
-  do {
-    prev = result;
-    result = result.replace(SCRIPT_RE, "<!--removed-->").replace(STYLE_RE, "<!--removed-->");
-  } while (result !== prev);
-  return result.replace(/\s+on\w+=(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, " ");
+  return sanitizeFilingHtml(html);
 }
 
 function _buildFilingIndexFromHtml(
@@ -7573,10 +7557,6 @@ async function _indexSecFilingImpl(
   return result;
 }
 
-// indexSecFiling and getSecFilingIndex are separate exports for API symmetry:
-// Both currently delegate to the same impl (cache-first). They may diverge in a
-// future release (e.g. force-refresh vs strict cache-only), so the separation
-// is preserved at the API level while the implementation remains shared.
 export async function indexSecFiling(
   ticker: string,
   filingType: string = "10-K",
@@ -7596,11 +7576,7 @@ export async function getSecFilingIndex(
   period: string = "latest",
   accessionNumber: string | null = null,
 ): Promise<string> {
-  try {
-    return await _indexSecFilingImpl(ticker, filingType, period, accessionNumber);
-  } catch (e) {
-    return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: `${e instanceof Error ? e.message : String(e)}` } });
-  }
+  return indexSecFiling(ticker, filingType, period, accessionNumber);
 }
 
 

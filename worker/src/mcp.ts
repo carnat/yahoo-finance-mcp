@@ -8,7 +8,7 @@
  * Notifications (no `id` field) are accepted but produce no response body.
  */
 
-import { callTool, TOOLS } from "./tools.js";
+import { callVisibleTool, listVisibleTools } from "./tools.js";
 
 interface JsonRpcRequest {
   jsonrpc: "2.0";
@@ -75,13 +75,13 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return {};
 
     case "tools/list":
-      return { tools: TOOLS.filter(t => !t.deprecated) };
+      return { tools: listVisibleTools() };
 
     case "tools/call": {
       const p = params as { name?: string; arguments?: Record<string, unknown> };
       if (!p?.name) throw Object.assign(new Error("Missing tool name"), { code: -32602 });
 
-      const text = await callTool(p.name, p.arguments ?? {});
+      const text = await callVisibleTool(p.name, p.arguments ?? {});
       return { content: [{ type: "text", text }] };
     }
 

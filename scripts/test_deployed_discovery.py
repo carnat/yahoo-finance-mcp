@@ -57,6 +57,93 @@ CANONICAL_TOOLS = {
     "verify_company_event",
     "health_check",
 }
+GROUPED_TOOLS = {
+    "stock_pricing",
+    "stock_fundamentals",
+    "analyst_data",
+    "options_analysis",
+    "sec_filings",
+    "sec_extractors",
+    "news_events",
+    "earnings_intelligence",
+    "screening",
+    "system",
+}
+ACTION_GROUP = {
+    "health_check": "system",
+    "get_manifest_diagnostics": "system",
+    "get_market_quote": "stock_pricing",
+    "get_historical_prices": "stock_pricing",
+    "analyze_price_performance": "stock_pricing",
+    "analyze_moving_average_position": "stock_pricing",
+    "analyze_volume_ratio": "stock_pricing",
+    "check_volume_liquidity_threshold": "stock_pricing",
+    "get_technical_indicators": "stock_pricing",
+    "get_price_slope": "stock_pricing",
+    "get_short_interest": "stock_pricing",
+    "get_short_momentum": "stock_pricing",
+    "get_overnight_quote": "stock_pricing",
+    "get_market_snapshot": "stock_pricing",
+    "get_company_profile": "stock_fundamentals",
+    "get_fund_profile": "stock_fundamentals",
+    "get_financial_statement": "stock_fundamentals",
+    "analyze_financial_ratios": "stock_fundamentals",
+    "analyze_credit_health": "stock_fundamentals",
+    "get_corporate_actions": "stock_fundamentals",
+    "get_ownership_holders": "stock_fundamentals",
+    "get_analyst_consensus": "analyst_data",
+    "get_earnings_analysis": "analyst_data",
+    "get_analyst_recommendations": "analyst_data",
+    "get_analyst_rating_changes": "analyst_data",
+    "analyze_earnings_momentum": "analyst_data",
+    "get_company_events_calendar": "analyst_data",
+    "get_option_expiration_dates": "options_analysis",
+    "get_option_chain": "options_analysis",
+    "summarize_options_flow": "options_analysis",
+    "find_put_hedge_candidates": "options_analysis",
+    "analyze_options_flow_window": "options_analysis",
+    "list_sec_company_filings": "sec_filings",
+    "list_sec_material_filings": "sec_filings",
+    "get_sec_filing_outline": "sec_filings",
+    "get_sec_filing_section": "sec_filings",
+    "get_sec_filing_section_markdown": "sec_filings",
+    "list_sec_filing_tables": "sec_filings",
+    "get_sec_filing_table": "sec_filings",
+    "extract_sec_filing_fact": "sec_filings",
+    "search_sec_filing_text": "sec_filings",
+    "index_sec_filing": "sec_filings",
+    "get_sec_filing_index": "sec_filings",
+    "get_sec_filing_intelligence": "sec_filings",
+    "query_sec_filing_index": "sec_filings",
+    "list_sec_filing_exhibits": "sec_filings",
+    "get_sec_filing_exhibit_content": "sec_filings",
+    "extract_geographic_revenue": "sec_extractors",
+    "extract_segment_revenue": "sec_extractors",
+    "extract_total_revenue": "sec_extractors",
+    "extract_revenue_exposure": "sec_extractors",
+    "extract_china_exposure": "sec_extractors",
+    "extract_risk_factor_mentions": "sec_extractors",
+    "extract_customer_concentration": "sec_extractors",
+    "extract_exposure": "sec_extractors",
+    "get_company_news": "news_events",
+    "search_company_news": "news_events",
+    "get_company_press_releases": "news_events",
+    "get_sec_recent_events": "news_events",
+    "get_public_event_timeline": "news_events",
+    "verify_company_event": "news_events",
+    "get_latest_earnings_release": "earnings_intelligence",
+    "index_earnings_release": "earnings_intelligence",
+    "extract_earnings_metrics": "earnings_intelligence",
+    "extract_guidance": "earnings_intelligence",
+    "extract_management_commentary": "earnings_intelligence",
+    "compare_earnings_actual_vs_estimate": "earnings_intelligence",
+    "get_earnings_call_transcript": "earnings_intelligence",
+    "parse_public_transcript": "earnings_intelligence",
+    "search_ticker": "screening",
+    "screen_stocks": "screening",
+    "analyze_position_signals": "screening",
+    "calculate_price_target_distance": "screening",
+}
 
 # Safe args for tools that can be called generically during tool-scan loop.
 # Tools not listed here are validated via discovery/schema only; no runtime call with {}.
@@ -94,6 +181,8 @@ SMOKE_ARGS: dict[str, dict] = {
 }
 
 _ALLOW_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in ("1", "true", "yes")
+_GROUPED_DISCOVERY = False
+_EXPECTED_TOOL_MODE = os.environ.get("EXPECTED_TOOL_MODE", os.environ.get("TOOL_MODE", "")).lower()
 _FINNHUB_KEY_CONFIGURED = bool(os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_TOKEN"))
 _FORBIDDEN_PUBLIC_TERMS = (
     r"\bIO\b",
@@ -145,7 +234,14 @@ def rpc(method: str, params: dict | None = None, req_id: int = 1) -> dict:
 
 
 def call_tool(name: str, arguments: dict, req_id: int, allow_jsonrpc_error: bool = False) -> dict:
-    resp = rpc("tools/call", {"name": name, "arguments": arguments}, req_id=req_id)
+    call_name = name
+    call_args = arguments
+    if _GROUPED_DISCOVERY and name not in GROUPED_TOOLS:
+        group = ACTION_GROUP.get(name)
+        if group:
+            call_name = group
+            call_args = {"action": name, "params": arguments}
+    resp = rpc("tools/call", {"name": call_name, "arguments": call_args}, req_id=req_id)
     if "error" in resp and resp["error"]:
         if allow_jsonrpc_error:
             return resp
@@ -406,6 +502,10 @@ def _assert_deprecated_alias_metadata(tools: list[dict]) -> None:
         "get_eqf_bracket",
         "get_tps_inputs",
         "get_adv_gate",
+        "get_china_revenue_pct",
+        "get_geographic_revenue",
+        "get_filing_text_search",
+        "get_filing_document",
     }
     for alias in expected_absent:
         if alias in by_name:
@@ -430,6 +530,7 @@ def _assert_public_tool_wording(tools: list[dict]) -> None:
 
 
 def main() -> int:
+    global _GROUPED_DISCOVERY
     try:
         listed = rpc("tools/list")
     except urllib.error.URLError as exc:
@@ -443,43 +544,55 @@ def main() -> int:
     tools = ((listed.get("result") or {}).get("tools")) or []
     if not all(isinstance(t, dict) for t in tools):
         raise AssertionError("tools/list returned non-object tool entries")
+    names = {str(t.get("name")) for t in tools if isinstance(t, dict)}
+    _GROUPED_DISCOVERY = GROUPED_TOOLS.issubset(names)
+    if _EXPECTED_TOOL_MODE == "grouped" and not _GROUPED_DISCOVERY:
+        raise AssertionError("Expected grouped tools/list, got expanded discovery")
+    if _EXPECTED_TOOL_MODE == "expanded" and _GROUPED_DISCOVERY:
+        raise AssertionError("Expected expanded tools/list, got grouped discovery")
     _check_public_description_terms([t for t in tools if isinstance(t, dict)])
     _assert_deprecated_alias_metadata([t for t in tools if isinstance(t, dict)])
-    _assert_public_tool_wording([t for t in tools if isinstance(t, dict)])
-    print("  PASS public description and deprecated alias metadata checks")
-    names = {str(t.get("name")) for t in tools if isinstance(t, dict)}
-    missing = sorted(CANONICAL_TOOLS - names)
-    if missing:
-        raise AssertionError(f"Missing canonical tools in discovery: {missing}")
+    if not _GROUPED_DISCOVERY:
+        _assert_public_tool_wording([t for t in tools if isinstance(t, dict)])
+    print("  PASS public description and private alias checks")
+    if _GROUPED_DISCOVERY:
+        if names != GROUPED_TOOLS:
+            raise AssertionError(f"Grouped discovery should expose only grouped tools: {sorted(names)}")
+        print("  PASS grouped tools/list exposes 10 domain tools")
+    else:
+        missing = sorted(CANONICAL_TOOLS - names)
+        if missing:
+            raise AssertionError(f"Missing canonical tools in discovery: {missing}")
 
-    opt = next((t for t in tools if isinstance(t, dict) and t.get("name") == "get_option_chain"), None)
-    if opt is None:
-        raise AssertionError("get_option_chain missing in discovery")
-    props = (((opt.get("inputSchema") or {}).get("properties")) or {})
-    for f in ("max_contracts", "min_open_interest", "min_volume",
-              "moneyness_window_pct", "include_illiquid"):
-        if f not in props:
-            raise AssertionError(f"get_option_chain schema missing: {f}")
+    if not _GROUPED_DISCOVERY:
+        opt = next((t for t in tools if isinstance(t, dict) and t.get("name") == "get_option_chain"), None)
+        if opt is None:
+            raise AssertionError("get_option_chain missing in discovery")
+        props = (((opt.get("inputSchema") or {}).get("properties")) or {})
+        for f in ("max_contracts", "min_open_interest", "min_volume",
+                  "moneyness_window_pct", "include_illiquid"):
+            if f not in props:
+                raise AssertionError(f"get_option_chain schema missing: {f}")
 
-    # Confirm sort_by enum includes "relevance"
-    sort_by_prop = props.get("sort_by") or {}
-    sort_by_enum = sort_by_prop.get("enum") or []
-    if "relevance" not in sort_by_enum:
-        raise AssertionError(f"get_option_chain sort_by enum missing 'relevance': {sort_by_enum}")
+        # Confirm sort_by enum includes "relevance"
+        sort_by_prop = props.get("sort_by") or {}
+        sort_by_enum = sort_by_prop.get("enum") or []
+        if "relevance" not in sort_by_enum:
+            raise AssertionError(f"get_option_chain sort_by enum missing 'relevance': {sort_by_enum}")
 
-    # Confirm default moneyness is "near_money"
-    moneyness_default = (props.get("moneyness") or {}).get("default")
-    if moneyness_default != "near_money":
-        raise AssertionError(
-            f"get_option_chain moneyness default must be 'near_money', got: {moneyness_default!r}"
-        )
+        # Confirm default moneyness is "near_money"
+        moneyness_default = (props.get("moneyness") or {}).get("default")
+        if moneyness_default != "near_money":
+            raise AssertionError(
+                f"get_option_chain moneyness default must be 'near_money', got: {moneyness_default!r}"
+            )
 
-    # Confirm default sort_by is "relevance"
-    sort_by_default = sort_by_prop.get("default")
-    if sort_by_default != "relevance":
-        raise AssertionError(
-            f"get_option_chain sort_by default must be 'relevance', got: {sort_by_default!r}"
-        )
+        # Confirm default sort_by is "relevance"
+        sort_by_default = sort_by_prop.get("default")
+        if sort_by_default != "relevance":
+            raise AssertionError(
+                f"get_option_chain sort_by default must be 'relevance', got: {sort_by_default!r}"
+            )
 
     filings = call_tool("list_sec_company_filings", {"ticker": "AAPL", "filing_type": "10-K", "limit": 5}, 20)
     assert_no_unknown_tool(filings, "list_sec_company_filings")

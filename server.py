@@ -51,7 +51,7 @@ from yfmcp.util import (
     _fetch_with_retry, get_last_trading_date,
     _PLACEHOLDER_IV_THRESHOLD, _compute_data_quality, _sort_by_relevance,
     _utc_now_iso, _to_iso_utc, _parse_rss_date,
-    _filter_paragraphs_by_topics,
+    _filter_paragraphs_by_topics, _safe_json_loads, _compact_excerpt,
 )
 from yfmcp.clients.yahoo import _safe_parse
 from yfmcp.clients.edgar import (
@@ -6505,15 +6505,8 @@ async def get_sec_filing_section_markdown(
     if section_end is None:
         section_end = min(section_start + max_chars * 3, len(html))
 
-    # Try sec2md first (optional dependency)
     parser_source = "html_parser_fallback"
-    try:
-        import sec2md  # type: ignore[import-untyped]
-        section_html = html[section_start:section_end]
-        markdown = sec2md.convert(section_html)
-        parser_source = "sec2md"
-    except (ImportError, Exception):
-        markdown = _html_to_markdown_fallback(html, section_start, section_end)
+    markdown = _html_to_markdown_fallback(html, section_start, section_end)
 
     # Count tables in the section
     section_slice = html[section_start:section_end]
@@ -6535,23 +6528,10 @@ async def get_sec_filing_section_markdown(
         "markdown": markdown,
         "tables_in_section": tables_in_section,
         "word_count": word_count,
-        "confidence": "HIGH" if parser_source == "sec2md" else "MEDIUM",
+        "confidence": "MEDIUM",
         "source": parser_source,
         "truncated": truncated,
     })
-
-
-def _safe_json_loads(payload: str) -> dict:
-    try:
-        parsed = json.loads(payload)
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        return {}
-
-
-def _compact_excerpt(text: str, max_len: int = 240) -> str:
-    cleaned = _re.sub(r"\s+", " ", str(text or "")).strip()
-    return cleaned if len(cleaned) <= max_len else cleaned[:max_len].rstrip() + "..."
 
 
 def _as_status(source_payload: dict) -> str:
@@ -7582,59 +7562,6 @@ from yfmcp.tools.earnings import (  # re-export for compatibility and grouped ro
     _fetch_alpha_vantage_transcript,
     get_earnings_call_transcript,
 )
-
-
-@yfinance_server.tool(name="get_tps_inputs", output_schema=_TOOL_OUTPUT_SCHEMAS["get_tps_inputs"], description="Deprecated alias for analyze_position_signals.")
-async def get_tps_inputs(ticker: str) -> str:
-    return _deprecated_alias_response("get_tps_inputs", "analyze_position_signals", await analyze_position_signals(ticker))
-
-
-@yfinance_server.tool(name="get_eqf_bracket", output_schema=_TOOL_OUTPUT_SCHEMAS["get_eqf_bracket"], description="Deprecated alias for calculate_price_target_distance.")
-async def get_eqf_bracket(ticker: str, io_pt: float) -> str:
-    return _deprecated_alias_response(
-        "get_eqf_bracket",
-        "calculate_price_target_distance",
-        await calculate_price_target_distance(ticker, io_pt=io_pt),
-    )
-
-
-@yfinance_server.tool(name="get_adv_gate", output_schema=_TOOL_OUTPUT_SCHEMAS["get_adv_gate"], description="Deprecated alias for check_volume_liquidity_threshold.")
-async def get_adv_gate(ticker: str, foreign_exchange: bool = False) -> str:
-    return _deprecated_alias_response("get_adv_gate", "check_volume_liquidity_threshold", await check_volume_liquidity_threshold(ticker, foreign_exchange))
-
-
-@yfinance_server.tool(name="get_dc134_options_scan", output_schema=_TOOL_OUTPUT_SCHEMAS["get_dc134_options_scan"], description="Deprecated alias for get_options_flow_scan.")
-async def get_dc134_options_scan(ticker: str, window_label: str) -> str:
-    return _deprecated_alias_response("get_dc134_options_scan", "analyze_options_flow_window", await analyze_options_flow_window(ticker, window_label))
-
-
-@yfinance_server.tool(name="get_china_revenue_pct", output_schema=_TOOL_OUTPUT_SCHEMAS["get_china_revenue_pct"], description="Deprecated alias for extract_sec_filing_fact.")
-async def get_china_revenue_pct(ticker: str) -> str:
-    return _deprecated_alias_response("get_china_revenue_pct", "extract_sec_filing_fact", await extract_sec_filing_fact(ticker=ticker, fact_type=FilingFactType.geographic_revenue, region="China"))
-
-
-@yfinance_server.tool(name="get_geographic_revenue", output_schema=_TOOL_OUTPUT_SCHEMAS["get_geographic_revenue"], description="Deprecated alias for extract_sec_filing_fact.")
-async def get_geographic_revenue(ticker: str, region: str = "China") -> str:
-    return _deprecated_alias_response("get_geographic_revenue", "extract_sec_filing_fact", await extract_sec_filing_fact(ticker=ticker, fact_type=FilingFactType.geographic_revenue, region=region))
-
-
-@yfinance_server.tool(name="get_filing_text_search", output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_text_search"], description="Deprecated alias for search_sec_filing_text.")
-async def get_filing_text_search(
-    ticker: str,
-    search_terms: list[str] | None = None,
-    section_hint: str | None = None,
-    filing_type: str = "10-K",
-    accession_number: str | None = None,
-    context_chars: int = 1500,
-    return_tables: bool = True,
-) -> str:
-    return _deprecated_alias_response("get_filing_text_search", "search_sec_filing_text", await search_sec_filing_text(ticker, search_terms, section_hint, filing_type, accession_number, context_chars, return_tables))
-
-
-@yfinance_server.tool(name="get_filing_document", output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_document"], description="Deprecated alias for get_sec_filing_section.")
-async def get_filing_document(ticker: str, section_name: str, document_url: str, context_chars: int = 3000) -> str:
-    return _deprecated_alias_response("get_filing_document", "get_sec_filing_section", await get_sec_filing_section(ticker, section_name, document_url, context_chars))
-
 
 
 # ---------------------------------------------------------------------------

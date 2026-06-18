@@ -186,18 +186,20 @@ class TestPublicConnectorSurfaceSource(unittest.TestCase):
         self.assertIn("reference_target_price", py_sig_win)
         self.assertIn("io_pt", py_sig_win)
 
-    def test_deprecated_aliases_have_standard_metadata(self) -> None:
-        expected_aliases = [
+    def test_private_aliases_are_not_registered(self) -> None:
+        private_aliases = [
             "get_dc134_options_scan",
             "get_eqf_bracket",
             "get_tps_inputs",
             "get_adv_gate",
+            "get_china_revenue_pct",
+            "get_geographic_revenue",
+            "get_filing_text_search",
+            "get_filing_document",
         ]
-        for alias in expected_aliases:
-            win = self._window(self.ts, f'name: "{alias}"', span=700)
-            self.assertIn("deprecated: true", win, f"{alias}: missing deprecated=true")
-            self.assertIn("useInstead:", win, f"{alias}: missing useInstead")
-            self.assertIn('deprecationReason: "Use the canonical public tool name."', win, f"{alias}: missing deprecationReason")
+        for alias in private_aliases:
+            self.assertNotIn(f'name: "{alias}"', self.ts)
+            self.assertNotIn(f'"{alias}"', self.py)
 
     def test_health_check_manifest_fields_exist(self) -> None:
         ts_health = self._window(self.ts, 'case "health_check"', span=900)

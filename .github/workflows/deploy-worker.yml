@@ -76,6 +76,7 @@ jobs:
         run: python scripts/test_deployed_discovery.py
         env:
           ALLOW_NETWORK_SKIP: "0"
+          EXPECTED_TOOL_MODE: expanded
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
 
       - name: Verify alias behavior
@@ -92,6 +93,25 @@ jobs:
         env:
           MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
           ALLOW_NETWORK_SKIP: "0"
+          EXPECTED_TOOL_MODE: expanded
+
+      - name: Verify deployed MCP grouped discovery
+        if: ${{ vars.DEPLOY_GROUPED_SMOKE == 'true' }}
+        run: python scripts/test_deployed_discovery.py
+        env:
+          ALLOW_NETWORK_SKIP: "0"
+          EXPECTED_TOOL_MODE: grouped
+          TOOL_MODE: grouped
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+
+      - name: Verify deployed grouped extractor tools
+        if: ${{ vars.DEPLOY_GROUPED_SMOKE == 'true' }}
+        run: python scripts/test_deployed_extractors.py
+        env:
+          MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
+          ALLOW_NETWORK_SKIP: "0"
+          EXPECTED_TOOL_MODE: grouped
+          TOOL_MODE: grouped
 
       - name: Run end-to-end tool tests
         run: python scripts/test_tools.py --url https://yahoo-finance-mcp.artinatw.workers.dev/mcp

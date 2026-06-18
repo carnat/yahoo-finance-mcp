@@ -24,6 +24,36 @@ import urllib.request
 MCP_URL = os.environ.get("MCP_URL", "https://yahoo-finance-mcp.artinatw.workers.dev/mcp").strip()
 UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-phase3-extractor-smoke/1.0)"
 _ALLOW_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in ("1", "true", "yes")
+_EXPECTED_TOOL_MODE = os.environ.get("EXPECTED_TOOL_MODE", os.environ.get("TOOL_MODE", "")).lower()
+GROUPED_TOOLS = {
+    "stock_pricing",
+    "stock_fundamentals",
+    "analyst_data",
+    "options_analysis",
+    "sec_filings",
+    "sec_extractors",
+    "news_events",
+    "earnings_intelligence",
+    "screening",
+    "system",
+}
+ACTION_GROUP = {
+    "list_sec_company_filings": "sec_filings",
+    "index_sec_filing": "sec_filings",
+    "get_sec_filing_index": "sec_filings",
+    "query_sec_filing_index": "sec_filings",
+    "extract_sec_filing_fact": "sec_filings",
+    "search_sec_filing_text": "sec_filings",
+    "extract_geographic_revenue": "sec_extractors",
+    "extract_segment_revenue": "sec_extractors",
+    "extract_total_revenue": "sec_extractors",
+    "extract_revenue_exposure": "sec_extractors",
+    "extract_china_exposure": "sec_extractors",
+    "extract_risk_factor_mentions": "sec_extractors",
+    "extract_customer_concentration": "sec_extractors",
+    "extract_exposure": "sec_extractors",
+}
+_GROUPED_DISCOVERY = False
 
 
 def rpc(method: str, params: dict | None = None, req_id: int = 1) -> dict:
@@ -60,7 +90,14 @@ def rpc(method: str, params: dict | None = None, req_id: int = 1) -> dict:
 
 
 def call_tool(name: str, arguments: dict, req_id: int) -> dict:
-    resp = rpc("tools/call", {"name": name, "arguments": arguments}, req_id=req_id)
+    call_name = name
+    call_args = arguments
+    if _GROUPED_DISCOVERY and name not in GROUPED_TOOLS:
+        group = ACTION_GROUP.get(name)
+        if group:
+            call_name = group
+            call_args = {"action": name, "params": arguments}
+    resp = rpc("tools/call", {"name": call_name, "arguments": call_args}, req_id=req_id)
     if "error" in resp and resp["error"]:
         raise AssertionError(f"{name} JSON-RPC error: {resp['error']}")
     text = ((((resp.get("result") or {}).get("content") or [{}])[0]) or {}).get("text", "")
@@ -127,6 +164,7 @@ def _check_private_terms(descriptions: list[str], tool_names: list[str]) -> None
 
 
 def main() -> int:
+    global _GROUPED_DISCOVERY
     print(f"Phase 3 extractor smoke target: {MCP_URL}")
 
     # --- tools/list validation ---
@@ -140,22 +178,31 @@ def main() -> int:
 
     tools = ((listed.get("result") or {}).get("tools")) or []
     names = {str(t.get("name")) for t in tools if isinstance(t, dict)}
-
-    required_phase2 = {"list_sec_company_filings", "index_sec_filing", "get_sec_filing_index"}
-    required_phase3 = {
-        "extract_segment_revenue",
-        "extract_total_revenue",
-        "extract_risk_factor_mentions",
-        "extract_customer_concentration",
-        "extract_exposure",
-    }
-    missing_p2 = sorted(required_phase2 - names)
-    missing_p3 = sorted(required_phase3 - names)
-    if missing_p2:
-        raise AssertionError(f"Missing Phase 2 tools in tools/list: {missing_p2}")
-    if missing_p3:
-        raise AssertionError(f"Missing Phase 3 tools in tools/list: {missing_p3}")
-    print(f"  PASS tools/list exposes all Phase 2+3 tools ({len(names)} total)")
+    _GROUPED_DISCOVERY = GROUPED_TOOLS.issubset(names)
+    if _EXPECTED_TOOL_MODE == "grouped" and not _GROUPED_DISCOVERY:
+        raise AssertionError("Expected grouped tools/list, got expanded discovery")
+    if _EXPECTED_TOOL_MODE == "expanded" and _GROUPED_DISCOVERY:
+        raise AssertionError("Expected expanded tools/list, got grouped discovery")
+    if _GROUPED_DISCOVERY:
+        if names != GROUPED_TOOLS:
+            raise AssertionError(f"Grouped discovery should expose only grouped tools: {sorted(names)}")
+        print(f"  PASS grouped tools/list exposes all grouped tools ({len(names)} total)")
+    else:
+        required_phase2 = {"list_sec_company_filings", "index_sec_filing", "get_sec_filing_index"}
+        required_phase3 = {
+            "extract_segment_revenue",
+            "extract_total_revenue",
+            "extract_risk_factor_mentions",
+            "extract_customer_concentration",
+            "extract_exposure",
+        }
+        missing_p2 = sorted(required_phase2 - names)
+        missing_p3 = sorted(required_phase3 - names)
+        if missing_p2:
+            raise AssertionError(f"Missing Phase 2 tools in tools/list: {missing_p2}")
+        if missing_p3:
+            raise AssertionError(f"Missing Phase 3 tools in tools/list: {missing_p3}")
+        print(f"  PASS tools/list exposes all Phase 2+3 tools ({len(names)} total)")
 
     # Check descriptions for private terms (require at least one description to avoid silent pass)
     descriptions = [str(t.get("description", "")) for t in tools if isinstance(t, dict)]
