@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate canonical/alias routing invariants on deployed MCP.
 
-Asserts routing metadata (ok, meta.canonicalTool, DEPRECATED_ALIAS warning,
+Asserts routing metadata (ok, meta.canonicalTool, optional DEPRECATED_ALIAS warning,
 stable key presence) WITHOUT exact-comparing volatile live payload values
 (prices, timestamps, volume). This avoids false failures when the market is open
 or when two sequential calls return slightly different quotes.
@@ -29,6 +29,10 @@ import urllib.request
 URL = "https://yahoo-finance-mcp.artinatw.workers.dev/mcp"
 UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-universal-aliases/1.0)"
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 # Set ALLOW_NETWORK_SKIP=1 (or "true"/"yes") to skip gracefully when the
 # deployed worker is unreachable or behind (e.g. pre-deployment CI runs).
 # The deployed smoke-test (deploy-worker.yml) always sets ALLOW_NETWORK_SKIP=0.
@@ -38,12 +42,8 @@ _ALLOW_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "0").lower() in ("1", "true",
 ALIAS_PAIRS: list[tuple[str, dict, str, set[str], bool]] = [
     # get_fast_info returns yfinance fast_info fields directly (no "ticker" key injected)
     ("get_market_quote", {"ticker": "AAPL"}, "get_fast_info", {"currency", "quoteType", "lastPrice", "previousClose"}, False),
-    ("check_volume_liquidity_threshold", {"ticker": "AAPL"}, "get_adv_gate", {"ticker", "gatePass", "dataDate"}, True),
     ("summarize_options_flow", {"ticker": "AAPL"}, "get_options_summary", {"ticker", "dataQuality"}, False),
     ("summarize_options_flow", {"ticker": "AAPL"}, "get_options_flow_summary", {"ticker", "dataQuality"}, False),
-    ("analyze_options_flow_window", {"ticker": "AAPL", "window_label": "audit"}, "get_dc134_options_scan", {"ticker", "dataQuality"}, True),
-    ("analyze_position_signals", {"ticker": "AAPL"}, "get_tps_inputs", {"t1_inputs", "t2_inputs", "t4_inputs", "t5_inputs"}, True),
-    ("calculate_price_target_distance", {"ticker": "AAPL", "io_pt": 200}, "get_eqf_bracket", {"ticker", "currentPrice", "bracket"}, True),
 ]
 
 

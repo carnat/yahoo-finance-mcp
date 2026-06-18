@@ -443,14 +443,6 @@ _TOOL_OUTPUT_SCHEMAS.setdefault("extract_risk_factor_mentions", _SIMPLE_OUTPUT_S
 _TOOL_OUTPUT_SCHEMAS.setdefault("extract_customer_concentration", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("extract_exposure", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("query_sec_filing_index", _SIMPLE_OUTPUT_SCHEMA)
-_TOOL_OUTPUT_SCHEMAS.setdefault("get_tps_inputs", _TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"])
-_TOOL_OUTPUT_SCHEMAS.setdefault("get_eqf_bracket", _TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"])
-_TOOL_OUTPUT_SCHEMAS.setdefault("get_adv_gate", _TOOL_OUTPUT_SCHEMAS["get_volume_gate"])
-_TOOL_OUTPUT_SCHEMAS.setdefault("get_dc134_options_scan", _TOOL_OUTPUT_SCHEMAS["get_options_flow_scan"])
-_TOOL_OUTPUT_SCHEMAS.setdefault("get_china_revenue_pct", _TOOL_OUTPUT_SCHEMAS["get_filing_data"])
-_TOOL_OUTPUT_SCHEMAS.setdefault("get_geographic_revenue", _TOOL_OUTPUT_SCHEMAS["get_filing_data"])
-_TOOL_OUTPUT_SCHEMAS.setdefault("get_filing_text_search", _TOOL_OUTPUT_SCHEMAS["search_filing_text"])
-_TOOL_OUTPUT_SCHEMAS.setdefault("get_filing_document", _TOOL_OUTPUT_SCHEMAS["get_filing_section"])
 
 
 _MARKET_SNAPSHOT_OUTPUT_SCHEMA = {

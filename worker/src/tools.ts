@@ -1,4 +1,5 @@
 import { mcpSuccess, mcpFailure, ErrorCode, getWorkerVar } from "./response.js";
+import { GROUPED_TOOL_DEFS } from "./tool-catalog.js";
 import {
   getAnalystConsensus,
   getAnalystUpgradeRadar,
@@ -921,7 +922,6 @@ export const TOOL_ALIASES: Record<string, string> = {
   get_ma_position: "analyze_moving_average_position",
   get_volume_ratio: "analyze_volume_ratio",
   get_volume_gate: "check_volume_liquidity_threshold",
-  get_adv_gate: "check_volume_liquidity_threshold",
 
   get_financial_ratios: "analyze_financial_ratios",
   get_credit_health: "analyze_credit_health",
@@ -935,13 +935,10 @@ export const TOOL_ALIASES: Record<string, string> = {
   get_options_flow_summary: "summarize_options_flow",
   get_options_summary: "summarize_options_flow",
   get_options_flow_scan: "analyze_options_flow_window",
-  get_dc134_options_scan: "analyze_options_flow_window",
   get_put_hedge_candidates: "find_put_hedge_candidates",
 
   get_price_target_bracket: "calculate_price_target_distance",
-  get_eqf_bracket: "calculate_price_target_distance",
   get_position_score_inputs: "analyze_position_signals",
-  get_tps_inputs: "analyze_position_signals",
 
   list_sec_filings: "list_sec_company_filings",
   get_filing_outline: "get_sec_filing_outline",
@@ -951,17 +948,8 @@ export const TOOL_ALIASES: Record<string, string> = {
 
   get_filing_data: "extract_sec_filing_fact",
   extract_filing_fact: "extract_sec_filing_fact",
-  get_geographic_revenue: "extract_sec_filing_fact",
-  get_china_revenue_pct: "extract_sec_filing_fact",
 
   search_filing_text: "search_sec_filing_text",
-  get_filing_text_search: "search_sec_filing_text",
-  get_filing_document: "get_sec_filing_section",
-
-  // superseded by extract_exposure
-  extract_geographic_revenue: "extract_exposure",
-  extract_china_exposure: "extract_exposure",
-  extract_revenue_exposure: "extract_exposure",
 };
 
 const CANONICAL_ADDITIONS: Tool[] = [
@@ -1028,26 +1016,8 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "health_check", description: "Return runtime and deployment health metadata.", inputSchema: { type: "object", properties: {} } },
 ];
 
-const DEPRECATED_ALIAS_TOOLS: Tool[] = [
-  { name: "get_adv_gate", description: "Deprecated alias for check_volume_liquidity_threshold.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] }, deprecated: true, useInstead: "check_volume_liquidity_threshold", deprecationReason: "Use the canonical public tool name." },
-  { name: "get_dc134_options_scan", description: "Deprecated alias for analyze_options_flow_window.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, window_label: { type: "string" } }, required: ["ticker", "window_label"] }, deprecated: true, useInstead: "analyze_options_flow_window", deprecationReason: "Use the canonical public tool name." },
-  { name: "get_eqf_bracket", description: "Deprecated alias for calculate_price_target_distance.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, reference_target_price: { type: "number" }, io_pt: { type: "number" } }, required: ["ticker"] }, deprecated: true, useInstead: "calculate_price_target_distance", deprecationReason: "Use the canonical public tool name." },
-  { name: "get_tps_inputs", description: "Deprecated alias for analyze_position_signals.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] }, deprecated: true, useInstead: "analyze_position_signals", deprecationReason: "Use the canonical public tool name." },
-  { name: "get_geographic_revenue", description: "Deprecated alias for extract_sec_filing_fact.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, region: { type: "string", default: "China" } }, required: ["ticker"] }, deprecated: true, useInstead: "extract_sec_filing_fact", deprecationReason: "Use the canonical public tool name." },
-  { name: "get_china_revenue_pct", description: "Deprecated alias for extract_sec_filing_fact.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] }, deprecated: true, useInstead: "extract_sec_filing_fact", deprecationReason: "Use the canonical public tool name." },
-  { name: "get_filing_text_search", description: "Deprecated alias for search_sec_filing_text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, search_terms: { type: "array", items: { type: "string" } } }, required: ["ticker"] }, deprecated: true, useInstead: "search_sec_filing_text", deprecationReason: "Use the canonical public tool name." },
-  { name: "get_filing_document", description: "Deprecated alias for get_sec_filing_section.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, section_name: { type: "string" }, document_url: { type: "string" }, context_chars: { type: "number", default: 3000 } }, required: ["ticker", "section_name", "document_url"] }, deprecated: true, useInstead: "get_sec_filing_section", deprecationReason: "Use the canonical public tool name." },
-];
-const DEPRECATED_ALIAS_NAMES = new Set<string>([
-  "get_adv_gate",
-  "get_dc134_options_scan",
-  "get_eqf_bracket",
-  "get_tps_inputs",
-  "get_geographic_revenue",
-  "get_china_revenue_pct",
-  "get_filing_text_search",
-  "get_filing_document",
-]);
+const DEPRECATED_ALIAS_TOOLS: Tool[] = [];
+const DEPRECATED_ALIAS_NAMES = new Set<string>();
 
 TOOLS.push(...CANONICAL_ADDITIONS, ...DEPRECATED_ALIAS_TOOLS);
 for (const tool of TOOLS) {
@@ -1484,6 +1454,31 @@ for (const tool of TOOLS) {
   tool.outputSchema = OUTPUT_SCHEMAS[tool.name] ?? SIMPLE_OBJECT_SCHEMA;
 }
 
+const GROUPED_TOOLS: Tool[] = GROUPED_TOOL_DEFS.map((group) => ({
+  name: group.name,
+  description: group.description,
+  inputSchema: {
+    type: "object",
+    properties: {
+      action: { type: "string", enum: Object.keys(group.actions) },
+      params: { type: "object", default: {} },
+    },
+    required: ["action"],
+  },
+  outputSchema: ENVELOPE_V2_OUTPUT_SCHEMA,
+}));
+
+const GROUPED_ACTIONS = new Map(
+  GROUPED_TOOL_DEFS.map((group) => [group.name, new Set(Object.keys(group.actions))])
+);
+
+export function isGroupedMode(): boolean {
+  return (getWorkerVar("TOOL_MODE") ?? "expanded").toLowerCase() === "grouped";
+}
+
+export function listVisibleTools(): Tool[] {
+  return isGroupedMode() ? GROUPED_TOOLS : TOOLS.filter((t) => !t.deprecated);
+}
 
 const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
 const num = (v: unknown, fallback: number): number => (typeof v === "number" ? v : fallback);
@@ -1559,6 +1554,27 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
     return mcpSuccess(name, raw, opts);
   }
   return mcpSuccess(name, raw, batchMeta);
+}
+
+export async function callVisibleTool(name: string, args: Record<string, unknown>): Promise<string> {
+  if (!isGroupedMode()) return callTool(name, args);
+
+  const actions = GROUPED_ACTIONS.get(name);
+  if (!actions) {
+    throw new Error(`Unknown grouped tool: ${name}`);
+  }
+  const action = str(args.action).trim();
+  if (!action) {
+    return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, "action is required");
+  }
+  if (!actions.has(action)) {
+    return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, `Unknown action '${action}' for grouped tool '${name}'`);
+  }
+  const params = args.params;
+  if (params != null && (typeof params !== "object" || Array.isArray(params))) {
+    return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, "params must be an object when provided");
+  }
+  return callTool(action, (params as Record<string, unknown> | undefined) ?? {});
 }
 
 async function _dispatchTool(name: string, args: Record<string, unknown>): Promise<string> {
@@ -1906,11 +1922,12 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       const buildSha = getWorkerVar("BUILD_SHA") ?? "unknown";
       const buildDate = getWorkerVar("BUILD_DATE") ?? "unknown";
       const version = getWorkerVar("SERVER_VERSION") ?? "1.1.0";
-      const canonicalToolCount = TOOLS.filter((t) => t.deprecated !== true).length;
-      const deprecatedAliasCount = TOOLS.filter((t) => t.deprecated === true).length;
+      const visibleTools = listVisibleTools();
+      const canonicalToolCount = visibleTools.length;
+      const deprecatedAliasCount = isGroupedMode() ? 0 : TOOLS.filter((t) => t.deprecated === true).length;
       const manifestVersion = getWorkerVar("MANIFEST_VERSION") ?? "1";
       const deployedAt = getWorkerVar("DEPLOYED_AT") ?? new Date().toISOString();
-      const manifestHash = await computeHash(JSON.stringify(TOOLS.filter(t => !t.deprecated).map(t => t.name)));
+      const manifestHash = await computeHash(JSON.stringify(visibleTools.map(t => t.name)));
       return JSON.stringify({
         status: "ok",
         serverVersion: version,
@@ -1933,11 +1950,12 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_manifest_diagnostics": {
       const buildSha = getWorkerVar("BUILD_SHA") ?? "unknown";
       const version = getWorkerVar("SERVER_VERSION") ?? "1.0.0";
-      const canonicalToolCount = TOOLS.filter((t) => t.deprecated !== true).length;
-      const deprecatedAliasCount = TOOLS.filter((t) => t.deprecated === true).length;
+      const visibleTools = listVisibleTools();
+      const canonicalToolCount = visibleTools.length;
+      const deprecatedAliasCount = isGroupedMode() ? 0 : TOOLS.filter((t) => t.deprecated === true).length;
       const manifestVersion = getWorkerVar("MANIFEST_VERSION") ?? null;
       const deployedAt = getWorkerVar("DEPLOYED_AT") ?? null;
-      const manifestHash = await computeHash(JSON.stringify(TOOLS.filter(t => !t.deprecated).map(t => t.name)));
+      const manifestHash = await computeHash(JSON.stringify(visibleTools.map(t => t.name)));
       const workerSchemaGeneratedAt = new Date().toISOString();
       return JSON.stringify({
         toolCount: canonicalToolCount,

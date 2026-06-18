@@ -28,6 +28,7 @@ export interface Env {
   MCP_ENVELOPE_V2?: string;
   SERVER_VERSION?: string;
   WORKER_VERSION?: string;
+  TOOL_MODE?: string;
   AUDIT_TOKEN?: string;
   BUILD_SHA?: string;
   [key: string]: string | undefined;

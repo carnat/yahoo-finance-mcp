@@ -530,10 +530,19 @@ class TestToolRegistration(unittest.TestCase):
         ]:
             self.assertIn(atomic, tools, f"Atomic tool {atomic!r} must not be removed")
 
-    def test_deprecated_aliases_preserved(self):
+    def test_private_aliases_removed(self):
         tools = self._get_registered_tool_names()
-        for alias in ["get_adv_gate", "get_eqf_bracket", "get_tps_inputs", "get_dc134_options_scan"]:
-            self.assertIn(alias, tools, f"Deprecated alias {alias!r} must remain for backward compat")
+        for alias in [
+            "get_adv_gate",
+            "get_eqf_bracket",
+            "get_tps_inputs",
+            "get_dc134_options_scan",
+            "get_china_revenue_pct",
+            "get_geographic_revenue",
+            "get_filing_text_search",
+            "get_filing_document",
+        ]:
+            self.assertNotIn(alias, tools, f"Private alias {alias!r} should not be registered")
 
 
 # ---------------------------------------------------------------------------

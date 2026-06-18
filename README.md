@@ -16,24 +16,24 @@ Canonical tool names use neutral public language. Legacy aliases are preserved f
 | `analyze_price_performance` | `get_price_stats` |
 | `analyze_moving_average_position` | `get_ma_position` |
 | `analyze_volume_ratio` | `get_volume_ratio` |
-| `check_volume_liquidity_threshold` | `get_volume_gate`, `get_adv_gate` |
-| `analyze_position_signals` | `get_tps_inputs` |
-| `calculate_price_target_distance` | `get_eqf_bracket` |
-| `analyze_options_flow_window` | `get_dc134_options_scan` |
-| `extract_sec_filing_fact` | `get_filing_data`, `get_geographic_revenue`, `get_china_revenue_pct` |
-| `search_sec_filing_text` | `get_filing_text_search` |
-| `get_sec_filing_section` | `get_filing_document` |
+| `check_volume_liquidity_threshold` | `get_volume_gate` |
+| `analyze_position_signals` | `get_position_score_inputs` |
+| `calculate_price_target_distance` | `get_price_target_bracket` |
+| `analyze_options_flow_window` | `get_options_flow_scan` |
+| `extract_sec_filing_fact` | `get_filing_data`, `extract_filing_fact` |
+| `search_sec_filing_text` | `search_filing_text` |
+| `get_sec_filing_section` | `get_filing_section` |
 | `get_company_news` | `get_yahoo_finance_news` |
 
 ---
 
 ## Grouped Meta-Tools Mode (LLM Token Optimization)
 
-Set `TOOL_MODE=grouped` to expose **10 domain-level meta-tools** instead of 111 individual tools, reducing LLM tool-schema token overhead by ~80–85%.
+Set `TOOL_MODE=grouped` in the Python or Worker runtime to expose **10 domain-level meta-tools** instead of the expanded tool list, reducing LLM tool-schema token overhead by ~80–85%.
 
 | Env var | Value | Behavior |
 |---------|-------|----------|
-| `TOOL_MODE` | `expanded` (default) | 111 individual tools registered as normal |
+| `TOOL_MODE` | `expanded` (default) | individual tools registered as normal |
 | `TOOL_MODE` | `grouped` | 10 domain meta-tools with `action` + `params` routing |
 
 **Grouped meta-tools:**
@@ -45,7 +45,7 @@ Set `TOOL_MODE=grouped` to expose **10 domain-level meta-tools** instead of 111 
 | `analyst_data` | Analyst ratings, forecasts | `get_analyst_consensus`, `get_earnings_analysis`, `get_analyst_recommendations`, `get_analyst_rating_changes`, `analyze_earnings_momentum`, `get_company_events_calendar` |
 | `options_analysis` | Options chain, flow, hedging | `get_option_expiration_dates`, `get_option_chain`, `summarize_options_flow`, `find_put_hedge_candidates`, `analyze_options_flow_window` |
 | `sec_filings` | SEC EDGAR access, indexing | `list_sec_company_filings`, `list_sec_material_filings`, `get_sec_filing_outline`, `get_sec_filing_section`, `get_sec_filing_section_markdown`, `list_sec_filing_tables`, `get_sec_filing_table`, `extract_sec_filing_fact`, `search_sec_filing_text`, `index_sec_filing`, `get_sec_filing_index`, `get_sec_filing_intelligence`, `query_sec_filing_index`, `list_sec_filing_exhibits`, `get_sec_filing_exhibit_content` |
-| `sec_extractors` | Structured SEC extraction | `extract_geographic_revenue`, `extract_segment_revenue`, `extract_total_revenue`, `extract_revenue_exposure`, `extract_china_exposure`, `extract_risk_factor_mentions`, `extract_customer_concentration` |
+| `sec_extractors` | Structured SEC extraction | `extract_geographic_revenue`, `extract_segment_revenue`, `extract_total_revenue`, `extract_revenue_exposure`, `extract_china_exposure`, `extract_risk_factor_mentions`, `extract_customer_concentration`, `extract_exposure` |
 | `news_events` | News, events, timeline | `get_company_news`, `search_company_news`, `get_company_press_releases`, `get_yahoo_finance_news`, `get_sec_recent_events`, `get_public_event_timeline`, `verify_company_event` |
 | `earnings_intelligence` | Earnings analysis | `get_latest_earnings_release`, `index_earnings_release`, `extract_earnings_metrics`, `extract_guidance`, `extract_management_commentary`, `compare_earnings_actual_vs_estimate`, `get_earnings_call_transcript`, `parse_public_transcript` |
 | `screening` | Discovery, screening | `search_ticker`, `screen_stocks`, `analyze_position_signals`, `calculate_price_target_distance` |
@@ -85,7 +85,7 @@ All canonical action names and response schemas remain identical to expanded mod
 | `analyze_price_performance` | Pre-computed: % distance from 52w high/low and MAs, 30d annualised volatility, CAGR. Alias: `get_price_stats`. |
 | `analyze_moving_average_position` | Pre-computed: % vs 50DMA/200DMA, regime50, regime200, trend (BULLISH/BEARISH/MIXED). Alias: `get_ma_position`. |
 | `analyze_volume_ratio` | Pre-computed: volume vs 10d/90d averages, volumeFlag (HIGH/NORMAL/LOW). Alias: `get_volume_ratio`. |
-| `check_volume_liquidity_threshold` | 20d ADV liquidity gate pass/fail. FX notional mode available via `foreign_exchange=true`. Aliases: `get_volume_gate`, `get_adv_gate`. |
+| `check_volume_liquidity_threshold` | 20d ADV liquidity gate pass/fail. FX notional mode available via `foreign_exchange=true`. Alias: `get_volume_gate`. |
 | `get_technical_indicators` | Pre-computed RSI-14 (Wilder) and MACD (12,26,9) from daily closes. |
 | `get_price_slope` | N-day price slope (% change) and direction (UP/DOWN/FLAT). Args: `days` (default 5). |
 | `get_short_interest` | Short % of float, shares short, days-to-cover, prior-month comparison. |
@@ -131,11 +131,11 @@ All canonical action names and response schemas remain identical to expanded mod
 |------|-------------|
 | `list_sec_company_filings` | List SEC filings from EDGAR submissions. Returns filing type, date, accession number, document URL. |
 | `get_sec_filing_outline` | Section/heading outline of an SEC filing. |
-| `get_sec_filing_section` | Text of a specific filing section. Alias: `get_filing_document`. |
+| `get_sec_filing_section` | Text of a specific filing section. Alias: `get_filing_section`. |
 | `list_sec_filing_tables` | Tables present in an SEC filing. |
 | `get_sec_filing_table` | Specific table from an SEC filing by index. |
 | `extract_sec_filing_fact` | Extract a specific fact from a filing. |
-| `search_sec_filing_text` | Search narrative filing HTML text or retrieve table-context snippets. Use as fallback when `get_filing_data` returns `NOT_DISCLOSED`. Alias: `get_filing_text_search`. |
+| `search_sec_filing_text` | Search narrative filing HTML text or retrieve table-context snippets. Use as fallback when `get_filing_data` returns `NOT_DISCLOSED`. Alias: `search_filing_text`. |
 | `index_sec_filing` | Build a deterministic section/table index for a filing (cached 24h). |
 | `get_sec_filing_index` | Get the pre-built filing index. |
 | `query_sec_filing_index` | Route SEC filing query types to index-backed extractors. |
@@ -181,8 +181,8 @@ All canonical action names and response schemas remain identical to expanded mod
 |------|-------------|
 | `search_ticker` | Resolve company name or ISIN to ticker symbol. |
 | `screen_stocks` | Screen with predefined criteria (day_gainers, most_actives, undervalued_large_caps, etc.). |
-| `analyze_position_signals` | Aggregate public market, analyst, earnings, and technical inputs for caller-defined scoring. Alias: `get_tps_inputs`. |
-| `calculate_price_target_distance` | Compare current price to a user-supplied reference target. `reference_target_price` is preferred; `io_pt` is accepted for backward compatibility. Alias: `get_eqf_bracket`. |
+| `analyze_position_signals` | Aggregate public market, analyst, earnings, and technical inputs for caller-defined scoring. Alias: `get_position_score_inputs`. |
+| `calculate_price_target_distance` | Compare current price to a user-supplied reference target. `reference_target_price` is preferred; `io_pt` is accepted for backward compatibility. Alias: `get_price_target_bracket`. |
 
 ### Diagnostics
 
