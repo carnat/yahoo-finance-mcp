@@ -128,6 +128,13 @@ def assert_no_unknown_tool(payload: dict, tool: str) -> None:
         raise AssertionError(f"{tool} returned non-callable error: {payload}")
 
 
+def assert_not_silent_wrong_filing_type(data: dict, label: str) -> None:
+    status = str(data.get("status") or data.get("confidence") or data.get("code") or "").upper()
+    evidence = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
+    if status == "NOT_DISCLOSED" and not any(evidence.get(k) for k in ("accessionNumber", "filingDate", "documentUrl")):
+        raise AssertionError(f"{label}: silent wrong-filing-type NOT_DISCLOSED with no filing evidence")
+
+
 def _assert_geo_invariants(data: dict, label: str) -> None:
     for key in ("value", "denominator", "valueRatio", "valuePct", "confidence", "extractionMethod"):
         if key not in data:
@@ -250,6 +257,45 @@ def main() -> int:
     if not isinstance(aapl_cidx_data.get("index"), dict):
         raise AssertionError("get_sec_filing_index AAPL: missing index")
     print("  PASS get_sec_filing_index AAPL schema")
+
+    # Wrong filing type on a 20-F filer must not become a clean non-disclosure.
+    tsm_wrong_type = call_tool("extract_geographic_revenue", {
+        "ticker": "TSM", "region": "China", "filing_type": "10-K", "period": "latest",
+    }, 23)
+    assert_no_unknown_tool(tsm_wrong_type, "extract_geographic_revenue")
+    tsm_wrong_type_data = extract_data(tsm_wrong_type)
+    assert_not_silent_wrong_filing_type(tsm_wrong_type_data, "TSM 10-K fallback")
+    if str(tsm_wrong_type_data.get("status") or tsm_wrong_type_data.get("code") or "").upper() == "FILING_NOT_FOUND_TRY_OTHER_TYPE":
+        if "20-F" not in tsm_wrong_type_data.get("suggestedFilingTypes", []):
+            raise AssertionError(f"TSM wrong filing type should suggest 20-F: {tsm_wrong_type_data}")
+    print("  PASS TSM wrong-filing-type guard")
+
+    # Table listing should be paginated and expose index-derived titles/captions.
+    tables_page = call_tool("list_sec_filing_tables", {
+        "ticker": "AAPL", "filing_type": "10-K", "offset": 0, "limit": 5,
+    }, 24)
+    assert_no_unknown_tool(tables_page, "list_sec_filing_tables")
+    tables_data = extract_data(tables_page)
+    for field in ("tableCount", "returnedCount", "offset", "limit", "hasMore", "tables"):
+        if field not in tables_data:
+            raise AssertionError(f"list_sec_filing_tables pagination missing {field}: {tables_data}")
+    if tables_data.get("returnedCount", 0) > 0 and not any((t.get("title") if isinstance(t, dict) else None) for t in tables_data.get("tables", [])):
+        raise AssertionError("list_sec_filing_tables should expose at least one non-empty title/caption on first page")
+    print("  PASS list_sec_filing_tables pagination/title smoke")
+
+    # Search should resolve readable primary HTML, not XBRL tag soup.
+    tsem_search = call_tool("search_sec_filing_text", {
+        "ticker": "TSEM", "search_terms": ["revenue"], "filing_type": "10-K", "context_chars": 800,
+    }, 25)
+    assert_no_unknown_tool(tsem_search, "search_sec_filing_text")
+    tsem_data = extract_data(tsem_search)
+    if tsem_data.get("documentKind") == "xbrl_xml":
+        raise AssertionError(f"search_sec_filing_text returned XBRL/XML instead of readable filing text: {tsem_data}")
+    if tsem_data.get("documentKind") == "primary_html":
+        raw = json.dumps(tsem_data.get("matches", []))[:5000].lower()
+        if "<xbrl" in raw or "<ix:" in raw:
+            raise AssertionError("search_sec_filing_text returned raw XBRL/inline-XBRL tag soup")
+    print("  PASS search_sec_filing_text primary-html routing smoke")
 
     # --- Phase 3B-4: extract_geographic_revenue ---
 

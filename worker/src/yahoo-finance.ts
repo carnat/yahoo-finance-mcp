@@ -3486,6 +3486,160 @@ async function getSubmissionsForTicker(ticker: string): Promise<{ cikPadded: str
   return { cikPadded, submissions };
 }
 
+type ResolvedSecFiling = {
+  ticker: string;
+  cikPadded: string;
+  cikInt: number;
+  requestedFilingType: string;
+  filingType: string;
+  filingDate: string | null;
+  acceptedAt: string | null;
+  accessionNumber: string;
+  primaryDocument: string;
+  documentUrl: string;
+  availableFilingTypes: string[];
+  suggestedFilingTypes: string[];
+  warnings: Record<string, unknown>[];
+};
+
+function uniqueRecentForms(forms: unknown[], limit = 12): string[] {
+  const out: string[] = [];
+  for (const form of forms) {
+    const value = String(form ?? "").toUpperCase();
+    if (value && !out.includes(value)) out.push(value);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function filingNotFoundPayload(ticker: string, requestedFilingType: string, availableFilingTypes: string[]): Record<string, unknown> {
+  const suggestedFilingTypes = requestedFilingType.toUpperCase() === "10-K" && availableFilingTypes.includes("20-F") ? ["20-F"] : [];
+  return {
+    status: "FILING_NOT_FOUND_TRY_OTHER_TYPE",
+    code: "FILING_NOT_FOUND_TRY_OTHER_TYPE",
+    ticker,
+    requestedFilingType,
+    availableFilingTypes,
+    suggestedFilingTypes,
+    accessionNumber: null,
+    filingDate: null,
+    documentUrl: null,
+    warnings: [{
+      code: "FILING_NOT_FOUND_TRY_OTHER_TYPE",
+      message: `No ${requestedFilingType} filing found for '${ticker}'.`,
+      severity: "error",
+    }],
+  };
+}
+
+function isLikelyXbrlDocumentUrl(url: string): boolean {
+  const lower = url.split("?", 1)[0].toLowerCase();
+  return lower.endsWith(".xml") || /\/xbrl\//.test(lower) || /(_htm|xbrl|cal|def|lab|pre)\.xml$/.test(lower);
+}
+
+async function resolveSecFiling(
+  ticker: string,
+  requestedFilingType: string = "10-K",
+  accessionNumber: string | null = null,
+): Promise<{ ok: true; filing: ResolvedSecFiling } | { ok: false; error: Record<string, unknown> }> {
+  const requested = (requestedFilingType || "10-K").toUpperCase();
+  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
+  if (!cikPadded || !submissions) {
+    return { ok: false, error: { status: "TICKER_NOT_FOUND", code: "TICKER_NOT_FOUND", ticker, message: `Could not resolve EDGAR submissions for ticker '${ticker}'` } };
+  }
+
+  const recent = ((submissions.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+  const forms = (recent.form as string[]) ?? [];
+  const accessions = (recent.accessionNumber as string[]) ?? [];
+  const primaryDocs = (recent.primaryDocument as string[]) ?? [];
+  const filingDates = (recent.filingDate as string[]) ?? [];
+  const acceptedDts = (recent.acceptanceDateTime as string[]) ?? [];
+  const availableFilingTypes = uniqueRecentForms(forms);
+
+  let targetIdx = -1;
+  const warnings: Record<string, unknown>[] = [];
+  if (accessionNumber) {
+    targetIdx = accessions.findIndex((a) => a === accessionNumber);
+  } else {
+    targetIdx = forms.findIndex((f) => String(f).toUpperCase() === requested);
+    if (targetIdx < 0 && requested === "10-K") {
+      const fallbackIdx = forms.findIndex((f) => String(f).toUpperCase() === "20-F");
+      if (fallbackIdx >= 0) {
+        targetIdx = fallbackIdx;
+        warnings.push({
+          code: "AUTO_20F_FALLBACK",
+          message: "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).",
+          severity: "info",
+        });
+      }
+    }
+  }
+
+  if (targetIdx < 0 || !accessions[targetIdx]) {
+    return { ok: false, error: filingNotFoundPayload(ticker, requested, availableFilingTypes) };
+  }
+
+  const primaryDocument = String(primaryDocs[targetIdx] ?? "");
+  if (!primaryDocument) {
+    return {
+      ok: false,
+      error: {
+        status: "FILING_TEXT_NOT_AVAILABLE",
+        code: "FILING_TEXT_NOT_AVAILABLE",
+        ticker,
+        requestedFilingType: requested,
+        filingType: String(forms[targetIdx] ?? requested),
+        filingDate: filingDates[targetIdx] ?? null,
+        accessionNumber: accessions[targetIdx],
+        documentUrl: null,
+        availableFilingTypes,
+        suggestedFilingTypes: [],
+        warnings: [{ code: "PRIMARY_DOCUMENT_MISSING", message: "SEC submissions entry has no primaryDocument.", severity: "error" }],
+      },
+    };
+  }
+
+  const cikInt = parseInt(cikPadded, 10);
+  const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(cikInt, accessions[targetIdx], primaryDocument);
+  if (!edgarPrimaryDocumentUrl || isLikelyXbrlDocumentUrl(edgarPrimaryDocumentUrl)) {
+    return {
+      ok: false,
+      error: {
+        status: "FILING_TEXT_NOT_AVAILABLE",
+        code: "FILING_TEXT_NOT_AVAILABLE",
+        ticker,
+        requestedFilingType: requested,
+        filingType: String(forms[targetIdx] ?? requested),
+        filingDate: filingDates[targetIdx] ?? null,
+        accessionNumber: accessions[targetIdx],
+        documentUrl: edgarPrimaryDocumentUrl,
+        availableFilingTypes,
+        suggestedFilingTypes: [],
+        warnings: [{ code: "PRIMARY_HTML_NOT_FOUND", message: "Could not resolve a human-readable primary filing HTML document.", severity: "error" }],
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    filing: {
+      ticker,
+      cikPadded,
+      cikInt,
+      requestedFilingType: requested,
+      filingType: String(forms[targetIdx] ?? requested),
+      filingDate: filingDates[targetIdx] ?? null,
+      acceptedAt: acceptedDts[targetIdx] ?? null,
+      accessionNumber: accessions[targetIdx],
+      primaryDocument,
+      documentUrl: edgarPrimaryDocumentUrl,
+      availableFilingTypes,
+      suggestedFilingTypes: requested === "10-K" && String(forms[targetIdx]).toUpperCase() === "20-F" ? ["20-F"] : [],
+      warnings,
+    },
+  };
+}
+
 /** Look up the most recent 10-K filing info for a CIK from EDGAR submissions. */
 async function edgarGetLatest10K(cik: number): Promise<{
   filingDate: string | null;
@@ -3890,6 +4044,8 @@ export async function getFilingData(
       primaryDocumentUrl: payload.primaryDocumentUrl ?? null,
       evidence: payload.evidence ?? {},
       calculation: payload.calculation ?? null,
+      status: payload.status ?? (payload.value != null ? "FOUND" : (payload.confidence ?? "NOT_DISCLOSED")),
+      code: payload.code ?? null,
       warnings,
     };
     if (addDenominatorWarning && shaped.value != null && shaped.denominator == null) {
@@ -4045,77 +4201,100 @@ export async function getFilingData(
     // Some companies (e.g. GLW) do not XBRL-tag geographic-revenue segments.
     // Fall through to the same HTML-parsing path used by searchFilingText.
     if (factType === "geographic_revenue") {
-      const { cikPadded: subsCik, submissions } = await getSubmissionsForTicker(ticker);
-      if (subsCik && submissions) {
-        const recent = ((submissions.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
-        const sforms = (recent.form as string[]) ?? [];
-        const saccessions = (recent.accessionNumber as string[]) ?? [];
-        const sprimaryDocs = (recent.primaryDocument as string[]) ?? [];
-        const sfilingDates = (recent.filingDate as string[]) ?? [];
-        const sreportDates = (recent.reportDate as string[]) ?? [];
-        const idx = sforms.findIndex((f) => String(f).toUpperCase() === filingType.toUpperCase());
-        if (idx >= 0) {
-          const primaryDoc = sprimaryDocs[idx] ?? null;
-          if (primaryDoc) {
-            const cikInt = parseInt(subsCik, 10);
-            const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(cikInt, saccessions[idx], primaryDoc);
-            if (edgarPrimaryDocumentUrl) {
-              const htmlText = await edgarGetHtml(edgarPrimaryDocumentUrl, 5_000_000);
-              if (htmlText) {
-                const geo = extractGeoRevenueFromHtml(htmlText, region ?? "");
-                if (geo) {
-                  const reportDate = sreportDates[idx] ?? "";
-                  const fiscalYear = reportDate ? `FY${String(reportDate).slice(0, 4)}` : "";
-                  const warnings = geo.denominator == null && geo.usd != null
-                    ? [{
-                        code: "DENOMINATOR_NOT_FOUND",
-                        message: "Could not compute geographic revenue percentage due to missing denominator.",
-                        severity: "warning",
-                      }]
-                    : [];
-                  return withGeoShape({
-                    ticker,
-                    factType,
-                    region,
-                    period: fiscalYear || null,
-                    rawValue: geo.rawValue ?? formatRawNumber(geo.usd ?? null),
-                    rawDenominator: geo.rawDenominator ?? formatRawNumber(geo.denominator ?? null),
-                    unit: "USD",
-                    unitScale: geo.unitScale,
-                    value: geo.usd ?? null,
-                    denominator: geo.denominator ?? null,
-                    valueRatio: geo.pct,
-                    valuePct: geo.denominator != null ? ratioToPct(geo.pct) : null,
-                    extractionMethod: "PARSED_TABLE",
-                    source: "PARSED_TABLE",
-                    confidence: geo.denominator != null ? "HIGH" : "LOW",
-                    filingType,
-                    filingDate: sfilingDates[idx] ?? null,
-                    accessionNumber: saccessions[idx] ?? null,
-                    documentUrl: edgarPrimaryDocumentUrl,
-                    indexUrl: null,
-                    primaryDocumentUrl: edgarPrimaryDocumentUrl,
-                    evidence: {
-                      sectionHeading: geo.sectionHeading || null,
-                      tableTitle: null,
-                      sourceTableId: 1,
-                      sourceRows: geo.sourceRows,
-                      sourceColumns: geo.sourceColumns.length > 0 ? geo.sourceColumns : [fiscalYear],
-                    },
-                    calculation: geo.denominator != null
-                      ? {
-                          formula: "value / denominator * 100",
-                          valueSource: "sourceRows[0]",
-                          denominatorSource: "sourceRows[1]",
-                          resultPct: ratioToPct(geo.pct),
-                        }
-                      : null,
-                    warnings,
-                  });
+      const resolved = await resolveSecFiling(ticker, filingType, null);
+      if (!resolved.ok) {
+        return withGeoShape({
+          ...resolved.error,
+          factType,
+          region,
+          value: null,
+          denominator: null,
+          valueRatio: null,
+          valuePct: null,
+          extractionMethod: "NONE",
+          source: resolved.error.code,
+          confidence: resolved.error.code,
+          filingType,
+          evidence: {},
+        });
+      }
+      const filing = resolved.filing;
+      const htmlText = await edgarGetHtml(filing.documentUrl, 5_000_000);
+      if (htmlText) {
+        const geo = extractGeoRevenueFromHtml(htmlText, region ?? "");
+        if (geo) {
+          const reportDate = filing.filingDate ?? "";
+          const fiscalYear = reportDate ? `FY${String(reportDate).slice(0, 4)}` : "";
+          const warnings = geo.denominator == null && geo.usd != null
+            ? [{
+                code: "DENOMINATOR_NOT_FOUND",
+                message: "Could not compute geographic revenue percentage due to missing denominator.",
+                severity: "warning",
+              }]
+            : [];
+          return withGeoShape({
+            ticker,
+            factType,
+            region,
+            period: fiscalYear || null,
+            rawValue: geo.rawValue ?? formatRawNumber(geo.usd ?? null),
+            rawDenominator: geo.rawDenominator ?? formatRawNumber(geo.denominator ?? null),
+            unit: "USD",
+            unitScale: geo.unitScale,
+            value: geo.usd ?? null,
+            denominator: geo.denominator ?? null,
+            valueRatio: geo.pct,
+            valuePct: geo.denominator != null ? ratioToPct(geo.pct) : null,
+            extractionMethod: "PARSED_TABLE",
+            source: "PARSED_TABLE",
+            confidence: geo.denominator != null ? "HIGH" : "LOW",
+            filingType: filing.filingType,
+            filingDate: filing.filingDate,
+            accessionNumber: filing.accessionNumber,
+            documentUrl: filing.documentUrl,
+            indexUrl: null,
+            primaryDocumentUrl: filing.documentUrl,
+            evidence: {
+              sectionHeading: geo.sectionHeading || null,
+              tableTitle: null,
+              sourceTableId: 1,
+              sourceRows: geo.sourceRows,
+              sourceColumns: geo.sourceColumns.length > 0 ? geo.sourceColumns : [fiscalYear],
+            },
+            calculation: geo.denominator != null
+              ? {
+                  formula: "value / denominator * 100",
+                  valueSource: "sourceRows[0]",
+                  denominatorSource: "sourceRows[1]",
+                  resultPct: ratioToPct(geo.pct),
                 }
-              }
-            }
-          }
+              : null,
+            warnings: [...warnings, ...filing.warnings],
+          });
+        }
+        const readable = stripHtmlTags(htmlText).toLowerCase();
+        const regionText = String(region ?? "").toLowerCase();
+        if (regionText && readable.includes(regionText) && /revenue|sales|geographic|segment/.test(readable)) {
+          return withGeoShape({
+            ticker,
+            factType,
+            region,
+            value: null,
+            denominator: null,
+            valueRatio: null,
+            valuePct: null,
+            extractionMethod: "NONE",
+            source: "EXTRACTION_FAILED",
+            confidence: "EXTRACTION_FAILED",
+            status: "EXTRACTION_FAILED",
+            code: "EXTRACTION_FAILED",
+            filingType: filing.filingType,
+            filingDate: filing.filingDate,
+            accessionNumber: filing.accessionNumber,
+            documentUrl: filing.documentUrl,
+            evidence: {},
+            warnings: [...filing.warnings, { code: "TABLE_NOT_PARSED", message: "Relevant filing text exists, but no geographic revenue table was parsed.", severity: "warning" }],
+          });
         }
       }
     }
@@ -4210,82 +4389,94 @@ export async function searchFilingText(
   accessionNumber: string | null = null,
   contextChars = 1500,
   returnTables = true,
+  documentUrl: string | null = null,
 ): Promise<string> {
-  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
-  if (!cikPadded || !submissions) {
-    return JSON.stringify({
-      ticker,
-      accessionNumber,
-      documentUrl: null,
-      fiscalYear: null,
-      filingType,
-      filingDate: null,
-      matches: [],
-      matchCount: 0,
-      confidence: "PARSED_HTML",
-      _note: "Could not resolve SEC submissions for ticker.",
-    });
+  const warnings: Record<string, unknown>[] = [];
+  let edgarPrimaryDocumentUrl: string | null = documentUrl;
+  let filingDate: string | null = null;
+  let fiscalYear: string | null = null;
+  let actualFilingType = filingType;
+
+  if (documentUrl && isLikelyXbrlDocumentUrl(documentUrl)) {
+    if (!accessionNumber) {
+      return JSON.stringify({
+        ticker,
+        accessionNumber,
+        documentUrl,
+        fiscalYear: null,
+        filingType,
+        filingDate: null,
+        documentKind: "xbrl_xml",
+        matches: [],
+        matchCount: 0,
+        status: "FILING_TEXT_NOT_AVAILABLE",
+        code: "FILING_TEXT_NOT_AVAILABLE",
+        confidence: "FILING_TEXT_NOT_AVAILABLE",
+        warnings: [{ code: "FILING_TEXT_NOT_AVAILABLE", message: "Provided document_url appears to be XBRL/XML and no accession_number was supplied to resolve primary HTML.", severity: "error" }],
+      });
+    }
+    edgarPrimaryDocumentUrl = null;
+    warnings.push({ code: "DOCUMENT_URL_REPLACED_WITH_PRIMARY_HTML", message: "Provided document_url was XBRL/XML; resolved the accession primary HTML document instead.", severity: "warning" });
   }
 
-  const recent = ((submissions.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
-  const forms = (recent.form as string[]) ?? [];
-  const accessions = (recent.accessionNumber as string[]) ?? [];
-  const primaryDocs = (recent.primaryDocument as string[]) ?? [];
-  const filingDates = (recent.filingDate as string[]) ?? [];
-  const reportDates = (recent.reportDate as string[]) ?? [];
-
-  let targetIndex = -1;
-  if (accessionNumber) {
-    targetIndex = accessions.findIndex((a) => a === accessionNumber);
-  } else {
-    targetIndex = forms.findIndex((f) => String(f).toUpperCase() === filingType.toUpperCase());
-    if (targetIndex >= 0) accessionNumber = accessions[targetIndex] ?? null;
-  }
-  if (targetIndex < 0 || !accessionNumber) {
-    return JSON.stringify({
-      ticker,
-      accessionNumber,
-      documentUrl: null,
-      fiscalYear: null,
-      filingType,
-      filingDate: null,
-      matches: [],
-      matchCount: 0,
-      confidence: "PARSED_HTML",
-      _note: `No ${filingType} filing found in submissions JSON.`,
-    });
+  if (!edgarPrimaryDocumentUrl) {
+    const resolved = await resolveSecFiling(ticker, filingType, accessionNumber);
+    if (!resolved.ok) {
+      return JSON.stringify({
+        ...resolved.error,
+        accessionNumber: resolved.error.accessionNumber ?? accessionNumber,
+        documentUrl: resolved.error.documentUrl ?? null,
+        fiscalYear: null,
+        filingType,
+        filingDate: resolved.error.filingDate ?? null,
+        documentKind: "unavailable",
+        matches: [],
+        matchCount: 0,
+        confidence: resolved.error.code,
+      });
+    }
+    const filing = resolved.filing;
+    edgarPrimaryDocumentUrl = filing.documentUrl;
+    accessionNumber = filing.accessionNumber;
+    filingDate = filing.filingDate;
+    fiscalYear = filing.filingDate ? `FY${String(filing.filingDate).slice(0, 4)}` : null;
+    actualFilingType = filing.filingType;
+    warnings.push(...filing.warnings);
   }
 
-  const primaryDocument = primaryDocs[targetIndex] ?? null;
-  if (!primaryDocument) {
-    return JSON.stringify({
-      ticker,
-      accessionNumber,
-      documentUrl: null,
-      fiscalYear: null,
-      filingType,
-      filingDate: filingDates[targetIndex] ?? null,
-      matches: [],
-      matchCount: 0,
-      confidence: "PARSED_HTML",
-      _note: "primaryDocument missing in submissions JSON.",
-    });
-  }
-
-  const cik = parseInt(cikPadded, 10);
-  const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(cik, accessionNumber, primaryDocument);
   if (!edgarPrimaryDocumentUrl) {
     return JSON.stringify({
       ticker,
       accessionNumber,
       documentUrl: null,
-      fiscalYear: null,
-      filingType,
-      filingDate: filingDates[targetIndex] ?? null,
+      fiscalYear,
+      filingType: actualFilingType,
+      filingDate,
+      documentKind: "unavailable",
       matches: [],
       matchCount: 0,
-      confidence: "PARSED_HTML",
-      _note: "Failed constructing filing document URL.",
+      status: "FILING_TEXT_NOT_AVAILABLE",
+      code: "FILING_TEXT_NOT_AVAILABLE",
+      confidence: "FILING_TEXT_NOT_AVAILABLE",
+      warnings: [...warnings, { code: "FILING_TEXT_NOT_AVAILABLE", message: "Could not resolve primary filing HTML.", severity: "error" }],
+    });
+  }
+
+  if (isLikelyXbrlDocumentUrl(edgarPrimaryDocumentUrl)) {
+    return JSON.stringify({
+      ticker,
+      accessionNumber,
+      documentUrl: edgarPrimaryDocumentUrl,
+      fiscalYear: null,
+      filingType: actualFilingType,
+      filingDate: null,
+      documentKind: "xbrl_xml",
+      matches: [],
+      matchCount: 0,
+      status: "FILING_TEXT_NOT_AVAILABLE",
+      code: "FILING_TEXT_NOT_AVAILABLE",
+      confidence: "FILING_TEXT_NOT_AVAILABLE",
+      warnings: [{ code: "FILING_TEXT_NOT_AVAILABLE", message: "Only an XBRL/XML document could be resolved; refusing to return tag soup as filing text.", severity: "error" }],
     });
   }
 
@@ -4295,13 +4486,16 @@ export async function searchFilingText(
       ticker,
       accessionNumber,
       documentUrl: edgarPrimaryDocumentUrl,
-      fiscalYear: reportDates[targetIndex] ? `FY${String(reportDates[targetIndex]).slice(0, 4)}` : null,
-      filingType,
-      filingDate: filingDates[targetIndex] ?? null,
+      fiscalYear,
+      filingType: actualFilingType,
+      filingDate,
+      documentKind: "primary_html",
       matches: [],
       matchCount: 0,
-      confidence: "PARSED_HTML",
-      _note: "Unable to fetch filing HTML.",
+      status: "FILING_TEXT_NOT_AVAILABLE",
+      code: "FILING_TEXT_NOT_AVAILABLE",
+      confidence: "FILING_TEXT_NOT_AVAILABLE",
+      warnings: [...warnings, { code: "FILING_TEXT_NOT_AVAILABLE", message: "Unable to fetch primary filing HTML.", severity: "error" }],
     });
   }
 
@@ -4365,17 +4559,18 @@ export async function searchFilingText(
     ticker,
     accessionNumber,
     documentUrl: edgarPrimaryDocumentUrl,
-    fiscalYear: reportDates[targetIndex] ? `FY${String(reportDates[targetIndex]).slice(0, 4)}` : null,
-    filingType,
-    filingDate: filingDates[targetIndex] ?? null,
+    fiscalYear,
+    filingType: actualFilingType,
+    filingDate,
+    documentKind: "primary_html",
     matches,
     matchCount: matches.length,
     confidence: matches.length === 0 ? "NOT_DISCLOSED" : (matches.some(m => ((m.tableParsed as unknown[]) ?? []).length > 0) ? "HIGH" : "MEDIUM"),
-    warnings: matches.length > 0 ? [{
+    warnings: [...warnings, ...(matches.length > 0 ? [{
       code: "RAW_FILING_TEXT",
       message: "Returned text is sanitized filing context, not structured fact extraction.",
       severity: "info",
-    }] : [],
+    }] : [])],
   });
 }
 
@@ -5885,7 +6080,7 @@ export async function getFilingSection(ticker: string, sectionName: string, docu
 
 // ── list_filing_tables ────────────────────────────────────────────────────────
 
-export async function listFilingTables(ticker: string, documentUrl: string): Promise<string> {
+export async function listFilingTables(ticker: string, documentUrl: string, offset: number = 0, limit: number = 50): Promise<string> {
   try {
     if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
       return JSON.stringify({ error: true, message: "Invalid SEC URL" });
@@ -5894,12 +6089,13 @@ export async function listFilingTables(ticker: string, documentUrl: string): Pro
     if (!resp.ok) return JSON.stringify({ error: true, message: `HTTP ${resp.status}` });
     const html = await resp.text();
 
-    const tables: { tableIndex: number; rowCount: number; headers: string[] }[] = [];
+    const tables: { tableIndex: number; rowCount: number; title: string | null; headers: string[] }[] = [];
     const tableRe = /<table[^>]*>([\s\S]*?)<\/table>/gi;
     const tdRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
     let tm: RegExpExecArray | null;
     let idx = 0;
-    while ((tm = tableRe.exec(html)) !== null && tables.length < 50) {
+    while ((tm = tableRe.exec(html)) !== null) {
+      const tableStart = tm.index;
       const tableHtml = tm[1];
       const rows = tableHtml.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) ?? [];
       const headers: string[] = [];
@@ -5911,9 +6107,24 @@ export async function listFilingTables(ticker: string, documentUrl: string): Pro
           headers.push(hm[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
         }
       }
-      tables.push({ tableIndex: idx++, rowCount: rows.length, headers });
+      const preText = stripHtmlTags(html.slice(Math.max(0, tableStart - 500), tableStart));
+      const lines = preText.split(/\n| {2,}/).map(l => l.trim()).filter(Boolean);
+      const candidate = lines[lines.length - 1] ?? "";
+      tables.push({ tableIndex: idx++, rowCount: rows.length, title: candidate.length > 10 && candidate.length < 200 ? candidate : null, headers });
     }
-    return JSON.stringify({ ticker, documentUrl, tableCount: tables.length, tables });
+    const safeOffset = Math.max(0, Math.trunc(offset));
+    const safeLimit = Math.min(100, Math.max(1, Math.trunc(limit || 50)));
+    const page = tables.slice(safeOffset, safeOffset + safeLimit);
+    return JSON.stringify({
+      ticker,
+      documentUrl,
+      tableCount: tables.length,
+      returnedCount: page.length,
+      offset: safeOffset,
+      limit: safeLimit,
+      hasMore: safeOffset + page.length < tables.length,
+      tables: page,
+    });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
   }
@@ -7453,59 +7664,22 @@ async function _indexSecFilingImpl(
   _period: string,
   accessionNumber: string | null,
 ): Promise<string> {
-  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
-  if (!cikPadded || !submissions) {
-    return JSON.stringify({ ok: false, error: { code: "TICKER_NOT_FOUND", message: `Could not resolve EDGAR submissions for ticker '${ticker}'` } });
+  const resolved = await resolveSecFiling(ticker, filingType, accessionNumber);
+  if (!resolved.ok) {
+    return JSON.stringify({ ok: false, error: resolved.error, ...resolved.error });
   }
-
-  const recent = ((submissions.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
-  const forms = (recent.form as string[]) ?? [];
-  const accessions = (recent.accessionNumber as string[]) ?? [];
-  const primaryDocs = (recent.primaryDocument as string[]) ?? [];
-  const filingDates = (recent.filingDate as string[]) ?? [];
-  const acceptedDts = (recent.acceptanceDateTime as string[]) ?? [];
-
-  // Find target filing
-  let targetIdx: number | null = null;
-  if (accessionNumber) {
-    for (let i = 0; i < accessions.length; i++) {
-      if (accessions[i] === accessionNumber) { targetIdx = i; break; }
-    }
-  } else {
-    for (let i = 0; i < forms.length; i++) {
-      if (forms[i]!.toUpperCase() === filingType.toUpperCase()) {
-        targetIdx = i;
-        accessionNumber = accessions[i] ?? null;
-        break;
-      }
-    }
-  }
-
-  if (targetIdx === null || !accessionNumber) {
-    return JSON.stringify({ ok: false, error: { code: "NO_FILING_DATA", message: `No ${filingType} filing found for '${ticker}'` } });
-  }
-
-  const filingDate = filingDates[targetIdx] ?? "";
-  const acceptedAt = acceptedDts[targetIdx] ?? null;
-  const primaryDoc = primaryDocs[targetIdx] ?? null;
-
-  if (!primaryDoc) {
-    return JSON.stringify({ ok: false, error: { code: "NO_FILING_DATA", message: `primaryDocument missing for ${accessionNumber}` } });
-  }
-
-  const cikInt = parseInt(cikPadded, 10);
-  const accClean = accessionNumber.replace(/-/g, "");
-  const documentUrl = `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accClean}/${primaryDoc}`;
+  const filing = resolved.filing;
+  accessionNumber = filing.accessionNumber;
 
   // Check cache
-  const cacheKey = `secidx:${ticker.toUpperCase()}:${accessionNumber}:${filingType}`;
+  const cacheKey = `secidx:${ticker.toUpperCase()}:${accessionNumber}:${filing.filingType}`;
   const cached = filingIndexCache.get(cacheKey);
   if (cached && Date.now() - cached.storedAt < FILING_INDEX_TTL_MS) {
     return cached.value;
   }
 
   // Fetch filing HTML
-  const resp = await fetch(documentUrl, { headers: { "User-Agent": EDGAR_UA } });
+  const resp = await fetch(filing.documentUrl, { headers: { "User-Agent": EDGAR_UA } });
   if (!resp.ok) {
     return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: `Failed to fetch filing: HTTP ${resp.status}` } });
   }
@@ -7538,12 +7712,13 @@ async function _indexSecFilingImpl(
 
   const result = JSON.stringify({
     ticker,
-    cik: cikPadded,
-    filingType,
-    filingDate,
-    acceptedAt,
-    accessionNumber,
-    documentUrl,
+    cik: filing.cikPadded,
+    requestedFilingType: filing.requestedFilingType,
+    filingType: filing.filingType,
+    filingDate: filing.filingDate,
+    acceptedAt: filing.acceptedAt,
+    accessionNumber: filing.accessionNumber,
+    documentUrl: filing.documentUrl,
     index,
     meta: {
       indexedAt,
@@ -7551,6 +7726,7 @@ async function _indexSecFilingImpl(
       cacheKey: `${ticker.toUpperCase()}:${accessionNumber}`,
       cacheTtlHours: 24,
     },
+    warnings: filing.warnings,
   });
 
   filingIndexCache.set(cacheKey, { value: result, storedAt: Date.now() });
@@ -8311,8 +8487,14 @@ function compactExcerpt(text: unknown, maxLen = 240): string {
 }
 
 function normalizeStatus(payload: Record<string, unknown>): string {
+  const status = String(payload.status ?? payload.code ?? "").toUpperCase();
+  if (status === "FILING_NOT_FOUND_TRY_OTHER_TYPE") return "FILING_NOT_FOUND_TRY_OTHER_TYPE";
+  if (status === "FILING_TEXT_NOT_AVAILABLE") return "FILING_TEXT_NOT_AVAILABLE";
+  if (status === "EXTRACTION_FAILED") return "EXTRACTION_FAILED";
   const source = String(payload.source ?? "").toUpperCase();
   const confidence = String(payload.confidence ?? "").toUpperCase();
+  if (source === "FILING_NOT_FOUND_TRY_OTHER_TYPE" || confidence === "FILING_NOT_FOUND_TRY_OTHER_TYPE") return "FILING_NOT_FOUND_TRY_OTHER_TYPE";
+  if (source === "EXTRACTION_FAILED" || confidence === "EXTRACTION_FAILED") return "EXTRACTION_FAILED";
   if (source === "NOT_DISCLOSED" || confidence === "NOT_DISCLOSED") return "NOT_DISCLOSED";
   if (source === "CONFLICTING" || confidence === "CONFLICTING") return "CONFLICTING";
   return "NOT_FOUND";
@@ -8551,6 +8733,7 @@ export async function extractRevenueExposure(
   const geo = parseObjectJson(await extractGeographicRevenue(ticker, exposureQuery, filingType, period, null, detailLevel));
   const found = geo.value != null;
   const status = found ? "FOUND_REVENUE_EXPOSURE" : normalizeStatus(geo);
+  const warnings = Array.isArray(geo.warnings) ? geo.warnings : [];
   const matches = found
     ? [{
         exposureType: "geographic_revenue",
@@ -8564,7 +8747,21 @@ export async function extractRevenueExposure(
         evidence: geo.evidence ?? {},
       }]
     : [];
-  return JSON.stringify({ ticker, query: exposureQuery, matches, status });
+  return JSON.stringify({
+    ticker,
+    query: exposureQuery,
+    matches,
+    status,
+    code: found ? null : (geo.code ?? (status === "NOT_DISCLOSED" ? null : status)),
+    requestedFilingType: geo.requestedFilingType ?? filingType,
+    filingType: (geo.evidence && typeof geo.evidence === "object" ? (geo.evidence as Record<string, unknown>).filingType : null) ?? geo.filingType ?? filingType,
+    filingDate: (geo.evidence && typeof geo.evidence === "object" ? (geo.evidence as Record<string, unknown>).filingDate : null) ?? geo.filingDate ?? null,
+    accessionNumber: (geo.evidence && typeof geo.evidence === "object" ? (geo.evidence as Record<string, unknown>).accessionNumber : null) ?? geo.accessionNumber ?? null,
+    documentUrl: (geo.evidence && typeof geo.evidence === "object" ? (geo.evidence as Record<string, unknown>).documentUrl : null) ?? geo.documentUrl ?? null,
+    availableFilingTypes: geo.availableFilingTypes ?? [],
+    suggestedFilingTypes: geo.suggestedFilingTypes ?? [],
+    warnings,
+  });
 }
 
 export async function extractRiskFactorMentions(
@@ -8652,6 +8849,31 @@ export async function extractChinaExposure(
 ): Promise<string> {
   const idx = parseObjectJson(await getSecFilingIndex(ticker, filingType, period, accessionNumber));
   const revenue = parseObjectJson(await extractRevenueExposure(ticker, "China", filingType, period, "compact"));
+  const idxError = idx.error && typeof idx.error === "object" ? idx.error as Record<string, unknown> : {};
+  const idxStatus = String(idx.status ?? idx.code ?? idxError.code ?? "").toUpperCase();
+  const revenueStatus = String(revenue.status ?? revenue.code ?? "").toUpperCase();
+  if (idxStatus === "FILING_NOT_FOUND_TRY_OTHER_TYPE" || revenueStatus === "FILING_NOT_FOUND_TRY_OTHER_TYPE") {
+    const source = idxStatus === "FILING_NOT_FOUND_TRY_OTHER_TYPE" ? idx : revenue;
+    return JSON.stringify({
+      ticker,
+      exposureType: "china_exposure",
+      filingType,
+      filingDate: null,
+      accessionNumber: null,
+      documentUrl: null,
+      revenueExposure: { status: "FILING_NOT_FOUND_TRY_OTHER_TYPE", value: null, denominator: null, valueRatio: null, valuePct: null, confidence: "FILING_NOT_FOUND_TRY_OTHER_TYPE", evidence: [] },
+      manufacturingExposure: { status: "NOT_FOUND", confidence: "LOW", evidence: [] },
+      entityExposure: { status: "NOT_FOUND", entities: [], confidence: "LOW", evidence: [] },
+      bankExposure: { status: "NOT_FOUND", entities: [], confidence: "LOW", evidence: [] },
+      riskFactorExposure: { status: "NOT_FOUND", confidence: "LOW", evidence: [] },
+      overallStatus: "FILING_NOT_FOUND_TRY_OTHER_TYPE",
+      code: "FILING_NOT_FOUND_TRY_OTHER_TYPE",
+      requestedFilingType: source.requestedFilingType ?? filingType,
+      availableFilingTypes: source.availableFilingTypes ?? [],
+      suggestedFilingTypes: source.suggestedFilingTypes ?? [],
+      warnings: source.warnings ?? [],
+    });
+  }
   const index = idx.index && typeof idx.index === "object" ? idx.index as Record<string, unknown> : {};
   const sections = Array.isArray(index.sections) ? index.sections : [];
   const tables = Array.isArray(index.tables) ? index.tables : [];

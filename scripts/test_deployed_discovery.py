@@ -637,10 +637,11 @@ def main() -> int:
         ("get_option_chain", {"ticker": "ASTS", "expiration_date": expiry, "option_type": "calls", "max_contracts": 10}),
         ("get_sec_filing_outline", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}),
         ("get_sec_filing_section", {"ticker": "AAPL", "filing_type": "10-K", "selector": {"item": "Item 1A"}}),
-        ("list_sec_filing_tables", {"ticker": "AAPL", "filing_type": "10-K"}),
+        ("list_sec_filing_tables", {"ticker": "AAPL", "filing_type": "10-K", "offset": 0, "limit": 5}),
         ("get_sec_filing_table", {"ticker": "AAPL", "filing_type": "10-K", "table_index": 0}),
         ("extract_sec_filing_fact", {"ticker": "QCOM", "fact": "geographic_revenue", "region": "China"}),
         ("search_sec_filing_text", {"ticker": "AAPL", "search_terms": ["Greater China"], "filing_type": "10-K"}),
+        ("extract_geographic_revenue", {"ticker": "TSM", "region": "China", "filing_type": "10-K", "period": "latest"}),
         ("get_company_news", {"ticker": "AAPL"}),
         ("search_company_news", {"ticker": "AAPL", "query": "earnings", "max_results": 5}),
         ("get_company_press_releases", {"ticker": "AAPL", "max_results": 5}),
@@ -664,7 +665,7 @@ def main() -> int:
     if doc_url:
         calls.extend([
             ("get_sec_filing_outline", {"ticker": "AAPL", "document_url": doc_url}),
-            ("list_sec_filing_tables", {"ticker": "AAPL", "document_url": doc_url}),
+            ("list_sec_filing_tables", {"ticker": "AAPL", "document_url": doc_url, "offset": 0, "limit": 5}),
         ])
 
     for i, (name, args) in enumerate(calls, start=100):
@@ -710,6 +711,17 @@ def main() -> int:
                 for key in ("sort_by", "moneyness"):
                     if key not in fa:
                         raise AssertionError(f"get_option_chain filtersApplied missing: {key}")
+        if name == "list_sec_filing_tables":
+            data = extract_data(payload)
+            for field in ("tableCount", "returnedCount", "offset", "limit", "hasMore", "tables"):
+                if field not in data:
+                    raise AssertionError(f"list_sec_filing_tables missing {field}: {data}")
+            if args.get("document_url") is None and data.get("returnedCount", 0) and not any((t.get("title") if isinstance(t, dict) else None) for t in data.get("tables", [])):
+                raise AssertionError(f"list_sec_filing_tables returned no table titles/captions: {data}")
+        if name == "search_sec_filing_text":
+            data = extract_data(payload)
+            if data.get("documentKind") == "xbrl_xml":
+                raise AssertionError(f"search_sec_filing_text returned xbrl_xml: {data}")
         if name == "extract_sec_filing_fact" and args.get("ticker") == "QCOM":
             data = extract_data(payload)
             if not isinstance(data, dict):
@@ -742,7 +754,13 @@ def main() -> int:
                 raise AssertionError(f"extract_geographic_revenue returned non-object: {data!r}")
             ticker = str(args.get("ticker", ""))
             region = str(args.get("region", ""))
-            if ticker == "AAPL" and region == "Greater China":
+            if ticker == "TSM":
+                status = str(data.get("status") or data.get("confidence") or data.get("code") or "").upper()
+                evidence = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
+                if status == "NOT_DISCLOSED" and not any(evidence.get(k) for k in ("accessionNumber", "filingDate", "documentUrl")):
+                    raise AssertionError(f"TSM wrong filing type returned silent NOT_DISCLOSED: {data}")
+                print("  PASS TSM wrong-filing-type guard")
+            elif ticker == "AAPL" and region == "Greater China":
                 has_value = _check_geographic_revenue_schema(
                     data, label="AAPL extract_geographic_revenue", require_positive=False
                 )
