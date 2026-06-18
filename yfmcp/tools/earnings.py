@@ -450,8 +450,6 @@ async def extract_earnings_metrics(
         "evidence": evidence_items,
         "confidence": overall_conf,
     }, warnings=warnings)
-
-
 @yfinance_server.tool(
     name="extract_guidance",
     output_schema=_TOOL_OUTPUT_SCHEMAS["extract_guidance"],
@@ -1180,5 +1178,3 @@ async def get_earnings_call_transcript(ticker: str, period: str = "latest", topi
         "attemptedSources": attempted_sources,
         "nextRecommendedFallback": None,
     }, warnings=warnings)
-
-
