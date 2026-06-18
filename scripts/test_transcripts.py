@@ -156,8 +156,8 @@ class TestFilterParagraphsByTopics(unittest.TestCase):
 
 class TestListSecFilingExhibits(unittest.TestCase):
     def test_returns_exhibits(self):
-        with patch("server._edgar_cik_from_accession", return_value=12345), \
-             patch("server._edgar_list_exhibits_from_index", new_callable=AsyncMock) as mock_list:
+        with patch("yfmcp.tools.earnings._edgar_cik_from_accession", return_value=12345), \
+             patch("yfmcp.tools.earnings._edgar_list_exhibits_from_index", new_callable=AsyncMock) as mock_list:
             mock_list.return_value = [
                 {"sequence": "1", "description": "Press Release", "document": "ex99-1.htm", "type": "EX-99.1", "size": "50000"},
             ]
@@ -182,8 +182,8 @@ class TestListSecFilingExhibits(unittest.TestCase):
 class TestGetSecFilingExhibitContent(unittest.TestCase):
     def test_returns_full_text_without_topics(self):
         mock_html = "<html><body><p>Revenue grew 20% in the quarter.</p><p>Net income was $1.5 billion.</p></body></html>"
-        with patch("server._edgar_cik_from_accession", return_value=12345), \
-             patch("server._edgar_get_html", new_callable=AsyncMock) as mock_get:
+        with patch("yfmcp.tools.earnings._edgar_cik_from_accession", return_value=12345), \
+             patch("yfmcp.tools.earnings._edgar_get_html", new_callable=AsyncMock) as mock_get:
             mock_get.return_value = mock_html
             raw = _run(srv.get_sec_filing_exhibit_content(
                 ticker="AAPL", accessionNumber="0000320193-24-000081", fileName="ex99-1.htm"
@@ -195,8 +195,8 @@ class TestGetSecFilingExhibitContent(unittest.TestCase):
 
     def test_returns_filtered_paragraphs_with_topics(self):
         mock_html = "<html><body><p>Revenue grew 20% in the quarter due to AI services.</p><p>Net income was $1.5 billion from operations.</p></body></html>"
-        with patch("server._edgar_cik_from_accession", return_value=12345), \
-             patch("server._edgar_get_html", new_callable=AsyncMock) as mock_get:
+        with patch("yfmcp.tools.earnings._edgar_cik_from_accession", return_value=12345), \
+             patch("yfmcp.tools.earnings._edgar_get_html", new_callable=AsyncMock) as mock_get:
             mock_get.return_value = mock_html
             raw = _run(srv.get_sec_filing_exhibit_content(
                 ticker="AAPL", accessionNumber="0000320193-24-000081", fileName="ex99-1.htm", topics=["AI"]
@@ -212,7 +212,7 @@ class TestGetSecFilingExhibitContent(unittest.TestCase):
 
 class TestGetEarningsCallTranscript(unittest.TestCase):
     def test_returns_sec_not_found_when_no_8k(self):
-        with patch("server._resolve_latest_earnings_sec_source", new_callable=AsyncMock) as mock_src:
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_sec_source", new_callable=AsyncMock) as mock_src:
             mock_src.return_value = None
             raw = _run(srv.get_earnings_call_transcript(ticker="AAPL"))
         data = _parse(raw)
@@ -227,9 +227,9 @@ class TestGetEarningsCallTranscript(unittest.TestCase):
 
     def test_returns_exhibit_not_found_when_no_transcript(self):
         mock_sec = {"accessionNumber": "0000320193-24-000081", "filingDate": "2024-01-25", "acceptedAt": "2024-01-25T16:00:00"}
-        with patch("server._resolve_latest_earnings_sec_source", new_callable=AsyncMock, return_value=mock_sec), \
-             patch("server._edgar_cik_from_accession", return_value=320193), \
-             patch("server._edgar_list_exhibits_from_index", new_callable=AsyncMock) as mock_list:
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_sec_source", new_callable=AsyncMock, return_value=mock_sec), \
+             patch("yfmcp.tools.earnings._edgar_cik_from_accession", return_value=320193), \
+             patch("yfmcp.tools.earnings._edgar_list_exhibits_from_index", new_callable=AsyncMock) as mock_list:
             # Only EX-99.1 (press release), no transcript
             mock_list.return_value = [
                 {"sequence": "1", "description": "PRESS RELEASE", "document": "ex99-1.htm", "type": "EX-99.1", "size": "50000"},
@@ -246,10 +246,10 @@ class TestGetEarningsCallTranscript(unittest.TestCase):
 
     def test_returns_structured_metadata_when_sec_fetch_fails(self):
         mock_sec = {"accessionNumber": "0000320193-24-000081", "filingDate": "2024-01-25", "acceptedAt": "2024-01-25T16:00:00"}
-        with patch("server._resolve_latest_earnings_sec_source", new_callable=AsyncMock, return_value=mock_sec), \
-             patch("server._edgar_cik_from_accession", return_value=320193), \
-             patch("server._edgar_list_exhibits_from_index", new_callable=AsyncMock) as mock_list, \
-             patch("server._edgar_get_html", new_callable=AsyncMock) as mock_get:
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_sec_source", new_callable=AsyncMock, return_value=mock_sec), \
+             patch("yfmcp.tools.earnings._edgar_cik_from_accession", return_value=320193), \
+             patch("yfmcp.tools.earnings._edgar_list_exhibits_from_index", new_callable=AsyncMock) as mock_list, \
+             patch("yfmcp.tools.earnings._edgar_get_html", new_callable=AsyncMock) as mock_get:
             mock_list.return_value = [
                 {"sequence": "2", "description": "EARNINGS CALL TRANSCRIPT", "document": "ex99-2.htm", "type": "EX-99.2", "size": "120000"},
             ]
@@ -273,10 +273,10 @@ class TestGetEarningsCallTranscript(unittest.TestCase):
             "warnings": [],
         }
         alpha_attempt = {"sourceType": "alpha_vantage", "status": "SUCCESS", "quarter": "2024Q1", "rateLimit": {"provider": "alpha_vantage", "used": True}}
-        with patch("server._resolve_latest_earnings_sec_source", new_callable=AsyncMock, return_value=mock_sec), \
-             patch("server._edgar_cik_from_accession", return_value=320193), \
-             patch("server._edgar_list_exhibits_from_index", new_callable=AsyncMock) as mock_list, \
-             patch("server._fetch_alpha_vantage_transcript", new_callable=AsyncMock) as mock_alpha:
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_sec_source", new_callable=AsyncMock, return_value=mock_sec), \
+             patch("yfmcp.tools.earnings._edgar_cik_from_accession", return_value=320193), \
+             patch("yfmcp.tools.earnings._edgar_list_exhibits_from_index", new_callable=AsyncMock) as mock_list, \
+             patch("yfmcp.tools.earnings._fetch_alpha_vantage_transcript", new_callable=AsyncMock) as mock_alpha:
             mock_list.return_value = [
                 {"sequence": "1", "description": "PRESS RELEASE", "document": "ex99-1.htm", "type": "EX-99.1", "size": "50000"},
             ]
@@ -292,10 +292,10 @@ class TestGetEarningsCallTranscript(unittest.TestCase):
     def test_returns_transcript_content_when_found(self):
         mock_sec = {"accessionNumber": "0000320193-24-000081", "filingDate": "2024-01-25", "acceptedAt": "2024-01-25T16:00:00"}
         mock_html = "<html><body><p>Good afternoon everyone, welcome to the earnings call.</p><p>We had a fantastic quarter driven by AI.</p></body></html>"
-        with patch("server._resolve_latest_earnings_sec_source", new_callable=AsyncMock, return_value=mock_sec), \
-             patch("server._edgar_cik_from_accession", return_value=320193), \
-             patch("server._edgar_list_exhibits_from_index", new_callable=AsyncMock) as mock_list, \
-             patch("server._edgar_get_html", new_callable=AsyncMock) as mock_get:
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_sec_source", new_callable=AsyncMock, return_value=mock_sec), \
+             patch("yfmcp.tools.earnings._edgar_cik_from_accession", return_value=320193), \
+             patch("yfmcp.tools.earnings._edgar_list_exhibits_from_index", new_callable=AsyncMock) as mock_list, \
+             patch("yfmcp.tools.earnings._edgar_get_html", new_callable=AsyncMock) as mock_get:
             mock_list.return_value = [
                 {"sequence": "1", "description": "PRESS RELEASE", "document": "ex99-1.htm", "type": "EX-99.1", "size": "50000"},
                 {"sequence": "2", "description": "EARNINGS CALL TRANSCRIPT", "document": "ex99-2.htm", "type": "EX-99.2", "size": "120000"},
@@ -312,10 +312,10 @@ class TestGetEarningsCallTranscript(unittest.TestCase):
     def test_topic_filtering(self):
         mock_sec = {"accessionNumber": "0000320193-24-000081", "filingDate": "2024-01-25", "acceptedAt": "2024-01-25T16:00:00"}
         mock_html = "<html><body><p>Good afternoon everyone, welcome to the earnings call for Apple Inc.</p><p>Our AI investments drove significant growth this quarter with new model deployments.</p><p>Supply chain improvements reduced costs by 8% globally.</p></body></html>"
-        with patch("server._resolve_latest_earnings_sec_source", new_callable=AsyncMock, return_value=mock_sec), \
-             patch("server._edgar_cik_from_accession", return_value=320193), \
-             patch("server._edgar_list_exhibits_from_index", new_callable=AsyncMock) as mock_list, \
-             patch("server._edgar_get_html", new_callable=AsyncMock) as mock_get:
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_sec_source", new_callable=AsyncMock, return_value=mock_sec), \
+             patch("yfmcp.tools.earnings._edgar_cik_from_accession", return_value=320193), \
+             patch("yfmcp.tools.earnings._edgar_list_exhibits_from_index", new_callable=AsyncMock) as mock_list, \
+             patch("yfmcp.tools.earnings._edgar_get_html", new_callable=AsyncMock) as mock_get:
             mock_list.return_value = [
                 {"sequence": "2", "description": "TRANSCRIPT", "document": "ex99-2.htm", "type": "EX-99.2", "size": "120000"},
             ]
