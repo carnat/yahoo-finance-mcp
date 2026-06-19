@@ -160,4 +160,4 @@ jobs:
       - name: Verify deployed Worker reaches EdgarTools sidecar
         run: python scripts/test_deployed_sec_facts_sidecar.py
         env:
-          MCP_URL: ${{ vars.SEC_FACTS_GATE_MCP_URL }}
+          MCP_URL: ${{ vars.SEC_FACTS_GATE_MCP_URL || 'https://yahoo-finance-mcp.artinatw.workers.dev/mcp' }}
