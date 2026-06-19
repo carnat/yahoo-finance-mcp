@@ -67,7 +67,7 @@ jobs:
         working-directory: worker
 
       - name: Install Python deps
-        run: pip install mcp yfinance pandas pydantic
+        run: pip install -e . pandas pydantic
 
       # ── 1. Fastest sanity gates (no deps) ────────────────────────────────
       - name: Python syntax check
@@ -101,6 +101,9 @@ jobs:
 
       - name: Worker SEC reliability tests
         run: python scripts/test_sec_reliability_worker.py
+
+      - name: SEC facts sidecar tests
+        run: python -m unittest scripts.test_sec_facts_sidecar scripts.test_worker_sec_sidecar -v
 
       # ── 4. Infrastructure: cache layer ────────────────────────────────────
       - name: Cache layer tests
@@ -143,3 +146,18 @@ jobs:
       - name: Worker type-check
         run: npx tsc --noEmit
         working-directory: worker
+
+  live-sec-facts-sidecar-smoke:
+    name: Live SEC facts sidecar smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Verify deployed Worker reaches EdgarTools sidecar
+        run: python scripts/test_deployed_sec_facts_sidecar.py
+        env:
+          MCP_URL: ${{ vars.SEC_FACTS_GATE_MCP_URL }}

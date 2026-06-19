@@ -244,6 +244,13 @@ TOOL_MODE=grouped uv run server.py
 https://<your-replit>.repl.co/mcp
 ```
 
+### SEC structured-facts sidecar
+
+Structured SEC revenue/geography facts use the optional EdgarTools sidecar.
+The Cloudflare Worker remains the public MCP endpoint; set `EDGAR_FACTS_URL`
+on the Worker to enable sidecar-backed extraction. See
+[`docs/sec-facts-sidecar.md`](docs/sec-facts-sidecar.md).
+
 ## License
 
 MIT

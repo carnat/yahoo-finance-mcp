@@ -3,7 +3,13 @@ name: Deploy Cloudflare Worker
 on:
   push:
     branches: [main]
-    paths: ["worker/**", "server.py"]
+    paths:
+      - "worker/**"
+      - "server.py"
+      - "pyproject.toml"
+      - "Dockerfile.sec-facts"
+      - "yfmcp/sec_facts_sidecar.py"
+      - "scripts/test_deployed_sec_facts_sidecar.py"
   workflow_dispatch: # allow manual trigger from GitHub UI
 
 env:
@@ -94,6 +100,11 @@ jobs:
           MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
           ALLOW_NETWORK_SKIP: "0"
           EXPECTED_TOOL_MODE: expanded
+
+      - name: Verify deployed Worker reaches EdgarTools sidecar
+        run: python scripts/test_deployed_sec_facts_sidecar.py
+        env:
+          MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
 
       - name: Verify deployed MCP grouped discovery
         if: ${{ vars.DEPLOY_GROUPED_SMOKE == 'true' }}

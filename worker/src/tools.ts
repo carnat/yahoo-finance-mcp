@@ -51,14 +51,8 @@ import {
   getSecRecentEvents,
   getPublicEventTimeline,
   verifyCompanyEvent,
-  extractGeographicRevenue,
-  extractSegmentRevenue,
-  extractTotalRevenue,
-  extractRevenueExposure,
-  extractChinaExposure,
   extractRiskFactorMentions,
   extractCustomerConcentration,
-  extractExposure,
   querySecFilingIndex,
   getLatestEarningsRelease,
   indexEarningsRelease,
@@ -1543,6 +1537,162 @@ function secIndexTablesPayload(indexPayload: Record<string, unknown>, offset: nu
   });
 }
 
+function structuredFactsUrl(): string | null {
+  if (getWorkerVar("STRUCTURED_FACT_PROVIDER") === "disabled") return null;
+  const url = (getWorkerVar("EDGAR_FACTS_URL") ?? "").trim();
+  return url ? url.replace(/\/+$/, "") : null;
+}
+
+function structuredFactsUnavailable(tool: string, code: string, message: string, args: Record<string, unknown>): string {
+  return JSON.stringify({
+    status: code,
+    code,
+    provider: "edgartools_sidecar",
+    tool,
+    ticker: str(args.ticker).toUpperCase(),
+    topic: str(args.topic ?? args.region ?? args.exposure_query ?? (tool === "extract_china_exposure" ? "China" : "")),
+    value: null,
+    valuePct: null,
+    warnings: [{ code, message, severity: code === "STRUCTURED_FACT_PROVIDER_UNCONFIGURED" ? "info" : "error" }],
+  });
+}
+
+function structuredTopic(tool: string, args: Record<string, unknown>): string {
+  if (tool === "extract_geographic_revenue") return str(args.region);
+  if (tool === "extract_revenue_exposure") return str(args.exposure_query);
+  if (tool === "extract_china_exposure") return "China";
+  if (tool === "extract_segment_revenue") return "segment revenue";
+  if (tool === "extract_total_revenue") return "total revenue";
+  return str(args.topic);
+}
+
+function shapeStructuredFactPayload(tool: string, args: Record<string, unknown>, payload: Record<string, unknown>): string {
+  const topic = structuredTopic(tool, args);
+  const status = str(payload.status ?? payload.code);
+  const common = {
+    ...payload,
+    provider: payload.provider ?? "edgartools_sidecar",
+    factType: tool === "extract_total_revenue" ? "total_revenue"
+      : tool === "extract_segment_revenue" ? "segment_revenue"
+      : "geographic_revenue",
+  };
+  if (tool === "extract_china_exposure") {
+    return JSON.stringify({
+      ...common,
+      overallStatus: status === "FOUND" ? "FOUND_REVENUE_EXPOSURE" : status,
+      revenueExposure: payload,
+      nonRevenueExposure: null,
+      topic: "China",
+    });
+  }
+  if (tool === "extract_revenue_exposure") {
+    return JSON.stringify({
+      ...common,
+      exposureQuery: topic,
+      matches: status === "FOUND" ? [payload.evidence ?? payload] : [],
+    });
+  }
+  if (tool === "extract_exposure") {
+    return JSON.stringify({
+      ...common,
+      topic,
+      revenueExposure: payload,
+      riskMentions: [],
+      operationalExposure: null,
+    });
+  }
+  return JSON.stringify({
+    ...common,
+    region: topic,
+  });
+}
+
+async function callStructuredFactsProvider(tool: string, args: Record<string, unknown>): Promise<string> {
+  const url = structuredFactsUrl();
+  if (!url) {
+    return structuredFactsUnavailable(
+      tool,
+      "STRUCTURED_FACT_PROVIDER_UNCONFIGURED",
+      "EDGAR_FACTS_URL is not configured; structured SEC facts are disabled.",
+      args,
+    );
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
+  try {
+    const resp = await fetch(`${url}/sec/facts/exposure`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tool,
+        ticker: str(args.ticker).toUpperCase(),
+        topic: structuredTopic(tool, args),
+        filing_type: str(args.filing_type, "10-K"),
+        period: str(args.period, "latest"),
+        accession_number: args.accession_number != null ? str(args.accession_number) : null,
+        detailLevel: str(args.detailLevel, "compact"),
+      }),
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      return structuredFactsUnavailable(tool, "STRUCTURED_FACT_PROVIDER_UNAVAILABLE", `EdgarTools sidecar returned HTTP ${resp.status}.`, args);
+    }
+    const payload = await resp.json() as Record<string, unknown>;
+    return shapeStructuredFactPayload(tool, args, payload);
+  } catch (e) {
+    return structuredFactsUnavailable(
+      tool,
+      "STRUCTURED_FACT_PROVIDER_UNAVAILABLE",
+      `EdgarTools sidecar unavailable: ${e instanceof Error ? e.message : String(e)}`,
+      args,
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function structuredFactProviderDiagnostics(): Promise<Record<string, unknown>> {
+  const url = structuredFactsUrl();
+  const base = {
+    structuredFactProvider: url ? "edgartools_sidecar" : "disabled",
+    structuredFactProviderConfigured: Boolean(url),
+    structuredFactProviderUrlConfigured: Boolean(url),
+    structuredFactProviderLastSmokeStatus: getWorkerVar("EDGAR_FACTS_LAST_SMOKE_STATUS") ?? null,
+  };
+  if (!url) {
+    return {
+      ...base,
+      structuredFactProviderHealth: "UNCONFIGURED",
+      structuredFactProviderCacheStatus: null,
+      structuredFactProviderLastErrorCode: "STRUCTURED_FACT_PROVIDER_UNCONFIGURED",
+    };
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1500);
+  try {
+    const resp = await fetch(`${url}/health`, { signal: controller.signal });
+    const body = resp.ok ? await resp.json() as Record<string, unknown> : {};
+    return {
+      ...base,
+      structuredFactProviderHealth: resp.ok && body.status === "ok" ? "OK" : "UNHEALTHY",
+      structuredFactProviderCacheStatus: {
+        entries: body.cacheEntries ?? null,
+        ttlSeconds: body.cacheTtlSeconds ?? null,
+      },
+      structuredFactProviderLastErrorCode: body.lastErrorCode ?? null,
+    };
+  } catch (e) {
+    return {
+      ...base,
+      structuredFactProviderHealth: "UNAVAILABLE",
+      structuredFactProviderCacheStatus: null,
+      structuredFactProviderLastErrorCode: "STRUCTURED_FACT_PROVIDER_UNAVAILABLE",
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function callTool(name: string, args: Record<string, unknown>): Promise<string> {
   const aliasTarget = TOOL_ALIASES[name];
   const canonicalTool = aliasTarget ?? name;
@@ -1842,21 +1992,16 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         Array.isArray(args.topics) ? args.topics.map(String) : null,
       );
     case "extract_geographic_revenue":
-      return extractGeographicRevenue(str(args.ticker), str(args.region), str(args.filing_type, "10-K"), str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null, str(args.detailLevel, "compact"));
     case "extract_segment_revenue":
-      return extractSegmentRevenue(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
     case "extract_total_revenue":
-      return extractTotalRevenue(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"));
     case "extract_revenue_exposure":
-      return extractRevenueExposure(str(args.ticker), str(args.exposure_query), str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
     case "extract_china_exposure":
-      return extractChinaExposure(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null, str(args.detailLevel, "compact"));
+    case "extract_exposure":
+      return callStructuredFactsProvider(name, args);
     case "extract_risk_factor_mentions":
       return extractRiskFactorMentions(str(args.ticker), Array.isArray(args.terms) ? args.terms.map(String) : [], str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
     case "extract_customer_concentration":
       return extractCustomerConcentration(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
-    case "extract_exposure":
-      return extractExposure(str(args.ticker), str(args.topic), str(args.filing_type, "10-K"), str(args.period, "latest"), args.include_risk_factors !== false);
     case "query_sec_filing_index":
       return querySecFilingIndex(
         str(args.ticker),
@@ -1965,6 +2110,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       const manifestVersion = getWorkerVar("MANIFEST_VERSION") ?? "1";
       const deployedAt = getWorkerVar("DEPLOYED_AT") ?? new Date().toISOString();
       const manifestHash = await computeHash(JSON.stringify(visibleTools.map(t => t.name)));
+      const structuredFacts = await structuredFactProviderDiagnostics();
       return JSON.stringify({
         status: "ok",
         serverVersion: version,
@@ -1982,6 +2128,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         deployedAt,
         generatedAt: new Date().toISOString(),
         privacyScope: "public_market_data_only",
+        ...structuredFacts,
       });
     }
     case "get_manifest_diagnostics": {
@@ -1994,6 +2141,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       const deployedAt = getWorkerVar("DEPLOYED_AT") ?? null;
       const manifestHash = await computeHash(JSON.stringify(visibleTools.map(t => t.name)));
       const workerSchemaGeneratedAt = new Date().toISOString();
+      const structuredFacts = await structuredFactProviderDiagnostics();
       return JSON.stringify({
         toolCount: canonicalToolCount,
         manifestVersion,
@@ -2008,6 +2156,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         manifestMismatch: null,
         staleConnectorWarning: "ChatGPT connector schema may lag the deployed Worker schema. Direct Worker tools/list and get_manifest_diagnostics are source of truth.",
         serverVersion: version,
+        ...structuredFacts,
       });
     }
     case "get_market_snapshot": {
