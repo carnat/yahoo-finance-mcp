@@ -3700,7 +3700,7 @@ function stripHtmlTags(html: string): string {
     }
     return " ";
   });
-  return decoded.replace(/\s+/g, " ").trim();
+  return decoded.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function sanitizeFilingHtml(html: string): string {
@@ -4500,6 +4500,8 @@ export async function searchFilingText(
   }
 
   const cleanedHtml = sanitizeFilingHtml(html);
+  const readableText = cleanFilingDisplayText(htmlToReadableText(cleanedHtml));
+  const textLower = readableText.toLowerCase();
   const htmlLower = cleanedHtml.toLowerCase();
   const size = Math.max(200, Math.min(Math.floor(contextChars), 4000));
   const matches: Record<string, unknown>[] = [];
@@ -4509,20 +4511,22 @@ export async function searchFilingText(
     if ([...seen].some((p) => Math.abs(p - pos) < 150)) return;
     seen.add(pos);
     const start = Math.max(0, pos - Math.floor(size / 2));
-    const end = Math.min(cleanedHtml.length, pos + Math.floor(size / 2));
-    const contextHtml = cleanedHtml.slice(start, end);
-    const preHtml = cleanedHtml.slice(Math.max(0, pos - 8_000), pos);
-    const headingMatches = [...preHtml.matchAll(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi)];
-    const sectionHeading = headingMatches.length ? stripHtmlTags(headingMatches[headingMatches.length - 1][1]) : "";
+    const end = Math.min(readableText.length, pos + Math.floor(size / 2));
+    const contextText = cleanFilingDisplayText(readableText.slice(start, end));
+    const preText = readableText.slice(Math.max(0, pos - 2_000), pos);
+    const sectionHeading = (preText.match(/(?:Item\s+\d+[A-Z]?\.?\s+[^.]{3,120}|[A-Z][A-Z0-9 ,&/-]{12,120})\s*$/) ?? [""])[0].trim();
     const match: Record<string, unknown> = {
       term,
       sectionHeading,
-      contextText: stripHtmlTags(contextHtml),
+      contextText,
       confidence: "LOW",
     };
     if (returnTables) {
       const tableParsed: Record<string, unknown>[] = [];
-      const tableWindow = cleanedHtml.slice(Math.max(0, pos - 12_000), Math.min(cleanedHtml.length, pos + 12_000));
+      const htmlPos = htmlLower.indexOf(term.toLowerCase());
+      const tableWindow = htmlPos >= 0
+        ? cleanedHtml.slice(Math.max(0, htmlPos - 12_000), Math.min(cleanedHtml.length, htmlPos + 12_000))
+        : "";
       for (const m of tableWindow.matchAll(/<table[^>]*>([\s\S]*?)<\/table>/gi)) {
         const rows = parseHtmlTable(m[0]);
         if (rows.length >= 2 && rows.some(r => r.length > 0 && r.some(c => c.length > 0))) {
@@ -4541,14 +4545,14 @@ export async function searchFilingText(
   };
 
   if (sectionHint) {
-    const pos = htmlLower.indexOf(sectionHint.toLowerCase());
+    const pos = textLower.indexOf(sectionHint.toLowerCase());
     if (pos >= 0) addMatch(sectionHint, pos);
   }
   for (const term of searchTerms) {
     let idx = 0;
     const termLower = term.toLowerCase();
     while (matches.length < 10) {
-      const pos = htmlLower.indexOf(termLower, idx);
+      const pos = textLower.indexOf(termLower, idx);
       if (pos < 0) break;
       addMatch(term, pos);
       idx = pos + 1;
@@ -4572,6 +4576,20 @@ export async function searchFilingText(
       severity: "info",
     }] : [])],
   });
+}
+
+function cleanFilingDisplayText(text: string): string {
+  return text
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\b(?:contextRef|unitRef|decimals|id|name|class|style|href)=("[^"]*"|'[^']*'|[^\s]+)/gi, " ")
+    .replace(/\b(?:xbrli|ix|dei|us-gaap|srt|country):[A-Za-z0-9_.:-]+\b/g, " ")
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function looksLikeFilingMarkupText(text: string): boolean {
+  return /[<>]=?|(?:^|\s)(?:contextRef|unitRef|decimals|style|class|id|name)=|(?:xbrli|ix|dei|us-gaap|srt|country):|https?:\/\//i.test(text);
 }
 
 export async function getGeographicRevenue(ticker: string, region: string = "China"): Promise<string> {
@@ -6108,9 +6126,10 @@ export async function listFilingTables(ticker: string, documentUrl: string, offs
         }
       }
       const preText = stripHtmlTags(html.slice(Math.max(0, tableStart - 500), tableStart));
-      const lines = preText.split(/\n| {2,}/).map(l => l.trim()).filter(Boolean);
+      const lines = preText.split(/\n| {2,}/).map(l => cleanFilingDisplayText(l.trim())).filter(Boolean);
       const candidate = lines[lines.length - 1] ?? "";
-      tables.push({ tableIndex: idx++, rowCount: rows.length, title: candidate.length > 10 && candidate.length < 200 ? candidate : null, headers });
+      const title = candidate.length > 10 && candidate.length < 200 && !looksLikeFilingMarkupText(candidate) ? candidate : null;
+      tables.push({ tableIndex: idx++, rowCount: rows.length, title, headers });
     }
     const safeOffset = Math.max(0, Math.trunc(offset));
     const safeLimit = Math.min(100, Math.max(1, Math.trunc(limit || 50)));
@@ -7620,10 +7639,10 @@ function _buildFilingIndexFromHtml(
 
     // Infer title from pre-context
     const preText = _stripHtmlTagsIdx(sanitized.slice(Math.max(0, tableStart - 500), tableStart));
-    const lines = preText.split("\n").map(l => l.trim()).filter(Boolean);
+    const lines = preText.split("\n").map(l => cleanFilingDisplayText(l.trim())).filter(Boolean);
     let title = "";
     const candidate = lines[lines.length - 1] ?? "";
-    if (candidate.length > 10 && candidate.length < 200) title = candidate;
+    if (candidate.length > 10 && candidate.length < 200 && !looksLikeFilingMarkupText(candidate)) title = candidate;
 
     tables.push({ tableId: tableIdx, sectionId: nearbySectionId, title: title || nearbyHeading, headers, rowLabels, unit: "USD", unitScale, confidence });
     tableIdx++;

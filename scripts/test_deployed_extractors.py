@@ -104,6 +104,10 @@ def call_tool(name: str, arguments: dict, req_id: int) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
+        if text.strip().lower() == "no approval received.":
+            raise AssertionError(
+                f"{name} returned connector/platform approval text instead of a JSON tool payload"
+            )
         return {"_raw": text}
 
 
