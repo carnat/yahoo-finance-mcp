@@ -7,9 +7,10 @@ MCP_ENVELOPE_V2 = "true"
 SERVER_VERSION = "1.4.1"
 BUILD_DATE = "2026-06-18"
 BUILD_SHA = ""
-# Set EDGAR_FACTS_URL after deploying the Python sidecar. Leave unset, or set
-# STRUCTURED_FACT_PROVIDER = "disabled", to force structured fact rollback.
-STRUCTURED_FACT_PROVIDER = "disabled"
+# Set EDGAR_FACTS_URL as a Worker secret after deploying the Python sidecar.
+# To roll back structured facts, unset EDGAR_FACTS_URL or set this binding to
+# "disabled" as a Worker secret.
+STRUCTURED_FACT_PROVIDER = "edgartools_sidecar"
 
 # Smart Placement routes Worker execution to the Cloudflare PoP geographically
 # closest to its outbound dependencies (e.g. data.sec.gov in US-East), which
