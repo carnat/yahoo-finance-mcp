@@ -1537,23 +1537,36 @@ function secIndexTablesPayload(indexPayload: Record<string, unknown>, offset: nu
   });
 }
 
-function structuredFactsUrl(): string | null {
-  if (getWorkerVar("STRUCTURED_FACT_PROVIDER") === "disabled") return null;
-  const url = (getWorkerVar("EDGAR_FACTS_URL") ?? "").trim();
-  return url ? url.replace(/\/+$/, "") : null;
+const SEC_COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json";
+const SEC_DATA_BASE = "https://data.sec.gov";
+const SEC_ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data";
+const REVENUE_CONCEPTS = [
+  "RevenueFromContractWithCustomerExcludingAssessedTax",
+  "Revenues",
+  "SalesRevenueNet",
+  "RevenueFromContractWithCustomerIncludingAssessedTax",
+];
+
+function structuredFactsDisabled(): boolean {
+  return getWorkerVar("STRUCTURED_FACT_PROVIDER") === "disabled";
 }
 
-function structuredFactsUnavailable(tool: string, code: string, message: string, args: Record<string, unknown>): string {
+function secUserAgent(): string {
+  return getWorkerVar("SEC_USER_AGENT") ?? "yahoo-finance-mcp/1.4.1 public-market-data";
+}
+
+function structuredFactsUnavailable(tool: string, code: string, message: string, args: Record<string, unknown>, extra: Record<string, unknown> = {}): string {
   return JSON.stringify({
     status: code,
     code,
-    provider: "edgartools_sidecar",
+    provider: "official_sec_data_api",
     tool,
     ticker: str(args.ticker).toUpperCase(),
     topic: str(args.topic ?? args.region ?? args.exposure_query ?? (tool === "extract_china_exposure" ? "China" : "")),
     value: null,
     valuePct: null,
     warnings: [{ code, message, severity: code === "STRUCTURED_FACT_PROVIDER_UNCONFIGURED" ? "info" : "error" }],
+    ...extra,
   });
 }
 
@@ -1571,7 +1584,7 @@ function shapeStructuredFactPayload(tool: string, args: Record<string, unknown>,
   const status = str(payload.status ?? payload.code);
   const common = {
     ...payload,
-    provider: payload.provider ?? "edgartools_sidecar",
+    provider: payload.provider ?? "official_sec_data_api",
     factType: tool === "extract_total_revenue" ? "total_revenue"
       : tool === "extract_segment_revenue" ? "segment_revenue"
       : "geographic_revenue",
@@ -1607,90 +1620,305 @@ function shapeStructuredFactPayload(tool: string, args: Record<string, unknown>,
   });
 }
 
-async function callStructuredFactsProvider(tool: string, args: Record<string, unknown>): Promise<string> {
-  const url = structuredFactsUrl();
-  if (!url) {
-    return structuredFactsUnavailable(
-      tool,
-      "STRUCTURED_FACT_PROVIDER_UNCONFIGURED",
-      "EDGAR_FACTS_URL is not configured; structured SEC facts are disabled.",
-      args,
-    );
-  }
+function compactText(value: unknown): string {
+  return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function padCik(cik: number | string): string {
+  return String(cik).replace(/\D/g, "").padStart(10, "0");
+}
+
+function accessionNoDashes(accession: string): string {
+  return accession.replace(/-/g, "");
+}
+
+async function fetchSecJson(url: string, timeoutMs = 20_000): Promise<Record<string, unknown>> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20_000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const resp = await fetch(`${url}/sec/facts/exposure`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        tool,
-        ticker: str(args.ticker).toUpperCase(),
-        topic: structuredTopic(tool, args),
-        filing_type: str(args.filing_type, "10-K"),
-        period: str(args.period, "latest"),
-        accession_number: args.accession_number != null ? str(args.accession_number) : null,
-        detailLevel: str(args.detailLevel, "compact"),
-      }),
+    const resp = await fetch(url, {
+      headers: {
+        "Accept": "application/json",
+        "User-Agent": secUserAgent(),
+      },
       signal: controller.signal,
     });
-    if (!resp.ok) {
-      return structuredFactsUnavailable(tool, "STRUCTURED_FACT_PROVIDER_UNAVAILABLE", `EdgarTools sidecar returned HTTP ${resp.status}.`, args);
+    if (resp.status === 429) {
+      throw new Error("SEC_RATE_LIMITED");
     }
-    const payload = await resp.json() as Record<string, unknown>;
-    return shapeStructuredFactPayload(tool, args, payload);
-  } catch (e) {
-    return structuredFactsUnavailable(
-      tool,
-      "STRUCTURED_FACT_PROVIDER_UNAVAILABLE",
-      `EdgarTools sidecar unavailable: ${e instanceof Error ? e.message : String(e)}`,
-      args,
-    );
+    if (!resp.ok) {
+      throw new Error(`SEC API returned HTTP ${resp.status}`);
+    }
+    return await resp.json() as Record<string, unknown>;
   } finally {
     clearTimeout(timeout);
   }
 }
 
-async function structuredFactProviderDiagnostics(): Promise<Record<string, unknown>> {
-  const url = structuredFactsUrl();
-  const base = {
-    structuredFactProvider: url ? "edgartools_sidecar" : "disabled",
-    structuredFactProviderConfigured: Boolean(url),
-    structuredFactProviderUrlConfigured: Boolean(url),
-    structuredFactProviderLastSmokeStatus: getWorkerVar("EDGAR_FACTS_LAST_SMOKE_STATUS") ?? null,
+async function resolveCikFromSecTickerMap(ticker: string): Promise<{ cik: string; companyName: string | null }> {
+  const tickerU = ticker.toUpperCase();
+  const payload = await fetchSecJson(SEC_COMPANY_TICKERS_URL);
+  for (const item of Object.values(payload)) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    if (String(row.ticker ?? "").toUpperCase() !== tickerU) continue;
+    return { cik: padCik(String(row.cik_str ?? "")), companyName: str(row.title, "") || null };
+  }
+  throw new Error("TICKER_NOT_FOUND");
+}
+
+function recentFilings(submissions: Record<string, unknown>): Array<Record<string, unknown>> {
+  const recent = submissions.recent as Record<string, unknown> | undefined;
+  if (!recent) return [];
+  const accessionNumber = Array.isArray(recent.accessionNumber) ? recent.accessionNumber : [];
+  const forms = Array.isArray(recent.form) ? recent.form : [];
+  const filingDate = Array.isArray(recent.filingDate) ? recent.filingDate : [];
+  const primaryDocument = Array.isArray(recent.primaryDocument) ? recent.primaryDocument : [];
+  return accessionNumber.map((accn, i) => ({
+    accessionNumber: String(accn),
+    filingType: String(forms[i] ?? ""),
+    filingDate: String(filingDate[i] ?? ""),
+    primaryDocument: String(primaryDocument[i] ?? ""),
+  }));
+}
+
+async function resolveOfficialSecFiling(ticker: string, cik: string, requestedType: string, accessionNumber: string | null): Promise<Record<string, unknown>> {
+  const submissions = await fetchSecJson(`${SEC_DATA_BASE}/submissions/CIK${cik}.json`);
+  const filings = recentFilings(submissions);
+  const requested = requestedType.toUpperCase();
+  const candidates = requested === "10-K" ? [requested, "20-F"] : [requested];
+  let filing = accessionNumber
+    ? filings.find((f) => String(f.accessionNumber) === accessionNumber)
+    : null;
+  let actualType = filing ? String(filing.filingType) : "";
+  if (!filing) {
+    for (const form of candidates) {
+      filing = filings.find((f) => String(f.filingType).toUpperCase() === form) ?? null;
+      if (filing) {
+        actualType = form;
+        break;
+      }
+    }
+  }
+  const availableFilingTypes = Array.from(new Set(filings.map((f) => String(f.filingType)).filter(Boolean))).slice(0, 20);
+  if (!filing) {
+    throw new Error(JSON.stringify({
+      code: "FILING_NOT_FOUND_TRY_OTHER_TYPE",
+      requestedFilingType: requestedType,
+      availableFilingTypes,
+      suggestedFilingTypes: requested === "10-K" && availableFilingTypes.includes("20-F") ? ["20-F"] : [],
+    }));
+  }
+  const accn = String(filing.accessionNumber ?? "");
+  const primaryDocument = String(filing.primaryDocument ?? "");
+  const documentUrl = accn && primaryDocument
+    ? `${SEC_ARCHIVES_BASE}/${Number(cik)}/${accessionNoDashes(accn)}/${primaryDocument}`
+    : null;
+  return {
+    ticker: ticker.toUpperCase(),
+    cik,
+    companyName: str(submissions.name, "") || null,
+    filingType: actualType || String(filing.filingType ?? requestedType),
+    requestedFilingType: requestedType,
+    filingDate: filing.filingDate ?? null,
+    accessionNumber: accn || null,
+    documentUrl,
+    availableFilingTypes,
   };
-  if (!url) {
-    return {
-      ...base,
-      structuredFactProviderHealth: "UNCONFIGURED",
-      structuredFactProviderCacheStatus: null,
-      structuredFactProviderLastErrorCode: "STRUCTURED_FACT_PROVIDER_UNCONFIGURED",
-    };
+}
+
+type SecFactRow = {
+  concept: string;
+  taxonomy: string;
+  unit: string;
+  label: string;
+  value: number | null;
+  accn: string | null;
+  form: string | null;
+  filed: string | null;
+  fy: number | null;
+  fp: string | null;
+  end: string | null;
+  raw: Record<string, unknown>;
+};
+
+function factRows(companyFacts: Record<string, unknown>, concepts: string[]): SecFactRow[] {
+  const out: SecFactRow[] = [];
+  const facts = companyFacts.facts as Record<string, unknown> | undefined;
+  if (!facts) return out;
+  for (const [taxonomy, taxonomyFacts] of Object.entries(facts)) {
+    if (!taxonomyFacts || typeof taxonomyFacts !== "object") continue;
+    const conceptMap = taxonomyFacts as Record<string, unknown>;
+    for (const concept of concepts) {
+      const node = conceptMap[concept] as Record<string, unknown> | undefined;
+      if (!node || typeof node !== "object") continue;
+      const label = str(node.label ?? node.description ?? concept);
+      const units = node.units as Record<string, unknown> | undefined;
+      if (!units) continue;
+      for (const [unit, rows] of Object.entries(units)) {
+        if (!Array.isArray(rows)) continue;
+        for (const raw of rows) {
+          if (!raw || typeof raw !== "object") continue;
+          const r = raw as Record<string, unknown>;
+          out.push({
+            concept,
+            taxonomy,
+            unit,
+            label,
+            value: typeof r.val === "number" ? r.val : null,
+            accn: r.accn != null ? String(r.accn) : null,
+            form: r.form != null ? String(r.form) : null,
+            filed: r.filed != null ? String(r.filed) : null,
+            fy: typeof r.fy === "number" ? r.fy : null,
+            fp: r.fp != null ? String(r.fp) : null,
+            end: r.end != null ? String(r.end) : null,
+            raw: r,
+          });
+        }
+      }
+    }
   }
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 1500);
+  return out;
+}
+
+function chooseRevenueFact(rows: SecFactRow[], filing: Record<string, unknown>, topic: string | null): SecFactRow | null {
+  const accn = String(filing.accessionNumber ?? "");
+  const filingType = String(filing.filingType ?? "");
+  const topicNorm = topic ? compactText(topic) : "";
+  const filtered = rows.filter((row) => {
+    if (row.value == null) return false;
+    if (!["10-K", "20-F", "40-F", "10-Q", "6-K", "8-K"].includes(String(row.form ?? ""))) return false;
+    if (accn && row.accn && row.accn !== accn) return false;
+    if (filingType && row.form && row.form !== filingType) return false;
+    if (topicNorm) {
+      const haystack = compactText(`${row.concept} ${row.label} ${JSON.stringify(row.raw)}`);
+      return haystack.includes(topicNorm);
+    }
+    return true;
+  });
+  const candidates = filtered.length ? filtered : rows.filter((row) => row.value != null && (!topicNorm));
+  return candidates.sort((a, b) => {
+    const dateCmp = String(b.end ?? b.filed ?? "").localeCompare(String(a.end ?? a.filed ?? ""));
+    if (dateCmp !== 0) return dateCmp;
+    return Math.abs(b.value ?? 0) - Math.abs(a.value ?? 0);
+  })[0] ?? null;
+}
+
+function officialSecPayload(tool: string, args: Record<string, unknown>, filing: Record<string, unknown>, row: SecFactRow | null, totalRow: SecFactRow | null, status: string, message?: string): Record<string, unknown> {
+  const topic = structuredTopic(tool, args);
+  const value = row?.value ?? null;
+  const total = totalRow?.value ?? null;
+  const valuePct = value != null && total != null && total !== 0 ? Number(((value / total) * 100).toFixed(4)) : null;
+  return {
+    status,
+    code: status,
+    provider: "official_sec_data_api",
+    ticker: str(args.ticker).toUpperCase(),
+    topic,
+    value,
+    valuePct,
+    currency: row?.unit ?? totalRow?.unit ?? "USD",
+    denominator: total,
+    ...filing,
+    evidence: row ? {
+      provider: "sec_companyfacts",
+      sourceUrl: `${SEC_DATA_BASE}/api/xbrl/companyfacts/CIK${filing.cik}.json`,
+      concept: row.concept,
+      taxonomy: row.taxonomy,
+      label: row.label,
+      unit: row.unit,
+      periodEnd: row.end,
+      filed: row.filed,
+      accessionNumber: row.accn,
+      form: row.form,
+    } : null,
+    warnings: message ? [{ code: status, message, severity: status === "FOUND" ? "info" : "warning" }] : [],
+  };
+}
+
+async function callStructuredFactsProvider(tool: string, args: Record<string, unknown>): Promise<string> {
+  if (structuredFactsDisabled()) {
+    return structuredFactsUnavailable(
+      tool,
+      "STRUCTURED_FACT_PROVIDER_UNCONFIGURED",
+      "STRUCTURED_FACT_PROVIDER is disabled; official SEC structured facts are not active.",
+      args,
+    );
+  }
   try {
-    const resp = await fetch(`${url}/health`, { signal: controller.signal });
-    const body = resp.ok ? await resp.json() as Record<string, unknown> : {};
-    return {
-      ...base,
-      structuredFactProviderHealth: resp.ok && body.status === "ok" ? "OK" : "UNHEALTHY",
-      structuredFactProviderCacheStatus: {
-        entries: body.cacheEntries ?? null,
-        ttlSeconds: body.cacheTtlSeconds ?? null,
-      },
-      structuredFactProviderLastErrorCode: body.lastErrorCode ?? null,
-    };
+    const ticker = str(args.ticker).toUpperCase();
+    const { cik } = await resolveCikFromSecTickerMap(ticker);
+    const filing = await resolveOfficialSecFiling(
+      ticker,
+      cik,
+      str(args.filing_type, "10-K"),
+      args.accession_number != null ? str(args.accession_number) : null,
+    );
+    const facts = await fetchSecJson(`${SEC_DATA_BASE}/api/xbrl/companyfacts/CIK${cik}.json`);
+    const rows = factRows(facts, REVENUE_CONCEPTS);
+    const totalRow = chooseRevenueFact(rows, filing, null);
+    const topic = structuredTopic(tool, args);
+    const wantsDimensionalFact = !["extract_total_revenue"].includes(tool);
+    const row = wantsDimensionalFact ? chooseRevenueFact(rows, filing, topic) : totalRow;
+    let payload: Record<string, unknown>;
+    if (row) {
+      payload = officialSecPayload(tool, args, filing, row, totalRow, "FOUND");
+    } else if (totalRow && wantsDimensionalFact) {
+      payload = officialSecPayload(
+        tool,
+        args,
+        filing,
+        null,
+        totalRow,
+        "PROVIDER_LIMITATION",
+        "Official SEC companyfacts exposes standardized entity-level facts, but no matching dimensional geography/segment fact was available for this topic.",
+      );
+    } else {
+      payload = officialSecPayload(
+        tool,
+        args,
+        filing,
+        null,
+        totalRow,
+        "NO_STANDARD_REVENUE_FACT",
+        "Official SEC companyfacts did not expose a standard revenue fact for this filing.",
+      );
+    }
+    return shapeStructuredFactPayload(tool, args, payload);
   } catch (e) {
-    return {
-      ...base,
-      structuredFactProviderHealth: "UNAVAILABLE",
-      structuredFactProviderCacheStatus: null,
-      structuredFactProviderLastErrorCode: "STRUCTURED_FACT_PROVIDER_UNAVAILABLE",
-    };
-  } finally {
-    clearTimeout(timeout);
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = JSON.parse(e instanceof Error ? e.message : String(e)) as Record<string, unknown>;
+    } catch {
+      parsed = null;
+    }
+    if (parsed?.code === "FILING_NOT_FOUND_TRY_OTHER_TYPE") {
+      return structuredFactsUnavailable(tool, "FILING_NOT_FOUND_TRY_OTHER_TYPE", "No requested SEC filing was found; try another filing_type.", args, parsed);
+    }
+    const message = e instanceof Error ? e.message : String(e);
+    const code = message.includes("SEC_RATE_LIMITED") ? "SEC_RATE_LIMITED"
+      : message.includes("TICKER_NOT_FOUND") ? "TICKER_NOT_FOUND"
+      : "STRUCTURED_FACT_PROVIDER_UNAVAILABLE";
+    return structuredFactsUnavailable(
+      tool,
+      code,
+      code === "SEC_RATE_LIMITED" ? "SEC rate limited the official data API request." : `Official SEC data API unavailable: ${message}`,
+      args,
+    );
   }
+}
+
+async function structuredFactProviderDiagnostics(): Promise<Record<string, unknown>> {
+  const disabled = structuredFactsDisabled();
+  return {
+    structuredFactProvider: disabled ? "disabled" : "official_sec_data_api",
+    structuredFactProviderConfigured: !disabled,
+    structuredFactProviderUrlConfigured: true,
+    structuredFactProviderLastSmokeStatus: getWorkerVar("EDGAR_FACTS_LAST_SMOKE_STATUS") ?? null,
+    structuredFactProviderHealth: disabled ? "UNCONFIGURED" : "OK",
+    structuredFactProviderCacheStatus: null,
+    structuredFactProviderLastErrorCode: disabled ? "STRUCTURED_FACT_PROVIDER_UNCONFIGURED" : null,
+  };
 }
 
 export async function callTool(name: string, args: Record<string, unknown>): Promise<string> {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static guards for Worker structured-facts sidecar routing."""
+"""Static guards for Worker official SEC structured-facts routing."""
 
 from __future__ import annotations
 
@@ -17,8 +17,10 @@ class TestWorkerSecSidecar(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.tools = TOOLS_TS.read_text(encoding="utf-8")
 
-    def test_structured_extractors_route_to_sidecar(self) -> None:
-        self.assertIn("EDGAR_FACTS_URL", self.tools)
+    def test_structured_extractors_route_to_official_sec_provider(self) -> None:
+        self.assertIn("official_sec_data_api", self.tools)
+        self.assertIn("data.sec.gov", self.tools)
+        self.assertIn("companyfacts", self.tools)
         self.assertIn("STRUCTURED_FACT_PROVIDER_UNCONFIGURED", self.tools)
         self.assertIn("STRUCTURED_FACT_PROVIDER_UNAVAILABLE", self.tools)
         for tool in (
@@ -44,6 +46,10 @@ class TestWorkerSecSidecar(unittest.TestCase):
         ):
             self.assertIn(field, self.tools)
 
+    def test_no_sidecar_url_dependency(self) -> None:
+        self.assertNotIn("EDGAR_FACTS_URL", self.tools)
+        self.assertNotIn("/sec/facts/exposure", self.tools)
+
     def test_structured_tools_do_not_fall_back_to_legacy_parser(self) -> None:
         self.assertNotRegex(
             self.tools,
@@ -57,4 +63,3 @@ class TestWorkerSecSidecar(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-
