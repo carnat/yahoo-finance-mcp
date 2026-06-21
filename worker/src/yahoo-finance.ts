@@ -7349,11 +7349,18 @@ async function collectCompanyEvents(
 // ─── Public event / news tools ─────────────────────────────────────────────────
 
 export async function getCompanyNews(
-  ticker: string,
+  ticker: string | string[],
   maxResults = 10,
   lookbackDays = 14,
   sources: string[] = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
 ): Promise<string> {
+  // Batch path: fetch each ticker independently and return a per-ticker keyed
+  // object (a union of results), matching the other multi-ticker tools. News is
+  // fetched per ticker — there is no combined/OR'd query that could zero out the
+  // whole batch under low-news conditions.
+  if (Array.isArray(ticker)) {
+    return runPartialBatch(ticker, (t) => getCompanyNews(t, maxResults, lookbackDays, sources));
+  }
   const out = await collectCompanyEvents(ticker, { maxResults, lookbackDays, sources });
   const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources);

@@ -5546,6 +5546,11 @@ async def get_company_events_calendar(ticker: str) -> str:
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_yahoo_finance_news"],
     description="""Get recent public company news and press releases from selected public sources.
 
+Accepts a single ticker or an array of up to 5 symbols. For an array, each
+ticker is fetched independently and results are returned as a per-ticker keyed
+object (a union of per-ticker results), so low-news conditions for one ticker
+never zero out the others.
+
 Returns deduplicated source-backed items with precise source labels
 (``yahoo_finance_news``, ``yahoo_finance_press_releases``, ``finnhub``),
 timestamps, URL, event classification, confidence, ticker relevance,
@@ -5557,11 +5562,21 @@ Supported sources: ``yahoo_finance_news``, ``yahoo_finance_press_releases``,
 """,
 )
 async def get_company_news(
-    ticker: str,
+    ticker: str | list[str],
     max_results: int = 10,
     lookback_days: int = 14,
     sources: list[str] | None = None,
 ) -> str:
+    # Batch path: fetch each ticker independently and return a per-ticker keyed
+    # object (a union of results), matching the other multi-ticker tools. News is
+    # fetched per ticker — there is no combined/OR'd query that could zero out the
+    # whole batch under low-news conditions.
+    if isinstance(ticker, list):
+        results = await asyncio.gather(
+            *[get_company_news(t, max_results=max_results, lookback_days=lookback_days, sources=sources) for t in ticker],
+            return_exceptions=True,
+        )
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     err = _validate_ticker(ticker)
     if err:
         return _mcp_failure("get_company_news", ErrorCode.INPUT_VALIDATION_ERROR, err)
