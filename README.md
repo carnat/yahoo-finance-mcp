@@ -244,6 +244,13 @@ TOOL_MODE=grouped uv run server.py
 https://<your-replit>.repl.co/mcp
 ```
 
+### SEC structured-facts provider
+
+Structured SEC revenue/geography facts use the official SEC `data.sec.gov`
+JSON APIs directly from the Cloudflare Worker. No Python sidecar or API key is
+required. See
+[`docs/sec-facts-sidecar.md`](docs/sec-facts-sidecar.md).
+
 ## License
 
 MIT

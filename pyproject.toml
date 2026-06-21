@@ -11,3 +11,7 @@ dependencies = [
     "starlette>=0.37.0",
 ]
 
+[tool.setuptools.packages.find]
+include = ["yfmcp*"]
+exclude = ["assets*", "worker*", "scripts*", "docs*"]
+
