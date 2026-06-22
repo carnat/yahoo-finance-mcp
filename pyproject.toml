@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "mcp[cli]>=1.6.0",
-    "yfinance>=0.2.62",
+    "yfinance>=1.4.1",
     "uvicorn>=0.29.0",
     "starlette>=0.37.0",
 ]
