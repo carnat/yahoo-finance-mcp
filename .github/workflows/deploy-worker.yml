@@ -60,11 +60,31 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
 
+      - name: Wire Alpaca overnight provider secrets
+        run: |
+          if [ -n "$ALPACA_API_KEY" ]; then
+            printf '%s' "$ALPACA_API_KEY" | npx wrangler secret put ALPACA_API_KEY
+          fi
+          if [ -n "$ALPACA_SECRET_KEY" ]; then
+            printf '%s' "$ALPACA_SECRET_KEY" | npx wrangler secret put ALPACA_SECRET_KEY
+          fi
+          if [ -n "$OVERNIGHT_PROVIDER" ]; then
+            printf '%s' "$OVERNIGHT_PROVIDER" | npx wrangler secret put OVERNIGHT_PROVIDER
+          fi
+          if [ -n "$ALPACA_DATA_BASE_URL" ]; then
+            printf '%s' "$ALPACA_DATA_BASE_URL" | npx wrangler secret put ALPACA_DATA_BASE_URL
+          fi
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          OVERNIGHT_PROVIDER: ${{ secrets.OVERNIGHT_PROVIDER || vars.OVERNIGHT_PROVIDER }}
+          ALPACA_DATA_BASE_URL: ${{ secrets.ALPACA_DATA_BASE_URL || vars.ALPACA_DATA_BASE_URL }}
+
       - name: Wire SEC facts provider secrets
         run: |
-          if [ -n "$STRUCTURED_FACT_PROVIDER" ]; then
-            printf '%s' "$STRUCTURED_FACT_PROVIDER" | npx wrangler secret put STRUCTURED_FACT_PROVIDER
-          fi
           if [ -n "$EDGAR_FACTS_LAST_SMOKE_STATUS" ]; then
             printf '%s' "$EDGAR_FACTS_LAST_SMOKE_STATUS" | npx wrangler secret put EDGAR_FACTS_LAST_SMOKE_STATUS
           fi
@@ -72,7 +92,6 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          STRUCTURED_FACT_PROVIDER: ${{ vars.STRUCTURED_FACT_PROVIDER || 'official_sec_data_api' }}
           EDGAR_FACTS_LAST_SMOKE_STATUS: ${{ vars.EDGAR_FACTS_LAST_SMOKE_STATUS }}
 
   smoke-test:
@@ -97,6 +116,9 @@ jobs:
           ALLOW_NETWORK_SKIP: "0"
           EXPECTED_TOOL_MODE: expanded
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          OVERNIGHT_PROVIDER: ${{ secrets.OVERNIGHT_PROVIDER || vars.OVERNIGHT_PROVIDER }}
 
       - name: Verify alias behavior
         run: python scripts/test_universal_aliases.py

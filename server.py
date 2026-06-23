@@ -5569,7 +5569,7 @@ async def get_company_news(
 ) -> str:
     # Batch path: fetch each ticker independently and return a per-ticker keyed
     # object (a union of results), matching the other multi-ticker tools. News is
-    # fetched per ticker — there is no combined/OR'd query that could zero out the
+    # fetched per ticker; there is no combined query that could zero out the
     # whole batch under low-news conditions.
     if isinstance(ticker, list):
         results = await asyncio.gather(
