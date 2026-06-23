@@ -184,6 +184,8 @@ _ALLOW_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in ("1", "true",
 _GROUPED_DISCOVERY = False
 _EXPECTED_TOOL_MODE = os.environ.get("EXPECTED_TOOL_MODE", os.environ.get("TOOL_MODE", "")).lower()
 _FINNHUB_KEY_CONFIGURED = bool(os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_TOKEN"))
+_OVERNIGHT_PROVIDER = os.environ.get("OVERNIGHT_PROVIDER", "").lower()
+_ALPACA_KEY_CONFIGURED = bool(os.environ.get("ALPACA_API_KEY") and os.environ.get("ALPACA_SECRET_KEY"))
 _FORBIDDEN_PUBLIC_TERMS = (
     r"\bIO\b",
     r"Commander",
@@ -941,6 +943,45 @@ def main() -> int:
                 f"Finnhub expected UNCONFIGURED when key absent, got: {actual_fh_status!r}"
             )
         print("  PASS Finnhub deployed smoke (key absent, sourceStatus.finnhub=UNCONFIGURED)")
+
+    # Conditional Alpaca overnight smoke. Do not require an active overnight print;
+    # require only a standard JSON shape and an honest provider status.
+    overnight = call_tool("get_overnight_quote", {"ticker": "AAPL"}, 2100)
+    assert_no_unknown_tool(overnight, "get_overnight_quote")
+    overnight_data = extract_data(overnight)
+    if not isinstance(overnight_data, dict):
+        raise AssertionError(f"get_overnight_quote returned non-object: {type(overnight_data)}")
+    if _OVERNIGHT_PROVIDER == "alpaca" and _ALPACA_KEY_CONFIGURED:
+        allowed_provider_status = {
+            "FOUND_TRUE_OVERNIGHT",
+            "PROVIDER_FORBIDDEN",
+            "PROVIDER_RATE_LIMITED",
+            "PROVIDER_UNAVAILABLE",
+            "NO_OVERNIGHT_BARS",
+            "FALLBACK_EXTENDED_HOURS",
+        }
+        provider_status = overnight_data.get("providerStatus")
+        primary_status = overnight_data.get("primaryProviderStatus")
+        if provider_status not in allowed_provider_status and primary_status not in allowed_provider_status:
+            raise AssertionError(
+                f"Alpaca overnight provider returned unexpected status: "
+                f"providerStatus={provider_status!r}, primaryProviderStatus={primary_status!r}"
+            )
+        if overnight_data.get("provider") not in ("alpaca", "yahoo"):
+            raise AssertionError(f"Unexpected overnight provider: {overnight_data.get('provider')!r}")
+        for secret_name in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY"):
+            secret_value = os.environ.get(secret_name) or ""
+            if secret_value and secret_value in json.dumps(overnight):
+                raise AssertionError(f"SECURITY: {secret_name} found in overnight tool output")
+        print(
+            "  PASS Alpaca overnight smoke "
+            f"(provider={overnight_data.get('provider')!r}, "
+            f"providerStatus={provider_status!r}, primaryProviderStatus={primary_status!r})"
+        )
+    else:
+        if "providerStatus" not in overnight_data:
+            raise AssertionError("get_overnight_quote missing providerStatus")
+        print(f"  PASS overnight smoke (providerStatus={overnight_data.get('providerStatus')!r})")
 
     print(f"PASS deployed discovery + smoke ({len(names)} tools)")
     return 0

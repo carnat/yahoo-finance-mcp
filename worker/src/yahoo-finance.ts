@@ -1265,10 +1265,275 @@ const OVERNIGHT_SUSPENSION_REASON =
   "True overnight window (20:00-04:00 ET) unavailable via Yahoo Finance API";
 const OVERNIGHT_RELIABILITY_WARNING =
   "OTC_INDICATIVE data may lag actual price materially; use with extreme caution.";
+const ALPACA_DEFAULT_DATA_BASE_URL = "https://data.alpaca.markets";
+const ALPACA_OVERNIGHT_FEED = "boats";
+
+type AlpacaBar = {
+  t: string;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+};
+
+function cleanWorkerVar(name: string): string | null {
+  const value = getWorkerVar(name);
+  const cleaned = typeof value === "string" ? value.trim() : "";
+  return cleaned ? cleaned : null;
+}
+
+function overnightProvider(): string {
+  return (cleanWorkerVar("OVERNIGHT_PROVIDER") ?? "").toLowerCase();
+}
+
+function alpacaDataBaseUrl(): string {
+  const configured = cleanWorkerVar("ALPACA_DATA_BASE_URL");
+  return (configured ?? ALPACA_DEFAULT_DATA_BASE_URL).replace(/\/+$/, "");
+}
+
+function alpacaCredentials(): { key: string | null; secret: string | null } {
+  return {
+    key: cleanWorkerVar("ALPACA_API_KEY") ?? cleanWorkerVar("APCA_API_KEY_ID"),
+    secret: cleanWorkerVar("ALPACA_SECRET_KEY") ?? cleanWorkerVar("APCA_API_SECRET_KEY"),
+  };
+}
+
+function etDateHour(tsMs: number): { date: string; hour: number } {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(tsMs));
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return {
+    date: `${get("year")}-${get("month")}-${get("day")}`,
+    hour: Number(get("hour")),
+  };
+}
+
+function addUtcDateDays(ymd: string, days: number): string {
+  const [year, month, day] = ymd.split("-").map((v) => Number(v));
+  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
+}
+
+function overnightSessionKey(tsMs: number): string | null {
+  const et = etDateHour(tsMs);
+  if (et.hour >= 20) return addUtcDateDays(et.date, 1);
+  if (et.hour < 4) return et.date;
+  return null;
+}
+
+function numeric(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+function extractAlpacaBars(payload: unknown, ticker: string): AlpacaBar[] {
+  const root = payload as Record<string, unknown> | null;
+  const barsRoot = root?.bars as Record<string, unknown> | unknown[] | undefined;
+  const candidates = Array.isArray(barsRoot)
+    ? barsRoot
+    : ((barsRoot?.[ticker.toUpperCase()] ?? barsRoot?.[ticker]) as unknown[] | undefined) ?? [];
+
+  return candidates
+    .map((bar) => {
+      const b = bar as Record<string, unknown>;
+      const t = typeof b.t === "string" ? b.t : typeof b.timestamp === "string" ? b.timestamp : null;
+      const o = numeric(b.o ?? b.open);
+      const h = numeric(b.h ?? b.high);
+      const l = numeric(b.l ?? b.low);
+      const c = numeric(b.c ?? b.close);
+      const v = numeric(b.v ?? b.volume) ?? 0;
+      return t && o != null && h != null && l != null && c != null
+        ? { t, o, h, l, c, v }
+        : null;
+    })
+    .filter((bar): bar is AlpacaBar => bar !== null);
+}
+
+async function getPreviousClose(ticker: string): Promise<number | null> {
+  try {
+    const priceD = await yGet(
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price`
+    ) as Record<string, unknown>;
+    const priceResult = (priceD?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    const priceMod = (priceResult?.price as Record<string, unknown>) ?? {};
+    return raw(priceMod.regularMarketPreviousClose) as number | null;
+  } catch {
+    return null;
+  }
+}
+
+function providerFailurePayload(
+  ticker: string,
+  providerStatus: string,
+  message: string,
+  httpStatus: number | null = null
+): string {
+  return JSON.stringify({
+    ticker,
+    status: providerStatus,
+    provider: "alpaca",
+    providerStatus,
+    requestedFeed: ALPACA_OVERNIGHT_FEED,
+    httpStatus,
+    overnightPrice: null,
+    overnightTime: null,
+    overnightHigh: null,
+    overnightLow: null,
+    overnightOpen: null,
+    overnightVolume: null,
+    previousClose: null,
+    gapPct: null,
+    gapDirection: null,
+    dataSource: null,
+    isBlueOceanWindow: false,
+    isStale: null,
+    dataAgeHours: null,
+    fallback: false,
+    message,
+  });
+}
+
+async function tryAlpacaOvernightQuote(ticker: string): Promise<string | null> {
+  if (overnightProvider() !== "alpaca") return null;
+
+  const { key, secret } = alpacaCredentials();
+  if (!key || !secret) {
+    return providerFailurePayload(
+      ticker,
+      "PROVIDER_UNCONFIGURED",
+      "OVERNIGHT_PROVIDER=alpaca but Alpaca API credentials are not configured."
+    );
+  }
+
+  const now = new Date();
+  const start = new Date(now.getTime() - 4 * 24 * 60 * 60 * 1000).toISOString();
+  const end = now.toISOString();
+  const params = new URLSearchParams({
+    symbols: ticker.toUpperCase(),
+    timeframe: "1Min",
+    start,
+    end,
+    limit: "10000",
+    adjustment: "raw",
+    feed: ALPACA_OVERNIGHT_FEED,
+    sort: "asc",
+  });
+  const url = `${alpacaDataBaseUrl()}/v2/stocks/bars?${params.toString()}`;
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      headers: {
+        "User-Agent": UA,
+        "APCA-API-KEY-ID": key,
+        "APCA-API-SECRET-KEY": secret,
+      },
+    });
+  } catch (e) {
+    const fallback = JSON.parse(await getYahooOvernightQuote(ticker)) as Record<string, unknown>;
+    return JSON.stringify({
+      ...fallback,
+      primaryProvider: "alpaca",
+      primaryProviderStatus: "PROVIDER_UNAVAILABLE",
+      primaryProviderError: e instanceof Error ? e.message : String(e),
+    });
+  }
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    const message = body.slice(0, 300) || `Alpaca market data API returned HTTP ${res.status}`;
+    if (res.status === 401 || res.status === 403) {
+      return providerFailurePayload(ticker, "PROVIDER_FORBIDDEN", message, res.status);
+    }
+    if (res.status === 429) {
+      return providerFailurePayload(ticker, "PROVIDER_RATE_LIMITED", message, res.status);
+    }
+    const fallback = JSON.parse(await getYahooOvernightQuote(ticker)) as Record<string, unknown>;
+    return JSON.stringify({
+      ...fallback,
+      primaryProvider: "alpaca",
+      primaryProviderStatus: "PROVIDER_UNAVAILABLE",
+      primaryProviderHttpStatus: res.status,
+      primaryProviderError: message,
+    });
+  }
+
+  const payload = await res.json();
+  const bars = extractAlpacaBars(payload, ticker);
+  const buckets = new Map<string, AlpacaBar[]>();
+  for (const bar of bars) {
+    const tsMs = Date.parse(bar.t);
+    if (!Number.isFinite(tsMs)) continue;
+    const session = overnightSessionKey(tsMs);
+    if (!session) continue;
+    if (!buckets.has(session)) buckets.set(session, []);
+    buckets.get(session)!.push(bar);
+  }
+
+  if (buckets.size === 0) {
+    const fallback = JSON.parse(await getYahooOvernightQuote(ticker)) as Record<string, unknown>;
+    return JSON.stringify({
+      ...fallback,
+      primaryProvider: "alpaca",
+      primaryProviderStatus: "NO_OVERNIGHT_BARS",
+      requestedFeed: ALPACA_OVERNIGHT_FEED,
+    });
+  }
+
+  const latestDate = [...buckets.keys()].sort().at(-1)!;
+  const latestBars = buckets.get(latestDate)!;
+  const first = latestBars[0];
+  const last = latestBars[latestBars.length - 1];
+  const overnightHigh = Math.max(...latestBars.map((b) => b.h));
+  const overnightLow = Math.min(...latestBars.map((b) => b.l));
+  const overnightVolume = latestBars.reduce((acc, b) => acc + b.v, 0);
+  const prevClose = await getPreviousClose(ticker);
+  const gapPct = prevClose && last.c != null ? gapPctFromClose(last.c, prevClose) : null;
+  const lastTsSeconds = Math.floor(Date.parse(last.t) / 1000);
+  const dataAgeHours = dataAgeHoursFromTs(lastTsSeconds, Date.now());
+
+  return JSON.stringify({
+    ticker,
+    status: "OK",
+    provider: "alpaca",
+    providerStatus: "FOUND_TRUE_OVERNIGHT",
+    requestedFeed: ALPACA_OVERNIGHT_FEED,
+    overnightPrice: last.c,
+    overnightTime: last.t,
+    overnightHigh,
+    overnightLow,
+    overnightOpen: first.o,
+    overnightVolume: Math.round(overnightVolume),
+    sessionDate: latestDate,
+    timezone: "America/New_York",
+    previousClose: prevClose,
+    gapPct,
+    gapDirection: gapPct === null ? null : gapPct > 0.1 ? "UP" : gapPct < -0.1 ? "DOWN" : "FLAT",
+    dataSource: "BLUE_OCEAN_ATS",
+    isBlueOceanWindow: true,
+    isStale: dataAgeHours > 6,
+    dataAgeHours,
+    fallback: false,
+    note: null,
+  });
+}
 
 // ── get_overnight_quote ───────────────────────────────────────────────────────
 
 export async function getOvernightQuote(ticker: string): Promise<string> {
+  const alpaca = await tryAlpacaOvernightQuote(ticker);
+  if (alpaca) return alpaca;
+  return getYahooOvernightQuote(ticker);
+}
+
+async function getYahooOvernightQuote(ticker: string): Promise<string> {
   try {
     // Fetch chart data and quoteSummary price in parallel.
     // The chart meta.regularMarketPreviousClose is often null for equities;
@@ -1362,6 +1627,9 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
         return JSON.stringify({
           ticker,
           status: "SUSPENDED",
+          provider: "yahoo",
+          providerStatus: "FALLBACK_EXTENDED_HOURS",
+          requestedFeed: null,
           suspensionReason: OVERNIGHT_SUSPENSION_REASON,
           reliabilityWarning: OVERNIGHT_RELIABILITY_WARNING,
           overnightPrice: null,
@@ -1385,6 +1653,9 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
       return JSON.stringify({
         ticker,
         status: "SUSPENDED",
+        provider: "yahoo",
+        providerStatus: "FALLBACK_EXTENDED_HOURS",
+        requestedFeed: null,
         suspensionReason: OVERNIGHT_SUSPENSION_REASON,
         reliabilityWarning: OVERNIGHT_RELIABILITY_WARNING,
         overnightPrice: fbClose,
@@ -1430,6 +1701,9 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
 
     return JSON.stringify({
       ticker,
+      provider: "yahoo",
+      providerStatus: "FALLBACK_EXTENDED_HOURS",
+      requestedFeed: null,
       ...(suspendedOvernight
         ? {
             status: "SUSPENDED",
@@ -1456,7 +1730,13 @@ export async function getOvernightQuote(ticker: string): Promise<string> {
       note: null,
     });
   } catch (e) {
-    return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
+    return JSON.stringify({
+      error: true,
+      message: `${e instanceof Error ? e.message : String(e)}`,
+      ticker,
+      provider: "yahoo",
+      providerStatus: "PROVIDER_UNAVAILABLE",
+    });
   }
 }
 
@@ -7356,7 +7636,7 @@ export async function getCompanyNews(
 ): Promise<string> {
   // Batch path: fetch each ticker independently and return a per-ticker keyed
   // object (a union of results), matching the other multi-ticker tools. News is
-  // fetched per ticker — there is no combined/OR'd query that could zero out the
+  // fetched per ticker; there is no combined query that could zero out the
   // whole batch under low-news conditions.
   if (Array.isArray(ticker)) {
     return runPartialBatch(ticker, (t) => getCompanyNews(t, maxResults, lookbackDays, sources));
