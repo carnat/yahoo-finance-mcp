@@ -7835,7 +7835,28 @@ const _INDEX_KEYWORDS = [
 ];
 
 function _stripHtmlTagsIdx(html: string): string {
-  return stripHtmlTags(html);
+  const sanitizedHtml = html
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script[^>]*>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style[^>]*>/gi, " ")
+    .replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, " ");
+  const blockBroken = sanitizedHtml
+    .replace(/<(?:br|\/p|\/div|\/li|\/tr|\/h[1-6]|\/section)\b[^>]*>/gi, "\n")
+    .replace(/<(?:p|div|li|tr|h[1-6]|section)\b[^>]*>/gi, "\n");
+  const noTags = blockBroken.replace(/<[^>]+>/g, " ");
+  const ENTITY_MAP: Record<string, string> = {
+    "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'",
+  };
+  const decoded = noTags.replace(/&(?:nbsp|amp|lt|gt|quot|apos|#\d+|[a-z]+);/gi, (entity) => {
+    if (entity in ENTITY_MAP) return ENTITY_MAP[entity];
+    if (entity.startsWith("&#")) {
+      const code = parseInt(entity.slice(2, -1), 10);
+      return isNaN(code) ? " " : String.fromCharCode(code);
+    }
+    return " ";
+  });
+  const lines = decoded.split("\n").map(line => line.replace(/[ \t]+/g, " ").trim());
+  return lines.filter(Boolean).join("\n");
 }
 
 function _sanitizeFilingHtml(html: string): string {
