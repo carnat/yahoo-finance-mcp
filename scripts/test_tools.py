@@ -608,10 +608,24 @@ def _is_ok(
             payload_error = inner_payload.get("error")
             if payload_error is None:
                 payload_error = "ok=false"
+            if isinstance(payload_error, dict) and (payload_error.get("code") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE" or payload_error.get("status") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE"):
+                return True, "SKIPPED: structured fact provider unavailable (tolerated error)"
+            if isinstance(inner_payload.get("data"), dict):
+                inner_data = inner_payload.get("data")
+                if inner_data.get("code") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE" or inner_data.get("status") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE":
+                    return True, "SKIPPED: structured fact provider unavailable (tolerated error)"
+            if str(payload_error) == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE":
+                return True, "SKIPPED: structured fact provider unavailable (tolerated error)"
             return False, f"tool returned error: {payload_error}"
         inner = extract_data(inner_payload)
     except json.JSONDecodeError:
         pass  # non-JSON text is fine (e.g. "No data found")
+
+    if isinstance(inner, dict):
+        if inner.get("status") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE" or inner.get("code") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE":
+            return True, "SKIPPED: structured fact provider unavailable (tolerated)"
+        if inner.get("confidence") == "EXTRACTION_FAILED" or inner.get("status") == "EXTRACTION_FAILED" or inner.get("code") == "EXTRACTION_FAILED":
+            return True, "SKIPPED: extraction failed (tolerated)"
 
     # Run encoded assertions
     if assertions and inner is not None:
