@@ -1753,16 +1753,49 @@ async def get_company_press_releases(
     warnings = source_warnings + warnings
     release_types = {"company_ir", "press_release", "newswire", "sec_filing", "yahoo_finance_press_releases"}
     release_items = [it for it in items if str(it.get("sourceType")) in release_types]
-    if not release_items:
+
+    modified_release_items = []
+    has_sec_ex99_found = False
+    from yfmcp.tools.earnings import _resolve_ex991_url
+    for it in release_items:
+        if it.get("sourceType") == "sec_filing" and it.get("filingType") == "8-K":
+            acc = it.get("accessionNumber")
+            url = it.get("url") or ""
+            cik_match = _re.search(r'/data/(\d+)/', url)
+            cik = int(cik_match.group(1)) if cik_match else None
+            if acc and cik is not None:
+                ex991_url = await _resolve_ex991_url(acc, cik)
+                if ex991_url:
+                    it = dict(it)
+                    it["sourceType"] = "sec_ex99_found"
+                    it["url"] = ex991_url
+                    it["title"] = "EX-99.1 exhibit found in 8-K"
+                    has_sec_ex99_found = True
+        modified_release_items.append(it)
+
+    if not modified_release_items:
         warnings.append({
             "code": "NO_OFFICIAL_RELEASE_SOURCE",
             "message": "No company-originated or official release source found in requested window.",
             "severity": "warning",
         })
-    status = _build_collection_status(release_items, sources_used, warnings)
+
+    status = None
+    if has_sec_ex99_found:
+        status = "SEC_EX99_FOUND"
+    elif not modified_release_items:
+        if "yahoo_finance_press_releases" in selected_sources:
+            status = "NO_YAHOO_PRESS_RELEASE"
+        elif "company_ir" in selected_sources:
+            status = "COMPANY_IR_NOT_FOUND"
+        else:
+            status = "NOT_FOUND"
+    else:
+        status = _build_collection_status(modified_release_items, sources_used, warnings)
+
     payload = {
         "ticker": ticker.upper(),
-        "items": release_items[:_coerce_max_results(max_results, 20)],
+        "items": modified_release_items[:_coerce_max_results(max_results, 20)],
         "meta": {
             "sourcesUsed": sources_used,
             "deduped": True,
@@ -2689,6 +2722,26 @@ async def get_filing_section(ticker: str, section_name: str, document_url: str, 
             html = resp.read().decode("utf-8", errors="replace")
 
         html = _sanitize_sec_html(html)
+        start_idx, end_idx, found_heading, toc_skipped, err_code = _find_section_bounds(html, section_name, context_chars)
+        if err_code == "SECTION_AMBIGUOUS":
+            return _mcp_failure("get_filing_section", "SECTION_AMBIGUOUS", "The section heading could not be resolved unambiguously.")
+
+        if start_idx is not None and end_idx is not None:
+            section_html = html[start_idx:end_idx]
+            plain_section = _re.sub(r'<[^>]+>', ' ', section_html)
+            plain_section = ' '.join(plain_section.split())
+            return json.dumps({
+                "ticker": ticker,
+                "sectionName": section_name,
+                "found": True,
+                "text": plain_section[:context_chars],
+                "sectionStartOffset": start_idx,
+                "sectionEndOffset": end_idx,
+                "matchedHeading": found_heading,
+                "tocSkipped": toc_skipped,
+            })
+
+        # Fallback to plain-text regex search if structure bounds not found
         text = _re.sub(r'<[^>]+>', ' ', html)
         text = ' '.join(text.split())
 
@@ -2701,7 +2754,16 @@ async def get_filing_section(ticker: str, section_name: str, document_url: str, 
                 m = pattern2.search(text)
 
         if not m:
-            return json.dumps({"ticker": ticker, "sectionName": section_name, "found": False, "text": None})
+            return json.dumps({
+                "ticker": ticker,
+                "sectionName": section_name,
+                "found": False,
+                "text": None,
+                "sectionStartOffset": None,
+                "sectionEndOffset": None,
+                "matchedHeading": "",
+                "tocSkipped": toc_skipped,
+            })
 
         start = max(0, m.start())
         end = min(len(text), m.start() + context_chars)
@@ -2710,6 +2772,10 @@ async def get_filing_section(ticker: str, section_name: str, document_url: str, 
             "sectionName": section_name,
             "found": True,
             "text": text[start:end],
+            "sectionStartOffset": start,
+            "sectionEndOffset": end,
+            "matchedHeading": section_name,
+            "tocSkipped": toc_skipped,
         })
     except Exception as e:
         return _mcp_failure("get_filing_section", ErrorCode.PROVIDER_ERROR, str(e))
@@ -6507,6 +6573,90 @@ async def get_sec_filing_intelligence(
     })
 
 
+def _is_toc_match(html: str, match_start: int, match_end: int) -> bool:
+    if _re.search(r'<a\b[^>]*\bhref\s*=\s*[\'"]#[^\'"]*[\'"]', html[max(0, match_start - 30):min(len(html), match_end + 30)], _re.IGNORECASE):
+        return True
+    surr_before = html[max(0, match_start - 100):match_start]
+    if _re.search(r'<a\b[^>]*\bhref\s*=\s*[\'"]#[^\'"]*[\'"][^>]*>\s*$', surr_before, _re.IGNORECASE):
+        return True
+    context = html[max(0, match_start - 150):min(len(html), match_end + 150)]
+    if "...." in context or ". . ." in context or "&#183;" in context or "&middot;" in context:
+        return True
+    plain_context = _re.sub(r'<[^>]+>', ' ', context)
+    if _re.search(r'\.{3,}\s*\d+|\.\s*\.\s*\.\s*\d+', plain_context):
+        return True
+    return False
+
+
+def _find_section_bounds(html: str, section: str, max_chars: int = 50000) -> tuple[int | None, int | None, str, bool, str | None]:
+    section_lower = section.lower().strip()
+    heading_re = _re.compile(r'<h([1-6])[^>]*>(.*?)</h\1>', _re.DOTALL | _re.IGNORECASE)
+    candidates = []
+    toc_skipped = False
+    
+    all_headings = list(heading_re.finditer(html))
+    for idx, h_match in enumerate(all_headings):
+        heading_text = _strip_html_tags(h_match.group(2)).lower().strip()
+        level = int(h_match.group(1))
+        
+        if section_lower in heading_text or heading_text in section_lower:
+            if _is_toc_match(html, h_match.start(), h_match.end()):
+                toc_skipped = True
+                continue
+            candidates.append((h_match.start(), level, _strip_html_tags(h_match.group(2)).strip(), idx))
+            
+    item_matches = []
+    if not candidates:
+        item_re = _re.compile(
+            rf'(?:<b[^>]*>|<span[^>]*font-weight:\s*bold[^>]*>)\s*{_re.escape(section)}\b',
+            _re.IGNORECASE,
+        )
+        for item_match in item_re.finditer(html):
+            if _is_toc_match(html, item_match.start(), item_match.end()):
+                toc_skipped = True
+                continue
+            item_matches.append((item_match.start(), item_match.end()))
+            
+    if not candidates and not item_matches:
+        return None, None, "", toc_skipped, None
+        
+    if len(candidates) > 1 or len(item_matches) > 1:
+        return None, None, "", toc_skipped, "SECTION_AMBIGUOUS"
+        
+    if candidates:
+        start_pos, level, found_heading, h_idx = candidates[0]
+        end_pos = None
+        for next_h in all_headings[h_idx + 1:]:
+            next_level = int(next_h.group(1))
+            if next_level <= level:
+                end_pos = next_h.start()
+                break
+        if end_pos is None:
+            end_pos = min(start_pos + max_chars * 3, len(html))
+        return start_pos, end_pos, found_heading, toc_skipped, None
+    else:
+        start_pos, end_pos_match = item_matches[0]
+        found_heading = section
+        _MIN_SECTION_SPACING = 100
+        item_re = _re.compile(
+            rf'(?:<b[^>]*>|<span[^>]*font-weight:\s*bold[^>]*>)\s*{_re.escape(section)}\b',
+            _re.IGNORECASE,
+        )
+        next_start = end_pos_match + _MIN_SECTION_SPACING
+        end_pos = None
+        while True:
+            next_item = item_re.search(html, next_start)
+            if not next_item:
+                break
+            if _is_toc_match(html, next_item.start(), next_item.end()):
+                next_start = next_item.end()
+                continue
+            end_pos = next_item.start()
+            break
+        if end_pos is None:
+            end_pos = min(start_pos + max_chars * 3, len(html))
+        return start_pos, end_pos, found_heading, toc_skipped, None
+
 
 @yfinance_server.tool(
     name="get_sec_filing_section_markdown",
@@ -6576,57 +6726,20 @@ async def get_sec_filing_section_markdown(
         return _mcp_failure("get_sec_filing_section_markdown", ErrorCode.PROVIDER_ERROR,
                             f"Failed to fetch filing document: {document_url}")
 
-    # Find the section boundaries using heading patterns
-    section_lower = section.lower().strip()
-    heading_re = _re.compile(r'<h([1-6])[^>]*>(.*?)</h\1>', _re.DOTALL | _re.IGNORECASE)
+# Find the section boundaries using heading patterns
+    start_idx, end_idx, found_heading, toc_skipped, err_code = _find_section_bounds(html, section, max_chars)
+    if err_code == "SECTION_AMBIGUOUS":
+        return _mcp_failure("get_sec_filing_section_markdown", "SECTION_AMBIGUOUS", "The section heading could not be resolved unambiguously.")
 
-    section_start: int | None = None
-    section_end: int | None = None
-    section_level: int | None = None
-    found_heading = ""
-
-    for h_match in heading_re.finditer(html):
-        heading_text = _strip_html_tags(h_match.group(2)).lower().strip()
-        level = int(h_match.group(1))
-
-        if section_start is not None:
-            # End section at next heading of same or higher level
-            if level <= section_level:  # type: ignore[operator]
-                section_end = h_match.start()
-                break
-        elif section_lower in heading_text or heading_text in section_lower:
-            section_start = h_match.start()
-            section_level = level
-            found_heading = _strip_html_tags(h_match.group(2)).strip()
-
-    # Also try item-based pattern (e.g. "Item 1A" in bold/span)
-    if section_start is None:
-        item_re = _re.compile(
-            rf'(?:<b[^>]*>|<span[^>]*font-weight:\s*bold[^>]*>)\s*{_re.escape(section)}\b',
-            _re.IGNORECASE,
-        )
-        item_match = item_re.search(html)
-        if item_match:
-            section_start = item_match.start()
-            found_heading = section
-            # Find next Item pattern for end boundary
-            _MIN_SECTION_SPACING = 100  # minimum chars to skip before next section boundary
-            next_item = item_re.search(html, item_match.end() + _MIN_SECTION_SPACING)
-            if next_item:
-                section_end = next_item.start()
-
-    if section_start is None:
+    if start_idx is None:
         return _mcp_failure("get_sec_filing_section_markdown", ErrorCode.NO_FILING_DATA,
                             f"Section '{section}' not found in filing")
 
-    if section_end is None:
-        section_end = min(section_start + max_chars * 3, len(html))
-
     parser_source = "html_parser_fallback"
-    markdown = _html_to_markdown_fallback(html, section_start, section_end)
+    markdown = _html_to_markdown_fallback(html, start_idx, end_idx)
 
     # Count tables in the section
-    section_slice = html[section_start:section_end]
+    section_slice = html[start_idx:end_idx]
     tables_in_section = len(_re.findall(r'<table[^>]*>', section_slice, _re.IGNORECASE))
 
     # Truncate if needed
@@ -6648,6 +6761,10 @@ async def get_sec_filing_section_markdown(
         "confidence": "MEDIUM",
         "source": parser_source,
         "truncated": truncated,
+        "sectionStartOffset": start_idx,
+        "sectionEndOffset": end_idx,
+        "matchedHeading": found_heading,
+        "tocSkipped": toc_skipped,
     })
 
 
@@ -7369,7 +7486,15 @@ async def query_sec_filing_index(
     filing_type: str = "10-K",
     period: str = "latest",
     accession_number: str | None = None,
-    query_type: str = "",
+    query_type: Literal[
+        "geographic_revenue_share",
+        "revenue_exposure",
+        "china_exposure",
+        "risk_factor_mentions",
+        "customer_concentration",
+        "total_revenue",
+        "segment_revenue",
+    ] = "geographic_revenue_share",
     params: dict | None = None,
     return_evidence: bool = True,
     detailLevel: str = "compact",
@@ -7449,12 +7574,16 @@ async def query_sec_filing_index(
         "segment_revenue",
     }
     if query not in supported:
-        return _result(
-            "UNSUPPORTED_BY_INDEX",
-            None,
-            "NOT_DISCLOSED",
-            [],
-            [{"code": "UNSUPPORTED_QUERY_TYPE", "message": "Use one of the supported query_type values."}],
+        return _mcp_failure(
+            "query_sec_filing_index",
+            "UNSUPPORTED_QUERY_TYPE",
+            f"Unsupported query type '{query}'. Supported types are: {', '.join(sorted(supported))}",
+            meta_extra={
+                "supportedQueryTypes": list(supported),
+                "error_extra": {
+                    "supportedQueryTypes": list(supported)
+                }
+            }
         )
 
     warnings: list[dict] = []

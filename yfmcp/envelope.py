@@ -185,9 +185,83 @@ def _mcp_warning(
     })
 
 
+import re
+
 # ---------------------------------------------------------------------------
 # Envelope V2 standardization helper
 # ---------------------------------------------------------------------------
+def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metric=False):
+    if isinstance(val, dict):
+        is_fact = "value" in val or "low" in val or "high" in val or "valueRatio" in val or "valuePct" in val or is_metric
+        
+        if is_fact:
+            conf = val.get("confidence") or parent_confidence
+            if not conf:
+                if val.get("value") is not None or val.get("low") is not None or val.get("valueRatio") is not None:
+                    conf = "HIGH"
+                else:
+                    conf = "NOT_DECISION_GRADE"
+            
+            conf = str(conf).upper()
+            if conf not in {"HIGH", "MEDIUM", "LOW", "NOT_DECISION_GRADE"}:
+                if conf == "NOT_DISCLOSED":
+                    conf = "NOT_DECISION_GRADE"
+                else:
+                    conf = "LOW"
+                    
+            val["confidence"] = conf
+            val["sourceType"] = val.get("sourceType") or parent_source_type or "yahoo"
+            val["evidenceRequired"] = True
+            val["decisionGrade"] = conf in {"HIGH", "MEDIUM"}
+            
+            orig_ev = val.get("evidence")
+            ev_list = []
+            if isinstance(orig_ev, list):
+                ev_list = orig_ev
+            elif orig_ev:
+                ev_list = [orig_ev]
+                
+            standardised_ev = []
+            for ev in ev_list:
+                if isinstance(ev, dict):
+                    standardised_ev.append({
+                        "url": ev.get("url") or ev.get("documentUrl") or None,
+                        "filingType": ev.get("filingType") or None,
+                        "accessionNumber": ev.get("accessionNumber") or None,
+                        "filingDate": ev.get("filingDate") or None,
+                        "tableIndex": ev.get("tableIndex") or None,
+                        "rowLabel": ev.get("rowLabel") or None,
+                        "columnLabel": ev.get("columnLabel") or None,
+                        "rawRow": ev.get("rawRow") or None,
+                    })
+                elif isinstance(ev, str):
+                    standardised_ev.append({
+                        "url": None,
+                        "filingType": None,
+                        "accessionNumber": None,
+                        "filingDate": None,
+                        "tableIndex": None,
+                        "rowLabel": None,
+                        "columnLabel": None,
+                        "rawRow": ev,
+                    })
+            val["evidence"] = standardised_ev if standardised_ev else None
+            
+        source_type = val.get("source") or val.get("sourceType") or parent_source_type
+        confidence = val.get("confidence") or parent_confidence
+        
+        for k, v in list(val.items()):
+            if k in {"confidence", "sourceType", "evidenceRequired", "decisionGrade", "evidence"}:
+                continue
+            child_is_metric = is_fact or k in {"metrics", "actual", "estimate", "revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex", "eps"}
+            val[k] = _enrich_facts(v, parent_source_type=source_type, parent_confidence=confidence, is_metric=child_is_metric)
+            
+    elif isinstance(val, list):
+        return [_enrich_facts(item, parent_source_type, parent_confidence, is_metric) for item in val]
+        
+    return val
+
+
 def _wrap_envelope_v2(
     tool_name: str,
     data: dict | list | None,
@@ -250,9 +324,10 @@ def _wrap_envelope_v2(
 
         return json.dumps(resp)
 
+    enriched_data = _enrich_facts(data)
     return json.dumps({
         "ok": True,
-        "data": data,
+        "data": enriched_data,
         "error": None,
         "errorCode": None,
         "meta": meta,

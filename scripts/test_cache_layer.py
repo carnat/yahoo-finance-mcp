@@ -92,8 +92,13 @@ class TestQuerySecFilingIndex(unittest.TestCase):
 
     def test_unsupported_query_type(self):
         res = self._call(ticker="AAPL", query_type="is_this_investable", params={})
-        self.assertEqual(res.get("status"), "UNSUPPORTED_BY_INDEX")
-        self.assertEqual(res.get("queryType"), "is_this_investable")
+        if "error" in res and isinstance(res["error"], dict):
+            self.assertEqual(res["ok"], false if "false" in str(res["ok"]) else False)
+            self.assertEqual(res["error"]["code"], "UNSUPPORTED_QUERY_TYPE")
+            self.assertIn("supportedQueryTypes", res["meta"])
+        else:
+            self.assertTrue(res.get("error"))
+            self.assertEqual(res.get("code"), "UNSUPPORTED_QUERY_TYPE")
 
     def test_missing_required_param_region(self):
         with patch("server.extract_geographic_revenue", new_callable=AsyncMock) as mocked:

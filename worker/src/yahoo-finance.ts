@@ -1,4 +1,4 @@
-import { getWorkerVar } from "./response.js";
+import { getWorkerVar, mcpFailure } from "./response.js";
 
 /**
  * Yahoo Finance API client for Cloudflare Workers.
@@ -1450,7 +1450,30 @@ async function tryAlpacaOvernightQuote(ticker: string): Promise<string | null> {
     const body = await res.text().catch(() => "");
     const message = body.slice(0, 300) || `Alpaca market data API returned HTTP ${res.status}`;
     if (res.status === 401 || res.status === 403) {
-      return providerFailurePayload(ticker, "PROVIDER_FORBIDDEN", message, res.status);
+      const yahooStr = await getYahooOvernightQuote(ticker);
+      let yahooPayload: any = null;
+      try {
+        yahooPayload = JSON.parse(yahooStr);
+        if (yahooPayload && typeof yahooPayload === "object") {
+          // If the yahoo response is a success envelope or has a data field:
+          // Wait, getYahooOvernightQuote returns a success envelope if MCP_ENVELOPE_V2 is true,
+          // or a raw quote object if it's false or V1.
+          // Let's set dataSource to INDICATIVE_ONLY in data if it exists, or at the top level.
+          if (yahooPayload.data && typeof yahooPayload.data === "object") {
+            yahooPayload.data.dataSource = "INDICATIVE_ONLY";
+          } else {
+            yahooPayload.dataSource = "INDICATIVE_ONLY";
+          }
+        }
+      } catch (err) {}
+      return mcpFailure(
+        "get_overnight_quote",
+        "PROVIDER_FORBIDDEN",
+        message,
+        {
+          diagnostics: yahooPayload,
+        }
+      );
     }
     if (res.status === 429) {
       return providerFailurePayload(ticker, "PROVIDER_RATE_LIMITED", message, res.status);
@@ -6425,6 +6448,124 @@ export async function getFilingOutline(ticker: string, _accessionNumber: string 
 
 // ── get_filing_section ────────────────────────────────────────────────────────
 
+function isTocMatch(html: string, matchStart: number, matchEnd: number): boolean {
+  const slice = html.slice(Math.max(0, matchStart - 30), Math.min(html.length, matchEnd + 30));
+  if (/<a\b[^>]*\bhref\s*=\s*['"]#[^'"]*['"]/i.test(slice)) {
+    return true;
+  }
+  const surrBefore = html.slice(Math.max(0, matchStart - 100), matchStart);
+  if (/<a\b[^>]*\bhref\s*=\s*['"]#[^'"]*['"][^>]*>\s*$/i.test(surrBefore)) {
+    return true;
+  }
+  const context = html.slice(Math.max(0, matchStart - 150), Math.min(html.length, matchEnd + 150));
+  if (context.includes("....") || context.includes(". . .") || context.includes("&#183;") || context.includes("&middot;")) {
+    return true;
+  }
+  const plainContext = context.replace(/<[^>]+>/g, " ");
+  if (/\.{3,}\s*\d+|\.\s*\.\s*\.\s*\d+/.test(plainContext)) {
+    return true;
+  }
+  return false;
+}
+
+interface SectionBounds {
+  startIdx: number | null;
+  endIdx: number | null;
+  foundHeading: string;
+  tocSkipped: boolean;
+  errCode: string | null;
+}
+
+function findSectionBounds(html: string, section: string, maxChars: number = 50000): SectionBounds {
+  const sectionLower = section.toLowerCase().trim();
+  const headingRe = /<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi;
+  let tocSkipped = false;
+  
+  const allHeadings: { text: string; start: number; end: number; level: number; rawText: string }[] = [];
+  let hMatch: RegExpExecArray | null;
+  while ((hMatch = headingRe.exec(html)) !== null) {
+    const text = hMatch[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+    allHeadings.push({
+      text,
+      start: hMatch.index,
+      end: headingRe.lastIndex,
+      level: parseInt(hMatch[1], 10),
+      rawText: hMatch[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
+    });
+  }
+  
+  const candidates: { start: number; level: number; rawText: string; hIdx: number }[] = [];
+  for (let i = 0; i < allHeadings.length; i++) {
+    const h = allHeadings[i];
+    if (sectionLower.includes(h.text) || h.text.includes(sectionLower)) {
+      if (isTocMatch(html, h.start, h.end)) {
+        tocSkipped = true;
+        continue;
+      }
+      candidates.push({ start: h.start, level: h.level, rawText: h.rawText, hIdx: i });
+    }
+  }
+  
+  const itemMatches: { start: number; end: number }[] = [];
+  if (candidates.length === 0) {
+    const escapeRegex = (s: string) => s.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+    const itemRe = new RegExp(`(?:<b[^>]*>|<span[^>]*font-weight:\\s*bold[^>]*>)\\s*${escapeRegex(section)}\\b`, "gi");
+    let itemMatch: RegExpExecArray | null;
+    while ((itemMatch = itemRe.exec(html)) !== null) {
+      if (isTocMatch(html, itemMatch.index, itemRe.lastIndex)) {
+        tocSkipped = true;
+        continue;
+      }
+      itemMatches.push({ start: itemMatch.index, end: itemRe.lastIndex });
+    }
+  }
+  
+  if (candidates.length === 0 && itemMatches.length === 0) {
+    return { startIdx: null, endIdx: null, foundHeading: "", tocSkipped, errCode: null };
+  }
+  
+  if (candidates.length > 1 || itemMatches.length > 1) {
+    return { startIdx: null, endIdx: null, foundHeading: "", tocSkipped, errCode: "SECTION_AMBIGUOUS" };
+  }
+  
+  if (candidates.length === 1) {
+    const c = candidates[0];
+    let endPos: number | null = null;
+    for (let i = c.hIdx + 1; i < allHeadings.length; i++) {
+      if (allHeadings[i].level <= c.level) {
+        endPos = allHeadings[i].start;
+        break;
+      }
+    }
+    if (endPos === null) {
+      endPos = Math.min(c.start + maxChars * 3, html.length);
+    }
+    return { startIdx: c.start, endIdx: endPos, foundHeading: c.rawText, tocSkipped, errCode: null };
+  } else {
+    const match = itemMatches[0];
+    const escapeRegex = (s: string) => s.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+    const itemRe = new RegExp(`(?:<b[^>]*>|<span[^>]*font-weight:\\s*bold[^>]*>)\\s*${escapeRegex(section)}\\b`, "gi");
+    const minSpacing = 100;
+    const nextStart = match.end + minSpacing;
+    let endPos: number | null = null;
+    
+    itemRe.lastIndex = nextStart;
+    let nextMatch: RegExpExecArray | null;
+    while ((nextMatch = itemRe.exec(html)) !== null) {
+      if (isTocMatch(html, nextMatch.index, itemRe.lastIndex)) {
+        itemRe.lastIndex = nextMatch.index + 1;
+        continue;
+      }
+      endPos = nextMatch.index;
+      break;
+    }
+    if (endPos === null) {
+      endPos = Math.min(match.start + maxChars * 3, html.length);
+    }
+    return { startIdx: match.start, endIdx: endPos, foundHeading: section, tocSkipped, errCode: null };
+  }
+}
+
 export async function getFilingSection(ticker: string, sectionName: string, documentUrl: string, contextChars: number = 3000): Promise<string> {
   try {
     if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
@@ -6433,10 +6574,52 @@ export async function getFilingSection(ticker: string, sectionName: string, docu
     const resp = await fetch(documentUrl, { headers: { "User-Agent": "yahoo-finance-mcp/1.0 admin@example.com" } });
     if (!resp.ok) return JSON.stringify({ error: true, message: `HTTP ${resp.status}` });
     const html = await resp.text();
+
+    const bounds = findSectionBounds(html, sectionName, contextChars);
+    if (bounds.errCode === "SECTION_AMBIGUOUS") {
+      return mcpFailure("get_filing_section", "SECTION_AMBIGUOUS", "The section heading could not be resolved unambiguously.");
+    }
+
+    if (bounds.startIdx !== null && bounds.endIdx !== null) {
+      const sectionHtml = html.slice(bounds.startIdx, bounds.endIdx);
+      const plainSection = sectionHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+      return JSON.stringify({
+        ticker,
+        sectionName,
+        found: true,
+        text: plainSection.slice(0, contextChars),
+        sectionStartOffset: bounds.startIdx,
+        sectionEndOffset: bounds.endIdx,
+        matchedHeading: bounds.foundHeading,
+        tocSkipped: bounds.tocSkipped,
+      });
+    }
+
+    // Fallback to text search
     const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
     const idx = text.toLowerCase().indexOf(sectionName.toLowerCase());
-    if (idx === -1) return JSON.stringify({ ticker, sectionName, found: false, text: null });
-    return JSON.stringify({ ticker, sectionName, found: true, text: text.slice(idx, idx + contextChars) });
+    if (idx === -1) {
+      return JSON.stringify({
+        ticker,
+        sectionName,
+        found: false,
+        text: null,
+        sectionStartOffset: null,
+        sectionEndOffset: null,
+        matchedHeading: "",
+        tocSkipped: bounds.tocSkipped,
+      });
+    }
+    return JSON.stringify({
+      ticker,
+      sectionName,
+      found: true,
+      text: text.slice(idx, idx + contextChars),
+      sectionStartOffset: idx,
+      sectionEndOffset: idx + contextChars,
+      matchedHeading: sectionName,
+      tocSkipped: bounds.tocSkipped,
+    });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
   }
@@ -7762,18 +7945,57 @@ export async function getCompanyPressReleases(
   });
   const releaseTypes = new Set(["company_ir", "press_release", "newswire", "sec_filing", "yahoo_finance_press_releases"]);
   const items = out.items.filter(it => releaseTypes.has(_str(it.sourceType)));
+  
+  let hasSecEx99Found = false;
+  const processedItems = await Promise.all(items.map(async (it) => {
+    if (_str(it.sourceType) === "sec_filing" && _str(it.filingType) === "8-K") {
+      const accession = _str(it.accessionNumber);
+      const url = _str(it.url);
+      const cikMatch = /\/data\/(\d+)\//.exec(url);
+      const cik = cikMatch ? parseInt(cikMatch[1], 10) : null;
+      if (accession && cik !== null) {
+        const ex991Url = await resolveEx991Url(cik, accession);
+        if (ex991Url) {
+          hasSecEx99Found = true;
+          return {
+            ...it,
+            sourceType: "sec_ex99_found",
+            url: ex991Url,
+            title: "EX-99.1 exhibit found in 8-K",
+          };
+        }
+      }
+    }
+    return it;
+  }));
+
   const warnings = [...out.warnings];
-  if (items.length === 0) {
+  if (processedItems.length === 0) {
     warnings.push({
       code: "NO_OFFICIAL_RELEASE_SOURCE",
       message: "No company-originated or official release source found in requested window.",
       severity: "warning",
     });
   }
-  const status = collectionStatus(items, out.sourcesUsed, warnings);
+
+  let status: string | null = null;
+  if (hasSecEx99Found) {
+    status = "SEC_EX99_FOUND";
+  } else if (processedItems.length === 0) {
+    if (sources.includes("yahoo_finance_press_releases")) {
+      status = "NO_YAHOO_PRESS_RELEASE";
+    } else if (sources.includes("company_ir")) {
+      status = "COMPANY_IR_NOT_FOUND";
+    } else {
+      status = "NOT_FOUND";
+    }
+  } else {
+    status = collectionStatus(processedItems, out.sourcesUsed, warnings);
+  }
+
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
-    items: items.slice(0, clampInt(maxResults, 20, 1, 100)),
+    items: processedItems.slice(0, clampInt(maxResults, 20, 1, 100)),
     meta: { sourcesUsed: out.sourcesUsed, deduped: true, watermark: out.watermark },
     warnings,
   };
@@ -8334,37 +8556,18 @@ export async function getSecFilingSectionMarkdown(
   }
 
   // Find section boundaries
-  const sectionLower = section.toLowerCase().trim();
-  const headingRe = /<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi;
-  let sectionStart: number | null = null;
-  let sectionEnd: number | null = null;
-  let sectionLevel: number | null = null;
-  let foundHeading = "";
-
-  let hMatch: RegExpExecArray | null;
-  while ((hMatch = headingRe.exec(html)) !== null) {
-    const headingText = hMatch[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
-    const level = parseInt(hMatch[1], 10);
-
-    if (sectionStart !== null) {
-      if (level <= sectionLevel!) {
-        sectionEnd = hMatch.index;
-        break;
-      }
-    } else if (sectionLower.includes(headingText) || headingText.includes(sectionLower)) {
-      sectionStart = hMatch.index;
-      sectionLevel = level;
-      foundHeading = hMatch[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-    }
+  const bounds = findSectionBounds(html, section, maxChars);
+  if (bounds.errCode === "SECTION_AMBIGUOUS") {
+    return JSON.stringify({ ok: false, error: { code: "SECTION_AMBIGUOUS", message: "The section heading could not be resolved unambiguously." } });
   }
 
-  if (sectionStart === null) {
+  if (bounds.startIdx === null || bounds.endIdx === null) {
     return JSON.stringify({ ok: false, error: { code: "NO_FILING_DATA", message: `Section '${section}' not found in filing` } });
   }
 
-  if (sectionEnd === null) {
-    sectionEnd = Math.min(sectionStart + maxChars * 3, html.length);
-  }
+  const sectionStart = bounds.startIdx;
+  const sectionEnd = bounds.endIdx;
+  const foundHeading = bounds.foundHeading;
 
   // Convert to markdown (basic fallback — no sec2md in worker)
   let sectionHtml = html.slice(sectionStart, sectionEnd);
@@ -8431,6 +8634,10 @@ export async function getSecFilingSectionMarkdown(
     confidence: "MEDIUM",
     source: "html_parser_fallback",
     truncated,
+    sectionStartOffset: sectionStart,
+    sectionEndOffset: sectionEnd,
+    matchedHeading: foundHeading,
+    tocSkipped: bounds.tocSkipped,
   });
 }
 
@@ -9678,12 +9885,15 @@ export async function querySecFilingIndex(
     "segment_revenue",
   ]);
   if (!supported.has(query)) {
-    return result(
-      "UNSUPPORTED_BY_INDEX",
-      null,
-      "NOT_DISCLOSED",
-      [],
-      [{ code: "UNSUPPORTED_QUERY_TYPE", message: "Use one of the supported query_type values." }],
+    return mcpFailure(
+      "query_sec_filing_index",
+      "UNSUPPORTED_QUERY_TYPE",
+      `Unsupported query type '${query}'. Supported types are: ${Array.from(supported).sort().join(", ")}`,
+      {
+        metaExtra: {
+          supportedQueryTypes: Array.from(supported),
+        }
+      }
     );
   }
 
