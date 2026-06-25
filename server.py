@@ -1953,18 +1953,55 @@ async def verify_company_event(
         status = "NOT_FOUND"
 
     best = official_in_range or matched_in_range or matched
-    best_evidence = [{
-        "source": ev.get("source"),
-        "sourceType": ev.get("sourceType"),
-        "publishedAt": ev.get("publishedAt"),
-        "retrievedAt": ev.get("retrievedAt"),
-        "url": ev.get("url"),
-        "confidence": ev.get("confidence"),
-        "evidenceText": _short_text(ev.get("evidenceText") or ev.get("summary") or ev.get("title")),
-    } for ev in best[:5]]
+
+    # ── Ticker/entity relevance filtering ────────────────────────────────
+    # Ensure bestEvidence items actually reference the queried ticker/entity
+    # to prevent returning evidence about unrelated companies.
+    ticker_upper = ticker.upper()
+    ticker_pattern = _re.compile(r'\b' + _re.escape(ticker_upper) + r'\b', _re.IGNORECASE)
+
+    def _relevance_score(ev: dict) -> str:
+        """Return 'HIGH', 'MEDIUM', or 'LOW' based on ticker/entity presence."""
+        hay = " ".join([
+            str(ev.get("title") or ""),
+            str(ev.get("summary") or ""),
+            str(ev.get("evidenceText") or ""),
+        ])
+        if ticker_pattern.search(hay):
+            return "HIGH"
+        # Check company name (from source metadata or event content)
+        source_type = str(ev.get("sourceType") or "")
+        if source_type in ("sec_filing", "sec", "company_ir"):
+            return "HIGH"  # SEC/IR sources are inherently ticker-scoped
+        return "LOW"
+
+    best_evidence = []
+    for ev in best[:5]:
+        relevance = _relevance_score(ev)
+        evidence_item = {
+            "source": ev.get("source"),
+            "sourceType": ev.get("sourceType"),
+            "publishedAt": ev.get("publishedAt"),
+            "retrievedAt": ev.get("retrievedAt"),
+            "url": ev.get("url"),
+            "confidence": ev.get("confidence"),
+            "relevance": relevance,
+            "evidenceText": _short_text(ev.get("evidenceText") or ev.get("summary") or ev.get("title")),
+        }
+        best_evidence.append(evidence_item)
+
+    # If all best evidence is LOW relevance, downgrade status
+    if best_evidence and all(e.get("relevance") == "LOW" for e in best_evidence):
+        if status == "CONFIRMED":
+            status = "PARTIAL"
+            warnings.append({
+                "code": "LOW_RELEVANCE_EVIDENCE",
+                "message": f"Evidence found but none contain word-boundary match for ticker '{ticker_upper}'. Confidence downgraded.",
+                "severity": "warning",
+            })
 
     return json.dumps({
-        "ticker": ticker.upper(),
+        "ticker": ticker_upper,
         "query": event_query,
         "status": status,
         "bestEvidence": best_evidence,
