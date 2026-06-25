@@ -102,7 +102,9 @@ class TestPhase6BCompanyNews(unittest.TestCase):
     def test_search_company_news_query_required(self):
         payload = _parse(_run(srv.search_company_news("AAPL", "")))
         self.assertTrue(payload.get("error"))
-        self.assertEqual(payload.get("code"), "INPUT_VALIDATION_ERROR")
+        err = payload.get("error")
+        code = err.get("code") if isinstance(err, dict) else payload.get("code")
+        self.assertEqual(code, "INPUT_VALIDATION_ERROR")
 
     def test_search_company_news_returns_query(self):
         fake_items = [{

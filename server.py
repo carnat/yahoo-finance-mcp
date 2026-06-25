@@ -58,7 +58,7 @@ from yfmcp.clients.edgar import (
     _SEC_REQUIRED_UA, _SMOKE_TICKER_CIK_FALLBACKS,
     _resolve_cik_for_ticker, _get_submissions_for_ticker,
     _EDGAR_TICKERS, _EDGAR_TICKERS_LOADED_AT, _EDGAR_TTL,
-    _load_edgar_tickers, _edgar_get,
+    _load_edgar_tickers, _edgar_get, EdgarError,
     _EDGAR_FACTS_CACHE, _EDGAR_SUBS_CACHE,
     _edgar_get_company_facts, _edgar_get_submissions,
     _edgar_build_filing_urls, _edgar_cik_from_accession,
@@ -1753,16 +1753,49 @@ async def get_company_press_releases(
     warnings = source_warnings + warnings
     release_types = {"company_ir", "press_release", "newswire", "sec_filing", "yahoo_finance_press_releases"}
     release_items = [it for it in items if str(it.get("sourceType")) in release_types]
-    if not release_items:
+
+    modified_release_items = []
+    has_sec_ex99_found = False
+    from yfmcp.tools.earnings import _resolve_ex991_url
+    for it in release_items:
+        if it.get("sourceType") == "sec_filing" and it.get("filingType") == "8-K":
+            acc = it.get("accessionNumber")
+            url = it.get("url") or ""
+            cik_match = _re.search(r'/data/(\d+)/', url)
+            cik = int(cik_match.group(1)) if cik_match else None
+            if acc and cik is not None:
+                ex991_url = await _resolve_ex991_url(acc, cik)
+                if ex991_url:
+                    it = dict(it)
+                    it["sourceType"] = "sec_ex99_found"
+                    it["url"] = ex991_url
+                    it["title"] = "EX-99.1 exhibit found in 8-K"
+                    has_sec_ex99_found = True
+        modified_release_items.append(it)
+
+    if not modified_release_items:
         warnings.append({
             "code": "NO_OFFICIAL_RELEASE_SOURCE",
             "message": "No company-originated or official release source found in requested window.",
             "severity": "warning",
         })
-    status = _build_collection_status(release_items, sources_used, warnings)
+
+    status = None
+    if has_sec_ex99_found:
+        status = "SEC_EX99_FOUND"
+    elif not modified_release_items:
+        if "yahoo_finance_press_releases" in selected_sources:
+            status = "NO_YAHOO_PRESS_RELEASE"
+        elif "company_ir" in selected_sources:
+            status = "COMPANY_IR_NOT_FOUND"
+        else:
+            status = "NOT_FOUND"
+    else:
+        status = _build_collection_status(modified_release_items, sources_used, warnings)
+
     payload = {
         "ticker": ticker.upper(),
-        "items": release_items[:_coerce_max_results(max_results, 20)],
+        "items": modified_release_items[:_coerce_max_results(max_results, 20)],
         "meta": {
             "sourcesUsed": sources_used,
             "deduped": True,
@@ -1953,18 +1986,100 @@ async def verify_company_event(
         status = "NOT_FOUND"
 
     best = official_in_range or matched_in_range or matched
-    best_evidence = [{
-        "source": ev.get("source"),
-        "sourceType": ev.get("sourceType"),
-        "publishedAt": ev.get("publishedAt"),
-        "retrievedAt": ev.get("retrievedAt"),
-        "url": ev.get("url"),
-        "confidence": ev.get("confidence"),
-        "evidenceText": _short_text(ev.get("evidenceText") or ev.get("summary") or ev.get("title")),
-    } for ev in best[:5]]
+
+    # ── Ticker/entity relevance filtering ────────────────────────────────
+    # Ensure bestEvidence items actually reference the queried ticker/entity
+    # to prevent returning evidence about unrelated companies.
+    ticker_upper = ticker.upper()
+    ticker_pattern = _re.compile(r'\b' + _re.escape(ticker_upper) + r'\b', _re.IGNORECASE)
+
+    cik_padded, submissions = await _get_submissions_for_ticker(ticker)
+    company_name = ""
+    if submissions and isinstance(submissions, dict):
+        company_name = str(submissions.get("name") or "").strip()
+
+    def _extract_base_company_name(name: str) -> str:
+        if not name:
+            return ""
+        name_clean = name.upper()
+        suffixes = [
+            " INC", " CORP", " CORPORATION", " LTD", " LIMITED", " PLC",
+            " CO", " COMPANY", " S.A.", " AG", " GMBH", " S.A.B. DE C.V.",
+            " GROUP", " HOLDINGS", " TRUST"
+        ]
+        for p in (".", ",", "/"):
+            name_clean = name_clean.replace(p, "")
+        for suff in suffixes:
+            if name_clean.endswith(suff):
+                name_clean = name_clean[:-len(suff)]
+        return name_clean.strip()
+
+    base_company_name = _extract_base_company_name(company_name)
+
+    def _relevance_score(ev: dict) -> str:
+        """Return 'HIGH', 'MEDIUM', or 'LOW' based on ticker/entity presence."""
+        # 1. Check explicit tickers list
+        ev_tickers = ev.get("tickers") or []
+        if any(str(t).upper() == ticker_upper for t in ev_tickers):
+            return "HIGH"
+            
+        # 2. Check source type
+        source_type = str(ev.get("sourceType") or "")
+        if source_type in ("sec_filing", "sec", "company_ir", "sec_ex99_found"):
+            return "HIGH"
+            
+        # 3. Check text content
+        hay = " ".join([
+            str(ev.get("title") or ""),
+            str(ev.get("summary") or ""),
+            str(ev.get("evidenceText") or ""),
+            str(ev.get("issuer") or ""),
+        ])
+        
+        # Word boundary match for ticker
+        if ticker_pattern.search(hay):
+            return "HIGH"
+            
+        # Check company name/base name
+        if base_company_name and base_company_name.lower() in hay.lower():
+            return "HIGH"
+        if company_name and company_name.lower() in hay.lower():
+            return "HIGH"
+            
+        # Check issuer field explicitly
+        ev_issuer = str(ev.get("issuer") or "").upper()
+        if ticker_upper in ev_issuer:
+            return "HIGH"
+            
+        return "LOW"
+
+    best_evidence = []
+    for ev in best[:5]:
+        relevance = _relevance_score(ev)
+        evidence_item = {
+            "source": ev.get("source"),
+            "sourceType": ev.get("sourceType"),
+            "publishedAt": ev.get("publishedAt"),
+            "retrievedAt": ev.get("retrievedAt"),
+            "url": ev.get("url"),
+            "confidence": ev.get("confidence"),
+            "relevance": relevance,
+            "evidenceText": _short_text(ev.get("evidenceText") or ev.get("summary") or ev.get("title")),
+        }
+        best_evidence.append(evidence_item)
+
+    # If all best evidence is LOW relevance, downgrade status
+    if best_evidence and all(e.get("relevance") == "LOW" for e in best_evidence):
+        if status == "CONFIRMED":
+            status = "PARTIAL"
+            warnings.append({
+                "code": "LOW_RELEVANCE_EVIDENCE",
+                "message": f"Evidence found but none contain word-boundary match for ticker '{ticker_upper}'. Confidence downgraded.",
+                "severity": "warning",
+            })
 
     return json.dumps({
-        "ticker": ticker.upper(),
+        "ticker": ticker_upper,
         "query": event_query,
         "status": status,
         "bestEvidence": best_evidence,
@@ -2652,6 +2767,26 @@ async def get_filing_section(ticker: str, section_name: str, document_url: str, 
             html = resp.read().decode("utf-8", errors="replace")
 
         html = _sanitize_sec_html(html)
+        start_idx, end_idx, found_heading, toc_skipped, err_code = _find_section_bounds(html, section_name, context_chars)
+        if err_code == "SECTION_AMBIGUOUS":
+            return _mcp_failure("get_filing_section", "SECTION_AMBIGUOUS", "The section heading could not be resolved unambiguously.")
+
+        if start_idx is not None and end_idx is not None:
+            section_html = html[start_idx:end_idx]
+            plain_section = _re.sub(r'<[^>]+>', ' ', section_html)
+            plain_section = ' '.join(plain_section.split())
+            return json.dumps({
+                "ticker": ticker,
+                "sectionName": section_name,
+                "found": True,
+                "text": plain_section[:context_chars],
+                "sectionStartOffset": start_idx,
+                "sectionEndOffset": end_idx,
+                "matchedHeading": found_heading,
+                "tocSkipped": toc_skipped,
+            })
+
+        # Fallback to plain-text regex search if structure bounds not found
         text = _re.sub(r'<[^>]+>', ' ', html)
         text = ' '.join(text.split())
 
@@ -2664,7 +2799,16 @@ async def get_filing_section(ticker: str, section_name: str, document_url: str, 
                 m = pattern2.search(text)
 
         if not m:
-            return json.dumps({"ticker": ticker, "sectionName": section_name, "found": False, "text": None})
+            return json.dumps({
+                "ticker": ticker,
+                "sectionName": section_name,
+                "found": False,
+                "text": None,
+                "sectionStartOffset": None,
+                "sectionEndOffset": None,
+                "matchedHeading": "",
+                "tocSkipped": toc_skipped,
+            })
 
         start = max(0, m.start())
         end = min(len(text), m.start() + context_chars)
@@ -2673,6 +2817,10 @@ async def get_filing_section(ticker: str, section_name: str, document_url: str, 
             "sectionName": section_name,
             "found": True,
             "text": text[start:end],
+            "sectionStartOffset": start,
+            "sectionEndOffset": end,
+            "matchedHeading": section_name,
+            "tocSkipped": toc_skipped,
         })
     except Exception as e:
         return _mcp_failure("get_filing_section", ErrorCode.PROVIDER_ERROR, str(e))
@@ -3442,6 +3590,7 @@ def _manual_lookup_payload(ticker: str, cik_padded: str | None, filing_type: str
     description="""Retrieve structured XBRL-tagged financial facts from EDGAR.
 
 Try this tool before search_filing_text for GAAP line items or geographic revenue.
+Use period_mode to select quarter, ytd, or annual facts (default: auto selects quarter for 10-Q, annual for 10-K).
 """,
 )
 async def get_filing_data(
@@ -3450,6 +3599,7 @@ async def get_filing_data(
     region: str | None = None,
     filing_type: str = "10-K",
     period: str = "latest",
+    period_mode: str = "auto",
 ) -> str:
     FLOATING_POINT_EPSILON = 1e-9
     RATIO_DECIMALS = 4
@@ -3562,9 +3712,12 @@ async def get_filing_data(
         })
 
     async def _concept_json(concept_name: str) -> dict | None:
-        return await _edgar_get(
-            f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik_padded}/us-gaap/{concept_name}.json"
-        )
+        try:
+            return await _edgar_get(
+                f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik_padded}/us-gaap/{concept_name}.json"
+            )
+        except EdgarError:
+            return None
 
     concept_used = concept_primary
     concept_data = await _concept_json(concept_primary)
@@ -3604,6 +3757,53 @@ async def get_filing_data(
     if filtered and period == "latest":
         latest_filed = max(str(f.get("filed", "")) for f in filtered)
         filtered = [f for f in filtered if str(f.get("filed", "")) == latest_filed]
+
+    # ── period_mode filtering ─────────────────────────────────────────────
+    # XBRL facts include both quarterly and YTD figures for the same filing.
+    # Filter by duration to avoid returning 6-month revenue as quarterly.
+    resolved_mode = period_mode.lower().strip() if period_mode else "auto"
+    if resolved_mode == "auto":
+        resolved_mode = "quarter" if filing_type.upper() == "10-Q" else "annual"
+    if resolved_mode in ("quarter", "annual", "ytd") and filtered:
+        def _duration_days(f: dict) -> int | None:
+            """Compute duration in days from XBRL start/end dates."""
+            s, e = f.get("start"), f.get("end")
+            if not s or not e:
+                return None
+            try:
+                d0 = datetime.date.fromisoformat(str(s))
+                d1 = datetime.date.fromisoformat(str(e))
+                return (d1 - d0).days
+            except (ValueError, TypeError):
+                return None
+        dur_tagged = [(f, _duration_days(f)) for f in filtered]
+        if resolved_mode == "quarter":
+            # Keep facts with duration 80-100 days (one quarter ~90 days)
+            # Also keep instant facts (no start/end) and untagged duration
+            mode_filtered = [f for f, d in dur_tagged if d is None or (60 <= d <= 110)]
+        elif resolved_mode == "ytd":
+            # Keep facts with year-to-date duration based on fiscal period (fp) or form type
+            def _is_ytd_match(f: dict, d: int | None) -> bool:
+                if d is None:
+                    return True
+                fp = str(f.get("fp") or "").upper().strip()
+                if fp == "Q1":
+                    return 60 <= d <= 110
+                elif fp == "Q2":
+                    return 150 <= d <= 200
+                elif fp == "Q3":
+                    return 240 <= d <= 290
+                else:  # FY, Q4, or fallback
+                    form = str(f.get("form") or "").upper().strip()
+                    if form == "10-K":
+                        return 340 <= d <= 400
+                    return d >= 60
+            mode_filtered = [f for f, d in dur_tagged if _is_ytd_match(f, d)]
+        else:  # annual
+            # Keep facts with duration 350-380 days (one year ~365 days)
+            mode_filtered = [f for f, d in dur_tagged if d is None or (340 <= d <= 400)]
+        if mode_filtered:
+            filtered = mode_filtered
 
     if fact_type == FilingFactType.segment_revenue:
         seg_rows = []
@@ -3799,6 +3999,34 @@ async def get_filing_data(
     if period_label and not period_label.startswith("FY"):
         period_label = f"FY{period_label}"
 
+    # ── XBRL context metadata ─────────────────────────────────────────────
+    xbrl_context: dict = {
+        "periodStart": picked.get("start"),
+        "periodEnd": picked.get("end"),
+        "durationDays": None,
+        "fiscalPeriod": str(picked.get("fp") or ""),
+        "fiscalYear": str(picked.get("fy") or ""),
+        "form": str(picked.get("form") or ""),
+        "frame": picked.get("frame"),
+        "periodMode": resolved_mode,
+    }
+    if picked.get("start") and picked.get("end"):
+        try:
+            d0 = datetime.date.fromisoformat(str(picked["start"]))
+            d1 = datetime.date.fromisoformat(str(picked["end"]))
+            xbrl_context["durationDays"] = (d1 - d0).days
+        except (ValueError, TypeError):
+            pass
+
+    result_warnings: list[dict] = []
+    # Warn if period_mode filtering was requested but couldn't narrow results
+    if resolved_mode == "quarter" and xbrl_context.get("durationDays") and xbrl_context["durationDays"] > 110:
+        result_warnings.append({
+            "code": "PERIOD_MODE_MISMATCH",
+            "message": f"Requested quarter but picked fact has {xbrl_context['durationDays']}-day duration. No quarterly fact available.",
+            "severity": "warning",
+        })
+
     return _geo_shape({
         "ticker": ticker,
         "factType": fact_type.value,
@@ -3821,6 +4049,7 @@ async def get_filing_data(
         "documentUrl": document_url,
         "indexUrl": index_url,
         "primaryDocumentUrl": primary_document_url,
+        "xbrlContext": xbrl_context,
         "evidence": {
             "sectionHeading": segment_label,
             "tableTitle": None,
@@ -3840,7 +4069,7 @@ async def get_filing_data(
             }
             if fact_type == FilingFactType.geographic_revenue and denominator is not None else None
         ),
-        "warnings": [],
+        "warnings": result_warnings,
     }, warn_denominator=(fact_type == FilingFactType.geographic_revenue and denominator is None))
 
 
@@ -5802,6 +6031,7 @@ async def extract_sec_filing_fact(
     region: str | None = None,
     filing_type: str = "10-K",
     period: str = "latest",
+    period_mode: str = "auto",
     document_url: str | None = None,
     accession_number: str | None = None,
 ) -> str:
@@ -5813,7 +6043,7 @@ async def extract_sec_filing_fact(
             routed_fact_type = FilingFactType.geographic_revenue if region is not None else None
     if routed_fact_type is not None or region is not None or fact_name is None:
         routed_fact_type = routed_fact_type or FilingFactType.geographic_revenue
-        raw = await get_filing_data(ticker=ticker, fact_type=routed_fact_type, region=region, filing_type=filing_type, period=period)
+        raw = await get_filing_data(ticker=ticker, fact_type=routed_fact_type, region=region, filing_type=filing_type, period=period, period_mode=period_mode)
         parsed_payload: dict = {}
         try:
             parsed_any = json.loads(raw)
@@ -5843,6 +6073,7 @@ async def extract_sec_filing_fact(
             "extractionMethod": parsed_payload.get("extractionMethod", "NONE"),
             "source": parsed_payload.get("source", "NOT_DISCLOSED"),
             "confidence": parsed_payload.get("confidence", "NOT_DISCLOSED"),
+            "xbrlContext": parsed_payload.get("xbrlContext"),
             "retrieval_path": _map_extraction_to_retrieval_path(parsed_payload.get("extractionMethod", "NONE")),
             "documentUrl": parsed_payload.get("documentUrl"),
             "indexUrl": parsed_payload.get("indexUrl"),
@@ -6405,6 +6636,90 @@ async def get_sec_filing_intelligence(
     })
 
 
+def _is_toc_match(html: str, match_start: int, match_end: int) -> bool:
+    if _re.search(r'<a\b[^>]*\bhref\s*=\s*[\'"]#[^\'"]*[\'"]', html[max(0, match_start - 30):min(len(html), match_end + 30)], _re.IGNORECASE):
+        return True
+    surr_before = html[max(0, match_start - 100):match_start]
+    if _re.search(r'<a\b[^>]*\bhref\s*=\s*[\'"]#[^\'"]*[\'"][^>]*>\s*$', surr_before, _re.IGNORECASE):
+        return True
+    context = html[max(0, match_start - 150):min(len(html), match_end + 150)]
+    if "...." in context or ". . ." in context or "&#183;" in context or "&middot;" in context:
+        return True
+    plain_context = _re.sub(r'<[^>]+>', ' ', context)
+    if _re.search(r'\.{3,}\s*\d+|\.\s*\.\s*\.\s*\d+', plain_context):
+        return True
+    return False
+
+
+def _find_section_bounds(html: str, section: str, max_chars: int = 50000) -> tuple[int | None, int | None, str, bool, str | None]:
+    section_lower = section.lower().strip()
+    heading_re = _re.compile(r'<h([1-6])[^>]*>(.*?)</h\1>', _re.DOTALL | _re.IGNORECASE)
+    candidates = []
+    toc_skipped = False
+    
+    all_headings = list(heading_re.finditer(html))
+    for idx, h_match in enumerate(all_headings):
+        heading_text = _strip_html_tags(h_match.group(2)).lower().strip()
+        level = int(h_match.group(1))
+        
+        if section_lower in heading_text or heading_text in section_lower:
+            if _is_toc_match(html, h_match.start(), h_match.end()):
+                toc_skipped = True
+                continue
+            candidates.append((h_match.start(), level, _strip_html_tags(h_match.group(2)).strip(), idx))
+            
+    item_matches = []
+    if not candidates:
+        item_re = _re.compile(
+            rf'(?:<b[^>]*>|<span[^>]*font-weight:\s*bold[^>]*>)\s*{_re.escape(section)}\b',
+            _re.IGNORECASE,
+        )
+        for item_match in item_re.finditer(html):
+            if _is_toc_match(html, item_match.start(), item_match.end()):
+                toc_skipped = True
+                continue
+            item_matches.append((item_match.start(), item_match.end()))
+            
+    if not candidates and not item_matches:
+        return None, None, "", toc_skipped, None
+        
+    if len(candidates) > 1 or len(item_matches) > 1:
+        return None, None, "", toc_skipped, "SECTION_AMBIGUOUS"
+        
+    if candidates:
+        start_pos, level, found_heading, h_idx = candidates[0]
+        end_pos = None
+        for next_h in all_headings[h_idx + 1:]:
+            next_level = int(next_h.group(1))
+            if next_level <= level:
+                end_pos = next_h.start()
+                break
+        if end_pos is None:
+            end_pos = min(start_pos + max_chars * 3, len(html))
+        return start_pos, end_pos, found_heading, toc_skipped, None
+    else:
+        start_pos, end_pos_match = item_matches[0]
+        found_heading = section
+        _MIN_SECTION_SPACING = 100
+        item_re = _re.compile(
+            rf'(?:<b[^>]*>|<span[^>]*font-weight:\s*bold[^>]*>)\s*{_re.escape(section)}\b',
+            _re.IGNORECASE,
+        )
+        next_start = end_pos_match + _MIN_SECTION_SPACING
+        end_pos = None
+        while True:
+            next_item = item_re.search(html, next_start)
+            if not next_item:
+                break
+            if _is_toc_match(html, next_item.start(), next_item.end()):
+                next_start = next_item.end()
+                continue
+            end_pos = next_item.start()
+            break
+        if end_pos is None:
+            end_pos = min(start_pos + max_chars * 3, len(html))
+        return start_pos, end_pos, found_heading, toc_skipped, None
+
 
 @yfinance_server.tool(
     name="get_sec_filing_section_markdown",
@@ -6474,57 +6789,20 @@ async def get_sec_filing_section_markdown(
         return _mcp_failure("get_sec_filing_section_markdown", ErrorCode.PROVIDER_ERROR,
                             f"Failed to fetch filing document: {document_url}")
 
-    # Find the section boundaries using heading patterns
-    section_lower = section.lower().strip()
-    heading_re = _re.compile(r'<h([1-6])[^>]*>(.*?)</h\1>', _re.DOTALL | _re.IGNORECASE)
+# Find the section boundaries using heading patterns
+    start_idx, end_idx, found_heading, toc_skipped, err_code = _find_section_bounds(html, section, max_chars)
+    if err_code == "SECTION_AMBIGUOUS":
+        return _mcp_failure("get_sec_filing_section_markdown", "SECTION_AMBIGUOUS", "The section heading could not be resolved unambiguously.")
 
-    section_start: int | None = None
-    section_end: int | None = None
-    section_level: int | None = None
-    found_heading = ""
-
-    for h_match in heading_re.finditer(html):
-        heading_text = _strip_html_tags(h_match.group(2)).lower().strip()
-        level = int(h_match.group(1))
-
-        if section_start is not None:
-            # End section at next heading of same or higher level
-            if level <= section_level:  # type: ignore[operator]
-                section_end = h_match.start()
-                break
-        elif section_lower in heading_text or heading_text in section_lower:
-            section_start = h_match.start()
-            section_level = level
-            found_heading = _strip_html_tags(h_match.group(2)).strip()
-
-    # Also try item-based pattern (e.g. "Item 1A" in bold/span)
-    if section_start is None:
-        item_re = _re.compile(
-            rf'(?:<b[^>]*>|<span[^>]*font-weight:\s*bold[^>]*>)\s*{_re.escape(section)}\b',
-            _re.IGNORECASE,
-        )
-        item_match = item_re.search(html)
-        if item_match:
-            section_start = item_match.start()
-            found_heading = section
-            # Find next Item pattern for end boundary
-            _MIN_SECTION_SPACING = 100  # minimum chars to skip before next section boundary
-            next_item = item_re.search(html, item_match.end() + _MIN_SECTION_SPACING)
-            if next_item:
-                section_end = next_item.start()
-
-    if section_start is None:
+    if start_idx is None:
         return _mcp_failure("get_sec_filing_section_markdown", ErrorCode.NO_FILING_DATA,
                             f"Section '{section}' not found in filing")
 
-    if section_end is None:
-        section_end = min(section_start + max_chars * 3, len(html))
-
     parser_source = "html_parser_fallback"
-    markdown = _html_to_markdown_fallback(html, section_start, section_end)
+    markdown = _html_to_markdown_fallback(html, start_idx, end_idx)
 
     # Count tables in the section
-    section_slice = html[section_start:section_end]
+    section_slice = html[start_idx:end_idx]
     tables_in_section = len(_re.findall(r'<table[^>]*>', section_slice, _re.IGNORECASE))
 
     # Truncate if needed
@@ -6546,6 +6824,10 @@ async def get_sec_filing_section_markdown(
         "confidence": "MEDIUM",
         "source": parser_source,
         "truncated": truncated,
+        "sectionStartOffset": start_idx,
+        "sectionEndOffset": end_idx,
+        "matchedHeading": found_heading,
+        "tocSkipped": toc_skipped,
     })
 
 
@@ -7267,7 +7549,15 @@ async def query_sec_filing_index(
     filing_type: str = "10-K",
     period: str = "latest",
     accession_number: str | None = None,
-    query_type: str = "",
+    query_type: Literal[
+        "geographic_revenue_share",
+        "revenue_exposure",
+        "china_exposure",
+        "risk_factor_mentions",
+        "customer_concentration",
+        "total_revenue",
+        "segment_revenue",
+    ] = "geographic_revenue_share",
     params: dict | None = None,
     return_evidence: bool = True,
     detailLevel: str = "compact",
@@ -7347,12 +7637,16 @@ async def query_sec_filing_index(
         "segment_revenue",
     }
     if query not in supported:
-        return _result(
-            "UNSUPPORTED_BY_INDEX",
-            None,
-            "NOT_DISCLOSED",
-            [],
-            [{"code": "UNSUPPORTED_QUERY_TYPE", "message": "Use one of the supported query_type values."}],
+        return _mcp_failure(
+            "query_sec_filing_index",
+            "UNSUPPORTED_QUERY_TYPE",
+            f"Unsupported query type '{query}'. Supported types are: {', '.join(sorted(supported))}",
+            meta_extra={
+                "supportedQueryTypes": list(supported),
+                "error_extra": {
+                    "supportedQueryTypes": list(supported)
+                }
+            }
         )
 
     warnings: list[dict] = []

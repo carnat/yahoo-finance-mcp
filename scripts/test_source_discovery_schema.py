@@ -26,16 +26,16 @@ _TOOL_BLOCK_SIZE = 4000
 
 
 def _ts_source() -> str:
-    return TOOLS_TS.read_text()
+    return TOOLS_TS.read_text(encoding="utf-8")
 
 
 def _py_source() -> str:
     """Return combined Python source covering server.py and all yfmcp/tools/*.py modules."""
-    parts = [SERVER_PY.read_text()]
+    parts = [SERVER_PY.read_text(encoding="utf-8")]
     tools_dir = ROOT / "yfmcp" / "tools"
     if tools_dir.is_dir():
         for path in sorted(tools_dir.glob("*.py")):
-            parts.append(path.read_text())
+            parts.append(path.read_text(encoding="utf-8"))
     return "\n".join(parts)
 
 

@@ -172,7 +172,9 @@ class TestListSecFilingExhibits(unittest.TestCase):
         raw = _run(srv.list_sec_filing_exhibits(ticker="AAPL", accessionNumber=""))
         envelope = _parse_full(raw)
         self.assertFalse(envelope["ok"])
-        self.assertIn("accessionNumber", envelope["error"])
+        err = envelope["error"]
+        msg = err["message"] if isinstance(err, dict) else err
+        self.assertIn("accessionNumber", msg)
 
 
 # ---------------------------------------------------------------------------

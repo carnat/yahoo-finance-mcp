@@ -174,7 +174,7 @@ class TestExtractEarningsMetrics(unittest.TestCase):
             metrics = data.get("metrics", {})
             for key in ("revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex"):
                 self.assertIn(key, metrics)
-            self.assertEqual(metrics["freeCashFlow"].get("confidence"), "NOT_DISCLOSED")
+            self.assertEqual(metrics["freeCashFlow"].get("confidence"), "NOT_DECISION_GRADE")
             self.assertIsNone(metrics["freeCashFlow"].get("value"))
             self.assertEqual(metrics["revenue"].get("confidence"), "HIGH")
             self.assertIsNotNone(metrics["revenue"].get("evidence"))
@@ -380,6 +380,98 @@ class TestSemanticQualityFixes(unittest.TestCase):
         self.assertIn("CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES", warning_codes)
 
 
+class TestNewFixesAndFeatures(unittest.TestCase):
+    def test_query_sec_filing_index_unsupported_ok_false(self):
+        with patch.dict(os.environ, {"MCP_ENVELOPE_V2": "true"}):
+            res = json.loads(asyncio.run(srv.query_sec_filing_index(ticker="AAPL", query_type="unsupported_type")))
+            self.assertEqual(res.get("ok"), False)
+            self.assertEqual(res.get("error", {}).get("code"), "UNSUPPORTED_QUERY_TYPE")
+            self.assertIn("supportedQueryTypes", res.get("meta", {}))
+
+    def test_get_filing_section_skip_toc(self):
+        html = """
+        <html>
+        <body>
+        <div id="toc">
+          <h1><a href="#item1a">Item 1A</a></h1>
+        </div>
+        <hr>
+        <h1>Item 1A. Risk Factors</h1>
+        <p>This is the actual risk factor content containing various risk details.</p>
+        <h1>Item 1B. Unresolved Staff Comments</h1>
+        </body>
+        </html>
+        """
+        start_idx, end_idx, found_heading, toc_skipped, err_code = srv._find_section_bounds(html, "Item 1A", 1000)
+        self.assertIsNotNone(start_idx)
+        self.assertTrue(toc_skipped)
+        self.assertEqual(found_heading, "Item 1A. Risk Factors")
+        self.assertIn("actual risk factor", html[start_idx:end_idx])
+
+    def test_get_filing_section_ambiguous(self):
+        html = """
+        <html>
+        <body>
+        <h1>Item 1A. Risk Factors</h1>
+        <p>First section</p>
+        <h1>Item 1A. Risk Factors</h1>
+        <p>Second section</p>
+        </body>
+        </html>
+        """
+        start_idx, end_idx, found_heading, toc_skipped, err_code = srv._find_section_bounds(html, "Item 1A", 1000)
+        self.assertEqual(err_code, "SECTION_AMBIGUOUS")
+
+    def test_get_company_press_releases_status_split(self):
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked_collect, \
+             patch("yfmcp.tools.earnings._resolve_ex991_url", new_callable=AsyncMock) as mocked_ex991:
+            
+            mocked_collect.return_value = (
+                [
+                    {
+                        "sourceType": "sec_filing",
+                        "filingType": "8-K",
+                        "accessionNumber": "0001193125-26-000001",
+                        "url": "https://www.sec.gov/Archives/edgar/data/320193/000119312526000001/primary.htm",
+                        "title": "8-K filed",
+                    }
+                ],
+                ["sec"],
+                [],
+                "2026-06-25T12:00:00Z"
+            )
+            
+            mocked_ex991.return_value = "https://www.sec.gov/Archives/edgar/data/320193/000119312526000001/ex99-1.htm"
+            res = json.loads(asyncio.run(srv.get_company_press_releases("AAPL", sources=["sec"])))
+            self.assertEqual(res.get("status"), "SEC_EX99_FOUND")
+            self.assertEqual(res["items"][0]["sourceType"], "sec_ex99_found")
+            self.assertEqual(res["items"][0]["url"], "https://www.sec.gov/Archives/edgar/data/320193/000119312526000001/ex99-1.htm")
+
+            mocked_collect.return_value = ([], ["yahoo_finance_press_releases"], [], "2026-06-25T12:00:00Z")
+            mocked_ex991.return_value = None
+            res = json.loads(asyncio.run(srv.get_company_press_releases("AAPL", sources=["yahoo_finance_press_releases"])))
+            self.assertEqual(res.get("status"), "NO_YAHOO_PRESS_RELEASE")
+
+    def test_decision_grade_enrichment(self):
+        data = {
+            "metrics": {
+                "revenue": {
+                    "value": 1000,
+                    "unit": "USD",
+                    "confidence": "HIGH",
+                    "evidence": "exhibit EX-99.1"
+                }
+            }
+        }
+        res_str = srv._wrap_envelope_v2("extract_earnings_metrics", data)
+        res = json.loads(res_str)
+        enriched = res["data"]["metrics"]["revenue"]
+        self.assertEqual(enriched.get("decisionGrade"), True)
+        self.assertEqual(enriched.get("evidenceRequired"), True)
+        self.assertEqual(enriched.get("sourceType"), "unknown")
+        self.assertEqual(enriched["evidence"][0]["rawRow"], "exhibit EX-99.1")
+
+
 if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
@@ -392,6 +484,7 @@ if __name__ == "__main__":
         TestCompareActualVsEstimate,
         TestPublicWording,
         TestSemanticQualityFixes,
+        TestNewFixesAndFeatures,
     ]
     for cls in classes:
         suite.addTests(loader.loadTestsFromTestCase(cls))

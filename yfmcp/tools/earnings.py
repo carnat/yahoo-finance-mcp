@@ -133,6 +133,25 @@ def _extract_metric_number(text: str, patterns: list[str]) -> tuple[float | None
     return None, None, None
 
 
+async def _resolve_ex991_url(accession_number: str, cik: int | None) -> str | None:
+    """Resolve the EX-99.1 exhibit URL from an 8-K filing index.
+
+    Returns the full SEC URL for the EX-99.1 document, or None if not found.
+    """
+    if not accession_number or cik is None:
+        return None
+    index_url, _ = _edgar_build_filing_urls(cik, accession_number, None)
+    exhibits = await _edgar_list_exhibits_from_index(index_url)
+    for ex in exhibits:
+        doc_type = str(ex.get("type") or "").upper()
+        if doc_type in ("EX-99.1", "EX-99", "99.1"):
+            doc_name = ex.get("document")
+            if doc_name:
+                accession_nodash = accession_number.replace("-", "")
+                return f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{doc_name}"
+    return None
+
+
 async def _resolve_latest_earnings_sec_source(ticker: str) -> dict | None:
     raw = await _server_attr("list_sec_company_filings")(ticker=ticker, filing_type="8-K", limit=10)
     payload = _safe_json_loads(raw)
@@ -145,12 +164,22 @@ async def _resolve_latest_earnings_sec_source(ticker: str) -> dict | None:
         doc_url = str(filing.get("documentUrl") or "")
         if not doc_url.startswith("https://www.sec.gov/Archives/"):
             continue
+        accn = filing.get("accessionNumber")
+        # Try to resolve EX-99.1 exhibit URL (contains the actual press release)
+        ex991_url = None
+        if accn:
+            cik = _edgar_cik_from_accession(accn)
+            if cik:
+                ex991_url = await _resolve_ex991_url(accn, cik)
+        source_url = ex991_url or doc_url
+        source_type = "sec_8k_ex991" if ex991_url else "sec_8k"
         return {
-            "sourceType": "sec_8k",
-            "url": doc_url,
+            "sourceType": source_type,
+            "url": source_url,
+            "primaryDocumentUrl": doc_url,
             "filingDate": filing.get("filingDate"),
             "acceptedAt": filing.get("acceptedAt"),
-            "accessionNumber": filing.get("accessionNumber"),
+            "accessionNumber": accn,
             "confidence": "HIGH",
         }
     return None
@@ -802,34 +831,97 @@ async def get_sec_filing_exhibit_content(ticker: str, accessionNumber: str, file
     output_schema=_TOOL_OUTPUT_SCHEMAS["parse_public_transcript"],
     description="Fetch and parse a public transcript page (Motley Fool, company IR, etc.). Supports topic-based paragraph filtering to reduce token usage.",
 )
-async def parse_public_transcript(url: str, topics: list[str] | None = None) -> str:
+async def parse_public_transcript(url: str = "", topics: list[str] | None = None, raw_text: str | None = None) -> str:
+    # If raw_text is provided, parse it directly (bypass URL fetching)
+    if raw_text and str(raw_text).strip():
+        clean_text = _strip_html_tags(_sanitize_sec_html(str(raw_text)))
+        warnings: list[dict] = []
+        if topics:
+            filtered = _filter_paragraphs_by_topics(clean_text, topics)
+            if not filtered:
+                warnings.append({"code": "NO_TOPIC_MATCHES", "message": f"No paragraphs matched the provided topics: {topics}"})
+            return _wrap_envelope_v2("parse_public_transcript", {
+                "url": None,
+                "source": "raw_text",
+                "filteredByTopics": topics,
+                "matchedParagraphs": filtered,
+                "totalTextLength": len(clean_text),
+            }, warnings=warnings)
+        max_chars = 50_000
+        truncated = len(clean_text) > max_chars
+        if truncated:
+            warnings.append({"code": "TEXT_TRUNCATED", "message": f"Text truncated from {len(clean_text)} to {max_chars} characters."})
+        return _wrap_envelope_v2("parse_public_transcript", {
+            "url": None,
+            "source": "raw_text",
+            "filteredByTopics": None,
+            "text": clean_text[:max_chars],
+            "totalTextLength": len(clean_text),
+            "truncated": truncated,
+        }, warnings=warnings)
+
     if not url or not url.startswith("https://"):
-        return _wrap_envelope_v2("parse_public_transcript", None, error="A valid https:// URL is required.", error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+        return _wrap_envelope_v2("parse_public_transcript", None, error="A valid https:// URL or raw_text is required.", error_code=ErrorCode.INPUT_VALIDATION_ERROR)
 
     loop = asyncio.get_event_loop()
 
-    def _fetch_page() -> str | None:
+    def _fetch_page() -> tuple[str | None, str | None, int | None]:
+        """Fetch page and return (html, error_detail, http_status)."""
         req = _urlrequest.Request(
             url,
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"},
         )
         try:
             with _urlrequest.urlopen(req, timeout=30) as resp:  # noqa: S310
+                status_code = resp.getcode()
                 raw = resp.read(5_000_000)
             try:
-                return raw.decode("utf-8")
+                html = raw.decode("utf-8")
             except UnicodeDecodeError:
-                return raw.decode("latin-1", errors="replace")
-        except Exception:
-            return None
+                html = raw.decode("latin-1", errors="replace")
+            return html, None, status_code
+        except _urlerror.HTTPError as e:
+            return None, f"HTTP {e.code}: {e.reason}", e.code
+        except _urlerror.URLError as e:
+            return None, f"URL error: {e.reason}", None
+        except TimeoutError:
+            return None, "Connection timed out after 30s", None
+        except Exception as exc:
+            return None, f"Fetch error: {type(exc).__name__}: {exc}", None
 
-    html = await loop.run_in_executor(None, _fetch_page)
+    html, error_detail, http_status = await loop.run_in_executor(None, _fetch_page)
     if not html:
-        return _wrap_envelope_v2("parse_public_transcript", None, error=f"Could not fetch URL: {url}", error_code="FETCH_ERROR")
+        diagnostics: dict = {"url": url}
+        if http_status is not None:
+            diagnostics["httpStatus"] = http_status
+        if error_detail:
+            diagnostics["detail"] = error_detail
+        # Classify the failure
+        error_code = "FETCH_ERROR"
+        if http_status == 403:
+            error_code = "FETCH_FORBIDDEN"
+            diagnostics["hint"] = "Site may block automated requests. Try raw_text parameter instead."
+        elif http_status == 429:
+            error_code = "FETCH_RATE_LIMITED"
+            diagnostics["hint"] = "Rate limited by host. Wait and retry, or use raw_text parameter."
+        elif http_status and http_status >= 500:
+            error_code = "FETCH_SERVER_ERROR"
+        return _wrap_envelope_v2("parse_public_transcript", None,
+            error=error_detail or f"Could not fetch URL: {url}",
+            error_code=error_code,
+            meta_extra={"diagnostics": diagnostics})
 
+    # Detect paywall/robots block
     clean_text = _strip_html_tags(_sanitize_sec_html(html))
-
     warnings: list[dict] = []
+    lower_text = clean_text[:2000].lower()
+    if any(kw in lower_text for kw in ("access denied", "robot", "captcha", "subscribe to read", "paywall")):
+        warnings.append({
+            "code": "POSSIBLE_PAYWALL_OR_BLOCK",
+            "message": "Page content suggests a paywall, CAPTCHA, or robot block. Parsed content may be incomplete.",
+            "severity": "warning",
+        })
+
     if topics:
         filtered = _filter_paragraphs_by_topics(clean_text, topics)
         if not filtered:

@@ -56,6 +56,138 @@ export const ErrorCode = {
 
 export type ErrorCodeValue = (typeof ErrorCode)[keyof typeof ErrorCode];
 
+function enrichFacts(val: any, parentSourceType: string | null = null, parentConfidence: string | null = null, isMetric = false): any {
+  if (val && typeof val === "object") {
+    if (Array.isArray(val)) {
+      return val.map(item => enrichFacts(item, parentSourceType, parentConfidence, isMetric));
+    }
+    
+    const isFact = ("value" in val) || ("low" in val) || ("high" in val) || ("valueRatio" in val) || ("valuePct" in val) || isMetric;
+    
+    if (isFact) {
+      let conf = val.confidence || parentConfidence;
+      if (!conf) {
+        if ((val.value !== undefined && val.value !== null) || (val.low !== undefined && val.low !== null) || (val.valueRatio !== undefined && val.valueRatio !== null)) {
+          conf = "HIGH";
+        } else {
+          conf = "NOT_DECISION_GRADE";
+        }
+      }
+      conf = String(conf).toUpperCase();
+      if (!["HIGH", "MEDIUM", "LOW", "NOT_DECISION_GRADE"].includes(conf)) {
+        if (conf === "NOT_DISCLOSED") {
+          conf = "NOT_DECISION_GRADE";
+        } else {
+          conf = "LOW";
+        }
+      }
+      val.confidence = conf;
+
+      const origEv = val.evidence;
+      let evList: any[] = [];
+      if (Array.isArray(origEv)) {
+        evList = origEv;
+      } else if (origEv) {
+        evList = [origEv];
+      }
+      
+      const urls: string[] = [];
+      const standardisedEv = evList.map(ev => {
+        if (ev && typeof ev === "object") {
+          const url = ev.url || ev.documentUrl || null;
+          if (url) urls.push(String(url));
+          return {
+            url,
+            filingType: ev.filingType || null,
+            accessionNumber: ev.accessionNumber || null,
+            filingDate: ev.filingDate || null,
+            tableIndex: ev.tableIndex || null,
+            rowLabel: ev.rowLabel || null,
+            columnLabel: ev.columnLabel || null,
+            rawRow: ev.rawRow || null,
+          };
+        } else if (ev) {
+          const evStr = String(ev);
+          if (evStr.startsWith("http")) urls.push(evStr);
+          return {
+            url: evStr.startsWith("http") ? evStr : null,
+            filingType: null,
+            accessionNumber: null,
+            filingDate: null,
+            tableIndex: null,
+            rowLabel: null,
+            columnLabel: null,
+            rawRow: evStr,
+          };
+        }
+        return null;
+      }).filter(Boolean);
+      val.evidence = standardisedEv.length > 0 ? standardisedEv : null;
+
+      let inferredSourceType: string | null = null;
+      for (const url of urls) {
+        const urlLower = url.toLowerCase();
+        if (urlLower.includes("sec.gov")) {
+          if (urlLower.includes("companyfacts") || urlLower.includes("submissions") || urlLower.includes(".xml")) {
+            inferredSourceType = "sec_xbrl";
+            break;
+          } else if (urlLower.includes("ix?doc=") || urlLower.includes("index")) {
+            inferredSourceType = "sec_table";
+            break;
+          } else {
+            inferredSourceType = "sec_filing";
+            break;
+          }
+        } else if (urlLower.includes("yahoo.com")) {
+          inferredSourceType = "yahoo";
+          break;
+        } else if (urlLower.includes("ir.") || urlLower.includes("investor")) {
+          inferredSourceType = "company_ir";
+          break;
+        } else if (urlLower.startsWith("http")) {
+          inferredSourceType = "unknown";
+          break;
+        }
+      }
+
+      if (!inferredSourceType) {
+        inferredSourceType = parentSourceType;
+      }
+
+      if (!inferredSourceType) {
+        const extMethod = String(val.extractionMethod || "").toUpperCase();
+        if (extMethod.includes("XBRL") || extMethod.includes("COMPANYFACTS")) {
+          inferredSourceType = "sec_xbrl";
+        } else if (extMethod.includes("HTML") || extMethod.includes("TABLE")) {
+          inferredSourceType = "sec_table";
+        } else if (extMethod.includes("TEXT")) {
+          inferredSourceType = "sec_filing";
+        }
+      }
+
+      if (!inferredSourceType) {
+        inferredSourceType = "unknown";
+      }
+
+      val.sourceType = val.sourceType || inferredSourceType;
+      val.evidenceRequired = true;
+      val.decisionGrade = ["HIGH", "MEDIUM"].includes(conf);
+    }
+    
+    const sourceType = val.source || val.sourceType || parentSourceType;
+    const confidence = val.confidence || parentConfidence;
+    
+    for (const key of Object.keys(val)) {
+      if (["confidence", "sourceType", "evidenceRequired", "decisionGrade", "evidence"].includes(key)) {
+        continue;
+      }
+      const childIsMetric = isFact || ["metrics", "actual", "estimate", "revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex", "eps"].includes(key);
+      val[key] = enrichFacts(val[key], sourceType, confidence, childIsMetric);
+    }
+  }
+  return val;
+}
+
 export function mcpSuccess(
   tool: string,
   rawData: string,
@@ -76,6 +208,7 @@ export function mcpSuccess(
   let data: unknown;
   try {
     data = JSON.parse(rawData);
+    data = enrichFacts(data);
   } catch {
     data = rawData;
   }
@@ -105,10 +238,18 @@ export function mcpFailure(
   tool: string,
   code: string,
   message: string,
-  opts?: { source?: string }
+  opts?: { source?: string; metaExtra?: Record<string, unknown>; diagnostics?: unknown }
 ): string {
-  if (_workerEnv["MCP_ENVELOPE_V2"] !== "true") return JSON.stringify({ error: true, code, message });
-  const resp: McpResponse = {
+  if (_workerEnv["MCP_ENVELOPE_V2"] !== "true") {
+    return JSON.stringify({
+      error: true,
+      code,
+      message,
+      ...(opts?.metaExtra || {}),
+      ...(opts?.diagnostics !== undefined ? { diagnostics: opts.diagnostics } : {}),
+    });
+  }
+  const resp: any = {
     ok: false,
     data: null,
     meta: {
@@ -118,8 +259,16 @@ export function mcpFailure(
       serverVersion: SERVER_VERSION,
       cacheHit: false,
       warnings: [],
+      ...(opts?.metaExtra || {}),
     },
-    error: { code, message },
+    error: {
+      code,
+      message,
+      ...(opts?.metaExtra || {}),
+    },
   };
+  if (opts?.diagnostics !== undefined) {
+    resp.diagnostics = opts.diagnostics;
+  }
   return JSON.stringify(resp);
 }

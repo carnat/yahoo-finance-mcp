@@ -15,7 +15,19 @@ from typing import TypedDict
 # ---------------------------------------------------------------------------
 SERVER_VERSION = "0.2.0"
 BUILD_DATE = "2026-06-14"  # date of this release; update on each deploy
-_ENVELOPE_V2 = os.environ.get("MCP_ENVELOPE_V2", "").lower() == "true"
+
+
+class _DynamicEnvelopeV2Flag:
+    def __bool__(self) -> bool:
+        return os.environ.get("MCP_ENVELOPE_V2", "").lower() == "true"
+    def __repr__(self) -> str:
+        return str(bool(self))
+    def __eq__(self, other: object) -> bool:
+        return bool(self) == other
+
+
+_ENVELOPE_V2 = _DynamicEnvelopeV2Flag()
+
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +42,7 @@ class ErrorCode:
     RATE_LIMIT = "RATE_LIMIT"
     INPUT_VALIDATION_ERROR = "INPUT_VALIDATION_ERROR"
     DEPRECATED_TOOL = "DEPRECATED_TOOL"
+    AMBIGUOUS_CONTEXT = "AMBIGUOUS_CONTEXT"
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +114,21 @@ def _mcp_failure(
     *,
     source: str = "yahoo_finance",
     data_date: str | None = None,
+    meta_extra: dict | None = None,
 ) -> str:
+    error_payload = {
+        "code": code,
+        "message": message,
+    }
+    diagnostics = None
+    if meta_extra:
+        if "error_extra" in meta_extra:
+            error_payload.update(meta_extra["error_extra"])
+            meta_extra = {k: v for k, v in meta_extra.items() if k != "error_extra"}
+        if "diagnostics" in meta_extra:
+            diagnostics = meta_extra["diagnostics"]
+            meta_extra = {k: v for k, v in meta_extra.items() if k != "diagnostics"}
+
     payload = {
         "ok": False,
         "data": None,
@@ -113,10 +140,20 @@ def _mcp_failure(
             "cacheHit": False,
             "warnings": [],
         },
-        "error": {"code": code, "message": message},
+        "error": error_payload,
     }
+    if meta_extra:
+        payload["meta"].update(meta_extra)
+    if diagnostics is not None:
+        payload["diagnostics"] = diagnostics
+
     if not _ENVELOPE_V2:
-        return json.dumps({"error": True, "code": code, "message": message})
+        ret = {"error": True, "code": code, "message": message}
+        if "fallbackSuggested" in error_payload:
+            ret["fallbackSuggested"] = error_payload["fallbackSuggested"]
+        if "retryable" in error_payload:
+            ret["retryable"] = error_payload["retryable"]
+        return json.dumps(ret)
     return json.dumps(payload)
 
 
@@ -148,9 +185,128 @@ def _mcp_warning(
     })
 
 
+import re
+
 # ---------------------------------------------------------------------------
 # Envelope V2 standardization helper
 # ---------------------------------------------------------------------------
+def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metric=False):
+    if isinstance(val, dict):
+        is_fact = "value" in val or "low" in val or "high" in val or "valueRatio" in val or "valuePct" in val or is_metric
+        
+        if is_fact:
+            conf = val.get("confidence") or parent_confidence
+            if not conf:
+                if val.get("value") is not None or val.get("low") is not None or val.get("valueRatio") is not None:
+                    conf = "HIGH"
+                else:
+                    conf = "NOT_DECISION_GRADE"
+            
+            conf = str(conf).upper()
+            if conf not in {"HIGH", "MEDIUM", "LOW", "NOT_DECISION_GRADE"}:
+                if conf == "NOT_DISCLOSED":
+                    conf = "NOT_DECISION_GRADE"
+                else:
+                    conf = "LOW"
+                    
+            val["confidence"] = conf
+            
+            orig_ev = val.get("evidence")
+            ev_list = []
+            if isinstance(orig_ev, list):
+                ev_list = orig_ev
+            elif orig_ev:
+                ev_list = [orig_ev]
+                
+            standardised_ev = []
+            urls = []
+            for ev in ev_list:
+                if isinstance(ev, dict):
+                    url = ev.get("url") or ev.get("documentUrl") or None
+                    if url:
+                        urls.append(str(url))
+                    standardised_ev.append({
+                        "url": url,
+                        "filingType": ev.get("filingType") or None,
+                        "accessionNumber": ev.get("accessionNumber") or None,
+                        "filingDate": ev.get("filingDate") or None,
+                        "tableIndex": ev.get("tableIndex") or None,
+                        "rowLabel": ev.get("rowLabel") or None,
+                        "columnLabel": ev.get("columnLabel") or None,
+                        "rawRow": ev.get("rawRow") or None,
+                    })
+                elif isinstance(ev, str):
+                    if ev.startswith("http"):
+                        urls.append(ev)
+                    standardised_ev.append({
+                        "url": ev if ev.startswith("http") else None,
+                        "filingType": None,
+                        "accessionNumber": None,
+                        "filingDate": None,
+                        "tableIndex": None,
+                        "rowLabel": None,
+                        "columnLabel": None,
+                        "rawRow": ev,
+                    })
+            val["evidence"] = standardised_ev if standardised_ev else None
+
+            inferred_source_type = None
+            for url in urls:
+                url_lower = url.lower()
+                if "sec.gov" in url_lower:
+                    if "companyfacts" in url_lower or "submissions" in url_lower or ".xml" in url_lower:
+                        inferred_source_type = "sec_xbrl"
+                        break
+                    elif "ix?doc=" in url_lower or "index" in url_lower:
+                        inferred_source_type = "sec_table"
+                        break
+                    else:
+                        inferred_source_type = "sec_filing"
+                        break
+                elif "yahoo.com" in url_lower:
+                    inferred_source_type = "yahoo"
+                    break
+                elif "ir." in url_lower or "investor" in url_lower:
+                    inferred_source_type = "company_ir"
+                    break
+                elif url_lower.startswith("http"):
+                    inferred_source_type = "unknown"
+                    break
+
+            if not inferred_source_type:
+                inferred_source_type = parent_source_type
+
+            if not inferred_source_type:
+                ext_method = str(val.get("extractionMethod") or "").upper()
+                if "XBRL" in ext_method or "COMPANYFACTS" in ext_method:
+                    inferred_source_type = "sec_xbrl"
+                elif "HTML" in ext_method or "TABLE" in ext_method:
+                    inferred_source_type = "sec_table"
+                elif "TEXT" in ext_method:
+                    inferred_source_type = "sec_filing"
+
+            if not inferred_source_type:
+                inferred_source_type = "unknown"
+
+            val["sourceType"] = val.get("sourceType") or inferred_source_type
+            val["evidenceRequired"] = True
+            val["decisionGrade"] = conf in {"HIGH", "MEDIUM"}
+            
+        source_type = val.get("source") or val.get("sourceType") or parent_source_type
+        confidence = val.get("confidence") or parent_confidence
+        
+        for k, v in list(val.items()):
+            if k in {"confidence", "sourceType", "evidenceRequired", "decisionGrade", "evidence"}:
+                continue
+            child_is_metric = is_fact or k in {"metrics", "actual", "estimate", "revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex", "eps"}
+            val[k] = _enrich_facts(v, parent_source_type=source_type, parent_confidence=confidence, is_metric=child_is_metric)
+            
+    elif isinstance(val, list):
+        return [_enrich_facts(item, parent_source_type, parent_confidence, is_metric) for item in val]
+        
+    return val
+
+
 def _wrap_envelope_v2(
     tool_name: str,
     data: dict | list | None,
@@ -186,17 +342,37 @@ def _wrap_envelope_v2(
         meta.update(meta_extra)
 
     if error is not None:
-        return json.dumps({
+        error_payload = {
+            "code": error_code or "UNKNOWN_ERROR",
+            "message": error,
+        }
+        diagnostics = None
+        if meta_extra:
+            if "error_extra" in meta_extra:
+                error_payload.update(meta_extra["error_extra"])
+                # Clean up to avoid duplicate keys in meta
+                meta_extra = {k: v for k, v in meta_extra.items() if k != "error_extra"}
+            if "diagnostics" in meta_extra:
+                diagnostics = meta_extra["diagnostics"]
+                meta_extra = {k: v for k, v in meta_extra.items() if k != "diagnostics"}
+            meta.update(meta_extra)
+
+        resp = {
             "ok": False,
-            "error": error,
+            "error": error_payload,
             "errorCode": error_code or "UNKNOWN_ERROR",
             "data": None,
             "meta": meta,
-        })
+        }
+        if diagnostics is not None:
+            resp["diagnostics"] = diagnostics
 
+        return json.dumps(resp)
+
+    enriched_data = _enrich_facts(data)
     return json.dumps({
         "ok": True,
-        "data": data,
+        "data": enriched_data,
         "error": None,
         "errorCode": None,
         "meta": meta,

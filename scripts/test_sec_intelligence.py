@@ -120,7 +120,7 @@ MOCK_COMPANY_FACTS = {
 
 class TestListSecMaterialFilings(unittest.TestCase):
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
     def test_filters_noisy_forms(self, mock_subs):
@@ -195,7 +195,7 @@ class TestListSecMaterialFilings(unittest.TestCase):
 
 class TestGetSecFilingIntelligence(unittest.TestCase):
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     @patch.object(srv, "_index_sec_filing_impl", new_callable=AsyncMock)
     @patch.object(srv, "_edgar_get_company_facts", new_callable=AsyncMock)
@@ -251,7 +251,7 @@ class TestGetSecFilingIntelligence(unittest.TestCase):
 
 class TestGetSecFilingSectionMarkdown(unittest.TestCase):
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     @patch.object(srv, "_edgar_get_html", new_callable=AsyncMock)
     @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
@@ -288,6 +288,43 @@ class TestGetSecFilingSectionMarkdown(unittest.TestCase):
         # Content is short enough to not truncate with 1000 char limit here
         self.assertIn("markdown", data)
 
+    @patch.object(srv, "_edgar_get_html", new_callable=AsyncMock)
+    @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
+    def test_mu_sec_filing_section_toc_skip(self, mock_subs, mock_html):
+        mock_subs.return_value = (MOCK_CIK, MOCK_SUBMISSIONS)
+        mu_html = """
+        <html><body>
+        <div id="table_of_contents">
+            <h2>Table of Contents</h2>
+            <h3><a href="#item1a">Item 1A. Risk Factors</a></h3>
+            <h3><a href="#item2">Item 2. Properties</a></h3>
+        </div>
+        <hr/>
+        <div id="item1a">
+            <h2>Item 1A. Risk Factors</h2>
+            <p>This is the actual risk factors content for Micron Technology (MU).</p>
+            <p>We face risks relating to DRAM and NAND price fluctuations.</p>
+        </div>
+        <div id="item2">
+            <h2>Item 2. Properties</h2>
+            <p>Actual properties content.</p>
+        </div>
+        </body></html>
+        """
+        mock_html.return_value = mu_html
+        result = self._run(srv.get_sec_filing_section_markdown("MU", section="Item 1A", max_chars=2500))
+        data = json.loads(result)
+        self.assertNotIn("error", data)
+        self.assertIn("markdown", data)
+        self.assertIn("matchedHeading", data)
+        self.assertIn("tocSkipped", data)
+        self.assertIn("sectionStartOffset", data)
+        self.assertIn("sectionEndOffset", data)
+        self.assertTrue(data["tocSkipped"])
+        self.assertEqual(data["matchedHeading"], "Item 1A. Risk Factors")
+        self.assertIn("Micron Technology (MU)", data["markdown"])
+        self.assertNotIn("Table of Contents", data["markdown"])
+
 
 # ---------------------------------------------------------------------------
 # Tests: extract_sec_filing_fact enhancements
@@ -295,7 +332,7 @@ class TestGetSecFilingSectionMarkdown(unittest.TestCase):
 
 class TestExtractSecFilingFactEnhancements(unittest.TestCase):
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     def test_retrieval_path_mapping(self):
         self.assertEqual(srv._map_extraction_to_retrieval_path("XBRL"), "XBRL")

@@ -305,7 +305,7 @@ class TestExtractGeoRevenueFromHtml(unittest.TestCase):
     # ── Basic GLW-like fixture ────────────────────────────────────────────
 
     def test_glw_note20_china_pct(self):
-        pct, usd, heading, _ = _extract_geo_revenue_from_html(MOCK_GLW_NOTE_20, "China")
+        pct, usd, _, heading, _ = _extract_geo_revenue_from_html(MOCK_GLW_NOTE_20, "China")
         self.assertIsNotNone(pct, "regionRevenuePct must not be None")
         self.assertAlmostEqual(pct, 2840 / 15630, places=3,
                                msg="China pct should be ~18.2% of total")
@@ -315,25 +315,25 @@ class TestExtractGeoRevenueFromHtml(unittest.TestCase):
                                msg="USD value should be 2840M when unit is millions")
 
     def test_glw_note20_heading_detected(self):
-        _, _, heading, _ = _extract_geo_revenue_from_html(MOCK_GLW_NOTE_20, "China")
+        _, _, _, heading, _ = _extract_geo_revenue_from_html(MOCK_GLW_NOTE_20, "China")
         self.assertIn("geographic", heading.lower(),
                       msg=f"Section heading should mention geographic, got: {heading!r}")
 
     def test_glw_note20_tables_returned(self):
-        _, _, _, tables = _extract_geo_revenue_from_html(MOCK_GLW_NOTE_20, "China")
-        self.assertTrue(len(tables) > 0, "At least one parsed table should be returned")
-        rows = tables[0]["rows"]
-        self.assertTrue(len(rows) >= 3, f"Table must have at least 3 rows, got {len(rows)}")
+        _, _, _, _, evidence = _extract_geo_revenue_from_html(MOCK_GLW_NOTE_20, "China")
+        self.assertIsNotNone(evidence, "Evidence must not be None")
+        rows = evidence.get("sourceRows")
+        self.assertTrue(len(rows) >= 2, f"Table must have at least 2 rows, got {len(rows)}")
 
     def test_china_not_present_returns_none(self):
-        pct, usd, _, _ = _extract_geo_revenue_from_html(MOCK_NO_CHINA, "China")
+        pct, usd, _, _, _ = _extract_geo_revenue_from_html(MOCK_NO_CHINA, "China")
         self.assertIsNone(pct, "Should return None when China not in table")
         self.assertIsNone(usd)
 
     # ── Alternative label for total row ──────────────────────────────────
 
     def test_total_label_revenues(self):
-        pct, usd, _, _ = _extract_geo_revenue_from_html(MOCK_TOTAL_LABEL_VARIANT, "China")
+        pct, usd, _, _, _ = _extract_geo_revenue_from_html(MOCK_TOTAL_LABEL_VARIANT, "China")
         self.assertIsNotNone(pct, "Should find China with 'Revenues' total row label")
         expected = 3200 / 13400
         self.assertAlmostEqual(pct, expected, places=3,
@@ -342,7 +342,7 @@ class TestExtractGeoRevenueFromHtml(unittest.TestCase):
     # ── Billions unit scale ───────────────────────────────────────────────
 
     def test_billions_unit_scale(self):
-        pct, usd, _, _ = _extract_geo_revenue_from_html(MOCK_BILLIONS_UNIT, "China")
+        pct, usd, _, _, _ = _extract_geo_revenue_from_html(MOCK_BILLIONS_UNIT, "China")
         self.assertIsNotNone(pct)
         expected_pct = 2.84 / 15.58
         self.assertAlmostEqual(pct, expected_pct, places=2,
@@ -354,7 +354,7 @@ class TestExtractGeoRevenueFromHtml(unittest.TestCase):
     # ── Fallback: no 'geographic' keyword, just the region in a table ────
 
     def test_no_geo_keyword_falls_back_to_region_name(self):
-        pct, _, _, _ = _extract_geo_revenue_from_html(MOCK_NO_GEO_KEYWORD, "China")
+        pct, _, _, _, _ = _extract_geo_revenue_from_html(MOCK_NO_GEO_KEYWORD, "China")
         self.assertIsNotNone(pct, "Should find China even without 'geographic' keyword")
         expected = 1600 / 12000
         self.assertAlmostEqual(pct, expected, places=3)
@@ -362,7 +362,7 @@ class TestExtractGeoRevenueFromHtml(unittest.TestCase):
     # ── Nested tables ─────────────────────────────────────────────────────
 
     def test_nested_tables(self):
-        pct, _, heading, _ = _extract_geo_revenue_from_html(MOCK_NESTED_TABLES, "China")
+        pct, _, _, heading, _ = _extract_geo_revenue_from_html(MOCK_NESTED_TABLES, "China")
         self.assertIsNotNone(pct, "Should parse inner data table within nested layout table")
         expected = 2840 / 15630
         self.assertAlmostEqual(pct, expected, places=3)
@@ -370,15 +370,15 @@ class TestExtractGeoRevenueFromHtml(unittest.TestCase):
     # ── Edge cases ────────────────────────────────────────────────────────
 
     def test_empty_html(self):
-        pct, usd, heading, tables = _extract_geo_revenue_from_html("", "China")
+        pct, usd, _, heading, evidence = _extract_geo_revenue_from_html("", "China")
         self.assertIsNone(pct)
         self.assertIsNone(usd)
         self.assertEqual(heading, "")
-        self.assertEqual(tables, [])
+        self.assertIsNone(evidence)
 
     def test_html_with_no_tables(self):
         html = "<html><body><h3>Geographic Information</h3><p>China revenues were significant.</p></body></html>"
-        pct, usd, _, _ = _extract_geo_revenue_from_html(html, "China")
+        pct, usd, _, _, _ = _extract_geo_revenue_from_html(html, "China")
         self.assertIsNone(pct, "No table → should return None")
 
     def test_case_insensitive_region_match(self):
@@ -393,7 +393,7 @@ class TestExtractGeoRevenueFromHtml(unittest.TestCase):
 </table>
 </body></html>
 """
-        pct, _, _, _ = _extract_geo_revenue_from_html(html, "China")
+        pct, _, _, _, _ = _extract_geo_revenue_from_html(html, "China")
         self.assertIsNotNone(pct)
 
     def test_region_with_parentheses_negative_value(self):
@@ -409,14 +409,14 @@ class TestExtractGeoRevenueFromHtml(unittest.TestCase):
 </table>
 </body></html>
 """
-        pct, _, _, _ = _extract_geo_revenue_from_html(html, "China")
+        pct, _, _, _, _ = _extract_geo_revenue_from_html(html, "China")
         self.assertIsNotNone(pct)
         self.assertAlmostEqual(pct, 2840 / 15630, places=3)
 
 
 class TestEdgarPrimaryDocFromIndex(unittest.TestCase):
     def _run_with_html(self, html: str) -> str | None:
-        with mock.patch("server._edgar_get_html", new=mock.AsyncMock(return_value=html)):
+        with mock.patch("yfmcp.clients.edgar._edgar_get_html", new=mock.AsyncMock(return_value=html)):
             return asyncio.run(_edgar_primary_doc_from_index("https://example.com/index.htm"))
 
     def test_prefers_seq1_or_10k_row(self):
