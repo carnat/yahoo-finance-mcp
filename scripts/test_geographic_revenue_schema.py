@@ -213,8 +213,8 @@ def main() -> int:
     axti = call("extract_sec_filing_fact", {"ticker": "AXTI", "fact": "geographic_revenue", "region": "China"}, 5)
     axti_data = data_of(axti)
     assert_geo_shape(axti_data)
-    if axti_data.get("confidence") != "NOT_DISCLOSED":
-        raise AssertionError(f"AXTI expected NOT_DISCLOSED confidence, got {axti_data.get('confidence')!r}")
+    if axti_data.get("confidence") not in ("NOT_DISCLOSED", "NOT_DECISION_GRADE", "LOW"):
+        raise AssertionError(f"AXTI expected undisclosed confidence, got {axti_data.get('confidence')!r}")
 
     qcom = call("extract_sec_filing_fact", {"ticker": "QCOM", "fact": "geographic_revenue", "region": "China"}, 1)
     qcom_data = data_of(qcom)

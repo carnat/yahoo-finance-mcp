@@ -146,8 +146,12 @@ def assert_no_unknown_tool(payload: dict, tool: str) -> None:
 
 def assert_not_silent_wrong_filing_type(data: dict, label: str) -> None:
     status = str(data.get("status") or data.get("confidence") or data.get("code") or "").upper()
-    evidence = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
-    if status == "NOT_DISCLOSED" and not any(evidence.get(k) for k in ("accessionNumber", "filingDate", "documentUrl")):
+    evidence = data.get("evidence")
+    if isinstance(evidence, list) and evidence:
+        evidence = evidence[0]
+    if not isinstance(evidence, dict):
+        evidence = {}
+    if status == "NOT_DISCLOSED" and not any((evidence.get(k) or (evidence.get("url") if k == "documentUrl" else None)) for k in ("accessionNumber", "filingDate", "documentUrl")):
         raise AssertionError(f"{label}: silent wrong-filing-type NOT_DISCLOSED with no filing evidence")
 
 
@@ -331,10 +335,13 @@ def main() -> int:
         for field in ("factType", "evidence", "warnings"):
             if field not in aapl_geo_data:
                 raise AssertionError(f"extract_geographic_revenue AAPL: missing field '{field}'")
-        evidence = aapl_geo_data.get("evidence") or {}
+        evidence = aapl_geo_data.get("evidence")
+        if isinstance(evidence, list) and evidence:
+            evidence = evidence[0]
         if isinstance(evidence, dict):
             for ef in ("filingType", "filingDate", "accessionNumber", "documentUrl"):
-                if not evidence.get(ef):
+                val = evidence.get(ef) or (evidence.get("url") if ef == "documentUrl" else None)
+                if not val:
                     print(f"  WARN extract_geographic_revenue AAPL: evidence.{ef} missing/empty")
         print(f"  PASS extract_geographic_revenue AAPL/Greater China (value={aapl_geo_data.get('value')!r})")
 

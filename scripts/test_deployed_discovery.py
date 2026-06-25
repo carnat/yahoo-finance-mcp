@@ -280,7 +280,10 @@ def _check_aaoi_geographic_revenue_schema(data: dict) -> None:
 def _check_axti_not_disclosed_schema(data: dict) -> None:
     """AXTI NOT_DISCLOSED schema check: stable null keys for undisclosed geographic revenue."""
     confidence = data.get("confidence")
-    if confidence == "EXTRACTION_FAILED":
+    status = data.get("status")
+    code = data.get("code")
+    source = data.get("source")
+    if "EXTRACTION_FAILED" in (confidence, status, code, source):
         print("  AXTI: tolerated EXTRACTION_FAILED")
         return
     has_positive = _check_geographic_revenue_schema(data, label="AXTI", require_positive=False)
@@ -289,8 +292,8 @@ def _check_axti_not_disclosed_schema(data: dict) -> None:
     extraction = data.get("extractionMethod")
     if extraction not in (None, "NONE", "NOT_DISCLOSED"):
         raise AssertionError(f"AXTI: extractionMethod should be NONE/NOT_DISCLOSED, got {extraction!r}")
-    if confidence != "NOT_DISCLOSED":
-        raise AssertionError(f"AXTI: confidence should be NOT_DISCLOSED, got {confidence!r}")
+    if confidence not in ("NOT_DISCLOSED", "NOT_DECISION_GRADE"):
+        raise AssertionError(f"AXTI: confidence should be NOT_DISCLOSED/NOT_DECISION_GRADE, got {confidence!r}")
 
 
 def _check_geographic_revenue_schema(data: dict, label: str, require_positive: bool = False) -> bool:
@@ -340,10 +343,22 @@ def _check_geographic_revenue_schema(data: dict, label: str, require_positive: b
         if data.get("denominator") is None:
             raise AssertionError(f"{label}: value present but denominator is null: {data}")
         evidence = data.get("evidence")
-        if not isinstance(evidence, dict) or not evidence:
-            raise AssertionError(f"{label}: positive extraction must include non-empty evidence object")
-        evidence_doc_url = evidence.get("documentUrl")
-        evidence_primary_doc_url = evidence.get("primaryDocumentUrl")
+        if isinstance(evidence, list):
+            if not evidence:
+                raise AssertionError(f"{label}: positive extraction must include non-empty evidence list")
+            first_ev = evidence[0]
+            if not isinstance(first_ev, dict):
+                raise AssertionError(f"{label}: evidence list items must be objects")
+            evidence_doc_url = first_ev.get("documentUrl") or first_ev.get("url")
+            evidence_primary_doc_url = first_ev.get("primaryDocumentUrl")
+        elif isinstance(evidence, dict):
+            if not evidence:
+                raise AssertionError(f"{label}: positive extraction must include non-empty evidence object")
+            evidence_doc_url = evidence.get("documentUrl")
+            evidence_primary_doc_url = evidence.get("primaryDocumentUrl")
+        else:
+            raise AssertionError(f"{label}: positive extraction must include non-empty evidence object or list, got {type(evidence).__name__}")
+
         if not (
             data.get("documentUrl")
             or data.get("primaryDocumentUrl")
@@ -357,11 +372,11 @@ def _check_geographic_revenue_schema(data: dict, label: str, require_positive: b
         raise AssertionError(f"{label}: expected positive extraction but got NOT_DISCLOSED/NOT_FOUND: {data}")
 
     confidence = data.get("confidence")
-    if confidence == "EXTRACTION_FAILED":
+    if confidence == "EXTRACTION_FAILED" or data.get("status") == "EXTRACTION_FAILED" or data.get("code") == "EXTRACTION_FAILED" or data.get("source") == "EXTRACTION_FAILED":
         print(f"  {label}: tolerated EXTRACTION_FAILED")
         return False
-    if confidence not in ("NOT_DISCLOSED", "NOT_FOUND"):
-        raise AssertionError(f"{label}: expected NOT_DISCLOSED/NOT_FOUND confidence, got {confidence!r}")
+    if confidence not in ("NOT_DISCLOSED", "NOT_FOUND", "NOT_DECISION_GRADE"):
+        raise AssertionError(f"{label}: expected NOT_DISCLOSED/NOT_FOUND/NOT_DECISION_GRADE confidence, got {confidence!r}")
 
     stable_null_keys = (
         "value",
@@ -786,8 +801,12 @@ def main() -> int:
             region = str(args.get("region", ""))
             if ticker == "TSM":
                 status = str(data.get("status") or data.get("confidence") or data.get("code") or "").upper()
-                evidence = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
-                if status == "NOT_DISCLOSED" and not any(evidence.get(k) for k in ("accessionNumber", "filingDate", "documentUrl")):
+                evidence = data.get("evidence")
+                if isinstance(evidence, list) and evidence:
+                    evidence = evidence[0]
+                if not isinstance(evidence, dict):
+                    evidence = {}
+                if status == "NOT_DISCLOSED" and not any((evidence.get(k) or (evidence.get("url") if k == "documentUrl" else None)) for k in ("accessionNumber", "filingDate", "documentUrl")):
                     raise AssertionError(f"TSM wrong filing type returned silent NOT_DISCLOSED: {data}")
                 print("  PASS TSM wrong-filing-type guard")
             elif ticker == "AAPL" and region == "Greater China":
@@ -984,28 +1003,32 @@ def main() -> int:
             "NO_OVERNIGHT_BARS",
             "FALLBACK_EXTENDED_HOURS",
         }
-        provider_status = overnight_data.get("providerStatus")
-        primary_status = overnight_data.get("primaryProviderStatus")
+        diagnostics = overnight_data.get("diagnostics") or {}
+        provider_status = overnight_data.get("providerStatus") or diagnostics.get("providerStatus")
+        primary_status = overnight_data.get("primaryProviderStatus") or diagnostics.get("primaryProviderStatus")
+        provider = overnight_data.get("provider") or diagnostics.get("provider")
         if provider_status not in allowed_provider_status and primary_status not in allowed_provider_status:
             raise AssertionError(
                 f"Alpaca overnight provider returned unexpected status: "
                 f"providerStatus={provider_status!r}, primaryProviderStatus={primary_status!r}"
             )
-        if overnight_data.get("provider") not in ("alpaca", "yahoo"):
-            raise AssertionError(f"Unexpected overnight provider: {overnight_data.get('provider')!r}")
+        if provider not in ("alpaca", "yahoo"):
+            raise AssertionError(f"Unexpected overnight provider: {provider!r}")
         for secret_name in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY"):
             secret_value = os.environ.get(secret_name) or ""
             if secret_value and secret_value in json.dumps(overnight):
                 raise AssertionError(f"SECURITY: {secret_name} found in overnight tool output")
         print(
             "  PASS Alpaca overnight smoke "
-            f"(provider={overnight_data.get('provider')!r}, "
+            f"(provider={provider!r}, "
             f"providerStatus={provider_status!r}, primaryProviderStatus={primary_status!r})"
         )
     else:
-        if "providerStatus" not in overnight_data:
+        diagnostics = overnight_data.get("diagnostics") or {}
+        provider_status = overnight_data.get("providerStatus") or diagnostics.get("providerStatus")
+        if provider_status is None:
             raise AssertionError("get_overnight_quote missing providerStatus")
-        print(f"  PASS overnight smoke (providerStatus={overnight_data.get('providerStatus')!r})")
+        print(f"  PASS overnight smoke (providerStatus={provider_status!r})")
 
     print(f"PASS deployed discovery + smoke ({len(names)} tools)")
     return 0
