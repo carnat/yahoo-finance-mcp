@@ -210,9 +210,6 @@ def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metri
                     conf = "LOW"
                     
             val["confidence"] = conf
-            val["sourceType"] = val.get("sourceType") or parent_source_type or "yahoo"
-            val["evidenceRequired"] = True
-            val["decisionGrade"] = conf in {"HIGH", "MEDIUM"}
             
             orig_ev = val.get("evidence")
             ev_list = []
@@ -222,10 +219,14 @@ def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metri
                 ev_list = [orig_ev]
                 
             standardised_ev = []
+            urls = []
             for ev in ev_list:
                 if isinstance(ev, dict):
+                    url = ev.get("url") or ev.get("documentUrl") or None
+                    if url:
+                        urls.append(str(url))
                     standardised_ev.append({
-                        "url": ev.get("url") or ev.get("documentUrl") or None,
+                        "url": url,
                         "filingType": ev.get("filingType") or None,
                         "accessionNumber": ev.get("accessionNumber") or None,
                         "filingDate": ev.get("filingDate") or None,
@@ -235,8 +236,10 @@ def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metri
                         "rawRow": ev.get("rawRow") or None,
                     })
                 elif isinstance(ev, str):
+                    if ev.startswith("http"):
+                        urls.append(ev)
                     standardised_ev.append({
-                        "url": None,
+                        "url": ev if ev.startswith("http") else None,
                         "filingType": None,
                         "accessionNumber": None,
                         "filingDate": None,
@@ -246,6 +249,48 @@ def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metri
                         "rawRow": ev,
                     })
             val["evidence"] = standardised_ev if standardised_ev else None
+
+            inferred_source_type = None
+            for url in urls:
+                url_lower = url.lower()
+                if "sec.gov" in url_lower:
+                    if "companyfacts" in url_lower or "submissions" in url_lower or ".xml" in url_lower:
+                        inferred_source_type = "sec_xbrl"
+                        break
+                    elif "ix?doc=" in url_lower or "index" in url_lower:
+                        inferred_source_type = "sec_table"
+                        break
+                    else:
+                        inferred_source_type = "sec_filing"
+                        break
+                elif "yahoo.com" in url_lower:
+                    inferred_source_type = "yahoo"
+                    break
+                elif "ir." in url_lower or "investor" in url_lower:
+                    inferred_source_type = "company_ir"
+                    break
+                elif url_lower.startswith("http"):
+                    inferred_source_type = "unknown"
+                    break
+
+            if not inferred_source_type:
+                inferred_source_type = parent_source_type
+
+            if not inferred_source_type:
+                ext_method = str(val.get("extractionMethod") or "").upper()
+                if "XBRL" in ext_method or "COMPANYFACTS" in ext_method:
+                    inferred_source_type = "sec_xbrl"
+                elif "HTML" in ext_method or "TABLE" in ext_method:
+                    inferred_source_type = "sec_table"
+                elif "TEXT" in ext_method:
+                    inferred_source_type = "sec_filing"
+
+            if not inferred_source_type:
+                inferred_source_type = "unknown"
+
+            val["sourceType"] = val.get("sourceType") or inferred_source_type
+            val["evidenceRequired"] = True
+            val["decisionGrade"] = conf in {"HIGH", "MEDIUM"}
             
         source_type = val.get("source") or val.get("sourceType") or parent_source_type
         confidence = val.get("confidence") or parent_confidence

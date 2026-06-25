@@ -82,10 +82,7 @@ function enrichFacts(val: any, parentSourceType: string | null = null, parentCon
         }
       }
       val.confidence = conf;
-      val.sourceType = val.sourceType || parentSourceType || "yahoo";
-      val.evidenceRequired = true;
-      val.decisionGrade = ["HIGH", "MEDIUM"].includes(conf);
-      
+
       const origEv = val.evidence;
       let evList: any[] = [];
       if (Array.isArray(origEv)) {
@@ -94,10 +91,13 @@ function enrichFacts(val: any, parentSourceType: string | null = null, parentCon
         evList = [origEv];
       }
       
+      const urls: string[] = [];
       const standardisedEv = evList.map(ev => {
         if (ev && typeof ev === "object") {
+          const url = ev.url || ev.documentUrl || null;
+          if (url) urls.push(String(url));
           return {
-            url: ev.url || ev.documentUrl || null,
+            url,
             filingType: ev.filingType || null,
             accessionNumber: ev.accessionNumber || null,
             filingDate: ev.filingDate || null,
@@ -107,20 +107,71 @@ function enrichFacts(val: any, parentSourceType: string | null = null, parentCon
             rawRow: ev.rawRow || null,
           };
         } else if (ev) {
+          const evStr = String(ev);
+          if (evStr.startsWith("http")) urls.push(evStr);
           return {
-            url: null,
+            url: evStr.startsWith("http") ? evStr : null,
             filingType: null,
             accessionNumber: null,
             filingDate: null,
             tableIndex: null,
             rowLabel: null,
             columnLabel: null,
-            rawRow: String(ev),
+            rawRow: evStr,
           };
         }
         return null;
       }).filter(Boolean);
       val.evidence = standardisedEv.length > 0 ? standardisedEv : null;
+
+      let inferredSourceType: string | null = null;
+      for (const url of urls) {
+        const urlLower = url.toLowerCase();
+        if (urlLower.includes("sec.gov")) {
+          if (urlLower.includes("companyfacts") || urlLower.includes("submissions") || urlLower.includes(".xml")) {
+            inferredSourceType = "sec_xbrl";
+            break;
+          } else if (urlLower.includes("ix?doc=") || urlLower.includes("index")) {
+            inferredSourceType = "sec_table";
+            break;
+          } else {
+            inferredSourceType = "sec_filing";
+            break;
+          }
+        } else if (urlLower.includes("yahoo.com")) {
+          inferredSourceType = "yahoo";
+          break;
+        } else if (urlLower.includes("ir.") || urlLower.includes("investor")) {
+          inferredSourceType = "company_ir";
+          break;
+        } else if (urlLower.startsWith("http")) {
+          inferredSourceType = "unknown";
+          break;
+        }
+      }
+
+      if (!inferredSourceType) {
+        inferredSourceType = parentSourceType;
+      }
+
+      if (!inferredSourceType) {
+        const extMethod = String(val.extractionMethod || "").toUpperCase();
+        if (extMethod.includes("XBRL") || extMethod.includes("COMPANYFACTS")) {
+          inferredSourceType = "sec_xbrl";
+        } else if (extMethod.includes("HTML") || extMethod.includes("TABLE")) {
+          inferredSourceType = "sec_table";
+        } else if (extMethod.includes("TEXT")) {
+          inferredSourceType = "sec_filing";
+        }
+      }
+
+      if (!inferredSourceType) {
+        inferredSourceType = "unknown";
+      }
+
+      val.sourceType = val.sourceType || inferredSourceType;
+      val.evidenceRequired = true;
+      val.decisionGrade = ["HIGH", "MEDIUM"].includes(conf);
     }
     
     const sourceType = val.source || val.sourceType || parentSourceType;

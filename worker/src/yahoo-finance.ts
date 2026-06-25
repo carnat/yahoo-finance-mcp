@@ -4434,7 +4434,7 @@ export async function getFilingData(
   if (resolvedMode === "auto") {
     resolvedMode = filingType.toUpperCase() === "10-Q" ? "quarter" : "annual";
   }
-  if ((resolvedMode === "quarter" || resolvedMode === "annual") && filtered.length) {
+  if ((resolvedMode === "quarter" || resolvedMode === "annual" || resolvedMode === "ytd") && filtered.length) {
     const durationDays = (f: Record<string, unknown>): number | null => {
       const s = f.start as string | undefined;
       const e = f.end as string | undefined;
@@ -4452,6 +4452,17 @@ export async function getFilingData(
     let modeFiltered: Record<string, unknown>[];
     if (resolvedMode === "quarter") {
       modeFiltered = tagged.filter(({ d }) => d == null || (d >= 60 && d <= 110)).map(({ f }) => f);
+    } else if (resolvedMode === "ytd") {
+      modeFiltered = tagged.filter(({ f, d }) => {
+        if (d == null) return true;
+        const fp = String(f.fp ?? "").toUpperCase().trim();
+        if (fp === "Q1") return d >= 60 && d <= 110;
+        if (fp === "Q2") return d >= 150 && d <= 200;
+        if (fp === "Q3") return d >= 240 && d <= 290;
+        const form = String(f.form ?? "").toUpperCase().trim();
+        if (form === "10-K") return d >= 340 && d <= 400;
+        return d >= 60;
+      }).map(({ f }) => f);
     } else {
       modeFiltered = tagged.filter(({ d }) => d == null || (d >= 340 && d <= 400)).map(({ f }) => f);
     }
@@ -8094,15 +8105,100 @@ export async function verifyCompanyEvent(
   else if (official.length > 0) status = "CONFIRMED";
   else if (inRange.length > 0) status = "PARTIAL";
   else if (staleOnly) status = "STALE";
-  const best = (official.length > 0 ? official : (inRange.length > 0 ? inRange : matched)).slice(0, 5).map(ev => ({
-    source: ev.source,
-    sourceType: ev.sourceType,
-    publishedAt: ev.publishedAt,
-    retrievedAt: ev.retrievedAt,
-    url: ev.url,
-    confidence: confidenceForSourceType(ev.sourceType, ev.confidence),
-    evidenceText: shortText(ev.evidenceText || ev.summary || ev.title, 180),
-  }));
+
+  let companyName = "";
+  try {
+    const priceD = await yGet(
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price`
+    ) as Record<string, unknown>;
+    const priceResult = ((priceD?.quoteSummary as Record<string, unknown> | undefined)
+      ?.result as Record<string, unknown>[] | undefined)?.[0]?.price as Record<string, unknown> | undefined;
+    companyName = _str(priceResult?.shortName || priceResult?.longName);
+  } catch { /* non-fatal */ }
+
+  const extractBaseCompanyName = (name: string): string => {
+    if (!name) return "";
+    let nameClean = name.toUpperCase();
+    const suffixes = [
+      " INC", " CORP", " CORPORATION", " LTD", " LIMITED", " PLC",
+      " CO", " COMPANY", " S.A.", " AG", " GMBH", " S.A.B. DE C.V.",
+      " GROUP", " HOLDINGS", " TRUST"
+    ];
+    for (const p of [".", ",", "/"]) {
+      nameClean = nameClean.split(p).join("");
+    }
+    for (const suff of suffixes) {
+      if (nameClean.endsWith(suff)) {
+        nameClean = nameClean.slice(0, -suff.length);
+      }
+    }
+    return nameClean.trim();
+  };
+
+  const baseCompanyName = extractBaseCompanyName(companyName);
+  const tickerUpper = ticker.toUpperCase();
+  const tickerPattern = new RegExp(`\\b${tickerUpper}\\b`, "i");
+
+  const relevanceScore = (ev: Record<string, unknown>): string => {
+    // 1. Check explicit tickers list
+    const evTickers = Array.isArray(ev.tickers) ? ev.tickers.map(String) : [];
+    if (evTickers.some(t => t.toUpperCase() === tickerUpper)) {
+      return "HIGH";
+    }
+
+    // 2. Check source type
+    const sourceType = _str(ev.sourceType);
+    if (["sec_filing", "sec", "company_ir", "sec_ex99_found"].includes(sourceType)) {
+      return "HIGH";
+    }
+
+    // 3. Check text content
+    const hay = `${_str(ev.title)} ${_str(ev.summary)} ${_str(ev.evidenceText)} ${_str(ev.issuer)}`.toLowerCase();
+    if (tickerPattern.test(hay)) {
+      return "HIGH";
+    }
+
+    if (baseCompanyName && hay.includes(baseCompanyName.toLowerCase())) {
+      return "HIGH";
+    }
+    if (companyName && hay.includes(companyName.toLowerCase())) {
+      return "HIGH";
+    }
+
+    // Check issuer field explicitly
+    const evIssuer = _str(ev.issuer).toUpperCase();
+    if (evIssuer.includes(tickerUpper)) {
+      return "HIGH";
+    }
+
+    return "LOW";
+  };
+
+  const best = (official.length > 0 ? official : (inRange.length > 0 ? inRange : matched)).slice(0, 5).map(ev => {
+    const relevance = relevanceScore(ev);
+    return {
+      source: ev.source,
+      sourceType: ev.sourceType,
+      publishedAt: ev.publishedAt,
+      retrievedAt: ev.retrievedAt,
+      url: ev.url,
+      confidence: confidenceForSourceType(ev.sourceType, ev.confidence),
+      relevance,
+      evidenceText: shortText(ev.evidenceText || ev.summary || ev.title, 180),
+    };
+  });
+
+  // If all best evidence is LOW relevance, downgrade status
+  if (best.length > 0 && best.every(e => e.relevance === "LOW")) {
+    if (status === "CONFIRMED") {
+      status = "PARTIAL";
+      out.warnings.push({
+        code: "LOW_RELEVANCE_EVIDENCE",
+        message: `Evidence found but none contain word-boundary match for ticker '${tickerUpper}'. Confidence downgraded.`,
+        severity: "warning",
+      });
+    }
+  }
   return JSON.stringify({
     ticker: ticker.toUpperCase(),
     query: eventQuery,

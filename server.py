@@ -1993,19 +1993,64 @@ async def verify_company_event(
     ticker_upper = ticker.upper()
     ticker_pattern = _re.compile(r'\b' + _re.escape(ticker_upper) + r'\b', _re.IGNORECASE)
 
+    cik_padded, submissions = await _get_submissions_for_ticker(ticker)
+    company_name = ""
+    if submissions and isinstance(submissions, dict):
+        company_name = str(submissions.get("name") or "").strip()
+
+    def _extract_base_company_name(name: str) -> str:
+        if not name:
+            return ""
+        name_clean = name.upper()
+        suffixes = [
+            " INC", " CORP", " CORPORATION", " LTD", " LIMITED", " PLC",
+            " CO", " COMPANY", " S.A.", " AG", " GMBH", " S.A.B. DE C.V.",
+            " GROUP", " HOLDINGS", " TRUST"
+        ]
+        for p in (".", ",", "/"):
+            name_clean = name_clean.replace(p, "")
+        for suff in suffixes:
+            if name_clean.endswith(suff):
+                name_clean = name_clean[:-len(suff)]
+        return name_clean.strip()
+
+    base_company_name = _extract_base_company_name(company_name)
+
     def _relevance_score(ev: dict) -> str:
         """Return 'HIGH', 'MEDIUM', or 'LOW' based on ticker/entity presence."""
+        # 1. Check explicit tickers list
+        ev_tickers = ev.get("tickers") or []
+        if any(str(t).upper() == ticker_upper for t in ev_tickers):
+            return "HIGH"
+            
+        # 2. Check source type
+        source_type = str(ev.get("sourceType") or "")
+        if source_type in ("sec_filing", "sec", "company_ir", "sec_ex99_found"):
+            return "HIGH"
+            
+        # 3. Check text content
         hay = " ".join([
             str(ev.get("title") or ""),
             str(ev.get("summary") or ""),
             str(ev.get("evidenceText") or ""),
+            str(ev.get("issuer") or ""),
         ])
+        
+        # Word boundary match for ticker
         if ticker_pattern.search(hay):
             return "HIGH"
-        # Check company name (from source metadata or event content)
-        source_type = str(ev.get("sourceType") or "")
-        if source_type in ("sec_filing", "sec", "company_ir"):
-            return "HIGH"  # SEC/IR sources are inherently ticker-scoped
+            
+        # Check company name/base name
+        if base_company_name and base_company_name.lower() in hay.lower():
+            return "HIGH"
+        if company_name and company_name.lower() in hay.lower():
+            return "HIGH"
+            
+        # Check issuer field explicitly
+        ev_issuer = str(ev.get("issuer") or "").upper()
+        if ticker_upper in ev_issuer:
+            return "HIGH"
+            
         return "LOW"
 
     best_evidence = []
@@ -3719,7 +3764,7 @@ async def get_filing_data(
     resolved_mode = period_mode.lower().strip() if period_mode else "auto"
     if resolved_mode == "auto":
         resolved_mode = "quarter" if filing_type.upper() == "10-Q" else "annual"
-    if resolved_mode in ("quarter", "annual") and filtered:
+    if resolved_mode in ("quarter", "annual", "ytd") and filtered:
         def _duration_days(f: dict) -> int | None:
             """Compute duration in days from XBRL start/end dates."""
             s, e = f.get("start"), f.get("end")
@@ -3736,6 +3781,24 @@ async def get_filing_data(
             # Keep facts with duration 80-100 days (one quarter ~90 days)
             # Also keep instant facts (no start/end) and untagged duration
             mode_filtered = [f for f, d in dur_tagged if d is None or (60 <= d <= 110)]
+        elif resolved_mode == "ytd":
+            # Keep facts with year-to-date duration based on fiscal period (fp) or form type
+            def _is_ytd_match(f: dict, d: int | None) -> bool:
+                if d is None:
+                    return True
+                fp = str(f.get("fp") or "").upper().strip()
+                if fp == "Q1":
+                    return 60 <= d <= 110
+                elif fp == "Q2":
+                    return 150 <= d <= 200
+                elif fp == "Q3":
+                    return 240 <= d <= 290
+                else:  # FY, Q4, or fallback
+                    form = str(f.get("form") or "").upper().strip()
+                    if form == "10-K":
+                        return 340 <= d <= 400
+                    return d >= 60
+            mode_filtered = [f for f, d in dur_tagged if _is_ytd_match(f, d)]
         else:  # annual
             # Keep facts with duration 350-380 days (one year ~365 days)
             mode_filtered = [f for f, d in dur_tagged if d is None or (340 <= d <= 400)]

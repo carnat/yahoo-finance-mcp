@@ -288,6 +288,43 @@ class TestGetSecFilingSectionMarkdown(unittest.TestCase):
         # Content is short enough to not truncate with 1000 char limit here
         self.assertIn("markdown", data)
 
+    @patch.object(srv, "_edgar_get_html", new_callable=AsyncMock)
+    @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
+    def test_mu_sec_filing_section_toc_skip(self, mock_subs, mock_html):
+        mock_subs.return_value = (MOCK_CIK, MOCK_SUBMISSIONS)
+        mu_html = """
+        <html><body>
+        <div id="table_of_contents">
+            <h2>Table of Contents</h2>
+            <h3><a href="#item1a">Item 1A. Risk Factors</a></h3>
+            <h3><a href="#item2">Item 2. Properties</a></h3>
+        </div>
+        <hr/>
+        <div id="item1a">
+            <h2>Item 1A. Risk Factors</h2>
+            <p>This is the actual risk factors content for Micron Technology (MU).</p>
+            <p>We face risks relating to DRAM and NAND price fluctuations.</p>
+        </div>
+        <div id="item2">
+            <h2>Item 2. Properties</h2>
+            <p>Actual properties content.</p>
+        </div>
+        </body></html>
+        """
+        mock_html.return_value = mu_html
+        result = self._run(srv.get_sec_filing_section_markdown("MU", section="Item 1A", max_chars=2500))
+        data = json.loads(result)
+        self.assertNotIn("error", data)
+        self.assertIn("markdown", data)
+        self.assertIn("matchedHeading", data)
+        self.assertIn("tocSkipped", data)
+        self.assertIn("sectionStartOffset", data)
+        self.assertIn("sectionEndOffset", data)
+        self.assertTrue(data["tocSkipped"])
+        self.assertEqual(data["matchedHeading"], "Item 1A. Risk Factors")
+        self.assertIn("Micron Technology (MU)", data["markdown"])
+        self.assertNotIn("Table of Contents", data["markdown"])
+
 
 # ---------------------------------------------------------------------------
 # Tests: extract_sec_filing_fact enhancements

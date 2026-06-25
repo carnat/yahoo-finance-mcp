@@ -468,7 +468,7 @@ class TestNewFixesAndFeatures(unittest.TestCase):
         enriched = res["data"]["metrics"]["revenue"]
         self.assertEqual(enriched.get("decisionGrade"), True)
         self.assertEqual(enriched.get("evidenceRequired"), True)
-        self.assertEqual(enriched.get("sourceType"), "yahoo")
+        self.assertEqual(enriched.get("sourceType"), "unknown")
         self.assertEqual(enriched["evidence"][0]["rawRow"], "exhibit EX-99.1")
 
 
