@@ -4285,6 +4285,7 @@ export async function getFilingData(
   region: string | null = null,
   filingType = "10-K",
   period = "latest",
+  periodMode = "auto",
 ): Promise<string> {
   const FLOATING_POINT_EPSILON = 1e-9;
   const RATIO_SCALE = 10000;
@@ -4401,6 +4402,39 @@ export async function getFilingData(
   if (filtered.length && period === "latest") {
     const latestFiled = filtered.map((f) => String(f.filed ?? "")).sort().slice(-1)[0];
     filtered = filtered.filter((f) => String(f.filed ?? "") === latestFiled);
+  }
+
+  // ── period_mode filtering ─────────────────────────────────────────────
+  // XBRL facts include both quarterly and YTD figures for the same filing.
+  // Filter by duration to avoid returning 6-month revenue as quarterly.
+  let resolvedMode = (periodMode || "auto").toLowerCase().trim();
+  if (resolvedMode === "auto") {
+    resolvedMode = filingType.toUpperCase() === "10-Q" ? "quarter" : "annual";
+  }
+  if ((resolvedMode === "quarter" || resolvedMode === "annual") && filtered.length) {
+    const durationDays = (f: Record<string, unknown>): number | null => {
+      const s = f.start as string | undefined;
+      const e = f.end as string | undefined;
+      if (!s || !e) return null;
+      try {
+        const d0 = new Date(s);
+        const d1 = new Date(e);
+        if (isNaN(d0.getTime()) || isNaN(d1.getTime())) return null;
+        return Math.round((d1.getTime() - d0.getTime()) / (1000 * 60 * 60 * 24));
+      } catch {
+        return null;
+      }
+    };
+    const tagged = filtered.map((f) => ({ f, d: durationDays(f) }));
+    let modeFiltered: Record<string, unknown>[];
+    if (resolvedMode === "quarter") {
+      modeFiltered = tagged.filter(({ d }) => d == null || (d >= 60 && d <= 110)).map(({ f }) => f);
+    } else {
+      modeFiltered = tagged.filter(({ d }) => d == null || (d >= 340 && d <= 400)).map(({ f }) => f);
+    }
+    if (modeFiltered.length) {
+      filtered = modeFiltered;
+    }
   }
 
   if (factType === "segment_revenue") {
@@ -4617,6 +4651,37 @@ export async function getFilingData(
   const rawValue = formatRawNumber(valueNum);
   const rawDenominator = formatRawNumber(denominator);
 
+  // ── XBRL context metadata ─────────────────────────────────────────────
+  let durationDaysVal: number | null = null;
+  if (picked.start && picked.end) {
+    try {
+      const d0 = new Date(String(picked.start));
+      const d1 = new Date(String(picked.end));
+      if (!isNaN(d0.getTime()) && !isNaN(d1.getTime())) {
+        durationDaysVal = Math.round((d1.getTime() - d0.getTime()) / (1000 * 60 * 60 * 24));
+      }
+    } catch { /* ignore */ }
+  }
+  const xbrlContext = {
+    periodStart: picked.start ?? null,
+    periodEnd: picked.end ?? null,
+    durationDays: durationDaysVal,
+    fiscalPeriod: String(picked.fp ?? ""),
+    fiscalYear: String(picked.fy ?? ""),
+    form: String(picked.form ?? ""),
+    frame: picked.frame ?? null,
+    periodMode: resolvedMode,
+  };
+
+  const resultWarnings: Record<string, unknown>[] = [];
+  if (resolvedMode === "quarter" && durationDaysVal != null && durationDaysVal > 110) {
+    resultWarnings.push({
+      code: "PERIOD_MODE_MISMATCH",
+      message: `Requested quarter but picked fact has ${durationDaysVal}-day duration. No quarterly fact available.`,
+      severity: "warning",
+    });
+  }
+
   return withGeoShape({
     ticker,
     factType,
@@ -4639,6 +4704,7 @@ export async function getFilingData(
     documentUrl,
     indexUrl,
     primaryDocumentUrl,
+    xbrlContext,
     evidence: {
       sectionHeading: segmentLabel,
       tableTitle: null,
@@ -4657,7 +4723,7 @@ export async function getFilingData(
           resultPct: valuePct,
         }
       : null,
-    warnings: [],
+    warnings: resultWarnings,
   }, factType === "geographic_revenue" && denominator == null);
 }
 

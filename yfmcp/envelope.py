@@ -15,7 +15,19 @@ from typing import TypedDict
 # ---------------------------------------------------------------------------
 SERVER_VERSION = "0.2.0"
 BUILD_DATE = "2026-06-14"  # date of this release; update on each deploy
-_ENVELOPE_V2 = os.environ.get("MCP_ENVELOPE_V2", "").lower() == "true"
+
+
+class _DynamicEnvelopeV2Flag:
+    def __bool__(self) -> bool:
+        return os.environ.get("MCP_ENVELOPE_V2", "").lower() == "true"
+    def __repr__(self) -> str:
+        return str(bool(self))
+    def __eq__(self, other: object) -> bool:
+        return bool(self) == other
+
+
+_ENVELOPE_V2 = _DynamicEnvelopeV2Flag()
+
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +42,7 @@ class ErrorCode:
     RATE_LIMIT = "RATE_LIMIT"
     INPUT_VALIDATION_ERROR = "INPUT_VALIDATION_ERROR"
     DEPRECATED_TOOL = "DEPRECATED_TOOL"
+    AMBIGUOUS_CONTEXT = "AMBIGUOUS_CONTEXT"
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +114,21 @@ def _mcp_failure(
     *,
     source: str = "yahoo_finance",
     data_date: str | None = None,
+    meta_extra: dict | None = None,
 ) -> str:
+    error_payload = {
+        "code": code,
+        "message": message,
+    }
+    diagnostics = None
+    if meta_extra:
+        if "error_extra" in meta_extra:
+            error_payload.update(meta_extra["error_extra"])
+            meta_extra = {k: v for k, v in meta_extra.items() if k != "error_extra"}
+        if "diagnostics" in meta_extra:
+            diagnostics = meta_extra["diagnostics"]
+            meta_extra = {k: v for k, v in meta_extra.items() if k != "diagnostics"}
+
     payload = {
         "ok": False,
         "data": None,
@@ -113,10 +140,20 @@ def _mcp_failure(
             "cacheHit": False,
             "warnings": [],
         },
-        "error": {"code": code, "message": message},
+        "error": error_payload,
     }
+    if meta_extra:
+        payload["meta"].update(meta_extra)
+    if diagnostics is not None:
+        payload["diagnostics"] = diagnostics
+
     if not _ENVELOPE_V2:
-        return json.dumps({"error": True, "code": code, "message": message})
+        ret = {"error": True, "code": code, "message": message}
+        if "fallbackSuggested" in error_payload:
+            ret["fallbackSuggested"] = error_payload["fallbackSuggested"]
+        if "retryable" in error_payload:
+            ret["retryable"] = error_payload["retryable"]
+        return json.dumps(ret)
     return json.dumps(payload)
 
 
@@ -186,13 +223,32 @@ def _wrap_envelope_v2(
         meta.update(meta_extra)
 
     if error is not None:
-        return json.dumps({
+        error_payload = {
+            "code": error_code or "UNKNOWN_ERROR",
+            "message": error,
+        }
+        diagnostics = None
+        if meta_extra:
+            if "error_extra" in meta_extra:
+                error_payload.update(meta_extra["error_extra"])
+                # Clean up to avoid duplicate keys in meta
+                meta_extra = {k: v for k, v in meta_extra.items() if k != "error_extra"}
+            if "diagnostics" in meta_extra:
+                diagnostics = meta_extra["diagnostics"]
+                meta_extra = {k: v for k, v in meta_extra.items() if k != "diagnostics"}
+            meta.update(meta_extra)
+
+        resp = {
             "ok": False,
-            "error": error,
+            "error": error_payload,
             "errorCode": error_code or "UNKNOWN_ERROR",
             "data": None,
             "meta": meta,
-        })
+        }
+        if diagnostics is not None:
+            resp["diagnostics"] = diagnostics
+
+        return json.dumps(resp)
 
     return json.dumps({
         "ok": True,

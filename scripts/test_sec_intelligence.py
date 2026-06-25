@@ -120,7 +120,7 @@ MOCK_COMPANY_FACTS = {
 
 class TestListSecMaterialFilings(unittest.TestCase):
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
     def test_filters_noisy_forms(self, mock_subs):
@@ -195,7 +195,7 @@ class TestListSecMaterialFilings(unittest.TestCase):
 
 class TestGetSecFilingIntelligence(unittest.TestCase):
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     @patch.object(srv, "_index_sec_filing_impl", new_callable=AsyncMock)
     @patch.object(srv, "_edgar_get_company_facts", new_callable=AsyncMock)
@@ -251,7 +251,7 @@ class TestGetSecFilingIntelligence(unittest.TestCase):
 
 class TestGetSecFilingSectionMarkdown(unittest.TestCase):
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     @patch.object(srv, "_edgar_get_html", new_callable=AsyncMock)
     @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
@@ -295,7 +295,7 @@ class TestGetSecFilingSectionMarkdown(unittest.TestCase):
 
 class TestExtractSecFilingFactEnhancements(unittest.TestCase):
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     def test_retrieval_path_mapping(self):
         self.assertEqual(srv._map_extraction_to_retrieval_path("XBRL"), "XBRL")

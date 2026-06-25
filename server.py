@@ -58,7 +58,7 @@ from yfmcp.clients.edgar import (
     _SEC_REQUIRED_UA, _SMOKE_TICKER_CIK_FALLBACKS,
     _resolve_cik_for_ticker, _get_submissions_for_ticker,
     _EDGAR_TICKERS, _EDGAR_TICKERS_LOADED_AT, _EDGAR_TTL,
-    _load_edgar_tickers, _edgar_get,
+    _load_edgar_tickers, _edgar_get, EdgarError,
     _EDGAR_FACTS_CACHE, _EDGAR_SUBS_CACHE,
     _edgar_get_company_facts, _edgar_get_submissions,
     _edgar_build_filing_urls, _edgar_cik_from_accession,
@@ -3442,6 +3442,7 @@ def _manual_lookup_payload(ticker: str, cik_padded: str | None, filing_type: str
     description="""Retrieve structured XBRL-tagged financial facts from EDGAR.
 
 Try this tool before search_filing_text for GAAP line items or geographic revenue.
+Use period_mode to select quarter, ytd, or annual facts (default: auto selects quarter for 10-Q, annual for 10-K).
 """,
 )
 async def get_filing_data(
@@ -3450,6 +3451,7 @@ async def get_filing_data(
     region: str | None = None,
     filing_type: str = "10-K",
     period: str = "latest",
+    period_mode: str = "auto",
 ) -> str:
     FLOATING_POINT_EPSILON = 1e-9
     RATIO_DECIMALS = 4
@@ -3562,9 +3564,12 @@ async def get_filing_data(
         })
 
     async def _concept_json(concept_name: str) -> dict | None:
-        return await _edgar_get(
-            f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik_padded}/us-gaap/{concept_name}.json"
-        )
+        try:
+            return await _edgar_get(
+                f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik_padded}/us-gaap/{concept_name}.json"
+            )
+        except EdgarError:
+            return None
 
     concept_used = concept_primary
     concept_data = await _concept_json(concept_primary)
@@ -3604,6 +3609,35 @@ async def get_filing_data(
     if filtered and period == "latest":
         latest_filed = max(str(f.get("filed", "")) for f in filtered)
         filtered = [f for f in filtered if str(f.get("filed", "")) == latest_filed]
+
+    # ── period_mode filtering ─────────────────────────────────────────────
+    # XBRL facts include both quarterly and YTD figures for the same filing.
+    # Filter by duration to avoid returning 6-month revenue as quarterly.
+    resolved_mode = period_mode.lower().strip() if period_mode else "auto"
+    if resolved_mode == "auto":
+        resolved_mode = "quarter" if filing_type.upper() == "10-Q" else "annual"
+    if resolved_mode in ("quarter", "annual") and filtered:
+        def _duration_days(f: dict) -> int | None:
+            """Compute duration in days from XBRL start/end dates."""
+            s, e = f.get("start"), f.get("end")
+            if not s or not e:
+                return None
+            try:
+                d0 = datetime.date.fromisoformat(str(s))
+                d1 = datetime.date.fromisoformat(str(e))
+                return (d1 - d0).days
+            except (ValueError, TypeError):
+                return None
+        dur_tagged = [(f, _duration_days(f)) for f in filtered]
+        if resolved_mode == "quarter":
+            # Keep facts with duration 80-100 days (one quarter ~90 days)
+            # Also keep instant facts (no start/end) and untagged duration
+            mode_filtered = [f for f, d in dur_tagged if d is None or (60 <= d <= 110)]
+        else:  # annual
+            # Keep facts with duration 350-380 days (one year ~365 days)
+            mode_filtered = [f for f, d in dur_tagged if d is None or (340 <= d <= 400)]
+        if mode_filtered:
+            filtered = mode_filtered
 
     if fact_type == FilingFactType.segment_revenue:
         seg_rows = []
@@ -3799,6 +3833,34 @@ async def get_filing_data(
     if period_label and not period_label.startswith("FY"):
         period_label = f"FY{period_label}"
 
+    # ── XBRL context metadata ─────────────────────────────────────────────
+    xbrl_context: dict = {
+        "periodStart": picked.get("start"),
+        "periodEnd": picked.get("end"),
+        "durationDays": None,
+        "fiscalPeriod": str(picked.get("fp") or ""),
+        "fiscalYear": str(picked.get("fy") or ""),
+        "form": str(picked.get("form") or ""),
+        "frame": picked.get("frame"),
+        "periodMode": resolved_mode,
+    }
+    if picked.get("start") and picked.get("end"):
+        try:
+            d0 = datetime.date.fromisoformat(str(picked["start"]))
+            d1 = datetime.date.fromisoformat(str(picked["end"]))
+            xbrl_context["durationDays"] = (d1 - d0).days
+        except (ValueError, TypeError):
+            pass
+
+    result_warnings: list[dict] = []
+    # Warn if period_mode filtering was requested but couldn't narrow results
+    if resolved_mode == "quarter" and xbrl_context.get("durationDays") and xbrl_context["durationDays"] > 110:
+        result_warnings.append({
+            "code": "PERIOD_MODE_MISMATCH",
+            "message": f"Requested quarter but picked fact has {xbrl_context['durationDays']}-day duration. No quarterly fact available.",
+            "severity": "warning",
+        })
+
     return _geo_shape({
         "ticker": ticker,
         "factType": fact_type.value,
@@ -3821,6 +3883,7 @@ async def get_filing_data(
         "documentUrl": document_url,
         "indexUrl": index_url,
         "primaryDocumentUrl": primary_document_url,
+        "xbrlContext": xbrl_context,
         "evidence": {
             "sectionHeading": segment_label,
             "tableTitle": None,
@@ -3840,7 +3903,7 @@ async def get_filing_data(
             }
             if fact_type == FilingFactType.geographic_revenue and denominator is not None else None
         ),
-        "warnings": [],
+        "warnings": result_warnings,
     }, warn_denominator=(fact_type == FilingFactType.geographic_revenue and denominator is None))
 
 
@@ -5802,6 +5865,7 @@ async def extract_sec_filing_fact(
     region: str | None = None,
     filing_type: str = "10-K",
     period: str = "latest",
+    period_mode: str = "auto",
     document_url: str | None = None,
     accession_number: str | None = None,
 ) -> str:
@@ -5813,7 +5877,7 @@ async def extract_sec_filing_fact(
             routed_fact_type = FilingFactType.geographic_revenue if region is not None else None
     if routed_fact_type is not None or region is not None or fact_name is None:
         routed_fact_type = routed_fact_type or FilingFactType.geographic_revenue
-        raw = await get_filing_data(ticker=ticker, fact_type=routed_fact_type, region=region, filing_type=filing_type, period=period)
+        raw = await get_filing_data(ticker=ticker, fact_type=routed_fact_type, region=region, filing_type=filing_type, period=period, period_mode=period_mode)
         parsed_payload: dict = {}
         try:
             parsed_any = json.loads(raw)
@@ -5843,6 +5907,7 @@ async def extract_sec_filing_fact(
             "extractionMethod": parsed_payload.get("extractionMethod", "NONE"),
             "source": parsed_payload.get("source", "NOT_DISCLOSED"),
             "confidence": parsed_payload.get("confidence", "NOT_DISCLOSED"),
+            "xbrlContext": parsed_payload.get("xbrlContext"),
             "retrieval_path": _map_extraction_to_retrieval_path(parsed_payload.get("extractionMethod", "NONE")),
             "documentUrl": parsed_payload.get("documentUrl"),
             "indexUrl": parsed_payload.get("indexUrl"),

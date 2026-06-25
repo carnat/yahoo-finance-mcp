@@ -77,11 +77,17 @@ async def _load_edgar_tickers() -> dict[str, int]:
     return _EDGAR_TICKERS  # type: ignore[return-value]
 
 
-async def _edgar_get(url: str) -> dict | None:
+class EdgarError(Exception):
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+async def _edgar_get(url: str) -> dict:
     """Fetch a JSON document from the SEC EDGAR API (runs in a thread executor)."""
     loop = asyncio.get_event_loop()
 
-    def _fetch() -> dict | None:
+    def _fetch() -> dict:
         req = _urlreq.Request(
             url,
             headers={"User-Agent": _SEC_REQUIRED_UA},
@@ -89,8 +95,10 @@ async def _edgar_get(url: str) -> dict | None:
         try:
             with _urlreq.urlopen(req, timeout=10) as resp:  # noqa: S310
                 return json.loads(resp.read())
-        except Exception:
-            return None
+        except _urlreq.HTTPError as e:
+            raise EdgarError(f"SEC API returned HTTP {e.code}: {e.reason}", status_code=e.code) from e
+        except Exception as e:
+            raise EdgarError(f"SEC API connection failed: {e}") from e
 
     return await loop.run_in_executor(None, _fetch)
 
@@ -101,7 +109,10 @@ async def _edgar_get_company_facts(cik_padded: str) -> dict | None:
     cached_entry = _EDGAR_FACTS_CACHE.get(cik_padded)
     if cached_entry is not None and (now - cached_entry[1]) < _EDGAR_TTL:
         return cached_entry[0]
-    data = await _edgar_get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_padded}.json")
+    try:
+        data = await _edgar_get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_padded}.json")
+    except EdgarError:
+        return None
     if data is not None:
         _EDGAR_FACTS_CACHE[cik_padded] = (data, now)
     return data
@@ -113,7 +124,10 @@ async def _edgar_get_submissions(cik_padded: str) -> dict | None:
     cached_entry = _EDGAR_SUBS_CACHE.get(cik_padded)
     if cached_entry is not None and (now - cached_entry[1]) < _EDGAR_TTL:
         return cached_entry[0]
-    data = await _edgar_get(f"https://data.sec.gov/submissions/CIK{cik_padded}.json")
+    try:
+        data = await _edgar_get(f"https://data.sec.gov/submissions/CIK{cik_padded}.json")
+    except EdgarError:
+        return None
     if data is not None:
         _EDGAR_SUBS_CACHE[cik_padded] = (data, now)
     return data

@@ -143,17 +143,21 @@ def _extract_geo_revenue_from_html(
         "net revenues", "revenues", "total revenue",
     })
 
+    def _local_format_raw_number(n: float | int | None) -> str | None:
+        if n is None:
+            return None
+        try:
+            f = float(n)
+            if abs(f - round(f)) < 1e-9:
+                return f"{int(round(f)):,}"
+            return f"{f:,.2f}"
+        except Exception:
+            return None
+
+    is_china_query = region_lower in ("china", "greater china")
+
     for tbl in candidate_tables:
         rows: list[list[str]] = tbl["rows"]
-
-        # Find the row index for the target region
-        region_row_idx: int | None = None
-        for i, row in enumerate(rows):
-            if any(region_lower in cell.lower() for cell in row):
-                region_row_idx = i
-                break
-        if region_row_idx is None:
-            continue
 
         # Find a "Total" row
         total_row_idx: int | None = None
@@ -168,73 +172,202 @@ def _extract_geo_revenue_from_html(
                     total_row_idx = i
                     break
 
-        if total_row_idx is None or total_row_idx == region_row_idx:
+        if total_row_idx is None:
             continue
 
-        # Find the first numeric column in the region row (skip label column)
-        region_row = rows[region_row_idx]
-        value_col: int | None = None
-        for j, cell in enumerate(region_row):
-            v = _parse_numeric_cell(cell)
-            if v is not None and v > 0:
-                value_col = j
-                break
-        if value_col is None:
-            continue
+        if is_china_query:
+            # China query: extract and sum Mainland China / Hong Kong rows
+            mainland_idx = None
+            hongkong_idx = None
+            greater_china_idx = None
+            generic_china_idx = None
 
-        region_val = _parse_numeric_cell(
-            rows[region_row_idx][value_col] if value_col < len(rows[region_row_idx]) else ""
-        )
-        total_val = _parse_numeric_cell(
-            rows[total_row_idx][value_col] if value_col < len(rows[total_row_idx]) else ""
-        )
+            for i, row in enumerate(rows):
+                if not row or i == total_row_idx:
+                    continue
+                label = str(row[0]).lower()
+                if any(t in label for t in ["total", "consolidated"]) and not "china" in label:
+                    continue
+                if "hong kong" in label or "hongkong" in label:
+                    hongkong_idx = i
+                elif "mainland" in label or "excluding hong kong" in label or "exclude hong kong" in label:
+                    mainland_idx = i
+                elif "greater china" in label:
+                    greater_china_idx = i
+                elif "china" in label:
+                    generic_china_idx = i
 
-        if region_val is None or total_val is None or total_val <= 0:
-            continue
+            # Find first numeric column in total row
+            value_col = None
+            total_row = rows[total_row_idx]
+            for j in range(1, len(total_row)):
+                if _parse_numeric_cell(total_row[j]) is not None:
+                    value_col = j
+                    break
 
-        ratio = round(region_val / total_val, 4)
+            if value_col is None:
+                continue
 
-        # Detect unit scale for USD conversion
-        context_html = html_text[max(0, tbl["pos"] - 3_000): tbl["pos"]]
-        unit_mult = _detect_unit_multiplier(tbl["table_html"], context_html)
-        region_usd = region_val * unit_mult
-        total_usd = total_val * unit_mult
+            mainland_val = _parse_numeric_cell(rows[mainland_idx][value_col]) if mainland_idx is not None and value_col < len(rows[mainland_idx]) else None
+            hongkong_val = _parse_numeric_cell(rows[hongkong_idx][value_col]) if hongkong_idx is not None and value_col < len(rows[hongkong_idx]) else None
+            greater_china_val = _parse_numeric_cell(rows[greater_china_idx][value_col]) if greater_china_idx is not None and value_col < len(rows[greater_china_idx]) else None
+            generic_china_val = _parse_numeric_cell(rows[generic_china_idx][value_col]) if generic_china_idx is not None and value_col < len(rows[generic_china_idx]) else None
+            total_val = _parse_numeric_cell(rows[total_row_idx][value_col]) if total_row_idx is not None and value_col < len(rows[total_row_idx]) else None
 
-        # Extract nearest section heading (last <h*> tag before the table)
-        heading = ""
-        pre_html = html_text[max(0, tbl["pos"] - 6_000): tbl["pos"]]
-        h_matches = _re.findall(r"<h[1-6][^>]*>(.*?)</h[1-6]>", pre_html, _re.IGNORECASE | _re.DOTALL)
-        if h_matches:
-            heading = _strip_html_tags(h_matches[-1])
+            region_val = None
+            interpretation_warning = None
+            if mainland_val is not None and hongkong_val is not None:
+                region_val = mainland_val + hongkong_val
+                interpretation_warning = "Combined Mainland China and Hong Kong revenue to represent total China exposure."
+            elif mainland_val is not None:
+                region_val = mainland_val
+                interpretation_warning = "Mainland China revenue only; Hong Kong revenue was not separately identified."
+            elif greater_china_val is not None:
+                region_val = greater_china_val
+            elif generic_china_val is not None:
+                region_val = generic_china_val
+            elif hongkong_val is not None:
+                region_val = hongkong_val
+                interpretation_warning = "Hong Kong revenue only; Mainland China revenue was not separately identified."
 
-        header_row = rows[0] if rows else []
-        source_col = str(header_row[value_col]).strip() if value_col < len(header_row) else ""
-        unit_scale = (
-            "thousands" if unit_mult == 1_000.0
-            else "millions" if unit_mult == 1_000_000.0
-            else "actual" if unit_mult == 1.0
-            else "actual"
-        )
-        evidence = {
-            "sectionHeading": heading or None,
-            "tableTitle": None,
-            "sourceTableId": 1,
-            "sourceRows": [
-                [
-                    str(rows[region_row_idx][0] if rows[region_row_idx] else region),
-                    str(rows[region_row_idx][value_col]) if value_col < len(rows[region_row_idx]) else "",
+            if region_val is None or total_val is None or total_val <= 0:
+                continue
+
+            ratio = round(region_val / total_val, 4)
+
+            # Detect unit scale for USD conversion
+            context_html = html_text[max(0, tbl["pos"] - 3_000): tbl["pos"]]
+            unit_mult = _detect_unit_multiplier(tbl["table_html"], context_html)
+            region_usd = region_val * unit_mult
+            total_usd = total_val * unit_mult
+
+            # Extract nearest section heading
+            heading = ""
+            pre_html = html_text[max(0, tbl["pos"] - 6_000): tbl["pos"]]
+            h_matches = _re.findall(r"<h[1-6][^>]*>(.*?)</h[1-6]>", pre_html, _re.IGNORECASE | _re.DOTALL)
+            if h_matches:
+                heading = _strip_html_tags(h_matches[-1])
+
+            header_row = rows[0] if rows else []
+            source_col = str(header_row[value_col]).strip() if value_col < len(header_row) else ""
+            unit_scale = (
+                "thousands" if unit_mult == 1_000.0
+                else "millions" if unit_mult == 1_000_000.0
+                else "actual" if unit_mult == 1.0
+                else "actual"
+            )
+
+            source_rows = []
+            if mainland_idx is not None:
+                source_rows.append([str(rows[mainland_idx][0]), str(rows[mainland_idx][value_col])])
+            if hongkong_idx is not None:
+                source_rows.append([str(rows[hongkong_idx][0]), str(rows[hongkong_idx][value_col])])
+            if greater_china_idx is not None:
+                source_rows.append([str(rows[greater_china_idx][0]), str(rows[greater_china_idx][value_col])])
+            if generic_china_idx is not None and mainland_idx is None and greater_china_idx is None:
+                source_rows.append([str(rows[generic_china_idx][0]), str(rows[generic_china_idx][value_col])])
+            source_rows.append([str(rows[total_row_idx][0]), str(rows[total_row_idx][value_col])])
+
+            breakdown = {}
+            if total_val > 0:
+                if mainland_val is not None:
+                    breakdown["mainlandPct"] = round(mainland_val / total_val * 100, 2)
+                    breakdown["mainlandUSD"] = mainland_val * unit_mult
+                if hongkong_val is not None:
+                    breakdown["hongKongPct"] = round(hongkong_val / total_val * 100, 2)
+                    breakdown["hongKongUSD"] = hongkong_val * unit_mult
+                if mainland_val is not None and hongkong_val is not None:
+                    breakdown["combinedPct"] = round((mainland_val + hongkong_val) / total_val * 100, 2)
+                    breakdown["combinedUSD"] = (mainland_val + hongkong_val) * unit_mult
+
+            evidence = {
+                "sectionHeading": heading or None,
+                "tableTitle": None,
+                "sourceTableId": 1,
+                "sourceRows": source_rows,
+                "sourceColumns": [source_col] if source_col else [],
+                "unitScale": unit_scale,
+                "rawValue": _local_format_raw_number(region_val),
+                "rawDenominator": _local_format_raw_number(total_val),
+                "breakdown": breakdown,
+                "allChinaInterpretationWarning": interpretation_warning,
+            }
+            return ratio, region_usd, total_usd, heading, evidence
+
+        else:
+            # Standard single-row matching
+            region_row_idx: int | None = None
+            for i, row in enumerate(rows):
+                if any(region_lower in cell.lower() for cell in row):
+                    region_row_idx = i
+                    break
+            if region_row_idx is None or total_row_idx == region_row_idx:
+                continue
+
+            # Find the first numeric column in the region row (skip label column)
+            region_row = rows[region_row_idx]
+            value_col: int | None = None
+            for j, cell in enumerate(region_row):
+                v = _parse_numeric_cell(cell)
+                if v is not None and v > 0:
+                    value_col = j
+                    break
+            if value_col is None:
+                continue
+
+            region_val = _parse_numeric_cell(
+                rows[region_row_idx][value_col] if value_col < len(rows[region_row_idx]) else ""
+            )
+            total_val = _parse_numeric_cell(
+                rows[total_row_idx][value_col] if value_col < len(rows[total_row_idx]) else ""
+            )
+
+            if region_val is None or total_val is None or total_val <= 0:
+                continue
+
+            ratio = round(region_val / total_val, 4)
+
+            # Detect unit scale for USD conversion
+            context_html = html_text[max(0, tbl["pos"] - 3_000): tbl["pos"]]
+            unit_mult = _detect_unit_multiplier(tbl["table_html"], context_html)
+            region_usd = region_val * unit_mult
+            total_usd = total_val * unit_mult
+
+            # Extract nearest section heading
+            heading = ""
+            pre_html = html_text[max(0, tbl["pos"] - 6_000): tbl["pos"]]
+            h_matches = _re.findall(r"<h[1-6][^>]*>(.*?)</h[1-6]>", pre_html, _re.IGNORECASE | _re.DOTALL)
+            if h_matches:
+                heading = _strip_html_tags(h_matches[-1])
+
+            header_row = rows[0] if rows else []
+            source_col = str(header_row[value_col]).strip() if value_col < len(header_row) else ""
+            unit_scale = (
+                "thousands" if unit_mult == 1_000.0
+                else "millions" if unit_mult == 1_000_000.0
+                else "actual" if unit_mult == 1.0
+                else "actual"
+            )
+            evidence = {
+                "sectionHeading": heading or None,
+                "tableTitle": None,
+                "sourceTableId": 1,
+                "sourceRows": [
+                    [
+                        str(rows[region_row_idx][0] if rows[region_row_idx] else region),
+                        str(rows[region_row_idx][value_col]) if value_col < len(rows[region_row_idx]) else "",
+                    ],
+                    [
+                        str(rows[total_row_idx][0] if rows[total_row_idx] else "Total revenue"),
+                        str(rows[total_row_idx][value_col]) if value_col < len(rows[total_row_idx]) else "",
+                    ],
                 ],
-                [
-                    str(rows[total_row_idx][0] if rows[total_row_idx] else "Total revenue"),
-                    str(rows[total_row_idx][value_col]) if value_col < len(rows[total_row_idx]) else "",
-                ],
-            ],
-            "sourceColumns": [source_col] if source_col else [],
-            "unitScale": unit_scale,
-            "rawValue": str(rows[region_row_idx][value_col]) if value_col < len(rows[region_row_idx]) else None,
-            "rawDenominator": str(rows[total_row_idx][value_col]) if value_col < len(rows[total_row_idx]) else None,
-        }
-        return ratio, region_usd, total_usd, heading, evidence
+                "sourceColumns": [source_col] if source_col else [],
+                "unitScale": unit_scale,
+                "rawValue": str(rows[region_row_idx][value_col]) if value_col < len(rows[region_row_idx]) else None,
+                "rawDenominator": str(rows[total_row_idx][value_col]) if value_col < len(rows[total_row_idx]) else None,
+            }
+            return ratio, region_usd, total_usd, heading, evidence
 
     return None, None, None, "", None
 

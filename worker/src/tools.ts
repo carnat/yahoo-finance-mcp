@@ -709,6 +709,13 @@ export const TOOLS: Tool[] = [
           enum: ["latest", "all"],
           default: "latest",
         },
+        period_mode: {
+          type: "string",
+          enum: ["auto", "quarter", "ytd", "annual"],
+          default: "auto",
+          description:
+            "Filter XBRL facts by duration. 'auto' selects quarter for 10-Q, annual for 10-K. Use 'quarter' to avoid YTD figures.",
+        },
       },
       required: ["ticker", "fact_type"],
     },
@@ -2397,7 +2404,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_options_summary":
       return getOptionsSummary(str(args.ticker), args.expiry_hint != null ? str(args.expiry_hint) : undefined);
     case "get_filing_data":
-      return getFilingData(str(args.ticker), str(args.fact_type), args.region != null ? str(args.region) : null, str(args.filing_type, "10-K"), str(args.period, "latest"));
+      return getFilingData(str(args.ticker), str(args.fact_type), args.region != null ? str(args.region) : null, str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.period_mode, "auto"));
     case "list_sec_filings":
       return listSecFilings(str(args.ticker), str(args.filing_type ?? args.form_type, "10-K"), num(args.limit ?? args.max_filings, 5));
     case "get_filing_outline":
