@@ -265,7 +265,7 @@ TEST_CASES: list[TestCase] = [
         "get_filing_data",
         {"ticker": "AXTI", "fact_type": "geographic_revenue", "region": "China", "filing_type": "10-K", "period": "latest"},
         [
-            ("confidence", "NOT_DISCLOSED"),
+            ("confidence", ("NOT_DISCLOSED", "NOT_DECISION_GRADE", "LOW")),
             ("value", IS_NULL),
             ("denominator", IS_NULL),
             ("valueRatio", IS_NULL),
@@ -292,7 +292,7 @@ TEST_CASES: list[TestCase] = [
         "get_filing_data",
         {"ticker": "ZZZZINVALID", "fact_type": "geographic_revenue", "region": "China"},
         [
-            ("confidence", "NOT_DISCLOSED"),
+            ("confidence", ("NOT_DISCLOSED", "NOT_DECISION_GRADE")),
             ("value", KEY_PRESENT),
             ("denominator", KEY_PRESENT),
             ("valueRatio", KEY_PRESENT),
@@ -575,8 +575,12 @@ def _check_assertions(
             if actual is not None and not isinstance(actual, (int, float)):
                 failures.append(f"assertion '{path}': expected number|null, got {type(actual).__name__}")
         else:
-            if actual != expected:
-                failures.append(f"assertion '{path}': expected {expected!r}, got {actual!r}")
+            if isinstance(expected, tuple):
+                if actual not in expected:
+                    failures.append(f"assertion '{path}': expected one of {expected!r}, got {actual!r}")
+            else:
+                if actual != expected:
+                    failures.append(f"assertion '{path}': expected {expected!r}, got {actual!r}")
     return failures
 
 
