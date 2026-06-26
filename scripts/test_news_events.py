@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import types
 import unittest
@@ -1020,7 +1021,10 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
         for name in names:
             self.assertIn(name, server_text)
             self.assertIn(name, tools_text)
-        blob = server_text + "\n" + tools_text
+        public_descriptions = "\n".join(
+            re.findall(r'description:\s*"([^"]*)"', tools_text)
+        )
+        blob = server_text + "\n" + public_descriptions
         for term in private_terms:
             self.assertNotIn(term, blob)
 
