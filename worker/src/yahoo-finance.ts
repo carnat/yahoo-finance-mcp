@@ -1375,7 +1375,7 @@ function providerFailurePayload(
   message: string,
   httpStatus: number | null = null
 ): string {
-  return JSON.stringify({
+  const diagnostics = {
     ticker,
     status: providerStatus,
     provider: "alpaca",
@@ -1397,6 +1397,15 @@ function providerFailurePayload(
     dataAgeHours: null,
     fallback: false,
     message,
+  };
+  return mcpFailure("get_overnight_quote", providerStatus, message, {
+    metaExtra: {
+      provider: "alpaca",
+      providerStatus,
+      requestedFeed: ALPACA_OVERNIGHT_FEED,
+      httpStatus,
+    },
+    diagnostics,
   });
 }
 

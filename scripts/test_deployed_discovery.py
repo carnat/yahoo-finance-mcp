@@ -272,6 +272,14 @@ def assert_no_unknown_tool(payload: dict, tool: str) -> None:
         raise AssertionError(f"{tool} returned non-callable error: {payload}")
 
 
+def assert_not_double_enveloped_failure(payload: dict, tool: str) -> None:
+    if not isinstance(payload, dict):
+        return
+    data = payload.get("data")
+    if payload.get("ok") is True and isinstance(data, dict) and data.get("ok") is False:
+        raise AssertionError(f"{tool} returned inner ok:false wrapped as top-level ok:true: {payload}")
+
+
 def _check_aaoi_geographic_revenue_schema(data: dict) -> None:
     """Backward-compatible AAOI wrapper around unified geographic revenue schema checks."""
     _check_geographic_revenue_schema(data, label="AAOI", require_positive=False)
@@ -701,6 +709,7 @@ def main() -> int:
     for i, (name, args) in enumerate(calls, start=100):
         payload = call_tool(name, args, i)
         assert_no_unknown_tool(payload, name)
+        assert_not_double_enveloped_failure(payload, name)
         if name in (
             "extract_sec_filing_fact",
             "extract_geographic_revenue",
@@ -738,6 +747,22 @@ def main() -> int:
                     )
                 if health.get("privacyScope") != "public_market_data_only":
                     raise AssertionError(f"health_check privacyScope mismatch: {health.get('privacyScope')!r}")
+                doctrine_status = health.get("doctrineToolStatus")
+                if not isinstance(doctrine_status, dict):
+                    raise AssertionError("health_check missing doctrineToolStatus")
+                expected_doctrine = {
+                    "get_overnight_quote": ("PROVIDER_GATED", "DIAGNOSTICS_ONLY"),
+                    "get_sec_filing_section_markdown": ("DEGRADED", "BLOCKED"),
+                    "get_company_press_releases": ("DEGRADED", "VERIFY_ONLY"),
+                    "query_sec_filing_index": ("DEGRADED", "VERIFY_ONLY"),
+                    "extract_sec_filing_fact": ("DEGRADED", "VERIFY_ONLY"),
+                }
+                for tool_name, (capability, use) in expected_doctrine.items():
+                    status = doctrine_status.get(tool_name)
+                    if not isinstance(status, dict):
+                        raise AssertionError(f"health_check doctrineToolStatus missing {tool_name}")
+                    if status.get("capabilityStatus") != capability or status.get("doctrineUse") != use:
+                        raise AssertionError(f"health_check doctrine status mismatch for {tool_name}: {status}")
         if name == "get_option_chain":
             data = extract_data(payload)
             # Worker returns {"error": true, "code": "INVALID_EXPIRY_DATE"} when the
@@ -991,9 +1016,16 @@ def main() -> int:
     # require only a standard JSON shape and an honest provider status.
     overnight = call_tool("get_overnight_quote", {"ticker": "AAPL"}, 2100)
     assert_no_unknown_tool(overnight, "get_overnight_quote")
+    assert_not_double_enveloped_failure(overnight, "get_overnight_quote")
     overnight_data = extract_data(overnight)
+    overnight_meta = overnight.get("meta") if isinstance(overnight, dict) else {}
+    overnight_error = overnight.get("error") if isinstance(overnight, dict) else {}
     if not isinstance(overnight_data, dict):
-        raise AssertionError(f"get_overnight_quote returned non-object: {type(overnight_data)}")
+        raise AssertionError(f"get_overnight_quote returned non-object data: {type(overnight_data)}")
+    if not isinstance(overnight_meta, dict):
+        overnight_meta = {}
+    if not isinstance(overnight_error, dict):
+        overnight_error = {}
     if _OVERNIGHT_PROVIDER == "alpaca" and _ALPACA_KEY_CONFIGURED:
         allowed_provider_status = {
             "FOUND_TRUE_OVERNIGHT",
@@ -1003,10 +1035,17 @@ def main() -> int:
             "NO_OVERNIGHT_BARS",
             "FALLBACK_EXTENDED_HOURS",
         }
-        diagnostics = overnight_data.get("diagnostics") or {}
-        provider_status = overnight_data.get("providerStatus") or diagnostics.get("providerStatus")
+        diagnostics = overnight.get("diagnostics") if isinstance(overnight, dict) else {}
+        if not isinstance(diagnostics, dict):
+            diagnostics = overnight_data.get("diagnostics") or {}
+        provider_status = (
+            overnight_data.get("providerStatus")
+            or overnight_meta.get("providerStatus")
+            or overnight_error.get("providerStatus")
+            or diagnostics.get("providerStatus")
+        )
         primary_status = overnight_data.get("primaryProviderStatus") or diagnostics.get("primaryProviderStatus")
-        provider = overnight_data.get("provider") or diagnostics.get("provider")
+        provider = overnight_data.get("provider") or overnight_meta.get("provider") or diagnostics.get("provider")
         if provider_status not in allowed_provider_status and primary_status not in allowed_provider_status:
             raise AssertionError(
                 f"Alpaca overnight provider returned unexpected status: "
@@ -1014,6 +1053,10 @@ def main() -> int:
             )
         if provider not in ("alpaca", "yahoo"):
             raise AssertionError(f"Unexpected overnight provider: {provider!r}")
+        if provider_status in {"PROVIDER_FORBIDDEN", "PROVIDER_UNCONFIGURED"} and overnight.get("ok") is not False:
+            raise AssertionError(f"Alpaca gated overnight response must be top-level ok:false: {overnight}")
+        if overnight_meta.get("doctrineUse") != "DIAGNOSTICS_ONLY":
+            raise AssertionError(f"get_overnight_quote missing DIAGNOSTICS_ONLY metadata: {overnight_meta}")
         for secret_name in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY"):
             secret_value = os.environ.get(secret_name) or ""
             if secret_value and secret_value in json.dumps(overnight):
@@ -1024,11 +1067,29 @@ def main() -> int:
             f"providerStatus={provider_status!r}, primaryProviderStatus={primary_status!r})"
         )
     else:
-        diagnostics = overnight_data.get("diagnostics") or {}
-        provider_status = overnight_data.get("providerStatus") or diagnostics.get("providerStatus")
+        diagnostics = overnight.get("diagnostics") if isinstance(overnight, dict) else {}
+        if not isinstance(diagnostics, dict):
+            diagnostics = overnight_data.get("diagnostics") or {}
+        provider_status = overnight_data.get("providerStatus") or overnight_meta.get("providerStatus") or diagnostics.get("providerStatus")
         if provider_status is None:
             raise AssertionError("get_overnight_quote missing providerStatus")
         print(f"  PASS overnight smoke (providerStatus={provider_status!r})")
+
+    unsupported = call_tool(
+        "query_sec_filing_index",
+        {"ticker": "AAPL", "query_type": "unsupported_query_type", "params": {}},
+        2110,
+    )
+    assert_no_unknown_tool(unsupported, "query_sec_filing_index")
+    assert_not_double_enveloped_failure(unsupported, "query_sec_filing_index")
+    if unsupported.get("ok") is not False:
+        raise AssertionError(f"unsupported query_sec_filing_index must be top-level ok:false: {unsupported}")
+    unsupported_error = unsupported.get("error") or {}
+    if unsupported_error.get("code") != "UNSUPPORTED_QUERY_TYPE":
+        raise AssertionError(f"unsupported query_sec_filing_index wrong error code: {unsupported}")
+    unsupported_meta = unsupported.get("meta") or {}
+    if not unsupported_meta.get("supportedQueryTypes"):
+        raise AssertionError(f"unsupported query_sec_filing_index missing supportedQueryTypes: {unsupported}")
 
     print(f"PASS deployed discovery + smoke ({len(names)} tools)")
     return 0

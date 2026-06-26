@@ -1485,6 +1485,75 @@ const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : 
 const num = (v: unknown, fallback: number): number => (typeof v === "number" ? v : fallback);
 const tickerArg = (v: unknown): string | string[] =>
   Array.isArray(v) ? v.map(String) : str(v);
+
+type DoctrineToolStatus = {
+  capabilityStatus: "ACTIVE" | "DEGRADED" | "PROVIDER_GATED" | "EXPERIMENTAL" | "RETIRED";
+  decisionGrade: boolean;
+  doctrineUse: "ALLOWED" | "VERIFY_ONLY" | "DIAGNOSTICS_ONLY" | "BLOCKED";
+  failureMode: string | null;
+  evidenceRequired: boolean;
+  sourceType: "sec_xbrl" | "sec_table" | "sec_filing" | "company_ir" | "yahoo" | "exchange" | "provider_diagnostic" | "unknown";
+};
+
+const TOOL_DOCTRINE_STATUS: Record<string, DoctrineToolStatus> = {
+  get_overnight_quote: {
+    capabilityStatus: "PROVIDER_GATED",
+    decisionGrade: false,
+    doctrineUse: "DIAGNOSTICS_ONLY",
+    failureMode: "BOATS_PROVIDER_FORBIDDEN",
+    evidenceRequired: false,
+    sourceType: "provider_diagnostic",
+  },
+  get_sec_filing_section_markdown: {
+    capabilityStatus: "DEGRADED",
+    decisionGrade: false,
+    doctrineUse: "BLOCKED",
+    failureMode: "LIVE_SECTION_EXTRACTION_UNRELIABLE",
+    evidenceRequired: true,
+    sourceType: "sec_filing",
+  },
+  get_company_press_releases: {
+    capabilityStatus: "DEGRADED",
+    decisionGrade: false,
+    doctrineUse: "VERIFY_ONLY",
+    failureMode: "SEC_EX99_LINKAGE_INCOMPLETE",
+    evidenceRequired: true,
+    sourceType: "company_ir",
+  },
+  query_sec_filing_index: {
+    capabilityStatus: "DEGRADED",
+    decisionGrade: false,
+    doctrineUse: "VERIFY_ONLY",
+    failureMode: "ENVELOPE_SEMANTICS_UNDER_VERIFICATION",
+    evidenceRequired: true,
+    sourceType: "sec_table",
+  },
+  extract_sec_filing_fact: {
+    capabilityStatus: "DEGRADED",
+    decisionGrade: false,
+    doctrineUse: "VERIFY_ONLY",
+    failureMode: "XBRL_CONTEXT_METADATA_INCOMPLETE",
+    evidenceRequired: true,
+    sourceType: "sec_xbrl",
+  },
+};
+
+function doctrineStatusFor(tool: string): DoctrineToolStatus | undefined {
+  return TOOL_DOCTRINE_STATUS[tool];
+}
+
+function doctrineStatusDiagnostics(): Record<string, unknown> {
+  const counts: Record<string, number> = {};
+  for (const status of Object.values(TOOL_DOCTRINE_STATUS)) {
+    counts[status.capabilityStatus] = (counts[status.capabilityStatus] ?? 0) + 1;
+  }
+  return {
+    doctrineToolStatusCount: Object.keys(TOOL_DOCTRINE_STATUS).length,
+    doctrineToolStatusCounts: counts,
+    doctrineToolStatus: TOOL_DOCTRINE_STATUS,
+  };
+}
+
 type AliasSuccessOptions = {
   canonicalTool: string;
   deprecatedTool?: boolean;
@@ -1493,6 +1562,7 @@ type AliasSuccessOptions = {
   successCount?: number;
   errorCount?: number;
   warnings?: { code: string; message: string; severity: string }[];
+  metaExtra?: Record<string, unknown>;
 };
 
 async function computeHash(data: string): Promise<string> {
@@ -1953,6 +2023,7 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
     const aliasToolDef = TOOLS.find((t) => t.name === name);
     const opts: AliasSuccessOptions = {
       canonicalTool,
+      ...(doctrineStatusFor(canonicalTool) ? { metaExtra: doctrineStatusFor(canonicalTool) } : {}),
       ...(DEPRECATED_ALIAS_NAMES.has(name)
         ? {
             deprecatedTool: true,
@@ -1970,7 +2041,10 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
     }
     return mcpSuccess(name, raw, opts);
   }
-  return mcpSuccess(name, raw, batchMeta);
+  return mcpSuccess(name, raw, {
+    ...(batchMeta ?? {}),
+    ...(doctrineStatusFor(canonicalTool) ? { metaExtra: doctrineStatusFor(canonicalTool) } : {}),
+  });
 }
 
 export async function callVisibleTool(name: string, args: Record<string, unknown>): Promise<string> {
@@ -2346,6 +2420,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       const deployedAt = getWorkerVar("DEPLOYED_AT") ?? new Date().toISOString();
       const manifestHash = await computeHash(JSON.stringify(visibleTools.map(t => t.name)));
       const structuredFacts = await structuredFactProviderDiagnostics();
+      const doctrineStatus = doctrineStatusDiagnostics();
       return JSON.stringify({
         status: "ok",
         serverVersion: version,
@@ -2364,6 +2439,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         generatedAt: new Date().toISOString(),
         privacyScope: "public_market_data_only",
         ...structuredFacts,
+        ...doctrineStatus,
       });
     }
     case "get_manifest_diagnostics": {
@@ -2377,6 +2453,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       const manifestHash = await computeHash(JSON.stringify(visibleTools.map(t => t.name)));
       const workerSchemaGeneratedAt = new Date().toISOString();
       const structuredFacts = await structuredFactProviderDiagnostics();
+      const doctrineStatus = doctrineStatusDiagnostics();
       return JSON.stringify({
         toolCount: canonicalToolCount,
         manifestVersion,
@@ -2392,6 +2469,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         staleConnectorWarning: "ChatGPT connector schema may lag the deployed Worker schema. Direct Worker tools/list and get_manifest_diagnostics are source of truth.",
         serverVersion: version,
         ...structuredFacts,
+        ...doctrineStatus,
       });
     }
     case "get_market_snapshot": {

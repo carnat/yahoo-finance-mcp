@@ -29,6 +29,12 @@ export interface ToolMeta {
   serverVersion: string;
   cacheHit: boolean;
   warnings: unknown[];
+  capabilityStatus?: string;
+  decisionGrade?: boolean;
+  doctrineUse?: string;
+  failureMode?: string | null;
+  evidenceRequired?: boolean;
+  sourceType?: string;
 }
 
 export interface ErrorDetail {
@@ -55,6 +61,39 @@ export const ErrorCode = {
 } as const;
 
 export type ErrorCodeValue = (typeof ErrorCode)[keyof typeof ErrorCode];
+
+function buildMeta(
+  tool: string,
+  opts?: {
+    canonicalTool?: string;
+    deprecatedTool?: boolean;
+    useInstead?: string;
+    partialSuccess?: boolean;
+    successCount?: number;
+    errorCount?: number;
+    source?: string;
+    dataDate?: string | null;
+    cacheHit?: boolean;
+    warnings?: unknown[];
+    metaExtra?: Record<string, unknown>;
+  }
+): ToolMeta {
+  return {
+    tool,
+    ...(opts?.canonicalTool ? { canonicalTool: opts.canonicalTool } : {}),
+    ...(opts?.deprecatedTool != null ? { deprecatedTool: opts.deprecatedTool } : {}),
+    ...(opts?.useInstead ? { useInstead: opts.useInstead } : {}),
+    ...(opts?.partialSuccess != null ? { partialSuccess: opts.partialSuccess } : {}),
+    ...(opts?.successCount != null ? { successCount: opts.successCount } : {}),
+    ...(opts?.errorCount != null ? { errorCount: opts.errorCount } : {}),
+    source: opts?.source ?? "yahoo_finance",
+    dataDate: opts?.dataDate ?? null,
+    serverVersion: SERVER_VERSION,
+    cacheHit: opts?.cacheHit ?? false,
+    warnings: opts?.warnings ?? [],
+    ...(opts?.metaExtra || {}),
+  } as ToolMeta;
+}
 
 function enrichFacts(val: any, parentSourceType: string | null = null, parentConfidence: string | null = null, isMetric = false): any {
   if (val && typeof val === "object") {
@@ -202,12 +241,45 @@ export function mcpSuccess(
     dataDate?: string | null;
     cacheHit?: boolean;
     warnings?: unknown[];
+    metaExtra?: Record<string, unknown>;
   }
 ): string {
   if (_workerEnv["MCP_ENVELOPE_V2"] !== "true") return rawData;
   let data: unknown;
   try {
-    data = JSON.parse(rawData);
+    const parsed = JSON.parse(rawData);
+    if (
+      parsed != null &&
+      typeof parsed === "object" &&
+      "ok" in parsed &&
+      "data" in parsed
+    ) {
+      const inner = parsed as Record<string, unknown>;
+      const innerMeta = inner.meta && typeof inner.meta === "object"
+        ? inner.meta as Record<string, unknown>
+        : {};
+      const resp: McpResponse = {
+        ok: inner.ok === true,
+        data: inner.ok === true ? enrichFacts(inner.data) : inner.data ?? null,
+        meta: {
+          ...buildMeta(tool, opts),
+          ...innerMeta,
+          ...(opts?.metaExtra || {}),
+        } as ToolMeta,
+        error: inner.ok === true ? null : (inner.error as ErrorDetail | null) ?? {
+          code: "PROVIDER_ERROR",
+          message: "Tool returned an error envelope without error details.",
+        },
+      };
+      const passthrough = inner as Record<string, unknown>;
+      for (const key of ["diagnostics"]) {
+        if (passthrough[key] !== undefined) {
+          (resp as any)[key] = passthrough[key];
+        }
+      }
+      return JSON.stringify(resp);
+    }
+    data = parsed;
     data = enrichFacts(data);
   } catch {
     data = rawData;
@@ -215,20 +287,7 @@ export function mcpSuccess(
   const resp: McpResponse = {
     ok: true,
     data,
-    meta: {
-      tool,
-      ...(opts?.canonicalTool ? { canonicalTool: opts.canonicalTool } : {}),
-      ...(opts?.deprecatedTool != null ? { deprecatedTool: opts.deprecatedTool } : {}),
-      ...(opts?.useInstead ? { useInstead: opts.useInstead } : {}),
-      ...(opts?.partialSuccess != null ? { partialSuccess: opts.partialSuccess } : {}),
-      ...(opts?.successCount != null ? { successCount: opts.successCount } : {}),
-      ...(opts?.errorCount != null ? { errorCount: opts.errorCount } : {}),
-      source: opts?.source ?? "yahoo_finance",
-      dataDate: opts?.dataDate ?? null,
-      serverVersion: SERVER_VERSION,
-      cacheHit: opts?.cacheHit ?? false,
-      warnings: opts?.warnings ?? [],
-    },
+    meta: buildMeta(tool, opts),
     error: null,
   };
   return JSON.stringify(resp);
