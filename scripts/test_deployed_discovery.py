@@ -1091,6 +1091,22 @@ def main() -> int:
     if not unsupported_meta.get("supportedQueryTypes"):
         raise AssertionError(f"unsupported query_sec_filing_index missing supportedQueryTypes: {unsupported}")
 
+    alias_payload = call_tool("get_historical_stock_prices", {}, 2120)
+    assert_no_unknown_tool(alias_payload, "get_historical_stock_prices")
+    assert_not_double_enveloped_failure(alias_payload, "get_historical_stock_prices")
+    if alias_payload.get("ok") is not False:
+        raise AssertionError(f"deprecated alias validation failure must be top-level ok:false: {alias_payload}")
+    alias_meta = alias_payload.get("meta") or {}
+    if alias_meta.get("canonicalTool") != "get_historical_prices":
+        raise AssertionError(f"deprecated alias missing canonicalTool: {alias_payload}")
+    if alias_meta.get("deprecatedTool") is not True:
+        raise AssertionError(f"deprecated alias missing deprecatedTool=true: {alias_payload}")
+    if alias_meta.get("useInstead") != "get_historical_prices":
+        raise AssertionError(f"deprecated alias missing useInstead: {alias_payload}")
+    alias_warnings = alias_meta.get("warnings") or []
+    if not any(isinstance(w, dict) and w.get("code") == "DEPRECATED_ALIAS" for w in alias_warnings):
+        raise AssertionError(f"deprecated alias missing DEPRECATED_ALIAS warning: {alias_payload}")
+
     print(f"PASS deployed discovery + smoke ({len(names)} tools)")
     return 0
 

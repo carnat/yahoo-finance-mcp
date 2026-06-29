@@ -1018,7 +1018,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
 ];
 
 const DEPRECATED_ALIAS_TOOLS: Tool[] = [];
-const DEPRECATED_ALIAS_NAMES = new Set<string>();
+const DEPRECATED_ALIAS_NAMES = new Set(Object.keys(TOOL_ALIASES));
 
 TOOLS.push(...CANONICAL_ADDITIONS, ...DEPRECATED_ALIAS_TOOLS);
 for (const tool of TOOLS) {

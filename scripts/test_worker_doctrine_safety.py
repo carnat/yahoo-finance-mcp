@@ -1,66 +1,79 @@
 #!/usr/bin/env python3
-"""Static guards for Worker doctrine safety envelope semantics."""
+"""Behavior guards for Worker doctrine safety envelope semantics."""
 
 from __future__ import annotations
 
+import json
+import os
 import pathlib
-import re
+import shutil
+import subprocess
 import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-RESPONSE_TS = ROOT / "worker" / "src" / "response.ts"
 TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
-YF_TS = ROOT / "worker" / "src" / "yahoo-finance.ts"
 DEPLOYED_DISCOVERY = ROOT / "scripts" / "test_deployed_discovery.py"
 
 
+def _node_json(source: str) -> dict:
+    node = os.environ.get("NODE_BINARY") or shutil.which("node")
+    if node is None:
+        raise unittest.SkipTest("node executable not found")
+    result = subprocess.run(
+        [node, "--experimental-strip-types", "--input-type=module", "-e", source],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr or result.stdout)
+    return json.loads(result.stdout)
+
+
 class TestWorkerDoctrineSafety(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.response = RESPONSE_TS.read_text(encoding="utf-8")
-        cls.tools = TOOLS_TS.read_text(encoding="utf-8")
-        cls.worker = YF_TS.read_text(encoding="utf-8")
-        cls.discovery = DEPLOYED_DISCOVERY.read_text(encoding="utf-8")
-
     def test_mcp_success_propagates_inner_failure_envelopes(self) -> None:
-        self.assertIn('"ok" in parsed', self.response)
-        self.assertIn('"data" in parsed', self.response)
-        self.assertIn("ok: inner.ok === true", self.response)
-        self.assertIn("error: inner.ok === true ? null", self.response)
-        self.assertRegex(self.response, r"for \(const key of \[\"diagnostics\"\]\)")
+        payload = _node_json(
+            """
+            import assert from "node:assert/strict";
+            import { mcpSuccess, setWorkerEnv } from "./worker/src/response.ts";
 
-    def test_doctrine_quarantine_manifest_is_exposed(self) -> None:
-        for tool in (
-            "get_overnight_quote",
-            "get_sec_filing_section_markdown",
-            "get_company_press_releases",
-            "query_sec_filing_index",
-            "extract_sec_filing_fact",
-        ):
-            self.assertIn(tool, self.tools)
-        for field in (
-            "capabilityStatus",
-            "decisionGrade",
-            "doctrineUse",
-            "failureMode",
-            "evidenceRequired",
-            "sourceType",
-            "doctrineToolStatus",
-        ):
-            self.assertIn(field, self.tools)
+            setWorkerEnv({ MCP_ENVELOPE_V2: "true" });
+            const raw = JSON.stringify({
+              ok: false,
+              data: null,
+              meta: { source: "alpaca", providerStatus: "PROVIDER_FORBIDDEN" },
+              error: { code: "PROVIDER_FORBIDDEN", message: "subscription blocked" },
+              diagnostics: { provider: "yahoo", dataSource: "INDICATIVE_ONLY" },
+            });
+            const out = JSON.parse(mcpSuccess("get_overnight_quote", raw, {
+              metaExtra: { doctrineUse: "DIAGNOSTICS_ONLY" },
+            }));
 
-    def test_overnight_provider_failures_are_failure_envelopes(self) -> None:
-        self.assertIn('mcpFailure("get_overnight_quote"', self.worker)
-        self.assertIn("PROVIDER_FORBIDDEN", self.worker)
-        self.assertIn("DIAGNOSTICS_ONLY", self.tools)
-        self.assertIn("provider_diagnostic", self.tools)
+            assert.equal(out.ok, false);
+            assert.equal(out.error.code, "PROVIDER_FORBIDDEN");
+            assert.equal(out.meta.tool, "get_overnight_quote");
+            assert.equal(out.meta.providerStatus, "PROVIDER_FORBIDDEN");
+            assert.equal(out.meta.doctrineUse, "DIAGNOSTICS_ONLY");
+            assert.equal(out.diagnostics.dataSource, "INDICATIVE_ONLY");
+            console.log(JSON.stringify(out));
+            """
+        )
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "PROVIDER_FORBIDDEN")
 
-    def test_deployed_smoke_blocks_double_envelope_regression(self) -> None:
-        self.assertIn("assert_not_double_enveloped_failure", self.discovery)
-        self.assertIn("UNSUPPORTED_QUERY_TYPE", self.discovery)
-        self.assertIn("doctrineToolStatus", self.discovery)
-        self.assertIn("no approval received", self.discovery)
+    def test_deprecated_alias_set_is_derived_from_alias_map(self) -> None:
+        tools = TOOLS_TS.read_text(encoding="utf-8")
+        self.assertIn('get_historical_stock_prices: "get_historical_prices"', tools)
+        self.assertIn("const DEPRECATED_ALIAS_NAMES = new Set(Object.keys(TOOL_ALIASES));", tools)
+        self.assertNotIn("const DEPRECATED_ALIAS_NAMES = new Set<string>();", tools)
+
+    def test_deployed_smoke_covers_alias_and_doctrine_status_behavior(self) -> None:
+        smoke = DEPLOYED_DISCOVERY.read_text(encoding="utf-8")
+        self.assertIn("get_historical_stock_prices", smoke)
+        self.assertIn("deprecatedTool", smoke)
+        self.assertIn("DEPRECATED_ALIAS", smoke)
+        self.assertIn("doctrineToolStatus", smoke)
 
 
 if __name__ == "__main__":
