@@ -12,7 +12,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
 
 
-class TestWorkerSecSidecar(unittest.TestCase):
+class TestWorkerSecProvider(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.tools = TOOLS_TS.read_text(encoding="utf-8")
@@ -46,7 +46,7 @@ class TestWorkerSecSidecar(unittest.TestCase):
         ):
             self.assertIn(field, self.tools)
 
-    def test_no_sidecar_url_dependency(self) -> None:
+    def test_no_external_python_service_dependency(self) -> None:
         self.assertNotIn("EDGAR_FACTS_URL", self.tools)
         self.assertNotIn("/sec/facts/exposure", self.tools)
 

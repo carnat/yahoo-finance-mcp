@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Deployed Phase 3 extractor smoke tests.
+"""Deployed SEC structured extractor smoke tests.
 
 Makes live JSON-RPC calls against the deployed MCP Worker to validate
-Phase 3 extractor tool output shapes and value invariants.
+SEC structured extractor tool output shapes and value invariants.
 
 Environment variables:
   MCP_URL              Deployed Worker endpoint (required).
@@ -195,14 +195,14 @@ def _check_private_terms(descriptions: list[str], tool_names: list[str]) -> None
 
 def main() -> int:
     global _GROUPED_DISCOVERY
-    print(f"Phase 3 extractor smoke target: {MCP_URL}")
+    print(f"SEC structured extractor smoke target: {MCP_URL}")
 
     # --- tools/list validation ---
     try:
         listed = rpc("tools/list", req_id=1)
     except urllib.error.URLError as exc:
         if _ALLOW_SKIP:
-            print(f"SKIP deployed Phase 3 smoke: worker unreachable ({exc})")
+            print(f"SKIP deployed SEC structured smoke: worker unreachable ({exc})")
             return 0
         raise AssertionError(f"Worker unreachable and ALLOW_NETWORK_SKIP not set: {exc}") from exc
 
@@ -565,7 +565,7 @@ def main() -> int:
         )
     print("  PASS get_historical_stock_prices empty-ticker returns validation error")
 
-    print(f"\nPASS deployed Phase 3 extractor smoke ({MCP_URL})")
+    print(f"\nPASS deployed SEC structured extractor smoke ({MCP_URL})")
     return 0
 
 

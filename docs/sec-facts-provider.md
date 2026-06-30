@@ -9,7 +9,7 @@ Provider endpoints used by the Worker:
 - `https://data.sec.gov/submissions/CIK##########.json`
 - `https://data.sec.gov/api/xbrl/companyfacts/CIK##########.json`
 
-No Python sidecar, Fly app, paid EdgarTools API, or API key is required.
+No separate Python service, Fly app, paid EdgarTools API, or API key is required.
 
 ## Worker Configuration
 
@@ -37,8 +37,8 @@ This is intentional: do not collapse provider limitations into
 
 ## Required Post-Deploy Smoke
 
-The smoke script is `scripts/test_deployed_sec_facts_sidecar.py` for continuity
-with earlier PR wiring. It calls the deployed Worker, verifies
+The smoke script is `scripts/test_deployed_sec_facts_provider.py`. It calls the
+deployed Worker, verifies
 `health_check.structuredFactProvider == "official_sec_data_api"`, then calls:
 
 ```text

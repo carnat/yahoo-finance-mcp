@@ -42,8 +42,8 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
             const raw = JSON.stringify({
               ok: false,
               data: null,
-              meta: { source: "alpaca", providerStatus: "PROVIDER_FORBIDDEN", warnings: [] },
-              error: { code: "PROVIDER_FORBIDDEN", message: "subscription blocked" },
+              meta: { source: "provider", providerStatus: "PROVIDER_BLOCKED", warnings: [] },
+              error: { code: "PROVIDER_BLOCKED", message: "provider blocked" },
               diagnostics: { provider: "yahoo", dataSource: "INDICATIVE_ONLY" },
             });
             const out = JSON.parse(mcpSuccess("get_overnight_quote", raw, {
@@ -52,9 +52,9 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
             }));
 
             assert.equal(out.ok, false);
-            assert.equal(out.error.code, "PROVIDER_FORBIDDEN");
+            assert.equal(out.error.code, "PROVIDER_BLOCKED");
             assert.equal(out.meta.tool, "get_overnight_quote");
-            assert.equal(out.meta.providerStatus, "PROVIDER_FORBIDDEN");
+            assert.equal(out.meta.providerStatus, "PROVIDER_BLOCKED");
             assert.equal(out.meta.doctrineUse, "DIAGNOSTICS_ONLY");
             assert.equal(out.meta.warnings[0].code, "DEPRECATED_ALIAS");
             assert.equal(out.diagnostics.dataSource, "INDICATIVE_ONLY");
@@ -62,7 +62,53 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
             """
         )
         self.assertFalse(payload["ok"])
-        self.assertEqual(payload["error"]["code"], "PROVIDER_FORBIDDEN")
+        self.assertEqual(payload["error"]["code"], "PROVIDER_BLOCKED")
+
+    def test_mcp_success_propagates_inner_failure_without_data_field(self) -> None:
+        payload = _node_json(
+            """
+            import assert from "node:assert/strict";
+            import { mcpSuccess, setWorkerEnv } from "./worker/src/response.ts";
+
+            setWorkerEnv({ MCP_ENVELOPE_V2: "true" });
+            const raw = JSON.stringify({
+              ok: false,
+              error: { code: "UNSUPPORTED_QUERY_TYPE", message: "unsupported query" },
+            });
+            const out = JSON.parse(mcpSuccess("query_sec_filing_index", raw));
+
+            assert.equal(out.ok, false);
+            assert.equal(out.data, null);
+            assert.equal(out.error.code, "UNSUPPORTED_QUERY_TYPE");
+            console.log(JSON.stringify(out));
+            """
+        )
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "UNSUPPORTED_QUERY_TYPE")
+
+    def test_mcp_success_converts_legacy_error_true_payloads(self) -> None:
+        payload = _node_json(
+            """
+            import assert from "node:assert/strict";
+            import { mcpSuccess, setWorkerEnv } from "./worker/src/response.ts";
+
+            setWorkerEnv({ MCP_ENVELOPE_V2: "true" });
+            const raw = JSON.stringify({
+              error: true,
+              code: "NO_OPTIONS_DATA",
+              message: "No option expirations",
+              ticker: "AAPL",
+            });
+            const out = JSON.parse(mcpSuccess("get_option_chain", raw));
+
+            assert.equal(out.ok, false);
+            assert.equal(out.data, null);
+            assert.equal(out.error.code, "NO_OPTIONS_DATA");
+            console.log(JSON.stringify(out));
+            """
+        )
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "NO_OPTIONS_DATA")
 
     def test_deprecated_alias_set_is_derived_from_alias_map(self) -> None:
         tools = TOOLS_TS.read_text(encoding="utf-8")

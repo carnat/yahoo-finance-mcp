@@ -184,8 +184,6 @@ _ALLOW_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in ("1", "true",
 _GROUPED_DISCOVERY = False
 _EXPECTED_TOOL_MODE = os.environ.get("EXPECTED_TOOL_MODE", os.environ.get("TOOL_MODE", "")).lower()
 _FINNHUB_KEY_CONFIGURED = bool(os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_TOKEN"))
-_OVERNIGHT_PROVIDER = os.environ.get("OVERNIGHT_PROVIDER", "").lower()
-_ALPACA_KEY_CONFIGURED = bool(os.environ.get("ALPACA_API_KEY") and os.environ.get("ALPACA_SECRET_KEY"))
 _FORBIDDEN_PUBLIC_TERMS = (
     r"\bIO\b",
     r"Commander",
@@ -278,6 +276,10 @@ def assert_not_double_enveloped_failure(payload: dict, tool: str) -> None:
     data = payload.get("data")
     if payload.get("ok") is True and isinstance(data, dict) and data.get("ok") is False:
         raise AssertionError(f"{tool} returned inner ok:false wrapped as top-level ok:true: {payload}")
+    if payload.get("ok") is True and isinstance(data, dict) and data.get("error") is True:
+        raise AssertionError(f"{tool} returned legacy error:true wrapped as top-level ok:true: {payload}")
+    if payload.get("ok") is True and isinstance(data, dict) and isinstance(data.get("error"), (dict, str)):
+        raise AssertionError(f"{tool} returned inner error wrapped as top-level ok:true: {payload}")
 
 
 def _check_aaoi_geographic_revenue_schema(data: dict) -> None:
@@ -1012,68 +1014,29 @@ def main() -> int:
             )
         print("  PASS Finnhub deployed smoke (key absent, sourceStatus.finnhub=UNCONFIGURED)")
 
-    # Conditional Alpaca overnight smoke. Do not require an active overnight print;
-    # require only a standard JSON shape and an honest provider status.
+    # Overnight smoke. This is Yahoo indicative/pre-post-market data only; true
+    # The unusable third-party true-overnight route was removed.
     overnight = call_tool("get_overnight_quote", {"ticker": "AAPL"}, 2100)
     assert_no_unknown_tool(overnight, "get_overnight_quote")
     assert_not_double_enveloped_failure(overnight, "get_overnight_quote")
     overnight_data = extract_data(overnight)
     overnight_meta = overnight.get("meta") if isinstance(overnight, dict) else {}
-    overnight_error = overnight.get("error") if isinstance(overnight, dict) else {}
     if not isinstance(overnight_data, dict):
         raise AssertionError(f"get_overnight_quote returned non-object data: {type(overnight_data)}")
     if not isinstance(overnight_meta, dict):
         overnight_meta = {}
-    if not isinstance(overnight_error, dict):
-        overnight_error = {}
-    if _OVERNIGHT_PROVIDER == "alpaca" and _ALPACA_KEY_CONFIGURED:
-        allowed_provider_status = {
-            "FOUND_TRUE_OVERNIGHT",
-            "PROVIDER_FORBIDDEN",
-            "PROVIDER_RATE_LIMITED",
-            "PROVIDER_UNAVAILABLE",
-            "NO_OVERNIGHT_BARS",
-            "FALLBACK_EXTENDED_HOURS",
-        }
-        diagnostics = overnight.get("diagnostics") if isinstance(overnight, dict) else {}
-        if not isinstance(diagnostics, dict):
-            diagnostics = overnight_data.get("diagnostics") or {}
-        provider_status = (
-            overnight_data.get("providerStatus")
-            or overnight_meta.get("providerStatus")
-            or overnight_error.get("providerStatus")
-            or diagnostics.get("providerStatus")
-        )
-        primary_status = overnight_data.get("primaryProviderStatus") or diagnostics.get("primaryProviderStatus")
-        provider = overnight_data.get("provider") or overnight_meta.get("provider") or diagnostics.get("provider")
-        if provider_status not in allowed_provider_status and primary_status not in allowed_provider_status:
-            raise AssertionError(
-                f"Alpaca overnight provider returned unexpected status: "
-                f"providerStatus={provider_status!r}, primaryProviderStatus={primary_status!r}"
-            )
-        if provider not in ("alpaca", "yahoo"):
-            raise AssertionError(f"Unexpected overnight provider: {provider!r}")
-        if provider_status in {"PROVIDER_FORBIDDEN", "PROVIDER_UNCONFIGURED"} and overnight.get("ok") is not False:
-            raise AssertionError(f"Alpaca gated overnight response must be top-level ok:false: {overnight}")
-        if overnight_meta.get("doctrineUse") != "DIAGNOSTICS_ONLY":
-            raise AssertionError(f"get_overnight_quote missing DIAGNOSTICS_ONLY metadata: {overnight_meta}")
-        for secret_name in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY"):
-            secret_value = os.environ.get(secret_name) or ""
-            if secret_value and secret_value in json.dumps(overnight):
-                raise AssertionError(f"SECURITY: {secret_name} found in overnight tool output")
-        print(
-            "  PASS Alpaca overnight smoke "
-            f"(provider={provider!r}, "
-            f"providerStatus={provider_status!r}, primaryProviderStatus={primary_status!r})"
-        )
-    else:
-        diagnostics = overnight.get("diagnostics") if isinstance(overnight, dict) else {}
-        if not isinstance(diagnostics, dict):
-            diagnostics = overnight_data.get("diagnostics") or {}
-        provider_status = overnight_data.get("providerStatus") or overnight_meta.get("providerStatus") or diagnostics.get("providerStatus")
-        if provider_status is None:
-            raise AssertionError("get_overnight_quote missing providerStatus")
-        print(f"  PASS overnight smoke (providerStatus={provider_status!r})")
+    diagnostics = overnight.get("diagnostics") if isinstance(overnight, dict) else {}
+    if not isinstance(diagnostics, dict):
+        diagnostics = overnight_data.get("diagnostics") or {}
+    provider = overnight_data.get("provider") or overnight_meta.get("provider") or diagnostics.get("provider")
+    provider_status = overnight_data.get("providerStatus") or overnight_meta.get("providerStatus") or diagnostics.get("providerStatus")
+    if provider != "yahoo":
+        raise AssertionError(f"get_overnight_quote should use only Yahoo after third-party provider removal, got {provider!r}")
+    if provider_status is None:
+        raise AssertionError("get_overnight_quote missing providerStatus")
+    if overnight_meta.get("doctrineUse") != "DIAGNOSTICS_ONLY":
+        raise AssertionError(f"get_overnight_quote missing DIAGNOSTICS_ONLY metadata: {overnight_meta}")
+    print(f"  PASS overnight smoke (provider={provider!r}, providerStatus={provider_status!r})")
 
     unsupported = call_tool(
         "query_sec_filing_index",

@@ -663,7 +663,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_overnight_quote",
     description:
-      "Get overnight trading data for a ticker. When OVERNIGHT_PROVIDER=alpaca is configured, uses Alpaca BOATS/Blue Ocean overnight bars. Otherwise uses Yahoo pre/post-market data as an explicit fallback. Returns provider, providerStatus, requestedFeed, overnightPrice, overnightTime, overnightHigh, overnightLow, overnightOpen, overnightVolume, previousClose, gapPct, gapDirection, dataSource, isBlueOceanWindow, isStale, dataAgeHours, fallback, and note.",
+      "Get indicative overnight or pre/post-market pricing from Yahoo Finance. Returns provider, providerStatus, requestedFeed, overnightPrice, overnightTime, overnightHigh, overnightLow, overnightOpen, overnightVolume, previousClose, gapPct, gapDirection, dataSource, isBlueOceanWindow, isStale, dataAgeHours, fallback, and note.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1497,12 +1497,12 @@ type DoctrineToolStatus = {
 
 const TOOL_DOCTRINE_STATUS: Record<string, DoctrineToolStatus> = {
   get_overnight_quote: {
-    capabilityStatus: "PROVIDER_GATED",
+    capabilityStatus: "DEGRADED",
     decisionGrade: false,
     doctrineUse: "DIAGNOSTICS_ONLY",
-    failureMode: "BOATS_PROVIDER_FORBIDDEN",
+    failureMode: "TRUE_OVERNIGHT_PROVIDER_REMOVED",
     evidenceRequired: false,
-    sourceType: "provider_diagnostic",
+    sourceType: "yahoo",
   },
   get_sec_filing_section_markdown: {
     capabilityStatus: "DEGRADED",
@@ -1987,14 +1987,18 @@ async function callStructuredFactsProvider(tool: string, args: Record<string, un
 
 async function structuredFactProviderDiagnostics(): Promise<Record<string, unknown>> {
   const disabled = structuredFactsDisabled();
+  const lastSmokeStatus = getWorkerVar("EDGAR_FACTS_LAST_SMOKE_STATUS") ?? null;
+  const smokeOk = typeof lastSmokeStatus === "string"
+    ? lastSmokeStatus.toUpperCase() === "OK" || lastSmokeStatus.toUpperCase() === "PASS"
+    : false;
   return {
     structuredFactProvider: disabled ? "disabled" : "official_sec_data_api",
     structuredFactProviderConfigured: !disabled,
     structuredFactProviderUrlConfigured: true,
-    structuredFactProviderLastSmokeStatus: getWorkerVar("EDGAR_FACTS_LAST_SMOKE_STATUS") ?? null,
-    structuredFactProviderHealth: disabled ? "UNCONFIGURED" : "OK",
+    structuredFactProviderLastSmokeStatus: lastSmokeStatus,
+    structuredFactProviderHealth: disabled ? "UNCONFIGURED" : (smokeOk ? "OK" : "UNKNOWN"),
     structuredFactProviderCacheStatus: null,
-    structuredFactProviderLastErrorCode: disabled ? "STRUCTURED_FACT_PROVIDER_UNCONFIGURED" : null,
+    structuredFactProviderLastErrorCode: disabled ? "STRUCTURED_FACT_PROVIDER_UNCONFIGURED" : (smokeOk ? null : "STRUCTURED_FACT_PROVIDER_SMOKE_UNKNOWN"),
   };
 }
 
