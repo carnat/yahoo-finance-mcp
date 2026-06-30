@@ -103,7 +103,7 @@ jobs:
         run: python scripts/test_sec_reliability_worker.py
 
       - name: Official SEC facts provider tests
-        run: python -m unittest scripts.test_worker_sec_sidecar -v
+        run: python -m unittest scripts.test_worker_sec_provider -v
 
       # ── 4. Infrastructure: cache layer ────────────────────────────────────
       - name: Cache layer tests

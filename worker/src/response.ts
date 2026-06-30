@@ -251,8 +251,8 @@ export function mcpSuccess(
     if (
       parsed != null &&
       typeof parsed === "object" &&
-      "ok" in parsed &&
-      "data" in parsed
+      typeof (parsed as Record<string, unknown>).ok === "boolean" &&
+      ("data" in parsed || "error" in parsed)
     ) {
       const inner = parsed as Record<string, unknown>;
       const innerMeta = inner.meta && typeof inner.meta === "object"
@@ -279,6 +279,28 @@ export function mcpSuccess(
       for (const key of ["diagnostics"]) {
         if (passthrough[key] !== undefined) {
           (resp as any)[key] = passthrough[key];
+        }
+      }
+      return JSON.stringify(resp);
+    }
+    if (parsed != null && typeof parsed === "object" && (parsed as Record<string, unknown>).error === true) {
+      const inner = parsed as Record<string, unknown>;
+      const errorCode = typeof inner.code === "string" ? inner.code : "PROVIDER_ERROR";
+      const errorMessage = typeof inner.message === "string"
+        ? inner.message
+        : "Tool returned a legacy error envelope without error details.";
+      const resp: McpResponse = {
+        ok: false,
+        data: null,
+        meta: buildMeta(tool, opts),
+        error: {
+          code: errorCode,
+          message: errorMessage,
+        },
+      };
+      for (const key of ["diagnostics"]) {
+        if (inner[key] !== undefined) {
+          (resp as any)[key] = inner[key];
         }
       }
       return JSON.stringify(resp);

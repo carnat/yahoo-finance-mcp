@@ -39,7 +39,7 @@ Representative live smoke calls also passed for:
 | `get_company_news(AAPL)` | `ok:true` |
 | `list_sec_company_filings(AAPL, 10-K)` | `ok:true` |
 | `query_sec_filing_index` unsupported query | `ok:false`, `UNSUPPORTED_QUERY_TYPE` |
-| `get_overnight_quote(AAPL)` | `ok:false`, `PROVIDER_FORBIDDEN`, `DIAGNOSTICS_ONLY` |
+| `get_overnight_quote(AAPL)` | `ok:true`, Yahoo indicative/pre-post-market data, `DIAGNOSTICS_ONLY` |
 | `extract_geographic_revenue(AAPL, Greater China)` | JSON envelope returned through `official_sec_data_api`; provider availability is reported explicitly |
 
 ### Quarantined Or Degraded Tools
@@ -48,7 +48,7 @@ These tools remain visible for compatibility and diagnostics, but their `meta` s
 
 | Tool | Capability status | Doctrine use | Decision grade | Failure mode |
 |------|-------------------|--------------|----------------|--------------|
-| `get_overnight_quote` | `PROVIDER_GATED` | `DIAGNOSTICS_ONLY` | `false` | `BOATS_PROVIDER_FORBIDDEN` |
+| `get_overnight_quote` | `DEGRADED` | `DIAGNOSTICS_ONLY` | `false` | `TRUE_OVERNIGHT_PROVIDER_REMOVED` |
 | `get_sec_filing_section_markdown` | `DEGRADED` | `BLOCKED` | `false` | `LIVE_SECTION_EXTRACTION_UNRELIABLE` |
 | `get_company_press_releases` | `DEGRADED` | `VERIFY_ONLY` | `false` | `SEC_EX99_LINKAGE_INCOMPLETE` |
 | `query_sec_filing_index` | `DEGRADED` | `VERIFY_ONLY` | `false` | `ENVELOPE_SEMANTICS_UNDER_VERIFICATION` |
@@ -193,7 +193,7 @@ Set `TOOL_MODE=grouped` in the Python or Worker runtime to expose **10 domain-le
 | `options_analysis` | Options chain, flow, hedging | `get_option_expiration_dates`, `get_option_chain`, `summarize_options_flow`, `find_put_hedge_candidates`, `analyze_options_flow_window` |
 | `sec_filings` | SEC EDGAR access, indexing | `list_sec_company_filings`, `list_sec_material_filings`, `get_sec_filing_outline`, `get_sec_filing_section`, `get_sec_filing_section_markdown`, `list_sec_filing_tables`, `get_sec_filing_table`, `extract_sec_filing_fact`, `search_sec_filing_text`, `index_sec_filing`, `get_sec_filing_index`, `get_sec_filing_intelligence`, `query_sec_filing_index`, `list_sec_filing_exhibits`, `get_sec_filing_exhibit_content` |
 | `sec_extractors` | Structured SEC extraction | `extract_geographic_revenue`, `extract_segment_revenue`, `extract_total_revenue`, `extract_revenue_exposure`, `extract_china_exposure`, `extract_risk_factor_mentions`, `extract_customer_concentration`, `extract_exposure` |
-| `news_events` | News, events, timeline | `get_company_news`, `search_company_news`, `get_company_press_releases`, `get_yahoo_finance_news`, `get_sec_recent_events`, `get_public_event_timeline`, `verify_company_event` |
+| `news_events` | News, events, timeline | `get_company_news`, `search_company_news`, `get_company_press_releases`, `get_sec_recent_events`, `get_public_event_timeline`, `verify_company_event` |
 | `earnings_intelligence` | Earnings analysis | `get_latest_earnings_release`, `index_earnings_release`, `extract_earnings_metrics`, `extract_guidance`, `extract_management_commentary`, `compare_earnings_actual_vs_estimate`, `get_earnings_call_transcript`, `parse_public_transcript` |
 | `screening` | Discovery, screening | `search_ticker`, `screen_stocks`, `analyze_position_signals`, `calculate_price_target_distance` |
 | `system` | Diagnostics | `health_check`, `get_manifest_diagnostics` |
@@ -287,7 +287,7 @@ All canonical action names and response schemas remain identical to expanded mod
 | `get_sec_filing_index` | Get the pre-built filing index. |
 | `query_sec_filing_index` | Route SEC filing query types to index-backed extractors. |
 
-### SEC Phase 3 Extractors
+### SEC Structured Extractors
 
 | Tool | Description |
 |------|-------------|
@@ -394,9 +394,9 @@ https://<your-replit>.repl.co/mcp
 ### SEC structured-facts provider
 
 Structured SEC revenue/geography facts use the official SEC `data.sec.gov`
-JSON APIs directly from the Cloudflare Worker. No Python sidecar or API key is
+JSON APIs directly from the Cloudflare Worker. No separate Python service or API key is
 required. See
-[`docs/sec-facts-sidecar.md`](docs/sec-facts-sidecar.md).
+[`docs/sec-facts-provider.md`](docs/sec-facts-provider.md).
 
 ## License
 
