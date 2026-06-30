@@ -258,13 +258,17 @@ export function mcpSuccess(
       const innerMeta = inner.meta && typeof inner.meta === "object"
         ? inner.meta as Record<string, unknown>
         : {};
+      const baseMeta = buildMeta(tool, opts);
+      const baseWarnings = Array.isArray(baseMeta.warnings) ? baseMeta.warnings : [];
+      const innerWarnings = Array.isArray(innerMeta.warnings) ? innerMeta.warnings : [];
       const resp: McpResponse = {
         ok: inner.ok === true,
         data: inner.ok === true ? enrichFacts(inner.data) : inner.data ?? null,
         meta: {
-          ...buildMeta(tool, opts),
+          ...baseMeta,
           ...innerMeta,
           ...(opts?.metaExtra || {}),
+          warnings: [...baseWarnings, ...innerWarnings],
         } as ToolMeta,
         error: inner.ok === true ? null : (inner.error as ErrorDetail | null) ?? {
           code: "PROVIDER_ERROR",

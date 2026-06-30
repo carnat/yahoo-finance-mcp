@@ -42,11 +42,12 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
             const raw = JSON.stringify({
               ok: false,
               data: null,
-              meta: { source: "alpaca", providerStatus: "PROVIDER_FORBIDDEN" },
+              meta: { source: "alpaca", providerStatus: "PROVIDER_FORBIDDEN", warnings: [] },
               error: { code: "PROVIDER_FORBIDDEN", message: "subscription blocked" },
               diagnostics: { provider: "yahoo", dataSource: "INDICATIVE_ONLY" },
             });
             const out = JSON.parse(mcpSuccess("get_overnight_quote", raw, {
+              warnings: [{ code: "DEPRECATED_ALIAS", message: "Use canonical tool instead." }],
               metaExtra: { doctrineUse: "DIAGNOSTICS_ONLY" },
             }));
 
@@ -55,6 +56,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
             assert.equal(out.meta.tool, "get_overnight_quote");
             assert.equal(out.meta.providerStatus, "PROVIDER_FORBIDDEN");
             assert.equal(out.meta.doctrineUse, "DIAGNOSTICS_ONLY");
+            assert.equal(out.meta.warnings[0].code, "DEPRECATED_ALIAS");
             assert.equal(out.diagnostics.dataSource, "INDICATIVE_ONLY");
             console.log(JSON.stringify(out));
             """
