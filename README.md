@@ -6,6 +6,136 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that g
 
 ---
 
+## Live Deployment Status
+
+Last checked against `https://yahoo-finance-mcp.artinatw.workers.dev/mcp` on 2026-06-30.
+
+| Field | Live value |
+|-------|------------|
+| Server version | `1.4.1` |
+| Expanded canonical tools | `73` |
+| Deprecated aliases | `31` |
+| Grouped meta-tools | `10` when `TOOL_MODE=grouped` |
+| Privacy scope | `public_market_data_only` |
+| Structured SEC facts provider | `official_sec_data_api` |
+| Structured SEC facts health | `OK` |
+| Quarantined/degraded tools | `5` |
+| Opaque response count in tool-by-tool envelope probe | `0` |
+
+The tool-by-tool probe verifies that every expanded tool is discoverable through live `tools/list` and returns a JSON MCP envelope instead of opaque text. It is an interface and safety check, not a guarantee that every possible ticker, filing, provider, or argument combination has fresh data. Provider rate limits, market-data entitlements, and SEC availability can still affect individual calls.
+
+Representative live smoke calls also passed for:
+
+| Tool | Live result |
+|------|-------------|
+| `health_check` | `ok:true`, `serverVersion: "1.4.1"` |
+| `get_manifest_diagnostics` | `ok:true`, reports canonical/deprecated counts and doctrine status metadata |
+| `get_market_quote(AAPL)` | `ok:true` |
+| `get_fast_info(AAPL)` | `ok:true`, `deprecatedTool:true`, `DEPRECATED_ALIAS` warning |
+| `get_historical_stock_prices({})` | `ok:false`, `INPUT_VALIDATION_ERROR`, `DEPRECATED_ALIAS` warning |
+| `get_market_snapshot(AAPL)` | `ok:true` |
+| `get_option_expiration_dates(AAPL)` | `ok:true` |
+| `summarize_options_flow(AAPL)` | `ok:true` |
+| `get_company_news(AAPL)` | `ok:true` |
+| `list_sec_company_filings(AAPL, 10-K)` | `ok:true` |
+| `query_sec_filing_index` unsupported query | `ok:false`, `UNSUPPORTED_QUERY_TYPE` |
+| `get_overnight_quote(AAPL)` | `ok:false`, `PROVIDER_FORBIDDEN`, `DIAGNOSTICS_ONLY` |
+| `extract_geographic_revenue(AAPL, Greater China)` | JSON envelope returned through `official_sec_data_api`; provider availability is reported explicitly |
+
+### Quarantined Or Degraded Tools
+
+These tools remain visible for compatibility and diagnostics, but their `meta` status tells clients not to treat them as decision-grade without external verification.
+
+| Tool | Capability status | Doctrine use | Decision grade | Failure mode |
+|------|-------------------|--------------|----------------|--------------|
+| `get_overnight_quote` | `PROVIDER_GATED` | `DIAGNOSTICS_ONLY` | `false` | `BOATS_PROVIDER_FORBIDDEN` |
+| `get_sec_filing_section_markdown` | `DEGRADED` | `BLOCKED` | `false` | `LIVE_SECTION_EXTRACTION_UNRELIABLE` |
+| `get_company_press_releases` | `DEGRADED` | `VERIFY_ONLY` | `false` | `SEC_EX99_LINKAGE_INCOMPLETE` |
+| `query_sec_filing_index` | `DEGRADED` | `VERIFY_ONLY` | `false` | `ENVELOPE_SEMANTICS_UNDER_VERIFICATION` |
+| `extract_sec_filing_fact` | `DEGRADED` | `VERIFY_ONLY` | `false` | `XBRL_CONTEXT_METADATA_INCOMPLETE` |
+
+### Tool-By-Tool Live Status
+
+`Supported` means the tool is present in live discovery and returned a standard JSON envelope in the tool-by-tool probe. Quarantined entries expose stricter runtime metadata in `meta.capabilityStatus`, `meta.doctrineUse`, and `meta.decisionGrade`.
+
+| Domain | Tool | Live status |
+|--------|------|-------------|
+| Price & Market Data | `get_market_quote` | Supported |
+| Price & Market Data | `get_historical_prices` | Supported |
+| Price & Market Data | `analyze_price_performance` | Supported |
+| Price & Market Data | `analyze_moving_average_position` | Supported |
+| Price & Market Data | `analyze_volume_ratio` | Supported |
+| Price & Market Data | `check_volume_liquidity_threshold` | Supported |
+| Price & Market Data | `get_technical_indicators` | Supported |
+| Price & Market Data | `get_price_slope` | Supported |
+| Price & Market Data | `get_short_interest` | Supported |
+| Price & Market Data | `get_short_momentum` | Supported |
+| Price & Market Data | `get_overnight_quote` | `PROVIDER_GATED` / `DIAGNOSTICS_ONLY` |
+| Price & Market Data | `get_market_snapshot` | Supported |
+| Company Fundamentals | `get_company_profile` | Supported |
+| Company Fundamentals | `get_fund_profile` | Supported |
+| Company Fundamentals | `get_financial_statement` | Supported |
+| Company Fundamentals | `analyze_financial_ratios` | Supported |
+| Company Fundamentals | `analyze_credit_health` | Supported |
+| Company Fundamentals | `get_corporate_actions` | Supported |
+| Company Fundamentals | `get_ownership_holders` | Supported |
+| Analyst & Forecasts | `get_analyst_consensus` | Supported |
+| Analyst & Forecasts | `get_earnings_analysis` | Supported |
+| Analyst & Forecasts | `get_analyst_recommendations` | Supported |
+| Analyst & Forecasts | `get_analyst_rating_changes` | Supported |
+| Analyst & Forecasts | `analyze_earnings_momentum` | Supported |
+| Analyst & Forecasts | `get_company_events_calendar` | Supported |
+| Options | `get_option_expiration_dates` | Supported |
+| Options | `get_option_chain` | Supported |
+| Options | `summarize_options_flow` | Supported |
+| Options | `find_put_hedge_candidates` | Supported |
+| Options | `analyze_options_flow_window` | Supported |
+| SEC Filings | `list_sec_company_filings` | Supported |
+| SEC Filings | `list_sec_material_filings` | Supported |
+| SEC Filings | `get_sec_filing_outline` | Supported |
+| SEC Filings | `get_sec_filing_section` | Supported |
+| SEC Filings | `get_sec_filing_section_markdown` | `DEGRADED` / `BLOCKED` |
+| SEC Filings | `list_sec_filing_tables` | Supported |
+| SEC Filings | `get_sec_filing_table` | Supported |
+| SEC Filings | `extract_sec_filing_fact` | `DEGRADED` / `VERIFY_ONLY` |
+| SEC Filings | `search_sec_filing_text` | Supported |
+| SEC Filings | `index_sec_filing` | Supported |
+| SEC Filings | `get_sec_filing_index` | Supported |
+| SEC Filings | `get_sec_filing_intelligence` | Supported |
+| SEC Filings | `query_sec_filing_index` | `DEGRADED` / `VERIFY_ONLY` |
+| SEC Filings | `list_sec_filing_exhibits` | Supported |
+| SEC Filings | `get_sec_filing_exhibit_content` | Supported |
+| SEC Extractors | `extract_geographic_revenue` | Supported; provider failures are explicit |
+| SEC Extractors | `extract_segment_revenue` | Supported; provider failures are explicit |
+| SEC Extractors | `extract_total_revenue` | Supported; provider failures are explicit |
+| SEC Extractors | `extract_revenue_exposure` | Supported; provider failures are explicit |
+| SEC Extractors | `extract_china_exposure` | Supported; provider failures are explicit |
+| SEC Extractors | `extract_risk_factor_mentions` | Supported |
+| SEC Extractors | `extract_customer_concentration` | Supported |
+| SEC Extractors | `extract_exposure` | Supported; provider failures are explicit |
+| News & Events | `get_company_news` | Supported |
+| News & Events | `search_company_news` | Supported |
+| News & Events | `get_company_press_releases` | `DEGRADED` / `VERIFY_ONLY` |
+| News & Events | `get_sec_recent_events` | Supported |
+| News & Events | `get_public_event_timeline` | Supported |
+| News & Events | `verify_company_event` | Supported |
+| Earnings Intelligence | `get_latest_earnings_release` | Supported |
+| Earnings Intelligence | `index_earnings_release` | Supported |
+| Earnings Intelligence | `extract_earnings_metrics` | Supported |
+| Earnings Intelligence | `extract_guidance` | Supported |
+| Earnings Intelligence | `extract_management_commentary` | Supported |
+| Earnings Intelligence | `compare_earnings_actual_vs_estimate` | Supported |
+| Earnings Intelligence | `get_earnings_call_transcript` | Supported |
+| Earnings Intelligence | `parse_public_transcript` | Supported |
+| Discovery & Position | `search_ticker` | Supported |
+| Discovery & Position | `screen_stocks` | Supported |
+| Discovery & Position | `analyze_position_signals` | Supported |
+| Discovery & Position | `calculate_price_target_distance` | Supported |
+| Diagnostics | `health_check` | Supported |
+| Diagnostics | `get_manifest_diagnostics` | Supported |
+
+---
+
 ## Canonical Tool Names vs Legacy Aliases
 
 Canonical tool names use neutral public language. Legacy aliases are preserved for backward compatibility but should not be used in new integrations. Deprecated aliases return `meta.deprecatedTool=true` and `meta.useInstead`.
@@ -13,16 +143,33 @@ Canonical tool names use neutral public language. Legacy aliases are preserved f
 | Canonical name | Legacy alias |
 |----------------|-------------|
 | `get_market_quote` | `get_fast_info` |
+| `get_historical_prices` | `get_historical_stock_prices` |
+| `get_company_profile` | `get_stock_info` |
+| `get_fund_profile` | `get_etf_info` |
+| `get_corporate_actions` | `get_stock_actions` |
+| `get_ownership_holders` | `get_holder_info` |
 | `analyze_price_performance` | `get_price_stats` |
 | `analyze_moving_average_position` | `get_ma_position` |
 | `analyze_volume_ratio` | `get_volume_ratio` |
 | `check_volume_liquidity_threshold` | `get_volume_gate` |
+| `analyze_financial_ratios` | `get_financial_ratios` |
+| `analyze_credit_health` | `get_credit_health` |
+| `get_analyst_recommendations` | `get_recommendations` |
+| `get_analyst_rating_changes` | `get_analyst_upgrade_radar` |
+| `analyze_earnings_momentum` | `get_earnings_momentum` |
+| `get_company_events_calendar` | `get_calendar` |
 | `analyze_position_signals` | `get_position_score_inputs` |
 | `calculate_price_target_distance` | `get_price_target_bracket` |
+| `summarize_options_flow` | `get_options_flow_summary`, `get_options_summary` |
 | `analyze_options_flow_window` | `get_options_flow_scan` |
+| `find_put_hedge_candidates` | `get_put_hedge_candidates` |
+| `list_sec_company_filings` | `list_sec_filings` |
+| `get_sec_filing_outline` | `get_filing_outline` |
+| `get_sec_filing_section` | `get_filing_section` |
+| `list_sec_filing_tables` | `list_filing_tables` |
+| `get_sec_filing_table` | `get_filing_table` |
 | `extract_sec_filing_fact` | `get_filing_data`, `extract_filing_fact` |
 | `search_sec_filing_text` | `search_filing_text` |
-| `get_sec_filing_section` | `get_filing_section` |
 | `get_company_news` | `get_yahoo_finance_news` |
 
 ---
