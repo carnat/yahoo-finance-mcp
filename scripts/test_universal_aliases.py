@@ -41,9 +41,9 @@ _ALLOW_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "0").lower() in ("1", "true",
 # (canonical, args, alias, required_stable_keys_in_data, expect_deprecated_warning)
 ALIAS_PAIRS: list[tuple[str, dict, str, set[str], bool]] = [
     # get_fast_info returns yfinance fast_info fields directly (no "ticker" key injected)
-    ("get_market_quote", {"ticker": "AAPL"}, "get_fast_info", {"currency", "quoteType", "lastPrice", "previousClose"}, False),
-    ("summarize_options_flow", {"ticker": "AAPL"}, "get_options_summary", {"ticker", "dataQuality"}, False),
-    ("summarize_options_flow", {"ticker": "AAPL"}, "get_options_flow_summary", {"ticker", "dataQuality"}, False),
+    ("get_market_quote", {"ticker": "AAPL"}, "get_fast_info", {"currency", "quoteType", "lastPrice", "previousClose"}, True),
+    ("summarize_options_flow", {"ticker": "AAPL"}, "get_options_summary", {"ticker", "dataQuality"}, True),
+    ("summarize_options_flow", {"ticker": "AAPL"}, "get_options_flow_summary", {"ticker", "dataQuality"}, True),
 ]
 
 
@@ -66,6 +66,18 @@ def rpc(name: str, args: dict, req_id: int) -> dict:
         raise AssertionError(f"{name} JSON-RPC error: {body['error']}")
     text = ((((body.get("result") or {}).get("content") or [{}])[0]) or {}).get("text", "")
     return json.loads(text)
+
+
+def is_transient_provider_error(exc: BaseException) -> bool:
+    text = str(exc)
+    markers = (
+        "429",
+        "RATE_LIMIT",
+        "rate limit",
+        "Crumb fetch failed",
+        "Too Many Requests",
+    )
+    return any(marker in text for marker in markers)
 
 
 def data_of(payload: dict) -> dict:
@@ -92,6 +104,12 @@ def main() -> int:
                 print(f"SKIP universal alias tests: worker unreachable ({exc})")
                 return 0
             failures.append(f"{alias}: network error — {exc}")
+            continue
+        except AssertionError as exc:
+            if _ALLOW_SKIP and is_transient_provider_error(exc):
+                print(f"SKIP universal alias tests: provider temporarily unavailable ({exc})")
+                return 0
+            failures.append(f"{alias}: {exc}")
             continue
         try:
             can_data = data_of(can_payload)
