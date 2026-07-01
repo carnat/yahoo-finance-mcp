@@ -7674,10 +7674,19 @@ export async function getCompanyPressReleases(
   const items = out.items.filter(it => releaseTypes.has(_str(it.sourceType)));
   
   let hasSecEx99Found = false;
+  const sec8kEvidence: Record<string, unknown>[] = [];
+  let sec8kWithoutEx99Count = 0;
   const processedItems = await Promise.all(items.map(async (it) => {
     if (_str(it.sourceType) === "sec_filing" && _str(it.filingType) === "8-K") {
       const accession = _str(it.accessionNumber);
       const url = _str(it.url);
+      sec8kEvidence.push({
+        filingType: "8-K",
+        filingDate: it.filingDate ?? null,
+        acceptedAt: it.acceptedAt ?? null,
+        accessionNumber: accession || null,
+        documentUrl: url || null,
+      });
       const cikMatch = /\/data\/(\d+)\//.exec(url);
       const cik = cikMatch ? parseInt(cikMatch[1], 10) : null;
       if (accession && cik !== null) {
@@ -7692,6 +7701,7 @@ export async function getCompanyPressReleases(
           };
         }
       }
+      sec8kWithoutEx99Count += 1;
     }
     return it;
   }));
@@ -7704,10 +7714,20 @@ export async function getCompanyPressReleases(
       severity: "warning",
     });
   }
+  if (!hasSecEx99Found && sec8kWithoutEx99Count > 0) {
+    warnings.push({
+      code: "SEC_8K_FOUND_EX99_NOT_FOUND",
+      message: "SEC 8-K filing(s) were found, but no EX-99.1 press-release exhibit was resolved.",
+      severity: "warning",
+      filingsSearched: sec8kWithoutEx99Count,
+    });
+  }
 
   let status: string | null = null;
   if (hasSecEx99Found) {
     status = "SEC_EX99_FOUND";
+  } else if (sec8kWithoutEx99Count > 0) {
+    status = "SEC_8K_FOUND_EX99_NOT_FOUND";
   } else if (processedItems.length === 0) {
     if (sources.includes("yahoo_finance_press_releases")) {
       status = "NO_YAHOO_PRESS_RELEASE";
@@ -7726,6 +7746,7 @@ export async function getCompanyPressReleases(
     meta: { sourcesUsed: out.sourcesUsed, deduped: true, watermark: out.watermark },
     warnings,
   };
+  if (sec8kEvidence.length > 0) payload.secEvidence = sec8kEvidence.slice(0, 10);
   if (status) payload.status = status;
   return JSON.stringify(payload);
 }

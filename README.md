@@ -307,7 +307,7 @@ All canonical action names and response schemas remain identical to expanded mod
 |------|-------------|
 | `get_company_news` | Recent public company news from Yahoo Finance and SEC sources. |
 | `search_company_news` | Search news with keyword filter. |
-| `get_company_press_releases` | 8-K press releases as structured public events. |
+| `get_company_press_releases` | 8-K press releases as structured public events. Returns explicit `SEC_8K_FOUND_EX99_NOT_FOUND` when 8-K evidence exists but no EX-99.1 exhibit is resolved. |
 | `get_sec_recent_events` | Recent SEC filings as structured public events. |
 | `get_public_event_timeline` | Deduplicated chronological timeline across all sources. |
 | `verify_company_event` | Cross-validate an event across sources: CONFIRMED/PARTIAL/NOT_FOUND/STALE/CONFLICTING. |
