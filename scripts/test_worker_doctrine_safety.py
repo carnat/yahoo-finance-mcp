@@ -131,6 +131,14 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("sec8kWithoutEx99Count", worker)
         self.assertIn("filingsSearched", worker)
 
+    def test_section_markdown_success_is_not_decision_grade(self) -> None:
+        worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
+        self.assertIn("SECTION_MARKDOWN_UNVERIFIED", worker)
+        self.assertIn("LIVE_SECTION_EXTRACTION_UNRELIABLE", worker)
+        self.assertIn('confidence: "NOT_DECISION_GRADE"', worker)
+        self.assertIn("decisionGrade: false", worker)
+        self.assertIn('doctrineUse: "BLOCKED"', worker)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
