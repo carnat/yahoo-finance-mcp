@@ -753,7 +753,7 @@ def main() -> int:
                 if not isinstance(doctrine_status, dict):
                     raise AssertionError("health_check missing doctrineToolStatus")
                 expected_doctrine = {
-                    "get_overnight_quote": ("PROVIDER_GATED", "DIAGNOSTICS_ONLY"),
+                    "get_overnight_quote": ("DEGRADED", "DIAGNOSTICS_ONLY"),
                     "get_sec_filing_section_markdown": ("DEGRADED", "BLOCKED"),
                     "get_company_press_releases": ("DEGRADED", "VERIFY_ONLY"),
                     "query_sec_filing_index": ("DEGRADED", "VERIFY_ONLY"),
