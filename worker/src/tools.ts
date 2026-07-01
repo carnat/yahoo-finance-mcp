@@ -1532,7 +1532,7 @@ const TOOL_DOCTRINE_STATUS: Record<string, DoctrineToolStatus> = {
     capabilityStatus: "DEGRADED",
     decisionGrade: false,
     doctrineUse: "VERIFY_ONLY",
-    failureMode: "XBRL_CONTEXT_METADATA_INCOMPLETE",
+    failureMode: "XBRL_CONTEXT_METADATA_UNDER_VERIFICATION",
     evidenceRequired: true,
     sourceType: "sec_xbrl",
   },

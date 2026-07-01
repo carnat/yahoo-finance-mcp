@@ -803,9 +803,17 @@ def main() -> int:
                 raise AssertionError("extract_sec_filing_fact returned non-object")
             if "valuePct" not in data:
                 raise AssertionError("extract_sec_filing_fact missing valuePct")
+            if data.get("value") is not None and data.get("extractionMethod") == "XBRL":
+                warning_codes = {str(w.get("code")) for w in data.get("warnings", []) if isinstance(w, dict)}
+                if not isinstance(data.get("xbrlContext"), dict) and "XBRL_CONTEXT_METADATA_UNAVAILABLE" not in warning_codes:
+                    raise AssertionError("extract_sec_filing_fact returned XBRL value without xbrlContext or unavailable warning")
         if name == "extract_sec_filing_fact" and args.get("ticker") == "AAOI":
             data = extract_data(payload)
             if isinstance(data, dict):
+                if data.get("value") is not None and data.get("extractionMethod") == "XBRL":
+                    warning_codes = {str(w.get("code")) for w in data.get("warnings", []) if isinstance(w, dict)}
+                    if not isinstance(data.get("xbrlContext"), dict) and "XBRL_CONTEXT_METADATA_UNAVAILABLE" not in warning_codes:
+                        raise AssertionError("AAOI extract_sec_filing_fact returned XBRL value without xbrlContext or unavailable warning")
                 aaoi_has_value = _check_geographic_revenue_schema(
                     data, label="AAOI extract_sec_filing_fact", require_positive=False
                 )

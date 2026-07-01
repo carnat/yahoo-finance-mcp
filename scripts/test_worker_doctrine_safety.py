@@ -139,6 +139,14 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("decisionGrade: false", worker)
         self.assertIn('doctrineUse: "BLOCKED"', worker)
 
+    def test_sec_filing_fact_preserves_xbrl_context_metadata(self) -> None:
+        worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
+        self.assertIn("xbrlContext: payload.xbrlContext ?? null", worker)
+        self.assertIn("XBRL_CONTEXT_METADATA_UNAVAILABLE", worker)
+        self.assertIn("function buildXbrlFactContext", worker)
+        for field in ("periodStart", "periodEnd", "instant", "durationDays", "fiscalPeriod", "fiscalYear", "form", "frame", "dimensions"):
+            self.assertIn(field, worker)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

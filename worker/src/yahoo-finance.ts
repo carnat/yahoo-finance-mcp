@@ -3989,6 +3989,40 @@ function normalizeSegmentLabel(segment: unknown): string {
   return String(segment).trim();
 }
 
+function buildXbrlFactContext(fact: Record<string, unknown>, concept: string, periodMode: string): Record<string, unknown> {
+  let durationDays: number | null = null;
+  if (fact.start && fact.end) {
+    try {
+      const d0 = new Date(String(fact.start));
+      const d1 = new Date(String(fact.end));
+      if (!isNaN(d0.getTime()) && !isNaN(d1.getTime())) {
+        durationDays = Math.round((d1.getTime() - d0.getTime()) / (1000 * 60 * 60 * 24));
+      }
+    } catch { /* ignore */ }
+  }
+  const segmentLabel = normalizeSegmentLabel(fact.segment);
+  const dimensions: Record<string, unknown> = {};
+  if (segmentLabel) dimensions.segment = segmentLabel;
+  if (fact.segment != null) dimensions.rawSegment = fact.segment;
+  return {
+    concept,
+    taxonomy: "us-gaap",
+    unit: "USD",
+    periodStart: fact.start ?? null,
+    periodEnd: fact.end ?? null,
+    instant: fact.start ? null : (fact.end ?? null),
+    durationDays,
+    fiscalPeriod: String(fact.fp ?? ""),
+    fiscalYear: String(fact.fy ?? ""),
+    form: String(fact.form ?? ""),
+    frame: fact.frame ?? null,
+    accessionNumber: fact.accn ?? null,
+    filedAt: fact.filed ?? null,
+    periodMode,
+    dimensions,
+  };
+}
+
 function regionMatches(segmentLabel: string, region: string, includeAsiaFallback = false): boolean {
   const label = segmentLabel.toLowerCase();
   const regionLower = region.toLowerCase();
@@ -4066,8 +4100,21 @@ export async function getFilingData(
       calculation: payload.calculation ?? null,
       status: payload.status ?? (payload.value != null ? "FOUND" : (payload.confidence ?? "NOT_DISCLOSED")),
       code: payload.code ?? null,
+      xbrlContext: payload.xbrlContext ?? null,
       warnings,
     };
+    if (
+      shaped.value != null
+      && shaped.extractionMethod === "XBRL"
+      && shaped.xbrlContext == null
+      && !(shaped.warnings as Record<string, unknown>[]).some((w) => w.code === "XBRL_CONTEXT_METADATA_UNAVAILABLE")
+    ) {
+      (shaped.warnings as unknown[]).push({
+        code: "XBRL_CONTEXT_METADATA_UNAVAILABLE",
+        message: "XBRL fact value was found, but SEC context metadata was unavailable.",
+        severity: "warning",
+      });
+    }
     if (addDenominatorWarning && shaped.value != null && shaped.denominator == null) {
       (shaped.warnings as unknown[]).push({
         code: "DENOMINATOR_NOT_FOUND",
@@ -4192,6 +4239,7 @@ export async function getFilingData(
       .map((f) => {
         const segmentLabel = normalizeSegmentLabel(f.segment);
         if (!segmentLabel) return null;
+        const xbrlContext = buildXbrlFactContext(f, concept, resolvedMode);
         return {
           segmentLabel,
           value: f.val ?? null,
@@ -4199,6 +4247,7 @@ export async function getFilingData(
           fiscalPeriod: String(f.fp ?? ""),
           filingDate: String(f.filed ?? ""),
           accessionNumber: String(f.accn ?? ""),
+          xbrlContext,
         };
       })
       .filter((v) => v != null);
@@ -4212,6 +4261,7 @@ export async function getFilingData(
       filingType,
       filingDate: allSegments[0]?.filingDate ?? null,
       accessionNumber: allSegments[0]?.accessionNumber ?? null,
+      xbrlContext: allSegments[0]?.xbrlContext ?? null,
       extractionMethod: "XBRL",
       source: "XBRL",
       confidence: "HIGH",
@@ -4413,14 +4463,24 @@ export async function getFilingData(
     } catch { /* ignore */ }
   }
   const xbrlContext = {
+    concept,
+    taxonomy: "us-gaap",
+    unit: "USD",
     periodStart: picked.start ?? null,
     periodEnd: picked.end ?? null,
+    instant: picked.start ? null : (picked.end ?? null),
     durationDays: durationDaysVal,
     fiscalPeriod: String(picked.fp ?? ""),
     fiscalYear: String(picked.fy ?? ""),
     form: String(picked.form ?? ""),
     frame: picked.frame ?? null,
+    accessionNumber: picked.accn ?? null,
+    filedAt: picked.filed ?? null,
     periodMode: resolvedMode,
+    dimensions: {
+      ...(segmentLabel ? { segment: segmentLabel } : {}),
+      ...(picked.segment != null ? { rawSegment: picked.segment } : {}),
+    },
   };
 
   const resultWarnings: Record<string, unknown>[] = [];
