@@ -51,7 +51,7 @@ These tools remain visible for compatibility and diagnostics, but their `meta` s
 | Tool | Capability status | Doctrine use | Decision grade | Failure mode |
 |------|-------------------|--------------|----------------|--------------|
 | `get_overnight_quote` | `DEGRADED` | `DIAGNOSTICS_ONLY` | `false` | `TRUE_OVERNIGHT_PROVIDER_REMOVED` |
-| `get_sec_filing_section_markdown` | `DEGRADED` | `BLOCKED` | `false` | `LIVE_SECTION_EXTRACTION_UNRELIABLE` |
+| `get_sec_filing_section_markdown` | `DEGRADED` | `BLOCKED` | `false` | `LIVE_SECTION_EXTRACTION_UNRELIABLE`; successful payloads are `SECTION_MARKDOWN_UNVERIFIED` |
 | `get_company_press_releases` | `DEGRADED` | `VERIFY_ONLY` | `false` | `SEC_EX99_LINKAGE_INCOMPLETE` |
 | `query_sec_filing_index` | `DEGRADED` | `VERIFY_ONLY` | `false` | `ENVELOPE_SEMANTICS_UNDER_VERIFICATION` |
 | `extract_sec_filing_fact` | `DEGRADED` | `VERIFY_ONLY` | `false` | `XBRL_CONTEXT_METADATA_INCOMPLETE` |

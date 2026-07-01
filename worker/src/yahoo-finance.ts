@@ -8456,6 +8456,20 @@ export async function getSecFilingSectionMarkdown(
     truncated = true;
   }
 
+  const wordCount = markdown ? markdown.split(/\s+/).length : 0;
+  const warnings: Record<string, unknown>[] = [{
+    code: "LIVE_SECTION_EXTRACTION_UNRELIABLE",
+    message: "Section markdown is produced by a lossy Worker HTML fallback and is blocked from decision-grade use.",
+    severity: "warning",
+  }];
+  if (wordCount < 50) {
+    warnings.push({
+      code: "SECTION_MARKDOWN_LOW_CONTENT",
+      message: "Extracted section markdown is unusually short; verify with the source filing.",
+      severity: "warning",
+    });
+  }
+
   return JSON.stringify({
     ticker,
     section: foundHeading || section,
@@ -8463,8 +8477,12 @@ export async function getSecFilingSectionMarkdown(
     accessionNumber,
     markdown,
     tables_in_section: tablesInSection,
-    word_count: markdown.split(/\s+/).length,
-    confidence: "MEDIUM",
+    word_count: wordCount,
+    status: "SECTION_MARKDOWN_UNVERIFIED",
+    confidence: "NOT_DECISION_GRADE",
+    decisionGrade: false,
+    doctrineUse: "BLOCKED",
+    warnings,
     source: "html_parser_fallback",
     truncated,
     sectionStartOffset: sectionStart,
