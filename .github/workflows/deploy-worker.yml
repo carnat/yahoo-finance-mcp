@@ -4,10 +4,16 @@ on:
   push:
     branches: [main]
     paths:
+      - ".github/workflows/deploy-worker.yml"
       - "worker/**"
       - "server.py"
       - "pyproject.toml"
+      - "scripts/test_deployed_discovery.py"
+      - "scripts/test_deployed_extractors.py"
+      - "scripts/test_geographic_revenue_schema.py"
       - "scripts/test_deployed_sec_facts_provider.py"
+      - "scripts/test_tools.py"
+      - "scripts/test_universal_aliases.py"
   workflow_dispatch: # allow manual trigger from GitHub UI
 
 env:
