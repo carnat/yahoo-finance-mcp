@@ -24,6 +24,8 @@ Last checked against `https://yahoo-finance-mcp.artinatw.workers.dev/mcp` on 202
 
 The tool-by-tool probe verifies that every expanded tool is discoverable through live `tools/list` and returns a JSON MCP envelope instead of opaque text. It is an interface and safety check, not a guarantee that every possible ticker, filing, provider, or argument combination has fresh data. Provider rate limits, market-data entitlements, and SEC availability can still affect individual calls.
 
+Live smoke policy and PR checklist guidance lives in [`docs/live-smoke-policy.md`](docs/live-smoke-policy.md). Tool/provider changes should update smoke expectations in the same PR and avoid hardcoded volatile market dates or live provider values.
+
 Representative live smoke calls also passed for:
 
 | Tool | Live result |

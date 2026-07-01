@@ -7,9 +7,12 @@ import sys
 import urllib.request
 from typing import Any
 
+from live_smoke_utils import resolve_option_expiration
+
 DEFAULT_URL = "https://yahoo-finance-mcp.artinatw.workers.dev/mcp"
 _UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-live-discovery/1.0)"
 _BAD_CALL_ERRORS = ("unknown tool", "method not found", "unregistered dispatch")
+_DYNAMIC_OPTION_EXPIRATION = "_DYNAMIC_OPTION_EXPIRATION_"
 
 
 def _rpc(url: str, method: str, params: dict[str, Any] | None = None, req_id: int = 1) -> dict[str, Any]:
@@ -26,7 +29,9 @@ def _rpc(url: str, method: str, params: dict[str, Any] | None = None, req_id: in
         return json.loads(resp.read())
 
 
-def _default_for(name: str, schema: dict[str, Any]) -> Any:
+def _default_for(name: str, schema: dict[str, Any], runtime_defaults: dict[str, Any]) -> Any:
+    if name in runtime_defaults:
+        return runtime_defaults[name]
     if "default" in schema:
         return schema["default"]
     if "enum" in schema and schema["enum"]:
@@ -54,7 +59,7 @@ def _default_for(name: str, schema: dict[str, Any]) -> Any:
         "interval": "1d",
         "financial_type": "income_stmt",
         "holder_type": "major_holders",
-        "expiration_date": "2025-06-20",
+        "expiration_date": _DYNAMIC_OPTION_EXPIRATION,
         "option_type": "calls",
         "recommendation_type": "recommendations",
         "screener_name": "day_gainers",
@@ -70,13 +75,13 @@ def _default_for(name: str, schema: dict[str, Any]) -> Any:
     return lookup.get(name, "sample")
 
 
-def _args_for(tool: dict[str, Any]) -> dict[str, Any]:
+def _args_for(tool: dict[str, Any], runtime_defaults: dict[str, Any]) -> dict[str, Any]:
     schema = tool.get("inputSchema", {}) or {}
     props = schema.get("properties", {}) or {}
     required = schema.get("required", []) or []
     args: dict[str, Any] = {}
     for name in required:
-        args[name] = _default_for(name, props.get(name, {}))
+        args[name] = _default_for(name, props.get(name, {}), runtime_defaults)
     return args
 
 
@@ -91,6 +96,7 @@ def main() -> int:
     args = parser.parse_args()
 
     errors: list[str] = []
+    runtime_defaults: dict[str, Any] = {}
     listed = _rpc(args.url, "tools/list")
     if "error" in listed:
         print(f"FAIL tools/list error: {listed['error']}", file=sys.stderr)
@@ -112,6 +118,14 @@ def main() -> int:
     if "health_check" not in tool_names:
         errors.append("missing health_check in discovery")
 
+    if "get_option_chain" in tool_names:
+        expiry = resolve_option_expiration(args.url, "AAPL", user_agent=_UA, req_id=9000)
+        if expiry:
+            runtime_defaults["expiration_date"] = expiry
+            print(f"Resolved AAPL option expiration for live discovery: {expiry}")
+        else:
+            print("WARN could not resolve AAPL option expiration; get_option_chain callability will be skipped")
+
     option_tool = next((t for t in tools if isinstance(t, dict) and t.get("name") == "get_option_chain"), None)
     if option_tool is None:
         errors.append("missing get_option_chain in discovery")
@@ -127,7 +141,10 @@ def main() -> int:
         name = str(tool.get("name", ""))
         if not name:
             continue
-        call = _rpc(args.url, "tools/call", {"name": name, "arguments": _args_for(tool)}, req_id=idx + 1000)
+        tool_args = _args_for(tool, runtime_defaults)
+        if tool_args.get("expiration_date") == _DYNAMIC_OPTION_EXPIRATION:
+            continue
+        call = _rpc(args.url, "tools/call", {"name": name, "arguments": tool_args}, req_id=idx + 1000)
         if "error" in call:
             msg = json.dumps(call["error"]).lower()
             if any(bad in msg for bad in _BAD_CALL_ERRORS):
