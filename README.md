@@ -70,7 +70,7 @@ These tools remain visible for compatibility and diagnostics, but their `meta` s
 | Price & Market Data | `get_price_slope` | Supported |
 | Price & Market Data | `get_short_interest` | Supported |
 | Price & Market Data | `get_short_momentum` | Supported |
-| Price & Market Data | `get_overnight_quote` | `PROVIDER_GATED` / `DIAGNOSTICS_ONLY` |
+| Price & Market Data | `get_overnight_quote` | `DEGRADED` / `DIAGNOSTICS_ONLY` |
 | Price & Market Data | `get_market_snapshot` | Supported |
 | Company Fundamentals | `get_company_profile` | Supported |
 | Company Fundamentals | `get_fund_profile` | Supported |
