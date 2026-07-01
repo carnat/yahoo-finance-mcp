@@ -822,6 +822,22 @@ def main() -> int:
             data = extract_data(payload)
             _check_yahoo_news_structured(data)
             print("  PASS Yahoo news structured smoke")
+        if name == "get_company_press_releases":
+            data = extract_data(payload)
+            if not isinstance(data, dict):
+                raise AssertionError(f"get_company_press_releases returned non-object: {data!r}")
+            if "items" not in data or not isinstance(data.get("items"), list):
+                raise AssertionError("get_company_press_releases missing items[]")
+            if "warnings" not in data or not isinstance(data.get("warnings"), list):
+                raise AssertionError("get_company_press_releases missing warnings[]")
+            status = data.get("status")
+            if status == "SEC_8K_FOUND_EX99_NOT_FOUND":
+                if not isinstance(data.get("secEvidence"), list) or not data.get("secEvidence"):
+                    raise AssertionError("get_company_press_releases missing secEvidence for SEC_8K_FOUND_EX99_NOT_FOUND")
+                warning_codes = {str(w.get("code")) for w in data.get("warnings", []) if isinstance(w, dict)}
+                if "SEC_8K_FOUND_EX99_NOT_FOUND" not in warning_codes:
+                    raise AssertionError("get_company_press_releases missing SEC_8K_FOUND_EX99_NOT_FOUND warning")
+            print(f"  PASS get_company_press_releases structured smoke (status={status!r})")
         # Phase 3 extractor tool dispatch checks
         if name == "extract_geographic_revenue":
             data = extract_data(payload)

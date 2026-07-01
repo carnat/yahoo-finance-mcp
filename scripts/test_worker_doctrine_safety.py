@@ -13,6 +13,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
+YAHOO_FINANCE_TS = ROOT / "worker" / "src" / "yahoo-finance.ts"
 DEPLOYED_DISCOVERY = ROOT / "scripts" / "test_deployed_discovery.py"
 
 
@@ -122,6 +123,13 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("deprecatedTool", smoke)
         self.assertIn("DEPRECATED_ALIAS", smoke)
         self.assertIn("doctrineToolStatus", smoke)
+
+    def test_press_releases_exposes_8k_without_ex99_status(self) -> None:
+        worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
+        self.assertIn("SEC_8K_FOUND_EX99_NOT_FOUND", worker)
+        self.assertIn("secEvidence", worker)
+        self.assertIn("sec8kWithoutEx99Count", worker)
+        self.assertIn("filingsSearched", worker)
 
 
 if __name__ == "__main__":
