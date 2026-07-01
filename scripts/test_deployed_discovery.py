@@ -1050,12 +1050,25 @@ def main() -> int:
         diagnostics = overnight_data.get("diagnostics") or {}
     provider = overnight_data.get("provider") or overnight_meta.get("provider") or diagnostics.get("provider")
     provider_status = overnight_data.get("providerStatus") or overnight_meta.get("providerStatus") or diagnostics.get("providerStatus")
+    warning_codes = {
+        w.get("code")
+        for w in overnight_data.get("warnings", [])
+        if isinstance(w, dict)
+    }
     if provider != "yahoo":
         raise AssertionError(f"get_overnight_quote should use only Yahoo after third-party provider removal, got {provider!r}")
     if provider_status is None:
         raise AssertionError("get_overnight_quote missing providerStatus")
     if overnight_meta.get("doctrineUse") != "DIAGNOSTICS_ONLY":
         raise AssertionError(f"get_overnight_quote missing DIAGNOSTICS_ONLY metadata: {overnight_meta}")
+    if overnight_data.get("decisionGrade") is not False:
+        raise AssertionError(f"get_overnight_quote must be payload-level decisionGrade:false: {overnight_data}")
+    if overnight_data.get("doctrineUse") != "DIAGNOSTICS_ONLY":
+        raise AssertionError(f"get_overnight_quote must be payload-level DIAGNOSTICS_ONLY: {overnight_data}")
+    if overnight_data.get("dataKind") != "yahoo_extended_hours_proxy":
+        raise AssertionError(f"get_overnight_quote must declare yahoo_extended_hours_proxy: {overnight_data}")
+    if "TRUE_OVERNIGHT_PROVIDER_REMOVED" not in warning_codes:
+        raise AssertionError(f"get_overnight_quote missing TRUE_OVERNIGHT_PROVIDER_REMOVED warning: {overnight_data}")
     print(f"  PASS overnight smoke (provider={provider!r}, providerStatus={provider_status!r})")
 
     unsupported = call_tool(

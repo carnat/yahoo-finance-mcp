@@ -147,6 +147,19 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         for field in ("periodStart", "periodEnd", "instant", "durationDays", "fiscalPeriod", "fiscalYear", "form", "frame", "dimensions"):
             self.assertIn(field, worker)
 
+    def test_overnight_quote_is_explicitly_diagnostics_only(self) -> None:
+        tools = TOOLS_TS.read_text(encoding="utf-8")
+        worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
+        smoke = DEPLOYED_DISCOVERY.read_text(encoding="utf-8")
+        self.assertIn("Deprecated diagnostics-only Yahoo extended-hours proxy", tools)
+        self.assertIn('failureMode: "YAHOO_EXTENDED_HOURS_PROXY_ONLY"', tools)
+        self.assertIn("OVERNIGHT_DIAGNOSTIC_FIELDS", worker)
+        self.assertIn('dataKind: "yahoo_extended_hours_proxy"', worker)
+        self.assertIn('decisionGrade: false', worker)
+        self.assertIn('doctrineUse: "DIAGNOSTICS_ONLY"', worker)
+        self.assertIn("TRUE_OVERNIGHT_PROVIDER_REMOVED", worker)
+        self.assertIn("yahoo_extended_hours_proxy", smoke)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

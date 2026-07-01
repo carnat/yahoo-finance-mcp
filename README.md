@@ -41,7 +41,7 @@ Representative live smoke calls also passed for:
 | `get_company_news(AAPL)` | `ok:true` |
 | `list_sec_company_filings(AAPL, 10-K)` | `ok:true` |
 | `query_sec_filing_index` unsupported query | `ok:false`, `UNSUPPORTED_QUERY_TYPE` |
-| `get_overnight_quote(AAPL)` | `ok:true`, Yahoo indicative/pre-post-market data, `DIAGNOSTICS_ONLY` |
+| `get_overnight_quote(AAPL)` | `ok:true`, deprecated Yahoo extended-hours proxy, `DIAGNOSTICS_ONLY`, `decisionGrade:false` |
 | `extract_geographic_revenue(AAPL, Greater China)` | JSON envelope returned through `official_sec_data_api`; provider availability is reported explicitly |
 
 ### Quarantined Or Degraded Tools
@@ -50,7 +50,7 @@ These tools remain visible for compatibility and diagnostics, but their `meta` s
 
 | Tool | Capability status | Doctrine use | Decision grade | Failure mode |
 |------|-------------------|--------------|----------------|--------------|
-| `get_overnight_quote` | `DEGRADED` | `DIAGNOSTICS_ONLY` | `false` | `TRUE_OVERNIGHT_PROVIDER_REMOVED` |
+| `get_overnight_quote` | `DEGRADED` | `DIAGNOSTICS_ONLY` | `false` | `YAHOO_EXTENDED_HOURS_PROXY_ONLY` |
 | `get_sec_filing_section_markdown` | `DEGRADED` | `BLOCKED` | `false` | `LIVE_SECTION_EXTRACTION_UNRELIABLE`; successful payloads are `SECTION_MARKDOWN_UNVERIFIED` |
 | `get_company_press_releases` | `DEGRADED` | `VERIFY_ONLY` | `false` | `SEC_EX99_LINKAGE_INCOMPLETE` |
 | `query_sec_filing_index` | `DEGRADED` | `VERIFY_ONLY` | `false` | `ENVELOPE_SEMANTICS_UNDER_VERIFICATION` |
@@ -239,7 +239,7 @@ All canonical action names and response schemas remain identical to expanded mod
 | `get_price_slope` | N-day price slope (% change) and direction (UP/DOWN/FLAT). Args: `days` (default 5). |
 | `get_short_interest` | Short % of float, shares short, days-to-cover, prior-month comparison. |
 | `get_short_momentum` | Short interest with MoM delta, direction (RISING/FALLING/FLAT), squeeze risk (HIGH/MODERATE/LOW). |
-| `get_overnight_quote` | Overnight trading data (20:00–04:00 ET). Returns price, gap %, data source, and staleness flag. |
+| `get_overnight_quote` | Deprecated diagnostics-only Yahoo extended-hours proxy. It does **not** provide true 20:00-04:00 ET overnight venue data. Prefer `get_market_quote` for regular/pre/post-market fields. |
 
 ### Company Fundamentals
 

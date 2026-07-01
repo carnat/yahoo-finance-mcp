@@ -1265,6 +1265,17 @@ const OVERNIGHT_SUSPENSION_REASON =
   "True overnight window (20:00-04:00 ET) unavailable via Yahoo Finance API";
 const OVERNIGHT_RELIABILITY_WARNING =
   "OTC_INDICATIVE data may lag actual price materially; use with extreme caution.";
+const OVERNIGHT_DEPRECATION_WARNING = {
+  code: "TRUE_OVERNIGHT_PROVIDER_REMOVED",
+  message: "This tool is diagnostics-only and does not provide true 20:00-04:00 ET overnight venue data.",
+  severity: "warning",
+};
+const OVERNIGHT_DIAGNOSTIC_FIELDS = {
+  dataKind: "yahoo_extended_hours_proxy",
+  decisionGrade: false,
+  doctrineUse: "DIAGNOSTICS_ONLY",
+  warnings: [OVERNIGHT_DEPRECATION_WARNING],
+};
 
 // ── get_overnight_quote ───────────────────────────────────────────────────────
 
@@ -1365,6 +1376,7 @@ async function getYahooOvernightQuote(ticker: string): Promise<string> {
       if (fallbackIdx === -1) {
         return JSON.stringify({
           ticker,
+          ...OVERNIGHT_DIAGNOSTIC_FIELDS,
           status: "SUSPENDED",
           provider: "yahoo",
           providerStatus: "FALLBACK_EXTENDED_HOURS",
@@ -1391,6 +1403,7 @@ async function getYahooOvernightQuote(ticker: string): Promise<string> {
 
       return JSON.stringify({
         ticker,
+        ...OVERNIGHT_DIAGNOSTIC_FIELDS,
         status: "SUSPENDED",
         provider: "yahoo",
         providerStatus: "FALLBACK_EXTENDED_HOURS",
@@ -1440,6 +1453,7 @@ async function getYahooOvernightQuote(ticker: string): Promise<string> {
 
     return JSON.stringify({
       ticker,
+      ...OVERNIGHT_DIAGNOSTIC_FIELDS,
       provider: "yahoo",
       providerStatus: "FALLBACK_EXTENDED_HOURS",
       requestedFeed: null,

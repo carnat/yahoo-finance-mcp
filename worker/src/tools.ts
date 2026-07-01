@@ -663,7 +663,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_overnight_quote",
     description:
-      "Get indicative overnight or pre/post-market pricing from Yahoo Finance. Returns provider, providerStatus, requestedFeed, overnightPrice, overnightTime, overnightHigh, overnightLow, overnightOpen, overnightVolume, previousClose, gapPct, gapDirection, dataSource, isBlueOceanWindow, isStale, dataAgeHours, fallback, and note.",
+      "Deprecated diagnostics-only Yahoo extended-hours proxy. This does not provide true 20:00-04:00 ET overnight venue data. Returns provider, providerStatus, dataKind, decisionGrade, doctrineUse, warnings, requestedFeed, overnightPrice, overnightTime, overnightHigh, overnightLow, overnightOpen, overnightVolume, previousClose, gapPct, gapDirection, dataSource, isBlueOceanWindow, isStale, dataAgeHours, fallback, and note.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1500,7 +1500,7 @@ const TOOL_DOCTRINE_STATUS: Record<string, DoctrineToolStatus> = {
     capabilityStatus: "DEGRADED",
     decisionGrade: false,
     doctrineUse: "DIAGNOSTICS_ONLY",
-    failureMode: "TRUE_OVERNIGHT_PROVIDER_REMOVED",
+    failureMode: "YAHOO_EXTENDED_HOURS_PROXY_ONLY",
     evidenceRequired: false,
     sourceType: "yahoo",
   },

@@ -19,7 +19,7 @@
 
 ## Canonical tool groups
 
-- Market: `get_market_quote`, `get_historical_prices`, `analyze_price_performance`, `analyze_moving_average_position`, `analyze_volume_ratio`, `check_volume_liquidity_threshold`, `get_technical_indicators`, `get_price_slope`, `get_short_interest`, `get_short_momentum`, `get_overnight_quote`
+- Market: `get_market_quote`, `get_historical_prices`, `analyze_price_performance`, `analyze_moving_average_position`, `analyze_volume_ratio`, `check_volume_liquidity_threshold`, `get_technical_indicators`, `get_price_slope`, `get_short_interest`, `get_short_momentum`, `get_overnight_quote` (deprecated diagnostics-only Yahoo extended-hours proxy)
 - Snapshot: `get_market_snapshot`, `get_manifest_diagnostics`, `health_check`
 - Fundamentals: `get_company_profile`, `get_fund_profile`, `get_financial_statement`, `analyze_financial_ratios`, `analyze_credit_health`, `get_corporate_actions`, `get_ownership_holders`
 - Analyst/earnings: `get_analyst_consensus`, `get_analyst_recommendations`, `get_analyst_rating_changes`, `get_earnings_analysis`, `analyze_earnings_momentum`, `get_company_events_calendar`
