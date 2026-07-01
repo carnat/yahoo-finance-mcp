@@ -29,6 +29,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from live_smoke_utils import resolve_option_expiration
+
 # Browser-like User-Agent to avoid Cloudflare bot-protection blocking Python-urllib
 _UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-test/1.0)"
 
@@ -667,30 +669,6 @@ def _is_ok(
 _DYNAMIC_GLW_10K = "_DYNAMIC_GLW_10K_"        # sentinel for accession number
 
 
-def _resolve_aapl_option_expiration(url: str) -> str | None:
-    """Resolve a currently valid AAPL option expiration date."""
-    try:
-        resp = _call(url, "get_option_expiration_dates", {"ticker": "AAPL"})
-        result = resp.get("result", {})
-        content = result.get("content", [])
-        if not content:
-            return None
-        text = content[0].get("text", "") if isinstance(content[0], dict) else ""
-        payload = json.loads(text)
-        if is_error_payload(payload):
-            return None
-        data = extract_data(payload)
-        if isinstance(data, list) and data:
-            # Prefer the second listed expiry when available; the first can be
-            # same-day and more likely to disappear during a deploy window.
-            for candidate in data[1:] + data[:1]:
-                if isinstance(candidate, str):
-                    return candidate
-    except Exception:  # noqa: BLE001
-        pass
-    return None
-
-
 def _resolve_glw_10k_accession(url: str) -> tuple[str | None, str | None]:
     """Resolve the latest GLW 10-K accession number and document URL.
 
@@ -761,7 +739,7 @@ def main() -> None:
     print()
 
     print("Resolving current AAPL option expiration...", end=" ", flush=True)
-    aapl_expiration = _resolve_aapl_option_expiration(url)
+    aapl_expiration = resolve_option_expiration(url, "AAPL", user_agent=_UA)
     if aapl_expiration:
         print(f"OK {aapl_expiration}")
         for _, tool_args, _ in TEST_CASES:

@@ -12,6 +12,7 @@ on:
       - "scripts/test_deployed_extractors.py"
       - "scripts/test_geographic_revenue_schema.py"
       - "scripts/test_deployed_sec_facts_provider.py"
+      - "scripts/live_smoke_utils.py"
       - "scripts/test_tools.py"
       - "scripts/test_universal_aliases.py"
   workflow_dispatch: # allow manual trigger from GitHub UI

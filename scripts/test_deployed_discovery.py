@@ -18,6 +18,8 @@ import time
 import urllib.error
 import urllib.request
 
+from live_smoke_utils import choose_stable_option_expiration
+
 URL = "https://yahoo-finance-mcp.artinatw.workers.dev/mcp"
 UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-deployed-discovery/1.0)"
 CANONICAL_TOOLS = {
@@ -183,7 +185,6 @@ SMOKE_ARGS: dict[str, dict] = {
 _ALLOW_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in ("1", "true", "yes")
 _GROUPED_DISCOVERY = False
 _EXPECTED_TOOL_MODE = os.environ.get("EXPECTED_TOOL_MODE", os.environ.get("TOOL_MODE", "")).lower()
-_FINNHUB_KEY_CONFIGURED = bool(os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_TOKEN"))
 _FORBIDDEN_PUBLIC_TERMS = (
     r"\bIO\b",
     r"Commander",
@@ -665,7 +666,9 @@ def main() -> int:
     exp = call_tool("get_option_expiration_dates", {"ticker": "ASTS"}, 26)
     assert_no_unknown_tool(exp, "get_option_expiration_dates")
     expiry_dates = extract_data(exp)
-    expiry = expiry_dates[0] if isinstance(expiry_dates, list) and expiry_dates else "2025-06-20"
+    expiry = choose_stable_option_expiration(expiry_dates)
+    if not expiry:
+        raise AssertionError(f"get_option_expiration_dates returned no usable ASTS expirations: {expiry_dates!r}")
 
     calls: list[tuple[str, dict]] = [
         ("health_check", {}),
@@ -915,7 +918,9 @@ def main() -> int:
     aapl_exp_payload = call_tool("get_option_expiration_dates", {"ticker": "AAPL"}, 900)
     assert_no_unknown_tool(aapl_exp_payload, "get_option_expiration_dates")
     aapl_dates = extract_data(aapl_exp_payload)
-    aapl_expiry = aapl_dates[0] if isinstance(aapl_dates, list) and aapl_dates else "2025-06-20"
+    aapl_expiry = choose_stable_option_expiration(aapl_dates)
+    if not aapl_expiry:
+        raise AssertionError(f"get_option_expiration_dates returned no usable AAPL expirations: {aapl_dates!r}")
     aapl_chain = call_tool(
         "get_option_chain",
         {"ticker": "AAPL", "expiration_date": aapl_expiry, "option_type": "calls"},
@@ -987,32 +992,23 @@ def main() -> int:
         raise AssertionError(f"get_company_news(finnhub) returned non-object: {type(fh_data)}")
     fh_source_status = (fh_data.get("sourceStatus") or {}).get("finnhub") or {}
     actual_fh_status = fh_source_status.get("status")
-    if _FINNHUB_KEY_CONFIGURED:
-        _allowed = {"OK", "EMPTY_RESULT", "RATE_LIMITED", "AUTH_ERROR", "PROVIDER_ERROR", "PROVIDER_CHANGED"}
-        if actual_fh_status not in _allowed:
-            raise AssertionError(
-                f"Finnhub sourceStatus.status unexpected when key configured: {actual_fh_status!r}"
-            )
+    _allowed = {"OK", "EMPTY_RESULT", "RATE_LIMITED", "AUTH_ERROR", "PROVIDER_ERROR", "PROVIDER_CHANGED", "UNCONFIGURED"}
+    if actual_fh_status not in _allowed:
+        raise AssertionError(f"Finnhub sourceStatus.status unexpected: {actual_fh_status!r}")
+    if actual_fh_status != "UNCONFIGURED":
         if "rawCount" not in fh_source_status:
             raise AssertionError("Finnhub sourceStatus missing rawCount")
         if "filteredCount" not in fh_source_status:
             raise AssertionError("Finnhub sourceStatus missing filteredCount")
-        # Verify key is not echoed anywhere in the response
-        _key_val = os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_TOKEN") or ""
-        if _key_val and _key_val in json.dumps(fh_resp):
-            raise AssertionError("SECURITY: Finnhub API key found in tool output")
-        # If items were returned, validate the first item shape
-        _fh_items = fh_data.get("items") or []
-        if actual_fh_status == "OK" and _fh_items:
-            _check_finnhub_item_shape(_fh_items[0])
-            print(f"  PASS Finnhub item shape check (sourceType=company_news, source=finnhub)")
-        print(f"  PASS Finnhub deployed smoke (key configured, status={actual_fh_status!r})")
-    else:
-        if actual_fh_status != "UNCONFIGURED":
-            raise AssertionError(
-                f"Finnhub expected UNCONFIGURED when key absent, got: {actual_fh_status!r}"
-            )
-        print("  PASS Finnhub deployed smoke (key absent, sourceStatus.finnhub=UNCONFIGURED)")
+    # Verify a runner-provided key is not echoed anywhere in the response.
+    _key_val = os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_TOKEN") or ""
+    if _key_val and _key_val in json.dumps(fh_resp):
+        raise AssertionError("SECURITY: Finnhub API key found in tool output")
+    _fh_items = fh_data.get("items") or []
+    if actual_fh_status == "OK" and _fh_items:
+        _check_finnhub_item_shape(_fh_items[0])
+        print("  PASS Finnhub item shape check (sourceType=company_news, source=finnhub)")
+    print(f"  PASS Finnhub deployed smoke (status={actual_fh_status!r})")
 
     # Overnight smoke. This is Yahoo indicative/pre-post-market data only; true
     # The unusable third-party true-overnight route was removed.
