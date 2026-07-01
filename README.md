@@ -54,7 +54,7 @@ These tools remain visible for compatibility and diagnostics, but their `meta` s
 | `get_sec_filing_section_markdown` | `DEGRADED` | `BLOCKED` | `false` | `LIVE_SECTION_EXTRACTION_UNRELIABLE`; successful payloads are `SECTION_MARKDOWN_UNVERIFIED` |
 | `get_company_press_releases` | `DEGRADED` | `VERIFY_ONLY` | `false` | `SEC_EX99_LINKAGE_INCOMPLETE` |
 | `query_sec_filing_index` | `DEGRADED` | `VERIFY_ONLY` | `false` | `ENVELOPE_SEMANTICS_UNDER_VERIFICATION` |
-| `extract_sec_filing_fact` | `DEGRADED` | `VERIFY_ONLY` | `false` | `XBRL_CONTEXT_METADATA_INCOMPLETE` |
+| `extract_sec_filing_fact` | `DEGRADED` | `VERIFY_ONLY` | `false` | XBRL context metadata is included when available; otherwise `XBRL_CONTEXT_METADATA_UNAVAILABLE` |
 
 ### Tool-By-Tool Live Status
 
@@ -283,7 +283,7 @@ All canonical action names and response schemas remain identical to expanded mod
 | `get_sec_filing_section` | Text of a specific filing section. Alias: `get_filing_section`. |
 | `list_sec_filing_tables` | Tables present in an SEC filing. |
 | `get_sec_filing_table` | Specific table from an SEC filing by index. |
-| `extract_sec_filing_fact` | Extract a specific fact from a filing. |
+| `extract_sec_filing_fact` | Extract a specific fact from a filing, including XBRL context metadata when available. |
 | `search_sec_filing_text` | Search narrative filing HTML text or retrieve table-context snippets. Use as fallback when `get_filing_data` returns `NOT_DISCLOSED`. Alias: `search_filing_text`. |
 | `index_sec_filing` | Build a deterministic section/table index for a filing (cached 24h). |
 | `get_sec_filing_index` | Get the pre-built filing index. |
