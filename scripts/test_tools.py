@@ -55,6 +55,7 @@ NUMBER_OR_NULL = _Sentinel("NUMBER_OR_NULL")  # field is number or null
 # assertions is a list of (dot-path-into-result, expected) tuples.
 # Dot-path examples: "lastVolume", "AAPL.shares", "_note"
 TestCase = tuple[str, dict[str, Any], list[tuple[str, Any]]]
+_DYNAMIC_AAPL_OPTION_EXPIRATION = "_DYNAMIC_AAPL_OPTION_EXPIRATION_"
 
 
 # ── Test suite ─────────────────────────────────────────────────────────────────
@@ -112,11 +113,11 @@ TEST_CASES: list[TestCase] = [
         {"ticker": "AAPL"},
         [],
     ),
-    # options chain: the expiry must exist on Yahoo; if it doesn't Yahoo
-    # returns a data error which is acceptable — the tool must not crash.
+    # options chain: resolve a current expiry at runtime so this live smoke
+    # does not rot as option calendars roll forward.
     (
         "get_option_chain",
-        {"ticker": "AAPL", "expiration_date": "2025-06-20", "option_type": "calls"},
+        {"ticker": "AAPL", "expiration_date": _DYNAMIC_AAPL_OPTION_EXPIRATION, "option_type": "calls"},
         [],
     ),
     (
@@ -666,6 +667,30 @@ def _is_ok(
 _DYNAMIC_GLW_10K = "_DYNAMIC_GLW_10K_"        # sentinel for accession number
 
 
+def _resolve_aapl_option_expiration(url: str) -> str | None:
+    """Resolve a currently valid AAPL option expiration date."""
+    try:
+        resp = _call(url, "get_option_expiration_dates", {"ticker": "AAPL"})
+        result = resp.get("result", {})
+        content = result.get("content", [])
+        if not content:
+            return None
+        text = content[0].get("text", "") if isinstance(content[0], dict) else ""
+        payload = json.loads(text)
+        if is_error_payload(payload):
+            return None
+        data = extract_data(payload)
+        if isinstance(data, list) and data:
+            # Prefer the second listed expiry when available; the first can be
+            # same-day and more likely to disappear during a deploy window.
+            for candidate in data[1:] + data[:1]:
+                if isinstance(candidate, str):
+                    return candidate
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def _resolve_glw_10k_accession(url: str) -> tuple[str | None, str | None]:
     """Resolve the latest GLW 10-K accession number and document URL.
 
@@ -735,6 +760,17 @@ def main() -> None:
         print("⚠️  could not resolve — filing tests will be skipped")
     print()
 
+    print("Resolving current AAPL option expiration...", end=" ", flush=True)
+    aapl_expiration = _resolve_aapl_option_expiration(url)
+    if aapl_expiration:
+        print(f"OK {aapl_expiration}")
+        for _, tool_args, _ in TEST_CASES:
+            if tool_args.get("expiration_date") == _DYNAMIC_AAPL_OPTION_EXPIRATION:
+                tool_args["expiration_date"] = aapl_expiration
+    else:
+        print("SKIP option-chain test; could not resolve current expiration")
+    print()
+
     print(f"{'Tool':<35} {'Args summary':<38} {'Result'}")
     print("-" * 112)
 
@@ -745,6 +781,10 @@ def main() -> None:
         # Skip filing tests when accession could not be dynamically resolved
         if tool_args.get("accession_number") == _DYNAMIC_GLW_10K:
             print(f"{tool:<35} {'(skipped — no accession)':<38} ⚠️  SKIP")
+            continue
+
+        if tool_args.get("expiration_date") == _DYNAMIC_AAPL_OPTION_EXPIRATION:
+            print(f"{tool:<35} {'(skipped - no expiration)':<38} SKIP")
             continue
 
         args_summary = json.dumps(tool_args)[:36]
