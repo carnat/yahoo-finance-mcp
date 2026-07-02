@@ -759,7 +759,6 @@ def main() -> int:
                     "get_overnight_quote": ("DEGRADED", "DIAGNOSTICS_ONLY"),
                     "get_sec_filing_section_markdown": ("DEGRADED", "BLOCKED"),
                     "get_company_press_releases": ("DEGRADED", "VERIFY_ONLY"),
-                    "query_sec_filing_index": ("DEGRADED", "VERIFY_ONLY"),
                     "extract_sec_filing_fact": ("DEGRADED", "VERIFY_ONLY"),
                 }
                 for tool_name, (capability, use) in expected_doctrine.items():

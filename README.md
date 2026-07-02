@@ -19,7 +19,7 @@ Last checked against `https://yahoo-finance-mcp.artinatw.workers.dev/mcp` on 202
 | Privacy scope | `public_market_data_only` |
 | Structured SEC facts provider | `official_sec_data_api` |
 | Structured SEC facts health | `OK` |
-| Quarantined/degraded tools | `5` |
+| Quarantined/degraded tools | `4` |
 | Opaque response count in tool-by-tool envelope probe | `0` |
 
 The tool-by-tool probe verifies that every expanded tool is discoverable through live `tools/list` and returns a JSON MCP envelope instead of opaque text. It is an interface and safety check, not a guarantee that every possible ticker, filing, provider, or argument combination has fresh data. Provider rate limits, market-data entitlements, and SEC availability can still affect individual calls.
@@ -53,7 +53,6 @@ These tools remain visible for compatibility and diagnostics, but their `meta` s
 | `get_overnight_quote` | `DEGRADED` | `DIAGNOSTICS_ONLY` | `false` | `YAHOO_EXTENDED_HOURS_PROXY_ONLY` |
 | `get_sec_filing_section_markdown` | `DEGRADED` | `BLOCKED` | `false` | `LIVE_SECTION_EXTRACTION_UNRELIABLE`; successful payloads are `SECTION_MARKDOWN_UNVERIFIED` |
 | `get_company_press_releases` | `DEGRADED` | `VERIFY_ONLY` | `false` | `SEC_EX99_LINKAGE_INCOMPLETE` |
-| `query_sec_filing_index` | `DEGRADED` | `VERIFY_ONLY` | `false` | `ENVELOPE_SEMANTICS_UNDER_VERIFICATION` |
 | `extract_sec_filing_fact` | `DEGRADED` | `VERIFY_ONLY` | `false` | XBRL context metadata is included when available; otherwise `XBRL_CONTEXT_METADATA_UNAVAILABLE` |
 
 ### Tool-By-Tool Live Status
@@ -104,7 +103,7 @@ These tools remain visible for compatibility and diagnostics, but their `meta` s
 | SEC Filings | `index_sec_filing` | Supported |
 | SEC Filings | `get_sec_filing_index` | Supported |
 | SEC Filings | `get_sec_filing_intelligence` | Supported |
-| SEC Filings | `query_sec_filing_index` | `DEGRADED` / `VERIFY_ONLY` |
+| SEC Filings | `query_sec_filing_index` | Supported |
 | SEC Filings | `list_sec_filing_exhibits` | Supported |
 | SEC Filings | `get_sec_filing_exhibit_content` | Supported |
 | SEC Extractors | `extract_geographic_revenue` | Supported; provider failures are explicit |
