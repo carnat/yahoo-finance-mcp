@@ -1486,6 +1486,42 @@ const num = (v: unknown, fallback: number): number => (typeof v === "number" ? v
 const tickerArg = (v: unknown): string | string[] =>
   Array.isArray(v) ? v.map(String) : str(v);
 
+function hasUsefulEvidence(evidence: unknown): boolean {
+  if (!evidence) return false;
+  const rows = Array.isArray(evidence) ? evidence : [evidence];
+  return rows.some((row) => {
+    if (!row || typeof row !== "object") return false;
+    return Object.values(row as Record<string, unknown>).some((value) => {
+      if (value == null) return false;
+      if (Array.isArray(value)) return value.length > 0;
+      if (typeof value === "object") return Object.keys(value as Record<string, unknown>).length > 0;
+      return String(value).trim() !== "";
+    });
+  });
+}
+
+function xbrlSourceEvidence(parsed: Record<string, unknown>): Record<string, unknown> | null {
+  const ctx = parsed.xbrlContext;
+  if (!ctx || typeof ctx !== "object") return null;
+  const c = ctx as Record<string, unknown>;
+  return {
+    sourceType: "sec_xbrl_companyconcept",
+    concept: c.concept ?? null,
+    taxonomy: c.taxonomy ?? null,
+    unit: c.unit ?? parsed.unit ?? null,
+    accessionNumber: parsed.accessionNumber ?? c.accessionNumber ?? null,
+    filingType: parsed.filingType ?? c.form ?? null,
+    filingDate: parsed.filingDate ?? c.filedAt ?? null,
+    periodStart: c.periodStart ?? null,
+    periodEnd: c.periodEnd ?? c.instant ?? null,
+    fiscalYear: c.fiscalYear ?? null,
+    fiscalPeriod: c.fiscalPeriod ?? null,
+    dimensions: c.dimensions ?? {},
+    documentUrl: parsed.documentUrl ?? null,
+    indexUrl: parsed.indexUrl ?? null,
+  };
+}
+
 type DoctrineToolStatus = {
   capabilityStatus: "ACTIVE" | "DEGRADED" | "PROVIDER_GATED" | "EXPERIMENTAL" | "RETIRED";
   decisionGrade: boolean;
@@ -2189,6 +2225,9 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         } catch {
           parsed = {};
         }
+        const sourceEvidence = hasUsefulEvidence(parsed.evidence)
+          ? parsed.evidence
+          : xbrlSourceEvidence(parsed);
         return JSON.stringify({
           fact,
           region: args.region != null ? str(args.region) : null,
@@ -2210,7 +2249,9 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
           documentUrl: parsed.documentUrl ?? null,
           indexUrl: parsed.indexUrl ?? null,
           primaryDocumentUrl: parsed.primaryDocumentUrl ?? null,
+          xbrlContext: parsed.xbrlContext ?? null,
           evidence: parsed.evidence ?? null,
+          sourceEvidence,
           calculation: parsed.calculation ?? null,
           warnings: parsed.warnings ?? [],
           ticker: parsed.ticker ?? str(args.ticker),

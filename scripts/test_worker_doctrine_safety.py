@@ -151,11 +151,15 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
 
     def test_sec_filing_fact_preserves_xbrl_context_metadata(self) -> None:
         worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
+        tools = TOOLS_TS.read_text(encoding="utf-8")
         self.assertIn("xbrlContext: payload.xbrlContext ?? null", worker)
         self.assertIn("XBRL_CONTEXT_METADATA_UNAVAILABLE", worker)
         self.assertIn("function buildXbrlFactContext", worker)
         for field in ("periodStart", "periodEnd", "instant", "durationDays", "fiscalPeriod", "fiscalYear", "form", "frame", "dimensions"):
             self.assertIn(field, worker)
+        self.assertIn("function xbrlSourceEvidence", tools)
+        self.assertIn("sourceEvidence", tools)
+        self.assertIn("xbrlContext: parsed.xbrlContext ?? null", tools)
 
     def test_overnight_quote_is_explicitly_diagnostics_only(self) -> None:
         tools = TOOLS_TS.read_text(encoding="utf-8")
