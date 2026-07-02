@@ -10082,8 +10082,21 @@ function sentenceForTopic(text: string, topic: string): string | null {
 
 /** Resolve the EX-99.1 exhibit URL from an 8-K filing index page. */
 async function resolveEx991Url(cikInt: number, accessionNumber: string): Promise<string | null> {
-  const noDash = accessionNumber.replace(/-/g, "");
-  const indexUrl = `https://www.sec.gov/Archives/edgar/data/${cikInt}/${noDash}/${accessionNumber}-index.htm`;
+  const { edgarIndexUrl: indexUrl } = edgarBuildFilingUrls(cikInt, accessionNumber, null);
+  const exhibits = await edgarListExhibitsFromIndex(indexUrl);
+  const ex991 = exhibits.find((exhibit) => {
+    const type = String(exhibit.type ?? "").toUpperCase().replace(/\s+/g, "");
+    const description = String(exhibit.description ?? "").toUpperCase();
+    const document = String(exhibit.document ?? "").toLowerCase();
+    if (/^EX-99\.0?1\b/.test(type)) return true;
+    if (type.startsWith("EX-99") && /PRESS RELEASE|EARNINGS RELEASE|RESULTS RELEASE/.test(description)) return true;
+    return /(?:^|[-_])ex(?:hibit)?[-_]?99[-_.]?0?1\b/.test(document);
+  });
+  if (ex991?.document) {
+    const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(cikInt, accessionNumber, String(ex991.document));
+    if (edgarPrimaryDocumentUrl) return edgarPrimaryDocumentUrl;
+  }
+
   const html = await edgarGetHtml(indexUrl, 100_000);
   if (!html) return null;
   // Match an EX-99.1 row in the filing index and capture its document link

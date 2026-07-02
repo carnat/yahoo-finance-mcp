@@ -131,6 +131,16 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("sec8kWithoutEx99Count", worker)
         self.assertIn("filingsSearched", worker)
 
+    def test_press_release_ex99_resolver_uses_index_exhibits(self) -> None:
+        worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
+        start = worker.index("async function resolveEx991Url")
+        end = worker.index("/** Parse inline XBRL", start)
+        resolver = worker[start:end]
+        self.assertIn("edgarListExhibitsFromIndex(indexUrl)", resolver)
+        self.assertIn('type.startsWith("EX-99")', resolver)
+        self.assertIn("PRESS RELEASE|EARNINGS RELEASE|RESULTS RELEASE", resolver)
+        self.assertIn("edgarBuildFilingUrls(cikInt, accessionNumber, String(ex991.document))", resolver)
+
     def test_section_markdown_success_is_not_decision_grade(self) -> None:
         worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
         self.assertIn("SECTION_MARKDOWN_UNVERIFIED", worker)
