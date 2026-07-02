@@ -1086,6 +1086,26 @@ def main() -> int:
     if not unsupported_meta.get("supportedQueryTypes"):
         raise AssertionError(f"unsupported query_sec_filing_index missing supportedQueryTypes: {unsupported}")
 
+    total_fact = call_tool(
+        "extract_sec_filing_fact",
+        {"ticker": "AAPL", "fact_type": "total_revenue", "filing_type": "10-K", "period": "latest"},
+        2115,
+    )
+    assert_no_unknown_tool(total_fact, "extract_sec_filing_fact")
+    assert_not_double_enveloped_failure(total_fact, "extract_sec_filing_fact")
+    total_data = extract_data(total_fact)
+    if not isinstance(total_data, dict):
+        raise AssertionError(f"extract_sec_filing_fact total_revenue returned non-object: {total_data!r}")
+    if total_data.get("value") is not None and total_data.get("extractionMethod") == "XBRL":
+        if not isinstance(total_data.get("xbrlContext"), dict):
+            raise AssertionError(f"extract_sec_filing_fact total_revenue missing xbrlContext: {total_data}")
+        source_evidence = total_data.get("sourceEvidence")
+        if not isinstance(source_evidence, dict):
+            raise AssertionError(f"extract_sec_filing_fact total_revenue missing sourceEvidence: {total_data}")
+        for field in ("sourceType", "concept", "accessionNumber", "periodEnd"):
+            if not source_evidence.get(field):
+                raise AssertionError(f"extract_sec_filing_fact total_revenue sourceEvidence missing {field}: {source_evidence}")
+
     alias_payload = call_tool("get_historical_stock_prices", {}, 2120)
     assert_no_unknown_tool(alias_payload, "get_historical_stock_prices")
     assert_not_double_enveloped_failure(alias_payload, "get_historical_stock_prices")
