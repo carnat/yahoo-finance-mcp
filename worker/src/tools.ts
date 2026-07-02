@@ -663,7 +663,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_overnight_quote",
     description:
-      "Deprecated diagnostics-only Yahoo extended-hours proxy. This does not provide true 20:00-04:00 ET overnight venue data. Returns provider, providerStatus, dataKind, decisionGrade, doctrineUse, warnings, requestedFeed, overnightPrice, overnightTime, overnightHigh, overnightLow, overnightOpen, overnightVolume, previousClose, gapPct, gapDirection, dataSource, isBlueOceanWindow, isStale, dataAgeHours, fallback, and note.",
+      "Deprecated diagnostics-only Yahoo extended-hours proxy. This does not provide true 20:00-04:00 ET overnight venue data. Returns provider, providerStatus, dataKind, decisionGrade, warnings, requestedFeed, overnightPrice, overnightTime, overnightHigh, overnightLow, overnightOpen, overnightVolume, previousClose, gapPct, gapDirection, dataSource, isBlueOceanWindow, isStale, dataAgeHours, fallback, and note.",
     inputSchema: {
       type: "object",
       properties: {
