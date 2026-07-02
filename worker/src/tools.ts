@@ -2225,9 +2225,8 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         } catch {
           parsed = {};
         }
-        const sourceEvidence = hasUsefulEvidence(parsed.evidence)
-          ? parsed.evidence
-          : xbrlSourceEvidence(parsed);
+        const sourceEvidence = xbrlSourceEvidence(parsed)
+          ?? (hasUsefulEvidence(parsed.evidence) ? parsed.evidence : null);
         return JSON.stringify({
           fact,
           region: args.region != null ? str(args.region) : null,
