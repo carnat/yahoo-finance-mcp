@@ -1520,14 +1520,6 @@ const TOOL_DOCTRINE_STATUS: Record<string, DoctrineToolStatus> = {
     evidenceRequired: true,
     sourceType: "company_ir",
   },
-  query_sec_filing_index: {
-    capabilityStatus: "DEGRADED",
-    decisionGrade: false,
-    doctrineUse: "VERIFY_ONLY",
-    failureMode: "ENVELOPE_SEMANTICS_UNDER_VERIFICATION",
-    evidenceRequired: true,
-    sourceType: "sec_table",
-  },
   extract_sec_filing_fact: {
     capabilityStatus: "DEGRADED",
     decisionGrade: false,

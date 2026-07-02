@@ -160,6 +160,13 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("TRUE_OVERNIGHT_PROVIDER_REMOVED", worker)
         self.assertIn("yahoo_extended_hours_proxy", smoke)
 
+    def test_query_sec_filing_index_no_longer_quarantined(self) -> None:
+        tools = TOOLS_TS.read_text(encoding="utf-8")
+        smoke = DEPLOYED_DISCOVERY.read_text(encoding="utf-8")
+        self.assertNotIn("ENVELOPE_SEMANTICS_UNDER_VERIFICATION", tools)
+        self.assertNotIn('"query_sec_filing_index": ("DEGRADED", "VERIFY_ONLY")', smoke)
+        self.assertIn("UNSUPPORTED_QUERY_TYPE", smoke)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
