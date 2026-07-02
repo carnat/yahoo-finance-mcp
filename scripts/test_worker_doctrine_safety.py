@@ -161,6 +161,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("sourceEvidence", tools)
         self.assertIn("xbrlContext: parsed.xbrlContext ?? null", tools)
         self.assertIn("const sourceEvidence = xbrlSourceEvidence(parsed)", tools)
+        self.assertIn('String(b.end ?? "").localeCompare(String(a.end ?? ""))', worker)
 
     def test_overnight_quote_is_explicitly_diagnostics_only(self) -> None:
         tools = TOOLS_TS.read_text(encoding="utf-8")

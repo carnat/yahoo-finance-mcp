@@ -4247,6 +4247,15 @@ export async function getFilingData(
       filtered = modeFiltered;
     }
   }
+  if (period === "latest" && filtered.length) {
+    filtered = [...filtered].sort((a, b) => {
+      const endCmp = String(b.end ?? "").localeCompare(String(a.end ?? ""));
+      if (endCmp !== 0) return endCmp;
+      const fyCmp = Number(b.fy ?? 0) - Number(a.fy ?? 0);
+      if (fyCmp !== 0) return fyCmp;
+      return String(b.filed ?? "").localeCompare(String(a.filed ?? ""));
+    });
+  }
 
   if (factType === "segment_revenue") {
     const allSegments = filtered

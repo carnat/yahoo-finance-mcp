@@ -1105,6 +1105,12 @@ def main() -> int:
         for field in ("sourceType", "concept", "accessionNumber", "periodEnd"):
             if not source_evidence.get(field):
                 raise AssertionError(f"extract_sec_filing_fact total_revenue sourceEvidence missing {field}: {source_evidence}")
+        filing_year = str(source_evidence.get("filingDate") or "")[:4]
+        period_year = str(source_evidence.get("periodEnd") or "")[:4]
+        if filing_year.isdigit() and period_year.isdigit() and int(period_year) < int(filing_year) - 1:
+            raise AssertionError(
+                f"extract_sec_filing_fact total_revenue selected stale period for filing: {source_evidence}"
+            )
 
     alias_payload = call_tool("get_historical_stock_prices", {}, 2120)
     assert_no_unknown_tool(alias_payload, "get_historical_stock_prices")
