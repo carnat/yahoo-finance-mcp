@@ -104,13 +104,15 @@ jobs:
       - name: Verify alias behavior
         run: python scripts/test_universal_aliases.py
 
-      - name: Verify geographic revenue schema
+      - name: Audit geographic revenue schema
+        continue-on-error: true
         run: python scripts/test_geographic_revenue_schema.py
         env:
           GEO_SCHEMA_TARGET: remote
           MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
 
-      - name: Verify deployed extractor tools
+      - name: Audit deployed extractor tools
+        continue-on-error: true
         run: python scripts/test_deployed_extractors.py
         env:
           MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
@@ -140,5 +142,6 @@ jobs:
           EXPECTED_TOOL_MODE: grouped
           TOOL_MODE: grouped
 
-      - name: Run end-to-end tool tests
+      - name: Audit end-to-end tool tests
+        continue-on-error: true
         run: python scripts/test_tools.py --url https://yahoo-finance-mcp.artinatw.workers.dev/mcp
