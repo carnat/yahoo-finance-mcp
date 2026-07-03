@@ -9601,7 +9601,7 @@ export async function extractExposure(
   let revStatus: string;
   if (geoValue != null) {
     revStatus = "FOUND";
-  } else if (revenueStatus === "NOT_DISCLOSED") {
+  } else if (revenueStatus === "NOT_DISCLOSED" && synonymEntry != null) {
     revStatus = "NOT_DISCLOSED";
   } else {
     revStatus = "NOT_FOUND";
@@ -9699,10 +9699,13 @@ export async function extractExposure(
     const riskMatches: Record<string, unknown>[] = Array.isArray(riskRaw.matches)
       ? (riskRaw.matches as Record<string, unknown>[]).filter((m) => m && typeof m === "object")
       : [];
-    const riskEvidence = riskMatches.slice(0, 5).map((m) => ({
-      excerpt: compactExcerpt(m.excerpt ?? m.context ?? m.contextText ?? "", 200),
-      section: String(m.sectionHeading ?? "Risk Factors"),
-    }));
+    const riskEvidence = riskMatches
+      .map((m) => ({
+        excerpt: compactExcerpt(m.excerpt ?? m.context ?? m.contextText ?? "", 200),
+        section: String(m.sectionHeading ?? "Risk Factors"),
+      }))
+      .filter((m) => m.excerpt.length > 0)
+      .slice(0, 5);
     riskFactorExposure = {
       status: riskEvidence.length > 0 ? "FOUND" : "NOT_FOUND",
       mentionCount: riskMatches.length,
