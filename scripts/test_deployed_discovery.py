@@ -284,8 +284,14 @@ def assert_not_double_enveloped_failure(payload: dict, tool: str) -> None:
 
 
 def _check_aaoi_geographic_revenue_schema(data: dict) -> None:
-    """Backward-compatible AAOI wrapper around unified geographic revenue schema checks."""
-    _check_geographic_revenue_schema(data, label="AAOI", require_positive=False)
+    """AAOI is the hard positive China-exposure fixture."""
+    _check_geographic_revenue_schema(data, label="AAOI", require_positive=True)
+    value = data.get("value")
+    pct = data.get("valuePct")
+    if not isinstance(value, (int, float)) or not (200_000_000 <= value <= 350_000_000):
+        raise AssertionError(f"AAOI China value outside expected live range: {data}")
+    if not isinstance(pct, (int, float)) or not (45 <= pct <= 70):
+        raise AssertionError(f"AAOI China valuePct outside expected live range: {data}")
 
 
 def _check_axti_not_disclosed_schema(data: dict) -> None:
@@ -313,8 +319,7 @@ def _check_geographic_revenue_schema(data: dict, label: str, require_positive: b
     Returns True when payload contains a positive extracted value, False for NOT_DISCLOSED/NOT_FOUND payloads.
     """
     if isinstance(data, dict) and (data.get("status") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE" or data.get("code") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE"):
-        print(f"  {label}: tolerated STRUCTURED_FACT_PROVIDER_UNAVAILABLE error payload")
-        return False
+        raise AssertionError(f"{label}: local SEC extractor returned provider-unavailable instead of local result/limitation: {data}")
     required_keys = (
         "value",
         "denominator",
@@ -383,8 +388,15 @@ def _check_geographic_revenue_schema(data: dict, label: str, require_positive: b
         raise AssertionError(f"{label}: expected positive extraction but got NOT_DISCLOSED/NOT_FOUND: {data}")
 
     confidence = data.get("confidence")
-    if confidence == "EXTRACTION_FAILED" or data.get("status") == "EXTRACTION_FAILED" or data.get("code") == "EXTRACTION_FAILED" or data.get("source") == "EXTRACTION_FAILED":
-        print(f"  {label}: tolerated EXTRACTION_FAILED")
+    explicit_limitations = {
+        "EXTRACTION_FAILED",
+        "TABLE_NOT_PARSED",
+        "NO_DIMENSIONAL_REVENUE_FACT",
+        "PROVIDER_LIMITATION",
+    }
+    observed_statuses = {str(v).upper() for v in (confidence, data.get("status"), data.get("code"), data.get("source")) if v}
+    if observed_statuses & explicit_limitations:
+        print(f"  {label}: tolerated explicit limitation {sorted(observed_statuses & explicit_limitations)}")
         return False
     if confidence not in ("NOT_DISCLOSED", "NOT_FOUND", "NOT_DECISION_GRADE"):
         raise AssertionError(f"{label}: expected NOT_DISCLOSED/NOT_FOUND/NOT_DECISION_GRADE confidence, got {confidence!r}")
@@ -697,13 +709,16 @@ def main() -> int:
         # Phase 3 extractor tools — dispatch smoke (schema-only, no deep value assertions)
         ("extract_geographic_revenue", {"ticker": "AAOI", "region": "China", "filing_type": "10-K", "period": "latest"}),
         ("extract_geographic_revenue", {"ticker": "AAPL", "region": "Greater China", "filing_type": "10-K", "period": "latest"}),
+        ("extract_geographic_revenue", {"ticker": "SNDK", "region": "China", "filing_type": "10-K", "period": "latest"}),
         ("extract_segment_revenue", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}),
         ("extract_total_revenue", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}),
         ("extract_revenue_exposure", {"ticker": "AAOI", "exposure_query": "China", "filing_type": "10-K", "period": "latest"}),
+        ("extract_revenue_exposure", {"ticker": "AXTI", "exposure_query": "China", "filing_type": "10-K", "period": "latest"}),
         ("extract_china_exposure", {"ticker": "AXTI", "filing_type": "10-K", "period": "latest"}),
         ("extract_risk_factor_mentions", {"ticker": "AXTI", "terms": ["China", "tariff"], "filing_type": "10-K", "period": "latest"}),
         ("extract_customer_concentration", {"ticker": "AAOI", "filing_type": "10-K", "period": "latest"}),
         ("query_sec_filing_index", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest", "query_type": "geographic_revenue_share", "params": {"region": "Greater China"}}),
+        ("query_sec_filing_index", {"ticker": "AAOI", "filing_type": "10-K", "period": "latest", "query_type": "geographic_revenue_share", "params": {"region": "China"}}),
     ]
     if doc_url:
         calls.extend([
@@ -728,8 +743,7 @@ def main() -> int:
         ):
             data = extract_data(payload)
             if isinstance(data, dict) and (data.get("status") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE" or data.get("code") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE"):
-                print(f"  TOLERATED: {name} got STRUCTURED_FACT_PROVIDER_UNAVAILABLE")
-                continue
+                raise AssertionError(f"{name} returned STRUCTURED_FACT_PROVIDER_UNAVAILABLE after local routing: {data}")
         if name == "health_check":
             health = extract_data(payload)
             print(f"  health_check response: {json.dumps(payload)}")
@@ -814,12 +828,13 @@ def main() -> int:
                     if not isinstance(data.get("xbrlContext"), dict) and "XBRL_CONTEXT_METADATA_UNAVAILABLE" not in warning_codes:
                         raise AssertionError("AAOI extract_sec_filing_fact returned XBRL value without xbrlContext or unavailable warning")
                 aaoi_has_value = _check_geographic_revenue_schema(
-                    data, label="AAOI extract_sec_filing_fact", require_positive=False
+                    data, label="AAOI extract_sec_filing_fact", require_positive=True
                 )
                 if aaoi_has_value:
+                    _check_aaoi_geographic_revenue_schema(data)
                     print("  PASS AAOI geographic revenue extracted with value")
                 else:
-                    print("  WARN AAOI geographic revenue returned NOT_DISCLOSED/NOT_FOUND (allowed)")
+                    raise AssertionError(f"AAOI geographic revenue positive fixture returned no value: {data}")
         if name == "extract_sec_filing_fact" and args.get("ticker") == "AXTI":
             data = extract_data(payload)
             if isinstance(data, dict):
@@ -871,13 +886,19 @@ def main() -> int:
                 else:
                     print("  WARN extract_geographic_revenue AAPL/Greater China returned NOT_DISCLOSED (live data, allowed)")
             elif ticker == "AAOI" and region == "China":
-                aaoi_geo_has_value = _check_geographic_revenue_schema(
-                    data, label="AAOI extract_geographic_revenue", require_positive=False
+                _check_aaoi_geographic_revenue_schema(data)
+                print("  PASS extract_geographic_revenue AAOI extracted value")
+            elif ticker in ("AXTI", "SNDK") and region == "China":
+                _check_geographic_revenue_schema(
+                    data, label=f"extract_geographic_revenue:{ticker}/{region}", require_positive=False
                 )
-                if aaoi_geo_has_value:
-                    print("  PASS extract_geographic_revenue AAOI extracted value")
-                else:
-                    print("  WARN extract_geographic_revenue AAOI returned NOT_DISCLOSED/NOT_FOUND (allowed)")
+                status = str(data.get("status") or data.get("confidence") or data.get("code") or "").upper()
+                if status not in ("EXTRACTION_FAILED", "TABLE_NOT_PARSED", "NO_DIMENSIONAL_REVENUE_FACT", "PROVIDER_LIMITATION", "NOT_DISCLOSED", "NOT_FOUND"):
+                    raise AssertionError(f"{ticker} China limitation fixture returned unexpected status: {data}")
+                evidence = data.get("evidence")
+                if not isinstance(evidence, dict) or not (evidence.get("accessionNumber") or evidence.get("filingDate") or evidence.get("documentUrl")):
+                    raise AssertionError(f"{ticker} China limitation fixture missing filing metadata: {data}")
+                print(f"  PASS extract_geographic_revenue {ticker} explicit limitation")
             else:
                 _check_geographic_revenue_schema(
                     data, label=f"extract_geographic_revenue:{ticker}/{region}", require_positive=False
@@ -935,6 +956,24 @@ def main() -> int:
             for field in ("status", "queryType", "answer", "confidence", "evidence"):
                 if field not in data:
                     raise AssertionError(f"query_sec_filing_index missing field: {field}")
+            if args.get("ticker") == "AAOI" and args.get("query_type") == "geographic_revenue_share":
+                answer = data.get("answer")
+                if not isinstance(answer, dict):
+                    raise AssertionError(f"AAOI query_sec_filing_index missing answer object: {data}")
+                evidence = data.get("evidence")
+                first_evidence = evidence[0] if isinstance(evidence, list) and evidence else {}
+                _check_aaoi_geographic_revenue_schema({
+                    "value": answer.get("value"),
+                    "denominator": answer.get("denominator"),
+                    "valueRatio": answer.get("valueRatio"),
+                    "valuePct": answer.get("valuePct"),
+                    "extractionMethod": "QUERY_INDEX",
+                    "confidence": data.get("confidence"),
+                    "warnings": data.get("warnings", []),
+                    "documentUrl": first_evidence.get("documentUrl") if isinstance(first_evidence, dict) else None,
+                    "primaryDocumentUrl": first_evidence.get("primaryDocumentUrl") if isinstance(first_evidence, dict) else None,
+                    "evidence": first_evidence,
+                })
             print(f"  PASS query_sec_filing_index dispatch ({args.get('ticker')}/{args.get('query_type')})")
 
     # Chained option-chain smoke (AAPL)

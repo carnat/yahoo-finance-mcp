@@ -51,6 +51,12 @@ import {
   getSecRecentEvents,
   getPublicEventTimeline,
   verifyCompanyEvent,
+  extractGeographicRevenue,
+  extractSegmentRevenue,
+  extractTotalRevenue,
+  extractRevenueExposure,
+  extractChinaExposure,
+  extractExposure,
   extractRiskFactorMentions,
   extractCustomerConcentration,
   querySecFilingIndex,
@@ -2337,12 +2343,36 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         Array.isArray(args.topics) ? args.topics.map(String) : null,
       );
     case "extract_geographic_revenue":
+      return extractGeographicRevenue(
+        str(args.ticker),
+        str(args.region),
+        str(args.filing_type, "10-K"),
+        str(args.period, "latest"),
+        args.accession_number != null ? str(args.accession_number) : null,
+        str(args.detailLevel, "compact"),
+      );
     case "extract_segment_revenue":
+      return extractSegmentRevenue(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
     case "extract_total_revenue":
+      return extractTotalRevenue(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"));
     case "extract_revenue_exposure":
+      return extractRevenueExposure(str(args.ticker), str(args.exposure_query), str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
     case "extract_china_exposure":
+      return extractChinaExposure(
+        str(args.ticker),
+        str(args.filing_type, "10-K"),
+        str(args.period, "latest"),
+        args.accession_number != null ? str(args.accession_number) : null,
+        str(args.detailLevel, "compact"),
+      );
     case "extract_exposure":
-      return callStructuredFactsProvider(name, args);
+      return extractExposure(
+        str(args.ticker),
+        str(args.topic),
+        str(args.filing_type, "10-K"),
+        str(args.period, "latest"),
+        args.include_risk_factors !== false,
+      );
     case "extract_risk_factor_mentions":
       return extractRiskFactorMentions(str(args.ticker), Array.isArray(args.terms) ? args.terms.map(String) : [], str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
     case "extract_customer_concentration":
