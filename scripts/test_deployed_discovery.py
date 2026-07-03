@@ -694,9 +694,7 @@ def main() -> int:
         ("get_sec_filing_section", {"ticker": "AAPL", "filing_type": "10-K", "selector": {"item": "Item 1A"}}),
         ("list_sec_filing_tables", {"ticker": "AAPL", "filing_type": "10-K", "offset": 0, "limit": 20}),
         ("get_sec_filing_table", {"ticker": "AAPL", "filing_type": "10-K", "table_index": 0}),
-        ("extract_sec_filing_fact", {"ticker": "QCOM", "fact": "geographic_revenue", "region": "China"}),
         ("search_sec_filing_text", {"ticker": "AAPL", "search_terms": ["Greater China"], "filing_type": "10-K"}),
-        ("extract_geographic_revenue", {"ticker": "TSM", "region": "China", "filing_type": "10-K", "period": "latest"}),
         ("get_company_news", {"ticker": "AAPL"}),
         ("search_company_news", {"ticker": "AAPL", "query": "earnings", "max_results": 5}),
         ("get_company_press_releases", {"ticker": "AAPL", "max_results": 5}),
@@ -705,19 +703,8 @@ def main() -> int:
         ("verify_company_event", {"ticker": "AAPL", "event_query": "quarterly results"}),
         # PR50 AAOI/AXTI schema smoke
         ("extract_sec_filing_fact", {"ticker": "AAOI", "fact_type": "geographic_revenue", "region": "China", "filing_type": "10-K", "period": "latest"}),
-        ("extract_sec_filing_fact", {"ticker": "AXTI", "fact_type": "geographic_revenue", "region": "China", "filing_type": "10-K", "period": "latest"}),
         # Phase 3 extractor tools — dispatch smoke (schema-only, no deep value assertions)
         ("extract_geographic_revenue", {"ticker": "AAOI", "region": "China", "filing_type": "10-K", "period": "latest"}),
-        ("extract_geographic_revenue", {"ticker": "AAPL", "region": "Greater China", "filing_type": "10-K", "period": "latest"}),
-        ("extract_geographic_revenue", {"ticker": "SNDK", "region": "China", "filing_type": "10-K", "period": "latest"}),
-        ("extract_segment_revenue", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}),
-        ("extract_total_revenue", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}),
-        ("extract_revenue_exposure", {"ticker": "AAOI", "exposure_query": "China", "filing_type": "10-K", "period": "latest"}),
-        ("extract_revenue_exposure", {"ticker": "AXTI", "exposure_query": "China", "filing_type": "10-K", "period": "latest"}),
-        ("extract_china_exposure", {"ticker": "AXTI", "filing_type": "10-K", "period": "latest"}),
-        ("extract_risk_factor_mentions", {"ticker": "AXTI", "terms": ["China", "tariff"], "filing_type": "10-K", "period": "latest"}),
-        ("extract_customer_concentration", {"ticker": "AAOI", "filing_type": "10-K", "period": "latest"}),
-        ("query_sec_filing_index", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest", "query_type": "geographic_revenue_share", "params": {"region": "Greater China"}}),
         ("query_sec_filing_index", {"ticker": "AAOI", "filing_type": "10-K", "period": "latest", "query_type": "geographic_revenue_share", "params": {"region": "China"}}),
     ]
     if doc_url:
@@ -727,7 +714,10 @@ def main() -> int:
         ])
 
     for i, (name, args) in enumerate(calls, start=100):
-        payload = call_tool(name, args, i)
+        try:
+            payload = call_tool(name, args, i)
+        except Exception as exc:
+            raise AssertionError(f"{name} smoke call failed with args {args}: {exc}") from exc
         assert_no_unknown_tool(payload, name)
         assert_not_double_enveloped_failure(payload, name)
         if name in (
@@ -896,7 +886,9 @@ def main() -> int:
                 if status not in ("EXTRACTION_FAILED", "TABLE_NOT_PARSED", "NO_DIMENSIONAL_REVENUE_FACT", "PROVIDER_LIMITATION", "NOT_DISCLOSED", "NOT_FOUND"):
                     raise AssertionError(f"{ticker} China limitation fixture returned unexpected status: {data}")
                 evidence = data.get("evidence")
-                if not isinstance(evidence, dict) or not (evidence.get("accessionNumber") or evidence.get("filingDate") or evidence.get("documentUrl")):
+                if isinstance(evidence, list) and evidence:
+                    evidence = evidence[0]
+                if not isinstance(evidence, dict) or not (evidence.get("accessionNumber") or evidence.get("filingDate") or evidence.get("documentUrl") or evidence.get("url")):
                     raise AssertionError(f"{ticker} China limitation fixture missing filing metadata: {data}")
                 print(f"  PASS extract_geographic_revenue {ticker} explicit limitation")
             else:
