@@ -9080,6 +9080,7 @@ export async function extractGeographicRevenue(
   const idx = parseObjectJson(await getSecFilingIndex(ticker, filingType, period, accessionNumber));
   const evidence = payload.evidence && typeof payload.evidence === "object" ? payload.evidence as Record<string, unknown> : {};
   const warnings = Array.isArray(payload.warnings) ? [...payload.warnings] : [];
+  const payloadStatus = String(payload.status ?? payload.code ?? payload.confidence ?? "").trim();
   if (payload.value != null && payload.denominator == null && !hasWarningCode(warnings, "DENOMINATOR_NOT_FOUND")) {
     warnings.push({ code: "DENOMINATOR_NOT_FOUND", message: "Could not compute geographic revenue percentage due to missing denominator.", severity: "warning" });
   }
@@ -9111,6 +9112,8 @@ export async function extractGeographicRevenue(
       sourceColumns: Array.isArray(evidence.sourceColumns) ? evidence.sourceColumns : [],
     },
     calculation: payload.calculation ?? null,
+    status: payload.value != null ? "FOUND" : (payloadStatus || "NOT_DISCLOSED"),
+    code: payload.code ?? (payloadStatus && payloadStatus !== "FOUND" && payloadStatus !== "NOT_DISCLOSED" ? payloadStatus : null),
     warnings,
   };
   if (filingType.toUpperCase() === "10-K" && String(out.confidence ?? "").toUpperCase() === "NOT_DISCLOSED") {
@@ -9153,6 +9156,8 @@ export async function extractGeographicRevenue(
           sourceColumns: Array.isArray(fbEvidence.sourceColumns) ? fbEvidence.sourceColumns : [],
         };
         out.calculation = fallbackPayload.calculation ?? null;
+        out.status = "FOUND";
+        out.code = fallbackPayload.code ?? null;
         // Append advisory warning noting automatic 20-F selection
         fbWarnings.push({
           code: "AUTO_20F_FALLBACK",

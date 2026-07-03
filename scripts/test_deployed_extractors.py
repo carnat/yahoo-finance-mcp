@@ -123,17 +123,17 @@ def extract_data(payload: dict) -> dict:
                 parsed = json.loads(data)
                 if isinstance(parsed, dict):
                     if parsed.get("status") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE" or parsed.get("code") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE":
-                        raise ProviderUnavailableException("Structured fact provider is unavailable")
+                        raise AssertionError(f"Structured facts should route locally, got provider unavailable: {parsed}")
                     return parsed
             except json.JSONDecodeError:
                 return {}
         if isinstance(data, dict):
             if data.get("status") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE" or data.get("code") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE":
-                raise ProviderUnavailableException("Structured fact provider is unavailable")
+                raise AssertionError(f"Structured facts should route locally, got provider unavailable: {data}")
         return data or {}
     if isinstance(payload, dict):
         if payload.get("status") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE" or payload.get("code") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE":
-            raise ProviderUnavailableException("Structured fact provider is unavailable")
+            raise AssertionError(f"Structured facts should route locally, got provider unavailable: {payload}")
     return payload
 
 
@@ -157,8 +157,7 @@ def assert_not_silent_wrong_filing_type(data: dict, label: str) -> None:
 
 def _assert_geo_invariants(data: dict, label: str) -> None:
     if isinstance(data, dict) and (data.get("status") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE" or data.get("code") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE"):
-        print(f"  TOLERATED: {label} has STRUCTURED_FACT_PROVIDER_UNAVAILABLE")
-        return
+        raise AssertionError(f"{label}: local SEC extractor returned provider-unavailable: {data}")
     for key in ("value", "denominator", "valueRatio", "valuePct", "confidence", "extractionMethod"):
         if key not in data:
             raise AssertionError(f"{label}: missing key '{key}'")
@@ -176,6 +175,16 @@ def _assert_geo_invariants(data: dict, label: str) -> None:
     if data["valuePct"] is not None:
         p = float(data["valuePct"])
         assert 0.0 <= p <= 100.0, f"{label}: valuePct {p} not in [0,100]"
+
+
+def _assert_aaoi_china_positive(data: dict, label: str) -> None:
+    _assert_geo_invariants(data, label)
+    value = data.get("value")
+    pct = data.get("valuePct")
+    if not isinstance(value, (int, float)) or not (200_000_000 <= value <= 350_000_000):
+        raise AssertionError(f"{label}: AAOI China value outside expected live range: {data}")
+    if not isinstance(pct, (int, float)) or not (45 <= pct <= 70):
+        raise AssertionError(f"{label}: AAOI China valuePct outside expected live range: {data}")
 
 
 def _check_private_terms(descriptions: list[str], tool_names: list[str]) -> None:
@@ -328,22 +337,19 @@ def main() -> int:
     }, 30)
     assert_no_unknown_tool(aapl_geo, "extract_geographic_revenue")
     aapl_geo_data = extract_data(aapl_geo)
-    if aapl_geo_data.get("status") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE" or aapl_geo_data.get("code") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE":
-        print("  TOLERATED: extract_geographic_revenue AAPL/Greater China STRUCTURED_FACT_PROVIDER_UNAVAILABLE")
-    else:
-        _assert_geo_invariants(aapl_geo_data, "extract_geographic_revenue AAPL/Greater China")
-        for field in ("factType", "evidence", "warnings"):
-            if field not in aapl_geo_data:
-                raise AssertionError(f"extract_geographic_revenue AAPL: missing field '{field}'")
-        evidence = aapl_geo_data.get("evidence")
-        if isinstance(evidence, list) and evidence:
-            evidence = evidence[0]
-        if isinstance(evidence, dict):
-            for ef in ("filingType", "filingDate", "accessionNumber", "documentUrl"):
-                val = evidence.get(ef) or (evidence.get("url") if ef == "documentUrl" else None)
-                if not val:
-                    print(f"  WARN extract_geographic_revenue AAPL: evidence.{ef} missing/empty")
-        print(f"  PASS extract_geographic_revenue AAPL/Greater China (value={aapl_geo_data.get('value')!r})")
+    _assert_geo_invariants(aapl_geo_data, "extract_geographic_revenue AAPL/Greater China")
+    for field in ("factType", "evidence", "warnings"):
+        if field not in aapl_geo_data:
+            raise AssertionError(f"extract_geographic_revenue AAPL: missing field '{field}'")
+    evidence = aapl_geo_data.get("evidence")
+    if isinstance(evidence, list) and evidence:
+        evidence = evidence[0]
+    if isinstance(evidence, dict):
+        for ef in ("filingType", "filingDate", "accessionNumber", "documentUrl"):
+            val = evidence.get(ef) or (evidence.get("url") if ef == "documentUrl" else None)
+            if not val:
+                print(f"  WARN extract_geographic_revenue AAPL: evidence.{ef} missing/empty")
+    print(f"  PASS extract_geographic_revenue AAPL/Greater China (value={aapl_geo_data.get('value')!r})")
 
     # AAOI China
     aaoi_geo = call_tool("extract_geographic_revenue", {
@@ -351,11 +357,8 @@ def main() -> int:
     }, 31)
     assert_no_unknown_tool(aaoi_geo, "extract_geographic_revenue")
     aaoi_geo_data = extract_data(aaoi_geo)
-    if aaoi_geo_data.get("status") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE" or aaoi_geo_data.get("code") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE":
-        print("  TOLERATED: extract_geographic_revenue AAOI/China STRUCTURED_FACT_PROVIDER_UNAVAILABLE")
-    else:
-        _assert_geo_invariants(aaoi_geo_data, "extract_geographic_revenue AAOI/China")
-        print(f"  PASS extract_geographic_revenue AAOI/China (value={aaoi_geo_data.get('value')!r}, pct={aaoi_geo_data.get('valuePct')!r})")
+    _assert_aaoi_china_positive(aaoi_geo_data, "extract_geographic_revenue AAOI/China")
+    print(f"  PASS extract_geographic_revenue AAOI/China (value={aaoi_geo_data.get('value')!r}, pct={aaoi_geo_data.get('valuePct')!r})")
 
     # Missing region (Atlantis) — stable null keys
     atlantis_geo = call_tool("extract_geographic_revenue", {
@@ -363,13 +366,10 @@ def main() -> int:
     }, 32)
     assert_no_unknown_tool(atlantis_geo, "extract_geographic_revenue")
     atlantis_data = extract_data(atlantis_geo)
-    if atlantis_data.get("status") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE" or atlantis_data.get("code") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE":
-        print("  TOLERATED: extract_geographic_revenue AAPL/Atlantis STRUCTURED_FACT_PROVIDER_UNAVAILABLE")
-    else:
-        _assert_geo_invariants(atlantis_data, "extract_geographic_revenue AAPL/Atlantis")
-        if atlantis_data.get("value") is not None:
-            raise AssertionError(f"Atlantis region must have null value, got: {atlantis_data.get('value')!r}")
-        print("  PASS extract_geographic_revenue AAPL/Atlantis (stable null)")
+    _assert_geo_invariants(atlantis_data, "extract_geographic_revenue AAPL/Atlantis")
+    if atlantis_data.get("value") is not None:
+        raise AssertionError(f"Atlantis region must have null value, got: {atlantis_data.get('value')!r}")
+    print("  PASS extract_geographic_revenue AAPL/Atlantis (stable null)")
 
     # --- Phase 3B-5: extract_revenue_exposure ---
 
@@ -385,6 +385,18 @@ def main() -> int:
         if isinstance(m, dict) and m.get("valuePct") is not None:
             if m.get("denominator") is None:
                 raise AssertionError("extract_revenue_exposure AAOI: valuePct present but denominator null")
+    matches = aaoi_rev_data.get("matches") or []
+    if aaoi_rev_data.get("status") != "FOUND_REVENUE_EXPOSURE" or not matches:
+        raise AssertionError(f"extract_revenue_exposure AAOI should propagate numeric China exposure: {aaoi_rev_data}")
+    first_match = matches[0] if isinstance(matches[0], dict) else {}
+    _assert_aaoi_china_positive({
+        "value": first_match.get("value"),
+        "denominator": first_match.get("denominator"),
+        "valueRatio": first_match.get("valueRatio"),
+        "valuePct": first_match.get("valuePct"),
+        "confidence": first_match.get("confidence"),
+        "extractionMethod": "REVENUE_EXPOSURE",
+    }, "extract_revenue_exposure AAOI/China")
     print(f"  PASS extract_revenue_exposure AAOI/China (status={aaoi_rev_data.get('status')!r})")
 
     axti_rev = call_tool("extract_revenue_exposure", {
@@ -429,6 +441,17 @@ def main() -> int:
     for field in ("ticker", "exposureType", "revenueExposure", "overallStatus"):
         if field not in aaoi_china_data:
             raise AssertionError(f"extract_china_exposure AAOI: missing field '{field}'")
+    revenue = aaoi_china_data.get("revenueExposure")
+    if not isinstance(revenue, dict):
+        raise AssertionError(f"extract_china_exposure AAOI: revenueExposure must be object: {aaoi_china_data}")
+    _assert_aaoi_china_positive({
+        "value": revenue.get("value"),
+        "denominator": revenue.get("denominator"),
+        "valueRatio": revenue.get("valueRatio"),
+        "valuePct": revenue.get("valuePct"),
+        "confidence": revenue.get("confidence"),
+        "extractionMethod": "CHINA_EXPOSURE",
+    }, "extract_china_exposure AAOI")
     print(f"  PASS extract_china_exposure AAOI (overallStatus={aaoi_china_data.get('overallStatus')!r})")
 
     # --- Phase 3B-7: extract_risk_factor_mentions ---
@@ -527,8 +550,16 @@ def main() -> int:
     if data.get("overallStatus") not in ("FOUND_REVENUE_EXPOSURE", "FOUND_NON_REVENUE_EXPOSURE", "NOT_DISCLOSED", "NOT_FOUND"):
         raise AssertionError(f"extract_exposure AAOI china: unexpected overallStatus={data.get('overallStatus')!r}")
     rev = data.get("revenueExposure") or {}
-    if rev.get("status") not in ("FOUND", "NOT_DISCLOSED", "NOT_FOUND"):
+    if rev.get("status") != "FOUND":
         raise AssertionError(f"extract_exposure AAOI china: unexpected revenueExposure.status={rev.get('status')!r}")
+    _assert_aaoi_china_positive({
+        "value": rev.get("value"),
+        "denominator": rev.get("denominator"),
+        "valueRatio": rev.get("valueRatio"),
+        "valuePct": rev.get("valuePct"),
+        "confidence": rev.get("confidence"),
+        "extractionMethod": "EXTRACT_EXPOSURE",
+    }, "extract_exposure AAOI china")
     print(f"  PASS extract_exposure AAOI china (overallStatus={data.get('overallStatus')!r}, rev.status={rev.get('status')!r})")
 
     exp_null = call_tool("extract_exposure", {

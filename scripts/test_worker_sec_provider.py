@@ -17,24 +17,22 @@ class TestWorkerSecProvider(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.tools = TOOLS_TS.read_text(encoding="utf-8")
 
-    def test_structured_extractors_route_to_official_sec_provider(self) -> None:
+    def test_structured_extractors_route_to_worker_local_sec_extractors(self) -> None:
         self.assertIn("official_sec_data_api", self.tools)
         self.assertIn("data.sec.gov", self.tools)
         self.assertIn("companyfacts", self.tools)
         self.assertIn("STRUCTURED_FACT_PROVIDER_UNCONFIGURED", self.tools)
         self.assertIn("STRUCTURED_FACT_PROVIDER_UNAVAILABLE", self.tools)
-        for tool in (
-            "extract_geographic_revenue",
-            "extract_segment_revenue",
-            "extract_total_revenue",
-            "extract_revenue_exposure",
-            "extract_china_exposure",
-            "extract_exposure",
-        ):
-            self.assertRegex(
-                self.tools,
-                rf'case "{tool}":[\s\S]*?return callStructuredFactsProvider\(name, args\);',
-            )
+        expected_routes = {
+            "extract_geographic_revenue": "extractGeographicRevenue(",
+            "extract_segment_revenue": "extractSegmentRevenue(",
+            "extract_total_revenue": "extractTotalRevenue(",
+            "extract_revenue_exposure": "extractRevenueExposure(",
+            "extract_china_exposure": "extractChinaExposure(",
+            "extract_exposure": "extractExposure(",
+        }
+        for tool, target in expected_routes.items():
+            self.assertRegex(self.tools, rf'case "{tool}":[\s\S]*?return {re.escape(target)}')
 
     def test_diagnostics_are_exposed_for_live_gate(self) -> None:
         for field in (
@@ -50,15 +48,13 @@ class TestWorkerSecProvider(unittest.TestCase):
         self.assertNotIn("EDGAR_FACTS_URL", self.tools)
         self.assertNotIn("/sec/facts/exposure", self.tools)
 
-    def test_structured_tools_do_not_fall_back_to_legacy_parser(self) -> None:
-        self.assertNotRegex(
+    def test_public_tools_do_not_route_through_sidecar_style_gate(self) -> None:
+        dispatch = re.search(
+            r'case "extract_geographic_revenue":[\s\S]*?case "extract_risk_factor_mentions"',
             self.tools,
-            r'case "extract_geographic_revenue":[\s\S]*?extractGeographicRevenue\(',
         )
-        self.assertNotRegex(
-            self.tools,
-            r'case "extract_revenue_exposure":[\s\S]*?extractRevenueExposure\(',
-        )
+        self.assertIsNotNone(dispatch)
+        self.assertNotIn("callStructuredFactsProvider(name, args)", dispatch.group(0))
 
 
 if __name__ == "__main__":
