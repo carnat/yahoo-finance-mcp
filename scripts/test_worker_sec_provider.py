@@ -10,12 +10,14 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
+YAHOO_TS = ROOT / "worker" / "src" / "yahoo-finance.ts"
 
 
 class TestWorkerSecProvider(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.tools = TOOLS_TS.read_text(encoding="utf-8")
+        cls.worker = YAHOO_TS.read_text(encoding="utf-8")
 
     def test_structured_extractors_route_to_worker_local_sec_extractors(self) -> None:
         self.assertIn("official_sec_data_api", self.tools)
@@ -55,6 +57,16 @@ class TestWorkerSecProvider(unittest.TestCase):
         )
         self.assertIsNotNone(dispatch)
         self.assertNotIn("callStructuredFactsProvider(name, args)", dispatch.group(0))
+
+    def test_extract_exposure_uses_shared_revenue_exposure_path(self) -> None:
+        match = re.search(
+            r"export async function extractExposure\([\s\S]*?// 2\. Operational/entity scan",
+            self.worker,
+        )
+        self.assertIsNotNone(match)
+        section = match.group(0)
+        self.assertIn("extractRevenueExposure(ticker, topic", section)
+        self.assertNotIn("extractGeographicRevenue(ticker, regionLabel", section)
 
 
 if __name__ == "__main__":
