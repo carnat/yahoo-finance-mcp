@@ -68,6 +68,15 @@ class TestWorkerSecProvider(unittest.TestCase):
         self.assertIn("extractRevenueExposure(ticker, topic", section)
         self.assertNotIn("extractGeographicRevenue(ticker, regionLabel", section)
 
+    def test_extract_exposure_ignores_empty_risk_evidence(self) -> None:
+        match = re.search(
+            r"// --- Process risk factor exposure ---[\s\S]*?// --- Determine overallStatus ---",
+            self.worker,
+        )
+        self.assertIsNotNone(match)
+        section = match.group(0)
+        self.assertIn(".filter((m) => m.excerpt.length > 0)", section)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
