@@ -9555,14 +9555,13 @@ export async function extractExposure(
   const accessionNumber: string | null = typeof idx.accessionNumber === "string" ? idx.accessionNumber : null;
   const documentUrl: string | null = typeof idx.documentUrl === "string" ? idx.documentUrl : null;
 
-  // Determine the region name to use for XBRL lookup (try synonym table, otherwise use raw topic)
+  // Determine whether the topic maps to a known exposure family.
   const synonymEntry = Object.entries(EXPOSURE_SYNONYMS).find(([key]) => key === topicLower);
-  const regionLabel = synonymEntry ? (topicLower === "china" ? "Greater China" : topic) : topic;
 
   // --- Fan-out: revenue extraction, operational scan, risk factor scan (all parallel) ---
 
-  // 1. Revenue extraction via existing geographic revenue logic
-  const revenuePromise = extractGeographicRevenue(ticker, regionLabel, filingType, period, null, "compact");
+  // 1. Revenue extraction via the same public revenue exposure path used by extract_china_exposure.
+  const revenuePromise = extractRevenueExposure(ticker, topic, filingType, period, "compact");
 
   // 2. Operational/entity scan via searchFilingText
   const operationalPromise = searchFilingText(ticker, [topicLower], null, filingType, null, 600, false);
@@ -9586,16 +9585,23 @@ export async function extractExposure(
   ]);
 
   // --- Process revenue ---
-  const geo = revenueResult.status === "fulfilled" ? parseObjectJson(revenueResult.value) : {};
-  const geoValue: number | null = typeof geo.value === "number" ? geo.value : null;
-  const geoDenominator: number | null = typeof geo.denominator === "number" ? geo.denominator : null;
-  const geoConf = String(geo.confidence ?? "LOW").toUpperCase();
-  const geoMethod = String(geo.extractionMethod ?? "NONE").toUpperCase();
-  const geoEvidence = geo.evidence && typeof geo.evidence === "object" ? geo.evidence as Record<string, unknown> : {};
+  const revenueRaw = revenueResult.status === "fulfilled" ? parseObjectJson(revenueResult.value) : {};
+  const revenueMatches: Record<string, unknown>[] = Array.isArray(revenueRaw.matches)
+    ? (revenueRaw.matches as Record<string, unknown>[]).filter((m) => m && typeof m === "object")
+    : [];
+  const firstRevenue = revenueMatches.length > 0 ? revenueMatches[0] : {};
+  const geoValue: number | null = typeof firstRevenue.value === "number" ? firstRevenue.value : null;
+  const geoDenominator: number | null = typeof firstRevenue.denominator === "number" ? firstRevenue.denominator : null;
+  const geoConf = String(firstRevenue.confidence ?? "LOW").toUpperCase();
+  const geoEvidenceRaw = firstRevenue.evidence;
+  const geoEvidence = Array.isArray(geoEvidenceRaw)
+    ? (geoEvidenceRaw.find((ev) => ev && typeof ev === "object") as Record<string, unknown> | undefined) ?? {}
+    : (geoEvidenceRaw && typeof geoEvidenceRaw === "object" ? geoEvidenceRaw as Record<string, unknown> : {});
+  const revenueStatus = String(revenueRaw.status ?? revenueRaw.code ?? "").toUpperCase();
   let revStatus: string;
   if (geoValue != null) {
     revStatus = "FOUND";
-  } else if (geoConf === "NOT_DISCLOSED") {
+  } else if (revenueStatus === "NOT_DISCLOSED") {
     revStatus = "NOT_DISCLOSED";
   } else {
     revStatus = "NOT_FOUND";
@@ -9605,12 +9611,12 @@ export async function extractExposure(
     status: revStatus,
     value: geoValue,
     denominator: geoDenominator,
-    valuePct: geoDenominator != null ? (geo.valuePct ?? null) : null,
-    valueRatio: geoDenominator != null ? (geo.valueRatio ?? null) : null,
-    unit: geo.unit ?? "USD",
-    region: geoEvidence.sectionHeading ?? regionLabel,
-    period: geo.period ?? null,
-    extractionMethod: geoMethod === "NONE" ? "NONE" : geoMethod,
+    valuePct: geoDenominator != null ? (firstRevenue.valuePct ?? null) : null,
+    valueRatio: geoDenominator != null ? (firstRevenue.valueRatio ?? null) : null,
+    unit: firstRevenue.unit ?? "USD",
+    region: firstRevenue.label ?? topic,
+    period: firstRevenue.period ?? null,
+    extractionMethod: geoValue != null ? "REVENUE_EXPOSURE" : "NONE",
     confidence: geoConf === "NOT_DISCLOSED" ? "LOW" : (geoValue != null ? (geoConf || "MEDIUM") : "LOW"),
     evidence: {
       sectionHeading: geoEvidence.sectionHeading ?? null,
