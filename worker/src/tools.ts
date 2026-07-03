@@ -1947,7 +1947,7 @@ function officialSecPayload(tool: string, args: Record<string, unknown>, filing:
   };
 }
 
-async function callStructuredFactsProvider(tool: string, args: Record<string, unknown>): Promise<string> {
+export async function callStructuredFactsProvider(tool: string, args: Record<string, unknown>): Promise<string> {
   if (structuredFactsDisabled()) {
     return structuredFactsUnavailable(
       tool,
