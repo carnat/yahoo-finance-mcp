@@ -7828,6 +7828,10 @@ export async function getCompanyPressReleases(
     items: processedItems.slice(0, clampInt(maxResults, 20, 1, 100)),
     meta: { sourcesUsed: out.sourcesUsed, deduped: true, watermark: out.watermark },
     warnings,
+    capabilityStatus: "DEGRADED",
+    decisionGrade: false,
+    doctrineUse: "VERIFY_ONLY",
+    failureMode: "SEC_EX99_LINKAGE_INCOMPLETE",
   };
   if (sec8kEvidence.length > 0) payload.secEvidence = sec8kEvidence.slice(0, 10);
   if (status) payload.status = status;
@@ -9025,10 +9029,16 @@ function normalizeStatus(payload: Record<string, unknown>): string {
   if (status === "FILING_NOT_FOUND_TRY_OTHER_TYPE") return "FILING_NOT_FOUND_TRY_OTHER_TYPE";
   if (status === "FILING_TEXT_NOT_AVAILABLE") return "FILING_TEXT_NOT_AVAILABLE";
   if (status === "EXTRACTION_FAILED") return "EXTRACTION_FAILED";
+  if (status === "TABLE_NOT_PARSED") return "TABLE_NOT_PARSED";
+  if (status === "PROVIDER_LIMITATION") return "PROVIDER_LIMITATION";
+  if (status === "NO_DIMENSIONAL_REVENUE_FACT") return "NO_DIMENSIONAL_REVENUE_FACT";
   const source = String(payload.source ?? "").toUpperCase();
   const confidence = String(payload.confidence ?? "").toUpperCase();
   if (source === "FILING_NOT_FOUND_TRY_OTHER_TYPE" || confidence === "FILING_NOT_FOUND_TRY_OTHER_TYPE") return "FILING_NOT_FOUND_TRY_OTHER_TYPE";
   if (source === "EXTRACTION_FAILED" || confidence === "EXTRACTION_FAILED") return "EXTRACTION_FAILED";
+  if (source === "TABLE_NOT_PARSED" || confidence === "TABLE_NOT_PARSED") return "TABLE_NOT_PARSED";
+  if (source === "PROVIDER_LIMITATION" || confidence === "PROVIDER_LIMITATION") return "PROVIDER_LIMITATION";
+  if (source === "NO_DIMENSIONAL_REVENUE_FACT" || confidence === "NO_DIMENSIONAL_REVENUE_FACT") return "NO_DIMENSIONAL_REVENUE_FACT";
   if (source === "NOT_DISCLOSED" || confidence === "NOT_DISCLOSED") return "NOT_DISCLOSED";
   if (source === "CONFLICTING" || confidence === "CONFLICTING") return "CONFLICTING";
   return "NOT_FOUND";
@@ -9036,6 +9046,23 @@ function normalizeStatus(payload: Record<string, unknown>): string {
 
 function hasWarningCode(warnings: unknown[], code: string): boolean {
   return warnings.some((w) => typeof w === "object" && w != null && (w as Record<string, unknown>).code === code);
+}
+
+const NON_DECISION_REVENUE_STATUSES = new Set([
+  "EXTRACTION_FAILED",
+  "TABLE_NOT_PARSED",
+  "PROVIDER_LIMITATION",
+  "NO_DIMENSIONAL_REVENUE_FACT",
+  "FILING_NOT_FOUND_TRY_OTHER_TYPE",
+  "FILING_TEXT_NOT_AVAILABLE",
+]);
+
+function explicitRevenueLimitationStatus(status: unknown, warnings: unknown[] = []): string | null {
+  const normalized = String(status ?? "").toUpperCase();
+  if (NON_DECISION_REVENUE_STATUSES.has(normalized)) return normalized;
+  if (hasWarningCode(warnings, "TABLE_NOT_PARSED")) return "TABLE_NOT_PARSED";
+  if (hasWarningCode(warnings, "NO_DIMENSIONAL_REVENUE_FACT")) return "NO_DIMENSIONAL_REVENUE_FACT";
+  return null;
 }
 
 async function mayBe20FFiler(ticker: string): Promise<boolean> {
@@ -9472,6 +9499,7 @@ export async function extractChinaExposure(
   const nonRevenueFound = entityEvidence.length > 0 || bankEvidence.length > 0 || manuEvidence.length > 0 || riskEvidence.length > 0;
   const revStatus = String(revenue.status ?? "NOT_FOUND");
   const revFound = revStatus === "FOUND_REVENUE_EXPOSURE";
+  const explicitRevenueStatus = explicitRevenueLimitationStatus(revStatus, Array.isArray(revenue.warnings) ? revenue.warnings : []);
 
   const revenueMatches = Array.isArray(revenue.matches) ? revenue.matches : [];
   const firstRevenue = revenueMatches.length > 0 && typeof revenueMatches[0] === "object" ? revenueMatches[0] as Record<string, unknown> : {};
@@ -9480,6 +9508,8 @@ export async function extractChinaExposure(
     ? "FOUND_REVENUE_EXPOSURE"
     : nonRevenueFound
       ? "FOUND_NON_REVENUE_EXPOSURE"
+      : explicitRevenueStatus
+        ? explicitRevenueStatus
       : revStatus === "NOT_DISCLOSED"
         ? "NOT_DISCLOSED"
         : revStatus === "CONFLICTING"
@@ -9499,7 +9529,7 @@ export async function extractChinaExposure(
       denominator: firstRevenue.denominator ?? null,
       valueRatio: firstRevenue.valueRatio ?? null,
       valuePct: firstRevenue.valuePct ?? null,
-      confidence: revFound ? "HIGH" : (revStatus === "NOT_DISCLOSED" ? "NOT_DISCLOSED" : "LOW"),
+      confidence: revFound ? "HIGH" : (explicitRevenueStatus ? explicitRevenueStatus : (revStatus === "NOT_DISCLOSED" ? "NOT_DISCLOSED" : "LOW")),
       evidence: firstRevenue.evidence ?? [],
     },
     manufacturingExposure: { status: manuEvidence.length > 0 ? "FOUND" : "NOT_FOUND", confidence: "MEDIUM", evidence: manuEvidence },
@@ -9507,7 +9537,8 @@ export async function extractChinaExposure(
     bankExposure: { status: bankEvidence.length > 0 ? "FOUND" : "NOT_FOUND", entities: bankEvidence.length > 0 ? bankTerms : [], confidence: "MEDIUM", evidence: bankEvidence },
     riskFactorExposure: { status: riskEvidence.length > 0 ? "FOUND" : "NOT_FOUND", confidence: "MEDIUM", evidence: riskEvidence },
     overallStatus,
-    warnings: [],
+    code: explicitRevenueStatus,
+    warnings: Array.isArray(revenue.warnings) ? revenue.warnings : [],
   };
   if (String(detailLevel).toLowerCase() === "raw") out.rawContext = { filingIndex: idx };
   return JSON.stringify(out);
@@ -9567,7 +9598,7 @@ export async function extractExposure(
   const operationalPromise = searchFilingText(ticker, [topicLower], null, filingType, null, 600, false);
 
   // 3. Entity scan — only for China topic
-  const isChina = synonymEntry != null && topicLower === "china" || (synonymEntry?.includes("china") ?? false);
+  const isChina = topicLower === "china" || (synonymEntry?.[0] === "china") || ((synonymEntry?.[1] ?? []).includes("china"));
   const entityPromise = isChina
     ? searchFilingText(ticker, CHINA_NAMED_ENTITIES.slice(0, 3), null, filingType, null, 400, false)
     : Promise.resolve(null as string | null);
@@ -9586,6 +9617,7 @@ export async function extractExposure(
 
   // --- Process revenue ---
   const revenueRaw = revenueResult.status === "fulfilled" ? parseObjectJson(revenueResult.value) : {};
+  const revenueWarnings = Array.isArray(revenueRaw.warnings) ? revenueRaw.warnings : [];
   const revenueMatches: Record<string, unknown>[] = Array.isArray(revenueRaw.matches)
     ? (revenueRaw.matches as Record<string, unknown>[]).filter((m) => m && typeof m === "object")
     : [];
@@ -9598,9 +9630,12 @@ export async function extractExposure(
     ? (geoEvidenceRaw.find((ev) => ev && typeof ev === "object") as Record<string, unknown> | undefined) ?? {}
     : (geoEvidenceRaw && typeof geoEvidenceRaw === "object" ? geoEvidenceRaw as Record<string, unknown> : {});
   const revenueStatus = String(revenueRaw.status ?? revenueRaw.code ?? "").toUpperCase();
+  const explicitRevenueStatus = explicitRevenueLimitationStatus(revenueStatus, revenueWarnings);
   let revStatus: string;
   if (geoValue != null) {
     revStatus = "FOUND";
+  } else if (explicitRevenueStatus) {
+    revStatus = explicitRevenueStatus;
   } else if (revenueStatus === "NOT_DISCLOSED" && synonymEntry != null) {
     revStatus = "NOT_DISCLOSED";
   } else {
@@ -9617,8 +9652,13 @@ export async function extractExposure(
     region: firstRevenue.label ?? topic,
     period: firstRevenue.period ?? null,
     extractionMethod: geoValue != null ? "REVENUE_EXPOSURE" : "NONE",
-    confidence: geoConf === "NOT_DISCLOSED" ? "LOW" : (geoValue != null ? (geoConf || "MEDIUM") : "LOW"),
+    confidence: geoValue != null ? (geoConf || "MEDIUM") : (explicitRevenueStatus ?? (geoConf === "NOT_DISCLOSED" ? "LOW" : "LOW")),
+    code: explicitRevenueStatus,
     evidence: {
+      filingType: revenueRaw.filingType ?? filingType,
+      filingDate: revenueRaw.filingDate ?? filingDate,
+      accessionNumber: revenueRaw.accessionNumber ?? accessionNumber,
+      documentUrl: revenueRaw.documentUrl ?? documentUrl,
       sectionHeading: geoEvidence.sectionHeading ?? null,
       sourceRows: Array.isArray(geoEvidence.sourceRows) ? geoEvidence.sourceRows : [],
       sourceColumns: Array.isArray(geoEvidence.sourceColumns) ? geoEvidence.sourceColumns : [],
@@ -9725,6 +9765,8 @@ export async function extractExposure(
     overallStatus = "FOUND_REVENUE_EXPOSURE";
   } else if (nonRevenueFound) {
     overallStatus = "FOUND_NON_REVENUE_EXPOSURE";
+  } else if (explicitRevenueStatus) {
+    overallStatus = explicitRevenueStatus;
   } else if (revStatus === "NOT_DISCLOSED") {
     overallStatus = "NOT_DISCLOSED";
   } else {
@@ -9733,6 +9775,11 @@ export async function extractExposure(
 
   // Propagate any errors as warnings
   if (revenueResult.status === "rejected") warnings.push({ code: "REVENUE_EXTRACTION_ERROR", message: String(revenueResult.reason), severity: "warning" });
+  if (revenueResult.status === "fulfilled") {
+    for (const warning of revenueWarnings) {
+      if (warning && typeof warning === "object") warnings.push(warning as Record<string, unknown>);
+    }
+  }
   if (operationalResult.status === "rejected") warnings.push({ code: "OPERATIONAL_SCAN_ERROR", message: String(operationalResult.reason), severity: "warning" });
 
   return JSON.stringify({
@@ -9747,6 +9794,7 @@ export async function extractExposure(
     entityExposure,
     riskFactorExposure,
     overallStatus,
+    code: explicitRevenueStatus,
     warnings,
   });
 }
