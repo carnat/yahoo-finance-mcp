@@ -892,22 +892,16 @@ def _classify_overnight_session(now_utc: pd.Timestamp) -> Literal["ACTIVE", "END
 @yfinance_server.tool(
     name="get_overnight_quote",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_overnight_quote"],
-    description="""Get overnight trading data for a ticker.
+    description="""Deprecated diagnostics-only Yahoo extended-hours proxy for a ticker.
 
-The true Blue Ocean overnight session is 20:00–04:00 ET with DST-aware UTC conversion.
-Returns sessionStatus (ACTIVE/ENDED/NOT_STARTED) and requestedAt for freshness checks.
-If sessionStatus=NOT_STARTED, returns the prior overnight session and flags that in note.
-If no overnight bars are found, falls back to a pre-market bar (08:00–14:00 UTC) with
-fallback=true and a note.
-
-For crypto/futures (24/7 markets), returns true exchange data with real volume
-(dataSource=EXCHANGE). For equities, OTC indicative quotes typically have Volume=0
-(dataSource=OTC_INDICATIVE).
+This does not provide true 20:00-04:00 ET overnight venue data. Equity results
+are Yahoo indicative extended-hours data and are not decision-grade overnight
+quotes. Prefer get_market_quote for regular/pre/post-market fields.
 
 Returns: overnightPrice, overnightTime, overnightHigh, overnightLow, overnightOpen,
 overnightVolume, sessionDate, timezone, previousClose, gapPct, gapDirection,
 dataSource, isBlueOceanWindow, sessionStatus, requestedAt, isStale, dataAgeHours,
-fallback, note.
+fallback, provider, providerStatus, dataKind, decisionGrade, warnings, note.
 
 Args:
     ticker: str

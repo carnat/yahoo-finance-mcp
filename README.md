@@ -8,7 +8,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that g
 
 ## Live Deployment Status
 
-Last checked against `https://yahoo-finance-mcp.artinatw.workers.dev/mcp` on 2026-06-30.
+Last checked against `https://yahoo-finance-mcp.artinatw.workers.dev/mcp` on 2026-07-04.
 
 | Field | Live value |
 |-------|------------|
@@ -18,13 +18,13 @@ Last checked against `https://yahoo-finance-mcp.artinatw.workers.dev/mcp` on 202
 | Grouped meta-tools | `10` when `TOOL_MODE=grouped` |
 | Privacy scope | `public_market_data_only` |
 | Structured SEC facts provider | `official_sec_data_api` |
-| Structured SEC facts health | `OK` |
+| Structured SEC facts health | `UNKNOWN` unless `EDGAR_FACTS_LAST_SMOKE_STATUS=ok` is set |
 | Quarantined/degraded tools | `4` |
 | Opaque response count in tool-by-tool envelope probe | `0` |
 
 The tool-by-tool probe verifies that every expanded tool is discoverable through live `tools/list` and returns a JSON MCP envelope instead of opaque text. It is an interface and safety check, not a guarantee that every possible ticker, filing, provider, or argument combination has fresh data. Provider rate limits, market-data entitlements, and SEC availability can still affect individual calls.
 
-Live smoke policy and PR checklist guidance lives in [`docs/live-smoke-policy.md`](docs/live-smoke-policy.md). Tool/provider changes should update smoke expectations in the same PR and avoid hardcoded volatile market dates or live provider values.
+Live smoke policy and PR checklist guidance lives in [`docs/live-smoke-policy.md`](docs/live-smoke-policy.md). Core deploy smoke is blocking; broad parser/provider-quality sweeps are non-blocking audits. Tool/provider changes should update smoke expectations in the same PR and avoid hardcoded volatile market dates or live provider values.
 
 Representative live smoke calls also passed for:
 
@@ -42,7 +42,7 @@ Representative live smoke calls also passed for:
 | `list_sec_company_filings(AAPL, 10-K)` | `ok:true` |
 | `query_sec_filing_index` unsupported query | `ok:false`, `UNSUPPORTED_QUERY_TYPE` |
 | `get_overnight_quote(AAPL)` | `ok:true`, deprecated Yahoo extended-hours proxy, `DIAGNOSTICS_ONLY`, `decisionGrade:false` |
-| `extract_geographic_revenue(AAPL, Greater China)` | JSON envelope returned through `official_sec_data_api`; provider availability is reported explicitly |
+| `extract_geographic_revenue(AAPL, Greater China)` | JSON envelope returned through `official_sec_data_api`; parser/provider limitations are explicit and may be non-decision-grade |
 
 ### Quarantined Or Degraded Tools
 
