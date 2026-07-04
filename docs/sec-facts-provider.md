@@ -30,10 +30,11 @@ The official SEC `companyfacts` API is best for standardized entity-level XBRL
 facts such as total revenue. It may not expose company-specific geographic or
 segment dimensions such as "Greater China" in a normalized way.
 
-When a filing and total revenue exist but no matching dimensional fact is
-available from official SEC JSON, the Worker returns `PROVIDER_LIMITATION`.
-This is intentional: do not collapse provider limitations into
-`NOT_DISCLOSED`.
+When a filing and total revenue exist but no matching dimensional fact or table
+can be parsed, the Worker returns an explicit non-decision-grade status such as
+`PROVIDER_LIMITATION`, `NO_DIMENSIONAL_REVENUE_FACT`, `EXTRACTION_FAILED`, or
+`TABLE_NOT_PARSED`. This is intentional: do not collapse provider or parser
+limitations into `NOT_DISCLOSED`.
 
 ## Required Post-Deploy Smoke
 
@@ -47,8 +48,10 @@ extract_geographic_revenue(AAPL, Greater China, 10-K, latest)
 ```
 
 The total revenue call must return `FOUND`. The geographic call may return
-`FOUND` or `PROVIDER_LIMITATION`, but must not return fake `NOT_DISCLOSED`
-when official SEC JSON cannot expose a dimensional fact.
+`FOUND` or an explicit limitation/failure status such as `PROVIDER_LIMITATION`,
+`EXTRACTION_FAILED`, `TABLE_NOT_PARSED`, or `NO_DIMENSIONAL_REVENUE_FACT`, but
+must not return fake `NOT_DISCLOSED` when the filing exists and the parser or
+official SEC JSON cannot expose a dimensional fact.
 
 ## Rollback
 

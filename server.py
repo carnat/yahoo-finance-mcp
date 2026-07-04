@@ -6882,7 +6882,7 @@ async def _may_be_20f_filer(ticker: str) -> bool:
 @yfinance_server.tool(
     name="extract_geographic_revenue",
     output_schema=_TOOL_OUTPUT_SCHEMAS["extract_geographic_revenue"],
-    description="Deterministically extract geographic revenue exposure from SEC filing data and filing index.",
+    description="Extract geographic revenue exposure from official SEC data and indexed filing tables, returning explicit parser/provider limitation statuses when no decision-grade value is available.",
 )
 async def extract_geographic_revenue(
     ticker: str,
@@ -7024,7 +7024,7 @@ async def extract_geographic_revenue(
     return json.dumps(shaped)
 
 
-@yfinance_server.tool(name="extract_segment_revenue", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_segment_revenue"], description="Extract segment revenue rows from SEC filing facts with evidence metadata.")
+@yfinance_server.tool(name="extract_segment_revenue", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_segment_revenue"], description="Extract segment revenue rows from official SEC facts and filing tables, returning explicit limitation statuses when no parseable segment data is found.")
 async def extract_segment_revenue(
     ticker: str,
     filing_type: str = "10-K",
@@ -7090,7 +7090,7 @@ async def extract_segment_revenue(
     return json.dumps(out)
 
 
-@yfinance_server.tool(name="extract_total_revenue", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_total_revenue"], description="Extract total revenue from SEC filing facts with stable null fields.")
+@yfinance_server.tool(name="extract_total_revenue", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_total_revenue"], description="Extract total revenue from official SEC facts or filing tables with evidence metadata.")
 async def extract_total_revenue(
     ticker: str,
     filing_type: str = "10-K",
@@ -7114,7 +7114,7 @@ async def extract_total_revenue(
     })
 
 
-@yfinance_server.tool(name="extract_revenue_exposure", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_revenue_exposure"], description="Extract revenue exposure for a region/customer/segment query with deterministic status codes.")
+@yfinance_server.tool(name="extract_revenue_exposure", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_revenue_exposure"], description="Extract revenue exposure for a region/customer/segment query, returning explicit parser/provider limitation statuses when no decision-grade value is available.")
 async def extract_revenue_exposure(
     ticker: str,
     exposure_query: str,
@@ -7227,7 +7227,7 @@ async def extract_customer_concentration(
     return json.dumps(result)
 
 
-@yfinance_server.tool(name="extract_china_exposure", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_china_exposure"], description="Extract China exposure with separate revenue and non-revenue classifications.")
+@yfinance_server.tool(name="extract_china_exposure", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_china_exposure"], description="Extract China exposure with separate revenue and non-revenue classifications; revenue values are decision-grade only when evidence and status support them.")
 async def extract_china_exposure(
     ticker: str,
     filing_type: str = "10-K",
@@ -7342,7 +7342,7 @@ async def extract_china_exposure(
 @yfinance_server.tool(
     name="extract_exposure",
     output_schema=_TOOL_OUTPUT_SCHEMAS["extract_exposure"],
-    description="Extract multi-dimensional exposure for any geographic region or named entity/topic from the latest SEC 10-K (or 20-F) filing. Returns revenue exposure (XBRL + HTML fallback), operational evidence, named-entity mentions, and risk-factor excerpts in one call. Replaces extract_geographic_revenue, extract_china_exposure, and extract_revenue_exposure.",
+    description="Extract multi-dimensional SEC exposure for a geographic region or named entity/topic. Returns revenue, operational, named-entity, and risk evidence with explicit non-decision-grade statuses when parser/provider limits prevent a value.",
 )
 async def extract_exposure(
     ticker: str,

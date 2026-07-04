@@ -19,6 +19,19 @@ Keep these as deploy-blocking checks:
   codes instead of fake success data;
 - required diagnostic/quarantine metadata is present.
 
+## Non-Blocking Audit Checks
+
+Keep broad live parser and provider-quality sweeps as audit steps. They are
+useful signal, but should not block deploy after the core MCP contract is
+healthy:
+
+- broad SEC extractor matrices across many tickers;
+- exact geographic/parser quality expectations beyond the stable AAOI positive
+  fixture;
+- end-to-end all-tool live probes;
+- grouped-mode live smokes unless the deployed Worker is actually configured
+  with grouped discovery.
+
 ## Volatile Data Rules
 
 - Do not hardcode option expiration dates in live smokes. Resolve current
