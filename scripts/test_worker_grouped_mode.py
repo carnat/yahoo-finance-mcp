@@ -20,6 +20,7 @@ CATALOG = ROOT / "tool_catalog.json"
 TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
 MCP_TS = ROOT / "worker" / "src" / "mcp.ts"
 CATALOG_TS = ROOT / "worker" / "src" / "tool-catalog.ts"
+DEPLOY_WORKFLOW = ROOT / ".github" / "workflows" / "deploy-worker.yml"
 
 
 class TestWorkerGroupedMode(unittest.TestCase):
@@ -29,6 +30,7 @@ class TestWorkerGroupedMode(unittest.TestCase):
         cls.tools_ts = TOOLS_TS.read_text(encoding="utf-8")
         cls.mcp_ts = MCP_TS.read_text(encoding="utf-8")
         cls.catalog_ts = CATALOG_TS.read_text(encoding="utf-8")
+        cls.deploy_workflow = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
 
     def test_catalog_has_expected_group_surface(self) -> None:
         groups = self.catalog["groups"]
@@ -72,6 +74,12 @@ class TestWorkerGroupedMode(unittest.TestCase):
             self.tools_ts,
         )
         self.assertIsNotNone(match)
+
+    def test_deploy_can_wire_grouped_mode_to_worker(self) -> None:
+        self.assertIn("Wire TOOL_MODE", self.deploy_workflow)
+        self.assertIn("wrangler secret put TOOL_MODE", self.deploy_workflow)
+        self.assertIn("TOOL_MODE: ${{ vars.TOOL_MODE || 'expanded' }}", self.deploy_workflow)
+        self.assertIn("DEPLOY_GROUPED_SMOKE", self.deploy_workflow)
 
 
 if __name__ == "__main__":

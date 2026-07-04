@@ -177,12 +177,18 @@ Canonical tool names use neutral public language. Legacy aliases are preserved f
 
 ## Grouped Meta-Tools Mode (LLM Token Optimization)
 
-Set `TOOL_MODE=grouped` in the Python or Worker runtime to expose **10 domain-level meta-tools** instead of the expanded tool list, reducing LLM tool-schema token overhead by ~80–85%.
+Set `TOOL_MODE=grouped` in the Python or Worker runtime to expose **10 domain-level meta-tools** instead of the expanded tool list, reducing LLM tool-schema token overhead by ~80-85%.
 
 | Env var | Value | Behavior |
 |---------|-------|----------|
 | `TOOL_MODE` | `expanded` (default) | individual tools registered as normal |
 | `TOOL_MODE` | `grouped` | 10 domain meta-tools with `action` + `params` routing |
+
+Production remains `expanded` by default for client compatibility. To switch the
+Cloudflare Worker to grouped discovery, set repository variable
+`TOOL_MODE=grouped`, set `DEPLOY_GROUPED_SMOKE=true`, and run the deploy
+workflow; the workflow wires `TOOL_MODE` into the Worker before grouped smoke
+checks run.
 
 **Grouped meta-tools:**
 

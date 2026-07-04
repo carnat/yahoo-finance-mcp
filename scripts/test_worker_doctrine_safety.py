@@ -130,6 +130,9 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("secEvidence", worker)
         self.assertIn("sec8kWithoutEx99Count", worker)
         self.assertIn("filingsSearched", worker)
+        self.assertIn('capabilityStatus: "DEGRADED"', worker)
+        self.assertIn('doctrineUse: "VERIFY_ONLY"', worker)
+        self.assertIn('failureMode: "SEC_EX99_LINKAGE_INCOMPLETE"', worker)
 
     def test_press_release_ex99_resolver_uses_index_exhibits(self) -> None:
         worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
@@ -182,6 +185,20 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertNotIn("ENVELOPE_SEMANTICS_UNDER_VERIFICATION", tools)
         self.assertNotIn('"query_sec_filing_index": ("DEGRADED", "VERIFY_ONLY")', smoke)
         self.assertIn("UNSUPPORTED_QUERY_TYPE", smoke)
+
+    def test_sec_exposure_preserves_parser_limitation_statuses(self) -> None:
+        worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
+        self.assertIn("NON_DECISION_REVENUE_STATUSES", worker)
+        self.assertIn("explicitRevenueLimitationStatus", worker)
+        self.assertIn('"TABLE_NOT_PARSED"', worker)
+        self.assertIn('"NO_DIMENSIONAL_REVENUE_FACT"', worker)
+        self.assertIn("overallStatus = explicitRevenueStatus", worker)
+        self.assertIn("code: explicitRevenueStatus", worker)
+
+    def test_tool_descriptions_do_not_overstate_degraded_tools(self) -> None:
+        tools = TOOLS_TS.read_text(encoding="utf-8")
+        self.assertIn("unverified Markdown from a degraded Worker HTML fallback", tools)
+        self.assertIn("verification only", tools)
 
 
 if __name__ == "__main__":
