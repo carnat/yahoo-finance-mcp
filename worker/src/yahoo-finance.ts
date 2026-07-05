@@ -3996,6 +3996,23 @@ function extractGeoRevenueFromHtml(
   return null;
 }
 
+function filingHasRelevantGeoText(html: string, region: string): boolean {
+  const regionLower = region.toLowerCase();
+  if (!regionLower) return false;
+  const htmlLower = html.toLowerCase();
+  let idx = 0;
+  let checked = 0;
+  while (checked < 20) {
+    const pos = htmlLower.indexOf(regionLower, idx);
+    if (pos < 0) return false;
+    const window = htmlLower.slice(Math.max(0, pos - 4_000), Math.min(htmlLower.length, pos + 4_000));
+    if (/revenue|sales|geographic|segment/.test(window)) return true;
+    idx = pos + regionLower.length;
+    checked++;
+  }
+  return false;
+}
+
 function normalizeSegmentLabel(segment: unknown): string {
   if (segment == null) return "";
   if (Array.isArray(segment)) return segment.map((s) => normalizeSegmentLabel(s)).join(" ").trim();
@@ -4409,9 +4426,8 @@ export async function getFilingData(
             warnings: [...warnings, ...filing.warnings],
           });
         }
-        const readable = stripHtmlTags(htmlText).toLowerCase();
-        const regionText = String(region ?? "").toLowerCase();
-        if (regionText && readable.includes(regionText) && /revenue|sales|geographic|segment/.test(readable)) {
+        const regionText = String(region ?? "");
+        if (filingHasRelevantGeoText(htmlText, regionText)) {
           return withGeoShape({
             ticker,
             factType,
@@ -4678,10 +4694,8 @@ export async function searchFilingText(
     });
   }
 
-  const cleanedHtml = sanitizeFilingHtml(html);
-  const readableText = cleanFilingDisplayText(htmlToReadableText(cleanedHtml));
-  const textLower = readableText.toLowerCase();
-  const htmlLower = cleanedHtml.toLowerCase();
+  // ponytail: keep search bounded; full-filing text conversion can exhaust Worker CPU on large SEC HTML.
+  const htmlLower = html.toLowerCase();
   const size = Math.max(200, Math.min(Math.floor(contextChars), 4000));
   const matches: Record<string, unknown>[] = [];
   const seen = new Set<number>();
@@ -4690,9 +4704,10 @@ export async function searchFilingText(
     if ([...seen].some((p) => Math.abs(p - pos) < 150)) return;
     seen.add(pos);
     const start = Math.max(0, pos - Math.floor(size / 2));
-    const end = Math.min(readableText.length, pos + Math.floor(size / 2));
-    const contextText = cleanFilingDisplayText(readableText.slice(start, end));
-    const preText = readableText.slice(Math.max(0, pos - 2_000), pos);
+    const end = Math.min(html.length, pos + Math.floor(size / 2));
+    const contextHtml = html.slice(start, end);
+    const contextText = cleanFilingDisplayText(htmlToReadableText(contextHtml));
+    const preText = cleanFilingDisplayText(htmlToReadableText(html.slice(Math.max(0, pos - 2_000), pos)));
     const sectionHeading = (preText.match(/(?:Item\s+\d+[A-Z]?\.?\s+[^.]{3,120}|[A-Z][A-Z0-9 ,&/-]{12,120})\s*$/) ?? [""])[0].trim();
     const match: Record<string, unknown> = {
       term,
@@ -4702,9 +4717,8 @@ export async function searchFilingText(
     };
     if (returnTables) {
       const tableParsed: Record<string, unknown>[] = [];
-      const htmlPos = htmlLower.indexOf(term.toLowerCase());
-      const tableWindow = htmlPos >= 0
-        ? cleanedHtml.slice(Math.max(0, htmlPos - 12_000), Math.min(cleanedHtml.length, htmlPos + 12_000))
+      const tableWindow = pos >= 0
+        ? html.slice(Math.max(0, pos - 12_000), Math.min(html.length, pos + 12_000))
         : "";
       for (const m of tableWindow.matchAll(/<table[^>]*>([\s\S]*?)<\/table>/gi)) {
         const rows = parseHtmlTable(m[0]);
@@ -4724,14 +4738,14 @@ export async function searchFilingText(
   };
 
   if (sectionHint) {
-    const pos = textLower.indexOf(sectionHint.toLowerCase());
+    const pos = htmlLower.indexOf(sectionHint.toLowerCase());
     if (pos >= 0) addMatch(sectionHint, pos);
   }
   for (const term of searchTerms) {
     let idx = 0;
     const termLower = term.toLowerCase();
     while (matches.length < 10) {
-      const pos = textLower.indexOf(termLower, idx);
+      const pos = htmlLower.indexOf(termLower, idx);
       if (pos < 0) break;
       addMatch(term, pos);
       idx = pos + 1;
@@ -9104,7 +9118,9 @@ export async function extractGeographicRevenue(
     });
   }
   const payload = parseObjectJson(await getFilingData(ticker, "geographic_revenue", region, filingType, period));
-  const idx = parseObjectJson(await getSecFilingIndex(ticker, filingType, period, accessionNumber));
+  const detail = String(detailLevel).toLowerCase();
+  const needsIndex = detail === "raw";
+  const idx = needsIndex ? parseObjectJson(await getSecFilingIndex(ticker, filingType, period, accessionNumber)) : {};
   const evidence = payload.evidence && typeof payload.evidence === "object" ? payload.evidence as Record<string, unknown> : {};
   const warnings = Array.isArray(payload.warnings) ? [...payload.warnings] : [];
   const payloadStatus = String(payload.status ?? payload.code ?? payload.confidence ?? "").trim();
@@ -9204,7 +9220,7 @@ export async function extractGeographicRevenue(
       }
     }
   }
-  if (String(detailLevel).toLowerCase() === "raw") out.rawContext = { filingIndex: idx };
+  if (detail === "raw") out.rawContext = { filingIndex: idx };
   return JSON.stringify(out);
 }
 

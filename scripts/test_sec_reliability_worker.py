@@ -28,7 +28,7 @@ class TestSecReliabilityWorker(unittest.TestCase):
     def test_geo_extraction_distinguishes_parser_failure(self) -> None:
         self.assertIn('"EXTRACTION_FAILED"', self.worker)
         self.assertIn('"TABLE_NOT_PARSED"', self.worker)
-        self.assertRegex(self.worker, r"readable\.includes\(regionText\)[\s\S]+?EXTRACTION_FAILED")
+        self.assertRegex(self.worker, r"filingHasRelevantGeoText\(htmlText, regionText\)[\s\S]+?EXTRACTION_FAILED")
         self.assertRegex(self.worker, r"function normalizeStatus[\s\S]+?FILING_NOT_FOUND_TRY_OTHER_TYPE[\s\S]+?EXTRACTION_FAILED")
 
     def test_table_listing_is_paginated_and_index_backed(self) -> None:
