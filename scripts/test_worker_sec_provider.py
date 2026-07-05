@@ -77,6 +77,31 @@ class TestWorkerSecProvider(unittest.TestCase):
         section = match.group(0)
         self.assertIn(".filter((m) => m.excerpt.length > 0)", section)
 
+    def test_compact_geo_extraction_does_not_build_full_filing_index(self) -> None:
+        match = re.search(
+            r"export async function extractGeographicRevenue\([\s\S]*?return JSON\.stringify\(out\);",
+            self.worker,
+        )
+        self.assertIsNotNone(match)
+        section = match.group(0)
+        self.assertIn('const needsIndex = detail === "raw"', section)
+        self.assertIn("needsIndex ? parseObjectJson(await getSecFilingIndex", section)
+
+    def test_sec_text_search_is_bounded_for_worker_cpu(self) -> None:
+        match = re.search(
+            r"export async function searchFilingText\([\s\S]*?return JSON\.stringify\(\{[\s\S]*?\n  \}\);",
+            self.worker,
+        )
+        self.assertIsNotNone(match)
+        section = match.group(0)
+        self.assertIn("full-filing text conversion can exhaust Worker CPU", section)
+        self.assertIn("const htmlLower = html.toLowerCase()", section)
+        self.assertNotIn("const readableText = cleanFilingDisplayText(htmlToReadableText", section)
+
+    def test_geo_fallback_avoids_full_document_strip(self) -> None:
+        self.assertIn("function filingHasRelevantGeoText", self.worker)
+        self.assertNotIn("stripHtmlTags(htmlText).toLowerCase()", self.worker)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
