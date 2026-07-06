@@ -96,6 +96,8 @@ class TestWorkerSecProvider(unittest.TestCase):
         section = match.group(0)
         self.assertIn("full-filing text conversion can exhaust Worker CPU", section)
         self.assertIn("const htmlLower = html.toLowerCase()", section)
+        self.assertIn("isHtmlTagPosition(html, pos)", section)
+        self.assertIn("htmlWindowAtTagBoundaries(html", section)
         self.assertNotIn("const readableText = cleanFilingDisplayText(htmlToReadableText", section)
 
     def test_geo_fallback_avoids_full_document_strip(self) -> None:

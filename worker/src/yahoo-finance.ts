@@ -4013,6 +4013,27 @@ function filingHasRelevantGeoText(html: string, region: string): boolean {
   return false;
 }
 
+function isHtmlTagPosition(html: string, pos: number): boolean {
+  const lastOpen = html.lastIndexOf("<", pos);
+  const lastClose = html.lastIndexOf(">", pos);
+  return lastOpen > lastClose;
+}
+
+function htmlWindowAtTagBoundaries(html: string, start: number, end: number): string {
+  let s = Math.max(0, start);
+  let e = Math.min(html.length, end);
+  const openBeforeStart = html.lastIndexOf("<", s);
+  const closeBeforeStart = html.lastIndexOf(">", s);
+  if (openBeforeStart > closeBeforeStart) s = openBeforeStart;
+  const openBeforeEnd = html.lastIndexOf("<", e);
+  const closeBeforeEnd = html.lastIndexOf(">", e);
+  if (openBeforeEnd > closeBeforeEnd) {
+    const closeAfterEnd = html.indexOf(">", e);
+    if (closeAfterEnd >= 0) e = Math.min(html.length, closeAfterEnd + 1);
+  }
+  return html.slice(s, e);
+}
+
 function normalizeSegmentLabel(segment: unknown): string {
   if (segment == null) return "";
   if (Array.isArray(segment)) return segment.map((s) => normalizeSegmentLabel(s)).join(" ").trim();
@@ -4701,13 +4722,14 @@ export async function searchFilingText(
   const seen = new Set<number>();
 
   const addMatch = (term: string, pos: number) => {
+    if (isHtmlTagPosition(html, pos)) return;
     if ([...seen].some((p) => Math.abs(p - pos) < 150)) return;
     seen.add(pos);
     const start = Math.max(0, pos - Math.floor(size / 2));
     const end = Math.min(html.length, pos + Math.floor(size / 2));
-    const contextHtml = html.slice(start, end);
+    const contextHtml = htmlWindowAtTagBoundaries(html, start, end);
     const contextText = cleanFilingDisplayText(htmlToReadableText(contextHtml));
-    const preText = cleanFilingDisplayText(htmlToReadableText(html.slice(Math.max(0, pos - 2_000), pos)));
+    const preText = cleanFilingDisplayText(htmlToReadableText(htmlWindowAtTagBoundaries(html, Math.max(0, pos - 2_000), pos)));
     const sectionHeading = (preText.match(/(?:Item\s+\d+[A-Z]?\.?\s+[^.]{3,120}|[A-Z][A-Z0-9 ,&/-]{12,120})\s*$/) ?? [""])[0].trim();
     const match: Record<string, unknown> = {
       term,
