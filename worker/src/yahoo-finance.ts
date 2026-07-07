@@ -10316,7 +10316,7 @@ function extractMetricNumber(
 const MANAGEMENT_COMMENTARY_TOPIC_ALIASES: Record<string, string[]> = {
   guidance: ["guidance", "outlook", "expects", "expect", "forecast", "sees", "project", "projects", "reaffirm", "full year", "next quarter"],
   capacity: ["capacity", "production", "manufacturing", "facility", "facilities", "utilization", "ramp", "expansion", "supply"],
-  revenue: ["revenue", "sales", "net sales", "top line", "growth", "demand"],
+  revenue: ["revenue", "sales", "net sales", "top line", "revenue growth", "sales growth", "net sales growth"],
   margin: ["margin", "gross margin", "operating margin", "profitability"],
   ai: ["ai", "artificial intelligence"],
 };
@@ -10332,6 +10332,10 @@ function commentaryTermMatches(text: string, term: string): boolean {
   return new RegExp(`\\b${escaped}\\b`, "i").test(text);
 }
 
+function isManagementCommentaryBoilerplate(sentence: string): boolean {
+  return /emerging growth company|smaller reporting company|accelerated filer|shell company|check mark|exchange act|securities act/i.test(sentence);
+}
+
 function sentenceForTopic(text: string, topic: string): { excerpt: string; matchedTerms: string[] } | null {
   const terms = managementCommentaryTerms(topic);
   const sentences = text
@@ -10342,6 +10346,7 @@ function sentenceForTopic(text: string, topic: string): { excerpt: string; match
   let best: { score: number; excerpt: string; matchedTerms: string[] } | null = null;
   for (let i = 0; i < sentences.length; i++) {
     const sentence = sentences[i];
+    if (isManagementCommentaryBoilerplate(sentence)) continue;
     const matchedTerms = terms.filter((term) => commentaryTermMatches(sentence, term));
     if (!matchedTerms.length) continue;
     const exactMatch = commentaryTermMatches(sentence, topic);

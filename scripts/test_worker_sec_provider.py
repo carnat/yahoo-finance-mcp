@@ -201,6 +201,15 @@ class TestWorkerSecProvider(unittest.TestCase):
         self.assertIn("MANAGEMENT_COMMENTARY_TOPIC_ALIASES", self.worker)
         for term in ("outlook", "expects", "production", "manufacturing", "net sales", "artificial intelligence"):
             self.assertIn(term, self.worker)
+        revenue_aliases = re.search(r"revenue: \[([^\]]+)\]", self.worker)
+        self.assertIsNotNone(revenue_aliases)
+        revenue_aliases_text = revenue_aliases.group(1)
+        self.assertIn('"revenue growth"', revenue_aliases_text)
+        self.assertIn('"sales growth"', revenue_aliases_text)
+        self.assertNotIn('"growth"', revenue_aliases_text)
+        self.assertNotIn('"demand"', revenue_aliases_text)
+        self.assertIn("function isManagementCommentaryBoilerplate", self.worker)
+        self.assertIn("emerging growth company", self.worker)
         match = re.search(
             r"function sentenceForTopic\([\s\S]*?return best \? \{ excerpt: best\.excerpt, matchedTerms: best\.matchedTerms \} : null;",
             self.worker,
@@ -208,6 +217,7 @@ class TestWorkerSecProvider(unittest.TestCase):
         self.assertIsNotNone(match)
         section = match.group(0)
         self.assertIn("managementCommentaryTerms(topic)", section)
+        self.assertIn("isManagementCommentaryBoilerplate(sentence)", section)
         self.assertIn("commentaryTermMatches(sentence, term)", section)
         self.assertIn("matchedTerms", section)
         commentary = re.search(
