@@ -10386,8 +10386,21 @@ async function resolveEx991Url(cikInt: number, accessionNumber: string): Promise
   return null;
 }
 
+async function resolveEarningsContentSource(src: Record<string, unknown>): Promise<{ url: string; sourceType: string }> {
+  const srcUrl = String(src.url ?? "");
+  const sourceType = String(src.sourceType ?? "company_ir");
+  if (!srcUrl.startsWith("https://www.sec.gov/Archives/")) return { url: srcUrl, sourceType };
+
+  const accessionNumber = String(src.accessionNumber ?? "");
+  const cikInt = parseInt(String(src.cikPadded ?? "0"), 10);
+  if (!accessionNumber || !cikInt) return { url: srcUrl, sourceType };
+
+  const ex991 = await resolveEx991Url(cikInt, accessionNumber);
+  return ex991 ? { url: ex991, sourceType: "sec_8k_ex991" } : { url: srcUrl, sourceType };
+}
+
 /** Parse inline XBRL (iXBRL) numeric tags from an HTML document.
- *  Returns a Map of lowercased concept name → scaled numeric value. */
+ *  Returns a Map of lowercased concept name to scaled numeric value. */
 function parseIxbrlConceptValues(html: string): Map<string, number> {
   const result = new Map<string, number>();
   // Match ix:nonFraction and ix:nonfraction (case-insensitive tag name)
@@ -10845,7 +10858,9 @@ export async function extractManagementCommentary(
   const src = Array.isArray(release.sources) && release.sources[0] && typeof release.sources[0] === "object"
     ? release.sources[0] as Record<string, unknown>
     : {};
-  const srcUrl = String(src.url ?? "");
+  const content = await resolveEarningsContentSource(src);
+  const srcUrl = content.url;
+  const sourceType = content.sourceType;
   let text = "";
   if (srcUrl.startsWith("https://www.sec.gov/Archives/")) {
     text = _stripHtmlTagsIdx(_sanitizeFilingHtml((await edgarGetHtml(srcUrl, 5_000_000)) ?? ""));
@@ -10864,14 +10879,14 @@ export async function extractManagementCommentary(
       summary: excerpt,
       matchedTerms: match.matchedTerms,
       evidence: [{
-        sourceType: src.sourceType ?? "company_ir",
+        sourceType,
         url: srcUrl,
         publishedAt: toIsoUtc((src.filingDate as string | null) ?? (src.publishedAt as string | null) ?? null),
         retrievedAt: nowIsoUtc(),
         excerpt: excerpt.slice(0, 240),
         matchedTerms: match.matchedTerms,
       }],
-      confidence: src.sourceType === "sec_8k" ? "HIGH" : "MEDIUM",
+      confidence: sourceType.startsWith("sec_8k") ? "HIGH" : "MEDIUM",
     };
   });
   return JSON.stringify({
