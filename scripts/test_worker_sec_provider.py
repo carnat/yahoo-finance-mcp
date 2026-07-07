@@ -227,6 +227,26 @@ class TestWorkerSecProvider(unittest.TestCase):
         self.assertIsNotNone(commentary)
         self.assertIn("matchedTerms: match.matchedTerms", commentary.group(0))
 
+    def test_management_commentary_uses_resolved_earnings_exhibit(self) -> None:
+        self.assertIn("function resolveEx991Url", self.worker)
+        self.assertIn("function resolveEarningsContentSource", self.worker)
+        helper = re.search(
+            r"async function resolveEarningsContentSource\([\s\S]*?return ex991 \? \{ url: ex991, sourceType: \"sec_8k_ex991\" \} : \{ url: srcUrl, sourceType \};",
+            self.worker,
+        )
+        self.assertIsNotNone(helper)
+        section = helper.group(0)
+        self.assertIn("resolveEx991Url(cikInt, accessionNumber)", section)
+        commentary = re.search(
+            r"export async function extractManagementCommentary\([\s\S]*?return JSON\.stringify\(\{",
+            self.worker,
+        )
+        self.assertIsNotNone(commentary)
+        commentary_section = commentary.group(0)
+        self.assertIn("await resolveEarningsContentSource(src)", commentary_section)
+        self.assertIn("sourceType,", commentary_section)
+        self.assertIn('sourceType.startsWith("sec_8k")', commentary_section)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
