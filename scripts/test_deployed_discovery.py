@@ -650,6 +650,41 @@ def main() -> int:
     filings = call_tool("list_sec_company_filings", {"ticker": "AAPL", "filing_type": "10-K", "limit": 5}, 20)
     assert_no_unknown_tool(filings, "list_sec_company_filings")
     filing_list, doc_url = _assert_filing_resolution(filings, "AAPL")
+    aapl_accession = str(filing_list[0].get("accessionNumber") or "")
+
+    exhibits = call_tool("list_sec_filing_exhibits", {"ticker": "AAPL", "accessionNumber": aapl_accession}, 205)
+    assert_no_unknown_tool(exhibits, "list_sec_filing_exhibits")
+    exhibit_data = extract_data(exhibits)
+    exhibit_list = exhibit_data.get("exhibits") if isinstance(exhibit_data, dict) else None
+    if not isinstance(exhibit_list, list) or not exhibit_list:
+        raise AssertionError(f"list_sec_filing_exhibits returned no exhibits for AAPL {aapl_accession}: {exhibit_data}")
+    first_fetchable_exhibit = next(
+        (
+            exhibit for exhibit in exhibit_list
+            if isinstance(exhibit, dict)
+            and str(exhibit.get("document") or "").lower().endswith((".htm", ".html"))
+        ),
+        None,
+    )
+    if not first_fetchable_exhibit:
+        raise AssertionError(f"list_sec_filing_exhibits returned no HTML exhibit for AAPL {aapl_accession}: {exhibit_list[:5]}")
+    listed_document = str(first_fetchable_exhibit.get("document") or "")
+    listed_url = str(first_fetchable_exhibit.get("documentUrl") or "")
+    if not listed_url.startswith("https://www.sec.gov/Archives/"):
+        raise AssertionError(f"list_sec_filing_exhibits missing documentUrl for listed exhibit: {first_fetchable_exhibit}")
+    exhibit_content = call_tool(
+        "get_sec_filing_exhibit_content",
+        {"ticker": "AAPL", "accessionNumber": aapl_accession, "fileName": listed_document, "topics": ["Apple"]},
+        206,
+    )
+    assert_no_unknown_tool(exhibit_content, "get_sec_filing_exhibit_content")
+    assert_not_double_enveloped_failure(exhibit_content, "get_sec_filing_exhibit_content")
+    exhibit_content_data = extract_data(exhibit_content)
+    if not isinstance(exhibit_content_data, dict) or exhibit_content_data.get("documentUrl") != listed_url:
+        raise AssertionError(f"get_sec_filing_exhibit_content did not fetch the listed exhibit URL: {exhibit_content_data}")
+    if exhibit_content.get("ok") is False:
+        raise AssertionError(f"get_sec_filing_exhibit_content failed for listed exhibit {listed_document}: {exhibit_content}")
+    print("  PASS SEC exhibit list/content handoff smoke")
 
     aaoi_filings = call_tool("list_sec_company_filings", {"ticker": "AAOI", "filing_type": "10-K", "limit": 3}, 21)
     assert_no_unknown_tool(aaoi_filings, "list_sec_company_filings")
@@ -1116,6 +1151,23 @@ def main() -> int:
     unsupported_meta = unsupported.get("meta") or {}
     if not unsupported_meta.get("supportedQueryTypes"):
         raise AssertionError(f"unsupported query_sec_filing_index missing supportedQueryTypes: {unsupported}")
+
+    bad_recommendation = call_tool(
+        "get_analyst_recommendations",
+        {"ticker": "AAPL", "recommendation_type": "summary"},
+        2112,
+    )
+    assert_no_unknown_tool(bad_recommendation, "get_analyst_recommendations")
+    assert_not_double_enveloped_failure(bad_recommendation, "get_analyst_recommendations")
+    if bad_recommendation.get("ok") is not False:
+        raise AssertionError(f"invalid get_analyst_recommendations type must be top-level ok:false: {bad_recommendation}")
+    rec_error = bad_recommendation.get("error") or {}
+    if rec_error.get("code") != "INPUT_VALIDATION_ERROR":
+        raise AssertionError(f"invalid get_analyst_recommendations wrong error code: {bad_recommendation}")
+    rec_meta = bad_recommendation.get("meta") or {}
+    supported_rec_types = rec_meta.get("supportedRecommendationTypes") or []
+    if "recommendations" not in supported_rec_types or "upgrades_downgrades" not in supported_rec_types:
+        raise AssertionError(f"invalid get_analyst_recommendations missing supportedRecommendationTypes: {bad_recommendation}")
 
     total_fact = call_tool(
         "extract_sec_filing_fact",

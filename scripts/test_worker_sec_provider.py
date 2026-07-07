@@ -141,6 +141,33 @@ class TestWorkerSecProvider(unittest.TestCase):
         self.assertIn('"OUTLINE_NOT_PARSED"', self.worker)
         self.assertIn('"TABLES_FOUND_OUTLINE_EMPTY"', self.worker)
 
+    def test_analyst_recommendation_schema_advertises_supported_types(self) -> None:
+        self.assertIn("export const SUPPORTED_RECOMMENDATION_TYPES", self.worker)
+        self.assertIn("supportedRecommendationTypes: SUPPORTED_RECOMMENDATION_TYPES", self.worker)
+        match = re.search(
+            r'name: "get_analyst_recommendations"[\s\S]*?required: \["ticker", "recommendation_type"\]',
+            self.tools,
+        )
+        self.assertIsNotNone(match)
+        schema = match.group(0)
+        self.assertIn("enum: SUPPORTED_RECOMMENDATION_TYPES", schema)
+        self.assertIn("recommendations", schema)
+        self.assertIn("upgrades_downgrades", schema)
+
+    def test_sec_exhibit_content_accepts_listed_document_references(self) -> None:
+        self.assertIn("function normalizeEdgarDocumentRef", self.worker)
+        self.assertIn("function edgarDocumentUrlFromIndexUrl", self.worker)
+        self.assertIn("documentUrl,", self.worker)
+        match = re.search(
+            r"export async function getSecFilingExhibitContent\([\s\S]*?const cleanText = htmlToReadableText\(html\);",
+            self.worker,
+        )
+        self.assertIsNotNone(match)
+        section = match.group(0)
+        self.assertIn("edgarDocumentUrlFromRef(cik, accessionNumber, fileName)", section)
+        self.assertIn("edgarListExhibitsFromIndex(edgarIndexUrl)", section)
+        self.assertIn("matched.documentUrl", section)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

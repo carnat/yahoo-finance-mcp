@@ -1191,6 +1191,7 @@ const REC_MOD: Record<string, string> = {
   recommendations: "recommendationTrend",
   upgrades_downgrades: "upgradeDowngradeHistory",
 };
+export const SUPPORTED_RECOMMENDATION_TYPES = Object.keys(REC_MOD);
 
 // ── New tools ────────────────────────────────────────────────────────────────
 
@@ -2049,7 +2050,14 @@ export async function getRecommendations(
   monthsBack: number
 ): Promise<string> {
   const mod = REC_MOD[type];
-  if (!mod) return `Error: invalid recommendation type '${type}'`;
+  if (!mod) {
+    return mcpFailure(
+      "get_analyst_recommendations",
+      "INPUT_VALIDATION_ERROR",
+      `Invalid recommendation_type '${type}'. Supported recommendation_type values: ${SUPPORTED_RECOMMENDATION_TYPES.join(", ")}`,
+      { metaExtra: { supportedRecommendationTypes: SUPPORTED_RECOMMENDATION_TYPES } },
+    );
+  }
 
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=${mod}`
@@ -3339,6 +3347,46 @@ function edgarBuildFilingUrls(
   return { edgarIndexUrl, edgarPrimaryDocumentUrl };
 }
 
+function normalizeEdgarDocumentRef(rawRef: string): string | null {
+  let ref = rawRef.trim();
+  if (!ref) return null;
+  const docParam = ref.match(/[?&]doc=([^&#]+)/i);
+  if (docParam) {
+    try {
+      ref = decodeURIComponent(docParam[1]);
+    } catch {
+      ref = docParam[1];
+    }
+  }
+  ref = ref.split("#", 1)[0].split("?", 1)[0].trim();
+  return ref || null;
+}
+
+function edgarDocumentFileName(rawRef: string): string {
+  const normalized = normalizeEdgarDocumentRef(rawRef) ?? rawRef.trim();
+  return normalized.split("/").pop() ?? normalized;
+}
+
+function edgarDocumentUrlFromRef(cik: number, accessionNumber: string, rawRef: string): string | null {
+  const ref = normalizeEdgarDocumentRef(rawRef);
+  if (!ref) return null;
+  if (/^https?:\/\//i.test(ref)) return ref;
+  if (ref.startsWith("/Archives/")) return `https://www.sec.gov${ref}`;
+  const noDash = accessionNumber.replace(/-/g, "");
+  const fileName = ref.split("/").pop() ?? ref;
+  return fileName ? `https://www.sec.gov/Archives/edgar/data/${cik}/${noDash}/${fileName}` : null;
+}
+
+function edgarDocumentUrlFromIndexUrl(indexUrl: string, rawRef: string): string | null {
+  const ref = normalizeEdgarDocumentRef(rawRef);
+  if (!ref) return null;
+  if (/^https?:\/\//i.test(ref)) return ref;
+  if (ref.startsWith("/Archives/")) return `https://www.sec.gov${ref}`;
+  const fileName = ref.split("/").pop() ?? ref;
+  const baseUrl = indexUrl.replace(/\/[^/]*$/, "/");
+  return fileName ? `${baseUrl}${fileName}` : null;
+}
+
 /**
  * Fetch the EDGAR filing index HTM and return the primary document filename.
  *
@@ -3354,18 +3402,7 @@ async function edgarPrimaryDocFromIndex(indexUrl: string): Promise<string | null
   const html = await edgarGetHtml(indexUrl);
   if (!html) return null;
   const normalizeHref = (rawHref: string): string | null => {
-    let href = rawHref.trim();
-    if (!href) return null;
-    // SEC often wraps filing docs as /ixviewer/ix.html?doc=/Archives/.../file.htm
-    const docParam = href.match(/[?&]doc=([^&#]+)/i);
-    if (docParam) {
-      try {
-        href = decodeURIComponent(docParam[1]);
-      } catch {
-        href = docParam[1];
-      }
-    }
-    href = href.split("#", 1)[0].split("?", 1)[0];
+    const href = normalizeEdgarDocumentRef(rawHref);
     if (!href) return null;
     const fname = href.includes("/") ? (href.split("/").pop() ?? "") : href;
     return fname.trim() || null;
@@ -3409,13 +3446,16 @@ async function edgarListExhibitsFromIndex(indexUrl: string): Promise<Record<stri
     const sequence = stripHtmlTags(cells[0]).trim();
     if (!/^\d/.test(sequence)) continue;
     const hrefMatch = cells[2].match(/href=["']([^"']+)["']/i);
-    const document = hrefMatch
-      ? hrefMatch[1].trim().split("/").pop()?.split("?", 1)[0].split("#", 1)[0] ?? ""
+    const rawDocumentRef = hrefMatch
+      ? hrefMatch[1].trim()
       : stripHtmlTags(cells[2] ?? "").trim();
+    const document = edgarDocumentFileName(rawDocumentRef);
+    const documentUrl = edgarDocumentUrlFromIndexUrl(indexUrl, rawDocumentRef);
     exhibits.push({
       sequence,
       description: stripHtmlTags(cells[1] ?? "").trim(),
       document,
+      documentUrl,
       type: stripHtmlTags(cells[3] ?? "").trim(),
       size: stripHtmlTags(cells[4] ?? "").trim(),
     });
@@ -8678,8 +8718,23 @@ export async function getSecFilingExhibitContent(
     return JSON.stringify({ ok: false, error: { code: "TICKER_NOT_FOUND", message: `Could not resolve CIK for ticker '${ticker}'.` } });
   }
 
-  const documentUrl = `https://www.sec.gov/Archives/edgar/data/${cik}/${accessionNumber.replace(/-/g, "")}/${fileName}`;
-  const html = await edgarGetHtml(documentUrl, 5_000_000);
+  const { edgarIndexUrl } = edgarBuildFilingUrls(cik, accessionNumber, null);
+  let documentUrl = edgarDocumentUrlFromRef(cik, accessionNumber, fileName);
+  let html = documentUrl ? await edgarGetHtml(documentUrl, 5_000_000) : null;
+  if (!html) {
+    const requestedFileName = edgarDocumentFileName(fileName).toLowerCase();
+    const requestedUrl = documentUrl?.toLowerCase() ?? "";
+    const exhibits = await edgarListExhibitsFromIndex(edgarIndexUrl);
+    const matched = exhibits.find((exhibit) => {
+      const document = String(exhibit.document ?? "").toLowerCase();
+      const exhibitUrl = String(exhibit.documentUrl ?? "").toLowerCase();
+      return document === requestedFileName || exhibitUrl === requestedUrl || exhibitUrl.endsWith(`/${requestedFileName}`);
+    });
+    if (matched?.documentUrl) {
+      documentUrl = String(matched.documentUrl);
+      html = await edgarGetHtml(documentUrl, 5_000_000);
+    }
+  }
   if (!html) {
     return JSON.stringify({ ok: false, error: { code: "FETCH_ERROR", message: `Could not fetch exhibit '${fileName}'.` } });
   }
