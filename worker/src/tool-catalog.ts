@@ -9,7 +9,7 @@ export interface GroupedToolDef {
 export const GROUPED_TOOL_DEFS: GroupedToolDef[] = [
   {
     "name": "analyst_data",
-    "description": "Analyst ratings, forecasts, and earnings momentum.\n\nActions:\n- get_analyst_consensus: Targets + rating breakdown. Params: ticker\n- get_earnings_analysis: EPS/revenue estimates. Params: ticker\n- get_analyst_recommendations: Raw recs. Params: ticker, recommendation_type\n- get_analyst_rating_changes: Recent changes with signal. Params: ticker\n- analyze_earnings_momentum: Revision momentum. Params: ticker\n- get_company_events_calendar: Earnings/dividend dates. Params: ticker",
+    "description": "Analyst ratings, forecasts, and earnings momentum.\n\nActions:\n- get_analyst_consensus: Targets + rating breakdown. Params: ticker\n- get_earnings_analysis: EPS/revenue estimates. Params: ticker\n- get_analyst_recommendations: Raw recs. recommendation_type: recommendations, upgrades_downgrades\n- get_analyst_rating_changes: Recent changes with signal. Params: ticker\n- analyze_earnings_momentum: Revision momentum. Params: ticker\n- get_company_events_calendar: Earnings/dividend dates. Params: ticker",
     "actions": {
       "analyze_earnings_momentum": "get_earnings_momentum",
       "get_analyst_consensus": "get_analyst_consensus",
