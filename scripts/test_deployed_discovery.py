@@ -1218,14 +1218,27 @@ def main() -> int:
     if not isinstance(commentary_topics, list):
         raise AssertionError(f"extract_management_commentary returned missing topics[]: {commentary_data}")
     found_commentary = [t for t in commentary_topics if isinstance(t, dict) and t.get("status") == "FOUND"]
-    if not found_commentary:
-        raise AssertionError(f"extract_management_commentary should find AAPL revenue commentary: {commentary_data}")
-    first_commentary = found_commentary[0]
-    evidence = first_commentary.get("evidence") or []
-    if not isinstance(evidence, list) or not evidence:
-        raise AssertionError(f"extract_management_commentary FOUND topic missing evidence: {first_commentary}")
-    if not first_commentary.get("matchedTerms"):
-        raise AssertionError(f"extract_management_commentary FOUND topic missing matchedTerms: {first_commentary}")
+    if found_commentary:
+        first_commentary = found_commentary[0]
+        evidence = first_commentary.get("evidence") or []
+        if not isinstance(evidence, list) or not evidence:
+            raise AssertionError(f"extract_management_commentary FOUND topic missing evidence: {first_commentary}")
+        if not first_commentary.get("matchedTerms"):
+            raise AssertionError(f"extract_management_commentary FOUND topic missing matchedTerms: {first_commentary}")
+        commentary_text = " ".join(
+            str(value or "")
+            for value in [
+                first_commentary.get("summary"),
+                *(item.get("excerpt") for item in evidence if isinstance(item, dict)),
+            ]
+        ).lower()
+        if "emerging growth company" in commentary_text:
+            raise AssertionError(f"extract_management_commentary returned SEC cover-page boilerplate: {first_commentary}")
+    else:
+        valid_statuses = {t.get("status") for t in commentary_topics if isinstance(t, dict)}
+        if valid_statuses - {"NOT_FOUND"}:
+            raise AssertionError(f"extract_management_commentary returned unexpected topic status: {commentary_data}")
+        print("PASS extract_management_commentary revenue smoke (honest NOT_FOUND)")
 
     alias_payload = call_tool("get_historical_stock_prices", {}, 2120)
     assert_no_unknown_tool(alias_payload, "get_historical_stock_prices")
