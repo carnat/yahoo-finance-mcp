@@ -7160,6 +7160,7 @@ function buildSecEventItem(
       filingDate: filingDate || null,
       acceptedAt: acceptedAt || null,
       accessionNumber: accessionNumber || null,
+      cikInt: cikInt || null,
       url: url || null,
       publishedAt,
       retrievedAt,
@@ -7897,24 +7898,35 @@ export async function getCompanyPressReleases(
     if (_str(it.sourceType) === "sec_filing" && _str(it.filingType) === "8-K") {
       const accession = _str(it.accessionNumber);
       const url = _str(it.url);
-      sec8kEvidence.push({
+      const evidence: Record<string, unknown> = {
         filingType: "8-K",
         filingDate: it.filingDate ?? null,
         acceptedAt: it.acceptedAt ?? null,
         accessionNumber: accession || null,
+        cikInt: it.cikInt ?? null,
         documentUrl: url || null,
-      });
+      };
+      sec8kEvidence.push(evidence);
+      const cikFromItem = Number.parseInt(_str(it.cikInt), 10);
+      const cikFromAccession = accession ? edgarCikFromAccession(accession) : null;
       const cikMatch = /\/data\/(\d+)\//.exec(url);
-      const cik = cikMatch ? parseInt(cikMatch[1], 10) : null;
+      const cikFromUrl = cikMatch ? Number.parseInt(cikMatch[1], 10) : null;
+      const cik = [cikFromItem, cikFromAccession, cikFromUrl]
+        .find((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0) ?? null;
       if (accession && cik !== null) {
         const ex991Url = await resolveEx991Url(cik, accession);
         if (ex991Url) {
           hasSecEx99Found = true;
+          evidence.ex991Url = ex991Url;
+          evidence.ex991Resolved = true;
           return {
             ...it,
             sourceType: "sec_ex99_found",
             url: ex991Url,
             title: "EX-99.1 exhibit found in 8-K",
+            eventType: "press_release",
+            evidenceText: "Resolved EX-99.1 press-release exhibit from SEC 8-K.",
+            confidence: "HIGH",
           };
         }
       }
