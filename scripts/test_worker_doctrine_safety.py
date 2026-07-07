@@ -165,6 +165,12 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("xbrlContext: parsed.xbrlContext ?? null", tools)
         self.assertIn("const sourceEvidence = xbrlSourceEvidence(parsed)", tools)
         self.assertIn('String(b.end ?? "").localeCompare(String(a.end ?? ""))', worker)
+        self.assertIn('capabilityStatus: "ACTIVE"', tools)
+        self.assertIn('doctrineUse: "ALLOWED"', tools)
+        self.assertIn('successCriteria: ["value", "xbrlContext", "sourceEvidence"]', tools)
+        self.assertIn('"SEC_FACT_NOT_AVAILABLE"', tools)
+        self.assertIn('"NO_COMPANYCONCEPT_FACT_FOR_FORM"', tools)
+        self.assertNotIn('failureMode: "XBRL_CONTEXT_METADATA_UNDER_VERIFICATION"', tools)
 
     def test_overnight_quote_is_explicitly_diagnostics_only(self) -> None:
         tools = TOOLS_TS.read_text(encoding="utf-8")

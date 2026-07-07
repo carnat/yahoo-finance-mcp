@@ -10313,12 +10313,46 @@ function extractMetricNumber(
   return { value: null, rawValue: null, excerpt: null };
 }
 
-function sentenceForTopic(text: string, topic: string): string | null {
-  const topicLower = topic.toLowerCase();
-  for (const s of text.split(/(?<=[.!?])\s+/)) {
-    if (s.toLowerCase().includes(topicLower)) return compactExcerpt(s, 220);
+const MANAGEMENT_COMMENTARY_TOPIC_ALIASES: Record<string, string[]> = {
+  guidance: ["guidance", "outlook", "expects", "expect", "forecast", "sees", "project", "projects", "reaffirm", "full year", "next quarter"],
+  capacity: ["capacity", "production", "manufacturing", "facility", "facilities", "utilization", "ramp", "expansion", "supply"],
+  revenue: ["revenue", "sales", "net sales", "top line", "growth", "demand"],
+  margin: ["margin", "gross margin", "operating margin", "profitability"],
+  ai: ["ai", "artificial intelligence"],
+};
+
+function managementCommentaryTerms(topic: string): string[] {
+  const topicLower = topic.toLowerCase().trim();
+  const aliases = MANAGEMENT_COMMENTARY_TOPIC_ALIASES[topicLower] ?? [];
+  return Array.from(new Set([topicLower, ...aliases].filter(Boolean)));
+}
+
+function commentaryTermMatches(text: string, term: string): boolean {
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+  return new RegExp(`\\b${escaped}\\b`, "i").test(text);
+}
+
+function sentenceForTopic(text: string, topic: string): { excerpt: string; matchedTerms: string[] } | null {
+  const terms = managementCommentaryTerms(topic);
+  const sentences = text
+    .replace(/\s+/g, " ")
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  let best: { score: number; excerpt: string; matchedTerms: string[] } | null = null;
+  for (let i = 0; i < sentences.length; i++) {
+    const sentence = sentences[i];
+    const matchedTerms = terms.filter((term) => commentaryTermMatches(sentence, term));
+    if (!matchedTerms.length) continue;
+    const exactMatch = commentaryTermMatches(sentence, topic);
+    const score = (exactMatch ? 100 : 0) + matchedTerms.length * 10 - Math.min(sentence.length / 200, 3);
+    const context = sentence.length < 90 && sentences[i + 1]
+      ? `${sentence} ${sentences[i + 1]}`
+      : sentence;
+    const candidate = { score, excerpt: compactExcerpt(context, 320), matchedTerms };
+    if (!best || candidate.score > best.score) best = candidate;
   }
-  return null;
+  return best ? { excerpt: best.excerpt, matchedTerms: best.matchedTerms } : null;
 }
 
 /** Resolve the EX-99.1 exhibit URL from an 8-K filing index page. */
@@ -10814,20 +10848,23 @@ export async function extractManagementCommentary(
     text = _stripHtmlTagsIdx(_sanitizeFilingHtml((await fetchPublicHtml(srcUrl)) ?? ""));
   }
   const outTopics = (topics ?? []).map((topic) => {
-    const excerpt = text ? sentenceForTopic(text, topic) : null;
-    if (!excerpt) {
+    const match = text ? sentenceForTopic(text, topic) : null;
+    if (!match) {
       return { topic, status: "NOT_FOUND", summary: "", evidence: [], confidence: "LOW" };
     }
+    const excerpt = match.excerpt;
     return {
       topic,
       status: "FOUND",
       summary: excerpt,
+      matchedTerms: match.matchedTerms,
       evidence: [{
         sourceType: src.sourceType ?? "company_ir",
         url: srcUrl,
         publishedAt: toIsoUtc((src.filingDate as string | null) ?? (src.publishedAt as string | null) ?? null),
         retrievedAt: nowIsoUtc(),
         excerpt: excerpt.slice(0, 240),
+        matchedTerms: match.matchedTerms,
       }],
       confidence: src.sourceType === "sec_8k" ? "HIGH" : "MEDIUM",
     };

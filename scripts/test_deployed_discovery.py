@@ -798,7 +798,7 @@ def main() -> int:
                     "get_overnight_quote": ("DEGRADED", "DIAGNOSTICS_ONLY"),
                     "get_sec_filing_section_markdown": ("DEGRADED", "BLOCKED"),
                     "get_company_press_releases": ("DEGRADED", "VERIFY_ONLY"),
-                    "extract_sec_filing_fact": ("DEGRADED", "VERIFY_ONLY"),
+                    "extract_sec_filing_fact": ("ACTIVE", "ALLOWED"),
                 }
                 for tool_name, (capability, use) in expected_doctrine.items():
                     status = doctrine_status.get(tool_name)
@@ -806,6 +806,15 @@ def main() -> int:
                         raise AssertionError(f"health_check doctrineToolStatus missing {tool_name}")
                     if status.get("capabilityStatus") != capability or status.get("doctrineUse") != use:
                         raise AssertionError(f"health_check doctrine status mismatch for {tool_name}: {status}")
+                    if tool_name == "extract_sec_filing_fact":
+                        if status.get("decisionGrade") is not True:
+                            raise AssertionError(f"extract_sec_filing_fact diagnostics should be payload-conditionally decision-grade: {status}")
+                        if status.get("successCriteria") != ["value", "xbrlContext", "sourceEvidence"]:
+                            raise AssertionError(f"extract_sec_filing_fact diagnostics missing successCriteria: {status}")
+                        limitation_statuses = status.get("limitationStatuses") or []
+                        for code in ("SEC_FACT_NOT_AVAILABLE", "NO_COMPANYCONCEPT_FACT_FOR_FORM", "UNSUPPORTED_XBRL_CONCEPT"):
+                            if code not in limitation_statuses:
+                                raise AssertionError(f"extract_sec_filing_fact diagnostics missing limitation status {code}: {status}")
         if name == "get_option_chain":
             data = extract_data(payload)
             # Worker returns {"error": true, "code": "INVALID_EXPIRY_DATE"} when the
@@ -1180,6 +1189,8 @@ def main() -> int:
     if not isinstance(total_data, dict):
         raise AssertionError(f"extract_sec_filing_fact total_revenue returned non-object: {total_data!r}")
     if total_data.get("value") is not None and total_data.get("extractionMethod") == "XBRL":
+        if total_data.get("decisionGrade") is not True:
+            raise AssertionError(f"extract_sec_filing_fact total_revenue XBRL success must be decisionGrade:true: {total_data}")
         if not isinstance(total_data.get("xbrlContext"), dict):
             raise AssertionError(f"extract_sec_filing_fact total_revenue missing xbrlContext: {total_data}")
         source_evidence = total_data.get("sourceEvidence")
@@ -1194,6 +1205,27 @@ def main() -> int:
             raise AssertionError(
                 f"extract_sec_filing_fact total_revenue selected stale period for filing: {source_evidence}"
             )
+
+    commentary = call_tool(
+        "extract_management_commentary",
+        {"ticker": "AAPL", "period": "latest", "topics": ["revenue"]},
+        2118,
+    )
+    assert_no_unknown_tool(commentary, "extract_management_commentary")
+    assert_not_double_enveloped_failure(commentary, "extract_management_commentary")
+    commentary_data = extract_data(commentary)
+    commentary_topics = commentary_data.get("topics") if isinstance(commentary_data, dict) else None
+    if not isinstance(commentary_topics, list):
+        raise AssertionError(f"extract_management_commentary returned missing topics[]: {commentary_data}")
+    found_commentary = [t for t in commentary_topics if isinstance(t, dict) and t.get("status") == "FOUND"]
+    if not found_commentary:
+        raise AssertionError(f"extract_management_commentary should find AAPL revenue commentary: {commentary_data}")
+    first_commentary = found_commentary[0]
+    evidence = first_commentary.get("evidence") or []
+    if not isinstance(evidence, list) or not evidence:
+        raise AssertionError(f"extract_management_commentary FOUND topic missing evidence: {first_commentary}")
+    if not first_commentary.get("matchedTerms"):
+        raise AssertionError(f"extract_management_commentary FOUND topic missing matchedTerms: {first_commentary}")
 
     alias_payload = call_tool("get_historical_stock_prices", {}, 2120)
     assert_no_unknown_tool(alias_payload, "get_historical_stock_prices")
