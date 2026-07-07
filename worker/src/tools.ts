@@ -1494,6 +1494,38 @@ const num = (v: unknown, fallback: number): number => (typeof v === "number" ? v
 const tickerArg = (v: unknown): string | string[] =>
   Array.isArray(v) ? v.map(String) : str(v);
 
+const SEC_XBRL_CONCEPT_ALIASES: Record<string, string> = {
+  cash: "cash",
+  cashandcashequivalentsatcarryingvalue: "cash",
+  revenuefromcontractwithcustomerexcludingassessedtax: "total_revenue",
+  revenues: "total_revenue",
+  totalrevenue: "total_revenue",
+};
+
+function normalizeSecXbrlConceptName(value: string): string {
+  return value
+    .replace(/^(?:us-gaap|dei|srt|country):/i, "")
+    .replace(/[^A-Za-z0-9]/g, "")
+    .toLowerCase();
+}
+
+function mappedSecFactType(value: string): string | null {
+  return SEC_XBRL_CONCEPT_ALIASES[normalizeSecXbrlConceptName(value)] ?? null;
+}
+
+function looksLikeSecXbrlConcept(value: string): boolean {
+  const bare = value.trim().replace(/^(?:us-gaap|dei|srt|country):/i, "");
+  return /^[A-Z][A-Za-z0-9]+$/.test(bare) && /[a-z][A-Z]/.test(bare);
+}
+
+function supportedXbrlConceptAliases(): string[] {
+  return [
+    "CashAndCashEquivalentsAtCarryingValue",
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "Revenues",
+  ];
+}
+
 function hasUsefulEvidence(evidence: unknown): boolean {
   if (!evidence) return false;
   const rows = Array.isArray(evidence) ? evidence : [evidence];
@@ -2231,9 +2263,19 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_overnight_quote":
       return getOvernightQuote(str(args.ticker));
 
-    case "extract_sec_filing_fact":
-      if (args.fact_type != null || args.region != null || args.fact_name == null || args.fact != null) {
-        const fact = str(args.fact_type ?? args.fact, args.region != null ? "geographic_revenue" : "total_revenue");
+    case "extract_sec_filing_fact": {
+      const requestedFactName = str(args.fact_type ?? args.fact ?? args.fact_name);
+      const mappedFact = requestedFactName ? mappedSecFactType(requestedFactName) : null;
+      if (requestedFactName && mappedFact == null && looksLikeSecXbrlConcept(requestedFactName)) {
+        return mcpFailure(
+          "extract_sec_filing_fact",
+          "UNSUPPORTED_XBRL_CONCEPT",
+          `Unsupported XBRL concept '${requestedFactName}'. Use a supported fact_type or one of the supported concept aliases.`,
+          { metaExtra: { supportedXbrlConceptAliases: supportedXbrlConceptAliases(), supportedFactTypes: ["cash", "total_revenue", "geographic_revenue", "segment_revenue"] } },
+        );
+      }
+      if (args.fact_type != null || args.region != null || args.fact_name == null || args.fact != null || mappedFact != null) {
+        const fact = mappedFact ?? str(args.fact_type ?? args.fact, args.region != null ? "geographic_revenue" : "total_revenue");
         const raw = await getFilingData(
           str(args.ticker),
           fact,
@@ -2263,6 +2305,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         }
         const sourceEvidence = xbrlSourceEvidence(parsed)
           ?? (hasUsefulEvidence(parsed.evidence) ? parsed.evidence : null);
+        const status = parsed.status ?? (parsed.value != null ? "FOUND" : (parsed.code ?? parsed.confidence ?? "NOT_DISCLOSED"));
         return JSON.stringify({
           fact,
           region: args.region != null ? str(args.region) : null,
@@ -2281,6 +2324,9 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
           extractionMethod: parsed.extractionMethod ?? "NONE",
           source: parsed.source ?? "NOT_DISCLOSED",
           confidence: parsed.confidence ?? "NOT_DISCLOSED",
+          status,
+          code: parsed.code ?? null,
+          decisionGrade: parsed.value == null || String(status).toUpperCase() !== "FOUND" ? false : (parsed.decisionGrade ?? null),
           documentUrl: parsed.documentUrl ?? null,
           indexUrl: parsed.indexUrl ?? null,
           primaryDocumentUrl: parsed.primaryDocumentUrl ?? null,
@@ -2293,6 +2339,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         });
       }
       return extractFilingFact(str(args.ticker), str(args.fact_name), args.document_url != null ? str(args.document_url) : null, args.accession_number != null ? str(args.accession_number) : null);
+    }
     case "list_sec_company_filings":
       return listSecCompanyFilings(str(args.ticker), str(args.filing_type ?? args.form_type, "10-K"), num(args.limit ?? args.max_filings, 5));
     case "get_sec_filing_outline": {
