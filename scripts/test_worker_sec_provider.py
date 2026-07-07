@@ -104,6 +104,18 @@ class TestWorkerSecProvider(unittest.TestCase):
         self.assertIn("function filingHasRelevantGeoText", self.worker)
         self.assertNotIn("stripHtmlTags(htmlText).toLowerCase()", self.worker)
 
+    def test_geo_html_fallback_uses_region_aliases_and_truncation_status(self) -> None:
+        self.assertIn("function geoRegionAliases", self.worker)
+        self.assertIn('"greater china"', self.worker)
+        self.assertIn('"hong kong"', self.worker)
+        self.assertIn('"taiwan"', self.worker)
+        self.assertIn("textContainsGeoRegion(tableHtml, region)", self.worker)
+        self.assertIn("rowMatchesGeoRegion(rows[i], region)", self.worker)
+        self.assertIn("geoRegionAliases(region)", self.worker)
+        self.assertIn('"FILING_READ_TRUNCATED"', self.worker)
+        self.assertIn("filingReadTruncated", self.worker)
+        self.assertIn("relevantGeoText || filingReadTruncated", self.worker)
+
     def test_ownership_holder_schema_advertises_supported_types(self) -> None:
         self.assertIn("export const SUPPORTED_HOLDER_TYPES", self.worker)
         self.assertIn("supportedHolderTypes: SUPPORTED_HOLDER_TYPES", self.worker)

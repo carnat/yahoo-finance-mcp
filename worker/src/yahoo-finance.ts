@@ -3888,6 +3888,48 @@ const TOTAL_LABELS = new Set([
   "net revenues", "revenues", "total revenue",
 ]);
 
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function geoRegionAliases(region: string): string[] {
+  const lower = region.toLowerCase().trim();
+  const compact = lower.replace(/\s+/g, "");
+  const aliases = new Set<string>([lower]);
+  if (lower === "china" || lower === "prc" || lower === "mainland china") {
+    for (const alias of [
+      "china",
+      "mainland china",
+      "prc",
+      "greater china",
+      "hong kong",
+      "taiwan",
+      "country:cn",
+      "srt:chinamember",
+      "greaterchinamember",
+    ]) aliases.add(alias);
+  } else if (lower === "greater china" || compact === "greaterchina") {
+    aliases.add("greater china");
+    aliases.add("greaterchinamember");
+  }
+  return [...aliases].filter(Boolean);
+}
+
+function textContainsGeoRegion(text: string, region: string): boolean {
+  const lower = text.toLowerCase();
+  return geoRegionAliases(region).some((term) => {
+    if (!term) return false;
+    if (/^[a-z0-9 ]+$/.test(term)) {
+      return new RegExp(`\\b${escapeRegexLiteral(term).replace(/\s+/g, "\\s+")}\\b`, "i").test(lower);
+    }
+    return lower.includes(term);
+  });
+}
+
+function rowMatchesGeoRegion(row: string[], region: string): boolean {
+  return row.some((cell) => textContainsGeoRegion(cell, region));
+}
+
 /**
  * Search an SEC filing HTML document for a geographic revenue table.
  * Returns { pct, usd, sectionHeading, parsedTables } or null if not found.
@@ -3907,8 +3949,8 @@ function extractGeoRevenueFromHtml(
   sourceRows: string[][];
   sourceColumns: string[];
 } | null {
-  const regionLower = region.toLowerCase();
   const htmlLower = html.toLowerCase();
+  const regionAliases = geoRegionAliases(region);
 
   const searchTerms = [
     "geographic information",
@@ -3916,8 +3958,8 @@ function extractGeoRevenueFromHtml(
     "geographic segment",
     "revenue by region",
     "revenues by geography",
-    regionLower,
-  ];
+    ...regionAliases,
+  ].filter(Boolean);
 
   // Collect match positions (capped)
   const positions: number[] = [];
@@ -3960,7 +4002,7 @@ function extractGeoRevenueFromHtml(
       }
 
       const tableHtml = html.slice(absStart, tableEnd);
-      if (!tableHtml.toLowerCase().includes(regionLower)) continue;
+      if (!textContainsGeoRegion(tableHtml, region)) continue;
       const rows = parseHtmlTable(tableHtml);
       if (rows.length < 2) continue;
       candidateTables.push({ pos: absStart, tableHtml, rows });
@@ -3973,7 +4015,7 @@ function extractGeoRevenueFromHtml(
     // Find region row
     let regionRowIdx: number | null = null;
     for (let i = 0; i < rows.length; i++) {
-      if (rows[i].some(c => c.toLowerCase().includes(regionLower))) { regionRowIdx = i; break; }
+      if (rowMatchesGeoRegion(rows[i], region)) { regionRowIdx = i; break; }
     }
     if (regionRowIdx === null) continue;
 
@@ -4045,17 +4087,21 @@ function extractGeoRevenueFromHtml(
 }
 
 function filingHasRelevantGeoText(html: string, region: string): boolean {
-  const regionLower = region.toLowerCase();
-  if (!regionLower) return false;
   const htmlLower = html.toLowerCase();
+  const aliases = geoRegionAliases(region);
+  if (aliases.length === 0) return false;
   let idx = 0;
   let checked = 0;
   while (checked < 20) {
-    const pos = htmlLower.indexOf(regionLower, idx);
+    const positions = aliases
+      .map((term) => htmlLower.indexOf(term, idx))
+      .filter((pos) => pos >= 0);
+    if (positions.length === 0) return false;
+    const pos = Math.min(...positions);
     if (pos < 0) return false;
     const window = htmlLower.slice(Math.max(0, pos - 4_000), Math.min(htmlLower.length, pos + 4_000));
     if (/revenue|sales|geographic|segment/.test(window)) return true;
-    idx = pos + regionLower.length;
+    idx = pos + 1;
     checked++;
   }
   return false;
@@ -4536,7 +4582,16 @@ export async function getFilingData(
           });
         }
         const regionText = String(region ?? "");
-        if (filingHasRelevantGeoText(htmlText, regionText)) {
+        const relevantGeoText = filingHasRelevantGeoText(htmlText, regionText);
+        const filingReadTruncated = htmlText.length >= 4_900_000;
+        if (relevantGeoText || filingReadTruncated) {
+          const extractionWarnings = [...filing.warnings];
+          if (relevantGeoText) {
+            extractionWarnings.push({ code: "TABLE_NOT_PARSED", message: "Relevant filing text exists, but no geographic revenue table was parsed.", severity: "warning" });
+          }
+          if (filingReadTruncated) {
+            extractionWarnings.push({ code: "FILING_READ_TRUNCATED", message: "Geographic revenue scan read only the bounded filing prefix; relevant tables may appear later in the filing.", severity: "warning" });
+          }
           return withGeoShape({
             ticker,
             factType,
@@ -4555,7 +4610,7 @@ export async function getFilingData(
             accessionNumber: filing.accessionNumber,
             documentUrl: filing.documentUrl,
             evidence: {},
-            warnings: [...filing.warnings, { code: "TABLE_NOT_PARSED", message: "Relevant filing text exists, but no geographic revenue table was parsed.", severity: "warning" }],
+            warnings: extractionWarnings,
           });
         }
       }
