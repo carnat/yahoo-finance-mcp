@@ -168,6 +168,35 @@ class TestWorkerSecProvider(unittest.TestCase):
         self.assertIn("edgarListExhibitsFromIndex(edgarIndexUrl)", section)
         self.assertIn("matched.documentUrl", section)
 
+    def test_risk_factor_mentions_use_search_context_text(self) -> None:
+        match = re.search(
+            r"export async function extractRiskFactorMentions\([\s\S]*?return JSON\.stringify\(out\);",
+            self.worker,
+        )
+        self.assertIsNotNone(match)
+        section = match.group(0)
+        self.assertIn("item.contextText ?? item.context ?? item.excerpt", section)
+        self.assertIn("rowTerm.toLowerCase()", section)
+        self.assertIn('"FOUND_NO_EXCERPT"', section)
+        self.assertIn('"EXCERPT_NOT_AVAILABLE"', section)
+
+    def test_sec_fact_raw_xbrl_concepts_route_to_structured_facts(self) -> None:
+        self.assertIn("const SEC_XBRL_CONCEPT_ALIASES", self.tools)
+        self.assertIn("cashandcashequivalentsatcarryingvalue", self.tools)
+        self.assertIn('"UNSUPPORTED_XBRL_CONCEPT"', self.tools)
+        self.assertIn("mappedSecFactType(requestedFactName)", self.tools)
+        dispatch = re.search(
+            r'case "extract_sec_filing_fact":[\s\S]*?case "list_sec_company_filings"',
+            self.tools,
+        )
+        self.assertIsNotNone(dispatch)
+        section = dispatch.group(0)
+        self.assertIn("mappedFact != null", section)
+        self.assertIn("status,", section)
+        self.assertIn("decisionGrade:", section)
+        self.assertIn('"SEC_FACT_NOT_AVAILABLE"', self.worker)
+        self.assertIn('"NO_COMPANYCONCEPT_FACT_FOR_FORM"', self.worker)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

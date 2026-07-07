@@ -4232,6 +4232,55 @@ export async function getFilingData(
   }
 
   const cikPadded = await resolveCikForTicker(ticker);
+  const unavailableStructuredFact = async (
+    code: string,
+    message: string,
+    conceptName: string | null,
+  ): Promise<string> => {
+    const resolved = await resolveSecFiling(ticker, filingType, null).catch(() => null);
+    const filing = resolved?.ok ? resolved.filing : null;
+    const filingWarnings = resolved?.ok ? resolved.filing.warnings : [];
+    return JSON.stringify({
+      ticker,
+      factType,
+      concept: conceptName,
+      value: null,
+      denominator: null,
+      valueRatio: null,
+      valuePct: null,
+      rawValue: null,
+      rawDenominator: null,
+      unit: "USD",
+      unitScale: "actual",
+      period: null,
+      filingType: filing?.filingType ?? filingType,
+      filingDate: filing?.filingDate ?? null,
+      accessionNumber: filing?.accessionNumber ?? null,
+      documentUrl: filing?.documentUrl ?? null,
+      indexUrl: null,
+      primaryDocumentUrl: filing?.documentUrl ?? null,
+      extractionMethod: "NONE",
+      source: "SEC_COMPANYCONCEPT",
+      confidence: "NOT_DECISION_GRADE",
+      status: "SEC_FACT_NOT_AVAILABLE",
+      code,
+      decisionGrade: false,
+      evidence: filing ? {
+        sourceType: "sec_filing",
+        filingType: filing.filingType,
+        filingDate: filing.filingDate,
+        accessionNumber: filing.accessionNumber,
+        documentUrl: filing.documentUrl,
+      } : {},
+      xbrlContext: null,
+      calculation: null,
+      warnings: [
+        ...filingWarnings,
+        { code, message, severity: "warning" },
+      ],
+      _manualLookup: filingManualLookup(ticker, cikPadded, filingType),
+    });
+  };
   if (!cikPadded) {
     return withGeoShape({
       ticker,
@@ -4268,20 +4317,11 @@ export async function getFilingData(
   let filtered = facts.filter((f) => String(f.form ?? "").toUpperCase() === filingType.toUpperCase());
   if (!filtered.length) {
     if (factType !== "geographic_revenue") {
-      return withGeoShape({
-        ticker,
-        factType,
-        value: null,
-        denominator: null,
-        valueRatio: null,
-        valuePct: null,
-        extractionMethod: "NONE",
-        source: "NOT_DISCLOSED",
-        confidence: "NOT_DISCLOSED",
-        evidence: {},
-        warnings: [],
-        _manualLookup: filingManualLookup(ticker, cikPadded, filingType),
-      });
+      return unavailableStructuredFact(
+        "NO_COMPANYCONCEPT_FACT_FOR_FORM",
+        `SEC companyconcept has no ${concept} facts for filing type ${filingType}.`,
+        concept,
+      );
     }
     // For geographic_revenue, fall through to HTML fallback below (picked remains null)
   }
@@ -9449,19 +9489,25 @@ export async function extractRiskFactorMentions(
   detailLevel = "compact",
 ): Promise<string> {
   const matches: Record<string, unknown>[] = [];
+  let rawMatchCount = 0;
+  const warnings: Record<string, unknown>[] = [];
   for (const term of terms ?? []) {
     const search = parseObjectJson(await searchFilingText(ticker, [term], "Risk Factors", filingType, null, 1200, false));
+    rawMatchCount += Number(search.matchCount ?? 0);
     const list = Array.isArray(search.matches) ? search.matches : [];
     for (const row of list.slice(0, 3)) {
       if (!row || typeof row !== "object") continue;
       const item = row as Record<string, unknown>;
-      const excerpt = compactExcerpt(item.context ?? item.excerpt ?? "");
+      const rowTerm = String(item.term ?? "");
+      if (rowTerm && rowTerm.toLowerCase() !== String(term).toLowerCase()) continue;
+      const excerpt = compactExcerpt(item.contextText ?? item.context ?? item.excerpt ?? "");
+      if (!excerpt) continue;
       matches.push({
         term,
         sectionHeading: item.sectionHeading ?? "Risk Factors",
         excerpt,
-        excerptAvailable: excerpt.length > 0,
-        confidence: "MEDIUM",
+        excerptAvailable: true,
+        confidence: item.confidence ?? "MEDIUM",
         evidence: {
           filingDate: search.filingDate ?? null,
           accessionNumber: search.accessionNumber ?? null,
@@ -9470,7 +9516,20 @@ export async function extractRiskFactorMentions(
       });
     }
   }
-  const out: Record<string, unknown> = { ticker, matches, status: matches.length > 0 ? "FOUND" : "NOT_FOUND" };
+  if (rawMatchCount > 0 && matches.length === 0) {
+    warnings.push({
+      code: "EXCERPT_NOT_AVAILABLE",
+      message: "Risk terms were detected, but no readable excerpt window could be produced.",
+      severity: "warning",
+    });
+  }
+  const out: Record<string, unknown> = {
+    ticker,
+    matches,
+    status: matches.length > 0 ? "FOUND" : (rawMatchCount > 0 ? "FOUND_NO_EXCERPT" : "NOT_FOUND"),
+    rawMatchCount,
+    warnings,
+  };
   if (String(detailLevel).toLowerCase() === "raw") out.rawTerms = terms ?? [];
   return JSON.stringify(out);
 }

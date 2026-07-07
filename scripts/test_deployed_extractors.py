@@ -467,17 +467,25 @@ def main() -> int:
     for field in ("ticker", "matches", "status"):
         if field not in axti_risk_data:
             raise AssertionError(f"extract_risk_factor_mentions AXTI: missing field '{field}'")
-    for m in (axti_risk_data.get("matches") or []):
-        if not isinstance(m, dict):
-            continue
+    risk_matches = [m for m in (axti_risk_data.get("matches") or []) if isinstance(m, dict)]
+    if axti_risk_data.get("status") == "FOUND" and not risk_matches:
+        raise AssertionError(f"extract_risk_factor_mentions AXTI status FOUND but matches[] is empty: {axti_risk_data}")
+    nonempty_excerpts = 0
+    for m in risk_matches:
         for mf in ("term", "sectionHeading", "excerpt", "confidence", "evidence"):
             if mf not in m:
                 print(f"  WARN extract_risk_factor_mentions AXTI: match missing '{mf}'")
         excerpt = str(m.get("excerpt") or "")
+        if excerpt:
+            nonempty_excerpts += 1
+        if m.get("excerptAvailable") is not True:
+            raise AssertionError(f"extract_risk_factor_mentions AXTI: match missing excerptAvailable=true: {m}")
         if len(excerpt) > 500:
             raise AssertionError(
                 f"extract_risk_factor_mentions AXTI: excerpt too long ({len(excerpt)} chars): {excerpt[:100]!r}"
             )
+    if risk_matches and nonempty_excerpts == 0:
+        raise AssertionError(f"extract_risk_factor_mentions AXTI: matches have no non-empty excerpts: {axti_risk_data}")
     print(f"  PASS extract_risk_factor_mentions AXTI (status={axti_risk_data.get('status')!r}, matches={len(axti_risk_data.get('matches') or [])})")
 
     # --- Phase 3B-8: extract_customer_concentration ---
@@ -536,6 +544,28 @@ def main() -> int:
         if len(labels) == 1:
             print("  WARN LITE has single segment — may have reorganized into single reporting segment (FY2026 Q1)")
     print(f"  PASS extract_segment_revenue LITE (status={lite_seg_data.get('status')!r})")
+
+    asts_cash = call_tool("extract_sec_filing_fact", {
+        "ticker": "ASTS",
+        "fact_name": "CashAndCashEquivalentsAtCarryingValue",
+        "filing_type": "10-K",
+        "period": "latest",
+    }, 82)
+    assert_no_unknown_tool(asts_cash, "extract_sec_filing_fact ASTS cash concept")
+    asts_cash_data = extract_data(asts_cash)
+    if asts_cash_data.get("extractionMethod") == "text_search":
+        raise AssertionError(f"extract_sec_filing_fact ASTS cash raw concept should not use legacy text_search: {asts_cash_data}")
+    if asts_cash_data.get("value") is None:
+        if asts_cash_data.get("status") != "SEC_FACT_NOT_AVAILABLE":
+            raise AssertionError(f"extract_sec_filing_fact ASTS cash missing explicit limitation status: {asts_cash_data}")
+        if asts_cash_data.get("code") != "NO_COMPANYCONCEPT_FACT_FOR_FORM":
+            raise AssertionError(f"extract_sec_filing_fact ASTS cash wrong limitation code: {asts_cash_data}")
+        for field in ("filingDate", "accessionNumber", "documentUrl"):
+            if not asts_cash_data.get(field):
+                raise AssertionError(f"extract_sec_filing_fact ASTS cash limitation missing {field}: {asts_cash_data}")
+        if asts_cash_data.get("decisionGrade") is not False:
+            raise AssertionError(f"extract_sec_filing_fact ASTS cash limitation must be decisionGrade=false: {asts_cash_data}")
+    print(f"  PASS extract_sec_filing_fact ASTS cash concept (status={asts_cash_data.get('status')!r}, value={asts_cash_data.get('value')!r})")
 
     # --- Phase 3B-13: extract_exposure ---
 
