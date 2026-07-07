@@ -104,6 +104,43 @@ class TestWorkerSecProvider(unittest.TestCase):
         self.assertIn("function filingHasRelevantGeoText", self.worker)
         self.assertNotIn("stripHtmlTags(htmlText).toLowerCase()", self.worker)
 
+    def test_ownership_holder_schema_advertises_supported_types(self) -> None:
+        self.assertIn("export const SUPPORTED_HOLDER_TYPES", self.worker)
+        self.assertIn("supportedHolderTypes: SUPPORTED_HOLDER_TYPES", self.worker)
+        self.assertIn('"INPUT_VALIDATION_ERROR"', self.worker)
+        match = re.search(
+            r'name: "get_ownership_holders"[\s\S]*?required: \["ticker", "holder_type"\]',
+            self.tools,
+        )
+        self.assertIsNotNone(match)
+        schema = match.group(0)
+        self.assertIn("enum: SUPPORTED_HOLDER_TYPES", schema)
+        for holder_type in (
+            "major_holders",
+            "institutional_holders",
+            "mutualfund_holders",
+            "insider_transactions",
+            "insider_purchases",
+            "insider_roster_holders",
+        ):
+            self.assertIn(holder_type, schema)
+
+    def test_sec_filing_outline_uses_index_fallback_and_explicit_empty_status(self) -> None:
+        self.assertIn("function secIndexOutlinePayload", self.tools)
+        self.assertIn('"OUTLINE_NOT_PARSED"', self.tools)
+        self.assertIn('"TABLES_FOUND_OUTLINE_EMPTY"', self.tools)
+        dispatch = re.search(
+            r'case "get_sec_filing_outline":[\s\S]*?case "get_sec_filing_section"',
+            self.tools,
+        )
+        self.assertIsNotNone(dispatch)
+        section = dispatch.group(0)
+        self.assertIn("getSecFilingIndex(", section)
+        self.assertIn("secIndexOutlinePayload(idx)", section)
+        self.assertIn("getFilingOutline(", section)
+        self.assertIn('"OUTLINE_NOT_PARSED"', self.worker)
+        self.assertIn('"TABLES_FOUND_OUTLINE_EMPTY"', self.worker)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

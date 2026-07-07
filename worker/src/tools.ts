@@ -17,6 +17,7 @@ import {
   getVolumeGate,
   getHistoricalPrices,
   getHolderInfo,
+  SUPPORTED_HOLDER_TYPES,
   getMaPosition,
   getOptionChain,
   getOptionExpirationDates,
@@ -971,7 +972,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "analyze_financial_ratios", description: "Analyze financial ratios.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
   { name: "analyze_credit_health", description: "Analyze credit health metrics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
   { name: "get_corporate_actions", description: "Get corporate actions.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
-  { name: "get_ownership_holders", description: "Get ownership/holder data.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, holder_type: { type: "string" } }, required: ["ticker", "holder_type"] } },
+  { name: "get_ownership_holders", description: "Get ownership/holder data. Supported holder_type values: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, holder_type: { type: "string", enum: SUPPORTED_HOLDER_TYPES, description: "One of: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders." } }, required: ["ticker", "holder_type"] } },
   { name: "get_analyst_recommendations", description: "Get analyst recommendations and changes.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, recommendation_type: { type: "string" }, months_back: { type: "number", default: 12 } }, required: ["ticker", "recommendation_type"] } },
   { name: "get_analyst_rating_changes", description: "Get analyst rating changes radar.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, days_back: { type: "number", default: 30 } }, required: ["ticker"] } },
   { name: "analyze_earnings_momentum", description: "Analyze earnings momentum.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
@@ -980,7 +981,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "analyze_options_flow_window", description: "Analyze options flow in an event window.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, window_label: { type: "string" } }, required: ["ticker", "window_label"] } },
   { name: "find_put_hedge_candidates", description: "Find put hedge candidates.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, otm_pct_min: { type: "number", default: 8 }, otm_pct_max: { type: "number", default: 12 }, budget_usd: { type: "number", default: 500 }, expiry_after: { type: "string" } }, required: ["ticker"] } },
   { name: "list_sec_company_filings", description: "List SEC filings for a company from EDGAR submissions. Returns cik, filingType, filingDate, acceptedAt, accessionNumber, primaryDocument, documentUrl, and meta.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, form_type: { type: "string", default: "10-K" }, limit: { type: "number", default: 5 }, max_filings: { type: "number", default: 5 } }, required: ["ticker"] } },
-  { name: "get_sec_filing_outline", description: "Get SEC filing outline.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, document_url: { type: "string" } }, required: ["ticker"] } },
+  { name: "get_sec_filing_outline", description: "Get SEC filing outline. Uses the indexed filing path for ticker/filing_type calls and returns OUTLINE_NOT_PARSED with tableCount when tables exist but headings are not parsed.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, document_url: { type: "string" } }, required: ["ticker"] } },
   { name: "get_sec_filing_section", description: "Get SEC filing section text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, selector: { type: "object" }, section_name: { type: "string" }, document_url: { type: "string" }, context_chars: { type: "number", default: 3000 } }, required: ["ticker"] } },
   { name: "list_sec_filing_tables", description: "List SEC filing tables.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, document_url: { type: "string" }, offset: { type: "number", default: 0 }, limit: { type: "number", default: 50 } }, required: ["ticker"] } },
   { name: "get_sec_filing_table", description: "Get SEC filing table.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, document_url: { type: "string" }, table_index: { type: "number" }, max_rows: { type: "number", default: 30 } }, required: ["ticker", "table_index"] } },
@@ -989,7 +990,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "index_sec_filing", description: "Build a deterministic section/table index for an SEC filing. Identifies headings, tables, row labels, and units. period is reserved for future multi-period support; currently only 'latest' is supported unless accession_number is provided.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest", description: "Reserved. Only 'latest' supported currently." }, accession_number: { type: "string" } }, required: ["ticker"] } },
   { name: "get_sec_filing_index", description: "Get the pre-built section/table index for an SEC filing. Returns cached index when available; builds and caches on first call. period is reserved for future multi-period support; currently only 'latest' is supported unless accession_number is provided.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest", description: "Reserved. Only 'latest' supported currently." }, accession_number: { type: "string" } }, required: ["ticker"] } },
   { name: "list_sec_material_filings", description: "List latest material SEC filings for a ticker, filtering out noise (Form 4, 144, SC 13G, etc.). Returns only significant filings (10-K, 10-Q, 8-K, S-1, 424B, DEF 14A, 20-F, 6-K by default).", inputSchema: { type: "object", properties: { ticker: { type: "string" }, forms: { type: "array", items: { type: "string" }, default: ["10-K", "10-Q", "8-K", "S-1", "424B", "DEF 14A", "20-F", "6-K"] }, limit: { type: "number", default: 5 } }, required: ["ticker"] } },
-  { name: "get_sec_filing_intelligence", description: "Get a comprehensive intelligence map of a company's SEC filing — XBRL facts snapshot, section/table index summary, and recommended queries — in a single call.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, filing_index: { type: "number", default: 0 } }, required: ["ticker"] } },
+  { name: "get_sec_filing_intelligence", description: "Preferred diagnostic call when SEC extraction, outline, or table parsing disagrees. Returns XBRL facts snapshot, section/table index summary, and recommended queries in one call.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, filing_index: { type: "number", default: 0 } }, required: ["ticker"] } },
   { name: "get_sec_filing_section_markdown", description: "Return a specific SEC filing section as unverified Markdown from a degraded Worker HTML fallback. Payloads are blocked from decision-grade use and include source offsets/warnings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, section: { type: "string", default: "Item 1A" }, filing_type: { type: "string", default: "10-K" }, filing_index: { type: "number", default: 0 }, max_chars: { type: "number", default: 50000 } }, required: ["ticker"] } },
   { name: "analyze_position_signals", description: "Aggregate public market, analyst, earnings, and technical inputs that may be useful for a caller-defined scoring model. This tool does not access holdings, cost basis, position size, or private scoring rules.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
   { name: "calculate_price_target_distance", description: "Compare current market price to a user-supplied reference price target and return percentage distance and bracket labels.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, reference_target_price: { type: "number", description: "Preferred: user-supplied reference target price." }, io_pt: { type: "number", description: "Backward-compatible alias for reference_target_price." } }, required: ["ticker"] } },
@@ -1648,6 +1649,34 @@ function secIndexTablesPayload(indexPayload: Record<string, unknown>, offset: nu
   });
 }
 
+function secIndexOutlinePayload(indexPayload: Record<string, unknown>): string {
+  if (indexPayload.ok === false || indexPayload.error) return JSON.stringify(indexPayload);
+  const index = indexPayload.index && typeof indexPayload.index === "object"
+    ? indexPayload.index as Record<string, unknown>
+    : {};
+  const sections = Array.isArray(index.sections) ? index.sections as Record<string, unknown>[] : [];
+  const tables = Array.isArray(index.tables) ? index.tables as Record<string, unknown>[] : [];
+  const outline = sections.map((section) => ({
+    level: section.level ?? null,
+    title: section.heading ?? section.normalizedHeading ?? "",
+    sectionId: section.sectionId ?? null,
+  })).filter((section) => String(section.title ?? "").trim());
+  const warnings = outline.length === 0 && tables.length > 0
+    ? [{ code: "TABLES_FOUND_OUTLINE_EMPTY", message: "Filing tables were detected but no section outline headings were parsed.", severity: "warning" }]
+    : [];
+  return JSON.stringify({
+    ticker: indexPayload.ticker,
+    filingType: indexPayload.filingType ?? null,
+    filingDate: indexPayload.filingDate ?? null,
+    accessionNumber: indexPayload.accessionNumber ?? null,
+    documentUrl: indexPayload.documentUrl ?? null,
+    outline,
+    status: outline.length > 0 ? "OK" : (tables.length > 0 ? "OUTLINE_NOT_PARSED" : "EMPTY"),
+    tableCount: tables.length,
+    warnings,
+  });
+}
+
 const SEC_COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json";
 const SEC_DATA_BASE = "https://data.sec.gov";
 const SEC_ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data";
@@ -2268,10 +2297,11 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_sec_filing_outline": {
       const ticker = str(args.ticker);
       const filingType = str(args.filing_type ?? args.form_type, "10-K");
-      const docUrl = args.document_url != null
-        ? str(args.document_url)
-        : await resolveSecDocumentUrl(ticker, filingType, 1);
-      return getFilingOutline(ticker, args.accession_number != null ? str(args.accession_number) : null, docUrl);
+      if (args.document_url == null) {
+        const idx = JSON.parse(await getSecFilingIndex(ticker, filingType, str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null)) as Record<string, unknown>;
+        return secIndexOutlinePayload(idx);
+      }
+      return getFilingOutline(ticker, args.accession_number != null ? str(args.accession_number) : null, str(args.document_url));
     }
     case "get_sec_filing_section": {
       const ticker = str(args.ticker);
