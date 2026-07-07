@@ -1569,6 +1569,9 @@ type DoctrineToolStatus = {
   failureMode: string | null;
   evidenceRequired: boolean;
   sourceType: "sec_xbrl" | "sec_table" | "sec_filing" | "company_ir" | "yahoo" | "exchange" | "provider_diagnostic" | "unknown";
+  successCriteria?: string[];
+  limitationStatuses?: string[];
+  note?: string;
 };
 
 const TOOL_DOCTRINE_STATUS: Record<string, DoctrineToolStatus> = {
@@ -1597,12 +1600,15 @@ const TOOL_DOCTRINE_STATUS: Record<string, DoctrineToolStatus> = {
     sourceType: "company_ir",
   },
   extract_sec_filing_fact: {
-    capabilityStatus: "DEGRADED",
-    decisionGrade: false,
-    doctrineUse: "VERIFY_ONLY",
-    failureMode: "XBRL_CONTEXT_METADATA_UNDER_VERIFICATION",
+    capabilityStatus: "ACTIVE",
+    decisionGrade: true,
+    doctrineUse: "ALLOWED",
+    failureMode: null,
     evidenceRequired: true,
     sourceType: "sec_xbrl",
+    successCriteria: ["value", "xbrlContext", "sourceEvidence"],
+    limitationStatuses: ["SEC_FACT_NOT_AVAILABLE", "NO_COMPANYCONCEPT_FACT_FOR_FORM", "UNSUPPORTED_XBRL_CONCEPT"],
+    note: "Decision-grade only for successful XBRL facts with value, xbrlContext, and sourceEvidence; limitation statuses remain non-decision-grade at payload level.",
   },
 };
 

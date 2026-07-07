@@ -197,6 +197,26 @@ class TestWorkerSecProvider(unittest.TestCase):
         self.assertIn('"SEC_FACT_NOT_AVAILABLE"', self.worker)
         self.assertIn('"NO_COMPANYCONCEPT_FACT_FOR_FORM"', self.worker)
 
+    def test_management_commentary_uses_topic_alias_families(self) -> None:
+        self.assertIn("MANAGEMENT_COMMENTARY_TOPIC_ALIASES", self.worker)
+        for term in ("outlook", "expects", "production", "manufacturing", "net sales", "artificial intelligence"):
+            self.assertIn(term, self.worker)
+        match = re.search(
+            r"function sentenceForTopic\([\s\S]*?return best \? \{ excerpt: best\.excerpt, matchedTerms: best\.matchedTerms \} : null;",
+            self.worker,
+        )
+        self.assertIsNotNone(match)
+        section = match.group(0)
+        self.assertIn("managementCommentaryTerms(topic)", section)
+        self.assertIn("commentaryTermMatches(sentence, term)", section)
+        self.assertIn("matchedTerms", section)
+        commentary = re.search(
+            r"export async function extractManagementCommentary\([\s\S]*?return JSON\.stringify\(\{",
+            self.worker,
+        )
+        self.assertIsNotNone(commentary)
+        self.assertIn("matchedTerms: match.matchedTerms", commentary.group(0))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
