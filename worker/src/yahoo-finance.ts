@@ -944,10 +944,18 @@ const HOLDER_MOD: Record<string, string> = {
   insider_purchases: "netSharePurchaseActivity",
   insider_roster_holders: "insiderHolders",
 };
+export const SUPPORTED_HOLDER_TYPES = Object.keys(HOLDER_MOD);
 
 export async function getHolderInfo(ticker: string, type: string): Promise<string> {
   const mod = HOLDER_MOD[type];
-  if (!mod) return `Error: invalid holder type '${type}'`;
+  if (!mod) {
+    return mcpFailure(
+      "get_ownership_holders",
+      "INPUT_VALIDATION_ERROR",
+      `Invalid holder_type '${type}'. Supported holder_type values: ${SUPPORTED_HOLDER_TYPES.join(", ")}`,
+      { metaExtra: { supportedHolderTypes: SUPPORTED_HOLDER_TYPES } },
+    );
+  }
 
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=${mod}`
@@ -6286,7 +6294,17 @@ export async function getFilingOutline(ticker: string, _accessionNumber: string 
         outline.push({ level, title: text });
       }
     }
-    return JSON.stringify({ ticker, documentUrl, outline });
+    const tableCount = (html.match(/<table\b/gi) ?? []).length;
+    return JSON.stringify({
+      ticker,
+      documentUrl,
+      outline,
+      status: outline.length > 0 ? "OK" : (tableCount > 0 ? "OUTLINE_NOT_PARSED" : "EMPTY"),
+      tableCount,
+      warnings: outline.length === 0 && tableCount > 0
+        ? [{ code: "TABLES_FOUND_OUTLINE_EMPTY", message: "Filing tables were detected but no section outline headings were parsed.", severity: "warning" }]
+        : [],
+    });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
   }
