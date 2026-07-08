@@ -3,6 +3,9 @@
 The public MCP endpoint remains the Cloudflare Worker. Structured SEC fact
 tools use the official keyless SEC JSON APIs at `data.sec.gov`.
 
+See also `docs/provider-runtime-guidance.md` for the official SEC and
+Cloudflare constraints that govern provider/runtime changes.
+
 Provider endpoints used by the Worker:
 
 - `https://www.sec.gov/files/company_tickers.json`
@@ -29,6 +32,15 @@ heuristics.
 The official SEC `companyfacts` API is best for standardized entity-level XBRL
 facts such as total revenue. It may not expose company-specific geographic or
 segment dimensions such as "Greater China" in a normalized way.
+
+SEC's XBRL APIs are designed around non-custom taxonomy facts that apply to the
+whole filing entity. Geography, product, customer, and segment disclosures are
+often company-specific filing/table problems, so the Worker filing index and
+HTML table fallback remain part of the structured exposure path.
+
+Do not add a paid parser, sidecar, or extra provider until a concrete fixture
+proves the official SEC JSON plus Worker filing-index path cannot meet the
+tool's stated contract.
 
 When a filing and total revenue exist but no matching dimensional fact or table
 can be parsed, the Worker returns an explicit non-decision-grade status such as
@@ -58,3 +70,11 @@ official SEC JSON cannot expose a dimensional fact.
 Set `STRUCTURED_FACT_PROVIDER=disabled` as a Worker secret. The Worker will keep
 the public tools callable, but structured fact tools will return
 `STRUCTURED_FACT_PROVIDER_UNCONFIGURED`.
+
+## Provider Access Discipline
+
+- Use a declared SEC User-Agent for scripted access.
+- Cache repeated submissions/companyfacts/index fetches.
+- Avoid retry storms on SEC `429`; pass through explicit rate-limit status.
+- Keep broad extraction-quality sweeps out of blocking deploy gates unless the
+  response contract itself changed.
