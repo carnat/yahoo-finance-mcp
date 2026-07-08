@@ -997,7 +997,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "calculate_price_target_distance", description: "Compare current market price to a user-supplied reference price target and return percentage distance and bracket labels.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, reference_target_price: { type: "number", description: "Preferred: user-supplied reference target price." }, io_pt: { type: "number", description: "Backward-compatible alias for reference_target_price." } }, required: ["ticker"] } },
   { name: "get_company_news", description: "Get recent public company news and press releases from selected public sources with precise source labels (yahoo_finance_news, yahoo_finance_press_releases, finnhub), timestamps, URL, dedupe metadata, and short evidence text. Accepts a single ticker or an array of up to 5 symbols; for an array, results are returned as a per-ticker keyed object (each ticker fetched independently).", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }], description: "Ticker symbol (e.g. 'AAPL') or an array of up to 5 symbols (e.g. ['AAPL', 'MSFT']). If more than 5 are provided, only the first 5 are processed; split larger lists into multiple calls." }, max_results: { type: "number", default: 10 }, lookback_days: { type: "number", default: 14 }, sources: { type: "array", items: { type: "string" }, default: ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"] } }, required: ["ticker"] } },
   { name: "search_company_news", description: "Search public company news/events for a ticker and query across allowed source metadata and short snippets only.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Ticker symbol, e.g. 'AAPL'" }, query: { type: "string", description: "Required search query string." }, start_date: { type: "string", default: "" }, end_date: { type: "string", default: "" }, sources: { type: "array", items: { type: "string" }, default: ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"] }, max_results: { type: "number", default: 10 } }, required: ["ticker", "query"] } },
-  { name: "get_company_press_releases", description: "Get company press releases and official release-style events for verification only. SEC 8-K to EX-99.1 linkage is degraded and unresolved exhibit states are explicit.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, lookback_days: { type: "number", default: 90 }, max_results: { type: "number", default: 20 }, sources: { type: "array", items: { type: "string" }, default: ["yahoo_finance_press_releases", "company_ir", "newswire", "sec"] } }, required: ["ticker"] } },
+  { name: "get_company_press_releases", description: "Get company press releases and official release-style events. Gate use is payload-level: only payloads with decisionGrade:true and resolved SEC EX-99 press-release evidence are decision-grade; unresolved exhibit states remain explicit.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, lookback_days: { type: "number", default: 90 }, max_results: { type: "number", default: 20 }, sources: { type: "array", items: { type: "string" }, default: ["yahoo_finance_press_releases", "company_ir", "newswire", "sec"] } }, required: ["ticker"] } },
   { name: "get_sec_recent_events", description: "Get recent SEC filing events with filing type, filing date, accepted timestamp, accession number, SEC archive URL, and event metadata.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_types: { type: "array", items: { type: "string" }, default: ["8-K", "10-Q", "10-K"] }, lookback_days: { type: "number", default: 90 }, max_results: { type: "number", default: 20 } }, required: ["ticker"] } },
   { name: "get_public_event_timeline", description: "Get a deduplicated chronological timeline of public company events across selected public sources.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, start_date: { type: "string", default: "" }, end_date: { type: "string", default: "" }, sources: { type: "array", items: { type: "string" }, default: ["sec", "company_ir", "newswire", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"] }, max_results: { type: "number", default: 50 }, newest_first: { type: "boolean", default: false } }, required: ["ticker"] } },
   { name: "verify_company_event", description: "Verify whether a public company event is source-backed, returning CONFIRMED, PARTIAL, NOT_FOUND, STALE, or CONFLICTING with best evidence.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, event_query: { type: "string", description: "Keywords describing the event to verify." }, start_date: { type: "string", default: "" }, end_date: { type: "string", default: "" }, sources: { type: "array", items: { type: "string" }, default: ["sec", "company_ir", "newswire", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"] } }, required: ["ticker", "event_query"] } },
@@ -1485,6 +1485,39 @@ export function isGroupedMode(): boolean {
   return (getWorkerVar("TOOL_MODE") ?? "expanded").toLowerCase() === "grouped";
 }
 
+const ENVELOPE_SCHEMA_VERSION = "2026-07-08";
+const DEFAULT_TOOL_MODE = "expanded";
+
+function currentToolMode(): "expanded" | "grouped" {
+  return isGroupedMode() ? "grouped" : "expanded";
+}
+
+const RESPONSE_FIELD_CONTRACT = {
+  envelope: {
+    ok: "boolean success flag. Top-level ok:false is authoritative for tool failure.",
+    data: "successful payload object, or null when ok:false.",
+    error: "machine-readable error object when ok:false.",
+    meta: "transport/tool metadata. Do not use meta.decisionGrade alone to clear gates.",
+    diagnostics: "optional provider/runtime diagnostics when available.",
+  },
+  diagnosticsStatus: {
+    capabilityStatus: "tool-level readiness: ACTIVE, DEGRADED, PROVIDER_GATED, EXPERIMENTAL, or RETIRED.",
+    doctrineUse: "tool-level use policy: ALLOWED, VERIFY_ONLY, DIAGNOSTICS_ONLY, or BLOCKED.",
+    decisionGrade: "tool-level default only. Payload-level decisionGrade wins for specific calls.",
+    failureMode: "known tool-level limitation, or null.",
+    evidenceRequired: "whether payload evidence is required for decision use.",
+    sourceType: "dominant source family used by the tool.",
+  },
+  payloadLevel: {
+    status: "call-specific status such as FOUND, NOT_DISCLOSED, EXTRACTION_FAILED, or provider/error codes.",
+    confidence: "call-specific confidence or limitation class.",
+    decisionGrade: "call-specific decision-grade flag. This is the field gate-aware callers should inspect first.",
+    evidence: "source evidence for extracted facts when available.",
+    sourceEvidence: "structured XBRL/source evidence for SEC fact calls when available.",
+    warnings: "recoverable limitations or caveats; TABLE_NOT_PARSED blocks clean non-disclosure.",
+  },
+};
+
 export function listVisibleTools(): Tool[] {
   return isGroupedMode() ? GROUPED_TOOLS : TOOLS.filter((t) => !t.deprecated);
 }
@@ -1592,12 +1625,15 @@ const TOOL_DOCTRINE_STATUS: Record<string, DoctrineToolStatus> = {
     sourceType: "sec_filing",
   },
   get_company_press_releases: {
-    capabilityStatus: "DEGRADED",
+    capabilityStatus: "ACTIVE",
     decisionGrade: false,
-    doctrineUse: "VERIFY_ONLY",
-    failureMode: "SEC_EX99_LINKAGE_INCOMPLETE",
+    doctrineUse: "ALLOWED",
+    failureMode: null,
     evidenceRequired: true,
     sourceType: "company_ir",
+    successCriteria: ["coverageStatus=SEC_EX99_RESOLVED", "decisionGrade=true", "secEvidence.ex991Resolved=true"],
+    limitationStatuses: ["SEC_8K_FOUND_EX99_NOT_FOUND", "NO_OFFICIAL_RELEASE_SOURCE", "NO_YAHOO_PRESS_RELEASE", "COMPANY_IR_NOT_FOUND", "NOT_FOUND"],
+    note: "Tool is usable, but gate-clear is payload-level only; unresolved or non-SEC-release payloads remain non-decision-grade.",
   },
   extract_sec_filing_fact: {
     capabilityStatus: "ACTIVE",
@@ -1625,6 +1661,35 @@ function doctrineStatusDiagnostics(): Record<string, unknown> {
     doctrineToolStatusCount: Object.keys(TOOL_DOCTRINE_STATUS).length,
     doctrineToolStatusCounts: counts,
     doctrineToolStatus: TOOL_DOCTRINE_STATUS,
+  };
+}
+
+function hiddenAliasDiagnostics(): Record<string, unknown> {
+  return {
+    hiddenAliasCount: Object.keys(TOOL_ALIASES).length,
+    hiddenAliases: TOOL_ALIASES,
+    hiddenAliasVisibility: "hidden_from_tools_list",
+  };
+}
+
+function runtimeContractDiagnostics(): Record<string, unknown> {
+  const toolMode = currentToolMode();
+  return {
+    envelopeSchemaVersion: ENVELOPE_SCHEMA_VERSION,
+    toolMode,
+    defaultToolMode: DEFAULT_TOOL_MODE,
+    groupedAvailable: true,
+    groupedEnabled: toolMode === "grouped",
+    responseFieldContract: RESPONSE_FIELD_CONTRACT,
+    batchContracts: {
+      get_company_news: {
+        maxTickers: 5,
+        batchMode: "independent_per_ticker",
+        resultShape: "per_ticker_keyed_object",
+        emptyCriticalGateFallback: "retry_ticker_solo_or_web_search",
+      },
+    },
+    ...hiddenAliasDiagnostics(),
   };
 }
 
@@ -2571,6 +2636,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       const manifestHash = await computeHash(JSON.stringify(visibleTools.map(t => t.name)));
       const structuredFacts = await structuredFactProviderDiagnostics();
       const doctrineStatus = doctrineStatusDiagnostics();
+      const runtimeContract = runtimeContractDiagnostics();
       return JSON.stringify({
         status: "ok",
         serverVersion: version,
@@ -2588,6 +2654,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         deployedAt,
         generatedAt: new Date().toISOString(),
         privacyScope: "public_market_data_only",
+        ...runtimeContract,
         ...structuredFacts,
         ...doctrineStatus,
       });
@@ -2604,6 +2671,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       const workerSchemaGeneratedAt = new Date().toISOString();
       const structuredFacts = await structuredFactProviderDiagnostics();
       const doctrineStatus = doctrineStatusDiagnostics();
+      const runtimeContract = runtimeContractDiagnostics();
       return JSON.stringify({
         toolCount: canonicalToolCount,
         manifestVersion,
@@ -2618,6 +2686,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         manifestMismatch: null,
         staleConnectorWarning: "ChatGPT connector schema may lag the deployed Worker schema. Direct Worker tools/list and get_manifest_diagnostics are source of truth.",
         serverVersion: version,
+        ...runtimeContract,
         ...structuredFacts,
         ...doctrineStatus,
       });
