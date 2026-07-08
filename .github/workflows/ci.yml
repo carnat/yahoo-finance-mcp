@@ -82,6 +82,9 @@ jobs:
       - name: Workflow SDK version guard
         run: python scripts/test_workflow_sdk_versions.py
 
+      - name: Deployed canary registry validation
+        run: python scripts/test_deployed_canaries.py --validate-only
+
       # ── 2. Core contracts: envelope, validation, security ─────────────────
       - name: MCP envelope tests
         run: python scripts/test_mcp_envelope.py
