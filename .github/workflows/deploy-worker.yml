@@ -9,6 +9,8 @@ on:
       - "server.py"
       - "pyproject.toml"
       - "scripts/test_deployed_discovery.py"
+      - "scripts/test_deployed_canaries.py"
+      - "scripts/deployed_canaries.json"
       - "scripts/test_deployed_extractors.py"
       - "scripts/test_geographic_revenue_schema.py"
       - "scripts/test_deployed_sec_facts_provider.py"
@@ -108,6 +110,13 @@ jobs:
 
       - name: Wait for worker propagation
         run: sleep 30
+
+      - name: Verify deployed MCP contract canaries
+        run: python scripts/test_deployed_canaries.py
+        env:
+          ALLOW_NETWORK_SKIP: "0"
+          EXPECTED_TOOL_MODE: expanded
+          EXPECTED_BUILD_SHA: ${{ github.sha }}
 
       - name: Verify deployed MCP live discovery
         run: python scripts/test_deployed_discovery.py

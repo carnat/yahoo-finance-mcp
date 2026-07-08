@@ -16,3 +16,4 @@ Check any that apply:
 - [ ] Relevant smoke tests were updated in the same PR.
 - [ ] Live smoke inputs avoid hardcoded volatile dates/values, or use recorded fixtures.
 - [ ] Expected provider failures return explicit JSON status/error codes, not opaque text or fake success.
+- [ ] External/provider changes cite current official docs or state why no provider docs apply.

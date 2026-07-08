@@ -48,6 +48,8 @@ healthy:
 Any PR that changes a public tool, schema, envelope, provider, fallback, or
 diagnostic field should update the relevant smoke expectation in the same PR:
 
+- `scripts/deployed_canaries.json`
+- `scripts/test_deployed_canaries.py`
 - `scripts/test_deployed_discovery.py`
 - `scripts/test_deployed_extractors.py`
 - `scripts/test_deployed_sec_facts_provider.py`
@@ -57,3 +59,8 @@ diagnostic field should update the relevant smoke expectation in the same PR:
 If a live data-quality assertion is too brittle, move the exact assertion to a
 fixture/unit test and keep the deploy smoke focused on the truthful runtime
 contract.
+
+Provider-facing changes should cite the current official provider docs in the
+PR description or update the relevant docs in-repo. Community repos are useful
+implementation references, but they should not define the deployed contract by
+themselves.

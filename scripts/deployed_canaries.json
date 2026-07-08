@@ -1,0 +1,96 @@
+{
+  "schemaVersion": "2026-07-08",
+  "description": "Blocking deployed MCP contract canaries. Keep parser-quality sweeps in audit scripts unless the response contract itself changes.",
+  "canaries": [
+    {
+      "id": "health-contract",
+      "description": "Runtime health exposes the live envelope, tool-mode, hidden-alias, doctrine-status, and build-SHA contract.",
+      "tool": "health_check",
+      "args": {},
+      "assertion": "health_contract",
+      "blocking": true,
+      "volatility": "stable_contract"
+    },
+    {
+      "id": "manifest-contract",
+      "description": "Manifest diagnostics exposes the same machine-readable contract fields as health_check.",
+      "tool": "get_manifest_diagnostics",
+      "args": {},
+      "assertion": "manifest_contract",
+      "blocking": true,
+      "volatility": "stable_contract"
+    },
+    {
+      "id": "press-release-payload-gate",
+      "description": "Press-release results expose payload-level decision-grade fields instead of relying on tool-level status.",
+      "tool": "get_company_press_releases",
+      "args": {
+        "ticker": "AAPL",
+        "max_results": 5
+      },
+      "assertion": "press_release_payload_gate",
+      "blocking": true,
+      "volatility": "provider_status"
+    },
+    {
+      "id": "company-news-five-ticker-batch",
+      "description": "Batched company news returns independent per-ticker keys for all requested symbols.",
+      "tool": "get_company_news",
+      "args": {
+        "ticker": ["AAPL", "MSFT", "NVDA", "AMD", "TSM"],
+        "max_results": 1,
+        "lookback_days": 14
+      },
+      "assertion": "news_batch_independent",
+      "blocking": true,
+      "volatility": "provider_status"
+    },
+    {
+      "id": "overnight-diagnostics-only",
+      "description": "Overnight quote remains a Yahoo extended-hours diagnostic proxy, never decision-grade overnight venue data.",
+      "tool": "get_overnight_quote",
+      "args": {
+        "ticker": "AAPL"
+      },
+      "assertion": "overnight_diagnostics_only",
+      "blocking": true,
+      "volatility": "stable_contract"
+    },
+    {
+      "id": "query-sec-index-unsupported-type",
+      "description": "Unsupported SEC index queries return top-level ok:false with supported query types.",
+      "tool": "query_sec_filing_index",
+      "args": {
+        "ticker": "AAPL",
+        "query_type": "unsupported_query_type",
+        "params": {}
+      },
+      "assertion": "unsupported_query_error",
+      "blocking": true,
+      "volatility": "stable_contract"
+    },
+    {
+      "id": "deprecated-alias-validation-error",
+      "description": "Deprecated aliases preserve migration metadata when validation fails.",
+      "tool": "get_historical_stock_prices",
+      "args": {},
+      "assertion": "deprecated_alias_error",
+      "blocking": true,
+      "volatility": "stable_contract"
+    },
+    {
+      "id": "aaoi-china-geographic-positive",
+      "description": "Stable AAOI China positive fixture remains numeric and evidence-bearing.",
+      "tool": "extract_geographic_revenue",
+      "args": {
+        "ticker": "AAOI",
+        "region": "China",
+        "filing_type": "10-K",
+        "period": "latest"
+      },
+      "assertion": "aaoi_china_positive",
+      "blocking": true,
+      "volatility": "stable_positive_fixture"
+    }
+  ]
+}
