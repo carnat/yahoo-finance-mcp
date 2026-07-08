@@ -4255,6 +4255,9 @@ export async function getFilingData(
       primaryDocumentUrl: payload.primaryDocumentUrl ?? null,
       evidence: payload.evidence ?? {},
       calculation: payload.calculation ?? null,
+      scanCoverage: payload.scanCoverage ?? null,
+      searchedTerms: payload.searchedTerms ?? [],
+      notDisclosedBasis: payload.notDisclosedBasis ?? null,
       status: payload.status ?? (payload.value != null ? "FOUND" : (payload.confidence ?? "NOT_DISCLOSED")),
       code: payload.code ?? null,
       xbrlContext: payload.xbrlContext ?? null,
@@ -4593,8 +4596,18 @@ export async function getFilingData(
           });
         }
         const regionText = String(region ?? "");
+        const searchedTerms = geoRegionAliases(regionText);
         const relevantGeoText = filingHasRelevantGeoText(htmlText, regionText);
         const filingReadTruncated = htmlText.length >= 4_900_000;
+        const scanCoverage = {
+          sourceType: "sec_primary_html",
+          documentUrl: filing.documentUrl,
+          charsScanned: htmlText.length,
+          maxCharsRequested: 5_000_000,
+          filingReadTruncated,
+          relevantGeoTextFound: relevantGeoText,
+          searchedTerms,
+        };
         if (relevantGeoText || filingReadTruncated) {
           const extractionWarnings = [...filing.warnings];
           if (relevantGeoText) {
@@ -4620,11 +4633,79 @@ export async function getFilingData(
             filingDate: filing.filingDate,
             accessionNumber: filing.accessionNumber,
             documentUrl: filing.documentUrl,
-            evidence: {},
+            primaryDocumentUrl: filing.documentUrl,
+            evidence: {
+              sourceType: "sec_filing",
+              filingType: filing.filingType,
+              filingDate: filing.filingDate,
+              accessionNumber: filing.accessionNumber,
+              documentUrl: filing.documentUrl,
+            },
+            scanCoverage,
+            searchedTerms,
             warnings: extractionWarnings,
           });
         }
+        return withGeoShape({
+          ticker,
+          factType,
+          region,
+          value: null,
+          denominator: null,
+          valueRatio: null,
+          valuePct: null,
+          extractionMethod: "NONE",
+          source: "NOT_DISCLOSED",
+          confidence: "NOT_DISCLOSED",
+          status: "NOT_DISCLOSED",
+          filingType: filing.filingType,
+          filingDate: filing.filingDate,
+          accessionNumber: filing.accessionNumber,
+          documentUrl: filing.documentUrl,
+          primaryDocumentUrl: filing.documentUrl,
+          evidence: {
+            sourceType: "sec_filing",
+            filingType: filing.filingType,
+            filingDate: filing.filingDate,
+            accessionNumber: filing.accessionNumber,
+            documentUrl: filing.documentUrl,
+          },
+          scanCoverage,
+          searchedTerms,
+          notDisclosedBasis: "Resolved and scanned the primary SEC filing HTML; no matching geographic revenue disclosure text or parseable table was found for the requested region.",
+          warnings: [...filing.warnings],
+        });
       }
+      return withGeoShape({
+        ticker,
+        factType,
+        region,
+        value: null,
+        denominator: null,
+        valueRatio: null,
+        valuePct: null,
+        extractionMethod: "NONE",
+        source: "EXTRACTION_FAILED",
+        confidence: "EXTRACTION_FAILED",
+        status: "EXTRACTION_FAILED",
+        code: "FILING_TEXT_NOT_AVAILABLE",
+        filingType: filing.filingType,
+        filingDate: filing.filingDate,
+        accessionNumber: filing.accessionNumber,
+        documentUrl: filing.documentUrl,
+        primaryDocumentUrl: filing.documentUrl,
+        evidence: {
+          sourceType: "sec_filing",
+          filingType: filing.filingType,
+          filingDate: filing.filingDate,
+          accessionNumber: filing.accessionNumber,
+          documentUrl: filing.documentUrl,
+        },
+        warnings: [
+          ...filing.warnings,
+          { code: "FILING_TEXT_NOT_AVAILABLE", message: "Resolved SEC filing, but primary HTML text could not be fetched for geographic revenue scan.", severity: "warning" },
+        ],
+      });
     }
     return withGeoShape({
       ticker,
@@ -8035,15 +8116,26 @@ export async function getCompanyPressReleases(
     status = collectionStatus(processedItems, out.sourcesUsed, warnings);
   }
 
+  const coverageStatus = hasSecEx99Found ? "SEC_EX99_RESOLVED"
+    : sec8kWithoutEx99Count > 0 ? "SEC_8K_FOUND_EX99_NOT_FOUND"
+    : processedItems.length > 0 ? "OFFICIAL_RELEASE_SOURCE_FOUND"
+    : "NO_OFFICIAL_RELEASE_SOURCE";
+  const payloadDecisionGrade = hasSecEx99Found;
+  const decisionGradeBasis = payloadDecisionGrade
+    ? "Resolved SEC 8-K EX-99 press-release exhibit for this call."
+    : "No resolved SEC EX-99 press-release exhibit in this call; use for verification/context only.";
+
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
     items: processedItems.slice(0, clampInt(maxResults, 20, 1, 100)),
     meta: { sourcesUsed: out.sourcesUsed, deduped: true, watermark: out.watermark },
     warnings,
-    capabilityStatus: "DEGRADED",
-    decisionGrade: false,
-    doctrineUse: "VERIFY_ONLY",
-    failureMode: "SEC_EX99_LINKAGE_INCOMPLETE",
+    coverageStatus,
+    decisionGrade: payloadDecisionGrade,
+    decisionGradeBasis,
+    capabilityStatus: "ACTIVE",
+    doctrineUse: "ALLOWED",
+    failureMode: payloadDecisionGrade ? null : coverageStatus,
   };
   if (sec8kEvidence.length > 0) payload.secEvidence = sec8kEvidence.slice(0, 10);
   if (status) payload.status = status;
@@ -9368,6 +9460,9 @@ export async function extractGeographicRevenue(
       sourceColumns: Array.isArray(evidence.sourceColumns) ? evidence.sourceColumns : [],
     },
     calculation: payload.calculation ?? null,
+    scanCoverage: payload.scanCoverage ?? null,
+    searchedTerms: Array.isArray(payload.searchedTerms) ? payload.searchedTerms : [],
+    notDisclosedBasis: payload.notDisclosedBasis ?? null,
     status: payload.value != null ? "FOUND" : (payloadStatus || "NOT_DISCLOSED"),
     code: payload.code ?? (payloadStatus && payloadStatus !== "FOUND" && payloadStatus !== "NOT_DISCLOSED" ? payloadStatus : null),
     warnings,
@@ -9412,6 +9507,9 @@ export async function extractGeographicRevenue(
           sourceColumns: Array.isArray(fbEvidence.sourceColumns) ? fbEvidence.sourceColumns : [],
         };
         out.calculation = fallbackPayload.calculation ?? null;
+        out.scanCoverage = fallbackPayload.scanCoverage ?? null;
+        out.searchedTerms = Array.isArray(fallbackPayload.searchedTerms) ? fallbackPayload.searchedTerms : [];
+        out.notDisclosedBasis = fallbackPayload.notDisclosedBasis ?? null;
         out.status = "FOUND";
         out.code = fallbackPayload.code ?? null;
         // Append advisory warning noting automatic 20-F selection

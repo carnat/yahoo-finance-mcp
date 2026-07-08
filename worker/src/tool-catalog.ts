@@ -35,7 +35,7 @@ export const GROUPED_TOOL_DEFS: GroupedToolDef[] = [
   },
   {
     "name": "news_events",
-    "description": "Company news, press releases, and public event timeline.\n\nActions:\n- get_company_news: Multi-source news. Params: ticker, max_results, lookback_days, sources\n- search_company_news: Keyword search. Params: ticker, query, start_date, end_date, sources, max_results\n- get_company_press_releases: Verification-only press releases; SEC EX-99.1 linkage is degraded. Params: ticker, lookback_days, max_results\n- get_yahoo_finance_news: Legacy Yahoo news. Params: ticker\n- get_sec_recent_events: SEC filings as events. Params: ticker, lookback_days\n- get_public_event_timeline: Chronological timeline. Params: ticker, lookback_days\n- verify_company_event: Cross-validate event. Params: ticker, event_description, event_date",
+    "description": "Company news, press releases, and public event timeline.\n\nActions:\n- get_company_news: Multi-source news. Params: ticker, max_results, lookback_days, sources\n- search_company_news: Keyword search. Params: ticker, query, start_date, end_date, sources, max_results\n- get_company_press_releases: Official release events; decision-grade only when payload decisionGrade=true with resolved SEC EX-99 evidence. Params: ticker, lookback_days, max_results\n- get_yahoo_finance_news: Legacy Yahoo news. Params: ticker\n- get_sec_recent_events: SEC filings as events. Params: ticker, lookback_days\n- get_public_event_timeline: Chronological timeline. Params: ticker, lookback_days\n- verify_company_event: Cross-validate event. Params: ticker, event_description, event_date",
     "actions": {
       "get_company_news": "get_company_news",
       "get_company_press_releases": "get_company_press_releases",

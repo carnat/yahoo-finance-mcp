@@ -112,8 +112,9 @@ schemas, aliases, and deprecation metadata.
   proxy. It does not provide true 20:00-04:00 ET overnight venue data.
 - `get_sec_filing_section_markdown` is degraded and should be verified against
   the source filing before use; it uses a lossy Worker HTML fallback.
-- `get_company_press_releases` is verification-only; SEC 8-K to EX-99.1 linkage
-  may be incomplete.
+- `get_company_press_releases` is payload-gated: only responses with
+  `decisionGrade:true` and resolved SEC EX-99 press-release evidence are
+  decision-grade; unresolved exhibit states remain explicit.
 - `extract_sec_filing_fact` and SEC exposure tools can return explicit
   limitation statuses such as `EXTRACTION_FAILED`, `TABLE_NOT_PARSED`,
   `PROVIDER_LIMITATION`, or `NO_DIMENSIONAL_REVENUE_FACT`.

@@ -12,6 +12,7 @@ on:
       - "scripts/test_deployed_extractors.py"
       - "scripts/test_geographic_revenue_schema.py"
       - "scripts/test_deployed_sec_facts_provider.py"
+      - "scripts/stamp_worker_build.py"
       - "scripts/live_smoke_utils.py"
       - "scripts/test_tools.py"
       - "scripts/test_universal_aliases.py"
@@ -46,6 +47,11 @@ jobs:
       - name: Type-check
         run: npx tsc --noEmit
         working-directory: worker
+
+      - name: Stamp Worker build metadata
+        run: python scripts/stamp_worker_build.py
+        env:
+          BUILD_SHA: ${{ github.sha }}
 
       - name: Deploy to Cloudflare Workers
         run: npx wrangler deploy
@@ -108,6 +114,7 @@ jobs:
         env:
           ALLOW_NETWORK_SKIP: "0"
           EXPECTED_TOOL_MODE: expanded
+          EXPECTED_BUILD_SHA: ${{ github.sha }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
 
       - name: Verify alias behavior
@@ -140,6 +147,7 @@ jobs:
           ALLOW_NETWORK_SKIP: "0"
           EXPECTED_TOOL_MODE: grouped
           TOOL_MODE: grouped
+          EXPECTED_BUILD_SHA: ${{ github.sha }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
 
       - name: Verify deployed grouped extractor tools

@@ -123,6 +123,25 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("deprecatedTool", smoke)
         self.assertIn("DEPRECATED_ALIAS", smoke)
         self.assertIn("doctrineToolStatus", smoke)
+        self.assertIn("envelopeSchemaVersion", smoke)
+        self.assertIn("EXPECTED_BUILD_SHA", smoke)
+
+    def test_diagnostics_exposes_contract_tool_mode_and_hidden_aliases(self) -> None:
+        tools = TOOLS_TS.read_text(encoding="utf-8")
+        for field in (
+            "ENVELOPE_SCHEMA_VERSION",
+            "responseFieldContract",
+            "toolMode",
+            "defaultToolMode",
+            "groupedAvailable",
+            "groupedEnabled",
+            "hiddenAliases",
+            "hiddenAliasVisibility",
+            "get_holder_info",
+            "batchMode",
+            "independent_per_ticker",
+        ):
+            self.assertIn(field, tools)
 
     def test_press_releases_exposes_8k_without_ex99_status(self) -> None:
         worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
@@ -135,9 +154,14 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("cikFromUrl", worker)
         self.assertIn("evidence.ex991Url = ex991Url", worker)
         self.assertIn('sourceType: "sec_ex99_found"', worker)
-        self.assertIn('capabilityStatus: "DEGRADED"', worker)
-        self.assertIn('doctrineUse: "VERIFY_ONLY"', worker)
-        self.assertIn('failureMode: "SEC_EX99_LINKAGE_INCOMPLETE"', worker)
+        self.assertIn("coverageStatus", worker)
+        self.assertIn("decisionGradeBasis", worker)
+        self.assertIn("payloadDecisionGrade", worker)
+        tools = TOOLS_TS.read_text(encoding="utf-8")
+        self.assertIn('capabilityStatus: "ACTIVE"', tools)
+        self.assertIn('doctrineUse: "ALLOWED"', tools)
+        self.assertIn("coverageStatus=SEC_EX99_RESOLVED", tools)
+        self.assertNotIn('failureMode: "SEC_EX99_LINKAGE_INCOMPLETE"', tools)
 
     def test_press_release_ex99_resolver_uses_index_exhibits(self) -> None:
         worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
@@ -206,10 +230,21 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("overallStatus = explicitRevenueStatus", worker)
         self.assertIn("code: explicitRevenueStatus", worker)
 
+    def test_geo_not_disclosed_requires_search_coverage_metadata(self) -> None:
+        worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
+        for field in (
+            "scanCoverage",
+            "searchedTerms",
+            "notDisclosedBasis",
+            "relevantGeoTextFound",
+            "Resolved and scanned the primary SEC filing HTML",
+        ):
+            self.assertIn(field, worker)
+
     def test_tool_descriptions_do_not_overstate_degraded_tools(self) -> None:
         tools = TOOLS_TS.read_text(encoding="utf-8")
         self.assertIn("unverified Markdown from a degraded Worker HTML fallback", tools)
-        self.assertIn("verification only", tools)
+        self.assertIn("Gate use is payload-level", tools)
 
 
 if __name__ == "__main__":

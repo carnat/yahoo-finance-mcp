@@ -119,6 +119,9 @@ class TestWorkerSecProvider(unittest.TestCase):
         self.assertIn('"FILING_READ_TRUNCATED"', self.worker)
         self.assertIn("filingReadTruncated", self.worker)
         self.assertIn("relevantGeoText || filingReadTruncated", self.worker)
+        self.assertIn("notDisclosedBasis", self.worker)
+        self.assertIn("scanCoverage", self.worker)
+        self.assertIn("searchedTerms", self.worker)
 
     def test_geo_html_fallback_china_does_not_match_taiwan_row(self) -> None:
         node = os.environ.get("NODE_BINARY") or shutil.which("node")

@@ -185,6 +185,7 @@ SMOKE_ARGS: dict[str, dict] = {
 _ALLOW_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in ("1", "true", "yes")
 _GROUPED_DISCOVERY = False
 _EXPECTED_TOOL_MODE = os.environ.get("EXPECTED_TOOL_MODE", os.environ.get("TOOL_MODE", "")).lower()
+_EXPECTED_BUILD_SHA = os.environ.get("EXPECTED_BUILD_SHA", "").strip()
 _FORBIDDEN_PUBLIC_TERMS = (
     r"\bIO\b",
     r"Commander",
@@ -408,12 +409,27 @@ def _check_geographic_revenue_schema(data: dict, label: str, require_positive: b
         "valuePct",
         "rawValue",
         "rawDenominator",
-        "filingDate",
-        "accessionNumber",
     )
     for key in stable_null_keys:
         if key in data and data.get(key) is not None:
             raise AssertionError(f"{label}: {key} should be null in NOT_DISCLOSED/NOT_FOUND payload")
+    if confidence == "NOT_DISCLOSED":
+        evidence = data.get("evidence")
+        if isinstance(evidence, list) and evidence:
+            evidence = evidence[0]
+        if not isinstance(evidence, dict):
+            evidence = {}
+        if not (evidence.get("accessionNumber") and evidence.get("filingDate") and (evidence.get("documentUrl") or evidence.get("url"))):
+            raise AssertionError(f"{label}: clean NOT_DISCLOSED must include filing metadata: {data}")
+        if not isinstance(data.get("scanCoverage"), dict):
+            raise AssertionError(f"{label}: clean NOT_DISCLOSED missing scanCoverage: {data}")
+        if not isinstance(data.get("searchedTerms"), list) or not data.get("searchedTerms"):
+            raise AssertionError(f"{label}: clean NOT_DISCLOSED missing searchedTerms: {data}")
+        if not data.get("notDisclosedBasis"):
+            raise AssertionError(f"{label}: clean NOT_DISCLOSED missing notDisclosedBasis: {data}")
+        warning_codes = {str(w.get("code")) for w in data.get("warnings", []) if isinstance(w, dict)}
+        if "TABLE_NOT_PARSED" in warning_codes:
+            raise AssertionError(f"{label}: NOT_DISCLOSED must not carry TABLE_NOT_PARSED: {data}")
     return False
 
 
@@ -782,9 +798,32 @@ def main() -> int:
                     "buildSha",
                     "deployedAt",
                     "privacyScope",
+                    "envelopeSchemaVersion",
+                    "toolMode",
+                    "defaultToolMode",
+                    "groupedAvailable",
+                    "groupedEnabled",
+                    "responseFieldContract",
+                    "hiddenAliases",
+                    "batchContracts",
                 ):
                     if field not in health:
                         raise AssertionError(f"health_check missing field: {field}")
+                if health.get("envelopeSchemaVersion") != "2026-07-08":
+                    raise AssertionError(f"health_check envelopeSchemaVersion mismatch: {health}")
+                if _EXPECTED_BUILD_SHA and health.get("buildSha") != _EXPECTED_BUILD_SHA:
+                    raise AssertionError(
+                        f"health_check buildSha mismatch: {health.get('buildSha')!r} != {_EXPECTED_BUILD_SHA!r}"
+                    )
+                if health.get("defaultToolMode") != "expanded":
+                    raise AssertionError(f"health_check defaultToolMode mismatch: {health}")
+                if health.get("groupedAvailable") is not True:
+                    raise AssertionError(f"health_check groupedAvailable mismatch: {health}")
+                if "get_holder_info" not in (health.get("hiddenAliases") or {}):
+                    raise AssertionError(f"health_check hiddenAliases missing get_holder_info: {health}")
+                news_contract = ((health.get("batchContracts") or {}).get("get_company_news") or {})
+                if news_contract.get("batchMode") != "independent_per_ticker":
+                    raise AssertionError(f"health_check get_company_news batch contract missing: {health}")
                 if health.get("toolCount") != len(names):
                     raise AssertionError(
                         f"health_check toolCount mismatch: {health.get('toolCount')} != tools/list {len(names)}"
@@ -797,7 +836,7 @@ def main() -> int:
                 expected_doctrine = {
                     "get_overnight_quote": ("DEGRADED", "DIAGNOSTICS_ONLY"),
                     "get_sec_filing_section_markdown": ("DEGRADED", "BLOCKED"),
-                    "get_company_press_releases": ("DEGRADED", "VERIFY_ONLY"),
+                    "get_company_press_releases": ("ACTIVE", "ALLOWED"),
                     "extract_sec_filing_fact": ("ACTIVE", "ALLOWED"),
                 }
                 for tool_name, (capability, use) in expected_doctrine.items():
@@ -886,6 +925,11 @@ def main() -> int:
                 raise AssertionError("get_company_press_releases missing items[]")
             if "warnings" not in data or not isinstance(data.get("warnings"), list):
                 raise AssertionError("get_company_press_releases missing warnings[]")
+            for field in ("coverageStatus", "decisionGrade", "decisionGradeBasis"):
+                if field not in data:
+                    raise AssertionError(f"get_company_press_releases missing payload gate field {field}: {data}")
+            if data.get("decisionGrade") is True and data.get("coverageStatus") != "SEC_EX99_RESOLVED":
+                raise AssertionError(f"get_company_press_releases decisionGrade true without SEC_EX99_RESOLVED: {data}")
             status = data.get("status")
             if status == "SEC_8K_FOUND_EX99_NOT_FOUND":
                 if not isinstance(data.get("secEvidence"), list) or not data.get("secEvidence"):
@@ -1064,6 +1108,49 @@ def main() -> int:
             f"get_historical_stock_prices({{}}) expected validation error or ok=false, got: {bad_str[:400]}"
         )
     print("  PASS invalid-args test (empty ticker returns validation error, not provider 404)")
+
+    manifest_diag = call_tool("get_manifest_diagnostics", {}, 903)
+    assert_no_unknown_tool(manifest_diag, "get_manifest_diagnostics")
+    assert_not_double_enveloped_failure(manifest_diag, "get_manifest_diagnostics")
+    diag_data = extract_data(manifest_diag)
+    if not isinstance(diag_data, dict):
+        raise AssertionError(f"get_manifest_diagnostics returned non-object: {diag_data!r}")
+    for field in (
+        "envelopeSchemaVersion",
+        "toolMode",
+        "defaultToolMode",
+        "groupedAvailable",
+        "groupedEnabled",
+        "responseFieldContract",
+        "hiddenAliases",
+        "doctrineToolStatus",
+        "batchContracts",
+        "buildSha",
+    ):
+        if field not in diag_data:
+            raise AssertionError(f"get_manifest_diagnostics missing field {field}: {diag_data}")
+    if _EXPECTED_BUILD_SHA and diag_data.get("buildSha") != _EXPECTED_BUILD_SHA:
+        raise AssertionError(
+            f"get_manifest_diagnostics buildSha mismatch: {diag_data.get('buildSha')!r} != {_EXPECTED_BUILD_SHA!r}"
+        )
+    if "get_holder_info" not in (diag_data.get("hiddenAliases") or {}):
+        raise AssertionError(f"get_manifest_diagnostics hiddenAliases missing get_holder_info: {diag_data}")
+    print("  PASS get_manifest_diagnostics contract smoke")
+
+    batch_news = call_tool(
+        "get_company_news",
+        {"ticker": ["AAPL", "MSFT", "NVDA", "AMD", "TSM"], "max_results": 1, "lookback_days": 14},
+        904,
+    )
+    assert_no_unknown_tool(batch_news, "get_company_news batch")
+    assert_not_double_enveloped_failure(batch_news, "get_company_news batch")
+    batch_data = extract_data(batch_news)
+    if not isinstance(batch_data, dict):
+        raise AssertionError(f"get_company_news batch returned non-object: {batch_data!r}")
+    for ticker in ("AAPL", "MSFT", "NVDA", "AMD", "TSM"):
+        if ticker not in batch_data:
+            raise AssertionError(f"get_company_news batch missing key {ticker}: {batch_data}")
+    print("  PASS get_company_news 5-ticker independent batch smoke")
 
     # Tool-scan loop: use SMOKE_ARGS for known-safe tools; skip runtime call for others
     for idx, t in enumerate(tools, start=1000):
