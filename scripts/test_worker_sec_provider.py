@@ -3,8 +3,12 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 
@@ -115,6 +119,53 @@ class TestWorkerSecProvider(unittest.TestCase):
         self.assertIn('"FILING_READ_TRUNCATED"', self.worker)
         self.assertIn("filingReadTruncated", self.worker)
         self.assertIn("relevantGeoText || filingReadTruncated", self.worker)
+
+    def test_geo_html_fallback_china_does_not_match_taiwan_row(self) -> None:
+        node = os.environ.get("NODE_BINARY") or shutil.which("node")
+        if node is None:
+            raise unittest.SkipTest("node executable not found")
+
+        helper_start = self.worker.index("function stripHtmlTags")
+        helper_end = self.worker.index("function filingHasRelevantGeoText")
+        helper_source = self.worker[helper_start:helper_end]
+        fixture = r"""
+const aaoiTable = `
+  <p>The following tables set forth the Company's revenue and asset information by geographic region (in thousands):</p>
+  <table>
+    <tr><th></th><th>2025</th><th>2024</th><th>2023</th></tr>
+    <tr><td>United States</td><td>$19,378</td><td>$10,921</td><td>$30,798</td></tr>
+    <tr><td>Taiwan</td><td>174,197</td><td>126,639</td><td>143,528</td></tr>
+    <tr><td>China</td><td>262,140</td><td>111,805</td><td>43,320</td></tr>
+    <tr><td>Total revenues</td><td>$455,715</td><td>$249,365</td><td>$217,646</td></tr>
+  </table>
+`;
+const china = extractGeoRevenueFromHtml(aaoiTable, "China");
+if (!china) throw new Error("China fixture returned null");
+if (china.usd !== 262140000) throw new Error(`China fixture picked ${china.usd}`);
+if (china.sourceRows[0][0] !== "China") throw new Error(`China fixture row was ${china.sourceRows[0][0]}`);
+if (china.denominator !== 455715000) throw new Error(`China denominator was ${china.denominator}`);
+if (Math.round(china.pct * 10000) / 100 !== 57.52) throw new Error(`China pct was ${china.pct}`);
+const taiwan = extractGeoRevenueFromHtml(aaoiTable, "Taiwan");
+if (!taiwan) throw new Error("Taiwan fixture returned null");
+if (taiwan.usd !== 174197000) throw new Error(`Taiwan fixture picked ${taiwan.usd}`);
+if (taiwan.sourceRows[0][0] !== "Taiwan") throw new Error(`Taiwan fixture row was ${taiwan.sourceRows[0][0]}`);
+"""
+        tmp_path: pathlib.Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".ts", encoding="utf-8", delete=False, dir=ROOT) as handle:
+                handle.write(f"{helper_source}\n{fixture}")
+                tmp_path = pathlib.Path(handle.name)
+            proc = subprocess.run(
+                [node, "--experimental-strip-types", str(tmp_path)],
+                text=True,
+                capture_output=True,
+                cwd=ROOT,
+                timeout=20,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
 
     def test_ownership_holder_schema_advertises_supported_types(self) -> None:
         self.assertIn("export const SUPPORTED_HOLDER_TYPES", self.worker)

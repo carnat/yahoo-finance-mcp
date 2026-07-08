@@ -3900,17 +3900,28 @@ function geoRegionAliases(region: string): string[] {
     for (const alias of [
       "china",
       "mainland china",
+      "people's republic of china",
+      "peoples republic of china",
       "prc",
-      "greater china",
-      "hong kong",
-      "taiwan",
       "country:cn",
       "srt:chinamember",
-      "greaterchinamember",
+      "chinamember",
+      "mainlandchinamember",
     ]) aliases.add(alias);
   } else if (lower === "greater china" || compact === "greaterchina") {
     aliases.add("greater china");
     aliases.add("greaterchinamember");
+  } else if (lower === "hong kong" || compact === "hongkong") {
+    aliases.add("hong kong");
+    aliases.add("hongkong");
+    aliases.add("country:hk");
+    aliases.add("srt:hongkongmember");
+    aliases.add("hongkongmember");
+  } else if (lower === "taiwan") {
+    aliases.add("taiwan");
+    aliases.add("country:tw");
+    aliases.add("srt:taiwanmember");
+    aliases.add("taiwanmember");
   }
   return [...aliases].filter(Boolean);
 }
