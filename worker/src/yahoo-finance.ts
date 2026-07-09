@@ -82,6 +82,10 @@ const COMPANY_IR_DISCOVERY_PATHS = [
   "/rss.cfm",
   "/feed",
   "/rss",
+  "/rss-news-feeds",
+  "/rss-feeds",
+  "/feed/press-releases.xml",
+  "/feed/news.xml",
 ];
 const COMPANY_IR_BLOCKED_WEBSITE_HOSTS = [
   "bloomberg.com",
@@ -7652,7 +7656,7 @@ async function discoverCompanyIrFeeds(identity: NewsCompanyIdentity, warnings: R
 }
 
 function parseCompanyIrFeedItems(xml: string): { feedTitle: string | null; itemXmls: Array<{ kind: "rss" | "atom"; xml: string }> } {
-  if (/<!doctype|<!entity/i.test(xml)) throw new Error("unsupported XML declaration in company IR RSS/Atom");
+  if (/<!entity/i.test(xml)) throw new Error("unsupported XML entity declaration in company IR RSS/Atom");
   if (!looksLikeFeed(xml)) throw new Error("invalid company IR RSS/Atom XML");
   const feedTitle = extractXmlTag(xml, "title") || null;
   const itemXmls: Array<{ kind: "rss" | "atom"; xml: string }> = [];
@@ -8364,8 +8368,8 @@ async function collectGlobeNewswireEvents(
     }
 
     try {
-      if (/<!doctype|<!entity/i.test(xml)) {
-        throw new Error("unsupported XML declaration in GlobeNewswire RSS");
+      if (/<!entity/i.test(xml)) {
+        throw new Error("unsupported XML entity declaration in GlobeNewswire RSS");
       }
       if (!/<rss\b/i.test(xml) || !/<channel\b/i.test(xml) || !/<\/rss>/i.test(xml)) {
         throw new Error("invalid GlobeNewswire RSS XML");

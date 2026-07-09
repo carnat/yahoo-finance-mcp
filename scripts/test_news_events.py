@@ -1946,6 +1946,24 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         self.assertIn("sourceDiagnostics.company_ir", worker_text)
         self.assertIn("company-ir-source-status", canary_text)
 
+    def test_worker_company_ir_xml_safety_check_relaxed(self):
+        """Worker XML safety check should be relaxed to support standard DOCTYPEs but reject ENTITYs."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+            worker_text = f.read()
+
+        # Confirm safety check is now specific to ENTITY declarations
+        self.assertIn("unsupported XML entity declaration in company IR RSS/Atom", worker_text)
+        self.assertIn("unsupported XML entity declaration in GlobeNewswire RSS", worker_text)
+        self.assertNotIn("unsupported XML declaration in company IR RSS/Atom", worker_text)
+        self.assertNotIn("unsupported XML declaration in GlobeNewswire RSS", worker_text)
+
+        # Confirm expanded candidate paths are present
+        self.assertIn('"/rss-news-feeds"', worker_text)
+        self.assertIn('"/rss-feeds"', worker_text)
+        self.assertIn('"/feed/press-releases.xml"', worker_text)
+        self.assertIn('"/feed/news.xml"', worker_text)
+
 
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
