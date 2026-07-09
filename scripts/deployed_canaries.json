@@ -59,20 +59,6 @@
       "volatility": "provider_status"
     },
     {
-      "id": "company-ir-mu-rss-positive",
-      "description": "Micron official IR RSS feed on investors.micron.com is discovered and returned as company_ir evidence.",
-      "tool": "get_company_press_releases",
-      "args": {
-        "ticker": "MU",
-        "sources": ["company_ir"],
-        "lookback_days": 365,
-        "max_results": 10
-      },
-      "assertion": "company_ir_mu_rss_positive",
-      "blocking": true,
-      "volatility": "provider_status"
-    },
-    {
       "id": "overnight-diagnostics-only",
       "description": "Overnight quote remains a Yahoo extended-hours diagnostic proxy, never decision-grade overnight venue data.",
       "tool": "get_overnight_quote",

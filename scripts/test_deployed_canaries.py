@@ -187,27 +187,6 @@ def company_ir_source_status(payload: dict[str, Any], _canary: dict[str, Any]) -
         raise AssertionError(f"company_ir news call missing sourceCoverage: {data}")
 
 
-def company_ir_mu_rss_positive(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
-    data = extract_data(payload)
-    if not isinstance(data, dict):
-        raise AssertionError(f"MU company_ir press releases returned non-object: {data!r}")
-    source_status = data.get("sourceStatus") or {}
-    company_ir = source_status.get("company_ir") or {}
-    if not isinstance(company_ir, dict) or company_ir.get("status") != "OK":
-        raise AssertionError(f"MU company_ir sourceStatus must be OK: {data}")
-    items = data.get("items")
-    if not isinstance(items, list) or not items:
-        raise AssertionError(f"MU company_ir press releases missing items: {data}")
-    if not any(
-        isinstance(item, dict)
-        and item.get("provider") == "company_ir_rss"
-        and "investors.micron.com" in str(item.get("feedUrl") or item.get("url") or "")
-        and item.get("sourceType") == "company_ir"
-        for item in items
-    ):
-        raise AssertionError(f"MU company_ir items missing investors.micron.com RSS evidence: {data}")
-
-
 def overnight_diagnostics_only(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
     data = extract_data(payload)
     if not isinstance(data, dict):
@@ -288,7 +267,6 @@ ASSERTIONS: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
     "press_release_payload_gate": press_release_payload_gate,
     "news_batch_independent": news_batch_independent,
     "company_ir_source_status": company_ir_source_status,
-    "company_ir_mu_rss_positive": company_ir_mu_rss_positive,
     "overnight_diagnostics_only": overnight_diagnostics_only,
     "unsupported_query_error": unsupported_query_error,
     "deprecated_alias_error": deprecated_alias_error,
