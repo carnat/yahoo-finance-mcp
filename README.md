@@ -130,6 +130,11 @@ Structured SEC revenue/geography facts use official SEC data plus the Worker
 filing/index fallback. No separate Python sidecar or paid hosted parser is
 required.
 
+Provider/runtime design notes live in:
+
+- `docs/sec-facts-provider.md`
+- `docs/provider-runtime-guidance.md`
+
 ## Development
 
 Common checks:
