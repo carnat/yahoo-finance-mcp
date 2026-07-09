@@ -102,6 +102,11 @@ def _assert_contract(data: Any, label: str) -> None:
     news_contract = ((data.get("batchContracts") or {}).get("get_company_news") or {})
     if news_contract.get("batchMode") != "independent_per_ticker":
         raise AssertionError(f"{label} missing independent get_company_news batch contract: {data}")
+    ir_contract = data.get("companyIrRssDiscovery") or {}
+    if ir_contract.get("provider") != "company_ir_rss" or ir_contract.get("source") != "company_ir":
+        raise AssertionError(f"{label} missing company IR RSS discovery contract: {data}")
+    if ir_contract.get("defaultInGetCompanyNews") is not False:
+        raise AssertionError(f"{label} company IR RSS must not be in get_company_news defaults: {data}")
 
     status_map = data.get("doctrineToolStatus") or {}
     press = status_map.get("get_company_press_releases") or {}
@@ -153,6 +158,33 @@ def news_batch_independent(payload: dict[str, Any], canary: dict[str, Any]) -> N
             raise AssertionError(f"get_company_news batch missing {ticker}: {data}")
         if not isinstance(data.get(ticker), dict):
             raise AssertionError(f"get_company_news batch entry for {ticker} must be object: {data}")
+
+
+def company_ir_source_status(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
+    data = extract_data(payload)
+    if not isinstance(data, dict):
+        raise AssertionError(f"company_ir news call returned non-object: {data!r}")
+    source_status = data.get("sourceStatus") or {}
+    if not isinstance(source_status, dict) or "company_ir" not in source_status:
+        raise AssertionError(f"company_ir news call missing sourceStatus.company_ir: {data}")
+    company_ir = source_status.get("company_ir") or {}
+    if not isinstance(company_ir, dict):
+        raise AssertionError(f"sourceStatus.company_ir must be an object: {data}")
+    allowed = {
+        "OK",
+        "WEBSITE_NOT_AVAILABLE",
+        "FEED_NOT_FOUND",
+        "DISCOVERY_NOT_FOUND",
+        "PROVIDER_ERROR",
+        "PARSE_ERROR",
+        "EMPTY_RESULT",
+    }
+    if company_ir.get("status") not in allowed:
+        raise AssertionError(f"unexpected company_ir source status: {data}")
+    if "companyName" not in company_ir or "identityConfidence" not in company_ir:
+        raise AssertionError(f"company_ir source status missing identity diagnostics: {data}")
+    if data.get("sourceCoverage") not in {"FULL", "PARTIAL"}:
+        raise AssertionError(f"company_ir news call missing sourceCoverage: {data}")
 
 
 def overnight_diagnostics_only(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
@@ -234,6 +266,7 @@ ASSERTIONS: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
     "manifest_contract": manifest_contract,
     "press_release_payload_gate": press_release_payload_gate,
     "news_batch_independent": news_batch_independent,
+    "company_ir_source_status": company_ir_source_status,
     "overnight_diagnostics_only": overnight_diagnostics_only,
     "unsupported_query_error": unsupported_query_error,
     "deprecated_alias_error": deprecated_alias_error,

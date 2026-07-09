@@ -1808,6 +1808,54 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         self.assertNotIn('ct !== "PRESS_RELEASE"', worker_text)
         self.assertNotIn("ct !== 'PRESS_RELEASE'", worker_text)
 
+    def test_worker_company_ir_uses_official_rss_autodiscovery(self):
+        """Worker company_ir source must use official RSS/Atom discovery, not Yahoo backfill."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+            worker_text = f.read()
+        with open(os.path.join(root, "worker", "src", "tools.ts"), encoding="utf-8") as f:
+            tools_text = f.read()
+
+        self.assertIn("COMPANY_IR_DISCOVERY_PATHS", worker_text)
+        self.assertIn("collectCompanyIrRssEvents", worker_text)
+        self.assertIn('provider: "company_ir_rss"', worker_text)
+        self.assertIn('discoveredVia: "company_website_rss_autodiscovery"', worker_text)
+        self.assertIn("same_domain_or_validated_linked_feed", tools_text)
+        self.assertNotIn('|| selected.includes("company_ir");', worker_text)
+        self.assertNotIn('else if (selected.includes("company_ir")', worker_text)
+
+    def test_worker_news_items_expose_decision_use(self):
+        """All event providers should label source strength for LLM callers."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+            worker_text = f.read()
+
+        self.assertIn("function sourceDecisionUse", worker_text)
+        self.assertIn('decisionUse: sourceDecisionUse("company_ir")', worker_text)
+        self.assertIn('decisionUse: sourceDecisionUse("newswire")', worker_text)
+        self.assertIn('decisionUse: sourceDecisionUse("sec_filing")', worker_text)
+        self.assertIn('decisionUse: sourceDecisionUse("company_news")', worker_text)
+        self.assertIn("decisionUse: sourceDecisionUse(sourceKey)", worker_text)
+
+    def test_worker_company_ir_status_is_machine_readable(self):
+        """Company IR discovery failures must be status-coded for agents."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+            worker_text = f.read()
+        with open(os.path.join(root, "scripts", "deployed_canaries.json"), encoding="utf-8") as f:
+            canary_text = f.read()
+
+        for status in (
+            "WEBSITE_NOT_AVAILABLE",
+            "FEED_NOT_FOUND",
+            "DISCOVERY_NOT_FOUND",
+            "PROVIDER_ERROR",
+            "PARSE_ERROR",
+        ):
+            self.assertIn(status, worker_text)
+        self.assertIn("sourceDiagnostics.company_ir", worker_text)
+        self.assertIn("company-ir-source-status", canary_text)
+
 
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)
