@@ -115,6 +115,12 @@ schemas, aliases, and deprecation metadata.
 - `get_company_press_releases` is payload-gated: only responses with
   `decisionGrade:true` and resolved SEC EX-99 press-release evidence are
   decision-grade; unresolved exhibit states remain explicit.
+- News/event tools can use `company_ir` to attempt safe official company
+  website RSS/Atom autodiscovery. `get_company_news` keeps lightweight Yahoo
+  Finance/Finnhub defaults for batch efficiency; pass `sources:["company_ir"]`
+  or use timeline/verification tools when official company-site coverage is
+  needed. RSS-only releases are verification/context evidence unless the payload
+  also resolves SEC EX-99 evidence.
 - `extract_sec_filing_fact` and SEC exposure tools can return explicit
   limitation statuses such as `EXTRACTION_FAILED`, `TABLE_NOT_PARSED`,
   `PROVIDER_LIMITATION`, or `NO_DIMENSIONAL_REVENUE_FACT`.
@@ -125,6 +131,8 @@ schemas, aliases, and deprecation metadata.
 
 - Yahoo Finance public market data
 - SEC EDGAR official public filing data and `data.sec.gov` JSON APIs
+- Official company website RSS/Atom feeds when discoverable from public profile
+  website metadata
 
 Structured SEC revenue/geography facts use official SEC data plus the Worker
 filing/index fallback. No separate Python sidecar or paid hosted parser is

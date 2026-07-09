@@ -46,6 +46,19 @@
       "volatility": "provider_status"
     },
     {
+      "id": "company-ir-source-status",
+      "description": "Company IR RSS/Atom discovery exposes machine-readable status without requiring a live feed to exist.",
+      "tool": "get_public_event_timeline",
+      "args": {
+        "ticker": "AAPL",
+        "sources": ["company_ir"],
+        "max_results": 5
+      },
+      "assertion": "company_ir_source_status",
+      "blocking": true,
+      "volatility": "provider_status"
+    },
+    {
       "id": "overnight-diagnostics-only",
       "description": "Overnight quote remains a Yahoo extended-hours diagnostic proxy, never decision-grade overnight venue data.",
       "tool": "get_overnight_quote",
