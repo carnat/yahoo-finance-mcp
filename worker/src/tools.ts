@@ -1699,6 +1699,7 @@ function runtimeContractDiagnostics(): Record<string, unknown> {
       safeGuards: [
         "yahoo_profile_company_website",
         "sec_identity_metadata_when_available",
+        "investors_and_ir_subdomain_probe",
         "same_domain_or_validated_linked_feed",
         "rss_atom_only",
         "no_broad_crawl",

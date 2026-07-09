@@ -1817,12 +1817,41 @@ class TestGlobeNewswireRSS(unittest.TestCase):
             tools_text = f.read()
 
         self.assertIn("COMPANY_IR_DISCOVERY_PATHS", worker_text)
+        self.assertIn('"/rss.cfm"', worker_text)
+        self.assertIn("companyIrCandidateHosts", worker_text)
+        self.assertIn("investors.${identity.websiteRoot}", worker_text)
+        self.assertIn("ir.${identity.websiteRoot}", worker_text)
         self.assertIn("collectCompanyIrRssEvents", worker_text)
         self.assertIn('provider: "company_ir_rss"', worker_text)
         self.assertIn('discoveredVia: "company_website_rss_autodiscovery"', worker_text)
+        self.assertIn("investors_and_ir_subdomain_probe", tools_text)
         self.assertIn("same_domain_or_validated_linked_feed", tools_text)
         self.assertNotIn('|| selected.includes("company_ir");', worker_text)
         self.assertNotIn('else if (selected.includes("company_ir")', worker_text)
+
+    def test_worker_company_ir_rejects_non_feed_candidates(self):
+        """oEmbed/JSON/social links must not be treated as RSS candidates."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+            worker_text = f.read()
+
+        self.assertIn("rejectedCompanyIrFeedCandidate", worker_text)
+        self.assertIn('path.includes("/wp-json/")', worker_text)
+        self.assertIn('path.includes("oembed")', worker_text)
+        self.assertIn('path.endsWith(".json")', worker_text)
+        self.assertIn('"twitter.com"', worker_text)
+        self.assertIn('"x.com"', worker_text)
+
+    def test_worker_newswire_ticker_match_checks_exchange(self):
+        """Exact ticker matches from newswire RSS should reject incompatible listed exchanges."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+            worker_text = f.read()
+
+        self.assertIn("function exchangeCompatibleWithStockCategory", worker_text)
+        self.assertIn("normalizedExchangeCode", worker_text)
+        self.assertIn("globenewswireStockCategoryMatches(tickerU, stockCategories, exchange)", worker_text)
+        self.assertIn("collectGlobeNewswireEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, identity?.exchange ?? null)", worker_text)
 
     def test_worker_news_items_expose_decision_use(self):
         """All event providers should label source strength for LLM callers."""

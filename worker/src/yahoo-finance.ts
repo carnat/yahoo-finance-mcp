@@ -79,6 +79,7 @@ const COMPANY_IR_DISCOVERY_PATHS = [
   "/newsroom",
   "/news",
   "/press-releases",
+  "/rss.cfm",
   "/feed",
   "/rss",
 ];
@@ -6974,9 +6975,49 @@ function sameCompanyDomain(candidateHost: string, companyHost: string | null, co
   );
 }
 
+function companyIrCandidateHosts(identity: NewsCompanyIdentity): string[] {
+  const hosts: string[] = [];
+  const seen = new Set<string>();
+  const add = (host: string | null) => {
+    if (!host) return;
+    const clean = host.trim().toLowerCase();
+    if (!clean) return;
+    const key = hostWithoutWww(clean);
+    if (seen.has(key)) return;
+    seen.add(key);
+    hosts.push(clean);
+  };
+  try {
+    if (identity.website) add(new URL(identity.website).hostname);
+  } catch {
+    // Fall back to the normalized host below.
+  }
+  add(identity.websiteHost);
+  if (identity.websiteRoot) {
+    add(`investors.${identity.websiteRoot}`);
+    add(`ir.${identity.websiteRoot}`);
+  }
+  return hosts.slice(0, 3);
+}
+
 function blockedCompanyWebsiteHost(host: string): boolean {
   const h = hostWithoutWww(host);
   return COMPANY_IR_BLOCKED_WEBSITE_HOSTS.some(blocked => h === blocked || h.endsWith(`.${blocked}`));
+}
+
+function rejectedCompanyIrFeedCandidate(url: string): boolean {
+  try {
+    const u = new URL(url);
+    const host = hostWithoutWww(u.hostname);
+    const path = u.pathname.toLowerCase();
+    const query = u.search.toLowerCase();
+    if (blockedCompanyWebsiteHost(host)) return true;
+    if (path.includes("/wp-json/") || path.includes("oembed") || query.includes("oembed")) return true;
+    if (path.endsWith(".json") || query.includes("format=json")) return true;
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 function normalizeCompanyWebsite(raw: unknown): { url: string | null; host: string | null; root: string | null; warning: Record<string, unknown> | null } {
@@ -7062,6 +7103,26 @@ function normalizeLinkedUrl(raw: string, baseUrl: string): string | null {
 
 function looksLikeFeed(text: string): boolean {
   return /<rss\b/i.test(text) || /<feed\b/i.test(text);
+}
+
+function normalizedExchangeCode(exchange: string | null | undefined): string | null {
+  const e = _str(exchange).toUpperCase();
+  if (!e) return null;
+  if (e.includes("NASDAQ") || e.includes("NMS") || e.includes("NGM") || e.includes("NCM")) return "NASDAQ";
+  if (e.includes("NYSE") || e === "NYQ") return "NYSE";
+  if (e.includes("AMEX") || e.includes("NYSE AMERICAN") || e === "ASE") return "NYSEAMERICAN";
+  return null;
+}
+
+function exchangeCompatibleWithStockCategory(exchange: string | null | undefined, category: string): boolean {
+  const expected = normalizedExchangeCode(exchange);
+  if (!expected) return true;
+  const prefix = category.split(":")[0]?.trim().toUpperCase();
+  if (!prefix || prefix === category.toUpperCase()) return true;
+  if (expected === "NASDAQ") return prefix === "NASDAQ";
+  if (expected === "NYSE") return prefix === "NYSE";
+  if (expected === "NYSEAMERICAN") return ["NYSEAMERICAN", "NYSE AMERICAN", "AMEX"].includes(prefix);
+  return true;
 }
 
 function normalizeIso(raw: unknown): string | null {
@@ -7371,9 +7432,12 @@ function extractGlobeNewswireCategories(xml: string, domain: string): string[] {
   return out;
 }
 
-function globenewswireStockCategoryMatches(ticker: string, stockCategories: string[]): boolean {
+function globenewswireStockCategoryMatches(ticker: string, stockCategories: string[], exchange?: string | null): boolean {
   const tickerU = ticker.toUpperCase();
-  return stockCategories.some(category => category.split(":").pop()?.trim().toUpperCase() === tickerU);
+  return stockCategories.some(category =>
+    category.split(":").pop()?.trim().toUpperCase() === tickerU &&
+    exchangeCompatibleWithStockCategory(exchange, category)
+  );
 }
 
 function globenewswirePlainText(value: string): string {
@@ -7468,18 +7532,23 @@ async function fetchCompanyIrText(url: string, maxBytes: number, ttlMs: number):
   return text;
 }
 
-function candidateCompanyIrPageUrls(identity: NewsCompanyIdentity): string[] {
-  if (!identity.website) return [];
-  const base = new URL(identity.website);
+function candidateCompanyIrPageUrlGroups(identity: NewsCompanyIdentity): string[][] {
   const urls: string[] = [];
-  for (const path of COMPANY_IR_DISCOVERY_PATHS) {
-    const u = new URL(base.toString());
-    u.pathname = path;
-    u.search = "";
-    u.hash = "";
-    urls.push(u.toString());
+  const groups: string[][] = [];
+  const protocol = identity.website?.startsWith("http://") ? "http:" : "https:";
+  for (const host of companyIrCandidateHosts(identity)) {
+    urls.length = 0;
+    const base = `${protocol}//${host}/`;
+    for (const path of COMPANY_IR_DISCOVERY_PATHS) {
+      const u = new URL(base);
+      u.pathname = path;
+      u.search = "";
+      u.hash = "";
+      urls.push(u.toString());
+    }
+    groups.push([...new Set(urls)].slice(0, COMPANY_IR_DISCOVERY_PATHS.length));
   }
-  return [...new Set(urls)].slice(0, COMPANY_IR_DISCOVERY_PATHS.length);
+  return groups;
 }
 
 function extractCompanyIrFeedLinks(pageHtml: string, pageUrl: string): Array<{ url: string; method: string }> {
@@ -7488,6 +7557,7 @@ function extractCompanyIrFeedLinks(pageHtml: string, pageUrl: string): Array<{ u
   const push = (raw: string, method: string) => {
     const url = normalizeLinkedUrl(raw, pageUrl);
     if (!url || seen.has(url)) return;
+    if (rejectedCompanyIrFeedCandidate(url)) return;
     seen.add(url);
     links.push({ url, method });
   };
@@ -7532,37 +7602,40 @@ async function discoverCompanyIrFeeds(identity: NewsCompanyIdentity, warnings: R
 
   const feeds: DiscoveredCompanyIrFeed[] = [];
   const seenFeeds = new Set<string>();
-  for (const pageUrl of candidateCompanyIrPageUrls(identity)) {
-    let text = "";
-    try {
-      text = await fetchCompanyIrText(pageUrl, COMPANY_IR_HTML_MAX_BYTES, COMPANY_IR_DISCOVERY_TTL_MS);
-    } catch {
-      continue;
-    }
-
-    if (looksLikeFeed(text)) {
-      const pageHost = new URL(pageUrl).hostname;
-      if (sameCompanyDomain(pageHost, identity.websiteHost, identity.websiteRoot)) {
-        feeds.push({ feedUrl: pageUrl, pageUrl, discoveryMethod: "direct_feed_path", hostRelationship: "same_domain" });
-        seenFeeds.add(pageUrl);
-      }
-      continue;
-    }
-
-    for (const candidate of extractCompanyIrFeedLinks(text, pageUrl)) {
-      if (seenFeeds.has(candidate.url)) continue;
-      let relationship: DiscoveredCompanyIrFeed["hostRelationship"] = "linked_external";
+  for (const pageUrls of candidateCompanyIrPageUrlGroups(identity)) {
+    for (const pageUrl of pageUrls) {
+      let text = "";
       try {
-        const candidateHost = new URL(candidate.url).hostname;
-        if (sameCompanyDomain(candidateHost, identity.websiteHost, identity.websiteRoot)) relationship = "same_domain";
+        text = await fetchCompanyIrText(pageUrl, COMPANY_IR_HTML_MAX_BYTES, COMPANY_IR_DISCOVERY_TTL_MS);
       } catch {
         continue;
       }
-      seenFeeds.add(candidate.url);
-      feeds.push({ feedUrl: candidate.url, pageUrl, discoveryMethod: candidate.method, hostRelationship: relationship });
+
+      if (looksLikeFeed(text)) {
+        const pageHost = new URL(pageUrl).hostname;
+        if (sameCompanyDomain(pageHost, identity.websiteHost, identity.websiteRoot)) {
+          feeds.push({ feedUrl: pageUrl, pageUrl, discoveryMethod: "direct_feed_path", hostRelationship: "same_domain" });
+          seenFeeds.add(pageUrl);
+        }
+        continue;
+      }
+
+      for (const candidate of extractCompanyIrFeedLinks(text, pageUrl)) {
+        if (seenFeeds.has(candidate.url)) continue;
+        let relationship: DiscoveredCompanyIrFeed["hostRelationship"] = "linked_external";
+        try {
+          const candidateHost = new URL(candidate.url).hostname;
+          if (sameCompanyDomain(candidateHost, identity.websiteHost, identity.websiteRoot)) relationship = "same_domain";
+        } catch {
+          continue;
+        }
+        seenFeeds.add(candidate.url);
+        feeds.push({ feedUrl: candidate.url, pageUrl, discoveryMethod: candidate.method, hostRelationship: relationship });
+        if (feeds.length >= 8) break;
+      }
       if (feeds.length >= 8) break;
     }
-    if (feeds.length >= 8) break;
+    if (feeds.length > 0) break;
   }
 
   if (feeds.length === 0) {
@@ -8218,7 +8291,8 @@ async function collectGlobeNewswireEvents(
   retrievedAt: string,
   startDate = "",
   endDate = "",
-  lookbackDays?: number
+  lookbackDays?: number,
+  exchange?: string | null
 ): Promise<{ items: Record<string, unknown>[]; warnings: Record<string, unknown>[]; used: boolean }> {
   const warnings: Record<string, unknown>[] = [];
   const items: Record<string, unknown>[] = [];
@@ -8257,7 +8331,7 @@ async function collectGlobeNewswireEvents(
       while ((m = itemRe.exec(xml)) !== null) {
         const itemXml = m[1];
         const stockCategories = extractGlobeNewswireCategories(itemXml, GLOBENEWSWIRE_STOCK_CATEGORY_DOMAIN);
-        if (!globenewswireStockCategoryMatches(tickerU, stockCategories)) continue;
+        if (!globenewswireStockCategoryMatches(tickerU, stockCategories, exchange)) continue;
 
         const title = extractXmlTag(itemXml, "title");
         const descriptionRaw = extractXmlTag(itemXml, "description");
@@ -8448,6 +8522,16 @@ async function collectCompanyEvents(
   const items: Record<string, unknown>[] = [];
   const sourcesUsed: string[] = [];
   const sourceDiagnostics: Record<string, unknown> = {};
+  let eventIdentity: NewsCompanyIdentity | null = null;
+  const getEventIdentity = async (): Promise<NewsCompanyIdentity | null> => {
+    if (eventIdentity) return eventIdentity;
+    try {
+      eventIdentity = await resolveNewsCompanyIdentity(ticker);
+    } catch {
+      eventIdentity = null;
+    }
+    return eventIdentity;
+  };
 
   if (selected.includes("sec")) {
     const sec = await collectSecEvents(ticker, secFilingTypes, safeMax, watermark, startDate, endDate, safeLookback);
@@ -8517,7 +8601,8 @@ async function collectCompanyEvents(
   }
 
   if (selected.includes("newswire")) {
-    const gnw = await collectGlobeNewswireEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback);
+    const identity = await getEventIdentity();
+    const gnw = await collectGlobeNewswireEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, identity?.exchange ?? null);
     if (gnw.used) sourcesUsed.push("newswire");
     items.push(...gnw.items);
     warnings.push(...gnw.warnings);
