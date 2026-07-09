@@ -6994,10 +6994,11 @@ function companyIrCandidateHosts(identity: NewsCompanyIdentity): string[] {
   }
   add(identity.websiteHost);
   if (identity.websiteRoot) {
+    add(`investor.${identity.websiteRoot}`);
     add(`investors.${identity.websiteRoot}`);
     add(`ir.${identity.websiteRoot}`);
   }
-  return hosts.slice(0, 3);
+  return hosts.slice(0, 5);
 }
 
 function blockedCompanyWebsiteHost(host: string): boolean {
@@ -7108,9 +7109,10 @@ function looksLikeFeed(text: string): boolean {
 function normalizedExchangeCode(exchange: string | null | undefined): string | null {
   const e = _str(exchange).toUpperCase();
   if (!e) return null;
-  if (e.includes("NASDAQ") || e.includes("NMS") || e.includes("NGM") || e.includes("NCM")) return "NASDAQ";
-  if (e.includes("NYSE") || e === "NYQ") return "NYSE";
-  if (e.includes("AMEX") || e.includes("NYSE AMERICAN") || e === "ASE") return "NYSEAMERICAN";
+  const eUpper = e.toUpperCase();
+  if (eUpper.includes("NASDAQ") || eUpper.includes("NMS") || eUpper.includes("NGM") || eUpper.includes("NCM")) return "NASDAQ";
+  if (eUpper.includes("NYSE") || eUpper === "NYQ") return "NYSE";
+  if (eUpper.includes("AMEX") || eUpper.includes("NYSE AMERICAN") || eUpper === "ASE") return "NYSEAMERICAN";
   return null;
 }
 
@@ -8177,6 +8179,54 @@ async function collectSecEvents(
   return { items, warnings, used: true };
 }
 
+function normalizeExchange(exch: string | null | undefined): string | null {
+  if (!exch) return null;
+  const e = exch.toUpperCase();
+  if (e.includes("NASDAQ") || e.includes("NMS") || e.includes("NGM") || e.includes("NCM") || e.includes("GS")) return "NASDAQ";
+  if (e.includes("NYSE") || e === "NYQ") return "NYSE";
+  if (e.includes("AMEX") || e.includes("NYSE AMERICAN") || e === "ASE") return "NYSEAMERICAN";
+  if (e.includes("TSXV") || e.includes("CVE")) return "TSXV";
+  if (e.includes("TSX") || e.includes("TOR")) return "TSX";
+  return null;
+}
+
+function isTickerCompatibleWithContext(text: string, ticker: string, companyExchange: string | null | undefined): boolean {
+  const tickerU = ticker.toUpperCase();
+  const tickerEsc = tickerU.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const tickerPat = new RegExp(`\\b${tickerEsc}\\b`, "gi");
+  
+  const matches = [...text.matchAll(tickerPat)];
+  if (matches.length === 0) return false;
+  
+  const normComp = normalizeExchange(companyExchange);
+  if (!normComp) return true;
+  
+  const prefixPat = /\b([A-Za-z0-9]+)\s*:\s*$/i;
+  
+  for (const m of matches) {
+    const idx = m.index ?? 0;
+    const preceding = text.slice(Math.max(0, idx - 20), idx);
+    const pm = preceding.match(prefixPat);
+    if (pm) {
+      const prefix = pm[1].toUpperCase();
+      const normPrefix = normalizeExchange(prefix);
+      if (normPrefix) {
+        if (normPrefix === normComp) return true;
+      } else {
+        if (["TSXV", "TSX", "NYSE", "NASDAQ", "AMEX", "CVE", "ASX", "LSE", "TSX-V"].includes(prefix)) {
+          // Incompatible exchange prefix
+        } else {
+          return true; // Not a known exchange prefix
+        }
+      }
+    } else {
+      return true; // No prefix
+    }
+  }
+  
+  return false;
+}
+
 async function collectYahooEvents(
   ticker: string,
   maxResults: number,
@@ -8186,6 +8236,7 @@ async function collectYahooEvents(
   lookbackDays?: number,
   feed: "news" | "press_releases" = "news",
   nameTokens: string[] = [],
+  companyExchange: string | null = null,
 ): Promise<{ items: Record<string, unknown>[]; warnings: Record<string, unknown>[]; used: boolean }> {
   const warnings: Record<string, unknown>[] = [];
   const items: Record<string, unknown>[] = [];
@@ -8242,8 +8293,7 @@ async function collectYahooEvents(
       // fall back to permissive (no filtering) to avoid over-dropping.
       if (feed === "news" && nameTokens.length > 0) {
         const hay = `${_str(item.title)} ${_str(item.evidenceText)}`;
-        const tickerEsc = ticker.toUpperCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const tickerFound = new RegExp(`\\b${tickerEsc}\\b`).test(hay.toUpperCase());
+        const tickerFound = isTickerCompatibleWithContext(hay, ticker, companyExchange);
         const nameFound = nameTokens.some(tok =>
           new RegExp(`\\b${tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(hay)
         );
@@ -8576,7 +8626,8 @@ async function collectCompanyEvents(
   const needYfNews = selected.includes("yahoo_finance_news")
     || selected.includes("yahoo_finance");
   if (needYfNews) {
-    const yf = await collectYahooEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, "news", companyNameTokens);
+    const identity = await getEventIdentity();
+    const yf = await collectYahooEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, "news", companyNameTokens, identity?.exchange ?? null);
     if (yf.used) {
       if (selected.includes("yahoo_finance_news")) sourcesUsed.push("yahoo_finance_news");
       if (selected.includes("yahoo_finance") && !sourcesUsed.includes("yahoo_finance")) sourcesUsed.push("yahoo_finance");
@@ -8592,7 +8643,8 @@ async function collectCompanyEvents(
   // Yahoo Finance press releases tab (explicit or via legacy yahoo_finance)
   const needYfPr = selected.includes("yahoo_finance_press_releases") || selected.includes("yahoo_finance");
   if (needYfPr) {
-    const pr = await collectYahooEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, "press_releases");
+    const identity = await getEventIdentity();
+    const pr = await collectYahooEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, "press_releases", [], identity?.exchange ?? null);
     if (pr.used && selected.includes("yahoo_finance_press_releases") && !sourcesUsed.includes("yahoo_finance_press_releases")) {
       sourcesUsed.push("yahoo_finance_press_releases");
     }

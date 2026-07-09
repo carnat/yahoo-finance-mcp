@@ -939,6 +939,58 @@ async def _collect_sec_events(
     return events, warnings, True
 
 
+def _normalize_exchange(exch: str | None) -> str | None:
+    if not exch:
+        return None
+    exch = str(exch).upper()
+    if any(x in exch for x in ("NASDAQ", "NMS", "NGM", "NCM", "GS")):
+        return "NASDAQ"
+    if "NYSE" in exch or exch == "NYQ":
+        return "NYSE"
+    if any(x in exch for x in ("AMEX", "NYSE AMERICAN", "ASE")):
+        return "NYSEAMERICAN"
+    if "TSXV" in exch or "CVE" in exch:
+        return "TSXV"
+    if "TSX" in exch or "TOR" in exch:
+        return "TSX"
+    return None
+
+
+def _is_ticker_compatible_with_context(text: str, ticker: str, company_exchange: str | None) -> bool:
+    ticker_u = ticker.upper()
+    ticker_pat = _re.compile(r"\b" + _re.escape(ticker_u) + r"\b", _re.IGNORECASE)
+    matches = list(ticker_pat.finditer(text))
+    if not matches:
+        return False
+    
+    norm_comp = _normalize_exchange(company_exchange)
+    if not norm_comp:
+        return True
+        
+    prefix_pat = _re.compile(r"\b([A-Za-z0-9]+)\s*:\s*$", _re.IGNORECASE)
+    
+    for m in matches:
+        start = m.start()
+        preceding = text[max(0, start - 20):start]
+        pm = prefix_pat.search(preceding)
+        if pm:
+            prefix = pm.group(1).upper()
+            norm_prefix = _normalize_exchange(prefix)
+            if norm_prefix:
+                if norm_prefix == norm_comp:
+                    return True
+            else:
+                if prefix in ("TSXV", "TSX", "NYSE", "NASDAQ", "AMEX", "CVE", "ASX", "LSE", "TSX-V"):
+                    # Incompatible exchange prefix
+                    pass
+                else:
+                    return True
+        else:
+            return True
+            
+    return False
+
+
 async def _collect_yahoo_events(
     ticker: str,
     *,
@@ -1005,9 +1057,11 @@ async def _collect_yahoo_events(
         "energy", "capital", "financial", "finance", "resources",
     })
     short_name = ""
+    company_exchange = None
     try:
         info = company.info
         short_name = str(info.get("shortName") or info.get("longName") or "").strip()
+        company_exchange = info.get("exchange") or info.get("exchangeName")
     except Exception:
         pass
     _name_tokens: frozenset[str] = frozenset(
@@ -1031,7 +1085,7 @@ async def _collect_yahoo_events(
         # Headline relevance filter: keep only items that mention the ticker
         # symbol or a significant company-name word in the title/summary.
         hay = f"{item.get('title') or ''} {item.get('evidenceText') or ''}"
-        ticker_found = bool(_ticker_pat.search(hay))
+        ticker_found = _is_ticker_compatible_with_context(hay, ticker, company_exchange)
         name_found = bool(_name_tokens and any(
             _re.search(r"\b" + _re.escape(tok) + r"\b", hay, _re.IGNORECASE)
             for tok in _name_tokens

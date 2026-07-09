@@ -1002,6 +1002,67 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
         self.assertEqual(pr_labeled, [], "Generic news items must not be mislabeled as press releases")
         self.assertFalse(used)
 
+    def test_mrvl_cross_ticker_exchange_filtering(self):
+        """Yahoo event relevance filtering rejects MRVL ticker matches if prefixed by TSXV."""
+        import server as srv_mod
+        import datetime
+
+        retrieved = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Item about TSXV:MRVL (Marvel Discovery Corp)
+        bad_item = {
+            "content": {
+                "title": "Marvel Discovery (TSXV:MRVL) announces drilling results",
+                "summary": "Marvel Discovery Corp TSXV:MRVL reports positive results on black fox project.",
+                "contentType": "STORY",
+                "pubDate": retrieved,
+                "provider": {"displayName": "GlobeNewswire"},
+                "canonicalUrl": {"url": "https://globenewswire.com/mrvl-drill"},
+            }
+        }
+
+        # Item about NASDAQ:MRVL (Marvell Technology)
+        good_item = {
+            "content": {
+                "title": "Marvell (NASDAQ:MRVL) announces new AI chips",
+                "summary": "Marvell Technology Inc. introduces next-generation optical DSPs.",
+                "contentType": "STORY",
+                "pubDate": retrieved,
+                "provider": {"displayName": "GlobeNewswire"},
+                "canonicalUrl": {"url": "https://globenewswire.com/mrvl-ai"},
+            }
+        }
+
+        class _TickerMock:
+            def __init__(self, items):
+                self._items = items
+            def get_news(self, tab="news"):
+                return self._items
+            @property
+            def info(self):
+                # Simulated yfinance info for Marvell Technology on Nasdaq
+                return {
+                    "shortName": "Marvell Technology, Inc.",
+                    "longName": "Marvell Technology, Inc.",
+                    "exchange": "NMS",
+                    "exchangeName": "NasdaqGS"
+                }
+
+        with patch("server.yf") as mock_yf:
+            mock_yf.Ticker.return_value = _TickerMock([bad_item, good_item])
+            items, warnings, used = _run(
+                srv_mod._collect_yahoo_events(
+                    "MRVL",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                    feed="news",
+                )
+            )
+
+        self.assertTrue(used)
+        # Should filter out the TSXV:MRVL item, keeping only the NASDAQ:MRVL item
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["title"], "Marvell (NASDAQ:MRVL) announces new AI chips")
 
     def test_no_private_terms_in_public_descriptions(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
