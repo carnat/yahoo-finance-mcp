@@ -1864,6 +1864,33 @@ def _compute_source_coverage(source_status: dict) -> str:
     return "FULL"
 
 
+def _verify_coverage_failure_mode(source_status: dict, warnings: list[dict]) -> str | None:
+    """Classify unavailable verification coverage without mistaking it for absence."""
+    warning_text = " ".join(
+        str(w.get("message") or "").lower()
+        for w in warnings
+        if isinstance(w, dict) and w.get("code") == "SOURCE_UNAVAILABLE"
+    )
+    if "too many subrequests" in warning_text:
+        return "WORKER_SUBREQUEST_LIMIT"
+    source_states = {
+        str(info.get("status") or "")
+        for info in source_status.values()
+        if isinstance(info, dict)
+    }
+    if "RATE_LIMITED" in source_states:
+        return "RATE_LIMITED"
+    if "TIMEOUT" in source_states:
+        return "PROVIDER_TIMEOUT"
+    if "PROVIDER_CHANGED" in source_states:
+        return "PROVIDER_CHANGED"
+    if "UNCONFIGURED" in source_states:
+        return "SOURCE_UNCONFIGURED"
+    if "PROVIDER_ERROR" in source_states:
+        return "PROVIDER_ERROR"
+    return None
+
+
 async def _collect_company_events(
     ticker: str,
     *,
@@ -2383,7 +2410,9 @@ async def get_public_event_timeline(
     output_schema=_TOOL_OUTPUT_SCHEMAS["verify_company_event"],
     description="""Verify whether a public company event has source-backed evidence.
 
-Returns CONFIRMED, PARTIAL, NOT_FOUND, STALE, or CONFLICTING with best source evidence and metadata.
+Returns CONFIRMED, PARTIAL, NOT_FOUND, SOURCE_LIMITED_NOT_FOUND, STALE, or CONFLICTING.
+SOURCE_LIMITED_NOT_FOUND means selected provider coverage was incomplete, not that
+the event is confirmed absent; inspect sourceStatus and failureMode for recovery.
 """,
 )
 async def verify_company_event(
@@ -2541,6 +2570,20 @@ async def verify_company_event(
                 "severity": "warning",
             })
 
+    source_status = _compute_source_status(sources_used, warnings, items, sources)
+    source_coverage = _compute_source_coverage(source_status)
+    coverage_failure_mode = _verify_coverage_failure_mode(source_status, warnings)
+    if status == "NOT_FOUND" and coverage_failure_mode:
+        status = "SOURCE_LIMITED_NOT_FOUND"
+        warnings.append({
+            "code": "SOURCE_LIMITED_NOT_FOUND",
+            "message": "One or more selected sources were unavailable; this is not confirmed evidence that the event did not occur.",
+            "severity": "warning",
+            "failureMode": coverage_failure_mode,
+        })
+    failure_mode = coverage_failure_mode if status == "SOURCE_LIMITED_NOT_FOUND" else None
+    retryable = failure_mode in ("WORKER_SUBREQUEST_LIMIT", "RATE_LIMITED", "PROVIDER_TIMEOUT")
+
     return json.dumps({
         "ticker": ticker_upper,
         "query": event_query,
@@ -2552,6 +2595,14 @@ async def verify_company_event(
             "watermark": retrieved_at,
         },
         "warnings": warnings,
+        "sourceCoverage": source_coverage,
+        "sourceStatus": source_status,
+        "failureMode": failure_mode,
+        "retryable": retryable,
+        "recommendedAction": (
+            "Inspect sourceStatus and retry with a narrower sources list that excludes failed providers; do not treat this result as confirmed absence."
+            if failure_mode else None
+        ),
     })
 
 
