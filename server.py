@@ -6,6 +6,7 @@ import html as _html_module
 import inspect
 import json
 import os
+from pathlib import Path
 import re as _re
 import time
 import urllib.parse as _urlparse
@@ -252,16 +253,18 @@ async def get_yahoo_finance_news(ticker: str) -> str:
 _DEDUP_TITLE_MAX_LEN = 80
 _STALE_EVENT_DAYS = 90
 _PHASE6B_SUPPORTED_SOURCES = {
-    "sec", "company_ir", "newswire",
+    "sec", "company_ir", "company_ir_page", "newswire",
     "yahoo_finance",                  # legacy: aggregates news + press releases
     "yahoo_finance_news",             # Yahoo Finance general news tab
     "yahoo_finance_press_releases",   # Yahoo Finance press releases tab
     "finnhub",
 }
-_OFFICIAL_SOURCE_TYPES = {"sec_filing", "company_ir", "press_release", "newswire", "yahoo_finance_press_releases"}
+_OFFICIAL_SOURCE_TYPES = {"sec_filing", "company_ir", "company_ir_page", "press_release", "newswire", "yahoo_finance_press_releases"}
 _SOURCE_PRIORITY = {
     "sec_filing": 0,
+    "sec_ex99_found": 0,
     "company_ir": 1,
+    "company_ir_page": 1,
     "press_release": 2,
     "yahoo_finance_press_releases": 2,
     "newswire": 3,
@@ -333,6 +336,8 @@ _GLOBENEWSWIRE_MAX_BYTES = 2 * 1024 * 1024
 _GLOBENEWSWIRE_BLOCKED_XML_MARKERS = ("<!doctype", "<!entity")
 _GLOBENEWSWIRE_STOCK_CATEGORY_DOMAIN = "https://www.globenewswire.com/rss/stock"
 _GLOBENEWSWIRE_ISIN_CATEGORY_DOMAIN = "https://www.globenewswire.com/rss/ISIN"
+_COMPANY_IR_PAGE_REGISTRY_PATH = Path(__file__).resolve().parent / "worker" / "src" / "company-ir-page-registry.json"
+_COMPANY_IR_PAGE_MAX_BYTES = 750 * 1024
 
 
 def _globenewswire_xml_is_safe(xml_content: str) -> bool:
@@ -766,6 +771,251 @@ def _within_date_window(
         if day < cutoff:
             return False
     return True
+
+
+def _load_company_ir_page_registry() -> dict:
+    try:
+        return json.loads(_COMPANY_IR_PAGE_REGISTRY_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"schemaVersion": "unknown", "registryVersion": "unknown", "sources": []}
+
+
+def _company_ir_page_entry(ticker: str) -> dict | None:
+    ticker_u = str(ticker or "").upper()
+    registry = _load_company_ir_page_registry()
+    for entry in registry.get("sources") or []:
+        if isinstance(entry, dict) and str(entry.get("ticker") or "").upper() == ticker_u:
+            return dict(entry, registryVersion=registry.get("registryVersion"), registrySchemaVersion=registry.get("schemaVersion"))
+    return None
+
+
+def _host_without_www(host: str) -> str:
+    return str(host or "").lower().removeprefix("www.")
+
+
+def _company_ir_page_url_allowed(entry: dict, raw_url: str) -> bool:
+    try:
+        parsed = _urlparse.urlparse(str(raw_url or ""))
+    except Exception:
+        return False
+    if parsed.scheme.lower() != "https":
+        return False
+    host = _host_without_www(parsed.hostname or "")
+    allowed_hosts = {_host_without_www(h) for h in entry.get("allowedHosts") or []}
+    prefixes = [str(p) for p in entry.get("allowedPathPrefixes") or [] if str(p)]
+    return host in allowed_hosts and any(parsed.path.startswith(prefix) for prefix in prefixes)
+
+
+def _company_ir_page_registry_fresh(entry: dict) -> bool:
+    raw = entry.get("revalidateAfter")
+    if not raw:
+        return True
+    try:
+        deadline = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=datetime.timezone.utc)
+        return deadline >= datetime.datetime.now(datetime.timezone.utc)
+    except Exception:
+        return False
+
+
+def _company_ir_page_item(
+    ticker: str,
+    entry: dict,
+    title: str,
+    summary: str,
+    raw_url: str | None,
+    published_at: str | None,
+    retrieved_at: str,
+    final_url: str,
+) -> dict | None:
+    url = _urlparse.urljoin(final_url, raw_url or final_url)
+    if not _company_ir_page_url_allowed(entry, url):
+        return None
+    ticker_u = ticker.upper()
+    issuer = str(entry.get("issuerName") or ticker_u)
+    duplicate_group_id = _make_duplicate_group_id(ticker_u, title, published_at, issuer, url)
+    return {
+        "title": title,
+        "source": "company_ir_page",
+        "originalSource": issuer,
+        "sourceType": "company_ir_page",
+        "provider": "company_ir_page_registry",
+        "discoveredVia": "approved_company_ir_page_registry",
+        "adapter": entry.get("adapter"),
+        "canonicalUrl": entry.get("canonicalUrl"),
+        "registryVersion": entry.get("registryVersion"),
+        "approvalStatus": "approved",
+        "publishedAt": published_at,
+        "retrievedAt": retrieved_at,
+        "url": url,
+        "issuer": issuer,
+        "tickers": [ticker_u],
+        "eventType": _event_type_from_keywords(f"{title} {summary}"),
+        "summary": _short_text(summary or title, 240),
+        "evidenceText": _short_text(summary or title, 180),
+        "confidence": "HIGH",
+        "tickerRelevance": "HIGH",
+        "duplicateGroupId": duplicate_group_id,
+    }
+
+
+def _company_ir_page_json_records(payload: object) -> list[dict]:
+    if not isinstance(payload, dict):
+        return []
+    candidates = [
+        payload.get("items"),
+        payload.get("releases"),
+        payload.get("pressReleases"),
+        payload.get("news"),
+        payload.get("data"),
+    ]
+    feed = payload.get("feed")
+    if isinstance(feed, dict):
+        candidates.append(feed.get("items"))
+    data = payload.get("data")
+    if isinstance(data, dict):
+        candidates.extend(data.values())
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            records = [r for r in candidate if isinstance(r, dict)]
+            if records:
+                return records
+    return []
+
+
+def _parse_company_ir_page_json(ticker: str, entry: dict, text: str, retrieved_at: str, final_url: str) -> list[dict]:
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return []
+    items: list[dict] = []
+    for raw in _company_ir_page_json_records(payload):
+        title = str(raw.get("title") or raw.get("headline") or raw.get("name") or "").strip()
+        if not title:
+            continue
+        summary = str(raw.get("summary") or raw.get("description") or raw.get("excerpt") or raw.get("content") or "").strip()
+        raw_url = str(raw.get("url") or raw.get("link") or raw.get("external_url") or raw.get("permalink") or "").strip() or None
+        published_at = _to_iso_utc(raw.get("publishedAt") or raw.get("published_at") or raw.get("datePublished") or raw.get("date_published") or raw.get("date") or raw.get("pubDate"))
+        item = _company_ir_page_item(ticker, entry, title, summary, raw_url, published_at, retrieved_at, final_url)
+        if item:
+            items.append(item)
+    return items
+
+
+def _html_attr(attrs: str, name: str) -> str:
+    match = _re.search(rf'\b{_re.escape(name)}\s*=\s*["\']([^"\']+)["\']', attrs or "", flags=_re.I)
+    return _html_module.unescape(match.group(1)) if match else ""
+
+
+def _parse_company_ir_page_html(ticker: str, entry: dict, html_text: str, retrieved_at: str, final_url: str) -> list[dict]:
+    blocks = _re.findall(r"<article\b[^>]*>[\s\S]*?</article>", html_text or "", flags=_re.I)
+    if not blocks:
+        blocks = [
+            m.group(0)
+            for m in _re.finditer(r"<li\b[^>]*>[\s\S]*?</li>", html_text or "", flags=_re.I)
+            if _re.search(r"press release|news release|earnings|results|announces|reports", _strip_html_tags(m.group(0)), flags=_re.I)
+        ]
+    items: list[dict] = []
+    for block in blocks[:50]:
+        heading = _re.search(r"<h[1-4]\b[^>]*>([\s\S]*?)</h[1-4]>", block, flags=_re.I)
+        anchor = _re.search(r"<a\b([^>]*)>([\s\S]*?)</a>", block, flags=_re.I)
+        title = _strip_html_tags((heading.group(1) if heading else anchor.group(2) if anchor else "") or "").strip()
+        if len(title) < 6:
+            continue
+        href = _html_attr(anchor.group(1), "href") if anchor else ""
+        time_match = _re.search(r"<time\b([^>]*)>([\s\S]*?)</time>", block, flags=_re.I)
+        datetime_raw = ""
+        if time_match:
+            datetime_raw = _html_attr(time_match.group(1), "datetime") or _strip_html_tags(time_match.group(2))
+        item = _company_ir_page_item(
+            ticker,
+            entry,
+            title,
+            _strip_html_tags(block),
+            href or None,
+            _to_iso_utc(datetime_raw),
+            retrieved_at,
+            final_url,
+        )
+        if item:
+            items.append(item)
+    return items
+
+
+async def _fetch_company_ir_page(entry: dict) -> tuple[str, str, str]:
+    canonical_url = str(entry.get("canonicalUrl") or "")
+    if not _company_ir_page_url_allowed(entry, canonical_url):
+        raise ValueError("registry canonical URL is outside its allow-list")
+
+    def _fetch() -> tuple[str, str, str]:
+        req = _urlrequest.Request(
+            canonical_url,
+            headers={
+                "User-Agent": "yahoo-finance-mcp/ir-page-registry",
+                "Accept": "application/json, application/xml, text/xml, text/html;q=0.9",
+            },
+        )
+        with _urlrequest.urlopen(req, timeout=15) as resp:
+            final_url = resp.geturl()
+            if not _company_ir_page_url_allowed(entry, final_url):
+                raise ValueError("redirect target is outside registry allow-list")
+            content_type = str(resp.headers.get("content-type") or "").lower()
+            data = resp.read(_COMPANY_IR_PAGE_MAX_BYTES + 1)
+            if len(data) > _COMPANY_IR_PAGE_MAX_BYTES:
+                raise ValueError("response exceeded size limit")
+            return data.decode("utf-8", errors="replace"), final_url, content_type
+
+    return await asyncio.to_thread(_fetch)
+
+
+async def _collect_company_ir_page_events(
+    ticker: str,
+    *,
+    retrieved_at: str,
+    max_results: int,
+    start_date: str = "",
+    end_date: str = "",
+    lookback_days: int | None = None,
+) -> tuple[list[dict], list[dict], bool]:
+    entry = _company_ir_page_entry(ticker)
+    if not entry:
+        return [], [], False
+    status = str(entry.get("status") or "")
+    warning_base = {
+        "canonicalUrl": entry.get("canonicalUrl"),
+        "registryVersion": entry.get("registryVersion"),
+        "approvalStatus": status,
+    }
+    if status == "disabled":
+        return [], [{**warning_base, "code": "COMPANY_IR_PAGE_DISABLED", "message": "Company IR page registry entry is disabled.", "severity": "info"}], False
+    if status == "candidate":
+        candidate = {
+            "ticker": entry.get("ticker"),
+            "issuerName": entry.get("issuerName"),
+            "canonicalUrl": entry.get("canonicalUrl"),
+            "adapter": entry.get("adapter"),
+            "candidateReason": entry.get("candidateReason"),
+            "discoveredAt": entry.get("discoveredAt"),
+            "decisionGrade": False,
+        }
+        return [], [{**warning_base, "code": "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE", "message": "Company IR page candidate is available for review but was not fetched.", "severity": "info", "candidate": candidate}], False
+    if not _company_ir_page_registry_fresh(entry):
+        return [], [{**warning_base, "code": "COMPANY_IR_PAGE_REVALIDATION_DUE", "message": "Approved company IR page is past its revalidation date; skipped until reviewed.", "severity": "warning"}], False
+    try:
+        text, final_url, content_type = await _fetch_company_ir_page(entry)
+        adapter = str(entry.get("adapter") or "")
+        if adapter == "structured" or "json" in content_type:
+            items = _parse_company_ir_page_json(ticker, entry, text, retrieved_at, final_url)
+        else:
+            items = _parse_company_ir_page_html(ticker, entry, text, retrieved_at, final_url)
+        items = [
+            item for item in items
+            if _within_date_window(item.get("publishedAt"), start_date=start_date, end_date=end_date, lookback_days=lookback_days)
+        ][:max_results]
+        return items, [], True
+    except Exception as exc:
+        return [], [{**warning_base, "code": "COMPANY_IR_PAGE_VALIDATION_FAILED", "message": f"Approved company IR page validation failed: {exc}", "severity": "warning"}], False
 
 
 def _build_yahoo_event_item(
@@ -1442,6 +1692,8 @@ def _build_collection_status(items: list[dict], sources_used: list[str], warning
         # so callers know the empty result may be due to missing coverage, not genuine absence.
         if any(w.get("code") == "SOURCE_UNAVAILABLE" for w in warnings if isinstance(w, dict)):
             return "SOURCE_LIMITED_NOT_FOUND"
+        if any(str(w.get("code", "")).startswith("COMPANY_IR_PAGE_") for w in warnings if isinstance(w, dict)):
+            return "SOURCE_LIMITED_NOT_FOUND"
         if sources_used:
             return "NOT_FOUND"
         return "PROVIDER_ERROR"
@@ -1461,6 +1713,7 @@ def _compute_source_status(
     name for backward compatibility.
     """
     warning_msgs = [w.get("message", "") for w in warnings if isinstance(w, dict) and w.get("code") == "SOURCE_UNAVAILABLE"]
+    warning_codes = {w.get("code") for w in warnings if isinstance(w, dict)}
     sec_items = [it for it in items if "sec" in str(it.get("sourceType", "")).lower()]
     sources = selected_sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]
 
@@ -1494,6 +1747,7 @@ def _compute_source_status(
     ]
     newswire_items = [it for it in items if str(it.get("sourceType", "")) == "newswire"]
     company_ir_items = [it for it in items if str(it.get("sourceType", "")) in ("company_ir", "press_release")]
+    company_ir_page_items = [it for it in items if str(it.get("sourceType", "")) == "company_ir_page"]
     finnhub_items = [it for it in items if str(it.get("source", "")) == "finnhub"]
 
     def _yf_error_status(warn_msgs: list[str]) -> str | None:
@@ -1560,6 +1814,34 @@ def _compute_source_status(
             result["company_ir"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
         else:
             result["company_ir"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+    if "company_ir_page" in sources:
+        page_warning = next((w for w in warnings if isinstance(w, dict) and str(w.get("code", "")).startswith("COMPANY_IR_PAGE_")), {})
+        status = "EMPTY_RESULT"
+        if "company_ir_page" in sources_used:
+            status = "APPROVED_SOURCE_OK" if company_ir_page_items else "EMPTY_RESULT"
+        elif "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE" in warning_codes:
+            status = "CANDIDATE_AVAILABLE"
+        elif "COMPANY_IR_PAGE_DISABLED" in warning_codes:
+            status = "DISABLED"
+        elif "COMPANY_IR_PAGE_REVALIDATION_DUE" in warning_codes:
+            status = "REVALIDATION_DUE"
+        elif "COMPANY_IR_PAGE_VALIDATION_FAILED" in warning_codes:
+            status = "SOURCE_VALIDATION_FAILED"
+        else:
+            status = "NOT_REGISTERED"
+        result["company_ir_page"] = {
+            "status": status,
+            "rawCount": len(company_ir_page_items),
+            "filteredCount": len(company_ir_page_items),
+            "registryVersion": page_warning.get("registryVersion"),
+            "canonicalUrl": page_warning.get("canonicalUrl"),
+            "approvalStatus": page_warning.get("approvalStatus"),
+            "allowedAction": "fetch_configured_source" if status == "APPROVED_SOURCE_OK" else (
+                "review_and_promote" if status == "CANDIDATE_AVAILABLE" else "registry_review_required"
+            ),
+        }
+        if isinstance(page_warning.get("candidate"), dict):
+            result["company_ir_page"]["candidates"] = [page_warning["candidate"]]
     if "newswire" in sources:
         if "newswire" in sources_used:
             result["newswire"] = {"status": "OK" if newswire_items else "EMPTY_RESULT", "rawCount": len(newswire_items), "filteredCount": len(newswire_items)}
@@ -1574,7 +1856,10 @@ def _compute_source_coverage(source_status: dict) -> str:
     """Return PARTIAL if any source is UNCONFIGURED or has an error, else FULL."""
     for info in source_status.values():
         s = info.get("status", "") if isinstance(info, dict) else ""
-        if s in ("UNCONFIGURED", "PROVIDER_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED"):
+        if s in (
+            "UNCONFIGURED", "PROVIDER_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED",
+            "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED",
+        ):
             return "PARTIAL"
     return "FULL"
 
@@ -1592,7 +1877,7 @@ async def _collect_company_events(
     retrieved_at = _utc_now_iso()
     selected_sources, warnings = _normalize_event_sources(
         sources,
-        ["sec", "company_ir", "newswire", "yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
+        ["sec", "company_ir_page", "company_ir", "newswire", "yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
     )
     items: list[dict] = []
     sources_used: list[str] = []
@@ -1613,6 +1898,20 @@ async def _collect_company_events(
             sources_used.append("sec")
         items.extend(sec_items)
         warnings.extend(sec_warnings)
+
+    if "company_ir_page" in selected_sources:
+        page_items, page_warnings, page_used = await _collect_company_ir_page_events(
+            ticker,
+            retrieved_at=retrieved_at,
+            max_results=max_cap,
+            start_date=start_date,
+            end_date=end_date,
+            lookback_days=lookback,
+        )
+        if page_used:
+            sources_used.append("company_ir_page")
+        items.extend(page_items)
+        warnings.extend(page_warnings)
 
     # --- Yahoo Finance news ---
     # ``yahoo_finance_news`` fetches the news tab explicitly.
@@ -1776,13 +2075,14 @@ async def search_company_news(
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_company_press_releases"],
     description="""Get company press releases and official release-style public events.
 
-Returns Yahoo Finance press releases (``yahoo_finance_press_releases``) as a
-first-class source alongside SEC 8-K filings, company IR, and newswire content.
-Items are labelled with precise source identifiers so callers can distinguish
-their origin.
+Defaults resolve SEC 8-K/EX-99 evidence first, then registry-backed
+``company_ir_page``, then Yahoo press-release context. Explicit sources can
+also include ``company_ir`` RSS/Atom and ``newswire``. Items are labelled with
+precise source identifiers so callers can distinguish their origin.
 
-Supported sources: ``yahoo_finance_press_releases``, ``company_ir``,
-``newswire``, ``sec``.
+Decision-grade use is payload-level only: ``decisionGrade:true`` requires
+``coverageStatus`` of ``SEC_EX99_RESOLVED`` or
+``APPROVED_IR_PAGE_RESOLVED`` with evidence fields.
 """,
 )
 async def get_company_press_releases(
@@ -1795,37 +2095,85 @@ async def get_company_press_releases(
     if err:
         return _mcp_failure("get_company_press_releases", ErrorCode.INPUT_VALIDATION_ERROR, err)
     selected_sources, source_warnings = _normalize_event_sources(
-        sources, ["yahoo_finance_press_releases", "company_ir", "newswire", "sec"]
+        sources, ["sec", "company_ir_page", "yahoo_finance_press_releases"]
     )
-    items, sources_used, warnings, retrieved_at = await _collect_company_events(
-        ticker,
-        max_results=max_results,
-        lookback_days=lookback_days,
-        sources=selected_sources,
-        sec_filing_types=["8-K"],
-    )
-    warnings = source_warnings + warnings
-    release_types = {"company_ir", "press_release", "newswire", "sec_filing", "yahoo_finance_press_releases"}
-    release_items = [it for it in items if str(it.get("sourceType")) in release_types]
+    primary_sources = [src for src in selected_sources if src in ("sec", "company_ir_page")]
+    optional_sources = [src for src in selected_sources if src not in ("sec", "company_ir_page")]
+    safe_max = _coerce_max_results(max_results, 20)
+    primary_items: list[dict] = []
+    primary_used: list[str] = []
+    primary_warnings: list[dict] = []
+    retrieved_at = _utc_now_iso()
+    if primary_sources:
+        primary_items, primary_used, primary_warnings, retrieved_at = await _collect_company_events(
+            ticker,
+            max_results=safe_max,
+            lookback_days=lookback_days,
+            sources=primary_sources,
+            sec_filing_types=["8-K"],
+        )
+    release_types = {"company_ir", "company_ir_page", "press_release", "newswire", "sec_filing", "sec_ex99_found", "yahoo_finance_press_releases"}
+    release_items = [it for it in primary_items if str(it.get("sourceType")) in release_types]
 
-    modified_release_items = []
+    modified_primary_items: list[dict] = []
     has_sec_ex99_found = False
+    sec_8k_evidence: list[dict] = []
+    sec_8k_without_ex99_count = 0
     from yfmcp.tools.earnings import _resolve_ex991_url
     for it in release_items:
         if it.get("sourceType") == "sec_filing" and it.get("filingType") == "8-K":
             acc = it.get("accessionNumber")
             url = it.get("url") or ""
+            evidence = {
+                "filingType": "8-K",
+                "filingDate": it.get("filingDate"),
+                "acceptedAt": it.get("acceptedAt"),
+                "accessionNumber": acc,
+                "documentUrl": url or None,
+            }
+            sec_8k_evidence.append(evidence)
             cik_match = _re.search(r'/data/(\d+)/', url)
             cik = int(cik_match.group(1)) if cik_match else None
             if acc and cik is not None:
                 ex991_url = await _resolve_ex991_url(acc, cik)
                 if ex991_url:
+                    evidence["ex991Url"] = ex991_url
+                    evidence["ex991Resolved"] = True
                     it = dict(it)
                     it["sourceType"] = "sec_ex99_found"
                     it["url"] = ex991_url
                     it["title"] = "EX-99.1 exhibit found in 8-K"
+                    it["eventType"] = "press_release"
+                    it["evidenceText"] = "Resolved EX-99.1 press-release exhibit from SEC 8-K."
+                    it["confidence"] = "HIGH"
                     has_sec_ex99_found = True
-        modified_release_items.append(it)
+                else:
+                    sec_8k_without_ex99_count += 1
+            else:
+                sec_8k_without_ex99_count += 1
+        modified_primary_items.append(it)
+
+    optional_items: list[dict] = []
+    optional_used: list[str] = []
+    optional_warnings: list[dict] = []
+    if optional_sources:
+        optional_items, optional_used, optional_warnings, _optional_retrieved_at = await _collect_company_events(
+            ticker,
+            max_results=safe_max,
+            lookback_days=lookback_days,
+            sources=optional_sources,
+            sec_filing_types=["8-K"],
+        )
+    warnings = source_warnings + primary_warnings + optional_warnings
+    modified_release_items = _dedupe_event_items(
+        modified_primary_items + [it for it in optional_items if str(it.get("sourceType")) in release_types],
+        warnings,
+    )
+    sources_used = list(dict.fromkeys(primary_used + optional_used))
+    has_approved_ir_page = any(
+        it.get("sourceType") == "company_ir_page" and it.get("approvalStatus") == "approved" and it.get("url")
+        for it in modified_release_items
+    )
 
     if not modified_release_items:
         warnings.append({
@@ -1833,13 +2181,26 @@ async def get_company_press_releases(
             "message": "No company-originated or official release source found in requested window.",
             "severity": "warning",
         })
+    if not has_sec_ex99_found and sec_8k_without_ex99_count > 0:
+        warnings.append({
+            "code": "SEC_8K_FOUND_EX99_NOT_FOUND",
+            "message": "SEC 8-K filing(s) were found, but no EX-99.1 press-release exhibit was resolved.",
+            "severity": "warning",
+            "filingsSearched": sec_8k_without_ex99_count,
+        })
 
     status = None
     if has_sec_ex99_found:
         status = "SEC_EX99_FOUND"
+    elif has_approved_ir_page:
+        status = "APPROVED_IR_PAGE_FOUND"
+    elif sec_8k_without_ex99_count > 0:
+        status = "SEC_8K_FOUND_EX99_NOT_FOUND"
     elif not modified_release_items:
         if "yahoo_finance_press_releases" in selected_sources:
             status = "NO_YAHOO_PRESS_RELEASE"
+        elif "company_ir_page" in selected_sources:
+            status = "COMPANY_IR_PAGE_NOT_APPROVED"
         elif "company_ir" in selected_sources:
             status = "COMPANY_IR_NOT_FOUND"
         else:
@@ -1847,16 +2208,64 @@ async def get_company_press_releases(
     else:
         status = _build_collection_status(modified_release_items, sources_used, warnings)
 
+    source_status = _compute_source_status(sources_used, warnings, modified_release_items, selected_sources)
+    source_coverage = _compute_source_coverage(source_status)
+    coverage_status = (
+        "SEC_EX99_RESOLVED" if has_sec_ex99_found else
+        "APPROVED_IR_PAGE_RESOLVED" if has_approved_ir_page else
+        "SEC_8K_FOUND_EX99_NOT_FOUND" if sec_8k_without_ex99_count > 0 else
+        "OFFICIAL_RELEASE_SOURCE_FOUND" if modified_release_items else
+        "NO_OFFICIAL_RELEASE_SOURCE"
+    )
+    decision_grade = has_sec_ex99_found or has_approved_ir_page
+    decision_grade_basis = (
+        "Resolved SEC 8-K EX-99 press-release exhibit for this call."
+        if has_sec_ex99_found else
+        "Resolved an approved, registry-reviewed company IR page source for this call."
+        if has_approved_ir_page else
+        "No resolved SEC EX-99 or approved IR-page evidence in this call; use for verification/context only."
+    )
+    ir_page_evidence = [
+        {
+            "title": it.get("title"),
+            "publishedAt": it.get("publishedAt"),
+            "url": it.get("url"),
+            "canonicalUrl": it.get("canonicalUrl"),
+            "adapter": it.get("adapter"),
+            "registryVersion": it.get("registryVersion"),
+            "basis": "approved_company_ir_page_registry",
+        }
+        for it in modified_release_items
+        if it.get("sourceType") == "company_ir_page" and it.get("approvalStatus") == "approved"
+    ][:10]
+    candidate_sources = [
+        w.get("candidate")
+        for w in warnings
+        if isinstance(w, dict) and w.get("code") == "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE" and isinstance(w.get("candidate"), dict)
+    ]
     payload = {
         "ticker": ticker.upper(),
-        "items": modified_release_items[:_coerce_max_results(max_results, 20)],
+        "items": modified_release_items[:safe_max],
         "meta": {
             "sourcesUsed": sources_used,
             "deduped": True,
             "watermark": retrieved_at,
         },
         "warnings": warnings,
+        "sourceCoverage": source_coverage,
+        "sourceStatus": source_status,
+        "coverageStatus": coverage_status,
+        "decisionGrade": decision_grade,
+        "decisionGradeBasis": decision_grade_basis,
+        "capabilityStatus": "ACTIVE",
+        "failureMode": None if decision_grade else coverage_status,
     }
+    if sec_8k_evidence:
+        payload["secEvidence"] = sec_8k_evidence[:10]
+    if ir_page_evidence:
+        payload["irPageEvidence"] = ir_page_evidence
+    if candidate_sources:
+        payload["candidateSources"] = candidate_sources
     if status:
         payload["status"] = status
     return json.dumps(payload)
@@ -5840,7 +6249,8 @@ timestamps, URL, event classification, confidence, ticker relevance,
 and short evidence excerpts.
 
 Supported sources: ``yahoo_finance_news``, ``yahoo_finance_press_releases``,
-``finnhub``, ``sec``, ``company_ir``, ``newswire``, and the legacy
+``finnhub``, ``sec``, ``company_ir`` (RSS/Atom only), ``company_ir_page``
+(Git-reviewed IR-page registry), ``newswire``, and the legacy
 ``yahoo_finance`` aggregate alias.
 """,
 )

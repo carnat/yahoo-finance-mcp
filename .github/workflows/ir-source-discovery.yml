@@ -1,0 +1,46 @@
+name: Refresh IR Source Review Queue
+
+on:
+  schedule:
+    - cron: "15 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Refresh bounded IR source candidates
+        run: python scripts/discover_ir_page_candidates.py --write
+
+      - name: Validate IR source registry
+        run: python scripts/discover_ir_page_candidates.py --validate-only
+
+      - name: Open or update review PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet -- worker/src/company-ir-page-registry.json; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C automation/ir-source-review
+          git add worker/src/company-ir-page-registry.json
+          git commit -m "chore: refresh IR source review queue"
+          git push --force origin automation/ir-source-review
+          if gh pr view automation/ir-source-review --json number --jq .number >/dev/null 2>&1; then
+            exit 0
+          fi
+          gh pr create --draft --base main --head automation/ir-source-review --title "chore: refresh IR source review queue" --body "Automated bounded discovery candidates. Reviewers may merge candidates for context only; change status to approved only after source validation."

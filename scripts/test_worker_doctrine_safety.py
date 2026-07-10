@@ -157,10 +157,13 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("coverageStatus", worker)
         self.assertIn("decisionGradeBasis", worker)
         self.assertIn("payloadDecisionGrade", worker)
+        self.assertIn("APPROVED_IR_PAGE_RESOLVED", worker)
+        self.assertIn("irPageEvidence", worker)
         tools = TOOLS_TS.read_text(encoding="utf-8")
         self.assertIn('capabilityStatus: "ACTIVE"', tools)
         self.assertIn('doctrineUse: "ALLOWED"', tools)
         self.assertIn("coverageStatus=SEC_EX99_RESOLVED", tools)
+        self.assertIn("APPROVED_IR_PAGE_RESOLVED", tools)
         self.assertNotIn('failureMode: "SEC_EX99_LINKAGE_INCOMPLETE"', tools)
 
     def test_press_release_ex99_resolver_uses_index_exhibits(self) -> None:
