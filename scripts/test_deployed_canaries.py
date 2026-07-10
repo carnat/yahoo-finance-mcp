@@ -139,10 +139,14 @@ def press_release_payload_gate(payload: dict[str, Any], _canary: dict[str, Any])
     for field in ("coverageStatus", "decisionGrade", "decisionGradeBasis"):
         if field not in data:
             raise AssertionError(f"get_company_press_releases missing {field}: {data}")
-    if data.get("decisionGrade") is True and data.get("coverageStatus") != "SEC_EX99_RESOLVED":
-        raise AssertionError(f"decisionGrade true without SEC_EX99_RESOLVED: {data}")
+    if data.get("decisionGrade") is True and data.get("coverageStatus") not in {"SEC_EX99_RESOLVED", "APPROVED_IR_PAGE_RESOLVED"}:
+        raise AssertionError(f"decisionGrade true without approved evidence status: {data}")
+    if data.get("coverageStatus") == "SEC_EX99_RESOLVED" and not data.get("secEvidence"):
+        raise AssertionError(f"SEC_EX99_RESOLVED missing secEvidence: {data}")
+    if data.get("coverageStatus") == "APPROVED_IR_PAGE_RESOLVED" and not data.get("irPageEvidence"):
+        raise AssertionError(f"APPROVED_IR_PAGE_RESOLVED missing irPageEvidence: {data}")
     if data.get("coverageStatus") == "SEC_8K_FOUND_EX99_NOT_FOUND":
-        if not isinstance(data.get("secEvidence"), dict):
+        if not data.get("secEvidence"):
             raise AssertionError(f"SEC_8K_FOUND_EX99_NOT_FOUND missing secEvidence: {data}")
         if "SEC_8K_FOUND_EX99_NOT_FOUND" not in _warning_codes(data):
             raise AssertionError(f"SEC_8K_FOUND_EX99_NOT_FOUND missing warning: {data}")

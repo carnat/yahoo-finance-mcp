@@ -753,6 +753,157 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
             called_sources = call_kwargs.kwargs.get("sources") or []
             self.assertIn("yahoo_finance_press_releases", called_sources)
 
+    def test_get_company_press_releases_default_resolves_sec_before_optional_failures(self):
+        """Default press releases preserve SEC EX-99 evidence even when optional sources fail later."""
+        now = "2026-05-15T12:00:00Z"
+        sec_item = {
+            "title": "8-K filed",
+            "source": "SEC",
+            "sourceType": "sec_filing",
+            "filingType": "8-K",
+            "filingDate": "2026-05-15",
+            "acceptedAt": now,
+            "accessionNumber": "0000723125-26-000004",
+            "url": "https://www.sec.gov/Archives/edgar/data/723125/000072312526000004/mu-20260515.htm",
+            "publishedAt": now,
+            "retrievedAt": now,
+            "issuer": "MICRON TECHNOLOGY INC",
+            "tickers": ["MU"],
+            "eventType": "regulatory",
+            "summary": "SEC 8-K filing for MU",
+            "evidenceText": "8-K accepted by SEC",
+            "confidence": "HIGH",
+            "tickerRelevance": "HIGH",
+            "duplicateGroupId": "mu-8k",
+        }
+        calls: list[list[str]] = []
+
+        async def _side_effect(*_args, **kwargs):
+            requested = list(kwargs.get("sources") or [])
+            calls.append(requested)
+            if requested == ["sec", "company_ir_page"]:
+                return [sec_item], ["sec"], [], now
+            return [], [], [{
+                "code": "SOURCE_UNAVAILABLE",
+                "message": "Yahoo Finance source unavailable: test failure",
+                "severity": "warning",
+            }], now
+
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked_collect, \
+             patch("yfmcp.tools.earnings._resolve_ex991_url", new_callable=AsyncMock) as mocked_ex99:
+            mocked_collect.side_effect = _side_effect
+            mocked_ex99.return_value = "https://www.sec.gov/Archives/edgar/data/723125/000072312526000004/a2026q2ex991-pressrelease.htm"
+            data = _parse(_run(srv.get_company_press_releases("MU")))
+
+        self.assertEqual(calls[0], ["sec", "company_ir_page"])
+        self.assertEqual(calls[1], ["yahoo_finance_press_releases"])
+        self.assertTrue(data.get("decisionGrade"))
+        self.assertEqual(data.get("coverageStatus"), "SEC_EX99_RESOLVED")
+        self.assertEqual(data.get("items", [{}])[0].get("sourceType"), "sec_ex99_found")
+        self.assertTrue(data.get("secEvidence"))
+        self.assertNotIn("SEC_8K_FOUND_EX99_NOT_FOUND", [w.get("code") for w in data.get("warnings", [])])
+
+    def test_get_company_press_releases_approved_ir_page_can_be_decision_grade(self):
+        """Approved company_ir_page items can clear the payload gate without SEC evidence."""
+        now = "2026-05-15T12:00:00Z"
+        page_item = {
+            "title": "Micron Reports Fiscal Q2 Results",
+            "source": "company_ir_page",
+            "originalSource": "Micron Technology, Inc.",
+            "sourceType": "company_ir_page",
+            "provider": "company_ir_page_registry",
+            "approvalStatus": "approved",
+            "adapter": "html_article",
+            "canonicalUrl": "https://investors.micron.com/news-releases",
+            "registryVersion": "test",
+            "publishedAt": now,
+            "retrievedAt": now,
+            "url": "https://investors.micron.com/news-releases/news-details/2026/micron-results",
+            "issuer": "Micron Technology, Inc.",
+            "tickers": ["MU"],
+            "eventType": "earnings",
+            "summary": "Q2 results",
+            "evidenceText": "Q2 results",
+            "confidence": "HIGH",
+            "tickerRelevance": "HIGH",
+            "duplicateGroupId": "mu-ir-page",
+        }
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+            mocked.return_value = ([page_item], ["company_ir_page"], [], now)
+            data = _parse(_run(srv.get_company_press_releases("MU", sources=["company_ir_page"])))
+        self.assertTrue(data.get("decisionGrade"))
+        self.assertEqual(data.get("coverageStatus"), "APPROVED_IR_PAGE_RESOLVED")
+        self.assertTrue(data.get("irPageEvidence"))
+
+    def test_company_ir_page_candidate_source_status_is_context_only(self):
+        """Candidate registry entries surface compact review links without becoming evidence."""
+        candidate = {
+            "ticker": "MU",
+            "issuerName": "Micron Technology, Inc.",
+            "canonicalUrl": "https://investors.micron.com/news-releases",
+            "adapter": "html_article",
+            "decisionGrade": False,
+        }
+        status = srv._compute_source_status(
+            [],
+            [{
+                "code": "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE",
+                "message": "candidate",
+                "severity": "info",
+                "candidate": candidate,
+                "registryVersion": "test",
+                "canonicalUrl": candidate["canonicalUrl"],
+                "approvalStatus": "candidate",
+            }],
+            [],
+            ["company_ir_page"],
+        )
+        page = status.get("company_ir_page", {})
+        self.assertEqual(page.get("status"), "CANDIDATE_AVAILABLE")
+        self.assertEqual(page.get("candidates", [{}])[0].get("decisionGrade"), False)
+
+    def test_company_ir_page_adapters_and_allow_list(self):
+        """Approved HTML/JSON adapters emit page items, and disallowed hosts are rejected."""
+        entry = {
+            "issuerName": "Micron Technology, Inc.",
+            "adapter": "html_article",
+            "canonicalUrl": "https://investors.micron.com/news-releases",
+            "allowedHosts": ["investors.micron.com"],
+            "allowedPathPrefixes": ["/news-releases"],
+            "registryVersion": "test",
+        }
+        html = """
+        <article>
+          <time datetime="2026-05-15T12:00:00Z">May 15, 2026</time>
+          <a href="/news-releases/news-details/2026/micron-results">Micron Reports Fiscal Q2 Results</a>
+          <p>Revenue and EPS results.</p>
+        </article>
+        """
+        html_items = srv._parse_company_ir_page_html("MU", entry, html, "2026-05-15T13:00:00Z", entry["canonicalUrl"])
+        self.assertEqual(html_items[0]["sourceType"], "company_ir_page")
+        self.assertEqual(html_items[0]["approvalStatus"], "approved")
+        payload = json.dumps({
+            "items": [{
+                "title": "Micron Announces Product Update",
+                "summary": "Product update.",
+                "url": "/news-releases/news-details/2026/product-update",
+                "publishedAt": "2026-05-16T12:00:00Z",
+            }]
+        })
+        json_items = srv._parse_company_ir_page_json("MU", entry, payload, "2026-05-16T13:00:00Z", entry["canonicalUrl"])
+        self.assertEqual(json_items[0]["sourceType"], "company_ir_page")
+        rejected = srv._company_ir_page_item(
+            "MU",
+            entry,
+            "Bad host",
+            "Bad host",
+            "https://example.com/news-releases/bad",
+            "2026-05-16T12:00:00Z",
+            "2026-05-16T13:00:00Z",
+            entry["canonicalUrl"],
+        )
+        self.assertIsNone(rejected)
+
     # ------------------------------------------------------------------
     # _build_yahoo_event_item: item schema
     # ------------------------------------------------------------------

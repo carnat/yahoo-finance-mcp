@@ -85,6 +85,9 @@ jobs:
       - name: Deployed canary registry validation
         run: python scripts/test_deployed_canaries.py --validate-only
 
+      - name: Company IR-page registry validation
+        run: python scripts/test_ir_page_registry.py
+
       # ── 2. Core contracts: envelope, validation, security ─────────────────
       - name: MCP envelope tests
         run: python scripts/test_mcp_envelope.py

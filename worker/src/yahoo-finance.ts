@@ -1,4 +1,5 @@
 import { getWorkerVar, mcpFailure } from "./response.js";
+import registryManifest from "./company-ir-page-registry.json";
 
 /**
  * Yahoo Finance API client for Cloudflare Workers.
@@ -6876,9 +6877,9 @@ export async function extractFilingFact(ticker: string, factName: string, _docum
 // ─── Public news / event helpers ──────────────────────────────────────────────
 
 const _str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
-const OFFICIAL_SOURCE_TYPES = new Set(["sec_filing", "company_ir", "press_release", "newswire", "yahoo_finance_press_releases"]);
+const OFFICIAL_SOURCE_TYPES = new Set(["sec_filing", "company_ir", "company_ir_page", "press_release", "newswire", "yahoo_finance_press_releases"]);
 const SUPPORTED_EVENT_SOURCES = new Set([
-  "sec", "company_ir", "newswire",
+  "sec", "company_ir", "company_ir_page", "newswire",
   "yahoo_finance",                  // legacy: aggregates news + press releases
   "yahoo_finance_news",             // Yahoo Finance general news tab
   "yahoo_finance_press_releases",   // Yahoo Finance press releases tab
@@ -6887,7 +6888,9 @@ const SUPPORTED_EVENT_SOURCES = new Set([
 const PRE_REVENUE_EPS_EPSILON = 1e-9;
 const SOURCE_PRIORITY: Record<string, number> = {
   sec_filing: 0,
+  sec_ex99_found: 0,
   company_ir: 1,
+  company_ir_page: 1,
   press_release: 2,
   yahoo_finance_press_releases: 2,
   newswire: 3,
@@ -6899,7 +6902,7 @@ const SOURCE_PRIORITY: Record<string, number> = {
 
 function confidenceForSourceType(sourceType: unknown, fallback: unknown = "LOW"): string {
   const src = _str(sourceType);
-  if (src === "sec_filing" || src === "company_ir") return "HIGH";
+  if (src === "sec_filing" || src === "company_ir" || src === "company_ir_page") return "HIGH";
   if (src === "press_release" || src === "yahoo_finance_press_releases" || src === "newswire") return "MEDIUM";
   if (src === "company_news" || src === "yahoo_finance_news" || src === "yahoo_finance" || src === "finnhub") return "LOW";
   return _str(fallback, "LOW");
@@ -6950,11 +6953,70 @@ type DiscoveredCompanyIrFeed = {
   hostRelationship: "same_domain" | "linked_external";
 };
 
+type CompanyEventCollectionResult = {
+  items: Record<string, unknown>[];
+  sourcesUsed: string[];
+  warnings: Record<string, unknown>[];
+  watermark: string;
+  sourceDiagnostics: Record<string, unknown>;
+};
+
 function sourceDecisionUse(sourceType: unknown): string {
   const src = _str(sourceType);
-  if (src === "sec_filing" || src === "company_ir" || src === "sec_ex99_found") return "decision_grade_candidate";
+  if (src === "sec_filing" || src === "company_ir" || src === "company_ir_page" || src === "sec_ex99_found") return "decision_grade_candidate";
   if (src === "press_release" || src === "yahoo_finance_press_releases" || src === "newswire") return "verify_only";
   return "context_only";
+}
+
+type CompanyIrPageSource = {
+  ticker: string;
+  issuerName: string;
+  status: "candidate" | "approved" | "disabled";
+  adapter: "structured" | "html_article";
+  canonicalUrl: string;
+  allowedHosts: string[];
+  allowedPathPrefixes: string[];
+  candidateReason?: string | null;
+  discoveredAt?: string | null;
+  reviewedBy?: string | null;
+  reviewedAt?: string | null;
+  revalidateAfter?: string | null;
+};
+
+type CompanyIrPageRegistry = {
+  schemaVersion: string;
+  registryVersion: string;
+  sources: CompanyIrPageSource[];
+};
+
+const companyIrPageRegistry = registryManifest as unknown as CompanyIrPageRegistry;
+
+function companyIrPageEntry(ticker: string): CompanyIrPageSource | null {
+  const tickerU = ticker.toUpperCase();
+  return companyIrPageRegistry.sources.find(entry => entry.ticker.toUpperCase() === tickerU) ?? null;
+}
+
+function companyIrPageUrlAllowed(entry: CompanyIrPageSource, rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "https:") return false;
+    const host = hostWithoutWww(url.hostname);
+    const allowedHost = entry.allowedHosts.some(candidate => host === hostWithoutWww(candidate));
+    const allowedPath = entry.allowedPathPrefixes.some(prefix => url.pathname.startsWith(prefix));
+    return allowedHost && allowedPath;
+  } catch {
+    return false;
+  }
+}
+
+function registryFresh(entry: CompanyIrPageSource): boolean {
+  if (!entry.revalidateAfter) return true;
+  const deadline = Date.parse(entry.revalidateAfter);
+  return Number.isFinite(deadline) && deadline >= Date.now();
+}
+
+function arrayRecords(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.filter((v): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v)) : [];
 }
 
 function hostWithoutWww(host: string): string {
@@ -7538,6 +7600,285 @@ async function fetchCompanyIrText(url: string, maxBytes: number, ttlMs: number):
   return text;
 }
 
+async function fetchApprovedCompanyIrPage(entry: CompanyIrPageSource): Promise<{ text: string; finalUrl: string; contentType: string }> {
+  if (!companyIrPageUrlAllowed(entry, entry.canonicalUrl)) {
+    throw new Error("registry canonical URL is outside its allow-list");
+  }
+  const resp = await fetch(entry.canonicalUrl, {
+    headers: {
+      "User-Agent": UA,
+      Accept: "application/json, application/rss+xml, application/atom+xml, application/xml, text/xml, text/html;q=0.9",
+    },
+  });
+  if (!resp.ok) {
+    await resp.body?.cancel();
+    throw new Error(`HTTP ${resp.status}`);
+  }
+  const finalUrl = resp.url || entry.canonicalUrl;
+  if (!companyIrPageUrlAllowed(entry, finalUrl)) {
+    await resp.body?.cancel();
+    throw new Error("redirect target is outside registry allow-list");
+  }
+  const contentType = _str(resp.headers.get("content-type")).toLowerCase();
+  if (entry.adapter === "structured" && contentType && !/(json|xml|rss|atom|text\/plain)/i.test(contentType)) {
+    await resp.body?.cancel();
+    throw new Error(`unexpected structured content type: ${contentType}`);
+  }
+  if (entry.adapter === "html_article" && contentType && !/(html|text\/plain)/i.test(contentType)) {
+    await resp.body?.cancel();
+    throw new Error(`unexpected HTML content type: ${contentType}`);
+  }
+  const declaredLen = Number(resp.headers.get("content-length") || "0");
+  if (declaredLen > COMPANY_IR_HTML_MAX_BYTES) {
+    await resp.body?.cancel();
+    throw new Error("response exceeded size limit");
+  }
+  const buf = await resp.arrayBuffer();
+  if (buf.byteLength > COMPANY_IR_HTML_MAX_BYTES) throw new Error("response exceeded size limit");
+  return { text: new TextDecoder("utf-8").decode(buf), finalUrl, contentType };
+}
+
+function companyIrPageItemBase(
+  ticker: string,
+  entry: CompanyIrPageSource,
+  title: string,
+  summary: string,
+  rawUrl: string | null,
+  publishedAt: string | null,
+  retrievedAt: string,
+  finalUrl: string,
+): Record<string, unknown> | null {
+  const url = rawUrl ? normalizeLinkedUrl(rawUrl, finalUrl) : finalUrl;
+  if (!url || !companyIrPageUrlAllowed(entry, url)) return null;
+  const tickerU = ticker.toUpperCase();
+  const duplicateGroupId = makeDupGroupId(tickerU, title, publishedAt, entry.issuerName);
+  return {
+    title,
+    source: "company_ir_page",
+    originalSource: entry.issuerName,
+    sourceType: "company_ir_page",
+    provider: "company_ir_page_registry",
+    discoveredVia: "approved_company_ir_page_registry",
+    adapter: entry.adapter,
+    canonicalUrl: entry.canonicalUrl,
+    registryVersion: companyIrPageRegistry.registryVersion,
+    approvalStatus: "approved",
+    publishedAt,
+    retrievedAt,
+    url,
+    issuer: entry.issuerName,
+    tickers: [tickerU],
+    eventType: eventTypeFromKeywords(title, summary),
+    summary: shortText(summary || title, 240),
+    evidenceText: shortText(summary || title, 180),
+    confidence: "HIGH",
+    tickerRelevance: "HIGH",
+    decisionUse: sourceDecisionUse("company_ir_page"),
+    duplicateGroupId,
+  };
+}
+
+function companyIrPageFeedItems(
+  ticker: string,
+  entry: CompanyIrPageSource,
+  xml: string,
+  retrievedAt: string,
+  finalUrl: string,
+): Record<string, unknown>[] {
+  const { itemXmls } = parseCompanyIrFeedItems(xml);
+  const items: Record<string, unknown>[] = [];
+  for (const feedItem of itemXmls) {
+    const title = extractXmlTag(feedItem.xml, "title");
+    if (!title) continue;
+    const summaryRaw = feedItem.kind === "atom"
+      ? (extractXmlTag(feedItem.xml, "summary") || extractXmlTag(feedItem.xml, "content"))
+      : (extractXmlTag(feedItem.xml, "description") || extractXmlTag(feedItem.xml, "content:encoded"));
+    const summary = stripHtmlTags(summaryRaw);
+    const rawLink = feedItem.kind === "atom"
+      ? atomEntryLink(feedItem.xml)
+      : (extractXmlTag(feedItem.xml, "link") || extractXmlTag(feedItem.xml, "guid"));
+    const publishedAt = normalizeIso(
+      feedItem.kind === "atom"
+        ? (extractXmlTag(feedItem.xml, "published") || extractXmlTag(feedItem.xml, "updated"))
+        : extractXmlTag(feedItem.xml, "pubDate")
+    );
+    const item = companyIrPageItemBase(ticker, entry, title, summary, rawLink || null, publishedAt, retrievedAt, finalUrl);
+    if (item) items.push(item);
+  }
+  return items;
+}
+
+function structuredJsonItemArrays(value: unknown): Record<string, unknown>[] {
+  const root = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const candidates = [
+    root.items,
+    root.releases,
+    root.pressReleases,
+    root.news,
+    root.data,
+    (root.feed && typeof root.feed === "object" ? (root.feed as Record<string, unknown>).items : null),
+  ];
+  for (const candidate of candidates) {
+    const records = arrayRecords(candidate);
+    if (records.length > 0) return records;
+  }
+  if (root.data && typeof root.data === "object" && !Array.isArray(root.data)) {
+    for (const value of Object.values(root.data as Record<string, unknown>)) {
+      const records = arrayRecords(value);
+      if (records.length > 0) return records;
+    }
+  }
+  return [];
+}
+
+function companyIrPageStructuredJsonItems(
+  ticker: string,
+  entry: CompanyIrPageSource,
+  text: string,
+  retrievedAt: string,
+  finalUrl: string,
+): Record<string, unknown>[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  const items: Record<string, unknown>[] = [];
+  for (const raw of structuredJsonItemArrays(parsed)) {
+    const title = _str(raw.title || raw.headline || raw.name).trim();
+    if (!title) continue;
+    const summary = _str(raw.summary || raw.description || raw.excerpt || raw.content_text || raw.content || "").trim();
+    const rawUrl = _str(raw.url || raw.link || raw.external_url || raw.permalink || "").trim() || null;
+    const publishedAt = normalizeIso(raw.publishedAt || raw.published_at || raw.datePublished || raw.date_published || raw.date || raw.pubDate);
+    const item = companyIrPageItemBase(ticker, entry, title, summary, rawUrl, publishedAt, retrievedAt, finalUrl);
+    if (item) items.push(item);
+  }
+  return items;
+}
+
+function companyIrPageHtmlItems(
+  ticker: string,
+  entry: CompanyIrPageSource,
+  html: string,
+  retrievedAt: string,
+  finalUrl: string,
+): Record<string, unknown>[] {
+  const items: Record<string, unknown>[] = [];
+  const blocks: string[] = [];
+  const articleRe = /<article\b[^>]*>[\s\S]*?<\/article>/gi;
+  let articleM: RegExpExecArray | null;
+  while ((articleM = articleRe.exec(html)) !== null && blocks.length < 50) blocks.push(articleM[0]);
+  if (blocks.length === 0) {
+    const liRe = /<li\b[^>]*>[\s\S]*?<\/li>/gi;
+    let liM: RegExpExecArray | null;
+    while ((liM = liRe.exec(html)) !== null && blocks.length < 50) {
+      const text = stripHtmlTags(liM[0]).toLowerCase();
+      if (/(press release|news release|earnings|results|announces|reports)/.test(text)) blocks.push(liM[0]);
+    }
+  }
+  for (const block of blocks) {
+    const headingM = block.match(/<h[1-4]\b[^>]*>([\s\S]*?)<\/h[1-4]>/i);
+    const anchorM = block.match(/<a\b([^>]*)>([\s\S]*?)<\/a>/i);
+    const title = stripHtmlTags(headingM?.[1] || anchorM?.[2] || "").trim();
+    if (!title || title.length < 6) continue;
+    const href = anchorM ? htmlAttr(anchorM[1], "href") : "";
+    const timeM = block.match(/<time\b([^>]*)>([\s\S]*?)<\/time>/i);
+    const datetime = timeM ? (htmlAttr(timeM[1], "datetime") || stripHtmlTags(timeM[2])) : "";
+    const publishedAt = normalizeIso(datetime);
+    const summary = stripHtmlTags(block);
+    const item = companyIrPageItemBase(ticker, entry, title, summary, href || null, publishedAt, retrievedAt, finalUrl);
+    if (item) items.push(item);
+  }
+  return items;
+}
+
+async function collectCompanyIrPageEvents(
+  ticker: string,
+  maxResults: number,
+  retrievedAt: string,
+  startDate = "",
+  endDate = "",
+  lookbackDays?: number
+): Promise<{ items: Record<string, unknown>[]; warnings: Record<string, unknown>[]; used: boolean; diagnostics: Record<string, unknown> }> {
+  const tickerU = ticker.toUpperCase();
+  const entry = companyIrPageEntry(tickerU);
+  const warnings: Record<string, unknown>[] = [];
+  const baseDiagnostics: Record<string, unknown> = {
+    registryVersion: companyIrPageRegistry.registryVersion,
+    registrySchemaVersion: companyIrPageRegistry.schemaVersion,
+  };
+  if (!entry) {
+    return {
+      items: [],
+      warnings,
+      used: false,
+      diagnostics: { ...baseDiagnostics, status: "NOT_REGISTERED", approvalStatus: "not_registered", allowedAction: "registry_review_required" },
+    };
+  }
+  const diagnostics: Record<string, unknown> = {
+    ...baseDiagnostics,
+    status: "EMPTY_RESULT",
+    approvalStatus: entry.status,
+    adapter: entry.adapter,
+    canonicalUrl: entry.canonicalUrl,
+    allowedHosts: entry.allowedHosts,
+    allowedPathPrefixes: entry.allowedPathPrefixes,
+    revalidateAfter: entry.revalidateAfter ?? null,
+  };
+  if (entry.status === "disabled") {
+    return { items: [], warnings, used: false, diagnostics: { ...diagnostics, status: "DISABLED", allowedAction: "none" } };
+  }
+  if (entry.status === "candidate") {
+    diagnostics.status = "CANDIDATE_AVAILABLE";
+    diagnostics.allowedAction = "review_and_promote";
+    diagnostics.candidates = [{
+      ticker: entry.ticker,
+      issuerName: entry.issuerName,
+      canonicalUrl: entry.canonicalUrl,
+      adapter: entry.adapter,
+      candidateReason: entry.candidateReason ?? null,
+      discoveredAt: entry.discoveredAt ?? null,
+      decisionGrade: false,
+    }];
+    return { items: [], warnings, used: false, diagnostics };
+  }
+  if (!registryFresh(entry)) {
+    warnings.push({
+      code: "COMPANY_IR_PAGE_REVALIDATION_DUE",
+      message: "Approved company IR page is past its revalidation date; skipped until reviewed.",
+      severity: "warning",
+      canonicalUrl: entry.canonicalUrl,
+    });
+    return { items: [], warnings, used: false, diagnostics: { ...diagnostics, status: "REVALIDATION_DUE", allowedAction: "revalidate" } };
+  }
+
+  try {
+    const { text, finalUrl } = await fetchApprovedCompanyIrPage(entry);
+    let parsed = looksLikeFeed(text)
+      ? companyIrPageFeedItems(tickerU, entry, text, retrievedAt, finalUrl)
+      : entry.adapter === "structured"
+        ? companyIrPageStructuredJsonItems(tickerU, entry, text, retrievedAt, finalUrl)
+        : companyIrPageHtmlItems(tickerU, entry, text, retrievedAt, finalUrl);
+    parsed = parsed.filter(item => withinDateWindow(_str(item.publishedAt) || null, startDate, endDate, lookbackDays)).slice(0, maxResults);
+    diagnostics.status = parsed.length > 0 ? "APPROVED_SOURCE_OK" : "EMPTY_RESULT";
+    diagnostics.allowedAction = "fetch_configured_source";
+    diagnostics.finalUrl = finalUrl;
+    diagnostics.rawCount = parsed.length;
+    diagnostics.filteredCount = parsed.length;
+    return { items: parsed, warnings, used: true, diagnostics };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    warnings.push({
+      code: "COMPANY_IR_PAGE_VALIDATION_FAILED",
+      message: `Approved company IR page validation failed: ${message}`,
+      severity: "warning",
+      canonicalUrl: entry.canonicalUrl,
+    });
+    return { items: [], warnings, used: false, diagnostics: { ...diagnostics, status: "SOURCE_VALIDATION_FAILED", allowedAction: "review_registry_entry" } };
+  }
+}
+
 function candidateCompanyIrPageUrlGroups(identity: NewsCompanyIdentity): string[][] {
   const urls: string[] = [];
   const groups: string[][] = [];
@@ -7988,6 +8329,8 @@ function collectionStatus(items: Record<string, unknown>[], sourcesUsed: string[
       "COMPANY_IR_RSS_HOST_REJECTED",
       "COMPANY_IR_RSS_PARSE_ERROR",
       "COMPANY_IR_RSS_UNAVAILABLE",
+      "COMPANY_IR_PAGE_VALIDATION_FAILED",
+      "COMPANY_IR_PAGE_REVALIDATION_DUE",
     ].includes(_str(w.code)))) return "SOURCE_LIMITED_NOT_FOUND";
     if (sourcesUsed.length > 0) return "NOT_FOUND";
     return "PROVIDER_ERROR";
@@ -8027,6 +8370,7 @@ function computeSourceStatus(
   );
   const newswireItems = items.filter(it => _str(it.sourceType) === "newswire");
   const companyIrItems = items.filter(it => ["company_ir", "press_release"].includes(_str(it.sourceType)));
+  const companyIrPageItems = items.filter(it => _str(it.sourceType) === "company_ir_page");
   const finnhubItems = items.filter(it => _str(it.source) === "finnhub");
   const result: Record<string, unknown> = {};
   if (selectedSources.includes("sec")) {
@@ -8106,6 +8450,25 @@ function computeSourceStatus(
     }
     result.company_ir = { status: companyIrStatus, rawCount: companyIrItems.length, filteredCount: companyIrItems.length, ...diagnostic };
   }
+  if (selectedSources.includes("company_ir_page")) {
+    const diagnostic = (sourceDiagnostics.company_ir_page && typeof sourceDiagnostics.company_ir_page === "object")
+      ? sourceDiagnostics.company_ir_page as Record<string, unknown>
+      : {};
+    let companyIrPageStatus = _str(diagnostic.status) || "EMPTY_RESULT";
+    if (sourcesUsed.includes("company_ir_page") && !companyIrPageStatus) {
+      companyIrPageStatus = companyIrPageItems.length > 0 ? "APPROVED_SOURCE_OK" : "EMPTY_RESULT";
+    } else if (warningCodes.has("COMPANY_IR_PAGE_VALIDATION_FAILED")) {
+      companyIrPageStatus = "SOURCE_VALIDATION_FAILED";
+    } else if (warningCodes.has("COMPANY_IR_PAGE_REVALIDATION_DUE")) {
+      companyIrPageStatus = "REVALIDATION_DUE";
+    }
+    result.company_ir_page = {
+      status: companyIrPageStatus,
+      rawCount: companyIrPageItems.length,
+      filteredCount: companyIrPageItems.length,
+      ...diagnostic,
+    };
+  }
   if (selectedSources.includes("newswire")) {
     if (sourcesUsed.includes("newswire")) {
       result.newswire = { status: newswireItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: newswireItems.length, filteredCount: newswireItems.length };
@@ -8129,6 +8492,11 @@ function computeSourceCoverage(sourceStatus: Record<string, unknown>): string {
     "DISCOVERY_NOT_FOUND",
     "FEED_NOT_FOUND",
     "PARSE_ERROR",
+    "CANDIDATE_AVAILABLE",
+    "NOT_REGISTERED",
+    "DISABLED",
+    "REVALIDATION_DUE",
+    "SOURCE_VALIDATION_FAILED",
   ]);
   for (const info of Object.values(sourceStatus)) {
     if (info && typeof info === "object" && limitedStatuses.has(_str((info as Record<string, unknown>).status))) {
@@ -8568,7 +8936,7 @@ async function collectCompanyEvents(
   const safeLookback = clampInt(lookbackDays, 14, 1, 3650);
   const watermark = new Date().toISOString();
   const { selected, warnings: sourceWarnings } = normalizeSources(sources, [
-    "sec", "company_ir", "newswire",
+    "sec", "company_ir_page", "company_ir", "newswire",
     "yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases",
     "finnhub",
   ]);
@@ -8600,6 +8968,14 @@ async function collectCompanyEvents(
     if (ir.used) sourcesUsed.push("company_ir");
     items.push(...ir.items);
     warnings.push(...ir.warnings);
+  }
+
+  if (selected.includes("company_ir_page")) {
+    const page = await collectCompanyIrPageEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback);
+    sourceDiagnostics.company_ir_page = page.diagnostics;
+    if (page.used) sourcesUsed.push("company_ir_page");
+    items.push(...page.items);
+    warnings.push(...page.warnings);
   }
 
   // Fetch company short name once for news relevance filtering (BUG-08)
@@ -8747,21 +9123,37 @@ export async function getCompanyPressReleases(
   ticker: string,
   lookbackDays = 90,
   maxResults = 20,
-  sources: string[] = ["yahoo_finance_press_releases", "company_ir", "newswire", "sec"]
+  sources: string[] = ["sec", "company_ir_page", "yahoo_finance_press_releases"]
 ): Promise<string> {
-  const out = await collectCompanyEvents(ticker, {
-    maxResults,
-    lookbackDays,
-    sources,
-    secFilingTypes: ["8-K"],
+  const safeMax = clampInt(maxResults, 20, 1, 100);
+  const safeLookback = clampInt(lookbackDays, 90, 1, 3650);
+  const { selected, warnings: sourceWarnings } = normalizeSources(sources, ["sec", "company_ir_page", "yahoo_finance_press_releases"]);
+  const primarySources = selected.filter(src => src === "sec" || src === "company_ir_page");
+  const optionalSources = selected.filter(src => src !== "sec" && src !== "company_ir_page");
+  const selectedHasCompanyIr = selected.includes("company_ir");
+  const emptyCollection = (): CompanyEventCollectionResult => ({
+    items: [],
+    sourcesUsed: [],
+    warnings: [],
+    watermark: new Date().toISOString(),
+    sourceDiagnostics: {},
   });
-  const releaseTypes = new Set(["company_ir", "press_release", "newswire", "sec_filing", "yahoo_finance_press_releases"]);
-  const items = out.items.filter(it => releaseTypes.has(_str(it.sourceType)));
-  
+  const primary = primarySources.length > 0
+    ? await collectCompanyEvents(ticker, {
+      maxResults: safeMax,
+      lookbackDays: safeLookback,
+      sources: primarySources,
+      secFilingTypes: ["8-K"],
+    })
+    : emptyCollection();
+  const releaseTypes = new Set(["company_ir", "company_ir_page", "press_release", "newswire", "sec_filing", "sec_ex99_found", "yahoo_finance_press_releases"]);
+  const primaryItems = primary.items.filter(it => releaseTypes.has(_str(it.sourceType)));
+
   let hasSecEx99Found = false;
   const sec8kEvidence: Record<string, unknown>[] = [];
   let sec8kWithoutEx99Count = 0;
-  const processedItems = await Promise.all(items.map(async (it) => {
+  const processedPrimaryItems: Record<string, unknown>[] = [];
+  for (const it of primaryItems) {
     if (_str(it.sourceType) === "sec_filing" && _str(it.filingType) === "8-K") {
       const accession = _str(it.accessionNumber);
       const url = _str(it.url);
@@ -8786,7 +9178,7 @@ export async function getCompanyPressReleases(
           hasSecEx99Found = true;
           evidence.ex991Url = ex991Url;
           evidence.ex991Resolved = true;
-          return {
+          processedPrimaryItems.push({
             ...it,
             sourceType: "sec_ex99_found",
             url: ex991Url,
@@ -8795,24 +9187,65 @@ export async function getCompanyPressReleases(
             evidenceText: "Resolved EX-99.1 press-release exhibit from SEC 8-K.",
             confidence: "HIGH",
             decisionUse: sourceDecisionUse("sec_ex99_found"),
-          };
+          });
+          continue;
         }
       }
       sec8kWithoutEx99Count += 1;
     }
-    return it;
-  }));
+    processedPrimaryItems.push(it);
+  }
 
-  const warnings = [...out.warnings];
+  const supplemental = optionalSources.length > 0
+    ? await collectCompanyEvents(ticker, {
+      maxResults: safeMax,
+      lookbackDays: safeLookback,
+      sources: optionalSources,
+      secFilingTypes: ["8-K"],
+    })
+    : emptyCollection();
+  const warnings = [...sourceWarnings, ...primary.warnings, ...supplemental.warnings];
+  const warningKeys = new Set<string>();
+  const uniqueWarnings: Record<string, unknown>[] = [];
+  for (const w of warnings) {
+    const key = `${_str(w.code)}|${_str(w.message)}|${_str(w.feedUrl)}|${_str(w.canonicalUrl)}`;
+    if (warningKeys.has(key)) continue;
+    warningKeys.add(key);
+    uniqueWarnings.push(w);
+  }
+  const supplementalItems = supplemental.items.filter(it => releaseTypes.has(_str(it.sourceType)));
+  const processedItems = dedupeEventItems([...processedPrimaryItems, ...supplementalItems], uniqueWarnings);
+  const sourcesUsed = [...new Set([...primary.sourcesUsed, ...supplemental.sourcesUsed])];
+  const sourceDiagnostics = { ...primary.sourceDiagnostics, ...supplemental.sourceDiagnostics };
+  const hasApprovedIrPageResolved = processedItems.some(it =>
+    _str(it.sourceType) === "company_ir_page" && _str(it.approvalStatus) === "approved" && !!_str(it.url)
+  );
+  const irPageEvidence = processedItems
+    .filter(it => _str(it.sourceType) === "company_ir_page" && _str(it.approvalStatus) === "approved")
+    .slice(0, 10)
+    .map(it => ({
+      title: it.title ?? null,
+      publishedAt: it.publishedAt ?? null,
+      url: it.url ?? null,
+      canonicalUrl: it.canonicalUrl ?? null,
+      adapter: it.adapter ?? null,
+      registryVersion: it.registryVersion ?? null,
+      basis: "approved_company_ir_page_registry",
+    }));
+  const companyIrPageStatus = sourceDiagnostics.company_ir_page && typeof sourceDiagnostics.company_ir_page === "object"
+    ? sourceDiagnostics.company_ir_page as Record<string, unknown>
+    : {};
+  const candidateSources = Array.isArray(companyIrPageStatus.candidates) ? companyIrPageStatus.candidates : [];
+
   if (processedItems.length === 0) {
-    warnings.push({
+    uniqueWarnings.push({
       code: "NO_OFFICIAL_RELEASE_SOURCE",
       message: "No company-originated or official release source found in requested window.",
       severity: "warning",
     });
   }
   if (!hasSecEx99Found && sec8kWithoutEx99Count > 0) {
-    warnings.push({
+    uniqueWarnings.push({
       code: "SEC_8K_FOUND_EX99_NOT_FOUND",
       message: "SEC 8-K filing(s) were found, but no EX-99.1 press-release exhibit was resolved.",
       severity: "warning",
@@ -8823,36 +9256,43 @@ export async function getCompanyPressReleases(
   let status: string | null = null;
   if (hasSecEx99Found) {
     status = "SEC_EX99_FOUND";
+  } else if (hasApprovedIrPageResolved) {
+    status = "APPROVED_IR_PAGE_FOUND";
   } else if (sec8kWithoutEx99Count > 0) {
     status = "SEC_8K_FOUND_EX99_NOT_FOUND";
   } else if (processedItems.length === 0) {
-    if (sources.includes("yahoo_finance_press_releases")) {
+    if (selected.includes("yahoo_finance_press_releases")) {
       status = "NO_YAHOO_PRESS_RELEASE";
-    } else if (sources.includes("company_ir")) {
+    } else if (selected.includes("company_ir_page")) {
+      status = candidateSources.length > 0 ? "COMPANY_IR_PAGE_CANDIDATE_ONLY" : "COMPANY_IR_PAGE_NOT_APPROVED";
+    } else if (selectedHasCompanyIr) {
       status = "COMPANY_IR_NOT_FOUND";
     } else {
       status = "NOT_FOUND";
     }
   } else {
-    status = collectionStatus(processedItems, out.sourcesUsed, warnings);
+    status = collectionStatus(processedItems, sourcesUsed, uniqueWarnings);
   }
 
   const coverageStatus = hasSecEx99Found ? "SEC_EX99_RESOLVED"
+    : hasApprovedIrPageResolved ? "APPROVED_IR_PAGE_RESOLVED"
     : sec8kWithoutEx99Count > 0 ? "SEC_8K_FOUND_EX99_NOT_FOUND"
     : processedItems.length > 0 ? "OFFICIAL_RELEASE_SOURCE_FOUND"
     : "NO_OFFICIAL_RELEASE_SOURCE";
-  const payloadDecisionGrade = hasSecEx99Found;
+  const payloadDecisionGrade = hasSecEx99Found || hasApprovedIrPageResolved;
   const decisionGradeBasis = payloadDecisionGrade
-    ? "Resolved SEC 8-K EX-99 press-release exhibit for this call."
+    ? hasSecEx99Found
+      ? "Resolved SEC 8-K EX-99 press-release exhibit for this call."
+      : "Resolved an approved, registry-reviewed company IR page source for this call."
     : "No resolved SEC EX-99 press-release exhibit in this call; use for verification/context only.";
-  const sourceStatus = computeSourceStatus(out.sourcesUsed, warnings, processedItems, sources, out.sourceDiagnostics);
+  const sourceStatus = computeSourceStatus(sourcesUsed, uniqueWarnings, processedItems, selected, sourceDiagnostics);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
 
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
-    items: processedItems.slice(0, clampInt(maxResults, 20, 1, 100)),
-    meta: { sourcesUsed: out.sourcesUsed, deduped: true, watermark: out.watermark },
-    warnings,
+    items: processedItems.slice(0, safeMax),
+    meta: { sourcesUsed, deduped: true, watermark: primary.watermark || supplemental.watermark },
+    warnings: uniqueWarnings,
     sourceCoverage,
     sourceStatus,
     coverageStatus,
@@ -8863,6 +9303,8 @@ export async function getCompanyPressReleases(
     failureMode: payloadDecisionGrade ? null : coverageStatus,
   };
   if (sec8kEvidence.length > 0) payload.secEvidence = sec8kEvidence.slice(0, 10);
+  if (irPageEvidence.length > 0) payload.irPageEvidence = irPageEvidence;
+  if (candidateSources.length > 0) payload.candidateSources = candidateSources;
   if (status) payload.status = status;
   return JSON.stringify(payload);
 }
@@ -9005,7 +9447,7 @@ export async function verifyCompanyEvent(
 
     // 2. Check source type
     const sourceType = _str(ev.sourceType);
-    if (["sec_filing", "sec", "company_ir", "sec_ex99_found"].includes(sourceType)) {
+    if (["sec_filing", "sec", "company_ir", "company_ir_page", "sec_ex99_found"].includes(sourceType)) {
       return "HIGH";
     }
 

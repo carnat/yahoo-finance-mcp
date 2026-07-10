@@ -113,14 +113,19 @@ schemas, aliases, and deprecation metadata.
 - `get_sec_filing_section_markdown` is degraded and should be verified against
   the source filing before use; it uses a lossy Worker HTML fallback.
 - `get_company_press_releases` is payload-gated: only responses with
-  `decisionGrade:true` and resolved SEC EX-99 press-release evidence are
-  decision-grade; unresolved exhibit states remain explicit.
+  `decisionGrade:true` and `coverageStatus` of `SEC_EX99_RESOLVED` or
+  `APPROVED_IR_PAGE_RESOLVED` are decision-grade. SEC responses include
+  `secEvidence`; approved IR-page responses include `irPageEvidence`.
 - News/event tools can use `company_ir` to attempt safe official company
-  website RSS/Atom autodiscovery. `get_company_news` keeps lightweight Yahoo
-  Finance/Finnhub defaults for batch efficiency; pass `sources:["company_ir"]`
-  or use timeline/verification tools when official company-site coverage is
-  needed. RSS-only releases are verification/context evidence unless the payload
-  also resolves SEC EX-99 evidence.
+  website RSS/Atom autodiscovery. `company_ir` remains RSS/Atom-only.
+  `company_ir_page` is separate and registry-backed: candidate entries return
+  compact review links only, while approved entries fetch a configured HTTPS
+  host/path prefix. `get_company_news` keeps lightweight Yahoo Finance/Finnhub
+  defaults for batch efficiency; pass `sources:["company_ir"]` or
+  `sources:["company_ir_page"]` when official company-site coverage is needed.
+  RSS-only releases, candidate links, newswire, and Yahoo items are
+  verification/context evidence unless the payload also resolves SEC EX-99 or
+  approved IR-page evidence.
 - `extract_sec_filing_fact` and SEC exposure tools can return explicit
   limitation statuses such as `EXTRACTION_FAILED`, `TABLE_NOT_PARSED`,
   `PROVIDER_LIMITATION`, or `NO_DIMENSIONAL_REVENUE_FACT`.
@@ -133,6 +138,9 @@ schemas, aliases, and deprecation metadata.
 - SEC EDGAR official public filing data and `data.sec.gov` JSON APIs
 - Official company website RSS/Atom feeds when discoverable from public profile
   website metadata
+- Git-reviewed official company IR-page registry at
+  `worker/src/company-ir-page-registry.json`; daily discovery writes candidates
+  for manual review and never promotes sources automatically.
 
 Structured SEC revenue/geography facts use official SEC data plus the Worker
 filing/index fallback. No separate Python sidecar or paid hosted parser is

@@ -928,8 +928,12 @@ def main() -> int:
             for field in ("coverageStatus", "decisionGrade", "decisionGradeBasis"):
                 if field not in data:
                     raise AssertionError(f"get_company_press_releases missing payload gate field {field}: {data}")
-            if data.get("decisionGrade") is True and data.get("coverageStatus") != "SEC_EX99_RESOLVED":
-                raise AssertionError(f"get_company_press_releases decisionGrade true without SEC_EX99_RESOLVED: {data}")
+            if data.get("decisionGrade") is True and data.get("coverageStatus") not in {"SEC_EX99_RESOLVED", "APPROVED_IR_PAGE_RESOLVED"}:
+                raise AssertionError(f"get_company_press_releases decisionGrade true without approved evidence status: {data}")
+            if data.get("coverageStatus") == "SEC_EX99_RESOLVED" and not data.get("secEvidence"):
+                raise AssertionError(f"get_company_press_releases missing secEvidence for SEC_EX99_RESOLVED: {data}")
+            if data.get("coverageStatus") == "APPROVED_IR_PAGE_RESOLVED" and not data.get("irPageEvidence"):
+                raise AssertionError(f"get_company_press_releases missing irPageEvidence for APPROVED_IR_PAGE_RESOLVED: {data}")
             status = data.get("status")
             if status == "SEC_8K_FOUND_EX99_NOT_FOUND":
                 if not isinstance(data.get("secEvidence"), list) or not data.get("secEvidence"):
