@@ -179,6 +179,7 @@ def company_ir_source_status(payload: dict[str, Any], _canary: dict[str, Any]) -
         "WEBSITE_NOT_AVAILABLE",
         "FEED_NOT_FOUND",
         "DISCOVERY_NOT_FOUND",
+        "DISCOVERY_BUDGET_EXHAUSTED",
         "PROVIDER_ERROR",
         "PARSE_ERROR",
         "EMPTY_RESULT",

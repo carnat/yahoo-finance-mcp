@@ -72,21 +72,24 @@ const COMPANY_IR_HTML_MAX_BYTES = 750 * 1024;
 const COMPANY_IR_FEED_MAX_BYTES = 2 * 1024 * 1024;
 const COMPANY_IR_DISCOVERY_TTL_MS = 24 * 60 * 60 * 1000;
 const COMPANY_IR_FEED_TTL_MS = 15 * 60 * 1000;
+// This leaves enough Worker subrequests for SEC, Yahoo, newswire, and Finnhub
+// when the full event-verification source set is selected.
+const COMPANY_IR_DISCOVERY_MAX_PAGE_PROBES = 24;
 const COMPANY_IR_DISCOVERY_PATHS = [
   "/",
+  "/rss.cfm",
+  "/rss-news-feeds",
+  "/rss-feeds",
+  "/feed/press-releases.xml",
+  "/feed/news.xml",
+  "/feed",
+  "/rss",
   "/investor-relations",
   "/investors",
   "/investor",
   "/newsroom",
   "/news",
   "/press-releases",
-  "/rss.cfm",
-  "/feed",
-  "/rss",
-  "/rss-news-feeds",
-  "/rss-feeds",
-  "/feed/press-releases.xml",
-  "/feed/news.xml",
 ];
 const COMPANY_IR_BLOCKED_WEBSITE_HOSTS = [
   "bloomberg.com",
@@ -106,7 +109,10 @@ const COMPANY_IR_BLOCKED_WEBSITE_HOSTS = [
   "youtube.com",
 ];
 const companyIrIdentityCache = new Map<string, { value: NewsCompanyIdentity; storedAt: number }>();
-const companyIrDiscoveryCache = new Map<string, { value: DiscoveredCompanyIrFeed[]; storedAt: number }>();
+const companyIrDiscoveryCache = new Map<string, {
+  value: { feeds: DiscoveredCompanyIrFeed[]; pageProbeCount: number; probeBudgetExhausted: boolean };
+  storedAt: number;
+}>();
 const companyIrTextCache = new Map<string, { value: string; storedAt: number }>();
 const YAHOO_ALLOWED_CONTENT_TYPES = new Set(["STORY", "ARTICLE", "PRESS_RELEASE"]);
 const SMOKE_TICKER_CIK_FALLBACKS: Record<string, string> = {
@@ -7932,16 +7938,30 @@ function extractCompanyIrFeedLinks(pageHtml: string, pageUrl: string): Array<{ u
   return links.slice(0, 12);
 }
 
-async function discoverCompanyIrFeeds(identity: NewsCompanyIdentity, warnings: Record<string, unknown>[]): Promise<DiscoveredCompanyIrFeed[]> {
-  if (!identity.website || !identity.websiteHost) return [];
+async function discoverCompanyIrFeeds(
+  identity: NewsCompanyIdentity,
+  warnings: Record<string, unknown>[]
+): Promise<{ feeds: DiscoveredCompanyIrFeed[]; pageProbeCount: number; probeBudgetExhausted: boolean }> {
+  if (!identity.website || !identity.websiteHost) {
+    return { feeds: [], pageProbeCount: 0, probeBudgetExhausted: false };
+  }
   const cacheKey = `${identity.ticker}:${identity.website}`;
   const cached = companyIrDiscoveryCache.get(cacheKey);
   if (cached && Date.now() - cached.storedAt < COMPANY_IR_DISCOVERY_TTL_MS) {
-    if (cached.value.length === 0) {
+    if (cached.value.feeds.length === 0) {
       warnings.push({
         code: "COMPANY_IR_FEED_NOT_FOUND",
         message: "No RSS/Atom feed was discovered from the verified company website or common IR/news paths.",
         severity: "warning",
+      });
+    }
+    if (cached.value.probeBudgetExhausted) {
+      warnings.push({
+        code: "COMPANY_IR_DISCOVERY_BUDGET_EXHAUSTED",
+        message: `RSS/Atom discovery reached its ${COMPANY_IR_DISCOVERY_MAX_PAGE_PROBES}-page Worker probe budget before all bounded company/IR paths were checked.`,
+        severity: "warning",
+        pageProbeCount: cached.value.pageProbeCount,
+        probeBudget: COMPANY_IR_DISCOVERY_MAX_PAGE_PROBES,
       });
     }
     return cached.value;
@@ -7949,8 +7969,15 @@ async function discoverCompanyIrFeeds(identity: NewsCompanyIdentity, warnings: R
 
   const feeds: DiscoveredCompanyIrFeed[] = [];
   const seenFeeds = new Set<string>();
-  for (const pageUrls of candidateCompanyIrPageUrlGroups(identity)) {
+  let pageProbeCount = 0;
+  let probeBudgetExhausted = false;
+  discoveryLoop: for (const pageUrls of candidateCompanyIrPageUrlGroups(identity)) {
     for (const pageUrl of pageUrls) {
+      if (pageProbeCount >= COMPANY_IR_DISCOVERY_MAX_PAGE_PROBES) {
+        probeBudgetExhausted = true;
+        break discoveryLoop;
+      }
+      pageProbeCount += 1;
       let text = "";
       try {
         text = await fetchCompanyIrText(pageUrl, COMPANY_IR_HTML_MAX_BYTES, COMPANY_IR_DISCOVERY_TTL_MS);
@@ -7982,9 +8009,18 @@ async function discoverCompanyIrFeeds(identity: NewsCompanyIdentity, warnings: R
       }
       if (feeds.length >= 8) break;
     }
-    if (feeds.length > 0) break;
+      if (feeds.length > 0) break;
   }
 
+  if (probeBudgetExhausted) {
+    warnings.push({
+      code: "COMPANY_IR_DISCOVERY_BUDGET_EXHAUSTED",
+      message: `RSS/Atom discovery reached its ${COMPANY_IR_DISCOVERY_MAX_PAGE_PROBES}-page Worker probe budget before all bounded company/IR paths were checked.`,
+      severity: "warning",
+      pageProbeCount,
+      probeBudget: COMPANY_IR_DISCOVERY_MAX_PAGE_PROBES,
+    });
+  }
   if (feeds.length === 0) {
     warnings.push({
       code: "COMPANY_IR_FEED_NOT_FOUND",
@@ -7992,8 +8028,9 @@ async function discoverCompanyIrFeeds(identity: NewsCompanyIdentity, warnings: R
       severity: "warning",
     });
   }
-  companyIrDiscoveryCache.set(cacheKey, { value: feeds, storedAt: Date.now() });
-  return feeds;
+  const result = { feeds, pageProbeCount, probeBudgetExhausted };
+  companyIrDiscoveryCache.set(cacheKey, { value: result, storedAt: Date.now() });
+  return result;
 }
 
 function parseCompanyIrFeedItems(xml: string): { feedTitle: string | null; itemXmls: Array<{ kind: "rss" | "atom"; xml: string }> } {
@@ -8100,8 +8137,12 @@ async function collectCompanyIrRssEvents(
     return { items, warnings, used: false, diagnostics };
   }
 
-  const feeds = await discoverCompanyIrFeeds(identity, warnings);
+  const discovery = await discoverCompanyIrFeeds(identity, warnings);
+  const feeds = discovery.feeds;
   diagnostics.discoveredFeedCount = feeds.length;
+  diagnostics.discoveryPageProbeCount = discovery.pageProbeCount;
+  diagnostics.discoveryProbeBudget = COMPANY_IR_DISCOVERY_MAX_PAGE_PROBES;
+  diagnostics.discoveryProbeBudgetExhausted = discovery.probeBudgetExhausted;
   diagnostics.rssDiscovery = feeds.length > 0 ? "feeds_discovered" : "feed_not_found";
   const acceptedFeeds: string[] = [];
 
@@ -8329,6 +8370,7 @@ function collectionStatus(items: Record<string, unknown>[], sourcesUsed: string[
       "COMPANY_IR_RSS_HOST_REJECTED",
       "COMPANY_IR_RSS_PARSE_ERROR",
       "COMPANY_IR_RSS_UNAVAILABLE",
+      "COMPANY_IR_DISCOVERY_BUDGET_EXHAUSTED",
       "COMPANY_IR_PAGE_VALIDATION_FAILED",
       "COMPANY_IR_PAGE_REVALIDATION_DUE",
     ].includes(_str(w.code)))) return "SOURCE_LIMITED_NOT_FOUND";
@@ -8437,6 +8479,8 @@ function computeSourceStatus(
       companyIrStatus = companyIrItems.length > 0 ? "OK" : "EMPTY_RESULT";
     } else if (warningCodes.has("COMPANY_WEBSITE_NOT_AVAILABLE")) {
       companyIrStatus = "WEBSITE_NOT_AVAILABLE";
+    } else if (warningCodes.has("COMPANY_IR_DISCOVERY_BUDGET_EXHAUSTED")) {
+      companyIrStatus = "DISCOVERY_BUDGET_EXHAUSTED";
     } else if (warningCodes.has("COMPANY_IR_FEED_NOT_FOUND")) {
       companyIrStatus = "FEED_NOT_FOUND";
     } else if (warningCodes.has("COMPANY_IR_RSS_PARSE_ERROR")) {
@@ -8490,6 +8534,7 @@ function computeSourceCoverage(sourceStatus: Record<string, unknown>): string {
     "PROVIDER_CHANGED",
     "WEBSITE_NOT_AVAILABLE",
     "DISCOVERY_NOT_FOUND",
+    "DISCOVERY_BUDGET_EXHAUSTED",
     "FEED_NOT_FOUND",
     "PARSE_ERROR",
     "CANDIDATE_AVAILABLE",
@@ -8504,6 +8549,26 @@ function computeSourceCoverage(sourceStatus: Record<string, unknown>): string {
     }
   }
   return "FULL";
+}
+
+function verifyCoverageFailureMode(
+  sourceStatus: Record<string, unknown>,
+  warnings: Record<string, unknown>[]
+): string | null {
+  const sourceStatuses = Object.values(sourceStatus)
+    .filter((info): info is Record<string, unknown> => !!info && typeof info === "object")
+    .map(info => _str(info.status));
+  const warningText = warnings
+    .filter(w => _str(w.code) === "SOURCE_UNAVAILABLE")
+    .map(w => _str(w.message).toLowerCase())
+    .join(" ");
+  if (warningText.includes("too many subrequests")) return "WORKER_SUBREQUEST_LIMIT";
+  if (sourceStatuses.includes("RATE_LIMITED")) return "RATE_LIMITED";
+  if (sourceStatuses.includes("TIMEOUT")) return "PROVIDER_TIMEOUT";
+  if (sourceStatuses.includes("PROVIDER_CHANGED")) return "PROVIDER_CHANGED";
+  if (sourceStatuses.includes("UNCONFIGURED")) return "SOURCE_UNCONFIGURED";
+  if (sourceStatuses.includes("PROVIDER_ERROR")) return "PROVIDER_ERROR";
+  return null;
 }
 
 async function collectSecEvents(
@@ -9500,6 +9565,18 @@ export async function verifyCompanyEvent(
   }
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
+  const coverageFailureMode = verifyCoverageFailureMode(sourceStatus, out.warnings);
+  if (status === "NOT_FOUND" && coverageFailureMode) {
+    status = "SOURCE_LIMITED_NOT_FOUND";
+    out.warnings.push({
+      code: "SOURCE_LIMITED_NOT_FOUND",
+      message: "One or more selected sources were unavailable; this is not confirmed evidence that the event did not occur.",
+      severity: "warning",
+      failureMode: coverageFailureMode,
+    });
+  }
+  const failureMode = status === "SOURCE_LIMITED_NOT_FOUND" ? coverageFailureMode : null;
+  const retryable = ["WORKER_SUBREQUEST_LIMIT", "RATE_LIMITED", "PROVIDER_TIMEOUT"].includes(_str(failureMode));
   return JSON.stringify({
     ticker: ticker.toUpperCase(),
     query: eventQuery,
@@ -9510,6 +9587,11 @@ export async function verifyCompanyEvent(
     warnings: out.warnings,
     sourceCoverage,
     sourceStatus,
+    failureMode,
+    retryable,
+    recommendedAction: failureMode
+      ? "Inspect sourceStatus and retry with a narrower sources list that excludes failed providers; do not treat this result as confirmed absence."
+      : null,
   });
 }
 

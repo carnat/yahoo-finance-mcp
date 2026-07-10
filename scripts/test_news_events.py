@@ -564,6 +564,33 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
             data = _parse(_run(srv.verify_company_event("AAPL", "guidance")))
             self.assertEqual(data.get("status"), "NOT_FOUND")
 
+    def test_verify_source_limited_not_found_when_providers_fail(self):
+        warnings = [
+            {
+                "code": "SOURCE_UNAVAILABLE",
+                "message": "Yahoo Finance source unavailable: too many subrequests by single Worker invocation",
+                "severity": "warning",
+            },
+            {
+                "code": "SOURCE_UNAVAILABLE",
+                "message": "Finnhub source unavailable: too many subrequests by single Worker invocation",
+                "severity": "warning",
+            },
+        ]
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+            mocked.return_value = ([], [], warnings, "2026-05-10T10:01:00Z")
+            data = _parse(_run(srv.verify_company_event(
+                "AAPL",
+                "guidance",
+                sources=["yahoo_finance_news", "finnhub"],
+            )))
+        self.assertEqual(data.get("status"), "SOURCE_LIMITED_NOT_FOUND")
+        self.assertEqual(data.get("failureMode"), "WORKER_SUBREQUEST_LIMIT")
+        self.assertTrue(data.get("retryable"))
+        self.assertEqual(data.get("sourceCoverage"), "PARTIAL")
+        self.assertEqual(data.get("sourceStatus", {}).get("yahoo_finance_news", {}).get("status"), "PROVIDER_ERROR")
+        self.assertEqual(data.get("sourceStatus", {}).get("finnhub", {}).get("status"), "PROVIDER_ERROR")
+
     def test_verify_stale_and_conflicting(self):
         stale_item = [{
             "title": "Old guidance",
@@ -2090,12 +2117,29 @@ class TestGlobeNewswireRSS(unittest.TestCase):
             "WEBSITE_NOT_AVAILABLE",
             "FEED_NOT_FOUND",
             "DISCOVERY_NOT_FOUND",
+            "DISCOVERY_BUDGET_EXHAUSTED",
             "PROVIDER_ERROR",
             "PARSE_ERROR",
         ):
             self.assertIn(status, worker_text)
+        self.assertIn("COMPANY_IR_DISCOVERY_MAX_PAGE_PROBES", worker_text)
+        self.assertIn("discoveryPageProbeCount", worker_text)
         self.assertIn("sourceDiagnostics.company_ir", worker_text)
         self.assertIn("company-ir-source-status", canary_text)
+
+    def test_worker_verify_marks_unavailable_coverage_as_not_confirmed_absence(self):
+        """An unavailable provider must not be flattened into a plain NOT_FOUND."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+            worker_text = f.read()
+        with open(os.path.join(root, "worker", "src", "tools.ts"), encoding="utf-8") as f:
+            tools_text = f.read()
+
+        self.assertIn("function verifyCoverageFailureMode", worker_text)
+        self.assertIn('status = "SOURCE_LIMITED_NOT_FOUND"', worker_text)
+        self.assertIn('"WORKER_SUBREQUEST_LIMIT"', worker_text)
+        self.assertIn("recommendedAction", worker_text)
+        self.assertIn("SOURCE_LIMITED_NOT_FOUND", tools_text)
 
     def test_worker_company_ir_xml_safety_check_relaxed(self):
         """Worker XML safety check should be relaxed to support standard DOCTYPEs but reject ENTITYs."""
