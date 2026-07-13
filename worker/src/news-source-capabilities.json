@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "2026-07-13",
+  "providers": {
+    "finnhub": {
+      "defaultEligibility": "eligible",
+      "ineligibleTickerSuffixes": [".ST", ".DE", ".L", ".TWO"],
+      "ineligibleTickers": ["FOCI"],
+      "reasonCode": "MARKET_NOT_ENABLED_BY_DEPLOYED_ENTITLEMENT"
+    }
+  }
+}
