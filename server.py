@@ -1755,12 +1755,16 @@ def _dedupe_event_items(items: list[dict], warnings: list[dict]) -> list[dict]:
 
 
 def _build_collection_status(items: list[dict], sources_used: list[str], warnings: list[dict]) -> str | None:
-    if items and any(w.get("code") == "SOURCE_UNAVAILABLE" for w in warnings if isinstance(w, dict)):
+    has_limited_source = any(
+        w.get("code") in {"SOURCE_UNAVAILABLE", "SOURCE_NOT_ELIGIBLE"}
+        for w in warnings if isinstance(w, dict)
+    )
+    if items and has_limited_source:
         return "PARTIAL"
     if not items:
         # If any source is unconfigured/provider-error/rate-limited, report SOURCE_LIMITED_NOT_FOUND
         # so callers know the empty result may be due to missing coverage, not genuine absence.
-        if any(w.get("code") == "SOURCE_UNAVAILABLE" for w in warnings if isinstance(w, dict)):
+        if has_limited_source:
             return "SOURCE_LIMITED_NOT_FOUND"
         if any(str(w.get("code", "")).startswith("COMPANY_IR_PAGE_") for w in warnings if isinstance(w, dict)):
             return "SOURCE_LIMITED_NOT_FOUND"

@@ -7,6 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +44,17 @@ class TestIrPageRegistry(unittest.TestCase):
         tickers = module.validate_scope(scope)
         self.assertEqual(set(tickers), ARSENAL_TICKERS)
         self.assertEqual(len(tickers), 20)
+
+    def test_candidate_records_keep_review_metadata_as_json_null(self):
+        module = _load_discovery_module()
+        with patch.object(module, "public_company_identity", return_value=("Micron Technology", "https://www.micron.com/")):
+            with patch.object(module, "fetch_text", return_value=("https://investors.micron.com/news", "text/html", "<title>Investor Relations newsroom</title>")):
+                candidate = module.candidate_for("MU")
+        self.assertEqual(candidate["status"], "candidate")
+        self.assertEqual(candidate["issuerName"], "Micron Technology")
+        self.assertIsNone(candidate["reviewedBy"])
+        self.assertIsNone(candidate["revalidateAfter"])
+        module.validate_registry({"schemaVersion": "2026-07-10", "sources": [candidate]})
 
 
 if __name__ == "__main__":

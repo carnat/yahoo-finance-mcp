@@ -646,6 +646,14 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
         self.assertEqual(coverage["skippedSources"][0]["source"], "finnhub")
         self.assertEqual(coverage["recommendedNextAction"], "CHECK_OFFICIAL_RELEASES")
 
+    def test_finnhub_only_policy_skip_is_source_limited_not_found(self):
+        data = _parse(_run(srv.get_company_news("SIVE.ST", sources=["finnhub"], max_results=1)))
+        self.assertEqual(data.get("status"), "SOURCE_LIMITED_NOT_FOUND")
+        self.assertEqual(data.get("sourceCoverage"), "PARTIAL")
+        self.assertEqual(data.get("sourceStatus", {}).get("finnhub", {}).get("status"), "NOT_ELIGIBLE")
+        self.assertIs(data.get("sourceStatus", {}).get("finnhub", {}).get("attempted"), False)
+        self.assertEqual(data.get("coverage", {}).get("recommendedNextAction"), "CHECK_OFFICIAL_RELEASES")
+
     def test_llm_evidence_fields_are_source_independent(self):
         item = srv._enrich_news_item_for_llm({
             "sourceType": "company_news",
