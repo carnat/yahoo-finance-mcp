@@ -126,6 +126,11 @@ schemas, aliases, and deprecation metadata.
   RSS-only releases, candidate links, newswire, and Yahoo items are
   verification/context evidence unless the payload also resolves SEC EX-99 or
   approved IR-page evidence.
+- News/event responses include a compact `coverage` object. Check its `state`,
+  `failedSources`, `skippedSources`, and `recommendedNextAction` before
+  treating an empty result as absence. `evidenceClass`, `tickerMatch`, and
+  `urlProvenance` make source meaning comparable for LLM callers; legacy
+  `confidence` remains backward-compatible but is not a provider-quality rank.
 - `extract_sec_filing_fact` and SEC exposure tools can return explicit
   limitation statuses such as `EXTRACTION_FAILED`, `TABLE_NOT_PARSED`,
   `PROVIDER_LIMITATION`, or `NO_DIMENSIONAL_REVENUE_FACT`.

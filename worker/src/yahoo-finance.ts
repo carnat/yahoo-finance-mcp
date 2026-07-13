@@ -1,5 +1,6 @@
 import { getWorkerVar, mcpFailure } from "./response.js";
 import registryManifest from "./company-ir-page-registry.json";
+import newsSourceCapabilities from "./news-source-capabilities.json";
 
 /**
  * Yahoo Finance API client for Cloudflare Workers.
@@ -6974,6 +6975,70 @@ function sourceDecisionUse(sourceType: unknown): string {
   return "context_only";
 }
 
+function finnhubEligibility(ticker: string): { eligible: boolean; reasonCode: string | null } {
+  const policy = newsSourceCapabilities.providers.finnhub;
+  const tickerU = ticker.toUpperCase();
+  const ineligible = policy.ineligibleTickers.includes(tickerU)
+    || policy.ineligibleTickerSuffixes.some(suffix => tickerU.endsWith(suffix));
+  return { eligible: !ineligible, reasonCode: ineligible ? policy.reasonCode : null };
+}
+
+function evidenceClassFor(sourceType: unknown): string {
+  const source = _str(sourceType);
+  if (source === "sec_filing" || source === "sec_ex99_found") return "SEC_FILING";
+  if (source === "company_ir_page") return "APPROVED_IR_PAGE";
+  if (source === "company_ir") return "OFFICIAL_RSS_ATOM";
+  if (["newswire", "press_release", "yahoo_finance_press_releases"].includes(source)) return "WIRE_RELEASE";
+  return "CONTEXTUAL_NEWS";
+}
+
+function urlProvenanceFor(item: Record<string, unknown>): string {
+  const source = _str(item.sourceType);
+  if (["sec_filing", "sec_ex99_found", "company_ir", "company_ir_page"].includes(source)) return "OFFICIAL";
+  const url = _str(item.url);
+  if (!url) return "UNKNOWN";
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host.endsWith("finance.yahoo.com") || host.endsWith("finnhub.io")) return "PROVIDER";
+  } catch { return "UNKNOWN"; }
+  return "PUBLISHER";
+}
+
+function tickerMatchFor(item: Record<string, unknown>): string {
+  const configuredTicker = Array.isArray(item.tickers) ? item.tickers.map(value => _str(value).toUpperCase()).find(Boolean) ?? "" : "";
+  const text = `${_str(item.title)} ${_str(item.summary)} ${_str(item.evidenceText)}`.toUpperCase();
+  if (configuredTicker && new RegExp(`\\b${configuredTicker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(text)) return "EXPLICIT";
+  if (configuredTicker) return "SOURCE_SCOPED";
+  return "UNVERIFIED";
+}
+
+function enrichNewsItemForLlm(item: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...item,
+    evidenceClass: evidenceClassFor(item.sourceType),
+    tickerMatch: tickerMatchFor(item),
+    urlProvenance: urlProvenanceFor(item),
+  };
+}
+
+function buildCoverage(sourceStatus: Record<string, unknown>): Record<string, unknown> {
+  const failedStatuses = new Set(["UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED", "WEBSITE_NOT_AVAILABLE", "DISCOVERY_NOT_FOUND", "DISCOVERY_BUDGET_EXHAUSTED", "FEED_NOT_FOUND", "PARSE_ERROR", "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED"]);
+  const failedSources: Record<string, unknown>[] = [];
+  const skippedSources: Record<string, unknown>[] = [];
+  for (const [source, value] of Object.entries(sourceStatus)) {
+    if (!value || typeof value !== "object") continue;
+    const info = value as Record<string, unknown>;
+    const status = _str(info.status);
+    const entry = { source, status, attempted: info.attempted !== false, reasonCode: info.reasonCode ?? null };
+    if (status === "NOT_ELIGIBLE") skippedSources.push(entry);
+    else if (failedStatuses.has(status)) failedSources.push(entry);
+  }
+  const recommendedNextAction = failedSources.some(entry => ["RATE_LIMITED", "TIMEOUT"].includes(_str(entry.status)))
+    ? "RETRY_RETRYABLE_SOURCES"
+    : (failedSources.length || skippedSources.length ? "CHECK_OFFICIAL_RELEASES" : "USE_RETURNED_CONTEXT");
+  return { state: computeSourceCoverage(sourceStatus), failedSources, skippedSources, recommendedNextAction };
+}
+
 type CompanyIrPageSource = {
   ticker: string;
   issuerName: string;
@@ -8460,7 +8525,12 @@ function computeSourceStatus(
     }
   }
   if (selectedSources.includes("finnhub")) {
-    if (sourcesUsed.includes("finnhub")) {
+    const diagnostic = (sourceDiagnostics.finnhub && typeof sourceDiagnostics.finnhub === "object")
+      ? sourceDiagnostics.finnhub as Record<string, unknown>
+      : {};
+    if (_str(diagnostic.status) === "NOT_ELIGIBLE") {
+      result.finnhub = { status: "NOT_ELIGIBLE", rawCount: 0, filteredCount: 0, ...diagnostic };
+    } else if (sourcesUsed.includes("finnhub")) {
       result.finnhub = { status: finnhubItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: finnhubItems.length, filteredCount: finnhubItems.length };
     } else if (warningMsgs.some(m => m.includes("finnhub company-news source is not configured"))) {
       result.finnhub = { status: "UNCONFIGURED" };
@@ -8534,6 +8604,7 @@ function computeSourceStatus(
 function computeSourceCoverage(sourceStatus: Record<string, unknown>): string {
   const limitedStatuses = new Set([
     "UNCONFIGURED",
+    "NOT_ELIGIBLE",
     "PROVIDER_ERROR",
     "AUTH_ERROR",
     "RATE_LIMITED",
@@ -8574,6 +8645,7 @@ function verifyCoverageFailureMode(
   if (sourceStatuses.includes("TIMEOUT")) return "PROVIDER_TIMEOUT";
   if (sourceStatuses.includes("PROVIDER_CHANGED")) return "PROVIDER_CHANGED";
   if (sourceStatuses.includes("UNCONFIGURED")) return "SOURCE_UNCONFIGURED";
+  if (sourceStatuses.includes("NOT_ELIGIBLE")) return "SOURCE_NOT_ELIGIBLE";
   if (sourceStatuses.includes("PROVIDER_ERROR")) return "PROVIDER_ERROR";
   return null;
 }
@@ -9112,14 +9184,30 @@ async function collectCompanyEvents(
     warnings.push(...gnw.warnings);
   }
 
-  if (selected.includes("finnhub")) {
+  if (selected.includes("finnhub") && finnhubEligibility(ticker).eligible) {
     const finnhub = await collectFinnhubEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback);
     if (finnhub.used) sourcesUsed.push("finnhub");
     items.push(...finnhub.items);
     warnings.push(...finnhub.warnings);
+  } else if (selected.includes("finnhub")) {
+    const eligibility = finnhubEligibility(ticker);
+    sourceDiagnostics.finnhub = {
+      status: "NOT_ELIGIBLE",
+      attempted: false,
+      reasonCode: eligibility.reasonCode,
+      allowedAction: "use_yahoo_or_official_sources",
+    };
+    warnings.push({
+      code: "SOURCE_NOT_ELIGIBLE",
+      message: `Finnhub company-news is intentionally skipped for ${ticker.toUpperCase()} under the deployed market capability policy.`,
+      severity: "warning",
+      source: "finnhub",
+      attempted: false,
+      reasonCode: eligibility.reasonCode,
+    });
   }
 
-  const deduped = dedupeEventItems(items, warnings).slice(0, safeMax);
+  const deduped = dedupeEventItems(items, warnings).slice(0, safeMax).map(enrichNewsItemForLlm);
   const uniqueWarnings: Record<string, unknown>[] = [];
   const warningKeys = new Set<string>();
   for (const w of warnings) {
@@ -9150,12 +9238,14 @@ export async function getCompanyNews(
   const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
+  const coverage = buildCoverage(sourceStatus);
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
     items: out.items,
     meta: { sourcesUsed: out.sourcesUsed, deduped: true, watermark: out.watermark },
     warnings: out.warnings,
     sourceCoverage,
+    coverage,
     sourceStatus,
   };
   if (status) payload.status = status;
@@ -9178,6 +9268,7 @@ export async function searchCompanyNews(
   const status = collectionStatus(matched, out.sourcesUsed, out.warnings);
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
+  const coverage = buildCoverage(sourceStatus);
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
     query,
@@ -9185,6 +9276,7 @@ export async function searchCompanyNews(
     meta: { sourcesUsed: out.sourcesUsed, deduped: true, watermark: out.watermark },
     warnings: out.warnings,
     sourceCoverage,
+    coverage,
     sourceStatus,
   };
   if (status) payload.status = status;
@@ -9359,6 +9451,7 @@ export async function getCompanyPressReleases(
     : "No resolved SEC EX-99 press-release exhibit in this call; use for verification/context only.";
   const sourceStatus = computeSourceStatus(sourcesUsed, uniqueWarnings, processedItems, selected, sourceDiagnostics);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
+  const coverage = buildCoverage(sourceStatus);
 
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
@@ -9366,6 +9459,7 @@ export async function getCompanyPressReleases(
     meta: { sourcesUsed, deduped: true, watermark: primary.watermark || supplemental.watermark },
     warnings: uniqueWarnings,
     sourceCoverage,
+    coverage,
     sourceStatus,
     coverageStatus,
     decisionGrade: payloadDecisionGrade,
@@ -9390,11 +9484,17 @@ export async function getSecRecentEvents(
   const watermark = new Date().toISOString();
   const sec = await collectSecEvents(ticker, filingTypes, clampInt(maxResults, 20, 1, 100), watermark, "", "", clampInt(lookbackDays, 90, 1, 3650));
   const status = collectionStatus(sec.items, sec.used ? ["sec"] : [], sec.warnings);
+  const sourceStatus = { sec: { status: sec.used ? (sec.items.length ? "OK" : "EMPTY_RESULT") : "PROVIDER_ERROR", rawCount: sec.items.length, filteredCount: sec.items.length } };
+  const sourceCoverage = computeSourceCoverage(sourceStatus);
+  const coverage = buildCoverage(sourceStatus);
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
-    items: sec.items,
+    items: sec.items.map(enrichNewsItemForLlm),
     meta: { sourcesUsed: sec.used ? ["sec"] : [], watermark },
     warnings: sec.warnings,
+    sourceCoverage,
+    coverage,
+    sourceStatus,
   };
   if (status) payload.status = status;
   return JSON.stringify(payload);
@@ -9419,6 +9519,9 @@ export async function getPublicEventTimeline(
       sourceType: item.sourceType,
       url: item.url,
       confidence: item.confidence,
+      evidenceClass: item.evidenceClass,
+      tickerMatch: item.tickerMatch,
+      urlProvenance: item.urlProvenance,
       duplicateGroupId: item.duplicateGroupId,
       sourceRefs: item.sourceRefs ?? [],
     }))
@@ -9429,12 +9532,14 @@ export async function getPublicEventTimeline(
   const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
+  const coverage = buildCoverage(sourceStatus);
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
     timeline,
     meta: { sourcesUsed: out.sourcesUsed, deduped: true, watermark: out.watermark },
     warnings: out.warnings,
     sourceCoverage,
+    coverage,
     sourceStatus,
   };
   if (status) payload.status = status;
@@ -9577,6 +9682,7 @@ export async function verifyCompanyEvent(
   }
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
+  const coverage = buildCoverage(sourceStatus);
   const coverageFailureMode = verifyCoverageFailureMode(sourceStatus, out.warnings);
   if (status === "NOT_FOUND" && coverageFailureMode) {
     status = "SOURCE_LIMITED_NOT_FOUND";
@@ -9598,6 +9704,7 @@ export async function verifyCompanyEvent(
     meta: { sourcesChecked: out.sourcesUsed, watermark: out.watermark },
     warnings: out.warnings,
     sourceCoverage,
+    coverage,
     sourceStatus,
     failureMode,
     retryable,
