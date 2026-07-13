@@ -58,17 +58,30 @@ def validate_registry(registry: dict[str, Any]) -> list[dict[str, Any]]:
         status = source.get("status")
         canonical = str(source.get("canonicalUrl") or "")
         hosts = source.get("allowedHosts")
-        if not ticker or status not in {"candidate", "approved", "disabled"}:
-            raise ValueError("registry entries require ticker and valid status")
+        prefixes = source.get("allowedPathPrefixes")
+        adapter = source.get("adapter")
+        issuer = str(source.get("issuerName") or "").strip()
+        if not ticker or not issuer or status not in {"candidate", "approved", "disabled"}:
+            raise ValueError("registry entries require ticker, issuerName, and valid status")
         if ticker in seen:
             raise ValueError(f"duplicate registry ticker: {ticker}")
         seen.add(ticker)
-        if canonical:
-            parsed = urllib.parse.urlparse(canonical)
-            if parsed.scheme != "https" or not parsed.hostname:
-                raise ValueError(f"{ticker} canonicalUrl must be HTTPS")
-        if not isinstance(hosts, list) or any(not isinstance(host, str) or not host for host in hosts):
+        parsed = urllib.parse.urlparse(canonical)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError(f"{ticker} canonicalUrl must be HTTPS")
+        if not isinstance(hosts, list) or not hosts or any(not isinstance(host, str) or not host for host in hosts):
             raise ValueError(f"{ticker} allowedHosts must be a non-empty string list")
+        if not isinstance(prefixes, list) or not prefixes or any(not isinstance(prefix, str) or not prefix.startswith("/") for prefix in prefixes):
+            raise ValueError(f"{ticker} allowedPathPrefixes must be a non-empty absolute-path list")
+        if adapter not in {"structured", "html_article"}:
+            raise ValueError(f"{ticker} adapter must be structured or html_article")
+        if status == "candidate" and not str(source.get("candidateReason") or "").strip():
+            raise ValueError(f"{ticker} candidate entries require candidateReason")
+        if status == "approved":
+            if not str(source.get("reviewedBy") or "").strip() or not str(source.get("reviewedAt") or "").strip():
+                raise ValueError(f"{ticker} approved entries require reviewer metadata")
+            if not str(source.get("revalidateAfter") or "").strip():
+                raise ValueError(f"{ticker} approved entries require revalidateAfter")
     return sources
 
 
@@ -147,9 +160,9 @@ def candidate_for(ticker: str) -> dict[str, Any] | None:
                 "allowedPathPrefixes": [final.path or "/"],
                 "candidateReason": "bounded company-domain discovery found a structured feed/API or newsroom page",
                 "discoveredAt": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
-                "reviewedBy": null,
-                "reviewedAt": null,
-                "revalidateAfter": null
+                "reviewedBy": None,
+                "reviewedAt": None,
+                "revalidateAfter": None
             }
     return None
 

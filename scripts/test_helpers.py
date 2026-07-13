@@ -555,6 +555,11 @@ class TestBuildCollectionStatus(unittest.TestCase):
         result = srv._build_collection_status([], [], warnings)
         self.assertEqual(result, "SOURCE_LIMITED_NOT_FOUND")
 
+    def test_no_items_not_eligible_warning_returns_source_limited(self):
+        warnings = [{"code": "SOURCE_NOT_ELIGIBLE", "message": "Finnhub is not enabled for this market."}]
+        result = srv._build_collection_status([], [], warnings)
+        self.assertEqual(result, "SOURCE_LIMITED_NOT_FOUND")
+
     def test_no_items_no_sources_returns_provider_error(self):
         result = srv._build_collection_status([], [], [])
         self.assertEqual(result, "PROVIDER_ERROR")

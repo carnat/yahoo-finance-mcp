@@ -59,6 +59,20 @@
       "volatility": "provider_status"
     },
     {
+      "id": "finnhub-not-eligible-contract",
+      "description": "Known unsupported Finnhub markets are skipped deterministically rather than producing a remote authorization failure.",
+      "tool": "get_company_news",
+      "args": {
+        "ticker": "SIVE.ST",
+        "sources": ["finnhub"],
+        "max_results": 1,
+        "lookback_days": 7
+      },
+      "assertion": "finnhub_not_eligible_contract",
+      "blocking": true,
+      "volatility": "stable_contract"
+    },
+    {
       "id": "overnight-diagnostics-only",
       "description": "Overnight quote remains a Yahoo extended-hours diagnostic proxy, never decision-grade overnight venue data.",
       "tool": "get_overnight_quote",

@@ -8432,9 +8432,10 @@ function dedupeEventItems(items: Record<string, unknown>[], warnings: Record<str
 }
 
 function collectionStatus(items: Record<string, unknown>[], sourcesUsed: string[], warnings: Record<string, unknown>[]): string | null {
-  if (items.length > 0 && warnings.some(w => _str(w.code) === "SOURCE_UNAVAILABLE")) return "PARTIAL";
+  const hasLimitedSource = warnings.some(w => ["SOURCE_UNAVAILABLE", "SOURCE_NOT_ELIGIBLE"].includes(_str(w.code)));
+  if (items.length > 0 && hasLimitedSource) return "PARTIAL";
   if (items.length === 0) {
-    if (warnings.some(w => _str(w.code) === "SOURCE_UNAVAILABLE")) return "SOURCE_LIMITED_NOT_FOUND";
+    if (hasLimitedSource) return "SOURCE_LIMITED_NOT_FOUND";
     if (warnings.some(w => [
       "COMPANY_WEBSITE_NOT_AVAILABLE",
       "COMPANY_IR_FEED_NOT_FOUND",
