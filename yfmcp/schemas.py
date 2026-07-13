@@ -51,8 +51,23 @@ _NEWS_EVENT_OUTPUT_SCHEMA: dict = {
     "type": "object",
     "properties": {
         "ticker": {"type": "string"},
-        "items": {"type": "array"},
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "evidenceClass": {"type": "string"},
+                    "tickerMatch": {"type": "string"},
+                    "matchBasis": {"type": "string"},
+                    "urlProvenance": {"type": "string"},
+                    "decisionUse": {"type": "string"},
+                },
+                "additionalProperties": True,
+            },
+        },
         "meta": {"type": "object"},
+        "coverage": {"type": "object"},
+        "sourceStatus": {"type": "object"},
     },
     "additionalProperties": True,
 }

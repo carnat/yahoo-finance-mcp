@@ -315,7 +315,7 @@ def _enrich_news_item_for_llm(item: dict) -> dict:
     ticker = next((str(value).upper() for value in item.get("tickers") or [] if str(value).strip()), "")
     text = " ".join(str(item.get(key) or "") for key in ("title", "summary", "evidenceText")).upper()
     enriched["evidenceClass"] = _evidence_class_for(item.get("sourceType"))
-    enriched["tickerMatch"] = "EXPLICIT" if ticker and _re.search(rf"\b{_re.escape(ticker)}\b", text) else ("SOURCE_SCOPED" if ticker else "UNVERIFIED")
+    enriched["tickerMatch"] = "EXPLICIT" if item.get("matchBasis") in {"TICKER_TOKEN", "ISSUER_NAME", "ISSUER_ACRONYM"} or (ticker and _re.search(rf"\b{_re.escape(ticker)}\b", text)) else ("SOURCE_SCOPED" if ticker else "UNVERIFIED")
     enriched["urlProvenance"] = _url_provenance_for(item)
     return enriched
 
@@ -323,6 +323,7 @@ def _enrich_news_item_for_llm(item: dict) -> dict:
 def _build_coverage(source_status: dict) -> dict:
     failed_states = {
         "UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED",
+        "IDENTITY_UNAVAILABLE",
         "WEBSITE_NOT_AVAILABLE", "DISCOVERY_NOT_FOUND", "DISCOVERY_BUDGET_EXHAUSTED", "FEED_NOT_FOUND",
         "PARSE_ERROR", "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED",
     }
@@ -340,6 +341,72 @@ def _build_coverage(source_status: dict) -> dict:
         "CHECK_OFFICIAL_RELEASES" if failed_sources or skipped_sources else "USE_RETURNED_CONTEXT"
     )
     return {"state": _compute_source_coverage(source_status), "failedSources": failed_sources, "skippedSources": skipped_sources, "recommendedNextAction": action}
+
+
+_YAHOO_NEWS_LEGAL_SUFFIXES = frozenset({
+    "inc", "incorporated", "corp", "corporation", "ltd", "limited", "llc", "plc",
+    "co", "company", "sa", "ag", "nv", "se", "gmbh",
+})
+_YAHOO_NEWS_ACRONYM_IGNORED_WORDS = frozenset({"the", "and", "of", "for"})
+
+
+def _normalized_yahoo_news_phrase(value: object) -> str:
+    return _re.sub(r"\s+", " ", _re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())).strip()
+
+
+def _strip_yahoo_news_legal_suffix(value: str) -> str:
+    words = [word for word in value.split() if word]
+    while len(words) > 1 and words[-1] in _YAHOO_NEWS_LEGAL_SUFFIXES:
+        words.pop()
+    return " ".join(words)
+
+
+def _yahoo_news_identity_from_info(ticker: str, info: dict | None) -> dict:
+    info = info if isinstance(info, dict) else {}
+    aliases: set[str] = set()
+    acronyms: set[str] = set()
+    company_name = str(info.get("longName") or info.get("shortName") or "").strip() or None
+    for raw_name in (info.get("shortName"), info.get("longName")):
+        normalized = _normalized_yahoo_news_phrase(raw_name)
+        if not normalized:
+            continue
+        stripped = _strip_yahoo_news_legal_suffix(normalized)
+        for alias in (normalized, stripped):
+            if len(alias) >= 3:
+                aliases.add(alias)
+        initials = "".join(
+            word[0] for word in stripped.split()
+            if word and word not in _YAHOO_NEWS_ACRONYM_IGNORED_WORDS
+        )
+        if 3 <= len(initials) <= 6:
+            acronyms.add(initials)
+    return {
+        "status": "RESOLVED" if aliases else "UNAVAILABLE",
+        "companyName": company_name,
+        "aliases": tuple(sorted(aliases)),
+        "acronyms": tuple(sorted(acronyms)),
+        "exchange": info.get("exchange") or info.get("exchangeName"),
+        "ticker": ticker.upper(),
+    }
+
+
+def _yahoo_news_match_for(text: str, ticker: str, identity: dict) -> tuple[str, int] | None:
+    if _is_ticker_compatible_with_context(text, ticker, identity.get("exchange")):
+        return "TICKER_TOKEN", 0
+    if identity.get("status") != "RESOLVED":
+        return None
+    normalized_text = f" {_normalized_yahoo_news_phrase(text)} "
+    if any(f" {alias} " in normalized_text for alias in identity.get("aliases") or ()):
+        return "ISSUER_NAME", 1
+    if any(_re.search(r"\b" + _re.escape(acronym) + r"\b", text, _re.IGNORECASE) for acronym in identity.get("acronyms") or ()):
+        return "ISSUER_ACRONYM", 2
+    return None
+
+
+def _yahoo_decision_use(event_type: str) -> str:
+    return "CHECK_OFFICIAL_RELEASES" if event_type in {
+        "earnings", "guidance", "contract", "financing", "product", "regulatory", "litigation",
+    } else "CONTEXT_ONLY"
 _NEWSWIRE_HINTS = ("businesswire", "globenewswire", "prnewswire")
 _COMPANY_IR_URL_MARKERS = ("investor.", "investors.", "/investor", "/news-releases", "/press-release")
 _YAHOO_ALLOWED_CONTENT_TYPES = {"STORY", "ARTICLE", "PRESS_RELEASE"}
@@ -1318,7 +1385,9 @@ async def _collect_yahoo_events(
     end_date: str = "",
     lookback_days: int | None = None,
     feed: str = "news",
-) -> tuple[list[dict], list[dict], bool]:
+    identity: dict | None = None,
+    include_diagnostics: bool = False,
+) -> tuple:
     """Fetch Yahoo Finance items for the given *feed*.
 
     ``feed="news"`` fetches the general news tab and labels items as
@@ -1331,6 +1400,26 @@ async def _collect_yahoo_events(
     """
     warnings: list[dict] = []
     items: list[dict] = []
+    diagnostics: dict = {
+        "rawCount": 0,
+        "retrievedCount": 0,
+        "filteredCount": 0,
+        "acceptedCount": 0,
+        "rejectedCount": 0,
+        "rejectionCounts": {},
+        "identityStatus": "UNAVAILABLE",
+    }
+
+    def _reject(reason: str) -> None:
+        diagnostics["rejectedCount"] += 1
+        counts = diagnostics["rejectionCounts"]
+        counts[reason] = counts.get(reason, 0) + 1
+
+    def _result(collected: list[dict], used: bool) -> tuple:
+        if include_diagnostics:
+            return collected, warnings, used, diagnostics
+        return collected, warnings, used
+
     feed_source_override: str | None = "yahoo_finance_press_releases" if feed == "press_releases" else None
 
     try:
@@ -1361,64 +1450,57 @@ async def _collect_yahoo_events(
                 raw_news = company.news or []
     except Exception as exc:
         warnings.append({"code": "SOURCE_UNAVAILABLE", "message": f"Yahoo Finance source unavailable: {exc}", "severity": "warning"})
-        return items, warnings, False
+        return _result(items, False)
 
-    # Build company-name tokens for headline relevance filtering (BUG-08).
-    # Yahoo's news feed returns sector/peer articles tagged with a ticker but
-    # mentioning unrelated companies. We reject items where neither the ticker
-    # symbol nor any significant company-name word appears in the headline.
-    _HEADLINE_STOPWORDS = frozenset({
-        "corp", "corporation", "inc", "ltd", "llc", "plc", "co",
-        "group", "holdings", "technology", "technologies", "solutions",
-        "services", "systems", "international", "global",
-        # Common sector nouns that appear in peer/sector articles
-        "energy", "capital", "financial", "finance", "resources",
-    })
-    short_name = ""
-    company_exchange = None
-    try:
-        info = company.info
-        short_name = str(info.get("shortName") or info.get("longName") or "").strip()
-        company_exchange = info.get("exchange") or info.get("exchangeName")
-    except Exception:
-        pass
-    _name_tokens: frozenset[str] = frozenset(
-        w for w in _re.sub(r"[^a-z0-9]", " ", short_name.lower()).split()
-        if len(w) >= 4 and w not in _HEADLINE_STOPWORDS
-    )
-    _ticker_upper = ticker.upper()
-    _ticker_pat = _re.compile(r"\b" + _re.escape(_ticker_upper) + r"\b")
+    if identity is None:
+        try:
+            identity = _yahoo_news_identity_from_info(ticker, company.info)
+        except Exception:
+            identity = _yahoo_news_identity_from_info(ticker, None)
+    diagnostics["identityStatus"] = identity.get("status") or "UNAVAILABLE"
+    accepted: list[tuple[dict, int]] = []
 
     for n in raw_news:
         if not isinstance(n, dict):
             continue
+        diagnostics["rawCount"] += 1
+        diagnostics["retrievedCount"] += 1
         content = n.get("content", {}) if isinstance(n.get("content"), dict) else {}
         content_type = str(content.get("contentType") or n.get("contentType") or "").upper()
         if content_type and content_type not in _YAHOO_ALLOWED_CONTENT_TYPES:
+            _reject("CONTENT_TYPE")
             continue
         # For the press-releases feed, Yahoo tab membership is authoritative:
         # valid press-release tab items may still arrive as STORY/ARTICLE.
         item, item_warnings = _build_yahoo_event_item(ticker, n, retrieved_at, feed_source=feed_source_override)
 
-        # Headline relevance filter: keep only items that mention the ticker
-        # symbol or a significant company-name word in the title/summary.
-        hay = f"{item.get('title') or ''} {item.get('evidenceText') or ''}"
-        ticker_found = _is_ticker_compatible_with_context(hay, ticker, company_exchange)
-        name_found = bool(_name_tokens and any(
-            _re.search(r"\b" + _re.escape(tok) + r"\b", hay, _re.IGNORECASE)
-            for tok in _name_tokens
-        ))
-        item["sourceTickerMatch"] = ticker_found or name_found
-        if not item["sourceTickerMatch"]:
-            continue
-
         if not _within_date_window(item.get("publishedAt"), start_date=start_date, end_date=end_date, lookback_days=lookback_days):
+            _reject("DATE_WINDOW")
             continue
-        items.append(item)
+        match = _yahoo_news_match_for(
+            f"{item.get('title') or ''} {item.get('summary') or ''} {item.get('evidenceText') or ''}",
+            ticker,
+            identity,
+        )
+        if match is None:
+            _reject("IDENTITY_UNAVAILABLE_TICKER_NOT_FOUND" if identity.get("status") == "UNAVAILABLE" else "IDENTITY_MISMATCH")
+            continue
+        match_basis, rank = match
+        item["issuer"] = identity.get("companyName")
+        item["matchBasis"] = match_basis
+        item["sourceTickerMatch"] = True
+        item["tickerRelevance"] = "HIGH"
+        item["confidence"] = "MEDIUM" if item.get("url") else "LOW"
+        item["decisionUse"] = _yahoo_decision_use(str(item.get("eventType") or "other"))
+        accepted.append((item, rank))
         warnings.extend(item_warnings)
-        if len(items) >= max_results:
-            break
-    return items, warnings, True
+    # Stable sorts make the primary match rank deterministic, then newest first.
+    accepted.sort(key=lambda pair: str(pair[0].get("publishedAt") or ""), reverse=True)
+    accepted.sort(key=lambda pair: pair[1])
+    diagnostics["filteredCount"] = len(accepted)
+    diagnostics["acceptedCount"] = len(accepted)
+    items = [item for item, _rank in accepted[:max_results]]
+    return _result(items, True)
 
 
 async def _collect_globenewswire_events(
@@ -1756,7 +1838,7 @@ def _dedupe_event_items(items: list[dict], warnings: list[dict]) -> list[dict]:
 
 def _build_collection_status(items: list[dict], sources_used: list[str], warnings: list[dict]) -> str | None:
     has_limited_source = any(
-        w.get("code") in {"SOURCE_UNAVAILABLE", "SOURCE_NOT_ELIGIBLE"}
+        w.get("code") in {"SOURCE_UNAVAILABLE", "SOURCE_NOT_ELIGIBLE", "SOURCE_IDENTITY_UNAVAILABLE"}
         for w in warnings if isinstance(w, dict)
     )
     if items and has_limited_source:
@@ -1779,6 +1861,7 @@ def _compute_source_status(
     warnings: list[dict],
     items: list[dict],
     selected_sources: list[str] | None = None,
+    source_diagnostics: dict | None = None,
 ) -> dict:
     """Build per-source status dict from collection results.
 
@@ -1823,6 +1906,7 @@ def _compute_source_status(
     company_ir_items = [it for it in items if str(it.get("sourceType", "")) in ("company_ir", "press_release")]
     company_ir_page_items = [it for it in items if str(it.get("sourceType", "")) == "company_ir_page"]
     finnhub_items = [it for it in items if str(it.get("source", "")) == "finnhub"]
+    diagnostics = source_diagnostics or {}
 
     def _yf_error_status(warn_msgs: list[str]) -> str | None:
         if any("yahoo finance" in m.lower() for m in warn_msgs):
@@ -1830,6 +1914,26 @@ def _compute_source_status(
         return None
 
     result: dict = {}
+    identity_diagnostic = diagnostics.get("yahoo_finance_identity") if isinstance(diagnostics.get("yahoo_finance_identity"), dict) else None
+    if identity_diagnostic and identity_diagnostic.get("status") == "IDENTITY_UNAVAILABLE":
+        result["yahoo_finance_identity"] = dict(identity_diagnostic)
+
+    def _yahoo_status(source: str, source_items: list[dict]) -> dict | None:
+        diagnostic = diagnostics.get(source) if isinstance(diagnostics.get(source), dict) else None
+        if diagnostic is None:
+            return None
+        return {
+            "status": "PROVIDER_ERROR" if diagnostic.get("completed") is False else ("OK" if source_items else "EMPTY_RESULT"),
+            "rawCount": int(diagnostic.get("rawCount") or 0),
+            "retrievedCount": int(diagnostic.get("retrievedCount") or diagnostic.get("rawCount") or 0),
+            "filteredCount": int(diagnostic.get("filteredCount") or 0),
+            "acceptedCount": int(diagnostic.get("acceptedCount") or diagnostic.get("filteredCount") or 0),
+            "rejectedCount": int(diagnostic.get("rejectedCount") or 0),
+            "rejectionCounts": dict(diagnostic.get("rejectionCounts") or {}),
+            "identityStatus": diagnostic.get("identityStatus"),
+            "attempted": diagnostic.get("attempted") is not False,
+        }
+
     if "sec" in sources:
         if "sec" in sources_used:
             result["sec"] = {"status": "OK" if sec_items else "EMPTY_RESULT", "rawCount": len(sec_items), "filteredCount": len(sec_items)}
@@ -1841,7 +1945,10 @@ def _compute_source_status(
     # Fine-grained Yahoo Finance sources
     if "yahoo_finance_news" in sources:
         err = _yf_error_status(warning_msgs)
-        if "yahoo_finance_news" in sources_used:
+        diagnostic_status = _yahoo_status("yahoo_finance_news", yf_news_items)
+        if diagnostic_status is not None:
+            result["yahoo_finance_news"] = diagnostic_status
+        elif "yahoo_finance_news" in sources_used:
             result["yahoo_finance_news"] = {"status": "OK" if yf_news_items else "EMPTY_RESULT", "rawCount": len(yf_news_items), "filteredCount": len(yf_news_items)}
         elif err:
             result["yahoo_finance_news"] = {"status": err, "rawCount": 0, "filteredCount": 0}
@@ -1849,7 +1956,10 @@ def _compute_source_status(
             result["yahoo_finance_news"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
     if "yahoo_finance_press_releases" in sources:
         err = _yf_error_status(warning_msgs)
-        if "yahoo_finance_press_releases" in sources_used:
+        diagnostic_status = _yahoo_status("yahoo_finance_press_releases", yf_pr_items)
+        if diagnostic_status is not None:
+            result["yahoo_finance_press_releases"] = diagnostic_status
+        elif "yahoo_finance_press_releases" in sources_used:
             result["yahoo_finance_press_releases"] = {"status": "OK" if yf_pr_items else "EMPTY_RESULT", "rawCount": len(yf_pr_items), "filteredCount": len(yf_pr_items)}
         elif err:
             result["yahoo_finance_press_releases"] = {"status": err, "rawCount": 0, "filteredCount": 0}
@@ -1859,7 +1969,10 @@ def _compute_source_status(
     # Legacy yahoo_finance aggregate source
     if "yahoo_finance" in sources:
         err = _yf_error_status(warning_msgs)
-        if "yahoo_finance" in sources_used:
+        diagnostic_status = _yahoo_status("yahoo_finance", yf_legacy_items)
+        if diagnostic_status is not None:
+            result["yahoo_finance"] = diagnostic_status
+        elif "yahoo_finance" in sources_used:
             result["yahoo_finance"] = {"status": "OK" if yf_legacy_items else "EMPTY_RESULT", "rawCount": len(yf_legacy_items), "filteredCount": len(yf_legacy_items)}
         elif err:
             result["yahoo_finance"] = {"status": err, "rawCount": 0, "filteredCount": 0}
@@ -1939,6 +2052,7 @@ def _compute_source_coverage(source_status: dict) -> str:
         s = info.get("status", "") if isinstance(info, dict) else ""
         if s in (
             "UNCONFIGURED", "NOT_ELIGIBLE", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED",
+            "IDENTITY_UNAVAILABLE",
             "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED",
         ):
             return "PARTIAL"
@@ -1965,6 +2079,8 @@ def _verify_coverage_failure_mode(source_status: dict, warnings: list[dict]) -> 
         return "PROVIDER_TIMEOUT"
     if "PROVIDER_CHANGED" in source_states:
         return "PROVIDER_CHANGED"
+    if "IDENTITY_UNAVAILABLE" in source_states:
+        return "YAHOO_IDENTITY_UNAVAILABLE"
     if "UNCONFIGURED" in source_states:
         return "SOURCE_UNCONFIGURED"
     if "NOT_ELIGIBLE" in source_states:
@@ -1983,7 +2099,8 @@ async def _collect_company_events(
     end_date: str = "",
     sources: list[str] | None = None,
     sec_filing_types: list[str] | None = None,
-) -> tuple[list[dict], list[str], list[dict], str]:
+    include_diagnostics: bool = False,
+) -> tuple:
     retrieved_at = _utc_now_iso()
     selected_sources, warnings = _normalize_event_sources(
         sources,
@@ -1991,6 +2108,7 @@ async def _collect_company_events(
     )
     items: list[dict] = []
     sources_used: list[str] = []
+    source_diagnostics: dict[str, dict] = {}
     max_cap = _coerce_max_results(max_results, 10)
     lookback = _coerce_lookback_days(lookback_days, 14)
 
@@ -2034,8 +2152,35 @@ async def _collect_company_events(
     # GlobeNewswire RSS fetcher below and is intentionally excluded here.
     _need_yf_news = _need_yf_news or "company_ir" in selected_sources
 
+    yahoo_identity: dict | None = None
+    if _need_yf_news or _need_yf_pr:
+        try:
+            yahoo_identity = _yahoo_news_identity_from_info(ticker, yf.Ticker(ticker).info)
+        except Exception:
+            yahoo_identity = _yahoo_news_identity_from_info(ticker, None)
+        if yahoo_identity.get("status") == "UNAVAILABLE":
+            source_diagnostics["yahoo_finance_identity"] = {
+                "status": "IDENTITY_UNAVAILABLE",
+                "attempted": True,
+                "reasonCode": "YAHOO_PROFILE_IDENTITY_UNAVAILABLE",
+                "allowedAction": "retry_or_use_explicit_ticker_matches_only",
+            }
+            warnings.append({
+                "code": "SOURCE_IDENTITY_UNAVAILABLE",
+                "message": "Yahoo company identity lookup was unavailable; only exact ticker-token matches were retained.",
+                "severity": "warning",
+                "source": "yahoo_finance_identity",
+            })
+
+    def _unpack_yahoo_result(value: tuple) -> tuple[list[dict], list[dict], bool, dict]:
+        if len(value) == 4:
+            result_items, result_warnings, result_used, result_diagnostics = value
+            return result_items, result_warnings, result_used, result_diagnostics
+        result_items, result_warnings, result_used = value
+        return result_items, result_warnings, result_used, {}
+
     if _need_yf_news:
-        yf_items, yf_warnings, used = await _collect_yahoo_events(
+        yf_result = await _collect_yahoo_events(
             ticker,
             retrieved_at=retrieved_at,
             max_results=max_cap,
@@ -2043,7 +2188,11 @@ async def _collect_company_events(
             end_date=end_date,
             lookback_days=lookback,
             feed="news",
+            identity=yahoo_identity,
+            include_diagnostics=True,
         )
+        yf_items, yf_warnings, used, yf_diagnostics = _unpack_yahoo_result(yf_result)
+        source_diagnostics["yahoo_finance_news"] = {**yf_diagnostics, "attempted": True, "completed": used}
         if used:
             if "yahoo_finance_news" in selected_sources:
                 sources_used.append("yahoo_finance_news")
@@ -2063,7 +2212,7 @@ async def _collect_company_events(
         warnings.extend(yf_warnings)
 
     if _need_yf_pr:
-        pr_items, pr_warnings, used = await _collect_yahoo_events(
+        pr_result = await _collect_yahoo_events(
             ticker,
             retrieved_at=retrieved_at,
             max_results=max_cap,
@@ -2071,7 +2220,11 @@ async def _collect_company_events(
             end_date=end_date,
             lookback_days=lookback,
             feed="press_releases",
+            identity=yahoo_identity,
+            include_diagnostics=True,
         )
+        pr_items, pr_warnings, used, pr_diagnostics = _unpack_yahoo_result(pr_result)
+        source_diagnostics["yahoo_finance_press_releases"] = {**pr_diagnostics, "attempted": True, "completed": used}
         if used and "yahoo_finance_press_releases" in selected_sources and "yahoo_finance_press_releases" not in sources_used:
             sources_used.append("yahoo_finance_press_releases")
         items.extend(pr_items)
@@ -2127,7 +2280,40 @@ async def _collect_company_events(
             continue
         seen_warning_keys.add(key)
         unique_warnings.append(w)
+    if "yahoo_finance" in selected_sources:
+        yahoo_diagnostics = [
+            source_diagnostics[name]
+            for name in ("yahoo_finance_news", "yahoo_finance_press_releases")
+            if name in source_diagnostics
+        ]
+        if yahoo_diagnostics:
+            rejection_counts: dict[str, int] = {}
+            for diagnostic in yahoo_diagnostics:
+                for reason, count in (diagnostic.get("rejectionCounts") or {}).items():
+                    rejection_counts[reason] = rejection_counts.get(reason, 0) + int(count or 0)
+            source_diagnostics["yahoo_finance"] = {
+                "rawCount": sum(int(diagnostic.get("rawCount") or 0) for diagnostic in yahoo_diagnostics),
+                "retrievedCount": sum(int(diagnostic.get("retrievedCount") or 0) for diagnostic in yahoo_diagnostics),
+                "filteredCount": sum(int(diagnostic.get("filteredCount") or 0) for diagnostic in yahoo_diagnostics),
+                "acceptedCount": sum(int(diagnostic.get("acceptedCount") or 0) for diagnostic in yahoo_diagnostics),
+                "rejectedCount": sum(int(diagnostic.get("rejectedCount") or 0) for diagnostic in yahoo_diagnostics),
+                "rejectionCounts": rejection_counts,
+                "identityStatus": (yahoo_identity or {}).get("status") or "UNAVAILABLE",
+                "attempted": True,
+                "completed": all(diagnostic.get("completed") is True for diagnostic in yahoo_diagnostics),
+            }
+    if include_diagnostics:
+        return deduped, sources_used, unique_warnings, retrieved_at, source_diagnostics
     return deduped, sources_used, unique_warnings, retrieved_at
+
+
+def _unpack_company_event_result(value: tuple) -> tuple[list[dict], list[str], list[dict], str, dict]:
+    """Accept legacy test fixtures while production callers receive diagnostics."""
+    if len(value) == 5:
+        items, sources_used, warnings, retrieved_at, source_diagnostics = value
+        return items, sources_used, warnings, retrieved_at, source_diagnostics
+    items, sources_used, warnings, retrieved_at = value
+    return items, sources_used, warnings, retrieved_at, {}
 
 
 @yfinance_server.tool(
@@ -2153,13 +2339,16 @@ async def search_company_news(
     if not str(query or "").strip():
         return _mcp_failure("search_company_news", ErrorCode.INPUT_VALIDATION_ERROR, "query is required")
     effective_sources = sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]
-    items, sources_used, warnings, retrieved_at = await _collect_company_events(
-        ticker,
-        max_results=max_results,
-        lookback_days=14,
-        start_date=start_date,
-        end_date=end_date,
-        sources=effective_sources,
+    items, sources_used, warnings, retrieved_at, source_diagnostics = _unpack_company_event_result(
+        await _collect_company_events(
+            ticker,
+            max_results=max_results,
+            lookback_days=14,
+            start_date=start_date,
+            end_date=end_date,
+            sources=effective_sources,
+            include_diagnostics=True,
+        )
     )
     q = query.strip().lower()
     filtered: list[dict] = []
@@ -2174,7 +2363,7 @@ async def search_company_news(
         if q in text:
             filtered.append(item)
     status = _build_collection_status(filtered, sources_used, warnings)
-    source_status = _compute_source_status(sources_used, warnings, items, effective_sources)
+    source_status = _compute_source_status(sources_used, warnings, items, effective_sources, source_diagnostics)
     source_coverage = _compute_source_coverage(source_status)
     payload = {
         "ticker": ticker.upper(),
@@ -2228,14 +2417,18 @@ async def get_company_press_releases(
     primary_items: list[dict] = []
     primary_used: list[str] = []
     primary_warnings: list[dict] = []
+    primary_diagnostics: dict = {}
     retrieved_at = _utc_now_iso()
     if primary_sources:
-        primary_items, primary_used, primary_warnings, retrieved_at = await _collect_company_events(
-            ticker,
-            max_results=safe_max,
-            lookback_days=lookback_days,
-            sources=primary_sources,
-            sec_filing_types=["8-K"],
+        primary_items, primary_used, primary_warnings, retrieved_at, primary_diagnostics = _unpack_company_event_result(
+            await _collect_company_events(
+                ticker,
+                max_results=safe_max,
+                lookback_days=lookback_days,
+                sources=primary_sources,
+                sec_filing_types=["8-K"],
+                include_diagnostics=True,
+            )
         )
     release_types = {"company_ir", "company_ir_page", "press_release", "newswire", "sec_filing", "sec_ex99_found", "yahoo_finance_press_releases"}
     release_items = [it for it in primary_items if str(it.get("sourceType")) in release_types]
@@ -2281,13 +2474,17 @@ async def get_company_press_releases(
     optional_items: list[dict] = []
     optional_used: list[str] = []
     optional_warnings: list[dict] = []
+    optional_diagnostics: dict = {}
     if optional_sources:
-        optional_items, optional_used, optional_warnings, _optional_retrieved_at = await _collect_company_events(
-            ticker,
-            max_results=safe_max,
-            lookback_days=lookback_days,
-            sources=optional_sources,
-            sec_filing_types=["8-K"],
+        optional_items, optional_used, optional_warnings, _optional_retrieved_at, optional_diagnostics = _unpack_company_event_result(
+            await _collect_company_events(
+                ticker,
+                max_results=safe_max,
+                lookback_days=lookback_days,
+                sources=optional_sources,
+                sec_filing_types=["8-K"],
+                include_diagnostics=True,
+            )
         )
     warnings = source_warnings + primary_warnings + optional_warnings
     modified_release_items = _dedupe_event_items(
@@ -2333,7 +2530,13 @@ async def get_company_press_releases(
     else:
         status = _build_collection_status(modified_release_items, sources_used, warnings)
 
-    source_status = _compute_source_status(sources_used, warnings, modified_release_items, selected_sources)
+    source_status = _compute_source_status(
+        sources_used,
+        warnings,
+        modified_release_items,
+        selected_sources,
+        {**primary_diagnostics, **optional_diagnostics},
+    )
     source_coverage = _compute_source_coverage(source_status)
     coverage = _build_coverage(source_status)
     coverage_status = (
@@ -2471,13 +2674,16 @@ async def get_public_event_timeline(
     err = _validate_ticker(ticker)
     if err:
         return _mcp_failure("get_public_event_timeline", ErrorCode.INPUT_VALIDATION_ERROR, err)
-    items, sources_used, warnings, retrieved_at = await _collect_company_events(
-        ticker,
-        max_results=max_results,
-        lookback_days=365,
-        start_date=start_date,
-        end_date=end_date,
-        sources=sources,
+    items, sources_used, warnings, retrieved_at, source_diagnostics = _unpack_company_event_result(
+        await _collect_company_events(
+            ticker,
+            max_results=max_results,
+            lookback_days=365,
+            start_date=start_date,
+            end_date=end_date,
+            sources=sources,
+            include_diagnostics=True,
+        )
     )
     timeline = [{
         "timestamp": it.get("publishedAt"),
@@ -2489,14 +2695,16 @@ async def get_public_event_timeline(
         "confidence": it.get("confidence"),
         "evidenceClass": it.get("evidenceClass"),
         "tickerMatch": it.get("tickerMatch"),
+        "matchBasis": it.get("matchBasis"),
         "urlProvenance": it.get("urlProvenance"),
+        "decisionUse": it.get("decisionUse"),
         "duplicateGroupId": it.get("duplicateGroupId"),
         "sourceRefs": it.get("sourceRefs") or [],
     } for it in items if it.get("publishedAt")]
     timeline.sort(key=lambda ev: str(ev.get("timestamp") or ""), reverse=bool(newest_first))
     timeline = timeline[:_coerce_max_results(max_results, 50)]
     status = _build_collection_status(items, sources_used, warnings)
-    source_status = _compute_source_status(sources_used, warnings, items, sources)
+    source_status = _compute_source_status(sources_used, warnings, items, sources, source_diagnostics)
     source_coverage = _compute_source_coverage(source_status)
     payload = {
         "ticker": ticker.upper(),
@@ -2507,6 +2715,9 @@ async def get_public_event_timeline(
             "watermark": retrieved_at,
         },
         "warnings": warnings,
+        "sourceCoverage": source_coverage,
+        "coverage": _build_coverage(source_status),
+        "sourceStatus": source_status,
     }
     if status:
         payload["status"] = status
@@ -2535,11 +2746,14 @@ async def verify_company_event(
         return _mcp_failure("verify_company_event", ErrorCode.INPUT_VALIDATION_ERROR, err)
     if not str(event_query or "").strip():
         return _mcp_failure("verify_company_event", ErrorCode.INPUT_VALIDATION_ERROR, "event_query is required")
-    items, sources_used, warnings, retrieved_at = await _collect_company_events(
-        ticker,
-        max_results=50,
-        lookback_days=365,
-        sources=sources,
+    items, sources_used, warnings, retrieved_at, source_diagnostics = _unpack_company_event_result(
+        await _collect_company_events(
+            ticker,
+            max_results=50,
+            lookback_days=365,
+            sources=sources,
+            include_diagnostics=True,
+        )
     )
     query_text = event_query.strip().lower()
     query_tokens = [tok for tok in _re.split(r"\s+", query_text) if tok]
@@ -2691,7 +2905,7 @@ async def verify_company_event(
                 "severity": "warning",
             })
 
-    source_status = _compute_source_status(sources_used, warnings, items, sources)
+    source_status = _compute_source_status(sources_used, warnings, items, sources, source_diagnostics)
     source_coverage = _compute_source_coverage(source_status)
     coverage = _build_coverage(source_status)
     coverage_failure_mode = _verify_coverage_failure_mode(source_status, warnings)
@@ -6430,8 +6644,12 @@ and short evidence excerpts.
 
 Read ``coverage`` before treating an empty result as absence. It provides
 ``state``, failed/skipped sources, and a deterministic next action; use item
-``evidenceClass`` and ``decisionUse`` rather than legacy confidence to compare
-provider evidence.
+``tickerMatch`` and ``matchBasis`` before treating Yahoo context as issuer
+evidence. Yahoo primary items require an explicit ticker, canonical issuer
+name, or bounded issuer acronym; source status exposes raw/accepted/rejected
+counts. ``decisionUse=CHECK_OFFICIAL_RELEASES`` means escalate a material item
+to official-release or event verification. Legacy confidence is not a
+cross-provider quality ranking.
 
 Supported sources: ``yahoo_finance_news``, ``yahoo_finance_press_releases``,
 ``finnhub``, ``sec``, ``company_ir`` (RSS/Atom only), ``company_ir_page``
@@ -6459,14 +6677,17 @@ async def get_company_news(
     if err:
         return _mcp_failure("get_company_news", ErrorCode.INPUT_VALIDATION_ERROR, err)
     effective_sources = sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]
-    items, sources_used, warnings, retrieved_at = await _collect_company_events(
-        ticker,
-        max_results=max_results,
-        lookback_days=lookback_days,
-        sources=effective_sources,
+    items, sources_used, warnings, retrieved_at, source_diagnostics = _unpack_company_event_result(
+        await _collect_company_events(
+            ticker,
+            max_results=max_results,
+            lookback_days=lookback_days,
+            sources=effective_sources,
+            include_diagnostics=True,
+        )
     )
     status = _build_collection_status(items, sources_used, warnings)
-    source_status = _compute_source_status(sources_used, warnings, items, effective_sources)
+    source_status = _compute_source_status(sources_used, warnings, items, effective_sources, source_diagnostics)
     source_coverage = _compute_source_coverage(source_status)
     coverage = _build_coverage(source_status)
     payload = {
