@@ -1664,9 +1664,11 @@ def _dedupe_event_items(items: list[dict], warnings: list[dict]) -> list[dict]:
             keep_new = str(item.get("publishedAt") or "") > str(existing.get("publishedAt") or "")
         if str(existing.get("publishedAt") or "") != str(item.get("publishedAt") or ""):
             warnings.append({
-                "code": "TIMESTAMP_CONFLICT",
-                "message": f"Conflicting source timestamps observed for duplicateGroupId={gid}.",
+                "code": "TIMESTAMP_VARIANCE",
+                "message": f"Different source timestamps observed for duplicateGroupId={gid}; this is dedupe metadata, not factual evidence conflict.",
                 "severity": "warning",
+                "duplicateGroupId": gid,
+                "statusImpact": False,
             })
         preferred = item if keep_new else existing
         alternate = existing if keep_new else item
@@ -1857,7 +1859,7 @@ def _compute_source_coverage(source_status: dict) -> str:
     for info in source_status.values():
         s = info.get("status", "") if isinstance(info, dict) else ""
         if s in (
-            "UNCONFIGURED", "PROVIDER_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED",
+            "UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED",
             "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED",
         ):
             return "PARTIAL"
@@ -2462,9 +2464,22 @@ async def verify_company_event(
     ]
     stale_cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=_STALE_EVENT_DAYS)).strftime("%Y-%m-%d")
     stale_only = bool(matched) and all(str(it.get("publishedAt") or "")[:10] < stale_cutoff for it in matched if it.get("publishedAt"))
-    conflicts: list[dict] = []
-    if any(w.get("code") == "TIMESTAMP_CONFLICT" for w in warnings if isinstance(w, dict)):
-        conflicts.append({"type": "timestamp", "message": "Conflicting timestamps observed across sources for related events."})
+    matched_group_ids = {
+        str(item.get("duplicateGroupId") or "")
+        for item in matched
+        if str(item.get("duplicateGroupId") or "")
+    }
+    conflicts = [
+        {
+            "type": "evidence",
+            "duplicateGroupId": str(warning.get("duplicateGroupId") or ""),
+            "message": str(warning.get("message") or "Conflicting evidence observed for the matched event."),
+        }
+        for warning in warnings
+        if isinstance(warning, dict)
+        and warning.get("code") == "EVIDENCE_CONFLICT"
+        and str(warning.get("duplicateGroupId") or "") in matched_group_ids
+    ]
 
     if conflicts:
         status = "CONFLICTING"

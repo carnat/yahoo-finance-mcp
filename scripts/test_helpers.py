@@ -511,12 +511,14 @@ class TestDedupeEventItems(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["sourceType"], "sec_filing")
 
-    def test_timestamp_conflict_warning_emitted(self):
+    def test_timestamp_variance_warning_emitted_without_status_impact(self):
         a = _make_event(published_at="2026-05-15T10:00:00Z", group_id="g1")
         b = _make_event(published_at="2026-05-15T11:00:00Z", group_id="g1")
         warnings: list[dict] = []
         srv._dedupe_event_items([a, b], warnings)
-        self.assertTrue(any(w.get("code") == "TIMESTAMP_CONFLICT" for w in warnings))
+        self.assertTrue(any(w.get("code") == "TIMESTAMP_VARIANCE" for w in warnings))
+        self.assertEqual(warnings[0].get("duplicateGroupId"), "g1")
+        self.assertFalse(warnings[0].get("statusImpact"))
 
     def test_source_refs_merged(self):
         a = _make_event(source_type="sec_filing", group_id="g1")
