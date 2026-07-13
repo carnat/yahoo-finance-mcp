@@ -8341,7 +8341,13 @@ function dedupeEventItems(items: Record<string, unknown>[], warnings: Record<str
       keepNew = _str(item.publishedAt) > _str(existing.publishedAt);
     }
     if (_str(existing.publishedAt) !== _str(item.publishedAt)) {
-      warnings.push({ code: "TIMESTAMP_CONFLICT", message: `Conflicting source timestamps observed for duplicateGroupId=${gid}.`, severity: "warning" });
+      warnings.push({
+        code: "TIMESTAMP_VARIANCE",
+        message: `Different source timestamps observed for duplicateGroupId=${gid}; this is dedupe metadata, not factual evidence conflict.`,
+        severity: "warning",
+        duplicateGroupId: gid,
+        statusImpact: false,
+      });
     }
     const preferred = keepNew ? item : existing;
     const alternate = keepNew ? existing : item;
@@ -8529,6 +8535,7 @@ function computeSourceCoverage(sourceStatus: Record<string, unknown>): string {
   const limitedStatuses = new Set([
     "UNCONFIGURED",
     "PROVIDER_ERROR",
+    "AUTH_ERROR",
     "RATE_LIMITED",
     "TIMEOUT",
     "PROVIDER_CHANGED",
@@ -9461,9 +9468,14 @@ export async function verifyCompanyEvent(
   );
   const staleCutoff = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
   const staleOnly = matched.length > 0 && matched.every(item => _str(item.publishedAt).slice(0, 10) < staleCutoff);
-  const conflicts: Record<string, unknown>[] = out.warnings.some(w => _str(w.code) === "TIMESTAMP_CONFLICT")
-    ? [{ type: "timestamp", message: "Conflicting timestamps observed across sources for related events." }]
-    : [];
+  const matchedGroupIds = new Set(matched.map(item => _str(item.duplicateGroupId)).filter(Boolean));
+  const conflicts: Record<string, unknown>[] = out.warnings
+    .filter(w => _str(w.code) === "EVIDENCE_CONFLICT" && matchedGroupIds.has(_str(w.duplicateGroupId)))
+    .map(w => ({
+      type: "evidence",
+      duplicateGroupId: _str(w.duplicateGroupId),
+      message: _str(w.message, "Conflicting evidence observed for the matched event."),
+    }));
   let status = "NOT_FOUND";
   if (conflicts.length > 0) status = "CONFLICTING";
   else if (official.length > 0) status = "CONFIRMED";

@@ -591,7 +591,7 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
         self.assertEqual(data.get("sourceStatus", {}).get("yahoo_finance_news", {}).get("status"), "PROVIDER_ERROR")
         self.assertEqual(data.get("sourceStatus", {}).get("finnhub", {}).get("status"), "PROVIDER_ERROR")
 
-    def test_verify_stale_and_conflicting(self):
+    def test_verify_stale_timestamp_variance_and_evidence_conflict(self):
         stale_item = [{
             "title": "Old guidance",
             "source": "SEC",
@@ -610,9 +610,24 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
             self.assertEqual(data.get("status"), "STALE")
 
         with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
-            mocked.return_value = (stale_item, ["sec"], [{"code": "TIMESTAMP_CONFLICT", "message": "x"}], "2026-05-10T10:01:00Z")
+            mocked.return_value = (stale_item, ["sec"], [{"code": "TIMESTAMP_VARIANCE", "message": "x", "duplicateGroupId": "other", "statusImpact": False}], "2026-05-10T10:01:00Z")
+            data = _parse(_run(srv.verify_company_event("AAPL", "guidance")))
+            self.assertEqual(data.get("status"), "CONFIRMED")
+            self.assertEqual(data.get("conflicts"), [])
+
+        matched_item = [dict(stale_item[0], duplicateGroupId="guidance-group", publishedAt="2026-05-10T10:00:00Z")]
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+            mocked.return_value = (matched_item, ["sec"], [{"code": "EVIDENCE_CONFLICT", "message": "Amounts differ.", "duplicateGroupId": "guidance-group"}], "2026-05-10T10:01:00Z")
             data = _parse(_run(srv.verify_company_event("AAPL", "guidance")))
             self.assertEqual(data.get("status"), "CONFLICTING")
+            self.assertEqual(data.get("conflicts", [{}])[0].get("type"), "evidence")
+
+    def test_auth_error_makes_source_coverage_partial(self):
+        source_status = {
+            "yahoo_finance_news": {"status": "OK"},
+            "finnhub": {"status": "AUTH_ERROR"},
+        }
+        self.assertEqual(srv._compute_source_coverage(source_status), "PARTIAL")
 
 
 class TestPhase6BYahooFinanceSources(unittest.TestCase):
