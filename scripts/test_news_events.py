@@ -629,6 +629,42 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
         }
         self.assertEqual(srv._compute_source_coverage(source_status), "PARTIAL")
 
+    def test_finnhub_capability_policy_skips_known_markets(self):
+        eligible, reason = srv._finnhub_eligibility("SIVE.ST")
+        self.assertFalse(eligible)
+        self.assertEqual(reason, "MARKET_NOT_ENABLED_BY_DEPLOYED_ENTITLEMENT")
+        warning = {
+            "code": "SOURCE_NOT_ELIGIBLE",
+            "source": "finnhub",
+            "attempted": False,
+            "reasonCode": reason,
+        }
+        status = srv._compute_source_status([], [warning], [], ["finnhub"])
+        self.assertEqual(status["finnhub"]["status"], "NOT_ELIGIBLE")
+        coverage = srv._build_coverage(status)
+        self.assertEqual(coverage["state"], "PARTIAL")
+        self.assertEqual(coverage["skippedSources"][0]["source"], "finnhub")
+        self.assertEqual(coverage["recommendedNextAction"], "CHECK_OFFICIAL_RELEASES")
+
+    def test_finnhub_only_policy_skip_is_source_limited_not_found(self):
+        data = _parse(_run(srv.get_company_news("SIVE.ST", sources=["finnhub"], max_results=1)))
+        self.assertEqual(data.get("status"), "SOURCE_LIMITED_NOT_FOUND")
+        self.assertEqual(data.get("sourceCoverage"), "PARTIAL")
+        self.assertEqual(data.get("sourceStatus", {}).get("finnhub", {}).get("status"), "NOT_ELIGIBLE")
+        self.assertIs(data.get("sourceStatus", {}).get("finnhub", {}).get("attempted"), False)
+        self.assertEqual(data.get("coverage", {}).get("recommendedNextAction"), "CHECK_OFFICIAL_RELEASES")
+
+    def test_llm_evidence_fields_are_source_independent(self):
+        item = srv._enrich_news_item_for_llm({
+            "sourceType": "company_news",
+            "title": "SIVE.ST announces an update",
+            "tickers": ["SIVE.ST"],
+            "url": "https://example.com/story",
+        })
+        self.assertEqual(item["evidenceClass"], "CONTEXTUAL_NEWS")
+        self.assertEqual(item["tickerMatch"], "EXPLICIT")
+        self.assertEqual(item["urlProvenance"], "PUBLISHER")
+
 
 class TestPhase6BYahooFinanceSources(unittest.TestCase):
     """Tests for the new yahoo_finance_news / yahoo_finance_press_releases split."""

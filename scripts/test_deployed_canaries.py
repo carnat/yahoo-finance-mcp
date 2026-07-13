@@ -16,7 +16,10 @@ import urllib.error
 from pathlib import Path
 from typing import Any, Callable
 
-from live_smoke_utils import call_tool
+try:  # Supports direct canary execution and module-based regression checks.
+    from live_smoke_utils import call_tool
+except ModuleNotFoundError:
+    from scripts.live_smoke_utils import call_tool
 
 
 ROOT = Path(__file__).resolve().parent
@@ -192,6 +195,25 @@ def company_ir_source_status(payload: dict[str, Any], _canary: dict[str, Any]) -
         raise AssertionError(f"company_ir news call missing sourceCoverage: {data}")
 
 
+def finnhub_not_eligible_contract(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
+    data = extract_data(payload)
+    if not isinstance(data, dict):
+        raise AssertionError(f"Finnhub capability-policy call returned non-object: {data!r}")
+    finnhub = (data.get("sourceStatus") or {}).get("finnhub") or {}
+    if finnhub.get("status") != "NOT_ELIGIBLE" or finnhub.get("attempted") is not False:
+        raise AssertionError(f"Finnhub ineligible market must be a deterministic non-attempt: {data}")
+    coverage = data.get("coverage") or {}
+    if data.get("sourceCoverage") != "PARTIAL" or coverage.get("state") != "PARTIAL":
+        raise AssertionError(f"Finnhub ineligible market must expose partial coverage: {data}")
+    skipped = coverage.get("skippedSources") or []
+    if not any(isinstance(entry, dict) and entry.get("source") == "finnhub" for entry in skipped):
+        raise AssertionError(f"Finnhub ineligible market must name the skipped source: {data}")
+    if coverage.get("recommendedNextAction") != "CHECK_OFFICIAL_RELEASES":
+        raise AssertionError(f"Finnhub ineligible market must recommend official-release escalation: {data}")
+    if data.get("status") != "SOURCE_LIMITED_NOT_FOUND":
+        raise AssertionError(f"Finnhub-only ineligible request must not claim absence: {data}")
+
+
 def overnight_diagnostics_only(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
     data = extract_data(payload)
     if not isinstance(data, dict):
@@ -272,6 +294,7 @@ ASSERTIONS: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
     "press_release_payload_gate": press_release_payload_gate,
     "news_batch_independent": news_batch_independent,
     "company_ir_source_status": company_ir_source_status,
+    "finnhub_not_eligible_contract": finnhub_not_eligible_contract,
     "overnight_diagnostics_only": overnight_diagnostics_only,
     "unsupported_query_error": unsupported_query_error,
     "deprecated_alias_error": deprecated_alias_error,

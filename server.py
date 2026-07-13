@@ -273,6 +273,73 @@ _SOURCE_PRIORITY = {
     "yahoo_finance_news": 5,
     "other": 6,
 }
+
+
+def _finnhub_eligibility(ticker: str) -> tuple[bool, str | None]:
+    policy = json.loads(_NEWS_SOURCE_CAPABILITIES_PATH.read_text(encoding="utf-8"))["providers"]["finnhub"]
+    ticker_u = ticker.upper()
+    ineligible = ticker_u in set(policy.get("ineligibleTickers") or []) or any(
+        ticker_u.endswith(str(suffix).upper()) for suffix in policy.get("ineligibleTickerSuffixes") or []
+    )
+    return (not ineligible, str(policy.get("reasonCode") or "") if ineligible else None)
+
+
+def _evidence_class_for(source_type: object) -> str:
+    source = str(source_type or "")
+    if source in {"sec_filing", "sec_ex99_found"}:
+        return "SEC_FILING"
+    if source == "company_ir_page":
+        return "APPROVED_IR_PAGE"
+    if source == "company_ir":
+        return "OFFICIAL_RSS_ATOM"
+    if source in {"newswire", "press_release", "yahoo_finance_press_releases"}:
+        return "WIRE_RELEASE"
+    return "CONTEXTUAL_NEWS"
+
+
+def _url_provenance_for(item: dict) -> str:
+    source = str(item.get("sourceType") or "")
+    if source in {"sec_filing", "sec_ex99_found", "company_ir", "company_ir_page"}:
+        return "OFFICIAL"
+    url = str(item.get("url") or "")
+    if not url:
+        return "UNKNOWN"
+    host = _urlparse.urlparse(url).hostname or ""
+    if host.lower().endswith(("finance.yahoo.com", "finnhub.io")):
+        return "PROVIDER"
+    return "PUBLISHER"
+
+
+def _enrich_news_item_for_llm(item: dict) -> dict:
+    enriched = dict(item)
+    ticker = next((str(value).upper() for value in item.get("tickers") or [] if str(value).strip()), "")
+    text = " ".join(str(item.get(key) or "") for key in ("title", "summary", "evidenceText")).upper()
+    enriched["evidenceClass"] = _evidence_class_for(item.get("sourceType"))
+    enriched["tickerMatch"] = "EXPLICIT" if ticker and _re.search(rf"\b{_re.escape(ticker)}\b", text) else ("SOURCE_SCOPED" if ticker else "UNVERIFIED")
+    enriched["urlProvenance"] = _url_provenance_for(item)
+    return enriched
+
+
+def _build_coverage(source_status: dict) -> dict:
+    failed_states = {
+        "UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED",
+        "WEBSITE_NOT_AVAILABLE", "DISCOVERY_NOT_FOUND", "DISCOVERY_BUDGET_EXHAUSTED", "FEED_NOT_FOUND",
+        "PARSE_ERROR", "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED",
+    }
+    failed_sources: list[dict] = []
+    skipped_sources: list[dict] = []
+    for source, info in source_status.items():
+        if not isinstance(info, dict):
+            continue
+        entry = {"source": source, "status": info.get("status"), "attempted": info.get("attempted") is not False, "reasonCode": info.get("reasonCode")}
+        if info.get("status") == "NOT_ELIGIBLE":
+            skipped_sources.append(entry)
+        elif info.get("status") in failed_states:
+            failed_sources.append(entry)
+    action = "RETRY_RETRYABLE_SOURCES" if any(row["status"] in {"RATE_LIMITED", "TIMEOUT"} for row in failed_sources) else (
+        "CHECK_OFFICIAL_RELEASES" if failed_sources or skipped_sources else "USE_RETURNED_CONTEXT"
+    )
+    return {"state": _compute_source_coverage(source_status), "failedSources": failed_sources, "skippedSources": skipped_sources, "recommendedNextAction": action}
 _NEWSWIRE_HINTS = ("businesswire", "globenewswire", "prnewswire")
 _COMPANY_IR_URL_MARKERS = ("investor.", "investors.", "/investor", "/news-releases", "/press-release")
 _YAHOO_ALLOWED_CONTENT_TYPES = {"STORY", "ARTICLE", "PRESS_RELEASE"}
@@ -337,6 +404,7 @@ _GLOBENEWSWIRE_BLOCKED_XML_MARKERS = ("<!doctype", "<!entity")
 _GLOBENEWSWIRE_STOCK_CATEGORY_DOMAIN = "https://www.globenewswire.com/rss/stock"
 _GLOBENEWSWIRE_ISIN_CATEGORY_DOMAIN = "https://www.globenewswire.com/rss/ISIN"
 _COMPANY_IR_PAGE_REGISTRY_PATH = Path(__file__).resolve().parent / "worker" / "src" / "company-ir-page-registry.json"
+_NEWS_SOURCE_CAPABILITIES_PATH = Path(__file__).resolve().parent / "worker" / "src" / "news-source-capabilities.json"
 _COMPANY_IR_PAGE_MAX_BYTES = 750 * 1024
 
 
@@ -1687,12 +1755,16 @@ def _dedupe_event_items(items: list[dict], warnings: list[dict]) -> list[dict]:
 
 
 def _build_collection_status(items: list[dict], sources_used: list[str], warnings: list[dict]) -> str | None:
-    if items and any(w.get("code") == "SOURCE_UNAVAILABLE" for w in warnings if isinstance(w, dict)):
+    has_limited_source = any(
+        w.get("code") in {"SOURCE_UNAVAILABLE", "SOURCE_NOT_ELIGIBLE"}
+        for w in warnings if isinstance(w, dict)
+    )
+    if items and has_limited_source:
         return "PARTIAL"
     if not items:
         # If any source is unconfigured/provider-error/rate-limited, report SOURCE_LIMITED_NOT_FOUND
         # so callers know the empty result may be due to missing coverage, not genuine absence.
-        if any(w.get("code") == "SOURCE_UNAVAILABLE" for w in warnings if isinstance(w, dict)):
+        if has_limited_source:
             return "SOURCE_LIMITED_NOT_FOUND"
         if any(str(w.get("code", "")).startswith("COMPANY_IR_PAGE_") for w in warnings if isinstance(w, dict)):
             return "SOURCE_LIMITED_NOT_FOUND"
@@ -1795,7 +1867,14 @@ def _compute_source_status(
             result["yahoo_finance"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
 
     if "finnhub" in sources:
-        if "finnhub" in sources_used:
+        ineligible_warning = next((w for w in warnings if isinstance(w, dict) and w.get("code") == "SOURCE_NOT_ELIGIBLE" and w.get("source") == "finnhub"), None)
+        if ineligible_warning:
+            result["finnhub"] = {
+                "status": "NOT_ELIGIBLE", "rawCount": 0, "filteredCount": 0,
+                "attempted": False, "reasonCode": ineligible_warning.get("reasonCode"),
+                "allowedAction": "use_yahoo_or_official_sources",
+            }
+        elif "finnhub" in sources_used:
             result["finnhub"] = {"status": "OK" if finnhub_items else "EMPTY_RESULT", "rawCount": len(finnhub_items), "filteredCount": len(finnhub_items)}
         elif any("finnhub company-news source is not configured" in m.lower() for m in warning_msgs):
             result["finnhub"] = {"status": "UNCONFIGURED"}
@@ -1859,7 +1938,7 @@ def _compute_source_coverage(source_status: dict) -> str:
     for info in source_status.values():
         s = info.get("status", "") if isinstance(info, dict) else ""
         if s in (
-            "UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED",
+            "UNCONFIGURED", "NOT_ELIGIBLE", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED",
             "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED",
         ):
             return "PARTIAL"
@@ -1888,6 +1967,8 @@ def _verify_coverage_failure_mode(source_status: dict, warnings: list[dict]) -> 
         return "PROVIDER_CHANGED"
     if "UNCONFIGURED" in source_states:
         return "SOURCE_UNCONFIGURED"
+    if "NOT_ELIGIBLE" in source_states:
+        return "SOURCE_NOT_ELIGIBLE"
     if "PROVIDER_ERROR" in source_states:
         return "PROVIDER_ERROR"
     return None
@@ -2010,7 +2091,7 @@ async def _collect_company_events(
         items.extend(gnw_items)
         warnings.extend(gnw_warnings)
 
-    if "finnhub" in selected_sources:
+    if "finnhub" in selected_sources and _finnhub_eligibility(ticker)[0]:
         finnhub_items, finnhub_warnings, used = await _collect_finnhub_events(
             ticker,
             retrieved_at=retrieved_at,
@@ -2023,8 +2104,18 @@ async def _collect_company_events(
             sources_used.append("finnhub")
         items.extend(finnhub_items)
         warnings.extend(finnhub_warnings)
+    elif "finnhub" in selected_sources:
+        _, reason_code = _finnhub_eligibility(ticker)
+        warnings.append({
+            "code": "SOURCE_NOT_ELIGIBLE",
+            "message": f"Finnhub company-news is intentionally skipped for {ticker.upper()} under the deployed market capability policy.",
+            "severity": "warning",
+            "source": "finnhub",
+            "attempted": False,
+            "reasonCode": reason_code,
+        })
 
-    deduped = _dedupe_event_items(items, warnings)
+    deduped = [_enrich_news_item_for_llm(item) for item in _dedupe_event_items(items, warnings)]
     deduped = deduped[:max_cap]
     seen_warning_keys: set[str] = set()
     unique_warnings: list[dict] = []
@@ -2083,6 +2174,8 @@ async def search_company_news(
         if q in text:
             filtered.append(item)
     status = _build_collection_status(filtered, sources_used, warnings)
+    source_status = _compute_source_status(sources_used, warnings, items, effective_sources)
+    source_coverage = _compute_source_coverage(source_status)
     payload = {
         "ticker": ticker.upper(),
         "query": query,
@@ -2093,6 +2186,9 @@ async def search_company_news(
             "watermark": retrieved_at,
         },
         "warnings": warnings,
+        "sourceCoverage": source_coverage,
+        "coverage": _build_coverage(source_status),
+        "sourceStatus": source_status,
     }
     if status:
         payload["status"] = status
@@ -2239,6 +2335,7 @@ async def get_company_press_releases(
 
     source_status = _compute_source_status(sources_used, warnings, modified_release_items, selected_sources)
     source_coverage = _compute_source_coverage(source_status)
+    coverage = _build_coverage(source_status)
     coverage_status = (
         "SEC_EX99_RESOLVED" if has_sec_ex99_found else
         "APPROVED_IR_PAGE_RESOLVED" if has_approved_ir_page else
@@ -2282,6 +2379,7 @@ async def get_company_press_releases(
         },
         "warnings": warnings,
         "sourceCoverage": source_coverage,
+        "coverage": coverage,
         "sourceStatus": source_status,
         "coverageStatus": coverage_status,
         "decisionGrade": decision_grade,
@@ -2336,7 +2434,10 @@ async def get_sec_recent_events(
                 "message": "SEC event URL missing or invalid SEC Archives URL.",
                 "severity": "warning",
             })
+    items = [_enrich_news_item_for_llm(item) for item in items]
     status = _build_collection_status(items, ["sec"] if used else [], warnings)
+    source_status = {"sec": {"status": "OK" if items else "EMPTY_RESULT"} if used else {"status": "PROVIDER_ERROR"}}
+    source_coverage = _compute_source_coverage(source_status)
     payload = {
         "ticker": ticker.upper(),
         "items": items,
@@ -2386,12 +2487,17 @@ async def get_public_event_timeline(
         "sourceType": it.get("sourceType"),
         "url": it.get("url"),
         "confidence": it.get("confidence"),
+        "evidenceClass": it.get("evidenceClass"),
+        "tickerMatch": it.get("tickerMatch"),
+        "urlProvenance": it.get("urlProvenance"),
         "duplicateGroupId": it.get("duplicateGroupId"),
         "sourceRefs": it.get("sourceRefs") or [],
     } for it in items if it.get("publishedAt")]
     timeline.sort(key=lambda ev: str(ev.get("timestamp") or ""), reverse=bool(newest_first))
     timeline = timeline[:_coerce_max_results(max_results, 50)]
     status = _build_collection_status(items, sources_used, warnings)
+    source_status = _compute_source_status(sources_used, warnings, items, sources)
+    source_coverage = _compute_source_coverage(source_status)
     payload = {
         "ticker": ticker.upper(),
         "timeline": timeline,
@@ -2587,6 +2693,7 @@ async def verify_company_event(
 
     source_status = _compute_source_status(sources_used, warnings, items, sources)
     source_coverage = _compute_source_coverage(source_status)
+    coverage = _build_coverage(source_status)
     coverage_failure_mode = _verify_coverage_failure_mode(source_status, warnings)
     if status == "NOT_FOUND" and coverage_failure_mode:
         status = "SOURCE_LIMITED_NOT_FOUND"
@@ -2611,6 +2718,13 @@ async def verify_company_event(
         },
         "warnings": warnings,
         "sourceCoverage": source_coverage,
+        "coverage": _build_coverage(source_status),
+        "sourceStatus": source_status,
+        "sourceCoverage": source_coverage,
+        "coverage": _build_coverage(source_status),
+        "sourceStatus": source_status,
+        "sourceCoverage": source_coverage,
+        "coverage": coverage,
         "sourceStatus": source_status,
         "failureMode": failure_mode,
         "retryable": retryable,
@@ -6314,6 +6428,11 @@ Returns deduplicated source-backed items with precise source labels
 timestamps, URL, event classification, confidence, ticker relevance,
 and short evidence excerpts.
 
+Read ``coverage`` before treating an empty result as absence. It provides
+``state``, failed/skipped sources, and a deterministic next action; use item
+``evidenceClass`` and ``decisionUse`` rather than legacy confidence to compare
+provider evidence.
+
 Supported sources: ``yahoo_finance_news``, ``yahoo_finance_press_releases``,
 ``finnhub``, ``sec``, ``company_ir`` (RSS/Atom only), ``company_ir_page``
 (Git-reviewed IR-page registry), ``newswire``, and the legacy
@@ -6349,6 +6468,7 @@ async def get_company_news(
     status = _build_collection_status(items, sources_used, warnings)
     source_status = _compute_source_status(sources_used, warnings, items, effective_sources)
     source_coverage = _compute_source_coverage(source_status)
+    coverage = _build_coverage(source_status)
     payload = {
         "ticker": ticker.upper(),
         "items": items,
@@ -6359,6 +6479,7 @@ async def get_company_news(
         },
         "warnings": warnings,
         "sourceCoverage": source_coverage,
+        "coverage": coverage,
         "sourceStatus": source_status,
     }
     if status:
