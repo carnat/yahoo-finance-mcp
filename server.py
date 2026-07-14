@@ -3377,14 +3377,31 @@ def _invalid_expiry_payload(ticker: str, requested: str, expirations: list[str])
 
 
 async def get_options_summary(ticker: str, expiry_hint: str | None = None) -> str:
-    company = yf.Ticker(ticker)
     try:
+        company = yf.Ticker(ticker)
         expirations = list(company.options or [])
         if not expirations:
-            return json.dumps({"ticker": ticker, "error": "No options data available"})
+            return _mcp_failure(
+                "get_options_summary",
+                ErrorCode.NO_OPTIONS_DATA,
+                f"No options data available for {ticker.upper()}",
+                meta_extra={"error_extra": {"ticker": ticker.upper()}},
+            )
         expiry = expiry_hint or expirations[0]
         if expiry not in expirations:
-            return json.dumps(_invalid_expiry_payload(ticker, expiry, expirations))
+            invalid_expiry = _invalid_expiry_payload(ticker, expiry, expirations)
+            return _mcp_failure(
+                "get_options_summary",
+                str(invalid_expiry["code"]),
+                str(invalid_expiry["message"]),
+                meta_extra={
+                    "error_extra": {
+                        key: value
+                        for key, value in invalid_expiry.items()
+                        if key not in {"error", "code", "message"}
+                    }
+                },
+            )
         opt = company.option_chain(expiry)
         calls = opt.calls
         puts = opt.puts
@@ -3464,7 +3481,12 @@ async def get_options_summary(ticker: str, expiry_hint: str | None = None) -> st
             "warnings": flow_warnings,
         })
     except Exception as e:
-        return json.dumps({"ticker": ticker, "error": str(e)})
+        return _mcp_failure(
+            "get_options_summary",
+            ErrorCode.PROVIDER_ERROR,
+            str(e),
+            meta_extra={"error_extra": {"ticker": ticker.upper()}},
+        )
 
 
 @yfinance_server.tool(

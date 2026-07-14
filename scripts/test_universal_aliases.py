@@ -94,11 +94,18 @@ def meta_of(payload: dict) -> dict:
 
 
 def returned_provider_error(payload: dict) -> str | None:
-    """Return a tool-level upstream error that arrived as normal JSON data.
+    """Return a tool-level upstream error from either supported envelope.
 
-    Several Yahoo failures are represented as ``{ticker, error}``, not a JSON-RPC
-    error.  Those payloads cannot satisfy the success-shape assertions below.
+    The deployed pre-flight alias check may see either the old ``{ticker, error}``
+    shape or the correct V2 ``ok: false`` failure envelope during an upstream
+    Yahoo outage.  With ``ALLOW_NETWORK_SKIP=1`` both are transient provider
+    failures, not alias-contract regressions.
     """
+    if isinstance(payload, dict) and payload.get("ok") is False:
+        error = payload.get("error")
+        message = error.get("message") if isinstance(error, dict) else None
+        if isinstance(message, str) and message.strip():
+            return message.strip()
     data = data_of(payload)
     error = data.get("error") if isinstance(data, dict) else None
     return error.strip() if isinstance(error, str) and error.strip() else None

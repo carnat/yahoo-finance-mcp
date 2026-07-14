@@ -1,4 +1,4 @@
-import { getWorkerVar, mcpFailure } from "./response.js";
+import { ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
 import registryManifest from "./company-ir-page-registry.json";
 import newsSourceCapabilities from "./news-source-capabilities.json";
 
@@ -6374,7 +6374,16 @@ export async function getOptionsSummary(ticker: string, expiryHint?: string): Pr
   try {
     const expData = JSON.parse(await getOptionExpirationDates(ticker)) as string[];
     if (!expData || expData.length === 0) {
-      return JSON.stringify({ ticker, error: "No options data available" });
+      // Return the legacy failure shape here so callTool's mcpSuccess wrapper
+      // can retain its canonical/alias metadata while converting it to V2
+      // `ok: false`.  Do not return `{ ticker, error: string }`: that shape
+      // is indistinguishable from successful tool data and becomes `ok: true`.
+      return JSON.stringify({
+        error: true,
+        code: ErrorCode.NO_OPTIONS_DATA,
+        message: `No options data available for ${ticker.toUpperCase()}`,
+        ticker: ticker.toUpperCase(),
+      });
     }
     const expiry = expiryHint || expData[0];
     if (!expData.includes(expiry)) {
@@ -6448,7 +6457,12 @@ export async function getOptionsSummary(ticker: string, expiryHint?: string): Pr
       warnings: summaryWarnings,
     });
   } catch (e) {
-    return JSON.stringify({ ticker, error: `${e instanceof Error ? e.message : String(e)}` });
+    return JSON.stringify({
+      error: true,
+      code: ErrorCode.PROVIDER_ERROR,
+      message: e instanceof Error ? e.message : String(e),
+      ticker: ticker.toUpperCase(),
+    });
   }
 }
 
