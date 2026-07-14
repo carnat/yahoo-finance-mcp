@@ -73,10 +73,21 @@ class TestPr2DataQuality(unittest.TestCase):
             options = ["2026-06-18"]
 
         srv.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
-        data = json.loads(_run(srv.get_options_summary("ASTS", expiry_hint="2026-06-19")))
-        self.assertTrue(data["error"])
-        self.assertEqual(data["code"], "INVALID_EXPIRY_DATE")
-        self.assertEqual(data["nearestExpiration"], "2026-06-18")
+        previous = os.environ.get("MCP_ENVELOPE_V2")
+        os.environ["MCP_ENVELOPE_V2"] = "true"
+        try:
+            payload = json.loads(_run(srv.get_options_summary("ASTS", expiry_hint="2026-06-19")))
+        finally:
+            if previous is None:
+                os.environ.pop("MCP_ENVELOPE_V2", None)
+            else:
+                os.environ["MCP_ENVELOPE_V2"] = previous
+
+        self.assertFalse(payload["ok"])
+        self.assertIsNone(payload["data"])
+        error = payload["error"]
+        self.assertEqual(error["code"], "INVALID_EXPIRY_DATE")
+        self.assertEqual(error["nearestExpiration"], "2026-06-18")
 
     def test_credit_health_splits_ebit_and_ebitda_coverage(self):
         col = pd.Timestamp("2026-03-31")
