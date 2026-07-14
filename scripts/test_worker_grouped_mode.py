@@ -34,7 +34,7 @@ class TestWorkerGroupedMode(unittest.TestCase):
 
     def test_catalog_has_expected_group_surface(self) -> None:
         groups = self.catalog["groups"]
-        self.assertEqual(len(groups), 10)
+        self.assertEqual(len(groups), 11)
         self.assertEqual(
             set(groups),
             {
@@ -48,11 +48,13 @@ class TestWorkerGroupedMode(unittest.TestCase):
                 "earnings_intelligence",
                 "screening",
                 "system",
+                "thai_funds",
             },
         )
         self.assertIn("get_market_quote", groups["stock_pricing"]["actions"])
         self.assertIn("health_check", groups["system"]["actions"])
         self.assertIn("extract_exposure", groups["sec_extractors"]["actions"])
+        self.assertIn("get_thai_fund_nav", groups["thai_funds"]["actions"])
 
     def test_worker_generated_catalog_matches_json(self) -> None:
         for group_name, group_def in self.catalog["groups"].items():

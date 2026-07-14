@@ -73,6 +73,19 @@
       "volatility": "stable_contract"
     },
     {
+      "id": "thai-fund-nav-contract",
+      "description": "Thai SEC NAV exposes a bounded, exact-share-class contract; an intentionally unconfigured deployment must fail safely without credential detail.",
+      "tool": "get_thai_fund_nav",
+      "args": {
+        "fund_class_name": "SCBSEMI(E)",
+        "proj_id": "M0232_2564",
+        "lookback_days": 45
+      },
+      "assertion": "thai_fund_nav_contract",
+      "blocking": true,
+      "volatility": "provider_status"
+    },
+    {
       "id": "overnight-diagnostics-only",
       "description": "Overnight quote remains a Yahoo extended-hours diagnostic proxy, never decision-grade overnight venue data.",
       "tool": "get_overnight_quote",

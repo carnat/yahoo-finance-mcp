@@ -1,0 +1,61 @@
+{
+  "profile": {
+    "message": "success",
+    "page_size": 100,
+    "next_cursor": "",
+    "items": [
+      {
+        "unique_id": "C0000000239",
+        "comp_name_th": "SCB Asset Management",
+        "comp_name_en": "SCB Asset Management Co., Ltd.",
+        "proj_id": "M0232_2564",
+        "proj_name_th": "SCB Semiconductor Fund",
+        "proj_name_en": "SCB Semiconductor Fund",
+        "fund_class_name": "SCBSEMI(E)"
+      }
+    ]
+  },
+  "nav_unordered": {
+    "message": "success",
+    "page_size": 100,
+    "next_cursor": "",
+    "items": [
+      {"proj_id": "M0232_2564", "fund_class_name": "SCBSEMI(E)", "nav_date": "2026-07-08", "last_val": 41.11, "net_asset": 120.0},
+      {"proj_id": "M0232_2564", "fund_class_name": "SCBSEMI(E)", "nav_date": "2026-07-10", "last_val": 41.36, "net_asset": 121.0},
+      {"proj_id": "M0232_2564", "fund_class_name": "SCBSEMI(E)", "nav_date": "2026-07-09", "last_val": 41.20, "net_asset": 120.5}
+    ]
+  },
+  "statistics": {
+    "message": "success",
+    "page_size": 1,
+    "next_cursor": "",
+    "items": [
+      {"proj_id": "M0232_2564", "fund_class_name": "SCBSEMI(E)", "start_date": "2026-05-01", "end_date": "2026-05-31", "prospectus_type": "Monthly", "sharpe_ratio": "1.6", "beta": "0.89", "maximum_drawdown": "-45.5"}
+    ]
+  },
+  "top_holdings": {
+    "message": "success",
+    "page_size": 5,
+    "next_cursor": "",
+    "items": [
+      {"proj_id": "M0232_2564", "asset_seq": 1, "asset_name": "Semiconductor ETF", "asset_ratio": 101.33, "start_date": "2026-05-01", "end_date": "2026-05-31", "prospectus_type": "Monthly"}
+    ]
+  },
+  "urls": {
+    "message": "success",
+    "page_size": 1,
+    "next_cursor": "",
+    "items": [
+      {"proj_id": "M0232_2564", "fund_class_name": "SCBSEMI(E)", "prospectus_type": "Monthly", "amc_url_factsheet": "https://example.invalid/amc.pdf", "pdf_factsheet": "https://example.invalid/sec.pdf", "as_of_date": "2026-05-31", "last_upd_date": "2026-06-26T15:07:00"}
+    ]
+  },
+  "dividends_unordered": {
+    "message": "success",
+    "page_size": 100,
+    "next_cursor": "cursor-page-2",
+    "items": [
+      {"proj_id": "M0232_2564", "unique_id": "C0000000239", "class_abbr_name": "SCBSEMI", "book_close_date": "2025-12-01", "dividend_date": "2025-12-12", "dividend_value": 0.2},
+      {"proj_id": "M0232_2564", "unique_id": "C0000000239", "class_abbr_name": "SCBSEMI", "book_close_date": "2026-01-01", "dividend_date": "2026-01-12", "dividend_value": 0.3}
+    ]
+  }
+}

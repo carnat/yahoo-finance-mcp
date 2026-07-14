@@ -288,6 +288,35 @@ def aaoi_china_positive(payload: dict[str, Any], _canary: dict[str, Any]) -> Non
         raise AssertionError(f"AAOI China positive extraction missing document URL: {data}")
 
 
+def thai_fund_nav_contract(payload: dict[str, Any], canary: dict[str, Any]) -> None:
+    """Accept a safe unconfigured state, otherwise pin the live NAV contract."""
+    if payload.get("ok") is False:
+        error = payload.get("error") or {}
+        meta = payload.get("meta") or {}
+        if error.get("code") != "SOURCE_UNCONFIGURED" or meta.get("source") != "sec_thailand_open_data":
+            raise AssertionError(f"Thai SEC NAV failure must be safe SOURCE_UNCONFIGURED: {payload}")
+        return
+    data = extract_data(payload)
+    if not isinstance(data, dict):
+        raise AssertionError(f"Thai SEC NAV returned non-object: {data!r}")
+    expected = canary.get("args") or {}
+    identity = data.get("identity") or {}
+    if data.get("source") != "sec_thailand_open_data":
+        raise AssertionError(f"Thai SEC NAV source mismatch: {data}")
+    if data.get("evidenceClass") != "OFFICIAL_REGULATORY_DATA" or data.get("decisionGrade") is not False:
+        raise AssertionError(f"Thai SEC NAV evidence contract mismatch: {data}")
+    if data.get("scope") != "SHARE_CLASS" or identity.get("fundClassName") != expected.get("fund_class_name"):
+        raise AssertionError(f"Thai SEC NAV share-class identity mismatch: {data}")
+    if identity.get("projId") != expected.get("proj_id"):
+        raise AssertionError(f"Thai SEC NAV project identity mismatch: {data}")
+    if data.get("status") not in {"OK", "NAV_NOT_FOUND_IN_WINDOW"}:
+        raise AssertionError(f"Thai SEC NAV status mismatch: {data}")
+    if not isinstance(data.get("requestedWindow"), dict) or not isinstance(data.get("freshness"), dict):
+        raise AssertionError(f"Thai SEC NAV missing bounded-window/freshness fields: {data}")
+    if data.get("status") == "OK" and not isinstance(data.get("nav"), dict):
+        raise AssertionError(f"Thai SEC NAV OK missing nav object: {data}")
+
+
 ASSERTIONS: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
     "health_contract": health_contract,
     "manifest_contract": manifest_contract,
@@ -299,6 +328,7 @@ ASSERTIONS: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
     "unsupported_query_error": unsupported_query_error,
     "deprecated_alias_error": deprecated_alias_error,
     "aaoi_china_positive": aaoi_china_positive,
+    "thai_fund_nav_contract": thai_fund_nav_contract,
 }
 
 

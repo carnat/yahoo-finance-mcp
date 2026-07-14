@@ -140,5 +140,14 @@ export const GROUPED_TOOL_DEFS: GroupedToolDef[] = [
       "get_manifest_diagnostics": "get_manifest_diagnostics",
       "health_check": "health_check"
     }
+  },
+  {
+    "name": "thai_funds",
+    "description": "Official Thailand SEC Open Data mutual-fund workflows. Resolve fund_class_name exactly; provide proj_id when a share class is ambiguous. All evidence is OFFICIAL_REGULATORY_DATA but remains decisionGrade:false.\n\nActions:\n- get_thai_fund_nav: Latest NAV in a 45-day Bangkok-time window (cap 90). Params: fund_class_name, proj_id, as_of_date, lookback_days\n- get_thai_fund_factsheet: Dated statistics, project-scoped top holdings, and official URL references. Params: fund_class_name, proj_id, sections\n- get_thai_fund_dividend_history: One project-scoped dividend page; retain classAbbrName and follow nextCursor. Params: fund_class_name, proj_id, max_results, next_cursor",
+    "actions": {
+      "get_thai_fund_dividend_history": "get_thai_fund_dividend_history",
+      "get_thai_fund_factsheet": "get_thai_fund_factsheet",
+      "get_thai_fund_nav": "get_thai_fund_nav"
+    }
   }
 ];
