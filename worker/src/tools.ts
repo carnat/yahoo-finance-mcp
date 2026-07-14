@@ -77,6 +77,11 @@ import {
   parsePublicTranscript,
   getEarningsCallTranscript,
 } from "./yahoo-finance.js";
+import {
+  getThaiFundDividendHistory,
+  getThaiFundFactsheet,
+  getThaiFundNav,
+} from "./sec-thailand.js";
 import { validateTicker } from "./validate.js";
 
 export interface Tool {
@@ -99,6 +104,50 @@ export interface Tool {
 }
 
 export const TOOLS: Tool[] = [
+  {
+    name: "get_thai_fund_nav",
+    description:
+      "Return the latest official Thai SEC daily NAV for one exact fund share class in a bounded Bangkok-time window. fund_class_name is exact; provide proj_id whenever needed to disambiguate. Defaults to 45 days ending today in Asia/Bangkok and never searches more than 90 days. NAV_NOT_FOUND_IN_WINDOW is not evidence of no NAV outside the requested window.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fund_class_name: { type: "string", description: "Exact Thai SEC share-class code, e.g. SCBSEMI(E)." },
+        proj_id: { type: "string", description: "Optional exact SEC project ID. Required when fund_class_name is ambiguous." },
+        as_of_date: { type: "string", description: "Optional Bangkok-date endpoint in YYYY-MM-DD; defaults to today." },
+        lookback_days: { type: "integer", minimum: 1, maximum: 90, default: 45, description: "Calendar-day window length, capped at 90." },
+      },
+      required: ["fund_class_name"],
+    },
+  },
+  {
+    name: "get_thai_fund_factsheet",
+    description:
+      "Return dated official Thai SEC factsheet evidence for an exact share class. sections defaults to statistics, top_holdings, and urls. Statistics/URLs are share-class scoped; top holdings are project scoped. Read each section's asOfDate and status. This tool returns URLs only and never fetches/parses PDFs.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fund_class_name: { type: "string", description: "Exact Thai SEC share-class code, e.g. SCBSEMI(E)." },
+        proj_id: { type: "string", description: "Optional exact SEC project ID. Required when fund_class_name is ambiguous." },
+        sections: { type: "array", items: { type: "string", enum: ["statistics", "top_holdings", "urls"] }, description: "Optional subset; default is all three sections." },
+      },
+      required: ["fund_class_name"],
+    },
+  },
+  {
+    name: "get_thai_fund_dividend_history",
+    description:
+      "Return one page of official Thai SEC mutual-fund dividend history. The requested share class is resolved exactly, but the SEC history is project scoped. Each row retains classAbbrName; nextCursor/hasMore mean the page is not a claimed complete history.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fund_class_name: { type: "string", description: "Exact Thai SEC share-class code, e.g. SCBSEMI(E)." },
+        proj_id: { type: "string", description: "Optional exact SEC project ID. Required when fund_class_name is ambiguous." },
+        max_results: { type: "integer", minimum: 1, maximum: 100, default: 100, description: "Rows in this returned SEC page." },
+        next_cursor: { type: "string", description: "Cursor from a prior response to fetch its next page." },
+      },
+      required: ["fund_class_name"],
+    },
+  },
   {
     name: "get_historical_stock_prices",
     description:
@@ -2266,6 +2315,12 @@ export async function callVisibleTool(name: string, args: Record<string, unknown
 
 async function _dispatchTool(name: string, args: Record<string, unknown>): Promise<string> {
   switch (name) {
+    case "get_thai_fund_nav":
+      return getThaiFundNav(args.fund_class_name, args.proj_id, args.as_of_date, args.lookback_days);
+    case "get_thai_fund_factsheet":
+      return getThaiFundFactsheet(args.fund_class_name, args.proj_id, args.sections);
+    case "get_thai_fund_dividend_history":
+      return getThaiFundDividendHistory(args.fund_class_name, args.proj_id, args.max_results, args.next_cursor);
     case "get_historical_prices": {
       const rawTicker = args.ticker;
       if (rawTicker == null || String(rawTicker).trim() === "") {

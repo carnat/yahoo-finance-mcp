@@ -83,6 +83,7 @@ from yfmcp.parsing.extractors import (
 # ---------------------------------------------------------------------------
 import yfmcp.tools.system  # noqa: F401 (side-effect import)
 import yfmcp.tools.pricing  # noqa: F401 (side-effect import)
+import yfmcp.tools.thai_funds  # noqa: F401 (side-effect import)
 from yfmcp.tools.system import health_check, get_manifest_diagnostics  # re-export for grouped routing
 from yfmcp.tools.pricing import (  # re-export for compatibility and grouped routing
     get_historical_stock_prices,
@@ -101,6 +102,11 @@ from yfmcp.tools.pricing import (  # re-export for compatibility and grouped rou
     _overnight_window_utc,
     _classify_overnight_session,
     _classify_freshness,
+)
+from yfmcp.tools.thai_funds import (  # re-export for grouped routing
+    get_thai_fund_nav,
+    get_thai_fund_factsheet,
+    get_thai_fund_dividend_history,
 )
 
 
@@ -8750,7 +8756,7 @@ from yfmcp.tools.earnings import (  # re-export for compatibility and grouped ro
 # ---------------------------------------------------------------------------
 # TOOL_MODE env var controls which interface is exposed:
 #   - "expanded" (default): all 111 individual tools (backward-compatible)
-#   - "grouped": 10 domain meta-tools with action routing (~80-85% token savings)
+#   - "grouped": 11 domain meta-tools with action routing (~80-85% token savings)
 # ---------------------------------------------------------------------------
 _TOOL_MODE = os.environ.get("TOOL_MODE", "expanded").lower().strip()
 
@@ -8809,7 +8815,7 @@ def get_server():
     """Return the appropriate server based on TOOL_MODE env var.
 
     - TOOL_MODE=expanded (default): 111 individual tools
-    - TOOL_MODE=grouped: 10 domain meta-tools (~80-85% token savings)
+    - TOOL_MODE=grouped: 11 domain meta-tools (~80-85% token savings)
     """
     global _grouped_server
     if _TOOL_MODE == "grouped":

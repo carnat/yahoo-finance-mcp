@@ -17,6 +17,9 @@ TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
 TOOL_CATALOG = ROOT / "tool_catalog.json"
 
 EXPECTED_CANONICAL = {
+    "get_thai_fund_nav",
+    "get_thai_fund_factsheet",
+    "get_thai_fund_dividend_history",
     "get_market_quote",
     "get_historical_prices",
     "analyze_price_performance",
@@ -185,8 +188,8 @@ def main():
 
     catalog = json.loads(TOOL_CATALOG.read_text(encoding="utf-8"))
     groups = catalog.get("groups", {})
-    if not isinstance(groups, dict) or len(groups) != 10:
-        print("ERROR: tool_catalog.json must define exactly 10 grouped tools", file=sys.stderr)
+    if not isinstance(groups, dict) or len(groups) != 11:
+        print("ERROR: tool_catalog.json must define exactly 11 grouped tools", file=sys.stderr)
         return 1
     grouped_actions = {
         action

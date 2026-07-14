@@ -57,6 +57,9 @@ CANONICAL_TOOLS = {
     "get_sec_recent_events",
     "get_public_event_timeline",
     "verify_company_event",
+    "get_thai_fund_nav",
+    "get_thai_fund_factsheet",
+    "get_thai_fund_dividend_history",
     "health_check",
 }
 GROUPED_TOOLS = {
@@ -70,6 +73,7 @@ GROUPED_TOOLS = {
     "earnings_intelligence",
     "screening",
     "system",
+    "thai_funds",
 }
 ACTION_GROUP = {
     "health_check": "system",
@@ -145,6 +149,9 @@ ACTION_GROUP = {
     "screen_stocks": "screening",
     "analyze_position_signals": "screening",
     "calculate_price_target_distance": "screening",
+    "get_thai_fund_nav": "thai_funds",
+    "get_thai_fund_factsheet": "thai_funds",
+    "get_thai_fund_dividend_history": "thai_funds",
 }
 
 # Safe args for tools that can be called generically during tool-scan loop.
@@ -627,7 +634,7 @@ def main() -> int:
     if _GROUPED_DISCOVERY:
         if names != GROUPED_TOOLS:
             raise AssertionError(f"Grouped discovery should expose only grouped tools: {sorted(names)}")
-        print("  PASS grouped tools/list exposes 10 domain tools")
+        print("  PASS grouped tools/list exposes 11 domain tools")
     else:
         missing = sorted(CANONICAL_TOOLS - names)
         if missing:

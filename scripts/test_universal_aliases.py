@@ -93,8 +93,20 @@ def meta_of(payload: dict) -> dict:
     return {}
 
 
+def returned_provider_error(payload: dict) -> str | None:
+    """Return a tool-level upstream error that arrived as normal JSON data.
+
+    Several Yahoo failures are represented as ``{ticker, error}``, not a JSON-RPC
+    error.  Those payloads cannot satisfy the success-shape assertions below.
+    """
+    data = data_of(payload)
+    error = data.get("error") if isinstance(data, dict) else None
+    return error.strip() if isinstance(error, str) and error.strip() else None
+
+
 def main() -> int:
     failures: list[str] = []
+    skipped_pairs = 0
     for i, (canonical, args, alias, stable_keys, expect_warning) in enumerate(ALIAS_PAIRS, start=1):
         try:
             can_payload = rpc(canonical, args, i)
@@ -114,6 +126,25 @@ def main() -> int:
         try:
             can_data = data_of(can_payload)
             ali_data = data_of(ali_payload)
+
+            provider_errors = [
+                f"{tool}: provider returned an error payload ({error})"
+                for tool, error in (
+                    (canonical, returned_provider_error(can_payload)),
+                    (alias, returned_provider_error(ali_payload)),
+                )
+                if error is not None
+            ]
+            if provider_errors:
+                if _ALLOW_SKIP:
+                    skipped_pairs += 1
+                    print(
+                        f"  SKIP  {alias} → {canonical}: live provider error payload",
+                        file=sys.stderr,
+                    )
+                    continue
+                failures.extend(provider_errors)
+                continue
 
             # Check V2 envelope on canonical
             if isinstance(can_payload, dict) and "ok" in can_payload:
@@ -179,6 +210,10 @@ def main() -> int:
         for f in failures:
             print(f"  {f}", file=sys.stderr)
         return 1
+
+    if skipped_pairs:
+        print(f"\nPASS — {skipped_pairs} live provider comparison(s) skipped")
+        return 0
 
     print("\nPASS — all universal aliases routing invariants verified")
     return 0

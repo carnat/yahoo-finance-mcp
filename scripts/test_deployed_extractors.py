@@ -36,6 +36,7 @@ GROUPED_TOOLS = {
     "earnings_intelligence",
     "screening",
     "system",
+    "thai_funds",
 }
 ACTION_GROUP = {
     "list_sec_company_filings": "sec_filings",

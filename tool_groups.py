@@ -37,7 +37,7 @@ def register_grouped_tools(server, handler_registry: dict) -> None:
 
     ``handler_registry`` maps handler function name -> function (see
     ``yfmcp.app.build_handler_registry``). This replaces the 111 individual tool
-    registrations with 10 grouped tools, reducing LLM token overhead.
+    registrations with 11 grouped tools, reducing LLM token overhead.
     """
 
     def _make_handler(gn, registry):

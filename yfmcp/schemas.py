@@ -73,6 +73,38 @@ _NEWS_EVENT_OUTPUT_SCHEMA: dict = {
 }
 
 _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
+    "get_thai_fund_nav": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string"}, "identity": {"type": ["object", "null"]},
+            "scope": {"type": "string"}, "dataDate": {"type": ["string", "null"]},
+            "freshness": {"type": "object"}, "nav": {"type": ["object", "null"]},
+            "nextCursor": {"type": ["string", "null"]}, "hasMore": {"type": "boolean"},
+            "evidenceClass": {"type": "string"}, "decisionGrade": {"type": "boolean"},
+        },
+        "additionalProperties": True,
+    },
+    "get_thai_fund_factsheet": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string"}, "identity": {"type": ["object", "null"]},
+            "scope": {"type": "string"}, "sections": {"type": "object"},
+            "sectionStatus": {"type": "object"}, "partialSuccess": {"type": "boolean"},
+            "evidenceClass": {"type": "string"}, "decisionGrade": {"type": "boolean"},
+        },
+        "additionalProperties": True,
+    },
+    "get_thai_fund_dividend_history": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string"}, "identity": {"type": ["object", "null"]},
+            "scope": {"const": "PROJECT"}, "dataDate": {"type": ["string", "null"]},
+            "dividends": {"type": "array"}, "nextCursor": {"type": ["string", "null"]},
+            "hasMore": {"type": "boolean"}, "evidenceClass": {"type": "string"},
+            "decisionGrade": {"const": False},
+        },
+        "additionalProperties": True,
+    },
     "get_historical_stock_prices": _SIMPLE_OUTPUT_SCHEMA,
     "get_stock_info": _SIMPLE_OUTPUT_SCHEMA,
     "get_yahoo_finance_news": _NEWS_EVENT_OUTPUT_SCHEMA,

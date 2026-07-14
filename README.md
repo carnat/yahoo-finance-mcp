@@ -57,7 +57,7 @@ Claude Desktop example:
 
 Expanded mode is the default and exposes individual tools.
 
-Grouped mode exposes 10 domain tools with `{ "action": "...", "params": {...} }`
+Grouped mode exposes 11 domain tools with `{ "action": "...", "params": {...} }`
 routing. It is useful when an MCP client benefits from a smaller tool list.
 
 ```bash
@@ -76,6 +76,7 @@ Grouped domains:
 - `earnings_intelligence`
 - `screening`
 - `system`
+- `thai_funds`
 
 Example grouped call:
 
@@ -101,6 +102,7 @@ Main public tool areas:
 - SEC structured extractors for revenue, segment, geography, risk, and exposure queries;
 - company news, press releases, SEC events, event timelines, and event verification;
 - earnings release indexing, metrics, guidance, commentary, actual-vs-estimate, and transcripts;
+- Thailand SEC Open Data fund NAV, dated factsheet evidence, and project-scoped dividend history;
 - ticker search, stock screens, diagnostics, and manifest health.
 
 Use `tools/list` or `get_manifest_diagnostics` for the exact current tool names,
@@ -142,6 +144,11 @@ schemas, aliases, and deprecation metadata.
   `PROVIDER_LIMITATION`, or `NO_DIMENSIONAL_REVENUE_FACT`.
 - Provider rate limits, market data availability, filing formats, and SEC EDGAR
   availability can affect individual calls.
+- Thai fund tools require `SEC_OPEN_DATA_API_KEY`. They resolve
+  `fund_class_name` exactly and never infer a share class. Check `status`,
+  `scope`, `dataDate`/section `asOfDate`, and `recovery` before using results:
+  NAV is share-class scoped, factsheet holdings and dividends are project
+  scoped, and factsheet URLs are references only (no PDF fetching/parsing).
 
 ## Data Sources
 
@@ -152,6 +159,9 @@ schemas, aliases, and deprecation metadata.
 - Git-reviewed official company IR-page registry at
   `worker/src/company-ir-page-registry.json`; daily discovery writes candidates
   for manual review and never promotes sources automatically.
+- Thailand SEC Open Data Fund API (`https://api.sec.or.th/v2/fund/...`) with a
+  configured subscription key. It returns official regulatory data but does
+  not change the existing decision-grade gate.
 
 Structured SEC revenue/geography facts use official SEC data plus the Worker
 filing/index fallback. No separate Python sidecar or paid hosted parser is
@@ -161,6 +171,7 @@ Provider/runtime design notes live in:
 
 - `docs/sec-facts-provider.md`
 - `docs/provider-runtime-guidance.md`
+- `docs/thai-sec-fund-phase2.md`
 
 ## Development
 

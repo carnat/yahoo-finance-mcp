@@ -108,6 +108,9 @@ jobs:
       - name: Worker SEC reliability tests
         run: python scripts/test_sec_reliability_worker.py
 
+      - name: Thai SEC fund workflow tests
+        run: python -m unittest scripts.test_thai_funds -v
+
       - name: Official SEC facts provider tests
         run: python -m unittest scripts.test_worker_sec_provider -v
 
@@ -143,6 +146,9 @@ jobs:
         run: python scripts/test_geographic_revenue_schema.py
 
       # ── 8. Integration / alias routing (network-optional) ─────────────────
+      - name: Universal alias payload handling tests
+        run: python -m unittest scripts.test_universal_aliases_unit -v
+
       - name: Universal alias tests
         run: python scripts/test_universal_aliases.py
         env:
