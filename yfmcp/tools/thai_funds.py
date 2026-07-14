@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+import hashlib
 import json
 import os
 from typing import Any
@@ -39,10 +40,17 @@ _DEFAULT_FACTSHEET_SECTIONS = ("statistics", "top_holdings", "urls")
 class SecThailandProviderError(Exception):
     """A sanitized, caller-actionable failure from the Thailand SEC provider."""
 
-    def __init__(self, code: str, message: str, recovery_action: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        recovery_action: str,
+        diagnostics: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.recovery_action = recovery_action
+        self.diagnostics = diagnostics
 
 
 @dataclass(frozen=True)
@@ -136,22 +144,32 @@ def _request_json_sync(path: str, params: dict[str, object]) -> dict[str, Any]:
             "CONFIGURE_SEC_OPEN_DATA_API_KEY",
         )
 
+    request_params = dict(params)
+    if request_params.get("next_cursor") is None:
+        request_params["next_cursor"] = ""
     query = {
         key: str(value).lower() if isinstance(value, bool) else str(value)
-        for key, value in params.items()
-        if value is not None and str(value) != ""
+        for key, value in request_params.items()
+        if value is not None and (str(value) != "" or key == "next_cursor")
     }
     url = f"{_BASE_URL}{path}?{_urlparse.urlencode(query)}" if query else f"{_BASE_URL}{path}"
     request = _urlrequest.Request(
         url,
         headers={
             "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache",
             "Ocp-Apim-Subscription-Key": api_key,
         },
         method="GET",
     )
+    response_status: int | None = None
+    content_type: str | None = None
     try:
         with _urlrequest.urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
+            response_status = getattr(response, "status", None)
+            headers = getattr(response, "headers", None)
+            content_type = headers.get("Content-Type") if headers is not None else None
             raw = response.read()
     except _urlerror.HTTPError as exc:
         if exc.code in {401, 403}:
@@ -185,6 +203,12 @@ def _request_json_sync(path: str, params: dict[str, object]) -> dict[str, Any]:
             "PROVIDER_ERROR",
             "SEC Open Data returned an invalid JSON response.",
             "RETRY_LATER",
+            diagnostics={
+                "httpStatus": response_status,
+                "contentType": content_type,
+                "bodyBytes": len(raw),
+                "bodySha256": hashlib.sha256(raw).hexdigest(),
+            },
         ) from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
         raise SecThailandProviderError(
@@ -199,13 +223,26 @@ async def _request_json(path: str, params: dict[str, object]) -> dict[str, Any]:
     return await asyncio.to_thread(_request_json_sync, path, params)
 
 
-async def _resolve_fund(fund_class_name: str, proj_id: str | None) -> Resolution:
+async def _resolve_fund(
+    fund_class_name: str,
+    proj_id: str | None,
+    project_info: str | None,
+) -> Resolution:
     target_class = fund_class_name.strip()
-    params: dict[str, object] = {"fund_class_name": target_class, "page_size": _MAX_PAGE_SIZE}
-    if proj_id:
-        params["project_info"] = proj_id
+    project_lookup = proj_id or project_info
+    params: dict[str, object] = {
+        "fund_class_name": target_class,
+        "fund_status": "Registered",
+        "next_cursor": "",
+        "page_size": _MAX_PAGE_SIZE,
+    }
+    if project_lookup:
+        params["project_info"] = project_lookup
     payload = await _request_json("/general-info/profiles", params)
     records = [row for row in payload["items"] if isinstance(row, dict)]
+    if not any(str(row.get("fund_class_name") or "") == target_class for row in records) and not payload.get("next_cursor"):
+        payload = await _request_json("/general-info/profiles", {**params, "fund_status": "IPO"})
+        records = [row for row in payload["items"] if isinstance(row, dict)]
     exact = [
         FundIdentity.from_profile(row)
         for row in records
@@ -240,11 +277,17 @@ async def _resolve_fund(fund_class_name: str, proj_id: str | None) -> Resolution
     return Resolution("OK", identity=exact[0])
 
 
-def _resolution_response(tool: str, fund_class_name: str, proj_id: str | None, resolution: Resolution) -> str:
+def _resolution_response(
+    tool: str,
+    fund_class_name: str,
+    proj_id: str | None,
+    project_info: str | None,
+    resolution: Resolution,
+) -> str:
     payload = _base_payload(resolution.status)
     payload.update({
         "scope": "SHARE_CLASS",
-        "requestedIdentity": {"fundClassName": fund_class_name, "projId": proj_id},
+        "requestedIdentity": {"fundClassName": fund_class_name, "projId": proj_id, "projectInfo": project_info},
         "identity": resolution.identity.compact() if resolution.identity else None,
         "candidates": list(resolution.candidates),
         "recovery": _recovery(
@@ -256,20 +299,28 @@ def _resolution_response(tool: str, fund_class_name: str, proj_id: str | None, r
 
 
 def _provider_failure(tool: str, error: SecThailandProviderError) -> str:
+    meta_extra: dict[str, object] = {
+        "recoveryAction": error.recovery_action,
+        "evidenceClass": _EVIDENCE_CLASS,
+        "decisionGrade": False,
+    }
+    if error.diagnostics is not None:
+        meta_extra["diagnostics"] = error.diagnostics
     return _mcp_failure(
         tool,
         error.code,
         error.args[0],
         source=_SOURCE,
-        meta_extra={
-            "recoveryAction": error.recovery_action,
-            "evidenceClass": _EVIDENCE_CLASS,
-            "decisionGrade": False,
-        },
+        meta_extra=meta_extra,
     )
 
 
-async def _resolve_or_response(tool: str, fund_class_name: str, proj_id: str | None) -> tuple[FundIdentity | None, str | None]:
+async def _resolve_or_response(
+    tool: str,
+    fund_class_name: str,
+    proj_id: str | None,
+    project_info: str | None,
+) -> tuple[FundIdentity | None, str | None]:
     if not isinstance(fund_class_name, str) or not fund_class_name.strip():
         return None, _mcp_failure(
             tool,
@@ -278,12 +329,13 @@ async def _resolve_or_response(tool: str, fund_class_name: str, proj_id: str | N
             source=_SOURCE,
         )
     normalized_project = _optional_str(proj_id)
+    normalized_project_info = _optional_str(project_info)
     try:
-        resolution = await _resolve_fund(fund_class_name, normalized_project)
+        resolution = await _resolve_fund(fund_class_name, normalized_project, normalized_project_info)
     except SecThailandProviderError as error:
         return None, _provider_failure(tool, error)
     if resolution.status != "OK" or resolution.identity is None:
-        return None, _resolution_response(tool, fund_class_name.strip(), normalized_project, resolution)
+        return None, _resolution_response(tool, fund_class_name.strip(), normalized_project, normalized_project_info, resolution)
     return resolution.identity, None
 
 
@@ -303,7 +355,8 @@ def _freshness(data_date: str | None, requested_as_of: date) -> dict[str, object
     description="""Return the latest Thai SEC daily NAV in a bounded Bangkok-time window for one exact fund share class.
 
 Use when a caller needs official NAV/pricing evidence. fund_class_name is exact;
-provide proj_id whenever the class name can be ambiguous. The default window is
+provide proj_id whenever the class name can be ambiguous, or project_info to
+narrow the documented SEC profile search by official name or abbreviation. The default window is
 45 calendar days ending on as_of_date (or Bangkok today), capped at 90 days.
 NAV_NOT_FOUND_IN_WINDOW does not mean the fund has no NAV outside that window.
 """,
@@ -313,9 +366,10 @@ async def get_thai_fund_nav(
     proj_id: str | None = None,
     as_of_date: str | None = None,
     lookback_days: int = _DEFAULT_NAV_LOOKBACK_DAYS,
+    project_info: str | None = None,
 ) -> str:
     """Get one exact share class's latest official NAV within a bounded date window."""
-    identity, response = await _resolve_or_response("get_thai_fund_nav", fund_class_name, proj_id)
+    identity, response = await _resolve_or_response("get_thai_fund_nav", fund_class_name, proj_id, project_info)
     if response:
         return response
     assert identity is not None
@@ -479,16 +533,18 @@ async def _factsheet_urls(identity: FundIdentity) -> dict[str, object]:
 Choose sections from statistics, top_holdings, and urls (all by default). Each
 section preserves its own asOfDate and scope. Top holdings are project scoped;
 statistics and URLs are share-class scoped. Partial section failures are kept
-alongside successful sections. URLs are references only: no PDF is fetched.
+alongside successful sections. Use project_info to narrow the documented SEC
+profile search by official project name or abbreviation. URLs are references only: no PDF is fetched.
 """,
 )
 async def get_thai_fund_factsheet(
     fund_class_name: str,
     proj_id: str | None = None,
     sections: list[str] | None = None,
+    project_info: str | None = None,
 ) -> str:
     """Get independent, dated factsheet sections without treating them as live holdings."""
-    identity, response = await _resolve_or_response("get_thai_fund_factsheet", fund_class_name, proj_id)
+    identity, response = await _resolve_or_response("get_thai_fund_factsheet", fund_class_name, proj_id, project_info)
     if response:
         return response
     assert identity is not None
@@ -535,6 +591,8 @@ async def get_thai_fund_factsheet(
 The requested fund_class_name is resolved exactly, but payout history is
 project scoped by the SEC endpoint. Each row retains class_abbr_name and the
 response exposes nextCursor/hasMore instead of claiming complete history.
+project_info may narrow the documented SEC profile search by official project
+name or abbreviation.
 """,
 )
 async def get_thai_fund_dividend_history(
@@ -542,9 +600,10 @@ async def get_thai_fund_dividend_history(
     proj_id: str | None = None,
     max_results: int = _MAX_PAGE_SIZE,
     next_cursor: str | None = None,
+    project_info: str | None = None,
 ) -> str:
     """Get one sorted, project-scoped page of dividend history without class inference."""
-    identity, response = await _resolve_or_response("get_thai_fund_dividend_history", fund_class_name, proj_id)
+    identity, response = await _resolve_or_response("get_thai_fund_dividend_history", fund_class_name, proj_id, project_info)
     if response:
         return response
     assert identity is not None
