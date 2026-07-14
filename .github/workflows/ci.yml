@@ -146,6 +146,9 @@ jobs:
         run: python scripts/test_geographic_revenue_schema.py
 
       # ── 8. Integration / alias routing (network-optional) ─────────────────
+      - name: Universal alias payload handling tests
+        run: python -m unittest scripts.test_universal_aliases_unit -v
+
       - name: Universal alias tests
         run: python scripts/test_universal_aliases.py
         env:
