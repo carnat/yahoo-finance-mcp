@@ -1293,6 +1293,159 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["title"], "Marvell (NASDAQ:MRVL) announces new AI chips")
 
+    def test_yahoo_strict_identity_filter_ranks_and_reports_diagnostics(self):
+        """Yahoo retains only exact ticker/canonical-issuer matches before the result cap."""
+        import server as srv_mod
+        import datetime
+
+        retrieved = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        raw_items = [
+            {
+                "content": {
+                    "title": "Marvell Technology announces product update",
+                    "summary": "A new product announcement.",
+                    "contentType": "STORY",
+                    "pubDate": retrieved,
+                    "canonicalUrl": {"url": "https://example.com/name-match"},
+                },
+            },
+            {
+                "content": {
+                    "title": "Marvell (NASDAQ:MRVL) secures major contract",
+                    "summary": "MRVL signs a material agreement.",
+                    "contentType": "STORY",
+                    "pubDate": "2026-01-01T00:00:00Z",
+                    "canonicalUrl": {"url": "https://example.com/ticker-match"},
+                },
+            },
+            {
+                "content": {
+                    "title": "Optical peers discuss AI demand",
+                    "summary": "Sector commentary without the issuer.",
+                    "contentType": "STORY",
+                    "pubDate": retrieved,
+                    "canonicalUrl": {"url": "https://example.com/noise"},
+                },
+            },
+        ]
+
+        class _TickerMock:
+            def get_news(self, tab="news"):
+                return raw_items
+
+            @property
+            def info(self):
+                return {"shortName": "Marvell Technology, Inc.", "exchange": "NMS"}
+
+        with patch("server.yf") as mock_yf:
+            mock_yf.Ticker.return_value = _TickerMock()
+            items, _warnings, used, diagnostics = _run(
+                srv_mod._collect_yahoo_events(
+                    "MRVL",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                    feed="news",
+                    include_diagnostics=True,
+                )
+            )
+
+        self.assertTrue(used)
+        self.assertEqual([item["matchBasis"] for item in items], ["TICKER_TOKEN", "ISSUER_NAME"])
+        self.assertEqual(items[0]["decisionUse"], "CHECK_OFFICIAL_RELEASES")
+        self.assertEqual(diagnostics["rawCount"], 3)
+        self.assertEqual(diagnostics["acceptedCount"], 2)
+        self.assertEqual(diagnostics["rejectedCount"], 1)
+        self.assertEqual(diagnostics["rejectionCounts"].get("IDENTITY_MISMATCH"), 1)
+
+    def test_yahoo_identity_unavailable_keeps_only_exact_ticker_tokens(self):
+        """A failed identity lookup is a coverage gap, never a permissive name-token fallback."""
+        import server as srv_mod
+        import datetime
+
+        retrieved = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        raw_items = [
+            {"content": {"title": "ASTS launches service", "summary": "ASTS update", "contentType": "STORY", "pubDate": retrieved}},
+            {"content": {"title": "Satellite sector update", "summary": "No ticker token", "contentType": "STORY", "pubDate": retrieved}},
+        ]
+
+        class _TickerMock:
+            def get_news(self, tab="news"):
+                return raw_items
+
+            @property
+            def info(self):
+                raise RuntimeError("profile unavailable")
+
+        with patch("server.yf") as mock_yf:
+            mock_yf.Ticker.return_value = _TickerMock()
+            items, _warnings, used, diagnostics = _run(
+                srv_mod._collect_yahoo_events(
+                    "ASTS",
+                    retrieved_at=retrieved,
+                    max_results=10,
+                    feed="news",
+                    include_diagnostics=True,
+                )
+            )
+
+        self.assertTrue(used)
+        self.assertEqual([item["matchBasis"] for item in items], ["TICKER_TOKEN"])
+        self.assertEqual(diagnostics["identityStatus"], "UNAVAILABLE")
+        self.assertEqual(diagnostics["rejectionCounts"].get("IDENTITY_UNAVAILABLE_TICKER_NOT_FOUND"), 1)
+
+    def test_yahoo_source_status_uses_fetched_and_accepted_diagnostics(self):
+        status = srv._compute_source_status(
+            sources_used=["yahoo_finance_news"],
+            warnings=[],
+            items=[{"source": "yahoo_finance_news", "sourceType": "yahoo_finance_news"}],
+            selected_sources=["yahoo_finance_news"],
+            source_diagnostics={
+                "yahoo_finance_news": {
+                    "rawCount": 7,
+                    "retrievedCount": 7,
+                    "acceptedCount": 1,
+                    "filteredCount": 1,
+                    "rejectedCount": 6,
+                    "rejectionCounts": {"IDENTITY_MISMATCH": 6},
+                    "identityStatus": "RESOLVED",
+                    "completed": True,
+                },
+            },
+        )
+        source = status["yahoo_finance_news"]
+        self.assertEqual(source["rawCount"], 7)
+        self.assertEqual(source["acceptedCount"], 1)
+        self.assertEqual(source["rejectedCount"], 6)
+
+    def test_identity_unavailable_is_partial_and_never_absence(self):
+        diagnostics = {
+            "yahoo_finance_identity": {
+                "status": "IDENTITY_UNAVAILABLE",
+                "attempted": True,
+                "reasonCode": "YAHOO_PROFILE_IDENTITY_UNAVAILABLE",
+            },
+            "yahoo_finance_news": {
+                "rawCount": 2,
+                "acceptedCount": 0,
+                "filteredCount": 0,
+                "rejectedCount": 2,
+                "identityStatus": "UNAVAILABLE",
+                "completed": True,
+            },
+        }
+        warnings = [{
+            "code": "SOURCE_IDENTITY_UNAVAILABLE",
+            "message": "Yahoo company identity lookup was unavailable; only exact ticker-token matches were retained.",
+            "severity": "warning",
+        }]
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked:
+            mocked.return_value = ([], ["yahoo_finance_news"], warnings, "2026-05-15T13:01:22Z", diagnostics)
+            data = _parse(_run(srv.get_company_news("ASTS", sources=["yahoo_finance_news"])))
+
+        self.assertEqual(data.get("status"), "SOURCE_LIMITED_NOT_FOUND")
+        self.assertEqual(data.get("sourceCoverage"), "PARTIAL")
+        self.assertEqual(data.get("coverage", {}).get("failedSources", [{}])[0].get("source"), "yahoo_finance_identity")
+
     def test_no_private_terms_in_public_descriptions(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(root, "server.py"), encoding="utf-8") as f:
@@ -2155,6 +2308,20 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         self.assertIn('decisionUse: sourceDecisionUse("sec_filing")', worker_text)
         self.assertIn('decisionUse: sourceDecisionUse("company_news")', worker_text)
         self.assertIn("decisionUse: sourceDecisionUse(sourceKey)", worker_text)
+
+    def test_worker_yahoo_news_uses_strict_identity_and_honest_counts(self):
+        """Worker Yahoo collection must not regress to generic name-token matching."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
+            worker_text = f.read()
+
+        self.assertIn("function yahooNewsIdentityFor", worker_text)
+        self.assertIn("function yahooNewsMatchFor", worker_text)
+        self.assertIn("item.matchBasis = match.basis", worker_text)
+        self.assertIn("diagnostics.rawCount = newsRaw.length", worker_text)
+        self.assertIn("diagnostics.acceptedCount = accepted.length", worker_text)
+        self.assertIn('code: "SOURCE_IDENTITY_UNAVAILABLE"', worker_text)
+        self.assertNotIn("companyNameTokens", worker_text)
 
     def test_worker_company_ir_status_is_machine_readable(self):
         """Company IR discovery failures must be status-coded for agents."""

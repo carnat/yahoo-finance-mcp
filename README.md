@@ -128,9 +128,15 @@ schemas, aliases, and deprecation metadata.
   approved IR-page evidence.
 - News/event responses include a compact `coverage` object. Check its `state`,
   `failedSources`, `skippedSources`, and `recommendedNextAction` before
-  treating an empty result as absence. `evidenceClass`, `tickerMatch`, and
-  `urlProvenance` make source meaning comparable for LLM callers; legacy
-  `confidence` remains backward-compatible but is not a provider-quality rank.
+  treating an empty result as absence. Yahoo primary items are retained only
+  when `tickerMatch:"EXPLICIT"` is supported by `matchBasis` of
+  `TICKER_TOKEN`, `ISSUER_NAME`, or `ISSUER_ACRONYM`; source diagnostics expose
+  `rawCount`, `acceptedCount`, and rejection reasons. `decisionUse` is
+  `CHECK_OFFICIAL_RELEASES` for material Yahoo events that should be escalated
+  to `get_company_press_releases` or `verify_company_event`, otherwise
+  `CONTEXT_ONLY`. `evidenceClass` and `urlProvenance` remain comparable for LLM
+  callers; legacy `confidence` is backward-compatible but not a provider-quality
+  rank.
 - `extract_sec_filing_fact` and SEC exposure tools can return explicit
   limitation statuses such as `EXTRACTION_FAILED`, `TABLE_NOT_PARSED`,
   `PROVIDER_LIMITATION`, or `NO_DIMENSIONAL_REVENUE_FACT`.

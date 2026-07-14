@@ -170,7 +170,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - extract_customer_concentration: Customer concentration percentages.
 
 ### Public news & events
-- get_company_news: Recent public company news from Yahoo Finance, Finnhub, and SEC sources. Multi-source with sourceStatus.
+- get_company_news: Recent public company news with strict Yahoo issuer matching. Read coverage/sourceStatus first; Yahoo items require tickerMatch=EXPLICIT and expose matchBasis plus raw/accepted/rejected diagnostics. Escalate decisionUse=CHECK_OFFICIAL_RELEASES to official releases or event verification.
 - search_company_news: Search news with keyword filter.
 - get_company_press_releases: 8-K press releases as structured public events.
 - get_sec_recent_events: Recent SEC filings as structured public events.

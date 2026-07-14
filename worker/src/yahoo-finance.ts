@@ -7005,6 +7005,7 @@ function urlProvenanceFor(item: Record<string, unknown>): string {
 }
 
 function tickerMatchFor(item: Record<string, unknown>): string {
+  if (["TICKER_TOKEN", "ISSUER_NAME", "ISSUER_ACRONYM"].includes(_str(item.matchBasis))) return "EXPLICIT";
   const configuredTicker = Array.isArray(item.tickers) ? item.tickers.map(value => _str(value).toUpperCase()).find(Boolean) ?? "" : "";
   const text = `${_str(item.title)} ${_str(item.summary)} ${_str(item.evidenceText)}`.toUpperCase();
   if (configuredTicker && new RegExp(`\\b${configuredTicker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(text)) return "EXPLICIT";
@@ -7022,7 +7023,7 @@ function enrichNewsItemForLlm(item: Record<string, unknown>): Record<string, unk
 }
 
 function buildCoverage(sourceStatus: Record<string, unknown>): Record<string, unknown> {
-  const failedStatuses = new Set(["UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED", "WEBSITE_NOT_AVAILABLE", "DISCOVERY_NOT_FOUND", "DISCOVERY_BUDGET_EXHAUSTED", "FEED_NOT_FOUND", "PARSE_ERROR", "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED"]);
+  const failedStatuses = new Set(["UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED", "IDENTITY_UNAVAILABLE", "WEBSITE_NOT_AVAILABLE", "DISCOVERY_NOT_FOUND", "DISCOVERY_BUDGET_EXHAUSTED", "FEED_NOT_FOUND", "PARSE_ERROR", "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED"]);
   const failedSources: Record<string, unknown>[] = [];
   const skippedSources: Record<string, unknown>[] = [];
   for (const [source, value] of Object.entries(sourceStatus)) {
@@ -7218,6 +7219,79 @@ function identityMatchesText(identity: NewsCompanyIdentity, text: string): boole
   if (new RegExp(`\\b${ticker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text)) return true;
   const tokens = nameTokensForIdentity(identity);
   return tokens.some(token => new RegExp(`\\b${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(hay));
+}
+
+const YAHOO_NEWS_LEGAL_SUFFIXES = new Set([
+  "inc", "incorporated", "corp", "corporation", "ltd", "limited", "llc", "plc",
+  "co", "company", "sa", "ag", "nv", "se", "gmbh",
+]);
+const YAHOO_NEWS_ACRONYM_IGNORED_WORDS = new Set(["the", "and", "of", "for"]);
+
+type YahooNewsIdentity = {
+  status: "RESOLVED" | "UNAVAILABLE";
+  companyName: string | null;
+  aliases: string[];
+  acronyms: string[];
+  exchange: string | null;
+};
+
+type YahooNewsMatch = {
+  basis: "TICKER_TOKEN" | "ISSUER_NAME" | "ISSUER_ACRONYM";
+  rank: number;
+};
+
+function normalizedYahooNewsPhrase(value: unknown): string {
+  return _str(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function stripYahooNewsLegalSuffix(value: string): string {
+  const words = value.split(" ").filter(Boolean);
+  while (words.length > 1 && YAHOO_NEWS_LEGAL_SUFFIXES.has(words[words.length - 1])) words.pop();
+  return words.join(" ");
+}
+
+function yahooNewsIdentityFor(identity: NewsCompanyIdentity | null): YahooNewsIdentity {
+  const aliases = new Set<string>();
+  const acronyms = new Set<string>();
+  for (const rawName of [identity?.shortName, identity?.longName, identity?.companyName]) {
+    const normalized = normalizedYahooNewsPhrase(rawName);
+    if (!normalized) continue;
+    const stripped = stripYahooNewsLegalSuffix(normalized);
+    for (const alias of [normalized, stripped]) {
+      // quoteSummary may fall back shortName to the ticker; it is not issuer identity.
+      if (alias.length >= 3 && alias !== identity?.ticker.toLowerCase()) aliases.add(alias);
+    }
+    const initials = stripped.split(" ")
+      .filter(word => word && !YAHOO_NEWS_ACRONYM_IGNORED_WORDS.has(word))
+      .map(word => word[0])
+      .join("");
+    // Two-character acronyms create a large false-positive surface in news text.
+    if (initials.length >= 3 && initials.length <= 6) acronyms.add(initials);
+  }
+  return {
+    status: aliases.size > 0 ? "RESOLVED" : "UNAVAILABLE",
+    companyName: identity?.companyName ?? identity?.longName ?? identity?.shortName ?? null,
+    aliases: [...aliases],
+    acronyms: [...acronyms],
+    exchange: identity?.exchange ?? null,
+  };
+}
+
+function yahooNewsMatchFor(text: string, ticker: string, identity: YahooNewsIdentity): YahooNewsMatch | null {
+  if (isTickerCompatibleWithContext(text, ticker, identity.exchange)) return { basis: "TICKER_TOKEN", rank: 0 };
+  if (identity.status !== "RESOLVED") return null;
+  const normalizedText = ` ${normalizedYahooNewsPhrase(text)} `;
+  if (identity.aliases.some(alias => normalizedText.includes(` ${alias} `))) return { basis: "ISSUER_NAME", rank: 1 };
+  if (identity.acronyms.some(acronym => new RegExp(`\\b${acronym}\\b`, "i").test(text))) {
+    return { basis: "ISSUER_ACRONYM", rank: 2 };
+  }
+  return null;
+}
+
+function yahooDecisionUse(eventType: string): "CONTEXT_ONLY" | "CHECK_OFFICIAL_RELEASES" {
+  return new Set(["earnings", "guidance", "contract", "financing", "product", "regulatory", "litigation"]).has(eventType)
+    ? "CHECK_OFFICIAL_RELEASES"
+    : "CONTEXT_ONLY";
 }
 
 function htmlAttr(attrs: string, name: string): string {
@@ -8432,7 +8506,7 @@ function dedupeEventItems(items: Record<string, unknown>[], warnings: Record<str
 }
 
 function collectionStatus(items: Record<string, unknown>[], sourcesUsed: string[], warnings: Record<string, unknown>[]): string | null {
-  const hasLimitedSource = warnings.some(w => ["SOURCE_UNAVAILABLE", "SOURCE_NOT_ELIGIBLE"].includes(_str(w.code)));
+  const hasLimitedSource = warnings.some(w => ["SOURCE_UNAVAILABLE", "SOURCE_NOT_ELIGIBLE", "SOURCE_IDENTITY_UNAVAILABLE"].includes(_str(w.code)));
   if (items.length > 0 && hasLimitedSource) return "PARTIAL";
   if (items.length === 0) {
     if (hasLimitedSource) return "SOURCE_LIMITED_NOT_FOUND";
@@ -8487,6 +8561,29 @@ function computeSourceStatus(
   const companyIrPageItems = items.filter(it => _str(it.sourceType) === "company_ir_page");
   const finnhubItems = items.filter(it => _str(it.source) === "finnhub");
   const result: Record<string, unknown> = {};
+  const yahooStatus = (source: string, sourceItems: Record<string, unknown>[]): Record<string, unknown> | null => {
+    const diagnostic = (sourceDiagnostics[source] && typeof sourceDiagnostics[source] === "object")
+      ? sourceDiagnostics[source] as Record<string, unknown>
+      : null;
+    if (!diagnostic) return null;
+    return {
+      status: diagnostic.completed === false ? "PROVIDER_ERROR" : (sourceItems.length > 0 ? "OK" : "EMPTY_RESULT"),
+      rawCount: Number(diagnostic.rawCount ?? 0),
+      retrievedCount: Number(diagnostic.retrievedCount ?? diagnostic.rawCount ?? 0),
+      filteredCount: Number(diagnostic.filteredCount ?? 0),
+      acceptedCount: Number(diagnostic.acceptedCount ?? diagnostic.filteredCount ?? 0),
+      rejectedCount: Number(diagnostic.rejectedCount ?? 0),
+      rejectionCounts: diagnostic.rejectionCounts ?? {},
+      identityStatus: diagnostic.identityStatus ?? null,
+      attempted: diagnostic.attempted !== false,
+    };
+  };
+  const identityDiagnostic = (sourceDiagnostics.yahoo_finance_identity && typeof sourceDiagnostics.yahoo_finance_identity === "object")
+    ? sourceDiagnostics.yahoo_finance_identity as Record<string, unknown>
+    : null;
+  if (identityDiagnostic && _str(identityDiagnostic.status) === "IDENTITY_UNAVAILABLE") {
+    result.yahoo_finance_identity = identityDiagnostic;
+  }
   if (selectedSources.includes("sec")) {
     if (sourcesUsed.includes("sec")) {
       result.sec = { status: secItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: secItems.length, filteredCount: secItems.length };
@@ -8498,7 +8595,10 @@ function computeSourceStatus(
   }
   // Fine-grained Yahoo Finance sources
   if (selectedSources.includes("yahoo_finance_news")) {
-    if (sourcesUsed.includes("yahoo_finance_news")) {
+    const diagnosticStatus = yahooStatus("yahoo_finance_news", yfNewsItems);
+    if (diagnosticStatus) {
+      result.yahoo_finance_news = diagnosticStatus;
+    } else if (sourcesUsed.includes("yahoo_finance_news")) {
       result.yahoo_finance_news = { status: yfNewsItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: yfNewsItems.length, filteredCount: yfNewsItems.length };
     } else if (isYfError) {
       result.yahoo_finance_news = { status: "PROVIDER_ERROR", rawCount: 0, filteredCount: 0 };
@@ -8507,7 +8607,10 @@ function computeSourceStatus(
     }
   }
   if (selectedSources.includes("yahoo_finance_press_releases")) {
-    if (sourcesUsed.includes("yahoo_finance_press_releases")) {
+    const diagnosticStatus = yahooStatus("yahoo_finance_press_releases", yfPrItems);
+    if (diagnosticStatus) {
+      result.yahoo_finance_press_releases = diagnosticStatus;
+    } else if (sourcesUsed.includes("yahoo_finance_press_releases")) {
       result.yahoo_finance_press_releases = { status: yfPrItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: yfPrItems.length, filteredCount: yfPrItems.length };
     } else if (isYfError) {
       result.yahoo_finance_press_releases = { status: "PROVIDER_ERROR", rawCount: 0, filteredCount: 0 };
@@ -8517,7 +8620,10 @@ function computeSourceStatus(
   }
   // Legacy yahoo_finance aggregate
   if (selectedSources.includes("yahoo_finance")) {
-    if (sourcesUsed.includes("yahoo_finance")) {
+    const diagnosticStatus = yahooStatus("yahoo_finance", yfLegacyItems);
+    if (diagnosticStatus) {
+      result.yahoo_finance = diagnosticStatus;
+    } else if (sourcesUsed.includes("yahoo_finance")) {
       result.yahoo_finance = { status: yfLegacyItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: yfLegacyItems.length, filteredCount: yfLegacyItems.length };
     } else if (isYfError) {
       result.yahoo_finance = { status: "PROVIDER_ERROR", rawCount: 0, filteredCount: 0 };
@@ -8611,6 +8717,7 @@ function computeSourceCoverage(sourceStatus: Record<string, unknown>): string {
     "RATE_LIMITED",
     "TIMEOUT",
     "PROVIDER_CHANGED",
+    "IDENTITY_UNAVAILABLE",
     "WEBSITE_NOT_AVAILABLE",
     "DISCOVERY_NOT_FOUND",
     "DISCOVERY_BUDGET_EXHAUSTED",
@@ -8645,6 +8752,7 @@ function verifyCoverageFailureMode(
   if (sourceStatuses.includes("RATE_LIMITED")) return "RATE_LIMITED";
   if (sourceStatuses.includes("TIMEOUT")) return "PROVIDER_TIMEOUT";
   if (sourceStatuses.includes("PROVIDER_CHANGED")) return "PROVIDER_CHANGED";
+  if (sourceStatuses.includes("IDENTITY_UNAVAILABLE")) return "YAHOO_IDENTITY_UNAVAILABLE";
   if (sourceStatuses.includes("UNCONFIGURED")) return "SOURCE_UNCONFIGURED";
   if (sourceStatuses.includes("NOT_ELIGIBLE")) return "SOURCE_NOT_ELIGIBLE";
   if (sourceStatuses.includes("PROVIDER_ERROR")) return "PROVIDER_ERROR";
@@ -8748,15 +8856,28 @@ async function collectYahooEvents(
   ticker: string,
   maxResults: number,
   retrievedAt: string,
+  identity: YahooNewsIdentity,
   startDate = "",
   endDate = "",
   lookbackDays?: number,
   feed: "news" | "press_releases" = "news",
-  nameTokens: string[] = [],
-  companyExchange: string | null = null,
-): Promise<{ items: Record<string, unknown>[]; warnings: Record<string, unknown>[]; used: boolean }> {
+): Promise<{ items: Record<string, unknown>[]; warnings: Record<string, unknown>[]; used: boolean; diagnostics: Record<string, unknown> }> {
   const warnings: Record<string, unknown>[] = [];
-  const items: Record<string, unknown>[] = [];
+  const accepted: Array<{ item: Record<string, unknown>; rank: number }> = [];
+  const diagnostics: Record<string, unknown> = {
+    rawCount: 0,
+    retrievedCount: 0,
+    filteredCount: 0,
+    acceptedCount: 0,
+    rejectedCount: 0,
+    rejectionCounts: {},
+    identityStatus: identity.status,
+  };
+  const reject = (reason: string): void => {
+    diagnostics.rejectedCount = Number(diagnostics.rejectedCount) + 1;
+    const rejectionCounts = diagnostics.rejectionCounts as Record<string, number>;
+    rejectionCounts[reason] = (rejectionCounts[reason] ?? 0) + 1;
+  };
   const feedSource = feed === "press_releases" ? "yahoo_finance_press_releases" : "yahoo_finance_news";
   try {
     let newsRaw: Record<string, unknown>[];
@@ -8765,67 +8886,71 @@ async function collectYahooEvents(
       // POST https://finance.yahoo.com/xhr/ncp?queryRef=pressRelease&serviceKey=ncp_fin
       // Body: { serviceConfig: { snippetCount: count, s: [ticker] } }
       // Response: data.data.tickerStream.stream (filter out ad items)
-      try {
-        const { cookie } = await getCrumb();
-        const count = Math.min(Math.max(1, maxResults), 100);
-        const prUrl = "https://finance.yahoo.com/xhr/ncp?queryRef=pressRelease&serviceKey=ncp_fin";
-        const resp = await fetch(prUrl, {
-          method: "POST",
-          headers: {
-            "User-Agent": UA,
-            "Content-Type": "application/json",
-            Cookie: cookie,
-          },
-          body: JSON.stringify({ serviceConfig: { snippetCount: count, s: [ticker.toUpperCase()] } }),
-        });
-        if (!resp.ok) {
-          await resp.body?.cancel();
-          newsRaw = [];
-        } else {
-          const prJson = await resp.json() as Record<string, unknown>;
-          const stream = (
-            (prJson.data as Record<string, unknown> | undefined)?.tickerStream as Record<string, unknown> | undefined
-          )?.stream;
-          const raw = Array.isArray(stream) ? (stream as Record<string, unknown>[]) : [];
-          // Filter out ad items, exactly as yfinance does
-          newsRaw = raw.filter(item => !item.ad || (Array.isArray(item.ad) && item.ad.length === 0));
-        }
-      } catch {
-        newsRaw = [];
+      const { cookie } = await getCrumb();
+      const count = Math.min(Math.max(1, maxResults), 100);
+      const prUrl = "https://finance.yahoo.com/xhr/ncp?queryRef=pressRelease&serviceKey=ncp_fin";
+      const resp = await fetch(prUrl, {
+        method: "POST",
+        headers: {
+          "User-Agent": UA,
+          "Content-Type": "application/json",
+          Cookie: cookie,
+        },
+        body: JSON.stringify({ serviceConfig: { snippetCount: count, s: [ticker.toUpperCase()] } }),
+      });
+      if (!resp.ok) {
+        await resp.body?.cancel();
+        throw new Error(`HTTP ${resp.status}`);
       }
+      const prJson = await resp.json() as Record<string, unknown>;
+      const stream = (
+        (prJson.data as Record<string, unknown> | undefined)?.tickerStream as Record<string, unknown> | undefined
+      )?.stream;
+      const raw = Array.isArray(stream) ? (stream as Record<string, unknown>[]) : [];
+      // Filter out ad items, exactly as yfinance does.
+      newsRaw = raw.filter(item => !item.ad || (Array.isArray(item.ad) && item.ad.length === 0));
     } else {
       const raw = JSON.parse(await getNews(ticker)) as Record<string, unknown>;
       newsRaw = (raw.items as Record<string, unknown>[]) ?? [];
     }
+    diagnostics.rawCount = newsRaw.length;
+    diagnostics.retrievedCount = newsRaw.length;
     for (const n of newsRaw) {
       const content = (n.content && typeof n.content === "object") ? n.content as Record<string, unknown> : {};
       const ct = _str(content.contentType || n.contentType).toUpperCase();
-      if (ct && !YAHOO_ALLOWED_CONTENT_TYPES.has(ct)) continue;
+      if (ct && !YAHOO_ALLOWED_CONTENT_TYPES.has(ct)) {
+        reject("CONTENT_TYPE");
+        continue;
+      }
       // For the press-releases feed, Yahoo tab membership is authoritative:
       // valid press-release tab items may still arrive as STORY/ARTICLE.
       const { item, warnings: w } = buildYfEventItem(ticker, n, retrievedAt, feedSource);
-      if (!withinDateWindow(_str(item.publishedAt) || null, startDate, endDate, lookbackDays)) continue;
-      // BUG-08: drop articles that don't mention the ticker or company name.
-      // Only filter when nameTokens is populated; if company name lookup failed,
-      // fall back to permissive (no filtering) to avoid over-dropping.
-      if (feed === "news" && nameTokens.length > 0) {
-        const hay = `${_str(item.title)} ${_str(item.evidenceText)}`;
-        const tickerFound = isTickerCompatibleWithContext(hay, ticker, companyExchange);
-        const nameFound = nameTokens.some(tok =>
-          new RegExp(`\\b${tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(hay)
-        );
-        if (!tickerFound && !nameFound) continue;
-        item.sourceTickerMatch = true;
+      if (!withinDateWindow(_str(item.publishedAt) || null, startDate, endDate, lookbackDays)) {
+        reject("DATE_WINDOW");
+        continue;
       }
-      items.push(item);
+      const match = yahooNewsMatchFor(`${_str(item.title)} ${_str(item.summary)} ${_str(item.evidenceText)}`, ticker, identity);
+      if (!match) {
+        reject(identity.status === "UNAVAILABLE" ? "IDENTITY_UNAVAILABLE_TICKER_NOT_FOUND" : "IDENTITY_MISMATCH");
+        continue;
+      }
+      item.issuer = identity.companyName;
+      item.matchBasis = match.basis;
+      item.sourceTickerMatch = true;
+      item.tickerRelevance = "HIGH";
+      item.confidence = item.url ? "MEDIUM" : "LOW";
+      item.decisionUse = yahooDecisionUse(_str(item.eventType));
+      accepted.push({ item, rank: match.rank });
       warnings.push(...w);
-      if (items.length >= maxResults) break;
     }
   } catch (e) {
     warnings.push({ code: "SOURCE_UNAVAILABLE", message: `Yahoo Finance source unavailable: ${e instanceof Error ? e.message : String(e)}`, severity: "warning" });
-    return { items, warnings, used: false };
+    return { items: [], warnings, used: false, diagnostics };
   }
-  return { items, warnings, used: true };
+  accepted.sort((a, b) => a.rank - b.rank || _str(b.item.publishedAt).localeCompare(_str(a.item.publishedAt)));
+  diagnostics.filteredCount = accepted.length;
+  diagnostics.acceptedCount = accepted.length;
+  return { items: accepted.slice(0, maxResults).map(entry => entry.item), warnings, used: true, diagnostics };
 }
 
 async function fetchGlobeNewswireFeed(feed: { name: string; url: string }): Promise<string> {
@@ -9123,36 +9248,34 @@ async function collectCompanyEvents(
     warnings.push(...page.warnings);
   }
 
-  // Fetch company short name once for news relevance filtering (BUG-08)
-  const _yfHeadlineStopwords = new Set([
-    "corp","corporation","inc","ltd","llc","plc","co","group","holdings",
-    "technology","technologies","solutions","services","systems",
-    "international","global","energy","capital","financial","finance","resources",
-  ]);
-  let companyNameTokens: string[] = [];
-  try {
-    const priceD = await yGet(
-      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price`
-    ) as Record<string, unknown>;
-    const priceResult = ((priceD?.quoteSummary as Record<string, unknown> | undefined)
-      ?.result as Record<string, unknown>[] | undefined)?.[0]?.price as Record<string, unknown> | undefined;
-    const shortName = _str(priceResult?.shortName || priceResult?.longName);
-    if (shortName) {
-      companyNameTokens = shortName.toLowerCase()
-        .replace(/[^a-z0-9]/g, " ")
-        .split(/\s+/)
-        .filter(w => w.length >= 4 && !_yfHeadlineStopwords.has(w));
-    }
-  } catch { /* non-fatal */ }
-
   // Yahoo Finance news tab (explicit or via legacy yahoo_finance).
   // company_ir is served by official RSS/Atom discovery above; Yahoo sources
   // remain selectable separately as yahoo_finance_news / _press_releases.
   const needYfNews = selected.includes("yahoo_finance_news")
     || selected.includes("yahoo_finance");
+  const needYfPr = selected.includes("yahoo_finance_press_releases") || selected.includes("yahoo_finance");
+  const needYahooIdentity = needYfNews || needYfPr;
+  const yahooIdentity = needYahooIdentity ? yahooNewsIdentityFor(await getEventIdentity()) : null;
+  const yahooDiagnostics: Record<string, unknown>[] = [];
+  if (yahooIdentity?.status === "UNAVAILABLE") {
+    sourceDiagnostics.yahoo_finance_identity = {
+      status: "IDENTITY_UNAVAILABLE",
+      attempted: true,
+      reasonCode: "YAHOO_PROFILE_IDENTITY_UNAVAILABLE",
+      allowedAction: "retry_or_use_explicit_ticker_matches_only",
+    };
+    warnings.push({
+      code: "SOURCE_IDENTITY_UNAVAILABLE",
+      message: "Yahoo company identity lookup was unavailable; only exact ticker-token matches were retained.",
+      severity: "warning",
+      source: "yahoo_finance_identity",
+    });
+  }
   if (needYfNews) {
-    const identity = await getEventIdentity();
-    const yf = await collectYahooEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, "news", companyNameTokens, identity?.exchange ?? null);
+    const yf = await collectYahooEvents(ticker, safeMax, watermark, yahooIdentity!, startDate, endDate, safeLookback, "news");
+    const diagnostic = { ...yf.diagnostics, attempted: true, completed: yf.used };
+    sourceDiagnostics.yahoo_finance_news = diagnostic;
+    yahooDiagnostics.push(diagnostic);
     if (yf.used) {
       if (selected.includes("yahoo_finance_news")) sourcesUsed.push("yahoo_finance_news");
       if (selected.includes("yahoo_finance") && !sourcesUsed.includes("yahoo_finance")) sourcesUsed.push("yahoo_finance");
@@ -9166,15 +9289,36 @@ async function collectCompanyEvents(
   }
 
   // Yahoo Finance press releases tab (explicit or via legacy yahoo_finance)
-  const needYfPr = selected.includes("yahoo_finance_press_releases") || selected.includes("yahoo_finance");
   if (needYfPr) {
-    const identity = await getEventIdentity();
-    const pr = await collectYahooEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, "press_releases", [], identity?.exchange ?? null);
+    const pr = await collectYahooEvents(ticker, safeMax, watermark, yahooIdentity!, startDate, endDate, safeLookback, "press_releases");
+    const diagnostic = { ...pr.diagnostics, attempted: true, completed: pr.used };
+    sourceDiagnostics.yahoo_finance_press_releases = diagnostic;
+    yahooDiagnostics.push(diagnostic);
     if (pr.used && selected.includes("yahoo_finance_press_releases") && !sourcesUsed.includes("yahoo_finance_press_releases")) {
       sourcesUsed.push("yahoo_finance_press_releases");
     }
     items.push(...pr.items);
     warnings.push(...pr.warnings);
+  }
+
+  if (selected.includes("yahoo_finance") && yahooDiagnostics.length) {
+    const rejectionCounts: Record<string, number> = {};
+    for (const diagnostic of yahooDiagnostics) {
+      for (const [reason, count] of Object.entries((diagnostic.rejectionCounts as Record<string, number>) ?? {})) {
+        rejectionCounts[reason] = (rejectionCounts[reason] ?? 0) + count;
+      }
+    }
+    sourceDiagnostics.yahoo_finance = {
+      rawCount: yahooDiagnostics.reduce((sum, diagnostic) => sum + Number(diagnostic.rawCount ?? 0), 0),
+      retrievedCount: yahooDiagnostics.reduce((sum, diagnostic) => sum + Number(diagnostic.retrievedCount ?? 0), 0),
+      filteredCount: yahooDiagnostics.reduce((sum, diagnostic) => sum + Number(diagnostic.filteredCount ?? 0), 0),
+      acceptedCount: yahooDiagnostics.reduce((sum, diagnostic) => sum + Number(diagnostic.acceptedCount ?? 0), 0),
+      rejectedCount: yahooDiagnostics.reduce((sum, diagnostic) => sum + Number(diagnostic.rejectedCount ?? 0), 0),
+      rejectionCounts,
+      identityStatus: yahooIdentity?.status ?? "UNAVAILABLE",
+      attempted: true,
+      completed: yahooDiagnostics.every(diagnostic => diagnostic.completed === true),
+    };
   }
 
   if (selected.includes("newswire")) {
@@ -9522,7 +9666,9 @@ export async function getPublicEventTimeline(
       confidence: item.confidence,
       evidenceClass: item.evidenceClass,
       tickerMatch: item.tickerMatch,
+      matchBasis: item.matchBasis ?? null,
       urlProvenance: item.urlProvenance,
+      decisionUse: item.decisionUse ?? null,
       duplicateGroupId: item.duplicateGroupId,
       sourceRefs: item.sourceRefs ?? [],
     }))
