@@ -18,6 +18,7 @@ interface ProviderError {
   code: string;
   message: string;
   recoveryAction: string;
+  diagnostics?: RecordValue;
 }
 
 interface SecResponse {
@@ -56,8 +57,8 @@ function recovery(action: string, detail: string): RecordValue {
   return { action, detail };
 }
 
-function providerError(code: string, message: string, recoveryAction: string): ProviderError {
-  return { code, message, recoveryAction };
+function providerError(code: string, message: string, recoveryAction: string, diagnostics?: RecordValue): ProviderError {
+  return { code, message, recoveryAction, diagnostics };
 }
 
 function isIsoDate(value: unknown): value is string {
@@ -91,6 +92,7 @@ function errorResult(tool: string, error: ProviderError): string {
       evidenceClass: EVIDENCE_CLASS,
       decisionGrade: false,
     },
+    diagnostics: error.diagnostics,
   });
 }
 
@@ -104,8 +106,12 @@ async function secGet(path: string, params: Record<string, unknown>): Promise<Se
     throw providerError("SOURCE_UNCONFIGURED", "SEC Open Data is not configured for this runtime.", "CONFIGURE_SEC_OPEN_DATA_API_KEY");
   }
   const url = new URL(`${BASE_URL}${path}`);
-  for (const [key, value] of Object.entries(params)) {
-    if (value != null && String(value) !== "") url.searchParams.set(key, typeof value === "boolean" ? String(value).toLowerCase() : String(value));
+  const queryParams = { ...params };
+  if (queryParams.next_cursor == null) queryParams.next_cursor = "";
+  for (const [key, value] of Object.entries(queryParams)) {
+    if (value != null && (String(value) !== "" || key === "next_cursor")) {
+      url.searchParams.set(key, typeof value === "boolean" ? String(value).toLowerCase() : String(value));
+    }
   }
   const controller = new AbortController();
   let timedOut = false;
@@ -114,7 +120,12 @@ async function secGet(path: string, params: Record<string, unknown>): Promise<Se
   try {
     response = await fetch(url.toString(), {
       method: "GET",
-      headers: { Accept: "application/json", "Ocp-Apim-Subscription-Key": apiKey },
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Cache-Control": "no-cache",
+        "Ocp-Apim-Subscription-Key": apiKey,
+      },
       signal: controller.signal,
     });
   } catch {
@@ -133,11 +144,20 @@ async function secGet(path: string, params: Record<string, unknown>): Promise<Se
   if (!response.ok) {
     throw providerError("PROVIDER_ERROR", `SEC Open Data returned HTTP ${response.status}.`, "RETRY_LATER");
   }
+  const raw = await response.text();
   let payload: unknown;
   try {
-    payload = await response.json();
+    payload = JSON.parse(raw);
   } catch {
-    throw providerError("PROVIDER_ERROR", "SEC Open Data returned an invalid JSON response.", "RETRY_LATER");
+    const bodyBytes = new TextEncoder().encode(raw);
+    const digest = await crypto.subtle.digest("SHA-256", bodyBytes);
+    const bodySha256 = Array.from(new Uint8Array(digest)).map((value) => value.toString(16).padStart(2, "0")).join("");
+    throw providerError("PROVIDER_ERROR", "SEC Open Data returned an invalid JSON response.", "RETRY_LATER", {
+      httpStatus: response.status,
+      contentType: response.headers.get("content-type"),
+      bodyBytes: bodyBytes.byteLength,
+      bodySha256,
+    });
   }
   if (!payload || typeof payload !== "object" || !Array.isArray((payload as RecordValue).items)) {
     throw providerError("PROVIDER_ERROR", "SEC Open Data returned an unexpected response shape.", "RETRY_LATER");
@@ -161,12 +181,11 @@ function identityFromProfile(row: RecordValue): FundIdentity {
   };
 }
 
-async function resolveFund(fundClassName: string, projId: string | null): Promise<Resolution> {
-  const payload = await secGet("/general-info/profiles", {
-    fund_class_name: fundClassName,
-    page_size: MAX_PAGE_SIZE,
-    ...(projId ? { project_info: projId } : {}),
-  });
+function resolveProfilePayload(
+  payload: SecResponse,
+  fundClassName: string,
+  projId: string | null,
+): Resolution {
   const exact = payload.items
     .filter((row) => String(row.fund_class_name ?? "") === fundClassName && (!projId || String(row.proj_id ?? "") === projId))
     .map(identityFromProfile);
@@ -190,11 +209,39 @@ async function resolveFund(fundClassName: string, projId: string | null): Promis
   return { status: "OK", identity: exact[0] };
 }
 
-function resolutionResponse(tool: string, fundClassName: string, projId: string | null, resolution: Resolution): string {
+async function resolveFund(
+  fundClassName: string,
+  projId: string | null,
+  projectInfo: string | null,
+): Promise<Resolution> {
+  const projectLookup = projId ?? projectInfo;
+  const profilesParams = {
+    fund_class_name: fundClassName,
+    fund_status: "Registered",
+    page_size: MAX_PAGE_SIZE,
+    next_cursor: "",
+    ...(projectLookup ? { project_info: projectLookup } : {}),
+  };
+  const registered = await secGet("/general-info/profiles", profilesParams);
+  const registeredClassMatches = registered.items.filter((row) => String(row.fund_class_name ?? "") === fundClassName);
+  if (registeredClassMatches.length || registered.next_cursor) {
+    return resolveProfilePayload(registered, fundClassName, projId);
+  }
+  const ipo = await secGet("/general-info/profiles", { ...profilesParams, fund_status: "IPO" });
+  return resolveProfilePayload(ipo, fundClassName, projId);
+}
+
+function resolutionResponse(
+  tool: string,
+  fundClassName: string,
+  projId: string | null,
+  projectInfo: string | null,
+  resolution: Resolution,
+): string {
   const payload = basePayload(resolution.status);
   Object.assign(payload, {
     scope: "SHARE_CLASS",
-    requestedIdentity: { fundClassName, projId },
+    requestedIdentity: { fundClassName, projId, projectInfo },
     identity: resolution.identity ?? null,
     candidates: resolution.candidates ?? [],
     recovery: recovery(
@@ -205,13 +252,19 @@ function resolutionResponse(tool: string, fundClassName: string, projId: string 
   return mcpSuccess(tool, JSON.stringify(payload), { source: SOURCE });
 }
 
-async function resolveOrResponse(tool: string, fundClassNameRaw: unknown, projIdRaw: unknown): Promise<{ identity?: FundIdentity; response?: string }> {
+async function resolveOrResponse(
+  tool: string,
+  fundClassNameRaw: unknown,
+  projIdRaw: unknown,
+  projectInfoRaw: unknown,
+): Promise<{ identity?: FundIdentity; response?: string }> {
   const fundClassName = optionalString(fundClassNameRaw);
   if (!fundClassName) return { response: inputError(tool, "fund_class_name is required.") };
   const projId = optionalString(projIdRaw);
+  const projectInfo = optionalString(projectInfoRaw);
   try {
-    const resolution = await resolveFund(fundClassName, projId);
-    if (resolution.status !== "OK" || !resolution.identity) return { response: resolutionResponse(tool, fundClassName, projId, resolution) };
+    const resolution = await resolveFund(fundClassName, projId, projectInfo);
+    if (resolution.status !== "OK" || !resolution.identity) return { response: resolutionResponse(tool, fundClassName, projId, projectInfo, resolution) };
     return { identity: resolution.identity };
   } catch (error) {
     return { response: errorResult(tool, error as ProviderError) };
@@ -230,9 +283,10 @@ export async function getThaiFundNav(
   projIdRaw: unknown,
   asOfDateRaw: unknown,
   lookbackDaysRaw: unknown,
+  projectInfoRaw: unknown,
 ): Promise<string> {
   const tool = "get_thai_fund_nav";
-  const resolved = await resolveOrResponse(tool, fundClassNameRaw, projIdRaw);
+  const resolved = await resolveOrResponse(tool, fundClassNameRaw, projIdRaw, projectInfoRaw);
   if (resolved.response) return resolved.response;
   const identity = resolved.identity!;
   const asOfDate = asOfDateRaw == null || String(asOfDateRaw).trim() === "" ? bangkokToday() : String(asOfDateRaw).trim();
@@ -345,9 +399,10 @@ export async function getThaiFundFactsheet(
   fundClassNameRaw: unknown,
   projIdRaw: unknown,
   sectionsRaw: unknown,
+  projectInfoRaw: unknown,
 ): Promise<string> {
   const tool = "get_thai_fund_factsheet";
-  const resolved = await resolveOrResponse(tool, fundClassNameRaw, projIdRaw);
+  const resolved = await resolveOrResponse(tool, fundClassNameRaw, projIdRaw, projectInfoRaw);
   if (resolved.response) return resolved.response;
   const identity = resolved.identity!;
   const selected = sectionsRaw == null ? ["statistics", "top_holdings", "urls"] : Array.isArray(sectionsRaw) ? sectionsRaw.map(String) : [];
@@ -374,9 +429,10 @@ export async function getThaiFundDividendHistory(
   projIdRaw: unknown,
   maxResultsRaw: unknown,
   nextCursorRaw: unknown,
+  projectInfoRaw: unknown,
 ): Promise<string> {
   const tool = "get_thai_fund_dividend_history";
-  const resolved = await resolveOrResponse(tool, fundClassNameRaw, projIdRaw);
+  const resolved = await resolveOrResponse(tool, fundClassNameRaw, projIdRaw, projectInfoRaw);
   if (resolved.response) return resolved.response;
   const identity = resolved.identity!;
   const maxResults = maxResultsRaw == null ? MAX_PAGE_SIZE : Number(maxResultsRaw);

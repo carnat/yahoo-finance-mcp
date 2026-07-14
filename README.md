@@ -105,6 +105,13 @@ Main public tool areas:
 - Thailand SEC Open Data fund NAV, dated factsheet evidence, and project-scoped dividend history;
 - ticker search, stock screens, diagnostics, and manifest health.
 
+Thai SEC fund tools resolve an exact `fund_class_name`; use `proj_id` to
+disambiguate or `project_info` to narrow the documented SEC profile query by
+the official project name or abbreviation. Profile lookup first covers
+`Registered` funds, then retries `IPO` only when no registered exact match is
+returned. This is discovery only: the returned NAV, factsheet, and dividend
+data retain their own dates and scopes.
+
 Use `tools/list` or `get_manifest_diagnostics` for the exact current tool names,
 schemas, aliases, and deprecation metadata.
 

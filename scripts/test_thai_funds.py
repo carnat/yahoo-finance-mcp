@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import unittest
 from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,7 +64,30 @@ class ThaiFundFixtureTest(unittest.TestCase):
         self.assertEqual(data["requestedWindow"]["startDate"], "2026-07-06")
         self.assertEqual(data["nav"]["navDate"], "2026-07-10")
         self.assertEqual(data["freshness"]["calendarDaysFromAsOf"], 0)
+        self.assertEqual(calls[0][1]["fund_status"], "Registered")
+        self.assertEqual(calls[0][1]["next_cursor"], "")
+        self.assertEqual(calls[0][1]["project_info"], "M0232_2564")
         self.assertEqual(calls[1][1]["page_size"], 100)
+
+    def test_profile_lookup_uses_project_info_and_bounded_ipo_fallback(self) -> None:
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        async def fake_request(path: str, params: dict[str, object]) -> dict:
+            calls.append((path, params))
+            if path == "/general-info/profiles" and params["fund_status"] == "Registered":
+                return {"message": "success", "page_size": 100, "next_cursor": "", "items": []}
+            return copy.deepcopy(FIXTURES["profile"] if path == "/general-info/profiles" else FIXTURES["nav_unordered"])
+
+        thai._request_json = fake_request
+        payload = decode(asyncio.run(thai.get_thai_fund_nav(
+            "SCBSEMI(E)", as_of_date="2026-07-10", lookback_days=5, project_info="SCB Semiconductor",
+        )))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["data"]["status"], "OK")
+        profile_calls = [params for path, params in calls if path == "/general-info/profiles"]
+        self.assertEqual([params["fund_status"] for params in profile_calls], ["Registered", "IPO"])
+        self.assertTrue(all(params["project_info"] == "SCB Semiconductor" for params in profile_calls))
+        self.assertTrue(all(params["next_cursor"] == "" for params in profile_calls))
 
     def test_ambiguous_and_mismatched_share_classes_are_not_selected(self) -> None:
         ambiguous = copy.deepcopy(FIXTURES["profile"])
@@ -138,6 +163,9 @@ class ThaiFundFixtureTest(unittest.TestCase):
         original = thai._urlrequest.urlopen
         try:
             class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "application/json"}
+
                 def __enter__(self):
                     return self
                 def __exit__(self, *_args):
@@ -150,6 +178,7 @@ class ThaiFundFixtureTest(unittest.TestCase):
                 captured["data"] = request.data
                 captured["method"] = request.get_method()
                 captured["timeout"] = timeout
+                captured["headers"] = dict(request.header_items())
                 return FakeResponse()
 
             thai._urlrequest.urlopen = fake_urlopen
@@ -161,6 +190,55 @@ class ThaiFundFixtureTest(unittest.TestCase):
         self.assertIn("proj_id=M0232_2564", captured["url"])
         self.assertIn("start_nav_date=2026-07-01", captured["url"])
         self.assertIn("latest=true", captured["url"])
+        query = parse_qs(urlparse(str(captured["url"])).query, keep_blank_values=True)
+        self.assertEqual(query["next_cursor"], [""])
+        request_headers = {key.lower(): value for key, value in captured["headers"].items()}
+        self.assertEqual(request_headers["content-type"], "application/json")
+        self.assertEqual(request_headers["cache-control"], "no-cache")
+        self.assertEqual(request_headers["ocp-apim-subscription-key"], "fixture-key")
+
+    def test_invalid_json_is_redacted_but_diagnosable(self) -> None:
+        original = thai._urlrequest.urlopen
+        raw = b"<html>upstream error</html>"
+        try:
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "text/html; charset=utf-8"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+                def read(self):
+                    return raw
+
+            thai._urlrequest.urlopen = lambda *_args, **_kwargs: FakeResponse()
+            with self.assertRaises(thai.SecThailandProviderError) as captured:
+                thai._request_json_sync("/general-info/profiles", {"fund_class_name": "SCBRMJP"})
+        finally:
+            thai._urlrequest.urlopen = original
+        self.assertEqual(captured.exception.code, "PROVIDER_ERROR")
+        self.assertEqual(captured.exception.diagnostics, {
+            "httpStatus": 200,
+            "contentType": "text/html; charset=utf-8",
+            "bodyBytes": len(raw),
+            "bodySha256": hashlib.sha256(raw).hexdigest(),
+        })
+        self.assertNotIn(raw.decode(), json.dumps(captured.exception.diagnostics))
+
+    def test_provider_diagnostics_are_preserved_in_the_mcp_failure(self) -> None:
+        diagnostics = {"httpStatus": 200, "contentType": "text/html", "bodyBytes": 11, "bodySha256": "abc"}
+        self.set_responses({
+            "/general-info/profiles": thai.SecThailandProviderError(
+                "PROVIDER_ERROR", "SEC Open Data returned an invalid JSON response.", "RETRY_LATER", diagnostics,
+            ),
+        })
+        response = decode(asyncio.run(thai.get_thai_fund_nav("SCBRMJP")))
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "PROVIDER_ERROR")
+        self.assertEqual(response["diagnostics"], diagnostics)
 
 
 class ThaiFundWorkerParityTest(unittest.TestCase):
@@ -170,11 +248,17 @@ class ThaiFundWorkerParityTest(unittest.TestCase):
         catalog = json.loads((ROOT / "tool_catalog.json").read_text(encoding="utf-8"))
         for endpoint in ("/general-info/profiles", "/daily-info/nav", "/factsheet/statistics", "/factsheet/top5-holdings", "/factsheet/urls", "/daily-info/dividend-history"):
             self.assertIn(endpoint, worker)
-        for token in ("url.searchParams.set", 'method: "GET"', "Ocp-Apim-Subscription-Key", "SOURCE_UNCONFIGURED", "AUTH_ERROR", "RATE_LIMIT", "PROVIDER_TIMEOUT"):
+        for token in (
+            "url.searchParams.set", 'method: "GET"', "Ocp-Apim-Subscription-Key", "Content-Type", "Cache-Control",
+            "SOURCE_UNCONFIGURED", "AUTH_ERROR", "RATE_LIMIT", "PROVIDER_TIMEOUT", 'fund_status: "Registered"',
+            'fund_status: "IPO"', "projectInfoRaw", "bodySha256",
+        ):
             self.assertIn(token, worker)
         for action in ("get_thai_fund_nav", "get_thai_fund_factsheet", "get_thai_fund_dividend_history"):
             self.assertIn(action, tools)
             self.assertIn(action, catalog["groups"]["thai_funds"]["actions"])
+        self.assertIn("project_info", tools)
+        self.assertIn("project_info", catalog["groups"]["thai_funds"]["description"])
         self.assertIn("NAV_NOT_FOUND_IN_WINDOW", worker)
         self.assertIn('scope: "PROJECT"', worker)
         self.assertIn("rows.reduce", worker)
