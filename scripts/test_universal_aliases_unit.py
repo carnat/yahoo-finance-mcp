@@ -16,6 +16,18 @@ class TestReturnedProviderError(unittest.TestCase):
 
         self.assertEqual(returned_provider_error(payload), "No options data available")
 
+    def test_recognizes_v2_failure_envelope(self) -> None:
+        payload = {
+            "ok": False,
+            "data": None,
+            "error": {
+                "code": "PROVIDER_ERROR",
+                "message": "Yahoo Finance API error 500",
+            },
+        }
+
+        self.assertEqual(returned_provider_error(payload), "Yahoo Finance API error 500")
+
     def test_ignores_success_payload(self) -> None:
         payload = {"ok": True, "data": {"ticker": "AAPL", "dataQuality": {}}}
 
