@@ -8856,11 +8856,11 @@ async function collectYahooEvents(
   ticker: string,
   maxResults: number,
   retrievedAt: string,
+  identity: YahooNewsIdentity,
   startDate = "",
   endDate = "",
   lookbackDays?: number,
   feed: "news" | "press_releases" = "news",
-  identity: YahooNewsIdentity,
 ): Promise<{ items: Record<string, unknown>[]; warnings: Record<string, unknown>[]; used: boolean; diagnostics: Record<string, unknown> }> {
   const warnings: Record<string, unknown>[] = [];
   const accepted: Array<{ item: Record<string, unknown>; rank: number }> = [];
@@ -9272,7 +9272,7 @@ async function collectCompanyEvents(
     });
   }
   if (needYfNews) {
-    const yf = await collectYahooEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, "news", yahooIdentity!);
+    const yf = await collectYahooEvents(ticker, safeMax, watermark, yahooIdentity!, startDate, endDate, safeLookback, "news");
     const diagnostic = { ...yf.diagnostics, attempted: true, completed: yf.used };
     sourceDiagnostics.yahoo_finance_news = diagnostic;
     yahooDiagnostics.push(diagnostic);
@@ -9290,7 +9290,7 @@ async function collectCompanyEvents(
 
   // Yahoo Finance press releases tab (explicit or via legacy yahoo_finance)
   if (needYfPr) {
-    const pr = await collectYahooEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, "press_releases", yahooIdentity!);
+    const pr = await collectYahooEvents(ticker, safeMax, watermark, yahooIdentity!, startDate, endDate, safeLookback, "press_releases");
     const diagnostic = { ...pr.diagnostics, attempted: true, completed: pr.used };
     sourceDiagnostics.yahoo_finance_press_releases = diagnostic;
     yahooDiagnostics.push(diagnostic);
