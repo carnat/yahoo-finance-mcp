@@ -78,9 +78,11 @@ import {
   getEarningsCallTranscript,
 } from "./yahoo-finance.js";
 import {
+  searchThaiFunds,
   getThaiFundDividendHistory,
   getThaiFundFactsheet,
   getThaiFundNav,
+  getThaiFundNavBatch,
 } from "./sec-thailand.js";
 import { validateTicker } from "./validate.js";
 
@@ -105,6 +107,28 @@ export interface Tool {
 
 export const TOOLS: Tool[] = [
   {
+    name: "search_thai_funds",
+    description:
+      "Search bounded official Thai SEC active fund-profile candidates. Provide project_info (official project name or abbreviation), company_info, or fund_class_name. The result queries Registered and IPO profiles separately, returns compact candidates and per-status nextCursors, and never selects a candidate automatically. Use a returned projId and fundClassName in a later fund-data call.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_info: { type: "string", description: "Official project name or project abbreviation; supports the documented partial profile search." },
+        company_info: { type: "string", description: "AMC name or unique ID for the documented profile search." },
+        fund_class_name: { type: "string", description: "Exact Thai SEC share-class code when known." },
+        page_size: { type: "integer", minimum: 1, maximum: 20, default: 10, description: "Candidate rows per active status, capped at 20." },
+        next_cursors: {
+          type: "object",
+          properties: {
+            Registered: { type: ["string", "null"] },
+            IPO: { type: ["string", "null"] },
+          },
+          description: "The complete nextCursors object from a prior search response. Null marks a completed status page.",
+        },
+      },
+    },
+  },
+  {
     name: "get_thai_fund_nav",
     description:
       "Return the latest official Thai SEC daily NAV in a bounded Bangkok-time window. Without proj_id, fund_class_name must exactly match an SEC share class. With explicit proj_id, the tool calls NAV directly and returns the SEC source class, which may be main rather than a public distributor code; multiple returned classes are never inferred. Defaults to 45 days ending today in Asia/Bangkok and never searches more than 90 days. NAV_NOT_FOUND_IN_WINDOW is not evidence of no NAV outside the requested window.",
@@ -118,6 +142,33 @@ export const TOOLS: Tool[] = [
         lookback_days: { type: "integer", minimum: 1, maximum: 90, default: 45, description: "Calendar-day window length, capped at 90." },
       },
       required: ["fund_class_name"],
+    },
+  },
+  {
+    name: "get_thai_fund_nav_batch",
+    description:
+      "Refresh up to 20 official Thai SEC NAVs with explicit project identities. Each funds entry requires fund_class_name and proj_id; reference is an optional caller label. Requests run sequentially, never profile-search or infer a class, and return a status/freshness/recovery object per item. This tool returns NAV evidence only; it does not calculate portfolio value or tax-wrapper eligibility.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        funds: {
+          type: "array",
+          minItems: 1,
+          maxItems: 20,
+          items: {
+            type: "object",
+            properties: {
+              reference: { type: "string", description: "Optional caller-owned label for this fund." },
+              fund_class_name: { type: "string", description: "Public or SEC share-class code retained as the requested identity." },
+              proj_id: { type: "string", description: "Authoritative Thai SEC project ID; required for deterministic direct NAV lookup." },
+            },
+            required: ["fund_class_name", "proj_id"],
+          },
+        },
+        as_of_date: { type: "string", description: "Optional Bangkok-date endpoint in YYYY-MM-DD; defaults to today." },
+        lookback_days: { type: "integer", minimum: 1, maximum: 90, default: 45, description: "Calendar-day window length, capped at 90." },
+      },
+      required: ["funds"],
     },
   },
   {
@@ -2318,8 +2369,12 @@ export async function callVisibleTool(name: string, args: Record<string, unknown
 
 async function _dispatchTool(name: string, args: Record<string, unknown>): Promise<string> {
   switch (name) {
+    case "search_thai_funds":
+      return searchThaiFunds(args.project_info, args.company_info, args.fund_class_name, args.page_size, args.next_cursors);
     case "get_thai_fund_nav":
       return getThaiFundNav(args.fund_class_name, args.proj_id, args.as_of_date, args.lookback_days, args.project_info);
+    case "get_thai_fund_nav_batch":
+      return getThaiFundNavBatch(args.funds, args.as_of_date, args.lookback_days);
     case "get_thai_fund_factsheet":
       return getThaiFundFactsheet(args.fund_class_name, args.proj_id, args.sections, args.project_info);
     case "get_thai_fund_dividend_history":

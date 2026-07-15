@@ -1,9 +1,9 @@
 """Bounded Thai SEC Open Data fund workflows.
 
-This module intentionally exposes three different workflows instead of an
-unbounded fund overview: share-class NAV, dated factsheet evidence, and
-project-scoped dividend history.  It uses only the documented SEC Open Data
-JSON endpoints and never follows AMC/PDF links.
+This module exposes bounded workflows instead of an unbounded fund overview:
+profile discovery, share-class NAV, dated factsheet evidence, and project-
+scoped dividend history. It uses only the documented SEC Open Data JSON
+endpoints and never follows AMC/PDF links.
 """
 
 from __future__ import annotations
@@ -33,6 +33,10 @@ _REQUEST_TIMEOUT_SECONDS = 12
 _MAX_PAGE_SIZE = 100
 _DEFAULT_NAV_LOOKBACK_DAYS = 45
 _MAX_NAV_LOOKBACK_DAYS = 90
+_DEFAULT_SEARCH_PAGE_SIZE = 10
+_MAX_SEARCH_PAGE_SIZE = 20
+_MAX_NAV_BATCH_FUNDS = 20
+_ACTIVE_FUND_STATUSES = ("Registered", "IPO")
 _FACTSHEET_SECTIONS = frozenset({"statistics", "top_holdings", "urls"})
 _DEFAULT_FACTSHEET_SECTIONS = ("statistics", "top_holdings", "urls")
 
@@ -159,6 +163,40 @@ def _base_payload(status: str) -> dict[str, object]:
 
 def _recovery(action: str, detail: str) -> dict[str, str]:
     return {"action": action, "detail": detail}
+
+
+def _search_candidate(row: dict[str, Any]) -> dict[str, str | None]:
+    """Return only the profile fields needed to select a later exact request."""
+    return {
+        "projId": _optional_str(row.get("proj_id")),
+        "fundClassName": _optional_str(row.get("fund_class_name")),
+        "projectNameTh": _optional_str(row.get("proj_name_th")),
+        "projectNameEn": _optional_str(row.get("proj_name_en")),
+        "projectAbbreviation": _optional_str(row.get("proj_abbr_name")),
+        "companyNameTh": _optional_str(row.get("comp_name_th")),
+        "companyNameEn": _optional_str(row.get("comp_name_en")),
+        "uniqueId": _optional_str(row.get("unique_id")),
+        "fundStatus": _optional_str(row.get("fund_status")),
+        "lastUpdatedAt": _optional_str(row.get("last_upd_date")),
+    }
+
+
+def _normalize_search_cursors(value: object) -> dict[str, str | None] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("next_cursors must be an object returned by a prior search_thai_funds response.")
+    unknown = set(value) - set(_ACTIVE_FUND_STATUSES)
+    if unknown:
+        raise ValueError("next_cursors may contain only Registered and IPO keys.")
+    cursors: dict[str, str | None] = {}
+    for status, cursor in value.items():
+        if cursor is not None and not isinstance(cursor, str):
+            raise ValueError("next_cursors values must be strings or null.")
+        cursors[status] = _optional_str(cursor)
+    if cursors and all(cursor is None for cursor in cursors.values()):
+        raise ValueError("next_cursors has no remaining page; start a new search without it.")
+    return cursors
 
 
 def _request_json_sync(path: str, params: dict[str, object]) -> dict[str, Any]:
@@ -365,6 +403,105 @@ async def _resolve_or_response(
     return resolution.identity, None
 
 
+@yfinance_server.tool(
+    name="search_thai_funds",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["search_thai_funds"],
+    description="""Search the official Thai SEC active fund-profile catalogue for candidate identities.
+
+Provide at least one of project_info (official project name or abbreviation),
+company_info, or fund_class_name. The search reads both Registered and IPO
+profiles, returning compact candidates and separate pagination cursors per
+status. A candidate is not automatically selected: pass its projId and the
+desired fundClassName to a later NAV, factsheet, or dividend request.
+""",
+)
+async def search_thai_funds(
+    project_info: str | None = None,
+    company_info: str | None = None,
+    fund_class_name: str | None = None,
+    page_size: int = _DEFAULT_SEARCH_PAGE_SIZE,
+    next_cursors: dict[str, str | None] | None = None,
+) -> str:
+    """Find bounded SEC profile candidates without resolving a share class."""
+    tool = "search_thai_funds"
+    project = _optional_str(project_info)
+    company = _optional_str(company_info)
+    fund_class = _optional_str(fund_class_name)
+    if not any((project, company, fund_class)):
+        return _mcp_failure(
+            tool,
+            ErrorCode.INPUT_VALIDATION_ERROR,
+            "Provide at least one of project_info, company_info, or fund_class_name.",
+            source=_SOURCE,
+        )
+    if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= _MAX_SEARCH_PAGE_SIZE:
+        return _mcp_failure(
+            tool,
+            ErrorCode.INPUT_VALIDATION_ERROR,
+            "page_size must be an integer from 1 through 20 per active fund status.",
+            source=_SOURCE,
+        )
+    try:
+        cursors = _normalize_search_cursors(next_cursors)
+    except ValueError as error:
+        return _mcp_failure(tool, ErrorCode.INPUT_VALIDATION_ERROR, str(error), source=_SOURCE)
+
+    status_results: dict[str, dict[str, object]] = {}
+    try:
+        for fund_status in _ACTIVE_FUND_STATUSES:
+            if cursors is not None and fund_status in cursors and cursors[fund_status] is None:
+                continue
+            response = await _request_json("/general-info/profiles", {
+                "project_info": project,
+                "company_info": company,
+                "fund_class_name": fund_class,
+                "fund_status": fund_status,
+                "next_cursor": "" if cursors is None else cursors.get(fund_status) or "",
+                "page_size": page_size,
+            })
+            candidates = [_search_candidate(row) for row in response["items"] if isinstance(row, dict)]
+            cursor = _optional_str(response.get("next_cursor"))
+            status_results[fund_status] = {
+                "candidates": candidates,
+                "nextCursor": cursor,
+                "hasMore": bool(cursor),
+            }
+    except SecThailandProviderError as error:
+        return _provider_failure(tool, error)
+
+    candidates = [
+        candidate
+        for result in status_results.values()
+        for candidate in result["candidates"]  # type: ignore[index]
+    ]
+    next_cursor_state: dict[str, str | None] = {
+        status: status_results[status]["nextCursor"] if status in status_results else None  # type: ignore[index]
+        for status in _ACTIVE_FUND_STATUSES
+    }
+    payload = _base_payload("OK" if candidates else "FUND_NOT_FOUND")
+    payload.update({
+        "scope": "PROFILE_CATALOG",
+        "requestedFilters": {
+            "projectInfo": project,
+            "companyInfo": company,
+            "fundClassName": fund_class,
+            "fundStatuses": list(status_results),
+            "pageSizePerStatus": page_size,
+        },
+        "candidates": candidates,
+        "candidateCount": len(candidates),
+        "resultsByFundStatus": status_results,
+        "nextCursors": next_cursor_state,
+        "hasMore": any(cursor is not None for cursor in next_cursor_state.values()),
+        "recovery": _recovery(
+            "USE_CANDIDATE_PROJ_ID" if candidates else "CHECK_PROJECT_OR_COMPANY_NAME",
+            "Select an exact candidate explicitly; no candidate has been promoted into fund evidence."
+            if candidates else "No active SEC profile candidate matched these filters. Try an official project name, abbreviation, or company name.",
+        ),
+    })
+    return _mcp_success(tool, payload, source=_SOURCE)
+
+
 def _freshness(data_date: str | None, requested_as_of: date) -> dict[str, object]:
     parsed = _safe_date(data_date)
     return {
@@ -422,13 +559,13 @@ def _nav_result(
     return base
 
 
-def _nav_class_ambiguity_response(
+def _nav_class_ambiguity_payload(
     *,
     requested_fund_class_name: str,
     proj_id: str,
     classes: list[str],
     next_cursor: str | None,
-) -> str:
+) -> dict[str, object]:
     payload = _base_payload("AMBIGUOUS_SHARE_CLASS")
     payload.update({
         "scope": "PROJECT",
@@ -441,7 +578,63 @@ def _nav_class_ambiguity_response(
             "The explicit proj_id returned multiple SEC fund classes; retry with one returned SEC fund_class_name.",
         ),
     })
-    return _mcp_success("get_thai_fund_nav", payload, source=_SOURCE)
+    return payload
+
+
+async def _explicit_project_nav_payload(
+    requested_fund_class_name: str,
+    proj_id: str,
+    *,
+    start_date: date,
+    end_date: date,
+    lookback_days: int,
+) -> dict[str, object]:
+    """Fetch one project directly, retaining the source class without inference."""
+    response = await _request_json("/daily-info/nav", {
+        "proj_id": proj_id,
+        "start_nav_date": start_date.isoformat(),
+        "end_nav_date": end_date.isoformat(),
+        "page_size": _MAX_PAGE_SIZE,
+    })
+    rows = [row for row in response["items"] if isinstance(row, dict) and _safe_date(row.get("nav_date"))]
+    next_cursor = _optional_str(response.get("next_cursor"))
+    source_classes = sorted({str(row.get("fund_class_name") or "") for row in rows if row.get("fund_class_name")})
+    exact_rows = [row for row in rows if str(row.get("fund_class_name") or "") == requested_fund_class_name]
+    if exact_rows:
+        selected_rows = exact_rows
+        identity_status = "NAV_PROJECT_ID_AND_SEC_CLASS_CONFIRMED"
+    elif len(source_classes) == 1 and not next_cursor:
+        selected_rows = rows
+        identity_status = "NAV_PROJECT_ID_CONFIRMED_CLASS_ALIAS"
+    elif rows:
+        return _nav_class_ambiguity_payload(
+            requested_fund_class_name=requested_fund_class_name,
+            proj_id=proj_id,
+            classes=source_classes,
+            next_cursor=next_cursor,
+        )
+    else:
+        selected_rows = []
+        identity_status = "NAV_PROJECT_ID_UNVERIFIED_NO_ROWS"
+    identity = FundIdentity.from_nav(
+        selected_rows[0] if selected_rows else {},
+        proj_id=proj_id,
+        requested_fund_class_name=requested_fund_class_name,
+    )
+    return _nav_result(
+        identity,
+        selected_rows,
+        next_cursor=next_cursor,
+        start_date=start_date,
+        end_date=end_date,
+        lookback_days=lookback_days,
+        identity_resolution={
+            "status": identity_status,
+            "method": "EXPLICIT_PROJ_ID_DIRECT_NAV",
+            "requestedFundClassName": requested_fund_class_name,
+            "sourceFundClassName": identity.fund_class_name if selected_rows else None,
+        },
+    )
 
 
 @yfinance_server.tool(
@@ -490,60 +683,20 @@ async def get_thai_fund_nav(
 
     if explicit_proj_id is not None:
         try:
-            payload = await _request_json("/daily-info/nav", {
-                "proj_id": explicit_proj_id,
-                "start_nav_date": start_date.isoformat(),
-                "end_nav_date": end_date.isoformat(),
-                "page_size": _MAX_PAGE_SIZE,
-            })
+            base = await _explicit_project_nav_payload(
+                requested_fund_class_name,
+                explicit_proj_id,
+                start_date=start_date,
+                end_date=end_date,
+                lookback_days=lookback_days,
+            )
         except SecThailandProviderError as error:
             return _provider_failure("get_thai_fund_nav", error)
-
-        rows = [row for row in payload["items"] if isinstance(row, dict) and _safe_date(row.get("nav_date"))]
-        next_cursor = _optional_str(payload.get("next_cursor"))
-        source_classes = sorted({str(row.get("fund_class_name") or "") for row in rows if row.get("fund_class_name")})
-        exact_rows = [row for row in rows if str(row.get("fund_class_name") or "") == requested_fund_class_name]
-        if exact_rows:
-            selected_rows = exact_rows
-            identity_status = "NAV_PROJECT_ID_AND_SEC_CLASS_CONFIRMED"
-        elif len(source_classes) == 1 and not next_cursor:
-            selected_rows = rows
-            identity_status = "NAV_PROJECT_ID_CONFIRMED_CLASS_ALIAS"
-        elif rows:
-            return _nav_class_ambiguity_response(
-                requested_fund_class_name=requested_fund_class_name,
-                proj_id=explicit_proj_id,
-                classes=source_classes,
-                next_cursor=next_cursor,
-            )
-        else:
-            selected_rows = []
-            identity_status = "NAV_PROJECT_ID_UNVERIFIED_NO_ROWS"
-
-        identity = FundIdentity.from_nav(
-            selected_rows[0] if selected_rows else {},
-            proj_id=explicit_proj_id,
-            requested_fund_class_name=requested_fund_class_name,
-        )
-        base = _nav_result(
-            identity,
-            selected_rows,
-            next_cursor=next_cursor,
-            start_date=start_date,
-            end_date=end_date,
-            lookback_days=lookback_days,
-            identity_resolution={
-                "status": identity_status,
-                "method": "EXPLICIT_PROJ_ID_DIRECT_NAV",
-                "requestedFundClassName": requested_fund_class_name,
-                "sourceFundClassName": identity.fund_class_name if selected_rows else None,
-            },
-        )
         return _mcp_success(
             "get_thai_fund_nav",
             base,
             source=_SOURCE,
-            data_date=base["dataDate"] if isinstance(base["dataDate"], str) else None,
+            data_date=base.get("dataDate") if isinstance(base.get("dataDate"), str) else None,
         )
 
     identity, response = await _resolve_or_response(
@@ -573,6 +726,141 @@ async def get_thai_fund_nav(
         lookback_days=lookback_days,
     )
     return _mcp_success("get_thai_fund_nav", base, source=_SOURCE, data_date=base["dataDate"] if isinstance(base["dataDate"], str) else None)
+
+
+def _normalize_nav_batch_funds(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("funds must be a non-empty list of explicit fund_class_name and proj_id pairs.")
+    if len(value) > _MAX_NAV_BATCH_FUNDS:
+        raise ValueError(f"funds supports at most {_MAX_NAV_BATCH_FUNDS} entries per request.")
+    normalized: list[dict[str, str]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValueError(f"funds[{index}] must be an object.")
+        fund_class_name = _optional_str(item.get("fund_class_name"))
+        proj_id = _optional_str(item.get("proj_id"))
+        if fund_class_name is None or proj_id is None:
+            raise ValueError(f"funds[{index}] requires fund_class_name and proj_id.")
+        normalized.append({
+            "reference": _optional_str(item.get("reference")) or fund_class_name,
+            "fund_class_name": fund_class_name,
+            "proj_id": proj_id,
+        })
+    return normalized
+
+
+def _nav_batch_item_failure(
+    fund: dict[str, str],
+    error: SecThailandProviderError,
+    *,
+    start_date: date,
+    end_date: date,
+    lookback_days: int,
+) -> dict[str, object]:
+    payload = _base_payload(error.code)
+    payload.update({
+        "reference": fund["reference"],
+        "scope": "SHARE_CLASS",
+        "requestedIdentity": {"fundClassName": fund["fund_class_name"], "projId": fund["proj_id"]},
+        "requestedWindow": {
+            "startDate": start_date.isoformat(),
+            "endDate": end_date.isoformat(),
+            "lookbackCalendarDays": lookback_days,
+            "timezone": _TIMEZONE,
+        },
+        "dataDate": None,
+        "freshness": _freshness(None, end_date),
+        "nav": None,
+        "recovery": _recovery(error.recovery_action, error.args[0]),
+    })
+    return payload
+
+
+@yfinance_server.tool(
+    name="get_thai_fund_nav_batch",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_thai_fund_nav_batch"],
+    description="""Refresh up to 20 Thai SEC fund NAVs using explicit project identities.
+
+Each funds entry requires fund_class_name and proj_id; reference is an optional
+caller label. Requests run sequentially and never fall back to profile search,
+so a vault refresh cannot silently select a share class. Read each item's
+status, dataDate, and freshness. PARTIAL means at least one item did not return
+an exact NAV result in its requested window or had a recoverable source error.
+""",
+)
+async def get_thai_fund_nav_batch(
+    funds: list[dict[str, object]],
+    as_of_date: str | None = None,
+    lookback_days: int = _DEFAULT_NAV_LOOKBACK_DAYS,
+) -> str:
+    """Refresh a bounded, caller-owned fund list without deriving portfolio values."""
+    tool = "get_thai_fund_nav_batch"
+    try:
+        normalized_funds = _normalize_nav_batch_funds(funds)
+    except ValueError as error:
+        return _mcp_failure(tool, ErrorCode.INPUT_VALIDATION_ERROR, str(error), source=_SOURCE)
+    try:
+        end_date = _parse_iso_date(as_of_date, "as_of_date") if as_of_date else _bangkok_today()
+    except ValueError as error:
+        return _mcp_failure(tool, ErrorCode.INPUT_VALIDATION_ERROR, str(error), source=_SOURCE)
+    if isinstance(lookback_days, bool) or not isinstance(lookback_days, int) or not 1 <= lookback_days <= _MAX_NAV_LOOKBACK_DAYS:
+        return _mcp_failure(
+            tool,
+            ErrorCode.INPUT_VALIDATION_ERROR,
+            "lookback_days must be an integer from 1 through 90.",
+            source=_SOURCE,
+        )
+    start_date = end_date - timedelta(days=lookback_days - 1)
+    items: list[dict[str, object]] = []
+    for fund in normalized_funds:
+        try:
+            item = await _explicit_project_nav_payload(
+                fund["fund_class_name"],
+                fund["proj_id"],
+                start_date=start_date,
+                end_date=end_date,
+                lookback_days=lookback_days,
+            )
+        except SecThailandProviderError as error:
+            if error.code in {"SOURCE_UNCONFIGURED", "AUTH_ERROR"}:
+                return _provider_failure(tool, error)
+            item = _nav_batch_item_failure(
+                fund,
+                error,
+                start_date=start_date,
+                end_date=end_date,
+                lookback_days=lookback_days,
+            )
+        item["reference"] = fund["reference"]
+        items.append(item)
+
+    incomplete = [item["reference"] for item in items if item.get("status") != "OK"]
+    data_dates = [item.get("dataDate") for item in items if isinstance(item.get("dataDate"), str)]
+    payload = _base_payload("PARTIAL" if incomplete else "OK")
+    payload.update({
+        "scope": "VAULT_BATCH",
+        "requestedWindow": {
+            "startDate": start_date.isoformat(),
+            "endDate": end_date.isoformat(),
+            "lookbackCalendarDays": lookback_days,
+            "timezone": _TIMEZONE,
+        },
+        "items": items,
+        "itemCount": len(items),
+        "incompleteReferences": incomplete,
+        "dataDate": max(data_dates) if data_dates else None,
+        "recovery": _recovery(
+            "RETRY_INCOMPLETE_FUNDS" if incomplete else "NONE",
+            "Retry only incompleteReferences after reviewing each item recovery action."
+            if incomplete else "All requested direct-project NAV lookups completed.",
+        ),
+    })
+    return _mcp_success(
+        tool,
+        payload,
+        source=_SOURCE,
+        data_date=payload["dataDate"] if isinstance(payload["dataDate"], str) else None,
+    )
 
 
 def _factsheet_section_error(section: str, error: SecThailandProviderError) -> dict[str, object]:

@@ -104,7 +104,9 @@ from yfmcp.tools.pricing import (  # re-export for compatibility and grouped rou
     _classify_freshness,
 )
 from yfmcp.tools.thai_funds import (  # re-export for grouped routing
+    search_thai_funds,
     get_thai_fund_nav,
+    get_thai_fund_nav_batch,
     get_thai_fund_factsheet,
     get_thai_fund_dividend_history,
 )
