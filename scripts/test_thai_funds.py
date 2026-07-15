@@ -56,7 +56,7 @@ class ThaiFundFixtureTest(unittest.TestCase):
             return copy.deepcopy(FIXTURES["profile"] if path == "/general-info/profiles" else FIXTURES["nav_unordered"])
 
         thai._request_json = fake_request
-        payload = decode(asyncio.run(thai.get_thai_fund_nav("SCBSEMI(E)", "M0232_2564", "2026-07-10", 5)))
+        payload = decode(asyncio.run(thai.get_thai_fund_nav("SCBSEMI(E)", as_of_date="2026-07-10", lookback_days=5)))
         self.assertTrue(payload["ok"])
         data = payload["data"]
         self.assertEqual(data["status"], "OK")
@@ -66,8 +66,41 @@ class ThaiFundFixtureTest(unittest.TestCase):
         self.assertEqual(data["freshness"]["calendarDaysFromAsOf"], 0)
         self.assertEqual(calls[0][1]["fund_status"], "Registered")
         self.assertEqual(calls[0][1]["next_cursor"], "")
-        self.assertEqual(calls[0][1]["project_info"], "M0232_2564")
         self.assertEqual(calls[1][1]["page_size"], 100)
+
+    def test_explicit_project_nav_bypasses_profile_and_accepts_main_alias(self) -> None:
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        async def fake_request(path: str, params: dict[str, object]) -> dict:
+            calls.append((path, params))
+            self.assertEqual(path, "/daily-info/nav")
+            return copy.deepcopy(FIXTURES["nav_main_project"])
+
+        thai._request_json = fake_request
+        payload = decode(asyncio.run(thai.get_thai_fund_nav(
+            "KFINFRASSF", "M0370_2564", "2026-07-10", 5,
+        )))
+        self.assertTrue(payload["ok"])
+        data = payload["data"]
+        self.assertEqual(data["status"], "OK")
+        self.assertEqual(data["identity"]["projId"], "M0370_2564")
+        self.assertEqual(data["identity"]["fundClassName"], "main")
+        self.assertEqual(data["identity"]["requestedFundClassName"], "KFINFRASSF")
+        self.assertEqual(data["identityResolution"]["status"], "NAV_PROJECT_ID_CONFIRMED_CLASS_ALIAS")
+        self.assertEqual(data["identityResolution"]["method"], "EXPLICIT_PROJ_ID_DIRECT_NAV")
+        self.assertEqual(data["nav"]["navDate"], "2026-07-10")
+        self.assertEqual([path for path, _params in calls], ["/daily-info/nav"])
+        self.assertNotIn("fund_class_name", calls[0][1])
+
+    def test_explicit_project_nav_does_not_infer_multiple_sec_classes(self) -> None:
+        self.set_responses({"/daily-info/nav": FIXTURES["nav_multiple_classes"]})
+        payload = decode(asyncio.run(thai.get_thai_fund_nav(
+            "PUBLIC-CODE", "M0999_2564", "2026-07-10", 5,
+        )))
+        data = payload["data"]
+        self.assertEqual(data["status"], "AMBIGUOUS_SHARE_CLASS")
+        self.assertEqual([candidate["fundClassName"] for candidate in data["candidates"]], ["CLASS-A", "CLASS-B"])
+        self.assertEqual(data["recovery"]["action"], "PROVIDE_SEC_FUND_CLASS_NAME")
 
     def test_profile_lookup_uses_project_info_and_bounded_ipo_fallback(self) -> None:
         calls: list[tuple[str, dict[str, object]]] = []
@@ -99,9 +132,9 @@ class ThaiFundFixtureTest(unittest.TestCase):
         self.assertEqual(len(response["data"]["candidates"]), 2)
 
         self.set_responses({"/general-info/profiles": copy.deepcopy(FIXTURES["profile"])})
-        response = decode(asyncio.run(thai.get_thai_fund_nav("SCBSEMI(E)", "M0000_0000", "2026-07-10")))
-        self.assertEqual(response["data"]["status"], "FUND_IDENTITY_MISMATCH")
-        self.assertEqual(response["data"]["identity"], None)
+        resolution = asyncio.run(thai._resolve_fund("SCBSEMI(E)", "M0000_0000", None))
+        self.assertEqual(resolution.status, "FUND_IDENTITY_MISMATCH")
+        self.assertIsNone(resolution.identity)
 
     def test_empty_nav_is_scoped_to_the_requested_window(self) -> None:
         empty_nav = {"message": "success", "page_size": 100, "next_cursor": "", "items": []}
@@ -111,6 +144,7 @@ class ThaiFundFixtureTest(unittest.TestCase):
         self.assertEqual(data["status"], "NAV_NOT_FOUND_IN_WINDOW")
         self.assertEqual(data["nav"], None)
         self.assertEqual(data["recovery"]["action"], "EXPAND_WINDOW_UP_TO_90_DAYS")
+        self.assertEqual(data["identityResolution"]["status"], "NAV_PROJECT_ID_UNVERIFIED_NO_ROWS")
 
     def test_factsheet_preserves_success_when_one_section_fails(self) -> None:
         self.set_responses({
@@ -260,6 +294,9 @@ class ThaiFundWorkerParityTest(unittest.TestCase):
         self.assertIn("project_info", tools)
         self.assertIn("project_info", catalog["groups"]["thai_funds"]["description"])
         self.assertIn("NAV_NOT_FOUND_IN_WINDOW", worker)
+        self.assertIn("EXPLICIT_PROJ_ID_DIRECT_NAV", worker)
+        self.assertIn("NAV_PROJECT_ID_CONFIRMED_CLASS_ALIAS", worker)
+        self.assertIn("identityFromNav", worker)
         self.assertIn('scope: "PROJECT"', worker)
         self.assertIn("rows.reduce", worker)
 

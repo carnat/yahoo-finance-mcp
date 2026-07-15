@@ -34,6 +34,7 @@ interface FundIdentity {
   companyNameEn: string | null;
   projectNameTh: string | null;
   projectNameEn: string | null;
+  requestedFundClassName?: string | null;
 }
 
 interface Resolution {
@@ -181,6 +182,24 @@ function identityFromProfile(row: RecordValue): FundIdentity {
   };
 }
 
+function identityFromNav(
+  row: RecordValue,
+  projId: string,
+  requestedFundClassName: string,
+): FundIdentity {
+  const sourceFundClassName = optionalString(row.fund_class_name) ?? requestedFundClassName;
+  return {
+    fundClassName: sourceFundClassName,
+    projId,
+    uniqueId: optionalString(row.unique_id),
+    companyNameTh: null,
+    companyNameEn: null,
+    projectNameTh: null,
+    projectNameEn: null,
+    ...(sourceFundClassName !== requestedFundClassName ? { requestedFundClassName } : {}),
+  };
+}
+
 function resolveProfilePayload(
   payload: SecResponse,
   fundClassName: string,
@@ -278,37 +297,15 @@ function freshness(dataDate: string | null, asOfDate: string): RecordValue {
   return { asOfDate, dataDate, calendarDaysFromAsOf: days, timezone: TIMEZONE };
 }
 
-export async function getThaiFundNav(
-  fundClassNameRaw: unknown,
-  projIdRaw: unknown,
-  asOfDateRaw: unknown,
-  lookbackDaysRaw: unknown,
-  projectInfoRaw: unknown,
-): Promise<string> {
-  const tool = "get_thai_fund_nav";
-  const resolved = await resolveOrResponse(tool, fundClassNameRaw, projIdRaw, projectInfoRaw);
-  if (resolved.response) return resolved.response;
-  const identity = resolved.identity!;
-  const asOfDate = asOfDateRaw == null || String(asOfDateRaw).trim() === "" ? bangkokToday() : String(asOfDateRaw).trim();
-  if (!isIsoDate(asOfDate)) return inputError(tool, "as_of_date must be YYYY-MM-DD.");
-  const lookbackDays = lookbackDaysRaw == null ? DEFAULT_NAV_LOOKBACK_DAYS : Number(lookbackDaysRaw);
-  if (!Number.isInteger(lookbackDays) || lookbackDays < 1 || lookbackDays > MAX_NAV_LOOKBACK_DAYS) {
-    return inputError(tool, "lookback_days must be an integer from 1 through 90.");
-  }
-  const startDate = addDays(asOfDate, -(lookbackDays - 1));
-  let response: SecResponse;
-  try {
-    response = await secGet("/daily-info/nav", {
-      proj_id: identity.projId,
-      fund_class_name: identity.fundClassName,
-      start_nav_date: startDate,
-      end_nav_date: asOfDate,
-      page_size: MAX_PAGE_SIZE,
-    });
-  } catch (error) {
-    return errorResult(tool, error as ProviderError);
-  }
-  const rows = response.items.filter((row) => isIsoDate(row.nav_date));
+function navPayload(
+  identity: FundIdentity,
+  rows: RecordValue[],
+  nextCursor: string | null,
+  startDate: string,
+  asOfDate: string,
+  lookbackDays: number,
+  identityResolution?: RecordValue,
+): RecordValue {
   const latest = rows.length ? rows.reduce((best, row) => String(row.nav_date) > String(best.nav_date) ? row : best) : null;
   const dataDate = latest ? optionalString(latest.nav_date) : null;
   const payload = basePayload(latest ? "OK" : "NAV_NOT_FOUND_IN_WINDOW");
@@ -323,14 +320,122 @@ export async function getThaiFundNav(
       sellPrice: latest.sell_price, buyPrice: latest.buy_price, sellSwapPrice: latest.sell_swap_price,
       buySwapPrice: latest.buy_swap_price, lastUpdatedAt: latest.last_upd_date,
     } : null,
-    nextCursor: optionalString(response.next_cursor),
-    hasMore: Boolean(response.next_cursor),
+    nextCursor,
+    hasMore: Boolean(nextCursor),
     recovery: recovery(
       latest ? "NONE" : "EXPAND_WINDOW_UP_TO_90_DAYS",
       latest ? "Latest returned NAV selected by nav_date, not provider row order." : "No NAV was returned inside this requested window; try a later as_of_date or a wider window.",
     ),
+    ...(identityResolution ? { identityResolution } : {}),
   });
-  return mcpSuccess(tool, JSON.stringify(payload), { source: SOURCE, dataDate });
+  return payload;
+}
+
+function navClassAmbiguityResponse(
+  requestedFundClassName: string,
+  projId: string,
+  classes: string[],
+  nextCursor: string | null,
+): string {
+  const payload = basePayload("AMBIGUOUS_SHARE_CLASS");
+  Object.assign(payload, {
+    scope: "PROJECT",
+    requestedIdentity: { fundClassName: requestedFundClassName, projId },
+    candidates: classes.map((fundClassName) => ({ fundClassName, projId })),
+    nextCursor,
+    hasMore: Boolean(nextCursor),
+    recovery: recovery(
+      "PROVIDE_SEC_FUND_CLASS_NAME",
+      "The explicit proj_id returned multiple SEC fund classes; retry with one returned SEC fund_class_name.",
+    ),
+  });
+  return mcpSuccess("get_thai_fund_nav", JSON.stringify(payload), { source: SOURCE });
+}
+
+export async function getThaiFundNav(
+  fundClassNameRaw: unknown,
+  projIdRaw: unknown,
+  asOfDateRaw: unknown,
+  lookbackDaysRaw: unknown,
+  projectInfoRaw: unknown,
+): Promise<string> {
+  const tool = "get_thai_fund_nav";
+  const requestedFundClassName = optionalString(fundClassNameRaw);
+  if (!requestedFundClassName) return inputError(tool, "fund_class_name is required.");
+  const explicitProjId = optionalString(projIdRaw);
+  const asOfDate = asOfDateRaw == null || String(asOfDateRaw).trim() === "" ? bangkokToday() : String(asOfDateRaw).trim();
+  if (!isIsoDate(asOfDate)) return inputError(tool, "as_of_date must be YYYY-MM-DD.");
+  const lookbackDays = lookbackDaysRaw == null ? DEFAULT_NAV_LOOKBACK_DAYS : Number(lookbackDaysRaw);
+  if (!Number.isInteger(lookbackDays) || lookbackDays < 1 || lookbackDays > MAX_NAV_LOOKBACK_DAYS) {
+    return inputError(tool, "lookback_days must be an integer from 1 through 90.");
+  }
+  const startDate = addDays(asOfDate, -(lookbackDays - 1));
+
+  if (explicitProjId) {
+    let response: SecResponse;
+    try {
+      response = await secGet("/daily-info/nav", {
+        proj_id: explicitProjId,
+        start_nav_date: startDate,
+        end_nav_date: asOfDate,
+        page_size: MAX_PAGE_SIZE,
+      });
+    } catch (error) {
+      return errorResult(tool, error as ProviderError);
+    }
+    const rows = response.items.filter((row) => isIsoDate(row.nav_date));
+    const sourceClasses = [...new Set(rows.map((row) => optionalString(row.fund_class_name)).filter((value): value is string => Boolean(value)))].sort();
+    const exactRows = rows.filter((row) => String(row.fund_class_name ?? "") === requestedFundClassName);
+    let selectedRows: RecordValue[];
+    let identityStatus: string;
+    if (exactRows.length) {
+      selectedRows = exactRows;
+      identityStatus = "NAV_PROJECT_ID_AND_SEC_CLASS_CONFIRMED";
+    } else if (sourceClasses.length === 1 && !response.next_cursor) {
+      selectedRows = rows;
+      identityStatus = "NAV_PROJECT_ID_CONFIRMED_CLASS_ALIAS";
+    } else if (rows.length) {
+      return navClassAmbiguityResponse(requestedFundClassName, explicitProjId, sourceClasses, optionalString(response.next_cursor));
+    } else {
+      selectedRows = [];
+      identityStatus = "NAV_PROJECT_ID_UNVERIFIED_NO_ROWS";
+    }
+    const identity = identityFromNav(selectedRows[0] ?? {}, explicitProjId, requestedFundClassName);
+    const payload = navPayload(
+      identity,
+      selectedRows,
+      optionalString(response.next_cursor),
+      startDate,
+      asOfDate,
+      lookbackDays,
+      {
+        status: identityStatus,
+        method: "EXPLICIT_PROJ_ID_DIRECT_NAV",
+        requestedFundClassName,
+        sourceFundClassName: selectedRows.length ? identity.fundClassName : null,
+      },
+    );
+    return mcpSuccess(tool, JSON.stringify(payload), { source: SOURCE, dataDate: payload.dataDate as string | null });
+  }
+
+  const resolved = await resolveOrResponse(tool, requestedFundClassName, null, projectInfoRaw);
+  if (resolved.response) return resolved.response;
+  const identity = resolved.identity!;
+  let response: SecResponse;
+  try {
+    response = await secGet("/daily-info/nav", {
+      proj_id: identity.projId,
+      fund_class_name: identity.fundClassName,
+      start_nav_date: startDate,
+      end_nav_date: asOfDate,
+      page_size: MAX_PAGE_SIZE,
+    });
+  } catch (error) {
+    return errorResult(tool, error as ProviderError);
+  }
+  const rows = response.items.filter((row) => isIsoDate(row.nav_date));
+  const payload = navPayload(identity, rows, optionalString(response.next_cursor), startDate, asOfDate, lookbackDays);
+  return mcpSuccess(tool, JSON.stringify(payload), { source: SOURCE, dataDate: payload.dataDate as string | null });
 }
 
 function factsheetSectionError(section: string, error: ProviderError): RecordValue {

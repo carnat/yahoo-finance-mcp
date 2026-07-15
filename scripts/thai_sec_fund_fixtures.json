@@ -25,6 +25,24 @@
       {"proj_id": "M0232_2564", "fund_class_name": "SCBSEMI(E)", "nav_date": "2026-07-09", "last_val": 41.20, "net_asset": 120.5}
     ]
   },
+  "nav_main_project": {
+    "message": "success",
+    "page_size": 100,
+    "next_cursor": "",
+    "items": [
+      {"proj_id": "M0370_2564", "unique_id": "C0000000709", "fund_class_name": "main", "nav_date": "2026-07-09", "last_val": 10.5592, "net_asset": 53315871.13},
+      {"proj_id": "M0370_2564", "unique_id": "C0000000709", "fund_class_name": "main", "nav_date": "2026-07-10", "last_val": 10.6043, "net_asset": 53891243.35}
+    ]
+  },
+  "nav_multiple_classes": {
+    "message": "success",
+    "page_size": 100,
+    "next_cursor": "",
+    "items": [
+      {"proj_id": "M0999_2564", "fund_class_name": "CLASS-A", "nav_date": "2026-07-10", "last_val": 1.0},
+      {"proj_id": "M0999_2564", "fund_class_name": "CLASS-B", "nav_date": "2026-07-10", "last_val": 2.0}
+    ]
+  },
   "statistics": {
     "message": "success",
     "page_size": 1,

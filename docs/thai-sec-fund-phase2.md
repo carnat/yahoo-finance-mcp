@@ -18,11 +18,14 @@ share-class scoped, fetch a factsheet PDF, or crawl AMC websites.
 - API filters and pagination are **query-string parameters**. A GET body is not
   part of this provider contract.
 - `/general-info/profiles` resolves exact `fund_class_name`; `project_info`
-  narrows an explicitly supplied `proj_id`. Ambiguous classes require the
-  caller to supply a project ID.
+  narrows that profile search. Ambiguous profile matches require the caller to
+  supply a project ID.
 - `/daily-info/nav` accepts `proj_id`, `fund_class_name`,
-  `start_nav_date`, and `end_nav_date`; the v1 result selects the maximum
-  returned `nav_date` rather than trusting row order.
+  `start_nav_date`, and `end_nav_date`. An explicit NAV `proj_id` is queried
+  directly without requiring profile lookup: one returned SEC class (including
+  `main`) is accepted as a source-class alias, while multiple classes remain
+  an explicit ambiguity. The v1 result selects the maximum returned `nav_date`
+  rather than trusting row order.
 - Factsheet records with `latest=true` still retain their own historical
   period/as-of date. They are dated evidence, not live holdings.
 - `/factsheet/top5-holdings` and `/daily-info/dividend-history` are project
@@ -30,6 +33,17 @@ share-class scoped, fetch a factsheet PDF, or crawl AMC websites.
   the endpoint share-class scoped.
 - URL records are returned only as official references. PDF fetching/parsing is
   intentionally out of scope.
+
+## Next PR Backlog - Fund and Project Discovery
+
+Add one bounded `search_thai_funds` workflow backed only by
+`/general-info/profiles`. It should accept documented `project_info`,
+`company_info`, and `fund_class_name` filters, use bounded cursor pagination,
+and default its active set to `Registered` and `IPO`. Each compact candidate
+must retain `projId`, SEC `fundClassName`, project names/abbreviation, AMC,
+status, and last-update date. It may help map a public distributor/SETTrade
+code to a project ID, but it must never automatically select a share class or
+silently promote a search candidate into NAV, factsheet, or dividend evidence.
 
 ## Deferred Endpoint Inventory
 
