@@ -102,17 +102,19 @@ Main public tool areas:
 - SEC structured extractors for revenue, segment, geography, risk, and exposure queries;
 - company news, press releases, SEC events, event timelines, and event verification;
 - earnings release indexing, metrics, guidance, commentary, actual-vs-estimate, and transcripts;
-- Thailand SEC Open Data fund NAV, dated factsheet evidence, and project-scoped dividend history;
+- Thailand SEC Open Data fund discovery, direct-project NAV refresh, dated factsheet evidence, and project-scoped dividend history;
 - ticker search, stock screens, diagnostics, and manifest health.
 
-Thai SEC fund tools resolve an exact SEC `fund_class_name`; use `project_info`
-to narrow the documented profile query by official project name or abbreviation.
+Use `search_thai_funds` to map an official project name, abbreviation, AMC, or
+known SEC share-class code to compact active-profile candidates. It never
+selects one automatically. Thai SEC fund data calls resolve an exact SEC
+`fund_class_name`; use `project_info` to narrow the documented profile query.
 For NAV, an explicit `proj_id` calls the official NAV endpoint directly: the
 returned SEC class is source truth and can be `main` rather than a public
-distributor code. If that project returns multiple classes, no class is
-inferred. Profile lookup first covers `Registered` funds, then retries `IPO`
-only when no registered exact match is returned. This is discovery only: the
-returned NAV, factsheet, and dividend data retain their own dates and scopes.
+distributor code. `get_thai_fund_nav_batch` refreshes up to 20 explicit
+project identities sequentially; it does not calculate portfolio value or
+wrapper/tax eligibility. Returned NAV, factsheet, and dividend data retain
+their own dates and scopes.
 
 Use `tools/list` or `get_manifest_diagnostics` for the exact current tool names,
 schemas, aliases, and deprecation metadata.
@@ -154,12 +156,12 @@ schemas, aliases, and deprecation metadata.
 - Provider rate limits, market data availability, filing formats, and SEC EDGAR
   availability can affect individual calls.
 - Thai fund tools require `SEC_OPEN_DATA_API_KEY`. They never infer a share
-  class: an explicit NAV `proj_id` may return a one-class source alias such as
-  `main`, while multiple returned classes remain an explicit ambiguity. Check
-  `status`, `scope`, `dataDate`/section `asOfDate`, and `recovery` before using
-  results: NAV is share-class scoped, factsheet holdings and dividends are
-  project scoped, and factsheet URLs are references only (no PDF
-  fetching/parsing).
+  class: profile search returns candidates only, while an explicit NAV
+  `proj_id` may return a one-class source alias such as `main`; multiple
+  returned classes remain an explicit ambiguity. Check `status`, `scope`,
+  `dataDate`/section `asOfDate`, and `recovery` before using results: NAV is
+  share-class scoped, factsheet holdings and dividends are project scoped, and
+  factsheet URLs are references only (no PDF fetching/parsing).
 
 ## Data Sources
 

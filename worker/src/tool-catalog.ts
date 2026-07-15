@@ -143,11 +143,13 @@ export const GROUPED_TOOL_DEFS: GroupedToolDef[] = [
   },
   {
     "name": "thai_funds",
-    "description": "Official Thailand SEC Open Data mutual-fund workflows. Resolve fund_class_name exactly through the SEC profile catalogue, or use project_info to narrow that search. For NAV, an explicit proj_id calls the NAV endpoint directly; the returned SEC class is source truth and may be main rather than a public distributor code. Multiple returned classes are never inferred. All evidence is OFFICIAL_REGULATORY_DATA but remains decisionGrade:false.\n\nActions:\n- get_thai_fund_nav: Latest NAV in a 45-day Bangkok-time window (cap 90). Params: fund_class_name, proj_id, project_info, as_of_date, lookback_days\n- get_thai_fund_factsheet: Dated statistics, project-scoped top holdings, and official URL references. Params: fund_class_name, proj_id, project_info, sections\n- get_thai_fund_dividend_history: One project-scoped dividend page; retain classAbbrName and follow nextCursor. Params: fund_class_name, proj_id, project_info, max_results, next_cursor",
+    "description": "Official Thailand SEC Open Data mutual-fund workflows. Search candidates first when a public distributor code lacks a stable project ID; no search candidate is selected automatically. For NAV, an explicit proj_id calls the NAV endpoint directly; the returned SEC class is source truth and may be main rather than a public distributor code. Multiple returned classes are never inferred. All evidence is OFFICIAL_REGULATORY_DATA but remains decisionGrade:false.\n\nActions:\n- search_thai_funds: Bounded active-profile discovery across Registered and IPO. Params: project_info, company_info, fund_class_name, page_size, next_cursors\n- get_thai_fund_nav: Latest NAV in a 45-day Bangkok-time window (cap 90). Params: fund_class_name, proj_id, project_info, as_of_date, lookback_days\n- get_thai_fund_nav_batch: Sequential direct-project NAV refresh for up to 20 caller-owned identities. Params: funds, as_of_date, lookback_days\n- get_thai_fund_factsheet: Dated statistics, project-scoped top holdings, and official URL references. Params: fund_class_name, proj_id, project_info, sections\n- get_thai_fund_dividend_history: One project-scoped dividend page; retain classAbbrName and follow nextCursor. Params: fund_class_name, proj_id, project_info, max_results, next_cursor",
     "actions": {
+      "search_thai_funds": "search_thai_funds",
       "get_thai_fund_dividend_history": "get_thai_fund_dividend_history",
       "get_thai_fund_factsheet": "get_thai_fund_factsheet",
-      "get_thai_fund_nav": "get_thai_fund_nav"
+      "get_thai_fund_nav": "get_thai_fund_nav",
+      "get_thai_fund_nav_batch": "get_thai_fund_nav_batch"
     }
   }
 ];

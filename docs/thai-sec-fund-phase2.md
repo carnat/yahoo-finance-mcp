@@ -1,8 +1,10 @@
 # Thai SEC Fund API — Phase 2 Roadmap
 
-Thai SEC Fund MCP v1 intentionally exposes only three bounded workflows:
+Thai SEC Fund MCP intentionally exposes only bounded workflows:
 
+- `search_thai_funds` — active-profile discovery that returns candidates without selecting one.
 - `get_thai_fund_nav` — exact share-class NAV in a caller-bounded Bangkok-time window.
+- `get_thai_fund_nav_batch` — sequential direct-project NAV refresh for a caller-owned list.
 - `get_thai_fund_factsheet` — dated statistics, project-scoped top-five holdings, and official URL references.
 - `get_thai_fund_dividend_history` — one project-scoped payout page with explicit pagination.
 
@@ -34,16 +36,17 @@ share-class scoped, fetch a factsheet PDF, or crawl AMC websites.
 - URL records are returned only as official references. PDF fetching/parsing is
   intentionally out of scope.
 
-## Next PR Backlog - Fund and Project Discovery
+## Verified Discovery and Batch Notes
 
-Add one bounded `search_thai_funds` workflow backed only by
-`/general-info/profiles`. It should accept documented `project_info`,
-`company_info`, and `fund_class_name` filters, use bounded cursor pagination,
-and default its active set to `Registered` and `IPO`. Each compact candidate
-must retain `projId`, SEC `fundClassName`, project names/abbreviation, AMC,
-status, and last-update date. It may help map a public distributor/SETTrade
-code to a project ID, but it must never automatically select a share class or
-silently promote a search candidate into NAV, factsheet, or dividend evidence.
+- `/general-info/profiles` powers bounded `search_thai_funds` with documented
+  `project_info`, `company_info`, and `fund_class_name` filters. It returns
+  Registered and IPO results separately, with a cursor per status. A search
+  candidate never becomes evidence until a caller explicitly supplies its
+  `projId` and intended class to a later tool.
+- `get_thai_fund_nav_batch` accepts up to 20 explicit `fund_class_name` /
+  `proj_id` pairs and makes sequential direct NAV calls. It neither profile-
+  searches nor derives portfolio value, wrapper eligibility, tax treatment,
+  units, cost, or P&L.
 
 ## Deferred Endpoint Inventory
 
@@ -51,7 +54,7 @@ silently promote a search candidate into NAV, factsheet, or dividend evidence.
 | --- | --- | --- |
 | `/factsheet/performance`, `/factsheet/benchmarks`, `/factsheet/risk-spectrum`, `/factsheet/asset-allocation` | Performance, benchmark comparison, risk, allocation | Period, benchmark, and freshness semantics need live fixtures before an LLM-facing contract is safe. |
 | `/factsheet/dividend-policy`, `/factsheet/fees` | Product comparison | Policy/fee disclosure is distinct from actual dividend history. |
-| `/general-info/specifications`, `/general-info/subscription-redemption-minimums`, `/general-info/subscription-redemption-periods`, `/general-info/ipos`, `/general-info/involve-parties` | Product discovery and transaction terms | Terms must be modeled independently from market-data/NAV evidence. |
+| `/general-info/specifications`, `/general-info/mutual-fund-fees`, `/factsheet/subscription-redemption-minimums`, `/factsheet/subscription-redemption-periods`, `/factsheet/ipos`, `/general-info/involve-parties` | Product discovery and transaction terms | Terms must be modeled independently from market-data/NAV evidence. |
 | `/outstanding/portfolio`, `/outstanding/portfolio-asset-type` | Broader portfolio exposure | Pagination, reporting date, and stale-record handling require validation first. |
 
 ## Promotion Criteria

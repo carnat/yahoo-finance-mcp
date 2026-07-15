@@ -73,6 +73,17 @@ _NEWS_EVENT_OUTPUT_SCHEMA: dict = {
 }
 
 _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
+    "search_thai_funds": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string"}, "scope": {"const": "PROFILE_CATALOG"},
+            "candidates": {"type": "array"}, "candidateCount": {"type": "integer"},
+            "resultsByFundStatus": {"type": "object"}, "nextCursors": {"type": "object"},
+            "hasMore": {"type": "boolean"}, "evidenceClass": {"type": "string"},
+            "decisionGrade": {"const": False},
+        },
+        "additionalProperties": True,
+    },
     "get_thai_fund_nav": {
         "type": "object",
         "properties": {
@@ -81,6 +92,17 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
             "freshness": {"type": "object"}, "nav": {"type": ["object", "null"]},
             "nextCursor": {"type": ["string", "null"]}, "hasMore": {"type": "boolean"},
             "evidenceClass": {"type": "string"}, "decisionGrade": {"type": "boolean"},
+        },
+        "additionalProperties": True,
+    },
+    "get_thai_fund_nav_batch": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string"}, "scope": {"const": "VAULT_BATCH"},
+            "requestedWindow": {"type": "object"}, "items": {"type": "array"},
+            "itemCount": {"type": "integer"}, "incompleteReferences": {"type": "array"},
+            "dataDate": {"type": ["string", "null"]}, "evidenceClass": {"type": "string"},
+            "decisionGrade": {"const": False},
         },
         "additionalProperties": True,
     },

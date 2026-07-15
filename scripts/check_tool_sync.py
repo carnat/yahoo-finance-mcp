@@ -17,7 +17,9 @@ TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
 TOOL_CATALOG = ROOT / "tool_catalog.json"
 
 EXPECTED_CANONICAL = {
+    "search_thai_funds",
     "get_thai_fund_nav",
+    "get_thai_fund_nav_batch",
     "get_thai_fund_factsheet",
     "get_thai_fund_dividend_history",
     "get_market_quote",

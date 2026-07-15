@@ -122,6 +122,55 @@ class ThaiFundFixtureTest(unittest.TestCase):
         self.assertTrue(all(params["project_info"] == "SCB Semiconductor" for params in profile_calls))
         self.assertTrue(all(params["next_cursor"] == "" for params in profile_calls))
 
+    def test_search_returns_active_profile_candidates_without_selection(self) -> None:
+        calls: list[tuple[str, dict[str, object]]] = []
+        registered = copy.deepcopy(FIXTURES["profile"])
+        registered["items"][0].update({
+            "proj_abbr_name": "SCBSEMI", "fund_status": "Registered", "last_upd_date": "2026-07-11T10:00:00",
+        })
+        ipo = {"message": "success", "page_size": 10, "next_cursor": "", "items": []}
+
+        async def fake_request(path: str, params: dict[str, object]) -> dict:
+            calls.append((path, params))
+            return copy.deepcopy(registered if params["fund_status"] == "Registered" else ipo)
+
+        thai._request_json = fake_request
+        response = decode(asyncio.run(thai.search_thai_funds(project_info="SCBSEMI", page_size=10)))
+        self.assertTrue(response["ok"])
+        data = response["data"]
+        self.assertEqual(data["status"], "OK")
+        self.assertEqual(data["scope"], "PROFILE_CATALOG")
+        self.assertEqual(data["candidateCount"], 1)
+        self.assertEqual(data["candidates"][0]["projId"], "M0232_2564")
+        self.assertEqual(data["candidates"][0]["projectAbbreviation"], "SCBSEMI")
+        self.assertEqual(data["recovery"]["action"], "USE_CANDIDATE_PROJ_ID")
+        self.assertEqual([params["fund_status"] for _path, params in calls], ["Registered", "IPO"])
+        self.assertTrue(all(params["project_info"] == "SCBSEMI" for _path, params in calls))
+        self.assertTrue(all(params["page_size"] == 10 for _path, params in calls))
+
+    def test_search_preserves_per_status_cursors_and_rejects_broad_requests(self) -> None:
+        registered = copy.deepcopy(FIXTURES["profile"])
+        registered["next_cursor"] = "registered-page-2"
+        ipo = {"message": "success", "page_size": 10, "next_cursor": "", "items": []}
+        calls: list[dict[str, object]] = []
+
+        async def fake_request(path: str, params: dict[str, object]) -> dict:
+            self.assertEqual(path, "/general-info/profiles")
+            calls.append(params)
+            return copy.deepcopy(registered if params["fund_status"] == "Registered" else ipo)
+
+        thai._request_json = fake_request
+        response = decode(asyncio.run(thai.search_thai_funds(company_info="SCB", next_cursors={"Registered": "cursor-1", "IPO": None})))
+        data = response["data"]
+        self.assertEqual(data["nextCursors"], {"Registered": "registered-page-2", "IPO": None})
+        self.assertTrue(data["hasMore"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["next_cursor"], "cursor-1")
+
+        invalid = decode(asyncio.run(thai.search_thai_funds()))
+        self.assertFalse(invalid["ok"])
+        self.assertEqual(invalid["error"]["code"], "INPUT_VALIDATION_ERROR")
+
     def test_ambiguous_and_mismatched_share_classes_are_not_selected(self) -> None:
         ambiguous = copy.deepcopy(FIXTURES["profile"])
         ambiguous["items"].append({**ambiguous["items"][0], "proj_id": "M0999_2564"})
@@ -145,6 +194,37 @@ class ThaiFundFixtureTest(unittest.TestCase):
         self.assertEqual(data["nav"], None)
         self.assertEqual(data["recovery"]["action"], "EXPAND_WINDOW_UP_TO_90_DAYS")
         self.assertEqual(data["identityResolution"]["status"], "NAV_PROJECT_ID_UNVERIFIED_NO_ROWS")
+
+    def test_nav_batch_is_sequential_direct_project_only_and_retains_partial_results(self) -> None:
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        async def fake_request(path: str, params: dict[str, object]) -> dict:
+            calls.append((path, params))
+            self.assertEqual(path, "/daily-info/nav")
+            if params["proj_id"] == "M0370_2564":
+                return copy.deepcopy(FIXTURES["nav_main_project"])
+            raise thai.SecThailandProviderError("RATE_LIMIT", "limited", "RETRY_LATER")
+
+        thai._request_json = fake_request
+        response = decode(asyncio.run(thai.get_thai_fund_nav_batch(
+            [
+                {"reference": "infra", "fund_class_name": "KFINFRASSF", "proj_id": "M0370_2564"},
+                {"reference": "semi", "fund_class_name": "SCBSEMI(E)", "proj_id": "M0232_2564"},
+            ],
+            as_of_date="2026-07-10",
+            lookback_days=5,
+        )))
+        self.assertTrue(response["ok"])
+        data = response["data"]
+        self.assertEqual(data["status"], "PARTIAL")
+        self.assertEqual(data["scope"], "VAULT_BATCH")
+        self.assertEqual(data["items"][0]["reference"], "infra")
+        self.assertEqual(data["items"][0]["identity"]["fundClassName"], "main")
+        self.assertEqual(data["items"][1]["status"], "RATE_LIMIT")
+        self.assertEqual(data["incompleteReferences"], ["semi"])
+        self.assertEqual(data["recovery"]["action"], "RETRY_INCOMPLETE_FUNDS")
+        self.assertEqual([path for path, _params in calls], ["/daily-info/nav", "/daily-info/nav"])
+        self.assertTrue(all("fund_class_name" not in params for _path, params in calls))
 
     def test_factsheet_preserves_success_when_one_section_fails(self) -> None:
         self.set_responses({
@@ -288,7 +368,9 @@ class ThaiFundWorkerParityTest(unittest.TestCase):
             'fund_status: "IPO"', "projectInfoRaw", "bodySha256",
         ):
             self.assertIn(token, worker)
-        for action in ("get_thai_fund_nav", "get_thai_fund_factsheet", "get_thai_fund_dividend_history"):
+        for endpoint in ("/general-info/profiles", "/daily-info/nav"):
+            self.assertIn(endpoint, worker)
+        for action in ("search_thai_funds", "get_thai_fund_nav", "get_thai_fund_nav_batch", "get_thai_fund_factsheet", "get_thai_fund_dividend_history"):
             self.assertIn(action, tools)
             self.assertIn(action, catalog["groups"]["thai_funds"]["actions"])
         self.assertIn("project_info", tools)
@@ -297,6 +379,10 @@ class ThaiFundWorkerParityTest(unittest.TestCase):
         self.assertIn("EXPLICIT_PROJ_ID_DIRECT_NAV", worker)
         self.assertIn("NAV_PROJECT_ID_CONFIRMED_CLASS_ALIAS", worker)
         self.assertIn("identityFromNav", worker)
+        self.assertIn("searchThaiFunds", worker)
+        self.assertIn("getThaiFundNavBatch", worker)
+        self.assertIn("ACTIVE_FUND_STATUSES", worker)
+        self.assertIn("MAX_NAV_BATCH_FUNDS", worker)
         self.assertIn('scope: "PROJECT"', worker)
         self.assertIn("rows.reduce", worker)
 

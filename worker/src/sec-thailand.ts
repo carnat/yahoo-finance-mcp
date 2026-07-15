@@ -10,6 +10,10 @@ const TIMEOUT_MS = 12_000;
 const MAX_PAGE_SIZE = 100;
 const DEFAULT_NAV_LOOKBACK_DAYS = 45;
 const MAX_NAV_LOOKBACK_DAYS = 90;
+const DEFAULT_SEARCH_PAGE_SIZE = 10;
+const MAX_SEARCH_PAGE_SIZE = 20;
+const MAX_NAV_BATCH_FUNDS = 20;
+const ACTIVE_FUND_STATUSES = ["Registered", "IPO"] as const;
 const FACTSHEET_SECTIONS = new Set(["statistics", "top_holdings", "urls"]);
 
 type RecordValue = Record<string, unknown>;
@@ -56,6 +60,42 @@ function basePayload(status: string): RecordValue {
 
 function recovery(action: string, detail: string): RecordValue {
   return { action, detail };
+}
+
+function searchCandidate(row: RecordValue): RecordValue {
+  return {
+    projId: optionalString(row.proj_id),
+    fundClassName: optionalString(row.fund_class_name),
+    projectNameTh: optionalString(row.proj_name_th),
+    projectNameEn: optionalString(row.proj_name_en),
+    projectAbbreviation: optionalString(row.proj_abbr_name),
+    companyNameTh: optionalString(row.comp_name_th),
+    companyNameEn: optionalString(row.comp_name_en),
+    uniqueId: optionalString(row.unique_id),
+    fundStatus: optionalString(row.fund_status),
+    lastUpdatedAt: optionalString(row.last_upd_date),
+  };
+}
+
+function normalizeSearchCursors(value: unknown): Record<string, string | null> | null {
+  if (value == null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("next_cursors must be an object returned by a prior search_thai_funds response.");
+  }
+  const cursors: Record<string, string | null> = {};
+  for (const [status, cursor] of Object.entries(value as Record<string, unknown>)) {
+    if (!(ACTIVE_FUND_STATUSES as readonly string[]).includes(status)) {
+      throw new Error("next_cursors may contain only Registered and IPO keys.");
+    }
+    if (cursor != null && typeof cursor !== "string") {
+      throw new Error("next_cursors values must be strings or null.");
+    }
+    cursors[status] = optionalString(cursor);
+  }
+  if (Object.keys(cursors).length && Object.values(cursors).every((cursor) => cursor == null)) {
+    throw new Error("next_cursors has no remaining page; start a new search without it.");
+  }
+  return cursors;
 }
 
 function providerError(code: string, message: string, recoveryAction: string, diagnostics?: RecordValue): ProviderError {
@@ -290,6 +330,86 @@ async function resolveOrResponse(
   }
 }
 
+export async function searchThaiFunds(
+  projectInfoRaw: unknown,
+  companyInfoRaw: unknown,
+  fundClassNameRaw: unknown,
+  pageSizeRaw: unknown,
+  nextCursorsRaw: unknown,
+): Promise<string> {
+  const tool = "search_thai_funds";
+  const projectInfo = optionalString(projectInfoRaw);
+  const companyInfo = optionalString(companyInfoRaw);
+  const fundClassName = optionalString(fundClassNameRaw);
+  if (!projectInfo && !companyInfo && !fundClassName) {
+    return inputError(tool, "Provide at least one of project_info, company_info, or fund_class_name.");
+  }
+  const pageSize = pageSizeRaw == null ? DEFAULT_SEARCH_PAGE_SIZE : Number(pageSizeRaw);
+  if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_SEARCH_PAGE_SIZE) {
+    return inputError(tool, "page_size must be an integer from 1 through 20 per active fund status.");
+  }
+  let cursors: Record<string, string | null> | null;
+  try {
+    cursors = normalizeSearchCursors(nextCursorsRaw);
+  } catch (error) {
+    return inputError(tool, (error as Error).message);
+  }
+
+  const resultsByFundStatus: Record<string, RecordValue> = {};
+  try {
+    for (const fundStatus of ACTIVE_FUND_STATUSES) {
+      if (cursors && Object.prototype.hasOwnProperty.call(cursors, fundStatus) && cursors[fundStatus] == null) continue;
+      const response = await secGet("/general-info/profiles", {
+        project_info: projectInfo,
+        company_info: companyInfo,
+        fund_class_name: fundClassName,
+        fund_status: fundStatus,
+        next_cursor: cursors == null ? "" : cursors[fundStatus] ?? "",
+        page_size: pageSize,
+      });
+      const nextCursor = optionalString(response.next_cursor);
+      resultsByFundStatus[fundStatus] = {
+        candidates: response.items.map(searchCandidate),
+        nextCursor,
+        hasMore: Boolean(nextCursor),
+      };
+    }
+  } catch (error) {
+    return errorResult(tool, error as ProviderError);
+  }
+  const candidates = Object.values(resultsByFundStatus)
+    .flatMap((result) => result.candidates as RecordValue[]);
+  const nextCursors = Object.fromEntries(
+    ACTIVE_FUND_STATUSES.map((status) => [
+      status,
+      (resultsByFundStatus[status]?.nextCursor as string | null | undefined) ?? null,
+    ]),
+  );
+  const payload = basePayload(candidates.length ? "OK" : "FUND_NOT_FOUND");
+  Object.assign(payload, {
+    scope: "PROFILE_CATALOG",
+    requestedFilters: {
+      projectInfo,
+      companyInfo,
+      fundClassName,
+      fundStatuses: Object.keys(resultsByFundStatus),
+      pageSizePerStatus: pageSize,
+    },
+    candidates,
+    candidateCount: candidates.length,
+    resultsByFundStatus,
+    nextCursors,
+    hasMore: Object.values(nextCursors).some((cursor) => cursor != null),
+    recovery: recovery(
+      candidates.length ? "USE_CANDIDATE_PROJ_ID" : "CHECK_PROJECT_OR_COMPANY_NAME",
+      candidates.length
+        ? "Select an exact candidate explicitly; no candidate has been promoted into fund evidence."
+        : "No active SEC profile candidate matched these filters. Try an official project name, abbreviation, or company name.",
+    ),
+  });
+  return mcpSuccess(tool, JSON.stringify(payload), { source: SOURCE });
+}
+
 function freshness(dataDate: string | null, asOfDate: string): RecordValue {
   const days = dataDate && isIsoDate(dataDate) && isIsoDate(asOfDate)
     ? Math.round((Date.parse(`${asOfDate}T00:00:00Z`) - Date.parse(`${dataDate}T00:00:00Z`)) / 86_400_000)
@@ -331,12 +451,12 @@ function navPayload(
   return payload;
 }
 
-function navClassAmbiguityResponse(
+function navClassAmbiguityPayload(
   requestedFundClassName: string,
   projId: string,
   classes: string[],
   nextCursor: string | null,
-): string {
+): RecordValue {
   const payload = basePayload("AMBIGUOUS_SHARE_CLASS");
   Object.assign(payload, {
     scope: "PROJECT",
@@ -349,7 +469,55 @@ function navClassAmbiguityResponse(
       "The explicit proj_id returned multiple SEC fund classes; retry with one returned SEC fund_class_name.",
     ),
   });
-  return mcpSuccess("get_thai_fund_nav", JSON.stringify(payload), { source: SOURCE });
+  return payload;
+}
+
+async function explicitProjectNavPayload(
+  requestedFundClassName: string,
+  projId: string,
+  startDate: string,
+  asOfDate: string,
+  lookbackDays: number,
+): Promise<RecordValue> {
+  const response = await secGet("/daily-info/nav", {
+    proj_id: projId,
+    start_nav_date: startDate,
+    end_nav_date: asOfDate,
+    page_size: MAX_PAGE_SIZE,
+  });
+  const rows = response.items.filter((row) => isIsoDate(row.nav_date));
+  const nextCursor = optionalString(response.next_cursor);
+  const sourceClasses = [...new Set(rows.map((row) => optionalString(row.fund_class_name)).filter((value): value is string => Boolean(value)))].sort();
+  const exactRows = rows.filter((row) => String(row.fund_class_name ?? "") === requestedFundClassName);
+  let selectedRows: RecordValue[];
+  let identityStatus: string;
+  if (exactRows.length) {
+    selectedRows = exactRows;
+    identityStatus = "NAV_PROJECT_ID_AND_SEC_CLASS_CONFIRMED";
+  } else if (sourceClasses.length === 1 && !nextCursor) {
+    selectedRows = rows;
+    identityStatus = "NAV_PROJECT_ID_CONFIRMED_CLASS_ALIAS";
+  } else if (rows.length) {
+    return navClassAmbiguityPayload(requestedFundClassName, projId, sourceClasses, nextCursor);
+  } else {
+    selectedRows = [];
+    identityStatus = "NAV_PROJECT_ID_UNVERIFIED_NO_ROWS";
+  }
+  const identity = identityFromNav(selectedRows[0] ?? {}, projId, requestedFundClassName);
+  return navPayload(
+    identity,
+    selectedRows,
+    nextCursor,
+    startDate,
+    asOfDate,
+    lookbackDays,
+    {
+      status: identityStatus,
+      method: "EXPLICIT_PROJ_ID_DIRECT_NAV",
+      requestedFundClassName,
+      sourceFundClassName: selectedRows.length ? identity.fundClassName : null,
+    },
+  );
 }
 
 export async function getThaiFundNav(
@@ -372,50 +540,18 @@ export async function getThaiFundNav(
   const startDate = addDays(asOfDate, -(lookbackDays - 1));
 
   if (explicitProjId) {
-    let response: SecResponse;
     try {
-      response = await secGet("/daily-info/nav", {
-        proj_id: explicitProjId,
-        start_nav_date: startDate,
-        end_nav_date: asOfDate,
-        page_size: MAX_PAGE_SIZE,
-      });
+      const payload = await explicitProjectNavPayload(
+        requestedFundClassName,
+        explicitProjId,
+        startDate,
+        asOfDate,
+        lookbackDays,
+      );
+      return mcpSuccess(tool, JSON.stringify(payload), { source: SOURCE, dataDate: payload.dataDate as string | null });
     } catch (error) {
       return errorResult(tool, error as ProviderError);
     }
-    const rows = response.items.filter((row) => isIsoDate(row.nav_date));
-    const sourceClasses = [...new Set(rows.map((row) => optionalString(row.fund_class_name)).filter((value): value is string => Boolean(value)))].sort();
-    const exactRows = rows.filter((row) => String(row.fund_class_name ?? "") === requestedFundClassName);
-    let selectedRows: RecordValue[];
-    let identityStatus: string;
-    if (exactRows.length) {
-      selectedRows = exactRows;
-      identityStatus = "NAV_PROJECT_ID_AND_SEC_CLASS_CONFIRMED";
-    } else if (sourceClasses.length === 1 && !response.next_cursor) {
-      selectedRows = rows;
-      identityStatus = "NAV_PROJECT_ID_CONFIRMED_CLASS_ALIAS";
-    } else if (rows.length) {
-      return navClassAmbiguityResponse(requestedFundClassName, explicitProjId, sourceClasses, optionalString(response.next_cursor));
-    } else {
-      selectedRows = [];
-      identityStatus = "NAV_PROJECT_ID_UNVERIFIED_NO_ROWS";
-    }
-    const identity = identityFromNav(selectedRows[0] ?? {}, explicitProjId, requestedFundClassName);
-    const payload = navPayload(
-      identity,
-      selectedRows,
-      optionalString(response.next_cursor),
-      startDate,
-      asOfDate,
-      lookbackDays,
-      {
-        status: identityStatus,
-        method: "EXPLICIT_PROJ_ID_DIRECT_NAV",
-        requestedFundClassName,
-        sourceFundClassName: selectedRows.length ? identity.fundClassName : null,
-      },
-    );
-    return mcpSuccess(tool, JSON.stringify(payload), { source: SOURCE, dataDate: payload.dataDate as string | null });
   }
 
   const resolved = await resolveOrResponse(tool, requestedFundClassName, null, projectInfoRaw);
@@ -435,6 +571,110 @@ export async function getThaiFundNav(
   }
   const rows = response.items.filter((row) => isIsoDate(row.nav_date));
   const payload = navPayload(identity, rows, optionalString(response.next_cursor), startDate, asOfDate, lookbackDays);
+  return mcpSuccess(tool, JSON.stringify(payload), { source: SOURCE, dataDate: payload.dataDate as string | null });
+}
+
+interface NavBatchFund {
+  reference: string;
+  fundClassName: string;
+  projId: string;
+}
+
+function normalizeNavBatchFunds(value: unknown): NavBatchFund[] {
+  if (!Array.isArray(value) || !value.length) {
+    throw new Error("funds must be a non-empty list of explicit fund_class_name and proj_id pairs.");
+  }
+  if (value.length > MAX_NAV_BATCH_FUNDS) {
+    throw new Error(`funds supports at most ${MAX_NAV_BATCH_FUNDS} entries per request.`);
+  }
+  return value.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error(`funds[${index}] must be an object.`);
+    }
+    const entry = item as Record<string, unknown>;
+    const fundClassName = optionalString(entry.fund_class_name);
+    const projId = optionalString(entry.proj_id);
+    if (!fundClassName || !projId) {
+      throw new Error(`funds[${index}] requires fund_class_name and proj_id.`);
+    }
+    return { reference: optionalString(entry.reference) ?? fundClassName, fundClassName, projId };
+  });
+}
+
+function navBatchItemFailure(
+  fund: NavBatchFund,
+  error: ProviderError,
+  startDate: string,
+  asOfDate: string,
+  lookbackDays: number,
+): RecordValue {
+  const payload = basePayload(error.code);
+  Object.assign(payload, {
+    reference: fund.reference,
+    scope: "SHARE_CLASS",
+    requestedIdentity: { fundClassName: fund.fundClassName, projId: fund.projId },
+    requestedWindow: { startDate, endDate: asOfDate, lookbackCalendarDays: lookbackDays, timezone: TIMEZONE },
+    dataDate: null,
+    freshness: freshness(null, asOfDate),
+    nav: null,
+    recovery: recovery(error.recoveryAction, error.message),
+  });
+  return payload;
+}
+
+export async function getThaiFundNavBatch(
+  fundsRaw: unknown,
+  asOfDateRaw: unknown,
+  lookbackDaysRaw: unknown,
+): Promise<string> {
+  const tool = "get_thai_fund_nav_batch";
+  let funds: NavBatchFund[];
+  try {
+    funds = normalizeNavBatchFunds(fundsRaw);
+  } catch (error) {
+    return inputError(tool, (error as Error).message);
+  }
+  const asOfDate = asOfDateRaw == null || String(asOfDateRaw).trim() === "" ? bangkokToday() : String(asOfDateRaw).trim();
+  if (!isIsoDate(asOfDate)) return inputError(tool, "as_of_date must be YYYY-MM-DD.");
+  const lookbackDays = lookbackDaysRaw == null ? DEFAULT_NAV_LOOKBACK_DAYS : Number(lookbackDaysRaw);
+  if (!Number.isInteger(lookbackDays) || lookbackDays < 1 || lookbackDays > MAX_NAV_LOOKBACK_DAYS) {
+    return inputError(tool, "lookback_days must be an integer from 1 through 90.");
+  }
+  const startDate = addDays(asOfDate, -(lookbackDays - 1));
+  const items: RecordValue[] = [];
+  for (const fund of funds) {
+    let item: RecordValue;
+    try {
+      item = await explicitProjectNavPayload(fund.fundClassName, fund.projId, startDate, asOfDate, lookbackDays);
+    } catch (error) {
+      const provider = error as ProviderError;
+      if (provider.code === "SOURCE_UNCONFIGURED" || provider.code === "AUTH_ERROR") return errorResult(tool, provider);
+      item = navBatchItemFailure(fund, provider, startDate, asOfDate, lookbackDays);
+    }
+    item.reference = fund.reference;
+    items.push(item);
+  }
+  const incompleteReferences = items
+    .filter((item) => item.status !== "OK")
+    .map((item) => item.reference as string);
+  const dataDates = items
+    .map((item) => item.dataDate)
+    .filter((value): value is string => typeof value === "string");
+  const payload = basePayload(incompleteReferences.length ? "PARTIAL" : "OK");
+  Object.assign(payload, {
+    scope: "VAULT_BATCH",
+    requestedWindow: { startDate, endDate: asOfDate, lookbackCalendarDays: lookbackDays, timezone: TIMEZONE },
+    items,
+    itemCount: items.length,
+    incompleteReferences,
+    dataDate: dataDates.length ? [...dataDates].sort()[dataDates.length - 1] : null,
+    recovery: recovery(
+      incompleteReferences.length ? "RETRY_INCOMPLETE_FUNDS" : "NONE",
+      incompleteReferences.length
+        ? "Retry only incompleteReferences after reviewing each item recovery action."
+        : "All requested direct-project NAV lookups completed.",
+    ),
+  });
   return mcpSuccess(tool, JSON.stringify(payload), { source: SOURCE, dataDate: payload.dataDate as string | null });
 }
 
