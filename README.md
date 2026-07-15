@@ -105,12 +105,14 @@ Main public tool areas:
 - Thailand SEC Open Data fund NAV, dated factsheet evidence, and project-scoped dividend history;
 - ticker search, stock screens, diagnostics, and manifest health.
 
-Thai SEC fund tools resolve an exact `fund_class_name`; use `proj_id` to
-disambiguate or `project_info` to narrow the documented SEC profile query by
-the official project name or abbreviation. Profile lookup first covers
-`Registered` funds, then retries `IPO` only when no registered exact match is
-returned. This is discovery only: the returned NAV, factsheet, and dividend
-data retain their own dates and scopes.
+Thai SEC fund tools resolve an exact SEC `fund_class_name`; use `project_info`
+to narrow the documented profile query by official project name or abbreviation.
+For NAV, an explicit `proj_id` calls the official NAV endpoint directly: the
+returned SEC class is source truth and can be `main` rather than a public
+distributor code. If that project returns multiple classes, no class is
+inferred. Profile lookup first covers `Registered` funds, then retries `IPO`
+only when no registered exact match is returned. This is discovery only: the
+returned NAV, factsheet, and dividend data retain their own dates and scopes.
 
 Use `tools/list` or `get_manifest_diagnostics` for the exact current tool names,
 schemas, aliases, and deprecation metadata.
@@ -151,11 +153,13 @@ schemas, aliases, and deprecation metadata.
   `PROVIDER_LIMITATION`, or `NO_DIMENSIONAL_REVENUE_FACT`.
 - Provider rate limits, market data availability, filing formats, and SEC EDGAR
   availability can affect individual calls.
-- Thai fund tools require `SEC_OPEN_DATA_API_KEY`. They resolve
-  `fund_class_name` exactly and never infer a share class. Check `status`,
-  `scope`, `dataDate`/section `asOfDate`, and `recovery` before using results:
-  NAV is share-class scoped, factsheet holdings and dividends are project
-  scoped, and factsheet URLs are references only (no PDF fetching/parsing).
+- Thai fund tools require `SEC_OPEN_DATA_API_KEY`. They never infer a share
+  class: an explicit NAV `proj_id` may return a one-class source alias such as
+  `main`, while multiple returned classes remain an explicit ambiguity. Check
+  `status`, `scope`, `dataDate`/section `asOfDate`, and `recovery` before using
+  results: NAV is share-class scoped, factsheet holdings and dividends are
+  project scoped, and factsheet URLs are references only (no PDF
+  fetching/parsing).
 
 ## Data Sources
 

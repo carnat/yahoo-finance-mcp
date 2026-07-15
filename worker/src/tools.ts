@@ -107,12 +107,12 @@ export const TOOLS: Tool[] = [
   {
     name: "get_thai_fund_nav",
     description:
-      "Return the latest official Thai SEC daily NAV for one exact fund share class in a bounded Bangkok-time window. fund_class_name is exact; provide proj_id to disambiguate or project_info to narrow the documented SEC profile search by official project name/abbreviation. Defaults to 45 days ending today in Asia/Bangkok and never searches more than 90 days. NAV_NOT_FOUND_IN_WINDOW is not evidence of no NAV outside the requested window.",
+      "Return the latest official Thai SEC daily NAV in a bounded Bangkok-time window. Without proj_id, fund_class_name must exactly match an SEC share class. With explicit proj_id, the tool calls NAV directly and returns the SEC source class, which may be main rather than a public distributor code; multiple returned classes are never inferred. Defaults to 45 days ending today in Asia/Bangkok and never searches more than 90 days. NAV_NOT_FOUND_IN_WINDOW is not evidence of no NAV outside the requested window.",
     inputSchema: {
       type: "object",
       properties: {
         fund_class_name: { type: "string", description: "Exact Thai SEC share-class code, e.g. SCBSEMI(E)." },
-        proj_id: { type: "string", description: "Optional exact SEC project ID. Required when fund_class_name is ambiguous." },
+        proj_id: { type: "string", description: "Optional authoritative SEC project ID. Enables direct NAV lookup; the source class may be main." },
         project_info: { type: "string", description: "Optional official project name or abbreviation for the documented SEC profile search; does not replace exact fund_class_name." },
         as_of_date: { type: "string", description: "Optional Bangkok-date endpoint in YYYY-MM-DD; defaults to today." },
         lookback_days: { type: "integer", minimum: 1, maximum: 90, default: 45, description: "Calendar-day window length, capped at 90." },

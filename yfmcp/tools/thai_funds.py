@@ -62,6 +62,7 @@ class FundIdentity:
     company_name_en: str | None
     project_name_th: str | None
     project_name_en: str | None
+    requested_fund_class_name: str | None = None
 
     @classmethod
     def from_profile(cls, row: dict[str, Any]) -> "FundIdentity":
@@ -75,8 +76,30 @@ class FundIdentity:
             project_name_en=_optional_str(row.get("proj_name_en")),
         )
 
+    @classmethod
+    def from_nav(
+        cls,
+        row: dict[str, Any],
+        *,
+        proj_id: str,
+        requested_fund_class_name: str,
+    ) -> "FundIdentity":
+        source_class_name = _optional_str(row.get("fund_class_name")) or requested_fund_class_name
+        return cls(
+            fund_class_name=source_class_name,
+            proj_id=proj_id,
+            unique_id=_optional_str(row.get("unique_id")),
+            company_name_th=None,
+            company_name_en=None,
+            project_name_th=None,
+            project_name_en=None,
+            requested_fund_class_name=(
+                requested_fund_class_name if source_class_name != requested_fund_class_name else None
+            ),
+        )
+
     def compact(self) -> dict[str, str | None]:
-        return {
+        compact = {
             "fundClassName": self.fund_class_name,
             "projId": self.proj_id,
             "uniqueId": self.unique_id,
@@ -85,6 +108,9 @@ class FundIdentity:
             "projectNameTh": self.project_name_th,
             "projectNameEn": self.project_name_en,
         }
+        if self.requested_fund_class_name is not None:
+            compact["requestedFundClassName"] = self.requested_fund_class_name
+        return compact
 
 
 @dataclass(frozen=True)
@@ -349,15 +375,86 @@ def _freshness(data_date: str | None, requested_as_of: date) -> dict[str, object
     }
 
 
+def _nav_result(
+    identity: FundIdentity,
+    rows: list[dict[str, Any]],
+    *,
+    next_cursor: str | None,
+    start_date: date,
+    end_date: date,
+    lookback_days: int,
+    identity_resolution: dict[str, object] | None = None,
+) -> dict[str, object]:
+    latest = max(rows, key=lambda row: str(row.get("nav_date"))) if rows else None
+    data_date = _optional_str(latest.get("nav_date")) if latest else None
+    base = _base_payload("OK" if latest else "NAV_NOT_FOUND_IN_WINDOW")
+    base.update({
+        "scope": "SHARE_CLASS",
+        "identity": identity.compact(),
+        "requestedWindow": {
+            "startDate": start_date.isoformat(),
+            "endDate": end_date.isoformat(),
+            "lookbackCalendarDays": lookback_days,
+            "timezone": _TIMEZONE,
+        },
+        "dataDate": data_date,
+        "freshness": _freshness(data_date, end_date),
+        "nav": ({
+            "navDate": latest.get("nav_date"),
+            "netAsset": latest.get("net_asset"),
+            "lastValue": latest.get("last_val"),
+            "sellPrice": latest.get("sell_price"),
+            "buyPrice": latest.get("buy_price"),
+            "sellSwapPrice": latest.get("sell_swap_price"),
+            "buySwapPrice": latest.get("buy_swap_price"),
+            "lastUpdatedAt": latest.get("last_upd_date"),
+        } if latest else None),
+        "nextCursor": next_cursor,
+        "hasMore": bool(next_cursor),
+        "recovery": _recovery(
+            "EXPAND_WINDOW_UP_TO_90_DAYS" if not latest else "NONE",
+            "No NAV was returned inside this requested window; try a later as_of_date or a wider window."
+            if not latest else "Latest returned NAV selected by nav_date, not provider row order.",
+        ),
+    })
+    if identity_resolution is not None:
+        base["identityResolution"] = identity_resolution
+    return base
+
+
+def _nav_class_ambiguity_response(
+    *,
+    requested_fund_class_name: str,
+    proj_id: str,
+    classes: list[str],
+    next_cursor: str | None,
+) -> str:
+    payload = _base_payload("AMBIGUOUS_SHARE_CLASS")
+    payload.update({
+        "scope": "PROJECT",
+        "requestedIdentity": {"fundClassName": requested_fund_class_name, "projId": proj_id},
+        "candidates": [{"fundClassName": value, "projId": proj_id} for value in classes],
+        "nextCursor": next_cursor,
+        "hasMore": bool(next_cursor),
+        "recovery": _recovery(
+            "PROVIDE_SEC_FUND_CLASS_NAME",
+            "The explicit proj_id returned multiple SEC fund classes; retry with one returned SEC fund_class_name.",
+        ),
+    })
+    return _mcp_success("get_thai_fund_nav", payload, source=_SOURCE)
+
+
 @yfinance_server.tool(
     name="get_thai_fund_nav",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_thai_fund_nav"],
-    description="""Return the latest Thai SEC daily NAV in a bounded Bangkok-time window for one exact fund share class.
+    description="""Return the latest Thai SEC daily NAV in a bounded Bangkok-time window.
 
-Use when a caller needs official NAV/pricing evidence. fund_class_name is exact;
-provide proj_id whenever the class name can be ambiguous, or project_info to
-narrow the documented SEC profile search by official name or abbreviation. The default window is
-45 calendar days ending on as_of_date (or Bangkok today), capped at 90 days.
+Without proj_id, fund_class_name must be an exact SEC share-class code and is
+resolved through the active profile catalogue. With an explicit proj_id, NAV is
+queried directly: the returned SEC fund_class_name is source truth and may be
+"main" rather than a public distributor code. If that project returns multiple
+SEC classes, no class is inferred; candidates are returned. The default window
+is 45 calendar days ending on as_of_date (or Bangkok today), capped at 90 days.
 NAV_NOT_FOUND_IN_WINDOW does not mean the fund has no NAV outside that window.
 """,
 )
@@ -369,10 +466,15 @@ async def get_thai_fund_nav(
     project_info: str | None = None,
 ) -> str:
     """Get one exact share class's latest official NAV within a bounded date window."""
-    identity, response = await _resolve_or_response("get_thai_fund_nav", fund_class_name, proj_id, project_info)
-    if response:
-        return response
-    assert identity is not None
+    requested_fund_class_name = _optional_str(fund_class_name)
+    if requested_fund_class_name is None:
+        return _mcp_failure(
+            "get_thai_fund_nav",
+            ErrorCode.INPUT_VALIDATION_ERROR,
+            "fund_class_name is required.",
+            source=_SOURCE,
+        )
+    explicit_proj_id = _optional_str(proj_id)
     try:
         end_date = _parse_iso_date(as_of_date, "as_of_date") if as_of_date else _bangkok_today()
     except ValueError as error:
@@ -385,6 +487,71 @@ async def get_thai_fund_nav(
             source=_SOURCE,
         )
     start_date = end_date - timedelta(days=lookback_days - 1)
+
+    if explicit_proj_id is not None:
+        try:
+            payload = await _request_json("/daily-info/nav", {
+                "proj_id": explicit_proj_id,
+                "start_nav_date": start_date.isoformat(),
+                "end_nav_date": end_date.isoformat(),
+                "page_size": _MAX_PAGE_SIZE,
+            })
+        except SecThailandProviderError as error:
+            return _provider_failure("get_thai_fund_nav", error)
+
+        rows = [row for row in payload["items"] if isinstance(row, dict) and _safe_date(row.get("nav_date"))]
+        next_cursor = _optional_str(payload.get("next_cursor"))
+        source_classes = sorted({str(row.get("fund_class_name") or "") for row in rows if row.get("fund_class_name")})
+        exact_rows = [row for row in rows if str(row.get("fund_class_name") or "") == requested_fund_class_name]
+        if exact_rows:
+            selected_rows = exact_rows
+            identity_status = "NAV_PROJECT_ID_AND_SEC_CLASS_CONFIRMED"
+        elif len(source_classes) == 1 and not next_cursor:
+            selected_rows = rows
+            identity_status = "NAV_PROJECT_ID_CONFIRMED_CLASS_ALIAS"
+        elif rows:
+            return _nav_class_ambiguity_response(
+                requested_fund_class_name=requested_fund_class_name,
+                proj_id=explicit_proj_id,
+                classes=source_classes,
+                next_cursor=next_cursor,
+            )
+        else:
+            selected_rows = []
+            identity_status = "NAV_PROJECT_ID_UNVERIFIED_NO_ROWS"
+
+        identity = FundIdentity.from_nav(
+            selected_rows[0] if selected_rows else {},
+            proj_id=explicit_proj_id,
+            requested_fund_class_name=requested_fund_class_name,
+        )
+        base = _nav_result(
+            identity,
+            selected_rows,
+            next_cursor=next_cursor,
+            start_date=start_date,
+            end_date=end_date,
+            lookback_days=lookback_days,
+            identity_resolution={
+                "status": identity_status,
+                "method": "EXPLICIT_PROJ_ID_DIRECT_NAV",
+                "requestedFundClassName": requested_fund_class_name,
+                "sourceFundClassName": identity.fund_class_name if selected_rows else None,
+            },
+        )
+        return _mcp_success(
+            "get_thai_fund_nav",
+            base,
+            source=_SOURCE,
+            data_date=base["dataDate"] if isinstance(base["dataDate"], str) else None,
+        )
+
+    identity, response = await _resolve_or_response(
+        "get_thai_fund_nav", requested_fund_class_name, None, project_info,
+    )
+    if response:
+        return response
+    assert identity is not None
     try:
         payload = await _request_json("/daily-info/nav", {
             "proj_id": identity.proj_id,
@@ -397,36 +564,14 @@ async def get_thai_fund_nav(
         return _provider_failure("get_thai_fund_nav", error)
 
     rows = [row for row in payload["items"] if isinstance(row, dict) and _safe_date(row.get("nav_date"))]
-    latest = max(rows, key=lambda row: str(row.get("nav_date"))) if rows else None
-    base = _base_payload("OK" if latest else "NAV_NOT_FOUND_IN_WINDOW")
-    base.update({
-        "scope": "SHARE_CLASS",
-        "identity": identity.compact(),
-        "requestedWindow": {
-            "startDate": start_date.isoformat(),
-            "endDate": end_date.isoformat(),
-            "lookbackCalendarDays": lookback_days,
-            "timezone": _TIMEZONE,
-        },
-        "dataDate": _optional_str(latest.get("nav_date")) if latest else None,
-        "freshness": _freshness(_optional_str(latest.get("nav_date")) if latest else None, end_date),
-        "nav": ({
-            "navDate": latest.get("nav_date"),
-            "netAsset": latest.get("net_asset"),
-            "lastValue": latest.get("last_val"),
-            "sellPrice": latest.get("sell_price"),
-            "buyPrice": latest.get("buy_price"),
-            "sellSwapPrice": latest.get("sell_swap_price"),
-            "buySwapPrice": latest.get("buy_swap_price"),
-            "lastUpdatedAt": latest.get("last_upd_date"),
-        } if latest else None),
-        "nextCursor": _optional_str(payload.get("next_cursor")),
-        "hasMore": bool(payload.get("next_cursor")),
-        "recovery": _recovery(
-            "EXPAND_WINDOW_UP_TO_90_DAYS" if not latest else "NONE",
-            "No NAV was returned inside this requested window; try a later as_of_date or a wider window." if not latest else "Latest returned NAV selected by nav_date, not provider row order.",
-        ),
-    })
+    base = _nav_result(
+        identity,
+        rows,
+        next_cursor=_optional_str(payload.get("next_cursor")),
+        start_date=start_date,
+        end_date=end_date,
+        lookback_days=lookback_days,
+    )
     return _mcp_success("get_thai_fund_nav", base, source=_SOURCE, data_date=base["dataDate"] if isinstance(base["dataDate"], str) else None)
 
 
