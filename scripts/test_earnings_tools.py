@@ -61,6 +61,7 @@ if not getattr(_FastMCP, "_output_schema_patched", False):
     _FastMCP._output_schema_patched = True  # type: ignore[attr-defined]
 
 import server as srv  # noqa: E402
+from yfmcp.tools import earnings as earnings_tools  # noqa: E402
 
 
 def _run(coro):  # type: ignore[no-untyped-def]
@@ -101,7 +102,9 @@ class TestGetLatestEarningsRelease(unittest.TestCase):
             self.assertIn("warnings", data)
 
     def test_found_has_url_and_timestamps(self):
-        with patch("yfmcp.tools.earnings._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked:
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked, patch(
+            "yfmcp.tools.earnings._resolve_earnings_period_from_source", new_callable=AsyncMock
+        ) as mocked_period:
             mocked.return_value = {
                 "ticker": "AAPL",
                 "eventType": "earnings_release",
@@ -118,11 +121,48 @@ class TestGetLatestEarningsRelease(unittest.TestCase):
                 "confidence": "HIGH",
                 "warnings": [],
             }
+            mocked_period.return_value = {
+                "period": "FY2026 Q2",
+                "periodStatus": "EX99_TEXT_RESOLVED",
+                "periodEvidence": "second quarter of fiscal 2026",
+            }
             data = _parse(_run(srv.get_latest_earnings_release("AAPL")))
             src = data["sources"][0]
             self.assertTrue(str(src.get("url", "")).startswith("https://"))
             self.assertIsNotNone(src.get("filingDate"))
             self.assertIsNotNone(src.get("acceptedAt"))
+            self.assertEqual(data.get("period"), "FY2026 Q2")
+            self.assertEqual(data.get("periodStatus"), "EX99_TEXT_RESOLVED")
+
+    def test_exhibit_url_uses_issuer_cik_not_accession_agent_prefix(self):
+        filings_payload = {
+            "cik": "0001040470",
+            "filings": [{
+                "filingDate": "2026-07-14",
+                "acceptedAt": "2026-07-14T16:50:31.000Z",
+                "accessionNumber": "0001654954-26-006655",
+                "documentUrl": "https://www.sec.gov/Archives/edgar/data/1040470/000165495426006655/aehr_8k.htm",
+            }],
+        }
+        with patch("server.list_sec_company_filings", new_callable=AsyncMock) as mocked_filings, patch(
+            "yfmcp.tools.earnings._edgar_list_exhibits_from_index", new_callable=AsyncMock
+        ) as mocked_exhibits:
+            mocked_filings.return_value = json.dumps(filings_payload)
+            mocked_exhibits.return_value = [{"type": "EX-99.1", "document": "aehr_ex991.htm"}]
+            source = _run(earnings_tools._resolve_latest_earnings_sec_source("AEHR"))
+            self.assertEqual(source["sourceType"], "sec_8k_ex991")
+            self.assertEqual(
+                source["url"],
+                "https://www.sec.gov/Archives/edgar/data/1040470/000165495426006655/aehr_ex991.htm",
+            )
+
+    def test_period_prefers_current_release_heading_over_prior_year_comparison(self):
+        period = earnings_tools._extract_earnings_period_from_text(
+            "Aehr Reports Fiscal 2026 Fourth Quarter Results. Net revenue was $18.8 million, "
+            "compared to $14.1 million in the fourth quarter of fiscal 2025."
+        )
+        self.assertEqual(period["period"], "FY2026 Q4")
+        self.assertEqual(period["periodStatus"], "EX99_TEXT_RESOLVED")
 
 
 class TestIndexEarningsRelease(unittest.TestCase):
@@ -158,7 +198,11 @@ class TestIndexEarningsRelease(unittest.TestCase):
 
 class TestExtractEarningsMetrics(unittest.TestCase):
     def test_stable_keys_and_evidence(self):
-        html = "Revenue was $123.0 billion. Diluted earnings per share $2.31. Gross margin 47.8%."
+        html = (
+            "Company Reports Fourth Quarter Fiscal 2026 Results. "
+            "Revenue was $123.0 billion for the fourth quarter of fiscal 2026. "
+            "Diluted earnings per share was $2.31. Gross margin was 47.8%."
+        )
         with patch("yfmcp.tools.earnings._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked_release, patch(
             "yfmcp.tools.earnings._edgar_get_html", new_callable=AsyncMock
         ) as mocked_html:
@@ -176,8 +220,37 @@ class TestExtractEarningsMetrics(unittest.TestCase):
                 self.assertIn(key, metrics)
             self.assertEqual(metrics["freeCashFlow"].get("confidence"), "NOT_DECISION_GRADE")
             self.assertIsNone(metrics["freeCashFlow"].get("value"))
-            self.assertEqual(metrics["revenue"].get("confidence"), "HIGH")
+            self.assertEqual(metrics["revenue"].get("confidence"), "LOW")
             self.assertIsNotNone(metrics["revenue"].get("evidence"))
+            self.assertEqual(data.get("period"), "FY2026 Q4")
+            self.assertEqual(data.get("periodStatus"), "EX99_TEXT_RESOLVED")
+            self.assertEqual(data.get("confidence"), "LOW")
+            warning_codes = [w.get("code") for w in data.get("warnings", []) if isinstance(w, dict)]
+            self.assertIn("TEXT_METRIC_VERIFY_REQUIRED", warning_codes)
+
+    def test_aehr_style_guidance_is_not_selected_as_reported_revenue(self):
+        html = (
+            "Aehr Test Systems Reports Fourth Quarter and Full Fiscal Year 2026 Results. "
+            "Revenue was $18.8 million for the fourth quarter of fiscal 2026. "
+            "The company expects revenue of $130 million for fiscal 2027."
+        )
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked_release, patch(
+            "yfmcp.tools.earnings._edgar_get_html", new_callable=AsyncMock
+        ) as mocked_html:
+            mocked_release.return_value = {
+                "ticker": "AEHR",
+                "period": "latest",
+                "reportedAt": "2026-07-14T20:00:00Z",
+                "sources": [{"sourceType": "sec_8k_ex991", "url": "https://www.sec.gov/Archives/aehr_ex991.htm", "filingDate": "2026-07-14"}],
+                "confidence": "HIGH",
+            }
+            mocked_html.return_value = html
+            data = _parse(_run(srv.extract_earnings_metrics("AEHR")))
+            self.assertEqual(data["period"], "FY2026 Q4")
+            self.assertEqual(data["metrics"]["revenue"]["value"], 18_800_000)
+            self.assertEqual(data["metrics"]["revenue"]["confidence"], "LOW")
+            self.assertEqual(data.get("confidence"), "LOW")
+            self.assertFalse(data.get("decisionGrade", False))
 
 
 class TestExtractGuidance(unittest.TestCase):
@@ -229,6 +302,22 @@ class TestExtractManagementCommentary(unittest.TestCase):
 
 
 class TestCompareActualVsEstimate(unittest.TestCase):
+    def test_earnings_analysis_serializes_timestamp_quarters(self):
+        class _FastInfo:
+            currency = "USD"
+
+        class _Ticker:
+            def __init__(self):
+                self.fast_info = _FastInfo()
+                self.earnings_history = srv.pd.DataFrame(
+                    [{"epsActual": 0.11, "epsEstimate": -0.0075}],
+                    index=srv.pd.Index([srv.pd.Timestamp("2026-05-31")], name="quarter"),
+                )
+
+        with patch("server.yf.Ticker", return_value=_Ticker()):
+            data = json.loads(_run(srv.get_earnings_analysis("AEHR")))
+        self.assertEqual(data["earningsHistory"][0]["quarter"], "2026-05-31T00:00:00")
+
     def test_surprise_calc_and_source(self):
         metrics_payload = {
             "period": "FY2026 Q2",
@@ -253,6 +342,24 @@ class TestCompareActualVsEstimate(unittest.TestCase):
             self.assertEqual(data["estimate"]["eps"]["source"], "yahoo")
             self.assertAlmostEqual(data["surprise"]["revenueSurprisePct"], 1.65, places=2)
             self.assertAlmostEqual(data["surprise"]["epsSurprisePct"], 2.67, places=2)
+            self.assertAlmostEqual(data["surprise"]["epsDelta"], 0.06, places=4)
+
+    def test_near_zero_eps_estimate_uses_delta_not_percentage(self):
+        metrics_payload = {"period": "FY2026 Q4", "metrics": {"revenue": {"value": 18_800_000}, "epsDiluted": {"value": 0.11}}}
+        ea_payload = {
+            "revenueEstimate": [],
+            "earningsHistory": [{"period": "FY2026 Q4", "quarter": "2026-05-31", "epsActual": 0.11, "epsEstimate": -0.0075}],
+        }
+        with patch("yfmcp.tools.earnings.extract_earnings_metrics", new_callable=AsyncMock) as mocked_metrics, patch(
+            "server.get_earnings_analysis", new_callable=AsyncMock
+        ) as mocked_ea:
+            mocked_metrics.return_value = json.dumps(metrics_payload)
+            mocked_ea.return_value = json.dumps(ea_payload)
+            data = _parse(_run(srv.compare_earnings_actual_vs_estimate("AEHR")))
+            self.assertIsNone(data["surprise"]["epsSurprisePct"])
+            self.assertAlmostEqual(data["surprise"]["epsDelta"], 0.1175, places=4)
+            warning_codes = [w.get("code") for w in data.get("warnings", []) if isinstance(w, dict)]
+            self.assertIn("EPS_NEAR_ZERO_ESTIMATE_BASE", warning_codes)
 
     def test_no_reported_quarter_warning(self):
         with patch("yfmcp.tools.earnings.extract_earnings_metrics", new_callable=AsyncMock) as mocked_metrics, patch(
