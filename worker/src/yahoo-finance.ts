@@ -11933,12 +11933,60 @@ function toIsoUtc(ts: unknown): string | null {
   return Number.isFinite(d.getTime()) ? d.toISOString() : null;
 }
 
-function deriveFiscalPeriod(dateStr: unknown): string | null {
-  if (typeof dateStr !== "string" || !dateStr.trim()) return null;
-  const d = new Date(dateStr);
-  if (!Number.isFinite(d.getTime())) return null;
-  const q = Math.floor(d.getUTCMonth() / 3) + 1;
-  return `FY${d.getUTCFullYear()} Q${q}`;
+type EarningsPeriodInfo = {
+  period: string | null;
+  periodStatus: "EX99_TEXT_RESOLVED" | "UNRESOLVED";
+  periodEvidence: string | null;
+};
+
+const EARNINGS_QUARTER_WORDS: Record<string, string> = {
+  first: "Q1",
+  second: "Q2",
+  third: "Q3",
+  fourth: "Q4",
+};
+
+function extractEarningsPeriodFromText(text: string): EarningsPeriodInfo {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const quarter = /\b(first|second|third|fourth)\s+quarter\b|\bQ([1-4])\b/i;
+  const fiscalYear = /\b(?:fiscal\s+(?:year\s+)?|FY\s*)(20\d{2})\b/i;
+  const candidates = [
+    new RegExp(`${quarter.source}[\\s\\S]{0,180}?${fiscalYear.source}`, "i"),
+    new RegExp(`${fiscalYear.source}[\\s\\S]{0,180}?${quarter.source}`, "i"),
+  ];
+  let best: RegExpMatchArray | null = null;
+  for (const re of candidates) {
+    const match = normalized.match(re);
+    if (!match) continue;
+    // Prefer the first explicit period in the release. Comparative prior-year
+    // figures appear later in results bullets (AEHR is a concrete case).
+    if (!best || (match.index ?? Number.MAX_SAFE_INTEGER) < (best.index ?? Number.MAX_SAFE_INTEGER)) best = match;
+  }
+  if (best) {
+    const qMatch = best[0].match(quarter);
+    const fyMatch = best[0].match(fiscalYear);
+    const q = qMatch?.[2] ? `Q${qMatch[2]}` : (qMatch?.[1] ? EARNINGS_QUARTER_WORDS[qMatch[1].toLowerCase()] : null);
+    const fy = fyMatch?.[1] ?? null;
+    if (q && fy) {
+      return {
+        period: `FY${fy} ${q}`,
+        periodStatus: "EX99_TEXT_RESOLVED",
+        periodEvidence: compactExcerpt(best[0], 220),
+      };
+    }
+  }
+  return { period: null, periodStatus: "UNRESOLVED", periodEvidence: null };
+}
+
+async function resolveEarningsPeriodFromSource(src: Record<string, unknown>): Promise<EarningsPeriodInfo> {
+  const content = await resolveEarningsContentSource(src);
+  if (!content.url) return { period: null, periodStatus: "UNRESOLVED", periodEvidence: null };
+  const html = content.url.startsWith("https://www.sec.gov/Archives/")
+    ? await edgarGetHtml(content.url, 5_000_000)
+    : await fetchPublicHtml(content.url);
+  return html
+    ? extractEarningsPeriodFromText(_stripHtmlTagsIdx(_sanitizeFilingHtml(html)))
+    : { period: null, periodStatus: "UNRESOLVED", periodEvidence: null };
 }
 
 function isPaywalledUrl(url: string): boolean {
@@ -12010,18 +12058,24 @@ function scaleNumberFromText(raw: unknown): number | null {
   return n;
 }
 
-function extractMetricNumber(
+function extractReportedTextMetric(
   text: string,
-  patterns: RegExp[],
+  label: RegExp,
+  valuePattern: RegExp,
 ): { value: number | null; rawValue: string | null; excerpt: string | null } {
-  for (const re of patterns) {
-    const m = text.match(re);
-    if (!m) continue;
-    const rawValue = m[1] ?? null;
+  const guidanceContext = /\b(?:guidance|outlook|expect(?:s|ed|ation)?|forecast|project(?:s|ed)?|target|range)\b/i;
+  const reportedContext = /\b(?:reported|was|were|totaled|generated|delivered|achieved)\b/i;
+  const sentences = text
+    .replace(/\s+/g, " ")
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+  for (const sentence of sentences) {
+    if (!label.test(sentence) || guidanceContext.test(sentence) || !reportedContext.test(sentence)) continue;
+    const match = sentence.match(valuePattern);
+    const rawValue = match?.[1] ?? null;
     const value = scaleNumberFromText(rawValue);
-    if (value != null) {
-      return { value, rawValue, excerpt: compactExcerpt(m[0] ?? "", 220) };
-    }
+    if (value != null) return { value, rawValue, excerpt: compactExcerpt(sentence, 220) };
   }
   return { value: null, rawValue: null, excerpt: null };
 }
@@ -12187,7 +12241,9 @@ async function resolveLatestEarningsRelease(ticker: string): Promise<Record<stri
     return {
       ticker: ticker.toUpperCase(),
       eventType: "earnings_release",
-      period: deriveFiscalPeriod(sec.filingDate) ?? "latest",
+      period: "latest",
+      periodStatus: "UNRESOLVED",
+      periodEvidence: null,
       reportedAt: reportingTs,
       sources: [sec],
       confidence: "HIGH",
@@ -12203,7 +12259,9 @@ async function resolveLatestEarningsRelease(ticker: string): Promise<Record<stri
     return {
       ticker: ticker.toUpperCase(),
       eventType: "earnings_release",
-      period: deriveFiscalPeriod(first) ?? "latest",
+      period: "latest",
+      periodStatus: "UNRESOLVED",
+      periodEvidence: null,
       reportedAt: toIsoUtc(first),
       sources: [
         {
@@ -12223,6 +12281,8 @@ async function resolveLatestEarningsRelease(ticker: string): Promise<Record<stri
     ticker: ticker.toUpperCase(),
     eventType: "earnings_release",
     period: "latest",
+    periodStatus: "UNRESOLVED",
+    periodEvidence: null,
     reportedAt: null,
     sources: [],
     confidence: "NOT_FOUND",
@@ -12231,7 +12291,19 @@ async function resolveLatestEarningsRelease(ticker: string): Promise<Record<stri
 }
 
 export async function getLatestEarningsRelease(ticker: string, _period = "latest"): Promise<string> {
-  return JSON.stringify(await resolveLatestEarningsRelease(ticker));
+  const release = await resolveLatestEarningsRelease(ticker);
+  const src = Array.isArray(release.sources) && release.sources[0] && typeof release.sources[0] === "object"
+    ? release.sources[0] as Record<string, unknown>
+    : {};
+  const periodInfo = String(src.sourceType ?? "") === "yahoo_estimate"
+    ? { period: null, periodStatus: "UNRESOLVED" as const, periodEvidence: null }
+    : await resolveEarningsPeriodFromSource(src);
+  return JSON.stringify({
+    ...release,
+    period: periodInfo.period ?? release.period ?? "latest",
+    periodStatus: periodInfo.periodStatus,
+    periodEvidence: periodInfo.periodEvidence,
+  });
 }
 
 export async function indexEarningsRelease(ticker: string, period = "latest", sourceUrl: string | null = null): Promise<string> {
@@ -12246,9 +12318,10 @@ export async function indexEarningsRelease(ticker: string, period = "latest", so
     const latest = await resolveLatestEarningsRelease(ticker);
     const sources = Array.isArray(latest.sources) ? latest.sources : [];
     const src = (sources[0] && typeof sources[0] === "object") ? sources[0] as Record<string, unknown> : {};
-    sourceType = String(src.sourceType ?? "");
-    sourceUrl = String(src.url ?? "");
-    sourceMeta = src;
+    const content = await resolveEarningsContentSource(src);
+    sourceType = content.sourceType;
+    sourceUrl = content.url;
+    sourceMeta = { ...src, sourceType };
   }
 
   if (!sourceUrl) {
@@ -12273,9 +12346,12 @@ export async function indexEarningsRelease(ticker: string, period = "latest", so
   if (!html) return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: `Failed to fetch source: ${sourceUrl}` } });
 
   const index = _buildFilingIndexFromHtml(_sanitizeFilingHtml(html));
+  const periodInfo = extractEarningsPeriodFromText(_stripHtmlTagsIdx(_sanitizeFilingHtml(html)));
   const out = {
     ticker: ticker.toUpperCase(),
-    period: deriveFiscalPeriod(sourceMeta.filingDate ?? sourceMeta.publishedAt) ?? period,
+    period: periodInfo.period ?? period,
+    periodStatus: periodInfo.periodStatus,
+    periodEvidence: periodInfo.periodEvidence,
     source: {
       sourceType: sourceType ?? sourceMeta.sourceType ?? "company_ir",
       url: sourceUrl,
@@ -12310,6 +12386,7 @@ export async function extractEarningsMetrics(
   };
   const evidence: Record<string, unknown>[] = [];
   const warnings: Record<string, unknown>[] = [];
+  let sourcePeriodInfo: EarningsPeriodInfo = { period: null, periodStatus: "UNRESOLVED", periodEvidence: null };
   const src = Array.isArray(release.sources) && release.sources[0] && typeof release.sources[0] === "object"
     ? release.sources[0] as Record<string, unknown>
     : {};
@@ -12317,8 +12394,13 @@ export async function extractEarningsMetrics(
   const srcType = String(src.sourceType ?? "yahoo");
   const srcAccession = String(src.accessionNumber ?? "");
   const srcCikPadded = String(src.cikPadded ?? "");
+  const releaseFilingDate = String(src.filingDate ?? "");
   const publishedAt = toIsoUtc((src.filingDate as string | null) ?? (src.publishedAt as string | null) ?? null);
   const retrievedAt = nowIsoUtc();
+  // Resolve the issuer fiscal period independently of whether a structured
+  // metric source is available. A correct metric does not justify a calendar
+  // quarter label inferred from the 8-K filing date.
+  sourcePeriodInfo = await resolveEarningsPeriodFromSource(src);
 
   const hasHighConfidence = (): boolean =>
     Object.values(metrics).some((m) => (m as Record<string, unknown>).confidence === "HIGH");
@@ -12332,20 +12414,23 @@ export async function extractEarningsMetrics(
       primary: string,
       fallback?: string,
       unitType: "USD" | "USD/shares" = "USD",
-    ): Promise<{ value: number; end: string; concept: string } | null> => {
+    ): Promise<{ value: number; end: string; filed: string; concept: string } | null> => {
       for (const concept of [primary, ...(fallback ? [fallback] : [])]) {
         const d = await edgarGetJson(
           `https://data.sec.gov/api/xbrl/companyconcept/CIK${cikPadded}/us-gaap/${concept}.json`,
         );
         const facts =
           (((d?.units as Record<string, unknown>) ?? {})[unitType] as Record<string, unknown>[] | undefined) ?? [];
-        // Exclude segment-level (non-consolidated) facts; take most recent 10-Q
+        // Exclude segment-level (non-consolidated) facts. A filing cannot be
+        // used for a release that it predates: that was the path that allowed
+        // a stale 10-Q to masquerade as the latest release metric.
         const quarterly = facts
           .filter((f) => String(f.form ?? "").toUpperCase() === "10-Q" && !f.segment)
+          .filter((f) => !releaseFilingDate || String(f.filed ?? "") >= releaseFilingDate)
           .sort((a, b) => String(b.end ?? "").localeCompare(String(a.end ?? "")));
         const latest = quarterly[0];
         if (latest?.val != null && typeof latest.val === "number") {
-          return { value: latest.val, end: String(latest.end ?? ""), concept };
+          return { value: latest.val, end: String(latest.end ?? ""), filed: String(latest.filed ?? ""), concept };
         }
       }
       return null;
@@ -12427,8 +12512,12 @@ export async function extractEarningsMetrics(
           excerpt: `iXBRL: ${label}`,
         });
         const setIx = (key: string, val: Record<string, unknown>): void => {
-          metrics[key] = val;
-          evidence.push(val.evidence as Record<string, unknown>);
+          // iXBRL tags can contain comparative, annual, and quarterly values.
+          // Until a tag is tied to the release's stated period, retain it only
+          // as supporting evidence, never as decision-grade output.
+          const unscoped: Record<string, unknown> = { ...val, confidence: "LOW", extractionMethod: "EX99_IXBRL_UNSCOPED", periodMatch: false };
+          metrics[key] = unscoped;
+          evidence.push(unscoped.evidence as Record<string, unknown>);
         };
 
         const ixRev = getConcept(
@@ -12460,27 +12549,37 @@ export async function extractEarningsMetrics(
       // Tier 3 (regex fallback): plain-text extraction for non-iXBRL press releases
       if (!hasHighConfidence()) {
         const text = _stripHtmlTagsIdx(_sanitizeFilingHtml(html));
-        const rev = extractMetricNumber(text, [/(?:net sales|revenue(?:s)?)\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
-        const eps = extractMetricNumber(text, [/(?:diluted (?:earnings per share|eps)|eps \(diluted\))\D{0,20}\$?\s*([0-9]+(?:\.[0-9]+)?)/i]);
-        const gm = extractMetricNumber(text, [/gross margin\D{0,15}([0-9]{1,2}(?:\.[0-9]+)?)\s*%/i]);
-        const op = extractMetricNumber(text, [/operating income\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
-        const fcf = extractMetricNumber(text, [/free cash flow\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
-        const capex = extractMetricNumber(text, [/(?:capital expenditures|capex)\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i]);
+        sourcePeriodInfo = extractEarningsPeriodFromText(text);
+        const amount = /(\$\s*[-+]?[0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i;
+        const epsAmount = /(\$\s*\(?[-+]?[0-9]+(?:\.[0-9]+)?\)?)/i;
+        const pct = /([0-9]{1,2}(?:\.[0-9]+)?\s*%)/i;
+        const rev = extractReportedTextMetric(text, /\b(?:net sales|revenue(?:s)?)\b/i, amount);
+        const eps = extractReportedTextMetric(text, /\b(?:diluted (?:earnings per share|eps)|eps \(diluted\))\b/i, epsAmount);
+        const gm = extractReportedTextMetric(text, /\bgross margin\b/i, pct);
+        const op = extractReportedTextMetric(text, /\boperating income\b/i, amount);
+        const fcf = extractReportedTextMetric(text, /\bfree cash flow\b/i, amount);
+        const capex = extractReportedTextMetric(text, /\b(?:capital expenditures|capex)\b/i, amount);
         const setFallbackMetric = (key: string, val: Record<string, unknown>): void => {
           metrics[key] = val;
           const ev = val.evidence;
           if (ev && typeof ev === "object") evidence.push(ev as Record<string, unknown>);
         };
+        const textMetric = (value: Record<string, unknown>): Record<string, unknown> => ({
+          ...value,
+          confidence: "LOW",
+          extractionMethod: "EX99_TEXT_CONTEXT",
+          periodMatch: Boolean(sourcePeriodInfo.period),
+        });
 
-        if (rev.value != null) setFallbackMetric("revenue", { value: rev.value, unit: "USD", rawValue: rev.rawValue, confidence: "HIGH", evidence: contentEv(rev.excerpt) });
-        if (eps.value != null) setFallbackMetric("epsDiluted", { value: eps.value, unit: "USD/share", rawValue: eps.rawValue ? `$${eps.rawValue}` : null, confidence: "HIGH", evidence: contentEv(eps.excerpt) });
+        if (rev.value != null) setFallbackMetric("revenue", textMetric({ value: rev.value, unit: "USD", rawValue: rev.rawValue, evidence: contentEv(rev.excerpt) }));
+        if (eps.value != null) setFallbackMetric("epsDiluted", textMetric({ value: eps.value, unit: "USD/share", rawValue: eps.rawValue, evidence: contentEv(eps.excerpt) }));
         if (gm.value != null) {
           const pct = Number(gm.value);
-          setFallbackMetric("grossMargin", { valueRatio: Number((pct / 100).toFixed(6)), valuePct: pct, rawValue: gm.rawValue, confidence: "HIGH", evidence: contentEv(gm.excerpt) });
+          setFallbackMetric("grossMargin", textMetric({ valueRatio: Number((pct / 100).toFixed(6)), valuePct: pct, rawValue: gm.rawValue, evidence: contentEv(gm.excerpt) }));
         }
-        if (op.value != null) setFallbackMetric("operatingIncome", { value: op.value, unit: "USD", rawValue: op.rawValue, confidence: "HIGH", evidence: contentEv(op.excerpt) });
-        if (fcf.value != null) setFallbackMetric("freeCashFlow", { value: fcf.value, unit: "USD", rawValue: fcf.rawValue, confidence: "HIGH", evidence: contentEv(fcf.excerpt) });
-        if (capex.value != null) setFallbackMetric("capex", { value: capex.value, unit: "USD", rawValue: capex.rawValue, confidence: "HIGH", evidence: contentEv(capex.excerpt) });
+        if (op.value != null) setFallbackMetric("operatingIncome", textMetric({ value: op.value, unit: "USD", rawValue: op.rawValue, evidence: contentEv(op.excerpt) }));
+        if (fcf.value != null) setFallbackMetric("freeCashFlow", textMetric({ value: fcf.value, unit: "USD", rawValue: fcf.rawValue, evidence: contentEv(fcf.excerpt) }));
+        if (capex.value != null) setFallbackMetric("capex", textMetric({ value: capex.value, unit: "USD", rawValue: capex.rawValue, evidence: contentEv(capex.excerpt) }));
       }
     }
   } else if (!hasHighConfidence() && !srcUrl.startsWith("https://www.sec.gov/Archives/")) {
@@ -12492,12 +12591,22 @@ export async function extractEarningsMetrics(
     const conf = String((metrics[key] as Record<string, unknown>).confidence ?? "");
     if (conf === "HIGH") { confidence = "HIGH"; break; }
   }
-  if (confidence !== "HIGH" && (release.confidence === "MEDIUM" || release.confidence === "LOW")) confidence = String(release.confidence);
+  const hasLowConfidence = Object.values(metrics).some((metric) => (metric as Record<string, unknown>).confidence === "LOW");
+  if (confidence !== "HIGH" && hasLowConfidence) {
+    confidence = "LOW";
+    warnings.push({
+      code: "TEXT_METRIC_VERIFY_REQUIRED",
+      message: "EX-99 text or unscoped iXBRL metrics are not decision-grade without a structured period-matched fact.",
+    });
+  }
+  if (confidence === "NOT_DISCLOSED" && (release.confidence === "MEDIUM" || release.confidence === "LOW")) confidence = String(release.confidence);
 
   return JSON.stringify({
     ticker: ticker.toUpperCase(),
     eventType: "earnings_release",
-    period: release.period ?? period,
+    period: sourcePeriodInfo.period ?? release.period ?? period,
+    periodStatus: sourcePeriodInfo.periodStatus,
+    periodEvidence: sourcePeriodInfo.periodEvidence,
     reportedAt: release.reportedAt ?? null,
     source: srcType || "yahoo",
     metrics,
@@ -12728,10 +12837,21 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
     return JSON.stringify(out);
   }
 
+  const epsDelta = actualEps - estEps;
   out.surprise = {
     revenueSurprisePct: (out.surprise as Record<string, unknown>).revenueSurprisePct ?? null,
-    epsSurprisePct: Number((((actualEps - estEps) / Math.abs(estEps)) * 100).toFixed(2)),
+    epsSurprisePct: null,
+    epsDelta: Number(epsDelta.toFixed(4)),
   };
+  if (Math.abs(estEps) < 0.02) {
+    (out.warnings as Record<string, unknown>[]).push({
+      code: "EPS_NEAR_ZERO_ESTIMATE_BASE",
+      message: "EPS percentage surprise is omitted because the absolute estimate is below $0.02 per share; use epsDelta instead.",
+    });
+    out.confidence = "MEDIUM";
+    return JSON.stringify(out);
+  }
+  (out.surprise as Record<string, unknown>).epsSurprisePct = Number(((epsDelta / Math.abs(estEps)) * 100).toFixed(2));
   out.confidence = (out.surprise as Record<string, unknown>).revenueSurprisePct != null ? "HIGH" : "MEDIUM";
   return JSON.stringify(out);
 }

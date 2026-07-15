@@ -45,6 +45,21 @@ class TestSecReliabilityWorker(unittest.TestCase):
         self.assertIn('documentKind: "primary_html"', self.worker)
         self.assertIn("FILING_TEXT_NOT_AVAILABLE", self.worker)
 
+    def test_earnings_ex99_text_is_period_resolved_and_non_decision_grade(self) -> None:
+        self.assertIn("function extractEarningsPeriodFromText", self.worker)
+        self.assertIn('periodStatus: "EX99_TEXT_RESOLVED"', self.worker)
+        self.assertIn("async function resolveEarningsPeriodFromSource", self.worker)
+        self.assertIn("function extractReportedTextMetric", self.worker)
+        self.assertIn("EX99_TEXT_CONTEXT", self.worker)
+        self.assertIn("EX99_IXBRL_UNSCOPED", self.worker)
+        self.assertIn("TEXT_METRIC_VERIFY_REQUIRED", self.worker)
+        self.assertIn("EPS_NEAR_ZERO_ESTIMATE_BASE", self.worker)
+        self.assertRegex(
+            self.worker,
+            r"String\(f\.filed \?\? \"\"\) >= releaseFilingDate",
+        )
+        self.assertNotIn("function deriveFiscalPeriod", self.worker)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

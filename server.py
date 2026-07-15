@@ -4122,7 +4122,12 @@ async def get_earnings_analysis(ticker: str) -> str:
         df = df.reset_index()
         df.columns = [str(c) for c in df.columns]
         df = df.where(pd.notnull(df), None)
-        return df.to_dict(orient="records")
+        records = df.to_dict(orient="records")
+        for record in records:
+            for key, value in record.items():
+                if isinstance(value, (pd.Timestamp, datetime.datetime, datetime.date)):
+                    record[key] = value.isoformat()
+        return records
 
     output: dict = {"ticker": ticker}
     for key, attr in [

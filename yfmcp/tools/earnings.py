@@ -44,14 +44,121 @@ def _server_attr(name: str):
 
 
 def _derive_fiscal_period_from_date(date_str: str | None) -> str | None:
+    """Deprecated compatibility helper; earnings tools do not use it.
+
+    A filing date is not an issuer fiscal-quarter identifier.  SEC earnings
+    flows resolve periods from the release itself through
+    ``_extract_earnings_period_from_text``.
+    """
     if not date_str:
         return None
     try:
         d = datetime.datetime.fromisoformat(str(date_str)[:10]).date()
     except Exception:
         return None
-    q = ((d.month - 1) // 3) + 1
-    return f"FY{d.year} Q{q}"
+    return f"FY{d.year} Q{((d.month - 1) // 3) + 1}"
+
+
+_QUARTER_WORDS = {
+    "first": "1", "1st": "1",
+    "second": "2", "2nd": "2",
+    "third": "3", "3rd": "3",
+    "fourth": "4", "4th": "4",
+}
+_GUIDANCE_CONTEXT_RE = _re.compile(
+    r"\b(?:guidance|outlook|expects?|expected|forecast|projects?|target|range)\b",
+    flags=_re.IGNORECASE,
+)
+_REPORTED_CONTEXT_RE = _re.compile(
+    r"\b(?:reported|was|were|total(?:ed|led)|generated|delivered|achieved)\b",
+    flags=_re.IGNORECASE,
+)
+
+
+def _extract_earnings_period_from_text(text: str) -> dict[str, str | None]:
+    """Return an issuer fiscal period explicitly stated in earnings-release text.
+
+    Never infer a fiscal quarter from an SEC filing date.  This deliberately
+    returns an unresolved period when a release does not state one.
+    """
+    normalized = _re.sub(r"\s+", " ", text or " ").strip()
+    patterns = (
+        _re.compile(
+            r"\b(first|1st|second|2nd|third|3rd|fourth|4th)\s+quarter"
+            r"(?:\s+and\s+(?:full\s+)?fiscal\s+year)?(?:\s+of)?\s+(?:fiscal\s+)?(20\d{2})\b",
+            flags=_re.IGNORECASE,
+        ),
+        _re.compile(r"\bQ([1-4])\s*(?:of\s*)?(?:FY|fiscal\s+year)\s*(20\d{2})\b", flags=_re.IGNORECASE),
+        _re.compile(
+            r"\bfiscal\s+(20\d{2})\b.{0,80}?\b(first|1st|second|2nd|third|3rd|fourth|4th)\s+quarter\b",
+            flags=_re.IGNORECASE,
+        ),
+    )
+    matches = [(index, match) for index, pattern in enumerate(patterns) if (match := pattern.search(normalized))]
+    if matches:
+        # Prefer the first explicit period in the release. Comparative prior-year
+        # figures appear later in the results bullets (AEHR is a concrete case).
+        index, match = min(matches, key=lambda item: item[1].start())
+        if index == 2:
+            year, quarter_word = match.group(1), match.group(2).lower()
+            quarter = _QUARTER_WORDS[quarter_word]
+        elif index == 1:
+            quarter, year = match.group(1), match.group(2)
+        else:
+            quarter_word, year = match.group(1).lower(), match.group(2)
+            quarter = _QUARTER_WORDS[quarter_word]
+        return {
+            "period": f"FY{year} Q{quarter}",
+            "periodStatus": "EX99_TEXT_RESOLVED",
+            "periodEvidence": _compact_excerpt(match.group(0), max_len=220),
+        }
+    return {
+        "period": None,
+        "periodStatus": "UNRESOLVED",
+        "periodEvidence": None,
+    }
+
+
+async def _resolve_earnings_period_from_source(source: dict) -> dict[str, str | None]:
+    source_url = str(source.get("url") or "")
+    if not source_url:
+        return _extract_earnings_period_from_text("")
+    if source_url.startswith("https://www.sec.gov/Archives/"):
+        html = await _edgar_get_html(source_url, max_bytes=500_000)
+    else:
+        html = _fetch_public_html(source_url, max_bytes=500_000)
+    return _extract_earnings_period_from_text(_strip_html_tags(_sanitize_sec_html(html or "")))
+
+
+def _extract_reported_text_metric(
+    text: str,
+    label_pattern: str,
+    value_pattern: str,
+) -> tuple[float | None, str | None, str | None]:
+    """Extract only explicitly reported prose metrics, never guidance wording.
+
+    Free-text release prose cannot be decision-grade without a structured
+    period-matched table or XBRL context.  This helper is intentionally strict:
+    a sentence needs both an actual-result verb and a value near the requested
+    metric label, and guidance/outlook language always wins as an exclusion.
+    """
+    for sentence in _re.split(r"(?<=[.!?])\s+", _re.sub(r"\s+", " ", text or "")):
+        if not _re.search(label_pattern, sentence, flags=_re.IGNORECASE):
+            continue
+        if _GUIDANCE_CONTEXT_RE.search(sentence) or not _REPORTED_CONTEXT_RE.search(sentence):
+            continue
+        match = _re.search(
+            rf"(?:{label_pattern})\D{{0,100}}?{value_pattern}",
+            sentence,
+            flags=_re.IGNORECASE,
+        )
+        if not match:
+            continue
+        raw = match.group(1)
+        value = _scale_number_from_text(raw)
+        if value is not None:
+            return value, raw, _compact_excerpt(sentence, max_len=220)
+    return None, None, None
 
 
 def _is_paywalled_url(url: str) -> bool:
@@ -156,6 +263,10 @@ async def _resolve_latest_earnings_sec_source(ticker: str) -> dict | None:
     raw = await _server_attr("list_sec_company_filings")(ticker=ticker, filing_type="8-K", limit=10)
     payload = _safe_json_loads(raw)
     filings = payload.get("filings") if isinstance(payload.get("filings"), list) else []
+    try:
+        issuer_cik = int(str(payload.get("cik") or "").lstrip("0"))
+    except (TypeError, ValueError):
+        issuer_cik = None
     if not filings:
         return None
     for filing in filings:
@@ -168,7 +279,10 @@ async def _resolve_latest_earnings_sec_source(ticker: str) -> dict | None:
         # Try to resolve EX-99.1 exhibit URL (contains the actual press release)
         ex991_url = None
         if accn:
-            cik = _edgar_cik_from_accession(accn)
+            # The accession prefix identifies the filing agent, not necessarily
+            # the issuer. SEC archive paths must use the issuer CIK returned by
+            # the submission response (AEHR is a concrete counterexample).
+            cik = issuer_cik
             if cik:
                 ex991_url = await _resolve_ex991_url(accn, cik)
         source_url = ex991_url or doc_url
@@ -189,11 +303,12 @@ async def _resolve_latest_earnings_release(ticker: str) -> dict:
     sec = await _resolve_latest_earnings_sec_source(ticker)
     if sec:
         reporting_ts = _to_iso_utc(sec.get("acceptedAt")) or _to_iso_utc(sec.get("filingDate"))
-        period = _derive_fiscal_period_from_date(sec.get("filingDate")) or "latest"
         return {
             "ticker": ticker.upper(),
             "eventType": "earnings_release",
-            "period": period,
+            "period": "latest",
+            "periodStatus": "UNRESOLVED",
+            "periodEvidence": None,
             "reportedAt": reporting_ts,
             "sources": [sec],
             "confidence": "HIGH",
@@ -206,11 +321,12 @@ async def _resolve_latest_earnings_release(ticker: str) -> dict:
     earnings_dates = (((cal.get("calendar") or {}).get("earnings") or {}).get("earningsDate") or [])
     published = earnings_dates[0] if isinstance(earnings_dates, list) and earnings_dates else None
     if published:
-        period = _derive_fiscal_period_from_date(published) or "latest"
         return {
             "ticker": ticker.upper(),
             "eventType": "earnings_release",
-            "period": period,
+            "period": "latest",
+            "periodStatus": "UNRESOLVED",
+            "periodEvidence": None,
             "reportedAt": _to_iso_utc(published),
             "sources": [
                 {
@@ -229,6 +345,8 @@ async def _resolve_latest_earnings_release(ticker: str) -> dict:
         "ticker": ticker.upper(),
         "eventType": "earnings_release",
         "period": "latest",
+        "periodStatus": "UNRESOLVED",
+        "periodEvidence": None,
         "reportedAt": None,
         "sources": [],
         "confidence": "NOT_FOUND",
@@ -239,7 +357,7 @@ async def _resolve_latest_earnings_release(ticker: str) -> dict:
 @yfinance_server.tool(
     name="get_latest_earnings_release",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_latest_earnings_release"],
-    description="Find the latest public earnings release evidence from SEC 8-K, company IR, or Yahoo earnings calendars.",
+    description="Find the latest public earnings release evidence. Fiscal period is returned only when explicit release text resolves it; otherwise it remains unresolved.",
 )
 async def get_latest_earnings_release(ticker: str, period: str = "latest") -> str:
     _ = period  # reserved for future explicit periods
@@ -247,6 +365,10 @@ async def get_latest_earnings_release(ticker: str, period: str = "latest") -> st
     if err:
         return _wrap_envelope_v2("get_latest_earnings_release", None, error=err, error_code=ErrorCode.INPUT_VALIDATION_ERROR)
     data = await _resolve_latest_earnings_release(ticker)
+    sources = data.get("sources") if isinstance(data.get("sources"), list) else []
+    source = sources[0] if sources and isinstance(sources[0], dict) else None
+    if source and str(source.get("sourceType") or "") != "yahoo_estimate":
+        data.update(await _resolve_earnings_period_from_source(source))
     return _wrap_envelope_v2("get_latest_earnings_release", data)
 
 
@@ -296,9 +418,12 @@ async def index_earnings_release(ticker: str, period: str = "latest", source_url
         return _wrap_envelope_v2("index_earnings_release", None, error=f"Failed to fetch source: {source_url}", error_code=ErrorCode.PROVIDER_ERROR)
 
     idx = _server_attr("_build_filing_index_from_html")(_sanitize_sec_html(html))
+    period_info = _extract_earnings_period_from_text(_strip_html_tags(_sanitize_sec_html(html)))
     out_data = {
         "ticker": ticker.upper(),
-        "period": _derive_fiscal_period_from_date(source_meta.get("filingDate") or source_meta.get("publishedAt")) or period,
+        "period": period_info["period"] or period,
+        "periodStatus": period_info["periodStatus"],
+        "periodEvidence": period_info["periodEvidence"],
         "source": {
             "sourceType": source_type or source_meta.get("sourceType") or "company_ir",
             "url": source_url,
@@ -318,7 +443,7 @@ async def index_earnings_release(ticker: str, period: str = "latest", source_url
 @yfinance_server.tool(
     name="extract_earnings_metrics",
     output_schema=_TOOL_OUTPUT_SCHEMAS["extract_earnings_metrics"],
-    description="Extract reported earnings metrics (revenue, EPS, margin, operating income, free cash flow, capex) from public earnings sources.",
+    description="Extract reported earnings metrics from public earnings sources. EX-99 prose or unscoped iXBRL values remain non-decision-grade until their period is structurally matched.",
 )
 async def extract_earnings_metrics(
     ticker: str,
@@ -355,37 +480,29 @@ async def extract_earnings_metrics(
     src_type = str(src.get("sourceType") or "yahoo")
     src_published = _to_iso_utc(src.get("filingDate") or src.get("publishedAt"))
     retrieved_at = _utc_now_iso()
+    period_info = _extract_earnings_period_from_text("")
 
     if src_url and src_url.startswith("https://www.sec.gov/Archives/"):
         html = await _edgar_get_html(src_url, max_bytes=5_000_000)
         text = _strip_html_tags(_sanitize_sec_html(html or ""))
-        revenue_val, revenue_raw, revenue_ex = _extract_metric_number(
-            text,
-            [
-                r"(?:net sales|revenue(?:s)?)\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)",
-            ],
+        period_info = _extract_earnings_period_from_text(text)
+        revenue_val, revenue_raw, revenue_ex = _extract_reported_text_metric(
+            text, r"net sales|revenue(?:s)?", r"\$\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)",
         )
-        eps_val, eps_raw, eps_ex = _extract_metric_number(
-            text,
-            [
-                r"(?:diluted (?:earnings per share|eps)|eps \(diluted\))\D{0,20}\$?\s*([0-9]+(?:\.[0-9]+)?)",
-            ],
+        eps_val, eps_raw, eps_ex = _extract_reported_text_metric(
+            text, r"diluted (?:earnings per share|eps)|eps \(diluted\)", r"\$\s*([0-9]+(?:\.[0-9]+)?)",
         )
-        gm_val, gm_raw, gm_ex = _extract_metric_number(
-            text,
-            [r"gross margin\D{0,15}([0-9]{1,2}(?:\.[0-9]+)?)\s*%"],
+        gm_val, gm_raw, gm_ex = _extract_reported_text_metric(
+            text, r"gross margin", r"([0-9]{1,2}(?:\.[0-9]+)?)\s*%",
         )
-        op_val, op_raw, op_ex = _extract_metric_number(
-            text,
-            [r"operating income\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)"],
+        op_val, op_raw, op_ex = _extract_reported_text_metric(
+            text, r"operating income", r"\$\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)",
         )
-        fcf_val, fcf_raw, fcf_ex = _extract_metric_number(
-            text,
-            [r"free cash flow\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)"],
+        fcf_val, fcf_raw, fcf_ex = _extract_reported_text_metric(
+            text, r"free cash flow", r"\$\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)",
         )
-        capex_val, capex_raw, capex_ex = _extract_metric_number(
-            text,
-            [r"(?:capital expenditures|capex)\D{0,20}\$?\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)"],
+        capex_val, capex_raw, capex_ex = _extract_reported_text_metric(
+            text, r"capital expenditures|capex", r"\$\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)",
         )
 
         def _ev(excerpt: str | None) -> dict | None:
@@ -404,7 +521,9 @@ async def extract_earnings_metrics(
                 "value": revenue_val,
                 "unit": "USD",
                 "rawValue": revenue_raw,
-                "confidence": "HIGH",
+                "confidence": "LOW",
+                "extractionMethod": "EX99_TEXT_CONTEXT",
+                "periodMatch": bool(period_info["period"]),
                 "evidence": _ev(revenue_ex),
             }
         if eps_val is not None:
@@ -412,7 +531,9 @@ async def extract_earnings_metrics(
                 "value": eps_val,
                 "unit": "USD/share",
                 "rawValue": f"${eps_raw}" if eps_raw else None,
-                "confidence": "HIGH",
+                "confidence": "LOW",
+                "extractionMethod": "EX99_TEXT_CONTEXT",
+                "periodMatch": bool(period_info["period"]),
                 "evidence": _ev(eps_ex),
             }
         if gm_val is not None:
@@ -421,7 +542,9 @@ async def extract_earnings_metrics(
                 "valueRatio": round(gm_pct / 100.0, 6),
                 "valuePct": gm_pct,
                 "rawValue": f"{gm_raw}%" if gm_raw and "%" not in gm_raw else gm_raw,
-                "confidence": "HIGH",
+                "confidence": "LOW",
+                "extractionMethod": "EX99_TEXT_CONTEXT",
+                "periodMatch": bool(period_info["period"]),
                 "evidence": _ev(gm_ex),
             }
         if op_val is not None:
@@ -429,7 +552,9 @@ async def extract_earnings_metrics(
                 "value": op_val,
                 "unit": "USD",
                 "rawValue": op_raw,
-                "confidence": "HIGH",
+                "confidence": "LOW",
+                "extractionMethod": "EX99_TEXT_CONTEXT",
+                "periodMatch": bool(period_info["period"]),
                 "evidence": _ev(op_ex),
             }
         if fcf_val is not None:
@@ -437,7 +562,9 @@ async def extract_earnings_metrics(
                 "value": fcf_val,
                 "unit": "USD",
                 "rawValue": fcf_raw,
-                "confidence": "HIGH",
+                "confidence": "LOW",
+                "extractionMethod": "EX99_TEXT_CONTEXT",
+                "periodMatch": bool(period_info["period"]),
                 "evidence": _ev(fcf_ex),
             }
         if capex_val is not None:
@@ -445,27 +572,38 @@ async def extract_earnings_metrics(
                 "value": capex_val,
                 "unit": "USD",
                 "rawValue": capex_raw,
-                "confidence": "HIGH",
+                "confidence": "LOW",
+                "extractionMethod": "EX99_TEXT_CONTEXT",
+                "periodMatch": bool(period_info["period"]),
                 "evidence": _ev(capex_ex),
             }
         for key in ("revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex"):
             ev = metrics[key].get("evidence") if isinstance(metrics[key], dict) else None
             conf = str(metrics[key].get("confidence") or "")
-            if conf == "HIGH" and isinstance(ev, dict):
+            if conf in {"HIGH", "LOW"} and isinstance(ev, dict):
                 evidence_items.append(ev)
+        if any(str((metrics[k] or {}).get("confidence")) == "LOW" for k in metrics):
+            warnings.append({
+                "code": "TEXT_METRIC_VERIFY_REQUIRED",
+                "message": "EX-99 prose extraction is contextual but not decision-grade without a structured period-matched table or XBRL fact.",
+            })
     else:
         warnings.append({"code": "PUBLIC_RELEASE_NOT_FOUND", "message": "No SEC 8-K earnings release source available"})
 
     overall_conf = "NOT_DISCLOSED"
     if any(str((metrics[k] or {}).get("confidence")) == "HIGH" for k in ("revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex")):
         overall_conf = "HIGH"
+    elif any(str((metrics[k] or {}).get("confidence")) == "LOW" for k in ("revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex")):
+        overall_conf = "LOW"
     elif release.get("confidence") in {"MEDIUM", "LOW"}:
         overall_conf = str(release.get("confidence"))
 
     return _wrap_envelope_v2("extract_earnings_metrics", {
         "ticker": ticker.upper(),
         "eventType": "earnings_release",
-        "period": release.get("period") or period,
+        "period": period_info["period"] or release.get("period") or period,
+        "periodStatus": period_info["periodStatus"],
+        "periodEvidence": period_info["periodEvidence"],
         "reportedAt": release.get("reportedAt"),
         "source": src_type if src_type else "yahoo",
         "metrics": metrics,
@@ -587,7 +725,7 @@ async def extract_management_commentary(ticker: str, period: str = "latest", top
 @yfinance_server.tool(
     name="compare_earnings_actual_vs_estimate",
     output_schema=_TOOL_OUTPUT_SCHEMAS["compare_earnings_actual_vs_estimate"],
-    description="Compare the latest reported quarter with non-null actual EPS against Yahoo's historical estimate for that same reported quarter/date.",
+    description="Compare the latest reported quarter with Yahoo's historical estimate. Returns epsDelta and omits percentage surprise for near-zero estimates, with an explicit warning.",
 )
 async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest") -> str:
     raw_metrics = _safe_json_loads(await extract_earnings_metrics(ticker=ticker, period=period))
@@ -722,8 +860,18 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
         })
         return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
 
+    eps_delta = float(actual_eps) - float(eps_est)
+    result["surprise"]["epsDelta"] = round(eps_delta, 4)
+    if abs(float(eps_est)) < 0.02:
+        warnings.append({
+            "code": "EPS_NEAR_ZERO_ESTIMATE_BASE",
+            "message": "EPS percentage surprise is omitted because the absolute estimate is below $0.02 per share; use epsDelta instead.",
+        })
+        result["confidence"] = "MEDIUM"
+        return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
+
     try:
-        result["surprise"]["epsSurprisePct"] = round(((float(actual_eps) - float(eps_est)) / abs(float(eps_est))) * 100, 2)
+        result["surprise"]["epsSurprisePct"] = round((eps_delta / abs(float(eps_est))) * 100, 2)
     except Exception:
         return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
     result["confidence"] = "HIGH" if result["surprise"]["revenueSurprisePct"] is not None else "MEDIUM"
