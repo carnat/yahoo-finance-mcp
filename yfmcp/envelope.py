@@ -13,8 +13,8 @@ from typing import TypedDict
 # ---------------------------------------------------------------------------
 # Server version and envelope feature flag
 # ---------------------------------------------------------------------------
-SERVER_VERSION = "0.2.0"
-BUILD_DATE = "2026-06-14"  # date of this release; update on each deploy
+SERVER_VERSION = os.environ.get("SERVER_VERSION", "0.2.0")
+BUILD_DATE = os.environ.get("BUILD_DATE", "unknown")
 
 
 class _DynamicEnvelopeV2Flag:
@@ -195,6 +195,7 @@ def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metri
         is_fact = "value" in val or "low" in val or "high" in val or "valueRatio" in val or "valuePct" in val or is_metric
         
         if is_fact:
+            has_explicit_decision_grade = "decisionGrade" in val
             conf = val.get("confidence") or parent_confidence
             if not conf:
                 if val.get("value") is not None or val.get("low") is not None or val.get("valueRatio") is not None:
@@ -290,7 +291,8 @@ def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metri
 
             val["sourceType"] = val.get("sourceType") or inferred_source_type
             val["evidenceRequired"] = True
-            val["decisionGrade"] = conf in {"HIGH", "MEDIUM"}
+            if not has_explicit_decision_grade:
+                val["decisionGrade"] = False
             
         source_type = val.get("source") or val.get("sourceType") or parent_source_type
         confidence = val.get("confidence") or parent_confidence

@@ -725,7 +725,7 @@ async def extract_management_commentary(ticker: str, period: str = "latest", top
 @yfinance_server.tool(
     name="compare_earnings_actual_vs_estimate",
     output_schema=_TOOL_OUTPUT_SCHEMAS["compare_earnings_actual_vs_estimate"],
-    description="Compare the latest reported quarter with Yahoo's historical estimate. Returns epsDelta and omits percentage surprise for near-zero estimates, with an explicit warning.",
+    description="Compare official-release actuals with Yahoo's historical estimate row. The official fiscal label remains period/reportedPeriod; estimatePeriod and reportedDate identify the Yahoo row. Read periodAlignmentStatus before using cross-source revenue comparisons. Returns epsDelta and omits percentage surprise for near-zero estimates.",
 )
 async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest") -> str:
     raw_metrics = _safe_json_loads(await extract_earnings_metrics(ticker=ticker, period=period))
@@ -789,8 +789,20 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
         return (1, parsed.isoformat())
 
     selected = sorted(reported_rows, key=_sort_key, reverse=True)[0] if reported_rows else None
-    reported_period = _row_period(selected)
-    reported_date = _row_date(selected) or metrics.get("reportedAt")
+    source_period = str(metrics.get("period") or "").strip()
+    if not source_period or source_period.lower() == "latest":
+        source_period = None
+    estimate_period = _row_period(selected)
+    reported_date = _row_date(selected)
+    if source_period and estimate_period:
+        if source_period == estimate_period:
+            period_alignment_status = "MATCHED"
+        elif _re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:T.*)?", estimate_period):
+            period_alignment_status = "UNVERIFIED"
+        else:
+            period_alignment_status = "MISMATCH"
+    else:
+        period_alignment_status = "INCOMPLETE"
 
     actual_rev = (((metrics.get("metrics") or {}).get("revenue") or {}).get("value")
                   if isinstance((metrics.get("metrics") or {}).get("revenue"), dict) else None)
@@ -808,7 +820,7 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
         row_period = str(row.get("period") or row.get("reportedPeriod") or "")
         row_date = _row_date(row)
         if (
-            (reported_period and row_period == reported_period)
+            (estimate_period and row_period == estimate_period)
             or (reported_date and row_date == reported_date)
         ):
             revenue_est = _num(row.get("avg"))
@@ -817,16 +829,25 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
     warnings: list[dict] = []
     result = {
         "ticker": ticker.upper(),
-        "period": reported_period or metrics.get("period") or period,
-        "reportedPeriod": reported_period,
+        "period": source_period or estimate_period or period,
+        "reportedPeriod": source_period or estimate_period,
         "reportedDate": reported_date,
+        "releasePublishedAt": metrics.get("reportedAt"),
+        "estimatePeriod": estimate_period,
+        "periodAlignmentStatus": period_alignment_status,
         "actual": {
-            "revenue": {"value": actual_rev, "unit": "USD"},
-            "eps": {"value": actual_eps, "unit": "USD/share"},
+            "revenue": {
+                **(((metrics.get("metrics") or {}).get("revenue") or {}) if isinstance((metrics.get("metrics") or {}).get("revenue"), dict) else {}),
+                "value": actual_rev,
+                "unit": "USD",
+                "period": source_period,
+                "decisionGrade": bool((((metrics.get("metrics") or {}).get("revenue") or {}).get("decisionGrade")) if isinstance((metrics.get("metrics") or {}).get("revenue"), dict) else False),
+            },
+            "eps": {"value": actual_eps, "unit": "USD/share", "source": "yahoo", "period": estimate_period or reported_date, "decisionGrade": False},
         },
         "estimate": {
-            "revenue": {"value": revenue_est, "unit": "USD", "source": "yahoo"},
-            "eps": {"value": eps_est, "unit": "USD/share", "source": "yahoo"},
+            "revenue": {"value": revenue_est, "unit": "USD", "source": "yahoo", "period": estimate_period or reported_date, "decisionGrade": False},
+            "eps": {"value": eps_est, "unit": "USD/share", "source": "yahoo", "period": estimate_period or reported_date, "decisionGrade": False},
         },
         "surprise": {
             "revenueSurprisePct": None,
@@ -842,12 +863,22 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
         })
         return _wrap_envelope_v2("compare_earnings_actual_vs_estimate", result, warnings=warnings)
 
-    if actual_rev is not None and revenue_est not in (None, 0):
+    if source_period and period_alignment_status != "MATCHED":
+        warnings.append({
+            "code": "PERIOD_ALIGNMENT_MISMATCH" if period_alignment_status == "MISMATCH" else "PERIOD_ALIGNMENT_UNVERIFIED",
+            "message": (
+                "The official-release period differs from the selected Yahoo estimate period; cross-source revenue surprise is omitted."
+                if period_alignment_status == "MISMATCH"
+                else "Yahoo identifies the selected estimate row by date rather than the official fiscal-period label; cross-source revenue surprise is omitted unless the periods can be matched."
+            ),
+        })
+
+    if period_alignment_status == "MATCHED" and actual_rev is not None and revenue_est not in (None, 0):
         try:
             result["surprise"]["revenueSurprisePct"] = round(((float(actual_rev) - float(revenue_est)) / abs(float(revenue_est))) * 100, 2)
         except Exception:
             result["surprise"]["revenueSurprisePct"] = None
-    elif actual_rev is not None:
+    elif actual_rev is not None and period_alignment_status == "MATCHED":
         warnings.append({
             "code": "REVENUE_ESTIMATE_UNAVAILABLE",
             "message": "No Yahoo revenue estimate was available for the selected reported quarter.",

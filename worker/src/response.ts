@@ -16,6 +16,10 @@ export function getWorkerVar(name: string): string | undefined {
   return _workerEnv[name];
 }
 
+export function getServerVersion(): string {
+  return getWorkerVar("SERVER_VERSION") ?? SERVER_VERSION;
+}
+
 export interface ToolMeta {
   tool: string;
   canonicalTool?: string;
@@ -88,7 +92,7 @@ function buildMeta(
     ...(opts?.errorCount != null ? { errorCount: opts.errorCount } : {}),
     source: opts?.source ?? "yahoo_finance",
     dataDate: opts?.dataDate ?? null,
-    serverVersion: SERVER_VERSION,
+    serverVersion: getServerVersion(),
     cacheHit: opts?.cacheHit ?? false,
     warnings: opts?.warnings ?? [],
     ...(opts?.metaExtra || {}),
@@ -104,6 +108,7 @@ function enrichFacts(val: any, parentSourceType: string | null = null, parentCon
     const isFact = ("value" in val) || ("low" in val) || ("high" in val) || ("valueRatio" in val) || ("valuePct" in val) || isMetric;
     
     if (isFact) {
+      const hasExplicitDecisionGrade = Object.prototype.hasOwnProperty.call(val, "decisionGrade");
       let conf = val.confidence || parentConfidence;
       if (!conf) {
         if ((val.value !== undefined && val.value !== null) || (val.low !== undefined && val.low !== null) || (val.valueRatio !== undefined && val.valueRatio !== null)) {
@@ -210,7 +215,7 @@ function enrichFacts(val: any, parentSourceType: string | null = null, parentCon
 
       val.sourceType = val.sourceType || inferredSourceType;
       val.evidenceRequired = true;
-      val.decisionGrade = ["HIGH", "MEDIUM"].includes(conf);
+      if (!hasExplicitDecisionGrade) val.decisionGrade = false;
     }
     
     const sourceType = val.source || val.sourceType || parentSourceType;
@@ -341,7 +346,7 @@ export function mcpFailure(
       tool,
       source: opts?.source ?? "yahoo_finance",
       dataDate: null,
-      serverVersion: SERVER_VERSION,
+      serverVersion: getServerVersion(),
       cacheHit: false,
       warnings: [],
       ...(opts?.metaExtra || {}),

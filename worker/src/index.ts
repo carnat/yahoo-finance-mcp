@@ -72,11 +72,12 @@ export default {
         return new Response("Method Not Allowed", { status: 405, headers: CORS_HEADERS });
       }
       const token = getWorkerVar("AUDIT_TOKEN");
-      if (token) {
-        const authHeader = request.headers.get("Authorization") ?? "";
-        if (authHeader !== `Bearer ${token}`) {
-          return new Response("Unauthorized", { status: 401, headers: CORS_HEADERS });
-        }
+      if (!token) {
+        return new Response("Not Found", { status: 404, headers: CORS_HEADERS });
+      }
+      const authHeader = request.headers.get("Authorization") ?? "";
+      if (authHeader !== `Bearer ${token}`) {
+        return new Response("Unauthorized", { status: 401, headers: CORS_HEADERS });
       }
       return json(await runAudit());
     }

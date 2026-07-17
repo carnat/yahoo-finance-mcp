@@ -57,13 +57,12 @@ class TestManifestDiagnostics(unittest.TestCase):
 
     def test_get_manifest_diagnostics_shape(self):
         result = json.loads(_run(self.srv.get_manifest_diagnostics()))
-        self.assertIn("toolCount", result)
-        self.assertIn("privacyScope", result)
-        self.assertIn("canonicalToolCount", result)
-        self.assertIn("deprecatedAliasCount", result)
-        self.assertIn("workerSchemaGeneratedAt", result)
-        self.assertIn("staleConnectorWarning", result)
-        self.assertIn("manifestHash", result)
+        expected = {
+            "status", "serverVersion", "toolCount", "manifestVersion", "manifestHash",
+            "schemaHash", "runtimeHash", "toolMode", "envelopeSchemaVersion",
+            "generatedAt", "privacyScope",
+        }
+        self.assertEqual(set(result), expected)
 
     def test_privacy_scope_value(self):
         result = json.loads(_run(self.srv.get_manifest_diagnostics()))
@@ -74,22 +73,24 @@ class TestManifestDiagnostics(unittest.TestCase):
         self.assertIsInstance(result["toolCount"], int)
         self.assertGreater(result["toolCount"], 0)
 
-    def test_canonical_count_gte_deprecated(self):
+    def test_schema_hash_is_distinct_manifest_identity(self):
         result = json.loads(_run(self.srv.get_manifest_diagnostics()))
-        self.assertGreaterEqual(result["canonicalToolCount"], 0)
-        self.assertGreaterEqual(result["deprecatedAliasCount"], 0)
-        self.assertGreater(result["canonicalToolCount"], result["deprecatedAliasCount"])
-
-    def test_stale_connector_warning_present(self):
-        result = json.loads(_run(self.srv.get_manifest_diagnostics()))
-        warning = result.get("staleConnectorWarning")
-        self.assertIsNotNone(warning)
-        self.assertIn("source of truth", warning.lower())
+        self.assertIsInstance(result["schemaHash"], str)
+        self.assertGreater(len(result["schemaHash"]), 0)
+        self.assertNotEqual(result["schemaHash"], result["manifestHash"])
 
     def test_manifest_hash_is_string(self):
         result = json.loads(_run(self.srv.get_manifest_diagnostics()))
         self.assertIsInstance(result["manifestHash"], str)
         self.assertGreater(len(result["manifestHash"]), 0)
+
+    def test_public_diagnostics_omit_operational_details(self):
+        result = json.loads(_run(self.srv.get_manifest_diagnostics()))
+        forbidden = {
+            "buildSha", "deployedAt", "hiddenAliases", "batchContracts",
+            "responseFieldContract", "doctrineToolStatus", "structuredFactProvider",
+        }
+        self.assertTrue(forbidden.isdisjoint(result))
 
 
 # ---------------------------------------------------------------------------

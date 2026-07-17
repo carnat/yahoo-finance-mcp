@@ -2,12 +2,13 @@
  * MCP Streamable HTTP protocol handler (stateless, no sessions).
  *
  * Implements the JSON-RPC 2.0 layer of the MCP spec:
- *   https://spec.modelcontextprotocol.io/specification/2024-11-05/
+ *   https://modelcontextprotocol.io/specification/2025-06-18/
  *
  * Supports: initialize, ping, tools/list, tools/call
  * Notifications (no `id` field) are accepted but produce no response body.
  */
 
+import { getServerVersion } from "./response.js";
 import { callVisibleTool, listVisibleTools } from "./tools.js";
 
 interface JsonRpcRequest {
@@ -64,12 +65,18 @@ async function handleMessage(msg: McpMessage): Promise<unknown> {
 
 async function dispatch(method: string, params: unknown): Promise<unknown> {
   switch (method) {
-    case "initialize":
+    case "initialize": {
+      const requestedVersion = (params as { protocolVersion?: unknown } | null)?.protocolVersion;
+      const supportedVersions = new Set(["2025-06-18", "2024-11-05"]);
+      const protocolVersion = typeof requestedVersion === "string" && supportedVersions.has(requestedVersion)
+        ? requestedVersion
+        : "2025-06-18";
       return {
-        protocolVersion: "2024-11-05",
-        serverInfo: { name: "yahoo-finance-mcp", version: "1.0.0" },
+        protocolVersion,
+        serverInfo: { name: "yahoo-finance-mcp", version: getServerVersion() },
         capabilities: { tools: {} },
       };
+    }
 
     case "ping":
       return {};
@@ -82,7 +89,21 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       if (!p?.name) throw Object.assign(new Error("Missing tool name"), { code: -32602 });
 
       const text = await callVisibleTool(p.name, p.arguments ?? {});
-      return { content: [{ type: "text", text }] };
+      let parsed: unknown = null;
+      try { parsed = JSON.parse(text); } catch { /* text-only legacy payload */ }
+      const structuredContent = parsed != null && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : parsed !== null
+          ? { result: parsed }
+          : null;
+      const isError = structuredContent != null && (
+        structuredContent.ok === false || structuredContent.error === true
+      );
+      return {
+        content: [{ type: "text", text }],
+        ...(structuredContent ? { structuredContent } : {}),
+        ...(isError ? { isError: true } : {}),
+      };
     }
 
     default:

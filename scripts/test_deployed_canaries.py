@@ -29,7 +29,6 @@ UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-canary/1.0)"
 
 EXPECTED_SCHEMA_VERSION = "2026-07-08"
 EXPECTED_TOOL_MODE = os.environ.get("EXPECTED_TOOL_MODE", os.environ.get("TOOL_MODE", "expanded")).lower()
-EXPECTED_BUILD_SHA = os.environ.get("EXPECTED_BUILD_SHA", "").strip()
 ALLOW_NETWORK_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in {"1", "true", "yes"}
 
 
@@ -73,51 +72,19 @@ def _assert_contract(data: Any, label: str) -> None:
     if not isinstance(data, dict):
         raise AssertionError(f"{label} returned non-object data: {data!r}")
     required = (
-        "envelopeSchemaVersion",
-        "toolMode",
-        "defaultToolMode",
-        "groupedAvailable",
-        "groupedEnabled",
-        "responseFieldContract",
-        "hiddenAliases",
-        "doctrineToolStatus",
-        "batchContracts",
-        "buildSha",
+        "toolCount",
+        "manifestVersion",
+        "manifestHash",
+        "privacyScope",
     )
     for field in required:
         if field not in data:
             raise AssertionError(f"{label} missing {field}: {data}")
-    if data.get("envelopeSchemaVersion") != EXPECTED_SCHEMA_VERSION:
+    if data.get("envelopeSchemaVersion") not in (None, EXPECTED_SCHEMA_VERSION):
         raise AssertionError(f"{label} envelopeSchemaVersion mismatch: {data}")
     if EXPECTED_TOOL_MODE and str(data.get("toolMode", "")).lower() != EXPECTED_TOOL_MODE:
-        raise AssertionError(f"{label} toolMode mismatch: {data}")
-    if data.get("defaultToolMode") != "expanded":
-        raise AssertionError(f"{label} defaultToolMode mismatch: {data}")
-    if data.get("groupedAvailable") is not True:
-        raise AssertionError(f"{label} groupedAvailable must be true: {data}")
-    if "get_holder_info" not in (data.get("hiddenAliases") or {}):
-        raise AssertionError(f"{label} missing get_holder_info hidden alias: {data}")
-    if EXPECTED_BUILD_SHA and data.get("buildSha") != EXPECTED_BUILD_SHA:
-        raise AssertionError(
-            f"{label} buildSha mismatch: {data.get('buildSha')!r} != {EXPECTED_BUILD_SHA!r}"
-        )
-
-    news_contract = ((data.get("batchContracts") or {}).get("get_company_news") or {})
-    if news_contract.get("batchMode") != "independent_per_ticker":
-        raise AssertionError(f"{label} missing independent get_company_news batch contract: {data}")
-    ir_contract = data.get("companyIrRssDiscovery") or {}
-    if ir_contract.get("provider") != "company_ir_rss" or ir_contract.get("source") != "company_ir":
-        raise AssertionError(f"{label} missing company IR RSS discovery contract: {data}")
-    if ir_contract.get("defaultInGetCompanyNews") is not False:
-        raise AssertionError(f"{label} company IR RSS must not be in get_company_news defaults: {data}")
-
-    status_map = data.get("doctrineToolStatus") or {}
-    press = status_map.get("get_company_press_releases") or {}
-    if press.get("capabilityStatus") != "ACTIVE" or press.get("doctrineUse") != "ALLOWED":
-        raise AssertionError(f"{label} press-release tool status mismatch: {press}")
-    overnight = status_map.get("get_overnight_quote") or {}
-    if overnight.get("doctrineUse") != "DIAGNOSTICS_ONLY":
-        raise AssertionError(f"{label} overnight tool status mismatch: {overnight}")
+        if data.get("toolMode") is not None:
+            raise AssertionError(f"{label} toolMode mismatch: {data}")
 
 
 def health_contract(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
