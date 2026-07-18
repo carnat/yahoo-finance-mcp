@@ -7,9 +7,10 @@
         "get_analyst_rating_changes": "get_analyst_upgrade_radar",
         "get_analyst_recommendations": "get_recommendations",
         "get_company_events_calendar": "get_calendar",
+        "get_market_calendar": "get_market_calendar",
         "get_earnings_analysis": "get_earnings_analysis"
       },
-      "description": "Analyst ratings, forecasts, and earnings momentum.\n\nActions:\n- get_analyst_consensus: Targets + rating breakdown. Params: ticker\n- get_earnings_analysis: EPS/revenue estimates. Params: ticker\n- get_analyst_recommendations: Raw recs. recommendation_type: recommendations, upgrades_downgrades\n- get_analyst_rating_changes: Recent changes with signal. Params: ticker\n- analyze_earnings_momentum: Revision momentum. Params: ticker\n- get_company_events_calendar: Earnings/dividend dates. Params: ticker"
+      "description": "Analyst ratings, forecasts, and market calendars.\n\nActions:\n- get_analyst_consensus: Targets + rating breakdown. Params: ticker\n- get_earnings_analysis: EPS/revenue estimates and revision counts. Params: ticker\n- get_analyst_recommendations: Raw recs. recommendation_type: recommendations, upgrades_downgrades\n- get_analyst_rating_changes: Recent changes with signal. Params: ticker\n- analyze_earnings_momentum: Revision momentum. Params: ticker\n- get_company_events_calendar: Upcoming Yahoo dates or earnings history. Params: ticker, mode, limit, offset\n- get_market_calendar: Market-wide earnings/economic/IPO/splits. Params: event_type, start_date, end_date, limit, offset"
     },
     "earnings_intelligence": {
       "actions": {
@@ -92,13 +93,14 @@
       "actions": {
         "analyze_credit_health": "get_credit_health",
         "analyze_financial_ratios": "get_financial_ratios",
+        "analyze_share_count_trend": "analyze_share_count_trend",
         "get_company_profile": "get_stock_info",
         "get_corporate_actions": "get_stock_actions",
         "get_financial_statement": "get_financial_statement",
         "get_fund_profile": "get_etf_info",
         "get_ownership_holders": "get_holder_info"
       },
-      "description": "Company fundamentals, financials, and corporate data.\n\nActions:\n- get_company_profile: Key fundamental fields. Params: ticker, include_all\n- get_fund_profile: ETF/fund data. Params: ticker\n- get_financial_statement: Income/balance/cashflow. Params: ticker, financial_type, line_items\n- analyze_financial_ratios: Valuation ratios. Params: ticker\n- analyze_credit_health: Debt metrics. Params: ticker\n- get_corporate_actions: Dividends/splits. Params: ticker\n- get_ownership_holders: Holders data. holder_type: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders"
+      "description": "Company fundamentals, financials, funds, and corporate data.\n\nActions:\n- get_company_profile: Key fundamental fields. Params: ticker, include_all\n- get_fund_profile: Fund data. Params: ticker, sections\n- get_financial_statement: Annual/quarterly/trailing statements. Params: ticker, financial_type, line_items\n- analyze_financial_ratios: Current ratios plus optional valuation history. Params: ticker, history_periods, frequency\n- analyze_share_count_trend: Dilution/buyback share-count trend. Params: ticker, start_date, end_date\n- analyze_credit_health: Debt metrics. Params: ticker\n- get_corporate_actions: Dividends/splits/fund capital gains. Params: ticker\n- get_ownership_holders: Holders data. holder_type: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders"
     },
     "stock_pricing": {
       "actions": {

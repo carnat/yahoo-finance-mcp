@@ -24,6 +24,8 @@ URL = "https://yahoo-finance-mcp.artinatw.workers.dev/mcp"
 UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-deployed-discovery/1.0)"
 CANONICAL_TOOLS = {
     "get_market_quote",
+    "analyze_share_count_trend",
+    "get_market_calendar",
     "analyze_position_signals",
     "calculate_price_target_distance",
     "check_volume_liquidity_threshold",
@@ -96,6 +98,7 @@ ACTION_GROUP = {
     "get_fund_profile": "stock_fundamentals",
     "get_financial_statement": "stock_fundamentals",
     "analyze_financial_ratios": "stock_fundamentals",
+    "analyze_share_count_trend": "stock_fundamentals",
     "analyze_credit_health": "stock_fundamentals",
     "get_corporate_actions": "stock_fundamentals",
     "get_ownership_holders": "stock_fundamentals",
@@ -105,6 +108,7 @@ ACTION_GROUP = {
     "get_analyst_rating_changes": "analyst_data",
     "analyze_earnings_momentum": "analyst_data",
     "get_company_events_calendar": "analyst_data",
+    "get_market_calendar": "analyst_data",
     "get_option_expiration_dates": "options_analysis",
     "get_option_chain": "options_analysis",
     "summarize_options_flow": "options_analysis",
@@ -166,6 +170,8 @@ SMOKE_ARGS: dict[str, dict] = {
     "get_historical_prices": {"ticker": "AAPL", "period": "5d", "interval": "1d"},
     "get_company_profile": {"ticker": "AAPL", "include_all": False},
     "get_fund_profile": {"ticker": "SPY"},
+    "analyze_share_count_trend": {"ticker": "AAPL", "start_date": "2025-01-01"},
+    "get_market_calendar": {"event_type": "earnings", "limit": 5},
     "get_company_news": {"ticker": "AAPL"},
     "search_company_news": {"ticker": "AAPL", "query": "earnings", "max_results": 5},
     "get_company_press_releases": {"ticker": "AAPL", "max_results": 5},

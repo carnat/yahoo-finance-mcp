@@ -95,8 +95,8 @@ Example grouped call:
 Main public tool areas:
 
 - price, volume, technicals, short interest, and market snapshots;
-- company profile, funds, statements, ratios, credit health, ownership, and corporate actions;
-- analyst consensus, rating changes, earnings analysis, and calendars;
+- company profile, section-selectable fund data, annual/quarterly/trailing statements, current and historical valuation ratios, share-count trends, credit health, ownership, and corporate actions including fund capital-gain distributions;
+- analyst consensus, EPS revision counts, rating changes, ticker earnings history, and market-wide earnings/economic/IPO/split calendars;
 - options expirations, chains, flow summaries, and hedge candidates;
 - SEC filing lists, sections, tables, exhibits, text search, and filing indexes;
 - SEC structured extractors for revenue, segment, geography, risk, and exposure queries;
