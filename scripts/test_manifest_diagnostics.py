@@ -92,6 +92,23 @@ class TestManifestDiagnostics(unittest.TestCase):
         }
         self.assertTrue(forbidden.isdisjoint(result))
 
+        instructions = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "yfmcp",
+            "app.py",
+        )
+        with open(instructions, encoding="utf-8") as fh:
+            public_guidance = fh.read()
+        for removed_field in ("build SHA", "deploy time", "envelope V2 status"):
+            self.assertNotIn(removed_field, public_guidance)
+
+    def test_deployed_health_canary_accepts_public_safe_shape(self):
+        from scripts.test_deployed_canaries import health_contract
+
+        result = json.loads(_run(self.srv.health_check()))
+        self.assertNotIn("envelopeV2", result)
+        health_contract(result, {})
+
 
 # ---------------------------------------------------------------------------
 # 2. Freshness classifier unit tests
