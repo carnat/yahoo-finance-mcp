@@ -11,6 +11,8 @@ on:
       - "tool_catalog.json"
       - "pyproject.toml"
       - "scripts/test_deployed_discovery.py"
+      - "scripts/public_tool_contract.py"
+      - "scripts/test_public_tool_contract.py"
       - "scripts/test_deployed_canaries.py"
       - "scripts/deployed_canaries.json"
       - "scripts/test_deployed_extractors.py"

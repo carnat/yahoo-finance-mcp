@@ -72,6 +72,134 @@ _NEWS_EVENT_OUTPUT_SCHEMA: dict = {
     "additionalProperties": True,
 }
 
+_NUMBER_OR_NULL = {"type": ["number", "null"]}
+_STRING_OR_NULL = {"type": ["string", "null"]}
+
+
+def _contextual_output_schema(properties: dict) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "source": {"const": "yahoo_finance"},
+            "evidenceClass": {"const": "CONTEXTUAL_MARKET_DATA"},
+            "decisionGrade": {"const": False},
+            "recommendedNextAction": {
+                "type": "string",
+                "enum": ["NONE", "RETRY_OR_REQUEST_AVAILABLE_SECTION", "CHECK_SEC_FILINGS", "CHECK_OFFICIAL_RELEASES"],
+            },
+            **properties,
+        },
+        "additionalProperties": True,
+    }
+
+
+_FUND_PROFILE_OUTPUT_SCHEMA = _contextual_output_schema({
+    "ticker": {"type": "string"},
+    "sectionsRequested": {"type": "array", "items": {"type": "string"}},
+    "sectionStatus": {"type": "object", "additionalProperties": {"type": "string"}},
+    "description": _STRING_OR_NULL,
+    "fundOverview": {"type": ["object", "null"]},
+    "topHoldings": {"type": ["array", "null"]},
+    "equityHoldings": {"type": ["object", "null"]},
+    "assetClasses": {"type": ["object", "null"]},
+    "sectorWeights": {"type": ["array", "null"]},
+    "fundOperations": {"type": ["object", "null"]},
+    "bondHoldings": {"type": ["object", "null"]},
+    "bondRatings": {"type": ["object", "null"]},
+})
+
+_EARNINGS_ANALYSIS_OUTPUT_SCHEMA = _contextual_output_schema({
+    "ticker": {"type": "string"},
+    "earningsEstimate": {"type": ["array", "null"]},
+    "revenueEstimate": {"type": ["array", "null"]},
+    "epsTrend": {"type": ["array", "null"]},
+    "epsRevisions": {"type": ["array", "null"]},
+    "earningsHistory": {"type": ["array", "null"]},
+    "growthEstimates": {"type": ["array", "null"]},
+})
+
+_FINANCIAL_RATIOS_OUTPUT_SCHEMA = _contextual_output_schema({
+    "ticker": {"type": "string"},
+    "currency": _STRING_OR_NULL,
+    "trailingPE": _NUMBER_OR_NULL,
+    "forwardPE": _NUMBER_OR_NULL,
+    "pegRatio": _NUMBER_OR_NULL,
+    "priceToSales": _NUMBER_OR_NULL,
+    "priceToBook": _NUMBER_OR_NULL,
+    "enterpriseToEbitda": _NUMBER_OR_NULL,
+    "enterpriseToRevenue": _NUMBER_OR_NULL,
+    "grossMargins": _NUMBER_OR_NULL,
+    "operatingMargins": _NUMBER_OR_NULL,
+    "profitMargins": _NUMBER_OR_NULL,
+    "returnOnEquity": _NUMBER_OR_NULL,
+    "returnOnAssets": _NUMBER_OR_NULL,
+    "debtToEquity": _NUMBER_OR_NULL,
+    "currentRatio": _NUMBER_OR_NULL,
+    "quickRatio": _NUMBER_OR_NULL,
+    "freeCashflow": _NUMBER_OR_NULL,
+    "freeCashflowYield": _NUMBER_OR_NULL,
+    "dividendYield": _NUMBER_OR_NULL,
+    "payoutRatio": _NUMBER_OR_NULL,
+    "earningsGrowth": _NUMBER_OR_NULL,
+    "revenueGrowth": _NUMBER_OR_NULL,
+    "valuationHistory": {"type": ["array", "null"], "items": {"type": "object"}},
+    "valuationFrequency": _STRING_OR_NULL,
+    "historyPeriodsRequested": {"type": ["integer", "null"]},
+    "valuationHistoryStatus": _STRING_OR_NULL,
+})
+
+_SHARE_COUNT_TREND_OUTPUT_SCHEMA = _contextual_output_schema({
+    "ticker": {"type": "string"},
+    "status": {"type": "string"},
+    "startDate": _STRING_OR_NULL,
+    "endDate": _STRING_OR_NULL,
+    "dataDate": _STRING_OR_NULL,
+    "firstShares": _NUMBER_OR_NULL,
+    "currentShares": _NUMBER_OR_NULL,
+    "changeShares": _NUMBER_OR_NULL,
+    "changePct": _NUMBER_OR_NULL,
+    "sampleCount": {"type": ["integer", "null"]},
+    "returnedSampleCount": {"type": ["integer", "null"]},
+    "truncated": {"type": ["boolean", "null"]},
+    "observations": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {"date": {"type": "string"}, "shares": {"type": "number"}},
+            "additionalProperties": True,
+        },
+    },
+})
+
+_COMPANY_CALENDAR_OUTPUT_SCHEMA = _contextual_output_schema({
+    "ticker": {"type": "string"},
+    "mode": {"type": "string", "enum": ["upcoming", "history"]},
+    "status": _STRING_OR_NULL,
+    "items": {"type": ["array", "null"]},
+    "calendar": {"type": ["object", "null"]},
+    "limit": {"type": ["integer", "null"]},
+    "offset": {"type": ["integer", "null"]},
+    "hasMore": {"type": ["boolean", "null"]},
+    "confirmationStatus": {"const": "UNVERIFIED"},
+    "earningsDateConfirmed": {"type": ["boolean", "null"]},
+    "earningsDateSource": _STRING_OR_NULL,
+    "providerMethod": _STRING_OR_NULL,
+})
+
+_MARKET_CALENDAR_OUTPUT_SCHEMA = _contextual_output_schema({
+    "status": {"type": "string"},
+    "eventType": {"type": "string", "enum": ["earnings", "economic", "ipo", "splits"]},
+    "startDate": {"type": "string"},
+    "endDate": {"type": "string"},
+    "limit": {"type": "integer"},
+    "offset": {"type": "integer"},
+    "itemCount": {"type": "integer"},
+    "hasMore": {"type": "boolean"},
+    "coverage": {"type": "object"},
+    "items": {"type": "array"},
+    "confirmationStatus": {"const": "UNVERIFIED"},
+})
+
 _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
     "search_thai_funds": {
         "type": "object",
@@ -181,20 +309,11 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
                         'dataDate': {'type': 'string'}},
          'additionalProperties': True},
     "get_analyst_consensus": _SIMPLE_OUTPUT_SCHEMA,
-    "get_earnings_analysis": _SIMPLE_OUTPUT_SCHEMA,
-    "get_financial_ratios": _SIMPLE_OUTPUT_SCHEMA,
-    "analyze_share_count_trend": _SIMPLE_OUTPUT_SCHEMA,
-    "get_market_calendar": _SIMPLE_OUTPUT_SCHEMA,
-    "get_calendar": {'type': 'object',
-         'properties': {'ticker': {'type': 'string'},
-                        'mode': {'type': 'string'},
-                        'confirmationStatus': {'type': 'string'},
-                        'earningsDateConfirmed': {'type': ['boolean', 'null']},
-                        'earningsDateSource': {'type': ['string', 'null']},
-                        'source': {'type': 'string'},
-                        'decisionGrade': {'const': False},
-                        'recommendedNextAction': {'type': 'string'}},
-         'additionalProperties': True},
+    "get_earnings_analysis": _EARNINGS_ANALYSIS_OUTPUT_SCHEMA,
+    "get_financial_ratios": _FINANCIAL_RATIOS_OUTPUT_SCHEMA,
+    "analyze_share_count_trend": _SHARE_COUNT_TREND_OUTPUT_SCHEMA,
+    "get_market_calendar": _MARKET_CALENDAR_OUTPUT_SCHEMA,
+    "get_calendar": _COMPANY_CALENDAR_OUTPUT_SCHEMA,
     "search_ticker": _SIMPLE_OUTPUT_SCHEMA,
     "screen_stocks": _SIMPLE_OUTPUT_SCHEMA,
     "get_filing_data": {'type': 'object',
@@ -314,7 +433,7 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
                         'initiations30d': {'type': ['number', 'null']},
                         'dataDate': {'type': 'string'}},
          'additionalProperties': True},
-    "get_etf_info": _SIMPLE_OUTPUT_SCHEMA,
+    "get_etf_info": _FUND_PROFILE_OUTPUT_SCHEMA,
     "get_overnight_quote": _SIMPLE_OUTPUT_SCHEMA,
     "get_options_flow_scan": {'type': 'object',
          'properties': {'ticker': {'type': 'string'},

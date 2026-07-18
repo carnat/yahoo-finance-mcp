@@ -7006,7 +7006,7 @@ async def analyze_earnings_momentum(ticker: str | list[str]) -> str:
     return await get_earnings_momentum(ticker)
 
 
-@yfinance_server.tool(name="get_company_events_calendar", output_schema=_TOOL_OUTPUT_SCHEMAS["get_calendar"], description="Get a ticker's upcoming Yahoo calendar or paginated earnings history. Yahoo dates are unverified provider data.")
+@yfinance_server.tool(name="get_company_events_calendar", output_schema=_TOOL_OUTPUT_SCHEMAS["get_calendar"], description="Get a ticker's upcoming Yahoo calendar estimates or paginated earnings history. Yahoo dates are UNVERIFIED provider data; confirm material dates with official releases.")
 async def get_company_events_calendar(ticker: str, mode: Literal["upcoming", "history"] = "upcoming", limit: int = 12, offset: int = 0) -> str:
     return await get_calendar(ticker, mode, limit, offset)
 

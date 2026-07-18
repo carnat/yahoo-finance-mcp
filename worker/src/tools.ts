@@ -1093,7 +1093,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_analyst_recommendations", description: "Get analyst recommendations or upgrade/downgrade history. Supported recommendation_type values: recommendations, upgrades_downgrades.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, recommendation_type: { type: "string", enum: SUPPORTED_RECOMMENDATION_TYPES, description: "One of: recommendations, upgrades_downgrades." }, months_back: { type: "number", default: 12 } }, required: ["ticker", "recommendation_type"] } },
   { name: "get_analyst_rating_changes", description: "Get analyst rating changes radar.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, days_back: { type: "number", default: 30 } }, required: ["ticker"] } },
   { name: "analyze_earnings_momentum", description: "Analyze earnings momentum.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
-  { name: "get_company_events_calendar", description: "Get a ticker's upcoming Yahoo calendar or paginated earnings-date history. Yahoo dates are always marked UNVERIFIED.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, mode: { type: "string", enum: ["upcoming", "history"], default: "upcoming" }, limit: { type: "integer", minimum: 1, maximum: 100, default: 12 }, offset: { type: "integer", minimum: 0, default: 0 } }, required: ["ticker"] } },
+  { name: "get_company_events_calendar", description: "Get a ticker's upcoming Yahoo calendar estimates or paginated earnings-date history. Yahoo dates are always marked UNVERIFIED and material dates should be confirmed with official releases.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, mode: { type: "string", enum: ["upcoming", "history"], default: "upcoming" }, limit: { type: "integer", minimum: 1, maximum: 100, default: 12 }, offset: { type: "integer", minimum: 0, default: 0 } }, required: ["ticker"] } },
   { name: "get_market_calendar", description: "Use for market-wide earnings, economic-event, IPO, or stock-split calendar questions. Results are paginated Yahoo provider data, not official confirmation.", inputSchema: { type: "object", properties: { event_type: { type: "string", enum: ["earnings", "economic", "ipo", "splits"], default: "earnings" }, start_date: { type: "string" }, end_date: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100, default: 25 }, offset: { type: "integer", minimum: 0, default: 0 } } } },
   { name: "summarize_options_flow", description: "Summarize options flow.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, expiry_hint: { type: "string" } }, required: ["ticker"] } },
   { name: "analyze_options_flow_window", description: "Analyze options flow in an event window.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, window_label: { type: "string" } }, required: ["ticker", "window_label"] } },
@@ -1185,10 +1185,138 @@ const ENVELOPE_V2_OUTPUT_SCHEMA: Tool["outputSchema"] = {
   additionalProperties: true,
 };
 
+const NUMBER_OR_NULL = { type: ["number", "null"] };
+const STRING_OR_NULL = { type: ["string", "null"] };
+
+function contextualOutputSchema(properties: Record<string, unknown>): Tool["outputSchema"] {
+  return {
+    type: "object",
+    properties: {
+      source: { const: "yahoo_finance" },
+      evidenceClass: { const: "CONTEXTUAL_MARKET_DATA" },
+      decisionGrade: { const: false },
+      recommendedNextAction: {
+        type: "string",
+        enum: ["NONE", "RETRY_OR_REQUEST_AVAILABLE_SECTION", "CHECK_SEC_FILINGS", "CHECK_OFFICIAL_RELEASES"],
+      },
+      ...properties,
+    },
+    additionalProperties: true,
+  };
+}
+
+const FUND_PROFILE_OUTPUT_SCHEMA = contextualOutputSchema({
+  ticker: { type: "string" },
+  sectionsRequested: { type: "array", items: { type: "string" } },
+  sectionStatus: { type: "object", additionalProperties: { type: "string" } },
+  description: STRING_OR_NULL,
+  fundOverview: { type: ["object", "null"] },
+  topHoldings: { type: ["array", "null"] },
+  equityHoldings: { type: ["object", "null"] },
+  assetClasses: { type: ["object", "null"] },
+  sectorWeights: { type: ["array", "null"] },
+  fundOperations: { type: ["object", "null"] },
+  bondHoldings: { type: ["object", "null"] },
+  bondRatings: { type: ["object", "null"] },
+});
+
+const EARNINGS_ANALYSIS_OUTPUT_SCHEMA = contextualOutputSchema({
+  ticker: { type: "string" },
+  earningsEstimate: { type: ["array", "null"] },
+  revenueEstimate: { type: ["array", "null"] },
+  epsTrend: { type: ["array", "null"] },
+  epsRevisions: { type: ["array", "null"] },
+  earningsHistory: { type: ["array", "null"] },
+  growthEstimates: { type: ["array", "null"] },
+});
+
+const FINANCIAL_RATIOS_OUTPUT_SCHEMA = contextualOutputSchema({
+  ticker: { type: "string" },
+  currency: STRING_OR_NULL,
+  trailingPE: NUMBER_OR_NULL,
+  forwardPE: NUMBER_OR_NULL,
+  pegRatio: NUMBER_OR_NULL,
+  priceToSales: NUMBER_OR_NULL,
+  priceToBook: NUMBER_OR_NULL,
+  enterpriseToEbitda: NUMBER_OR_NULL,
+  enterpriseToRevenue: NUMBER_OR_NULL,
+  grossMargins: NUMBER_OR_NULL,
+  operatingMargins: NUMBER_OR_NULL,
+  profitMargins: NUMBER_OR_NULL,
+  returnOnEquity: NUMBER_OR_NULL,
+  returnOnAssets: NUMBER_OR_NULL,
+  debtToEquity: NUMBER_OR_NULL,
+  currentRatio: NUMBER_OR_NULL,
+  quickRatio: NUMBER_OR_NULL,
+  freeCashflow: NUMBER_OR_NULL,
+  freeCashflowYield: NUMBER_OR_NULL,
+  dividendYield: NUMBER_OR_NULL,
+  payoutRatio: NUMBER_OR_NULL,
+  earningsGrowth: NUMBER_OR_NULL,
+  revenueGrowth: NUMBER_OR_NULL,
+  valuationHistory: { type: ["array", "null"], items: { type: "object" } },
+  valuationFrequency: STRING_OR_NULL,
+  historyPeriodsRequested: { type: ["integer", "null"] },
+  valuationHistoryStatus: STRING_OR_NULL,
+});
+
+const SHARE_COUNT_TREND_OUTPUT_SCHEMA = contextualOutputSchema({
+  ticker: { type: "string" },
+  status: { type: "string" },
+  startDate: STRING_OR_NULL,
+  endDate: STRING_OR_NULL,
+  dataDate: STRING_OR_NULL,
+  firstShares: NUMBER_OR_NULL,
+  currentShares: NUMBER_OR_NULL,
+  changeShares: NUMBER_OR_NULL,
+  changePct: NUMBER_OR_NULL,
+  sampleCount: { type: ["integer", "null"] },
+  returnedSampleCount: { type: ["integer", "null"] },
+  truncated: { type: ["boolean", "null"] },
+  observations: {
+    type: "array",
+    items: {
+      type: "object",
+      properties: { date: { type: "string" }, shares: { type: "number" } },
+      additionalProperties: true,
+    },
+  },
+});
+
+const COMPANY_CALENDAR_OUTPUT_SCHEMA = contextualOutputSchema({
+  ticker: { type: "string" },
+  mode: { type: "string", enum: ["upcoming", "history"] },
+  status: STRING_OR_NULL,
+  items: { type: ["array", "null"] },
+  calendar: { type: ["object", "null"] },
+  limit: { type: ["integer", "null"] },
+  offset: { type: ["integer", "null"] },
+  hasMore: { type: ["boolean", "null"] },
+  confirmationStatus: { const: "UNVERIFIED" },
+  earningsDateConfirmed: { type: ["boolean", "null"] },
+  earningsDateSource: STRING_OR_NULL,
+  providerMethod: STRING_OR_NULL,
+});
+
+const MARKET_CALENDAR_OUTPUT_SCHEMA = contextualOutputSchema({
+  status: { type: "string" },
+  eventType: { type: "string", enum: ["earnings", "economic", "ipo", "splits"] },
+  startDate: { type: "string" },
+  endDate: { type: "string" },
+  limit: { type: "integer" },
+  offset: { type: "integer" },
+  itemCount: { type: "integer" },
+  hasMore: { type: "boolean" },
+  coverage: { type: "object" },
+  items: { type: "array" },
+  confirmationStatus: { const: "UNVERIFIED" },
+});
+
 const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   get_historical_stock_prices: SIMPLE_OBJECT_SCHEMA,
   get_stock_info: SIMPLE_OBJECT_SCHEMA,
-  get_etf_info: SIMPLE_OBJECT_SCHEMA,
+  get_etf_info: FUND_PROFILE_OUTPUT_SCHEMA,
+  get_fund_profile: FUND_PROFILE_OUTPUT_SCHEMA,
   get_yahoo_finance_news: NEWS_OUTPUT_SCHEMA,
   get_stock_actions: SIMPLE_OBJECT_SCHEMA,
   get_financial_statement: SIMPLE_OBJECT_SCHEMA,
@@ -1253,24 +1381,13 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     additionalProperties: true,
   },
   get_analyst_consensus: SIMPLE_OBJECT_SCHEMA,
-  get_earnings_analysis: SIMPLE_OBJECT_SCHEMA,
-  get_financial_ratios: SIMPLE_OBJECT_SCHEMA,
-  analyze_share_count_trend: SIMPLE_OBJECT_SCHEMA,
-  get_market_calendar: SIMPLE_OBJECT_SCHEMA,
-  get_calendar: {
-    type: "object",
-    properties: {
-      ticker: { type: "string" },
-      mode: { type: "string" },
-      confirmationStatus: { type: "string" },
-      earningsDateConfirmed: { type: ["boolean", "null"] },
-      earningsDateSource: { type: ["string", "null"] },
-      source: { type: "string" },
-      decisionGrade: { const: false },
-      recommendedNextAction: { type: "string" },
-    },
-    additionalProperties: true,
-  },
+  get_earnings_analysis: EARNINGS_ANALYSIS_OUTPUT_SCHEMA,
+  get_financial_ratios: FINANCIAL_RATIOS_OUTPUT_SCHEMA,
+  analyze_financial_ratios: FINANCIAL_RATIOS_OUTPUT_SCHEMA,
+  analyze_share_count_trend: SHARE_COUNT_TREND_OUTPUT_SCHEMA,
+  get_market_calendar: MARKET_CALENDAR_OUTPUT_SCHEMA,
+  get_calendar: COMPANY_CALENDAR_OUTPUT_SCHEMA,
+  get_company_events_calendar: COMPANY_CALENDAR_OUTPUT_SCHEMA,
   search_ticker: SIMPLE_OBJECT_SCHEMA,
   screen_stocks: SIMPLE_OBJECT_SCHEMA,
   get_technical_indicators: {
@@ -1590,6 +1707,29 @@ for (const tool of TOOLS) {
   tool.outputSchema = OUTPUT_SCHEMAS[tool.name] ?? SIMPLE_OBJECT_SCHEMA;
 }
 
+const LLM_DETAILED_OUTPUT_TOOLS = new Set([
+  "get_fund_profile",
+  "analyze_financial_ratios",
+  "get_earnings_analysis",
+  "analyze_share_count_trend",
+  "get_company_events_calendar",
+  "get_market_calendar",
+]);
+
+function envelopedToolOutputSchema(dataSchema: Tool["outputSchema"]): Tool["outputSchema"] {
+  const envelope = ENVELOPE_V2_OUTPUT_SCHEMA as NonNullable<Tool["outputSchema"]>;
+  const contextualData = dataSchema?.type === "object"
+    ? { ...dataSchema, type: ["object", "null"] }
+    : {};
+  return {
+    ...envelope,
+    properties: {
+      ...(envelope.properties ?? {}),
+      data: contextualData,
+    },
+  };
+}
+
 const GROUPED_TOOLS: Tool[] = GROUPED_TOOL_DEFS.map((group) => ({
   name: group.name,
   description: group.description,
@@ -1621,7 +1761,12 @@ function currentToolMode(): "expanded" | "grouped" {
 export function listVisibleTools(): Tool[] {
   const visible = isGroupedMode() ? GROUPED_TOOLS : TOOLS.filter((t) => !t.deprecated);
   if (getWorkerVar("MCP_ENVELOPE_V2") !== "true") return visible;
-  return visible.map(tool => ({ ...tool, outputSchema: ENVELOPE_V2_OUTPUT_SCHEMA }));
+  return visible.map(tool => ({
+    ...tool,
+    outputSchema: LLM_DETAILED_OUTPUT_TOOLS.has(tool.name)
+      ? envelopedToolOutputSchema(tool.outputSchema)
+      : ENVELOPE_V2_OUTPUT_SCHEMA,
+  }));
 }
 
 const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
