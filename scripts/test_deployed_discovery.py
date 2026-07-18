@@ -18,6 +18,11 @@ import time
 import urllib.error
 import urllib.request
 
+try:
+    from scripts.public_tool_contract import validate_live_tool_contract
+except ModuleNotFoundError:  # direct ``python scripts/test_deployed_discovery.py`` execution
+    from public_tool_contract import validate_live_tool_contract  # type: ignore[no-redef]
+
 from live_smoke_utils import choose_stable_option_expiration
 
 URL = "https://yahoo-finance-mcp.artinatw.workers.dev/mcp"
@@ -597,23 +602,6 @@ def _assert_deprecated_alias_metadata(tools: list[dict]) -> None:
             raise AssertionError(f"Deprecated alias should NOT appear in tools/list: {alias}")
 
 
-def _assert_public_tool_wording(tools: list[dict]) -> None:
-    by_name = {str(t.get("name")): str(t.get("description", "")) for t in tools if isinstance(t, dict)}
-    checks = {
-        "get_company_events_calendar": ("earnings", "estimate"),
-        "calculate_price_target_distance": ("reference price target",),
-        "analyze_position_signals": ("does not access holdings",),
-        "check_volume_liquidity_threshold": ("liquidity thresholds",),
-    }
-    for name, snippets in checks.items():
-        desc = by_name.get(name, "")
-        if not desc:
-            raise AssertionError(f"Missing description for {name}")
-        for snippet in snippets:
-            if snippet.lower() not in desc.lower():
-                raise AssertionError(f"{name}: description missing expected phrase {snippet!r}")
-
-
 def main() -> int:
     global _GROUPED_DISCOVERY
     try:
@@ -638,7 +626,7 @@ def main() -> int:
     _check_public_description_terms([t for t in tools if isinstance(t, dict)])
     _assert_deprecated_alias_metadata([t for t in tools if isinstance(t, dict)])
     if not _GROUPED_DISCOVERY:
-        _assert_public_tool_wording([t for t in tools if isinstance(t, dict)])
+        validate_live_tool_contract([t for t in tools if isinstance(t, dict)])
     print("  PASS public description and private alias checks")
     if _GROUPED_DISCOVERY:
         if names != GROUPED_TOOLS:

@@ -119,6 +119,9 @@ jobs:
         run: python scripts/test_cache_layer.py
 
       # ── 5. Schema validation ──────────────────────────────────────────────
+      - name: Public LLM tool contract tests
+        run: python -m unittest scripts.test_public_tool_contract -v
+
       - name: Extractor schema tests
         run: python scripts/test_extractor_schemas.py
 
@@ -137,6 +140,9 @@ jobs:
 
       - name: Data quality regression tests
         run: python scripts/test_data_quality.py
+
+      - name: Yahoo API coverage and routing tests
+        run: python -m unittest scripts.test_yfinance_api_coverage -v
 
       # ── 7. Domain-specific schema tests ──────────────────────────────────
       - name: Source discovery schema tests

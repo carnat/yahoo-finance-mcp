@@ -11,6 +11,17 @@ import sys
 import json
 from pathlib import Path
 
+try:
+    from scripts.public_tool_contract import (
+        validate_python_schema_source,
+        validate_worker_source_contract,
+    )
+except ModuleNotFoundError:  # direct ``python scripts/check_tool_sync.py`` execution
+    from public_tool_contract import (  # type: ignore[no-redef]
+        validate_python_schema_source,
+        validate_worker_source_contract,
+    )
+
 ROOT = Path(__file__).resolve().parent.parent
 SERVER_PY = ROOT / "server.py"
 TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
@@ -215,6 +226,13 @@ def main():
     ok, msg = validate_alias_targets(py_aliases, py_tools, "server")
     if not ok:
         print(msg, file=sys.stderr)
+        return 1
+
+    try:
+        validate_worker_source_contract(ts_source)
+        validate_python_schema_source((ROOT / "yfmcp" / "schemas.py").read_text(encoding="utf-8"))
+    except AssertionError as exc:
+        print(f"ERROR: LLM-facing tool contract mismatch: {exc}", file=sys.stderr)
         return 1
 
     print(f"OK: {len(py_tools)} tools in sync with canonical/alias checks")
