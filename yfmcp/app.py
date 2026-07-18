@@ -108,8 +108,8 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 
 ### Snapshot & diagnostics
 - get_market_snapshot: One-call market-state packet: price, range, MA trend, volume, RSI, MACD, liquidity gate, freshness. Compact (default, max 5 tickers) or full (max 2) modes.
-- get_manifest_diagnostics: Deployment diagnostics: tool count, manifest hash, build SHA, deploy time, canonical/deprecated counts, connector-staleness advisory.
-- health_check: Runtime health metadata: server version, tool count, manifest hash, envelope V2 status.
+- get_manifest_diagnostics: Public-safe schema identity metadata for connector freshness checks.
+- health_check: Public-safe MCP availability and schema identity metadata.
 
 ### Price & market data
 - get_market_quote: Current price, market cap, 52-week range, moving averages, volume (~20 fields). Pre/after-market prices when available.

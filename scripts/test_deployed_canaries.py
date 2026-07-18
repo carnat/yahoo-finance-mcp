@@ -90,8 +90,6 @@ def _assert_contract(data: Any, label: str) -> None:
 def health_contract(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
     data = extract_data(payload)
     _assert_contract(data, "health_check")
-    if isinstance(data, dict) and data.get("envelopeV2") is not True:
-        raise AssertionError(f"health_check envelopeV2 expected true: {data}")
 
 
 def manifest_contract(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
