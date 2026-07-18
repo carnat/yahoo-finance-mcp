@@ -325,10 +325,19 @@ def _enrich_news_item_for_llm(item: dict) -> dict:
     enriched["evidenceClass"] = _evidence_class_for(item.get("sourceType"))
     enriched["tickerMatch"] = "EXPLICIT" if item.get("matchBasis") in {"TICKER_TOKEN", "ISSUER_NAME", "ISSUER_ACRONYM"} or (ticker and _re.search(rf"\b{_re.escape(ticker)}\b", text)) else ("SOURCE_SCOPED" if ticker else "UNVERIFIED")
     enriched["urlProvenance"] = _url_provenance_for(item)
+    source_type = str(item.get("sourceType") or "")
+    if source_type == "sec_ex99_found" or (source_type == "company_ir_page" and item.get("approvalStatus") == "approved"):
+        enriched["decisionUse"] = "USE_OFFICIAL_EVIDENCE"
+    elif source_type in {"sec_filing", "company_ir", "company_ir_page", "press_release", "yahoo_finance_press_releases", "newswire"}:
+        enriched["decisionUse"] = "CHECK_OFFICIAL_RELEASES"
+    elif source_type in {"yahoo_finance_news", "company_news"}:
+        enriched["decisionUse"] = _yahoo_decision_use(str(item.get("eventType") or "other"))
+    else:
+        enriched["decisionUse"] = "CONTEXT_ONLY"
     return enriched
 
 
-def _build_coverage(source_status: dict) -> dict:
+def _build_coverage(source_status: dict, resolved_action: str | None = None) -> dict:
     failed_states = {
         "UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED",
         "IDENTITY_UNAVAILABLE",
@@ -345,8 +354,10 @@ def _build_coverage(source_status: dict) -> dict:
             skipped_sources.append(entry)
         elif info.get("status") in failed_states:
             failed_sources.append(entry)
-    action = "RETRY_RETRYABLE_SOURCES" if any(row["status"] in {"RATE_LIMITED", "TIMEOUT"} for row in failed_sources) else (
-        "CHECK_OFFICIAL_RELEASES" if failed_sources or skipped_sources else "USE_RETURNED_CONTEXT"
+    action = resolved_action or (
+        "RETRY_RETRYABLE_SOURCES" if any(row["status"] in {"RATE_LIMITED", "TIMEOUT"} for row in failed_sources) else (
+            "CHECK_OFFICIAL_RELEASES" if failed_sources or skipped_sources else "USE_RETURNED_CONTEXT"
+        )
     )
     return {"state": _compute_source_coverage(source_status), "failedSources": failed_sources, "skippedSources": skipped_sources, "recommendedNextAction": action}
 
@@ -1930,12 +1941,20 @@ def _compute_source_status(
         diagnostic = diagnostics.get(source) if isinstance(diagnostics.get(source), dict) else None
         if diagnostic is None:
             return None
+        accepted_count = int(
+            diagnostic["acceptedCount"]
+            if diagnostic.get("acceptedCount") is not None
+            else diagnostic["filteredCount"]
+            if diagnostic.get("filteredCount") is not None
+            else len(source_items)
+        )
         return {
-            "status": "PROVIDER_ERROR" if diagnostic.get("completed") is False else ("OK" if source_items else "EMPTY_RESULT"),
+            "status": "PROVIDER_ERROR" if diagnostic.get("completed") is False else ("OK" if accepted_count > 0 else "EMPTY_RESULT"),
             "rawCount": int(diagnostic.get("rawCount") or 0),
             "retrievedCount": int(diagnostic.get("retrievedCount") or diagnostic.get("rawCount") or 0),
             "filteredCount": int(diagnostic.get("filteredCount") or 0),
-            "acceptedCount": int(diagnostic.get("acceptedCount") or diagnostic.get("filteredCount") or 0),
+            "acceptedCount": accepted_count,
+            "returnedCount": len(source_items),
             "rejectedCount": int(diagnostic.get("rejectedCount") or 0),
             "rejectionCounts": dict(diagnostic.get("rejectionCounts") or {}),
             "identityStatus": diagnostic.get("identityStatus"),
@@ -2499,6 +2518,7 @@ async def get_company_press_releases(
         modified_primary_items + [it for it in optional_items if str(it.get("sourceType")) in release_types],
         warnings,
     )
+    modified_release_items = [_enrich_news_item_for_llm(item) for item in modified_release_items]
     sources_used = list(dict.fromkeys(primary_used + optional_used))
     has_approved_ir_page = any(
         it.get("sourceType") == "company_ir_page" and it.get("approvalStatus") == "approved" and it.get("url")
@@ -2546,7 +2566,6 @@ async def get_company_press_releases(
         {**primary_diagnostics, **optional_diagnostics},
     )
     source_coverage = _compute_source_coverage(source_status)
-    coverage = _build_coverage(source_status)
     coverage_status = (
         "SEC_EX99_RESOLVED" if has_sec_ex99_found else
         "APPROVED_IR_PAGE_RESOLVED" if has_approved_ir_page else
@@ -2555,6 +2574,7 @@ async def get_company_press_releases(
         "NO_OFFICIAL_RELEASE_SOURCE"
     )
     decision_grade = has_sec_ex99_found or has_approved_ir_page
+    coverage = _build_coverage(source_status, "USE_OFFICIAL_EVIDENCE" if decision_grade else None)
     decision_grade_basis = (
         "Resolved SEC 8-K EX-99 press-release exhibit for this call."
         if has_sec_ex99_found else
@@ -2740,6 +2760,8 @@ async def get_public_event_timeline(
 Returns CONFIRMED, PARTIAL, NOT_FOUND, SOURCE_LIMITED_NOT_FOUND, STALE, or CONFLICTING.
 SOURCE_LIMITED_NOT_FOUND means selected provider coverage was incomplete, not that
 the event is confirmed absent; inspect sourceStatus and failureMode for recovery.
+Generic publication words such as announced, report, results, and update do not
+establish a match by themselves; inspect queryPolicy and each queryMatch.
 """,
 )
 async def verify_company_event(
@@ -2763,22 +2785,50 @@ async def verify_company_event(
             include_diagnostics=True,
         )
     )
-    query_text = event_query.strip().lower()
-    query_tokens = [tok for tok in _re.split(r"\s+", query_text) if tok]
+    def _normalize_event_text(value: object) -> str:
+        return _re.sub(r"\s+", " ", _re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())).strip()
 
-    def _is_match(item: dict) -> bool:
-        hay = " ".join([
+    event_query_stopwords = {
+        "announce", "announced", "announcement", "announcements", "announces",
+        "company", "corporate", "latest", "news", "official", "press", "release",
+        "report", "reported", "reports", "result", "results", "today", "update",
+        "updated", "updates",
+    }
+    query_text = _normalize_event_text(event_query)
+    meaningful_terms = [
+        term for term in query_text.split()
+        if len(term) >= 3 and term not in event_query_stopwords
+    ]
+    required_term_matches = (
+        len(meaningful_terms)
+        if len(meaningful_terms) <= 2
+        else int(math.ceil(len(meaningful_terms) * 0.67))
+    )
+
+    def _query_match(item: dict) -> dict:
+        hay = _normalize_event_text(" ".join([
             str(item.get("title") or ""),
             str(item.get("summary") or ""),
             str(item.get("evidenceText") or ""),
             str(item.get("eventType") or ""),
             str(item.get("source") or ""),
-        ]).lower()
-        if query_text in hay:
-            return True
-        return any(len(tok) >= 4 and tok in hay for tok in query_tokens)
+        ]))
+        words = set(hay.split())
+        matched_terms = [term for term in meaningful_terms if term in words]
+        if query_text and query_text in hay:
+            return {"matched": True, "method": "PHRASE", "matchedTerms": matched_terms, "requiredTermMatches": required_term_matches}
+        if required_term_matches > 0 and len(matched_terms) >= required_term_matches:
+            return {"matched": True, "method": "TERM_THRESHOLD", "matchedTerms": matched_terms, "requiredTermMatches": required_term_matches}
+        return {"matched": False, "method": "NONE", "matchedTerms": matched_terms, "requiredTermMatches": required_term_matches}
 
-    matched = [it for it in items if _is_match(it)]
+    if not meaningful_terms:
+        warnings.append({
+            "code": "EVENT_QUERY_TOO_GENERIC",
+            "message": "The event query contains no specific event terms. Add a term such as acquisition, dividend, guidance, contract, or offering.",
+            "severity": "warning",
+        })
+
+    matched = [it for it in items if _query_match(it)["matched"]]
     matched_in_range = [
         it for it in matched
         if _within_date_window(it.get("publishedAt"), start_date=start_date, end_date=end_date)
@@ -2891,6 +2941,7 @@ async def verify_company_event(
     best_evidence = []
     for ev in best[:5]:
         relevance = _relevance_score(ev)
+        match = _query_match(ev)
         evidence_item = {
             "source": ev.get("source"),
             "sourceType": ev.get("sourceType"),
@@ -2899,6 +2950,12 @@ async def verify_company_event(
             "url": ev.get("url"),
             "confidence": ev.get("confidence"),
             "relevance": relevance,
+            "entityRelevance": relevance,
+            "queryMatch": {
+                "method": match["method"],
+                "matchedTerms": match["matchedTerms"],
+                "requiredTermMatches": match["requiredTermMatches"],
+            },
             "evidenceText": _short_text(ev.get("evidenceText") or ev.get("summary") or ev.get("title")),
         }
         best_evidence.append(evidence_item)
@@ -2931,6 +2988,11 @@ async def verify_company_event(
     return json.dumps({
         "ticker": ticker_upper,
         "query": event_query,
+        "queryPolicy": {
+            "meaningfulTerms": meaningful_terms,
+            "requiredTermMatches": required_term_matches,
+            "matchedEvidenceCount": len(matched),
+        },
         "status": status,
         "bestEvidence": best_evidence,
         "conflicts": conflicts,
@@ -2939,12 +3001,6 @@ async def verify_company_event(
             "watermark": retrieved_at,
         },
         "warnings": warnings,
-        "sourceCoverage": source_coverage,
-        "coverage": _build_coverage(source_status),
-        "sourceStatus": source_status,
-        "sourceCoverage": source_coverage,
-        "coverage": _build_coverage(source_status),
-        "sourceStatus": source_status,
         "sourceCoverage": source_coverage,
         "coverage": coverage,
         "sourceStatus": source_status,

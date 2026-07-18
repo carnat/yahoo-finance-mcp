@@ -336,8 +336,10 @@ class TestCompareActualVsEstimate(unittest.TestCase):
             mocked_metrics.return_value = json.dumps(metrics_payload)
             mocked_ea.return_value = json.dumps(ea_payload)
             data = _parse(_run(srv.compare_earnings_actual_vs_estimate("AAPL")))
+            self.assertEqual(data["period"], "FY2026 Q2")
             self.assertEqual(data["reportedPeriod"], "FY2026 Q2")
             self.assertEqual(data["reportedDate"], "2026-06-30")
+            self.assertEqual(data["periodAlignmentStatus"], "MATCHED")
             self.assertEqual(data["estimate"]["revenue"]["source"], "yahoo")
             self.assertEqual(data["estimate"]["eps"]["source"], "yahoo")
             self.assertAlmostEqual(data["surprise"]["revenueSurprisePct"], 1.65, places=2)
@@ -356,10 +358,40 @@ class TestCompareActualVsEstimate(unittest.TestCase):
             mocked_metrics.return_value = json.dumps(metrics_payload)
             mocked_ea.return_value = json.dumps(ea_payload)
             data = _parse(_run(srv.compare_earnings_actual_vs_estimate("AEHR")))
+            self.assertEqual(data["period"], "FY2026 Q4")
+            self.assertEqual(data["periodAlignmentStatus"], "MATCHED")
             self.assertIsNone(data["surprise"]["epsSurprisePct"])
             self.assertAlmostEqual(data["surprise"]["epsDelta"], 0.1175, places=4)
             warning_codes = [w.get("code") for w in data.get("warnings", []) if isinstance(w, dict)]
             self.assertIn("EPS_NEAR_ZERO_ESTIMATE_BASE", warning_codes)
+
+    def test_date_only_yahoo_period_does_not_override_official_fiscal_period(self):
+        metrics_payload = {
+            "period": "FY2026 Q4",
+            "reportedAt": "2026-07-14T00:00:00Z",
+            "metrics": {"revenue": {"value": 18_800_000}, "epsDiluted": {"value": 0.11}},
+        }
+        ea_payload = {
+            "revenueEstimate": [{"quarter": "2026-05-31", "avg": 19_000_000}],
+            "earningsHistory": [{"quarter": "2026-05-31", "epsActual": 0.11, "epsEstimate": -0.0075}],
+        }
+        with patch("yfmcp.tools.earnings.extract_earnings_metrics", new_callable=AsyncMock) as mocked_metrics, patch(
+            "server.get_earnings_analysis", new_callable=AsyncMock
+        ) as mocked_ea:
+            mocked_metrics.return_value = json.dumps(metrics_payload)
+            mocked_ea.return_value = json.dumps(ea_payload)
+            data = _parse(_run(srv.compare_earnings_actual_vs_estimate("AEHR")))
+
+        self.assertEqual(data["period"], "FY2026 Q4")
+        self.assertEqual(data["reportedPeriod"], "FY2026 Q4")
+        self.assertEqual(data["estimatePeriod"], "2026-05-31")
+        self.assertEqual(data["reportedDate"], "2026-05-31")
+        self.assertEqual(data["releasePublishedAt"], "2026-07-14T00:00:00Z")
+        self.assertEqual(data["periodAlignmentStatus"], "UNVERIFIED")
+        self.assertIsNone(data["surprise"]["revenueSurprisePct"])
+        self.assertFalse(data["actual"]["eps"]["decisionGrade"])
+        self.assertFalse(data["estimate"]["eps"]["decisionGrade"])
+        self.assertIn("PERIOD_ALIGNMENT_UNVERIFIED", [w.get("code") for w in data.get("warnings", [])])
 
     def test_no_reported_quarter_warning(self):
         with patch("yfmcp.tools.earnings.extract_earnings_metrics", new_callable=AsyncMock) as mocked_metrics, patch(
@@ -573,10 +605,17 @@ class TestNewFixesAndFeatures(unittest.TestCase):
         res_str = srv._wrap_envelope_v2("extract_earnings_metrics", data)
         res = json.loads(res_str)
         enriched = res["data"]["metrics"]["revenue"]
-        self.assertEqual(enriched.get("decisionGrade"), True)
+        self.assertEqual(enriched.get("decisionGrade"), False)
         self.assertEqual(enriched.get("evidenceRequired"), True)
         self.assertEqual(enriched.get("sourceType"), "unknown")
         self.assertEqual(enriched["evidence"][0]["rawRow"], "exhibit EX-99.1")
+
+        explicit = srv._wrap_envelope_v2(
+            "extract_earnings_metrics",
+            {"metrics": {"revenue": {"value": 1000, "confidence": "HIGH", "decisionGrade": True}}},
+        )
+        explicit_revenue = json.loads(explicit)["data"]["metrics"]["revenue"]
+        self.assertIs(explicit_revenue.get("decisionGrade"), True)
 
 
 if __name__ == "__main__":

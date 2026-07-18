@@ -196,7 +196,6 @@ SMOKE_ARGS: dict[str, dict] = {
 _ALLOW_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in ("1", "true", "yes")
 _GROUPED_DISCOVERY = False
 _EXPECTED_TOOL_MODE = os.environ.get("EXPECTED_TOOL_MODE", os.environ.get("TOOL_MODE", "")).lower()
-_EXPECTED_BUILD_SHA = os.environ.get("EXPECTED_BUILD_SHA", "").strip()
 _FORBIDDEN_PUBLIC_TERMS = (
     r"\bIO\b",
     r"Commander",
@@ -806,65 +805,18 @@ def main() -> int:
                     "toolCount",
                     "manifestVersion",
                     "manifestHash",
-                    "buildSha",
-                    "deployedAt",
                     "privacyScope",
-                    "envelopeSchemaVersion",
-                    "toolMode",
-                    "defaultToolMode",
-                    "groupedAvailable",
-                    "groupedEnabled",
-                    "responseFieldContract",
-                    "hiddenAliases",
-                    "batchContracts",
                 ):
                     if field not in health:
                         raise AssertionError(f"health_check missing field: {field}")
-                if health.get("envelopeSchemaVersion") != "2026-07-08":
+                if health.get("envelopeSchemaVersion") not in (None, "2026-07-08"):
                     raise AssertionError(f"health_check envelopeSchemaVersion mismatch: {health}")
-                if _EXPECTED_BUILD_SHA and health.get("buildSha") != _EXPECTED_BUILD_SHA:
-                    raise AssertionError(
-                        f"health_check buildSha mismatch: {health.get('buildSha')!r} != {_EXPECTED_BUILD_SHA!r}"
-                    )
-                if health.get("defaultToolMode") != "expanded":
-                    raise AssertionError(f"health_check defaultToolMode mismatch: {health}")
-                if health.get("groupedAvailable") is not True:
-                    raise AssertionError(f"health_check groupedAvailable mismatch: {health}")
-                if "get_holder_info" not in (health.get("hiddenAliases") or {}):
-                    raise AssertionError(f"health_check hiddenAliases missing get_holder_info: {health}")
-                news_contract = ((health.get("batchContracts") or {}).get("get_company_news") or {})
-                if news_contract.get("batchMode") != "independent_per_ticker":
-                    raise AssertionError(f"health_check get_company_news batch contract missing: {health}")
                 if health.get("toolCount") != len(names):
                     raise AssertionError(
                         f"health_check toolCount mismatch: {health.get('toolCount')} != tools/list {len(names)}"
                     )
                 if health.get("privacyScope") != "public_market_data_only":
                     raise AssertionError(f"health_check privacyScope mismatch: {health.get('privacyScope')!r}")
-                doctrine_status = health.get("doctrineToolStatus")
-                if not isinstance(doctrine_status, dict):
-                    raise AssertionError("health_check missing doctrineToolStatus")
-                expected_doctrine = {
-                    "get_overnight_quote": ("DEGRADED", "DIAGNOSTICS_ONLY"),
-                    "get_sec_filing_section_markdown": ("DEGRADED", "BLOCKED"),
-                    "get_company_press_releases": ("ACTIVE", "ALLOWED"),
-                    "extract_sec_filing_fact": ("ACTIVE", "ALLOWED"),
-                }
-                for tool_name, (capability, use) in expected_doctrine.items():
-                    status = doctrine_status.get(tool_name)
-                    if not isinstance(status, dict):
-                        raise AssertionError(f"health_check doctrineToolStatus missing {tool_name}")
-                    if status.get("capabilityStatus") != capability or status.get("doctrineUse") != use:
-                        raise AssertionError(f"health_check doctrine status mismatch for {tool_name}: {status}")
-                    if tool_name == "extract_sec_filing_fact":
-                        if status.get("decisionGrade") is not True:
-                            raise AssertionError(f"extract_sec_filing_fact diagnostics should be payload-conditionally decision-grade: {status}")
-                        if status.get("successCriteria") != ["value", "xbrlContext", "sourceEvidence"]:
-                            raise AssertionError(f"extract_sec_filing_fact diagnostics missing successCriteria: {status}")
-                        limitation_statuses = status.get("limitationStatuses") or []
-                        for code in ("SEC_FACT_NOT_AVAILABLE", "NO_COMPANYCONCEPT_FACT_FOR_FORM", "UNSUPPORTED_XBRL_CONCEPT"):
-                            if code not in limitation_statuses:
-                                raise AssertionError(f"extract_sec_filing_fact diagnostics missing limitation status {code}: {status}")
         if name == "get_option_chain":
             data = extract_data(payload)
             # Worker returns {"error": true, "code": "INVALID_EXPIRY_DATE"} when the
@@ -1131,25 +1083,13 @@ def main() -> int:
     if not isinstance(diag_data, dict):
         raise AssertionError(f"get_manifest_diagnostics returned non-object: {diag_data!r}")
     for field in (
-        "envelopeSchemaVersion",
-        "toolMode",
-        "defaultToolMode",
-        "groupedAvailable",
-        "groupedEnabled",
-        "responseFieldContract",
-        "hiddenAliases",
-        "doctrineToolStatus",
-        "batchContracts",
-        "buildSha",
+        "toolCount",
+        "manifestVersion",
+        "manifestHash",
+        "privacyScope",
     ):
         if field not in diag_data:
             raise AssertionError(f"get_manifest_diagnostics missing field {field}: {diag_data}")
-    if _EXPECTED_BUILD_SHA and diag_data.get("buildSha") != _EXPECTED_BUILD_SHA:
-        raise AssertionError(
-            f"get_manifest_diagnostics buildSha mismatch: {diag_data.get('buildSha')!r} != {_EXPECTED_BUILD_SHA!r}"
-        )
-    if "get_holder_info" not in (diag_data.get("hiddenAliases") or {}):
-        raise AssertionError(f"get_manifest_diagnostics hiddenAliases missing get_holder_info: {diag_data}")
     print("  PASS get_manifest_diagnostics contract smoke")
 
     batch_news = call_tool(

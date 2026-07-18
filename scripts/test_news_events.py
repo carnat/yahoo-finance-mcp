@@ -591,6 +591,76 @@ class TestPhase6BVerifyEvent(unittest.TestCase):
         self.assertEqual(data.get("sourceStatus", {}).get("yahoo_finance_news", {}).get("status"), "PROVIDER_ERROR")
         self.assertEqual(data.get("sourceStatus", {}).get("finnhub", {}).get("status"), "PROVIDER_ERROR")
 
+    def test_verify_does_not_confirm_on_generic_announcement_word(self):
+        unrelated = [{
+            "title": "Board share purchase announced",
+            "summary": "A director purchased shares in the company.",
+            "source": "company_ir",
+            "sourceType": "company_ir",
+            "publishedAt": "2026-07-10T08:00:00Z",
+            "retrievedAt": "2026-07-17T08:00:00Z",
+            "url": "https://example.com/board-purchase",
+            "confidence": "HIGH",
+            "tickers": ["SIVE.ST"],
+        }]
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked, patch(
+            "server._get_submissions_for_ticker", new_callable=AsyncMock
+        ) as submissions:
+            mocked.return_value = (unrelated, ["company_ir"], [], "2026-07-17T08:00:00Z")
+            submissions.return_value = (None, None)
+            data = _parse(_run(srv.verify_company_event("SIVE.ST", "acquisition announced")))
+
+        self.assertEqual(data.get("status"), "NOT_FOUND")
+        self.assertEqual(data.get("bestEvidence"), [])
+        self.assertEqual(data.get("queryPolicy", {}).get("meaningfulTerms"), ["acquisition"])
+        self.assertEqual(data.get("queryPolicy", {}).get("matchedEvidenceCount"), 0)
+
+    def test_verify_reports_deterministic_query_match_terms(self):
+        matching = [{
+            "title": "Acquisition announced",
+            "summary": "The company agreed to acquire Target AB.",
+            "source": "company_ir",
+            "sourceType": "company_ir",
+            "publishedAt": "2026-07-10T08:00:00Z",
+            "retrievedAt": "2026-07-17T08:00:00Z",
+            "url": "https://example.com/acquisition",
+            "confidence": "HIGH",
+            "tickers": ["SIVE.ST"],
+        }]
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked, patch(
+            "server._get_submissions_for_ticker", new_callable=AsyncMock
+        ) as submissions:
+            mocked.return_value = (matching, ["company_ir"], [], "2026-07-17T08:00:00Z")
+            submissions.return_value = (None, None)
+            data = _parse(_run(srv.verify_company_event("SIVE.ST", "acquisition announced")))
+
+        self.assertEqual(data.get("status"), "CONFIRMED")
+        query_match = data["bestEvidence"][0]["queryMatch"]
+        self.assertEqual(query_match.get("matchedTerms"), ["acquisition"])
+        self.assertEqual(query_match.get("requiredTermMatches"), 1)
+
+    def test_verify_punctuation_only_query_never_matches_everything(self):
+        item = [{
+            "title": "Unrelated board update",
+            "source": "company_ir",
+            "sourceType": "company_ir",
+            "publishedAt": "2026-07-10T08:00:00Z",
+            "retrievedAt": "2026-07-17T08:00:00Z",
+            "url": "https://example.com/board-update",
+            "confidence": "HIGH",
+            "tickers": ["SIVE.ST"],
+        }]
+        with patch("server._collect_company_events", new_callable=AsyncMock) as mocked, patch(
+            "server._get_submissions_for_ticker", new_callable=AsyncMock
+        ) as submissions:
+            mocked.return_value = (item, ["company_ir"], [], "2026-07-17T08:00:00Z")
+            submissions.return_value = (None, None)
+            data = _parse(_run(srv.verify_company_event("SIVE.ST", "---")))
+
+        self.assertEqual(data.get("status"), "NOT_FOUND")
+        self.assertEqual(data.get("queryPolicy", {}).get("matchedEvidenceCount"), 0)
+        self.assertIn("EVENT_QUERY_TOO_GENERIC", [w.get("code") for w in data.get("warnings", [])])
+
     def test_verify_stale_timestamp_variance_and_evidence_conflict(self):
         stale_item = [{
             "title": "Old guidance",
@@ -878,6 +948,8 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
         self.assertTrue(data.get("decisionGrade"))
         self.assertEqual(data.get("coverageStatus"), "SEC_EX99_RESOLVED")
         self.assertEqual(data.get("items", [{}])[0].get("sourceType"), "sec_ex99_found")
+        self.assertEqual(data.get("items", [{}])[0].get("decisionUse"), "USE_OFFICIAL_EVIDENCE")
+        self.assertEqual(data.get("coverage", {}).get("recommendedNextAction"), "USE_OFFICIAL_EVIDENCE")
         self.assertTrue(data.get("secEvidence"))
         self.assertNotIn("SEC_8K_FOUND_EX99_NOT_FOUND", [w.get("code") for w in data.get("warnings", [])])
 
@@ -911,6 +983,8 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
             data = _parse(_run(srv.get_company_press_releases("MU", sources=["company_ir_page"])))
         self.assertTrue(data.get("decisionGrade"))
         self.assertEqual(data.get("coverageStatus"), "APPROVED_IR_PAGE_RESOLVED")
+        self.assertEqual(data.get("items", [{}])[0].get("decisionUse"), "USE_OFFICIAL_EVIDENCE")
+        self.assertEqual(data.get("coverage", {}).get("recommendedNextAction"), "USE_OFFICIAL_EVIDENCE")
         self.assertTrue(data.get("irPageEvidence"))
 
     def test_company_ir_page_candidate_source_status_is_context_only(self):
@@ -1414,8 +1488,32 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
         )
         source = status["yahoo_finance_news"]
         self.assertEqual(source["rawCount"], 7)
+        self.assertEqual(source["status"], "OK")
         self.assertEqual(source["acceptedCount"], 1)
+        self.assertEqual(source["returnedCount"], 1)
         self.assertEqual(source["rejectedCount"], 6)
+
+    def test_yahoo_source_status_uses_accepted_count_when_global_cap_omits_items(self):
+        status = srv._compute_source_status(
+            sources_used=["yahoo_finance_press_releases"],
+            warnings=[],
+            items=[],
+            selected_sources=["yahoo_finance_press_releases"],
+            source_diagnostics={
+                "yahoo_finance_press_releases": {
+                    "rawCount": 5,
+                    "retrievedCount": 5,
+                    "acceptedCount": 5,
+                    "filteredCount": 5,
+                    "rejectedCount": 0,
+                    "completed": True,
+                },
+            },
+        )
+        source = status["yahoo_finance_press_releases"]
+        self.assertEqual(source["status"], "OK")
+        self.assertEqual(source["acceptedCount"], 5)
+        self.assertEqual(source["returnedCount"], 0)
 
     def test_identity_unavailable_is_partial_and_never_absence(self):
         diagnostics = {
@@ -2256,9 +2354,6 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
             worker_text = f.read()
-        with open(os.path.join(root, "worker", "src", "tools.ts"), encoding="utf-8") as f:
-            tools_text = f.read()
-
         self.assertIn("COMPANY_IR_DISCOVERY_PATHS", worker_text)
         self.assertIn('"/rss.cfm"', worker_text)
         self.assertIn("companyIrCandidateHosts", worker_text)
@@ -2267,8 +2362,8 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         self.assertIn("collectCompanyIrRssEvents", worker_text)
         self.assertIn('provider: "company_ir_rss"', worker_text)
         self.assertIn('discoveredVia: "company_website_rss_autodiscovery"', worker_text)
-        self.assertIn("investors_and_ir_subdomain_probe", tools_text)
-        self.assertIn("same_domain_or_validated_linked_feed", tools_text)
+        self.assertIn("sameCompanyDomain(candidateHost", worker_text)
+        self.assertIn('hostRelationship: "same_domain"', worker_text)
         self.assertNotIn('|| selected.includes("company_ir");', worker_text)
         self.assertNotIn('else if (selected.includes("company_ir")', worker_text)
 

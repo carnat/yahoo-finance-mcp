@@ -24,9 +24,11 @@ def _upsert_var(text: str, key: str, value: str) -> str:
 def main() -> int:
     build_sha = os.environ.get("BUILD_SHA") or os.environ.get("GITHUB_SHA") or "unknown"
     deployed_at = os.environ.get("DEPLOYED_AT") or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    build_date = deployed_at[:10]
     text = WRANGLER.read_text(encoding="utf-8")
     text = _upsert_var(text, "BUILD_SHA", build_sha)
     text = _upsert_var(text, "DEPLOYED_AT", deployed_at)
+    text = _upsert_var(text, "BUILD_DATE", build_date)
     WRANGLER.write_text(text, encoding="utf-8")
     return 0
 

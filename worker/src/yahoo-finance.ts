@@ -6984,9 +6984,11 @@ type CompanyEventCollectionResult = {
 
 function sourceDecisionUse(sourceType: unknown): string {
   const src = _str(sourceType);
-  if (src === "sec_filing" || src === "company_ir" || src === "company_ir_page" || src === "sec_ex99_found") return "decision_grade_candidate";
-  if (src === "press_release" || src === "yahoo_finance_press_releases" || src === "newswire") return "verify_only";
-  return "context_only";
+  if (src === "sec_ex99_found") return "USE_OFFICIAL_EVIDENCE";
+  if (["sec_filing", "company_ir", "company_ir_page", "press_release", "yahoo_finance_press_releases", "newswire"].includes(src)) {
+    return "CHECK_OFFICIAL_RELEASES";
+  }
+  return "CONTEXT_ONLY";
 }
 
 function finnhubEligibility(ticker: string): { eligible: boolean; reasonCode: string | null } {
@@ -7028,15 +7030,22 @@ function tickerMatchFor(item: Record<string, unknown>): string {
 }
 
 function enrichNewsItemForLlm(item: Record<string, unknown>): Record<string, unknown> {
+  const sourceType = _str(item.sourceType);
+  const decisionUse = sourceType === "company_ir_page" && _str(item.approvalStatus) === "approved"
+    ? "USE_OFFICIAL_EVIDENCE"
+    : (sourceType === "yahoo_finance_news" || sourceType === "company_news"
+      ? yahooDecisionUse(_str(item.eventType))
+      : sourceDecisionUse(sourceType));
   return {
     ...item,
     evidenceClass: evidenceClassFor(item.sourceType),
     tickerMatch: tickerMatchFor(item),
     urlProvenance: urlProvenanceFor(item),
+    decisionUse,
   };
 }
 
-function buildCoverage(sourceStatus: Record<string, unknown>): Record<string, unknown> {
+function buildCoverage(sourceStatus: Record<string, unknown>, resolvedAction: string | null = null): Record<string, unknown> {
   const failedStatuses = new Set(["UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED", "IDENTITY_UNAVAILABLE", "WEBSITE_NOT_AVAILABLE", "DISCOVERY_NOT_FOUND", "DISCOVERY_BUDGET_EXHAUSTED", "FEED_NOT_FOUND", "PARSE_ERROR", "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED"]);
   const failedSources: Record<string, unknown>[] = [];
   const skippedSources: Record<string, unknown>[] = [];
@@ -7048,9 +7057,11 @@ function buildCoverage(sourceStatus: Record<string, unknown>): Record<string, un
     if (status === "NOT_ELIGIBLE") skippedSources.push(entry);
     else if (failedStatuses.has(status)) failedSources.push(entry);
   }
-  const recommendedNextAction = failedSources.some(entry => ["RATE_LIMITED", "TIMEOUT"].includes(_str(entry.status)))
-    ? "RETRY_RETRYABLE_SOURCES"
-    : (failedSources.length || skippedSources.length ? "CHECK_OFFICIAL_RELEASES" : "USE_RETURNED_CONTEXT");
+  const recommendedNextAction = resolvedAction ?? (
+    failedSources.some(entry => ["RATE_LIMITED", "TIMEOUT"].includes(_str(entry.status)))
+      ? "RETRY_RETRYABLE_SOURCES"
+      : (failedSources.length || skippedSources.length ? "CHECK_OFFICIAL_RELEASES" : "USE_RETURNED_CONTEXT")
+  );
   return { state: computeSourceCoverage(sourceStatus), failedSources, skippedSources, recommendedNextAction };
 }
 
@@ -8580,12 +8591,14 @@ function computeSourceStatus(
       ? sourceDiagnostics[source] as Record<string, unknown>
       : null;
     if (!diagnostic) return null;
+    const acceptedCount = Number(diagnostic.acceptedCount ?? diagnostic.filteredCount ?? sourceItems.length);
     return {
-      status: diagnostic.completed === false ? "PROVIDER_ERROR" : (sourceItems.length > 0 ? "OK" : "EMPTY_RESULT"),
+      status: diagnostic.completed === false ? "PROVIDER_ERROR" : (acceptedCount > 0 ? "OK" : "EMPTY_RESULT"),
       rawCount: Number(diagnostic.rawCount ?? 0),
       retrievedCount: Number(diagnostic.retrievedCount ?? diagnostic.rawCount ?? 0),
       filteredCount: Number(diagnostic.filteredCount ?? 0),
-      acceptedCount: Number(diagnostic.acceptedCount ?? diagnostic.filteredCount ?? 0),
+      acceptedCount,
+      returnedCount: sourceItems.length,
       rejectedCount: Number(diagnostic.rejectedCount ?? 0),
       rejectionCounts: diagnostic.rejectionCounts ?? {},
       identityStatus: diagnostic.identityStatus ?? null,
@@ -9610,7 +9623,7 @@ export async function getCompanyPressReleases(
     : "No resolved SEC EX-99 press-release exhibit in this call; use for verification/context only.";
   const sourceStatus = computeSourceStatus(sourcesUsed, uniqueWarnings, processedItems, selected, sourceDiagnostics);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
-  const coverage = buildCoverage(sourceStatus);
+  const coverage = buildCoverage(sourceStatus, payloadDecisionGrade ? "USE_OFFICIAL_EVIDENCE" : null);
 
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
@@ -9715,14 +9728,46 @@ export async function verifyCompanyEvent(
   sources: string[] = ["sec", "company_ir", "newswire", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]
 ): Promise<string> {
   const out = await collectCompanyEvents(ticker, { maxResults: 50, lookbackDays: 365, startDate, endDate, sources });
-  const q = eventQuery.toLowerCase().trim();
-  const tokens = q.split(/\s+/).filter(Boolean);
-  const isMatch = (item: Record<string, unknown>): boolean => {
-    const text = `${_str(item.title)} ${_str(item.summary)} ${_str(item.evidenceText)} ${_str(item.eventType)} ${_str(item.source)}`.toLowerCase();
-    if (q && text.includes(q)) return true;
-    return tokens.some(t => t.length >= 4 && text.includes(t));
+  const normalizeEventText = (value: unknown): string =>
+    _str(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+  const eventQueryStopwords = new Set([
+    "announce", "announced", "announcement", "announcements", "announces",
+    "company", "corporate", "latest", "news", "official", "press", "release",
+    "report", "reported", "reports", "result", "results", "today", "update",
+    "updated", "updates",
+  ]);
+  const normalizedQuery = normalizeEventText(eventQuery);
+  const meaningfulTerms = normalizedQuery
+    .split(" ")
+    .filter(term => term.length >= 3 && !eventQueryStopwords.has(term));
+  const requiredTermMatches = meaningfulTerms.length <= 2
+    ? meaningfulTerms.length
+    : Math.ceil(meaningfulTerms.length * 0.67);
+  const queryMatch = (item: Record<string, unknown>): {
+    matched: boolean;
+    method: "PHRASE" | "TERM_THRESHOLD" | "NONE";
+    matchedTerms: string[];
+    requiredTermMatches: number;
+  } => {
+    const text = normalizeEventText(`${_str(item.title)} ${_str(item.summary)} ${_str(item.evidenceText)} ${_str(item.eventType)} ${_str(item.source)}`);
+    const words = new Set(text.split(" ").filter(Boolean));
+    const matchedTerms = meaningfulTerms.filter(term => words.has(term));
+    if (normalizedQuery && text.includes(normalizedQuery)) {
+      return { matched: true, method: "PHRASE", matchedTerms, requiredTermMatches };
+    }
+    if (requiredTermMatches > 0 && matchedTerms.length >= requiredTermMatches) {
+      return { matched: true, method: "TERM_THRESHOLD", matchedTerms, requiredTermMatches };
+    }
+    return { matched: false, method: "NONE", matchedTerms, requiredTermMatches };
   };
-  const matched = out.items.filter(isMatch);
+  if (meaningfulTerms.length === 0) {
+    out.warnings.push({
+      code: "EVENT_QUERY_TOO_GENERIC",
+      message: "The event query contains no specific event terms. Add a term such as acquisition, dividend, guidance, contract, or offering.",
+      severity: "warning",
+    });
+  }
+  const matched = out.items.filter(item => queryMatch(item).matched);
   const inRange = matched.filter(item => {
     if (!startDate && !endDate) return true;
     return withinDateWindow(_str(item.publishedAt) || null, startDate, endDate);
@@ -9818,6 +9863,7 @@ export async function verifyCompanyEvent(
 
   const best = (official.length > 0 ? official : (inRange.length > 0 ? inRange : matched)).slice(0, 5).map(ev => {
     const relevance = relevanceScore(ev);
+    const match = queryMatch(ev);
     return {
       source: ev.source,
       sourceType: ev.sourceType,
@@ -9826,6 +9872,12 @@ export async function verifyCompanyEvent(
       url: ev.url,
       confidence: confidenceForSourceType(ev.sourceType, ev.confidence),
       relevance,
+      entityRelevance: relevance,
+      queryMatch: {
+        method: match.method,
+        matchedTerms: match.matchedTerms,
+        requiredTermMatches: match.requiredTermMatches,
+      },
       evidenceText: shortText(ev.evidenceText || ev.summary || ev.title, 180),
     };
   });
@@ -9859,6 +9911,11 @@ export async function verifyCompanyEvent(
   return JSON.stringify({
     ticker: ticker.toUpperCase(),
     query: eventQuery,
+    queryPolicy: {
+      meaningfulTerms,
+      requiredTermMatches,
+      matchedEvidenceCount: matched.length,
+    },
     status,
     bestEvidence: best,
     conflicts,
@@ -12771,8 +12828,12 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
   const earningsHistory = Array.isArray(ea.earningsHistory) ? ea.earningsHistory as Record<string, unknown>[] : [];
   const reportedRows = earningsHistory.filter((row) => toNumber(row.epsActual) != null);
   const selected = reportedRows.sort((a, b) => String(rowDate(b) ?? "").localeCompare(String(rowDate(a) ?? "")))[0] ?? null;
-  const reportedPeriod = rowPeriod(selected);
-  const reportedDate = rowDate(selected) ?? (metrics.reportedAt as string | null) ?? null;
+  const sourcePeriod = _str(metrics.period) && _str(metrics.period).toLowerCase() !== "latest" ? _str(metrics.period) : null;
+  const estimatePeriod = rowPeriod(selected);
+  const reportedDate = rowDate(selected);
+  const periodAlignmentStatus = sourcePeriod && estimatePeriod
+    ? (sourcePeriod === estimatePeriod ? "MATCHED" : (/^\d{4}-\d{2}-\d{2}/.test(estimatePeriod) ? "UNVERIFIED" : "MISMATCH"))
+    : "INCOMPLETE";
   const actualEps = toNumber(selected?.epsActual) ?? (typeof epsMetric.value === "number" ? epsMetric.value : null);
   const estEps = toNumber(selected?.epsEstimate);
 
@@ -12781,7 +12842,7 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
   for (const row of revenueEstimate) {
     const candidatePeriod = String(row.period ?? row.reportedPeriod ?? "");
     if (
-      ((reportedPeriod != null && candidatePeriod === reportedPeriod)
+      ((estimatePeriod != null && candidatePeriod === estimatePeriod)
         || (reportedDate != null && rowDate(row) === reportedDate))
       && typeof row.avg === "number"
     ) {
@@ -12792,16 +12853,19 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
 
   const out: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
-    period: reportedPeriod ?? metrics.period ?? period,
-    reportedPeriod,
+    period: sourcePeriod ?? estimatePeriod ?? period,
+    reportedPeriod: sourcePeriod ?? estimatePeriod,
     reportedDate,
+    releasePublishedAt: metrics.reportedAt ?? null,
+    estimatePeriod,
+    periodAlignmentStatus,
     actual: {
-      revenue: { value: actualRevenue, unit: "USD" },
-      eps: { value: actualEps, unit: "USD/share" },
+      revenue: { ...revenueMetric, value: actualRevenue, unit: "USD", period: sourcePeriod, decisionGrade: revenueMetric.decisionGrade === true },
+      eps: { value: actualEps, unit: "USD/share", source: "yahoo", period: estimatePeriod ?? reportedDate, decisionGrade: false },
     },
     estimate: {
-      revenue: { value: estRevenue, unit: "USD", source: "yahoo" },
-      eps: { value: estEps, unit: "USD/share", source: "yahoo" },
+      revenue: { value: estRevenue, unit: "USD", source: "yahoo", period: estimatePeriod ?? reportedDate, decisionGrade: false },
+      eps: { value: estEps, unit: "USD/share", source: "yahoo", period: estimatePeriod ?? reportedDate, decisionGrade: false },
     },
     surprise: {
       revenueSurprisePct: null,
@@ -12819,10 +12883,19 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
     return JSON.stringify(out);
   }
 
-  if (actualRevenue != null && estRevenue != null && estRevenue !== 0) {
+  if (sourcePeriod && periodAlignmentStatus !== "MATCHED") {
+    (out.warnings as Record<string, unknown>[]).push({
+      code: periodAlignmentStatus === "MISMATCH" ? "PERIOD_ALIGNMENT_MISMATCH" : "PERIOD_ALIGNMENT_UNVERIFIED",
+      message: periodAlignmentStatus === "MISMATCH"
+        ? "The official-release period differs from the selected Yahoo estimate period; cross-source revenue surprise is omitted."
+        : "Yahoo identifies the selected estimate row by date rather than the official fiscal-period label; cross-source revenue surprise is omitted unless the periods can be matched.",
+    });
+  }
+
+  if (periodAlignmentStatus === "MATCHED" && actualRevenue != null && estRevenue != null && estRevenue !== 0) {
     (out.surprise as Record<string, unknown>).revenueSurprisePct =
       Number((((actualRevenue - estRevenue) / Math.abs(estRevenue)) * 100).toFixed(2));
-  } else if (actualRevenue != null) {
+  } else if (actualRevenue != null && periodAlignmentStatus === "MATCHED") {
     (out.warnings as Record<string, unknown>[]).push({
       code: "REVENUE_ESTIMATE_UNAVAILABLE",
       message: "No Yahoo revenue estimate was available for the selected reported quarter.",

@@ -95,10 +95,11 @@ export interface Tool {
     required?: string[];
   };
   outputSchema?: {
-    type: "object";
-    properties: Record<string, unknown>;
+    type?: "object";
+    properties?: Record<string, unknown>;
     required?: string[];
     additionalProperties?: boolean;
+    [key: string]: unknown;
   };
   deprecated?: boolean;
   useInstead?: string;
@@ -1103,7 +1104,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_company_press_releases", description: "Get company press releases and official release-style events. Defaults resolve SEC 8-K/EX-99 evidence first, then registry-backed company_ir_page, then Yahoo press-release context. Explicit sources can also include company_ir RSS/Atom and newswire. Gate use is payload-level: decisionGrade:true is allowed only for coverageStatus=SEC_EX99_RESOLVED or APPROVED_IR_PAGE_RESOLVED with evidence fields; candidates/RSS/newswire/Yahoo remain verification/context evidence.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, lookback_days: { type: "number", default: 90 }, max_results: { type: "number", default: 20 }, sources: { type: "array", items: { type: "string" }, default: ["sec", "company_ir_page", "yahoo_finance_press_releases"] } }, required: ["ticker"] } },
   { name: "get_sec_recent_events", description: "Get recent SEC filing events with filing type, filing date, accepted timestamp, accession number, SEC archive URL, and event metadata.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_types: { type: "array", items: { type: "string" }, default: ["8-K", "10-Q", "10-K"] }, lookback_days: { type: "number", default: 90 }, max_results: { type: "number", default: 20 } }, required: ["ticker"] } },
   { name: "get_public_event_timeline", description: "Get a deduplicated chronological timeline of public company events across SEC, company_ir RSS/Atom, company_ir_page registry entries, newswire, Yahoo, and Finnhub sources. Returns sourceStatus/sourceCoverage so missing official feeds or unapproved IR pages are distinguishable from no events.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, start_date: { type: "string", default: "" }, end_date: { type: "string", default: "" }, sources: { type: "array", items: { type: "string" }, default: ["sec", "company_ir", "newswire", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"] }, max_results: { type: "number", default: 50 }, newest_first: { type: "boolean", default: false } }, required: ["ticker"] } },
-  { name: "verify_company_event", description: "Verify whether a public company event is source-backed across SEC, company_ir RSS/Atom, company_ir_page registry entries, newswire, Yahoo, and Finnhub sources. Returns CONFIRMED, PARTIAL, NOT_FOUND, SOURCE_LIMITED_NOT_FOUND, STALE, or CONFLICTING with best evidence and sourceStatus/sourceCoverage. A SOURCE_LIMITED_NOT_FOUND includes failureMode/retryable/recommendedAction and must not be read as confirmed absence.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, event_query: { type: "string", description: "Keywords describing the event to verify." }, start_date: { type: "string", default: "" }, end_date: { type: "string", default: "" }, sources: { type: "array", items: { type: "string" }, default: ["sec", "company_ir", "newswire", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"] } }, required: ["ticker", "event_query"] } },
+  { name: "verify_company_event", description: "Verify whether a public company event is source-backed across SEC, company_ir RSS/Atom, company_ir_page registry entries, newswire, Yahoo, and Finnhub sources. Generic publication words such as announced, report, results, and update do not establish a match by themselves; inspect queryPolicy and each evidence item's queryMatch. Returns CONFIRMED, PARTIAL, NOT_FOUND, SOURCE_LIMITED_NOT_FOUND, STALE, or CONFLICTING with best evidence and sourceStatus/sourceCoverage. A SOURCE_LIMITED_NOT_FOUND must not be read as confirmed absence.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, event_query: { type: "string", description: "Specific event terms to verify, such as acquisition, dividend, guidance, contract, or offering." }, start_date: { type: "string", default: "" }, end_date: { type: "string", default: "" }, sources: { type: "array", items: { type: "string" }, default: ["sec", "company_ir", "newswire", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"] } }, required: ["ticker", "event_query"] } },
   { name: "extract_geographic_revenue", description: "Extract geographic revenue exposure from official SEC data and indexed filing tables. Returns explicit parser/provider limitation statuses instead of silent non-disclosure when data cannot be parsed.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, region: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker", "region"] } },
   { name: "extract_segment_revenue", description: "Extract segment revenue rows from official SEC facts and filing tables; may return explicit limitation statuses when no parseable segment data is found.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker"] } },
   { name: "extract_total_revenue", description: "Extract total revenue from official SEC facts or filing tables with evidence metadata.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" } }, required: ["ticker"] } },
@@ -1118,14 +1119,14 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "extract_earnings_metrics", description: "Extract reported earnings metrics from SEC 8-K or public IR source. EX-99 prose or unscoped iXBRL values remain non-decision-grade until their period is structurally matched.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" }, source_preference: { type: "array", items: { type: "string", enum: ["sec_8k", "company_ir", "10-q", "yahoo"] }, description: "Ordered preference list for source resolution.", default: ["sec_8k", "company_ir", "10-q", "yahoo"] } }, required: ["ticker"] } },
   { name: "extract_guidance", description: "Extract company-provided forward guidance ranges (revenue, gross margin, EPS) from the latest SEC 8-K or IR release.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" } }, required: ["ticker"] } },
   { name: "extract_management_commentary", description: "Extract topic-keyed management commentary snippets from the latest earnings release. Returns first relevant sentence per topic.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" }, topics: { type: "array", items: { type: "string" }, description: "Topics to search for, e.g. ['AI', 'margins', 'guidance', 'supply chain']" } }, required: ["ticker"] } },
-  { name: "compare_earnings_actual_vs_estimate", description: "Compare the latest reported quarter with Yahoo's historical estimate. Returns epsDelta and omits percentage surprise for near-zero estimates, with an explicit warning.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" } }, required: ["ticker"] } },
+  { name: "compare_earnings_actual_vs_estimate", description: "Compare official-release actuals with Yahoo's historical estimate row. The official fiscal label remains period/reportedPeriod; estimatePeriod and reportedDate identify the Yahoo row. Read periodAlignmentStatus before using cross-source revenue comparisons. Returns epsDelta and omits percentage surprise for near-zero estimates.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" } }, required: ["ticker"] } },
   { name: "list_sec_filing_exhibits", description: "List all exhibits/documents attached to a specific SEC filing by accession number.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, accessionNumber: { type: "string", description: "SEC filing accession number, e.g. '0000320193-24-000081'" } }, required: ["ticker", "accessionNumber"] } },
   { name: "get_sec_filing_exhibit_content", description: "Fetch and return the text content of a specific exhibit from an SEC filing. Supports topic-based paragraph filtering to reduce token usage.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, accessionNumber: { type: "string", description: "SEC filing accession number" }, fileName: { type: "string", description: "Exhibit filename from the filing index" }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" } }, required: ["ticker", "accessionNumber", "fileName"] } },
   { name: "parse_public_transcript", description: "Fetch and parse a public transcript page (Motley Fool, company IR, etc.). Supports topic-based paragraph filtering to reduce token usage. Provide raw_text to skip URL fetching.", inputSchema: { type: "object", properties: { url: { type: "string", description: "Public https URL of the transcript page" }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" }, raw_text: { type: "string", description: "Raw HTML or text content to parse directly (bypasses URL fetching)" } } } },
   { name: "get_earnings_call_transcript", description: "High-level tool to retrieve earnings call transcript content from SEC 8-K exhibits, then return structured fallback metadata for company IR, public transcript URLs, and optional Alpha Vantage.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, period: { type: "string", enum: ["latest"], default: "latest", description: "Period selector. Only 'latest' is supported." }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" } }, required: ["ticker"] } },
-  { name: "get_manifest_diagnostics", description: "Return deployment and manifest diagnostics: tool counts, manifest version, hash, build SHA, deploy timestamp, privacy scope, and connector-staleness advisory.", inputSchema: { type: "object", properties: {} } },
+  { name: "get_manifest_diagnostics", description: "Return public-safe MCP schema identity metadata for connector freshness checks.", inputSchema: { type: "object", properties: {} } },
   { name: "get_market_snapshot", description: "Compact market-state packet composing quote, price performance, moving-average trend, volume ratios, liquidity gate, and technical indicators in one call. Supports compact (default) and full modes, and optional batch of tickers.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, mode: { type: "string", enum: ["compact", "full"], default: "compact" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] } },
-  { name: "health_check", description: "Return runtime and deployment health metadata.", inputSchema: { type: "object", properties: {} } },
+  { name: "health_check", description: "Return public-safe MCP availability and schema identity metadata.", inputSchema: { type: "object", properties: {} } },
 ];
 
 const DEPRECATED_ALIAS_TOOLS: Tool[] = [];
@@ -1159,16 +1160,16 @@ const ENVELOPE_V2_OUTPUT_SCHEMA: Tool["outputSchema"] = {
   type: "object",
   properties: {
     ok: { type: "boolean" },
-    data: { type: "object" },
+    data: {},
     meta: {
       type: "object",
-      properties: {
-        tool: { type: "string" },
-        generatedAt: { type: "string" },
-        warnings: { type: "array", items: { type: "object" } },
-      },
+      additionalProperties: true,
     },
+    error: { type: ["object", "null"] },
+    diagnostics: {},
   },
+  required: ["ok", "data", "meta", "error"],
+  additionalProperties: true,
 };
 
 const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
@@ -1541,6 +1542,9 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       period: { type: ["string", "null"] },
       reportedPeriod: { type: ["string", "null"] },
       reportedDate: { type: ["string", "null"] },
+      releasePublishedAt: { type: ["string", "null"] },
+      estimatePeriod: { type: ["string", "null"] },
+      periodAlignmentStatus: { type: "string" },
       actual: { type: "object" },
       estimate: { type: "object" },
       surprise: { type: "object" },
@@ -1589,40 +1593,15 @@ export function isGroupedMode(): boolean {
 }
 
 const ENVELOPE_SCHEMA_VERSION = "2026-07-08";
-const DEFAULT_TOOL_MODE = "expanded";
 
 function currentToolMode(): "expanded" | "grouped" {
   return isGroupedMode() ? "grouped" : "expanded";
 }
 
-const RESPONSE_FIELD_CONTRACT = {
-  envelope: {
-    ok: "boolean success flag. Top-level ok:false is authoritative for tool failure.",
-    data: "successful payload object, or null when ok:false.",
-    error: "machine-readable error object when ok:false.",
-    meta: "transport/tool metadata. Do not use meta.decisionGrade alone to clear gates.",
-    diagnostics: "optional provider/runtime diagnostics when available.",
-  },
-  diagnosticsStatus: {
-    capabilityStatus: "tool-level readiness: ACTIVE, DEGRADED, PROVIDER_GATED, EXPERIMENTAL, or RETIRED.",
-    doctrineUse: "tool-level use policy: ALLOWED, VERIFY_ONLY, DIAGNOSTICS_ONLY, or BLOCKED.",
-    decisionGrade: "tool-level default only. Payload-level decisionGrade wins for specific calls.",
-    failureMode: "known tool-level limitation, or null.",
-    evidenceRequired: "whether payload evidence is required for decision use.",
-    sourceType: "dominant source family used by the tool.",
-  },
-  payloadLevel: {
-    status: "call-specific status such as FOUND, NOT_DISCLOSED, EXTRACTION_FAILED, or provider/error codes.",
-    confidence: "call-specific confidence or limitation class.",
-    decisionGrade: "call-specific decision-grade flag. This is the field gate-aware callers should inspect first.",
-    evidence: "source evidence for extracted facts when available.",
-    sourceEvidence: "structured XBRL/source evidence for SEC fact calls when available.",
-    warnings: "recoverable limitations or caveats; TABLE_NOT_PARSED blocks clean non-disclosure.",
-  },
-};
-
 export function listVisibleTools(): Tool[] {
-  return isGroupedMode() ? GROUPED_TOOLS : TOOLS.filter((t) => !t.deprecated);
+  const visible = isGroupedMode() ? GROUPED_TOOLS : TOOLS.filter((t) => !t.deprecated);
+  if (getWorkerVar("MCP_ENVELOPE_V2") !== "true") return visible;
+  return visible.map(tool => ({ ...tool, outputSchema: ENVELOPE_V2_OUTPUT_SCHEMA }));
 }
 
 const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
@@ -1753,72 +1732,6 @@ const TOOL_DOCTRINE_STATUS: Record<string, DoctrineToolStatus> = {
 
 function doctrineStatusFor(tool: string): DoctrineToolStatus | undefined {
   return TOOL_DOCTRINE_STATUS[tool];
-}
-
-function doctrineStatusDiagnostics(): Record<string, unknown> {
-  const counts: Record<string, number> = {};
-  for (const status of Object.values(TOOL_DOCTRINE_STATUS)) {
-    counts[status.capabilityStatus] = (counts[status.capabilityStatus] ?? 0) + 1;
-  }
-  return {
-    doctrineToolStatusCount: Object.keys(TOOL_DOCTRINE_STATUS).length,
-    doctrineToolStatusCounts: counts,
-    doctrineToolStatus: TOOL_DOCTRINE_STATUS,
-  };
-}
-
-function hiddenAliasDiagnostics(): Record<string, unknown> {
-  return {
-    hiddenAliasCount: Object.keys(TOOL_ALIASES).length,
-    hiddenAliases: TOOL_ALIASES,
-    hiddenAliasVisibility: "hidden_from_tools_list",
-  };
-}
-
-function runtimeContractDiagnostics(): Record<string, unknown> {
-  const toolMode = currentToolMode();
-  return {
-    envelopeSchemaVersion: ENVELOPE_SCHEMA_VERSION,
-    toolMode,
-    defaultToolMode: DEFAULT_TOOL_MODE,
-    groupedAvailable: true,
-    groupedEnabled: toolMode === "grouped",
-    responseFieldContract: RESPONSE_FIELD_CONTRACT,
-    batchContracts: {
-      get_company_news: {
-        maxTickers: 5,
-        batchMode: "independent_per_ticker",
-        resultShape: "per_ticker_keyed_object",
-        emptyCriticalGateFallback: "retry_ticker_solo_or_web_search",
-      },
-    },
-    companyIrRssDiscovery: {
-      status: "available",
-      source: "company_ir",
-      provider: "company_ir_rss",
-      discoveryMode: "safe_limited_website_autodiscovery",
-      publicTool: false,
-      defaultInGetCompanyNews: false,
-      safeGuards: [
-        "yahoo_profile_company_website",
-        "sec_identity_metadata_when_available",
-        "investors_and_ir_subdomain_probe",
-        "same_domain_or_validated_linked_feed",
-        "rss_atom_only",
-        "no_broad_crawl",
-        "no_html_article_scraping",
-      ],
-      sourceStatuses: [
-        "OK",
-        "WEBSITE_NOT_AVAILABLE",
-        "FEED_NOT_FOUND",
-        "DISCOVERY_NOT_FOUND",
-        "PROVIDER_ERROR",
-        "PARSE_ERROR",
-      ],
-    },
-    ...hiddenAliasDiagnostics(),
-  };
 }
 
 type AliasSuccessOptions = {
@@ -2280,27 +2193,37 @@ export async function callStructuredFactsProvider(tool: string, args: Record<str
   }
 }
 
-async function structuredFactProviderDiagnostics(): Promise<Record<string, unknown>> {
-  const disabled = structuredFactsDisabled();
-  const lastSmokeStatus = getWorkerVar("EDGAR_FACTS_LAST_SMOKE_STATUS") ?? null;
-  const smokeOk = typeof lastSmokeStatus === "string"
-    ? lastSmokeStatus.toUpperCase() === "OK" || lastSmokeStatus.toUpperCase() === "PASS"
-    : false;
-  return {
-    structuredFactProvider: disabled ? "disabled" : "official_sec_data_api",
-    structuredFactProviderConfigured: !disabled,
-    structuredFactProviderUrlConfigured: true,
-    structuredFactProviderLastSmokeStatus: lastSmokeStatus,
-    structuredFactProviderHealth: disabled ? "UNCONFIGURED" : (smokeOk ? "OK" : "UNKNOWN"),
-    structuredFactProviderCacheStatus: null,
-    structuredFactProviderLastErrorCode: disabled ? "STRUCTURED_FACT_PROVIDER_UNCONFIGURED" : (smokeOk ? null : "STRUCTURED_FACT_PROVIDER_SMOKE_UNKNOWN"),
-  };
-}
-
 export async function callTool(name: string, args: Record<string, unknown>): Promise<string> {
   const aliasTarget = TOOL_ALIASES[name];
   const canonicalTool = aliasTarget ?? name;
-  let raw = await _dispatchTool(canonicalTool, args);
+  let raw: string;
+  try {
+    raw = await _dispatchTool(canonicalTool, args);
+  } catch (error) {
+    const rawMessage = error instanceof Error ? error.message : String(error);
+    const lower = rawMessage.toLowerCase();
+    if (lower.includes("unknown tool") || lower.includes("unknown grouped tool")) {
+      return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, "Unknown tool name.");
+    }
+    if (lower.includes("ticker_not_found") || lower.includes("api error 404") || lower.includes("no data found for ticker")) {
+      return mcpFailure(name, ErrorCode.TICKER_NOT_FOUND, "No provider data was found for the requested ticker.", {
+        metaExtra: { retryable: false },
+      });
+    }
+    if (lower.includes("rate limit") || lower.includes("rate_limit") || lower.includes("429")) {
+      return mcpFailure(name, ErrorCode.RATE_LIMIT, "The upstream data provider rate limit was reached. Retry later.", {
+        metaExtra: { retryable: true },
+      });
+    }
+    if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("abort")) {
+      return mcpFailure(name, ErrorCode.PROVIDER_TIMEOUT, "The upstream data provider timed out. Retry this request.", {
+        metaExtra: { retryable: true },
+      });
+    }
+    return mcpFailure(name, ErrorCode.PROVIDER_ERROR, "The upstream data provider request failed.", {
+      metaExtra: { retryable: false },
+    });
+  }
   let batchMeta: { partialSuccess?: boolean; successCount?: number; errorCount?: number } | undefined;
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
@@ -2351,7 +2274,7 @@ export async function callVisibleTool(name: string, args: Record<string, unknown
 
   const actions = GROUPED_ACTIONS.get(name);
   if (!actions) {
-    throw new Error(`Unknown grouped tool: ${name}`);
+    return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, "Unknown tool name.");
   }
   const action = str(args.action).trim();
   if (!action) {
@@ -2763,70 +2686,53 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         Array.isArray(args.sources) ? args.sources.map(String) : ["sec", "company_ir", "newswire", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
       );
     case "health_check": {
-      const buildSha = getWorkerVar("BUILD_SHA") ?? "unknown";
-      const buildDate = getWorkerVar("BUILD_DATE") ?? "unknown";
       const version = getWorkerVar("SERVER_VERSION") ?? "1.1.0";
       const visibleTools = listVisibleTools();
-      const canonicalToolCount = visibleTools.length;
-      const deprecatedAliasCount = isGroupedMode() ? 0 : TOOLS.filter((t) => t.deprecated === true).length;
       const manifestVersion = getWorkerVar("MANIFEST_VERSION") ?? "1";
-      const deployedAt = getWorkerVar("DEPLOYED_AT") ?? new Date().toISOString();
       const manifestHash = await computeHash(JSON.stringify(visibleTools.map(t => t.name)));
-      const structuredFacts = await structuredFactProviderDiagnostics();
-      const doctrineStatus = doctrineStatusDiagnostics();
-      const runtimeContract = runtimeContractDiagnostics();
+      const schemaHash = await computeHash(JSON.stringify(visibleTools.map(t => ({
+        name: t.name,
+        description: t.description,
+        inputSchema: t.inputSchema,
+        outputSchema: t.outputSchema,
+      }))));
       return JSON.stringify({
         status: "ok",
         serverVersion: version,
-        envelopeV2: getWorkerVar("MCP_ENVELOPE_V2") === "true",
-        nodeVersion: "cloudflare-worker",
-        toolCount: canonicalToolCount,
-        canonicalToolCount,
-        deprecatedAliasCount,
+        toolCount: visibleTools.length,
         manifestVersion,
         manifestHash,
-        schemaHash: manifestHash,
-        runtimeHash: await computeHash(version + String(canonicalToolCount)),
-        buildSha,
-        buildDate,
-        deployedAt,
+        schemaHash,
+        runtimeHash: await computeHash(`${version}|${schemaHash}|${currentToolMode()}`),
+        toolMode: currentToolMode(),
+        envelopeSchemaVersion: ENVELOPE_SCHEMA_VERSION,
         generatedAt: new Date().toISOString(),
         privacyScope: "public_market_data_only",
-        ...runtimeContract,
-        ...structuredFacts,
-        ...doctrineStatus,
       });
     }
     case "get_manifest_diagnostics": {
-      const buildSha = getWorkerVar("BUILD_SHA") ?? "unknown";
-      const version = getWorkerVar("SERVER_VERSION") ?? "1.0.0";
+      const version = getWorkerVar("SERVER_VERSION") ?? "1.1.0";
       const visibleTools = listVisibleTools();
-      const canonicalToolCount = visibleTools.length;
-      const deprecatedAliasCount = isGroupedMode() ? 0 : TOOLS.filter((t) => t.deprecated === true).length;
-      const manifestVersion = getWorkerVar("MANIFEST_VERSION") ?? null;
-      const deployedAt = getWorkerVar("DEPLOYED_AT") ?? null;
+      const manifestVersion = getWorkerVar("MANIFEST_VERSION") ?? "1";
       const manifestHash = await computeHash(JSON.stringify(visibleTools.map(t => t.name)));
-      const workerSchemaGeneratedAt = new Date().toISOString();
-      const structuredFacts = await structuredFactProviderDiagnostics();
-      const doctrineStatus = doctrineStatusDiagnostics();
-      const runtimeContract = runtimeContractDiagnostics();
+      const schemaHash = await computeHash(JSON.stringify(visibleTools.map(t => ({
+        name: t.name,
+        description: t.description,
+        inputSchema: t.inputSchema,
+        outputSchema: t.outputSchema,
+      }))));
       return JSON.stringify({
-        toolCount: canonicalToolCount,
+        status: "ok",
+        serverVersion: version,
+        toolCount: visibleTools.length,
         manifestVersion,
         manifestHash,
-        buildSha,
-        deployedAt,
+        schemaHash,
+        runtimeHash: await computeHash(`${version}|${schemaHash}|${currentToolMode()}`),
+        toolMode: currentToolMode(),
+        envelopeSchemaVersion: ENVELOPE_SCHEMA_VERSION,
+        generatedAt: new Date().toISOString(),
         privacyScope: "public_market_data_only",
-        canonicalToolCount,
-        deprecatedAliasCount,
-        publicSchemaGeneratedAt: null,
-        workerSchemaGeneratedAt,
-        manifestMismatch: null,
-        staleConnectorWarning: "ChatGPT connector schema may lag the deployed Worker schema. Direct Worker tools/list and get_manifest_diagnostics are source of truth.",
-        serverVersion: version,
-        ...runtimeContract,
-        ...structuredFacts,
-        ...doctrineStatus,
       });
     }
     case "get_market_snapshot": {

@@ -40,15 +40,14 @@ class TestWorkerSecProvider(unittest.TestCase):
         for tool, target in expected_routes.items():
             self.assertRegex(self.tools, rf'case "{tool}":[\s\S]*?return {re.escape(target)}')
 
-    def test_diagnostics_are_exposed_for_live_gate(self) -> None:
+    def test_public_diagnostics_do_not_expose_provider_configuration(self) -> None:
         for field in (
-            "structuredFactProvider",
             "structuredFactProviderConfigured",
             "structuredFactProviderHealth",
             "structuredFactProviderLastSmokeStatus",
             "structuredFactProviderLastErrorCode",
         ):
-            self.assertIn(field, self.tools)
+            self.assertNotIn(field, self.tools)
 
     def test_no_external_python_service_dependency(self) -> None:
         self.assertNotIn("EDGAR_FACTS_URL", self.tools)

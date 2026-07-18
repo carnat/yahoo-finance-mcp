@@ -117,31 +117,20 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("const DEPRECATED_ALIAS_NAMES = new Set(Object.keys(TOOL_ALIASES));", tools)
         self.assertNotIn("const DEPRECATED_ALIAS_NAMES = new Set<string>();", tools)
 
-    def test_deployed_smoke_covers_alias_and_doctrine_status_behavior(self) -> None:
+    def test_deployed_smoke_covers_alias_and_public_schema_behavior(self) -> None:
         smoke = DEPLOYED_DISCOVERY.read_text(encoding="utf-8")
         self.assertIn("get_historical_stock_prices", smoke)
         self.assertIn("deprecatedTool", smoke)
         self.assertIn("DEPRECATED_ALIAS", smoke)
-        self.assertIn("doctrineToolStatus", smoke)
-        self.assertIn("envelopeSchemaVersion", smoke)
-        self.assertIn("EXPECTED_BUILD_SHA", smoke)
+        self.assertIn("manifestHash", smoke)
+        self.assertIn("privacyScope", smoke)
 
-    def test_diagnostics_exposes_contract_tool_mode_and_hidden_aliases(self) -> None:
+    def test_public_diagnostics_omit_internal_contract_maps(self) -> None:
         tools = TOOLS_TS.read_text(encoding="utf-8")
-        for field in (
-            "ENVELOPE_SCHEMA_VERSION",
-            "responseFieldContract",
-            "toolMode",
-            "defaultToolMode",
-            "groupedAvailable",
-            "groupedEnabled",
-            "hiddenAliases",
-            "hiddenAliasVisibility",
-            "get_holder_info",
-            "batchMode",
-            "independent_per_ticker",
-        ):
-            self.assertIn(field, tools)
+        self.assertIn("ENVELOPE_SCHEMA_VERSION", tools)
+        self.assertIn("schemaHash", tools)
+        for field in ("responseFieldContract", "hiddenAliases", "hiddenAliasVisibility", "structuredFactProviderConfigured"):
+            self.assertNotIn(field, tools)
 
     def test_press_releases_exposes_8k_without_ex99_status(self) -> None:
         worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
