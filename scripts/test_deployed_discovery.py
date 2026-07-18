@@ -23,6 +23,11 @@ try:
 except ModuleNotFoundError:  # direct ``python scripts/test_deployed_discovery.py`` execution
     from public_tool_contract import validate_live_tool_contract  # type: ignore[no-redef]
 
+try:
+    from scripts.test_deployed_canaries import health_contract
+except ModuleNotFoundError:  # direct ``python scripts/test_deployed_discovery.py`` execution
+    from test_deployed_canaries import health_contract  # type: ignore[no-redef]
+
 from live_smoke_utils import choose_stable_option_expiration
 
 URL = "https://yahoo-finance-mcp.artinatw.workers.dev/mcp"
@@ -790,27 +795,8 @@ def main() -> int:
             if isinstance(data, dict) and (data.get("status") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE" or data.get("code") == "STRUCTURED_FACT_PROVIDER_UNAVAILABLE"):
                 raise AssertionError(f"{name} returned STRUCTURED_FACT_PROVIDER_UNAVAILABLE after local routing: {data}")
         if name == "health_check":
-            health = extract_data(payload)
             print(f"  health_check response: {json.dumps(payload)}")
-            if isinstance(health, dict) and health.get("envelopeV2") is not True:
-                raise AssertionError(f"health_check envelopeV2 expected true, got: {health}")
-            if isinstance(health, dict):
-                for field in (
-                    "toolCount",
-                    "manifestVersion",
-                    "manifestHash",
-                    "privacyScope",
-                ):
-                    if field not in health:
-                        raise AssertionError(f"health_check missing field: {field}")
-                if health.get("envelopeSchemaVersion") not in (None, "2026-07-08"):
-                    raise AssertionError(f"health_check envelopeSchemaVersion mismatch: {health}")
-                if health.get("toolCount") != len(names):
-                    raise AssertionError(
-                        f"health_check toolCount mismatch: {health.get('toolCount')} != tools/list {len(names)}"
-                    )
-                if health.get("privacyScope") != "public_market_data_only":
-                    raise AssertionError(f"health_check privacyScope mismatch: {health.get('privacyScope')!r}")
+            health_contract(payload, {"expectedToolCount": len(names)})
         if name == "get_option_chain":
             data = extract_data(payload)
             # Worker returns {"error": true, "code": "INVALID_EXPIRY_DATE"} when the

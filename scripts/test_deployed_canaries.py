@@ -68,7 +68,7 @@ def _warning_codes(data: dict[str, Any]) -> set[str]:
     }
 
 
-def _assert_contract(data: Any, label: str) -> None:
+def _assert_contract(data: Any, label: str, expected_tool_count: int | None = None) -> None:
     if not isinstance(data, dict):
         raise AssertionError(f"{label} returned non-object data: {data!r}")
     required = (
@@ -85,11 +85,22 @@ def _assert_contract(data: Any, label: str) -> None:
     if EXPECTED_TOOL_MODE and str(data.get("toolMode", "")).lower() != EXPECTED_TOOL_MODE:
         if data.get("toolMode") is not None:
             raise AssertionError(f"{label} toolMode mismatch: {data}")
+    if data.get("privacyScope") != "public_market_data_only":
+        raise AssertionError(f"{label} privacyScope mismatch: {data.get('privacyScope')!r}")
+    if expected_tool_count is not None and data.get("toolCount") != expected_tool_count:
+        raise AssertionError(
+            f"{label} toolCount mismatch: {data.get('toolCount')} != tools/list {expected_tool_count}"
+        )
 
 
-def health_contract(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
+def health_contract(payload: dict[str, Any], canary: dict[str, Any]) -> None:
     data = extract_data(payload)
-    _assert_contract(data, "health_check")
+    expected_tool_count = canary.get("expectedToolCount")
+    _assert_contract(
+        data,
+        "health_check",
+        expected_tool_count if isinstance(expected_tool_count, int) else None,
+    )
 
 
 def manifest_contract(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
