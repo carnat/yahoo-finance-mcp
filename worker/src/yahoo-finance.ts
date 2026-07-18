@@ -445,6 +445,32 @@ async function yGet(url: string, auth = true): Promise<unknown> {
   return res.json();
 }
 
+async function yPost(url: string, body: Record<string, unknown>): Promise<unknown> {
+  const makeReq = async (c: { value: string; cookie: string }): Promise<Response> => {
+    const u = `${url}${url.includes("?") ? "&" : "?"}crumb=${encodeURIComponent(c.value)}`;
+    return fetch(u, {
+      method: "POST",
+      headers: {
+        "User-Agent": UA,
+        Cookie: c.cookie,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  };
+  let res = await makeReq(await getCrumb());
+  if (res.status === 401) {
+    await res.body?.cancel();
+    _crumb = null;
+    res = await makeReq(await getCrumb());
+  }
+  if (!res.ok) {
+    await res.body?.cancel();
+    throw new Error(`Yahoo Finance API error ${res.status} for: ${url}`);
+  }
+  return res.json();
+}
+
 // Extract the `raw` numeric value from Yahoo Finance's {raw, fmt} wrapper objects.
 // Empty objects {} are treated as missing values and normalized to null.
 function raw(v: unknown): unknown {
@@ -586,16 +612,24 @@ async function runPartialBatch(
 
 // ── get_etf_info ─────────────────────────────────────────────────────────────
 
-export async function getEtfInfo(ticker: string | string[]): Promise<string> {
+export async function getEtfInfo(ticker: string | string[], sections?: string[] | null): Promise<string> {
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getEtfInfo(t));
+    return runPartialBatch(ticker, (t) => getEtfInfo(t, sections));
   }
 
   try {
+    const requested = sections?.length ? sections : ["overview", "holdings", "allocation"];
+    const allowed = new Set(["overview", "holdings", "allocation", "operations", "fixed_income"]);
+    const invalid = requested.filter((section) => !allowed.has(section));
+    if (invalid.length) {
+      return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: `Unsupported sections: ${invalid.join(", ")}`, supportedSections: [...allowed] });
+    }
     const modules = [
       "summaryDetail",
+      "summaryProfile",
       "defaultKeyStatistics",
       "topHoldings",
+      "fundProfile",
       "fundPerformance",
       "price",
     ].join(",");
@@ -613,12 +647,20 @@ export async function getEtfInfo(ticker: string | string[]): Promise<string> {
     const summary = result.summaryDetail as Record<string, unknown> | undefined;
     const keyStats = result.defaultKeyStatistics as Record<string, unknown> | undefined;
     const topHoldingsData = result.topHoldings as Record<string, unknown> | undefined;
+    const summaryProfile = result.summaryProfile as Record<string, unknown> | undefined;
+    const fundProfile = result.fundProfile as Record<string, unknown> | undefined;
     const fundPerf = result.fundPerformance as Record<string, unknown> | undefined;
 
     const pick = (src: Record<string, unknown> | undefined, key: string): unknown =>
       src ? raw(src[key]) : null;
 
     const data: Record<string, unknown> = {
+      ticker,
+      source: "yahoo_finance",
+      evidenceClass: "CONTEXTUAL_MARKET_DATA",
+      decisionGrade: false,
+      sectionsRequested: requested,
+      sectionStatus: {},
       // Identity
       shortName: pick(priceData, "shortName"),
       quoteType: pick(priceData, "quoteType"),
@@ -649,8 +691,18 @@ export async function getEtfInfo(ticker: string | string[]): Promise<string> {
       twoHundredDayAverage: pick(summary, "twoHundredDayAverage"),
     };
 
+    if (requested.includes("overview")) {
+      data.description = pick(summaryProfile, "longBusinessSummary");
+      data.fundOverview = {
+        categoryName: pick(fundProfile, "categoryName") ?? pick(summary, "category"),
+        family: pick(fundProfile, "family") ?? pick(summary, "fundFamily"),
+        legalType: pick(fundProfile, "legalType") ?? pick(keyStats, "legalType"),
+      };
+      (data.sectionStatus as Record<string, string>).overview = summaryProfile || fundProfile ? "OK" : "EMPTY_RESULT";
+    }
+
     // Top holdings (up to 10)
-    if (topHoldingsData) {
+    if (topHoldingsData && requested.includes("holdings")) {
       const holdings = (topHoldingsData.holdings as Array<Record<string, unknown>> | undefined) ?? [];
       data.topHoldings = holdings.slice(0, 10).map((h) => ({
         symbol: h.symbol,
@@ -658,6 +710,22 @@ export async function getEtfInfo(ticker: string | string[]): Promise<string> {
         pct: raw(h.holdingPercent),
       }));
 
+      const equity = (topHoldingsData.equityHoldings as Record<string, unknown> | undefined) ?? {};
+      data.equityHoldings = Object.fromEntries(Object.entries(equity).map(([key, value]) => [key, raw(value)]));
+      (data.sectionStatus as Record<string, string>).holdings = "OK";
+    } else if (requested.includes("holdings")) {
+      (data.sectionStatus as Record<string, string>).holdings = "EMPTY_RESULT";
+    }
+
+    if (topHoldingsData && requested.includes("allocation")) {
+      data.assetClasses = {
+        cashPosition: raw(topHoldingsData.cashPosition),
+        stockPosition: raw(topHoldingsData.stockPosition),
+        bondPosition: raw(topHoldingsData.bondPosition),
+        preferredPosition: raw(topHoldingsData.preferredPosition),
+        convertiblePosition: raw(topHoldingsData.convertiblePosition),
+        otherPosition: raw(topHoldingsData.otherPosition),
+      };
       const sw = (topHoldingsData.sectorWeightings as Array<Record<string, unknown>> | undefined) ?? [];
       data.sectorWeights = sw
         .map((s) => {
@@ -667,6 +735,30 @@ export async function getEtfInfo(ticker: string | string[]): Promise<string> {
           return { sector, weight: raw(rawWeight) };
         })
         .filter(Boolean);
+      (data.sectionStatus as Record<string, string>).allocation = "OK";
+    } else if (requested.includes("allocation")) {
+      (data.sectionStatus as Record<string, string>).allocation = "EMPTY_RESULT";
+    }
+
+    if (requested.includes("operations")) {
+      const fees = (fundProfile?.feesExpensesInvestment as Record<string, unknown> | undefined) ?? {};
+      const categoryFees = (fundProfile?.feesExpensesInvestmentCat as Record<string, unknown> | undefined) ?? {};
+      data.fundOperations = Object.fromEntries(
+        [...new Set([...Object.keys(fees), ...Object.keys(categoryFees)])].map((key) => [key, {
+          fund: raw(fees[key]), categoryAverage: raw(categoryFees[key]),
+        }])
+      );
+      (data.sectionStatus as Record<string, string>).operations = fundProfile ? "OK" : "EMPTY_RESULT";
+    }
+
+    if (topHoldingsData && requested.includes("fixed_income")) {
+      const bond = (topHoldingsData.bondHoldings as Record<string, unknown> | undefined) ?? {};
+      data.bondHoldings = Object.fromEntries(Object.entries(bond).map(([key, value]) => [key, raw(value)]));
+      const ratings = (topHoldingsData.bondRatings as Array<Record<string, unknown>> | undefined) ?? [];
+      data.bondRatings = Object.fromEntries(ratings.flatMap((rating) => Object.entries(rating).map(([key, value]) => [key, raw(value)])));
+      (data.sectionStatus as Record<string, string>).fixed_income = "OK";
+    } else if (requested.includes("fixed_income")) {
+      (data.sectionStatus as Record<string, string>).fixed_income = "EMPTY_RESULT";
     }
 
     // Annual returns from fundPerformance (most recent 5 years)
@@ -681,6 +773,8 @@ export async function getEtfInfo(ticker: string | string[]): Promise<string> {
       }
     }
 
+    const statuses = Object.values(data.sectionStatus as Record<string, string>);
+    data.recommendedNextAction = statuses.every((status) => status === "OK") ? "NONE" : "RETRY_OR_REQUEST_AVAILABLE_SECTION";
     return JSON.stringify(data);
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
@@ -812,7 +906,7 @@ export async function getNews(ticker: string): Promise<string> {
 
 export async function getStockActions(ticker: string): Promise<string> {
   const d = (await yGet(
-    `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=max&interval=1d&events=div%2Csplit`,
+    `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=max&interval=1d&events=div%2Csplit%2CcapitalGains`,
     false
   )) as Record<string, unknown>;
 
@@ -821,18 +915,22 @@ export async function getStockActions(ticker: string): Promise<string> {
     | undefined;
   const events = (result?.events as Record<string, Record<string, Record<string, number>>>) ?? {};
 
-  type Row = { Date: string; Dividends: number; "Stock Splits": number };
+  type Row = { Date: string; Dividends: number; "Stock Splits": number; "Capital Gains": number };
   const rows: Row[] = [];
 
   for (const v of Object.values(events.dividends ?? {})) {
-    rows.push({ Date: iso(v.date), Dividends: v.amount, "Stock Splits": 0 });
+    rows.push({ Date: iso(v.date), Dividends: v.amount, "Stock Splits": 0, "Capital Gains": 0 });
   }
   for (const v of Object.values(events.splits ?? {})) {
     rows.push({
       Date: iso(v.date),
       Dividends: 0,
       "Stock Splits": v.numerator / v.denominator,
+      "Capital Gains": 0,
     });
+  }
+  for (const v of Object.values(events.capitalGains ?? {})) {
+    rows.push({ Date: iso(v.date), Dividends: 0, "Stock Splits": 0, "Capital Gains": v.amount });
   }
 
   rows.sort((a, b) => a.Date.localeCompare(b.Date));
@@ -896,14 +994,24 @@ const TIMESERIES_FS_CONFIG: Record<string, { prefix: string; baseTypes: string[]
   quarterly_balance_sheet: { prefix: "quarterly", baseTypes: BALANCE_BASE_TYPES },
   cashflow:                { prefix: "annual",    baseTypes: CASHFLOW_BASE_TYPES },
   quarterly_cashflow:      { prefix: "quarterly", baseTypes: CASHFLOW_BASE_TYPES },
+  ttm_income_stmt:         { prefix: "trailing",  baseTypes: INCOME_BASE_TYPES },
+  ttm_cashflow:            { prefix: "trailing",  baseTypes: CASHFLOW_BASE_TYPES },
 };
 
 async function fetchTimeseries(
   ticker: string,
   prefix: string,
-  baseTypes: string[]
+  baseTypes: string[],
+  lineItems?: string[] | null,
 ): Promise<string> {
-  const types = baseTypes.map((t) => `${prefix}${t}`);
+  const normalized = new Set((lineItems ?? []).map((item) => item.toLowerCase().replace(/[^a-z0-9]/g, "")));
+  const selectedTypes = normalized.size
+    ? baseTypes.filter((type) => normalized.has(type.toLowerCase()) || normalized.has(type.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase().replace(/[^a-z0-9]/g, "")))
+    : baseTypes;
+  if (normalized.size && !selectedTypes.length) {
+    return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: "No requested line_items matched this statement type", requestedLineItems: lineItems });
+  }
+  const types = selectedTypes.map((t) => `${prefix}${t}`);
   // period1: 1985-08-20 (yfinance default); period2: now
   const p2 = Math.floor(Date.now() / 1000);
   const d = (await yGet(
@@ -946,39 +1054,32 @@ async function fetchTimeseries(
     }
   }
 
-  // Sort most-recent first
-  const records = Object.values(byDate).sort((a, b) =>
-    (b.date as string).localeCompare(a.date as string)
-  );
+  const dates = Object.keys(byDate)
+    .sort((a, b) => b.localeCompare(a))
+    .slice(0, prefix === "trailing" ? 1 : 4);
+  if (!dates.length) return JSON.stringify([]);
 
-  // DEBUG: if byDate ended up empty, surface what the API actually returned
-  if (records.length === 0) {
-    const firstItem = results[0] as Record<string, unknown> | undefined;
-    const firstMeta = firstItem?.meta as Record<string, unknown> | undefined;
-    const firstType = firstMeta?.type;
-    const firstKey = Array.isArray(firstType) ? firstType[0] : firstType;
-    // Include raw response snippet so we can see the actual shape
-    const rawSnippet = JSON.stringify(d).slice(0, 1500);
-    const debug = {
-      resultsCount: results.length,
-      firstItemType: firstType,
-      firstItemKeys: firstItem ? Object.keys(firstItem) : null,
-      firstItemRaw: firstItem,  // full first item for structure inspection
-      firstItemDataSample: firstItem && firstKey ? firstItem[firstKey as string] : null,
-      rawResponseSnippet: rawSnippet,
-    };
-    return JSON.stringify({ debug, data: [] });
-  }
+  // Match Python/yfinance's line-item-oriented DataFrame serialization:
+  // [{lineItem: "Total Revenue", "2026-03-31": 123, ...}, ...]
+  const humanize = (value: string): string => value
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
+  const records = selectedTypes.map((baseType) => {
+    const key = baseType.charAt(0).toLowerCase() + baseType.slice(1);
+    const row: Record<string, unknown> = { lineItem: humanize(baseType) };
+    for (const date of dates) row[date] = byDate[date][key] ?? null;
+    return row;
+  }).filter((row) => dates.some((date) => row[date] != null));
 
   return JSON.stringify(records);
 }
 
-export async function getFinancialStatement(ticker: string, type: string): Promise<string> {
+export async function getFinancialStatement(ticker: string, type: string, lineItems?: string[] | null): Promise<string> {
   const cfg = TIMESERIES_FS_CONFIG[type];
   if (!cfg) return `Error: invalid financial type '${type}'`;
 
   try {
-    return await fetchTimeseries(ticker, cfg.prefix, cfg.baseTypes);
+    return await fetchTimeseries(ticker, cfg.prefix, cfg.baseTypes, lineItems);
   } catch (e) {
     return `Error fetching financial statement for ${ticker}: ${e instanceof Error ? e.message : String(e)}`;
   }
@@ -1760,8 +1861,13 @@ export async function getEarningsAnalysis(ticker: string): Promise<string> {
     earningsEstimate: null,
     revenueEstimate: null,
     epsTrend: null,
+    epsRevisions: null,
     earningsHistory: null,
     growthEstimates: null,
+    source: "yahoo_finance",
+    evidenceClass: "CONTEXTUAL_MARKET_DATA",
+    decisionGrade: false,
+    recommendedNextAction: "NONE",
   };
 
   const trendArr = (et.trend as Record<string, unknown>[]) ?? [];
@@ -1777,6 +1883,10 @@ export async function getEarningsAnalysis(ticker: string): Promise<string> {
     output.epsTrend = trendArr.map((p) => ({
       period: p.period,
       ...flatRaw((p.epsTrend as Record<string, unknown>) ?? {}),
+    }));
+    output.epsRevisions = trendArr.map((p) => ({
+      period: p.period,
+      ...flatRaw((p.epsRevisions as Record<string, unknown>) ?? {}),
     }));
     output.growthEstimates = trendArr.map((p) => ({
       period: p.period,
@@ -1798,9 +1908,55 @@ export async function getEarningsAnalysis(ticker: string): Promise<string> {
   return JSON.stringify(output);
 }
 
-export async function getFinancialRatios(ticker: string | string[]): Promise<string> {
+const VALUATION_TYPES: Record<string, string> = {
+  MarketCap: "marketCap",
+  EnterpriseValue: "enterpriseValue",
+  PeRatio: "trailingPE",
+  ForwardPeRatio: "forwardPE",
+  PegRatio: "pegRatio",
+  PsRatio: "priceToSales",
+  PbRatio: "priceToBook",
+  EnterprisesValueRevenueRatio: "enterpriseToRevenue",
+  EnterprisesValueEBITDARatio: "enterpriseToEbitda",
+};
+
+async function fetchValuationHistory(ticker: string, periods: number, frequency: string): Promise<Record<string, unknown>[]> {
+  const prefix = frequency === "yearly" ? "annual" : frequency;
+  const types = Object.keys(VALUATION_TYPES).map((type) => `${prefix}${type}`);
+  const p2 = Math.floor(Date.now() / 1000);
+  const d = (await yGet(
+    `https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${enc(ticker)}` +
+      `?type=${types.join(",")}&period1=1483142400&period2=${p2}`
+  )) as Record<string, unknown>;
+  const results = ((d.timeseries as Record<string, unknown> | undefined)?.result as Record<string, unknown>[] | undefined) ?? [];
+  const byDate: Record<string, Record<string, unknown>> = {};
+  for (const item of results) {
+    const rawType = ((item.meta as Record<string, unknown> | undefined)?.type ?? "") as string | string[];
+    const typeName = String(Array.isArray(rawType) ? rawType[0] ?? "" : rawType);
+    const baseType = typeName.slice(prefix.length);
+    const outputKey = VALUATION_TYPES[baseType];
+    if (!outputKey) continue;
+    const values = (item[typeName] as Array<{ asOfDate?: string; reportedValue?: { raw?: unknown } }> | undefined) ?? [];
+    for (const value of values) {
+      if (!value.asOfDate) continue;
+      byDate[value.asOfDate] ??= { period: value.asOfDate };
+      byDate[value.asOfDate][outputKey] = value.reportedValue?.raw ?? null;
+    }
+  }
+  return Object.values(byDate).sort((a, b) => String(b.period).localeCompare(String(a.period))).slice(0, periods);
+}
+
+export async function getFinancialRatios(
+  ticker: string | string[],
+  historyPeriods: number = 0,
+  frequency: string = "quarterly",
+): Promise<string> {
   if (Array.isArray(ticker)) {
-    return runPartialBatch(ticker, (t) => getFinancialRatios(t));
+    return runPartialBatch(ticker, (t) => getFinancialRatios(t, historyPeriods, frequency));
+  }
+  historyPeriods = Math.max(0, Math.min(20, Math.trunc(historyPeriods)));
+  if (!["quarterly", "monthly", "yearly", "trailing"].includes(frequency)) {
+    return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: "frequency must be quarterly, monthly, yearly, or trailing" });
   }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=summaryDetail,financialData,defaultKeyStatistics`
@@ -1820,6 +1976,10 @@ export async function getFinancialRatios(ticker: string | string[]): Promise<str
 
   const rawRatios: Record<string, unknown> = {
     ticker,
+    source: "yahoo_finance",
+    evidenceClass: "CONTEXTUAL_MARKET_DATA",
+    decisionGrade: false,
+    recommendedNextAction: "NONE",
     currency: raw(fd.financialCurrency),
     trailingPE: raw(sd.trailingPE),
     forwardPE: raw(sd.forwardPE),
@@ -1857,10 +2017,156 @@ export async function getFinancialRatios(ticker: string | string[]): Promise<str
     ])
   );
 
+  if (historyPeriods > 0) {
+    try {
+      const current: Record<string, unknown> = { period: "Current" };
+      for (const outputKey of Object.values(VALUATION_TYPES)) current[outputKey] = filtered[outputKey] ?? null;
+      const dated = historyPeriods > 1
+        ? await fetchValuationHistory(ticker, historyPeriods - 1, frequency)
+        : [];
+      filtered.valuationHistory = [current, ...dated];
+      filtered.valuationFrequency = frequency;
+      filtered.historyPeriodsRequested = historyPeriods;
+    } catch (e) {
+      filtered.valuationHistory = null;
+      filtered.valuationHistoryStatus = "PROVIDER_ERROR";
+      filtered.valuationHistoryWarning = e instanceof Error ? e.message : String(e);
+    }
+  }
   return JSON.stringify(filtered);
 }
 
-export async function getCalendar(ticker: string): Promise<string> {
+function visualizationRows(d: Record<string, unknown>): Record<string, unknown>[] {
+  const result = ((d.finance as Record<string, unknown> | undefined)?.result as Record<string, unknown>[] | undefined)?.[0];
+  const document = (result?.documents as Record<string, unknown>[] | undefined)?.[0];
+  const columns = (document?.columns as Array<{ label?: string; id?: string; type?: string }> | undefined) ?? [];
+  const seen = new Set<string>();
+  const labels = columns.map((column, index) => {
+    const base = column.label === "Event Start Date" && column.type === "STRING"
+      ? "Timing"
+      : column.label ?? column.id ?? `field${index + 1}`;
+    if (!seen.has(base)) {
+      seen.add(base);
+      return base;
+    }
+    const unique = `${base} ${index + 1}`;
+    seen.add(unique);
+    return unique;
+  });
+  const rows = (document?.rows as unknown[][] | undefined) ?? [];
+  return rows.map((row) => Object.fromEntries(labels.map((label, index) => [label, row[index] ?? null])));
+}
+
+function yahooCalendarNumber(value: string | undefined): number | null {
+  const normalized = (value ?? "").trim().replace(/,/g, "").replace(/%$/, "");
+  if (!normalized || normalized === "-" || /^n\/?a$/i.test(normalized)) return null;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function fetchTickerEarningsHistory(
+  ticker: string,
+  limit: number,
+  offset: number,
+): Promise<Record<string, unknown>[]> {
+  // yfinance's current Ticker.get_earnings_dates implementation scrapes this
+  // bounded Yahoo calendar table because the older visualization feed stopped
+  // receiving updates. Keep the Worker on the same source and pagination model.
+  const size = limit <= 25 ? 25 : limit <= 50 ? 50 : 100;
+  const url = `https://finance.yahoo.com/calendar/earnings?symbol=${enc(ticker)}&offset=${offset}&size=${size}`;
+  const response = await fetch(url, { headers: { "User-Agent": UA }, redirect: "follow" });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`Yahoo Finance calendar error ${response.status} for: ${ticker}`);
+  }
+  const html = await response.text();
+  const table = html.match(/<table\b[^>]*>[\s\S]*?<\/table>/i)?.[0];
+  if (!table) return [];
+
+  const rowHtml = [...table.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)].map((match) => match[1]);
+  if (!rowHtml.length) return [];
+  const headers = [...rowHtml[0].matchAll(/<th\b[^>]*>([\s\S]*?)<\/th>/gi)]
+    .map((match) => stripHtmlTags(match[1]));
+  if (!headers.length) return [];
+
+  const rows: Record<string, unknown>[] = [];
+  for (const rawRow of rowHtml.slice(1)) {
+    const cells = [...rawRow.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)]
+      .map((match) => stripHtmlTags(match[1]));
+    if (!cells.length) continue;
+    const row = Object.fromEntries(headers.map((header, index) => [header, cells[index] ?? ""]));
+    const symbol = String(row.Symbol ?? "").trim();
+    if (symbol && symbol.toUpperCase() !== ticker.toUpperCase()) continue;
+    rows.push({
+      "Earnings Date": row["Earnings Date"] || null,
+      "EPS Estimate": yahooCalendarNumber(String(row["EPS Estimate"] ?? "")),
+      "Reported EPS": yahooCalendarNumber(String(row["Reported EPS"] ?? "")),
+      "Surprise(%)": yahooCalendarNumber(String(row["Surprise(%)"] ?? row["Surprise (%)"] ?? "")),
+    });
+    if (rows.length >= limit) break;
+  }
+  return rows;
+}
+
+export async function analyzeShareCountTrend(
+  ticker: string,
+  startDate?: string | null,
+  endDate?: string | null,
+): Promise<string> {
+  const end = endDate ? new Date(`${endDate}T00:00:00Z`) : new Date();
+  const start = startDate ? new Date(`${startDate}T00:00:00Z`) : new Date(end.getTime() - 5 * 365 * 86_400_000);
+  if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || start >= end) {
+    return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: "start_date must be before end_date" });
+  }
+  const d = (await yGet(
+    `https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${enc(ticker)}` +
+      `?symbol=${enc(ticker)}&period1=${Math.floor(start.getTime() / 1000)}&period2=${Math.floor(end.getTime() / 1000)}`
+  )) as Record<string, unknown>;
+  const results = ((d.timeseries as Record<string, unknown> | undefined)?.result as Record<string, unknown>[] | undefined) ?? [];
+  const shares = results.find((item) => Array.isArray(item.shares_out));
+  const values = (shares?.shares_out as number[] | undefined) ?? [];
+  const timestamps = (shares?.timestamp as number[] | undefined) ?? [];
+  const ordered = timestamps.map((timestamp, index) => ({ date: iso(timestamp), shares: values[index] ?? null }))
+    .filter((item) => item.shares != null)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const byTimestamp = new Map<string, { date: string; shares: number | null }>();
+  for (const item of ordered) byTimestamp.set(item.date, item);
+  const deduped = [...byTimestamp.values()];
+  const compact = deduped.filter((item, index) => index === 0 || item.shares !== deduped[index - 1].shares);
+  if (!compact.length) {
+    return JSON.stringify({ ticker, status: "EMPTY_RESULT", observations: [], source: "yahoo_finance", evidenceClass: "CONTEXTUAL_MARKET_DATA", decisionGrade: false, recommendedNextAction: "CHECK_SEC_FILINGS" });
+  }
+  const first = compact[0].shares as number;
+  const current = compact[compact.length - 1].shares as number;
+  const change = current - first;
+  const observations = compact.slice(-60);
+  return JSON.stringify({
+    ticker, status: "OK", startDate: start.toISOString().slice(0, 10), endDate: end.toISOString().slice(0, 10),
+    dataDate: compact[compact.length - 1].date, firstShares: first, currentShares: current,
+    changeShares: change, changePct: first ? +((change / first) * 100).toFixed(4) : null,
+    sampleCount: compact.length, returnedSampleCount: observations.length,
+    truncated: compact.length > observations.length, observations, source: "yahoo_finance",
+    evidenceClass: "CONTEXTUAL_MARKET_DATA", decisionGrade: false,
+    interpretation: "Share-count changes may reflect issuance, buybacks, splits, or provider revisions; confirm material changes in company filings.",
+    recommendedNextAction: change ? "CHECK_SEC_FILINGS" : "NONE",
+  });
+}
+
+export async function getCalendar(ticker: string, mode: string = "upcoming", limit: number = 12, offset: number = 0): Promise<string> {
+  limit = Math.max(1, Math.min(100, Math.trunc(limit)));
+  offset = Math.max(0, Math.trunc(offset));
+  if (!['upcoming', 'history'].includes(mode)) {
+    return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: "mode must be upcoming or history" });
+  }
+  if (mode === "history") {
+    const items = await fetchTickerEarningsHistory(ticker, limit, offset);
+    return JSON.stringify({
+      ticker, mode, status: items.length ? "OK" : "EMPTY_RESULT", items, limit, offset, hasMore: items.length === limit,
+      source: "yahoo_finance", sourceType: "provider_calendar", evidenceClass: "CONTEXTUAL_MARKET_DATA",
+      providerMethod: "YAHOO_CALENDAR_HTML",
+      confirmationStatus: "UNVERIFIED", decisionGrade: false, recommendedNextAction: "NONE",
+    });
+  }
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=calendarEvents`
   )) as Record<string, unknown>;
@@ -1882,13 +2188,15 @@ export async function getCalendar(ticker: string): Promise<string> {
 
   return JSON.stringify({
     ticker,
-    earningsDateConfirmed: earningsDates.filter(Boolean).length === new Set(earningsDates.filter(Boolean)).size
-      && new Set(earningsDates.filter(Boolean)).size === 1,
-    earningsDateSource: earningsDates.filter(Boolean).length === 0
-      ? "UNKNOWN"
-      : new Set(earningsDates.filter(Boolean)).size === 1
-        ? "IR_FILING"
-        : "ESTIMATE",
+    mode,
+    earningsDateConfirmed: false,
+    earningsDateSource: earningsDates.filter(Boolean).length ? "YAHOO_CALENDAR" : "UNKNOWN",
+    confirmationStatus: "UNVERIFIED",
+    source: "yahoo_finance",
+    sourceType: "provider_calendar",
+    evidenceClass: "CONTEXTUAL_MARKET_DATA",
+    decisionGrade: false,
+    recommendedNextAction: earningsDates.filter(Boolean).length ? "CHECK_OFFICIAL_RELEASES" : "NONE",
     calendar: {
       earnings: {
         earningsDate: earningsDates,
@@ -1902,6 +2210,73 @@ export async function getCalendar(ticker: string): Promise<string> {
       exDividendDate: exDiv?.raw != null ? iso(exDiv.raw) : null,
       dividendDate: divDate?.raw != null ? iso(divDate.raw) : null,
     },
+  });
+}
+
+export async function getMarketCalendar(
+  eventType: string = "earnings",
+  startDate?: string | null,
+  endDate?: string | null,
+  limit: number = 25,
+  offset: number = 0,
+): Promise<string> {
+  const start = startDate ?? new Date().toISOString().slice(0, 10);
+  const startMs = new Date(`${start}T00:00:00Z`).getTime();
+  const end = endDate ?? new Date(startMs + 7 * 86_400_000).toISOString().slice(0, 10);
+  const endMs = new Date(`${end}T23:59:59Z`).getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs > endMs || endMs - startMs > 31 * 86_400_000) {
+    return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: "date range must be 0 to 31 days" });
+  }
+  limit = Math.max(1, Math.min(100, Math.trunc(limit)));
+  offset = Math.max(0, Math.trunc(offset));
+  const config: Record<string, { entity: string; fields: string[]; sortField: string }> = {
+    earnings: { entity: "sp_earnings", sortField: "intradaymarketcap", fields: ["ticker", "companyshortname", "intradaymarketcap", "eventname", "startdatetime", "startdatetimetype", "epsestimate", "epsactual", "epssurprisepct"] },
+    economic: { entity: "economic_event", sortField: "startdatetime", fields: ["econ_release", "country_code", "startdatetime", "period", "after_release_actual", "consensus_estimate", "prior_release_actual", "originally_reported_actual"] },
+    ipo: { entity: "ipo_info", sortField: "startdatetime", fields: ["ticker", "companyshortname", "exchange_short_name", "filingdate", "startdatetime", "amendeddate", "pricefrom", "priceto", "offerprice", "currencyname", "shares", "dealtype"] },
+    splits: { entity: "splits", sortField: "startdatetime", fields: ["ticker", "companyshortname", "startdatetime", "optionable", "old_share_worth", "share_worth"] },
+  };
+  const selected = config[eventType];
+  if (!selected) {
+    return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: "event_type must be earnings, economic, ipo, or splits" });
+  }
+  const dateQuery = eventType === "ipo"
+    ? { operator: "OR", operands: [
+        { operator: "GTELT", operands: ["startdatetime", start, end] },
+        { operator: "GTELT", operands: ["filingdate", start, end] },
+        { operator: "GTELT", operands: ["amendeddate", start, end] },
+      ] }
+    : eventType === "earnings"
+      ? { operator: "AND", operands: [
+          { operator: "EQ", operands: ["region", "us"] },
+          { operator: "OR", operands: [
+            { operator: "EQ", operands: ["eventtype", "EAD"] },
+            { operator: "EQ", operands: ["eventtype", "ERA"] },
+          ] },
+          { operator: "GTE", operands: ["startdatetime", start] },
+          { operator: "LTE", operands: ["startdatetime", end] },
+        ] }
+      : { operator: "AND", operands: [
+          { operator: "GTE", operands: ["startdatetime", start] },
+          { operator: "LTE", operands: ["startdatetime", end] },
+        ] };
+  const d = (await yPost("https://query1.finance.yahoo.com/v1/finance/visualization?lang=en-US&region=US", {
+    size: limit,
+    offset,
+    query: dateQuery,
+    sortField: selected.sortField,
+    sortType: "DESC",
+    entityIdType: selected.entity,
+    includeFields: selected.fields,
+  })) as Record<string, unknown>;
+  const items = visualizationRows(d);
+  return JSON.stringify({
+    status: items.length ? "OK" : "EMPTY_RESULT", eventType, startDate: start, endDate: end,
+    limit, offset, itemCount: items.length, hasMore: items.length === limit,
+    coverage: { state: items.length === limit ? "PARTIAL" : "FULL", truncated: items.length === limit },
+    items,
+    source: "yahoo_finance", sourceType: "provider_calendar", evidenceClass: "CONTEXTUAL_MARKET_DATA",
+    confirmationStatus: "UNVERIFIED", decisionGrade: false,
+    recommendedNextAction: ["earnings", "ipo", "splits"].includes(eventType) ? "CHECK_OFFICIAL_RELEASES" : "NONE",
   });
 }
 

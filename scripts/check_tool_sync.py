@@ -31,6 +31,7 @@ EXPECTED_CANONICAL = {
     "get_company_profile",
     "get_fund_profile",
     "analyze_financial_ratios",
+    "analyze_share_count_trend",
     "analyze_credit_health",
     "get_corporate_actions",
     "get_ownership_holders",
@@ -38,6 +39,7 @@ EXPECTED_CANONICAL = {
     "get_analyst_rating_changes",
     "analyze_earnings_momentum",
     "get_company_events_calendar",
+    "get_market_calendar",
     "summarize_options_flow",
     "analyze_options_flow_window",
     "find_put_hedge_candidates",
@@ -106,14 +108,14 @@ def get_python_tools() -> set:
         sources.extend(sorted(tools_dir.glob("*.py")))
     names = set()
     for path in sources:
-        for match in re.finditer(r'@yfinance_server\.tool\(\s*name\s*=\s*"([^"]+)"', path.read_text()):
+        for match in re.finditer(r'@yfinance_server\.tool\(\s*name\s*=\s*"([^"]+)"', path.read_text(encoding="utf-8")):
             names.add(match.group(1))
     return names
 
 
 def get_worker_tools() -> set:
     """Extract tool names from the TOOLS array in tools.ts."""
-    source = TOOLS_TS.read_text()
+    source = TOOLS_TS.read_text(encoding="utf-8")
     names = set()
     for match in re.finditer(r'name:\s*"([^"]+)"', source):
         names.add(match.group(1))
@@ -135,8 +137,8 @@ def validate_alias_targets(aliases: dict[str, str], tools: set[str], source_name
 
 
 def main():
-    py_source = SERVER_PY.read_text()
-    ts_source = TOOLS_TS.read_text()
+    py_source = SERVER_PY.read_text(encoding="utf-8")
+    ts_source = TOOLS_TS.read_text(encoding="utf-8")
     py_tools = get_python_tools()
     ts_tools = get_worker_tools()
     py_aliases = parse_alias_pairs(py_source)

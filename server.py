@@ -3016,7 +3016,7 @@ async def verify_company_event(
 @yfinance_server.tool(
     name="get_stock_actions",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_actions"],
-    description="""Get stock dividends and stock splits for a given ticker symbol from yahoo finance.
+    description="""Get dividends, stock splits, and fund capital-gain distributions from Yahoo Finance.
 
 Args:
     ticker: str
@@ -3024,7 +3024,7 @@ Args:
 """,
 )
 async def get_stock_actions(ticker: str) -> str:
-    """Get stock dividends and stock splits for a given ticker symbol"""
+    """Get dividends, splits, and fund capital-gain distributions for a ticker."""
     try:
         company = yf.Ticker(ticker)
     except Exception as e:
@@ -4022,7 +4022,13 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
         print(f"Error: getting analyst consensus for {ticker}: {e}")
         return f"Error: getting analyst consensus for {ticker}: {e}"
 
-    output: dict = {"ticker": ticker}
+    output: dict = {
+        "ticker": ticker,
+        "source": "yahoo_finance",
+        "evidenceClass": "CONTEXTUAL_MARKET_DATA",
+        "decisionGrade": False,
+        "recommendedNextAction": "NONE",
+    }
     warnings: list[dict[str, str]] = []
 
     # Price targets
@@ -4148,6 +4154,7 @@ Returns:
 - earningsEstimate: EPS estimates for current quarter, next quarter, current year, next year
 - revenueEstimate: Revenue estimates for the same periods
 - epsTrend: How EPS estimates have moved over the last 7/30/60/90 days
+- epsRevisions: Analyst count changes (up/down) over the last 7/30 days
 - earningsHistory: Last 4 quarters — actual vs estimated EPS and surprise %
 - growthEstimates: Analyst growth estimates for stock vs industry/sector/index
 
@@ -4185,11 +4192,18 @@ async def get_earnings_analysis(ticker: str) -> str:
                     record[key] = value.isoformat()
         return records
 
-    output: dict = {"ticker": ticker}
+    output: dict = {
+        "ticker": ticker,
+        "source": "yahoo_finance",
+        "evidenceClass": "CONTEXTUAL_MARKET_DATA",
+        "decisionGrade": False,
+        "recommendedNextAction": "NONE",
+    }
     for key, attr in [
         ("earningsEstimate", "earnings_estimate"),
         ("revenueEstimate", "revenue_estimate"),
         ("epsTrend", "eps_trend"),
+        ("epsRevisions", "eps_revisions"),
         ("earningsHistory", "earnings_history"),
         ("growthEstimates", "growth_estimates"),
     ]:
@@ -4214,6 +4228,7 @@ async def get_earnings_analysis(ticker: str) -> str:
 
 PREFER THIS over fetching full financial statements when you need valuation or profitability ratios.
 Ratios are computed server-side from company.info so the LLM does not have to process raw statements.
+Set history_periods (1-20) to add dated Yahoo valuation measures at the requested frequency.
 
 Includes:
 - Valuation: P/E (trailing & forward), P/S, P/B, EV/EBITDA, EV/Revenue, PEG ratio
@@ -4226,14 +4241,28 @@ Args:
     ticker: str | list[str]
         A single ticker symbol (e.g. "AAPL") or a list of symbols (e.g. ["AAPL", "MSFT"]).
         When a list is provided, returns a dict keyed by symbol.
+    history_periods: int
+        Optional number of dated valuation periods to add. Default 0 (current snapshot only).
+    frequency: quarterly | monthly | yearly | trailing
+        Frequency for valuation history.
 """,
 )
-async def get_financial_ratios(ticker: str | list[str]) -> str:
+async def get_financial_ratios(
+    ticker: str | list[str],
+    history_periods: int = 0,
+    frequency: Literal["quarterly", "monthly", "yearly", "trailing"] = "quarterly",
+) -> str:
     """Get pre-computed key financial ratios."""
     if isinstance(ticker, list):
-        results = await asyncio.gather(*[get_financial_ratios(t) for t in ticker], return_exceptions=True)
+        results = await asyncio.gather(
+            *[get_financial_ratios(t, history_periods, frequency) for t in ticker],
+            return_exceptions=True,
+        )
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
-    cache_key = f"financial_ratios:{ticker}"
+    history_periods = max(0, min(int(history_periods), 20))
+    if frequency not in {"quarterly", "monthly", "yearly", "trailing"}:
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "frequency must be quarterly, monthly, yearly, or trailing"})
+    cache_key = f"financial_ratios:{ticker}:{history_periods}:{frequency}"
     cached = _cache_get(cache_key, _STMT_TTL)
     if cached is not None:
         return cached
@@ -4253,6 +4282,10 @@ async def get_financial_ratios(ticker: str | list[str]) -> str:
 
     ratios: dict = {
         "ticker": ticker,
+        "source": "yahoo_finance",
+        "evidenceClass": "CONTEXTUAL_MARKET_DATA",
+        "decisionGrade": False,
+        "recommendedNextAction": "NONE",
         "currency": _get("financialCurrency"),
         # Valuation
         "trailingPE": _get("trailingPE"),
@@ -4290,6 +4323,55 @@ async def get_financial_ratios(ticker: str | list[str]) -> str:
     # Replace any dict values (empty {} or non-numeric wrappers) with None
     ratios = {k: (None if isinstance(v, dict) else v) for k, v in ratios.items()}
 
+    if history_periods:
+        label_map = {
+            "Market Cap": "marketCap",
+            "Enterprise Value": "enterpriseValue",
+            "Trailing P/E": "trailingPE",
+            "Forward P/E": "forwardPE",
+            "PEG Ratio (5yr expected)": "pegRatio",
+            "Price/Sales": "priceToSales",
+            "Price/Book": "priceToBook",
+            "Enterprise Value/Revenue": "enterpriseToRevenue",
+            "Enterprise Value/EBITDA": "enterpriseToEbitda",
+        }
+        def _valuation_number(value: Any) -> float | int | None:
+            if value is None or pd.isna(value):
+                return None
+            if isinstance(value, (int, float)):
+                return value
+            text = str(value).strip().replace(",", "")
+            if not text or text in {"-", "N/A"}:
+                return None
+            multiplier = 1.0
+            if text[-1:].upper() in {"K", "M", "B", "T"}:
+                multiplier = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}[text[-1].upper()]
+                text = text[:-1]
+            try:
+                return float(text.rstrip("%")) * multiplier
+            except ValueError:
+                return None
+        try:
+            try:
+                valuation = company.get_valuation_measures(freq=frequency, periods=history_periods)
+            except TypeError:
+                valuation = company.get_valuation_measures()
+            history: list[dict[str, Any]] = []
+            if valuation is not None and not valuation.empty:
+                for period in list(valuation.columns)[:history_periods]:
+                    row: dict[str, Any] = {"period": str(period)}
+                    for source_label, output_key in label_map.items():
+                        value = valuation.at[source_label, period] if source_label in valuation.index else None
+                        row[output_key] = _valuation_number(value)
+                    history.append(row)
+            ratios["valuationHistory"] = history
+            ratios["valuationFrequency"] = frequency
+            ratios["historyPeriodsRequested"] = history_periods
+        except Exception as e:
+            ratios["valuationHistory"] = None
+            ratios["valuationHistoryStatus"] = "PROVIDER_ERROR"
+            ratios["valuationHistoryWarning"] = str(e)
+
     result = json.dumps(ratios)
     _cache_set(cache_key, result)
     return result
@@ -4300,25 +4382,107 @@ async def get_financial_ratios(ticker: str | list[str]) -> str:
 # ---------------------------------------------------------------------------
 
 @yfinance_server.tool(
+    name="analyze_share_count_trend",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["analyze_share_count_trend"],
+    description="""Analyze historical shares outstanding for dilution, issuance, or buyback questions.
+
+Use this tool whenever the user asks whether a company diluted shareholders, issued shares,
+repurchased stock, or changed its share count. Yahoo share-count history is contextual evidence;
+material changes should be confirmed in SEC filings before a decision.
+""",
+)
+async def analyze_share_count_trend(
+    ticker: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> str:
+    try:
+        end = datetime.date.fromisoformat(end_date) if end_date else datetime.date.today()
+        start = datetime.date.fromisoformat(start_date) if start_date else end - datetime.timedelta(days=5 * 365)
+    except ValueError:
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "dates must use YYYY-MM-DD"})
+    if start >= end:
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "start_date must be before end_date"})
+    try:
+        shares = yf.Ticker(ticker).get_shares_full(start=start.isoformat(), end=end.isoformat())
+    except Exception as e:
+        return json.dumps({"error": True, "code": "PROVIDER_ERROR", "message": str(e), "ticker": ticker})
+    if shares is None or shares.empty:
+        return json.dumps({
+            "ticker": ticker, "status": "EMPTY_RESULT", "observations": [],
+            "source": "yahoo_finance", "evidenceClass": "CONTEXTUAL_MARKET_DATA",
+            "decisionGrade": False, "recommendedNextAction": "CHECK_SEC_FILINGS",
+        })
+    shares = shares.dropna().sort_index()
+    if shares.index.has_duplicates:
+        shares = shares.groupby(level=0).last()
+    if shares.empty:
+        return json.dumps({
+            "ticker": ticker, "status": "EMPTY_RESULT", "observations": [],
+            "source": "yahoo_finance", "evidenceClass": "CONTEXTUAL_MARKET_DATA",
+            "decisionGrade": False, "recommendedNextAction": "CHECK_SEC_FILINGS",
+        })
+    compact: list[dict[str, Any]] = []
+    previous = object()
+    for index, value in shares.items():
+        numeric = float(value)
+        if numeric == previous:
+            continue
+        compact.append({"date": index.isoformat(), "shares": numeric})
+        previous = numeric
+    first = compact[0]["shares"]
+    current = compact[-1]["shares"]
+    change = current - first
+    change_pct = round(change / first * 100, 4) if first else None
+    observations = compact[-60:]
+    return json.dumps({
+        "ticker": ticker,
+        "status": "OK",
+        "startDate": start.isoformat(),
+        "endDate": end.isoformat(),
+        "dataDate": compact[-1]["date"],
+        "firstShares": first,
+        "currentShares": current,
+        "changeShares": change,
+        "changePct": change_pct,
+        "sampleCount": len(compact),
+        "returnedSampleCount": len(observations),
+        "truncated": len(compact) > len(observations),
+        "observations": observations,
+        "source": "yahoo_finance",
+        "evidenceClass": "CONTEXTUAL_MARKET_DATA",
+        "decisionGrade": False,
+        "interpretation": "Share-count changes may reflect issuance, buybacks, splits, or provider revisions; confirm material changes in company filings.",
+        "recommendedNextAction": "CHECK_SEC_FILINGS" if change else "NONE",
+    })
+
+
+@yfinance_server.tool(
     name="get_calendar",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_calendar"],
-    description="""Get upcoming earnings and dividend schedule for a ticker.
+    description="""Get a company's upcoming Yahoo calendar or paginated earnings-date history.
 
 Returns:
 - Next earnings date range and EPS/revenue estimates
 - Ex-dividend date and dividend pay date
-- earningsDateConfirmed: true when Yahoo Finance shows a single fixed date (likely confirmed
-  by company filing/IR source); false when a date range is returned (estimate).
-- earningsDateSource: "IR_FILING" | "ESTIMATE" | "UNKNOWN"
+- mode="upcoming": next earnings and dividend dates from Yahoo's provider calendar.
+- mode="history": historical/recent earnings dates with EPS estimate, actual, and surprise.
+
+Yahoo does not establish official IR/filing provenance. Dates are always labeled UNVERIFIED;
+for material scheduling decisions follow recommendedNextAction and check official releases.
 
 Args:
     ticker: str
         The ticker symbol, e.g. "AAPL"
 """,
 )
-async def get_calendar(ticker: str) -> str:
+async def get_calendar(ticker: str, mode: Literal["upcoming", "history"] = "upcoming", limit: int = 12, offset: int = 0) -> str:
     """Get upcoming earnings and dividend calendar for a ticker."""
-    cache_key = f"calendar:{ticker}"
+    limit = max(1, min(int(limit), 100))
+    offset = max(0, int(offset))
+    if mode not in {"upcoming", "history"}:
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "mode must be upcoming or history"})
+    cache_key = f"calendar:{ticker}:{mode}:{limit}:{offset}"
     cached = _cache_get(cache_key, _PRICE_TTL)
     if cached is not None:
         return cached
@@ -4332,6 +4496,22 @@ async def get_calendar(ticker: str) -> str:
         print(f"Error: getting calendar for {ticker}: {e}")
         return f"Error: getting calendar for {ticker}: {e}"
 
+    if mode == "history":
+        try:
+            dates = company.get_earnings_dates(limit=limit, offset=offset)
+        except Exception as e:
+            return json.dumps({"error": True, "code": "PROVIDER_ERROR", "message": str(e), "ticker": ticker})
+        items = _df_to_records(dates) or []
+        return json.dumps({
+            "ticker": ticker, "mode": mode, "status": "OK" if items else "EMPTY_RESULT",
+            "items": items, "limit": limit, "offset": offset,
+            "hasMore": len(items) == limit, "source": "yahoo_finance",
+            "sourceType": "provider_calendar", "evidenceClass": "CONTEXTUAL_MARKET_DATA",
+            "providerMethod": "YAHOO_CALENDAR_HTML",
+            "confirmationStatus": "UNVERIFIED", "decisionGrade": False,
+            "recommendedNextAction": "NONE",
+        })
+
     try:
         cal = company.calendar
     except Exception as e:
@@ -4339,7 +4519,12 @@ async def get_calendar(ticker: str) -> str:
         return f"Error: getting calendar for {ticker}: {e}"
 
     if not cal:
-        return json.dumps({"ticker": ticker, "calendar": None})
+        return json.dumps({
+            "ticker": ticker, "mode": mode, "calendar": None, "source": "yahoo_finance",
+            "sourceType": "provider_calendar", "evidenceClass": "CONTEXTUAL_MARKET_DATA",
+            "confirmationStatus": "UNVERIFIED", "decisionGrade": False,
+            "recommendedNextAction": "CHECK_OFFICIAL_RELEASES",
+        })
 
     # calendar values may be datetime.date objects — convert to strings
     def _serialize(v):
@@ -4349,10 +4534,6 @@ async def get_calendar(ticker: str) -> str:
             return [_serialize(i) for i in v]
         return v
 
-    # Determine whether the earnings date is IR-confirmed or an analyst estimate.
-    # Heuristic: if Yahoo Finance provides a single fixed date, it's likely sourced from
-    # an IR press release / 8-K filing. A date range (start ≠ end) signals an analyst
-    # estimate. This heuristic is imperfect but is the best available without SEC parsing.
     ed_raw = cal.get("Earnings Date")
     if isinstance(ed_raw, list):
         ed_dates = ed_raw
@@ -4361,26 +4542,77 @@ async def get_calendar(ticker: str) -> str:
     else:
         ed_dates = []
 
-    unique_dates = {getattr(d, "date", lambda: d)() if hasattr(d, "date") else d for d in ed_dates}
-    if len(unique_dates) == 0:
-        earnings_date_confirmed = False
-        earnings_date_source = "UNKNOWN"
-    elif len(unique_dates) == 1:
-        earnings_date_confirmed = True
-        earnings_date_source = "IR_FILING"
-    else:
-        earnings_date_confirmed = False
-        earnings_date_source = "ESTIMATE"
-
     output = {
         "ticker": ticker,
-        "earningsDateConfirmed": earnings_date_confirmed,
-        "earningsDateSource": earnings_date_source,
+        "mode": mode,
+        "earningsDateConfirmed": False,
+        "earningsDateSource": "YAHOO_CALENDAR" if ed_dates else "UNKNOWN",
+        "confirmationStatus": "UNVERIFIED",
+        "source": "yahoo_finance",
+        "sourceType": "provider_calendar",
+        "evidenceClass": "CONTEXTUAL_MARKET_DATA",
+        "decisionGrade": False,
+        "recommendedNextAction": "CHECK_OFFICIAL_RELEASES" if ed_dates else "NONE",
         "calendar": {k: _serialize(v) for k, v in cal.items()},
     }
     result = json.dumps(output)
     _cache_set(cache_key, result)
     return result
+
+
+@yfinance_server.tool(
+    name="get_market_calendar",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_market_calendar"],
+    description="""Get a market-wide Yahoo calendar for earnings, economic events, IPOs, or stock splits.
+
+Use this tool when the user asks which companies report this week, what macro releases are due,
+which IPOs are scheduled, or which stocks are splitting. Results are paginated provider data,
+not official-company confirmation.
+""",
+)
+async def get_market_calendar(
+    event_type: Literal["earnings", "economic", "ipo", "splits"] = "earnings",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = 25,
+    offset: int = 0,
+) -> str:
+    try:
+        start = datetime.date.fromisoformat(start_date) if start_date else datetime.date.today()
+        end = datetime.date.fromisoformat(end_date) if end_date else start + datetime.timedelta(days=7)
+    except ValueError:
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "dates must use YYYY-MM-DD"})
+    if start > end or (end - start).days > 31:
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "date range must be 0 to 31 days"})
+    limit = max(1, min(int(limit), 100))
+    offset = max(0, int(offset))
+    methods = {
+        "earnings": "get_earnings_calendar",
+        "economic": "get_economic_events_calendar",
+        "ipo": "get_ipo_info_calendar",
+        "splits": "get_splits_calendar",
+    }
+    if event_type not in methods:
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "event_type must be earnings, economic, ipo, or splits"})
+    try:
+        calendars = yf.Calendars(start=start.isoformat(), end=end.isoformat())
+        method = getattr(calendars, methods[event_type])
+        kwargs = {"limit": limit, "offset": offset}
+        if event_type == "earnings":
+            kwargs["filter_most_active"] = False
+        frame = method(**kwargs)
+        items = _df_to_records(frame) or []
+    except Exception as e:
+        return json.dumps({"error": True, "code": "PROVIDER_ERROR", "message": str(e), "eventType": event_type})
+    return json.dumps({
+        "status": "OK" if items else "EMPTY_RESULT",
+        "eventType": event_type, "startDate": start.isoformat(), "endDate": end.isoformat(),
+        "limit": limit, "offset": offset, "itemCount": len(items), "hasMore": len(items) == limit,
+        "coverage": {"state": "PARTIAL" if len(items) == limit else "FULL", "truncated": len(items) == limit},
+        "items": items, "source": "yahoo_finance", "sourceType": "provider_calendar",
+        "evidenceClass": "CONTEXTUAL_MARKET_DATA", "confirmationStatus": "UNVERIFIED",
+        "decisionGrade": False, "recommendedNextAction": "CHECK_OFFICIAL_RELEASES" if event_type in {"earnings", "ipo", "splits"} else "NONE",
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -6119,7 +6351,7 @@ def _df_to_records(df) -> list | None:
     """Convert a DataFrame to a JSON-serialisable list of records, or None if empty."""
     if df is None or df.empty:
         return None
-    return json.loads(df.reset_index().to_json(orient="records"))
+    return json.loads(df.reset_index().to_json(orient="records", date_format="iso"))
 
 
 @yfinance_server.tool(
@@ -6131,8 +6363,10 @@ Returns identity (shortName, category, fundFamily, legalType, fundInceptionDate)
 pricing (navPrice, previousClose, open, dayHigh, dayLow, volume, averageVolume),
 AUM/costs (totalAssets, yield, annualReportExpenseRatio, ytdReturn, beta3Year),
 52-week stats (fiftyTwoWeekHigh, fiftyTwoWeekLow, fiftyTwoWeekChange),
-moving averages (fiftyDayAverage, twoHundredDayAverage),
-top-10 holdings (topHoldings), and sector weights (sectorWeights).
+moving averages (fiftyDayAverage, twoHundredDayAverage), and selected FundsData sections.
+
+sections defaults to overview, holdings, and allocation. Request operations for expense/turnover
+comparisons or fixed_income for duration, maturity, credit-quality, and bond-rating data.
 
 Use this tool for ETF and fund tickers: SPY, QQQ, VTI, ARKK, VFIAX, etc.
 For individual stocks, use get_fast_info or get_stock_info instead.
@@ -6144,19 +6378,27 @@ Args:
         Max 5 tickers per call; split larger lists into multiple calls.
 """,
 )
-async def get_etf_info(ticker: str | list[str]) -> str:
+async def get_etf_info(
+    ticker: str | list[str],
+    sections: list[str] | None = None,
+) -> str:
     """Get ETF/fund information for one or more ticker symbols."""
     if isinstance(ticker, list):
         results = []
         for t in ticker:
             try:
-                results.append(await get_etf_info(t))
+                results.append(await get_etf_info(t, sections))
             except Exception as e:
                 results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
             await asyncio.sleep(0.1)
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
 
-    cache_key = f"etf_info:{ticker}"
+    requested = sections or ["overview", "holdings", "allocation"]
+    allowed = {"overview", "holdings", "allocation", "operations", "fixed_income"}
+    invalid = sorted(set(requested) - allowed)
+    if invalid:
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": f"Unsupported sections: {', '.join(invalid)}", "supportedSections": sorted(allowed)})
+    cache_key = f"etf_info:{ticker}:{','.join(sorted(requested))}"
     cached = _cache_get(cache_key, _PRICE_TTL)
     if cached is not None:
         return cached
@@ -6168,20 +6410,71 @@ async def get_etf_info(ticker: str | list[str]) -> str:
         return f"Error: getting ETF info for {ticker}: {e}"
 
     data: dict = {k: info.get(k) for k in _ETF_INFO_FIELDS}
+    data.update({
+        "ticker": ticker,
+        "source": "yahoo_finance",
+        "evidenceClass": "CONTEXTUAL_MARKET_DATA",
+        "decisionGrade": False,
+        "sectionsRequested": requested,
+        "sectionStatus": {},
+    })
 
-    # Top-10 holdings from funds_top_holdings DataFrame
     try:
-        holdings_df = company.funds_top_holdings
-        records = _df_to_records(None if holdings_df is None else holdings_df.head(10))
-        data["topHoldings"] = records
-    except Exception:
-        data["topHoldings"] = None
+        funds = company.funds_data
+    except Exception as e:
+        funds = None
+        data["fundsDataStatus"] = "PROVIDER_ERROR"
+        data["fundsDataWarning"] = str(e)
 
-    # Sector weights from funds_sector_weightings DataFrame
-    try:
-        data["sectorWeights"] = _df_to_records(company.funds_sector_weightings)
-    except Exception:
-        data["sectorWeights"] = None
+    def _section(name: str, loader) -> None:
+        if name not in requested:
+            return
+        try:
+            present = loader()
+            data["sectionStatus"][name] = "OK" if present is not False else "EMPTY_RESULT"
+        except Exception:
+            data["sectionStatus"][name] = "PROVIDER_ERROR"
+
+    if funds is not None:
+        def _load_overview() -> bool:
+            data["description"] = funds.description
+            data["fundOverview"] = funds.fund_overview
+            return bool(data["description"] or data["fundOverview"])
+
+        def _load_holdings() -> bool:
+            holdings = funds.top_holdings
+            data["topHoldings"] = _df_to_records(None if holdings is None else holdings.head(10))
+            data["equityHoldings"] = _df_to_records(funds.equity_holdings)
+            return bool(data["topHoldings"] or data["equityHoldings"])
+
+        def _load_allocation() -> bool:
+            data["assetClasses"] = funds.asset_classes
+            sector_weights = funds.sector_weightings
+            data["sectorWeights"] = (
+                [{"sector": key, "weight": value} for key, value in sector_weights.items()]
+                if isinstance(sector_weights, dict) else None
+            )
+            return bool(data["assetClasses"] or data["sectorWeights"])
+
+        def _load_operations() -> bool:
+            data["fundOperations"] = _df_to_records(funds.fund_operations)
+            return bool(data["fundOperations"])
+
+        def _load_fixed_income() -> bool:
+            data["bondHoldings"] = _df_to_records(funds.bond_holdings)
+            data["bondRatings"] = funds.bond_ratings
+            return bool(data["bondHoldings"] or data["bondRatings"])
+
+        _section("overview", _load_overview)
+        _section("holdings", _load_holdings)
+        _section("allocation", _load_allocation)
+        _section("operations", _load_operations)
+        _section("fixed_income", _load_fixed_income)
+    else:
+        for section in requested:
+            data["sectionStatus"][section] = "PROVIDER_ERROR"
+
+    data["recommendedNextAction"] = "NONE" if all(v == "OK" for v in data["sectionStatus"].values()) else "RETRY_OR_REQUEST_AVAILABLE_SECTION"
 
     result = json.dumps(data)
     _cache_set(cache_key, result)
@@ -6673,14 +6966,14 @@ async def get_company_profile(ticker: str | list[str], include_all: bool = False
     return await get_stock_info(ticker, include_all=include_all)
 
 
-@yfinance_server.tool(name="get_fund_profile", output_schema=_TOOL_OUTPUT_SCHEMAS["get_etf_info"], description="Canonical alias for get_etf_info.")
-async def get_fund_profile(ticker: str | list[str]) -> str:
-    return await get_etf_info(ticker)
+@yfinance_server.tool(name="get_fund_profile", output_schema=_TOOL_OUTPUT_SCHEMAS["get_etf_info"], description="Get a fund/ETF profile. Use sections to request overview, holdings, allocation, operations, or fixed-income detail.")
+async def get_fund_profile(ticker: str | list[str], sections: list[str] | None = None) -> str:
+    return await get_etf_info(ticker, sections)
 
 
-@yfinance_server.tool(name="analyze_financial_ratios", output_schema=_TOOL_OUTPUT_SCHEMAS["get_financial_ratios"], description="Canonical alias for get_financial_ratios.")
-async def analyze_financial_ratios(ticker: str | list[str]) -> str:
-    return await get_financial_ratios(ticker)
+@yfinance_server.tool(name="analyze_financial_ratios", output_schema=_TOOL_OUTPUT_SCHEMAS["get_financial_ratios"], description="Analyze current financial ratios and optionally historical Yahoo valuation measures.")
+async def analyze_financial_ratios(ticker: str | list[str], history_periods: int = 0, frequency: Literal["quarterly", "monthly", "yearly", "trailing"] = "quarterly") -> str:
+    return await get_financial_ratios(ticker, history_periods, frequency)
 
 
 @yfinance_server.tool(name="analyze_credit_health", output_schema=_TOOL_OUTPUT_SCHEMAS["get_credit_health"], description="Canonical alias for get_credit_health.")
@@ -6688,7 +6981,7 @@ async def analyze_credit_health(ticker: str | list[str]) -> str:
     return await get_credit_health(ticker)
 
 
-@yfinance_server.tool(name="get_corporate_actions", output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_actions"], description="Canonical alias for get_stock_actions.")
+@yfinance_server.tool(name="get_corporate_actions", output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_actions"], description="Get dividends, stock splits, and fund capital-gain distributions from Yahoo Finance.")
 async def get_corporate_actions(ticker: str) -> str:
     return await get_stock_actions(ticker)
 
@@ -6713,9 +7006,9 @@ async def analyze_earnings_momentum(ticker: str | list[str]) -> str:
     return await get_earnings_momentum(ticker)
 
 
-@yfinance_server.tool(name="get_company_events_calendar", output_schema=_TOOL_OUTPUT_SCHEMAS["get_calendar"], description="Canonical alias for get_calendar.")
-async def get_company_events_calendar(ticker: str) -> str:
-    return await get_calendar(ticker)
+@yfinance_server.tool(name="get_company_events_calendar", output_schema=_TOOL_OUTPUT_SCHEMAS["get_calendar"], description="Get a ticker's upcoming Yahoo calendar or paginated earnings history. Yahoo dates are unverified provider data.")
+async def get_company_events_calendar(ticker: str, mode: Literal["upcoming", "history"] = "upcoming", limit: int = 12, offset: int = 0) -> str:
+    return await get_calendar(ticker, mode, limit, offset)
 
 
 @yfinance_server.tool(

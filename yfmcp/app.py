@@ -93,7 +93,9 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - **Prefer `get_market_snapshot`** for a one-call market overview (price, range, MA trend, volume, RSI, MACD, liquidity gate, freshness). Supports compact (max 5 tickers) and full (max 2 tickers) modes.
 - **Prefer `get_market_quote`** over `get_company_profile` for current price, market cap, 52-week range, or moving averages — it returns ~20 fields instead of 120+ and uses far fewer tokens.
 - Use `get_company_profile` only when you need deep fundamentals, business description, or fields not in get_market_quote. For ETFs or mutual funds, use `get_fund_profile` instead.
-- **Prefer `analyze_financial_ratios`** over fetching full financial statements when you need valuation or profitability ratios — ratios are pre-computed server-side.
+- **Prefer `analyze_financial_ratios`** over fetching full financial statements when you need current ratios; request history_periods only for valuation history.
+- Use `analyze_share_count_trend` automatically for dilution, issuance, buyback, or shares-outstanding trend questions, then confirm material changes in SEC filings.
+- Use `get_market_calendar` automatically for market-wide earnings, economic-event, IPO, or split schedules. Use `get_company_events_calendar` for one ticker.
 - **Prefer `get_analyst_consensus`** over `get_analyst_recommendations` when you need a quick summary of analyst sentiment and price targets.
 - **Prefer `get_earnings_analysis`** to get all forward-looking analyst estimates in a single call instead of five separate calls.
 - Use `get_short_interest` or `get_short_momentum` for short-selling metrics.
@@ -126,20 +128,22 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 
 ### Company fundamentals
 - get_company_profile: ~30 key fundamental fields by default. Pass include_all=true for full ~120-field payload. For ETFs/funds, use get_fund_profile instead.
-- get_fund_profile: ETF/mutual fund data — NAV, expense ratio, AUM, YTD return, top-10 holdings, sector weights.
+- get_fund_profile: ETF/mutual fund data. Request sections: overview, holdings, allocation, operations, fixed_income.
 - get_financial_statement: Income statement, balance sheet, or cash flow (annual/quarterly/TTM). Optional line_items filter.
-- analyze_financial_ratios: Pre-computed P/E, PEG, P/S, P/B, EV/EBITDA, margins, ROE, ROA, debt ratios.
+- analyze_financial_ratios: Current P/E, PEG, P/S, P/B, EV/EBITDA, margins, ROE, ROA, debt ratios; optional valuation history.
+- analyze_share_count_trend: Historical shares outstanding for dilution/buyback questions; Yahoo context, not filing confirmation.
 - analyze_credit_health: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag.
-- get_corporate_actions: Dividends and splits history.
+- get_corporate_actions: Dividends, splits, and fund capital-gain distribution history.
 - get_ownership_holders: Major holders, institutional holders, mutual funds, or insider transactions.
 
 ### Analyst & forecasts
 - get_analyst_consensus: Compact analyst price targets (current/low/high/mean/median + % upside) and rating breakdown.
-- get_earnings_analysis: All analyst forward-looking data: EPS/revenue estimates, trend, history, growth.
+- get_earnings_analysis: EPS/revenue estimates, trend, analyst up/down revision counts, history, and growth.
 - get_analyst_recommendations: Raw analyst recommendations or upgrades/downgrades history.
 - get_analyst_rating_changes: Recent rating changes with signal (UPGRADE/DOWNGRADE/MAINTAIN), price target direction, net sentiment.
 - analyze_earnings_momentum: EPS revision momentum (7/30/90d), revision direction, beat rate, beat streak.
-- get_company_events_calendar: Next earnings date (confirmed vs estimated), ex-dividend/pay dates.
+- get_company_events_calendar: Upcoming Yahoo provider dates or earnings history; dates are UNVERIFIED.
+- get_market_calendar: Market-wide earnings, economic, IPO, or stock-split calendar with pagination.
 
 ### Options
 - get_option_expiration_dates: Available options expiration dates.

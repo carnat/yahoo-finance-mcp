@@ -4,6 +4,8 @@ import {
   getAnalystConsensus,
   getAnalystUpgradeRadar,
   getCalendar,
+  getMarketCalendar,
+  analyzeShareCountTrend,
   getCreditHealth,
   getOptionsFlowScan,
   getEarningsAnalysis,
@@ -257,7 +259,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_etf_info",
     description:
-      "Get ETF or mutual fund data for one or more tickers. Returns identity (shortName, category, fundFamily, legalType, fundInceptionDate), pricing (navPrice, previousClose, open, dayHigh, dayLow, volume, averageVolume), AUM/costs (totalAssets, yield, annualReportExpenseRatio, ytdReturn, beta3Year), 52-week stats, moving averages, top-10 holdings (topHoldings), sector weights (sectorWeights), and recent annual returns. Use for ETF/fund tickers: SPY, QQQ, VTI, ARKK, VFIAX, etc. Max 5 tickers per call; split larger lists into multiple calls.",
+      "Get ETF or mutual fund data. sections defaults to overview, holdings, allocation; add operations for expense/turnover comparisons or fixed_income for bond detail. Use for fund tickers, not individual stocks.",
     inputSchema: {
       type: "object",
       properties: {
@@ -268,6 +270,7 @@ export const TOOLS: Tool[] = [
             { type: "array", items: { type: "string" }, maxItems: 5 },
           ],
         },
+        sections: { type: "array", items: { type: "string", enum: ["overview", "holdings", "allocation", "operations", "fixed_income"] }, uniqueItems: true },
       },
       required: ["ticker"],
     },
@@ -285,7 +288,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "get_stock_actions",
-    description: "Get dividend payment history and stock split history for a ticker.",
+    description: "Get dividend, stock-split, and fund capital-gain distribution history for a ticker.",
     inputSchema: {
       type: "object",
       properties: {
@@ -297,7 +300,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_financial_statement",
     description:
-      "Get a financial statement for a ticker. Choose from: income_stmt, quarterly_income_stmt, balance_sheet, quarterly_balance_sheet, cashflow, quarterly_cashflow.",
+      "Get a financial statement for a ticker. Supports annual, quarterly, trailing income/cash-flow, and optional line_items filtering.",
     inputSchema: {
       type: "object",
       properties: {
@@ -312,8 +315,11 @@ export const TOOLS: Tool[] = [
             "quarterly_balance_sheet",
             "cashflow",
             "quarterly_cashflow",
+            "ttm_income_stmt",
+            "ttm_cashflow",
           ],
         },
+        line_items: { type: "array", items: { type: "string" }, description: "Optional line-item names to return, e.g. Total Revenue or Free Cash Flow." },
       },
       required: ["ticker", "financial_type"],
     },
@@ -480,7 +486,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_earnings_analysis",
     description:
-      "Get all analyst forward-looking data in one call: EPS estimates, revenue estimates, EPS trend (7/30/60/90-day revisions), earnings history (actual vs estimated EPS and surprise %), and growth estimates.",
+      "Get analyst forward-looking data: EPS/revenue estimates, EPS trend, up/down EPS revision counts, earnings history, and growth estimates.",
     inputSchema: {
       type: "object",
       properties: {
@@ -503,6 +509,8 @@ export const TOOLS: Tool[] = [
             { type: "array", items: { type: "string" }, maxItems: 5 },
           ],
         },
+        history_periods: { type: "integer", minimum: 0, maximum: 20, default: 0, description: "Add up to 20 historical Yahoo valuation periods; 0 keeps the compact current snapshot." },
+        frequency: { type: "string", enum: ["quarterly", "monthly", "yearly", "trailing"], default: "quarterly" },
       },
       required: ["ticker"],
     },
@@ -510,11 +518,14 @@ export const TOOLS: Tool[] = [
   {
     name: "get_calendar",
     description:
-      "Get upcoming earnings and dividend schedule for a ticker: next earnings date range, EPS/revenue consensus estimates, ex-dividend date, and dividend pay date. Also returns earningsDateConfirmed (true = single fixed date from IR, false = analyst estimate range) and earningsDateSource ('IR_FILING' | 'ESTIMATE' | 'UNKNOWN'). Use earningsDateConfirmed to distinguish a confirmed single date (from IR/filing) vs an estimated date range.",
+      "Get a ticker's upcoming Yahoo calendar or earnings-date history. Yahoo dates are provider data and always UNVERIFIED; check official releases for material scheduling decisions.",
     inputSchema: {
       type: "object",
       properties: {
         ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
+        mode: { type: "string", enum: ["upcoming", "history"], default: "upcoming" },
+        limit: { type: "integer", minimum: 1, maximum: 100, default: 12 },
+        offset: { type: "integer", minimum: 0, default: 0 },
       },
       required: ["ticker"],
     },
@@ -1073,15 +1084,17 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "analyze_volume_ratio", description: "Analyze volume ratio signals.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, period: { type: "number", default: 10 } }, required: ["ticker"] } },
   { name: "check_volume_liquidity_threshold", description: "Check current trading volume and dollar-notional liquidity against configurable public liquidity thresholds.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] } },
   { name: "get_company_profile", description: "Get company profile/fundamentals.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, include_all: { type: "boolean" } }, required: ["ticker"] } },
-  { name: "get_fund_profile", description: "Get ETF/fund profile.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
-  { name: "analyze_financial_ratios", description: "Analyze financial ratios.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
+  { name: "get_fund_profile", description: "Get ETF/fund profile. Request overview, holdings, allocation, operations, or fixed-income sections.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, sections: { type: "array", items: { type: "string", enum: ["overview", "holdings", "allocation", "operations", "fixed_income"] }, uniqueItems: true } }, required: ["ticker"] } },
+  { name: "analyze_financial_ratios", description: "Analyze current financial ratios and optional historical Yahoo valuation measures.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, history_periods: { type: "integer", minimum: 0, maximum: 20, default: 0 }, frequency: { type: "string", enum: ["quarterly", "monthly", "yearly", "trailing"], default: "quarterly" } }, required: ["ticker"] } },
+  { name: "analyze_share_count_trend", description: "Use for dilution, issuance, buyback, or historical shares-outstanding questions. Returns contextual Yahoo data and directs material changes to SEC confirmation.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, start_date: { type: "string" }, end_date: { type: "string" } }, required: ["ticker"] } },
   { name: "analyze_credit_health", description: "Analyze credit health metrics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
-  { name: "get_corporate_actions", description: "Get corporate actions.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+  { name: "get_corporate_actions", description: "Get dividends, stock splits, and fund capital-gain distributions from Yahoo Finance.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
   { name: "get_ownership_holders", description: "Get ownership/holder data. Supported holder_type values: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, holder_type: { type: "string", enum: SUPPORTED_HOLDER_TYPES, description: "One of: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders." } }, required: ["ticker", "holder_type"] } },
   { name: "get_analyst_recommendations", description: "Get analyst recommendations or upgrade/downgrade history. Supported recommendation_type values: recommendations, upgrades_downgrades.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, recommendation_type: { type: "string", enum: SUPPORTED_RECOMMENDATION_TYPES, description: "One of: recommendations, upgrades_downgrades." }, months_back: { type: "number", default: 12 } }, required: ["ticker", "recommendation_type"] } },
   { name: "get_analyst_rating_changes", description: "Get analyst rating changes radar.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, days_back: { type: "number", default: 30 } }, required: ["ticker"] } },
   { name: "analyze_earnings_momentum", description: "Analyze earnings momentum.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
-  { name: "get_company_events_calendar", description: "Get upcoming earnings and dividend schedule for a ticker, including whether the earnings date appears confirmed by company filing/IR source or is an estimate.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+  { name: "get_company_events_calendar", description: "Get a ticker's upcoming Yahoo calendar or paginated earnings-date history. Yahoo dates are always marked UNVERIFIED.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, mode: { type: "string", enum: ["upcoming", "history"], default: "upcoming" }, limit: { type: "integer", minimum: 1, maximum: 100, default: 12 }, offset: { type: "integer", minimum: 0, default: 0 } }, required: ["ticker"] } },
+  { name: "get_market_calendar", description: "Use for market-wide earnings, economic-event, IPO, or stock-split calendar questions. Results are paginated Yahoo provider data, not official confirmation.", inputSchema: { type: "object", properties: { event_type: { type: "string", enum: ["earnings", "economic", "ipo", "splits"], default: "earnings" }, start_date: { type: "string" }, end_date: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100, default: 25 }, offset: { type: "integer", minimum: 0, default: 0 } } } },
   { name: "summarize_options_flow", description: "Summarize options flow.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, expiry_hint: { type: "string" } }, required: ["ticker"] } },
   { name: "analyze_options_flow_window", description: "Analyze options flow in an event window.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, window_label: { type: "string" } }, required: ["ticker", "window_label"] } },
   { name: "find_put_hedge_candidates", description: "Find put hedge candidates.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, otm_pct_min: { type: "number", default: 8 }, otm_pct_max: { type: "number", default: 12 }, budget_usd: { type: "number", default: 500 }, expiry_after: { type: "string" } }, required: ["ticker"] } },
@@ -1242,12 +1255,19 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   get_analyst_consensus: SIMPLE_OBJECT_SCHEMA,
   get_earnings_analysis: SIMPLE_OBJECT_SCHEMA,
   get_financial_ratios: SIMPLE_OBJECT_SCHEMA,
+  analyze_share_count_trend: SIMPLE_OBJECT_SCHEMA,
+  get_market_calendar: SIMPLE_OBJECT_SCHEMA,
   get_calendar: {
     type: "object",
     properties: {
       ticker: { type: "string" },
+      mode: { type: "string" },
+      confirmationStatus: { type: "string" },
       earningsDateConfirmed: { type: ["boolean", "null"] },
       earningsDateSource: { type: ["string", "null"] },
+      source: { type: "string" },
+      decisionGrade: { const: false },
+      recommendedNextAction: { type: "string" },
     },
     additionalProperties: true,
   },
@@ -2315,7 +2335,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_company_profile":
       return getStockInfo(tickerArg(args.ticker), args.include_all === true);
     case "get_fund_profile":
-      return getEtfInfo(tickerArg(args.ticker));
+      return getEtfInfo(tickerArg(args.ticker), Array.isArray(args.sections) ? args.sections.map((item) => str(item)) : undefined);
     case "get_company_news":
       return getCompanyNews(
         tickerArg(args.ticker),
@@ -2328,7 +2348,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_corporate_actions":
       return getStockActions(str(args.ticker));
     case "get_financial_statement":
-      return getFinancialStatement(str(args.ticker), str(args.financial_type));
+      return getFinancialStatement(str(args.ticker), str(args.financial_type), Array.isArray(args.line_items) ? args.line_items.map((item) => str(item)) : undefined);
     case "get_ownership_holders":
       return getHolderInfo(str(args.ticker), str(args.holder_type));
     case "get_option_expiration_dates":
@@ -2357,9 +2377,13 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_earnings_analysis":
       return getEarningsAnalysis(str(args.ticker));
     case "analyze_financial_ratios":
-      return getFinancialRatios(tickerArg(args.ticker));
+      return getFinancialRatios(tickerArg(args.ticker), num(args.history_periods, 0), str(args.frequency, "quarterly"));
+    case "analyze_share_count_trend":
+      return analyzeShareCountTrend(str(args.ticker), args.start_date != null ? str(args.start_date) : undefined, args.end_date != null ? str(args.end_date) : undefined);
     case "get_company_events_calendar":
-      return getCalendar(str(args.ticker));
+      return getCalendar(str(args.ticker), str(args.mode, "upcoming"), num(args.limit, 12), num(args.offset, 0));
+    case "get_market_calendar":
+      return getMarketCalendar(str(args.event_type, "earnings"), args.start_date != null ? str(args.start_date) : undefined, args.end_date != null ? str(args.end_date) : undefined, num(args.limit, 25), num(args.offset, 0));
     case "search_ticker":
       return searchTicker(str(args.query), num(args.max_results, 8), args.exchange != null ? str(args.exchange) : null);
     case "screen_stocks":
@@ -2773,7 +2797,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_stock_info":
       return getStockInfo(tickerArg(args.ticker), args.include_all === true);
     case "get_etf_info":
-      return getEtfInfo(tickerArg(args.ticker));
+      return getEtfInfo(tickerArg(args.ticker), Array.isArray(args.sections) ? args.sections.map((item) => str(item)) : undefined);
     case "get_stock_actions":
       return getStockActions(str(args.ticker));
     case "get_holder_info":
@@ -2787,7 +2811,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_volume_gate":
       return getVolumeGate(str(args.ticker), args.foreign_exchange === true);
     case "get_financial_ratios":
-      return getFinancialRatios(tickerArg(args.ticker));
+      return getFinancialRatios(tickerArg(args.ticker), num(args.history_periods, 0), str(args.frequency, "quarterly"));
     case "get_credit_health":
       return getCreditHealth(tickerArg(args.ticker));
     case "get_recommendations":
@@ -2797,7 +2821,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_earnings_momentum":
       return getEarningsMomentum(tickerArg(args.ticker));
     case "get_calendar":
-      return getCalendar(str(args.ticker));
+      return getCalendar(str(args.ticker), str(args.mode, "upcoming"), num(args.limit, 12), num(args.offset, 0));
     case "get_yahoo_finance_news":
       return getCompanyNews(str(args.ticker), 10, 14, ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]);
     case "get_options_flow_summary":
