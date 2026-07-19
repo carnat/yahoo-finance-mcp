@@ -107,6 +107,34 @@ def manifest_contract(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
     _assert_contract(extract_data(payload), "get_manifest_diagnostics")
 
 
+def sec_xbrl_decision_grade(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
+    data = extract_data(payload)
+    if not isinstance(data, dict):
+        raise AssertionError(f"extract_sec_filing_fact returned non-object data: {data!r}")
+    value = data.get("value")
+    if data.get("status") != "FOUND" or not isinstance(value, (int, float)) or value <= 0:
+        raise AssertionError(f"SEC XBRL canary did not resolve a positive fact: {data}")
+    if "XBRL" not in str(data.get("extractionMethod", "")).upper():
+        raise AssertionError(f"SEC XBRL canary used a non-XBRL extraction path: {data}")
+    if data.get("decisionGrade") is not True:
+        raise AssertionError(f"resolved SEC XBRL fact must be decisionGrade:true: {data}")
+
+    context = data.get("xbrlContext")
+    evidence = data.get("sourceEvidence")
+    if not isinstance(context, dict) or not isinstance(evidence, dict):
+        raise AssertionError(f"resolved SEC XBRL fact missing context/source evidence: {data}")
+    for field in ("concept", "periodEnd"):
+        if not context.get(field):
+            raise AssertionError(f"SEC XBRL context missing {field}: {data}")
+    for field in ("sourceType", "concept", "accessionNumber", "periodEnd", "documentUrl"):
+        if not evidence.get(field):
+            raise AssertionError(f"SEC XBRL sourceEvidence missing {field}: {data}")
+    if evidence.get("sourceType") != "sec_xbrl_companyconcept":
+        raise AssertionError(f"SEC XBRL sourceEvidence has unexpected sourceType: {data}")
+    if evidence.get("concept") != context.get("concept"):
+        raise AssertionError(f"SEC XBRL concept differs between context and evidence: {data}")
+
+
 def press_release_payload_gate(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
     data = extract_data(payload)
     if not isinstance(data, dict):
@@ -296,6 +324,7 @@ def thai_fund_nav_contract(payload: dict[str, Any], canary: dict[str, Any]) -> N
 ASSERTIONS: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
     "health_contract": health_contract,
     "manifest_contract": manifest_contract,
+    "sec_xbrl_decision_grade": sec_xbrl_decision_grade,
     "press_release_payload_gate": press_release_payload_gate,
     "news_batch_independent": news_batch_independent,
     "company_ir_source_status": company_ir_source_status,
@@ -343,22 +372,31 @@ def validate_registry(registry: dict[str, Any]) -> list[dict[str, Any]]:
 def run_canaries(canaries: list[dict[str, Any]]) -> None:
     if not MCP_URL:
         raise AssertionError("MCP_URL is required")
+    failures: list[str] = []
     for idx, canary in enumerate(canaries, start=1):
         tool = str(canary["tool"])
-        payload = call_tool(
-            MCP_URL,
-            tool,
-            canary["args"],
-            req_id=3000 + idx,
-            user_agent=UA,
-            timeout=120,
-            retries=5,
-        )
-        assert_no_jsonrpc_error(payload, tool)
-        assert_no_unknown_tool(payload, tool)
-        assert_not_double_enveloped_failure(payload, tool)
-        ASSERTIONS[str(canary["assertion"])](payload, canary)
-        print(f"  PASS {canary['id']}")
+        try:
+            payload = call_tool(
+                MCP_URL,
+                tool,
+                canary["args"],
+                req_id=3000 + idx,
+                user_agent=UA,
+                timeout=120,
+                retries=5,
+            )
+            assert_no_jsonrpc_error(payload, tool)
+            assert_no_unknown_tool(payload, tool)
+            assert_not_double_enveloped_failure(payload, tool)
+            ASSERTIONS[str(canary["assertion"])](payload, canary)
+            print(f"  PASS {canary['id']}")
+        except (TimeoutError, urllib.error.URLError):
+            raise
+        except Exception as exc:
+            failures.append(f"{canary['id']}: {exc}")
+            print(f"  FAIL {canary['id']}: {exc}")
+    if failures:
+        raise AssertionError("deployed canary failures:\n  - " + "\n  - ".join(failures))
 
 
 def main(argv: list[str] | None = None) -> int:

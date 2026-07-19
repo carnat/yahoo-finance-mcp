@@ -39,7 +39,7 @@ jobs:
           cache-dependency-path: worker/package-lock.json
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
         working-directory: worker
 
       - name: Type-check
@@ -84,6 +84,9 @@ jobs:
 
       - name: Deployed canary registry validation
         run: python scripts/test_deployed_canaries.py --validate-only
+
+      - name: Deployed smoke architecture tests
+        run: python -m unittest scripts.test_smoke_architecture -v
 
       - name: Company IR-page registry validation
         run: python scripts/test_ir_page_registry.py
