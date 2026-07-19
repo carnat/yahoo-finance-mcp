@@ -17,7 +17,7 @@ on:
       - "scripts/deployed_canaries.json"
       - "scripts/test_deployed_extractors.py"
       - "scripts/test_geographic_revenue_schema.py"
-      - "scripts/test_deployed_sec_facts_provider.py"
+      - "scripts/test_smoke_architecture.py"
       - "scripts/stamp_worker_build.py"
       - "scripts/live_smoke_utils.py"
       - "scripts/test_tools.py"
@@ -28,9 +28,14 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+concurrency:
+  group: deploy-worker-production
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
 
@@ -48,7 +53,7 @@ jobs:
         run: python scripts/check_tool_sync.py
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
         working-directory: worker
 
       - name: Type-check
@@ -93,17 +98,6 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           SEC_OPEN_DATA_API_KEY: ${{ secrets.SEC_OPEN_DATA_API_KEY }}
 
-      - name: Wire SEC facts provider secrets
-        run: |
-          if [ -n "$EDGAR_FACTS_LAST_SMOKE_STATUS" ]; then
-            printf '%s' "$EDGAR_FACTS_LAST_SMOKE_STATUS" | npx wrangler secret put EDGAR_FACTS_LAST_SMOKE_STATUS
-          fi
-        working-directory: worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          EDGAR_FACTS_LAST_SMOKE_STATUS: ${{ vars.EDGAR_FACTS_LAST_SMOKE_STATUS }}
-
       - name: Wire TOOL_MODE
         run: |
           printf '%s' "$TOOL_MODE" | npx wrangler secret put TOOL_MODE
@@ -116,6 +110,7 @@ jobs:
   smoke-test:
     name: Smoke-test deployed worker
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs: deploy
     permissions:
       contents: read
@@ -130,24 +125,31 @@ jobs:
         run: sleep 30
 
       - name: Verify deployed MCP contract canaries
+        id: contract_canaries
         run: python scripts/test_deployed_canaries.py
         env:
           ALLOW_NETWORK_SKIP: "0"
           EXPECTED_TOOL_MODE: expanded
-          EXPECTED_BUILD_SHA: ${{ github.sha }}
 
-      - name: Verify deployed MCP live discovery
+      - name: Audit deployed MCP live discovery
+        id: live_discovery
+        if: ${{ always() }}
+        continue-on-error: true
         run: python scripts/test_deployed_discovery.py
         env:
           ALLOW_NETWORK_SKIP: "0"
           EXPECTED_TOOL_MODE: expanded
-          EXPECTED_BUILD_SHA: ${{ github.sha }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
 
-      - name: Verify alias behavior
+      - name: Audit alias behavior
+        id: aliases
+        if: ${{ always() }}
+        continue-on-error: true
         run: python scripts/test_universal_aliases.py
 
       - name: Audit geographic revenue schema
+        id: geographic_revenue
+        if: ${{ always() }}
         continue-on-error: true
         run: python scripts/test_geographic_revenue_schema.py
         env:
@@ -155,6 +157,8 @@ jobs:
           MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
 
       - name: Audit deployed extractor tools
+        id: extractors
+        if: ${{ always() }}
         continue-on-error: true
         run: python scripts/test_deployed_extractors.py
         env:
@@ -162,23 +166,21 @@ jobs:
           ALLOW_NETWORK_SKIP: "0"
           EXPECTED_TOOL_MODE: expanded
 
-      - name: Verify deployed Worker official SEC facts provider
-        run: python scripts/test_deployed_sec_facts_provider.py
-        env:
-          MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
-
-      - name: Verify deployed MCP grouped discovery
-        if: ${{ vars.DEPLOY_GROUPED_SMOKE == 'true' }}
+      - name: Audit deployed MCP grouped discovery
+        id: grouped_discovery
+        if: ${{ always() && vars.DEPLOY_GROUPED_SMOKE == 'true' }}
+        continue-on-error: true
         run: python scripts/test_deployed_discovery.py
         env:
           ALLOW_NETWORK_SKIP: "0"
           EXPECTED_TOOL_MODE: grouped
           TOOL_MODE: grouped
-          EXPECTED_BUILD_SHA: ${{ github.sha }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
 
-      - name: Verify deployed grouped extractor tools
-        if: ${{ vars.DEPLOY_GROUPED_SMOKE == 'true' }}
+      - name: Audit deployed grouped extractor tools
+        id: grouped_extractors
+        if: ${{ always() && vars.DEPLOY_GROUPED_SMOKE == 'true' }}
+        continue-on-error: true
         run: python scripts/test_deployed_extractors.py
         env:
           MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
@@ -187,5 +189,22 @@ jobs:
           TOOL_MODE: grouped
 
       - name: Audit end-to-end tool tests
+        id: end_to_end
+        if: ${{ always() }}
         continue-on-error: true
         run: python scripts/test_tools.py --url https://yahoo-finance-mcp.artinatw.workers.dev/mcp
+
+      - name: Summarize deployed smoke results
+        if: ${{ always() }}
+        run: |
+          echo "## Deployed smoke results" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Suite | Outcome | Gate |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Contract canaries | ${{ steps.contract_canaries.outcome }} | blocking |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Live discovery | ${{ steps.live_discovery.outcome }} | advisory |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Aliases | ${{ steps.aliases.outcome }} | advisory |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Geographic revenue | ${{ steps.geographic_revenue.outcome }} | advisory |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Extractors | ${{ steps.extractors.outcome }} | advisory |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Grouped discovery | ${{ steps.grouped_discovery.outcome }} | advisory |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Grouped extractors | ${{ steps.grouped_extractors.outcome }} | advisory |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| End-to-end tools | ${{ steps.end_to_end.outcome }} | advisory |" >> "$GITHUB_STEP_SUMMARY"

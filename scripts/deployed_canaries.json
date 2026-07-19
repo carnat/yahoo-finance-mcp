@@ -21,6 +21,20 @@
       "volatility": "stable_contract"
     },
     {
+      "id": "sec-xbrl-decision-grade",
+      "description": "A resolved SEC XBRL fact exposes complete decision-grade source evidence.",
+      "tool": "extract_sec_filing_fact",
+      "args": {
+        "ticker": "AAPL",
+        "fact_type": "total_revenue",
+        "filing_type": "10-K",
+        "period": "latest"
+      },
+      "assertion": "sec_xbrl_decision_grade",
+      "blocking": true,
+      "volatility": "stable_positive_fixture"
+    },
+    {
       "id": "press-release-payload-gate",
       "description": "Press-release results expose payload-level decision-grade fields instead of relying on tool-level status.",
       "tool": "get_company_press_releases",
