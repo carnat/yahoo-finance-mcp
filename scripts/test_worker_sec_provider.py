@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import pathlib
 import re
@@ -10,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, patch
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -258,9 +261,50 @@ if (taiwan.sourceRows[0][0] !== "Taiwan") throw new Error(`Taiwan fixture row wa
         section = dispatch.group(0)
         self.assertIn("mappedFact != null", section)
         self.assertIn("status,", section)
-        self.assertIn("decisionGrade:", section)
+        self.assertIn("isDecisionGradeXbrlFact(parsed, decisionEvidence, status)", section)
+        self.assertIn("decisionGrade,", section)
         self.assertIn('"SEC_FACT_NOT_AVAILABLE"', self.worker)
         self.assertIn('"NO_COMPANYCONCEPT_FACT_FOR_FORM"', self.worker)
+
+    def test_python_sec_fact_decision_grade_requires_resolved_xbrl_evidence(self) -> None:
+        import server
+
+        resolved = {
+            "ticker": "TEST",
+            "value": 1000,
+            "status": "FOUND",
+            "extractionMethod": "XBRL",
+            "accessionNumber": "0000000000-26-000001",
+            "filingType": "10-K",
+            "filingDate": "2026-02-01",
+            "documentUrl": "https://www.sec.gov/Archives/example.htm",
+            "indexUrl": "https://www.sec.gov/Archives/example-index.htm",
+            "xbrlContext": {
+                "concept": "RevenueFromContractWithCustomerExcludingAssessedTax",
+                "taxonomy": "us-gaap",
+                "periodStart": "2025-01-01",
+                "periodEnd": "2025-12-31",
+                "fiscalYear": "2025",
+                "fiscalPeriod": "FY",
+            },
+        }
+        with patch.object(server, "get_filing_data", AsyncMock(return_value=json.dumps(resolved))):
+            result = json.loads(asyncio.run(server.extract_sec_filing_fact(
+                ticker="TEST",
+                fact_type=server.FilingFactType.total_revenue,
+            )))
+        self.assertIs(result["decisionGrade"], True)
+        self.assertEqual(result["sourceEvidence"]["concept"], resolved["xbrlContext"]["concept"])
+
+        unresolved = dict(resolved)
+        unresolved["xbrlContext"] = None
+        with patch.object(server, "get_filing_data", AsyncMock(return_value=json.dumps(unresolved))):
+            result = json.loads(asyncio.run(server.extract_sec_filing_fact(
+                ticker="TEST",
+                fact_type=server.FilingFactType.total_revenue,
+            )))
+        self.assertIs(result["decisionGrade"], False)
+        self.assertIsNone(result["sourceEvidence"])
 
     def test_management_commentary_uses_topic_alias_families(self) -> None:
         self.assertIn("MANAGEMENT_COMMENTARY_TOPIC_ALIASES", self.worker)

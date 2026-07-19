@@ -107,7 +107,21 @@ class TestManifestDiagnostics(unittest.TestCase):
 
         result = json.loads(_run(self.srv.health_check()))
         self.assertNotIn("envelopeV2", result)
-        health_contract(result, {})
+        health_contract(result, {"expectedToolCount": result["toolCount"]})
+
+    def test_deployed_health_canary_rejects_tool_count_mismatch(self):
+        from scripts.test_deployed_canaries import health_contract
+
+        result = json.loads(_run(self.srv.health_check()))
+        with self.assertRaisesRegex(AssertionError, "toolCount mismatch"):
+            health_contract(result, {"expectedToolCount": result["toolCount"] + 1})
+
+    def test_deployed_discovery_reuses_health_contract(self):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_deployed_discovery.py")
+        with open(path, encoding="utf-8") as fh:
+            source = fh.read()
+        self.assertIn('health_contract(payload, {"expectedToolCount": len(names)})', source)
+        self.assertNotIn('health.get("envelopeV2")', source)
 
 
 # ---------------------------------------------------------------------------

@@ -7311,6 +7311,39 @@ async def extract_sec_filing_fact(
                 parsed_payload = parsed_any
         except Exception:
             parsed_payload = {}
+        xbrl_context = parsed_payload.get("xbrlContext")
+        source_evidence = None
+        if isinstance(xbrl_context, dict):
+            source_evidence = {
+                "sourceType": "sec_xbrl_companyconcept",
+                "concept": xbrl_context.get("concept"),
+                "taxonomy": xbrl_context.get("taxonomy"),
+                "unit": xbrl_context.get("unit") or parsed_payload.get("unit"),
+                "accessionNumber": parsed_payload.get("accessionNumber") or xbrl_context.get("accessionNumber"),
+                "filingType": parsed_payload.get("filingType") or xbrl_context.get("form"),
+                "filingDate": parsed_payload.get("filingDate") or xbrl_context.get("filedAt"),
+                "periodStart": xbrl_context.get("periodStart"),
+                "periodEnd": xbrl_context.get("periodEnd") or xbrl_context.get("instant"),
+                "fiscalYear": xbrl_context.get("fiscalYear"),
+                "fiscalPeriod": xbrl_context.get("fiscalPeriod"),
+                "dimensions": xbrl_context.get("dimensions") or {},
+                "documentUrl": parsed_payload.get("documentUrl"),
+                "indexUrl": parsed_payload.get("indexUrl"),
+            }
+        status = parsed_payload.get("status") or (
+            "FOUND" if parsed_payload.get("value") is not None
+            else parsed_payload.get("code") or parsed_payload.get("confidence") or "NOT_DISCLOSED"
+        )
+        decision_grade = bool(
+            parsed_payload.get("value") is not None
+            and str(status).upper() == "FOUND"
+            and "XBRL" in str(parsed_payload.get("extractionMethod") or "").upper()
+            and isinstance(xbrl_context, dict)
+            and isinstance(source_evidence, dict)
+            and all(source_evidence.get(field) not in (None, "") for field in (
+                "sourceType", "concept", "accessionNumber", "periodEnd",
+            ))
+        )
         return json.dumps({
             "fact": routed_fact_type.value,
             "region": region,
@@ -7329,12 +7362,16 @@ async def extract_sec_filing_fact(
             "extractionMethod": parsed_payload.get("extractionMethod", "NONE"),
             "source": parsed_payload.get("source", "NOT_DISCLOSED"),
             "confidence": parsed_payload.get("confidence", "NOT_DISCLOSED"),
-            "xbrlContext": parsed_payload.get("xbrlContext"),
+            "status": status,
+            "code": parsed_payload.get("code"),
+            "decisionGrade": decision_grade,
+            "xbrlContext": xbrl_context,
             "retrieval_path": _map_extraction_to_retrieval_path(parsed_payload.get("extractionMethod", "NONE")),
             "documentUrl": parsed_payload.get("documentUrl"),
             "indexUrl": parsed_payload.get("indexUrl"),
             "primaryDocumentUrl": parsed_payload.get("primaryDocumentUrl"),
             "evidence": parsed_payload.get("evidence"),
+            "sourceEvidence": source_evidence,
             "calculation": parsed_payload.get("calculation"),
             "warnings": parsed_payload.get("warnings", []),
             "alternative_queries": _suggest_alternative_queries(routed_fact_type.value, region, parsed_payload),

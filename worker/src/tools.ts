@@ -1842,6 +1842,18 @@ function xbrlSourceEvidence(parsed: Record<string, unknown>): Record<string, unk
   };
 }
 
+function isDecisionGradeXbrlFact(
+  parsed: Record<string, unknown>,
+  sourceEvidence: Record<string, unknown> | null,
+  status: unknown,
+): boolean {
+  if (parsed.value == null || String(status).toUpperCase() !== "FOUND") return false;
+  if (!String(parsed.extractionMethod ?? "").toUpperCase().includes("XBRL")) return false;
+  if (!parsed.xbrlContext || typeof parsed.xbrlContext !== "object" || !sourceEvidence) return false;
+  return ["sourceType", "concept", "accessionNumber", "periodEnd"]
+    .every((field) => sourceEvidence[field] != null && String(sourceEvidence[field]).trim() !== "");
+}
+
 type DoctrineToolStatus = {
   capabilityStatus: "ACTIVE" | "DEGRADED" | "PROVIDER_GATED" | "EXPERIMENTAL" | "RETIRED";
   decisionGrade: boolean;
@@ -2607,6 +2619,10 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         const sourceEvidence = xbrlSourceEvidence(parsed)
           ?? (hasUsefulEvidence(parsed.evidence) ? parsed.evidence : null);
         const status = parsed.status ?? (parsed.value != null ? "FOUND" : (parsed.code ?? parsed.confidence ?? "NOT_DISCLOSED"));
+        const decisionEvidence = sourceEvidence && typeof sourceEvidence === "object" && !Array.isArray(sourceEvidence)
+          ? sourceEvidence as Record<string, unknown>
+          : null;
+        const decisionGrade = isDecisionGradeXbrlFact(parsed, decisionEvidence, status);
         return JSON.stringify({
           fact,
           region: args.region != null ? str(args.region) : null,
@@ -2627,7 +2643,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
           confidence: parsed.confidence ?? "NOT_DISCLOSED",
           status,
           code: parsed.code ?? null,
-          decisionGrade: parsed.value == null || String(status).toUpperCase() !== "FOUND" ? false : (parsed.decisionGrade ?? null),
+          decisionGrade,
           documentUrl: parsed.documentUrl ?? null,
           indexUrl: parsed.indexUrl ?? null,
           primaryDocumentUrl: parsed.primaryDocumentUrl ?? null,

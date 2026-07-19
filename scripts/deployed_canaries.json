@@ -4,7 +4,7 @@
   "canaries": [
     {
       "id": "health-contract",
-      "description": "Runtime health exposes the live envelope, tool-mode, hidden-alias, doctrine-status, and build-SHA contract.",
+      "description": "Runtime health exposes the public schema identity, tool-mode, and envelope-version contract.",
       "tool": "health_check",
       "args": {},
       "assertion": "health_contract",
