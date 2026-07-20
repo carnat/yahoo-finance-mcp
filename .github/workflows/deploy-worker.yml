@@ -18,6 +18,7 @@ on:
       - "scripts/test_deployed_extractors.py"
       - "scripts/test_geographic_revenue_schema.py"
       - "scripts/test_smoke_architecture.py"
+      - "scripts/worker_version_promotion.py"
       - "scripts/stamp_worker_build.py"
       - "scripts/live_smoke_utils.py"
       - "scripts/test_tools.py"
@@ -27,15 +28,22 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  DEPLOY_TOOL_MODE: ${{ vars.TOOL_MODE || 'expanded' }}
+  PRODUCTION_HEALTH_URL: https://yahoo-finance-mcp.artinatw.workers.dev/health
+  PRODUCTION_MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
 
 concurrency:
   group: deploy-worker-production
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  upload_version:
+    name: Build and upload candidate version
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      version_id: ${{ steps.upload.outputs.version_id }}
+      preview_url: ${{ steps.upload.outputs.preview_url }}
     steps:
       - uses: actions/checkout@v5
 
@@ -65,53 +73,45 @@ jobs:
         env:
           BUILD_SHA: ${{ github.sha }}
 
-      - name: Deploy to Cloudflare Workers
-        run: npx wrangler deploy
-        working-directory: worker
+      - name: Build candidate secrets file
+        run: python scripts/worker_version_promotion.py write-secrets "$RUNNER_TEMP/worker-secrets.json"
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
-      # Wire optional FINNHUB_API_KEY as a Worker secret so it is available at runtime.
-      # If not using CI, run manually: wrangler secret put FINNHUB_API_KEY
-      - name: Wire FINNHUB_API_KEY secret
-        run: |
-          if [ -n "$FINNHUB_API_KEY" ]; then
-            printf '%s' "$FINNHUB_API_KEY" | npx wrangler secret put FINNHUB_API_KEY
-          fi
-        working-directory: worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-
-      # Optional Thailand SEC Open Data key. Without it the public tools return
-      # SOURCE_UNCONFIGURED with a recovery action and no credential detail.
-      - name: Wire SEC_OPEN_DATA_API_KEY secret
-        run: |
-          if [ -n "$SEC_OPEN_DATA_API_KEY" ]; then
-            printf '%s' "$SEC_OPEN_DATA_API_KEY" | npx wrangler secret put SEC_OPEN_DATA_API_KEY
-          fi
-        working-directory: worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           SEC_OPEN_DATA_API_KEY: ${{ secrets.SEC_OPEN_DATA_API_KEY }}
+          TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}
 
-      - name: Wire TOOL_MODE
+      - name: Upload immutable candidate version
+        id: upload
         run: |
-          printf '%s' "$TOOL_MODE" | npx wrangler secret put TOOL_MODE
+          npx wrangler versions upload \
+            --secrets-file "$RUNNER_TEMP/worker-secrets.json" \
+            --preview-alias "$PREVIEW_ALIAS" \
+            --tag "$VERSION_TAG" \
+            --message "GitHub $GITHUB_SHA" \
+            --strict
+          python ../scripts/worker_version_promotion.py parse-upload \
+            "$WRANGLER_OUTPUT_FILE_PATH" \
+            --expected-preview-alias "$PREVIEW_ALIAS" \
+            --worker-name "yahoo-finance-mcp" \
+            --github-output "$GITHUB_OUTPUT"
         working-directory: worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          TOOL_MODE: ${{ vars.TOOL_MODE || 'expanded' }}
+          FORCE_COLOR: "0"
+          PREVIEW_ALIAS: candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          VERSION_TAG: github-${{ github.run_id }}-${{ github.run_attempt }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-upload.ndjson
 
-  smoke-test:
-    name: Smoke-test deployed worker
+      - name: Remove candidate secrets file
+        if: ${{ always() }}
+        run: rm -f "$RUNNER_TEMP/worker-secrets.json" "$RUNNER_TEMP/wrangler-upload.ndjson"
+
+  candidate_smoke:
+    name: Verify candidate version
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    needs: deploy
+    timeout-minutes: 30
+    needs: upload_version
     permissions:
       contents: read
     steps:
@@ -121,15 +121,77 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Wait for worker propagation
-        run: sleep 30
+      - name: Verify candidate version identity
+        run: >-
+          python scripts/worker_version_promotion.py verify-health
+          --health-url "${{ needs.upload_version.outputs.preview_url }}/health"
+          --expected-version-id "${{ needs.upload_version.outputs.version_id }}"
 
-      - name: Verify deployed MCP contract canaries
+      - name: Verify candidate MCP contract canaries
+        run: python scripts/test_deployed_canaries.py
+        env:
+          MCP_URL: ${{ needs.upload_version.outputs.preview_url }}/mcp
+          ALLOW_NETWORK_SKIP: "0"
+          EXPECTED_TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}
+
+  promote_version:
+    name: Promote verified candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [upload_version, candidate_smoke]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: worker
+
+      - name: Promote exact candidate version
+        run: >-
+          npx wrangler versions deploy
+          "${VERSION_ID}@100%"
+          --yes
+          --message "Promote GitHub ${GITHUB_SHA}"
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VERSION_ID: ${{ needs.upload_version.outputs.version_id }}
+
+  production_smoke:
+    name: Verify promoted production version
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [upload_version, promote_version]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Verify production version identity
+        id: version_identity
+        run: >-
+          python scripts/worker_version_promotion.py verify-health
+          --health-url "$PRODUCTION_HEALTH_URL"
+          --expected-version-id "${{ needs.upload_version.outputs.version_id }}"
+
+      - name: Verify production MCP contract canaries
         id: contract_canaries
         run: python scripts/test_deployed_canaries.py
         env:
+          MCP_URL: ${{ env.PRODUCTION_MCP_URL }}
           ALLOW_NETWORK_SKIP: "0"
-          EXPECTED_TOOL_MODE: expanded
+          EXPECTED_TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}
 
       - name: Audit deployed MCP live discovery
         id: live_discovery
@@ -137,8 +199,9 @@ jobs:
         continue-on-error: true
         run: python scripts/test_deployed_discovery.py
         env:
+          MCP_URL: ${{ env.PRODUCTION_MCP_URL }}
           ALLOW_NETWORK_SKIP: "0"
-          EXPECTED_TOOL_MODE: expanded
+          EXPECTED_TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
 
       - name: Audit alias behavior
@@ -154,7 +217,7 @@ jobs:
         run: python scripts/test_geographic_revenue_schema.py
         env:
           GEO_SCHEMA_TARGET: remote
-          MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
+          MCP_URL: ${{ env.PRODUCTION_MCP_URL }}
 
       - name: Audit deployed extractor tools
         id: extractors
@@ -162,9 +225,9 @@ jobs:
         continue-on-error: true
         run: python scripts/test_deployed_extractors.py
         env:
-          MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
+          MCP_URL: ${{ env.PRODUCTION_MCP_URL }}
           ALLOW_NETWORK_SKIP: "0"
-          EXPECTED_TOOL_MODE: expanded
+          EXPECTED_TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}
 
       - name: Audit deployed MCP grouped discovery
         id: grouped_discovery
@@ -192,7 +255,7 @@ jobs:
         id: end_to_end
         if: ${{ always() }}
         continue-on-error: true
-        run: python scripts/test_tools.py --url https://yahoo-finance-mcp.artinatw.workers.dev/mcp
+        run: python scripts/test_tools.py --url "$PRODUCTION_MCP_URL"
 
       - name: Summarize deployed smoke results
         if: ${{ always() }}
@@ -200,6 +263,7 @@ jobs:
           echo "## Deployed smoke results" >> "$GITHUB_STEP_SUMMARY"
           echo "| Suite | Outcome | Gate |" >> "$GITHUB_STEP_SUMMARY"
           echo "| --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Version identity | ${{ steps.version_identity.outcome }} | blocking |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Contract canaries | ${{ steps.contract_canaries.outcome }} | blocking |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Live discovery | ${{ steps.live_discovery.outcome }} | advisory |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Aliases | ${{ steps.aliases.outcome }} | advisory |" >> "$GITHUB_STEP_SUMMARY"

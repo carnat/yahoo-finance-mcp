@@ -31,7 +31,8 @@ export interface Env {
   TOOL_MODE?: string;
   AUDIT_TOKEN?: string;
   BUILD_SHA?: string;
-  [key: string]: string | undefined;
+  CF_VERSION_METADATA?: WorkerVersionMetadata;
+  [key: string]: unknown;
 }
 
 const CORS_HEADERS: Record<string, string> = {
@@ -63,7 +64,12 @@ export default {
 
     // Health check
     if (pathname === "/" || pathname === "/health") {
-      return json({ name: "yahoo-finance-mcp", status: "ok", transport: "streamable-http" });
+      return json({
+        name: "yahoo-finance-mcp",
+        status: "ok",
+        transport: "streamable-http",
+        workerVersionId: env.CF_VERSION_METADATA?.id ?? null,
+      });
     }
 
     // Audit endpoint

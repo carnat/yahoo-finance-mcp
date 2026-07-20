@@ -8,8 +8,10 @@ export const SERVER_VERSION = "1.0.0";
 // every request to the same Worker instance, so concurrent overwrites are safe.
 let _workerEnv: Record<string, string | undefined> = {};
 
-export function setWorkerEnv(env: Record<string, string | undefined>): void {
-  _workerEnv = env;
+export function setWorkerEnv(env: Record<string, unknown>): void {
+  _workerEnv = Object.fromEntries(
+    Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string")
+  );
 }
 
 export function getWorkerVar(name: string): string | undefined {

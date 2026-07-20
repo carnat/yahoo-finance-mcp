@@ -7,10 +7,28 @@ known unsafe failure modes stay explicit.
 They should not depend on stale market dates or exact provider data unless the
 test first discovers the current valid input.
 
+## Version Promotion Gate
+
+Production deploys use an immutable-version promotion sequence:
+
+1. Build and upload one Worker version without changing production traffic.
+2. Include configured secrets in that same version upload; omitted optional
+   secrets remain inherited from the previous version.
+3. Verify the version-metadata ID exposed by the candidate preview URL.
+4. Run the blocking contract canaries against that preview URL.
+5. Promote the exact verified version ID to 100% of production traffic.
+6. Poll production until it reports that same version ID, then rerun the
+   blocking contract canaries before the broader advisory audits.
+
+If candidate identity or contract verification fails, promotion does not run
+and production traffic remains unchanged. Production deployments are
+serialized so two workflow runs cannot race to promote different versions.
+
 ## Blocking Contract Checks
 
 Keep these as deploy-blocking checks:
 
+- candidate and production health report the exact uploaded Worker version ID;
 - deployed Worker is reachable when `ALLOW_NETWORK_SKIP=0`;
 - `tools/list` exposes the expected expanded or grouped surface;
 - tool calls return JSON payloads, not opaque platform text;
@@ -52,7 +70,8 @@ diagnostic field should update the relevant smoke expectation in the same PR:
 - `scripts/test_deployed_canaries.py`
 - `scripts/test_deployed_discovery.py`
 - `scripts/test_deployed_extractors.py`
-- `scripts/test_deployed_sec_facts_provider.py`
+- `scripts/test_smoke_architecture.py`
+- `scripts/worker_version_promotion.py`
 - `scripts/test_tools.py`
 - `scripts/test_live_discovery.py`
 
