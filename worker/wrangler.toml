@@ -1,6 +1,10 @@
 name = "yahoo-finance-mcp"
 main = "src/index.ts"
 compatibility_date = "2024-11-01"
+preview_urls = true
+
+[version_metadata]
+binding = "CF_VERSION_METADATA"
 
 [vars]
 MCP_ENVELOPE_V2 = "true"
