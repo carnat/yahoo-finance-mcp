@@ -78,9 +78,12 @@ class TestWorkerGroupedMode(unittest.TestCase):
         self.assertIsNotNone(match)
 
     def test_deploy_can_wire_grouped_mode_to_worker(self) -> None:
-        self.assertIn("Wire TOOL_MODE", self.deploy_workflow)
-        self.assertIn("wrangler secret put TOOL_MODE", self.deploy_workflow)
-        self.assertIn("TOOL_MODE: ${{ vars.TOOL_MODE || 'expanded' }}", self.deploy_workflow)
+        self.assertIn("DEPLOY_TOOL_MODE: ${{ vars.TOOL_MODE || 'expanded' }}", self.deploy_workflow)
+        self.assertIn("Build candidate secrets file", self.deploy_workflow)
+        self.assertIn("worker_version_promotion.py write-secrets", self.deploy_workflow)
+        self.assertIn("TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}", self.deploy_workflow)
+        self.assertIn('--secrets-file "$RUNNER_TEMP/worker-secrets.json"', self.deploy_workflow)
+        self.assertNotIn("wrangler secret put TOOL_MODE", self.deploy_workflow)
         self.assertIn("DEPLOY_GROUPED_SMOKE", self.deploy_workflow)
 
 
