@@ -1380,12 +1380,17 @@ export async function getFastInfo(ticker: string | string[]): Promise<string> {
 
   const regMktTime = raw(price.regularMarketTime) as number | null;
   const postMktTime = raw(price.postMarketTime) as number | null;
+  const marketState = typeof price.marketState === "string" ? price.marketState : null;
 
   return JSON.stringify({
     currency: raw(price.currency),
     exchange: raw(price.exchangeName),
     quoteType,
     lastPrice: raw(price.regularMarketPrice),
+    priceBasis: "REGULAR_MARKET_PRICE",
+    observationType: "REGULAR_MARKET_QUOTE",
+    priceTimestamp: regMktTime != null ? new Date(regMktTime * 1000).toISOString() : null,
+    marketState,
     open: raw(price.regularMarketOpen),
     previousClose: raw(price.regularMarketPreviousClose),
     dayHigh: raw(price.regularMarketDayHigh),
@@ -1402,7 +1407,7 @@ export async function getFastInfo(ticker: string | string[]): Promise<string> {
     twoHundredDayAverage: raw(detail.twoHundredDayAverage),
     preMarketPrice: raw(price.preMarketPrice),
     postMarketPrice: raw(price.postMarketPrice),
-    marketOpen: (price.marketState as string | null) === "REGULAR",
+    marketOpen: marketState === "REGULAR",
     lastTradeDate: regMktTime != null ? new Date(regMktTime * 1000).toISOString().slice(0, 10) : null,
     postMarketTimestamp: postMktTime != null ? new Date(postMktTime * 1000).toISOString() : null,
     ...(isIndex ? { _note: "Index ticker — volume, shares, and marketCap are not applicable and are returned as null" } : {}),
@@ -2675,17 +2680,30 @@ export async function getPriceSlope(ticker: string | string[], days: number): Pr
     if (!result) return JSON.stringify({ error: true, message: `No data for ${ticker}`, ticker });
 
     const timestamps = (result.timestamp as number[]) ?? [];
-    const adjclose =
+    const adjustedCloses =
       ((result.indicators as Record<string, unknown[]>)?.adjclose?.[0] as Record<string, (number | null)[]>)?.adjclose ??
+      [];
+    const rawCloses =
       ((result.indicators as Record<string, unknown[]>)?.quote?.[0] as Record<string, (number | null)[]>)?.close ??
       [];
+    const adjustedCount = adjustedCloses.filter((value): value is number => typeof value === "number").length;
+    const priceSeries = adjustedCount >= 2 ? adjustedCloses : rawCloses;
+    const priceBasis = adjustedCount >= 2 ? "ADJUSTED_CLOSE" : "UNADJUSTED_CLOSE";
+    const observations = priceSeries
+      .map((close, index): { close: number | null; rawClose: number | null; timestamp: number | null } => ({
+        close,
+        rawClose: rawCloses[index] ?? null,
+        timestamp: timestamps[index] ?? null,
+      }))
+      .filter((observation): observation is { close: number; rawClose: number | null; timestamp: number | null } =>
+        typeof observation.close === "number"
+      );
+    if (observations.length < 2) return JSON.stringify({ error: true, message: `Insufficient data for ${ticker}`, ticker });
 
-    const closes = adjclose.filter((v): v is number => v != null);
-    if (closes.length < 2) return JSON.stringify({ error: true, message: `Insufficient data for ${ticker}`, ticker });
-
-    const tail = closes.slice(-days);
-    const startClose = tail[0];
-    const endClose = tail[tail.length - 1];
+    const tail = observations.slice(-days);
+    const startClose = tail[0].close;
+    const endObservation = tail[tail.length - 1];
+    const endClose = endObservation.close;
     const slopePct = startClose !== 0 ? +((endClose - startClose) / startClose * 100).toFixed(2) : null;
 
     let direction: string;
@@ -2693,15 +2711,19 @@ export async function getPriceSlope(ticker: string | string[], days: number): Pr
     else if (slopePct > 0) direction = "UP";
     else direction = "DOWN";
 
-    const lastTsVal = timestamps[timestamps.length - 1];
     return JSON.stringify({
       ticker,
       days,
       startClose: +startClose.toFixed(2),
       endClose: +endClose.toFixed(2),
+      endRawClose: endObservation.rawClose != null ? +endObservation.rawClose.toFixed(2) : null,
+      priceBasis,
+      observationType: "DAILY_PRICE_BAR",
       slopePct,
       direction,
-      dataDate: lastTsVal ? new Date(lastTsVal * 1000).toISOString().slice(0, 10) : null,
+      dataDate: endObservation.timestamp != null
+        ? new Date(endObservation.timestamp * 1000).toISOString().slice(0, 10)
+        : null,
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });

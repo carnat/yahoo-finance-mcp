@@ -6931,7 +6931,15 @@ def _deprecated_alias_response(alias_tool: str, canonical_tool: str, raw: str) -
 
 
 
-@yfinance_server.tool(name="get_market_quote", output_schema=_TOOL_OUTPUT_SCHEMAS["get_fast_info"], description="Canonical alias for get_fast_info.")
+@yfinance_server.tool(
+    name="get_market_quote",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_fast_info"],
+    description=(
+        "Get a lightweight Yahoo regular-market price observation for one or more tickers. "
+        "lastPrice uses priceBasis=REGULAR_MARKET_PRICE and includes priceTimestamp. "
+        "It may differ from get_price_slope.endClose, which is adjusted daily-bar analytics."
+    ),
+)
 async def get_market_quote(ticker: str | list[str]) -> str:
     return await get_fast_info(ticker)
 

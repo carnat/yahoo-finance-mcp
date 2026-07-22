@@ -432,7 +432,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_fast_info",
     description:
-      "Alias for get_market_quote. Get lightweight real-time price and market data for one or more tickers. Returns high-signal fields: currency, exchange, quoteType, lastPrice, open, previousClose, dayHigh, dayLow, yearHigh, yearLow, yearChange, marketCap, shares, lastVolume, tenDayAverageVolume, threeMonthAverageVolume, fiftyDayAverage, twoHundredDayAverage, preMarketPrice, postMarketPrice, marketOpen (true only during regular session hours), lastTradeDate (YYYY-MM-DD date of the session the OHLCV data belongs to — use this to detect weekend/holiday staleness), postMarketTimestamp (ISO8601 timestamp of postMarketPrice, null if no AH activity). Prefer this over get_stock_info for price/market data queries — it uses far fewer tokens. Max 5 tickers per call; if you need more, split into multiple calls.",
+      "Alias for get_market_quote. Get lightweight regular-market price and market data for one or more tickers. lastPrice has priceBasis=REGULAR_MARKET_PRICE and priceTimestamp identifies the Yahoo quote observation. It is not an adjusted historical close and may differ from get_price_slope.endClose during an active session or between provider observations. Returns high-signal fields: currency, exchange, quoteType, lastPrice, priceBasis, priceTimestamp, marketState, open, previousClose, dayHigh, dayLow, yearHigh, yearLow, yearChange, marketCap, shares, lastVolume, tenDayAverageVolume, threeMonthAverageVolume, fiftyDayAverage, twoHundredDayAverage, preMarketPrice, postMarketPrice, marketOpen, lastTradeDate, and postMarketTimestamp. Prefer this over get_stock_info for current price/market data queries. Max 5 tickers per call; if you need more, split into multiple calls.",
     inputSchema: {
       type: "object",
       properties: {
@@ -613,7 +613,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_price_slope",
     description:
-      "Get N-day price slope (% change) and direction for one or more tickers. Returns startClose, endClose, slopePct, direction (UP/DOWN/FLAT). Max 5 tickers per call.",
+      "Get N-day adjusted-close slope (% change) and direction for one or more tickers. Returns startClose/endClose on priceBasis, endRawClose from the same dated daily bar, observationType, slopePct, direction, and dataDate. This is daily-bar analytics, not a real-time quote; compare endRawClose with get_market_quote.lastPrice only when dates/timestamps identify the same observation. Max 5 tickers per call.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1077,7 +1077,7 @@ export const TOOL_ALIASES: Record<string, string> = {
 };
 
 const CANONICAL_ADDITIONS: Tool[] = [
-  { name: "get_market_quote", description: "Get market quote for one or more tickers.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
+  { name: "get_market_quote", description: "Get a lightweight Yahoo regular-market price observation for one or more tickers. lastPrice uses priceBasis=REGULAR_MARKET_PRICE and includes priceTimestamp; use get_price_slope for adjusted daily-bar analytics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
   { name: "get_historical_prices", description: "Get historical prices for a ticker.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "1mo" }, interval: { type: "string", default: "1d" }, prepost: { type: "boolean", default: false } }, required: ["ticker"] } },
   { name: "analyze_price_performance", description: "Analyze price performance metrics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
   { name: "analyze_moving_average_position", description: "Analyze moving-average position.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
@@ -1344,6 +1344,10 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     properties: {
       ticker: { type: "string" },
       lastPrice: { type: "number" },
+      priceBasis: { type: "string", enum: ["REGULAR_MARKET_PRICE"] },
+      observationType: { type: "string", enum: ["REGULAR_MARKET_QUOTE"] },
+      priceTimestamp: { type: ["string", "null"] },
+      marketState: { type: ["string", "null"] },
       currency: { type: "string" },
       exchange: { type: "string" },
       quoteType: { type: "string" },
@@ -1409,6 +1413,9 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       ticker: { type: "string" },
       startClose: { type: ["number", "null"] },
       endClose: { type: ["number", "null"] },
+      endRawClose: { type: ["number", "null"] },
+      priceBasis: { type: "string", enum: ["ADJUSTED_CLOSE", "UNADJUSTED_CLOSE"] },
+      observationType: { type: "string", enum: ["DAILY_PRICE_BAR"] },
       slopePct: { type: ["number", "null"] },
       direction: { type: "string" },
       dataDate: { type: "string" },

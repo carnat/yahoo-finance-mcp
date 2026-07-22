@@ -144,10 +144,14 @@ plus pre-market/after-hours prices when available.
 PREFER THIS over get_stock_info for any query involving current price, market cap, 52-week range,
 moving averages, or trading volume — it uses ~85-90% fewer tokens than get_stock_info.
 
-Fields returned: currency, exchange, quoteType, lastPrice, open, previousClose,
+Fields returned: currency, exchange, quoteType, lastPrice, priceBasis, observationType, open, previousClose,
 dayHigh, dayLow, yearHigh, yearLow, yearChange, marketCap, shares, lastVolume,
 tenDayAverageVolume, threeMonthAverageVolume, fiftyDayAverage, twoHundredDayAverage,
-marketOpen, lastTradeDate, postMarketTimestamp.
+priceTimestamp, marketState, marketOpen, lastTradeDate, postMarketTimestamp.
+
+lastPrice is Yahoo's regular-market price observation. It is not a historical
+adjusted close and may differ from get_price_slope.endClose during an active
+session or when the two Yahoo endpoints were observed at different times.
 
 marketOpen: true only during regular session hours (09:30–16:00 ET Mon–Fri). false
 pre-market, after-hours, weekends, and holidays. Always true for crypto (24/7 markets).
@@ -187,6 +191,11 @@ async def get_fast_info(ticker: str | list[str]) -> str:
         print(f"Error: getting fast info for {ticker}: {e}")
         return f"Error: getting fast info for {ticker}: {e}"
 
+    data["priceBasis"] = "REGULAR_MARKET_PRICE"
+    data["observationType"] = "REGULAR_MARKET_QUOTE"
+    data["priceTimestamp"] = None
+    data["marketState"] = None
+
     # Fetch .info once to cover both the shares fallback and extended-hours enrichment.
     try:
         info = company.info
@@ -203,6 +212,12 @@ async def get_fast_info(ticker: str | list[str]) -> str:
         # Market state fields (CR-03)
         data["marketOpen"] = info.get("marketState") == "REGULAR"
         reg_mkt_time = info.get("regularMarketTime")
+        data["priceTimestamp"] = (
+            datetime.datetime.fromtimestamp(reg_mkt_time, tz=datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+            if isinstance(reg_mkt_time, (int, float)) and reg_mkt_time
+            else None
+        )
+        data["marketState"] = info.get("marketState")
         data["lastTradeDate"] = (
             datetime.datetime.utcfromtimestamp(reg_mkt_time).strftime('%Y-%m-%d')
             if isinstance(reg_mkt_time, (int, float)) and reg_mkt_time
@@ -529,7 +544,13 @@ async def get_technical_indicators(ticker: str | list[str], period: str = "3mo")
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_slope"],
     description="""Get N-day price slope (% change) and direction for one or more tickers. Pre-computed server-side.
 
-Returns: startClose, endClose, slopePct, direction (UP/DOWN/FLAT).
+Returns: startClose, endClose, endRawClose, priceBasis, observationType,
+slopePct, direction (UP/DOWN/FLAT), and dataDate.
+
+startClose/endClose use adjusted daily closes when Yahoo provides them.
+endRawClose is the unadjusted close from the same dated bar. Compare it with
+get_market_quote.lastPrice only when their dates/timestamps describe the same
+market observation; an active daily bar may change during the session.
 
 Args:
     ticker: str | list[str] — single or batch
@@ -551,14 +572,16 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
     company = yf.Ticker(ticker)
     try:
         # Fetch extra buffer for weekends/holidays
-        hist = company.history(period=f"{days + 10}d", interval="1d")
+        hist = company.history(period=f"{days + 10}d", interval="1d", auto_adjust=False)
     except Exception as e:
         return json.dumps({"error": True, "message": str(e), "ticker": ticker})
 
     if hist is None or hist.empty or len(hist) < 2:
         return json.dumps({"error": True, "message": f"Insufficient price data for {ticker}", "ticker": ticker})
 
-    closes = hist["Close"].dropna()
+    adjusted_closes = hist["Adj Close"].dropna() if "Adj Close" in hist else hist["Close"].dropna()
+    price_basis = "ADJUSTED_CLOSE" if "Adj Close" in hist and len(adjusted_closes) >= 2 else "UNADJUSTED_CLOSE"
+    closes = adjusted_closes if len(adjusted_closes) >= 2 else hist["Close"].dropna()
     if len(closes) < 2:
         return json.dumps({"error": True, "message": f"Insufficient close data for {ticker}", "ticker": ticker})
 
@@ -579,12 +602,16 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
 
     last_idx = closes.index[-1]
     data_date = str(last_idx.date()) if hasattr(last_idx, "date") else str(last_idx)
+    raw_close = hist.loc[last_idx, "Close"] if "Close" in hist and last_idx in hist.index else None
 
     return json.dumps({
         "ticker": ticker,
         "days": days,
         "startClose": round(start_close, 2),
         "endClose": round(end_close, 2),
+        "endRawClose": round(float(raw_close), 2) if raw_close is not None and not pd.isna(raw_close) else None,
+        "priceBasis": price_basis,
+        "observationType": "DAILY_PRICE_BAR",
         "slopePct": slope_pct,
         "direction": direction,
         "dataDate": data_date,

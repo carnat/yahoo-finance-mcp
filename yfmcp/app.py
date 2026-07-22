@@ -114,14 +114,14 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - health_check: Public-safe MCP availability and schema identity metadata.
 
 ### Price & market data
-- get_market_quote: Current price, market cap, 52-week range, moving averages, volume (~20 fields). Pre/after-market prices when available.
+- get_market_quote: Current regular-market price observation with priceBasis and priceTimestamp, plus market cap, 52-week range, moving averages, and volume.
 - get_historical_prices: Historical OHLCV data with configurable period, interval, and optional columns filter.
 - analyze_price_performance: % distance from 52w high/low and MAs, 30d annualised volatility, CAGR.
 - analyze_moving_average_position: % vs 50DMA/200DMA, trend (BULLISH/BEARISH/MIXED).
 - analyze_volume_ratio: Volume vs 10d/90d averages, volumeFlag (HIGH/NORMAL/LOW).
 - check_volume_liquidity_threshold: 20d ADV liquidity gate pass/fail. FX notional mode via foreign_exchange=true.
 - get_technical_indicators: Pre-computed RSI-14 (Wilder) and MACD (12,26,9) from daily closes.
-- get_price_slope: N-day price slope (% change) and direction (UP/DOWN/FLAT).
+- get_price_slope: N-day adjusted daily-close slope with same-bar endRawClose, priceBasis, dataDate, and direction (UP/DOWN/FLAT). Not a real-time quote.
 - get_short_interest: Short % of float, shares short, days-to-cover, prior-month comparison.
 - get_short_momentum: Short interest with MoM delta, direction (RISING/FALLING/FLAT), squeeze risk.
 - get_overnight_quote: Overnight trading data (20:00–04:00 ET). Returns price, gap %, data source, and staleness flag.

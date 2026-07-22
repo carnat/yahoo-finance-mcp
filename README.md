@@ -105,6 +105,11 @@ Main public tool areas:
 - Thailand SEC Open Data fund discovery, direct-project NAV refresh, dated factsheet evidence, and project-scoped dividend history;
 - ticker search, stock screens, diagnostics, and manifest health.
 
+Price observations are explicitly labeled. `get_market_quote.lastPrice` is a
+regular-market quote with `priceTimestamp`; `get_price_slope.endClose` is an
+adjusted daily-bar value and includes `endRawClose` for the same `dataDate`.
+Do not treat values from different dates or observation times as conflicts.
+
 Use `search_thai_funds` to map an official project name, abbreviation, AMC, or
 known SEC share-class code to compact active-profile candidates. It never
 selects one automatically. Thai SEC fund data calls resolve an exact SEC

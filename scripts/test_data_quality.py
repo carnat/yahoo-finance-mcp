@@ -4,6 +4,7 @@
 import asyncio
 import json
 import os
+import pathlib
 import sys
 import unittest
 
@@ -67,6 +68,68 @@ class TestPr2DataQuality(unittest.TestCase):
             set(rows[0]),
             {"date", "open", "high", "low", "close", "volume", "adjClose"},
         )
+
+    def test_market_quote_labels_regular_market_price_observation(self):
+        timestamp = int(pd.Timestamp("2026-06-23T15:20:00Z").timestamp())
+
+        class FakeTicker:
+            fast_info = {
+                "currency": "USD",
+                "exchange": "NMS",
+                "quoteType": "EQUITY",
+                "lastPrice": 101.25,
+            }
+            info = {
+                "marketState": "REGULAR",
+                "regularMarketTime": timestamp,
+            }
+
+        pricing.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
+        result = json.loads(_run(pricing.get_fast_info("TSTPRICEOBS")))
+
+        self.assertEqual(result["priceBasis"], "REGULAR_MARKET_PRICE")
+        self.assertEqual(result["observationType"], "REGULAR_MARKET_QUOTE")
+        self.assertEqual(result["marketState"], "REGULAR")
+        self.assertEqual(result["priceTimestamp"], "2026-06-23T15:20:00Z")
+
+    def test_price_slope_keeps_adjusted_and_raw_close_semantics_aligned(self):
+        index = pd.DatetimeIndex(["2026-06-19", "2026-06-22", "2026-06-23"])
+
+        class FakeTicker:
+            def history(self, period, interval, auto_adjust=False):
+                self.request = (period, interval, auto_adjust)
+                return pd.DataFrame(
+                    {
+                        "Close": [100.0, 102.0, 104.0],
+                        "Adj Close": [50.0, 51.0, 52.0],
+                    },
+                    index=index,
+                )
+
+        ticker = FakeTicker()
+        pricing.yf.Ticker = lambda symbol: ticker  # type: ignore[assignment]
+        result = json.loads(_run(pricing.get_price_slope("TSTSLOPEOBS", days=3)))
+
+        self.assertEqual(ticker.request, ("13d", "1d", False))
+        self.assertEqual(result["startClose"], 50.0)
+        self.assertEqual(result["endClose"], 52.0)
+        self.assertEqual(result["endRawClose"], 104.0)
+        self.assertEqual(result["priceBasis"], "ADJUSTED_CLOSE")
+        self.assertEqual(result["observationType"], "DAILY_PRICE_BAR")
+        self.assertEqual(result["dataDate"], "2026-06-23")
+
+    def test_worker_price_slope_pairs_each_close_with_its_timestamp(self):
+        worker_source = (
+            pathlib.Path(__file__).resolve().parents[1] / "worker" / "src" / "yahoo-finance.ts"
+        ).read_text(encoding="utf-8")
+        slope_source = worker_source.split("export async function getPriceSlope", 1)[1].split(
+            "export async function getVolumeRatio", 1
+        )[0]
+
+        self.assertIn("timestamp: timestamps[index] ?? null", slope_source)
+        self.assertIn("endRawClose: endObservation.rawClose", slope_source)
+        self.assertIn('priceBasis: "REGULAR_MARKET_PRICE"', worker_source)
+        self.assertNotIn("const closes = adjclose.filter", slope_source)
 
     def test_options_summary_rejects_invalid_expiry_hint(self):
         class FakeTicker:
