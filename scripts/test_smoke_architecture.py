@@ -107,6 +107,14 @@ class TestSmokeArchitecture(unittest.TestCase):
         candidate = self._step_body("Verify candidate MCP contract canaries")
         self.assertIn("needs.upload_version.outputs.preview_url", candidate)
 
+    def test_version_upload_uses_only_supported_wrangler_flags(self) -> None:
+        upload_step = self._step_body("Upload immutable candidate version")
+        wrangler_command = upload_step.split("python ../scripts/worker_version_promotion.py", 1)[0]
+        self.assertEqual(
+            set(re.findall(r"--[a-z-]+", wrangler_command)),
+            {"--secrets-file", "--preview-alias", "--tag", "--message"},
+        )
+
     def test_candidate_secrets_are_atomic_and_ephemeral(self) -> None:
         secrets = self._step_body("Build candidate secrets file")
         self.assertIn("worker_version_promotion.py write-secrets", secrets)

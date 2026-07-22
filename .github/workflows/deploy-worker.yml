@@ -87,8 +87,7 @@ jobs:
             --secrets-file "$RUNNER_TEMP/worker-secrets.json" \
             --preview-alias "$PREVIEW_ALIAS" \
             --tag "$VERSION_TAG" \
-            --message "GitHub $GITHUB_SHA" \
-            --strict
+            --message "GitHub $GITHUB_SHA"
           python ../scripts/worker_version_promotion.py parse-upload \
             "$WRANGLER_OUTPUT_FILE_PATH" \
             --expected-preview-alias "$PREVIEW_ALIAS" \
