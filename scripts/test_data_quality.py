@@ -93,30 +93,230 @@ class TestPr2DataQuality(unittest.TestCase):
         self.assertEqual(result["priceTimestamp"], "2026-06-23T15:20:00Z")
 
     def test_price_slope_keeps_adjusted_and_raw_close_semantics_aligned(self):
-        index = pd.DatetimeIndex(["2026-06-19", "2026-06-22", "2026-06-23"])
+        index = pd.DatetimeIndex(["2026-06-18", "2026-06-19", "2026-06-22", "2026-06-23"])
 
         class FakeTicker:
-            def history(self, period, interval, auto_adjust=False):
-                self.request = (period, interval, auto_adjust)
+            def history(self, period, interval, auto_adjust=False, keepna=False):
+                self.request = (period, interval, auto_adjust, keepna)
                 return pd.DataFrame(
                     {
-                        "Close": [100.0, 102.0, 104.0],
-                        "Adj Close": [50.0, 51.0, 52.0],
+                        "Close": [98.0, 100.0, 102.0, 104.0],
+                        "Adj Close": [49.0, 50.0, 51.0, 52.0],
                     },
                     index=index,
                 )
+
+            def get_history_metadata(self):
+                return {}
 
         ticker = FakeTicker()
         pricing.yf.Ticker = lambda symbol: ticker  # type: ignore[assignment]
         result = json.loads(_run(pricing.get_price_slope("TSTSLOPEOBS", days=3)))
 
-        self.assertEqual(ticker.request, ("13d", "1d", False))
-        self.assertEqual(result["startClose"], 50.0)
+        self.assertEqual(ticker.request, ("1mo", "1d", False, True))
+        self.assertEqual(result["startClose"], 49.0)
         self.assertEqual(result["endClose"], 52.0)
         self.assertEqual(result["endRawClose"], 104.0)
         self.assertEqual(result["priceBasis"], "ADJUSTED_CLOSE")
         self.assertEqual(result["observationType"], "DAILY_PRICE_BAR")
+        self.assertEqual(result["calculationBasis"], "COMPLETED_SESSION_CLOSE_TO_CLOSE")
+        self.assertEqual(result["observationCount"], 4)
+        self.assertEqual(result["barStatus"], "COMPLETE")
         self.assertEqual(result["dataDate"], "2026-06-23")
+
+    def test_price_slope_retries_then_uses_one_consistent_raw_series(self):
+        index = pd.DatetimeIndex(
+            ["2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23", "2026-07-24"],
+            tz="UTC",
+        )
+
+        class FakeTicker:
+            def __init__(self):
+                self.history_calls = 0
+
+            def history(self, period, interval, auto_adjust=False, keepna=False):
+                self.history_calls += 1
+                return pd.DataFrame(
+                    {
+                        "Close": [100.0, 101.0, 102.0, 103.0, 104.0, 105.0],
+                        "Adj Close": [50.0, 50.5, 51.0, 51.5, 52.0, float("nan")],
+                    },
+                    index=index,
+                )
+
+            def get_history_metadata(self):
+                return {
+                    "exchangeTimezoneName": "UTC",
+                    "regularMarketTime": int(pd.Timestamp("2026-07-24T20:00:00Z").timestamp()),
+                }
+
+        ticker = FakeTicker()
+        pricing.yf.Ticker = lambda symbol: ticker  # type: ignore[assignment]
+        result = json.loads(_run(pricing.get_price_slope("TSTRAWFALLBACK", days=5)))
+
+        self.assertEqual(ticker.history_calls, 2)
+        self.assertEqual(result["status"], "OK")
+        self.assertEqual(result["startClose"], 100.0)
+        self.assertEqual(result["endClose"], 105.0)
+        self.assertEqual(result["endRawClose"], 105.0)
+        self.assertEqual(result["priceBasis"], "UNADJUSTED_CLOSE")
+        self.assertEqual(result["dataDate"], "2026-07-24")
+        self.assertTrue(result["retryAttempted"])
+        self.assertTrue(result["fallbackUsed"])
+
+    def test_price_slope_retries_a_stale_completed_bar(self):
+        stale_index = pd.DatetimeIndex(
+            ["2026-07-16", "2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23"],
+            tz="UTC",
+        )
+        fresh_index = pd.DatetimeIndex(
+            ["2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23", "2026-07-24"],
+            tz="UTC",
+        )
+
+        class FakeTicker:
+            def __init__(self):
+                self.history_calls = 0
+
+            def history(self, period, interval, auto_adjust=False, keepna=False):
+                self.history_calls += 1
+                index = stale_index if self.history_calls == 1 else fresh_index
+                return pd.DataFrame(
+                    {
+                        "Close": [100.0, 101.0, 102.0, 103.0, 104.0, 105.0],
+                        "Adj Close": [100.0, 101.0, 102.0, 103.0, 104.0, 105.0],
+                    },
+                    index=index,
+                )
+
+            def get_history_metadata(self):
+                return {
+                    "exchangeTimezoneName": "UTC",
+                    "regularMarketTime": int(pd.Timestamp("2026-07-24T20:00:00Z").timestamp()),
+                }
+
+        ticker = FakeTicker()
+        pricing.yf.Ticker = lambda symbol: ticker  # type: ignore[assignment]
+        result = json.loads(_run(pricing.get_price_slope("TSTSTALERETRY", days=5)))
+
+        self.assertEqual(ticker.history_calls, 2)
+        self.assertEqual(result["status"], "OK")
+        self.assertEqual(result["dataDate"], "2026-07-24")
+        self.assertEqual(result["freshnessStatus"], "CURRENT")
+        self.assertTrue(result["retryAttempted"])
+
+    def test_price_slope_does_not_publish_a_persistently_stale_slope(self):
+        index = pd.DatetimeIndex(
+            ["2026-07-16", "2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23"],
+            tz="UTC",
+        )
+
+        class FakeTicker:
+            def __init__(self):
+                self.history_calls = 0
+
+            def history(self, period, interval, auto_adjust=False, keepna=False):
+                self.history_calls += 1
+                return pd.DataFrame(
+                    {
+                        "Close": [100.0, 101.0, 102.0, 103.0, 104.0, 105.0],
+                        "Adj Close": [100.0, 101.0, 102.0, 103.0, 104.0, 105.0],
+                    },
+                    index=index,
+                )
+
+            def get_history_metadata(self):
+                return {
+                    "exchangeTimezoneName": "UTC",
+                    "regularMarketTime": int(pd.Timestamp("2026-07-24T20:00:00Z").timestamp()),
+                }
+
+        ticker = FakeTicker()
+        pricing.yf.Ticker = lambda symbol: ticker  # type: ignore[assignment]
+        result = json.loads(_run(pricing.get_price_slope("TSTPERSISTENTSTALE", days=5)))
+
+        self.assertEqual(ticker.history_calls, 2)
+        self.assertEqual(result["status"], "STALE_BAR")
+        self.assertIsNone(result["slopePct"])
+        self.assertEqual(result["freshnessStatus"], "STALE")
+        self.assertEqual(result["recommendedNextAction"], "RETRY")
+
+    def test_price_slope_excludes_the_active_daily_bar(self):
+        today = pd.Timestamp.now(tz="UTC").normalize()
+        index = pd.date_range(end=today, periods=7, freq="D")
+        now_epoch = int(pd.Timestamp.now(tz="UTC").timestamp())
+
+        class FakeTicker:
+            def history(self, period, interval, auto_adjust=False, keepna=False):
+                return pd.DataFrame(
+                    {
+                        "Close": [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 999.0],
+                        "Adj Close": [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 999.0],
+                    },
+                    index=index,
+                )
+
+            def get_history_metadata(self):
+                return {
+                    "exchangeTimezoneName": "UTC",
+                    "regularMarketTime": now_epoch,
+                    "previousClose": 105.0,
+                    "currentTradingPeriod": {
+                        "regular": {
+                            "start": now_epoch - 3600,
+                            "end": now_epoch + 3600,
+                        }
+                    },
+                }
+
+        pricing.yf.Ticker = lambda symbol: FakeTicker()  # type: ignore[assignment]
+        result = json.loads(_run(pricing.get_price_slope("TSTACTIVEBAR", days=5)))
+
+        self.assertEqual(result["endClose"], 105.0)
+        self.assertEqual(result["dataDate"], index[-2].date().isoformat())
+        self.assertTrue(result["excludedIncompleteBar"])
+        self.assertEqual(result["barStatus"], "COMPLETE")
+
+    def test_price_slope_detects_a_stale_previous_close_during_market_hours(self):
+        today = pd.Timestamp.now(tz="UTC").normalize()
+        index = pd.date_range(end=today, periods=7, freq="D")
+        now_epoch = int(pd.Timestamp.now(tz="UTC").timestamp())
+
+        class FakeTicker:
+            def __init__(self):
+                self.history_calls = 0
+
+            def history(self, period, interval, auto_adjust=False, keepna=False):
+                self.history_calls += 1
+                return pd.DataFrame(
+                    {
+                        "Close": [99.0, 100.0, 101.0, 102.0, 103.0, 104.0, 999.0],
+                        "Adj Close": [99.0, 100.0, 101.0, 102.0, 103.0, 104.0, 999.0],
+                    },
+                    index=index,
+                )
+
+            def get_history_metadata(self):
+                return {
+                    "exchangeTimezoneName": "UTC",
+                    "regularMarketTime": now_epoch,
+                    "previousClose": 105.0,
+                    "currentTradingPeriod": {
+                        "regular": {
+                            "start": now_epoch - 3600,
+                            "end": now_epoch + 3600,
+                        }
+                    },
+                }
+
+        ticker = FakeTicker()
+        pricing.yf.Ticker = lambda symbol: ticker  # type: ignore[assignment]
+        result = json.loads(_run(pricing.get_price_slope("TSTACTIVESTALE", days=5)))
+
+        self.assertEqual(ticker.history_calls, 2)
+        self.assertEqual(result["status"], "STALE_BAR")
+        self.assertIsNone(result["slopePct"])
+        self.assertEqual(result["recommendedNextAction"], "RETRY")
 
     def test_worker_price_slope_pairs_each_close_with_its_timestamp(self):
         worker_source = (
@@ -126,10 +326,15 @@ class TestPr2DataQuality(unittest.TestCase):
             "export async function getVolumeRatio", 1
         )[0]
 
-        self.assertIn("timestamp: timestamps[index] ?? null", slope_source)
+        self.assertIn("timestamp: parsedTimestamp", worker_source)
         self.assertIn("endRawClose: endObservation.rawClose", slope_source)
+        self.assertIn("normalizedDays + 1", slope_source)
+        self.assertIn("excludedIncompleteBar", slope_source)
+        self.assertIn("retryAttempted", slope_source)
+        self.assertIn("COMPLETED_SESSION_CLOSE_TO_CLOSE", slope_source)
         self.assertIn('priceBasis: "REGULAR_MARKET_PRICE"', worker_source)
         self.assertNotIn("const closes = adjclose.filter", slope_source)
+        self.assertNotIn("const priceSeries =", slope_source)
 
     def test_options_summary_rejects_invalid_expiry_hint(self):
         class FakeTicker:

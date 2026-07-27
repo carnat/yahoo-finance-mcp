@@ -539,26 +539,139 @@ async def get_technical_indicators(ticker: str | list[str], period: str = "3mo")
 
 # ---------------------------------------------------------------------------
 
+def _price_slope_period(days: int) -> str:
+    if days <= 20:
+        return "1mo"
+    if days <= 60:
+        return "3mo"
+    if days <= 120:
+        return "6mo"
+    if days <= 250:
+        return "1y"
+    return "2y"
+
+
+def _price_slope_epoch(value) -> int | None:
+    if isinstance(value, (int, float)) and not pd.isna(value):
+        return int(value)
+    if isinstance(value, (pd.Timestamp, datetime.datetime)):
+        timestamp = pd.Timestamp(value)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.tz_localize("UTC")
+        return int(timestamp.timestamp())
+    return None
+
+
+def _price_slope_date(value, timezone_name: str) -> str | None:
+    if value is None:
+        return None
+    try:
+        timestamp = pd.Timestamp(value)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.tz_localize(timezone_name)
+        else:
+            timestamp = timestamp.tz_convert(timezone_name)
+        return timestamp.date().isoformat()
+    except (TypeError, ValueError, zoneinfo.ZoneInfoNotFoundError):
+        return None
+
+
+def _price_slope_market_state(
+    metadata: dict,
+    hist: pd.DataFrame,
+    now_epoch: int,
+) -> tuple[pd.DataFrame, bool, str | None, str]:
+    timezone_name = str(metadata.get("exchangeTimezoneName") or "UTC")
+    current_period = metadata.get("currentTradingPeriod")
+    regular = current_period.get("regular", {}) if isinstance(current_period, dict) else {}
+    regular_start = _price_slope_epoch(regular.get("start")) if isinstance(regular, dict) else None
+    regular_end = _price_slope_epoch(regular.get("end")) if isinstance(regular, dict) else None
+    active_session = (
+        regular_start is not None
+        and regular_end is not None
+        and regular_start <= now_epoch < regular_end
+    )
+
+    completed = hist.copy()
+    excluded_incomplete = False
+    if active_session and not completed.empty and regular_start is not None:
+        session_date = _price_slope_date(
+            pd.Timestamp(regular_start, unit="s", tz="UTC"),
+            timezone_name,
+        )
+        last_date = _price_slope_date(completed.index[-1], timezone_name)
+        if session_date is not None and last_date == session_date:
+            completed = completed.iloc[:-1]
+            excluded_incomplete = True
+
+    expected_date = None
+    if not active_session:
+        regular_market_time = _price_slope_epoch(metadata.get("regularMarketTime"))
+        if regular_market_time is not None:
+            expected_date = _price_slope_date(
+                pd.Timestamp(regular_market_time, unit="s", tz="UTC"),
+                timezone_name,
+            )
+
+    if active_session:
+        expected_previous_close = pd.to_numeric(metadata.get("previousClose"), errors="coerce")
+        last_completed_raw_close = (
+            pd.to_numeric(completed["Close"].iloc[-1], errors="coerce")
+            if not completed.empty and "Close" in completed
+            else float("nan")
+        )
+        tolerance = (
+            max(0.01, abs(float(expected_previous_close)) * 1e-6)
+            if not pd.isna(expected_previous_close)
+            else 0.01
+        )
+        freshness_status = (
+            "STALE"
+            if not pd.isna(expected_previous_close)
+            and not pd.isna(last_completed_raw_close)
+            and abs(float(last_completed_raw_close) - float(expected_previous_close)) > tolerance
+            else "CURRENT"
+        )
+    elif expected_date is None or completed.empty:
+        freshness_status = "UNKNOWN"
+    else:
+        last_completed_date = _price_slope_date(completed.index[-1], timezone_name)
+        freshness_status = "STALE" if last_completed_date is None or last_completed_date < expected_date else "CURRENT"
+
+    return completed, excluded_incomplete, expected_date, freshness_status
+
+
+def _price_slope_adjusted_window_incomplete(hist: pd.DataFrame, required_bars: int) -> bool:
+    if hist.empty or "Adj Close" not in hist or "Close" not in hist:
+        return False
+    window = hist.tail(required_bars)
+    adjusted = pd.to_numeric(window["Adj Close"], errors="coerce")
+    raw_close = pd.to_numeric(window["Close"], errors="coerce")
+    return adjusted.notna().any() and adjusted.isna().any() and raw_close.notna().all()
+
+
 @yfinance_server.tool(
     name="get_price_slope",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_slope"],
-    description="""Get N-day price slope (% change) and direction for one or more tickers. Pre-computed server-side.
+    description="""Get completed-session N-day close-to-close price change and direction for one or more tickers. Pre-computed server-side.
 
-Returns: startClose, endClose, endRawClose, priceBasis, observationType,
-slopePct, direction (UP/DOWN/FLAT), and dataDate.
+days=N uses N+1 completed daily bars. An unfinished current-session bar is
+excluded. Returns startClose, endClose, endRawClose, priceBasis,
+calculationBasis, observationCount, barStatus, freshnessStatus, slopePct,
+direction (UP/DOWN/FLAT), and dataDate.
 
 startClose/endClose use adjusted daily closes when Yahoo provides them.
-endRawClose is the unadjusted close from the same dated bar. Compare it with
-get_market_quote.lastPrice only when their dates/timestamps describe the same
-market observation; an active daily bar may change during the session.
+endRawClose is the unadjusted close from the same completed dated bar. A stale
+or incomplete adjusted response is retried once; persistent adjusted gaps use
+one consistent unadjusted series rather than silently dropping the latest bar.
 
 Args:
     ticker: str | list[str] — single or batch
-    days: int — lookback in trading days (default: 5)
+    days: int — completed close-to-close trading-session intervals (default: 5)
 """,
 )
 async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
-    """Return N-day price slope for one or more tickers."""
+    """Return completed-session N-day price change for one or more tickers."""
     if isinstance(ticker, list):
         results = []
         for t in ticker:
@@ -569,24 +682,123 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
             await asyncio.sleep(0.1)
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
 
+    normalized_days = max(1, min(int(days), 500))
+    required_bars = normalized_days + 1
+    period = _price_slope_period(normalized_days)
     company = yf.Ticker(ticker)
     try:
-        # Fetch extra buffer for weekends/holidays
-        hist = company.history(period=f"{days + 10}d", interval="1d", auto_adjust=False)
+        hist = await asyncio.to_thread(
+            company.history,
+            period=period,
+            interval="1d",
+            auto_adjust=False,
+            keepna=True,
+        )
     except Exception as e:
         return json.dumps({"error": True, "message": str(e), "ticker": ticker})
 
-    if hist is None or hist.empty or len(hist) < 2:
+    try:
+        metadata = await asyncio.to_thread(company.get_history_metadata)
+        if not isinstance(metadata, dict):
+            metadata = {}
+    except Exception:
+        metadata = {}
+
+    if hist is None or hist.empty:
         return json.dumps({"error": True, "message": f"Insufficient price data for {ticker}", "ticker": ticker})
 
-    adjusted_closes = hist["Adj Close"].dropna() if "Adj Close" in hist else hist["Close"].dropna()
-    price_basis = "ADJUSTED_CLOSE" if "Adj Close" in hist and len(adjusted_closes) >= 2 else "UNADJUSTED_CLOSE"
-    closes = adjusted_closes if len(adjusted_closes) >= 2 else hist["Close"].dropna()
-    if len(closes) < 2:
-        return json.dumps({"error": True, "message": f"Insufficient close data for {ticker}", "ticker": ticker})
+    now_epoch = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+    completed, excluded_incomplete, expected_date, freshness_status = _price_slope_market_state(
+        metadata,
+        hist,
+        now_epoch,
+    )
+    retry_attempted = False
+    if freshness_status == "STALE" or _price_slope_adjusted_window_incomplete(completed, required_bars):
+        retry_attempted = True
+        try:
+            hist = await asyncio.to_thread(
+                company.history,
+                period=period,
+                interval="1d",
+                auto_adjust=False,
+                keepna=True,
+            )
+            completed, excluded_after_retry, expected_date, freshness_status = _price_slope_market_state(
+                metadata,
+                hist,
+                now_epoch,
+            )
+            excluded_incomplete = excluded_incomplete or excluded_after_retry
+        except Exception:
+            pass
 
-    # Take last N trading days
-    closes = closes.tail(days)
+    timezone_name = str(metadata.get("exchangeTimezoneName") or "UTC")
+    latest_available_date = (
+        _price_slope_date(completed.index[-1], timezone_name)
+        if not completed.empty
+        else None
+    )
+    if freshness_status == "STALE":
+        return json.dumps({
+            "ticker": ticker,
+            "days": normalized_days,
+            "status": "STALE_BAR",
+            "startClose": None,
+            "endClose": None,
+            "endRawClose": None,
+            "priceBasis": None,
+            "observationType": "DAILY_PRICE_BAR",
+            "calculationBasis": "COMPLETED_SESSION_CLOSE_TO_CLOSE",
+            "observationCount": 0,
+            "barStatus": "STALE",
+            "freshnessStatus": "STALE",
+            "expectedCompletedDate": expected_date,
+            "latestAvailableBarDate": latest_available_date,
+            "excludedIncompleteBar": excluded_incomplete,
+            "retryAttempted": retry_attempted,
+            "fallbackUsed": False,
+            "slopePct": None,
+            "direction": "UNKNOWN",
+            "dataDate": latest_available_date,
+            "recommendedNextAction": "RETRY",
+        })
+
+    if len(completed) < required_bars:
+        return json.dumps({
+            "error": True,
+            "message": f"Insufficient completed price data for {ticker}: need {required_bars} bars",
+            "ticker": ticker,
+        })
+
+    window = completed.tail(required_bars)
+    adjusted = (
+        pd.to_numeric(window["Adj Close"], errors="coerce")
+        if "Adj Close" in window
+        else pd.Series(dtype=float)
+    )
+    raw_closes = (
+        pd.to_numeric(window["Close"], errors="coerce")
+        if "Close" in window
+        else pd.Series(dtype=float)
+    )
+    adjusted_complete = len(adjusted) == required_bars and adjusted.notna().all()
+    raw_complete = len(raw_closes) == required_bars and raw_closes.notna().all()
+    if adjusted_complete:
+        closes = adjusted
+        price_basis = "ADJUSTED_CLOSE"
+        fallback_used = False
+    elif raw_complete:
+        closes = raw_closes
+        price_basis = "UNADJUSTED_CLOSE"
+        fallback_used = True
+    else:
+        return json.dumps({
+            "error": True,
+            "message": f"Incomplete completed-close series for {ticker}",
+            "ticker": ticker,
+        })
+
     start_close = float(closes.iloc[0])
     end_close = float(closes.iloc[-1])
     slope_pct = round((end_close - start_close) / start_close * 100, 2) if start_close != 0 else None
@@ -600,21 +812,32 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
     else:
         direction = "DOWN"
 
-    last_idx = closes.index[-1]
+    last_idx = window.index[-1]
     data_date = str(last_idx.date()) if hasattr(last_idx, "date") else str(last_idx)
-    raw_close = hist.loc[last_idx, "Close"] if "Close" in hist and last_idx in hist.index else None
+    raw_close = window.loc[last_idx, "Close"] if "Close" in window and last_idx in window.index else None
 
     return json.dumps({
         "ticker": ticker,
-        "days": days,
+        "days": normalized_days,
+        "status": "OK",
         "startClose": round(start_close, 2),
         "endClose": round(end_close, 2),
         "endRawClose": round(float(raw_close), 2) if raw_close is not None and not pd.isna(raw_close) else None,
         "priceBasis": price_basis,
         "observationType": "DAILY_PRICE_BAR",
+        "calculationBasis": "COMPLETED_SESSION_CLOSE_TO_CLOSE",
+        "observationCount": required_bars,
+        "barStatus": "COMPLETE",
+        "freshnessStatus": freshness_status,
+        "expectedCompletedDate": expected_date,
+        "latestAvailableBarDate": latest_available_date,
+        "excludedIncompleteBar": excluded_incomplete,
+        "retryAttempted": retry_attempted,
+        "fallbackUsed": fallback_used,
         "slopePct": slope_pct,
         "direction": direction,
         "dataDate": data_date,
+        "recommendedNextAction": "NONE",
     })
 
 
