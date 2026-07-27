@@ -419,6 +419,34 @@ class TestMarketSnapshotSchema(unittest.TestCase):
         self.assertIn("technicalIndicators", result["failedComponents"])
         self.assertTrue(any(w["code"] == "COMPONENT_FAILED" for w in result["warnings"]))
 
+    def test_partial_success_propagates_stale_component(self):
+        import unittest.mock as mock
+        self._mock_all_components(self.srv)
+
+        async def _stale_tech(ticker, period="3mo", *a, **kw):
+            return json.dumps({
+                "ticker": ticker,
+                "status": "STALE_BAR",
+                "rsi14": None,
+                "macdHistogram": None,
+                "dataDate": "2026-05-14",
+                "freshnessStatus": "STALE",
+                "recommendedNextAction": "RETRY",
+            })
+
+        with mock.patch.object(
+            __import__("yfmcp.tools.pricing", fromlist=["get_technical_indicators"]),
+            "get_technical_indicators",
+            _stale_tech,
+        ):
+            result = json.loads(_run(self.srv.get_market_snapshot("ASTS")))
+
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertTrue(result["partialSuccess"])
+        self.assertIn("technicalIndicators", result["limitedComponents"])
+        self.assertEqual(result["componentStatus"]["technicalIndicators"], "STALE_BAR")
+        self.assertEqual(result["recommendedNextAction"], "RETRY")
+
     def test_full_mode_has_components_key(self):
         self._mock_all_components(self.srv)
         result = json.loads(_run(self.srv.get_market_snapshot("ASTS", mode="full")))

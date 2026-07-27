@@ -102,6 +102,9 @@ from yfmcp.tools.pricing import (  # re-export for compatibility and grouped rou
     _overnight_window_utc,
     _classify_overnight_session,
     _classify_freshness,
+    _load_completed_daily_history,
+    _select_completed_close_series,
+    _daily_bar_date,
 )
 from yfmcp.tools.thai_funds import (  # re-export for grouped routing
     search_thai_funds,
@@ -6588,22 +6591,55 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
 
     # IV percentile — approximate using annualised 30-day rolling realised vol over 1 year
     iv_pctile: int | None = None
+    data_date: str | None = None
+    realized_vol_price_basis: str | None = None
+    historical_bar_status = "NOT_USED"
+    freshness_status = "UNKNOWN"
+    excluded_incomplete_bar = False
+    retry_attempted = False
+    fallback_used = False
     if quality == "LOW" and data_quality.get("placeholderIvCount", 0) > len(calls_list + puts_list) * 0.5:
         scan_warnings.append("IV_PERCENTILE_UNAVAILABLE_PLACEHOLDER_IV")
     else:
         try:
-            hist_1y = company.history(period="1y", interval="1d")
-            if hist_1y is not None and len(hist_1y) >= 30 and atm_iv is not None:
-                rets = hist_1y["Close"].pct_change().dropna()
-                roll_rv = rets.rolling(30).std() * (252 ** 0.5)
-                roll_rv = roll_rv.dropna()
-                if len(roll_rv) >= 5:
-                    rv_min, rv_max = float(roll_rv.min()), float(roll_rv.max())
-                    if rv_max > rv_min:
-                        pctile = (atm_iv - rv_min) / (rv_max - rv_min) * 100
-                        iv_pctile = max(0, min(100, round(pctile)))
+            prepared = await _load_completed_daily_history(
+                company,
+                "1y",
+                required_bars=31,
+                retry_adjusted_gap=True,
+            )
+            completed = prepared["completed"]
+            data_date = (
+                _daily_bar_date(completed.index[-1], prepared["timezoneName"])
+                if not completed.empty
+                else None
+            )
+            freshness_status = prepared["freshnessStatus"]
+            excluded_incomplete_bar = prepared["excludedIncompleteBar"]
+            retry_attempted = prepared["retryAttempted"]
+            if freshness_status == "STALE":
+                historical_bar_status = "STALE"
+                scan_warnings.append("IV_PERCENTILE_UNAVAILABLE_STALE_DAILY_BARS")
+            else:
+                selected = _select_completed_close_series(completed)
+                if selected is None:
+                    historical_bar_status = "INCOMPLETE"
+                    scan_warnings.append("IV_PERCENTILE_UNAVAILABLE_INCOMPLETE_DAILY_BARS")
+                else:
+                    closes, realized_vol_price_basis, fallback_used = selected
+                    historical_bar_status = "COMPLETE"
+                    rets = closes.pct_change().dropna()
+                    if len(closes) >= 31 and atm_iv is not None:
+                        roll_rv = rets.rolling(30).std() * (252 ** 0.5)
+                        roll_rv = roll_rv.dropna()
+                        if len(roll_rv) >= 5:
+                            rv_min, rv_max = float(roll_rv.min()), float(roll_rv.max())
+                            if rv_max > rv_min:
+                                pctile = (atm_iv - rv_min) / (rv_max - rv_min) * 100
+                                iv_pctile = max(0, min(100, round(pctile)))
         except Exception:
-            pass
+            historical_bar_status = "UNAVAILABLE"
+            scan_warnings.append("IV_PERCENTILE_UNAVAILABLE_DAILY_BARS")
 
     # Put vol vs 10-day average proxy (since historical options volume is unavailable via yfinance)
     # Proxy: put vol as a multiple of 1% of the stock's 10d average daily volume.
@@ -6614,13 +6650,6 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
             put_vol_vs_10d = round(put_vol / (adv10 * 0.01), 2)
     except Exception:
         pass
-
-    # Data date from history
-    try:
-        _h = company.history(period="5d", interval="1d")
-        data_date = get_last_trading_date(_h)
-    except Exception:
-        data_date = get_last_trading_date()
 
     # Look up prior window reading for trend analysis
     prev_window_map = {"T-7": "T-14", "T-2": "T-7"}
@@ -6690,6 +6719,18 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
         "maxPainStrike": max_pain_strike,
         "bracket": bracket,
         "formattedBlock": formatted_block,
+        "realizedVolPriceBasis": realized_vol_price_basis,
+        "historicalObservationType": "COMPLETED_DAILY_PRICE_SERIES",
+        "historicalBarStatus": historical_bar_status,
+        "freshnessStatus": freshness_status,
+        "excludedIncompleteBar": excluded_incomplete_bar,
+        "retryAttempted": retry_attempted,
+        "fallbackUsed": fallback_used,
+        "recommendedNextAction": (
+            "RETRY"
+            if historical_bar_status in {"STALE", "UNAVAILABLE"}
+            else "NONE"
+        ),
         "dataQuality": data_quality,
         "warnings": scan_warnings,
     }
@@ -6706,7 +6747,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
 @yfinance_server.tool(
     name="get_price_target_bracket",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"],
-    description="""Compare current market price to a user-supplied reference target price and return distance/bracket labels.
+    description="""Compare a live regular-market quote to a user-supplied reference target and return distance/bracket labels. Read priceTimestamp/observationType; this is not a completed-close calculation.
 
 ratio = currentPrice / reference_target_price × 100.
 
@@ -6765,17 +6806,33 @@ async def get_price_target_bracket(
 
     inverted_flag = reference_target_pct >= 100
 
-    data_date: str = str(datetime.date.today())
+    data_date: str | None = None
+    price_timestamp: str | None = None
+    market_state: str | None = None
+    market_open: bool | None = None
     try:
-        _h = company.history(period="5d", interval="1d")
-        if _h is not None and not _h.empty:
-            data_date = str(_h.index[-1].date())
+        info = company.info
+        market_time = info.get("regularMarketTime")
+        market_state = info.get("marketState")
+        market_open = market_state == "REGULAR"
+        if isinstance(market_time, (int, float)) and market_time:
+            price_time = datetime.datetime.fromtimestamp(
+                market_time,
+                tz=datetime.timezone.utc,
+            )
+            price_timestamp = price_time.isoformat().replace("+00:00", "Z")
+            data_date = price_time.date().isoformat()
     except Exception:
         pass
 
     return json.dumps({
         "ticker": ticker,
         "currentPrice": round(current_price, 4),
+        "priceBasis": "REGULAR_MARKET_PRICE",
+        "observationType": "REGULAR_MARKET_QUOTE_VS_USER_REFERENCE",
+        "priceTimestamp": price_timestamp,
+        "marketState": market_state,
+        "marketOpen": market_open,
         "referenceTargetPrice": target_price,
         "referenceTargetPct": reference_target_pct,
         "ioPt": target_price,
@@ -6786,6 +6843,7 @@ async def get_price_target_bracket(
         "tagNote": "Deprecated: tag is inferred from currentPrice/referenceTargetPrice distance. Use inferredTag.",
         "invertedFlag": inverted_flag,
         "dataDate": data_date,
+        "recommendedNextAction": "NONE",
     })
 
 
@@ -6796,9 +6854,10 @@ async def get_price_target_bracket(
 @yfinance_server.tool(
     name="get_position_score_inputs",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"],
-    description="""Aggregate public market, analyst, earnings, and technical inputs for caller-defined scoring models.
+    description="""Aggregate public analyst, earnings, live-price, and completed-session technical inputs for caller-defined scoring models.
 
-Runs up to 6 parallel data fetches per call.
+Runs up to 6 parallel data fetches per call. Read componentStatus plus separate
+quote/completed-bar dates; PARTIAL recommends RETRY.
 
 Returns grouped analyst, price/range, earnings-momentum, and technical indicator inputs plus dataDate.
 
@@ -6835,6 +6894,26 @@ async def get_position_score_inputs(ticker: str) -> str:
     earnings = _parse(results[3])
     tech = _parse(results[4])
     ma = _parse(results[5])
+    component_payloads = {
+        "analystUpgrades": upgrade,
+        "analystConsensus": consensus,
+        "priceStats": price,
+        "earningsMomentum": earnings,
+        "technicalIndicators": tech,
+        "maPosition": ma,
+    }
+    component_status: dict[str, str] = {}
+    failed_components: list[str] = []
+    limited_components: list[str] = []
+    for name, payload in component_payloads.items():
+        if not payload or payload.get("error"):
+            component_status[name] = "FAILED"
+            failed_components.append(name)
+        elif payload.get("status") in {"STALE_BAR", "PARTIAL"}:
+            component_status[name] = str(payload["status"])
+            limited_components.append(name)
+        else:
+            component_status[name] = "OK"
 
     # T1: analyst sentiment
     t1: dict = {
@@ -6880,11 +6959,25 @@ async def get_position_score_inputs(ticker: str) -> str:
 
     return json.dumps({
         "ticker": ticker,
+        "status": "PARTIAL" if failed_components or limited_components else "OK",
         "dataDate": data_date,
+        "quoteDataDate": (
+            str(price.get("priceTimestamp"))[:10]
+            if price.get("priceTimestamp")
+            else None
+        ),
+        "quoteTimestamp": price.get("priceTimestamp"),
+        "completedBarDataDate": tech.get("dataDate"),
         "t1_inputs": t1,
         "t2_inputs": t2,
         "t4_inputs": t4,
         "t5_inputs": t5,
+        "componentStatus": component_status,
+        "failedComponents": failed_components,
+        "limitedComponents": limited_components,
+        "recommendedNextAction": (
+            "RETRY" if failed_components or limited_components else "NONE"
+        ),
     })
 
 
