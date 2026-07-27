@@ -121,7 +121,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - analyze_volume_ratio: Volume vs 10d/90d averages, volumeFlag (HIGH/NORMAL/LOW).
 - check_volume_liquidity_threshold: 20d ADV liquidity gate pass/fail. FX notional mode via foreign_exchange=true.
 - get_technical_indicators: Pre-computed RSI-14 (Wilder) and MACD (12,26,9) from daily closes.
-- get_price_slope: N-day adjusted daily-close slope with same-bar endRawClose, priceBasis, dataDate, and direction (UP/DOWN/FLAT). Not a real-time quote.
+- get_price_slope: N completed-session close-to-close change using N+1 bars. Excludes unfinished bars and returns same-bar endRawClose, priceBasis, freshness/retry diagnostics, dataDate, and direction (UP/DOWN/FLAT). Not a real-time quote.
 - get_short_interest: Short % of float, shares short, days-to-cover, prior-month comparison.
 - get_short_momentum: Short interest with MoM delta, direction (RISING/FALLING/FLAT), squeeze risk.
 - get_overnight_quote: Overnight trading data (20:00–04:00 ET). Returns price, gap %, data source, and staleness flag.

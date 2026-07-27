@@ -107,8 +107,11 @@ Main public tool areas:
 
 Price observations are explicitly labeled. `get_market_quote.lastPrice` is a
 regular-market quote with `priceTimestamp`; `get_price_slope.endClose` is an
-adjusted daily-bar value and includes `endRawClose` for the same `dataDate`.
-Do not treat values from different dates or observation times as conflicts.
+adjusted completed daily-bar value when available and includes `endRawClose`
+for the same `dataDate`. `days=N` uses N+1 completed bars; an unfinished
+current-session bar is excluded. Check `freshnessStatus` and
+`recommendedNextAction` before using the result. Do not treat values from
+different dates or observation times as conflicts.
 
 Use `search_thai_funds` to map an official project name, abbreviation, AMC, or
 known SEC share-class code to compact active-profile candidates. It never
