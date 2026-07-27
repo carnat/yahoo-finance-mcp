@@ -99,7 +99,9 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - **Prefer `get_analyst_consensus`** over `get_analyst_recommendations` when you need a quick summary of analyst sentiment and price targets.
 - **Prefer `get_earnings_analysis`** to get all forward-looking analyst estimates in a single call instead of five separate calls.
 - Use `get_short_interest` or `get_short_momentum` for short-selling metrics.
-- Use `get_technical_indicators` for momentum signals (RSI-14, MACD) without fetching raw OHLCV history.
+- Use `get_technical_indicators` for completed-session momentum signals (RSI-14, MACD) without fetching raw OHLCV history. Read bar/freshness status before use.
+- Raw daily history may include an unfinished active row; check `barStatus`/`isFinal`. Volume ratios, liquidity gates, volatility, CAGR, and realized-volatility context exclude that row.
+- Moving-average position and target-distance tools intentionally use a live regular-market quote and expose `priceTimestamp`; do not compare them to a completed close without aligning observation dates.
 - Use `search_ticker` to resolve a company name or ISIN to a ticker symbol before calling other tools.
 - Use `screen_stocks` to discover stocks matching criteria (e.g., day_gainers, most_actives) without iterating tickers manually.
 - Index tickers like `^VIX`, `^GSPC`, `^DJI` are supported by `get_market_quote`, `analyze_price_performance`, and `get_technical_indicators`.

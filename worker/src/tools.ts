@@ -208,7 +208,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_historical_stock_prices",
     description:
-      "Get historical stock prices for a given ticker symbol. Returns camelCase fields: date, open, high, low, close, volume, and adjClose.",
+      "Get raw historical OHLCV rows. Daily rows include barStatus and isFinal so unfinished current-session data is explicit; derived analytics should use completed-session tools instead.",
     inputSchema: {
       type: "object",
       properties: {
@@ -450,7 +450,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_price_stats",
     description:
-      "Get pre-computed price statistics for one or more tickers: current price, % change vs previous close, % distance from 52-week high/low and 50/200-day moving averages, 30-day annualized volatility, and CAGR over 1y/3y/5y. Max 5 tickers per call; if you need more, split into multiple calls.",
+      "Get live quote/range fields plus completed-session 30-day volatility and 1y/3y/5y CAGR. Read priceTimestamp for live fields and dataDate/historicalBarStatus for derived fields; PARTIAL recommends RETRY. Max 5 tickers.",
     inputSchema: {
       type: "object",
       properties: {
@@ -589,7 +589,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_technical_indicators",
     description:
-      "Get pre-computed technical / momentum indicators for one or more tickers. Computes indicators server-side from historical daily close prices so the LLM does NOT need to fetch raw OHLCV history and calculate manually. Returns: rsi14 (14-day RSI, Wilder smoothing; below 30 = oversold, above 70 = overbought), macd (MACD line: 12-day EMA minus 26-day EMA), macdSignal (9-day EMA of MACD), macdHistogram (MACD minus signal; positive = bullish momentum), lastClose, and dataDate. Max 5 tickers per call; split larger lists into multiple calls.",
+      "Get RSI-14 and MACD from completed daily sessions only. An unfinished active bar is excluded; read priceBasis, dataDate, freshnessStatus, and recommendedNextAction. STALE_BAR publishes no indicator values. Max 5 tickers.",
     inputSchema: {
       type: "object",
       properties: {
@@ -638,7 +638,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_volume_ratio",
     description:
-      "Get last-session volume vs N-day average volume ratio. Returns ratio10d, ratio90d, volumeFlag (HIGH/NORMAL/LOW). Max 5 tickers per call.",
+      "Compare the latest completed-session volume with prior 10/90 completed-session averages. The numerator is excluded from both averages. Read dataDate/barStatus before using HIGH/NORMAL/LOW. Max 5 tickers.",
     inputSchema: {
       type: "object",
       properties: {
@@ -661,7 +661,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_ma_position",
     description:
-      "Get price position vs 50DMA and 200DMA with trend classification (BULLISH/BEARISH/MIXED). Max 5 tickers per call.",
+      "Compare Yahoo's live regular-market quote with trailing 50/200-day averages. This is intentionally live, not a completed-close signal; read priceTimestamp and observationType. Max 5 tickers.",
     inputSchema: {
       type: "object",
       properties: {
@@ -902,7 +902,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_price_target_bracket",
     description:
-      "Compare current market price to a user-supplied reference price target and return percentage distance and bracket labels. Preferred input is reference_target_price; io_pt is accepted as a backward-compatible alias.",
+      "Compare a live regular-market quote to a user-supplied reference target. Read priceTimestamp/observationType; this is not a completed-close calculation. reference_target_price is preferred and io_pt remains an alias.",
     inputSchema: {
       type: "object",
       properties: {
@@ -916,7 +916,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_position_score_inputs",
     description:
-      "Aggregate public market, analyst, earnings, and technical inputs that may be useful for a caller-defined scoring model. This tool does not access holdings, cost basis, position size, or private scoring rules.",
+      "Aggregate public analyst, earnings, live-price, and completed-session technical inputs. Read componentStatus plus quoteDataDate/completedBarDataDate; PARTIAL recommends RETRY. No holdings, cost basis, or private scoring rules.",
     inputSchema: {
       type: "object",
       properties: {
@@ -928,7 +928,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_volume_gate",
     description:
-      "Deprecated alias for check_volume_liquidity_threshold. Check current trading volume and dollar-notional liquidity against configurable public liquidity thresholds.",
+      "Deprecated alias for check_volume_liquidity_threshold. Evaluate liquidity from the latest completed-session volume/close versus prior-session ADV. Active-session cumulative volume is excluded; read dataDate/barStatus.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1372,7 +1372,12 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     type: "object",
     properties: {
       ticker: { type: "string" },
+      status: { type: "string", enum: ["OK", "PARTIAL"] },
       lastPrice: { type: "number" },
+      priceBasis: { type: "string", enum: ["REGULAR_MARKET_PRICE"] },
+      priceObservationType: { type: "string", enum: ["REGULAR_MARKET_QUOTE"] },
+      priceTimestamp: { type: ["string", "null"] },
+      marketState: { type: ["string", "null"] },
       changePct: { type: "number" },
       distFromHigh52wPct: { type: "number" },
       distFromLow52wPct: { type: "number" },
@@ -1382,7 +1387,15 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       cagr1y: { type: "number" },
       cagr3y: { type: "number" },
       cagr5y: { type: "number" },
-      dataDate: { type: "string" },
+      historicalPriceBasis: { type: ["string", "null"] },
+      historicalObservationType: { type: "string", enum: ["COMPLETED_DAILY_PRICE_SERIES"] },
+      historicalBarStatus: { type: "string", enum: ["COMPLETE", "STALE", "INCOMPLETE", "UNAVAILABLE"] },
+      freshnessStatus: { type: "string", enum: ["CURRENT", "STALE", "UNKNOWN"] },
+      excludedIncompleteBar: { type: "boolean" },
+      retryAttempted: { type: "boolean" },
+      fallbackUsed: { type: "boolean" },
+      recommendedNextAction: { type: "string", enum: ["NONE", "RETRY"] },
+      dataDate: { type: ["string", "null"] },
     },
     additionalProperties: true,
   },
@@ -1400,12 +1413,21 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     type: "object",
     properties: {
       ticker: { type: "string" },
+      status: { type: "string", enum: ["OK", "STALE_BAR"] },
       rsi14: { type: ["number", "null"] },
       macd: { type: ["number", "null"] },
       macdSignal: { type: ["number", "null"] },
       macdHistogram: { type: ["number", "null"] },
       lastClose: { type: ["number", "null"] },
-      dataDate: { type: "string" },
+      priceBasis: { type: ["string", "null"] },
+      observationType: { type: "string", enum: ["COMPLETED_DAILY_PRICE_SERIES"] },
+      barStatus: { type: "string", enum: ["COMPLETE", "STALE"] },
+      freshnessStatus: { type: "string", enum: ["CURRENT", "STALE", "UNKNOWN"] },
+      excludedIncompleteBar: { type: "boolean" },
+      retryAttempted: { type: "boolean" },
+      fallbackUsed: { type: "boolean" },
+      recommendedNextAction: { type: "string", enum: ["NONE", "RETRY"] },
+      dataDate: { type: ["string", "null"] },
     },
     additionalProperties: true,
   },
@@ -1440,10 +1462,20 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     type: "object",
     properties: {
       ticker: { type: "string" },
+      status: { type: "string", enum: ["OK", "STALE_BAR"] },
+      lastVolume: { type: ["number", "null"] },
+      avgVolume10d: { type: ["number", "null"] },
+      avgVolume90d: { type: ["number", "null"] },
       ratio10d: { type: ["number", "null"] },
       ratio90d: { type: ["number", "null"] },
       volumeFlag: { type: ["string", "null"] },
-      dataDate: { type: "string" },
+      observationType: { type: "string", enum: ["COMPLETED_DAILY_VOLUME"] },
+      barStatus: { type: "string", enum: ["COMPLETE", "STALE"] },
+      freshnessStatus: { type: "string", enum: ["CURRENT", "STALE", "UNKNOWN"] },
+      excludedIncompleteBar: { type: "boolean" },
+      retryAttempted: { type: "boolean" },
+      recommendedNextAction: { type: "string", enum: ["NONE", "RETRY"] },
+      dataDate: { type: ["string", "null"] },
     },
     additionalProperties: true,
   },
@@ -1451,13 +1483,18 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     type: "object",
     properties: {
       ticker: { type: "string" },
+      priceBasis: { type: "string", enum: ["REGULAR_MARKET_PRICE"] },
+      observationType: { type: "string", enum: ["REGULAR_MARKET_QUOTE_VS_TRAILING_AVERAGES"] },
+      priceTimestamp: { type: ["string", "null"] },
+      marketState: { type: ["string", "null"] },
       lastClose: { type: ["number", "null"] },
       sma50: { type: ["number", "null"] },
       sma200: { type: ["number", "null"] },
       distFrom50dmaPct: { type: ["number", "null"] },
       distFrom200dmaPct: { type: ["number", "null"] },
       trend: { type: "string" },
-      dataDate: { type: "string" },
+      recommendedNextAction: { type: "string", enum: ["NONE"] },
+      dataDate: { type: ["string", "null"] },
     },
     additionalProperties: true,
   },
@@ -1599,7 +1636,15 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       maxPainStrike: { type: ["number", "null"] },
       bracket: { type: ["string", "null"] },
       formattedBlock: { type: "string" },
-      dataDate: { type: "string" },
+      realizedVolPriceBasis: { type: ["string", "null"] },
+      historicalObservationType: { type: "string", enum: ["COMPLETED_DAILY_PRICE_SERIES"] },
+      historicalBarStatus: { type: "string" },
+      freshnessStatus: { type: "string" },
+      excludedIncompleteBar: { type: "boolean" },
+      retryAttempted: { type: "boolean" },
+      fallbackUsed: { type: "boolean" },
+      recommendedNextAction: { type: "string", enum: ["NONE", "RETRY"] },
+      dataDate: { type: ["string", "null"] },
       dataQuality: { type: "object" },
       warnings: { type: "array" },
     },
@@ -1610,6 +1655,10 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     properties: {
       ticker: { type: "string" },
       currentPrice: { type: ["number", "null"] },
+      priceBasis: { type: "string", enum: ["REGULAR_MARKET_PRICE"] },
+      observationType: { type: "string", enum: ["REGULAR_MARKET_QUOTE_VS_USER_REFERENCE"] },
+      priceTimestamp: { type: ["string", "null"] },
+      marketState: { type: ["string", "null"] },
       referenceTargetPrice: { type: ["number", "null"] },
       referenceTargetPct: { type: ["number", "null"] },
       ioPt: { type: ["number", "null"] },
@@ -1619,7 +1668,8 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       tag: { type: ["string", "null"] },
       tagNote: { type: ["string", "null"] },
       invertedFlag: { type: ["boolean", "null"] },
-      dataDate: { type: "string" },
+      recommendedNextAction: { type: "string", enum: ["NONE"] },
+      dataDate: { type: ["string", "null"] },
     },
     additionalProperties: true,
   },
@@ -1627,11 +1677,16 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     type: "object",
     properties: {
       ticker: { type: "string" },
+      status: { type: "string", enum: ["OK", "PARTIAL"] },
       t1_inputs: { type: "object" },
       t2_inputs: { type: "object" },
       t4_inputs: { type: "object" },
       t5_inputs: { type: "object" },
-      dataDate: { type: "string" },
+      componentStatus: { type: "object" },
+      failedComponents: { type: "array" },
+      limitedComponents: { type: "array" },
+      recommendedNextAction: { type: "string", enum: ["NONE", "RETRY"] },
+      dataDate: { type: ["string", "null"] },
     },
     additionalProperties: true,
   },
@@ -1639,16 +1694,47 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     type: "object",
     properties: {
       ticker: { type: "string" },
+      status: { type: "string", enum: ["OK", "STALE_BAR"] },
       currency: { type: ["string", "null"] },
       fxRate: { type: ["number", "null"] },
+      fxPriceTimestamp: { type: ["string", "null"] },
       lastVolume: { type: ["number", "null"] },
+      lastClose: { type: ["number", "null"] },
+      priceBasis: { type: "string", enum: ["UNADJUSTED_CLOSE"] },
       adv10d: { type: ["number", "null"] },
       adv20d: { type: ["number", "null"] },
       adv90d: { type: ["number", "null"] },
       ratio20d: { type: ["number", "null"] },
+      notionalUsd: { type: ["number", "null"] },
       gatePass: { type: ["boolean", "null"] },
-      dataDate: { type: "string" },
+      observationType: { type: "string", enum: ["COMPLETED_DAILY_VOLUME_NOTIONAL"] },
+      barStatus: { type: "string", enum: ["COMPLETE", "STALE"] },
+      freshnessStatus: { type: "string", enum: ["CURRENT", "STALE", "UNKNOWN"] },
+      excludedIncompleteBar: { type: "boolean" },
+      retryAttempted: { type: "boolean" },
+      recommendedNextAction: { type: "string", enum: ["NONE", "RETRY"] },
+      dataDate: { type: ["string", "null"] },
       note: { type: ["string", "null"] },
+    },
+    additionalProperties: true,
+  },
+  get_market_snapshot: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      status: { type: "string", enum: ["OK", "PARTIAL"] },
+      price: { type: "object" },
+      range: { type: "object" },
+      trend: { type: "object" },
+      volume: { type: "object" },
+      risk: { type: "object" },
+      freshness: { type: "object" },
+      componentStatus: { type: "object" },
+      partialSuccess: { type: "boolean" },
+      failedComponents: { type: "array" },
+      limitedComponents: { type: "array" },
+      warnings: { type: "array" },
+      recommendedNextAction: { type: "string", enum: ["NONE", "RETRY"] },
     },
     additionalProperties: true,
   },

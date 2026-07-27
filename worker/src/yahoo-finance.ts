@@ -806,17 +806,30 @@ export async function getHistoricalPrices(
       string,
       (number | null)[]
     >)?.adjclose ?? [];
+  const dailyState = interval === "1d"
+    ? prepareCompletedDailySeries(result, Math.floor(Date.now() / 1000))
+    : null;
+  const activeTimestamp = dailyState?.activeRow?.timestamp ?? null;
 
   return JSON.stringify(
-    timestamps.map((t, i) => ({
-      date: iso(t),
-      open: quote.open?.[i] ?? null,
-      high: quote.high?.[i] ?? null,
-      low: quote.low?.[i] ?? null,
-      close: quote.close?.[i] ?? null,
-      volume: quote.volume?.[i] ?? null,
-      adjClose: adjclose[i] ?? null,
-    }))
+    timestamps.map((t, i) => {
+      const isFinal = interval === "1d" ? t !== activeTimestamp : null;
+      return {
+        date: iso(t),
+        open: quote.open?.[i] ?? null,
+        high: quote.high?.[i] ?? null,
+        low: quote.low?.[i] ?? null,
+        close: quote.close?.[i] ?? null,
+        volume: quote.volume?.[i] ?? null,
+        adjClose: adjclose[i] ?? null,
+        ...(interval === "1d"
+          ? {
+            barStatus: isFinal ? "COMPLETE" : "INCOMPLETE",
+            isFinal,
+          }
+          : {}),
+      };
+    })
   );
 }
 
@@ -1660,7 +1673,7 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
   if (Array.isArray(ticker)) {
     return runPartialBatch(ticker, (t) => getPriceStats(t));
   }
-  const [metaRaw, histRaw] = await Promise.all([
+  const [metaRaw, initialHistRaw] = await Promise.all([
     yGet(
       `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price,summaryDetail`
     ),
@@ -1685,14 +1698,20 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
   const yearLow = raw(detail.fiftyTwoWeekLow) as number | null;
   const fiftyDayAvg = raw(detail.fiftyDayAverage) as number | null;
   const twoHundredDayAvg = raw(detail.twoHundredDayAverage) as number | null;
+  const regularMarketTime = raw(price.regularMarketTime) as number | null;
 
   const pct = (v: number | null, ref: number | null): number | null =>
     v != null && ref != null && ref !== 0 ? +((v - ref) / ref * 100).toFixed(4) : null;
 
   const stats: Record<string, unknown> = {
     ticker,
+    status: "OK",
     currency: raw(price.currency),
     lastPrice,
+    priceBasis: "REGULAR_MARKET_PRICE",
+    priceObservationType: "REGULAR_MARKET_QUOTE",
+    priceTimestamp: regularMarketTime != null ? iso(regularMarketTime) : null,
+    marketState: raw(price.marketState),
     previousClose: prevClose,
     pctChangeTodayVsPrevClose: pct(lastPrice, prevClose),
     yearHigh,
@@ -1705,49 +1724,124 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
     pctFromTwoHundredDayAvg: pct(lastPrice, twoHundredDayAvg),
   };
 
-  let chartTimestamps: number[] = [];
-  try {
-    const hist = histRaw as Record<string, unknown>;
-    const chartResult = (hist?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
-      | Record<string, unknown>
-      | undefined;
-    if (chartResult) {
-      const timestamps = (chartResult.timestamp as number[]) ?? [];
-      chartTimestamps = timestamps;
-      const adjClose =
-        ((chartResult.indicators as Record<string, unknown[]>)?.adjclose?.[0] as Record<
-          string,
-          (number | null)[]
-        >)?.adjclose ?? [];
-      const closes = adjClose.filter((v): v is number => v != null);
-
-      if (closes.length >= 20) {
-        const last31 = closes.slice(-31);
-        const returns = last31.slice(1).map((c, i) => Math.log(c / last31[i]));
-        const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
-        const variance = returns.reduce((a, b) => a + (b - mean) ** 2, 0) / returns.length;
-        stats.annualizedVolatility30d = +(Math.sqrt(variance * 252) * 100).toFixed(4);
+  let histRaw = initialHistRaw as Record<string, unknown>;
+  let chartResult = (histRaw?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
+    | Record<string, unknown>
+    | undefined;
+  let retryAttempted = false;
+  let prepared = chartResult
+    ? prepareCompletedDailySeries(chartResult, Math.floor(Date.now() / 1000))
+    : null;
+  if (
+    chartResult
+    && prepared
+    && (
+      prepared.freshnessStatus === "STALE"
+      || completedAdjustedWindowIncomplete(prepared.completedRows)
+    )
+  ) {
+    retryAttempted = true;
+    try {
+      histRaw = await yGet(
+        `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=5y&interval=1d&events=div%2Csplits&_=${Date.now()}`,
+        false
+      ) as Record<string, unknown>;
+      const retryResult = (histRaw?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
+        | Record<string, unknown>
+        | undefined;
+      if (retryResult) {
+        chartResult = retryResult;
+        const retried = prepareCompletedDailySeries(
+          chartResult,
+          Math.floor(Date.now() / 1000)
+        );
+        retried.excludedIncompleteBar =
+          prepared.excludedIncompleteBar || retried.excludedIncompleteBar;
+        prepared = retried;
       }
-
-      const cagr = (years: number): number | null => {
-        const cutoffMs = Date.now() - years * 365.25 * 86400 * 1000;
-        const idx = timestamps.findIndex((t) => t * 1000 >= cutoffMs);
-        if (idx < 0 || idx >= closes.length - 1) return null;
-        const start = adjClose[idx];
-        const end = closes[closes.length - 1];
-        if (start == null || start <= 0) return null;
-        return +((Math.pow(end / start, 1 / years) - 1) * 100).toFixed(4);
-      };
-
-      stats.cagr1y = cagr(1);
-      stats.cagr3y = cagr(3);
-      stats.cagr5y = cagr(5);
+    } catch {
+      // Keep quote-derived fields and report historical coverage below.
     }
-  } catch {
-    // partial stats from fast_info are still returned
   }
 
-  stats.dataDate = getLastTradingDate(chartTimestamps);
+  const chartMeta = (chartResult?.meta as Record<string, unknown> | undefined) ?? {};
+  const timezone = typeof chartMeta.exchangeTimezoneName === "string"
+    ? chartMeta.exchangeTimezoneName
+    : "UTC";
+  const historicalDataDate = prepared && prepared.completedRows.length > 0
+    ? dailyBarDate(prepared.completedRows[prepared.completedRows.length - 1].timestamp, timezone)
+    : null;
+
+  stats.historicalObservationType = "COMPLETED_DAILY_PRICE_SERIES";
+  stats.historicalBarStatus = !prepared
+    ? "UNAVAILABLE"
+    : prepared.freshnessStatus === "STALE"
+      ? "STALE"
+      : "COMPLETE";
+  stats.freshnessStatus = prepared?.freshnessStatus ?? "UNKNOWN";
+  stats.expectedCompletedDate = prepared?.expectedCompletedDate ?? null;
+  stats.latestAvailableBarDate = historicalDataDate;
+  stats.excludedIncompleteBar = prepared?.excludedIncompleteBar ?? false;
+  stats.retryAttempted = retryAttempted;
+  stats.dataDate = historicalDataDate;
+
+  if (!prepared || prepared.freshnessStatus === "STALE") {
+    stats.status = "PARTIAL";
+    stats.historicalPriceBasis = null;
+    stats.fallbackUsed = false;
+    stats.annualizedVolatility30d = null;
+    stats.cagr1y = null;
+    stats.cagr3y = null;
+    stats.cagr5y = null;
+    stats.recommendedNextAction = "RETRY";
+    return JSON.stringify(stats);
+  }
+
+  const selected = selectCompletedPriceSeries(prepared.completedRows);
+  stats.historicalPriceBasis = selected?.priceBasis ?? null;
+  stats.fallbackUsed = selected?.fallbackUsed ?? false;
+  stats.recommendedNextAction = selected ? "NONE" : "RETRY";
+  if (!selected) {
+    stats.status = "PARTIAL";
+    stats.historicalBarStatus = "INCOMPLETE";
+    stats.annualizedVolatility30d = null;
+    stats.cagr1y = null;
+    stats.cagr3y = null;
+    stats.cagr5y = null;
+    return JSON.stringify(stats);
+  }
+
+  try {
+    const observations = selected.observations;
+    const closes = observations.map((row) => row.close);
+    if (closes.length >= 31) {
+      const last31 = closes.slice(-31);
+      const returns = last31.slice(1).map((c, i) => Math.log(c / last31[i]));
+      const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+      const variance = returns.reduce((a, b) => a + (b - mean) ** 2, 0) / returns.length;
+      stats.annualizedVolatility30d = +(Math.sqrt(variance * 252) * 100).toFixed(4);
+    }
+
+    const cagr = (years: number): number | null => {
+      const endObservation = observations[observations.length - 1];
+      const cutoffMs = endObservation.timestamp * 1000 - years * 365.25 * 86400 * 1000;
+      const startObservation = observations.find((row) => row.timestamp * 1000 >= cutoffMs);
+      if (!startObservation || startObservation === endObservation || startObservation.close <= 0) {
+        return null;
+      }
+      return +(
+        (Math.pow(endObservation.close / startObservation.close, 1 / years) - 1) * 100
+      ).toFixed(4);
+    };
+
+    stats.cagr1y = cagr(1);
+    stats.cagr3y = cagr(3);
+    stats.cagr5y = cagr(5);
+  } catch {
+    stats.status = "PARTIAL";
+    stats.recommendedNextAction = "RETRY";
+  }
+
   return JSON.stringify(stats);
 }
 
@@ -2574,35 +2668,97 @@ export async function getTechnicalIndicators(
     }
     return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])), limit);
   }
-  const d = (await yGet(
-    `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=${period}&interval=1d`,
-    false
-  )) as Record<string, unknown>;
+  const fetchChart = async (retry: boolean): Promise<Record<string, unknown> | undefined> => {
+    const cacheBuster = retry ? `&events=div%2Csplits&_=${Date.now()}` : "";
+    const d = (await yGet(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=${period}&interval=1d${cacheBuster}`,
+      false
+    )) as Record<string, unknown>;
+    return (d?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
+      | Record<string, unknown>
+      | undefined;
+  };
 
-  const chartResult = (d?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
-    | Record<string, unknown>
-    | undefined;
+  let chartResult = await fetchChart(false);
   if (!chartResult) return noData(ticker);
-
-  const adjCloseArr =
-    ((chartResult.indicators as Record<string, unknown[]>)?.adjclose?.[0] as Record<
-      string,
-      (number | null)[]
-    >)?.adjclose ??
-    ((chartResult.indicators as Record<string, unknown[]>)?.quote?.[0] as Record<
-      string,
-      (number | null)[]
-    >)?.close ??
-    [];
-
-  const timestamps = (chartResult.timestamp as number[]) ?? [];
-  const closes = adjCloseArr.filter((v): v is number => v != null);
-
-  if (closes.length < 26) {
-    return `Error: insufficient price history for ${ticker} (need ≥26 data points, got ${closes.length})`;
+  const nowEpoch = Math.floor(Date.now() / 1000);
+  let prepared = prepareCompletedDailySeries(chartResult, nowEpoch);
+  let retryAttempted = false;
+  if (
+    prepared.freshnessStatus === "STALE"
+    || completedAdjustedWindowIncomplete(prepared.completedRows)
+  ) {
+    retryAttempted = true;
+    const retryResult = await fetchChart(true);
+    if (retryResult) {
+      chartResult = retryResult;
+      const retried = prepareCompletedDailySeries(chartResult, nowEpoch);
+      retried.excludedIncompleteBar =
+        prepared.excludedIncompleteBar || retried.excludedIncompleteBar;
+      prepared = retried;
+    }
   }
 
-  const output: Record<string, unknown> = { ticker };
+  const meta = (chartResult.meta as Record<string, unknown> | undefined) ?? {};
+  const timezone = typeof meta.exchangeTimezoneName === "string" ? meta.exchangeTimezoneName : "UTC";
+  const latestAvailableBarDate = prepared.completedRows.length > 0
+    ? dailyBarDate(prepared.completedRows[prepared.completedRows.length - 1].timestamp, timezone)
+    : null;
+  if (prepared.freshnessStatus === "STALE") {
+    return JSON.stringify({
+      ticker,
+      status: "STALE_BAR",
+      rsi14: null,
+      macd: null,
+      macdSignal: null,
+      macdHistogram: null,
+      lastClose: null,
+      priceBasis: null,
+      observationType: "COMPLETED_DAILY_PRICE_SERIES",
+      barStatus: "STALE",
+      freshnessStatus: "STALE",
+      expectedCompletedDate: prepared.expectedCompletedDate,
+      latestAvailableBarDate,
+      excludedIncompleteBar: prepared.excludedIncompleteBar,
+      retryAttempted,
+      fallbackUsed: false,
+      dataDate: latestAvailableBarDate,
+      recommendedNextAction: "RETRY",
+    });
+  }
+
+  const selected = selectCompletedPriceSeries(prepared.completedRows);
+  if (!selected) {
+    return JSON.stringify({
+      error: true,
+      message: `Incomplete completed-close series for ${ticker}`,
+      ticker,
+    });
+  }
+  const closes = selected.observations.map((row) => row.close);
+
+  if (closes.length < 26) {
+    return JSON.stringify({
+      error: true,
+      message: `Insufficient completed price history for ${ticker} (need >=26 data points, got ${closes.length})`,
+      ticker,
+    });
+  }
+
+  const output: Record<string, unknown> = {
+    ticker,
+    status: "OK",
+    priceBasis: selected.priceBasis,
+    observationType: "COMPLETED_DAILY_PRICE_SERIES",
+    barStatus: "COMPLETE",
+    freshnessStatus: prepared.freshnessStatus,
+    expectedCompletedDate: prepared.expectedCompletedDate,
+    latestAvailableBarDate,
+    excludedIncompleteBar: prepared.excludedIncompleteBar,
+    retryAttempted,
+    fallbackUsed: selected.fallbackUsed,
+    recommendedNextAction: "NONE",
+  };
 
   // RSI-14 (Wilder smoothing via EWM with alpha=1/14)
   try {
@@ -2649,29 +2805,30 @@ export async function getTechnicalIndicators(
   }
 
   output.lastClose = +closes[closes.length - 1].toFixed(2);
-  const lastTs = timestamps[timestamps.length - 1];
-  output.dataDate = lastTs ? new Date(lastTs * 1000).toISOString().slice(0, 10) : null;
+  output.dataDate = latestAvailableBarDate;
 
   return JSON.stringify(output);
 }
 
 // ── get_price_slope ──────────────────────────────────────────────────────────
 
-type PriceSlopeObservation = {
+type DailyBarObservation = {
   timestamp: number;
   adjustedClose: number | null;
   rawClose: number | null;
+  volume: number | null;
 };
 
-type PreparedPriceSlope = {
-  completedRows: PriceSlopeObservation[];
+type PreparedCompletedDailySeries = {
+  completedRows: DailyBarObservation[];
+  activeRow: DailyBarObservation | null;
+  activeSession: boolean;
   excludedIncompleteBar: boolean;
   expectedCompletedDate: string | null;
   freshnessStatus: "CURRENT" | "STALE" | "UNKNOWN";
-  adjustedWindowIncomplete: boolean;
 };
 
-function priceSlopeNumber(value: unknown): number | null {
+function dailyBarNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
@@ -2683,7 +2840,7 @@ function priceSlopeRange(days: number): string {
   return "2y";
 }
 
-function priceSlopeDate(timestamp: number | null, timezone: string): string | null {
+function dailyBarDate(timestamp: number | null, timezone: string): string | null {
   if (timestamp == null) return null;
   try {
     const parts = new Intl.DateTimeFormat("en-US", {
@@ -2701,26 +2858,31 @@ function priceSlopeDate(timestamp: number | null, timezone: string): string | nu
   }
 }
 
-function preparePriceSlope(
+function prepareCompletedDailySeries(
   result: Record<string, unknown>,
-  requiredBars: number,
   nowEpoch: number,
-): PreparedPriceSlope {
+): PreparedCompletedDailySeries {
   const timestamps = (result.timestamp as unknown[]) ?? [];
   const indicators = (result.indicators as Record<string, unknown[]> | undefined) ?? {};
   const adjustedCloses =
     ((indicators.adjclose?.[0] as Record<string, unknown[]> | undefined)?.adjclose ?? []);
-  const rawCloses =
-    ((indicators.quote?.[0] as Record<string, unknown[]> | undefined)?.close ?? []);
+  const quote =
+    (indicators.quote?.[0] as Record<string, unknown[]> | undefined) ?? {};
+  const rawCloses = quote.close ?? [];
+  const volumes = quote.volume ?? [];
   const rows = timestamps
-    .map((timestamp, index): PriceSlopeObservation | null => {
-      const parsedTimestamp = priceSlopeNumber(timestamp);
-      const adjustedClose = priceSlopeNumber(adjustedCloses[index]);
-      const rawClose = priceSlopeNumber(rawCloses[index]);
-      if (parsedTimestamp == null || (adjustedClose == null && rawClose == null)) return null;
-      return { timestamp: parsedTimestamp, adjustedClose, rawClose };
+    .map((timestamp, index): DailyBarObservation | null => {
+      const parsedTimestamp = dailyBarNumber(timestamp);
+      const adjustedClose = dailyBarNumber(adjustedCloses[index]);
+      const rawClose = dailyBarNumber(rawCloses[index]);
+      const volume = dailyBarNumber(volumes[index]);
+      if (
+        parsedTimestamp == null
+        || (adjustedClose == null && rawClose == null && volume == null)
+      ) return null;
+      return { timestamp: parsedTimestamp, adjustedClose, rawClose, volume };
     })
-    .filter((row): row is PriceSlopeObservation => row != null);
+    .filter((row): row is DailyBarObservation => row != null);
 
   const meta = (result.meta as Record<string, unknown> | undefined) ?? {};
   const timezone = typeof meta.exchangeTimezoneName === "string" ? meta.exchangeTimezoneName : "UTC";
@@ -2728,8 +2890,8 @@ function preparePriceSlope(
     (meta.currentTradingPeriod as Record<string, unknown> | undefined) ?? {};
   const regular =
     (currentTradingPeriod.regular as Record<string, unknown> | undefined) ?? {};
-  const regularStart = priceSlopeNumber(regular.start);
-  const regularEnd = priceSlopeNumber(regular.end);
+  const regularStart = dailyBarNumber(regular.start);
+  const regularEnd = dailyBarNumber(regular.end);
   const activeSession =
     regularStart != null
     && regularEnd != null
@@ -2737,24 +2899,25 @@ function preparePriceSlope(
     && nowEpoch < regularEnd;
 
   const completedRows = [...rows];
+  let activeRow: DailyBarObservation | null = null;
   let excludedIncompleteBar = false;
   if (activeSession && regularStart != null && completedRows.length > 0) {
-    const sessionDate = priceSlopeDate(regularStart, timezone);
-    const lastDate = priceSlopeDate(completedRows[completedRows.length - 1].timestamp, timezone);
+    const sessionDate = dailyBarDate(regularStart, timezone);
+    const lastDate = dailyBarDate(completedRows[completedRows.length - 1].timestamp, timezone);
     if (sessionDate != null && lastDate === sessionDate) {
-      completedRows.pop();
+      activeRow = completedRows.pop() ?? null;
       excludedIncompleteBar = true;
     }
   }
 
-  const regularMarketTime = priceSlopeNumber(meta.regularMarketTime);
+  const regularMarketTime = dailyBarNumber(meta.regularMarketTime);
   const expectedCompletedDate = !activeSession
-    ? priceSlopeDate(regularMarketTime, timezone)
+    ? dailyBarDate(regularMarketTime, timezone)
     : null;
   const lastCompletedDate = completedRows.length > 0
-    ? priceSlopeDate(completedRows[completedRows.length - 1].timestamp, timezone)
+    ? dailyBarDate(completedRows[completedRows.length - 1].timestamp, timezone)
     : null;
-  const expectedPreviousClose = priceSlopeNumber(meta.previousClose);
+  const expectedPreviousClose = dailyBarNumber(meta.previousClose);
   const lastCompletedRawClose = completedRows.length > 0
     ? completedRows[completedRows.length - 1].rawClose
     : null;
@@ -2764,7 +2927,7 @@ function preparePriceSlope(
     && lastCompletedRawClose != null
     && Math.abs(lastCompletedRawClose - expectedPreviousClose)
       > Math.max(0.01, Math.abs(expectedPreviousClose) * 1e-6);
-  const freshnessStatus: PreparedPriceSlope["freshnessStatus"] = activeSession
+  const freshnessStatus: PreparedCompletedDailySeries["freshnessStatus"] = activeSession
     ? activeSessionStale ? "STALE" : "CURRENT"
     : expectedCompletedDate == null || lastCompletedDate == null
       ? "UNKNOWN"
@@ -2772,21 +2935,47 @@ function preparePriceSlope(
         ? "STALE"
         : "CURRENT";
 
-  const requiredWindow = completedRows.slice(-requiredBars);
-  const hasAnyAdjusted = requiredWindow.some((row) => row.adjustedClose != null);
-  const hasAllAdjusted =
-    requiredWindow.length === requiredBars
-    && requiredWindow.every((row) => row.adjustedClose != null);
-  const hasAllRaw =
-    requiredWindow.length === requiredBars
-    && requiredWindow.every((row) => row.rawClose != null);
-
   return {
     completedRows,
+    activeRow,
+    activeSession,
     excludedIncompleteBar,
     expectedCompletedDate,
     freshnessStatus,
-    adjustedWindowIncomplete: hasAnyAdjusted && !hasAllAdjusted && hasAllRaw,
+  };
+}
+
+function completedAdjustedWindowIncomplete(
+  completedRows: DailyBarObservation[],
+  requiredBars?: number,
+): boolean {
+  const window = requiredBars == null ? completedRows : completedRows.slice(-requiredBars);
+  const hasAnyAdjusted = window.some((row) => row.adjustedClose != null);
+  const hasAllAdjusted =
+    window.length > 0 && window.every((row) => row.adjustedClose != null);
+  const hasAllRaw =
+    window.length > 0 && window.every((row) => row.rawClose != null);
+  return hasAnyAdjusted && !hasAllAdjusted && hasAllRaw;
+}
+
+function selectCompletedPriceSeries(completedRows: DailyBarObservation[]): {
+  observations: Array<{ close: number; rawClose: number | null; timestamp: number }>;
+  priceBasis: "ADJUSTED_CLOSE" | "UNADJUSTED_CLOSE";
+  fallbackUsed: boolean;
+} | null {
+  const adjustedComplete =
+    completedRows.length > 0 && completedRows.every((row) => row.adjustedClose != null);
+  const rawComplete =
+    completedRows.length > 0 && completedRows.every((row) => row.rawClose != null);
+  if (!adjustedComplete && !rawComplete) return null;
+  return {
+    observations: completedRows.map((row) => ({
+      close: adjustedComplete ? row.adjustedClose as number : row.rawClose as number,
+      rawClose: row.rawClose,
+      timestamp: row.timestamp,
+    })),
+    priceBasis: adjustedComplete ? "ADJUSTED_CLOSE" : "UNADJUSTED_CLOSE",
+    fallbackUsed: !adjustedComplete,
   };
 }
 
@@ -2819,14 +3008,17 @@ export async function getPriceSlope(ticker: string | string[], days: number): Pr
     if (!result) return JSON.stringify({ error: true, message: `No data for ${ticker}`, ticker });
 
     const nowEpoch = Math.floor(Date.now() / 1000);
-    let prepared = preparePriceSlope(result, requiredBars, nowEpoch);
+    let prepared = prepareCompletedDailySeries(result, nowEpoch);
     let retryAttempted = false;
-    if (prepared.freshnessStatus === "STALE" || prepared.adjustedWindowIncomplete) {
+    if (
+      prepared.freshnessStatus === "STALE"
+      || completedAdjustedWindowIncomplete(prepared.completedRows, requiredBars)
+    ) {
       retryAttempted = true;
       const retryResult = await fetchResult(true);
       if (retryResult) {
         result = retryResult;
-        const retried = preparePriceSlope(result, requiredBars, nowEpoch);
+        const retried = prepareCompletedDailySeries(result, nowEpoch);
         retried.excludedIncompleteBar =
           prepared.excludedIncompleteBar || retried.excludedIncompleteBar;
         prepared = retried;
@@ -2836,7 +3028,7 @@ export async function getPriceSlope(ticker: string | string[], days: number): Pr
     const meta = (result.meta as Record<string, unknown> | undefined) ?? {};
     const timezone = typeof meta.exchangeTimezoneName === "string" ? meta.exchangeTimezoneName : "UTC";
     const latestAvailableBarDate = prepared.completedRows.length > 0
-      ? priceSlopeDate(prepared.completedRows[prepared.completedRows.length - 1].timestamp, timezone)
+      ? dailyBarDate(prepared.completedRows[prepared.completedRows.length - 1].timestamp, timezone)
       : null;
     if (prepared.freshnessStatus === "STALE") {
       return JSON.stringify({
@@ -2873,9 +3065,8 @@ export async function getPriceSlope(ticker: string | string[], days: number): Pr
     }
 
     const window = prepared.completedRows.slice(-requiredBars);
-    const adjustedComplete = window.every((row) => row.adjustedClose != null);
-    const rawComplete = window.every((row) => row.rawClose != null);
-    if (!adjustedComplete && !rawComplete) {
+    const selected = selectCompletedPriceSeries(window);
+    if (!selected) {
       return JSON.stringify({
         error: true,
         message: `Incomplete completed-close series for ${ticker}`,
@@ -2883,13 +3074,7 @@ export async function getPriceSlope(ticker: string | string[], days: number): Pr
       });
     }
 
-    const priceBasis = adjustedComplete ? "ADJUSTED_CLOSE" : "UNADJUSTED_CLOSE";
-    const fallbackUsed = !adjustedComplete;
-    const observations = window.map((row) => ({
-      close: adjustedComplete ? row.adjustedClose as number : row.rawClose as number,
-      rawClose: row.rawClose,
-      timestamp: row.timestamp,
-    }));
+    const { observations, priceBasis, fallbackUsed } = selected;
     const startClose = observations[0].close;
     const endObservation = observations[observations.length - 1];
     const endClose = endObservation.close;
@@ -2920,7 +3105,7 @@ export async function getPriceSlope(ticker: string | string[], days: number): Pr
       fallbackUsed,
       slopePct,
       direction,
-      dataDate: priceSlopeDate(endObservation.timestamp, timezone),
+      dataDate: dailyBarDate(endObservation.timestamp, timezone),
       recommendedNextAction: "NONE",
     });
   } catch (e) {
@@ -2936,13 +3121,80 @@ export async function getVolumeRatio(ticker: string | string[], _period: number)
   }
 
   try {
-    const fi = JSON.parse(await getFastInfo(ticker));
-    const lastVolume = fi.lastVolume as number | null;
-    const avg10d = fi.tenDayAverageVolume as number | null;
-    const avg90d = fi.threeMonthAverageVolume as number | null;
+    const fetchChart = async (retry: boolean): Promise<Record<string, unknown> | undefined> => {
+      const cacheBuster = retry ? `&events=div%2Csplits&_=${Date.now()}` : "";
+      const payload = await yGet(
+        `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=6mo&interval=1d${cacheBuster}`,
+        false
+      ) as Record<string, unknown>;
+      return (payload?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
+        | Record<string, unknown>
+        | undefined;
+    };
+    let chartResult = await fetchChart(false);
+    if (!chartResult) return noData(ticker);
+    const nowEpoch = Math.floor(Date.now() / 1000);
+    let prepared = prepareCompletedDailySeries(chartResult, nowEpoch);
+    let retryAttempted = false;
+    if (prepared.freshnessStatus === "STALE") {
+      retryAttempted = true;
+      const retryResult = await fetchChart(true);
+      if (retryResult) {
+        chartResult = retryResult;
+        const retried = prepareCompletedDailySeries(chartResult, nowEpoch);
+        retried.excludedIncompleteBar =
+          prepared.excludedIncompleteBar || retried.excludedIncompleteBar;
+        prepared = retried;
+      }
+    }
+    const meta = (chartResult.meta as Record<string, unknown> | undefined) ?? {};
+    const timezone = typeof meta.exchangeTimezoneName === "string" ? meta.exchangeTimezoneName : "UTC";
+    const dataDate = prepared.completedRows.length > 0
+      ? dailyBarDate(prepared.completedRows[prepared.completedRows.length - 1].timestamp, timezone)
+      : null;
+    if (prepared.freshnessStatus === "STALE") {
+      return JSON.stringify({
+        ticker,
+        status: "STALE_BAR",
+        lastVolume: null,
+        avgVolume10d: null,
+        avgVolume90d: null,
+        ratio10d: null,
+        ratio90d: null,
+        volumeFlag: null,
+        observationType: "COMPLETED_DAILY_VOLUME",
+        barStatus: "STALE",
+        freshnessStatus: "STALE",
+        expectedCompletedDate: prepared.expectedCompletedDate,
+        latestAvailableBarDate: dataDate,
+        excludedIncompleteBar: prepared.excludedIncompleteBar,
+        retryAttempted,
+        dataDate,
+        recommendedNextAction: "RETRY",
+      });
+    }
 
-    const ratio10d = lastVolume != null && avg10d != null && avg10d !== 0 ? +(lastVolume / avg10d).toFixed(3) : null;
-    const ratio90d = lastVolume != null && avg90d != null && avg90d !== 0 ? +(lastVolume / avg90d).toFixed(3) : null;
+    const completedRows = prepared.completedRows;
+    const lastRow = completedRows[completedRows.length - 1];
+    if (!lastRow || lastRow.volume == null) {
+      return JSON.stringify({
+        error: true,
+        message: `Latest completed session has no volume for ${ticker}`,
+        ticker,
+      });
+    }
+    const average = (count: number): number | null => {
+      const window = completedRows.slice(-(count + 1), -1);
+      if (window.length < count || window.some((row) => row.volume == null)) return null;
+      return Math.round(
+        window.reduce((sum, row) => sum + (row.volume as number), 0) / window.length
+      );
+    };
+    const lastVolume = lastRow.volume as number;
+    const avg10d = average(10);
+    const avg90d = average(90);
+    const ratio10d = avg10d != null && avg10d !== 0 ? +(lastVolume / avg10d).toFixed(3) : null;
+    const ratio90d = avg90d != null && avg90d !== 0 ? +(lastVolume / avg90d).toFixed(3) : null;
 
     let volumeFlag: string | null = null;
     if (ratio10d != null) {
@@ -2953,13 +3205,22 @@ export async function getVolumeRatio(ticker: string | string[], _period: number)
 
     return JSON.stringify({
       ticker,
+      status: "OK",
       lastVolume,
       avgVolume10d: avg10d,
       avgVolume90d: avg90d,
       ratio10d,
       ratio90d,
       volumeFlag,
-      dataDate: (fi.lastTradeDate as string | null) ?? new Date().toISOString().slice(0, 10),
+      observationType: "COMPLETED_DAILY_VOLUME",
+      barStatus: "COMPLETE",
+      freshnessStatus: prepared.freshnessStatus,
+      expectedCompletedDate: prepared.expectedCompletedDate,
+      latestAvailableBarDate: dataDate,
+      excludedIncompleteBar: prepared.excludedIncompleteBar,
+      retryAttempted,
+      dataDate,
+      recommendedNextAction: "NONE",
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
@@ -2997,6 +3258,11 @@ export async function getMaPosition(ticker: string | string[]): Promise<string> 
     return JSON.stringify({
       ticker,
       lastPrice,
+      priceBasis: "REGULAR_MARKET_PRICE",
+      observationType: "REGULAR_MARKET_QUOTE_VS_TRAILING_AVERAGES",
+      priceTimestamp: (fi.priceTimestamp as string | null) ?? null,
+      marketState: (fi.marketState as string | null) ?? null,
+      marketOpen: (fi.marketOpen as boolean | null) ?? null,
       fiftyDayAverage: fiftyDma,
       twoHundredDayAverage: twoHundredDma,
       pctVs50dma: pctVs50,
@@ -3005,6 +3271,7 @@ export async function getMaPosition(ticker: string | string[]): Promise<string> 
       regime200,
       trend,
       dataDate: (fi.lastTradeDate as string | null) ?? new Date().toISOString().slice(0, 10),
+      recommendedNextAction: "NONE",
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
@@ -6483,43 +6750,110 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
     const placeholderIvCount = dataQuality.placeholderIvCount;
 
     let ivPctile: number | null = null;
-    let chartTimestamps: number[] = [];
+    let dataDate: string | null = null;
+    let realizedVolPriceBasis: string | null = null;
+    let historicalBarStatus = "NOT_USED";
+    let freshnessStatus = "UNKNOWN";
+    let excludedIncompleteBar = false;
+    let retryAttempted = false;
+    let fallbackUsed = false;
     if (quality === "LOW" && placeholderIvCount > allContractCount * 0.5) {
       scanWarnings.push("IV_PERCENTILE_UNAVAILABLE_PLACEHOLDER_IV");
     } else {
       try {
-        const chartD = await yGet(
-          `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=1y&interval=1d`,
-          false
-        ) as Record<string, unknown>;
-        const chartRes = (chartD?.chart as Record<string, unknown[]>)?.result?.[0] as Record<string, unknown>;
-        chartTimestamps = (chartRes?.timestamp as number[]) ?? [];
-        const adjclose =
-          ((chartRes?.indicators as Record<string, unknown[]>)?.adjclose?.[0] as Record<string, (number | null)[]>)?.adjclose ??
-          ((chartRes?.indicators as Record<string, unknown[]>)?.quote?.[0] as Record<string, (number | null)[]>)?.close ?? [];
-        const closes = adjclose.filter((v): v is number => v != null);
-        if (closes.length >= 30 && atmIv != null) {
-          const rets: number[] = [];
-          for (let i = 1; i < closes.length; i++) rets.push((closes[i] - closes[i - 1]) / closes[i - 1]);
-          const rollVols: number[] = [];
-          for (let i = 29; i < rets.length; i++) {
-            const windowSlice = rets.slice(i - 29, i + 1);
-            const mean = windowSlice.reduce((a, b) => a + b, 0) / windowSlice.length;
-            const variance = windowSlice.reduce((a, b) => a + (b - mean) ** 2, 0) / windowSlice.length;
-            rollVols.push(Math.sqrt(variance * 252));
+        const fetchChart = async (retry: boolean): Promise<Record<string, unknown> | undefined> => {
+          const cacheBuster = retry ? `&events=div%2Csplits&_=${Date.now()}` : "";
+          const chartD = await yGet(
+            `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=1y&interval=1d${cacheBuster}`,
+            false
+          ) as Record<string, unknown>;
+          return (chartD?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
+            | Record<string, unknown>
+            | undefined;
+        };
+        let chartRes = await fetchChart(false);
+        if (!chartRes) throw new Error("daily chart unavailable");
+        let prepared = prepareCompletedDailySeries(
+          chartRes,
+          Math.floor(Date.now() / 1000)
+        );
+        if (
+          prepared.freshnessStatus === "STALE"
+          || completedAdjustedWindowIncomplete(prepared.completedRows)
+        ) {
+          retryAttempted = true;
+          const retryResult = await fetchChart(true);
+          if (retryResult) {
+            chartRes = retryResult;
+            const retried = prepareCompletedDailySeries(
+              chartRes,
+              Math.floor(Date.now() / 1000)
+            );
+            retried.excludedIncompleteBar =
+              prepared.excludedIncompleteBar || retried.excludedIncompleteBar;
+            prepared = retried;
           }
-          if (rollVols.length >= 5) {
-            const rvMin = Math.min(...rollVols);
-            const rvMax = Math.max(...rollVols);
-            if (rvMax > rvMin) {
-              ivPctile = Math.max(0, Math.min(100, Math.round((atmIv - rvMin) / (rvMax - rvMin) * 100)));
+        }
+        const chartMeta = (chartRes.meta as Record<string, unknown> | undefined) ?? {};
+        const timezone = typeof chartMeta.exchangeTimezoneName === "string"
+          ? chartMeta.exchangeTimezoneName
+          : "UTC";
+        dataDate = prepared.completedRows.length > 0
+          ? dailyBarDate(
+            prepared.completedRows[prepared.completedRows.length - 1].timestamp,
+            timezone
+          )
+          : null;
+        freshnessStatus = prepared.freshnessStatus;
+        excludedIncompleteBar = prepared.excludedIncompleteBar;
+        if (prepared.freshnessStatus === "STALE") {
+          historicalBarStatus = "STALE";
+          scanWarnings.push("IV_PERCENTILE_UNAVAILABLE_STALE_DAILY_BARS");
+        } else {
+          const selected = selectCompletedPriceSeries(prepared.completedRows);
+          if (!selected) {
+            historicalBarStatus = "INCOMPLETE";
+            scanWarnings.push("IV_PERCENTILE_UNAVAILABLE_INCOMPLETE_DAILY_BARS");
+          } else {
+            historicalBarStatus = "COMPLETE";
+            realizedVolPriceBasis = selected.priceBasis;
+            fallbackUsed = selected.fallbackUsed;
+            const closes = selected.observations.map((row) => row.close);
+            if (closes.length >= 31 && atmIv != null) {
+              const rets: number[] = [];
+              for (let i = 1; i < closes.length; i++) {
+                rets.push((closes[i] - closes[i - 1]) / closes[i - 1]);
+              }
+              const rollVols: number[] = [];
+              for (let i = 29; i < rets.length; i++) {
+                const windowSlice = rets.slice(i - 29, i + 1);
+                const mean = windowSlice.reduce((a, b) => a + b, 0) / windowSlice.length;
+                const variance =
+                  windowSlice.reduce((a, b) => a + (b - mean) ** 2, 0)
+                  / windowSlice.length;
+                rollVols.push(Math.sqrt(variance * 252));
+              }
+              if (rollVols.length >= 5) {
+                const rvMin = Math.min(...rollVols);
+                const rvMax = Math.max(...rollVols);
+                if (rvMax > rvMin) {
+                  ivPctile = Math.max(
+                    0,
+                    Math.min(
+                      100,
+                      Math.round((atmIv - rvMin) / (rvMax - rvMin) * 100)
+                    )
+                  );
+                }
+              }
             }
           }
         }
-      } catch { /* ignore */ }
+      } catch {
+        historicalBarStatus = "UNAVAILABLE";
+        scanWarnings.push("IV_PERCENTILE_UNAVAILABLE_DAILY_BARS");
+      }
     }
-
-    const dataDate = getLastTradingDate(chartTimestamps);
 
     const prevWindowMap: Record<string, string> = { "T-7": "T-14", "T-2": "T-7" };
     const prevWindow = prevWindowMap[windowLabel];
@@ -6573,6 +6907,17 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
       ticker, windowLabel, dataDate,
       pcRatio, ivPctile, putVolVs10dAvg: putVolVs10d, putVolTrend,
       maxPainStrike, bracket, formattedBlock,
+      realizedVolPriceBasis,
+      historicalObservationType: "COMPLETED_DAILY_PRICE_SERIES",
+      historicalBarStatus,
+      freshnessStatus,
+      excludedIncompleteBar,
+      retryAttempted,
+      fallbackUsed,
+      recommendedNextAction:
+        historicalBarStatus === "STALE" || historicalBarStatus === "UNAVAILABLE"
+          ? "RETRY"
+          : "NONE",
       dataQuality, warnings: scanWarnings,
     };
 
@@ -6615,6 +6960,11 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number): Promi
     return JSON.stringify({
       ticker,
       currentPrice: +currentPrice.toFixed(4),
+      priceBasis: "REGULAR_MARKET_PRICE",
+      observationType: "REGULAR_MARKET_QUOTE_VS_USER_REFERENCE",
+      priceTimestamp: (fi.priceTimestamp as string | null) ?? null,
+      marketState: (fi.marketState as string | null) ?? null,
+      marketOpen: (fi.marketOpen as boolean | null) ?? null,
       referenceTargetPrice: ioPt,
       referenceTargetPct,
       ioPt,
@@ -6625,6 +6975,7 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number): Promi
       tagNote: "Deprecated: tag is inferred from currentPrice/referenceTargetPrice distance. Use inferredTag.",
       invertedFlag: referenceTargetPct >= 100,
       dataDate: (fi.lastTradeDate as string | null) ?? new Date().toISOString().slice(0, 10),
+      recommendedNextAction: "NONE",
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
@@ -6691,14 +7042,31 @@ export async function getPositionScoreInputs(ticker: string | string[]): Promise
       pctFrom200dma: ma.pctVs200dma ?? null,
       lastClose: tech.lastClose ?? null,
     };
+    const componentStatus = {
+      pricePerformance: (price.status as string | null) ?? "OK",
+      technicalIndicators: (tech.status as string | null) ?? "OK",
+      movingAveragePosition: (ma.status as string | null) ?? "OK",
+    };
+    const limitedComponents = Object.entries(componentStatus)
+      .filter(([, status]) => status !== "OK")
+      .map(([name]) => name);
 
     return JSON.stringify({
       ticker,
-      dataDate: (tech.dataDate as string | null) ?? (ma.dataDate as string | null) ?? new Date().toISOString().slice(0, 10),
+      status: limitedComponents.length > 0 ? "PARTIAL" : "OK",
+      dataDate:
+        (tech.dataDate as string | null)
+        ?? (ma.dataDate as string | null)
+        ?? new Date().toISOString().slice(0, 10),
+      quoteDataDate: (ma.dataDate as string | null) ?? null,
+      completedBarDataDate: (tech.dataDate as string | null) ?? null,
+      componentStatus,
+      limitedComponents,
       t1_inputs: t1,
       t2_inputs: t2,
       t4_inputs: t4,
       t5_inputs: t5,
+      recommendedNextAction: limitedComponents.length > 0 ? "RETRY" : "NONE",
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
@@ -6737,35 +7105,96 @@ function classifyFreshness(dataDate: string | null, retrievedAt: string): string
 export async function getVolumeGate(ticker: string, foreignExchange: boolean): Promise<string> {
   try {
     const fi = JSON.parse(await getFastInfo(ticker)) as Record<string, unknown>;
-    const lastVolume = fi.lastVolume as number | null;
-    const adv10d = fi.tenDayAverageVolume as number | null;
-    const adv90d = fi.threeMonthAverageVolume as number | null;
-    const lastPrice = fi.lastPrice as number | null;
     const currency = fi.currency as string | null;
-
-    let adv20d: number | null = null;
-    let dataDate = new Date().toISOString().slice(0, 10);
-    try {
-      const chartD = await yGet(
-        `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=1mo&interval=1d`,
+    const fetchChart = async (retry: boolean): Promise<Record<string, unknown> | undefined> => {
+      const cacheBuster = retry ? `&events=div%2Csplits&_=${Date.now()}` : "";
+      const payload = await yGet(
+        `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=6mo&interval=1d${cacheBuster}`,
         false
       ) as Record<string, unknown>;
-      const chartRes = (chartD?.chart as Record<string, unknown[]>)?.result?.[0] as Record<string, unknown>;
-      const timestamps = (chartRes?.timestamp as number[]) ?? [];
-      const volumes = ((chartRes?.indicators as Record<string, unknown[]>)?.quote?.[0] as Record<string, (number | null)[]>)?.volume ?? [];
-      const vols = volumes.filter((v): v is number => v != null);
-      if (vols.length >= 5) {
-        const tail20 = vols.slice(-20);
-        adv20d = Math.round(tail20.reduce((a, b) => a + b, 0) / tail20.length);
+      return (payload?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
+        | Record<string, unknown>
+        | undefined;
+    };
+    let chartResult = await fetchChart(false);
+    if (!chartResult) return noData(ticker);
+    const nowEpoch = Math.floor(Date.now() / 1000);
+    let prepared = prepareCompletedDailySeries(chartResult, nowEpoch);
+    let retryAttempted = false;
+    if (prepared.freshnessStatus === "STALE") {
+      retryAttempted = true;
+      const retryResult = await fetchChart(true);
+      if (retryResult) {
+        chartResult = retryResult;
+        const retried = prepareCompletedDailySeries(chartResult, nowEpoch);
+        retried.excludedIncompleteBar =
+          prepared.excludedIncompleteBar || retried.excludedIncompleteBar;
+        prepared = retried;
       }
-      if (timestamps.length > 0) {
-        dataDate = new Date(timestamps[timestamps.length - 1] * 1000).toISOString().slice(0, 10);
-      }
-    } catch { /* ignore */ }
+    }
+    const chartMeta = (chartResult.meta as Record<string, unknown> | undefined) ?? {};
+    const timezone = typeof chartMeta.exchangeTimezoneName === "string"
+      ? chartMeta.exchangeTimezoneName
+      : "UTC";
+    const dataDate = prepared.completedRows.length > 0
+      ? dailyBarDate(prepared.completedRows[prepared.completedRows.length - 1].timestamp, timezone)
+      : null;
+    if (prepared.freshnessStatus === "STALE") {
+      return JSON.stringify({
+        ticker,
+        status: "STALE_BAR",
+        currency,
+        lastVolume: null,
+        lastClose: null,
+        adv10d: null,
+        adv20d: null,
+        adv90d: null,
+        ratio20d: null,
+        fxRate: null,
+        fxPriceTimestamp: null,
+        notionalUsd: null,
+        gatePass: null,
+        observationType: "COMPLETED_DAILY_VOLUME_NOTIONAL",
+        barStatus: "STALE",
+        freshnessStatus: "STALE",
+        expectedCompletedDate: prepared.expectedCompletedDate,
+        latestAvailableBarDate: dataDate,
+        excludedIncompleteBar: prepared.excludedIncompleteBar,
+        retryAttempted,
+        dataDate,
+        note: "Volume gate UNKNOWN — latest completed daily bar is stale",
+        recommendedNextAction: "RETRY",
+      });
+    }
+
+    const rows = prepared.completedRows;
+    const lastRow = rows[rows.length - 1];
+    if (!lastRow || lastRow.volume == null || lastRow.rawClose == null) {
+      return JSON.stringify({
+        error: true,
+        message: `Latest completed session lacks price or volume for ${ticker}`,
+        ticker,
+      });
+    }
+    const average = (count: number): number | null => {
+      const window = rows.slice(-(count + 1), -1);
+      if (window.length < count || window.some((row) => row.volume == null)) return null;
+      return Math.round(
+        window.reduce((sum, row) => sum + (row.volume as number), 0) / window.length
+      );
+    };
+    const lastVolume = lastRow.volume as number;
+    const lastPrice = lastRow.rawClose as number;
+    const adv10d = average(10);
+    const adv20d = average(20);
+    const adv90d = average(90);
 
     let gatePass: boolean | null = null;
     let ratio20d: number | null = null;
     let fxRate: number | null = null;
+    let fxPriceTimestamp: string | null = null;
+    let notionalUsd: number | null = null;
+    let recommendedNextAction = "NONE";
     let note: string;
 
     if (foreignExchange) {
@@ -6781,24 +7210,32 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
             if (rate != null && rate > 0) {
               appliedFxRate = rate;
               fxRate = +rate.toFixed(4);
+              fxPriceTimestamp = (fxFi.priceTimestamp as string | null) ?? null;
               fxConversionNote = ` [${currency}→USD at ${rate.toFixed(2)}]`;
             } else {
-              fxConversionNote = ` [${currency}=X rate unavailable — notional in local currency]`;
+              appliedFxRate = 0;
+              fxConversionNote = ` [${currency}=X rate unavailable]`;
             }
           } catch {
-            fxConversionNote = ` [${currency}=X fetch failed — notional in local currency]`;
+            appliedFxRate = 0;
+            fxConversionNote = ` [${currency}=X fetch failed]`;
           }
         } else if (currency === "USD") {
           fxRate = 1.0;
         }
 
-        const dailyNotionalUSD = localNotional / appliedFxRate;
-        gatePass = dailyNotionalUSD >= 10_000_000;
-        note = `Volume gate ${gatePass ? "PASS" : "FAIL"} (FX notional) — $${(dailyNotionalUSD / 1_000_000).toFixed(1)}M daily notional (${gatePass ? "≥" : "<"} $10M threshold)${fxConversionNote}`;
+        if (appliedFxRate > 0) {
+          notionalUsd = +(localNotional / appliedFxRate).toFixed(2);
+          gatePass = notionalUsd >= 10_000_000;
+          note = `Volume gate ${gatePass ? "PASS" : "FAIL"} (completed-session FX notional) — $${(notionalUsd / 1_000_000).toFixed(1)}M (${gatePass ? "≥" : "<"} $10M threshold)${fxConversionNote}`;
+        } else {
+          recommendedNextAction = "RETRY";
+          note = `Volume gate UNKNOWN — FX conversion unavailable${fxConversionNote}`;
+        }
       } else {
         note = "Volume gate UNKNOWN — insufficient price/volume data for FX notional check";
+        recommendedNextAction = "RETRY";
       }
-      // Bug 5: also compute ratio20d in the FX branch
       if (lastVolume != null && adv20d != null && adv20d > 0) {
         ratio20d = +(lastVolume / adv20d).toFixed(2);
       }
@@ -6813,7 +7250,30 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
     }
 
     return JSON.stringify({
-      ticker, currency, lastVolume, adv10d, adv20d, adv90d, ratio20d, fxRate, gatePass, dataDate, note,
+      ticker,
+      status: "OK",
+      currency,
+      lastVolume,
+      lastClose: +lastPrice.toFixed(4),
+      priceBasis: "UNADJUSTED_CLOSE",
+      adv10d,
+      adv20d,
+      adv90d,
+      ratio20d,
+      fxRate,
+      fxPriceTimestamp,
+      notionalUsd,
+      gatePass,
+      observationType: "COMPLETED_DAILY_VOLUME_NOTIONAL",
+      barStatus: "COMPLETE",
+      freshnessStatus: prepared.freshnessStatus,
+      expectedCompletedDate: prepared.expectedCompletedDate,
+      latestAvailableBarDate: dataDate,
+      excludedIncompleteBar: prepared.excludedIncompleteBar,
+      retryAttempted,
+      dataDate,
+      note,
+      recommendedNextAction,
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
@@ -6859,6 +7319,7 @@ export async function getMarketSnapshot(
 
   const componentStatus: Record<string, string> = {};
   const failedComponents: string[] = [];
+  const limitedComponents: string[] = [];
   const warnings: Record<string, unknown>[] = [];
 
   const getVal = (
@@ -6866,7 +7327,18 @@ export async function getMarketSnapshot(
     name: string
   ): Record<string, unknown> | null => {
     if (result.status === "fulfilled" && !result.value?.error) {
-      componentStatus[name] = "OK";
+      const payloadStatus = typeof result.value?.status === "string"
+        ? result.value.status
+        : "OK";
+      componentStatus[name] = payloadStatus;
+      if (payloadStatus === "STALE_BAR" || payloadStatus === "PARTIAL") {
+        limitedComponents.push(name);
+        warnings.push({
+          code: payloadStatus,
+          component: name,
+          recommendedNextAction: result.value.recommendedNextAction ?? "RETRY",
+        });
+      }
       return result.value;
     }
     componentStatus[name] = "FAILED";
@@ -6889,6 +7361,11 @@ export async function getMarketSnapshot(
   const dataDate =
     (quote?.lastTradeDate as string | null) ??
     (priceStats?.dataDate as string | null) ??
+    null;
+  const completedBarDataDate =
+    (tech?.dataDate as string | null) ??
+    (priceStats?.dataDate as string | null) ??
+    (volumeGate?.dataDate as string | null) ??
     null;
 
   const lastPrice = (quote?.lastPrice as number | null) ?? null;
@@ -6925,9 +7402,18 @@ export async function getMarketSnapshot(
     },
     volume: {
       lastVolume: (quote?.lastVolume as number | null) ?? null,
-      avgVolume10d: (quote?.tenDayAverageVolume as number | null) ?? null,
+      lastVolumeObservationType: "REGULAR_SESSION_CUMULATIVE_VOLUME",
+      lastCompletedVolume: (volumeRatio?.lastVolume as number | null) ?? null,
+      completedVolumeDataDate: (volumeRatio?.dataDate as string | null) ?? null,
+      avgVolume10d:
+        (volumeRatio?.avgVolume10d as number | null)
+        ?? (quote?.tenDayAverageVolume as number | null)
+        ?? null,
       avgVolume20d: (volumeGate?.adv20d as number | null) ?? null,
-      avgVolume90d: (quote?.threeMonthAverageVolume as number | null) ?? null,
+      avgVolume90d:
+        (volumeRatio?.avgVolume90d as number | null)
+        ?? (quote?.threeMonthAverageVolume as number | null)
+        ?? null,
       ratio10d: (volumeRatio?.ratio10d as number | null) ?? null,
       ratio20d: (volumeGate?.ratio20d as number | null) ?? null,
       ratio90d: (volumeRatio?.ratio90d as number | null) ?? null,
@@ -6939,14 +7425,35 @@ export async function getMarketSnapshot(
     },
     freshness: {
       dataDate,
+      quoteDataDate: (quote?.lastTradeDate as string | null) ?? null,
+      quoteTimestamp: (quote?.priceTimestamp as string | null) ?? null,
+      completedBarDataDate,
+      componentDataDates: {
+        priceStats: (priceStats?.dataDate as string | null) ?? null,
+        maPosition: (ma?.dataDate as string | null) ?? null,
+        volumeRatio: (volumeRatio?.dataDate as string | null) ?? null,
+        volumeGate: (volumeGate?.dataDate as string | null) ?? null,
+        technicalIndicators: (tech?.dataDate as string | null) ?? null,
+      },
       retrievedAt,
       marketSessionAware: true,
       freshnessClass: classifyFreshness(dataDate, retrievedAt),
+      quoteFreshnessClass: classifyFreshness(dataDate, retrievedAt),
+      completedBarFreshnessStatus:
+        (tech?.freshnessStatus as string | null)
+        ?? (priceStats?.freshnessStatus as string | null)
+        ?? null,
     },
+    status: failedComponents.length > 0 || limitedComponents.length > 0 ? "PARTIAL" : "OK",
     componentStatus,
-    partialSuccess: failedComponents.length > 0 && failedComponents.length < 6,
+    partialSuccess:
+      (failedComponents.length > 0 || limitedComponents.length > 0)
+      && failedComponents.length < 6,
     failedComponents,
+    limitedComponents,
     warnings,
+    recommendedNextAction:
+      failedComponents.length > 0 || limitedComponents.length > 0 ? "RETRY" : "NONE",
   };
 
   if (mode === "full") {

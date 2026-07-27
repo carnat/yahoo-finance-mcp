@@ -113,6 +113,14 @@ current-session bar is excluded. Check `freshnessStatus` and
 `recommendedNextAction` before using the result. Do not treat values from
 different dates or observation times as conflicts.
 
+Other daily derived tools follow the same boundary. Technical indicators,
+volume ratios, liquidity gates, realized-volatility context, and historical
+performance use completed sessions only and expose `dataDate`, `barStatus`,
+and freshness/retry fields. Raw daily history can still include the active row,
+but labels it with `barStatus:"INCOMPLETE"` and `isFinal:false`. Moving-average
+and target-distance tools intentionally compare a live quote and therefore
+expose `priceTimestamp` separately.
+
 Use `search_thai_funds` to map an official project name, abbreviation, AMC, or
 known SEC share-class code to compact active-profile candidates. It never
 selects one automatically. Thai SEC fund data calls resolve an exact SEC

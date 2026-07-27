@@ -19,7 +19,7 @@ from yfmcp.clients.yahoo import _safe_parse
 @yfinance_server.tool(
     name="get_historical_stock_prices",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_historical_stock_prices"],
-    description="""Get historical stock prices for a given ticker symbol from yahoo finance. Include the following information: Date, Open, High, Low, Close (adjusted), Volume.
+    description="""Get raw Yahoo historical OHLCV rows. Daily rows include barStatus and isFinal so an unfinished current-session row is explicit; use completed-session tools for derived analytics.
 Args:
     ticker: str
         The ticker symbol of the stock to get historical prices for, e.g. "AAPL"
@@ -74,7 +74,7 @@ async def get_historical_stock_prices(
     if ticker_err:
         return _mcp_failure("get_historical_stock_prices", ErrorCode.INPUT_VALIDATION_ERROR, ticker_err)
 
-    cache_key = f"hist:{ticker}:{period}:{interval}:{prepost}:camel-v2"
+    cache_key = f"hist:{ticker}:{period}:{interval}:{prepost}:camel-v3"
     column_map = {
         "Date": "date",
         "Open": "open",
@@ -91,6 +91,8 @@ async def get_historical_stock_prices(
         if not columns:
             return rows
         wanted = {"date"}
+        if interval == "1d":
+            wanted.update({"barStatus", "isFinal"})
         for col in columns:
             key = column_map.get(str(col), str(col))
             wanted.add(key)
@@ -120,6 +122,25 @@ async def get_historical_stock_prices(
     except Exception as e:
         print(f"Error: getting historical stock prices for {ticker}: {e}")
         return f"Error: getting historical stock prices for {ticker}: {e}"
+
+    if interval == "1d":
+        try:
+            metadata = await asyncio.to_thread(company.get_history_metadata)
+            prepared = _prepare_completed_daily_history(
+                metadata if isinstance(metadata, dict) else {},
+                hist_data,
+                int(datetime.datetime.now(datetime.timezone.utc).timestamp()),
+            )
+            statuses = ["COMPLETE"] * len(hist_data)
+            if prepared["excludedIncompleteBar"] and statuses:
+                statuses[-1] = "INCOMPLETE"
+            hist_data = hist_data.copy()
+            hist_data["barStatus"] = statuses
+            hist_data["isFinal"] = [status == "COMPLETE" for status in statuses]
+        except Exception:
+            hist_data = hist_data.copy()
+            hist_data["barStatus"] = "UNKNOWN"
+            hist_data["isFinal"] = False
 
     hist_data = hist_data.reset_index(names="Date").rename(columns=column_map)
     full_result = hist_data.to_json(orient="records", date_format="iso")
@@ -332,8 +353,7 @@ async def get_short_interest(ticker: str) -> str:
 @yfinance_server.tool(
     name="get_price_stats",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_stats"],
-    description="""Get pre-computed price statistics for one or more tickers. Returns a compact summary so you do NOT
-need to fetch raw history and compute these yourself.
+    description="""Get live quote/range fields plus completed-session historical statistics.
 
 Includes:
 - Current price, previous close, % change today
@@ -341,6 +361,9 @@ Includes:
 - % distance from 50-day and 200-day moving averages
 - 30-day realized annualized volatility (from daily close returns)
 - CAGR over 1y, 3y, 5y (where data is available)
+
+Read priceTimestamp for live fields and dataDate/historicalBarStatus for derived
+fields. PARTIAL results recommend RETRY.
 
 Args:
     ticker: str | list[str]
@@ -374,8 +397,13 @@ async def get_price_stats(ticker: str | list[str]) -> str:
 
     stats: dict = {
         "ticker": ticker,
+        "status": "OK",
         "currency": fi.currency,
         "lastPrice": last_price,
+        "priceBasis": "REGULAR_MARKET_PRICE",
+        "priceObservationType": "REGULAR_MARKET_QUOTE",
+        "priceTimestamp": None,
+        "marketState": None,
         "previousClose": prev_close,
         "pctChangeTodayVsPrevClose": _pct(last_price, prev_close),
         "yearHigh": fi.year_high,
@@ -388,16 +416,39 @@ async def get_price_stats(ticker: str | list[str]) -> str:
         "pctFromTwoHundredDayAvg": _pct(last_price, fi.two_hundred_day_average),
     }
 
-    # Compute 30-day realised volatility and CAGR from history
-    hist_5y = None
     try:
-        hist_5y = await _fetch_with_retry(company.history, "5y", "1d")
-        if hist_5y is not None and not hist_5y.empty and "Close" in hist_5y.columns:
-            closes = hist_5y["Close"].dropna()
+        info = company.info
+        market_time = info.get("regularMarketTime")
+        stats["priceTimestamp"] = (
+            datetime.datetime.fromtimestamp(
+                market_time,
+                tz=datetime.timezone.utc,
+            ).isoformat().replace("+00:00", "Z")
+            if isinstance(market_time, (int, float)) and market_time
+            else None
+        )
+        stats["marketState"] = info.get("marketState")
+    except Exception:
+        pass
+
+    prepared = None
+    selected = None
+    try:
+        prepared = await _load_completed_daily_history(
+            company,
+            "5y",
+            required_bars=31,
+            retry_adjusted_gap=True,
+        )
+        completed = prepared["completed"]
+        selected = _select_completed_close_series(completed)
+        if prepared["freshnessStatus"] == "STALE":
+            stats["status"] = "PARTIAL"
+        elif selected is not None:
+            closes, historical_price_basis, fallback_used = selected
             daily_returns = closes.pct_change().dropna()
 
-            # 30-day volatility (annualised)
-            if len(daily_returns) >= 20:
+            if len(daily_returns) >= 30:
                 vol_30d = daily_returns.tail(30).std() * (252 ** 0.5)
                 stats["annualizedVolatility30d"] = round(float(vol_30d) * 100, 4)
 
@@ -414,15 +465,57 @@ async def get_price_stats(ticker: str | list[str]) -> str:
                 except Exception:
                     return None
 
-            now = closes.index[-1]
+            completed_end = closes.index[-1]
             for years, label in [(1, "cagr1y"), (3, "cagr3y"), (5, "cagr5y")]:
-                cutoff = now - pd.DateOffset(years=years)
+                cutoff = completed_end - pd.DateOffset(years=years)
                 subset = closes[closes.index >= cutoff]
                 stats[label] = _cagr(subset, years)
+            stats["historicalPriceBasis"] = historical_price_basis
+            stats["fallbackUsed"] = fallback_used
+        else:
+            stats["status"] = "PARTIAL"
     except Exception:
-        pass  # Stats from fast_info are still returned
+        stats["status"] = "PARTIAL"
 
-    stats["dataDate"] = get_last_trading_date(hist_5y)
+    completed = prepared["completed"] if prepared is not None else pd.DataFrame()
+    timezone_name = prepared["timezoneName"] if prepared is not None else "UTC"
+    data_date = (
+        _daily_bar_date(completed.index[-1], timezone_name)
+        if not completed.empty
+        else None
+    )
+    stats.setdefault("annualizedVolatility30d", None)
+    for label in ("cagr1y", "cagr3y", "cagr5y"):
+        stats.setdefault(label, None)
+    stats.setdefault("historicalPriceBasis", None)
+    stats.setdefault("fallbackUsed", False)
+    stats.update({
+        "historicalObservationType": "COMPLETED_DAILY_PRICE_SERIES",
+        "historicalBarStatus": (
+            "STALE"
+            if prepared is not None and prepared["freshnessStatus"] == "STALE"
+            else (
+                "COMPLETE"
+                if selected is not None
+                else ("INCOMPLETE" if not completed.empty else "UNAVAILABLE")
+            )
+        ),
+        "freshnessStatus": (
+            prepared["freshnessStatus"] if prepared is not None else "UNKNOWN"
+        ),
+        "expectedCompletedDate": (
+            prepared["expectedCompletedDate"] if prepared is not None else None
+        ),
+        "latestAvailableBarDate": data_date,
+        "excludedIncompleteBar": (
+            prepared["excludedIncompleteBar"] if prepared is not None else False
+        ),
+        "retryAttempted": (
+            prepared["retryAttempted"] if prepared is not None else False
+        ),
+        "recommendedNextAction": "RETRY" if stats["status"] == "PARTIAL" else "NONE",
+        "dataDate": data_date,
+    })
     result = json.dumps(stats)
     _cache_set(cache_key, result)
     return result
@@ -438,8 +531,9 @@ async def get_price_stats(ticker: str | list[str]) -> str:
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_technical_indicators"],
     description="""Get pre-computed technical / momentum indicators for one or more tickers.
 
-Computes indicators server-side from historical daily close prices so the LLM
-does NOT need to fetch raw OHLCV history and calculate manually.
+Computes indicators server-side from completed daily closes only. An unfinished
+active-session bar is excluded. Read priceBasis, dataDate, freshnessStatus, and
+recommendedNextAction; STALE_BAR publishes no indicator values.
 
 Returns:
 - rsi14: 14-day Relative Strength Index (Wilder smoothing). Values below 30 are
@@ -478,22 +572,73 @@ async def get_technical_indicators(ticker: str | list[str], period: str = "3mo")
 
     company = yf.Ticker(ticker)
     try:
-        hist = await _fetch_with_retry(company.history, period, "1d")
+        prepared = await _load_completed_daily_history(
+            company,
+            period,
+            required_bars=26,
+            retry_adjusted_gap=True,
+        )
     except Exception as e:
         print(f"Error: getting technical indicators for {ticker}: {e}")
-        return f"Error: getting technical indicators for {ticker}: {e}"
+        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
 
-    if hist is None or hist.empty or "Close" not in hist.columns:
-        return f"Error: no price history available for {ticker}"
+    completed = prepared["completed"]
+    timezone_name = prepared["timezoneName"]
+    data_date = (
+        _daily_bar_date(completed.index[-1], timezone_name)
+        if not completed.empty
+        else None
+    )
+    if prepared["freshnessStatus"] == "STALE":
+        return json.dumps({
+            "ticker": ticker,
+            "status": "STALE_BAR",
+            "rsi14": None,
+            "macd": None,
+            "macdSignal": None,
+            "macdHistogram": None,
+            "lastClose": None,
+            "priceBasis": None,
+            "observationType": "COMPLETED_DAILY_PRICE_SERIES",
+            "barStatus": "STALE",
+            "freshnessStatus": "STALE",
+            "expectedCompletedDate": prepared["expectedCompletedDate"],
+            "latestAvailableBarDate": data_date,
+            "excludedIncompleteBar": prepared["excludedIncompleteBar"],
+            "retryAttempted": prepared["retryAttempted"],
+            "fallbackUsed": False,
+            "dataDate": data_date,
+            "recommendedNextAction": "RETRY",
+        })
 
-    closes = hist["Close"].dropna()
+    selected = _select_completed_close_series(completed)
+    if selected is None:
+        return json.dumps({
+            "error": True,
+            "message": f"Incomplete completed-close series for {ticker}",
+            "ticker": ticker,
+        })
+    closes, price_basis, fallback_used = selected
     if len(closes) < 26:
         return (
             f"Error: insufficient price history for {ticker} "
             f"(need ≥26 data points, got {len(closes)})"
         )
 
-    output: dict = {"ticker": ticker}
+    output: dict = {
+        "ticker": ticker,
+        "status": "OK",
+        "priceBasis": price_basis,
+        "observationType": "COMPLETED_DAILY_PRICE_SERIES",
+        "barStatus": "COMPLETE",
+        "freshnessStatus": prepared["freshnessStatus"],
+        "expectedCompletedDate": prepared["expectedCompletedDate"],
+        "latestAvailableBarDate": data_date,
+        "excludedIncompleteBar": prepared["excludedIncompleteBar"],
+        "retryAttempted": prepared["retryAttempted"],
+        "fallbackUsed": fallback_used,
+        "recommendedNextAction": "NONE",
+    }
 
     # --- RSI-14 (Wilder smoothing) ---
     try:
@@ -524,10 +669,7 @@ async def get_technical_indicators(ticker: str | list[str], period: str = "3mo")
         output["macdHistogram"] = None
 
     output["lastClose"] = round(float(closes.iloc[-1]), 2)
-    last_idx = closes.index[-1]
-    output["dataDate"] = (
-        str(last_idx.date()) if hasattr(last_idx, "date") else str(last_idx)
-    )
+    output["dataDate"] = data_date
 
     result = json.dumps(output)
     _cache_set(cache_key, result)
@@ -551,7 +693,7 @@ def _price_slope_period(days: int) -> str:
     return "2y"
 
 
-def _price_slope_epoch(value) -> int | None:
+def _daily_bar_epoch(value) -> int | None:
     if isinstance(value, (int, float)) and not pd.isna(value):
         return int(value)
     if isinstance(value, (pd.Timestamp, datetime.datetime)):
@@ -562,7 +704,7 @@ def _price_slope_epoch(value) -> int | None:
     return None
 
 
-def _price_slope_date(value, timezone_name: str) -> str | None:
+def _daily_bar_date(value, timezone_name: str) -> str | None:
     if value is None:
         return None
     try:
@@ -576,16 +718,16 @@ def _price_slope_date(value, timezone_name: str) -> str | None:
         return None
 
 
-def _price_slope_market_state(
+def _prepare_completed_daily_history(
     metadata: dict,
     hist: pd.DataFrame,
     now_epoch: int,
-) -> tuple[pd.DataFrame, bool, str | None, str]:
+) -> dict:
     timezone_name = str(metadata.get("exchangeTimezoneName") or "UTC")
     current_period = metadata.get("currentTradingPeriod")
     regular = current_period.get("regular", {}) if isinstance(current_period, dict) else {}
-    regular_start = _price_slope_epoch(regular.get("start")) if isinstance(regular, dict) else None
-    regular_end = _price_slope_epoch(regular.get("end")) if isinstance(regular, dict) else None
+    regular_start = _daily_bar_epoch(regular.get("start")) if isinstance(regular, dict) else None
+    regular_end = _daily_bar_epoch(regular.get("end")) if isinstance(regular, dict) else None
     active_session = (
         regular_start is not None
         and regular_end is not None
@@ -593,22 +735,24 @@ def _price_slope_market_state(
     )
 
     completed = hist.copy()
+    active_row = None
     excluded_incomplete = False
     if active_session and not completed.empty and regular_start is not None:
-        session_date = _price_slope_date(
+        session_date = _daily_bar_date(
             pd.Timestamp(regular_start, unit="s", tz="UTC"),
             timezone_name,
         )
-        last_date = _price_slope_date(completed.index[-1], timezone_name)
+        last_date = _daily_bar_date(completed.index[-1], timezone_name)
         if session_date is not None and last_date == session_date:
+            active_row = completed.iloc[-1].copy()
             completed = completed.iloc[:-1]
             excluded_incomplete = True
 
     expected_date = None
     if not active_session:
-        regular_market_time = _price_slope_epoch(metadata.get("regularMarketTime"))
+        regular_market_time = _daily_bar_epoch(metadata.get("regularMarketTime"))
         if regular_market_time is not None:
-            expected_date = _price_slope_date(
+            expected_date = _daily_bar_date(
                 pd.Timestamp(regular_market_time, unit="s", tz="UTC"),
                 timezone_name,
             )
@@ -635,19 +779,108 @@ def _price_slope_market_state(
     elif expected_date is None or completed.empty:
         freshness_status = "UNKNOWN"
     else:
-        last_completed_date = _price_slope_date(completed.index[-1], timezone_name)
+        last_completed_date = _daily_bar_date(completed.index[-1], timezone_name)
         freshness_status = "STALE" if last_completed_date is None or last_completed_date < expected_date else "CURRENT"
 
-    return completed, excluded_incomplete, expected_date, freshness_status
+    return {
+        "history": hist,
+        "completed": completed,
+        "activeRow": active_row,
+        "activeSession": active_session,
+        "excludedIncompleteBar": excluded_incomplete,
+        "expectedCompletedDate": expected_date,
+        "freshnessStatus": freshness_status,
+        "timezoneName": timezone_name,
+    }
 
 
-def _price_slope_adjusted_window_incomplete(hist: pd.DataFrame, required_bars: int) -> bool:
+def _completed_adjusted_window_incomplete(
+    hist: pd.DataFrame,
+    required_bars: int | None = None,
+) -> bool:
     if hist.empty or "Adj Close" not in hist or "Close" not in hist:
         return False
-    window = hist.tail(required_bars)
+    window = hist if required_bars is None else hist.tail(required_bars)
     adjusted = pd.to_numeric(window["Adj Close"], errors="coerce")
     raw_close = pd.to_numeric(window["Close"], errors="coerce")
     return adjusted.notna().any() and adjusted.isna().any() and raw_close.notna().all()
+
+
+def _select_completed_close_series(
+    hist: pd.DataFrame,
+) -> tuple[pd.Series, str, bool] | None:
+    if hist.empty:
+        return None
+    adjusted = (
+        pd.to_numeric(hist["Adj Close"], errors="coerce")
+        if "Adj Close" in hist
+        else pd.Series(dtype=float)
+    )
+    raw_closes = (
+        pd.to_numeric(hist["Close"], errors="coerce")
+        if "Close" in hist
+        else pd.Series(dtype=float)
+    )
+    if len(adjusted) == len(hist) and adjusted.notna().all():
+        return adjusted, "ADJUSTED_CLOSE", False
+    if len(raw_closes) == len(hist) and raw_closes.notna().all():
+        return raw_closes, "UNADJUSTED_CLOSE", True
+    return None
+
+
+async def _load_completed_daily_history(
+    company,
+    period: str,
+    *,
+    required_bars: int | None = None,
+    retry_adjusted_gap: bool = False,
+) -> dict:
+    async def _load_history() -> pd.DataFrame:
+        return await asyncio.to_thread(
+            company.history,
+            period=period,
+            interval="1d",
+            auto_adjust=False,
+            keepna=True,
+        )
+
+    async def _load_metadata() -> dict:
+        try:
+            metadata = await asyncio.to_thread(company.get_history_metadata)
+            return metadata if isinstance(metadata, dict) else {}
+        except Exception:
+            return {}
+
+    hist = await _load_history()
+    metadata = await _load_metadata()
+    if hist is None:
+        hist = pd.DataFrame()
+    now_epoch = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+    prepared = _prepare_completed_daily_history(metadata, hist, now_epoch)
+    retry_attempted = False
+    adjusted_gap = (
+        retry_adjusted_gap
+        and _completed_adjusted_window_incomplete(
+            prepared["completed"],
+            required_bars,
+        )
+    )
+    if prepared["freshnessStatus"] == "STALE" or adjusted_gap:
+        retry_attempted = True
+        try:
+            hist = await _load_history()
+            metadata = await _load_metadata()
+            retried = _prepare_completed_daily_history(metadata, hist, now_epoch)
+            retried["excludedIncompleteBar"] = (
+                prepared["excludedIncompleteBar"]
+                or retried["excludedIncompleteBar"]
+            )
+            prepared = retried
+        except Exception:
+            pass
+    prepared["metadata"] = metadata
+    prepared["retryAttempted"] = retry_attempted
+    return prepared
 
 
 @yfinance_server.tool(
@@ -687,55 +920,26 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
     period = _price_slope_period(normalized_days)
     company = yf.Ticker(ticker)
     try:
-        hist = await asyncio.to_thread(
-            company.history,
-            period=period,
-            interval="1d",
-            auto_adjust=False,
-            keepna=True,
+        prepared = await _load_completed_daily_history(
+            company,
+            period,
+            required_bars=required_bars,
+            retry_adjusted_gap=True,
         )
     except Exception as e:
         return json.dumps({"error": True, "message": str(e), "ticker": ticker})
 
-    try:
-        metadata = await asyncio.to_thread(company.get_history_metadata)
-        if not isinstance(metadata, dict):
-            metadata = {}
-    except Exception:
-        metadata = {}
-
-    if hist is None or hist.empty:
+    completed = prepared["completed"]
+    if completed.empty:
         return json.dumps({"error": True, "message": f"Insufficient price data for {ticker}", "ticker": ticker})
 
-    now_epoch = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
-    completed, excluded_incomplete, expected_date, freshness_status = _price_slope_market_state(
-        metadata,
-        hist,
-        now_epoch,
-    )
-    retry_attempted = False
-    if freshness_status == "STALE" or _price_slope_adjusted_window_incomplete(completed, required_bars):
-        retry_attempted = True
-        try:
-            hist = await asyncio.to_thread(
-                company.history,
-                period=period,
-                interval="1d",
-                auto_adjust=False,
-                keepna=True,
-            )
-            completed, excluded_after_retry, expected_date, freshness_status = _price_slope_market_state(
-                metadata,
-                hist,
-                now_epoch,
-            )
-            excluded_incomplete = excluded_incomplete or excluded_after_retry
-        except Exception:
-            pass
-
-    timezone_name = str(metadata.get("exchangeTimezoneName") or "UTC")
+    excluded_incomplete = prepared["excludedIncompleteBar"]
+    expected_date = prepared["expectedCompletedDate"]
+    freshness_status = prepared["freshnessStatus"]
+    retry_attempted = prepared["retryAttempted"]
+    timezone_name = prepared["timezoneName"]
     latest_available_date = (
-        _price_slope_date(completed.index[-1], timezone_name)
+        _daily_bar_date(completed.index[-1], timezone_name)
         if not completed.empty
         else None
     )
@@ -772,32 +976,14 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
         })
 
     window = completed.tail(required_bars)
-    adjusted = (
-        pd.to_numeric(window["Adj Close"], errors="coerce")
-        if "Adj Close" in window
-        else pd.Series(dtype=float)
-    )
-    raw_closes = (
-        pd.to_numeric(window["Close"], errors="coerce")
-        if "Close" in window
-        else pd.Series(dtype=float)
-    )
-    adjusted_complete = len(adjusted) == required_bars and adjusted.notna().all()
-    raw_complete = len(raw_closes) == required_bars and raw_closes.notna().all()
-    if adjusted_complete:
-        closes = adjusted
-        price_basis = "ADJUSTED_CLOSE"
-        fallback_used = False
-    elif raw_complete:
-        closes = raw_closes
-        price_basis = "UNADJUSTED_CLOSE"
-        fallback_used = True
-    else:
+    selected = _select_completed_close_series(window)
+    if selected is None:
         return json.dumps({
             "error": True,
             "message": f"Incomplete completed-close series for {ticker}",
             "ticker": ticker,
         })
+    closes, price_basis, fallback_used = selected
 
     start_close = float(closes.iloc[0])
     end_close = float(closes.iloc[-1])
@@ -849,9 +1035,11 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
 @yfinance_server.tool(
     name="get_volume_ratio",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_ratio"],
-    description="""Get last-session volume vs N-day average volume ratio. Pre-computed server-side.
+    description="""Compare the latest completed-session volume with prior completed-session averages.
 
-Returns: lastVolume, avgVolume10d, avgVolume90d, ratio10d, ratio90d, volumeFlag (HIGH/NORMAL/LOW).
+The numerator is excluded from both averages. Returns lastVolume,
+avgVolume10d, avgVolume90d, ratio10d, ratio90d, volumeFlag, and bar/freshness
+metadata.
 
 Args:
     ticker: str | list[str] — single or batch
@@ -872,12 +1060,61 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
 
     company = yf.Ticker(ticker)
     try:
-        fi = company.fast_info
-        last_vol = fi.last_volume
-        avg_10d = fi.ten_day_average_volume
-        avg_90d = fi.three_month_average_volume
+        prepared = await _load_completed_daily_history(company, "6mo")
     except Exception as e:
         return json.dumps({"error": True, "message": str(e), "ticker": ticker})
+
+    completed = prepared["completed"]
+    timezone_name = prepared["timezoneName"]
+    data_date = (
+        _daily_bar_date(completed.index[-1], timezone_name)
+        if not completed.empty
+        else None
+    )
+    if prepared["freshnessStatus"] == "STALE":
+        return json.dumps({
+            "ticker": ticker,
+            "status": "STALE_BAR",
+            "lastVolume": None,
+            "avgVolume10d": None,
+            "avgVolume90d": None,
+            "ratio10d": None,
+            "ratio90d": None,
+            "volumeFlag": None,
+            "observationType": "COMPLETED_DAILY_VOLUME",
+            "barStatus": "STALE",
+            "freshnessStatus": "STALE",
+            "expectedCompletedDate": prepared["expectedCompletedDate"],
+            "latestAvailableBarDate": data_date,
+            "excludedIncompleteBar": prepared["excludedIncompleteBar"],
+            "retryAttempted": prepared["retryAttempted"],
+            "dataDate": data_date,
+            "recommendedNextAction": "RETRY",
+        })
+
+    volumes = (
+        pd.to_numeric(completed["Volume"], errors="coerce")
+        if "Volume" in completed
+        else pd.Series(dtype=float)
+    )
+    if volumes.empty or pd.isna(volumes.iloc[-1]):
+        return json.dumps({
+            "error": True,
+            "message": f"No completed volume data for {ticker}",
+            "ticker": ticker,
+        })
+    last_vol = int(volumes.iloc[-1])
+    prior_volumes = volumes.iloc[:-1]
+    avg_10d = (
+        float(prior_volumes.tail(10).mean())
+        if len(prior_volumes) >= 10 and prior_volumes.tail(10).notna().all()
+        else None
+    )
+    avg_90d = (
+        float(prior_volumes.tail(90).mean())
+        if len(prior_volumes) >= 90 and prior_volumes.tail(90).notna().all()
+        else None
+    )
 
     ratio_10d = round(last_vol / avg_10d, 3) if last_vol and avg_10d else None
     ratio_90d = round(last_vol / avg_90d, 3) if last_vol and avg_90d else None
@@ -893,25 +1130,24 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
     else:
         volume_flag = None
 
-    try:
-        _hist = company.history(period="5d", interval="1d")
-        data_date = (
-            str(_hist.index[-1].date())
-            if _hist is not None and not _hist.empty
-            else str(datetime.date.today())
-        )
-    except Exception:
-        data_date = str(datetime.date.today())
-
     return json.dumps({
         "ticker": ticker,
+        "status": "OK",
         "lastVolume": last_vol,
-        "avgVolume10d": avg_10d,
-        "avgVolume90d": avg_90d,
+        "avgVolume10d": round(avg_10d) if avg_10d is not None else None,
+        "avgVolume90d": round(avg_90d) if avg_90d is not None else None,
         "ratio10d": ratio_10d,
         "ratio90d": ratio_90d,
         "volumeFlag": volume_flag,
+        "observationType": "COMPLETED_DAILY_VOLUME",
+        "barStatus": "COMPLETE",
+        "freshnessStatus": prepared["freshnessStatus"],
+        "expectedCompletedDate": prepared["expectedCompletedDate"],
+        "latestAvailableBarDate": data_date,
+        "excludedIncompleteBar": prepared["excludedIncompleteBar"],
+        "retryAttempted": prepared["retryAttempted"],
         "dataDate": data_date,
+        "recommendedNextAction": "NONE",
     })
 
 
@@ -923,9 +1159,10 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
 @yfinance_server.tool(
     name="get_ma_position",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_ma_position"],
-    description="""Get price position vs 50DMA and 200DMA with trend classification. Pre-computed server-side.
+    description="""Compare Yahoo's live regular-market quote with trailing 50DMA and 200DMA values.
 
-Returns: lastPrice, fiftyDayAverage, twoHundredDayAverage, pctVs50dma, pctVs200dma, regime50, regime200, trend (BULLISH/BEARISH/MIXED).
+This is intentionally live, not a completed-close signal. Read priceTimestamp
+and observationType before comparing it with historical tools.
 
 Args:
     ticker: str | list[str] — single or batch
@@ -967,19 +1204,33 @@ async def get_ma_position(ticker: str | list[str]) -> str:
     else:
         trend = None
 
+    price_timestamp = None
+    market_state = None
+    market_open = None
+    data_date = None
     try:
-        _hist = company.history(period="5d", interval="1d")
-        data_date = (
-            str(_hist.index[-1].date())
-            if _hist is not None and not _hist.empty
-            else str(datetime.date.today())
-        )
+        info = company.info
+        market_time = info.get("regularMarketTime")
+        market_state = info.get("marketState")
+        market_open = market_state == "REGULAR"
+        if isinstance(market_time, (int, float)) and market_time:
+            price_time = datetime.datetime.fromtimestamp(
+                market_time,
+                tz=datetime.timezone.utc,
+            )
+            price_timestamp = price_time.isoformat().replace("+00:00", "Z")
+            data_date = price_time.date().isoformat()
     except Exception:
-        data_date = str(datetime.date.today())
+        pass
 
     return json.dumps({
         "ticker": ticker,
         "lastPrice": round(last_price, 2) if last_price else None,
+        "priceBasis": "REGULAR_MARKET_PRICE",
+        "observationType": "REGULAR_MARKET_QUOTE_VS_TRAILING_AVERAGES",
+        "priceTimestamp": price_timestamp,
+        "marketState": market_state,
+        "marketOpen": market_open,
         "fiftyDayAverage": round(fifty_dma, 2) if fifty_dma else None,
         "twoHundredDayAverage": round(two_hundred_dma, 2) if two_hundred_dma else None,
         "pctVs50dma": pct_vs_50,
@@ -988,6 +1239,7 @@ async def get_ma_position(ticker: str | list[str]) -> str:
         "regime200": regime_200,
         "trend": trend,
         "dataDate": data_date,
+        "recommendedNextAction": "NONE",
     })
 
 
@@ -1406,9 +1658,10 @@ async def get_overnight_quote(ticker: str) -> str:
 @yfinance_server.tool(
     name="get_volume_gate",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_gate"],
-    description="""Deprecated alias for check_volume_liquidity_threshold. Check current trading volume and dollar-notional liquidity against public liquidity thresholds.
+    description="""Deprecated alias for check_volume_liquidity_threshold. Evaluate liquidity from the latest completed-session volume and unadjusted close against prior-session averages or the USD notional threshold.
 
-Returns currency, fxRate, lastVolume, adv10d, adv20d (computed from last 20 daily sessions),
+An unfinished active-session bar is excluded. Returns currency, fxRate,
+lastVolume, adv10d, adv20d (computed from prior completed sessions),
 adv90d, ratio20d (always computed when adv20d is available), gatePass,
 dataDate, and a pre-formatted note.
 
@@ -1428,38 +1681,94 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
     company = yf.Ticker(ticker)
     try:
         fi = company.fast_info
-        last_volume: int | None = fi["lastVolume"]
-        adv10d: float | None = fi["tenDayAverageVolume"]
-        adv90d: float | None = fi["threeMonthAverageVolume"]
-        last_price: float | None = fi["lastPrice"]
         currency: str | None = fi["currency"]
+        prepared = await _load_completed_daily_history(company, "6mo")
     except Exception as e:
         return json.dumps({"error": True, "message": str(e), "ticker": ticker})
 
-    # 20-day ADV from history
-    adv20d: float | None = None
-    data_date: str = str(datetime.date.today())
-    try:
-        hist = company.history(period="1mo", interval="1d")
-        if hist is not None and not hist.empty:
-            vols = hist["Volume"].dropna()
-            if len(vols) >= 5:
-                adv20d = round(float(vols.tail(20).mean()))
-            data_date = str(hist.index[-1].date())
-    except Exception:
-        pass
+    completed = prepared["completed"]
+    timezone_name = prepared["timezoneName"]
+    data_date = (
+        _daily_bar_date(completed.index[-1], timezone_name)
+        if not completed.empty
+        else None
+    )
+    if prepared["freshnessStatus"] == "STALE":
+        return json.dumps({
+            "ticker": ticker,
+            "status": "STALE_BAR",
+            "currency": currency,
+            "lastVolume": None,
+            "lastClose": None,
+            "priceBasis": "UNADJUSTED_CLOSE",
+            "adv10d": None,
+            "adv20d": None,
+            "adv90d": None,
+            "ratio20d": None,
+            "fxRate": None,
+            "fxPriceTimestamp": None,
+            "notionalUsd": None,
+            "gatePass": None,
+            "observationType": "COMPLETED_DAILY_VOLUME_NOTIONAL",
+            "barStatus": "STALE",
+            "freshnessStatus": "STALE",
+            "expectedCompletedDate": prepared["expectedCompletedDate"],
+            "latestAvailableBarDate": data_date,
+            "excludedIncompleteBar": prepared["excludedIncompleteBar"],
+            "retryAttempted": prepared["retryAttempted"],
+            "dataDate": data_date,
+            "note": "Volume gate UNKNOWN — completed daily bars are stale",
+            "recommendedNextAction": "RETRY",
+        })
+
+    volumes = (
+        pd.to_numeric(completed["Volume"], errors="coerce")
+        if "Volume" in completed
+        else pd.Series(dtype=float)
+    )
+    closes = (
+        pd.to_numeric(completed["Close"], errors="coerce")
+        if "Close" in completed
+        else pd.Series(dtype=float)
+    )
+    last_volume = (
+        int(volumes.iloc[-1])
+        if not volumes.empty and not pd.isna(volumes.iloc[-1])
+        else None
+    )
+    last_price = (
+        float(closes.iloc[-1])
+        if not closes.empty and not pd.isna(closes.iloc[-1])
+        else None
+    )
+    prior_volumes = volumes.iloc[:-1]
+
+    def _prior_average(count: int) -> float | None:
+        window = prior_volumes.tail(count)
+        return (
+            round(float(window.mean()))
+            if len(window) == count and window.notna().all()
+            else None
+        )
+
+    adv10d = _prior_average(10)
+    adv20d = _prior_average(20)
+    adv90d = _prior_average(90)
 
     # Gate evaluation
     gate_pass: bool | None = None
     ratio20d: float | None = None
     fx_rate: float | None = None
+    fx_price_timestamp: str | None = None
+    daily_notional_usd: float | None = None
+    fx_rate_unavailable = False
     note: str
 
     if foreign_exchange:
         # FX notional mode: daily notional ≥ $10M USD (convert to USD via live FX rate)
         if last_volume is not None and last_price is not None and last_price > 0:
             local_notional = last_volume * last_price
-            applied_fx_rate = 1.0
+            applied_fx_rate: float | None = 1.0
             fx_conversion_note = ""
 
             if currency and currency != "USD":
@@ -1470,10 +1779,24 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
                         applied_fx_rate = rate_val
                         fx_rate = round(float(rate_val), 4)
                         fx_conversion_note = f" [{currency}\u2192USD at {rate_val:.2f}]"
+                        try:
+                            fx_info = fx_ticker.info
+                            fx_time = fx_info.get("regularMarketTime")
+                            if isinstance(fx_time, (int, float)) and fx_time:
+                                fx_price_timestamp = datetime.datetime.fromtimestamp(
+                                    fx_time,
+                                    tz=datetime.timezone.utc,
+                                ).isoformat().replace("+00:00", "Z")
+                        except Exception:
+                            pass
                     else:
-                        fx_conversion_note = f" [{currency}=X rate unavailable \u2014 notional in local currency]"
+                        applied_fx_rate = 1.0
+                        fx_rate_unavailable = True
+                        fx_conversion_note = f" [{currency}=X rate unavailable]"
                 except Exception:
-                    fx_conversion_note = f" [{currency}=X fetch failed \u2014 notional in local currency]"
+                    applied_fx_rate = 1.0
+                    fx_rate_unavailable = True
+                    fx_conversion_note = f" [{currency}=X fetch failed]"
             elif currency == "USD":
                 fx_rate = 1.0
 
@@ -1486,7 +1809,10 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
             )
         else:
             note = "Volume gate UNKNOWN — insufficient price/volume data for FX notional check"
-        # Bug 5: compute ratio20d in FX branch too
+        if fx_rate_unavailable:
+            daily_notional_usd = None
+            gate_pass = None
+            note = "Volume gate UNKNOWN — USD notional cannot be computed without an FX rate"
         if last_volume is not None and adv20d and adv20d > 0:
             ratio20d = round(last_volume / adv20d, 2)
     else:
@@ -1502,16 +1828,29 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
 
     return json.dumps({
         "ticker": ticker,
+        "status": "OK",
         "currency": currency,
         "lastVolume": last_volume,
+        "lastClose": round(last_price, 4) if last_price is not None else None,
+        "priceBasis": "UNADJUSTED_CLOSE",
         "adv10d": adv10d,
         "adv20d": adv20d,
         "adv90d": adv90d,
         "ratio20d": ratio20d,
         "fxRate": fx_rate,
+        "fxPriceTimestamp": fx_price_timestamp,
+        "notionalUsd": round(daily_notional_usd, 2) if daily_notional_usd is not None else None,
         "gatePass": gate_pass,
+        "observationType": "COMPLETED_DAILY_VOLUME_NOTIONAL",
+        "barStatus": "COMPLETE",
+        "freshnessStatus": prepared["freshnessStatus"],
+        "expectedCompletedDate": prepared["expectedCompletedDate"],
+        "latestAvailableBarDate": data_date,
+        "excludedIncompleteBar": prepared["excludedIncompleteBar"],
+        "retryAttempted": prepared["retryAttempted"],
         "dataDate": data_date,
         "note": note,
+        "recommendedNextAction": "NONE",
     })
 
 def _classify_freshness(data_date: str | None, retrieved_at: str) -> str:
@@ -1546,7 +1885,7 @@ def _classify_freshness(data_date: str | None, retrieved_at: str) -> str:
         return "UNKNOWN"
 
 
-@yfinance_server.tool(name="get_market_snapshot", output_schema=_MARKET_SNAPSHOT_OUTPUT_SCHEMA, description="Compact market-state packet composing quote, price performance, moving-average trend, volume ratios, liquidity gate, and technical indicators in one call. Supports compact (default) and full modes, and optional batch of tickers.")
+@yfinance_server.tool(name="get_market_snapshot", output_schema=_MARKET_SNAPSHOT_OUTPUT_SCHEMA, description="Compact market-state packet with separate live-quote and completed-bar dates, component status, price/range, moving-average trend, completed-session volume/liquidity, and technical indicators. Supports compact/full modes and ticker batches.")
 async def get_market_snapshot(
     ticker: str | list[str],
     mode: str = "compact",
@@ -1572,6 +1911,7 @@ async def get_market_snapshot(
 
     component_status: dict[str, str] = {}
     failed_components: list[str] = []
+    limited_components: list[str] = []
     warnings_list: list[dict] = []
 
     component_results = await asyncio.gather(
@@ -1599,7 +1939,17 @@ async def get_market_snapshot(
                 failed_components.append(name)
                 warnings_list.append({"code": "COMPONENT_FAILED", "component": name, "message": parsed.get("message", "error in response")})
                 return None
-            component_status[name] = "OK"
+            payload_status = parsed.get("status") if isinstance(parsed, dict) else None
+            if payload_status in {"STALE_BAR", "PARTIAL"}:
+                component_status[name] = str(payload_status)
+                limited_components.append(name)
+                warnings_list.append({
+                    "code": "COMPONENT_LIMITED",
+                    "component": name,
+                    "message": f"{name} returned {payload_status}",
+                })
+            else:
+                component_status[name] = "OK"
             return parsed if isinstance(parsed, dict) else None
         except Exception as e:
             component_status[name] = "FAILED"
@@ -1614,6 +1964,11 @@ async def get_market_snapshot(
     data_date = (
         (quote.get("lastTradeDate") if quote else None)
         or (price_stats.get("dataDate") if price_stats else None)
+    )
+    completed_bar_data_date = (
+        (tech.get("dataDate") if tech else None)
+        or (price_stats.get("dataDate") if price_stats else None)
+        or (volume_gate.get("dataDate") if volume_gate else None)
     )
 
     last_price = quote.get("lastPrice") if quote else None
@@ -1653,9 +2008,20 @@ async def get_market_snapshot(
         },
         "volume": {
             "lastVolume": quote.get("lastVolume") if quote else None,
-            "avgVolume10d": quote.get("tenDayAverageVolume") if quote else None,
+            "lastVolumeObservationType": "REGULAR_SESSION_CUMULATIVE_VOLUME",
+            "lastCompletedVolume": volume_ratio.get("lastVolume") if volume_ratio else None,
+            "completedVolumeDataDate": volume_ratio.get("dataDate") if volume_ratio else None,
+            "avgVolume10d": (
+                volume_ratio.get("avgVolume10d")
+                if volume_ratio and volume_ratio.get("avgVolume10d") is not None
+                else (quote.get("tenDayAverageVolume") if quote else None)
+            ),
             "avgVolume20d": volume_gate.get("adv20d") if volume_gate else None,
-            "avgVolume90d": quote.get("threeMonthAverageVolume") if quote else None,
+            "avgVolume90d": (
+                volume_ratio.get("avgVolume90d")
+                if volume_ratio and volume_ratio.get("avgVolume90d") is not None
+                else (quote.get("threeMonthAverageVolume") if quote else None)
+            ),
             "ratio10d": volume_ratio.get("ratio10d") if volume_ratio else None,
             "ratio20d": volume_gate.get("ratio20d") if volume_gate else None,
             "ratio90d": volume_ratio.get("ratio90d") if volume_ratio else None,
@@ -1667,14 +2033,35 @@ async def get_market_snapshot(
         },
         "freshness": {
             "dataDate": data_date,
+            "quoteDataDate": quote.get("lastTradeDate") if quote else None,
+            "quoteTimestamp": quote.get("priceTimestamp") if quote else None,
+            "completedBarDataDate": completed_bar_data_date,
+            "componentDataDates": {
+                "priceStats": price_stats.get("dataDate") if price_stats else None,
+                "maPosition": ma.get("dataDate") if ma else None,
+                "volumeRatio": volume_ratio.get("dataDate") if volume_ratio else None,
+                "volumeGate": volume_gate.get("dataDate") if volume_gate else None,
+                "technicalIndicators": tech.get("dataDate") if tech else None,
+            },
             "retrievedAt": retrieved_at,
             "marketSessionAware": True,
             "freshnessClass": _classify_freshness(data_date, retrieved_at),
+            "quoteFreshnessClass": _classify_freshness(data_date, retrieved_at),
+            "completedBarFreshnessStatus": (
+                (tech.get("freshnessStatus") if tech else None)
+                or (price_stats.get("freshnessStatus") if price_stats else None)
+            ),
         },
+        "status": "PARTIAL" if failed_components or limited_components else "OK",
         "componentStatus": component_status,
-        "partialSuccess": len(failed_components) > 0 and len(failed_components) < 6,
+        "partialSuccess": (
+            bool(failed_components or limited_components)
+            and len(failed_components) < 6
+        ),
         "failedComponents": failed_components,
+        "limitedComponents": limited_components,
         "warnings": warnings_list,
+        "recommendedNextAction": "RETRY" if failed_components or limited_components else "NONE",
     }
 
     if mode == "full":

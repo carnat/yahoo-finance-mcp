@@ -62,12 +62,250 @@ class TestPr2DataQuality(unittest.TestCase):
                     index=pd.DatetimeIndex(["2026-06-12"]),
                 )
 
+            def get_history_metadata(self):
+                return {}
+
         pricing.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
         rows = json.loads(_run(pricing.get_historical_stock_prices("TSTPR2HIST")))
         self.assertEqual(
             set(rows[0]),
-            {"date", "open", "high", "low", "close", "volume", "adjClose"},
+            {
+                "date", "open", "high", "low", "close", "volume",
+                "adjClose", "barStatus", "isFinal",
+            },
         )
+        self.assertEqual(rows[0]["barStatus"], "COMPLETE")
+        self.assertTrue(rows[0]["isFinal"])
+
+    def test_historical_prices_label_active_daily_row_incomplete(self):
+        now = pd.Timestamp.now(tz="UTC")
+        index = pd.DatetimeIndex([
+            now.normalize() - pd.Timedelta(days=1),
+            now.normalize(),
+        ])
+
+        class FakeTicker:
+            fast_info = _FastInfo()
+
+            def history(self, period, interval, prepost=False):
+                return pd.DataFrame(
+                    {
+                        "Open": [10.0, 11.0],
+                        "High": [11.0, 12.0],
+                        "Low": [9.0, 10.0],
+                        "Close": [10.5, 11.5],
+                        "Volume": [1_000, 100],
+                    },
+                    index=index,
+                )
+
+            def get_history_metadata(self):
+                return {
+                    "exchangeTimezoneName": "UTC",
+                    "previousClose": 10.5,
+                    "currentTradingPeriod": {
+                        "regular": {
+                            "start": int((now - pd.Timedelta(hours=1)).timestamp()),
+                            "end": int((now + pd.Timedelta(hours=1)).timestamp()),
+                        },
+                    },
+                }
+
+        pricing.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
+        rows = json.loads(_run(pricing.get_historical_stock_prices("TSTACTIVEHIST")))
+        self.assertEqual(rows[-2]["barStatus"], "COMPLETE")
+        self.assertTrue(rows[-2]["isFinal"])
+        self.assertEqual(rows[-1]["barStatus"], "INCOMPLETE")
+        self.assertFalse(rows[-1]["isFinal"])
+
+    def test_technical_indicators_exclude_active_daily_bar(self):
+        now = pd.Timestamp.now(tz="UTC")
+        index = pd.date_range(end=now.normalize(), periods=40, freq="D", tz="UTC")
+        completed_closes = [100.0 + i for i in range(39)]
+        raw_closes = completed_closes + [999.0]
+
+        class FakeTicker:
+            def history(self, period, interval, auto_adjust=False, keepna=False):
+                return pd.DataFrame(
+                    {
+                        "Close": raw_closes,
+                        "Adj Close": raw_closes,
+                        "Volume": [1_000] * 40,
+                    },
+                    index=index,
+                )
+
+            def get_history_metadata(self):
+                return {
+                    "exchangeTimezoneName": "UTC",
+                    "previousClose": completed_closes[-1],
+                    "currentTradingPeriod": {
+                        "regular": {
+                            "start": int((now - pd.Timedelta(hours=1)).timestamp()),
+                            "end": int((now + pd.Timedelta(hours=1)).timestamp()),
+                        },
+                    },
+                }
+
+        pricing.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
+        data = json.loads(_run(pricing.get_technical_indicators("TSTACTIVETECH")))
+        self.assertEqual(data["status"], "OK")
+        self.assertEqual(data["lastClose"], completed_closes[-1])
+        self.assertTrue(data["excludedIncompleteBar"])
+        self.assertEqual(data["barStatus"], "COMPLETE")
+        self.assertEqual(data["dataDate"], index[-2].date().isoformat())
+
+    def test_price_stats_separates_live_quote_from_completed_history(self):
+        now = pd.Timestamp.now(tz="UTC")
+        index = pd.date_range(end=now.normalize(), periods=40, freq="D", tz="UTC")
+        closes = [100.0 + i for i in range(39)] + [999.0]
+
+        class FastInfo:
+            last_price = 150.0
+            previous_close = 149.0
+            currency = "EUR"
+            year_high = 180.0
+            year_low = 80.0
+            fifty_day_average = 140.0
+            two_hundred_day_average = 120.0
+
+        class FakeTicker:
+            fast_info = FastInfo()
+            info = {
+                "marketState": "REGULAR",
+                "regularMarketTime": int(now.timestamp()),
+            }
+
+            def history(self, period, interval, auto_adjust=False, keepna=False):
+                return pd.DataFrame(
+                    {
+                        "Close": closes,
+                        "Adj Close": closes,
+                        "Volume": [1_000] * 40,
+                    },
+                    index=index,
+                )
+
+            def get_history_metadata(self):
+                return {
+                    "exchangeTimezoneName": "UTC",
+                    "previousClose": closes[-2],
+                    "currentTradingPeriod": {
+                        "regular": {
+                            "start": int((now - pd.Timedelta(hours=1)).timestamp()),
+                            "end": int((now + pd.Timedelta(hours=1)).timestamp()),
+                        },
+                    },
+                }
+
+        pricing.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
+        data = json.loads(_run(pricing.get_price_stats("TSTACTIVESTATS")))
+        self.assertEqual(data["lastPrice"], 150.0)
+        self.assertEqual(data["priceBasis"], "REGULAR_MARKET_PRICE")
+        self.assertEqual(data["dataDate"], index[-2].date().isoformat())
+        self.assertEqual(data["historicalBarStatus"], "COMPLETE")
+        self.assertTrue(data["excludedIncompleteBar"])
+        self.assertIsNotNone(data["priceTimestamp"])
+
+    def test_volume_ratio_uses_completed_numerator_and_prior_denominators(self):
+        now = pd.Timestamp.now(tz="UTC")
+        index = pd.date_range(end=now.normalize(), periods=92, freq="D", tz="UTC")
+        volumes = [100] * 90 + [200, 10_000]
+        closes = [50.0] * 92
+
+        class FakeTicker:
+            def history(self, period, interval, auto_adjust=False, keepna=False):
+                return pd.DataFrame(
+                    {"Close": closes, "Adj Close": closes, "Volume": volumes},
+                    index=index,
+                )
+
+            def get_history_metadata(self):
+                return {
+                    "exchangeTimezoneName": "UTC",
+                    "previousClose": 50.0,
+                    "currentTradingPeriod": {
+                        "regular": {
+                            "start": int((now - pd.Timedelta(hours=1)).timestamp()),
+                            "end": int((now + pd.Timedelta(hours=1)).timestamp()),
+                        },
+                    },
+                }
+
+        pricing.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
+        data = json.loads(_run(pricing.get_volume_ratio("TSTACTIVEVOL")))
+        self.assertEqual(data["lastVolume"], 200)
+        self.assertEqual(data["avgVolume10d"], 100)
+        self.assertEqual(data["avgVolume90d"], 100)
+        self.assertEqual(data["ratio10d"], 2.0)
+        self.assertEqual(data["volumeFlag"], "HIGH")
+        self.assertTrue(data["excludedIncompleteBar"])
+
+    def test_volume_ratio_does_not_shift_past_missing_latest_completed_volume(self):
+        now = pd.Timestamp.now(tz="UTC")
+        index = pd.date_range(end=now.normalize(), periods=12, freq="D", tz="UTC")
+        volumes = [100] * 10 + [float("nan"), 10_000]
+        closes = [50.0] * 12
+
+        class FakeTicker:
+            def history(self, period, interval, auto_adjust=False, keepna=False):
+                return pd.DataFrame(
+                    {"Close": closes, "Adj Close": closes, "Volume": volumes},
+                    index=index,
+                )
+
+            def get_history_metadata(self):
+                return {
+                    "exchangeTimezoneName": "UTC",
+                    "previousClose": 50.0,
+                    "currentTradingPeriod": {
+                        "regular": {
+                            "start": int((now - pd.Timedelta(hours=1)).timestamp()),
+                            "end": int((now + pd.Timedelta(hours=1)).timestamp()),
+                        },
+                    },
+                }
+
+        pricing.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
+        data = json.loads(_run(pricing.get_volume_ratio("TSTMISSINGLATESTVOL")))
+        self.assertTrue(data["error"])
+        self.assertIn("No completed volume data", data["message"])
+
+    def test_volume_gate_uses_last_completed_session(self):
+        now = pd.Timestamp.now(tz="UTC")
+        index = pd.date_range(end=now.normalize(), periods=22, freq="D", tz="UTC")
+        volumes = [200] * 20 + [100, 1]
+        closes = [25.0] * 22
+
+        class FakeTicker:
+            fast_info = {"currency": "USD"}
+
+            def history(self, period, interval, auto_adjust=False, keepna=False):
+                return pd.DataFrame(
+                    {"Close": closes, "Adj Close": closes, "Volume": volumes},
+                    index=index,
+                )
+
+            def get_history_metadata(self):
+                return {
+                    "exchangeTimezoneName": "UTC",
+                    "previousClose": 25.0,
+                    "currentTradingPeriod": {
+                        "regular": {
+                            "start": int((now - pd.Timedelta(hours=1)).timestamp()),
+                            "end": int((now + pd.Timedelta(hours=1)).timestamp()),
+                        },
+                    },
+                }
+
+        pricing.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
+        data = json.loads(_run(pricing.get_volume_gate("TSTACTIVEGATE")))
+        self.assertEqual(data["lastVolume"], 100)
+        self.assertEqual(data["adv20d"], 200)
+        self.assertEqual(data["ratio20d"], 0.5)
+        self.assertTrue(data["gatePass"])
+        self.assertTrue(data["excludedIncompleteBar"])
+        self.assertEqual(data["dataDate"], index[-2].date().isoformat())
 
     def test_market_quote_labels_regular_market_price_observation(self):
         timestamp = int(pd.Timestamp("2026-06-23T15:20:00Z").timestamp())
@@ -335,6 +573,40 @@ class TestPr2DataQuality(unittest.TestCase):
         self.assertIn('priceBasis: "REGULAR_MARKET_PRICE"', worker_source)
         self.assertNotIn("const closes = adjclose.filter", slope_source)
         self.assertNotIn("const priceSeries =", slope_source)
+
+    def test_worker_daily_derived_tools_share_completed_bar_selector(self):
+        worker_source = (
+            pathlib.Path(__file__).resolve().parents[1] / "worker" / "src" / "yahoo-finance.ts"
+        ).read_text(encoding="utf-8")
+        for start, end in (
+            ("export async function getTechnicalIndicators", "export async function getPriceSlope"),
+            ("export async function getVolumeRatio", "export async function getMaPosition"),
+            ("export async function getVolumeGate", "export async function getMarketSnapshot"),
+        ):
+            section = worker_source.split(start, 1)[1].split(end, 1)[0]
+            self.assertIn("prepareCompletedDailySeries", section)
+            self.assertIn("excludedIncompleteBar", section)
+        volume_section = worker_source.split(
+            "export async function getVolumeRatio", 1
+        )[1].split("export async function getMaPosition", 1)[0]
+        self.assertNotIn("fastInfo.lastVolume", volume_section)
+
+    def test_options_realized_volatility_uses_completed_bar_selector_in_both_runtimes(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        worker_source = (root / "worker" / "src" / "yahoo-finance.ts").read_text(
+            encoding="utf-8"
+        )
+        python_source = (root / "server.py").read_text(encoding="utf-8")
+        worker_section = worker_source.split(
+            "export async function getOptionsFlowScan", 1
+        )[1].split("export async function getPriceTargetBracket", 1)[0]
+        python_section = python_source.split(
+            "async def get_options_flow_scan", 1
+        )[1].split("async def get_price_target_bracket", 1)[0]
+        self.assertIn("prepareCompletedDailySeries", worker_section)
+        self.assertIn("historicalBarStatus", worker_section)
+        self.assertIn("_load_completed_daily_history", python_section)
+        self.assertIn("historical_bar_status", python_section)
 
     def test_options_summary_rejects_invalid_expiry_hint(self):
         class FakeTicker:
