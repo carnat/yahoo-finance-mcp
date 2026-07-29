@@ -86,7 +86,13 @@ def _contextual_output_schema(properties: dict) -> dict:
             "decisionGrade": {"const": False},
             "recommendedNextAction": {
                 "type": "string",
-                "enum": ["NONE", "RETRY_OR_REQUEST_AVAILABLE_SECTION", "CHECK_SEC_FILINGS", "CHECK_OFFICIAL_RELEASES"],
+                "enum": [
+                    "NONE",
+                    "RETRY_OR_REQUEST_AVAILABLE_SECTION",
+                    "CHECK_OFFICIAL_FUND_SOURCE",
+                    "CHECK_SEC_FILINGS",
+                    "CHECK_OFFICIAL_RELEASES",
+                ],
             },
             **properties,
         },
@@ -98,15 +104,20 @@ _FUND_PROFILE_OUTPUT_SCHEMA = _contextual_output_schema({
     "ticker": {"type": "string"},
     "sectionsRequested": {"type": "array", "items": {"type": "string"}},
     "sectionStatus": {"type": "object", "additionalProperties": {"type": "string"}},
+    "sectionDates": {"type": "object"},
     "description": _STRING_OR_NULL,
     "fundOverview": {"type": ["object", "null"]},
     "topHoldings": {"type": ["array", "null"]},
-    "equityHoldings": {"type": ["object", "null"]},
+    "equityHoldings": {"type": ["object", "array", "null"]},
+    "equityHoldingsProviderRaw": {"type": ["object", "array", "null"]},
+    "valuationBasis": _STRING_OR_NULL,
+    "valuationNormalization": {"type": "object"},
     "assetClasses": {"type": ["object", "null"]},
     "sectorWeights": {"type": ["array", "null"]},
     "fundOperations": {"type": ["object", "null"]},
     "bondHoldings": {"type": ["object", "null"]},
     "bondRatings": {"type": ["object", "null"]},
+    "warnings": {"type": "array", "items": {"type": "string"}},
 })
 
 _EARNINGS_ANALYSIS_OUTPUT_SCHEMA = _contextual_output_schema({
@@ -713,6 +724,7 @@ for _alias_name, _canonical_name in TOOL_ALIASES.items():
 # Canonical/alias schemas that route to existing base implementations.
 _TOOL_OUTPUT_SCHEMAS.setdefault("analyze_position_signals", _TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"])
 _TOOL_OUTPUT_SCHEMAS.setdefault("calculate_price_target_distance", _TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"])
+_TOOL_OUTPUT_SCHEMAS.setdefault("analyze_volume_ratio", _TOOL_OUTPUT_SCHEMAS["get_volume_ratio"])
 _TOOL_OUTPUT_SCHEMAS.setdefault("check_volume_liquidity_threshold", _TOOL_OUTPUT_SCHEMAS["get_volume_gate"])
 _TOOL_OUTPUT_SCHEMAS.setdefault("analyze_options_flow_window", _TOOL_OUTPUT_SCHEMAS["get_options_flow_scan"])
 _TOOL_OUTPUT_SCHEMAS.setdefault("summarize_options_flow", _TOOL_OUTPUT_SCHEMAS["get_options_summary"])

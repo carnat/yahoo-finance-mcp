@@ -1086,7 +1086,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "analyze_volume_ratio", description: "Analyze the latest completed-session volume ratio. PARTIAL/INCOMPLETE means retry; do not use a volume signal.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, period: { type: "number", default: 10 } }, required: ["ticker"] } },
   { name: "check_volume_liquidity_threshold", description: "Check completed-session volume/notional against public liquidity thresholds. PARTIAL/INCOMPLETE means retry; gatePass is unknown.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] } },
   { name: "get_company_profile", description: "Get company profile/fundamentals.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, include_all: { type: "boolean" } }, required: ["ticker"] } },
-  { name: "get_fund_profile", description: "Get ETF/fund profile. Request overview, holdings, allocation, operations, or fixed-income sections.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, sections: { type: "array", items: { type: "string", enum: ["overview", "holdings", "allocation", "operations", "fixed_income"] }, uniqueItems: true } }, required: ["ticker"] } },
+  { name: "get_fund_profile", description: "Get ETF/fund profile with per-section status and as-of-date limitations. Valuation characteristics are conventional multiples; provider inverse yields are retained separately. Request overview, holdings, allocation, operations, or fixed-income sections.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, sections: { type: "array", items: { type: "string", enum: ["overview", "holdings", "allocation", "operations", "fixed_income"] }, uniqueItems: true } }, required: ["ticker"] } },
   { name: "analyze_financial_ratios", description: "Analyze current financial ratios and optional historical Yahoo valuation measures.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, history_periods: { type: "integer", minimum: 0, maximum: 20, default: 0 }, frequency: { type: "string", enum: ["quarterly", "monthly", "yearly", "trailing"], default: "quarterly" } }, required: ["ticker"] } },
   { name: "analyze_share_count_trend", description: "Use for dilution, issuance, buyback, or historical shares-outstanding questions. Returns contextual Yahoo data and directs material changes to SEC confirmation.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, start_date: { type: "string" }, end_date: { type: "string" } }, required: ["ticker"] } },
   { name: "analyze_credit_health", description: "Analyze credit health metrics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
@@ -1098,8 +1098,8 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_company_events_calendar", description: "Get a ticker's upcoming Yahoo calendar estimates or paginated earnings-date history. Yahoo dates are always marked UNVERIFIED and material dates should be confirmed with official releases.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, mode: { type: "string", enum: ["upcoming", "history"], default: "upcoming" }, limit: { type: "integer", minimum: 1, maximum: 100, default: 12 }, offset: { type: "integer", minimum: 0, default: 0 } }, required: ["ticker"] } },
   { name: "get_market_calendar", description: "Use for market-wide earnings, economic-event, IPO, or stock-split calendar questions. Results are paginated Yahoo provider data, not official confirmation.", inputSchema: { type: "object", properties: { event_type: { type: "string", enum: ["earnings", "economic", "ipo", "splits"], default: "earnings" }, start_date: { type: "string" }, end_date: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100, default: 25 }, offset: { type: "integer", minimum: 0, default: 0 } } } },
   { name: "summarize_options_flow", description: "Summarize options flow.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, expiry_hint: { type: "string" } }, required: ["ticker"] } },
-  { name: "analyze_options_flow_window", description: "Analyze options flow in an event window.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, window_label: { type: "string" } }, required: ["ticker", "window_label"] } },
-  { name: "find_put_hedge_candidates", description: "Find put hedge candidates.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, otm_pct_min: { type: "number", default: 8 }, otm_pct_max: { type: "number", default: 12 }, budget_usd: { type: "number", default: 500 }, expiry_after: { type: "string" } }, required: ["ticker"] } },
+  { name: "analyze_options_flow_window", description: "Analyze options flow in an event window. LOW chain quality returns RETRY and must not support derivative conclusions.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, window_label: { type: "string" } }, required: ["ticker", "window_label"] } },
+  { name: "find_put_hedge_candidates", description: "Find OTM put hedge candidates using executable ask cost. Contracts require a two-sided quote plus liquidity evidence; PARTIAL means retry and do not use budgetFeasible as a decision.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, otm_pct_min: { type: "number", default: 8 }, otm_pct_max: { type: "number", default: 12 }, budget_usd: { type: "number", default: 500 }, expiry_after: { type: "string" } }, required: ["ticker"] } },
   { name: "list_sec_company_filings", description: "List SEC filings for a company from EDGAR submissions. Returns cik, filingType, filingDate, acceptedAt, accessionNumber, primaryDocument, documentUrl, and meta.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, form_type: { type: "string", default: "10-K" }, limit: { type: "number", default: 5 }, max_filings: { type: "number", default: 5 } }, required: ["ticker"] } },
   { name: "get_sec_filing_outline", description: "Get SEC filing outline. Uses the indexed filing path for ticker/filing_type calls and returns OUTLINE_NOT_PARSED with tableCount when tables exist but headings are not parsed.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, document_url: { type: "string" } }, required: ["ticker"] } },
   { name: "get_sec_filing_section", description: "Get SEC filing section text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, selector: { type: "object" }, section_name: { type: "string" }, document_url: { type: "string" }, context_chars: { type: "number", default: 3000 } }, required: ["ticker"] } },
@@ -1199,7 +1199,13 @@ function contextualOutputSchema(properties: Record<string, unknown>): Tool["outp
       decisionGrade: { const: false },
       recommendedNextAction: {
         type: "string",
-        enum: ["NONE", "RETRY_OR_REQUEST_AVAILABLE_SECTION", "CHECK_SEC_FILINGS", "CHECK_OFFICIAL_RELEASES"],
+        enum: [
+          "NONE",
+          "RETRY_OR_REQUEST_AVAILABLE_SECTION",
+          "CHECK_OFFICIAL_FUND_SOURCE",
+          "CHECK_SEC_FILINGS",
+          "CHECK_OFFICIAL_RELEASES",
+        ],
       },
       ...properties,
     },
@@ -1211,15 +1217,20 @@ const FUND_PROFILE_OUTPUT_SCHEMA = contextualOutputSchema({
   ticker: { type: "string" },
   sectionsRequested: { type: "array", items: { type: "string" } },
   sectionStatus: { type: "object", additionalProperties: { type: "string" } },
+  sectionDates: { type: "object" },
   description: STRING_OR_NULL,
   fundOverview: { type: ["object", "null"] },
   topHoldings: { type: ["array", "null"] },
-  equityHoldings: { type: ["object", "null"] },
+  equityHoldings: { type: ["object", "array", "null"] },
+  equityHoldingsProviderRaw: { type: ["object", "array", "null"] },
+  valuationBasis: STRING_OR_NULL,
+  valuationNormalization: { type: "object" },
   assetClasses: { type: ["object", "null"] },
   sectorWeights: { type: ["array", "null"] },
   fundOperations: { type: ["object", "null"] },
   bondHoldings: { type: ["object", "null"] },
   bondRatings: { type: ["object", "null"] },
+  warnings: { type: "array", items: { type: "string" } },
 });
 
 const EARNINGS_ANALYSIS_OUTPUT_SCHEMA = contextualOutputSchema({
@@ -1806,6 +1817,9 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   get_sec_filing_section_markdown: ENVELOPE_V2_OUTPUT_SCHEMA,
 };
 
+OUTPUT_SCHEMAS.analyze_volume_ratio = OUTPUT_SCHEMAS.get_volume_ratio;
+OUTPUT_SCHEMAS.check_volume_liquidity_threshold = OUTPUT_SCHEMAS.get_volume_gate;
+
 for (const [alias, canonical] of Object.entries(TOOL_ALIASES)) {
   OUTPUT_SCHEMAS[alias] = OUTPUT_SCHEMAS[canonical] ?? SIMPLE_OBJECT_SCHEMA;
 }
@@ -1821,6 +1835,8 @@ const LLM_DETAILED_OUTPUT_TOOLS = new Set([
   "analyze_share_count_trend",
   "get_company_events_calendar",
   "get_market_calendar",
+  "analyze_volume_ratio",
+  "check_volume_liquidity_threshold",
 ]);
 
 function envelopedToolOutputSchema(dataSchema: Tool["outputSchema"]): Tool["outputSchema"] {

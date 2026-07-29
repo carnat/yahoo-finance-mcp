@@ -130,7 +130,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 
 ### Company fundamentals
 - get_company_profile: ~30 key fundamental fields by default. Pass include_all=true for full ~120-field payload. For ETFs/funds, use get_fund_profile instead.
-- get_fund_profile: ETF/mutual fund data. Request sections: overview, holdings, allocation, operations, fixed_income.
+- get_fund_profile: ETF/mutual fund data with section dates/status. Valuation characteristics are conventional multiples; raw provider yields are retained. Request sections: overview, holdings, allocation, operations, fixed_income.
 - get_financial_statement: Income statement, balance sheet, or cash flow (annual/quarterly/TTM). Optional line_items filter.
 - analyze_financial_ratios: Current P/E, PEG, P/S, P/B, EV/EBITDA, margins, ROE, ROA, debt ratios; optional valuation history.
 - analyze_share_count_trend: Historical shares outstanding for dilution/buyback questions; Yahoo context, not filing confirmation.
@@ -151,8 +151,8 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - get_option_expiration_dates: Available options expiration dates.
 - get_option_chain: Options chain for a specific expiry and type. Supports strike filters and in_the_money_only.
 - summarize_options_flow: Put/call ratio, P/C sentiment, ATM IV, IV percentile, max pain, highest OI strikes.
-- find_put_hedge_candidates: Pre-filtered OTM puts within configurable OTM % range and budget.
-- analyze_options_flow_window: Structured event-window options scan with 72h cached trend.
+- find_put_hedge_candidates: Pre-filtered OTM puts with two-sided/liquidity evidence; cost and budget use executable ask.
+- analyze_options_flow_window: Structured event-window options scan with 72h cached trend; LOW quality requires retry.
 
 ### SEC filings
 - list_sec_company_filings: List SEC filings from EDGAR submissions. Returns filing type, date, accession number, document URL.
