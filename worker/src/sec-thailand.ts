@@ -185,6 +185,9 @@ async function secGet(path: string, params: Record<string, unknown>): Promise<Se
   if (!response.ok) {
     throw providerError("PROVIDER_ERROR", `SEC Open Data returned HTTP ${response.status}.`, "RETRY_LATER");
   }
+  if (response.status === 204) {
+    return { items: [], next_cursor: "" };
+  }
   const raw = await response.text();
   let payload: unknown;
   try {

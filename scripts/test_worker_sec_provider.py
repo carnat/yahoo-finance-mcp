@@ -245,6 +245,8 @@ if (taiwan.sourceRows[0][0] !== "Taiwan") throw new Error(`Taiwan fixture row wa
         section = match.group(0)
         self.assertIn("item.contextText ?? item.context ?? item.excerpt", section)
         self.assertIn("rowTerm.toLowerCase()", section)
+        self.assertIn("readableExposureExcerpt", section)
+        self.assertIn("rejectedNoiseCount", section)
         self.assertIn('"FOUND_NO_EXCERPT"', section)
         self.assertIn('"EXCERPT_NOT_AVAILABLE"', section)
 

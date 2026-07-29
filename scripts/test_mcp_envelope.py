@@ -80,6 +80,32 @@ class TestPhase1Envelope(unittest.TestCase):
         result = json.loads(self.srv._mcp_success("t", raw, warnings=["data may be stale"]))
         self.assertIn("data may be stale", result["meta"]["warnings"])
 
+    def test_decision_grade_xbrl_metadata_survives_enrichment(self):
+        evidence = {
+            "sourceType": "sec_xbrl_companyconcept",
+            "concept": "RevenueFromContractWithCustomerExcludingAssessedTax",
+            "accessionNumber": "0000320193-25-000079",
+            "periodEnd": "2025-09-27",
+            "documentUrl": "https://www.sec.gov/Archives/example.htm",
+        }
+        raw = json.dumps({
+            "status": "FOUND",
+            "value": 416_161_000_000,
+            "decisionGrade": True,
+            "extractionMethod": "XBRL",
+            "xbrlContext": {
+                "concept": evidence["concept"],
+                "periodEnd": evidence["periodEnd"],
+            },
+            "sourceEvidence": evidence,
+            "evidence": evidence,
+        })
+        data = json.loads(self.srv._wrap_envelope_v2("extract_sec_filing_fact", json.loads(raw)))["data"]
+        self.assertEqual(data["evidence"], evidence)
+        self.assertEqual(data["sourceEvidence"], evidence)
+        self.assertNotIn("decisionGrade", data["sourceEvidence"])
+        self.assertNotIn("decisionGrade", data["xbrlContext"])
+
     # ── _mcp_failure ────────────────────────────────────────────────────────
 
     def test_failure_envelope_shape(self):

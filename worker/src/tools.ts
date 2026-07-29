@@ -468,7 +468,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_analyst_consensus",
     description:
-      "Get analyst consensus summary for one or more tickers: price targets (current, low, high, mean, median) with % upside from last price, recommendation breakdown (strongBuy, buy, hold, sell, strongSell counts), and dominant rating. Max 5 tickers per call; if you need more, split into multiple calls.",
+      "Get analyst consensus for one or more tickers. priceTargets.current is the current market price; low/high/mean/median are consensus targets and pctUpsideFromLastPrice uses the mean target. Max 5 tickers per call.",
     inputSchema: {
       type: "object",
       properties: {
@@ -498,7 +498,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_financial_ratios",
     description:
-      "Get pre-computed key financial ratios for one or more tickers. Includes: P/E (trailing & forward), P/S, P/B, EV/EBITDA, EV/Revenue, PEG; gross/operating/net margins, ROE, ROA; debt/equity, current ratio, quick ratio; FCF and FCF yield; dividend yield and payout ratio. Max 5 tickers per call; if you need more, split into multiple calls.",
+      "Get pre-computed key financial ratios for one or more tickers, with unitSemantics separating multiples, decimal ratios, percent values, and currency values. Max 5 tickers per call; if you need more, split into multiple calls.",
     inputSchema: {
       type: "object",
       properties: {
@@ -697,7 +697,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_short_momentum",
     description:
-      "Get short interest with MoM delta, direction (RISING/FALLING/FLAT), squeeze risk (HIGH/MODERATE/LOW), and flag. Max 5 tickers per call; split larger lists into multiple calls.",
+      "Get short interest with MoM delta, direction, squeeze risk, and the SEC/provider observation date in dataDate (not today's market date). Max 5 tickers per call; split larger lists into multiple calls.",
     inputSchema: {
       type: "object",
       properties: {
@@ -902,7 +902,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_price_target_bracket",
     description:
-      "Compare a live regular-market quote to a user-supplied reference target. Read priceTimestamp/observationType; this is not a completed-close calculation. reference_target_price is preferred and io_pt remains an alias.",
+      "Compare a live regular-market quote to a user-supplied reference target. currentToTargetRatioPct preserves the legacy ratio; distanceToTargetPct is the directional percent distance to target. This is not a completed-close calculation.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1087,7 +1087,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "check_volume_liquidity_threshold", description: "Check completed-session volume/notional against public liquidity thresholds. PARTIAL/INCOMPLETE means retry; gatePass is unknown.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] } },
   { name: "get_company_profile", description: "Get company profile/fundamentals.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, include_all: { type: "boolean" } }, required: ["ticker"] } },
   { name: "get_fund_profile", description: "Get ETF/fund profile with per-section status and as-of-date limitations. Valuation characteristics are conventional multiples; provider inverse yields are retained separately. Request overview, holdings, allocation, operations, or fixed-income sections.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, sections: { type: "array", items: { type: "string", enum: ["overview", "holdings", "allocation", "operations", "fixed_income"] }, uniqueItems: true } }, required: ["ticker"] } },
-  { name: "analyze_financial_ratios", description: "Analyze current financial ratios and optional historical Yahoo valuation measures.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, history_periods: { type: "integer", minimum: 0, maximum: 20, default: 0 }, frequency: { type: "string", enum: ["quarterly", "monthly", "yearly", "trailing"], default: "quarterly" } }, required: ["ticker"] } },
+  { name: "analyze_financial_ratios", description: "Analyze current financial ratios with explicit unitSemantics and optional historical Yahoo valuation measures.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, history_periods: { type: "integer", minimum: 0, maximum: 20, default: 0 }, frequency: { type: "string", enum: ["quarterly", "monthly", "yearly", "trailing"], default: "quarterly" } }, required: ["ticker"] } },
   { name: "analyze_share_count_trend", description: "Use for dilution, issuance, buyback, or historical shares-outstanding questions. Returns contextual Yahoo data and directs material changes to SEC confirmation.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, start_date: { type: "string" }, end_date: { type: "string" } }, required: ["ticker"] } },
   { name: "analyze_credit_health", description: "Analyze credit health metrics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
   { name: "get_corporate_actions", description: "Get dividends, stock splits, and fund capital-gain distributions from Yahoo Finance.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
@@ -1113,7 +1113,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_sec_filing_intelligence", description: "Preferred SEC diagnostic call. Returns an accession-matched official companyfacts snapshot, usable section/table index summary, evidence metadata, and recommended follow-ups.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, filing_index: { type: "number", default: 0 } }, required: ["ticker"] } },
   { name: "get_sec_filing_section_markdown", description: "Return a specific SEC filing section as unverified Markdown from a degraded Worker HTML fallback. Payloads are blocked from decision-grade use and include source offsets/warnings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, section: { type: "string", default: "Item 1A" }, filing_type: { type: "string", default: "10-K" }, filing_index: { type: "number", default: 0 }, max_chars: { type: "number", default: 50000 } }, required: ["ticker"] } },
   { name: "analyze_position_signals", description: "Aggregate public market, analyst, earnings, and technical inputs that may be useful for a caller-defined scoring model. This tool does not access holdings, cost basis, position size, or private scoring rules.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
-  { name: "calculate_price_target_distance", description: "Compare current market price to a user-supplied reference price target and return percentage distance and bracket labels.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, reference_target_price: { type: "number", description: "Preferred: user-supplied reference target price." }, io_pt: { type: "number", description: "Backward-compatible alias for reference_target_price." } }, required: ["ticker"] } },
+  { name: "calculate_price_target_distance", description: "Compare current price to a user-supplied reference price target. Returns both the legacy current/target ratio and directional percent distance to target.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, reference_target_price: { type: "number", description: "Preferred: user-supplied reference target price." }, io_pt: { type: "number", description: "Backward-compatible alias for reference_target_price." } }, required: ["ticker"] } },
   { name: "get_company_news", description: "Get recent public company news and press releases with compact coverage guidance. Yahoo primary items are emitted only for an exact ticker token or canonical issuer identity; inspect tickerMatch=EXPLICIT and matchBasis before use. Read coverage.state, failedSources, skippedSources, recommendedNextAction, and per-source raw/accepted/rejected diagnostics before treating an empty result as absence. decisionUse=CHECK_OFFICIAL_RELEASES means escalate the material item to get_company_press_releases or verify_company_event. Defaults stay lightweight (Yahoo Finance news/press releases + eligible Finnhub). Include company_ir for official RSS/Atom discovery or company_ir_page for registry-reviewed IR pages. Accepts a ticker or array of up to 5 symbols.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }], description: "Ticker symbol (e.g. 'AAPL') or an array of up to 5 symbols (e.g. ['AAPL', 'MSFT']). If more than 5 are provided, only the first 5 are processed; split larger lists into multiple calls." }, max_results: { type: "number", default: 10 }, lookback_days: { type: "number", default: 14 }, sources: { type: "array", items: { type: "string" }, default: ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"], description: "Allowed sources include yahoo_finance_news, yahoo_finance_press_releases, finnhub, sec, newswire, company_ir, and company_ir_page. Finnhub may be deterministically skipped when the deployed entitlement cannot cover the ticker's market." } }, required: ["ticker"] } },
   { name: "search_company_news", description: "Search public company news/events for a ticker and query across selected source metadata and short snippets. Include company_ir for official website RSS/Atom items when discoverable or company_ir_page for registry-reviewed IR-page evidence/candidate diagnostics; inspect sourceStatus/sourceCoverage before relying on absence.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Ticker symbol, e.g. 'AAPL'" }, query: { type: "string", description: "Required search query string." }, start_date: { type: "string", default: "" }, end_date: { type: "string", default: "" }, sources: { type: "array", items: { type: "string" }, default: ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"] }, max_results: { type: "number", default: 10 } }, required: ["ticker", "query"] } },
   { name: "get_company_press_releases", description: "Get company press releases and official release-style events. Defaults resolve SEC 8-K/EX-99 evidence first, then registry-backed company_ir_page, then Yahoo press-release context. Explicit sources can also include company_ir RSS/Atom and newswire. Gate use is payload-level: decisionGrade:true is allowed only for coverageStatus=SEC_EX99_RESOLVED or APPROVED_IR_PAGE_RESOLVED with evidence fields; candidates/RSS/newswire/Yahoo remain verification/context evidence.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, lookback_days: { type: "number", default: 90 }, max_results: { type: "number", default: 20 }, sources: { type: "array", items: { type: "string" }, default: ["sec", "company_ir_page", "yahoo_finance_press_releases"] } }, required: ["ticker"] } },
@@ -1267,6 +1267,7 @@ const FINANCIAL_RATIOS_OUTPUT_SCHEMA = contextualOutputSchema({
   payoutRatio: NUMBER_OR_NULL,
   earningsGrowth: NUMBER_OR_NULL,
   revenueGrowth: NUMBER_OR_NULL,
+  unitSemantics: { type: "object" },
   valuationHistory: { type: ["array", "null"], items: { type: "object" } },
   valuationFrequency: STRING_OR_NULL,
   historyPeriodsRequested: { type: ["integer", "null"] },
@@ -1536,12 +1537,16 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     properties: {
       ticker: { type: "string" },
       sharesShort: { type: ["number", "null"] },
-      shortPctOfFloat: { type: ["number", "null"] },
-      momDelta: { type: ["number", "null"] },
-      direction: { type: ["string", "null"] },
+      sharesShortPriorMonth: { type: ["number", "null"] },
+      shortPctFloat: { type: ["number", "null"] },
+      daysToCover: { type: ["number", "null"] },
+      momDeltaPct: { type: ["number", "null"] },
+      momDirection: { type: ["string", "null"] },
       squeezeRisk: { type: ["string", "null"] },
       flag: { type: ["string", "null"] },
-      dataDate: { type: "string" },
+      dateShortInterest: { type: ["string", "null"] },
+      dataDate: { type: ["string", "null"] },
+      dataDateBasis: { type: "string", enum: ["SHORT_INTEREST_OBSERVATION", "UNAVAILABLE"] },
     },
     additionalProperties: true,
   },
@@ -1672,6 +1677,9 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       marketState: { type: ["string", "null"] },
       referenceTargetPrice: { type: ["number", "null"] },
       referenceTargetPct: { type: ["number", "null"] },
+      currentToTargetRatioPct: { type: ["number", "null"] },
+      distanceToTargetPct: { type: ["number", "null"] },
+      distanceConvention: { type: "string" },
       ioPt: { type: ["number", "null"] },
       eqfPct: { type: ["number", "null"] },
       bracket: { type: ["string", "null"] },

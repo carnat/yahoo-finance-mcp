@@ -2,6 +2,7 @@
 """Offline regressions for PR2 deterministic data-source fixes."""
 
 import asyncio
+import datetime
 import json
 import os
 import pathlib
@@ -1081,6 +1082,93 @@ class TestPr2DataQuality(unittest.TestCase):
         self.assertEqual(data["inferredTag"], "NEAR")
         self.assertEqual(data["tag"], "NEAR")
         self.assertIn("Deprecated", data["tagNote"])
+        self.assertEqual(data["currentToTargetRatioPct"], 83.3)
+        self.assertEqual(data["distanceToTargetPct"], 20.0)
+        self.assertEqual(data["distanceConvention"], "(referenceTargetPrice-currentPrice)/currentPrice*100")
+
+    def test_short_momentum_uses_observation_date(self):
+        observation = datetime.datetime(2026, 7, 15, tzinfo=datetime.UTC)
+
+        class FakeTicker:
+            info = {
+                "sharesShort": 120,
+                "sharesShortPriorMonth": 100,
+                "shortPercentOfFloat": 0.05,
+                "shortRatio": 2.5,
+                "dateShortInterest": int(observation.timestamp()),
+            }
+
+        srv.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
+        data = json.loads(_run(srv.get_short_momentum("AEHR")))
+        self.assertEqual(data["dateShortInterest"], "2026-07-15")
+        self.assertEqual(data["dataDate"], "2026-07-15")
+        self.assertEqual(data["dataDateBasis"], "SHORT_INTEREST_OBSERVATION")
+
+    def test_risk_mentions_reject_xbrl_identifier_noise(self):
+        async def fake_search(**kwargs):
+            return json.dumps({
+                "matchCount": 2,
+                "matches": [
+                    {"term": "China", "sectionHeading": "Risk Factors", "context": "srt:ChinaMember"},
+                    {
+                        "term": "China",
+                        "sectionHeading": "Risk Factors",
+                        "context": "Our operations in China may be adversely affected by tariffs and export controls.",
+                    },
+                ],
+            })
+
+        old_search = srv.search_sec_filing_text
+        try:
+            srv.search_sec_filing_text = fake_search
+            data = json.loads(_run(srv.extract_risk_factor_mentions("AAOI", ["China"])))
+        finally:
+            srv.search_sec_filing_text = old_search
+        self.assertEqual(data["status"], "FOUND")
+        self.assertEqual(len(data["matches"]), 1)
+        self.assertIn("operations in China", data["matches"][0]["excerpt"])
+        self.assertEqual(data["rejectedNoiseCount"], 1)
+
+    def test_entity_exposure_rejects_competitor_list(self):
+        async def fake_index(**kwargs):
+            return json.dumps({"filingType": "10-K", "index": {"sections": [], "tables": []}})
+
+        async def fake_geo(**kwargs):
+            return json.dumps({"status": "NOT_FOUND", "value": None, "confidence": "LOW", "evidence": {}})
+
+        async def fake_search(**kwargs):
+            terms = kwargs.get("search_terms") or []
+            if "foxconn" in terms:
+                return json.dumps({
+                    "matches": [{
+                        "term": "foxconn",
+                        "sectionHeading": "Competition",
+                        "context": "Our competitors include Foxconn, TSMC, and other large manufacturers.",
+                    }],
+                })
+            return json.dumps({"matches": []})
+
+        async def fake_risk(**kwargs):
+            return json.dumps({"status": "NOT_FOUND", "matches": []})
+
+        old_index = srv.get_sec_filing_index
+        old_geo = srv.extract_geographic_revenue
+        old_search = srv.search_sec_filing_text
+        old_risk = srv.extract_risk_factor_mentions
+        try:
+            srv.get_sec_filing_index = fake_index
+            srv.extract_geographic_revenue = fake_geo
+            srv.search_sec_filing_text = fake_search
+            srv.extract_risk_factor_mentions = fake_risk
+            data = json.loads(_run(srv.extract_exposure("AAOI", "china")))
+        finally:
+            srv.get_sec_filing_index = old_index
+            srv.extract_geographic_revenue = old_geo
+            srv.search_sec_filing_text = old_search
+            srv.extract_risk_factor_mentions = old_risk
+        self.assertEqual(data["entityExposure"]["status"], "NOT_FOUND")
+        self.assertEqual(data["entityExposure"]["entities"], [])
+        self.assertEqual(data["entityExposure"]["rejectedNoiseCount"], 1)
 
     def test_event_dedupe_ignores_source_url_and_keeps_refs(self):
         title = "Coherent and Lumentum Stocks Have Tumbled. Why Now Is the Time to Buy the Dip"
@@ -1202,10 +1290,9 @@ class TestPr2DataQuality(unittest.TestCase):
             srv.extract_revenue_exposure = old_revenue
             srv.extract_risk_factor_mentions = old_risk
         entity_evidence = data["manufacturingExposure"]["evidence"][0]
-        risk_evidence = data["riskFactorExposure"]["evidence"][0]
         self.assertTrue(entity_evidence["excerptAvailable"])
-        self.assertFalse(risk_evidence["excerptAvailable"])
-        self.assertNotIn("excerpt", risk_evidence)
+        self.assertEqual(data["riskFactorExposure"]["status"], "NOT_FOUND")
+        self.assertEqual(data["riskFactorExposure"]["evidence"], [])
 
 
 if __name__ == "__main__":

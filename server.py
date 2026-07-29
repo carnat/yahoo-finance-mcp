@@ -4067,7 +4067,7 @@ def _classify_analyst_change(action: object, from_grade: object, to_grade: objec
 
 Returns pre-aggregated data so you do NOT need to call get_recommendations separately.
 Includes:
-- Consensus price target (current, low, high, mean, median) and % upside from current price
+- Current market price plus consensus price targets (low, high, mean, median) and % upside to the mean target
 - Recommendation breakdown (strongBuy, buy, hold, sell, strongSell counts) for recent periods
 - Dominant consensus rating
 
@@ -4109,17 +4109,16 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
     try:
         targets = company.analyst_price_targets
         if targets:
-            current_target = targets.get("current")
             target_mean = targets.get("mean")
             output["priceTargets"] = {
-                "current": current_target,
+                "current": last_price,
                 "low": targets.get("low"),
                 "high": targets.get("high"),
                 "mean": target_mean,
                 "median": targets.get("median"),
                 "pctUpsideFromLastPrice": (
-                    round((current_target - last_price) / last_price * 100, 2)
-                    if current_target and last_price
+                    round((target_mean - last_price) / last_price * 100, 2)
+                    if target_mean and last_price
                     else None
                 ),
             }
@@ -4302,6 +4301,7 @@ async def get_earnings_analysis(ticker: str) -> str:
 PREFER THIS over fetching full financial statements when you need valuation or profitability ratios.
 Ratios are computed server-side from company.info so the LLM does not have to process raw statements.
 Set history_periods (1-20) to add dated Yahoo valuation measures at the requested frequency.
+Read unitSemantics before interpreting ratios: margins/yields are not all on the same scale.
 
 Includes:
 - Valuation: P/E (trailing & forward), P/S, P/B, EV/EBITDA, EV/Revenue, PEG ratio
@@ -4395,6 +4395,19 @@ async def get_financial_ratios(
 
     # Replace any dict values (empty {} or non-numeric wrappers) with None
     ratios = {k: (None if isinstance(v, dict) else v) for k, v in ratios.items()}
+    ratios["unitSemantics"] = {
+        "currency": ratios.get("currency"),
+        "multiples": [
+            "trailingPE", "forwardPE", "pegRatio", "priceToSales", "priceToBook",
+            "enterpriseToEbitda", "enterpriseToRevenue", "currentRatio", "quickRatio",
+        ],
+        "decimalRatios": [
+            "grossMargins", "operatingMargins", "profitMargins", "returnOnEquity",
+            "returnOnAssets", "dividendYield", "payoutRatio", "earningsGrowth", "revenueGrowth",
+        ],
+        "percentValues": ["debtToEquity", "freeCashflowYield"],
+        "currencyValues": ["freeCashflow"],
+    }
 
     if history_periods:
         label_map = {
@@ -4675,6 +4688,16 @@ async def get_market_calendar(
             kwargs["filter_most_active"] = False
         frame = method(**kwargs)
         items = _df_to_records(frame) or []
+        for item in items:
+            normalized = {
+                re.sub(r"[^a-z]", "", str(key).lower()): key
+                for key in item
+            }
+            actual_key = normalized.get("epsactual") or normalized.get("reportedeps")
+            if actual_key is not None and item.get(actual_key) is None:
+                for normalized_key, original_key in normalized.items():
+                    if "surprise" in normalized_key:
+                        item[original_key] = None
     except Exception as e:
         return json.dumps({"error": True, "code": "PROVIDER_ERROR", "message": str(e), "eventType": event_type})
     return json.dumps({
@@ -6951,7 +6974,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
 @yfinance_server.tool(
     name="get_price_target_bracket",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"],
-    description="""Compare a live regular-market quote to a user-supplied reference target and return distance/bracket labels. Read priceTimestamp/observationType; this is not a completed-close calculation.
+    description="""Compare a live regular-market quote to a user-supplied reference target and return distance/bracket labels. Read priceTimestamp/observationType; this is not a completed-close calculation. referenceTargetPct/currentToTargetRatioPct are the legacy ratio; distanceToTargetPct is the directional percent distance to target.
 
 ratio = currentPrice / reference_target_price × 100.
 
@@ -6989,6 +7012,7 @@ async def get_price_target_bracket(
         return json.dumps({"error": True, "message": str(e), "ticker": ticker})
 
     reference_target_pct = round(current_price / target_price * 100, 1)
+    distance_to_target_pct = round((target_price - current_price) / current_price * 100, 1)
 
     if reference_target_pct <= 75:
         bracket = "STRONG_BUY"
@@ -7039,6 +7063,9 @@ async def get_price_target_bracket(
         "marketOpen": market_open,
         "referenceTargetPrice": target_price,
         "referenceTargetPct": reference_target_pct,
+        "currentToTargetRatioPct": reference_target_pct,
+        "distanceToTargetPct": distance_to_target_pct,
+        "distanceConvention": "(referenceTargetPrice-currentPrice)/currentPrice*100",
         "ioPt": target_price,
         "eqfPct": reference_target_pct,
         "bracket": bracket,
@@ -7276,7 +7303,7 @@ async def get_fund_profile(ticker: str | list[str], sections: list[str] | None =
     return await get_etf_info(ticker, sections)
 
 
-@yfinance_server.tool(name="analyze_financial_ratios", output_schema=_TOOL_OUTPUT_SCHEMAS["get_financial_ratios"], description="Analyze current financial ratios and optionally historical Yahoo valuation measures.")
+@yfinance_server.tool(name="analyze_financial_ratios", output_schema=_TOOL_OUTPUT_SCHEMAS["get_financial_ratios"], description="Analyze current financial ratios with explicit unitSemantics and optionally historical Yahoo valuation measures.")
 async def analyze_financial_ratios(ticker: str | list[str], history_periods: int = 0, frequency: Literal["quarterly", "monthly", "yearly", "trailing"] = "quarterly") -> str:
     return await get_financial_ratios(ticker, history_periods, frequency)
 
@@ -7412,7 +7439,7 @@ async def find_put_hedge_candidates(ticker: str, otm_pct_min: float = 8, otm_pct
     return await get_put_hedge_candidates(ticker, otm_pct_min, otm_pct_max, budget_usd, expiry_after)
 
 
-@yfinance_server.tool(name="calculate_price_target_distance", output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"], description="Canonical alias for get_price_target_bracket.")
+@yfinance_server.tool(name="calculate_price_target_distance", output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"], description="Compare current price to a user-supplied reference price target with both the legacy ratio and directional percent distance.")
 async def calculate_price_target_distance(
     ticker: str,
     reference_target_price: float | None = None,
@@ -8787,6 +8814,53 @@ async def extract_revenue_exposure(
     return json.dumps({"ticker": ticker, "query": exposure_query, "matches": matches, "status": status})
 
 
+_EXPOSURE_XBRL_TOKEN_RE = _re.compile(
+    r"\b(?:us-gaap|srt|country|dei):[A-Za-z0-9_.-]+\b",
+    _re.IGNORECASE,
+)
+_EXPOSURE_COMPETITION_RE = _re.compile(
+    r"\b(?:competitors?|competition|compete(?:s|d|ing)?\s+with)\b",
+    _re.IGNORECASE,
+)
+_EXPOSURE_RELATIONSHIP_RE = _re.compile(
+    r"\b(?:supplier|vendor|customer|manufactur\w*|assembl\w*|facilit\w*|factory|"
+    r"subsidiar\w*|operations?|production|procur\w*|sourc\w*|partner\w*|"
+    r"loan|credit|deposit|account|lender|borrow\w*)\b",
+    _re.IGNORECASE,
+)
+
+
+def _exposure_term_present(text: str, term: str) -> bool:
+    return bool(_re.search(
+        rf"(?<![A-Za-z0-9]){_re.escape(str(term).strip())}(?![A-Za-z0-9])",
+        text,
+        _re.IGNORECASE,
+    ))
+
+
+def _readable_exposure_excerpt(
+    value: object,
+    terms: list[str],
+    *,
+    max_len: int = 240,
+    min_words: int = 5,
+) -> str:
+    cleaned = _EXPOSURE_XBRL_TOKEN_RE.sub(" ", str(value or ""))
+    excerpt = _compact_excerpt(cleaned, max_len)
+    if not excerpt or not any(_exposure_term_present(excerpt, term) for term in terms):
+        return ""
+    if len(_re.findall(r"[A-Za-z]{2,}", excerpt)) < min_words:
+        return ""
+    return excerpt
+
+
+def _contextual_entity_excerpt(value: object, entity: str, *, max_len: int = 240) -> str:
+    excerpt = _readable_exposure_excerpt(value, [entity], max_len=max_len, min_words=4)
+    if not excerpt or _EXPOSURE_COMPETITION_RE.search(excerpt):
+        return ""
+    return excerpt if _EXPOSURE_RELATIONSHIP_RE.search(excerpt) else ""
+
+
 @yfinance_server.tool(name="extract_risk_factor_mentions", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_risk_factor_mentions"], description="Extract concise risk-factor mentions for explicit terms from a filing.")
 async def extract_risk_factor_mentions(
     ticker: str,
@@ -8796,6 +8870,8 @@ async def extract_risk_factor_mentions(
     detailLevel: str = "compact",
 ) -> str:
     matches: list[dict] = []
+    rejected_noise_count = 0
+    raw_match_count = 0
     for term in (terms or []):
         search = _safe_json_loads(await search_sec_filing_text(
             ticker=ticker,
@@ -8803,15 +8879,30 @@ async def extract_risk_factor_mentions(
             section_hint="Risk Factors",
             filing_type=filing_type,
         ))
+        raw_match_count += int(search.get("matchCount") or 0)
         for m in (search.get("matches") if isinstance(search.get("matches"), list) else [])[:3]:
             if not isinstance(m, dict):
                 continue
-            excerpt = _compact_excerpt(str(m.get("context") or m.get("excerpt") or ""))
+            row_term = str(m.get("term") or "")
+            heading = str(m.get("sectionHeading") or "Risk Factors")
+            if row_term and row_term.lower() != str(term).lower():
+                rejected_noise_count += 1
+                continue
+            if m.get("sectionHeading") and "risk" not in heading.lower():
+                rejected_noise_count += 1
+                continue
+            excerpt = _readable_exposure_excerpt(
+                m.get("contextText") or m.get("context") or m.get("excerpt") or "",
+                [str(term)],
+            )
+            if not excerpt:
+                rejected_noise_count += 1
+                continue
             matches.append({
                 "term": term,
-                "sectionHeading": m.get("sectionHeading") or "Risk Factors",
+                "sectionHeading": heading,
                 "excerpt": excerpt,
-                "excerptAvailable": bool(excerpt),
+                "excerptAvailable": True,
                 "confidence": "MEDIUM",
                 "evidence": {
                     "filingDate": search.get("filingDate"),
@@ -8819,7 +8910,13 @@ async def extract_risk_factor_mentions(
                     "documentUrl": search.get("documentUrl"),
                 },
             })
-    result = {"ticker": ticker, "matches": matches, "status": "FOUND" if matches else "NOT_FOUND"}
+    result = {
+        "ticker": ticker,
+        "matches": matches,
+        "status": "FOUND" if matches else ("FOUND_NO_EXCERPT" if raw_match_count else "NOT_FOUND"),
+        "rawMatchCount": raw_match_count,
+        "rejectedNoiseCount": rejected_noise_count,
+    }
     if str(detailLevel).lower() == "raw":
         result["rawTerms"] = terms or []
     return json.dumps(result)
@@ -8889,8 +8986,18 @@ async def extract_china_exposure(
     sections = index.get("sections") if isinstance(index.get("sections"), list) else []
     tables = index.get("tables") if isinstance(index.get("tables"), list) else []
 
-    def _collect(term_list: list[str]) -> list[dict]:
+    def _collect(term_list: list[str], evidence_kind: str) -> tuple[list[dict], int]:
         found = []
+        rejected = 0
+
+        def _scoped_excerpt(value: object, term: str) -> str:
+            if evidence_kind == "entity":
+                return _contextual_entity_excerpt(value, term)
+            excerpt = _readable_exposure_excerpt(value, [term], min_words=3)
+            if evidence_kind == "bank" and excerpt and not _EXPOSURE_RELATIONSHIP_RE.search(excerpt):
+                return ""
+            return excerpt
+
         for sec in sections:
             if not isinstance(sec, dict):
                 continue
@@ -8898,7 +9005,10 @@ async def extract_china_exposure(
             low = heading.lower()
             for term in term_list:
                 if term.lower() in low:
-                    excerpt = _compact_excerpt(heading)
+                    excerpt = _scoped_excerpt(heading, term)
+                    if not excerpt:
+                        rejected += 1
+                        continue
                     found.append({
                         "source": "section",
                         "term": term,
@@ -8913,7 +9023,10 @@ async def extract_china_exposure(
             hay = hay_source.lower()
             for term in term_list:
                 if term.lower() in hay:
-                    excerpt = _compact_excerpt(hay_source)
+                    excerpt = _scoped_excerpt(hay_source, term)
+                    if not excerpt:
+                        rejected += 1
+                        continue
                     found.append({
                         "source": "table",
                         "term": term,
@@ -8923,27 +9036,31 @@ async def extract_china_exposure(
                         "excerpt": excerpt,
                         "excerptAvailable": bool(excerpt),
                     })
-        return found
+        return found, rejected
 
     entity_terms = ["Tongmei", "JinMei", "BoYu"]
     bank_terms = ["Bank of China"]
     manuf_terms = ["manufacturing", "production", "supply chain", "fab"]
     risk_terms = ["China", "tariff", "export control"]
 
-    entity_evidence = _collect(entity_terms)
-    bank_evidence = _collect(bank_terms)
-    manu_evidence = _collect(manuf_terms)
+    entity_evidence, entity_rejected = _collect(entity_terms, "entity")
+    bank_evidence, bank_rejected = _collect(bank_terms, "bank")
+    manu_evidence, manu_rejected = _collect(manuf_terms, "manufacturing")
     risk_mentions = _safe_json_loads(await extract_risk_factor_mentions(ticker=ticker, terms=risk_terms, filing_type=filing_type, period=period))
-    risk_evidence = risk_mentions.get("matches") if isinstance(risk_mentions.get("matches"), list) else []
-    for ev in risk_evidence:
+    raw_risk_evidence = risk_mentions.get("matches") if isinstance(risk_mentions.get("matches"), list) else []
+    risk_evidence = []
+    for ev in raw_risk_evidence:
         if isinstance(ev, dict):
-            excerpt = _compact_excerpt(str(ev.get("excerpt") or ev.get("context") or ""))
+            term = str(ev.get("term") or "China")
+            excerpt = _readable_exposure_excerpt(
+                ev.get("excerpt") or ev.get("context") or "",
+                [term],
+            )
             if excerpt:
-                ev["excerpt"] = excerpt
-                ev["excerptAvailable"] = True
-            else:
-                ev.pop("excerpt", None)
-                ev["excerptAvailable"] = False
+                shaped = dict(ev)
+                shaped["excerpt"] = excerpt
+                shaped["excerptAvailable"] = True
+                risk_evidence.append(shaped)
 
     non_revenue_found = bool(entity_evidence or bank_evidence or manu_evidence or risk_evidence)
     if revenue.get("status") == "FOUND_REVENUE_EXPOSURE":
@@ -8973,9 +9090,9 @@ async def extract_china_exposure(
             "confidence": "HIGH" if revenue_status == "FOUND" else ("NOT_DISCLOSED" if revenue_status == "NOT_DISCLOSED" else "LOW"),
             "evidence": revenue.get("matches", [{}])[0].get("evidence") if revenue.get("matches") else [],
         },
-        "manufacturingExposure": {"status": "FOUND" if manu_evidence else "NOT_FOUND", "confidence": "MEDIUM", "evidence": manu_evidence},
-        "entityExposure": {"status": "FOUND" if entity_evidence else "NOT_FOUND", "entities": entity_terms if entity_evidence else [], "confidence": "MEDIUM", "evidence": entity_evidence},
-        "bankExposure": {"status": "FOUND" if bank_evidence else "NOT_FOUND", "entities": bank_terms if bank_evidence else [], "confidence": "MEDIUM", "evidence": bank_evidence},
+        "manufacturingExposure": {"status": "FOUND" if manu_evidence else "NOT_FOUND", "confidence": "MEDIUM", "evidence": manu_evidence, "rejectedNoiseCount": manu_rejected},
+        "entityExposure": {"status": "FOUND" if entity_evidence else "NOT_FOUND", "entities": entity_terms if entity_evidence else [], "confidence": "MEDIUM", "evidence": entity_evidence, "rejectedNoiseCount": entity_rejected},
+        "bankExposure": {"status": "FOUND" if bank_evidence else "NOT_FOUND", "entities": bank_terms if bank_evidence else [], "confidence": "MEDIUM", "evidence": bank_evidence, "rejectedNoiseCount": bank_rejected},
         "riskFactorExposure": {"status": "FOUND" if risk_evidence else "NOT_FOUND", "confidence": "MEDIUM", "evidence": risk_evidence},
         "overallStatus": overall,
         "warnings": [],
@@ -9082,17 +9199,23 @@ async def extract_exposure(
 
     ops_evidence: list[dict] = []
     found_op_terms: set[str] = set()
+    rejected_ops_noise = 0
     for m in ops_matches:
         if not isinstance(m, dict):
             continue
-        context_text = str(m.get("contextText") or m.get("context") or "").lower()
+        raw_context = m.get("contextText") or m.get("context") or ""
+        context_excerpt = _readable_exposure_excerpt(raw_context, [topic_lower], max_len=200)
+        if not context_excerpt:
+            rejected_ops_noise += 1
+            continue
+        context_text = context_excerpt.lower()
         for op_term in OPERATIONAL_TERMS:
             if op_term in context_text:
                 found_op_terms.add(op_term)
                 if len(ops_evidence) < 5:
                     ops_evidence.append({
                         "term": op_term,
-                        "excerpt": _compact_excerpt(str(m.get("contextText") or m.get("context") or ""), 200),
+                        "excerpt": context_excerpt,
                         "section": str(m.get("sectionHeading") or ""),
                     })
                 break
@@ -9103,6 +9226,7 @@ async def extract_exposure(
         "status": "FOUND" if ops_evidence else "NOT_FOUND",
         "terms": list(found_op_terms),
         "evidence": ops_evidence,
+        "rejectedNoiseCount": rejected_ops_noise,
     }
 
     # Entity scan (China only)
@@ -9114,16 +9238,25 @@ async def extract_exposure(
             ent_matches = []
         found_entities: set[str] = set()
         ent_evidence: list[dict] = []
+        rejected_entity_noise = 0
         for m in ent_matches:
             if not isinstance(m, dict):
                 continue
             term_low = str(m.get("term") or "").lower()
+            excerpt = _contextual_entity_excerpt(
+                m.get("contextText") or m.get("context") or "",
+                term_low,
+                max_len=200,
+            )
+            if not term_low or not excerpt:
+                rejected_entity_noise += 1
+                continue
             if term_low and term_low not in found_entities:
                 found_entities.add(term_low)
                 if len(ent_evidence) < 5:
                     ent_evidence.append({
                         "entity": str(m.get("term") or ""),
-                        "excerpt": _compact_excerpt(str(m.get("contextText") or m.get("context") or ""), 200),
+                        "excerpt": excerpt,
                         "section": str(m.get("sectionHeading") or ""),
                     })
             if len(ent_evidence) >= 5:
@@ -9132,9 +9265,10 @@ async def extract_exposure(
             "status": "FOUND" if ent_evidence else "NOT_FOUND",
             "entities": list(found_entities),
             "evidence": ent_evidence,
+            "rejectedNoiseCount": rejected_entity_noise,
         }
     else:
-        entity_exposure = {"status": "NOT_FOUND", "entities": [], "evidence": []}
+        entity_exposure = {"status": "NOT_FOUND", "entities": [], "evidence": [], "rejectedNoiseCount": 0}
 
     # Risk factor scan
     if include_risk_factors:
@@ -9143,13 +9277,20 @@ async def extract_exposure(
             risk_matches = risk_raw.get("matches") or []
         except Exception:
             risk_matches = []
-        risk_evidence = [
-            {
-                "excerpt": _compact_excerpt(str(m.get("excerpt") or m.get("context") or m.get("contextText") or ""), 200),
-                "section": str(m.get("sectionHeading") or "Risk Factors"),
-            }
-            for m in risk_matches[:5] if isinstance(m, dict)
-        ]
+        risk_evidence = []
+        for m in risk_matches[:5]:
+            if not isinstance(m, dict):
+                continue
+            excerpt = _readable_exposure_excerpt(
+                m.get("excerpt") or m.get("context") or m.get("contextText") or "",
+                [topic_lower],
+                max_len=200,
+            )
+            if excerpt:
+                risk_evidence.append({
+                    "excerpt": excerpt,
+                    "section": str(m.get("sectionHeading") or "Risk Factors"),
+                })
         risk_factor_exposure = {
             "status": "FOUND" if risk_evidence else "NOT_FOUND",
             "mentionCount": len(risk_matches),

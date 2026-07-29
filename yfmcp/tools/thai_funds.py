@@ -260,6 +260,9 @@ def _request_json_sync(path: str, params: dict[str, object]) -> dict[str, Any]:
             "RETRY_LATER",
         ) from exc
 
+    if response_status == 204:
+        return {"message": "no_content", "items": [], "next_cursor": ""}
+
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:

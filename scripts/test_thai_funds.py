@@ -311,6 +311,33 @@ class ThaiFundFixtureTest(unittest.TestCase):
         self.assertEqual(request_headers["cache-control"], "no-cache")
         self.assertEqual(request_headers["ocp-apim-subscription-key"], "fixture-key")
 
+    def test_http_204_is_a_bounded_empty_page(self) -> None:
+        original = thai._urlrequest.urlopen
+        try:
+            class FakeResponse:
+                status = 204
+                headers = {"Content-Type": ""}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+                def read(self):
+                    return b""
+
+            thai._urlrequest.urlopen = lambda *_args, **_kwargs: FakeResponse()
+            payload = thai._request_json_sync(
+                "/daily-info/dividend-history",
+                {"proj_id": "M0232_2564", "page_size": 100},
+            )
+        finally:
+            thai._urlrequest.urlopen = original
+        self.assertEqual(payload["items"], [])
+        self.assertEqual(payload["next_cursor"], "")
+        self.assertEqual(payload["message"], "no_content")
+
     def test_invalid_json_is_redacted_but_diagnosable(self) -> None:
         original = thai._urlrequest.urlopen
         raw = b"<html>upstream error</html>"
@@ -365,7 +392,7 @@ class ThaiFundWorkerParityTest(unittest.TestCase):
         for token in (
             "url.searchParams.set", 'method: "GET"', "Ocp-Apim-Subscription-Key", "Content-Type", "Cache-Control",
             "SOURCE_UNCONFIGURED", "AUTH_ERROR", "RATE_LIMIT", "PROVIDER_TIMEOUT", 'fund_status: "Registered"',
-            'fund_status: "IPO"', "projectInfoRaw", "bodySha256",
+            'fund_status: "IPO"', "projectInfoRaw", "bodySha256", "response.status === 204",
         ):
             self.assertIn(token, worker)
         for endpoint in ("/general-info/profiles", "/daily-info/nav"):
