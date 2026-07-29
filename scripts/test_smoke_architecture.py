@@ -236,6 +236,13 @@ class TestSmokeArchitecture(unittest.TestCase):
         self.assertEqual(canary["assertion"], "sec_xbrl_decision_grade")
 
     def test_xbrl_canary_requires_source_evidence_not_private_health(self) -> None:
+        evidence = {
+            "sourceType": "sec_xbrl_companyconcept",
+            "concept": "RevenueFromContractWithCustomerExcludingAssessedTax",
+            "accessionNumber": "0000320193-25-000079",
+            "periodEnd": "2025-09-27",
+            "documentUrl": "https://www.sec.gov/Archives/example.htm",
+        }
         payload = {
             "ok": True,
             "data": {
@@ -248,13 +255,8 @@ class TestSmokeArchitecture(unittest.TestCase):
                     "concept": "RevenueFromContractWithCustomerExcludingAssessedTax",
                     "periodEnd": "2025-09-27",
                 },
-                "sourceEvidence": {
-                    "sourceType": "sec_xbrl_companyconcept",
-                    "concept": "RevenueFromContractWithCustomerExcludingAssessedTax",
-                    "accessionNumber": "0000320193-25-000079",
-                    "periodEnd": "2025-09-27",
-                    "documentUrl": "https://www.sec.gov/Archives/example.htm",
-                },
+                "sourceEvidence": evidence,
+                "evidence": evidence,
             },
         }
         deployed_canaries.sec_xbrl_decision_grade(payload, {})

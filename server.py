@@ -3690,7 +3690,7 @@ async def get_filing_outline(ticker: str, accession_number: str | None = None, d
 @yfinance_server.tool(
     name="get_filing_section",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_section"],
-    description="""Retrieve the text content of a specific section from an SEC filing document.
+    description="""Retrieve a structurally resolved SEC filing section. Item requests fail closed rather than returning table-of-contents text.
 Args:
     ticker: str - ticker symbol
     section_name: str - Section name/heading to find, e.g. 'Item 1A', 'Note 3', 'Risk Factors'
@@ -3724,6 +3724,7 @@ async def get_filing_section(ticker: str, section_name: str, document_url: str, 
             return json.dumps({
                 "ticker": ticker,
                 "sectionName": section_name,
+                "status": "OK",
                 "found": True,
                 "text": plain_section[:context_chars],
                 "sectionStartOffset": start_idx,
@@ -3732,7 +3733,22 @@ async def get_filing_section(ticker: str, section_name: str, document_url: str, 
                 "tocSkipped": toc_skipped,
             })
 
-        # Fallback to plain-text regex search if structure bounds not found
+        if _section_item_token(section_name):
+            return json.dumps({
+                "ticker": ticker,
+                "sectionName": section_name,
+                "status": "SECTION_STRUCTURE_NOT_RESOLVED",
+                "found": False,
+                "text": None,
+                "sectionStartOffset": None,
+                "sectionEndOffset": None,
+                "matchedHeading": "",
+                "tocSkipped": toc_skipped,
+                "decisionGrade": False,
+                "recommendedNextAction": "GET_FILING_OUTLINE",
+            })
+
+        # Non-Item labels retain the legacy plain-text fallback.
         text = _re.sub(r'<[^>]+>', ' ', html)
         text = ' '.join(text.split())
 
@@ -3748,6 +3764,7 @@ async def get_filing_section(ticker: str, section_name: str, document_url: str, 
             return json.dumps({
                 "ticker": ticker,
                 "sectionName": section_name,
+                "status": "SECTION_NOT_FOUND",
                 "found": False,
                 "text": None,
                 "sectionStartOffset": None,
@@ -3761,6 +3778,7 @@ async def get_filing_section(ticker: str, section_name: str, document_url: str, 
         return json.dumps({
             "ticker": ticker,
             "sectionName": section_name,
+            "status": "TEXT_FALLBACK",
             "found": True,
             "text": text[start:end],
             "sectionStartOffset": start,
@@ -3772,16 +3790,41 @@ async def get_filing_section(ticker: str, section_name: str, document_url: str, 
         return _mcp_failure("get_filing_section", ErrorCode.PROVIDER_ERROR, str(e))
 
 
+def _parse_filing_table_rows(table_html: str, max_rows: int | None = None) -> list[list[str]]:
+    tr_re = _re.compile(r'<tr[^>]*>(.*?)</tr>', _re.DOTALL | _re.IGNORECASE)
+    td_re = _re.compile(r'<t[dh][^>]*>(.*?)</t[dh]>', _re.DOTALL | _re.IGNORECASE)
+    parsed: list[list[str]] = []
+    for row_html in tr_re.findall(table_html):
+        cells = []
+        for cell_html in td_re.findall(row_html):
+            cell = _html_module.unescape(_re.sub(r'<[^>]+>', ' ', cell_html))
+            cells.append(" ".join(cell.replace("\xa0", " ").split()))
+        if any(cells):
+            parsed.append(cells)
+        if max_rows is not None and len(parsed) >= max_rows:
+            break
+    return parsed
+
+
+def _filing_table_is_usable(rows: list[list[str]]) -> bool:
+    return sum(1 for row in rows for cell in row if cell.strip()) >= 2
+
+
 @yfinance_server.tool(
     name="list_filing_tables",
     output_schema=_TOOL_OUTPUT_SCHEMAS["list_filing_tables"],
-    description="""List all HTML tables in an SEC filing document. Returns table index, headers, and row count.
+    description="""List semantically usable SEC filing tables, preserving original indexes and reporting excluded layout tables.
 Args:
     ticker: str
     document_url: str - Direct URL to filing HTML (must be https://www.sec.gov/Archives/...)
 """,
 )
-async def list_filing_tables(ticker: str, document_url: str) -> str:
+async def list_filing_tables(
+    ticker: str,
+    document_url: str,
+    offset: int = 0,
+    limit: int = 50,
+) -> str:
     err = _validate_ticker(ticker)
     if err:
         return _mcp_failure("list_filing_tables", ErrorCode.INPUT_VALIDATION_ERROR, err)
@@ -3798,19 +3841,37 @@ async def list_filing_tables(ticker: str, document_url: str) -> str:
         html = _sanitize_sec_html(html)
         tables = []
         table_re = _re.compile(r'<table[^>]*>(.*?)</table>', _re.DOTALL | _re.IGNORECASE)
-        tr_re = _re.compile(r'<tr[^>]*>(.*?)</tr>', _re.DOTALL | _re.IGNORECASE)
-        td_re = _re.compile(r'<t[dh][^>]*>(.*?)</t[dh]>', _re.DOTALL | _re.IGNORECASE)
 
-        for i, table_m in enumerate(table_re.finditer(html)):
-            rows = tr_re.findall(table_m.group(1))
-            row_count = len(rows)
-            headers = []
-            if rows:
-                first_cells = td_re.findall(rows[0])
-                headers = [' '.join(_re.sub(r'<[^>]+>', '', c).split()) for c in first_cells[:6]]
-            tables.append({"tableIndex": i, "rowCount": row_count, "headers": headers})
+        raw_tables = list(table_re.finditer(html))
+        for i, table_m in enumerate(raw_tables):
+            rows = _parse_filing_table_rows(table_m.group(1))
+            if not _filing_table_is_usable(rows):
+                continue
+            tables.append({
+                "tableIndex": i,
+                "rowCount": len(rows),
+                "title": None,
+                "headers": rows[0][:6],
+                "qualityStatus": "USABLE",
+            })
 
-        return json.dumps({"ticker": ticker, "documentUrl": document_url, "tableCount": len(tables), "tables": tables[:50]})
+        safe_offset = max(0, int(offset))
+        safe_limit = min(100, max(1, int(limit or 50)))
+        page = tables[safe_offset:safe_offset + safe_limit]
+        return json.dumps({
+            "ticker": ticker,
+            "documentUrl": document_url,
+            "status": "OK" if tables else "NO_USABLE_TABLES",
+            "tableCount": len(raw_tables),
+            "usableTableCount": len(tables),
+            "excludedTableCount": len(raw_tables) - len(tables),
+            "returnedCount": len(page),
+            "offset": safe_offset,
+            "limit": safe_limit,
+            "hasMore": safe_offset + len(page) < len(tables),
+            "tables": page,
+            "recommendedNextAction": "GET_SEC_FILING_TABLE" if tables else "SEARCH_FILING_TEXT",
+        })
     except Exception as e:
         return _mcp_failure("list_filing_tables", ErrorCode.PROVIDER_ERROR, str(e))
 
@@ -3818,7 +3879,7 @@ async def list_filing_tables(ticker: str, document_url: str) -> str:
 @yfinance_server.tool(
     name="get_filing_table",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_table"],
-    description="""Get the parsed rows of a specific table from an SEC filing document.
+    description="""Get parsed SEC filing table rows. Empty/layout-only candidates return UNUSABLE_TABLE with a recovery action.
 Args:
     ticker: str
     document_url: str - Direct URL to filing HTML (must be https://www.sec.gov/Archives/...)
@@ -3842,27 +3903,36 @@ async def get_filing_table(ticker: str, document_url: str, table_index: int, max
 
         html = _sanitize_sec_html(html)
         table_re = _re.compile(r'<table[^>]*>(.*?)</table>', _re.DOTALL | _re.IGNORECASE)
-        tr_re = _re.compile(r'<tr[^>]*>(.*?)</tr>', _re.DOTALL | _re.IGNORECASE)
-        td_re = _re.compile(r'<t[dh][^>]*>(.*?)</t[dh]>', _re.DOTALL | _re.IGNORECASE)
-
         tables = list(table_re.finditer(html))
-        if table_index >= len(tables):
+        if table_index < 0 or table_index >= len(tables):
             return _mcp_failure("get_filing_table", ErrorCode.NO_FILING_DATA,
                                 f"Table index {table_index} not found. Document has {len(tables)} tables.")
 
         table_html = tables[table_index].group(1)
-        rows = tr_re.findall(table_html)
-        parsed_rows = []
-        for row in rows[:max_rows + 1]:
-            cells = td_re.findall(row)
-            parsed_rows.append([' '.join(_re.sub(r'<[^>]+>', '', c).split()) for c in cells])
+        all_rows = _parse_filing_table_rows(table_html)
+        if not _filing_table_is_usable(all_rows):
+            return json.dumps({
+                "ticker": ticker,
+                "tableIndex": table_index,
+                "status": "UNUSABLE_TABLE",
+                "decisionGrade": False,
+                "totalRows": len(all_rows),
+                "returnedRows": 0,
+                "rows": [],
+                "recommendedNextAction": "LIST_USABLE_TABLES",
+            })
+        safe_max_rows = min(100, max(1, int(max_rows)))
+        parsed_rows = all_rows[:safe_max_rows]
 
         return json.dumps({
             "ticker": ticker,
             "tableIndex": table_index,
-            "totalRows": len(rows),
+            "status": "OK",
+            "decisionGrade": False,
+            "totalRows": len(all_rows),
             "returnedRows": len(parsed_rows),
             "rows": parsed_rows,
+            "recommendedNextAction": "VERIFY_TABLE_PERIOD_AND_UNITS",
         })
     except Exception as e:
         return _mcp_failure("get_filing_table", ErrorCode.PROVIDER_ERROR, str(e))
@@ -7438,7 +7508,7 @@ async def get_sec_filing_outline(ticker: str, filing_type: str = "10-K", period:
     return await get_filing_outline(ticker, accession_number, resolved_doc_url)
 
 
-@yfinance_server.tool(name="get_sec_filing_section", output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_section"], description="Canonical alias for get_filing_section.")
+@yfinance_server.tool(name="get_sec_filing_section", output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_section"], description="Get structurally resolved SEC filing section text; Item requests fail closed when structure is unresolved.")
 async def get_sec_filing_section(
     ticker: str,
     filing_type: str = "10-K",
@@ -7452,13 +7522,19 @@ async def get_sec_filing_section(
     return await get_filing_section(ticker, str(section), str(resolved_doc_url), context_chars)
 
 
-@yfinance_server.tool(name="list_sec_filing_tables", output_schema=_TOOL_OUTPUT_SCHEMAS["list_filing_tables"], description="Canonical alias for list_filing_tables.")
-async def list_sec_filing_tables(ticker: str, filing_type: str = "10-K", document_url: str | None = None) -> str:
+@yfinance_server.tool(name="list_sec_filing_tables", output_schema=_TOOL_OUTPUT_SCHEMAS["list_filing_tables"], description="List usable SEC filing tables with original indexes and excluded-table counts.")
+async def list_sec_filing_tables(
+    ticker: str,
+    filing_type: str = "10-K",
+    document_url: str | None = None,
+    offset: int = 0,
+    limit: int = 50,
+) -> str:
     resolved_doc_url = document_url or await _resolve_latest_sec_doc_url(ticker, filing_type)
-    return await list_filing_tables(ticker, str(resolved_doc_url))
+    return await list_filing_tables(ticker, str(resolved_doc_url), offset, limit)
 
 
-@yfinance_server.tool(name="get_sec_filing_table", output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_table"], description="Canonical alias for get_filing_table.")
+@yfinance_server.tool(name="get_sec_filing_table", output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_table"], description="Get a selected SEC table; unusable layout tables return an explicit recovery action.")
 async def get_sec_filing_table(ticker: str, table_index: int, filing_type: str = "10-K", document_url: str | None = None, max_rows: int = 30) -> str:
     resolved_doc_url = document_url or await _resolve_latest_sec_doc_url(ticker, filing_type)
     return await get_filing_table(ticker, str(resolved_doc_url), table_index, max_rows)
@@ -7605,7 +7681,7 @@ async def extract_sec_filing_fact(
             "documentUrl": parsed_payload.get("documentUrl"),
             "indexUrl": parsed_payload.get("indexUrl"),
             "primaryDocumentUrl": parsed_payload.get("primaryDocumentUrl"),
-            "evidence": parsed_payload.get("evidence"),
+            "evidence": source_evidence if decision_grade else parsed_payload.get("evidence"),
             "sourceEvidence": source_evidence,
             "calculation": parsed_payload.get("calculation"),
             "warnings": parsed_payload.get("warnings", []),
@@ -7683,13 +7759,13 @@ def _build_filing_index_from_html(html: str) -> dict:
 
     # Table extraction
     tables: list[dict] = []
+    raw_table_count = 0
     table_re = _re.compile(r'<table[^>]*>(.*?)</table>', _re.DOTALL | _re.IGNORECASE)
-    tr_re = _re.compile(r'<tr[^>]*>(.*?)</tr>', _re.DOTALL | _re.IGNORECASE)
-    td_re = _re.compile(r'<t[dh][^>]*>(.*?)</t[dh]>', _re.DOTALL | _re.IGNORECASE)
 
     for table_idx, t_match in enumerate(table_re.finditer(sanitized)):
         if table_idx >= 100:
             break
+        raw_table_count = table_idx + 1
         table_start = t_match.start()
         table_html = t_match.group(0)
 
@@ -7702,20 +7778,18 @@ def _build_filing_index_from_html(html: str) -> dict:
                 nearby_heading = sec["heading"]
                 break
 
-        rows = tr_re.findall(t_match.group(1))
-        if not rows:
+        parsed_rows = _parse_filing_table_rows(t_match.group(1))
+        if not _filing_table_is_usable(parsed_rows):
             continue
 
         # Headers from first row
-        first_cells = td_re.findall(rows[0])
-        headers = [_strip_html_tags(c) for c in first_cells[:10]]
+        headers = parsed_rows[0][:10]
 
         # Row labels from first column of subsequent rows
         row_labels: list[str] = []
-        for row in rows[1:20]:
-            cells = td_re.findall(row)
-            if cells:
-                label = _strip_html_tags(cells[0])
+        for row in parsed_rows[1:20]:
+            if row:
+                label = row[0]
                 if label and len(label) < 100:
                     row_labels.append(label)
 
@@ -7779,7 +7853,13 @@ def _build_filing_index_from_html(html: str) -> dict:
         if refs:
             keyword_map[kw] = refs
 
-    return {"sections": sections, "tables": tables, "keywordMap": keyword_map}
+    return {
+        "sections": sections,
+        "tables": tables,
+        "keywordMap": keyword_map,
+        "rawTableCount": raw_table_count,
+        "excludedTableCount": raw_table_count - len(tables),
+    }
 
 
 async def _index_sec_filing_impl(
@@ -8101,7 +8181,14 @@ async def get_sec_filing_intelligence(
             xbrl_available = True
             xbrl_status = "OK"
             for fact_key, concepts in _XBRL_INTELLIGENCE_CONCEPTS.items():
-                xbrl_facts[fact_key] = _extract_xbrl_latest_annual(facts_data, concepts)
+                xbrl_facts[fact_key] = _extract_xbrl_latest_annual(
+                    facts_data,
+                    concepts,
+                    accession_number=accession_number,
+                    document_url=document_url,
+                )
+            if not any(xbrl_facts.values()):
+                xbrl_status = "AVAILABLE_NO_MATCHING_FACTS"
     except Exception:
         xbrl_status = "ERROR"
 
@@ -8179,41 +8266,82 @@ def _is_toc_match(html: str, match_start: int, match_end: int) -> bool:
     return False
 
 
+def _section_item_token(value: str) -> str | None:
+    match = _re.search(r"\bitem\s+(\d+[a-z]?)\b", value, _re.IGNORECASE)
+    return f"item {match.group(1).lower()}" if match else None
+
+
+def _section_heading_matches(requested: str, heading: str) -> bool:
+    requested_text = " ".join(requested.lower().split())
+    heading_text = " ".join(heading.lower().split())
+    requested_item = _section_item_token(requested_text)
+    heading_item = _section_item_token(heading_text)
+    if requested_item:
+        return requested_item == heading_item
+    return requested_text in heading_text or heading_text in requested_text
+
+
+def _bold_item_headings(html: str) -> list[tuple[int, int, str, str]]:
+    """Return structurally bold SEC Item headings with offsets and normalized tokens."""
+    bold_open = (
+        r"(?:<b\b[^>]*>|<strong\b[^>]*>|"
+        r"<span\b[^>]*style\s*=\s*['\"][^'\"]*"
+        r"font-weight\s*:\s*(?:bold|[6-9]00)[^'\"]*['\"][^>]*>)"
+    )
+    item_re = _re.compile(
+        rf"{bold_open}\s*(?P<body>(?:<[^>]+>\s*)*Item(?:\s|&nbsp;|&#160;)+"
+        r"\d+[A-Z]?(?:\s*\([^)]+\))?[^<]{0,160})",
+        _re.IGNORECASE,
+    )
+    matches: list[tuple[int, int, str, str]] = []
+    for match in item_re.finditer(html):
+        text = _html_module.unescape(_strip_html_tags(match.group("body"))).replace("\xa0", " ")
+        text = " ".join(text.split())
+        token = _section_item_token(text)
+        if token:
+            matches.append((match.start(), match.end(), text, token))
+    return matches
+
+
 def _find_section_bounds(html: str, section: str, max_chars: int = 50000) -> tuple[int | None, int | None, str, bool, str | None]:
-    section_lower = section.lower().strip()
     heading_re = _re.compile(r'<h([1-6])[^>]*>(.*?)</h\1>', _re.DOTALL | _re.IGNORECASE)
     candidates = []
     toc_skipped = False
-    
+
+    for occurrence in _re.finditer(_re.escape(section), html, _re.IGNORECASE):
+        if _is_toc_match(html, occurrence.start(), occurrence.end()):
+            toc_skipped = True
+
     all_headings = list(heading_re.finditer(html))
     for idx, h_match in enumerate(all_headings):
-        heading_text = _strip_html_tags(h_match.group(2)).lower().strip()
+        heading_text = _html_module.unescape(_strip_html_tags(h_match.group(2))).replace("\xa0", " ")
+        heading_text = " ".join(heading_text.split())
         level = int(h_match.group(1))
-        
-        if section_lower in heading_text or heading_text in section_lower:
+
+        if _section_heading_matches(section, heading_text):
             if _is_toc_match(html, h_match.start(), h_match.end()):
                 toc_skipped = True
                 continue
-            candidates.append((h_match.start(), level, _strip_html_tags(h_match.group(2)).strip(), idx))
-            
-    item_matches = []
+            candidates.append((h_match.start(), level, heading_text, idx))
+
+    item_matches: list[tuple[int, int, str, str]] = []
+    all_bold_items = _bold_item_headings(html)
     if not candidates:
-        item_re = _re.compile(
-            rf'(?:<b[^>]*>|<span[^>]*font-weight:\s*bold[^>]*>)\s*{_re.escape(section)}\b',
-            _re.IGNORECASE,
-        )
-        for item_match in item_re.finditer(html):
-            if _is_toc_match(html, item_match.start(), item_match.end()):
+        for item_match in all_bold_items:
+            start, end, heading_text, _token = item_match
+            if not _section_heading_matches(section, heading_text):
+                continue
+            if _is_toc_match(html, start, end):
                 toc_skipped = True
                 continue
-            item_matches.append((item_match.start(), item_match.end()))
-            
+            item_matches.append(item_match)
+
     if not candidates and not item_matches:
         return None, None, "", toc_skipped, None
-        
+
     if len(candidates) > 1 or len(item_matches) > 1:
         return None, None, "", toc_skipped, "SECTION_AMBIGUOUS"
-        
+
     if candidates:
         start_pos, level, found_heading, h_idx = candidates[0]
         end_pos = None
@@ -8226,24 +8354,14 @@ def _find_section_bounds(html: str, section: str, max_chars: int = 50000) -> tup
             end_pos = min(start_pos + max_chars * 3, len(html))
         return start_pos, end_pos, found_heading, toc_skipped, None
     else:
-        start_pos, end_pos_match = item_matches[0]
-        found_heading = section
-        _MIN_SECTION_SPACING = 100
-        item_re = _re.compile(
-            rf'(?:<b[^>]*>|<span[^>]*font-weight:\s*bold[^>]*>)\s*{_re.escape(section)}\b',
-            _re.IGNORECASE,
-        )
-        next_start = end_pos_match + _MIN_SECTION_SPACING
-        end_pos = None
-        while True:
-            next_item = item_re.search(html, next_start)
-            if not next_item:
-                break
-            if _is_toc_match(html, next_item.start(), next_item.end()):
-                next_start = next_item.end()
-                continue
-            end_pos = next_item.start()
-            break
+        start_pos, end_pos_match, found_heading, matched_token = item_matches[0]
+        end_pos = next((
+            item_start
+            for item_start, item_end, _heading, item_token in all_bold_items
+            if item_start >= end_pos_match
+            and item_token != matched_token
+            and not _is_toc_match(html, item_start, item_end)
+        ), None)
         if end_pos is None:
             end_pos = min(start_pos + max_chars * 3, len(html))
         return start_pos, end_pos, found_heading, toc_skipped, None

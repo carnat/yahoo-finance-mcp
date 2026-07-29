@@ -183,6 +183,13 @@ schemas, aliases, and deprecation metadata.
 - `extract_sec_filing_fact` and SEC exposure tools can return explicit
   limitation statuses such as `EXTRACTION_FAILED`, `TABLE_NOT_PARSED`,
   `PROVIDER_LIMITATION`, or `NO_DIMENSIONAL_REVENUE_FACT`.
+- SEC Item-section extraction uses structural headings and fails closed rather
+  than returning table-of-contents text. Filing-table lists exclude empty or
+  layout-only tables while retaining each original `tableIndex`; check
+  `status`, `usableTableCount`, `excludedTableCount`, and
+  `recommendedNextAction`. Filing intelligence binds companyfacts evidence to
+  the selected accession. `parse_public_transcript` accepts either an HTTPS URL
+  or caller-supplied `raw_text`.
 - Provider rate limits, market data availability, filing formats, and SEC EDGAR
   availability can affect individual calls.
 - Thai fund tools require `SEC_OPEN_DATA_API_KEY`. They never infer a share

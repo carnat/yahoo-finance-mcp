@@ -295,6 +295,7 @@ if (taiwan.sourceRows[0][0] !== "Taiwan") throw new Error(`Taiwan fixture row wa
             )))
         self.assertIs(result["decisionGrade"], True)
         self.assertEqual(result["sourceEvidence"]["concept"], resolved["xbrlContext"]["concept"])
+        self.assertEqual(result["evidence"], result["sourceEvidence"])
 
         unresolved = dict(resolved)
         unresolved["xbrlContext"] = None
@@ -305,6 +306,40 @@ if (taiwan.sourceRows[0][0] !== "Taiwan") throw new Error(`Taiwan fixture row wa
             )))
         self.assertIs(result["decisionGrade"], False)
         self.assertIsNone(result["sourceEvidence"])
+
+    def test_phase3_sec_evidence_contracts_are_wired_in_worker(self) -> None:
+        self.assertIn('"SECTION_STRUCTURE_NOT_RESOLVED"', self.worker)
+        self.assertIn("font-weight\\s*:\\s*(?:bold|[6-9]00)", self.worker)
+        self.assertIn("parseFilingTableRows", self.worker)
+        self.assertIn('"UNUSABLE_TABLE"', self.worker)
+        self.assertIn('"LIST_USABLE_TABLES"', self.worker)
+        self.assertIn("https://data.sec.gov/api/xbrl/companyfacts/CIK", self.worker)
+        self.assertNotIn("xbrl_available: false,\n    xbrl_facts: {},", self.worker)
+
+        fact_dispatch = re.search(
+            r'case "extract_sec_filing_fact":[\s\S]*?case "list_sec_company_filings"',
+            self.tools,
+        )
+        self.assertIsNotNone(fact_dispatch)
+        self.assertIn("evidence: decisionGrade ? sourceEvidence", fact_dispatch.group(0))
+
+        transcript_dispatch = re.search(
+            r'case "parse_public_transcript":[\s\S]*?case "get_earnings_call_transcript"',
+            self.tools,
+        )
+        self.assertIsNotNone(transcript_dispatch)
+        self.assertIn("args.raw_text", transcript_dispatch.group(0))
+
+    def test_guidance_uses_resolved_exhibit_and_between_and_ranges(self) -> None:
+        guidance = re.search(
+            r"export async function extractGuidance\([\s\S]*?export async function extractManagementCommentary",
+            self.worker,
+        )
+        self.assertIsNotNone(guidance)
+        section = guidance.group(0)
+        self.assertIn("await resolveEarningsContentSource(src)", section)
+        self.assertIn("sourceType: content.sourceType", section)
+        self.assertRegex(section, r"between[\s\S]+and")
 
     def test_management_commentary_uses_topic_alias_families(self) -> None:
         self.assertIn("MANAGEMENT_COMMENTARY_TOPIC_ALIASES", self.worker)

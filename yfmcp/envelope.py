@@ -228,9 +228,15 @@ def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metri
                         urls.append(str(url))
                     standardised_ev.append({
                         "url": url,
+                        "sourceType": ev.get("sourceType") or None,
                         "filingType": ev.get("filingType") or None,
                         "accessionNumber": ev.get("accessionNumber") or None,
                         "filingDate": ev.get("filingDate") or None,
+                        "publishedAt": ev.get("publishedAt") or None,
+                        "retrievedAt": ev.get("retrievedAt") or None,
+                        "excerpt": ev.get("excerpt") or None,
+                        "concept": ev.get("concept") or None,
+                        "periodEnd": ev.get("periodEnd") or None,
                         "tableIndex": ev.get("tableIndex") or None,
                         "rowLabel": ev.get("rowLabel") or None,
                         "columnLabel": ev.get("columnLabel") or None,
@@ -241,9 +247,15 @@ def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metri
                         urls.append(ev)
                     standardised_ev.append({
                         "url": ev if ev.startswith("http") else None,
+                        "sourceType": None,
                         "filingType": None,
                         "accessionNumber": None,
                         "filingDate": None,
+                        "publishedAt": None,
+                        "retrievedAt": None,
+                        "excerpt": None,
+                        "concept": None,
+                        "periodEnd": None,
                         "tableIndex": None,
                         "rowLabel": None,
                         "columnLabel": None,
