@@ -19,7 +19,7 @@ from yfmcp.clients.yahoo import _safe_parse
 @yfinance_server.tool(
     name="get_historical_stock_prices",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_historical_stock_prices"],
-    description="""Get raw Yahoo historical OHLCV rows. Daily rows include barStatus and isFinal so an unfinished current-session row is explicit; use completed-session tools for derived analytics.
+    description="""Get raw Yahoo historical OHLCV rows. Daily rows include barStatus and isFinal. A current-session row or a finished row without a usable close is INCOMPLETE/isFinal=false; use completed-session tools for derived analytics.
 Args:
     ticker: str
         The ticker symbol of the stock to get historical prices for, e.g. "AAPL"
@@ -74,7 +74,7 @@ async def get_historical_stock_prices(
     if ticker_err:
         return _mcp_failure("get_historical_stock_prices", ErrorCode.INPUT_VALIDATION_ERROR, ticker_err)
 
-    cache_key = f"hist:{ticker}:{period}:{interval}:{prepost}:camel-v3"
+    cache_key = f"hist:{ticker}:{period}:{interval}:{prepost}:camel-v4"
     column_map = {
         "Date": "date",
         "Open": "open",
@@ -131,9 +131,22 @@ async def get_historical_stock_prices(
                 hist_data,
                 int(datetime.datetime.now(datetime.timezone.utc).timestamp()),
             )
-            statuses = ["COMPLETE"] * len(hist_data)
-            if prepared["excludedIncompleteBar"] and statuses:
-                statuses[-1] = "INCOMPLETE"
+            completed_index = prepared["completed"].index
+            raw_close = (
+                pd.to_numeric(hist_data["Close"], errors="coerce")
+                if "Close" in hist_data
+                else pd.Series(float("nan"), index=hist_data.index)
+            )
+            adjusted_close = (
+                pd.to_numeric(hist_data["Adj Close"], errors="coerce")
+                if "Adj Close" in hist_data
+                else pd.Series(float("nan"), index=hist_data.index)
+            )
+            usable_close = raw_close.notna() | adjusted_close.notna()
+            statuses = [
+                "COMPLETE" if index in completed_index and bool(has_close) else "INCOMPLETE"
+                for index, has_close in zip(hist_data.index, usable_close.tolist())
+            ]
             hist_data = hist_data.copy()
             hist_data["barStatus"] = statuses
             hist_data["isFinal"] = [status == "COMPLETE" for status in statuses]
@@ -748,6 +761,27 @@ def _prepare_completed_daily_history(
             completed = completed.iloc[:-1]
             excluded_incomplete = True
 
+    # A finished session row is not usable price evidence until at least one
+    # close series is populated. Yahoo can briefly return a daily row with
+    # volume/OHLC values but null Close and Adj Close. Trim only trailing
+    # close-incomplete rows; internal gaps stay in the series so selectors fail
+    # closed instead of silently bridging missing observations.
+    while not completed.empty:
+        raw_close = (
+            pd.to_numeric(completed["Close"].iloc[-1], errors="coerce")
+            if "Close" in completed
+            else float("nan")
+        )
+        adjusted_close = (
+            pd.to_numeric(completed["Adj Close"].iloc[-1], errors="coerce")
+            if "Adj Close" in completed
+            else float("nan")
+        )
+        if not pd.isna(raw_close) or not pd.isna(adjusted_close):
+            break
+        completed = completed.iloc[:-1]
+        excluded_incomplete = True
+
     expected_date = None
     if not active_session:
         regular_market_time = _daily_bar_epoch(metadata.get("regularMarketTime"))
@@ -834,6 +868,8 @@ async def _load_completed_daily_history(
     *,
     required_bars: int | None = None,
     retry_adjusted_gap: bool = False,
+    retry_missing_latest_volume: bool = False,
+    retry_missing_latest_raw_close: bool = False,
 ) -> dict:
     async def _load_history() -> pd.DataFrame:
         return await asyncio.to_thread(
@@ -865,7 +901,33 @@ async def _load_completed_daily_history(
             required_bars,
         )
     )
-    if prepared["freshnessStatus"] == "STALE" or adjusted_gap:
+    latest_completed = (
+        prepared["completed"].iloc[-1]
+        if not prepared["completed"].empty
+        else None
+    )
+    missing_latest_volume = (
+        retry_missing_latest_volume
+        and (
+            latest_completed is None
+            or "Volume" not in prepared["completed"]
+            or pd.isna(pd.to_numeric(latest_completed.get("Volume"), errors="coerce"))
+        )
+    )
+    missing_latest_raw_close = (
+        retry_missing_latest_raw_close
+        and (
+            latest_completed is None
+            or "Close" not in prepared["completed"]
+            or pd.isna(pd.to_numeric(latest_completed.get("Close"), errors="coerce"))
+        )
+    )
+    if (
+        prepared["freshnessStatus"] == "STALE"
+        or adjusted_gap
+        or missing_latest_volume
+        or missing_latest_raw_close
+    ):
         retry_attempted = True
         try:
             hist = await _load_history()
@@ -1037,7 +1099,9 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_ratio"],
     description="""Compare the latest completed-session volume with prior completed-session averages.
 
-The numerator is excluded from both averages. Returns lastVolume,
+The numerator is excluded from both averages. A current completed-price row
+whose volume is still missing returns PARTIAL/INCOMPLETE with RETRY rather than
+shifting to an older numerator. Returns lastVolume,
 avgVolume10d, avgVolume90d, ratio10d, ratio90d, volumeFlag, and bar/freshness
 metadata.
 
@@ -1060,7 +1124,11 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
 
     company = yf.Ticker(ticker)
     try:
-        prepared = await _load_completed_daily_history(company, "6mo")
+        prepared = await _load_completed_daily_history(
+            company,
+            "6mo",
+            retry_missing_latest_volume=True,
+        )
     except Exception as e:
         return json.dumps({"error": True, "message": str(e), "ticker": ticker})
 
@@ -1099,9 +1167,23 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
     )
     if volumes.empty or pd.isna(volumes.iloc[-1]):
         return json.dumps({
-            "error": True,
-            "message": f"No completed volume data for {ticker}",
             "ticker": ticker,
+            "status": "PARTIAL",
+            "lastVolume": None,
+            "avgVolume10d": None,
+            "avgVolume90d": None,
+            "ratio10d": None,
+            "ratio90d": None,
+            "volumeFlag": None,
+            "observationType": "COMPLETED_DAILY_VOLUME",
+            "barStatus": "INCOMPLETE",
+            "freshnessStatus": prepared["freshnessStatus"],
+            "expectedCompletedDate": prepared["expectedCompletedDate"],
+            "latestAvailableBarDate": data_date,
+            "excludedIncompleteBar": prepared["excludedIncompleteBar"],
+            "retryAttempted": prepared["retryAttempted"],
+            "dataDate": data_date,
+            "recommendedNextAction": "RETRY",
         })
     last_vol = int(volumes.iloc[-1])
     prior_volumes = volumes.iloc[:-1]
@@ -1660,7 +1742,9 @@ async def get_overnight_quote(ticker: str) -> str:
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_gate"],
     description="""Deprecated alias for check_volume_liquidity_threshold. Evaluate liquidity from the latest completed-session volume and unadjusted close against prior-session averages or the USD notional threshold.
 
-An unfinished active-session bar is excluded. Returns currency, fxRate,
+An unfinished active-session bar and any trailing row without a usable close
+are excluded. Missing current-session price/volume returns PARTIAL/INCOMPLETE
+with RETRY rather than a pass/fail decision. Returns currency, fxRate,
 lastVolume, adv10d, adv20d (computed from prior completed sessions),
 adv90d, ratio20d (always computed when adv20d is available), gatePass,
 dataDate, and a pre-formatted note.
@@ -1682,7 +1766,12 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
     try:
         fi = company.fast_info
         currency: str | None = fi["currency"]
-        prepared = await _load_completed_daily_history(company, "6mo")
+        prepared = await _load_completed_daily_history(
+            company,
+            "6mo",
+            retry_missing_latest_volume=True,
+            retry_missing_latest_raw_close=True,
+        )
     except Exception as e:
         return json.dumps({"error": True, "message": str(e), "ticker": ticker})
 
@@ -1741,6 +1830,33 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
         if not closes.empty and not pd.isna(closes.iloc[-1])
         else None
     )
+    if last_volume is None or last_price is None:
+        return json.dumps({
+            "ticker": ticker,
+            "status": "PARTIAL",
+            "currency": currency,
+            "lastVolume": None,
+            "lastClose": None,
+            "priceBasis": "UNADJUSTED_CLOSE",
+            "adv10d": None,
+            "adv20d": None,
+            "adv90d": None,
+            "ratio20d": None,
+            "fxRate": None,
+            "fxPriceTimestamp": None,
+            "notionalUsd": None,
+            "gatePass": None,
+            "observationType": "COMPLETED_DAILY_VOLUME_NOTIONAL",
+            "barStatus": "INCOMPLETE",
+            "freshnessStatus": prepared["freshnessStatus"],
+            "expectedCompletedDate": prepared["expectedCompletedDate"],
+            "latestAvailableBarDate": data_date,
+            "excludedIncompleteBar": prepared["excludedIncompleteBar"],
+            "retryAttempted": prepared["retryAttempted"],
+            "dataDate": data_date,
+            "note": "Volume gate UNKNOWN — latest completed session lacks price or volume",
+            "recommendedNextAction": "RETRY",
+        })
     prior_volumes = volumes.iloc[:-1]
 
     def _prior_average(count: int) -> float | None:
