@@ -24,6 +24,7 @@ def _patched_tool(self, name=None, output_schema=None, **kwargs):  # type: ignor
 _FastMCP.tool = _patched_tool  # type: ignore[method-assign]
 
 import server as srv  # noqa: E402
+from scripts import test_deployed_canaries as deployed_canaries  # noqa: E402
 from yfmcp.tools import pricing  # noqa: E402
 
 
@@ -117,6 +118,157 @@ class TestPr2DataQuality(unittest.TestCase):
         self.assertTrue(rows[-2]["isFinal"])
         self.assertEqual(rows[-1]["barStatus"], "INCOMPLETE")
         self.assertFalse(rows[-1]["isFinal"])
+
+    def test_completed_null_close_row_is_incomplete_and_daily_derivatives_fail_closed(self):
+        index = pd.date_range(
+            end=pd.Timestamp("2026-07-28T00:00:00Z"),
+            periods=40,
+            freq="D",
+        )
+        closes = [100.0 + i for i in range(39)] + [float("nan")]
+
+        class FastInfo(dict):
+            currency = "USD"
+            last_price = 140.0
+            previous_close = 139.0
+            year_high = 150.0
+            year_low = 90.0
+            fifty_day_average = 130.0
+            two_hundred_day_average = 120.0
+
+            def __init__(self):
+                super().__init__(currency="USD")
+
+        class FakeTicker:
+            fast_info = FastInfo()
+
+            def history(self, *args, **kwargs):
+                return pd.DataFrame(
+                    {
+                        "Open": [99.0 + i for i in range(40)],
+                        "High": [101.0 + i for i in range(40)],
+                        "Low": [98.0 + i for i in range(40)],
+                        "Close": closes,
+                        "Adj Close": closes,
+                        "Volume": [1_000 + i for i in range(40)],
+                    },
+                    index=index,
+                )
+
+            def get_history_metadata(self):
+                return {
+                    "exchangeTimezoneName": "UTC",
+                    "regularMarketTime": int(
+                        pd.Timestamp("2026-07-28T20:00:00Z").timestamp()
+                    ),
+                }
+
+        pricing.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
+
+        rows = json.loads(_run(pricing.get_historical_stock_prices("TSTNULLCLOSE")))
+        self.assertEqual(rows[-2]["barStatus"], "COMPLETE")
+        self.assertTrue(rows[-2]["isFinal"])
+        self.assertIsNone(rows[-1]["close"])
+        self.assertEqual(rows[-1]["barStatus"], "INCOMPLETE")
+        self.assertFalse(rows[-1]["isFinal"])
+
+        for result in (
+            json.loads(_run(pricing.get_technical_indicators("TSTNULLTECH"))),
+            json.loads(_run(pricing.get_price_slope("TSTNULLSLOPE", days=5))),
+            json.loads(_run(pricing.get_volume_ratio("TSTNULLVOLUME"))),
+            json.loads(_run(pricing.get_volume_gate("TSTNULLGATE"))),
+        ):
+            self.assertEqual(result["status"], "STALE_BAR")
+            self.assertEqual(result["barStatus"], "STALE")
+            self.assertEqual(result["latestAvailableBarDate"], "2026-07-27")
+            self.assertEqual(result["dataDate"], "2026-07-27")
+            self.assertTrue(result["excludedIncompleteBar"])
+            self.assertTrue(result["retryAttempted"])
+            self.assertEqual(result["recommendedNextAction"], "RETRY")
+
+        price_stats = json.loads(_run(pricing.get_price_stats("TSTNULLSTATS")))
+        self.assertEqual(price_stats["status"], "PARTIAL")
+        self.assertEqual(price_stats["historicalBarStatus"], "STALE")
+        self.assertEqual(price_stats["dataDate"], "2026-07-27")
+        self.assertTrue(price_stats["excludedIncompleteBar"])
+        self.assertEqual(price_stats["recommendedNextAction"], "RETRY")
+
+        snapshot = json.loads(
+            _run(pricing.get_market_snapshot("TSTNULLSNAPSHOT", mode="compact"))
+        )
+        self.assertEqual(snapshot["status"], "PARTIAL")
+        self.assertFalse(snapshot["failedComponents"])
+        self.assertIn("priceStats", snapshot["limitedComponents"])
+        self.assertIn("technicalIndicators", snapshot["limitedComponents"])
+        self.assertIn("volumeRatio", snapshot["limitedComponents"])
+        self.assertIn("volumeGate", snapshot["limitedComponents"])
+        self.assertEqual(snapshot["recommendedNextAction"], "RETRY")
+
+    def test_missing_latest_volume_limits_only_volume_derivatives(self):
+        index = pd.date_range(
+            end=pd.Timestamp("2026-07-28T00:00:00Z"),
+            periods=40,
+            freq="D",
+        )
+        closes = [100.0 + i for i in range(40)]
+        volumes = [1_000.0 + i for i in range(39)] + [float("nan")]
+
+        class FastInfo(dict):
+            currency = "USD"
+            last_price = 140.0
+            previous_close = 139.0
+            year_high = 150.0
+            year_low = 90.0
+            fifty_day_average = 130.0
+            two_hundred_day_average = 120.0
+
+            def __init__(self):
+                super().__init__(currency="USD")
+
+        class FakeTicker:
+            fast_info = FastInfo()
+
+            def history(self, *args, **kwargs):
+                return pd.DataFrame(
+                    {
+                        "Open": [99.0 + i for i in range(40)],
+                        "High": [101.0 + i for i in range(40)],
+                        "Low": [98.0 + i for i in range(40)],
+                        "Close": closes,
+                        "Adj Close": closes,
+                        "Volume": volumes,
+                    },
+                    index=index,
+                )
+
+            def get_history_metadata(self):
+                return {
+                    "exchangeTimezoneName": "UTC",
+                    "regularMarketTime": int(
+                        pd.Timestamp("2026-07-28T20:00:00Z").timestamp()
+                    ),
+                }
+
+        pricing.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
+
+        technical = json.loads(
+            _run(pricing.get_technical_indicators("TSTMISSINGVOLTECH"))
+        )
+        self.assertEqual(technical["status"], "OK")
+        self.assertEqual(technical["barStatus"], "COMPLETE")
+        self.assertEqual(technical["dataDate"], "2026-07-28")
+
+        for result in (
+            json.loads(_run(pricing.get_volume_ratio("TSTMISSINGVOLRATIO"))),
+            json.loads(_run(pricing.get_volume_gate("TSTMISSINGVOLGATE"))),
+        ):
+            self.assertEqual(result["status"], "PARTIAL")
+            self.assertEqual(result["barStatus"], "INCOMPLETE")
+            self.assertEqual(result["freshnessStatus"], "CURRENT")
+            self.assertEqual(result["latestAvailableBarDate"], "2026-07-28")
+            self.assertEqual(result["dataDate"], "2026-07-28")
+            self.assertTrue(result["retryAttempted"])
+            self.assertEqual(result["recommendedNextAction"], "RETRY")
 
     def test_technical_indicators_exclude_active_daily_bar(self):
         now = pd.Timestamp.now(tz="UTC")
@@ -268,8 +420,11 @@ class TestPr2DataQuality(unittest.TestCase):
 
         pricing.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
         data = json.loads(_run(pricing.get_volume_ratio("TSTMISSINGLATESTVOL")))
-        self.assertTrue(data["error"])
-        self.assertIn("No completed volume data", data["message"])
+        self.assertEqual(data["status"], "PARTIAL")
+        self.assertEqual(data["barStatus"], "INCOMPLETE")
+        self.assertIsNone(data["lastVolume"])
+        self.assertTrue(data["retryAttempted"])
+        self.assertEqual(data["recommendedNextAction"], "RETRY")
 
     def test_volume_gate_uses_last_completed_session(self):
         now = pd.Timestamp.now(tz="UTC")
@@ -401,6 +556,46 @@ class TestPr2DataQuality(unittest.TestCase):
         self.assertEqual(result["dataDate"], "2026-07-24")
         self.assertTrue(result["retryAttempted"])
         self.assertTrue(result["fallbackUsed"])
+
+    def test_daily_bar_canary_rejects_close_incomplete_final_row(self):
+        deployed_canaries.daily_bar_finality_contract(
+            {
+                "ok": True,
+                "data": [
+                    {
+                        "date": "2026-07-27",
+                        "close": 100.0,
+                        "adjClose": 100.0,
+                        "barStatus": "COMPLETE",
+                        "isFinal": True,
+                    },
+                    {
+                        "date": "2026-07-28",
+                        "close": None,
+                        "adjClose": None,
+                        "barStatus": "INCOMPLETE",
+                        "isFinal": False,
+                    },
+                ],
+            },
+            {},
+        )
+        with self.assertRaisesRegex(AssertionError, "marked final"):
+            deployed_canaries.daily_bar_finality_contract(
+                {
+                    "ok": True,
+                    "data": [
+                        {
+                            "date": "2026-07-28",
+                            "close": None,
+                            "adjClose": None,
+                            "barStatus": "COMPLETE",
+                            "isFinal": True,
+                        }
+                    ],
+                },
+                {},
+            )
 
     def test_price_slope_retries_a_stale_completed_bar(self):
         stale_index = pd.DatetimeIndex(
@@ -590,6 +785,21 @@ class TestPr2DataQuality(unittest.TestCase):
             "export async function getVolumeRatio", 1
         )[1].split("export async function getMaPosition", 1)[0]
         self.assertNotIn("fastInfo.lastVolume", volume_section)
+        self.assertIn("initialLatestRow?.volume == null", volume_section)
+        self.assertIn('status: "PARTIAL"', volume_section)
+        self.assertIn('barStatus: "INCOMPLETE"', volume_section)
+        gate_section = worker_source.split(
+            "export async function getVolumeGate", 1
+        )[1].split("export async function getMarketSnapshot", 1)[0]
+        self.assertIn("initialLatestRow?.volume == null", gate_section)
+        self.assertIn("initialLatestRow?.rawClose == null", gate_section)
+        self.assertIn('status: "PARTIAL"', gate_section)
+        self.assertIn('gatePass: null', gate_section)
+        self.assertIn("completedTimestamps.has(t) && hasUsableClose", worker_source)
+        self.assertIn(
+            "completedRows[completedRows.length - 1].adjustedClose == null",
+            worker_source,
+        )
 
     def test_options_realized_volatility_uses_completed_bar_selector_in_both_runtimes(self):
         root = pathlib.Path(__file__).resolve().parents[1]

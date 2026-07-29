@@ -208,7 +208,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_historical_stock_prices",
     description:
-      "Get raw historical OHLCV rows. Daily rows include barStatus and isFinal so unfinished current-session data is explicit; derived analytics should use completed-session tools instead.",
+      "Get raw historical OHLCV rows. Daily rows include barStatus/isFinal. A current-session row or finished row without a usable close is INCOMPLETE/isFinal=false; derived analytics should use completed-session tools.",
     inputSchema: {
       type: "object",
       properties: {
@@ -638,7 +638,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_volume_ratio",
     description:
-      "Compare the latest completed-session volume with prior 10/90 completed-session averages. The numerator is excluded from both averages. Read dataDate/barStatus before using HIGH/NORMAL/LOW. Max 5 tickers.",
+      "Compare the latest completed-session volume with prior 10/90 completed-session averages. The numerator is excluded from both averages. Missing latest volume returns PARTIAL/INCOMPLETE with RETRY; it never shifts to an older numerator. Max 5 tickers.",
     inputSchema: {
       type: "object",
       properties: {
@@ -928,7 +928,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_volume_gate",
     description:
-      "Deprecated alias for check_volume_liquidity_threshold. Evaluate liquidity from the latest completed-session volume/close versus prior-session ADV. Active-session cumulative volume is excluded; read dataDate/barStatus.",
+      "Deprecated alias for check_volume_liquidity_threshold. Evaluate liquidity from the latest completed-session volume/close versus prior-session ADV. Missing latest price/volume returns PARTIAL/INCOMPLETE with RETRY and no gate decision.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1080,11 +1080,11 @@ export const TOOL_ALIASES: Record<string, string> = {
 
 const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_market_quote", description: "Get a lightweight Yahoo regular-market price observation for one or more tickers. lastPrice uses priceBasis=REGULAR_MARKET_PRICE and includes priceTimestamp; use get_price_slope for adjusted daily-bar analytics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
-  { name: "get_historical_prices", description: "Get historical prices for a ticker.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "1mo" }, interval: { type: "string", default: "1d" }, prepost: { type: "boolean", default: false } }, required: ["ticker"] } },
+  { name: "get_historical_prices", description: "Get raw historical OHLCV. Daily rows without a usable close are INCOMPLETE/isFinal=false.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "1mo" }, interval: { type: "string", default: "1d" }, prepost: { type: "boolean", default: false } }, required: ["ticker"] } },
   { name: "analyze_price_performance", description: "Analyze price performance metrics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
   { name: "analyze_moving_average_position", description: "Analyze moving-average position.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
-  { name: "analyze_volume_ratio", description: "Analyze volume ratio signals.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, period: { type: "number", default: 10 } }, required: ["ticker"] } },
-  { name: "check_volume_liquidity_threshold", description: "Check current trading volume and dollar-notional liquidity against configurable public liquidity thresholds.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] } },
+  { name: "analyze_volume_ratio", description: "Analyze the latest completed-session volume ratio. PARTIAL/INCOMPLETE means retry; do not use a volume signal.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, period: { type: "number", default: 10 } }, required: ["ticker"] } },
+  { name: "check_volume_liquidity_threshold", description: "Check completed-session volume/notional against public liquidity thresholds. PARTIAL/INCOMPLETE means retry; gatePass is unknown.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] } },
   { name: "get_company_profile", description: "Get company profile/fundamentals.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, include_all: { type: "boolean" } }, required: ["ticker"] } },
   { name: "get_fund_profile", description: "Get ETF/fund profile. Request overview, holdings, allocation, operations, or fixed-income sections.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, sections: { type: "array", items: { type: "string", enum: ["overview", "holdings", "allocation", "operations", "fixed_income"] }, uniqueItems: true } }, required: ["ticker"] } },
   { name: "analyze_financial_ratios", description: "Analyze current financial ratios and optional historical Yahoo valuation measures.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, history_periods: { type: "integer", minimum: 0, maximum: 20, default: 0 }, frequency: { type: "string", enum: ["quarterly", "monthly", "yearly", "trailing"], default: "quarterly" } }, required: ["ticker"] } },
@@ -1462,7 +1462,7 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     type: "object",
     properties: {
       ticker: { type: "string" },
-      status: { type: "string", enum: ["OK", "STALE_BAR"] },
+      status: { type: "string", enum: ["OK", "STALE_BAR", "PARTIAL"] },
       lastVolume: { type: ["number", "null"] },
       avgVolume10d: { type: ["number", "null"] },
       avgVolume90d: { type: ["number", "null"] },
@@ -1470,7 +1470,7 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       ratio90d: { type: ["number", "null"] },
       volumeFlag: { type: ["string", "null"] },
       observationType: { type: "string", enum: ["COMPLETED_DAILY_VOLUME"] },
-      barStatus: { type: "string", enum: ["COMPLETE", "STALE"] },
+      barStatus: { type: "string", enum: ["COMPLETE", "STALE", "INCOMPLETE"] },
       freshnessStatus: { type: "string", enum: ["CURRENT", "STALE", "UNKNOWN"] },
       excludedIncompleteBar: { type: "boolean" },
       retryAttempted: { type: "boolean" },
@@ -1694,7 +1694,7 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     type: "object",
     properties: {
       ticker: { type: "string" },
-      status: { type: "string", enum: ["OK", "STALE_BAR"] },
+      status: { type: "string", enum: ["OK", "STALE_BAR", "PARTIAL"] },
       currency: { type: ["string", "null"] },
       fxRate: { type: ["number", "null"] },
       fxPriceTimestamp: { type: ["string", "null"] },
@@ -1708,7 +1708,7 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       notionalUsd: { type: ["number", "null"] },
       gatePass: { type: ["boolean", "null"] },
       observationType: { type: "string", enum: ["COMPLETED_DAILY_VOLUME_NOTIONAL"] },
-      barStatus: { type: "string", enum: ["COMPLETE", "STALE"] },
+      barStatus: { type: "string", enum: ["COMPLETE", "STALE", "INCOMPLETE"] },
       freshnessStatus: { type: "string", enum: ["CURRENT", "STALE", "UNKNOWN"] },
       excludedIncompleteBar: { type: "boolean" },
       retryAttempted: { type: "boolean" },

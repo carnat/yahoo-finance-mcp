@@ -117,11 +117,11 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 
 ### Price & market data
 - get_market_quote: Current regular-market price observation with priceBasis and priceTimestamp, plus market cap, 52-week range, moving averages, and volume.
-- get_historical_prices: Historical OHLCV data with configurable period, interval, and optional columns filter.
+- get_historical_prices: Historical OHLCV data; daily rows without a usable close are INCOMPLETE/isFinal=false.
 - analyze_price_performance: % distance from 52w high/low and MAs, 30d annualised volatility, CAGR.
 - analyze_moving_average_position: % vs 50DMA/200DMA, trend (BULLISH/BEARISH/MIXED).
-- analyze_volume_ratio: Volume vs 10d/90d averages, volumeFlag (HIGH/NORMAL/LOW).
-- check_volume_liquidity_threshold: 20d ADV liquidity gate pass/fail. FX notional mode via foreign_exchange=true.
+- analyze_volume_ratio: Completed-session volume vs 10d/90d averages. PARTIAL/INCOMPLETE means retry and do not use volumeFlag.
+- check_volume_liquidity_threshold: Completed-session 20d ADV liquidity gate. PARTIAL/INCOMPLETE means gatePass is unknown. FX notional mode via foreign_exchange=true.
 - get_technical_indicators: Pre-computed RSI-14 (Wilder) and MACD (12,26,9) from daily closes.
 - get_price_slope: N completed-session close-to-close change using N+1 bars. Excludes unfinished bars and returns same-bar endRawClose, priceBasis, freshness/retry diagnostics, dataDate, and direction (UP/DOWN/FLAT). Not a real-time quote.
 - get_short_interest: Short % of float, shares short, days-to-cover, prior-month comparison.

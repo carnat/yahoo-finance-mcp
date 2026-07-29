@@ -107,6 +107,26 @@ def manifest_contract(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
     _assert_contract(extract_data(payload), "get_manifest_diagnostics")
 
 
+def daily_bar_finality_contract(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
+    data = extract_data(payload)
+    if not isinstance(data, list) or not data:
+        raise AssertionError(f"get_historical_prices returned no daily rows: {data!r}")
+    for row in data:
+        if not isinstance(row, dict):
+            raise AssertionError(f"daily history row must be an object: {row!r}")
+        if "barStatus" not in row or "isFinal" not in row:
+            raise AssertionError(f"daily history row missing finality fields: {row}")
+        has_usable_close = row.get("adjClose") is not None or row.get("close") is not None
+        if row.get("isFinal") is True and not has_usable_close:
+            raise AssertionError(f"close-incomplete daily row marked final: {row}")
+        if not has_usable_close and (
+            row.get("barStatus") != "INCOMPLETE" or row.get("isFinal") is not False
+        ):
+            raise AssertionError(f"close-incomplete daily row lacks explicit incomplete state: {row}")
+        if row.get("barStatus") == "COMPLETE" and row.get("isFinal") is not True:
+            raise AssertionError(f"COMPLETE daily row must be final: {row}")
+
+
 def sec_xbrl_decision_grade(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
     data = extract_data(payload)
     if not isinstance(data, dict):
@@ -324,6 +344,7 @@ def thai_fund_nav_contract(payload: dict[str, Any], canary: dict[str, Any]) -> N
 ASSERTIONS: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
     "health_contract": health_contract,
     "manifest_contract": manifest_contract,
+    "daily_bar_finality_contract": daily_bar_finality_contract,
     "sec_xbrl_decision_grade": sec_xbrl_decision_grade,
     "press_release_payload_gate": press_release_payload_gate,
     "news_batch_independent": news_batch_independent,

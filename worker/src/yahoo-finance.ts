@@ -809,11 +809,17 @@ export async function getHistoricalPrices(
   const dailyState = interval === "1d"
     ? prepareCompletedDailySeries(result, Math.floor(Date.now() / 1000))
     : null;
-  const activeTimestamp = dailyState?.activeRow?.timestamp ?? null;
+  const completedTimestamps = new Set(
+    dailyState?.completedRows.map((row) => row.timestamp) ?? []
+  );
 
   return JSON.stringify(
     timestamps.map((t, i) => {
-      const isFinal = interval === "1d" ? t !== activeTimestamp : null;
+      const hasUsableClose =
+        dailyBarNumber(adjclose[i]) != null || dailyBarNumber(quote.close?.[i]) != null;
+      const isFinal = interval === "1d"
+        ? completedTimestamps.has(t) && hasUsableClose
+        : null;
       return {
         date: iso(t),
         open: quote.open?.[i] ?? null,
@@ -2898,7 +2904,7 @@ function prepareCompletedDailySeries(
     && regularStart <= nowEpoch
     && nowEpoch < regularEnd;
 
-  const completedRows = [...rows];
+  let completedRows = [...rows];
   let activeRow: DailyBarObservation | null = null;
   let excludedIncompleteBar = false;
   if (activeSession && regularStart != null && completedRows.length > 0) {
@@ -2908,6 +2914,20 @@ function prepareCompletedDailySeries(
       activeRow = completedRows.pop() ?? null;
       excludedIncompleteBar = true;
     }
+  }
+
+  // A session boundary alone does not make a row usable price evidence.
+  // Yahoo can briefly publish a finished daily row with volume/OHLC fields
+  // populated while both close series are null. Trim only trailing
+  // close-incomplete rows so consumers can report the latest valid completed
+  // date as stale; internal gaps remain visible to the price-series selector.
+  while (
+    completedRows.length > 0
+    && completedRows[completedRows.length - 1].adjustedClose == null
+    && completedRows[completedRows.length - 1].rawClose == null
+  ) {
+    completedRows.pop();
+    excludedIncompleteBar = true;
   }
 
   const regularMarketTime = dailyBarNumber(meta.regularMarketTime);
@@ -3136,7 +3156,11 @@ export async function getVolumeRatio(ticker: string | string[], _period: number)
     const nowEpoch = Math.floor(Date.now() / 1000);
     let prepared = prepareCompletedDailySeries(chartResult, nowEpoch);
     let retryAttempted = false;
-    if (prepared.freshnessStatus === "STALE") {
+    const initialLatestRow = prepared.completedRows[prepared.completedRows.length - 1];
+    if (
+      prepared.freshnessStatus === "STALE"
+      || initialLatestRow?.volume == null
+    ) {
       retryAttempted = true;
       const retryResult = await fetchChart(true);
       if (retryResult) {
@@ -3178,9 +3202,23 @@ export async function getVolumeRatio(ticker: string | string[], _period: number)
     const lastRow = completedRows[completedRows.length - 1];
     if (!lastRow || lastRow.volume == null) {
       return JSON.stringify({
-        error: true,
-        message: `Latest completed session has no volume for ${ticker}`,
         ticker,
+        status: "PARTIAL",
+        lastVolume: null,
+        avgVolume10d: null,
+        avgVolume90d: null,
+        ratio10d: null,
+        ratio90d: null,
+        volumeFlag: null,
+        observationType: "COMPLETED_DAILY_VOLUME",
+        barStatus: "INCOMPLETE",
+        freshnessStatus: prepared.freshnessStatus,
+        expectedCompletedDate: prepared.expectedCompletedDate,
+        latestAvailableBarDate: dataDate,
+        excludedIncompleteBar: prepared.excludedIncompleteBar,
+        retryAttempted,
+        dataDate,
+        recommendedNextAction: "RETRY",
       });
     }
     const average = (count: number): number | null => {
@@ -7129,7 +7167,12 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
     const nowEpoch = Math.floor(Date.now() / 1000);
     let prepared = prepareCompletedDailySeries(chartResult, nowEpoch);
     let retryAttempted = false;
-    if (prepared.freshnessStatus === "STALE") {
+    const initialLatestRow = prepared.completedRows[prepared.completedRows.length - 1];
+    if (
+      prepared.freshnessStatus === "STALE"
+      || initialLatestRow?.volume == null
+      || initialLatestRow?.rawClose == null
+    ) {
       retryAttempted = true;
       const retryResult = await fetchChart(true);
       if (retryResult) {
@@ -7154,6 +7197,7 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
         currency,
         lastVolume: null,
         lastClose: null,
+        priceBasis: "UNADJUSTED_CLOSE",
         adv10d: null,
         adv20d: null,
         adv90d: null,
@@ -7179,9 +7223,30 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
     const lastRow = rows[rows.length - 1];
     if (!lastRow || lastRow.volume == null || lastRow.rawClose == null) {
       return JSON.stringify({
-        error: true,
-        message: `Latest completed session lacks price or volume for ${ticker}`,
         ticker,
+        status: "PARTIAL",
+        currency,
+        lastVolume: null,
+        lastClose: null,
+        priceBasis: "UNADJUSTED_CLOSE",
+        adv10d: null,
+        adv20d: null,
+        adv90d: null,
+        ratio20d: null,
+        fxRate: null,
+        fxPriceTimestamp: null,
+        notionalUsd: null,
+        gatePass: null,
+        observationType: "COMPLETED_DAILY_VOLUME_NOTIONAL",
+        barStatus: "INCOMPLETE",
+        freshnessStatus: prepared.freshnessStatus,
+        expectedCompletedDate: prepared.expectedCompletedDate,
+        latestAvailableBarDate: dataDate,
+        excludedIncompleteBar: prepared.excludedIncompleteBar,
+        retryAttempted,
+        dataDate,
+        note: "Volume gate UNKNOWN — latest completed session lacks price or volume",
+        recommendedNextAction: "RETRY",
       });
     }
     const average = (count: number): number | null => {
