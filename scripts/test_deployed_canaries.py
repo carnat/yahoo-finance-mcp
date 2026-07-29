@@ -153,6 +153,21 @@ def sec_xbrl_decision_grade(payload: dict[str, Any], _canary: dict[str, Any]) ->
         raise AssertionError(f"SEC XBRL sourceEvidence has unexpected sourceType: {data}")
     if evidence.get("concept") != context.get("concept"):
         raise AssertionError(f"SEC XBRL concept differs between context and evidence: {data}")
+    if data.get("evidence") != evidence:
+        raise AssertionError(f"decision-grade SEC XBRL evidence must align with sourceEvidence: {data}")
+
+
+def transcript_raw_text_contract(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
+    data = extract_data(payload)
+    if not isinstance(data, dict):
+        raise AssertionError(f"parse_public_transcript returned non-object data: {data!r}")
+    if data.get("source") != "raw_text" or data.get("url") is not None:
+        raise AssertionError(f"raw_text transcript source identity mismatch: {data}")
+    if data.get("filteredByTopics") != ["guidance"]:
+        raise AssertionError(f"raw_text transcript topic filter mismatch: {data}")
+    matches = data.get("matchedParagraphs")
+    if not isinstance(matches, list) or not matches or "130 million" not in str(matches[0]):
+        raise AssertionError(f"raw_text transcript did not retain matching guidance: {data}")
 
 
 def press_release_payload_gate(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
@@ -346,6 +361,7 @@ ASSERTIONS: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
     "manifest_contract": manifest_contract,
     "daily_bar_finality_contract": daily_bar_finality_contract,
     "sec_xbrl_decision_grade": sec_xbrl_decision_grade,
+    "transcript_raw_text_contract": transcript_raw_text_contract,
     "press_release_payload_gate": press_release_payload_gate,
     "news_batch_independent": news_batch_independent,
     "company_ir_source_status": company_ir_source_status,

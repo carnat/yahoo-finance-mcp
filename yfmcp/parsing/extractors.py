@@ -506,7 +506,12 @@ def _extract_geographic_pct(
 # XBRL annual fact extractor (used by get_sec_filing_intelligence)
 # ---------------------------------------------------------------------------
 
-def _extract_xbrl_latest_annual(facts_data: dict, concept_names: list[str]) -> dict | None:
+def _extract_xbrl_latest_annual(
+    facts_data: dict,
+    concept_names: list[str],
+    accession_number: str | None = None,
+    document_url: str | None = None,
+) -> dict | None:
     """Extract the most recent annual (10-K/20-F) value for a set of XBRL concept names.
 
     Tries each concept name in order, returning the first match found.
@@ -521,16 +526,34 @@ def _extract_xbrl_latest_annual(facts_data: dict, concept_names: list[str]) -> d
         usd_units: list[dict] = concept_data.get("units", {}).get("USD", [])
         if not usd_units:
             continue
-        # Find most recent 10-K fact
+        # Bind the snapshot to the selected filing when an accession is known.
         annual_facts = [
             f for f in usd_units
             if f.get("form") in ("10-K", "10-K405", "10-KSB", "20-F")
             and f.get("end")
             and f.get("val") is not None
+            and (accession_number is None or f.get("accn") == accession_number)
         ]
         if not annual_facts:
             continue
         latest = max(annual_facts, key=lambda f: f.get("end", ""))
+        source_evidence = {
+            "sourceType": "sec_xbrl_companyfacts",
+            "concept": concept,
+            "taxonomy": "us-gaap",
+            "unit": "USD",
+            "accessionNumber": latest.get("accn"),
+            "filingType": latest.get("form"),
+            "filingDate": latest.get("filed"),
+            "periodEnd": latest.get("end"),
+            "documentUrl": document_url,
+        }
+        decision_grade = bool(
+            accession_number
+            and latest.get("accn") == accession_number
+            and source_evidence["periodEnd"]
+            and document_url
+        )
         return {
             "value": latest.get("val"),
             "unit": "USD",
@@ -538,5 +561,8 @@ def _extract_xbrl_latest_annual(facts_data: dict, concept_names: list[str]) -> d
             "form": latest.get("form"),
             "filed": latest.get("filed"),
             "confidence": "HIGH",
+            "decisionGrade": decision_grade,
+            "evidence": source_evidence if decision_grade else None,
+            "sourceEvidence": source_evidence,
         }
     return None

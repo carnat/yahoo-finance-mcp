@@ -254,6 +254,34 @@ class TestExtractEarningsMetrics(unittest.TestCase):
 
 
 class TestExtractGuidance(unittest.TestCase):
+    def test_aehr_between_and_guidance_range_is_resolved(self):
+        html = (
+            "For the fiscal year ending June 25, 2027, Aehr expects total company "
+            "revenue to be between $130 million and $150 million."
+        )
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked_release, patch(
+            "yfmcp.tools.earnings._edgar_get_html", new_callable=AsyncMock
+        ) as mocked_html:
+            mocked_release.return_value = {
+                "ticker": "AEHR",
+                "period": "FY2027",
+                "sources": [{
+                    "sourceType": "sec_8k_ex991",
+                    "url": "https://www.sec.gov/Archives/aehr_ex991.htm",
+                    "filingDate": "2026-07-14",
+                }],
+            }
+            mocked_html.return_value = html
+            data = _parse(_run(srv.extract_guidance("AEHR")))
+
+        revenue = data["guidance"]["revenue"]
+        self.assertEqual(revenue["status"], "FOUND")
+        self.assertEqual(revenue["low"], 130_000_000)
+        self.assertEqual(revenue["high"], 150_000_000)
+        self.assertEqual(revenue["midpoint"], 140_000_000)
+        self.assertEqual(revenue["evidence"][0]["sourceType"], "sec_8k_ex991")
+        self.assertEqual(data["confidence"], "HIGH")
+
     def test_not_disclosed_when_absent(self):
         with patch("yfmcp.tools.earnings._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked_release, patch(
             "yfmcp.tools.earnings._edgar_get_html", new_callable=AsyncMock
@@ -560,6 +588,81 @@ class TestNewFixesAndFeatures(unittest.TestCase):
         """
         start_idx, end_idx, found_heading, toc_skipped, err_code = srv._find_section_bounds(html, "Item 1A", 1000)
         self.assertEqual(err_code, "SECTION_AMBIGUOUS")
+
+    def test_get_filing_section_accepts_numeric_bold_and_stops_at_next_item(self):
+        html = """
+        <html><body>
+        <div><a href="#risk">Item 1A. Risk Factors</a></div>
+        <span style="font-weight:700">Item 1A. Risk Factors</span>
+        <p>This is the actual risk factor disclosure.</p>
+        <span style="font-weight:700">Item 1B. Unresolved Staff Comments</span>
+        <p>This text belongs to the next section.</p>
+        </body></html>
+        """
+        start_idx, end_idx, found_heading, toc_skipped, err_code = srv._find_section_bounds(html, "Item 1A", 1000)
+        self.assertIsNone(err_code)
+        self.assertIsNotNone(start_idx)
+        self.assertTrue(toc_skipped)
+        self.assertEqual(found_heading, "Item 1A. Risk Factors")
+        section_html = html[start_idx:end_idx]
+        self.assertIn("actual risk factor disclosure", section_html)
+        self.assertNotIn("next section", section_html)
+
+    def test_unusable_filing_table_rows_are_rejected(self):
+        empty = "<table><tr><td>&nbsp;</td><td> </td></tr><tr><td></td></tr></table>"
+        rows = srv._parse_filing_table_rows(empty)
+        self.assertEqual(rows, [])
+        self.assertFalse(srv._filing_table_is_usable(rows))
+
+        usable = "<table><tr><th>Metric</th><th>2026</th></tr><tr><td>Revenue</td><td>$10</td></tr></table>"
+        rows = srv._parse_filing_table_rows(usable)
+        self.assertTrue(srv._filing_table_is_usable(rows))
+        self.assertEqual(rows[1], ["Revenue", "$10"])
+
+    def test_filing_index_excludes_layout_tables_and_preserves_original_index(self):
+        html = """
+        <html><body>
+        <table><tr><td>&nbsp;</td><td></td></tr></table>
+        <table><tr><th>Metric</th><th>2026</th></tr><tr><td>Revenue</td><td>$10</td></tr></table>
+        </body></html>
+        """
+        index = srv._build_filing_index_from_html(html)
+        self.assertEqual(index["rawTableCount"], 2)
+        self.assertEqual(index["excludedTableCount"], 1)
+        self.assertEqual(len(index["tables"]), 1)
+        self.assertEqual(index["tables"][0]["tableId"], 1)
+
+    def test_item_section_without_structural_heading_fails_closed(self):
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'<html><body><a href="#risk">Item 1A. Risk Factors</a></body></html>'
+
+        with patch("urllib.request.urlopen", return_value=_Response()):
+            data = _parse(_run(srv.get_filing_section(
+                "AAPL",
+                "Item 1A",
+                "https://www.sec.gov/Archives/example.htm",
+            )))
+        self.assertFalse(data["found"])
+        self.assertEqual(data["status"], "SECTION_STRUCTURE_NOT_RESOLVED")
+        self.assertEqual(data["recommendedNextAction"], "GET_FILING_OUTLINE")
+
+    def test_parse_public_transcript_accepts_raw_text(self):
+        raw_text = (
+            "<p>Prepared remarks.</p>"
+            "<p>Management expects fiscal 2027 revenue between $130 million and $150 million.</p>"
+        )
+        data = _parse(_run(srv.parse_public_transcript(raw_text=raw_text, topics=["revenue"])))
+        self.assertEqual(data["source"], "raw_text")
+        self.assertIsNone(data["url"])
+        self.assertEqual(data["filteredByTopics"], ["revenue"])
+        self.assertIn("$130 million", data["matchedParagraphs"][0]["paragraph"])
 
     def test_get_company_press_releases_status_split(self):
         with patch("server._collect_company_events", new_callable=AsyncMock) as mocked_collect, \

@@ -48,6 +48,20 @@
       "volatility": "stable_positive_fixture"
     },
     {
+      "id": "transcript-raw-text-contract",
+      "description": "Caller-supplied transcript text is callable without a URL and remains topic-filterable.",
+      "tool": "parse_public_transcript",
+      "args": {
+        "raw_text": "<p>Prepared remarks.</p><p>Fiscal 2027 guidance is between $130 million and $150 million.</p>",
+        "topics": [
+          "guidance"
+        ]
+      },
+      "assertion": "transcript_raw_text_contract",
+      "blocking": true,
+      "volatility": "stable_contract"
+    },
+    {
       "id": "press-release-payload-gate",
       "description": "Press-release results expose payload-level decision-grade fields instead of relying on tool-level status.",
       "tool": "get_company_press_releases",

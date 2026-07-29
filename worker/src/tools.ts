@@ -982,7 +982,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "get_filing_section",
-    description: "Retrieve the text content of a specific section from an SEC filing document.",
+    description: "Retrieve an SEC filing section from a structural heading. Item requests fail closed with SECTION_STRUCTURE_NOT_RESOLVED instead of returning table-of-contents text.",
     inputSchema: {
       type: "object",
       properties: {
@@ -996,7 +996,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "list_filing_tables",
-    description: "List all HTML tables in an SEC filing document. Returns table index, headers, and row count.",
+    description: "List semantically usable SEC filing tables. Preserves original tableIndex and reports excluded empty/layout tables.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1008,7 +1008,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "get_filing_table",
-    description: "Get the parsed rows of a specific table from an SEC filing document.",
+    description: "Get parsed rows for a specific SEC table. Empty/layout-only tables return UNUSABLE_TABLE and LIST_USABLE_TABLES.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1102,15 +1102,15 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "find_put_hedge_candidates", description: "Find OTM put hedge candidates using executable ask cost. Contracts require a two-sided quote plus liquidity evidence; PARTIAL means retry and do not use budgetFeasible as a decision.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, otm_pct_min: { type: "number", default: 8 }, otm_pct_max: { type: "number", default: 12 }, budget_usd: { type: "number", default: 500 }, expiry_after: { type: "string" } }, required: ["ticker"] } },
   { name: "list_sec_company_filings", description: "List SEC filings for a company from EDGAR submissions. Returns cik, filingType, filingDate, acceptedAt, accessionNumber, primaryDocument, documentUrl, and meta.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, form_type: { type: "string", default: "10-K" }, limit: { type: "number", default: 5 }, max_filings: { type: "number", default: 5 } }, required: ["ticker"] } },
   { name: "get_sec_filing_outline", description: "Get SEC filing outline. Uses the indexed filing path for ticker/filing_type calls and returns OUTLINE_NOT_PARSED with tableCount when tables exist but headings are not parsed.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, document_url: { type: "string" } }, required: ["ticker"] } },
-  { name: "get_sec_filing_section", description: "Get SEC filing section text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, selector: { type: "object" }, section_name: { type: "string" }, document_url: { type: "string" }, context_chars: { type: "number", default: 3000 } }, required: ["ticker"] } },
-  { name: "list_sec_filing_tables", description: "List SEC filing tables.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, document_url: { type: "string" }, offset: { type: "number", default: 0 }, limit: { type: "number", default: 50 } }, required: ["ticker"] } },
-  { name: "get_sec_filing_table", description: "Get SEC filing table.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, document_url: { type: "string" }, table_index: { type: "number" }, max_rows: { type: "number", default: 30 } }, required: ["ticker", "table_index"] } },
+  { name: "get_sec_filing_section", description: "Get structurally resolved SEC filing section text. For Item headings, check status/found; unresolved structure fails closed instead of returning TOC text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, selector: { type: "object" }, section_name: { type: "string" }, document_url: { type: "string" }, context_chars: { type: "number", default: 3000 } }, required: ["ticker"] } },
+  { name: "list_sec_filing_tables", description: "List only usable SEC filing tables while preserving original tableIndex. Read usableTableCount/excludedTableCount before selecting a table.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, document_url: { type: "string" }, offset: { type: "number", default: 0 }, limit: { type: "number", default: 50 } }, required: ["ticker"] } },
+  { name: "get_sec_filing_table", description: "Get a selected SEC filing table. Empty/layout-only candidates return UNUSABLE_TABLE with a deterministic recovery action.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, document_url: { type: "string" }, table_index: { type: "number" }, max_rows: { type: "number", default: 30 } }, required: ["ticker", "table_index"] } },
   { name: "extract_sec_filing_fact", description: "Extract SEC filing fact.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, fact: { type: "string" }, fact_name: { type: "string" }, fact_type: { type: "string" }, region: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, document_url: { type: "string" }, accession_number: { type: "string" } }, required: ["ticker"] } },
   { name: "search_sec_filing_text", description: "Search SEC filing text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, search_terms: { type: "array", items: { type: "string" } }, search_query: { type: "string" }, section_hint: { type: "string" }, selector: { type: "object" }, filing_type: { type: "string", default: "10-K" }, accession_number: { type: "string" }, document_url: { type: "string" }, context_chars: { type: "number", default: 1500 }, return_tables: { type: "boolean", default: true } }, required: ["ticker"] } },
   { name: "index_sec_filing", description: "Build a deterministic section/table index for an SEC filing. Identifies headings, tables, row labels, and units. period is reserved for future multi-period support; currently only 'latest' is supported unless accession_number is provided.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest", description: "Reserved. Only 'latest' supported currently." }, accession_number: { type: "string" } }, required: ["ticker"] } },
   { name: "get_sec_filing_index", description: "Get the pre-built section/table index for an SEC filing. Returns cached index when available; builds and caches on first call. period is reserved for future multi-period support; currently only 'latest' is supported unless accession_number is provided.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest", description: "Reserved. Only 'latest' supported currently." }, accession_number: { type: "string" } }, required: ["ticker"] } },
   { name: "list_sec_material_filings", description: "List latest material SEC filings for a ticker, filtering out noise (Form 4, 144, SC 13G, etc.). Returns only significant filings (10-K, 10-Q, 8-K, S-1, 424B, DEF 14A, 20-F, 6-K by default).", inputSchema: { type: "object", properties: { ticker: { type: "string" }, forms: { type: "array", items: { type: "string" }, default: ["10-K", "10-Q", "8-K", "S-1", "424B", "DEF 14A", "20-F", "6-K"] }, limit: { type: "number", default: 5 } }, required: ["ticker"] } },
-  { name: "get_sec_filing_intelligence", description: "Preferred diagnostic call when SEC extraction, outline, or table parsing disagrees. Returns XBRL facts snapshot, section/table index summary, and recommended queries in one call.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, filing_index: { type: "number", default: 0 } }, required: ["ticker"] } },
+  { name: "get_sec_filing_intelligence", description: "Preferred SEC diagnostic call. Returns an accession-matched official companyfacts snapshot, usable section/table index summary, evidence metadata, and recommended follow-ups.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, filing_index: { type: "number", default: 0 } }, required: ["ticker"] } },
   { name: "get_sec_filing_section_markdown", description: "Return a specific SEC filing section as unverified Markdown from a degraded Worker HTML fallback. Payloads are blocked from decision-grade use and include source offsets/warnings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, section: { type: "string", default: "Item 1A" }, filing_type: { type: "string", default: "10-K" }, filing_index: { type: "number", default: 0 }, max_chars: { type: "number", default: 50000 } }, required: ["ticker"] } },
   { name: "analyze_position_signals", description: "Aggregate public market, analyst, earnings, and technical inputs that may be useful for a caller-defined scoring model. This tool does not access holdings, cost basis, position size, or private scoring rules.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
   { name: "calculate_price_target_distance", description: "Compare current market price to a user-supplied reference price target and return percentage distance and bracket labels.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, reference_target_price: { type: "number", description: "Preferred: user-supplied reference target price." }, io_pt: { type: "number", description: "Backward-compatible alias for reference_target_price." } }, required: ["ticker"] } },
@@ -1132,7 +1132,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_latest_earnings_release", description: "Resolve the latest public earnings release source for a ticker. Fiscal period is returned only when explicit release text resolves it; otherwise it remains unresolved.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" }, period: { type: "string", enum: ["latest"], default: "latest", description: "Period selector. Only 'latest' is supported." } }, required: ["ticker"] } },
   { name: "index_earnings_release", description: "Build a compact section/table index of the latest public earnings release for deterministic metric extraction.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, period: { type: "string", enum: ["latest"], default: "latest" }, source_url: { type: "string", description: "Optional override URL (must be https://www.sec.gov/Archives/ or company IR). Paywalled sources are blocked." } }, required: ["ticker"] } },
   { name: "extract_earnings_metrics", description: "Extract reported earnings metrics from SEC 8-K or public IR source. EX-99 prose or unscoped iXBRL values remain non-decision-grade until their period is structurally matched.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" }, source_preference: { type: "array", items: { type: "string", enum: ["sec_8k", "company_ir", "10-q", "yahoo"] }, description: "Ordered preference list for source resolution.", default: ["sec_8k", "company_ir", "10-q", "yahoo"] } }, required: ["ticker"] } },
-  { name: "extract_guidance", description: "Extract company-provided forward guidance ranges (revenue, gross margin, EPS) from the latest SEC 8-K or IR release.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" } }, required: ["ticker"] } },
+  { name: "extract_guidance", description: "Extract company-provided forward ranges from the resolved official SEC earnings exhibit, including 'between X and Y' wording. Guidance remains non-decision-grade unless separately verified.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" } }, required: ["ticker"] } },
   { name: "extract_management_commentary", description: "Extract topic-keyed management commentary snippets from the latest earnings release. Returns first relevant sentence per topic.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" }, topics: { type: "array", items: { type: "string" }, description: "Topics to search for, e.g. ['AI', 'margins', 'guidance', 'supply chain']" } }, required: ["ticker"] } },
   { name: "compare_earnings_actual_vs_estimate", description: "Compare official-release actuals with Yahoo's historical estimate row. The official fiscal label remains period/reportedPeriod; estimatePeriod and reportedDate identify the Yahoo row. Read periodAlignmentStatus before using cross-source revenue comparisons. Returns epsDelta and omits percentage surprise for near-zero estimates.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" } }, required: ["ticker"] } },
   { name: "list_sec_filing_exhibits", description: "List all exhibits/documents attached to a specific SEC filing by accession number.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, accessionNumber: { type: "string", description: "SEC filing accession number, e.g. '0000320193-24-000081'" } }, required: ["ticker", "accessionNumber"] } },
@@ -1771,9 +1771,49 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   },
   list_sec_filings: SIMPLE_OBJECT_SCHEMA,
   get_filing_outline: SIMPLE_OBJECT_SCHEMA,
-  get_filing_section: SIMPLE_OBJECT_SCHEMA,
-  list_filing_tables: SIMPLE_OBJECT_SCHEMA,
-  get_filing_table: SIMPLE_OBJECT_SCHEMA,
+  get_filing_section: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      sectionName: { type: "string" },
+      status: { type: "string", enum: ["OK", "TEXT_FALLBACK", "SECTION_NOT_FOUND", "SECTION_STRUCTURE_NOT_RESOLVED"] },
+      found: { type: "boolean" },
+      text: { type: ["string", "null"] },
+      matchedHeading: { type: "string" },
+      tocSkipped: { type: "boolean" },
+      decisionGrade: { type: "boolean" },
+      recommendedNextAction: { type: "string", enum: ["GET_FILING_OUTLINE"] },
+    },
+    additionalProperties: true,
+  },
+  list_filing_tables: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      status: { type: "string", enum: ["OK", "NO_USABLE_TABLES"] },
+      tableCount: { type: "number" },
+      usableTableCount: { type: "number" },
+      excludedTableCount: { type: "number" },
+      returnedCount: { type: "number" },
+      tables: { type: "array" },
+      recommendedNextAction: { type: "string", enum: ["GET_SEC_FILING_TABLE", "SEARCH_FILING_TEXT"] },
+    },
+    additionalProperties: true,
+  },
+  get_filing_table: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      tableIndex: { type: "number" },
+      status: { type: "string", enum: ["OK", "UNUSABLE_TABLE"] },
+      decisionGrade: { type: "boolean" },
+      totalRows: { type: "number" },
+      returnedRows: { type: "number" },
+      rows: { type: "array" },
+      recommendedNextAction: { type: "string", enum: ["LIST_USABLE_TABLES", "VERIFY_TABLE_PERIOD_AND_UNITS"] },
+    },
+    additionalProperties: true,
+  },
   extract_filing_fact: SIMPLE_OBJECT_SCHEMA,
   index_sec_filing: SIMPLE_OBJECT_SCHEMA,
   get_sec_filing_index: SIMPLE_OBJECT_SCHEMA,
@@ -1788,7 +1828,16 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   get_latest_earnings_release: ENVELOPE_V2_OUTPUT_SCHEMA,
   index_earnings_release: ENVELOPE_V2_OUTPUT_SCHEMA,
   extract_earnings_metrics: ENVELOPE_V2_OUTPUT_SCHEMA,
-  extract_guidance: ENVELOPE_V2_OUTPUT_SCHEMA,
+  extract_guidance: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      period: { type: ["string", "null"] },
+      guidance: { type: "object" },
+      confidence: { type: "string" },
+    },
+    additionalProperties: true,
+  },
   extract_management_commentary: ENVELOPE_V2_OUTPUT_SCHEMA,
   compare_earnings_actual_vs_estimate: {
     type: "object",
@@ -1810,15 +1859,58 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   },
   list_sec_filing_exhibits: ENVELOPE_V2_OUTPUT_SCHEMA,
   get_sec_filing_exhibit_content: ENVELOPE_V2_OUTPUT_SCHEMA,
-  parse_public_transcript: ENVELOPE_V2_OUTPUT_SCHEMA,
+  parse_public_transcript: {
+    type: "object",
+    properties: {
+      url: { type: ["string", "null"] },
+      source: { type: "string", enum: ["raw_text", "public_url"] },
+      filteredByTopics: { type: ["array", "null"] },
+      matchedParagraphs: { type: "array" },
+      text: { type: "string" },
+      totalTextLength: { type: "number" },
+      truncated: { type: "boolean" },
+    },
+    additionalProperties: true,
+  },
   get_earnings_call_transcript: ENVELOPE_V2_OUTPUT_SCHEMA,
   list_sec_material_filings: ENVELOPE_V2_OUTPUT_SCHEMA,
-  get_sec_filing_intelligence: ENVELOPE_V2_OUTPUT_SCHEMA,
+  get_sec_filing_intelligence: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      filing: { type: "object" },
+      xbrl_available: { type: "boolean" },
+      xbrl_facts: { type: "object" },
+      index: { type: "object" },
+      recommended_queries: { type: "array" },
+      status: { type: "object" },
+    },
+    additionalProperties: true,
+  },
   get_sec_filing_section_markdown: ENVELOPE_V2_OUTPUT_SCHEMA,
 };
 
 OUTPUT_SCHEMAS.analyze_volume_ratio = OUTPUT_SCHEMAS.get_volume_ratio;
 OUTPUT_SCHEMAS.check_volume_liquidity_threshold = OUTPUT_SCHEMAS.get_volume_gate;
+OUTPUT_SCHEMAS.get_sec_filing_section = OUTPUT_SCHEMAS.get_filing_section;
+OUTPUT_SCHEMAS.list_sec_filing_tables = OUTPUT_SCHEMAS.list_filing_tables;
+OUTPUT_SCHEMAS.get_sec_filing_table = OUTPUT_SCHEMAS.get_filing_table;
+OUTPUT_SCHEMAS.extract_sec_filing_fact = {
+  type: "object",
+  properties: {
+    ticker: { type: "string" },
+    fact: { type: "string" },
+    value: { type: ["number", "null"] },
+    unit: { type: "string" },
+    period: { type: ["string", "null"] },
+    status: { type: "string" },
+    decisionGrade: { type: "boolean" },
+    evidence: { type: ["object", "array", "null"] },
+    sourceEvidence: { type: ["object", "null"] },
+    recommendedNextAction: { type: "string" },
+  },
+  additionalProperties: true,
+};
 
 for (const [alias, canonical] of Object.entries(TOOL_ALIASES)) {
   OUTPUT_SCHEMAS[alias] = OUTPUT_SCHEMAS[canonical] ?? SIMPLE_OBJECT_SCHEMA;
@@ -1837,6 +1929,13 @@ const LLM_DETAILED_OUTPUT_TOOLS = new Set([
   "get_market_calendar",
   "analyze_volume_ratio",
   "check_volume_liquidity_threshold",
+  "get_sec_filing_section",
+  "list_sec_filing_tables",
+  "get_sec_filing_table",
+  "get_sec_filing_intelligence",
+  "extract_sec_filing_fact",
+  "extract_guidance",
+  "parse_public_transcript",
 ]);
 
 function envelopedToolOutputSchema(dataSchema: Tool["outputSchema"]): Tool["outputSchema"] {
@@ -2070,6 +2169,10 @@ function secIndexTablesPayload(indexPayload: Record<string, unknown>, offset: nu
     ? indexPayload.index as Record<string, unknown>
     : {};
   const allTables = Array.isArray(index.tables) ? index.tables as Record<string, unknown>[] : [];
+  const rawTableCount = typeof index.rawTableCount === "number" ? index.rawTableCount : allTables.length;
+  const excludedTableCount = typeof index.excludedTableCount === "number"
+    ? index.excludedTableCount
+    : Math.max(0, rawTableCount - allTables.length);
   const tables = allTables.slice(safeOffset, safeOffset + safeLimit).map((table, i) => ({
     tableIndex: table.tableId ?? safeOffset + i,
     title: table.title ?? null,
@@ -2085,12 +2188,16 @@ function secIndexTablesPayload(indexPayload: Record<string, unknown>, offset: nu
     filingDate: indexPayload.filingDate ?? null,
     accessionNumber: indexPayload.accessionNumber ?? null,
     documentUrl: indexPayload.documentUrl ?? null,
-    tableCount: allTables.length,
+    status: allTables.length > 0 ? "OK" : "NO_USABLE_TABLES",
+    tableCount: rawTableCount,
+    usableTableCount: allTables.length,
+    excludedTableCount,
     returnedCount: tables.length,
     offset: safeOffset,
     limit: safeLimit,
     hasMore: safeOffset + tables.length < allTables.length,
     tables,
+    recommendedNextAction: allTables.length > 0 ? "GET_SEC_FILING_TABLE" : "SEARCH_FILING_TEXT",
   });
 }
 
@@ -2771,7 +2878,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
           indexUrl: parsed.indexUrl ?? null,
           primaryDocumentUrl: parsed.primaryDocumentUrl ?? null,
           xbrlContext: parsed.xbrlContext ?? null,
-          evidence: parsed.evidence ?? null,
+          evidence: decisionGrade ? sourceEvidence : (parsed.evidence ?? null),
           sourceEvidence,
           calculation: parsed.calculation ?? null,
           warnings: parsed.warnings ?? [],
@@ -2853,7 +2960,11 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         Array.isArray(args.topics) ? args.topics.map(String) : null,
       );
     case "parse_public_transcript":
-      return parsePublicTranscript(str(args.url), Array.isArray(args.topics) ? args.topics.map(String) : null);
+      return parsePublicTranscript(
+        str(args.url),
+        Array.isArray(args.topics) ? args.topics.map(String) : null,
+        args.raw_text != null ? str(args.raw_text) : null,
+      );
     case "get_earnings_call_transcript":
       return getEarningsCallTranscript(
         str(args.ticker),

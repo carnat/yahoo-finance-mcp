@@ -7943,11 +7943,42 @@ interface SectionBounds {
   errCode: string | null;
 }
 
+function sectionItemToken(value: string): string | null {
+  const match = value.match(/\bitem\s+(\d+[a-z]?)\b/i);
+  return match ? `item ${match[1].toLowerCase()}` : null;
+}
+
+function sectionHeadingMatches(requested: string, heading: string): boolean {
+  const requestedText = requested.toLowerCase().replace(/\s+/g, " ").trim();
+  const headingText = heading.toLowerCase().replace(/\s+/g, " ").trim();
+  const requestedItem = sectionItemToken(requestedText);
+  if (requestedItem) return requestedItem === sectionItemToken(headingText);
+  return requestedText.includes(headingText) || headingText.includes(requestedText);
+}
+
+function boldItemHeadings(html: string): { start: number; end: number; text: string; token: string }[] {
+  const itemRe = /(?:<b\b[^>]*>|<strong\b[^>]*>|<span\b[^>]*style\s*=\s*['"][^'"]*font-weight\s*:\s*(?:bold|[6-9]00)[^'"]*['"][^>]*>)\s*((?:<[^>]+>\s*)*Item(?:\s|&nbsp;|&#160;)+\d+[A-Z]?(?:\s*\([^)]+\))?[^<]{0,160})/gi;
+  const matches: { start: number; end: number; text: string; token: string }[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = itemRe.exec(html)) !== null) {
+    const text = stripHtmlTags(match[1]).replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+    const token = sectionItemToken(text);
+    if (token) matches.push({ start: match.index, end: itemRe.lastIndex, text, token });
+  }
+  return matches;
+}
+
 function findSectionBounds(html: string, section: string, maxChars: number = 50000): SectionBounds {
-  const sectionLower = section.toLowerCase().trim();
   const headingRe = /<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi;
   let tocSkipped = false;
-  
+
+  const escapedSection = section.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+  const occurrenceRe = new RegExp(escapedSection, "gi");
+  let occurrence: RegExpExecArray | null;
+  while ((occurrence = occurrenceRe.exec(html)) !== null) {
+    if (isTocMatch(html, occurrence.index, occurrenceRe.lastIndex)) tocSkipped = true;
+  }
+
   const allHeadings: { text: string; start: number; end: number; level: number; rawText: string }[] = [];
   let hMatch: RegExpExecArray | null;
   while ((hMatch = headingRe.exec(html)) !== null) {
@@ -7964,7 +7995,7 @@ function findSectionBounds(html: string, section: string, maxChars: number = 500
   const candidates: { start: number; level: number; rawText: string; hIdx: number }[] = [];
   for (let i = 0; i < allHeadings.length; i++) {
     const h = allHeadings[i];
-    if (sectionLower.includes(h.text) || h.text.includes(sectionLower)) {
+    if (sectionHeadingMatches(section, h.rawText)) {
       if (isTocMatch(html, h.start, h.end)) {
         tocSkipped = true;
         continue;
@@ -7973,17 +8004,16 @@ function findSectionBounds(html: string, section: string, maxChars: number = 500
     }
   }
   
-  const itemMatches: { start: number; end: number }[] = [];
+  const itemMatches: { start: number; end: number; text: string; token: string }[] = [];
+  const allBoldItems = boldItemHeadings(html);
   if (candidates.length === 0) {
-    const escapeRegex = (s: string) => s.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
-    const itemRe = new RegExp(`(?:<b[^>]*>|<span[^>]*font-weight:\\s*bold[^>]*>)\\s*${escapeRegex(section)}\\b`, "gi");
-    let itemMatch: RegExpExecArray | null;
-    while ((itemMatch = itemRe.exec(html)) !== null) {
-      if (isTocMatch(html, itemMatch.index, itemRe.lastIndex)) {
+    for (const itemMatch of allBoldItems) {
+      if (!sectionHeadingMatches(section, itemMatch.text)) continue;
+      if (isTocMatch(html, itemMatch.start, itemMatch.end)) {
         tocSkipped = true;
         continue;
       }
-      itemMatches.push({ start: itemMatch.index, end: itemRe.lastIndex });
+      itemMatches.push(itemMatch);
     }
   }
   
@@ -8010,26 +8040,17 @@ function findSectionBounds(html: string, section: string, maxChars: number = 500
     return { startIdx: c.start, endIdx: endPos, foundHeading: c.rawText, tocSkipped, errCode: null };
   } else {
     const match = itemMatches[0];
-    const escapeRegex = (s: string) => s.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
-    const itemRe = new RegExp(`(?:<b[^>]*>|<span[^>]*font-weight:\\s*bold[^>]*>)\\s*${escapeRegex(section)}\\b`, "gi");
-    const minSpacing = 100;
-    const nextStart = match.end + minSpacing;
     let endPos: number | null = null;
-    
-    itemRe.lastIndex = nextStart;
-    let nextMatch: RegExpExecArray | null;
-    while ((nextMatch = itemRe.exec(html)) !== null) {
-      if (isTocMatch(html, nextMatch.index, itemRe.lastIndex)) {
-        itemRe.lastIndex = nextMatch.index + 1;
-        continue;
-      }
-      endPos = nextMatch.index;
+    for (const nextMatch of allBoldItems) {
+      if (nextMatch.start < match.end || nextMatch.token === match.token) continue;
+      if (isTocMatch(html, nextMatch.start, nextMatch.end)) continue;
+      endPos = nextMatch.start;
       break;
     }
     if (endPos === null) {
       endPos = Math.min(match.start + maxChars * 3, html.length);
     }
-    return { startIdx: match.start, endIdx: endPos, foundHeading: section, tocSkipped, errCode: null };
+    return { startIdx: match.start, endIdx: endPos, foundHeading: match.text, tocSkipped, errCode: null };
   }
 }
 
@@ -8053,6 +8074,7 @@ export async function getFilingSection(ticker: string, sectionName: string, docu
       return JSON.stringify({
         ticker,
         sectionName,
+        status: "OK",
         found: true,
         text: plainSection.slice(0, contextChars),
         sectionStartOffset: bounds.startIdx,
@@ -8062,13 +8084,30 @@ export async function getFilingSection(ticker: string, sectionName: string, docu
       });
     }
 
-    // Fallback to text search
+    if (sectionItemToken(sectionName)) {
+      return JSON.stringify({
+        ticker,
+        sectionName,
+        status: "SECTION_STRUCTURE_NOT_RESOLVED",
+        found: false,
+        text: null,
+        sectionStartOffset: null,
+        sectionEndOffset: null,
+        matchedHeading: "",
+        tocSkipped: bounds.tocSkipped,
+        decisionGrade: false,
+        recommendedNextAction: "GET_FILING_OUTLINE",
+      });
+    }
+
+    // Non-Item labels retain the legacy plain-text fallback.
     const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
     const idx = text.toLowerCase().indexOf(sectionName.toLowerCase());
     if (idx === -1) {
       return JSON.stringify({
         ticker,
         sectionName,
+        status: "SECTION_NOT_FOUND",
         found: false,
         text: null,
         sectionStartOffset: null,
@@ -8080,6 +8119,7 @@ export async function getFilingSection(ticker: string, sectionName: string, docu
     return JSON.stringify({
       ticker,
       sectionName,
+      status: "TEXT_FALLBACK",
       found: true,
       text: text.slice(idx, idx + contextChars),
       sectionStartOffset: idx,
@@ -8094,6 +8134,27 @@ export async function getFilingSection(ticker: string, sectionName: string, docu
 
 // ── list_filing_tables ────────────────────────────────────────────────────────
 
+function parseFilingTableRows(tableHtml: string, maxRows: number | null = null): string[][] {
+  const rows: string[][] = [];
+  const rowRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let rowMatch: RegExpExecArray | null;
+  while ((rowMatch = rowRe.exec(tableHtml)) !== null) {
+    const cells: string[] = [];
+    const cellRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+    let cellMatch: RegExpExecArray | null;
+    while ((cellMatch = cellRe.exec(rowMatch[1])) !== null) {
+      cells.push(stripHtmlTags(cellMatch[1]));
+    }
+    if (cells.some(Boolean)) rows.push(cells);
+    if (maxRows != null && rows.length >= maxRows) break;
+  }
+  return rows;
+}
+
+function filingTableIsUsable(rows: string[][]): boolean {
+  return rows.flat().filter((cell) => cell.trim() !== "").length >= 2;
+}
+
 export async function listFilingTables(ticker: string, documentUrl: string, offset: number = 0, limit: number = 50): Promise<string> {
   try {
     if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
@@ -8103,29 +8164,22 @@ export async function listFilingTables(ticker: string, documentUrl: string, offs
     if (!resp.ok) return JSON.stringify({ error: true, message: `HTTP ${resp.status}` });
     const html = await resp.text();
 
-    const tables: { tableIndex: number; rowCount: number; title: string | null; headers: string[] }[] = [];
+    const tables: { tableIndex: number; rowCount: number; title: string | null; headers: string[]; qualityStatus: "USABLE" }[] = [];
     const tableRe = /<table[^>]*>([\s\S]*?)<\/table>/gi;
-    const tdRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
     let tm: RegExpExecArray | null;
     let idx = 0;
     while ((tm = tableRe.exec(html)) !== null) {
       const tableStart = tm.index;
       const tableHtml = tm[1];
-      const rows = tableHtml.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) ?? [];
-      const headers: string[] = [];
-      if (rows.length > 0) {
-        const firstRow = rows[0] ?? "";
-        let hm: RegExpExecArray | null;
-        tdRe.lastIndex = 0;
-        while ((hm = tdRe.exec(firstRow)) !== null && headers.length < 6) {
-          headers.push(hm[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
-        }
-      }
+      const rows = parseFilingTableRows(tableHtml);
+      const tableIndex = idx++;
+      if (!filingTableIsUsable(rows)) continue;
+      const headers = (rows[0] ?? []).slice(0, 6);
       const preText = stripHtmlTags(html.slice(Math.max(0, tableStart - 500), tableStart));
       const lines = preText.split(/\n| {2,}/).map(l => cleanFilingDisplayText(l.trim())).filter(Boolean);
       const candidate = lines[lines.length - 1] ?? "";
       const title = candidate.length > 10 && candidate.length < 200 && !looksLikeFilingMarkupText(candidate) ? candidate : null;
-      tables.push({ tableIndex: idx++, rowCount: rows.length, title, headers });
+      tables.push({ tableIndex, rowCount: rows.length, title, headers, qualityStatus: "USABLE" });
     }
     const safeOffset = Math.max(0, Math.trunc(offset));
     const safeLimit = Math.min(100, Math.max(1, Math.trunc(limit || 50)));
@@ -8133,12 +8187,16 @@ export async function listFilingTables(ticker: string, documentUrl: string, offs
     return JSON.stringify({
       ticker,
       documentUrl,
-      tableCount: tables.length,
+      status: tables.length > 0 ? "OK" : "NO_USABLE_TABLES",
+      tableCount: idx,
+      usableTableCount: tables.length,
+      excludedTableCount: idx - tables.length,
       returnedCount: page.length,
       offset: safeOffset,
       limit: safeLimit,
       hasMore: safeOffset + page.length < tables.length,
       tables: page,
+      recommendedNextAction: tables.length > 0 ? "GET_SEC_FILING_TABLE" : "SEARCH_FILING_TEXT",
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
@@ -8161,26 +8219,36 @@ export async function getFilingTable(ticker: string, documentUrl: string, tableI
     let tm: RegExpExecArray | null;
     while ((tm = tableRe.exec(html)) !== null) tables.push(tm[1]);
 
-    if (tableIndex >= tables.length) {
+    if (tableIndex < 0 || tableIndex >= tables.length) {
       return JSON.stringify({ error: true, message: `Table index ${tableIndex} not found. Document has ${tables.length} tables.` });
     }
 
-    const tdRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
     const tableHtml = tables[tableIndex];
-    const rowMatches = tableHtml.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) ?? [];
-    const parsedRows: string[][] = [];
-
-    for (let r = 0; r < Math.min(rowMatches.length, maxRows + 1); r++) {
-      const cells: string[] = [];
-      let cm: RegExpExecArray | null;
-      tdRe.lastIndex = 0;
-      while ((cm = tdRe.exec(rowMatches[r])) !== null && cells.length < 10) {
-        cells.push(cm[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
-      }
-      parsedRows.push(cells);
+    const allRows = parseFilingTableRows(tableHtml);
+    if (!filingTableIsUsable(allRows)) {
+      return JSON.stringify({
+        ticker,
+        tableIndex,
+        status: "UNUSABLE_TABLE",
+        decisionGrade: false,
+        totalRows: allRows.length,
+        returnedRows: 0,
+        rows: [],
+        recommendedNextAction: "LIST_USABLE_TABLES",
+      });
     }
+    const parsedRows = allRows.slice(0, Math.max(1, maxRows));
 
-    return JSON.stringify({ ticker, tableIndex, totalRows: rowMatches.length, returnedRows: parsedRows.length, rows: parsedRows });
+    return JSON.stringify({
+      ticker,
+      tableIndex,
+      status: "OK",
+      decisionGrade: false,
+      totalRows: allRows.length,
+      returnedRows: parsedRows.length,
+      rows: parsedRows,
+      recommendedNextAction: "VERIFY_TABLE_PERIOD_AND_UNITS",
+    });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}` });
   }
@@ -11285,7 +11353,13 @@ function _sanitizeFilingHtml(html: string): string {
 
 function _buildFilingIndexFromHtml(
   html: string,
-): { sections: Record<string, unknown>[]; tables: Record<string, unknown>[]; keywordMap: Record<string, string[]> } {
+): {
+  sections: Record<string, unknown>[];
+  tables: Record<string, unknown>[];
+  keywordMap: Record<string, string[]>;
+  rawTableCount: number;
+  excludedTableCount: number;
+} {
   // Remove scripts/styles/event handlers to reduce noise.
   const sanitized = _sanitizeFilingHtml(html);
 
@@ -11306,7 +11380,6 @@ function _buildFilingIndexFromHtml(
   // --- Table extraction ---
   const tables: Record<string, unknown>[] = [];
   const tableRe = /<table[^>]*>([\s\S]*?)<\/table>/gi;
-  const tdRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
   let tm: RegExpExecArray | null;
   let tableIdx = 0;
   while ((tm = tableRe.exec(sanitized)) !== null && tableIdx < 100) {
@@ -11325,24 +11398,18 @@ function _buildFilingIndexFromHtml(
     }
 
     // Parse rows
-    const rowMatches = tableHtml.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) ?? [];
-    if (rowMatches.length === 0) { tableIdx++; continue; }
+    const parsedRows = parseFilingTableRows(tableHtml);
+    if (!filingTableIsUsable(parsedRows)) { tableIdx++; continue; }
 
     // Headers from first row
-    const headers: string[] = [];
-    tdRe.lastIndex = 0;
-    let hd: RegExpExecArray | null;
-    while ((hd = tdRe.exec(rowMatches[0] ?? "")) !== null && headers.length < 10) {
-      headers.push(_stripHtmlTagsIdx(hd[1]));
-    }
+    const headers = (parsedRows[0] ?? []).slice(0, 10);
 
     // Row labels from first column of subsequent rows (up to 19 data rows)
     const rowLabels: string[] = [];
-    for (let r = 1; r < Math.min(rowMatches.length, 20); r++) {
-      tdRe.lastIndex = 0;
-      const cellMatch = tdRe.exec(rowMatches[r] ?? "");
-      if (cellMatch) {
-        const label = _stripHtmlTagsIdx(cellMatch[1]);
+    for (let r = 1; r < Math.min(parsedRows.length, 20); r++) {
+      const row = parsedRows[r] ?? [];
+      if (row.length > 0) {
+        const label = row[0];
         if (label && label.length < 100) rowLabels.push(label);
       }
     }
@@ -11400,7 +11467,13 @@ function _buildFilingIndexFromHtml(
     if (refs.length > 0) keywordMap[kw] = refs;
   }
 
-  return { sections, tables, keywordMap };
+  return {
+    sections,
+    tables,
+    keywordMap,
+    rawTableCount: tableIdx,
+    excludedTableCount: tableIdx - tables.length,
+  };
 }
 
 async function _indexSecFilingImpl(
@@ -11558,6 +11631,76 @@ export async function listSecMaterialFilings(
   });
 }
 
+const XBRL_INTELLIGENCE_CONCEPTS: Record<string, string[]> = {
+  "revenue": ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet"],
+  net_income: ["NetIncomeLoss", "ProfitLoss"],
+  cash: ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsAndShortTermInvestments"],
+  long_term_debt: ["LongTermDebt", "LongTermDebtNoncurrent"],
+  total_assets: ["Assets"],
+  operating_income: ["OperatingIncomeLoss"],
+};
+
+function extractXbrlAnnualFact(
+  factsData: Record<string, unknown>,
+  conceptNames: string[],
+  accessionNumber: string,
+  documentUrl: string | null,
+): Record<string, unknown> | null {
+  const facts = factsData.facts && typeof factsData.facts === "object"
+    ? factsData.facts as Record<string, unknown>
+    : {};
+  const usGaap = facts["us-gaap"] && typeof facts["us-gaap"] === "object"
+    ? facts["us-gaap"] as Record<string, unknown>
+    : {};
+  for (const concept of conceptNames) {
+    const conceptData = usGaap[concept] && typeof usGaap[concept] === "object"
+      ? usGaap[concept] as Record<string, unknown>
+      : null;
+    const units = conceptData?.units && typeof conceptData.units === "object"
+      ? conceptData.units as Record<string, unknown>
+      : {};
+    const usdRows = Array.isArray(units.USD) ? units.USD as Record<string, unknown>[] : [];
+    const annual = usdRows
+      .filter((row) =>
+        ["10-K", "10-K405", "10-KSB", "20-F"].includes(String(row.form ?? ""))
+        && String(row.accn ?? "") === accessionNumber
+        && row.end != null
+        && row.val != null)
+      .sort((a, b) => String(b.end ?? "").localeCompare(String(a.end ?? "")));
+    const latest = annual[0];
+    if (!latest) continue;
+    const sourceEvidence = {
+      sourceType: "sec_xbrl_companyfacts",
+      concept,
+      taxonomy: "us-gaap",
+      unit: "USD",
+      accessionNumber: latest.accn,
+      filingType: latest.form,
+      filingDate: latest.filed,
+      periodEnd: latest.end,
+      documentUrl,
+    };
+    const decisionGrade = Boolean(
+      accessionNumber
+      && latest.accn === accessionNumber
+      && latest.end
+      && documentUrl
+    );
+    return {
+      value: latest.val,
+      unit: "USD",
+      period: latest.end,
+      form: latest.form,
+      filed: latest.filed,
+      confidence: "HIGH",
+      decisionGrade,
+      evidence: decisionGrade ? sourceEvidence : null,
+      sourceEvidence,
+    };
+  }
+  return null;
+}
+
 export async function getSecFilingIntelligence(
   ticker: string,
   filingType: string = "10-K",
@@ -11598,6 +11741,20 @@ export async function getSecFilingIntelligence(
   const accClean = accessionNumber.replace(/-/g, "");
   const documentUrl = primaryDoc ? `https://www.sec.gov/Archives/edgar/data/${cikInt}/${accClean}/${primaryDoc}` : null;
 
+  let xbrlAvailable = false;
+  let xbrlStatus = "UNAVAILABLE";
+  const xbrlFacts: Record<string, unknown> = {};
+  const factsData = await edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`);
+  if (factsData?.facts && typeof factsData.facts === "object") {
+    xbrlAvailable = true;
+    xbrlStatus = "OK";
+    for (const [factName, concepts] of Object.entries(XBRL_INTELLIGENCE_CONCEPTS)) {
+      const fact = extractXbrlAnnualFact(factsData, concepts, accessionNumber, documentUrl);
+      if (fact) xbrlFacts[factName] = fact;
+    }
+    if (Object.keys(xbrlFacts).length === 0) xbrlStatus = "AVAILABLE_NO_MATCHING_FACTS";
+  }
+
   // Attempt to get filing index
   let indexStatus = "UNAVAILABLE";
   let sectionsCount = 0;
@@ -11630,11 +11787,11 @@ export async function getSecFilingIntelligence(
   return JSON.stringify({
     ticker,
     filing: { type: filingType, accessionNumber, filedAt: filingDate, acceptedAt, documentUrl },
-    xbrl_available: false,
-    xbrl_facts: {},
+    xbrl_available: xbrlAvailable,
+    xbrl_facts: xbrlFacts,
     index: { sections_count: sectionsCount, tables_count: tablesCount, sections: sectionsList, exhibits_count: 0 },
     recommended_queries: recommendedQueries,
-    status: { xbrl: "UNAVAILABLE", index: indexStatus, sections: sectionsCount > 0 ? "AVAILABLE" : "EMPTY" },
+    status: { xbrl: xbrlStatus, index: indexStatus, sections: sectionsCount > 0 ? "AVAILABLE" : "EMPTY" },
   });
 }
 
@@ -11896,17 +12053,29 @@ export async function getSecFilingExhibitContent(
   });
 }
 
-export async function parsePublicTranscript(url: string, topics: string[] | null = null): Promise<string> {
-  if (!url.startsWith("https://")) {
-    return JSON.stringify({ ok: false, error: { code: "INPUT_VALIDATION_ERROR", message: "A valid https:// URL is required." } });
+export async function parsePublicTranscript(
+  url: string = "",
+  topics: string[] | null = null,
+  rawText: string | null = null,
+): Promise<string> {
+  const hasRawText = typeof rawText === "string" && rawText.trim() !== "";
+  if (!hasRawText && !url.startsWith("https://")) {
+    return JSON.stringify({ ok: false, error: { code: "INPUT_VALIDATION_ERROR", message: "A valid https:// URL or raw_text is required." } });
   }
 
-  const html = await fetchPublicHtml(url, 5_000_000);
-  if (!html) {
-    return JSON.stringify({ ok: false, error: { code: "FETCH_ERROR", message: `Could not fetch URL: ${url}` } });
+  let cleanText: string;
+  let source: "raw_text" | "public_url";
+  if (hasRawText) {
+    cleanText = htmlToReadableText(rawText as string);
+    source = "raw_text";
+  } else {
+    const html = await fetchPublicHtml(url, 5_000_000);
+    if (!html) {
+      return JSON.stringify({ ok: false, error: { code: "FETCH_ERROR", message: `Could not fetch URL: ${url}` } });
+    }
+    cleanText = htmlToReadableText(html);
+    source = "public_url";
   }
-
-  const cleanText = htmlToReadableText(html);
   const warnings: Record<string, unknown>[] = [];
   const topicList = (topics ?? []).filter((topic) => typeof topic === "string" && topic.trim()).map((topic) => topic.trim());
 
@@ -11916,7 +12085,8 @@ export async function parsePublicTranscript(url: string, topics: string[] | null
       warnings.push({ code: "NO_TOPIC_MATCHES", message: `No paragraphs matched the provided topics: ${topicList.join(", ")}` });
     }
     return JSON.stringify({
-      url,
+      url: hasRawText ? null : url,
+      source,
       filteredByTopics: topicList,
       matchedParagraphs,
       totalTextLength: cleanText.length,
@@ -11930,7 +12100,8 @@ export async function parsePublicTranscript(url: string, topics: string[] | null
     warnings.push({ code: "TEXT_TRUNCATED", message: `Text truncated from ${cleanText.length} to ${maxChars} characters.` });
   }
   return JSON.stringify({
-    url,
+    url: hasRawText ? null : url,
+    source,
     filteredByTopics: null,
     text: cleanText.slice(0, maxChars),
     totalTextLength: cleanText.length,
@@ -13997,19 +14168,21 @@ export async function extractGuidance(ticker: string, period = "latest"): Promis
   const src = Array.isArray(release.sources) && release.sources[0] && typeof release.sources[0] === "object"
     ? release.sources[0] as Record<string, unknown>
     : {};
-  const srcUrl = String(src.url ?? "");
+  const content = await resolveEarningsContentSource(src);
+  const srcUrl = content.url;
   if (!srcUrl.startsWith("https://www.sec.gov/Archives/")) {
     return JSON.stringify({ ticker: ticker.toUpperCase(), period: release.period ?? period, guidance, confidence: "NOT_DISCLOSED", warnings: [] });
   }
   const html = await edgarGetHtml(srcUrl, 5_000_000);
   const text = _stripHtmlTagsIdx(_sanitizeFilingHtml(html ?? ""));
-  const rev = text.match(/(?:expects|guidance|outlook)[^.\n]{0,120}revenue[^$]{0,25}\$?\s*([0-9.,]+(?:\s*(?:billion|million|thousand|bn|m|k))?)\s*(?:to|-)\s*\$?\s*([0-9.,]+(?:\s*(?:billion|million|thousand|bn|m|k))?)/i);
-  const gm = text.match(/gross margin[^0-9]{0,20}([0-9]{1,2}(?:\.[0-9]+)?)\s*%\s*(?:to|-)\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%/i);
-  const eps = text.match(/(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per share)[^$]{0,25}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|-)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)/i);
+  // Accept both "between $X and $Y" and "$X to $Y" guidance wording.
+  const rev = text.match(/(?:expects|guidance|outlook)[^.\n]{0,120}revenue[^$]{0,25}\$?\s*([0-9.,]+(?:\s*(?:billion|million|thousand|bn|m|k))?)\s*(?:to|and|[-–—])\s*\$?\s*([0-9.,]+(?:\s*(?:billion|million|thousand|bn|m|k))?)/i);
+  const gm = text.match(/gross margin[^0-9]{0,20}([0-9]{1,2}(?:\.[0-9]+)?)\s*%\s*(?:to|and|[-–—])\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%/i);
+  const eps = text.match(/(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per share)[^$]{0,25}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|and|[-–—])\s*\$?\s*([0-9]+(?:\.[0-9]+)?)/i);
 
   const ev = (excerpt: string): Record<string, unknown> => ({
     url: srcUrl,
-    sourceType: src.sourceType ?? "sec_8k",
+    sourceType: content.sourceType,
     publishedAt: toIsoUtc((src.filingDate as string | null) ?? null),
     retrievedAt: nowIsoUtc(),
     excerpt: compactExcerpt(excerpt),

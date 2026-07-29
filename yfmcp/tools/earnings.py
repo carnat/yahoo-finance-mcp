@@ -613,7 +613,7 @@ async def extract_earnings_metrics(
 @yfinance_server.tool(
     name="extract_guidance",
     output_schema=_TOOL_OUTPUT_SCHEMAS["extract_guidance"],
-    description="Extract company-provided earnings guidance/outlook ranges from public SEC 8-K or IR release text.",
+    description="Extract company-provided guidance ranges from the resolved official SEC earnings exhibit, including 'between X and Y' wording.",
 )
 async def extract_guidance(ticker: str, period: str = "latest") -> str:
     release = await _resolve_latest_earnings_release(ticker)
@@ -631,9 +631,9 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
     html = await _edgar_get_html(src_url, max_bytes=5_000_000)
     text = _strip_html_tags(_sanitize_sec_html(html or ""))
     patterns = {
-        "revenue": _re.search(r"(?:expects|guidance|outlook)[^.\n]{0,120}revenue[^$]{0,25}\$?\s*([0-9.,]+(?:\s*(?:billion|million|thousand|bn|m|k))?)\s*(?:to|-)\s*\$?\s*([0-9.,]+(?:\s*(?:billion|million|thousand|bn|m|k))?)", text, flags=_re.IGNORECASE),
-        "grossMargin": _re.search(r"gross margin[^0-9]{0,20}([0-9]{1,2}(?:\.[0-9]+)?)\s*%\s*(?:to|-)\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%", text, flags=_re.IGNORECASE),
-        "eps": _re.search(r"(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per share)[^$]{0,25}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|-)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", text, flags=_re.IGNORECASE),
+        "revenue": _re.search(r"(?:expects|guidance|outlook)[^.\n]{0,120}revenue[^$]{0,25}\$?\s*([0-9.,]+(?:\s*(?:billion|million|thousand|bn|m|k))?)\s*(?:to|and|[-–—])\s*\$?\s*([0-9.,]+(?:\s*(?:billion|million|thousand|bn|m|k))?)", text, flags=_re.IGNORECASE),
+        "grossMargin": _re.search(r"gross margin[^0-9]{0,20}([0-9]{1,2}(?:\.[0-9]+)?)\s*%\s*(?:to|and|[-–—])\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%", text, flags=_re.IGNORECASE),
+        "eps": _re.search(r"(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per share)[^$]{0,25}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|and|[-–—])\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", text, flags=_re.IGNORECASE),
     }
     if patterns["revenue"]:
         lo = _scale_number_from_text(patterns["revenue"].group(1))
@@ -1008,7 +1008,7 @@ async def get_sec_filing_exhibit_content(ticker: str, accessionNumber: str, file
 @yfinance_server.tool(
     name="parse_public_transcript",
     output_schema=_TOOL_OUTPUT_SCHEMAS["parse_public_transcript"],
-    description="Fetch and parse a public transcript page (Motley Fool, company IR, etc.). Supports topic-based paragraph filtering to reduce token usage.",
+    description="Parse a public transcript from an https URL or caller-supplied raw_text, with optional topic filtering.",
 )
 async def parse_public_transcript(url: str = "", topics: list[str] | None = None, raw_text: str | None = None) -> str:
     # If raw_text is provided, parse it directly (bypass URL fetching)
@@ -1107,6 +1107,7 @@ async def parse_public_transcript(url: str = "", topics: list[str] | None = None
             warnings.append({"code": "NO_TOPIC_MATCHES", "message": f"No paragraphs matched the provided topics: {topics}"})
         return _wrap_envelope_v2("parse_public_transcript", {
             "url": url,
+            "source": "public_url",
             "filteredByTopics": topics,
             "matchedParagraphs": filtered,
             "totalTextLength": len(clean_text),
@@ -1118,6 +1119,7 @@ async def parse_public_transcript(url: str = "", topics: list[str] | None = None
         warnings.append({"code": "TEXT_TRUNCATED", "message": f"Text truncated from {len(clean_text)} to {max_chars} characters."})
     return _wrap_envelope_v2("parse_public_transcript", {
         "url": url,
+        "source": "public_url",
         "filteredByTopics": None,
         "text": clean_text[:max_chars],
         "totalTextLength": len(clean_text),

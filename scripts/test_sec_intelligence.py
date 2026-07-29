@@ -90,22 +90,22 @@ MOCK_COMPANY_FACTS = {
             "Revenues": {
                 "units": {
                     "USD": [
-                        {"val": 391035000000, "end": "2024-09-28", "form": "10-K", "filed": "2024-11-01"},
-                        {"val": 383285000000, "end": "2023-09-30", "form": "10-K", "filed": "2023-11-01"},
+                        {"val": 391035000000, "end": "2024-09-28", "form": "10-K", "filed": "2024-11-01", "accn": "0000320193-24-000006"},
+                        {"val": 383285000000, "end": "2023-09-30", "form": "10-K", "filed": "2023-11-01", "accn": "0000320193-23-000006"},
                     ]
                 }
             },
             "NetIncomeLoss": {
                 "units": {
                     "USD": [
-                        {"val": 93736000000, "end": "2024-09-28", "form": "10-K", "filed": "2024-11-01"},
+                        {"val": 93736000000, "end": "2024-09-28", "form": "10-K", "filed": "2024-11-01", "accn": "0000320193-24-000006"},
                     ]
                 }
             },
             "CashAndCashEquivalentsAtCarryingValue": {
                 "units": {
                     "USD": [
-                        {"val": 29965000000, "end": "2024-09-28", "form": "10-K", "filed": "2024-11-01"},
+                        {"val": 29965000000, "end": "2024-09-28", "form": "10-K", "filed": "2024-11-01", "accn": "0000320193-24-000006"},
                     ]
                 }
             },
@@ -218,6 +218,15 @@ class TestGetSecFilingIntelligence(unittest.TestCase):
         self.assertIn("revenue", data["xbrl_facts"])
         self.assertEqual(data["xbrl_facts"]["revenue"]["value"], 391035000000)
         self.assertEqual(data["xbrl_facts"]["revenue"]["confidence"], "HIGH")
+        self.assertEqual(
+            data["xbrl_facts"]["revenue"]["sourceEvidence"]["accessionNumber"],
+            data["filing"]["accessionNumber"],
+        )
+        self.assertIs(data["xbrl_facts"]["revenue"]["decisionGrade"], True)
+        self.assertEqual(
+            data["xbrl_facts"]["revenue"]["evidence"],
+            data["xbrl_facts"]["revenue"]["sourceEvidence"],
+        )
         self.assertEqual(data["index"]["sections_count"], 2)
         self.assertEqual(data["index"]["tables_count"], 2)
         self.assertIn("recommended_queries", data)
@@ -405,12 +414,19 @@ class TestHtmlToMarkdownFallback(unittest.TestCase):
 class TestXbrlLatestAnnualExtraction(unittest.TestCase):
     def test_extracts_latest_value(self):
         result = srv._extract_xbrl_latest_annual(
-            MOCK_COMPANY_FACTS, ["Revenues"]
+            MOCK_COMPANY_FACTS,
+            ["Revenues"],
+            accession_number="0000320193-24-000006",
+            document_url="https://www.sec.gov/Archives/aapl-20240928.htm",
         )
         self.assertIsNotNone(result)
         self.assertEqual(result["value"], 391035000000)
         self.assertEqual(result["confidence"], "HIGH")
         self.assertEqual(result["unit"], "USD")
+        self.assertEqual(result["sourceEvidence"]["concept"], "Revenues")
+        self.assertEqual(result["sourceEvidence"]["accessionNumber"], "0000320193-24-000006")
+        self.assertIs(result["decisionGrade"], True)
+        self.assertEqual(result["evidence"], result["sourceEvidence"])
 
     def test_returns_none_for_missing_concept(self):
         result = srv._extract_xbrl_latest_annual(
