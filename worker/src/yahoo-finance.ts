@@ -7075,24 +7075,32 @@ export async function getPositionScoreInputs(ticker: string | string[]): Promise
 
 // ── freshness classifier ──────────────────────────────────────────────────────
 
-function classifyFreshness(dataDate: string | null, retrievedAt: string): string {
-  if (!dataDate) return "UNKNOWN";
+function classifyQuoteFreshness(
+  quoteTimestamp: string | null,
+  retrievedAt: string,
+  marketOpen: boolean | null,
+): string {
+  if (!quoteTimestamp) return "UNKNOWN";
   try {
     const now = new Date(retrievedAt);
-    // Approximate US market close as 21:00 UTC (4pm ET / 5pm EDT)
-    const data = new Date(dataDate + "T21:00:00Z");
-    const diffMs = now.getTime() - data.getTime();
-    if (diffMs < 0) return "UNKNOWN"; // future date
+    const observed = new Date(quoteTimestamp);
+    if (!Number.isFinite(now.getTime()) || !Number.isFinite(observed.getTime())) {
+      return "UNKNOWN";
+    }
+    const diffMs = now.getTime() - observed.getTime();
+    // Allow small provider/host clock skew, but reject genuinely future quotes.
+    if (diffMs < -5 * 60 * 1000) return "UNKNOWN";
     const diffHours = diffMs / (1000 * 60 * 60);
-    // JS getUTCDay(): 0=Sunday, 1=Monday, ..., 5=Friday, 6=Saturday
-    const nowDay = now.getUTCDay();  // 0=Sun, 6=Sat
-    const dataDay = data.getUTCDay(); // 5=Fri
-    // Weekend: current day is Saturday(6) or Sunday(0), data is from last Friday(5)
-    if ((nowDay === 6 || nowDay === 0) && dataDay === 5 && diffHours <= 72) {
+    if (diffHours <= 0.5) return "FRESH";
+    if (marketOpen === true) return "STALE";
+    if (
+      (now.getUTCDay() === 6 || now.getUTCDay() === 0)
+      && observed.getUTCDay() === 5
+      && diffHours <= 96
+    ) {
       return "WEEKEND_EXPECTED_STALE";
     }
-    if (diffHours <= 28) return "FRESH";
-    if (diffHours <= 56) return "MARKET_CLOSED_EXPECTED_STALE";
+    if (diffHours <= 96) return "MARKET_CLOSED_EXPECTED_STALE";
     if (diffHours <= 168) return "STALE";
     return "VERY_STALE";
   } catch {
@@ -7367,6 +7375,13 @@ export async function getMarketSnapshot(
     (priceStats?.dataDate as string | null) ??
     (volumeGate?.dataDate as string | null) ??
     null;
+  const quoteTimestamp = (quote?.priceTimestamp as string | null) ?? null;
+  const marketOpen = (quote?.marketOpen as boolean | null) ?? null;
+  const quoteFreshnessClass = classifyQuoteFreshness(
+    quoteTimestamp,
+    retrievedAt,
+    marketOpen,
+  );
 
   const lastPrice = (quote?.lastPrice as number | null) ?? null;
   const prevClose = (quote?.previousClose as number | null) ?? null;
@@ -7383,7 +7398,7 @@ export async function getMarketSnapshot(
       previousClose: prevClose,
       changePct,
       lastTradeDate: dataDate,
-      marketOpen: (quote?.marketOpen as boolean | null) ?? null,
+      marketOpen,
     },
     range: {
       yearHigh: (quote?.yearHigh as number | null) ?? null,
@@ -7426,7 +7441,7 @@ export async function getMarketSnapshot(
     freshness: {
       dataDate,
       quoteDataDate: (quote?.lastTradeDate as string | null) ?? null,
-      quoteTimestamp: (quote?.priceTimestamp as string | null) ?? null,
+      quoteTimestamp,
       completedBarDataDate,
       componentDataDates: {
         priceStats: (priceStats?.dataDate as string | null) ?? null,
@@ -7437,8 +7452,8 @@ export async function getMarketSnapshot(
       },
       retrievedAt,
       marketSessionAware: true,
-      freshnessClass: classifyFreshness(dataDate, retrievedAt),
-      quoteFreshnessClass: classifyFreshness(dataDate, retrievedAt),
+      freshnessClass: quoteFreshnessClass,
+      quoteFreshnessClass,
       completedBarFreshnessStatus:
         (tech?.freshnessStatus as string | null)
         ?? (priceStats?.freshnessStatus as string | null)

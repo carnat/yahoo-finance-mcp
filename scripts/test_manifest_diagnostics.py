@@ -266,7 +266,104 @@ class TestOvernightSessionGuardrails(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 4. get_market_snapshot schema smoke (offline, mocked components)
+# 4. Quote freshness classifier
+# ---------------------------------------------------------------------------
+
+class TestQuoteFreshnessClassifier(unittest.TestCase):
+    """Quote freshness uses the observed timestamp, not an assumed close time."""
+
+    def setUp(self):
+        import yfmcp.tools.pricing as pricing_tools
+        self.classify = pricing_tools._classify_quote_freshness
+
+    def test_current_open_session_quote_is_fresh(self):
+        self.assertEqual(
+            self.classify(
+                "2026-07-27T11:45:00Z",
+                "2026-07-27T12:00:00Z",
+                True,
+            ),
+            "FRESH",
+        )
+
+    def test_delayed_open_session_quote_is_stale(self):
+        self.assertEqual(
+            self.classify(
+                "2026-07-27T10:00:00Z",
+                "2026-07-27T12:00:00Z",
+                True,
+            ),
+            "STALE",
+        )
+
+    def test_recent_closed_session_quote_is_expected_stale(self):
+        self.assertEqual(
+            self.classify(
+                "2026-07-25T12:00:00Z",
+                "2026-07-27T12:00:00Z",
+                False,
+            ),
+            "MARKET_CLOSED_EXPECTED_STALE",
+        )
+
+    def test_friday_quote_on_weekend_is_expected_stale(self):
+        self.assertEqual(
+            self.classify(
+                "2026-07-24T20:00:00Z",
+                "2026-07-26T12:00:00Z",
+                False,
+            ),
+            "WEEKEND_EXPECTED_STALE",
+        )
+
+    def test_old_closed_quote_escalates(self):
+        self.assertEqual(
+            self.classify(
+                "2026-07-22T12:00:00Z",
+                "2026-07-27T12:00:00Z",
+                False,
+            ),
+            "STALE",
+        )
+        self.assertEqual(
+            self.classify(
+                "2026-07-19T12:00:00Z",
+                "2026-07-27T12:00:00Z",
+                False,
+            ),
+            "VERY_STALE",
+        )
+
+    def test_invalid_or_genuinely_future_quote_is_unknown(self):
+        self.assertEqual(self.classify(None, "2026-07-27T12:00:00Z", True), "UNKNOWN")
+        self.assertEqual(self.classify("invalid", "2026-07-27T12:00:00Z", True), "UNKNOWN")
+        self.assertEqual(
+            self.classify(
+                "2026-07-27T12:10:00Z",
+                "2026-07-27T12:00:00Z",
+                True,
+            ),
+            "UNKNOWN",
+        )
+
+    def test_worker_uses_quote_timestamp_and_market_state(self):
+        worker_source = (
+            os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "worker",
+                "src",
+                "yahoo-finance.ts",
+            )
+        )
+        with open(worker_source, encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertIn("function classifyQuoteFreshness(", source)
+        self.assertIn("quoteTimestamp,\n    retrievedAt,\n    marketOpen,", source)
+        self.assertNotIn("classifyFreshness(dataDate, retrievedAt)", source)
+
+
+# ---------------------------------------------------------------------------
+# 5. get_market_snapshot schema smoke (offline, mocked components)
 # ---------------------------------------------------------------------------
 
 class TestMarketSnapshotSchema(unittest.TestCase):
@@ -294,6 +391,7 @@ class TestMarketSnapshotSchema(unittest.TestCase):
                 "threeMonthAverageVolume": 15802664,
                 "marketOpen": False,
                 "lastTradeDate": "2026-05-15",
+                "priceTimestamp": "2026-05-15T20:00:00Z",
                 "currency": "USD",
             })
 
@@ -397,6 +495,24 @@ class TestMarketSnapshotSchema(unittest.TestCase):
         self.assertIn("freshnessClass", freshness)
         valid_classes = {"FRESH", "MARKET_CLOSED_EXPECTED_STALE", "WEEKEND_EXPECTED_STALE", "STALE", "VERY_STALE", "UNKNOWN"}
         self.assertIn(freshness["freshnessClass"], valid_classes)
+
+    def test_snapshot_classifies_the_quote_timestamp(self):
+        import unittest.mock as mock
+        import yfmcp.tools.pricing as pricing_tools
+
+        self._mock_all_components(self.srv)
+        with mock.patch.object(
+            pricing_tools,
+            "_classify_quote_freshness",
+            return_value="FRESH",
+        ) as classify:
+            result = json.loads(_run(self.srv.get_market_snapshot("ASTS")))
+
+        quote_timestamp, _, market_open = classify.call_args.args
+        self.assertEqual(quote_timestamp, "2026-05-15T20:00:00Z")
+        self.assertFalse(market_open)
+        self.assertEqual(result["freshness"]["freshnessClass"], "FRESH")
+        self.assertEqual(result["freshness"]["quoteFreshnessClass"], "FRESH")
 
     def test_partial_success_false_when_all_ok(self):
         self._mock_all_components(self.srv)

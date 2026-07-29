@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import re
 import sys
+import tomllib
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS_DIR = ROOT / ".github" / "workflows"
+PYPROJECT = ROOT / "pyproject.toml"
 
 REQUIRED_ACTION_VERSIONS = {
     "actions/checkout": "v5",
@@ -22,6 +24,16 @@ NODE_VERSION_PATTERN = re.compile(r'^\s*node-version:\s*"?(\d+)(?:\.\d+)?(?:\.x)
 
 
 class TestWorkflowSdkVersions(unittest.TestCase):
+    def test_mcp_python_sdk_stays_on_compatible_v1(self) -> None:
+        project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
+        mcp_dependencies = [
+            dependency
+            for dependency in project["dependencies"]
+            if dependency.startswith("mcp[cli]")
+        ]
+        self.assertEqual(len(mcp_dependencies), 1, "expected exactly one mcp[cli] dependency")
+        self.assertIn("<2", mcp_dependencies[0], "server.py still uses the MCP Python SDK v1 API")
+
     def test_required_actions_use_current_major(self) -> None:
         workflows = sorted(WORKFLOWS_DIR.glob("*.yml"))
         self.assertTrue(workflows, "No workflow files found")

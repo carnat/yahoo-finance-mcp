@@ -119,7 +119,9 @@ performance use completed sessions only and expose `dataDate`, `barStatus`,
 and freshness/retry fields. Raw daily history can still include the active row,
 but labels it with `barStatus:"INCOMPLETE"` and `isFinal:false`. Moving-average
 and target-distance tools intentionally compare a live quote and therefore
-expose `priceTimestamp` separately.
+expose `priceTimestamp` separately. In `get_market_snapshot`,
+`quoteFreshnessClass` (and the legacy `freshnessClass`) uses that quote
+timestamp, while `completedBarFreshnessStatus` remains independent.
 
 Use `search_thai_funds` to map an official project name, abbreviation, AMC, or
 known SEC share-class code to compact active-profile candidates. It never
