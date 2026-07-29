@@ -123,6 +123,18 @@ expose `priceTimestamp` separately. In `get_market_snapshot`,
 `quoteFreshnessClass` (and the legacy `freshnessClass`) uses that quote
 timestamp, while `completedBarFreshnessStatus` remains independent.
 
+Fund valuation characteristics are returned as conventional labeled
+multiples. When Yahoo supplies inverse valuation yields, `get_fund_profile`
+retains the provider values separately and records the reciprocal
+normalization. Yahoo does not expose a reliable holdings/allocation as-of date
+in this response; read `sectionDates`, `warnings`, and
+`recommendedNextAction` before material use.
+
+Put hedge candidates require a two-sided quote plus open-interest or volume
+evidence. Contract cost and budget feasibility use the executable ask price,
+not midpoint. `PARTIAL` or `recommendedNextAction:"RETRY"` means the option
+chain is not suitable for a hedge conclusion.
+
 Use `search_thai_funds` to map an official project name, abbreviation, AMC, or
 known SEC share-class code to compact active-profile candidates. It never
 selects one automatically. Thai SEC fund data calls resolve an exact SEC

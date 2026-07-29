@@ -16,7 +16,12 @@ from typing import Any
 
 # Each inner tuple is an any-of concept group; every group must be represented.
 DESCRIPTION_CONCEPTS: dict[str, tuple[tuple[str, ...], ...]] = {
-    "get_fund_profile": (("fund", "etf"), ("holdings", "allocation", "sections")),
+    "get_fund_profile": (
+        ("fund", "etf"),
+        ("holdings", "allocation", "sections"),
+        ("conventional multiples",),
+        ("as-of-date",),
+    ),
     "analyze_financial_ratios": (("financial ratios", "valuation"), ("historical", "history")),
     "get_earnings_analysis": (("earnings", "eps"), ("revision",)),
     "analyze_share_count_trend": (("dilution", "shares-outstanding"), ("sec", "filing")),
@@ -25,13 +30,16 @@ DESCRIPTION_CONCEPTS: dict[str, tuple[tuple[str, ...], ...]] = {
     "calculate_price_target_distance": (("reference price target", "user-supplied"),),
     "analyze_position_signals": (("does not access holdings",),),
     "check_volume_liquidity_threshold": (("liquidity thresholds",),),
+    "analyze_volume_ratio": (("completed-session volume",), ("partial", "retry")),
 }
 
 
 OUTPUT_SCHEMA_FIELDS: dict[str, tuple[str, ...]] = {
     "get_fund_profile": (
         "ticker", "sectionsRequested", "sectionStatus", "topHoldings",
-        "fundOperations", "decisionGrade", "recommendedNextAction",
+        "sectionDates", "equityHoldings", "equityHoldingsProviderRaw",
+        "valuationBasis", "valuationNormalization", "fundOperations",
+        "warnings", "decisionGrade", "recommendedNextAction",
     ),
     "analyze_financial_ratios": (
         "ticker", "trailingPE", "freeCashflowYield", "valuationHistory",
@@ -53,6 +61,28 @@ OUTPUT_SCHEMA_FIELDS: dict[str, tuple[str, ...]] = {
         "eventType", "items", "coverage", "confirmationStatus",
         "decisionGrade", "recommendedNextAction",
     ),
+}
+
+DIRECT_OUTPUT_SCHEMA_FIELDS: dict[str, tuple[str, ...]] = {
+    "analyze_volume_ratio": (
+        "ticker", "status", "barStatus", "freshnessStatus",
+        "retryAttempted", "recommendedNextAction", "dataDate",
+    ),
+    "check_volume_liquidity_threshold": (
+        "ticker", "status", "barStatus", "freshnessStatus",
+        "retryAttempted", "recommendedNextAction", "dataDate",
+    ),
+}
+
+OUTPUT_SCHEMA_ENUMS: dict[str, dict[str, tuple[str, ...]]] = {
+    "analyze_volume_ratio": {
+        "status": ("OK", "STALE_BAR", "PARTIAL"),
+        "barStatus": ("COMPLETE", "STALE", "INCOMPLETE"),
+    },
+    "check_volume_liquidity_threshold": {
+        "status": ("OK", "STALE_BAR", "PARTIAL"),
+        "barStatus": ("COMPLETE", "STALE", "INCOMPLETE"),
+    },
 }
 
 CONTEXTUAL_BASE_FIELDS = {"source", "evidenceClass", "decisionGrade", "recommendedNextAction"}
@@ -123,7 +153,8 @@ def validate_live_tool_contract(tools: Sequence[Mapping[str, Any]]) -> None:
     """Validate descriptions and exposed output schemas from MCP ``tools/list``."""
     by_name = {str(tool.get("name")): tool for tool in tools}
     errors = _description_errors({name: str(tool.get("description", "")) for name, tool in by_name.items()})
-    for name, expected_fields in OUTPUT_SCHEMA_FIELDS.items():
+    all_schema_fields = {**OUTPUT_SCHEMA_FIELDS, **DIRECT_OUTPUT_SCHEMA_FIELDS}
+    for name, expected_fields in all_schema_fields.items():
         tool = by_name.get(name)
         if tool is None:
             errors.append(f"Missing tool {name}")
@@ -132,6 +163,12 @@ def validate_live_tool_contract(tools: Sequence[Mapping[str, Any]]) -> None:
         missing = [field for field in expected_fields if field not in fields]
         if missing:
             errors.append(f"{name}: output schema missing {missing}")
+        for field, expected_values in OUTPUT_SCHEMA_ENUMS.get(name, {}).items():
+            field_schema = fields.get(field)
+            enum = field_schema.get("enum") if isinstance(field_schema, Mapping) else None
+            missing_values = [value for value in expected_values if not isinstance(enum, Sequence) or value not in enum]
+            if missing_values:
+                errors.append(f"{name}.{field}: enum missing {missing_values}")
     if errors:
         raise AssertionError("; ".join(errors))
 
@@ -220,6 +257,33 @@ def validate_worker_source_contract(source: str) -> None:
             errors.append(f"{canonical}: Worker schema mapping missing -> {schema_constant}")
         if re.search(rf'["\']{re.escape(canonical)}["\']', detailed_block) is None:
             errors.append(f"{canonical}: missing from Worker detailed envelope tool set")
+    for canonical, expected_fields in DIRECT_OUTPUT_SCHEMA_FIELDS.items():
+        source_key = {
+            "analyze_volume_ratio": "get_volume_ratio",
+            "check_volume_liquidity_threshold": "get_volume_gate",
+        }[canonical]
+        block = _balanced_object_after(
+            source,
+            rf"\n\s{{2}}{re.escape(source_key)}\s*:\s*(?=\{{)",
+        )
+        if not block:
+            errors.append(f"Worker direct output schema missing for {canonical}")
+            continue
+        missing = [field for field in expected_fields if re.search(rf"\b{re.escape(field)}\s*:", block) is None]
+        if missing:
+            errors.append(f"{canonical}: Worker direct output schema missing {missing}")
+        assignment = rf"OUTPUT_SCHEMAS\.{re.escape(canonical)}\s*=\s*OUTPUT_SCHEMAS\.{re.escape(source_key)}"
+        if re.search(assignment, source) is None:
+            errors.append(f"{canonical}: Worker direct schema assignment missing")
+        if re.search(rf'["\']{re.escape(canonical)}["\']', detailed_block) is None:
+            errors.append(f"{canonical}: missing from Worker detailed envelope tool set")
+        for field, expected_values in OUTPUT_SCHEMA_ENUMS.get(canonical, {}).items():
+            if re.search(rf"\b{re.escape(field)}\s*:[\s\S]*?enum\s*:\s*\[[^\]]*"
+                         + r"[^\]]*\]?", block) is None:
+                errors.append(f"{canonical}.{field}: Worker enum missing")
+            for value in expected_values:
+                if f'"{value}"' not in block:
+                    errors.append(f"{canonical}.{field}: Worker enum missing {value}")
     if errors:
         raise AssertionError("; ".join(errors))
 
@@ -256,6 +320,31 @@ def validate_python_schema_source(source: str) -> None:
         mapping_pattern = rf'["\']{re.escape(schema_key)}["\']\s*:\s*{re.escape(schema_constant)}\b'
         if re.search(mapping_pattern, source) is None:
             errors.append(f"{canonical}: Python schema mapping missing {schema_key!r} -> {schema_constant}")
+    for canonical, expected_fields in DIRECT_OUTPUT_SCHEMA_FIELDS.items():
+        source_key = {
+            "analyze_volume_ratio": "get_volume_ratio",
+            "check_volume_liquidity_threshold": "get_volume_gate",
+        }[canonical]
+        block = _balanced_object_after(source, rf'["\']{re.escape(source_key)}["\']\s*:')
+        if not block:
+            errors.append(f"Python direct output schema missing for {canonical}")
+            continue
+        missing = [
+            field for field in expected_fields
+            if re.search(rf'["\']{re.escape(field)}["\']\s*:', block) is None
+        ]
+        if missing:
+            errors.append(f"{canonical}: Python direct output schema missing {missing}")
+        canonical_mapping = (
+            f'_TOOL_OUTPUT_SCHEMAS.setdefault("{canonical}", '
+            f'_TOOL_OUTPUT_SCHEMAS["{source_key}"])'
+        )
+        if canonical_mapping not in source:
+            errors.append(f"{canonical}: Python direct schema assignment missing")
+        for field, expected_values in OUTPUT_SCHEMA_ENUMS.get(canonical, {}).items():
+            for value in expected_values:
+                if f'"{value}"' not in block and f"'{value}'" not in block:
+                    errors.append(f"{canonical}.{field}: Python enum missing {value}")
 
     if errors:
         raise AssertionError("; ".join(errors))

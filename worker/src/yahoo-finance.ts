@@ -612,6 +612,47 @@ async function runPartialBatch(
 
 // ── get_etf_info ─────────────────────────────────────────────────────────────
 
+const FUND_INVERSE_VALUATION_FIELDS = new Set([
+  "priceToEarnings",
+  "priceToBook",
+  "priceToSales",
+  "priceToCashflow",
+  "priceToEarningsCat",
+  "priceToBookCat",
+  "priceToSalesCat",
+  "priceToCashflowCat",
+]);
+
+function normalizeFundEquityHoldings(
+  source: Record<string, unknown>
+): {
+  values: Record<string, unknown>;
+  providerRaw: Record<string, unknown> | null;
+  methods: Record<string, string>;
+} {
+  const values: Record<string, unknown> = {};
+  const providerRaw: Record<string, unknown> = {};
+  const methods: Record<string, string> = {};
+  let changed = false;
+  for (const [key, wrapped] of Object.entries(source)) {
+    const value = raw(wrapped);
+    providerRaw[key] = value;
+    if (FUND_INVERSE_VALUATION_FIELDS.has(key) && typeof value === "number" && value > 0) {
+      if (value < 1) {
+        values[key] = +(1 / value).toFixed(4);
+        methods[key] = "RECIPROCAL_FROM_PROVIDER_YIELD";
+        changed = true;
+      } else {
+        values[key] = value;
+        methods[key] = "PASSTHROUGH_CONVENTIONAL_MULTIPLE";
+      }
+    } else {
+      values[key] = value;
+    }
+  }
+  return { values, providerRaw: changed ? providerRaw : null, methods };
+}
+
 export async function getEtfInfo(ticker: string | string[], sections?: string[] | null): Promise<string> {
   if (Array.isArray(ticker)) {
     return runPartialBatch(ticker, (t) => getEtfInfo(t, sections));
@@ -661,6 +702,8 @@ export async function getEtfInfo(ticker: string | string[], sections?: string[] 
       decisionGrade: false,
       sectionsRequested: requested,
       sectionStatus: {},
+      sectionDates: {},
+      warnings: [],
       // Identity
       shortName: pick(priceData, "shortName"),
       quoteType: pick(priceData, "quoteType"),
@@ -711,7 +754,15 @@ export async function getEtfInfo(ticker: string | string[], sections?: string[] 
       }));
 
       const equity = (topHoldingsData.equityHoldings as Record<string, unknown> | undefined) ?? {};
-      data.equityHoldings = Object.fromEntries(Object.entries(equity).map(([key, value]) => [key, raw(value)]));
+      const normalizedEquity = normalizeFundEquityHoldings(equity);
+      data.equityHoldings = normalizedEquity.values;
+      data.equityHoldingsProviderRaw = normalizedEquity.providerRaw;
+      data.valuationBasis = "CONVENTIONAL_MULTIPLE";
+      data.valuationNormalization = normalizedEquity.methods;
+      (data.sectionDates as Record<string, unknown>).holdings = {
+        asOfDate: null,
+        status: "NOT_EXPOSED_BY_PROVIDER",
+      };
       (data.sectionStatus as Record<string, string>).holdings = "OK";
     } else if (requested.includes("holdings")) {
       (data.sectionStatus as Record<string, string>).holdings = "EMPTY_RESULT";
@@ -735,6 +786,10 @@ export async function getEtfInfo(ticker: string | string[], sections?: string[] 
           return { sector, weight: raw(rawWeight) };
         })
         .filter(Boolean);
+      (data.sectionDates as Record<string, unknown>).allocation = {
+        asOfDate: null,
+        status: "NOT_EXPOSED_BY_PROVIDER",
+      };
       (data.sectionStatus as Record<string, string>).allocation = "OK";
     } else if (requested.includes("allocation")) {
       (data.sectionStatus as Record<string, string>).allocation = "EMPTY_RESULT";
@@ -774,7 +829,15 @@ export async function getEtfInfo(ticker: string | string[], sections?: string[] 
     }
 
     const statuses = Object.values(data.sectionStatus as Record<string, string>);
-    data.recommendedNextAction = statuses.every((status) => status === "OK") ? "NONE" : "RETRY_OR_REQUEST_AVAILABLE_SECTION";
+    const datedSections = ["holdings", "allocation"].filter((section) => requested.includes(section));
+    if (datedSections.some((section) => (data.sectionStatus as Record<string, string>)[section] === "OK")) {
+      (data.warnings as string[]).push("FUND_CHARACTERISTICS_AS_OF_DATE_NOT_EXPOSED");
+    }
+    data.recommendedNextAction = !statuses.every((status) => status === "OK")
+      ? "RETRY_OR_REQUEST_AVAILABLE_SECTION"
+      : (data.warnings as string[]).length
+        ? "CHECK_OFFICIAL_FUND_SOURCE"
+        : "NONE";
     return JSON.stringify(data);
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
@@ -3952,6 +4015,22 @@ export async function getPutHedgeCandidates(
   expiryAfter: string
 ): Promise<string> {
   try {
+    if (budgetUsd <= 0) {
+      return JSON.stringify({
+        error: true,
+        code: "INPUT_VALIDATION_ERROR",
+        message: "budget_usd must be greater than zero",
+        ticker,
+      });
+    }
+    if (otmPctMin < 0 || otmPctMax < otmPctMin) {
+      return JSON.stringify({
+        error: true,
+        code: "INPUT_VALIDATION_ERROR",
+        message: "otm_pct_min and otm_pct_max must define a non-negative ascending range",
+        ticker,
+      });
+    }
     // Get last price (1 subrequest)
     const fi = JSON.parse(await getFastInfo(ticker));
     const currentPrice = fi.lastPrice as number | null;
@@ -3982,13 +4061,21 @@ export async function getPutHedgeCandidates(
       ask: number;
       mid: number;
       contractCost: number;
+      contractCostBasis: "ASK";
       withinBudget: boolean;
       openInterest: number;
+      volume: number;
+      quoteStatus: "TWO_SIDED";
       ivPctile: number | null;
       ivFlag: string | null;
       otmPct: number;
     }
     const candidates: Candidate[] = [];
+    const consideredContracts: Record<string, unknown>[] = [];
+    const excludedContracts = {
+      noTwoSidedQuote: 0,
+      noLiquidityEvidence: 0,
+    };
 
     for (const exp of qualifying) {
       try {
@@ -4009,12 +4096,22 @@ export async function getPutHedgeCandidates(
         for (const p of putsRaw as Record<string, unknown>[]) {
           const strike = p.strike as number;
           if (strike == null || strike < strikeMin || strike > strikeMax) continue;
+          consideredContracts.push(p);
 
-          const bid = (p.bid as number) ?? 0;
-          const ask = (p.ask as number) ?? 0;
+          const bid = Number(p.bid ?? 0);
+          const ask = Number(p.ask ?? 0);
+          const oi = Number(p.openInterest ?? 0);
+          const volume = Number(p.volume ?? 0);
+          if (bid <= 0 || ask <= 0) {
+            excludedContracts.noTwoSidedQuote += 1;
+            continue;
+          }
+          if (oi <= 0 && volume <= 0) {
+            excludedContracts.noLiquidityEvidence += 1;
+            continue;
+          }
           const mid = +((bid + ask) / 2).toFixed(2);
-          const contractCost = +(mid * 100).toFixed(2);
-          const oi = (p.openInterest as number) ?? 0;
+          const contractCost = +(ask * 100).toFixed(2);
           const iv = (p.impliedVolatility as number) ?? 0;
 
           let ivPctile: number | null = null;
@@ -4029,8 +4126,11 @@ export async function getPutHedgeCandidates(
             ask,
             mid,
             contractCost,
+            contractCostBasis: "ASK",
             withinBudget: contractCost <= budgetUsd,
             openInterest: oi,
+            volume,
+            quoteStatus: "TWO_SIDED",
             ivPctile,
             ivFlag: ivPctile != null && ivPctile > 70 ? "⚠️ HIGH IV" : null,
             otmPct: +((currentPrice - strike) / currentPrice * 100).toFixed(2),
@@ -4042,19 +4142,37 @@ export async function getPutHedgeCandidates(
     }
 
     candidates.sort((a, b) => a.expiry.localeCompare(b.expiry) || a.strike - b.strike);
-    const budgetFeasible = candidates.some((c) => c.withinBudget);
+    const dataDate = getLastTradingDate();
+    const dataQuality = computeDataQuality(consideredContracts, dataDate);
+    const warnings = [...dataQuality.warnings];
+    if (excludedContracts.noTwoSidedQuote) warnings.push("UNQUOTED_CONTRACTS_EXCLUDED");
+    if (excludedContracts.noLiquidityEvidence) warnings.push("NO_LIQUIDITY_EVIDENCE_EXCLUDED");
+    const uniqueWarnings = [...new Set(warnings)];
+    const budgetFeasible: boolean | null = dataQuality.quality === "LOW"
+      ? null
+      : candidates.length
+      ? candidates.some((c) => c.withinBudget)
+      : consideredContracts.length ? null : false;
+    const status = dataQuality.quality === "LOW" || (consideredContracts.length > 0 && candidates.length === 0)
+      ? "PARTIAL"
+      : candidates.length ? "OK" : "EMPTY_RESULT";
 
     let note: string;
     let budgetGapUsd: number | null = null;
-    if (!candidates.length) {
+    if (status === "PARTIAL") {
+      note = "Option-chain quality is insufficient for a hedge or budget conclusion; retry before use.";
+    } else if (!candidates.length) {
       note = "No put options found in the specified OTM range.";
-    } else if (!budgetFeasible) {
+    } else if (budgetFeasible === false) {
       const nearest = candidates.reduce((a, b) => (a.contractCost < b.contractCost ? a : b));
       budgetGapUsd = +(nearest.contractCost - budgetUsd).toFixed(2);
-      note = `No candidates within budget. Nearest: $${nearest.strike} put at $${nearest.contractCost}/contract vs $${budgetUsd} budget.`;
+      note = `No candidates within budget. Nearest: $${nearest.strike} put at $${nearest.contractCost}/contract ask cost vs $${budgetUsd} budget.`;
     } else {
       const count = candidates.filter((c) => c.withinBudget).length;
-      note = `${count} candidate(s) within $${budgetUsd} budget.`;
+      note = `${count} candidate(s) within $${budgetUsd} budget using executable ask cost.`;
+    }
+    if (consideredContracts.length && !candidates.length) {
+      note = "No decision-usable hedge candidates: contracts lacked a two-sided quote or liquidity evidence.";
     }
 
     return JSON.stringify({
@@ -4066,8 +4184,16 @@ export async function getPutHedgeCandidates(
       candidates,
       budgetFeasible,
       budgetGapUsd,
+      status,
+      decisionGrade: false,
+      decisionUse: "HEDGE_SCREEN_ONLY",
+      consideredContracts: consideredContracts.length,
+      excludedContracts,
+      dataQuality,
+      warnings: uniqueWarnings,
+      recommendedNextAction: status === "PARTIAL" ? "RETRY" : "NONE",
       note,
-      dataDate: getLastTradingDate(),
+      dataDate,
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
@@ -6784,6 +6910,9 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
     // dataQuality
     const dataQuality = computeDataQuality(allContracts, getLastTradingDate());
     const quality = dataQuality.quality;
+    if (quality === "LOW") {
+      scanWarnings.push("OPTIONS_CHAIN_LOW_QUALITY");
+    }
     const allContractCount = calls.length + puts.length;
     const placeholderIvCount = dataQuality.placeholderIvCount;
 
@@ -6953,7 +7082,10 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
       retryAttempted,
       fallbackUsed,
       recommendedNextAction:
-        historicalBarStatus === "STALE" || historicalBarStatus === "UNAVAILABLE"
+        quality === "LOW"
+          || historicalBarStatus === "STALE"
+          || historicalBarStatus === "UNAVAILABLE"
+          || historicalBarStatus === "INCOMPLETE"
           ? "RETRY"
           : "NONE",
       dataQuality, warnings: scanWarnings,

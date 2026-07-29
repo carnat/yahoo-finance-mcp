@@ -5,6 +5,8 @@ import unittest
 
 from scripts.public_tool_contract import (
     DESCRIPTION_CONCEPTS,
+    DIRECT_OUTPUT_SCHEMA_FIELDS,
+    OUTPUT_SCHEMA_ENUMS,
     OUTPUT_SCHEMA_FIELDS,
     validate_live_tool_contract,
     validate_python_schema_source,
@@ -19,16 +21,19 @@ def _valid_live_tools() -> list[dict]:
     tools: list[dict] = []
     for name, groups in DESCRIPTION_CONCEPTS.items():
         description = " ".join(group[0] for group in groups)
-        fields = OUTPUT_SCHEMA_FIELDS.get(name)
+        fields = OUTPUT_SCHEMA_FIELDS.get(name) or DIRECT_OUTPUT_SCHEMA_FIELDS.get(name)
         output_schema = {"type": "object", "properties": {}}
         if fields:
+            field_schemas = {field: {} for field in fields}
+            for field, values in OUTPUT_SCHEMA_ENUMS.get(name, {}).items():
+                field_schemas[field] = {"type": "string", "enum": list(values)}
             output_schema = {
                 "type": "object",
                 "properties": {
                     "ok": {"type": "boolean"},
                     "data": {
                         "type": ["object", "null"],
-                        "properties": {field: {} for field in fields},
+                        "properties": field_schemas,
                     },
                     "meta": {"type": "object"},
                     "error": {"type": ["object", "null"]},

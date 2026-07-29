@@ -112,6 +112,33 @@ class TestYfinanceApiCoverage(unittest.TestCase):
         self.assertEqual(data["sectionStatus"]["holdings"], "PROVIDER_ERROR")
         self.assertEqual(data["description"], "Index fund")
 
+    def test_fund_profile_normalizes_inverse_valuation_yields_and_dates(self):
+        class Funds:
+            top_holdings = pd.DataFrame({"Name": ["Alpha"], "Holding Percent": [0.1]}, index=["AAA"])
+            equity_holdings = pd.DataFrame(
+                {"Fund": [0.04, 0.2], "Category Average": [0.05, 0.25]},
+                index=pd.Index(["Price/Earnings", "Price/Book"], name="Average"),
+            )
+            asset_classes = {"stockPosition": 1.0}
+            sector_weightings = {"technology": 1.0}
+
+        class FakeTicker:
+            info = {"shortName": "Inverse Yield Fund"}
+            funds_data = Funds()
+
+        srv.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
+        data = json.loads(_run(srv.get_fund_profile("TSTINV", ["holdings", "allocation"])))
+        by_metric = {row["Average"]: row for row in data["equityHoldings"]}
+        self.assertEqual(by_metric["Price/Earnings"]["Fund"], 25.0)
+        self.assertEqual(by_metric["Price/Book"]["Fund"], 5.0)
+        self.assertEqual(data["valuationBasis"], "CONVENTIONAL_MULTIPLE")
+        self.assertEqual(
+            data["sectionDates"]["holdings"]["status"],
+            "NOT_EXPOSED_BY_PROVIDER",
+        )
+        self.assertIn("FUND_CHARACTERISTICS_AS_OF_DATE_NOT_EXPOSED", data["warnings"])
+        self.assertEqual(data["recommendedNextAction"], "CHECK_OFFICIAL_FUND_SOURCE")
+
     def test_company_calendar_history_is_paginated(self):
         class FakeTicker:
             fast_info = _FastInfo()
@@ -216,6 +243,9 @@ class TestYfinanceApiCoverage(unittest.TestCase):
         self.assertIn('operator: "GTELT"', worker)
         self.assertIn("YAHOO_CALENDAR_HTML", worker)
         self.assertIn("https://finance.yahoo.com/calendar/earnings", worker)
+        self.assertIn("normalizeFundEquityHoldings", worker)
+        self.assertIn('contractCostBasis: "ASK"', worker)
+        self.assertIn('"OPTIONS_CHAIN_LOW_QUALITY"', worker)
         self.assertNotIn('entityIdType: "earnings"', worker)
 
     def test_llm_visible_descriptions_route_common_intents(self):

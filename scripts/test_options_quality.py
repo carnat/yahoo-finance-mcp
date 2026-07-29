@@ -13,7 +13,10 @@ Run: PYTHONPATH=. python scripts/test_options_quality.py
 import os
 import sys
 import json
+import asyncio
 import unittest
+
+import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -212,6 +215,91 @@ class TestAtmIVPlaceholder(unittest.TestCase):
         atm_iv_raw = srv._PLACEHOLDER_IV_THRESHOLD
         atm_iv = atm_iv_raw if atm_iv_raw > srv._PLACEHOLDER_IV_THRESHOLD else None
         self.assertIsNone(atm_iv)
+
+
+class TestPutHedgeCandidateSafety(unittest.TestCase):
+    def setUp(self):
+        self.ticker = srv.yf.Ticker
+
+    def tearDown(self):
+        srv.yf.Ticker = self.ticker  # type: ignore[assignment]
+
+    @staticmethod
+    def _ticker(rows):
+        class FastInfo:
+            last_price = 100.0
+
+        class Chain:
+            puts = pd.DataFrame(rows)
+
+        class FakeTicker:
+            fast_info = FastInfo()
+            options = ("2026-08-21",)
+
+            def option_chain(self, expiry):
+                return Chain()
+
+        return FakeTicker()
+
+    def test_hedge_candidates_exclude_unquoted_and_use_ask_cost(self):
+        rows = [
+            _make_contract(90.0, bid=0.0, ask=0.0, open_interest=0, volume=0, implied_volatility=0.4),
+            _make_contract(91.0, bid=1.0, ask=1.2, open_interest=5, volume=0, implied_volatility=0.4),
+        ]
+        srv.yf.Ticker = lambda ticker: self._ticker(rows)  # type: ignore[assignment]
+        data = json.loads(asyncio.run(srv.find_put_hedge_candidates("TST", budget_usd=115)))
+        self.assertEqual(len(data["candidates"]), 1)
+        self.assertEqual(data["candidates"][0]["contractCost"], 120.0)
+        self.assertEqual(data["candidates"][0]["contractCostBasis"], "ASK")
+        self.assertFalse(data["candidates"][0]["withinBudget"])
+        self.assertEqual(data["excludedContracts"]["noTwoSidedQuote"], 1)
+        self.assertIn("UNQUOTED_CONTRACTS_EXCLUDED", data["warnings"])
+
+    def test_hedge_candidates_return_partial_when_all_quotes_unusable(self):
+        rows = [
+            _make_contract(90.0, bid=0.0, ask=0.0, open_interest=0, volume=0, implied_volatility=0.00001),
+        ]
+        srv.yf.Ticker = lambda ticker: self._ticker(rows)  # type: ignore[assignment]
+        data = json.loads(asyncio.run(srv.find_put_hedge_candidates("TST")))
+        self.assertEqual(data["status"], "PARTIAL")
+        self.assertIsNone(data["budgetFeasible"])
+        self.assertEqual(data["recommendedNextAction"], "RETRY")
+        self.assertEqual(data["candidates"], [])
+
+    def test_low_quality_chain_suppresses_top_level_budget_decision(self):
+        rows = [
+            _make_contract(89.0, bid=0.0, ask=0.0, open_interest=0, volume=0, implied_volatility=0.00001),
+            _make_contract(90.0, bid=0.0, ask=0.0, open_interest=0, volume=0, implied_volatility=0.00001),
+            _make_contract(91.0, bid=0.0, ask=0.0, open_interest=0, volume=0, implied_volatility=0.00001),
+            _make_contract(92.0, bid=1.0, ask=1.1, open_interest=10, volume=2, implied_volatility=0.4),
+        ]
+        srv.yf.Ticker = lambda ticker: self._ticker(rows)  # type: ignore[assignment]
+        data = json.loads(asyncio.run(srv.find_put_hedge_candidates("TST", budget_usd=500)))
+        self.assertEqual(len(data["candidates"]), 1)
+        self.assertEqual(data["status"], "PARTIAL")
+        self.assertIsNone(data["budgetFeasible"])
+        self.assertEqual(data["recommendedNextAction"], "RETRY")
+
+    def test_low_quality_flow_recommends_retry(self):
+        rows = [
+            _make_contract(100.0, bid=0.0, ask=0.0, open_interest=0, volume=0, implied_volatility=0.00001),
+        ]
+
+        class FakeTicker:
+            fast_info = {"lastPrice": 100.0, "tenDayAverageVolume": 1_000_000}
+            options = ("2026-08-21",)
+
+            def option_chain(self, expiry):
+                chain = type("Chain", (), {})()
+                chain.calls = pd.DataFrame(rows)
+                chain.puts = pd.DataFrame(rows)
+                return chain
+
+        srv.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
+        data = json.loads(asyncio.run(srv.analyze_options_flow_window("TST", "audit")))
+        self.assertEqual(data["dataQuality"]["quality"], "LOW")
+        self.assertEqual(data["recommendedNextAction"], "RETRY")
+        self.assertIn("OPTIONS_CHAIN_LOW_QUALITY", data["warnings"])
 
 
 class TestSortByRelevance(unittest.TestCase):

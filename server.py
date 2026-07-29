@@ -6047,6 +6047,11 @@ async def get_options_flow_summary(ticker: str, expiry_hint: str | None = None) 
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_put_hedge_candidates"],
     description="""Get pre-filtered OTM put options within a strike range and budget. Single ticker only.
 
+Only contracts with a two-sided quote and open-interest or volume evidence are
+eligible. Contract cost and budget feasibility use executable ask price, not a
+zero/indicative midpoint. PARTIAL means retry and do not treat budgetFeasible as
+a hedge decision.
+
 Args:
     ticker: str — single ticker
     otm_pct_min: float — minimum OTM % (default: 8)
@@ -6063,6 +6068,20 @@ async def get_put_hedge_candidates(
     expiry_after: str = "",
 ) -> str:
     """Return filtered put hedge candidates."""
+    if budget_usd <= 0:
+        return json.dumps({
+            "error": True,
+            "code": "INPUT_VALIDATION_ERROR",
+            "message": "budget_usd must be greater than zero",
+            "ticker": ticker,
+        })
+    if otm_pct_min < 0 or otm_pct_max < otm_pct_min:
+        return json.dumps({
+            "error": True,
+            "code": "INPUT_VALIDATION_ERROR",
+            "message": "otm_pct_min and otm_pct_max must define a non-negative ascending range",
+            "ticker": ticker,
+        })
     company = yf.Ticker(ticker)
     try:
         fi = company.fast_info
@@ -6093,6 +6112,11 @@ async def get_put_hedge_candidates(
     strike_max = current_price * (1 - otm_pct_min / 100)
 
     candidates = []
+    considered_contracts: list[dict[str, Any]] = []
+    excluded_contracts = {
+        "noTwoSidedQuote": 0,
+        "noLiquidityEvidence": 0,
+    }
     for exp in qualifying_expiries:
         try:
             chain = company.option_chain(exp)
@@ -6102,6 +6126,9 @@ async def get_put_hedge_candidates(
 
         # Filter strikes
         filtered = puts_df[(puts_df["strike"] >= strike_min) & (puts_df["strike"] <= strike_max)]
+        considered_contracts.extend(
+            json.loads(filtered.to_json(orient="records", date_format="iso"))
+        )
 
         # Collect IVs for percentile calculation
         all_ivs = puts_df["impliedVolatility"].dropna().tolist() if "impliedVolatility" in puts_df.columns else []
@@ -6109,11 +6136,18 @@ async def get_put_hedge_candidates(
         for _, row in filtered.iterrows():
             bid = float(row.get("bid", 0) or 0)
             ask = float(row.get("ask", 0) or 0)
+            oi = int(row.get("openInterest", 0) or 0)
+            volume = int(row.get("volume", 0) or 0)
+            if bid <= 0 or ask <= 0:
+                excluded_contracts["noTwoSidedQuote"] += 1
+                continue
+            if oi <= 0 and volume <= 0:
+                excluded_contracts["noLiquidityEvidence"] += 1
+                continue
             mid = round((bid + ask) / 2, 2)
-            contract_cost = round(mid * 100, 2)
+            contract_cost = round(ask * 100, 2)
             within_budget = contract_cost <= budget_usd
             strike = float(row["strike"])
-            oi = int(row.get("openInterest", 0) or 0)
             iv = float(row.get("impliedVolatility", 0) or 0)
 
             # IV percentile within chain
@@ -6132,8 +6166,11 @@ async def get_put_hedge_candidates(
                 "ask": ask,
                 "mid": mid,
                 "contractCost": contract_cost,
+                "contractCostBasis": "ASK",
                 "withinBudget": within_budget,
                 "openInterest": oi,
+                "volume": volume,
+                "quoteStatus": "TWO_SIDED",
                 "ivPctile": iv_pctile,
                 "ivFlag": iv_flag,
                 "otmPct": otm_pct,
@@ -6142,20 +6179,46 @@ async def get_put_hedge_candidates(
     # Sort by expiry then strike
     candidates.sort(key=lambda c: (c["expiry"], c["strike"]))
 
-    budget_feasible = any(c["withinBudget"] for c in candidates)
+    data_date = get_last_trading_date()
+    data_quality = _compute_data_quality(considered_contracts, data_date)
+    quality_warnings = list(data_quality.get("warnings", []))
+    if excluded_contracts["noTwoSidedQuote"]:
+        quality_warnings.append("UNQUOTED_CONTRACTS_EXCLUDED")
+    if excluded_contracts["noLiquidityEvidence"]:
+        quality_warnings.append("NO_LIQUIDITY_EVIDENCE_EXCLUDED")
+    warnings = list(dict.fromkeys(quality_warnings))
+
+    budget_feasible: bool | None = (
+        None
+        if data_quality.get("quality") == "LOW"
+        else any(c["withinBudget"] for c in candidates)
+        if candidates else None if considered_contracts else False
+    )
+    status = (
+        "PARTIAL"
+        if data_quality.get("quality") == "LOW" or (considered_contracts and not candidates)
+        else "OK" if candidates
+        else "EMPTY_RESULT"
+    )
 
     # Generate note
-    if not candidates:
+    if status == "PARTIAL":
+        note = "Option-chain quality is insufficient for a hedge or budget conclusion; retry before use."
+        budget_gap = None
+    elif not candidates:
         note = "No put options found in the specified OTM range."
         budget_gap = None
-    elif not budget_feasible:
+    elif budget_feasible is False:
         nearest = min(candidates, key=lambda c: c["contractCost"])
         budget_gap = round(nearest["contractCost"] - budget_usd, 2)
-        note = f"No candidates within budget. Nearest: ${nearest['strike']} put at ${nearest['contractCost']}/contract vs ${budget_usd} budget."
+        note = f"No candidates within budget. Nearest: ${nearest['strike']} put at ${nearest['contractCost']}/contract ask cost vs ${budget_usd} budget."
     else:
         budget_gap = None
         count = sum(1 for c in candidates if c["withinBudget"])
-        note = f"{count} candidate(s) within ${budget_usd} budget."
+        note = f"{count} candidate(s) within ${budget_usd} budget using executable ask cost."
+
+    if considered_contracts and not candidates:
+        note = "No decision-usable hedge candidates: contracts lacked a two-sided quote or liquidity evidence."
 
     return json.dumps({
         "ticker": ticker,
@@ -6166,8 +6229,16 @@ async def get_put_hedge_candidates(
         "candidates": candidates,
         "budgetFeasible": budget_feasible,
         "budgetGapUsd": budget_gap,
+        "status": status,
+        "decisionGrade": False,
+        "decisionUse": "HEDGE_SCREEN_ONLY",
+        "consideredContracts": len(considered_contracts),
+        "excludedContracts": excluded_contracts,
+        "dataQuality": data_quality,
+        "warnings": warnings,
+        "recommendedNextAction": "RETRY" if status == "PARTIAL" else "NONE",
         "note": note,
-        "dataDate": get_last_trading_date(),
+        "dataDate": data_date,
     })
 
 
@@ -6357,6 +6428,42 @@ def _df_to_records(df) -> list | None:
     return json.loads(df.reset_index().to_json(orient="records", date_format="iso"))
 
 
+_FUND_INVERSE_VALUATION_LABELS = {
+    "Price/Earnings",
+    "Price/Book",
+    "Price/Sales",
+    "Price/Cashflow",
+}
+
+
+def _normalize_fund_equity_holdings(df) -> tuple[list | None, list | None, dict[str, str]]:
+    """Convert Yahoo inverse valuation yields to the conventional labeled multiples."""
+    records = _df_to_records(df)
+    if not records:
+        return records, None, {}
+    raw_records = json.loads(json.dumps(records))
+    methods: dict[str, str] = {}
+    changed = False
+    for record in records:
+        label_key = next(
+            (key for key in ("Average", "index") if key in record),
+            next(iter(record), None),
+        )
+        label = record.get(label_key) if label_key else None
+        if label not in _FUND_INVERSE_VALUATION_LABELS:
+            continue
+        for key, value in list(record.items()):
+            if key == label_key or not isinstance(value, (int, float)) or value <= 0:
+                continue
+            if value < 1:
+                record[key] = round(1 / value, 4)
+                methods[f"{label}:{key}"] = "RECIPROCAL_FROM_PROVIDER_YIELD"
+                changed = True
+            else:
+                methods[f"{label}:{key}"] = "PASSTHROUGH_CONVENTIONAL_MULTIPLE"
+    return records, raw_records if changed else None, methods
+
+
 @yfinance_server.tool(
     name="get_etf_info",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_etf_info"],
@@ -6370,6 +6477,9 @@ moving averages (fiftyDayAverage, twoHundredDayAverage), and selected FundsData 
 
 sections defaults to overview, holdings, and allocation. Request operations for expense/turnover
 comparisons or fixed_income for duration, maturity, credit-quality, and bond-rating data.
+Yahoo inverse valuation yields are normalized to conventional labeled multiples;
+provider-raw values and the normalization method are retained. Holdings/allocation
+as-of dates are null and explicitly NOT_EXPOSED_BY_PROVIDER when Yahoo omits them.
 
 Use this tool for ETF and fund tickers: SPY, QQQ, VTI, ARKK, VFIAX, etc.
 For individual stocks, use get_fast_info or get_stock_info instead.
@@ -6420,6 +6530,8 @@ async def get_etf_info(
         "decisionGrade": False,
         "sectionsRequested": requested,
         "sectionStatus": {},
+        "sectionDates": {},
+        "warnings": [],
     })
 
     try:
@@ -6447,7 +6559,15 @@ async def get_etf_info(
         def _load_holdings() -> bool:
             holdings = funds.top_holdings
             data["topHoldings"] = _df_to_records(None if holdings is None else holdings.head(10))
-            data["equityHoldings"] = _df_to_records(funds.equity_holdings)
+            normalized, provider_raw, methods = _normalize_fund_equity_holdings(funds.equity_holdings)
+            data["equityHoldings"] = normalized
+            data["equityHoldingsProviderRaw"] = provider_raw
+            data["valuationBasis"] = "CONVENTIONAL_MULTIPLE"
+            data["valuationNormalization"] = methods
+            data["sectionDates"]["holdings"] = {
+                "asOfDate": None,
+                "status": "NOT_EXPOSED_BY_PROVIDER",
+            }
             return bool(data["topHoldings"] or data["equityHoldings"])
 
         def _load_allocation() -> bool:
@@ -6457,6 +6577,10 @@ async def get_etf_info(
                 [{"sector": key, "weight": value} for key, value in sector_weights.items()]
                 if isinstance(sector_weights, dict) else None
             )
+            data["sectionDates"]["allocation"] = {
+                "asOfDate": None,
+                "status": "NOT_EXPOSED_BY_PROVIDER",
+            }
             return bool(data["assetClasses"] or data["sectorWeights"])
 
         def _load_operations() -> bool:
@@ -6477,7 +6601,15 @@ async def get_etf_info(
         for section in requested:
             data["sectionStatus"][section] = "PROVIDER_ERROR"
 
-    data["recommendedNextAction"] = "NONE" if all(v == "OK" for v in data["sectionStatus"].values()) else "RETRY_OR_REQUEST_AVAILABLE_SECTION"
+    dated_sections = {"holdings", "allocation"}.intersection(requested)
+    if dated_sections and any(data["sectionStatus"].get(section) == "OK" for section in dated_sections):
+        data["warnings"].append("FUND_CHARACTERISTICS_AS_OF_DATE_NOT_EXPOSED")
+    if not all(v == "OK" for v in data["sectionStatus"].values()):
+        data["recommendedNextAction"] = "RETRY_OR_REQUEST_AVAILABLE_SECTION"
+    elif data["warnings"]:
+        data["recommendedNextAction"] = "CHECK_OFFICIAL_FUND_SOURCE"
+    else:
+        data["recommendedNextAction"] = "NONE"
 
     result = json.dumps(data)
     _cache_set(cache_key, result)
@@ -6588,6 +6720,8 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
     puts_list = json.loads(puts_df.to_json(orient="records", date_format="iso"))
     data_quality = _compute_data_quality(calls_list + puts_list, get_last_trading_date())
     quality = data_quality.get("quality", "HIGH")
+    if quality == "LOW":
+        scan_warnings.append("OPTIONS_CHAIN_LOW_QUALITY")
 
     # IV percentile — approximate using annualised 30-day rolling realised vol over 1 year
     iv_pctile: int | None = None
@@ -6728,7 +6862,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
         "fallbackUsed": fallback_used,
         "recommendedNextAction": (
             "RETRY"
-            if historical_bar_status in {"STALE", "UNAVAILABLE"}
+            if quality == "LOW" or historical_bar_status in {"STALE", "UNAVAILABLE", "INCOMPLETE"}
             else "NONE"
         ),
         "dataQuality": data_quality,
@@ -7067,7 +7201,7 @@ async def get_company_profile(ticker: str | list[str], include_all: bool = False
     return await get_stock_info(ticker, include_all=include_all)
 
 
-@yfinance_server.tool(name="get_fund_profile", output_schema=_TOOL_OUTPUT_SCHEMAS["get_etf_info"], description="Get a fund/ETF profile. Use sections to request overview, holdings, allocation, operations, or fixed-income detail.")
+@yfinance_server.tool(name="get_fund_profile", output_schema=_TOOL_OUTPUT_SCHEMAS["get_etf_info"], description="Get a fund/ETF profile with section status and as-of-date limitations. Valuation characteristics are conventional multiples; provider inverse yields are retained separately. Use sections to request overview, holdings, allocation, operations, or fixed-income detail.")
 async def get_fund_profile(ticker: str | list[str], sections: list[str] | None = None) -> str:
     return await get_etf_info(ticker, sections)
 
@@ -7198,12 +7332,12 @@ async def summarize_options_flow(ticker: str, expiry_hint: str | None = None) ->
     return await get_options_summary(ticker=ticker, expiry_hint=expiry_hint)
 
 
-@yfinance_server.tool(name="analyze_options_flow_window", output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_flow_scan"], description="Canonical alias for get_options_flow_scan.")
+@yfinance_server.tool(name="analyze_options_flow_window", output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_flow_scan"], description="Analyze an event-window options flow reading. LOW chain quality returns RETRY and must not support derivative conclusions.")
 async def analyze_options_flow_window(ticker: str, window_label: str) -> str:
     return await get_options_flow_scan(ticker, window_label)
 
 
-@yfinance_server.tool(name="find_put_hedge_candidates", output_schema=_TOOL_OUTPUT_SCHEMAS["get_put_hedge_candidates"], description="Canonical alias for get_put_hedge_candidates.")
+@yfinance_server.tool(name="find_put_hedge_candidates", output_schema=_TOOL_OUTPUT_SCHEMAS["get_put_hedge_candidates"], description="Find OTM put hedge candidates using executable ask cost. Contracts require a two-sided quote plus liquidity evidence; PARTIAL means retry and do not use budgetFeasible as a decision.")
 async def find_put_hedge_candidates(ticker: str, otm_pct_min: float = 8, otm_pct_max: float = 12, budget_usd: float = 500, expiry_after: str = "") -> str:
     return await get_put_hedge_candidates(ticker, otm_pct_min, otm_pct_max, budget_usd, expiry_after)
 
