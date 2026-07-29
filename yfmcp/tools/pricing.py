@@ -1854,12 +1854,12 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
     })
 
 def _classify_freshness(data_date: str | None, retrieved_at: str) -> str:
-    """Classify data freshness based on data date and retrieval time."""
+    """Classify legacy date-only data freshness."""
     if not data_date:
         return "UNKNOWN"
     try:
         now = datetime.datetime.fromisoformat(retrieved_at.replace("Z", "+00:00"))
-        # Approximate US market close as 21:00 UTC (4pm ET / 5pm EDT)
+        # Preserve the existing date-only contract for compatibility.
         data_dt = datetime.datetime(
             int(data_date[:4]), int(data_date[5:7]), int(data_date[8:10]),
             21, 0, 0, tzinfo=datetime.timezone.utc
@@ -1868,15 +1868,56 @@ def _classify_freshness(data_date: str | None, retrieved_at: str) -> str:
         if diff_ms < 0:
             return "UNKNOWN"
         diff_hours = diff_ms / (1000 * 60 * 60)
-        # Python weekday(): 0=Monday, 1=Tuesday, ..., 4=Friday, 5=Saturday, 6=Sunday
-        now_day = now.weekday()    # 0=Mon, 4=Fri, 5=Sat, 6=Sun
+        now_day = now.weekday()
         data_day = data_dt.weekday()
-        # Weekend: current day is Saturday(5) or Sunday(6), data from Friday(4)
         if now_day in (5, 6) and data_day == 4 and diff_hours <= 72:
             return "WEEKEND_EXPECTED_STALE"
         if diff_hours <= 28:
             return "FRESH"
         if diff_hours <= 56:
+            return "MARKET_CLOSED_EXPECTED_STALE"
+        if diff_hours <= 168:
+            return "STALE"
+        return "VERY_STALE"
+    except Exception:
+        return "UNKNOWN"
+
+
+def _classify_quote_freshness(
+    quote_timestamp: str | None,
+    retrieved_at: str,
+    market_open: bool | None,
+) -> str:
+    """Classify quote freshness from its timestamp and current session state."""
+    if not quote_timestamp:
+        return "UNKNOWN"
+    try:
+        now = datetime.datetime.fromisoformat(retrieved_at.replace("Z", "+00:00"))
+        observed = datetime.datetime.fromisoformat(
+            quote_timestamp.replace("Z", "+00:00")
+        )
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=datetime.timezone.utc)
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=datetime.timezone.utc)
+        now = now.astimezone(datetime.timezone.utc)
+        observed = observed.astimezone(datetime.timezone.utc)
+        diff_seconds = (now - observed).total_seconds()
+        # Allow small provider/host clock skew, but reject genuinely future quotes.
+        if diff_seconds < -5 * 60:
+            return "UNKNOWN"
+        diff_hours = diff_seconds / (60 * 60)
+        if diff_hours <= 0.5:
+            return "FRESH"
+        if market_open is True:
+            return "STALE"
+        if (
+            now.weekday() in (5, 6)
+            and observed.weekday() == 4
+            and diff_hours <= 96
+        ):
+            return "WEEKEND_EXPECTED_STALE"
+        if diff_hours <= 96:
             return "MARKET_CLOSED_EXPECTED_STALE"
         if diff_hours <= 168:
             return "STALE"
@@ -1970,6 +2011,13 @@ async def get_market_snapshot(
         or (price_stats.get("dataDate") if price_stats else None)
         or (volume_gate.get("dataDate") if volume_gate else None)
     )
+    quote_timestamp = quote.get("priceTimestamp") if quote else None
+    market_open = quote.get("marketOpen") if quote else None
+    quote_freshness_class = _classify_quote_freshness(
+        quote_timestamp,
+        retrieved_at,
+        market_open,
+    )
 
     last_price = quote.get("lastPrice") if quote else None
     prev_close = quote.get("previousClose") if quote else None
@@ -1989,7 +2037,7 @@ async def get_market_snapshot(
             "previousClose": prev_close,
             "changePct": change_pct,
             "lastTradeDate": data_date,
-            "marketOpen": quote.get("marketOpen") if quote else None,
+            "marketOpen": market_open,
         },
         "range": {
             "yearHigh": quote.get("yearHigh") if quote else None,
@@ -2034,7 +2082,7 @@ async def get_market_snapshot(
         "freshness": {
             "dataDate": data_date,
             "quoteDataDate": quote.get("lastTradeDate") if quote else None,
-            "quoteTimestamp": quote.get("priceTimestamp") if quote else None,
+            "quoteTimestamp": quote_timestamp,
             "completedBarDataDate": completed_bar_data_date,
             "componentDataDates": {
                 "priceStats": price_stats.get("dataDate") if price_stats else None,
@@ -2045,8 +2093,8 @@ async def get_market_snapshot(
             },
             "retrievedAt": retrieved_at,
             "marketSessionAware": True,
-            "freshnessClass": _classify_freshness(data_date, retrieved_at),
-            "quoteFreshnessClass": _classify_freshness(data_date, retrieved_at),
+            "freshnessClass": quote_freshness_class,
+            "quoteFreshnessClass": quote_freshness_class,
             "completedBarFreshnessStatus": (
                 (tech.get("freshnessStatus") if tech else None)
                 or (price_stats.get("freshnessStatus") if price_stats else None)
