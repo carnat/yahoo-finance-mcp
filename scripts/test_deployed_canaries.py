@@ -12,24 +12,37 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 from pathlib import Path
 from typing import Any, Callable
 
 try:  # Supports direct canary execution and module-based regression checks.
-    from live_smoke_utils import call_tool
+    from live_smoke_utils import call_tool, rpc
 except ModuleNotFoundError:
-    from scripts.live_smoke_utils import call_tool
+    from scripts.live_smoke_utils import call_tool, rpc
 
 
 ROOT = Path(__file__).resolve().parent
 REGISTRY_PATH = ROOT / "deployed_canaries.json"
+CATALOG_PATH = ROOT.parent / "tool_catalog.json"
 MCP_URL = os.environ.get("MCP_URL", "https://yahoo-finance-mcp.artinatw.workers.dev/mcp").strip()
 UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-canary/1.0)"
 
 EXPECTED_SCHEMA_VERSION = "2026-07-08"
-EXPECTED_TOOL_MODE = os.environ.get("EXPECTED_TOOL_MODE", os.environ.get("TOOL_MODE", "expanded")).lower()
+EXPECTED_TOOL_MODE = os.environ.get("EXPECTED_TOOL_MODE", os.environ.get("TOOL_MODE", "grouped")).lower()
+EXPECTED_WORKER_VERSION_ID = os.environ.get("EXPECTED_WORKER_VERSION_ID", "").strip()
 ALLOW_NETWORK_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in {"1", "true", "yes"}
+VERSION_ATTEMPTS = 19
+VERSION_DELAY_SECONDS = 5.0
+
+_CATALOG = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+GROUPED_TOOLS = frozenset(_CATALOG["groups"])
+ACTION_GROUP = {
+    action: group_name
+    for group_name, group in _CATALOG["groups"].items()
+    for action in group["actions"]
+}
 
 
 def extract_data(payload: Any) -> Any:
@@ -289,21 +302,6 @@ def unsupported_query_error(payload: dict[str, Any], _canary: dict[str, Any]) ->
         raise AssertionError(f"unsupported query_sec_filing_index missing supportedQueryTypes: {payload}")
 
 
-def deprecated_alias_error(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
-    if payload.get("ok") is not False:
-        raise AssertionError(f"deprecated alias validation failure must be top-level ok:false: {payload}")
-    meta = payload.get("meta") or {}
-    if meta.get("canonicalTool") != "get_historical_prices":
-        raise AssertionError(f"deprecated alias missing canonicalTool: {payload}")
-    if meta.get("deprecatedTool") is not True:
-        raise AssertionError(f"deprecated alias missing deprecatedTool=true: {payload}")
-    if meta.get("useInstead") != "get_historical_prices":
-        raise AssertionError(f"deprecated alias missing useInstead: {payload}")
-    warnings = meta.get("warnings") or []
-    if not any(isinstance(item, dict) and item.get("code") == "DEPRECATED_ALIAS" for item in warnings):
-        raise AssertionError(f"deprecated alias missing DEPRECATED_ALIAS warning: {payload}")
-
-
 def aaoi_china_positive(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
     data = extract_data(payload)
     if not isinstance(data, dict):
@@ -368,7 +366,6 @@ ASSERTIONS: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
     "finnhub_not_eligible_contract": finnhub_not_eligible_contract,
     "overnight_diagnostics_only": overnight_diagnostics_only,
     "unsupported_query_error": unsupported_query_error,
-    "deprecated_alias_error": deprecated_alias_error,
     "aaoi_china_positive": aaoi_china_positive,
     "thai_fund_nav_contract": thai_fund_nav_contract,
 }
@@ -406,26 +403,125 @@ def validate_registry(registry: dict[str, Any]) -> list[dict[str, Any]]:
     return canaries
 
 
+def _listed_tool_mode(response: dict[str, Any]) -> str:
+    if response.get("error") is not None:
+        raise AssertionError(f"tools/list returned JSON-RPC error: {response['error']}")
+    tools = (response.get("result") or {}).get("tools")
+    if not isinstance(tools, list) or not tools:
+        raise AssertionError(f"tools/list returned no tools: {response}")
+    names = {
+        str(tool.get("name"))
+        for tool in tools
+        if isinstance(tool, dict) and tool.get("name")
+    }
+    if names == GROUPED_TOOLS:
+        return "grouped"
+    if names & GROUPED_TOOLS:
+        raise AssertionError(f"tools/list mixed grouped and expanded tools: {sorted(names)}")
+    return "expanded"
+
+
+def wait_for_expected_tool_mode(
+    expected_mode: str = EXPECTED_TOOL_MODE,
+    *,
+    rpc_call: Callable[..., dict[str, Any]] = rpc,
+    sleep: Callable[[float], None] = time.sleep,
+    attempts: int = VERSION_ATTEMPTS,
+    delay_seconds: float = VERSION_DELAY_SECONDS,
+) -> str:
+    if expected_mode not in {"grouped", "expanded"}:
+        raise AssertionError(f"unsupported EXPECTED_TOOL_MODE: {expected_mode!r}")
+    actual_mode = ""
+    for attempt in range(1, attempts + 1):
+        response = rpc_call(
+            MCP_URL,
+            "tools/list",
+            req_id=2999,
+            user_agent=UA,
+            timeout=120,
+            retries=5,
+        )
+        actual_mode = _listed_tool_mode(response)
+        if actual_mode == expected_mode:
+            return actual_mode
+        if attempt < attempts:
+            sleep(delay_seconds)
+    raise AssertionError(
+        f"deployed tool mode did not converge: expected {expected_mode}, got {actual_mode}"
+    )
+
+
+def _route_tool(tool: str, args: dict[str, Any], tool_mode: str) -> tuple[str, dict[str, Any]]:
+    if tool_mode == "expanded":
+        return tool, args
+    group = ACTION_GROUP.get(tool)
+    if group is None:
+        raise AssertionError(f"grouped canary tool is not a canonical catalog action: {tool}")
+    return group, {"action": tool, "params": args}
+
+
+def call_versioned_tool(
+    tool: str,
+    args: dict[str, Any],
+    *,
+    tool_mode: str,
+    req_id: int,
+    expected_version_id: str = EXPECTED_WORKER_VERSION_ID,
+    tool_call: Callable[..., dict[str, Any]] = call_tool,
+    sleep: Callable[[float], None] = time.sleep,
+    attempts: int = VERSION_ATTEMPTS,
+    delay_seconds: float = VERSION_DELAY_SECONDS,
+) -> dict[str, Any]:
+    routed_tool, routed_args = _route_tool(tool, args, tool_mode)
+    actual_version_id: Any = None
+    for attempt in range(1, attempts + 1):
+        payload = tool_call(
+            MCP_URL,
+            routed_tool,
+            routed_args,
+            req_id=req_id,
+            user_agent=UA,
+            timeout=120,
+            retries=5,
+        )
+        if not expected_version_id:
+            return payload
+        if payload.get("jsonrpc") == "2.0" and payload.get("error") is not None:
+            return payload
+        meta = payload.get("meta") if isinstance(payload, dict) else None
+        actual_version_id = meta.get("workerVersionId") if isinstance(meta, dict) else None
+        if actual_version_id == expected_version_id:
+            return payload
+        if attempt < attempts:
+            sleep(delay_seconds)
+    raise AssertionError(
+        f"{tool} did not converge to Worker version {expected_version_id}; "
+        f"last response version was {actual_version_id!r}"
+    )
+
+
 def run_canaries(canaries: list[dict[str, Any]]) -> None:
     if not MCP_URL:
         raise AssertionError("MCP_URL is required")
+    tool_mode = wait_for_expected_tool_mode()
+    expected_tool_count = len(GROUPED_TOOLS) if tool_mode == "grouped" else len(ACTION_GROUP)
     failures: list[str] = []
     for idx, canary in enumerate(canaries, start=1):
         tool = str(canary["tool"])
         try:
-            payload = call_tool(
-                MCP_URL,
+            payload = call_versioned_tool(
                 tool,
                 canary["args"],
+                tool_mode=tool_mode,
                 req_id=3000 + idx,
-                user_agent=UA,
-                timeout=120,
-                retries=5,
             )
             assert_no_jsonrpc_error(payload, tool)
             assert_no_unknown_tool(payload, tool)
             assert_not_double_enveloped_failure(payload, tool)
-            ASSERTIONS[str(canary["assertion"])](payload, canary)
+            ASSERTIONS[str(canary["assertion"])](
+                payload,
+                {**canary, "expectedToolCount": expected_tool_count},
+            )
             print(f"  PASS {canary['id']}")
         except (TimeoutError, urllib.error.URLError):
             raise

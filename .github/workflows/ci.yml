@@ -159,6 +159,7 @@ jobs:
         run: python -m unittest scripts.test_universal_aliases_unit -v
 
       - name: Universal alias tests
+        if: ${{ vars.TOOL_MODE == 'expanded' }}
         run: python scripts/test_universal_aliases.py
         env:
           ALLOW_NETWORK_SKIP: "1"

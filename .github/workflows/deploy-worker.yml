@@ -28,7 +28,7 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  DEPLOY_TOOL_MODE: ${{ vars.TOOL_MODE || 'expanded' }}
+  DEPLOY_TOOL_MODE: ${{ vars.TOOL_MODE || 'grouped' }}
   PRODUCTION_HEALTH_URL: https://yahoo-finance-mcp.artinatw.workers.dev/health
   PRODUCTION_MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
 
@@ -132,6 +132,7 @@ jobs:
           MCP_URL: ${{ needs.upload_version.outputs.preview_url }}/mcp
           ALLOW_NETWORK_SKIP: "0"
           EXPECTED_TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}
+          EXPECTED_WORKER_VERSION_ID: ${{ needs.upload_version.outputs.version_id }}
 
   promote_version:
     name: Promote verified candidate
@@ -191,6 +192,7 @@ jobs:
           MCP_URL: ${{ env.PRODUCTION_MCP_URL }}
           ALLOW_NETWORK_SKIP: "0"
           EXPECTED_TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}
+          EXPECTED_WORKER_VERSION_ID: ${{ needs.upload_version.outputs.version_id }}
 
       - name: Audit deployed MCP live discovery
         id: live_discovery
@@ -205,13 +207,13 @@ jobs:
 
       - name: Audit alias behavior
         id: aliases
-        if: ${{ always() }}
+        if: ${{ always() && env.DEPLOY_TOOL_MODE == 'expanded' }}
         continue-on-error: true
         run: python scripts/test_universal_aliases.py
 
       - name: Audit geographic revenue schema
         id: geographic_revenue
-        if: ${{ always() }}
+        if: ${{ always() && env.DEPLOY_TOOL_MODE == 'expanded' }}
         continue-on-error: true
         run: python scripts/test_geographic_revenue_schema.py
         env:
@@ -228,31 +230,9 @@ jobs:
           ALLOW_NETWORK_SKIP: "0"
           EXPECTED_TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}
 
-      - name: Audit deployed MCP grouped discovery
-        id: grouped_discovery
-        if: ${{ always() && vars.DEPLOY_GROUPED_SMOKE == 'true' }}
-        continue-on-error: true
-        run: python scripts/test_deployed_discovery.py
-        env:
-          ALLOW_NETWORK_SKIP: "0"
-          EXPECTED_TOOL_MODE: grouped
-          TOOL_MODE: grouped
-          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-
-      - name: Audit deployed grouped extractor tools
-        id: grouped_extractors
-        if: ${{ always() && vars.DEPLOY_GROUPED_SMOKE == 'true' }}
-        continue-on-error: true
-        run: python scripts/test_deployed_extractors.py
-        env:
-          MCP_URL: https://yahoo-finance-mcp.artinatw.workers.dev/mcp
-          ALLOW_NETWORK_SKIP: "0"
-          EXPECTED_TOOL_MODE: grouped
-          TOOL_MODE: grouped
-
       - name: Audit end-to-end tool tests
         id: end_to_end
-        if: ${{ always() }}
+        if: ${{ always() && env.DEPLOY_TOOL_MODE == 'expanded' }}
         continue-on-error: true
         run: python scripts/test_tools.py --url "$PRODUCTION_MCP_URL"
 
@@ -268,6 +248,4 @@ jobs:
           echo "| Aliases | ${{ steps.aliases.outcome }} | advisory |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Geographic revenue | ${{ steps.geographic_revenue.outcome }} | advisory |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Extractors | ${{ steps.extractors.outcome }} | advisory |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Grouped discovery | ${{ steps.grouped_discovery.outcome }} | advisory |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Grouped extractors | ${{ steps.grouped_extractors.outcome }} | advisory |" >> "$GITHUB_STEP_SUMMARY"
           echo "| End-to-end tools | ${{ steps.end_to_end.outcome }} | advisory |" >> "$GITHUB_STEP_SUMMARY"

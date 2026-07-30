@@ -53,7 +53,10 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     // Populate module-level env store so response wrappers and tools
     // can read Cloudflare runtime bindings (e.g. MCP_ENVELOPE_V2).
-    setWorkerEnv(env);
+    setWorkerEnv({
+      ...env,
+      WORKER_VERSION_ID: env.CF_VERSION_METADATA?.id,
+    });
     const { method } = request;
     const { pathname } = new URL(request.url);
 

@@ -20,7 +20,7 @@ OPTIONAL_SECRETS = ("FINNHUB_API_KEY", "SEC_OPEN_DATA_API_KEY")
 
 
 def build_secrets(environ: Mapping[str, str]) -> dict[str, str]:
-    tool_mode = environ.get("TOOL_MODE", "expanded").strip() or "expanded"
+    tool_mode = environ.get("TOOL_MODE", "grouped").strip() or "grouped"
     secrets = {"TOOL_MODE": tool_mode}
     for name in OPTIONAL_SECRETS:
         value = environ.get(name, "").strip()

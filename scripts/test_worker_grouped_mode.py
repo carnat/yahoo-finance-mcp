@@ -21,6 +21,8 @@ TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
 MCP_TS = ROOT / "worker" / "src" / "mcp.ts"
 CATALOG_TS = ROOT / "worker" / "src" / "tool-catalog.ts"
 DEPLOY_WORKFLOW = ROOT / ".github" / "workflows" / "deploy-worker.yml"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+SERVER = ROOT / "server.py"
 
 
 class TestWorkerGroupedMode(unittest.TestCase):
@@ -31,6 +33,8 @@ class TestWorkerGroupedMode(unittest.TestCase):
         cls.mcp_ts = MCP_TS.read_text(encoding="utf-8")
         cls.catalog_ts = CATALOG_TS.read_text(encoding="utf-8")
         cls.deploy_workflow = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
+        cls.ci_workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+        cls.server = SERVER.read_text(encoding="utf-8")
 
     def test_catalog_has_expected_group_surface(self) -> None:
         groups = self.catalog["groups"]
@@ -77,14 +81,20 @@ class TestWorkerGroupedMode(unittest.TestCase):
         )
         self.assertIsNotNone(match)
 
-    def test_deploy_can_wire_grouped_mode_to_worker(self) -> None:
-        self.assertIn("DEPLOY_TOOL_MODE: ${{ vars.TOOL_MODE || 'expanded' }}", self.deploy_workflow)
+    def test_grouped_mode_is_the_universal_default(self) -> None:
+        self.assertIn('getWorkerVar("TOOL_MODE") ?? "grouped"', self.tools_ts)
+        self.assertIn('os.environ.get("TOOL_MODE", "grouped")', self.server)
+        self.assertIn("DEPLOY_TOOL_MODE: ${{ vars.TOOL_MODE || 'grouped' }}", self.deploy_workflow)
         self.assertIn("Build candidate secrets file", self.deploy_workflow)
         self.assertIn("worker_version_promotion.py write-secrets", self.deploy_workflow)
         self.assertIn("TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}", self.deploy_workflow)
         self.assertIn('--secrets-file "$RUNNER_TEMP/worker-secrets.json"', self.deploy_workflow)
         self.assertNotIn("wrangler secret put TOOL_MODE", self.deploy_workflow)
-        self.assertIn("DEPLOY_GROUPED_SMOKE", self.deploy_workflow)
+        self.assertNotIn("DEPLOY_GROUPED_SMOKE", self.deploy_workflow)
+        self.assertRegex(
+            self.ci_workflow,
+            r"(?ms)- name: Universal alias tests\n\s+if: \$\{\{ vars\.TOOL_MODE == 'expanded' \}\}",
+        )
 
 
 if __name__ == "__main__":
