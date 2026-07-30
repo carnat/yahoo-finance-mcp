@@ -15,6 +15,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import types
@@ -134,6 +135,89 @@ class TestGroupedServer(unittest.TestCase):
                 os.environ.pop("TOOL_MODE", None)
             else:
                 os.environ["TOOL_MODE"] = original
+
+
+class TestGroupedRouting(unittest.TestCase):
+    def setUp(self):
+        self.registry = build_handler_registry(yfinance_server)
+
+    def call(self, group: str, action: str, params: dict | None) -> dict:
+        with patch.dict(os.environ, {"MCP_ENVELOPE_V2": "true"}):
+            raw = asyncio.run(
+                tool_groups._route_grouped_call(group, action, params, self.registry)
+            )
+        return json.loads(raw)
+
+    def test_registered_grouped_handler_invokes_router(self):
+        grouped = srv._build_grouped_server()
+        entry = grouped._tool_manager._tools["system"]
+        with patch.dict(os.environ, {"MCP_ENVELOPE_V2": "true"}):
+            payload = json.loads(asyncio.run(entry.fn("health_check", {})))
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["toolMode"], "grouped")
+
+    def test_missing_required_param_fails_before_provider_call(self):
+        payload = self.call("stock_pricing", "get_market_quote", {})
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "INPUT_VALIDATION_ERROR")
+        self.assertEqual(payload["error"]["missingParams"], ["ticker"])
+        self.assertEqual(payload["error"]["recommendedNextAction"], "CORRECT_TOOL_PARAMS")
+
+    def test_compat_error_keeps_recovery_diagnostics(self):
+        with patch.dict(os.environ, {"MCP_ENVELOPE_V2": ""}):
+            raw = asyncio.run(
+                tool_groups._route_grouped_call(
+                    "stock_pricing",
+                    "get_market_quote",
+                    {},
+                    self.registry,
+                )
+            )
+        payload = json.loads(raw)
+        self.assertTrue(payload["error"])
+        self.assertEqual(payload["missingParams"], ["ticker"])
+        self.assertEqual(payload["recommendedNextAction"], "CORRECT_TOOL_PARAMS")
+
+    def test_empty_required_param_fails_before_provider_call(self):
+        payload = self.call("news_events", "get_company_news", {"ticker": "   "})
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["invalidParams"], ["ticker"])
+
+    def test_unexpected_param_is_not_silently_dropped(self):
+        payload = self.call(
+            "sec_filings",
+            "list_sec_material_filings",
+            {"ticker": "AAPL", "form_types": ["8-K"]},
+        )
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["unexpectedParams"], ["form_types"])
+
+    def test_invalid_nested_param_type_is_rejected(self):
+        payload = self.call(
+            "news_events",
+            "get_company_news",
+            {"ticker": "AAPL", "max_results": "ten"},
+        )
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["invalidParams"], ["max_results"])
+
+    def test_legacy_error_string_becomes_failure_envelope(self):
+        async def fake_expirations(ticker: str) -> str:
+            return f"Error: getting option expiration dates for {ticker}: provider unavailable"
+
+        registry = {"get_option_expiration_dates": fake_expirations}
+        with patch.dict(os.environ, {"MCP_ENVELOPE_V2": "true"}):
+            raw = asyncio.run(
+                tool_groups._route_grouped_call(
+                    "options_analysis",
+                    "get_option_expiration_dates",
+                    {"ticker": "AAPL"},
+                    registry,
+                )
+            )
+        payload = json.loads(raw)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "PROVIDER_ERROR")
 
 
 if __name__ == "__main__":

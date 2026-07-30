@@ -10821,6 +10821,17 @@ export async function getCompanyNews(
   lookbackDays = 14,
   sources: string[] = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
 ): Promise<string> {
+  if (
+    (typeof ticker === "string" && ticker.trim() === "")
+    || (Array.isArray(ticker) && (ticker.length === 0 || ticker.some((item) => typeof item !== "string" || item.trim() === "")))
+  ) {
+    return JSON.stringify({
+      error: true,
+      code: "INPUT_VALIDATION_ERROR",
+      message: "ticker is required and must not contain empty symbols.",
+    });
+  }
+  ticker = Array.isArray(ticker) ? ticker.map((item) => item.trim()) : ticker.trim();
   // Batch path: fetch each ticker independently and return a per-ticker keyed
   // object (a union of results), matching the other multi-ticker tools. News is
   // fetched per ticker; there is no combined query that could zero out the

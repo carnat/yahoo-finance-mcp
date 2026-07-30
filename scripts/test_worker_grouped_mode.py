@@ -20,6 +20,7 @@ CATALOG = ROOT / "tool_catalog.json"
 TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
 MCP_TS = ROOT / "worker" / "src" / "mcp.ts"
 CATALOG_TS = ROOT / "worker" / "src" / "tool-catalog.ts"
+YAHOO_TS = ROOT / "worker" / "src" / "yahoo-finance.ts"
 DEPLOY_WORKFLOW = ROOT / ".github" / "workflows" / "deploy-worker.yml"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 SERVER = ROOT / "server.py"
@@ -32,6 +33,7 @@ class TestWorkerGroupedMode(unittest.TestCase):
         cls.tools_ts = TOOLS_TS.read_text(encoding="utf-8")
         cls.mcp_ts = MCP_TS.read_text(encoding="utf-8")
         cls.catalog_ts = CATALOG_TS.read_text(encoding="utf-8")
+        cls.yahoo_ts = YAHOO_TS.read_text(encoding="utf-8")
         cls.deploy_workflow = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
         cls.ci_workflow = CI_WORKFLOW.read_text(encoding="utf-8")
         cls.server = SERVER.read_text(encoding="utf-8")
@@ -71,15 +73,47 @@ class TestWorkerGroupedMode(unittest.TestCase):
         self.assertRegex(self.mcp_ts, r"tools/list[\s\S]*listVisibleTools\(\)")
         self.assertRegex(self.mcp_ts, r"tools/call[\s\S]*callVisibleTool\(p\.name, p\.arguments \?\? \{\}\)")
 
-    def test_grouped_call_delegates_to_expanded_action(self) -> None:
+    def test_grouped_call_validates_then_delegates_to_expanded_action(self) -> None:
         self.assertIn("export function isGroupedMode()", self.tools_ts)
         self.assertIn("const GROUPED_TOOLS", self.tools_ts)
         self.assertIn("const GROUPED_ACTIONS", self.tools_ts)
-        match = re.search(
-            r"export async function callVisibleTool[\s\S]+?return callTool\(action, \(params as Record<string, unknown> \| undefined\) \?\? \{\}\);",
-            self.tools_ts,
-        )
-        self.assertIsNotNone(match)
+        call_start = self.tools_ts.index("export async function callVisibleTool")
+        call_end = self.tools_ts.index("async function _dispatchTool", call_start)
+        body = self.tools_ts[call_start:call_end]
+        self.assertIn("validateGroupedActionParams(action, actionParams)", body)
+        self.assertIn("if (validationFailure) return validationFailure", body)
+        self.assertIn("return callTool(action, actionParams)", body)
+
+    def test_grouped_validation_is_action_specific_and_recoverable(self) -> None:
+        validation_start = self.tools_ts.index("function validateGroupedActionParams")
+        validation_end = self.tools_ts.index("function legacyToolFailure", validation_start)
+        body = self.tools_ts[validation_start:validation_end]
+        self.assertIn("TOOLS.find((tool) => tool.name === action)", body)
+        for field in (
+            "missingParams",
+            "invalidParams",
+            "unexpectedParams",
+            "expectedParams",
+            "CORRECT_TOOL_PARAMS",
+        ):
+            self.assertIn(field, body)
+
+    def test_legacy_text_errors_are_not_wrapped_as_success(self) -> None:
+        call_start = self.tools_ts.index("export async function callTool")
+        call_end = self.tools_ts.index("export async function callVisibleTool", call_start)
+        body = self.tools_ts[call_start:call_end]
+        self.assertIn("legacyToolFailure(raw)", body)
+        self.assertIn("return mcpFailure(name, legacyFailure.code, legacyFailure.message)", body)
+
+    def test_company_news_rejects_empty_symbols_before_collection(self) -> None:
+        start = self.yahoo_ts.index("export async function getCompanyNews")
+        end = self.yahoo_ts.index("export async function searchCompanyNews", start)
+        body = self.yahoo_ts[start:end]
+        guard = body.index('code: "INPUT_VALIDATION_ERROR"')
+        collect = body.index("collectCompanyEvents(")
+        self.assertLess(guard, collect)
+        self.assertIn("ticker.length === 0", body)
+        self.assertIn('item.trim() === ""', body)
 
     def test_grouped_mode_is_the_universal_default(self) -> None:
         self.assertIn('getWorkerVar("TOOL_MODE") ?? "grouped"', self.tools_ts)

@@ -87,6 +87,15 @@
       "volatility": "provider_status"
     },
     {
+      "id": "grouped-required-param-rejection",
+      "description": "A grouped action with a missing required ticker fails before any provider call and exposes corrective diagnostics.",
+      "tool": "get_company_news",
+      "args": {},
+      "assertion": "required_param_validation_error",
+      "blocking": true,
+      "volatility": "stable_contract"
+    },
+    {
       "id": "company-ir-source-status",
       "description": "Company IR RSS/Atom discovery exposes machine-readable status without requiring a live feed to exist.",
       "tool": "get_public_event_timeline",
