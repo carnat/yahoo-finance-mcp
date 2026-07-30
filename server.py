@@ -7379,6 +7379,15 @@ async def get_company_news(
     lookback_days: int = 14,
     sources: list[str] | None = None,
 ) -> str:
+    if isinstance(ticker, list) and (
+        not ticker
+        or any(not isinstance(item, str) or not item.strip() for item in ticker)
+    ):
+        return _mcp_failure(
+            "get_company_news",
+            ErrorCode.INPUT_VALIDATION_ERROR,
+            "ticker is required and must not contain empty symbols.",
+        )
     # Batch path: fetch each ticker independently and return a per-ticker keyed
     # object (a union of results), matching the other multi-ticker tools. News is
     # fetched per ticker; there is no combined query that could zero out the

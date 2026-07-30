@@ -302,6 +302,18 @@ def unsupported_query_error(payload: dict[str, Any], _canary: dict[str, Any]) ->
         raise AssertionError(f"unsupported query_sec_filing_index missing supportedQueryTypes: {payload}")
 
 
+def required_param_validation_error(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
+    if payload.get("ok") is not False:
+        raise AssertionError(f"missing required grouped params must be top-level ok:false: {payload}")
+    error = payload.get("error") or {}
+    if error.get("code") != "INPUT_VALIDATION_ERROR":
+        raise AssertionError(f"missing required grouped params returned wrong code: {payload}")
+    if "ticker" not in (error.get("missingParams") or []):
+        raise AssertionError(f"missing required grouped params omitted ticker diagnostics: {payload}")
+    if error.get("recommendedNextAction") != "CORRECT_TOOL_PARAMS":
+        raise AssertionError(f"missing required grouped params omitted recovery action: {payload}")
+
+
 def aaoi_china_positive(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
     data = extract_data(payload)
     if not isinstance(data, dict):
@@ -366,6 +378,7 @@ ASSERTIONS: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
     "finnhub_not_eligible_contract": finnhub_not_eligible_contract,
     "overnight_diagnostics_only": overnight_diagnostics_only,
     "unsupported_query_error": unsupported_query_error,
+    "required_param_validation_error": required_param_validation_error,
     "aaoi_china_positive": aaoi_china_positive,
     "thai_fund_nav_contract": thai_fund_nav_contract,
 }

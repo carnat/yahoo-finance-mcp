@@ -100,6 +100,17 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             self.assertEqual(data.get("meta", {}).get("sourcesUsed"), ["yahoo_finance"])
             self.assertTrue(data.get("meta", {}).get("deduped"))
 
+    def test_get_company_news_rejects_empty_batches_before_collection(self):
+        for ticker in ([], [""]):
+            with self.subTest(ticker=ticker), patch(
+                "server._collect_company_events",
+                new_callable=AsyncMock,
+            ) as mocked:
+                payload = _parse(_run(srv.get_company_news(ticker)))
+                self.assertTrue(payload.get("error"))
+                self.assertEqual(payload.get("code"), "INPUT_VALIDATION_ERROR")
+                mocked.assert_not_awaited()
+
     def test_search_company_news_query_required(self):
         payload = _parse(_run(srv.search_company_news("AAPL", "")))
         self.assertTrue(payload.get("error"))

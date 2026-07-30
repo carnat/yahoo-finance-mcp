@@ -2004,6 +2004,123 @@ const num = (v: unknown, fallback: number): number => (typeof v === "number" ? v
 const tickerArg = (v: unknown): string | string[] =>
   Array.isArray(v) ? v.map(String) : str(v);
 
+function isEmptyRequiredValue(value: unknown): boolean {
+  if (value == null) return true;
+  if (typeof value === "string") return value.trim() === "";
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value === "object") return Object.keys(value as Record<string, unknown>).length === 0;
+  return false;
+}
+
+function matchesParamSchema(value: unknown, rawSchema: unknown): boolean {
+  if (rawSchema == null || typeof rawSchema !== "object" || Array.isArray(rawSchema)) return true;
+  const schema = rawSchema as Record<string, unknown>;
+  const oneOf = schema.oneOf;
+  if (Array.isArray(oneOf)) {
+    return oneOf.some((candidate) => matchesParamSchema(value, candidate));
+  }
+  const rawType = schema.type;
+  const types = Array.isArray(rawType) ? rawType.map(String) : rawType == null ? [] : [String(rawType)];
+  if (types.length > 0) {
+    const typeMatches = types.some((type) => {
+      switch (type) {
+        case "null": return value == null;
+        case "string": return typeof value === "string";
+        case "number": return typeof value === "number" && Number.isFinite(value);
+        case "integer": return typeof value === "number" && Number.isInteger(value);
+        case "boolean": return typeof value === "boolean";
+        case "array": return Array.isArray(value);
+        case "object": return value != null && typeof value === "object" && !Array.isArray(value);
+        default: return true;
+      }
+    });
+    if (!typeMatches) return false;
+  }
+  if (Array.isArray(schema.enum) && !schema.enum.some((item) => Object.is(item, value))) return false;
+  if (Array.isArray(value)) {
+    if (typeof schema.maxItems === "number" && value.length > schema.maxItems) return false;
+    if (typeof schema.minItems === "number" && value.length < schema.minItems) return false;
+    if (schema.items != null && !value.every((item) => matchesParamSchema(item, schema.items))) return false;
+  }
+  if (typeof value === "number") {
+    if (typeof schema.minimum === "number" && value < schema.minimum) return false;
+    if (typeof schema.maximum === "number" && value > schema.maximum) return false;
+  }
+  return true;
+}
+
+function validateGroupedActionParams(
+  action: string,
+  params: Record<string, unknown>,
+): string | null {
+  const definition = TOOLS.find((tool) => tool.name === action);
+  if (!definition) {
+    return mcpFailure(action, ErrorCode.INPUT_VALIDATION_ERROR, `No canonical input contract exists for '${action}'.`);
+  }
+  const properties = definition.inputSchema.properties;
+  const expectedParams = Object.keys(properties);
+  const required = definition.inputSchema.required ?? [];
+  const missingParams = required.filter((name) => !(name in params));
+  const emptyParams = required.filter((name) => name in params && isEmptyRequiredValue(params[name]));
+  const unexpectedParams = Object.keys(params).filter((name) => !(name in properties)).sort();
+  const invalidParams = Object.entries(params)
+    .filter(([name, value]) => name in properties && !matchesParamSchema(value, properties[name]))
+    .map(([name]) => name)
+    .sort();
+  const allInvalidParams = [...new Set([...emptyParams, ...invalidParams])].sort();
+  if (missingParams.length === 0 && allInvalidParams.length === 0 && unexpectedParams.length === 0) {
+    return null;
+  }
+  const reasons: string[] = [];
+  if (missingParams.length > 0) reasons.push(`missing required parameter(s): ${missingParams.join(", ")}`);
+  if (emptyParams.length > 0) reasons.push(`empty required parameter(s): ${emptyParams.join(", ")}`);
+  const typedInvalid = invalidParams.filter((name) => !emptyParams.includes(name));
+  if (typedInvalid.length > 0) reasons.push(`invalid parameter value(s): ${typedInvalid.join(", ")}`);
+  if (unexpectedParams.length > 0) reasons.push(`unexpected parameter(s): ${unexpectedParams.join(", ")}`);
+  return mcpFailure(
+    action,
+    ErrorCode.INPUT_VALIDATION_ERROR,
+    `Invalid params for '${action}': ${reasons.join("; ")}.`,
+    {
+      metaExtra: {
+        missingParams,
+        invalidParams: allInvalidParams,
+        unexpectedParams,
+        expectedParams,
+        recommendedNextAction: "CORRECT_TOOL_PARAMS",
+      },
+    },
+  );
+}
+
+function legacyToolFailure(raw: string): { code: string; message: string } | null {
+  let text = raw.trim();
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed != null && typeof parsed === "object") return null;
+    if (typeof parsed === "string") text = parsed.trim();
+  } catch {
+    // Plain-text legacy payload.
+  }
+  const lower = text.toLowerCase();
+  if (!(lower.startsWith("error") || (lower.startsWith("company ticker") && lower.includes("not found")))) {
+    return null;
+  }
+  const code = lower.startsWith("error: invalid") || lower.includes(" is required")
+    ? ErrorCode.INPUT_VALIDATION_ERROR
+    : lower.includes("no option")
+      ? ErrorCode.NO_OPTIONS_DATA
+      : lower.includes("not found") || lower.includes("api error 404")
+        ? ErrorCode.TICKER_NOT_FOUND
+        : lower.includes("rate limit") || lower.includes("429")
+          ? ErrorCode.RATE_LIMIT
+          : lower.includes("timeout") || lower.includes("timed out")
+            ? ErrorCode.PROVIDER_TIMEOUT
+            : ErrorCode.PROVIDER_ERROR;
+  return { code, message: text };
+}
+
 const SEC_XBRL_CONCEPT_ALIASES: Record<string, string> = {
   cash: "cash",
   cashandcashequivalentsatcarryingvalue: "cash",
@@ -2639,6 +2756,10 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       metaExtra: { retryable: false },
     });
   }
+  const legacyFailure = legacyToolFailure(raw);
+  if (legacyFailure) {
+    return mcpFailure(name, legacyFailure.code, legacyFailure.message);
+  }
   let batchMeta: { partialSuccess?: boolean; successCount?: number; errorCount?: number } | undefined;
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
@@ -2702,7 +2823,10 @@ export async function callVisibleTool(name: string, args: Record<string, unknown
   if (params != null && (typeof params !== "object" || Array.isArray(params))) {
     return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, "params must be an object when provided");
   }
-  return callTool(action, (params as Record<string, unknown> | undefined) ?? {});
+  const actionParams = (params as Record<string, unknown> | undefined) ?? {};
+  const validationFailure = validateGroupedActionParams(action, actionParams);
+  if (validationFailure) return validationFailure;
+  return callTool(action, actionParams);
 }
 
 async function _dispatchTool(name: string, args: Record<string, unknown>): Promise<string> {
