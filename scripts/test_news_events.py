@@ -513,7 +513,16 @@ class TestPhase6BSecEvents(unittest.TestCase):
         }
         with patch("server._get_submissions_for_ticker", new_callable=AsyncMock) as mocked:
             mocked.return_value = ("0000000000", subs)
-            data = _parse(_run(srv.get_sec_recent_events("AAPL", filing_types=["8-K", "10-Q"], max_results=2)))
+            data = _parse(
+                _run(
+                    srv.get_sec_recent_events(
+                        "AAPL",
+                        filing_types=["8-K", "10-Q"],
+                        lookback_days=3650,
+                        max_results=2,
+                    )
+                )
+            )
             self.assertEqual(len(data.get("items", [])), 2)
             first = data["items"][0]
             self.assertEqual(first.get("publishedAt"), "2026-05-01T20:05:00Z")
