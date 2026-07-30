@@ -4690,7 +4690,7 @@ async def get_market_calendar(
         items = _df_to_records(frame) or []
         for item in items:
             normalized = {
-                re.sub(r"[^a-z]", "", str(key).lower()): key
+                _re.sub(r"[^a-z]", "", str(key).lower()): key
                 for key in item
             }
             actual_key = normalized.get("epsactual") or normalized.get("reportedeps")
