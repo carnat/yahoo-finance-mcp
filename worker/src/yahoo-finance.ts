@@ -12754,22 +12754,66 @@ export async function extractSegmentRevenue(ticker: string, filingType = "10-K",
   return JSON.stringify(out);
 }
 
+export function xbrlSourceEvidence(parsed: Record<string, unknown>): Record<string, unknown> | null {
+  const context = parsed.xbrlContext;
+  if (!context || typeof context !== "object") return null;
+  const row = context as Record<string, unknown>;
+  return {
+    sourceType: "sec_xbrl_companyconcept",
+    concept: row.concept ?? null,
+    taxonomy: row.taxonomy ?? null,
+    unit: row.unit ?? parsed.unit ?? null,
+    accessionNumber: parsed.accessionNumber ?? row.accessionNumber ?? null,
+    filingType: parsed.filingType ?? row.form ?? null,
+    filingDate: parsed.filingDate ?? row.filedAt ?? null,
+    periodStart: row.periodStart ?? null,
+    periodEnd: row.periodEnd ?? row.instant ?? null,
+    fiscalYear: row.fiscalYear ?? null,
+    fiscalPeriod: row.fiscalPeriod ?? null,
+    dimensions: row.dimensions ?? {},
+    documentUrl: parsed.documentUrl ?? null,
+    indexUrl: parsed.indexUrl ?? null,
+  };
+}
+
+export function isDecisionGradeXbrlFact(
+  parsed: Record<string, unknown>,
+  sourceEvidence: Record<string, unknown> | null,
+  status: unknown,
+): boolean {
+  if (parsed.value == null || String(status).toUpperCase() !== "FOUND") return false;
+  if (!String(parsed.extractionMethod ?? "").toUpperCase().includes("XBRL")) return false;
+  if (!parsed.xbrlContext || typeof parsed.xbrlContext !== "object" || !sourceEvidence) return false;
+  return ["sourceType", "concept", "accessionNumber", "periodEnd"]
+    .every((field) => sourceEvidence[field] != null && String(sourceEvidence[field]).trim() !== "");
+}
+
 export async function extractTotalRevenue(ticker: string, filingType = "10-K", period = "latest"): Promise<string> {
   const payload = parseObjectJson(await getFilingData(ticker, "total_revenue", null, filingType, period));
   const value = payload.value ?? null;
+  const status = value != null ? "FOUND" : normalizeStatus(payload);
+  const sourceEvidence = xbrlSourceEvidence(payload);
+  const decisionGrade = isDecisionGradeXbrlFact(payload, sourceEvidence, status);
+  const filingEvidence = {
+    filingType: payload.filingType ?? filingType,
+    filingDate: payload.filingDate ?? null,
+    accessionNumber: payload.accessionNumber ?? null,
+    documentUrl: payload.documentUrl ?? null,
+  };
   return JSON.stringify({
     ticker,
     factType: "total_revenue",
     value,
     period: payload.period ?? null,
+    unit: payload.unit ?? "USD",
+    unitScale: payload.unitScale ?? null,
     confidence: payload.confidence ?? (value != null ? "HIGH" : "NOT_DISCLOSED"),
-    evidence: {
-      filingType: payload.filingType ?? filingType,
-      filingDate: payload.filingDate ?? null,
-      accessionNumber: payload.accessionNumber ?? null,
-      documentUrl: payload.documentUrl ?? null,
-    },
-    status: value != null ? "FOUND" : normalizeStatus(payload),
+    extractionMethod: payload.extractionMethod ?? "NONE",
+    evidence: decisionGrade ? sourceEvidence : filingEvidence,
+    sourceEvidence,
+    xbrlContext: payload.xbrlContext ?? null,
+    decisionGrade,
+    status,
   });
 }
 

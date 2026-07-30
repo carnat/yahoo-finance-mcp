@@ -101,6 +101,23 @@ class TestWorkerGroupedMode(unittest.TestCase):
         self.assertIn("if (validationFailure) return validationFailure", body)
         self.assertIn("return callTool(action, actionParams)", body)
 
+    def test_grouped_discovery_has_action_specific_schemas_and_read_only_hints(self) -> None:
+        self.assertIn("function groupedInputSchema(", self.tools_ts)
+        self.assertIn("oneOf,", self.tools_ts)
+        self.assertIn("const: action", self.tools_ts)
+        self.assertIn("additionalProperties: false", self.tools_ts)
+        self.assertIn('requiredParams.length > 0 ? ["action", "params"]', self.tools_ts)
+        for field, value in (
+            ("readOnlyHint", "true"),
+            ("destructiveHint", "false"),
+            ("idempotentHint", "true"),
+            ("openWorldHint", "true"),
+        ):
+            self.assertIn(f"{field}: {value}", self.tools_ts)
+        self.assertIn("function annotationsForTool(", self.tools_ts)
+        self.assertIn('"system", "health_check", "get_manifest_diagnostics"', self.tools_ts)
+        self.assertIn("annotations: annotationsForTool(group.name)", self.tools_ts)
+
     def test_grouped_validation_is_action_specific_and_recoverable(self) -> None:
         validation_start = self.tools_ts.index("function validateGroupedActionParams")
         validation_end = self.tools_ts.index("function legacyToolFailure", validation_start)

@@ -15,6 +15,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -34,8 +35,22 @@ def _ensure_mcp_available() -> None:
         pass
 
     class _ToolEntry:
-        def __init__(self, fn):
+        def __init__(self, fn, name, annotations=None):
             self.fn = fn
+            self.name = name
+            self.annotations = annotations
+            signature = inspect.signature(fn)
+            properties = {param_name: {} for param_name in signature.parameters}
+            required = [
+                param_name
+                for param_name, parameter in signature.parameters.items()
+                if parameter.default is inspect.Parameter.empty
+            ]
+            self.parameters = {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            }
 
     class _ToolManager:
         def __init__(self):
@@ -47,7 +62,12 @@ def _ensure_mcp_available() -> None:
 
         def tool(self, *a: object, name: str | None = None, **kw: object):
             def _decorator(fn):
-                self._tool_manager._tools[name or fn.__name__] = _ToolEntry(fn)
+                tool_name = name or fn.__name__
+                self._tool_manager._tools[tool_name] = _ToolEntry(
+                    fn,
+                    tool_name,
+                    kw.get("annotations"),
+                )
                 return fn
             if a and callable(a[0]):
                 return _decorator(a[0])
@@ -136,6 +156,63 @@ class TestGroupedServer(unittest.TestCase):
                 os.environ.pop("TOOL_MODE", None)
             else:
                 os.environ["TOOL_MODE"] = original
+
+    def test_grouped_discovery_is_typed_and_read_only(self):
+        grouped = srv._build_grouped_server()
+        tools = asyncio.run(grouped.list_tools())
+        by_name = {
+            getattr(tool, "name", getattr(getattr(tool, "fn", None), "__name__", None)): tool
+            for tool in tools
+        }
+        pricing = by_name["stock_pricing"]
+        schema = getattr(pricing, "inputSchema", getattr(pricing, "parameters", {}))
+        branches = schema.get("oneOf")
+        self.assertIsInstance(branches, list)
+        self.assertEqual(
+            {
+                branch["properties"]["action"]["const"]
+                for branch in branches
+            },
+            set(tool_groups.TOOL_GROUPS["stock_pricing"]["actions"]),
+        )
+        quote_branch = next(
+            branch
+            for branch in branches
+            if branch["properties"]["action"]["const"] == "get_market_quote"
+        )
+        self.assertIn("params", quote_branch["required"])
+        quote_params = quote_branch["properties"]["params"]
+        self.assertIn("ticker", quote_params["required"])
+        self.assertIn("ticker", quote_params["properties"])
+        annotations = getattr(pricing, "annotations", None)
+        if hasattr(annotations, "model_dump"):
+            annotations = annotations.model_dump(exclude_none=True)
+        self.assertEqual(
+            annotations,
+            {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "openWorldHint": True,
+            },
+        )
+        system_annotations = getattr(by_name["system"], "annotations", None)
+        if hasattr(system_annotations, "model_dump"):
+            system_annotations = system_annotations.model_dump(exclude_none=True)
+        self.assertIs(system_annotations["openWorldHint"], False)
+
+    def test_expanded_discovery_has_the_same_safety_annotations(self):
+        tools = asyncio.run(yfinance_server.list_tools())
+        by_name = {tool.name: tool for tool in tools}
+        quote_annotations = by_name["get_market_quote"].annotations
+        health_annotations = by_name["health_check"].annotations
+        if hasattr(quote_annotations, "model_dump"):
+            quote_annotations = quote_annotations.model_dump(exclude_none=True)
+            health_annotations = health_annotations.model_dump(exclude_none=True)
+        self.assertIs(quote_annotations["readOnlyHint"], True)
+        self.assertIs(quote_annotations["destructiveHint"], False)
+        self.assertIs(quote_annotations["openWorldHint"], True)
+        self.assertIs(health_annotations["openWorldHint"], False)
 
 
 class TestGroupedRouting(unittest.TestCase):

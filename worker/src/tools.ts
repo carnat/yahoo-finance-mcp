@@ -78,6 +78,8 @@ import {
   getSecFilingExhibitContent,
   parsePublicTranscript,
   getEarningsCallTranscript,
+  xbrlSourceEvidence,
+  isDecisionGradeXbrlFact,
 } from "./yahoo-finance.js";
 import {
   searchThaiFunds,
@@ -95,6 +97,9 @@ export interface Tool {
     type: "object";
     properties: Record<string, unknown>;
     required?: string[];
+    oneOf?: Array<Record<string, unknown>>;
+    additionalProperties?: boolean;
+    [key: string]: unknown;
   };
   outputSchema?: {
     type?: "object";
@@ -106,6 +111,29 @@ export interface Tool {
   deprecated?: boolean;
   useInstead?: string;
   deprecationReason?: string;
+  annotations?: {
+    readOnlyHint: boolean;
+    destructiveHint: boolean;
+    idempotentHint: boolean;
+    openWorldHint: boolean;
+  };
+}
+
+const READ_ONLY_TOOL_ANNOTATIONS = Object.freeze({
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+});
+const CLOSED_WORLD_TOOL_ANNOTATIONS = Object.freeze({
+  ...READ_ONLY_TOOL_ANNOTATIONS,
+  openWorldHint: false,
+});
+
+function annotationsForTool(name: string): Tool["annotations"] {
+  return ["system", "health_check", "get_manifest_diagnostics"].includes(name)
+    ? CLOSED_WORLD_TOOL_ANNOTATIONS
+    : READ_ONLY_TOOL_ANNOTATIONS;
 }
 
 export const TOOLS: Tool[] = [
@@ -1960,18 +1988,57 @@ function envelopedToolOutputSchema(dataSchema: Tool["outputSchema"]): Tool["outp
   };
 }
 
+function groupedInputSchema(
+  groupName: string,
+  actions: Record<string, string>,
+): Tool["inputSchema"] {
+  const actionNames = Object.keys(actions);
+  const oneOf = actionNames.map((action) => {
+    const definition = TOOLS.find((tool) => tool.name === action);
+    if (!definition) {
+      throw new Error(`No canonical input schema for grouped action '${groupName}.${action}'`);
+    }
+    const requiredParams = definition.inputSchema.required ?? [];
+    return {
+      title: action,
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          const: action,
+          enum: [action],
+        },
+        params: {
+          ...definition.inputSchema,
+          additionalProperties: false,
+        },
+      },
+      required: requiredParams.length > 0 ? ["action", "params"] : ["action"],
+      additionalProperties: false,
+    };
+  });
+  return {
+    type: "object",
+    properties: {
+      action: { type: "string", enum: actionNames },
+      params: {
+        type: "object",
+        description:
+          "Arguments for the selected action. The matching oneOf branch defines allowed and required fields.",
+      },
+    },
+    required: ["action"],
+    oneOf,
+    additionalProperties: false,
+  };
+}
+
 const GROUPED_TOOLS: Tool[] = GROUPED_TOOL_DEFS.map((group) => ({
   name: group.name,
   description: group.description,
-  inputSchema: {
-    type: "object",
-    properties: {
-      action: { type: "string", enum: Object.keys(group.actions) },
-      params: { type: "object", default: {} },
-    },
-    required: ["action"],
-  },
+  inputSchema: groupedInputSchema(group.name, group.actions),
   outputSchema: ENVELOPE_V2_OUTPUT_SCHEMA,
+  annotations: annotationsForTool(group.name),
 }));
 
 const GROUPED_ACTIONS = new Map(
@@ -1990,12 +2057,16 @@ function currentToolMode(): "expanded" | "grouped" {
 
 export function listVisibleTools(): Tool[] {
   const visible = isGroupedMode() ? GROUPED_TOOLS : TOOLS.filter((t) => !t.deprecated);
-  if (getWorkerVar("MCP_ENVELOPE_V2") !== "true") return visible;
   return visible.map(tool => ({
     ...tool,
-    outputSchema: LLM_DETAILED_OUTPUT_TOOLS.has(tool.name)
-      ? envelopedToolOutputSchema(tool.outputSchema)
-      : ENVELOPE_V2_OUTPUT_SCHEMA,
+    annotations: tool.annotations ?? annotationsForTool(tool.name),
+    ...(getWorkerVar("MCP_ENVELOPE_V2") === "true"
+      ? {
+          outputSchema: LLM_DETAILED_OUTPUT_TOOLS.has(tool.name)
+            ? envelopedToolOutputSchema(tool.outputSchema)
+            : ENVELOPE_V2_OUTPUT_SCHEMA,
+        }
+      : {}),
   }));
 }
 
@@ -2165,40 +2236,6 @@ function hasUsefulEvidence(evidence: unknown): boolean {
       return String(value).trim() !== "";
     });
   });
-}
-
-function xbrlSourceEvidence(parsed: Record<string, unknown>): Record<string, unknown> | null {
-  const ctx = parsed.xbrlContext;
-  if (!ctx || typeof ctx !== "object") return null;
-  const c = ctx as Record<string, unknown>;
-  return {
-    sourceType: "sec_xbrl_companyconcept",
-    concept: c.concept ?? null,
-    taxonomy: c.taxonomy ?? null,
-    unit: c.unit ?? parsed.unit ?? null,
-    accessionNumber: parsed.accessionNumber ?? c.accessionNumber ?? null,
-    filingType: parsed.filingType ?? c.form ?? null,
-    filingDate: parsed.filingDate ?? c.filedAt ?? null,
-    periodStart: c.periodStart ?? null,
-    periodEnd: c.periodEnd ?? c.instant ?? null,
-    fiscalYear: c.fiscalYear ?? null,
-    fiscalPeriod: c.fiscalPeriod ?? null,
-    dimensions: c.dimensions ?? {},
-    documentUrl: parsed.documentUrl ?? null,
-    indexUrl: parsed.indexUrl ?? null,
-  };
-}
-
-function isDecisionGradeXbrlFact(
-  parsed: Record<string, unknown>,
-  sourceEvidence: Record<string, unknown> | null,
-  status: unknown,
-): boolean {
-  if (parsed.value == null || String(status).toUpperCase() !== "FOUND") return false;
-  if (!String(parsed.extractionMethod ?? "").toUpperCase().includes("XBRL")) return false;
-  if (!parsed.xbrlContext || typeof parsed.xbrlContext !== "object" || !sourceEvidence) return false;
-  return ["sourceType", "concept", "accessionNumber", "periodEnd"]
-    .every((field) => sourceEvidence[field] != null && String(sourceEvidence[field]).trim() !== "");
 }
 
 type DoctrineToolStatus = {

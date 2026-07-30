@@ -7,6 +7,7 @@ checks can share one machine-readable catalog.
 
 from __future__ import annotations
 
+import copy
 import inspect
 import json
 import types
@@ -154,6 +155,97 @@ def _normalize_legacy_failure(tool: str, result: Any) -> Any:
     return _mcp_failure(tool, code, text)
 
 
+def _inline_local_schema_refs(schema: dict[str, Any]) -> dict[str, Any]:
+    """Inline Pydantic-local refs so each action schema is self-contained."""
+    definitions = schema.get("$defs")
+    definitions = definitions if isinstance(definitions, dict) else {}
+
+    def _walk(value: Any, seen: frozenset[str] = frozenset()) -> Any:
+        if isinstance(value, list):
+            return [_walk(item, seen) for item in value]
+        if not isinstance(value, dict):
+            return value
+        reference = value.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/$defs/"):
+            name = reference.removeprefix("#/$defs/")
+            target = definitions.get(name)
+            if isinstance(target, dict) and name not in seen:
+                return _walk(copy.deepcopy(target), seen | {name})
+        return {
+            key: _walk(item, seen)
+            for key, item in value.items()
+            if key != "$defs"
+        }
+
+    resolved = _walk(copy.deepcopy(schema))
+    return resolved if isinstance(resolved, dict) else {}
+
+
+def _grouped_input_schema(
+    group_name: str,
+    group_def: dict[str, Any],
+    contract_registry: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    actions = group_def.get("actions")
+    if not isinstance(actions, dict) or not actions:
+        raise RuntimeError(f"Grouped tool '{group_name}' has no actions")
+
+    branches: list[dict[str, Any]] = []
+    for action, handler_name in actions.items():
+        contract = contract_registry.get(handler_name)
+        if not isinstance(contract, dict):
+            raise RuntimeError(
+                f"No canonical input schema for grouped action "
+                f"'{group_name}.{action}' ({handler_name})"
+            )
+        params_schema = _inline_local_schema_refs(contract)
+        if params_schema.get("type") != "object" or not isinstance(
+            params_schema.get("properties"), dict
+        ):
+            raise RuntimeError(
+                f"Canonical input schema for '{group_name}.{action}' is not an object"
+            )
+        params_schema.pop("title", None)
+        params_schema["additionalProperties"] = False
+        required_params = params_schema.get("required")
+        branch_required = ["action"]
+        if isinstance(required_params, list) and required_params:
+            branch_required.append("params")
+        branches.append(
+            {
+                "title": action,
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "const": action,
+                        "enum": [action],
+                    },
+                    "params": params_schema,
+                },
+                "required": branch_required,
+                "additionalProperties": False,
+            }
+        )
+
+    return {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": list(actions)},
+            "params": {
+                "type": "object",
+                "description": (
+                    "Arguments for the selected action. The matching oneOf branch "
+                    "defines allowed and required fields."
+                ),
+            },
+        },
+        "required": ["action"],
+        "oneOf": branches,
+        "additionalProperties": False,
+    }
+
+
 async def _route_grouped_call(
     group_name: str,
     action: str,
@@ -254,7 +346,11 @@ async def _route_grouped_call(
     return _normalize_legacy_failure(action, result)
 
 
-def register_grouped_tools(server, handler_registry: dict) -> None:
+def register_grouped_tools(
+    server,
+    handler_registry: dict,
+    contract_registry: dict[str, dict[str, Any]],
+) -> None:
     """Register domain-grouped meta-tools on the FastMCP server.
 
     Each meta-tool accepts:
@@ -279,6 +375,19 @@ def register_grouped_tools(server, handler_registry: dict) -> None:
             name=group_name,
             description=group_def["description"],
         )(handler)
+        manager = getattr(server, "_tool_manager", None)
+        registered = (
+            manager.get_tool(group_name)
+            if manager is not None and hasattr(manager, "get_tool")
+            else getattr(manager, "_tools", {}).get(group_name)
+        )
+        if registered is None:
+            raise RuntimeError(f"Grouped tool '{group_name}' was not registered")
+        registered.parameters = _grouped_input_schema(
+            group_name,
+            group_def,
+            contract_registry,
+        )
 
 
 def get_all_grouped_action_names() -> list[str]:

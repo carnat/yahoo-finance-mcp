@@ -7625,6 +7625,45 @@ def _suggest_alternative_queries(fact_type: str, region: str | None, payload: di
     return suggestions
 
 
+def _sec_xbrl_source_evidence(payload: dict) -> dict | None:
+    context = payload.get("xbrlContext")
+    if not isinstance(context, dict):
+        return None
+    return {
+        "sourceType": "sec_xbrl_companyconcept",
+        "concept": context.get("concept"),
+        "taxonomy": context.get("taxonomy"),
+        "unit": context.get("unit") or payload.get("unit"),
+        "accessionNumber": payload.get("accessionNumber") or context.get("accessionNumber"),
+        "filingType": payload.get("filingType") or context.get("form"),
+        "filingDate": payload.get("filingDate") or context.get("filedAt"),
+        "periodStart": context.get("periodStart"),
+        "periodEnd": context.get("periodEnd") or context.get("instant"),
+        "fiscalYear": context.get("fiscalYear"),
+        "fiscalPeriod": context.get("fiscalPeriod"),
+        "dimensions": context.get("dimensions") or {},
+        "documentUrl": payload.get("documentUrl"),
+        "indexUrl": payload.get("indexUrl"),
+    }
+
+
+def _is_decision_grade_sec_xbrl_fact(
+    payload: dict,
+    source_evidence: dict | None,
+    status: object,
+) -> bool:
+    return bool(
+        payload.get("value") is not None
+        and str(status).upper() == "FOUND"
+        and "XBRL" in str(payload.get("extractionMethod") or "").upper()
+        and isinstance(payload.get("xbrlContext"), dict)
+        and isinstance(source_evidence, dict)
+        and all(source_evidence.get(field) not in (None, "") for field in (
+            "sourceType", "concept", "accessionNumber", "periodEnd",
+        ))
+    )
+
+
 @yfinance_server.tool(name="extract_sec_filing_fact", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_filing_fact"], description="Canonical SEC fact extractor (routes to get_filing_data or extract_filing_fact).")
 async def extract_sec_filing_fact(
     ticker: str,
@@ -7659,37 +7698,15 @@ async def extract_sec_filing_fact(
         except Exception:
             parsed_payload = {}
         xbrl_context = parsed_payload.get("xbrlContext")
-        source_evidence = None
-        if isinstance(xbrl_context, dict):
-            source_evidence = {
-                "sourceType": "sec_xbrl_companyconcept",
-                "concept": xbrl_context.get("concept"),
-                "taxonomy": xbrl_context.get("taxonomy"),
-                "unit": xbrl_context.get("unit") or parsed_payload.get("unit"),
-                "accessionNumber": parsed_payload.get("accessionNumber") or xbrl_context.get("accessionNumber"),
-                "filingType": parsed_payload.get("filingType") or xbrl_context.get("form"),
-                "filingDate": parsed_payload.get("filingDate") or xbrl_context.get("filedAt"),
-                "periodStart": xbrl_context.get("periodStart"),
-                "periodEnd": xbrl_context.get("periodEnd") or xbrl_context.get("instant"),
-                "fiscalYear": xbrl_context.get("fiscalYear"),
-                "fiscalPeriod": xbrl_context.get("fiscalPeriod"),
-                "dimensions": xbrl_context.get("dimensions") or {},
-                "documentUrl": parsed_payload.get("documentUrl"),
-                "indexUrl": parsed_payload.get("indexUrl"),
-            }
+        source_evidence = _sec_xbrl_source_evidence(parsed_payload)
         status = parsed_payload.get("status") or (
             "FOUND" if parsed_payload.get("value") is not None
             else parsed_payload.get("code") or parsed_payload.get("confidence") or "NOT_DISCLOSED"
         )
-        decision_grade = bool(
-            parsed_payload.get("value") is not None
-            and str(status).upper() == "FOUND"
-            and "XBRL" in str(parsed_payload.get("extractionMethod") or "").upper()
-            and isinstance(xbrl_context, dict)
-            and isinstance(source_evidence, dict)
-            and all(source_evidence.get(field) not in (None, "") for field in (
-                "sourceType", "concept", "accessionNumber", "periodEnd",
-            ))
+        decision_grade = _is_decision_grade_sec_xbrl_fact(
+            parsed_payload,
+            source_evidence,
+            status,
         )
         return json.dumps({
             "fact": routed_fact_type.value,
@@ -8780,19 +8797,33 @@ async def extract_total_revenue(
 ) -> str:
     payload = _safe_json_loads(await get_filing_data(ticker=ticker, fact_type=FilingFactType.total_revenue, filing_type=filing_type, period=period))
     val = payload.get("value")
+    status = "FOUND" if val is not None else _as_status(payload)
+    source_evidence = _sec_xbrl_source_evidence(payload)
+    decision_grade = _is_decision_grade_sec_xbrl_fact(
+        payload,
+        source_evidence,
+        status,
+    )
+    filing_evidence = {
+        "filingType": payload.get("filingType", filing_type),
+        "filingDate": payload.get("filingDate"),
+        "accessionNumber": payload.get("accessionNumber"),
+        "documentUrl": payload.get("documentUrl"),
+    }
     return json.dumps({
         "ticker": ticker,
         "factType": "total_revenue",
         "value": val,
         "period": payload.get("period"),
+        "unit": payload.get("unit") or "USD",
+        "unitScale": payload.get("unitScale"),
         "confidence": payload.get("confidence", "NOT_DISCLOSED" if val is None else "HIGH"),
-        "evidence": {
-            "filingType": payload.get("filingType", filing_type),
-            "filingDate": payload.get("filingDate"),
-            "accessionNumber": payload.get("accessionNumber"),
-            "documentUrl": payload.get("documentUrl"),
-        },
-        "status": "FOUND" if val is not None else _as_status(payload),
+        "extractionMethod": payload.get("extractionMethod", "NONE"),
+        "evidence": source_evidence if decision_grade else filing_evidence,
+        "sourceEvidence": source_evidence,
+        "xbrlContext": payload.get("xbrlContext"),
+        "decisionGrade": decision_grade,
+        "status": status,
     })
 
 
@@ -9682,6 +9713,7 @@ _TOOL_MODE = os.environ.get("TOOL_MODE", "grouped").lower().strip()
 def _build_grouped_server():
     """Create a FastMCP server with grouped meta-tools for token efficiency."""
     from tool_groups import TOOL_GROUPS, register_grouped_tools
+    from yfmcp.app import build_tool_contract_registry
 
     grouped = FastMCP(
         "yfinance",
@@ -9721,7 +9753,8 @@ Input: {"action": "get_market_quote", "params": {"ticker": "AAPL"}}
     # rather than this module's globals, so the mapping holds as handlers move
     # into yfmcp.tools.* during the Phase 2 split.
     handler_registry = build_handler_registry(yfinance_server)
-    register_grouped_tools(grouped, handler_registry)
+    contract_registry = build_tool_contract_registry(yfinance_server)
+    register_grouped_tools(grouped, handler_registry, contract_registry)
     return grouped
 
 

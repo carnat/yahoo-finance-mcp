@@ -298,6 +298,12 @@ if (taiwan.sourceRows[0][0] !== "Taiwan") throw new Error(`Taiwan fixture row wa
         self.assertIs(result["decisionGrade"], True)
         self.assertEqual(result["sourceEvidence"]["concept"], resolved["xbrlContext"]["concept"])
         self.assertEqual(result["evidence"], result["sourceEvidence"])
+        with patch.object(server, "get_filing_data", AsyncMock(return_value=json.dumps(resolved))):
+            specialized = json.loads(asyncio.run(server.extract_total_revenue(ticker="TEST")))
+        self.assertEqual(specialized["value"], result["value"])
+        self.assertIs(specialized["decisionGrade"], True)
+        self.assertEqual(specialized["sourceEvidence"], result["sourceEvidence"])
+        self.assertEqual(specialized["evidence"], specialized["sourceEvidence"])
 
         unresolved = dict(resolved)
         unresolved["xbrlContext"] = None
@@ -308,6 +314,18 @@ if (taiwan.sourceRows[0][0] !== "Taiwan") throw new Error(`Taiwan fixture row wa
             )))
         self.assertIs(result["decisionGrade"], False)
         self.assertIsNone(result["sourceEvidence"])
+
+    def test_worker_total_revenue_uses_canonical_xbrl_decision_gate(self) -> None:
+        match = re.search(
+            r"export async function extractTotalRevenue\([\s\S]*?\n}\n",
+            self.worker,
+        )
+        self.assertIsNotNone(match)
+        section = match.group(0)
+        self.assertIn("xbrlSourceEvidence(payload)", section)
+        self.assertIn("isDecisionGradeXbrlFact(payload, sourceEvidence, status)", section)
+        self.assertIn("decisionGrade,", section)
+        self.assertIn("evidence: decisionGrade ? sourceEvidence : filingEvidence", section)
 
     def test_phase3_sec_evidence_contracts_are_wired_in_worker(self) -> None:
         self.assertIn('"SECTION_STRUCTURE_NOT_RESOLVED"', self.worker)
