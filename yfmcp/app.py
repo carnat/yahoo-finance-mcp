@@ -17,6 +17,37 @@ from typing import Any, Callable
 
 from mcp.server.fastmcp import FastMCP
 
+try:
+    from mcp.types import ToolAnnotations
+except (ImportError, ModuleNotFoundError):  # pragma: no cover - legacy test shim
+    ToolAnnotations = None  # type: ignore[assignment,misc]
+
+_READ_ONLY_ANNOTATION_VALUES = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": True,
+}
+READ_ONLY_TOOL_ANNOTATIONS = (
+    ToolAnnotations(**_READ_ONLY_ANNOTATION_VALUES)
+    if ToolAnnotations is not None
+    else _READ_ONLY_ANNOTATION_VALUES
+)
+_CLOSED_WORLD_ANNOTATION_VALUES = {
+    **_READ_ONLY_ANNOTATION_VALUES,
+    "openWorldHint": False,
+}
+CLOSED_WORLD_TOOL_ANNOTATIONS = (
+    ToolAnnotations(**_CLOSED_WORLD_ANNOTATION_VALUES)
+    if ToolAnnotations is not None
+    else _CLOSED_WORLD_ANNOTATION_VALUES
+)
+_CLOSED_WORLD_TOOL_NAMES = {
+    "system",
+    "health_check",
+    "get_manifest_diagnostics",
+}
+
 
 # ---------------------------------------------------------------------------
 # Backward-compatible FastMCP decorator shim
@@ -25,19 +56,41 @@ from mcp.server.fastmcp import FastMCP
 # ``@server.tool()``.  This shim silently drops the kwarg so the codebase can
 # annotate decorators with output schemas without breaking older runtimes.
 # ---------------------------------------------------------------------------
-_FASTMCP_TOOL_PARAMS = inspect.signature(FastMCP.tool).parameters
+_ORIGINAL_FASTMCP_TOOL = getattr(
+    FastMCP,
+    "_yfmcp_original_tool",
+    FastMCP.tool,
+)
+if not hasattr(FastMCP, "_yfmcp_original_tool"):
+    FastMCP._yfmcp_original_tool = _ORIGINAL_FASTMCP_TOOL  # type: ignore[attr-defined]
+_FASTMCP_TOOL_PARAMS = inspect.signature(_ORIGINAL_FASTMCP_TOOL).parameters
 _FASTMCP_TOOL_SUPPORTS_OUTPUT_SCHEMA = "output_schema" in _FASTMCP_TOOL_PARAMS or any(
     _param.kind == inspect.Parameter.VAR_KEYWORD
     for _param in _FASTMCP_TOOL_PARAMS.values()
 )
-if not _FASTMCP_TOOL_SUPPORTS_OUTPUT_SCHEMA:
-    _ORIGINAL_FASTMCP_TOOL = FastMCP.tool
+_FASTMCP_TOOL_SUPPORTS_ANNOTATIONS = "annotations" in _FASTMCP_TOOL_PARAMS or any(
+    _param.kind == inspect.Parameter.VAR_KEYWORD
+    for _param in _FASTMCP_TOOL_PARAMS.values()
+)
 
-    def _fastmcp_tool_compat(self: FastMCP, *args: Any, **kwargs: Any) -> Any:
-        """Strip unsupported output_schema kwarg for FastMCP SDK compatibility."""
+
+def _fastmcp_tool_compat(self: FastMCP, *args: Any, **kwargs: Any) -> Any:
+    """Apply read-only metadata and preserve older FastMCP compatibility."""
+    if _FASTMCP_TOOL_SUPPORTS_ANNOTATIONS:
+        annotations = (
+            CLOSED_WORLD_TOOL_ANNOTATIONS
+            if kwargs.get("name") in _CLOSED_WORLD_TOOL_NAMES
+            else READ_ONLY_TOOL_ANNOTATIONS
+        )
+        kwargs.setdefault("annotations", annotations)
+    else:
+        kwargs.pop("annotations", None)
+    if not _FASTMCP_TOOL_SUPPORTS_OUTPUT_SCHEMA:
         kwargs.pop("output_schema", None)
-        return _ORIGINAL_FASTMCP_TOOL(self, *args, **kwargs)
+    return _ORIGINAL_FASTMCP_TOOL(self, *args, **kwargs)
 
+
+if FastMCP.tool is not _fastmcp_tool_compat:
     FastMCP.tool = _fastmcp_tool_compat
 
 
@@ -216,4 +269,18 @@ def build_handler_registry(server: FastMCP) -> dict[str, Callable[..., Any]]:
             fn = getattr(tool, "fn", None)
             if fn is not None:
                 registry[fn.__name__] = fn
+    return registry
+
+
+def build_tool_contract_registry(server: FastMCP) -> dict[str, dict[str, Any]]:
+    """Map handler function name to its FastMCP-generated input schema."""
+    registry: dict[str, dict[str, Any]] = {}
+    manager = getattr(server, "_tool_manager", None)
+    tools = getattr(manager, "_tools", None) if manager is not None else None
+    if tools:
+        for tool in tools.values():
+            fn = getattr(tool, "fn", None)
+            parameters = getattr(tool, "parameters", None)
+            if fn is not None and isinstance(parameters, dict):
+                registry[fn.__name__] = parameters
     return registry

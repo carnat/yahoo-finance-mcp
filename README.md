@@ -57,7 +57,10 @@ Claude Desktop example:
 
 Grouped mode is the default. It exposes 11 domain tools with
 `{ "action": "...", "params": {...} }` routing so LLM clients receive a compact,
-deterministic tool list.
+deterministic tool list. MCP discovery publishes an action-discriminated
+`oneOf` schema for each domain, so required action parameters are typed before
+execution. All tools are annotated read-only, non-destructive, and idempotent;
+they may query external market and regulatory sources.
 
 ```bash
 uv run server.py

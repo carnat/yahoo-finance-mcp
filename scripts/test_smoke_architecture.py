@@ -241,6 +241,63 @@ class TestSmokeArchitecture(unittest.TestCase):
         self.assertEqual(canary["tool"], "extract_sec_filing_fact")
         self.assertEqual(canary["assertion"], "sec_xbrl_decision_grade")
 
+    def test_blocking_discovery_gate_requires_typed_read_only_grouped_tools(self) -> None:
+        tools = []
+        for group_name in deployed_canaries.GROUPED_TOOLS:
+            actions = sorted(
+                action
+                for action, group in deployed_canaries.ACTION_GROUP.items()
+                if group == group_name
+            )
+            branches = []
+            for action in actions:
+                required = sorted(
+                    deployed_canaries.DISCOVERY_REQUIRED_PARAMS.get(action, set())
+                )
+                branches.append(
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "const": action},
+                            "params": {
+                                "type": "object",
+                                "properties": {
+                                    name: {"type": "string"} for name in required
+                                },
+                                "required": required,
+                            },
+                        },
+                        "required": ["action", "params"] if required else ["action"],
+                    }
+                )
+            tools.append(
+                {
+                    "name": group_name,
+                    "annotations": {
+                        "readOnlyHint": True,
+                        "destructiveHint": False,
+                        "idempotentHint": True,
+                        "openWorldHint": group_name != "system",
+                    },
+                    "inputSchema": {"type": "object", "oneOf": branches},
+                }
+            )
+        response = {"result": {"tools": tools}}
+        deployed_canaries.assert_tool_discovery_contract(response, "grouped")
+
+        missing_annotations = copy.deepcopy(response)
+        missing_annotations["result"]["tools"][0]["annotations"] = None
+        with self.assertRaisesRegex(AssertionError, "missing MCP tool annotations"):
+            deployed_canaries.assert_tool_discovery_contract(
+                missing_annotations,
+                "grouped",
+            )
+
+        untyped = copy.deepcopy(response)
+        untyped["result"]["tools"][0]["inputSchema"].pop("oneOf")
+        with self.assertRaisesRegex(AssertionError, "action-discriminated oneOf"):
+            deployed_canaries.assert_tool_discovery_contract(untyped, "grouped")
+
     def test_xbrl_canary_requires_source_evidence_not_private_health(self) -> None:
         evidence = {
             "sourceType": "sec_xbrl_companyconcept",

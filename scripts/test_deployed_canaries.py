@@ -43,6 +43,13 @@ ACTION_GROUP = {
     for group_name, group in _CATALOG["groups"].items()
     for action in group["actions"]
 }
+DISCOVERY_REQUIRED_PARAMS = {
+    "get_market_quote": {"ticker"},
+    "get_company_news": {"ticker"},
+    "list_sec_filing_exhibits": {"ticker", "accessionNumber"},
+    "extract_total_revenue": {"ticker"},
+    "get_thai_fund_nav": {"fund_class_name"},
+}
 
 
 def extract_data(payload: Any) -> Any:
@@ -434,6 +441,77 @@ def _listed_tool_mode(response: dict[str, Any]) -> str:
     return "expanded"
 
 
+def assert_tool_discovery_contract(response: dict[str, Any], tool_mode: str) -> None:
+    tools = (response.get("result") or {}).get("tools")
+    if not isinstance(tools, list) or not tools:
+        raise AssertionError(f"tools/list returned no tools: {response}")
+    for tool in tools:
+        if not isinstance(tool, dict):
+            raise AssertionError(f"tools/list returned non-object tool: {tool!r}")
+        name = str(tool.get("name") or "")
+        annotations = tool.get("annotations")
+        expected_annotations = {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": name not in {
+                "system",
+                "health_check",
+                "get_manifest_diagnostics",
+            },
+        }
+        if not isinstance(annotations, dict):
+            raise AssertionError(f"{name} is missing MCP tool annotations")
+        for field, expected in expected_annotations.items():
+            if annotations.get(field) is not expected:
+                raise AssertionError(
+                    f"{name} annotation {field} must be {expected!r}: {annotations}"
+                )
+
+        if tool_mode != "grouped":
+            continue
+        schema = tool.get("inputSchema")
+        branches = schema.get("oneOf") if isinstance(schema, dict) else None
+        if not isinstance(branches, list) or not branches:
+            raise AssertionError(f"{name} must expose action-discriminated oneOf input schemas")
+        expected_actions = {
+            action for action, group in ACTION_GROUP.items() if group == name
+        }
+        actual_actions: set[str] = set()
+        for branch in branches:
+            properties = branch.get("properties") if isinstance(branch, dict) else None
+            action_schema = properties.get("action") if isinstance(properties, dict) else None
+            action = action_schema.get("const") if isinstance(action_schema, dict) else None
+            params_schema = properties.get("params") if isinstance(properties, dict) else None
+            if not isinstance(action, str) or not action:
+                raise AssertionError(f"{name} has a oneOf branch without an action const")
+            if not isinstance(params_schema, dict) or params_schema.get("type") != "object":
+                raise AssertionError(f"{name}.{action} params must have an object schema")
+            if not isinstance(params_schema.get("properties"), dict):
+                raise AssertionError(f"{name}.{action} params must expose typed properties")
+            required_params = params_schema.get("required")
+            if isinstance(required_params, list) and required_params:
+                branch_required = branch.get("required")
+                if not isinstance(branch_required, list) or "params" not in branch_required:
+                    raise AssertionError(
+                        f"{name}.{action} must require params because action fields are required"
+                    )
+            expected_required = DISCOVERY_REQUIRED_PARAMS.get(action)
+            if expected_required is not None:
+                actual_required = set(required_params) if isinstance(required_params, list) else set()
+                if not expected_required.issubset(actual_required):
+                    raise AssertionError(
+                        f"{name}.{action} required params drifted: expected at least "
+                        f"{sorted(expected_required)}, got {sorted(actual_required)}"
+                    )
+            actual_actions.add(action)
+        if actual_actions != expected_actions:
+            raise AssertionError(
+                f"{name} action schemas drifted: expected {sorted(expected_actions)}, "
+                f"got {sorted(actual_actions)}"
+            )
+
+
 def wait_for_expected_tool_mode(
     expected_mode: str = EXPECTED_TOOL_MODE,
     *,
@@ -456,6 +534,7 @@ def wait_for_expected_tool_mode(
         )
         actual_mode = _listed_tool_mode(response)
         if actual_mode == expected_mode:
+            assert_tool_discovery_contract(response, actual_mode)
             return actual_mode
         if attempt < attempts:
             sleep(delay_seconds)
