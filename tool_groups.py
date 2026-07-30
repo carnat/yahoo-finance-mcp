@@ -58,7 +58,8 @@ def _matches_annotation(value: Any, annotation: Any) -> bool:
     if origin in (Union, types.UnionType):
         return any(_matches_annotation(value, option) for option in args)
     if origin is Literal:
-        return value in args
+        # ponytail: grouped boundary checks type; handlers own semantic values.
+        return any(_matches_annotation(value, type(option)) for option in args)
     if origin is list:
         return isinstance(value, list) and (
             not args or all(_matches_annotation(item, args[0]) for item in value)
