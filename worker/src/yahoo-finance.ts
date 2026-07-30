@@ -1939,7 +1939,7 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
   const output: Record<string, unknown> = {
     ticker,
     priceTargets: {
-      current: targetMean,
+      current: lastPrice,
       low: raw(fd.targetLowPrice),
       high: raw(fd.targetHighPrice),
       mean: targetMean,
@@ -2184,6 +2184,19 @@ export async function getFinancialRatios(
       v !== null && typeof v === "object" && !Array.isArray(v) ? null : v,
     ])
   );
+  filtered.unitSemantics = {
+    currency: filtered.currency ?? null,
+    multiples: [
+      "trailingPE", "forwardPE", "pegRatio", "priceToSales", "priceToBook",
+      "enterpriseToEbitda", "enterpriseToRevenue", "currentRatio", "quickRatio",
+    ],
+    decimalRatios: [
+      "grossMargins", "operatingMargins", "profitMargins", "returnOnEquity",
+      "returnOnAssets", "dividendYield", "payoutRatio", "earningsGrowth", "revenueGrowth",
+    ],
+    percentValues: ["debtToEquity", "freeCashflowYield"],
+    currencyValues: ["freeCashflow"],
+  };
 
   if (historyPeriods > 0) {
     try {
@@ -2437,6 +2450,17 @@ export async function getMarketCalendar(
     includeFields: selected.fields,
   })) as Record<string, unknown>;
   const items = visualizationRows(d);
+  for (const item of items) {
+    const normalized = Object.fromEntries(
+      Object.keys(item).map((key) => [key.toLowerCase().replace(/[^a-z]/g, ""), key])
+    );
+    const actualKey = normalized.epsactual ?? normalized.reportedeps;
+    if (actualKey != null && item[actualKey] == null) {
+      for (const [normalizedKey, originalKey] of Object.entries(normalized)) {
+        if (normalizedKey.includes("surprise")) item[originalKey] = null;
+      }
+    }
+  }
   return JSON.stringify({
     status: items.length ? "OK" : "EMPTY_RESULT", eventType, startDate: start, endDate: end,
     limit, offset, itemCount: items.length, hasMore: items.length === limit,
@@ -3596,6 +3620,17 @@ export async function getShortMomentum(ticker: string | string[]): Promise<strin
     const shortPctFloatRaw = si.shortPercentOfFloat as number | null;
     const shortRatio = si.shortRatio as number | null;
     const dateShort = si.dateShortInterest;
+    let observationDate: string | null = null;
+    if (typeof dateShort === "number" && Number.isFinite(dateShort)) {
+      const timestampMs = dateShort > 1_000_000_000_000 ? dateShort : dateShort * 1000;
+      observationDate = new Date(timestampMs).toISOString().slice(0, 10);
+    } else if (typeof dateShort === "string" && dateShort.trim()) {
+      const numeric = Number(dateShort);
+      const parsed = Number.isFinite(numeric)
+        ? new Date(numeric > 1_000_000_000_000 ? numeric : numeric * 1000)
+        : new Date(dateShort);
+      if (!Number.isNaN(parsed.getTime())) observationDate = parsed.toISOString().slice(0, 10);
+    }
 
     const shortPctFloat = shortPctFloatRaw != null ? +(shortPctFloatRaw * 100).toFixed(2) : null;
 
@@ -3632,8 +3667,9 @@ export async function getShortMomentum(ticker: string | string[]): Promise<strin
       momDirection,
       squeezeRisk,
       flag,
-      dateShortInterest: dateShort,
-      dataDate: getLastTradingDate(),
+      dateShortInterest: observationDate,
+      dataDate: observationDate,
+      dataDateBasis: observationDate ? "SHORT_INTEREST_OBSERVATION" : "UNAVAILABLE",
     });
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
@@ -7116,6 +7152,7 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number): Promi
     }
 
     const referenceTargetPct = +(currentPrice / ioPt * 100).toFixed(1);
+    const distanceToTargetPct = +((ioPt - currentPrice) / currentPrice * 100).toFixed(1);
 
     const bracket =
       referenceTargetPct <= 75 ? "STRONG_BUY" :
@@ -7137,6 +7174,9 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number): Promi
       marketOpen: (fi.marketOpen as boolean | null) ?? null,
       referenceTargetPrice: ioPt,
       referenceTargetPct,
+      currentToTargetRatioPct: referenceTargetPct,
+      distanceToTargetPct,
+      distanceConvention: "(referenceTargetPrice-currentPrice)/currentPrice*100",
       ioPt,
       eqfPct: referenceTargetPct,
       bracket,
@@ -12422,6 +12462,33 @@ function compactExcerpt(text: unknown, maxLen = 240): string {
   return cleaned.length <= maxLen ? cleaned : `${cleaned.slice(0, maxLen).trimEnd()}...`;
 }
 
+const EXPOSURE_XBRL_TOKEN_RE = /\b(?:us-gaap|srt|country|dei):[A-Za-z0-9_.-]+\b/gi;
+const EXPOSURE_COMPETITION_RE = /\b(?:competitors?|competition|compete(?:s|d|ing)?\s+with)\b/i;
+const EXPOSURE_RELATIONSHIP_RE = /\b(?:supplier|vendor|customer|manufactur\w*|assembl\w*|facilit\w*|factory|subsidiar\w*|operations?|production|procur\w*|sourc\w*|partner\w*|loan|credit|deposit|account|lender|borrow\w*)\b/i;
+
+function exposureTermPresent(text: string, term: string): boolean {
+  const escaped = String(term).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return escaped.length > 0 && new RegExp(`(^|[^A-Za-z0-9])${escaped}([^A-Za-z0-9]|$)`, "i").test(text);
+}
+
+function readableExposureExcerpt(
+  value: unknown,
+  terms: string[],
+  maxLen = 240,
+  minWords = 5,
+): string {
+  const excerpt = compactExcerpt(String(value ?? "").replace(EXPOSURE_XBRL_TOKEN_RE, " "), maxLen);
+  if (!excerpt || !terms.some((term) => exposureTermPresent(excerpt, term))) return "";
+  const words = excerpt.match(/[A-Za-z]{2,}/g) ?? [];
+  return words.length >= minWords ? excerpt : "";
+}
+
+function contextualEntityExcerpt(value: unknown, entity: string, maxLen = 240): string {
+  const excerpt = readableExposureExcerpt(value, [entity], maxLen, 4);
+  if (!excerpt || EXPOSURE_COMPETITION_RE.test(excerpt)) return "";
+  return EXPOSURE_RELATIONSHIP_RE.test(excerpt) ? excerpt : "";
+}
+
 function normalizeStatus(payload: Record<string, unknown>): string {
   const status = String(payload.status ?? payload.code ?? "").toUpperCase();
   if (status === "FILING_NOT_FOUND_TRY_OTHER_TYPE") return "FILING_NOT_FOUND_TRY_OTHER_TYPE";
@@ -12745,6 +12812,7 @@ export async function extractRiskFactorMentions(
 ): Promise<string> {
   const matches: Record<string, unknown>[] = [];
   let rawMatchCount = 0;
+  let rejectedNoiseCount = 0;
   const warnings: Record<string, unknown>[] = [];
   for (const term of terms ?? []) {
     const search = parseObjectJson(await searchFilingText(ticker, [term], "Risk Factors", filingType, null, 1200, false));
@@ -12754,12 +12822,26 @@ export async function extractRiskFactorMentions(
       if (!row || typeof row !== "object") continue;
       const item = row as Record<string, unknown>;
       const rowTerm = String(item.term ?? "");
-      if (rowTerm && rowTerm.toLowerCase() !== String(term).toLowerCase()) continue;
-      const excerpt = compactExcerpt(item.contextText ?? item.context ?? item.excerpt ?? "");
-      if (!excerpt) continue;
+      const sectionHeading = String(item.sectionHeading ?? "Risk Factors");
+      if (rowTerm && rowTerm.toLowerCase() !== String(term).toLowerCase()) {
+        rejectedNoiseCount += 1;
+        continue;
+      }
+      if (item.sectionHeading != null && !sectionHeading.toLowerCase().includes("risk")) {
+        rejectedNoiseCount += 1;
+        continue;
+      }
+      const excerpt = readableExposureExcerpt(
+        item.contextText ?? item.context ?? item.excerpt ?? "",
+        [String(term)],
+      );
+      if (!excerpt) {
+        rejectedNoiseCount += 1;
+        continue;
+      }
       matches.push({
         term,
-        sectionHeading: item.sectionHeading ?? "Risk Factors",
+        sectionHeading,
         excerpt,
         excerptAvailable: true,
         confidence: item.confidence ?? "MEDIUM",
@@ -12783,6 +12865,7 @@ export async function extractRiskFactorMentions(
     matches,
     status: matches.length > 0 ? "FOUND" : (rawMatchCount > 0 ? "FOUND_NO_EXCERPT" : "NOT_FOUND"),
     rawMatchCount,
+    rejectedNoiseCount,
     warnings,
   };
   if (String(detailLevel).toLowerCase() === "raw") out.rawTerms = terms ?? [];
@@ -12869,8 +12952,18 @@ export async function extractChinaExposure(
   const sections = Array.isArray(index.sections) ? index.sections : [];
   const tables = Array.isArray(index.tables) ? index.tables : [];
 
-  const collect = (terms: string[]): Record<string, unknown>[] => {
+  const collect = (
+    terms: string[],
+    evidenceKind: "entity" | "bank" | "manufacturing",
+  ): { evidence: Record<string, unknown>[]; rejectedNoiseCount: number } => {
     const found: Record<string, unknown>[] = [];
+    let rejectedNoiseCount = 0;
+    const scopedExcerpt = (value: unknown, term: string): string => {
+      if (evidenceKind === "entity") return contextualEntityExcerpt(value, term);
+      const excerpt = readableExposureExcerpt(value, [term], 240, 3);
+      if (evidenceKind === "bank" && excerpt && !EXPOSURE_RELATIONSHIP_RE.test(excerpt)) return "";
+      return excerpt;
+    };
     for (const sec of sections) {
       if (!sec || typeof sec !== "object") continue;
       const s = sec as Record<string, unknown>;
@@ -12878,7 +12971,11 @@ export async function extractChinaExposure(
       const low = heading.toLowerCase();
       for (const term of terms) {
         if (low.includes(term.toLowerCase())) {
-          const excerpt = compactExcerpt(heading);
+          const excerpt = scopedExcerpt(heading, term);
+          if (!excerpt) {
+            rejectedNoiseCount += 1;
+            continue;
+          }
           found.push({ source: "section", term, sectionHeading: heading, excerpt, excerptAvailable: excerpt.length > 0 });
         }
       }
@@ -12891,12 +12988,16 @@ export async function extractChinaExposure(
       const haystack = haystackRaw.toLowerCase();
       for (const term of terms) {
         if (haystack.includes(term.toLowerCase())) {
-          const excerpt = compactExcerpt(haystackRaw);
+          const excerpt = scopedExcerpt(haystackRaw, term);
+          if (!excerpt) {
+            rejectedNoiseCount += 1;
+            continue;
+          }
           found.push({ source: "table", term, tableTitle: t.title ?? null, sourceTableId: t.tableId ?? null, sectionId: t.sectionId ?? null, excerpt, excerptAvailable: excerpt.length > 0 });
         }
       }
     }
-    return found;
+    return { evidence: found, rejectedNoiseCount };
   };
 
   const entityTerms = ["Tongmei", "JinMei", "BoYu"];
@@ -12904,20 +13005,23 @@ export async function extractChinaExposure(
   const manuTerms = ["manufacturing", "production", "supply chain", "fab"];
   const riskMentions = parseObjectJson(await extractRiskFactorMentions(ticker, ["China", "tariff", "export control", "Bank of China"], filingType, period, "compact"));
 
-  const entityEvidence = collect(entityTerms);
-  const bankEvidence = collect(bankTerms);
-  const manuEvidence = collect(manuTerms);
-  const riskEvidence = Array.isArray(riskMentions.matches) ? riskMentions.matches : [];
-  for (const ev of riskEvidence) {
+  const entityCollected = collect(entityTerms, "entity");
+  const bankCollected = collect(bankTerms, "bank");
+  const manuCollected = collect(manuTerms, "manufacturing");
+  const entityEvidence = entityCollected.evidence;
+  const bankEvidence = bankCollected.evidence;
+  const manuEvidence = manuCollected.evidence;
+  const riskEvidence: Record<string, unknown>[] = [];
+  const rawRiskEvidence = Array.isArray(riskMentions.matches) ? riskMentions.matches : [];
+  for (const ev of rawRiskEvidence) {
     if (ev && typeof ev === "object") {
       const item = ev as Record<string, unknown>;
-      const excerpt = compactExcerpt(item.excerpt ?? item.context ?? "");
+      const excerpt = readableExposureExcerpt(
+        item.excerpt ?? item.context ?? "",
+        [String(item.term ?? "China")],
+      );
       if (excerpt) {
-        item.excerpt = excerpt;
-        item.excerptAvailable = true;
-      } else {
-        delete item.excerpt;
-        item.excerptAvailable = false;
+        riskEvidence.push({ ...item, excerpt, excerptAvailable: true });
       }
     }
   }
@@ -12957,9 +13061,9 @@ export async function extractChinaExposure(
       confidence: revFound ? "HIGH" : (explicitRevenueStatus ? explicitRevenueStatus : (revStatus === "NOT_DISCLOSED" ? "NOT_DISCLOSED" : "LOW")),
       evidence: firstRevenue.evidence ?? [],
     },
-    manufacturingExposure: { status: manuEvidence.length > 0 ? "FOUND" : "NOT_FOUND", confidence: "MEDIUM", evidence: manuEvidence },
-    entityExposure: { status: entityEvidence.length > 0 ? "FOUND" : "NOT_FOUND", entities: entityEvidence.length > 0 ? entityTerms : [], confidence: "MEDIUM", evidence: entityEvidence },
-    bankExposure: { status: bankEvidence.length > 0 ? "FOUND" : "NOT_FOUND", entities: bankEvidence.length > 0 ? bankTerms : [], confidence: "MEDIUM", evidence: bankEvidence },
+    manufacturingExposure: { status: manuEvidence.length > 0 ? "FOUND" : "NOT_FOUND", confidence: "MEDIUM", evidence: manuEvidence, rejectedNoiseCount: manuCollected.rejectedNoiseCount },
+    entityExposure: { status: entityEvidence.length > 0 ? "FOUND" : "NOT_FOUND", entities: entityEvidence.length > 0 ? entityTerms : [], confidence: "MEDIUM", evidence: entityEvidence, rejectedNoiseCount: entityCollected.rejectedNoiseCount },
+    bankExposure: { status: bankEvidence.length > 0 ? "FOUND" : "NOT_FOUND", entities: bankEvidence.length > 0 ? bankTerms : [], confidence: "MEDIUM", evidence: bankEvidence, rejectedNoiseCount: bankCollected.rejectedNoiseCount },
     riskFactorExposure: { status: riskEvidence.length > 0 ? "FOUND" : "NOT_FOUND", confidence: "MEDIUM", evidence: riskEvidence },
     overallStatus,
     code: explicitRevenueStatus,
@@ -13101,15 +13205,25 @@ export async function extractExposure(
   // Scan for operational keyword co-occurrence in text excerpts
   const opsEvidence: Record<string, unknown>[] = [];
   const foundOpTerms = new Set<string>();
+  let rejectedOpsNoise = 0;
   for (const m of opsMatches) {
-    const contextText = String(m.contextText ?? m.context ?? "").toLowerCase();
+    const excerpt = readableExposureExcerpt(
+      m.contextText ?? m.context ?? "",
+      [topicLower],
+      200,
+    );
+    if (!excerpt) {
+      rejectedOpsNoise += 1;
+      continue;
+    }
+    const contextText = excerpt.toLowerCase();
     for (const opTerm of OPERATIONAL_TERMS) {
       if (contextText.includes(opTerm)) {
         foundOpTerms.add(opTerm);
         if (opsEvidence.length < 5) {
           opsEvidence.push({
             term: opTerm,
-            excerpt: compactExcerpt(m.contextText ?? m.context ?? "", 200),
+            excerpt,
             section: String(m.sectionHeading ?? ""),
           });
         }
@@ -13123,6 +13237,7 @@ export async function extractExposure(
     status: opsEvidence.length > 0 ? "FOUND" : "NOT_FOUND",
     terms: Array.from(foundOpTerms),
     evidence: opsEvidence,
+    rejectedNoiseCount: rejectedOpsNoise,
   };
 
   // --- Process entity exposure (China only) ---
@@ -13134,14 +13249,22 @@ export async function extractExposure(
       : [];
     const foundEntities = new Set<string>();
     const entEvidence: Record<string, unknown>[] = [];
+    let rejectedEntityNoise = 0;
     for (const m of entMatches) {
       const termLow = String(m.term ?? "").toLowerCase();
+      const excerpt = termLow
+        ? contextualEntityExcerpt(m.contextText ?? m.context ?? "", termLow, 200)
+        : "";
+      if (!termLow || !excerpt) {
+        rejectedEntityNoise += 1;
+        continue;
+      }
       if (termLow && !foundEntities.has(termLow)) {
         foundEntities.add(termLow);
         if (entEvidence.length < 5) {
           entEvidence.push({
             entity: String(m.term ?? ""),
-            excerpt: compactExcerpt(m.contextText ?? m.context ?? "", 200),
+            excerpt,
             section: String(m.sectionHeading ?? ""),
           });
         }
@@ -13152,9 +13275,10 @@ export async function extractExposure(
       status: entEvidence.length > 0 ? "FOUND" : "NOT_FOUND",
       entities: Array.from(foundEntities),
       evidence: entEvidence,
+      rejectedNoiseCount: rejectedEntityNoise,
     };
   } else {
-    entityExposure = { status: "NOT_FOUND", entities: [], evidence: [] };
+    entityExposure = { status: "NOT_FOUND", entities: [], evidence: [], rejectedNoiseCount: 0 };
   }
 
   // --- Process risk factor exposure ---
@@ -13165,10 +13289,14 @@ export async function extractExposure(
       ? (riskRaw.matches as Record<string, unknown>[]).filter((m) => m && typeof m === "object")
       : [];
     const riskEvidence = riskMatches
-      .map((m) => ({
-        excerpt: compactExcerpt(m.excerpt ?? m.context ?? m.contextText ?? "", 200),
-        section: String(m.sectionHeading ?? "Risk Factors"),
-      }))
+      .map((m) => {
+        const excerpt = readableExposureExcerpt(
+          m.excerpt ?? m.context ?? m.contextText ?? "",
+          [topicLower],
+          200,
+        );
+        return { excerpt, section: String(m.sectionHeading ?? "Risk Factors") };
+      })
       .filter((m) => m.excerpt.length > 0)
       .slice(0, 5);
     riskFactorExposure = {

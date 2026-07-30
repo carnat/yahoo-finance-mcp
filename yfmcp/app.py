@@ -132,7 +132,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - get_company_profile: ~30 key fundamental fields by default. Pass include_all=true for full ~120-field payload. For ETFs/funds, use get_fund_profile instead.
 - get_fund_profile: ETF/mutual fund data with section dates/status. Valuation characteristics are conventional multiples; raw provider yields are retained. Request sections: overview, holdings, allocation, operations, fixed_income.
 - get_financial_statement: Income statement, balance sheet, or cash flow (annual/quarterly/TTM). Optional line_items filter.
-- analyze_financial_ratios: Current P/E, PEG, P/S, P/B, EV/EBITDA, margins, ROE, ROA, debt ratios; optional valuation history.
+- analyze_financial_ratios: Current P/E, PEG, P/S, P/B, EV/EBITDA, margins, ROE, ROA, debt ratios with explicit unitSemantics; optional valuation history.
 - analyze_share_count_trend: Historical shares outstanding for dilution/buyback questions; Yahoo context, not filing confirmation.
 - analyze_credit_health: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag.
 - get_corporate_actions: Dividends, splits, and fund capital-gain distribution history.
@@ -195,7 +195,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - search_ticker: Resolve company name or ISIN to ticker symbol.
 - screen_stocks: Screen with predefined criteria (day_gainers, most_actives, undervalued_large_caps, etc.).
 - analyze_position_signals: Aggregate public market, analyst, earnings, and technical inputs for caller-defined scoring.
-- calculate_price_target_distance: Compare current price to a user-supplied reference target.
+- calculate_price_target_distance: Compare current price to a user target; separates the legacy ratio from directional percent distance.
 """,
 )
 

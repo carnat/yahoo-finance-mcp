@@ -542,6 +542,7 @@ class TestSemanticQualityFixes(unittest.TestCase):
         self.assertEqual(data.get("targetLagSignal"), "LIKELY_STALE_OR_LAGGING")
         self.assertEqual(data.get("recentUpgradeCount30d"), 1)
         self.assertEqual(data.get("priceTargets", {}).get("mean"), 355.52)
+        self.assertEqual(data.get("priceTargets", {}).get("current"), 370.94)
         self.assertAlmostEqual(data.get("priceTargets", {}).get("pctUpsideFromLastPrice"), -4.16, places=2)
         warning_codes = [w.get("code") for w in data.get("warnings", []) if isinstance(w, dict)]
         self.assertIn("CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES", warning_codes)

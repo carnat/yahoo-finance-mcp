@@ -313,7 +313,7 @@ class TestExtractRiskFactorMentionsShape(unittest.TestCase):
 
     def test_status_values(self):
         result = self._call("AAPL", ["Zxyz99NonexistentTerm"])
-        self.assertIn(result.get("status"), ("FOUND", "NOT_FOUND"))
+        self.assertIn(result.get("status"), ("FOUND", "FOUND_NO_EXCERPT", "NOT_FOUND"))
 
     def test_empty_terms_returns_not_found(self):
         result = self._call("AAPL", [])

@@ -111,6 +111,40 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"]["code"], "NO_OPTIONS_DATA")
 
+    def test_mcp_success_preserves_decision_grade_xbrl_metadata(self) -> None:
+        payload = _node_json(
+            """
+            import assert from "node:assert/strict";
+            import { mcpSuccess, setWorkerEnv } from "./worker/src/response.ts";
+
+            setWorkerEnv({ MCP_ENVELOPE_V2: "true" });
+            const evidence = {
+              sourceType: "sec_xbrl_companyconcept",
+              concept: "RevenueFromContractWithCustomerExcludingAssessedTax",
+              accessionNumber: "0000320193-25-000079",
+              periodEnd: "2025-09-27",
+              documentUrl: "https://www.sec.gov/Archives/example.htm",
+            };
+            const raw = JSON.stringify({
+              status: "FOUND",
+              value: 416161000000,
+              decisionGrade: true,
+              extractionMethod: "XBRL",
+              xbrlContext: { concept: evidence.concept, periodEnd: evidence.periodEnd },
+              sourceEvidence: evidence,
+              evidence,
+            });
+            const out = JSON.parse(mcpSuccess("extract_sec_filing_fact", raw));
+
+            assert.deepEqual(out.data.evidence, evidence);
+            assert.deepEqual(out.data.sourceEvidence, evidence);
+            assert.equal("decisionGrade" in out.data.sourceEvidence, false);
+            assert.equal("decisionGrade" in out.data.xbrlContext, false);
+            console.log(JSON.stringify(out));
+            """
+        )
+        self.assertEqual(payload["data"]["evidence"], payload["data"]["sourceEvidence"])
+
     def test_deprecated_alias_set_is_derived_from_alias_map(self) -> None:
         tools = TOOLS_TS.read_text(encoding="utf-8")
         self.assertIn('get_historical_stock_prices: "get_historical_prices"', tools)

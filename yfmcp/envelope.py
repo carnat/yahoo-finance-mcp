@@ -212,56 +212,68 @@ def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metri
                     
             val["confidence"] = conf
             
-            orig_ev = val.get("evidence")
-            ev_list = []
-            if isinstance(orig_ev, list):
-                ev_list = orig_ev
-            elif orig_ev:
-                ev_list = [orig_ev]
-                
-            standardised_ev = []
             urls = []
-            for ev in ev_list:
-                if isinstance(ev, dict):
-                    url = ev.get("url") or ev.get("documentUrl") or None
-                    if url:
-                        urls.append(str(url))
-                    standardised_ev.append({
-                        "url": url,
-                        "sourceType": ev.get("sourceType") or None,
-                        "filingType": ev.get("filingType") or None,
-                        "accessionNumber": ev.get("accessionNumber") or None,
-                        "filingDate": ev.get("filingDate") or None,
-                        "publishedAt": ev.get("publishedAt") or None,
-                        "retrievedAt": ev.get("retrievedAt") or None,
-                        "excerpt": ev.get("excerpt") or None,
-                        "concept": ev.get("concept") or None,
-                        "periodEnd": ev.get("periodEnd") or None,
-                        "tableIndex": ev.get("tableIndex") or None,
-                        "rowLabel": ev.get("rowLabel") or None,
-                        "columnLabel": ev.get("columnLabel") or None,
-                        "rawRow": ev.get("rawRow") or None,
-                    })
-                elif isinstance(ev, str):
-                    if ev.startswith("http"):
-                        urls.append(ev)
-                    standardised_ev.append({
-                        "url": ev if ev.startswith("http") else None,
-                        "sourceType": None,
-                        "filingType": None,
-                        "accessionNumber": None,
-                        "filingDate": None,
-                        "publishedAt": None,
-                        "retrievedAt": None,
-                        "excerpt": None,
-                        "concept": None,
-                        "periodEnd": None,
-                        "tableIndex": None,
-                        "rowLabel": None,
-                        "columnLabel": None,
-                        "rawRow": ev,
-                    })
-            val["evidence"] = standardised_ev if standardised_ev else None
+            source_evidence = val.get("sourceEvidence")
+            preserve_decision_grade_xbrl_evidence = (
+                val.get("decisionGrade") is True
+                and isinstance(source_evidence, dict)
+                and "XBRL" in str(val.get("extractionMethod") or "").upper()
+            )
+            if preserve_decision_grade_xbrl_evidence:
+                val["evidence"] = dict(source_evidence)
+                url = source_evidence.get("url") or source_evidence.get("documentUrl")
+                if url:
+                    urls.append(str(url))
+            else:
+                orig_ev = val.get("evidence")
+                ev_list = []
+                if isinstance(orig_ev, list):
+                    ev_list = orig_ev
+                elif orig_ev:
+                    ev_list = [orig_ev]
+
+                standardised_ev = []
+                for ev in ev_list:
+                    if isinstance(ev, dict):
+                        url = ev.get("url") or ev.get("documentUrl") or None
+                        if url:
+                            urls.append(str(url))
+                        standardised_ev.append({
+                            "url": url,
+                            "sourceType": ev.get("sourceType") or None,
+                            "filingType": ev.get("filingType") or None,
+                            "accessionNumber": ev.get("accessionNumber") or None,
+                            "filingDate": ev.get("filingDate") or None,
+                            "publishedAt": ev.get("publishedAt") or None,
+                            "retrievedAt": ev.get("retrievedAt") or None,
+                            "excerpt": ev.get("excerpt") or None,
+                            "concept": ev.get("concept") or None,
+                            "periodEnd": ev.get("periodEnd") or None,
+                            "tableIndex": ev.get("tableIndex") or None,
+                            "rowLabel": ev.get("rowLabel") or None,
+                            "columnLabel": ev.get("columnLabel") or None,
+                            "rawRow": ev.get("rawRow") or None,
+                        })
+                    elif isinstance(ev, str):
+                        if ev.startswith("http"):
+                            urls.append(ev)
+                        standardised_ev.append({
+                            "url": ev if ev.startswith("http") else None,
+                            "sourceType": None,
+                            "filingType": None,
+                            "accessionNumber": None,
+                            "filingDate": None,
+                            "publishedAt": None,
+                            "retrievedAt": None,
+                            "excerpt": None,
+                            "concept": None,
+                            "periodEnd": None,
+                            "tableIndex": None,
+                            "rowLabel": None,
+                            "columnLabel": None,
+                            "rawRow": ev,
+                        })
+                val["evidence"] = standardised_ev if standardised_ev else None
 
             inferred_source_type = None
             for url in urls:
@@ -310,7 +322,7 @@ def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metri
         confidence = val.get("confidence") or parent_confidence
         
         for k, v in list(val.items()):
-            if k in {"confidence", "sourceType", "evidenceRequired", "decisionGrade", "evidence"}:
+            if k in {"confidence", "sourceType", "evidenceRequired", "decisionGrade", "evidence", "sourceEvidence", "xbrlContext", "calculation"}:
                 continue
             child_is_metric = is_fact or k in {"metrics", "actual", "estimate", "revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex", "eps"}
             val[k] = _enrich_facts(v, parent_source_type=source_type, parent_confidence=confidence, is_metric=child_is_metric)

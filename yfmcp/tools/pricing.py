@@ -1332,7 +1332,7 @@ async def get_ma_position(ticker: str | list[str]) -> str:
 @yfinance_server.tool(
     name="get_short_momentum",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_short_momentum"],
-    description="""Get short interest with pre-computed momentum: MoM delta, direction, squeeze risk, and flag.
+    description="""Get short interest with pre-computed momentum: MoM delta, direction, squeeze risk, and flag. dataDate is the short-interest observation date, not today's market date.
 
 Args:
     ticker: str | list[str]
@@ -1403,10 +1403,22 @@ async def get_short_momentum(ticker: str | list[str]) -> str:
     else:
         flag = None
 
-    def _ser(v):
-        if hasattr(v, "isoformat"):
+    def _observation_date(v):
+        if v is None:
+            return None
+        if isinstance(v, datetime.datetime):
+            return v.date().isoformat()
+        if isinstance(v, datetime.date):
             return v.isoformat()
-        return v
+        if isinstance(v, (int, float)):
+            timestamp = float(v)
+            if timestamp > 1_000_000_000_000:
+                timestamp /= 1000
+            return datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc).date().isoformat()
+        parsed = pd.to_datetime(v, utc=True, errors="coerce")
+        return None if pd.isna(parsed) else parsed.date().isoformat()
+
+    observation_date = _observation_date(date_short)
 
     return json.dumps({
         "ticker": ticker,
@@ -1418,8 +1430,9 @@ async def get_short_momentum(ticker: str | list[str]) -> str:
         "momDirection": mom_direction,
         "squeezeRisk": squeeze_risk,
         "flag": flag,
-        "dateShortInterest": _ser(date_short),
-        "dataDate": get_last_trading_date(),
+        "dateShortInterest": observation_date,
+        "dataDate": observation_date,
+        "dataDateBasis": "SHORT_INTEREST_OBSERVATION" if observation_date else "UNAVAILABLE",
     })
 
 

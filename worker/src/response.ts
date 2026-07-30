@@ -129,46 +129,59 @@ function enrichFacts(val: any, parentSourceType: string | null = null, parentCon
       }
       val.confidence = conf;
 
-      const origEv = val.evidence;
-      let evList: any[] = [];
-      if (Array.isArray(origEv)) {
-        evList = origEv;
-      } else if (origEv) {
-        evList = [origEv];
-      }
-      
       const urls: string[] = [];
-      const standardisedEv = evList.map(ev => {
-        if (ev && typeof ev === "object") {
-          const url = ev.url || ev.documentUrl || null;
-          if (url) urls.push(String(url));
-          return {
-            url,
-            filingType: ev.filingType || null,
-            accessionNumber: ev.accessionNumber || null,
-            filingDate: ev.filingDate || null,
-            tableIndex: ev.tableIndex || null,
-            rowLabel: ev.rowLabel || null,
-            columnLabel: ev.columnLabel || null,
-            rawRow: ev.rawRow || null,
-          };
-        } else if (ev) {
-          const evStr = String(ev);
-          if (evStr.startsWith("http")) urls.push(evStr);
-          return {
-            url: evStr.startsWith("http") ? evStr : null,
-            filingType: null,
-            accessionNumber: null,
-            filingDate: null,
-            tableIndex: null,
-            rowLabel: null,
-            columnLabel: null,
-            rawRow: evStr,
-          };
+      const sourceEvidence = val.sourceEvidence;
+      const preserveDecisionGradeXbrlEvidence =
+        val.decisionGrade === true
+        && sourceEvidence
+        && typeof sourceEvidence === "object"
+        && !Array.isArray(sourceEvidence)
+        && String(val.extractionMethod || "").toUpperCase().includes("XBRL");
+      if (preserveDecisionGradeXbrlEvidence) {
+        val.evidence = { ...sourceEvidence };
+        const url = sourceEvidence.url || sourceEvidence.documentUrl;
+        if (url) urls.push(String(url));
+      } else {
+        const origEv = val.evidence;
+        let evList: any[] = [];
+        if (Array.isArray(origEv)) {
+          evList = origEv;
+        } else if (origEv) {
+          evList = [origEv];
         }
-        return null;
-      }).filter(Boolean);
-      val.evidence = standardisedEv.length > 0 ? standardisedEv : null;
+
+        const standardisedEv = evList.map(ev => {
+          if (ev && typeof ev === "object") {
+            const url = ev.url || ev.documentUrl || null;
+            if (url) urls.push(String(url));
+            return {
+              url,
+              filingType: ev.filingType || null,
+              accessionNumber: ev.accessionNumber || null,
+              filingDate: ev.filingDate || null,
+              tableIndex: ev.tableIndex || null,
+              rowLabel: ev.rowLabel || null,
+              columnLabel: ev.columnLabel || null,
+              rawRow: ev.rawRow || null,
+            };
+          } else if (ev) {
+            const evStr = String(ev);
+            if (evStr.startsWith("http")) urls.push(evStr);
+            return {
+              url: evStr.startsWith("http") ? evStr : null,
+              filingType: null,
+              accessionNumber: null,
+              filingDate: null,
+              tableIndex: null,
+              rowLabel: null,
+              columnLabel: null,
+              rawRow: evStr,
+            };
+          }
+          return null;
+        }).filter(Boolean);
+        val.evidence = standardisedEv.length > 0 ? standardisedEv : null;
+      }
 
       let inferredSourceType: string | null = null;
       for (const url of urls) {
@@ -224,7 +237,7 @@ function enrichFacts(val: any, parentSourceType: string | null = null, parentCon
     const confidence = val.confidence || parentConfidence;
     
     for (const key of Object.keys(val)) {
-      if (["confidence", "sourceType", "evidenceRequired", "decisionGrade", "evidence"].includes(key)) {
+      if (["confidence", "sourceType", "evidenceRequired", "decisionGrade", "evidence", "sourceEvidence", "xbrlContext", "calculation"].includes(key)) {
         continue;
       }
       const childIsMetric = isFact || ["metrics", "actual", "estimate", "revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex", "eps"].includes(key);

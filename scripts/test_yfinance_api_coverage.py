@@ -196,7 +196,13 @@ class TestYfinanceApiCoverage(unittest.TestCase):
 
     def test_financial_ratios_can_add_bounded_valuation_history(self):
         class FakeTicker:
-            info = {"financialCurrency": "USD", "marketCap": 100.0, "freeCashflow": 10.0}
+            info = {
+                "financialCurrency": "USD",
+                "marketCap": 100.0,
+                "freeCashflow": 10.0,
+                "grossMargins": 0.42,
+                "debtToEquity": 135.0,
+            }
 
             def get_valuation_measures(self, freq, periods):
                 self.request = (freq, periods)
@@ -210,6 +216,10 @@ class TestYfinanceApiCoverage(unittest.TestCase):
         self.assertEqual(data["valuationFrequency"], "quarterly")
         self.assertEqual(data["valuationHistory"][0]["trailingPE"], 15.0)
         self.assertEqual(data["valuationHistory"][1]["priceToSales"], 3.5)
+        self.assertIn("grossMargins", data["unitSemantics"]["decimalRatios"])
+        self.assertIn("debtToEquity", data["unitSemantics"]["percentValues"])
+        self.assertIn("freeCashflowYield", data["unitSemantics"]["percentValues"])
+        self.assertEqual(data["unitSemantics"]["currency"], "USD")
         self.assertFalse(data["decisionGrade"])
 
     def test_market_calendar_uses_unfiltered_earnings_and_bounds(self):
@@ -222,12 +232,18 @@ class TestYfinanceApiCoverage(unittest.TestCase):
                 self.kwargs = kwargs
                 if kwargs.get("filter_most_active") is not False:
                     raise AssertionError("hidden most-active filter must be disabled")
-                return pd.DataFrame({"Ticker": ["AAA"], "Event Start Date": ["2026-07-20"]})
+                return pd.DataFrame({
+                    "Ticker": ["AAA"],
+                    "Event Start Date": ["2026-07-20"],
+                    "EPS Actual": [None],
+                    "EPS Surprise (%)": [0.0],
+                })
 
         srv.yf.Calendars = FakeCalendars  # type: ignore[attr-defined]
         data = json.loads(_run(srv.get_market_calendar("earnings", "2026-07-20", "2026-07-21", 25, 0)))
         self.assertEqual(data["status"], "OK")
         self.assertEqual(data["items"][0]["Ticker"], "AAA")
+        self.assertIsNone(data["items"][0]["EPS Surprise (%)"])
         self.assertEqual(data["confirmationStatus"], "UNVERIFIED")
 
     def test_worker_contains_parity_guards(self):
@@ -246,6 +262,10 @@ class TestYfinanceApiCoverage(unittest.TestCase):
         self.assertIn("normalizeFundEquityHoldings", worker)
         self.assertIn('contractCostBasis: "ASK"', worker)
         self.assertIn('"OPTIONS_CHAIN_LOW_QUALITY"', worker)
+        self.assertIn("filtered.unitSemantics", worker)
+        self.assertIn("distanceToTargetPct", worker)
+        self.assertIn('"SHORT_INTEREST_OBSERVATION"', worker)
+        self.assertIn('normalized.epsactual ?? normalized.reportedeps', worker)
         self.assertNotIn('entityIdType: "earnings"', worker)
 
     def test_llm_visible_descriptions_route_common_intents(self):
