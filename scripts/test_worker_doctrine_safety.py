@@ -33,6 +33,24 @@ def _node_json(source: str) -> dict:
 
 
 class TestWorkerDoctrineSafety(unittest.TestCase):
+    def test_worker_version_identity_is_in_success_and_failure_envelopes(self) -> None:
+        payload = _node_json(
+            """
+            import assert from "node:assert/strict";
+            import { mcpFailure, mcpSuccess, setWorkerEnv } from "./worker/src/response.ts";
+
+            setWorkerEnv({ MCP_ENVELOPE_V2: "true", WORKER_VERSION_ID: "version-123" });
+            const success = JSON.parse(mcpSuccess("health_check", JSON.stringify({ status: "ok" })));
+            const failure = JSON.parse(mcpFailure("health_check", "TEST_ERROR", "test failure"));
+
+            assert.equal(success.meta.workerVersionId, "version-123");
+            assert.equal(failure.meta.workerVersionId, "version-123");
+            console.log(JSON.stringify({ success, failure }));
+            """
+        )
+        self.assertEqual(payload["success"]["meta"]["workerVersionId"], "version-123")
+        self.assertEqual(payload["failure"]["meta"]["workerVersionId"], "version-123")
+
     def test_mcp_success_propagates_inner_failure_envelopes(self) -> None:
         payload = _node_json(
             """

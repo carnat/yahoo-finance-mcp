@@ -55,13 +55,18 @@ Claude Desktop example:
 
 ## Tool Modes
 
-Expanded mode is the default and exposes individual tools.
-
-Grouped mode exposes 11 domain tools with `{ "action": "...", "params": {...} }`
-routing. It is useful when an MCP client benefits from a smaller tool list.
+Grouped mode is the default. It exposes 11 domain tools with
+`{ "action": "...", "params": {...} }` routing so LLM clients receive a compact,
+deterministic tool list.
 
 ```bash
-TOOL_MODE=grouped uv run server.py
+uv run server.py
+```
+
+Expanded mode remains available for compatibility and debugging:
+
+```bash
+TOOL_MODE=expanded uv run server.py
 ```
 
 Grouped domains:
@@ -89,6 +94,9 @@ Example grouped call:
   }
 }
 ```
+
+Clients that cache MCP discovery may need to reconnect or refresh the connector
+after switching tool modes.
 
 ## Tool Coverage
 

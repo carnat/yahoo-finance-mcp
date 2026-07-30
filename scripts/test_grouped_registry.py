@@ -19,6 +19,7 @@ import os
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -80,6 +81,7 @@ if not getattr(_FastMCP, "_output_schema_patched", False):
 import server as srv  # noqa: E402
 import tool_groups  # noqa: E402
 from yfmcp.app import build_handler_registry, yfinance_server  # noqa: E402
+from yfmcp.tools.system import _public_metadata  # noqa: E402
 
 
 class TestHandlerRegistry(unittest.TestCase):
@@ -110,6 +112,12 @@ class TestHandlerRegistry(unittest.TestCase):
 
 
 class TestGroupedServer(unittest.TestCase):
+    def test_manifest_count_matches_visible_mode(self):
+        with patch.dict(os.environ, {"TOOL_MODE": "grouped"}):
+            self.assertEqual(_public_metadata()["toolCount"], len(tool_groups.TOOL_GROUPS))
+        with patch.dict(os.environ, {"TOOL_MODE": "expanded"}):
+            self.assertEqual(_public_metadata()["toolCount"], 111)
+
     def test_grouped_server_exposes_one_tool_per_group(self):
         original = os.environ.get("TOOL_MODE")
         os.environ["TOOL_MODE"] = "grouped"

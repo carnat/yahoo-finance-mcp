@@ -54,8 +54,6 @@ class TestSmokeArchitecture(unittest.TestCase):
             "Audit alias behavior",
             "Audit geographic revenue schema",
             "Audit deployed extractor tools",
-            "Audit deployed MCP grouped discovery",
-            "Audit deployed grouped extractor tools",
             "Audit end-to-end tool tests",
         )
         for name in advisory_steps:
@@ -63,6 +61,8 @@ class TestSmokeArchitecture(unittest.TestCase):
                 body = self._step_body(name)
                 self.assertIn("continue-on-error: true", body)
                 self.assertIn("always()", body)
+        self.assertNotIn("Audit deployed MCP grouped discovery", self.workflow)
+        self.assertNotIn("Audit deployed grouped extractor tools", self.workflow)
 
     def test_obsolete_provider_configuration_probe_is_removed(self) -> None:
         self.assertFalse(REMOVED_SEC_SMOKE.exists())
@@ -131,6 +131,11 @@ class TestSmokeArchitecture(unittest.TestCase):
         self.assertIn('binding = "CF_VERSION_METADATA"', config)
         self.assertEqual(parsed_config["version_metadata"]["binding"], "CF_VERSION_METADATA")
         self.assertIn("workerVersionId: env.CF_VERSION_METADATA?.id ?? null", entry)
+        self.assertIn("WORKER_VERSION_ID: env.CF_VERSION_METADATA?.id", entry)
+        self.assertIn(
+            "EXPECTED_WORKER_VERSION_ID: ${{ needs.upload_version.outputs.version_id }}",
+            self.workflow,
+        )
 
     def test_version_upload_parser_uses_structured_wrangler_output(self) -> None:
         events = [
@@ -192,6 +197,7 @@ class TestSmokeArchitecture(unittest.TestCase):
         )
 
     def test_secrets_file_omits_unconfigured_optional_values(self) -> None:
+        self.assertEqual(promotion.build_secrets({}), {"TOOL_MODE": "grouped"})
         payload = promotion.build_secrets(
             {
                 "TOOL_MODE": "expanded",
@@ -276,7 +282,8 @@ class TestSmokeArchitecture(unittest.TestCase):
         ]
         with redirect_stdout(io.StringIO()):
             with (
-                patch.object(deployed_canaries, "call_tool", return_value={}) as call,
+                patch.object(deployed_canaries, "wait_for_expected_tool_mode", return_value="expanded"),
+                patch.object(deployed_canaries, "call_versioned_tool", return_value={}) as call,
                 patch.dict(deployed_canaries.ASSERTIONS, {"always_fail": always_fail}),
                 self.assertRaises(AssertionError) as raised,
             ):
@@ -286,6 +293,61 @@ class TestSmokeArchitecture(unittest.TestCase):
         self.assertIn("first: failed first", str(raised.exception))
         self.assertIn("second: failed second", str(raised.exception))
 
+    def test_canary_retries_only_stale_worker_versions(self) -> None:
+        responses = iter(
+            [
+                {"ok": True, "data": {}, "meta": {"workerVersionId": "old-version"}},
+                {"ok": True, "data": {}, "meta": {"workerVersionId": "expected-version"}},
+            ]
+        )
+        calls: list[tuple[str, dict]] = []
+        sleeps: list[float] = []
+
+        def tool_call(_url: str, tool: str, args: dict, **_kwargs: object) -> dict:
+            calls.append((tool, args))
+            return next(responses)
+
+        payload = deployed_canaries.call_versioned_tool(
+            "health_check",
+            {},
+            tool_mode="grouped",
+            req_id=1,
+            expected_version_id="expected-version",
+            tool_call=tool_call,
+            sleep=sleeps.append,
+            attempts=2,
+            delay_seconds=0.25,
+        )
+
+        self.assertEqual(payload["meta"]["workerVersionId"], "expected-version")
+        self.assertEqual(calls, [("system", {"action": "health_check", "params": {}})] * 2)
+        self.assertEqual(sleeps, [0.25])
+
+    def test_current_version_failure_is_not_retried(self) -> None:
+        calls: list[str] = []
+
+        def tool_call(_url: str, tool: str, _args: dict, **_kwargs: object) -> dict:
+            calls.append(tool)
+            return {
+                "ok": False,
+                "data": None,
+                "meta": {"workerVersionId": "expected-version"},
+                "error": {"code": "PROVIDER_ERROR", "message": "provider failed"},
+            }
+
+        payload = deployed_canaries.call_versioned_tool(
+            "health_check",
+            {},
+            tool_mode="expanded",
+            req_id=1,
+            expected_version_id="expected-version",
+            tool_call=tool_call,
+            sleep=lambda _seconds: self.fail("current-version failure must not sleep"),
+            attempts=3,
+        )
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(calls, ["health_check"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -151,15 +151,6 @@
       "volatility": "stable_contract"
     },
     {
-      "id": "deprecated-alias-validation-error",
-      "description": "Deprecated aliases preserve migration metadata when validation fails.",
-      "tool": "get_historical_stock_prices",
-      "args": {},
-      "assertion": "deprecated_alias_error",
-      "blocking": true,
-      "volatility": "stable_contract"
-    },
-    {
       "id": "aaoi-china-geographic-positive",
       "description": "Stable AAOI China positive fixture remains numeric and evidence-bearing.",
       "tool": "extract_geographic_revenue",

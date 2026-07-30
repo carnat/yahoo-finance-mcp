@@ -12,7 +12,16 @@ from yfmcp.envelope import SERVER_VERSION
 from yfmcp.schemas import _MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA, _SIMPLE_OUTPUT_SCHEMA
 
 
-def _tool_inventory() -> tuple[list[str], list[dict]]:
+def _tool_inventory(tool_mode: str) -> tuple[list[str], list[dict]]:
+    if tool_mode == "grouped":
+        from tool_groups import TOOL_GROUPS
+
+        names = sorted(TOOL_GROUPS)
+        specs = [
+            {"name": name, "description": str(TOOL_GROUPS[name].get("description") or "")}
+            for name in names
+        ]
+        return names, specs
     try:
         tools = yfinance_server._tool_manager._tools
     except Exception:
@@ -35,10 +44,10 @@ def _tool_inventory() -> tuple[list[str], list[dict]]:
 
 
 def _public_metadata() -> dict:
-    names, specs = _tool_inventory()
+    tool_mode = "grouped" if os.environ.get("TOOL_MODE", "grouped").lower() == "grouped" else "expanded"
+    names, specs = _tool_inventory(tool_mode)
     manifest_hash = hashlib.sha256(json.dumps(names, sort_keys=True).encode("utf-8")).hexdigest()[:16]
     schema_hash = hashlib.sha256(json.dumps(specs, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
-    tool_mode = os.environ.get("TOOL_MODE", "expanded").lower()
     return {
         "status": "ok",
         "serverVersion": SERVER_VERSION,

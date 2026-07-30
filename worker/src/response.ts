@@ -33,6 +33,7 @@ export interface ToolMeta {
   source: string;
   dataDate: string | null;
   serverVersion: string;
+  workerVersionId?: string;
   cacheHit: boolean;
   warnings: unknown[];
   capabilityStatus?: string;
@@ -84,6 +85,7 @@ function buildMeta(
     metaExtra?: Record<string, unknown>;
   }
 ): ToolMeta {
+  const workerVersionId = getWorkerVar("WORKER_VERSION_ID");
   return {
     tool,
     ...(opts?.canonicalTool ? { canonicalTool: opts.canonicalTool } : {}),
@@ -98,6 +100,7 @@ function buildMeta(
     cacheHit: opts?.cacheHit ?? false,
     warnings: opts?.warnings ?? [],
     ...(opts?.metaExtra || {}),
+    ...(workerVersionId ? { workerVersionId } : {}),
   } as ToolMeta;
 }
 
@@ -281,6 +284,7 @@ export function mcpSuccess(
       const baseMeta = buildMeta(tool, opts);
       const baseWarnings = Array.isArray(baseMeta.warnings) ? baseMeta.warnings : [];
       const innerWarnings = Array.isArray(innerMeta.warnings) ? innerMeta.warnings : [];
+      const workerVersionId = baseMeta.workerVersionId;
       const resp: McpResponse = {
         ok: inner.ok === true,
         data: inner.ok === true ? enrichFacts(inner.data) : inner.data ?? null,
@@ -289,6 +293,7 @@ export function mcpSuccess(
           ...innerMeta,
           ...(opts?.metaExtra || {}),
           warnings: [...baseWarnings, ...innerWarnings],
+          ...(workerVersionId ? { workerVersionId } : {}),
         } as ToolMeta,
         error: inner.ok === true ? null : (inner.error as ErrorDetail | null) ?? {
           code: "PROVIDER_ERROR",
@@ -357,15 +362,10 @@ export function mcpFailure(
   const resp: any = {
     ok: false,
     data: null,
-    meta: {
-      tool,
-      source: opts?.source ?? "yahoo_finance",
-      dataDate: null,
-      serverVersion: getServerVersion(),
-      cacheHit: false,
-      warnings: [],
-      ...(opts?.metaExtra || {}),
-    },
+    meta: buildMeta(tool, {
+      source: opts?.source,
+      metaExtra: opts?.metaExtra,
+    }),
     error: {
       code,
       message,

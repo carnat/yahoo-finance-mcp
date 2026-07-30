@@ -1979,7 +1979,7 @@ const GROUPED_ACTIONS = new Map(
 );
 
 export function isGroupedMode(): boolean {
-  return (getWorkerVar("TOOL_MODE") ?? "expanded").toLowerCase() === "grouped";
+  return (getWorkerVar("TOOL_MODE") ?? "grouped").toLowerCase() === "grouped";
 }
 
 const ENVELOPE_SCHEMA_VERSION = "2026-07-08";
