@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SERVER_PY = ROOT / "server.py"
 TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
 TOOL_CATALOG = ROOT / "tool_catalog.json"
+TOOL_CATALOG_TS = ROOT / "worker" / "src" / "tool-catalog.ts"
 
 EXPECTED_CANONICAL = {
     "search_thai_funds",
@@ -202,6 +203,7 @@ def main():
         return 1
 
     catalog = json.loads(TOOL_CATALOG.read_text(encoding="utf-8"))
+    catalog_ts = TOOL_CATALOG_TS.read_text(encoding="utf-8")
     groups = catalog.get("groups", {})
     if not isinstance(groups, dict) or len(groups) != 11:
         print("ERROR: tool_catalog.json must define exactly 11 grouped tools", file=sys.stderr)
@@ -217,6 +219,15 @@ def main():
         print("ERROR: Grouped catalog action(s) missing from Python tools:", file=sys.stderr)
         for name in missing_group_actions:
             print(f"    - {name}", file=sys.stderr)
+        return 1
+    if (
+        'import catalog from "../../tool_catalog.json"' not in catalog_ts
+        or "Object.entries(catalog.groups)" not in catalog_ts
+    ):
+        print(
+            "ERROR: Worker grouped catalog must import tool_catalog.json directly.",
+            file=sys.stderr,
+        )
         return 1
 
     ok, msg = validate_alias_targets(ts_aliases, ts_tools, "worker")

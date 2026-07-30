@@ -2036,7 +2036,7 @@ function matchesParamSchema(value: unknown, rawSchema: unknown): boolean {
     });
     if (!typeMatches) return false;
   }
-  if (Array.isArray(schema.enum) && !schema.enum.some((item) => Object.is(item, value))) return false;
+  // ponytail: grouped boundary checks shape; action handlers own semantic enums.
   if (Array.isArray(value)) {
     if (typeof schema.maxItems === "number" && value.length > schema.maxItems) return false;
     if (typeof schema.minItems === "number" && value.length < schema.minItems) return false;

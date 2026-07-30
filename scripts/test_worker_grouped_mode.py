@@ -62,11 +62,28 @@ class TestWorkerGroupedMode(unittest.TestCase):
         self.assertIn("extract_exposure", groups["sec_extractors"]["actions"])
         self.assertIn("get_thai_fund_nav", groups["thai_funds"]["actions"])
 
-    def test_worker_generated_catalog_matches_json(self) -> None:
-        for group_name, group_def in self.catalog["groups"].items():
-            self.assertIn(f'"name": "{group_name}"', self.catalog_ts)
-            for action in group_def["actions"]:
-                self.assertIn(f'"{action}"', self.catalog_ts)
+    def test_worker_imports_shared_catalog_without_generated_mirror(self) -> None:
+        self.assertIn('import catalog from "../../tool_catalog.json"', self.catalog_ts)
+        self.assertIn("Object.entries(catalog.groups)", self.catalog_ts)
+        self.assertNotIn('"name": "sec_filings"', self.catalog_ts)
+
+    def test_sec_catalog_documents_canonical_params(self) -> None:
+        description = self.catalog["groups"]["sec_filings"]["description"]
+        self.assertIn(
+            "list_sec_material_filings: Material only. Params: ticker, forms, limit",
+            description,
+        )
+        self.assertIn(
+            "get_sec_filing_section_markdown: Unverified degraded section Markdown. "
+            "Params: ticker, section, filing_type, filing_index, max_chars",
+            description,
+        )
+        self.assertIn(
+            "list_sec_filing_exhibits: Exhibits list. Params: ticker, accessionNumber",
+            description,
+        )
+        self.assertNotIn("list_sec_material_filings: Material only. Params: ticker, form_types", description)
+        self.assertNotIn("list_sec_filing_exhibits: Exhibits list. Params: ticker, accession_number", description)
 
     def test_mcp_uses_visible_tools_for_list_and_call(self) -> None:
         self.assertIn("import { callVisibleTool, listVisibleTools }", self.mcp_ts)
@@ -97,6 +114,14 @@ class TestWorkerGroupedMode(unittest.TestCase):
             "CORRECT_TOOL_PARAMS",
         ):
             self.assertIn(field, body)
+
+    def test_grouped_validation_leaves_semantic_enums_to_handlers(self) -> None:
+        validation_start = self.tools_ts.index("function matchesParamSchema")
+        validation_end = self.tools_ts.index("function validateGroupedActionParams", validation_start)
+        body = self.tools_ts[validation_start:validation_end]
+        self.assertNotIn("schema.enum", body)
+        self.assertIn("schema.type", body)
+        self.assertIn('"UNSUPPORTED_QUERY_TYPE"', self.yahoo_ts)
 
     def test_legacy_text_errors_are_not_wrapped_as_success(self) -> None:
         call_start = self.tools_ts.index("export async function callTool")

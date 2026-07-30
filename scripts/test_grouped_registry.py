@@ -20,6 +20,7 @@ import os
 import sys
 import types
 import unittest
+from typing import Literal
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -200,6 +201,45 @@ class TestGroupedRouting(unittest.TestCase):
         )
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"]["invalidParams"], ["max_results"])
+
+    def test_semantic_literal_value_reaches_action_handler(self):
+        async def semantic_handler(
+            ticker: str,
+            query_type: Literal["supported"],
+            params: dict | None = None,
+        ) -> str:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "data": None,
+                    "meta": {
+                        "tool": "query_sec_filing_index",
+                        "supportedQueryTypes": ["supported"],
+                    },
+                    "error": {
+                        "code": "UNSUPPORTED_QUERY_TYPE",
+                        "message": f"Unsupported query type '{query_type}' for {ticker}.",
+                    },
+                }
+            )
+
+        with patch.dict(os.environ, {"MCP_ENVELOPE_V2": "true"}):
+            raw = asyncio.run(
+                tool_groups._route_grouped_call(
+                    "sec_filings",
+                    "query_sec_filing_index",
+                    {
+                        "ticker": "AAPL",
+                        "query_type": "unsupported",
+                        "params": {},
+                    },
+                    {"query_sec_filing_index": semantic_handler},
+                )
+            )
+        payload = json.loads(raw)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "UNSUPPORTED_QUERY_TYPE", payload)
+        self.assertEqual(payload["meta"]["supportedQueryTypes"], ["supported"])
 
     def test_legacy_error_string_becomes_failure_envelope(self):
         async def fake_expirations(ticker: str) -> str:
