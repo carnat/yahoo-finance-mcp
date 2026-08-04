@@ -84,6 +84,7 @@ from yfmcp.parsing.extractors import (
 import yfmcp.tools.system  # noqa: F401 (side-effect import)
 import yfmcp.tools.pricing  # noqa: F401 (side-effect import)
 import yfmcp.tools.thai_funds  # noqa: F401 (side-effect import)
+import yfmcp.tools.provider_gaps  # noqa: F401 (side-effect import)
 from yfmcp.tools.system import health_check, get_manifest_diagnostics  # re-export for grouped routing
 from yfmcp.tools.pricing import (  # re-export for compatibility and grouped routing
     get_historical_stock_prices,
@@ -112,6 +113,10 @@ from yfmcp.tools.thai_funds import (  # re-export for grouped routing
     get_thai_fund_nav_batch,
     get_thai_fund_factsheet,
     get_thai_fund_dividend_history,
+)
+from yfmcp.tools.provider_gaps import (  # re-export for grouped routing
+    get_historical_put_call_ratio,
+    get_expanded_institutional_ownership,
 )
 
 
@@ -349,6 +354,7 @@ def _build_coverage(source_status: dict, resolved_action: str | None = None) -> 
     }
     failed_sources: list[dict] = []
     skipped_sources: list[dict] = []
+    truncated_sources: list[dict] = []
     for source, info in source_status.items():
         if not isinstance(info, dict):
             continue
@@ -357,12 +363,27 @@ def _build_coverage(source_status: dict, resolved_action: str | None = None) -> 
             skipped_sources.append(entry)
         elif info.get("status") in failed_states:
             failed_sources.append(entry)
+        if info.get("hasMoreAccepted") is True:
+            truncated_sources.append({
+                "source": source,
+                "acceptedCount": int(info.get("acceptedCount") or 0),
+                "returnedCount": int(info.get("returnedCount") or 0),
+                "truncatedCount": int(info.get("truncatedCount") or 0),
+            })
     action = resolved_action or (
         "RETRY_RETRYABLE_SOURCES" if any(row["status"] in {"RATE_LIMITED", "TIMEOUT"} for row in failed_sources) else (
-            "CHECK_OFFICIAL_RELEASES" if failed_sources or skipped_sources else "USE_RETURNED_CONTEXT"
+            "CHECK_OFFICIAL_RELEASES" if failed_sources or skipped_sources else (
+                "RETRY_TRUNCATED_SOURCE" if truncated_sources else "USE_RETURNED_CONTEXT"
+            )
         )
     )
-    return {"state": _compute_source_coverage(source_status), "failedSources": failed_sources, "skippedSources": skipped_sources, "recommendedNextAction": action}
+    return {
+        "state": _compute_source_coverage(source_status),
+        "failedSources": failed_sources,
+        "skippedSources": skipped_sources,
+        "truncatedSources": truncated_sources,
+        "recommendedNextAction": action,
+    }
 
 
 _YAHOO_NEWS_LEGAL_SUFFIXES = frozenset({
@@ -1700,9 +1721,24 @@ async def _collect_finnhub_events(
     start_date: str = "",
     end_date: str = "",
     lookback_days: int | None = None,
-) -> tuple[list[dict], list[dict], bool]:
+) -> tuple[list[dict], list[dict], bool, dict]:
     warnings: list[dict] = []
     items: list[dict] = []
+    diagnostics = {
+        "rawCount": 0,
+        "retrievedCount": 0,
+        "acceptedCount": 0,
+        "collectedCount": 0,
+        "rejectedCount": 0,
+        "rejectionCounts": {},
+        "attempted": True,
+        "completed": False,
+    }
+
+    def _reject(reason: str) -> None:
+        diagnostics["rejectedCount"] += 1
+        diagnostics["rejectionCounts"][reason] = diagnostics["rejectionCounts"].get(reason, 0) + 1
+
     api_key = os.environ.get("FINNHUB_API_KEY") or os.environ.get("FINNHUB_TOKEN")
     if not api_key:
         warnings.append({
@@ -1710,7 +1746,8 @@ async def _collect_finnhub_events(
             "message": "Finnhub company-news source is not configured; skipped.",
             "severity": "warning",
         })
-        return items, warnings, False
+        diagnostics["attempted"] = False
+        return items, warnings, False, diagnostics
 
     from_day = (
         datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=lookback_days or 14)
@@ -1753,14 +1790,14 @@ async def _collect_finnhub_events(
                 "message": f"Finnhub source unavailable: {exc}",
                 "severity": "warning",
             })
-        return items, warnings, False
+        return items, warnings, False, diagnostics
     except Exception as exc:
         warnings.append({
             "code": "SOURCE_UNAVAILABLE",
             "message": f"Finnhub source unavailable: {exc}",
             "severity": "warning",
         })
-        return items, warnings, False
+        return items, warnings, False, diagnostics
 
     if not isinstance(raw_items, list):
         warnings.append({
@@ -1768,13 +1805,19 @@ async def _collect_finnhub_events(
             "message": "Finnhub provider changed: unexpected response format",
             "severity": "warning",
         })
-        return items, warnings, False
+        return items, warnings, False, diagnostics
 
+    diagnostics["rawCount"] = len(raw_items)
+    diagnostics["retrievedCount"] = len(raw_items)
     ticker_u = ticker.upper()
     for row in raw_items:
         if not isinstance(row, dict):
+            _reject("INVALID_ROW")
             continue
         title = str(row.get("headline") or "").strip()
+        if not title:
+            _reject("MISSING_HEADLINE")
+            continue
         summary = str(row.get("summary") or "").strip()
         original_source = str(row.get("source") or "").strip() or None
         item_url = str(row.get("url") or "").strip() or None
@@ -1810,11 +1853,14 @@ async def _collect_finnhub_events(
             end_date=end_date,
             lookback_days=lookback_days,
         ):
+            _reject("DATE_OUTSIDE_WINDOW")
             continue
-        items.append(item)
-        if len(items) >= max_results:
-            break
-    return items, warnings, True
+        diagnostics["acceptedCount"] += 1
+        if len(items) < max_results:
+            items.append(item)
+    diagnostics["collectedCount"] = len(items)
+    diagnostics["completed"] = True
+    return items, warnings, True, diagnostics
 
 
 def _dedupe_event_items(items: list[dict], warnings: list[dict]) -> list[dict]:
@@ -2018,7 +2064,24 @@ def _compute_source_status(
                 "allowedAction": "use_yahoo_or_official_sources",
             }
         elif "finnhub" in sources_used:
-            result["finnhub"] = {"status": "OK" if finnhub_items else "EMPTY_RESULT", "rawCount": len(finnhub_items), "filteredCount": len(finnhub_items)}
+            diagnostic = diagnostics.get("finnhub") if isinstance(diagnostics.get("finnhub"), dict) else {}
+            accepted_count = int(diagnostic.get("acceptedCount") if diagnostic.get("acceptedCount") is not None else len(finnhub_items))
+            returned_count = len(finnhub_items)
+            truncated_count = max(0, accepted_count - returned_count)
+            result["finnhub"] = {
+                "status": "OK" if accepted_count else "EMPTY_RESULT",
+                "rawCount": int(diagnostic.get("rawCount") if diagnostic.get("rawCount") is not None else accepted_count),
+                "retrievedCount": int(diagnostic.get("retrievedCount") if diagnostic.get("retrievedCount") is not None else diagnostic.get("rawCount") or accepted_count),
+                "filteredCount": accepted_count,
+                "acceptedCount": accepted_count,
+                "collectedCount": int(diagnostic.get("collectedCount") if diagnostic.get("collectedCount") is not None else accepted_count),
+                "returnedCount": returned_count,
+                "rejectedCount": int(diagnostic.get("rejectedCount") or 0),
+                "rejectionCounts": dict(diagnostic.get("rejectionCounts") or {}),
+                "truncatedCount": truncated_count,
+                "hasMoreAccepted": truncated_count > 0,
+                "attempted": diagnostic.get("attempted") is not False,
+            }
         elif any("finnhub company-news source is not configured" in m.lower() for m in warning_msgs):
             result["finnhub"] = {"status": "UNCONFIGURED"}
         elif any("finnhub auth error" in m.lower() for m in warning_msgs):
@@ -2209,6 +2272,13 @@ async def _collect_company_events(
         result_items, result_warnings, result_used = value
         return result_items, result_warnings, result_used, {}
 
+    def _unpack_finnhub_result(value: tuple) -> tuple[list[dict], list[dict], bool, dict]:
+        if len(value) == 4:
+            result_items, result_warnings, result_used, result_diagnostics = value
+            return result_items, result_warnings, result_used, result_diagnostics
+        result_items, result_warnings, result_used = value
+        return result_items, result_warnings, result_used, {}
+
     if _need_yf_news:
         yf_result = await _collect_yahoo_events(
             ticker,
@@ -2275,14 +2345,17 @@ async def _collect_company_events(
         warnings.extend(gnw_warnings)
 
     if "finnhub" in selected_sources and _finnhub_eligibility(ticker)[0]:
-        finnhub_items, finnhub_warnings, used = await _collect_finnhub_events(
-            ticker,
-            retrieved_at=retrieved_at,
-            max_results=max_cap,
-            start_date=start_date,
-            end_date=end_date,
-            lookback_days=lookback,
+        finnhub_items, finnhub_warnings, used, finnhub_diagnostics = _unpack_finnhub_result(
+            await _collect_finnhub_events(
+                ticker,
+                retrieved_at=retrieved_at,
+                max_results=max_cap,
+                start_date=start_date,
+                end_date=end_date,
+                lookback_days=lookback,
+            )
         )
+        source_diagnostics["finnhub"] = finnhub_diagnostics
         if used:
             sources_used.append("finnhub")
         items.extend(finnhub_items)
@@ -9705,7 +9778,7 @@ from yfmcp.tools.earnings import (  # re-export for compatibility and grouped ro
 # ---------------------------------------------------------------------------
 # TOOL_MODE env var controls which interface is exposed:
 #   - "grouped" (default): 11 domain meta-tools with action routing
-#   - "expanded": all 111 individual tools (compatibility/debug mode)
+#   - "expanded": all 113 individual tools (compatibility/debug mode)
 # ---------------------------------------------------------------------------
 _TOOL_MODE = os.environ.get("TOOL_MODE", "grouped").lower().strip()
 
@@ -9720,7 +9793,7 @@ def _build_grouped_server():
         instructions="""
 # Yahoo Finance MCP Server (Grouped Mode)
 
-Grouped mode is the default. Set TOOL_MODE=expanded to expose 111 individual tools.
+Grouped mode is the default. Set TOOL_MODE=expanded to expose 113 individual tools.
 
 This server provides financial market data via domain-grouped tools for token efficiency.
 Each tool covers a domain (pricing, fundamentals, options, etc.) and accepts an `action`
@@ -9766,7 +9839,7 @@ def get_server():
     """Return the appropriate server based on TOOL_MODE env var.
 
     - TOOL_MODE=grouped (default): 11 domain meta-tools
-    - TOOL_MODE=expanded: 111 individual tools
+    - TOOL_MODE=expanded: 113 individual tools
     """
     global _grouped_server
     if _TOOL_MODE == "grouped":

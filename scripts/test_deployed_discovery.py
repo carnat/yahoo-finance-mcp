@@ -40,6 +40,7 @@ CANONICAL_TOOLS = {
     "calculate_price_target_distance",
     "check_volume_liquidity_threshold",
     "summarize_options_flow",
+    "get_historical_put_call_ratio",
     "analyze_options_flow_window",
     "list_sec_company_filings",
     "get_sec_filing_outline",
@@ -74,6 +75,7 @@ CANONICAL_TOOLS = {
     "get_thai_fund_nav_batch",
     "get_thai_fund_factsheet",
     "get_thai_fund_dividend_history",
+    "get_expanded_institutional_ownership",
     "health_check",
 }
 GROUPED_TOOLS = {
@@ -112,6 +114,7 @@ ACTION_GROUP = {
     "analyze_credit_health": "stock_fundamentals",
     "get_corporate_actions": "stock_fundamentals",
     "get_ownership_holders": "stock_fundamentals",
+    "get_expanded_institutional_ownership": "stock_fundamentals",
     "get_analyst_consensus": "analyst_data",
     "get_earnings_analysis": "analyst_data",
     "get_analyst_recommendations": "analyst_data",
@@ -124,6 +127,7 @@ ACTION_GROUP = {
     "summarize_options_flow": "options_analysis",
     "find_put_hedge_candidates": "options_analysis",
     "analyze_options_flow_window": "options_analysis",
+    "get_historical_put_call_ratio": "options_analysis",
     "list_sec_company_filings": "sec_filings",
     "list_sec_material_filings": "sec_filings",
     "get_sec_filing_outline": "sec_filings",

@@ -46,6 +46,8 @@ ACTION_GROUP = {
 DISCOVERY_REQUIRED_PARAMS = {
     "get_market_quote": {"ticker"},
     "get_company_news": {"ticker"},
+    "get_expanded_institutional_ownership": {"ticker"},
+    "get_historical_put_call_ratio": {"ticker", "date"},
     "list_sec_filing_exhibits": {"ticker", "accessionNumber"},
     "extract_total_revenue": {"ticker"},
     "get_thai_fund_nav": {"fund_class_name"},

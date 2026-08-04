@@ -22,6 +22,252 @@ const UA =
  */
 const MAX_TICKERS = 5;
 const FINNHUB_COMPANY_NEWS_API = "https://finnhub.io/api/v1/company-news";
+const ALPHA_VANTAGE_API = "https://www.alphavantage.co/query";
+const FINNHUB_API = "https://finnhub.io/api/v1";
+const ALPHA_HISTORICAL_PUT_CALL_TTL_MS = 365 * 24 * 60 * 60 * 1000;
+const PROVIDER_OWNERSHIP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const ALPHA_TRANSCRIPT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+type ProviderJsonResult = {
+  payload: Record<string, unknown> | null;
+  status: string;
+  publicUrl: string;
+  providerAttempted: boolean;
+  cacheStatus: "MISS" | "HIT_PROCESS" | "HIT_EDGE";
+  fetchedAt?: string;
+  httpStatus?: number;
+  message?: string;
+  retryAfter?: string;
+};
+
+type ProviderCacheEntry = {
+  payload: Record<string, unknown>;
+  publicUrl: string;
+  fetchedAt: string;
+  storedAt: number;
+  ttlMs: number;
+};
+
+type EdgeCache = {
+  match(request: Request): Promise<Response | undefined>;
+  put(request: Request, response: Response): Promise<void>;
+};
+
+const providerJsonCache = new Map<string, ProviderCacheEntry>();
+
+function providerCacheKey(provider: string, operation: string, params: Record<string, unknown>): string {
+  const query = new URLSearchParams(
+    Object.entries(params)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, value]): [string, string] => [key, String(value)])
+  );
+  return `${provider}:${operation}:${query.toString()}`;
+}
+
+function providerEdgeRequest(cacheKey: string): Request {
+  return new Request(`https://provider-cache.invalid/${encodeURIComponent(cacheKey)}`);
+}
+
+function edgeCache(): EdgeCache | null {
+  const runtime = globalThis as typeof globalThis & { caches?: { default?: EdgeCache } };
+  return runtime.caches?.default ?? null;
+}
+
+async function getProviderCache(cacheKey: string, ttlMs: number): Promise<ProviderJsonResult | null> {
+  const memory = providerJsonCache.get(cacheKey);
+  if (memory && Date.now() - memory.storedAt < Math.min(ttlMs, memory.ttlMs)) {
+    return {
+      payload: memory.payload,
+      status: "OK",
+      publicUrl: memory.publicUrl,
+      providerAttempted: false,
+      cacheStatus: "HIT_PROCESS",
+      fetchedAt: memory.fetchedAt,
+    };
+  }
+  const cache = edgeCache();
+  if (!cache) return null;
+  try {
+    const response = await cache.match(providerEdgeRequest(cacheKey));
+    if (!response) return null;
+    const value = await response.json() as ProviderCacheEntry;
+    if (!value?.payload || Date.now() - Number(value.storedAt) >= Math.min(ttlMs, Number(value.ttlMs))) return null;
+    providerJsonCache.set(cacheKey, value);
+    return {
+      payload: value.payload,
+      status: "OK",
+      publicUrl: value.publicUrl,
+      providerAttempted: false,
+      cacheStatus: "HIT_EDGE",
+      fetchedAt: value.fetchedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function setProviderCache(
+  cacheKey: string,
+  payload: Record<string, unknown>,
+  publicUrl: string,
+  fetchedAt: string,
+  ttlMs: number,
+): Promise<void> {
+  const value: ProviderCacheEntry = { payload, publicUrl, fetchedAt, storedAt: Date.now(), ttlMs };
+  providerJsonCache.set(cacheKey, value);
+  const cache = edgeCache();
+  if (!cache) return;
+  try {
+    await cache.put(
+      providerEdgeRequest(cacheKey),
+      new Response(JSON.stringify(value), {
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": `public, max-age=${Math.max(1, Math.floor(ttlMs / 1000))}`,
+        },
+      }),
+    );
+  } catch {
+    // Edge cache is best effort; the provider response remains usable.
+  }
+}
+
+function providerMessageStatus(message: string): string {
+  const normalized = message.toLowerCase();
+  if (/rate limit|frequency|call volume|standard api rate|too many requests/.test(normalized)) return "RATE_LIMIT";
+  if (/premium|subscription|subscribe|entitlement|current plan|access to this resource/.test(normalized)) return "ENTITLEMENT_REQUIRED";
+  if (/api key|apikey|authentication|unauthorized|invalid token|forbidden/.test(normalized)) return "AUTH_ERROR";
+  return "PROVIDER_ERROR";
+}
+
+function providerHttpStatus(status: number, message: string): string {
+  if (status === 429) return "RATE_LIMIT";
+  if (status === 401) return "AUTH_ERROR";
+  if (status === 403) return providerMessageStatus(message) === "ENTITLEMENT_REQUIRED" ? "ENTITLEMENT_REQUIRED" : "AUTH_ERROR";
+  if (status === 404) return "NOT_FOUND";
+  return "PROVIDER_ERROR";
+}
+
+async function fetchProviderWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchAlphaVantageJson(
+  operation: string,
+  params: Record<string, unknown>,
+  ttlMs: number,
+): Promise<ProviderJsonResult> {
+  const safeParams = { function: operation, ...params };
+  const cacheKey = providerCacheKey("alpha_vantage", operation, safeParams);
+  const cached = await getProviderCache(cacheKey, ttlMs);
+  if (cached) return cached;
+  const apiKey = getWorkerVar("ALPHA_VANTAGE_API_KEY") ?? getWorkerVar("ALPHAVANTAGE_API_KEY");
+  const publicQuery = new URLSearchParams({
+    ...Object.fromEntries(Object.entries(safeParams).map(([key, value]) => [key, String(value)])),
+    apikey: "REDACTED",
+  });
+  const publicUrl = `${ALPHA_VANTAGE_API}?${publicQuery.toString()}`;
+  if (!apiKey) return { payload: null, status: "SOURCE_UNCONFIGURED", publicUrl, providerAttempted: false, cacheStatus: "MISS" };
+  const requestQuery = new URLSearchParams(publicQuery);
+  requestQuery.set("apikey", apiKey);
+  try {
+    const response = await fetchProviderWithTimeout(
+      `${ALPHA_VANTAGE_API}?${requestQuery.toString()}`,
+      { headers: { "User-Agent": UA } },
+      30_000,
+    );
+    const retryAfter = response.headers.get("Retry-After") ?? undefined;
+    if (!response.ok) {
+      const body = (await response.text()).replaceAll(apiKey, "REDACTED");
+      return {
+        payload: null,
+        status: providerHttpStatus(response.status, body),
+        publicUrl,
+        providerAttempted: true,
+        cacheStatus: "MISS",
+        httpStatus: response.status,
+        message: body.slice(0, 500) || undefined,
+        retryAfter,
+      };
+    }
+    const rawJson = await response.json();
+    if (!rawJson || typeof rawJson !== "object" || Array.isArray(rawJson)) {
+      return { payload: null, status: "PROVIDER_ERROR", publicUrl, providerAttempted: true, cacheStatus: "MISS", message: "Alpha Vantage returned a non-object payload." };
+    }
+    const json = rawJson as Record<string, unknown>;
+    const providerMessage = String(json.Note ?? json.Information ?? json["Error Message"] ?? "").replaceAll(apiKey, "REDACTED");
+    if (providerMessage) {
+      return { payload: null, status: providerMessageStatus(providerMessage), publicUrl, providerAttempted: true, cacheStatus: "MISS", message: providerMessage };
+    }
+    const fetchedAt = new Date().toISOString();
+    await setProviderCache(cacheKey, json, publicUrl, fetchedAt, ttlMs);
+    return { payload: json, status: "OK", publicUrl, providerAttempted: true, cacheStatus: "MISS", fetchedAt };
+  } catch (error) {
+    const message = error instanceof Error ? error.message.replaceAll(apiKey, "REDACTED") : String(error);
+    const status = /timeout|timed out|abort/i.test(message) ? "TIMEOUT" : "PROVIDER_ERROR";
+    return { payload: null, status, publicUrl, providerAttempted: true, cacheStatus: "MISS", message };
+  }
+}
+
+async function fetchFinnhubJson(
+  path: string,
+  params: Record<string, unknown>,
+  ttlMs: number,
+): Promise<ProviderJsonResult> {
+  const cleanPath = `/${path.replace(/^\/+/, "")}`;
+  const cacheKey = providerCacheKey("finnhub", cleanPath, params);
+  const cached = await getProviderCache(cacheKey, ttlMs);
+  if (cached) return cached;
+  const token = getWorkerVar("FINNHUB_API_KEY") ?? getWorkerVar("FINNHUB_TOKEN");
+  const query = new URLSearchParams(
+    Object.entries(params).map(([key, value]): [string, string] => [key, String(value)])
+  );
+  const publicUrl = `${FINNHUB_API}${cleanPath}?${query.toString()}`;
+  if (!token) return { payload: null, status: "SOURCE_UNCONFIGURED", publicUrl, providerAttempted: false, cacheStatus: "MISS" };
+  try {
+    const response = await fetchProviderWithTimeout(
+      publicUrl,
+      { headers: { "User-Agent": UA, "X-Finnhub-Token": token } },
+      20_000,
+    );
+    const retryAfter = response.headers.get("Retry-After") ?? undefined;
+    if (!response.ok) {
+      const body = (await response.text()).replaceAll(token, "REDACTED");
+      return {
+        payload: null,
+        status: providerHttpStatus(response.status, body),
+        publicUrl,
+        providerAttempted: true,
+        cacheStatus: "MISS",
+        httpStatus: response.status,
+        message: body.slice(0, 500) || undefined,
+        retryAfter,
+      };
+    }
+    const json = await response.json();
+    if (!json || typeof json !== "object" || Array.isArray(json)) {
+      return { payload: null, status: "PROVIDER_ERROR", publicUrl, providerAttempted: true, cacheStatus: "MISS", message: "Finnhub returned a non-object payload." };
+    }
+    const payload = json as Record<string, unknown>;
+    const fetchedAt = new Date().toISOString();
+    await setProviderCache(cacheKey, payload, publicUrl, fetchedAt, ttlMs);
+    return { payload, status: "OK", publicUrl, providerAttempted: true, cacheStatus: "MISS", fetchedAt };
+  } catch (error) {
+    const message = error instanceof Error ? error.message.replaceAll(token, "REDACTED") : String(error);
+    const status = /timeout|timed out|abort/i.test(message) ? "TIMEOUT" : "PROVIDER_ERROR";
+    return { payload: null, status, publicUrl, providerAttempted: true, cacheStatus: "MISS", message };
+  }
+}
 const GLOBENEWSWIRE_RSS_FEEDS: Array<{ name: string; url: string }> = [
   {
     name: "public_companies",
@@ -1198,6 +1444,295 @@ export async function getHolderInfo(ticker: string, type: string): Promise<strin
   if (!result) return noData(ticker);
 
   return JSON.stringify(result[mod]);
+}
+
+function providerNumber(value: unknown): number | null {
+  if (value == null || typeof value === "boolean") return null;
+  const parsed = Number(String(value).replaceAll(",", ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function providerAttempt(provider: string, result: ProviderJsonResult): Record<string, unknown> {
+  return Object.fromEntries(Object.entries({
+    provider,
+    status: result.status,
+    attempted: result.providerAttempted,
+    cacheStatus: result.cacheStatus,
+    url: result.publicUrl,
+    httpStatus: result.httpStatus,
+    message: result.message,
+    retryAfter: result.retryAfter,
+  }).filter(([, value]) => value != null));
+}
+
+function providerRecovery(status: string, alphaAllowed = false): string {
+  if (status === "SOURCE_UNCONFIGURED") return "CONFIGURE_PROVIDER";
+  if (status === "AUTH_ERROR") return "CHECK_PROVIDER_CREDENTIALS";
+  if (status === "ENTITLEMENT_REQUIRED") return alphaAllowed ? "USE_ALPHA_VANTAGE_EXPLICITLY" : "CHECK_PROVIDER_ENTITLEMENT";
+  if (status === "RATE_LIMIT") return "RETRY_AFTER_PROVIDER_RESET";
+  if (status === "TIMEOUT") return "RETRY_PROVIDER";
+  if (status === "NOT_ELIGIBLE") return "USE_YAHOO_OR_OFFICIAL_FILINGS";
+  if (status === "NOT_FOUND") return "VERIFY_TICKER_AND_DATE";
+  return "RETRY_OR_USE_PRIMARY_PROVIDER";
+}
+
+export async function getHistoricalPutCallRatio(ticker: string, date: string): Promise<string> {
+  const tool = "get_historical_put_call_ratio";
+  if (!String(ticker ?? "").trim()) {
+    return mcpFailure(tool, ErrorCode.INPUT_VALIDATION_ERROR, "ticker is required.");
+  }
+  const normalizedDate = String(date ?? "").trim();
+  const parsedDate = /^\d{4}-\d{2}-\d{2}$/.test(normalizedDate)
+    ? new Date(`${normalizedDate}T00:00:00.000Z`)
+    : new Date(Number.NaN);
+  const today = new Date().toISOString().slice(0, 10);
+  if (
+    !Number.isFinite(parsedDate.getTime())
+    || parsedDate.toISOString().slice(0, 10) !== normalizedDate
+    || normalizedDate <= "2008-01-01"
+    || normalizedDate > today
+  ) {
+    return mcpFailure(
+      tool,
+      ErrorCode.INPUT_VALIDATION_ERROR,
+      "date must be a valid YYYY-MM-DD after 2008-01-01 and not in the future. Use summarize_options_flow for a current Yahoo options snapshot.",
+    );
+  }
+  const tickerU = ticker.toUpperCase();
+  const result = await fetchAlphaVantageJson(
+    "HISTORICAL_PUT_CALL_RATIO",
+    { symbol: tickerU, date: normalizedDate },
+    ALPHA_HISTORICAL_PUT_CALL_TTL_MS,
+  );
+  const attempts = [providerAttempt("alpha_vantage", result)];
+  if (result.status !== "OK" || !result.payload) {
+    return JSON.stringify({
+      ticker: tickerU,
+      status: result.status,
+      source: null,
+      providerGapFilled: false,
+      capacityClass: "SCARCE_SHARED_QUOTA",
+      dataDate: normalizedDate,
+      evidenceClass: "CONTEXTUAL_PROVIDER_DATA",
+      decisionGrade: false,
+      providerAttempts: attempts,
+      recommendedNextAction: providerRecovery(result.status),
+    });
+  }
+  const responseSymbol = (_str(result.payload.symbol) || tickerU).toUpperCase();
+  const responseDate = _str(result.payload.date) || normalizedDate;
+  if (responseSymbol !== tickerU || responseDate !== normalizedDate) {
+    attempts[0].validationStatus = "PROVIDER_IDENTITY_MISMATCH";
+    return JSON.stringify({
+      ticker: tickerU,
+      status: "PROVIDER_IDENTITY_MISMATCH",
+      source: null,
+      providerGapFilled: false,
+      capacityClass: "SCARCE_SHARED_QUOTA",
+      dataDate: normalizedDate,
+      evidenceClass: "CONTEXTUAL_PROVIDER_DATA",
+      decisionGrade: false,
+      providerAttempts: attempts,
+      recommendedNextAction: "RETRY_OR_VERIFY_PROVIDER_RESPONSE",
+    });
+  }
+  const fullChain = providerNumber(result.payload.put_call_ratio_full_chain);
+  const byExpiration = (Array.isArray(result.payload.put_call_ratio_by_expiration)
+    ? result.payload.put_call_ratio_by_expiration
+    : [])
+    .filter((row): row is Record<string, unknown> => !!row && typeof row === "object" && !Array.isArray(row))
+    .map((row) => ({
+      expirationDate: _str(row.date),
+      putCallRatio: providerNumber(row.value),
+    }))
+    .filter((row) => row.expirationDate && row.putCallRatio != null);
+  if (fullChain == null && byExpiration.length === 0) {
+    return JSON.stringify({
+      ticker: tickerU,
+      status: "PROVIDER_ERROR",
+      source: null,
+      providerGapFilled: false,
+      capacityClass: "SCARCE_SHARED_QUOTA",
+      dataDate: normalizedDate,
+      evidenceClass: "CONTEXTUAL_PROVIDER_DATA",
+      decisionGrade: false,
+      providerAttempts: attempts,
+      recommendedNextAction: "RETRY_OR_USE_PRIMARY_PROVIDER",
+    });
+  }
+  return JSON.stringify({
+    ticker: tickerU,
+    status: "OK",
+    source: "alpha_vantage",
+    providerGapFilled: true,
+    capacityClass: "SCARCE_SHARED_QUOTA",
+    dataDate: responseDate,
+    freshnessStatus: "HISTORICAL_OBSERVATION",
+    putCallRatioFullChain: fullChain,
+    byExpiration,
+    expirationCount: byExpiration.length,
+    evidenceClass: "CONTEXTUAL_OPTIONS_DATA",
+    decisionGrade: false,
+    cacheStatus: result.cacheStatus,
+    fetchedAt: result.fetchedAt ?? null,
+    providerAttempts: attempts,
+    recommendedNextAction: "NONE",
+  });
+}
+
+function ownershipRows(payload: Record<string, unknown>, provider: string): Record<string, unknown>[] {
+  const candidates = [payload.holdings, payload.ownership, payload.data].find(Array.isArray);
+  if (!Array.isArray(candidates)) return [];
+  return candidates
+    .filter((row): row is Record<string, unknown> => !!row && typeof row === "object" && !Array.isArray(row))
+    .map((row) => {
+      const normalized = provider === "alpha_vantage"
+        ? {
+            holderName: row.holder_name,
+            sharesHeld: providerNumber(row.shares_held),
+            sharesChanged: providerNumber(row.shares_changed),
+            sharesChangedPct: providerNumber(row.shares_changed_percentage),
+            changeType: row.change_type,
+            reportDate: row.last_reported,
+          }
+        : {
+            holderName: row.name ?? row.holder ?? row.holderName,
+            sharesHeld: providerNumber(row.share ?? row.shares ?? row.sharesHeld),
+            sharesChanged: providerNumber(row.change ?? row.sharesChanged),
+            sharesChangedPct: providerNumber(row.changePercent ?? row.sharesChangedPct),
+            reportDate: row.filingDate ?? row.reportDate ?? row.date,
+          };
+      return Object.fromEntries(Object.entries(normalized).filter(([, value]) => value != null && value !== ""));
+    })
+    .filter((row) => Object.keys(row).length > 0);
+}
+
+function ownershipDataDate(payload: Record<string, unknown>, rows: Record<string, unknown>[]): string | null {
+  const direct = payload.date ?? payload.last_reported ?? payload.lastReported;
+  if (direct) return String(direct).slice(0, 10);
+  const dates = rows.map(row => _str(row.reportDate).slice(0, 10)).filter(Boolean).sort().reverse();
+  return dates[0] ?? null;
+}
+
+export async function getExpandedInstitutionalOwnership(
+  ticker: string,
+  allowScarceFallback = false,
+  maxHolders = 50,
+): Promise<string> {
+  const tool = "get_expanded_institutional_ownership";
+  if (!String(ticker ?? "").trim()) {
+    return mcpFailure(tool, ErrorCode.INPUT_VALIDATION_ERROR, "ticker is required.");
+  }
+  if (!Number.isInteger(maxHolders) || maxHolders < 1 || maxHolders > 100) {
+    return mcpFailure(tool, ErrorCode.INPUT_VALIDATION_ERROR, "max_holders must be an integer from 1 through 100.");
+  }
+  const tickerU = ticker.toUpperCase();
+  const attempts: Record<string, unknown>[] = [];
+  const eligibility = finnhubEligibility(tickerU);
+  let provider = "finnhub";
+  let result: ProviderJsonResult;
+  if (eligibility.eligible) {
+    result = await fetchFinnhubJson("/stock/ownership", { symbol: tickerU, limit: maxHolders }, PROVIDER_OWNERSHIP_TTL_MS);
+    attempts.push(providerAttempt("finnhub", result));
+  } else {
+    result = {
+      payload: null,
+      status: "NOT_ELIGIBLE",
+      publicUrl: "",
+      providerAttempted: false,
+      cacheStatus: "MISS",
+      message: eligibility.reasonCode ?? undefined,
+    };
+    attempts.push({ provider: "finnhub", status: "NOT_ELIGIBLE", attempted: false, reasonCode: eligibility.reasonCode });
+  }
+  let rows = result.payload ? ownershipRows(result.payload, "finnhub") : [];
+  if (result.payload && (_str(result.payload.symbol) || tickerU).toUpperCase() !== tickerU) {
+    attempts[attempts.length - 1].validationStatus = "PROVIDER_IDENTITY_MISMATCH";
+    result = {
+      ...result,
+      payload: null,
+      status: "PROVIDER_IDENTITY_MISMATCH",
+      message: "Provider response symbol did not match the requested ticker.",
+    };
+    rows = [];
+  }
+  if (rows.length === 0 && allowScarceFallback) {
+    provider = "alpha_vantage";
+    result = await fetchAlphaVantageJson("INSTITUTIONAL_HOLDINGS", { symbol: tickerU }, PROVIDER_OWNERSHIP_TTL_MS);
+    attempts.push(providerAttempt("alpha_vantage", result));
+    rows = result.payload ? ownershipRows(result.payload, "alpha_vantage") : [];
+    if (result.payload && (_str(result.payload.symbol) || tickerU).toUpperCase() !== tickerU) {
+      attempts[attempts.length - 1].validationStatus = "PROVIDER_IDENTITY_MISMATCH";
+      result = {
+        ...result,
+        payload: null,
+        status: "PROVIDER_IDENTITY_MISMATCH",
+        message: "Provider response symbol did not match the requested ticker.",
+      };
+      rows = [];
+    }
+  }
+  const capacityClass = provider === "alpha_vantage" ? "SCARCE_SHARED_QUOTA" : "ENTITLEMENT_DEPENDENT";
+  if (result.status !== "OK" || !result.payload || rows.length === 0) {
+    const status = result.status === "OK" ? "NOT_FOUND" : result.status;
+    const recommendedNextAction = status === "NOT_FOUND" && !allowScarceFallback
+      ? "VERIFY_SEC_13F_OR_ENABLE_SCARCE_FALLBACK"
+      : providerRecovery(status, !allowScarceFallback);
+    return JSON.stringify({
+      ticker: tickerU,
+      status,
+      source: null,
+      providerGapFilled: false,
+      capacityClass,
+      evidenceClass: "CONTEXTUAL_PROVIDER_DATA",
+      decisionGrade: false,
+      providerAttempts: attempts,
+      alphaFallbackAllowed: allowScarceFallback,
+      recommendedNextAction,
+    });
+  }
+  const totalCount = rows.length;
+  const holders = rows.slice(0, maxHolders);
+  const dataDate = ownershipDataDate(result.payload, holders);
+  const aggregate: Record<string, number> = {};
+  if (provider === "alpha_vantage") {
+    const mappings: Array<[string, string]> = [
+      ["total_institutional_holders", "totalInstitutionalHolders"],
+      ["total_institutional_shares", "totalInstitutionalShares"],
+      ["total_institutional_ownership_percentage", "totalInstitutionalOwnershipPct"],
+      ["holders_with_increased_holdings", "holdersIncreased"],
+      ["holders_with_decreased_holdings", "holdersDecreased"],
+      ["holders_with_unchanged_holdings", "holdersUnchanged"],
+      ["shares_with_increased_holdings", "sharesIncreased"],
+      ["shares_with_decreased_holdings", "sharesDecreased"],
+      ["shares_with_unchanged_holdings", "sharesUnchanged"],
+    ];
+    for (const [input, output] of mappings) {
+      const value = providerNumber(result.payload[input]);
+      if (value != null) aggregate[output] = value;
+    }
+  }
+  return JSON.stringify({
+    ticker: tickerU,
+    status: "OK",
+    source: provider,
+    providerGapFilled: true,
+    capacityClass,
+    scope: "PROVIDER_AGGREGATED_INSTITUTIONAL_OWNERSHIP",
+    dataDate,
+    freshnessStatus: dataDate ? "DATED" : "DATE_NOT_DISCLOSED",
+    holders,
+    returnedCount: holders.length,
+    providerRowCount: totalCount,
+    truncated: totalCount > holders.length,
+    aggregate,
+    evidenceClass: "CONTEXTUAL_OWNERSHIP_DATA",
+    decisionGrade: false,
+    cacheStatus: result.cacheStatus,
+    fetchedAt: result.fetchedAt ?? null,
+    providerAttempts: attempts,
+    recommendedNextAction: "VERIFY_SEC_13F_FOR_MATERIAL_USE",
+  });
 }
 
 export async function getOptionExpirationDates(ticker: string): Promise<string> {
@@ -8471,6 +9006,7 @@ function buildCoverage(sourceStatus: Record<string, unknown>, resolvedAction: st
   const failedStatuses = new Set(["UNCONFIGURED", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED", "IDENTITY_UNAVAILABLE", "WEBSITE_NOT_AVAILABLE", "DISCOVERY_NOT_FOUND", "DISCOVERY_BUDGET_EXHAUSTED", "FEED_NOT_FOUND", "PARSE_ERROR", "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED"]);
   const failedSources: Record<string, unknown>[] = [];
   const skippedSources: Record<string, unknown>[] = [];
+  const truncatedSources: Record<string, unknown>[] = [];
   for (const [source, value] of Object.entries(sourceStatus)) {
     if (!value || typeof value !== "object") continue;
     const info = value as Record<string, unknown>;
@@ -8478,13 +9014,23 @@ function buildCoverage(sourceStatus: Record<string, unknown>, resolvedAction: st
     const entry = { source, status, attempted: info.attempted !== false, reasonCode: info.reasonCode ?? null };
     if (status === "NOT_ELIGIBLE") skippedSources.push(entry);
     else if (failedStatuses.has(status)) failedSources.push(entry);
+    if (info.hasMoreAccepted === true) {
+      truncatedSources.push({
+        source,
+        acceptedCount: Number(info.acceptedCount ?? 0),
+        returnedCount: Number(info.returnedCount ?? 0),
+        truncatedCount: Number(info.truncatedCount ?? 0),
+      });
+    }
   }
   const recommendedNextAction = resolvedAction ?? (
     failedSources.some(entry => ["RATE_LIMITED", "TIMEOUT"].includes(_str(entry.status)))
       ? "RETRY_RETRYABLE_SOURCES"
-      : (failedSources.length || skippedSources.length ? "CHECK_OFFICIAL_RELEASES" : "USE_RETURNED_CONTEXT")
+      : (failedSources.length || skippedSources.length
+        ? "CHECK_OFFICIAL_RELEASES"
+        : (truncatedSources.length ? "RETRY_TRUNCATED_SOURCE" : "USE_RETURNED_CONTEXT"))
   );
-  return { state: computeSourceCoverage(sourceStatus), failedSources, skippedSources, recommendedNextAction };
+  return { state: computeSourceCoverage(sourceStatus), failedSources, skippedSources, truncatedSources, recommendedNextAction };
 }
 
 type CompanyIrPageSource = {
@@ -10087,7 +10633,23 @@ function computeSourceStatus(
     if (_str(diagnostic.status) === "NOT_ELIGIBLE") {
       result.finnhub = { status: "NOT_ELIGIBLE", rawCount: 0, filteredCount: 0, ...diagnostic };
     } else if (sourcesUsed.includes("finnhub")) {
-      result.finnhub = { status: finnhubItems.length > 0 ? "OK" : "EMPTY_RESULT", rawCount: finnhubItems.length, filteredCount: finnhubItems.length };
+      const acceptedCount = Number(diagnostic.acceptedCount ?? finnhubItems.length);
+      const returnedCount = finnhubItems.length;
+      const truncatedCount = Math.max(0, acceptedCount - returnedCount);
+      result.finnhub = {
+        status: acceptedCount > 0 ? "OK" : "EMPTY_RESULT",
+        rawCount: Number(diagnostic.rawCount ?? acceptedCount),
+        retrievedCount: Number(diagnostic.retrievedCount ?? diagnostic.rawCount ?? acceptedCount),
+        filteredCount: acceptedCount,
+        acceptedCount,
+        collectedCount: Number(diagnostic.collectedCount ?? acceptedCount),
+        returnedCount,
+        rejectedCount: Number(diagnostic.rejectedCount ?? 0),
+        rejectionCounts: diagnostic.rejectionCounts ?? {},
+        truncatedCount,
+        hasMoreAccepted: truncatedCount > 0,
+        attempted: diagnostic.attempted !== false,
+      };
     } else if (warningMsgs.some(m => m.includes("finnhub company-news source is not configured"))) {
       result.finnhub = { status: "UNCONFIGURED" };
     } else if (warningMsgs.some(m => m.includes("finnhub auth error"))) {
@@ -10554,13 +11116,29 @@ async function collectFinnhubEvents(
   startDate = "",
   endDate = "",
   lookbackDays?: number
-): Promise<{ items: Record<string, unknown>[]; warnings: Record<string, unknown>[]; used: boolean }> {
+): Promise<{ items: Record<string, unknown>[]; warnings: Record<string, unknown>[]; used: boolean; diagnostics: Record<string, unknown> }> {
   const warnings: Record<string, unknown>[] = [];
   const items: Record<string, unknown>[] = [];
+  const rejectionCounts: Record<string, number> = {};
+  const diagnostics: Record<string, unknown> = {
+    rawCount: 0,
+    retrievedCount: 0,
+    acceptedCount: 0,
+    collectedCount: 0,
+    rejectedCount: 0,
+    rejectionCounts,
+    attempted: true,
+    completed: false,
+  };
+  const reject = (reason: string): void => {
+    rejectionCounts[reason] = (rejectionCounts[reason] ?? 0) + 1;
+    diagnostics.rejectedCount = Number(diagnostics.rejectedCount ?? 0) + 1;
+  };
   const token = getWorkerVar("FINNHUB_API_KEY") ?? getWorkerVar("FINNHUB_TOKEN");
   if (!token) {
     warnings.push({ code: "SOURCE_UNAVAILABLE", message: "Finnhub company-news source is not configured; skipped.", severity: "warning" });
-    return { items, warnings, used: false };
+    diagnostics.attempted = false;
+    return { items, warnings, used: false, diagnostics };
   }
   try {
     const now = new Date();
@@ -10582,14 +11160,25 @@ async function collectFinnhubEvents(
     if (!Array.isArray(rawJson)) {
       throw new Error(`FINNHUB_PROVIDER_CHANGED: expected array, got ${typeof rawJson}`);
     }
-    const news = rawJson as Record<string, unknown>[];
+    const news = rawJson as unknown[];
+    diagnostics.rawCount = news.length;
+    diagnostics.retrievedCount = news.length;
     const tickerU = ticker.toUpperCase();
     for (const n of news) {
-      const title = _str(n.headline).trim();
-      const summary = _str(n.summary).trim();
-      const originalSource = _str(n.source).trim() || null;
-      const urlStr = _str(n.url).trim() || null;
-      const publishedAt = normalizeIso(n.datetime);
+      if (!n || typeof n !== "object" || Array.isArray(n)) {
+        reject("INVALID_ROW");
+        continue;
+      }
+      const row = n as Record<string, unknown>;
+      const title = _str(row.headline).trim();
+      if (!title) {
+        reject("MISSING_HEADLINE");
+        continue;
+      }
+      const summary = _str(row.summary).trim();
+      const originalSource = _str(row.source).trim() || null;
+      const urlStr = _str(row.url).trim() || null;
+      const publishedAt = normalizeIso(row.datetime);
       const duplicateGroupId = makeDupGroupId(tickerU, title, publishedAt, null);
       if (!duplicateGroupId) {
         warnings.push({ code: "DEDUPE_WEAK_KEY", message: "Weak dedupe key for at least one item.", severity: "warning" });
@@ -10613,9 +11202,12 @@ async function collectFinnhubEvents(
         decisionUse: sourceDecisionUse("company_news"),
         duplicateGroupId,
       };
-      if (!withinDateWindow(_str(item.publishedAt) || null, startDate, endDate, lookbackDays)) continue;
-      items.push(item);
-      if (items.length >= maxResults) break;
+      if (!withinDateWindow(_str(item.publishedAt) || null, startDate, endDate, lookbackDays)) {
+        reject("DATE_OUTSIDE_WINDOW");
+        continue;
+      }
+      diagnostics.acceptedCount = Number(diagnostics.acceptedCount ?? 0) + 1;
+      if (items.length < maxResults) items.push(item);
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -10628,9 +11220,11 @@ async function collectFinnhubEvents(
     } else {
       warnings.push({ code: "SOURCE_UNAVAILABLE", message: `Finnhub source unavailable: ${msg}`, severity: "warning" });
     }
-    return { items, warnings, used: false };
+    return { items, warnings, used: false, diagnostics };
   }
-  return { items, warnings, used: true };
+  diagnostics.collectedCount = items.length;
+  diagnostics.completed = true;
+  return { items, warnings, used: true, diagnostics };
 }
 
 async function collectCompanyEvents(
@@ -10780,6 +11374,7 @@ async function collectCompanyEvents(
 
   if (selected.includes("finnhub") && finnhubEligibility(ticker).eligible) {
     const finnhub = await collectFinnhubEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback);
+    sourceDiagnostics.finnhub = finnhub.diagnostics;
     if (finnhub.used) sourcesUsed.push("finnhub");
     items.push(...finnhub.items);
     warnings.push(...finnhub.warnings);
@@ -12264,53 +12859,34 @@ async function fetchAlphaVantageTranscript(
   quarter: string,
   topics: string[] | null = null,
 ): Promise<{ payload: Record<string, unknown> | null; attempt: Record<string, unknown> }> {
-  const apiKey = getWorkerVar("ALPHA_VANTAGE_API_KEY") ?? getWorkerVar("ALPHAVANTAGE_API_KEY");
-  if (!apiKey) {
+  const result = await fetchAlphaVantageJson(
+    "EARNINGS_CALL_TRANSCRIPT",
+    { symbol: ticker.toUpperCase(), quarter },
+    ALPHA_TRANSCRIPT_TTL_MS,
+  );
+  const safeUrl = result.publicUrl;
+  const rateLimit = {
+    provider: "alpha_vantage",
+    used: result.providerAttempted,
+    note: "Alpha Vantage free-tier rate limits may apply.",
+  };
+  if (result.status !== "OK" || !result.payload) {
     return {
       payload: null,
-      attempt: transcriptAttempt("alpha_vantage", "SOURCE_UNCONFIGURED", {
-        reasonCode: "ALPHA_VANTAGE_API_KEY_MISSING",
-        reason: "ALPHA_VANTAGE_API_KEY not configured.",
-        rateLimit: { provider: "alpha_vantage", used: false },
+      attempt: transcriptAttempt("alpha_vantage", result.status, {
+        url: safeUrl,
+        quarter,
+        httpStatus: result.httpStatus,
+        message: result.message,
+        retryAfter: result.retryAfter,
+        cacheStatus: result.cacheStatus,
+        rateLimit,
+        reasonCode: result.status === "SOURCE_UNCONFIGURED" ? "ALPHA_VANTAGE_API_KEY_MISSING" : null,
+        reason: result.status === "SOURCE_UNCONFIGURED" ? "ALPHA_VANTAGE_API_KEY not configured." : null,
       }),
     };
   }
-  const params = new URLSearchParams({
-    function: "EARNINGS_CALL_TRANSCRIPT",
-    symbol: ticker.toUpperCase(),
-    quarter,
-    apikey: apiKey,
-  });
-  const url = `https://www.alphavantage.co/query?${params.toString()}`;
-  params.set("apikey", "REDACTED");
-  const safeUrl = `https://www.alphavantage.co/query?${params.toString()}`;
-  const rateLimit = { provider: "alpha_vantage", used: true, note: "Alpha Vantage free-tier rate limits may apply." };
-  let json: Record<string, unknown> | null = null;
-  try {
-    const resp = await fetch(url, { headers: { "User-Agent": UA } });
-    if (!resp.ok) {
-      await resp.body?.cancel();
-      const status = resp.status === 401 || resp.status === 403
-        ? "AUTH_ERROR"
-        : resp.status === 429
-          ? "RATE_LIMIT"
-          : "PROVIDER_ERROR";
-      return { payload: null, attempt: transcriptAttempt("alpha_vantage", status, { url: safeUrl, quarter, httpStatus: resp.status, rateLimit }) };
-    }
-    json = await resp.json() as Record<string, unknown>;
-  } catch {
-    return { payload: null, attempt: transcriptAttempt("alpha_vantage", "PROVIDER_ERROR", { url: safeUrl, quarter, rateLimit }) };
-  }
-  const providerMessage = String(json.Note ?? json.Information ?? json["Error Message"] ?? "").replaceAll(apiKey, "REDACTED");
-  if (providerMessage) {
-    const normalized = providerMessage.toLowerCase();
-    const status = /rate limit|frequency|call volume|standard api rate/.test(normalized)
-      ? "RATE_LIMIT"
-      : /api key|apikey|authentication|unauthorized|forbidden/.test(normalized)
-        ? "AUTH_ERROR"
-        : "PROVIDER_ERROR";
-    return { payload: null, attempt: transcriptAttempt("alpha_vantage", status, { url: safeUrl, quarter, message: providerMessage, rateLimit }) };
-  }
+  const json = result.payload;
   const rows = Array.isArray(json.transcript) ? json.transcript as Record<string, unknown>[] : [];
   const paragraphs = rows
     .map((row) => {
@@ -12320,7 +12896,7 @@ async function fetchAlphaVantageTranscript(
     })
     .filter(Boolean);
   if (!paragraphs.length) {
-    return { payload: null, attempt: transcriptAttempt("alpha_vantage", "NOT_FOUND", { url: safeUrl, quarter, rateLimit }) };
+    return { payload: null, attempt: transcriptAttempt("alpha_vantage", "NOT_FOUND", { url: safeUrl, quarter, rateLimit, cacheStatus: result.cacheStatus }) };
   }
   const cleanText = paragraphs.join("\n\n");
   const warnings: Record<string, unknown>[] = [];
@@ -12341,7 +12917,7 @@ async function fetchAlphaVantageTranscript(
         truncated: false,
         warnings,
       },
-      attempt: transcriptAttempt("alpha_vantage", "SUCCESS", { url: safeUrl, quarter, rateLimit }),
+      attempt: transcriptAttempt("alpha_vantage", "SUCCESS", { url: safeUrl, quarter, rateLimit, cacheStatus: result.cacheStatus }),
     };
   }
   const maxChars = 50_000;
@@ -12359,7 +12935,7 @@ async function fetchAlphaVantageTranscript(
       truncated,
       warnings,
     },
-    attempt: transcriptAttempt("alpha_vantage", "SUCCESS", { url: safeUrl, quarter, rateLimit }),
+    attempt: transcriptAttempt("alpha_vantage", "SUCCESS", { url: safeUrl, quarter, rateLimit, cacheStatus: result.cacheStatus }),
   };
 }
 

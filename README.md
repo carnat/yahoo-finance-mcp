@@ -106,9 +106,9 @@ after switching tool modes.
 Main public tool areas:
 
 - price, volume, technicals, short interest, and market snapshots;
-- company profile, section-selectable fund data, annual/quarterly/trailing statements, current and historical valuation ratios, share-count trends, credit health, ownership, and corporate actions including fund capital-gain distributions;
+- company profile, section-selectable fund data, annual/quarterly/trailing statements, current and historical valuation ratios, share-count trends, credit health, Yahoo holder views, explicit deeper institutional ownership, and corporate actions including fund capital-gain distributions;
 - analyst consensus, EPS revision counts, rating changes, ticker earnings history, and market-wide earnings/economic/IPO/split calendars;
-- options expirations, chains, flow summaries, and hedge candidates;
+- options expirations, chains, current flow summaries, explicit historical put/call ratios, and hedge candidates;
 - SEC filing lists, sections, tables, exhibits, text search, and filing indexes;
 - SEC structured extractors for revenue, segment, geography, risk, and exposure queries;
 - company news, press releases, SEC events, event timelines, and event verification;
@@ -181,7 +181,8 @@ schemas, aliases, and deprecation metadata.
   verification/context evidence unless the payload also resolves SEC EX-99 or
   approved IR-page evidence.
 - News/event responses include a compact `coverage` object. Check its `state`,
-  `failedSources`, `skippedSources`, and `recommendedNextAction` before
+  `failedSources`, `skippedSources`, `truncatedSources`, and
+  `recommendedNextAction` before
   treating an empty result as absence. Yahoo primary items are retained only
   when `tickerMatch:"EXPLICIT"` is supported by `matchBasis` of
   `TICKER_TOKEN`, `ISSUER_NAME`, or `ISSUER_ACRONYM`; source diagnostics expose
@@ -190,7 +191,9 @@ schemas, aliases, and deprecation metadata.
   to `get_company_press_releases` or `verify_company_event`, otherwise
   `CONTEXT_ONLY`. `evidenceClass` and `urlProvenance` remain comparable for LLM
   callers; legacy `confidence` is backward-compatible but not a provider-quality
-  rank.
+  rank. `RETRY_TRUNCATED_SOURCE` means accepted evidence was omitted by the
+  response cap or cross-source dedupe; it does not mark a completed provider as
+  failed or make `sourceCoverage` partial.
 - `extract_sec_filing_fact` and SEC exposure tools can return explicit
   limitation statuses such as `EXTRACTION_FAILED`, `TABLE_NOT_PARSED`,
   `PROVIDER_LIMITATION`, or `NO_DIMENSIONAL_REVENUE_FACT`.
@@ -208,6 +211,17 @@ schemas, aliases, and deprecation metadata.
   Alpha transcript output is `evidenceClass:"CONTEXTUAL_TRANSCRIPT"` with
   `decisionGrade:false`; inspect `fiscalQuarterStatus`, `periodEvidence`, and
   `attemptedSources` before use.
+- Use `get_ownership_holders` for ordinary Yahoo holder questions. The deeper
+  `get_expanded_institutional_ownership` action tries eligible Finnhub coverage
+  first and never calls Alpha unless `allow_scarce_fallback:true` is explicit.
+  Verify material ownership claims against SEC 13F filings.
+- Use `summarize_options_flow` for a current Yahoo options snapshot.
+  `get_historical_put_call_ratio` requires one explicit historical date and
+  returns contextual Alpha data with `decisionGrade:false`.
+- Alpha-backed gap actions expose
+  `capacityClass:"SCARCE_SHARED_QUOTA"`. Process and Worker edge caches reduce
+  repeat calls, but the edge cache is best effort and data-center local; it is
+  not global daily-quota enforcement.
 - Provider rate limits, market data availability, filing formats, and SEC EDGAR
   availability can affect individual calls.
 - Thai fund tools require `SEC_OPEN_DATA_API_KEY`. They never infer a share
@@ -230,8 +244,12 @@ schemas, aliases, and deprecation metadata.
 - Thailand SEC Open Data Fund API (`https://api.sec.or.th/v2/fund/...`) with a
   configured subscription key. It returns official regulatory data but does
   not change the existing decision-grade gate.
-- Optional Alpha Vantage `EARNINGS_CALL_TRANSCRIPT` fallback with a configured
-  API key; it supplements rather than replaces SEC/official-source evidence.
+- Optional Alpha Vantage transcript, explicit historical put/call-ratio, and
+  explicit institutional-ownership fallback workflows with a configured API
+  key. They supplement rather than replace Yahoo, Finnhub, SEC, or official
+  evidence and remain contextual.
+- Optional Finnhub company-news and expanded institutional-ownership coverage
+  with a configured API key and market/endpoint eligibility checks.
 
 Structured SEC revenue/geography facts use official SEC data plus the Worker
 filing/index fallback. No separate Python sidecar or paid hosted parser is

@@ -135,6 +135,9 @@ jobs:
       - name: News and events tests
         run: python scripts/test_news_events.py
 
+      - name: Provider gap routing tests
+        run: python -m unittest scripts.test_provider_gap_routing -v
+
       - name: Earnings tools tests
         run: python scripts/test_earnings_tools.py
 
