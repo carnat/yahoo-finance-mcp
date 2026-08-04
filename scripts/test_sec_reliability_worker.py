@@ -60,6 +60,26 @@ class TestSecReliabilityWorker(unittest.TestCase):
         )
         self.assertNotIn("function deriveFiscalPeriod", self.worker)
 
+    def test_transcript_fallback_uses_issuer_fiscal_quarter_not_filing_date(self) -> None:
+        self.assertIn("async function resolveTranscriptFiscalQuarter", self.worker)
+        self.assertIn("OFFICIAL_RELEASE_RESOLVED", self.worker)
+        self.assertIn("FISCAL_QUARTER_UNRESOLVED", self.worker)
+        self.assertIn('fiscal_quarter: { type: "string", pattern: "^[0-9]{4}Q[1-4]$"', self.tools)
+        self.assertRegex(
+            self.tools,
+            r'case "get_earnings_call_transcript"[\s\S]+?args\.fiscal_quarter[\s\S]+?getEarningsCallTranscript',
+        )
+        self.assertNotRegex(
+            self.worker,
+            r"alphaVantageQuarter\([^\n]*filingDate",
+        )
+        quarter_helper = re.search(
+            r"function alphaVantageQuarter\([\s\S]+?\n}\n",
+            self.worker,
+        )
+        self.assertIsNotNone(quarter_helper)
+        self.assertNotIn("new Date", quarter_helper.group(0))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -8,6 +8,7 @@ import os
 import pathlib
 import sys
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -942,15 +943,9 @@ class TestPr2DataQuality(unittest.TestCase):
                 ],
             })
 
-        old_metrics = srv.extract_earnings_metrics
-        old_ea = srv.get_earnings_analysis
-        try:
-            srv.extract_earnings_metrics = fake_metrics
-            srv.get_earnings_analysis = fake_ea
+        with patch("yfmcp.tools.earnings.extract_earnings_metrics", new=fake_metrics), \
+             patch.object(srv, "get_earnings_analysis", new=fake_ea):
             parsed = json.loads(_run(srv.compare_earnings_actual_vs_estimate("AAPL")))
-        finally:
-            srv.extract_earnings_metrics = old_metrics
-            srv.get_earnings_analysis = old_ea
         data = parsed["data"] if parsed.get("ok") else parsed
         self.assertEqual(data["reportedPeriod"], "FY2026 Q2")
         self.assertEqual(data["reportedDate"], "2026-06-30")
@@ -965,15 +960,9 @@ class TestPr2DataQuality(unittest.TestCase):
         async def fake_ea(**kwargs):
             return json.dumps({"earningsHistory": [{"quarter": "2026-09-30", "epsActual": None, "epsEstimate": 1.2}]})
 
-        old_metrics = srv.extract_earnings_metrics
-        old_ea = srv.get_earnings_analysis
-        try:
-            srv.extract_earnings_metrics = fake_metrics
-            srv.get_earnings_analysis = fake_ea
+        with patch("yfmcp.tools.earnings.extract_earnings_metrics", new=fake_metrics), \
+             patch.object(srv, "get_earnings_analysis", new=fake_ea):
             parsed = json.loads(_run(srv.compare_earnings_actual_vs_estimate("AAPL")))
-        finally:
-            srv.extract_earnings_metrics = old_metrics
-            srv.get_earnings_analysis = old_ea
         data = parsed["data"] if parsed.get("ok") else parsed
         warnings = (parsed.get("meta") or {}).get("warnings") or data.get("warnings") or []
         self.assertEqual(data["confidence"], "NOT_DISCLOSED")

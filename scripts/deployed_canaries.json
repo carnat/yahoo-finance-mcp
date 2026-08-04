@@ -160,6 +160,18 @@
       "volatility": "stable_contract"
     },
     {
+      "id": "earnings-transcript-invalid-fiscal-quarter",
+      "description": "Invalid issuer fiscal-quarter input fails before SEC or Alpha Vantage provider access.",
+      "tool": "get_earnings_call_transcript",
+      "args": {
+        "ticker": "AEHR",
+        "fiscal_quarter": "2026Q5"
+      },
+      "assertion": "invalid_fiscal_quarter_error",
+      "blocking": true,
+      "volatility": "stable_contract"
+    },
+    {
       "id": "aaoi-china-geographic-positive",
       "description": "Stable AAOI China positive fixture remains numeric and evidence-bearing.",
       "tool": "extract_geographic_revenue",
