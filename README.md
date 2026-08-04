@@ -201,6 +201,13 @@ schemas, aliases, and deprecation metadata.
   `recommendedNextAction`. Filing intelligence binds companyfacts evidence to
   the selected accession. `parse_public_transcript` accepts either an HTTPS URL
   or caller-supplied `raw_text`.
+- `get_earnings_call_transcript` is SEC-first. Optional Alpha Vantage fallback
+  requires `ALPHA_VANTAGE_API_KEY` and an issuer fiscal quarter supplied as
+  `fiscal_quarter:"YYYYQn"` or resolved from explicit official-release text.
+  The tool never converts a filing/publication date into a fiscal quarter.
+  Alpha transcript output is `evidenceClass:"CONTEXTUAL_TRANSCRIPT"` with
+  `decisionGrade:false`; inspect `fiscalQuarterStatus`, `periodEvidence`, and
+  `attemptedSources` before use.
 - Provider rate limits, market data availability, filing formats, and SEC EDGAR
   availability can affect individual calls.
 - Thai fund tools require `SEC_OPEN_DATA_API_KEY`. They never infer a share
@@ -223,6 +230,8 @@ schemas, aliases, and deprecation metadata.
 - Thailand SEC Open Data Fund API (`https://api.sec.or.th/v2/fund/...`) with a
   configured subscription key. It returns official regulatory data but does
   not change the existing decision-grade gate.
+- Optional Alpha Vantage `EARNINGS_CALL_TRANSCRIPT` fallback with a configured
+  API key; it supplements rather than replaces SEC/official-source evidence.
 
 Structured SEC revenue/geography facts use official SEC data plus the Worker
 filing/index fallback. No separate Python sidecar or paid hosted parser is

@@ -13,8 +13,10 @@ import re as _re
 import urllib.error as _urlerror
 import urllib.parse as _urlparse
 import urllib.request as _urlrequest
+from typing import Annotated
 
 import pandas as pd
+from pydantic import Field
 
 from yfmcp.app import yfinance_server
 from yfmcp.schemas import _TOOL_OUTPUT_SCHEMAS
@@ -1153,18 +1155,61 @@ def _next_transcript_fallback(attempted_sources: list[dict]) -> dict | None:
     return None
 
 
-def _alpha_vantage_quarter(period: str, filing_date: object | None = None) -> str | None:
+def _alpha_vantage_quarter(period: str) -> str | None:
     text = str(period or "").strip()
     m = _re.search(r"(\d{4})\s*Q([1-4])", text, flags=_re.IGNORECASE)
     if m:
         return f"{m.group(1)}Q{m.group(2)}"
-    if filing_date:
-        try:
-            d = datetime.datetime.fromisoformat(str(filing_date)[:10]).date()
-            return f"{d.year}Q{((d.month - 1) // 3) + 1}"
-        except Exception:
-            return None
     return None
+
+
+async def _resolve_transcript_fiscal_quarter(
+    fiscal_quarter: str | None,
+    official_release_source: dict | None,
+) -> dict[str, str | None]:
+    explicit = _alpha_vantage_quarter(fiscal_quarter or "")
+    if explicit:
+        return {
+            "fiscalQuarter": explicit,
+            "fiscalQuarterStatus": "EXPLICIT",
+            "periodEvidence": None,
+        }
+    if official_release_source:
+        period_info = await _resolve_earnings_period_from_source(official_release_source)
+        resolved = _alpha_vantage_quarter(str(period_info.get("period") or ""))
+        if resolved:
+            return {
+                "fiscalQuarter": resolved,
+                "fiscalQuarterStatus": "OFFICIAL_RELEASE_RESOLVED",
+                "periodEvidence": period_info.get("periodEvidence"),
+            }
+    return {
+        "fiscalQuarter": None,
+        "fiscalQuarterStatus": "UNRESOLVED",
+        "periodEvidence": None,
+    }
+
+
+async def _attempt_alpha_vantage_transcript(
+    ticker: str,
+    fiscal_quarter: str | None,
+    official_release_source: dict | None,
+    topics: list[str] | None,
+) -> tuple[dict | None, dict, dict[str, str | None]]:
+    resolution = await _resolve_transcript_fiscal_quarter(fiscal_quarter, official_release_source)
+    quarter = resolution.get("fiscalQuarter")
+    if not quarter:
+        return None, _transcript_attempt(
+            "alpha_vantage",
+            "NOT_ELIGIBLE",
+            reasonCode="FISCAL_QUARTER_UNRESOLVED",
+            reason=(
+                "Alpha Vantage requires an issuer fiscal quarter. Provide fiscal_quarter "
+                "as YYYYQn or retry after an official earnings release is available."
+            ),
+        ), resolution
+    payload, attempt = await _fetch_alpha_vantage_transcript(ticker, quarter, topics)
+    return payload, attempt, resolution
 
 
 async def _fetch_alpha_vantage_transcript(ticker: str, quarter: str, topics: list[str] | None = None) -> tuple[dict | None, dict]:
@@ -1172,7 +1217,8 @@ async def _fetch_alpha_vantage_transcript(ticker: str, quarter: str, topics: lis
     if not api_key:
         return None, _transcript_attempt(
             "alpha_vantage",
-            "SKIPPED",
+            "SOURCE_UNCONFIGURED",
+            reasonCode="ALPHA_VANTAGE_API_KEY_MISSING",
             reason="ALPHA_VANTAGE_API_KEY not configured.",
             rateLimit={"provider": "alpha_vantage", "used": False},
         )
@@ -1188,31 +1234,65 @@ async def _fetch_alpha_vantage_transcript(ticker: str, quarter: str, topics: lis
     )
     loop = asyncio.get_event_loop()
 
-    def _fetch_json() -> dict | None:
+    def _fetch_json() -> tuple[dict | None, int | None]:
         req = _urlrequest.Request(url, headers={"User-Agent": "yahoo-finance-mcp/1.0"})
         try:
             with _urlrequest.urlopen(req, timeout=30) as resp:  # noqa: S310
                 raw = resp.read(5_000_000)
-            return json.loads(raw.decode("utf-8", errors="replace"))
+            return json.loads(raw.decode("utf-8", errors="replace")), None
+        except _urlerror.HTTPError as exc:
+            try:
+                raw = exc.read(1_000_000)
+                parsed = json.loads(raw.decode("utf-8", errors="replace"))
+                payload = parsed if isinstance(parsed, dict) else None
+            except Exception:
+                payload = None
+            return payload, exc.code
         except Exception:
-            return None
+            return None, None
 
-    payload = await loop.run_in_executor(None, _fetch_json)
-    public_url = url.replace(api_key, "REDACTED")
+    payload, http_status = await loop.run_in_executor(None, _fetch_json)
+    public_url = (
+        "https://www.alphavantage.co/query?"
+        + _urlparse.urlencode({
+            "function": "EARNINGS_CALL_TRANSCRIPT",
+            "symbol": ticker.upper(),
+            "quarter": quarter,
+            "apikey": "REDACTED",
+        })
+    )
     rate_limit = {
         "provider": "alpha_vantage",
         "used": True,
         "note": "Alpha Vantage free-tier rate limits may apply.",
     }
-    if not payload:
-        return None, _transcript_attempt("alpha_vantage", "FETCH_ERROR", url=public_url, quarter=quarter, rateLimit=rate_limit)
-    if payload.get("Note") or payload.get("Information"):
+    if http_status is not None:
+        status = "AUTH_ERROR" if http_status in {401, 403} else "RATE_LIMIT" if http_status == 429 else "PROVIDER_ERROR"
         return None, _transcript_attempt(
             "alpha_vantage",
-            "RATE_LIMITED_OR_UNAVAILABLE",
+            status,
             url=public_url,
             quarter=quarter,
-            message=payload.get("Note") or payload.get("Information"),
+            httpStatus=http_status,
+            rateLimit=rate_limit,
+        )
+    if not payload:
+        return None, _transcript_attempt("alpha_vantage", "PROVIDER_ERROR", url=public_url, quarter=quarter, rateLimit=rate_limit)
+    provider_message = str(payload.get("Note") or payload.get("Information") or payload.get("Error Message") or "").replace(api_key, "REDACTED")
+    if provider_message:
+        normalized = provider_message.lower()
+        if _re.search(r"rate limit|frequency|call volume|standard api rate", normalized):
+            status = "RATE_LIMIT"
+        elif _re.search(r"api key|apikey|authentication|unauthorized|forbidden", normalized):
+            status = "AUTH_ERROR"
+        else:
+            status = "PROVIDER_ERROR"
+        return None, _transcript_attempt(
+            "alpha_vantage",
+            status,
+            url=public_url,
+            quarter=quarter,
+            message=provider_message,
             rateLimit=rate_limit,
         )
 
@@ -1236,6 +1316,8 @@ async def _fetch_alpha_vantage_transcript(ticker: str, quarter: str, topics: lis
         return {
             "sourceType": "alpha_vantage",
             "status": "OK",
+            "evidenceClass": "CONTEXTUAL_TRANSCRIPT",
+            "decisionGrade": False,
             "filteredByTopics": topics,
             "matchedParagraphs": matched,
             "content": None,
@@ -1249,6 +1331,8 @@ async def _fetch_alpha_vantage_transcript(ticker: str, quarter: str, topics: lis
     return {
         "sourceType": "alpha_vantage",
         "status": "OK",
+        "evidenceClass": "CONTEXTUAL_TRANSCRIPT",
+        "decisionGrade": False,
         "filteredByTopics": None,
         "content": clean_text[:max_chars],
         "totalTextLength": len(clean_text),
@@ -1260,9 +1344,31 @@ async def _fetch_alpha_vantage_transcript(ticker: str, quarter: str, topics: lis
 @yfinance_server.tool(
     name="get_earnings_call_transcript",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_call_transcript"],
-    description="High-level tool to retrieve earnings call transcript content from SEC 8-K exhibits, then structured fallback metadata for company IR, public transcript URLs, and optional Alpha Vantage.",
+    description="High-level tool to retrieve earnings call transcript content from SEC 8-K exhibits, then structured fallback metadata for company IR, public transcript URLs, and optional Alpha Vantage. Alpha Vantage requires an explicit fiscal_quarter or one resolved from official release text; filing dates are never used to infer fiscal periods.",
 )
-async def get_earnings_call_transcript(ticker: str, period: str = "latest", topics: list[str] | None = None) -> str:
+async def get_earnings_call_transcript(
+    ticker: str,
+    period: str = "latest",
+    topics: list[str] | None = None,
+    fiscal_quarter: Annotated[
+        str | None,
+        Field(
+            pattern=r"^\d{4}Q[1-4]$",
+            description=(
+                "Optional issuer fiscal quarter for Alpha Vantage fallback, e.g. 2026Q4. "
+                "Do not derive this from the filing or publication date."
+            ),
+        ),
+    ] = None,
+) -> str:
+    normalized_fiscal_quarter = str(fiscal_quarter or "").strip().upper() or None
+    if normalized_fiscal_quarter and not _re.fullmatch(r"\d{4}Q[1-4]", normalized_fiscal_quarter):
+        return _wrap_envelope_v2(
+            "get_earnings_call_transcript",
+            None,
+            error="fiscal_quarter must use issuer fiscal-quarter format YYYYQ1 through YYYYQ4.",
+            error_code=ErrorCode.INPUT_VALIDATION_ERROR,
+        )
     err = _validate_ticker(ticker)
     if err:
         return _wrap_envelope_v2("get_earnings_call_transcript", None, error=err, error_code=ErrorCode.INPUT_VALIDATION_ERROR)
@@ -1275,15 +1381,18 @@ async def get_earnings_call_transcript(ticker: str, period: str = "latest", topi
         attempted_sources.append(_transcript_attempt("sec_8k_exhibit", "NOT_FOUND"))
         attempted_sources.append(_transcript_attempt("company_ir", "SKIPPED", reason="No company IR transcript/call page URL was discoverable."))
         attempted_sources.append(_transcript_attempt("public_transcript_url", "SKIPPED", reason="No public transcript URL was provided to parse_public_transcript."))
-        alpha_payload, alpha_attempt = await _fetch_alpha_vantage_transcript(ticker, _alpha_vantage_quarter(period) or "", topics) if _alpha_vantage_quarter(period) else (None, _transcript_attempt("alpha_vantage", "SKIPPED", reason="No fiscal quarter available for Alpha Vantage transcript lookup."))
+        alpha_payload, alpha_attempt, quarter_resolution = await _attempt_alpha_vantage_transcript(
+            ticker, normalized_fiscal_quarter, None, topics
+        )
         attempted_sources.append(alpha_attempt)
         if alpha_payload:
-            alpha_payload.update({"ticker": ticker.upper(), "period": period, "attemptedSources": attempted_sources, "nextRecommendedFallback": None})
+            alpha_payload.update({"ticker": ticker.upper(), "period": period, **quarter_resolution, "attemptedSources": attempted_sources, "nextRecommendedFallback": None})
             warnings = alpha_payload.pop("warnings", [])
             return _wrap_envelope_v2("get_earnings_call_transcript", alpha_payload, warnings=warnings)
         return _wrap_envelope_v2("get_earnings_call_transcript", {
             "ticker": ticker.upper(),
             "period": period,
+            **quarter_resolution,
             "status": "SEC_8K_NOT_FOUND",
             "message": "No recent SEC 8-K filing found for this ticker.",
             "content": None,
@@ -1311,6 +1420,7 @@ async def get_earnings_call_transcript(ticker: str, period: str = "latest", topi
     # Step 2: List exhibits
     index_url, _ = _edgar_build_filing_urls(cik, accession, None)
     exhibits = await _edgar_list_exhibits_from_index(index_url)
+    official_release_source = sec_source if sec_source.get("sourceType") == "sec_8k_ex991" else None
 
     # Step 3: Search for transcript exhibit
     transcript_exhibit: dict | None = None
@@ -1336,16 +1446,15 @@ async def get_earnings_call_transcript(ticker: str, period: str = "latest", topi
         ))
         attempted_sources.append(_transcript_attempt("company_ir", "SKIPPED", reason="No company IR transcript/call page URL was discoverable."))
         attempted_sources.append(_transcript_attempt("public_transcript_url", "SKIPPED", reason="No public transcript URL was provided to parse_public_transcript."))
-        alpha_payload, alpha_attempt = await _fetch_alpha_vantage_transcript(
-            ticker,
-            _alpha_vantage_quarter(period, sec_source.get("filingDate")) or "",
-            topics,
-        ) if _alpha_vantage_quarter(period, sec_source.get("filingDate")) else (None, _transcript_attempt("alpha_vantage", "SKIPPED", reason="No fiscal quarter available for Alpha Vantage transcript lookup."))
+        alpha_payload, alpha_attempt, quarter_resolution = await _attempt_alpha_vantage_transcript(
+            ticker, normalized_fiscal_quarter, official_release_source, topics
+        )
         attempted_sources.append(alpha_attempt)
         if alpha_payload:
             alpha_payload.update({
                 "ticker": ticker.upper(),
                 "period": period,
+                **quarter_resolution,
                 "accessionNumber": accession,
                 "filingDate": sec_source.get("filingDate"),
                 "attemptedSources": attempted_sources,
@@ -1356,6 +1465,7 @@ async def get_earnings_call_transcript(ticker: str, period: str = "latest", topi
         return _wrap_envelope_v2("get_earnings_call_transcript", {
             "ticker": ticker.upper(),
             "period": period,
+            **quarter_resolution,
             "status": "SEC_EXHIBIT_NOT_FOUND",
             "accessionNumber": accession,
             "filingDate": sec_source.get("filingDate"),
@@ -1375,16 +1485,15 @@ async def get_earnings_call_transcript(ticker: str, period: str = "latest", topi
         attempted_sources.append(_transcript_attempt("sec_8k_exhibit", "FETCH_ERROR", url=doc_url, accessionNumber=accession, filingDate=sec_source.get("filingDate")))
         attempted_sources.append(_transcript_attempt("company_ir", "SKIPPED", reason="No company IR transcript/call page URL was discoverable."))
         attempted_sources.append(_transcript_attempt("public_transcript_url", "SKIPPED", reason="No public transcript URL was provided to parse_public_transcript."))
-        alpha_payload, alpha_attempt = await _fetch_alpha_vantage_transcript(
-            ticker,
-            _alpha_vantage_quarter(period, sec_source.get("filingDate")) or "",
-            topics,
-        ) if _alpha_vantage_quarter(period, sec_source.get("filingDate")) else (None, _transcript_attempt("alpha_vantage", "SKIPPED", reason="No fiscal quarter available for Alpha Vantage transcript lookup."))
+        alpha_payload, alpha_attempt, quarter_resolution = await _attempt_alpha_vantage_transcript(
+            ticker, normalized_fiscal_quarter, official_release_source, topics
+        )
         attempted_sources.append(alpha_attempt)
         if alpha_payload:
             alpha_payload.update({
                 "ticker": ticker.upper(),
                 "period": period,
+                **quarter_resolution,
                 "attemptedSources": attempted_sources,
                 "nextRecommendedFallback": None,
             })
@@ -1393,6 +1502,7 @@ async def get_earnings_call_transcript(ticker: str, period: str = "latest", topi
         return _wrap_envelope_v2("get_earnings_call_transcript", {
             "ticker": ticker.upper(),
             "period": period,
+            **quarter_resolution,
             "status": "FETCH_ERROR",
             "documentUrl": doc_url,
             "message": f"Could not fetch exhibit document '{file_name}'.",

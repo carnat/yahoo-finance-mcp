@@ -118,6 +118,7 @@ class TestSmokeArchitecture(unittest.TestCase):
     def test_candidate_secrets_are_atomic_and_ephemeral(self) -> None:
         secrets = self._step_body("Build candidate secrets file")
         self.assertIn("worker_version_promotion.py write-secrets", secrets)
+        self.assertIn("ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}", self.workflow)
         cleanup = self._step_body("Remove candidate secrets file")
         self.assertIn("always()", cleanup)
         self.assertIn("rm -f", cleanup)
@@ -203,9 +204,17 @@ class TestSmokeArchitecture(unittest.TestCase):
                 "TOOL_MODE": "expanded",
                 "FINNHUB_API_KEY": "finnhub-secret",
                 "SEC_OPEN_DATA_API_KEY": "",
+                "ALPHA_VANTAGE_API_KEY": "alpha-secret",
             }
         )
-        self.assertEqual(payload, {"TOOL_MODE": "expanded", "FINNHUB_API_KEY": "finnhub-secret"})
+        self.assertEqual(
+            payload,
+            {
+                "TOOL_MODE": "expanded",
+                "FINNHUB_API_KEY": "finnhub-secret",
+                "ALPHA_VANTAGE_API_KEY": "alpha-secret",
+            },
+        )
         with tempfile.TemporaryDirectory() as temp_dir:
             path = pathlib.Path(temp_dir) / "secrets.json"
             promotion.write_secrets(path, {"TOOL_MODE": "grouped"})

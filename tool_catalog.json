@@ -23,7 +23,7 @@
         "index_earnings_release": "index_earnings_release",
         "parse_public_transcript": "parse_public_transcript"
       },
-      "description": "Earnings release analysis and estimate comparison.\n\nActions:\n- get_latest_earnings_release: Find latest earnings. Params: ticker\n- index_earnings_release: Build earnings index. Params: ticker, url\n- extract_earnings_metrics: Revenue, EPS, margins. Params: ticker, url\n- extract_guidance: Guidance ranges. Params: ticker, url\n- extract_management_commentary: Commentary excerpts. Params: ticker, topic, url\n- compare_earnings_actual_vs_estimate: Actual vs estimate with explicit fiscal-period alignment status. Params: ticker\n- get_earnings_call_transcript: Transcript. Params: ticker\n- parse_public_transcript: Parse transcript URL. Params: url"
+      "description": "Earnings release analysis and estimate comparison.\n\nActions:\n- get_latest_earnings_release: Find latest earnings. Params: ticker\n- index_earnings_release: Build earnings index. Params: ticker, url\n- extract_earnings_metrics: Revenue, EPS, margins. Params: ticker, url\n- extract_guidance: Guidance ranges. Params: ticker, url\n- extract_management_commentary: Commentary excerpts. Params: ticker, topic, url\n- compare_earnings_actual_vs_estimate: Actual vs estimate with explicit fiscal-period alignment status. Params: ticker\n- get_earnings_call_transcript: Transcript with SEC-first lookup and optional Alpha Vantage fallback. Params: ticker, optional fiscal_quarter (issuer YYYYQn), topics\n- parse_public_transcript: Parse transcript URL. Params: url"
     },
     "news_events": {
       "actions": {

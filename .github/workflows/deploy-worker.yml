@@ -78,6 +78,7 @@ jobs:
         env:
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
           SEC_OPEN_DATA_API_KEY: ${{ secrets.SEC_OPEN_DATA_API_KEY }}
+          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
           TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}
 
       - name: Upload immutable candidate version

@@ -321,6 +321,16 @@ def required_param_validation_error(payload: dict[str, Any], _canary: dict[str, 
         raise AssertionError(f"missing required grouped params omitted recovery action: {payload}")
 
 
+def invalid_fiscal_quarter_error(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
+    if payload.get("ok") is not False:
+        raise AssertionError(f"invalid fiscal_quarter must be top-level ok:false: {payload}")
+    error = payload.get("error") or {}
+    if error.get("code") != "INPUT_VALIDATION_ERROR":
+        raise AssertionError(f"invalid fiscal_quarter returned wrong code: {payload}")
+    if "fiscal_quarter" not in str(error.get("message") or ""):
+        raise AssertionError(f"invalid fiscal_quarter omitted corrective field name: {payload}")
+
+
 def aaoi_china_positive(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
     data = extract_data(payload)
     if not isinstance(data, dict):
@@ -386,6 +396,7 @@ ASSERTIONS: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
     "overnight_diagnostics_only": overnight_diagnostics_only,
     "unsupported_query_error": unsupported_query_error,
     "required_param_validation_error": required_param_validation_error,
+    "invalid_fiscal_quarter_error": invalid_fiscal_quarter_error,
     "aaoi_china_positive": aaoi_china_positive,
     "thai_fund_nav_contract": thai_fund_nav_contract,
 }

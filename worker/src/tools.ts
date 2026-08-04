@@ -1166,7 +1166,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "list_sec_filing_exhibits", description: "List all exhibits/documents attached to a specific SEC filing by accession number.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, accessionNumber: { type: "string", description: "SEC filing accession number, e.g. '0000320193-24-000081'" } }, required: ["ticker", "accessionNumber"] } },
   { name: "get_sec_filing_exhibit_content", description: "Fetch and return the text content of a specific exhibit from an SEC filing. Supports topic-based paragraph filtering to reduce token usage.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, accessionNumber: { type: "string", description: "SEC filing accession number" }, fileName: { type: "string", description: "Exhibit filename from the filing index" }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" } }, required: ["ticker", "accessionNumber", "fileName"] } },
   { name: "parse_public_transcript", description: "Fetch and parse a public transcript page (Motley Fool, company IR, etc.). Supports topic-based paragraph filtering to reduce token usage. Provide raw_text to skip URL fetching.", inputSchema: { type: "object", properties: { url: { type: "string", description: "Public https URL of the transcript page" }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" }, raw_text: { type: "string", description: "Raw HTML or text content to parse directly (bypasses URL fetching)" } } } },
-  { name: "get_earnings_call_transcript", description: "High-level tool to retrieve earnings call transcript content from SEC 8-K exhibits, then return structured fallback metadata for company IR, public transcript URLs, and optional Alpha Vantage.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, period: { type: "string", enum: ["latest"], default: "latest", description: "Period selector. Only 'latest' is supported." }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" } }, required: ["ticker"] } },
+  { name: "get_earnings_call_transcript", description: "Retrieve earnings-call transcript content from SEC exhibits, then structured fallback metadata for company IR, public transcript URLs, and optional Alpha Vantage. For Alpha Vantage, supply issuer fiscal_quarter as YYYYQn or let the tool resolve it from official release text; a filing date is never treated as a fiscal period. Alpha transcripts are contextual and never decision-grade.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, period: { type: "string", enum: ["latest"], default: "latest", description: "Event selector. Only the latest release is supported; this is not a fiscal-quarter value." }, fiscal_quarter: { type: "string", pattern: "^[0-9]{4}Q[1-4]$", description: "Optional issuer fiscal quarter for Alpha Vantage fallback, e.g. 2026Q4. Do not derive this from the filing or publication date." }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" } }, required: ["ticker"] } },
   { name: "get_manifest_diagnostics", description: "Return public-safe MCP schema identity metadata for connector freshness checks.", inputSchema: { type: "object", properties: {} } },
   { name: "get_market_snapshot", description: "Compact market-state packet composing quote, price performance, moving-average trend, volume ratios, liquidity gate, and technical indicators in one call. Supports compact (default) and full modes, and optional batch of tickers.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, mode: { type: "string", enum: ["compact", "full"], default: "compact" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] } },
   { name: "health_check", description: "Return public-safe MCP availability and schema identity metadata.", inputSchema: { type: "object", properties: {} } },
@@ -3135,10 +3135,18 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         args.raw_text != null ? str(args.raw_text) : null,
       );
     case "get_earnings_call_transcript":
+      if (args.fiscal_quarter != null && !/^\d{4}Q[1-4]$/i.test(str(args.fiscal_quarter).trim())) {
+        return mcpFailure(
+          "get_earnings_call_transcript",
+          ErrorCode.INPUT_VALIDATION_ERROR,
+          "fiscal_quarter must use issuer fiscal-quarter format YYYYQ1 through YYYYQ4.",
+        );
+      }
       return getEarningsCallTranscript(
         str(args.ticker),
         str(args.period, "latest"),
         Array.isArray(args.topics) ? args.topics.map(String) : null,
+        args.fiscal_quarter != null ? str(args.fiscal_quarter).trim().toUpperCase() : null,
       );
     case "extract_geographic_revenue":
       return extractGeographicRevenue(

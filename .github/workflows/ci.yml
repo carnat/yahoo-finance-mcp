@@ -138,6 +138,9 @@ jobs:
       - name: Earnings tools tests
         run: python scripts/test_earnings_tools.py
 
+      - name: Earnings transcript tests
+        run: python -m unittest scripts.test_transcripts -v
+
       - name: Options data quality tests
         run: python scripts/test_options_quality.py
 

@@ -9,6 +9,7 @@ import os
 import sys
 import types
 import unittest
+import urllib.error
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -213,6 +214,21 @@ class TestGetSecFilingExhibitContent(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestGetEarningsCallTranscript(unittest.TestCase):
+    def test_alpha_quarter_normalizes_fiscal_text_without_using_dates(self):
+        self.assertEqual(srv._alpha_vantage_quarter("2026Q4"), "2026Q4")
+        self.assertEqual(srv._alpha_vantage_quarter("FY2026 Q4"), "2026Q4")
+        self.assertIsNone(srv._alpha_vantage_quarter("latest"))
+        self.assertIsNone(srv._alpha_vantage_quarter("2026-07-14"))
+
+    def test_invalid_fiscal_quarter_fails_before_provider_access(self):
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_sec_source", new_callable=AsyncMock) as mock_src:
+            raw = _run(srv.get_earnings_call_transcript(ticker="AEHR", fiscal_quarter="2026Q5"))
+        envelope = _parse_full(raw)
+        self.assertFalse(envelope["ok"])
+        self.assertEqual(envelope["error"]["code"], "INPUT_VALIDATION_ERROR")
+        self.assertIn("fiscal_quarter", envelope["error"]["message"])
+        mock_src.assert_not_awaited()
+
     def test_returns_sec_not_found_when_no_8k(self):
         with patch("yfmcp.tools.earnings._resolve_latest_earnings_sec_source", new_callable=AsyncMock) as mock_src:
             mock_src.return_value = None
@@ -283,13 +299,102 @@ class TestGetEarningsCallTranscript(unittest.TestCase):
                 {"sequence": "1", "description": "PRESS RELEASE", "document": "ex99-1.htm", "type": "EX-99.1", "size": "50000"},
             ]
             mock_alpha.return_value = (alpha_payload, alpha_attempt)
-            raw = _run(srv.get_earnings_call_transcript(ticker="AAPL"))
+            raw = _run(srv.get_earnings_call_transcript(ticker="AAPL", fiscal_quarter="2024Q1"))
         data = _parse(raw)
         self.assertEqual(data["status"], "OK")
         self.assertEqual(data["sourceType"], "alpha_vantage")
         self.assertIn("Welcome to the call", data["content"])
         self.assertIsNone(data["nextRecommendedFallback"])
         self.assertEqual(data["attemptedSources"][-1]["status"], "SUCCESS")
+        self.assertEqual(data["fiscalQuarter"], "2024Q1")
+        self.assertEqual(data["fiscalQuarterStatus"], "EXPLICIT")
+
+    def test_aehr_release_resolves_fiscal_q4_not_filing_date_q3(self):
+        mock_sec = {
+            "sourceType": "sec_8k_ex991",
+            "accessionNumber": "0001104659-26-078657",
+            "filingDate": "2026-07-14",
+            "url": "https://www.sec.gov/Archives/edgar/data/1040470/release.htm",
+        }
+        alpha_payload = {
+            "sourceType": "alpha_vantage",
+            "status": "OK",
+            "evidenceClass": "CONTEXTUAL_TRANSCRIPT",
+            "decisionGrade": False,
+            "filteredByTopics": None,
+            "content": "Operator: AEHR fiscal fourth-quarter call.",
+            "totalTextLength": 42,
+            "truncated": False,
+            "warnings": [],
+        }
+        alpha_attempt = {"sourceType": "alpha_vantage", "status": "SUCCESS", "quarter": "2026Q4"}
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_sec_source", new_callable=AsyncMock, return_value=mock_sec), \
+             patch("yfmcp.tools.earnings._edgar_cik_from_accession", return_value=1040470), \
+             patch("yfmcp.tools.earnings._edgar_list_exhibits_from_index", new_callable=AsyncMock, return_value=[]), \
+             patch("yfmcp.tools.earnings._resolve_earnings_period_from_source", new_callable=AsyncMock) as mock_period, \
+             patch("yfmcp.tools.earnings._fetch_alpha_vantage_transcript", new_callable=AsyncMock) as mock_alpha:
+            mock_period.return_value = {
+                "period": "FY2026 Q4",
+                "periodStatus": "EX99_TEXT_RESOLVED",
+                "periodEvidence": "fourth quarter of fiscal 2026",
+            }
+            mock_alpha.return_value = (alpha_payload, alpha_attempt)
+            raw = _run(srv.get_earnings_call_transcript(ticker="AEHR"))
+        data = _parse(raw)
+        mock_alpha.assert_awaited_once_with("AEHR", "2026Q4", None)
+        self.assertNotEqual(mock_alpha.await_args.args[1], "2026Q3")
+        self.assertEqual(data["fiscalQuarter"], "2026Q4")
+        self.assertEqual(data["fiscalQuarterStatus"], "OFFICIAL_RELEASE_RESOLVED")
+        self.assertEqual(data["periodEvidence"], "fourth quarter of fiscal 2026")
+        self.assertFalse(data["decisionGrade"])
+
+    def test_unresolved_fiscal_period_skips_alpha_without_guessing(self):
+        mock_sec = {
+            "sourceType": "sec_8k_ex991",
+            "accessionNumber": "0001104659-26-078657",
+            "filingDate": "2026-07-14",
+            "url": "https://www.sec.gov/Archives/edgar/data/1040470/release.htm",
+        }
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_sec_source", new_callable=AsyncMock, return_value=mock_sec), \
+             patch("yfmcp.tools.earnings._edgar_cik_from_accession", return_value=1040470), \
+             patch("yfmcp.tools.earnings._edgar_list_exhibits_from_index", new_callable=AsyncMock, return_value=[]), \
+             patch("yfmcp.tools.earnings._resolve_earnings_period_from_source", new_callable=AsyncMock) as mock_period, \
+             patch("yfmcp.tools.earnings._fetch_alpha_vantage_transcript", new_callable=AsyncMock) as mock_alpha:
+            mock_period.return_value = {"period": None, "periodStatus": "UNRESOLVED", "periodEvidence": None}
+            raw = _run(srv.get_earnings_call_transcript(ticker="AEHR"))
+        data = _parse(raw)
+        mock_alpha.assert_not_awaited()
+        self.assertEqual(data["fiscalQuarterStatus"], "UNRESOLVED")
+        self.assertEqual(data["attemptedSources"][-1]["status"], "NOT_ELIGIBLE")
+        self.assertEqual(data["attemptedSources"][-1]["reasonCode"], "FISCAL_QUARTER_UNRESOLVED")
+
+    def test_alpha_provider_auth_error_redacts_key(self):
+        secret = "test-alpha-secret"
+        error = urllib.error.HTTPError("https://www.alphavantage.co/query", 403, "Forbidden", {}, None)
+        with patch.dict(os.environ, {"ALPHA_VANTAGE_API_KEY": secret}, clear=True), \
+             patch("yfmcp.tools.earnings._urlrequest.urlopen", side_effect=error):
+            payload, attempt = _run(srv._fetch_alpha_vantage_transcript("AEHR", "2026Q4"))
+        self.assertIsNone(payload)
+        self.assertEqual(attempt["status"], "AUTH_ERROR")
+        self.assertEqual(attempt["httpStatus"], 403)
+        self.assertNotIn(secret, json.dumps(attempt))
+        self.assertIn("REDACTED", attempt["url"])
+
+    def test_alpha_provider_missing_key_is_source_unconfigured(self):
+        with patch.dict(os.environ, {}, clear=True):
+            payload, attempt = _run(srv._fetch_alpha_vantage_transcript("AEHR", "2026Q4"))
+        self.assertIsNone(payload)
+        self.assertEqual(attempt["status"], "SOURCE_UNCONFIGURED")
+        self.assertEqual(attempt["reasonCode"], "ALPHA_VANTAGE_API_KEY_MISSING")
+
+    def test_alpha_provider_http_429_is_rate_limit(self):
+        error = urllib.error.HTTPError("https://www.alphavantage.co/query", 429, "Too Many Requests", {}, None)
+        with patch.dict(os.environ, {"ALPHA_VANTAGE_API_KEY": "test-secret"}, clear=True), \
+             patch("yfmcp.tools.earnings._urlrequest.urlopen", side_effect=error):
+            payload, attempt = _run(srv._fetch_alpha_vantage_transcript("AEHR", "2026Q4"))
+        self.assertIsNone(payload)
+        self.assertEqual(attempt["status"], "RATE_LIMIT")
+        self.assertEqual(attempt["httpStatus"], 429)
 
     def test_returns_transcript_content_when_found(self):
         mock_sec = {"accessionNumber": "0000320193-24-000081", "filingDate": "2024-01-25", "acceptedAt": "2024-01-25T16:00:00"}
