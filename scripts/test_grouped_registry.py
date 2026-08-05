@@ -138,7 +138,7 @@ class TestGroupedServer(unittest.TestCase):
         with patch.dict(os.environ, {"TOOL_MODE": "grouped"}):
             self.assertEqual(_public_metadata()["toolCount"], len(tool_groups.TOOL_GROUPS))
         with patch.dict(os.environ, {"TOOL_MODE": "expanded"}):
-            self.assertEqual(_public_metadata()["toolCount"], 111)
+            self.assertEqual(_public_metadata()["toolCount"], 113)
 
     def test_grouped_server_exposes_one_tool_per_group(self):
         original = os.environ.get("TOOL_MODE")

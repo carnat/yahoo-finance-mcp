@@ -4,12 +4,33 @@ This project is Worker-first for the public MCP endpoint. Before adding a data
 provider, parser dependency, cache path, or deployment path, check the current
 official provider/runtime docs and record the consequence in the PR.
 
-Sources checked on 2026-07-09:
+Sources checked through 2026-08-04:
 
 - SEC EDGAR APIs: https://www.sec.gov/search-filings/edgar-application-programming-interfaces
 - SEC fair access guidance: https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data
 - Cloudflare remote MCP server guide: https://developers.cloudflare.com/agents/model-context-protocol/guides/remote-mcp-server/
 - Cloudflare Workers limits: https://developers.cloudflare.com/workers/platform/limits/
+- Cloudflare Cache API: https://developers.cloudflare.com/workers/runtime-apis/cache/
+- yfinance Ticker API: https://ranaroussi.github.io/yfinance/reference/api/yfinance.Ticker.html
+- Finnhub API documentation: https://finnhub.io/docs/api
+- Alpha Vantage API documentation: https://www.alphavantage.co/documentation/
+
+## Scarce Optional Market Providers
+
+- Yahoo remains the default for current options snapshots and ordinary holder
+  views. Do not spend Alpha Vantage quota to duplicate those workflows.
+- Finnhub may fill deeper ownership or company-news gaps only when the deployed
+  capability policy marks the market eligible. Entitlement and authentication
+  failures must remain explicit provider statuses.
+- Alpha Vantage is an explicit scarce fallback. Historical put/call calls
+  require a date; ownership fallback requires caller opt-in. Do not retry Alpha
+  automatically or call it from routine deployed canaries.
+- Successful Alpha results are contextual (`decisionGrade:false`) and expose
+  `capacityClass:"SCARCE_SHARED_QUOTA"`. Transcript, historical options, and
+  ownership caches use different TTLs based on data mutability.
+- Worker Cache API storage is best effort and data-center local. It reduces
+  duplicate requests but is not global quota accounting or a persistent rate
+  limiter.
 
 ## SEC EDGAR Rules
 

@@ -37,6 +37,7 @@ from yfmcp.clients.edgar import (
     _edgar_list_exhibits_from_index,
     _get_submissions_for_ticker,
 )
+from yfmcp.clients.market_providers import fetch_alpha_vantage_json
 from yfmcp.parsing.html import _strip_html_tags
 
 
@@ -1213,89 +1214,41 @@ async def _attempt_alpha_vantage_transcript(
 
 
 async def _fetch_alpha_vantage_transcript(ticker: str, quarter: str, topics: list[str] | None = None) -> tuple[dict | None, dict]:
-    api_key = os.environ.get("ALPHA_VANTAGE_API_KEY") or os.environ.get("ALPHAVANTAGE_API_KEY")
-    if not api_key:
-        return None, _transcript_attempt(
-            "alpha_vantage",
-            "SOURCE_UNCONFIGURED",
-            reasonCode="ALPHA_VANTAGE_API_KEY_MISSING",
-            reason="ALPHA_VANTAGE_API_KEY not configured.",
-            rateLimit={"provider": "alpha_vantage", "used": False},
-        )
-
-    url = (
-        "https://www.alphavantage.co/query?"
-        + _urlparse.urlencode({
-            "function": "EARNINGS_CALL_TRANSCRIPT",
-            "symbol": ticker.upper(),
-            "quarter": quarter,
-            "apikey": api_key,
-        })
+    result = await fetch_alpha_vantage_json(
+        "EARNINGS_CALL_TRANSCRIPT",
+        {"symbol": ticker.upper(), "quarter": quarter},
+        ttl_seconds=30 * 24 * 60 * 60,
     )
-    loop = asyncio.get_event_loop()
-
-    def _fetch_json() -> tuple[dict | None, int | None]:
-        req = _urlrequest.Request(url, headers={"User-Agent": "yahoo-finance-mcp/1.0"})
-        try:
-            with _urlrequest.urlopen(req, timeout=30) as resp:  # noqa: S310
-                raw = resp.read(5_000_000)
-            return json.loads(raw.decode("utf-8", errors="replace")), None
-        except _urlerror.HTTPError as exc:
-            try:
-                raw = exc.read(1_000_000)
-                parsed = json.loads(raw.decode("utf-8", errors="replace"))
-                payload = parsed if isinstance(parsed, dict) else None
-            except Exception:
-                payload = None
-            return payload, exc.code
-        except Exception:
-            return None, None
-
-    payload, http_status = await loop.run_in_executor(None, _fetch_json)
-    public_url = (
-        "https://www.alphavantage.co/query?"
-        + _urlparse.urlencode({
-            "function": "EARNINGS_CALL_TRANSCRIPT",
-            "symbol": ticker.upper(),
-            "quarter": quarter,
-            "apikey": "REDACTED",
-        })
-    )
+    public_url = result.public_url
     rate_limit = {
         "provider": "alpha_vantage",
-        "used": True,
+        "used": result.provider_attempted,
         "note": "Alpha Vantage free-tier rate limits may apply.",
     }
-    if http_status is not None:
-        status = "AUTH_ERROR" if http_status in {401, 403} else "RATE_LIMIT" if http_status == 429 else "PROVIDER_ERROR"
+    if result.status != "OK" or not isinstance(result.payload, dict):
+        extras: dict[str, object] = {
+            "url": public_url,
+            "quarter": quarter,
+            "rateLimit": rate_limit,
+            "cacheStatus": result.cache_status,
+        }
+        if result.http_status is not None:
+            extras["httpStatus"] = result.http_status
+        if result.message:
+            extras["message"] = result.message
+        if result.retry_after:
+            extras["retryAfter"] = result.retry_after
+        if result.status == "SOURCE_UNCONFIGURED":
+            extras.update({
+                "reasonCode": "ALPHA_VANTAGE_API_KEY_MISSING",
+                "reason": "ALPHA_VANTAGE_API_KEY not configured.",
+            })
         return None, _transcript_attempt(
             "alpha_vantage",
-            status,
-            url=public_url,
-            quarter=quarter,
-            httpStatus=http_status,
-            rateLimit=rate_limit,
+            result.status,
+            **extras,
         )
-    if not payload:
-        return None, _transcript_attempt("alpha_vantage", "PROVIDER_ERROR", url=public_url, quarter=quarter, rateLimit=rate_limit)
-    provider_message = str(payload.get("Note") or payload.get("Information") or payload.get("Error Message") or "").replace(api_key, "REDACTED")
-    if provider_message:
-        normalized = provider_message.lower()
-        if _re.search(r"rate limit|frequency|call volume|standard api rate", normalized):
-            status = "RATE_LIMIT"
-        elif _re.search(r"api key|apikey|authentication|unauthorized|forbidden", normalized):
-            status = "AUTH_ERROR"
-        else:
-            status = "PROVIDER_ERROR"
-        return None, _transcript_attempt(
-            "alpha_vantage",
-            status,
-            url=public_url,
-            quarter=quarter,
-            message=provider_message,
-            rateLimit=rate_limit,
-        )
-
+    payload = result.payload
     rows = payload.get("transcript") if isinstance(payload.get("transcript"), list) else []
     paragraphs: list[str] = []
     for row in rows:
@@ -1306,7 +1259,10 @@ async def _fetch_alpha_vantage_transcript(ticker: str, quarter: str, topics: lis
         if content:
             paragraphs.append(f"{speaker}: {content}" if speaker else content)
     if not paragraphs:
-        return None, _transcript_attempt("alpha_vantage", "NOT_FOUND", url=public_url, quarter=quarter, rateLimit=rate_limit)
+        return None, _transcript_attempt(
+            "alpha_vantage", "NOT_FOUND", url=public_url, quarter=quarter,
+            rateLimit=rate_limit, cacheStatus=result.cache_status,
+        )
 
     clean_text = "\n\n".join(paragraphs)
     max_chars = 50_000
@@ -1324,7 +1280,7 @@ async def _fetch_alpha_vantage_transcript(ticker: str, quarter: str, topics: lis
             "totalTextLength": len(clean_text),
             "truncated": False,
             "warnings": warnings if matched else [{"code": "NO_TOPIC_MATCHES", "message": f"No paragraphs matched the provided topics: {topics}"}],
-        }, _transcript_attempt("alpha_vantage", "SUCCESS", url=public_url, quarter=quarter, rateLimit=rate_limit)
+        }, _transcript_attempt("alpha_vantage", "SUCCESS", url=public_url, quarter=quarter, rateLimit=rate_limit, cacheStatus=result.cache_status)
     truncated = len(clean_text) > max_chars
     if truncated:
         warnings.append({"code": "TEXT_TRUNCATED", "message": f"Text truncated from {len(clean_text)} to {max_chars} characters."})
@@ -1338,7 +1294,7 @@ async def _fetch_alpha_vantage_transcript(ticker: str, quarter: str, topics: lis
         "totalTextLength": len(clean_text),
         "truncated": truncated,
         "warnings": warnings,
-    }, _transcript_attempt("alpha_vantage", "SUCCESS", url=public_url, quarter=quarter, rateLimit=rate_limit)
+    }, _transcript_attempt("alpha_vantage", "SUCCESS", url=public_url, quarter=quarter, rateLimit=rate_limit, cacheStatus=result.cache_status)
 
 
 @yfinance_server.tool(

@@ -160,6 +160,9 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - Index tickers like `^VIX`, `^GSPC`, `^DJI` are supported by `get_market_quote`, `analyze_price_performance`, and `get_technical_indicators`.
 - For SEC data: use `extract_sec_filing_fact` first for XBRL-tagged facts. If it returns NOT_DISCLOSED, use `search_sec_filing_text` with `return_tables=true` as fallback.
 - For news: use `get_company_news` (multi-source) instead of `get_yahoo_finance_news` (legacy single-source).
+- For news completeness, read `coverage.truncatedSources` as well as failed/skipped sources. `RETRY_TRUNCATED_SOURCE` means accepted items were omitted by caps or dedupe, not that the provider failed.
+- Use `get_ownership_holders` for ordinary Yahoo holder questions. Use `get_expanded_institutional_ownership` only for a deeper list; it tries eligible Finnhub coverage first and spends scarce Alpha quota only with `allow_scarce_fallback=true`.
+- Use `summarize_options_flow` for current options context. Use `get_historical_put_call_ratio` only for one explicit historical date; the Alpha-backed result is contextual and never decision-grade.
 
 ## Available tools
 
@@ -190,6 +193,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - analyze_credit_health: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag.
 - get_corporate_actions: Dividends, splits, and fund capital-gain distribution history.
 - get_ownership_holders: Major holders, institutional holders, mutual funds, or insider transactions.
+- get_expanded_institutional_ownership: Deeper institutional ownership via eligible Finnhub coverage; optional Alpha fallback requires allow_scarce_fallback=true. Verify material claims against SEC 13F filings.
 
 ### Analyst & forecasts
 - get_analyst_consensus: Compact analyst price targets (current/low/high/mean/median + % upside) and rating breakdown.
@@ -204,6 +208,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - get_option_expiration_dates: Available options expiration dates.
 - get_option_chain: Options chain for a specific expiry and type. Supports strike filters and in_the_money_only.
 - summarize_options_flow: Put/call ratio, P/C sentiment, ATM IV, IV percentile, max pain, highest OI strikes.
+- get_historical_put_call_ratio: Explicit dated historical put/call ratio. Uses scarce Alpha quota, never substitutes for the current Yahoo snapshot, and is decisionGrade=false.
 - find_put_hedge_candidates: Pre-filtered OTM puts with two-sided/liquidity evidence; cost and budget use executable ask.
 - analyze_options_flow_window: Structured event-window options scan with 72h cached trend; LOW quality requires retry.
 

@@ -372,7 +372,7 @@ class TestGetEarningsCallTranscript(unittest.TestCase):
         secret = "test-alpha-secret"
         error = urllib.error.HTTPError("https://www.alphavantage.co/query", 403, "Forbidden", {}, None)
         with patch.dict(os.environ, {"ALPHA_VANTAGE_API_KEY": secret}, clear=True), \
-             patch("yfmcp.tools.earnings._urlrequest.urlopen", side_effect=error):
+             patch("yfmcp.clients.market_providers.urllib.request.urlopen", side_effect=error):
             payload, attempt = _run(srv._fetch_alpha_vantage_transcript("AEHR", "2026Q4"))
         self.assertIsNone(payload)
         self.assertEqual(attempt["status"], "AUTH_ERROR")
@@ -390,7 +390,7 @@ class TestGetEarningsCallTranscript(unittest.TestCase):
     def test_alpha_provider_http_429_is_rate_limit(self):
         error = urllib.error.HTTPError("https://www.alphavantage.co/query", 429, "Too Many Requests", {}, None)
         with patch.dict(os.environ, {"ALPHA_VANTAGE_API_KEY": "test-secret"}, clear=True), \
-             patch("yfmcp.tools.earnings._urlrequest.urlopen", side_effect=error):
+             patch("yfmcp.clients.market_providers.urllib.request.urlopen", side_effect=error):
             payload, attempt = _run(srv._fetch_alpha_vantage_transcript("AEHR", "2026Q4"))
         self.assertIsNone(payload)
         self.assertEqual(attempt["status"], "RATE_LIMIT")

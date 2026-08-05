@@ -358,7 +358,7 @@ def register_grouped_tools(
       - params: dict (optional) โ€” parameters for the sub-action (e.g. ticker, period, etc.)
 
     ``handler_registry`` maps handler function name -> function (see
-    ``yfmcp.app.build_handler_registry``). This replaces the 111 individual tool
+    ``yfmcp.app.build_handler_registry``). This replaces the 113 individual tool
     registrations with 11 grouped tools, reducing LLM token overhead.
     """
 

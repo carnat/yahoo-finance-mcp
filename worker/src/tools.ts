@@ -19,10 +19,12 @@ import {
   getVolumeGate,
   getHistoricalPrices,
   getHolderInfo,
+  getExpandedInstitutionalOwnership,
   SUPPORTED_HOLDER_TYPES,
   getMaPosition,
   getOptionChain,
   getOptionExpirationDates,
+  getHistoricalPutCallRatio,
   getOvernightQuote,
   getPriceSlope,
   getPriceStats,
@@ -1120,12 +1122,14 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "analyze_credit_health", description: "Analyze credit health metrics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
   { name: "get_corporate_actions", description: "Get dividends, stock splits, and fund capital-gain distributions from Yahoo Finance.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
   { name: "get_ownership_holders", description: "Get ownership/holder data. Supported holder_type values: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, holder_type: { type: "string", enum: SUPPORTED_HOLDER_TYPES, description: "One of: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders." } }, required: ["ticker", "holder_type"] } },
+  { name: "get_expanded_institutional_ownership", description: "Use only when Yahoo's ordinary top-holder view is insufficient. Tries eligible Finnhub coverage first and never spends scarce Alpha quota unless allow_scarce_fallback=true. Results are contextual; verify material ownership claims against SEC 13F filings.", inputSchema: { type: "object", properties: { ticker: { type: "string", minLength: 1 }, allow_scarce_fallback: { type: "boolean", default: false, description: "Explicitly permit one Alpha Vantage call if Finnhub is unavailable, ineligible, or returns no usable holders." }, max_holders: { type: "integer", minimum: 1, maximum: 100, default: 50 } }, required: ["ticker"] } },
   { name: "get_analyst_recommendations", description: "Get analyst recommendations or upgrade/downgrade history. Supported recommendation_type values: recommendations, upgrades_downgrades.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, recommendation_type: { type: "string", enum: SUPPORTED_RECOMMENDATION_TYPES, description: "One of: recommendations, upgrades_downgrades." }, months_back: { type: "number", default: 12 } }, required: ["ticker", "recommendation_type"] } },
   { name: "get_analyst_rating_changes", description: "Get analyst rating changes radar.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, days_back: { type: "number", default: 30 } }, required: ["ticker"] } },
   { name: "analyze_earnings_momentum", description: "Analyze earnings momentum.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
   { name: "get_company_events_calendar", description: "Get a ticker's upcoming Yahoo calendar estimates or paginated earnings-date history. Yahoo dates are always marked UNVERIFIED and material dates should be confirmed with official releases.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, mode: { type: "string", enum: ["upcoming", "history"], default: "upcoming" }, limit: { type: "integer", minimum: 1, maximum: 100, default: 12 }, offset: { type: "integer", minimum: 0, default: 0 } }, required: ["ticker"] } },
   { name: "get_market_calendar", description: "Use for market-wide earnings, economic-event, IPO, or stock-split calendar questions. Results are paginated Yahoo provider data, not official confirmation.", inputSchema: { type: "object", properties: { event_type: { type: "string", enum: ["earnings", "economic", "ipo", "splits"], default: "earnings" }, start_date: { type: "string" }, end_date: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100, default: 25 }, offset: { type: "integer", minimum: 0, default: 0 } } } },
   { name: "summarize_options_flow", description: "Summarize options flow.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, expiry_hint: { type: "string" } }, required: ["ticker"] } },
+  { name: "get_historical_put_call_ratio", description: "Return one explicit historical Alpha Vantage put/call-ratio observation. date is required so scarce quota is never spent on a current snapshot Yahoo already provides; use summarize_options_flow for current options context.", inputSchema: { type: "object", properties: { ticker: { type: "string", minLength: 1 }, date: { type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", description: "Historical trading date after 2008-01-01 in YYYY-MM-DD." } }, required: ["ticker", "date"] } },
   { name: "analyze_options_flow_window", description: "Analyze options flow in an event window. LOW chain quality returns RETRY and must not support derivative conclusions.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, window_label: { type: "string" } }, required: ["ticker", "window_label"] } },
   { name: "find_put_hedge_candidates", description: "Find OTM put hedge candidates using executable ask cost. Contracts require a two-sided quote plus liquidity evidence; PARTIAL means retry and do not use budgetFeasible as a decision.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, otm_pct_min: { type: "number", default: 8 }, otm_pct_max: { type: "number", default: 12 }, budget_usd: { type: "number", default: 500 }, expiry_after: { type: "string" } }, required: ["ticker"] } },
   { name: "list_sec_company_filings", description: "List SEC filings for a company from EDGAR submissions. Returns cik, filingType, filingDate, acceptedAt, accessionNumber, primaryDocument, documentUrl, and meta.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, form_type: { type: "string", default: "10-K" }, limit: { type: "number", default: 5 }, max_filings: { type: "number", default: 5 } }, required: ["ticker"] } },
@@ -1363,7 +1367,43 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   get_stock_actions: SIMPLE_OBJECT_SCHEMA,
   get_financial_statement: SIMPLE_OBJECT_SCHEMA,
   get_holder_info: SIMPLE_OBJECT_SCHEMA,
+  get_expanded_institutional_ownership: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      status: { type: "string" },
+      source: { type: ["string", "null"] },
+      providerGapFilled: { type: "boolean" },
+      capacityClass: { type: ["string", "null"] },
+      dataDate: { type: ["string", "null"] },
+      holders: { type: "array" },
+      aggregate: { type: "object" },
+      providerAttempts: { type: "array" },
+      evidenceClass: { type: "string" },
+      decisionGrade: { const: false },
+      recommendedNextAction: { type: "string" },
+    },
+    additionalProperties: true,
+  },
   get_option_expiration_dates: SIMPLE_OBJECT_SCHEMA,
+  get_historical_put_call_ratio: {
+    type: "object",
+    properties: {
+      ticker: { type: "string" },
+      status: { type: "string" },
+      source: { type: ["string", "null"] },
+      providerGapFilled: { type: "boolean" },
+      capacityClass: { type: ["string", "null"] },
+      dataDate: { type: ["string", "null"] },
+      putCallRatioFullChain: { type: ["number", "null"] },
+      byExpiration: { type: "array" },
+      providerAttempts: { type: "array" },
+      evidenceClass: { type: "string" },
+      decisionGrade: { const: false },
+      recommendedNextAction: { type: "string" },
+    },
+    additionalProperties: true,
+  },
   get_option_chain: {
     type: "object",
     properties: {
@@ -1960,6 +2000,8 @@ const LLM_DETAILED_OUTPUT_TOOLS = new Set([
   "get_fund_profile",
   "analyze_financial_ratios",
   "get_earnings_analysis",
+  "get_expanded_institutional_ownership",
+  "get_historical_put_call_ratio",
   "analyze_share_count_trend",
   "get_company_events_calendar",
   "get_market_calendar",
@@ -2907,8 +2949,16 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       return getFinancialStatement(str(args.ticker), str(args.financial_type), Array.isArray(args.line_items) ? args.line_items.map((item) => str(item)) : undefined);
     case "get_ownership_holders":
       return getHolderInfo(str(args.ticker), str(args.holder_type));
+    case "get_expanded_institutional_ownership":
+      return getExpandedInstitutionalOwnership(
+        str(args.ticker),
+        args.allow_scarce_fallback === true,
+        num(args.max_holders, 50),
+      );
     case "get_option_expiration_dates":
       return getOptionExpirationDates(str(args.ticker));
+    case "get_historical_put_call_ratio":
+      return getHistoricalPutCallRatio(str(args.ticker), str(args.date));
     case "get_option_chain":
       return getOptionChain(str(args.ticker), str(args.expiration_date), str(args.option_type),
         num(args.max_contracts, 50), num(args.min_open_interest, 0), num(args.min_volume, 0),
