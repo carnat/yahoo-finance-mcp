@@ -45,7 +45,6 @@ CLOSED_WORLD_TOOL_ANNOTATIONS = (
 _CLOSED_WORLD_TOOL_NAMES = {
     "system",
     "health_check",
-    "get_manifest_diagnostics",
 }
 
 
@@ -168,8 +167,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 
 ### Snapshot & diagnostics
 - get_market_snapshot: One-call market-state packet: price, range, MA trend, volume, RSI, MACD, liquidity gate, freshness. Compact (default, max 5 tickers) or full (max 2) modes.
-- get_manifest_diagnostics: Public-safe schema identity metadata for connector freshness checks.
-- health_check: Public-safe MCP availability and schema identity metadata.
+- health_check: Public-safe MCP availability, schema identity, tool mode, and connector-freshness metadata.
 
 ### Price & market data
 - get_market_quote: Current regular-market price observation with priceBasis and priceTimestamp, plus market cap, 52-week range, moving averages, and volume.
@@ -220,8 +218,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - get_sec_filing_table: Specific table from an SEC filing by index.
 - extract_sec_filing_fact: Extract a specific XBRL fact from a filing (try this first for GAAP line items).
 - search_sec_filing_text: Search narrative filing HTML text. Use as fallback when extract_sec_filing_fact returns NOT_DISCLOSED.
-- index_sec_filing: Build a deterministic section/table index for a filing (cached 24h).
-- get_sec_filing_index: Get the pre-built filing index.
+- get_sec_filing_index: Build or retrieve the cached deterministic section/table index for a filing.
 - query_sec_filing_index: Route SEC filing query types to index-backed extractors.
 
 ### SEC structured extractors

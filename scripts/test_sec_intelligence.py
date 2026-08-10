@@ -197,7 +197,7 @@ class TestGetSecFilingIntelligence(unittest.TestCase):
     def _run(self, coro):
         return asyncio.run(coro)
 
-    @patch.object(srv, "_index_sec_filing_impl", new_callable=AsyncMock)
+    @patch.object(srv, "_get_sec_filing_index_impl", new_callable=AsyncMock)
     @patch.object(srv, "_edgar_get_company_facts", new_callable=AsyncMock)
     @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
     def test_returns_intelligence_map(self, mock_subs, mock_facts, mock_index):
@@ -233,7 +233,7 @@ class TestGetSecFilingIntelligence(unittest.TestCase):
         self.assertEqual(data["status"]["xbrl"], "OK")
         self.assertEqual(data["status"]["index"], "OK")
 
-    @patch.object(srv, "_index_sec_filing_impl", new_callable=AsyncMock)
+    @patch.object(srv, "_get_sec_filing_index_impl", new_callable=AsyncMock)
     @patch.object(srv, "_edgar_get_company_facts", new_callable=AsyncMock)
     @patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock)
     def test_filing_index_parameter(self, mock_subs, mock_facts, mock_index):

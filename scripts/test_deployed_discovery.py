@@ -17,6 +17,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 try:
     from scripts.public_tool_contract import validate_live_tool_contract
@@ -49,7 +50,6 @@ CANONICAL_TOOLS = {
     "get_sec_filing_table",
     "extract_sec_filing_fact",
     "search_sec_filing_text",
-    "index_sec_filing",
     "get_sec_filing_index",
     # Phase 3 extractor tools
     "extract_segment_revenue",
@@ -78,102 +78,13 @@ CANONICAL_TOOLS = {
     "get_expanded_institutional_ownership",
     "health_check",
 }
-GROUPED_TOOLS = {
-    "stock_pricing",
-    "stock_fundamentals",
-    "analyst_data",
-    "options_analysis",
-    "sec_filings",
-    "sec_extractors",
-    "news_events",
-    "earnings_intelligence",
-    "screening",
-    "system",
-    "thai_funds",
-}
+_CATALOG_PATH = Path(__file__).resolve().parent.parent / "tool_catalog.json"
+_CATALOG = json.loads(_CATALOG_PATH.read_text(encoding="utf-8"))
+GROUPED_TOOLS = frozenset(_CATALOG["groups"])
 ACTION_GROUP = {
-    "health_check": "system",
-    "get_manifest_diagnostics": "system",
-    "get_market_quote": "stock_pricing",
-    "get_historical_prices": "stock_pricing",
-    "analyze_price_performance": "stock_pricing",
-    "analyze_moving_average_position": "stock_pricing",
-    "analyze_volume_ratio": "stock_pricing",
-    "check_volume_liquidity_threshold": "stock_pricing",
-    "get_technical_indicators": "stock_pricing",
-    "get_price_slope": "stock_pricing",
-    "get_short_interest": "stock_pricing",
-    "get_short_momentum": "stock_pricing",
-    "get_overnight_quote": "stock_pricing",
-    "get_market_snapshot": "stock_pricing",
-    "get_company_profile": "stock_fundamentals",
-    "get_fund_profile": "stock_fundamentals",
-    "get_financial_statement": "stock_fundamentals",
-    "analyze_financial_ratios": "stock_fundamentals",
-    "analyze_share_count_trend": "stock_fundamentals",
-    "analyze_credit_health": "stock_fundamentals",
-    "get_corporate_actions": "stock_fundamentals",
-    "get_ownership_holders": "stock_fundamentals",
-    "get_expanded_institutional_ownership": "stock_fundamentals",
-    "get_analyst_consensus": "analyst_data",
-    "get_earnings_analysis": "analyst_data",
-    "get_analyst_recommendations": "analyst_data",
-    "get_analyst_rating_changes": "analyst_data",
-    "analyze_earnings_momentum": "analyst_data",
-    "get_company_events_calendar": "analyst_data",
-    "get_market_calendar": "analyst_data",
-    "get_option_expiration_dates": "options_analysis",
-    "get_option_chain": "options_analysis",
-    "summarize_options_flow": "options_analysis",
-    "find_put_hedge_candidates": "options_analysis",
-    "analyze_options_flow_window": "options_analysis",
-    "get_historical_put_call_ratio": "options_analysis",
-    "list_sec_company_filings": "sec_filings",
-    "list_sec_material_filings": "sec_filings",
-    "get_sec_filing_outline": "sec_filings",
-    "get_sec_filing_section": "sec_filings",
-    "get_sec_filing_section_markdown": "sec_filings",
-    "list_sec_filing_tables": "sec_filings",
-    "get_sec_filing_table": "sec_filings",
-    "extract_sec_filing_fact": "sec_filings",
-    "search_sec_filing_text": "sec_filings",
-    "index_sec_filing": "sec_filings",
-    "get_sec_filing_index": "sec_filings",
-    "get_sec_filing_intelligence": "sec_filings",
-    "query_sec_filing_index": "sec_filings",
-    "list_sec_filing_exhibits": "sec_filings",
-    "get_sec_filing_exhibit_content": "sec_filings",
-    "extract_geographic_revenue": "sec_extractors",
-    "extract_segment_revenue": "sec_extractors",
-    "extract_total_revenue": "sec_extractors",
-    "extract_revenue_exposure": "sec_extractors",
-    "extract_china_exposure": "sec_extractors",
-    "extract_risk_factor_mentions": "sec_extractors",
-    "extract_customer_concentration": "sec_extractors",
-    "extract_exposure": "sec_extractors",
-    "get_company_news": "news_events",
-    "search_company_news": "news_events",
-    "get_company_press_releases": "news_events",
-    "get_sec_recent_events": "news_events",
-    "get_public_event_timeline": "news_events",
-    "verify_company_event": "news_events",
-    "get_latest_earnings_release": "earnings_intelligence",
-    "index_earnings_release": "earnings_intelligence",
-    "extract_earnings_metrics": "earnings_intelligence",
-    "extract_guidance": "earnings_intelligence",
-    "extract_management_commentary": "earnings_intelligence",
-    "compare_earnings_actual_vs_estimate": "earnings_intelligence",
-    "get_earnings_call_transcript": "earnings_intelligence",
-    "parse_public_transcript": "earnings_intelligence",
-    "search_ticker": "screening",
-    "screen_stocks": "screening",
-    "analyze_position_signals": "screening",
-    "calculate_price_target_distance": "screening",
-    "search_thai_funds": "thai_funds",
-    "get_thai_fund_nav": "thai_funds",
-    "get_thai_fund_nav_batch": "thai_funds",
-    "get_thai_fund_factsheet": "thai_funds",
-    "get_thai_fund_dividend_history": "thai_funds",
+    action: group_name
+    for group_name, group in _CATALOG["groups"].items()
+    for action in group["actions"]
 }
 
 # Safe args for tools that can be called generically during tool-scan loop.
@@ -720,11 +631,7 @@ def main() -> int:
     _assert_filing_resolution(aaoi_filings, "AAOI")
     print("  PASS AAOI filing-resolution smoke")
 
-    aapl_index = call_tool("index_sec_filing", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}, 22)
-    assert_no_unknown_tool(aapl_index, "index_sec_filing")
-    _assert_sec_index_shape(extract_data(aapl_index), "index_sec_filing")
-
-    aapl_cached_index = call_tool("get_sec_filing_index", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}, 23)
+    aapl_cached_index = call_tool("get_sec_filing_index", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}, 22)
     assert_no_unknown_tool(aapl_cached_index, "get_sec_filing_index")
     _assert_sec_index_shape(extract_data(aapl_cached_index), "get_sec_filing_index")
 
@@ -1059,22 +966,6 @@ def main() -> int:
             f"get_historical_stock_prices({{}}) expected validation error or ok=false, got: {bad_str[:400]}"
         )
     print("  PASS invalid-args test (empty ticker returns validation error, not provider 404)")
-
-    manifest_diag = call_tool("get_manifest_diagnostics", {}, 903)
-    assert_no_unknown_tool(manifest_diag, "get_manifest_diagnostics")
-    assert_not_double_enveloped_failure(manifest_diag, "get_manifest_diagnostics")
-    diag_data = extract_data(manifest_diag)
-    if not isinstance(diag_data, dict):
-        raise AssertionError(f"get_manifest_diagnostics returned non-object: {diag_data!r}")
-    for field in (
-        "toolCount",
-        "manifestVersion",
-        "manifestHash",
-        "privacyScope",
-    ):
-        if field not in diag_data:
-            raise AssertionError(f"get_manifest_diagnostics missing field {field}: {diag_data}")
-    print("  PASS get_manifest_diagnostics contract smoke")
 
     batch_news = call_tool(
         "get_company_news",

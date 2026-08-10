@@ -11382,7 +11382,7 @@ export async function verifyCompanyEvent(
   });
 }
 
-// ── index_sec_filing / get_sec_filing_index ────────────────────────────────────
+// ── get_sec_filing_index ───────────────────────────────────────────────────────
 
 const _INDEX_KEYWORDS = [
   "china", "greater china", "prc", "geographic", "segment", "revenue",
@@ -11544,7 +11544,7 @@ function _buildFilingIndexFromHtml(
   };
 }
 
-async function _indexSecFilingImpl(
+async function _getSecFilingIndexImpl(
   ticker: string,
   filingType: string,
   // `period` is reserved for future multi-period support (e.g. "2024", "prior").
@@ -11621,26 +11621,17 @@ async function _indexSecFilingImpl(
   return result;
 }
 
-export async function indexSecFiling(
-  ticker: string,
-  filingType: string = "10-K",
-  period: string = "latest",
-  accessionNumber: string | null = null,
-): Promise<string> {
-  try {
-    return await _indexSecFilingImpl(ticker, filingType, period, accessionNumber);
-  } catch (e) {
-    return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: `${e instanceof Error ? e.message : String(e)}` } });
-  }
-}
-
 export async function getSecFilingIndex(
   ticker: string,
   filingType: string = "10-K",
   period: string = "latest",
   accessionNumber: string | null = null,
 ): Promise<string> {
-  return indexSecFiling(ticker, filingType, period, accessionNumber);
+  try {
+    return await _getSecFilingIndexImpl(ticker, filingType, period, accessionNumber);
+  } catch (e) {
+    return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: `${e instanceof Error ? e.message : String(e)}` } });
+  }
 }
 
 
@@ -11829,7 +11820,7 @@ export async function getSecFilingIntelligence(
   let tablesCount = 0;
   const sectionsList: string[] = [];
   try {
-    const indexRaw = await _indexSecFilingImpl(ticker, filingType, "latest", accessionNumber);
+    const indexRaw = await _getSecFilingIndexImpl(ticker, filingType, "latest", accessionNumber);
     const indexData = JSON.parse(indexRaw) as Record<string, unknown>;
     if (indexData.index) {
       const idx = indexData.index as Record<string, unknown[]>;
