@@ -14,19 +14,6 @@ Provider endpoints used by the Worker:
 
 No separate Python service, Fly app, paid EdgarTools API, or API key is required.
 
-## Worker Configuration
-
-- `STRUCTURED_FACT_PROVIDER`: default `official_sec_data_api`; set to
-  `disabled` to roll back structured fact tools.
-- `SEC_USER_AGENT`: optional SEC-compliant User-Agent string. Defaults to a
-  project identifier.
-- `EDGAR_FACTS_LAST_SMOKE_STATUS`: optional deploy metadata set by automation
-  after the live smoke.
-
-When disabled, structured fact tools return
-`STRUCTURED_FACT_PROVIDER_UNCONFIGURED` instead of using legacy Worker
-heuristics.
-
 ## Limits
 
 The official SEC `companyfacts` API is best for standardized entity-level XBRL
@@ -50,9 +37,8 @@ limitations into `NOT_DISCLOSED`.
 
 ## Required Post-Deploy Smoke
 
-The smoke script is `scripts/test_deployed_sec_facts_provider.py`. It calls the
-deployed Worker, verifies
-`health_check.structuredFactProvider == "official_sec_data_api"`, then calls:
+The deployed extractor audit is `scripts/test_deployed_extractors.py`. It calls
+the public Worker and exercises structured SEC extraction, including:
 
 ```text
 extract_total_revenue(AAPL, 10-K, latest)
@@ -64,12 +50,6 @@ The total revenue call must return `FOUND`. The geographic call may return
 `EXTRACTION_FAILED`, `TABLE_NOT_PARSED`, or `NO_DIMENSIONAL_REVENUE_FACT`, but
 must not return fake `NOT_DISCLOSED` when the filing exists and the parser or
 official SEC JSON cannot expose a dimensional fact.
-
-## Rollback
-
-Set `STRUCTURED_FACT_PROVIDER=disabled` as a Worker secret. The Worker will keep
-the public tools callable, but structured fact tools will return
-`STRUCTURED_FACT_PROVIDER_UNCONFIGURED`.
 
 ## Provider Access Discipline
 

@@ -32,14 +32,13 @@ from yfmcp.schemas import (
 # ---------------------------------------------------------------------------
 # Phase 1: yfmcp infrastructure imports
 # ---------------------------------------------------------------------------
-import yfmcp.envelope as _envelope
 from yfmcp.envelope import (
     SERVER_VERSION, _ENVELOPE_V2, ErrorCode, ToolMeta, ErrorDetail, McpResponse,
-    _mcp_success, _mcp_failure, _mcp_warning, _wrap_envelope_v2,
+    _mcp_success, _mcp_failure, _wrap_envelope_v2,
 )
 from yfmcp.validation import (
     _TICKER_RE, _ACCESSION_RE,
-    _validate_ticker, _validate_accession, _validate_batch_tickers,
+    _validate_ticker, _validate_accession,
     _validate_sec_url, _sanitize_sec_html,
 )
 from yfmcp.cache import (
@@ -63,8 +62,7 @@ from yfmcp.clients.edgar import (
     _EDGAR_FACTS_CACHE, _EDGAR_SUBS_CACHE,
     _edgar_get_company_facts, _edgar_get_submissions,
     _edgar_build_filing_urls, _edgar_cik_from_accession,
-    _edgar_list_exhibits_from_index,
-    _edgar_primary_doc_from_index, _edgar_get_html,
+    _edgar_list_exhibits_from_index, _edgar_get_html,
 )
 from yfmcp.parsing.html import (
     _strip_html_tags, _parse_html_table, _parse_numeric_cell, _detect_unit_multiplier,
@@ -73,8 +71,6 @@ from yfmcp.parsing.html import (
 from yfmcp.parsing.extractors import (
     _normalize_segment_label, _region_matches,
     _extract_geo_revenue_from_html,
-    _REGION_XBRL_MEMBERS, _GEO_REVENUE_CONCEPTS, _GEO_AXIS,
-    _extract_geographic_pct,
     _extract_xbrl_latest_annual,
 )
 
@@ -102,7 +98,6 @@ from yfmcp.tools.pricing import (  # re-export for compatibility and grouped rou
     _overnight_window_utc_for_session_end_date,
     _overnight_window_utc,
     _classify_overnight_session,
-    _classify_freshness,
     _load_completed_daily_history,
     _select_completed_close_series,
     _daily_bar_date,
@@ -393,7 +388,7 @@ _YAHOO_NEWS_LEGAL_SUFFIXES = frozenset({
 _YAHOO_NEWS_ACRONYM_IGNORED_WORDS = frozenset({"the", "and", "of", "for"})
 
 
-def _normalized_yahoo_news_phrase(value: object) -> str:
+def _normalize_event_text(value: object) -> str:
     return _re.sub(r"\s+", " ", _re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())).strip()
 
 
@@ -410,7 +405,7 @@ def _yahoo_news_identity_from_info(ticker: str, info: dict | None) -> dict:
     acronyms: set[str] = set()
     company_name = str(info.get("longName") or info.get("shortName") or "").strip() or None
     for raw_name in (info.get("shortName"), info.get("longName")):
-        normalized = _normalized_yahoo_news_phrase(raw_name)
+        normalized = _normalize_event_text(raw_name)
         if not normalized:
             continue
         stripped = _strip_yahoo_news_legal_suffix(normalized)
@@ -438,7 +433,7 @@ def _yahoo_news_match_for(text: str, ticker: str, identity: dict) -> tuple[str, 
         return "TICKER_TOKEN", 0
     if identity.get("status") != "RESOLVED":
         return None
-    normalized_text = f" {_normalized_yahoo_news_phrase(text)} "
+    normalized_text = f" {_normalize_event_text(text)} "
     if any(f" {alias} " in normalized_text for alias in identity.get("aliases") or ()):
         return "ISSUER_NAME", 1
     if any(_re.search(r"\b" + _re.escape(acronym) + r"\b", text, _re.IGNORECASE) for acronym in identity.get("acronyms") or ()):
@@ -662,26 +657,6 @@ def _short_text(text: object, max_chars: int = 220) -> str | None:
     if not value:
         return None
     return value[:max_chars]
-
-
-def _canonicalize_event_url(url: str | None) -> str | None:
-    raw = str(url or "").strip()
-    if not raw:
-        return None
-    try:
-        parsed = _urlparse.urlparse(raw)
-        if parsed.scheme not in ("http", "https"):
-            return None
-        normalized = parsed._replace(
-            scheme=parsed.scheme.lower(),
-            netloc=parsed.netloc.lower(),
-            params="",
-            query="",
-            fragment="",
-        )
-        return _urlparse.urlunparse(normalized)
-    except Exception:
-        return None
 
 
 def _make_duplicate_group_id(
@@ -2265,14 +2240,7 @@ async def _collect_company_events(
                 "source": "yahoo_finance_identity",
             })
 
-    def _unpack_yahoo_result(value: tuple) -> tuple[list[dict], list[dict], bool, dict]:
-        if len(value) == 4:
-            result_items, result_warnings, result_used, result_diagnostics = value
-            return result_items, result_warnings, result_used, result_diagnostics
-        result_items, result_warnings, result_used = value
-        return result_items, result_warnings, result_used, {}
-
-    def _unpack_finnhub_result(value: tuple) -> tuple[list[dict], list[dict], bool, dict]:
+    def _unpack_provider_result(value: tuple) -> tuple[list[dict], list[dict], bool, dict]:
         if len(value) == 4:
             result_items, result_warnings, result_used, result_diagnostics = value
             return result_items, result_warnings, result_used, result_diagnostics
@@ -2291,7 +2259,7 @@ async def _collect_company_events(
             identity=yahoo_identity,
             include_diagnostics=True,
         )
-        yf_items, yf_warnings, used, yf_diagnostics = _unpack_yahoo_result(yf_result)
+        yf_items, yf_warnings, used, yf_diagnostics = _unpack_provider_result(yf_result)
         source_diagnostics["yahoo_finance_news"] = {**yf_diagnostics, "attempted": True, "completed": used}
         if used:
             if "yahoo_finance_news" in selected_sources:
@@ -2323,7 +2291,7 @@ async def _collect_company_events(
             identity=yahoo_identity,
             include_diagnostics=True,
         )
-        pr_items, pr_warnings, used, pr_diagnostics = _unpack_yahoo_result(pr_result)
+        pr_items, pr_warnings, used, pr_diagnostics = _unpack_provider_result(pr_result)
         source_diagnostics["yahoo_finance_press_releases"] = {**pr_diagnostics, "attempted": True, "completed": used}
         if used and "yahoo_finance_press_releases" in selected_sources and "yahoo_finance_press_releases" not in sources_used:
             sources_used.append("yahoo_finance_press_releases")
@@ -2345,7 +2313,7 @@ async def _collect_company_events(
         warnings.extend(gnw_warnings)
 
     if "finnhub" in selected_sources and _finnhub_eligibility(ticker)[0]:
-        finnhub_items, finnhub_warnings, used, finnhub_diagnostics = _unpack_finnhub_result(
+        finnhub_items, finnhub_warnings, used, finnhub_diagnostics = _unpack_provider_result(
             await _collect_finnhub_events(
                 ticker,
                 retrieved_at=retrieved_at,
@@ -2861,9 +2829,6 @@ async def verify_company_event(
             include_diagnostics=True,
         )
     )
-    def _normalize_event_text(value: object) -> str:
-        return _re.sub(r"\s+", " ", _re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())).strip()
-
     event_query_stopwords = {
         "announce", "announced", "announcement", "announcements", "announces",
         "company", "corporate", "latest", "news", "official", "press", "release",
@@ -4966,15 +4931,6 @@ async def get_filing_data(
         except Exception:
             return None
 
-    def _scale_label(multiplier: float | None) -> str:
-        if multiplier == 1_000.0:
-            return "thousands"
-        if multiplier == 1_000_000.0:
-            return "millions"
-        if multiplier == 1.0:
-            return "actual"
-        return "actual"
-
     def _geo_shape(payload: dict, *, warn_denominator: bool = False) -> str:
         if fact_type != FilingFactType.geographic_revenue:
             return json.dumps(payload)
@@ -5656,16 +5612,6 @@ async def get_credit_health(ticker: str | list[str]) -> str:
             except (KeyError, TypeError):
                 continue
         return None
-
-    def _safe_get_with_source(df, col, *row_names):
-        for name in row_names:
-            try:
-                val = df.loc[name, col]
-                if pd.notna(val):
-                    return float(val), str(name)
-            except (KeyError, TypeError):
-                continue
-        return None, None
 
     def _ttm_sum(df, cols, *row_names):
         """Sum first matching row across quarterly cols for TTM. Returns (total, source_row, n_quarters_used)."""
@@ -7287,46 +7233,6 @@ async def get_position_score_inputs(ticker: str) -> str:
 
 # ---------------------------------------------------------------------------
 # CR-15 — get_volume_gate
-
-def _deprecated_alias_response(alias_tool: str, canonical_tool: str, raw: str) -> str:
-    warning_obj = {
-        "code": "DEPRECATED_ALIAS",
-        "message": f"Use {canonical_tool} instead.",
-        "severity": "info",
-    }
-    if not _envelope._ENVELOPE_V2:
-        return raw
-    try:
-        payload = json.loads(raw)
-    except Exception:
-        payload = raw
-    if isinstance(payload, dict) and "ok" in payload:
-        meta = payload.get("meta")
-        if not isinstance(meta, dict):
-            meta = {}
-            payload["meta"] = meta
-        meta["tool"] = alias_tool
-        meta["canonicalTool"] = canonical_tool
-        meta["deprecatedTool"] = True
-        meta["useInstead"] = canonical_tool
-        warnings = meta.get("warnings")
-        warning_list = list(warnings) if isinstance(warnings, list) else []
-        warning_list.append(warning_obj)
-        meta["warnings"] = warning_list
-        return json.dumps(payload)
-    return _mcp_success(
-        alias_tool,
-        payload,
-        canonical_tool=canonical_tool,
-        deprecated_tool=True,
-        use_instead=canonical_tool,
-        warnings=[warning_obj],
-    )
-
-
-
-
-
 
 @yfinance_server.tool(
     name="get_market_quote",
@@ -9747,13 +9653,11 @@ async def query_sec_filing_index(
 # ---------------------------------------------------------------------------
 import yfmcp.tools.earnings  # noqa: F401 (side-effect import)
 from yfmcp.tools.earnings import (  # re-export for compatibility and grouped routing
-    _derive_fiscal_period_from_date,
     _is_paywalled_url,
     _classify_earnings_source_url,
     _fetch_public_html,
     _scale_number_from_text,
     _first_sentence_for_topic,
-    _extract_metric_number,
     _resolve_latest_earnings_sec_source,
     _resolve_latest_earnings_release,
     get_latest_earnings_release,

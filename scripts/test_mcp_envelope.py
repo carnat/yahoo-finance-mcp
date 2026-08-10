@@ -120,14 +120,6 @@ class TestPhase1Envelope(unittest.TestCase):
         result = json.loads(self.srv._mcp_failure("my_tool", "PROVIDER_ERROR", "timeout"))
         self.assertEqual(result["meta"]["tool"], "my_tool")
 
-    # ── _mcp_warning ────────────────────────────────────────────────────────
-
-    def test_warning_ok_true(self):
-        raw = json.dumps({"data": 42})
-        result = json.loads(self.srv._mcp_warning("t", raw, "stale data"))
-        self.assertTrue(result["ok"])
-        self.assertIn("stale data", result["meta"]["warnings"])
-
     # ── Feature flag off ────────────────────────────────────────────────────
 
     def test_flag_off_returns_raw(self):

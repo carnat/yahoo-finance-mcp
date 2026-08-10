@@ -201,57 +201,6 @@ async def _edgar_list_exhibits_from_index(index_url: str) -> list[dict]:
     return exhibits
 
 
-async def _edgar_primary_doc_from_index(index_url: str) -> str | None:
-    """Fetch the EDGAR filing index HTM and return the primary document filename.
-
-    The EDGAR filing index page (e.g. ``0000024741-26-000124-index.htm``) contains a
-    table listing all documents for a filing.  The sequence-1 entry is the primary
-    document (e.g. ``glw-20251231.htm``).  This function is ticker- and naming-
-    convention-agnostic and works regardless of the EDGAR submissions window.
-
-    Returns the bare filename (suitable for passing to ``_edgar_build_filing_urls``),
-    or ``None`` if the page cannot be fetched or parsed.
-    """
-    html = await _edgar_get_html(index_url, max_bytes=500_000)
-    if not html:
-        return None
-    def _normalize_href(raw_href: str) -> str | None:
-        href = _html_module.unescape(raw_href).strip()
-        if not href:
-            return None
-        # SEC often wraps document links as /ixviewer/ix.html?doc=/Archives/.../file.htm
-        doc_m = _re.search(r"[?&]doc=([^&#]+)", href, _re.IGNORECASE)
-        if doc_m:
-            href = doc_m.group(1)
-        href = href.split("#", 1)[0].split("?", 1)[0]
-        if not href:
-            return None
-        fname = href.rsplit("/", 1)[-1].strip()
-        return fname if fname else None
-
-    # Prefer the first row matching Sequence=1 OR Type=10-K.
-    for row_m in _re.finditer(r"<tr[^>]*>([\s\S]*?)</tr>", html, _re.IGNORECASE):
-        row_html = row_m.group(1)
-        cell_html = _re.findall(r"<t[dh][^>]*>([\s\S]*?)</t[dh]>", row_html, _re.IGNORECASE)
-        if not cell_html:
-            continue
-        seq = _strip_html_tags(cell_html[0])
-        doc_type = _strip_html_tags(cell_html[1]) if len(cell_html) > 1 else ""
-        if seq == "1" or doc_type.upper().startswith("10-K"):
-            href_m = _re.search(r'<a[^>]+href=["\']([^"\']+)["\']', row_html, _re.IGNORECASE)
-            if href_m:
-                fname = _normalize_href(href_m.group(1))
-                if fname and not fname.lower().endswith(("-index.htm", "-index.html")):
-                    return fname
-
-    # Fallback: return the first document-like link that is not the index file itself.
-    for href_m in _re.finditer(r'href=["\']([^"\']+)["\']', html, _re.IGNORECASE):
-        fname = _normalize_href(href_m.group(1))
-        if fname and fname.lower().endswith((".htm", ".html")) and not fname.lower().endswith(("-index.htm", "-index.html")):
-            return fname
-    return None
-
-
 async def _edgar_get_html(url: str, max_bytes: int = 5_000_000) -> str | None:
     """Fetch an HTML document from EDGAR, reading at most max_bytes uncompressed bytes."""
     loop = asyncio.get_event_loop()

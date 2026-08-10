@@ -125,57 +125,7 @@ class TestManifestDiagnostics(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 2. Freshness classifier unit tests
-# ---------------------------------------------------------------------------
-
-class TestFreshnessClassifier(unittest.TestCase):
-    def setUp(self):
-        self.srv = _reload_server()
-
-    def _classify(self, data_date, retrieved_at):
-        return self.srv._classify_freshness(data_date, retrieved_at)
-
-    def test_none_data_date_returns_unknown(self):
-        self.assertEqual(self._classify(None, "2026-05-17T10:00:00Z"), "UNKNOWN")
-
-    def test_fresh_same_day(self):
-        # Data from 16:05 UTC close, retrieved 18:00 UTC same day
-        result = self._classify("2026-05-15", "2026-05-15T22:00:00Z")
-        self.assertEqual(result, "FRESH")
-
-    def test_weekend_expected_stale_sunday_friday_data(self):
-        # Sunday 2026-05-17 (Python weekday=6), data from Friday 2026-05-15 (Python weekday=4)
-        result = self._classify("2026-05-15", "2026-05-17T12:00:00Z")
-        self.assertEqual(result, "WEEKEND_EXPECTED_STALE")
-
-    def test_weekend_expected_stale_saturday_friday_data(self):
-        # Saturday 2026-05-16 (Python weekday=5), data from Friday 2026-05-15 (Python weekday=4)
-        result = self._classify("2026-05-15", "2026-05-16T12:00:00Z")
-        self.assertEqual(result, "WEEKEND_EXPECTED_STALE")
-
-    def test_market_closed_expected_stale_overnight(self):
-        # Data from Friday close, retrieved Monday morning within 56h
-        # Friday 2026-05-15 21:00 UTC approx close → Monday 2026-05-18 04:00 UTC = ~55h
-        result = self._classify("2026-05-15", "2026-05-18T04:00:00Z")
-        self.assertEqual(result, "MARKET_CLOSED_EXPECTED_STALE")
-
-    def test_stale_3_5_days(self):
-        # Data 4 days old (~96h)
-        result = self._classify("2026-05-13", "2026-05-17T10:00:00Z")
-        self.assertEqual(result, "STALE")
-
-    def test_very_stale_over_7_days(self):
-        # Data 10 days old
-        result = self._classify("2026-05-07", "2026-05-17T10:00:00Z")
-        self.assertEqual(result, "VERY_STALE")
-
-    def test_future_date_returns_unknown(self):
-        result = self._classify("2026-05-20", "2026-05-17T10:00:00Z")
-        self.assertEqual(result, "UNKNOWN")
-
-
-# ---------------------------------------------------------------------------
-# 3. Overnight guardrails unit tests
+# 2. Overnight guardrails unit tests
 # ---------------------------------------------------------------------------
 
 class TestOvernightSessionGuardrails(unittest.TestCase):
@@ -266,7 +216,7 @@ class TestOvernightSessionGuardrails(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 4. Quote freshness classifier
+# 3. Quote freshness classifier
 # ---------------------------------------------------------------------------
 
 class TestQuoteFreshnessClassifier(unittest.TestCase):
@@ -363,7 +313,7 @@ class TestQuoteFreshnessClassifier(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 5. get_market_snapshot schema smoke (offline, mocked components)
+# 4. get_market_snapshot schema smoke (offline, mocked components)
 # ---------------------------------------------------------------------------
 
 class TestMarketSnapshotSchema(unittest.TestCase):
@@ -591,7 +541,7 @@ class TestMarketSnapshotSchema(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 4. Public wording smoke — tool descriptions must not contain private language
+# 5. Public wording smoke — tool descriptions must not contain private language
 # ---------------------------------------------------------------------------
 
 class TestPublicWording(unittest.TestCase):
@@ -661,7 +611,7 @@ class TestPublicWording(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 5. Tool sync smoke — new canonical tools are registered
+# 6. Tool sync smoke — new canonical tools are registered
 # ---------------------------------------------------------------------------
 
 class TestToolRegistration(unittest.TestCase):
@@ -722,7 +672,7 @@ class TestToolRegistration(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 6. V2 envelope contract
+# 7. V2 envelope contract
 # ---------------------------------------------------------------------------
 
 class TestV2Envelope(unittest.TestCase):

@@ -1982,36 +1982,6 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
         "recommendedNextAction": "NONE",
     })
 
-def _classify_freshness(data_date: str | None, retrieved_at: str) -> str:
-    """Classify legacy date-only data freshness."""
-    if not data_date:
-        return "UNKNOWN"
-    try:
-        now = datetime.datetime.fromisoformat(retrieved_at.replace("Z", "+00:00"))
-        # Preserve the existing date-only contract for compatibility.
-        data_dt = datetime.datetime(
-            int(data_date[:4]), int(data_date[5:7]), int(data_date[8:10]),
-            21, 0, 0, tzinfo=datetime.timezone.utc
-        )
-        diff_ms = (now - data_dt).total_seconds() * 1000
-        if diff_ms < 0:
-            return "UNKNOWN"
-        diff_hours = diff_ms / (1000 * 60 * 60)
-        now_day = now.weekday()
-        data_day = data_dt.weekday()
-        if now_day in (5, 6) and data_day == 4 and diff_hours <= 72:
-            return "WEEKEND_EXPECTED_STALE"
-        if diff_hours <= 28:
-            return "FRESH"
-        if diff_hours <= 56:
-            return "MARKET_CLOSED_EXPECTED_STALE"
-        if diff_hours <= 168:
-            return "STALE"
-        return "VERY_STALE"
-    except Exception:
-        return "UNKNOWN"
-
-
 def _classify_quote_freshness(
     quote_timestamp: str | None,
     retrieved_at: str,

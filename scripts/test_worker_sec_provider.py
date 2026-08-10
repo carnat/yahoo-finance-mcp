@@ -27,11 +27,10 @@ class TestWorkerSecProvider(unittest.TestCase):
         cls.worker = YAHOO_TS.read_text(encoding="utf-8")
 
     def test_structured_extractors_route_to_worker_local_sec_extractors(self) -> None:
-        self.assertIn("official_sec_data_api", self.tools)
-        self.assertIn("data.sec.gov", self.tools)
-        self.assertIn("companyfacts", self.tools)
-        self.assertIn("STRUCTURED_FACT_PROVIDER_UNCONFIGURED", self.tools)
-        self.assertIn("STRUCTURED_FACT_PROVIDER_UNAVAILABLE", self.tools)
+        self.assertIn("data.sec.gov", self.worker)
+        self.assertIn("companyfacts", self.worker)
+        self.assertNotIn("STRUCTURED_FACT_PROVIDER", self.tools)
+        self.assertNotIn("callStructuredFactsProvider", self.tools)
         expected_routes = {
             "extract_geographic_revenue": "extractGeographicRevenue(",
             "extract_segment_revenue": "extractSegmentRevenue(",

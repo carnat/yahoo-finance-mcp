@@ -28,13 +28,6 @@ def _validate_accession(acc: str) -> str | None:
     return None
 
 
-def _validate_batch_tickers(tickers: list) -> str | None:
-    """Returns an error message if the batch is too large, else None."""
-    if len(tickers) > 5:
-        return f"Too many tickers: {len(tickers)}. Maximum is 5 per call."
-    return None
-
-
 def _validate_sec_url(url: str) -> str | None:
     """Returns an error message if the SEC URL is not from sec.gov/Archives, else None."""
     if not url.startswith("https://www.sec.gov/Archives/"):

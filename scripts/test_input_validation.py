@@ -52,18 +52,6 @@ class TestAccessionValidation(unittest.TestCase):
             self.assertIsNotNone(srv._validate_accession(bad), f"Expected '{bad}' to be invalid")
 
 
-class TestBatchValidation(unittest.TestCase):
-    def test_valid_batch(self):
-        self.assertIsNone(srv._validate_batch_tickers(["AAPL", "MSFT"]))
-        self.assertIsNone(srv._validate_batch_tickers(["A", "B", "C", "D", "E"]))
-
-    def test_batch_too_large(self):
-        self.assertIsNotNone(srv._validate_batch_tickers(["A"] * 6))
-
-    def test_empty_batch_ok(self):
-        self.assertIsNone(srv._validate_batch_tickers([]))
-
-
 class TestSecUrlValidation(unittest.TestCase):
     def test_valid_sec_url(self):
         url = "https://www.sec.gov/Archives/edgar/data/320193/000032019323000077/aapl-20230930.htm"
@@ -128,7 +116,7 @@ class TestSecCikResolutionFallbacks(unittest.TestCase):
 if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
-    for cls in [TestTickerValidation, TestAccessionValidation, TestBatchValidation,
+    for cls in [TestTickerValidation, TestAccessionValidation,
                 TestSecUrlValidation, TestHtmlSanitization, TestSecCikResolutionFallbacks]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
     runner = unittest.TextTestRunner(verbosity=2)
