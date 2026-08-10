@@ -24,6 +24,10 @@ const MAX_TICKERS = 5;
 const FINNHUB_COMPANY_NEWS_API = "https://finnhub.io/api/v1/company-news";
 const ALPHA_VANTAGE_API = "https://www.alphavantage.co/query";
 const FINNHUB_API = "https://finnhub.io/api/v1";
+const MARKETAUX_NEWS_API = "https://api.marketaux.com/v1/news/all";
+const MARKETAUX_WIRE_DOMAINS = ["businesswire.com", "prnewswire.com", "globenewswire.com"] as const;
+const MARKETAUX_MAX_ITEMS = 3;
+const MARKETAUX_NEWS_TTL_MS = 15 * 60 * 1000;
 const ALPHA_HISTORICAL_PUT_CALL_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 const PROVIDER_OWNERSHIP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const ALPHA_TRANSCRIPT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -259,6 +263,63 @@ async function fetchFinnhubJson(
       return { payload: null, status: "PROVIDER_ERROR", publicUrl, providerAttempted: true, cacheStatus: "MISS", message: "Finnhub returned a non-object payload." };
     }
     const payload = json as Record<string, unknown>;
+    const fetchedAt = new Date().toISOString();
+    await setProviderCache(cacheKey, payload, publicUrl, fetchedAt, ttlMs);
+    return { payload, status: "OK", publicUrl, providerAttempted: true, cacheStatus: "MISS", fetchedAt };
+  } catch (error) {
+    const message = error instanceof Error ? error.message.replaceAll(token, "REDACTED") : String(error);
+    const status = /timeout|timed out|abort/i.test(message) ? "TIMEOUT" : "PROVIDER_ERROR";
+    return { payload: null, status, publicUrl, providerAttempted: true, cacheStatus: "MISS", message };
+  }
+}
+
+async function fetchMarketauxJson(
+  params: Record<string, unknown>,
+  ttlMs = MARKETAUX_NEWS_TTL_MS,
+): Promise<ProviderJsonResult> {
+  const cacheKey = providerCacheKey("marketaux", "/v1/news/all", params);
+  const cached = await getProviderCache(cacheKey, ttlMs);
+  if (cached) return cached;
+  const token = getWorkerVar("MARKETAUX_API_TOKEN") ?? getWorkerVar("MARKETAUX_API_KEY");
+  const publicQuery = new URLSearchParams(
+    Object.entries({ ...params, api_token: "REDACTED" }).map(([key, value]): [string, string] => [key, String(value)])
+  );
+  const publicUrl = `${MARKETAUX_NEWS_API}?${publicQuery.toString()}`;
+  if (!token) {
+    return { payload: null, status: "SOURCE_UNCONFIGURED", publicUrl, providerAttempted: false, cacheStatus: "MISS" };
+  }
+  const requestQuery = new URLSearchParams(publicQuery);
+  requestQuery.set("api_token", token);
+  try {
+    const response = await fetchProviderWithTimeout(
+      `${MARKETAUX_NEWS_API}?${requestQuery.toString()}`,
+      { headers: { "User-Agent": UA } },
+      12_000,
+    );
+    const retryAfter = response.headers.get("Retry-After") ?? undefined;
+    if (!response.ok) {
+      const body = (await response.text()).replaceAll(token, "REDACTED");
+      const status = response.status === 402 || response.status === 429
+        ? "RATE_LIMIT"
+        : response.status === 401 || response.status === 403
+          ? "AUTH_ERROR"
+          : providerHttpStatus(response.status, body);
+      return {
+        payload: null,
+        status,
+        publicUrl,
+        providerAttempted: true,
+        cacheStatus: "MISS",
+        httpStatus: response.status,
+        message: body.slice(0, 500) || undefined,
+        retryAfter,
+      };
+    }
+    const rawJson = await response.json();
+    if (!rawJson || typeof rawJson !== "object" || Array.isArray(rawJson)) {
+      return { payload: null, status: "PROVIDER_ERROR", publicUrl, providerAttempted: true, cacheStatus: "MISS", message: "Marketaux returned a non-object payload." };
+    }
+    const payload = rawJson as Record<string, unknown>;
     const fetchedAt = new Date().toISOString();
     await setProviderCache(cacheKey, payload, publicUrl, fetchedAt, ttlMs);
     return { payload, status: "OK", publicUrl, providerAttempted: true, cacheStatus: "MISS", fetchedAt };
@@ -8283,7 +8344,7 @@ const SUPPORTED_EVENT_SOURCES = new Set([
   "yahoo_finance",                  // legacy: aggregates news + press releases
   "yahoo_finance_news",             // Yahoo Finance general news tab
   "yahoo_finance_press_releases",   // Yahoo Finance press releases tab
-  "finnhub",
+  "finnhub", "marketaux",
 ]);
 const PRE_REVENUE_EPS_EPSILON = 1e-9;
 const SOURCE_PRIORITY: Record<string, number> = {
@@ -8297,7 +8358,8 @@ const SOURCE_PRIORITY: Record<string, number> = {
   company_news: 4,
   yahoo_finance: 5,
   yahoo_finance_news: 5,
-  other: 6,
+  marketaux_wire: 6,
+  other: 7,
 };
 
 function confidenceForSourceType(sourceType: unknown, fallback: unknown = "LOW"): string {
@@ -8364,7 +8426,7 @@ type CompanyEventCollectionResult = {
 function sourceDecisionUse(sourceType: unknown): string {
   const src = _str(sourceType);
   if (src === "sec_ex99_found") return "USE_OFFICIAL_EVIDENCE";
-  if (["sec_filing", "company_ir", "company_ir_page", "press_release", "yahoo_finance_press_releases", "newswire"].includes(src)) {
+  if (["sec_filing", "company_ir", "company_ir_page", "press_release", "yahoo_finance_press_releases", "newswire", "marketaux_wire"].includes(src)) {
     return "CHECK_OFFICIAL_RELEASES";
   }
   return "CONTEXT_ONLY";
@@ -8400,7 +8462,7 @@ function urlProvenanceFor(item: Record<string, unknown>): string {
 }
 
 function tickerMatchFor(item: Record<string, unknown>): string {
-  if (["TICKER_TOKEN", "ISSUER_NAME", "ISSUER_ACRONYM"].includes(_str(item.matchBasis))) return "EXPLICIT";
+  if (["TICKER_TOKEN", "ISSUER_NAME", "ISSUER_ACRONYM", "PROVIDER_ENTITY_SYMBOL"].includes(_str(item.matchBasis))) return "EXPLICIT";
   const configuredTicker = Array.isArray(item.tickers) ? item.tickers.map(value => _str(value).toUpperCase()).find(Boolean) ?? "" : "";
   const text = `${_str(item.title)} ${_str(item.summary)} ${_str(item.evidenceText)}`.toUpperCase();
   if (configuredTicker && new RegExp(`\\b${configuredTicker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(text)) return "EXPLICIT";
@@ -8434,7 +8496,7 @@ function buildCoverage(sourceStatus: Record<string, unknown>, resolvedAction: st
     const info = value as Record<string, unknown>;
     const status = _str(info.status);
     const entry = { source, status, attempted: info.attempted !== false, reasonCode: info.reasonCode ?? null };
-    if (status === "NOT_ELIGIBLE") skippedSources.push(entry);
+    if (status === "NOT_ELIGIBLE" || status === "NOT_NEEDED") skippedSources.push(entry);
     else if (failedStatuses.has(status)) failedSources.push(entry);
     if (info.hasMoreAccepted === true) {
       truncatedSources.push({
@@ -8445,10 +8507,11 @@ function buildCoverage(sourceStatus: Record<string, unknown>, resolvedAction: st
       });
     }
   }
+  const coverageLimitingSkips = skippedSources.filter(entry => entry.status !== "NOT_NEEDED");
   const recommendedNextAction = resolvedAction ?? (
     failedSources.some(entry => ["RATE_LIMITED", "TIMEOUT"].includes(_str(entry.status)))
       ? "RETRY_RETRYABLE_SOURCES"
-      : (failedSources.length || skippedSources.length
+      : (failedSources.length || coverageLimitingSkips.length
         ? "CHECK_OFFICIAL_RELEASES"
         : (truncatedSources.length ? "RETRY_TRUNCATED_SOURCE" : "USE_RETURNED_CONTEXT"))
   );
@@ -9975,6 +10038,7 @@ function computeSourceStatus(
   const companyIrItems = items.filter(it => ["company_ir", "press_release"].includes(_str(it.sourceType)));
   const companyIrPageItems = items.filter(it => _str(it.sourceType) === "company_ir_page");
   const finnhubItems = items.filter(it => _str(it.source) === "finnhub");
+  const marketauxItems = items.filter(it => _str(it.source) === "marketaux");
   const result: Record<string, unknown> = {};
   const yahooStatus = (source: string, sourceItems: Record<string, unknown>[]): Record<string, unknown> | null => {
     const diagnostic = (sourceDiagnostics[source] && typeof sourceDiagnostics[source] === "object")
@@ -10085,6 +10149,38 @@ function computeSourceStatus(
     } else {
       result.finnhub = { status: "EMPTY_RESULT", rawCount: 0, filteredCount: 0 };
     }
+  }
+  if (selectedSources.includes("marketaux")) {
+    const diagnostic = (sourceDiagnostics.marketaux && typeof sourceDiagnostics.marketaux === "object")
+      ? sourceDiagnostics.marketaux as Record<string, unknown>
+      : {};
+    const acceptedCount = Number(diagnostic.acceptedCount ?? marketauxItems.length);
+    const status = _str(diagnostic.status) || (acceptedCount > 0 ? "OK" : "EMPTY_RESULT");
+    const allowedAction: Record<string, string> = {
+      NOT_NEEDED: "none",
+      UNCONFIGURED: "configure_marketaux_api_token",
+      AUTH_ERROR: "verify_marketaux_api_token",
+      RATE_LIMITED: "retry_after_quota_reset",
+      TIMEOUT: "retry_later",
+      PROVIDER_CHANGED: "inspect_provider_contract",
+      PROVIDER_ERROR: "retry_or_use_official_sources",
+    };
+    result.marketaux = {
+      status,
+      rawCount: Number(diagnostic.rawCount ?? 0),
+      retrievedCount: Number(diagnostic.retrievedCount ?? diagnostic.rawCount ?? 0),
+      filteredCount: acceptedCount,
+      acceptedCount,
+      returnedCount: marketauxItems.length,
+      rejectedCount: Number(diagnostic.rejectedCount ?? 0),
+      rejectionCounts: diagnostic.rejectionCounts ?? {},
+      attempted: diagnostic.attempted !== false,
+      reasonCode: diagnostic.reasonCode ?? null,
+      fallbackReason: diagnostic.fallbackReason ?? null,
+      quotaPolicy: diagnostic.quotaPolicy ?? null,
+      domains: diagnostic.domains ?? null,
+      allowedAction: allowedAction[status] ?? (acceptedCount > 0 ? "check_official_releases" : "none"),
+    };
   }
   if (selectedSources.includes("company_ir")) {
     const diagnostic = (sourceDiagnostics.company_ir && typeof sourceDiagnostics.company_ir === "object")
@@ -10649,6 +10745,202 @@ async function collectFinnhubEvents(
   return { items, warnings, used: true, diagnostics };
 }
 
+async function collectMarketauxEvents(
+  ticker: string,
+  maxResults: number,
+  retrievedAt: string,
+  startDate = "",
+  endDate = "",
+  lookbackDays?: number,
+  fallbackReason = "EXPLICIT_SOURCE_SELECTION",
+  searchQuery = "",
+  expectedExchange: string | null = null,
+): Promise<{ items: Record<string, unknown>[]; warnings: Record<string, unknown>[]; used: boolean; diagnostics: Record<string, unknown> }> {
+  const warnings: Record<string, unknown>[] = [];
+  const items: Record<string, unknown>[] = [];
+  const limit = Math.min(MARKETAUX_MAX_ITEMS, Math.max(1, maxResults));
+  const rejectionCounts: Record<string, number> = {};
+  const diagnostics: Record<string, unknown> = {
+    status: "PROVIDER_ERROR",
+    rawCount: 0,
+    retrievedCount: 0,
+    acceptedCount: 0,
+    collectedCount: 0,
+    rejectedCount: 0,
+    rejectionCounts,
+    attempted: true,
+    completed: false,
+    fallbackReason,
+    domains: [...MARKETAUX_WIRE_DOMAINS],
+    quotaPolicy: {
+      dailyLimit: 100,
+      maxArticlesPerRequest: MARKETAUX_MAX_ITEMS,
+      pagesRequested: 1,
+      automaticPagination: false,
+    },
+  };
+  const reject = (reason: string): void => {
+    rejectionCounts[reason] = (rejectionCounts[reason] ?? 0) + 1;
+    diagnostics.rejectedCount = Number(diagnostics.rejectedCount ?? 0) + 1;
+  };
+  const now = new Date();
+  const fromDay = startDate || new Date(now.getTime() - (lookbackDays ?? 14) * 86400000).toISOString().slice(0, 10);
+  const toDay = endDate || now.toISOString().slice(0, 10);
+  const providerParams: Record<string, unknown> = {
+    symbols: ticker.toUpperCase(),
+    filter_entities: true,
+    language: "en",
+    domains: MARKETAUX_WIRE_DOMAINS.join(","),
+    published_after: `${fromDay}T00:00:00`,
+    published_before: `${toDay}T23:59:59`,
+    limit,
+    page: 1,
+  };
+  if (searchQuery.trim()) providerParams.search = searchQuery.trim();
+  const provider = await fetchMarketauxJson(providerParams);
+  diagnostics.providerUrl = provider.publicUrl;
+  diagnostics.cacheStatus = provider.cacheStatus;
+  diagnostics.attempted = provider.providerAttempted;
+  if (provider.status !== "OK" || !provider.payload) {
+    const status = provider.status === "SOURCE_UNCONFIGURED"
+      ? "UNCONFIGURED"
+      : provider.status === "RATE_LIMIT"
+        ? "RATE_LIMITED"
+        : provider.status;
+    diagnostics.status = status;
+    const message = status === "UNCONFIGURED"
+      ? "Marketaux wire fallback is not configured; set MARKETAUX_API_TOKEN to enable it."
+      : `Marketaux wire fallback unavailable (${status}).`;
+    warnings.push({ code: "SOURCE_UNAVAILABLE", message, severity: "warning", source: "marketaux" });
+    return { items, warnings, used: false, diagnostics };
+  }
+  const rawItems = provider.payload.data;
+  if (!Array.isArray(rawItems)) {
+    diagnostics.status = "PROVIDER_CHANGED";
+    warnings.push({ code: "SOURCE_UNAVAILABLE", message: "Marketaux provider changed: expected a data array.", severity: "warning", source: "marketaux" });
+    return { items, warnings, used: false, diagnostics };
+  }
+  diagnostics.rawCount = rawItems.length;
+  diagnostics.retrievedCount = rawItems.length;
+  const tickerU = ticker.toUpperCase();
+  for (const candidate of rawItems) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      reject("INVALID_ROW");
+      continue;
+    }
+    const row = candidate as Record<string, unknown>;
+    const title = _str(row.title).trim();
+    const url = _str(row.url).trim();
+    if (!title) {
+      reject("MISSING_HEADLINE");
+      continue;
+    }
+    let host = "";
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== "https:") throw new Error("invalid protocol");
+      host = parsed.hostname.toLowerCase();
+    } catch {
+      reject("INVALID_URL");
+      continue;
+    }
+    if (!MARKETAUX_WIRE_DOMAINS.some(domain => host === domain || host.endsWith(`.${domain}`))) {
+      reject("DOMAIN_NOT_ALLOWED");
+      continue;
+    }
+    const entities = Array.isArray(row.entities) ? row.entities : [];
+    const matchedEntity = entities.find(entity => (
+      !!entity && typeof entity === "object" && !Array.isArray(entity)
+      && _str((entity as Record<string, unknown>).symbol).toUpperCase() === tickerU
+    )) as Record<string, unknown> | undefined;
+    if (!matchedEntity) {
+      reject("ENTITY_SYMBOL_MISMATCH");
+      continue;
+    }
+    const expectedExchangeNorm = normalizeExchange(expectedExchange);
+    const providerExchangeNorm = normalizeExchange(_str(matchedEntity.exchange));
+    if (expectedExchangeNorm && providerExchangeNorm && expectedExchangeNorm !== providerExchangeNorm) {
+      reject("ENTITY_EXCHANGE_MISMATCH");
+      continue;
+    }
+    const publishedAt = toIsoUtc(row.published_at);
+    if (!withinDateWindow(publishedAt, startDate, endDate, lookbackDays)) {
+      reject("DATE_OUTSIDE_WINDOW");
+      continue;
+    }
+    const summary = _str(row.snippet) || _str(row.description) || title;
+    const duplicateGroupId = makeDupGroupId(tickerU, title, publishedAt, null);
+    items.push({
+      title,
+      source: "marketaux",
+      originalSource: _str(row.source) || host,
+      sourceType: "marketaux_wire",
+      provider: "marketaux",
+      discoveredVia: "marketaux_api",
+      publishedAt,
+      retrievedAt,
+      url,
+      issuer: _str(matchedEntity.name) || null,
+      tickers: [tickerU],
+      matchBasis: "PROVIDER_ENTITY_SYMBOL",
+      sourceTickerMatch: true,
+      eventType: eventTypeFromKeywords(title, summary),
+      summary: shortText(summary, 240),
+      evidenceText: shortText(summary, 180),
+      confidence: "LOW",
+      tickerRelevance: "HIGH",
+      duplicateGroupId,
+      providerArticleId: _str(row.uuid) || null,
+      providerRelevanceScore: matchedEntity.match_score ?? null,
+    });
+    diagnostics.acceptedCount = Number(diagnostics.acceptedCount ?? 0) + 1;
+    if (items.length >= limit) break;
+  }
+  diagnostics.status = Number(diagnostics.acceptedCount ?? 0) > 0 ? "OK" : "EMPTY_RESULT";
+  diagnostics.collectedCount = items.length;
+  diagnostics.completed = true;
+  return { items, warnings, used: true, diagnostics };
+}
+
+function marketauxFallbackReason(
+  selected: string[],
+  items: Record<string, unknown>[],
+  warnings: Record<string, unknown>[],
+  sourceDiagnostics: Record<string, unknown>,
+  searchQuery = "",
+): string | null {
+  const prioritySources = new Set(["yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]);
+  const selectedPriority = selected.filter(source => prioritySources.has(source));
+  if (selectedPriority.length === 0) return "EXPLICIT_SOURCE_SELECTION";
+  const query = searchQuery.trim().toLowerCase();
+  const hasPriorityItems = items.some(item => {
+    const isPriority = prioritySources.has(_str(item.source))
+      || prioritySources.has(_str(item.sourceType))
+      || _str(item.sourceType) === "company_news";
+    if (!isPriority || !query) return isPriority;
+    const text = `${_str(item.title)} ${_str(item.summary)} ${_str(item.source)} ${_str(item.eventType)} ${_str(item.evidenceText)}`.toLowerCase();
+    return text.includes(query);
+  });
+  let limited = warnings.some(warning => {
+    const code = _str(warning.code);
+    const sourceOrMessage = `${_str(warning.source)} ${_str(warning.message)}`.toLowerCase();
+    return code === "SOURCE_IDENTITY_UNAVAILABLE"
+      || (["SOURCE_UNAVAILABLE", "SOURCE_NOT_ELIGIBLE"].includes(code) && sourceOrMessage.includes("finnhub"))
+      || (code === "SOURCE_UNAVAILABLE" && sourceOrMessage.includes("yahoo finance"));
+  });
+  for (const source of selectedPriority) {
+    const value = sourceDiagnostics[source];
+    const diagnostic = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+    if (diagnostic && (
+      diagnostic.completed === false
+      || ["UNCONFIGURED", "NOT_ELIGIBLE", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED"].includes(_str(diagnostic.status))
+    )) limited = true;
+  }
+  if (limited) return "HIGHER_PRIORITY_COVERAGE_LIMITED";
+  if (!hasPriorityItems) return "HIGHER_PRIORITY_EMPTY";
+  return null;
+}
+
 async function collectCompanyEvents(
   ticker: string,
   {
@@ -10658,6 +10950,7 @@ async function collectCompanyEvents(
     endDate = "",
     sources,
     secFilingTypes = ["8-K", "10-Q", "10-K", "S-3", "DEF14A"],
+    searchQuery = "",
   }: {
     maxResults?: number;
     lookbackDays?: number;
@@ -10665,15 +10958,16 @@ async function collectCompanyEvents(
     endDate?: string;
     sources?: string[];
     secFilingTypes?: string[];
+    searchQuery?: string;
   } = {}
 ): Promise<{ items: Record<string, unknown>[]; sourcesUsed: string[]; warnings: Record<string, unknown>[]; watermark: string; sourceDiagnostics: Record<string, unknown> }> {
   const safeMax = clampInt(maxResults, 10, 1, 100);
   const safeLookback = clampInt(lookbackDays, 14, 1, 3650);
   const watermark = new Date().toISOString();
   const { selected, warnings: sourceWarnings } = normalizeSources(sources, [
-    "sec", "company_ir_page", "company_ir", "newswire",
+    "sec", "company_ir_page", "company_ir",
     "yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases",
-    "finnhub",
+    "finnhub", "marketaux",
   ]);
   const warnings: Record<string, unknown>[] = [...sourceWarnings];
   const items: Record<string, unknown>[] = [];
@@ -10786,14 +11080,6 @@ async function collectCompanyEvents(
     };
   }
 
-  if (selected.includes("newswire")) {
-    const identity = await getEventIdentity();
-    const gnw = await collectGlobeNewswireEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, identity?.exchange ?? null);
-    if (gnw.used) sourcesUsed.push("newswire");
-    items.push(...gnw.items);
-    warnings.push(...gnw.warnings);
-  }
-
   if (selected.includes("finnhub") && finnhubEligibility(ticker).eligible) {
     const finnhub = await collectFinnhubEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback);
     sourceDiagnostics.finnhub = finnhub.diagnostics;
@@ -10818,6 +11104,52 @@ async function collectCompanyEvents(
     });
   }
 
+  if (selected.includes("marketaux")) {
+    const fallbackReason = marketauxFallbackReason(selected, items, warnings, sourceDiagnostics, searchQuery);
+    if (fallbackReason === null) {
+      sourceDiagnostics.marketaux = {
+        status: "NOT_NEEDED",
+        attempted: false,
+        completed: true,
+        reasonCode: "HIGHER_PRIORITY_EVIDENCE_FOUND",
+        fallbackReason: null,
+        domains: [...MARKETAUX_WIRE_DOMAINS],
+        quotaPolicy: {
+          dailyLimit: 100,
+          maxArticlesPerRequest: MARKETAUX_MAX_ITEMS,
+          pagesRequested: 0,
+          automaticPagination: false,
+        },
+      };
+    } else {
+      const marketaux = await collectMarketauxEvents(
+        ticker,
+        safeMax,
+        watermark,
+        startDate,
+        endDate,
+        safeLookback,
+        fallbackReason,
+        searchQuery,
+        yahooIdentity?.exchange ?? null,
+      );
+      sourceDiagnostics.marketaux = marketaux.diagnostics;
+      if (marketaux.used) sourcesUsed.push("marketaux");
+      items.push(...marketaux.items);
+      warnings.push(...marketaux.warnings);
+    }
+  }
+
+  // GlobeNewswire RSS is an explicit shallow snapshot and intentionally runs
+  // after bounded API sources so cold feed latency cannot delay them.
+  if (selected.includes("newswire")) {
+    const identity = await getEventIdentity();
+    const gnw = await collectGlobeNewswireEvents(ticker, safeMax, watermark, startDate, endDate, safeLookback, identity?.exchange ?? null);
+    if (gnw.used) sourcesUsed.push("newswire");
+    items.push(...gnw.items);
+    warnings.push(...gnw.warnings);
+  }
+
   const deduped = dedupeEventItems(items, warnings).slice(0, safeMax).map(enrichNewsItemForLlm);
   const uniqueWarnings: Record<string, unknown>[] = [];
   const warningKeys = new Set<string>();
@@ -10836,7 +11168,7 @@ export async function getCompanyNews(
   ticker: string | string[],
   maxResults = 10,
   lookbackDays = 14,
-  sources: string[] = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
+  sources: string[] = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"],
 ): Promise<string> {
   if (
     (typeof ticker === "string" && ticker.trim() === "")
@@ -10879,10 +11211,17 @@ export async function searchCompanyNews(
   query: string,
   startDate = "",
   endDate = "",
-  sources: string[] = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
+  sources: string[] = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"],
   maxResults = 10
 ): Promise<string> {
-  const out = await collectCompanyEvents(ticker, { maxResults, lookbackDays: 14, startDate, endDate, sources });
+  const out = await collectCompanyEvents(ticker, {
+    maxResults,
+    lookbackDays: 14,
+    startDate,
+    endDate,
+    sources,
+    searchQuery: query,
+  });
   const q = query.toLowerCase().trim();
   const matched = q
     ? out.items.filter(item => `${_str(item.title)} ${_str(item.summary)} ${_str(item.source)} ${_str(item.eventType)} ${_str(item.evidenceText)}`.toLowerCase().includes(q))
@@ -10932,7 +11271,7 @@ export async function getCompanyPressReleases(
       secFilingTypes: ["8-K"],
     })
     : emptyCollection();
-  const releaseTypes = new Set(["company_ir", "company_ir_page", "press_release", "newswire", "sec_filing", "sec_ex99_found", "yahoo_finance_press_releases"]);
+  const releaseTypes = new Set(["company_ir", "company_ir_page", "press_release", "newswire", "marketaux_wire", "sec_filing", "sec_ex99_found", "yahoo_finance_press_releases"]);
   const primaryItems = primary.items.filter(it => releaseTypes.has(_str(it.sourceType)));
 
   let hasSecEx99Found = false;

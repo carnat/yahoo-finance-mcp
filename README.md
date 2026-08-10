@@ -171,8 +171,13 @@ schemas, aliases, and deprecation metadata.
   website RSS/Atom autodiscovery. `company_ir` remains RSS/Atom-only.
   `company_ir_page` is separate and registry-backed: candidate entries return
   compact review links only, while approved entries fetch a configured HTTPS
-  host/path prefix. `get_company_news` keeps lightweight Yahoo Finance/Finnhub
-  defaults for batch efficiency; pass `sources:["company_ir"]` or
+  host/path prefix. `get_company_news` uses Yahoo Finance first, eligible
+  Finnhub second, and one Marketaux request only when those sources are empty
+  or coverage-limited. Marketaux requires `MARKETAUX_API_TOKEN`, is restricted
+  to Business Wire, PR Newswire, and GlobeNewswire domains, returns at most
+  three contextual items, and never paginates automatically. Direct
+  GlobeNewswire `newswire` RSS is an explicit shallow snapshot rather than a
+  default. Pass `sources:["company_ir"]` or
   `sources:["company_ir_page"]` when official company-site coverage is needed.
   RSS-only releases, candidate links, newswire, and Yahoo items are
   verification/context evidence unless the payload also resolves SEC EX-99 or
@@ -184,7 +189,7 @@ schemas, aliases, and deprecation metadata.
   when `tickerMatch:"EXPLICIT"` is supported by `matchBasis` of
   `TICKER_TOKEN`, `ISSUER_NAME`, or `ISSUER_ACRONYM`; source diagnostics expose
   `rawCount`, `acceptedCount`, and rejection reasons. `decisionUse` is
-  `CHECK_OFFICIAL_RELEASES` for material Yahoo events that should be escalated
+  `CHECK_OFFICIAL_RELEASES` for material Yahoo or Marketaux events that should be escalated
   to `get_company_press_releases` or `verify_company_event`, otherwise
   `CONTEXT_ONLY`. `evidenceClass` and `urlProvenance` remain comparable for LLM
   callers; legacy `confidence` is backward-compatible but not a provider-quality

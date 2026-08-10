@@ -16,7 +16,12 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 
-OPTIONAL_SECRETS = ("FINNHUB_API_KEY", "SEC_OPEN_DATA_API_KEY", "ALPHA_VANTAGE_API_KEY")
+OPTIONAL_SECRETS = (
+    "FINNHUB_API_KEY",
+    "SEC_OPEN_DATA_API_KEY",
+    "ALPHA_VANTAGE_API_KEY",
+    "MARKETAUX_API_TOKEN",
+)
 
 
 def build_secrets(environ: Mapping[str, str]) -> dict[str, str]:
