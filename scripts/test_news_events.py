@@ -180,8 +180,8 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             data = _parse(_run(srv.get_company_news("AAPL", sources=["finnhub"])))
             self.assertEqual(data.get("sourceStatus", {}).get("finnhub", {}).get("status"), "OK")
 
-    def test_get_company_news_default_sources_uses_fine_grained_yahoo(self):
-        """Regression: default sources must be yahoo_finance_news + yahoo_finance_press_releases + finnhub only."""
+    def test_get_company_news_default_sources_use_priority_routing(self):
+        """Defaults expose fine-grained Yahoo, Finnhub, and Marketaux fallback status."""
         yf_items = [
             {
                 "title": "Apple reports record sales",
@@ -226,11 +226,12 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             data = _parse(_run(srv.get_company_news("AAPL")))
             # Must return 2 items from Yahoo even though Finnhub is absent
             self.assertEqual(len(data.get("items", [])), 2)
-            # sourceStatus must include yahoo_finance_news, yahoo_finance_press_releases, and finnhub only
+            # sourceStatus must include both Yahoo lanes, Finnhub, and the Marketaux fallback.
             source_status = data.get("sourceStatus", {})
             self.assertIn("yahoo_finance_news", source_status)
             self.assertIn("yahoo_finance_press_releases", source_status)
             self.assertIn("finnhub", source_status)
+            self.assertIn("marketaux", source_status)
             # sec, company_ir, newswire, legacy yahoo_finance must NOT appear in default sourceStatus
             self.assertNotIn("sec", source_status)
             self.assertNotIn("company_ir", source_status)

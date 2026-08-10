@@ -119,6 +119,7 @@ class TestSmokeArchitecture(unittest.TestCase):
         secrets = self._step_body("Build candidate secrets file")
         self.assertIn("worker_version_promotion.py write-secrets", secrets)
         self.assertIn("ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}", self.workflow)
+        self.assertIn("MARKETAUX_API_TOKEN: ${{ secrets.MARKETAUX_API_TOKEN }}", self.workflow)
         cleanup = self._step_body("Remove candidate secrets file")
         self.assertIn("always()", cleanup)
         self.assertIn("rm -f", cleanup)
@@ -205,6 +206,7 @@ class TestSmokeArchitecture(unittest.TestCase):
                 "FINNHUB_API_KEY": "finnhub-secret",
                 "SEC_OPEN_DATA_API_KEY": "",
                 "ALPHA_VANTAGE_API_KEY": "alpha-secret",
+                "MARKETAUX_API_TOKEN": "marketaux-secret",
             }
         )
         self.assertEqual(
@@ -213,6 +215,7 @@ class TestSmokeArchitecture(unittest.TestCase):
                 "TOOL_MODE": "expanded",
                 "FINNHUB_API_KEY": "finnhub-secret",
                 "ALPHA_VANTAGE_API_KEY": "alpha-secret",
+                "MARKETAUX_API_TOKEN": "marketaux-secret",
             },
         )
         with tempfile.TemporaryDirectory() as temp_dir:

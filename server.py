@@ -268,7 +268,7 @@ _PHASE6B_SUPPORTED_SOURCES = {
     "yahoo_finance",                  # legacy: aggregates news + press releases
     "yahoo_finance_news",             # Yahoo Finance general news tab
     "yahoo_finance_press_releases",   # Yahoo Finance press releases tab
-    "finnhub",
+    "finnhub", "marketaux",
 }
 _OFFICIAL_SOURCE_TYPES = {"sec_filing", "company_ir", "company_ir_page", "press_release", "newswire", "yahoo_finance_press_releases"}
 _SOURCE_PRIORITY = {
@@ -282,7 +282,8 @@ _SOURCE_PRIORITY = {
     "company_news": 4,
     "yahoo_finance": 5,
     "yahoo_finance_news": 5,
-    "other": 6,
+    "marketaux_wire": 6,
+    "other": 7,
 }
 
 
@@ -326,12 +327,12 @@ def _enrich_news_item_for_llm(item: dict) -> dict:
     ticker = next((str(value).upper() for value in item.get("tickers") or [] if str(value).strip()), "")
     text = " ".join(str(item.get(key) or "") for key in ("title", "summary", "evidenceText")).upper()
     enriched["evidenceClass"] = _evidence_class_for(item.get("sourceType"))
-    enriched["tickerMatch"] = "EXPLICIT" if item.get("matchBasis") in {"TICKER_TOKEN", "ISSUER_NAME", "ISSUER_ACRONYM"} or (ticker and _re.search(rf"\b{_re.escape(ticker)}\b", text)) else ("SOURCE_SCOPED" if ticker else "UNVERIFIED")
+    enriched["tickerMatch"] = "EXPLICIT" if item.get("matchBasis") in {"TICKER_TOKEN", "ISSUER_NAME", "ISSUER_ACRONYM", "PROVIDER_ENTITY_SYMBOL"} or (ticker and _re.search(rf"\b{_re.escape(ticker)}\b", text)) else ("SOURCE_SCOPED" if ticker else "UNVERIFIED")
     enriched["urlProvenance"] = _url_provenance_for(item)
     source_type = str(item.get("sourceType") or "")
     if source_type == "sec_ex99_found" or (source_type == "company_ir_page" and item.get("approvalStatus") == "approved"):
         enriched["decisionUse"] = "USE_OFFICIAL_EVIDENCE"
-    elif source_type in {"sec_filing", "company_ir", "company_ir_page", "press_release", "yahoo_finance_press_releases", "newswire"}:
+    elif source_type in {"sec_filing", "company_ir", "company_ir_page", "press_release", "yahoo_finance_press_releases", "newswire", "marketaux_wire"}:
         enriched["decisionUse"] = "CHECK_OFFICIAL_RELEASES"
     elif source_type in {"yahoo_finance_news", "company_news"}:
         enriched["decisionUse"] = _yahoo_decision_use(str(item.get("eventType") or "other"))
@@ -354,7 +355,7 @@ def _build_coverage(source_status: dict, resolved_action: str | None = None) -> 
         if not isinstance(info, dict):
             continue
         entry = {"source": source, "status": info.get("status"), "attempted": info.get("attempted") is not False, "reasonCode": info.get("reasonCode")}
-        if info.get("status") == "NOT_ELIGIBLE":
+        if info.get("status") in {"NOT_ELIGIBLE", "NOT_NEEDED"}:
             skipped_sources.append(entry)
         elif info.get("status") in failed_states:
             failed_sources.append(entry)
@@ -365,9 +366,10 @@ def _build_coverage(source_status: dict, resolved_action: str | None = None) -> 
                 "returnedCount": int(info.get("returnedCount") or 0),
                 "truncatedCount": int(info.get("truncatedCount") or 0),
             })
+    coverage_limiting_skips = [row for row in skipped_sources if row["status"] != "NOT_NEEDED"]
     action = resolved_action or (
         "RETRY_RETRYABLE_SOURCES" if any(row["status"] in {"RATE_LIMITED", "TIMEOUT"} for row in failed_sources) else (
-            "CHECK_OFFICIAL_RELEASES" if failed_sources or skipped_sources else (
+            "CHECK_OFFICIAL_RELEASES" if failed_sources or coverage_limiting_skips else (
                 "RETRY_TRUNCATED_SOURCE" if truncated_sources else "USE_RETURNED_CONTEXT"
             )
         )
@@ -450,6 +452,9 @@ _COMPANY_IR_URL_MARKERS = ("investor.", "investors.", "/investor", "/news-releas
 _YAHOO_ALLOWED_CONTENT_TYPES = {"STORY", "ARTICLE", "PRESS_RELEASE"}
 _PRE_REVENUE_EPS_EPSILON = 1e-9
 _FINNHUB_NEWS_API = "https://finnhub.io/api/v1/company-news"
+_MARKETAUX_NEWS_API = "https://api.marketaux.com/v1/news/all"
+_MARKETAUX_WIRE_DOMAINS = ("businesswire.com", "prnewswire.com", "globenewswire.com")
+_MARKETAUX_MAX_ITEMS = 3
 _GLOBENEWSWIRE_RSS_FEEDS = (
     (
         "public_companies",
@@ -1838,6 +1843,259 @@ async def _collect_finnhub_events(
     return items, warnings, True, diagnostics
 
 
+async def _collect_marketaux_events(
+    ticker: str,
+    *,
+    retrieved_at: str,
+    max_results: int,
+    start_date: str = "",
+    end_date: str = "",
+    lookback_days: int | None = None,
+    fallback_reason: str = "EXPLICIT_SOURCE_SELECTION",
+    search_query: str = "",
+    expected_exchange: str | None = None,
+) -> tuple[list[dict], list[dict], bool, dict]:
+    """Fetch one bounded Marketaux page from major wire domains.
+
+    Marketaux is a contextual aggregator, not official evidence. The free-tier
+    request is deliberately capped at three rows and never paginated.
+    """
+    warnings: list[dict] = []
+    items: list[dict] = []
+    limit = min(_MARKETAUX_MAX_ITEMS, max(1, int(max_results)))
+    diagnostics = {
+        "status": "PROVIDER_ERROR",
+        "rawCount": 0,
+        "retrievedCount": 0,
+        "acceptedCount": 0,
+        "collectedCount": 0,
+        "rejectedCount": 0,
+        "rejectionCounts": {},
+        "attempted": True,
+        "completed": False,
+        "fallbackReason": fallback_reason,
+        "domains": list(_MARKETAUX_WIRE_DOMAINS),
+        "quotaPolicy": {
+            "dailyLimit": 100,
+            "maxArticlesPerRequest": _MARKETAUX_MAX_ITEMS,
+            "pagesRequested": 1,
+            "automaticPagination": False,
+        },
+    }
+
+    def _reject(reason: str) -> None:
+        diagnostics["rejectedCount"] += 1
+        diagnostics["rejectionCounts"][reason] = diagnostics["rejectionCounts"].get(reason, 0) + 1
+
+    api_token = os.environ.get("MARKETAUX_API_TOKEN") or os.environ.get("MARKETAUX_API_KEY")
+    if not api_token:
+        diagnostics.update({"status": "UNCONFIGURED", "attempted": False})
+        warnings.append({
+            "code": "SOURCE_UNAVAILABLE",
+            "message": "Marketaux wire fallback is not configured; set MARKETAUX_API_TOKEN to enable it.",
+            "severity": "warning",
+            "source": "marketaux",
+        })
+        return items, warnings, False, diagnostics
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    from_day = start_date or (now - datetime.timedelta(days=lookback_days or 14)).strftime("%Y-%m-%d")
+    to_day = end_date or now.strftime("%Y-%m-%d")
+    safe_params = {
+        "symbols": ticker.upper(),
+        "filter_entities": "true",
+        "language": "en",
+        "domains": ",".join(_MARKETAUX_WIRE_DOMAINS),
+        "published_after": f"{from_day}T00:00:00",
+        "published_before": f"{to_day}T23:59:59",
+        "limit": str(limit),
+        "page": "1",
+    }
+    if str(search_query or "").strip():
+        safe_params["search"] = str(search_query).strip()
+    public_url = f"{_MARKETAUX_NEWS_API}?{_urlparse.urlencode({**safe_params, 'api_token': 'REDACTED'})}"
+    request_url = f"{_MARKETAUX_NEWS_API}?{_urlparse.urlencode({**safe_params, 'api_token': api_token})}"
+    diagnostics["providerUrl"] = public_url
+    loop = asyncio.get_event_loop()
+
+    def _fetch() -> dict:
+        req = _urlrequest.Request(request_url, headers={"User-Agent": _SEC_REQUIRED_UA})
+        with _urlrequest.urlopen(req, timeout=12) as resp:  # noqa: S310
+            return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+    try:
+        payload = await loop.run_in_executor(None, _fetch)
+    except _urlerror.HTTPError as exc:
+        status = "AUTH_ERROR" if exc.code in (401, 403) else "RATE_LIMITED" if exc.code in (402, 429) else "PROVIDER_ERROR"
+        diagnostics["status"] = status
+        warnings.append({
+            "code": "SOURCE_UNAVAILABLE",
+            "message": f"Marketaux wire fallback returned HTTP {exc.code} ({status}).",
+            "severity": "warning",
+            "source": "marketaux",
+        })
+        return items, warnings, False, diagnostics
+    except Exception as exc:
+        message = str(exc).replace(api_token, "REDACTED")
+        status = "TIMEOUT" if any(token in message.lower() for token in ("timeout", "timed out")) else "PROVIDER_ERROR"
+        diagnostics["status"] = status
+        warnings.append({
+            "code": "SOURCE_UNAVAILABLE",
+            "message": f"Marketaux wire fallback unavailable ({status}).",
+            "severity": "warning",
+            "source": "marketaux",
+        })
+        return items, warnings, False, diagnostics
+
+    raw_items = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(raw_items, list):
+        diagnostics["status"] = "PROVIDER_CHANGED"
+        warnings.append({
+            "code": "SOURCE_UNAVAILABLE",
+            "message": "Marketaux provider changed: expected a data array.",
+            "severity": "warning",
+            "source": "marketaux",
+        })
+        return items, warnings, False, diagnostics
+
+    diagnostics["rawCount"] = len(raw_items)
+    diagnostics["retrievedCount"] = len(raw_items)
+    ticker_u = ticker.upper()
+    for row in raw_items:
+        if not isinstance(row, dict):
+            _reject("INVALID_ROW")
+            continue
+        title = str(row.get("title") or "").strip()
+        item_url = str(row.get("url") or "").strip()
+        if not title:
+            _reject("MISSING_HEADLINE")
+            continue
+        if not item_url.startswith("https://"):
+            _reject("INVALID_URL")
+            continue
+        host = (_urlparse.urlparse(item_url).hostname or "").lower()
+        if not any(host == domain or host.endswith(f".{domain}") for domain in _MARKETAUX_WIRE_DOMAINS):
+            _reject("DOMAIN_NOT_ALLOWED")
+            continue
+        entities = row.get("entities") if isinstance(row.get("entities"), list) else []
+        matched_entity = next((
+            entity for entity in entities
+            if isinstance(entity, dict) and str(entity.get("symbol") or "").upper() == ticker_u
+        ), None)
+        if matched_entity is None:
+            _reject("ENTITY_SYMBOL_MISMATCH")
+            continue
+        expected_exchange_norm = _normalize_exchange(expected_exchange)
+        provider_exchange_norm = _normalize_exchange(str(matched_entity.get("exchange") or ""))
+        if expected_exchange_norm and provider_exchange_norm and expected_exchange_norm != provider_exchange_norm:
+            _reject("ENTITY_EXCHANGE_MISMATCH")
+            continue
+        published_at = _to_iso_utc(row.get("published_at"))
+        if not _within_date_window(published_at, start_date=start_date, end_date=end_date, lookback_days=lookback_days):
+            _reject("DATE_OUTSIDE_WINDOW")
+            continue
+        summary = str(row.get("snippet") or row.get("description") or title).strip()
+        duplicate_group_id = _make_duplicate_group_id(ticker_u, title, published_at, None, item_url)
+        item = {
+            "title": title,
+            "source": "marketaux",
+            "originalSource": str(row.get("source") or host).strip() or host,
+            "sourceType": "marketaux_wire",
+            "provider": "marketaux",
+            "discoveredVia": "marketaux_api",
+            "publishedAt": published_at,
+            "retrievedAt": retrieved_at,
+            "url": item_url,
+            "issuer": str(matched_entity.get("name") or "").strip() or None,
+            "tickers": [ticker_u],
+            "matchBasis": "PROVIDER_ENTITY_SYMBOL",
+            "sourceTickerMatch": True,
+            "eventType": _event_type_from_keywords(f"{title} {summary}"),
+            "summary": _short_text(summary, 240),
+            "evidenceText": _short_text(summary, 180),
+            "confidence": "LOW",
+            "tickerRelevance": "HIGH",
+            "duplicateGroupId": duplicate_group_id,
+            "providerArticleId": str(row.get("uuid") or "").strip() or None,
+            "providerRelevanceScore": matched_entity.get("match_score"),
+        }
+        diagnostics["acceptedCount"] += 1
+        if len(items) < limit:
+            items.append(item)
+
+    diagnostics.update({
+        "status": "OK" if diagnostics["acceptedCount"] else "EMPTY_RESULT",
+        "collectedCount": len(items),
+        "completed": True,
+    })
+    return items, warnings, True, diagnostics
+
+
+def _marketaux_fallback_reason(
+    selected_sources: list[str],
+    items: list[dict],
+    warnings: list[dict],
+    source_diagnostics: dict[str, dict],
+    search_query: str = "",
+) -> str | None:
+    priority_sources = {
+        "yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub",
+    }
+    selected_priority = priority_sources.intersection(selected_sources)
+    if not selected_priority:
+        return "EXPLICIT_SOURCE_SELECTION"
+
+    priority_item_sources = {
+        "yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub",
+    }
+    query = str(search_query or "").strip().lower()
+
+    def _matches_query(item: dict) -> bool:
+        if not query:
+            return True
+        text = " ".join(str(item.get(key) or "") for key in (
+            "title", "summary", "source", "eventType", "evidenceText",
+        )).lower()
+        return query in text
+
+    has_priority_items = any(
+        (
+            str(item.get("source") or "") in priority_item_sources
+            or str(item.get("sourceType") or "") in priority_item_sources.union({"company_news"})
+        )
+        and _matches_query(item)
+        for item in items
+    )
+    limited = any(
+        isinstance(warning, dict) and (
+            warning.get("code") == "SOURCE_IDENTITY_UNAVAILABLE"
+            or (
+                warning.get("code") in {"SOURCE_UNAVAILABLE", "SOURCE_NOT_ELIGIBLE"}
+                and str(warning.get("source") or warning.get("message") or "").lower().find("finnhub") >= 0
+            )
+            or (
+                warning.get("code") == "SOURCE_UNAVAILABLE"
+                and "yahoo finance" in str(warning.get("message") or "").lower()
+            )
+        )
+        for warning in warnings
+    )
+    for source in selected_priority:
+        diagnostic = source_diagnostics.get(source)
+        if isinstance(diagnostic, dict) and (
+            diagnostic.get("completed") is False
+            or str(diagnostic.get("status") or "") in {
+                "UNCONFIGURED", "NOT_ELIGIBLE", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED",
+            }
+        ):
+            limited = True
+    if limited:
+        return "HIGHER_PRIORITY_COVERAGE_LIMITED"
+    if not has_priority_items:
+        return "HIGHER_PRIORITY_EMPTY"
+    return None
+
+
 def _dedupe_event_items(items: list[dict], warnings: list[dict]) -> list[dict]:
     grouped: dict[str, dict] = {}
     passthrough: list[dict] = []
@@ -1915,7 +2173,7 @@ def _compute_source_status(
     warning_msgs = [w.get("message", "") for w in warnings if isinstance(w, dict) and w.get("code") == "SOURCE_UNAVAILABLE"]
     warning_codes = {w.get("code") for w in warnings if isinstance(w, dict)}
     sec_items = [it for it in items if "sec" in str(it.get("sourceType", "")).lower()]
-    sources = selected_sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]
+    sources = selected_sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"]
 
     def _item_source(it: dict) -> str:
         return str(it.get("source") or "")
@@ -1949,6 +2207,7 @@ def _compute_source_status(
     company_ir_items = [it for it in items if str(it.get("sourceType", "")) in ("company_ir", "press_release")]
     company_ir_page_items = [it for it in items if str(it.get("sourceType", "")) == "company_ir_page"]
     finnhub_items = [it for it in items if str(it.get("source", "")) == "finnhub"]
+    marketaux_items = [it for it in items if str(it.get("source", "")) == "marketaux"]
     diagnostics = source_diagnostics or {}
 
     def _yf_error_status(warn_msgs: list[str]) -> str | None:
@@ -2069,6 +2328,37 @@ def _compute_source_status(
             result["finnhub"] = {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}
         else:
             result["finnhub"] = {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}
+    if "marketaux" in sources:
+        diagnostic = diagnostics.get("marketaux") if isinstance(diagnostics.get("marketaux"), dict) else {}
+        diagnostic_status = str(diagnostic.get("status") or "")
+        accepted_count = int(diagnostic.get("acceptedCount") if diagnostic.get("acceptedCount") is not None else len(marketaux_items))
+        returned_count = len(marketaux_items)
+        status = diagnostic_status or ("OK" if accepted_count else "EMPTY_RESULT")
+        allowed_action = {
+            "NOT_NEEDED": "none",
+            "UNCONFIGURED": "configure_marketaux_api_token",
+            "AUTH_ERROR": "verify_marketaux_api_token",
+            "RATE_LIMITED": "retry_after_quota_reset",
+            "TIMEOUT": "retry_later",
+            "PROVIDER_CHANGED": "inspect_provider_contract",
+            "PROVIDER_ERROR": "retry_or_use_official_sources",
+        }.get(status, "check_official_releases" if accepted_count else "none")
+        result["marketaux"] = {
+            "status": status,
+            "rawCount": int(diagnostic.get("rawCount") or 0),
+            "retrievedCount": int(diagnostic.get("retrievedCount") or diagnostic.get("rawCount") or 0),
+            "filteredCount": accepted_count,
+            "acceptedCount": accepted_count,
+            "returnedCount": returned_count,
+            "rejectedCount": int(diagnostic.get("rejectedCount") or 0),
+            "rejectionCounts": dict(diagnostic.get("rejectionCounts") or {}),
+            "attempted": diagnostic.get("attempted") is not False,
+            "reasonCode": diagnostic.get("reasonCode"),
+            "fallbackReason": diagnostic.get("fallbackReason"),
+            "quotaPolicy": diagnostic.get("quotaPolicy"),
+            "domains": diagnostic.get("domains"),
+            "allowedAction": allowed_action,
+        }
     if "company_ir" in sources:
         if "company_ir" in sources_used:
             result["company_ir"] = {"status": "OK" if company_ir_items else "EMPTY_RESULT", "rawCount": len(company_ir_items), "filteredCount": len(company_ir_items)}
@@ -2167,12 +2457,13 @@ async def _collect_company_events(
     end_date: str = "",
     sources: list[str] | None = None,
     sec_filing_types: list[str] | None = None,
+    search_query: str = "",
     include_diagnostics: bool = False,
 ) -> tuple:
     retrieved_at = _utc_now_iso()
     selected_sources, warnings = _normalize_event_sources(
         sources,
-        ["sec", "company_ir_page", "company_ir", "newswire", "yahoo_finance", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
+        ["sec", "company_ir_page", "company_ir", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"],
     )
     items: list[dict] = []
     sources_used: list[str] = []
@@ -2298,20 +2589,6 @@ async def _collect_company_events(
         items.extend(pr_items)
         warnings.extend(pr_warnings)
 
-    if "newswire" in selected_sources:
-        gnw_items, gnw_warnings, gnw_used = await _collect_globenewswire_events(
-            ticker,
-            retrieved_at=retrieved_at,
-            max_results=max_cap,
-            start_date=start_date,
-            end_date=end_date,
-            lookback_days=lookback,
-        )
-        if gnw_used:
-            sources_used.append("newswire")
-        items.extend(gnw_items)
-        warnings.extend(gnw_warnings)
-
     if "finnhub" in selected_sources and _finnhub_eligibility(ticker)[0]:
         finnhub_items, finnhub_warnings, used, finnhub_diagnostics = _unpack_provider_result(
             await _collect_finnhub_events(
@@ -2338,6 +2615,65 @@ async def _collect_company_events(
             "attempted": False,
             "reasonCode": reason_code,
         })
+
+    if "marketaux" in selected_sources:
+        fallback_reason = _marketaux_fallback_reason(
+            selected_sources,
+            items,
+            warnings,
+            source_diagnostics,
+            search_query,
+        )
+        if fallback_reason is None:
+            source_diagnostics["marketaux"] = {
+                "status": "NOT_NEEDED",
+                "attempted": False,
+                "completed": True,
+                "reasonCode": "HIGHER_PRIORITY_EVIDENCE_FOUND",
+                "fallbackReason": None,
+                "domains": list(_MARKETAUX_WIRE_DOMAINS),
+                "quotaPolicy": {
+                    "dailyLimit": 100,
+                    "maxArticlesPerRequest": _MARKETAUX_MAX_ITEMS,
+                    "pagesRequested": 0,
+                    "automaticPagination": False,
+                },
+            }
+        else:
+            marketaux_items, marketaux_warnings, used, marketaux_diagnostics = _unpack_provider_result(
+                await _collect_marketaux_events(
+                    ticker,
+                    retrieved_at=retrieved_at,
+                    max_results=max_cap,
+                    start_date=start_date,
+                    end_date=end_date,
+                    lookback_days=lookback,
+                    fallback_reason=fallback_reason,
+                    search_query=search_query,
+                    expected_exchange=(yahoo_identity or {}).get("exchange"),
+                )
+            )
+            source_diagnostics["marketaux"] = marketaux_diagnostics
+            if used:
+                sources_used.append("marketaux")
+            items.extend(marketaux_items)
+            warnings.extend(marketaux_warnings)
+
+    # Direct GlobeNewswire RSS is an explicitly selected shallow snapshot and
+    # runs after the bounded API sources so its cold latency cannot delay them.
+    if "newswire" in selected_sources:
+        gnw_items, gnw_warnings, gnw_used = await _collect_globenewswire_events(
+            ticker,
+            retrieved_at=retrieved_at,
+            max_results=max_cap,
+            start_date=start_date,
+            end_date=end_date,
+            lookback_days=lookback,
+        )
+        if gnw_used:
+            sources_used.append("newswire")
+        items.extend(gnw_items)
+        warnings.extend(gnw_warnings)
 
     deduped = [_enrich_news_item_for_llm(item) for item in _dedupe_event_items(items, warnings)]
     deduped = deduped[:max_cap]
@@ -2392,8 +2728,10 @@ def _unpack_company_event_result(value: tuple) -> tuple[list[dict], list[str], l
     output_schema=_TOOL_OUTPUT_SCHEMAS["search_company_news"],
     description="""Search public company news/events for a ticker and query string.
 
-Returns source-backed, deduplicated event items with source type, published/retrieved timestamps,
-URL, confidence, relevance, and short evidence excerpts.
+Defaults use Yahoo Finance, eligible Finnhub, then one quota-bounded Marketaux
+wire-domain fallback only when higher-priority coverage is empty or limited.
+Marketaux never paginates automatically and remains contextual evidence; inspect
+coverage and sourceStatus before treating an empty result as absence.
 """,
 )
 async def search_company_news(
@@ -2409,7 +2747,7 @@ async def search_company_news(
         return _mcp_failure("search_company_news", ErrorCode.INPUT_VALIDATION_ERROR, err)
     if not str(query or "").strip():
         return _mcp_failure("search_company_news", ErrorCode.INPUT_VALIDATION_ERROR, "query is required")
-    effective_sources = sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]
+    effective_sources = sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"]
     items, sources_used, warnings, retrieved_at, source_diagnostics = _unpack_company_event_result(
         await _collect_company_events(
             ticker,
@@ -2418,6 +2756,7 @@ async def search_company_news(
             start_date=start_date,
             end_date=end_date,
             sources=effective_sources,
+            search_query=query,
             include_diagnostics=True,
         )
     )
@@ -2462,8 +2801,9 @@ async def search_company_news(
 
 Defaults resolve SEC 8-K/EX-99 evidence first, then registry-backed
 ``company_ir_page``, then Yahoo press-release context. Explicit sources can
-also include ``company_ir`` RSS/Atom and ``newswire``. Items are labelled with
-precise source identifiers so callers can distinguish their origin.
+also include ``company_ir`` RSS/Atom, quota-bounded ``marketaux``, and direct
+``newswire`` RSS. Items are labelled with precise source identifiers so callers
+can distinguish their origin.
 
 Decision-grade use is payload-level only: ``decisionGrade:true`` requires
 ``coverageStatus`` of ``SEC_EX99_RESOLVED`` or
@@ -2501,7 +2841,7 @@ async def get_company_press_releases(
                 include_diagnostics=True,
             )
         )
-    release_types = {"company_ir", "company_ir_page", "press_release", "newswire", "sec_filing", "sec_ex99_found", "yahoo_finance_press_releases"}
+    release_types = {"company_ir", "company_ir_page", "press_release", "newswire", "marketaux_wire", "sec_filing", "sec_ex99_found", "yahoo_finance_press_releases"}
     release_items = [it for it in primary_items if str(it.get("sourceType")) in release_types]
 
     modified_primary_items: list[dict] = []
@@ -2730,9 +3070,12 @@ async def get_sec_recent_events(
 @yfinance_server.tool(
     name="get_public_event_timeline",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_public_event_timeline"],
-    description="""Get a deduplicated chronological timeline of public company events.
+description="""Get a deduplicated chronological timeline of public company events.
 
-Combines selected public sources, deduplicates related items, and returns timeline entries ordered by time.
+Defaults combine SEC and reviewed/RSS company IR with Yahoo, eligible Finnhub,
+and one quota-aware Marketaux fallback. Direct newswire RSS is explicit because
+it is a shallow snapshot. Returns coverage metadata so source limitations are
+distinguishable from no events.
 """,
 )
 async def get_public_event_timeline(
@@ -2806,6 +3149,9 @@ SOURCE_LIMITED_NOT_FOUND means selected provider coverage was incomplete, not th
 the event is confirmed absent; inspect sourceStatus and failureMode for recovery.
 Generic publication words such as announced, report, results, and update do not
 establish a match by themselves; inspect queryPolicy and each queryMatch.
+Defaults use SEC/company IR, Yahoo, eligible Finnhub, then one quota-aware
+Marketaux fallback. Marketaux evidence remains contextual and should be escalated
+to an official release before decision use.
 """,
 )
 async def verify_company_event(
@@ -7333,7 +7679,8 @@ object (a union of per-ticker results), so low-news conditions for one ticker
 never zero out the others.
 
 Returns deduplicated source-backed items with precise source labels
-(``yahoo_finance_news``, ``yahoo_finance_press_releases``, ``finnhub``),
+(``yahoo_finance_news``, ``yahoo_finance_press_releases``, ``finnhub``,
+``marketaux``),
 timestamps, URL, event classification, confidence, ticker relevance,
 and short evidence excerpts.
 
@@ -7347,9 +7694,9 @@ to official-release or event verification. Legacy confidence is not a
 cross-provider quality ranking.
 
 Supported sources: ``yahoo_finance_news``, ``yahoo_finance_press_releases``,
-``finnhub``, ``sec``, ``company_ir`` (RSS/Atom only), ``company_ir_page``
-(Git-reviewed IR-page registry), ``newswire``, and the legacy
-``yahoo_finance`` aggregate alias.
+``finnhub``, quota-aware ``marketaux``, ``sec``, ``company_ir`` (RSS/Atom
+only), ``company_ir_page`` (Git-reviewed IR-page registry), explicit snapshot
+``newswire``, and the legacy ``yahoo_finance`` aggregate alias.
 """,
 )
 async def get_company_news(
@@ -7380,7 +7727,7 @@ async def get_company_news(
     err = _validate_ticker(ticker)
     if err:
         return _mcp_failure("get_company_news", ErrorCode.INPUT_VALIDATION_ERROR, err)
-    effective_sources = sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]
+    effective_sources = sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"]
     items, sources_used, warnings, retrieved_at, source_diagnostics = _unpack_company_event_result(
         await _collect_company_events(
             ticker,
