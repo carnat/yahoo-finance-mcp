@@ -12,15 +12,6 @@
       "volatility": "stable_contract"
     },
     {
-      "id": "manifest-contract",
-      "description": "Manifest diagnostics exposes the same machine-readable contract fields as health_check.",
-      "tool": "get_manifest_diagnostics",
-      "args": {},
-      "assertion": "manifest_contract",
-      "blocking": true,
-      "volatility": "stable_contract"
-    },
-    {
       "id": "daily-bar-finality-contract",
       "description": "A daily row is final only when its session is complete and at least one close field is usable.",
       "tool": "get_historical_prices",

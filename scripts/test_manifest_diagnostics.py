@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase 8 tests: manifest diagnostics, get_market_snapshot, freshness classifier, wording smoke.
+"""Phase 8 tests: health metadata, get_market_snapshot, freshness classifier, wording smoke.
 
 These are offline/unit tests — no live network calls required.
 Run: PYTHONPATH=. python scripts/test_phase8.py
@@ -48,15 +48,15 @@ def _run(coro):
 
 
 # ---------------------------------------------------------------------------
-# 1. Manifest diagnostics smoke
+# 1. Health metadata smoke
 # ---------------------------------------------------------------------------
 
-class TestManifestDiagnostics(unittest.TestCase):
+class TestHealthMetadata(unittest.TestCase):
     def setUp(self):
         self.srv = _reload_server()
 
-    def test_get_manifest_diagnostics_shape(self):
-        result = json.loads(_run(self.srv.get_manifest_diagnostics()))
+    def test_health_check_shape(self):
+        result = json.loads(_run(self.srv.health_check()))
         expected = {
             "status", "serverVersion", "toolCount", "manifestVersion", "manifestHash",
             "schemaHash", "runtimeHash", "toolMode", "envelopeSchemaVersion",
@@ -65,27 +65,27 @@ class TestManifestDiagnostics(unittest.TestCase):
         self.assertEqual(set(result), expected)
 
     def test_privacy_scope_value(self):
-        result = json.loads(_run(self.srv.get_manifest_diagnostics()))
+        result = json.loads(_run(self.srv.health_check()))
         self.assertEqual(result["privacyScope"], "public_market_data_only")
 
     def test_tool_count_positive(self):
-        result = json.loads(_run(self.srv.get_manifest_diagnostics()))
+        result = json.loads(_run(self.srv.health_check()))
         self.assertIsInstance(result["toolCount"], int)
         self.assertGreater(result["toolCount"], 0)
 
     def test_schema_hash_is_distinct_manifest_identity(self):
-        result = json.loads(_run(self.srv.get_manifest_diagnostics()))
+        result = json.loads(_run(self.srv.health_check()))
         self.assertIsInstance(result["schemaHash"], str)
         self.assertGreater(len(result["schemaHash"]), 0)
         self.assertNotEqual(result["schemaHash"], result["manifestHash"])
 
     def test_manifest_hash_is_string(self):
-        result = json.loads(_run(self.srv.get_manifest_diagnostics()))
+        result = json.loads(_run(self.srv.health_check()))
         self.assertIsInstance(result["manifestHash"], str)
         self.assertGreater(len(result["manifestHash"]), 0)
 
     def test_public_diagnostics_omit_operational_details(self):
-        result = json.loads(_run(self.srv.get_manifest_diagnostics()))
+        result = json.loads(_run(self.srv.health_check()))
         forbidden = {
             "buildSha", "deployedAt", "hiddenAliases", "batchContracts",
             "responseFieldContract", "doctrineToolStatus", "structuredFactProvider",
@@ -122,6 +122,15 @@ class TestManifestDiagnostics(unittest.TestCase):
             source = fh.read()
         self.assertIn('health_contract(payload, {"expectedToolCount": len(names)})', source)
         self.assertNotIn('health.get("envelopeV2")', source)
+        self.assertNotIn('get_manifest_diagnostics', source)
+
+    def test_deployed_grouped_routing_is_catalog_derived(self):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_deployed_discovery.py")
+        with open(path, encoding="utf-8") as fh:
+            source = fh.read()
+        self.assertIn('_CATALOG_PATH = Path(__file__).resolve().parent.parent / "tool_catalog.json"', source)
+        self.assertIn('for action in group["actions"]', source)
+        self.assertNotIn('"list_sec_filing_tables": "sec_filings"', source)
 
 
 # ---------------------------------------------------------------------------
@@ -635,8 +644,12 @@ class TestToolRegistration(unittest.TestCase):
                 )
         return names
 
-    def test_get_manifest_diagnostics_registered(self):
-        self.assertIn("get_manifest_diagnostics", self._get_registered_tool_names())
+    def test_duplicate_tools_retired(self):
+        tools = self._get_registered_tool_names()
+        self.assertNotIn("get_manifest_diagnostics", tools)
+        self.assertNotIn("index_sec_filing", tools)
+        self.assertIn("health_check", tools)
+        self.assertIn("get_sec_filing_index", tools)
 
     def test_get_market_snapshot_registered(self):
         self.assertIn("get_market_snapshot", self._get_registered_tool_names())

@@ -50,7 +50,6 @@ import {
   listFilingTables,
   getFilingTable,
   extractFilingFact,
-  indexSecFiling,
   getSecFilingIndex,
   searchCompanyNews,
   getCompanyPressReleases,
@@ -133,7 +132,7 @@ const CLOSED_WORLD_TOOL_ANNOTATIONS = Object.freeze({
 });
 
 function annotationsForTool(name: string): Tool["annotations"] {
-  return ["system", "health_check", "get_manifest_diagnostics"].includes(name)
+  return ["system", "health_check"].includes(name)
     ? CLOSED_WORLD_TOOL_ANNOTATIONS
     : READ_ONLY_TOOL_ANNOTATIONS;
 }
@@ -1139,8 +1138,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_sec_filing_table", description: "Get a selected SEC filing table. Empty/layout-only candidates return UNUSABLE_TABLE with a deterministic recovery action.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, document_url: { type: "string" }, table_index: { type: "number" }, max_rows: { type: "number", default: 30 } }, required: ["ticker", "table_index"] } },
   { name: "extract_sec_filing_fact", description: "Extract SEC filing fact.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, fact: { type: "string" }, fact_name: { type: "string" }, fact_type: { type: "string" }, region: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, document_url: { type: "string" }, accession_number: { type: "string" } }, required: ["ticker"] } },
   { name: "search_sec_filing_text", description: "Search SEC filing text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, search_terms: { type: "array", items: { type: "string" } }, search_query: { type: "string" }, section_hint: { type: "string" }, selector: { type: "object" }, filing_type: { type: "string", default: "10-K" }, accession_number: { type: "string" }, document_url: { type: "string" }, context_chars: { type: "number", default: 1500 }, return_tables: { type: "boolean", default: true } }, required: ["ticker"] } },
-  { name: "index_sec_filing", description: "Build a deterministic section/table index for an SEC filing. Identifies headings, tables, row labels, and units. period is reserved for future multi-period support; currently only 'latest' is supported unless accession_number is provided.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest", description: "Reserved. Only 'latest' supported currently." }, accession_number: { type: "string" } }, required: ["ticker"] } },
-  { name: "get_sec_filing_index", description: "Get the pre-built section/table index for an SEC filing. Returns cached index when available; builds and caches on first call. period is reserved for future multi-period support; currently only 'latest' is supported unless accession_number is provided.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest", description: "Reserved. Only 'latest' supported currently." }, accession_number: { type: "string" } }, required: ["ticker"] } },
+  { name: "get_sec_filing_index", description: "Build or retrieve the cached section/table index for an SEC filing. Identifies headings, tables, row labels, and units. period is reserved for future multi-period support; currently only 'latest' is supported unless accession_number is provided.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest", description: "Reserved. Only 'latest' supported currently." }, accession_number: { type: "string" } }, required: ["ticker"] } },
   { name: "list_sec_material_filings", description: "List latest material SEC filings for a ticker, filtering out noise (Form 4, 144, SC 13G, etc.). Returns only significant filings (10-K, 10-Q, 8-K, S-1, 424B, DEF 14A, 20-F, 6-K by default).", inputSchema: { type: "object", properties: { ticker: { type: "string" }, forms: { type: "array", items: { type: "string" }, default: ["10-K", "10-Q", "8-K", "S-1", "424B", "DEF 14A", "20-F", "6-K"] }, limit: { type: "number", default: 5 } }, required: ["ticker"] } },
   { name: "get_sec_filing_intelligence", description: "Preferred SEC diagnostic call. Returns an accession-matched official companyfacts snapshot, usable section/table index summary, evidence metadata, and recommended follow-ups.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, filing_index: { type: "number", default: 0 } }, required: ["ticker"] } },
   { name: "get_sec_filing_section_markdown", description: "Return a specific SEC filing section as unverified Markdown from a degraded Worker HTML fallback. Payloads are blocked from decision-grade use and include source offsets/warnings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, section: { type: "string", default: "Item 1A" }, filing_type: { type: "string", default: "10-K" }, filing_index: { type: "number", default: 0 }, max_chars: { type: "number", default: 50000 } }, required: ["ticker"] } },
@@ -1171,9 +1169,8 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_sec_filing_exhibit_content", description: "Fetch and return the text content of a specific exhibit from an SEC filing. Supports topic-based paragraph filtering to reduce token usage.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, accessionNumber: { type: "string", description: "SEC filing accession number" }, fileName: { type: "string", description: "Exhibit filename from the filing index" }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" } }, required: ["ticker", "accessionNumber", "fileName"] } },
   { name: "parse_public_transcript", description: "Fetch and parse a public transcript page (Motley Fool, company IR, etc.). Supports topic-based paragraph filtering to reduce token usage. Provide raw_text to skip URL fetching.", inputSchema: { type: "object", properties: { url: { type: "string", description: "Public https URL of the transcript page" }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" }, raw_text: { type: "string", description: "Raw HTML or text content to parse directly (bypasses URL fetching)" } } } },
   { name: "get_earnings_call_transcript", description: "Retrieve earnings-call transcript content from SEC exhibits, then structured fallback metadata for company IR, public transcript URLs, and optional Alpha Vantage. For Alpha Vantage, supply issuer fiscal_quarter as YYYYQn or let the tool resolve it from official release text; a filing date is never treated as a fiscal period. Alpha transcripts are contextual and never decision-grade.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, period: { type: "string", enum: ["latest"], default: "latest", description: "Event selector. Only the latest release is supported; this is not a fiscal-quarter value." }, fiscal_quarter: { type: "string", pattern: "^[0-9]{4}Q[1-4]$", description: "Optional issuer fiscal quarter for Alpha Vantage fallback, e.g. 2026Q4. Do not derive this from the filing or publication date." }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" } }, required: ["ticker"] } },
-  { name: "get_manifest_diagnostics", description: "Return public-safe MCP schema identity metadata for connector freshness checks.", inputSchema: { type: "object", properties: {} } },
   { name: "get_market_snapshot", description: "Compact market-state packet composing quote, price performance, moving-average trend, volume ratios, liquidity gate, and technical indicators in one call. Supports compact (default) and full modes, and optional batch of tickers.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, mode: { type: "string", enum: ["compact", "full"], default: "compact" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] } },
-  { name: "health_check", description: "Return public-safe MCP availability and schema identity metadata.", inputSchema: { type: "object", properties: {} } },
+  { name: "health_check", description: "Return public-safe MCP availability, schema identity, tool mode, and connector-freshness metadata.", inputSchema: { type: "object", properties: {} } },
 ];
 
 const DEPRECATED_ALIAS_TOOLS: Tool[] = [];
@@ -1193,6 +1190,23 @@ const SIMPLE_OBJECT_SCHEMA: Tool["outputSchema"] = {
   type: "object",
   properties: {},
   additionalProperties: true,
+};
+const MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA: Tool["outputSchema"] = {
+  type: "object",
+  properties: {
+    status: { type: "string" },
+    serverVersion: { type: "string" },
+    toolCount: { type: "number" },
+    manifestVersion: { type: "string" },
+    manifestHash: { type: "string" },
+    schemaHash: { type: "string" },
+    runtimeHash: { type: "string" },
+    toolMode: { type: "string" },
+    envelopeSchemaVersion: { type: "string" },
+    generatedAt: { type: "string" },
+    privacyScope: { type: "string" },
+  },
+  additionalProperties: false,
 };
 const NEWS_OUTPUT_SCHEMA: Tool["outputSchema"] = {
   type: "object",
@@ -1891,7 +1905,6 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     additionalProperties: true,
   },
   extract_filing_fact: SIMPLE_OBJECT_SCHEMA,
-  index_sec_filing: SIMPLE_OBJECT_SCHEMA,
   get_sec_filing_index: SIMPLE_OBJECT_SCHEMA,
   extract_geographic_revenue: SIMPLE_OBJECT_SCHEMA,
   extract_segment_revenue: SIMPLE_OBJECT_SCHEMA,
@@ -1901,6 +1914,7 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   extract_risk_factor_mentions: SIMPLE_OBJECT_SCHEMA,
   extract_customer_concentration: SIMPLE_OBJECT_SCHEMA,
   extract_exposure: SIMPLE_OBJECT_SCHEMA,
+  health_check: MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA,
   get_latest_earnings_release: ENVELOPE_V2_OUTPUT_SCHEMA,
   index_earnings_release: ENVELOPE_V2_OUTPUT_SCHEMA,
   extract_earnings_metrics: ENVELOPE_V2_OUTPUT_SCHEMA,
@@ -2788,8 +2802,6 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         args.return_tables !== false,
         args.document_url != null ? str(args.document_url) : null,
       );
-    case "index_sec_filing":
-      return indexSecFiling(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null);
     case "get_sec_filing_index":
       return getSecFilingIndex(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null);
     case "list_sec_material_filings":
@@ -2961,31 +2973,6 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         Array.isArray(args.sources) ? args.sources.map(String) : ["sec", "company_ir", "newswire", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"],
       );
     case "health_check": {
-      const version = getWorkerVar("SERVER_VERSION") ?? "1.1.0";
-      const visibleTools = listVisibleTools();
-      const manifestVersion = getWorkerVar("MANIFEST_VERSION") ?? "1";
-      const manifestHash = await computeHash(JSON.stringify(visibleTools.map(t => t.name)));
-      const schemaHash = await computeHash(JSON.stringify(visibleTools.map(t => ({
-        name: t.name,
-        description: t.description,
-        inputSchema: t.inputSchema,
-        outputSchema: t.outputSchema,
-      }))));
-      return JSON.stringify({
-        status: "ok",
-        serverVersion: version,
-        toolCount: visibleTools.length,
-        manifestVersion,
-        manifestHash,
-        schemaHash,
-        runtimeHash: await computeHash(`${version}|${schemaHash}|${currentToolMode()}`),
-        toolMode: currentToolMode(),
-        envelopeSchemaVersion: ENVELOPE_SCHEMA_VERSION,
-        generatedAt: new Date().toISOString(),
-        privacyScope: "public_market_data_only",
-      });
-    }
-    case "get_manifest_diagnostics": {
       const version = getWorkerVar("SERVER_VERSION") ?? "1.1.0";
       const visibleTools = listVisibleTools();
       const manifestVersion = getWorkerVar("MANIFEST_VERSION") ?? "1";

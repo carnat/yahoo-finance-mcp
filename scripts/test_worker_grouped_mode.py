@@ -115,7 +115,8 @@ class TestWorkerGroupedMode(unittest.TestCase):
         ):
             self.assertIn(f"{field}: {value}", self.tools_ts)
         self.assertIn("function annotationsForTool(", self.tools_ts)
-        self.assertIn('"system", "health_check", "get_manifest_diagnostics"', self.tools_ts)
+        self.assertIn('["system", "health_check"].includes(name)', self.tools_ts)
+        self.assertNotIn('"get_manifest_diagnostics"', self.tools_ts)
         self.assertIn("annotations: annotationsForTool(group.name)", self.tools_ts)
 
     def test_grouped_validation_is_action_specific_and_recoverable(self) -> None:

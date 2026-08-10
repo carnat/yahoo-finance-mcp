@@ -20,39 +20,19 @@ import os
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 MCP_URL = os.environ.get("MCP_URL", "https://yahoo-finance-mcp.artinatw.workers.dev/mcp").strip()
 UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-phase3-extractor-smoke/1.0)"
 _ALLOW_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in ("1", "true", "yes")
 _EXPECTED_TOOL_MODE = os.environ.get("EXPECTED_TOOL_MODE", os.environ.get("TOOL_MODE", "")).lower()
-GROUPED_TOOLS = {
-    "stock_pricing",
-    "stock_fundamentals",
-    "analyst_data",
-    "options_analysis",
-    "sec_filings",
-    "sec_extractors",
-    "news_events",
-    "earnings_intelligence",
-    "screening",
-    "system",
-    "thai_funds",
-}
+_CATALOG_PATH = Path(__file__).resolve().parent.parent / "tool_catalog.json"
+_CATALOG = json.loads(_CATALOG_PATH.read_text(encoding="utf-8"))
+GROUPED_TOOLS = frozenset(_CATALOG["groups"])
 ACTION_GROUP = {
-    "list_sec_company_filings": "sec_filings",
-    "index_sec_filing": "sec_filings",
-    "get_sec_filing_index": "sec_filings",
-    "query_sec_filing_index": "sec_filings",
-    "extract_sec_filing_fact": "sec_filings",
-    "search_sec_filing_text": "sec_filings",
-    "extract_geographic_revenue": "sec_extractors",
-    "extract_segment_revenue": "sec_extractors",
-    "extract_total_revenue": "sec_extractors",
-    "extract_revenue_exposure": "sec_extractors",
-    "extract_china_exposure": "sec_extractors",
-    "extract_risk_factor_mentions": "sec_extractors",
-    "extract_customer_concentration": "sec_extractors",
-    "extract_exposure": "sec_extractors",
+    action: group_name
+    for group_name, group in _CATALOG["groups"].items()
+    for action in group["actions"]
 }
 _GROUPED_DISCOVERY = False
 
@@ -228,7 +208,7 @@ def main() -> int:
             raise AssertionError(f"Grouped discovery should expose only grouped tools: {sorted(names)}")
         print(f"  PASS grouped tools/list exposes all grouped tools ({len(names)} total)")
     else:
-        required_phase2 = {"list_sec_company_filings", "index_sec_filing", "get_sec_filing_index"}
+        required_phase2 = {"list_sec_company_filings", "get_sec_filing_index"}
         required_phase3 = {
             "extract_segment_revenue",
             "extract_total_revenue",
@@ -267,28 +247,20 @@ def main() -> int:
         raise AssertionError(f"list_sec_company_filings: invalid documentUrl: {first}")
     print("  PASS list_sec_company_filings AAPL schema")
 
-    # index_sec_filing AAPL
-    aapl_idx = call_tool("index_sec_filing", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}, 21)
-    assert_no_unknown_tool(aapl_idx, "index_sec_filing")
-    aapl_idx_data = extract_data(aapl_idx)
-    doc_url = aapl_idx_data.get("documentUrl", "")
-    if not isinstance(doc_url, str) or not doc_url.startswith("https://www.sec.gov/Archives/"):
-        raise AssertionError(f"index_sec_filing AAPL: invalid documentUrl: {doc_url!r}")
-    index = aapl_idx_data.get("index") if isinstance(aapl_idx_data, dict) else {}
-    if not isinstance(index, dict) or not isinstance(index.get("sections"), list):
-        raise AssertionError("index_sec_filing AAPL: missing index.sections")
-    if not isinstance(index.get("tables"), list):
-        raise AssertionError("index_sec_filing AAPL: missing index.tables")
-    if not isinstance(index.get("keywordMap"), dict):
-        raise AssertionError("index_sec_filing AAPL: missing index.keywordMap")
-    print("  PASS index_sec_filing AAPL schema")
-
     # get_sec_filing_index AAPL
-    aapl_cidx = call_tool("get_sec_filing_index", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}, 22)
+    aapl_cidx = call_tool("get_sec_filing_index", {"ticker": "AAPL", "filing_type": "10-K", "period": "latest"}, 21)
     assert_no_unknown_tool(aapl_cidx, "get_sec_filing_index")
     aapl_cidx_data = extract_data(aapl_cidx)
-    if not isinstance(aapl_cidx_data.get("index"), dict):
-        raise AssertionError("get_sec_filing_index AAPL: missing index")
+    doc_url = aapl_cidx_data.get("documentUrl", "")
+    if not isinstance(doc_url, str) or not doc_url.startswith("https://www.sec.gov/Archives/"):
+        raise AssertionError(f"get_sec_filing_index AAPL: invalid documentUrl: {doc_url!r}")
+    index = aapl_cidx_data.get("index") if isinstance(aapl_cidx_data, dict) else {}
+    if not isinstance(index, dict) or not isinstance(index.get("sections"), list):
+        raise AssertionError("get_sec_filing_index AAPL: missing index.sections")
+    if not isinstance(index.get("tables"), list):
+        raise AssertionError("get_sec_filing_index AAPL: missing index.tables")
+    if not isinstance(index.get("keywordMap"), dict):
+        raise AssertionError("get_sec_filing_index AAPL: missing index.keywordMap")
     print("  PASS get_sec_filing_index AAPL schema")
 
     # Wrong filing type on a 20-F filer must not become a clean non-disclosure.

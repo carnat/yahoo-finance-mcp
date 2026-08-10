@@ -9,7 +9,7 @@ import os
 
 from yfmcp.app import yfinance_server
 from yfmcp.envelope import SERVER_VERSION
-from yfmcp.schemas import _MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA, _SIMPLE_OUTPUT_SCHEMA
+from yfmcp.schemas import _MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA
 
 
 def _tool_inventory(tool_mode: str) -> tuple[list[str], list[dict]]:
@@ -63,11 +63,10 @@ def _public_metadata() -> dict:
     }
 
 
-@yfinance_server.tool(name="health_check", output_schema=_SIMPLE_OUTPUT_SCHEMA, description="Return public-safe MCP availability and schema identity metadata.")
+@yfinance_server.tool(
+    name="health_check",
+    output_schema=_MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA,
+    description="Return public-safe MCP availability, schema identity, tool mode, and connector-freshness metadata.",
+)
 async def health_check() -> str:
-    return json.dumps(_public_metadata())
-
-
-@yfinance_server.tool(name="get_manifest_diagnostics", output_schema=_MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA, description="Return public-safe MCP schema identity metadata for connector freshness checks.")
-async def get_manifest_diagnostics() -> str:
     return json.dumps(_public_metadata())

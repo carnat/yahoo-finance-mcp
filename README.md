@@ -20,10 +20,7 @@ https://yahoo-finance-mcp.artinatw.workers.dev/mcp
 ```
 
 The live server exposes its current tool manifest through MCP `tools/list`.
-For runtime metadata, call:
-
-- `health_check`
-- `get_manifest_diagnostics`
+For runtime metadata and connector-freshness identity, call `health_check`.
 
 ## Install Locally
 
@@ -157,7 +154,7 @@ project identities sequentially; it does not calculate portfolio value or
 wrapper/tax eligibility. Returned NAV, factsheet, and dividend data retain
 their own dates and scopes.
 
-Use `tools/list` or `get_manifest_diagnostics` for the exact current tool names,
+Use `tools/list` or `health_check` for the exact current tool names,
 schemas, aliases, and deprecation metadata.
 
 ## Important Limitations

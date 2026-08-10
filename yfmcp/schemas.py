@@ -692,29 +692,6 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
         "additionalProperties": True,
     },
     "extract_filing_fact": _SIMPLE_OUTPUT_SCHEMA,
-    "index_sec_filing": {
-        "type": "object",
-        "properties": {
-            "ticker": {"type": "string"},
-            "cik": {"type": "string"},
-            "filingType": {"type": "string"},
-            "filingDate": {"type": ["string", "null"]},
-            "acceptedAt": {"type": ["string", "null"]},
-            "accessionNumber": {"type": "string"},
-            "documentUrl": {"type": "string"},
-            "index": {
-                "type": "object",
-                "properties": {
-                    "sections": {"type": "array"},
-                    "tables": {"type": "array"},
-                    "keywordMap": {"type": "object"},
-                },
-                "additionalProperties": True,
-            },
-            "meta": {"type": "object"},
-        },
-        "additionalProperties": True,
-    },
     "get_sec_filing_index": {
         "type": "object",
         "properties": {

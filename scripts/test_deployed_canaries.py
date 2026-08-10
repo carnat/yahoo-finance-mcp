@@ -125,10 +125,6 @@ def health_contract(payload: dict[str, Any], canary: dict[str, Any]) -> None:
     )
 
 
-def manifest_contract(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
-    _assert_contract(extract_data(payload), "get_manifest_diagnostics")
-
-
 def daily_bar_finality_contract(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
     data = extract_data(payload)
     if not isinstance(data, list) or not data:
@@ -387,7 +383,6 @@ def thai_fund_nav_contract(payload: dict[str, Any], canary: dict[str, Any]) -> N
 
 ASSERTIONS: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
     "health_contract": health_contract,
-    "manifest_contract": manifest_contract,
     "daily_bar_finality_contract": daily_bar_finality_contract,
     "sec_xbrl_decision_grade": sec_xbrl_decision_grade,
     "transcript_raw_text_contract": transcript_raw_text_contract,
@@ -470,7 +465,6 @@ def assert_tool_discovery_contract(response: dict[str, Any], tool_mode: str) -> 
             "openWorldHint": name not in {
                 "system",
                 "health_check",
-                "get_manifest_diagnostics",
             },
         }
         if not isinstance(annotations, dict):

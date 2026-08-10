@@ -81,7 +81,7 @@ import yfmcp.tools.system  # noqa: F401 (side-effect import)
 import yfmcp.tools.pricing  # noqa: F401 (side-effect import)
 import yfmcp.tools.thai_funds  # noqa: F401 (side-effect import)
 import yfmcp.tools.provider_gaps  # noqa: F401 (side-effect import)
-from yfmcp.tools.system import health_check, get_manifest_diagnostics  # re-export for grouped routing
+from yfmcp.tools.system import health_check  # re-export for grouped routing
 from yfmcp.tools.pricing import (  # re-export for compatibility and grouped routing
     get_historical_stock_prices,
     get_fast_info,
@@ -7894,15 +7894,15 @@ def _build_filing_index_from_html(html: str) -> dict:
     }
 
 
-async def _index_sec_filing_impl(
+async def _get_sec_filing_index_impl(
     ticker: str,
     filing_type: str = "10-K",
     accession_number: str | None = None,
 ) -> str:
-    """Shared implementation for index_sec_filing and get_sec_filing_index."""
+    """Build or retrieve the cached index for get_sec_filing_index."""
     cik_padded, subs = await _get_submissions_for_ticker(ticker)
     if not cik_padded or not subs:
-        return _mcp_failure("index_sec_filing", ErrorCode.TICKER_NOT_FOUND,
+        return _mcp_failure("get_sec_filing_index", ErrorCode.TICKER_NOT_FOUND,
                             f"Could not resolve EDGAR submissions for ticker '{ticker}'")
 
     cik_int = int(cik_padded)
@@ -7927,7 +7927,7 @@ async def _index_sec_filing_impl(
                 break
 
     if target_idx is None or not accession_number:
-        return _mcp_failure("index_sec_filing", ErrorCode.NO_FILING_DATA,
+        return _mcp_failure("get_sec_filing_index", ErrorCode.NO_FILING_DATA,
                             f"No {filing_type} filing found for '{ticker}'")
 
     filing_date = filing_dates[target_idx] if target_idx < len(filing_dates) else ""
@@ -7936,7 +7936,7 @@ async def _index_sec_filing_impl(
 
     _, document_url = _edgar_build_filing_urls(cik_int, accession_number, primary_doc)
     if not document_url:
-        return _mcp_failure("index_sec_filing", ErrorCode.NO_FILING_DATA,
+        return _mcp_failure("get_sec_filing_index", ErrorCode.NO_FILING_DATA,
                             f"primaryDocument missing for {accession_number}")
 
     # Check cache
@@ -7948,7 +7948,7 @@ async def _index_sec_filing_impl(
     # Fetch filing HTML
     html = await _edgar_get_html(document_url, max_bytes=5_000_000)
     if not html:
-        return _mcp_failure("index_sec_filing", ErrorCode.PROVIDER_ERROR,
+        return _mcp_failure("get_sec_filing_index", ErrorCode.PROVIDER_ERROR,
                             f"Failed to fetch filing document: {document_url}")
 
     index = _build_filing_index_from_html(html)
@@ -7976,41 +7976,10 @@ async def _index_sec_filing_impl(
 
 
 @yfinance_server.tool(
-    name="index_sec_filing",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["index_sec_filing"],
-    description="""Build a deterministic section/table index for an SEC filing.
-Identifies headings, tables, row labels, and units, enabling subsequent queries without re-fetching the filing.
-
-Args:
-    ticker: Ticker symbol.
-    filing_type: SEC form type, e.g. "10-K" or "10-Q". Defaults to "10-K".
-    period: Reserved for future multi-period support. Currently only "latest" is supported.
-        When accession_number is provided, the specific filing is indexed regardless of period.
-    accession_number: Optional SEC accession number (format XXXXXXXXXX-YY-ZZZZZZ).
-        If omitted, the most recent filing matching filing_type is indexed.
-""",
-)
-async def index_sec_filing(
-    ticker: str,
-    filing_type: str = "10-K",
-    period: str = "latest",
-    accession_number: str | None = None,
-) -> str:
-    err = _validate_ticker(ticker)
-    if err:
-        return _mcp_failure("index_sec_filing", ErrorCode.INPUT_VALIDATION_ERROR, err)
-    if accession_number:
-        acc_err = _validate_accession(accession_number)
-        if acc_err:
-            return _mcp_failure("index_sec_filing", ErrorCode.INPUT_VALIDATION_ERROR, acc_err)
-    return await _index_sec_filing_impl(ticker, filing_type, accession_number)
-
-
-@yfinance_server.tool(
     name="get_sec_filing_index",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_sec_filing_index"],
-    description="""Get the pre-built section/table index for an SEC filing.
-Returns cached index when available; builds and caches on first call.
+    description="""Build or retrieve the cached section/table index for an SEC filing.
+Identifies headings, tables, row labels, and units without a duplicate indexing action.
 
 Args:
     ticker: Ticker symbol.
@@ -8034,7 +8003,7 @@ async def get_sec_filing_index(
         acc_err = _validate_accession(accession_number)
         if acc_err:
             return _mcp_failure("get_sec_filing_index", ErrorCode.INPUT_VALIDATION_ERROR, acc_err)
-    return await _index_sec_filing_impl(ticker, filing_type, accession_number)
+    return await _get_sec_filing_index_impl(ticker, filing_type, accession_number)
 
 
 # ---------------------------------------------------------------------------
@@ -8231,7 +8200,7 @@ async def get_sec_filing_intelligence(
     tables_count = 0
     exhibits_count = 0
     try:
-        index_raw = await _index_sec_filing_impl(ticker, filing_type, accession_number)
+        index_raw = await _get_sec_filing_index_impl(ticker, filing_type, accession_number)
         index_data = json.loads(index_raw)
         if isinstance(index_data, dict) and "index" in index_data:
             idx = index_data["index"]
@@ -9682,7 +9651,7 @@ from yfmcp.tools.earnings import (  # re-export for compatibility and grouped ro
 # ---------------------------------------------------------------------------
 # TOOL_MODE env var controls which interface is exposed:
 #   - "grouped" (default): 11 domain meta-tools with action routing
-#   - "expanded": all 113 individual tools (compatibility/debug mode)
+#   - "expanded": all 111 individual tools (compatibility/debug mode)
 # ---------------------------------------------------------------------------
 _TOOL_MODE = os.environ.get("TOOL_MODE", "grouped").lower().strip()
 
@@ -9697,7 +9666,7 @@ def _build_grouped_server():
         instructions="""
 # Yahoo Finance MCP Server (Grouped Mode)
 
-Grouped mode is the default. Set TOOL_MODE=expanded to expose 113 individual tools.
+Grouped mode is the default. Set TOOL_MODE=expanded to expose 111 individual tools.
 
 This server provides financial market data via domain-grouped tools for token efficiency.
 Each tool covers a domain (pricing, fundamentals, options, etc.) and accepts an `action`
@@ -9743,7 +9712,7 @@ def get_server():
     """Return the appropriate server based on TOOL_MODE env var.
 
     - TOOL_MODE=grouped (default): 11 domain meta-tools
-    - TOOL_MODE=expanded: 113 individual tools
+    - TOOL_MODE=expanded: 111 individual tools
     """
     global _grouped_server
     if _TOOL_MODE == "grouped":

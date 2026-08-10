@@ -132,13 +132,26 @@ class TestHandlerRegistry(unittest.TestCase):
         for name, fn in self.registry.items():
             self.assertEqual(name, fn.__name__)
 
+    def test_catalog_has_expected_post_deduplication_shape(self):
+        action_names = {
+            action
+            for group in tool_groups.TOOL_GROUPS.values()
+            for action in group["actions"]
+        }
+        self.assertEqual(len(tool_groups.TOOL_GROUPS), 11)
+        self.assertEqual(len(action_names), 81)
+        self.assertNotIn("get_manifest_diagnostics", action_names)
+        self.assertNotIn("index_sec_filing", action_names)
+        self.assertIn("health_check", action_names)
+        self.assertIn("get_sec_filing_index", action_names)
+
 
 class TestGroupedServer(unittest.TestCase):
     def test_manifest_count_matches_visible_mode(self):
         with patch.dict(os.environ, {"TOOL_MODE": "grouped"}):
             self.assertEqual(_public_metadata()["toolCount"], len(tool_groups.TOOL_GROUPS))
         with patch.dict(os.environ, {"TOOL_MODE": "expanded"}):
-            self.assertEqual(_public_metadata()["toolCount"], 113)
+            self.assertEqual(_public_metadata()["toolCount"], 111)
 
     def test_grouped_server_exposes_one_tool_per_group(self):
         original = os.environ.get("TOOL_MODE")
