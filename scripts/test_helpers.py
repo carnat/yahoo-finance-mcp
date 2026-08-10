@@ -2,10 +2,10 @@
 """Comprehensive unit tests for untested helper functions in server.py.
 
 Covers ~30 pure/offline helper functions that were missing test coverage:
-  - Date/time utilities: get_last_trading_date, _to_iso_utc, _derive_fiscal_period_from_date
+  - Date/time utilities: get_last_trading_date, _to_iso_utc
   - Coercion helpers: _coerce_max_results, _coerce_lookback_days
   - Event-layer helpers: _normalize_event_sources, _event_type_from_keywords,
-      _event_type_from_form, _short_text, _canonicalize_event_url,
+      _event_type_from_form, _short_text,
       _make_duplicate_group_id, _source_rank, _safe_sec_url, _within_date_window,
       _dedupe_event_items, _build_collection_status, _compute_source_status,
       _compute_source_coverage
@@ -13,8 +13,7 @@ Covers ~30 pure/offline helper functions that were missing test coverage:
   - Filing / XBRL helpers: _region_matches, _normalize_segment_label, _as_status
   - JSON / text helpers: _safe_parse, _safe_json_loads, _compact_excerpt
   - Earnings helpers: _is_paywalled_url, _classify_earnings_source_url,
-      _scale_number_from_text, _first_sentence_for_topic, _extract_metric_number
-  - Alias helpers: _deprecated_alias_response
+      _scale_number_from_text, _first_sentence_for_topic
   - SEC filing index: _build_filing_index_from_html (including XSS sanitization)
 
 All tests are offline — no network calls required.
@@ -81,7 +80,6 @@ if not getattr(_FastMCP, "_output_schema_patched", False):
     _FastMCP._output_schema_patched = True  # type: ignore[attr-defined]
 
 import server as srv  # noqa: E402
-import yfmcp.envelope as _envelope_mod  # noqa: E402
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -185,29 +183,6 @@ class TestToIsoUtc(unittest.TestCase):
         result = srv._utc_now_iso()
         self.assertTrue(result.endswith("Z"))
         self.assertIsNotNone(srv._to_iso_utc(result))
-
-
-class TestDeriveFiscalPeriod(unittest.TestCase):
-    def test_q1_january(self):
-        self.assertEqual(srv._derive_fiscal_period_from_date("2026-01-15"), "FY2026 Q1")
-
-    def test_q1_march(self):
-        self.assertEqual(srv._derive_fiscal_period_from_date("2026-03-31"), "FY2026 Q1")
-
-    def test_q2_april(self):
-        self.assertEqual(srv._derive_fiscal_period_from_date("2026-04-01"), "FY2026 Q2")
-
-    def test_q3_july(self):
-        self.assertEqual(srv._derive_fiscal_period_from_date("2026-07-10"), "FY2026 Q3")
-
-    def test_q4_december(self):
-        self.assertEqual(srv._derive_fiscal_period_from_date("2026-12-31"), "FY2026 Q4")
-
-    def test_none_returns_none(self):
-        self.assertIsNone(srv._derive_fiscal_period_from_date(None))
-
-    def test_invalid_date_returns_none(self):
-        self.assertIsNone(srv._derive_fiscal_period_from_date("not-a-date"))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -363,37 +338,6 @@ class TestShortText(unittest.TestCase):
         result = srv._short_text(long_text)
         self.assertIsNotNone(result)
         self.assertEqual(len(result), 220)
-
-
-class TestCanonicalizeEventUrl(unittest.TestCase):
-    def test_valid_https_url_stripped(self):
-        result = srv._canonicalize_event_url("https://Example.com/path?q=1#frag")
-        self.assertEqual(result, "https://example.com/path")
-
-    def test_valid_http_url_preserved(self):
-        result = srv._canonicalize_event_url("http://example.com/news")
-        self.assertEqual(result, "http://example.com/news")
-
-    def test_javascript_scheme_returns_none(self):
-        self.assertIsNone(srv._canonicalize_event_url("javascript:alert(1)"))
-
-    def test_none_returns_none(self):
-        self.assertIsNone(srv._canonicalize_event_url(None))
-
-    def test_empty_string_returns_none(self):
-        self.assertIsNone(srv._canonicalize_event_url(""))
-
-    def test_file_scheme_returns_none(self):
-        self.assertIsNone(srv._canonicalize_event_url("file:///etc/passwd"))
-
-    def test_query_and_fragment_stripped(self):
-        result = srv._canonicalize_event_url("https://news.com/article?utm_source=x&ref=y#top")
-        self.assertEqual(result, "https://news.com/article")
-
-    def test_scheme_lowercased(self):
-        result = srv._canonicalize_event_url("HTTPS://Example.COM/path")
-        self.assertIsNotNone(result)
-        self.assertTrue(result.startswith("https://"))
 
 
 class TestMakeDuplicateGroupId(unittest.TestCase):
@@ -815,52 +759,7 @@ class TestCompactExcerpt(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 7. Alias helper
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class TestDeprecatedAliasResponse(unittest.TestCase):
-    def setUp(self):
-        self._orig = _envelope_mod._ENVELOPE_V2
-        _envelope_mod._ENVELOPE_V2 = True
-
-    def tearDown(self):
-        _envelope_mod._ENVELOPE_V2 = self._orig
-
-    def test_injects_deprecated_alias_warning(self):
-        inner = json.dumps(srv._mcp_success("canonical_tool", json.dumps({"x": 1})))
-        result = json.loads(srv._deprecated_alias_response("alias_tool", "canonical_tool", inner))
-        warnings = result["meta"]["warnings"]
-        self.assertTrue(any(w.get("code") == "DEPRECATED_ALIAS" for w in warnings))
-
-    def test_meta_tool_set_to_alias(self):
-        inner = json.dumps(srv._mcp_success("canonical_tool", json.dumps({"x": 1})))
-        result = json.loads(srv._deprecated_alias_response("alias_tool", "canonical_tool", inner))
-        self.assertEqual(result["meta"]["tool"], "alias_tool")
-
-    def test_meta_canonical_tool_set(self):
-        inner = json.dumps(srv._mcp_success("canonical_tool", json.dumps({"x": 1})))
-        result = json.loads(srv._deprecated_alias_response("alias_tool", "canonical_tool", inner))
-        self.assertEqual(result["meta"]["canonicalTool"], "canonical_tool")
-
-    def test_deprecated_tool_flag_true(self):
-        inner = json.dumps(srv._mcp_success("canonical_tool", json.dumps({"x": 1})))
-        result = json.loads(srv._deprecated_alias_response("alias_tool", "canonical_tool", inner))
-        self.assertTrue(result["meta"]["deprecatedTool"])
-
-    def test_use_instead_set(self):
-        inner = json.dumps(srv._mcp_success("canonical_tool", json.dumps({"x": 1})))
-        result = json.loads(srv._deprecated_alias_response("alias_tool", "canonical_tool", inner))
-        self.assertEqual(result["meta"]["useInstead"], "canonical_tool")
-
-    def test_envelope_off_returns_raw(self):
-        _envelope_mod._ENVELOPE_V2 = False
-        raw = '{"raw": "data"}'
-        result = srv._deprecated_alias_response("alias_tool", "canonical_tool", raw)
-        self.assertEqual(result, raw)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 8. Earnings helpers
+# 7. Earnings helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestIsPaywalledUrl(unittest.TestCase):
@@ -963,32 +862,8 @@ class TestFirstSentenceForTopic(unittest.TestCase):
         self.assertIsNotNone(result)
 
 
-class TestExtractMetricNumber(unittest.TestCase):
-    def test_matches_first_pattern(self):
-        val, raw, excerpt = srv._extract_metric_number(
-            "Revenue was $2.5 billion in Q3",
-            [r"\$(\d+(?:\.\d+)?\s*billion)"],
-        )
-        self.assertIsNotNone(val)
-        self.assertAlmostEqual(val, 2_500_000_000)
-
-    def test_returns_none_when_no_match(self):
-        val, raw, excerpt = srv._extract_metric_number("No numbers here", [r"\$(\d+ billion)"])
-        self.assertIsNone(val)
-        self.assertIsNone(raw)
-        self.assertIsNone(excerpt)
-
-    def test_tries_multiple_patterns(self):
-        val, raw, excerpt = srv._extract_metric_number(
-            "EPS was 1.23",
-            [r"no_match_here", r"EPS was (\d+\.\d+)"],
-        )
-        self.assertIsNotNone(val)
-        self.assertAlmostEqual(val, 1.23)
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# 9. SEC filing index builder (includes XSS sanitization coverage)
+# 8. SEC filing index builder (includes XSS sanitization coverage)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestBuildFilingIndexFromHtml(unittest.TestCase):

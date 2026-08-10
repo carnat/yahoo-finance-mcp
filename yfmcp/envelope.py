@@ -157,34 +157,6 @@ def _mcp_failure(
     return json.dumps(payload)
 
 
-def _mcp_warning(
-    tool: str,
-    data: object,
-    message: str,
-    *,
-    canonical_tool: str | None = None,
-    source: str = "yahoo_finance",
-    data_date: str | None = None,
-) -> str:
-    if not _ENVELOPE_V2:
-        return data if isinstance(data, str) else json.dumps(data)
-    parsed = data if not isinstance(data, str) else json.loads(data)
-    return json.dumps({
-        "ok": True,
-        "data": parsed,
-        "meta": {
-            "tool": tool,
-            **({"canonicalTool": canonical_tool} if canonical_tool is not None else {}),
-            "source": source,
-            "dataDate": data_date,
-            "serverVersion": SERVER_VERSION,
-            "cacheHit": False,
-            "warnings": [message],
-        },
-        "error": None,
-    })
-
-
 import re
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,6 @@
 Extracted from server.py in Phase 1 of the refactoring plan.
 """
 
-import datetime
 import re as _re
 
 from yfmcp.parsing.html import (
@@ -373,139 +372,8 @@ def _extract_geo_revenue_from_html(
 
 
 # ---------------------------------------------------------------------------
-# Region → XBRL segment-member mapping for geographic revenue extraction.
-# Keys are lowercase region names; values are ordered candidate member strings.
-# Substring fallback (region_lower in member.lower()) handles custom prefixes
-# such as "aapl:GreaterChinaMember".
+# XBRL annual fact extractor (used by get_sec_filing_intelligence).
 # ---------------------------------------------------------------------------
-_REGION_XBRL_MEMBERS: dict[str, list[str]] = {
-    "china": ["country:CN", "srt:ChinaMember"],
-    "united states": ["country:US", "srt:UnitedStatesMember"],
-    "europe": ["srt:EuropeMember", "srt:EuropeMiddleEastAndAfricaMember"],
-    "japan": ["country:JP", "srt:JapanMember"],
-    "asia pacific": ["srt:AsiaPacificMember", "srt:AsiaMember"],
-    "rest of world": ["srt:NonUsMember", "srt:OtherGeographicAreasMember"],
-}
-
-# Revenue concept names to probe, in priority order.
-_GEO_REVENUE_CONCEPTS = [
-    "RevenueFromContractWithCustomerExcludingAssessedTax",
-    "Revenues",
-    "SalesRevenueNet",
-    "RevenueFromContractWithCustomer",
-]
-
-_GEO_AXIS = "srt:StatementGeographicalAxis"
-
-
-def _extract_geographic_pct(
-    facts_data: dict,
-    region: str,
-    filing_date: str | None,
-) -> tuple[float | None, float | None, str, str, str]:
-    """Extract geographic revenue from EDGAR XBRL company-facts JSON.
-
-    Returns (regionRevenuePct, regionRevenueUSD, segmentLabel, source, confidence).
-    All-None/NOT_DISCLOSED on failure.
-    """
-    region_lower = region.lower()
-    candidate_members: list[str] = _REGION_XBRL_MEMBERS.get(region_lower, [])
-
-    def _member_matches(member_val: str) -> bool:
-        if any(m.lower() == member_val.lower() for m in candidate_members):
-            return True
-        # Substring fallback — catches custom prefixes like "aapl:GreaterChinaMember"
-        return region_lower in member_val.lower()
-
-    us_gaap: dict = facts_data.get("facts", {}).get("us-gaap", {})
-
-    for concept in _GEO_REVENUE_CONCEPTS:
-        concept_data = us_gaap.get(concept)
-        if not concept_data:
-            continue
-
-        usd_units: list[dict] = concept_data.get("units", {}).get("USD", [])
-        if not usd_units:
-            continue
-
-        # Pin facts to the specific 10-K by filing date (±10 days) or, when
-        # filing_date is unknown, accept any 10-K annual fact.
-        def _is_target_filing(fact: dict) -> bool:
-            if fact.get("form") not in ("10-K", "10-K405", "10-KSB"):
-                return False
-            if filing_date is None:
-                return True
-            try:
-                fd = datetime.date.fromisoformat(filing_date)
-                ff = datetime.date.fromisoformat(fact["filed"])
-                return abs((ff - fd).days) <= 10
-            except Exception:
-                return True
-
-        target_facts = [f for f in usd_units if _is_target_filing(f)]
-        if not target_facts:
-            # Relax: accept any 10-K fact for this concept if none match the date
-            target_facts = [
-                f for f in usd_units
-                if f.get("form") in ("10-K", "10-K405", "10-KSB")
-            ]
-        if not target_facts:
-            continue
-
-        # Group facts by period end-date to align regional vs. total rows
-        by_period: dict[str, list[dict]] = {}
-        for fact in target_facts:
-            end = fact.get("end", "")
-            by_period.setdefault(end, []).append(fact)
-
-        # Try each period (most-recent first)
-        for period_end in sorted(by_period.keys(), reverse=True):
-            period_facts = by_period[period_end]
-
-            regional_fact: dict | None = None
-            total_fact: dict | None = None
-
-            for fact in period_facts:
-                seg = fact.get("segment")
-                if seg is None:
-                    # No segment dimension → consolidated total
-                    total_fact = fact
-                elif (
-                    isinstance(seg, dict)
-                    and seg.get("dimension") == _GEO_AXIS
-                    and _member_matches(str(seg.get("member", "")))
-                ):
-                    regional_fact = fact
-                elif isinstance(seg, list):
-                    # Some filers encode segment as a list of {dimension, member} objects
-                    for dim_entry in seg:
-                        if (
-                            isinstance(dim_entry, dict)
-                            and dim_entry.get("dimension") == _GEO_AXIS
-                            and _member_matches(str(dim_entry.get("member", "")))
-                        ):
-                            regional_fact = fact
-                            break
-
-            if regional_fact is not None and total_fact is not None:
-                r_val = float(regional_fact["val"])
-                t_val = float(total_fact["val"])
-                if t_val > 0:
-                    pct = round(r_val / t_val, 4)
-                    seg_member = (
-                        regional_fact["segment"]["member"]
-                        if isinstance(regional_fact.get("segment"), dict)
-                        else region
-                    )
-                    return pct, r_val, seg_member, "edgar_xbrl", "CONFIRMED"
-
-    return None, None, region, "not_available", "NOT_DISCLOSED"
-
-
-# ---------------------------------------------------------------------------
-# XBRL annual fact extractor (used by get_sec_filing_intelligence)
-# ---------------------------------------------------------------------------
-
 def _extract_xbrl_latest_annual(
     facts_data: dict,
     concept_names: list[str],

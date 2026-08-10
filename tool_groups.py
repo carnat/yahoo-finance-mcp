@@ -388,20 +388,3 @@ def register_grouped_tools(
             group_def,
             contract_registry,
         )
-
-
-def get_all_grouped_action_names() -> list[str]:
-    """Return a flat list of all action names across all groups."""
-    names = []
-    for group_def in TOOL_GROUPS.values():
-        names.extend(group_def["actions"].keys())
-    return names
-
-
-def get_group_for_action(action: str) -> str | None:
-    """Given an action name, return which group it belongs to."""
-    for group_name, group_def in TOOL_GROUPS.items():
-        if action in group_def["actions"]:
-            return group_name
-    return None
-

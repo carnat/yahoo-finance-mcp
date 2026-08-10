@@ -182,7 +182,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - get_price_slope: N completed-session close-to-close change using N+1 bars. Excludes unfinished bars and returns same-bar endRawClose, priceBasis, freshness/retry diagnostics, dataDate, and direction (UP/DOWN/FLAT). Not a real-time quote.
 - get_short_interest: Short % of float, shares short, days-to-cover, prior-month comparison.
 - get_short_momentum: Short interest with MoM delta, direction (RISING/FALLING/FLAT), squeeze risk.
-- get_overnight_quote: Overnight trading data (20:00–04:00 ET). Returns price, gap %, data source, and staleness flag.
+- get_overnight_quote: Deprecated diagnostics-only Yahoo extended-hours proxy; not true 20:00–04:00 ET overnight venue data.
 
 ### Company fundamentals
 - get_company_profile: ~30 key fundamental fields by default. Pass include_all=true for full ~120-field payload. For ETFs/funds, use get_fund_profile instead.

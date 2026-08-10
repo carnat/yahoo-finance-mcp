@@ -46,22 +46,6 @@ def _server_attr(name: str):
     return getattr(_server, name)
 
 
-def _derive_fiscal_period_from_date(date_str: str | None) -> str | None:
-    """Deprecated compatibility helper; earnings tools do not use it.
-
-    A filing date is not an issuer fiscal-quarter identifier.  SEC earnings
-    flows resolve periods from the release itself through
-    ``_extract_earnings_period_from_text``.
-    """
-    if not date_str:
-        return None
-    try:
-        d = datetime.datetime.fromisoformat(str(date_str)[:10]).date()
-    except Exception:
-        return None
-    return f"FY{d.year} Q{((d.month - 1) // 3) + 1}"
-
-
 _QUARTER_WORDS = {
     "first": "1", "1st": "1",
     "second": "2", "2nd": "2",
@@ -230,17 +214,6 @@ def _first_sentence_for_topic(text: str, topic: str) -> str | None:
         if topic_l in sent.lower():
             return _compact_excerpt(sent, max_len=220)
     return None
-
-
-def _extract_metric_number(text: str, patterns: list[str]) -> tuple[float | None, str | None, str | None]:
-    for pat in patterns:
-        m = _re.search(pat, text, flags=_re.IGNORECASE)
-        if m:
-            raw = m.group(1)
-            val = _scale_number_from_text(raw)
-            if val is not None:
-                return val, raw, _compact_excerpt(m.group(0), max_len=220)
-    return None, None, None
 
 
 async def _resolve_ex991_url(accession_number: str, cik: int | None) -> str | None:
