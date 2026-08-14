@@ -136,6 +136,44 @@ def _cache_key(ticker: str, event_id: str) -> str:
     return f"yahoo_quartr_transcript:{ticker.upper()}:{event_id}:en-US:US"
 
 
+def validate_yahoo_transcript_payload_identity(
+    payload: dict,
+    expected_event_id: str,
+    expected_fiscal_quarter: str | None = None,
+) -> str | None:
+    """Return a recoverable error when Yahoo metadata disagrees with the request."""
+    metadata = payload.get("transcriptMetadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    content = payload.get("transcriptContent")
+    content = content if isinstance(content, dict) else {}
+
+    returned_event_ids = {
+        str(value)
+        for value in (metadata.get("eventId"), content.get("event_id"), content.get("eventId"))
+        if value not in (None, "")
+    }
+    expected_event = str(expected_event_id)
+    if not returned_event_ids:
+        return f"Yahoo transcript metadata omitted the expected event ID {expected_event}."
+    if returned_event_ids != {expected_event}:
+        returned = ", ".join(sorted(returned_event_ids))
+        return f"Yahoo returned event ID {returned}; expected {expected_event}."
+
+    expected_quarter = str(expected_fiscal_quarter or "").strip().upper()
+    if not expected_quarter:
+        return None
+    fiscal_period = str(metadata.get("fiscalPeriod") or "").strip().upper()
+    fiscal_year = str(metadata.get("fiscalYear") or "").strip()
+    returned_quarter = (
+        f"{fiscal_year}{fiscal_period}"
+        if re.fullmatch(r"20\d{2}", fiscal_year) and re.fullmatch(r"Q[1-4]", fiscal_period)
+        else None
+    )
+    if returned_quarter != expected_quarter:
+        return f"Yahoo returned fiscal quarter {returned_quarter or 'UNKNOWN'}; expected {expected_quarter}."
+    return None
+
+
 def _cached_payload(ticker: str, event_id: str) -> tuple[dict, str | None] | None:
     cached = _tool_cache.get(_cache_key(ticker, event_id))
     if cached is None:
@@ -154,6 +192,10 @@ def _store_payload(ticker: str, event_id: str, payload: dict) -> None:
         json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
         _TRANSCRIPT_TTL_SECONDS,
     )
+
+
+def _discard_cached_payload(ticker: str, event_id: str) -> None:
+    _tool_cache._store.pop(_cache_key(ticker, event_id), None)
 
 
 def _status_from_http(status: int | None) -> str:
@@ -213,13 +255,21 @@ def _blocking_fetch(
         )
     resolved_event_id = event_id or (str(resolved["eventId"]) if resolved else None)
     resolved_source_url = str(resolved["sourceUrl"]) if resolved else None
+    expected_fiscal_quarter = str(fiscal_quarter or "").strip().upper() or None
+    if resolved:
+        expected_fiscal_quarter = expected_fiscal_quarter or str(resolved["fiscalQuarter"])
     if resolved_event_id:
         cached = _cached_payload(ticker_u, resolved_event_id)
         if cached:
             payload, cached_at = cached
-            return YahooTranscriptResult(
-                payload, "OK", resolved_source_url, resolved_event_id, False, "HIT_PROCESS", fetched_at=cached_at
+            identity_error = validate_yahoo_transcript_payload_identity(
+                payload, resolved_event_id, expected_fiscal_quarter
             )
+            if not identity_error:
+                return YahooTranscriptResult(
+                    payload, "OK", resolved_source_url, resolved_event_id, False, "HIT_PROCESS", fetched_at=cached_at
+                )
+            _discard_cached_payload(ticker_u, resolved_event_id)
 
     cookie_jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
@@ -256,12 +306,18 @@ def _blocking_fetch(
                 )
             resolved_event_id = str(discovered["eventId"])
             resolved_source_url = str(discovered["sourceUrl"])
+            expected_fiscal_quarter = expected_fiscal_quarter or str(discovered["fiscalQuarter"])
             cached = _cached_payload(ticker_u, resolved_event_id)
             if cached:
                 payload, cached_at = cached
-                return YahooTranscriptResult(
-                    payload, "OK", resolved_source_url, resolved_event_id, False, "HIT_PROCESS", fetched_at=cached_at
+                identity_error = validate_yahoo_transcript_payload_identity(
+                    payload, resolved_event_id, expected_fiscal_quarter
                 )
+                if not identity_error:
+                    return YahooTranscriptResult(
+                        payload, "OK", resolved_source_url, resolved_event_id, False, "HIT_PROCESS", fetched_at=cached_at
+                    )
+                _discard_cached_payload(ticker_u, resolved_event_id)
 
         quote_query = urllib.parse.urlencode({"crumb": crumb, "lang": "en-US", "region": "US"})
         quote_url = f"{_QUOTE_TYPE_URL.format(ticker=urllib.parse.quote(ticker_u, safe='.^=-'))}?{quote_query}"
@@ -301,6 +357,19 @@ def _blocking_fetch(
                 True,
                 "MISS",
                 message="Yahoo returned no structured transcript content for this event.",
+            )
+        identity_error = validate_yahoo_transcript_payload_identity(
+            payload, str(resolved_event_id), expected_fiscal_quarter
+        )
+        if identity_error:
+            return YahooTranscriptResult(
+                None,
+                "YAHOO_METADATA_MISMATCH",
+                resolved_source_url,
+                str(resolved_event_id),
+                True,
+                "MISS",
+                message=identity_error,
             )
         fetched_at = _utc_now_iso()
         _store_payload(ticker_u, str(resolved_event_id), payload)

@@ -56,6 +56,7 @@ type ProviderCacheEntry = {
 type EdgeCache = {
   match(request: Request): Promise<Response | undefined>;
   put(request: Request, response: Response): Promise<void>;
+  delete(request: Request): Promise<boolean>;
 };
 
 const providerJsonCache = new Map<string, ProviderCacheEntry>();
@@ -134,6 +135,17 @@ async function setProviderCache(
     );
   } catch {
     // Edge cache is best effort; the provider response remains usable.
+  }
+}
+
+async function deleteProviderCache(cacheKey: string): Promise<void> {
+  providerJsonCache.delete(cacheKey);
+  const cache = edgeCache();
+  if (!cache) return;
+  try {
+    await cache.delete(providerEdgeRequest(cacheKey));
+  } catch {
+    // Edge cache invalidation is best effort; the provider request still proceeds.
   }
 }
 
@@ -12609,6 +12621,41 @@ function discoverYahooTranscriptEvent(
   return selected ? { eventId: selected.eventId, fiscalQuarter: selected.fiscalQuarter, sourceUrl: selected.sourceUrl } : null;
 }
 
+function validateYahooTranscriptPayloadIdentity(
+  payload: Record<string, unknown>,
+  expectedEventId: string,
+  expectedFiscalQuarter: string | null,
+): string | null {
+  const metadata = payload.transcriptMetadata && typeof payload.transcriptMetadata === "object" && !Array.isArray(payload.transcriptMetadata)
+    ? payload.transcriptMetadata as Record<string, unknown>
+    : {};
+  const content = payload.transcriptContent && typeof payload.transcriptContent === "object" && !Array.isArray(payload.transcriptContent)
+    ? payload.transcriptContent as Record<string, unknown>
+    : {};
+  const returnedEventIds = new Set(
+    [metadata.eventId, content.event_id, content.eventId]
+      .filter((value) => value != null && String(value) !== "")
+      .map((value) => String(value)),
+  );
+  if (!returnedEventIds.size) {
+    return `Yahoo transcript metadata omitted the expected event ID ${expectedEventId}.`;
+  }
+  if (returnedEventIds.size !== 1 || !returnedEventIds.has(expectedEventId)) {
+    return `Yahoo returned event ID ${[...returnedEventIds].sort().join(", ")}; expected ${expectedEventId}.`;
+  }
+
+  const expectedQuarter = String(expectedFiscalQuarter ?? "").trim().toUpperCase();
+  if (!expectedQuarter) return null;
+  const fiscalPeriod = String(metadata.fiscalPeriod ?? "").trim().toUpperCase();
+  const fiscalYear = String(metadata.fiscalYear ?? "").trim();
+  const returnedQuarter = /^20\d{2}$/.test(fiscalYear) && /^Q[1-4]$/.test(fiscalPeriod)
+    ? `${fiscalYear}${fiscalPeriod}`
+    : null;
+  return returnedQuarter === expectedQuarter
+    ? null
+    : `Yahoo returned fiscal quarter ${returnedQuarter ?? "UNKNOWN"}; expected ${expectedQuarter}.`;
+}
+
 async function yahooTranscriptResponse(url: string, timeoutMs: number): Promise<Response> {
   const makeRequest = async (session: { value: string; cookie: string }): Promise<Response> => {
     const parsed = new URL(url);
@@ -12658,6 +12705,7 @@ async function fetchYahooQuartrTranscript(
   const tickerU = ticker.toUpperCase();
   let resolvedEventId = eventId;
   let resolvedSourceUrl = sourceUrl;
+  let expectedFiscalQuarter = String(fiscalQuarter ?? "").trim().toUpperCase() || null;
   if (sourceUrl) {
     const parsed = parseYahooTranscriptSourceUrl(tickerU, sourceUrl);
     if (!parsed.identity) {
@@ -12675,6 +12723,7 @@ async function fetchYahooQuartrTranscript(
     }
     resolvedEventId = resolvedEventId ?? parsed.identity.eventId;
     resolvedSourceUrl = parsed.identity.sourceUrl;
+    expectedFiscalQuarter = expectedFiscalQuarter ?? parsed.identity.fiscalQuarter;
   }
 
   const cachedForEvent = async (): Promise<YahooTranscriptFetchResult | null> => {
@@ -12684,6 +12733,13 @@ async function fetchYahooQuartrTranscript(
     });
     const cached = await getProviderCache(cacheKey, YAHOO_TRANSCRIPT_TTL_MS);
     if (!cached) return null;
+    const identityError = validateYahooTranscriptPayloadIdentity(
+      cached.payload ?? {}, String(resolvedEventId), expectedFiscalQuarter,
+    );
+    if (identityError) {
+      await deleteProviderCache(cacheKey);
+      return null;
+    }
     return { ...cached, sourceUrl: resolvedSourceUrl, eventId: resolvedEventId };
   };
   const initialCached = await cachedForEvent();
@@ -12713,6 +12769,7 @@ async function fetchYahooQuartrTranscript(
       }
       resolvedEventId = discovered.eventId;
       resolvedSourceUrl = discovered.sourceUrl;
+      expectedFiscalQuarter = expectedFiscalQuarter ?? discovered.fiscalQuarter;
       const discoveredCached = await cachedForEvent();
       if (discoveredCached) return discoveredCached;
     }
@@ -12754,6 +12811,16 @@ async function fetchYahooQuartrTranscript(
         payload: null, status: "NOT_FOUND", publicUrl: resolvedSourceUrl ?? xhr.toString(),
         sourceUrl: resolvedSourceUrl, eventId: resolvedEventId, providerAttempted: true, cacheStatus: "MISS",
         message: "Yahoo returned no structured transcript content for this event.",
+      };
+    }
+    const identityError = validateYahooTranscriptPayloadIdentity(
+      payload, String(resolvedEventId), expectedFiscalQuarter,
+    );
+    if (identityError) {
+      return {
+        payload: null, status: "YAHOO_METADATA_MISMATCH", publicUrl: resolvedSourceUrl ?? xhr.toString(),
+        sourceUrl: resolvedSourceUrl, eventId: resolvedEventId, providerAttempted: true, cacheStatus: "MISS",
+        message: identityError,
       };
     }
     const fetchedAt = new Date().toISOString();
@@ -12949,6 +13016,23 @@ async function attemptYahooQuartrTranscript(
   };
   if (result.status !== "OK" || !result.payload) {
     return { payload: null, attempt: transcriptAttempt("yahoo_quartr", result.status, attemptExtra) };
+  }
+  let expectedQuarter = fiscalQuarter;
+  if (!expectedQuarter && result.sourceUrl) {
+    expectedQuarter = parseYahooTranscriptSourceUrl(ticker, result.sourceUrl).identity?.fiscalQuarter ?? null;
+  }
+  const identityError = validateYahooTranscriptPayloadIdentity(
+    result.payload, String(result.eventId ?? eventId ?? ""), expectedQuarter,
+  );
+  if (identityError) {
+    return {
+      payload: null,
+      attempt: transcriptAttempt("yahoo_quartr", "YAHOO_METADATA_MISMATCH", {
+        ...attemptExtra,
+        reasonCode: "YAHOO_METADATA_MISMATCH",
+        reason: identityError,
+      }),
+    };
   }
   const normalized = await normalizeYahooQuartrPayload(
     ticker, result.payload, result.sourceUrl, result.eventId, topics,
