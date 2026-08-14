@@ -31,6 +31,7 @@ const MARKETAUX_NEWS_TTL_MS = 15 * 60 * 1000;
 const ALPHA_HISTORICAL_PUT_CALL_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 const PROVIDER_OWNERSHIP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const ALPHA_TRANSCRIPT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const YAHOO_TRANSCRIPT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 type ProviderJsonResult = {
   payload: Record<string, unknown> | null;
@@ -12512,6 +12513,494 @@ function transcriptAttempt(sourceType: string, status: string, extra: Record<str
   return Object.fromEntries(Object.entries({ sourceType, status, ...extra }).filter(([, v]) => v != null));
 }
 
+type YahooTranscriptSourceIdentity = {
+  eventId: string;
+  fiscalQuarter: string;
+  sourceUrl: string;
+};
+
+type YahooTranscriptFetchResult = ProviderJsonResult & {
+  sourceUrl: string | null;
+  eventId: string | null;
+};
+
+function yahooTickerPath(ticker: string): string {
+  return encodeURIComponent(ticker.toUpperCase())
+    .replace(/%5E/gi, "^")
+    .replace(/%3D/gi, "=")
+    .replace(/%2E/gi, ".");
+}
+
+function canonicalYahooTranscriptUrl(ticker: string, quarter: string, year: number, eventId: string): string {
+  const encoded = yahooTickerPath(ticker);
+  return `https://finance.yahoo.com/quote/${encoded}/earnings/${encoded}-${quarter.toUpperCase()}-${year}-earnings_call-${eventId}.html`;
+}
+
+export function parseYahooTranscriptSourceUrl(
+  ticker: string,
+  sourceUrl: string,
+): { identity: YahooTranscriptSourceIdentity | null; error: string | null } {
+  let parsed: URL;
+  try {
+    parsed = new URL(String(sourceUrl ?? "").trim());
+  } catch {
+    return { identity: null, error: "source_url is malformed" };
+  }
+  if (parsed.protocol !== "https:" || parsed.hostname.toLowerCase() !== "finance.yahoo.com") {
+    return { identity: null, error: "source_url must be an https://finance.yahoo.com earnings-call URL" };
+  }
+  if (parsed.username || parsed.password || (parsed.port && parsed.port !== "443")) {
+    return { identity: null, error: "source_url must not contain credentials or a non-standard port" };
+  }
+  let path: string;
+  try {
+    path = decodeURIComponent(parsed.pathname);
+  } catch {
+    return { identity: null, error: "source_url path is malformed" };
+  }
+  const match = path.match(/^\/quote\/([^/]+)\/earnings\/([^/]+)-Q([1-4])-(20\d{2})-earnings_call-(\d+)\.html\/?$/i);
+  if (!match) {
+    return { identity: null, error: "source_url must match Yahoo's /quote/{ticker}/earnings/...-earnings_call-{eventId}.html format" };
+  }
+  const requested = ticker.toUpperCase();
+  if (match[1].toUpperCase() !== requested || match[2].toUpperCase() !== requested) {
+    return { identity: null, error: "source_url ticker does not match the requested ticker" };
+  }
+  const year = Number(match[4]);
+  const quarter = `Q${match[3]}`;
+  return {
+    identity: {
+      eventId: match[5],
+      fiscalQuarter: `${year}Q${match[3]}`,
+      sourceUrl: canonicalYahooTranscriptUrl(requested, quarter, year, match[5]),
+    },
+    error: null,
+  };
+}
+
+function discoverYahooTranscriptEvent(
+  ticker: string,
+  html: string,
+  fiscalQuarter: string | null,
+): YahooTranscriptSourceIdentity | null {
+  const tickerU = ticker.toUpperCase();
+  const pattern = /(?:https:\/\/finance\.yahoo\.com)?\/quote\/([^/"'?]+)\/earnings\/([^/"'?]+)-Q([1-4])-(20\d{2})-earnings_call-(\d+)\.html/gi;
+  const seen = new Set<string>();
+  const calls: Array<YahooTranscriptSourceIdentity & { year: number; quarterNumber: number }> = [];
+  for (const match of html.matchAll(pattern)) {
+    const pathTicker = String(match[1] ?? "").toUpperCase();
+    const slugTicker = String(match[2] ?? "").toUpperCase();
+    const eventId = String(match[5] ?? "");
+    if (pathTicker !== tickerU || slugTicker !== tickerU || !eventId || seen.has(eventId)) continue;
+    seen.add(eventId);
+    const quarterNumber = Number(match[3]);
+    const year = Number(match[4]);
+    calls.push({
+      eventId,
+      fiscalQuarter: `${year}Q${quarterNumber}`,
+      sourceUrl: canonicalYahooTranscriptUrl(tickerU, `Q${quarterNumber}`, year, eventId),
+      year,
+      quarterNumber,
+    });
+  }
+  calls.sort((a, b) => b.year - a.year || b.quarterNumber - a.quarterNumber);
+  const requested = String(fiscalQuarter ?? "").toUpperCase();
+  const selected = requested ? calls.find((call) => call.fiscalQuarter === requested) : calls[0];
+  return selected ? { eventId: selected.eventId, fiscalQuarter: selected.fiscalQuarter, sourceUrl: selected.sourceUrl } : null;
+}
+
+async function yahooTranscriptResponse(url: string, timeoutMs: number): Promise<Response> {
+  const makeRequest = async (session: { value: string; cookie: string }): Promise<Response> => {
+    const parsed = new URL(url);
+    parsed.searchParams.set("crumb", session.value);
+    return fetchProviderWithTimeout(
+      parsed.toString(),
+      { headers: { "User-Agent": UA, Cookie: session.cookie, Accept: "application/json,text/html;q=0.9,*/*;q=0.8" } },
+      timeoutMs,
+    );
+  };
+  let response = await makeRequest(await getCrumb());
+  if (response.status === 401) {
+    await response.body?.cancel();
+    _crumb = null;
+    response = await makeRequest(await getCrumb());
+  }
+  return response;
+}
+
+async function yahooTranscriptHttpFailure(
+  response: Response,
+  sourceUrl: string | null,
+  eventId: string | null,
+): Promise<YahooTranscriptFetchResult> {
+  const retryAfter = response.headers.get("Retry-After") ?? undefined;
+  const body = (await response.text()).slice(0, 500);
+  return {
+    payload: null,
+    status: providerHttpStatus(response.status, body),
+    publicUrl: sourceUrl ?? "https://finance.yahoo.com/",
+    sourceUrl,
+    eventId,
+    providerAttempted: true,
+    cacheStatus: "MISS",
+    httpStatus: response.status,
+    message: body || `Yahoo returned HTTP ${response.status}.`,
+    retryAfter,
+  };
+}
+
+async function fetchYahooQuartrTranscript(
+  ticker: string,
+  eventId: string | null,
+  sourceUrl: string | null,
+  fiscalQuarter: string | null,
+): Promise<YahooTranscriptFetchResult> {
+  const tickerU = ticker.toUpperCase();
+  let resolvedEventId = eventId;
+  let resolvedSourceUrl = sourceUrl;
+  if (sourceUrl) {
+    const parsed = parseYahooTranscriptSourceUrl(tickerU, sourceUrl);
+    if (!parsed.identity) {
+      return {
+        payload: null, status: "INVALID_SOURCE_URL", publicUrl: sourceUrl, sourceUrl, eventId,
+        providerAttempted: false, cacheStatus: "MISS", message: parsed.error ?? "Invalid Yahoo transcript source URL.",
+      };
+    }
+    if (eventId && eventId !== parsed.identity.eventId) {
+      return {
+        payload: null, status: "INVALID_SOURCE_URL", publicUrl: parsed.identity.sourceUrl,
+        sourceUrl: parsed.identity.sourceUrl, eventId, providerAttempted: false, cacheStatus: "MISS",
+        message: "event_id does not match source_url",
+      };
+    }
+    resolvedEventId = resolvedEventId ?? parsed.identity.eventId;
+    resolvedSourceUrl = parsed.identity.sourceUrl;
+  }
+
+  const cachedForEvent = async (): Promise<YahooTranscriptFetchResult | null> => {
+    if (!resolvedEventId) return null;
+    const cacheKey = providerCacheKey("yahoo_quartr", "transcript", {
+      ticker: tickerU, eventId: resolvedEventId, lang: "en-US", region: "US",
+    });
+    const cached = await getProviderCache(cacheKey, YAHOO_TRANSCRIPT_TTL_MS);
+    if (!cached) return null;
+    return { ...cached, sourceUrl: resolvedSourceUrl, eventId: resolvedEventId };
+  };
+  const initialCached = await cachedForEvent();
+  if (initialCached) return initialCached;
+
+  try {
+    if (!resolvedEventId) {
+      const quotePageUrl = `https://finance.yahoo.com/quote/${yahooTickerPath(tickerU)}`;
+      const response = await yahooTranscriptResponse(quotePageUrl, 20_000);
+      if (!response.ok) return yahooTranscriptHttpFailure(response, null, null);
+      const html = await response.text();
+      if (html.length > 10_000_000) {
+        return {
+          payload: null, status: "PROVIDER_ERROR", publicUrl: quotePageUrl, sourceUrl: null, eventId: null,
+          providerAttempted: true, cacheStatus: "MISS", message: "Yahoo quote page exceeded the configured size limit.",
+        };
+      }
+      const discovered = discoverYahooTranscriptEvent(tickerU, html, fiscalQuarter);
+      if (!discovered) {
+        return {
+          payload: null, status: "NOT_FOUND", publicUrl: quotePageUrl, sourceUrl: null, eventId: null,
+          providerAttempted: true, cacheStatus: "MISS",
+          message: fiscalQuarter
+            ? `Yahoo did not expose an earnings-call page for ${fiscalQuarter}.`
+            : "Yahoo did not expose an earnings-call page for this ticker.",
+        };
+      }
+      resolvedEventId = discovered.eventId;
+      resolvedSourceUrl = discovered.sourceUrl;
+      const discoveredCached = await cachedForEvent();
+      if (discoveredCached) return discoveredCached;
+    }
+
+    const quoteTypeUrl = `https://query1.finance.yahoo.com/v1/finance/quoteType/${yahooTickerPath(tickerU)}?lang=en-US&region=US`;
+    const quoteResponse = await yahooTranscriptResponse(quoteTypeUrl, 20_000);
+    if (!quoteResponse.ok) return yahooTranscriptHttpFailure(quoteResponse, resolvedSourceUrl, resolvedEventId);
+    const quoteJson = await quoteResponse.json() as Record<string, unknown>;
+    const quoteType = quoteJson.quoteType as Record<string, unknown> | undefined;
+    const quoteResults = Array.isArray(quoteType?.result) ? quoteType.result as Record<string, unknown>[] : [];
+    const quartrId = quoteResults[0]?.quartrId;
+    if (quartrId == null || String(quartrId) === "") {
+      return {
+        payload: null, status: "NOT_FOUND", publicUrl: resolvedSourceUrl ?? quoteTypeUrl,
+        sourceUrl: resolvedSourceUrl, eventId: resolvedEventId, providerAttempted: true, cacheStatus: "MISS",
+        message: "Yahoo quote metadata did not expose a Quartr company identifier.",
+      };
+    }
+
+    const xhr = new URL("https://finance.yahoo.com/xhr/transcript");
+    xhr.searchParams.set("eventType", "earnings_call");
+    xhr.searchParams.set("quartrId", String(quartrId));
+    xhr.searchParams.set("eventId", String(resolvedEventId));
+    xhr.searchParams.set("lang", "en-US");
+    xhr.searchParams.set("region", "US");
+    const transcriptResponse = await yahooTranscriptResponse(xhr.toString(), 30_000);
+    if (!transcriptResponse.ok) return yahooTranscriptHttpFailure(transcriptResponse, resolvedSourceUrl, resolvedEventId);
+    const rawJson = await transcriptResponse.json() as unknown;
+    if (!rawJson || typeof rawJson !== "object" || Array.isArray(rawJson)) {
+      return {
+        payload: null, status: "PROVIDER_ERROR", publicUrl: resolvedSourceUrl ?? xhr.toString(),
+        sourceUrl: resolvedSourceUrl, eventId: resolvedEventId, providerAttempted: true, cacheStatus: "MISS",
+        message: "Yahoo returned a non-object transcript response.",
+      };
+    }
+    const payload = rawJson as Record<string, unknown>;
+    if (!payload.transcriptContent || typeof payload.transcriptContent !== "object") {
+      return {
+        payload: null, status: "NOT_FOUND", publicUrl: resolvedSourceUrl ?? xhr.toString(),
+        sourceUrl: resolvedSourceUrl, eventId: resolvedEventId, providerAttempted: true, cacheStatus: "MISS",
+        message: "Yahoo returned no structured transcript content for this event.",
+      };
+    }
+    const fetchedAt = new Date().toISOString();
+    const cacheKey = providerCacheKey("yahoo_quartr", "transcript", {
+      ticker: tickerU, eventId: String(resolvedEventId), lang: "en-US", region: "US",
+    });
+    await setProviderCache(cacheKey, payload, resolvedSourceUrl ?? xhr.toString(), fetchedAt, YAHOO_TRANSCRIPT_TTL_MS);
+    return {
+      payload, status: "OK", publicUrl: resolvedSourceUrl ?? xhr.toString(), sourceUrl: resolvedSourceUrl,
+      eventId: resolvedEventId, providerAttempted: true, cacheStatus: "MISS", fetchedAt,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      payload: null,
+      status: /timeout|timed out|abort/i.test(message) ? "TIMEOUT" : "PROVIDER_ERROR",
+      publicUrl: resolvedSourceUrl ?? "https://finance.yahoo.com/",
+      sourceUrl: resolvedSourceUrl,
+      eventId: resolvedEventId,
+      providerAttempted: true,
+      cacheStatus: "MISS",
+      message,
+    };
+  }
+}
+
+function metadataEpochIso(value: unknown): string | null {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  try {
+    return new Date(numeric * 1000).toISOString();
+  } catch {
+    return null;
+  }
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function normalizeYahooQuartrPayload(
+  ticker: string,
+  payload: Record<string, unknown>,
+  sourceUrl: string | null,
+  eventId: string | null,
+  topics: string[] | null,
+  paragraphLimit: number,
+  paragraphCursor: number,
+  cacheStatus: string,
+  fetchedAt: string | undefined,
+): Promise<Record<string, unknown> | null> {
+  const content = payload.transcriptContent;
+  if (!content || typeof content !== "object" || Array.isArray(content)) return null;
+  const contentRecord = content as Record<string, unknown>;
+  const transcript = contentRecord.transcript;
+  if (!transcript || typeof transcript !== "object" || Array.isArray(transcript)) return null;
+  const transcriptRecord = transcript as Record<string, unknown>;
+  const metadata = payload.transcriptMetadata && typeof payload.transcriptMetadata === "object" && !Array.isArray(payload.transcriptMetadata)
+    ? payload.transcriptMetadata as Record<string, unknown>
+    : {};
+
+  const speakerRows = Array.isArray(contentRecord.speaker_mapping)
+    ? contentRecord.speaker_mapping as Record<string, unknown>[]
+    : Array.isArray(contentRecord.speakerMapping)
+      ? contentRecord.speakerMapping as Record<string, unknown>[]
+      : [];
+  const speakerMap = new Map<string, Record<string, unknown>>();
+  const speakers: Record<string, unknown>[] = [];
+  for (const row of speakerRows) {
+    if (!row || typeof row !== "object") continue;
+    const speakerDataRaw = row.speaker_data ?? row.speakerData;
+    const speakerData = speakerDataRaw && typeof speakerDataRaw === "object" && !Array.isArray(speakerDataRaw)
+      ? speakerDataRaw as Record<string, unknown>
+      : {};
+    const compact = {
+      speakerId: row.speaker ?? null,
+      name: speakerData.name ?? null,
+      role: speakerData.role ?? null,
+      company: speakerData.company ?? null,
+    };
+    speakerMap.set(String(row.speaker), compact);
+    speakers.push(compact);
+  }
+
+  const paragraphRows = Array.isArray(transcriptRecord.paragraphs)
+    ? transcriptRecord.paragraphs as Record<string, unknown>[]
+    : [];
+  let paragraphs: Record<string, unknown>[] = [];
+  for (let index = 0; index < paragraphRows.length; index++) {
+    const row = paragraphRows[index];
+    if (!row || typeof row !== "object") continue;
+    let text = String(row.text ?? "").trim();
+    if (!text && Array.isArray(row.sentences)) {
+      text = (row.sentences as Record<string, unknown>[])
+        .map((sentence) => String(sentence?.text ?? "").trim())
+        .filter(Boolean)
+        .join(" ");
+    }
+    if (!text) continue;
+    const speaker = speakerMap.get(String(row.speaker)) ?? {};
+    paragraphs.push({
+      index,
+      speaker: speaker.name ?? (String(row.speaker).toLowerCase() === "operator" ? "Operator" : null),
+      role: speaker.role ?? null,
+      company: speaker.company ?? null,
+      start: row.start ?? null,
+      end: row.end ?? null,
+      text,
+    });
+  }
+  if (!paragraphs.length) {
+    paragraphs = String(transcriptRecord.text ?? "")
+      .split(/\n\s*\n/)
+      .map((text, index) => ({ index, speaker: null, role: null, company: null, start: null, end: null, text: text.trim() }))
+      .filter((paragraph) => paragraph.text);
+  }
+  if (!paragraphs.length) return null;
+
+  const topicList = (topics ?? []).map((topic) => String(topic).trim()).filter(Boolean);
+  const selected = topicList.length
+    ? paragraphs.flatMap((paragraph) => {
+        const searchable = `${String(paragraph.speaker ?? "")} ${String(paragraph.text ?? "")}`;
+        const matchedTopics = topicList.filter((topic) => new RegExp(topic.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(searchable));
+        return matchedTopics.length ? [{ ...paragraph, matchedTopics }] : [];
+      })
+    : paragraphs;
+  const offset = Math.min(paragraphCursor, selected.length);
+  const page = selected.slice(offset, offset + paragraphLimit);
+  const nextCursor = offset + page.length < selected.length ? String(offset + page.length) : null;
+  const resolvedEventId = String(metadata.eventId ?? contentRecord.event_id ?? contentRecord.eventId ?? eventId ?? "") || null;
+  const fiscalPeriod = String(metadata.fiscalPeriod ?? "") || null;
+  const fiscalYearValue = Number(metadata.fiscalYear);
+  const fiscalYear = Number.isFinite(fiscalYearValue) ? fiscalYearValue : null;
+  let resolvedSourceUrl = sourceUrl;
+  if (!resolvedSourceUrl && resolvedEventId && fiscalPeriod && fiscalYear && /^Q[1-4]$/i.test(fiscalPeriod)) {
+    resolvedSourceUrl = canonicalYahooTranscriptUrl(ticker, fiscalPeriod, fiscalYear, resolvedEventId);
+  }
+  const warnings: Record<string, unknown>[] = [];
+  if (topicList.length && !selected.length) {
+    warnings.push({ code: "NO_TOPIC_MATCHES", message: `No transcript paragraphs matched: ${topicList.join(", ")}` });
+  }
+  return {
+    ticker: ticker.toUpperCase(),
+    status: "OK",
+    sourceType: "yahoo_quartr",
+    provider: "yahoo_finance_quartr",
+    evidenceClass: "CONTEXTUAL_TRANSCRIPT",
+    decisionGrade: false,
+    sourceUrl: resolvedSourceUrl,
+    eventId: resolvedEventId,
+    title: metadata.title ?? null,
+    fiscalPeriod,
+    fiscalYear,
+    eventDate: metadataEpochIso(metadata.date),
+    updatedAt: metadataEpochIso(metadata.updated),
+    retrievedAt: fetchedAt ?? null,
+    cacheStatus,
+    contentSha256: await sha256Hex(JSON.stringify(payload)),
+    speakerCount: transcriptRecord.number_of_speakers ?? transcriptRecord.numberOfSpeakers ?? speakers.length,
+    speakers,
+    filteredByTopics: topicList.length ? topicList : null,
+    paragraphs: topicList.length ? null : page,
+    matchedParagraphs: topicList.length ? page : [],
+    content: null,
+    pagination: {
+      cursor: String(offset), nextCursor, limit: paragraphLimit, returned: page.length,
+      matchingParagraphs: selected.length, totalParagraphs: paragraphs.length, hasMore: nextCursor != null,
+    },
+    warnings,
+  };
+}
+
+async function attemptYahooQuartrTranscript(
+  ticker: string,
+  fiscalQuarter: string | null,
+  topics: string[] | null,
+  eventId: string | null,
+  sourceUrl: string | null,
+  paragraphLimit: number,
+  paragraphCursor: number,
+): Promise<{ payload: Record<string, unknown> | null; attempt: Record<string, unknown> }> {
+  const result = await fetchYahooQuartrTranscript(ticker, eventId, sourceUrl, fiscalQuarter);
+  const attemptExtra = {
+    url: result.sourceUrl,
+    eventId: result.eventId,
+    fiscalQuarter,
+    cacheStatus: result.cacheStatus,
+    attempted: result.providerAttempted,
+    httpStatus: result.httpStatus,
+    message: result.message,
+    retryAfter: result.retryAfter,
+  };
+  if (result.status !== "OK" || !result.payload) {
+    return { payload: null, attempt: transcriptAttempt("yahoo_quartr", result.status, attemptExtra) };
+  }
+  const normalized = await normalizeYahooQuartrPayload(
+    ticker, result.payload, result.sourceUrl, result.eventId, topics,
+    paragraphLimit, paragraphCursor, result.cacheStatus, result.fetchedAt,
+  );
+  if (!normalized) {
+    return {
+      payload: null,
+      attempt: transcriptAttempt("yahoo_quartr", "PROVIDER_ERROR", {
+        ...attemptExtra,
+        reasonCode: "TRANSCRIPT_SHAPE_INVALID",
+        reason: "Yahoo returned transcript data without usable paragraphs.",
+      }),
+    };
+  }
+  return { payload: normalized, attempt: transcriptAttempt("yahoo_quartr", "SUCCESS", attemptExtra) };
+}
+
+const SEC_TRANSCRIPT_MARKER_RE = /\b(?:earnings|conference)\s+call\b|\bprepared\s+remarks\b|\bquestion(?:s)?[- ]and[- ]answer(?:s)?\b|\bopen\s+the\s+call\s+(?:for|to)\s+questions\b/i;
+const SEC_TRANSCRIPT_SPEAKER_RE = /\b(Operator|[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3})(?:\s*[-–—]\s*(?:CEO|CFO|COO|President|Analyst|Investor Relations))?\s*:/g;
+const SEC_PRESENTATION_RE = /\b(?:investor presentation|presentation slides?|slide\s+\d+)\b/i;
+
+function validateSecTranscriptText(text: string): { valid: boolean; diagnostics: Record<string, unknown> } {
+  const normalized = String(text ?? "").replace(/\s+/g, " ").trim();
+  const speakerTurns = [...normalized.matchAll(SEC_TRANSCRIPT_SPEAKER_RE)].map((match) => String(match[1]));
+  const distinctSpeakers = new Set(speakerTurns.map((speaker) => speaker.toLowerCase()));
+  const callMarkerFound = SEC_TRANSCRIPT_MARKER_RE.test(normalized);
+  const presentationMarkersFound = SEC_PRESENTATION_RE.test(normalized);
+  const valid = normalized.length >= 300
+    && callMarkerFound
+    && speakerTurns.length >= 3
+    && distinctSpeakers.size >= 2
+    && !(presentationMarkersFound && speakerTurns.length < 5);
+  return {
+    valid,
+    diagnostics: {
+      textLength: normalized.length,
+      callMarkerFound,
+      speakerTurnCount: speakerTurns.length,
+      distinctSpeakerCount: distinctSpeakers.size,
+      presentationMarkersFound,
+    },
+  };
+}
+
+function isSecTranscriptCandidate(exhibit: Record<string, unknown>): boolean {
+  const exhibitType = String(exhibit.type ?? "").toUpperCase().replace(/\s+/g, "");
+  const description = String(exhibit.description ?? "").toUpperCase();
+  return /^EX-99\.0?[23]\b/.test(exhibitType)
+    || ["TRANSCRIPT", "CONFERENCE CALL", "PROCEEDINGS", "EARNINGS CALL"].some((keyword) => description.includes(keyword));
+}
+
 function nextTranscriptFallback(attemptedSources: Record<string, unknown>[]): Record<string, unknown> | null {
   const statusBySource = new Map(attemptedSources.map((a) => [String(a.sourceType), String(a.status)]));
   if (!statusBySource.has("company_ir") || statusBySource.get("company_ir") === "SKIPPED") {
@@ -12519,6 +13008,9 @@ function nextTranscriptFallback(attemptedSources: Record<string, unknown>[]): Re
   }
   if (!statusBySource.has("public_transcript_url") || statusBySource.get("public_transcript_url") === "SKIPPED") {
     return { sourceType: "public_transcript_url", action: "Call parse_public_transcript with a verified public transcript URL." };
+  }
+  if (!statusBySource.has("yahoo_quartr") || statusBySource.get("yahoo_quartr") === "SKIPPED") {
+    return { sourceType: "yahoo_quartr", action: "Retry with a validated Yahoo earnings-call source_url or event_id." };
   }
   if (!statusBySource.has("alpha_vantage") || statusBySource.get("alpha_vantage") === "SKIPPED") {
     return { sourceType: "alpha_vantage", action: "Configure ALPHA_VANTAGE_API_KEY and retry when a fiscal quarter is known." };
@@ -12696,173 +13188,214 @@ export async function getEarningsCallTranscript(
   period: string = "latest",
   topics: string[] | null = null,
   fiscalQuarter: string | null = null,
+  eventId: string | null = null,
+  sourceUrl: string | null = null,
+  paragraphLimit: number = 20,
+  paragraphCursor: number = 0,
 ): Promise<string> {
   const attemptedSources: Record<string, unknown>[] = [];
+  let normalizedFiscalQuarter = String(fiscalQuarter ?? "").trim().toUpperCase() || null;
+  let normalizedEventId = String(eventId ?? "").trim() || null;
+  let normalizedSourceUrl = String(sourceUrl ?? "").trim() || null;
+  if (normalizedSourceUrl) {
+    const parsed = parseYahooTranscriptSourceUrl(ticker, normalizedSourceUrl);
+    if (!parsed.identity) {
+      return JSON.stringify({ status: "INPUT_VALIDATION_ERROR", message: parsed.error });
+    }
+    if (normalizedEventId && normalizedEventId !== parsed.identity.eventId) {
+      return JSON.stringify({ status: "INPUT_VALIDATION_ERROR", message: "event_id does not match source_url." });
+    }
+    if (normalizedFiscalQuarter && normalizedFiscalQuarter !== parsed.identity.fiscalQuarter) {
+      return JSON.stringify({ status: "INPUT_VALIDATION_ERROR", message: "fiscal_quarter does not match source_url." });
+    }
+    normalizedEventId = normalizedEventId ?? parsed.identity.eventId;
+    normalizedFiscalQuarter = normalizedFiscalQuarter ?? parsed.identity.fiscalQuarter;
+    normalizedSourceUrl = parsed.identity.sourceUrl;
+  }
+  const pageLimit = Math.min(50, Math.max(1, Math.trunc(paragraphLimit)));
+  const pageCursor = Math.max(0, Math.trunc(paragraphCursor));
+  const explicitYahoo = Boolean(normalizedEventId || normalizedSourceUrl);
+  if (explicitYahoo) {
+    const yahoo = await attemptYahooQuartrTranscript(
+      ticker, normalizedFiscalQuarter, topics, normalizedEventId, normalizedSourceUrl, pageLimit, pageCursor,
+    );
+    attemptedSources.push(yahoo.attempt);
+    if (yahoo.payload) {
+      const { warnings = [], ...payload } = yahoo.payload;
+      return JSON.stringify({
+        ...payload,
+        period,
+        fiscalQuarter: normalizedFiscalQuarter,
+        fiscalQuarterStatus: "EXPLICIT_SOURCE",
+        attemptedSources,
+        nextRecommendedFallback: null,
+        warnings,
+      });
+    }
+  }
+
+  let secFallback: Record<string, unknown>;
+  let officialReleaseSource: Record<string, unknown> | null = null;
   const secSource = await resolveLatestEarningsSecSource(ticker);
   if (!secSource) {
     attemptedSources.push(transcriptAttempt("sec_8k_exhibit", "NOT_FOUND"));
-    attemptedSources.push(transcriptAttempt("company_ir", "SKIPPED", { reason: "No company IR transcript/call page URL was discoverable." }));
-    attemptedSources.push(transcriptAttempt("public_transcript_url", "SKIPPED", { reason: "No public transcript URL was provided to parse_public_transcript." }));
-    const alpha = await attemptAlphaVantageTranscript(ticker, fiscalQuarter, null, topics);
-    attemptedSources.push(alpha.attempt);
-    if (alpha.payload) {
-      return JSON.stringify({ ticker: ticker.toUpperCase(), period, ...alpha.resolution, ...alpha.payload, attemptedSources, nextRecommendedFallback: null });
-    }
-    return JSON.stringify({
+    secFallback = {
       ticker: ticker.toUpperCase(),
       period,
-      ...alpha.resolution,
       status: "SEC_8K_NOT_FOUND",
       message: "No recent SEC 8-K filing found for this ticker.",
       content: null,
-      attemptedSources,
-      nextRecommendedFallback: nextTranscriptFallback(attemptedSources),
-    });
-  }
+    };
+  } else {
+    const accessionNumber = String(secSource.accessionNumber ?? "");
+    let cik = edgarCikFromAccession(accessionNumber);
+    if (!cik) {
+      const { cikPadded } = await getSubmissionsForTicker(ticker);
+      cik = cikPadded ? parseInt(cikPadded, 10) : null;
+    }
+    if (!cik) {
+      attemptedSources.push(transcriptAttempt("sec_8k_exhibit", "FAILED", {
+        accessionNumber, reason: "CIK resolution failed.",
+      }));
+      secFallback = {
+        ticker: ticker.toUpperCase(), period, status: "CIK_RESOLUTION_FAILED",
+        message: "Could not resolve CIK for ticker.", content: null,
+      };
+    } else {
+      const { edgarIndexUrl } = edgarBuildFilingUrls(cik, accessionNumber, null);
+      const exhibits = await edgarListExhibitsFromIndex(edgarIndexUrl);
+      officialReleaseSource = transcriptOfficialReleaseSource(secSource, exhibits, cik, accessionNumber);
+      const candidates = exhibits.filter(isSecTranscriptCandidate);
+      const candidateDiagnostics: Record<string, unknown>[] = [];
+      let validated: {
+        exhibit: Record<string, unknown>;
+        documentUrl: string;
+        cleanText: string;
+        validation: Record<string, unknown>;
+      } | null = null;
+      for (const exhibit of candidates.slice(0, 4)) {
+        const fileName = String(exhibit.document ?? "");
+        if (!fileName) {
+          candidateDiagnostics.push({
+            type: exhibit.type ?? null, document: null, status: "REJECTED", reasonCode: "MISSING_DOCUMENT_NAME",
+          });
+          continue;
+        }
+        const documentUrl = `https://www.sec.gov/Archives/edgar/data/${cik}/${accessionNumber.replace(/-/g, "")}/${fileName}`;
+        const html = await edgarGetHtml(documentUrl, 5_000_000);
+        if (!html) {
+          candidateDiagnostics.push({ type: exhibit.type ?? null, document: fileName, url: documentUrl, status: "FETCH_ERROR" });
+          continue;
+        }
+        const cleanText = htmlToReadableText(html);
+        const check = validateSecTranscriptText(cleanText);
+        candidateDiagnostics.push({
+          type: exhibit.type ?? null, document: fileName, url: documentUrl,
+          status: check.valid ? "VALIDATED" : "REJECTED", validation: check.diagnostics,
+        });
+        if (check.valid) {
+          validated = { exhibit, documentUrl, cleanText, validation: check.diagnostics };
+          break;
+        }
+      }
 
-  const accessionNumber = String(secSource.accessionNumber ?? "");
-  let cik = edgarCikFromAccession(accessionNumber);
-  if (!cik) {
-    const { cikPadded } = await getSubmissionsForTicker(ticker);
-    cik = cikPadded ? parseInt(cikPadded, 10) : null;
-  }
-  if (!cik) {
-    attemptedSources.push(transcriptAttempt("sec_8k_exhibit", "FAILED", { accessionNumber, reason: "CIK resolution failed." }));
-    return JSON.stringify({
-      ticker: ticker.toUpperCase(),
-      period,
-      status: "CIK_RESOLUTION_FAILED",
-      message: "Could not resolve CIK for ticker.",
-      content: null,
-      attemptedSources,
-      nextRecommendedFallback: nextTranscriptFallback(attemptedSources),
-    });
-  }
+      if (validated) {
+        attemptedSources.push(transcriptAttempt("sec_8k_exhibit", "SUCCESS", {
+          url: validated.documentUrl,
+          accessionNumber,
+          filingDate: secSource.filingDate ?? null,
+          validation: validated.validation,
+        }));
+        const warnings: Record<string, unknown>[] = [];
+        const common = {
+          ticker: ticker.toUpperCase(), period, status: "OK", sourceType: "sec_8k_exhibit",
+          evidenceClass: "SEC_FILING", decisionGrade: true, sourceUrl: validated.documentUrl,
+          accessionNumber, filingDate: secSource.filingDate ?? null, exhibitType: validated.exhibit.type ?? null,
+          documentUrl: validated.documentUrl, totalTextLength: validated.cleanText.length,
+          attemptedSources, nextRecommendedFallback: null,
+        };
+        const topicList = (topics ?? []).map((topic) => String(topic).trim()).filter(Boolean);
+        if (topicList.length) {
+          const matchedParagraphs = filterParagraphsByTopics(validated.cleanText, topicList);
+          if (!matchedParagraphs.length) {
+            warnings.push({ code: "NO_TOPIC_MATCHES", message: `No paragraphs matched the provided topics: ${topicList.join(", ")}` });
+          }
+          return JSON.stringify({
+            ...common, filteredByTopics: topicList, matchedParagraphs, content: null, warnings,
+          });
+        }
+        const maxChars = 50_000;
+        const truncated = validated.cleanText.length > maxChars;
+        if (truncated) {
+          warnings.push({ code: "TEXT_TRUNCATED", message: `Text truncated from ${validated.cleanText.length} to ${maxChars} characters.` });
+        }
+        return JSON.stringify({
+          ...common, filteredByTopics: null, content: validated.cleanText.slice(0, maxChars), truncated, warnings,
+        });
+      }
 
-  const { edgarIndexUrl } = edgarBuildFilingUrls(cik, accessionNumber, null);
-  const exhibits = await edgarListExhibitsFromIndex(edgarIndexUrl);
-  const officialReleaseSource = transcriptOfficialReleaseSource(secSource, exhibits, cik, accessionNumber);
-  const transcriptKeywords = ["TRANSCRIPT", "CONFERENCE CALL", "PROCEEDINGS", "EARNINGS CALL"];
-  const transcriptExhibit = exhibits.find((exhibit) => {
-    const exhibitType = String(exhibit.type ?? "").toUpperCase();
-    const description = String(exhibit.description ?? "").toUpperCase();
-    return exhibitType === "EX-99.2" || exhibitType === "EX-99.3" || transcriptKeywords.some((keyword) => description.includes(keyword));
-  });
-
-  if (!transcriptExhibit) {
-    attemptedSources.push(transcriptAttempt("sec_8k_exhibit", "NOT_FOUND", {
-      url: edgarIndexUrl,
-      accessionNumber,
-      filingDate: secSource.filingDate ?? null,
-      exhibitsSearched: exhibits.length,
-    }));
-    attemptedSources.push(transcriptAttempt("company_ir", "SKIPPED", { reason: "No company IR transcript/call page URL was discoverable." }));
-    attemptedSources.push(transcriptAttempt("public_transcript_url", "SKIPPED", { reason: "No public transcript URL was provided to parse_public_transcript." }));
-    const alpha = await attemptAlphaVantageTranscript(ticker, fiscalQuarter, officialReleaseSource, topics);
-    attemptedSources.push(alpha.attempt);
-    if (alpha.payload) {
-      return JSON.stringify({
-        ticker: ticker.toUpperCase(),
-        period,
-        ...alpha.resolution,
+      attemptedSources.push(transcriptAttempt("sec_8k_exhibit", "NOT_FOUND", {
+        url: edgarIndexUrl,
         accessionNumber,
         filingDate: secSource.filingDate ?? null,
-        ...alpha.payload,
+        exhibitsSearched: exhibits.length,
+        candidatesChecked: candidateDiagnostics.length,
+        candidateDiagnostics,
+      }));
+      secFallback = {
+        ticker: ticker.toUpperCase(), period, status: "SEC_EXHIBIT_NOT_FOUND", accessionNumber,
+        filingDate: secSource.filingDate ?? null,
+        availableExhibits: exhibits.map((exhibit) => ({
+          type: exhibit.type ?? "", description: exhibit.description ?? "", document: exhibit.document ?? "",
+        })),
+        candidateDiagnostics,
+        message: "8-K filing found but no content-validated transcript exhibit was detected.",
+        content: null,
+      };
+    }
+  }
+
+  attemptedSources.push(transcriptAttempt("company_ir", "SKIPPED", {
+    reason: "No approved company IR transcript source was configured.",
+  }));
+  if (!explicitYahoo) {
+    const yahoo = await attemptYahooQuartrTranscript(
+      ticker, normalizedFiscalQuarter, topics, null, null, pageLimit, pageCursor,
+    );
+    attemptedSources.push(yahoo.attempt);
+    if (yahoo.payload) {
+      const metadataQuarter = yahoo.payload.fiscalYear && yahoo.payload.fiscalPeriod
+        ? `${yahoo.payload.fiscalYear}${String(yahoo.payload.fiscalPeriod).toUpperCase()}`
+        : null;
+      const { warnings = [], ...payload } = yahoo.payload;
+      return JSON.stringify({
+        ...payload,
+        period,
+        fiscalQuarter: normalizedFiscalQuarter ?? metadataQuarter,
+        fiscalQuarterStatus: normalizedFiscalQuarter ? "EXPLICIT" : "YAHOO_METADATA_RESOLVED",
         attemptedSources,
         nextRecommendedFallback: null,
+        warnings,
       });
     }
-    return JSON.stringify({
-      ticker: ticker.toUpperCase(),
-      period,
-      ...alpha.resolution,
-      status: "SEC_EXHIBIT_NOT_FOUND",
-      accessionNumber,
-      filingDate: secSource.filingDate ?? null,
-      availableExhibits: exhibits.map((exhibit) => ({
-        type: exhibit.type ?? "",
-        description: exhibit.description ?? "",
-        document: exhibit.document ?? "",
-      })),
-      message: "8-K filing found but no transcript exhibit detected.",
-      content: null,
-      attemptedSources,
-      nextRecommendedFallback: nextTranscriptFallback(attemptedSources),
-    });
   }
 
-  const fileName = String(transcriptExhibit.document ?? "");
-  const documentUrl = `https://www.sec.gov/Archives/edgar/data/${cik}/${accessionNumber.replace(/-/g, "")}/${fileName}`;
-  const html = await edgarGetHtml(documentUrl, 5_000_000);
-  if (!html) {
-    attemptedSources.push(transcriptAttempt("sec_8k_exhibit", "FETCH_ERROR", { url: documentUrl, accessionNumber, filingDate: secSource.filingDate ?? null }));
-    attemptedSources.push(transcriptAttempt("company_ir", "SKIPPED", { reason: "No company IR transcript/call page URL was discoverable." }));
-    attemptedSources.push(transcriptAttempt("public_transcript_url", "SKIPPED", { reason: "No public transcript URL was provided to parse_public_transcript." }));
-    const alpha = await attemptAlphaVantageTranscript(ticker, fiscalQuarter, officialReleaseSource, topics);
-    attemptedSources.push(alpha.attempt);
-    if (alpha.payload) {
-      return JSON.stringify({ ticker: ticker.toUpperCase(), period, ...alpha.resolution, ...alpha.payload, attemptedSources, nextRecommendedFallback: null });
-    }
+  attemptedSources.push(transcriptAttempt("public_transcript_url", "SKIPPED", {
+    reason: "No non-Yahoo public transcript URL was provided to parse_public_transcript.",
+  }));
+  const alpha = await attemptAlphaVantageTranscript(ticker, normalizedFiscalQuarter, officialReleaseSource, topics);
+  attemptedSources.push(alpha.attempt);
+  if (alpha.payload) {
     return JSON.stringify({
-      ticker: ticker.toUpperCase(),
-      period,
-      ...alpha.resolution,
-      status: "FETCH_ERROR",
-      documentUrl,
-      message: `Could not fetch exhibit document '${fileName}'.`,
-      content: null,
-      attemptedSources,
-      nextRecommendedFallback: nextTranscriptFallback(attemptedSources),
+      ticker: ticker.toUpperCase(), period, ...alpha.resolution, ...alpha.payload,
+      attemptedSources, nextRecommendedFallback: null,
     });
-  }
-
-  const cleanText = htmlToReadableText(html);
-  const warnings: Record<string, unknown>[] = [];
-  attemptedSources.push(transcriptAttempt("sec_8k_exhibit", "SUCCESS", { url: documentUrl, accessionNumber, filingDate: secSource.filingDate ?? null }));
-  const topicList = (topics ?? []).filter((topic) => typeof topic === "string" && topic.trim()).map((topic) => topic.trim());
-  if (topicList.length) {
-    const matchedParagraphs = filterParagraphsByTopics(cleanText, topicList);
-    if (!matchedParagraphs.length) {
-      warnings.push({ code: "NO_TOPIC_MATCHES", message: `No paragraphs matched the provided topics: ${topicList.join(", ")}` });
-    }
-    return JSON.stringify({
-      ticker: ticker.toUpperCase(),
-      period,
-      status: "OK",
-      accessionNumber,
-      filingDate: secSource.filingDate ?? null,
-      exhibitType: transcriptExhibit.type ?? null,
-      documentUrl,
-      filteredByTopics: topicList,
-      matchedParagraphs,
-      totalTextLength: cleanText.length,
-      content: null,
-      attemptedSources,
-      nextRecommendedFallback: null,
-      warnings,
-    });
-  }
-
-  const maxChars = 50_000;
-  const truncated = cleanText.length > maxChars;
-  if (truncated) {
-    warnings.push({ code: "TEXT_TRUNCATED", message: `Text truncated from ${cleanText.length} to ${maxChars} characters.` });
   }
   return JSON.stringify({
-    ticker: ticker.toUpperCase(),
-    period,
-    status: "OK",
-    accessionNumber,
-    filingDate: secSource.filingDate ?? null,
-    exhibitType: transcriptExhibit.type ?? null,
-    documentUrl,
-    filteredByTopics: null,
-    content: cleanText.slice(0, maxChars),
-    totalTextLength: cleanText.length,
-    truncated,
+    ...secFallback,
+    ...alpha.resolution,
     attemptedSources,
-    nextRecommendedFallback: null,
-    warnings,
+    nextRecommendedFallback: nextTranscriptFallback(attemptedSources),
   });
 }
 

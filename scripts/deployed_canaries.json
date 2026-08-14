@@ -163,6 +163,18 @@
       "volatility": "stable_contract"
     },
     {
+      "id": "earnings-transcript-invalid-source-url",
+      "description": "Caller-provided transcript URLs are restricted to canonical Yahoo Finance earnings-call pages.",
+      "tool": "get_earnings_call_transcript",
+      "args": {
+        "ticker": "LITE",
+        "source_url": "https://example.com/quote/LITE/earnings/LITE-Q4-2026-earnings_call-660925.html"
+      },
+      "assertion": "invalid_transcript_source_error",
+      "blocking": true,
+      "volatility": "stable_contract"
+    },
+    {
       "id": "aaoi-china-geographic-positive",
       "description": "Stable AAOI China positive fixture remains numeric and evidence-bearing.",
       "tool": "extract_geographic_revenue",

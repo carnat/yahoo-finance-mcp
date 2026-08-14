@@ -7,6 +7,7 @@ time instead of pulling more code into this refactor.
 
 import asyncio
 import datetime
+import hashlib
 import json
 import os
 import re as _re
@@ -38,6 +39,10 @@ from yfmcp.clients.edgar import (
     _get_submissions_for_ticker,
 )
 from yfmcp.clients.market_providers import fetch_alpha_vantage_json
+from yfmcp.clients.yahoo_transcripts import (
+    fetch_yahoo_quartr_transcript,
+    parse_yahoo_transcript_source_url,
+)
 from yfmcp.parsing.html import _strip_html_tags
 
 
@@ -1109,6 +1114,254 @@ def _transcript_attempt(source_type: str, status: str, **extra: object) -> dict:
     return attempt
 
 
+_SEC_TRANSCRIPT_MARKER_RE = _re.compile(
+    r"\b(?:earnings|conference)\s+call\b|\bprepared\s+remarks\b|"
+    r"\bquestion(?:s)?[- ]and[- ]answer(?:s)?\b|\bopen\s+the\s+call\s+(?:for|to)\s+questions\b",
+    flags=_re.IGNORECASE,
+)
+_SEC_TRANSCRIPT_SPEAKER_RE = _re.compile(
+    r"\b(Operator|[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3})"
+    r"(?:\s*[-–—]\s*(?:CEO|CFO|COO|President|Analyst|Investor Relations))?\s*:",
+)
+_SEC_PRESENTATION_RE = _re.compile(
+    r"\b(?:investor presentation|presentation slides?|slide\s+\d+)\b",
+    flags=_re.IGNORECASE,
+)
+
+
+def _validate_sec_transcript_text(text: str) -> tuple[bool, dict[str, object]]:
+    """Require call markers and repeated speaker turns before certifying an exhibit."""
+    normalized = _re.sub(r"\s+", " ", text or "").strip()
+    speaker_turns = [match.group(1) for match in _SEC_TRANSCRIPT_SPEAKER_RE.finditer(normalized)]
+    unique_speakers = {speaker.casefold() for speaker in speaker_turns}
+    has_call_marker = bool(_SEC_TRANSCRIPT_MARKER_RE.search(normalized))
+    looks_like_presentation = bool(_SEC_PRESENTATION_RE.search(normalized))
+    valid = (
+        len(normalized) >= 300
+        and has_call_marker
+        and len(speaker_turns) >= 3
+        and len(unique_speakers) >= 2
+        and not (looks_like_presentation and len(speaker_turns) < 5)
+    )
+    return valid, {
+        "textLength": len(normalized),
+        "callMarkerFound": has_call_marker,
+        "speakerTurnCount": len(speaker_turns),
+        "distinctSpeakerCount": len(unique_speakers),
+        "presentationMarkersFound": looks_like_presentation,
+    }
+
+
+def _is_sec_transcript_candidate(exhibit: dict) -> bool:
+    exhibit_type = _re.sub(r"\s+", "", str(exhibit.get("type") or "").upper())
+    description = str(exhibit.get("description") or "").upper()
+    return bool(
+        _re.match(r"^EX-99\.0?[23]\b", exhibit_type)
+        or any(keyword in description for keyword in ("TRANSCRIPT", "CONFERENCE CALL", "PROCEEDINGS", "EARNINGS CALL"))
+    )
+
+
+def _metadata_epoch_iso(value: object) -> str | None:
+    try:
+        return datetime.datetime.fromtimestamp(float(value), tz=datetime.timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _normalize_yahoo_quartr_payload(
+    ticker: str,
+    payload: dict,
+    *,
+    source_url: str | None,
+    event_id: str | None,
+    topics: list[str] | None,
+    paragraph_limit: int,
+    paragraph_cursor: int,
+    cache_status: str,
+    fetched_at: str | None,
+) -> dict | None:
+    content = payload.get("transcriptContent")
+    metadata = payload.get("transcriptMetadata")
+    if not isinstance(content, dict):
+        return None
+    metadata = metadata if isinstance(metadata, dict) else {}
+    transcript = content.get("transcript")
+    if not isinstance(transcript, dict):
+        return None
+
+    speaker_rows = content.get("speaker_mapping") or content.get("speakerMapping") or []
+    speaker_map: dict[str, dict[str, object]] = {}
+    speakers: list[dict[str, object]] = []
+    if isinstance(speaker_rows, list):
+        for row in speaker_rows:
+            if not isinstance(row, dict):
+                continue
+            speaker_id = str(row.get("speaker"))
+            speaker_data = row.get("speaker_data") or row.get("speakerData") or {}
+            speaker_data = speaker_data if isinstance(speaker_data, dict) else {}
+            compact = {
+                "speakerId": row.get("speaker"),
+                "name": speaker_data.get("name"),
+                "role": speaker_data.get("role"),
+                "company": speaker_data.get("company"),
+            }
+            speaker_map[speaker_id] = compact
+            speakers.append(compact)
+
+    paragraph_rows = transcript.get("paragraphs")
+    normalized_paragraphs: list[dict[str, object]] = []
+    if isinstance(paragraph_rows, list):
+        for index, row in enumerate(paragraph_rows):
+            if not isinstance(row, dict):
+                continue
+            text = str(row.get("text") or "").strip()
+            if not text and isinstance(row.get("sentences"), list):
+                text = " ".join(
+                    str(sentence.get("text") or "").strip()
+                    for sentence in row["sentences"]
+                    if isinstance(sentence, dict) and str(sentence.get("text") or "").strip()
+                )
+            if not text:
+                continue
+            speaker = speaker_map.get(str(row.get("speaker")), {})
+            normalized_paragraphs.append({
+                "index": index,
+                "speaker": speaker.get("name") or ("Operator" if str(row.get("speaker")) == "operator" else None),
+                "role": speaker.get("role"),
+                "company": speaker.get("company"),
+                "start": row.get("start"),
+                "end": row.get("end"),
+                "text": text,
+            })
+    if not normalized_paragraphs:
+        full_text = str(transcript.get("text") or "").strip()
+        normalized_paragraphs = [
+            {"index": index, "speaker": None, "role": None, "company": None, "start": None, "end": None, "text": para}
+            for index, para in enumerate(_re.split(r"\n\s*\n", full_text))
+            if para.strip()
+        ]
+    if not normalized_paragraphs:
+        return None
+
+    topic_list = [str(topic).strip() for topic in (topics or []) if str(topic).strip()]
+    selected: list[dict[str, object]] = []
+    for paragraph in normalized_paragraphs:
+        if not topic_list:
+            selected.append(paragraph)
+            continue
+        searchable = f"{paragraph.get('speaker') or ''} {paragraph['text']}"
+        matched = [topic for topic in topic_list if _re.search(_re.escape(topic), searchable, flags=_re.IGNORECASE)]
+        if matched:
+            selected.append({**paragraph, "matchedTopics": matched})
+
+    offset = min(paragraph_cursor, len(selected))
+    page = selected[offset:offset + paragraph_limit]
+    next_cursor = str(offset + len(page)) if offset + len(page) < len(selected) else None
+    resolved_event_id = str(metadata.get("eventId") or content.get("event_id") or content.get("eventId") or event_id or "") or None
+    fiscal_period = str(metadata.get("fiscalPeriod") or "") or None
+    try:
+        fiscal_year = int(metadata.get("fiscalYear")) if metadata.get("fiscalYear") is not None else None
+    except (TypeError, ValueError):
+        fiscal_year = None
+    resolved_source_url = source_url
+    if not resolved_source_url and resolved_event_id and fiscal_period and fiscal_year and _re.fullmatch(r"Q[1-4]", fiscal_period, flags=_re.IGNORECASE):
+        ticker_u = ticker.upper()
+        resolved_source_url = (
+            f"https://finance.yahoo.com/quote/{_urlparse.quote(ticker_u, safe='.^=-')}/earnings/"
+            f"{_urlparse.quote(ticker_u, safe='.^=-')}-{fiscal_period.upper()}-{fiscal_year}"
+            f"-earnings_call-{resolved_event_id}.html"
+        )
+    raw_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    warnings: list[dict] = []
+    if topic_list and not selected:
+        warnings.append({"code": "NO_TOPIC_MATCHES", "message": f"No transcript paragraphs matched: {topic_list}"})
+    return {
+        "ticker": ticker.upper(),
+        "status": "OK",
+        "sourceType": "yahoo_quartr",
+        "provider": "yahoo_finance_quartr",
+        "evidenceClass": "CONTEXTUAL_TRANSCRIPT",
+        "decisionGrade": False,
+        "sourceUrl": resolved_source_url,
+        "eventId": resolved_event_id,
+        "title": metadata.get("title"),
+        "fiscalPeriod": fiscal_period,
+        "fiscalYear": fiscal_year,
+        "eventDate": _metadata_epoch_iso(metadata.get("date")),
+        "updatedAt": _metadata_epoch_iso(metadata.get("updated")),
+        "retrievedAt": fetched_at,
+        "cacheStatus": cache_status,
+        "contentSha256": hashlib.sha256(raw_json.encode("utf-8")).hexdigest(),
+        "speakerCount": transcript.get("number_of_speakers") or transcript.get("numberOfSpeakers") or len(speakers),
+        "speakers": speakers,
+        "filteredByTopics": topic_list or None,
+        "paragraphs": None if topic_list else page,
+        "matchedParagraphs": page if topic_list else [],
+        "content": None,
+        "pagination": {
+            "cursor": str(offset),
+            "nextCursor": next_cursor,
+            "limit": paragraph_limit,
+            "returned": len(page),
+            "matchingParagraphs": len(selected),
+            "totalParagraphs": len(normalized_paragraphs),
+            "hasMore": next_cursor is not None,
+        },
+        "warnings": warnings,
+    }
+
+
+async def _attempt_yahoo_quartr_transcript(
+    ticker: str,
+    *,
+    fiscal_quarter: str | None,
+    topics: list[str] | None,
+    event_id: str | None,
+    source_url: str | None,
+    paragraph_limit: int,
+    paragraph_cursor: int,
+) -> tuple[dict | None, dict]:
+    result = await fetch_yahoo_quartr_transcript(
+        ticker,
+        event_id=event_id,
+        source_url=source_url,
+        fiscal_quarter=fiscal_quarter,
+    )
+    attempt_extras: dict[str, object] = {
+        "url": result.source_url,
+        "eventId": result.event_id,
+        "fiscalQuarter": fiscal_quarter,
+        "cacheStatus": result.cache_status,
+        "attempted": result.provider_attempted,
+    }
+    if result.http_status is not None:
+        attempt_extras["httpStatus"] = result.http_status
+    if result.message:
+        attempt_extras["message"] = result.message
+    if result.retry_after:
+        attempt_extras["retryAfter"] = result.retry_after
+    if result.status != "OK" or not result.payload:
+        return None, _transcript_attempt("yahoo_quartr", result.status, **attempt_extras)
+    normalized = _normalize_yahoo_quartr_payload(
+        ticker,
+        result.payload,
+        source_url=result.source_url,
+        event_id=result.event_id,
+        topics=topics,
+        paragraph_limit=paragraph_limit,
+        paragraph_cursor=paragraph_cursor,
+        cache_status=result.cache_status,
+        fetched_at=result.fetched_at,
+    )
+    if not normalized:
+        return None, _transcript_attempt(
+            "yahoo_quartr", "PROVIDER_ERROR", **attempt_extras,
+            reasonCode="TRANSCRIPT_SHAPE_INVALID",
+            reason="Yahoo returned transcript data without usable paragraphs.",
+        )
+    return normalized, _transcript_attempt("yahoo_quartr", "SUCCESS", **attempt_extras)
+
+
 def _next_transcript_fallback(attempted_sources: list[dict]) -> dict | None:
     statuses = {str(a.get("sourceType")): str(a.get("status")) for a in attempted_sources}
     if statuses.get("company_ir") in {None, "SKIPPED"}:
@@ -1120,6 +1373,11 @@ def _next_transcript_fallback(attempted_sources: list[dict]) -> dict | None:
         return {
             "sourceType": "public_transcript_url",
             "action": "Call parse_public_transcript with a verified public transcript URL.",
+        }
+    if statuses.get("yahoo_quartr") in {None, "SKIPPED"}:
+        return {
+            "sourceType": "yahoo_quartr",
+            "action": "Retry with a validated Yahoo earnings-call source_url or event_id.",
         }
     if statuses.get("alpha_vantage") in {None, "SKIPPED"}:
         return {
@@ -1273,7 +1531,7 @@ async def _fetch_alpha_vantage_transcript(ticker: str, quarter: str, topics: lis
 @yfinance_server.tool(
     name="get_earnings_call_transcript",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_call_transcript"],
-    description="High-level tool to retrieve earnings call transcript content from SEC 8-K exhibits, then structured fallback metadata for company IR, public transcript URLs, and optional Alpha Vantage. Alpha Vantage requires an explicit fiscal_quarter or one resolved from official release text; filing dates are never used to infer fiscal periods.",
+    description="Retrieve an earnings-call transcript from a content-validated SEC exhibit, then Yahoo/Quartr, then optional Alpha Vantage. Yahoo results are structured and paragraph-paginated for LLM use and include the human-readable sourceUrl. Provide source_url or event_id to target a known Yahoo call. Yahoo and Alpha transcripts are contextual and never decision-grade; filing dates are never treated as fiscal periods.",
 )
 async def get_earnings_call_transcript(
     ticker: str,
@@ -1289,6 +1547,22 @@ async def get_earnings_call_transcript(
             ),
         ),
     ] = None,
+    event_id: Annotated[
+        str | None,
+        Field(pattern=r"^\d+$", description="Optional Yahoo earnings-call event ID from a validated Yahoo transcript URL."),
+    ] = None,
+    source_url: Annotated[
+        str | None,
+        Field(description="Optional https://finance.yahoo.com/quote/{ticker}/earnings/...-earnings_call-{eventId}.html URL."),
+    ] = None,
+    paragraph_limit: Annotated[
+        int,
+        Field(ge=1, le=50, description="Maximum Yahoo transcript paragraphs to return per call."),
+    ] = 20,
+    paragraph_cursor: Annotated[
+        str | None,
+        Field(pattern=r"^\d+$", description="Opaque nextCursor from a previous Yahoo transcript response."),
+    ] = None,
 ) -> str:
     normalized_fiscal_quarter = str(fiscal_quarter or "").strip().upper() or None
     if normalized_fiscal_quarter and not _re.fullmatch(r"\d{4}Q[1-4]", normalized_fiscal_quarter):
@@ -1298,188 +1572,236 @@ async def get_earnings_call_transcript(
             error="fiscal_quarter must use issuer fiscal-quarter format YYYYQ1 through YYYYQ4.",
             error_code=ErrorCode.INPUT_VALIDATION_ERROR,
         )
+    normalized_event_id = str(event_id or "").strip() or None
+    if normalized_event_id and not normalized_event_id.isdigit():
+        return _wrap_envelope_v2(
+            "get_earnings_call_transcript", None,
+            error="event_id must contain digits only.",
+            error_code=ErrorCode.INPUT_VALIDATION_ERROR,
+        )
+    normalized_source_url = str(source_url or "").strip() or None
+    source_identity: dict | None = None
+    if normalized_source_url:
+        source_identity, source_error = parse_yahoo_transcript_source_url(ticker, normalized_source_url)
+        if source_error:
+            return _wrap_envelope_v2(
+                "get_earnings_call_transcript", None,
+                error=source_error,
+                error_code=ErrorCode.INPUT_VALIDATION_ERROR,
+            )
+        if normalized_event_id and normalized_event_id != source_identity.get("eventId"):
+            return _wrap_envelope_v2(
+                "get_earnings_call_transcript", None,
+                error="event_id does not match source_url.",
+                error_code=ErrorCode.INPUT_VALIDATION_ERROR,
+            )
+        source_quarter = str(source_identity.get("fiscalQuarter") or "") or None
+        if normalized_fiscal_quarter and source_quarter != normalized_fiscal_quarter:
+            return _wrap_envelope_v2(
+                "get_earnings_call_transcript", None,
+                error="fiscal_quarter does not match source_url.",
+                error_code=ErrorCode.INPUT_VALIDATION_ERROR,
+            )
+        normalized_event_id = normalized_event_id or str(source_identity.get("eventId") or "") or None
+        normalized_fiscal_quarter = normalized_fiscal_quarter or source_quarter
+        normalized_source_url = str(source_identity.get("sourceUrl") or normalized_source_url)
+    try:
+        cursor_offset = int(str(paragraph_cursor or "0"))
+    except ValueError:
+        return _wrap_envelope_v2(
+            "get_earnings_call_transcript", None,
+            error="paragraph_cursor must be a non-negative integer cursor.",
+            error_code=ErrorCode.INPUT_VALIDATION_ERROR,
+        )
+    if cursor_offset < 0 or not 1 <= int(paragraph_limit) <= 50:
+        return _wrap_envelope_v2(
+            "get_earnings_call_transcript", None,
+            error="paragraph_limit must be between 1 and 50 and paragraph_cursor must be non-negative.",
+            error_code=ErrorCode.INPUT_VALIDATION_ERROR,
+        )
     err = _validate_ticker(ticker)
     if err:
         return _wrap_envelope_v2("get_earnings_call_transcript", None, error=err, error_code=ErrorCode.INPUT_VALIDATION_ERROR)
 
     attempted_sources: list[dict] = []
+    explicit_yahoo = bool(normalized_event_id or normalized_source_url)
+    if explicit_yahoo:
+        yahoo_payload, yahoo_attempt = await _attempt_yahoo_quartr_transcript(
+            ticker,
+            fiscal_quarter=normalized_fiscal_quarter,
+            topics=topics,
+            event_id=normalized_event_id,
+            source_url=normalized_source_url,
+            paragraph_limit=int(paragraph_limit),
+            paragraph_cursor=cursor_offset,
+        )
+        attempted_sources.append(yahoo_attempt)
+        if yahoo_payload:
+            yahoo_payload.update({
+                "period": period,
+                "fiscalQuarter": normalized_fiscal_quarter,
+                "fiscalQuarterStatus": "EXPLICIT_SOURCE",
+                "attemptedSources": attempted_sources,
+                "nextRecommendedFallback": None,
+            })
+            warnings = yahoo_payload.pop("warnings", [])
+            return _wrap_envelope_v2("get_earnings_call_transcript", yahoo_payload, warnings=warnings)
 
-    # Step 1: Find the latest 8-K filing
+    sec_fallback: dict[str, object]
+    official_release_source: dict | None = None
     sec_source = await _resolve_latest_earnings_sec_source(ticker)
     if not sec_source:
         attempted_sources.append(_transcript_attempt("sec_8k_exhibit", "NOT_FOUND"))
-        attempted_sources.append(_transcript_attempt("company_ir", "SKIPPED", reason="No company IR transcript/call page URL was discoverable."))
-        attempted_sources.append(_transcript_attempt("public_transcript_url", "SKIPPED", reason="No public transcript URL was provided to parse_public_transcript."))
-        alpha_payload, alpha_attempt, quarter_resolution = await _attempt_alpha_vantage_transcript(
-            ticker, normalized_fiscal_quarter, None, topics
-        )
-        attempted_sources.append(alpha_attempt)
-        if alpha_payload:
-            alpha_payload.update({"ticker": ticker.upper(), "period": period, **quarter_resolution, "attemptedSources": attempted_sources, "nextRecommendedFallback": None})
-            warnings = alpha_payload.pop("warnings", [])
-            return _wrap_envelope_v2("get_earnings_call_transcript", alpha_payload, warnings=warnings)
-        return _wrap_envelope_v2("get_earnings_call_transcript", {
+        sec_fallback = {
             "ticker": ticker.upper(),
             "period": period,
-            **quarter_resolution,
             "status": "SEC_8K_NOT_FOUND",
             "message": "No recent SEC 8-K filing found for this ticker.",
             "content": None,
-            "attemptedSources": attempted_sources,
-            "nextRecommendedFallback": _next_transcript_fallback(attempted_sources),
-        })
+        }
+    else:
+        accession = str(sec_source.get("accessionNumber") or "")
+        official_release_source = sec_source if sec_source.get("sourceType") == "sec_8k_ex991" else None
+        cik = _edgar_cik_from_accession(accession)
+        if not cik:
+            cik_padded, _ = await _get_submissions_for_ticker(ticker)
+            cik = int(cik_padded) if cik_padded else None
+        if not cik:
+            attempted_sources.append(_transcript_attempt(
+                "sec_8k_exhibit", "FAILED", accessionNumber=accession, reason="CIK resolution failed."
+            ))
+            sec_fallback = {
+                "ticker": ticker.upper(), "period": period, "status": "CIK_RESOLUTION_FAILED",
+                "message": "Could not resolve CIK for ticker.", "content": None,
+            }
+        else:
+            index_url, _ = _edgar_build_filing_urls(cik, accession, None)
+            exhibits = await _edgar_list_exhibits_from_index(index_url)
+            candidates = [exhibit for exhibit in exhibits if _is_sec_transcript_candidate(exhibit)]
+            candidate_diagnostics: list[dict[str, object]] = []
+            validated: tuple[dict, str, str, dict[str, object]] | None = None
+            for exhibit in candidates[:4]:
+                file_name = str(exhibit.get("document") or "")
+                if not file_name:
+                    candidate_diagnostics.append({
+                        "type": exhibit.get("type"), "document": None, "status": "REJECTED",
+                        "reasonCode": "MISSING_DOCUMENT_NAME",
+                    })
+                    continue
+                doc_url = (
+                    f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession.replace('-', '')}/{file_name}"
+                )
+                html = await _edgar_get_html(doc_url, max_bytes=5_000_000)
+                if not html:
+                    candidate_diagnostics.append({
+                        "type": exhibit.get("type"), "document": file_name, "url": doc_url,
+                        "status": "FETCH_ERROR",
+                    })
+                    continue
+                clean_text = _strip_html_tags(_sanitize_sec_html(html))
+                is_valid, validation = _validate_sec_transcript_text(clean_text)
+                candidate_diagnostics.append({
+                    "type": exhibit.get("type"), "document": file_name, "url": doc_url,
+                    "status": "VALIDATED" if is_valid else "REJECTED",
+                    "validation": validation,
+                })
+                if is_valid:
+                    validated = (exhibit, doc_url, clean_text, validation)
+                    break
 
-    accession = sec_source.get("accessionNumber", "")
-    cik = _edgar_cik_from_accession(accession)
-    if not cik:
-        cik_padded, _ = await _get_submissions_for_ticker(ticker)
-        cik = int(cik_padded) if cik_padded else None
-    if not cik:
-        attempted_sources.append(_transcript_attempt("sec_8k_exhibit", "FAILED", accessionNumber=accession, reason="CIK resolution failed."))
-        return _wrap_envelope_v2("get_earnings_call_transcript", {
-            "ticker": ticker.upper(),
-            "period": period,
-            "status": "CIK_RESOLUTION_FAILED",
-            "message": "Could not resolve CIK for ticker.",
-            "content": None,
-            "attemptedSources": attempted_sources,
-            "nextRecommendedFallback": _next_transcript_fallback(attempted_sources),
-        })
+            if validated:
+                transcript_exhibit, doc_url, clean_text, validation = validated
+                attempted_sources.append(_transcript_attempt(
+                    "sec_8k_exhibit", "SUCCESS", url=doc_url, accessionNumber=accession,
+                    filingDate=sec_source.get("filingDate"), validation=validation,
+                ))
+                warnings: list[dict] = []
+                common = {
+                    "ticker": ticker.upper(), "period": period, "status": "OK",
+                    "sourceType": "sec_8k_exhibit", "evidenceClass": "SEC_FILING", "decisionGrade": True,
+                    "sourceUrl": doc_url, "accessionNumber": accession,
+                    "filingDate": sec_source.get("filingDate"), "exhibitType": transcript_exhibit.get("type"),
+                    "documentUrl": doc_url, "totalTextLength": len(clean_text),
+                    "attemptedSources": attempted_sources, "nextRecommendedFallback": None,
+                }
+                if topics:
+                    filtered = _filter_paragraphs_by_topics(clean_text, topics)
+                    if not filtered:
+                        warnings.append({"code": "NO_TOPIC_MATCHES", "message": f"No paragraphs matched the provided topics: {topics}"})
+                    return _wrap_envelope_v2("get_earnings_call_transcript", {
+                        **common, "filteredByTopics": topics, "matchedParagraphs": filtered, "content": None,
+                    }, warnings=warnings)
+                max_chars = 50_000
+                truncated = len(clean_text) > max_chars
+                if truncated:
+                    warnings.append({"code": "TEXT_TRUNCATED", "message": f"Text truncated from {len(clean_text)} to {max_chars} characters."})
+                return _wrap_envelope_v2("get_earnings_call_transcript", {
+                    **common, "filteredByTopics": None, "content": clean_text[:max_chars], "truncated": truncated,
+                }, warnings=warnings)
 
-    # Step 2: List exhibits
-    index_url, _ = _edgar_build_filing_urls(cik, accession, None)
-    exhibits = await _edgar_list_exhibits_from_index(index_url)
-    official_release_source = sec_source if sec_source.get("sourceType") == "sec_8k_ex991" else None
+            attempted_sources.append(_transcript_attempt(
+                "sec_8k_exhibit", "NOT_FOUND", url=index_url, accessionNumber=accession,
+                filingDate=sec_source.get("filingDate"), exhibitsSearched=len(exhibits),
+                candidatesChecked=len(candidate_diagnostics), candidateDiagnostics=candidate_diagnostics,
+            ))
+            sec_fallback = {
+                "ticker": ticker.upper(), "period": period, "status": "SEC_EXHIBIT_NOT_FOUND",
+                "accessionNumber": accession, "filingDate": sec_source.get("filingDate"),
+                "availableExhibits": [
+                    {"type": ex.get("type"), "description": ex.get("description"), "document": ex.get("document")}
+                    for ex in exhibits
+                ],
+                "candidateDiagnostics": candidate_diagnostics,
+                "message": "8-K filing found but no content-validated transcript exhibit was detected.",
+                "content": None,
+            }
 
-    # Step 3: Search for transcript exhibit
-    transcript_exhibit: dict | None = None
-    transcript_keywords = ("TRANSCRIPT", "CONFERENCE CALL", "PROCEEDINGS", "EARNINGS CALL")
-    for ex in exhibits:
-        ex_type = str(ex.get("type", "")).upper()
-        ex_desc = str(ex.get("description", "")).upper()
-        if ex_type in ("EX-99.2", "EX-99.3"):
-            transcript_exhibit = ex
-            break
-        if any(kw in ex_desc for kw in transcript_keywords):
-            transcript_exhibit = ex
-            break
-
-    if not transcript_exhibit:
-        attempted_sources.append(_transcript_attempt(
-            "sec_8k_exhibit",
-            "NOT_FOUND",
-            url=index_url,
-            accessionNumber=accession,
-            filingDate=sec_source.get("filingDate"),
-            exhibitsSearched=len(exhibits),
-        ))
-        attempted_sources.append(_transcript_attempt("company_ir", "SKIPPED", reason="No company IR transcript/call page URL was discoverable."))
-        attempted_sources.append(_transcript_attempt("public_transcript_url", "SKIPPED", reason="No public transcript URL was provided to parse_public_transcript."))
-        alpha_payload, alpha_attempt, quarter_resolution = await _attempt_alpha_vantage_transcript(
-            ticker, normalized_fiscal_quarter, official_release_source, topics
+    attempted_sources.append(_transcript_attempt(
+        "company_ir", "SKIPPED", reason="No approved company IR transcript source was configured."
+    ))
+    if not explicit_yahoo:
+        yahoo_payload, yahoo_attempt = await _attempt_yahoo_quartr_transcript(
+            ticker,
+            fiscal_quarter=normalized_fiscal_quarter,
+            topics=topics,
+            event_id=None,
+            source_url=None,
+            paragraph_limit=int(paragraph_limit),
+            paragraph_cursor=cursor_offset,
         )
-        attempted_sources.append(alpha_attempt)
-        if alpha_payload:
-            alpha_payload.update({
-                "ticker": ticker.upper(),
+        attempted_sources.append(yahoo_attempt)
+        if yahoo_payload:
+            metadata_quarter = None
+            if yahoo_payload.get("fiscalYear") and yahoo_payload.get("fiscalPeriod"):
+                metadata_quarter = f"{yahoo_payload['fiscalYear']}{str(yahoo_payload['fiscalPeriod']).upper()}"
+            yahoo_payload.update({
                 "period": period,
-                **quarter_resolution,
-                "accessionNumber": accession,
-                "filingDate": sec_source.get("filingDate"),
+                "fiscalQuarter": normalized_fiscal_quarter or metadata_quarter,
+                "fiscalQuarterStatus": "EXPLICIT" if normalized_fiscal_quarter else "YAHOO_METADATA_RESOLVED",
                 "attemptedSources": attempted_sources,
                 "nextRecommendedFallback": None,
             })
-            warnings = alpha_payload.pop("warnings", [])
-            return _wrap_envelope_v2("get_earnings_call_transcript", alpha_payload, warnings=warnings)
-        return _wrap_envelope_v2("get_earnings_call_transcript", {
-            "ticker": ticker.upper(),
-            "period": period,
-            **quarter_resolution,
-            "status": "SEC_EXHIBIT_NOT_FOUND",
-            "accessionNumber": accession,
-            "filingDate": sec_source.get("filingDate"),
-            "availableExhibits": [{"type": ex.get("type"), "description": ex.get("description"), "document": ex.get("document")} for ex in exhibits],
-            "message": "8-K filing found but no transcript exhibit detected.",
-            "content": None,
-            "attemptedSources": attempted_sources,
-            "nextRecommendedFallback": _next_transcript_fallback(attempted_sources),
+            warnings = yahoo_payload.pop("warnings", [])
+            return _wrap_envelope_v2("get_earnings_call_transcript", yahoo_payload, warnings=warnings)
+
+    attempted_sources.append(_transcript_attempt(
+        "public_transcript_url", "SKIPPED", reason="No non-Yahoo public transcript URL was provided to parse_public_transcript."
+    ))
+    alpha_payload, alpha_attempt, quarter_resolution = await _attempt_alpha_vantage_transcript(
+        ticker, normalized_fiscal_quarter, official_release_source, topics
+    )
+    attempted_sources.append(alpha_attempt)
+    if alpha_payload:
+        alpha_payload.update({
+            "ticker": ticker.upper(), "period": period, **quarter_resolution,
+            "attemptedSources": attempted_sources, "nextRecommendedFallback": None,
         })
+        warnings = alpha_payload.pop("warnings", [])
+        return _wrap_envelope_v2("get_earnings_call_transcript", alpha_payload, warnings=warnings)
 
-    # Step 4: Fetch and parse the exhibit
-    file_name = transcript_exhibit.get("document", "")
-    accession_nodash = accession.replace("-", "")
-    doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{file_name}"
-    html = await _edgar_get_html(doc_url, max_bytes=5_000_000)
-    if not html:
-        attempted_sources.append(_transcript_attempt("sec_8k_exhibit", "FETCH_ERROR", url=doc_url, accessionNumber=accession, filingDate=sec_source.get("filingDate")))
-        attempted_sources.append(_transcript_attempt("company_ir", "SKIPPED", reason="No company IR transcript/call page URL was discoverable."))
-        attempted_sources.append(_transcript_attempt("public_transcript_url", "SKIPPED", reason="No public transcript URL was provided to parse_public_transcript."))
-        alpha_payload, alpha_attempt, quarter_resolution = await _attempt_alpha_vantage_transcript(
-            ticker, normalized_fiscal_quarter, official_release_source, topics
-        )
-        attempted_sources.append(alpha_attempt)
-        if alpha_payload:
-            alpha_payload.update({
-                "ticker": ticker.upper(),
-                "period": period,
-                **quarter_resolution,
-                "attemptedSources": attempted_sources,
-                "nextRecommendedFallback": None,
-            })
-            warnings = alpha_payload.pop("warnings", [])
-            return _wrap_envelope_v2("get_earnings_call_transcript", alpha_payload, warnings=warnings)
-        return _wrap_envelope_v2("get_earnings_call_transcript", {
-            "ticker": ticker.upper(),
-            "period": period,
-            **quarter_resolution,
-            "status": "FETCH_ERROR",
-            "documentUrl": doc_url,
-            "message": f"Could not fetch exhibit document '{file_name}'.",
-            "content": None,
-            "attemptedSources": attempted_sources,
-            "nextRecommendedFallback": _next_transcript_fallback(attempted_sources),
-        })
-
-    clean_text = _strip_html_tags(_sanitize_sec_html(html))
-    warnings: list[dict] = []
-    attempted_sources.append(_transcript_attempt("sec_8k_exhibit", "SUCCESS", url=doc_url, accessionNumber=accession, filingDate=sec_source.get("filingDate")))
-
-    if topics:
-        filtered = _filter_paragraphs_by_topics(clean_text, topics)
-        if not filtered:
-            warnings.append({"code": "NO_TOPIC_MATCHES", "message": f"No paragraphs matched the provided topics: {topics}"})
-        return _wrap_envelope_v2("get_earnings_call_transcript", {
-            "ticker": ticker.upper(),
-            "period": period,
-            "status": "OK",
-            "accessionNumber": accession,
-            "filingDate": sec_source.get("filingDate"),
-            "exhibitType": transcript_exhibit.get("type"),
-            "documentUrl": doc_url,
-            "filteredByTopics": topics,
-            "matchedParagraphs": filtered,
-            "totalTextLength": len(clean_text),
-            "content": None,
-            "attemptedSources": attempted_sources,
-            "nextRecommendedFallback": None,
-        }, warnings=warnings)
-
-    max_chars = 50_000
-    truncated = len(clean_text) > max_chars
-    if truncated:
-        warnings.append({"code": "TEXT_TRUNCATED", "message": f"Text truncated from {len(clean_text)} to {max_chars} characters."})
-    return _wrap_envelope_v2("get_earnings_call_transcript", {
-        "ticker": ticker.upper(),
-        "period": period,
-        "status": "OK",
-        "accessionNumber": accession,
-        "filingDate": sec_source.get("filingDate"),
-        "exhibitType": transcript_exhibit.get("type"),
-        "documentUrl": doc_url,
-        "filteredByTopics": None,
-        "content": clean_text[:max_chars],
-        "totalTextLength": len(clean_text),
-        "truncated": truncated,
+    sec_fallback.update({
+        **quarter_resolution,
         "attemptedSources": attempted_sources,
-        "nextRecommendedFallback": None,
-    }, warnings=warnings)
+        "nextRecommendedFallback": _next_transcript_fallback(attempted_sources),
+    })
+    return _wrap_envelope_v2("get_earnings_call_transcript", sec_fallback)
