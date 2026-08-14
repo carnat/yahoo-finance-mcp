@@ -2887,7 +2887,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         args.event_id != null ? str(args.event_id).trim() : null,
         args.source_url != null ? str(args.source_url).trim() : null,
         num(args.paragraph_limit, 20),
-        num(args.paragraph_cursor, 0),
+        args.paragraph_cursor != null ? Number(str(args.paragraph_cursor).trim()) : 0,
       );
     case "extract_geographic_revenue":
       return extractGeographicRevenue(

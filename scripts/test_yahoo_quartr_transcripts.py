@@ -219,6 +219,11 @@ class WorkerParityTests(unittest.TestCase):
         dispatch = self.worker_tools[dispatch_start:dispatch_end]
         for field in ("args.event_id", "args.source_url", "args.paragraph_limit", "args.paragraph_cursor"):
             self.assertIn(field, dispatch)
+        self.assertIn(
+            "args.paragraph_cursor != null ? Number(str(args.paragraph_cursor).trim()) : 0",
+            dispatch,
+        )
+        self.assertNotIn("num(args.paragraph_cursor, 0)", dispatch)
 
 
 if __name__ == "__main__":
