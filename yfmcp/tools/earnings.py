@@ -42,6 +42,7 @@ from yfmcp.clients.market_providers import fetch_alpha_vantage_json
 from yfmcp.clients.yahoo_transcripts import (
     fetch_yahoo_quartr_transcript,
     parse_yahoo_transcript_source_url,
+    validate_yahoo_transcript_payload_identity,
 )
 from yfmcp.parsing.html import _strip_html_tags
 
@@ -1342,6 +1343,24 @@ async def _attempt_yahoo_quartr_transcript(
         attempt_extras["retryAfter"] = result.retry_after
     if result.status != "OK" or not result.payload:
         return None, _transcript_attempt("yahoo_quartr", result.status, **attempt_extras)
+    expected_quarter = fiscal_quarter
+    if not expected_quarter and result.source_url:
+        source_identity, _ = parse_yahoo_transcript_source_url(ticker, result.source_url)
+        if source_identity:
+            expected_quarter = str(source_identity.get("fiscalQuarter") or "") or None
+    identity_error = validate_yahoo_transcript_payload_identity(
+        result.payload,
+        str(result.event_id or event_id or ""),
+        expected_quarter,
+    )
+    if identity_error:
+        return None, _transcript_attempt(
+            "yahoo_quartr",
+            "YAHOO_METADATA_MISMATCH",
+            **attempt_extras,
+            reasonCode="YAHOO_METADATA_MISMATCH",
+            reason=identity_error,
+        )
     normalized = _normalize_yahoo_quartr_payload(
         ticker,
         result.payload,

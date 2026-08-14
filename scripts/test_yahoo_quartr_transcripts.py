@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import unittest
 from pathlib import Path
@@ -6,10 +7,12 @@ from unittest.mock import AsyncMock, patch
 
 import server as srv
 from yfmcp.tools import earnings as earnings_tools
+from yfmcp.clients import yahoo_transcripts as yahoo_client
 from yfmcp.clients.yahoo_transcripts import (
     YahooTranscriptResult,
     discover_yahoo_transcript_event,
     parse_yahoo_transcript_source_url,
+    validate_yahoo_transcript_payload_identity,
 )
 
 
@@ -56,6 +59,81 @@ class YahooTranscriptIdentityTests(unittest.TestCase):
         self.assertEqual(discover_yahoo_transcript_event("LITE", html)["eventId"], "660925")
         self.assertEqual(discover_yahoo_transcript_event("LITE", html, "2026Q3")["eventId"], "600001")
         self.assertIsNone(discover_yahoo_transcript_event("LITE", html, "2025Q4"))
+
+    def test_provider_payload_requires_matching_event_and_fiscal_quarter(self):
+        self.assertIsNone(validate_yahoo_transcript_payload_identity(FIXTURE, "660925", "2026Q4"))
+
+        wrong_event = copy.deepcopy(FIXTURE)
+        wrong_event["transcriptMetadata"]["eventId"] = 600001
+        self.assertIn(
+            "expected 660925",
+            validate_yahoo_transcript_payload_identity(wrong_event, "660925", "2026Q4"),
+        )
+
+        wrong_quarter = copy.deepcopy(FIXTURE)
+        wrong_quarter["transcriptMetadata"]["fiscalPeriod"] = "Q3"
+        self.assertIn(
+            "expected 2026Q4",
+            validate_yahoo_transcript_payload_identity(wrong_quarter, "660925", "2026Q4"),
+        )
+
+    def test_provider_payload_rejects_missing_or_conflicting_event_metadata(self):
+        missing = copy.deepcopy(FIXTURE)
+        missing["transcriptMetadata"].pop("eventId")
+        missing["transcriptContent"].pop("event_id")
+        self.assertIn("omitted", validate_yahoo_transcript_payload_identity(missing, "660925"))
+
+        conflict = copy.deepcopy(FIXTURE)
+        conflict["transcriptMetadata"]["eventId"] = 600001
+        self.assertIn("600001, 660925", validate_yahoo_transcript_payload_identity(conflict, "660925"))
+
+
+class YahooTranscriptClientValidationTests(unittest.TestCase):
+    def setUp(self):
+        yahoo_client._discard_cached_payload("LITE", "660925")
+
+    def tearDown(self):
+        yahoo_client._discard_cached_payload("LITE", "660925")
+
+    @staticmethod
+    def _transport_responses(payload: dict) -> list[bytes]:
+        return [
+            b"",
+            b"crumb",
+            json.dumps({"quoteType": {"result": [{"quartrId": 8801}]}}).encode("utf-8"),
+            json.dumps(payload).encode("utf-8"),
+        ]
+
+    def test_mismatching_live_payload_is_not_cached(self):
+        wrong_quarter = copy.deepcopy(FIXTURE)
+        wrong_quarter["transcriptMetadata"]["fiscalPeriod"] = "Q3"
+        with patch.object(
+            yahoo_client,
+            "_response_bytes",
+            side_effect=self._transport_responses(wrong_quarter),
+        ):
+            result = yahoo_client._blocking_fetch("LITE", "660925", None, "2026Q4")
+        self.assertEqual(result.status, "YAHOO_METADATA_MISMATCH")
+        self.assertIn("expected 2026Q4", result.message)
+        self.assertIsNone(yahoo_client._cached_payload("LITE", "660925"))
+
+    def test_invalid_cache_is_discarded_and_refetched_once(self):
+        wrong_event = copy.deepcopy(FIXTURE)
+        wrong_event["transcriptMetadata"]["eventId"] = 600001
+        yahoo_client._store_payload("LITE", "660925", wrong_event)
+        with patch.object(
+            yahoo_client,
+            "_response_bytes",
+            side_effect=self._transport_responses(FIXTURE),
+        ) as response_bytes:
+            result = yahoo_client._blocking_fetch("LITE", "660925", None, "2026Q4")
+        self.assertEqual(result.status, "OK")
+        self.assertEqual(result.cache_status, "MISS")
+        self.assertTrue(result.provider_attempted)
+        self.assertEqual(response_bytes.call_count, 4)
+        cached = yahoo_client._cached_payload("LITE", "660925")
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached[0]["transcriptMetadata"]["eventId"], 660925)
 
 
 class YahooTranscriptNormalizationTests(unittest.TestCase):
@@ -125,6 +203,64 @@ class YahooTranscriptNormalizationTests(unittest.TestCase):
         self.assertEqual([row["sourceType"] for row in data["attemptedSources"]], [
             "sec_8k_exhibit", "company_ir", "yahoo_quartr",
         ])
+
+    def test_attempt_rejects_event_id_mismatch_from_provider_result(self):
+        wrong_event = copy.deepcopy(FIXTURE)
+        wrong_event["transcriptMetadata"]["eventId"] = 600001
+        result = YahooTranscriptResult(
+            payload=wrong_event,
+            status="OK",
+            source_url="https://finance.yahoo.com/quote/LITE/earnings/LITE-Q4-2026-earnings_call-660925.html",
+            event_id="660925",
+            provider_attempted=True,
+            cache_status="MISS",
+        )
+        with patch(
+            "yfmcp.tools.earnings.fetch_yahoo_quartr_transcript",
+            new_callable=AsyncMock,
+            return_value=result,
+        ):
+            payload, attempt = _run(earnings_tools._attempt_yahoo_quartr_transcript(
+                "LITE",
+                fiscal_quarter="2026Q4",
+                topics=None,
+                event_id="660925",
+                source_url=None,
+                paragraph_limit=20,
+                paragraph_cursor=0,
+            ))
+        self.assertIsNone(payload)
+        self.assertEqual(attempt["status"], "YAHOO_METADATA_MISMATCH")
+        self.assertEqual(attempt["reasonCode"], "YAHOO_METADATA_MISMATCH")
+
+    def test_attempt_rejects_quarter_mismatch_from_provider_result(self):
+        wrong_quarter = copy.deepcopy(FIXTURE)
+        wrong_quarter["transcriptMetadata"]["fiscalPeriod"] = "Q3"
+        result = YahooTranscriptResult(
+            payload=wrong_quarter,
+            status="OK",
+            source_url="https://finance.yahoo.com/quote/LITE/earnings/LITE-Q4-2026-earnings_call-660925.html",
+            event_id="660925",
+            provider_attempted=True,
+            cache_status="MISS",
+        )
+        with patch(
+            "yfmcp.tools.earnings.fetch_yahoo_quartr_transcript",
+            new_callable=AsyncMock,
+            return_value=result,
+        ):
+            payload, attempt = _run(earnings_tools._attempt_yahoo_quartr_transcript(
+                "LITE",
+                fiscal_quarter="2026Q4",
+                topics=None,
+                event_id="660925",
+                source_url=None,
+                paragraph_limit=20,
+                paragraph_cursor=0,
+            ))
+        self.assertIsNone(payload)
+        self.assertEqual(attempt["status"], "YAHOO_METADATA_MISMATCH")
+        self.assertIn("expected 2026Q4", attempt["reason"])
 
     def test_conflicting_source_identity_is_input_error(self):
         raw = _run(srv.get_earnings_call_transcript(
@@ -203,6 +339,24 @@ class WorkerParityTests(unittest.TestCase):
         self.assertIn("parseYahooTranscriptSourceUrl", self.worker_source)
         self.assertIn("validateSecTranscriptText", self.worker_source)
         self.assertIn("candidateDiagnostics", self.worker_source)
+
+    def test_worker_validates_yahoo_identity_before_cache_and_success(self):
+        fetch_start = self.worker_source.index("async function fetchYahooQuartrTranscript(")
+        normalize_start = self.worker_source.index("async function normalizeYahooQuartrPayload(", fetch_start)
+        fetch_source = self.worker_source[fetch_start:normalize_start]
+        self.assertIn("validateYahooTranscriptPayloadIdentity", fetch_source)
+        self.assertIn('status: "YAHOO_METADATA_MISMATCH"', fetch_source)
+        self.assertIn("await deleteProviderCache(cacheKey)", fetch_source)
+        self.assertLess(
+            fetch_source.rindex("validateYahooTranscriptPayloadIdentity"),
+            fetch_source.index("await setProviderCache(cacheKey, payload"),
+        )
+
+        attempt_start = self.worker_source.index("async function attemptYahooQuartrTranscript(")
+        attempt_end = self.worker_source.index("const SEC_TRANSCRIPT_MARKER_RE", attempt_start)
+        attempt_source = self.worker_source[attempt_start:attempt_end]
+        self.assertIn("validateYahooTranscriptPayloadIdentity", attempt_source)
+        self.assertIn('reasonCode: "YAHOO_METADATA_MISMATCH"', attempt_source)
 
     def test_worker_schema_exposes_bounded_continuation_fields(self):
         transcript_tool = next(
