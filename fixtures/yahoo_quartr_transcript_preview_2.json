@@ -1,0 +1,55 @@
+{
+  "transcriptContent": {
+    "company_id": 9001,
+    "event_id": 409967,
+    "speaker_mapping": [
+      {
+        "speaker": 0,
+        "speaker_data": {
+          "company": null,
+          "name": "Operator",
+          "role": null
+        }
+      },
+      {
+        "speaker": 1,
+        "speaker_data": {
+          "company": "Example Semiconductor",
+          "name": "Executive One",
+          "role": "Chief Executive Officer"
+        }
+      }
+    ],
+    "transcript": {
+      "text": "",
+      "number_of_speakers": 16,
+      "paragraphs": [
+        {
+          "speaker": 0,
+          "start": 0.1,
+          "end": 20.0,
+          "text": "Welcome to the quarterly earnings conference call."
+        },
+        {
+          "speaker": 0,
+          "start": 20.1,
+          "end": 35.0,
+          "text": "This second short operator paragraph is still only a provider preview."
+        }
+      ]
+    },
+    "version": "1.0.0"
+  },
+  "transcriptMetadata": {
+    "date": 1771981200,
+    "eventId": 409967,
+    "eventType": "Earnings call",
+    "fiscalPeriod": "Q4",
+    "fiscalYear": 2026,
+    "isLatest": false,
+    "title": "Q4 2026",
+    "transcriptId": 2928714,
+    "type": "IN_HOUSE",
+    "updated": 1771984800
+  }
+}

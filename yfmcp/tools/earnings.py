@@ -1170,6 +1170,50 @@ def _metadata_epoch_iso(value: object) -> str | None:
         return None
 
 
+def _yahoo_transcript_content_sha256(
+    ticker: str,
+    event_id: str | None,
+    fiscal_period: str | None,
+    fiscal_year: int | None,
+    speakers: list[dict[str, object]],
+    paragraphs: list[dict[str, object]],
+) -> str:
+    """Hash a cross-runtime canonical projection of transcript identity and text."""
+
+    def text_or_none(value: object) -> str | None:
+        if value in (None, ""):
+            return None
+        return str(value)
+
+    document = {
+        "contract": "CANONICAL_TRANSCRIPT_TEXT_V1",
+        "ticker": ticker.upper(),
+        "eventId": text_or_none(event_id),
+        "fiscalPeriod": text_or_none(fiscal_period),
+        "fiscalYear": text_or_none(fiscal_year),
+        "speakers": [
+            {
+                "speakerId": text_or_none(speaker.get("speakerId")),
+                "name": text_or_none(speaker.get("name")),
+                "role": text_or_none(speaker.get("role")),
+                "company": text_or_none(speaker.get("company")),
+            }
+            for speaker in speakers
+        ],
+        "paragraphs": [
+            {
+                "speaker": text_or_none(paragraph.get("speaker")),
+                "role": text_or_none(paragraph.get("role")),
+                "company": text_or_none(paragraph.get("company")),
+                "text": str(paragraph.get("text") or ""),
+            }
+            for paragraph in paragraphs
+        ],
+    }
+    canonical_json = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+
 def _normalize_yahoo_quartr_payload(
     ticker: str,
     payload: dict,
@@ -1228,7 +1272,7 @@ def _normalize_yahoo_quartr_payload(
             speaker = speaker_map.get(str(row.get("speaker")), {})
             normalized_paragraphs.append({
                 "index": index,
-                "speaker": speaker.get("name") or ("Operator" if str(row.get("speaker")) == "operator" else None),
+                "speaker": speaker.get("name") or ("Operator" if str(row.get("speaker")).lower() == "operator" else None),
                 "role": speaker.get("role"),
                 "company": speaker.get("company"),
                 "start": row.get("start"),
@@ -1238,7 +1282,7 @@ def _normalize_yahoo_quartr_payload(
     if not normalized_paragraphs:
         full_text = str(transcript.get("text") or "").strip()
         normalized_paragraphs = [
-            {"index": index, "speaker": None, "role": None, "company": None, "start": None, "end": None, "text": para}
+            {"index": index, "speaker": None, "role": None, "company": None, "start": None, "end": None, "text": para.strip()}
             for index, para in enumerate(_re.split(r"\n\s*\n", full_text))
             if para.strip()
         ]
@@ -1273,7 +1317,14 @@ def _normalize_yahoo_quartr_payload(
             f"{_urlparse.quote(ticker_u, safe='.^=-')}-{fiscal_period.upper()}-{fiscal_year}"
             f"-earnings_call-{resolved_event_id}.html"
         )
-    raw_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    content_sha256 = _yahoo_transcript_content_sha256(
+        ticker,
+        resolved_event_id,
+        fiscal_period,
+        fiscal_year,
+        speakers,
+        normalized_paragraphs,
+    )
     warnings: list[dict] = []
     if topic_list and not selected:
         warnings.append({"code": "NO_TOPIC_MATCHES", "message": f"No transcript paragraphs matched: {topic_list}"})
@@ -1295,7 +1346,8 @@ def _normalize_yahoo_quartr_payload(
         "updatedAt": _metadata_epoch_iso(metadata.get("updated")),
         "retrievedAt": fetched_at,
         "cacheStatus": cache_status,
-        "contentSha256": hashlib.sha256(raw_json.encode("utf-8")).hexdigest(),
+        "contentSha256": content_sha256,
+        "contentHashBasis": "CANONICAL_TRANSCRIPT_TEXT_V1",
         "speakerCount": transcript.get("number_of_speakers") or transcript.get("numberOfSpeakers") or len(speakers),
         "speakers": speakers,
         "filteredByTopics": topic_list or None,
@@ -1586,7 +1638,7 @@ async def _fetch_alpha_vantage_transcript(ticker: str, quarter: str, topics: lis
 @yfinance_server.tool(
     name="get_earnings_call_transcript",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_call_transcript"],
-    description="Retrieve an earnings-call transcript from a content-validated SEC exhibit, then Yahoo/Quartr, then optional Alpha Vantage. Yahoo results are structured and paragraph-paginated for LLM use and include the human-readable sourceUrl. Preview-only Yahoo payloads are reported as INCOMPLETE_TRANSCRIPT and continue to the alternate-source fallback; inspect contentCompleteness rather than treating cursor exhaustion as proof of a full call. Provide source_url or event_id to target a known Yahoo call. Yahoo and Alpha transcripts are contextual and never decision-grade; filing dates are never treated as fiscal periods.",
+    description="Retrieve an earnings-call transcript from a content-validated SEC exhibit, then Yahoo/Quartr, then optional Alpha Vantage. Yahoo results are structured and paragraph-paginated for LLM use and include the human-readable sourceUrl. Preview-only Yahoo payloads are reported as INCOMPLETE_TRANSCRIPT and continue to the alternate-source fallback. Inspect contentCompleteness rather than treating cursor exhaustion as proof of a full call. Yahoo contentSha256 identifies the canonical transcript text and speaker projection declared by contentHashBasis, so it remains stable across pages and runtimes. Provide source_url or event_id to target a known Yahoo call. Yahoo and Alpha transcripts are contextual and never decision-grade; filing dates are never treated as fiscal periods.",
 )
 async def get_earnings_call_transcript(
     ticker: str,

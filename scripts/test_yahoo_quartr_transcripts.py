@@ -22,6 +22,12 @@ FIXTURE = json.loads((ROOT / "fixtures" / "yahoo_quartr_transcript.json").read_t
 PREVIEW_FIXTURE = json.loads(
     (ROOT / "fixtures" / "yahoo_quartr_transcript_preview.json").read_text(encoding="utf-8")
 )
+PREVIEW_2_FIXTURE = json.loads(
+    (ROOT / "fixtures" / "yahoo_quartr_transcript_preview_2.json").read_text(encoding="utf-8")
+)
+PREVIEW_3_FIXTURE = json.loads(
+    (ROOT / "fixtures" / "yahoo_quartr_transcript_preview_3.json").read_text(encoding="utf-8")
+)
 
 
 def _run(coro):
@@ -93,14 +99,44 @@ class YahooTranscriptIdentityTests(unittest.TestCase):
 
     def test_completeness_distinguishes_full_transcript_from_provider_preview(self):
         full = assess_yahoo_transcript_payload_completeness(FIXTURE)
-        preview = assess_yahoo_transcript_payload_completeness(PREVIEW_FIXTURE)
+        previews = [
+            assess_yahoo_transcript_payload_completeness(payload)
+            for payload in (PREVIEW_FIXTURE, PREVIEW_2_FIXTURE, PREVIEW_3_FIXTURE)
+        ]
 
         self.assertEqual(full["contentCompleteness"], "FULL")
         self.assertIsNone(full["reasonCode"])
-        self.assertEqual(preview["contentCompleteness"], "PARTIAL")
-        self.assertEqual(preview["reasonCode"], "YAHOO_PREVIEW_ONLY")
-        self.assertEqual(preview["usableParagraphCount"], 1)
-        self.assertEqual(preview["advertisedSpeakerCount"], 16)
+        for expected_count, preview in enumerate(previews, start=1):
+            self.assertEqual(preview["contentCompleteness"], "PARTIAL")
+            self.assertEqual(preview["reasonCode"], "YAHOO_PREVIEW_ONLY")
+            self.assertEqual(preview["usableParagraphCount"], expected_count)
+            self.assertEqual(preview["advertisedSpeakerCount"], 16)
+
+    def test_preview_detection_is_not_limited_to_two_thousand_characters(self):
+        preview = copy.deepcopy(PREVIEW_FIXTURE)
+        preview["transcriptContent"]["transcript"]["paragraphs"][0]["text"] = "x" * 2_500
+
+        result = assess_yahoo_transcript_payload_completeness(preview)
+
+        self.assertEqual(result["contentCompleteness"], "PARTIAL")
+        self.assertEqual(result["paragraphTextLength"], 2_500)
+
+    def test_preview_detection_requires_sparse_speaker_coverage(self):
+        multi_speaker = copy.deepcopy(PREVIEW_3_FIXTURE)
+        multi_speaker["transcriptContent"]["transcript"]["paragraphs"][1]["speaker"] = 1
+        four_paragraphs = copy.deepcopy(PREVIEW_3_FIXTURE)
+        four_paragraphs["transcriptContent"]["transcript"]["paragraphs"].append(
+            {"speaker": 0, "start": 45.1, "end": 55.0, "text": "A fourth usable paragraph."}
+        )
+
+        self.assertEqual(
+            assess_yahoo_transcript_payload_completeness(multi_speaker)["contentCompleteness"],
+            "FULL",
+        )
+        self.assertEqual(
+            assess_yahoo_transcript_payload_completeness(four_paragraphs)["contentCompleteness"],
+            "FULL",
+        )
 
 
 class YahooTranscriptClientValidationTests(unittest.TestCase):
@@ -213,6 +249,7 @@ class YahooTranscriptNormalizationTests(unittest.TestCase):
         self.assertFalse(data["pagination"]["pageExhausted"])
         self.assertEqual(data["contentCompleteness"], "FULL")
         self.assertEqual(len(data["contentSha256"]), 64)
+        self.assertEqual(data["contentHashBasis"], "CANONICAL_TRANSCRIPT_TEXT_V1")
         self.assertEqual(data["attemptedSources"], [{
             "sourceType": "yahoo_quartr",
             "status": "SUCCESS",
@@ -240,6 +277,43 @@ class YahooTranscriptNormalizationTests(unittest.TestCase):
         self.assertEqual(data["pagination"]["matchingParagraphs"], 2)
         self.assertIsNone(data["pagination"]["nextCursor"])
         self.assertTrue(data["pagination"]["pageExhausted"])
+
+    def test_content_hash_is_stable_across_pagination_and_payload_key_order(self):
+        reversed_payload = {
+            key: copy.deepcopy(FIXTURE[key])
+            for key in reversed(list(FIXTURE))
+        }
+        first = earnings_tools._normalize_yahoo_quartr_payload(
+            "LITE",
+            FIXTURE,
+            source_url=None,
+            event_id="660925",
+            topics=None,
+            paragraph_limit=2,
+            paragraph_cursor=0,
+            cache_status="MISS",
+            fetched_at="2026-08-14T00:00:00+00:00",
+        )
+        later = earnings_tools._normalize_yahoo_quartr_payload(
+            "LITE",
+            reversed_payload,
+            source_url=None,
+            event_id="660925",
+            topics=None,
+            paragraph_limit=2,
+            paragraph_cursor=2,
+            cache_status="HIT_PROCESS",
+            fetched_at="2026-08-14T00:00:00+00:00",
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(later)
+        self.assertEqual(first["contentSha256"], later["contentSha256"])
+        self.assertEqual(
+            first["contentSha256"],
+            "b41b012512c35a2ae936fccf99249368a9994c2a0ae086a8fffb0d3f402f0a43",
+        )
+        self.assertEqual(first["contentHashBasis"], "CANONICAL_TRANSCRIPT_TEXT_V1")
 
     def test_default_path_uses_yahoo_before_alpha_when_sec_is_missing(self):
         with patch("yfmcp.tools.earnings._resolve_latest_earnings_sec_source", new_callable=AsyncMock, return_value=None), \
@@ -481,6 +555,7 @@ class WorkerParityTests(unittest.TestCase):
     def setUpClass(cls):
         cls.worker_source = (ROOT / "worker" / "src" / "yahoo-finance.ts").read_text(encoding="utf-8")
         cls.worker_tools = (ROOT / "worker" / "src" / "tools.ts").read_text(encoding="utf-8")
+        cls.worker_hash_contract = (ROOT / "worker" / "src" / "transcript-contract.ts").read_text(encoding="utf-8")
 
     def test_worker_uses_structured_yahoo_endpoint_and_validates_sec_content(self):
         self.assertIn("https://finance.yahoo.com/xhr/transcript", self.worker_source)
@@ -519,6 +594,15 @@ class WorkerParityTests(unittest.TestCase):
             if 'name: "get_earnings_call_transcript"' in line
         )
         self.assertIn("Inspect contentCompleteness", transcript_tool)
+
+    def test_worker_uses_canonical_transcript_text_hash(self):
+        self.assertIn("function canonicalJsonStringify", self.worker_hash_contract)
+        self.assertIn("function yahooTranscriptContentHashDocument", self.worker_hash_contract)
+        self.assertIn("async function yahooTranscriptContentSha256", self.worker_hash_contract)
+        self.assertIn('contentHashBasis: "CANONICAL_TRANSCRIPT_TEXT_V1"', self.worker_source)
+        self.assertIn("return sha256Hex(canonicalJsonStringify(document))", self.worker_hash_contract)
+        self.assertIn("contentSha256: await yahooTranscriptContentSha256(", self.worker_source)
+        self.assertNotIn("sha256Hex(JSON.stringify(payload))", self.worker_source)
 
     def test_worker_schema_exposes_bounded_continuation_fields(self):
         transcript_tool = next(

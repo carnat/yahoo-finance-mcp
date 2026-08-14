@@ -1,4 +1,5 @@
 import { ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
+import { yahooTranscriptContentSha256 } from "./transcript-contract.js";
 import registryManifest from "./company-ir-page-registry.json";
 import newsSourceCapabilities from "./news-source-capabilities.json";
 
@@ -33,7 +34,8 @@ const PROVIDER_OWNERSHIP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const ALPHA_TRANSCRIPT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const YAHOO_TRANSCRIPT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const YAHOO_TRANSCRIPT_CACHE_VERSION = "v2";
-const YAHOO_TRANSCRIPT_PREVIEW_MAX_CHARS = 2_000;
+const YAHOO_TRANSCRIPT_PREVIEW_MAX_PARAGRAPHS = 3;
+const YAHOO_TRANSCRIPT_PREVIEW_MAX_FULL_TEXT_CHARS = 256;
 
 type ProviderJsonResult = {
   payload: Record<string, unknown> | null;
@@ -12706,11 +12708,12 @@ export function assessYahooTranscriptPayloadCompleteness(
     speakerRows.length,
   );
   const fullTextLength = String(transcript.text ?? "").trim().length;
-  const previewOnly = usableParagraphCount <= 1
-    && fullTextLength === 0
-    && advertisedSpeakerCount >= 2
+  const sparseSingleParagraph = usableParagraphCount <= 1 && advertisedSpeakerCount >= 2;
+  const sparseMultiParagraph = usableParagraphCount <= YAHOO_TRANSCRIPT_PREVIEW_MAX_PARAGRAPHS
+    && advertisedSpeakerCount >= 4;
+  const previewOnly = fullTextLength <= YAHOO_TRANSCRIPT_PREVIEW_MAX_FULL_TEXT_CHARS
     && paragraphSpeakers.size <= 1
-    && paragraphTextLength <= YAHOO_TRANSCRIPT_PREVIEW_MAX_CHARS;
+    && (sparseSingleParagraph || sparseMultiParagraph);
   const noUsableContent = usableParagraphCount === 0 && fullTextLength === 0;
   return {
     contentCompleteness: previewOnly ? "PARTIAL" : noUsableContent ? "UNKNOWN" : "FULL",
@@ -12725,7 +12728,7 @@ export function assessYahooTranscriptPayloadCompleteness(
 
 function yahooTranscriptCompletenessMessage(diagnostics: Record<string, unknown>): string {
   if (diagnostics.reasonCode === "YAHOO_PREVIEW_ONLY") {
-    return `Yahoo returned only a preview paragraph for ${diagnostics.advertisedSpeakerCount ?? 0} advertised speakers; the transcript is incomplete.`;
+    return `Yahoo returned only sparse preview content for ${diagnostics.advertisedSpeakerCount ?? 0} advertised speakers; the transcript is incomplete.`;
   }
   return "Yahoo returned transcript data without usable content.";
 }
@@ -12949,11 +12952,6 @@ function metadataEpochIso(value: unknown): string | null {
   }
 }
 
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
 async function normalizeYahooQuartrPayload(
   ticker: string,
   payload: Record<string, unknown>,
@@ -13073,7 +13071,15 @@ async function normalizeYahooQuartrPayload(
     updatedAt: metadataEpochIso(metadata.updated),
     retrievedAt: fetchedAt ?? null,
     cacheStatus,
-    contentSha256: await sha256Hex(JSON.stringify(payload)),
+    contentSha256: await yahooTranscriptContentSha256(
+      ticker,
+      resolvedEventId,
+      fiscalPeriod,
+      fiscalYear,
+      speakers,
+      paragraphs,
+    ),
+    contentHashBasis: "CANONICAL_TRANSCRIPT_TEXT_V1",
     speakerCount: transcriptRecord.number_of_speakers ?? transcriptRecord.numberOfSpeakers ?? speakers.length,
     speakers,
     filteredByTopics: topicList.length ? topicList : null,

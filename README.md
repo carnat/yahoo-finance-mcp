@@ -213,9 +213,13 @@ schemas, aliases, and deprecation metadata.
   focused extraction or pass a returned `event_id`/`source_url` to continue the
   same event. Inspect `contentCompleteness`; `pagination.pageExhausted` only
   means the received provider document has no more paragraphs. A Yahoo payload
-  containing only a short preview despite multiple advertised speakers is
+  containing only sparse one-to-three-paragraph content despite multiple
+  advertised speakers is
   reported as `INCOMPLETE_TRANSCRIPT`, is not cached as success, and continues
-  to the eligible alternate-source fallback. Yahoo's transcript interface is
+  to the eligible alternate-source fallback. For Yahoo results,
+  `contentSha256` hashes the canonical transcript text and speaker projection
+  named by `contentHashBasis`, so the identity stays stable across pages and
+  the Worker/Python runtimes. Yahoo's transcript interface is
   undocumented and may change; its
   output is `evidenceClass:"CONTEXTUAL_TRANSCRIPT"` and
   `decisionGrade:false`. Optional Alpha Vantage is the scarce-quota last

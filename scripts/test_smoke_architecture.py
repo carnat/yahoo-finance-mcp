@@ -266,6 +266,10 @@ class TestSmokeArchitecture(unittest.TestCase):
                 required = sorted(
                     deployed_canaries.DISCOVERY_REQUIRED_PARAMS.get(action, set())
                 )
+                properties = sorted(
+                    set(required)
+                    | deployed_canaries.DISCOVERY_EXPECTED_PARAMS.get(action, set())
+                )
                 branches.append(
                     {
                         "type": "object",
@@ -274,7 +278,7 @@ class TestSmokeArchitecture(unittest.TestCase):
                             "params": {
                                 "type": "object",
                                 "properties": {
-                                    name: {"type": "string"} for name in required
+                                    name: {"type": "string"} for name in properties
                                 },
                                 "required": required,
                             },
@@ -309,6 +313,24 @@ class TestSmokeArchitecture(unittest.TestCase):
         untyped["result"]["tools"][0]["inputSchema"].pop("oneOf")
         with self.assertRaisesRegex(AssertionError, "action-discriminated oneOf"):
             deployed_canaries.assert_tool_discovery_contract(untyped, "grouped")
+
+        missing_transcript_field = copy.deepcopy(response)
+        earnings = next(
+            tool
+            for tool in missing_transcript_field["result"]["tools"]
+            if tool["name"] == "earnings_intelligence"
+        )
+        transcript = next(
+            branch
+            for branch in earnings["inputSchema"]["oneOf"]
+            if branch["properties"]["action"]["const"] == "get_earnings_call_transcript"
+        )
+        transcript["properties"]["params"]["properties"].pop("paragraph_cursor")
+        with self.assertRaisesRegex(AssertionError, "optional params drifted"):
+            deployed_canaries.assert_tool_discovery_contract(
+                missing_transcript_field,
+                "grouped",
+            )
 
     def test_xbrl_canary_requires_source_evidence_not_private_health(self) -> None:
         evidence = {
