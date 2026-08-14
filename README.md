@@ -211,7 +211,12 @@ schemas, aliases, and deprecation metadata.
   structured Quartr transcript and returns compact speaker-labelled paragraphs,
   a canonical `sourceUrl`, and `nextCursor` pagination. Use `topics` for a
   focused extraction or pass a returned `event_id`/`source_url` to continue the
-  same event. Yahoo's transcript interface is undocumented and may change; its
+  same event. Inspect `contentCompleteness`; `pagination.pageExhausted` only
+  means the received provider document has no more paragraphs. A Yahoo payload
+  containing only a short preview despite multiple advertised speakers is
+  reported as `INCOMPLETE_TRANSCRIPT`, is not cached as success, and continues
+  to the eligible alternate-source fallback. Yahoo's transcript interface is
+  undocumented and may change; its
   output is `evidenceClass:"CONTEXTUAL_TRANSCRIPT"` and
   `decisionGrade:false`. Optional Alpha Vantage is the scarce-quota last
   fallback and requires `ALPHA_VANTAGE_API_KEY`. The tool never converts a

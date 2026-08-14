@@ -40,6 +40,7 @@ from yfmcp.clients.edgar import (
 )
 from yfmcp.clients.market_providers import fetch_alpha_vantage_json
 from yfmcp.clients.yahoo_transcripts import (
+    assess_yahoo_transcript_payload_completeness,
     fetch_yahoo_quartr_transcript,
     parse_yahoo_transcript_source_url,
     validate_yahoo_transcript_payload_identity,
@@ -1283,6 +1284,8 @@ def _normalize_yahoo_quartr_payload(
         "provider": "yahoo_finance_quartr",
         "evidenceClass": "CONTEXTUAL_TRANSCRIPT",
         "decisionGrade": False,
+        "contentCompleteness": "FULL",
+        "completenessBasis": "YAHOO_STRUCTURED_TRANSCRIPT_VALIDATED",
         "sourceUrl": resolved_source_url,
         "eventId": resolved_event_id,
         "title": metadata.get("title"),
@@ -1307,6 +1310,7 @@ def _normalize_yahoo_quartr_payload(
             "matchingParagraphs": len(selected),
             "totalParagraphs": len(normalized_paragraphs),
             "hasMore": next_cursor is not None,
+            "pageExhausted": next_cursor is None,
         },
         "warnings": warnings,
     }
@@ -1341,6 +1345,15 @@ async def _attempt_yahoo_quartr_transcript(
         attempt_extras["message"] = result.message
     if result.retry_after:
         attempt_extras["retryAfter"] = result.retry_after
+    if result.content_diagnostics:
+        attempt_extras["contentCompleteness"] = result.content_diagnostics.get("contentCompleteness")
+        attempt_extras["contentDiagnostics"] = result.content_diagnostics
+        if result.content_diagnostics.get("contentCompleteness") == "PARTIAL":
+            attempt_extras.update({
+                "reasonCode": str(result.content_diagnostics.get("reasonCode") or "YAHOO_PREVIEW_ONLY"),
+                "reason": result.message or "Yahoo returned an incomplete transcript preview.",
+                "recommendedNextAction": "TRY_ALTERNATE_SOURCE",
+            })
     if result.status != "OK" or not result.payload:
         return None, _transcript_attempt("yahoo_quartr", result.status, **attempt_extras)
     expected_quarter = fiscal_quarter
@@ -1360,6 +1373,25 @@ async def _attempt_yahoo_quartr_transcript(
             **attempt_extras,
             reasonCode="YAHOO_METADATA_MISMATCH",
             reason=identity_error,
+        )
+    completeness = assess_yahoo_transcript_payload_completeness(result.payload)
+    if completeness["contentCompleteness"] != "FULL":
+        completeness_extras = {
+            **attempt_extras,
+            "contentCompleteness": completeness["contentCompleteness"],
+            "contentDiagnostics": completeness,
+            "reasonCode": str(completeness.get("reasonCode") or "TRANSCRIPT_SHAPE_INVALID"),
+            "reason": (
+                "Yahoo returned only a preview of the earnings-call transcript."
+                if completeness["contentCompleteness"] == "PARTIAL"
+                else "Yahoo returned transcript data without usable content."
+            ),
+            "recommendedNextAction": "TRY_ALTERNATE_SOURCE",
+        }
+        return None, _transcript_attempt(
+            "yahoo_quartr",
+            "INCOMPLETE_TRANSCRIPT" if completeness["contentCompleteness"] == "PARTIAL" else "PROVIDER_ERROR",
+            **completeness_extras,
         )
     normalized = _normalize_yahoo_quartr_payload(
         ticker,
@@ -1524,6 +1556,8 @@ async def _fetch_alpha_vantage_transcript(ticker: str, quarter: str, topics: lis
             "status": "OK",
             "evidenceClass": "CONTEXTUAL_TRANSCRIPT",
             "decisionGrade": False,
+            "contentCompleteness": "FULL",
+            "completenessBasis": "ALPHA_TRANSCRIPT_ROWS_PRESENT",
             "filteredByTopics": topics,
             "matchedParagraphs": matched,
             "content": None,
@@ -1539,6 +1573,8 @@ async def _fetch_alpha_vantage_transcript(ticker: str, quarter: str, topics: lis
         "status": "OK",
         "evidenceClass": "CONTEXTUAL_TRANSCRIPT",
         "decisionGrade": False,
+        "contentCompleteness": "FULL",
+        "completenessBasis": "ALPHA_TRANSCRIPT_ROWS_PRESENT",
         "filteredByTopics": None,
         "content": clean_text[:max_chars],
         "totalTextLength": len(clean_text),
@@ -1550,7 +1586,7 @@ async def _fetch_alpha_vantage_transcript(ticker: str, quarter: str, topics: lis
 @yfinance_server.tool(
     name="get_earnings_call_transcript",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_call_transcript"],
-    description="Retrieve an earnings-call transcript from a content-validated SEC exhibit, then Yahoo/Quartr, then optional Alpha Vantage. Yahoo results are structured and paragraph-paginated for LLM use and include the human-readable sourceUrl. Provide source_url or event_id to target a known Yahoo call. Yahoo and Alpha transcripts are contextual and never decision-grade; filing dates are never treated as fiscal periods.",
+    description="Retrieve an earnings-call transcript from a content-validated SEC exhibit, then Yahoo/Quartr, then optional Alpha Vantage. Yahoo results are structured and paragraph-paginated for LLM use and include the human-readable sourceUrl. Preview-only Yahoo payloads are reported as INCOMPLETE_TRANSCRIPT and continue to the alternate-source fallback; inspect contentCompleteness rather than treating cursor exhaustion as proof of a full call. Provide source_url or event_id to target a known Yahoo call. Yahoo and Alpha transcripts are contextual and never decision-grade; filing dates are never treated as fiscal periods.",
 )
 async def get_earnings_call_transcript(
     ticker: str,
@@ -1738,6 +1774,7 @@ async def get_earnings_call_transcript(
                 common = {
                     "ticker": ticker.upper(), "period": period, "status": "OK",
                     "sourceType": "sec_8k_exhibit", "evidenceClass": "SEC_FILING", "decisionGrade": True,
+                    "contentCompleteness": "FULL", "completenessBasis": "CONTENT_VALIDATED_SEC_EXHIBIT",
                     "sourceUrl": doc_url, "accessionNumber": accession,
                     "filingDate": sec_source.get("filingDate"), "exhibitType": transcript_exhibit.get("type"),
                     "documentUrl": doc_url, "totalTextLength": len(clean_text),
@@ -1818,9 +1855,37 @@ async def get_earnings_call_transcript(
         warnings = alpha_payload.pop("warnings", [])
         return _wrap_envelope_v2("get_earnings_call_transcript", alpha_payload, warnings=warnings)
 
+    incomplete_yahoo = next(
+        (
+            attempt for attempt in reversed(attempted_sources)
+            if attempt.get("sourceType") == "yahoo_quartr"
+            and attempt.get("status") == "INCOMPLETE_TRANSCRIPT"
+        ),
+        None,
+    )
+    if incomplete_yahoo:
+        sec_fallback.update({
+            "status": "INCOMPLETE_TRANSCRIPT",
+            "sourceType": "yahoo_quartr",
+            "provider": "yahoo_finance_quartr",
+            "evidenceClass": "CONTEXTUAL_TRANSCRIPT",
+            "decisionGrade": False,
+            "sourceUrl": incomplete_yahoo.get("url"),
+            "eventId": incomplete_yahoo.get("eventId"),
+            "contentCompleteness": "PARTIAL",
+            "recommendedNextAction": "TRY_ALTERNATE_SOURCE",
+            "message": incomplete_yahoo.get("reason") or incomplete_yahoo.get("message"),
+        })
     sec_fallback.update({
         **quarter_resolution,
         "attemptedSources": attempted_sources,
-        "nextRecommendedFallback": _next_transcript_fallback(attempted_sources),
+        "nextRecommendedFallback": (
+            {
+                "sourceType": "alternate_transcript_source",
+                "action": "Provide a verified public transcript URL or retry later; do not treat the preview as a full call.",
+            }
+            if incomplete_yahoo
+            else _next_transcript_fallback(attempted_sources)
+        ),
     })
     return _wrap_envelope_v2("get_earnings_call_transcript", sec_fallback)

@@ -32,6 +32,8 @@ const ALPHA_HISTORICAL_PUT_CALL_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 const PROVIDER_OWNERSHIP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const ALPHA_TRANSCRIPT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const YAHOO_TRANSCRIPT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const YAHOO_TRANSCRIPT_CACHE_VERSION = "v2";
+const YAHOO_TRANSCRIPT_PREVIEW_MAX_CHARS = 2_000;
 
 type ProviderJsonResult = {
   payload: Record<string, unknown> | null;
@@ -12534,6 +12536,7 @@ type YahooTranscriptSourceIdentity = {
 type YahooTranscriptFetchResult = ProviderJsonResult & {
   sourceUrl: string | null;
   eventId: string | null;
+  contentDiagnostics?: Record<string, unknown>;
 };
 
 function yahooTickerPath(ticker: string): string {
@@ -12656,6 +12659,77 @@ function validateYahooTranscriptPayloadIdentity(
     : `Yahoo returned fiscal quarter ${returnedQuarter ?? "UNKNOWN"}; expected ${expectedQuarter}.`;
 }
 
+export function assessYahooTranscriptPayloadCompleteness(
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  const content = payload.transcriptContent && typeof payload.transcriptContent === "object" && !Array.isArray(payload.transcriptContent)
+    ? payload.transcriptContent as Record<string, unknown>
+    : {};
+  const transcript = content.transcript && typeof content.transcript === "object" && !Array.isArray(content.transcript)
+    ? content.transcript as Record<string, unknown>
+    : null;
+  if (!transcript) {
+    return {
+      contentCompleteness: "UNKNOWN", reasonCode: "TRANSCRIPT_SHAPE_INVALID",
+      usableParagraphCount: 0, advertisedSpeakerCount: 0, paragraphSpeakerCount: 0,
+      fullTextLength: 0, paragraphTextLength: 0,
+    };
+  }
+
+  const paragraphRows = Array.isArray(transcript.paragraphs)
+    ? transcript.paragraphs as Record<string, unknown>[]
+    : [];
+  let usableParagraphCount = 0;
+  let paragraphTextLength = 0;
+  const paragraphSpeakers = new Set<string>();
+  for (const row of paragraphRows) {
+    if (!row || typeof row !== "object") continue;
+    let text = String(row.text ?? "").trim();
+    if (!text && Array.isArray(row.sentences)) {
+      text = (row.sentences as Record<string, unknown>[])
+        .map((sentence) => String(sentence?.text ?? "").trim())
+        .filter(Boolean)
+        .join(" ");
+    }
+    if (!text) continue;
+    usableParagraphCount += 1;
+    paragraphTextLength += text.length;
+    if (row.speaker != null && String(row.speaker) !== "") paragraphSpeakers.add(String(row.speaker));
+  }
+
+  const speakerRows = Array.isArray(content.speaker_mapping)
+    ? content.speaker_mapping
+    : Array.isArray(content.speakerMapping) ? content.speakerMapping : [];
+  const declaredSpeakerCount = Number(transcript.number_of_speakers ?? transcript.numberOfSpeakers ?? 0);
+  const advertisedSpeakerCount = Math.max(
+    Number.isFinite(declaredSpeakerCount) ? declaredSpeakerCount : 0,
+    speakerRows.length,
+  );
+  const fullTextLength = String(transcript.text ?? "").trim().length;
+  const previewOnly = usableParagraphCount <= 1
+    && fullTextLength === 0
+    && advertisedSpeakerCount >= 2
+    && paragraphSpeakers.size <= 1
+    && paragraphTextLength <= YAHOO_TRANSCRIPT_PREVIEW_MAX_CHARS;
+  const noUsableContent = usableParagraphCount === 0 && fullTextLength === 0;
+  return {
+    contentCompleteness: previewOnly ? "PARTIAL" : noUsableContent ? "UNKNOWN" : "FULL",
+    reasonCode: previewOnly ? "YAHOO_PREVIEW_ONLY" : noUsableContent ? "TRANSCRIPT_SHAPE_INVALID" : null,
+    usableParagraphCount,
+    advertisedSpeakerCount,
+    paragraphSpeakerCount: paragraphSpeakers.size,
+    fullTextLength,
+    paragraphTextLength,
+  };
+}
+
+function yahooTranscriptCompletenessMessage(diagnostics: Record<string, unknown>): string {
+  if (diagnostics.reasonCode === "YAHOO_PREVIEW_ONLY") {
+    return `Yahoo returned only a preview paragraph for ${diagnostics.advertisedSpeakerCount ?? 0} advertised speakers; the transcript is incomplete.`;
+  }
+  return "Yahoo returned transcript data without usable content.";
+}
+
 async function yahooTranscriptResponse(url: string, timeoutMs: number): Promise<Response> {
   const makeRequest = async (session: { value: string; cookie: string }): Promise<Response> => {
     const parsed = new URL(url);
@@ -12729,6 +12803,7 @@ async function fetchYahooQuartrTranscript(
   const cachedForEvent = async (): Promise<YahooTranscriptFetchResult | null> => {
     if (!resolvedEventId) return null;
     const cacheKey = providerCacheKey("yahoo_quartr", "transcript", {
+      contract: YAHOO_TRANSCRIPT_CACHE_VERSION,
       ticker: tickerU, eventId: resolvedEventId, lang: "en-US", region: "US",
     });
     const cached = await getProviderCache(cacheKey, YAHOO_TRANSCRIPT_TTL_MS);
@@ -12736,11 +12811,12 @@ async function fetchYahooQuartrTranscript(
     const identityError = validateYahooTranscriptPayloadIdentity(
       cached.payload ?? {}, String(resolvedEventId), expectedFiscalQuarter,
     );
-    if (identityError) {
+    const completeness = assessYahooTranscriptPayloadCompleteness(cached.payload ?? {});
+    if (identityError || completeness.contentCompleteness !== "FULL") {
       await deleteProviderCache(cacheKey);
       return null;
     }
-    return { ...cached, sourceUrl: resolvedSourceUrl, eventId: resolvedEventId };
+    return { ...cached, sourceUrl: resolvedSourceUrl, eventId: resolvedEventId, contentDiagnostics: completeness };
   };
   const initialCached = await cachedForEvent();
   if (initialCached) return initialCached;
@@ -12823,14 +12899,30 @@ async function fetchYahooQuartrTranscript(
         message: identityError,
       };
     }
+    const completeness = assessYahooTranscriptPayloadCompleteness(payload);
+    if (completeness.contentCompleteness !== "FULL") {
+      return {
+        payload,
+        status: completeness.contentCompleteness === "PARTIAL" ? "INCOMPLETE_TRANSCRIPT" : "PROVIDER_ERROR",
+        publicUrl: resolvedSourceUrl ?? xhr.toString(),
+        sourceUrl: resolvedSourceUrl,
+        eventId: resolvedEventId,
+        providerAttempted: true,
+        cacheStatus: "MISS",
+        message: yahooTranscriptCompletenessMessage(completeness),
+        contentDiagnostics: completeness,
+      };
+    }
     const fetchedAt = new Date().toISOString();
     const cacheKey = providerCacheKey("yahoo_quartr", "transcript", {
+      contract: YAHOO_TRANSCRIPT_CACHE_VERSION,
       ticker: tickerU, eventId: String(resolvedEventId), lang: "en-US", region: "US",
     });
     await setProviderCache(cacheKey, payload, resolvedSourceUrl ?? xhr.toString(), fetchedAt, YAHOO_TRANSCRIPT_TTL_MS);
     return {
       payload, status: "OK", publicUrl: resolvedSourceUrl ?? xhr.toString(), sourceUrl: resolvedSourceUrl,
       eventId: resolvedEventId, providerAttempted: true, cacheStatus: "MISS", fetchedAt,
+      contentDiagnostics: completeness,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -12970,6 +13062,8 @@ async function normalizeYahooQuartrPayload(
     provider: "yahoo_finance_quartr",
     evidenceClass: "CONTEXTUAL_TRANSCRIPT",
     decisionGrade: false,
+    contentCompleteness: "FULL",
+    completenessBasis: "YAHOO_STRUCTURED_TRANSCRIPT_VALIDATED",
     sourceUrl: resolvedSourceUrl,
     eventId: resolvedEventId,
     title: metadata.title ?? null,
@@ -12989,6 +13083,7 @@ async function normalizeYahooQuartrPayload(
     pagination: {
       cursor: String(offset), nextCursor, limit: paragraphLimit, returned: page.length,
       matchingParagraphs: selected.length, totalParagraphs: paragraphs.length, hasMore: nextCursor != null,
+      pageExhausted: nextCursor == null,
     },
     warnings,
   };
@@ -13004,7 +13099,7 @@ async function attemptYahooQuartrTranscript(
   paragraphCursor: number,
 ): Promise<{ payload: Record<string, unknown> | null; attempt: Record<string, unknown> }> {
   const result = await fetchYahooQuartrTranscript(ticker, eventId, sourceUrl, fiscalQuarter);
-  const attemptExtra = {
+  const attemptExtra: Record<string, unknown> = {
     url: result.sourceUrl,
     eventId: result.eventId,
     fiscalQuarter,
@@ -13014,6 +13109,15 @@ async function attemptYahooQuartrTranscript(
     message: result.message,
     retryAfter: result.retryAfter,
   };
+  if (result.contentDiagnostics) {
+    attemptExtra.contentCompleteness = result.contentDiagnostics.contentCompleteness;
+    attemptExtra.contentDiagnostics = result.contentDiagnostics;
+    if (result.contentDiagnostics.contentCompleteness === "PARTIAL") {
+      attemptExtra.reasonCode = result.contentDiagnostics.reasonCode ?? "YAHOO_PREVIEW_ONLY";
+      attemptExtra.reason = result.message ?? "Yahoo returned an incomplete transcript preview.";
+      attemptExtra.recommendedNextAction = "TRY_ALTERNATE_SOURCE";
+    }
+  }
   if (result.status !== "OK" || !result.payload) {
     return { payload: null, attempt: transcriptAttempt("yahoo_quartr", result.status, attemptExtra) };
   }
@@ -13032,6 +13136,26 @@ async function attemptYahooQuartrTranscript(
         reasonCode: "YAHOO_METADATA_MISMATCH",
         reason: identityError,
       }),
+    };
+  }
+  const completeness = assessYahooTranscriptPayloadCompleteness(result.payload);
+  if (completeness.contentCompleteness !== "FULL") {
+    return {
+      payload: null,
+      attempt: transcriptAttempt(
+        "yahoo_quartr",
+        completeness.contentCompleteness === "PARTIAL" ? "INCOMPLETE_TRANSCRIPT" : "PROVIDER_ERROR",
+        {
+          ...attemptExtra,
+          contentCompleteness: completeness.contentCompleteness,
+          contentDiagnostics: completeness,
+          reasonCode: completeness.reasonCode ?? "TRANSCRIPT_SHAPE_INVALID",
+          reason: completeness.contentCompleteness === "PARTIAL"
+            ? "Yahoo returned only a preview of the earnings-call transcript."
+            : "Yahoo returned transcript data without usable content.",
+          recommendedNextAction: "TRY_ALTERNATE_SOURCE",
+        },
+      ),
     };
   }
   const normalized = await normalizeYahooQuartrPayload(
@@ -13238,6 +13362,8 @@ async function fetchAlphaVantageTranscript(
         status: "OK",
         evidenceClass: "CONTEXTUAL_TRANSCRIPT",
         decisionGrade: false,
+        contentCompleteness: "FULL",
+        completenessBasis: "ALPHA_TRANSCRIPT_ROWS_PRESENT",
         filteredByTopics: topicList,
         matchedParagraphs,
         content: null,
@@ -13257,6 +13383,8 @@ async function fetchAlphaVantageTranscript(
       status: "OK",
       evidenceClass: "CONTEXTUAL_TRANSCRIPT",
       decisionGrade: false,
+      contentCompleteness: "FULL",
+      completenessBasis: "ALPHA_TRANSCRIPT_ROWS_PRESENT",
       filteredByTopics: null,
       content: cleanText.slice(0, maxChars),
       totalTextLength: cleanText.length,
@@ -13394,6 +13522,7 @@ export async function getEarningsCallTranscript(
         const common = {
           ticker: ticker.toUpperCase(), period, status: "OK", sourceType: "sec_8k_exhibit",
           evidenceClass: "SEC_FILING", decisionGrade: true, sourceUrl: validated.documentUrl,
+          contentCompleteness: "FULL", completenessBasis: "CONTENT_VALIDATED_SEC_EXHIBIT",
           accessionNumber, filingDate: secSource.filingDate ?? null, exhibitType: validated.exhibit.type ?? null,
           documentUrl: validated.documentUrl, totalTextLength: validated.cleanText.length,
           attemptedSources, nextRecommendedFallback: null,
@@ -13475,11 +13604,34 @@ export async function getEarningsCallTranscript(
       attemptedSources, nextRecommendedFallback: null,
     });
   }
+  const incompleteYahoo = [...attemptedSources].reverse().find(
+    (attempt) => attempt.sourceType === "yahoo_quartr" && attempt.status === "INCOMPLETE_TRANSCRIPT",
+  );
+  if (incompleteYahoo) {
+    secFallback = {
+      ...secFallback,
+      status: "INCOMPLETE_TRANSCRIPT",
+      sourceType: "yahoo_quartr",
+      provider: "yahoo_finance_quartr",
+      evidenceClass: "CONTEXTUAL_TRANSCRIPT",
+      decisionGrade: false,
+      sourceUrl: incompleteYahoo.url ?? null,
+      eventId: incompleteYahoo.eventId ?? null,
+      contentCompleteness: "PARTIAL",
+      recommendedNextAction: "TRY_ALTERNATE_SOURCE",
+      message: incompleteYahoo.reason ?? incompleteYahoo.message ?? "Yahoo returned an incomplete transcript preview.",
+    };
+  }
   return JSON.stringify({
     ...secFallback,
     ...alpha.resolution,
     attemptedSources,
-    nextRecommendedFallback: nextTranscriptFallback(attemptedSources),
+    nextRecommendedFallback: incompleteYahoo
+      ? {
+          sourceType: "alternate_transcript_source",
+          action: "Provide a verified public transcript URL or retry later; do not treat the preview as a full call.",
+        }
+      : nextTranscriptFallback(attemptedSources),
   });
 }
 
