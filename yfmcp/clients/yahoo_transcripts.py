@@ -30,6 +30,8 @@ _USER_AGENT = (
 _QUOTE_TYPE_URL = "https://query1.finance.yahoo.com/v1/finance/quoteType/{ticker}"
 _TRANSCRIPT_URL = "https://finance.yahoo.com/xhr/transcript"
 _TRANSCRIPT_TTL_SECONDS = 30 * 24 * 60 * 60
+_TRANSCRIPT_CACHE_VERSION = "v2"
+_PREVIEW_MAX_TEXT_LENGTH = 2_000
 _MAX_RESPONSE_BYTES = 10_000_000
 _SOURCE_PATH_RE = re.compile(
     r"^/quote/([^/]+)/earnings/([^/]+)-Q([1-4])-(20\d{2})-earnings_call-(\d+)\.html/?$",
@@ -54,6 +56,7 @@ class YahooTranscriptResult:
     http_status: int | None = None
     message: str | None = None
     retry_after: str | None = None
+    content_diagnostics: dict | None = None
 
 
 class _YahooHttpError(Exception):
@@ -133,7 +136,7 @@ def discover_yahoo_transcript_event(
 
 
 def _cache_key(ticker: str, event_id: str) -> str:
-    return f"yahoo_quartr_transcript:{ticker.upper()}:{event_id}:en-US:US"
+    return f"yahoo_quartr_transcript:{_TRANSCRIPT_CACHE_VERSION}:{ticker.upper()}:{event_id}:en-US:US"
 
 
 def validate_yahoo_transcript_payload_identity(
@@ -172,6 +175,87 @@ def validate_yahoo_transcript_payload_identity(
     if returned_quarter != expected_quarter:
         return f"Yahoo returned fiscal quarter {returned_quarter or 'UNKNOWN'}; expected {expected_quarter}."
     return None
+
+
+def assess_yahoo_transcript_payload_completeness(payload: dict) -> dict:
+    """Classify whether Yahoo supplied a usable full transcript or only a preview."""
+    content = payload.get("transcriptContent")
+    content = content if isinstance(content, dict) else {}
+    transcript = content.get("transcript")
+    if not isinstance(transcript, dict):
+        return {
+            "contentCompleteness": "UNKNOWN",
+            "reasonCode": "TRANSCRIPT_SHAPE_INVALID",
+            "usableParagraphCount": 0,
+            "advertisedSpeakerCount": 0,
+            "paragraphSpeakerCount": 0,
+            "fullTextLength": 0,
+            "paragraphTextLength": 0,
+        }
+
+    paragraph_rows = transcript.get("paragraphs")
+    paragraph_rows = paragraph_rows if isinstance(paragraph_rows, list) else []
+    usable_rows: list[dict] = []
+    paragraph_text_length = 0
+    paragraph_speakers: set[str] = set()
+    for row in paragraph_rows:
+        if not isinstance(row, dict):
+            continue
+        text = str(row.get("text") or "").strip()
+        if not text and isinstance(row.get("sentences"), list):
+            text = " ".join(
+                str(sentence.get("text") or "").strip()
+                for sentence in row["sentences"]
+                if isinstance(sentence, dict) and str(sentence.get("text") or "").strip()
+            )
+        if not text:
+            continue
+        usable_rows.append(row)
+        paragraph_text_length += len(text)
+        if row.get("speaker") not in (None, ""):
+            paragraph_speakers.add(str(row.get("speaker")))
+
+    speaker_rows = content.get("speaker_mapping") or content.get("speakerMapping") or []
+    mapped_speaker_count = len(speaker_rows) if isinstance(speaker_rows, list) else 0
+    try:
+        declared_speaker_count = int(
+            transcript.get("number_of_speakers") or transcript.get("numberOfSpeakers") or 0
+        )
+    except (TypeError, ValueError):
+        declared_speaker_count = 0
+    advertised_speaker_count = max(declared_speaker_count, mapped_speaker_count)
+    full_text_length = len(str(transcript.get("text") or "").strip())
+    preview_only = bool(
+        len(usable_rows) <= 1
+        and full_text_length == 0
+        and advertised_speaker_count >= 2
+        and len(paragraph_speakers) <= 1
+        and paragraph_text_length <= _PREVIEW_MAX_TEXT_LENGTH
+    )
+    no_usable_content = not usable_rows and full_text_length == 0
+    return {
+        "contentCompleteness": "PARTIAL" if preview_only else ("UNKNOWN" if no_usable_content else "FULL"),
+        "reasonCode": (
+            "YAHOO_PREVIEW_ONLY"
+            if preview_only
+            else ("TRANSCRIPT_SHAPE_INVALID" if no_usable_content else None)
+        ),
+        "usableParagraphCount": len(usable_rows),
+        "advertisedSpeakerCount": advertised_speaker_count,
+        "paragraphSpeakerCount": len(paragraph_speakers),
+        "fullTextLength": full_text_length,
+        "paragraphTextLength": paragraph_text_length,
+    }
+
+
+def _completeness_message(diagnostics: dict) -> str:
+    if diagnostics.get("reasonCode") == "YAHOO_PREVIEW_ONLY":
+        return (
+            "Yahoo returned only a preview paragraph for "
+            f"{diagnostics.get('advertisedSpeakerCount', 0)} advertised speakers; "
+            "the transcript is incomplete."
+        )
+    return "Yahoo returned transcript data without usable content."
 
 
 def _cached_payload(ticker: str, event_id: str) -> tuple[dict, str | None] | None:
@@ -265,9 +349,11 @@ def _blocking_fetch(
             identity_error = validate_yahoo_transcript_payload_identity(
                 payload, resolved_event_id, expected_fiscal_quarter
             )
-            if not identity_error:
+            completeness = assess_yahoo_transcript_payload_completeness(payload)
+            if not identity_error and completeness["contentCompleteness"] == "FULL":
                 return YahooTranscriptResult(
-                    payload, "OK", resolved_source_url, resolved_event_id, False, "HIT_PROCESS", fetched_at=cached_at
+                    payload, "OK", resolved_source_url, resolved_event_id, False, "HIT_PROCESS",
+                    fetched_at=cached_at, content_diagnostics=completeness,
                 )
             _discard_cached_payload(ticker_u, resolved_event_id)
 
@@ -313,9 +399,11 @@ def _blocking_fetch(
                 identity_error = validate_yahoo_transcript_payload_identity(
                     payload, resolved_event_id, expected_fiscal_quarter
                 )
-                if not identity_error:
+                completeness = assess_yahoo_transcript_payload_completeness(payload)
+                if not identity_error and completeness["contentCompleteness"] == "FULL":
                     return YahooTranscriptResult(
-                        payload, "OK", resolved_source_url, resolved_event_id, False, "HIT_PROCESS", fetched_at=cached_at
+                        payload, "OK", resolved_source_url, resolved_event_id, False, "HIT_PROCESS",
+                        fetched_at=cached_at, content_diagnostics=completeness,
                     )
                 _discard_cached_payload(ticker_u, resolved_event_id)
 
@@ -371,6 +459,18 @@ def _blocking_fetch(
                 "MISS",
                 message=identity_error,
             )
+        completeness = assess_yahoo_transcript_payload_completeness(payload)
+        if completeness["contentCompleteness"] != "FULL":
+            return YahooTranscriptResult(
+                payload,
+                "INCOMPLETE_TRANSCRIPT" if completeness["contentCompleteness"] == "PARTIAL" else "PROVIDER_ERROR",
+                resolved_source_url,
+                str(resolved_event_id),
+                True,
+                "MISS",
+                message=_completeness_message(completeness),
+                content_diagnostics=completeness,
+            )
         fetched_at = _utc_now_iso()
         _store_payload(ticker_u, str(resolved_event_id), payload)
         return YahooTranscriptResult(
@@ -381,6 +481,7 @@ def _blocking_fetch(
             True,
             "MISS",
             fetched_at=fetched_at,
+            content_diagnostics=completeness,
         )
     except _YahooHttpError as error:
         return YahooTranscriptResult(
