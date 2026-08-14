@@ -1,0 +1,80 @@
+{
+  "transcriptContent": {
+    "company_id": 8801,
+    "event_id": 660925,
+    "speaker_mapping": [
+      {
+        "speaker": 0,
+        "speaker_data": {
+          "company": null,
+          "name": "Operator",
+          "role": null
+        }
+      },
+      {
+        "speaker": 1,
+        "speaker_data": {
+          "company": "Example Photonics",
+          "name": "Alex Morgan",
+          "role": "Chief Executive Officer"
+        }
+      },
+      {
+        "speaker": 2,
+        "speaker_data": {
+          "company": "Example Photonics",
+          "name": "Taylor Chen",
+          "role": "Chief Financial Officer"
+        }
+      }
+    ],
+    "transcript": {
+      "number_of_speakers": 3,
+      "paragraphs": [
+        {
+          "speaker": 0,
+          "start": 0.1,
+          "end": 8.0,
+          "text": "Good afternoon and welcome to the fiscal fourth-quarter earnings call."
+        },
+        {
+          "speaker": 1,
+          "start": 8.1,
+          "end": 25.0,
+          "text": "Revenue increased as cloud demand accelerated during the quarter."
+        },
+        {
+          "speaker": 2,
+          "start": 25.1,
+          "end": 42.0,
+          "text": "Gross margin improved while operating expenses remained controlled."
+        },
+        {
+          "speaker": 1,
+          "start": 42.1,
+          "end": 60.0,
+          "text": "We expect additional revenue growth from new optical platforms."
+        },
+        {
+          "speaker": 0,
+          "start": 60.1,
+          "end": 70.0,
+          "text": "We will now open the call for questions."
+        }
+      ]
+    },
+    "version": "1.0.0"
+  },
+  "transcriptMetadata": {
+    "date": 1786482000,
+    "eventId": 660925,
+    "eventType": "Earnings call",
+    "fiscalPeriod": "Q4",
+    "fiscalYear": 2026,
+    "isLatest": true,
+    "title": "Q4 2026",
+    "transcriptId": 4001001,
+    "type": "IN_HOUSE",
+    "updated": 1786485600
+  }
+}

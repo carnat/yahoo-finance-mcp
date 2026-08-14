@@ -214,6 +214,17 @@ class TestGetSecFilingExhibitContent(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestGetEarningsCallTranscript(unittest.TestCase):
+    def setUp(self):
+        self.yahoo_patcher = patch(
+            "yfmcp.tools.earnings._attempt_yahoo_quartr_transcript",
+            new_callable=AsyncMock,
+            return_value=(None, {"sourceType": "yahoo_quartr", "status": "NOT_FOUND", "attempted": True}),
+        )
+        self.yahoo_patcher.start()
+
+    def tearDown(self):
+        self.yahoo_patcher.stop()
+
     def test_alpha_quarter_normalizes_fiscal_text_without_using_dates(self):
         self.assertEqual(srv._alpha_vantage_quarter("2026Q4"), "2026Q4")
         self.assertEqual(srv._alpha_vantage_quarter("FY2026 Q4"), "2026Q4")
@@ -239,8 +250,9 @@ class TestGetEarningsCallTranscript(unittest.TestCase):
         self.assertEqual(data["attemptedSources"][0]["sourceType"], "sec_8k_exhibit")
         self.assertEqual(data["attemptedSources"][0]["status"], "NOT_FOUND")
         self.assertEqual(data["attemptedSources"][1]["sourceType"], "company_ir")
-        self.assertEqual(data["attemptedSources"][2]["sourceType"], "public_transcript_url")
-        self.assertEqual(data["attemptedSources"][3]["sourceType"], "alpha_vantage")
+        self.assertEqual(data["attemptedSources"][2]["sourceType"], "yahoo_quartr")
+        self.assertEqual(data["attemptedSources"][3]["sourceType"], "public_transcript_url")
+        self.assertEqual(data["attemptedSources"][4]["sourceType"], "alpha_vantage")
         self.assertIsInstance(data["nextRecommendedFallback"], dict)
 
     def test_returns_exhibit_not_found_when_no_transcript(self):
@@ -274,9 +286,9 @@ class TestGetEarningsCallTranscript(unittest.TestCase):
             mock_get.return_value = None
             raw = _run(srv.get_earnings_call_transcript(ticker="AAPL"))
         data = _parse(raw)
-        self.assertEqual(data["status"], "FETCH_ERROR")
-        self.assertEqual(data["attemptedSources"][0]["status"], "FETCH_ERROR")
-        self.assertIn("documentUrl", data)
+        self.assertEqual(data["status"], "SEC_EXHIBIT_NOT_FOUND")
+        self.assertEqual(data["attemptedSources"][0]["status"], "NOT_FOUND")
+        self.assertEqual(data["candidateDiagnostics"][0]["status"], "FETCH_ERROR")
         self.assertIsInstance(data["nextRecommendedFallback"], dict)
 
     def test_alpha_vantage_fallback_success_when_sec_exhibit_missing(self):
@@ -398,7 +410,11 @@ class TestGetEarningsCallTranscript(unittest.TestCase):
 
     def test_returns_transcript_content_when_found(self):
         mock_sec = {"accessionNumber": "0000320193-24-000081", "filingDate": "2024-01-25", "acceptedAt": "2024-01-25T16:00:00"}
-        mock_html = "<html><body><p>Good afternoon everyone, welcome to the earnings call.</p><p>We had a fantastic quarter driven by AI.</p></body></html>"
+        mock_html = ("<html><body><p>Operator: Welcome to the quarterly earnings call.</p>"
+                     "<p>Tim Cook: We delivered strong revenue growth and expanded capacity across our network.</p>"
+                     "<p>Jane Smith: Gross margin improved and operating expenses remained controlled throughout the quarter.</p>"
+                     "<p>Tim Cook: We will now open the call for questions and answers from analysts.</p>"
+                     "<p>Operator: Our first question comes from the research team.</p></body></html>") * 3
         with patch("yfmcp.tools.earnings._resolve_latest_earnings_sec_source", new_callable=AsyncMock, return_value=mock_sec), \
              patch("yfmcp.tools.earnings._edgar_cik_from_accession", return_value=320193), \
              patch("yfmcp.tools.earnings._edgar_list_exhibits_from_index", new_callable=AsyncMock) as mock_list, \
@@ -418,7 +434,11 @@ class TestGetEarningsCallTranscript(unittest.TestCase):
 
     def test_topic_filtering(self):
         mock_sec = {"accessionNumber": "0000320193-24-000081", "filingDate": "2024-01-25", "acceptedAt": "2024-01-25T16:00:00"}
-        mock_html = "<html><body><p>Good afternoon everyone, welcome to the earnings call for Apple Inc.</p><p>Our AI investments drove significant growth this quarter with new model deployments.</p><p>Supply chain improvements reduced costs by 8% globally.</p></body></html>"
+        mock_html = ("<html><body><p>Operator: Welcome to the quarterly earnings call for Apple Inc.</p>"
+                     "<p>Tim Cook: Our AI investments drove significant growth this quarter with new model deployments.</p>"
+                     "<p>Jane Smith: Supply chain improvements reduced costs by 8% globally.</p>"
+                     "<p>Tim Cook: We will now open the call for questions and answers from analysts.</p>"
+                     "<p>Operator: Our first question comes from the research team.</p></body></html>") * 3
         with patch("yfmcp.tools.earnings._resolve_latest_earnings_sec_source", new_callable=AsyncMock, return_value=mock_sec), \
              patch("yfmcp.tools.earnings._edgar_cik_from_accession", return_value=320193), \
              patch("yfmcp.tools.earnings._edgar_list_exhibits_from_index", new_callable=AsyncMock) as mock_list, \

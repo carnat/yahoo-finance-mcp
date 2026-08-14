@@ -79,6 +79,7 @@ import {
   getSecFilingExhibitContent,
   parsePublicTranscript,
   getEarningsCallTranscript,
+  parseYahooTranscriptSourceUrl,
   xbrlSourceEvidence,
   isDecisionGradeXbrlFact,
 } from "./yahoo-finance.js";
@@ -1168,7 +1169,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "list_sec_filing_exhibits", description: "List all exhibits/documents attached to a specific SEC filing by accession number.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, accessionNumber: { type: "string", description: "SEC filing accession number, e.g. '0000320193-24-000081'" } }, required: ["ticker", "accessionNumber"] } },
   { name: "get_sec_filing_exhibit_content", description: "Fetch and return the text content of a specific exhibit from an SEC filing. Supports topic-based paragraph filtering to reduce token usage.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, accessionNumber: { type: "string", description: "SEC filing accession number" }, fileName: { type: "string", description: "Exhibit filename from the filing index" }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" } }, required: ["ticker", "accessionNumber", "fileName"] } },
   { name: "parse_public_transcript", description: "Fetch and parse a public transcript page (Motley Fool, company IR, etc.). Supports topic-based paragraph filtering to reduce token usage. Provide raw_text to skip URL fetching.", inputSchema: { type: "object", properties: { url: { type: "string", description: "Public https URL of the transcript page" }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" }, raw_text: { type: "string", description: "Raw HTML or text content to parse directly (bypasses URL fetching)" } } } },
-  { name: "get_earnings_call_transcript", description: "Retrieve earnings-call transcript content from SEC exhibits, then structured fallback metadata for company IR, public transcript URLs, and optional Alpha Vantage. For Alpha Vantage, supply issuer fiscal_quarter as YYYYQn or let the tool resolve it from official release text; a filing date is never treated as a fiscal period. Alpha transcripts are contextual and never decision-grade.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, period: { type: "string", enum: ["latest"], default: "latest", description: "Event selector. Only the latest release is supported; this is not a fiscal-quarter value." }, fiscal_quarter: { type: "string", pattern: "^[0-9]{4}Q[1-4]$", description: "Optional issuer fiscal quarter for Alpha Vantage fallback, e.g. 2026Q4. Do not derive this from the filing or publication date." }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" } }, required: ["ticker"] } },
+  { name: "get_earnings_call_transcript", description: "Retrieve a content-validated SEC transcript when available, otherwise a structured Yahoo/Quartr transcript page, with optional scarce-quota Alpha Vantage last. Yahoo/Quartr output is contextual, paginated, and includes the canonical Yahoo source URL plus speaker/paragraph metadata. Use nextCursor for another page, or topics to request matching paragraphs. Supply source_url or event_id only when continuing a known Yahoo transcript. Non-SEC transcripts are never decision-grade.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, period: { type: "string", enum: ["latest"], default: "latest", description: "Event selector. Only the latest release is supported; this is not a fiscal-quarter value." }, fiscal_quarter: { type: "string", pattern: "^[0-9]{4}Q[1-4]$", description: "Optional issuer fiscal quarter, e.g. 2026Q4. Do not derive this from the filing or publication date." }, event_id: { type: "string", pattern: "^[0-9]+$", description: "Optional Yahoo earnings-event ID. Use only to continue a previously returned Yahoo transcript." }, source_url: { type: "string", format: "uri", description: "Optional canonical finance.yahoo.com transcript URL returned by this tool. Other hosts and ticker mismatches are rejected." }, paragraph_limit: { type: "integer", minimum: 1, maximum: 50, default: 20, description: "Maximum structured Yahoo transcript paragraphs to return." }, paragraph_cursor: { type: "string", pattern: "^[0-9]+$", description: "Opaque nextCursor from a prior Yahoo transcript response." }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter transcript paragraphs by" } }, required: ["ticker"] } },
   { name: "get_market_snapshot", description: "Compact market-state packet composing quote, price performance, moving-average trend, volume ratios, liquidity gate, and technical indicators in one call. Supports compact (default) and full modes, and optional batch of tickers.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, mode: { type: "string", enum: ["compact", "full"], default: "compact" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] } },
   { name: "health_check", description: "Return public-safe MCP availability, schema identity, tool mode, and connector-freshness metadata.", inputSchema: { type: "object", properties: {} } },
 ];
@@ -2833,11 +2834,60 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
           "fiscal_quarter must use issuer fiscal-quarter format YYYYQ1 through YYYYQ4.",
         );
       }
+      if (args.event_id != null && !/^\d+$/.test(str(args.event_id).trim())) {
+        return mcpFailure(
+          "get_earnings_call_transcript",
+          ErrorCode.INPUT_VALIDATION_ERROR,
+          "event_id must contain digits only.",
+        );
+      }
+      if (args.source_url != null) {
+        const parsedSource = parseYahooTranscriptSourceUrl(str(args.ticker), str(args.source_url).trim());
+        if (!parsedSource.identity) {
+          return mcpFailure(
+            "get_earnings_call_transcript",
+            ErrorCode.INPUT_VALIDATION_ERROR,
+            parsedSource.error ?? "source_url is not a valid Yahoo earnings-call URL.",
+          );
+        }
+        if (args.event_id != null && str(args.event_id).trim() !== parsedSource.identity.eventId) {
+          return mcpFailure(
+            "get_earnings_call_transcript",
+            ErrorCode.INPUT_VALIDATION_ERROR,
+            "event_id does not match source_url.",
+          );
+        }
+        if (args.fiscal_quarter != null && str(args.fiscal_quarter).trim().toUpperCase() !== parsedSource.identity.fiscalQuarter) {
+          return mcpFailure(
+            "get_earnings_call_transcript",
+            ErrorCode.INPUT_VALIDATION_ERROR,
+            "fiscal_quarter does not match source_url.",
+          );
+        }
+      }
+      if (args.paragraph_limit != null && (!Number.isInteger(Number(args.paragraph_limit)) || Number(args.paragraph_limit) < 1 || Number(args.paragraph_limit) > 50)) {
+        return mcpFailure(
+          "get_earnings_call_transcript",
+          ErrorCode.INPUT_VALIDATION_ERROR,
+          "paragraph_limit must be an integer from 1 through 50.",
+        );
+      }
+      if (args.paragraph_cursor != null && !/^\d+$/.test(str(args.paragraph_cursor).trim())) {
+        return mcpFailure(
+          "get_earnings_call_transcript",
+          ErrorCode.INPUT_VALIDATION_ERROR,
+          "paragraph_cursor must be a non-negative integer.",
+        );
+      }
       return getEarningsCallTranscript(
         str(args.ticker),
         str(args.period, "latest"),
         Array.isArray(args.topics) ? args.topics.map(String) : null,
         args.fiscal_quarter != null ? str(args.fiscal_quarter).trim().toUpperCase() : null,
+        args.event_id != null ? str(args.event_id).trim() : null,
+        args.source_url != null ? str(args.source_url).trim() : null,
+        num(args.paragraph_limit, 20),
+        num(args.paragraph_cursor, 0),
       );
     case "extract_geographic_revenue":
       return extractGeographicRevenue(

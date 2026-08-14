@@ -206,13 +206,17 @@ schemas, aliases, and deprecation metadata.
   `recommendedNextAction`. Filing intelligence binds companyfacts evidence to
   the selected accession. `parse_public_transcript` accepts either an HTTPS URL
   or caller-supplied `raw_text`.
-- `get_earnings_call_transcript` is SEC-first. Optional Alpha Vantage fallback
-  requires `ALPHA_VANTAGE_API_KEY` and an issuer fiscal quarter supplied as
-  `fiscal_quarter:"YYYYQn"` or resolved from explicit official-release text.
-  The tool never converts a filing/publication date into a fiscal quarter.
-  Alpha transcript output is `evidenceClass:"CONTEXTUAL_TRANSCRIPT"` with
-  `decisionGrade:false`; inspect `fiscalQuarterStatus`, `periodEvidence`, and
-  `attemptedSources` before use.
+- `get_earnings_call_transcript` first checks SEC exhibits and accepts one only
+  after transcript-content validation. It then discovers Yahoo Finance's
+  structured Quartr transcript and returns compact speaker-labelled paragraphs,
+  a canonical `sourceUrl`, and `nextCursor` pagination. Use `topics` for a
+  focused extraction or pass a returned `event_id`/`source_url` to continue the
+  same event. Yahoo's transcript interface is undocumented and may change; its
+  output is `evidenceClass:"CONTEXTUAL_TRANSCRIPT"` and
+  `decisionGrade:false`. Optional Alpha Vantage is the scarce-quota last
+  fallback and requires `ALPHA_VANTAGE_API_KEY`. The tool never converts a
+  filing/publication date into a fiscal quarter. Inspect `fiscalQuarterStatus`,
+  `attemptedSources`, and source-specific warnings before use.
 - Use `get_ownership_holders` for ordinary Yahoo holder questions. The deeper
   `get_expanded_institutional_ownership` action tries eligible Finnhub coverage
   first and never calls Alpha unless `allow_scarce_fallback:true` is explicit.
