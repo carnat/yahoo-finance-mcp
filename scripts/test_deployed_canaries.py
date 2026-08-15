@@ -52,6 +52,14 @@ DISCOVERY_REQUIRED_PARAMS = {
     "extract_total_revenue": {"ticker"},
     "get_thai_fund_nav": {"fund_class_name"},
 }
+DISCOVERY_EXPECTED_PARAMS = {
+    "get_earnings_call_transcript": {
+        "event_id",
+        "source_url",
+        "paragraph_limit",
+        "paragraph_cursor",
+    },
+}
 
 
 def extract_data(payload: Any) -> Any:
@@ -507,6 +515,7 @@ def assert_tool_discovery_contract(response: dict[str, Any], tool_mode: str) -> 
                 raise AssertionError(f"{name}.{action} params must have an object schema")
             if not isinstance(params_schema.get("properties"), dict):
                 raise AssertionError(f"{name}.{action} params must expose typed properties")
+            actual_properties = set(params_schema["properties"])
             required_params = params_schema.get("required")
             if isinstance(required_params, list) and required_params:
                 branch_required = branch.get("required")
@@ -522,6 +531,12 @@ def assert_tool_discovery_contract(response: dict[str, Any], tool_mode: str) -> 
                         f"{name}.{action} required params drifted: expected at least "
                         f"{sorted(expected_required)}, got {sorted(actual_required)}"
                     )
+            expected_properties = DISCOVERY_EXPECTED_PARAMS.get(action)
+            if expected_properties is not None and not expected_properties.issubset(actual_properties):
+                raise AssertionError(
+                    f"{name}.{action} optional params drifted: expected at least "
+                    f"{sorted(expected_properties)}, got {sorted(actual_properties)}"
+                )
             actual_actions.add(action)
         if actual_actions != expected_actions:
             raise AssertionError(

@@ -31,7 +31,8 @@ _QUOTE_TYPE_URL = "https://query1.finance.yahoo.com/v1/finance/quoteType/{ticker
 _TRANSCRIPT_URL = "https://finance.yahoo.com/xhr/transcript"
 _TRANSCRIPT_TTL_SECONDS = 30 * 24 * 60 * 60
 _TRANSCRIPT_CACHE_VERSION = "v2"
-_PREVIEW_MAX_TEXT_LENGTH = 2_000
+_PREVIEW_MAX_PARAGRAPHS = 3
+_PREVIEW_MAX_FULL_TEXT_LENGTH = 256
 _MAX_RESPONSE_BYTES = 10_000_000
 _SOURCE_PATH_RE = re.compile(
     r"^/quote/([^/]+)/earnings/([^/]+)-Q([1-4])-(20\d{2})-earnings_call-(\d+)\.html/?$",
@@ -225,12 +226,15 @@ def assess_yahoo_transcript_payload_completeness(payload: dict) -> dict:
         declared_speaker_count = 0
     advertised_speaker_count = max(declared_speaker_count, mapped_speaker_count)
     full_text_length = len(str(transcript.get("text") or "").strip())
+    sparse_single_paragraph = len(usable_rows) <= 1 and advertised_speaker_count >= 2
+    sparse_multi_paragraph = (
+        len(usable_rows) <= _PREVIEW_MAX_PARAGRAPHS
+        and advertised_speaker_count >= 4
+    )
     preview_only = bool(
-        len(usable_rows) <= 1
-        and full_text_length == 0
-        and advertised_speaker_count >= 2
+        full_text_length <= _PREVIEW_MAX_FULL_TEXT_LENGTH
         and len(paragraph_speakers) <= 1
-        and paragraph_text_length <= _PREVIEW_MAX_TEXT_LENGTH
+        and (sparse_single_paragraph or sparse_multi_paragraph)
     )
     no_usable_content = not usable_rows and full_text_length == 0
     return {
@@ -251,7 +255,7 @@ def assess_yahoo_transcript_payload_completeness(payload: dict) -> dict:
 def _completeness_message(diagnostics: dict) -> str:
     if diagnostics.get("reasonCode") == "YAHOO_PREVIEW_ONLY":
         return (
-            "Yahoo returned only a preview paragraph for "
+            "Yahoo returned only sparse preview content for "
             f"{diagnostics.get('advertisedSpeakerCount', 0)} advertised speakers; "
             "the transcript is incomplete."
         )
