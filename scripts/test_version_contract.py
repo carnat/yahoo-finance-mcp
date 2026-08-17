@@ -20,12 +20,10 @@ from yfmcp.version import RELEASE_VERSION  # noqa: E402
 
 
 class TestVersionContract(unittest.TestCase):
-    def test_python_mcp_initialize_uses_exact_build_version(self) -> None:
-        from yfmcp.app import yfinance_server
-        from yfmcp.build_info import BUILD_VERSION
-
-        initialization = yfinance_server._mcp_server.create_initialization_options()
-        self.assertEqual(initialization.server_version, BUILD_VERSION)
+    def test_python_mcp_initialize_is_pinned_to_exact_build_version(self) -> None:
+        app_source = (ROOT / "yfmcp" / "app.py").read_text(encoding="utf-8")
+        self.assertIn("from yfmcp.build_info import BUILD_VERSION", app_source)
+        self.assertIn("yfinance_server._mcp_server.version = BUILD_VERSION", app_source)
 
     def test_committed_version_sources_match_canonical_release(self) -> None:
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))

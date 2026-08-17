@@ -55,6 +55,12 @@ class TestHealthMetadata(unittest.TestCase):
     def setUp(self):
         self.srv = _reload_server()
 
+    def test_python_mcp_initialize_uses_exact_build_version(self):
+        from yfmcp.build_info import BUILD_VERSION
+
+        initialization = self.srv.yfinance_server._mcp_server.create_initialization_options()
+        self.assertEqual(initialization.server_version, BUILD_VERSION)
+
     def test_health_check_shape(self):
         result = json.loads(_run(self.srv.health_check()))
         expected = {
