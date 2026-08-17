@@ -21,16 +21,18 @@
  */
 
 import { handleMcp } from "./mcp.js";
-import { setWorkerEnv, getWorkerVar } from "./response.js";
+import { getBuildVersion, getServerVersion, setWorkerEnv, getWorkerVar } from "./response.js";
 import { TOOLS, callTool } from "./tools.js";
 
 export interface Env {
   MCP_ENVELOPE_V2?: string;
   SERVER_VERSION?: string;
+  BUILD_VERSION?: string;
   WORKER_VERSION?: string;
   TOOL_MODE?: string;
   AUDIT_TOKEN?: string;
   BUILD_SHA?: string;
+  DEPLOYED_AT?: string;
   CF_VERSION_METADATA?: WorkerVersionMetadata;
   [key: string]: unknown;
 }
@@ -71,6 +73,10 @@ export default {
         name: "yahoo-finance-mcp",
         status: "ok",
         transport: "streamable-http",
+        serverVersion: getServerVersion(),
+        buildVersion: getBuildVersion(),
+        buildSha: getWorkerVar("BUILD_SHA")?.trim() || null,
+        deployedAt: getWorkerVar("DEPLOYED_AT")?.trim() || null,
         workerVersionId: env.CF_VERSION_METADATA?.id ?? null,
       });
     }

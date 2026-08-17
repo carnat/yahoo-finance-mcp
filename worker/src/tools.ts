@@ -1,4 +1,4 @@
-import { mcpSuccess, mcpFailure, ErrorCode, getWorkerVar } from "./response.js";
+import { mcpSuccess, mcpFailure, ErrorCode, getBuildVersion, getServerVersion, getWorkerVar } from "./response.js";
 import { GROUPED_TOOL_DEFS } from "./tool-catalog.js";
 import {
   getAnalystConsensus,
@@ -1171,7 +1171,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "parse_public_transcript", description: "Fetch and parse a public transcript page (Motley Fool, company IR, etc.). Supports topic-based paragraph filtering to reduce token usage. Provide raw_text to skip URL fetching.", inputSchema: { type: "object", properties: { url: { type: "string", description: "Public https URL of the transcript page" }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" }, raw_text: { type: "string", description: "Raw HTML or text content to parse directly (bypasses URL fetching)" } } } },
   { name: "get_earnings_call_transcript", description: "Retrieve an earnings-call transcript from a content-validated SEC exhibit, then Yahoo/Quartr, then optional Alpha Vantage. Yahoo results are structured and paragraph-paginated for LLM use and include the human-readable sourceUrl. Preview-only Yahoo payloads are reported as INCOMPLETE_TRANSCRIPT and continue to the alternate-source fallback. Inspect contentCompleteness rather than treating cursor exhaustion as proof of a full call. Yahoo contentSha256 identifies the canonical transcript text and speaker projection declared by contentHashBasis, so it remains stable across pages and runtimes. Provide source_url or event_id to target a known Yahoo call. Yahoo and Alpha transcripts are contextual and never decision-grade; filing dates are never treated as fiscal periods.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, period: { type: "string", enum: ["latest"], default: "latest", description: "Event selector. Only the latest release is supported; this is not a fiscal-quarter value." }, fiscal_quarter: { type: "string", pattern: "^[0-9]{4}Q[1-4]$", description: "Optional issuer fiscal quarter, e.g. 2026Q4. Do not derive this from the filing or publication date." }, event_id: { type: "string", pattern: "^[0-9]+$", description: "Optional Yahoo earnings-event ID. Use only to continue a previously returned Yahoo transcript." }, source_url: { type: "string", format: "uri", description: "Optional canonical finance.yahoo.com transcript URL returned by this tool. Other hosts and ticker mismatches are rejected." }, paragraph_limit: { type: "integer", minimum: 1, maximum: 50, default: 20, description: "Maximum structured Yahoo transcript paragraphs to return." }, paragraph_cursor: { type: "string", pattern: "^[0-9]+$", description: "Opaque nextCursor from a prior Yahoo transcript response." }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter transcript paragraphs by" } }, required: ["ticker"] } },
   { name: "get_market_snapshot", description: "Compact market-state packet composing quote, price performance, moving-average trend, volume ratios, liquidity gate, and technical indicators in one call. Supports compact (default) and full modes, and optional batch of tickers.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, mode: { type: "string", enum: ["compact", "full"], default: "compact" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] } },
-  { name: "health_check", description: "Return public-safe MCP availability, schema identity, tool mode, and connector-freshness metadata.", inputSchema: { type: "object", properties: {} } },
+  { name: "health_check", description: "Return public-safe MCP availability, release/build identity, schema identity, tool mode, and connector-freshness metadata.", inputSchema: { type: "object", properties: {} } },
 ];
 
 const DEPRECATED_ALIAS_TOOLS: Tool[] = [];
@@ -1197,6 +1197,9 @@ const MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA: Tool["outputSchema"] = {
   properties: {
     status: { type: "string" },
     serverVersion: { type: "string" },
+    buildVersion: { type: "string" },
+    buildSha: { type: ["string", "null"] },
+    deployedAt: { type: ["string", "null"] },
     toolCount: { type: "number" },
     manifestVersion: { type: "string" },
     manifestHash: { type: "string" },
@@ -3023,7 +3026,8 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         Array.isArray(args.sources) ? args.sources.map(String) : ["sec", "company_ir_page", "company_ir", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"],
       );
     case "health_check": {
-      const version = getWorkerVar("SERVER_VERSION") ?? "1.1.0";
+      const version = getServerVersion();
+      const buildVersion = getBuildVersion();
       const visibleTools = listVisibleTools();
       const manifestVersion = getWorkerVar("MANIFEST_VERSION") ?? "1";
       const manifestHash = await computeHash(JSON.stringify(visibleTools.map(t => t.name)));
@@ -3036,11 +3040,14 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       return JSON.stringify({
         status: "ok",
         serverVersion: version,
+        buildVersion,
+        buildSha: getWorkerVar("BUILD_SHA")?.trim() || null,
+        deployedAt: getWorkerVar("DEPLOYED_AT")?.trim() || null,
         toolCount: visibleTools.length,
         manifestVersion,
         manifestHash,
         schemaHash,
-        runtimeHash: await computeHash(`${version}|${schemaHash}|${currentToolMode()}`),
+        runtimeHash: await computeHash(`${buildVersion}|${schemaHash}|${currentToolMode()}`),
         toolMode: currentToolMode(),
         envelopeSchemaVersion: ENVELOPE_SCHEMA_VERSION,
         generatedAt: new Date().toISOString(),

@@ -26,6 +26,9 @@ jobs:
       - name: Check server.py ↔ worker tool sync
         run: python scripts/check_tool_sync.py
 
+      - name: Check release/build version contract
+        run: python scripts/test_version_contract.py
+
   type-check-worker:
     name: Type-check Worker
     runs-on: ubuntu-latest
@@ -79,6 +82,9 @@ jobs:
 
       - name: Python import check
         run: python -c "import server"
+
+      - name: Release/build version contract
+        run: python scripts/test_version_contract.py
 
       - name: Tool sync
         run: python scripts/check_tool_sync.py

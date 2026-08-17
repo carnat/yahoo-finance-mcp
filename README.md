@@ -22,6 +22,31 @@ https://yahoo-finance-mcp.artinatw.workers.dev/mcp
 The live server exposes its current tool manifest through MCP `tools/list`.
 For runtime metadata and connector-freshness identity, call `health_check`.
 
+## Runtime Version and Statelessness
+
+The server reports two related version identities:
+
+- `serverVersion` is the semantic compatibility release. Compatible fixes
+  increment the patch version; additive public capabilities increment the
+  minor version; incompatible public-contract changes require a major version.
+- MCP `serverInfo.version` and `health_check.buildVersion` identify the exact
+  deployed build as `<serverVersion>+git.<short-sha>`. `health_check` also
+  returns the full public `buildSha`, `deployedAt`, and Cloudflare
+  `workerVersionId` for deployment verification.
+
+Build metadata identifies an exact deployment but does not change semantic
+version precedence. Use `schemaHash` to detect a changed tool contract and
+`runtimeHash` to detect a changed deployed runtime. A version change does not
+force clients that cache MCP discovery to reload; reconnect or refresh the
+connector when its advertised schema is stale.
+
+The remote MCP transport is session-stateless: requests do not depend on a
+user session, private portfolio, account state, Durable Object, or application
+database. The Worker does use bounded process-local and best-effort Cloudflare
+edge caches for public provider responses. Those caches reduce provider load
+and preserve freshness/rate-limit headroom, but they are not user state, are
+not globally coordinated, and may miss across isolates or data centers.
+
 ## Install Locally
 
 Requirements:
@@ -96,7 +121,7 @@ Example grouped call:
 ```
 
 Clients that cache MCP discovery may need to reconnect or refresh the connector
-after switching tool modes.
+after switching tool modes or when `health_check.schemaHash` changes.
 
 ## Tool Coverage
 

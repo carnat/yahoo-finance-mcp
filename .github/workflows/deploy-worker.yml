@@ -20,6 +20,7 @@ on:
       - "scripts/test_smoke_architecture.py"
       - "scripts/worker_version_promotion.py"
       - "scripts/stamp_worker_build.py"
+      - "scripts/test_version_contract.py"
       - "scripts/live_smoke_utils.py"
       - "scripts/test_tools.py"
       - "scripts/test_universal_aliases.py"
@@ -59,6 +60,9 @@ jobs:
 
       - name: Verify tool lists are in sync
         run: python scripts/check_tool_sync.py
+
+      - name: Verify release/build version contract
+        run: python scripts/test_version_contract.py
 
       - name: Install dependencies
         run: npm ci
@@ -127,6 +131,7 @@ jobs:
           python scripts/worker_version_promotion.py verify-health
           --health-url "${{ needs.upload_version.outputs.preview_url }}/health"
           --expected-version-id "${{ needs.upload_version.outputs.version_id }}"
+          --expected-build-sha "${{ github.sha }}"
 
       - name: Verify candidate MCP contract canaries
         run: python scripts/test_deployed_canaries.py
@@ -135,6 +140,7 @@ jobs:
           ALLOW_NETWORK_SKIP: "0"
           EXPECTED_TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}
           EXPECTED_WORKER_VERSION_ID: ${{ needs.upload_version.outputs.version_id }}
+          EXPECTED_BUILD_SHA: ${{ github.sha }}
 
   promote_version:
     name: Promote verified candidate
@@ -186,6 +192,7 @@ jobs:
           python scripts/worker_version_promotion.py verify-health
           --health-url "$PRODUCTION_HEALTH_URL"
           --expected-version-id "${{ needs.upload_version.outputs.version_id }}"
+          --expected-build-sha "${{ github.sha }}"
 
       - name: Verify production MCP contract canaries
         id: contract_canaries
@@ -195,6 +202,7 @@ jobs:
           ALLOW_NETWORK_SKIP: "0"
           EXPECTED_TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}
           EXPECTED_WORKER_VERSION_ID: ${{ needs.upload_version.outputs.version_id }}
+          EXPECTED_BUILD_SHA: ${{ github.sha }}
 
       - name: Audit deployed MCP live discovery
         id: live_discovery

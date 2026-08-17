@@ -853,6 +853,9 @@ _MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA = {
     "properties": {
         "status": {"type": "string"},
         "serverVersion": {"type": "string"},
+        "buildVersion": {"type": "string"},
+        "buildSha": {"type": ["string", "null"]},
+        "deployedAt": {"type": ["string", "null"]},
         "toolCount": {"type": "number"},
         "manifestVersion": {"type": "string"},
         "manifestHash": {"type": "string"},

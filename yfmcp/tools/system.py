@@ -8,7 +8,7 @@ import json
 import os
 
 from yfmcp.app import yfinance_server
-from yfmcp.envelope import SERVER_VERSION
+from yfmcp.build_info import BUILD_SHA, BUILD_VERSION, DEPLOYED_AT, SERVER_VERSION
 from yfmcp.schemas import _MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA
 
 
@@ -51,11 +51,14 @@ def _public_metadata() -> dict:
     return {
         "status": "ok",
         "serverVersion": SERVER_VERSION,
+        "buildVersion": BUILD_VERSION,
+        "buildSha": BUILD_SHA,
+        "deployedAt": DEPLOYED_AT,
         "toolCount": len(names),
         "manifestVersion": os.environ.get("MANIFEST_VERSION", "1"),
         "manifestHash": manifest_hash,
         "schemaHash": schema_hash,
-        "runtimeHash": hashlib.sha256(f"{SERVER_VERSION}|{schema_hash}|{tool_mode}".encode("utf-8")).hexdigest()[:16],
+        "runtimeHash": hashlib.sha256(f"{BUILD_VERSION}|{schema_hash}|{tool_mode}".encode("utf-8")).hexdigest()[:16],
         "toolMode": tool_mode,
         "envelopeSchemaVersion": "2026-07-08",
         "generatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -66,7 +69,7 @@ def _public_metadata() -> dict:
 @yfinance_server.tool(
     name="health_check",
     output_schema=_MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA,
-    description="Return public-safe MCP availability, schema identity, tool mode, and connector-freshness metadata.",
+    description="Return public-safe MCP availability, release/build identity, schema identity, tool mode, and connector-freshness metadata.",
 )
 async def health_check() -> str:
     return json.dumps(_public_metadata())
