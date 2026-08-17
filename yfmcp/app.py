@@ -17,6 +17,8 @@ from typing import Any, Callable
 
 from mcp.server.fastmcp import FastMCP
 
+from yfmcp.build_info import BUILD_VERSION
+
 try:
     from mcp.types import ToolAnnotations
 except (ImportError, ModuleNotFoundError):  # pragma: no cover - legacy test shim
@@ -167,7 +169,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 
 ### Snapshot & diagnostics
 - get_market_snapshot: One-call market-state packet: price, range, MA trend, volume, RSI, MACD, liquidity gate, freshness. Compact (default, max 5 tickers) or full (max 2) modes.
-- health_check: Public-safe MCP availability, schema identity, tool mode, and connector-freshness metadata.
+- health_check: Public-safe MCP availability, release/build identity, schema identity, tool mode, and connector-freshness metadata.
 
 ### Price & market data
 - get_market_quote: Current regular-market price observation with priceBasis and priceTimestamp, plus market cap, 52-week range, moving averages, and volume.
@@ -253,6 +255,10 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - calculate_price_target_distance: Compare current price to a user target; separates the legacy ratio from directional percent distance.
 """,
 )
+# FastMCP 1.x does not expose the low-level implementation-version argument.
+# Set it explicitly so local MCP initialize reports this server build instead
+# of the installed MCP SDK version.
+yfinance_server._mcp_server.version = BUILD_VERSION
 
 
 def build_handler_registry(server: FastMCP) -> dict[str, Callable[..., Any]]:

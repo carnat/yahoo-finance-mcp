@@ -8,7 +8,7 @@
  * Notifications (no `id` field) are accepted but produce no response body.
  */
 
-import { getServerVersion } from "./response.js";
+import { getBuildVersion } from "./response.js";
 import { callVisibleTool, listVisibleTools } from "./tools.js";
 
 interface JsonRpcRequest {
@@ -73,7 +73,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         : "2025-06-18";
       return {
         protocolVersion,
-        serverInfo: { name: "yahoo-finance-mcp", version: getServerVersion() },
+        serverInfo: { name: "yahoo-finance-mcp", version: getBuildVersion() },
         capabilities: { tools: {} },
       };
     }

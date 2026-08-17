@@ -10,13 +10,11 @@ import json
 import os
 from typing import TypedDict
 
+from yfmcp.build_info import BUILD_DATE, SERVER_VERSION
+
 # ---------------------------------------------------------------------------
 # Server version and envelope feature flag
 # ---------------------------------------------------------------------------
-SERVER_VERSION = os.environ.get("SERVER_VERSION", "0.2.0")
-BUILD_DATE = os.environ.get("BUILD_DATE", "unknown")
-
-
 class _DynamicEnvelopeV2Flag:
     def __bool__(self) -> bool:
         return os.environ.get("MCP_ENVELOPE_V2", "").lower() == "true"

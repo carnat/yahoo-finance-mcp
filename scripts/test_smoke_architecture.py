@@ -134,10 +134,13 @@ class TestSmokeArchitecture(unittest.TestCase):
         self.assertEqual(parsed_config["version_metadata"]["binding"], "CF_VERSION_METADATA")
         self.assertIn("workerVersionId: env.CF_VERSION_METADATA?.id ?? null", entry)
         self.assertIn("WORKER_VERSION_ID: env.CF_VERSION_METADATA?.id", entry)
+        self.assertIn("buildVersion: getBuildVersion()", entry)
+        self.assertIn('buildSha: getWorkerVar("BUILD_SHA")?.trim() || null', entry)
         self.assertIn(
             "EXPECTED_WORKER_VERSION_ID: ${{ needs.upload_version.outputs.version_id }}",
             self.workflow,
         )
+        self.assertIn("EXPECTED_BUILD_SHA: ${{ github.sha }}", self.workflow)
 
     def test_version_upload_parser_uses_structured_wrangler_output(self) -> None:
         events = [
@@ -244,6 +247,26 @@ class TestSmokeArchitecture(unittest.TestCase):
 
         self.assertEqual(payload["workerVersionId"], "expected-version")
         self.assertEqual(sleeps, [0.25])
+
+    def test_version_identity_requires_expected_git_build(self) -> None:
+        expected_sha = "541dfa26a14ce7554773b9385d700a2808d68fb5"
+        payload = promotion.wait_for_worker_version(
+            "https://example.workers.dev/health",
+            "expected-version",
+            expected_sha,
+            attempts=1,
+            delay_seconds=0,
+            timeout=1,
+            fetch=lambda _url, _timeout: {
+                "status": "ok",
+                "serverVersion": "1.5.0",
+                "buildVersion": "1.5.0+git.541dfa2",
+                "buildSha": expected_sha,
+                "workerVersionId": "expected-version",
+            },
+            sleep=lambda _seconds: None,
+        )
+        self.assertEqual(payload["buildSha"], expected_sha)
 
     def test_registry_contains_decision_grade_xbrl_canary(self) -> None:
         canaries = deployed_canaries.validate_registry(deployed_canaries.load_registry())

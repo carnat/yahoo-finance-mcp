@@ -140,6 +140,7 @@ def fetch_health(url: str, timeout: int) -> dict[str, Any]:
 def wait_for_worker_version(
     health_url: str,
     expected_version_id: str,
+    expected_build_sha: str | None = None,
     *,
     attempts: int,
     delay_seconds: float,
@@ -158,6 +159,14 @@ def wait_for_worker_version(
                 last_error = (
                     f"workerVersionId was {actual_version_id!r}, expected {expected_version_id!r}"
                 )
+            elif expected_build_sha and str(payload.get("buildSha") or "").lower() != expected_build_sha.lower():
+                last_error = (
+                    f"buildSha was {payload.get('buildSha')!r}, expected {expected_build_sha!r}"
+                )
+            elif expected_build_sha and payload.get("buildVersion") != (
+                f"{payload.get('serverVersion')}+git.{expected_build_sha[:7].lower()}"
+            ):
+                last_error = "buildVersion did not identify the expected release and Git commit"
             else:
                 return payload
         except (OSError, ValueError, urllib.error.URLError, json.JSONDecodeError) as exc:
@@ -183,6 +192,7 @@ def _parser() -> argparse.ArgumentParser:
     verify = subparsers.add_parser("verify-health")
     verify.add_argument("--health-url", required=True)
     verify.add_argument("--expected-version-id", required=True)
+    verify.add_argument("--expected-build-sha")
     verify.add_argument("--attempts", type=int, default=18)
     verify.add_argument("--delay-seconds", type=float, default=5)
     verify.add_argument("--timeout", type=int, default=15)
@@ -205,6 +215,7 @@ def main() -> int:
             wait_for_worker_version(
                 args.health_url,
                 args.expected_version_id,
+                args.expected_build_sha,
                 attempts=args.attempts,
                 delay_seconds=args.delay_seconds,
                 timeout=args.timeout,

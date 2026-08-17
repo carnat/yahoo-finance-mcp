@@ -124,7 +124,7 @@
       "actions": {
         "health_check": "health_check"
       },
-      "description": "Public-safe MCP availability and schema identity.\n\nActions:\n- health_check: Availability, schema identity, tool mode, and connector freshness metadata. Params: none"
+      "description": "Public-safe MCP availability, release/build identity, and schema identity.\n\nActions:\n- health_check: Availability, semantic release, exact deployed build, schema identity, tool mode, and connector freshness metadata. Params: none"
     },
     "thai_funds": {
       "actions": {

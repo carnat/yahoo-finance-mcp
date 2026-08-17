@@ -22,7 +22,7 @@ class TestWorkerTransportContract(unittest.TestCase):
     def test_initialize_negotiates_current_and_legacy_protocols(self):
         self.assertIn('"2025-06-18"', self.mcp)
         self.assertIn('"2024-11-05"', self.mcp)
-        self.assertIn("getServerVersion()", self.mcp)
+        self.assertIn("getBuildVersion()", self.mcp)
 
     def test_envelope_schema_matches_structured_response(self):
         schema_start = self.tools.index("const ENVELOPE_V2_OUTPUT_SCHEMA")
@@ -51,7 +51,10 @@ class TestWorkerTransportContract(unittest.TestCase):
         self.assertIn('getWorkerVar("SERVER_VERSION")', self.response)
         self.assertIn("getServerVersion()", self.response)
 
-    def test_deploy_stamp_updates_build_date(self):
+    def test_deploy_stamp_updates_release_and_build_identity(self):
+        self.assertIn('_upsert_var(text, "SERVER_VERSION", release_version)', self.stamp)
+        self.assertIn('_upsert_var(text, "BUILD_VERSION", build_version)', self.stamp)
+        self.assertIn('_upsert_var(text, "BUILD_SHA", build_sha)', self.stamp)
         self.assertIn('build_date = deployed_at[:10]', self.stamp)
         self.assertIn('_upsert_var(text, "BUILD_DATE", build_date)', self.stamp)
 

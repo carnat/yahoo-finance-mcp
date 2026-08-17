@@ -32,6 +32,7 @@ UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-canary/1.0)"
 EXPECTED_SCHEMA_VERSION = "2026-07-08"
 EXPECTED_TOOL_MODE = os.environ.get("EXPECTED_TOOL_MODE", os.environ.get("TOOL_MODE", "grouped")).lower()
 EXPECTED_WORKER_VERSION_ID = os.environ.get("EXPECTED_WORKER_VERSION_ID", "").strip()
+EXPECTED_BUILD_SHA = os.environ.get("EXPECTED_BUILD_SHA", "").strip().lower()
 ALLOW_NETWORK_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in {"1", "true", "yes"}
 VERSION_ATTEMPTS = 19
 VERSION_DELAY_SECONDS = 5.0
@@ -102,6 +103,10 @@ def _assert_contract(data: Any, label: str, expected_tool_count: int | None = No
     if not isinstance(data, dict):
         raise AssertionError(f"{label} returned non-object data: {data!r}")
     required = (
+        "serverVersion",
+        "buildVersion",
+        "buildSha",
+        "deployedAt",
         "toolCount",
         "manifestVersion",
         "manifestHash",
@@ -110,6 +115,14 @@ def _assert_contract(data: Any, label: str, expected_tool_count: int | None = No
     for field in required:
         if field not in data:
             raise AssertionError(f"{label} missing {field}: {data}")
+    if EXPECTED_BUILD_SHA:
+        if str(data.get("buildSha") or "").lower() != EXPECTED_BUILD_SHA:
+            raise AssertionError(f"{label} buildSha mismatch: {data.get('buildSha')!r}")
+        expected_build_version = f"{data.get('serverVersion')}+git.{EXPECTED_BUILD_SHA[:7]}"
+        if data.get("buildVersion") != expected_build_version:
+            raise AssertionError(
+                f"{label} buildVersion mismatch: {data.get('buildVersion')!r} != {expected_build_version!r}"
+            )
     if data.get("envelopeSchemaVersion") not in (None, EXPECTED_SCHEMA_VERSION):
         raise AssertionError(f"{label} envelopeSchemaVersion mismatch: {data}")
     if EXPECTED_TOOL_MODE and str(data.get("toolMode", "")).lower() != EXPECTED_TOOL_MODE:

@@ -1,4 +1,4 @@
-export const SERVER_VERSION = "1.0.0";
+export const UNCONFIGURED_SERVER_VERSION = "0.0.0+unconfigured";
 
 // Module-level Worker env store — populated by setWorkerEnv() in index.ts
 // on each incoming request before tool dispatch.
@@ -19,7 +19,15 @@ export function getWorkerVar(name: string): string | undefined {
 }
 
 export function getServerVersion(): string {
-  return getWorkerVar("SERVER_VERSION") ?? SERVER_VERSION;
+  return getWorkerVar("SERVER_VERSION")?.trim() || UNCONFIGURED_SERVER_VERSION;
+}
+
+export function getBuildVersion(): string {
+  const explicit = getWorkerVar("BUILD_VERSION")?.trim();
+  if (explicit) return explicit;
+  const sha = getWorkerVar("BUILD_SHA")?.trim();
+  const shortSha = sha && /^[0-9a-f]{7,64}$/i.test(sha) ? sha.slice(0, 7).toLowerCase() : null;
+  return shortSha ? `${getServerVersion()}+git.${shortSha}` : getServerVersion();
 }
 
 export interface ToolMeta {

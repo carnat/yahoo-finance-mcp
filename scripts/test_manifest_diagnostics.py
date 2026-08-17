@@ -58,7 +58,8 @@ class TestHealthMetadata(unittest.TestCase):
     def test_health_check_shape(self):
         result = json.loads(_run(self.srv.health_check()))
         expected = {
-            "status", "serverVersion", "toolCount", "manifestVersion", "manifestHash",
+            "status", "serverVersion", "buildVersion", "buildSha", "deployedAt",
+            "toolCount", "manifestVersion", "manifestHash",
             "schemaHash", "runtimeHash", "toolMode", "envelopeSchemaVersion",
             "generatedAt", "privacyScope",
         }
@@ -87,10 +88,13 @@ class TestHealthMetadata(unittest.TestCase):
     def test_public_diagnostics_omit_operational_details(self):
         result = json.loads(_run(self.srv.health_check()))
         forbidden = {
-            "buildSha", "deployedAt", "hiddenAliases", "batchContracts",
+            "hiddenAliases", "batchContracts",
             "responseFieldContract", "doctrineToolStatus", "structuredFactProvider",
         }
         self.assertTrue(forbidden.isdisjoint(result))
+        self.assertEqual(result["serverVersion"], result["buildVersion"])
+        self.assertIsNone(result["buildSha"])
+        self.assertIsNone(result["deployedAt"])
 
         instructions = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
