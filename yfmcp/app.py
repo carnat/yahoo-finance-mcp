@@ -250,7 +250,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 
 ### Options
 - get_option_expiration_dates: Available options expiration dates.
-- get_option_chain: Options chain for a specific expiry and type. Supports strike filters and in_the_money_only.
+- get_option_chain: Options chain for a specific expiry and type. Supports strike_min/strike_max filters and moneyness (near_money, itm, otm, all).
 - summarize_options_flow: Put/call ratio, P/C sentiment, ATM IV, IV percentile, max pain, highest OI strikes.
 - get_historical_put_call_ratio: Explicit dated historical put/call ratio. Uses scarce Alpha quota, never substitutes for the current Yahoo snapshot, and is decisionGrade=false.
 - find_put_hedge_candidates: Pre-filtered OTM puts with two-sided/liquidity evidence; cost and budget use executable ask.
@@ -301,24 +301,13 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 )
 
 
-# Grouped actions route to these handlers under their historical function
-# names (e.g. get_market_quote -> get_fast_info), and grouped input schemas
-# come from their signatures. They are registered on this internal server,
-# which is never served, so expanded mode exposes canonical tool names only;
-# the old names stopped being public tools in 2.0.0.
-internal_handler_server = create_server(
-    "yfinance-internal-handlers",
-    instructions="Internal grouped-mode handler registry; not served.",
-)
-
-
 def build_handler_registry(*servers: FastMCP) -> dict[str, Callable[..., Any]]:
     """Map handler function name -> function for every tool registered on ``servers``.
 
     Reads the FastMCP tool manager so the mapping always reflects the live set
     of registered tools, independent of where the handlers are defined. Used by
-    grouped mode to route action names (e.g. "get_market_quote") to their
-    underlying handler functions (e.g. ``get_fast_info``).
+    grouped mode to route each action name (e.g. "get_market_quote") to the
+    canonical tool function of the same name.
     """
     registry: dict[str, Callable[..., Any]] = {}
     for server in servers:

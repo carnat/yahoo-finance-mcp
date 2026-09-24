@@ -8,7 +8,7 @@ import zoneinfo
 import pandas as pd
 import yfinance as yf
 
-from yfmcp.app import internal_handler_server, yfinance_server
+from yfmcp.app import yfinance_server
 from yfmcp.schemas import _MARKET_SNAPSHOT_OUTPUT_SCHEMA, _TOOL_OUTPUT_SCHEMAS
 from yfmcp.envelope import ErrorCode, _mcp_failure
 from yfmcp.validation import _validate_ticker
@@ -17,32 +17,6 @@ from yfmcp.util import _fetch_with_retry, get_last_trading_date
 from yfmcp.clients.yahoo import _safe_parse
 
 
-@internal_handler_server.tool(
-    name="get_historical_stock_prices",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_historical_stock_prices"],
-    description="""Get raw Yahoo historical OHLCV rows. Daily rows include barStatus and isFinal. A current-session row or a finished row without a usable close is INCOMPLETE/isFinal=false; use completed-session tools for derived analytics.
-Args:
-    ticker: str
-        The ticker symbol of the stock to get historical prices for, e.g. "AAPL"
-    period : str
-        Valid periods: 1d,5d,1mo,3mo,6mo,1y,2y,5y,10y,ytd,max
-        Either Use period parameter or use start and end
-        Default is "1mo"
-    interval : str
-        Valid intervals: 1m,2m,5m,15m,30m,60m,90m,1h,1d,5d,1wk,1mo,3mo
-        Intraday data cannot extend last 60 days
-        Default is "1d"
-    columns : list[str] | None
-        Optional list of OHLCV column names to return, e.g. ["Close"] or ["Close","Volume"].
-        Valid column names: Open, High, Low, Close, Volume, Dividends, Stock Splits.
-        If omitted, all columns are returned.
-        Tip: request only "Close" when you only need price trend data — this reduces response size significantly.
-    prepost : bool
-        If True, includes pre-market and after-hours data rows.
-        Only meaningful with intraday intervals (1m–90m) and period ≤ 60d.
-        Default is False.
-""",
-)
 async def get_historical_stock_prices(
     ticker: str, period: str = "1mo", interval: str = "1d",
     columns: list[str] | None = None, prepost: bool = False,
@@ -170,39 +144,6 @@ async def get_historical_stock_prices(
 
 # ---------------------------------------------------------------------------
 
-@internal_handler_server.tool(
-    name="get_fast_info",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_fast_info"],
-    description="""Alias for get_market_quote. Get lightweight real-time price and market data for one or more ticker symbols. Returns ~20 high-signal fields
-plus pre-market/after-hours prices when available.
-
-PREFER THIS over get_stock_info for any query involving current price, market cap, 52-week range,
-moving averages, or trading volume — it uses ~85-90% fewer tokens than get_stock_info.
-
-Fields returned: currency, exchange, quoteType, lastPrice, priceBasis, observationType, open, previousClose,
-dayHigh, dayLow, yearHigh, yearLow, yearChange, marketCap, shares, lastVolume,
-tenDayAverageVolume, threeMonthAverageVolume, fiftyDayAverage, twoHundredDayAverage,
-priceTimestamp, marketState, marketOpen, lastTradeDate, postMarketTimestamp.
-
-lastPrice is Yahoo's regular-market price observation. It is not a historical
-adjusted close and may differ from get_price_slope.endClose during an active
-session or when the two Yahoo endpoints were observed at different times.
-
-marketOpen: true only during regular session hours (09:30–16:00 ET Mon–Fri). false
-pre-market, after-hours, weekends, and holidays. Always true for crypto (24/7 markets).
-lastTradeDate: YYYY-MM-DD date of the session that open/dayHigh/dayLow/lastVolume belong to.
-On weekends this is the prior Friday, not today.
-postMarketTimestamp: ISO8601 timestamp of postMarketPrice. null when no AH activity.
-
-Extended-hours fields (included when available): preMarketPrice, preMarketChange,
-preMarketChangePercent, postMarketPrice, postMarketChange, postMarketChangePercent.
-
-Args:
-    ticker: str | list[str]
-        A single ticker symbol (e.g. "AAPL") or a list of symbols (e.g. ["AAPL", "MSFT"]).
-        When a list is provided, returns a dict keyed by symbol.
-""",
-)
 async def get_fast_info(ticker: str | list[str]) -> str:
     """Get lightweight real-time price and market data for a ticker symbol."""
     if isinstance(ticker, list):
@@ -364,27 +305,6 @@ async def get_short_interest(ticker: str) -> str:
 
 # ---------------------------------------------------------------------------
 
-@internal_handler_server.tool(
-    name="get_price_stats",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_stats"],
-    description="""Get live quote/range fields plus completed-session historical statistics.
-
-Includes:
-- Current price, previous close, % change today
-- % distance from 52-week high and 52-week low
-- % distance from 50-day and 200-day moving averages
-- 30-day realized annualized volatility (from daily close returns)
-- CAGR over 1y, 3y, 5y (where data is available)
-
-Read priceTimestamp for live fields and dataDate/historicalBarStatus for derived
-fields. PARTIAL results recommend RETRY.
-
-Args:
-    ticker: str | list[str]
-        A single ticker symbol (e.g. "AAPL") or a list of symbols (e.g. ["AAPL", "MSFT"]).
-        When a list is provided, returns a dict keyed by symbol.
-""",
-)
 async def get_price_stats(ticker: str | list[str]) -> str:
     """Get pre-computed price statistics for a ticker."""
     if isinstance(ticker, list):
@@ -1095,22 +1015,6 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
 
 # ---------------------------------------------------------------------------
 
-@internal_handler_server.tool(
-    name="get_volume_ratio",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_ratio"],
-    description="""Compare the latest completed-session volume with prior completed-session averages.
-
-The numerator is excluded from both averages. A current completed-price row
-whose volume is still missing returns PARTIAL/INCOMPLETE with RETRY rather than
-shifting to an older numerator. Returns lastVolume,
-avgVolume10d, avgVolume90d, ratio10d, ratio90d, volumeFlag, and bar/freshness
-metadata.
-
-Args:
-    ticker: str | list[str] — single or batch
-    period: int — averaging period in days (default: 10, used for flag threshold)
-""",
-)
 async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
     """Return volume ratio for one or more tickers."""
     if isinstance(ticker, list):
@@ -1239,18 +1143,6 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
 
 # ---------------------------------------------------------------------------
 
-@internal_handler_server.tool(
-    name="get_ma_position",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_ma_position"],
-    description="""Compare Yahoo's live regular-market quote with trailing 50DMA and 200DMA values.
-
-This is intentionally live, not a completed-close signal. Read priceTimestamp
-and observationType before comparing it with historical tools.
-
-Args:
-    ticker: str | list[str] — single or batch
-""",
-)
 async def get_ma_position(ticker: str | list[str]) -> str:
     """Return MA position for one or more tickers."""
     if isinstance(ticker, list):
@@ -1442,29 +1334,6 @@ async def get_short_momentum(ticker: str | list[str]) -> str:
 
 # ---------------------------------------------------------------------------
 
-@internal_handler_server.tool(
-    name="get_volume_gate",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_gate"],
-    description="""Deprecated alias for check_volume_liquidity_threshold. Evaluate liquidity from the latest completed-session volume and unadjusted close against prior-session averages or the USD notional threshold.
-
-An unfinished active-session bar and any trailing row without a usable close
-are excluded. Missing current-session price/volume returns PARTIAL/INCOMPLETE
-with RETRY rather than a pass/fail decision. Returns currency, fxRate,
-lastVolume, adv10d, adv20d (computed from prior completed sessions),
-adv90d, ratio20d (always computed when adv20d is available), gatePass,
-dataDate, and a pre-formatted note.
-
-foreign_exchange: bool (default False). When True, enables foreign exchange notional conversion:
-daily notional is converted to USD via a live {CCY}=X FX rate fetch before comparing to the $10M threshold.
-ratio20d is still computed and returned alongside the notional gate result.
-
-Args:
-    ticker: str
-        The ticker symbol, e.g. "ASTS"
-    foreign_exchange: bool
-        Set True for foreign exchange / ADR tickers to convert daily notional to USD for the threshold check. Default False.
-""",
-)
 async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
     """Return volume liquidity threshold assessment."""
     company = yf.Ticker(ticker)
