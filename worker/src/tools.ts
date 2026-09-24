@@ -25,7 +25,6 @@ import {
   getOptionChain,
   getOptionExpirationDates,
   getHistoricalPutCallRatio,
-  getOvernightQuote,
   getPriceSlope,
   getPriceStats,
   getPutHedgeCandidates,
@@ -43,7 +42,6 @@ import {
   getStockInfo,
   getOptionsSummary,
   getCompanyNews,
-  listSecFilings,
   listSecCompanyFilings,
   getFilingOutline,
   getFilingSection,
@@ -236,98 +234,6 @@ export const TOOLS: Tool[] = [
     },
   },
   {
-    name: "get_historical_stock_prices",
-    description:
-      "Get raw historical OHLCV rows. Daily rows include barStatus/isFinal. A current-session row or finished row without a usable close is INCOMPLETE/isFinal=false; derived analytics should use completed-session tools.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
-        period: {
-          type: "string",
-          description: "Valid periods: 1d | 5d | 1mo | 3mo | 6mo | 1y | 2y | 5y | 10y | ytd | max",
-          default: "1mo",
-        },
-        interval: {
-          type: "string",
-          description:
-            "Valid intervals: 1m | 2m | 5m | 15m | 30m | 60m | 90m | 1h | 1d | 5d | 1wk | 1mo | 3mo. Intraday data cannot extend past 60 days.",
-          default: "1d",
-        },
-        prepost: {
-          type: "boolean",
-          description:
-            "If true, includes pre-market and after-hours rows. Only meaningful with intraday intervals (1m–90m) and period ≤ 60d. Default false.",
-          default: false,
-        },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_stock_info",
-    description:
-      "Get stock fundamentals for one or more tickers. Returns ~30 key fields by default: identity (shortName, sector, industry, country), price (currentPrice, previousClose, marketCap, enterpriseValue), valuation (trailingPE, forwardPE, priceToBook, EV/EBITDA), earnings (EPS, revenueGrowth), margins (gross/operating/profit, ROE, ROA), dividends, analyst ratings, and longBusinessSummary. Pass include_all: true to get the full 120+ field payload. Pass an array of symbols to fetch multiple tickers in one call — returns a dict keyed by symbol. Max 5 tickers per call; if you need more, split into multiple calls. For ETFs or mutual funds, use get_etf_info instead.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: {
-          description: "Stock ticker symbol (e.g. 'AAPL') or an array of up to 5 symbols (e.g. ['AAPL', 'MSFT']). If more than 5 are provided, only the first 5 are processed — split larger lists into multiple calls.",
-          oneOf: [
-            { type: "string" },
-            { type: "array", items: { type: "string" }, maxItems: 5 },
-          ],
-        },
-        include_all: {
-          type: "boolean",
-          description: "Set to true to return the full 120+ field payload. Defaults to false (returns ~30 key fields).",
-        },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_etf_info",
-    description:
-      "Get ETF or mutual fund data. sections defaults to overview, holdings, allocation; add operations for expense/turnover comparisons or fixed_income for bond detail. Use for fund tickers, not individual stocks.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: {
-          description: "ETF or fund ticker symbol (e.g. 'SPY') or an array of up to 5 symbols (e.g. ['SPY', 'QQQ']). If more than 5 are provided, only the first 5 are processed — split larger lists into multiple calls.",
-          oneOf: [
-            { type: "string" },
-            { type: "array", items: { type: "string" }, maxItems: 5 },
-          ],
-        },
-        sections: { type: "array", items: { type: "string", enum: ["overview", "holdings", "allocation", "operations", "fixed_income"] }, uniqueItems: true },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_yahoo_finance_news",
-    description: "Deprecated alias for get_company_news.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_stock_actions",
-    description: "Get dividend, stock-split, and fund capital-gain distribution history for a ticker.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
     name: "get_financial_statement",
     description:
       "Get a financial statement for a ticker. Supports annual, quarterly, trailing income/cash-flow, and optional line_items filtering.",
@@ -352,30 +258,6 @@ export const TOOLS: Tool[] = [
         line_items: { type: "array", items: { type: "string" }, description: "Optional line-item names to return, e.g. Total Revenue or Free Cash Flow." },
       },
       required: ["ticker", "financial_type"],
-    },
-  },
-  {
-    name: "get_holder_info",
-    description:
-      "Get shareholder data for a ticker. Choose from: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
-        holder_type: {
-          type: "string",
-          description: "The type of holder information to retrieve.",
-          enum: [
-            "major_holders",
-            "institutional_holders",
-            "mutualfund_holders",
-            "insider_transactions",
-            "insider_purchases",
-            "insider_roster_holders",
-          ],
-        },
-      },
-      required: ["ticker", "holder_type"],
     },
   },
   {
@@ -438,64 +320,6 @@ export const TOOLS: Tool[] = [
     },
   },
   {
-    name: "get_recommendations",
-    description:
-      "Get analyst recommendations or upgrade/downgrade history for a ticker. For upgrades_downgrades, specify months_back (default 12).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
-        recommendation_type: {
-          type: "string",
-          description: "The type of recommendation data to retrieve.",
-          enum: ["recommendations", "upgrades_downgrades"],
-        },
-        months_back: {
-          type: "number",
-          description: "Number of months of upgrade/downgrade history to return (default: 12).",
-          default: 12,
-        },
-      },
-      required: ["ticker", "recommendation_type"],
-    },
-  },
-  {
-    name: "get_fast_info",
-    description:
-      "Alias for get_market_quote. Get lightweight regular-market price and market data for one or more tickers. lastPrice has priceBasis=REGULAR_MARKET_PRICE and priceTimestamp identifies the Yahoo quote observation. It is not an adjusted historical close and may differ from get_price_slope.endClose during an active session or between provider observations. Returns high-signal fields: currency, exchange, quoteType, lastPrice, priceBasis, priceTimestamp, marketState, open, previousClose, dayHigh, dayLow, yearHigh, yearLow, yearChange, marketCap, shares, lastVolume, tenDayAverageVolume, threeMonthAverageVolume, fiftyDayAverage, twoHundredDayAverage, preMarketPrice, postMarketPrice, marketOpen, lastTradeDate, and postMarketTimestamp. Prefer this over get_stock_info for current price/market data queries. Max 5 tickers per call; if you need more, split into multiple calls.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: {
-          description: "Stock ticker symbol (e.g. 'AAPL') or an array of up to 5 symbols (e.g. ['AAPL', 'MSFT']). If more than 5 are provided, only the first 5 are processed — split larger lists into multiple calls.",
-          oneOf: [
-            { type: "string" },
-            { type: "array", items: { type: "string" }, maxItems: 5 },
-          ],
-        },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_price_stats",
-    description:
-      "Get live quote/range fields plus completed-session 30-day volatility and 1y/3y/5y CAGR. Read priceTimestamp for live fields and dataDate/historicalBarStatus for derived fields; PARTIAL recommends RETRY. Max 5 tickers.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: {
-          description: "Stock ticker symbol (e.g. 'AAPL') or an array of up to 5 symbols (e.g. ['AAPL', 'MSFT']). If more than 5 are provided, only the first 5 are processed — split larger lists into multiple calls.",
-          oneOf: [
-            { type: "string" },
-            { type: "array", items: { type: "string" }, maxItems: 5 },
-          ],
-        },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
     name: "get_analyst_consensus",
     description:
       "Get analyst consensus for one or more tickers. priceTargets.current is the current market price; low/high/mean/median are consensus targets and pctUpsideFromLastPrice uses the mean target. Max 5 tickers per call.",
@@ -521,41 +345,6 @@ export const TOOLS: Tool[] = [
       type: "object",
       properties: {
         ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_financial_ratios",
-    description:
-      "Get pre-computed key financial ratios for one or more tickers, with unitSemantics separating multiples, decimal ratios, percent values, and currency values. Max 5 tickers per call; if you need more, split into multiple calls.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: {
-          description: "Stock ticker symbol (e.g. 'AAPL') or an array of up to 5 symbols (e.g. ['AAPL', 'MSFT']). If more than 5 are provided, only the first 5 are processed — split larger lists into multiple calls.",
-          oneOf: [
-            { type: "string" },
-            { type: "array", items: { type: "string" }, maxItems: 5 },
-          ],
-        },
-        history_periods: { type: "integer", minimum: 0, maximum: 20, default: 0, description: "Add up to 20 historical Yahoo valuation periods; 0 keeps the compact current snapshot." },
-        frequency: { type: "string", enum: ["quarterly", "monthly", "yearly", "trailing"], default: "quarterly" },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_calendar",
-    description:
-      "Get a ticker's upcoming Yahoo calendar or earnings-date history. Yahoo dates are provider data and always UNVERIFIED; check official releases for material scheduling decisions.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
-        mode: { type: "string", enum: ["upcoming", "history"], default: "upcoming" },
-        limit: { type: "integer", minimum: 1, maximum: 100, default: 12 },
-        offset: { type: "integer", minimum: 0, default: 0 },
       },
       required: ["ticker"],
     },
@@ -666,65 +455,6 @@ export const TOOLS: Tool[] = [
     },
   },
   {
-    name: "get_volume_ratio",
-    description:
-      "Compare the latest completed-session volume with prior 10/90 completed-session averages. The numerator is excluded from both averages. Missing latest volume returns PARTIAL/INCOMPLETE with RETRY; it never shifts to an older numerator. Max 5 tickers.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: {
-          description: "Stock ticker symbol or array of up to 5 symbols. Split larger lists into multiple calls.",
-          oneOf: [
-            { type: "string" },
-            { type: "array", items: { type: "string" }, maxItems: 5 },
-          ],
-        },
-        period: {
-          type: "number",
-          description: "Averaging period in days (default: 10).",
-          default: 10,
-        },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_ma_position",
-    description:
-      "Compare Yahoo's live regular-market quote with trailing 50/200-day averages. This is intentionally live, not a completed-close signal; read priceTimestamp and observationType. Max 5 tickers.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: {
-          description: "Stock ticker symbol or array of up to 5 symbols. Split larger lists into multiple calls.",
-          oneOf: [
-            { type: "string" },
-            { type: "array", items: { type: "string" }, maxItems: 5 },
-          ],
-        },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_credit_health",
-    description:
-      "Get pre-computed credit/leverage metrics using operational EBITDA (EBIT plus depreciation/amortization when available), EBIT and EBITDA interest coverage, debt tier, credit stress flag, and source fields. Max 5 tickers per call; split larger lists into multiple calls.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: {
-          description: "Stock ticker symbol or array of up to 5 symbols. Split larger lists into multiple calls.",
-          oneOf: [
-            { type: "string" },
-            { type: "array", items: { type: "string" }, maxItems: 5 },
-          ],
-        },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
     name: "get_short_momentum",
     description:
       "Get short interest with MoM delta, direction, squeeze risk, and the SEC/provider observation date in dataDate (not today's market date). Max 5 tickers per call; split larger lists into multiple calls.",
@@ -742,371 +472,7 @@ export const TOOLS: Tool[] = [
       required: ["ticker"],
     },
   },
-  {
-    name: "get_earnings_momentum",
-    description:
-      "Deprecated alias for analyze_earnings_momentum. Get earnings revision momentum, beat rate, and estimate direction signals. Returns revision7d/30d/90d, momentumFlag, beatRate, currentBeatStreak. Max 5 tickers per call; split larger lists into multiple calls.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: {
-          description: "Stock ticker symbol or array of up to 5 symbols. Split larger lists into multiple calls.",
-          oneOf: [
-            { type: "string" },
-            { type: "array", items: { type: "string" }, maxItems: 5 },
-          ],
-        },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_options_flow_summary",
-    description:
-      "Get options flow summary: P/C ratio, IV percentile, max pain strike, highest OI strikes for nearest liquid expiry. Single ticker only.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
-        expiry_hint: {
-          type: "string",
-          description: "Optional YYYY-MM-DD expiry date. If omitted, selects nearest liquid expiry.",
-        },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_put_hedge_candidates",
-    description:
-      "Get pre-filtered OTM put options within a strike range and budget with feasibility pre-computed. Single ticker only.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
-        otm_pct_min: { type: "number", description: "Minimum OTM % (default: 8).", default: 8 },
-        otm_pct_max: { type: "number", description: "Maximum OTM % (default: 12).", default: 12 },
-        budget_usd: { type: "number", description: "Max premium per contract in USD (default: 500).", default: 500 },
-        expiry_after: { type: "string", description: "YYYY-MM-DD minimum expiry date.", default: "" },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_analyst_upgrade_radar",
-    description:
-      "Get recent analyst rating changes with canonical signal classification (UPGRADE/DOWNGRADE/INITIATED/MAINTAIN), separate upgrade/downgrade/initiation counts, netSentiment, and summary. Returns ptFrom, ptTo (null — price target data not exposed by yfinance), and ptDirection (RAISE/CUT/UNCHANGED/INITIATED/null). Max 5 tickers per call.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: {
-          description: "Stock ticker symbol or array of up to 5 symbols. Split larger lists into multiple calls.",
-          oneOf: [
-            { type: "string" },
-            { type: "array", items: { type: "string" }, maxItems: 5 },
-          ],
-        },
-        days_back: {
-          type: "number",
-          description: "Lookback window in calendar days (default: 30).",
-          default: 30,
-        },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_overnight_quote",
-    description:
-      "Deprecated diagnostics-only Yahoo extended-hours proxy. This does not provide true 20:00-04:00 ET overnight venue data. Returns provider, providerStatus, dataKind, decisionGrade, warnings, requestedFeed, overnightPrice, overnightTime, overnightHigh, overnightLow, overnightOpen, overnightVolume, previousClose, gapPct, gapDirection, dataSource, isBlueOceanWindow, isStale, dataAgeHours, fallback, and note.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Ticker symbol, e.g. 'BTC-USD'" },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_filing_data",
-    description:
-      "Retrieve structured XBRL-tagged financial facts from EDGAR. Try this tool before search_filing_text for GAAP line items and geographic revenue.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Ticker symbol, e.g. 'GLW'" },
-        fact_type: {
-          type: "string",
-          enum: [
-            "geographic_revenue",
-            "segment_revenue",
-            "capex",
-            "rd_expense",
-            "operating_income",
-            "net_income",
-            "total_revenue",
-            "long_term_debt",
-            "cash",
-          ],
-          description: "Fact type to retrieve from EDGAR companyconcept.",
-        },
-        region: {
-          type: "string",
-          description: "Required for fact_type='geographic_revenue'.",
-        },
-        filing_type: {
-          type: "string",
-          enum: ["10-K", "10-Q"],
-          default: "10-K",
-        },
-        period: {
-          type: "string",
-          enum: ["latest", "all"],
-          default: "latest",
-        },
-        period_mode: {
-          type: "string",
-          enum: ["auto", "quarter", "ytd", "annual"],
-          default: "auto",
-          description:
-            "Filter XBRL facts by duration. 'auto' selects quarter for 10-Q, annual for 10-K. Use 'quarter' to avoid YTD figures.",
-        },
-      },
-      required: ["ticker", "fact_type"],
-    },
-  },
-  {
-    name: "search_filing_text",
-    description:
-      "Full-text search or section retrieval from SEC filing HTML. Use only when get_filing_data returns NOT_DISCLOSED or the fact is not XBRL-tagged.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Ticker symbol, e.g. 'GLW'" },
-        search_terms: {
-          type: "array",
-          items: { type: "string" },
-          description: "Keywords to search for in filing text.",
-        },
-        section_hint: {
-          type: "string",
-          description: "Optional section/heading hint.",
-        },
-        filing_type: {
-          type: "string",
-          enum: ["10-K", "10-Q", "8-K"],
-          default: "10-K",
-        },
-        accession_number: {
-          type: "string",
-          description: "Optional accession number; if omitted latest filing is selected from submissions.",
-        },
-        context_chars: {
-          type: "number",
-          default: 1500,
-        },
-        return_tables: {
-          type: "boolean",
-          default: true,
-        },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_options_flow_scan",
-    description:
-      "Structured options flow scan for a binary event window. Returns pcRatio, ivPctile, putVolVs10dAvg, putVolTrend (INCREASING/STABLE/DECREASING), maxPainStrike, bracket (UPPER/MID/LOWER), formattedBlock (paste directly into session output), dataDate. Prior window-label readings cached server-side 72h for trend computation (e.g. T-14 → T-7 → T-2).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
-        window_label: {
-          type: "string",
-          description: "Free-form label for this reading, e.g. 'T-14', 'T-7', 'T-2', 'pre-earnings', 'week1'. Used as cache key for trend computation across readings.",
-        },
-      },
-      required: ["ticker", "window_label"],
-    },
-  },
-  {
-    name: "get_price_target_bracket",
-    description:
-      "Compare a live regular-market quote to a user-supplied reference target. currentToTargetRatioPct preserves the legacy ratio; distanceToTargetPct is the directional percent distance to target. This is not a completed-close calculation.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
-        reference_target_price: { type: "number", description: "Preferred user-supplied reference target price." },
-        io_pt: { type: "number", description: "Backward-compatible alias for reference_target_price." },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_position_score_inputs",
-    description:
-      "Aggregate public analyst, earnings, live-price, and completed-session technical inputs. Read componentStatus plus quoteDataDate/completedBarDataDate; PARTIAL recommends RETRY. No holdings, cost basis, or private scoring rules.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_volume_gate",
-    description:
-      "Deprecated alias for check_volume_liquidity_threshold. Evaluate liquidity from the latest completed-session volume/close versus prior-session ADV. Missing latest price/volume returns PARTIAL/INCOMPLETE with RETRY and no gate decision.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'ASTS'" },
-        foreign_exchange: {
-          type: "boolean",
-          description: "Set true for foreign exchange / ADR tickers to convert daily notional to USD for the $10M threshold check. Default false.",
-          default: false,
-        },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_options_summary",
-    description: "Get options summary for a single ticker: ATM implied volatility, put/call ratio by volume and OI, max pain strike for the nearest or requested expiry. Preferred for data-source use because it returns a compact snapshot without the full contract list.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" },
-        expiry_hint: { type: "string", description: "Optional YYYY-MM-DD expiry. Must be one of get_option_expiration_dates." },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "list_sec_filings",
-    description: "List recent SEC filings for a ticker from EDGAR. Returns accession number, filing date, form type, primary document URL, and EDGAR index URL.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string" },
-        form_type: { type: "string", enum: ["10-K", "10-Q", "8-K", "DEF 14A"], default: "10-K" },
-        max_filings: { type: "number", default: 5 },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_filing_outline",
-    description: "Parse the document outline of an SEC filing. Returns a hierarchical tree of Parts, Items, and Notes.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string" },
-        accession_number: { type: "string" },
-        document_url: { type: "string" },
-      },
-      required: ["ticker"],
-    },
-  },
-  {
-    name: "get_filing_section",
-    description: "Retrieve an SEC filing section from a structural heading. Item requests fail closed with SECTION_STRUCTURE_NOT_RESOLVED instead of returning table-of-contents text.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string" },
-        section_name: { type: "string" },
-        document_url: { type: "string" },
-        context_chars: { type: "number", default: 3000 },
-      },
-      required: ["ticker", "section_name", "document_url"],
-    },
-  },
-  {
-    name: "list_filing_tables",
-    description: "List semantically usable SEC filing tables. Preserves original tableIndex and reports excluded empty/layout tables.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string" },
-        document_url: { type: "string" },
-      },
-      required: ["ticker", "document_url"],
-    },
-  },
-  {
-    name: "get_filing_table",
-    description: "Get parsed rows for a specific SEC table. Empty/layout-only tables return UNUSABLE_TABLE and LIST_USABLE_TABLES.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string" },
-        document_url: { type: "string" },
-        table_index: { type: "number" },
-        max_rows: { type: "number", default: 30 },
-      },
-      required: ["ticker", "document_url", "table_index"],
-    },
-  },
-  {
-    name: "extract_filing_fact",
-    description: "Extract a specific financial fact from an SEC filing. Uses XBRL first, parsed tables second, text search last.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticker: { type: "string" },
-        fact_name: { type: "string" },
-        document_url: { type: "string" },
-        accession_number: { type: "string" },
-      },
-      required: ["ticker", "fact_name"],
-    },
-  },
 ];
-
-export const TOOL_ALIASES: Record<string, string> = {
-  get_fast_info: "get_market_quote",
-  get_historical_stock_prices: "get_historical_prices",
-  get_stock_info: "get_company_profile",
-  get_etf_info: "get_fund_profile",
-  get_stock_actions: "get_corporate_actions",
-  get_holder_info: "get_ownership_holders",
-
-  get_price_stats: "analyze_price_performance",
-  get_ma_position: "analyze_moving_average_position",
-  get_volume_ratio: "analyze_volume_ratio",
-  get_volume_gate: "check_volume_liquidity_threshold",
-
-  get_financial_ratios: "analyze_financial_ratios",
-  get_credit_health: "analyze_credit_health",
-
-  get_recommendations: "get_analyst_recommendations",
-  get_analyst_upgrade_radar: "get_analyst_rating_changes",
-  get_earnings_momentum: "analyze_earnings_momentum",
-  get_calendar: "get_company_events_calendar",
-  get_yahoo_finance_news: "get_company_news",
-
-  get_options_flow_summary: "summarize_options_flow",
-  get_options_summary: "summarize_options_flow",
-  get_options_flow_scan: "analyze_options_flow_window",
-  get_put_hedge_candidates: "find_put_hedge_candidates",
-
-  get_price_target_bracket: "calculate_price_target_distance",
-  get_position_score_inputs: "analyze_position_signals",
-
-  list_sec_filings: "list_sec_company_filings",
-  get_filing_outline: "get_sec_filing_outline",
-  get_filing_section: "get_sec_filing_section",
-  list_filing_tables: "list_sec_filing_tables",
-  get_filing_table: "get_sec_filing_table",
-
-  get_filing_data: "extract_sec_filing_fact",
-  extract_filing_fact: "extract_sec_filing_fact",
-
-  search_filing_text: "search_sec_filing_text",
-};
 
 const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_market_quote", description: "Get a lightweight Yahoo regular-market price observation for one or more tickers. lastPrice uses priceBasis=REGULAR_MARKET_PRICE and includes priceTimestamp; use get_price_slope for adjusted daily-bar analytics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
@@ -1174,18 +540,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "health_check", description: "Return public-safe MCP availability, release/build identity, schema identity, tool mode, and connector-freshness metadata.", inputSchema: { type: "object", properties: {} } },
 ];
 
-const DEPRECATED_ALIAS_TOOLS: Tool[] = [];
-const DEPRECATED_ALIAS_NAMES = new Set(Object.keys(TOOL_ALIASES));
-
-TOOLS.push(...CANONICAL_ADDITIONS, ...DEPRECATED_ALIAS_TOOLS);
-for (const tool of TOOLS) {
-  const canonical = TOOL_ALIASES[tool.name];
-  if (canonical && tool.name !== canonical) {
-    tool.deprecated = true;
-    tool.useInstead = canonical;
-    tool.deprecationReason ??= "Use the canonical public tool name.";
-  }
-}
+TOOLS.push(...CANONICAL_ADDITIONS);
 
 const SIMPLE_OBJECT_SCHEMA: Tool["outputSchema"] = {
   type: "object",
@@ -1694,7 +1049,6 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     },
     additionalProperties: true,
   },
-  get_overnight_quote: SIMPLE_OBJECT_SCHEMA,
   get_filing_data: {
     type: "object",
     properties: {
@@ -2006,10 +1360,6 @@ OUTPUT_SCHEMAS.extract_sec_filing_fact = {
   additionalProperties: true,
 };
 
-for (const [alias, canonical] of Object.entries(TOOL_ALIASES)) {
-  OUTPUT_SCHEMAS[alias] = OUTPUT_SCHEMAS[canonical] ?? SIMPLE_OBJECT_SCHEMA;
-}
-
 for (const tool of TOOLS) {
   tool.outputSchema = OUTPUT_SCHEMAS[tool.name] ?? SIMPLE_OBJECT_SCHEMA;
 }
@@ -2320,14 +1670,6 @@ type DoctrineToolStatus = {
 };
 
 const TOOL_DOCTRINE_STATUS: Record<string, DoctrineToolStatus> = {
-  get_overnight_quote: {
-    capabilityStatus: "DEGRADED",
-    decisionGrade: false,
-    doctrineUse: "DIAGNOSTICS_ONLY",
-    failureMode: "YAHOO_EXTENDED_HOURS_PROXY_ONLY",
-    evidenceRequired: false,
-    sourceType: "yahoo",
-  },
   get_sec_filing_section_markdown: {
     capabilityStatus: "DEGRADED",
     decisionGrade: false,
@@ -2363,17 +1705,6 @@ const TOOL_DOCTRINE_STATUS: Record<string, DoctrineToolStatus> = {
 function doctrineStatusFor(tool: string): DoctrineToolStatus | undefined {
   return TOOL_DOCTRINE_STATUS[tool];
 }
-
-type AliasSuccessOptions = {
-  canonicalTool: string;
-  deprecatedTool?: boolean;
-  useInstead?: string;
-  partialSuccess?: boolean;
-  successCount?: number;
-  errorCount?: number;
-  warnings?: { code: string; message: string; severity: string }[];
-  metaExtra?: Record<string, unknown>;
-};
 
 async function computeHash(data: string): Promise<string> {
   const encoded = new TextEncoder().encode(data);
@@ -2461,11 +1792,9 @@ function secIndexOutlinePayload(indexPayload: Record<string, unknown>): string {
 }
 
 export async function callTool(name: string, args: Record<string, unknown>): Promise<string> {
-  const aliasTarget = TOOL_ALIASES[name];
-  const canonicalTool = aliasTarget ?? name;
   let raw: string;
   try {
-    raw = await _dispatchTool(canonicalTool, args);
+    raw = await _dispatchTool(name, args);
   } catch (error) {
     const rawMessage = error instanceof Error ? error.message : String(error);
     const lower = rawMessage.toLowerCase();
@@ -2517,31 +1846,9 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       // non-JSON payload
     }
   }
-  if (aliasTarget != null) {
-    const aliasToolDef = TOOLS.find((t) => t.name === name);
-    const opts: AliasSuccessOptions = {
-      canonicalTool,
-      ...(doctrineStatusFor(canonicalTool) ? { metaExtra: doctrineStatusFor(canonicalTool) } : {}),
-      ...(DEPRECATED_ALIAS_NAMES.has(name)
-        ? {
-            deprecatedTool: true,
-            useInstead: aliasToolDef?.useInstead ?? TOOL_ALIASES[name] ?? canonicalTool,
-          }
-        : {}),
-      ...(batchMeta ?? {}),
-    };
-    if (DEPRECATED_ALIAS_NAMES.has(name)) {
-      opts.warnings = [{
-        code: "DEPRECATED_ALIAS",
-        message: `Use ${canonicalTool} instead.`,
-        severity: "info",
-      }];
-    }
-    return mcpSuccess(name, raw, opts);
-  }
   return mcpSuccess(name, raw, {
     ...(batchMeta ?? {}),
-    ...(doctrineStatusFor(canonicalTool) ? { metaExtra: doctrineStatusFor(canonicalTool) } : {}),
+    ...(doctrineStatusFor(name) ? { metaExtra: doctrineStatusFor(name) } : {}),
   });
 }
 
@@ -2683,8 +1990,6 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       );
     case "get_analyst_rating_changes":
       return getAnalystUpgradeRadar(tickerArg(args.ticker), num(args.days_back, 30));
-    case "get_overnight_quote":
-      return getOvernightQuote(str(args.ticker));
 
     case "extract_sec_filing_fact": {
       const requestedFactName = str(args.fact_type ?? args.fact ?? args.fact_name);
@@ -2972,16 +2277,6 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       );
     case "compare_earnings_actual_vs_estimate":
       return compareEarningsActualVsEstimate(str(args.ticker), str(args.period, "latest"));
-    case "search_filing_text":
-      return searchFilingText(
-        str(args.ticker),
-        (args.search_terms as string[]) ?? [],
-        args.section_hint != null ? str(args.section_hint) : null,
-        str(args.filing_type, "10-K"),
-        args.accession_number != null ? str(args.accession_number) : null,
-        num(args.context_chars, 1500),
-        args.return_tables !== false,
-      );
     case "analyze_options_flow_window":
       return getOptionsFlowScan(str(args.ticker), str(args.window_label));
     case "calculate_price_target_distance":
@@ -3075,74 +2370,6 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       const foreignExchange = args.foreign_exchange === true;
       return getMarketSnapshot(ticker, mode, foreignExchange);
     }
-    case "get_options_summary":
-      return getOptionsSummary(str(args.ticker), args.expiry_hint != null ? str(args.expiry_hint) : undefined);
-    case "get_filing_data":
-      return getFilingData(str(args.ticker), str(args.fact_type), args.region != null ? str(args.region) : null, str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.period_mode, "auto"));
-    case "list_sec_filings":
-      return listSecFilings(str(args.ticker), str(args.filing_type ?? args.form_type, "10-K"), num(args.limit ?? args.max_filings, 5));
-    case "get_filing_outline":
-      return _dispatchTool("get_sec_filing_outline", args);
-    case "get_filing_section":
-      return _dispatchTool("get_sec_filing_section", args);
-    case "list_filing_tables":
-      return _dispatchTool("list_sec_filing_tables", args);
-    case "get_filing_table":
-      return _dispatchTool("get_sec_filing_table", args);
-    case "extract_filing_fact":
-      return extractFilingFact(str(args.ticker), str(args.fact_name), args.document_url != null ? str(args.document_url) : null, args.accession_number != null ? str(args.accession_number) : null);
-    case "get_fast_info":
-      return getFastInfo(tickerArg(args.ticker));
-    case "get_historical_stock_prices": {
-      const rawTicker = args.ticker;
-      if (rawTicker == null || String(rawTicker).trim() === "") {
-        return mcpFailure("get_historical_stock_prices", ErrorCode.INPUT_VALIDATION_ERROR, "ticker is required");
-      }
-      const tickerStr = String(rawTicker).trim().toUpperCase();
-      const tickerErr = validateTicker(tickerStr);
-      if (tickerErr) return mcpFailure("get_historical_stock_prices", ErrorCode.INPUT_VALIDATION_ERROR, tickerErr);
-      return getHistoricalPrices(tickerStr, str(args.period, "1mo"), str(args.interval, "1d"), args.prepost === true);
-    }
-    case "get_stock_info":
-      return getStockInfo(tickerArg(args.ticker), args.include_all === true);
-    case "get_etf_info":
-      return getEtfInfo(tickerArg(args.ticker), Array.isArray(args.sections) ? args.sections.map((item) => str(item)) : undefined);
-    case "get_stock_actions":
-      return getStockActions(str(args.ticker));
-    case "get_holder_info":
-      return getHolderInfo(str(args.ticker), str(args.holder_type));
-    case "get_price_stats":
-      return getPriceStats(tickerArg(args.ticker));
-    case "get_ma_position":
-      return getMaPosition(tickerArg(args.ticker));
-    case "get_volume_ratio":
-      return getVolumeRatio(tickerArg(args.ticker), num(args.period, 10));
-    case "get_volume_gate":
-      return getVolumeGate(str(args.ticker), args.foreign_exchange === true);
-    case "get_financial_ratios":
-      return getFinancialRatios(tickerArg(args.ticker), num(args.history_periods, 0), str(args.frequency, "quarterly"));
-    case "get_credit_health":
-      return getCreditHealth(tickerArg(args.ticker));
-    case "get_recommendations":
-      return getRecommendations(str(args.ticker), str(args.recommendation_type), num(args.months_back, 12));
-    case "get_analyst_upgrade_radar":
-      return getAnalystUpgradeRadar(tickerArg(args.ticker), num(args.days_back, 30));
-    case "get_earnings_momentum":
-      return getEarningsMomentum(tickerArg(args.ticker));
-    case "get_calendar":
-      return getCalendar(str(args.ticker), str(args.mode, "upcoming"), num(args.limit, 12), num(args.offset, 0));
-    case "get_yahoo_finance_news":
-      return getCompanyNews(str(args.ticker), 10, 14, ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]);
-    case "get_options_flow_summary":
-      return getOptionsSummary(str(args.ticker), args.expiry_hint != null ? str(args.expiry_hint) : undefined);
-    case "get_options_flow_scan":
-      return getOptionsFlowScan(str(args.ticker), str(args.window_label));
-    case "get_put_hedge_candidates":
-      return getPutHedgeCandidates(str(args.ticker), num(args.otm_pct_min, 8), num(args.otm_pct_max, 12), num(args.budget_usd, 500), str(args.expiry_after));
-    case "get_price_target_bracket":
-      return getPriceTargetBracket(str(args.ticker), num(args.reference_target_price ?? args.io_pt, 0));
-    case "get_position_score_inputs":
-      return getPositionScoreInputs(tickerArg(args.ticker));
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

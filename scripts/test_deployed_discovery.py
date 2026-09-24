@@ -939,8 +939,8 @@ def main() -> int:
             raise AssertionError("get_option_chain (AAPL) missing filtersApplied")
         print("  PASS chained option-chain smoke (AAPL)")
 
-    # Invalid-args validation test: get_historical_stock_prices({}) must not cause provider 404
-    bad_payload = call_tool("get_historical_stock_prices", {}, 902, allow_jsonrpc_error=True)
+    # Invalid-args validation test: get_historical_prices({}) must not cause provider 404
+    bad_payload = call_tool("get_historical_prices", {}, 902, allow_jsonrpc_error=True)
     bad_str = json.dumps(bad_payload)
     # Must return a validation error. The specific check is whether we see a Yahoo chart 404
     # (which indicates the provider was called with no ticker before validation occurred).
@@ -954,7 +954,7 @@ def main() -> int:
     )
     if is_provider_404:
         raise AssertionError(
-            f"get_historical_stock_prices({{}}) caused provider 404 instead of INPUT_VALIDATION_ERROR.\n"
+            f"get_historical_prices({{}}) caused provider 404 instead of INPUT_VALIDATION_ERROR.\n"
             f"Response: {bad_str[:400]}"
         )
     if not (
@@ -963,7 +963,7 @@ def main() -> int:
         or (isinstance(bad_payload, dict) and bad_payload.get("error"))
     ):
         raise AssertionError(
-            f"get_historical_stock_prices({{}}) expected validation error or ok=false, got: {bad_str[:400]}"
+            f"get_historical_prices({{}}) expected validation error or ok=false, got: {bad_str[:400]}"
         )
     print("  PASS invalid-args test (empty ticker returns validation error, not provider 404)")
 
@@ -1024,43 +1024,6 @@ def main() -> int:
         _check_finnhub_item_shape(_fh_items[0])
         print("  PASS Finnhub item shape check (sourceType=company_news, source=finnhub)")
     print(f"  PASS Finnhub deployed smoke (status={actual_fh_status!r})")
-
-    # Overnight smoke. This is Yahoo indicative/pre-post-market data only; true
-    # The unusable third-party true-overnight route was removed.
-    overnight = call_tool("get_overnight_quote", {"ticker": "AAPL"}, 2100)
-    assert_no_unknown_tool(overnight, "get_overnight_quote")
-    assert_not_double_enveloped_failure(overnight, "get_overnight_quote")
-    overnight_data = extract_data(overnight)
-    overnight_meta = overnight.get("meta") if isinstance(overnight, dict) else {}
-    if not isinstance(overnight_data, dict):
-        raise AssertionError(f"get_overnight_quote returned non-object data: {type(overnight_data)}")
-    if not isinstance(overnight_meta, dict):
-        overnight_meta = {}
-    diagnostics = overnight.get("diagnostics") if isinstance(overnight, dict) else {}
-    if not isinstance(diagnostics, dict):
-        diagnostics = overnight_data.get("diagnostics") or {}
-    provider = overnight_data.get("provider") or overnight_meta.get("provider") or diagnostics.get("provider")
-    provider_status = overnight_data.get("providerStatus") or overnight_meta.get("providerStatus") or diagnostics.get("providerStatus")
-    warning_codes = {
-        w.get("code")
-        for w in overnight_data.get("warnings", [])
-        if isinstance(w, dict)
-    }
-    if provider != "yahoo":
-        raise AssertionError(f"get_overnight_quote should use only Yahoo after third-party provider removal, got {provider!r}")
-    if provider_status is None:
-        raise AssertionError("get_overnight_quote missing providerStatus")
-    if overnight_meta.get("doctrineUse") != "DIAGNOSTICS_ONLY":
-        raise AssertionError(f"get_overnight_quote missing DIAGNOSTICS_ONLY metadata: {overnight_meta}")
-    if overnight_data.get("decisionGrade") is not False:
-        raise AssertionError(f"get_overnight_quote must be payload-level decisionGrade:false: {overnight_data}")
-    if overnight_data.get("doctrineUse") != "DIAGNOSTICS_ONLY":
-        raise AssertionError(f"get_overnight_quote must be payload-level DIAGNOSTICS_ONLY: {overnight_data}")
-    if overnight_data.get("dataKind") != "yahoo_extended_hours_proxy":
-        raise AssertionError(f"get_overnight_quote must declare yahoo_extended_hours_proxy: {overnight_data}")
-    if "TRUE_OVERNIGHT_PROVIDER_REMOVED" not in warning_codes:
-        raise AssertionError(f"get_overnight_quote missing TRUE_OVERNIGHT_PROVIDER_REMOVED warning: {overnight_data}")
-    print(f"  PASS overnight smoke (provider={provider!r}, providerStatus={provider_status!r})")
 
     unsupported = call_tool(
         "query_sec_filing_index",
@@ -1157,21 +1120,20 @@ def main() -> int:
             raise AssertionError(f"extract_management_commentary returned unexpected topic status: {commentary_data}")
         print("PASS extract_management_commentary revenue smoke (honest NOT_FOUND)")
 
-    alias_payload = call_tool("get_historical_stock_prices", {}, 2120)
-    assert_no_unknown_tool(alias_payload, "get_historical_stock_prices")
-    assert_not_double_enveloped_failure(alias_payload, "get_historical_stock_prices")
-    if alias_payload.get("ok") is not False:
-        raise AssertionError(f"deprecated alias validation failure must be top-level ok:false: {alias_payload}")
-    alias_meta = alias_payload.get("meta") or {}
-    if alias_meta.get("canonicalTool") != "get_historical_prices":
-        raise AssertionError(f"deprecated alias missing canonicalTool: {alias_payload}")
-    if alias_meta.get("deprecatedTool") is not True:
-        raise AssertionError(f"deprecated alias missing deprecatedTool=true: {alias_payload}")
-    if alias_meta.get("useInstead") != "get_historical_prices":
-        raise AssertionError(f"deprecated alias missing useInstead: {alias_payload}")
-    alias_warnings = alias_meta.get("warnings") or []
-    if not any(isinstance(w, dict) and w.get("code") == "DEPRECATED_ALIAS" for w in alias_warnings):
-        raise AssertionError(f"deprecated alias missing DEPRECATED_ALIAS warning: {alias_payload}")
+    # 2.0.0 removed the deprecated alias names and get_overnight_quote; calls
+    # must be rejected as unknown tools, never routed to a canonical handler.
+    for removed_req_id, removed_name in enumerate(("get_historical_stock_prices", "get_overnight_quote"), 2120):
+        removed_payload = call_tool(removed_name, {"ticker": "AAPL"}, removed_req_id, allow_jsonrpc_error=True)
+        removed_error = removed_payload.get("error") if isinstance(removed_payload, dict) else None
+        rejected = (
+            isinstance(removed_payload, dict)
+            and removed_payload.get("ok") is False
+            and isinstance(removed_error, dict)
+            and removed_error.get("code") == "INPUT_VALIDATION_ERROR"
+        ) or (isinstance(removed_error, dict) and "jsonrpc" in removed_payload)
+        if not rejected:
+            raise AssertionError(f"removed tool {removed_name} must be rejected as unknown: {removed_payload}")
+    print("PASS removed 1.x tool names are rejected")
 
     print(f"PASS deployed discovery + smoke ({len(names)} tools)")
     return 0

@@ -65,22 +65,22 @@ _DYNAMIC_AAPL_OPTION_EXPIRATION = "_DYNAMIC_AAPL_OPTION_EXPIRATION_"
 TEST_CASES: list[TestCase] = [
     # ── single-ticker fundamentals ────────────────────────────────────────
     (
-        "get_historical_stock_prices",
+        "get_historical_prices",
         {"ticker": "AAPL", "period": "5d", "interval": "1d"},
         [],
     ),
     (
-        "get_stock_info",
+        "get_company_profile",
         {"ticker": "MSFT"},
         [("shortName", NOT_NULL)],
     ),
     (
-        "get_etf_info",
+        "get_fund_profile",
         {"ticker": "SPY"},
         [("shortName", NOT_NULL)],
     ),
     (
-        "get_yahoo_finance_news",
+        "get_company_news",
         {"ticker": "AAPL"},
         [
             # get_yahoo_finance_news is a deprecated alias for get_company_news,
@@ -96,7 +96,7 @@ TEST_CASES: list[TestCase] = [
         ],
     ),
     (
-        "get_stock_actions",
+        "get_corporate_actions",
         {"ticker": "AAPL"},
         [],
     ),
@@ -106,7 +106,7 @@ TEST_CASES: list[TestCase] = [
         [],
     ),
     (
-        "get_holder_info",
+        "get_ownership_holders",
         {"ticker": "AAPL", "holder_type": "major_holders"},
         [],
     ),
@@ -123,13 +123,13 @@ TEST_CASES: list[TestCase] = [
         [],
     ),
     (
-        "get_recommendations",
+        "get_analyst_recommendations",
         {"ticker": "AAPL", "recommendation_type": "recommendations"},
         [],
     ),
     # ── get_fast_info (stock) ─────────────────────────────────────────────
     (
-        "get_fast_info",
+        "get_market_quote",
         {"ticker": "AAPL"},
         [
             ("lastPrice",   NOT_NULL),
@@ -142,7 +142,7 @@ TEST_CASES: list[TestCase] = [
     # ^VIX is an index: volume/shares/marketCap must be null, not 0.
     # A _note field must be present explaining the null values.
     (
-        "get_fast_info",
+        "get_market_quote",
         {"ticker": "^VIX"},
         [
             ("lastPrice",              NOT_NULL),
@@ -156,7 +156,7 @@ TEST_CASES: list[TestCase] = [
         ],
     ),
     (
-        "get_fast_info",
+        "get_market_quote",
         {"ticker": "^VVIX"},
         [
             ("quoteType",  "INDEX"),
@@ -167,13 +167,13 @@ TEST_CASES: list[TestCase] = [
     # ASTS (AST SpaceMobile) had a missing sharesOutstanding in the price
     # module; the fix falls back to defaultKeyStatistics.sharesOutstanding.
     (
-        "get_fast_info",
+        "get_market_quote",
         {"ticker": "ASTS"},
         [("shares", NOT_NULL)],
     ),
     # ── more fast_info / price stats ──────────────────────────────────────
     (
-        "get_price_stats",
+        "analyze_price_performance",
         {"ticker": "AAPL"},
         [("lastPrice", NOT_NULL)],
     ),
@@ -188,12 +188,12 @@ TEST_CASES: list[TestCase] = [
         [],
     ),
     (
-        "get_financial_ratios",
+        "analyze_financial_ratios",
         {"ticker": "AAPL"},
         [],
     ),
     (
-        "get_calendar",
+        "get_company_events_calendar",
         {"ticker": "AAPL"},
         [],
     ),
@@ -211,14 +211,14 @@ TEST_CASES: list[TestCase] = [
     # ── filings / short interest ──────────────────────────────────────────
     # search_filing_text smoke test (replaces the retired get_sec_filings smoke test)
     (
-        "search_filing_text",
+        "search_sec_filing_text",
         {"ticker": "AAPL", "filing_type": "10-K"},
         [],
     ),
     # ── get_filing_data — GLW total revenue (regression guard, replaces get_sec_filings(GLW)) ──
     # Verifies that get_filing_data can resolve CIK and return structured XBRL facts for GLW.
     (
-        "get_filing_data",
+        "extract_sec_filing_fact",
         {"ticker": "GLW", "fact_type": "total_revenue"},
         [
             ("ticker", "GLW"),
@@ -229,7 +229,7 @@ TEST_CASES: list[TestCase] = [
     # GLW does NOT tag China revenue in XBRL; the HTML fallback inside get_filing_data
     # must parse it from the 10-K prose table and return a non-NOT_DISCLOSED confidence.
     (
-        "get_filing_data",
+        "extract_sec_filing_fact",
         {"ticker": "GLW", "fact_type": "geographic_revenue", "region": "China"},
         [
             ("ticker", "GLW"),
@@ -239,7 +239,7 @@ TEST_CASES: list[TestCase] = [
     # ── get_filing_data — QCOM geographic revenue CONFIRMED baseline ──────
     # QCOM has XBRL-tagged China revenue; schema keys must always be present.
     (
-        "get_filing_data",
+        "extract_sec_filing_fact",
         {"ticker": "QCOM", "fact_type": "geographic_revenue", "region": "China"},
         [
             ("value", KEY_PRESENT),
@@ -254,7 +254,7 @@ TEST_CASES: list[TestCase] = [
     ),
     # ── AAOI geographic_revenue known-scale regression ─────────────────────
     (
-        "get_filing_data",
+        "extract_sec_filing_fact",
         {"ticker": "AAOI", "fact_type": "geographic_revenue", "region": "China", "filing_type": "10-K", "period": "latest"},
         [
             ("value", 262140000),
@@ -265,7 +265,7 @@ TEST_CASES: list[TestCase] = [
     ),
     # ── AXTI geographic_revenue NOT_DISCLOSED path ─────────────────────────
     (
-        "get_filing_data",
+        "extract_sec_filing_fact",
         {"ticker": "AXTI", "fact_type": "geographic_revenue", "region": "China", "filing_type": "10-K", "period": "latest"},
         [
             ("confidence", ("NOT_DISCLOSED", "NOT_DECISION_GRADE", "LOW")),
@@ -278,7 +278,7 @@ TEST_CASES: list[TestCase] = [
     ),
     # ── geographic_revenue denominator-missing/nullable schema regression ───
     (
-        "get_filing_data",
+        "extract_sec_filing_fact",
         {"ticker": "GLW", "fact_type": "geographic_revenue", "region": "China"},
         [
             ("value", KEY_PRESENT),
@@ -292,7 +292,7 @@ TEST_CASES: list[TestCase] = [
     ),
     # ── geographic_revenue NOT_DISCLOSED path must still include keys ───────
     (
-        "get_filing_data",
+        "extract_sec_filing_fact",
         {"ticker": "ZZZZINVALID", "fact_type": "geographic_revenue", "region": "China"},
         [
             ("confidence", ("NOT_DISCLOSED", "NOT_DECISION_GRADE")),
@@ -310,7 +310,7 @@ TEST_CASES: list[TestCase] = [
     # search_filing_text for GLW and extracting accessionNumber from the response.
     # The placeholder "_DYNAMIC_GLW_10K_" is replaced before running the test.
     (
-        "search_filing_text",
+        "search_sec_filing_text",
         {
             "ticker": "GLW",
             "accession_number": "_DYNAMIC_GLW_10K_",
@@ -340,18 +340,18 @@ TEST_CASES: list[TestCase] = [
         [("slopePct", NOT_NULL)],
     ),
     (
-        "get_volume_ratio",
+        "analyze_volume_ratio",
         {"ticker": "AAPL"},
         [("ratio10d", NOT_NULL)],
     ),
     (
-        "get_ma_position",
+        "analyze_moving_average_position",
         {"ticker": "AAPL"},
         [("trend", NOT_NULL)],
     ),
     # ── pre-computed alpha signals ────────────────────────────────────────
     (
-        "get_credit_health",
+        "analyze_credit_health",
         {"ticker": "AAPL"},
         [],
     ),
@@ -361,22 +361,22 @@ TEST_CASES: list[TestCase] = [
         [],
     ),
     (
-        "get_earnings_momentum",
+        "analyze_earnings_momentum",
         {"ticker": "AAPL"},
         [],
     ),
     (
-        "get_options_flow_summary",
+        "summarize_options_flow",
         {"ticker": "AAPL"},
         [],
     ),
     (
-        "get_put_hedge_candidates",
+        "find_put_hedge_candidates",
         {"ticker": "AAPL", "otm_pct_min": 8, "otm_pct_max": 12},
         [],
     ),
     (
-        "get_analyst_upgrade_radar",
+        "get_analyst_rating_changes",
         {"ticker": "AAPL", "days_back": 30},
         [],
     ),
@@ -433,7 +433,7 @@ TEST_CASES: list[TestCase] = [
     # ── batch variants: same tools with an array of tickers ───────────────
     # Intentional re-tests of single-ticker tools to verify batch dispatch.
     (
-        "get_fast_info",
+        "get_market_quote",
         {"ticker": ["AAPL", "MSFT"]},
         [
             ("AAPL.lastPrice", NOT_NULL),
@@ -441,7 +441,7 @@ TEST_CASES: list[TestCase] = [
         ],
     ),
     (
-        "get_etf_info",
+        "get_fund_profile",
         {"ticker": ["SPY", "QQQ"]},
         [
             ("SPY.shortName", NOT_NULL),

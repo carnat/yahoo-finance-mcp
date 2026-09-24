@@ -226,7 +226,6 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - get_price_slope: N completed-session close-to-close change using N+1 bars. Excludes unfinished bars and returns same-bar endRawClose, priceBasis, freshness/retry diagnostics, dataDate, and direction (UP/DOWN/FLAT). Not a real-time quote.
 - get_short_interest: Short % of float, shares short, days-to-cover, prior-month comparison.
 - get_short_momentum: Short interest with MoM delta, direction (RISING/FALLING/FLAT), squeeze risk.
-- get_overnight_quote: Deprecated diagnostics-only Yahoo extended-hours proxy; not true 20:00–04:00 ET overnight venue data.
 
 ### Company fundamentals
 - get_company_profile: ~30 key fundamental fields by default. Pass include_all=true for full ~120-field payload. For ETFs/funds, use get_fund_profile instead.
@@ -301,8 +300,19 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 )
 
 
-def build_handler_registry(server: FastMCP) -> dict[str, Callable[..., Any]]:
-    """Map handler function name -> function for every tool registered on ``server``.
+# Grouped actions route to these handlers under their historical function
+# names (e.g. get_market_quote -> get_fast_info), and grouped input schemas
+# come from their signatures. They are registered on this internal server,
+# which is never served, so expanded mode exposes canonical tool names only;
+# the old names stopped being public tools in 2.0.0.
+internal_handler_server = create_server(
+    "yfinance-internal-handlers",
+    instructions="Internal grouped-mode handler registry; not served.",
+)
+
+
+def build_handler_registry(*servers: FastMCP) -> dict[str, Callable[..., Any]]:
+    """Map handler function name -> function for every tool registered on ``servers``.
 
     Reads the FastMCP tool manager so the mapping always reflects the live set
     of registered tools, independent of where the handlers are defined. Used by
@@ -310,10 +320,10 @@ def build_handler_registry(server: FastMCP) -> dict[str, Callable[..., Any]]:
     underlying handler functions (e.g. ``get_fast_info``).
     """
     registry: dict[str, Callable[..., Any]] = {}
-    manager = getattr(server, "_tool_manager", None)
-    tools = getattr(manager, "_tools", None) if manager is not None else None
-    if tools:
-        for tool in tools.values():
+    for server in servers:
+        manager = getattr(server, "_tool_manager", None)
+        tools = getattr(manager, "_tools", None) if manager is not None else None
+        for tool in (tools or {}).values():
             fn = getattr(tool, "fn", None)
             if fn is not None:
                 # Grouped tools are already offloaded; route to the original
@@ -323,13 +333,13 @@ def build_handler_registry(server: FastMCP) -> dict[str, Callable[..., Any]]:
     return registry
 
 
-def build_tool_contract_registry(server: FastMCP) -> dict[str, dict[str, Any]]:
+def build_tool_contract_registry(*servers: FastMCP) -> dict[str, dict[str, Any]]:
     """Map handler function name to its FastMCP-generated input schema."""
     registry: dict[str, dict[str, Any]] = {}
-    manager = getattr(server, "_tool_manager", None)
-    tools = getattr(manager, "_tools", None) if manager is not None else None
-    if tools:
-        for tool in tools.values():
+    for server in servers:
+        manager = getattr(server, "_tool_manager", None)
+        tools = getattr(manager, "_tools", None) if manager is not None else None
+        for tool in (tools or {}).values():
             fn = getattr(tool, "fn", None)
             parameters = getattr(tool, "parameters", None)
             if fn is not None and isinstance(parameters, dict):

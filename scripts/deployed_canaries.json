@@ -127,17 +127,6 @@
       "volatility": "provider_status"
     },
     {
-      "id": "overnight-diagnostics-only",
-      "description": "Overnight quote remains a Yahoo extended-hours diagnostic proxy, never decision-grade overnight venue data.",
-      "tool": "get_overnight_quote",
-      "args": {
-        "ticker": "AAPL"
-      },
-      "assertion": "overnight_diagnostics_only",
-      "blocking": true,
-      "volatility": "stable_contract"
-    },
-    {
       "id": "query-sec-index-unsupported-type",
       "description": "Unsupported SEC index queries return top-level ok:false with supported query types.",
       "tool": "query_sec_filing_index",

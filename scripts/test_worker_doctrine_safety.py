@@ -65,14 +65,14 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
               error: { code: "PROVIDER_BLOCKED", message: "provider blocked" },
               diagnostics: { provider: "yahoo", dataSource: "INDICATIVE_ONLY" },
             });
-            const out = JSON.parse(mcpSuccess("get_overnight_quote", raw, {
+            const out = JSON.parse(mcpSuccess("get_market_quote", raw, {
               warnings: [{ code: "DEPRECATED_ALIAS", message: "Use canonical tool instead." }],
               metaExtra: { doctrineUse: "DIAGNOSTICS_ONLY" },
             }));
 
             assert.equal(out.ok, false);
             assert.equal(out.error.code, "PROVIDER_BLOCKED");
-            assert.equal(out.meta.tool, "get_overnight_quote");
+            assert.equal(out.meta.tool, "get_market_quote");
             assert.equal(out.meta.providerStatus, "PROVIDER_BLOCKED");
             assert.equal(out.meta.doctrineUse, "DIAGNOSTICS_ONLY");
             assert.equal(out.meta.warnings[0].code, "DEPRECATED_ALIAS");
@@ -163,17 +163,16 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         )
         self.assertEqual(payload["data"]["evidence"], payload["data"]["sourceEvidence"])
 
-    def test_deprecated_alias_set_is_derived_from_alias_map(self) -> None:
+    def test_removed_alias_names_are_not_routed(self) -> None:
         tools = TOOLS_TS.read_text(encoding="utf-8")
-        self.assertIn('get_historical_stock_prices: "get_historical_prices"', tools)
-        self.assertIn("const DEPRECATED_ALIAS_NAMES = new Set(Object.keys(TOOL_ALIASES));", tools)
-        self.assertNotIn("const DEPRECATED_ALIAS_NAMES = new Set<string>();", tools)
+        self.assertNotIn("TOOL_ALIASES", tools)
+        self.assertNotIn("DEPRECATED_ALIAS_NAMES", tools)
+        self.assertNotIn('name: "get_historical_stock_prices"', tools)
+        self.assertNotIn('case "get_historical_stock_prices":', tools)
 
     def test_deployed_smoke_covers_alias_and_public_schema_behavior(self) -> None:
         smoke = DEPLOYED_DISCOVERY.read_text(encoding="utf-8")
-        self.assertIn("get_historical_stock_prices", smoke)
-        self.assertIn("deprecatedTool", smoke)
-        self.assertIn("DEPRECATED_ALIAS", smoke)
+        self.assertIn("removed tool {removed_name} must be rejected as unknown", smoke)
         self.assertIn("manifestHash", smoke)
         self.assertIn("privacyScope", smoke)
 
@@ -244,19 +243,6 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn('"SEC_FACT_NOT_AVAILABLE"', tools)
         self.assertIn('"NO_COMPANYCONCEPT_FACT_FOR_FORM"', tools)
         self.assertNotIn('failureMode: "XBRL_CONTEXT_METADATA_UNDER_VERIFICATION"', tools)
-
-    def test_overnight_quote_is_explicitly_diagnostics_only(self) -> None:
-        tools = TOOLS_TS.read_text(encoding="utf-8")
-        worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
-        smoke = DEPLOYED_DISCOVERY.read_text(encoding="utf-8")
-        self.assertIn("Deprecated diagnostics-only Yahoo extended-hours proxy", tools)
-        self.assertIn('failureMode: "YAHOO_EXTENDED_HOURS_PROXY_ONLY"', tools)
-        self.assertIn("OVERNIGHT_DIAGNOSTIC_FIELDS", worker)
-        self.assertIn('dataKind: "yahoo_extended_hours_proxy"', worker)
-        self.assertIn('decisionGrade: false', worker)
-        self.assertIn('doctrineUse: "DIAGNOSTICS_ONLY"', worker)
-        self.assertIn("TRUE_OVERNIGHT_PROVIDER_REMOVED", worker)
-        self.assertIn("yahoo_extended_hours_proxy", smoke)
 
     def test_query_sec_filing_index_no_longer_quarantined(self) -> None:
         tools = TOOLS_TS.read_text(encoding="utf-8")

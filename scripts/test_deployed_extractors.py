@@ -585,7 +585,7 @@ def main() -> int:
     assert_no_unknown_tool(hist, "get_historical_prices")
     print("  PASS get_historical_prices backward compat")
 
-    bad_hist = call_tool("get_historical_stock_prices", {}, 91)
+    bad_hist = call_tool("get_historical_prices", {}, 91)
     bad_str = json.dumps(bad_hist)
     is_provider_404 = (
         "chart" in bad_str.lower()
@@ -595,9 +595,9 @@ def main() -> int:
     )
     if is_provider_404:
         raise AssertionError(
-            "get_historical_stock_prices({}) caused provider 404 instead of INPUT_VALIDATION_ERROR"
+            "get_historical_prices({}) caused provider 404 instead of INPUT_VALIDATION_ERROR"
         )
-    print("  PASS get_historical_stock_prices empty-ticker returns validation error")
+    print("  PASS get_historical_prices empty-ticker returns validation error")
 
     print(f"\nPASS deployed SEC structured extractor smoke ({MCP_URL})")
     return 0

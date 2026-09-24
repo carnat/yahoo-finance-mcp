@@ -543,7 +543,6 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
                         'dataDate': {'type': 'string'}},
          'additionalProperties': True},
     "get_etf_info": _FUND_PROFILE_OUTPUT_SCHEMA,
-    "get_overnight_quote": _SIMPLE_OUTPUT_SCHEMA,
     "get_options_flow_scan": {'type': 'object',
          'properties': {'ticker': {'type': 'string'},
                         'windowLabel': {'type': 'string'},

@@ -292,32 +292,6 @@ def finnhub_not_eligible_contract(payload: dict[str, Any], _canary: dict[str, An
         raise AssertionError(f"Finnhub-only ineligible request must not claim absence: {data}")
 
 
-def overnight_diagnostics_only(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
-    data = extract_data(payload)
-    if not isinstance(data, dict):
-        raise AssertionError(f"get_overnight_quote returned non-object data: {data!r}")
-    meta = payload.get("meta") if isinstance(payload, dict) else {}
-    if not isinstance(meta, dict):
-        meta = {}
-    diagnostics = payload.get("diagnostics") if isinstance(payload, dict) else {}
-    if not isinstance(diagnostics, dict):
-        diagnostics = data.get("diagnostics") or {}
-    provider = data.get("provider") or meta.get("provider") or diagnostics.get("provider")
-    provider_status = data.get("providerStatus") or meta.get("providerStatus") or diagnostics.get("providerStatus")
-    if provider != "yahoo":
-        raise AssertionError(f"get_overnight_quote provider should be yahoo, got {provider!r}")
-    if not provider_status:
-        raise AssertionError(f"get_overnight_quote missing providerStatus: {data}")
-    if data.get("decisionGrade") is not False:
-        raise AssertionError(f"get_overnight_quote must be decisionGrade:false: {data}")
-    if data.get("doctrineUse") != "DIAGNOSTICS_ONLY" or meta.get("doctrineUse") != "DIAGNOSTICS_ONLY":
-        raise AssertionError(f"get_overnight_quote missing DIAGNOSTICS_ONLY metadata: payload={data} meta={meta}")
-    if data.get("dataKind") != "yahoo_extended_hours_proxy":
-        raise AssertionError(f"get_overnight_quote dataKind mismatch: {data}")
-    if "TRUE_OVERNIGHT_PROVIDER_REMOVED" not in _warning_codes(data):
-        raise AssertionError(f"get_overnight_quote missing TRUE_OVERNIGHT_PROVIDER_REMOVED warning: {data}")
-
-
 def unsupported_query_error(payload: dict[str, Any], _canary: dict[str, Any]) -> None:
     if payload.get("ok") is not False:
         raise AssertionError(f"unsupported query_sec_filing_index must be top-level ok:false: {payload}")
@@ -421,7 +395,6 @@ ASSERTIONS: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
     "news_batch_independent": news_batch_independent,
     "company_ir_source_status": company_ir_source_status,
     "finnhub_not_eligible_contract": finnhub_not_eligible_contract,
-    "overnight_diagnostics_only": overnight_diagnostics_only,
     "unsupported_query_error": unsupported_query_error,
     "required_param_validation_error": required_param_validation_error,
     "invalid_fiscal_quarter_error": invalid_fiscal_quarter_error,

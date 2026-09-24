@@ -22,7 +22,7 @@ import yfinance as yf
 
 # Phase 2b: yfmcp.app owns the FastMCP compat shim, yfinance_server instance, TOOL_ALIASES, and
 # build_handler_registry.  Import first so the compat shim fires before any decorator runs.
-from yfmcp.app import create_server, yfinance_server, TOOL_ALIASES, build_handler_registry
+from yfmcp.app import create_server, internal_handler_server, yfinance_server, TOOL_ALIASES, build_handler_registry
 from yfmcp.schemas import (
     FinancialType, HolderType, RecommendationType, FilingFactType,
     _TOOL_OUTPUT_SCHEMAS, _MARKET_SNAPSHOT_OUTPUT_SCHEMA,
@@ -93,11 +93,7 @@ from yfmcp.tools.pricing import (  # re-export for compatibility and grouped rou
     get_price_slope,
     get_short_interest,
     get_short_momentum,
-    get_overnight_quote,
     get_market_snapshot,
-    _overnight_window_utc_for_session_end_date,
-    _overnight_window_utc,
-    _classify_overnight_session,
     _load_completed_daily_history,
     _select_completed_close_series,
     _daily_bar_date,
@@ -164,7 +160,7 @@ _STOCK_INFO_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
 }
 
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_stock_info",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_info"],
     description="""Get stock fundamentals for one or more ticker symbols from Yahoo Finance.
@@ -242,7 +238,7 @@ async def get_stock_info(
     return json.dumps(info)
 
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_yahoo_finance_news",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_yahoo_finance_news"],
     description="""Deprecated alias for get_company_news.
@@ -3400,7 +3396,7 @@ async def verify_company_event(
     })
 
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_stock_actions",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_actions"],
     description="""Get dividends, stock splits, and fund capital-gain distributions from Yahoo Finance.
@@ -3540,7 +3536,7 @@ async def get_financial_statement(
     return result
 
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_holder_info",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_holder_info"],
     description="""Get holder information for a given ticker symbol from yahoo finance. You can choose from the following holder types: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders.
@@ -3794,7 +3790,7 @@ async def get_option_chain(
     })
 
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_options_summary",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_summary"],
     description="Get options summary for a single ticker: ATM implied volatility, put/call ratio by volume and OI, max pain strike for the nearest or requested expiry. Preferred for data-source use because it returns a compact snapshot without the full contract list.",
@@ -3934,7 +3930,7 @@ async def get_options_summary(ticker: str, expiry_hint: str | None = None) -> st
         )
 
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="list_sec_filings",
     output_schema=_TOOL_OUTPUT_SCHEMAS["list_sec_filings"],
     description="""List recent SEC filings for a ticker from EDGAR.
@@ -4008,7 +4004,7 @@ async def list_sec_filings(ticker: str, form_type: str = "10-K", max_filings: in
         return _mcp_failure("list_sec_filings", ErrorCode.PROVIDER_ERROR, str(e))
 
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_filing_outline",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_outline"],
     description="""Parse the document outline of an SEC filing (10-K/10-Q). Returns a hierarchical tree of Parts, Items, Notes as found in the document.
@@ -4071,7 +4067,7 @@ async def get_filing_outline(ticker: str, accession_number: str | None = None, d
         return _mcp_failure("get_filing_outline", ErrorCode.PROVIDER_ERROR, str(e))
 
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_filing_section",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_section"],
     description="""Retrieve a structurally resolved SEC filing section. Item requests fail closed rather than returning table-of-contents text.
@@ -4194,7 +4190,7 @@ def _filing_table_is_usable(rows: list[list[str]]) -> bool:
     return sum(1 for row in rows for cell in row if cell.strip()) >= 2
 
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="list_filing_tables",
     output_schema=_TOOL_OUTPUT_SCHEMAS["list_filing_tables"],
     description="""List semantically usable SEC filing tables, preserving original indexes and reporting excluded layout tables.
@@ -4260,7 +4256,7 @@ async def list_filing_tables(
         return _mcp_failure("list_filing_tables", ErrorCode.PROVIDER_ERROR, str(e))
 
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_filing_table",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_table"],
     description="""Get parsed SEC filing table rows. Empty/layout-only candidates return UNUSABLE_TABLE with a recovery action.
@@ -4322,7 +4318,7 @@ async def get_filing_table(ticker: str, document_url: str, table_index: int, max
         return _mcp_failure("get_filing_table", ErrorCode.PROVIDER_ERROR, str(e))
 
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="extract_filing_fact",
     output_schema=_TOOL_OUTPUT_SCHEMAS["extract_filing_fact"],
     description="""Extract a specific financial fact from an SEC filing. Uses XBRL first, parsed tables second, text search last.
@@ -4367,7 +4363,7 @@ async def extract_filing_fact(
         return _mcp_failure("extract_filing_fact", ErrorCode.PROVIDER_ERROR, str(e))
 
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_recommendations",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_recommendations"],
     description="""Get recommendations or upgrades/downgrades for a given ticker symbol from yahoo finance. You can also specify the number of months back to get upgrades/downgrades for, default is 12.
@@ -4677,7 +4673,7 @@ async def get_earnings_analysis(ticker: str) -> str:
 # Group 2.4 — get_financial_ratios
 # ---------------------------------------------------------------------------
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_financial_ratios",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_financial_ratios"],
     description="""Get pre-computed key financial ratios for one or more tickers.
@@ -4927,7 +4923,7 @@ async def analyze_share_count_trend(
     })
 
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_calendar",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_calendar"],
     description="""Get a company's upcoming Yahoo calendar or paginated earnings-date history.
@@ -5244,7 +5240,7 @@ def _manual_lookup_payload(ticker: str, cik_padded: str | None, filing_type: str
     }
 
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_filing_data",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_data"],
     description="""Retrieve structured XBRL-tagged financial facts from EDGAR.
@@ -5724,7 +5720,7 @@ async def get_filing_data(
     }, warn_denominator=(fact_type == FilingFactType.geographic_revenue and denominator is None))
 
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="search_filing_text",
     output_schema=_TOOL_OUTPUT_SCHEMAS["search_filing_text"],
     description="""Search filing narrative text by keyword or section hint.
@@ -5898,7 +5894,7 @@ async def search_filing_text(
 # Group 3.5 — get_technical_indicators
 # ---------------------------------------------------------------------------
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_credit_health",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_credit_health"],
     description="""Get pre-computed credit/leverage metrics using operational EBITDA when available: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag, and source fields.
@@ -6200,7 +6196,7 @@ async def get_credit_health(ticker: str | list[str]) -> str:
 # ---------------------------------------------------------------------------
 # Tool: get_short_momentum
 # ---------------------------------------------------------------------------
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_earnings_momentum",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_momentum"],
     description="""Deprecated alias for analyze_earnings_momentum. Get earnings revision momentum, beat rate, and estimate direction signals.
@@ -6481,7 +6477,7 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
 # Tool: get_options_flow_summary
 # ---------------------------------------------------------------------------
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_options_flow_summary",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_flow_summary"],
     description="""Get options flow summary: P/C ratio, IV percentile, max pain strike, highest OI strikes. Single ticker only.
@@ -6500,7 +6496,7 @@ async def get_options_flow_summary(ticker: str, expiry_hint: str | None = None) 
 # Tool: get_put_hedge_candidates
 # ---------------------------------------------------------------------------
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_put_hedge_candidates",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_put_hedge_candidates"],
     description="""Get pre-filtered OTM put options within a strike range and budget. Single ticker only.
@@ -6704,7 +6700,7 @@ async def get_put_hedge_candidates(
 # Tool: get_analyst_upgrade_radar
 # ---------------------------------------------------------------------------
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_analyst_upgrade_radar",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_analyst_upgrade_radar"],
     description="""Get recent analyst rating changes with canonical signal classification. Batch supported.
@@ -6922,7 +6918,7 @@ def _normalize_fund_equity_holdings(df) -> tuple[list | None, list | None, dict[
     return records, raw_records if changed else None, methods
 
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_etf_info",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_etf_info"],
     description="""Get ETF or mutual fund data for one or more ticker symbols.
@@ -7075,11 +7071,7 @@ async def get_etf_info(
 
 
 
-# ---------------------------------------------------------------------------
-# Tool: get_overnight_quote
-# ---------------------------------------------------------------------------
-
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_options_flow_scan",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_flow_scan"],
     description="""Structured options flow scan for a binary event window.
@@ -7336,7 +7328,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
 # CR-13 — get_price_target_bracket
 # ---------------------------------------------------------------------------
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_price_target_bracket",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"],
     description="""Compare a live regular-market quote to a user-supplied reference target and return distance/bracket labels. Read priceTimestamp/observationType; this is not a completed-close calculation. referenceTargetPct/currentToTargetRatioPct are the legacy ratio; distanceToTargetPct is the directional percent distance to target.
@@ -7447,7 +7439,7 @@ async def get_price_target_bracket(
 # CR-14 — get_position_score_inputs
 # ---------------------------------------------------------------------------
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_position_score_inputs",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"],
     description="""Aggregate public analyst, earnings, live-price, and completed-session technical inputs for caller-defined scoring models.
@@ -9998,7 +9990,7 @@ from yfmcp.tools.earnings import (  # re-export for compatibility and grouped ro
 # ---------------------------------------------------------------------------
 # TOOL_MODE env var controls which interface is exposed:
 #   - "grouped" (default): 11 domain meta-tools with action routing
-#   - "expanded": all 111 individual tools (compatibility/debug mode)
+#   - "expanded": all 79 individual tools (compatibility/debug mode)
 # ---------------------------------------------------------------------------
 _TOOL_MODE = os.environ.get("TOOL_MODE", "grouped").lower().strip()
 
@@ -10013,7 +10005,7 @@ def _build_grouped_server():
         instructions="""
 # Yahoo Finance MCP Server (Grouped Mode)
 
-Grouped mode is the default. Set TOOL_MODE=expanded to expose 111 individual tools.
+Grouped mode is the default. Set TOOL_MODE=expanded to expose 79 individual tools.
 
 This server provides financial market data via domain-grouped tools for token efficiency.
 Each tool covers a domain (pricing, fundamentals, options, etc.) and accepts an `action`
@@ -10045,8 +10037,8 @@ Input: {"action": "get_market_quote", "params": {"ticker": "AAPL"}}
     # Resolve handlers from the shared FastMCP instance (single source of truth)
     # rather than this module's globals, so the mapping holds as handlers move
     # into yfmcp.tools.* during the Phase 2 split.
-    handler_registry = build_handler_registry(yfinance_server)
-    contract_registry = build_tool_contract_registry(yfinance_server)
+    handler_registry = build_handler_registry(internal_handler_server, yfinance_server)
+    contract_registry = build_tool_contract_registry(internal_handler_server, yfinance_server)
     register_grouped_tools(grouped, handler_registry, contract_registry)
     return grouped
 
@@ -10059,7 +10051,7 @@ def get_server():
     """Return the appropriate server based on TOOL_MODE env var.
 
     - TOOL_MODE=grouped (default): 11 domain meta-tools
-    - TOOL_MODE=expanded: 111 individual tools
+    - TOOL_MODE=expanded: 79 individual tools
     """
     global _grouped_server
     if _TOOL_MODE == "grouped":

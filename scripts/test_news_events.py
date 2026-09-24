@@ -2354,8 +2354,8 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         self.assertIn('if (selected.includes("newswire"))', worker_text)
         self.assertNotIn('selected.includes("newswire")\n    || selected.includes("company_ir")', worker_text)
 
-        fine_grained_default = '["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]'
-        self.assertIn(fine_grained_default, tools_text)
+        # The get_yahoo_finance_news alias (the last fixed-source default) was
+        # removed in 2.0.0; no Worker default may use the legacy aggregate.
         self.assertNotIn('["yahoo_finance", "finnhub"]', tools_text)
         self.assertNotIn('["sec", "company_ir", "newswire", "yahoo_finance"]', tools_text)
 

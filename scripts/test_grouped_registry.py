@@ -102,13 +102,13 @@ if not getattr(_FastMCP, "_output_schema_patched", False):
 
 import server as srv  # noqa: E402
 import tool_groups  # noqa: E402
-from yfmcp.app import build_handler_registry, yfinance_server  # noqa: E402
+from yfmcp.app import build_handler_registry, internal_handler_server, yfinance_server  # noqa: E402
 from yfmcp.tools.system import _public_metadata  # noqa: E402
 
 
 class TestHandlerRegistry(unittest.TestCase):
     def setUp(self):
-        self.registry = build_handler_registry(yfinance_server)
+        self.registry = build_handler_registry(internal_handler_server, yfinance_server)
 
     def test_registry_nonempty(self):
         self.assertTrue(self.registry, "registry should not be empty")
@@ -139,7 +139,7 @@ class TestHandlerRegistry(unittest.TestCase):
             for action in group["actions"]
         }
         self.assertEqual(len(tool_groups.TOOL_GROUPS), 11)
-        self.assertEqual(len(action_names), 81)
+        self.assertEqual(len(action_names), 79)
         self.assertNotIn("get_manifest_diagnostics", action_names)
         self.assertNotIn("index_sec_filing", action_names)
         self.assertIn("health_check", action_names)
@@ -151,7 +151,7 @@ class TestGroupedServer(unittest.TestCase):
         with patch.dict(os.environ, {"TOOL_MODE": "grouped"}):
             self.assertEqual(_public_metadata()["toolCount"], len(tool_groups.TOOL_GROUPS))
         with patch.dict(os.environ, {"TOOL_MODE": "expanded"}):
-            self.assertEqual(_public_metadata()["toolCount"], 111)
+            self.assertEqual(_public_metadata()["toolCount"], 79)
 
     def test_grouped_server_exposes_one_tool_per_group(self):
         original = os.environ.get("TOOL_MODE")
@@ -246,7 +246,7 @@ class TestGroupedServer(unittest.TestCase):
 
 class TestGroupedRouting(unittest.TestCase):
     def setUp(self):
-        self.registry = build_handler_registry(yfinance_server)
+        self.registry = build_handler_registry(internal_handler_server, yfinance_server)
 
     def call(self, group: str, action: str, params: dict | None) -> dict:
         with patch.dict(os.environ, {"MCP_ENVELOPE_V2": "true"}):
