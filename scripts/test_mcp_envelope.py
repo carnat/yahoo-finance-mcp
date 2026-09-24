@@ -165,6 +165,54 @@ class TestPhase1Envelope(unittest.TestCase):
         self.assertEqual(ec.DEPRECATED_TOOL, "DEPRECATED_TOOL")
 
 
+class TestToolBoundaryEnvelope(unittest.TestCase):
+    """_envelope_tool_result gives every local MCP response the Worker's shape."""
+
+    def wrap(self, raw: str) -> dict:
+        from yfmcp.envelope import _envelope_tool_result
+        return json.loads(_envelope_tool_result("get_market_quote", raw))
+
+    def test_raw_object_becomes_success_envelope(self):
+        out = self.wrap(json.dumps({"lastPrice": 101}))
+        self.assertIs(out["ok"], True)
+        self.assertEqual(out["data"], {"lastPrice": 101})
+        self.assertIsNone(out["error"])
+        self.assertEqual(out["meta"]["tool"], "get_market_quote")
+        self.assertIn("serverVersion", out["meta"])
+
+    def test_raw_list_becomes_success_envelope(self):
+        self.assertEqual(self.wrap(json.dumps(["2026-09-25"]))["data"], ["2026-09-25"])
+
+    def test_legacy_error_object_becomes_failure_envelope(self):
+        out = self.wrap(json.dumps({"error": True, "code": "RATE_LIMIT", "message": "slow down", "retryable": True}))
+        self.assertIs(out["ok"], False)
+        self.assertIsNone(out["data"])
+        self.assertEqual(out["error"]["code"], "RATE_LIMIT")
+        self.assertEqual(out["error"]["message"], "slow down")
+        self.assertIs(out["error"]["retryable"], True)
+
+    def test_plain_text_error_is_classified(self):
+        out = self.wrap("Error: getting fast info for ZZ429: 500 for url ?_=1727142900")
+        self.assertIs(out["ok"], False)
+        self.assertEqual(out["error"]["code"], "PROVIDER_ERROR")
+        self.assertEqual(self.wrap("Company ticker ZZZZ not found.")["error"]["code"], "TICKER_NOT_FOUND")
+
+    def test_existing_envelope_keeps_its_meta_and_gains_base_meta(self):
+        inner = {"ok": True, "data": {"x": 1}, "meta": {"tool": "get_fast_info", "cacheHit": True}, "error": None}
+        out = self.wrap(json.dumps(inner))
+        self.assertEqual(out["meta"]["tool"], "get_fast_info")
+        self.assertIs(out["meta"]["cacheHit"], True)
+        self.assertIn("serverVersion", out["meta"])
+        self.assertEqual(out["data"], {"x": 1})
+
+    def test_legacy_mode_returns_the_raw_result(self):
+        from unittest.mock import patch
+        from yfmcp.envelope import _envelope_tool_result
+        raw = json.dumps({"lastPrice": 101})
+        with patch.dict(os.environ, {"MCP_ENVELOPE_V2": "false"}):
+            self.assertEqual(_envelope_tool_result("get_market_quote", raw), raw)
+
+
 if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = loader.loadTestsFromTestCase(TestPhase1Envelope)

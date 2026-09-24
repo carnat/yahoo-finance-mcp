@@ -10,12 +10,11 @@ from __future__ import annotations
 import copy
 import inspect
 import json
-import re
 import types
 from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
-from yfmcp.envelope import ErrorCode, _mcp_failure
+from yfmcp.envelope import ErrorCode, _envelope_tool_result, _mcp_failure
 
 
 _CATALOG_PATH = Path(__file__).with_name("tool_catalog.json")
@@ -118,48 +117,6 @@ def _input_failure(
         parsed.update(details)
         return json.dumps(parsed)
     return response
-
-
-# Matches an HTTP 429 status ("error 429", "HTTP 429", "status: 429"). A bare
-# "429" substring test also matched tickers and timestamps inside URLs quoted
-# in provider exception text, reporting ordinary failures as rate limits.
-_HTTP_429_PATTERN = re.compile(r"\b(?:error|http|status)[:\s]*429\b")
-
-
-def _normalize_legacy_failure(tool: str, result: Any) -> Any:
-    if not isinstance(result, str):
-        return result
-    text = result.strip()
-    if not text:
-        return result
-    try:
-        parsed = json.loads(text)
-    except (TypeError, ValueError):
-        parsed = None
-    if isinstance(parsed, (dict, list)):
-        return result
-    if isinstance(parsed, str):
-        text = parsed.strip()
-
-    lower = text.lower()
-    if not (
-        lower.startswith("error")
-        or (lower.startswith("company ticker") and "not found" in lower)
-    ):
-        return result
-    if lower.startswith("error: invalid") or " is required" in lower:
-        code = ErrorCode.INPUT_VALIDATION_ERROR
-    elif "no option" in lower:
-        code = ErrorCode.NO_OPTIONS_DATA
-    elif "not found" in lower:
-        code = ErrorCode.TICKER_NOT_FOUND
-    elif "rate limit" in lower or _HTTP_429_PATTERN.search(lower):
-        code = ErrorCode.RATE_LIMIT
-    elif "timeout" in lower or "timed out" in lower:
-        code = ErrorCode.PROVIDER_TIMEOUT
-    else:
-        code = ErrorCode.PROVIDER_ERROR
-    return _mcp_failure(tool, code, text)
 
 
 def _inline_local_schema_refs(schema: dict[str, Any]) -> dict[str, Any]:
@@ -350,7 +307,7 @@ async def _route_grouped_call(
     result = handler(*bound.args, **bound.kwargs)
     if inspect.isawaitable(result):
         result = await result
-    return _normalize_legacy_failure(action, result)
+    return _envelope_tool_result(action, result)
 
 
 def register_grouped_tools(

@@ -24,6 +24,7 @@ except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import FastMCP
 
 from yfmcp.build_info import BUILD_VERSION
+from yfmcp.envelope import _envelope_tool_result
 
 try:
     from mcp.types import ToolAnnotations
@@ -97,25 +98,29 @@ def _fastmcp_tool_compat(self: FastMCP, *args: Any, **kwargs: Any) -> Any:
     register = _ORIGINAL_FASTMCP_TOOL(self, *args, **kwargs)
 
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-        register(_offload_to_thread(fn) if inspect.iscoroutinefunction(fn) else fn)
+        tool_name = kwargs.get("name") or fn.__name__
+        register(_offload_to_thread(fn, tool_name) if inspect.iscoroutinefunction(fn) else fn)
         return fn
 
     return decorator
 
 
-def _offload_to_thread(fn: Callable[..., Any]) -> Callable[..., Any]:
+def _offload_to_thread(fn: Callable[..., Any], tool_name: str) -> Callable[..., Any]:
     """Run each MCP invocation of an async tool on a worker thread.
 
     Tool bodies call blocking yfinance and urllib APIs directly. Running the
     invocation in its own event loop on a worker thread keeps the stdio
     server's loop responsive and lets concurrent requests proceed in parallel.
     Module-level names keep the original coroutine function, so direct calls
-    and grouped routing (see ``build_handler_registry``) are unaffected.
+    and grouped routing (see ``build_handler_registry``) are unaffected. The
+    MCP response gets the same V2 envelope the Worker applies; grouped results
+    arrive already enveloped by the router and pass through unchanged.
     """
 
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        return await asyncio.to_thread(lambda: asyncio.run(fn(*args, **kwargs)))
+        result = await asyncio.to_thread(lambda: asyncio.run(fn(*args, **kwargs)))
+        return _envelope_tool_result(tool_name, result)
 
     wrapper._yfmcp_handler = fn  # type: ignore[attr-defined]
     return wrapper

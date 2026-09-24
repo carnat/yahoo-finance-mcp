@@ -260,8 +260,11 @@ class TestGroupedRouting(unittest.TestCase):
         entry = grouped._tool_manager._tools["system"]
         with patch.dict(os.environ, {"MCP_ENVELOPE_V2": "true"}):
             payload = json.loads(asyncio.run(entry.fn("health_check", {})))
-        self.assertEqual(payload["status"], "ok")
-        self.assertEqual(payload["toolMode"], "grouped")
+        # Same V2 envelope the Worker returns for health_check.
+        self.assertIs(payload["ok"], True)
+        self.assertEqual(payload["meta"]["tool"], "health_check")
+        self.assertEqual(payload["data"]["status"], "ok")
+        self.assertEqual(payload["data"]["toolMode"], "grouped")
 
     def test_missing_required_param_fails_before_provider_call(self):
         payload = self.call("stock_pricing", "get_market_quote", {})
