@@ -1,3 +1,4 @@
+import { BoundedTtlCache, setBounded } from "./cache.js";
 import { ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
 import { yahooTranscriptContentSha256 } from "./transcript-contract.js";
 import registryManifest from "./company-ir-page-registry.json";
@@ -63,6 +64,7 @@ type EdgeCache = {
   delete(request: Request): Promise<boolean>;
 };
 
+const PROVIDER_JSON_CACHE_MAX = 200;
 const providerJsonCache = new Map<string, ProviderCacheEntry>();
 
 function providerCacheKey(provider: string, operation: string, params: Record<string, unknown>): string {
@@ -102,7 +104,7 @@ async function getProviderCache(cacheKey: string, ttlMs: number): Promise<Provid
     if (!response) return null;
     const value = await response.json() as ProviderCacheEntry;
     if (!value?.payload || Date.now() - Number(value.storedAt) >= Math.min(ttlMs, Number(value.ttlMs))) return null;
-    providerJsonCache.set(cacheKey, value);
+    setBounded(providerJsonCache, cacheKey, value, PROVIDER_JSON_CACHE_MAX);
     return {
       payload: value.payload,
       status: "OK",
@@ -124,7 +126,7 @@ async function setProviderCache(
   ttlMs: number,
 ): Promise<void> {
   const value: ProviderCacheEntry = { payload, publicUrl, fetchedAt, storedAt: Date.now(), ttlMs };
-  providerJsonCache.set(cacheKey, value);
+  setBounded(providerJsonCache, cacheKey, value, PROVIDER_JSON_CACHE_MAX);
   const cache = edgeCache();
   if (!cache) return;
   try {
@@ -392,6 +394,7 @@ const GLOBENEWSWIRE_MAX_BYTES = 2 * 1024 * 1024;
 const GLOBENEWSWIRE_TTL_MS = 15 * 60 * 1000;
 const GLOBENEWSWIRE_STOCK_CATEGORY_DOMAIN = "https://www.globenewswire.com/rss/stock";
 const GLOBENEWSWIRE_ISIN_CATEGORY_DOMAIN = "https://www.globenewswire.com/rss/ISIN";
+const GLOBENEWSWIRE_CACHE_MAX = 40;
 const globenewswireCache = new Map<string, { value: string; storedAt: number }>();
 const COMPANY_IR_HTML_MAX_BYTES = 750 * 1024;
 const COMPANY_IR_FEED_MAX_BYTES = 2 * 1024 * 1024;
@@ -433,11 +436,14 @@ const COMPANY_IR_BLOCKED_WEBSITE_HOSTS = [
   "yahoo.com",
   "youtube.com",
 ];
+const COMPANY_IR_IDENTITY_CACHE_MAX = 500;
 const companyIrIdentityCache = new Map<string, { value: NewsCompanyIdentity; storedAt: number }>();
+const COMPANY_IR_DISCOVERY_CACHE_MAX = 200;
 const companyIrDiscoveryCache = new Map<string, {
   value: { feeds: DiscoveredCompanyIrFeed[]; pageProbeCount: number; probeBudgetExhausted: boolean };
   storedAt: number;
 }>();
+const COMPANY_IR_TEXT_CACHE_MAX = 20;
 const companyIrTextCache = new Map<string, { value: string; storedAt: number }>();
 const YAHOO_ALLOWED_CONTENT_TYPES = new Set(["STORY", "ARTICLE", "PRESS_RELEASE"]);
 const SMOKE_TICKER_CIK_FALLBACKS: Record<string, string> = {
@@ -701,13 +707,18 @@ function sortByRelevance(
 
 // Module-level crumb cache — shared within a Cloudflare isolate session
 let _crumb: { value: string; cookie: string; exp: number } | null = null;
+// In-flight refresh shared by concurrent callers so a cold isolate performs
+// one fc.yahoo.com + getcrumb round trip instead of one per parallel request.
+let _crumbRefresh: Promise<{ value: string; cookie: string; exp: number }> | null = null;
+
+const YAHOO_FETCH_TIMEOUT_MS = 15_000;
 
 async function refreshCrumb(): Promise<{ value: string; cookie: string }> {
   // fc.yahoo.com sets the consent cookie used by Yahoo Finance APIs
-  const init = await fetch("https://fc.yahoo.com", {
+  const init = await fetchProviderWithTimeout("https://fc.yahoo.com", {
     headers: { "User-Agent": UA },
     redirect: "follow",
-  });
+  }, YAHOO_FETCH_TIMEOUT_MS);
 
   // Collect all Set-Cookie headers (Workers Headers.entries() exposes them)
   const cookies: string[] = [];
@@ -723,9 +734,9 @@ async function refreshCrumb(): Promise<{ value: string; cookie: string }> {
   // "stalled response canceled to prevent deadlock" warnings.
   await init.body?.cancel();
 
-  const crumbRes = await fetch("https://query2.finance.yahoo.com/v1/test/getcrumb", {
+  const crumbRes = await fetchProviderWithTimeout("https://query2.finance.yahoo.com/v1/test/getcrumb", {
     headers: { "User-Agent": UA, Cookie: cookie },
-  });
+  }, YAHOO_FETCH_TIMEOUT_MS);
   if (!crumbRes.ok) {
     await crumbRes.body?.cancel();
     throw new Error(`Crumb fetch failed: ${crumbRes.status}`);
@@ -736,12 +747,39 @@ async function refreshCrumb(): Promise<{ value: string; cookie: string }> {
 
 async function getCrumb(): Promise<{ value: string; cookie: string }> {
   if (_crumb && Date.now() < _crumb.exp) return _crumb;
-  const { value, cookie } = await refreshCrumb();
-  _crumb = { value, cookie, exp: Date.now() + 3_600_000 }; // 1-hour cache
-  return _crumb;
+  _crumbRefresh ??= refreshCrumb()
+    .then(({ value, cookie }) => {
+      _crumb = { value, cookie, exp: Date.now() + 3_600_000 }; // 1-hour cache
+      return _crumb;
+    })
+    .finally(() => {
+      _crumbRefresh = null;
+    });
+  return _crumbRefresh;
 }
 
-async function yGet(url: string, auth = true): Promise<unknown> {
+/** Drop the cached crumb after a 401, unless a concurrent caller already replaced it. */
+function invalidateCrumb(rejected: { value: string }): void {
+  if (_crumb?.value === rejected.value) _crumb = null;
+}
+
+/** Error thrown for a non-OK Yahoo response; `status` drives failure classification. */
+class YahooHttpError extends Error {
+  constructor(readonly status: number, url: string) {
+    super(`Yahoo Finance API error ${status} for: ${url}`);
+  }
+}
+
+// Composite tools (market snapshot, position signals) request the same Yahoo
+// URLs from several components in parallel. Identical GETs share one
+// in-flight request and a short-lived body cache; each caller parses its own
+// copy so callers can never mutate each other's payloads. Retry URLs carry a
+// unique cache-buster, so they always reach Yahoo.
+const YAHOO_GET_TTL_MS = 30_000;
+const yahooGetBodies = new BoundedTtlCache<string>(200);
+const yahooGetInflight = new Map<string, Promise<string>>();
+
+async function yGetText(url: string, auth: boolean): Promise<string> {
   const makeReq = async (c?: { value: string; cookie: string }): Promise<Response> => {
     const headers: Record<string, string> = { "User-Agent": UA };
     let u = url;
@@ -749,30 +787,57 @@ async function yGet(url: string, auth = true): Promise<unknown> {
       headers.Cookie = c.cookie;
       u += `${u.includes("?") ? "&" : "?"}crumb=${encodeURIComponent(c.value)}`;
     }
-    return fetch(u, { headers });
+    return fetchProviderWithTimeout(u, { headers }, YAHOO_FETCH_TIMEOUT_MS);
   };
 
-  let res = await makeReq(auth ? await getCrumb() : undefined);
+  const crumb = auth ? await getCrumb() : undefined;
+  let res = await makeReq(crumb);
 
   // Retry once with a fresh crumb on 401
-  if (res.status === 401 && auth) {
+  if (res.status === 401 && crumb) {
     // Cancel the unconsumed response body to free the HTTP slot
     await res.body?.cancel();
-    _crumb = null;
+    invalidateCrumb(crumb);
     res = await makeReq(await getCrumb());
   }
 
   if (!res.ok) {
     await res.body?.cancel();
-    throw new Error(`Yahoo Finance API error ${res.status} for: ${url}`);
+    throw new YahooHttpError(res.status, url);
   }
-  return res.json();
+  return res.text();
+}
+
+async function yGet(url: string, auth = true): Promise<unknown> {
+  const key = `${auth ? "auth" : "anon"}:${url}`;
+  let body = yahooGetBodies.get(key);
+  if (body === undefined) {
+    let pending = yahooGetInflight.get(key);
+    if (!pending) {
+      pending = yGetText(url, auth)
+        .then((text) => {
+          yahooGetBodies.set(key, text, YAHOO_GET_TTL_MS);
+          return text;
+        })
+        .finally(() => {
+          yahooGetInflight.delete(key);
+        });
+      yahooGetInflight.set(key, pending);
+    }
+    body = await pending;
+  }
+  try {
+    return JSON.parse(body);
+  } catch (error) {
+    yahooGetBodies.delete(key);
+    throw error;
+  }
 }
 
 async function yPost(url: string, body: Record<string, unknown>): Promise<unknown> {
   const makeReq = async (c: { value: string; cookie: string }): Promise<Response> => {
     const u = `${url}${url.includes("?") ? "&" : "?"}crumb=${encodeURIComponent(c.value)}`;
-    return fetch(u, {
+    return fetchProviderWithTimeout(u, {
       method: "POST",
       headers: {
         "User-Agent": UA,
@@ -780,17 +845,18 @@ async function yPost(url: string, body: Record<string, unknown>): Promise<unknow
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-    });
+    }, YAHOO_FETCH_TIMEOUT_MS);
   };
-  let res = await makeReq(await getCrumb());
+  const crumb = await getCrumb();
+  let res = await makeReq(crumb);
   if (res.status === 401) {
     await res.body?.cancel();
-    _crumb = null;
+    invalidateCrumb(crumb);
     res = await makeReq(await getCrumb());
   }
   if (!res.ok) {
     await res.body?.cancel();
-    throw new Error(`Yahoo Finance API error ${res.status} for: ${url}`);
+    throw new YahooHttpError(res.status, url);
   }
   return res.json();
 }
@@ -878,6 +944,28 @@ function normalizeBatchSymbolResult(parsed: unknown, ticker: string): Record<str
   return { ok: false, data: null, error: toBatchError(`Malformed response for ${ticker}`, "PROVIDER_ERROR", false) };
 }
 
+// Per-ticker work in a batch runs a few symbols at a time: enough overlap to
+// cut latency without multiplying simultaneous Yahoo connections.
+const BATCH_TICKER_CONCURRENCY = 3;
+
+/** Map items with at most `limit` pending calls; results keep input order. */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 async function runPartialBatch(
   tickers: string[],
   perTicker: (ticker: string) => Promise<string>
@@ -892,9 +980,16 @@ async function runPartialBatch(
   const out: Record<string, unknown> = {};
   let successCount = 0;
   let errorCount = 0;
-  for (const t of tickers) {
+  const settled = await mapWithConcurrency(tickers, BATCH_TICKER_CONCURRENCY, (t) =>
+    perTicker(t).then(
+      (raw) => ({ raw }),
+      (error: unknown) => ({ error }),
+    ));
+  for (const [index, t] of tickers.entries()) {
     try {
-      const raw = await perTicker(t);
+      const result = settled[index];
+      if ("error" in result) throw result.error;
+      const raw = result.raw;
       const parsed = safeJsonParse(raw, t);
       const shaped = normalizeBatchSymbolResult(parsed, t);
       if (shaped.ok === true) successCount += 1;
@@ -3260,9 +3355,7 @@ export async function getTechnicalIndicators(
   if (Array.isArray(ticker)) {
     const limit = limitTickers(ticker);
     const results: string[] = [];
-    for (const t of limit.tickers) {
-      results.push(await getTechnicalIndicators(t, period));
-    }
+    results.push(...await mapWithConcurrency(limit.tickers, BATCH_TICKER_CONCURRENCY, (t) => getTechnicalIndicators(t, period)));
     return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])), limit);
   }
   const fetchChart = async (retry: boolean): Promise<Record<string, unknown> | undefined> => {
@@ -3594,9 +3687,7 @@ export async function getPriceSlope(ticker: string | string[], days: number): Pr
   if (Array.isArray(ticker)) {
     const limit = limitTickers(ticker);
     const results: string[] = [];
-    for (const t of limit.tickers) {
-      results.push(await getPriceSlope(t, days));
-    }
+    results.push(...await mapWithConcurrency(limit.tickers, BATCH_TICKER_CONCURRENCY, (t) => getPriceSlope(t, days)));
     return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, JSON.parse(results[i])])), limit);
   }
 
@@ -4699,17 +4790,32 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
 
 // Module-level in-memory cache for options flow window-label readings.
 // Persists within a single Worker instance lifetime.
+const OPTIONS_FLOW_CACHE_MAX = 500;
 const _optionsFlowCache = new Map<string, { data: Record<string, unknown>; storedAt: number }>();
 
 // ── SEC geographic revenue extraction ─────────────────────────────────────────
 
 // EDGAR fair-access policy requires a reachable contact in the User-Agent.
-// Replace the URL/contact below with one owned by the operator, or inject
-// via the EDGAR_CONTACT_EMAIL Cloudflare secret / var.
-const EDGAR_UA = "yahoo-finance-mcp contact@example.com";
+// Set the EDGAR_CONTACT_EMAIL Cloudflare var/secret to an operator-owned
+// address; the placeholder is used only when it is unset.
+const EDGAR_FALLBACK_CONTACT = "contact@example.com";
+const EDGAR_FETCH_TIMEOUT_MS = 20_000;
 
-const filingCikCache = new Map<string, string>();
-const filingSubmissionsCache = new Map<string, Record<string, unknown>>();
+function edgarUserAgent(): string {
+  return `yahoo-finance-mcp ${getWorkerVar("EDGAR_CONTACT_EMAIL")?.trim() || EDGAR_FALLBACK_CONTACT}`;
+}
+
+function edgarFetch(url: string): Promise<Response> {
+  return fetchProviderWithTimeout(url, { headers: { "User-Agent": edgarUserAgent() } }, EDGAR_FETCH_TIMEOUT_MS);
+}
+
+const FILING_CIK_TTL_MS = 24 * 60 * 60 * 1000;
+// Submissions list recent filings, so they must expire for new 8-K/10-Q
+// filings to become visible within a long-lived isolate.
+const FILING_SUBMISSIONS_TTL_MS = 15 * 60 * 1000;
+const filingCikCache = new BoundedTtlCache<string>(2_000);
+const filingSubmissionsCache = new BoundedTtlCache<Record<string, unknown>>(50);
+const FILING_INDEX_CACHE_MAX = 50;
 const filingIndexCache = new Map<string, { value: string; storedAt: number }>();
 const FILING_INDEX_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -4732,7 +4838,7 @@ const FILING_FACT_CONCEPTS: Record<string, { primary: string; fallback?: string 
 /** Fetch an EDGAR JSON endpoint using the required User-Agent header. */
 async function edgarGetJson(url: string): Promise<Record<string, unknown> | null> {
   try {
-    const resp = await fetch(url, { headers: { "User-Agent": EDGAR_UA } });
+    const resp = await edgarFetch(url);
     if (!resp.ok) { await resp.body?.cancel(); return null; }
     return await resp.json() as Record<string, unknown>;
   } catch {
@@ -4744,7 +4850,7 @@ async function edgarGetJson(url: string): Promise<Record<string, unknown> | null
  *  stream and cancels the rest, avoiding large memory allocations for big filings. */
 async function edgarGetHtml(url: string, maxBytes = 5_000_000): Promise<string | null> {
   try {
-    const resp = await fetch(url, { headers: { "User-Agent": EDGAR_UA } });
+    const resp = await edgarFetch(url);
     if (!resp.ok || !resp.body) { await resp.body?.cancel(); return null; }
     const reader = resp.body.getReader();
     const chunks: Uint8Array[] = [];
@@ -4923,15 +5029,41 @@ function edgarCikFromAccession(accessionNumber: string): number | null {
   }
 }
 
+const EDGAR_TICKER_MAP_TTL_MS = 24 * 60 * 60 * 1000;
+let edgarTickerMap: { value: Map<string, number>; expiresAt: number } | null = null;
+let edgarTickerMapLoad: Promise<Map<string, number> | null> | null = null;
+
+/**
+ * Ticker -> CIK lookup built from EDGAR company_tickers.json (~1 MB). The file
+ * is downloaded and indexed once per isolate per day instead of per lookup;
+ * concurrent callers share one download. A failed download is not cached.
+ */
+async function getEdgarTickerCikMap(): Promise<Map<string, number> | null> {
+  if (edgarTickerMap && Date.now() < edgarTickerMap.expiresAt) return edgarTickerMap.value;
+  edgarTickerMapLoad ??= edgarGetJson("https://www.sec.gov/files/company_tickers.json")
+    .then((data) => {
+      if (!data) return null;
+      const map = new Map<string, number>();
+      for (const entry of Object.values(data) as { ticker?: unknown; cik_str?: unknown }[]) {
+        const cik = Number(entry?.cik_str);
+        if (typeof entry?.ticker !== "string" || !Number.isFinite(cik) || cik <= 0) continue;
+        const symbol = entry.ticker.toUpperCase();
+        // company_tickers.json is ordered by relevance; keep the first match.
+        if (!map.has(symbol)) map.set(symbol, cik);
+      }
+      edgarTickerMap = { value: map, expiresAt: Date.now() + EDGAR_TICKER_MAP_TTL_MS };
+      return map;
+    })
+    .finally(() => {
+      edgarTickerMapLoad = null;
+    });
+  return edgarTickerMapLoad;
+}
+
 /** Resolve CIK for a ticker using the EDGAR company_tickers.json index. */
 async function edgarResolveCik(ticker: string): Promise<number | null> {
-  const data = await edgarGetJson("https://www.sec.gov/files/company_tickers.json");
-  if (!data) return null;
-  const upper = ticker.toUpperCase();
-  for (const entry of Object.values(data) as { ticker: string; cik_str: number }[]) {
-    if (entry.ticker.toUpperCase() === upper) return entry.cik_str;
-  }
-  return null;
+  const map = await getEdgarTickerCikMap();
+  return map?.get(ticker.toUpperCase()) ?? null;
 }
 
 async function resolveCikForTicker(ticker: string): Promise<string | null> {
@@ -4948,7 +5080,7 @@ async function resolveCikForTicker(ticker: string): Promise<string | null> {
     const cikFromYahoo = secFilings?.cik as string | number | undefined;
     if (cikFromYahoo != null) {
       const cik = String(cikFromYahoo).replace(/\D/g, "").padStart(10, "0");
-      filingCikCache.set(key, cik);
+      filingCikCache.set(key, cik, FILING_CIK_TTL_MS);
       return cik;
     }
   } catch { /* non-fatal */ }
@@ -4956,13 +5088,13 @@ async function resolveCikForTicker(ticker: string): Promise<string | null> {
   const cikFromTickerFile = await edgarResolveCik(ticker);
   if (cikFromTickerFile != null) {
     const cik = String(cikFromTickerFile).padStart(10, "0");
-    filingCikCache.set(key, cik);
+    filingCikCache.set(key, cik, FILING_CIK_TTL_MS);
     return cik;
   }
 
   const fixtureCik = SMOKE_TICKER_CIK_FALLBACKS[key];
   if (fixtureCik) {
-    filingCikCache.set(key, fixtureCik);
+    filingCikCache.set(key, fixtureCik, FILING_CIK_TTL_MS);
     return fixtureCik;
   }
 
@@ -4982,7 +5114,7 @@ async function resolveCikForTicker(ticker: string): Promise<string | null> {
 
   try {
     for (const atomUrl of atomUrls) {
-      const atom = await fetch(atomUrl, { headers: { "User-Agent": EDGAR_UA } });
+      const atom = await edgarFetch(atomUrl);
       if (!atom.ok) {
         await atom.body?.cancel();
         continue;
@@ -4990,7 +5122,7 @@ async function resolveCikForTicker(ticker: string): Promise<string | null> {
       const text = await atom.text();
       const cik = extractCik(text);
       if (cik) {
-        filingCikCache.set(key, cik);
+        filingCikCache.set(key, cik, FILING_CIK_TTL_MS);
         return cik;
       }
     }
@@ -5006,7 +5138,7 @@ async function getSubmissionsForTicker(ticker: string): Promise<{ cikPadded: str
   if (!cikPadded) return { cikPadded: null, submissions: null };
   if (cachedSubmissions) return { cikPadded, submissions: cachedSubmissions };
   const submissions = await edgarGetJson(`https://data.sec.gov/submissions/CIK${cikPadded}.json`);
-  if (submissions) filingSubmissionsCache.set(key, submissions);
+  if (submissions) filingSubmissionsCache.set(key, submissions, FILING_SUBMISSIONS_TTL_MS);
   return { cikPadded, submissions };
 }
 
@@ -7162,7 +7294,7 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
       dataQuality, warnings: scanWarnings,
     };
 
-    _optionsFlowCache.set(`${ticker}:${windowLabel}`, { data: resultData, storedAt: Date.now() });
+    setBounded(_optionsFlowCache, `${ticker}:${windowLabel}`, { data: resultData, storedAt: Date.now() }, OPTIONS_FLOW_CACHE_MAX);
     return JSON.stringify(resultData);
   } catch (e) {
     return JSON.stringify({ error: true, message: `${e instanceof Error ? e.message : String(e)}`, ticker });
@@ -7570,14 +7702,14 @@ export async function getMarketSnapshot(
   if (Array.isArray(ticker)) {
     const cap = mode === "full" ? 2 : 5;
     const limited = ticker.slice(0, cap);
-    const results: Record<string, unknown> = {};
-    for (const t of limited) {
+    const snapshots = await mapWithConcurrency(limited, BATCH_TICKER_CONCURRENCY, async (t) => {
       try {
-        results[t] = JSON.parse(await getMarketSnapshot(t, mode, foreignExchange));
+        return JSON.parse(await getMarketSnapshot(t, mode, foreignExchange)) as unknown;
       } catch (e) {
-        results[t] = { error: true, message: e instanceof Error ? e.message : String(e) };
+        return { error: true, message: e instanceof Error ? e.message : String(e) };
       }
-    }
+    });
+    const results: Record<string, unknown> = Object.fromEntries(limited.map((t, i) => [t, snapshots[i]]));
     return JSON.stringify({
       tickers: results,
       truncated: ticker.length > cap,
@@ -7859,25 +7991,13 @@ export async function getOptionsSummary(ticker: string, expiryHint?: string): Pr
 
 export async function listSecFilings(ticker: string, formType: string = "10-K", maxFilings: number = 5): Promise<string> {
   try {
-    const tickersResp = await fetch("https://www.sec.gov/files/company_tickers.json", {
-      headers: { "User-Agent": "yahoo-finance-mcp/1.0 admin@example.com" }
-    });
-    if (!tickersResp.ok) return JSON.stringify({ error: true, message: "Failed to fetch EDGAR tickers" });
-    const tickersData = await tickersResp.json() as Record<string, { ticker: string; cik_str: string }>;
-
-    let cik: number | null = null;
-    for (const entry of Object.values(tickersData)) {
-      if (entry.ticker.toUpperCase() === ticker.toUpperCase()) {
-        cik = parseInt(entry.cik_str, 10);
-        break;
-      }
-    }
+    const tickerMap = await getEdgarTickerCikMap();
+    if (!tickerMap) return JSON.stringify({ error: true, message: "Failed to fetch EDGAR tickers" });
+    const cik = tickerMap.get(ticker.toUpperCase()) ?? null;
     if (!cik) return JSON.stringify({ error: true, message: `Could not find EDGAR CIK for ticker '${ticker}'` });
 
     const cikPadded = String(cik).padStart(10, "0");
-    const subResp = await fetch(`https://data.sec.gov/submissions/CIK${cikPadded}.json`, {
-      headers: { "User-Agent": "yahoo-finance-mcp/1.0 admin@example.com" }
-    });
+    const subResp = await edgarFetch(`https://data.sec.gov/submissions/CIK${cikPadded}.json`);
     if (!subResp.ok) return JSON.stringify({ error: true, message: "Failed to fetch EDGAR submissions" });
     const subData = await subResp.json() as Record<string, unknown>;
     const recent = (subData.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>;
@@ -7957,7 +8077,7 @@ export async function getFilingOutline(ticker: string, _accessionNumber: string 
     if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
       return JSON.stringify({ error: true, message: "Invalid SEC URL" });
     }
-    const resp = await fetch(documentUrl, { headers: { "User-Agent": "yahoo-finance-mcp/1.0 admin@example.com" } });
+    const resp = await edgarFetch(documentUrl);
     if (!resp.ok) return JSON.stringify({ error: true, message: `HTTP ${resp.status}` });
     const html = await resp.text();
 
@@ -8134,7 +8254,7 @@ export async function getFilingSection(ticker: string, sectionName: string, docu
     if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
       return JSON.stringify({ error: true, message: "Invalid SEC URL" });
     }
-    const resp = await fetch(documentUrl, { headers: { "User-Agent": "yahoo-finance-mcp/1.0 admin@example.com" } });
+    const resp = await edgarFetch(documentUrl);
     if (!resp.ok) return JSON.stringify({ error: true, message: `HTTP ${resp.status}` });
     const html = await resp.text();
 
@@ -8235,7 +8355,7 @@ export async function listFilingTables(ticker: string, documentUrl: string, offs
     if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
       return JSON.stringify({ error: true, message: "Invalid SEC URL" });
     }
-    const resp = await fetch(documentUrl, { headers: { "User-Agent": "yahoo-finance-mcp/1.0 admin@example.com" } });
+    const resp = await edgarFetch(documentUrl);
     if (!resp.ok) return JSON.stringify({ error: true, message: `HTTP ${resp.status}` });
     const html = await resp.text();
 
@@ -8285,7 +8405,7 @@ export async function getFilingTable(ticker: string, documentUrl: string, tableI
     if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
       return JSON.stringify({ error: true, message: "Invalid SEC URL" });
     }
-    const resp = await fetch(documentUrl, { headers: { "User-Agent": "yahoo-finance-mcp/1.0 admin@example.com" } });
+    const resp = await edgarFetch(documentUrl);
     if (!resp.ok) return JSON.stringify({ error: true, message: `HTTP ${resp.status}` });
     const html = await resp.text();
 
@@ -9216,7 +9336,7 @@ async function resolveNewsCompanyIdentity(ticker: string): Promise<NewsCompanyId
     confidence,
     warnings,
   };
-  companyIrIdentityCache.set(tickerU, { value: identity, storedAt: Date.now() });
+  setBounded(companyIrIdentityCache, tickerU, { value: identity, storedAt: Date.now() }, COMPANY_IR_IDENTITY_CACHE_MAX);
   return identity;
 }
 
@@ -9236,7 +9356,7 @@ async function fetchCompanyIrText(url: string, maxBytes: number, ttlMs: number):
   const buf = await resp.arrayBuffer();
   if (buf.byteLength > maxBytes) throw new Error("response exceeded size limit");
   const text = new TextDecoder("utf-8").decode(buf);
-  companyIrTextCache.set(url, { value: text, storedAt: Date.now() });
+  setBounded(companyIrTextCache, url, { value: text, storedAt: Date.now() }, COMPANY_IR_TEXT_CACHE_MAX);
   return text;
 }
 
@@ -9663,7 +9783,7 @@ async function discoverCompanyIrFeeds(
     });
   }
   const result = { feeds, pageProbeCount, probeBudgetExhausted };
-  companyIrDiscoveryCache.set(cacheKey, { value: result, storedAt: Date.now() });
+  setBounded(companyIrDiscoveryCache, cacheKey, { value: result, storedAt: Date.now() }, COMPANY_IR_DISCOVERY_CACHE_MAX);
   return result;
 }
 
@@ -10519,7 +10639,7 @@ async function fetchGlobeNewswireFeed(feed: { name: string; url: string }): Prom
     throw new Error("GlobeNewswire RSS response exceeded size limit");
   }
   const xml = new TextDecoder("utf-8").decode(buf);
-  globenewswireCache.set(cacheKey, { value: xml, storedAt: Date.now() });
+  setBounded(globenewswireCache, cacheKey, { value: xml, storedAt: Date.now() }, GLOBENEWSWIRE_CACHE_MAX);
   return xml;
 }
 
@@ -11923,7 +12043,7 @@ async function _getSecFilingIndexImpl(
   }
 
   // Fetch filing HTML
-  const resp = await fetch(filing.documentUrl, { headers: { "User-Agent": EDGAR_UA } });
+  const resp = await edgarFetch(filing.documentUrl);
   if (!resp.ok) {
     return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: `Failed to fetch filing: HTTP ${resp.status}` } });
   }
@@ -11973,7 +12093,7 @@ async function _getSecFilingIndexImpl(
     warnings: filing.warnings,
   });
 
-  filingIndexCache.set(cacheKey, { value: result, storedAt: Date.now() });
+  setBounded(filingIndexCache, cacheKey, { value: result, storedAt: Date.now() }, FILING_INDEX_CACHE_MAX);
   return result;
 }
 
@@ -12743,10 +12863,11 @@ async function yahooTranscriptResponse(url: string, timeoutMs: number): Promise<
       timeoutMs,
     );
   };
-  let response = await makeRequest(await getCrumb());
+  const crumb = await getCrumb();
+  let response = await makeRequest(crumb);
   if (response.status === 401) {
     await response.body?.cancel();
-    _crumb = null;
+    invalidateCrumb(crumb);
     response = await makeRequest(await getCrumb());
   }
   return response;
@@ -15272,7 +15393,7 @@ export async function indexEarningsRelease(ticker: string, period = "latest", so
     meta: { indexedAt: nowIsoUtc(), cacheKey, cacheTtlHours: 24 },
   };
   const encoded = JSON.stringify(out);
-  filingIndexCache.set(cacheKey, { value: encoded, storedAt: Date.now() });
+  setBounded(filingIndexCache, cacheKey, { value: encoded, storedAt: Date.now() }, FILING_INDEX_CACHE_MAX);
   return encoded;
 }
 

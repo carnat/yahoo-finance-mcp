@@ -27,10 +27,10 @@ def _compact_excerpt(text: object, max_len: int = 240) -> str:
 # Async retry helper
 # ---------------------------------------------------------------------------
 async def _fetch_with_retry(fn, *args, retries: int = 1, delay: float = 2.0, **kwargs):
-    """Call fn(*args, **kwargs) with one retry on exception, waiting `delay` seconds."""
+    """Call blocking fn(*args, **kwargs) off the event loop, retrying once on exception."""
     for attempt in range(retries + 1):
         try:
-            return fn(*args, **kwargs)
+            return await asyncio.to_thread(fn, *args, **kwargs)
         except Exception:
             if attempt < retries:
                 await asyncio.sleep(delay)

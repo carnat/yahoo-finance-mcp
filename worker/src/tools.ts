@@ -2224,6 +2224,15 @@ function validateGroupedActionParams(
   );
 }
 
+/**
+ * True when text reports an HTTP 429 status ("api error 429", "HTTP 429",
+ * "status 429"). A bare substring test also matched digits inside URLs and
+ * cache-buster timestamps, turning ordinary failures into RATE_LIMIT.
+ */
+function mentionsHttp429(lower: string): boolean {
+  return /\b(?:error|http|status)[:\s]*429\b/.test(lower);
+}
+
 function legacyToolFailure(raw: string): { code: string; message: string } | null {
   let text = raw.trim();
   if (!text) return null;
@@ -2244,7 +2253,7 @@ function legacyToolFailure(raw: string): { code: string; message: string } | nul
       ? ErrorCode.NO_OPTIONS_DATA
       : lower.includes("not found") || lower.includes("api error 404")
         ? ErrorCode.TICKER_NOT_FOUND
-        : lower.includes("rate limit") || lower.includes("429")
+        : lower.includes("rate limit") || mentionsHttp429(lower)
           ? ErrorCode.RATE_LIMIT
           : lower.includes("timeout") || lower.includes("timed out")
             ? ErrorCode.PROVIDER_TIMEOUT
@@ -2460,6 +2469,7 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
   } catch (error) {
     const rawMessage = error instanceof Error ? error.message : String(error);
     const lower = rawMessage.toLowerCase();
+    const httpStatus = (error as { status?: unknown } | null)?.status;
     if (lower.includes("unknown tool") || lower.includes("unknown grouped tool")) {
       return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, "Unknown tool name.");
     }
@@ -2468,7 +2478,7 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
         metaExtra: { retryable: false },
       });
     }
-    if (lower.includes("rate limit") || lower.includes("rate_limit") || lower.includes("429")) {
+    if (httpStatus === 429 || lower.includes("rate limit") || lower.includes("rate_limit") || mentionsHttp429(lower)) {
       return mcpFailure(name, ErrorCode.RATE_LIMIT, "The upstream data provider rate limit was reached. Retry later.", {
         metaExtra: { retryable: true },
       });

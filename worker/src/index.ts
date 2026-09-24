@@ -91,7 +91,7 @@ export default {
         return new Response("Not Found", { status: 404, headers: CORS_HEADERS });
       }
       const authHeader = request.headers.get("Authorization") ?? "";
-      if (authHeader !== `Bearer ${token}`) {
+      if (!timingSafeEqual(authHeader, `Bearer ${token}`)) {
         return new Response("Unauthorized", { status: 401, headers: CORS_HEADERS });
       }
       return json(await runAudit());
@@ -134,6 +134,17 @@ export default {
     return new Response("Not Found", { status: 404 });
   },
 };
+
+/** Constant-time string comparison so the audit token cannot be probed by timing. */
+function timingSafeEqual(a: string, b: string): boolean {
+  const left = new TextEncoder().encode(a);
+  const right = new TextEncoder().encode(b);
+  let diff = left.length ^ right.length;
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    diff |= (left[i] ?? 0) ^ (right[i] ?? 0);
+  }
+  return diff === 0;
+}
 
 async function runAudit(): Promise<Record<string, unknown>> {
   const healthRaw = await callTool("health_check", {});

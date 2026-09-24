@@ -12,6 +12,8 @@ All ``yfmcp/tools/*.py`` domain modules import ``yfinance_server`` from here.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import inspect
 from typing import Any, Callable
 
@@ -88,7 +90,31 @@ def _fastmcp_tool_compat(self: FastMCP, *args: Any, **kwargs: Any) -> Any:
         kwargs.pop("annotations", None)
     if not _FASTMCP_TOOL_SUPPORTS_OUTPUT_SCHEMA:
         kwargs.pop("output_schema", None)
-    return _ORIGINAL_FASTMCP_TOOL(self, *args, **kwargs)
+    register = _ORIGINAL_FASTMCP_TOOL(self, *args, **kwargs)
+
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        register(_offload_to_thread(fn) if inspect.iscoroutinefunction(fn) else fn)
+        return fn
+
+    return decorator
+
+
+def _offload_to_thread(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Run each MCP invocation of an async tool on a worker thread.
+
+    Tool bodies call blocking yfinance and urllib APIs directly. Running the
+    invocation in its own event loop on a worker thread keeps the stdio
+    server's loop responsive and lets concurrent requests proceed in parallel.
+    Module-level names keep the original coroutine function, so direct calls
+    and grouped routing (see ``build_handler_registry``) are unaffected.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return await asyncio.to_thread(lambda: asyncio.run(fn(*args, **kwargs)))
+
+    wrapper._yfmcp_handler = fn  # type: ignore[attr-defined]
+    return wrapper
 
 
 if FastMCP.tool is not _fastmcp_tool_compat:
@@ -276,6 +302,9 @@ def build_handler_registry(server: FastMCP) -> dict[str, Callable[..., Any]]:
         for tool in tools.values():
             fn = getattr(tool, "fn", None)
             if fn is not None:
+                # Grouped tools are already offloaded; route to the original
+                # handler so an action call does not hop threads twice.
+                fn = getattr(fn, "_yfmcp_handler", fn)
                 registry[fn.__name__] = fn
     return registry
 

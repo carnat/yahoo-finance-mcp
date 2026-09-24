@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re as _re
 import time
+import sys
 import urllib.parse as _urlparse
 import urllib.request as _urlrequest
 import urllib.error as _urlerror
@@ -215,10 +216,10 @@ async def get_stock_info(
     company = yf.Ticker(ticker)
     try:
         if company.fast_info.currency is None:
-            print(f"Company ticker {ticker} not found.")
+            print(f"Company ticker {ticker} not found.", file=sys.stderr)
             return f"Company ticker {ticker} not found."
     except Exception as e:
-        print(f"Error: getting stock information for {ticker}: {e}")
+        print(f"Error: getting stock information for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting stock information for {ticker}: {e}"
     info = company.info
     # Strip ETF/crypto/fund fields from equity responses to reduce payload size
@@ -3415,7 +3416,7 @@ async def get_stock_actions(ticker: str) -> str:
     try:
         company = yf.Ticker(ticker)
     except Exception as e:
-        print(f"Error: getting stock actions for {ticker}: {e}")
+        print(f"Error: getting stock actions for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting stock actions for {ticker}: {e}"
     actions_df = company.actions
     actions_df = actions_df.reset_index(names="Date")
@@ -3471,10 +3472,10 @@ async def get_financial_statement(
     company = yf.Ticker(ticker)
     try:
         if company.fast_info.currency is None:
-            print(f"Company ticker {ticker} not found.")
+            print(f"Company ticker {ticker} not found.", file=sys.stderr)
             return f"Company ticker {ticker} not found."
     except Exception as e:
-        print(f"Error: getting financial statement for {ticker}: {e}")
+        print(f"Error: getting financial statement for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting financial statement for {ticker}: {e}"
 
     _freq_map = {
@@ -3506,7 +3507,7 @@ async def get_financial_statement(
     try:
         df = await _fetch_with_retry(_fetch_stmt, company)
     except Exception as e:
-        print(f"Error: getting financial statement for {ticker}: {e}")
+        print(f"Error: getting financial statement for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting financial statement for {ticker}: {e}"
 
     if df is None or df.empty:
@@ -3558,10 +3559,10 @@ async def get_holder_info(ticker: str, holder_type: str) -> str:
     company = yf.Ticker(ticker)
     try:
         if company.fast_info.currency is None:
-            print(f"Company ticker {ticker} not found.")
+            print(f"Company ticker {ticker} not found.", file=sys.stderr)
             return f"Company ticker {ticker} not found."
     except Exception as e:
-        print(f"Error: getting holder info for {ticker}: {e}")
+        print(f"Error: getting holder info for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting holder info for {ticker}: {e}"
 
     if holder_type == HolderType.major_holders:
@@ -3596,10 +3597,10 @@ async def get_option_expiration_dates(ticker: str) -> str:
     company = yf.Ticker(ticker)
     try:
         if company.fast_info.currency is None:
-            print(f"Company ticker {ticker} not found.")
+            print(f"Company ticker {ticker} not found.", file=sys.stderr)
             return f"Company ticker {ticker} not found."
     except Exception as e:
-        print(f"Error: getting option expiration dates for {ticker}: {e}")
+        print(f"Error: getting option expiration dates for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting option expiration dates for {ticker}: {e}"
     return json.dumps(company.options)
 
@@ -3677,10 +3678,10 @@ async def get_option_chain(
     company = yf.Ticker(ticker)
     try:
         if company.fast_info.currency is None:
-            print(f"Company ticker {ticker} not found.")
+            print(f"Company ticker {ticker} not found.", file=sys.stderr)
             return f"Company ticker {ticker} not found."
     except Exception as e:
-        print(f"Error: getting option chain for {ticker}: {e}")
+        print(f"Error: getting option chain for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting option chain for {ticker}: {e}"
 
     # Check if the expiration date is valid
@@ -4386,10 +4387,10 @@ async def get_recommendations(ticker: str, recommendation_type: str, months_back
     company = yf.Ticker(ticker)
     try:
         if company.fast_info.currency is None:
-            print(f"Company ticker {ticker} not found.")
+            print(f"Company ticker {ticker} not found.", file=sys.stderr)
             return f"Company ticker {ticker} not found."
     except Exception as e:
-        print(f"Error: getting recommendations for {ticker}: {e}")
+        print(f"Error: getting recommendations for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting recommendations for {ticker}: {e}"
     try:
         if recommendation_type == RecommendationType.recommendations:
@@ -4406,7 +4407,7 @@ async def get_recommendations(ticker: str, recommendation_type: str, months_back
             latest_by_firm = upgrades_downgrades.drop_duplicates(subset=["Firm"])
             return latest_by_firm.to_json(orient="records", date_format="iso")
     except Exception as e:
-        print(f"Error: getting recommendations for {ticker}: {e}")
+        print(f"Error: getting recommendations for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting recommendations for {ticker}: {e}"
 
 
@@ -4476,7 +4477,7 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
         fi = company.fast_info
         last_price = fi.last_price
     except Exception as e:
-        print(f"Error: getting analyst consensus for {ticker}: {e}")
+        print(f"Error: getting analyst consensus for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting analyst consensus for {ticker}: {e}"
 
     output: dict = {
@@ -4632,7 +4633,7 @@ async def get_earnings_analysis(ticker: str) -> str:
         if fi.currency is None:
             return f"Company ticker {ticker} not found."
     except Exception as e:
-        print(f"Error: getting earnings analysis for {ticker}: {e}")
+        print(f"Error: getting earnings analysis for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting earnings analysis for {ticker}: {e}"
 
     def _df_to_records(df):
@@ -4728,7 +4729,7 @@ async def get_financial_ratios(
     try:
         info = company.info
     except Exception as e:
-        print(f"Error: getting financial ratios for {ticker}: {e}")
+        print(f"Error: getting financial ratios for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting financial ratios for {ticker}: {e}"
 
     def _get(key):
@@ -4963,7 +4964,7 @@ async def get_calendar(ticker: str, mode: Literal["upcoming", "history"] = "upco
         if fi.currency is None:
             return f"Company ticker {ticker} not found."
     except Exception as e:
-        print(f"Error: getting calendar for {ticker}: {e}")
+        print(f"Error: getting calendar for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting calendar for {ticker}: {e}"
 
     if mode == "history":
@@ -4985,7 +4986,7 @@ async def get_calendar(ticker: str, mode: Literal["upcoming", "history"] = "upco
     try:
         cal = company.calendar
     except Exception as e:
-        print(f"Error: getting calendar for {ticker}: {e}")
+        print(f"Error: getting calendar for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting calendar for {ticker}: {e}"
 
     if not cal:
@@ -5146,7 +5147,7 @@ async def search_ticker(query: str, max_results: int = 8, exchange: str | None =
                 trimmed = [r for r in trimmed if r.get("exchange") == exch_upper]
         return json.dumps(trimmed)
     except Exception as e:
-        print(f"Error: searching for '{query}': {e}")
+        print(f"Error: searching for '{query}': {e}", file=sys.stderr)
         return f"Error: searching for '{query}': {e}"
 
 
@@ -5205,7 +5206,7 @@ async def screen_stocks(screener_name: str, count: int = 25) -> str:
         ]
         return json.dumps({"screener": screener_name, "count": len(trimmed), "results": trimmed})
     except Exception as e:
-        print(f"Error: running screener '{screener_name}': {e}")
+        print(f"Error: running screener '{screener_name}': {e}", file=sys.stderr)
         return f"Error: running screener '{screener_name}': {e}"
 
 
@@ -10073,5 +10074,5 @@ if __name__ == "__main__":
     # Initialize and run the server
     server = get_server()
     mode_label = "grouped" if _TOOL_MODE == "grouped" else "expanded"
-    print(f"Starting Yahoo Finance MCP server (mode={mode_label})...")
+    print(f"Starting Yahoo Finance MCP server (mode={mode_label})...", file=sys.stderr)
     server.run(transport="stdio")
