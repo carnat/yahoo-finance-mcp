@@ -36,9 +36,10 @@ EXPECTED_BUILD_SHA = os.environ.get("EXPECTED_BUILD_SHA", "").strip().lower()
 ALLOW_NETWORK_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in {"1", "true", "yes"}
 VERSION_ATTEMPTS = 19
 VERSION_DELAY_SECONDS = 5.0
-# A single upstream throttle or timeout is retried once; a repeat still fails.
+# An upstream throttle or timeout is retried twice, 20 s then 40 s later;
+# a third one still fails the gate.
 PROVIDER_RETRY_CODES = frozenset({"RATE_LIMIT", "PROVIDER_TIMEOUT"})
-PROVIDER_RETRY_DELAY_SECONDS = 20.0
+PROVIDER_RETRY_DELAYS_SECONDS: tuple[float, ...] = (20.0, 40.0)
 
 _CATALOG = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
 GROUPED_TOOLS = frozenset(_CATALOG["groups"])
@@ -631,17 +632,19 @@ def call_canary(
     req_id: int,
     call: Callable[..., dict[str, Any]] | None = None,
     sleep: Callable[[float], None] = time.sleep,
-    delay_seconds: float = PROVIDER_RETRY_DELAY_SECONDS,
+    delays_seconds: tuple[float, ...] = PROVIDER_RETRY_DELAYS_SECONDS,
 ) -> dict[str, Any]:
-    """Call a canary tool, retrying once when the provider throttled or timed out."""
+    """Call a canary tool, retrying while the provider throttles or times out."""
     call = call or call_versioned_tool
     payload = call(tool, args, tool_mode=tool_mode, req_id=req_id)
-    code = _retryable_provider_code(payload)
-    if code is None:
-        return payload
-    print(f"  RETRY {tool}: provider returned {code}; retrying once in {delay_seconds:.0f}s")
-    sleep(delay_seconds)
-    return call(tool, args, tool_mode=tool_mode, req_id=req_id)
+    for delay in delays_seconds:
+        code = _retryable_provider_code(payload)
+        if code is None:
+            return payload
+        print(f"  RETRY {tool}: provider returned {code}; retrying in {delay:.0f}s")
+        sleep(delay)
+        payload = call(tool, args, tool_mode=tool_mode, req_id=req_id)
+    return payload
 
 
 def run_canaries(canaries: list[dict[str, Any]]) -> None:

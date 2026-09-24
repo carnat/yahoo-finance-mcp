@@ -1833,7 +1833,9 @@ export async function callToolResult(name: string, args: Record<string, unknown>
   }
   const legacyFailure = legacyToolFailure(raw);
   if (legacyFailure) {
-    return mcpFailureResult(name, legacyFailure.code, legacyFailure.message);
+    // Throttling and timeouts are transient; say so, as the thrown-error path does.
+    const retryable = legacyFailure.code === ErrorCode.RATE_LIMIT || legacyFailure.code === ErrorCode.PROVIDER_TIMEOUT;
+    return mcpFailureResult(name, legacyFailure.code, legacyFailure.message, retryable ? { metaExtra: { retryable: true } } : undefined);
   }
   let batchMeta: { partialSuccess?: boolean; successCount?: number; errorCount?: number } | undefined;
   // Only batch results carry __batchMeta; everything else (large filings and
