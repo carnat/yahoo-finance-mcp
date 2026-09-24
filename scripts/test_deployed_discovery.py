@@ -651,7 +651,10 @@ def main() -> int:
     expiry_dates = extract_data(exp)
     expiry = choose_stable_option_expiration(expiry_dates)
     if not expiry:
-        raise AssertionError(f"get_option_expiration_dates returned no usable ASTS expirations: {expiry_dates!r}")
+        raise AssertionError(
+            f"get_option_expiration_dates returned no usable ASTS expirations: {expiry_dates!r}; "
+            f"full payload: {json.dumps(exp)[:2000]}"
+        )
 
     calls: list[tuple[str, dict]] = [
         ("health_check", {}),
@@ -920,7 +923,10 @@ def main() -> int:
     aapl_dates = extract_data(aapl_exp_payload)
     aapl_expiry = choose_stable_option_expiration(aapl_dates)
     if not aapl_expiry:
-        raise AssertionError(f"get_option_expiration_dates returned no usable AAPL expirations: {aapl_dates!r}")
+        raise AssertionError(
+            f"get_option_expiration_dates returned no usable AAPL expirations: {aapl_dates!r}; "
+            f"full payload: {json.dumps(aapl_exp_payload)[:2000]}"
+        )
     aapl_chain = call_tool(
         "get_option_chain",
         {"ticker": "AAPL", "expiration_date": aapl_expiry, "option_type": "calls"},

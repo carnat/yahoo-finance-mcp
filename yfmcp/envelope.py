@@ -92,19 +92,42 @@ def _mcp_success(
     return json.dumps({
         "ok": True,
         "data": data if not isinstance(data, str) else json.loads(data),
-        "meta": {
-            "tool": tool,
-            **({"canonicalTool": canonical_tool} if canonical_tool is not None else {}),
-            **({"deprecatedTool": deprecated_tool} if deprecated_tool is not None else {}),
-            **({"useInstead": use_instead} if use_instead is not None else {}),
-            "source": source,
-            "dataDate": data_date,
-            "serverVersion": SERVER_VERSION,
-            "cacheHit": cache_hit,
-            "warnings": warnings or [],
-        },
+        "meta": _base_meta(
+            tool,
+            canonical_tool=canonical_tool,
+            deprecated_tool=deprecated_tool,
+            use_instead=use_instead,
+            source=source,
+            data_date=data_date,
+            cache_hit=cache_hit,
+            warnings=warnings,
+        ),
         "error": None,
     })
+
+
+def _base_meta(
+    tool: str,
+    *,
+    canonical_tool: str | None = None,
+    deprecated_tool: bool | None = None,
+    use_instead: str | None = None,
+    source: str = "yahoo_finance",
+    data_date: str | None = None,
+    cache_hit: bool = False,
+    warnings: list[object] | None = None,
+) -> dict:
+    return {
+        "tool": tool,
+        **({"canonicalTool": canonical_tool} if canonical_tool is not None else {}),
+        **({"deprecatedTool": deprecated_tool} if deprecated_tool is not None else {}),
+        **({"useInstead": use_instead} if use_instead is not None else {}),
+        "source": source,
+        "dataDate": data_date,
+        "serverVersion": SERVER_VERSION,
+        "cacheHit": cache_hit,
+        "warnings": warnings or [],
+    }
 
 
 def _mcp_failure(
@@ -375,3 +398,91 @@ def _wrap_envelope_v2(
         "errorCode": None,
         "meta": meta,
     })
+
+
+# ---------------------------------------------------------------------------
+# Tool-boundary envelope (parity with the Worker's callTool/mcpSuccess)
+# ---------------------------------------------------------------------------
+# Matches an HTTP 429 status ("error 429", "HTTP 429", "status: 429"). A bare
+# "429" substring test also matched tickers and timestamps inside URLs quoted
+# in provider exception text, reporting ordinary failures as rate limits.
+_HTTP_429_PATTERN = re.compile(r"\b(?:error|http|status)[:\s]*429\b")
+
+# Legacy {"error": true, ...} fields carried into the V2 error object.
+_LEGACY_ERROR_FIELDS = (
+    "retryable",
+    "fallbackSuggested",
+    "recommendedNextAction",
+    "missingParams",
+    "invalidParams",
+    "unexpectedParams",
+    "expectedParams",
+)
+
+
+def _legacy_text_failure(tool: str, text: str) -> str | None:
+    """Failure envelope for a plain-text legacy error, or None if text is not one."""
+    text = text.strip()
+    lower = text.lower()
+    if not (
+        lower.startswith("error")
+        or (lower.startswith("company ticker") and "not found" in lower)
+    ):
+        return None
+    if lower.startswith("error: invalid") or " is required" in lower:
+        code = ErrorCode.INPUT_VALIDATION_ERROR
+    elif "no option" in lower:
+        code = ErrorCode.NO_OPTIONS_DATA
+    elif "not found" in lower:
+        code = ErrorCode.TICKER_NOT_FOUND
+    elif "rate limit" in lower or _HTTP_429_PATTERN.search(lower):
+        code = ErrorCode.RATE_LIMIT
+    elif "timeout" in lower or "timed out" in lower:
+        code = ErrorCode.PROVIDER_TIMEOUT
+    else:
+        code = ErrorCode.PROVIDER_ERROR
+    return _mcp_failure(tool, code, text)
+
+
+def _envelope_tool_result(tool: str, result: object) -> object:
+    """Return a tool's raw result in the V2 envelope, as the Worker does.
+
+    Applied once per MCP tool call so local responses share the hosted shape:
+    existing envelopes gain any missing base meta, legacy ``{"error": true}``
+    payloads and plain-text errors become failure envelopes, and everything
+    else becomes ``{"ok": true, "data": ...}`` with fact enrichment. With
+    MCP_ENVELOPE_V2 disabled the raw result is returned unchanged.
+    """
+    if not _ENVELOPE_V2 or not isinstance(result, str):
+        return result
+    text = result.strip()
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        parsed = text
+    if isinstance(parsed, str):
+        failure = _legacy_text_failure(tool, parsed)
+        if failure is not None:
+            return failure
+        return json.dumps({"ok": True, "data": parsed, "meta": _base_meta(tool), "error": None})
+    if isinstance(parsed, dict):
+        if isinstance(parsed.get("ok"), bool) and ("data" in parsed or "error" in parsed):
+            inner_meta = parsed.get("meta") if isinstance(parsed.get("meta"), dict) else {}
+            parsed["meta"] = {**_base_meta(tool), **inner_meta}
+            if parsed["ok"] is True:
+                parsed["data"] = _enrich_facts(parsed.get("data"))
+            return json.dumps(parsed)
+        if parsed.get("error") is True:
+            meta_extra: dict = {}
+            error_extra = {k: parsed[k] for k in _LEGACY_ERROR_FIELDS if k in parsed}
+            if error_extra:
+                meta_extra["error_extra"] = error_extra
+            if "diagnostics" in parsed:
+                meta_extra["diagnostics"] = parsed["diagnostics"]
+            return _mcp_failure(
+                tool,
+                str(parsed.get("code") or ErrorCode.PROVIDER_ERROR),
+                str(parsed.get("message") or "Tool returned a legacy error without details."),
+                meta_extra=meta_extra or None,
+            )
+    return json.dumps({"ok": True, "data": _enrich_facts(parsed), "meta": _base_meta(tool), "error": None})
