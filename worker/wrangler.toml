@@ -14,8 +14,9 @@ BUILD_DATE = ""
 BUILD_SHA = ""
 DEPLOYED_AT = ""
 # SEC EDGAR fair-access policy requires a reachable contact in the User-Agent.
-# Set EDGAR_CONTACT_EMAIL (var or secret) to an operator-owned address;
-# requests fall back to a placeholder contact when it is unset.
+# The deploy workflow passes the EDGAR_CONTACT_EMAIL GitHub Actions secret
+# through as a Worker secret; requests fall back to a placeholder contact
+# when it is unset.
 
 # Smart Placement routes Worker execution to the Cloudflare PoP geographically
 # closest to its outbound dependencies (e.g. data.sec.gov in US-East), which

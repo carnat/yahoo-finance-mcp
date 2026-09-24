@@ -84,6 +84,7 @@ jobs:
           SEC_OPEN_DATA_API_KEY: ${{ secrets.SEC_OPEN_DATA_API_KEY }}
           ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
           MARKETAUX_API_TOKEN: ${{ secrets.MARKETAUX_API_TOKEN }}
+          EDGAR_CONTACT_EMAIL: ${{ secrets.EDGAR_CONTACT_EMAIL }}
           TOOL_MODE: ${{ env.DEPLOY_TOOL_MODE }}
 
       - name: Upload immutable candidate version

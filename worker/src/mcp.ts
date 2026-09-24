@@ -67,7 +67,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
   switch (method) {
     case "initialize": {
       const requestedVersion = (params as { protocolVersion?: unknown } | null)?.protocolVersion;
-      const supportedVersions = new Set(["2025-06-18", "2024-11-05"]);
+      const supportedVersions = new Set(["2025-06-18", "2025-03-26", "2024-11-05"]);
       const protocolVersion = typeof requestedVersion === "string" && supportedVersions.has(requestedVersion)
         ? requestedVersion
         : "2025-06-18";
