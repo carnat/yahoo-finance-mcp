@@ -1,4 +1,4 @@
-import { mcpSuccess, mcpFailure, ErrorCode, getBuildVersion, getServerVersion, getWorkerVar } from "./response.js";
+import { mcpSuccess, mcpFailure, ErrorCode, envelopeV2Enabled, getBuildVersion, getServerVersion, getWorkerVar } from "./response.js";
 import { GROUPED_TOOL_DEFS } from "./tool-catalog.js";
 import {
   getAnalystConsensus,
@@ -1470,7 +1470,7 @@ export function listVisibleTools(): Tool[] {
   return visible.map(tool => ({
     ...tool,
     annotations: tool.annotations ?? annotationsForTool(tool.name),
-    ...(getWorkerVar("MCP_ENVELOPE_V2") === "true"
+    ...(envelopeV2Enabled()
       ? {
           outputSchema: LLM_DETAILED_OUTPUT_TOOLS.has(tool.name)
             ? envelopedToolOutputSchema(tool.outputSchema)

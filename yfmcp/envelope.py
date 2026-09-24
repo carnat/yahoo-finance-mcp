@@ -17,7 +17,9 @@ from yfmcp.build_info import BUILD_DATE, SERVER_VERSION
 # ---------------------------------------------------------------------------
 class _DynamicEnvelopeV2Flag:
     def __bool__(self) -> bool:
-        return os.environ.get("MCP_ENVELOPE_V2", "").lower() == "true"
+        # V2 is the default since 2.0.0; set MCP_ENVELOPE_V2 to any other
+        # value (e.g. "false") for the legacy 1.x response shape.
+        return os.environ.get("MCP_ENVELOPE_V2", "true").lower() == "true"
     def __repr__(self) -> str:
         return str(bool(self))
     def __eq__(self, other: object) -> bool:
