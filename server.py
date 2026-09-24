@@ -22,7 +22,7 @@ import yfinance as yf
 
 # Phase 2b: yfmcp.app owns the FastMCP compat shim, yfinance_server instance, TOOL_ALIASES, and
 # build_handler_registry.  Import first so the compat shim fires before any decorator runs.
-from yfmcp.app import create_server, internal_handler_server, yfinance_server, TOOL_ALIASES, build_handler_registry
+from yfmcp.app import create_server, yfinance_server, TOOL_ALIASES, build_handler_registry
 from yfmcp.schemas import (
     FinancialType, HolderType, RecommendationType, FilingFactType,
     _TOOL_OUTPUT_SCHEMAS, _MARKET_SNAPSHOT_OUTPUT_SCHEMA,
@@ -160,42 +160,6 @@ _STOCK_INFO_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
 }
 
 
-@internal_handler_server.tool(
-    name="get_stock_info",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_info"],
-    description="""Get stock fundamentals for one or more ticker symbols from Yahoo Finance.
-
-By default returns ~30 key fields covering identity, price, valuation, earnings, margins,
-dividends, analyst ratings, and the business description — enough for most queries at a
-fraction of the token cost of the full payload.
-
-Pass include_all=true only when you specifically need fields outside the default set (e.g.
-raw balance-sheet items, governance scores, or insider-ownership details).
-
-For ETFs or mutual funds (SPY, QQQ, VTI, ARKK, etc.), use get_etf_info instead — it returns
-fund-specific fields including NAV, expense ratio, top-10 holdings, and sector weights.
-
-Default fields (~30): shortName, longName, sector, industry, country, website,
-fullTimeEmployees, currentPrice, previousClose, marketCap, enterpriseValue, currency,
-trailingPE, forwardPE, priceToBook, priceToSalesTrailing12Months, enterpriseToEbitda,
-trailingEps, forwardEps, revenueGrowth, earningsGrowth, grossMargins, operatingMargins,
-profitMargins, returnOnEquity, returnOnAssets, dividendYield, payoutRatio,
-recommendationMean, numberOfAnalystOpinions, targetMeanPrice, longBusinessSummary.
-
-Args:
-    ticker: str | list[str]
-        A single ticker symbol (e.g. "AAPL") or a list of symbols (e.g. ["AAPL", "MSFT"]).
-        When a list is provided, returns a dict keyed by symbol.
-    fields: list[str] | None
-        Optional list of exact field names or group aliases to return.
-        Group aliases: "identity", "pricing", "valuation", "earnings", "margins",
-        "dividends", "analyst", "description".
-        Mixing aliases and exact names is supported, e.g. ["pricing", "trailingPE"].
-        Ignored when include_all=true.
-    include_all: bool
-        Set to true to return the full ~120-field payload. Default is false.
-""",
-)
 async def get_stock_info(
     ticker: str | list[str],
     fields: list[str] | None = None,
@@ -238,16 +202,6 @@ async def get_stock_info(
     return json.dumps(info)
 
 
-@internal_handler_server.tool(
-    name="get_yahoo_finance_news",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_yahoo_finance_news"],
-    description="""Deprecated alias for get_company_news.
-
-Args:
-    ticker: str
-        The ticker symbol of the stock to get news for, e.g. "AAPL"
-""",
-)
 async def get_yahoo_finance_news(ticker: str) -> str:
     """Alias for get_company_news. Routes to the canonical news tool with Yahoo Finance + Finnhub sources."""
     return await get_company_news(ticker, sources=["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"])
@@ -905,6 +859,12 @@ def _source_rank(source_type: object) -> int:
 def _safe_sec_url(candidate: object) -> str | None:
     url = str(candidate or "").strip()
     return url if url.startswith("https://www.sec.gov/Archives/") else None
+
+
+def _is_likely_xbrl_document_url(url: str) -> bool:
+    """Same test as the Worker's isLikelyXbrlDocumentUrl."""
+    lower = url.split("?", 1)[0].lower()
+    return lower.endswith(".xml") or "/xbrl/" in lower
 
 
 def _within_date_window(
@@ -3396,16 +3356,6 @@ async def verify_company_event(
     })
 
 
-@internal_handler_server.tool(
-    name="get_stock_actions",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_actions"],
-    description="""Get dividends, stock splits, and fund capital-gain distributions from Yahoo Finance.
-
-Args:
-    ticker: str
-        The ticker symbol of the stock to get stock actions for, e.g. "AAPL"
-""",
-)
 async def get_stock_actions(ticker: str) -> str:
     """Get dividends, splits, and fund capital-gain distributions for a ticker."""
     try:
@@ -3536,18 +3486,6 @@ async def get_financial_statement(
     return result
 
 
-@internal_handler_server.tool(
-    name="get_holder_info",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_holder_info"],
-    description="""Get holder information for a given ticker symbol from yahoo finance. You can choose from the following holder types: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders.
-
-Args:
-    ticker: str
-        The ticker symbol of the stock to get holder information for, e.g. "AAPL"
-    holder_type: str
-        The type of holder information to get. You can choose from the following holder types: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders.
-""",
-)
 async def get_holder_info(ticker: str, holder_type: str) -> str:
     """Get holder information for a given ticker symbol"""
 
@@ -3652,9 +3590,6 @@ async def get_option_chain(
     moneyness_window_pct: float = 20.0,
     sort_by: str = "relevance",
     include_illiquid: bool = False,
-    min_strike: float | None = None,  # legacy alias
-    max_strike: float | None = None,  # legacy alias
-    in_the_money_only: bool = False,  # legacy alias
 ) -> str:
     """Fetch the option chain for a given ticker symbol, expiration date, and option type.
 
@@ -3662,9 +3597,9 @@ async def get_option_chain(
         ticker: The ticker symbol of the stock
         expiration_date: The expiration date for the options chain (format: 'YYYY-MM-DD')
         option_type: The type of option to fetch ('calls' or 'puts')
-        min_strike: Optional minimum strike price filter.
-        max_strike: Optional maximum strike price filter.
-        in_the_money_only: If True, only return in-the-money options.
+        strike_min: Optional minimum strike price filter.
+        strike_max: Optional maximum strike price filter.
+        moneyness: "near_money" (default), "itm", "otm", or "all".
 
     Returns:
         str: JSON string containing the option chain data
@@ -3696,10 +3631,8 @@ async def get_option_chain(
     else:
         return f"Error: invalid option type {option_type}. Please use one of the following: calls, puts."
 
-    effective_strike_min = strike_min if strike_min is not None else min_strike
-    effective_strike_max = strike_max if strike_max is not None else max_strike
-    if in_the_money_only and moneyness == "all":
-        moneyness = "itm"
+    effective_strike_min = strike_min
+    effective_strike_max = strike_max
 
     # Get underlying price once (needed for near_money and relevance sort)
     underlying_price: float | None = None
@@ -3790,11 +3723,6 @@ async def get_option_chain(
     })
 
 
-@internal_handler_server.tool(
-    name="get_options_summary",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_summary"],
-    description="Get options summary for a single ticker: ATM implied volatility, put/call ratio by volume and OI, max pain strike for the nearest or requested expiry. Preferred for data-source use because it returns a compact snapshot without the full contract list.",
-)
 def _invalid_expiry_payload(ticker: str, requested: str, expirations: list[str]) -> dict:
     nearest = None
     if expirations:
@@ -3930,18 +3858,6 @@ async def get_options_summary(ticker: str, expiry_hint: str | None = None) -> st
         )
 
 
-@internal_handler_server.tool(
-    name="list_sec_filings",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["list_sec_filings"],
-    description="""List recent SEC filings for a ticker from EDGAR.
-Returns accession number, filing date, form type, primary document URL, and EDGAR index URL.
-Supports form types: 10-K, 10-Q, 8-K, DEF 14A.
-Args:
-    ticker: str - The ticker symbol
-    form_type: str - Optional form type filter (10-K, 10-Q, 8-K, DEF 14A). Default: 10-K
-    max_filings: int - Maximum filings to return (default: 5, max: 20)
-""",
-)
 async def list_sec_filings(ticker: str, form_type: str = "10-K", max_filings: int = 5) -> str:
     ALLOWED_FORMS = {"10-K", "10-Q", "8-K", "DEF 14A"}
     if form_type not in ALLOWED_FORMS:
@@ -4004,16 +3920,6 @@ async def list_sec_filings(ticker: str, form_type: str = "10-K", max_filings: in
         return _mcp_failure("list_sec_filings", ErrorCode.PROVIDER_ERROR, str(e))
 
 
-@internal_handler_server.tool(
-    name="get_filing_outline",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_outline"],
-    description="""Parse the document outline of an SEC filing (10-K/10-Q). Returns a hierarchical tree of Parts, Items, Notes as found in the document.
-Args:
-    ticker: str - ticker symbol
-    accession_number: str - SEC accession number (format: XXXXXXXXXX-YY-ZZZZZZ)
-    document_url: str - Optional direct URL to the filing HTML document (must be https://www.sec.gov/Archives/...)
-""",
-)
 async def get_filing_outline(ticker: str, accession_number: str | None = None, document_url: str | None = None) -> str:
     err = _validate_ticker(ticker)
     if err:
@@ -4067,17 +3973,6 @@ async def get_filing_outline(ticker: str, accession_number: str | None = None, d
         return _mcp_failure("get_filing_outline", ErrorCode.PROVIDER_ERROR, str(e))
 
 
-@internal_handler_server.tool(
-    name="get_filing_section",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_section"],
-    description="""Retrieve a structurally resolved SEC filing section. Item requests fail closed rather than returning table-of-contents text.
-Args:
-    ticker: str - ticker symbol
-    section_name: str - Section name/heading to find, e.g. 'Item 1A', 'Note 3', 'Risk Factors'
-    document_url: str - Direct URL to filing HTML (must be https://www.sec.gov/Archives/...)
-    context_chars: int - Characters of context around matched section (default: 3000)
-""",
-)
 async def get_filing_section(ticker: str, section_name: str, document_url: str, context_chars: int = 3000) -> str:
     err = _validate_ticker(ticker)
     if err:
@@ -4190,15 +4085,6 @@ def _filing_table_is_usable(rows: list[list[str]]) -> bool:
     return sum(1 for row in rows for cell in row if cell.strip()) >= 2
 
 
-@internal_handler_server.tool(
-    name="list_filing_tables",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["list_filing_tables"],
-    description="""List semantically usable SEC filing tables, preserving original indexes and reporting excluded layout tables.
-Args:
-    ticker: str
-    document_url: str - Direct URL to filing HTML (must be https://www.sec.gov/Archives/...)
-""",
-)
 async def list_filing_tables(
     ticker: str,
     document_url: str,
@@ -4256,17 +4142,6 @@ async def list_filing_tables(
         return _mcp_failure("list_filing_tables", ErrorCode.PROVIDER_ERROR, str(e))
 
 
-@internal_handler_server.tool(
-    name="get_filing_table",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_table"],
-    description="""Get parsed SEC filing table rows. Empty/layout-only candidates return UNUSABLE_TABLE with a recovery action.
-Args:
-    ticker: str
-    document_url: str - Direct URL to filing HTML (must be https://www.sec.gov/Archives/...)
-    table_index: int - Table index from list_filing_tables (0-based)
-    max_rows: int - Maximum rows to return (default: 30)
-""",
-)
 async def get_filing_table(ticker: str, document_url: str, table_index: int, max_rows: int = 30) -> str:
     err = _validate_ticker(ticker)
     if err:
@@ -4318,17 +4193,6 @@ async def get_filing_table(ticker: str, document_url: str, table_index: int, max
         return _mcp_failure("get_filing_table", ErrorCode.PROVIDER_ERROR, str(e))
 
 
-@internal_handler_server.tool(
-    name="extract_filing_fact",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_filing_fact"],
-    description="""Extract a specific financial fact from an SEC filing. Uses XBRL first, parsed tables second, text search last.
-Args:
-    ticker: str
-    fact_name: str - Fact to extract (e.g. 'revenue', 'net income', 'R&D expense')
-    document_url: str - Optional direct URL to filing HTML (must be https://www.sec.gov/Archives/...)
-    accession_number: str - Optional accession number for XBRL lookup
-""",
-)
 async def extract_filing_fact(
     ticker: str,
     fact_name: str,
@@ -4363,20 +4227,6 @@ async def extract_filing_fact(
         return _mcp_failure("extract_filing_fact", ErrorCode.PROVIDER_ERROR, str(e))
 
 
-@internal_handler_server.tool(
-    name="get_recommendations",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_recommendations"],
-    description="""Get recommendations or upgrades/downgrades for a given ticker symbol from yahoo finance. You can also specify the number of months back to get upgrades/downgrades for, default is 12.
-
-Args:
-    ticker: str
-        The ticker symbol of the stock to get recommendations for, e.g. "AAPL"
-    recommendation_type: str
-        The type of recommendation to get. You can choose from the following recommendation types: recommendations, upgrades_downgrades.
-    months_back: int
-        The number of months back to get upgrades/downgrades for, default is 12.
-""",
-)
 async def get_recommendations(ticker: str, recommendation_type: str, months_back: int = 12) -> str:
     """Get recommendations or upgrades/downgrades for a given ticker symbol"""
     company = yf.Ticker(ticker)
@@ -4673,33 +4523,6 @@ async def get_earnings_analysis(ticker: str) -> str:
 # Group 2.4 — get_financial_ratios
 # ---------------------------------------------------------------------------
 
-@internal_handler_server.tool(
-    name="get_financial_ratios",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_financial_ratios"],
-    description="""Get pre-computed key financial ratios for one or more tickers.
-
-PREFER THIS over fetching full financial statements when you need valuation or profitability ratios.
-Ratios are computed server-side from company.info so the LLM does not have to process raw statements.
-Set history_periods (1-20) to add dated Yahoo valuation measures at the requested frequency.
-Read unitSemantics before interpreting ratios: margins/yields are not all on the same scale.
-
-Includes:
-- Valuation: P/E (trailing & forward), P/S, P/B, EV/EBITDA, EV/Revenue, PEG ratio
-- Profitability: Gross/Operating/Net margins, ROE, ROA
-- Leverage: Debt/Equity, Current ratio, Quick ratio
-- Cash flow: Free Cash Flow, FCF yield (FCF / market cap)
-- Dividend: Yield, Payout ratio
-
-Args:
-    ticker: str | list[str]
-        A single ticker symbol (e.g. "AAPL") or a list of symbols (e.g. ["AAPL", "MSFT"]).
-        When a list is provided, returns a dict keyed by symbol.
-    history_periods: int
-        Optional number of dated valuation periods to add. Default 0 (current snapshot only).
-    frequency: quarterly | monthly | yearly | trailing
-        Frequency for valuation history.
-""",
-)
 async def get_financial_ratios(
     ticker: str | list[str],
     history_periods: int = 0,
@@ -4923,25 +4746,6 @@ async def analyze_share_count_trend(
     })
 
 
-@internal_handler_server.tool(
-    name="get_calendar",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_calendar"],
-    description="""Get a company's upcoming Yahoo calendar or paginated earnings-date history.
-
-Returns:
-- Next earnings date range and EPS/revenue estimates
-- Ex-dividend date and dividend pay date
-- mode="upcoming": next earnings and dividend dates from Yahoo's provider calendar.
-- mode="history": historical/recent earnings dates with EPS estimate, actual, and surprise.
-
-Yahoo does not establish official IR/filing provenance. Dates are always labeled UNVERIFIED;
-for material scheduling decisions follow recommendedNextAction and check official releases.
-
-Args:
-    ticker: str
-        The ticker symbol, e.g. "AAPL"
-""",
-)
 async def get_calendar(ticker: str, mode: Literal["upcoming", "history"] = "upcoming", limit: int = 12, offset: int = 0) -> str:
     """Get upcoming earnings and dividend calendar for a ticker."""
     limit = max(1, min(int(limit), 100))
@@ -5240,15 +5044,6 @@ def _manual_lookup_payload(ticker: str, cik_padded: str | None, filing_type: str
     }
 
 
-@internal_handler_server.tool(
-    name="get_filing_data",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_filing_data"],
-    description="""Retrieve structured XBRL-tagged financial facts from EDGAR.
-
-Try this tool before search_filing_text for GAAP line items or geographic revenue.
-Use period_mode to select quarter, ytd, or annual facts (default: auto selects quarter for 10-Q, annual for 10-K).
-""",
-)
 async def get_filing_data(
     ticker: str,
     fact_type: FilingFactType,
@@ -5720,14 +5515,6 @@ async def get_filing_data(
     }, warn_denominator=(fact_type == FilingFactType.geographic_revenue and denominator is None))
 
 
-@internal_handler_server.tool(
-    name="search_filing_text",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["search_filing_text"],
-    description="""Search filing narrative text by keyword or section hint.
-
-Use this only when get_filing_data returns NOT_DISCLOSED or the fact is not XBRL-tagged.
-""",
-)
 async def search_filing_text(
     ticker: str,
     search_terms: list[str] | None = None,
@@ -5736,96 +5523,137 @@ async def search_filing_text(
     accession_number: str | None = None,
     context_chars: int = 1500,
     return_tables: bool = True,
+    document_url: str | None = None,
 ) -> str:
-    cik_padded, subs = await _get_submissions_for_ticker(ticker)
-    if not cik_padded or not subs:
-        return json.dumps({
-            "ticker": ticker,
-            "accessionNumber": accession_number,
-            "documentUrl": None,
-            "fiscalYear": None,
-            "filingType": filing_type,
-            "filingDate": None,
-            "matches": [],
-            "matchCount": 0,
-            "confidence": "PARSED_HTML",
-            "_note": "Could not resolve SEC submissions for ticker.",
-        })
-
-    recent = subs.get("filings", {}).get("recent", {})
-    forms: list[str] = recent.get("form", [])
-    accessions: list[str] = recent.get("accessionNumber", [])
-    primary_docs: list[str] = recent.get("primaryDocument", [])
-    filing_dates: list[str] = recent.get("filingDate", [])
-    report_dates: list[str] = recent.get("reportDate", [])
-
-    target_idx: int | None = None
-    if accession_number:
-        for i, acc in enumerate(accessions):
-            if acc == accession_number:
-                target_idx = i
-                break
-    else:
-        for i, form in enumerate(forms):
-            if str(form).upper() == filing_type.upper():
-                target_idx = i
-                accession_number = accessions[i] if i < len(accessions) else None
-                break
-
-    if target_idx is None or not accession_number:
-        return json.dumps({
-            "ticker": ticker,
-            "accessionNumber": accession_number,
-            "documentUrl": None,
-            "fiscalYear": None,
-            "filingType": filing_type,
-            "filingDate": None,
-            "matches": [],
-            "matchCount": 0,
-            "confidence": "PARSED_HTML",
-            "_note": f"No {filing_type} filing found in submissions JSON.",
-        })
-
-    primary_doc = primary_docs[target_idx] if target_idx < len(primary_docs) else None
-    if not primary_doc:
-        return json.dumps({
-            "ticker": ticker,
-            "accessionNumber": accession_number,
-            "documentUrl": None,
-            "fiscalYear": None,
-            "filingType": filing_type,
-            "filingDate": filing_dates[target_idx] if target_idx < len(filing_dates) else None,
-            "matches": [],
-            "matchCount": 0,
-            "confidence": "PARSED_HTML",
-            "_note": "primaryDocument missing in submissions JSON.",
-        })
-
-    cik_int = int(cik_padded)
-    _, document_url = _edgar_build_filing_urls(cik_int, accession_number, primary_doc)
+    filing_date: str | None = None
+    fiscal_year: str | None = None
+    if document_url:
+        # Mirrors the Worker: an explicit SEC Archives document skips filing
+        # resolution, and an XBRL/XML document is replaced by the primary HTML
+        # of accession_number, which is then required.
+        explicit_url = _safe_sec_url(document_url)
+        if explicit_url is None:
+            return json.dumps({
+                "ticker": ticker,
+                "accessionNumber": accession_number,
+                "documentUrl": None,
+                "fiscalYear": None,
+                "filingType": filing_type,
+                "filingDate": None,
+                "matches": [],
+                "matchCount": 0,
+                "confidence": "PARSED_HTML",
+                "_note": "document_url must be an https://www.sec.gov/Archives/ URL.",
+            })
+        if _is_likely_xbrl_document_url(explicit_url):
+            if not accession_number:
+                return json.dumps({
+                    "ticker": ticker,
+                    "accessionNumber": None,
+                    "documentUrl": explicit_url,
+                    "fiscalYear": None,
+                    "filingType": filing_type,
+                    "filingDate": None,
+                    "matches": [],
+                    "matchCount": 0,
+                    "status": "FILING_TEXT_NOT_AVAILABLE",
+                    "confidence": "FILING_TEXT_NOT_AVAILABLE",
+                    "_note": "document_url appears to be XBRL/XML and no accession_number was supplied to resolve the primary HTML.",
+                })
+            explicit_url = None
+        document_url = explicit_url
     if not document_url:
-        return json.dumps({
-            "ticker": ticker,
-            "accessionNumber": accession_number,
-            "documentUrl": None,
-            "fiscalYear": None,
-            "filingType": filing_type,
-            "filingDate": filing_dates[target_idx] if target_idx < len(filing_dates) else None,
-            "matches": [],
-            "matchCount": 0,
-            "confidence": "PARSED_HTML",
-            "_note": "Failed constructing filing document URL.",
-        })
+        cik_padded, subs = await _get_submissions_for_ticker(ticker)
+        if not cik_padded or not subs:
+            return json.dumps({
+                "ticker": ticker,
+                "accessionNumber": accession_number,
+                "documentUrl": None,
+                "fiscalYear": None,
+                "filingType": filing_type,
+                "filingDate": None,
+                "matches": [],
+                "matchCount": 0,
+                "confidence": "PARSED_HTML",
+                "_note": "Could not resolve SEC submissions for ticker.",
+            })
 
+        recent = subs.get("filings", {}).get("recent", {})
+        forms: list[str] = recent.get("form", [])
+        accessions: list[str] = recent.get("accessionNumber", [])
+        primary_docs: list[str] = recent.get("primaryDocument", [])
+        filing_dates: list[str] = recent.get("filingDate", [])
+        report_dates: list[str] = recent.get("reportDate", [])
+
+        target_idx: int | None = None
+        if accession_number:
+            for i, acc in enumerate(accessions):
+                if acc == accession_number:
+                    target_idx = i
+                    break
+        else:
+            for i, form in enumerate(forms):
+                if str(form).upper() == filing_type.upper():
+                    target_idx = i
+                    accession_number = accessions[i] if i < len(accessions) else None
+                    break
+
+        if target_idx is None or not accession_number:
+            return json.dumps({
+                "ticker": ticker,
+                "accessionNumber": accession_number,
+                "documentUrl": None,
+                "fiscalYear": None,
+                "filingType": filing_type,
+                "filingDate": None,
+                "matches": [],
+                "matchCount": 0,
+                "confidence": "PARSED_HTML",
+                "_note": f"No {filing_type} filing found in submissions JSON.",
+            })
+
+        primary_doc = primary_docs[target_idx] if target_idx < len(primary_docs) else None
+        if not primary_doc:
+            return json.dumps({
+                "ticker": ticker,
+                "accessionNumber": accession_number,
+                "documentUrl": None,
+                "fiscalYear": None,
+                "filingType": filing_type,
+                "filingDate": filing_dates[target_idx] if target_idx < len(filing_dates) else None,
+                "matches": [],
+                "matchCount": 0,
+                "confidence": "PARSED_HTML",
+                "_note": "primaryDocument missing in submissions JSON.",
+            })
+
+        cik_int = int(cik_padded)
+        _, document_url = _edgar_build_filing_urls(cik_int, accession_number, primary_doc)
+        filing_date = filing_dates[target_idx] if target_idx < len(filing_dates) else None
+        report_date = report_dates[target_idx] if target_idx < len(report_dates) else None
+        fiscal_year = f"FY{str(report_date)[:4]}" if report_date else None
+        if not document_url:
+            return json.dumps({
+                "ticker": ticker,
+                "accessionNumber": accession_number,
+                "documentUrl": None,
+                "fiscalYear": None,
+                "filingType": filing_type,
+                "filingDate": filing_dates[target_idx] if target_idx < len(filing_dates) else None,
+                "matches": [],
+                "matchCount": 0,
+                "confidence": "PARSED_HTML",
+                "_note": "Failed constructing filing document URL.",
+            })
     html_text = await _edgar_get_html(document_url, max_bytes=5_000_000)
     if not html_text:
         return json.dumps({
             "ticker": ticker,
             "accessionNumber": accession_number,
             "documentUrl": document_url,
-            "fiscalYear": f"FY{str(report_dates[target_idx])[:4]}" if target_idx < len(report_dates) and report_dates[target_idx] else None,
+            "fiscalYear": fiscal_year,
             "filingType": filing_type,
-            "filingDate": filing_dates[target_idx] if target_idx < len(filing_dates) else None,
+            "filingDate": filing_date,
             "matches": [],
             "matchCount": 0,
             "confidence": "PARSED_HTML",
@@ -5881,9 +5709,9 @@ async def search_filing_text(
         "ticker": ticker,
         "accessionNumber": accession_number,
         "documentUrl": document_url,
-        "fiscalYear": f"FY{str(report_dates[target_idx])[:4]}" if target_idx < len(report_dates) and report_dates[target_idx] else None,
+        "fiscalYear": fiscal_year,
         "filingType": filing_type,
-        "filingDate": filing_dates[target_idx] if target_idx < len(filing_dates) else None,
+        "filingDate": filing_date,
         "matches": matches,
         "matchCount": len(matches),
         "confidence": "PARSED_HTML",
@@ -5894,18 +5722,6 @@ async def search_filing_text(
 # Group 3.5 — get_technical_indicators
 # ---------------------------------------------------------------------------
 
-@internal_handler_server.tool(
-    name="get_credit_health",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_credit_health"],
-    description="""Get pre-computed credit/leverage metrics using operational EBITDA when available: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag, and source fields.
-
-Args:
-    ticker: str | list[str]
-        A single ticker symbol (e.g. "AAPL") or a list of up to 5 symbols.
-        When a list is provided, returns a dict keyed by symbol.
-        Max 5 tickers per call; split larger lists into multiple calls.
-""",
-)
 async def get_credit_health(ticker: str | list[str]) -> str:
     """Return credit health metrics for one or more tickers."""
     if isinstance(ticker, list):
@@ -6196,20 +6012,6 @@ async def get_credit_health(ticker: str | list[str]) -> str:
 # ---------------------------------------------------------------------------
 # Tool: get_short_momentum
 # ---------------------------------------------------------------------------
-@internal_handler_server.tool(
-    name="get_earnings_momentum",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_earnings_momentum"],
-    description="""Deprecated alias for analyze_earnings_momentum. Get earnings revision momentum, beat rate, and estimate direction signals.
-
-Returns: revision7d/30d/90d, revisionDirection, momentumFlag, beatRate, beatCount, avgSurprisePct, currentBeatStreak.
-
-Args:
-    ticker: str | list[str]
-        A single ticker symbol (e.g. "AAPL") or a list of up to 5 symbols.
-        When a list is provided, returns a dict keyed by symbol.
-        Max 5 tickers per call; split larger lists into multiple calls.
-""",
-)
 async def get_earnings_momentum(ticker: str | list[str]) -> str:
     """Return earnings momentum for one or more tickers."""
     if isinstance(ticker, list):
@@ -6477,16 +6279,6 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
 # Tool: get_options_flow_summary
 # ---------------------------------------------------------------------------
 
-@internal_handler_server.tool(
-    name="get_options_flow_summary",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_flow_summary"],
-    description="""Get options flow summary: P/C ratio, IV percentile, max pain strike, highest OI strikes. Single ticker only.
-
-Args:
-    ticker: str — single ticker
-    expiry_hint: str | None — optional YYYY-MM-DD; if omitted, selects nearest liquid expiry
-""",
-)
 async def get_options_flow_summary(ticker: str, expiry_hint: str | None = None) -> str:
     # Consolidated naming: route to the same payload implementation as get_options_summary.
     return await get_options_summary(ticker, expiry_hint=expiry_hint)
@@ -6496,24 +6288,6 @@ async def get_options_flow_summary(ticker: str, expiry_hint: str | None = None) 
 # Tool: get_put_hedge_candidates
 # ---------------------------------------------------------------------------
 
-@internal_handler_server.tool(
-    name="get_put_hedge_candidates",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_put_hedge_candidates"],
-    description="""Get pre-filtered OTM put options within a strike range and budget. Single ticker only.
-
-Only contracts with a two-sided quote and open-interest or volume evidence are
-eligible. Contract cost and budget feasibility use executable ask price, not a
-zero/indicative midpoint. PARTIAL means retry and do not treat budgetFeasible as
-a hedge decision.
-
-Args:
-    ticker: str — single ticker
-    otm_pct_min: float — minimum OTM % (default: 8)
-    otm_pct_max: float — maximum OTM % (default: 12)
-    budget_usd: float — max premium per contract (100 shares)
-    expiry_after: str — YYYY-MM-DD minimum expiry date
-""",
-)
 async def get_put_hedge_candidates(
     ticker: str,
     otm_pct_min: float = 8.0,
@@ -6700,22 +6474,6 @@ async def get_put_hedge_candidates(
 # Tool: get_analyst_upgrade_radar
 # ---------------------------------------------------------------------------
 
-@internal_handler_server.tool(
-    name="get_analyst_upgrade_radar",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_analyst_upgrade_radar"],
-    description="""Get recent analyst rating changes with canonical signal classification. Batch supported.
-
-Returns: changes with signal (UPGRADE/DOWNGRADE/INITIATED/MAINTAIN), separate upgrade/downgrade/initiation counts, ptFrom, ptTo, ptDirection, mixedSignal, strengthFlag; netSentiment, summary.
-
-ptFrom / ptTo: prior and new price target (null — yfinance does not expose numeric targets; stubs for
-future compatibility). ptDirection: RAISE/CUT/UNCHANGED/INITIATED — derived from ptFrom→ptTo when
-both are available; INITIATED for new coverage; UNCHANGED for reiterations with no target change.
-
-Args:
-    ticker: str | list[str] — single or batch
-    days_back: int — lookback window in calendar days (default: 30)
-""",
-)
 async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30) -> str:
     """Return recent analyst upgrades/downgrades with signals."""
     if isinstance(ticker, list):
@@ -6918,33 +6676,6 @@ def _normalize_fund_equity_holdings(df) -> tuple[list | None, list | None, dict[
     return records, raw_records if changed else None, methods
 
 
-@internal_handler_server.tool(
-    name="get_etf_info",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_etf_info"],
-    description="""Get ETF or mutual fund data for one or more ticker symbols.
-
-Returns identity (shortName, category, fundFamily, legalType, fundInceptionDate),
-pricing (navPrice, previousClose, open, dayHigh, dayLow, volume, averageVolume),
-AUM/costs (totalAssets, yield, annualReportExpenseRatio, ytdReturn, beta3Year),
-52-week stats (fiftyTwoWeekHigh, fiftyTwoWeekLow, fiftyTwoWeekChange),
-moving averages (fiftyDayAverage, twoHundredDayAverage), and selected FundsData sections.
-
-sections defaults to overview, holdings, and allocation. Request operations for expense/turnover
-comparisons or fixed_income for duration, maturity, credit-quality, and bond-rating data.
-Yahoo inverse valuation yields are normalized to conventional labeled multiples;
-provider-raw values and the normalization method are retained. Holdings/allocation
-as-of dates are null and explicitly NOT_EXPOSED_BY_PROVIDER when Yahoo omits them.
-
-Use this tool for ETF and fund tickers: SPY, QQQ, VTI, ARKK, VFIAX, etc.
-For individual stocks, use get_fast_info or get_stock_info instead.
-
-Args:
-    ticker: str | list[str]
-        A single ETF/fund ticker (e.g. "SPY") or a list of up to 5 symbols.
-        When a list is provided, returns a dict keyed by symbol.
-        Max 5 tickers per call; split larger lists into multiple calls.
-""",
-)
 async def get_etf_info(
     ticker: str | list[str],
     sections: list[str] | None = None,
@@ -7071,26 +6802,6 @@ async def get_etf_info(
 
 
 
-@internal_handler_server.tool(
-    name="get_options_flow_scan",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_flow_scan"],
-    description="""Structured options flow scan for a binary event window.
-
-Returns the formatted options flow output block. Callers can paste formattedBlock directly into
-client output. Prior window-label readings are cached server-side (72 h TTL) to enable trend
-computation across readings (e.g. T-14 → T-7 → T-2).
-
-Returns: pcRatio, ivPctile, putVolVs10dAvg, putVolTrend (INCREASING/STABLE/DECREASING),
-maxPainStrike, bracket (UPPER/MID/LOWER), formattedBlock, dataDate.
-
-Args:
-    ticker: str
-        The ticker symbol, e.g. "ASTS"
-    window_label: str
-        Free-form label for this reading, e.g. "T-14", "T-7", "T-2", "pre-earnings", "week1".
-        Used as cache key for trend computation across readings.
-""",
-)
 async def get_options_flow_scan(ticker: str, window_label: str) -> str:
     """Return structured options flow scan for the specified window label."""
     company = yf.Ticker(ticker)
@@ -7328,25 +7039,6 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
 # CR-13 — get_price_target_bracket
 # ---------------------------------------------------------------------------
 
-@internal_handler_server.tool(
-    name="get_price_target_bracket",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_target_bracket"],
-    description="""Compare a live regular-market quote to a user-supplied reference target and return distance/bracket labels. Read priceTimestamp/observationType; this is not a completed-close calculation. referenceTargetPct/currentToTargetRatioPct are the legacy ratio; distanceToTargetPct is the directional percent distance to target.
-
-ratio = currentPrice / reference_target_price × 100.
-
-Brackets: ≤75% → STRONG_BUY | 75–90% → ACCEPTABLE | 90–100% → RISK | >100% → ABOVE_TARGET
-Tags: <40% → SPECULATIVE | 40–79% → LONG | 80–99% → NEAR | ≥100% → INVERTED
-
-Args:
-    ticker: str
-        The ticker symbol, e.g. "ASTS"
-    reference_target_price: float | None
-        Preferred user-supplied reference target price.
-    io_pt: float | None
-        Backward-compatible alias for reference_target_price.
-""",
-)
 async def get_price_target_bracket(
     ticker: str, reference_target_price: float | None = None, io_pt: float | None = None
 ) -> str:
@@ -7439,23 +7131,6 @@ async def get_price_target_bracket(
 # CR-14 — get_position_score_inputs
 # ---------------------------------------------------------------------------
 
-@internal_handler_server.tool(
-    name="get_position_score_inputs",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"],
-    description="""Aggregate public analyst, earnings, live-price, and completed-session technical inputs for caller-defined scoring models.
-
-Runs up to 6 parallel data fetches per call. Read componentStatus plus separate
-quote/completed-bar dates; PARTIAL recommends RETRY.
-
-Returns grouped analyst, price/range, earnings-momentum, and technical indicator inputs plus dataDate.
-
-This tool does not access holdings, cost basis, position size, or private scoring rules.
-
-Args:
-    ticker: str
-        Single ticker symbol, e.g. "ASTS"
-""",
-)
 async def get_position_score_inputs(ticker: str) -> str:
     """Return grouped public inputs for caller-defined scoring workflows."""
     results = await asyncio.gather(
@@ -8073,10 +7748,13 @@ async def search_sec_filing_text(
     accession_number: str | None = None,
     context_chars: int = 1500,
     return_tables: bool = True,
+    document_url: str | None = None,
 ) -> str:
     terms = search_terms or ([search_query] if search_query else [])
     hint = section_hint or (selector or {}).get("item")
-    return await search_filing_text(ticker, terms, hint, filing_type, accession_number, context_chars, return_tables)
+    return await search_filing_text(
+        ticker, terms, hint, filing_type, accession_number, context_chars, return_tables, document_url
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -9660,9 +9338,8 @@ async def extract_exposure(
 )
 async def query_sec_filing_index(
     ticker: str,
-    filing_type: str = "10-K",
-    period: str = "latest",
-    accession_number: str | None = None,
+    # Required, as on the Worker: an omitted query type must not silently
+    # become geographic_revenue_share.
     query_type: Literal[
         "geographic_revenue_share",
         "revenue_exposure",
@@ -9671,7 +9348,10 @@ async def query_sec_filing_index(
         "customer_concentration",
         "total_revenue",
         "segment_revenue",
-    ] = "geographic_revenue_share",
+    ],
+    filing_type: str = "10-K",
+    period: str = "latest",
+    accession_number: str | None = None,
     params: dict | None = None,
     return_evidence: bool = True,
     detailLevel: str = "compact",
@@ -10037,8 +9717,8 @@ Input: {"action": "get_market_quote", "params": {"ticker": "AAPL"}}
     # Resolve handlers from the shared FastMCP instance (single source of truth)
     # rather than this module's globals, so the mapping holds as handlers move
     # into yfmcp.tools.* during the Phase 2 split.
-    handler_registry = build_handler_registry(internal_handler_server, yfinance_server)
-    contract_registry = build_tool_contract_registry(internal_handler_server, yfinance_server)
+    handler_registry = build_handler_registry(yfinance_server)
+    contract_registry = build_tool_contract_registry(yfinance_server)
     register_grouped_tools(grouped, handler_registry, contract_registry)
     return grouped
 

@@ -113,6 +113,38 @@ class TestSecCikResolutionFallbacks(unittest.TestCase):
         self.assertEqual(cik, "0001051627")
 
 
+class TestSecDocumentUrlGuard(unittest.TestCase):
+    """search_sec_filing_text only reads caller-supplied SEC Archives documents."""
+
+    def _search(self, **kwargs) -> dict:
+        import json
+        with patch.object(srv, "_edgar_get_html", new_callable=AsyncMock) as fetch, \
+                patch.object(srv, "_get_submissions_for_ticker", new_callable=AsyncMock) as subs:
+            subs.return_value = (None, None)
+            fetch.return_value = "<html><body>Revenue in China grew.</body></html>"
+            result = json.loads(asyncio.run(srv.search_sec_filing_text(ticker="AAPL", search_query="China", **kwargs)))
+        return {"result": result, "fetched": [c.args[0] for c in fetch.call_args_list], "resolved": subs.await_count}
+
+    def test_non_sec_url_is_rejected_without_fetching(self):
+        out = self._search(document_url="https://attacker.example/filing.htm")
+        self.assertEqual(out["fetched"], [])
+        self.assertIsNone(out["result"]["documentUrl"])
+        self.assertIn("sec.gov/Archives", out["result"]["_note"])
+
+    def test_sec_archives_url_is_read_directly(self):
+        url = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000079/aapl-20250927.htm"
+        out = self._search(document_url=url)
+        self.assertEqual(out["fetched"], [url])
+        self.assertEqual(out["resolved"], 0)
+        self.assertEqual(out["result"]["documentUrl"], url)
+        self.assertEqual(out["result"]["matchCount"], 1)
+
+    def test_xbrl_url_without_accession_is_not_available(self):
+        out = self._search(document_url="https://www.sec.gov/Archives/edgar/data/320193/000032019325000079/aapl-20250927_htm.xml")
+        self.assertEqual(out["fetched"], [])
+        self.assertEqual(out["result"]["status"], "FILING_TEXT_NOT_AVAILABLE")
+
+
 if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()

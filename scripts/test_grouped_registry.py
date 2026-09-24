@@ -102,13 +102,13 @@ if not getattr(_FastMCP, "_output_schema_patched", False):
 
 import server as srv  # noqa: E402
 import tool_groups  # noqa: E402
-from yfmcp.app import build_handler_registry, internal_handler_server, yfinance_server  # noqa: E402
+from yfmcp.app import build_handler_registry, yfinance_server  # noqa: E402
 from yfmcp.tools.system import _public_metadata  # noqa: E402
 
 
 class TestHandlerRegistry(unittest.TestCase):
     def setUp(self):
-        self.registry = build_handler_registry(internal_handler_server, yfinance_server)
+        self.registry = build_handler_registry(yfinance_server)
 
     def test_registry_nonempty(self):
         self.assertTrue(self.registry, "registry should not be empty")
@@ -246,7 +246,7 @@ class TestGroupedServer(unittest.TestCase):
 
 class TestGroupedRouting(unittest.TestCase):
     def setUp(self):
-        self.registry = build_handler_registry(internal_handler_server, yfinance_server)
+        self.registry = build_handler_registry(yfinance_server)
 
     def call(self, group: str, action: str, params: dict | None) -> dict:
         with patch.dict(os.environ, {"MCP_ENVELOPE_V2": "true"}):

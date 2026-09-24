@@ -2,11 +2,11 @@
   "groups": {
     "analyst_data": {
       "actions": {
-        "analyze_earnings_momentum": "get_earnings_momentum",
+        "analyze_earnings_momentum": "analyze_earnings_momentum",
         "get_analyst_consensus": "get_analyst_consensus",
-        "get_analyst_rating_changes": "get_analyst_upgrade_radar",
-        "get_analyst_recommendations": "get_recommendations",
-        "get_company_events_calendar": "get_calendar",
+        "get_analyst_rating_changes": "get_analyst_rating_changes",
+        "get_analyst_recommendations": "get_analyst_recommendations",
+        "get_company_events_calendar": "get_company_events_calendar",
         "get_market_calendar": "get_market_calendar",
         "get_earnings_analysis": "get_earnings_analysis"
       },
@@ -38,8 +38,8 @@
     },
     "options_analysis": {
       "actions": {
-        "analyze_options_flow_window": "get_options_flow_scan",
-        "find_put_hedge_candidates": "get_put_hedge_candidates",
+        "analyze_options_flow_window": "analyze_options_flow_window",
+        "find_put_hedge_candidates": "find_put_hedge_candidates",
         "get_historical_put_call_ratio": "get_historical_put_call_ratio",
         "get_option_chain": "get_option_chain",
         "get_option_expiration_dates": "get_option_expiration_dates",
@@ -49,8 +49,8 @@
     },
     "screening": {
       "actions": {
-        "analyze_position_signals": "get_position_score_inputs",
-        "calculate_price_target_distance": "get_price_target_bracket",
+        "analyze_position_signals": "analyze_position_signals",
+        "calculate_price_target_distance": "calculate_price_target_distance",
         "screen_stocks": "screen_stocks",
         "search_ticker": "search_ticker"
       },
@@ -75,41 +75,41 @@
         "get_sec_filing_exhibit_content": "get_sec_filing_exhibit_content",
         "get_sec_filing_index": "get_sec_filing_index",
         "get_sec_filing_intelligence": "get_sec_filing_intelligence",
-        "get_sec_filing_outline": "get_filing_outline",
-        "get_sec_filing_section": "get_filing_section",
+        "get_sec_filing_outline": "get_sec_filing_outline",
+        "get_sec_filing_section": "get_sec_filing_section",
         "get_sec_filing_section_markdown": "get_sec_filing_section_markdown",
-        "get_sec_filing_table": "get_filing_table",
-        "list_sec_company_filings": "list_sec_filings",
+        "get_sec_filing_table": "get_sec_filing_table",
+        "list_sec_company_filings": "list_sec_company_filings",
         "list_sec_filing_exhibits": "list_sec_filing_exhibits",
-        "list_sec_filing_tables": "list_filing_tables",
+        "list_sec_filing_tables": "list_sec_filing_tables",
         "list_sec_material_filings": "list_sec_material_filings",
         "query_sec_filing_index": "query_sec_filing_index",
-        "search_sec_filing_text": "search_filing_text"
+        "search_sec_filing_text": "search_sec_filing_text"
       },
       "description": "SEC EDGAR filing access, indexing, and text search.\n\nActions:\n- list_sec_company_filings: List filings. Params: ticker, filing_type, filing_date_from, filing_date_to\n- list_sec_material_filings: Material only. Params: ticker, forms, limit\n- get_sec_filing_outline: Index-backed section outline, or OUTLINE_NOT_PARSED with tableCount. Params: ticker, accession_number\n- get_sec_filing_section: Section text. Params: ticker, section_name, document_url, context_chars\n- get_sec_filing_section_markdown: Unverified degraded section Markdown. Params: ticker, section, filing_type, filing_index, max_chars\n- list_sec_filing_tables: Tables list. Params: ticker, accession_number\n- get_sec_filing_table: Table by index. Params: ticker, accession_number, table_index\n- extract_sec_filing_fact: XBRL fact. Params: ticker, fact_type, region, filing_type, accession_number\n- search_sec_filing_text: Text search. Params: ticker, search_terms, section_hint, filing_type, return_tables\n- get_sec_filing_index: Build or retrieve the cached index. Params: ticker, accession_number\n- get_sec_filing_intelligence: Best diagnostic for SEC extraction/outline/table disagreements. Params: ticker, accession_number\n- query_sec_filing_index: Query index. Params: ticker, query, accession_number\n- list_sec_filing_exhibits: Exhibits list. Params: ticker, accessionNumber\n- get_sec_filing_exhibit_content: Exhibit content. Params: ticker, accession_number, exhibit_type, exhibit_index"
     },
     "stock_fundamentals": {
       "actions": {
-        "analyze_credit_health": "get_credit_health",
-        "analyze_financial_ratios": "get_financial_ratios",
+        "analyze_credit_health": "analyze_credit_health",
+        "analyze_financial_ratios": "analyze_financial_ratios",
         "analyze_share_count_trend": "analyze_share_count_trend",
-        "get_company_profile": "get_stock_info",
-        "get_corporate_actions": "get_stock_actions",
+        "get_company_profile": "get_company_profile",
+        "get_corporate_actions": "get_corporate_actions",
         "get_financial_statement": "get_financial_statement",
-        "get_fund_profile": "get_etf_info",
+        "get_fund_profile": "get_fund_profile",
         "get_expanded_institutional_ownership": "get_expanded_institutional_ownership",
-        "get_ownership_holders": "get_holder_info"
+        "get_ownership_holders": "get_ownership_holders"
       },
       "description": "Company fundamentals, financials, funds, and corporate data.\n\nActions:\n- get_company_profile: Key fundamental fields. Params: ticker, include_all\n- get_fund_profile: Fund sections with normalized valuation multiples and explicit as-of limitations. Params: ticker, sections\n- get_financial_statement: Annual/quarterly/trailing statements. Params: ticker, financial_type, line_items\n- analyze_financial_ratios: Current ratios with unitSemantics plus optional valuation history. Params: ticker, history_periods, frequency\n- analyze_share_count_trend: Dilution/buyback share-count trend. Params: ticker, start_date, end_date\n- analyze_credit_health: Debt metrics. Params: ticker\n- get_corporate_actions: Dividends/splits/fund capital gains. Params: ticker\n- get_ownership_holders: Default Yahoo holder data. holder_type: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders\n- get_expanded_institutional_ownership: Deeper Finnhub coverage; Alpha requires allow_scarce_fallback=true. Params: ticker, allow_scarce_fallback, max_holders"
     },
     "stock_pricing": {
       "actions": {
-        "analyze_moving_average_position": "get_ma_position",
-        "analyze_price_performance": "get_price_stats",
-        "analyze_volume_ratio": "get_volume_ratio",
-        "check_volume_liquidity_threshold": "get_volume_gate",
-        "get_historical_prices": "get_historical_stock_prices",
-        "get_market_quote": "get_fast_info",
+        "analyze_moving_average_position": "analyze_moving_average_position",
+        "analyze_price_performance": "analyze_price_performance",
+        "analyze_volume_ratio": "analyze_volume_ratio",
+        "check_volume_liquidity_threshold": "check_volume_liquidity_threshold",
+        "get_historical_prices": "get_historical_prices",
+        "get_market_quote": "get_market_quote",
         "get_market_snapshot": "get_market_snapshot",
         "get_price_slope": "get_price_slope",
         "get_short_interest": "get_short_interest",

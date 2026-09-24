@@ -118,6 +118,9 @@ jobs:
       - name: Worker grouped-mode routing tests
         run: python scripts/test_worker_grouped_mode.py
 
+      - name: Grouped parameter parity (Worker vs local)
+        run: python -m unittest scripts.test_grouped_contract_parity -v
+
       - name: Worker SEC reliability tests
         run: python scripts/test_sec_reliability_worker.py
 
