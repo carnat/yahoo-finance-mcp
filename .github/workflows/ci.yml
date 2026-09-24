@@ -130,6 +130,9 @@ jobs:
       - name: Worker Yahoo edge cache tests
         run: python scripts/test_worker_yahoo_edge_cache.py -v
 
+      - name: Historical prices contract tests (Worker and local)
+        run: python scripts/test_historical_prices_contract.py -v
+
       - name: Worker SEC reliability tests
         run: python scripts/test_sec_reliability_worker.py
 
@@ -144,6 +147,9 @@ jobs:
 
       - name: EDGAR HTML parsing tests
         run: python scripts/test_edgar_html_parse.py
+
+      - name: EDGAR client cache tests
+        run: python scripts/test_edgar_client_cache.py -v
 
       # ── 4. Infrastructure: cache layer ────────────────────────────────────
       - name: Cache layer tests

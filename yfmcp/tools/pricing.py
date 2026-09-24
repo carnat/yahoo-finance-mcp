@@ -2,7 +2,7 @@ import asyncio
 import datetime
 import json
 import sys
-from typing import Literal
+from typing import Literal, get_args
 import zoneinfo
 
 import pandas as pd
@@ -17,8 +17,24 @@ from yfmcp.util import _fetch_with_retry, get_last_trading_date
 from yfmcp.clients.yahoo import _safe_parse
 
 
+# Yahoo answers an unknown range or interval with a fallback series (a single
+# live bar) instead of an error, so inputs are checked against these sets.
+HistoricalPeriod = Literal["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"]
+HistoricalInterval = Literal["1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"]
+HISTORICAL_PERIODS: tuple[str, ...] = get_args(HistoricalPeriod)
+HISTORICAL_INTERVALS: tuple[str, ...] = get_args(HistoricalInterval)
+
+
+def _historical_range_error(period: str, interval: str) -> str | None:
+    if period not in HISTORICAL_PERIODS:
+        return f"period must be one of: {', '.join(HISTORICAL_PERIODS)}"
+    if interval not in HISTORICAL_INTERVALS:
+        return f"interval must be one of: {', '.join(HISTORICAL_INTERVALS)}"
+    return None
+
+
 async def get_historical_stock_prices(
-    ticker: str, period: str = "1mo", interval: str = "1d",
+    ticker: str, period: HistoricalPeriod = "1mo", interval: HistoricalInterval = "1d",
     columns: list[str] | None = None, prepost: bool = False,
 ) -> str:
     """Get historical stock prices for a given ticker symbol
@@ -48,8 +64,13 @@ async def get_historical_stock_prices(
     ticker_err = _validate_ticker(ticker)
     if ticker_err:
         return _mcp_failure("get_historical_stock_prices", ErrorCode.INPUT_VALIDATION_ERROR, ticker_err)
+    period = str(period).strip()
+    interval = str(interval).strip()
+    range_err = _historical_range_error(period, interval)
+    if range_err:
+        return _mcp_failure("get_historical_stock_prices", ErrorCode.INPUT_VALIDATION_ERROR, range_err)
 
-    cache_key = f"hist:{ticker}:{period}:{interval}:{prepost}:camel-v4"
+    cache_key = f"hist:{ticker}:{period}:{interval}:{prepost}:camel-v5"
     column_map = {
         "Date": "date",
         "Open": "open",
@@ -65,7 +86,7 @@ async def get_historical_stock_prices(
     def _filter_rows(rows: list[dict]) -> list[dict]:
         if not columns:
             return rows
-        wanted = {"date"}
+        wanted = {"date", "tradingDate"}
         if interval == "1d":
             wanted.update({"barStatus", "isFinal"})
         for col in columns:
@@ -130,6 +151,12 @@ async def get_historical_stock_prices(
             hist_data["barStatus"] = "UNKNOWN"
             hist_data["isFinal"] = False
 
+    # The index is in the exchange's timezone; `date` serializes as UTC, which
+    # puts east-of-UTC sessions on the previous day, so keep the local date.
+    hist_data = hist_data.copy()
+    hist_data.insert(0, "tradingDate", [
+        ts.strftime("%Y-%m-%d") if hasattr(ts, "strftime") else None for ts in hist_data.index
+    ])
     hist_data = hist_data.reset_index(names="Date").rename(columns=column_map)
     full_result = hist_data.to_json(orient="records", date_format="iso")
     _tool_cache.set(cache_key, full_result, _PRICE_TTL)

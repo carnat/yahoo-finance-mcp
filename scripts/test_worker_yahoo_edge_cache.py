@@ -84,6 +84,7 @@ async function run(isolate) {
   out.holders = await call(isolate, "stock_fundamentals", "get_ownership_holders", { ticker: "AAPL", holder_type: "institutional_holders" });
   out.recommendations = await call(isolate, "analyst_data", "get_analyst_recommendations", { ticker: "AAPL", recommendation_type: "recommendations" });
   out.quote = await call(isolate, "stock_pricing", "get_market_quote", { ticker: "AAPL" });
+  out.health = await (await isolate.fetch("https://x/health")).json();
   return out;
 }
 const first = await run(await mf.getWorker("first"));
@@ -125,6 +126,8 @@ class TestWorkerYahooEdgeCache(unittest.TestCase):
     def test_all_calls_succeed_in_both_isolates(self) -> None:
         for isolate in ("first", "second"):
             for call, payload in self.result[isolate].items():
+                if call == "health":
+                    continue
                 with self.subTest(isolate=isolate, call=call):
                     self.assertTrue(payload.get("ok"), payload.get("error"))
 
@@ -146,6 +149,53 @@ class TestWorkerYahooEdgeCache(unittest.TestCase):
         self.assertTrue(quote_keys)
         for key in quote_keys:
             self.assertEqual(after[key], 2, key)
+
+
+    def test_health_reports_cache_counters(self) -> None:
+        first = self.result["first"]["health"]["yahooCache"]
+        second = self.result["second"]["health"]["yahooCache"]
+        self.assertEqual(first["scope"], "isolate")
+        # First isolate: statement, holders and recommendations are written to
+        # the edge cache; the repeated statement call is a memory hit.
+        self.assertEqual(first["edgeHits"], 0)
+        self.assertEqual(first["edgeWrites"], 3)
+        self.assertGreaterEqual(first["memoryHits"], 1)
+        # Second isolate: the same three reads come from the edge cache.
+        self.assertEqual(second["edgeHits"], 3)
+        self.assertEqual(second["edgeWrites"], 0)
+        self.assertGreater(second["bodyCacheChars"], 0)
+
+
+_CACHE_UNIT = r"""
+const { BoundedTtlCache } = await import(process.argv.at(-1));
+const cache = new BoundedTtlCache(10, 25, (v) => v.length);
+for (const key of ["a", "b", "c"]) cache.set(key, "x".repeat(10), 60_000);
+const afterBudget = { size: cache.size, weight: cache.weight, a: cache.get("a") ?? null, c: cache.get("c") ?? null };
+cache.set("big", "y".repeat(26), 60_000);
+const oversized = { size: cache.size, big: cache.get("big") ?? null };
+cache.delete("c");
+console.log(JSON.stringify({ afterBudget, oversized, afterDelete: { size: cache.size, weight: cache.weight } }));
+"""
+
+
+class TestBoundedTtlCacheWeight(unittest.TestCase):
+    def test_total_weight_limit(self) -> None:
+        node = os.environ.get("NODE_BINARY") or shutil.which("node")
+        if node is None:
+            raise unittest.SkipTest("node is required")
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "cache_unit.mjs"
+            script.write_text(_CACHE_UNIT, encoding="utf-8")
+            result = subprocess.run(
+                [node, "--experimental-strip-types", "--no-warnings", str(script), (WORKER / "src" / "cache.ts").as_uri()],
+                check=True, capture_output=True, text=True, timeout=60,
+            )
+        out = json.loads(result.stdout)
+        # Three 10-char bodies exceed the 25-char budget; the oldest goes.
+        self.assertEqual(out["afterBudget"], {"size": 2, "weight": 20, "a": None, "c": "x" * 10})
+        # A value larger than the whole budget is not stored.
+        self.assertEqual(out["oversized"], {"size": 2, "big": None})
+        self.assertEqual(out["afterDelete"], {"size": 1, "weight": 10})
 
 
 if __name__ == "__main__":

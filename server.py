@@ -3,6 +3,7 @@ import datetime
 import email.utils as _email_utils
 import hashlib
 import html as _html_module
+import functools
 import inspect
 import json
 import os
@@ -83,6 +84,8 @@ import yfmcp.tools.provider_gaps  # noqa: F401 (side-effect import)
 from yfmcp.tools.system import health_check  # re-export for grouped routing
 from yfmcp.tools.pricing import (  # re-export for compatibility and grouped routing
     get_historical_stock_prices,
+    HistoricalPeriod,
+    HistoricalInterval,
     get_fast_info,
     get_price_stats,
     get_ma_position,
@@ -236,8 +239,14 @@ _SOURCE_PRIORITY = {
 }
 
 
+@functools.lru_cache(maxsize=1)
+def _finnhub_policy() -> dict:
+    """The deployed Finnhub market policy, read once per process."""
+    return json.loads(_NEWS_SOURCE_CAPABILITIES_PATH.read_text(encoding="utf-8"))["providers"]["finnhub"]
+
+
 def _finnhub_eligibility(ticker: str) -> tuple[bool, str | None]:
-    policy = json.loads(_NEWS_SOURCE_CAPABILITIES_PATH.read_text(encoding="utf-8"))["providers"]["finnhub"]
+    policy = _finnhub_policy()
     ticker_u = ticker.upper()
     ineligible = ticker_u in set(policy.get("ineligibleTickers") or []) or any(
         ticker_u.endswith(str(suffix).upper()) for suffix in policy.get("ineligibleTickerSuffixes") or []
@@ -7269,7 +7278,7 @@ async def get_market_quote(ticker: str | list[str]) -> str:
 
 
 @yfinance_server.tool(name="get_historical_prices", output_schema=_TOOL_OUTPUT_SCHEMAS["get_historical_stock_prices"], description="Canonical alias for get_historical_stock_prices.")
-async def get_historical_prices(ticker: str, period: str = "1mo", interval: str = "1d", prepost: bool = False) -> str:
+async def get_historical_prices(ticker: str, period: HistoricalPeriod = "1mo", interval: HistoricalInterval = "1d", prepost: bool = False) -> str:
     return await get_historical_stock_prices(ticker=ticker, period=period, interval=interval, prepost=prepost)
 
 

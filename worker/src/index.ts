@@ -23,6 +23,7 @@
 import { handleMcp } from "./mcp.js";
 import { getBuildVersion, getServerVersion, setWorkerEnv, getWorkerVar } from "./response.js";
 import { TOOLS, callTool } from "./tools.js";
+import { yahooCacheStats } from "./yahoo-finance.js";
 
 export interface Env {
   MCP_ENVELOPE_V2?: string;
@@ -78,6 +79,7 @@ export default {
         buildSha: getWorkerVar("BUILD_SHA")?.trim() || null,
         deployedAt: getWorkerVar("DEPLOYED_AT")?.trim() || null,
         workerVersionId: env.CF_VERSION_METADATA?.id ?? null,
+        yahooCache: yahooCacheStats(),
       });
     }
 

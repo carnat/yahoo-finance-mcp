@@ -4,9 +4,11 @@ Extracted from server.py in Phase 1 of the refactoring plan.
 """
 
 import asyncio
+import concurrent.futures
 import html as _html_module
 import json
 import re as _re
+import threading
 import time
 import urllib.parse as _urlparse
 import urllib.request as _urlreq
@@ -20,7 +22,20 @@ from yfmcp.parsing.html import _strip_html_tags
 # ---------------------------------------------------------------------------
 _SEC_REQUIRED_UA = "yahoo-finance-mcp contact@example.com"
 _FILING_CIK_CACHE: dict[str, str] = {}
-_FILING_SUBMISSIONS_BY_TICKER: dict[str, dict] = {}
+
+# Size limits for the in-process EDGAR caches. The server is long-lived and
+# keys include every ticker queried; parsed companyfacts can be tens of MB.
+_FILING_CIK_CACHE_MAX = 4096
+_EDGAR_FACTS_CACHE_MAX = 16
+_EDGAR_SUBS_CACHE_MAX = 256
+
+
+def _bounded_set(cache: dict, key, value, max_entries: int) -> None:
+    """Set key last in insertion order and drop the oldest entries past max_entries."""
+    cache.pop(key, None)
+    cache[key] = value
+    while len(cache) > max_entries:
+        del cache[next(iter(cache))]
 
 # Stable fixture fallback map for smoke/regression-critical tickers.
 _SMOKE_TICKER_CIK_FALLBACKS: dict[str, str] = {
@@ -114,7 +129,7 @@ async def _edgar_get_company_facts(cik_padded: str) -> dict | None:
     except EdgarError:
         return None
     if data is not None:
-        _EDGAR_FACTS_CACHE[cik_padded] = (data, now)
+        _bounded_set(_EDGAR_FACTS_CACHE, cik_padded, (data, now), _EDGAR_FACTS_CACHE_MAX)
     return data
 
 
@@ -129,7 +144,7 @@ async def _edgar_get_submissions(cik_padded: str) -> dict | None:
     except EdgarError:
         return None
     if data is not None:
-        _EDGAR_SUBS_CACHE[cik_padded] = (data, now)
+        _bounded_set(_EDGAR_SUBS_CACHE, cik_padded, (data, now), _EDGAR_SUBS_CACHE_MAX)
     return data
 
 
@@ -201,26 +216,73 @@ async def _edgar_list_exhibits_from_index(index_url: str) -> list[dict]:
     return exhibits
 
 
+def _fetch_edgar_html(url: str, max_bytes: int) -> str | None:
+    req = _urlreq.Request(
+        url,
+        headers={"User-Agent": _SEC_REQUIRED_UA},
+    )
+    try:
+        with _urlreq.urlopen(req, timeout=30) as resp:  # noqa: S310
+            raw = resp.read(max_bytes)
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw.decode("latin-1", errors="replace")
+    except Exception:
+        return None
+
+
+# EDGAR archive documents never change once filed, and composite tools read
+# the same filing several times (index, tables, text search, risk factors).
+# Archive fetches share one in-flight request and a size-limited body cache.
+# Each MCP call runs its own event loop on its own thread, so sharing uses
+# thread-safe futures rather than loop-bound tasks.
+_EDGAR_ARCHIVE_PREFIX = "https://www.sec.gov/Archives/"
+_EDGAR_HTML_TTL = 30 * 60
+_EDGAR_HTML_CACHE_MAX_CHARS = 64 * 1024 * 1024
+_EDGAR_HTML_CACHE: dict[tuple[str, int], tuple[str, float]] = {}
+_EDGAR_HTML_CACHE_CHARS = 0
+_EDGAR_HTML_INFLIGHT: dict[tuple[str, int], concurrent.futures.Future] = {}
+# Re-entrant: a fetch that finishes before add_done_callback runs its
+# callback immediately on the thread that holds the lock.
+_EDGAR_HTML_LOCK = threading.RLock()
+_EDGAR_HTML_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="edgar-html")
+
+
+def _store_edgar_html(key: tuple[str, int], future: concurrent.futures.Future) -> None:
+    global _EDGAR_HTML_CACHE_CHARS
+    with _EDGAR_HTML_LOCK:
+        _EDGAR_HTML_INFLIGHT.pop(key, None)
+        if future.cancelled() or future.exception() is not None:
+            return
+        text = future.result()
+        if text is None or len(text) > _EDGAR_HTML_CACHE_MAX_CHARS:
+            return  # failures are retried on the next call
+        previous = _EDGAR_HTML_CACHE.pop(key, None)
+        if previous is not None:
+            _EDGAR_HTML_CACHE_CHARS -= len(previous[0])
+        _EDGAR_HTML_CACHE[key] = (text, time.monotonic())
+        _EDGAR_HTML_CACHE_CHARS += len(text)
+        while _EDGAR_HTML_CACHE_CHARS > _EDGAR_HTML_CACHE_MAX_CHARS and _EDGAR_HTML_CACHE:
+            oldest = next(iter(_EDGAR_HTML_CACHE))
+            _EDGAR_HTML_CACHE_CHARS -= len(_EDGAR_HTML_CACHE.pop(oldest)[0])
+
+
 async def _edgar_get_html(url: str, max_bytes: int = 5_000_000) -> str | None:
     """Fetch an HTML document from EDGAR, reading at most max_bytes uncompressed bytes."""
-    loop = asyncio.get_event_loop()
-
-    def _fetch() -> str | None:
-        req = _urlreq.Request(
-            url,
-            headers={"User-Agent": _SEC_REQUIRED_UA},
-        )
-        try:
-            with _urlreq.urlopen(req, timeout=30) as resp:  # noqa: S310
-                raw = resp.read(max_bytes)
-            try:
-                return raw.decode("utf-8")
-            except UnicodeDecodeError:
-                return raw.decode("latin-1", errors="replace")
-        except Exception:
-            return None
-
-    return await loop.run_in_executor(None, _fetch)
+    if not url.startswith(_EDGAR_ARCHIVE_PREFIX):
+        return await asyncio.get_running_loop().run_in_executor(None, _fetch_edgar_html, url, max_bytes)
+    key = (url, max_bytes)
+    with _EDGAR_HTML_LOCK:
+        hit = _EDGAR_HTML_CACHE.get(key)
+        if hit is not None and time.monotonic() - hit[1] < _EDGAR_HTML_TTL:
+            return hit[0]
+        future = _EDGAR_HTML_INFLIGHT.get(key)
+        if future is None:
+            future = _EDGAR_HTML_EXECUTOR.submit(_fetch_edgar_html, url, max_bytes)
+            _EDGAR_HTML_INFLIGHT[key] = future
+            future.add_done_callback(lambda done, key=key: _store_edgar_html(key, done))
+    return await asyncio.wrap_future(future)
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +301,7 @@ async def _resolve_cik_for_ticker(ticker: str) -> str | None:
         cik_raw = None
     if cik_raw:
         cik_padded = str(cik_raw).strip().zfill(10)
-        _FILING_CIK_CACHE[t_upper] = cik_padded
+        _bounded_set(_FILING_CIK_CACHE, t_upper, cik_padded, _FILING_CIK_CACHE_MAX)
         return cik_padded
 
     # Fallback: look up from SEC EDGAR company_tickers.json
@@ -248,7 +310,7 @@ async def _resolve_cik_for_ticker(ticker: str) -> str | None:
         cik_int = tickers_map.get(t_upper)
         if cik_int:
             cik_padded = str(cik_int).zfill(10)
-            _FILING_CIK_CACHE[t_upper] = cik_padded
+            _bounded_set(_FILING_CIK_CACHE, t_upper, cik_padded, _FILING_CIK_CACHE_MAX)
             return cik_padded
     except Exception:
         pass
@@ -256,7 +318,7 @@ async def _resolve_cik_for_ticker(ticker: str) -> str | None:
     # Stable fixture fallback map for smoke/regression-critical tickers.
     fixture_cik = _SMOKE_TICKER_CIK_FALLBACKS.get(t_upper)
     if fixture_cik:
-        _FILING_CIK_CACHE[t_upper] = fixture_cik
+        _bounded_set(_FILING_CIK_CACHE, t_upper, fixture_cik, _FILING_CIK_CACHE_MAX)
         return fixture_cik
 
     def _extract_cik_from_edgar_atom(text: str) -> str | None:
@@ -298,20 +360,14 @@ async def _resolve_cik_for_ticker(ticker: str) -> str | None:
 
     cik_padded = await loop.run_in_executor(None, _fetch_atom)
     if cik_padded:
-        _FILING_CIK_CACHE[t_upper] = cik_padded
+        _bounded_set(_FILING_CIK_CACHE, t_upper, cik_padded, _FILING_CIK_CACHE_MAX)
     return cik_padded
 
 
 async def _get_submissions_for_ticker(ticker: str) -> tuple[str | None, dict | None]:
-    t_upper = ticker.upper()
-    cached_subs = _FILING_SUBMISSIONS_BY_TICKER.get(t_upper)
-    if cached_subs is not None:
-        cik = _FILING_CIK_CACHE.get(t_upper)
-        return cik, cached_subs
+    # Both lookups are cached: CIKs indefinitely (they do not change) and
+    # submissions for 24 h, so newly filed documents appear within a day.
     cik_padded = await _resolve_cik_for_ticker(ticker)
     if not cik_padded:
         return None, None
-    subs = await _edgar_get_submissions(cik_padded)
-    if subs is not None:
-        _FILING_SUBMISSIONS_BY_TICKER[t_upper] = subs
-    return cik_padded, subs
+    return cik_padded, await _edgar_get_submissions(cik_padded)
