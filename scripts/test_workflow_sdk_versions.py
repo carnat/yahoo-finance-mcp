@@ -17,6 +17,7 @@ REQUIRED_ACTION_VERSIONS = {
     "actions/checkout": "v5",
     "actions/setup-python": "v6",
     "actions/setup-node": "v5",
+    "actions/upload-artifact": "v7",
 }
 
 ACTION_USE_PATTERN = re.compile(r"^\s*-\s*uses:\s*(actions/[a-zA-Z0-9_-]+)@([vV][0-9]+)\s*$", re.MULTILINE)
