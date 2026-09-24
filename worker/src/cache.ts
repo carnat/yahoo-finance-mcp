@@ -1,38 +1,51 @@
-interface CacheEntry {
-  value: string;
-  storedAt: number; // Date.now() ms
-  ttl: number;      // ms
+/**
+ * Process-local TTL cache with a size bound.
+ *
+ * Worker isolates are long-lived and memory-capped, so module-level caches
+ * must expire entries and stop growing. Map iteration order is insertion
+ * order, which makes the oldest entry the first key: re-setting a key moves
+ * it to the back, and overflow evicts from the front.
+ */
+export class BoundedTtlCache<V> {
+  private store = new Map<string, { value: V; expiresAt: number }>();
+
+  constructor(private readonly maxEntries: number) {}
+
+  get(key: string): V | undefined {
+    const entry = this.store.get(key);
+    if (!entry) return undefined;
+    if (Date.now() >= entry.expiresAt) {
+      this.store.delete(key);
+      return undefined;
+    }
+    return entry.value;
+  }
+
+  set(key: string, value: V, ttlMs: number): void {
+    this.store.delete(key);
+    this.store.set(key, { value, expiresAt: Date.now() + ttlMs });
+    while (this.store.size > this.maxEntries) {
+      const oldest = this.store.keys().next().value;
+      if (oldest === undefined) break;
+      this.store.delete(oldest);
+    }
+  }
+
+  delete(key: string): void {
+    this.store.delete(key);
+  }
 }
 
-export class ToolCache {
-  private store = new Map<string, CacheEntry>();
-
-  get(key: string): { value: string; cacheHit: true; cachedAt: string } | null {
-    const entry = this.store.get(key);
-    if (!entry) return null;
-    if (Date.now() - entry.storedAt >= entry.ttl) return null;
-    return {
-      value: entry.value,
-      cacheHit: true,
-      cachedAt: new Date(entry.storedAt).toISOString(),
-    };
-  }
-
-  set(key: string, value: string, ttl: number): void {
-    this.store.set(key, { value, storedAt: Date.now(), ttl });
-  }
-
-  isStale(key: string): boolean {
-    const entry = this.store.get(key);
-    if (!entry) return false;
-    return Date.now() - entry.storedAt > 2 * entry.ttl;
+/**
+ * Set a key on a plain Map cache and evict its oldest entries beyond
+ * maxEntries. For caches that keep their own storedAt/TTL bookkeeping.
+ */
+export function setBounded<K, V>(map: Map<K, V>, key: K, value: V, maxEntries: number): void {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > maxEntries) {
+    const oldest = map.keys().next();
+    if (oldest.done) break;
+    map.delete(oldest.value);
   }
 }
-
-export const TTL_PRICE = 5 * 60 * 1000;
-export const TTL_ANALYST = 15 * 60 * 1000;
-export const TTL_FINANCIALS = 4 * 3600 * 1000;
-export const TTL_EDGAR = 24 * 3600 * 1000;
-export const TTL_OPTIONS = 15 * 60 * 1000;
-
-export const toolCache = new ToolCache();
