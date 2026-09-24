@@ -210,6 +210,7 @@ class TestSmokeArchitecture(unittest.TestCase):
                 "SEC_OPEN_DATA_API_KEY": "",
                 "ALPHA_VANTAGE_API_KEY": "alpha-secret",
                 "MARKETAUX_API_TOKEN": "marketaux-secret",
+                "EDGAR_CONTACT_EMAIL": "ops@example.org",
             }
         )
         self.assertEqual(
@@ -219,6 +220,7 @@ class TestSmokeArchitecture(unittest.TestCase):
                 "FINNHUB_API_KEY": "finnhub-secret",
                 "ALPHA_VANTAGE_API_KEY": "alpha-secret",
                 "MARKETAUX_API_TOKEN": "marketaux-secret",
+                "EDGAR_CONTACT_EMAIL": "ops@example.org",
             },
         )
         with tempfile.TemporaryDirectory() as temp_dir:
