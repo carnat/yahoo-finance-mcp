@@ -21,9 +21,10 @@ Production deploys use an immutable-version promotion sequence:
    blocking contract canaries before the broader advisory audits.
 
 A canary whose tool answers `RATE_LIMIT` or `PROVIDER_TIMEOUT` with
-`retryable: true` is called once more after 20 seconds, so a single upstream
-throttle cannot block a release; a second throttle, and every other failure,
-still fails the gate.
+`retryable: true` is called again after 20 seconds and, if still throttled,
+after 40 more, so a short upstream throttle cannot block a release; a third
+throttle, and every other failure, still fails the gate. The advisory live
+discovery smoke retries its tool calls the same way.
 
 If candidate identity or contract verification fails, promotion does not run
 and production traffic remains unchanged. Production deployments are

@@ -146,7 +146,7 @@ class TestWorkerGroupedMode(unittest.TestCase):
         call_end = self.tools_ts.index("export async function callVisibleTool", call_start)
         body = self.tools_ts[call_start:call_end]
         self.assertIn("legacyToolFailure(raw)", body)
-        self.assertIn("return mcpFailureResult(name, legacyFailure.code, legacyFailure.message)", body)
+        self.assertIn("return mcpFailureResult(name, legacyFailure.code, legacyFailure.message", body)
 
     def test_company_news_rejects_empty_symbols_before_collection(self) -> None:
         start = self.yahoo_ts.index("export async function getCompanyNews")

@@ -714,6 +714,37 @@ let _crumbRefresh: Promise<{ value: string; cookie: string; exp: number }> | nul
 
 const YAHOO_FETCH_TIMEOUT_MS = 15_000;
 
+// Yahoo throttling (HTTP 429) is handled the way yfinance handles it: a
+// rate-limited crumb request does not fail the call (many endpoints answer
+// without a crumb), and a rate-limited data request is retried once, after a
+// short pause, on Yahoo's other API host.
+const YAHOO_API_HOSTS = ["query2.finance.yahoo.com", "query1.finance.yahoo.com"] as const;
+const YAHOO_RATE_LIMIT_RETRY_DELAY_MS = 750;
+// After a rate-limited crumb request, skip crumb requests for a minute so a
+// throttled isolate does not add a cookie + crumb round trip to every call.
+const CRUMB_RATE_LIMIT_COOLDOWN_MS = 60_000;
+let _crumbUnavailableUntil = 0;
+
+/** Yahoo refused the crumb request with HTTP 429. */
+class YahooCrumbRateLimitError extends Error {
+  readonly status = 429;
+  constructor() {
+    super("Yahoo Finance crumb request rate limited (HTTP 429)");
+  }
+}
+
+/** The same URL on Yahoo's other API host, or null for non-API URLs. */
+function alternateYahooHost(url: string): string | null {
+  const [primary, secondary] = YAHOO_API_HOSTS;
+  if (url.includes(`//${primary}/`)) return url.replace(`//${primary}/`, `//${secondary}/`);
+  if (url.includes(`//${secondary}/`)) return url.replace(`//${secondary}/`, `//${primary}/`);
+  return null;
+}
+
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function refreshCrumb(): Promise<{ value: string; cookie: string }> {
   // fc.yahoo.com sets the consent cookie used by Yahoo Finance APIs
   const init = await fetchProviderWithTimeout("https://fc.yahoo.com", {
@@ -735,15 +766,36 @@ async function refreshCrumb(): Promise<{ value: string; cookie: string }> {
   // "stalled response canceled to prevent deadlock" warnings.
   await init.body?.cancel();
 
-  const crumbRes = await fetchProviderWithTimeout("https://query2.finance.yahoo.com/v1/test/getcrumb", {
-    headers: { "User-Agent": UA, Cookie: cookie },
-  }, YAHOO_FETCH_TIMEOUT_MS);
-  if (!crumbRes.ok) {
+  // Like yfinance's two cookie strategies, fall back to the other API host
+  // when the first refuses the crumb request.
+  let lastStatus = 0;
+  for (const host of YAHOO_API_HOSTS) {
+    const crumbRes = await fetchProviderWithTimeout(`https://${host}/v1/test/getcrumb`, {
+      headers: { "User-Agent": UA, Cookie: cookie },
+    }, YAHOO_FETCH_TIMEOUT_MS);
+    if (crumbRes.ok) return { value: await crumbRes.text(), cookie };
     await crumbRes.body?.cancel();
-    throw new Error(`Crumb fetch failed: ${crumbRes.status}`);
+    lastStatus = crumbRes.status;
   }
+  if (lastStatus === 429) throw new YahooCrumbRateLimitError();
+  throw new Error(`Crumb fetch failed: ${lastStatus}`);
+}
 
-  return { value: await crumbRes.text(), cookie };
+/**
+ * A crumb, or undefined while Yahoo is rate-limiting crumb requests; the
+ * caller then requests the endpoint without one.
+ */
+async function getCrumbIfAvailable(): Promise<{ value: string; cookie: string } | undefined> {
+  if (Date.now() < _crumbUnavailableUntil) return undefined;
+  try {
+    return await getCrumb();
+  } catch (error) {
+    if (error instanceof YahooCrumbRateLimitError) {
+      _crumbUnavailableUntil = Date.now() + CRUMB_RATE_LIMIT_COOLDOWN_MS;
+      return undefined;
+    }
+    throw error;
+  }
 }
 
 async function getCrumb(): Promise<{ value: string; cookie: string }> {
@@ -843,9 +895,9 @@ export function yahooCacheStats(): Record<string, unknown> {
 }
 
 async function yGetText(url: string, auth: boolean): Promise<string> {
-  const makeReq = async (c?: { value: string; cookie: string }): Promise<Response> => {
+  const makeReq = async (target: string, c?: { value: string; cookie: string }): Promise<Response> => {
     const headers: Record<string, string> = { "User-Agent": UA };
-    let u = url;
+    let u = target;
     if (c) {
       headers.Cookie = c.cookie;
       u += `${u.includes("?") ? "&" : "?"}crumb=${encodeURIComponent(c.value)}`;
@@ -853,20 +905,33 @@ async function yGetText(url: string, auth: boolean): Promise<string> {
     return fetchProviderWithTimeout(u, { headers }, YAHOO_FETCH_TIMEOUT_MS);
   };
 
-  const crumb = auth ? await getCrumb() : undefined;
-  let res = await makeReq(crumb);
+  let crumb = auth ? await getCrumbIfAvailable() : undefined;
+  const crumbThrottled = auth && crumb === undefined;
+  let res = await makeReq(url, crumb);
 
   // Retry once with a fresh crumb on 401
   if (res.status === 401 && crumb) {
     // Cancel the unconsumed response body to free the HTTP slot
     await res.body?.cancel();
     invalidateCrumb(crumb);
-    res = await makeReq(await getCrumb());
+    crumb = await getCrumbIfAvailable();
+    res = await makeReq(url, crumb);
+  }
+
+  // Retry a throttled request once on the other API host.
+  const alternate = res.status === 429 ? alternateYahooHost(url) : null;
+  if (alternate) {
+    await res.body?.cancel();
+    await pause(YAHOO_RATE_LIMIT_RETRY_DELAY_MS);
+    res = await makeReq(alternate, crumb);
   }
 
   if (!res.ok) {
     await res.body?.cancel();
-    throw new YahooHttpError(res.status, url);
+    // An endpoint that needs a crumb refuses the crumb-less request; the
+    // cause is Yahoo's rate limit on crumbs, so report it as a rate limit.
+    const status = crumbThrottled && (res.status === 401 || res.status === 403) ? 429 : res.status;
+    throw new YahooHttpError(status, url);
   }
   return res.text();
 }

@@ -130,6 +130,9 @@ jobs:
       - name: Worker Yahoo edge cache tests
         run: python scripts/test_worker_yahoo_edge_cache.py -v
 
+      - name: Worker Yahoo throttling tests
+        run: python scripts/test_worker_yahoo_throttling.py -v
+
       - name: Historical prices contract tests (Worker and local)
         run: python scripts/test_historical_prices_contract.py -v
 

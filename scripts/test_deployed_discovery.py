@@ -176,7 +176,29 @@ def rpc(method: str, params: dict | None = None, req_id: int = 1) -> dict:
     raise last_exc or RuntimeError("RPC failed")
 
 
+# Yahoo throttling of the smoke's own traffic is retried, so one 429 cannot
+# end the smoke before the later checks run; a third throttle is reported.
+_THROTTLE_CODES = frozenset({"RATE_LIMIT", "PROVIDER_TIMEOUT"})
+_THROTTLE_RETRY_DELAYS = (20, 40)
+
+
+def _is_throttled(payload: object) -> bool:
+    error = payload.get("error") if isinstance(payload, dict) and payload.get("ok") is False else None
+    return isinstance(error, dict) and error.get("retryable") is True and error.get("code") in _THROTTLE_CODES
+
+
 def call_tool(name: str, arguments: dict, req_id: int, allow_jsonrpc_error: bool = False) -> dict:
+    payload = _call_tool_once(name, arguments, req_id, allow_jsonrpc_error)
+    for delay in _THROTTLE_RETRY_DELAYS:
+        if not _is_throttled(payload):
+            break
+        print(f"  RETRY {name}: provider returned {payload['error']['code']}; retrying in {delay}s")
+        time.sleep(delay)
+        payload = _call_tool_once(name, arguments, req_id, allow_jsonrpc_error)
+    return payload
+
+
+def _call_tool_once(name: str, arguments: dict, req_id: int, allow_jsonrpc_error: bool = False) -> dict:
     call_name = name
     call_args = arguments
     if _GROUPED_DISCOVERY and name not in GROUPED_TOOLS:

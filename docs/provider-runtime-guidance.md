@@ -34,6 +34,16 @@ Sources checked through 2026-08-04:
 
 ## Yahoo Finance Caching
 
+- Yahoo throttling (HTTP 429) is handled as yfinance 1.7 handles it
+  (`yfinance/data.py`, `_make_request` and the basic/csrf crumb strategies):
+  a throttled crumb request is retried on the other API host
+  (`query2`/`query1`); if both refuse, the call proceeds without a crumb and
+  crumb requests pause for 60 s. A throttled data request is retried once,
+  after 750 ms, on the other API host. When both hosts throttle, or an endpoint
+  needs the missing crumb, the tool returns `RATE_LIMIT` with
+  `retryable: true`. yfinance also impersonates a browser TLS fingerprint
+  (`curl_cffi`), which a Worker cannot do.
+
 - Every Worker Yahoo GET shares in-flight requests and a 30-second
   process-local body cache, so composite tools that fan out to the same URL
   make one upstream call.
