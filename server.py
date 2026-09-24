@@ -472,6 +472,9 @@ _GLOBENEWSWIRE_BLOCKED_XML_MARKERS = ("<!doctype", "<!entity")
 _GLOBENEWSWIRE_STOCK_CATEGORY_DOMAIN = "https://www.globenewswire.com/rss/stock"
 _GLOBENEWSWIRE_ISIN_CATEGORY_DOMAIN = "https://www.globenewswire.com/rss/ISIN"
 _COMPANY_IR_PAGE_REGISTRY_PATH = Path(__file__).resolve().parent / "worker" / "src" / "company-ir-page-registry.json"
+# Non-SEC providers (news feeds, Finnhub, Marketaux) get a plain agent; the
+# SEC agent carries the operator contact and is for SEC hosts only.
+_PROVIDER_USER_AGENT = "yahoo-finance-mcp"
 _NEWS_SOURCE_CAPABILITIES_PATH = Path(__file__).resolve().parent / "worker" / "src" / "news-source-capabilities.json"
 _COMPANY_IR_PAGE_MAX_BYTES = 750 * 1024
 
@@ -1527,7 +1530,7 @@ async def _collect_globenewswire_events(
             def _fetch_rss() -> str:
                 req = _urlrequest.Request(
                     feed_url,
-                    headers={"User-Agent": _SEC_REQUIRED_UA},
+                    headers={"User-Agent": _PROVIDER_USER_AGENT},
                 )
                 with _urlrequest.urlopen(req, timeout=20) as resp:  # noqa: S310
                     raw = resp.read(_GLOBENEWSWIRE_MAX_BYTES + 1)
@@ -1708,7 +1711,7 @@ async def _collect_finnhub_events(
     def _fetch() -> list[dict]:
         req = _urlrequest.Request(
             url,
-            headers={"User-Agent": _SEC_REQUIRED_UA, "X-Finnhub-Token": api_key},
+            headers={"User-Agent": _PROVIDER_USER_AGENT, "X-Finnhub-Token": api_key},
         )
         with _urlrequest.urlopen(req, timeout=20) as resp:  # noqa: S310
             return json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -1883,7 +1886,7 @@ async def _collect_marketaux_events(
     loop = asyncio.get_event_loop()
 
     def _fetch() -> dict:
-        req = _urlrequest.Request(request_url, headers={"User-Agent": _SEC_REQUIRED_UA})
+        req = _urlrequest.Request(request_url, headers={"User-Agent": _PROVIDER_USER_AGENT})
         with _urlrequest.urlopen(req, timeout=12) as resp:  # noqa: S310
             return json.loads(resp.read().decode("utf-8", errors="replace"))
 

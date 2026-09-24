@@ -52,7 +52,14 @@ Sources checked through 2026-08-04:
 - The Worker's 30-second body cache holds at most 200 bodies and 24 million
   characters in total. `/health` reports per-isolate `yahooCache` counters
   (memory hits, shared in-flight requests, edge hits, misses and writes, and
-  upstream fetches), and the deployed discovery smoke prints them.
+  upstream fetches), and the deployed discovery smoke prints them. Counting
+  starts at the isolate's first request (`since`).
+- Every `/mcp` response carries an `X-Yahoo-Cache` header with that request's
+  own counts, for example `memory=0, shared=0, edge-hit=1, edge-miss=0,
+  edge-write=0, upstream=0`. Requests are attributed with `AsyncLocalStorage`
+  (the `nodejs_als` compatibility flag), so concurrent requests in one isolate
+  do not mix. The deployed discovery smoke reads a statement twice, 31 s apart,
+  and reports whether the second read came from the edge cache.
 - The local server caches EDGAR archive documents (`https://www.sec.gov/Archives/`)
   for 30 minutes in a 64-million-character budget and shares in-flight fetches
   across concurrent tool calls. Submissions are cached for 24 hours, so new

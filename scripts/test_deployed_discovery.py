@@ -541,18 +541,42 @@ def _check_historical_prices_contract() -> None:
     print("PASS get_historical_prices 5d contract (tradingDate, untagged rows, range validation)")
 
 
+def _post_with_cache_header(name: str, arguments: dict, req_id: int) -> tuple[dict, str | None]:
+    call_name, call_args = name, arguments
+    if _GROUPED_DISCOVERY and name not in GROUPED_TOOLS and ACTION_GROUP.get(name):
+        call_name, call_args = ACTION_GROUP[name], {"action": name, "params": arguments}
+    body = json.dumps({"jsonrpc": "2.0", "id": req_id, "method": "tools/call",
+                       "params": {"name": call_name, "arguments": call_args}}).encode("utf-8")
+    req = urllib.request.Request(URL, data=body, method="POST",
+                                 headers={"Content-Type": "application/json", "User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=90) as resp:
+        return json.loads(resp.read()), resp.headers.get("X-Yahoo-Cache")
+
+
 def _report_yahoo_cache() -> None:
-    """Advisory: print the Yahoo cache counters of whichever isolate serves /health."""
-    for req_id in (970, 971):  # the second read of a slow Yahoo endpoint can hit a cache
-        call_tool("get_financial_statement", {"ticker": "AAPL", "financial_type": "income_stmt"}, req_id)
-    health_url = re.sub(r"/mcp/?$", "/health", URL)
+    """Advisory: show where repeated slow-data reads come from.
+
+    The second read waits past the 30 s in-process cache, so it is served by
+    the Cloudflare edge cache (edge-hit=1) or by Yahoo (upstream=1).
+    """
+    args = {"ticker": "AAPL", "financial_type": "income_stmt"}
     try:
+        _, first = _post_with_cache_header("get_financial_statement", args, 970)
+        time.sleep(31)
+        _, second = _post_with_cache_header("get_financial_statement", args, 971)
+        print(f"  INFO X-Yahoo-Cache first read: {first}")
+        print(f"  INFO X-Yahoo-Cache read after 31 s: {second}")
+        if second and "edge-hit=1" in second:
+            print("  INFO edge cache served the repeat read")
+        elif second:
+            print("  INFO edge cache did not serve the repeat read")
+        health_url = re.sub(r"/mcp/?$", "/health", URL)
         req = urllib.request.Request(health_url, headers={"User-Agent": UA})
         with urllib.request.urlopen(req, timeout=30) as resp:
             health = json.loads(resp.read())
         print(f"  INFO /health yahooCache: {json.dumps(health.get('yahooCache'))}")
     except Exception as exc:  # advisory only
-        print(f"  INFO /health yahooCache unavailable: {exc}")
+        print(f"  INFO Yahoo cache report unavailable: {exc}")
 
 
 def main() -> int:

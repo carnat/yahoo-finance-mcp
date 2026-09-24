@@ -7,6 +7,7 @@ import asyncio
 import concurrent.futures
 import html as _html_module
 import json
+import os
 import re as _re
 import threading
 import time
@@ -20,7 +21,21 @@ from yfmcp.parsing.html import _strip_html_tags
 # ---------------------------------------------------------------------------
 # SEC request constants and in-process caches
 # ---------------------------------------------------------------------------
-_SEC_REQUIRED_UA = "yahoo-finance-mcp contact@example.com"
+_EDGAR_FALLBACK_CONTACT = "contact@example.com"
+
+
+def _sec_user_agent() -> str:
+    """SEC fair access requires a reachable contact in the User-Agent.
+
+    Set EDGAR_CONTACT_EMAIL to an operator-owned address (the Worker reads the
+    same variable); the placeholder is used only when it is unset. Send this
+    header to SEC hosts only.
+    """
+    contact = os.environ.get("EDGAR_CONTACT_EMAIL", "").strip() or _EDGAR_FALLBACK_CONTACT
+    return f"yahoo-finance-mcp {contact}"
+
+
+_SEC_REQUIRED_UA = _sec_user_agent()
 _FILING_CIK_CACHE: dict[str, str] = {}
 
 # Size limits for the in-process EDGAR caches. The server is long-lived and

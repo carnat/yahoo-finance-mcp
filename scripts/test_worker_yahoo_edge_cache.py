@@ -62,36 +62,43 @@ async function outbound(req) {
 }
 
 const worker = (name) => ({
-  name, modules: true, scriptPath, compatibilityDate: "2026-09-21",
+  name, modules: true, scriptPath, compatibilityDate: "2026-09-21", compatibilityFlags: ["nodejs_als"],
   bindings: { TOOL_MODE: "grouped", MCP_ENVELOPE_V2: "true" }, outboundService: outbound,
 });
 const mf = new Miniflare(convertV4MiniflareOptions({ workers: [worker("first"), worker("second")] }));
 let id = 0;
-async function call(isolate, group, action, params) {
+const headers = { first: {}, second: {} };
+let current = "first";
+async function call(isolate, group, action, params, label) {
   const res = await isolate.fetch("https://x/mcp", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method: "tools/call", params: { name: group, arguments: { action, params } } }),
   });
+  if (label) headers[current][label] = res.headers.get("x-yahoo-cache");
   return (await res.json()).result.structuredContent;
 }
 async function run(isolate) {
   const out = {};
-  out.statement = await call(isolate, "stock_fundamentals", "get_financial_statement", { ticker: "AAPL", financial_type: "income_stmt" });
+  out.statement = await call(isolate, "stock_fundamentals", "get_financial_statement", { ticker: "AAPL", financial_type: "income_stmt" }, "statement");
   await new Promise((r) => setTimeout(r, 1100));  // the timeseries window end moves to the next second
-  out.statementAgain = await call(isolate, "stock_fundamentals", "get_financial_statement", { ticker: "AAPL", financial_type: "income_stmt" });
-  out.empty = await call(isolate, "stock_fundamentals", "get_financial_statement", { ticker: "EMPTY", financial_type: "income_stmt" });
-  out.holders = await call(isolate, "stock_fundamentals", "get_ownership_holders", { ticker: "AAPL", holder_type: "institutional_holders" });
-  out.recommendations = await call(isolate, "analyst_data", "get_analyst_recommendations", { ticker: "AAPL", recommendation_type: "recommendations" });
-  out.quote = await call(isolate, "stock_pricing", "get_market_quote", { ticker: "AAPL" });
+  out.statementAgain = await call(isolate, "stock_fundamentals", "get_financial_statement", { ticker: "AAPL", financial_type: "income_stmt" }, "statementAgain");
+  out.empty = await call(isolate, "stock_fundamentals", "get_financial_statement", { ticker: "EMPTY", financial_type: "income_stmt" }, "empty");
+  // Two concurrent requests in one isolate: each header counts only its own reads.
+  [out.holders, out.recommendations] = await Promise.all([
+    call(isolate, "stock_fundamentals", "get_ownership_holders", { ticker: "AAPL", holder_type: "institutional_holders" }, "holders"),
+    call(isolate, "analyst_data", "get_analyst_recommendations", { ticker: "AAPL", recommendation_type: "recommendations" }, "recommendations"),
+  ]);
+  out.quote = await call(isolate, "stock_pricing", "get_market_quote", { ticker: "AAPL" }, "quote");
   out.health = await (await isolate.fetch("https://x/health")).json();
   return out;
 }
 const first = await run(await mf.getWorker("first"));
 const afterFirst = { ...counts };
+current = "second";
 const second = await run(await mf.getWorker("second"));
 await mf.dispose();
-console.log(JSON.stringify({ first, second, afterFirst, afterSecond: counts }));
+console.log(JSON.stringify({ first, second, afterFirst, afterSecond: counts, headers }));
 """
 
 
@@ -108,7 +115,7 @@ def _run_harness() -> dict:
         entry.write_text(f'export {{ default }} from "{(WORKER / "src" / "index.ts").as_posix()}";\n', encoding="utf-8")
         subprocess.run(
             [str(ESBUILD), str(entry), "--bundle", "--format=esm", "--platform=neutral",
-             "--main-fields=module,main", f"--outfile={bundle}", "--log-level=error"],
+             "--main-fields=module,main", "--external:node:async_hooks", f"--outfile={bundle}", "--log-level=error"],
             cwd=WORKER, check=True, capture_output=True, text=True, timeout=120,
         )
         result = subprocess.run(
@@ -155,6 +162,7 @@ class TestWorkerYahooEdgeCache(unittest.TestCase):
         first = self.result["first"]["health"]["yahooCache"]
         second = self.result["second"]["health"]["yahooCache"]
         self.assertEqual(first["scope"], "isolate")
+        self.assertFalse(str(first["since"]).startswith("1970"), first["since"])
         # First isolate: statement, holders and recommendations are written to
         # the edge cache; the repeated statement call is a memory hit.
         self.assertEqual(first["edgeHits"], 0)
@@ -176,6 +184,40 @@ const oversized = { size: cache.size, big: cache.get("big") ?? null };
 cache.delete("c");
 console.log(JSON.stringify({ afterBudget, oversized, afterDelete: { size: cache.size, weight: cache.weight } }));
 """
+
+
+class TestYahooCacheHeader(unittest.TestCase):
+    """X-Yahoo-Cache reports where each request's Yahoo data came from."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.headers = _run_harness()["headers"]
+
+    @staticmethod
+    def _parse(header: str) -> dict[str, int]:
+        return {key: int(value) for key, value in (part.split("=") for part in header.split(", "))}
+
+    def test_first_isolate_fetches_then_reuses_memory(self) -> None:
+        first = {label: self._parse(value) for label, value in self.headers["first"].items()}
+        self.assertEqual(first["statement"]["upstream"], 1)
+        self.assertEqual(first["statement"]["edge-miss"], 1)
+        self.assertEqual(first["statement"]["edge-write"], 1)
+        self.assertEqual(first["statementAgain"], {**first["statementAgain"], "memory": 1, "upstream": 0, "edge-hit": 0})
+
+    def test_second_isolate_reads_the_edge_cache(self) -> None:
+        second = {label: self._parse(value) for label, value in self.headers["second"].items()}
+        for label in ("statement", "holders", "recommendations"):
+            with self.subTest(label=label):
+                self.assertEqual(second[label]["edge-hit"], 1)
+                self.assertEqual(second[label]["upstream"], 0)
+        self.assertGreaterEqual(second["quote"]["upstream"], 1)
+        self.assertEqual(second["quote"]["edge-hit"], 0)
+
+    def test_concurrent_requests_are_counted_separately(self) -> None:
+        # holders and recommendations ran concurrently; one edge read each.
+        second = {label: self._parse(value) for label, value in self.headers["second"].items()}
+        self.assertEqual(sum(second["holders"].values()), 1)
+        self.assertEqual(sum(second["recommendations"].values()), 1)
 
 
 class TestBoundedTtlCacheWeight(unittest.TestCase):

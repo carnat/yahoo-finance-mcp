@@ -465,5 +465,56 @@ class TestSmokeArchitecture(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(calls, ["health_check"])
 
+    def _provider_failure(self, code: str, retryable: bool = True) -> dict:
+        return {
+            "ok": False,
+            "data": None,
+            "meta": {},
+            "error": {"code": code, "message": "provider", "retryable": retryable},
+        }
+
+    def test_canary_retries_a_throttled_provider_once(self) -> None:
+        responses = iter([self._provider_failure("RATE_LIMIT"), {"ok": True, "data": {"rows": 1}}])
+        sleeps: list[float] = []
+        with redirect_stdout(io.StringIO()):
+            payload = deployed_canaries.call_canary(
+                "get_historical_prices", {}, tool_mode="grouped", req_id=1,
+                call=lambda *_a, **_k: next(responses), sleep=sleeps.append, delay_seconds=3,
+            )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(sleeps, [3])
+
+    def test_canary_reports_a_repeated_throttle(self) -> None:
+        calls: list[int] = []
+
+        def call(*_args: object, **_kwargs: object) -> dict:
+            calls.append(1)
+            return self._provider_failure("PROVIDER_TIMEOUT")
+
+        with redirect_stdout(io.StringIO()):
+            payload = deployed_canaries.call_canary(
+                "get_historical_prices", {}, tool_mode="grouped", req_id=1,
+                call=call, sleep=lambda _seconds: None,
+            )
+        self.assertEqual(payload["error"]["code"], "PROVIDER_TIMEOUT")
+        self.assertEqual(len(calls), 2)
+
+    def test_canary_does_not_retry_other_failures(self) -> None:
+        for failure in (self._provider_failure("PROVIDER_ERROR"), self._provider_failure("RATE_LIMIT", retryable=False),
+                        self._provider_failure("INPUT_VALIDATION_ERROR")):
+            with self.subTest(code=failure["error"]["code"], retryable=failure["error"]["retryable"]):
+                calls: list[int] = []
+
+                def call(*_args: object, failure: dict = failure, **_kwargs: object) -> dict:
+                    calls.append(1)
+                    return failure
+
+                deployed_canaries.call_canary(
+                    "get_historical_prices", {}, tool_mode="grouped", req_id=1,
+                    call=call, sleep=lambda _seconds: self.fail("must not retry"),
+                )
+                self.assertEqual(len(calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

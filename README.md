@@ -62,6 +62,12 @@ uv pip install -e .
 uv run server.py
 ```
 
+Set `EDGAR_CONTACT_EMAIL` to an address you own before using the SEC tools.
+SEC fair-access rules require a reachable contact in the User-Agent of every
+SEC request; without it the server sends a placeholder, which SEC may throttle.
+The address is sent only to SEC hosts. The deployed Worker reads the same name
+from its secrets.
+
 Claude Desktop example:
 
 ```json
