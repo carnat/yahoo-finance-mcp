@@ -3,7 +3,8 @@
 This module is the single source of truth for:
 - The FastMCP compat shim (strips unsupported output_schema kwarg on older SDKs)
 - The shared ``yfinance_server`` FastMCP instance that all domain modules register on
-- ``TOOL_ALIASES``: the canonical mapping of deprecated/alternate tool names to canonical ones
+- ``TOOL_ALIASES``: historical handler name -> canonical tool name (output-schema lookup only;
+  these names are not public tools since 2.0.0)
 - ``build_handler_registry``: derives the handler map from the live tool manager for grouped mode
 
 All ``yfmcp/tools/*.py`` domain modules import ``yfinance_server`` from here.
@@ -125,7 +126,7 @@ if FastMCP.tool is not _fastmcp_tool_compat:
 
 
 # ---------------------------------------------------------------------------
-# Deprecated / alternate → canonical tool name mapping
+# Historical handler name → canonical tool name (not public tools since 2.0.0)
 # ---------------------------------------------------------------------------
 TOOL_ALIASES: dict[str, str] = {
     "get_fast_info": "get_market_quote",
@@ -204,7 +205,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - Use `screen_stocks` to discover stocks matching criteria (e.g., day_gainers, most_actives) without iterating tickers manually.
 - Index tickers like `^VIX`, `^GSPC`, `^DJI` are supported by `get_market_quote`, `analyze_price_performance`, and `get_technical_indicators`.
 - For SEC data: use `extract_sec_filing_fact` first for XBRL-tagged facts. If it returns NOT_DISCLOSED, use `search_sec_filing_text` with `return_tables=true` as fallback.
-- For news: use `get_company_news` (multi-source) instead of `get_yahoo_finance_news` (legacy single-source).
+- For news: use `get_company_news` (multi-source routing with coverage diagnostics).
 - For news completeness, read `coverage.truncatedSources` as well as failed/skipped sources. `RETRY_TRUNCATED_SOURCE` means accepted items were omitted by caps or dedupe, not that the provider failed.
 - Use `get_ownership_holders` for ordinary Yahoo holder questions. Use `get_expanded_institutional_ownership` only for a deeper list; it tries eligible Finnhub coverage first and spends scarce Alpha quota only with `allow_scarce_fallback=true`.
 - Use `summarize_options_flow` for current options context. Use `get_historical_put_call_ratio` only for one explicit historical date; the Alpha-backed result is contextual and never decision-grade.

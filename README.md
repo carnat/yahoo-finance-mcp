@@ -88,11 +88,15 @@ they may query external market and regulatory sources.
 uv run server.py
 ```
 
-Expanded mode remains available for compatibility and debugging:
+Expanded mode remains available for compatibility and debugging. It lists the
+same canonical tools individually:
 
 ```bash
 TOOL_MODE=expanded uv run server.py
 ```
+
+Both runtimes return the V2 response envelope (`ok`, `data`, `meta`, `error`).
+Set `MCP_ENVELOPE_V2=false` on the local server to keep the legacy 1.x shape.
 
 Grouped domains:
 
@@ -179,13 +183,25 @@ project identities sequentially; it does not calculate portfolio value or
 wrapper/tax eligibility. Returned NAV, factsheet, and dividend data retain
 their own dates and scopes.
 
-Use `tools/list` or `health_check` for the exact current tool names,
-schemas, aliases, and deprecation metadata.
+Use `tools/list` or `health_check` for the exact current tool names and
+schemas.
+
+## Migrating from 1.x
+
+2.0.0 removed public tool names that were deprecated in 1.x:
+
+- The deprecated aliases (for example `get_fast_info`, `get_stock_info`,
+  `list_sec_filings`, `get_filing_section`) are no longer tools. Calls to them
+  return `INPUT_VALIDATION_ERROR`. Use the canonical names in
+  [docs/tool-naming.md](docs/tool-naming.md).
+- `get_overnight_quote` and the `get_yahoo_finance_news` grouped action were
+  removed. Use `get_market_quote` for regular, pre- and post-market fields and
+  `get_company_news` for news.
+- The local server defaults to the V2 response envelope, like the hosted
+  Worker. Set `MCP_ENVELOPE_V2=false` for the legacy shape.
 
 ## Important Limitations
 
-- `get_overnight_quote` is a deprecated diagnostics-only Yahoo extended-hours
-  proxy. It does not provide true 20:00-04:00 ET overnight venue data.
 - `get_sec_filing_section_markdown` is degraded and should be verified against
   the source filing before use; it uses a lossy Worker HTML fallback.
 - `get_company_press_releases` is payload-gated: only responses with
