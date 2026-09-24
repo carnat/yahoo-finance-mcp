@@ -136,6 +136,9 @@ jobs:
       - name: Historical prices contract tests (Worker and local)
         run: python scripts/test_historical_prices_contract.py -v
 
+      - name: Completed-session freshness tests (Worker and local)
+        run: python scripts/test_completed_session_freshness.py -v
+
       - name: Worker SEC reliability tests
         run: python scripts/test_sec_reliability_worker.py
 

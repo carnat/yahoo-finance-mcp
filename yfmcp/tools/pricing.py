@@ -679,6 +679,14 @@ def _daily_bar_date(value, timezone_name: str) -> str | None:
         return None
 
 
+def _previous_weekday(iso_date: str) -> str:
+    """The weekday (Mon-Fri) before an ISO date, as an ISO date."""
+    day = datetime.date.fromisoformat(iso_date) - datetime.timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= datetime.timedelta(days=1)
+    return day.isoformat()
+
+
 def _prepare_completed_daily_history(
     metadata: dict,
     hist: pd.DataFrame,
@@ -730,6 +738,19 @@ def _prepare_completed_daily_history(
         completed = completed.iloc[:-1]
         excluded_incomplete = True
 
+    last_completed_date = _daily_bar_date(completed.index[-1], timezone_name) if not completed.empty else None
+    last_completed_raw_close = (
+        pd.to_numeric(completed["Close"].iloc[-1], errors="coerce")
+        if not completed.empty and "Close" in completed
+        else float("nan")
+    )
+
+    # expectedCompletedDate is the most recent session that should already be
+    # complete. Outside a regular session that is the session of
+    # regularMarketTime. During one it is the previous session, which is only
+    # named when proven: Yahoo's previousClose equals the last completed close,
+    # or (without previousClose) the last completed bar is from the weekday
+    # just before today's session, so no weekday session can be missing.
     expected_date = None
     if not active_session:
         regular_market_time = _daily_bar_epoch(metadata.get("regularMarketTime"))
@@ -738,31 +759,27 @@ def _prepare_completed_daily_history(
                 pd.Timestamp(regular_market_time, unit="s", tz="UTC"),
                 timezone_name,
             )
-
-    if active_session:
-        expected_previous_close = pd.to_numeric(metadata.get("previousClose"), errors="coerce")
-        last_completed_raw_close = (
-            pd.to_numeric(completed["Close"].iloc[-1], errors="coerce")
-            if not completed.empty and "Close" in completed
-            else float("nan")
-        )
-        tolerance = (
-            max(0.01, abs(float(expected_previous_close)) * 1e-6)
-            if not pd.isna(expected_previous_close)
-            else 0.01
-        )
-        freshness_status = (
-            "STALE"
-            if not pd.isna(expected_previous_close)
-            and not pd.isna(last_completed_raw_close)
-            and abs(float(last_completed_raw_close) - float(expected_previous_close)) > tolerance
-            else "CURRENT"
-        )
-    elif expected_date is None or completed.empty:
-        freshness_status = "UNKNOWN"
+        if expected_date is None or last_completed_date is None:
+            freshness_status = "UNKNOWN"
+        else:
+            freshness_status = "STALE" if last_completed_date < expected_date else "CURRENT"
     else:
-        last_completed_date = _daily_bar_date(completed.index[-1], timezone_name)
-        freshness_status = "STALE" if last_completed_date is None or last_completed_date < expected_date else "CURRENT"
+        previous_close = pd.to_numeric(metadata.get("previousClose"), errors="coerce")
+        session_date = _daily_bar_date(pd.Timestamp(regular_start, unit="s", tz="UTC"), timezone_name)
+        if not pd.isna(previous_close) and not pd.isna(last_completed_raw_close):
+            tolerance = max(0.01, abs(float(previous_close)) * 1e-6)
+            matches = abs(float(last_completed_raw_close) - float(previous_close)) <= tolerance
+            freshness_status = "CURRENT" if matches else "STALE"
+            expected_date = last_completed_date if matches else None
+        elif (
+            last_completed_date is not None
+            and session_date is not None
+            and last_completed_date == _previous_weekday(session_date)
+        ):
+            freshness_status = "CURRENT"
+            expected_date = last_completed_date
+        else:
+            freshness_status = "UNKNOWN"
 
     return {
         "history": hist,
