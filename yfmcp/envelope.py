@@ -185,8 +185,16 @@ import re
 # ---------------------------------------------------------------------------
 # Envelope V2 standardization helper
 # ---------------------------------------------------------------------------
+def _is_price_bar(val: dict) -> bool:
+    return "open" in val and "high" in val and "low" in val and "close" in val
+
+
 def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metric=False):
     if isinstance(val, dict):
+        # OHLC price bars carry high/low keys but are raw exchange prices, not
+        # extracted facts that need evidence tagging.
+        if _is_price_bar(val):
+            return val
         is_fact = "value" in val or "low" in val or "high" in val or "valueRatio" in val or "valuePct" in val or is_metric
         
         if is_fact:

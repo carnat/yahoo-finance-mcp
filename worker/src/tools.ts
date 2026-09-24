@@ -18,6 +18,9 @@ import {
   getFinancialStatement,
   getVolumeGate,
   getHistoricalPrices,
+  historicalRangeError,
+  HISTORICAL_PERIODS,
+  HISTORICAL_INTERVALS,
   getHolderInfo,
   getExpandedInstitutionalOwnership,
   SUPPORTED_HOLDER_TYPES,
@@ -476,7 +479,7 @@ export const TOOLS: Tool[] = [
 
 const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_market_quote", description: "Get a lightweight Yahoo regular-market price observation for one or more tickers. lastPrice uses priceBasis=REGULAR_MARKET_PRICE and includes priceTimestamp; use get_price_slope for adjusted daily-bar analytics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
-  { name: "get_historical_prices", description: "Get raw historical OHLCV. Daily rows without a usable close are INCOMPLETE/isFinal=false.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", default: "1mo" }, interval: { type: "string", default: "1d" }, prepost: { type: "boolean", default: false } }, required: ["ticker"] } },
+  { name: "get_historical_prices", description: "Get raw historical OHLCV. Daily rows without a usable close are INCOMPLETE/isFinal=false.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: [...HISTORICAL_PERIODS], default: "1mo" }, interval: { type: "string", enum: [...HISTORICAL_INTERVALS], default: "1d" }, prepost: { type: "boolean", default: false } }, required: ["ticker"] } },
   { name: "analyze_price_performance", description: "Analyze price performance metrics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
   { name: "analyze_moving_average_position", description: "Analyze moving-average position.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
   { name: "analyze_volume_ratio", description: "Analyze the latest completed-session volume ratio. PARTIAL/INCOMPLETE means retry; do not use a volume signal.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, period: { type: "number", default: 10 } }, required: ["ticker"] } },
@@ -1910,7 +1913,11 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       const tickerStr = String(rawTicker).trim().toUpperCase();
       const tickerErr = validateTicker(tickerStr);
       if (tickerErr) return mcpFailure("get_historical_prices", ErrorCode.INPUT_VALIDATION_ERROR, tickerErr);
-      return getHistoricalPrices(tickerStr, str(args.period, "1mo"), str(args.interval, "1d"), args.prepost === true);
+      const period = str(args.period, "1mo").trim();
+      const interval = str(args.interval, "1d").trim();
+      const rangeErr = historicalRangeError(period, interval);
+      if (rangeErr) return mcpFailure("get_historical_prices", ErrorCode.INPUT_VALIDATION_ERROR, rangeErr);
+      return getHistoricalPrices(tickerStr, period, interval, args.prepost === true);
     }
     case "get_company_profile":
       return getStockInfo(tickerArg(args.ticker), args.include_all === true);

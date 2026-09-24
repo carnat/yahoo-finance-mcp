@@ -104,6 +104,8 @@ _ENVELOPE_SAMPLES = {
     "object": {"lastPrice": 101.5, "currency": "USD"},
     "list": ["2026-09-25", "2026-10-02"],
     "fact": {"revenue": {"value": 391035000000, "unit": "USD"}, "status": "FOUND"},
+    "price_bars": [{"date": "2026-09-24T00:00:00.000Z", "open": 60.5, "high": 61.1, "low": 60.3, "close": 61.0, "volume": 7648430}],
+    "range": {"targetPrice": {"low": 250.0, "high": 400.0}},
     "legacy_error": {"error": True, "code": "RATE_LIMIT", "message": "slow down"},
     "envelope": {"ok": True, "data": {"x": 1}, "meta": {"tool": "inner"}, "error": None},
 }

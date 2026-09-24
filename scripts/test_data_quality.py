@@ -73,10 +73,11 @@ class TestPr2DataQuality(unittest.TestCase):
         self.assertEqual(
             set(rows[0]),
             {
-                "date", "open", "high", "low", "close", "volume",
+                "date", "tradingDate", "open", "high", "low", "close", "volume",
                 "adjClose", "barStatus", "isFinal",
             },
         )
+        self.assertEqual(rows[0]["tradingDate"], "2026-06-12")
         self.assertEqual(rows[0]["barStatus"], "COMPLETE")
         self.assertTrue(rows[0]["isFinal"])
 

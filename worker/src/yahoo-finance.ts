@@ -776,8 +776,32 @@ class YahooHttpError extends Error {
 // copy so callers can never mutate each other's payloads. Retry URLs carry a
 // unique cache-buster, so they always reach Yahoo.
 const YAHOO_GET_TTL_MS = 30_000;
-const yahooGetBodies = new BoundedTtlCache<string>(200);
+// Bodies range from a few KB to over 1 MB (long daily histories), so the
+// cache is limited by total characters as well as entries.
+const YAHOO_GET_CACHE_MAX_CHARS = 24_000_000;
+const yahooGetBodies = new BoundedTtlCache<string>(200, YAHOO_GET_CACHE_MAX_CHARS, (body) => body.length);
 const yahooGetInflight = new Map<string, Promise<string>>();
+
+// Per-isolate counters for the Yahoo GET caches, reported on /health.
+const yahooCacheCounters = {
+  memoryHits: 0,
+  sharedInflight: 0,
+  edgeHits: 0,
+  edgeMisses: 0,
+  edgeWrites: 0,
+  upstreamFetches: 0,
+};
+const isolateStartedAt = new Date().toISOString();
+
+export function yahooCacheStats(): Record<string, unknown> {
+  return {
+    scope: "isolate",
+    since: isolateStartedAt,
+    ...yahooCacheCounters,
+    bodyCacheEntries: yahooGetBodies.size,
+    bodyCacheChars: yahooGetBodies.weight,
+  };
+}
 
 async function yGetText(url: string, auth: boolean): Promise<string> {
   const makeReq = async (c?: { value: string; cookie: string }): Promise<Response> => {
@@ -929,11 +953,17 @@ async function fetchYahooBody(url: string, auth: boolean, cacheUrl: string): Pro
   const edgeTtl = yahooEdgeTtlMs(url);
   if (edgeTtl > 0) {
     const cached = await readYahooEdge(cacheUrl, edgeTtl);
-    if (cached !== null) return cached;
+    if (cached !== null) {
+      yahooCacheCounters.edgeHits++;
+      return cached;
+    }
+    yahooCacheCounters.edgeMisses++;
   }
+  yahooCacheCounters.upstreamFetches++;
   const text = await yGetText(url, auth);
   if (edgeTtl > 0 && isEdgeCacheableYahooBody(url, text)) {
     await writeYahooEdge(cacheUrl, text, edgeTtl);
+    yahooCacheCounters.edgeWrites++;
   }
   return text;
 }
@@ -950,9 +980,13 @@ function evictYahooGet(url: string, auth = true): void {
 async function yGet(url: string, auth = true): Promise<unknown> {
   const key = yahooGetKey(url, auth);
   let body = yahooGetBodies.get(key);
-  if (body === undefined) {
+  if (body !== undefined) {
+    yahooCacheCounters.memoryHits++;
+  } else {
     let pending = yahooGetInflight.get(key);
-    if (!pending) {
+    if (pending) {
+      yahooCacheCounters.sharedInflight++;
+    } else {
       pending = fetchYahooBody(url, auth, yahooCacheUrl(url))
         .then((text) => {
           yahooGetBodies.set(key, text, YAHOO_GET_TTL_MS);
@@ -1403,6 +1437,22 @@ export async function getEtfInfo(ticker: string | string[], sections?: string[] 
 }
 
 
+// Yahoo chart ranges and intervals. Yahoo answers an unknown value with a
+// fallback series (a single live bar) instead of an error, so inputs are
+// checked against the documented sets before the request.
+export const HISTORICAL_PERIODS = ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"] as const;
+export const HISTORICAL_INTERVALS = ["1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"] as const;
+
+export function historicalRangeError(period: string, interval: string): string | null {
+  if (!(HISTORICAL_PERIODS as readonly string[]).includes(period)) {
+    return `period must be one of: ${HISTORICAL_PERIODS.join(", ")}`;
+  }
+  if (!(HISTORICAL_INTERVALS as readonly string[]).includes(interval)) {
+    return `interval must be one of: ${HISTORICAL_INTERVALS.join(", ")}`;
+  }
+  return null;
+}
+
 export async function getHistoricalPrices(
   ticker: string,
   period: string,
@@ -1433,6 +1483,11 @@ export async function getHistoricalPrices(
   const completedTimestamps = new Set(
     dailyState?.completedRows.map((row) => row.timestamp) ?? []
   );
+  // `date` is the bar's UTC instant; for exchanges east of UTC the session
+  // open can fall on the previous UTC day, so the exchange-local calendar
+  // date is reported separately.
+  const meta = (result.meta as Record<string, unknown> | undefined) ?? {};
+  const exchangeTimezone = typeof meta.exchangeTimezoneName === "string" ? meta.exchangeTimezoneName : "UTC";
 
   return JSON.stringify(
     timestamps.map((t, i) => {
@@ -1443,6 +1498,7 @@ export async function getHistoricalPrices(
         : null;
       return {
         date: iso(t),
+        tradingDate: dailyBarDate(t, exchangeTimezone),
         open: quote.open?.[i] ?? null,
         high: quote.high?.[i] ?? null,
         low: quote.low?.[i] ?? null,

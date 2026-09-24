@@ -49,6 +49,15 @@ Sources checked through 2026-08-04:
   cache. Error responses and empty Yahoo answers are never edge cached.
 - Timeseries requests end their window at the current second (`period2`); the
   cache key ignores that parameter so repeated calls can hit.
+- The Worker's 30-second body cache holds at most 200 bodies and 24 million
+  characters in total. `/health` reports per-isolate `yahooCache` counters
+  (memory hits, shared in-flight requests, edge hits, misses and writes, and
+  upstream fetches), and the deployed discovery smoke prints them.
+- The local server caches EDGAR archive documents (`https://www.sec.gov/Archives/`)
+  for 30 minutes in a 64-million-character budget and shares in-flight fetches
+  across concurrent tool calls. Submissions are cached for 24 hours, so new
+  filings appear within a day; company facts (16) and submissions (256) are
+  size-limited.
 
 ## SEC EDGAR Rules
 

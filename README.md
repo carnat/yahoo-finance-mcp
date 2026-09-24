@@ -154,7 +154,15 @@ Other daily derived tools follow the same boundary. Technical indicators,
 volume ratios, liquidity gates, realized-volatility context, and historical
 performance use completed sessions only and expose `dataDate`, `barStatus`,
 and freshness/retry fields. Raw daily history can still include the active row,
-but labels it with `barStatus:"INCOMPLETE"` and `isFinal:false`. Moving-average
+but labels it with `barStatus:"INCOMPLETE"` and `isFinal:false`. Each
+`get_historical_prices` row has `date`, the bar's UTC instant, and
+`tradingDate`, its calendar date on the exchange. Use `tradingDate` for the
+session date: sessions east of UTC (for example ASX, NZX, SET) can start on the
+previous UTC day. `period` and `interval` accept only Yahoo's documented values
+(`1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max` and
+`1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo`); anything else is
+an `INPUT_VALIDATION_ERROR`, because Yahoo answers unknown values with a single
+live bar instead of an error. Moving-average
 and target-distance tools intentionally compare a live quote and therefore
 expose `priceTimestamp` separately. In `get_market_snapshot`,
 `quoteFreshnessClass` (and the legacy `freshnessClass`) uses that quote

@@ -117,12 +117,19 @@ function buildMeta(
   } as ToolMeta;
 }
 
+function isPriceBar(val: Record<string, unknown>): boolean {
+  return "open" in val && "high" in val && "low" in val && "close" in val;
+}
+
 function enrichFacts(val: any, parentSourceType: string | null = null, parentConfidence: string | null = null, isMetric = false): any {
   if (val && typeof val === "object") {
     if (Array.isArray(val)) {
       return val.map(item => enrichFacts(item, parentSourceType, parentConfidence, isMetric));
     }
     
+    // OHLC price bars carry high/low keys but are raw exchange prices, not
+    // extracted facts that need evidence tagging.
+    if (isPriceBar(val)) return val;
     const isFact = ("value" in val) || ("low" in val) || ("high" in val) || ("valueRatio" in val) || ("valuePct" in val) || isMetric;
     
     if (isFact) {

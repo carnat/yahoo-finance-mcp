@@ -522,6 +522,39 @@ def _assert_deprecated_alias_metadata(tools: list[dict]) -> None:
             raise AssertionError(f"Deprecated alias should NOT appear in tools/list: {alias}")
 
 
+def _check_historical_prices_contract() -> None:
+    """5-day history carries exchange-local dates, no fact tags, and rejects bad ranges."""
+    for req_id, ticker in ((960, "AAPL"), (961, "BHP.AX")):
+        payload = call_tool("get_historical_prices", {"ticker": ticker, "period": "5d", "interval": "1d"}, req_id)
+        rows = extract_data(payload)
+        if not isinstance(rows, list) or not rows:
+            raise AssertionError(f"get_historical_prices {ticker} 5d returned no rows: {json.dumps(payload)[:2000]}")
+        for row in rows:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(row.get("tradingDate") or "")):
+                raise AssertionError(f"get_historical_prices {ticker} row missing tradingDate: {row}")
+            tagged = [key for key in ("evidenceRequired", "decisionGrade", "sourceType") if key in row]
+            if tagged:
+                raise AssertionError(f"get_historical_prices {ticker} price row is fact-tagged ({tagged}): {row}")
+    bad = call_tool("get_historical_prices", {"ticker": "AAPL", "period": "5days", "interval": "1d"}, 962)
+    if bad.get("ok") is not False or (bad.get("error") or {}).get("code") != "INPUT_VALIDATION_ERROR":
+        raise AssertionError(f"invalid period must be INPUT_VALIDATION_ERROR: {json.dumps(bad)[:2000]}")
+    print("PASS get_historical_prices 5d contract (tradingDate, untagged rows, range validation)")
+
+
+def _report_yahoo_cache() -> None:
+    """Advisory: print the Yahoo cache counters of whichever isolate serves /health."""
+    for req_id in (970, 971):  # the second read of a slow Yahoo endpoint can hit a cache
+        call_tool("get_financial_statement", {"ticker": "AAPL", "financial_type": "income_stmt"}, req_id)
+    health_url = re.sub(r"/mcp/?$", "/health", URL)
+    try:
+        req = urllib.request.Request(health_url, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            health = json.loads(resp.read())
+        print(f"  INFO /health yahooCache: {json.dumps(health.get('yahooCache'))}")
+    except Exception as exc:  # advisory only
+        print(f"  INFO /health yahooCache unavailable: {exc}")
+
+
 def main() -> int:
     global _GROUPED_DISCOVERY
     try:
@@ -1140,6 +1173,9 @@ def main() -> int:
         if not rejected:
             raise AssertionError(f"removed tool {removed_name} must be rejected as unknown: {removed_payload}")
     print("PASS removed 1.x tool names are rejected")
+
+    _check_historical_prices_contract()
+    _report_yahoo_cache()
 
     print(f"PASS deployed discovery + smoke ({len(names)} tools)")
     return 0
