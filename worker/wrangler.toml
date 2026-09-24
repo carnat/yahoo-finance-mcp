@@ -1,6 +1,8 @@
 name = "yahoo-finance-mcp"
 main = "src/index.ts"
 compatibility_date = "2026-09-21"
+# AsyncLocalStorage (node:async_hooks) attributes Yahoo cache use to each request.
+compatibility_flags = ["nodejs_als"]
 preview_urls = true
 
 [version_metadata]
@@ -8,7 +10,7 @@ binding = "CF_VERSION_METADATA"
 
 [vars]
 MCP_ENVELOPE_V2 = "true"
-SERVER_VERSION = "2.2.0"
+SERVER_VERSION = "2.2.1"
 BUILD_VERSION = ""
 BUILD_DATE = ""
 BUILD_SHA = ""

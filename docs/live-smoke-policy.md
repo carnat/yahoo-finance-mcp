@@ -20,6 +20,11 @@ Production deploys use an immutable-version promotion sequence:
 6. Poll production until it reports that same version ID, then rerun the
    blocking contract canaries before the broader advisory audits.
 
+A canary whose tool answers `RATE_LIMIT` or `PROVIDER_TIMEOUT` with
+`retryable: true` is called once more after 20 seconds, so a single upstream
+throttle cannot block a release; a second throttle, and every other failure,
+still fails the gate.
+
 If candidate identity or contract verification fails, promotion does not run
 and production traffic remains unchanged. Production deployments are
 serialized so two workflow runs cannot race to promote different versions.

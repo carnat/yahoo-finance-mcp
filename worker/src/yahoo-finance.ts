@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { BoundedTtlCache, setBounded } from "./cache.js";
 import { ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
 import { yahooTranscriptContentSha256 } from "./transcript-contract.js";
@@ -791,12 +792,50 @@ const yahooCacheCounters = {
   edgeWrites: 0,
   upstreamFetches: 0,
 };
-const isolateStartedAt = new Date().toISOString();
+type YahooCacheEvent = keyof typeof yahooCacheCounters;
+// The Workers clock reads 0 while a module is first evaluated, so the
+// counters' start time is taken from the first request instead.
+let countersSince: string | null = null;
+
+export function markYahooCacheActivity(): void {
+  countersSince ??= new Date().toISOString();
+}
+
+/** Yahoo cache events of one MCP request, reported in its X-Yahoo-Cache header. */
+export type YahooCacheUsage = Record<YahooCacheEvent, number>;
+const requestCacheUsage = new AsyncLocalStorage<YahooCacheUsage>();
+
+function countYahooCache(event: YahooCacheEvent): void {
+  yahooCacheCounters[event]++;
+  const usage = requestCacheUsage.getStore();
+  if (usage) usage[event]++;
+}
+
+/** Run fn with its Yahoo cache events collected separately from concurrent requests. */
+export async function withYahooCacheUsage<T>(fn: () => Promise<T>): Promise<{ result: T; usage: YahooCacheUsage }> {
+  const usage: YahooCacheUsage = {
+    memoryHits: 0, sharedInflight: 0, edgeHits: 0, edgeMisses: 0, edgeWrites: 0, upstreamFetches: 0,
+  };
+  const result = await requestCacheUsage.run(usage, fn);
+  return { result, usage };
+}
+
+/** Header form, e.g. "memory=1, shared=0, edge-hit=2, edge-miss=0, edge-write=0, upstream=1". */
+export function formatYahooCacheUsage(usage: YahooCacheUsage): string {
+  return [
+    `memory=${usage.memoryHits}`,
+    `shared=${usage.sharedInflight}`,
+    `edge-hit=${usage.edgeHits}`,
+    `edge-miss=${usage.edgeMisses}`,
+    `edge-write=${usage.edgeWrites}`,
+    `upstream=${usage.upstreamFetches}`,
+  ].join(", ");
+}
 
 export function yahooCacheStats(): Record<string, unknown> {
   return {
     scope: "isolate",
-    since: isolateStartedAt,
+    since: countersSince,
     ...yahooCacheCounters,
     bodyCacheEntries: yahooGetBodies.size,
     bodyCacheChars: yahooGetBodies.weight,
@@ -954,16 +993,16 @@ async function fetchYahooBody(url: string, auth: boolean, cacheUrl: string): Pro
   if (edgeTtl > 0) {
     const cached = await readYahooEdge(cacheUrl, edgeTtl);
     if (cached !== null) {
-      yahooCacheCounters.edgeHits++;
+      countYahooCache("edgeHits");
       return cached;
     }
-    yahooCacheCounters.edgeMisses++;
+    countYahooCache("edgeMisses");
   }
-  yahooCacheCounters.upstreamFetches++;
+  countYahooCache("upstreamFetches");
   const text = await yGetText(url, auth);
   if (edgeTtl > 0 && isEdgeCacheableYahooBody(url, text)) {
     await writeYahooEdge(cacheUrl, text, edgeTtl);
-    yahooCacheCounters.edgeWrites++;
+    countYahooCache("edgeWrites");
   }
   return text;
 }
@@ -981,11 +1020,11 @@ async function yGet(url: string, auth = true): Promise<unknown> {
   const key = yahooGetKey(url, auth);
   let body = yahooGetBodies.get(key);
   if (body !== undefined) {
-    yahooCacheCounters.memoryHits++;
+    countYahooCache("memoryHits");
   } else {
     let pending = yahooGetInflight.get(key);
     if (pending) {
-      yahooCacheCounters.sharedInflight++;
+      countYahooCache("sharedInflight");
     } else {
       pending = fetchYahooBody(url, auth, yahooCacheUrl(url))
         .then((text) => {

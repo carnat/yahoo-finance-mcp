@@ -23,7 +23,7 @@
 import { handleMcp } from "./mcp.js";
 import { getBuildVersion, getServerVersion, setWorkerEnv, getWorkerVar } from "./response.js";
 import { TOOLS, callTool } from "./tools.js";
-import { yahooCacheStats } from "./yahoo-finance.js";
+import { formatYahooCacheUsage, markYahooCacheActivity, withYahooCacheUsage, yahooCacheStats } from "./yahoo-finance.js";
 
 export interface Env {
   MCP_ENVELOPE_V2?: string;
@@ -43,12 +43,13 @@ const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Mcp-Session-Id",
   "Access-Control-Max-Age": "86400",
+  "Access-Control-Expose-Headers": "X-Yahoo-Cache",
 };
 
-function json(data: unknown, status = 200): Response {
+function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+    headers: { "Content-Type": "application/json", ...CORS_HEADERS, ...extraHeaders },
   });
 }
 
@@ -60,6 +61,7 @@ export default {
       ...env,
       WORKER_VERSION_ID: env.CF_VERSION_METADATA?.id,
     });
+    markYahooCacheActivity();
     const { method } = request;
     const { pathname } = new URL(request.url);
 
@@ -116,14 +118,16 @@ export default {
       }
 
       try {
-        const result = await handleMcp(body);
+        const { result, usage } = await withYahooCacheUsage(() => handleMcp(body));
 
         // Null means the request was notification-only — no response body needed
         if (result === null) {
           return new Response(null, { status: 202, headers: CORS_HEADERS });
         }
 
-        return json(result);
+        // Where this request's Yahoo data came from: process memory, a
+        // request already in flight, the edge cache, or Yahoo itself.
+        return json(result, 200, { "X-Yahoo-Cache": formatYahooCacheUsage(usage) });
       } catch (e) {
         const message = e instanceof Error ? e.message : "Internal server error";
         return json(

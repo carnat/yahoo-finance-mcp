@@ -36,6 +36,9 @@ EXPECTED_BUILD_SHA = os.environ.get("EXPECTED_BUILD_SHA", "").strip().lower()
 ALLOW_NETWORK_SKIP = os.environ.get("ALLOW_NETWORK_SKIP", "1").lower() in {"1", "true", "yes"}
 VERSION_ATTEMPTS = 19
 VERSION_DELAY_SECONDS = 5.0
+# A single upstream throttle or timeout is retried once; a repeat still fails.
+PROVIDER_RETRY_CODES = frozenset({"RATE_LIMIT", "PROVIDER_TIMEOUT"})
+PROVIDER_RETRY_DELAY_SECONDS = 20.0
 
 _CATALOG = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
 GROUPED_TOOLS = frozenset(_CATALOG["groups"])
@@ -611,6 +614,36 @@ def call_versioned_tool(
     )
 
 
+def _retryable_provider_code(payload: Any) -> str | None:
+    if not isinstance(payload, dict) or payload.get("ok") is not False:
+        return None
+    error = payload.get("error")
+    if isinstance(error, dict) and error.get("retryable") is True and error.get("code") in PROVIDER_RETRY_CODES:
+        return str(error["code"])
+    return None
+
+
+def call_canary(
+    tool: str,
+    args: dict[str, Any],
+    *,
+    tool_mode: str,
+    req_id: int,
+    call: Callable[..., dict[str, Any]] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    delay_seconds: float = PROVIDER_RETRY_DELAY_SECONDS,
+) -> dict[str, Any]:
+    """Call a canary tool, retrying once when the provider throttled or timed out."""
+    call = call or call_versioned_tool
+    payload = call(tool, args, tool_mode=tool_mode, req_id=req_id)
+    code = _retryable_provider_code(payload)
+    if code is None:
+        return payload
+    print(f"  RETRY {tool}: provider returned {code}; retrying once in {delay_seconds:.0f}s")
+    sleep(delay_seconds)
+    return call(tool, args, tool_mode=tool_mode, req_id=req_id)
+
+
 def run_canaries(canaries: list[dict[str, Any]]) -> None:
     if not MCP_URL:
         raise AssertionError("MCP_URL is required")
@@ -620,7 +653,7 @@ def run_canaries(canaries: list[dict[str, Any]]) -> None:
     for idx, canary in enumerate(canaries, start=1):
         tool = str(canary["tool"])
         try:
-            payload = call_versioned_tool(
+            payload = call_canary(
                 tool,
                 canary["args"],
                 tool_mode=tool_mode,

@@ -59,7 +59,7 @@ def _worker_grouped_schemas() -> dict[str, dict[str, list[str]]]:
         try:
             subprocess.run(
                 [str(ESBUILD), str(entry), "--bundle", "--format=esm", "--platform=neutral",
-                 "--main-fields=module,main", f"--outfile={bundle}", "--log-level=error"],
+                 "--main-fields=module,main", "--external:node:async_hooks", f"--outfile={bundle}", "--log-level=error"],
                 cwd=WORKER, check=True, capture_output=True, text=True, timeout=120,
             )
         finally:

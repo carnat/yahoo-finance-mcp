@@ -153,5 +153,23 @@ class TestFinnhubPolicy(unittest.TestCase):
         self.assertEqual(info.hits, 2)
 
 
+class TestSecUserAgent(unittest.TestCase):
+    def test_contact_comes_from_environment(self) -> None:
+        with patch.dict(os.environ, {"EDGAR_CONTACT_EMAIL": " ops@example.org "}):
+            self.assertEqual(edgar._sec_user_agent(), "yahoo-finance-mcp ops@example.org")
+        with patch.dict(os.environ, {"EDGAR_CONTACT_EMAIL": ""}):
+            self.assertEqual(edgar._sec_user_agent(), "yahoo-finance-mcp contact@example.com")
+
+    def test_non_sec_providers_do_not_receive_the_contact(self) -> None:
+        import inspect
+
+        self.assertNotIn("@", server._PROVIDER_USER_AGENT)
+        for fn in (server._collect_globenewswire_events, server._collect_finnhub_events, server._collect_marketaux_events):
+            with self.subTest(fn=fn.__name__):
+                source = inspect.getsource(fn)
+                self.assertNotIn("_SEC_REQUIRED_UA", source)
+                self.assertIn("_PROVIDER_USER_AGENT", source)
+
+
 if __name__ == "__main__":
     unittest.main()
