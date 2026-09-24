@@ -12,7 +12,7 @@ from yfmcp.app import yfinance_server
 from yfmcp.schemas import _MARKET_SNAPSHOT_OUTPUT_SCHEMA, _TOOL_OUTPUT_SCHEMAS
 from yfmcp.envelope import ErrorCode, _mcp_failure
 from yfmcp.validation import _validate_ticker
-from yfmcp.cache import _PRICE_TTL, _STMT_TTL, _cache_get, _cache_set
+from yfmcp.cache import _PRICE_TTL, _STMT_TTL, _tool_cache
 from yfmcp.util import _fetch_with_retry, get_last_trading_date
 from yfmcp.clients.yahoo import _safe_parse
 
@@ -73,7 +73,7 @@ async def get_historical_stock_prices(
             wanted.add(key)
         return [{k: r[k] for k in wanted if k in r} for r in rows]
 
-    cached = _cache_get(cache_key, _PRICE_TTL)
+    cached = _tool_cache.get_value(cache_key)
     if cached is not None:
         if columns:
             try:
@@ -132,7 +132,7 @@ async def get_historical_stock_prices(
 
     hist_data = hist_data.reset_index(names="Date").rename(columns=column_map)
     full_result = hist_data.to_json(orient="records", date_format="iso")
-    _cache_set(cache_key, full_result)
+    _tool_cache.set(cache_key, full_result, _PRICE_TTL)
 
     if columns:
         try:
@@ -150,7 +150,7 @@ async def get_fast_info(ticker: str | list[str]) -> str:
         results = await asyncio.gather(*[get_fast_info(t) for t in ticker], return_exceptions=True)
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     cache_key = f"fast_info:{ticker}"
-    cached = _cache_get(cache_key, _PRICE_TTL)
+    cached = _tool_cache.get_value(cache_key)
     if cached is not None:
         return cached
 
@@ -223,7 +223,7 @@ async def get_fast_info(ticker: str | list[str]) -> str:
     data = {k: (None if isinstance(v, dict) and not v else v) for k, v in data.items()}
 
     result = json.dumps(data)
-    _cache_set(cache_key, result)
+    _tool_cache.set(cache_key, result, _PRICE_TTL)
     return result
 
 
@@ -261,7 +261,7 @@ Args:
 async def get_short_interest(ticker: str) -> str:
     """Get short interest data for a ticker symbol."""
     cache_key = f"short_interest:{ticker}"
-    cached = _cache_get(cache_key, _STMT_TTL)
+    cached = _tool_cache.get_value(cache_key)
     if cached is not None:
         return cached
 
@@ -296,7 +296,7 @@ async def get_short_interest(ticker: str) -> str:
             data[key] = _serialize(val)
 
     result = json.dumps(data)
-    _cache_set(cache_key, result)
+    _tool_cache.set(cache_key, result, _STMT_TTL)
     return result
 
 
@@ -311,7 +311,7 @@ async def get_price_stats(ticker: str | list[str]) -> str:
         results = await asyncio.gather(*[get_price_stats(t) for t in ticker], return_exceptions=True)
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     cache_key = f"price_stats:{ticker}"
-    cached = _cache_get(cache_key, _PRICE_TTL)
+    cached = _tool_cache.get_value(cache_key)
     if cached is not None:
         return cached
 
@@ -451,7 +451,7 @@ async def get_price_stats(ticker: str | list[str]) -> str:
         "dataDate": data_date,
     })
     result = json.dumps(stats)
-    _cache_set(cache_key, result)
+    _tool_cache.set(cache_key, result, _PRICE_TTL)
     return result
 
 
@@ -500,7 +500,7 @@ async def get_technical_indicators(ticker: str | list[str], period: str = "3mo")
             await asyncio.sleep(0.1)
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     cache_key = f"tech_indicators:{ticker}:{period}"
-    cached = _cache_get(cache_key, _PRICE_TTL)
+    cached = _tool_cache.get_value(cache_key)
     if cached is not None:
         return cached
 
@@ -606,7 +606,7 @@ async def get_technical_indicators(ticker: str | list[str], period: str = "3mo")
     output["dataDate"] = data_date
 
     result = json.dumps(output)
-    _cache_set(cache_key, result)
+    _tool_cache.set(cache_key, result, _PRICE_TTL)
     return result
 
 

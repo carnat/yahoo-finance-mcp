@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from enum import Enum
 
-from yfmcp.app import TOOL_ALIASES
-
 
 # Define an enum for the type of financial statement
 class FinancialType(str, Enum):
@@ -800,10 +798,6 @@ _TOOL_OUTPUT_SCHEMAS: dict[str, dict] = {
         "additionalProperties": True,
     },
 }
-
-for _alias_name, _canonical_name in TOOL_ALIASES.items():
-    if _canonical_name in _TOOL_OUTPUT_SCHEMAS and _alias_name not in _TOOL_OUTPUT_SCHEMAS:
-        _TOOL_OUTPUT_SCHEMAS[_alias_name] = _TOOL_OUTPUT_SCHEMAS[_canonical_name]
 
 # Canonical/alias schemas that route to existing base implementations.
 _TOOL_OUTPUT_SCHEMAS.setdefault("analyze_position_signals", _TOOL_OUTPUT_SCHEMAS["get_position_score_inputs"])

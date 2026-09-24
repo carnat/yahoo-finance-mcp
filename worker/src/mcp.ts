@@ -9,7 +9,7 @@
  */
 
 import { getBuildVersion } from "./response.js";
-import { callVisibleTool, listVisibleTools } from "./tools.js";
+import { callVisibleToolResult, listVisibleTools } from "./tools.js";
 
 interface JsonRpcRequest {
   jsonrpc: "2.0";
@@ -88,9 +88,13 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const p = params as { name?: string; arguments?: Record<string, unknown> };
       if (!p?.name) throw Object.assign(new Error("Missing tool name"), { code: -32602 });
 
-      const text = await callVisibleTool(p.name, p.arguments ?? {});
-      let parsed: unknown = null;
-      try { parsed = JSON.parse(text); } catch { /* text-only legacy payload */ }
+      const { text, value } = await callVisibleToolResult(p.name, p.arguments ?? {});
+      // Envelope builders hand over the object they serialized; parse only
+      // results that arrive as text alone.
+      let parsed: unknown = value ?? null;
+      if (value === undefined) {
+        try { parsed = JSON.parse(text); } catch { /* text-only legacy payload */ }
+      }
       const structuredContent = parsed != null && typeof parsed === "object" && !Array.isArray(parsed)
         ? parsed as Record<string, unknown>
         : parsed !== null

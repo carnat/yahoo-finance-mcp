@@ -15,6 +15,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
 YAHOO_FINANCE_TS = ROOT / "worker" / "src" / "yahoo-finance.ts"
 DEPLOYED_DISCOVERY = ROOT / "scripts" / "test_deployed_discovery.py"
+DEPLOYED_CANARIES = ROOT / "scripts" / "test_deployed_canaries.py"
 
 
 def _node_json(source: str) -> dict:
@@ -172,9 +173,11 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
 
     def test_deployed_smoke_covers_alias_and_public_schema_behavior(self) -> None:
         smoke = DEPLOYED_DISCOVERY.read_text(encoding="utf-8")
+        canaries = DEPLOYED_CANARIES.read_text(encoding="utf-8")
         self.assertIn("removed tool {removed_name} must be rejected as unknown", smoke)
-        self.assertIn("manifestHash", smoke)
-        self.assertIn("privacyScope", smoke)
+        # The blocking health-contract canary checks the public health schema.
+        self.assertIn("manifestHash", canaries)
+        self.assertIn("privacyScope", canaries)
 
     def test_public_diagnostics_omit_internal_contract_maps(self) -> None:
         tools = TOOLS_TS.read_text(encoding="utf-8")
@@ -232,7 +235,7 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         self.assertIn("function buildXbrlFactContext", worker)
         for field in ("periodStart", "periodEnd", "instant", "durationDays", "fiscalPeriod", "fiscalYear", "form", "frame", "dimensions"):
             self.assertIn(field, worker)
-        self.assertIn("function xbrlSourceEvidence", tools)
+        self.assertIn("export function xbrlSourceEvidence", worker)
         self.assertIn("sourceEvidence", tools)
         self.assertIn("xbrlContext: parsed.xbrlContext ?? null", tools)
         self.assertIn("const sourceEvidence = xbrlSourceEvidence(parsed)", tools)

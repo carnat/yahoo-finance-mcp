@@ -1,10 +1,8 @@
-"""Central FastMCP application instance and tool alias registry.
+"""Central FastMCP application instance.
 
 This module is the single source of truth for:
 - The FastMCP compat shim (strips unsupported output_schema kwarg on older SDKs)
 - The shared ``yfinance_server`` FastMCP instance that all domain modules register on
-- ``TOOL_ALIASES``: historical handler name -> canonical tool name (output-schema lookup only;
-  these names are not public tools since 2.0.0)
 - ``build_handler_registry``: derives the handler map from the live tool manager for grouped mode
 
 All ``yfmcp/tools/*.py`` domain modules import ``yfinance_server`` from here.
@@ -128,44 +126,6 @@ def _offload_to_thread(fn: Callable[..., Any], tool_name: str) -> Callable[..., 
 
 if FastMCP.tool is not _fastmcp_tool_compat:
     FastMCP.tool = _fastmcp_tool_compat
-
-
-# ---------------------------------------------------------------------------
-# Historical handler name → canonical tool name (not public tools since 2.0.0)
-# ---------------------------------------------------------------------------
-TOOL_ALIASES: dict[str, str] = {
-    "get_fast_info": "get_market_quote",
-    "get_historical_stock_prices": "get_historical_prices",
-    "get_stock_info": "get_company_profile",
-    "get_etf_info": "get_fund_profile",
-    "get_stock_actions": "get_corporate_actions",
-    "get_holder_info": "get_ownership_holders",
-    "get_price_stats": "analyze_price_performance",
-    "get_ma_position": "analyze_moving_average_position",
-    "get_volume_ratio": "analyze_volume_ratio",
-    "get_volume_gate": "check_volume_liquidity_threshold",
-    "get_financial_ratios": "analyze_financial_ratios",
-    "get_credit_health": "analyze_credit_health",
-    "get_recommendations": "get_analyst_recommendations",
-    "get_analyst_upgrade_radar": "get_analyst_rating_changes",
-    "get_earnings_momentum": "analyze_earnings_momentum",
-    "get_calendar": "get_company_events_calendar",
-    "get_yahoo_finance_news": "get_company_news",
-    "get_options_flow_summary": "summarize_options_flow",
-    "get_options_summary": "summarize_options_flow",
-    "get_options_flow_scan": "analyze_options_flow_window",
-    "get_put_hedge_candidates": "find_put_hedge_candidates",
-    "get_price_target_bracket": "calculate_price_target_distance",
-    "get_position_score_inputs": "analyze_position_signals",
-    "list_sec_filings": "list_sec_company_filings",
-    "get_filing_outline": "get_sec_filing_outline",
-    "get_filing_section": "get_sec_filing_section",
-    "list_filing_tables": "list_sec_filing_tables",
-    "get_filing_table": "get_sec_filing_table",
-    "get_filing_data": "extract_sec_filing_fact",
-    "extract_filing_fact": "extract_sec_filing_fact",
-    "search_filing_text": "search_sec_filing_text",
-}
 
 
 # ---------------------------------------------------------------------------
