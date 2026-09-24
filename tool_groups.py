@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+import re
 import types
 from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
@@ -119,6 +120,12 @@ def _input_failure(
     return response
 
 
+# Matches an HTTP 429 status ("error 429", "HTTP 429", "status: 429"). A bare
+# "429" substring test also matched tickers and timestamps inside URLs quoted
+# in provider exception text, reporting ordinary failures as rate limits.
+_HTTP_429_PATTERN = re.compile(r"\b(?:error|http|status)[:\s]*429\b")
+
+
 def _normalize_legacy_failure(tool: str, result: Any) -> Any:
     if not isinstance(result, str):
         return result
@@ -146,7 +153,7 @@ def _normalize_legacy_failure(tool: str, result: Any) -> Any:
         code = ErrorCode.NO_OPTIONS_DATA
     elif "not found" in lower:
         code = ErrorCode.TICKER_NOT_FOUND
-    elif "rate limit" in lower or "429" in lower:
+    elif "rate limit" in lower or _HTTP_429_PATTERN.search(lower):
         code = ErrorCode.RATE_LIMIT
     elif "timeout" in lower or "timed out" in lower:
         code = ErrorCode.PROVIDER_TIMEOUT

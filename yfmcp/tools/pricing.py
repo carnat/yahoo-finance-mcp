@@ -388,8 +388,8 @@ Args:
 async def get_price_stats(ticker: str | list[str]) -> str:
     """Get pre-computed price statistics for a ticker."""
     if isinstance(ticker, list):
-        results = await asyncio.gather(*[get_price_stats(t) for t in ticker])
-        return json.dumps({t: json.loads(r) for t, r in zip(ticker, results)})
+        results = await asyncio.gather(*[get_price_stats(t) for t in ticker], return_exceptions=True)
+        return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     cache_key = f"price_stats:{ticker}"
     cached = _cache_get(cache_key, _PRICE_TTL)
     if cached is not None:
