@@ -162,13 +162,9 @@ class TestPublicConnectorSurfaceSource(unittest.TestCase):
             r"\bT[1-5]\b",
         )
         names = [
-            "get_calendar",
             "get_company_events_calendar",
-            "get_price_target_bracket",
             "calculate_price_target_distance",
-            "get_position_score_inputs",
             "analyze_position_signals",
-            "get_volume_gate",
             "check_volume_liquidity_threshold",
         ]
         for name in names:

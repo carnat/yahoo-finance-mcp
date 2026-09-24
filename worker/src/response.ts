@@ -18,6 +18,11 @@ export function getWorkerVar(name: string): string | undefined {
   return _workerEnv[name];
 }
 
+/** V2 envelope is the default since 2.0.0; any explicit value other than "true" opts out. */
+export function envelopeV2Enabled(): boolean {
+  return (getWorkerVar("MCP_ENVELOPE_V2") ?? "true") === "true";
+}
+
 export function getServerVersion(): string {
   return getWorkerVar("SERVER_VERSION")?.trim() || UNCONFIGURED_SERVER_VERSION;
 }
@@ -275,7 +280,7 @@ export function mcpSuccess(
     metaExtra?: Record<string, unknown>;
   }
 ): string {
-  if (_workerEnv["MCP_ENVELOPE_V2"] !== "true") return rawData;
+  if (!envelopeV2Enabled()) return rawData;
   let data: unknown;
   try {
     const parsed = JSON.parse(rawData);
@@ -358,7 +363,7 @@ export function mcpFailure(
   message: string,
   opts?: { source?: string; metaExtra?: Record<string, unknown>; diagnostics?: unknown }
 ): string {
-  if (_workerEnv["MCP_ENVELOPE_V2"] !== "true") {
+  if (!envelopeV2Enabled()) {
     return JSON.stringify({
       error: true,
       code,

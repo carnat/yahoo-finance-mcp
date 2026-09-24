@@ -8,7 +8,7 @@ import zoneinfo
 import pandas as pd
 import yfinance as yf
 
-from yfmcp.app import yfinance_server
+from yfmcp.app import internal_handler_server, yfinance_server
 from yfmcp.schemas import _MARKET_SNAPSHOT_OUTPUT_SCHEMA, _TOOL_OUTPUT_SCHEMAS
 from yfmcp.envelope import ErrorCode, _mcp_failure
 from yfmcp.validation import _validate_ticker
@@ -17,7 +17,7 @@ from yfmcp.util import _fetch_with_retry, get_last_trading_date
 from yfmcp.clients.yahoo import _safe_parse
 
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_historical_stock_prices",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_historical_stock_prices"],
     description="""Get raw Yahoo historical OHLCV rows. Daily rows include barStatus and isFinal. A current-session row or a finished row without a usable close is INCOMPLETE/isFinal=false; use completed-session tools for derived analytics.
@@ -170,7 +170,7 @@ async def get_historical_stock_prices(
 
 # ---------------------------------------------------------------------------
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_fast_info",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_fast_info"],
     description="""Alias for get_market_quote. Get lightweight real-time price and market data for one or more ticker symbols. Returns ~20 high-signal fields
@@ -364,7 +364,7 @@ async def get_short_interest(ticker: str) -> str:
 
 # ---------------------------------------------------------------------------
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_price_stats",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_price_stats"],
     description="""Get live quote/range fields plus completed-session historical statistics.
@@ -1095,7 +1095,7 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
 
 # ---------------------------------------------------------------------------
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_volume_ratio",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_ratio"],
     description="""Compare the latest completed-session volume with prior completed-session averages.
@@ -1239,7 +1239,7 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
 
 # ---------------------------------------------------------------------------
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_ma_position",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_ma_position"],
     description="""Compare Yahoo's live regular-market quote with trailing 50DMA and 200DMA values.
@@ -1438,320 +1438,11 @@ async def get_short_momentum(ticker: str | list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool: get_earnings_momentum
-
-# ---------------------------------------------------------------------------
-
-_NY_TZ = zoneinfo.ZoneInfo("America/New_York")
-_ENDED_SESSION_STALE_HOURS = 12
-
-
-def _overnight_window_utc_for_session_end_date(
-    session_end_date_et: datetime.date,
-) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """Return UTC overnight window for a given ET session-end date (04:00 ET boundary)."""
-    start_et = pd.Timestamp(
-        datetime.datetime.combine(
-            session_end_date_et - datetime.timedelta(days=1),
-            datetime.time(hour=20),
-        ),
-        tz=_NY_TZ,
-    )
-    end_et = pd.Timestamp(
-        datetime.datetime.combine(session_end_date_et, datetime.time(hour=4)),
-        tz=_NY_TZ,
-    )
-    return start_et.tz_convert("UTC"), end_et.tz_convert("UTC")
-
-
-def _overnight_window_utc(now_utc: pd.Timestamp) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """Return the relevant Blue Ocean overnight UTC window for the current ET date context."""
-    now_utc = pd.Timestamp(now_utc).tz_convert("UTC")
-    now_et = now_utc.tz_convert(_NY_TZ)
-
-    if now_et.hour < 12:
-        # Overnight session that ended (or is ending) this ET morning.
-        session_end_date_et = now_et.date()
-    else:
-        # Upcoming overnight session for tonight (or currently active after 20:00 ET).
-        session_end_date_et = now_et.date() + datetime.timedelta(days=1)
-    return _overnight_window_utc_for_session_end_date(session_end_date_et)
-
-
-def _classify_overnight_session(now_utc: pd.Timestamp) -> Literal["ACTIVE", "ENDED", "NOT_STARTED"]:
-    """Classify the overnight session state for current ET context."""
-    session_start_utc, session_end_utc = _overnight_window_utc(now_utc)
-    if session_start_utc <= now_utc < session_end_utc:
-        return "ACTIVE"
-    if now_utc < session_start_utc:
-        return "NOT_STARTED"
-    return "ENDED"
-
-@yfinance_server.tool(
-    name="get_overnight_quote",
-    output_schema=_TOOL_OUTPUT_SCHEMAS["get_overnight_quote"],
-    description="""Deprecated diagnostics-only Yahoo extended-hours proxy for a ticker.
-
-This does not provide true 20:00-04:00 ET overnight venue data. Equity results
-are Yahoo indicative extended-hours data and are not decision-grade overnight
-quotes. Prefer get_market_quote for regular/pre/post-market fields.
-
-Returns: overnightPrice, overnightTime, overnightHigh, overnightLow, overnightOpen,
-overnightVolume, sessionDate, timezone, previousClose, gapPct, gapDirection,
-dataSource, isBlueOceanWindow, sessionStatus, requestedAt, isStale, dataAgeHours,
-fallback, provider, providerStatus, dataKind, decisionGrade, warnings, note.
-
-Args:
-    ticker: str
-        The ticker symbol, e.g. "BTC-USD", "ASTS", or "ES=F"
-""",
-)
-async def get_overnight_quote(ticker: str) -> str:
-    """Get overnight quote data with session-status and timezone guardrails."""
-    cache_key = f"overnight_quote:{ticker}"
-    cached = _cache_get(cache_key, _PRICE_TTL)
-    if cached is not None:
-        return cached
-
-    company = yf.Ticker(ticker)
-    try:
-        hist = await _fetch_with_retry(
-            company.history, period="5d", interval="1h", prepost=True, auto_adjust=False
-        )
-    except Exception as e:
-        return json.dumps({"error": True, "message": str(e), "ticker": ticker})
-
-    if hist is None or hist.empty:
-        return json.dumps({
-            "ticker": ticker,
-            "overnightPrice": None,
-            "overnightTime": None,
-            "overnightHigh": None,
-            "overnightLow": None,
-            "overnightOpen": None,
-            "overnightVolume": None,
-            "sessionStatus": "NOT_STARTED",
-            "requestedAt": pd.Timestamp.now(tz="UTC").isoformat(),
-            "_note": "No price history available for this ticker",
-        })
-
-    # Exchange timezone (used for sessionDate and tz label)
-    try:
-        tz_name = company.fast_info.timezone
-    except Exception:
-        tz_name = "UTC"
-
-    try:
-        tz = zoneinfo.ZoneInfo(tz_name)
-    except Exception:
-        tz = zoneinfo.ZoneInfo("UTC")
-        tz_name = "UTC"
-
-    # Previous close for gap calculation.
-    # Use bracket access fi["previousClose"] which reliably translates camelCase
-    # to the snake_case FastInfo property via __getitem__.
-    prev_close = None
-    fi = None
-    try:
-        fi = company.fast_info
-        prev_close = fi["previousClose"]
-    except Exception:
-        pass
-    if not prev_close:
-        try:
-            _info_pc = company.info
-            prev_close = (
-                _info_pc.get("regularMarketPreviousClose") or _info_pc.get("previousClose")
-            )
-        except Exception:
-            pass
-
-    now_utc = pd.Timestamp.now(tz="UTC")
-    requested_at = now_utc.isoformat()
-    session_status = _classify_overnight_session(now_utc)
-    session_start_utc, session_end_utc = _overnight_window_utc(now_utc)
-    target_start_utc = session_start_utc
-    target_end_utc = session_end_utc
-    note: str | None = None
-    if session_status == "NOT_STARTED":
-        target_start_utc, target_end_utc = _overnight_window_utc_for_session_end_date(
-            now_utc.tz_convert(_NY_TZ).date()
-        )
-        note = (
-            "Overnight session has not started yet for current ET day. "
-            "Returning prior overnight session data."
-        )
-
-    # Opportunistic upgrade path for yfinance PR #2640 FastInfo overnight fields.
-    fast_info_payload: dict[str, object] | None = None
-    if fi is not None:
-        try:
-            fi_price = getattr(fi, "overnight_price")
-            fi_time = getattr(fi, "overnight_time")
-            fi_high = getattr(fi, "overnight_high")
-            fi_low = getattr(fi, "overnight_low")
-            fi_open = getattr(fi, "overnight_open")
-            fi_volume = getattr(fi, "overnight_volume")
-            if fi_time is not None:
-                fi_ts_utc = pd.Timestamp(fi_time)
-                if fi_ts_utc.tzinfo is None:
-                    fi_ts_utc = fi_ts_utc.tz_localize("UTC")
-                else:
-                    fi_ts_utc = fi_ts_utc.tz_convert("UTC")
-                fast_info_payload = {
-                    "price": float(fi_price) if fi_price is not None else None,
-                    "time_utc": fi_ts_utc,
-                    "high": float(fi_high) if fi_high is not None else None,
-                    "low": float(fi_low) if fi_low is not None else None,
-                    "open": float(fi_open) if fi_open is not None else None,
-                    "volume": int(fi_volume) if fi_volume is not None else None,
-                }
-        except AttributeError:
-            fast_info_payload = None
-        except Exception:
-            fast_info_payload = None
-
-    is_fallback = False
-    day_bars = None
-    last_ts_utc = None
-    overnight_open = overnight_high = overnight_low = overnight_price = overnight_volume = None
-    if fast_info_payload is not None and target_start_utc <= fast_info_payload["time_utc"] < target_end_utc:
-        overnight_open = fast_info_payload["open"]
-        overnight_high = fast_info_payload["high"]
-        overnight_low = fast_info_payload["low"]
-        overnight_price = fast_info_payload["price"]
-        overnight_volume = fast_info_payload["volume"]
-        last_ts_utc = fast_info_payload["time_utc"]
-    else:
-        utc_index = hist.index.tz_convert("UTC")
-        overnight_mask = (utc_index >= target_start_utc) & (utc_index < target_end_utc)
-        overnight = hist[overnight_mask]
-
-        if overnight.empty:
-            # Fallback: most recent pre-market bar in 08:00–14:00 UTC.
-            premarket_mask = (utc_index.hour >= 8) & (utc_index.hour < 14)
-            premarket = hist[premarket_mask]
-            if premarket.empty:
-                result = json.dumps({
-                    "ticker": ticker,
-                    "overnightPrice": None,
-                    "overnightTime": None,
-                    "overnightHigh": None,
-                    "overnightLow": None,
-                    "overnightOpen": None,
-                    "overnightVolume": None,
-                    "sessionStatus": session_status,
-                    "requestedAt": requested_at,
-                    "_note": "No overnight or pre-market data found for this ticker",
-                })
-                _cache_set(cache_key, result)
-                return result
-            day_bars = premarket.iloc[[-1]]
-            is_fallback = True
-        else:
-            day_bars = overnight
-
-        if day_bars is None or day_bars.empty:
-            result = json.dumps({
-                "ticker": ticker,
-                "overnightPrice": None,
-                "overnightTime": None,
-                "overnightHigh": None,
-                "overnightLow": None,
-                "overnightOpen": None,
-                "overnightVolume": None,
-                "sessionStatus": session_status,
-                "requestedAt": requested_at,
-                "_note": "No overnight data found for selected session window",
-            })
-            _cache_set(cache_key, result)
-            return result
-
-        overnight_open = float(day_bars["Open"].iloc[0]) if "Open" in day_bars.columns else None
-        overnight_high = float(day_bars["High"].max()) if "High" in day_bars.columns else None
-        overnight_low = float(day_bars["Low"].min()) if "Low" in day_bars.columns else None
-        overnight_price = float(day_bars["Close"].iloc[-1]) if "Close" in day_bars.columns else None
-        overnight_volume = int(day_bars["Volume"].sum()) if "Volume" in day_bars.columns else None
-        last_ts = day_bars.index[-1]
-        last_ts_utc = pd.Timestamp(last_ts).tz_convert("UTC")
-
-    if last_ts_utc is None:
-        result = json.dumps({
-            "ticker": ticker,
-            "overnightPrice": None,
-            "overnightTime": None,
-            "overnightHigh": None,
-            "overnightLow": None,
-            "overnightOpen": None,
-            "overnightVolume": None,
-            "sessionStatus": session_status,
-            "requestedAt": requested_at,
-            "_note": "Overnight timestamp unavailable",
-        })
-        _cache_set(cache_key, result)
-        return result
-
-    overnight_time = last_ts_utc.isoformat()
-
-    # sessionDate in exchange local timezone
-    session_date = str(last_ts_utc.tz_convert(tz).date())
-
-    # Data quality flags
-    last_ts_et = last_ts_utc.tz_convert(_NY_TZ)
-    is_blue_ocean = (last_ts_et.hour >= 20) or (last_ts_et.hour < 4)
-    data_source = "EXCHANGE" if (overnight_volume or 0) > 0 else "OTC_INDICATIVE"
-
-    # Staleness with session-status guardrails
-    data_age_hours = round((now_utc - last_ts_utc).total_seconds() / 3600, 1)
-    if session_status == "ACTIVE":
-        is_stale = data_age_hours > 2
-    elif session_status == "ENDED":
-        is_stale = now_utc > (target_end_utc + pd.Timedelta(hours=_ENDED_SESSION_STALE_HOURS))
-    else:
-        is_stale = True
-
-    # Gap vs previous close
-    gap_pct = None
-    gap_direction = None
-    if prev_close and overnight_price:
-        gap_pct = round((overnight_price - prev_close) / prev_close * 100, 2)
-        gap_direction = "UP" if gap_pct > 0.1 else ("DOWN" if gap_pct < -0.1 else "FLAT")
-
-    result = json.dumps({
-        "ticker": ticker,
-        "overnightPrice": overnight_price,
-        "overnightTime": overnight_time,
-        "overnightHigh": overnight_high,
-        "overnightLow": overnight_low,
-        "overnightOpen": overnight_open,
-        "overnightVolume": overnight_volume,
-        "sessionDate": session_date,
-        "timezone": tz_name,
-        "previousClose": prev_close,
-        "gapPct": gap_pct,
-        "gapDirection": gap_direction,
-        "dataSource": data_source,
-        "isBlueOceanWindow": is_blue_ocean,
-        "sessionStatus": session_status,
-        "requestedAt": requested_at,
-        "isStale": is_stale,
-        "dataAgeHours": data_age_hours,
-        "fallback": is_fallback,
-        "note": (
-            "True overnight window (20:00–04:00 ET) unavailable via Yahoo Finance API. "
-            "Returning last pre-market OTC indicative quote as proxy."
-        ) if is_fallback else note,
-    })
-    _cache_set(cache_key, result)
-    return result
-
-
-# ---------------------------------------------------------------------------
 # CR-12 — get_options_flow_scan
 
 # ---------------------------------------------------------------------------
 
-@yfinance_server.tool(
+@internal_handler_server.tool(
     name="get_volume_gate",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_gate"],
     description="""Deprecated alias for check_volume_liquidity_threshold. Evaluate liquidity from the latest completed-session volume and unadjusted close against prior-session averages or the USD notional threshold.

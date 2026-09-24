@@ -4,7 +4,7 @@
 
 - Canonical tools use clear, general financial verbs: `get_`, `list_`, `search_`, `screen_`, `analyze_`, `summarize_`, `check_`, `find_`, `calculate_`.
 - Canonical names avoid doctrine/internal terms (TPS, EQF, ADV gate, DC-*).
-- Aliases remain available for backward compatibility.
+- Deprecated names are removed only in a major release (see the deprecation policy).
 - Inputs must be public-data oriented and must not require holdings, cost basis, position size, or private workflow state.
 - Output contracts should keep provider values, computed ratios, confidence/data-quality flags, warnings, and evidence/source metadata clearly separated.
 
@@ -19,7 +19,7 @@
 
 ## Canonical tool groups
 
-- Market: `get_market_quote`, `get_historical_prices`, `analyze_price_performance`, `analyze_moving_average_position`, `analyze_volume_ratio`, `check_volume_liquidity_threshold`, `get_technical_indicators`, `get_price_slope`, `get_short_interest`, `get_short_momentum`, `get_overnight_quote` (deprecated diagnostics-only Yahoo extended-hours proxy)
+- Market: `get_market_quote`, `get_historical_prices`, `analyze_price_performance`, `analyze_moving_average_position`, `analyze_volume_ratio`, `check_volume_liquidity_threshold`, `get_technical_indicators`, `get_price_slope`, `get_short_interest`, `get_short_momentum`
 - Snapshot: `get_market_snapshot`, `get_manifest_diagnostics`, `health_check`
 - Fundamentals: `get_company_profile`, `get_fund_profile`, `get_financial_statement`, `analyze_financial_ratios`, `analyze_credit_health`, `get_corporate_actions`, `get_ownership_holders`, `get_expanded_institutional_ownership`
 - Analyst/earnings: `get_analyst_consensus`, `get_analyst_recommendations`, `get_analyst_rating_changes`, `get_earnings_analysis`, `analyze_earnings_momentum`, `get_company_events_calendar`
@@ -30,32 +30,54 @@
 - Earnings intelligence: `get_latest_earnings_release`, `index_earnings_release`, `extract_earnings_metrics`, `extract_guidance`, `extract_management_commentary`, `compare_earnings_actual_vs_estimate`, `get_earnings_call_transcript`
 - Position/discovery: `analyze_position_signals`, `calculate_price_target_distance`, `search_ticker`, `screen_stocks`
 
-## Alias map
+## Removed 1.x names
 
-- `get_fast_info` → `get_market_quote`
+These names were deprecated aliases in 1.x and were removed in 2.0.0. Calls to
+them return `INPUT_VALIDATION_ERROR`; call the canonical tool instead.
+
+- `get_credit_health` → `analyze_credit_health`
+- `get_earnings_momentum` → `analyze_earnings_momentum`
+- `get_financial_ratios` → `analyze_financial_ratios`
+- `get_ma_position` → `analyze_moving_average_position`
+- `get_options_flow_scan` → `analyze_options_flow_window`
 - `get_position_score_inputs` → `analyze_position_signals`
+- `get_price_stats` → `analyze_price_performance`
+- `get_volume_ratio` → `analyze_volume_ratio`
 - `get_price_target_bracket` → `calculate_price_target_distance`
 - `get_volume_gate` → `check_volume_liquidity_threshold`
-- `get_options_flow_scan` → `analyze_options_flow_window`
-- `get_options_summary` / `get_options_flow_summary` → `summarize_options_flow`
-- `list_sec_filings` → `list_sec_company_filings`
+- `extract_filing_fact` / `get_filing_data` → `extract_sec_filing_fact`
+- `get_put_hedge_candidates` → `find_put_hedge_candidates`
+- `get_analyst_upgrade_radar` → `get_analyst_rating_changes`
+- `get_recommendations` → `get_analyst_recommendations`
+- `get_calendar` → `get_company_events_calendar`
+- `get_yahoo_finance_news` → `get_company_news`
+- `get_stock_info` → `get_company_profile`
+- `get_stock_actions` → `get_corporate_actions`
+- `get_etf_info` → `get_fund_profile`
+- `get_historical_stock_prices` → `get_historical_prices`
+- `get_fast_info` → `get_market_quote`
+- `get_holder_info` → `get_ownership_holders`
 - `get_filing_outline` → `get_sec_filing_outline`
 - `get_filing_section` → `get_sec_filing_section`
-- `list_filing_tables` → `list_sec_filing_tables`
 - `get_filing_table` → `get_sec_filing_table`
-- `extract_filing_fact` / `get_filing_data` → `extract_sec_filing_fact`
+- `list_sec_filings` → `list_sec_company_filings`
+- `list_filing_tables` → `list_sec_filing_tables`
 - `search_filing_text` → `search_sec_filing_text`
+- `get_options_flow_summary` / `get_options_summary` → `summarize_options_flow`
+- `get_overnight_quote` → removed; use `get_market_quote` for regular, pre- and post-market fields
 
 ## Deprecation policy
 
-Canonical tool names are designed for general financial callers. Public aliases remain supported for compatibility. Private doctrine-style aliases are removed from discovery and routing.
+Canonical tool names are designed for general financial callers and are the
+only public names.
 
 - Canonical names are first-class in discovery and documentation.
-- Public alias calls remain callable. Deprecated public aliases emit `DEPRECATED_ALIAS` warnings in V2 envelope mode when metadata is present.
-- Deprecated aliases should expose standardized manifest metadata:
-  - `deprecated: true`
-  - `useInstead: "<canonical_or_preferred_public_tool_name>"`
-  - `deprecationReason: "Use the canonical public tool name."`
+- A tool or name that is being retired is first marked deprecated for at least
+  one minor release. Deprecated tools expose `deprecated: true`, `useInstead`,
+  and `deprecationReason` in the manifest and emit a `DEPRECATED_ALIAS` warning
+  in V2 envelope mode.
+- Deprecated names are removed only in a major release, as the 1.x aliases
+  were in 2.0.0.
 
 ## Examples
 

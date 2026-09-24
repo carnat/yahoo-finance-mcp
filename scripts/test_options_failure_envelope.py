@@ -15,7 +15,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 # FastMCP versions used by the mirror differ over output_schema support.
-from mcp.server.fastmcp import FastMCP as _FastMCP  # noqa: E402
+from yfmcp.app import FastMCP as _FastMCP  # noqa: E402
 
 _original_tool = _FastMCP.tool
 

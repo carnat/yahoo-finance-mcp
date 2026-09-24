@@ -16,7 +16,7 @@ class TestWorkerOptionsSummaryEnvelope(unittest.TestCase):
     def setUp(self) -> None:
         source = WORKER_YAHOO.read_text(encoding="utf-8")
         start = source.index("export async function getOptionsSummary")
-        end = source.index("export async function listSecFilings", start)
+        end = source.index("export async function listSecCompanyFilings", start)
         self.summary_source = source[start:end]
 
     def test_failure_paths_are_typed_legacy_envelopes(self) -> None:

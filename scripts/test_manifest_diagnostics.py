@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["MCP_ENVELOPE_V2"] = "true"
 
 # Patch FastMCP.tool to accept output_schema (not in mcp>=1.9)
-from mcp.server.fastmcp import FastMCP as _FastMCP  # noqa: E402
+from yfmcp.app import FastMCP as _FastMCP  # noqa: E402
 _orig_tool = _FastMCP.tool
 def _patched_tool(self, name=None, output_schema=None, **kwargs):  # type: ignore[override]
     return _orig_tool(self, name=name, **kwargs)
@@ -58,7 +58,10 @@ class TestHealthMetadata(unittest.TestCase):
     def test_python_mcp_initialize_uses_exact_build_version(self):
         from yfmcp.build_info import BUILD_VERSION
 
-        initialization = self.srv.yfinance_server._mcp_server.create_initialization_options()
+        # mcp 1.x keeps the low-level server on _mcp_server, 2.x on _lowlevel_server.
+        server = self.srv.yfinance_server
+        low_level = getattr(server, "_mcp_server", None) or server._lowlevel_server
+        initialization = low_level.create_initialization_options()
         self.assertEqual(initialization.server_version, BUILD_VERSION)
 
     def test_health_check_shape(self):
@@ -141,97 +144,6 @@ class TestHealthMetadata(unittest.TestCase):
         self.assertIn('_CATALOG_PATH = Path(__file__).resolve().parent.parent / "tool_catalog.json"', source)
         self.assertIn('for action in group["actions"]', source)
         self.assertNotIn('"list_sec_filing_tables": "sec_filings"', source)
-
-
-# ---------------------------------------------------------------------------
-# 2. Overnight guardrails unit tests
-# ---------------------------------------------------------------------------
-
-class TestOvernightSessionGuardrails(unittest.TestCase):
-    def setUp(self):
-        self.srv = _reload_server()
-
-    def test_overnight_session_status_classifier(self):
-        self.assertEqual(
-            self.srv._classify_overnight_session(self.srv.pd.Timestamp("2026-06-08T07:00:00Z")),
-            "ACTIVE",
-        )
-        self.assertEqual(
-            self.srv._classify_overnight_session(self.srv.pd.Timestamp("2026-06-08T15:00:00Z")),
-            "ENDED",
-        )
-        self.assertEqual(
-            self.srv._classify_overnight_session(self.srv.pd.Timestamp("2026-06-08T23:00:00Z")),
-            "NOT_STARTED",
-        )
-
-    def test_dst_window_shift_winter_vs_summer(self):
-        summer_start, summer_end = self.srv._overnight_window_utc(
-            self.srv.pd.Timestamp("2026-06-08T07:00:00Z")
-        )
-        winter_start, winter_end = self.srv._overnight_window_utc(
-            self.srv.pd.Timestamp("2026-12-08T08:00:00Z")
-        )
-
-        self.assertEqual(str(summer_start), "2026-06-08 00:00:00+00:00")  # EDT => 00:00–08:00 UTC
-        self.assertEqual(str(summer_end), "2026-06-08 08:00:00+00:00")
-        self.assertEqual(str(winter_start), "2026-12-08 01:00:00+00:00")  # EST => 01:00–09:00 UTC
-        self.assertEqual(str(winter_end), "2026-12-08 09:00:00+00:00")
-
-    def test_get_overnight_quote_includes_session_fields(self):
-        import unittest.mock as mock
-        import yfmcp.tools.pricing as pricing_tools
-
-        class _FastInfo:
-            timezone = "America/New_York"
-
-            def __getitem__(self, key):
-                if key == "previousClose":
-                    return 100.0
-                raise KeyError(key)
-
-            def __getattr__(self, name):
-                raise AttributeError(name)
-
-        class _Company:
-            def __init__(self):
-                self.fast_info = _FastInfo()
-                self.info = {}
-
-            def history(self, *args, **kwargs):
-                raise RuntimeError("history should be mocked")
-
-        idx = self.srv.pd.to_datetime(
-            ["2026-06-08T01:00:00Z", "2026-06-08T02:00:00Z"], utc=True
-        )
-        hist = self.srv.pd.DataFrame(
-            {
-                "Open": [101.0, 102.0],
-                "High": [103.0, 104.0],
-                "Low": [100.0, 101.0],
-                "Close": [102.0, 103.0],
-                "Volume": [10, 20],
-            },
-            index=idx,
-        )
-
-        async def _fake_fetch(*args, **kwargs):
-            return hist
-
-        with (
-            mock.patch.object(self.srv.yf, "Ticker", return_value=_Company()),
-            mock.patch.object(pricing_tools, "_fetch_with_retry", _fake_fetch),
-            mock.patch.object(
-                self.srv.pd.Timestamp,
-                "now",
-                return_value=self.srv.pd.Timestamp("2026-06-08T07:00:00Z"),
-            ),
-        ):
-            out = json.loads(_run(self.srv.get_overnight_quote("ZZTEST")))
-
-        self.assertIn("sessionStatus", out)
-        self.assertIn("requestedAt", out)
-        self.assertEqual(out["sessionStatus"], "ACTIVE")
 
 
 # ---------------------------------------------------------------------------

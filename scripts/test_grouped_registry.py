@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def _ensure_mcp_available() -> None:
     try:
-        from mcp.server.fastmcp import FastMCP  # noqa: F401
+        import mcp.server  # noqa: F401
         return
     except ModuleNotFoundError:
         pass
@@ -89,7 +89,7 @@ def _ensure_mcp_available() -> None:
 
 _ensure_mcp_available()
 
-from mcp.server.fastmcp import FastMCP as _FastMCP  # noqa: E402
+from yfmcp.app import FastMCP as _FastMCP  # noqa: E402
 
 if not getattr(_FastMCP, "_output_schema_patched", False):
     _orig_tool = _FastMCP.tool
@@ -102,13 +102,13 @@ if not getattr(_FastMCP, "_output_schema_patched", False):
 
 import server as srv  # noqa: E402
 import tool_groups  # noqa: E402
-from yfmcp.app import build_handler_registry, yfinance_server  # noqa: E402
+from yfmcp.app import build_handler_registry, internal_handler_server, yfinance_server  # noqa: E402
 from yfmcp.tools.system import _public_metadata  # noqa: E402
 
 
 class TestHandlerRegistry(unittest.TestCase):
     def setUp(self):
-        self.registry = build_handler_registry(yfinance_server)
+        self.registry = build_handler_registry(internal_handler_server, yfinance_server)
 
     def test_registry_nonempty(self):
         self.assertTrue(self.registry, "registry should not be empty")
@@ -139,7 +139,7 @@ class TestHandlerRegistry(unittest.TestCase):
             for action in group["actions"]
         }
         self.assertEqual(len(tool_groups.TOOL_GROUPS), 11)
-        self.assertEqual(len(action_names), 81)
+        self.assertEqual(len(action_names), 79)
         self.assertNotIn("get_manifest_diagnostics", action_names)
         self.assertNotIn("index_sec_filing", action_names)
         self.assertIn("health_check", action_names)
@@ -151,7 +151,7 @@ class TestGroupedServer(unittest.TestCase):
         with patch.dict(os.environ, {"TOOL_MODE": "grouped"}):
             self.assertEqual(_public_metadata()["toolCount"], len(tool_groups.TOOL_GROUPS))
         with patch.dict(os.environ, {"TOOL_MODE": "expanded"}):
-            self.assertEqual(_public_metadata()["toolCount"], 111)
+            self.assertEqual(_public_metadata()["toolCount"], 79)
 
     def test_grouped_server_exposes_one_tool_per_group(self):
         original = os.environ.get("TOOL_MODE")
@@ -170,6 +170,17 @@ class TestGroupedServer(unittest.TestCase):
             else:
                 os.environ["TOOL_MODE"] = original
 
+    def test_grouped_initialize_uses_exact_build_version(self):
+        from yfmcp.build_info import BUILD_VERSION
+
+        grouped = srv._build_grouped_server()
+        # mcp 1.x keeps the low-level server on _mcp_server, 2.x on _lowlevel_server.
+        low_level = getattr(grouped, "_mcp_server", None) or getattr(grouped, "_lowlevel_server", None)
+        if low_level is None:
+            self.skipTest("MCP SDK stub has no low-level server")
+        initialization = low_level.create_initialization_options()
+        self.assertEqual(initialization.server_version, BUILD_VERSION)
+
     def test_grouped_discovery_is_typed_and_read_only(self):
         grouped = srv._build_grouped_server()
         tools = asyncio.run(grouped.list_tools())
@@ -178,7 +189,12 @@ class TestGroupedServer(unittest.TestCase):
             for tool in tools
         }
         pricing = by_name["stock_pricing"]
-        schema = getattr(pricing, "inputSchema", getattr(pricing, "parameters", {}))
+        # mcp 2.x exposes snake_case model attributes; 1.x uses camelCase.
+        schema = (
+            getattr(pricing, "input_schema", None)
+            or getattr(pricing, "inputSchema", None)
+            or getattr(pricing, "parameters", {})
+        )
         branches = schema.get("oneOf")
         self.assertIsInstance(branches, list)
         self.assertEqual(
@@ -199,7 +215,7 @@ class TestGroupedServer(unittest.TestCase):
         self.assertIn("ticker", quote_params["properties"])
         annotations = getattr(pricing, "annotations", None)
         if hasattr(annotations, "model_dump"):
-            annotations = annotations.model_dump(exclude_none=True)
+            annotations = annotations.model_dump(by_alias=True, exclude_none=True)
         self.assertEqual(
             annotations,
             {
@@ -211,7 +227,7 @@ class TestGroupedServer(unittest.TestCase):
         )
         system_annotations = getattr(by_name["system"], "annotations", None)
         if hasattr(system_annotations, "model_dump"):
-            system_annotations = system_annotations.model_dump(exclude_none=True)
+            system_annotations = system_annotations.model_dump(by_alias=True, exclude_none=True)
         self.assertIs(system_annotations["openWorldHint"], False)
 
     def test_expanded_discovery_has_the_same_safety_annotations(self):
@@ -220,8 +236,8 @@ class TestGroupedServer(unittest.TestCase):
         quote_annotations = by_name["get_market_quote"].annotations
         health_annotations = by_name["health_check"].annotations
         if hasattr(quote_annotations, "model_dump"):
-            quote_annotations = quote_annotations.model_dump(exclude_none=True)
-            health_annotations = health_annotations.model_dump(exclude_none=True)
+            quote_annotations = quote_annotations.model_dump(by_alias=True, exclude_none=True)
+            health_annotations = health_annotations.model_dump(by_alias=True, exclude_none=True)
         self.assertIs(quote_annotations["readOnlyHint"], True)
         self.assertIs(quote_annotations["destructiveHint"], False)
         self.assertIs(quote_annotations["openWorldHint"], True)
@@ -230,7 +246,7 @@ class TestGroupedServer(unittest.TestCase):
 
 class TestGroupedRouting(unittest.TestCase):
     def setUp(self):
-        self.registry = build_handler_registry(yfinance_server)
+        self.registry = build_handler_registry(internal_handler_server, yfinance_server)
 
     def call(self, group: str, action: str, params: dict | None) -> dict:
         with patch.dict(os.environ, {"MCP_ENVELOPE_V2": "true"}):

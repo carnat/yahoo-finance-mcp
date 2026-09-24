@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def _ensure_mcp_available() -> None:
     """Install a minimal FastMCP stub when the real mcp package is absent."""
     try:
-        from mcp.server.fastmcp import FastMCP  # noqa: F401
+        import mcp.server  # noqa: F401
         return
     except ModuleNotFoundError:
         pass
@@ -54,7 +54,7 @@ def _ensure_mcp_available() -> None:
 _ensure_mcp_available()
 
 # Patch FastMCP.tool to accept output_schema before importing server
-from mcp.server.fastmcp import FastMCP as _FastMCP  # noqa: E402
+from yfmcp.app import FastMCP as _FastMCP  # noqa: E402
 
 if not getattr(_FastMCP, "_output_schema_patched", False):
     _orig_tool = _FastMCP.tool

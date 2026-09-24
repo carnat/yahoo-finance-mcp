@@ -53,9 +53,11 @@ class ProviderGapRoutingTests(unittest.TestCase):
         with patch("yfmcp.tools.provider_gaps.fetch_alpha_vantage_json", new_callable=AsyncMock) as provider:
             raw = _run(srv.get_historical_put_call_ratio(ticker="IBM", date="not-a-date"))
         envelope = json.loads(raw)
+        # V2 nests code/message under error; the legacy shape keeps them top-level.
+        error = envelope["error"] if isinstance(envelope.get("error"), dict) else envelope
         self.assertTrue(envelope["error"])
-        self.assertEqual(envelope["code"], "INPUT_VALIDATION_ERROR")
-        self.assertIn("summarize_options_flow", envelope["message"])
+        self.assertEqual(error["code"], "INPUT_VALIDATION_ERROR")
+        self.assertIn("summarize_options_flow", error["message"])
         provider.assert_not_awaited()
 
     def test_historical_ratio_parses_verified_alpha_shape(self):

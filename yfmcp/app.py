@@ -3,7 +3,8 @@
 This module is the single source of truth for:
 - The FastMCP compat shim (strips unsupported output_schema kwarg on older SDKs)
 - The shared ``yfinance_server`` FastMCP instance that all domain modules register on
-- ``TOOL_ALIASES``: the canonical mapping of deprecated/alternate tool names to canonical ones
+- ``TOOL_ALIASES``: historical handler name -> canonical tool name (output-schema lookup only;
+  these names are not public tools since 2.0.0)
 - ``build_handler_registry``: derives the handler map from the live tool manager for grouped mode
 
 All ``yfmcp/tools/*.py`` domain modules import ``yfinance_server`` from here.
@@ -17,7 +18,10 @@ import functools
 import inspect
 from typing import Any, Callable
 
-from mcp.server.fastmcp import FastMCP
+try:  # mcp>=2 renamed FastMCP to MCPServer; the decorator API is unchanged.
+    from mcp.server.mcpserver import MCPServer as FastMCP
+except ImportError:  # mcp 1.x
+    from mcp.server.fastmcp import FastMCP
 
 from yfmcp.build_info import BUILD_VERSION
 
@@ -122,7 +126,7 @@ if FastMCP.tool is not _fastmcp_tool_compat:
 
 
 # ---------------------------------------------------------------------------
-# Deprecated / alternate → canonical tool name mapping
+# Historical handler name → canonical tool name (not public tools since 2.0.0)
 # ---------------------------------------------------------------------------
 TOOL_ALIASES: dict[str, str] = {
     "get_fast_info": "get_market_quote",
@@ -162,7 +166,22 @@ TOOL_ALIASES: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Shared FastMCP server instance
 # ---------------------------------------------------------------------------
-yfinance_server = FastMCP(
+def create_server(name: str, instructions: str) -> FastMCP:
+    """Build a server whose MCP ``initialize`` reports this build's version.
+
+    mcp 2.x accepts ``version``; 1.x has no argument for it, so set the
+    low-level implementation version directly instead of reporting the SDK's.
+    """
+    if "version" in inspect.signature(FastMCP.__init__).parameters:
+        return FastMCP(name, instructions=instructions, version=BUILD_VERSION)
+    server = FastMCP(name, instructions=instructions)
+    low_level = getattr(server, "_mcp_server", None)
+    if low_level is not None:
+        low_level.version = BUILD_VERSION
+    return server
+
+
+yfinance_server = create_server(
     "yfinance",
     instructions="""
 # Yahoo Finance MCP Server
@@ -186,7 +205,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - Use `screen_stocks` to discover stocks matching criteria (e.g., day_gainers, most_actives) without iterating tickers manually.
 - Index tickers like `^VIX`, `^GSPC`, `^DJI` are supported by `get_market_quote`, `analyze_price_performance`, and `get_technical_indicators`.
 - For SEC data: use `extract_sec_filing_fact` first for XBRL-tagged facts. If it returns NOT_DISCLOSED, use `search_sec_filing_text` with `return_tables=true` as fallback.
-- For news: use `get_company_news` (multi-source) instead of `get_yahoo_finance_news` (legacy single-source).
+- For news: use `get_company_news` (multi-source routing with coverage diagnostics).
 - For news completeness, read `coverage.truncatedSources` as well as failed/skipped sources. `RETRY_TRUNCATED_SOURCE` means accepted items were omitted by caps or dedupe, not that the provider failed.
 - Use `get_ownership_holders` for ordinary Yahoo holder questions. Use `get_expanded_institutional_ownership` only for a deeper list; it tries eligible Finnhub coverage first and spends scarce Alpha quota only with `allow_scarce_fallback=true`.
 - Use `summarize_options_flow` for current options context. Use `get_historical_put_call_ratio` only for one explicit historical date; the Alpha-backed result is contextual and never decision-grade.
@@ -208,7 +227,6 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - get_price_slope: N completed-session close-to-close change using N+1 bars. Excludes unfinished bars and returns same-bar endRawClose, priceBasis, freshness/retry diagnostics, dataDate, and direction (UP/DOWN/FLAT). Not a real-time quote.
 - get_short_interest: Short % of float, shares short, days-to-cover, prior-month comparison.
 - get_short_momentum: Short interest with MoM delta, direction (RISING/FALLING/FLAT), squeeze risk.
-- get_overnight_quote: Deprecated diagnostics-only Yahoo extended-hours proxy; not true 20:00–04:00 ET overnight venue data.
 
 ### Company fundamentals
 - get_company_profile: ~30 key fundamental fields by default. Pass include_all=true for full ~120-field payload. For ETFs/funds, use get_fund_profile instead.
@@ -281,14 +299,21 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - calculate_price_target_distance: Compare current price to a user target; separates the legacy ratio from directional percent distance.
 """,
 )
-# FastMCP 1.x does not expose the low-level implementation-version argument.
-# Set it explicitly so local MCP initialize reports this server build instead
-# of the installed MCP SDK version.
-yfinance_server._mcp_server.version = BUILD_VERSION
 
 
-def build_handler_registry(server: FastMCP) -> dict[str, Callable[..., Any]]:
-    """Map handler function name -> function for every tool registered on ``server``.
+# Grouped actions route to these handlers under their historical function
+# names (e.g. get_market_quote -> get_fast_info), and grouped input schemas
+# come from their signatures. They are registered on this internal server,
+# which is never served, so expanded mode exposes canonical tool names only;
+# the old names stopped being public tools in 2.0.0.
+internal_handler_server = create_server(
+    "yfinance-internal-handlers",
+    instructions="Internal grouped-mode handler registry; not served.",
+)
+
+
+def build_handler_registry(*servers: FastMCP) -> dict[str, Callable[..., Any]]:
+    """Map handler function name -> function for every tool registered on ``servers``.
 
     Reads the FastMCP tool manager so the mapping always reflects the live set
     of registered tools, independent of where the handlers are defined. Used by
@@ -296,10 +321,10 @@ def build_handler_registry(server: FastMCP) -> dict[str, Callable[..., Any]]:
     underlying handler functions (e.g. ``get_fast_info``).
     """
     registry: dict[str, Callable[..., Any]] = {}
-    manager = getattr(server, "_tool_manager", None)
-    tools = getattr(manager, "_tools", None) if manager is not None else None
-    if tools:
-        for tool in tools.values():
+    for server in servers:
+        manager = getattr(server, "_tool_manager", None)
+        tools = getattr(manager, "_tools", None) if manager is not None else None
+        for tool in (tools or {}).values():
             fn = getattr(tool, "fn", None)
             if fn is not None:
                 # Grouped tools are already offloaded; route to the original
@@ -309,13 +334,13 @@ def build_handler_registry(server: FastMCP) -> dict[str, Callable[..., Any]]:
     return registry
 
 
-def build_tool_contract_registry(server: FastMCP) -> dict[str, dict[str, Any]]:
+def build_tool_contract_registry(*servers: FastMCP) -> dict[str, dict[str, Any]]:
     """Map handler function name to its FastMCP-generated input schema."""
     registry: dict[str, dict[str, Any]] = {}
-    manager = getattr(server, "_tool_manager", None)
-    tools = getattr(manager, "_tools", None) if manager is not None else None
-    if tools:
-        for tool in tools.values():
+    for server in servers:
+        manager = getattr(server, "_tool_manager", None)
+        tools = getattr(manager, "_tools", None) if manager is not None else None
+        for tool in (tools or {}).values():
             fn = getattr(tool, "fn", None)
             parameters = getattr(tool, "parameters", None)
             if fn is not None and isinstance(parameters, dict):

@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def _ensure_mcp_available() -> None:
     try:
-        from mcp.server.fastmcp import FastMCP  # noqa: F401
+        import mcp.server  # noqa: F401
         return
     except ModuleNotFoundError:
         pass
@@ -48,7 +48,7 @@ def _ensure_mcp_available() -> None:
 
 _ensure_mcp_available()
 
-from mcp.server.fastmcp import FastMCP as _FastMCP  # noqa: E402
+from yfmcp.app import FastMCP as _FastMCP  # noqa: E402
 
 if not getattr(_FastMCP, "_output_schema_patched", False):
     _orig_tool = _FastMCP.tool
@@ -108,7 +108,9 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             ) as mocked:
                 payload = _parse(_run(srv.get_company_news(ticker)))
                 self.assertTrue(payload.get("error"))
-                self.assertEqual(payload.get("code"), "INPUT_VALIDATION_ERROR")
+                err = payload.get("error")
+                code = err.get("code") if isinstance(err, dict) else payload.get("code")
+                self.assertEqual(code, "INPUT_VALIDATION_ERROR")
                 mocked.assert_not_awaited()
 
     def test_search_company_news_query_required(self):
@@ -2354,8 +2356,8 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         self.assertIn('if (selected.includes("newswire"))', worker_text)
         self.assertNotIn('selected.includes("newswire")\n    || selected.includes("company_ir")', worker_text)
 
-        fine_grained_default = '["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]'
-        self.assertIn(fine_grained_default, tools_text)
+        # The get_yahoo_finance_news alias (the last fixed-source default) was
+        # removed in 2.0.0; no Worker default may use the legacy aggregate.
         self.assertNotIn('["yahoo_finance", "finnhub"]', tools_text)
         self.assertNotIn('["sec", "company_ir", "newswire", "yahoo_finance"]', tools_text)
 
