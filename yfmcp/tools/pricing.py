@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import json
+import sys
 from typing import Literal
 import zoneinfo
 
@@ -111,16 +112,16 @@ async def get_historical_stock_prices(
     company = yf.Ticker(ticker)
     try:
         if company.fast_info.currency is None:
-            print(f"Company ticker {ticker} not found.")
+            print(f"Company ticker {ticker} not found.", file=sys.stderr)
             return f"Company ticker {ticker} not found."
     except Exception as e:
-        print(f"Error: getting historical stock prices for {ticker}: {e}")
+        print(f"Error: getting historical stock prices for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting historical stock prices for {ticker}: {e}"
 
     try:
         hist_data = await _fetch_with_retry(company.history, period, interval, prepost=prepost)
     except Exception as e:
-        print(f"Error: getting historical stock prices for {ticker}: {e}")
+        print(f"Error: getting historical stock prices for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting historical stock prices for {ticker}: {e}"
 
     if interval == "1d":
@@ -222,7 +223,7 @@ async def get_fast_info(ticker: str | list[str]) -> str:
             except Exception:
                 data[k] = None
     except Exception as e:
-        print(f"Error: getting fast info for {ticker}: {e}")
+        print(f"Error: getting fast info for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting fast info for {ticker}: {e}"
 
     data["priceBasis"] = "REGULAR_MARKET_PRICE"
@@ -327,7 +328,7 @@ async def get_short_interest(ticker: str) -> str:
     try:
         info = company.info
     except Exception as e:
-        print(f"Error: getting short interest for {ticker}: {e}")
+        print(f"Error: getting short interest for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting short interest for {ticker}: {e}"
 
     _SHORT_FIELDS = (
@@ -400,7 +401,7 @@ async def get_price_stats(ticker: str | list[str]) -> str:
         last_price = fi.last_price
         prev_close = fi.previous_close
     except Exception as e:
-        print(f"Error: getting price stats for {ticker}: {e}")
+        print(f"Error: getting price stats for {ticker}: {e}", file=sys.stderr)
         return f"Error: getting price stats for {ticker}: {e}"
 
     def _pct(value, reference):
@@ -592,7 +593,7 @@ async def get_technical_indicators(ticker: str | list[str], period: str = "3mo")
             retry_adjusted_gap=True,
         )
     except Exception as e:
-        print(f"Error: getting technical indicators for {ticker}: {e}")
+        print(f"Error: getting technical indicators for {ticker}: {e}", file=sys.stderr)
         return json.dumps({"error": True, "message": str(e), "ticker": ticker})
 
     completed = prepared["completed"]
