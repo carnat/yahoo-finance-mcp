@@ -86,9 +86,9 @@ class TestWorkerGroupedMode(unittest.TestCase):
         self.assertNotIn("list_sec_filing_exhibits: Exhibits list. Params: ticker, accession_number", description)
 
     def test_mcp_uses_visible_tools_for_list_and_call(self) -> None:
-        self.assertIn("import { callVisibleTool, listVisibleTools }", self.mcp_ts)
+        self.assertIn("import { callVisibleToolResult, listVisibleTools }", self.mcp_ts)
         self.assertRegex(self.mcp_ts, r"tools/list[\s\S]*listVisibleTools\(\)")
-        self.assertRegex(self.mcp_ts, r"tools/call[\s\S]*callVisibleTool\(p\.name, p\.arguments \?\? \{\}\)")
+        self.assertRegex(self.mcp_ts, r"tools/call[\s\S]*callVisibleToolResult\(p\.name, p\.arguments \?\? \{\}\)")
 
     def test_grouped_call_validates_then_delegates_to_expanded_action(self) -> None:
         self.assertIn("export function isGroupedMode()", self.tools_ts)
@@ -98,8 +98,8 @@ class TestWorkerGroupedMode(unittest.TestCase):
         call_end = self.tools_ts.index("async function _dispatchTool", call_start)
         body = self.tools_ts[call_start:call_end]
         self.assertIn("validateGroupedActionParams(action, actionParams)", body)
-        self.assertIn("if (validationFailure) return validationFailure", body)
-        self.assertIn("return callTool(action, actionParams)", body)
+        self.assertIn("if (validationFailure) return { text: validationFailure }", body)
+        self.assertIn("return callToolResult(action, actionParams)", body)
 
     def test_grouped_discovery_has_action_specific_schemas_and_read_only_hints(self) -> None:
         self.assertIn("function groupedInputSchema(", self.tools_ts)
@@ -146,7 +146,7 @@ class TestWorkerGroupedMode(unittest.TestCase):
         call_end = self.tools_ts.index("export async function callVisibleTool", call_start)
         body = self.tools_ts[call_start:call_end]
         self.assertIn("legacyToolFailure(raw)", body)
-        self.assertIn("return mcpFailure(name, legacyFailure.code, legacyFailure.message)", body)
+        self.assertIn("return mcpFailureResult(name, legacyFailure.code, legacyFailure.message)", body)
 
     def test_company_news_rejects_empty_symbols_before_collection(self) -> None:
         start = self.yahoo_ts.index("export async function getCompanyNews")

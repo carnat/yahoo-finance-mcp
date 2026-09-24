@@ -263,27 +263,63 @@ function enrichFacts(val: any, parentSourceType: string | null = null, parentCon
   return val;
 }
 
-export function mcpSuccess(
-  tool: string,
-  rawData: string,
-  opts?: {
-    canonicalTool?: string;
-    deprecatedTool?: boolean;
-    useInstead?: string;
-    partialSuccess?: boolean;
-    successCount?: number;
-    errorCount?: number;
-    source?: string;
-    dataDate?: string | null;
-    cacheHit?: boolean;
-    warnings?: unknown[];
-    metaExtra?: Record<string, unknown>;
+/**
+ * A tool response as sent to the client (`text`) plus, when available, the
+ * value that `text` serializes. Callers that need the object form (the MCP
+ * layer's structuredContent) use `value` instead of parsing `text` again.
+ */
+export interface ToolResult {
+  text: string;
+  value?: unknown;
+}
+
+export type McpSuccessOptions = {
+  canonicalTool?: string;
+  deprecatedTool?: boolean;
+  useInstead?: string;
+  partialSuccess?: boolean;
+  successCount?: number;
+  errorCount?: number;
+  source?: string;
+  dataDate?: string | null;
+  cacheHit?: boolean;
+  warnings?: unknown[];
+  metaExtra?: Record<string, unknown>;
+};
+
+function toolResult(value: unknown): ToolResult {
+  return { text: JSON.stringify(value), value };
+}
+
+/** Wrap a tool payload string in the V2 envelope. */
+export function mcpSuccess(tool: string, rawData: string, opts?: McpSuccessOptions): string {
+  return mcpSuccessResult(tool, rawData, opts).text;
+}
+
+export function mcpSuccessResult(tool: string, rawData: string, opts?: McpSuccessOptions): ToolResult {
+  if (!envelopeV2Enabled()) return { text: rawData };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawData);
+  } catch {
+    return toolResult({ ok: true, data: rawData, meta: buildMeta(tool, opts), error: null } satisfies McpResponse);
   }
-): string {
-  if (!envelopeV2Enabled()) return rawData;
+  return mcpSuccessFromValue(tool, parsed, rawData, opts);
+}
+
+/**
+ * Wrap an already-parsed tool payload. `rawData` is the payload's source
+ * text, used as the data if enrichment fails, as mcpSuccess always did.
+ */
+export function mcpSuccessFromValue(
+  tool: string,
+  parsed: unknown,
+  rawData: string,
+  opts?: McpSuccessOptions,
+): ToolResult {
+  if (!envelopeV2Enabled()) return { text: rawData };
   let data: unknown;
   try {
-    const parsed = JSON.parse(rawData);
     if (
       parsed != null &&
       typeof parsed === "object" &&
@@ -319,7 +355,7 @@ export function mcpSuccess(
           (resp as any)[key] = passthrough[key];
         }
       }
-      return JSON.stringify(resp);
+      return toolResult(resp);
     }
     if (parsed != null && typeof parsed === "object" && (parsed as Record<string, unknown>).error === true) {
       const inner = parsed as Record<string, unknown>;
@@ -341,7 +377,7 @@ export function mcpSuccess(
           (resp as any)[key] = inner[key];
         }
       }
-      return JSON.stringify(resp);
+      return toolResult(resp);
     }
     data = parsed;
     data = enrichFacts(data);
@@ -354,7 +390,7 @@ export function mcpSuccess(
     meta: buildMeta(tool, opts),
     error: null,
   };
-  return JSON.stringify(resp);
+  return toolResult(resp);
 }
 
 export function mcpFailure(
@@ -363,8 +399,17 @@ export function mcpFailure(
   message: string,
   opts?: { source?: string; metaExtra?: Record<string, unknown>; diagnostics?: unknown }
 ): string {
+  return mcpFailureResult(tool, code, message, opts).text;
+}
+
+export function mcpFailureResult(
+  tool: string,
+  code: string,
+  message: string,
+  opts?: { source?: string; metaExtra?: Record<string, unknown>; diagnostics?: unknown }
+): ToolResult {
   if (!envelopeV2Enabled()) {
-    return JSON.stringify({
+    return toolResult({
       error: true,
       code,
       message,
@@ -388,5 +433,5 @@ export function mcpFailure(
   if (opts?.diagnostics !== undefined) {
     resp.diagnostics = opts.diagnostics;
   }
-  return JSON.stringify(resp);
+  return toolResult(resp);
 }

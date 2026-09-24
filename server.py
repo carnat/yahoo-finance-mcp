@@ -20,9 +20,9 @@ import zoneinfo
 import pandas as pd
 import yfinance as yf
 
-# Phase 2b: yfmcp.app owns the FastMCP compat shim, yfinance_server instance, TOOL_ALIASES, and
+# Phase 2b: yfmcp.app owns the FastMCP compat shim, yfinance_server instance, and
 # build_handler_registry.  Import first so the compat shim fires before any decorator runs.
-from yfmcp.app import create_server, yfinance_server, TOOL_ALIASES, build_handler_registry
+from yfmcp.app import create_server, yfinance_server, build_handler_registry
 from yfmcp.schemas import (
     FinancialType, HolderType, RecommendationType, FilingFactType,
     _TOOL_OUTPUT_SCHEMAS, _MARKET_SNAPSHOT_OUTPUT_SCHEMA,
@@ -45,7 +45,6 @@ from yfmcp.cache import (
     ToolCache, _tool_cache,
     TTL_PRICE, TTL_ANALYST, TTL_FINANCIALS, TTL_EDGAR, TTL_OPTIONS, TTL_NEWS,
     _PRICE_TTL, _STMT_TTL,
-    _cache_get, _cache_set,
 )
 from yfmcp.util import (
     _fetch_with_retry, get_last_trading_date,
@@ -2427,35 +2426,6 @@ async def _collect_company_events(
     max_cap = _coerce_max_results(max_results, 10)
     lookback = _coerce_lookback_days(lookback_days, 14)
 
-    if "sec" in selected_sources:
-        sec_items, sec_warnings, used = await _collect_sec_events(
-            ticker,
-            filing_types=sec_filing_types or ["8-K", "10-Q", "10-K", "S-3", "DEF14A"],
-            retrieved_at=retrieved_at,
-            max_results=max_cap,
-            start_date=start_date,
-            end_date=end_date,
-            lookback_days=lookback,
-        )
-        if used:
-            sources_used.append("sec")
-        items.extend(sec_items)
-        warnings.extend(sec_warnings)
-
-    if "company_ir_page" in selected_sources:
-        page_items, page_warnings, page_used = await _collect_company_ir_page_events(
-            ticker,
-            retrieved_at=retrieved_at,
-            max_results=max_cap,
-            start_date=start_date,
-            end_date=end_date,
-            lookback_days=lookback,
-        )
-        if page_used:
-            sources_used.append("company_ir_page")
-        items.extend(page_items)
-        warnings.extend(page_warnings)
-
     # --- Yahoo Finance news ---
     # ``yahoo_finance_news`` fetches the news tab explicitly.
     # ``yahoo_finance`` (legacy) fetches news tab and also the press-releases tab;
@@ -2466,26 +2436,83 @@ async def _collect_company_events(
     # but yahoo_finance* is not.  ``newswire`` is now served by the direct
     # GlobeNewswire RSS fetcher below and is intentionally excluded here.
     _need_yf_news = _need_yf_news or "company_ir" in selected_sources
+    finnhub_eligible, finnhub_reason_code = (
+        _finnhub_eligibility(ticker) if "finnhub" in selected_sources else (False, None)
+    )
+    window = {
+        "retrieved_at": retrieved_at,
+        "max_results": max_cap,
+        "start_date": start_date,
+        "end_date": end_date,
+        "lookback_days": lookback,
+    }
 
-    yahoo_identity: dict | None = None
-    if _need_yf_news or _need_yf_pr:
+    async def _skipped() -> None:
+        return None
+
+    async def _yahoo_feeds() -> tuple:
+        if not (_need_yf_news or _need_yf_pr):
+            return None, None, None
         try:
-            yahoo_identity = _yahoo_news_identity_from_info(ticker, yf.Ticker(ticker).info)
+            info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
+            identity = _yahoo_news_identity_from_info(ticker, info)
         except Exception:
-            yahoo_identity = _yahoo_news_identity_from_info(ticker, None)
-        if yahoo_identity.get("status") == "UNAVAILABLE":
-            source_diagnostics["yahoo_finance_identity"] = {
-                "status": "IDENTITY_UNAVAILABLE",
-                "attempted": True,
-                "reasonCode": "YAHOO_PROFILE_IDENTITY_UNAVAILABLE",
-                "allowedAction": "retry_or_use_explicit_ticker_matches_only",
-            }
-            warnings.append({
-                "code": "SOURCE_IDENTITY_UNAVAILABLE",
-                "message": "Yahoo company identity lookup was unavailable; only exact ticker-token matches were retained.",
-                "severity": "warning",
-                "source": "yahoo_finance_identity",
-            })
+            identity = _yahoo_news_identity_from_info(ticker, None)
+
+        def _feed(feed: str):
+            # The Yahoo collector calls yfinance synchronously, so each feed
+            # runs on its own thread to overlap with the other sources.
+            return asyncio.to_thread(lambda: asyncio.run(_collect_yahoo_events(
+                ticker, **window, feed=feed, identity=identity, include_diagnostics=True,
+            )))
+
+        news, press = await asyncio.gather(
+            _feed("news") if _need_yf_news else _skipped(),
+            _feed("press_releases") if _need_yf_pr else _skipped(),
+        )
+        return identity, news, press
+
+    # The first-tier sources are independent, so they are fetched together;
+    # results are merged below in the fixed source order, as before.
+    sec_result, page_result, yahoo_result, finnhub_result = await asyncio.gather(
+        _collect_sec_events(
+            ticker,
+            filing_types=sec_filing_types or ["8-K", "10-Q", "10-K", "S-3", "DEF14A"],
+            **window,
+        ) if "sec" in selected_sources else _skipped(),
+        _collect_company_ir_page_events(ticker, **window) if "company_ir_page" in selected_sources else _skipped(),
+        _yahoo_feeds(),
+        _collect_finnhub_events(ticker, **window) if "finnhub" in selected_sources and finnhub_eligible else _skipped(),
+    )
+
+    if sec_result is not None:
+        sec_items, sec_warnings, used = sec_result
+        if used:
+            sources_used.append("sec")
+        items.extend(sec_items)
+        warnings.extend(sec_warnings)
+
+    if page_result is not None:
+        page_items, page_warnings, page_used = page_result
+        if page_used:
+            sources_used.append("company_ir_page")
+        items.extend(page_items)
+        warnings.extend(page_warnings)
+
+    yahoo_identity, yf_result, pr_result = yahoo_result
+    if yahoo_identity is not None and yahoo_identity.get("status") == "UNAVAILABLE":
+        source_diagnostics["yahoo_finance_identity"] = {
+            "status": "IDENTITY_UNAVAILABLE",
+            "attempted": True,
+            "reasonCode": "YAHOO_PROFILE_IDENTITY_UNAVAILABLE",
+            "allowedAction": "retry_or_use_explicit_ticker_matches_only",
+        }
+        warnings.append({
+            "code": "SOURCE_IDENTITY_UNAVAILABLE",
+            "message": "Yahoo company identity lookup was unavailable; only exact ticker-token matches were retained.",
+            "severity": "warning",
+            "source": "yahoo_finance_identity",
+        })
 
     def _unpack_provider_result(value: tuple) -> tuple[list[dict], list[dict], bool, dict]:
         if len(value) == 4:
@@ -2494,18 +2521,7 @@ async def _collect_company_events(
         result_items, result_warnings, result_used = value
         return result_items, result_warnings, result_used, {}
 
-    if _need_yf_news:
-        yf_result = await _collect_yahoo_events(
-            ticker,
-            retrieved_at=retrieved_at,
-            max_results=max_cap,
-            start_date=start_date,
-            end_date=end_date,
-            lookback_days=lookback,
-            feed="news",
-            identity=yahoo_identity,
-            include_diagnostics=True,
-        )
+    if yf_result is not None:
         yf_items, yf_warnings, used, yf_diagnostics = _unpack_provider_result(yf_result)
         source_diagnostics["yahoo_finance_news"] = {**yf_diagnostics, "attempted": True, "completed": used}
         if used:
@@ -2526,18 +2542,7 @@ async def _collect_company_events(
                 items.append(item)
         warnings.extend(yf_warnings)
 
-    if _need_yf_pr:
-        pr_result = await _collect_yahoo_events(
-            ticker,
-            retrieved_at=retrieved_at,
-            max_results=max_cap,
-            start_date=start_date,
-            end_date=end_date,
-            lookback_days=lookback,
-            feed="press_releases",
-            identity=yahoo_identity,
-            include_diagnostics=True,
-        )
+    if pr_result is not None:
         pr_items, pr_warnings, used, pr_diagnostics = _unpack_provider_result(pr_result)
         source_diagnostics["yahoo_finance_press_releases"] = {**pr_diagnostics, "attempted": True, "completed": used}
         if used and "yahoo_finance_press_releases" in selected_sources and "yahoo_finance_press_releases" not in sources_used:
@@ -2545,31 +2550,21 @@ async def _collect_company_events(
         items.extend(pr_items)
         warnings.extend(pr_warnings)
 
-    if "finnhub" in selected_sources and _finnhub_eligibility(ticker)[0]:
-        finnhub_items, finnhub_warnings, used, finnhub_diagnostics = _unpack_provider_result(
-            await _collect_finnhub_events(
-                ticker,
-                retrieved_at=retrieved_at,
-                max_results=max_cap,
-                start_date=start_date,
-                end_date=end_date,
-                lookback_days=lookback,
-            )
-        )
+    if finnhub_result is not None:
+        finnhub_items, finnhub_warnings, used, finnhub_diagnostics = _unpack_provider_result(finnhub_result)
         source_diagnostics["finnhub"] = finnhub_diagnostics
         if used:
             sources_used.append("finnhub")
         items.extend(finnhub_items)
         warnings.extend(finnhub_warnings)
     elif "finnhub" in selected_sources:
-        _, reason_code = _finnhub_eligibility(ticker)
         warnings.append({
             "code": "SOURCE_NOT_ELIGIBLE",
             "message": f"Finnhub company-news is intentionally skipped for {ticker.upper()} under the deployed market capability policy.",
             "severity": "warning",
             "source": "finnhub",
             "attempted": False,
-            "reasonCode": reason_code,
+            "reasonCode": finnhub_reason_code,
         })
 
     if "marketaux" in selected_sources:
@@ -2786,17 +2781,30 @@ async def get_company_press_releases(
     primary_warnings: list[dict] = []
     primary_diagnostics: dict = {}
     retrieved_at = _utc_now_iso()
-    if primary_sources:
-        primary_items, primary_used, primary_warnings, retrieved_at, primary_diagnostics = _unpack_company_event_result(
+
+    async def _collect(source_list: list[str]) -> tuple:
+        return _unpack_company_event_result(
             await _collect_company_events(
                 ticker,
                 max_results=safe_max,
                 lookback_days=lookback_days,
-                sources=primary_sources,
+                sources=source_list,
                 sec_filing_types=["8-K"],
                 include_diagnostics=True,
             )
         )
+
+    async def _no_sources() -> tuple:
+        return [], [], [], retrieved_at, {}
+
+    # Primary and optional sources are merged only after both return, so
+    # they are collected together.
+    primary_result, optional_result = await asyncio.gather(
+        _collect(primary_sources) if primary_sources else _no_sources(),
+        _collect(optional_sources) if optional_sources else _no_sources(),
+    )
+    if primary_sources:
+        primary_items, primary_used, primary_warnings, retrieved_at, primary_diagnostics = primary_result
     release_types = {"company_ir", "company_ir_page", "press_release", "newswire", "marketaux_wire", "sec_filing", "sec_ex99_found", "yahoo_finance_press_releases"}
     release_items = [it for it in primary_items if str(it.get("sourceType")) in release_types]
 
@@ -2805,7 +2813,22 @@ async def get_company_press_releases(
     sec_8k_evidence: list[dict] = []
     sec_8k_without_ex99_count = 0
     from yfmcp.tools.earnings import _resolve_ex991_url
-    for it in release_items:
+
+    # Resolve every 8-K's EX-99.1 exhibit up front, a few SEC requests at a time.
+    ex991_limit = asyncio.Semaphore(4)
+
+    async def _ex991_for(item: dict) -> str | None:
+        if item.get("sourceType") != "sec_filing" or item.get("filingType") != "8-K":
+            return None
+        acc = item.get("accessionNumber")
+        cik_match = _re.search(r'/data/(\d+)/', item.get("url") or "")
+        if not acc or not cik_match:
+            return None
+        async with ex991_limit:
+            return await _resolve_ex991_url(acc, int(cik_match.group(1)))
+
+    ex991_urls = await asyncio.gather(*(_ex991_for(it) for it in release_items))
+    for it, ex991_url in zip(release_items, ex991_urls):
         if it.get("sourceType") == "sec_filing" and it.get("filingType") == "8-K":
             acc = it.get("accessionNumber")
             url = it.get("url") or ""
@@ -2817,23 +2840,17 @@ async def get_company_press_releases(
                 "documentUrl": url or None,
             }
             sec_8k_evidence.append(evidence)
-            cik_match = _re.search(r'/data/(\d+)/', url)
-            cik = int(cik_match.group(1)) if cik_match else None
-            if acc and cik is not None:
-                ex991_url = await _resolve_ex991_url(acc, cik)
-                if ex991_url:
-                    evidence["ex991Url"] = ex991_url
-                    evidence["ex991Resolved"] = True
-                    it = dict(it)
-                    it["sourceType"] = "sec_ex99_found"
-                    it["url"] = ex991_url
-                    it["title"] = "EX-99.1 exhibit found in 8-K"
-                    it["eventType"] = "press_release"
-                    it["evidenceText"] = "Resolved EX-99.1 press-release exhibit from SEC 8-K."
-                    it["confidence"] = "HIGH"
-                    has_sec_ex99_found = True
-                else:
-                    sec_8k_without_ex99_count += 1
+            if ex991_url:
+                evidence["ex991Url"] = ex991_url
+                evidence["ex991Resolved"] = True
+                it = dict(it)
+                it["sourceType"] = "sec_ex99_found"
+                it["url"] = ex991_url
+                it["title"] = "EX-99.1 exhibit found in 8-K"
+                it["eventType"] = "press_release"
+                it["evidenceText"] = "Resolved EX-99.1 press-release exhibit from SEC 8-K."
+                it["confidence"] = "HIGH"
+                has_sec_ex99_found = True
             else:
                 sec_8k_without_ex99_count += 1
         modified_primary_items.append(it)
@@ -2843,16 +2860,7 @@ async def get_company_press_releases(
     optional_warnings: list[dict] = []
     optional_diagnostics: dict = {}
     if optional_sources:
-        optional_items, optional_used, optional_warnings, _optional_retrieved_at, optional_diagnostics = _unpack_company_event_result(
-            await _collect_company_events(
-                ticker,
-                max_results=safe_max,
-                lookback_days=lookback_days,
-                sources=optional_sources,
-                sec_filing_types=["8-K"],
-                include_diagnostics=True,
-            )
-        )
+        optional_items, optional_used, optional_warnings, _optional_retrieved_at, optional_diagnostics = optional_result
     warnings = source_warnings + primary_warnings + optional_warnings
     modified_release_items = _dedupe_event_items(
         modified_primary_items + [it for it in optional_items if str(it.get("sourceType")) in release_types],
@@ -3403,7 +3411,7 @@ async def get_financial_statement(
 
     # Check cache first
     cache_key = f"stmt:{ticker}:{financial_type}"
-    cached = _cache_get(cache_key, _STMT_TTL)
+    cached = _tool_cache.get_value(cache_key)
     if cached is not None:
         if line_items:
             try:
@@ -3474,7 +3482,7 @@ async def get_financial_statement(
     df = df.where(pd.notnull(df), None)
     result = json.dumps(df.to_dict(orient="records"))
 
-    _cache_set(cache_key, result)
+    _tool_cache.set(cache_key, result, _STMT_TTL)
 
     if line_items:
         try:
@@ -4313,7 +4321,7 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
         results = await asyncio.gather(*[get_analyst_consensus(t) for t in ticker], return_exceptions=True)
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     cache_key = f"analyst_consensus:{ticker}"
-    cached = _cache_get(cache_key, _STMT_TTL)
+    cached = _tool_cache.get_value(cache_key)
     if cached is not None:
         return cached
 
@@ -4439,7 +4447,7 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
     output["warnings"] = warnings
 
     result = json.dumps(output)
-    _cache_set(cache_key, result)
+    _tool_cache.set(cache_key, result, _STMT_TTL)
     return result
 
 
@@ -4468,7 +4476,7 @@ Args:
 async def get_earnings_analysis(ticker: str) -> str:
     """Get all forward-looking analyst estimates in one call."""
     cache_key = f"earnings_analysis:{ticker}"
-    cached = _cache_get(cache_key, _STMT_TTL)
+    cached = _tool_cache.get_value(cache_key)
     if cached is not None:
         return cached
 
@@ -4515,7 +4523,7 @@ async def get_earnings_analysis(ticker: str) -> str:
             output[key] = None
 
     result = json.dumps(output)
-    _cache_set(cache_key, result)
+    _tool_cache.set(cache_key, result, _STMT_TTL)
     return result
 
 
@@ -4539,7 +4547,7 @@ async def get_financial_ratios(
     if frequency not in {"quarterly", "monthly", "yearly", "trailing"}:
         return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "frequency must be quarterly, monthly, yearly, or trailing"})
     cache_key = f"financial_ratios:{ticker}:{history_periods}:{frequency}"
-    cached = _cache_get(cache_key, _STMT_TTL)
+    cached = _tool_cache.get_value(cache_key)
     if cached is not None:
         return cached
 
@@ -4662,7 +4670,7 @@ async def get_financial_ratios(
             ratios["valuationHistoryWarning"] = str(e)
 
     result = json.dumps(ratios)
-    _cache_set(cache_key, result)
+    _tool_cache.set(cache_key, result, _STMT_TTL)
     return result
 
 
@@ -4753,7 +4761,7 @@ async def get_calendar(ticker: str, mode: Literal["upcoming", "history"] = "upco
     if mode not in {"upcoming", "history"}:
         return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "mode must be upcoming or history"})
     cache_key = f"calendar:{ticker}:{mode}:{limit}:{offset}"
-    cached = _cache_get(cache_key, _PRICE_TTL)
+    cached = _tool_cache.get_value(cache_key)
     if cached is not None:
         return cached
 
@@ -4826,7 +4834,7 @@ async def get_calendar(ticker: str, mode: Literal["upcoming", "history"] = "upco
         "calendar": {k: _serialize(v) for k, v in cal.items()},
     }
     result = json.dumps(output)
-    _cache_set(cache_key, result)
+    _tool_cache.set(cache_key, result, _PRICE_TTL)
     return result
 
 
@@ -6697,7 +6705,7 @@ async def get_etf_info(
     if invalid:
         return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": f"Unsupported sections: {', '.join(invalid)}", "supportedSections": sorted(allowed)})
     cache_key = f"etf_info:{ticker}:{','.join(sorted(requested))}"
-    cached = _cache_get(cache_key, _PRICE_TTL)
+    cached = _tool_cache.get_value(cache_key)
     if cached is not None:
         return cached
 
@@ -6797,7 +6805,7 @@ async def get_etf_info(
         data["recommendedNextAction"] = "NONE"
 
     result = json.dumps(data)
-    _cache_set(cache_key, result)
+    _tool_cache.set(cache_key, result, _PRICE_TTL)
     return result
 
 
@@ -6951,7 +6959,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
     prev_window = prev_window_map.get(window_label)
     prev_data: dict | None = None
     if prev_window:
-        prev_cached = _cache_get(f"options_flow:{ticker}:{prev_window}", 72 * 3600)
+        prev_cached = _tool_cache.get_value(f"options_flow:{ticker}:{prev_window}")
         if prev_cached:
             try:
                 prev_data = json.loads(prev_cached)
@@ -7031,7 +7039,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
     }
 
     # Cache current reading for future trend comparison (72h TTL via 3-day window check)
-    _cache_set(f"options_flow:{ticker}:{window_label}", json.dumps(result_dict))
+    _tool_cache.set(f"options_flow:{ticker}:{window_label}", json.dumps(result_dict), 72 * 3600)
     return json.dumps(result_dict)
 
 
@@ -8975,6 +8983,20 @@ async def extract_customer_concentration(
     return json.dumps(result)
 
 
+async def _warm_sec_submissions(ticker: str) -> None:
+    """Load the cached SEC submissions once before concurrent filing reads.
+
+    Composite extractors fan out to several tools that each look up the
+    same submissions document; warming it first keeps a cold call from
+    sending one duplicate SEC request per branch. Failures are left to the
+    individual tools, which report them in their own responses.
+    """
+    try:
+        await _get_submissions_for_ticker(ticker)
+    except Exception:
+        pass
+
+
 @yfinance_server.tool(name="extract_china_exposure", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_china_exposure"], description="Extract China exposure with separate revenue and non-revenue classifications; revenue values are decision-grade only when evidence and status support them.")
 async def extract_china_exposure(
     ticker: str,
@@ -8983,8 +9005,17 @@ async def extract_china_exposure(
     accession_number: str | None = None,
     detailLevel: str = "compact",
 ) -> str:
-    idx = _safe_json_loads(await get_sec_filing_index(ticker=ticker, filing_type=filing_type, period=period, accession_number=accession_number))
-    revenue = _safe_json_loads(await extract_revenue_exposure(ticker=ticker, exposure_query="China", filing_type=filing_type, period=period))
+    risk_terms = ["China", "tariff", "export control"]
+    # Warm the shared submissions cache once, then fetch the three
+    # independent filing reads together.
+    await _warm_sec_submissions(ticker)
+    idx_raw, revenue_raw, risk_raw = await asyncio.gather(
+        get_sec_filing_index(ticker=ticker, filing_type=filing_type, period=period, accession_number=accession_number),
+        extract_revenue_exposure(ticker=ticker, exposure_query="China", filing_type=filing_type, period=period),
+        extract_risk_factor_mentions(ticker=ticker, terms=risk_terms, filing_type=filing_type, period=period),
+    )
+    idx = _safe_json_loads(idx_raw)
+    revenue = _safe_json_loads(revenue_raw)
     revenue_status = "FOUND" if revenue.get("status") == "FOUND_REVENUE_EXPOSURE" else revenue.get("status", "NOT_FOUND")
 
     index = idx.get("index") if isinstance(idx.get("index"), dict) else {}
@@ -9046,12 +9077,11 @@ async def extract_china_exposure(
     entity_terms = ["Tongmei", "JinMei", "BoYu"]
     bank_terms = ["Bank of China"]
     manuf_terms = ["manufacturing", "production", "supply chain", "fab"]
-    risk_terms = ["China", "tariff", "export control"]
 
     entity_evidence, entity_rejected = _collect(entity_terms, "entity")
     bank_evidence, bank_rejected = _collect(bank_terms, "bank")
     manu_evidence, manu_rejected = _collect(manuf_terms, "manufacturing")
-    risk_mentions = _safe_json_loads(await extract_risk_factor_mentions(ticker=ticker, terms=risk_terms, filing_type=filing_type, period=period))
+    risk_mentions = _safe_json_loads(risk_raw)
     raw_risk_evidence = risk_mentions.get("matches") if isinstance(risk_mentions.get("matches"), list) else []
     risk_evidence = []
     for ev in raw_risk_evidence:
@@ -9146,19 +9176,41 @@ async def extract_exposure(
 
     warnings: list[dict] = []
 
-    # Get filing index for metadata
-    idx = _safe_json_loads(await get_sec_filing_index(ticker=ticker, filing_type=filing_type, period=period))
+    async def _skipped() -> None:
+        return None
+
+    # The filing reads below are independent. Warm the shared submissions
+    # cache once, then run them together; each keeps its own error handling.
+    await _warm_sec_submissions(ticker)
+    idx_raw, geo_raw, ops_raw, ent_raw, risk_raw = await asyncio.gather(
+        get_sec_filing_index(ticker=ticker, filing_type=filing_type, period=period),
+        extract_geographic_revenue(ticker=ticker, region=region_label, filing_type=filing_type, period=period, detailLevel="compact"),
+        search_sec_filing_text(ticker=ticker, search_terms=[topic_lower], filing_type=filing_type, context_chars=600, return_tables=False),
+        search_sec_filing_text(ticker=ticker, search_terms=CHINA_NAMED_ENTITIES[:3], filing_type=filing_type, context_chars=400, return_tables=False)
+        if is_china else _skipped(),
+        extract_risk_factor_mentions(ticker=ticker, terms=[topic_lower], filing_type=filing_type, period=period, detailLevel="compact")
+        if include_risk_factors else _skipped(),
+        return_exceptions=True,
+    )
+    for result in (idx_raw, geo_raw, ops_raw, ent_raw, risk_raw):
+        if isinstance(result, BaseException) and not isinstance(result, Exception):
+            raise result
+    if isinstance(idx_raw, Exception):
+        raise idx_raw
+
+    # Filing index for metadata
+    idx = _safe_json_loads(idx_raw)
 
     filing_date = idx.get("filingDate")
     accession_number = idx.get("accessionNumber")
     document_url = idx.get("documentUrl")
 
     # Revenue extraction
-    try:
-        geo = _safe_json_loads(await extract_geographic_revenue(ticker=ticker, region=region_label, filing_type=filing_type, period=period, detailLevel="compact"))
-    except Exception as e:
-        warnings.append({"code": "REVENUE_EXTRACTION_ERROR", "message": str(e), "severity": "warning"})
+    if isinstance(geo_raw, Exception):
+        warnings.append({"code": "REVENUE_EXTRACTION_ERROR", "message": str(geo_raw), "severity": "warning"})
         geo = {}
+    else:
+        geo = _safe_json_loads(geo_raw)
 
     geo_value = geo.get("value")
     geo_denominator = geo.get("denominator")
@@ -9196,11 +9248,7 @@ async def extract_exposure(
     }
 
     # Operational scan via existing search
-    try:
-        ops_raw = _safe_json_loads(await search_sec_filing_text(ticker=ticker, search_terms=[topic_lower], filing_type=filing_type, context_chars=600, return_tables=False))
-        ops_matches = ops_raw.get("matches") or []
-    except Exception:
-        ops_matches = []
+    ops_matches = _safe_json_loads(ops_raw).get("matches") or []
 
     ops_evidence: list[dict] = []
     found_op_terms: set[str] = set()
@@ -9236,11 +9284,7 @@ async def extract_exposure(
 
     # Entity scan (China only)
     if is_china:
-        try:
-            ent_raw = _safe_json_loads(await search_sec_filing_text(ticker=ticker, search_terms=CHINA_NAMED_ENTITIES[:3], filing_type=filing_type, context_chars=400, return_tables=False))
-            ent_matches = ent_raw.get("matches") or []
-        except Exception:
-            ent_matches = []
+        ent_matches = _safe_json_loads(ent_raw).get("matches") or []
         found_entities: set[str] = set()
         ent_evidence: list[dict] = []
         rejected_entity_noise = 0
@@ -9277,11 +9321,7 @@ async def extract_exposure(
 
     # Risk factor scan
     if include_risk_factors:
-        try:
-            risk_raw = _safe_json_loads(await extract_risk_factor_mentions(ticker=ticker, terms=[topic_lower], filing_type=filing_type, period=period, detailLevel="compact"))
-            risk_matches = risk_raw.get("matches") or []
-        except Exception:
-            risk_matches = []
+        risk_matches = _safe_json_loads(risk_raw).get("matches") or []
         risk_evidence = []
         for m in risk_matches[:5]:
             if not isinstance(m, dict):

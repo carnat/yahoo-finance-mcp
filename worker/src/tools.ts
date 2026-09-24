@@ -1,4 +1,4 @@
-import { mcpSuccess, mcpFailure, ErrorCode, envelopeV2Enabled, getBuildVersion, getServerVersion, getWorkerVar } from "./response.js";
+import { mcpSuccessFromValue, mcpSuccessResult, mcpFailure, mcpFailureResult, type ToolResult, ErrorCode, envelopeV2Enabled, getBuildVersion, getServerVersion, getWorkerVar } from "./response.js";
 import { GROUPED_TOOL_DEFS } from "./tool-catalog.js";
 import {
   getAnalystConsensus,
@@ -1586,6 +1586,9 @@ function mentionsHttp429(lower: string): boolean {
 function legacyToolFailure(raw: string): { code: string; message: string } | null {
   let text = raw.trim();
   if (!text) return null;
+  // A JSON object or array is never a legacy text failure, and invalid JSON
+  // starting with "{" or "[" fails the prefix checks below; skip parsing it.
+  if (text[0] === "{" || text[0] === "[") return null;
   try {
     const parsed = JSON.parse(text);
     if (parsed != null && typeof parsed === "object") return null;
@@ -1792,6 +1795,10 @@ function secIndexOutlinePayload(indexPayload: Record<string, unknown>): string {
 }
 
 export async function callTool(name: string, args: Record<string, unknown>): Promise<string> {
+  return (await callToolResult(name, args)).text;
+}
+
+export async function callToolResult(name: string, args: Record<string, unknown>): Promise<ToolResult> {
   let raw: string;
   try {
     raw = await _dispatchTool(name, args);
@@ -1800,80 +1807,87 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
     const lower = rawMessage.toLowerCase();
     const httpStatus = (error as { status?: unknown } | null)?.status;
     if (lower.includes("unknown tool") || lower.includes("unknown grouped tool")) {
-      return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, "Unknown tool name.");
+      return mcpFailureResult(name, ErrorCode.INPUT_VALIDATION_ERROR, "Unknown tool name.");
     }
     if (lower.includes("ticker_not_found") || lower.includes("api error 404") || lower.includes("no data found for ticker")) {
-      return mcpFailure(name, ErrorCode.TICKER_NOT_FOUND, "No provider data was found for the requested ticker.", {
+      return mcpFailureResult(name, ErrorCode.TICKER_NOT_FOUND, "No provider data was found for the requested ticker.", {
         metaExtra: { retryable: false },
       });
     }
     if (httpStatus === 429 || lower.includes("rate limit") || lower.includes("rate_limit") || mentionsHttp429(lower)) {
-      return mcpFailure(name, ErrorCode.RATE_LIMIT, "The upstream data provider rate limit was reached. Retry later.", {
+      return mcpFailureResult(name, ErrorCode.RATE_LIMIT, "The upstream data provider rate limit was reached. Retry later.", {
         metaExtra: { retryable: true },
       });
     }
     if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("abort")) {
-      return mcpFailure(name, ErrorCode.PROVIDER_TIMEOUT, "The upstream data provider timed out. Retry this request.", {
+      return mcpFailureResult(name, ErrorCode.PROVIDER_TIMEOUT, "The upstream data provider timed out. Retry this request.", {
         metaExtra: { retryable: true },
       });
     }
-    return mcpFailure(name, ErrorCode.PROVIDER_ERROR, "The upstream data provider request failed.", {
+    return mcpFailureResult(name, ErrorCode.PROVIDER_ERROR, "The upstream data provider request failed.", {
       metaExtra: { retryable: false },
     });
   }
   const legacyFailure = legacyToolFailure(raw);
   if (legacyFailure) {
-    return mcpFailure(name, legacyFailure.code, legacyFailure.message);
+    return mcpFailureResult(name, legacyFailure.code, legacyFailure.message);
   }
   let batchMeta: { partialSuccess?: boolean; successCount?: number; errorCount?: number } | undefined;
-  // Only batch results carry __batchMeta; skip the parse/re-serialize round
-  // trip for everything else (large filings and transcripts included).
+  // Only batch results carry __batchMeta; everything else (large filings and
+  // transcripts included) is parsed once, by mcpSuccessResult.
   if (raw.includes('"__batchMeta"')) {
+    let parsed: Record<string, unknown> | null = null;
     try {
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-      const metaRaw = parsed.__batchMeta;
-      if (metaRaw != null && typeof metaRaw === "object") {
-        const bm = metaRaw as Record<string, unknown>;
-        batchMeta = {
-          partialSuccess: bm.partialSuccess === true,
-          successCount: typeof bm.successCount === "number" ? bm.successCount : undefined,
-          errorCount: typeof bm.errorCount === "number" ? bm.errorCount : undefined,
-        };
-        delete parsed.__batchMeta;
-        raw = JSON.stringify(parsed);
-      }
+      parsed = JSON.parse(raw) as Record<string, unknown>;
     } catch {
       // non-JSON payload
     }
+    const metaRaw = parsed?.__batchMeta;
+    if (parsed && metaRaw != null && typeof metaRaw === "object") {
+      const bm = metaRaw as Record<string, unknown>;
+      batchMeta = {
+        partialSuccess: bm.partialSuccess === true,
+        successCount: typeof bm.successCount === "number" ? bm.successCount : undefined,
+        errorCount: typeof bm.errorCount === "number" ? bm.errorCount : undefined,
+      };
+      delete parsed.__batchMeta;
+      return mcpSuccessFromValue(name, parsed, JSON.stringify(parsed), {
+        ...batchMeta,
+        ...(doctrineStatusFor(name) ? { metaExtra: doctrineStatusFor(name) } : {}),
+      });
+    }
   }
-  return mcpSuccess(name, raw, {
-    ...(batchMeta ?? {}),
+  return mcpSuccessResult(name, raw, {
     ...(doctrineStatusFor(name) ? { metaExtra: doctrineStatusFor(name) } : {}),
   });
 }
 
 export async function callVisibleTool(name: string, args: Record<string, unknown>): Promise<string> {
-  if (!isGroupedMode()) return callTool(name, args);
+  return (await callVisibleToolResult(name, args)).text;
+}
+
+export async function callVisibleToolResult(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+  if (!isGroupedMode()) return callToolResult(name, args);
 
   const actions = GROUPED_ACTIONS.get(name);
   if (!actions) {
-    return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, "Unknown tool name.");
+    return mcpFailureResult(name, ErrorCode.INPUT_VALIDATION_ERROR, "Unknown tool name.");
   }
   const action = str(args.action).trim();
   if (!action) {
-    return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, "action is required");
+    return mcpFailureResult(name, ErrorCode.INPUT_VALIDATION_ERROR, "action is required");
   }
   if (!actions.has(action)) {
-    return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, `Unknown action '${action}' for grouped tool '${name}'`);
+    return mcpFailureResult(name, ErrorCode.INPUT_VALIDATION_ERROR, `Unknown action '${action}' for grouped tool '${name}'`);
   }
   const params = args.params;
   if (params != null && (typeof params !== "object" || Array.isArray(params))) {
-    return mcpFailure(name, ErrorCode.INPUT_VALIDATION_ERROR, "params must be an object when provided");
+    return mcpFailureResult(name, ErrorCode.INPUT_VALIDATION_ERROR, "params must be an object when provided");
   }
   const actionParams = (params as Record<string, unknown> | undefined) ?? {};
   const validationFailure = validateGroupedActionParams(action, actionParams);
-  if (validationFailure) return validationFailure;
-  return callTool(action, actionParams);
+  if (validationFailure) return { text: validationFailure };
+  return callToolResult(action, actionParams);
 }
 
 async function _dispatchTool(name: string, args: Record<string, unknown>): Promise<string> {

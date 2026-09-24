@@ -73,17 +73,32 @@ class TestToolCache(unittest.TestCase):
     def test_legacy_stmt_ttl_alias(self):
         self.assertEqual(srv._STMT_TTL, srv.TTL_FINANCIALS)
 
-    def test_legacy_cache_get_set(self):
-        """Legacy _cache_get / _cache_set should still work."""
-        # Use a fresh cache state by using an unused key
-        srv._cache_set("legacy_test", '{"x":2}', ttl=300.0)
-        val = srv._cache_get("legacy_test", 300.0)
-        self.assertEqual(val, '{"x":2}')
-
-    def test_legacy_cache_miss_expired(self):
-        srv._cache_set("exp_legacy", "v", ttl=0.01)
+    def test_get_value(self):
+        self.cache.set("value_key", '{"x":2}', 300.0)
+        self.assertEqual(self.cache.get_value("value_key"), '{"x":2}')
+        self.cache.set("exp_value", "v", 0.01)
         time.sleep(0.05)
-        self.assertIsNone(srv._cache_get("exp_legacy", 0.01))
+        self.assertIsNone(self.cache.get_value("exp_value"))
+        self.assertIsNone(self.cache.get_value("missing"))
+
+    def test_size_bound_evicts_oldest(self):
+        cache = srv.ToolCache(max_entries=3)
+        for key in ("a", "b", "c"):
+            cache.set(key, key, 60.0)
+        cache.set("a", "a2", 60.0)  # re-set moves "a" to the back
+        cache.set("d", "d", 60.0)
+        self.assertIsNone(cache.get("b"))
+        self.assertEqual([cache.get_value(k) for k in ("a", "c", "d")], ["a2", "c", "d"])
+
+    def test_size_bound_evicts_expired_first(self):
+        cache = srv.ToolCache(max_entries=2)
+        cache.set("old", "x", 60.0)
+        cache.set("expired", "y", 0.01)
+        time.sleep(0.05)
+        cache.set("new", "z", 60.0)
+        self.assertEqual(cache.get_value("old"), "x")
+        self.assertEqual(cache.get_value("new"), "z")
+        self.assertNotIn("expired", cache._store)
 
 
 class TestQuerySecFilingIndex(unittest.TestCase):

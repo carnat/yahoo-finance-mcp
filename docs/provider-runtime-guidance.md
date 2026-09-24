@@ -32,6 +32,24 @@ Sources checked through 2026-08-04:
   duplicate requests but is not global quota accounting or a persistent rate
   limiter.
 
+## Yahoo Finance Caching
+
+- Every Worker Yahoo GET shares in-flight requests and a 30-second
+  process-local body cache, so composite tools that fan out to the same URL
+  make one upstream call.
+- Slow-changing Yahoo data is also stored in the Worker Cache API, so new
+  isolates in the same data center reuse it: fundamentals timeseries
+  (statements, valuation history) for 6 hours; profile, fund-profile,
+  holdings, and ownership quoteSummary modules for 6 hours; analyst
+  recommendations and rating changes, earnings trend/history, calendar events,
+  and SEC filing lists for 1 hour. The allow-list is `yahooEdgeTtlMs` in
+  `worker/src/yahoo-finance.ts`.
+- A quoteSummary request is edge cached only when every requested module is on
+  that list, so anything carrying a live price or quote keeps the 30-second
+  cache. Error responses and empty Yahoo answers are never edge cached.
+- Timeseries requests end their window at the current second (`period2`); the
+  cache key ignores that parameter so repeated calls can hit.
+
 ## SEC EDGAR Rules
 
 - `data.sec.gov` is keyless and public. Do not add API-key or paid-provider

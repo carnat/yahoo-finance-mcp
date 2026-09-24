@@ -434,6 +434,39 @@ class TestPhase6BCompanyNews(unittest.TestCase):
             self.assertIn("yahoo_finance_news", sources)
             self.assertIn("yahoo_finance_press_releases", sources)
 
+    def test_collect_company_events_fetches_independent_sources_concurrently(self):
+        """The first-tier sources overlap in time, and results keep the fixed source order."""
+        import time
+
+        def _source(name: str, used_flag_len: int):
+            async def _collect(*args, **kwargs):
+                await asyncio.sleep(0.3)
+                label = f"{name}:{kwargs.get('feed', '')}" if name == "yahoo" else name
+                warning = {"code": "ORDER", "message": label, "severity": "info"}
+                if used_flag_len == 4:
+                    return [], [warning], False, {}
+                return [], [warning], False
+            return _collect
+
+        with patch("server._collect_sec_events", side_effect=_source("sec", 3)), \
+             patch("server._collect_company_ir_page_events", side_effect=_source("ir", 3)), \
+             patch("server._collect_yahoo_events", side_effect=_source("yahoo", 4)), \
+             patch("server._collect_finnhub_events", side_effect=_source("finnhub", 4)), \
+             patch("server._finnhub_eligibility", return_value=(True, None)), \
+             patch("server.yf.Ticker") as ticker_cls:
+            ticker_cls.return_value.info = {"longName": "Tesla, Inc.", "exchange": "NMS"}
+            started = time.monotonic()
+            _, _, warnings, _ = _run(srv._collect_company_events(
+                "TSLA", max_results=10, lookback_days=14,
+                sources=["sec", "company_ir_page", "yahoo_finance", "finnhub"],
+            ))
+            elapsed = time.monotonic() - started
+
+        order = [w["message"] for w in warnings if w.get("code") == "ORDER"]
+        self.assertEqual(order, ["sec", "ir", "yahoo:news", "yahoo:press_releases", "finnhub"])
+        # Five 0.3s fetches take about 1.5s in sequence; together about 0.3s.
+        self.assertLess(elapsed, 1.0)
+
     def test_compute_source_status_with_new_yahoo_sources(self):
         """Unit test: _compute_source_status reports fine-grained Yahoo Finance source statuses."""
         items = [
@@ -975,6 +1008,57 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
         self.assertEqual(data.get("coverage", {}).get("recommendedNextAction"), "USE_OFFICIAL_EVIDENCE")
         self.assertTrue(data.get("secEvidence"))
         self.assertNotIn("SEC_8K_FOUND_EX99_NOT_FOUND", [w.get("code") for w in data.get("warnings", [])])
+
+    def test_get_company_press_releases_resolves_ex99_exhibits_concurrently(self):
+        """EX-99.1 lookups for several 8-Ks overlap, and each result stays with its filing."""
+        import time
+
+        now = "2026-05-15T12:00:00Z"
+
+        def _eight_k(acc: str, day: int) -> dict:
+            return {
+                "title": f"MU 8-K {acc}",
+                "source": "sec",
+                "sourceType": "sec_filing",
+                "filingType": "8-K",
+                "accessionNumber": acc,
+                "filingDate": f"2026-05-{day:02d}",
+                "publishedAt": f"2026-05-{day:02d}T12:00:00Z",
+                "retrievedAt": now,
+                "url": f"https://www.sec.gov/Archives/edgar/data/723125/{acc}/primary.htm",
+                "tickers": ["MU"],
+                "eventType": "regulatory",
+                "summary": "SEC 8-K filing for MU",
+                "evidenceText": "8-K accepted by SEC",
+                "confidence": "HIGH",
+                "tickerRelevance": "HIGH",
+                "duplicateGroupId": f"mu-{acc}",
+            }
+
+        filings = [_eight_k("0001", 14), _eight_k("0002", 13), _eight_k("0003", 12)]
+
+        async def _collect(*_args, **kwargs):
+            if "sec" in (kwargs.get("sources") or []):
+                return filings, ["sec"], [], now
+            return [], [], [], now
+
+        async def _resolve(acc, cik):
+            await asyncio.sleep(0.3)
+            self.assertEqual(cik, 723125)
+            return f"https://www.sec.gov/Archives/edgar/data/723125/{acc}/ex991.htm" if acc == "0002" else None
+
+        with patch("server._collect_company_events", side_effect=_collect), \
+             patch("yfmcp.tools.earnings._resolve_ex991_url", side_effect=_resolve):
+            started = time.monotonic()
+            data = _parse(_run(srv.get_company_press_releases("MU")))
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.8)
+        evidence = {e["accessionNumber"]: e for e in data.get("secEvidence", [])}
+        self.assertEqual(sorted(evidence), ["0001", "0002", "0003"])
+        self.assertEqual(evidence["0002"].get("ex991Url"), "https://www.sec.gov/Archives/edgar/data/723125/0002/ex991.htm")
+        self.assertNotIn("ex991Url", evidence["0001"])
+        self.assertNotIn("ex991Url", evidence["0003"])
 
     def test_get_company_press_releases_approved_ir_page_can_be_decision_grade(self):
         """Approved company_ir_page items can clear the payload gate without SEC evidence."""

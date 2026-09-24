@@ -45,10 +45,14 @@ class TestVersionContract(unittest.TestCase):
         self.assertEqual(package_lock["version"], RELEASE_VERSION)
         self.assertEqual(package_lock["packages"][""]["version"], RELEASE_VERSION)
         self.assertEqual(wrangler["vars"]["SERVER_VERSION"], RELEASE_VERSION)
-        self.assertIn(
-            f'name = "yahoo-finance-mcp"\nversion = "{RELEASE_VERSION}"',
-            uv_lock,
-        )
+        # uv writes no version for this project because the version is
+        # dynamic (it reads it from yfmcp/version.py); a version line, if
+        # present, must not be stale.
+        project_entry = uv_lock.split('name = "yahoo-finance-mcp"\n', 1)[1].split("\n\n", 1)[0]
+        self.assertIn('source = { virtual = "." }', project_entry)
+        for line in project_entry.splitlines():
+            if line.startswith("version = "):
+                self.assertEqual(line, f'version = "{RELEASE_VERSION}"')
 
     def test_build_version_uses_semver_build_metadata(self) -> None:
         self.assertEqual(stamp._build_version("1.5.0", "541DFA26A14C"), "1.5.0+git.541dfa2")

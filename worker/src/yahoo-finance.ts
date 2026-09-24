@@ -808,18 +808,152 @@ async function yGetText(url: string, auth: boolean): Promise<string> {
   return res.text();
 }
 
+// Slow-changing Yahoo data is also kept in the colo's edge cache, so fresh
+// isolates reuse it instead of calling Yahoo again. Only endpoints and
+// quoteSummary modules listed here qualify; anything that carries a live
+// price or quote stays on the 30-second in-process cache above.
+const YAHOO_EDGE_CACHE_VERSION = "v1";
+const HOUR_MS = 3_600_000;
+const YAHOO_TIMESERIES_EDGE_TTL_MS = 6 * HOUR_MS;
+const YAHOO_QUOTE_SUMMARY_EDGE_TTL_MS: Record<string, number> = {
+  assetProfile: 6 * HOUR_MS,
+  summaryProfile: 6 * HOUR_MS,
+  fundProfile: 6 * HOUR_MS,
+  topHoldings: 6 * HOUR_MS,
+  majorHoldersBreakdown: 6 * HOUR_MS,
+  institutionOwnership: 6 * HOUR_MS,
+  fundOwnership: 6 * HOUR_MS,
+  insiderHolders: 6 * HOUR_MS,
+  insiderTransactions: 6 * HOUR_MS,
+  netSharePurchaseActivity: 6 * HOUR_MS,
+  recommendationTrend: HOUR_MS,
+  upgradeDowngradeHistory: HOUR_MS,
+  earningsTrend: HOUR_MS,
+  earningsHistory: HOUR_MS,
+  calendarEvents: HOUR_MS,
+  secFilings: HOUR_MS,
+};
+
+/**
+ * The cache identity of a Yahoo GET. Timeseries requests end their window at
+ * the current second (`period2`), which would give every call a new key, so
+ * the window end is dropped from the key.
+ */
+function yahooCacheUrl(url: string): string {
+  if (!url.includes("/ws/fundamentals-timeseries/")) return url;
+  return url.replace(/([?&])period2=\d+(&|$)/, (_m, lead: string, tail: string) => (tail ? lead : ""));
+}
+
+/** Edge-cache lifetime for a Yahoo GET, or 0 when it must not be edge cached. */
+export function yahooEdgeTtlMs(url: string): number {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return 0;
+  }
+  if (parsed.pathname.includes("/ws/fundamentals-timeseries/")) return YAHOO_TIMESERIES_EDGE_TTL_MS;
+  if (!parsed.pathname.includes("/v10/finance/quoteSummary/")) return 0;
+  const modules = (parsed.searchParams.get("modules") ?? "").split(",").filter(Boolean);
+  if (modules.length === 0) return 0;
+  let ttl = Infinity;
+  for (const module of modules) {
+    const moduleTtl = YAHOO_QUOTE_SUMMARY_EDGE_TTL_MS[module];
+    if (!moduleTtl) return 0;
+    ttl = Math.min(ttl, moduleTtl);
+  }
+  return ttl;
+}
+
+/** Only a complete, error-free Yahoo answer is shared through the edge cache. */
+function isEdgeCacheableYahooBody(url: string, text: string): boolean {
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return false;
+  }
+  if (url.includes("/ws/fundamentals-timeseries/")) {
+    const series = body?.timeseries as { result?: unknown; error?: unknown } | undefined;
+    const results = Array.isArray(series?.result) ? series.result as Record<string, unknown>[] : [];
+    return series?.error == null && results.some((item) =>
+      item != null && typeof item === "object" && Object.keys(item).some((key) => key !== "meta" && key !== "timestamp")
+    );
+  }
+  const summary = body?.quoteSummary as { result?: unknown; error?: unknown } | undefined;
+  const first = Array.isArray(summary?.result) ? summary.result[0] : undefined;
+  return summary?.error == null && first != null && typeof first === "object" && Object.keys(first).length > 0;
+}
+
+function yahooEdgeRequest(cacheUrl: string): Request {
+  return new Request(`https://yahoo-cache.invalid/${YAHOO_EDGE_CACHE_VERSION}/${encodeURIComponent(cacheUrl)}`);
+}
+
+async function readYahooEdge(cacheUrl: string, ttlMs: number): Promise<string | null> {
+  const cache = edgeCache();
+  if (!cache) return null;
+  try {
+    const response = await cache.match(yahooEdgeRequest(cacheUrl));
+    if (!response) return null;
+    const storedAt = Number(response.headers.get("X-Stored-At"));
+    if (!Number.isFinite(storedAt) || Date.now() - storedAt >= ttlMs) {
+      await response.body?.cancel();
+      return null;
+    }
+    return await response.text();
+  } catch {
+    return null;
+  }
+}
+
+async function writeYahooEdge(cacheUrl: string, text: string, ttlMs: number): Promise<void> {
+  const cache = edgeCache();
+  if (!cache) return;
+  try {
+    await cache.put(
+      yahooEdgeRequest(cacheUrl),
+      new Response(text, {
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": `public, max-age=${Math.max(1, Math.floor(ttlMs / 1000))}`,
+          "X-Stored-At": String(Date.now()),
+        },
+      }),
+    );
+  } catch {
+    // Edge cache is best effort; the Yahoo response remains usable.
+  }
+}
+
+async function fetchYahooBody(url: string, auth: boolean, cacheUrl: string): Promise<string> {
+  const edgeTtl = yahooEdgeTtlMs(url);
+  if (edgeTtl > 0) {
+    const cached = await readYahooEdge(cacheUrl, edgeTtl);
+    if (cached !== null) return cached;
+  }
+  const text = await yGetText(url, auth);
+  if (edgeTtl > 0 && isEdgeCacheableYahooBody(url, text)) {
+    await writeYahooEdge(cacheUrl, text, edgeTtl);
+  }
+  return text;
+}
+
+function yahooGetKey(url: string, auth: boolean): string {
+  return `${auth ? "auth" : "anon"}:${yahooCacheUrl(url)}`;
+}
+
 /** Drop a cached Yahoo GET body so the next yGet for this URL refetches it. */
 function evictYahooGet(url: string, auth = true): void {
-  yahooGetBodies.delete(`${auth ? "auth" : "anon"}:${url}`);
+  yahooGetBodies.delete(yahooGetKey(url, auth));
 }
 
 async function yGet(url: string, auth = true): Promise<unknown> {
-  const key = `${auth ? "auth" : "anon"}:${url}`;
+  const key = yahooGetKey(url, auth);
   let body = yahooGetBodies.get(key);
   if (body === undefined) {
     let pending = yahooGetInflight.get(key);
     if (!pending) {
-      pending = yGetText(url, auth)
+      pending = fetchYahooBody(url, auth, yahooCacheUrl(url))
         .then((text) => {
           yahooGetBodies.set(key, text, YAHOO_GET_TTL_MS);
           return text;

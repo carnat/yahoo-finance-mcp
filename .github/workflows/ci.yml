@@ -105,6 +105,12 @@ jobs:
       - name: MCP envelope tests
         run: python scripts/test_mcp_envelope.py
 
+      - name: Worker transport contract tests
+        run: python scripts/test_worker_transport_contract.py
+
+      - name: Worker doctrine safety tests
+        run: python scripts/test_worker_doctrine_safety.py
+
       - name: Input validation and security tests
         run: python scripts/test_input_validation.py
 
@@ -121,6 +127,9 @@ jobs:
       - name: Grouped parameter parity (Worker vs local)
         run: python -m unittest scripts.test_grouped_contract_parity -v
 
+      - name: Worker Yahoo edge cache tests
+        run: python scripts/test_worker_yahoo_edge_cache.py -v
+
       - name: Worker SEC reliability tests
         run: python scripts/test_sec_reliability_worker.py
 
@@ -129,6 +138,12 @@ jobs:
 
       - name: Official SEC facts provider tests
         run: python -m unittest scripts.test_worker_sec_provider -v
+
+      - name: SEC filing intelligence tests
+        run: python scripts/test_sec_intelligence.py
+
+      - name: EDGAR HTML parsing tests
+        run: python scripts/test_edgar_html_parse.py
 
       # ── 4. Infrastructure: cache layer ────────────────────────────────────
       - name: Cache layer tests
@@ -148,6 +163,12 @@ jobs:
       - name: News and events tests
         run: python scripts/test_news_events.py
 
+      - name: Marketaux news fallback tests
+        run: python scripts/test_marketaux_news.py
+
+      - name: News-quality audit tests
+        run: python scripts/test_arsenal_news_audit.py
+
       - name: Provider gap routing tests
         run: python -m unittest scripts.test_provider_gap_routing -v
 
@@ -159,6 +180,11 @@ jobs:
 
       - name: Options data quality tests
         run: python scripts/test_options_quality.py
+
+      - name: Options failure envelope tests (local and Worker)
+        run: |
+          python scripts/test_options_failure_envelope.py
+          python scripts/test_worker_options_envelope.py
 
       - name: Data quality regression tests
         run: python scripts/test_data_quality.py

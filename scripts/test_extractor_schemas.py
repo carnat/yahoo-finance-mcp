@@ -407,6 +407,65 @@ class TestExtractChinaExposureShape(unittest.TestCase):
 # Token efficiency: default outputs must not contain raw HTML / huge context
 # ---------------------------------------------------------------------------
 
+class TestExposureFanOut(unittest.TestCase):
+    """Composite exposure tools read the filing concurrently and keep per-branch error handling."""
+
+    def _slow(self, payload: dict | None = None, error: Exception | None = None):
+        async def _call(*args, **kwargs):
+            await asyncio.sleep(0.3)
+            if error is not None:
+                raise error
+            return json.dumps(payload or {})
+        return _call
+
+    def test_extract_exposure_runs_branches_together(self):
+        import time
+        from unittest.mock import AsyncMock, patch
+
+        with patch("server._get_submissions_for_ticker", new_callable=AsyncMock) as warm, \
+             patch("server.get_sec_filing_index", side_effect=self._slow({"filingDate": "2026-02-01"})), \
+             patch("server.extract_geographic_revenue", side_effect=self._slow(error=RuntimeError("geo parser failed"))), \
+             patch("server.search_sec_filing_text", side_effect=self._slow({"matches": []})) as search, \
+             patch("server.extract_risk_factor_mentions", side_effect=self._slow({"matches": []})):
+            warm.return_value = ("0000320193", {})
+            started = time.monotonic()
+            result = _parse(_run(srv.extract_exposure(ticker="AAPL", topic="China")))
+            elapsed = time.monotonic() - started
+
+        warm.assert_awaited_once_with("AAPL")
+        self.assertEqual(search.call_count, 2)  # operational and named-entity scans
+        # Five 0.3s reads take about 1.5s in sequence; together about 0.3s.
+        self.assertLess(elapsed, 1.0)
+        codes = [w.get("code") for w in result.get("warnings", []) if isinstance(w, dict)]
+        self.assertIn("REVENUE_EXTRACTION_ERROR", codes)
+
+    def test_extract_exposure_index_failure_still_raises(self):
+        from unittest.mock import AsyncMock, patch
+
+        with patch("server._get_submissions_for_ticker", new_callable=AsyncMock), \
+             patch("server.get_sec_filing_index", side_effect=self._slow(error=RuntimeError("index down"))), \
+             patch("server.extract_geographic_revenue", side_effect=self._slow()), \
+             patch("server.search_sec_filing_text", side_effect=self._slow()), \
+             patch("server.extract_risk_factor_mentions", side_effect=self._slow()):
+            with self.assertRaisesRegex(RuntimeError, "index down"):
+                _run(srv.extract_exposure(ticker="AAPL", topic="China"))
+
+    def test_extract_china_exposure_runs_reads_together(self):
+        import time
+        from unittest.mock import AsyncMock, patch
+
+        with patch("server._get_submissions_for_ticker", new_callable=AsyncMock), \
+             patch("server.get_sec_filing_index", side_effect=self._slow({"index": {}})), \
+             patch("server.extract_revenue_exposure", side_effect=self._slow({"status": "NOT_DISCLOSED"})), \
+             patch("server.extract_risk_factor_mentions", side_effect=self._slow({"matches": []})):
+            started = time.monotonic()
+            result = _parse(_run(srv.extract_china_exposure(ticker="AAPL")))
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.8)
+        self.assertEqual(result["revenueExposure"]["status"], "NOT_DISCLOSED")
+
+
 class TestTokenEfficiency(unittest.TestCase):
     def test_geo_default_no_raw_context(self):
         raw = _run(srv.extract_geographic_revenue(
@@ -471,6 +530,7 @@ if __name__ == "__main__":
         TestExtractRiskFactorMentionsShape,
         TestExtractCustomerConcentrationShape,
         TestExtractChinaExposureShape,
+        TestExposureFanOut,
         TestTokenEfficiency,
         TestStatusSemantics,
     ]:
