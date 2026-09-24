@@ -808,6 +808,11 @@ async function yGetText(url: string, auth: boolean): Promise<string> {
   return res.text();
 }
 
+/** Drop a cached Yahoo GET body so the next yGet for this URL refetches it. */
+function evictYahooGet(url: string, auth = true): void {
+  yahooGetBodies.delete(`${auth ? "auth" : "anon"}:${url}`);
+}
+
 async function yGet(url: string, auth = true): Promise<unknown> {
   const key = `${auth ? "auth" : "anon"}:${url}`;
   let body = yahooGetBodies.get(key);
@@ -1912,18 +1917,25 @@ export async function getOptionExpirationDates(ticker: string): Promise<string> 
   // auth=true (default): the v7 options endpoint now requires a crumb;
   // passing false caused 401 → uncaught throw → "Error occurred during tool execution".
   try {
-    const d = (await yGet(
-      `https://query2.finance.yahoo.com/v7/finance/options/${enc(ticker)}`
-    )) as Record<string, unknown>;
+    const url = `https://query2.finance.yahoo.com/v7/finance/options/${enc(ticker)}`;
+    const read = (d: unknown): { result: Record<string, unknown> | undefined; dates: string[] } => {
+      const result = ((d as Record<string, unknown> | undefined)?.optionChain as Record<string, unknown[]> | undefined)
+        ?.result?.[0] as Record<string, unknown> | undefined;
+      const dates = ((result?.expirationDates as number[] | undefined) ?? []).map((ts) =>
+        new Date(ts * 1000).toISOString().split("T")[0]
+      );
+      return { result, dates };
+    };
 
-    const result = (d?.optionChain as Record<string, unknown[]> | undefined)?.result?.[0] as
-      | Record<string, unknown>
-      | undefined;
+    let { result, dates } = read(await yGet(url));
+    if (dates.length === 0) {
+      // Yahoo intermittently answers with no result or no expirations (seen
+      // right after deploys, on fresh isolates). Keep the 30s body cache from
+      // replaying that answer and retry once, uncached.
+      evictYahooGet(url);
+      ({ result, dates } = read(await yGet(`${url}?_=${Date.now()}`)));
+    }
     if (!result) return noData(ticker);
-
-    const dates = ((result.expirationDates as number[]) ?? []).map((ts) =>
-      new Date(ts * 1000).toISOString().split("T")[0]
-    );
     return JSON.stringify(dates);
   } catch (e) {
     return `Error fetching option expiration dates for ${ticker}: ${e instanceof Error ? e.message : String(e)}`;
