@@ -42,7 +42,7 @@ UA = "Mozilla/5.0 (compatible; yahoo-finance-mcp-geo-schema/1.0)"
 def _ensure_mcp_available() -> None:
     """Install a minimal FastMCP stub into sys.modules when the real mcp package is absent."""
     try:
-        from mcp.server.fastmcp import FastMCP  # noqa: F401
+        import mcp.server  # noqa: F401
         return
     except ModuleNotFoundError:
         pass
@@ -72,7 +72,7 @@ def _ensure_mcp_available() -> None:
 
 
 def _patch_fastmcp_tool() -> None:
-    from mcp.server.fastmcp import FastMCP as _FastMCP  # noqa: E402
+    from yfmcp.app import FastMCP as _FastMCP  # noqa: E402
 
     if getattr(_FastMCP, "_output_schema_patched", False):
         return

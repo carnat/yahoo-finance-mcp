@@ -19,11 +19,10 @@ import zoneinfo
 
 import pandas as pd
 import yfinance as yf
-from mcp.server.fastmcp import FastMCP
 
 # Phase 2b: yfmcp.app owns the FastMCP compat shim, yfinance_server instance, TOOL_ALIASES, and
 # build_handler_registry.  Import first so the compat shim fires before any decorator runs.
-from yfmcp.app import yfinance_server, TOOL_ALIASES, build_handler_registry
+from yfmcp.app import create_server, yfinance_server, TOOL_ALIASES, build_handler_registry
 from yfmcp.schemas import (
     FinancialType, HolderType, RecommendationType, FilingFactType,
     _TOOL_OUTPUT_SCHEMAS, _MARKET_SNAPSHOT_OUTPUT_SCHEMA,
@@ -10009,7 +10008,7 @@ def _build_grouped_server():
     from tool_groups import TOOL_GROUPS, register_grouped_tools
     from yfmcp.app import build_tool_contract_registry
 
-    grouped = FastMCP(
+    grouped = create_server(
         "yfinance",
         instructions="""
 # Yahoo Finance MCP Server (Grouped Mode)

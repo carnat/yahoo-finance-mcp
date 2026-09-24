@@ -25,7 +25,7 @@ NODE_VERSION_PATTERN = re.compile(r'^\s*node-version:\s*"?(\d+)(?:\.\d+)?(?:\.x)
 
 
 class TestWorkflowSdkVersions(unittest.TestCase):
-    def test_mcp_python_sdk_stays_on_compatible_v1(self) -> None:
+    def test_mcp_python_sdk_range_is_supported(self) -> None:
         project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
         mcp_dependencies = [
             dependency
@@ -33,7 +33,8 @@ class TestWorkflowSdkVersions(unittest.TestCase):
             if dependency.startswith("mcp[cli]")
         ]
         self.assertEqual(len(mcp_dependencies), 1, "expected exactly one mcp[cli] dependency")
-        self.assertIn("<2", mcp_dependencies[0], "server.py still uses the MCP Python SDK v1 API")
+        # yfmcp.app imports MCPServer (2.x) or FastMCP (1.x); 3.x is untested.
+        self.assertIn("<3", mcp_dependencies[0], "yfmcp.app supports MCP Python SDK 1.x and 2.x only")
 
     def test_required_actions_use_current_major(self) -> None:
         workflows = sorted(WORKFLOWS_DIR.glob("*.yml"))

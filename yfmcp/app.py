@@ -17,7 +17,10 @@ import functools
 import inspect
 from typing import Any, Callable
 
-from mcp.server.fastmcp import FastMCP
+try:  # mcp>=2 renamed FastMCP to MCPServer; the decorator API is unchanged.
+    from mcp.server.mcpserver import MCPServer as FastMCP
+except ImportError:  # mcp 1.x
+    from mcp.server.fastmcp import FastMCP
 
 from yfmcp.build_info import BUILD_VERSION
 
@@ -162,7 +165,22 @@ TOOL_ALIASES: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Shared FastMCP server instance
 # ---------------------------------------------------------------------------
-yfinance_server = FastMCP(
+def create_server(name: str, instructions: str) -> FastMCP:
+    """Build a server whose MCP ``initialize`` reports this build's version.
+
+    mcp 2.x accepts ``version``; 1.x has no argument for it, so set the
+    low-level implementation version directly instead of reporting the SDK's.
+    """
+    if "version" in inspect.signature(FastMCP.__init__).parameters:
+        return FastMCP(name, instructions=instructions, version=BUILD_VERSION)
+    server = FastMCP(name, instructions=instructions)
+    low_level = getattr(server, "_mcp_server", None)
+    if low_level is not None:
+        low_level.version = BUILD_VERSION
+    return server
+
+
+yfinance_server = create_server(
     "yfinance",
     instructions="""
 # Yahoo Finance MCP Server
@@ -281,10 +299,6 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - calculate_price_target_distance: Compare current price to a user target; separates the legacy ratio from directional percent distance.
 """,
 )
-# FastMCP 1.x does not expose the low-level implementation-version argument.
-# Set it explicitly so local MCP initialize reports this server build instead
-# of the installed MCP SDK version.
-yfinance_server._mcp_server.version = BUILD_VERSION
 
 
 def build_handler_registry(server: FastMCP) -> dict[str, Callable[..., Any]]:

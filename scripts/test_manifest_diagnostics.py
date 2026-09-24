@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["MCP_ENVELOPE_V2"] = "true"
 
 # Patch FastMCP.tool to accept output_schema (not in mcp>=1.9)
-from mcp.server.fastmcp import FastMCP as _FastMCP  # noqa: E402
+from yfmcp.app import FastMCP as _FastMCP  # noqa: E402
 _orig_tool = _FastMCP.tool
 def _patched_tool(self, name=None, output_schema=None, **kwargs):  # type: ignore[override]
     return _orig_tool(self, name=name, **kwargs)
@@ -58,7 +58,10 @@ class TestHealthMetadata(unittest.TestCase):
     def test_python_mcp_initialize_uses_exact_build_version(self):
         from yfmcp.build_info import BUILD_VERSION
 
-        initialization = self.srv.yfinance_server._mcp_server.create_initialization_options()
+        # mcp 1.x keeps the low-level server on _mcp_server, 2.x on _lowlevel_server.
+        server = self.srv.yfinance_server
+        low_level = getattr(server, "_mcp_server", None) or server._lowlevel_server
+        initialization = low_level.create_initialization_options()
         self.assertEqual(initialization.server_version, BUILD_VERSION)
 
     def test_health_check_shape(self):

@@ -11,7 +11,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mcp.server.fastmcp import FastMCP as _FastMCP  # noqa: E402
+from yfmcp.app import FastMCP as _FastMCP  # noqa: E402
 
 _orig_tool = _FastMCP.tool
 

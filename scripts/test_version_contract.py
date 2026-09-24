@@ -23,7 +23,11 @@ class TestVersionContract(unittest.TestCase):
     def test_python_mcp_initialize_is_pinned_to_exact_build_version(self) -> None:
         app_source = (ROOT / "yfmcp" / "app.py").read_text(encoding="utf-8")
         self.assertIn("from yfmcp.build_info import BUILD_VERSION", app_source)
-        self.assertIn("yfinance_server._mcp_server.version = BUILD_VERSION", app_source)
+        self.assertIn("version=BUILD_VERSION", app_source)
+        self.assertIn("low_level.version = BUILD_VERSION", app_source)
+        self.assertIn("yfinance_server = create_server(", app_source)
+        server_source = (ROOT / "server.py").read_text(encoding="utf-8")
+        self.assertIn("grouped = create_server(", server_source)
 
     def test_committed_version_sources_match_canonical_release(self) -> None:
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
