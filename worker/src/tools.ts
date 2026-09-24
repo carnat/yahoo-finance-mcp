@@ -2497,21 +2497,25 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
     return mcpFailure(name, legacyFailure.code, legacyFailure.message);
   }
   let batchMeta: { partialSuccess?: boolean; successCount?: number; errorCount?: number } | undefined;
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const metaRaw = parsed.__batchMeta;
-    if (metaRaw != null && typeof metaRaw === "object") {
-      const bm = metaRaw as Record<string, unknown>;
-      batchMeta = {
-        partialSuccess: bm.partialSuccess === true,
-        successCount: typeof bm.successCount === "number" ? bm.successCount : undefined,
-        errorCount: typeof bm.errorCount === "number" ? bm.errorCount : undefined,
-      };
-      delete parsed.__batchMeta;
-      raw = JSON.stringify(parsed);
+  // Only batch results carry __batchMeta; skip the parse/re-serialize round
+  // trip for everything else (large filings and transcripts included).
+  if (raw.includes('"__batchMeta"')) {
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const metaRaw = parsed.__batchMeta;
+      if (metaRaw != null && typeof metaRaw === "object") {
+        const bm = metaRaw as Record<string, unknown>;
+        batchMeta = {
+          partialSuccess: bm.partialSuccess === true,
+          successCount: typeof bm.successCount === "number" ? bm.successCount : undefined,
+          errorCount: typeof bm.errorCount === "number" ? bm.errorCount : undefined,
+        };
+        delete parsed.__batchMeta;
+        raw = JSON.stringify(parsed);
+      }
+    } catch {
+      // non-JSON payload
     }
-  } catch {
-    // non-JSON payload
   }
   if (aliasTarget != null) {
     const aliasToolDef = TOOLS.find((t) => t.name === name);
