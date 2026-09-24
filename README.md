@@ -156,6 +156,16 @@ current-session bar is excluded. Check `freshnessStatus` and
 `recommendedNextAction` before using the result. Do not treat values from
 different dates or observation times as conflicts.
 
+`expectedCompletedDate` is the most recent exchange session that should
+already be complete. Outside a regular session it is the session of the last
+regular-market trade. During a regular session it is the previous session,
+given only when proven: Yahoo's `previousClose` equals the last completed
+close, or the last completed bar is from the weekday before today's session.
+Otherwise it is `null` with `freshnessStatus` `STALE` (the previous session is
+missing) or `UNKNOWN` (not provable, for example after a holiday without
+`previousClose`). A completed-session result is current exactly when
+`latestAvailableBarDate` equals `expectedCompletedDate`.
+
 Other daily derived tools follow the same boundary. Technical indicators,
 volume ratios, liquidity gates, realized-volatility context, and historical
 performance use completed sessions only and expose `dataDate`, `barStatus`,

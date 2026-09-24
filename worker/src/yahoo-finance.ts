@@ -3612,6 +3612,15 @@ function dailyBarDate(timestamp: number | null, timezone: string): string | null
   }
 }
 
+/** The weekday (Mon-Fri) before an ISO date, as an ISO date. */
+function previousWeekday(isoDate: string): string {
+  const day = new Date(`${isoDate}T00:00:00Z`);
+  do {
+    day.setUTCDate(day.getUTCDate() - 1);
+  } while (day.getUTCDay() === 0 || day.getUTCDay() === 6);
+  return day.toISOString().slice(0, 10);
+}
+
 function prepareCompletedDailySeries(
   result: Record<string, unknown>,
   nowEpoch: number,
@@ -3678,30 +3687,44 @@ function prepareCompletedDailySeries(
     excludedIncompleteBar = true;
   }
 
-  const regularMarketTime = dailyBarNumber(meta.regularMarketTime);
-  const expectedCompletedDate = !activeSession
-    ? dailyBarDate(regularMarketTime, timezone)
-    : null;
   const lastCompletedDate = completedRows.length > 0
     ? dailyBarDate(completedRows[completedRows.length - 1].timestamp, timezone)
     : null;
-  const expectedPreviousClose = dailyBarNumber(meta.previousClose);
   const lastCompletedRawClose = completedRows.length > 0
     ? completedRows[completedRows.length - 1].rawClose
     : null;
-  const activeSessionStale =
-    activeSession
-    && expectedPreviousClose != null
-    && lastCompletedRawClose != null
-    && Math.abs(lastCompletedRawClose - expectedPreviousClose)
-      > Math.max(0.01, Math.abs(expectedPreviousClose) * 1e-6);
-  const freshnessStatus: PreparedCompletedDailySeries["freshnessStatus"] = activeSession
-    ? activeSessionStale ? "STALE" : "CURRENT"
-    : expectedCompletedDate == null || lastCompletedDate == null
+
+  // expectedCompletedDate is the most recent session that should already be
+  // complete. Outside a regular session that is the session of
+  // regularMarketTime. During one it is the previous session, which is only
+  // named when proven: Yahoo's previousClose equals the last completed close,
+  // or (without previousClose) the last completed bar is from the weekday just
+  // before today's session, so no weekday session can be missing in between.
+  let expectedCompletedDate: string | null;
+  let freshnessStatus: PreparedCompletedDailySeries["freshnessStatus"];
+  if (!activeSession) {
+    expectedCompletedDate = dailyBarDate(dailyBarNumber(meta.regularMarketTime), timezone);
+    freshnessStatus = expectedCompletedDate == null || lastCompletedDate == null
       ? "UNKNOWN"
       : lastCompletedDate < expectedCompletedDate
         ? "STALE"
         : "CURRENT";
+  } else {
+    const previousClose = dailyBarNumber(meta.previousClose);
+    const sessionDate = dailyBarDate(regularStart, timezone);
+    if (previousClose != null && lastCompletedRawClose != null) {
+      const matches = Math.abs(lastCompletedRawClose - previousClose)
+        <= Math.max(0.01, Math.abs(previousClose) * 1e-6);
+      freshnessStatus = matches ? "CURRENT" : "STALE";
+      expectedCompletedDate = matches ? lastCompletedDate : null;
+    } else if (lastCompletedDate != null && sessionDate != null && lastCompletedDate === previousWeekday(sessionDate)) {
+      freshnessStatus = "CURRENT";
+      expectedCompletedDate = lastCompletedDate;
+    } else {
+      freshnessStatus = "UNKNOWN";
+      expectedCompletedDate = null;
+    }
+  }
 
   return {
     completedRows,

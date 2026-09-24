@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -98,6 +99,44 @@ class TestGroupedContractParity(unittest.TestCase):
             if worker[action] != local[action]
         }
         self.assertEqual(mismatches, {}, json.dumps(mismatches, indent=2))
+
+
+_PARAMS_LINE = re.compile(r"^- (\w+):.*?Params:\s*(.*)$")
+
+
+def _advertised_params(listing: str) -> set[str]:
+    """Names in a description's "Params:" list ("a, b/c, optional d, e (note)")."""
+    if listing.strip().lower() == "none":
+        return set()
+    names = set()
+    for part in listing.split(","):
+        for name in part.split("/"):
+            name = re.sub(r"^optional\s+", "", name.strip()).split(" (")[0].strip()
+            if name:
+                names.add(name)
+    return names
+
+
+class TestCatalogDescribesExecutableParams(unittest.TestCase):
+    """The grouped descriptions are how an LLM learns each action's params."""
+
+    def test_advertised_params_are_accepted_and_required_ones_advertised(self) -> None:
+        worker = _worker_grouped_schemas()
+        catalog = json.loads((ROOT / "tool_catalog.json").read_text(encoding="utf-8"))
+        problems = {}
+        for group, info in catalog["groups"].items():
+            for line in info["description"].split("\n"):
+                match = _PARAMS_LINE.match(line)
+                if not match:
+                    continue
+                action = f"{group}.{match.group(1)}"
+                listed = _advertised_params(match.group(2))
+                schema = worker[action]
+                rejected = sorted(listed - set(schema["params"]))
+                unlisted_required = sorted(set(schema["required"]) - listed)
+                if rejected or unlisted_required:
+                    problems[action] = {"advertisedButRejected": rejected, "requiredButNotAdvertised": unlisted_required}
+        self.assertEqual(problems, {}, json.dumps(problems, indent=2))
 
 
 _ENVELOPE_SAMPLES = {
