@@ -16,6 +16,8 @@ answer on production:
 - Rating changes ignored Yahoo's price targets; the flow window's max pain
   was the strike with the most open interest; news items that only mention
   a company were labelled as issued by it.
+- Risk factor excerpts kept the first 240 characters of each search window,
+  which rarely held the term, and "tariff" did not match "tariffs".
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ export {
   selectQuarterFact, getCreditHealth, filingItemHeadings, findSectionBounds, mergeFinancialCells,
   extractSegmentTableFromHtml, extractGeoRevenueFromHtml, tableUnitScale, analystPriceTargetChange,
   computeMaxPainStrike, rankNewsItemsByRelevance, limitCorporateActions, unwrapYahooValues,
-  yahooItemIssuer, customerConcentrationFromMatches,
+  yahooItemIssuer, customerConcentrationFromMatches, readableExposureExcerpt,
 } from "./src/yahoo-finance.ts";
 """
 
@@ -183,6 +185,14 @@ out.customers = m.customerConcentrationFromMatches([
   { contextText: "Net sales are diversified. No single customer accounted for more than 10% of net sales in 2025." },
   { contextText: "One customer accounted for 24% of revenue. Customers include distributors." },
 ], { documentUrl: "u" }, "FY2025");
+// AAPL FY2025 risk factor search window: the term sits past the first 240
+// characters and appears only in plural form.
+const tariffWindow = "rk carriers and other channel partners. The Company has a large, global business with sales outside the U.S. representing a majority of the Company’s total net sales, and the Company believes that it generally benefits from growth in international trade. A significant majority of the Company’s manufacturing is performed in whole or in part by outsourcing partners located primarily in China mainland, India, Japan, South Korea, Taiwan and Vietnam. Restrictions on international trade, such as tariffs and other controls on imports or exports of goods, technology or data, can materially adversely affect the Company’s business and supply chain. The impact can be particularly significant if these restrictive measures apply to countries and regions where the Company derives a significant portion of its revenues.";
+out.riskExcerpt = {
+  tariff: m.readableExposureExcerpt(tariffWindow, ["tariff"]),
+  absent: m.readableExposureExcerpt(tariffWindow, ["semiconductor"]),
+  partialWord: m.readableExposureExcerpt(tariffWindow, ["tari"]),
+};
 console.log(JSON.stringify(out));
 """
 
@@ -300,6 +310,12 @@ class TestWorkerDataAccuracy(unittest.TestCase):
         customers = self.out["customers"]
         self.assertEqual([c["valuePct"] for c in customers["customers"]], [24])
         self.assertIn("No single customer", customers["negation"]["excerpt"])
+
+    def test_risk_excerpt_is_centered_on_the_term(self) -> None:
+        excerpt = self.out["riskExcerpt"]
+        self.assertTrue(excerpt["tariff"].startswith("...Restrictions on international trade, such as tariffs"))
+        self.assertLessEqual(len(excerpt["tariff"]), 246)
+        self.assertEqual((excerpt["absent"], excerpt["partialWord"]), ("", ""))
 
 
 if __name__ == "__main__":

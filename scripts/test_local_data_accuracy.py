@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Local-server counterparts of the Worker data-accuracy fixes (2.2.5).
+"""Local-server counterparts of the Worker data-accuracy fixes (2.2.5, 2.2.6).
 
 Price-target direction, corporate-action limits, news ranking/search and
-issuer labelling, SEC XBRL flags, meta.dataDate, and Yahoo transcript URLs
-behave as the Worker does.
+issuer labelling, SEC XBRL flags, meta.dataDate, Yahoo transcript URLs,
+risk factor excerpts and section text entities behave as the Worker does.
 """
 
 from __future__ import annotations
@@ -102,6 +102,43 @@ class TestLocalDataAccuracy(unittest.TestCase):
         self.assertEqual(data["source"], "public_url")
         self.assertEqual([p["paragraph"] for p in data["matchedParagraphs"]], ["Tim Cook: Gross margin was strong this quarter."])
         self.assertEqual(fake.await_count, 2)
+
+    def test_risk_excerpt_is_centered_on_the_term(self) -> None:
+        window = (
+            "rk carriers and other channel partners. The Company has a large, global business with sales outside the U.S. "
+            "representing a majority of the Company’s total net sales, and the Company believes that it generally benefits "
+            "from growth in international trade. A significant majority of the Company’s manufacturing is performed in whole "
+            "or in part by outsourcing partners located primarily in China mainland, India, Japan, South Korea, Taiwan and "
+            "Vietnam. Restrictions on international trade, such as tariffs and other controls on imports or exports of goods, "
+            "technology or data, can materially adversely affect the Company’s business and supply chain."
+        )
+        excerpt = srv._readable_exposure_excerpt(window, ["tariff"])
+        self.assertTrue(excerpt.startswith("...Restrictions on international trade, such as tariffs"))
+        self.assertLessEqual(len(excerpt), 246)
+        self.assertEqual(srv._readable_exposure_excerpt(window, ["tari"]), "")
+
+    def test_section_text_decodes_entities(self) -> None:
+        html = (
+            "<html><body><p><span style=\"font-weight:700\">Item 1A.&#160;&#160;Risk Factors</span></p>"
+            "<p>The Company&#8217;s business is subject to risks.</p>"
+            "<p><span style=\"font-weight:700\">Item 1B.&#160;&#160;Unresolved Staff Comments</span></p><p>None.</p></body></html>"
+        )
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return html.encode()
+
+        with patch("urllib.request.urlopen", return_value=_Resp()):
+            raw = _run(srv.get_filing_section("AAPL", "Item 1A", "https://www.sec.gov/Archives/edgar/data/320193/x/a.htm"))
+        text = _data(raw)["text"]
+        self.assertIn("The Company’s business", text)
+        self.assertNotIn("&#", text)
 
 
 if __name__ == "__main__":

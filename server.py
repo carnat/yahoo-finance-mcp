@@ -4055,7 +4055,7 @@ async def get_filing_section(ticker: str, section_name: str, document_url: str, 
 
         if start_idx is not None and end_idx is not None:
             section_html = html[start_idx:end_idx]
-            plain_section = _re.sub(r'<[^>]+>', ' ', section_html)
+            plain_section = _html_module.unescape(_re.sub(r'<[^>]+>', ' ', section_html))
             plain_section = ' '.join(plain_section.split())
             return json.dumps({
                 "ticker": ticker,
@@ -4085,7 +4085,7 @@ async def get_filing_section(ticker: str, section_name: str, document_url: str, 
             })
 
         # Non-Item labels retain the legacy plain-text fallback.
-        text = _re.sub(r'<[^>]+>', ' ', html)
+        text = _html_module.unescape(_re.sub(r'<[^>]+>', ' ', html))
         text = ' '.join(text.split())
 
         pattern = _re.compile(_re.escape(section_name), _re.IGNORECASE)
@@ -8897,12 +8897,41 @@ _EXPOSURE_RELATIONSHIP_RE = _re.compile(
 )
 
 
+def _exposure_term_match(text: str, term: str):
+    """First whole-word match of term, plural forms included ("tariff" matches "tariffs")."""
+    escaped = _re.escape(str(term).strip())
+    if not escaped:
+        return None
+    return _re.search(rf"(?<![A-Za-z0-9]){escaped}(?:e?s)?(?![A-Za-z0-9])", text, _re.IGNORECASE)
+
+
 def _exposure_term_present(text: str, term: str) -> bool:
-    return bool(_re.search(
-        rf"(?<![A-Za-z0-9]){_re.escape(str(term).strip())}(?![A-Za-z0-9])",
-        text,
-        _re.IGNORECASE,
-    ))
+    return _exposure_term_match(text, term) is not None
+
+
+def _term_centered_excerpt(text: str, terms: list[str], max_len: int) -> str:
+    """About max_len characters around the first term, starting at its sentence when that fits."""
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= max_len:
+        return cleaned
+    starts = [m.start() for m in (_exposure_term_match(cleaned, term) for term in terms) if m]
+    if not starts:
+        return _compact_excerpt(cleaned, max_len)
+    at = min(starts)
+    start = max(0, min(at - max_len // 3, len(cleaned) - max_len))
+    sentence = cleaned.rfind(". ", start, at)
+    if sentence >= 0:
+        start = sentence + 2
+    elif start > 0:
+        space = cleaned.find(" ", start, at)
+        if space >= 0:
+            start = space + 1
+    end = start + max_len
+    if end < len(cleaned):
+        space = cleaned.rfind(" ", at, end)
+        if space > at:
+            end = space
+    return f"{'...' if start > 0 else ''}{cleaned[start:end].strip()}{'...' if end < len(cleaned) else ''}"
 
 
 def _readable_exposure_excerpt(
@@ -8913,7 +8942,7 @@ def _readable_exposure_excerpt(
     min_words: int = 5,
 ) -> str:
     cleaned = _EXPOSURE_XBRL_TOKEN_RE.sub(" ", str(value or ""))
-    excerpt = _compact_excerpt(cleaned, max_len)
+    excerpt = _term_centered_excerpt(cleaned, terms, max_len)
     if not excerpt or not any(_exposure_term_present(excerpt, term) for term in terms):
         return ""
     if len(_re.findall(r"[A-Za-z]{2,}", excerpt)) < min_words:
