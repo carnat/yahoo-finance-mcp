@@ -1,5 +1,6 @@
 import { mcpSuccessFromValue, mcpSuccessResult, mcpFailure, mcpFailureResult, type ToolResult, ErrorCode, envelopeV2Enabled, getBuildVersion, getServerVersion, getWorkerVar } from "./response.js";
 import { GROUPED_TOOL_DEFS } from "./tool-catalog.js";
+import { withCacheScope } from "./request-context.js";
 import {
   getAnalystConsensus,
   getAnalystUpgradeRadar,
@@ -1801,7 +1802,15 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
   return (await callToolResult(name, args)).text;
 }
 
+/**
+ * Each tool call runs in its own cache scope, so its meta.cacheHit and
+ * meta.cacheSource describe that call alone.
+ */
 export async function callToolResult(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+  return (await withCacheScope(() => callToolResultInScope(name, args))).result;
+}
+
+async function callToolResultInScope(name: string, args: Record<string, unknown>): Promise<ToolResult> {
   let raw: string;
   try {
     raw = await _dispatchTool(name, args);
@@ -1872,6 +1881,10 @@ export async function callVisibleTool(name: string, args: Record<string, unknown
 }
 
 export async function callVisibleToolResult(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+  return (await withCacheScope(() => callVisibleToolResultInScope(name, args))).result;
+}
+
+async function callVisibleToolResultInScope(name: string, args: Record<string, unknown>): Promise<ToolResult> {
   if (!isGroupedMode()) return callToolResult(name, args);
 
   const actions = GROUPED_ACTIONS.get(name);

@@ -48,6 +48,7 @@ export interface ToolMeta {
   serverVersion: string;
   workerVersionId?: string;
   cacheHit: boolean;
+  cacheSource?: string | null;
   warnings: unknown[];
   capabilityStatus?: string;
   decisionGrade?: boolean;
@@ -82,6 +83,16 @@ export const ErrorCode = {
 
 export type ErrorCodeValue = (typeof ErrorCode)[keyof typeof ErrorCode];
 
+// Where the current tool call's provider data came from. index.ts installs
+// the request-context implementation; this module stays import-free so it
+// loads on its own (as the Node-based envelope tests do).
+type CacheSummary = { cacheHit: boolean; cacheSource: string | null };
+let cacheSummary: () => CacheSummary = () => ({ cacheHit: false, cacheSource: null });
+
+export function setCacheSummaryProvider(provider: () => CacheSummary): void {
+  cacheSummary = provider;
+}
+
 function buildMeta(
   tool: string,
   opts?: {
@@ -99,6 +110,7 @@ function buildMeta(
   }
 ): ToolMeta {
   const workerVersionId = getWorkerVar("WORKER_VERSION_ID");
+  const cache = cacheSummary();
   return {
     tool,
     ...(opts?.canonicalTool ? { canonicalTool: opts.canonicalTool } : {}),
@@ -110,7 +122,8 @@ function buildMeta(
     source: opts?.source ?? "yahoo_finance",
     dataDate: opts?.dataDate ?? null,
     serverVersion: getServerVersion(),
-    cacheHit: opts?.cacheHit ?? false,
+    cacheHit: opts?.cacheHit ?? cache.cacheHit,
+    cacheSource: cache.cacheSource,
     warnings: opts?.warnings ?? [],
     ...(opts?.metaExtra || {}),
     ...(workerVersionId ? { workerVersionId } : {}),
@@ -348,6 +361,10 @@ export function mcpSuccessFromValue(
           ...baseMeta,
           ...innerMeta,
           ...(opts?.metaExtra || {}),
+          // The inner envelope was built before the tool finished; its
+          // cache summary may be incomplete.
+          cacheHit: baseMeta.cacheHit,
+          cacheSource: baseMeta.cacheSource,
           warnings: [...baseWarnings, ...innerWarnings],
           ...(workerVersionId ? { workerVersionId } : {}),
         } as ToolMeta,

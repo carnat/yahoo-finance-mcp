@@ -157,6 +157,17 @@ class TestWorkerYahooEdgeCache(unittest.TestCase):
         for key in quote_keys:
             self.assertEqual(after[key], 2, key)
 
+    def test_meta_reports_where_each_call_got_its_data(self) -> None:
+        def summary(isolate: str, call: str) -> tuple[bool, str | None]:
+            meta = self.result[isolate][call]["meta"]
+            return meta["cacheHit"], meta["cacheSource"]
+
+        self.assertEqual(summary("first", "statement"), (False, "upstream"))
+        self.assertEqual(summary("first", "statementAgain"), (True, "memory"))
+        self.assertEqual(summary("second", "statement"), (True, "edge"))
+        self.assertEqual(summary("second", "holders"), (True, "edge"))
+        self.assertIs(summary("second", "quote")[0], False)
+        self.assertIn(summary("second", "quote")[1], ("upstream", "mixed"))
 
     def test_health_reports_cache_counters(self) -> None:
         first = self.result["first"]["health"]["yahooCache"]

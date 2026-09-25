@@ -70,6 +70,23 @@ Sources checked through 2026-08-04:
   (the `nodejs_als` compatibility flag), so concurrent requests in one isolate
   do not mix. The deployed discovery smoke reads a statement twice, 31 s apart,
   and reports whether the second read came from the edge cache.
+- `meta.cacheHit` and `meta.cacheSource` summarize each tool call's own cache
+  use. Every provider request goes through `providerFetch` in
+  `worker/src/request-context.ts`, and the Yahoo GET, SEC archive document,
+  and scarce-provider caches report their hits there; a call is a cache hit
+  only if it read cached data and made no provider request.
+
+## SEC Archive Document Caching
+
+- The Worker's filing tools that read a document by URL (outline, section,
+  table list, table) share one cache for `https://www.sec.gov/Archives/`
+  documents: 10 minutes in the isolate (at most 12 documents and 16 million
+  characters), 24 hours in the Worker Cache API, and one SEC request for
+  concurrent reads of the same document. Archive documents do not change once
+  filed. Failed fetches are never cached.
+- `/health` reports per-isolate `secDocumentCache` counters, and every `/mcp`
+  response carries an `X-Sec-Cache` header in the `X-Yahoo-Cache` format. Its
+  memory count also includes the isolate's CIK and submissions caches.
 - The local server caches EDGAR archive documents (`https://www.sec.gov/Archives/`)
   for 30 minutes in a 64-million-character budget and shares in-flight fetches
   across concurrent tool calls. Submissions are cached for 24 hours, so new

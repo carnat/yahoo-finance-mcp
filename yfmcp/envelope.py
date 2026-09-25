@@ -57,6 +57,7 @@ class ToolMeta(TypedDict):
     dataDate: str | None
     serverVersion: str
     cacheHit: bool
+    cacheSource: str | None
     warnings: list[object]
 
 
@@ -126,6 +127,8 @@ def _base_meta(
         "dataDate": data_date,
         "serverVersion": SERVER_VERSION,
         "cacheHit": cache_hit,
+        # The local server reports only its own tool-result cache hits.
+        "cacheSource": "memory" if cache_hit else None,
         "warnings": warnings or [],
     }
 
@@ -161,6 +164,7 @@ def _mcp_failure(
             "dataDate": data_date,
             "serverVersion": SERVER_VERSION,
             "cacheHit": False,
+            "cacheSource": None,
             "warnings": [],
         },
         "error": error_payload,
@@ -477,6 +481,8 @@ def _envelope_tool_result(tool: str, result: object) -> object:
         if isinstance(parsed.get("ok"), bool) and ("data" in parsed or "error" in parsed):
             inner_meta = parsed.get("meta") if isinstance(parsed.get("meta"), dict) else {}
             parsed["meta"] = {**_base_meta(tool), **inner_meta}
+            if "cacheSource" not in inner_meta:
+                parsed["meta"]["cacheSource"] = "memory" if parsed["meta"].get("cacheHit") is True else None
             if parsed["ok"] is True:
                 parsed["data"] = _enrich_facts(parsed.get("data"))
             return json.dumps(parsed)

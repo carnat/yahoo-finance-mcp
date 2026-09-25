@@ -133,6 +133,12 @@ jobs:
       - name: Worker Yahoo throttling tests
         run: python scripts/test_worker_yahoo_throttling.py -v
 
+      - name: Worker SEC document cache and meta.cacheSource tests
+        run: python scripts/test_worker_sec_document_cache.py -v
+
+      - name: Local batch concurrency tests
+        run: python scripts/test_python_batch_concurrency.py -v
+
       - name: Historical prices contract tests (Worker and local)
         run: python scripts/test_historical_prices_contract.py -v
 
