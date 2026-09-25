@@ -104,6 +104,15 @@ TOOL_MODE=expanded uv run server.py
 Both runtimes return the V2 response envelope (`ok`, `data`, `meta`, `error`).
 Set `MCP_ENVELOPE_V2=false` on the local server to keep the legacy 1.x shape.
 
+`meta.cacheSource` says where a call's provider data came from: `memory` (the
+process cache, or a request already in flight for another call), `edge` (the
+Worker's data-center cache), `upstream` (the provider), `mixed`, or `null` when
+no cached provider read was involved. `meta.cacheHit` is true only when data was
+read from a cache and no provider request was made. The local server reports
+only its own tool-result cache (`memory` or `null`).
+
+Batch calls (a list of tickers) run three tickers at a time in both runtimes.
+
 Grouped domains:
 
 - `stock_pricing`

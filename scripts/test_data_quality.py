@@ -108,8 +108,10 @@ class TestPr2DataQuality(unittest.TestCase):
                     "exchangeTimezoneName": "UTC",
                     "previousClose": 10.5,
                     "currentTradingPeriod": {
+                        # Sessions opening at midnight stay on today's bar at
+                        # any hour (an hour ago is yesterday before 01:00 UTC).
                         "regular": {
-                            "start": int((now - pd.Timedelta(hours=1)).timestamp()),
+                            "start": int(now.normalize().timestamp()),
                             "end": int((now + pd.Timedelta(hours=1)).timestamp()),
                         },
                     },
@@ -296,7 +298,7 @@ class TestPr2DataQuality(unittest.TestCase):
                     "previousClose": completed_closes[-1],
                     "currentTradingPeriod": {
                         "regular": {
-                            "start": int((now - pd.Timedelta(hours=1)).timestamp()),
+                            "start": int(now.normalize().timestamp()),
                             "end": int((now + pd.Timedelta(hours=1)).timestamp()),
                         },
                     },
@@ -347,7 +349,7 @@ class TestPr2DataQuality(unittest.TestCase):
                     "previousClose": closes[-2],
                     "currentTradingPeriod": {
                         "regular": {
-                            "start": int((now - pd.Timedelta(hours=1)).timestamp()),
+                            "start": int(now.normalize().timestamp()),
                             "end": int((now + pd.Timedelta(hours=1)).timestamp()),
                         },
                     },
@@ -381,7 +383,7 @@ class TestPr2DataQuality(unittest.TestCase):
                     "previousClose": 50.0,
                     "currentTradingPeriod": {
                         "regular": {
-                            "start": int((now - pd.Timedelta(hours=1)).timestamp()),
+                            "start": int(now.normalize().timestamp()),
                             "end": int((now + pd.Timedelta(hours=1)).timestamp()),
                         },
                     },
@@ -415,7 +417,7 @@ class TestPr2DataQuality(unittest.TestCase):
                     "previousClose": 50.0,
                     "currentTradingPeriod": {
                         "regular": {
-                            "start": int((now - pd.Timedelta(hours=1)).timestamp()),
+                            "start": int(now.normalize().timestamp()),
                             "end": int((now + pd.Timedelta(hours=1)).timestamp()),
                         },
                     },
@@ -450,7 +452,7 @@ class TestPr2DataQuality(unittest.TestCase):
                     "previousClose": 25.0,
                     "currentTradingPeriod": {
                         "regular": {
-                            "start": int((now - pd.Timedelta(hours=1)).timestamp()),
+                            "start": int(now.normalize().timestamp()),
                             "end": int((now + pd.Timedelta(hours=1)).timestamp()),
                         },
                     },
@@ -699,7 +701,7 @@ class TestPr2DataQuality(unittest.TestCase):
                     "previousClose": 105.0,
                     "currentTradingPeriod": {
                         "regular": {
-                            "start": now_epoch - 3600,
+                            "start": int(today.timestamp()),
                             "end": now_epoch + 3600,
                         }
                     },
@@ -739,7 +741,7 @@ class TestPr2DataQuality(unittest.TestCase):
                     "previousClose": 105.0,
                     "currentTradingPeriod": {
                         "regular": {
-                            "start": now_epoch - 3600,
+                            "start": int(today.timestamp()),
                             "end": now_epoch + 3600,
                         }
                     },

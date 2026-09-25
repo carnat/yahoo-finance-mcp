@@ -21,9 +21,10 @@
  */
 
 import { handleMcp } from "./mcp.js";
-import { getBuildVersion, getServerVersion, setWorkerEnv, getWorkerVar } from "./response.js";
+import { getBuildVersion, getServerVersion, setCacheSummaryProvider, setWorkerEnv, getWorkerVar } from "./response.js";
 import { TOOLS, callTool } from "./tools.js";
-import { formatYahooCacheUsage, markYahooCacheActivity, withYahooCacheUsage, yahooCacheStats } from "./yahoo-finance.js";
+import { currentCacheSummary, formatCacheUsage, withCacheScope } from "./request-context.js";
+import { markYahooCacheActivity, secDocumentCacheStats, yahooCacheStats } from "./yahoo-finance.js";
 
 export interface Env {
   MCP_ENVELOPE_V2?: string;
@@ -38,12 +39,14 @@ export interface Env {
   [key: string]: unknown;
 }
 
+setCacheSummaryProvider(currentCacheSummary);
+
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Mcp-Session-Id",
   "Access-Control-Max-Age": "86400",
-  "Access-Control-Expose-Headers": "X-Yahoo-Cache",
+  "Access-Control-Expose-Headers": "X-Yahoo-Cache, X-Sec-Cache",
 };
 
 function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}): Response {
@@ -82,6 +85,7 @@ export default {
         deployedAt: getWorkerVar("DEPLOYED_AT")?.trim() || null,
         workerVersionId: env.CF_VERSION_METADATA?.id ?? null,
         yahooCache: yahooCacheStats(),
+        secDocumentCache: secDocumentCacheStats(),
       });
     }
 
@@ -118,16 +122,20 @@ export default {
       }
 
       try {
-        const { result, usage } = await withYahooCacheUsage(() => handleMcp(body));
+        const { result, scope } = await withCacheScope(() => handleMcp(body));
 
         // Null means the request was notification-only — no response body needed
         if (result === null) {
           return new Response(null, { status: 202, headers: CORS_HEADERS });
         }
 
-        // Where this request's Yahoo data came from: process memory, a
-        // request already in flight, the edge cache, or Yahoo itself.
-        return json(result, 200, { "X-Yahoo-Cache": formatYahooCacheUsage(usage) });
+        // Where this request's Yahoo and SEC data came from: process
+        // memory, a request already in flight, the edge cache, or the
+        // provider itself.
+        return json(result, 200, {
+          "X-Yahoo-Cache": formatCacheUsage(scope.caches.yahoo),
+          "X-Sec-Cache": formatCacheUsage(scope.caches.sec),
+        });
       } catch (e) {
         const message = e instanceof Error ? e.message : "Internal server error";
         return json(

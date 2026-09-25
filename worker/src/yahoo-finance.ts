@@ -1,5 +1,5 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { BoundedTtlCache, setBounded } from "./cache.js";
+import { countCacheEvent, emptyCacheUsage, providerFetch, type CacheEvent, type CacheUsage } from "./request-context.js";
 import { ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
 import { yahooTranscriptContentSha256 } from "./transcript-contract.js";
 import registryManifest from "./company-ir-page-registry.json";
@@ -77,6 +77,11 @@ function providerCacheKey(provider: string, operation: string, params: Record<st
   return `${provider}:${operation}:${query.toString()}`;
 }
 
+/** "finnhub:company-news:..." → "finnhub" */
+function providerCacheName(cacheKey: string): string {
+  return cacheKey.slice(0, cacheKey.indexOf(":"));
+}
+
 function providerEdgeRequest(cacheKey: string): Request {
   return new Request(`https://provider-cache.invalid/${encodeURIComponent(cacheKey)}`);
 }
@@ -89,6 +94,7 @@ function edgeCache(): EdgeCache | null {
 async function getProviderCache(cacheKey: string, ttlMs: number): Promise<ProviderJsonResult | null> {
   const memory = providerJsonCache.get(cacheKey);
   if (memory && Date.now() - memory.storedAt < Math.min(ttlMs, memory.ttlMs)) {
+    countCacheEvent(providerCacheName(cacheKey), "memoryHits");
     return {
       payload: memory.payload,
       status: "OK",
@@ -106,6 +112,7 @@ async function getProviderCache(cacheKey: string, ttlMs: number): Promise<Provid
     const value = await response.json() as ProviderCacheEntry;
     if (!value?.payload || Date.now() - Number(value.storedAt) >= Math.min(ttlMs, Number(value.ttlMs))) return null;
     setBounded(providerJsonCache, cacheKey, value, PROVIDER_JSON_CACHE_MAX);
+    countCacheEvent(providerCacheName(cacheKey), "edgeHits");
     return {
       payload: value.payload,
       status: "OK",
@@ -180,7 +187,7 @@ async function fetchProviderWithTimeout(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await providerFetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timer);
   }
@@ -836,15 +843,7 @@ const yahooGetBodies = new BoundedTtlCache<string>(200, YAHOO_GET_CACHE_MAX_CHAR
 const yahooGetInflight = new Map<string, Promise<string>>();
 
 // Per-isolate counters for the Yahoo GET caches, reported on /health.
-const yahooCacheCounters = {
-  memoryHits: 0,
-  sharedInflight: 0,
-  edgeHits: 0,
-  edgeMisses: 0,
-  edgeWrites: 0,
-  upstreamFetches: 0,
-};
-type YahooCacheEvent = keyof typeof yahooCacheCounters;
+const yahooCacheCounters: CacheUsage = emptyCacheUsage();
 // The Workers clock reads 0 while a module is first evaluated, so the
 // counters' start time is taken from the first request instead.
 let countersSince: string | null = null;
@@ -853,35 +852,9 @@ export function markYahooCacheActivity(): void {
   countersSince ??= new Date().toISOString();
 }
 
-/** Yahoo cache events of one MCP request, reported in its X-Yahoo-Cache header. */
-export type YahooCacheUsage = Record<YahooCacheEvent, number>;
-const requestCacheUsage = new AsyncLocalStorage<YahooCacheUsage>();
-
-function countYahooCache(event: YahooCacheEvent): void {
+function countYahooCache(event: CacheEvent): void {
   yahooCacheCounters[event]++;
-  const usage = requestCacheUsage.getStore();
-  if (usage) usage[event]++;
-}
-
-/** Run fn with its Yahoo cache events collected separately from concurrent requests. */
-export async function withYahooCacheUsage<T>(fn: () => Promise<T>): Promise<{ result: T; usage: YahooCacheUsage }> {
-  const usage: YahooCacheUsage = {
-    memoryHits: 0, sharedInflight: 0, edgeHits: 0, edgeMisses: 0, edgeWrites: 0, upstreamFetches: 0,
-  };
-  const result = await requestCacheUsage.run(usage, fn);
-  return { result, usage };
-}
-
-/** Header form, e.g. "memory=1, shared=0, edge-hit=2, edge-miss=0, edge-write=0, upstream=1". */
-export function formatYahooCacheUsage(usage: YahooCacheUsage): string {
-  return [
-    `memory=${usage.memoryHits}`,
-    `shared=${usage.sharedInflight}`,
-    `edge-hit=${usage.edgeHits}`,
-    `edge-miss=${usage.edgeMisses}`,
-    `edge-write=${usage.edgeWrites}`,
-    `upstream=${usage.upstreamFetches}`,
-  ].join(", ");
+  countCacheEvent("yahoo", event);
 }
 
 export function yahooCacheStats(): Record<string, unknown> {
@@ -3027,7 +3000,7 @@ async function fetchTickerEarningsHistory(
   // receiving updates. Keep the Worker on the same source and pagination model.
   const size = limit <= 25 ? 25 : limit <= 50 ? 50 : 100;
   const url = `https://finance.yahoo.com/calendar/earnings?symbol=${enc(ticker)}&offset=${offset}&size=${size}`;
-  const response = await fetch(url, { headers: { "User-Agent": UA }, redirect: "follow" });
+  const response = await providerFetch(url, { headers: { "User-Agent": UA }, redirect: "follow" });
   if (!response.ok) {
     await response.body?.cancel();
     throw new Error(`Yahoo Finance calendar error ${response.status} for: ${ticker}`);
@@ -4896,6 +4869,121 @@ function edgarFetch(url: string): Promise<Response> {
   return fetchProviderWithTimeout(url, { headers: { "User-Agent": edgarUserAgent() } }, EDGAR_FETCH_TIMEOUT_MS);
 }
 
+// SEC archive documents (https://www.sec.gov/Archives/...) never change once
+// filed, and filing tools usually read the same document several times
+// (outline, then sections and tables). Documents are kept for 10 minutes in
+// the isolate and for 24 hours in the colo's edge cache, and concurrent reads
+// of one document share a single SEC request. Failed fetches are not cached.
+const SEC_DOCUMENT_EDGE_CACHE_VERSION = "v1";
+const SEC_DOCUMENT_MEMORY_TTL_MS = 10 * 60 * 1000;
+const SEC_DOCUMENT_EDGE_TTL_MS = 24 * 60 * 60 * 1000;
+// Filings reach several MB and may hold two-byte characters, so the
+// in-process cache is bounded by characters as well as entries.
+const SEC_DOCUMENT_CACHE_MAX_CHARS = 16_000_000;
+const secDocumentBodies = new BoundedTtlCache<string>(12, SEC_DOCUMENT_CACHE_MAX_CHARS, (body) => body.length);
+type SecDocumentResult = { ok: true; text: string } | { ok: false; status: number };
+const secDocumentInflight = new Map<string, Promise<SecDocumentResult>>();
+const secDocumentCounters: CacheUsage = emptyCacheUsage();
+
+function countSecDocumentCache(event: CacheEvent): void {
+  secDocumentCounters[event]++;
+  countCacheEvent("sec", event);
+}
+
+export function secDocumentCacheStats(): Record<string, unknown> {
+  return {
+    scope: "isolate",
+    since: countersSince,
+    ...secDocumentCounters,
+    bodyCacheEntries: secDocumentBodies.size,
+    bodyCacheChars: secDocumentBodies.weight,
+  };
+}
+
+function secDocumentEdgeRequest(url: string): Request {
+  return new Request(`https://sec-document-cache.invalid/${SEC_DOCUMENT_EDGE_CACHE_VERSION}/${encodeURIComponent(url)}`);
+}
+
+async function readSecDocumentEdge(url: string): Promise<string | null> {
+  const cache = edgeCache();
+  if (!cache) return null;
+  try {
+    const response = await cache.match(secDocumentEdgeRequest(url));
+    if (!response) return null;
+    const storedAt = Number(response.headers.get("X-Stored-At"));
+    if (!Number.isFinite(storedAt) || Date.now() - storedAt >= SEC_DOCUMENT_EDGE_TTL_MS) {
+      await response.body?.cancel();
+      return null;
+    }
+    return await response.text();
+  } catch {
+    return null;
+  }
+}
+
+async function writeSecDocumentEdge(url: string, text: string): Promise<boolean> {
+  const cache = edgeCache();
+  if (!cache) return false;
+  try {
+    await cache.put(
+      secDocumentEdgeRequest(url),
+      new Response(text, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": `public, max-age=${Math.floor(SEC_DOCUMENT_EDGE_TTL_MS / 1000)}`,
+          "X-Stored-At": String(Date.now()),
+        },
+      }),
+    );
+    return true;
+  } catch {
+    // Edge cache is best effort; the SEC response remains usable.
+    return false;
+  }
+}
+
+async function loadSecDocument(url: string): Promise<SecDocumentResult> {
+  const cached = await readSecDocumentEdge(url);
+  if (cached !== null) {
+    countSecDocumentCache("edgeHits");
+    return { ok: true, text: cached };
+  }
+  countSecDocumentCache("edgeMisses");
+  countSecDocumentCache("upstreamFetches");
+  const resp = await edgarFetch(url);
+  if (!resp.ok) {
+    await resp.body?.cancel();
+    return { ok: false, status: resp.status };
+  }
+  const text = await resp.text();
+  if (await writeSecDocumentEdge(url, text)) countSecDocumentCache("edgeWrites");
+  return { ok: true, text };
+}
+
+/** Read an SEC archive document through the process, in-flight and edge caches. */
+async function fetchSecDocument(url: string): Promise<SecDocumentResult> {
+  const cached = secDocumentBodies.get(url);
+  if (cached !== undefined) {
+    countSecDocumentCache("memoryHits");
+    return { ok: true, text: cached };
+  }
+  let pending = secDocumentInflight.get(url);
+  if (pending) {
+    countSecDocumentCache("sharedInflight");
+  } else {
+    pending = loadSecDocument(url)
+      .then((result) => {
+        if (result.ok) secDocumentBodies.set(url, result.text, SEC_DOCUMENT_MEMORY_TTL_MS);
+        return result;
+      })
+      .finally(() => {
+        secDocumentInflight.delete(url);
+      });
+    secDocumentInflight.set(url, pending);
+  }
+  return pending;
+}
+
 const FILING_CIK_TTL_MS = 24 * 60 * 60 * 1000;
 // Submissions list recent filings, so they must expire for new 8-K/10-Q
 // filings to become visible within a long-lived isolate.
@@ -5156,7 +5244,10 @@ async function edgarResolveCik(ticker: string): Promise<number | null> {
 async function resolveCikForTicker(ticker: string): Promise<string | null> {
   const key = ticker.toUpperCase();
   const cached = filingCikCache.get(key);
-  if (cached) return cached;
+  if (cached) {
+    countCacheEvent("sec", "memoryHits");
+    return cached;
+  }
 
   try {
     const sec = await yGet(
@@ -5223,7 +5314,10 @@ async function getSubmissionsForTicker(ticker: string): Promise<{ cikPadded: str
   const cachedSubmissions = filingSubmissionsCache.get(key) ?? null;
   const cikPadded = await resolveCikForTicker(ticker);
   if (!cikPadded) return { cikPadded: null, submissions: null };
-  if (cachedSubmissions) return { cikPadded, submissions: cachedSubmissions };
+  if (cachedSubmissions) {
+    countCacheEvent("sec", "memoryHits");
+    return { cikPadded, submissions: cachedSubmissions };
+  }
   const submissions = await edgarGetJson(`https://data.sec.gov/submissions/CIK${cikPadded}.json`);
   if (submissions) filingSubmissionsCache.set(key, submissions, FILING_SUBMISSIONS_TTL_MS);
   return { cikPadded, submissions };
@@ -8127,9 +8221,9 @@ export async function getFilingOutline(ticker: string, _accessionNumber: string 
     if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
       return JSON.stringify({ error: true, message: "Invalid SEC URL" });
     }
-    const resp = await edgarFetch(documentUrl);
-    if (!resp.ok) return JSON.stringify({ error: true, message: `HTTP ${resp.status}` });
-    const html = await resp.text();
+    const doc = await fetchSecDocument(documentUrl);
+    if (!doc.ok) return JSON.stringify({ error: true, message: `HTTP ${doc.status}` });
+    const html = doc.text;
 
     const outline: { level: number; title: string }[] = [];
     const headingRe = /<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi;
@@ -8304,9 +8398,9 @@ export async function getFilingSection(ticker: string, sectionName: string, docu
     if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
       return JSON.stringify({ error: true, message: "Invalid SEC URL" });
     }
-    const resp = await edgarFetch(documentUrl);
-    if (!resp.ok) return JSON.stringify({ error: true, message: `HTTP ${resp.status}` });
-    const html = await resp.text();
+    const doc = await fetchSecDocument(documentUrl);
+    if (!doc.ok) return JSON.stringify({ error: true, message: `HTTP ${doc.status}` });
+    const html = doc.text;
 
     const bounds = findSectionBounds(html, sectionName, contextChars);
     if (bounds.errCode === "SECTION_AMBIGUOUS") {
@@ -8405,9 +8499,9 @@ export async function listFilingTables(ticker: string, documentUrl: string, offs
     if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
       return JSON.stringify({ error: true, message: "Invalid SEC URL" });
     }
-    const resp = await edgarFetch(documentUrl);
-    if (!resp.ok) return JSON.stringify({ error: true, message: `HTTP ${resp.status}` });
-    const html = await resp.text();
+    const doc = await fetchSecDocument(documentUrl);
+    if (!doc.ok) return JSON.stringify({ error: true, message: `HTTP ${doc.status}` });
+    const html = doc.text;
 
     const tables: { tableIndex: number; rowCount: number; title: string | null; headers: string[]; qualityStatus: "USABLE" }[] = [];
     const tableRe = /<table[^>]*>([\s\S]*?)<\/table>/gi;
@@ -8455,9 +8549,9 @@ export async function getFilingTable(ticker: string, documentUrl: string, tableI
     if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
       return JSON.stringify({ error: true, message: "Invalid SEC URL" });
     }
-    const resp = await edgarFetch(documentUrl);
-    if (!resp.ok) return JSON.stringify({ error: true, message: `HTTP ${resp.status}` });
-    const html = await resp.text();
+    const doc = await fetchSecDocument(documentUrl);
+    if (!doc.ok) return JSON.stringify({ error: true, message: `HTTP ${doc.status}` });
+    const html = doc.text;
 
     const tableRe = /<table[^>]*>([\s\S]*?)<\/table>/gi;
     const tables: string[] = [];
@@ -9393,7 +9487,7 @@ async function resolveNewsCompanyIdentity(ticker: string): Promise<NewsCompanyId
 async function fetchCompanyIrText(url: string, maxBytes: number, ttlMs: number): Promise<string> {
   const cached = companyIrTextCache.get(url);
   if (cached && Date.now() - cached.storedAt < ttlMs) return cached.value;
-  const resp = await fetch(url, { headers: { "User-Agent": UA } });
+  const resp = await providerFetch(url, { headers: { "User-Agent": UA } });
   if (!resp.ok) {
     await resp.body?.cancel();
     throw new Error(`HTTP ${resp.status}`);
@@ -9414,7 +9508,7 @@ async function fetchApprovedCompanyIrPage(entry: CompanyIrPageSource): Promise<{
   if (!companyIrPageUrlAllowed(entry, entry.canonicalUrl)) {
     throw new Error("registry canonical URL is outside its allow-list");
   }
-  const resp = await fetch(entry.canonicalUrl, {
+  const resp = await providerFetch(entry.canonicalUrl, {
     headers: {
       "User-Agent": UA,
       Accept: "application/json, application/rss+xml, application/atom+xml, application/xml, text/xml, text/html;q=0.9",
@@ -10605,7 +10699,7 @@ async function collectYahooEvents(
       const { cookie } = await getCrumb();
       const count = Math.min(Math.max(1, maxResults), 100);
       const prUrl = "https://finance.yahoo.com/xhr/ncp?queryRef=pressRelease&serviceKey=ncp_fin";
-      const resp = await fetch(prUrl, {
+      const resp = await providerFetch(prUrl, {
         method: "POST",
         headers: {
           "User-Agent": UA,
@@ -10674,7 +10768,7 @@ async function fetchGlobeNewswireFeed(feed: { name: string; url: string }): Prom
   const cached = globenewswireCache.get(cacheKey);
   if (cached && Date.now() - cached.storedAt < GLOBENEWSWIRE_TTL_MS) return cached.value;
 
-  const resp = await fetch(feed.url, { headers: { "User-Agent": UA } });
+  const resp = await providerFetch(feed.url, { headers: { "User-Agent": UA } });
   if (!resp.ok) {
     await resp.body?.cancel();
     throw new Error(`HTTP ${resp.status}`);
@@ -10850,7 +10944,7 @@ async function collectFinnhubEvents(
     const from = new Date(now.getTime() - (lookbackDays ?? 14) * 86400000).toISOString().slice(0, 10);
     const to = now.toISOString().slice(0, 10);
     const url = `${FINNHUB_COMPANY_NEWS_API}?symbol=${encodeURIComponent(ticker.toUpperCase())}&from=${from}&to=${to}`;
-    const resp = await fetch(url, { headers: { "User-Agent": UA, "X-Finnhub-Token": token } });
+    const resp = await providerFetch(url, { headers: { "User-Agent": UA, "X-Finnhub-Token": token } });
     if (!resp.ok) {
       await resp.body?.cancel();
       if (resp.status === 401 || resp.status === 403) {
@@ -12089,6 +12183,7 @@ async function _getSecFilingIndexImpl(
   const cacheKey = `secidx:${ticker.toUpperCase()}:${accessionNumber}:${filing.filingType}`;
   const cached = filingIndexCache.get(cacheKey);
   if (cached && Date.now() - cached.storedAt < FILING_INDEX_TTL_MS) {
+    countCacheEvent("filing_index", "memoryHits");
     return cached.value;
   }
 
@@ -15099,7 +15194,7 @@ function classifyEarningsSourceUrl(url: string): { sourceType: "sec_8k" | "compa
 
 async function fetchPublicHtml(url: string, maxBytes = 3_000_000): Promise<string | null> {
   try {
-    const resp = await fetch(url, { headers: { "User-Agent": UA } });
+    const resp = await providerFetch(url, { headers: { "User-Agent": UA } });
     if (!resp.ok) return null;
     const reader = resp.body?.getReader();
     if (!reader) return await resp.text();
@@ -15416,7 +15511,10 @@ export async function indexEarningsRelease(ticker: string, period = "latest", so
   const cacheId = String(sourceMeta.accessionNumber ?? sourceUrl);
   const cacheKey = `earnidx:${ticker.toUpperCase()}:${cacheId}`;
   const cached = filingIndexCache.get(cacheKey);
-  if (cached && Date.now() - cached.storedAt < FILING_INDEX_TTL_MS) return cached.value;
+  if (cached && Date.now() - cached.storedAt < FILING_INDEX_TTL_MS) {
+    countCacheEvent("filing_index", "memoryHits");
+    return cached.value;
+  }
 
   const html = sourceUrl.startsWith("https://www.sec.gov/Archives/")
     ? await edgarGetHtml(sourceUrl, 5_000_000)

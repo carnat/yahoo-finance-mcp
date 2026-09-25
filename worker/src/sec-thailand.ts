@@ -1,6 +1,7 @@
 /** Bounded Thai SEC Open Data fund workflows. No cache, crawling, or PDF fetching. */
 
 import { ErrorCode, getWorkerVar, mcpFailure, mcpSuccess } from "./response.js";
+import { providerFetch } from "./request-context.js";
 
 const SOURCE = "sec_thailand_open_data";
 const EVIDENCE_CLASS = "OFFICIAL_REGULATORY_DATA";
@@ -159,7 +160,7 @@ async function secGet(path: string, params: Record<string, unknown>): Promise<Se
   const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, TIMEOUT_MS);
   let response: Response;
   try {
-    response = await fetch(url.toString(), {
+    response = await providerFetch(url.toString(), {
       method: "GET",
       headers: {
         Accept: "application/json",

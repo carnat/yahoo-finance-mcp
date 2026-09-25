@@ -17,6 +17,31 @@ from yfmcp.util import _fetch_with_retry, get_last_trading_date
 from yfmcp.clients.yahoo import _safe_parse
 
 
+# Batch requests run this many tickers at once, as the Worker does
+# (BATCH_TICKER_CONCURRENCY), so a batch is faster without bursting Yahoo.
+_BATCH_TICKER_CONCURRENCY = 3
+
+
+async def _run_ticker_batch(tickers: list[str], call) -> list[object]:
+    """Run ``call(ticker)`` for each ticker, at most three at a time.
+
+    Results keep the input order; a failure is returned as its exception.
+    The per-ticker tools make blocking yfinance calls, so each call runs in
+    its own event loop on a worker thread (as MCP invocations do, see
+    ``yfmcp.app._offload_to_thread``).
+    """
+    semaphore = asyncio.Semaphore(_BATCH_TICKER_CONCURRENCY)
+
+    async def one(ticker: str) -> object:
+        async with semaphore:
+            try:
+                return await asyncio.to_thread(lambda: asyncio.run(call(ticker)))
+            except Exception as e:
+                return e
+
+    return await asyncio.gather(*(one(t) for t in tickers))
+
+
 # Yahoo answers an unknown range or interval with a fallback series (a single
 # live bar) instead of an error, so inputs are checked against these sets.
 HistoricalPeriod = Literal["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"]
@@ -174,7 +199,7 @@ async def get_historical_stock_prices(
 async def get_fast_info(ticker: str | list[str]) -> str:
     """Get lightweight real-time price and market data for a ticker symbol."""
     if isinstance(ticker, list):
-        results = await asyncio.gather(*[get_fast_info(t) for t in ticker], return_exceptions=True)
+        results = await _run_ticker_batch(ticker, get_fast_info)
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     cache_key = f"fast_info:{ticker}"
     cached = _tool_cache.get_value(cache_key)
@@ -335,7 +360,7 @@ async def get_short_interest(ticker: str) -> str:
 async def get_price_stats(ticker: str | list[str]) -> str:
     """Get pre-computed price statistics for a ticker."""
     if isinstance(ticker, list):
-        results = await asyncio.gather(*[get_price_stats(t) for t in ticker], return_exceptions=True)
+        results = await _run_ticker_batch(ticker, get_price_stats)
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     cache_key = f"price_stats:{ticker}"
     cached = _tool_cache.get_value(cache_key)
@@ -518,13 +543,7 @@ Args:
 async def get_technical_indicators(ticker: str | list[str], period: str = "3mo") -> str:
     """Get pre-computed technical indicators (RSI, MACD) for one or more tickers."""
     if isinstance(ticker, list):
-        results = []
-        for t in ticker:
-            try:
-                results.append(await get_technical_indicators(t, period))
-            except Exception as e:
-                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
-            await asyncio.sleep(0.1)
+        results = await _run_ticker_batch(ticker, lambda t: get_technical_indicators(t, period))
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     cache_key = f"tech_indicators:{ticker}:{period}"
     cached = _tool_cache.get_value(cache_key)
@@ -933,13 +952,7 @@ Args:
 async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
     """Return completed-session N-day price change for one or more tickers."""
     if isinstance(ticker, list):
-        results = []
-        for t in ticker:
-            try:
-                results.append(await get_price_slope(t, days))
-            except Exception as e:
-                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
-            await asyncio.sleep(0.1)
+        results = await _run_ticker_batch(ticker, lambda t: get_price_slope(t, days))
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
 
     normalized_days = max(1, min(int(days), 500))
@@ -1062,13 +1075,7 @@ async def get_price_slope(ticker: str | list[str], days: int = 5) -> str:
 async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
     """Return volume ratio for one or more tickers."""
     if isinstance(ticker, list):
-        results = []
-        for t in ticker:
-            try:
-                results.append(await get_volume_ratio(t, period))
-            except Exception as e:
-                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
-            await asyncio.sleep(0.1)
+        results = await _run_ticker_batch(ticker, lambda t: get_volume_ratio(t, period))
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
 
     company = yf.Ticker(ticker)
@@ -1190,13 +1197,7 @@ async def get_volume_ratio(ticker: str | list[str], period: int = 10) -> str:
 async def get_ma_position(ticker: str | list[str]) -> str:
     """Return MA position for one or more tickers."""
     if isinstance(ticker, list):
-        results = []
-        for t in ticker:
-            try:
-                results.append(await get_ma_position(t))
-            except Exception as e:
-                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
-            await asyncio.sleep(0.1)
+        results = await _run_ticker_batch(ticker, get_ma_position)
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
 
     company = yf.Ticker(ticker)
@@ -1281,13 +1282,7 @@ Args:
 async def get_short_momentum(ticker: str | list[str]) -> str:
     """Return short interest momentum for one or more tickers."""
     if isinstance(ticker, list):
-        results = []
-        for t in ticker:
-            try:
-                results.append(await get_short_momentum(t))
-            except Exception as e:
-                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
-            await asyncio.sleep(0.1)
+        results = await _run_ticker_batch(ticker, get_short_momentum)
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     company = yf.Ticker(ticker)
     try:
@@ -1640,10 +1635,14 @@ async def get_market_snapshot(
     if isinstance(ticker, list):
         cap = 2 if mode == "full" else 5
         limited = ticker[:cap]
+        outcomes = await _run_ticker_batch(limited, lambda t: get_market_snapshot(t, mode, foreign_exchange))
         results = {}
-        for t in limited:
+        for t, outcome in zip(limited, outcomes):
+            if isinstance(outcome, Exception):
+                results[t] = {"error": True, "message": str(outcome)}
+                continue
             try:
-                results[t] = json.loads(await get_market_snapshot(t, mode, foreign_exchange))
+                results[t] = json.loads(outcome)
             except Exception as e:
                 results[t] = {"error": True, "message": str(e)}
         return json.dumps({
