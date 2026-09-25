@@ -346,6 +346,20 @@ async def get_short_interest(ticker: str) -> str:
         val = info.get(key)
         if val is not None:
             data[key] = _serialize(val)
+    # Observation dates as YYYY-MM-DD, as get_short_momentum reports them.
+    for key in ("dateShortInterest", "sharesShortPreviousMonthDate"):
+        value = data.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            data[key] = datetime.datetime.fromtimestamp(value, tz=datetime.timezone.utc).date().isoformat()
+        elif isinstance(value, str) and len(value) >= 10:
+            data[key] = value[:10]
+    data["dataDate"] = data.get("dateShortInterest") if isinstance(data.get("dateShortInterest"), str) else None
+    data["dataDateBasis"] = "SHORT_INTEREST_OBSERVATION"
+    data["unitSemantics"] = {
+        "decimalRatios": ["shortPercentOfFloat", "sharesPercentSharesOut"],
+        "days": ["shortRatio"],
+        "shares": ["sharesShort", "sharesShortPriorMonth", "floatShares", "sharesOutstanding"],
+    }
 
     result = json.dumps(data)
     _tool_cache.set(cache_key, result, _STMT_TTL)
@@ -432,11 +446,9 @@ async def get_price_stats(ticker: str | list[str]) -> str:
             stats["status"] = "PARTIAL"
         elif selected is not None:
             closes, historical_price_basis, fallback_used = selected
-            daily_returns = closes.pct_change().dropna()
-
-            if len(daily_returns) >= 30:
-                vol_30d = daily_returns.tail(30).std() * (252 ** 0.5)
-                stats["annualizedVolatility30d"] = round(float(vol_30d) * 100, 4)
+            volatility = _annualized_volatility([float(v) for v in closes], 30)
+            if volatility is not None:
+                stats["annualizedVolatility30d"] = round(volatility, 4)
 
             # CAGR
             def _cagr(closes_series, years):
@@ -512,6 +524,74 @@ async def get_price_stats(ticker: str | list[str]) -> str:
 
 # ---------------------------------------------------------------------------
 
+# RSI and MACD are recursive averages: their value depends on how much history
+# feeds them until the seed's weight decays. A year of daily bars (about 250)
+# leaves the seed under 0.01% of the result, so shorter periods are widened.
+# These mirror the Worker's wilderRsi, macd and annualizedVolatility exactly.
+INDICATOR_MIN_LOOKBACK = "1y"
+_INDICATOR_LONG_PERIODS = {"1y", "2y", "5y", "10y", "max"}
+
+
+def _indicator_lookback(period: str | None) -> str:
+    return period if period in _INDICATOR_LONG_PERIODS else INDICATOR_MIN_LOOKBACK
+
+
+def _wilder_rsi(closes: list[float], period: int = 14) -> float | None:
+    """Wilder RSI: gains and losses averaged over the first `period` changes, then smoothed by 1/period."""
+    if len(closes) <= period:
+        return None
+    avg_gain = 0.0
+    avg_loss = 0.0
+    for i in range(1, period + 1):
+        change = closes[i] - closes[i - 1]
+        if change > 0:
+            avg_gain += change
+        else:
+            avg_loss -= change
+    avg_gain /= period
+    avg_loss /= period
+    for i in range(period + 1, len(closes)):
+        change = closes[i] - closes[i - 1]
+        avg_gain = (avg_gain * (period - 1) + (change if change > 0 else 0)) / period
+        avg_loss = (avg_loss * (period - 1) + (-change if change < 0 else 0)) / period
+    if avg_loss == 0:
+        return 50.0 if avg_gain == 0 else 100.0
+    return 100 - 100 / (1 + avg_gain / avg_loss)
+
+
+def _ema_series(values: list[float], span: int) -> list[float]:
+    k = 2 / (span + 1)
+    out = [values[0]]
+    for value in values[1:]:
+        out.append(value * k + out[-1] * (1 - k))
+    return out
+
+
+def _macd(closes: list[float], fast: int = 12, slow: int = 26, signal_span: int = 9) -> tuple[float, float, float] | None:
+    """MACD(12, 26, 9) with each EMA seeded by its first value: (macd, signal, histogram)."""
+    if len(closes) < slow:
+        return None
+    fast_ema = _ema_series(closes, fast)
+    slow_ema = _ema_series(closes, slow)
+    line = [f - s for f, s in zip(fast_ema, slow_ema)]
+    signal = _ema_series(line, signal_span)
+    return line[-1], signal[-1], line[-1] - signal[-1]
+
+
+def _annualized_volatility(closes: list[float], window: int = 30) -> float | None:
+    """Annualized volatility in percent: sample standard deviation of the last `window`
+    daily log returns, times sqrt(252)."""
+    import math
+
+    if len(closes) < window + 1:
+        return None
+    tail = closes[-(window + 1):]
+    returns = [math.log(tail[i + 1] / tail[i]) for i in range(window)]
+    mean = sum(returns) / len(returns)
+    variance = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
+    return math.sqrt(variance * 252) * 100
+
+
 @yfinance_server.tool(
     name="get_technical_indicators",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_technical_indicators"],
@@ -536,16 +616,17 @@ Args:
         When a list is provided, returns a dict keyed by symbol.
         Max 5 tickers per call; split larger lists into multiple calls.
     period: str
-        Lookback period for fetching history (default "3mo"). Longer periods give
-        more accurate indicator warm-up. Valid: 1mo, 3mo, 6mo, 1y, 2y, 5y.
+        History fed to the indicators (default "1y"). Periods shorter than a year
+        are widened to "1y" so RSI and MACD settle. Valid: 1y, 2y, 5y.
 """,
 )
-async def get_technical_indicators(ticker: str | list[str], period: str = "3mo") -> str:
+async def get_technical_indicators(ticker: str | list[str], period: str = "1y") -> str:
     """Get pre-computed technical indicators (RSI, MACD) for one or more tickers."""
     if isinstance(ticker, list):
         results = await _run_ticker_batch(ticker, lambda t: get_technical_indicators(t, period))
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
-    cache_key = f"tech_indicators:{ticker}:{period}"
+    lookback = _indicator_lookback(period)
+    cache_key = f"tech_indicators:{ticker}:{lookback}"
     cached = _tool_cache.get_value(cache_key)
     if cached is not None:
         return cached
@@ -554,7 +635,7 @@ async def get_technical_indicators(ticker: str | list[str], period: str = "3mo")
     try:
         prepared = await _load_completed_daily_history(
             company,
-            period,
+            lookback,
             required_bars=26,
             retry_adjusted_gap=True,
         )
@@ -620,33 +701,15 @@ async def get_technical_indicators(ticker: str | list[str], period: str = "3mo")
         "recommendedNextAction": "NONE",
     }
 
-    # --- RSI-14 (Wilder smoothing) ---
-    try:
-        delta = closes.diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = (-delta).where(delta < 0, 0.0)
-        avg_gain = gain.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
-        avg_loss = loss.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        output["rsi14"] = round(float(rsi.iloc[-1]), 2)
-    except Exception:
-        output["rsi14"] = None
-
-    # --- MACD (12, 26, 9) ---
-    try:
-        ema12 = closes.ewm(span=12, adjust=False).mean()
-        ema26 = closes.ewm(span=26, adjust=False).mean()
-        macd_line = ema12 - ema26
-        signal_line = macd_line.ewm(span=9, adjust=False).mean()
-        histogram = macd_line - signal_line
-        output["macd"] = round(float(macd_line.iloc[-1]), 4)
-        output["macdSignal"] = round(float(signal_line.iloc[-1]), 4)
-        output["macdHistogram"] = round(float(histogram.iloc[-1]), 4)
-    except Exception:
-        output["macd"] = None
-        output["macdSignal"] = None
-        output["macdHistogram"] = None
+    values = [float(v) for v in closes]
+    rsi = _wilder_rsi(values)
+    output["rsi14"] = None if rsi is None else round(rsi, 2)
+    macd_values = _macd(values)
+    output["macd"] = None if macd_values is None else round(macd_values[0], 4)
+    output["macdSignal"] = None if macd_values is None else round(macd_values[1], 4)
+    output["macdHistogram"] = None if macd_values is None else round(macd_values[2], 4)
+    output["lookbackPeriod"] = lookback
+    output["lookbackBars"] = len(values)
 
     output["lastClose"] = round(float(closes.iloc[-1]), 2)
     output["dataDate"] = data_date
@@ -1373,6 +1436,52 @@ async def get_short_momentum(ticker: str | list[str]) -> str:
 
 # ---------------------------------------------------------------------------
 
+# A listing passes the liquidity gate when it trades at least this much a day
+# on average (USD). Mirrors the Worker's getVolumeGate.
+LIQUIDITY_GATE_MIN_ADV_USD = 10_000_000
+# Listings quoted in a currency's minor unit: (ISO currency, minor units per unit).
+_MINOR_UNIT_CURRENCIES = {"GBp": ("GBP", 100), "GBX": ("GBP", 100), "ZAc": ("ZAR", 100), "ILA": ("ILS", 100)}
+
+
+def _listing_currency_unit(currency: str) -> tuple[str, int]:
+    """The ISO currency behind a listing currency and how many listing units make one of it."""
+    return _MINOR_UNIT_CURRENCIES.get(currency, (currency.upper(), 1))
+
+
+def _average_traded_value(rows: list[tuple[float | None, float | None]], count: int) -> float | None:
+    """Mean daily volume x close over exactly `count` sessions, or None when any is missing."""
+    if len(rows) != count or any(v is None or c is None for v, c in rows):
+        return None
+    return sum(v * c for v, c in rows) / count
+
+
+def _usd_conversion(currency: str | None) -> dict:
+    """Listing-currency units per US dollar, from Yahoo's <ISO>=X quote (ISO units per USD)."""
+    if not currency:
+        return {"ok": False, "note": "listing currency unknown"}
+    iso, per_unit = _listing_currency_unit(currency)
+    if iso == "USD":
+        return {"ok": True, "localPerUsd": per_unit, "fxRate": 1.0, "fxCurrency": "USD", "fxPriceTimestamp": None,
+                "note": "" if per_unit == 1 else f" [{currency} = USD/{per_unit}]"}
+    try:
+        fx_ticker = yf.Ticker(f"{iso}=X")
+        rate = fx_ticker.fast_info.last_price
+        if not rate or rate <= 0:
+            return {"ok": False, "note": f"{iso}=X rate unavailable"}
+        fx_price_timestamp = None
+        try:
+            fx_time = fx_ticker.info.get("regularMarketTime")
+            if isinstance(fx_time, (int, float)) and fx_time:
+                fx_price_timestamp = datetime.datetime.fromtimestamp(fx_time, tz=datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        except Exception:
+            pass
+        unit_note = "" if per_unit == 1 else f", {per_unit} {currency} per {iso}"
+        return {"ok": True, "localPerUsd": float(rate) * per_unit, "fxRate": round(float(rate), 4), "fxCurrency": iso,
+                "fxPriceTimestamp": fx_price_timestamp, "note": f" [{currency}\u2192USD at {float(rate):.4f} {iso}/USD{unit_note}]"}
+    except Exception:
+        return {"ok": False, "note": f"{iso}=X fetch failed"}
+
+
 async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
     """Return volume liquidity threshold assessment."""
     company = yf.Ticker(ticker)
@@ -1484,76 +1593,40 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
     adv20d = _prior_average(20)
     adv90d = _prior_average(90)
 
-    # Gate evaluation
-    gate_pass: bool | None = None
+    # Gate: average daily traded value of the 20 prior sessions, in USD.
     ratio20d: float | None = None
-    fx_rate: float | None = None
-    fx_price_timestamp: str | None = None
     daily_notional_usd: float | None = None
-    fx_rate_unavailable = False
-    note: str
-
-    if foreign_exchange:
-        # FX notional mode: daily notional ≥ $10M USD (convert to USD via live FX rate)
-        if last_volume is not None and last_price is not None and last_price > 0:
-            local_notional = last_volume * last_price
-            applied_fx_rate: float | None = 1.0
-            fx_conversion_note = ""
-
-            if currency and currency != "USD":
-                try:
-                    fx_ticker = yf.Ticker(f"{currency}=X")
-                    rate_val = fx_ticker.fast_info.last_price
-                    if rate_val and rate_val > 0:
-                        applied_fx_rate = rate_val
-                        fx_rate = round(float(rate_val), 4)
-                        fx_conversion_note = f" [{currency}\u2192USD at {rate_val:.2f}]"
-                        try:
-                            fx_info = fx_ticker.info
-                            fx_time = fx_info.get("regularMarketTime")
-                            if isinstance(fx_time, (int, float)) and fx_time:
-                                fx_price_timestamp = datetime.datetime.fromtimestamp(
-                                    fx_time,
-                                    tz=datetime.timezone.utc,
-                                ).isoformat().replace("+00:00", "Z")
-                        except Exception:
-                            pass
-                    else:
-                        applied_fx_rate = 1.0
-                        fx_rate_unavailable = True
-                        fx_conversion_note = f" [{currency}=X rate unavailable]"
-                except Exception:
-                    applied_fx_rate = 1.0
-                    fx_rate_unavailable = True
-                    fx_conversion_note = f" [{currency}=X fetch failed]"
-            elif currency == "USD":
-                fx_rate = 1.0
-
-            daily_notional_usd = local_notional / applied_fx_rate
-            gate_pass = daily_notional_usd >= 10_000_000
-            note = (
-                f"Volume gate {'PASS' if gate_pass else 'FAIL'} (FX notional) — "
-                f"${daily_notional_usd / 1_000_000:.1f}M daily notional "
-                f"({'≥' if gate_pass else '<'} $10M threshold){fx_conversion_note}"
-            )
-        else:
-            note = "Volume gate UNKNOWN — insufficient price/volume data for FX notional check"
-        if fx_rate_unavailable:
-            daily_notional_usd = None
-            gate_pass = None
-            note = "Volume gate UNKNOWN — USD notional cannot be computed without an FX rate"
-        if last_volume is not None and adv20d and adv20d > 0:
-            ratio20d = round(last_volume / adv20d, 2)
+    adv20d_traded_value_usd: float | None = None
+    gate_pass: bool | None = None
+    recommended_next_action = "NONE"
+    if adv20d and adv20d > 0:
+        ratio20d = round(last_volume / adv20d, 2)
+    prior_closes = closes.iloc[:-1]
+    window_values = [
+        (None if pd.isna(v) else float(v), None if pd.isna(c) else float(c))
+        for v, c in zip(prior_volumes.tail(20), prior_closes.tail(20))
+    ]
+    adv20d_traded_value = _average_traded_value(window_values, 20)
+    fx = _usd_conversion(currency)
+    if adv20d_traded_value is None:
+        recommended_next_action = "RETRY"
+        note = "Volume gate UNKNOWN — fewer than 20 prior sessions with volume and close"
+    elif not fx["ok"]:
+        recommended_next_action = "RETRY"
+        note = f"Volume gate UNKNOWN — {fx['note']}"
     else:
-        if last_volume is not None and adv20d and adv20d > 0:
-            ratio20d = round(last_volume / adv20d, 2)
-            gate_pass = ratio20d >= 0.5
-            note = (
-                f"Volume gate {'PASS' if gate_pass else 'FAIL'} — "
-                f"{ratio20d:.2f}x 20d ADV"
-            )
-        else:
-            note = "Volume gate UNKNOWN — insufficient volume data for 20d ADV calculation"
+        adv20d_traded_value_usd = round(adv20d_traded_value / fx["localPerUsd"], 2)
+        daily_notional_usd = last_volume * last_price / fx["localPerUsd"]
+        gate_pass = adv20d_traded_value_usd >= LIQUIDITY_GATE_MIN_ADV_USD
+        note = (
+            f"Volume gate {'PASS' if gate_pass else 'FAIL'} — 20d average traded value "
+            f"${adv20d_traded_value_usd / 1_000_000:.1f}M ({'≥' if gate_pass else '<'} $10M)"
+            + (f"; latest session {ratio20d:.2f}x 20d ADV" if ratio20d is not None else "")
+            + fx["note"]
+        )
+    del foreign_exchange  # accepted for compatibility: non-USD listings are always converted
+    fx_rate = fx.get("fxRate") if fx["ok"] else None
+    fx_price_timestamp = fx.get("fxPriceTimestamp") if fx["ok"] else None
 
     return json.dumps({
         "ticker": ticker,
@@ -1567,8 +1640,12 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
         "adv90d": adv90d,
         "ratio20d": ratio20d,
         "fxRate": fx_rate,
+        "fxCurrency": fx.get("fxCurrency") if fx["ok"] else None,
         "fxPriceTimestamp": fx_price_timestamp,
         "notionalUsd": round(daily_notional_usd, 2) if daily_notional_usd is not None else None,
+        "adv20dTradedValueUsd": adv20d_traded_value_usd,
+        "gateBasis": "ADV20_TRADED_VALUE_USD",
+        "gateThresholdUsd": LIQUIDITY_GATE_MIN_ADV_USD,
         "gatePass": gate_pass,
         "observationType": "COMPLETED_DAILY_VOLUME_NOTIONAL",
         "barStatus": "COMPLETE",
@@ -1579,7 +1656,7 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
         "retryAttempted": prepared["retryAttempted"],
         "dataDate": data_date,
         "note": note,
-        "recommendedNextAction": "NONE",
+        "recommendedNextAction": recommended_next_action,
     })
 
 def _classify_quote_freshness(
@@ -1664,7 +1741,7 @@ async def get_market_snapshot(
         get_ma_position(ticker),
         get_volume_ratio(ticker, 10),
         get_volume_gate(ticker, foreign_exchange),
-        get_technical_indicators(ticker, "3mo"),
+        get_technical_indicators(ticker, INDICATOR_MIN_LOOKBACK),
         return_exceptions=True,
     )
 

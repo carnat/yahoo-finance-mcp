@@ -766,6 +766,36 @@ def section_at(sections: list[ProjectedSection], pos: int) -> ProjectedSection |
     return found
 
 
+# Section label for text before the first Part or Item heading with no heading line above it.
+FRONT_MATTER_SECTION = "Front matter"
+
+
+def heading_line_before(p: FilingTextProjection, pos: int) -> str | None:
+    """The nearest heading-like line at or above pos, for text outside any Part or Item
+    (the cover and the forward-looking statements before Part I): a short line that
+    starts with a capital or digit and ends without sentence punctuation, outside
+    tables. Looks back at most 40 lines (the Worker's headingLineBefore)."""
+    end = p.text.find("\n", pos)
+    if end < 0:
+        end = len(p.text)
+    for _ in range(40):
+        if end <= 0:
+            break
+        start = p.text.rfind("\n", 0, end) + 1
+        line = p.text[start:end].strip(" ")
+        if (
+            3 <= len(line) <= 100
+            and (line[0].isupper() or line[0].isdigit())
+            and any(ch.isalpha() for ch in line)
+            and line[-1] not in ".!?:;,"
+            and line.lower() != "table of contents"
+            and not table_at(p.tables, start)
+        ):
+            return line
+        end = start - 1
+    return None
+
+
 def section_weight(title: str | None, document_type: str) -> int:
     """Weight of a section in relevance ranking: risk factors and MD&A first."""
     if document_type != "primary":
@@ -868,7 +898,11 @@ def search_document(doc: SearchDocument, spec: SearchSpec) -> DocumentSearchResu
             matches.append(current)
         context = match_context(doc.projection, hit.start, hit.end, spec.budget)
         section = section_at(doc.projection.sections, hit.start)
-        current = SearchMatch(doc, list(hit.terms), 1, hit.start, context, section.title if section else doc.default_section)
+        label = (
+            section.title if section
+            else doc.default_section or heading_line_before(doc.projection, hit.start) or FRONT_MATTER_SECTION
+        )
+        current = SearchMatch(doc, list(hit.terms), 1, hit.start, context, label)
     if current:
         matches.append(current)
     for match in matches:

@@ -3808,6 +3808,19 @@ def _invalid_expiry_payload(ticker: str, requested: str, expirations: list[str])
     }
 
 
+def _us_market_date(now: datetime.datetime | None = None) -> str:
+    """Today's date on the US options exchanges (America/New_York)."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    return now.astimezone(zoneinfo.ZoneInfo("America/New_York")).date().isoformat()
+
+
+def _next_option_expiry(dates: list[str], today: str) -> str | None:
+    """The first expiry after today's US market date (the Worker's nextOptionExpiry).
+    A chain expiring today is mostly 0DTE contracts that close within hours, and
+    quotes zero bids before the open, so it does not describe positioning."""
+    return next((d for d in dates if d > today), dates[-1] if dates else None)
+
+
 async def get_options_summary(ticker: str, expiry_hint: str | None = None) -> str:
     try:
         company = yf.Ticker(ticker)
@@ -3819,7 +3832,9 @@ async def get_options_summary(ticker: str, expiry_hint: str | None = None) -> st
                 f"No options data available for {ticker.upper()}",
                 meta_extra={"error_extra": {"ticker": ticker.upper()}},
             )
-        expiry = expiry_hint or expirations[0]
+        today = _us_market_date()
+        expiry = expiry_hint or _next_option_expiry(expirations, today)
+        skipped_expiries = [] if expiry_hint else [d for d in expirations if d <= today and d != expiry]
         if expiry not in expirations:
             invalid_expiry = _invalid_expiry_payload(ticker, expiry, expirations)
             return _mcp_failure(
@@ -3899,6 +3914,8 @@ async def get_options_summary(ticker: str, expiry_hint: str | None = None) -> st
         return json.dumps({
             "ticker": ticker,
             "nearestExpiry": expiry,
+            "expirySelection": "REQUESTED" if expiry_hint else "NEXT_AFTER_TODAY",
+            "skippedExpiries": skipped_expiries,
             "currentPrice": current_price,
             "atmIV": round(atm_iv, 4) if atm_iv is not None else None,
             "pcRatioVolume": pc_ratio_volume,
@@ -4353,6 +4370,15 @@ def _classify_analyst_change(action: object, from_grade: object, to_grade: objec
     return "MAINTAIN"
 
 
+def _target_analyst_count(company) -> int | None:
+    """Analysts contributing price targets (Yahoo financialData.numberOfAnalystOpinions)."""
+    try:
+        value = (company.info or {}).get("numberOfAnalystOpinions")
+    except Exception:
+        return None
+    return int(value) if isinstance(value, (int, float)) else None
+
+
 @yfinance_server.tool(
     name="get_analyst_consensus",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_analyst_consensus"],
@@ -4409,6 +4435,8 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
                 "high": targets.get("high"),
                 "mean": target_mean,
                 "median": targets.get("median"),
+                # Analysts behind the price targets (not the rating counts).
+                "numberOfAnalysts": _target_analyst_count(company),
                 "pctUpsideFromLastPrice": (
                     round((target_mean - last_price) / last_price * 100, 2)
                     if target_mean and last_price
@@ -4474,7 +4502,11 @@ async def get_analyst_consensus(ticker: str | list[str]) -> str:
             output["recommendationSummary"] = rec_df.to_dict(orient="records")
             output["dominantRating"] = dominant
             output["ratingCounts"] = counts
-            output["totalAnalysts"] = sum(counts.values()) if counts else None
+            output["ratingCount"] = sum(counts.values()) if counts else None
+            # Deprecated names for the rating count, kept for existing callers;
+            # priceTargets.numberOfAnalysts counts target contributors.
+            output["numberOfAnalysts"] = output["ratingCount"]
+            output["totalAnalysts"] = output["ratingCount"]
     except Exception:
         output["recommendationSummary"] = None
 
@@ -4576,6 +4608,15 @@ async def get_earnings_analysis(ticker: str) -> str:
             output[key] = _df_to_records(getattr(company, attr))
         except Exception:
             output[key] = None
+    # Yahoo's surprisePercent is a decimal ratio (0.0452 = 4.52%); surprisePct is in percent.
+    for row in output.get("earningsHistory") or []:
+        if isinstance(row, dict):
+            ratio = row.get("surprisePercent")
+            row["surprisePct"] = round(float(ratio) * 100, 2) if isinstance(ratio, (int, float)) else None
+    output["unitSemantics"] = {
+        "decimalRatios": ["earningsEstimate[].growth", "revenueEstimate[].growth", "earningsHistory[].surprisePercent"],
+        "percentValues": ["earningsHistory[].surprisePct"],
+    }
 
     result = json.dumps(output)
     _tool_cache.set(cache_key, result, _STMT_TTL)
@@ -5651,7 +5692,8 @@ async def _exhibit_targets(cik_int: int, accession: str, filing_date: str | None
         description = str(exhibit.get("description") or "").strip()
         out.append({
             "key": url, "url": url, "documentType": doc_type,
-            "defaultSection": f"{doc_type}: {description}" if description else doc_type,
+            # The filing index often repeats the type as the description.
+            "defaultSection": f"{doc_type}: {description}" if description and description.upper() != doc_type else doc_type,
             "primary": False, "accessionNumber": accession, "filingDate": filing_date, "filingType": filing_type,
         })
         if len(out) >= _FILING_SEARCH_MAX_EXHIBITS:
@@ -7060,7 +7102,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
         exps = company.options
         if not exps:
             return json.dumps({"error": True, "message": f"No options data for {ticker}", "ticker": ticker})
-        exp = exps[0]
+        exp = _next_option_expiry(list(exps), _us_market_date())
         chain = company.option_chain(exp)
         calls_df = chain.calls
         puts_df = chain.puts
@@ -7257,6 +7299,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
         "putVolVs10dAvg": put_vol_vs_10d,
         "putVolTrend": put_vol_trend,
         "expiry": exp,
+        "expirySelection": "NEXT_AFTER_TODAY",
         "maxPainStrike": max_pain_strike,
         "bracket": bracket,
         "formattedBlock": formatted_block,
@@ -7384,7 +7427,7 @@ async def get_position_score_inputs(ticker: str) -> str:
         get_analyst_consensus(ticker),
         get_price_stats(ticker),
         get_earnings_momentum(ticker),
-        get_technical_indicators(ticker, "3mo"),
+        get_technical_indicators(ticker, "1y"),
         get_ma_position(ticker),
         return_exceptions=True,
     )

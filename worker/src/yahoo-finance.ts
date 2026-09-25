@@ -2717,13 +2717,8 @@ export async function getPriceStats(ticker: string | string[]): Promise<string> 
   try {
     const observations = selected.observations;
     const closes = observations.map((row) => row.close);
-    if (closes.length >= 31) {
-      const last31 = closes.slice(-31);
-      const returns = last31.slice(1).map((c, i) => Math.log(c / last31[i]));
-      const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
-      const variance = returns.reduce((a, b) => a + (b - mean) ** 2, 0) / returns.length;
-      stats.annualizedVolatility30d = +(Math.sqrt(variance * 252) * 100).toFixed(4);
-    }
+    const volatility = annualizedVolatility(closes, 30);
+    if (volatility != null) stats.annualizedVolatility30d = +volatility.toFixed(4);
 
     const cagr = (years: number): number | null => {
       const endObservation = observations[observations.length - 1];
@@ -2778,6 +2773,8 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
       high: raw(fd.targetHighPrice),
       mean: targetMean,
       median: raw(fd.targetMedianPrice),
+      // Analysts behind the price targets (not the rating counts below).
+      numberOfAnalysts: raw(fd.numberOfAnalystOpinions),
       pctUpsideFromLastPrice:
         targetMean != null && lastPrice != null && lastPrice !== 0
           ? +((targetMean - lastPrice) / lastPrice * 100).toFixed(2)
@@ -2798,7 +2795,9 @@ export async function getAnalystConsensus(ticker: string | string[]): Promise<st
     );
     output.dominantRating = dominant;
     output.ratingCounts = counts;
-    output.numberOfAnalysts = Object.values(counts).reduce((a, b) => a + b, 0);
+    output.ratingCount = Object.values(counts).reduce((a, b) => a + b, 0);
+    // Deprecated: the rating count; priceTargets.numberOfAnalysts counts target contributors.
+    output.numberOfAnalysts = output.ratingCount;
   } else {
     output.recommendationSummary = null;
   }
@@ -2904,12 +2903,20 @@ export async function getEarningsAnalysis(ticker: string): Promise<string> {
       epsActual: raw(h.epsActual),
       epsEstimate: raw(h.epsEstimate),
       epsDifference: raw(h.epsDifference),
+      // Yahoo's surprisePercent is a decimal ratio (0.0452 = 4.52%); surprisePct is in percent.
       surprisePercent: raw(h.surprisePercent),
+      surprisePct: typeof raw(h.surprisePercent) === "number" ? +((raw(h.surprisePercent) as number) * 100).toFixed(2) : null,
     }));
   }
+  output.unitSemantics = EARNINGS_ANALYSIS_UNITS;
 
   return JSON.stringify(output);
 }
+
+const EARNINGS_ANALYSIS_UNITS = {
+  decimalRatios: ["earningsEstimate[].growth", "revenueEstimate[].growth", "earningsHistory[].surprisePercent"],
+  percentValues: ["earningsHistory[].surprisePct"],
+};
 
 const VALUATION_TYPES: Record<string, string> = {
   MarketCap: "marketCap",
@@ -3469,11 +3476,85 @@ export async function getShortInterest(ticker: string): Promise<string> {
     const val = raw(ks[key]) ?? raw(price[key]);
     if (val != null) data[key] = val;
   }
+  // Observation dates as YYYY-MM-DD, as get_short_momentum reports them.
+  for (const key of ["dateShortInterest", "sharesShortPreviousMonthDate"] as const) {
+    const value = data[key];
+    if (typeof value === "number" && value > 0) data[key] = new Date(value * 1000).toISOString().slice(0, 10);
+  }
+  data.dataDate = typeof data.dateShortInterest === "string" ? data.dateShortInterest : null;
+  data.dataDateBasis = "SHORT_INTEREST_OBSERVATION";
+  data.unitSemantics = SHORT_INTEREST_UNITS;
 
   return JSON.stringify(data);
 }
 
+const SHORT_INTEREST_UNITS = {
+  decimalRatios: ["shortPercentOfFloat", "sharesPercentSharesOut"],
+  days: ["shortRatio"],
+  shares: ["sharesShort", "sharesShortPriorMonth", "floatShares", "sharesOutstanding"],
+};
+
 // ── get_technical_indicators ─────────────────────────────────────────────────
+
+// ── Indicators ───────────────────────────────────────────────────────────────
+// RSI and MACD are recursive averages: their value depends on how much history
+// feeds them until the seed's weight decays. A year of daily bars (about 250)
+// leaves the seed under 0.01% of the result, so shorter periods are widened.
+export const INDICATOR_MIN_LOOKBACK = "1y";
+const INDICATOR_LONG_PERIODS = new Set(["1y", "2y", "5y", "10y", "max"]);
+
+export function indicatorLookback(period: string | null | undefined): string {
+  return period && INDICATOR_LONG_PERIODS.has(period) ? period : INDICATOR_MIN_LOOKBACK;
+}
+
+/** Wilder RSI: gains and losses averaged over the first `period` changes, then smoothed by 1/period. */
+export function wilderRsi(closes: number[], period = 14): number | null {
+  if (closes.length <= period) return null;
+  let avgGain = 0;
+  let avgLoss = 0;
+  for (let i = 1; i <= period; i++) {
+    const change = closes[i] - closes[i - 1];
+    if (change > 0) avgGain += change;
+    else avgLoss -= change;
+  }
+  avgGain /= period;
+  avgLoss /= period;
+  for (let i = period + 1; i < closes.length; i++) {
+    const change = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (period - 1) + (change > 0 ? change : 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + (change < 0 ? -change : 0)) / period;
+  }
+  if (avgLoss === 0) return avgGain === 0 ? 50 : 100;
+  return 100 - 100 / (1 + avgGain / avgLoss);
+}
+
+function emaSeries(values: number[], span: number): number[] {
+  const k = 2 / (span + 1);
+  const out = [values[0]];
+  for (let i = 1; i < values.length; i++) out.push(values[i] * k + out[i - 1] * (1 - k));
+  return out;
+}
+
+/** MACD(12, 26, 9) with each EMA seeded by its first value. */
+export function macd(closes: number[], fast = 12, slow = 26, signalSpan = 9): { macd: number; signal: number; histogram: number } | null {
+  if (closes.length < slow) return null;
+  const fastEma = emaSeries(closes, fast);
+  const slowEma = emaSeries(closes, slow);
+  const line = fastEma.map((v, i) => v - slowEma[i]);
+  const signal = emaSeries(line, signalSpan);
+  const last = line.length - 1;
+  return { macd: line[last], signal: signal[last], histogram: line[last] - signal[last] };
+}
+
+/** Annualized volatility in percent: sample standard deviation of the last `window` daily log returns, times sqrt(252). */
+export function annualizedVolatility(closes: number[], window = 30): number | null {
+  if (closes.length < window + 1) return null;
+  const tail = closes.slice(-(window + 1));
+  const returns = tail.slice(1).map((c, i) => Math.log(c / tail[i]));
+  const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+  const variance = returns.reduce((a, b) => a + (b - mean) ** 2, 0) / (returns.length - 1);
+  return Math.sqrt(variance * 252) * 100;
+}
 
 export async function getTechnicalIndicators(
   ticker: string | string[],
@@ -3485,10 +3566,11 @@ export async function getTechnicalIndicators(
     results.push(...await mapWithConcurrency(limit.tickers, BATCH_TICKER_CONCURRENCY, (t) => getTechnicalIndicators(t, period)));
     return wrapBatchResult(Object.fromEntries(limit.tickers.map((t, i) => [t, safeJsonParse(results[i], t)])), limit);
   }
+  const lookback = indicatorLookback(period);
   const fetchChart = async (retry: boolean): Promise<Record<string, unknown> | undefined> => {
     const cacheBuster = retry ? `&events=div%2Csplits&_=${Date.now()}` : "";
     const d = (await yGet(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=${period}&interval=1d${cacheBuster}`,
+      `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=${lookback}&interval=1d${cacheBuster}`,
       false
     )) as Record<string, unknown>;
     return (d?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as
@@ -3577,49 +3659,14 @@ export async function getTechnicalIndicators(
     recommendedNextAction: "NONE",
   };
 
-  // RSI-14 (Wilder smoothing via EWM with alpha=1/14)
-  try {
-    const deltas = closes.slice(1).map((c, i) => c - closes[i]);
-    const gains = deltas.map((d) => (d > 0 ? d : 0));
-    const losses = deltas.map((d) => (d < 0 ? -d : 0));
-    const alpha = 1 / 14;
-    let avgGain = gains.slice(0, 14).reduce((a, b) => a + b, 0) / 14;
-    let avgLoss = losses.slice(0, 14).reduce((a, b) => a + b, 0) / 14;
-    for (let i = 14; i < gains.length; i++) {
-      avgGain = alpha * gains[i] + (1 - alpha) * avgGain;
-      avgLoss = alpha * losses[i] + (1 - alpha) * avgLoss;
-    }
-    const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
-    output.rsi14 = +(100 - 100 / (1 + rs)).toFixed(2);
-  } catch {
-    output.rsi14 = null;
-  }
-
-  // MACD (12, 26, 9)
-  try {
-    const ema = (data: number[], span: number): number[] => {
-      const k = 2 / (span + 1);
-      const result = [data[0]];
-      for (let i = 1; i < data.length; i++) {
-        result.push(data[i] * k + result[i - 1] * (1 - k));
-      }
-      return result;
-    };
-
-    const ema12 = ema(closes, 12);
-    const ema26 = ema(closes, 26);
-    const macdLine = ema12.map((v, i) => v - ema26[i]);
-    const signalLine = ema(macdLine, 9);
-    const last = macdLine.length - 1;
-
-    output.macd = +macdLine[last].toFixed(4);
-    output.macdSignal = +signalLine[last].toFixed(4);
-    output.macdHistogram = +(macdLine[last] - signalLine[last]).toFixed(4);
-  } catch {
-    output.macd = null;
-    output.macdSignal = null;
-    output.macdHistogram = null;
-  }
+  const rsi = wilderRsi(closes);
+  output.rsi14 = rsi == null ? null : +rsi.toFixed(2);
+  const macdValues = macd(closes);
+  output.macd = macdValues ? +macdValues.macd.toFixed(4) : null;
+  output.macdSignal = macdValues ? +macdValues.signal.toFixed(4) : null;
+  output.macdHistogram = macdValues ? +macdValues.histogram.toFixed(4) : null;
+  output.lookbackPeriod = lookback;
+  output.lookbackBars = closes.length;
 
   output.lastClose = +closes[closes.length - 1].toFixed(2);
   output.dataDate = latestAvailableBarDate;
@@ -6802,7 +6849,8 @@ async function exhibitTargets(cikInt: number, accessionNumber: string, filingDat
       key: url,
       url,
       documentType: type,
-      defaultSection: description ? `${type}: ${description}` : type,
+      // The filing index often repeats the type as the description.
+      defaultSection: description && description.toUpperCase() !== type ? `${type}: ${description}` : type,
       primary: false,
       accessionNumber,
       filingDate,
@@ -7617,7 +7665,9 @@ export function computeMaxPainStrike(calls: Record<string, unknown>[], puts: Rec
 
 export async function getOptionsFlowScan(ticker: string, windowLabel: string): Promise<string> {
   try {
-    const fullOptions = await yGetFullOptions(ticker);
+    const nearest = await yGetFullOptions(ticker);
+    const scanExpiry = nextOptionExpiry(nearest.dates, usMarketDate());
+    const fullOptions = scanExpiry && scanExpiry !== nearest.dates[0] ? await yGetFullOptions(ticker, scanExpiry) : nearest;
     const calls = fullOptions.calls.map(normalizeContractIv);
     const puts = fullOptions.puts.map(normalizeContractIv);
     if (!calls.length && !puts.length) {
@@ -7841,7 +7891,8 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
     const resultData: Record<string, unknown> = {
       ticker, windowLabel, dataDate,
       pcRatio, ivPctile, putVolVs10dAvg: putVolVs10d, putVolTrend,
-      expiry: fullOptions.dates[0] ?? null,
+      expiry: scanExpiry ?? null,
+      expirySelection: "NEXT_AFTER_TODAY",
       maxPainStrike, bracket, formattedBlock,
       realizedVolPriceBasis,
       historicalObservationType: "COMPLETED_DAILY_PRICE_SERIES",
@@ -7937,7 +7988,7 @@ export async function getPositionScoreInputs(ticker: string | string[]): Promise
       getAnalystConsensus(ticker),
       getPriceStats(ticker),
       getEarningsMomentum(ticker),
-      getTechnicalIndicators(ticker, "3mo"),
+      getTechnicalIndicators(ticker, INDICATOR_MIN_LOOKBACK),
       getMaPosition(ticker),
     ]);
 
@@ -8052,6 +8103,52 @@ function classifyQuoteFreshness(
 }
 
 // ── get_volume_gate ───────────────────────────────────────────────────────────
+
+/** A listing passes the liquidity gate when it trades at least this much a day on average (USD). */
+export const LIQUIDITY_GATE_MIN_ADV_USD = 10_000_000;
+
+// Listings quoted in a currency's minor unit: [ISO currency, minor units per unit].
+const MINOR_UNIT_CURRENCIES: Record<string, [string, number]> = {
+  GBp: ["GBP", 100], GBX: ["GBP", 100], ZAc: ["ZAR", 100], ILA: ["ILS", 100],
+};
+
+/** The ISO currency behind a listing currency and how many listing units make one of it. */
+export function listingCurrencyUnit(currency: string): { iso: string; perUnit: number } {
+  const minor = MINOR_UNIT_CURRENCIES[currency];
+  return minor ? { iso: minor[0], perUnit: minor[1] } : { iso: currency.toUpperCase(), perUnit: 1 };
+}
+
+/** Mean daily volume x close over exactly `count` sessions, or null when any is missing. */
+export function averageTradedValue(rows: { volume: number | null; rawClose: number | null }[], count: number): number | null {
+  if (rows.length !== count || rows.some((row) => row.volume == null || row.rawClose == null)) return null;
+  return rows.reduce((sum, row) => sum + (row.volume as number) * (row.rawClose as number), 0) / count;
+}
+
+type UsdConversion =
+  | { ok: true; localPerUsd: number; fxRate: number; fxCurrency: string; fxPriceTimestamp: string | null; note: string }
+  | { ok: false; note: string };
+
+/** Listing-currency units per US dollar, from Yahoo's <ISO>=X quote (ISO units per USD). */
+async function usdConversion(currency: string | null): Promise<UsdConversion> {
+  if (!currency) return { ok: false, note: "listing currency unknown" };
+  const { iso, perUnit } = listingCurrencyUnit(currency);
+  if (iso === "USD") return { ok: true, localPerUsd: perUnit, fxRate: 1, fxCurrency: "USD", fxPriceTimestamp: null, note: perUnit === 1 ? "" : ` [${currency} = USD/${perUnit}]` };
+  try {
+    const fxFi = JSON.parse(await getFastInfo(`${iso}=X`)) as Record<string, unknown>;
+    const rate = fxFi.lastPrice as number | null;
+    if (rate == null || !(rate > 0)) return { ok: false, note: `${iso}=X rate unavailable` };
+    return {
+      ok: true,
+      localPerUsd: rate * perUnit,
+      fxRate: +rate.toFixed(4),
+      fxCurrency: iso,
+      fxPriceTimestamp: (fxFi.priceTimestamp as string | null) ?? null,
+      note: ` [${currency}→USD at ${rate.toFixed(4)} ${iso}/USD${perUnit === 1 ? "" : `, ${perUnit} ${currency} per ${iso}`}]`,
+    };
+  } catch {
+    return { ok: false, note: `${iso}=X fetch failed` };
+  }
+}
 
 export async function getVolumeGate(ticker: string, foreignExchange: boolean): Promise<string> {
   try {
@@ -8169,63 +8266,30 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
 
     let gatePass: boolean | null = null;
     let ratio20d: number | null = null;
-    let fxRate: number | null = null;
-    let fxPriceTimestamp: string | null = null;
     let notionalUsd: number | null = null;
+    let adv20dTradedValueUsd: number | null = null;
     let recommendedNextAction = "NONE";
     let note: string;
-
-    if (foreignExchange) {
-      if (lastVolume != null && lastPrice != null && lastPrice > 0) {
-        const localNotional = lastVolume * lastPrice;
-        let appliedFxRate = 1.0;
-        let fxConversionNote = "";
-
-        if (currency && currency !== "USD") {
-          try {
-            const fxFi = JSON.parse(await getFastInfo(`${currency}=X`)) as Record<string, unknown>;
-            const rate = fxFi.lastPrice as number | null;
-            if (rate != null && rate > 0) {
-              appliedFxRate = rate;
-              fxRate = +rate.toFixed(4);
-              fxPriceTimestamp = (fxFi.priceTimestamp as string | null) ?? null;
-              fxConversionNote = ` [${currency}→USD at ${rate.toFixed(2)}]`;
-            } else {
-              appliedFxRate = 0;
-              fxConversionNote = ` [${currency}=X rate unavailable]`;
-            }
-          } catch {
-            appliedFxRate = 0;
-            fxConversionNote = ` [${currency}=X fetch failed]`;
-          }
-        } else if (currency === "USD") {
-          fxRate = 1.0;
-        }
-
-        if (appliedFxRate > 0) {
-          notionalUsd = +(localNotional / appliedFxRate).toFixed(2);
-          gatePass = notionalUsd >= 10_000_000;
-          note = `Volume gate ${gatePass ? "PASS" : "FAIL"} (completed-session FX notional) — $${(notionalUsd / 1_000_000).toFixed(1)}M (${gatePass ? "≥" : "<"} $10M threshold)${fxConversionNote}`;
-        } else {
-          recommendedNextAction = "RETRY";
-          note = `Volume gate UNKNOWN — FX conversion unavailable${fxConversionNote}`;
-        }
-      } else {
-        note = "Volume gate UNKNOWN — insufficient price/volume data for FX notional check";
-        recommendedNextAction = "RETRY";
-      }
-      if (lastVolume != null && adv20d != null && adv20d > 0) {
-        ratio20d = +(lastVolume / adv20d).toFixed(2);
-      }
+    if (adv20d != null && adv20d > 0) ratio20d = +(lastVolume / adv20d).toFixed(2);
+    const adv20dTradedValue = averageTradedValue(rows.slice(-21, -1), 20);
+    const fx = await usdConversion(currency);
+    if (adv20dTradedValue == null) {
+      recommendedNextAction = "RETRY";
+      note = "Volume gate UNKNOWN — fewer than 20 prior sessions with volume and close";
+    } else if (!fx.ok) {
+      recommendedNextAction = "RETRY";
+      note = `Volume gate UNKNOWN — ${fx.note}`;
     } else {
-      if (lastVolume != null && adv20d != null && adv20d > 0) {
-        ratio20d = +(lastVolume / adv20d).toFixed(2);
-        gatePass = ratio20d >= 0.5;
-        note = `Volume gate ${gatePass ? "PASS" : "FAIL"} — ${ratio20d.toFixed(2)}x 20d ADV`;
-      } else {
-        note = "Volume gate UNKNOWN — insufficient volume data for 20d ADV calculation";
-      }
+      adv20dTradedValueUsd = +(adv20dTradedValue / fx.localPerUsd).toFixed(2);
+      notionalUsd = +((lastVolume * lastPrice) / fx.localPerUsd).toFixed(2);
+      gatePass = adv20dTradedValueUsd >= LIQUIDITY_GATE_MIN_ADV_USD;
+      note = `Volume gate ${gatePass ? "PASS" : "FAIL"} — 20d average traded value $${(adv20dTradedValueUsd / 1_000_000).toFixed(1)}M (${gatePass ? "≥" : "<"} $10M)`
+        + (ratio20d != null ? `; latest session ${ratio20d.toFixed(2)}x 20d ADV` : "")
+        + fx.note;
     }
+    void foreignExchange; // accepted for compatibility: non-USD listings are always converted
+    const fxRate = fx.ok ? fx.fxRate : null;
+    const fxPriceTimestamp = fx.ok ? fx.fxPriceTimestamp : null;
 
     return JSON.stringify({
       ticker,
@@ -8239,8 +8303,12 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
       adv90d,
       ratio20d,
       fxRate,
+      fxCurrency: fx.ok ? fx.fxCurrency : null,
       fxPriceTimestamp,
       notionalUsd,
+      adv20dTradedValueUsd,
+      gateBasis: "ADV20_TRADED_VALUE_USD",
+      gateThresholdUsd: LIQUIDITY_GATE_MIN_ADV_USD,
       gatePass,
       observationType: "COMPLETED_DAILY_VOLUME_NOTIONAL",
       barStatus: "COMPLETE",
@@ -8292,7 +8360,7 @@ export async function getMarketSnapshot(
       getMaPosition(ticker).then((r) => JSON.parse(r) as Record<string, unknown>),
       getVolumeRatio(ticker, 10).then((r) => JSON.parse(r) as Record<string, unknown>),
       getVolumeGate(ticker, foreignExchange).then((r) => JSON.parse(r) as Record<string, unknown>),
-      getTechnicalIndicators(ticker, "3mo").then((r) => JSON.parse(r) as Record<string, unknown>),
+      getTechnicalIndicators(ticker, INDICATOR_MIN_LOOKBACK).then((r) => JSON.parse(r) as Record<string, unknown>),
     ]);
 
   const componentStatus: Record<string, string> = {};
@@ -8457,6 +8525,20 @@ export async function getMarketSnapshot(
 
 // ── get_options_summary ───────────────────────────────────────────────────────
 
+/** Today's date on the US options exchanges (America/New_York). */
+export function usMarketDate(now: Date = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+}
+
+/**
+ * The first expiry after today's US market date. A chain expiring today is
+ * mostly 0DTE contracts that close within hours (and quote zero bids before
+ * the open), so it does not describe positioning.
+ */
+export function nextOptionExpiry(dates: string[], today: string): string | null {
+  return dates.find((d) => d > today) ?? dates[dates.length - 1] ?? null;
+}
+
 export async function getOptionsSummary(ticker: string, expiryHint?: string): Promise<string> {
   try {
     const expData = JSON.parse(await getOptionExpirationDates(ticker)) as string[];
@@ -8472,7 +8554,9 @@ export async function getOptionsSummary(ticker: string, expiryHint?: string): Pr
         ticker: ticker.toUpperCase(),
       });
     }
-    const expiry = expiryHint || expData[0];
+    const today = usMarketDate();
+    const expiry = expiryHint || (nextOptionExpiry(expData, today) as string);
+    const skippedExpiries = expiryHint ? [] : expData.filter((d) => d <= today && d !== expiry);
     if (!expData.includes(expiry)) {
       return JSON.stringify(invalidExpiryPayload(ticker, expiry, expData));
     }
@@ -8528,7 +8612,7 @@ export async function getOptionsSummary(ticker: string, expiryHint?: string): Pr
     }
 
     return JSON.stringify({
-      ticker, nearestExpiry: expiry, currentPrice,
+      ticker, nearestExpiry: expiry, expirySelection: expiryHint ? "REQUESTED" : "NEXT_AFTER_TODAY", skippedExpiries, currentPrice,
       atmIV, pcRatioVolume, pcRatioOI,
       callVolume: callVol, putVolume: putVol, callOI, putOI,
       maxPainStrike, dataDate,
