@@ -75,6 +75,10 @@ DEBT = "us-gaap:DebtInstrumentAxis"
 CONV = "cstc:ConvertibleSeniorNotesDue2029Member"
 TERM = "cstc:TermLoanMember"
 OLD = "cstc:SeniorNotesDue2023Member"
+# Tagged the ASTS way (2.3.1): principal only as a carrying amount on the issue date.
+CONV31 = "cstc:ConvertibleNotesDue2031Member"
+# A coupon-only duplicate member of the 2029 notes.
+DUP = "cstc:ConvertibleSeniorNotesDue2029PercentageMember"
 
 K_CONTEXTS = "".join([
     _context("fy24", "2024-01-01..2024-12-31"),
@@ -97,6 +101,9 @@ K_CONTEXTS = "".join([
     _context("term", "2024-12-31", {DEBT: TERM}),
     _context("termD", "2024-01-01..2024-12-31", {DEBT: TERM}),
     _context("old", "2023-06-01", {DEBT: OLD}),
+    _context("c31Issue", "2024-06-01", {DEBT: CONV31}),
+    _context("c31D", "2024-01-01..2024-12-31", {DEBT: CONV31}),
+    _context("dupD", "2024-01-01..2024-12-31", {DEBT: DUP}),
 ])
 
 TEN_K = f"""<html><head><title>cstc-20241231</title></head><body>
@@ -131,6 +138,7 @@ pre-funded warrants {_num("us-gaap:ClassOfWarrantOrRightOutstanding", "wpre", "s
 Series B warrants {_num("us-gaap:ClassOfWarrantOrRightOutstanding", "wb", "shares", "500,000")}.</p>
 <p>In March 2024 we issued ${_num("us-gaap:DebtInstrumentFaceAmount", "convIssue", "usd", "300.0", 6)} million of {_num("us-gaap:DebtInstrumentInterestRateStatedPercentage", "convIssue", "pure", "0.375", -2)}% convertible senior notes due {_text("us-gaap:DebtInstrumentMaturityDate", "convD", "March 15, 2029", "ixt:date-monthname-day-year-en")}, convertible at {_num("us-gaap:DebtInstrumentConvertibleConversionRatio1", "convD", "pure", "50.0000")} shares per $1,000 principal. Carrying amount {_num("us-gaap:LongTermDebt", "conv", "usd", "290.0", 6)}.</p>
 <p>Term loan of ${_num("us-gaap:DebtInstrumentFaceAmount", "termD", "usd", "100.0", 6)} million bearing {_num("us-gaap:DebtInstrumentInterestRateStatedPercentage", "termD", "pure", "7.25", -2)}% and maturing {_text("us-gaap:DebtInstrumentMaturityDate", "termD", "June&#160;30,&#160;2027", "ixt:date-monthname-day-year-en")}; carrying {_num("us-gaap:LongTermDebt", "term", "usd", "95.0", 6)}.</p>
+<p>In June 2024 we issued {_num("us-gaap:LongTermDebt", "c31Issue", "usd", "200.0", 6)} of convertible notes due {_text("us-gaap:DebtInstrumentMaturityDate", "c31D", "June 1, 2031", "ixt:date-monthname-day-year-en")}, convertible at ${_num("us-gaap:DebtInstrumentConvertibleConversionPrice1", "c31D", "usdPerShare", "40.00")} per share; the {_num("us-gaap:DebtInstrumentInterestRateStatedPercentage", "dupD", "pure", "0.375", -2)}% notes are described above.</p>
 <p>The ${_num("us-gaap:DebtInstrumentFaceAmount", "old", "usd", "50.0", 6)} million senior notes matured on {_text("us-gaap:DebtInstrumentMaturityDate", "old", "June 1, 2023", "ixt:date-monthname-day-year-en")}.</p>
 <table>
 <tr><td>2025</td><td>{_num("us-gaap:LongTermDebtMaturitiesRepaymentsOfPrincipalInNextTwelveMonths", "i24", "usd", "5.0", 6)}</td></tr>
@@ -158,7 +166,38 @@ TEN_Q = f"""<html><body>
 <p>Cash {_num("us-gaap:CashAndCashEquivalentsAtCarryingValue", "iq1", "usd", "140.0", 6)}; long-term debt {_num("us-gaap:LongTermDebt", "iq1", "usd", "380.0", 6)}; unvested RSUs {_num("us-gaap:ShareBasedCompensationArrangementByShareBasedPaymentAwardEquityInstrumentsOtherThanOptionsNonvestedNumber", "iq1", "shares", "1,800,000")}.</p>
 </body></html>"""
 
-FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q}
+AWARD = "us-gaap:AwardTypeAxis"
+PLAN = "us-gaap:PlanNameAxis"
+A_CONTEXTS = "".join([
+    _context("aq", "2025-04-01..2025-06-30"),
+    _context("aytd", "2025-01-01..2025-06-30"),
+    _context("ai", "2025-06-30"),
+    _context("acover", "2025-08-01"),
+    _context("aPlan", "2025-06-30", {PLAN: "cstc:Plan2020Member"}),
+    _context("aRsuPlan", "2025-06-30", {AWARD: "us-gaap:RestrictedStockUnitsRSUMember", PLAN: "cstc:Plan2020Member"}),
+    _context("aPsuPlan", "2025-06-30", {AWARD: "us-gaap:PerformanceSharesMember", PLAN: "cstc:Plan2020Member"}),
+    _context("aWarrant", "2025-06-30", {"us-gaap:ClassOfWarrantOrRightAxis": "cstc:CustomerWarrantMember"}),
+    _context("aAntiQ", "2025-04-01..2025-06-30", {"us-gaap:AntidilutiveSecuritiesAxis": "us-gaap:RestrictedStockUnitsRSUMember"}),
+    _context("aAntiYtd", "2025-01-01..2025-06-30", {"us-gaap:AntidilutiveSecuritiesAxis": "us-gaap:RestrictedStockUnitsRSUMember"}),
+])
+# Tagged the AAOI way (2.3.1): awards only by type x plan and by plan, the
+# warrant as the shares it calls for, and EPS exclusions by security.
+AWARDS_Q = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "aq", "10-Q")}
+{_text("dei:DocumentPeriodEndDate", "aq", "June 30, 2025", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{A_CONTEXTS}{UNITS}</ix:resources></ix:header></div>
+<p>Shares outstanding: {_num("dei:EntityCommonStockSharesOutstanding", "acover", "shares", "50,000,000")}</p>
+<p>Unvested: RSUs {_num("us-gaap:ShareBasedCompensationArrangementByShareBasedPaymentAwardEquityInstrumentsOtherThanOptionsNonvestedNumber", "aRsuPlan", "shares", "700,000")},
+PSUs {_num("us-gaap:ShareBasedCompensationArrangementByShareBasedPaymentAwardEquityInstrumentsOtherThanOptionsNonvestedNumber", "aPsuPlan", "shares", "300,000")},
+2020 plan total {_num("us-gaap:ShareBasedCompensationArrangementByShareBasedPaymentAwardEquityInstrumentsOtherThanOptionsNonvestedNumber", "aPlan", "shares", "1,000,000")}.</p>
+<p>The customer warrant is exercisable for {_num("us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights", "aWarrant", "shares", "2,000,000")} shares at ${_num("us-gaap:ClassOfWarrantOrRightExercisePriceOfWarrantsOrRights1", "aWarrant", "usdPerShare", "10.00")}.</p>
+<p>Weighted basic {_num("us-gaap:WeightedAverageNumberOfSharesOutstandingBasic", "aq", "shares", "49,000,000")} (six months {_num("us-gaap:WeightedAverageNumberOfSharesOutstandingBasic", "aytd", "shares", "48,500,000")});
+diluted {_num("us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding", "aq", "shares", "49,000,000")}; antidilutive RSUs excluded {_num("us-gaap:AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount", "aAntiQ", "shares", "900,000")}
+(six months {_num("us-gaap:AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount", "aAntiYtd", "shares", "950,000")}).</p>
+</body></html>"""
+
+FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q}
 
 NEWS_ITEMS = [
     {"title": "Needham raises IQE price target to 45p from 38p", "summary": "Needham values IQE at 12x 2027 EV/EBITDA, citing gallium nitride demand.", "url": "https://news.example/1", "publishedAt": "2026-09-20T08:00:00Z", "source": "yahoo_finance_news"},
@@ -167,6 +206,8 @@ NEWS_ITEMS = [
     {"title": "Rosenblatt's $60 target is based on 41x 2H27-1H28 EBITDA", "summary": "The benchmark index fell. Revenue grew 3 times faster than peers.", "url": "https://news.example/4", "publishedAt": "2026-09-16T08:00:00Z"},
     {"title": "Needham raises IQE price target to 45p from 38p", "summary": "duplicate", "url": "https://news.example/1"},
     {"title": "Analysts see a sum-of-the-parts discount at Liberum", "summary": "Liberum uses a sum-of-the-parts valuation.", "url": "https://news.example/5", "publishedAt": "2026-09-15T08:00:00Z"},
+    # 2.3.0 read this as a $5 target (2.3.1).
+    {"title": "AST SpaceMobile Soars 12% on Berenberg\u2019s $92 Price Target, Planet Labs Climbs 5%", "summary": "", "url": "https://news.example/6", "publishedAt": "2026-09-02T14:20:15Z"},
 ]
 RATING_CHANGES = [
     {"date": "2026-09-20", "firm": "Needham", "toGrade": "Buy", "ptTo": 45, "ptFrom": 38},
@@ -201,6 +242,7 @@ const kFallback = { ...kSource, role: "latest_annual_fallback" };
 const atm = data.atm.map((t) => ({ contextText: t, sectionHeading: "Liquidity", documentUrl: data.qUrl, filingDate: "2025-05-08", accessionNumber: null }));
 out.bridge = m.dilutionBridge({ ticker: "CSTC", price: 25, priceCurrency: "USD", asOfDate: "2025-05-09", sources: [qSource, kFallback], atmMatches: atm });
 out.bridgeLow = m.dilutionBridge({ ticker: "CSTC", price: 10, priceCurrency: "USD", asOfDate: null, sources: [kSource], atmMatches: [] });
+out.bridgeAwards = m.dilutionBridge({ ticker: "CSTC", price: 25, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2025-08-06", "0001234568-25-000030", data.qUrl, "awards_q")], atmMatches: [] });
 out.capital = m.capitalStructure({ ticker: "CSTC", source: kSource, fundingMatches: atm });
 out.analyst = m.analystValuationMethods("IQE.L", data.news, data.changes);
 out.ch = m.companiesHouseFilings("01234567", data.chHistory);
@@ -211,6 +253,8 @@ console.log(JSON.stringify(out));
 ATM_TEXT = [
     "In May 2024, we entered into a sales agreement for an at-the-market offering program to sell up to $200.0 million of our common stock. During 2024, we sold 2,000,000 shares for net proceeds of $48.5 million, and $150.0 million remained available under the ATM program as of December 31, 2024.",
     "We believe our existing cash will be sufficient to fund our operations for at least the next twelve months. We expect capital expenditures of approximately $40 million in 2025, which we expect to be fully funded by cash on hand.",
+    # Not funding statements (2.3.1): revenue recognition, stock-award valuation, a boilerplate list item.
+    "The Company expects to recognize approximately 6.6% of its remaining performance obligations as revenue over the next 12 months. For these analyses, the Company selects companies with historical share price information sufficient to meet the expected life of the stock-based awards. Other factors include our ability to raise funds to finance operating expenses and capital expenditures;",
 ]
 
 CH_HISTORY = {"total_count": 2, "items": [
@@ -277,6 +321,7 @@ def _python_pure() -> dict:
         "documents": {name: _doc_json(doc) for name, doc in docs.items()},
         "bridge": cs.dilution_bridge("CSTC", 25, "USD", "2025-05-09", [q_source, k_fallback], atm),
         "bridgeLow": cs.dilution_bridge("CSTC", 10, "USD", None, [k_source], []),
+        "bridgeAwards": cs.dilution_bridge("CSTC", 25, "USD", None, [cs.IxSource("primary", "10-Q", "2025-08-06", "0001234568-25-000030", Q_URL, docs["awards_q"])], []),
         "capital": cs.capital_structure("CSTC", k_source, atm),
         "analyst": cs.analyst_valuation_methods("IQE.L", copy.deepcopy(NEWS_ITEMS), copy.deepcopy(RATING_CHANGES)),
         "ch": cs.companies_house_filings("01234567", CH_HISTORY),
@@ -297,7 +342,7 @@ class TestCapitalStructureParity(unittest.TestCase):
             self.assertEqual(self.worker["documents"][name], self.local["documents"][name], name)
 
     def test_outputs_match(self) -> None:
-        for key in ("bridge", "bridgeLow", "capital", "analyst", "ch", "chPick"):
+        for key in ("bridge", "bridgeLow", "bridgeAwards", "capital", "analyst", "ch", "chPick"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
 
@@ -347,9 +392,18 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertEqual(bridge["atmPotentialShares"], 6_000_000)
         self.assertEqual(b["partiallyResolved"], ["warrants"])
         self.assertEqual(b["notDisclosed"], [])
-        conv = next(c for c in b["components"] if c["component"] == "convertible_debt")["instruments"][0]
+        convs = next(c for c in b["components"] if c["component"] == "convertible_debt")["instruments"]
+        conv = convs[0]
         self.assertEqual(conv["conversionPrice"], 20)
         self.assertEqual(conv["maturityDate"], "2029-03-15")
+        self.assertEqual((conv["principal"], conv["principalBasis"]), (300_000_000, "face_amount"))
+        # No face amount: the issue-date carrying amount stands in, and says so.
+        conv31 = convs[1]
+        self.assertEqual((conv31["faceAmount"], conv31["principal"], conv31["principalConcept"], conv31["principalDate"], conv31["principalBasis"]),
+                         (None, 200_000_000, "us-gaap:LongTermDebt", "2024-06-01", "tagged_amount_fallback"))
+        self.assertEqual((conv31["ifConvertedShares"], conv31["inTheMoney"], conv31["incrementalShares"]), (5_000_000, False, 0))
+        self.assertEqual(len(convs), 2, "the coupon-only duplicate member has no conversion terms")
+        self.assertNotIn("taggedDilutionConcepts", b)
         atm = b["atmProgram"]
         self.assertEqual(atm["remainingCapacityUsd"], 150_000_000)
         self.assertEqual(atm["programSizeUsd"], 200_000_000)
@@ -380,8 +434,12 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertEqual(rows[CONV]["couponPct"], 0.375)
         self.assertTrue(rows[CONV]["convertible"])
         self.assertEqual(rows[OLD]["status"], "matured_before_period_end")
-        self.assertEqual([r["member"] for r in c["instruments"]], [OLD, TERM, CONV])
-        self.assertEqual([(y["year"], y["faceAmount"]) for y in c["instrumentMaturitiesByYear"]], [("2027", 100_000_000), ("2029", 300_000_000)])
+        # The coupon-only duplicate member is dropped (2.3.1).
+        self.assertEqual([r["member"] for r in c["instruments"]], [OLD, TERM, CONV, CONV31])
+        self.assertEqual((rows[CONV31]["carryingAmount"], rows[CONV31]["taggedAmount"], rows[CONV31]["taggedAmountDate"]), (None, 200_000_000, "2024-06-01"))
+        self.assertEqual(rows[TERM]["carryingAmountConcept"], "us-gaap:LongTermDebt")
+        self.assertEqual([(y["year"], y["faceAmount"]) for y in c["instrumentMaturitiesByYear"]],
+                         [("2027", 100_000_000), ("2029", 300_000_000), ("2031", 200_000_000)])
         ladder = {r["bucket"]: r for r in c["maturityLadder"]}
         self.assertEqual(ladder["year_3"]["periodThrough"], "2027-12-31")
         self.assertEqual(ladder["year_4"]["amount"], 0)
@@ -389,12 +447,31 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertIn(["liquidity_sufficiency"], categories)
         self.assertIn(["atm_program"], categories)
         self.assertTrue(any("capital_expenditure" in cats and "liquidity_sufficiency" in cats for cats in categories))
+        statements = " ".join(s["statement"] for s in c["fundingStatements"])
+        for noise in ("performance obligations", "expected life", "operating expenses and capital expenditures;"):
+            self.assertNotIn(noise, statements)
+
+    def test_awards_warrants_and_eps_tagged_the_aaoi_way(self) -> None:
+        b = self.out["bridgeAwards"]
+        awards = next(c for c in b["components"] if c["component"] == "unvested_share_awards")
+        # The plan total (one axis) is used, not added to its type x plan split.
+        self.assertEqual((awards["unvested"], awards["breakdown"]), (1_000_000, [{"awardType": "Plan 2020", "unvested": 1_000_000}]))
+        warrants = next(c for c in b["components"] if c["component"] == "warrants")
+        self.assertEqual(warrants["classes"][0]["concept"], "us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights")
+        self.assertEqual(warrants["incrementalShares"], 1_200_000)  # 2.0M x (1 - 10/25)
+        self.assertEqual(b["bridge"]["dilutedSharesAtPrice"], 52_200_000)
+        eps = b["reportedEpsDilution"]
+        self.assertEqual((eps["periodStart"], eps["periodEnd"], eps["weightedBasicShares"], eps["weightedDilutedShares"]),
+                         ("2025-04-01", "2025-06-30", 49_000_000, 49_000_000))
+        self.assertEqual(eps["antidilutiveExcluded"], [{"security": "Restricted Stock Units RSU", "shares": 900_000}])
+        self.assertEqual(b["notDisclosed"], ["stock_options", "convertible_debt", "atm_program"])
+        self.assertIn("us-gaap:AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount", b["taggedDilutionConcepts"])
 
     def test_analyst_methods(self) -> None:
         a = self.out["analyst"]
         self.assertEqual(a["status"], "FOUND")
         self.assertEqual(a["decisionUse"], "CONTEXT_ONLY")
-        self.assertEqual(a["itemsScanned"], 5)
+        self.assertEqual(a["itemsScanned"], 6)
         by_url = {}
         for e in a["evidence"]:
             by_url.setdefault(e["url"], []).append(e)
@@ -409,7 +486,10 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertEqual(len(rosenblatt), 1, "lowercase 'benchmark' and '3 times faster' are not evidence")
         self.assertEqual(rosenblatt[0]["methods"][0]["periods"], ["2H27", "1H28"])
         self.assertEqual(rosenblatt[0]["priceTarget"], {"target": 60, "prior": None, "currency": "USD"})
-        self.assertEqual({(m["firm"], m["source"]) for m in a["methodNotDisclosed"]}, {("Morgan Stanley", "news"), ("Jefferies", "rating_changes")})
+        # "$92 Price Target, ... Climbs 5%" is a $92 target, not $5 (2.3.1).
+        self.assertEqual(by_url["https://news.example/6"][0]["priceTarget"], {"target": 92, "prior": None, "currency": "USD"})
+        self.assertEqual({(m["firm"], m["source"]) for m in a["methodNotDisclosed"]},
+                         {("Morgan Stanley", "news"), ("Berenberg", "news"), ("Jefferies", "rating_changes")})
         self.assertEqual(a["methodCounts"], {"multiple": 2, "DCF": 1, "sum_of_the_parts": 2})
 
     def test_companies_house_rows(self) -> None:

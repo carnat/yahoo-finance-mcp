@@ -396,11 +396,14 @@ _OPTIONS_EXERCISABLE = "ShareBasedCompensationArrangementByShareBasedPaymentAwar
 _RANGE_OUTSTANDING = "ShareBasedCompensationSharesAuthorizedUnderStockOptionPlansExercisePriceRangeOutstandingOptions"
 _RANGE_STRIKE = "ShareBasedCompensationSharesAuthorizedUnderStockOptionPlansExercisePriceRangeOutstandingOptionsWeightedAverageExercisePrice"
 _UNVESTED_AWARDS = "ShareBasedCompensationArrangementByShareBasedPaymentAwardEquityInstrumentsOtherThanOptionsNonvestedNumber"
-_WARRANTS_OUTSTANDING = "ClassOfWarrantOrRightOutstanding"
+_AWARD_AXIS_RE = re.compile(r"Award|PlanName|Plan\b|Grant|Vesting", _F)
+# The outstanding count, else the number of shares the warrants are exercisable for.
+_WARRANT_COUNT_CONCEPTS = ["ClassOfWarrantOrRightOutstanding", "ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights"]
 _WARRANT_STRIKE = "ClassOfWarrantOrRightExercisePriceOfWarrantsOrRights1"
 _CONVERSION_PRICE = "DebtInstrumentConvertibleConversionPrice1"
 _CONVERSION_RATIO = "DebtInstrumentConvertibleConversionRatio1"
 _FACE_AMOUNT = "DebtInstrumentFaceAmount"
+_PRINCIPAL_FALLBACK_CONCEPTS = ["DebtInstrumentCarryingAmount", "LongTermDebt", "ConvertibleNotesPayable", "ConvertibleLongTermNotesPayable", "LongTermDebtNoncurrent", "SeniorNotes"]
 _DEBT_AXES = ["DebtInstrumentAxis", "LongtermDebtTypeAxis"]
 
 
@@ -480,7 +483,13 @@ def _awards_component(sources: list[IxSource]) -> dict | None:
         date = _max_period(facts)
         at_date = [f for f in facts if (f.period_end or "") == date]
         plain = next((f for f in at_date if not f.dims), None)
-        by_type = [f for f in at_date if len(f.dims) == 1 and re.search(r"AwardType|PlanName", next(iter(f.dims)), _F)]
+        # Without a total, sum the breakdown on the fewest award/plan axes, so a
+        # type x plan split is not also counted by type alone.
+        award_facts = [f for f in at_date if f.dims and all(_AWARD_AXIS_RE.search(axis) for axis in f.dims)]
+        fewest = min((len(f.dims) for f in award_facts), default=None)
+        axis_set = next((f for f in award_facts if len(f.dims) == fewest), None)
+        set_key = "&".join(sorted(axis_set.dims)) if axis_set is not None else ""
+        by_type = [f for f in award_facts if "&".join(sorted(f.dims)) == set_key]
         if plain is None and not by_type:
             return None
         return date, plain, by_type
@@ -489,7 +498,7 @@ def _awards_component(sources: list[IxSource]) -> dict | None:
     if not found:
         return None
     (date, plain, by_type), source = found
-    breakdown = [{"awardType": member_label(next(iter(f.dims.values()))), "unvested": f.value} for f in by_type]
+    breakdown = [{"awardType": " / ".join(member_label(v) for v in f.dims.values()), "unvested": f.value} for f in by_type]
     summed = sum((f.value or 0) for f in by_type)
     return {
         "component": "unvested_share_awards",
@@ -504,7 +513,8 @@ def _awards_component(sources: list[IxSource]) -> dict | None:
 
 def _warrants_component(sources: list[IxSource], price: float) -> dict | None:
     def find(doc: IxDocument):
-        facts = [f for f in doc.facts if f.local == _WARRANTS_OUTSTANDING and f.value is not None]
+        concept = next((c for c in _WARRANT_COUNT_CONCEPTS if any(f.local == c and f.value is not None for f in doc.facts)), None)
+        facts = [f for f in doc.facts if f.local == concept and f.value is not None]
         if not facts:
             return None
         groups: dict[str, IxFact] = {}
@@ -526,6 +536,7 @@ def _warrants_component(sources: list[IxSource], price: float) -> dict | None:
         label = " / ".join(member_label(v) for v in f.dims.values()) if f.dims else "Warrants (not itemized)"
         classes.append({
             "class": label,
+            "concept": f.name,
             "outstanding": f.value,
             "asOf": f.period_end,
             "exercisePrice": strike.value if strike else None,
@@ -598,7 +609,10 @@ def _convertibles_component(sources: list[IxSource], price: float) -> dict | Non
     groups, source = found
     instruments = []
     for g in groups:
-        face = _group_value(g, [_FACE_AMOUNT])
+        face_tagged = _group_value(g, [_FACE_AMOUNT])
+        # Some issuers tag each issue's principal only under a carrying-amount
+        # concept, often at the issue date; use it and say so.
+        face = face_tagged or _group_value(g, _PRINCIPAL_FALLBACK_CONCEPTS)
         conv_price = _group_value(g, [_CONVERSION_PRICE])
         ratio = _group_value(g, [_CONVERSION_RATIO])
         implied = conv_price["value"] if conv_price else (1000 / ratio["value"] if ratio and ratio["value"] > 0 else None)
@@ -606,15 +620,19 @@ def _convertibles_component(sources: list[IxSource], price: float) -> dict | Non
         basis = None
         if face and ratio and ratio["value"] > 0:
             shares = (face["value"] / 1000) * ratio["value"]
-            basis = "face_amount / 1000 * conversion_ratio"
+            basis = "principal / 1000 * conversion_ratio"
         elif face and conv_price and conv_price["value"] > 0:
             shares = face["value"] / conv_price["value"]
-            basis = "face_amount / conversion_price"
+            basis = "principal / conversion_price"
         in_the_money = price >= implied if implied is not None else None
         instruments.append({
             "instrument": member_label(g.member) if g.member else "Convertible notes (not itemized)",
             "member": g.member,
-            "faceAmount": face["value"] if face else None,
+            "faceAmount": face_tagged["value"] if face_tagged else None,
+            "principal": face["value"] if face else None,
+            "principalConcept": face["concept"] if face else None,
+            "principalDate": face["periodEnd"] if face else None,
+            "principalBasis": "face_amount" if face_tagged else ("tagged_amount_fallback" if face else None),
             "conversionPrice": conv_price["value"] if conv_price else (round_half_up(implied, 4) if implied is not None else None),
             "conversionPriceBasis": "tagged" if conv_price else ("1000 / conversion_ratio" if implied is not None else None),
             "conversionRatioPer1000": ratio["value"] if ratio else None,
@@ -632,7 +650,7 @@ def _convertibles_component(sources: list[IxSource], price: float) -> dict | Non
         "ifConvertedShares": sum((i["ifConvertedShares"] or 0) for i in instruments),
         "incrementalShares": None if unresolved == len(instruments) else sum((i["incrementalShares"] or 0) for i in instruments),
         "unresolvedInstruments": unresolved,
-        "note": "Face amount as tagged, which can be the original principal before repurchases. Net-share or cash settlement, capped calls and make-whole adjustments are not modeled.",
+        "note": "Principal is the tagged face amount, else the issue's tagged carrying amount (principalBasis says which); either can be the original principal before repurchases. Net-share or cash settlement, capped calls and make-whole adjustments are not modeled.",
         "source": _source_ref(source, None),
     }
 
@@ -729,6 +747,52 @@ def _atm_component(evidence: list[dict], price: float) -> dict | None:
     return out
 
 
+_ANTIDILUTIVE = "AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount"
+_DILUTION_CONCEPT_RE = re.compile(r"Warrant|Option|Nonvested|RestrictedStock|Convertible|Antidilutive|EarningsPerShare|SharesOutstanding", _F)
+
+
+def _latest_period_facts(facts: list[IxFact]) -> list[IxFact]:
+    """Facts over the shortest period ending at the latest end date: the quarter in a 10-Q, the year in a 10-K."""
+    end = _max_period(facts)
+    at_end = [f for f in facts if (f.period_end or "") == end]
+    start = ""
+    for f in at_end:
+        if (f.period_start or "") > start:
+            start = f.period_start or ""
+    return [f for f in at_end if (f.period_start or "") == start]
+
+
+def _reported_eps_dilution(doc: IxDocument) -> dict | None:
+    """The company's own EPS share counts and the securities it excluded as antidilutive."""
+    def plain(local: str) -> IxFact | None:
+        facts = _latest_period_facts([f for f in doc.facts if f.local == local and f.value is not None and not f.dims])
+        return facts[0] if facts else None
+
+    basic = plain("WeightedAverageNumberOfSharesOutstandingBasic")
+    diluted = plain("WeightedAverageNumberOfDilutedSharesOutstanding")
+    excluded = _latest_period_facts([f for f in doc.facts if f.local == _ANTIDILUTIVE and f.value is not None and f.dims.get("AntidilutiveSecuritiesAxis") is not None])
+    if basic is None and diluted is None and not excluded:
+        return None
+    period = basic or diluted or excluded[0]
+    return {
+        "periodStart": period.period_start,
+        "periodEnd": period.period_end,
+        "weightedBasicShares": basic.value if basic else None,
+        "weightedDilutedShares": diluted.value if diluted else None,
+        "antidilutiveExcluded": [{"security": member_label(f.dims["AntidilutiveSecuritiesAxis"]), "shares": f.value} for f in excluded],
+        "note": "The company's own weighted-average EPS counts for the period, and the securities it left out as antidilutive. A cross-check on the bridge's instrument list, not a point-in-time count.",
+    }
+
+
+def _tagged_dilution_concepts(sources: list[IxSource]) -> list[str]:
+    out: list[str] = []
+    for s in sources:
+        for f in s.doc.facts:
+            if f.value is not None and _DILUTION_CONCEPT_RE.search(f.local) and f.name not in out:
+                out.append(f.name)
+    return sorted(out)[:40]
+
+
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
@@ -775,6 +839,7 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
         "basicShares": {**basic_found[0], "source": _source_ref(basic_found[1], basic_found[0]["asOf"])} if basic_found else None,
         "components": components,
         "atmProgram": atm,
+        "reportedEpsDilution": (_find_in_sources(sources, _reported_eps_dilution) or (None,))[0],
         "notDisclosed": not_disclosed,
         "unresolved": unresolved,
         "partiallyResolved": partial,
@@ -816,6 +881,9 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
         "This is a mechanical bridge, not a consensus or forecast diluted share count, and must not be back-solved into one.",
         "A component missing from notDisclosed was not tagged in the filing; that is not proof the instrument does not exist.",
     ]
+    if not_disclosed or unresolved:
+        # What the filing does tag, so a missing component can be traced to a concept this bridge does not read.
+        out["taggedDilutionConcepts"] = _tagged_dilution_concepts(sources)
     out["warnings"] = warnings
     if primary is not None and primary.doc.document_period_end:
         out["periodEnd"] = primary.doc.document_period_end
@@ -880,13 +948,17 @@ def _instruments(doc: IxDocument, period_end: str | None) -> list[dict]:
     out: list[dict] = []
     for g in _debt_groups(doc):
         face = _group_value(g, [_FACE_AMOUNT])
-        carrying = _group_value(g, _CARRYING_CONCEPTS, period_end) or _group_value(g, _CARRYING_CONCEPTS)
+        # A carrying amount is a balance only at the period end; an amount tagged on
+        # another date (often the issue date) is reported as such.
+        carrying = _group_value(g, _CARRYING_CONCEPTS, period_end)
+        tagged = None if carrying else _group_value(g, _CARRYING_CONCEPTS)
         coupon = _group_value(g, ["DebtInstrumentInterestRateStatedPercentage"])
         effective = _group_value(g, ["DebtInstrumentInterestRateEffectivePercentage"])
         conv_price = _group_value(g, [_CONVERSION_PRICE])
         ratio = _group_value(g, [_CONVERSION_RATIO])
         maturity = normalize_ix_date(_group_text(g, "DebtInstrumentMaturityDate"))
-        if not face and not carrying and not coupon and not maturity:
+        # A coupon alone is often a duplicate member of an instrument listed elsewhere.
+        if not face and not carrying and not tagged and not maturity:
             continue
         latest = _max_period(g.facts)
         status = "reported"
@@ -900,7 +972,10 @@ def _instruments(doc: IxDocument, period_end: str | None) -> list[dict]:
             "axis": g.axis,
             "faceAmount": face["value"] if face else None,
             "carryingAmount": carrying["value"] if carrying else None,
-            "carryingAmountDate": carrying["periodEnd"] if carrying else None,
+            "carryingAmountConcept": carrying["concept"] if carrying else None,
+            "taggedAmount": tagged["value"] if tagged else None,
+            "taggedAmountDate": tagged["periodEnd"] if tagged else None,
+            "taggedAmountConcept": tagged["concept"] if tagged else None,
             "couponPct": round_half_up(coupon["value"] * 100, 4) if coupon else None,
             "effectiveRatePct": round_half_up(effective["value"] * 100, 4) if effective else None,
             "maturityDate": maturity,
@@ -914,12 +989,17 @@ def _instruments(doc: IxDocument, period_end: str | None) -> list[dict]:
     return out
 
 
+# (category, trigger, context the sentence must also have). The context
+# requirement keeps out "next 12 months" revenue recognition, stock-award
+# valuation, and capex mentioned only in passing.
+_CASH_CONTEXT_RE = re.compile(r"\bcash\b|\bliquidity\b|\bcapital resources\b|\bfund(?:s|ed|ing)?\b|\bfinanc\w*|\brunway\b|\bborrowings?\b", _F)
+_CAPEX_CONTEXT_RE = re.compile(r"\$\s?\d|\b(?:expects?|expected|plans?|planned|anticipates?|anticipated|intends?|budget(?:ed)?)\b", _F)
 _FUNDING_CATEGORIES = [
-    ("going_concern", re.compile(r"\bgoing concern\b|\bsubstantial doubt\b", _F)),
-    ("liquidity_sufficiency", re.compile(r"\bsufficient to (?:fund|meet|satisfy|finance)\b|\badequate to (?:fund|meet)\b|\bfully[- ]funded\b|\bcash runway\b|\brunway\b|\bnext (?:12|twelve) months\b", _F)),
-    ("atm_program", _ATM_RE),
-    ("capital_expenditure", re.compile(r"\bcapital expenditures?\b|\bcapex\b|\bpurchase commitments?\b", _F)),
-    ("financing_activity", re.compile(r"\bcredit (?:facility|agreement)\b|\brevolving\b|\bterm loan\b|\bnotes due\b|\bindenture\b", _F)),
+    ("going_concern", re.compile(r"\bgoing concern\b|\bsubstantial doubt\b", _F), None),
+    ("liquidity_sufficiency", re.compile(r"\bsufficient to (?:fund|meet|satisfy|finance)\b|\badequate to (?:fund|meet)\b|\bfully[- ]funded\b|\bcash runway\b|\brunway\b|\bnext (?:12|twelve) months\b", _F), _CASH_CONTEXT_RE),
+    ("atm_program", _ATM_RE, None),
+    ("capital_expenditure", re.compile(r"\bcapital expenditures?\b|\bcapex\b|\bpurchase commitments?\b", _F), _CAPEX_CONTEXT_RE),
+    ("financing_activity", re.compile(r"\bcredit (?:facility|agreement)\b|\brevolving\b|\bterm loan\b|\bnotes due\b|\bindenture\b", _F), None),
 ]
 
 
@@ -929,8 +1009,11 @@ def funding_statements(matches: list[TextMatch], limit: int = 10) -> list[dict]:
     seen: set[str] = set()
     for match in matches:
         for sentence in _sentences(_collapse(match.context_text)):
-            categories = [name for name, rx in _FUNDING_CATEGORIES if rx.search(sentence)]
-            if not categories or len(sentence) < 40:
+            # A sentence ending in ";" is an item of a list, usually forward-looking boilerplate.
+            if len(sentence) < 40 or sentence.endswith(";"):
+                continue
+            categories = [name for name, rx, context in _FUNDING_CATEGORIES if rx.search(sentence) and (context is None or context.search(sentence))]
+            if not categories:
                 continue
             key = sentence[:200].lower()
             if key in seen:
@@ -976,7 +1059,7 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
             continue
         year = maturity[:4]
         entry = by_year.get(year) or {"year": year, "faceAmount": 0, "instruments": []}
-        amount = row["faceAmount"] if row["faceAmount"] is not None else row["carryingAmount"]
+        amount = _first_not_none(row["faceAmount"], row["carryingAmount"], row["taggedAmount"])
         entry["faceAmount"] += float(amount if amount is not None else 0)
         entry["instruments"].append(str(row["instrument"]))
         by_year[year] = entry
@@ -1040,7 +1123,8 @@ _SUFFIX = r"(?:\s?(p|pence|kr|SEK)\b)?"
 _TARGET_FROM_TO = re.compile(rf"(?:price target|target price|\bPT\b|price objective)[^.]{{0,40}}?\bfrom\s+{_CURRENCY}\s?{_NUM}{_SUFFIX}\s+to\s+{_CURRENCY}\s?{_NUM}{_SUFFIX}", _F)
 _TARGET_TO_FROM = re.compile(rf"(?:price target|target price|\bPT\b|price objective)[^.\d$\u00a3\u20ac]{{0,40}}?\bto\s+{_CURRENCY}\s?{_NUM}{_SUFFIX}\s+from\s+{_CURRENCY}\s?{_NUM}{_SUFFIX}", _F)
 _TARGET_BEFORE = re.compile(r"(\$|US\$|\u00a3|\u20ac|NT\$)\s?(\d[\d,]*(?:\.\d+)?)\s+(?:price\s+)?target\b", _F)
-_TARGET_TO = re.compile(rf"(?:price target|target price|\bPT\b|price objective)[^.\d$\u00a3\u20ac]{{0,40}}?{_CURRENCY}\s?{_NUM}{_SUFFIX}", _F)
+# A number followed by "%" is a move or a rate, never a target.
+_TARGET_TO = re.compile(rf"(?:price target|target price|\bPT\b|price objective)[^.\d$\u00a3\u20ac]{{0,40}}?{_CURRENCY}\s?{_NUM}(?![\d.,]*\s?%){_SUFFIX}", _F)
 _PERIOD_RE = re.compile(r"\b(?:FY|CY|F)\s?'?\d{2,4}E?\b|\b[12]H\s?'?\d{2,4}E?\b|\b(?:19|20)\d\dE?\b|\bNTM\b|\bnext[- ]twelve[- ]months\b|\bforward\b", _F)
 _METRIC = r"(EV\s?/\s?EBITDA|EV\s?/\s?sales|EV\s?/\s?revenue|EV\s?/\s?EBIT|P\s?/\s?E|price[- ]to[- ]earnings|price[- ]to[- ]sales|EBITDA|EBIT|sales|revenue|earnings|EPS|free cash flow|FCF|gross profit|book value|NAV)"
 _MULTIPLE_FIRST = re.compile(rf"\b(\d{{1,3}}(?:\.\d+)?)\s?(?:x|times)\b([^.;]{{0,40}}?)\b{_METRIC}\b", _F)
@@ -1172,12 +1256,13 @@ def _price_target(sentence: str) -> dict | None:
             "prior": _number_of(to_from.group(5)),
             "currency": _currency_code(_first_not_none(to_from.group(1), to_from.group(4)), _first_not_none(to_from.group(3), to_from.group(6))),
         }
-    to = _TARGET_TO.search(sentence)
-    if to:
-        return {"target": _number_of(to.group(2)), "prior": None, "currency": _currency_code(to.group(1), to.group(3))}
+    # "$92 price target" names its number outright; try it before scanning past the phrase.
     before = _TARGET_BEFORE.search(sentence)
     if before:
         return {"target": _number_of(before.group(2)), "prior": None, "currency": _currency_code(before.group(1))}
+    to = _TARGET_TO.search(sentence)
+    if to:
+        return {"target": _number_of(to.group(2)), "prior": None, "currency": _currency_code(to.group(1), to.group(3))}
     return None
 
 

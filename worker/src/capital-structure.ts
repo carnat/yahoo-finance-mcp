@@ -370,11 +370,14 @@ const OPTIONS_EXERCISABLE = "ShareBasedCompensationArrangementByShareBasedPaymen
 const RANGE_OUTSTANDING = "ShareBasedCompensationSharesAuthorizedUnderStockOptionPlansExercisePriceRangeOutstandingOptions";
 const RANGE_STRIKE = "ShareBasedCompensationSharesAuthorizedUnderStockOptionPlansExercisePriceRangeOutstandingOptionsWeightedAverageExercisePrice";
 const UNVESTED_AWARDS = "ShareBasedCompensationArrangementByShareBasedPaymentAwardEquityInstrumentsOtherThanOptionsNonvestedNumber";
-const WARRANTS_OUTSTANDING = "ClassOfWarrantOrRightOutstanding";
+const AWARD_AXIS_RE = /Award|PlanName|Plan\b|Grant|Vesting/i;
+// The outstanding count, else the number of shares the warrants are exercisable for.
+const WARRANT_COUNT_CONCEPTS = ["ClassOfWarrantOrRightOutstanding", "ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights"];
 const WARRANT_STRIKE = "ClassOfWarrantOrRightExercisePriceOfWarrantsOrRights1";
 const CONVERSION_PRICE = "DebtInstrumentConvertibleConversionPrice1";
 const CONVERSION_RATIO = "DebtInstrumentConvertibleConversionRatio1";
 const FACE_AMOUNT = "DebtInstrumentFaceAmount";
+const PRINCIPAL_FALLBACK_CONCEPTS = ["DebtInstrumentCarryingAmount", "LongTermDebt", "ConvertibleNotesPayable", "ConvertibleLongTermNotesPayable", "LongTermDebtNoncurrent", "SeniorNotes"];
 const DEBT_AXES = ["DebtInstrumentAxis", "LongtermDebtTypeAxis"];
 
 function treasuryStock(count: number, strike: number, price: number): number {
@@ -455,16 +458,19 @@ function awardsComponent(sources: IxSource[]): Record<string, unknown> | null {
     const date = facts.reduce((best, f) => ((f.periodEnd ?? "") > best ? (f.periodEnd ?? "") : best), "");
     const atDate = facts.filter((f) => (f.periodEnd ?? "") === date);
     const plain = atDate.find((f) => !hasDims(f));
-    const byType = atDate.filter((f) => {
-      const axes = Object.keys(f.dims);
-      return axes.length === 1 && /AwardType|PlanName/i.test(axes[0]);
-    });
+    // Without a total, sum the breakdown on the fewest award/plan axes, so a
+    // type x plan split is not also counted by type alone.
+    const awardFacts = atDate.filter((f) => hasDims(f) && Object.keys(f.dims).every((axis) => AWARD_AXIS_RE.test(axis)));
+    const fewest = awardFacts.reduce((min, f) => Math.min(min, Object.keys(f.dims).length), Infinity);
+    const axisSet = awardFacts.find((f) => Object.keys(f.dims).length === fewest);
+    const setKey = axisSet ? Object.keys(axisSet.dims).sort().join("&") : "";
+    const byType = awardFacts.filter((f) => Object.keys(f.dims).sort().join("&") === setKey);
     if (!plain && byType.length === 0) return null;
     return { date, plain, byType };
   });
   if (!found) return null;
   const { value: { date, plain, byType }, source } = found;
-  const breakdown = byType.map((f) => ({ awardType: memberLabel(Object.values(f.dims)[0]), unvested: f.value }));
+  const breakdown = byType.map((f) => ({ awardType: Object.values(f.dims).map(memberLabel).join(" / "), unvested: f.value }));
   return {
     component: "unvested_share_awards",
     unvested: plain ? plain.value : byType.reduce((sum, f) => sum + (f.value ?? 0), 0),
@@ -478,7 +484,8 @@ function awardsComponent(sources: IxSource[]): Record<string, unknown> | null {
 
 function warrantsComponent(sources: IxSource[], price: number): Record<string, unknown> | null {
   const found = findInSources(sources, (doc) => {
-    const facts = doc.facts.filter((f) => f.local === WARRANTS_OUTSTANDING && f.value != null);
+    const concept = WARRANT_COUNT_CONCEPTS.find((c) => doc.facts.some((f) => f.local === c && f.value != null));
+    const facts = doc.facts.filter((f) => f.local === concept && f.value != null);
     if (facts.length === 0) return null;
     const groups = new Map<string, IxFact>();
     for (const f of facts) {
@@ -496,6 +503,7 @@ function warrantsComponent(sources: IxSource[], price: number): Record<string, u
     const label = hasDims(f) ? Object.values(f.dims).map(memberLabel).join(" / ") : "Warrants (not itemized)";
     return {
       class: label,
+      concept: f.name,
       outstanding: f.value,
       asOf: f.periodEnd,
       exercisePrice: strike ? strike.value : null,
@@ -560,7 +568,10 @@ function convertiblesComponent(sources: IxSource[], price: number): Record<strin
   if (!found) return null;
   const { value: groups, source } = found;
   const instruments = groups.map((g) => {
-    const face = groupValue(g, [FACE_AMOUNT]);
+    const faceTagged = groupValue(g, [FACE_AMOUNT]);
+    // Some issuers tag each issue's principal only under a carrying-amount
+    // concept, often at the issue date; use it and say so.
+    const face = faceTagged ?? groupValue(g, PRINCIPAL_FALLBACK_CONCEPTS);
     const convPrice = groupValue(g, [CONVERSION_PRICE]);
     const ratio = groupValue(g, [CONVERSION_RATIO]);
     const impliedPrice = convPrice ? convPrice.value : (ratio && ratio.value > 0 ? 1000 / ratio.value : null);
@@ -568,16 +579,20 @@ function convertiblesComponent(sources: IxSource[], price: number): Record<strin
     let basis: string | null = null;
     if (face && ratio && ratio.value > 0) {
       shares = (face.value / 1000) * ratio.value;
-      basis = "face_amount / 1000 * conversion_ratio";
+      basis = "principal / 1000 * conversion_ratio";
     } else if (face && convPrice && convPrice.value > 0) {
       shares = face.value / convPrice.value;
-      basis = "face_amount / conversion_price";
+      basis = "principal / conversion_price";
     }
     const inTheMoney = impliedPrice != null ? price >= impliedPrice : null;
     return {
       instrument: g.member ? memberLabel(g.member) : "Convertible notes (not itemized)",
       member: g.member,
-      faceAmount: face ? face.value : null,
+      faceAmount: faceTagged ? faceTagged.value : null,
+      principal: face ? face.value : null,
+      principalConcept: face ? face.concept : null,
+      principalDate: face ? face.periodEnd : null,
+      principalBasis: faceTagged ? "face_amount" : (face ? "tagged_amount_fallback" : null),
       conversionPrice: convPrice ? convPrice.value : (impliedPrice != null ? round(impliedPrice, 4) : null),
       conversionPriceBasis: convPrice ? "tagged" : (impliedPrice != null ? "1000 / conversion_ratio" : null),
       conversionRatioPer1000: ratio ? ratio.value : null,
@@ -596,7 +611,7 @@ function convertiblesComponent(sources: IxSource[], price: number): Record<strin
     ifConvertedShares: instruments.reduce((sum, i) => sum + (i.ifConvertedShares ?? 0), 0),
     incrementalShares: unresolved === instruments.length ? null : instruments.reduce((sum, i) => sum + (i.incrementalShares ?? 0), 0),
     unresolvedInstruments: unresolved,
-    note: "Face amount as tagged, which can be the original principal before repurchases. Net-share or cash settlement, capped calls and make-whole adjustments are not modeled.",
+    note: "Principal is the tagged face amount, else the issue's tagged carrying amount (principalBasis says which); either can be the original principal before repurchases. Net-share or cash settlement, capped calls and make-whole adjustments are not modeled.",
     source: sourceRef(source, null),
   };
 }
@@ -686,6 +701,45 @@ function atmComponent(evidence: Record<string, unknown>[], price: number): Recor
   return out;
 }
 
+const ANTIDILUTIVE = "AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount";
+const DILUTION_CONCEPT_RE = /Warrant|Option|Nonvested|RestrictedStock|Convertible|Antidilutive|EarningsPerShare|SharesOutstanding/i;
+
+/** Facts over the shortest period ending at the latest end date: the quarter in a 10-Q, the year in a 10-K. */
+function latestPeriodFacts(facts: IxFact[]): IxFact[] {
+  const end = facts.reduce((best, f) => ((f.periodEnd ?? "") > best ? (f.periodEnd ?? "") : best), "");
+  const atEnd = facts.filter((f) => (f.periodEnd ?? "") === end);
+  const start = atEnd.reduce((best, f) => ((f.periodStart ?? "") > best ? (f.periodStart ?? "") : best), "");
+  return atEnd.filter((f) => (f.periodStart ?? "") === start);
+}
+
+/** The company's own EPS share counts and the securities it excluded as antidilutive. */
+function reportedEpsDilution(doc: IxDocument): Record<string, unknown> | null {
+  const plain = (local: string) => latestPeriodFacts(doc.facts.filter((f) => f.local === local && f.value != null && !hasDims(f)))[0] ?? null;
+  const basic = plain("WeightedAverageNumberOfSharesOutstandingBasic");
+  const diluted = plain("WeightedAverageNumberOfDilutedSharesOutstanding");
+  const excluded = latestPeriodFacts(doc.facts.filter((f) => f.local === ANTIDILUTIVE && f.value != null && f.dims.AntidilutiveSecuritiesAxis != null));
+  if (!basic && !diluted && excluded.length === 0) return null;
+  const period = basic ?? diluted ?? excluded[0];
+  return {
+    periodStart: period.periodStart,
+    periodEnd: period.periodEnd,
+    weightedBasicShares: basic ? basic.value : null,
+    weightedDilutedShares: diluted ? diluted.value : null,
+    antidilutiveExcluded: excluded.map((f) => ({ security: memberLabel(f.dims.AntidilutiveSecuritiesAxis), shares: f.value })),
+    note: "The company's own weighted-average EPS counts for the period, and the securities it left out as antidilutive. A cross-check on the bridge's instrument list, not a point-in-time count.",
+  };
+}
+
+function taggedDilutionConcepts(sources: IxSource[]): string[] {
+  const out: string[] = [];
+  for (const s of sources) {
+    for (const f of s.doc.facts) {
+      if (f.value != null && DILUTION_CONCEPT_RE.test(f.local) && !out.includes(f.name)) out.push(f.name);
+    }
+  }
+  return out.sort().slice(0, 40);
+}
+
 export type DilutionInput = {
   ticker: string;
   price: number;
@@ -741,6 +795,7 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
     basicShares: basicFound ? { ...basicFound.value, source: sourceRef(basicFound.source, basicFound.value.asOf as string | null) } : null,
     components,
     atmProgram: atm,
+    reportedEpsDilution: findInSources(sources, reportedEpsDilution)?.value ?? null,
     notDisclosed,
     unresolved,
     partiallyResolved: partial,
@@ -780,6 +835,10 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
     "This is a mechanical bridge, not a consensus or forecast diluted share count, and must not be back-solved into one.",
     "A component missing from notDisclosed was not tagged in the filing; that is not proof the instrument does not exist.",
   ];
+  if (notDisclosed.length > 0 || unresolved.length > 0) {
+    // What the filing does tag, so a missing component can be traced to a concept this bridge does not read.
+    out.taggedDilutionConcepts = taggedDilutionConcepts(sources);
+  }
   out.warnings = warnings;
   if (primary && primary.doc.documentPeriodEnd) out.periodEnd = primary.doc.documentPeriodEnd;
   return out;
@@ -837,13 +896,17 @@ function instruments(doc: IxDocument, periodEnd: string | null): Record<string, 
   const out: Record<string, unknown>[] = [];
   for (const g of debtGroups(doc)) {
     const face = groupValue(g, [FACE_AMOUNT]);
-    const carrying = groupValue(g, CARRYING_CONCEPTS, periodEnd) ?? groupValue(g, CARRYING_CONCEPTS);
+    // A carrying amount is a balance only at the period end; an amount tagged on
+    // another date (often the issue date) is reported as such.
+    const carrying = groupValue(g, CARRYING_CONCEPTS, periodEnd);
+    const tagged = carrying ? null : groupValue(g, CARRYING_CONCEPTS);
     const coupon = groupValue(g, ["DebtInstrumentInterestRateStatedPercentage"]);
     const effective = groupValue(g, ["DebtInstrumentInterestRateEffectivePercentage"]);
     const convPrice = groupValue(g, [CONVERSION_PRICE]);
     const ratio = groupValue(g, [CONVERSION_RATIO]);
     const maturityDate = normalizeIxDate(groupText(g, "DebtInstrumentMaturityDate"));
-    if (!face && !carrying && !coupon && !maturityDate) continue;
+    // A coupon alone is often a duplicate member of an instrument listed elsewhere.
+    if (!face && !carrying && !tagged && !maturityDate) continue;
     const latest = g.facts.reduce((best, f) => ((f.periodEnd ?? "") > best ? (f.periodEnd ?? "") : best), "");
     let status = "reported";
     if (maturityDate && periodEnd && maturityDate.length === 10 && maturityDate < periodEnd) status = "matured_before_period_end";
@@ -854,7 +917,10 @@ function instruments(doc: IxDocument, periodEnd: string | null): Record<string, 
       axis: g.axis,
       faceAmount: face ? face.value : null,
       carryingAmount: carrying ? carrying.value : null,
-      carryingAmountDate: carrying ? carrying.periodEnd : null,
+      carryingAmountConcept: carrying ? carrying.concept : null,
+      taggedAmount: tagged ? tagged.value : null,
+      taggedAmountDate: tagged ? tagged.periodEnd : null,
+      taggedAmountConcept: tagged ? tagged.concept : null,
       couponPct: coupon ? round(coupon.value * 100, 4) : null,
       effectiveRatePct: effective ? round(effective.value * 100, 4) : null,
       maturityDate,
@@ -873,12 +939,17 @@ function instruments(doc: IxDocument, periodEnd: string | null): Record<string, 
   return out;
 }
 
-const FUNDING_CATEGORIES: [string, RegExp][] = [
-  ["going_concern", /\bgoing concern\b|\bsubstantial doubt\b/i],
-  ["liquidity_sufficiency", /\bsufficient to (?:fund|meet|satisfy|finance)\b|\badequate to (?:fund|meet)\b|\bfully[- ]funded\b|\bcash runway\b|\brunway\b|\bnext (?:12|twelve) months\b/i],
-  ["atm_program", ATM_RE],
-  ["capital_expenditure", /\bcapital expenditures?\b|\bcapex\b|\bpurchase commitments?\b/i],
-  ["financing_activity", /\bcredit (?:facility|agreement)\b|\brevolving\b|\bterm loan\b|\bnotes due\b|\bindenture\b/i],
+// [category, trigger, context the sentence must also have]. The context
+// requirement keeps out "next 12 months" revenue recognition, stock-award
+// valuation, and capex mentioned only in passing.
+const CASH_CONTEXT_RE = /\bcash\b|\bliquidity\b|\bcapital resources\b|\bfund(?:s|ed|ing)?\b|\bfinanc\w*|\brunway\b|\bborrowings?\b/i;
+const CAPEX_CONTEXT_RE = /\$\s?\d|\b(?:expects?|expected|plans?|planned|anticipates?|anticipated|intends?|budget(?:ed)?)\b/i;
+const FUNDING_CATEGORIES: [string, RegExp, RegExp | null][] = [
+  ["going_concern", /\bgoing concern\b|\bsubstantial doubt\b/i, null],
+  ["liquidity_sufficiency", /\bsufficient to (?:fund|meet|satisfy|finance)\b|\badequate to (?:fund|meet)\b|\bfully[- ]funded\b|\bcash runway\b|\brunway\b|\bnext (?:12|twelve) months\b/i, CASH_CONTEXT_RE],
+  ["atm_program", ATM_RE, null],
+  ["capital_expenditure", /\bcapital expenditures?\b|\bcapex\b|\bpurchase commitments?\b/i, CAPEX_CONTEXT_RE],
+  ["financing_activity", /\bcredit (?:facility|agreement)\b|\brevolving\b|\bterm loan\b|\bnotes due\b|\bindenture\b/i, null],
 ];
 
 /** Company statements on liquidity, funding and going concern, classified by what they speak to. */
@@ -887,8 +958,10 @@ export function fundingStatements(matches: TextMatch[], limit = 10): Record<stri
   const seen = new Set<string>();
   for (const match of matches) {
     for (const sentence of sentences(collapse(match.contextText))) {
-      const categories = FUNDING_CATEGORIES.filter(([, re]) => re.test(sentence)).map(([name]) => name);
-      if (categories.length === 0 || sentence.length < 40) continue;
+      // A sentence ending in ";" is an item of a list, usually forward-looking boilerplate.
+      if (sentence.length < 40 || sentence.endsWith(";")) continue;
+      const categories = FUNDING_CATEGORIES.filter(([, re, context]) => re.test(sentence) && (!context || context.test(sentence))).map(([name]) => name);
+      if (categories.length === 0) continue;
       const key = sentence.slice(0, 200).toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
@@ -938,7 +1011,7 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
     if (!maturity || row.status === "matured_before_period_end") continue;
     const year = maturity.slice(0, 4);
     const entry = byYear.get(year) ?? { year, faceAmount: 0, instruments: [] };
-    entry.faceAmount += Number(row.faceAmount ?? row.carryingAmount ?? 0);
+    entry.faceAmount += Number(row.faceAmount ?? row.carryingAmount ?? row.taggedAmount ?? 0);
     entry.instruments.push(String(row.instrument));
     byYear.set(year, entry);
   }
@@ -1004,7 +1077,8 @@ const SUFFIX = "(?:\\s?(p|pence|kr|SEK)\\b)?";
 const TARGET_FROM_TO = new RegExp(`(?:price target|target price|\\bPT\\b|price objective)[^.]{0,40}?\\bfrom\\s+${CURRENCY}\\s?${NUM}${SUFFIX}\\s+to\\s+${CURRENCY}\\s?${NUM}${SUFFIX}`, "i");
 const TARGET_TO_FROM = new RegExp(`(?:price target|target price|\\bPT\\b|price objective)[^.\\d$\\u00a3\\u20ac]{0,40}?\\bto\\s+${CURRENCY}\\s?${NUM}${SUFFIX}\\s+from\\s+${CURRENCY}\\s?${NUM}${SUFFIX}`, "i");
 const TARGET_BEFORE = /(\$|US\$|\u00a3|\u20ac|NT\$)\s?(\d[\d,]*(?:\.\d+)?)\s+(?:price\s+)?target\b/i;
-const TARGET_TO = new RegExp(`(?:price target|target price|\\bPT\\b|price objective)[^.\\d$\\u00a3\\u20ac]{0,40}?${CURRENCY}\\s?${NUM}${SUFFIX}`, "i");
+// A number followed by "%" is a move or a rate, never a target.
+const TARGET_TO = new RegExp(`(?:price target|target price|\\bPT\\b|price objective)[^.\\d$\\u00a3\\u20ac]{0,40}?${CURRENCY}\\s?${NUM}(?![\\d.,]*\\s?%)${SUFFIX}`, "i");
 const PERIOD_RE = /\b(?:FY|CY|F)\s?'?\d{2,4}E?\b|\b[12]H\s?'?\d{2,4}E?\b|\b(?:19|20)\d\dE?\b|\bNTM\b|\bnext[- ]twelve[- ]months\b|\bforward\b/gi;
 const METRIC = "(EV\\s?\\/\\s?EBITDA|EV\\s?\\/\\s?sales|EV\\s?\\/\\s?revenue|EV\\s?\\/\\s?EBIT|P\\s?\\/\\s?E|price[- ]to[- ]earnings|price[- ]to[- ]sales|EBITDA|EBIT|sales|revenue|earnings|EPS|free cash flow|FCF|gross profit|book value|NAV)";
 const MULTIPLE_FIRST = new RegExp(`\\b(\\d{1,3}(?:\\.\\d+)?)\\s?(?:x|times)\\b([^.;]{0,40}?)\\b${METRIC}\\b`, "gi");
@@ -1100,10 +1174,11 @@ function priceTarget(sentence: string): Record<string, unknown> | null {
   if (toFrom) {
     return { target: numberOf(toFrom[2]), prior: numberOf(toFrom[5]), currency: currencyCode(toFrom[1] ?? toFrom[4], toFrom[3] ?? toFrom[6]) };
   }
-  const to = TARGET_TO.exec(sentence);
-  if (to) return { target: numberOf(to[2]), prior: null, currency: currencyCode(to[1], to[3]) };
+  // "$92 price target" names its number outright; try it before scanning past the phrase.
   const before = TARGET_BEFORE.exec(sentence);
   if (before) return { target: numberOf(before[2]), prior: null, currency: currencyCode(before[1]) };
+  const to = TARGET_TO.exec(sentence);
+  if (to) return { target: numberOf(to[2]), prior: null, currency: currencyCode(to[1], to[3]) };
   return null;
 }
 
