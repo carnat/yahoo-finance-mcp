@@ -96,6 +96,7 @@ from yfmcp.tools.pricing import (  # re-export for compatibility and grouped rou
     get_short_interest,
     get_short_momentum,
     get_market_snapshot,
+    _run_ticker_batch,
     _load_completed_daily_history,
     _select_completed_close_series,
     _daily_bar_date,
@@ -169,10 +170,7 @@ async def get_stock_info(
 ) -> str:
     """Get stock information for a given ticker symbol"""
     if isinstance(ticker, list):
-        results = await asyncio.gather(
-            *[get_stock_info(t, fields, include_all) for t in ticker],
-            return_exceptions=True,
-        )
+        results = await _run_ticker_batch(ticker, lambda t: get_stock_info(t, fields, include_all))
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     company = yf.Ticker(ticker)
     try:
@@ -386,6 +384,17 @@ def _yahoo_news_identity_from_info(ticker: str, info: dict | None) -> dict:
         "exchange": info.get("exchange") or info.get("exchangeName"),
         "ticker": ticker.upper(),
     }
+
+
+def _yahoo_item_issuer(item: dict, identity: dict) -> str | None:
+    """Issuer of a Yahoo press-release item: the company when the headline starts with its name or ticker."""
+    if item.get("source") != "yahoo_finance_press_releases":
+        return None
+    title = _normalize_event_text(item.get("title"))
+    leads = [*(identity.get("aliases") or ()), *(str(t).lower() for t in item.get("tickers") or [])]
+    if any(lead and (title == lead or title.startswith(f"{lead} ")) for lead in leads):
+        return identity.get("companyName")
+    return None
 
 
 def _yahoo_news_match_for(text: str, ticker: str, identity: dict) -> tuple[str, int] | None:
@@ -1476,7 +1485,10 @@ async def _collect_yahoo_events(
             _reject("IDENTITY_UNAVAILABLE_TICKER_NOT_FOUND" if identity.get("status") == "UNAVAILABLE" else "IDENTITY_MISMATCH")
             continue
         match_basis, rank = match
-        item["issuer"] = identity.get("companyName")
+        # The match names the company, but a release about it may be issued
+        # by another company ("Qualcomm renews license with Apple").
+        item["mentionedCompany"] = identity.get("companyName")
+        item["issuer"] = _yahoo_item_issuer(item, identity)
         item["matchBasis"] = match_basis
         item["sourceTickerMatch"] = True
         item["tickerRelevance"] = "HIGH"
@@ -2686,6 +2698,14 @@ def _unpack_company_event_result(value: tuple) -> tuple[list[dict], list[str], l
     return items, sources_used, warnings, retrieved_at, {}
 
 
+_NEWS_RELEVANCE_RANK = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+
+
+def _rank_news_items_by_relevance(items: list[dict]) -> list[dict]:
+    """Items ordered by tickerRelevance (HIGH, MEDIUM, LOW), keeping their order within each level."""
+    return sorted(items, key=lambda item: _NEWS_RELEVANCE_RANK.get(str(item.get("tickerRelevance") or "").upper(), 1))
+
+
 @yfinance_server.tool(
     name="search_company_news",
     output_schema=_TOOL_OUTPUT_SCHEMAS["search_company_news"],
@@ -2712,9 +2732,10 @@ async def search_company_news(
         return _mcp_failure("search_company_news", ErrorCode.INPUT_VALIDATION_ERROR, "query is required")
     effective_sources = sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"]
     items, sources_used, warnings, retrieved_at, source_diagnostics = _unpack_company_event_result(
+        # The query filters the full collected pool, as the Worker does.
         await _collect_company_events(
             ticker,
-            max_results=max_results,
+            max_results=100,
             lookback_days=14,
             start_date=start_date,
             end_date=end_date,
@@ -2735,13 +2756,15 @@ async def search_company_news(
         ]).lower()
         if q in text:
             filtered.append(item)
-    status = _build_collection_status(filtered, sources_used, warnings)
-    source_status = _compute_source_status(sources_used, warnings, items, effective_sources, source_diagnostics)
+    returned = _rank_news_items_by_relevance(filtered)[:_coerce_max_results(max_results, 10)]
+    status = _build_collection_status(returned, sources_used, warnings)
+    source_status = _compute_source_status(sources_used, warnings, returned, effective_sources, source_diagnostics)
     source_coverage = _compute_source_coverage(source_status)
     payload = {
         "ticker": ticker.upper(),
         "query": query,
-        "items": filtered[:_coerce_max_results(max_results, 10)],
+        "matchCount": len(filtered),
+        "items": returned,
         "meta": {
             "sourcesUsed": sources_used,
             "deduped": True,
@@ -3376,8 +3399,12 @@ async def verify_company_event(
     })
 
 
-async def get_stock_actions(ticker: str) -> str:
-    """Get dividends, splits, and fund capital-gain distributions for a ticker."""
+async def get_stock_actions(ticker: str, start_date: str = "", limit: int = 40) -> str:
+    """Get dividends, splits, and fund capital-gain distributions for a ticker.
+
+    Every split is kept; dividends and capital gains are limited to the most
+    recent ``limit`` on or after ``start_date`` (as the Worker does).
+    """
     try:
         company = yf.Ticker(ticker)
     except Exception as e:
@@ -3385,7 +3412,21 @@ async def get_stock_actions(ticker: str) -> str:
         return f"Error: getting stock actions for {ticker}: {e}"
     actions_df = company.actions
     actions_df = actions_df.reset_index(names="Date")
-    return actions_df.to_json(orient="records", date_format="iso")
+    records = json.loads(actions_df.to_json(orient="records", date_format="iso"))
+    return json.dumps(_limit_corporate_actions(records, start_date, limit))
+
+
+def _limit_corporate_actions(rows: list[dict], start_date: str, limit: int) -> list[dict]:
+    """Every split plus the most recent ``limit`` dividend/capital-gain rows on or after start_date."""
+    cap = max(1, min(1000, int(limit or 40)))
+    def is_split(row: dict) -> bool:
+        try:
+            return float(row.get("Stock Splits") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+    payouts = [row for row in rows if not is_split(row) and (not start_date or str(row.get("Date") or "")[:10] >= start_date)]
+    kept = {id(row) for row in rows if is_split(row)} | {id(row) for row in payouts[-cap:]}
+    return [row for row in rows if id(row) in kept]
 
 
 @yfinance_server.tool(
@@ -4330,7 +4371,7 @@ Args:
 async def get_analyst_consensus(ticker: str | list[str]) -> str:
     """Get compact analyst consensus summary."""
     if isinstance(ticker, list):
-        results = await asyncio.gather(*[get_analyst_consensus(t) for t in ticker], return_exceptions=True)
+        results = await _run_ticker_batch(ticker, get_analyst_consensus)
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     cache_key = f"analyst_consensus:{ticker}"
     cached = _tool_cache.get_value(cache_key)
@@ -4550,10 +4591,7 @@ async def get_financial_ratios(
 ) -> str:
     """Get pre-computed key financial ratios."""
     if isinstance(ticker, list):
-        results = await asyncio.gather(
-            *[get_financial_ratios(t, history_periods, frequency) for t in ticker],
-            return_exceptions=True,
-        )
+        results = await _run_ticker_batch(ticker, lambda t: get_financial_ratios(t, history_periods, frequency))
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     history_periods = max(0, min(int(history_periods), 20))
     if frequency not in {"quarterly", "monthly", "yearly", "trailing"}:
@@ -5745,13 +5783,7 @@ async def search_filing_text(
 async def get_credit_health(ticker: str | list[str]) -> str:
     """Return credit health metrics for one or more tickers."""
     if isinstance(ticker, list):
-        results = []
-        for t in ticker:
-            try:
-                results.append(await get_credit_health(t))
-            except Exception as e:
-                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
-            await asyncio.sleep(0.1)
+        results = await _run_ticker_batch(ticker, get_credit_health)
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     company = yf.Ticker(ticker)
 
@@ -6035,13 +6067,7 @@ async def get_credit_health(ticker: str | list[str]) -> str:
 async def get_earnings_momentum(ticker: str | list[str]) -> str:
     """Return earnings momentum for one or more tickers."""
     if isinstance(ticker, list):
-        results = []
-        for t in ticker:
-            try:
-                results.append(await get_earnings_momentum(t))
-            except Exception as e:
-                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
-            await asyncio.sleep(0.1)
+        results = await _run_ticker_batch(ticker, get_earnings_momentum)
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     company = yf.Ticker(ticker)
     try:
@@ -6344,11 +6370,14 @@ async def get_put_hedge_candidates(
     except Exception as e:
         return json.dumps({"error": True, "message": f"No options: {e}", "ticker": ticker})
 
-    # Filter expiries >= expiry_after
+    # Filter expiries >= expiry_after. Without it, skip expiries less than a
+    # week out (as the Worker does): they rarely suit a hedge and often have
+    # no quotes.
     if expiry_after:
         qualifying_expiries = [e for e in expirations if e >= expiry_after]
     else:
-        qualifying_expiries = list(expirations)
+        default_after = (datetime.datetime.utcnow() + datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+        qualifying_expiries = [e for e in expirations if e >= default_after] or list(expirations)
 
     # Select nearest 2
     qualifying_expiries = qualifying_expiries[:2]
@@ -6494,16 +6523,41 @@ async def get_put_hedge_candidates(
 # Tool: get_analyst_upgrade_radar
 # ---------------------------------------------------------------------------
 
+def _analyst_price_target_change(row, signal: str) -> tuple[float | None, float | None, str | None]:
+    """Price-target change of one upgrades_downgrades row, as the Worker reports it.
+
+    yfinance returns currentPriceTarget/priorPriceTarget (0 means no target)
+    and priceTargetAction. Direction comes from the targets when both exist,
+    else from the action wording.
+    """
+    def _target(value) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if number > 0 and number == number else None
+
+    pt_to = _target(row.get("currentPriceTarget"))
+    pt_from = _target(row.get("priorPriceTarget"))
+    action = str(row.get("priceTargetAction") or "").lower()
+    if pt_from is not None and pt_to is not None:
+        direction = "RAISED" if pt_to > pt_from else "LOWERED" if pt_to < pt_from else "UNCHANGED"
+        return pt_from, pt_to, direction
+    if "raise" in action:
+        return pt_from, pt_to, "RAISED"
+    if "lower" in action:
+        return pt_from, pt_to, "LOWERED"
+    if ("announce" in action or "initiat" in action or signal == "INITIATED") and pt_to is not None:
+        return pt_from, pt_to, "INITIATED"
+    if "maintain" in action:
+        return pt_from, pt_to, "UNCHANGED"
+    return pt_from, pt_to, None
+
+
 async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30) -> str:
     """Return recent analyst upgrades/downgrades with signals."""
     if isinstance(ticker, list):
-        results = []
-        for t in ticker:
-            try:
-                results.append(await get_analyst_upgrade_radar(t, days_back))
-            except Exception as e:
-                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
-            await asyncio.sleep(0.1)
+        results = await _run_ticker_batch(ticker, lambda t: get_analyst_upgrade_radar(t, days_back))
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
 
     company = yf.Ticker(ticker)
@@ -6561,33 +6615,9 @@ async def get_analyst_upgrade_radar(ticker: str | list[str], days_back: int = 30
         elif signal == "INITIATED":
             initiation_count += 1
 
-        # Price target fields — yfinance upgrades_downgrades doesn't expose
-        # numeric price targets; stubs are included for forward-compatibility.
-        pt_from: float | None = None
-        pt_to: float | None = None
+        pt_from, pt_to, pt_direction = _analyst_price_target_change(row, signal)
 
-        # Derive ptDirection: use ptFrom/ptTo comparison when available;
-        # fall back to grade-change signal when PT numerics are absent (Option A);
-        # UNCHANGED for reiterations.
-        if pt_from is not None and pt_to is not None:
-            if pt_to > pt_from:
-                pt_direction = "RAISE"
-            elif pt_to < pt_from:
-                pt_direction = "CUT"
-            else:
-                pt_direction = "UNCHANGED"
-        elif signal == "INITIATED":
-            pt_direction = "INITIATED"
-        elif signal == "MAINTAIN":
-            pt_direction = "UNCHANGED"
-        elif signal == "UPGRADE":
-            pt_direction = "RAISE"
-        elif signal == "DOWNGRADE":
-            pt_direction = "CUT"
-        else:
-            pt_direction = None
-
-        mixed_signal = signal == "UPGRADE" and pt_direction == "CUT"
+        mixed_signal = (signal == "UPGRADE" and pt_direction == "LOWERED") or (signal == "DOWNGRADE" and pt_direction == "RAISED")
 
         # Strength flag
         if signal == "UPGRADE" and not mixed_signal:
@@ -6702,13 +6732,7 @@ async def get_etf_info(
 ) -> str:
     """Get ETF/fund information for one or more ticker symbols."""
     if isinstance(ticker, list):
-        results = []
-        for t in ticker:
-            try:
-                results.append(await get_etf_info(t, sections))
-            except Exception as e:
-                results.append(json.dumps({"error": True, "message": str(e), "ticker": t}))
-            await asyncio.sleep(0.1)
+        results = await _run_ticker_batch(ticker, lambda t: get_etf_info(t, sections))
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
 
     requested = sections or ["overview", "holdings", "allocation"]
@@ -6855,20 +6879,24 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
     call_oi_total = float(calls_df["openInterest"].sum(skipna=True)) if "openInterest" in calls_df.columns else 0.0
     put_oi_total = float(puts_df["openInterest"].sum(skipna=True)) if "openInterest" in puts_df.columns else 0.0
 
-    # Max pain strike — strike with maximum combined open interest
+    # Max pain strike: where option holders' total payout at expiry is
+    # smallest, as summarize_options_flow computes it (not the strike with
+    # the most open interest).
     max_pain_strike: float | None = None
     scan_warnings: list[str] = []
     if call_oi_total + put_oi_total <= 0:
         scan_warnings.append("MAX_PAIN_UNAVAILABLE_ZERO_OI")
     else:
         try:
-            combined = pd.concat([
-                calls_df[["strike", "openInterest"]],
-                puts_df[["strike", "openInterest"]],
-            ])
-            oi_by_strike = combined.groupby("strike")["openInterest"].sum()
-            if not oi_by_strike.empty:
-                max_pain_strike = float(oi_by_strike.idxmax())
+            call_oi = calls_df["openInterest"].fillna(0)
+            put_oi = puts_df["openInterest"].fillna(0)
+            min_pain = float("inf")
+            for strike in sorted(set(calls_df["strike"].tolist() + puts_df["strike"].tolist())):
+                pain = float(((strike - calls_df["strike"]).clip(lower=0) * call_oi).sum()
+                             + ((puts_df["strike"] - strike).clip(lower=0) * put_oi).sum())
+                if pain < min_pain:
+                    min_pain = pain
+                    max_pain_strike = float(strike)
         except Exception:
             pass
 
@@ -7031,6 +7059,7 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
         "ivPctile": iv_pctile,
         "putVolVs10dAvg": put_vol_vs_10d,
         "putVolTrend": put_vol_trend,
+        "expiry": exp,
         "maxPainStrike": max_pain_strike,
         "bracket": bracket,
         "formattedBlock": formatted_block,
@@ -7325,9 +7354,13 @@ async def analyze_credit_health(ticker: str | list[str]) -> str:
     return await get_credit_health(ticker)
 
 
-@yfinance_server.tool(name="get_corporate_actions", output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_actions"], description="Get dividends, stock splits, and fund capital-gain distributions from Yahoo Finance.")
-async def get_corporate_actions(ticker: str) -> str:
-    return await get_stock_actions(ticker)
+@yfinance_server.tool(name="get_corporate_actions", output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_actions"], description="Get stock splits, dividends, and fund capital-gain distributions from Yahoo Finance, oldest first. Every split is returned; dividends and capital gains are limited to the most recent `limit` on or after `start_date`.")
+async def get_corporate_actions(
+    ticker: str,
+    start_date: str | None = None,
+    limit: int = 40,
+) -> str:
+    return await get_stock_actions(ticker, start_date or "", limit)
 
 
 @yfinance_server.tool(name="get_ownership_holders", output_schema=_TOOL_OUTPUT_SCHEMAS["get_holder_info"], description="Canonical alias for get_holder_info.")
@@ -7406,24 +7439,26 @@ async def get_company_news(
     # fetched per ticker; there is no combined query that could zero out the
     # whole batch under low-news conditions.
     if isinstance(ticker, list):
-        results = await asyncio.gather(
-            *[get_company_news(t, max_results=max_results, lookback_days=lookback_days, sources=sources) for t in ticker],
-            return_exceptions=True,
+        results = await _run_ticker_batch(
+            ticker, lambda t: get_company_news(t, max_results=max_results, lookback_days=lookback_days, sources=sources),
         )
         return json.dumps({t: _safe_parse(r, t) for t, r in zip(ticker, results)})
     err = _validate_ticker(ticker)
     if err:
         return _mcp_failure("get_company_news", ErrorCode.INPUT_VALIDATION_ERROR, err)
     effective_sources = sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"]
+    # Collect a wider pool and keep the most relevant items, as the Worker does.
+    safe_max = _coerce_max_results(max_results, 10)
     items, sources_used, warnings, retrieved_at, source_diagnostics = _unpack_company_event_result(
         await _collect_company_events(
             ticker,
-            max_results=max_results,
+            max_results=min(100, safe_max * 3),
             lookback_days=lookback_days,
             sources=effective_sources,
             include_diagnostics=True,
         )
     )
+    items = _rank_news_items_by_relevance(items)[:safe_max]
     status = _build_collection_status(items, sources_used, warnings)
     source_status = _compute_source_status(sources_used, warnings, items, effective_sources, source_diagnostics)
     source_coverage = _compute_source_coverage(source_status)
@@ -8092,6 +8127,14 @@ async def list_sec_material_filings(
     accessions: list[str] = recent.get("accessionNumber", [])
     primary_docs: list[str] = recent.get("primaryDocument", [])
     accepted_dts: list[str] = recent.get("acceptanceDateTime", [])
+    is_xbrl: list = recent.get("isXBRL", [])
+    is_inline_xbrl: list = recent.get("isInlineXBRL", [])
+
+    def _flag_at(values: list, index: int) -> bool:
+        try:
+            return int(values[index]) == 1
+        except (IndexError, TypeError, ValueError):
+            return False
 
     results: list[dict] = []
     for i, form in enumerate(forms_list):
@@ -8111,9 +8154,8 @@ async def list_sec_material_filings(
         primary_doc = primary_docs[i] if i < len(primary_docs) else ""
         _, doc_url = _edgar_build_filing_urls(cik_int, acc, primary_doc)
 
-        # XBRL availability: true if companyfacts have been fetched for this CIK.
-        # This is a fast cache check; call get_sec_filing_intelligence for precise status.
-        xbrl_available = _EDGAR_FACTS_CACHE.get(cik_padded) is not None
+        # SEC submissions flag each filing that carries XBRL or inline XBRL.
+        xbrl_available = _flag_at(is_xbrl, i) or _flag_at(is_inline_xbrl, i)
 
         results.append({
             "filingType": form,

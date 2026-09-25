@@ -28,6 +28,11 @@ Sources checked through 2026-08-04:
 - Successful Alpha results are contextual (`decisionGrade:false`) and expose
   `capacityClass:"SCARCE_SHARED_QUOTA"`. Transcript, historical options, and
   ownership caches use different TTLs based on data mutability.
+- A Finnhub "no access" answer (entitlement or authentication) is remembered
+  per endpoint for 6 hours, and Alpha Vantage's daily-limit answer until the
+  next UTC day, so repeated calls are not spent on a known refusal.
+- The Alpha Vantage free key allows 25 requests a day and is shared by every
+  client that uses it; the deploy canaries and smokes never call Alpha.
 - Worker Cache API storage is best effort and data-center local. It reduces
   duplicate requests but is not global quota accounting or a persistent rate
   limiter.
@@ -84,6 +89,16 @@ Sources checked through 2026-08-04:
   characters), 24 hours in the Worker Cache API, and one SEC request for
   concurrent reads of the same document. Archive documents do not change once
   filed. Failed fetches are never cached.
+- Filing documents are read in full up to 12 million characters through that
+  cache (large inline-XBRL 10-Ks exceed 5 MB); scan coverage reports
+  `filingReadTruncated` when a filing is longer.
+- Inline-XBRL filings mark Part and Item headings with bold spans rather than
+  `<h1>`-`<h6>`; the outline, section, index and text-search tools read those
+  headings, skipping table-of-contents entries.
+- Segment revenue comes from XBRL segment facts when present; the
+  `companyconcept` API carries none, so the filing's own table introduced as
+  segment revenue is parsed, and its rows must sum to the table total.
+  `NOT_DISCLOSED` is returned only with the scan that supports it.
 - `/health` reports per-isolate `secDocumentCache` counters, and every `/mcp`
   response carries an `X-Sec-Cache` header in the `X-Yahoo-Cache` format. Its
   memory count also includes the isolate's CIK and submissions caches.

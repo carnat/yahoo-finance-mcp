@@ -111,6 +111,9 @@ no cached provider read was involved. `meta.cacheHit` is true only when data was
 read from a cache and no provider request was made. The local server reports
 only its own tool-result cache (`memory` or `null`).
 
+`meta.dataDate` repeats the payload's own `dataDate` (the date the data
+describes) when the payload has one.
+
 Batch calls (a list of tickers) run three tickers at a time in both runtimes.
 
 Grouped domains:

@@ -708,7 +708,7 @@ async def extract_management_commentary(ticker: str, period: str = "latest", top
 @yfinance_server.tool(
     name="compare_earnings_actual_vs_estimate",
     output_schema=_TOOL_OUTPUT_SCHEMAS["compare_earnings_actual_vs_estimate"],
-    description="Compare official-release actuals with Yahoo's historical estimate row. The official fiscal label remains period/reportedPeriod; estimatePeriod and reportedDate identify the Yahoo row. Read periodAlignmentStatus before using cross-source revenue comparisons. Returns epsDelta and omits percentage surprise for near-zero estimates.",
+    description="Compare official-release actuals with Yahoo's historical estimate row. The official fiscal label remains period/reportedPeriod; estimatePeriod and reportedDate identify the Yahoo row; releaseDate is the earnings release date. Read periodAlignmentStatus before using cross-source revenue comparisons. Returns epsDelta and omits percentage surprise for near-zero estimates.",
 )
 async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest") -> str:
     raw_metrics = _safe_json_loads(await extract_earnings_metrics(ticker=ticker, period=period))
@@ -815,6 +815,8 @@ async def compare_earnings_actual_vs_estimate(ticker: str, period: str = "latest
         "period": source_period or estimate_period or period,
         "reportedPeriod": source_period or estimate_period,
         "reportedDate": reported_date,
+        "releaseDate": str(metrics.get("reportedAt"))[:10] if metrics.get("reportedAt") else None,
+        "quarterEnd": reported_date,
         "releasePublishedAt": metrics.get("reportedAt"),
         "estimatePeriod": estimate_period,
         "periodAlignmentStatus": period_alignment_status,
@@ -988,6 +990,66 @@ async def get_sec_filing_exhibit_content(ticker: str, accessionNumber: str, file
     }, warnings=warnings)
 
 
+def _public_transcript_payload(url: str, clean_text: str, topics: list[str] | None, warnings: list[dict]) -> str:
+    if topics:
+        filtered = _filter_paragraphs_by_topics(clean_text, topics)
+        if not filtered:
+            warnings.append({"code": "NO_TOPIC_MATCHES", "message": f"No paragraphs matched the provided topics: {topics}"})
+        return _wrap_envelope_v2("parse_public_transcript", {
+            "url": url,
+            "source": "public_url",
+            "filteredByTopics": topics,
+            "matchedParagraphs": filtered,
+            "totalTextLength": len(clean_text),
+        }, warnings=warnings)
+
+    max_chars = 50_000
+    truncated = len(clean_text) > max_chars
+    if truncated:
+        warnings.append({"code": "TEXT_TRUNCATED", "message": f"Text truncated from {len(clean_text)} to {max_chars} characters."})
+    return _wrap_envelope_v2("parse_public_transcript", {
+        "url": url,
+        "source": "public_url",
+        "filteredByTopics": None,
+        "text": clean_text[:max_chars],
+        "totalTextLength": len(clean_text),
+        "truncated": truncated,
+    }, warnings=warnings)
+
+
+_YAHOO_TRANSCRIPT_URL_RE = _re.compile(r"^https://finance\.yahoo\.com/quote/([^/?#]+)/earnings/[^?#]*-earnings_call-\d+\.html", _re.IGNORECASE)
+
+
+async def _yahoo_transcript_text_for_url(url: str) -> str | None:
+    """Full text of a finance.yahoo.com transcript URL from the structured Yahoo/Quartr transcript.
+
+    Yahoo transcript pages do not render for scripted requests; the Worker
+    reads them the same way. None for other URLs or when unavailable.
+    """
+    match = _YAHOO_TRANSCRIPT_URL_RE.match(url or "")
+    if not match:
+        return None
+    ticker = match.group(1).upper()
+    paragraphs: list[str] = []
+    cursor: str | None = None
+    for _ in range(20):
+        raw = json.loads(await get_earnings_call_transcript(ticker, source_url=url, paragraph_limit=50, paragraph_cursor=cursor))
+        data = raw.get("data") if isinstance(raw, dict) and "ok" in raw else raw
+        if not isinstance(data, dict):
+            break
+        for row in data.get("paragraphs") or []:
+            text = str((row or {}).get("text") or "").strip()
+            if text:
+                speaker = (row or {}).get("speaker")
+                paragraphs.append(f"{speaker}: {text}" if speaker else text)
+        pagination = data.get("pagination") if isinstance(data.get("pagination"), dict) else {}
+        next_cursor = pagination.get("nextCursor")
+        if pagination.get("hasMore") is not True or not next_cursor or next_cursor == cursor:
+            break
+        cursor = str(next_cursor)
+    return "\n\n".join(paragraphs) if paragraphs else None
+
+
 @yfinance_server.tool(
     name="parse_public_transcript",
     output_schema=_TOOL_OUTPUT_SCHEMAS["parse_public_transcript"],
@@ -1024,6 +1086,10 @@ async def parse_public_transcript(url: str = "", topics: list[str] | None = None
 
     if not url or not url.startswith("https://"):
         return _wrap_envelope_v2("parse_public_transcript", None, error="A valid https:// URL or raw_text is required.", error_code=ErrorCode.INPUT_VALIDATION_ERROR)
+
+    yahoo_text = await _yahoo_transcript_text_for_url(url)
+    if yahoo_text is not None:
+        return _public_transcript_payload(url, yahoo_text, topics, [])
 
     loop = asyncio.get_event_loop()
 
@@ -1084,30 +1150,7 @@ async def parse_public_transcript(url: str = "", topics: list[str] | None = None
             "severity": "warning",
         })
 
-    if topics:
-        filtered = _filter_paragraphs_by_topics(clean_text, topics)
-        if not filtered:
-            warnings.append({"code": "NO_TOPIC_MATCHES", "message": f"No paragraphs matched the provided topics: {topics}"})
-        return _wrap_envelope_v2("parse_public_transcript", {
-            "url": url,
-            "source": "public_url",
-            "filteredByTopics": topics,
-            "matchedParagraphs": filtered,
-            "totalTextLength": len(clean_text),
-        }, warnings=warnings)
-
-    max_chars = 50_000
-    truncated = len(clean_text) > max_chars
-    if truncated:
-        warnings.append({"code": "TEXT_TRUNCATED", "message": f"Text truncated from {len(clean_text)} to {max_chars} characters."})
-    return _wrap_envelope_v2("parse_public_transcript", {
-        "url": url,
-        "source": "public_url",
-        "filteredByTopics": None,
-        "text": clean_text[:max_chars],
-        "totalTextLength": len(clean_text),
-        "truncated": truncated,
-    }, warnings=warnings)
+    return _public_transcript_payload(url, clean_text, topics, warnings)
 
 
 def _transcript_attempt(source_type: str, status: str, **extra: object) -> dict:

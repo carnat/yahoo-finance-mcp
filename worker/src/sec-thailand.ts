@@ -383,6 +383,12 @@ export async function searchThaiFunds(
   }
   const candidates = Object.values(resultsByFundStatus)
     .flatMap((result) => result.candidates as RecordValue[]);
+  // Candidates are listed once, at the top level; per-status results keep
+  // their count and cursor.
+  for (const result of Object.values(resultsByFundStatus)) {
+    result.candidateCount = (result.candidates as RecordValue[]).length;
+    delete result.candidates;
+  }
   const nextCursors = Object.fromEntries(
     ACTIVE_FUND_STATUSES.map((status) => [
       status,

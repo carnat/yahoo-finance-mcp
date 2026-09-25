@@ -193,6 +193,30 @@ async function fetchProviderWithTimeout(
   }
 }
 
+// Provider refusals that repeat until something changes (a plan entitlement,
+// a daily quota) are remembered per endpoint, so each call does not spend a
+// request, and quota, only to be refused again.
+const PROVIDER_ENTITLEMENT_DENIAL_TTL_MS = 6 * 60 * 60 * 1000;
+const providerDenials = new BoundedTtlCache<ProviderJsonResult>(100);
+
+function rememberedProviderDenial(denialKey: string): ProviderJsonResult | null {
+  const denial = providerDenials.get(denialKey);
+  if (!denial) return null;
+  countCacheEvent(providerCacheName(denialKey), "memoryHits");
+  return { ...denial, providerAttempted: false, cacheStatus: "HIT_PROCESS", message: `${denial.message ?? denial.status} (remembered; not retried)` };
+}
+
+function rememberProviderDenial(denialKey: string, result: ProviderJsonResult): ProviderJsonResult {
+  if (result.status === "ENTITLEMENT_REQUIRED" || result.status === "AUTH_ERROR") {
+    providerDenials.set(denialKey, result, PROVIDER_ENTITLEMENT_DENIAL_TTL_MS);
+  } else if (result.status === "RATE_LIMIT" && /per day|daily/i.test(result.message ?? "")) {
+    const now = new Date();
+    const nextUtcDay = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+    providerDenials.set(denialKey, result, Math.max(60_000, nextUtcDay - now.getTime()));
+  }
+  return result;
+}
+
 async function fetchAlphaVantageJson(
   operation: string,
   params: Record<string, unknown>,
@@ -202,6 +226,9 @@ async function fetchAlphaVantageJson(
   const cacheKey = providerCacheKey("alpha_vantage", operation, safeParams);
   const cached = await getProviderCache(cacheKey, ttlMs);
   if (cached) return cached;
+  const denialKey = "alpha_vantage:quota";
+  const denied = rememberedProviderDenial(denialKey);
+  if (denied) return denied;
   const apiKey = getWorkerVar("ALPHA_VANTAGE_API_KEY") ?? getWorkerVar("ALPHAVANTAGE_API_KEY");
   const publicQuery = new URLSearchParams({
     ...Object.fromEntries(Object.entries(safeParams).map(([key, value]) => [key, String(value)])),
@@ -238,7 +265,7 @@ async function fetchAlphaVantageJson(
     const json = rawJson as Record<string, unknown>;
     const providerMessage = String(json.Note ?? json.Information ?? json["Error Message"] ?? "").replaceAll(apiKey, "REDACTED");
     if (providerMessage) {
-      return { payload: null, status: providerMessageStatus(providerMessage), publicUrl, providerAttempted: true, cacheStatus: "MISS", message: providerMessage };
+      return rememberProviderDenial(denialKey, { payload: null, status: providerMessageStatus(providerMessage), publicUrl, providerAttempted: true, cacheStatus: "MISS", message: providerMessage });
     }
     const fetchedAt = new Date().toISOString();
     await setProviderCache(cacheKey, json, publicUrl, fetchedAt, ttlMs);
@@ -259,6 +286,10 @@ async function fetchFinnhubJson(
   const cacheKey = providerCacheKey("finnhub", cleanPath, params);
   const cached = await getProviderCache(cacheKey, ttlMs);
   if (cached) return cached;
+  // Entitlements are per endpoint, not per symbol.
+  const denialKey = `finnhub:${cleanPath}`;
+  const denied = rememberedProviderDenial(denialKey);
+  if (denied) return { ...denied, publicUrl: `${FINNHUB_API}${cleanPath}?${new URLSearchParams(Object.entries(params).map(([key, value]): [string, string] => [key, String(value)])).toString()}` };
   const token = getWorkerVar("FINNHUB_API_KEY") ?? getWorkerVar("FINNHUB_TOKEN");
   const query = new URLSearchParams(
     Object.entries(params).map(([key, value]): [string, string] => [key, String(value)])
@@ -274,7 +305,7 @@ async function fetchFinnhubJson(
     const retryAfter = response.headers.get("Retry-After") ?? undefined;
     if (!response.ok) {
       const body = (await response.text()).replaceAll(token, "REDACTED");
-      return {
+      return rememberProviderDenial(denialKey, {
         payload: null,
         status: providerHttpStatus(response.status, body),
         publicUrl,
@@ -283,7 +314,7 @@ async function fetchFinnhubJson(
         httpStatus: response.status,
         message: body.slice(0, 500) || undefined,
         retryAfter,
-      };
+      });
     }
     const json = await response.json();
     if (!json || typeof json !== "object" || Array.isArray(json)) {
@@ -1677,7 +1708,7 @@ export async function getNews(ticker: string): Promise<string> {
   });
 }
 
-export async function getStockActions(ticker: string): Promise<string> {
+export async function getStockActions(ticker: string, startDate = "", limit = 40): Promise<string> {
   const d = (await yGet(
     `https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?range=max&interval=1d&events=div%2Csplit%2CcapitalGains`,
     false
@@ -1707,7 +1738,20 @@ export async function getStockActions(ticker: string): Promise<string> {
   }
 
   rows.sort((a, b) => a.Date.localeCompare(b.Date));
-  return JSON.stringify(rows);
+  return JSON.stringify(limitCorporateActions(rows, startDate, limit));
+}
+
+/**
+ * Every split, plus the most recent `limit` dividend/capital-gain rows on or
+ * after startDate; oldest first. A full dividend history runs to hundreds of
+ * rows, while splits are rare and needed to read old prices.
+ */
+export function limitCorporateActions<T extends { Date: string; "Stock Splits": number }>(rows: T[], startDate: string, limit: number): T[] {
+  const cap = Math.max(1, Math.min(1000, Math.floor(Number(limit) || 40)));
+  const isSplit = (row: T): boolean => Number(row["Stock Splits"]) > 0;
+  const payouts = rows.filter((row) => !isSplit(row) && (!startDate || row.Date.slice(0, 10) >= startDate));
+  const kept = new Set<T>([...rows.filter(isSplit), ...payouts.slice(-cap)]);
+  return rows.filter((row) => kept.has(row));
 }
 
 // ── Financial statements via fundamentals timeseries API ────────────────────
@@ -1771,20 +1815,18 @@ const TIMESERIES_FS_CONFIG: Record<string, { prefix: string; baseTypes: string[]
   ttm_cashflow:            { prefix: "trailing",  baseTypes: CASHFLOW_BASE_TYPES },
 };
 
-async function fetchTimeseries(
+/**
+ * Yahoo fundamentals timeseries as one row per period, newest first:
+ * [{date: "2026-06-30", totalDebt: 1, ...}]. Keys are the type names without
+ * the prefix, first letter lower-cased ("quarterlyTotalDebt" -> "totalDebt").
+ * Null when Yahoo returns no series at all.
+ */
+async function fetchTimeseriesByDate(
   ticker: string,
   prefix: string,
   baseTypes: string[],
-  lineItems?: string[] | null,
-): Promise<string> {
-  const normalized = new Set((lineItems ?? []).map((item) => item.toLowerCase().replace(/[^a-z0-9]/g, "")));
-  const selectedTypes = normalized.size
-    ? baseTypes.filter((type) => normalized.has(type.toLowerCase()) || normalized.has(type.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase().replace(/[^a-z0-9]/g, "")))
-    : baseTypes;
-  if (normalized.size && !selectedTypes.length) {
-    return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: "No requested line_items matched this statement type", requestedLineItems: lineItems });
-  }
-  const types = selectedTypes.map((t) => `${prefix}${t}`);
+): Promise<Record<string, unknown>[] | null> {
+  const types = baseTypes.map((t) => `${prefix}${t}`);
   // period1: 1985-08-20 (yfinance default); period2: now
   const p2 = Math.floor(Date.now() / 1000);
   const d = (await yGet(
@@ -1799,7 +1841,7 @@ async function fetchTimeseries(
       unknown
     >[]) ?? [];
 
-  if (!results.length) return noData(ticker);
+  if (!results.length) return null;
 
   // Merge all type arrays into a {date → {field: value}} map
   const byDate: Record<string, Record<string, unknown>> = {};
@@ -1827,9 +1869,28 @@ async function fetchTimeseries(
     }
   }
 
-  const dates = Object.keys(byDate)
+  return Object.keys(byDate)
     .sort((a, b) => b.localeCompare(a))
-    .slice(0, prefix === "trailing" ? 1 : 4);
+    .map((date) => byDate[date]);
+}
+
+async function fetchTimeseries(
+  ticker: string,
+  prefix: string,
+  baseTypes: string[],
+  lineItems?: string[] | null,
+): Promise<string> {
+  const normalized = new Set((lineItems ?? []).map((item) => item.toLowerCase().replace(/[^a-z0-9]/g, "")));
+  const selectedTypes = normalized.size
+    ? baseTypes.filter((type) => normalized.has(type.toLowerCase()) || normalized.has(type.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase().replace(/[^a-z0-9]/g, "")))
+    : baseTypes;
+  if (normalized.size && !selectedTypes.length) {
+    return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: "No requested line_items matched this statement type", requestedLineItems: lineItems });
+  }
+  const byDateRows = await fetchTimeseriesByDate(ticker, prefix, selectedTypes);
+  if (byDateRows == null) return noData(ticker);
+  const byDate = Object.fromEntries(byDateRows.map((row) => [String(row.date), row]));
+  const dates = byDateRows.map((row) => String(row.date)).slice(0, prefix === "trailing" ? 1 : 4);
   if (!dates.length) return JSON.stringify([]);
 
   // Match Python/yfinance's line-item-oriented DataFrame serialization:
@@ -1888,7 +1949,29 @@ export async function getHolderInfo(ticker: string, type: string): Promise<strin
     | undefined;
   if (!result) return noData(ticker);
 
-  return JSON.stringify(result[mod]);
+  return JSON.stringify(unwrapYahooValues(result[mod]));
+}
+
+/**
+ * Yahoo quoteSummary values arrive as {raw, fmt, longFmt} objects. Keep the
+ * number (or the formatted date, for date values) and drop Yahoo's maxAge
+ * bookkeeping: {pctHeld: {raw: 0.08, fmt: "8%"}} -> {pctHeld: 0.08}.
+ */
+export function unwrapYahooValues(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(unwrapYahooValues);
+  if (value == null || typeof value !== "object") return value;
+  const obj = value as Record<string, unknown>;
+  if ("raw" in obj && Object.keys(obj).every((key) => key === "raw" || key === "fmt" || key === "longFmt")) {
+    if (typeof obj.fmt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(obj.fmt)) return obj.fmt;
+    return obj.raw ?? null;
+  }
+  if (Object.keys(obj).length === 0) return null;
+  const out: Record<string, unknown> = {};
+  for (const [key, inner] of Object.entries(obj)) {
+    if (key === "maxAge") continue;
+    out[key] = unwrapYahooValues(inner);
+  }
+  return out;
 }
 
 function providerNumber(value: unknown): number | null {
@@ -2810,7 +2893,8 @@ export async function getEarningsAnalysis(ticker: string): Promise<string> {
   const histArr = (eh.history as Record<string, unknown>[]) ?? [];
   if (histArr.length > 0) {
     output.earningsHistory = histArr.map((h) => ({
-      quarter: h.quarter,
+      // Fiscal quarter end as YYYY-MM-DD (Yahoo sends {raw: epoch, fmt}).
+      quarter: unwrapYahooValues(h.quarter),
       epsActual: raw(h.epsActual),
       epsEstimate: raw(h.epsEstimate),
       epsDifference: raw(h.epsDifference),
@@ -4065,9 +4149,11 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
     return runPartialBatch(ticker, (t) => getCreditHealth(t));
   }
   try {
-    const [bsRaw, incRaw] = await Promise.all([
-      fetchTimeseries(ticker, "quarterly", ["TotalDebt", "CashAndCashEquivalents"]),
-      fetchTimeseries(ticker, "quarterly", [
+    // One row per quarter, newest first (fetchTimeseries itself returns one
+    // row per line item for the statement tool).
+    const [bsRows, incRows4] = await Promise.all([
+      fetchTimeseriesByDate(ticker, "quarterly", ["TotalDebt", "CashAndCashEquivalents"]),
+      fetchTimeseriesByDate(ticker, "quarterly", [
         "EBITDA",
         "NormalizedEBITDA",
         "EBIT",
@@ -4080,14 +4166,14 @@ export async function getCreditHealth(ticker: string | string[]): Promise<string
       ]),
     ]);
 
-    const bs = JSON.parse(bsRaw) as Record<string, unknown>[];
-    const inc = JSON.parse(incRaw) as Record<string, unknown>[];
-
-    if (!Array.isArray(bs) || !bs.length || !Array.isArray(inc) || !inc.length) {
+    const bs = bsRows ?? [];
+    const inc = incRows4 ?? [];
+    if (!bs.length || !inc.length) {
       return JSON.stringify({ error: true, message: "Insufficient financial data", ticker });
     }
 
-    const bsLatest = bs[0];
+    // The newest quarter that reports debt or cash.
+    const bsLatest = bs.find((row) => row.totalDebt != null || row.cashAndCashEquivalents != null) ?? bs[0];
     // TTM: sum up to 4 most-recent quarterly income rows (newest first)
     const incRows = inc.slice(0, 4);
 
@@ -4541,6 +4627,9 @@ export async function getEarningsMomentum(ticker: string | string[]): Promise<st
 
 // ── get_options_flow_summary ─────────────────────────────────────────────────
 
+/** Without expiry_after, the hedge screen starts at expiries this many days out. */
+const HEDGE_DEFAULT_MIN_DAYS = 7;
+
 export async function getPutHedgeCandidates(
   ticker: string,
   otmPctMin: number,
@@ -4579,8 +4668,11 @@ export async function getPutHedgeCandidates(
       return JSON.stringify({ error: true, message: "No option expirations", ticker });
     }
 
-    // Filter and select nearest 2
-    const qualifying = expiryAfter ? dates.filter((d) => d >= expiryAfter).slice(0, 2) : dates.slice(0, 2);
+    // Filter and select nearest 2. Without expiry_after, skip expiries less
+    // than a week out: they rarely suit a hedge and often have no quotes.
+    const defaultAfter = new Date(Date.now() + HEDGE_DEFAULT_MIN_DAYS * 86_400_000).toISOString().slice(0, 10);
+    const eligible = dates.filter((d) => d >= (expiryAfter || defaultAfter));
+    const qualifying = (eligible.length || expiryAfter ? eligible : dates).slice(0, 2);
     if (!qualifying.length) {
       return JSON.stringify({ error: true, message: "No qualifying expiry dates", ticker });
     }
@@ -4736,6 +4828,27 @@ export async function getPutHedgeCandidates(
 
 // ── get_analyst_upgrade_radar ────────────────────────────────────────────────
 
+/** Price-target change of one upgradeDowngradeHistory row. */
+export function analystPriceTargetChange(
+  entry: Record<string, unknown>,
+  signal: string,
+): { ptFrom: number | null; ptTo: number | null; ptDirection: string | null } {
+  const target = (value: unknown): number | null =>
+    typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+  const ptTo = target(entry.currentPriceTarget);
+  const ptFrom = target(entry.priorPriceTarget);
+  const action = String(entry.priceTargetAction ?? "").toLowerCase();
+  if (ptFrom != null && ptTo != null) {
+    return { ptFrom, ptTo, ptDirection: ptTo > ptFrom ? "RAISED" : ptTo < ptFrom ? "LOWERED" : "UNCHANGED" };
+  }
+  let ptDirection: string | null = null;
+  if (/raise/.test(action)) ptDirection = "RAISED";
+  else if (/lower/.test(action)) ptDirection = "LOWERED";
+  else if ((/announce|initiat/.test(action) || signal === "INITIATED") && ptTo != null) ptDirection = "INITIATED";
+  else if (/maintain/.test(action)) ptDirection = "UNCHANGED";
+  return { ptFrom, ptTo, ptDirection };
+}
+
 export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack: number): Promise<string> {
   if (Array.isArray(ticker)) {
     return runPartialBatch(ticker, (t) => getAnalystUpgradeRadar(t, daysBack));
@@ -4789,18 +4902,11 @@ export async function getAnalystUpgradeRadar(ticker: string | string[], daysBack
       else if (signal === "DOWNGRADE") downgradeCount++;
       else if (signal === "INITIATED") initiationCount++;
 
-      // Price target direction.
-      // yfinance/upgrades_downgrades doesn't expose numeric price targets, so ptFrom/ptTo are
-      // structural stubs (null). ptDirection is derived from action semantics:
-      //   INITIATED — new coverage (initiated/init action)
-      //   UNCHANGED — reiteration/maintain with no rating change
-      //   null     — signal genuinely unknown
-      const ptFrom: null = null;
-      const ptTo: null = null;
-      const ptDirection: string | null =
-        signal === "INITIATED" ? "INITIATED" :
-        signal === "MAINTAIN" ? "UNCHANGED" : null;
-      const mixedSignal = signal === "UPGRADE" && ptDirection === "LOWERED";
+      // Price targets: Yahoo reports currentPriceTarget/priorPriceTarget and a
+      // priceTargetAction; 0 means no target. Direction comes from the
+      // targets when both exist, else from the action wording.
+      const { ptFrom, ptTo, ptDirection } = analystPriceTargetChange(entry, signal);
+      const mixedSignal = (signal === "UPGRADE" && ptDirection === "LOWERED") || (signal === "DOWNGRADE" && ptDirection === "RAISED");
 
       let strengthFlag: string;
       if (signal === "UPGRADE" && !mixedSignal) strengthFlag = "BULLISH";
@@ -4880,6 +4986,8 @@ const SEC_DOCUMENT_EDGE_TTL_MS = 24 * 60 * 60 * 1000;
 // Filings reach several MB and may hold two-byte characters, so the
 // in-process cache is bounded by characters as well as entries.
 const SEC_DOCUMENT_CACHE_MAX_CHARS = 16_000_000;
+/** Filing documents are read (and scanned) up to this many characters. */
+const SEC_DOCUMENT_READ_MAX_CHARS = 12_000_000;
 const secDocumentBodies = new BoundedTtlCache<string>(12, SEC_DOCUMENT_CACHE_MAX_CHARS, (body) => body.length);
 type SecDocumentResult = { ok: true; text: string } | { ok: false; status: number };
 const secDocumentInflight = new Map<string, Promise<SecDocumentResult>>();
@@ -5024,6 +5132,18 @@ async function edgarGetJson(url: string): Promise<Record<string, unknown> | null
 /** Fetch an EDGAR HTML/text document. Reads at most maxBytes from the response
  *  stream and cancels the rest, avoiding large memory allocations for big filings. */
 async function edgarGetHtml(url: string, maxBytes = 5_000_000): Promise<string | null> {
+  // Filing documents go through the SEC document cache and are read up to
+  // SEC_DOCUMENT_READ_MAX_CHARS; large inline-XBRL 10-Ks exceed 5 MB, and a
+  // cut-off read hid their later tables. Small reads (index pages) stream.
+  if (maxBytes >= 1_000_000 && url.startsWith("https://www.sec.gov/Archives/")) {
+    try {
+      const doc = await fetchSecDocument(url);
+      if (!doc.ok) return null;
+      return doc.text.length > SEC_DOCUMENT_READ_MAX_CHARS ? doc.text.slice(0, SEC_DOCUMENT_READ_MAX_CHARS) : doc.text;
+    } catch {
+      return null;
+    }
+  }
   try {
     const resp = await edgarFetch(url);
     if (!resp.ok || !resp.body) { await resp.body?.cancel(); return null; }
@@ -5577,9 +5697,43 @@ function parseHtmlTable(tableHtml: string): string[][] {
   return rows;
 }
 
+/**
+ * Financial statement tables put "$", "%" and a closing ")" in cells of
+ * their own, so the same period sits in a different column on each row.
+ * Merge those cells into the adjacent value and drop empty cells:
+ * ["Americas", "$", "178,353", "7", "%"] -> ["Americas", "$178,353", "7%"].
+ */
+export function mergeFinancialCells(cells: string[]): string[] {
+  const out: string[] = [];
+  let prefix = "";
+  for (const raw of cells) {
+    let cell = raw.replace(/\s+/g, " ").trim();
+    if (!cell) continue;
+    if (/^[$€£¥]$/.test(cell)) {
+      prefix += cell;
+      continue;
+    }
+    if (/^(?:%|\)|\)%|%\))$/.test(cell) && out.length > 0) {
+      out[out.length - 1] += cell;
+      continue;
+    }
+    // "( 95,699 )" -> "(95,699)"
+    cell = cell.replace(/^\(\s+/, "(").replace(/\s+\)$/, ")");
+    out.push(prefix + cell);
+    prefix = "";
+  }
+  if (prefix) out.push(prefix);
+  return out;
+}
+
+/** Table rows with financial cells merged (see mergeFinancialCells); empty rows dropped. */
+function parseFinancialTableRows(tableHtml: string): string[][] {
+  return parseHtmlTable(tableHtml).map(mergeFinancialCells).filter((row) => row.length > 0);
+}
+
 /** Parse a numeric cell value, handling commas, parens, and $/%/scale suffixes. */
 function parseNumericCell(text: string): number | null {
-  let s = text.replace(/,/g, "").replace(/\s/g, "").replace(/\$/g, "").replace(/%/g, "");
+  let s = text.replace(/,/g, "").replace(/\s/g, "").replace(/[$€£¥]/g, "").replace(/%/g, "");
   if (s.startsWith("(") && s.endsWith(")")) s = "-" + s.slice(1, -1);
   let mult = 1;
   if (/b$/i.test(s)) { mult = 1e9; s = s.slice(0, -1); }
@@ -5600,7 +5754,8 @@ function detectUnitMultiplier(tableHtml: string, contextHtml: string): number {
 
 const TOTAL_LABELS = new Set([
   "total", "consolidated", "total revenues", "total net revenues",
-  "net revenues", "revenues", "total revenue",
+  "net revenues", "revenues", "total revenue", "total net sales", "net sales",
+  "total net revenue",
 ]);
 
 function escapeRegexLiteral(value: string): string {
@@ -5660,7 +5815,7 @@ function rowMatchesGeoRegion(row: string[], region: string): boolean {
  * Search an SEC filing HTML document for a geographic revenue table.
  * Returns { pct, usd, sectionHeading, parsedTables } or null if not found.
  */
-function extractGeoRevenueFromHtml(
+export function extractGeoRevenueFromHtml(
   html: string,
   region: string
 ): {
@@ -5675,65 +5830,19 @@ function extractGeoRevenueFromHtml(
   sourceRows: string[][];
   sourceColumns: string[];
 } | null {
-  const htmlLower = html.toLowerCase();
-  const regionAliases = geoRegionAliases(region);
-
-  const searchTerms = [
-    "geographic information",
-    "geographic areas",
-    "geographic segment",
-    "revenue by region",
-    "revenues by geography",
-    ...regionAliases,
-  ].filter(Boolean);
-
-  // Collect match positions (capped)
-  const positions: number[] = [];
-  for (const term of searchTerms) {
-    let idx = 0;
-    while (positions.length < 30) {
-      const pos = htmlLower.indexOf(term, idx);
-      if (pos === -1) break;
-      positions.push(pos);
-      idx = pos + 1;
-    }
-  }
-  if (positions.length === 0) return null;
-
-  const checkedTables = new Set<number>();
+  // Every table that names the region is a candidate. (Scanning windows after
+  // the first mentions missed tables late in long filings.)
   const candidateTables: { pos: number; tableHtml: string; rows: string[][] }[] = [];
-
-  for (const pos of [...new Set(positions)].slice(0, 20)) {
-    const searchStart = Math.max(0, pos - 1_000);
-    const searchEnd = Math.min(html.length, pos + 60_000);
-    const chunk = html.slice(searchStart, searchEnd);
-
-    const tblRe = /<table[^>]*>/gi;
-    let tblM: RegExpExecArray | null;
-    while ((tblM = tblRe.exec(chunk)) !== null) {
-      const absStart = searchStart + tblM.index;
-      if (checkedTables.has(absStart)) continue;
-      checkedTables.add(absStart);
-
-      // Walk forward tracking nesting depth to find matching </table>
-      let depth = 0;
-      let i = absStart;
-      let tableEnd = absStart;
-      while (i < Math.min(html.length, absStart + 200_000)) {
-        const o = htmlLower.indexOf("<table", i);
-        const c = htmlLower.indexOf("</table>", i);
-        if (o === -1 && c === -1) break;
-        if (o !== -1 && (c === -1 || o < c)) { depth++; i = o + 6; }
-        else { depth--; if (depth === 0) { tableEnd = c + 8; break; } i = c + 8; }
-      }
-
-      const tableHtml = html.slice(absStart, tableEnd);
-      if (!textContainsGeoRegion(tableHtml, region)) continue;
-      const rows = parseHtmlTable(tableHtml);
-      if (rows.length < 2) continue;
-      candidateTables.push({ pos: absStart, tableHtml, rows });
-    }
+  let scanned = 0;
+  for (const m of html.matchAll(/<table[^>]*>[\s\S]*?<\/table>/gi)) {
+    if (++scanned > 800) break;
+    const tableHtml = m[0];
+    if (!textContainsGeoRegion(tableHtml, region)) continue;
+    const rows = parseFinancialTableRows(tableHtml);
+    if (rows.length < 2) continue;
+    candidateTables.push({ pos: m.index ?? 0, tableHtml, rows });
   }
+  if (candidateTables.length === 0) return null;
 
   for (const tbl of candidateTables) {
     const { rows, tableHtml } = tbl;
@@ -5788,7 +5897,10 @@ function extractGeoRevenueFromHtml(
       : "";
 
     const headerRow = rows[0] ?? [];
-    const sourceColumn = valueCol < headerRow.length ? String(headerRow[valueCol]).trim() : "";
+    // A header row without a label cell is one cell shorter than the data rows.
+    const headerOffset = Math.max(0, rows[regionRowIdx].length - headerRow.length);
+    const headerCol = valueCol - headerOffset;
+    const sourceColumn = headerCol >= 0 && headerCol < headerRow.length ? String(headerRow[headerCol]).trim() : "";
     const rawValue = valueCol < rows[regionRowIdx].length ? String(rows[regionRowIdx][valueCol]) : null;
     const rawDenominator = valueCol < rows[totalRowIdx].length ? String(rows[totalRowIdx][valueCol]) : null;
     const sourceRows = [
@@ -6313,12 +6425,12 @@ export async function getFilingData(
         const regionText = String(region ?? "");
         const searchedTerms = geoRegionAliases(regionText);
         const relevantGeoText = filingHasRelevantGeoText(htmlText, regionText);
-        const filingReadTruncated = htmlText.length >= 4_900_000;
+        const filingReadTruncated = htmlText.length >= SEC_DOCUMENT_READ_MAX_CHARS;
         const scanCoverage = {
           sourceType: "sec_primary_html",
           documentUrl: filing.documentUrl,
           charsScanned: htmlText.length,
-          maxCharsRequested: 5_000_000,
+          maxCharsRequested: SEC_DOCUMENT_READ_MAX_CHARS,
           filingReadTruncated,
           relevantGeoTextFound: relevantGeoText,
           searchedTerms,
@@ -6670,17 +6782,43 @@ export async function searchFilingText(
   const size = Math.max(200, Math.min(Math.floor(contextChars), 4000));
   const matches: Record<string, unknown>[] = [];
   const seen = new Set<number>();
+  // Item headings give each match its section, and a section hint that
+  // names a heading limits the search to that section.
+  const itemHeadings = filingItemHeadings(html);
+  const headingAt = (pos: number): string | null => {
+    let current: string | null = null;
+    for (const heading of itemHeadings) {
+      if (heading.start > pos) break;
+      current = heading.title;
+    }
+    return current;
+  };
+  let scopeStart = 0;
+  let scopeEnd = html.length;
+  let sectionScope: string | null = null;
+  if (sectionHint) {
+    const hintIdx = itemHeadings.findIndex((heading) =>
+      sectionHeadingMatches(sectionHint, heading.title) || heading.title.toLowerCase().includes(sectionHint.toLowerCase()));
+    if (hintIdx >= 0) {
+      const heading = itemHeadings[hintIdx];
+      scopeStart = heading.start;
+      scopeEnd = itemHeadings.slice(hintIdx + 1).find((next) => next.level <= heading.level)?.start ?? html.length;
+      sectionScope = heading.title;
+    }
+  }
 
   const addMatch = (term: string, pos: number) => {
     if (isHtmlTagPosition(html, pos)) return;
-    if ([...seen].some((p) => Math.abs(p - pos) < 150)) return;
+    // Windows of neighbouring matches would repeat the same passage.
+    if ([...seen].some((p) => Math.abs(p - pos) < size * 0.8)) return;
     seen.add(pos);
     const start = Math.max(0, pos - Math.floor(size / 2));
     const end = Math.min(html.length, pos + Math.floor(size / 2));
     const contextHtml = htmlWindowAtTagBoundaries(html, start, end);
     const contextText = cleanFilingDisplayText(htmlToReadableText(contextHtml));
     const preText = cleanFilingDisplayText(htmlToReadableText(htmlWindowAtTagBoundaries(html, Math.max(0, pos - 2_000), pos)));
-    const sectionHeading = (preText.match(/(?:Item\s+\d+[A-Z]?\.?\s+[^.]{3,120}|[A-Z][A-Z0-9 ,&/-]{12,120})\s*$/) ?? [""])[0].trim();
+    const sectionHeading = headingAt(pos)
+      ?? (preText.match(/(?:Item\s+\d+[A-Z]?\.?\s+[^.]{3,120}|[A-Z][A-Z0-9 ,&/-]{12,120})\s*$/) ?? [""])[0].trim();
     const match: Record<string, unknown> = {
       term,
       sectionHeading,
@@ -6709,16 +6847,16 @@ export async function searchFilingText(
     matches.push(match);
   };
 
-  if (sectionHint) {
+  if (sectionHint && sectionScope == null) {
     const pos = htmlLower.indexOf(sectionHint.toLowerCase());
     if (pos >= 0) addMatch(sectionHint, pos);
   }
   for (const term of searchTerms) {
-    let idx = 0;
+    let idx = scopeStart;
     const termLower = term.toLowerCase();
     while (matches.length < 10) {
       const pos = htmlLower.indexOf(termLower, idx);
-      if (pos < 0) break;
+      if (pos < 0 || pos >= scopeEnd) break;
       addMatch(term, pos);
       idx = pos + 1;
     }
@@ -6732,6 +6870,7 @@ export async function searchFilingText(
     filingType: actualFilingType,
     filingDate,
     documentKind: "primary_html",
+    ...(sectionHint ? { sectionScope } : {}),
     matches,
     matchCount: matches.length,
     confidence: matches.length === 0 ? "NOT_DISCLOSED" : (matches.some(m => ((m.tableParsed as unknown[]) ?? []).length > 0) ? "HIGH" : "MEDIUM"),
@@ -7223,6 +7362,22 @@ export async function getFilingDocument(
 
 // ── get_options_flow_scan ─────────────────────────────────────────────────────
 
+/** Max-pain strike: where the total intrinsic payout to call and put holders at expiry is smallest. */
+export function computeMaxPainStrike(calls: Record<string, unknown>[], puts: Record<string, unknown>[]): number | null {
+  const strikes = [...new Set([...calls, ...puts].map((c) => c.strike as number).filter((v) => Number.isFinite(v)))].sort((a, b) => a - b);
+  let best: number | null = null;
+  let minPain = Infinity;
+  for (const s of strikes) {
+    const callPain = calls.reduce((sum, c) => sum + Math.max(0, s - (c.strike as number)) * ((c.openInterest as number) || 0), 0);
+    const putPain = puts.reduce((sum, p) => sum + Math.max(0, (p.strike as number) - s) * ((p.openInterest as number) || 0), 0);
+    if (callPain + putPain < minPain) {
+      minPain = callPain + putPain;
+      best = s;
+    }
+  }
+  return best;
+}
+
 export async function getOptionsFlowScan(ticker: string, windowLabel: string): Promise<string> {
   try {
     const fullOptions = await yGetFullOptions(ticker);
@@ -7253,18 +7408,10 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
     if (totalCallOI + totalPutOI <= 0 || majorityZeroOpenInterest(allContracts)) {
       scanWarnings.push("MAX_PAIN_UNAVAILABLE_ZERO_OI");
     } else {
-      const oiByStrike = new Map<number, number>();
-      for (const c of [...calls, ...puts]) {
-        const strike = c.strike as number;
-        const oi = (c.openInterest as number) || 0;
-        oiByStrike.set(strike, (oiByStrike.get(strike) ?? 0) + oi);
-      }
-      if (oiByStrike.size > 0) {
-        let maxOi = -1;
-        for (const [strike, oi] of oiByStrike) {
-          if (oi > maxOi) { maxOi = oi; maxPainStrike = strike; }
-        }
-      }
+      // The same max-pain definition as summarize_options_flow: the strike
+      // where option holders' total payout is smallest (not the strike with
+      // the most open interest).
+      maxPainStrike = computeMaxPainStrike(calls, puts);
     }
 
     // ATM IV — reject placeholder
@@ -7457,6 +7604,7 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
     const resultData: Record<string, unknown> = {
       ticker, windowLabel, dataDate,
       pcRatio, ivPctile, putVolVs10dAvg: putVolVs10d, putVolTrend,
+      expiry: fullOptions.dates[0] ?? null,
       maxPainStrike, bracket, formattedBlock,
       realizedVolPriceBasis,
       historicalObservationType: "COMPLETED_DAILY_PRICE_SERIES",
@@ -8139,15 +8287,7 @@ export async function getOptionsSummary(ticker: string, expiryHint?: string): Pr
     if (callOI + putOI <= 0 || majorityZeroOpenInterest(allContracts)) {
       summaryWarnings.push("MAX_PAIN_UNAVAILABLE_ZERO_OI");
     } else {
-      const strikeSet = new Set([...calls.map(c => c.strike as number), ...puts.map(p => p.strike as number)]);
-      const allStrikes = Array.from(strikeSet).sort((a, b) => a - b);
-      let minPain = Infinity;
-      for (const s of allStrikes) {
-        const callPain = calls.reduce((sum, c) => sum + Math.max(0, s - (c.strike as number)) * ((c.openInterest as number) || 0), 0);
-        const putPain = puts.reduce((sum, p) => sum + Math.max(0, (p.strike as number) - s) * ((p.openInterest as number) || 0), 0);
-        const total = callPain + putPain;
-        if (total < minPain) { minPain = total; maxPainStrike = s; }
-      }
+      maxPainStrike = computeMaxPainStrike(calls, puts);
     }
 
     return JSON.stringify({
@@ -8236,6 +8376,11 @@ export async function getFilingOutline(ticker: string, _accessionNumber: string 
         outline.push({ level, title: text });
       }
     }
+    if (outline.length === 0) {
+      for (const heading of filingItemHeadings(html).slice(0, 100)) {
+        outline.push({ level: heading.level, title: heading.title });
+      }
+    }
     const tableCount = (html.match(/<table\b/gi) ?? []).length;
     return JSON.stringify({
       ticker,
@@ -8295,19 +8440,63 @@ function sectionHeadingMatches(requested: string, heading: string): boolean {
   return requestedText.includes(headingText) || headingText.includes(requestedText);
 }
 
+// Bold markup: <b>, <strong>, or a span whose style sets a bold weight. The
+// style value is matched per quote character, because inline-XBRL filings
+// quote font names inside it (style="font-family:'Helvetica';font-weight:700").
+const BOLD_OPEN = `(?:<b\\b[^>]*>|<strong\\b[^>]*>|<span\\b[^>]*style\\s*=\\s*(?:"[^"]*font-weight\\s*:\\s*(?:bold|[6-9]00)[^"]*"|'[^']*font-weight\\s*:\\s*(?:bold|[6-9]00)[^']*')[^>]*>)`;
+const BOLD_ITEM_RE = new RegExp(`${BOLD_OPEN}\\s*((?:<[^>]+>\\s*)*Item(?:\\s|&nbsp;|&#160;|\\u00a0)+\\d+[A-Z]?(?:\\s*\\([^)]+\\))?[^<]{0,160})`, "gi");
+const BOLD_PART_RE = new RegExp(`${BOLD_OPEN}\\s*((?:<[^>]+>\\s*)*Part(?:\\s|&nbsp;|&#160;|\\u00a0)+[IVX]+\\b[^<]{0,80})`, "gi");
+
+/** Plain text of the block (paragraph, div or table row) that starts at pos, for a heading's full title. */
+function headingBlockText(html: string, pos: number): string {
+  const rest = html.slice(pos, pos + 2_000);
+  const close = rest.search(/<\/(?:p|div|tr|h[1-6])>/i);
+  const block = close >= 0 ? rest.slice(0, close) : rest.slice(0, 600);
+  return stripHtmlTags(block).replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
+}
+
 function boldItemHeadings(html: string): { start: number; end: number; text: string; token: string }[] {
-  const itemRe = /(?:<b\b[^>]*>|<strong\b[^>]*>|<span\b[^>]*style\s*=\s*['"][^'"]*font-weight\s*:\s*(?:bold|[6-9]00)[^'"]*['"][^>]*>)\s*((?:<[^>]+>\s*)*Item(?:\s|&nbsp;|&#160;)+\d+[A-Z]?(?:\s*\([^)]+\))?[^<]{0,160})/gi;
   const matches: { start: number; end: number; text: string; token: string }[] = [];
-  let match: RegExpExecArray | null;
-  while ((match = itemRe.exec(html)) !== null) {
-    const text = stripHtmlTags(match[1]).replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+  for (const match of html.matchAll(BOLD_ITEM_RE)) {
+    const start = match.index ?? 0;
+    const text = headingBlockText(html, start) || stripHtmlTags(match[1]).replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
     const token = sectionItemToken(text);
-    if (token) matches.push({ start: match.index, end: itemRe.lastIndex, text, token });
+    if (token) matches.push({ start, end: start + match[0].length, text, token });
   }
   return matches;
 }
 
-function findSectionBounds(html: string, section: string, maxChars: number = 50000): SectionBounds {
+/**
+ * Part and Item headings of a filing in document order, outside the table
+ * of contents, for filings that mark headings with bold text instead of
+ * <h1>-<h6> (inline-XBRL 10-K and 10-Q documents).
+ */
+export function filingItemHeadings(html: string): { start: number; end: number; level: number; title: string; token: string }[] {
+  const headings: { start: number; end: number; level: number; title: string; token: string }[] = [];
+  const seen = new Set<string>();
+  const add = (re: RegExp, level: number, tokenOf: (text: string) => string | null): void => {
+    for (const match of html.matchAll(re)) {
+      const start = match.index ?? 0;
+      const end = start + match[0].length;
+      if (isTocMatch(html, start, end)) continue;
+      const title = headingBlockText(html, start);
+      // A table-of-contents row ends with its page number.
+      if (!title || /\s\d{1,3}$/.test(title)) continue;
+      const token = tokenOf(title);
+      if (!token || seen.has(token)) continue;
+      seen.add(token);
+      headings.push({ start, end, level, title, token });
+    }
+  };
+  add(BOLD_PART_RE, 1, (text) => {
+    const m = text.match(/^part\s+([ivx]+)\b/i);
+    return m ? `part ${m[1].toLowerCase()}` : null;
+  });
+  add(BOLD_ITEM_RE, 2, (text) => sectionItemToken(text));
+  return headings.sort((a, b) => a.start - b.start);
+}
+
+export function findSectionBounds(html: string, section: string, maxChars: number = 50000): SectionBounds {
   const headingRe = /<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi;
   let tocSkipped = false;
 
@@ -9034,6 +9223,19 @@ function yahooNewsIdentityFor(identity: NewsCompanyIdentity | null): YahooNewsId
     acronyms: [...acronyms],
     exchange: identity?.exchange ?? null,
   };
+}
+
+/**
+ * The issuer of a Yahoo press-release item: the company when the headline
+ * starts with its name (or ticker), otherwise unknown. News stories have no
+ * issuer.
+ */
+export function yahooItemIssuer(item: Record<string, unknown>, identity: YahooNewsIdentity): string | null {
+  if (_str(item.source) !== "yahoo_finance_press_releases") return null;
+  const title = normalizedYahooNewsPhrase(item.title);
+  const tickers = Array.isArray(item.tickers) ? item.tickers.map((t) => _str(t).toLowerCase()) : [];
+  const leads = [...identity.aliases, ...tickers];
+  return leads.some((lead) => lead && (title === lead || title.startsWith(`${lead} `))) ? identity.companyName : null;
 }
 
 function yahooNewsMatchFor(text: string, ticker: string, identity: YahooNewsIdentity): YahooNewsMatch | null {
@@ -10744,7 +10946,10 @@ async function collectYahooEvents(
         reject(identity.status === "UNAVAILABLE" ? "IDENTITY_UNAVAILABLE_TICKER_NOT_FOUND" : "IDENTITY_MISMATCH");
         continue;
       }
-      item.issuer = identity.companyName;
+      // The match names the company, but a release about it may be issued
+      // by another company ("Qualcomm renews license with Apple").
+      item.mentionedCompany = identity.companyName;
+      item.issuer = yahooItemIssuer(item, identity);
       item.matchBasis = match.basis;
       item.sourceTickerMatch = true;
       item.tickerRelevance = "HIGH";
@@ -11445,6 +11650,16 @@ async function collectCompanyEvents(
 
 // ─── Public event / news tools ─────────────────────────────────────────────────
 
+const NEWS_RELEVANCE_RANK: Record<string, number> = { HIGH: 0, MEDIUM: 1, LOW: 2 };
+
+/** Items ordered by tickerRelevance (HIGH, MEDIUM, LOW), keeping their order (newest first) within each level. */
+export function rankNewsItemsByRelevance(items: Record<string, unknown>[]): Record<string, unknown>[] {
+  const rank = (item: Record<string, unknown>): number => NEWS_RELEVANCE_RANK[_str(item.tickerRelevance).toUpperCase()] ?? 1;
+  return items.map((item, index) => ({ item, index }))
+    .sort((a, b) => rank(a.item) - rank(b.item) || a.index - b.index)
+    .map(({ item }) => item);
+}
+
 export async function getCompanyNews(
   ticker: string | string[],
   maxResults = 10,
@@ -11469,7 +11684,11 @@ export async function getCompanyNews(
   if (Array.isArray(ticker)) {
     return runPartialBatch(ticker, (t) => getCompanyNews(t, maxResults, lookbackDays, sources));
   }
-  const out = await collectCompanyEvents(ticker, { maxResults, lookbackDays, sources });
+  // Collect a wider pool, then keep the most relevant items: an item that
+  // only mentions the company in passing should not displace one about it.
+  const safeMax = clampInt(maxResults, 10, 1, 100);
+  const out = await collectCompanyEvents(ticker, { maxResults: Math.min(100, safeMax * 3), lookbackDays, sources });
+  out.items = rankNewsItemsByRelevance(out.items).slice(0, safeMax);
   const status = collectionStatus(out.items, out.sourcesUsed, out.warnings);
   const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
@@ -11495,8 +11714,10 @@ export async function searchCompanyNews(
   sources: string[] = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"],
   maxResults = 10
 ): Promise<string> {
+  // The query filters the full collected pool; filtering only the first
+  // max_results items found almost nothing.
   const out = await collectCompanyEvents(ticker, {
-    maxResults,
+    maxResults: 100,
     lookbackDays: 14,
     startDate,
     endDate,
@@ -11504,17 +11725,19 @@ export async function searchCompanyNews(
     searchQuery: query,
   });
   const q = query.toLowerCase().trim();
-  const matched = q
+  const matchedAll = q
     ? out.items.filter(item => `${_str(item.title)} ${_str(item.summary)} ${_str(item.source)} ${_str(item.eventType)} ${_str(item.evidenceText)}`.toLowerCase().includes(q))
     : out.items;
+  const matched = rankNewsItemsByRelevance(matchedAll).slice(0, clampInt(maxResults, 10, 1, 100));
   const status = collectionStatus(matched, out.sourcesUsed, out.warnings);
-  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, out.items, sources, out.sourceDiagnostics);
+  const sourceStatus = computeSourceStatus(out.sourcesUsed, out.warnings, matched, sources, out.sourceDiagnostics);
   const sourceCoverage = computeSourceCoverage(sourceStatus);
   const coverage = buildCoverage(sourceStatus);
   const payload: Record<string, unknown> = {
     ticker: ticker.toUpperCase(),
     query,
-    items: matched.slice(0, clampInt(maxResults, 10, 1, 100)),
+    matchCount: matchedAll.length,
+    items: matched,
     meta: { sourcesUsed: out.sourcesUsed, deduped: true, watermark: out.watermark },
     warnings: out.warnings,
     sourceCoverage,
@@ -12039,6 +12262,24 @@ function _sanitizeFilingHtml(html: string): string {
   return sanitizeFilingHtml(html);
 }
 
+/**
+ * The unit a filing table states, such as "(in millions)" in its caption or
+ * "(dollars in millions)" in the sentence before it. The statement nearest
+ * the table wins; an amount like "$4.2 billion" in nearby prose is not a
+ * unit statement. "unknown" when none is stated.
+ */
+export function tableUnitScale(tableHtml: string, beforeHtml: string): "thousands" | "millions" | "billions" | "unknown" {
+  const unitRe = /\bin\s+(thousands|millions|billions)\b|\$\s*(thousands|millions|billions)\b|\b(thousands|millions|billions)\s+of\s+(?:u\.s\.\s+)?dollars\b/gi;
+  const scaleOf = (m: RegExpMatchArray): "thousands" | "millions" | "billions" =>
+    (m[1] ?? m[2] ?? m[3]).toLowerCase() as "thousands" | "millions" | "billions";
+  const tableText = stripHtmlTags(tableHtml).slice(0, 1_500);
+  const inTable = [...tableText.matchAll(unitRe)];
+  if (inTable.length > 0) return scaleOf(inTable[0]);
+  const before = [...stripHtmlTags(beforeHtml).slice(-800).matchAll(unitRe)];
+  if (before.length > 0) return scaleOf(before[before.length - 1]);
+  return "unknown";
+}
+
 function _buildFilingIndexFromHtml(
   html: string,
 ): {
@@ -12063,6 +12304,21 @@ function _buildFilingIndexFromHtml(
     const keywords = _INDEX_KEYWORDS.filter(kw => normalized.includes(kw));
     const sectionId = normalized.replace(/[^a-z0-9]+/g, "_").slice(0, 60);
     sections.push({ sectionId, heading: rawText, normalizedHeading: normalized, level, keywords, startChar: hm.index, endChar: hm.index + hm[0].length });
+  }
+
+  if (sections.length === 0) {
+    for (const heading of filingItemHeadings(sanitized).slice(0, 50)) {
+      const normalized = heading.title.toLowerCase();
+      sections.push({
+        sectionId: normalized.replace(/[^a-z0-9]+/g, "_").slice(0, 60),
+        heading: heading.title,
+        normalizedHeading: normalized,
+        level: heading.level,
+        keywords: _INDEX_KEYWORDS.filter((kw) => normalized.includes(kw)),
+        startChar: heading.start,
+        endChar: heading.end,
+      });
+    }
   }
 
   // --- Table extraction ---
@@ -12105,13 +12361,7 @@ function _buildFilingIndexFromHtml(
     // Detect unit scale: default to "unknown"; detect explicitly from context.
     // Lowercase tableHtml separately since preContext is already lowercased,
     // then concatenate to build the search context.
-    const preContext = sanitized.slice(Math.max(0, tableStart - 2000), tableStart).toLowerCase();
-    const tableContext = tableHtml.toLowerCase() + preContext;
-    let unitScale: string;
-    if (/billion/.test(tableContext)) unitScale = "billions";
-    else if (/million/.test(tableContext)) unitScale = "millions";
-    else if (/thousand/.test(tableContext)) unitScale = "thousands";
-    else unitScale = "unknown";
+    const unitScale = tableUnitScale(tableHtml, sanitized.slice(Math.max(0, tableStart - 2000), tableStart));
 
     // Confidence: also lower when unitScale is unknown
     const hasYearHeaders = headers.some(h => /\b20\d\d\b/.test(h));
@@ -12188,33 +12438,13 @@ async function _getSecFilingIndexImpl(
   }
 
   // Fetch filing HTML
-  const resp = await edgarFetch(filing.documentUrl);
-  if (!resp.ok) {
-    return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: `Failed to fetch filing: HTTP ${resp.status}` } });
+  // Through the SEC document cache, so the outline, section and table tools
+  // reuse the same read.
+  const doc = await fetchSecDocument(filing.documentUrl);
+  if (!doc.ok) {
+    return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: `Failed to fetch filing: HTTP ${doc.status}` } });
   }
-
-  // Read up to 5 MB to avoid memory issues on large filings
-  const reader = resp.body?.getReader();
-  if (!reader) {
-    return JSON.stringify({ ok: false, error: { code: "PROVIDER_ERROR", message: "Failed to read filing response body" } });
-  }
-  const chunks: Uint8Array[] = [];
-  let totalBytes = 0;
-  const MAX_BYTES = 5_000_000;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(value);
-      totalBytes += value.byteLength;
-      if (totalBytes >= MAX_BYTES) { await reader.cancel(); break; }
-    }
-  }
-  // Pre-allocate a single buffer and copy chunks at correct offsets (avoids O(n²) reduce).
-  const merged = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.byteLength; }
-  const html = new TextDecoder().decode(merged);
+  const html = doc.text.length > SEC_DOCUMENT_READ_MAX_CHARS ? doc.text.slice(0, SEC_DOCUMENT_READ_MAX_CHARS) : doc.text;
 
   const index = _buildFilingIndexFromHtml(html);
   const indexedAt = new Date().toISOString();
@@ -12278,6 +12508,9 @@ export async function listSecMaterialFilings(
   const accessions: string[] = (recent.accessionNumber as string[]) ?? [];
   const primaryDocs: string[] = (recent.primaryDocument as string[]) ?? [];
   const acceptedDts: string[] = (recent.acceptanceDateTime as string[]) ?? [];
+  // SEC submissions flag each filing that carries XBRL (1) or inline XBRL.
+  const isXbrl: unknown[] = (recent.isXBRL as unknown[]) ?? [];
+  const isInlineXbrl: unknown[] = (recent.isInlineXBRL as unknown[]) ?? [];
 
   const results: Record<string, unknown>[] = [];
   const cikInt = parseInt(cikPadded, 10);
@@ -12299,7 +12532,7 @@ export async function listSecMaterialFilings(
       accessionNumber: acc,
       primaryDocument: primaryDoc,
       documentUrl: docUrl,
-      xbrl_available: false,
+      xbrl_available: Number(isXbrl[i]) === 1 || Number(isInlineXbrl[i]) === 1,
     });
   }
 
@@ -12733,6 +12966,33 @@ export async function getSecFilingExhibitContent(
   });
 }
 
+/**
+ * Full text of a finance.yahoo.com earnings-call transcript URL, one
+ * "Speaker: text" paragraph per line, read page by page from the structured
+ * transcript. Null for other URLs or when the transcript is unavailable.
+ */
+async function yahooTranscriptTextForUrl(url: string): Promise<string | null> {
+  const m = url.match(/^https:\/\/finance\.yahoo\.com\/quote\/([^/?#]+)\/earnings\//i);
+  if (!m) return null;
+  const ticker = decodeURIComponent(m[1]).toUpperCase();
+  if (!parseYahooTranscriptSourceUrl(ticker, url).identity) return null;
+  const paragraphs: string[] = [];
+  let cursor = 0;
+  for (let page = 0; page < 20; page++) {
+    const data = parseObjectJson(await getEarningsCallTranscript(ticker, "latest", null, null, null, url, 50, cursor));
+    const rows = Array.isArray(data.paragraphs) ? data.paragraphs as Record<string, unknown>[] : [];
+    for (const row of rows) {
+      const text = _str(row.text);
+      if (text) paragraphs.push(row.speaker ? `${_str(row.speaker)}: ${text}` : text);
+    }
+    const pagination = data.pagination && typeof data.pagination === "object" ? data.pagination as Record<string, unknown> : {};
+    const next = Number(pagination.nextCursor);
+    if (pagination.hasMore !== true || !Number.isFinite(next) || next <= cursor) break;
+    cursor = next;
+  }
+  return paragraphs.length > 0 ? paragraphs.join("\n\n") : null;
+}
+
 export async function parsePublicTranscript(
   url: string = "",
   topics: string[] | null = null,
@@ -12749,11 +13009,15 @@ export async function parsePublicTranscript(
     cleanText = htmlToReadableText(rawText as string);
     source = "raw_text";
   } else {
-    const html = await fetchPublicHtml(url, 5_000_000);
-    if (!html) {
+    // Yahoo transcript pages do not render for server requests; their
+    // transcripts come from the same structured Yahoo/Quartr source that
+    // get_earnings_call_transcript uses.
+    const yahooText = await yahooTranscriptTextForUrl(url);
+    const html = yahooText == null ? await fetchPublicHtml(url, 5_000_000) : null;
+    if (yahooText == null && !html) {
       return JSON.stringify({ ok: false, error: { code: "FETCH_ERROR", message: `Could not fetch URL: ${url}` } });
     }
-    cleanText = htmlToReadableText(html);
+    cleanText = yahooText ?? htmlToReadableText(html as string);
     source = "public_url";
   }
   const warnings: Record<string, unknown>[] = [];
@@ -14140,6 +14404,108 @@ export async function extractGeographicRevenue(
   return JSON.stringify(out);
 }
 
+export interface SegmentTableRow {
+  label: string;
+  rawValue: string;
+  value: number;
+}
+
+export interface SegmentTableResult {
+  segments: SegmentTableRow[];
+  total: SegmentTableRow;
+  tableIndex: number;
+  title: string | null;
+  column: string | null;
+  unitScale: "thousands" | "millions" | "billions" | "actual";
+  unitMultiplier: number;
+}
+
+const YEAR_CELL = /^(?:fy\s*)?(?:19|20)\d{2}$/i;
+
+/**
+ * A reportable-segment revenue table in a filing: segment rows that sum to
+ * the table's total row (within 1%), for the latest period column. The
+ * table must follow text that mentions segments and revenue or sales.
+ * Returns the tables it considered (segmentTablesSeen) even when none of
+ * them parses, so callers can tell "not parsed" from "not disclosed".
+ */
+export function extractSegmentTableFromHtml(html: string): { result: SegmentTableResult | null; segmentTablesSeen: number; tablesScanned: number } {
+  let tableIndex = -1;
+  let segmentTablesSeen = 0;
+  for (const m of html.matchAll(/<table[^>]*>([\s\S]*?)<\/table>/gi)) {
+    tableIndex++;
+    if (tableIndex > 800) break;
+    const pos = m.index ?? 0;
+    const before = stripHtmlTags(html.slice(Math.max(0, pos - 2_000), pos)).replace(/\s+/g, " ").trim();
+    const lead = before.slice(-400).toLowerCase();
+    if (!/segment/.test(lead) || !/revenue|net sales|sales/.test(lead)) continue;
+    segmentTablesSeen++;
+    const rows = parseFinancialTableRows(m[0]);
+    const headerIdx = rows.findIndex((row) => row.some((cell) => YEAR_CELL.test(cell)));
+    const header = headerIdx >= 0 ? rows[headerIdx] : null;
+    let yearCol: number | null = null;
+    if (header) {
+      let latest = -1;
+      header.forEach((cell, i) => {
+        const year = YEAR_CELL.test(cell) ? Number(cell.replace(/\D/g, "")) : NaN;
+        if (Number.isFinite(year) && year > latest) {
+          latest = year;
+          yearCol = i;
+        }
+      });
+    }
+    const valueOf = (row: string[]): { raw: string; value: number } | null => {
+      if (header && yearCol != null) {
+        const offset = Math.max(0, row.length - header.length);
+        const raw = row[yearCol + offset];
+        const value = raw != null ? parseNumericCell(raw) : null;
+        return raw != null && value != null ? { raw, value } : null;
+      }
+      for (const raw of row.slice(1)) {
+        const value = parseNumericCell(raw);
+        if (value != null) return { raw, value };
+      }
+      return null;
+    };
+    const segments: SegmentTableRow[] = [];
+    let total: SegmentTableRow | null = null;
+    for (const row of rows.slice(headerIdx + 1)) {
+      const label = (row[0] ?? "").trim();
+      if (!label) continue;
+      const cell = row.length > 1 ? valueOf(row) : null;
+      if (!cell) {
+        // A label-only row after segment rows starts another block
+        // (for example operating income); before them it is a heading.
+        if (segments.length > 0) break;
+        continue;
+      }
+      if (/^total\b/i.test(label) || /^(?:consolidated|net sales|total net sales|total revenues?)$/i.test(label)) {
+        total = { label, rawValue: cell.raw, value: cell.value };
+        break;
+      }
+      segments.push({ label, rawValue: cell.raw, value: cell.value });
+    }
+    if (!total || segments.length < 2 || total.value <= 0) continue;
+    const sum = segments.reduce((acc, row) => acc + row.value, 0);
+    if (Math.abs(sum - total.value) > total.value * 0.01) continue;
+    const unitMultiplier = detectUnitMultiplier(m[0], html.slice(Math.max(0, pos - 3_000), pos));
+    return {
+      result: {
+        segments,
+        total,
+        tableIndex,
+        title: before.slice(-300).split(/(?<=[.:])\s+/).pop() ?? null,
+        column: header && yearCol != null ? header[yearCol] : null,
+        unitScale: unitMultiplier === 1e9 ? "billions" : unitMultiplier === 1e6 ? "millions" : unitMultiplier === 1e3 ? "thousands" : "actual",
+        unitMultiplier,
+      },
+      segmentTablesSeen,
+      tablesScanned: tableIndex + 1,
+    };
+  }
+  return { result: null, segmentTablesSeen, tablesScanned: tableIndex + 1 };
+}
+
 export async function extractSegmentRevenue(ticker: string, filingType = "10-K", period = "latest", detailLevel = "compact"): Promise<string> {
   const payload = parseObjectJson(await getFilingData(ticker, "segment_revenue", null, filingType, period));
   const segsRaw = Array.isArray(payload.allSegments) ? payload.allSegments : [];
@@ -14197,9 +14563,104 @@ export async function extractSegmentRevenue(ticker: string, filingType = "10-K",
     }
   }
   const out: Record<string, unknown> = { ticker, factType: "segment_revenue", segments, status: segments.length > 0 ? "FOUND" : "NOT_DISCLOSED" };
+  if (segments.length === 0) {
+    // SEC companyconcept facts carry no segment dimensions, so most filers
+    // need the filing's own segment table; absence is only reported with
+    // the scan that supports it.
+    Object.assign(out, await segmentRevenueFromFilingTable(ticker, filingType, warnings));
+  }
   if (warnings.length > 0) out.warnings = warnings;
   if (String(detailLevel).toLowerCase() === "raw") out.rawContext = payload;
   return JSON.stringify(out);
+}
+
+async function segmentRevenueFromFilingTable(
+  ticker: string,
+  filingType: string,
+  warnings: Array<Record<string, unknown>>,
+): Promise<Record<string, unknown>> {
+  const resolved = await resolveSecFiling(ticker, filingType, null);
+  if (!resolved.ok) {
+    return { status: String(resolved.error.status ?? resolved.error.code ?? "FILING_NOT_FOUND"), code: resolved.error.code ?? null, message: resolved.error.message ?? null };
+  }
+  const filing = resolved.filing;
+  warnings.push(...filing.warnings);
+  const filingMeta = {
+    filingType: filing.filingType,
+    filingDate: filing.filingDate,
+    accessionNumber: filing.accessionNumber,
+    documentUrl: filing.documentUrl,
+  };
+  const html = await edgarGetHtml(filing.documentUrl, SEC_DOCUMENT_READ_MAX_CHARS);
+  if (!html) {
+    return { ...filingMeta, status: "PROVIDER_ERROR", code: "PROVIDER_ERROR", message: "The filing document could not be read." };
+  }
+  const { result, segmentTablesSeen, tablesScanned } = extractSegmentTableFromHtml(html);
+  const filingReadTruncated = html.length >= SEC_DOCUMENT_READ_MAX_CHARS;
+  const searchedTerms = ["segment", "revenue", "net sales"];
+  const scanCoverage = {
+    sourceType: "sec_primary_html",
+    documentUrl: filing.documentUrl,
+    charsScanned: html.length,
+    tablesScanned,
+    segmentTablesSeen,
+    filingReadTruncated,
+    searchedTerms,
+  };
+  if (result) {
+    const period = result.column ? `FY${result.column.replace(/\D/g, "")}` : null;
+    return {
+      ...filingMeta,
+      status: "FOUND",
+      extractionMethod: "PARSED_TABLE",
+      decisionGrade: false,
+      unitScale: result.unitScale,
+      segments: result.segments.map((row) => ({
+        label: row.label,
+        value: row.value * result.unitMultiplier,
+        rawValue: row.rawValue,
+        period,
+        confidence: "MEDIUM",
+        evidence: {
+          documentUrl: filing.documentUrl,
+          filingType: filing.filingType,
+          accessionNumber: filing.accessionNumber,
+          filingDate: filing.filingDate,
+          sourceTableId: result.tableIndex,
+          tableTitle: result.title,
+          sourceRows: [[row.label, row.rawValue], [result.total.label, result.total.rawValue]],
+          sourceColumns: result.column ? [result.column] : [],
+        },
+      })),
+      total: { label: result.total.label, value: result.total.value * result.unitMultiplier, rawValue: result.total.rawValue },
+      evidence: {
+        sourceType: "sec_filing_table",
+        documentUrl: filing.documentUrl,
+        tableIndex: result.tableIndex,
+        tableTitle: result.title,
+        column: result.column,
+      },
+      calculation: { check: "segments sum to the table total within 1%" },
+      recommendedNextAction: "VERIFY_TABLE_PERIOD_AND_UNITS",
+    };
+  }
+  if (segmentTablesSeen > 0 || filingReadTruncated) {
+    if (segmentTablesSeen > 0) {
+      warnings.push({ code: "TABLE_NOT_PARSED", message: "The filing has tables introduced as segment revenue, but none parsed into segments that sum to a total.", severity: "warning" });
+    }
+    if (filingReadTruncated) {
+      warnings.push({ code: "FILING_READ_TRUNCATED", message: "Only the first part of the filing was scanned; segment tables may appear later.", severity: "warning" });
+    }
+    return { ...filingMeta, status: "EXTRACTION_FAILED", code: "EXTRACTION_FAILED", decisionGrade: false, scanCoverage, searchedTerms, recommendedNextAction: "LIST_SEC_FILING_TABLES" };
+  }
+  return {
+    ...filingMeta,
+    status: "NOT_DISCLOSED",
+    decisionGrade: false,
+    scanCoverage,
+    searchedTerms,
+    notDisclosedBasis: "No XBRL segment facts and no table introduced as segment revenue in the full filing.",
+  };
 }
 
 export function xbrlSourceEvidence(parsed: Record<string, unknown>): Record<string, unknown> | null {
@@ -14330,7 +14791,8 @@ export async function extractRiskFactorMentions(
         rejectedNoiseCount += 1;
         continue;
       }
-      if (item.sectionHeading != null && !sectionHeading.toLowerCase().includes("risk")) {
+      // Reject a match only when its section is known and is not a risk section.
+      if (item.sectionHeading && !sectionHeading.toLowerCase().includes("risk")) {
         rejectedNoiseCount += 1;
         continue;
       }
@@ -14375,45 +14837,96 @@ export async function extractRiskFactorMentions(
   return JSON.stringify(out);
 }
 
+/**
+ * Customers with a revenue percentage in filing text matches, and the first
+ * statement that no customer reached the disclosure threshold. Only
+ * sentences about customers count, and a negated sentence is never a
+ * customer ("no customer accounted for more than 10%").
+ */
+export function customerConcentrationFromMatches(
+  list: unknown[],
+  filingEvidence: Record<string, unknown>,
+  period: string | null,
+): { customers: Record<string, unknown>[]; negation: Record<string, unknown> | null } {
+  const customers: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  let negation: Record<string, unknown> | null = null;
+  for (const row of list) {
+    if (!row || typeof row !== "object") continue;
+    const item = row as Record<string, unknown>;
+    const ctx = String(item.context ?? item.contextText ?? "");
+    // Only sentences about customers count; a statement that no customer
+    // reached the threshold is evidence of non-disclosure, not a customer.
+    for (const sentence of ctx.split(/(?<=[.;])\s+/)) {
+      if (!/customer/i.test(sentence)) continue;
+      if (/\bno (?:single |one )?customer\b|\bnone of (?:the|its|our) customers\b|did not have any (?:single )?customer|no customers? (?:that )?(?:individually )?accounted/i.test(sentence)) {
+        negation ??= { sectionHeading: item.sectionHeading ?? null, excerpt: compactExcerpt(sentence), ...filingEvidence };
+        continue;
+      }
+      const m = sentence.match(/(\d{1,2}(?:\.\d+)?)\s*%/);
+      if (!m) continue;
+      const pct = Number(m[1]);
+      if (!Number.isFinite(pct)) continue;
+      const key = pct.toFixed(2);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      customers.push({
+        label: `Customer ${String.fromCharCode(65 + customers.length)}`,
+        valuePct: pct,
+        period,
+        confidence: "MEDIUM",
+        evidence: {
+          sectionHeading: item.sectionHeading ?? null,
+          excerpt: compactExcerpt(sentence),
+          ...filingEvidence,
+        },
+      });
+      if (customers.length >= 5) break;
+    }
+    if (customers.length >= 5) break;
+  }
+  return { customers, negation };
+}
+
 export async function extractCustomerConcentration(
   ticker: string,
   filingType = "10-K",
   _period = "latest",
   detailLevel = "compact",
 ): Promise<string> {
-  const search = parseObjectJson(await searchFilingText(ticker, ["major customer", "customers", "customer accounted", "percent of revenue"], null, filingType, null, 1200, false));
+  const searchedTerms = ["major customer", "customers", "customer accounted", "percent of revenue"];
+  const search = parseObjectJson(await searchFilingText(ticker, searchedTerms, null, filingType, null, 1200, false));
   const list = Array.isArray(search.matches) ? search.matches : [];
-  const customers: Record<string, unknown>[] = [];
-  const seen = new Set<string>();
-  for (const row of list) {
-    if (!row || typeof row !== "object") continue;
-    const item = row as Record<string, unknown>;
-    const ctx = String(item.context ?? "");
-    const m = ctx.match(/(\d{1,2}(?:\.\d+)?)\s*%/);
-    if (!m) continue;
-    const pct = Number(m[1]);
-    if (!Number.isFinite(pct)) continue;
-    const key = pct.toFixed(2);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    customers.push({
-      label: `Customer ${String.fromCharCode(65 + customers.length)}`,
-      valuePct: pct,
-      period: search.fiscalYear ? `FY${String(search.fiscalYear)}` : null,
-      confidence: "HIGH",
-      evidence: {
-        sectionHeading: item.sectionHeading ?? null,
-        excerpt: compactExcerpt(ctx),
-        filingDate: search.filingDate ?? null,
-        accessionNumber: search.accessionNumber ?? null,
-        documentUrl: search.documentUrl ?? null,
-      },
+  const filingEvidence = {
+    filingDate: search.filingDate ?? null,
+    accessionNumber: search.accessionNumber ?? null,
+    documentUrl: search.documentUrl ?? null,
+  };
+  const { customers, negation } = customerConcentrationFromMatches(list, filingEvidence, search.fiscalYear ? `FY${String(search.fiscalYear)}` : null);
+  const matchCount = Number(search.matchCount ?? 0);
+  const scanCoverage = { sourceType: "sec_primary_html", ...filingEvidence, matchCount, searchedTerms };
+  const out: Record<string, unknown> = { ticker, customers };
+  if (customers.length > 0) {
+    out.status = "FOUND";
+  } else if (negation) {
+    Object.assign(out, {
+      status: "NOT_DISCLOSED",
+      notDisclosedBasis: "The filing states that no customer reached the disclosure threshold.",
+      evidence: negation,
+      scanCoverage,
     });
-    if (customers.length >= 5) break;
+  } else if (matchCount > 0) {
+    // Customer text exists but no percentage or explicit statement parsed.
+    Object.assign(out, {
+      status: "EXTRACTION_FAILED",
+      code: "EXTRACTION_FAILED",
+      scanCoverage,
+      warnings: [{ code: "CUSTOMER_PERCENT_NOT_PARSED", message: "Customer disclosures were found, but no customer percentage or no-major-customer statement was parsed.", severity: "warning" }],
+    });
+  } else {
+    Object.assign(out, { status: "NOT_FOUND", scanCoverage });
   }
-  const status = customers.length > 0 ? "FOUND" : ((Number(search.matchCount ?? 0) > 0) ? "NOT_DISCLOSED" : "NOT_FOUND");
-  const out: Record<string, unknown> = { ticker, customers, status };
-  if (String(detailLevel).toLowerCase() === "raw") out.rawMatchCount = search.matchCount ?? 0;
+  if (String(detailLevel).toLowerCase() === "raw") out.rawMatchCount = matchCount;
   return JSON.stringify(out);
 }
 
@@ -14514,6 +15027,18 @@ export async function extractChinaExposure(
   const entityEvidence = entityCollected.evidence;
   const bankEvidence = bankCollected.evidence;
   const manuEvidence = manuCollected.evidence;
+  if (manuEvidence.length === 0) {
+    // Headings and table labels rarely name manufacturing locations; the
+    // filing text does (as extract_exposure's operational scan reads it).
+    const chinaText = parseObjectJson(await searchFilingText(ticker, ["China"], null, filingType, accessionNumber, 800, false));
+    for (const m of Array.isArray(chinaText.matches) ? chinaText.matches as Record<string, unknown>[] : []) {
+      const excerpt = readableExposureExcerpt(m?.contextText ?? "", ["China"], 240, 3);
+      const term = excerpt ? manuTerms.find((t) => excerpt.toLowerCase().includes(t)) : undefined;
+      if (!excerpt || !term) continue;
+      manuEvidence.push({ source: "text", term, sectionHeading: m.sectionHeading ?? null, excerpt, excerptAvailable: true });
+      if (manuEvidence.length >= 5) break;
+    }
+  }
   const riskEvidence: Record<string, unknown>[] = [];
   const rawRiskEvidence = Array.isArray(riskMentions.matches) ? riskMentions.matches : [];
   for (const ev of rawRiskEvidence) {
@@ -15090,7 +15615,9 @@ export async function querySecFilingIndex(
     status = "NOT_FOUND";
     warnings.push({ code: "EVIDENCE_REQUIRED", message: "ANSWERED responses require evidence." });
   }
-  const confidence = status === "ANSWERED" ? "HIGH" : (status === "NOT_DISCLOSED" ? "NOT_DISCLOSED" : "LOW");
+  const segmentConfidence = segments.length > 0 ? String(segments[0].confidence ?? "HIGH") : null;
+  const confidence = status === "ANSWERED" ? segmentConfidence ?? "HIGH" : (status === "NOT_DISCLOSED" ? "NOT_DISCLOSED" : "LOW");
+  if (Array.isArray(seg.warnings)) warnings.push(...seg.warnings as Record<string, unknown>[]);
   return result(status, { segment: segmentName || null, segments }, confidence, evidence, warnings);
 }
 
@@ -15545,6 +16072,75 @@ export async function indexEarningsRelease(ticker: string, period = "latest", so
   return encoded;
 }
 
+export interface QuarterFact {
+  value: number;
+  start: string;
+  end: string;
+  filed: string;
+  form: string;
+  /** DIRECT_QUARTER: a reported three-month fact. YTD_DIFFERENCE: two year-to-date facts subtracted. */
+  method: "DIRECT_QUARTER" | "YTD_DIFFERENCE";
+}
+
+const DAY_MS = 86_400_000;
+const isQuarterLength = (days: number): boolean => days >= 80 && days <= 100;
+
+/**
+ * The latest fiscal quarter's value among SEC companyconcept facts.
+ *
+ * The latest period end comes from 10-Q/10-K facts filed on or after
+ * minFiled. A three-month fact for that end is used as is. Otherwise, when
+ * derive is set, the longest fact for that end (year to date, or the fiscal
+ * year in a 10-K) less the fact with the same start that ends one quarter
+ * earlier gives the quarter. Never returns a longer period as a quarter.
+ */
+export function selectQuarterFact(
+  facts: Record<string, unknown>[],
+  opts: { minFiled?: string; derive: boolean },
+): QuarterFact | null {
+  type Fact = { value: number; start: string; end: string; filed: string; form: string; days: number };
+  const usable: Fact[] = [];
+  for (const f of facts) {
+    const form = String(f.form ?? "").toUpperCase();
+    if (!/^10-[QK]/.test(form) || f.segment) continue;
+    if (typeof f.val !== "number" || !Number.isFinite(f.val)) continue;
+    const start = String(f.start ?? "");
+    const end = String(f.end ?? "");
+    const startMs = Date.parse(start);
+    const endMs = Date.parse(end);
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) continue;
+    usable.push({ value: f.val, start, end, filed: String(f.filed ?? ""), form, days: Math.round((endMs - startMs) / DAY_MS) });
+  }
+  const recent = usable.filter((f) => !opts.minFiled || f.filed >= opts.minFiled);
+  if (!recent.length) return null;
+  const targetEnd = recent.reduce((latest, f) => (f.end > latest ? f.end : latest), "");
+  const newestFirst = (a: Fact, b: Fact): number => b.filed.localeCompare(a.filed);
+
+  const direct = recent.filter((f) => f.end === targetEnd && isQuarterLength(f.days)).sort(newestFirst)[0];
+  if (direct) {
+    return { value: direct.value, start: direct.start, end: direct.end, filed: direct.filed, form: direct.form, method: "DIRECT_QUARTER" };
+  }
+  if (!opts.derive) return null;
+
+  const cumulative = recent
+    .filter((f) => f.end === targetEnd && f.days > 100)
+    .sort((a, b) => b.days - a.days || newestFirst(a, b))[0];
+  if (!cumulative) return null;
+  const prior = usable
+    .filter((f) => f.start === cumulative.start && f.end < targetEnd && isQuarterLength(cumulative.days - f.days))
+    .sort((a, b) => b.end.localeCompare(a.end) || newestFirst(a, b))[0];
+  if (!prior) return null;
+  const quarterStartMs = Date.parse(prior.end) + DAY_MS;
+  return {
+    value: cumulative.value - prior.value,
+    start: new Date(quarterStartMs).toISOString().slice(0, 10),
+    end: cumulative.end,
+    filed: cumulative.filed,
+    form: cumulative.form,
+    method: "YTD_DIFFERENCE",
+  };
+}
+
 export async function extractEarningsMetrics(
   ticker: string,
   period = "latest",
@@ -15586,33 +16182,35 @@ export async function extractEarningsMetrics(
   // the 10-Q is already filed (~40 days after earnings).
   const cikPadded = srcCikPadded || (await resolveCikForTicker(ticker)) || "";
   if (cikPadded) {
+    // A 10-Q reports each income-statement concept for the quarter and for the
+    // year to date with the same period end, and cash-flow concepts only for
+    // the year to date; a 10-K reports the fiscal year. The quarter is picked
+    // by period length, or derived as the difference of two year-to-date
+    // facts (for example FY minus nine months for a fourth quarter).
     const fetchQuarterlyFact = async (
       primary: string,
       fallback?: string,
       unitType: "USD" | "USD/shares" = "USD",
-    ): Promise<{ value: number; end: string; filed: string; concept: string } | null> => {
+    ): Promise<QuarterFact & { concept: string } | null> => {
       for (const concept of [primary, ...(fallback ? [fallback] : [])]) {
         const d = await edgarGetJson(
           `https://data.sec.gov/api/xbrl/companyconcept/CIK${cikPadded}/us-gaap/${concept}.json`,
         );
         const facts =
           (((d?.units as Record<string, unknown>) ?? {})[unitType] as Record<string, unknown>[] | undefined) ?? [];
-        // Exclude segment-level (non-consolidated) facts. A filing cannot be
-        // used for a release that it predates: that was the path that allowed
-        // a stale 10-Q to masquerade as the latest release metric.
-        const quarterly = facts
-          .filter((f) => String(f.form ?? "").toUpperCase() === "10-Q" && !f.segment)
-          .filter((f) => !releaseFilingDate || String(f.filed ?? "") >= releaseFilingDate)
-          .sort((a, b) => String(b.end ?? "").localeCompare(String(a.end ?? "")));
-        const latest = quarterly[0];
-        if (latest?.val != null && typeof latest.val === "number") {
-          return { value: latest.val, end: String(latest.end ?? ""), filed: String(latest.filed ?? ""), concept };
-        }
+        // A filing cannot be used for a release that it predates: that was the
+        // path that allowed a stale 10-Q to masquerade as the latest release
+        // metric. Per-share amounts are not additive, so EPS is never derived.
+        const quarter = selectQuarterFact(facts, {
+          minFiled: releaseFilingDate || undefined,
+          derive: unitType === "USD",
+        });
+        if (quarter) return { ...quarter, concept };
       }
       return null;
     };
 
-    const [xRev, xEps, xGp, xOi, xCapex, xOcf] = await Promise.all([
+    const [xRev, xEpsRaw, xGpRaw, xOiRaw, xCapexRaw, xOcfRaw] = await Promise.all([
       fetchQuarterlyFact("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"),
       fetchQuarterlyFact("EarningsPerShareDiluted", undefined, "USD/shares"),
       fetchQuarterlyFact("GrossProfit"),
@@ -15620,6 +16218,15 @@ export async function extractEarningsMetrics(
       fetchQuarterlyFact("PaymentsToAcquirePropertyPlantAndEquipment", "CapitalExpenditures"),
       fetchQuarterlyFact("NetCashProvidedByUsedInOperatingActivities"),
     ]);
+    // Every metric must describe the same quarter as revenue (or EPS).
+    const quarterEnd = xRev?.end ?? xEpsRaw?.end ?? null;
+    const sameQuarter = <T extends { end: string }>(fact: T | null): T | null =>
+      fact && (quarterEnd == null || fact.end === quarterEnd) ? fact : null;
+    const xEps = sameQuarter(xEpsRaw);
+    const xGp = sameQuarter(xGpRaw);
+    const xOi = sameQuarter(xOiRaw);
+    const xCapex = sameQuarter(xCapexRaw);
+    const xOcf = sameQuarter(xOcfRaw);
 
     // Only apply Tier 1 if the most recent period is within 4 months (10-Q lag window)
     const XBRL_MAX_AGE_MS = 120 * 24 * 60 * 60 * 1000;
@@ -15629,26 +16236,33 @@ export async function extractEarningsMetrics(
       : false;
 
     if (xbrlIsRecent) {
-      const xbrlEv = (concept: string, end: string): Record<string, unknown> => ({
-        url: `https://data.sec.gov/api/xbrl/companyconcept/CIK${cikPadded}/us-gaap/${concept}.json`,
-        sourceType: "sec_xbrl_10q",
+      const xbrlEv = (fact: QuarterFact & { concept: string }): Record<string, unknown> => ({
+        url: `https://data.sec.gov/api/xbrl/companyconcept/CIK${cikPadded}/us-gaap/${fact.concept}.json`,
+        sourceType: fact.form.startsWith("10-K") ? "sec_xbrl_10k" : "sec_xbrl_10q",
         publishedAt: null,
         retrievedAt,
-        excerpt: `XBRL ${concept} period ending ${end}`,
+        excerpt: fact.method === "YTD_DIFFERENCE"
+          ? `XBRL ${fact.concept} quarter ${fact.start} to ${fact.end}, derived as the ${fact.form} year-to-date value less the prior year-to-date value`
+          : `XBRL ${fact.concept} quarter ${fact.start} to ${fact.end}`,
+      });
+      const quarterFields = (fact: QuarterFact): Record<string, unknown> => ({
+        periodStart: fact.start,
+        periodEnd: fact.end,
+        derivation: fact.method,
       });
       const setM = (key: string, val: Record<string, unknown>): void => {
         metrics[key] = val;
         if (val.evidence) evidence.push(val.evidence as Record<string, unknown>);
       };
-      if (xRev) setM("revenue", { value: xRev.value, unit: "USD", rawValue: null, confidence: "HIGH", evidence: xbrlEv(xRev.concept, xRev.end) });
-      if (xEps) setM("epsDiluted", { value: xEps.value, unit: "USD/share", rawValue: null, confidence: "HIGH", evidence: xbrlEv(xEps.concept, xEps.end) });
+      if (xRev) setM("revenue", { value: xRev.value, unit: "USD", rawValue: null, confidence: "HIGH", ...quarterFields(xRev), evidence: xbrlEv(xRev) });
+      if (xEps) setM("epsDiluted", { value: xEps.value, unit: "USD/share", rawValue: null, confidence: "HIGH", ...quarterFields(xEps), evidence: xbrlEv(xEps) });
       if (xGp && xRev && xRev.value !== 0) {
         const pct = Number(((xGp.value / xRev.value) * 100).toFixed(2));
-        setM("grossMargin", { valueRatio: Number((xGp.value / xRev.value).toFixed(6)), valuePct: pct, rawValue: null, confidence: "HIGH", evidence: xbrlEv(xGp.concept, xGp.end) });
+        setM("grossMargin", { valueRatio: Number((xGp.value / xRev.value).toFixed(6)), valuePct: pct, rawValue: null, confidence: "HIGH", ...quarterFields(xGp), evidence: xbrlEv(xGp) });
       }
-      if (xOi) setM("operatingIncome", { value: xOi.value, unit: "USD", rawValue: null, confidence: "HIGH", evidence: xbrlEv(xOi.concept, xOi.end) });
-      if (xCapex) setM("capex", { value: Math.abs(xCapex.value), unit: "USD", rawValue: null, confidence: "HIGH", evidence: xbrlEv(xCapex.concept, xCapex.end) });
-      if (xOcf && xCapex) setM("freeCashFlow", { value: xOcf.value - Math.abs(xCapex.value), unit: "USD", rawValue: null, confidence: "HIGH", evidence: xbrlEv(xOcf.concept, xOcf.end) });
+      if (xOi) setM("operatingIncome", { value: xOi.value, unit: "USD", rawValue: null, confidence: "HIGH", ...quarterFields(xOi), evidence: xbrlEv(xOi) });
+      if (xCapex) setM("capex", { value: Math.abs(xCapex.value), unit: "USD", rawValue: null, confidence: "HIGH", ...quarterFields(xCapex), evidence: xbrlEv(xCapex) });
+      if (xOcf && xCapex) setM("freeCashFlow", { value: xOcf.value - Math.abs(xCapex.value), unit: "USD", rawValue: null, confidence: "HIGH", ...quarterFields(xOcf), evidence: xbrlEv(xOcf) });
     }
   }
 
@@ -15951,10 +16565,20 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
   const selected = reportedRows.sort((a, b) => String(rowDate(b) ?? "").localeCompare(String(rowDate(a) ?? "")))[0] ?? null;
   const sourcePeriod = _str(metrics.period) && _str(metrics.period).toLowerCase() !== "latest" ? _str(metrics.period) : null;
   const estimatePeriod = rowPeriod(selected);
-  const reportedDate = rowDate(selected);
+  // Yahoo's earningsHistory row is dated by its fiscal quarter end; the
+  // release date comes from the earnings release itself.
+  const estimateQuarterEnd = rowDate(selected);
+  // reportedDate keeps its documented meaning: the date of the Yahoo row.
+  const reportedDate = estimateQuarterEnd;
+  const releaseDate = typeof metrics.reportedAt === "string" ? metrics.reportedAt.slice(0, 10) : null;
+  // A structured quarter matches Yahoo's quarter when their period ends are
+  // within a week of each other (52/53-week fiscal calendars end on a weekday).
+  const metricPeriodEnd = typeof revenueMetric.periodEnd === "string" ? revenueMetric.periodEnd : null;
+  const periodEndsMatch = metricPeriodEnd != null && estimateQuarterEnd != null
+    && Math.abs(Date.parse(metricPeriodEnd) - Date.parse(estimateQuarterEnd)) <= 7 * 86_400_000;
   const periodAlignmentStatus = sourcePeriod && estimatePeriod
-    ? (sourcePeriod === estimatePeriod ? "MATCHED" : (/^\d{4}-\d{2}-\d{2}/.test(estimatePeriod) ? "UNVERIFIED" : "MISMATCH"))
-    : "INCOMPLETE";
+    ? (sourcePeriod === estimatePeriod || periodEndsMatch ? "MATCHED" : (/^\d{4}-\d{2}-\d{2}/.test(estimatePeriod) ? "UNVERIFIED" : "MISMATCH"))
+    : periodEndsMatch ? "MATCHED" : "INCOMPLETE";
   const actualEps = toNumber(selected?.epsActual) ?? (typeof epsMetric.value === "number" ? epsMetric.value : null);
   const estEps = toNumber(selected?.epsEstimate);
 
@@ -15964,7 +16588,7 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
     const candidatePeriod = String(row.period ?? row.reportedPeriod ?? "");
     if (
       ((estimatePeriod != null && candidatePeriod === estimatePeriod)
-        || (reportedDate != null && rowDate(row) === reportedDate))
+        || (estimateQuarterEnd != null && rowDate(row) === estimateQuarterEnd))
       && typeof row.avg === "number"
     ) {
       estRevenue = row.avg as number;
@@ -15977,16 +16601,18 @@ export async function compareEarningsActualVsEstimate(ticker: string, period = "
     period: sourcePeriod ?? estimatePeriod ?? period,
     reportedPeriod: sourcePeriod ?? estimatePeriod,
     reportedDate,
+    releaseDate,
+    quarterEnd: metricPeriodEnd ?? estimateQuarterEnd,
     releasePublishedAt: metrics.reportedAt ?? null,
     estimatePeriod,
     periodAlignmentStatus,
     actual: {
-      revenue: { ...revenueMetric, value: actualRevenue, unit: "USD", period: sourcePeriod, decisionGrade: revenueMetric.decisionGrade === true },
-      eps: { value: actualEps, unit: "USD/share", source: "yahoo", period: estimatePeriod ?? reportedDate, decisionGrade: false },
+      revenue: { ...revenueMetric, value: actualRevenue, unit: "USD", period: sourcePeriod ?? metricPeriodEnd, decisionGrade: revenueMetric.decisionGrade === true },
+      eps: { value: actualEps, unit: "USD/share", source: "yahoo", period: estimatePeriod ?? estimateQuarterEnd, decisionGrade: false },
     },
     estimate: {
-      revenue: { value: estRevenue, unit: "USD", source: "yahoo", period: estimatePeriod ?? reportedDate, decisionGrade: false },
-      eps: { value: estEps, unit: "USD/share", source: "yahoo", period: estimatePeriod ?? reportedDate, decisionGrade: false },
+      revenue: { value: estRevenue, unit: "USD", source: "yahoo", period: estimatePeriod ?? estimateQuarterEnd, decisionGrade: false },
+      eps: { value: estEps, unit: "USD/share", source: "yahoo", period: estimatePeriod ?? estimateQuarterEnd, decisionGrade: false },
     },
     surprise: {
       revenueSurprisePct: null,

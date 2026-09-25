@@ -54,10 +54,9 @@ class TestSecReliabilityWorker(unittest.TestCase):
         self.assertIn("EX99_IXBRL_UNSCOPED", self.worker)
         self.assertIn("TEXT_METRIC_VERIFY_REQUIRED", self.worker)
         self.assertIn("EPS_NEAR_ZERO_ESTIMATE_BASE", self.worker)
-        self.assertRegex(
-            self.worker,
-            r"String\(f\.filed \?\? \"\"\) >= releaseFilingDate",
-        )
+        # A 10-Q/10-K fact filed before the release cannot describe it.
+        self.assertIn("minFiled: releaseFilingDate || undefined", self.worker)
+        self.assertIn("!opts.minFiled || f.filed >= opts.minFiled", self.worker)
         self.assertNotIn("function deriveFiscalPeriod", self.worker)
 
     def test_transcript_fallback_uses_issuer_fiscal_quarter_not_filing_date(self) -> None:

@@ -130,6 +130,16 @@ function buildMeta(
   } as ToolMeta;
 }
 
+/**
+ * meta.dataDate from the payload's own dataDate (YYYY-MM-DD), so envelopes
+ * say which date the data describes without reading the data.
+ */
+function payloadDataDate(data: unknown): string | null {
+  if (data == null || typeof data !== "object" || Array.isArray(data)) return null;
+  const value = (data as Record<string, unknown>).dataDate;
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : null;
+}
+
 function isPriceBar(val: Record<string, unknown>): boolean {
   return "open" in val && "high" in val && "low" in val && "close" in val;
 }
@@ -350,7 +360,7 @@ export function mcpSuccessFromValue(
       const innerMeta = inner.meta && typeof inner.meta === "object"
         ? inner.meta as Record<string, unknown>
         : {};
-      const baseMeta = buildMeta(tool, opts);
+      const baseMeta = buildMeta(tool, { ...opts, dataDate: opts?.dataDate ?? payloadDataDate(inner.data) });
       const baseWarnings = Array.isArray(baseMeta.warnings) ? baseMeta.warnings : [];
       const innerWarnings = Array.isArray(innerMeta.warnings) ? innerMeta.warnings : [];
       const workerVersionId = baseMeta.workerVersionId;
@@ -365,6 +375,7 @@ export function mcpSuccessFromValue(
           // cache summary may be incomplete.
           cacheHit: baseMeta.cacheHit,
           cacheSource: baseMeta.cacheSource,
+          dataDate: (innerMeta.dataDate as string | null | undefined) ?? baseMeta.dataDate,
           warnings: [...baseWarnings, ...innerWarnings],
           ...(workerVersionId ? { workerVersionId } : {}),
         } as ToolMeta,
@@ -411,7 +422,7 @@ export function mcpSuccessFromValue(
   const resp: McpResponse = {
     ok: true,
     data,
-    meta: buildMeta(tool, opts),
+    meta: buildMeta(tool, { ...opts, dataDate: opts?.dataDate ?? payloadDataDate(parsed) }),
     error: null,
   };
   return toolResult(resp);
