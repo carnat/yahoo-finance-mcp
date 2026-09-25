@@ -426,8 +426,8 @@ export const TOOLS: Tool[] = [
         period: {
           type: "string",
           description:
-            "Lookback period for fetching history (default '3mo'). Longer periods give more accurate indicator warm-up. Valid: 1mo, 3mo, 6mo, 1y, 2y, 5y.",
-          default: "3mo",
+            "History fed to the indicators (default '1y'). Periods shorter than a year are widened to '1y' so RSI and MACD settle. Valid: 1y, 2y, 5y.",
+          default: "1y",
         },
       },
       required: ["ticker"],
@@ -484,7 +484,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "analyze_price_performance", description: "Analyze price performance metrics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
   { name: "analyze_moving_average_position", description: "Analyze moving-average position.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
   { name: "analyze_volume_ratio", description: "Analyze the latest completed-session volume ratio. PARTIAL/INCOMPLETE means retry; do not use a volume signal.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, period: { type: "number", default: 10 } }, required: ["ticker"] } },
-  { name: "check_volume_liquidity_threshold", description: "Check completed-session volume/notional against public liquidity thresholds. PARTIAL/INCOMPLETE means retry; gatePass is unknown.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] } },
+  { name: "check_volume_liquidity_threshold", description: "Check completed-session traded value against public liquidity thresholds: passes when the average daily traded value (volume x close) of the 20 sessions before the latest completed one is at least $10M, converted to USD for non-USD listings. ratio20d compares the latest session with that average. PARTIAL/INCOMPLETE means retry; gatePass is unknown.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, foreign_exchange: { type: "boolean", default: false, description: "Accepted for compatibility; non-USD listings are always converted to USD." } }, required: ["ticker"] } },
   { name: "get_company_profile", description: "Get company profile/fundamentals.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, include_all: { type: "boolean" } }, required: ["ticker"] } },
   { name: "get_fund_profile", description: "Get ETF/fund profile with per-section status and as-of-date limitations. Valuation characteristics are conventional multiples; provider inverse yields are retained separately. Request overview, holdings, allocation, operations, or fixed-income sections.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, sections: { type: "array", items: { type: "string", enum: ["overview", "holdings", "allocation", "operations", "fixed_income"] }, uniqueItems: true } }, required: ["ticker"] } },
   { name: "analyze_financial_ratios", description: "Analyze current financial ratios with explicit unitSemantics and optional historical Yahoo valuation measures.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, history_periods: { type: "integer", minimum: 0, maximum: 20, default: 0 }, frequency: { type: "string", enum: ["quarterly", "monthly", "yearly", "trailing"], default: "quarterly" } }, required: ["ticker"] } },
@@ -1169,6 +1169,10 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       adv90d: { type: ["number", "null"] },
       ratio20d: { type: ["number", "null"] },
       notionalUsd: { type: ["number", "null"] },
+      adv20dTradedValueUsd: { type: ["number", "null"] },
+      gateBasis: { type: "string", enum: ["ADV20_TRADED_VALUE_USD"] },
+      gateThresholdUsd: { type: "number" },
+      fxCurrency: { type: ["string", "null"] },
       gatePass: { type: ["boolean", "null"] },
       observationType: { type: "string", enum: ["COMPLETED_DAILY_VOLUME_NOTIONAL"] },
       barStatus: { type: "string", enum: ["COMPLETE", "STALE", "INCOMPLETE"] },
@@ -2024,7 +2028,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "get_short_interest":
       return getShortInterest(str(args.ticker));
     case "get_technical_indicators":
-      return getTechnicalIndicators(tickerArg(args.ticker), str(args.period, "3mo"));
+      return getTechnicalIndicators(tickerArg(args.ticker), str(args.period, "1y"));
     case "get_price_slope":
       return getPriceSlope(tickerArg(args.ticker), num(args.days, 5));
     case "analyze_volume_ratio":

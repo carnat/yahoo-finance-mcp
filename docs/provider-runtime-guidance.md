@@ -37,6 +37,31 @@ Sources checked through 2026-08-04:
   duplicate requests but is not global quota accounting or a persistent rate
   limiter.
 
+## Price And Quote Calculations
+
+- RSI-14 (Wilder: averages seeded by the first 14 changes, then smoothed by
+  1/14) and MACD(12, 26, 9) (EMAs seeded by their first value) run on at least
+  a year of completed daily bars; shorter `period` values are widened to `1y`.
+  Both are recursive averages, so on the 64 bars of `3mo` a single extra bar
+  moved RSI by 0.7 points. `lookbackPeriod` and `lookbackBars` report the input.
+- 30-day volatility is the sample standard deviation of the last 30 daily log
+  returns, times sqrt(252), in percent.
+- The liquidity gate passes when the 20 sessions before the latest completed
+  one averaged at least $10M traded a day (volume x close). Non-USD listings
+  are converted with Yahoo's `<ISO>=X` rate (ISO units per USD); GBp, ZAc and
+  ILA prices are in 1/100 of their currency. `ratio20d` still compares the
+  latest session with the average but no longer decides the gate, and
+  `foreign_exchange` is accepted for compatibility only.
+- The options summary and flow scan read the first expiry after today's US
+  market date: the chain expiring today is mostly 0DTE contracts and quotes
+  zero bids before the open. `skippedExpiries` lists what was passed over.
+- The Worker and local server share these formulas; scripts/test_quote_calculations.py
+  pins them to recorded AAPL bars (RSI 61.36, MACD 6.0381 / 5.2354 / 0.8027,
+  volatility 20.2718) in both runtimes.
+- A tool error that carries only a message is classified from it: a provider
+  429 is a retryable `RATE_LIMIT` and a timeout a retryable `PROVIDER_TIMEOUT`,
+  as for thrown errors.
+
 ## Yahoo Finance Caching
 
 - Yahoo throttling (HTTP 429) is handled as yfinance 1.7 handles it
@@ -141,6 +166,10 @@ Sources checked through 2026-08-04:
   and reports `filings[]` with hits per filing; `include_exhibits` adds up to
   four EX-99 exhibits per filing (for 8-Ks, the press release). With
   `return_tables`, a table match carries only its own table's rows.
+- Matches outside every Part and Item (the cover and forward-looking
+  statements) are labelled with the nearest heading line above them, else
+  `Front matter`. An exhibit is labelled `EX-99.1: <description>`, or just
+  its type when the filing index repeats the type as the description.
 - The Worker and local server share one algorithm (`worker/src/filing-search.ts`
   and `yfmcp/filing_search.py`); `scripts/test_filing_search.py` requires
   identical output from both on shared fixtures.

@@ -434,7 +434,8 @@ class TestPr2DataQuality(unittest.TestCase):
     def test_volume_gate_uses_last_completed_session(self):
         now = pd.Timestamp.now(tz="UTC")
         index = pd.date_range(end=now.normalize(), periods=22, freq="D", tz="UTC")
-        volumes = [200] * 20 + [100, 1]
+        # 2M shares at $25 = $50M a day, above the $10M gate.
+        volumes = [2_000_000] * 20 + [1_000_000, 1]
         closes = [25.0] * 22
 
         class FakeTicker:
@@ -460,9 +461,10 @@ class TestPr2DataQuality(unittest.TestCase):
 
         pricing.yf.Ticker = lambda ticker: FakeTicker()  # type: ignore[assignment]
         data = json.loads(_run(pricing.get_volume_gate("TSTACTIVEGATE")))
-        self.assertEqual(data["lastVolume"], 100)
-        self.assertEqual(data["adv20d"], 200)
+        self.assertEqual(data["lastVolume"], 1_000_000)
+        self.assertEqual(data["adv20d"], 2_000_000)
         self.assertEqual(data["ratio20d"], 0.5)
+        self.assertEqual(data["adv20dTradedValueUsd"], 50_000_000)
         self.assertTrue(data["gatePass"])
         self.assertTrue(data["excludedIncompleteBar"])
         self.assertEqual(data["dataDate"], index[-2].date().isoformat())

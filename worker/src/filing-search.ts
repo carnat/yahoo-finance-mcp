@@ -655,6 +655,34 @@ export function sectionAt(sections: ProjectedSection[], pos: number): ProjectedS
   return found;
 }
 
+/** Section label for text before the first Part or Item heading with no heading line above it. */
+export const FRONT_MATTER_SECTION = "Front matter";
+
+/**
+ * The nearest heading-like line at or above pos, for text outside any Part
+ * or Item (the cover and the forward-looking statements before Part I): a
+ * short line that starts with a capital or digit and ends without sentence
+ * punctuation, outside tables. Looks back at most 40 lines.
+ */
+export function headingLineBefore(p: FilingTextProjection, pos: number): string | null {
+  let end = p.text.indexOf("\n", pos);
+  if (end < 0) end = p.text.length;
+  for (let n = 0; n < 40 && end > 0; n++) {
+    const start = p.text.lastIndexOf("\n", end - 1) + 1;
+    const line = p.text.slice(start, end).trim();
+    if (
+      line.length >= 3 && line.length <= 100
+      && /^[\p{Lu}\p{N}]/u.test(line)
+      && /\p{L}/u.test(line)
+      && !/[.!?:;,]$/.test(line)
+      && line.toLowerCase() !== "table of contents"
+      && !tableAt(p.tables, start)
+    ) return line;
+    end = start - 1;
+  }
+  return null;
+}
+
 /** Weight of a section in relevance ranking: risk factors and MD&A first. */
 export function sectionWeight(title: string | null, documentType: string): number {
   if (documentType !== "primary") return 2;
@@ -755,7 +783,10 @@ export function searchDocument(doc: SearchDocument, spec: SearchSpec): DocumentS
     }
     if (current) matches.push(current);
     const context = matchContext(doc.projection, hit.start, hit.end, spec.budget);
-    const section = sectionAt(doc.projection.sections, hit.start)?.title ?? doc.defaultSection;
+    const section = sectionAt(doc.projection.sections, hit.start)?.title
+      ?? doc.defaultSection
+      ?? headingLineBefore(doc.projection, hit.start)
+      ?? FRONT_MATTER_SECTION;
     current = { doc, terms: [...hit.terms], hitCount: 1, start: hit.start, context, section, score: 0 };
   }
   if (current) matches.push(current);

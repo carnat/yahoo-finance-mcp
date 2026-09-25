@@ -444,6 +444,18 @@ _LEGACY_ERROR_FIELDS = (
 )
 
 
+def _classify_error_message(message: str) -> tuple[str, bool] | None:
+    """(code, retryable) for an error payload that carries only a message: a provider
+    429 is a retryable RATE_LIMIT and a timeout a retryable PROVIDER_TIMEOUT, as the
+    Worker's classifyErrorMessage decides. None when the message names neither."""
+    lower = message.lower()
+    if "rate limit" in lower or _HTTP_429_PATTERN.search(lower):
+        return ErrorCode.RATE_LIMIT, True
+    if "timeout" in lower or "timed out" in lower:
+        return ErrorCode.PROVIDER_TIMEOUT, True
+    return None
+
+
 def _legacy_text_failure(tool: str, text: str) -> str | None:
     """Failure envelope for a plain-text legacy error, or None if text is not one."""
     text = text.strip()
@@ -507,10 +519,14 @@ def _envelope_tool_result(tool: str, result: object) -> object:
                 meta_extra["error_extra"] = error_extra
             if "diagnostics" in parsed:
                 meta_extra["diagnostics"] = parsed["diagnostics"]
+            message = str(parsed.get("message") or "Tool returned a legacy error without details.")
+            classified = None if parsed.get("code") else _classify_error_message(message)
+            if classified is not None:
+                meta_extra["retryable"] = classified[1]
             return _mcp_failure(
                 tool,
-                str(parsed.get("code") or ErrorCode.PROVIDER_ERROR),
-                str(parsed.get("message") or "Tool returned a legacy error without details."),
+                str(parsed.get("code") or (classified[0] if classified else ErrorCode.PROVIDER_ERROR)),
+                message,
                 meta_extra=meta_extra or None,
             )
     return json.dumps({"ok": True, "data": _enrich_facts(parsed), "meta": _base_meta(tool, data_date=_payload_data_date(parsed)), "error": None})

@@ -70,7 +70,18 @@ HTAG_10K = """<html><body>
 <h2>Item 7. Management's Discussion and Analysis</h2><p>Revenue grew because customers bought more widgets.</p>
 </body></html>"""
 
-FIXTURES = {"ixbrl": IXBRL_10K, "htag": HTAG_10K}
+# Text before Part I: the cover and forward-looking statements (2.2.8).
+PREAMBLE_10K = """<html><body>
+<p>We expect results to vary.</p>
+<p>UNITED STATES SECURITIES AND EXCHANGE COMMISSION</p>
+<p>FORM 10-K</p>
+<p><b>Forward-Looking Statements</b></p>
+<p>This report contains forward-looking statements about tariffs and supply chains.</p>
+<p><span style="font-weight:700">PART I</span></p>
+<p><span style="font-weight:700">Item 1. Business</span></p><p>The Company sells widgets despite tariffs.</p>
+</body></html>"""
+
+FIXTURES = {"ixbrl": IXBRL_10K, "htag": HTAG_10K, "preamble": PREAMBLE_10K}
 
 # (name, fixture, spec) — spec: terms, query, exclude, mode, budget, hint.
 SCENARIOS = [
@@ -87,6 +98,7 @@ SCENARIOS = [
     ("hint_title", "ixbrl", {"terms": ["China"], "hint": "Risk Factors"}),
     ("exact", "ixbrl", {"query": '"tariff"'}),
     ("htag", "htag", {"terms": ["customer"]}),
+    ("preamble", "preamble", {"terms": ["tariffs", "results"]}),
 ]
 
 _WORKER_PURE = r"""
@@ -282,6 +294,14 @@ class TestFilingSearchBehaviour(unittest.TestCase):
                 self.assertEqual(scoped["termHits"], {"China": 3})
                 self.assertEqual({m["sectionHeading"] for m in scoped["matches"]}, {"Item 1A. Risk Factors"})
 
+    def test_text_before_part_one_takes_the_heading_above_it(self) -> None:
+        labels = {m["contextText"][:20]: m["sectionHeading"] for m in self.scenario("preamble")["matches"]}
+        self.assertEqual(labels, {
+            "We expect results to": "Front matter",
+            "This report contains": "Forward-Looking Statements",
+            "The Company sells wi": "Item 1. Business",
+        })
+
     def test_h_tag_headings_and_hidden_paragraphs(self) -> None:
         htag = self.scenario("htag")
         self.assertEqual(htag["termHits"], {"customer": 3})
@@ -310,9 +330,11 @@ SUBMISSIONS = {"filings": {"recent": {
     "acceptanceDateTime": ["" for _ in FILINGS],
 }}}
 EX991 = "<html><body><p>FSTC Reports Fourth Quarter Results</p><p>Revenue from Greater China rose 12%. Tariffs reduced gross margin by 50 basis points.</p></body></html>"
+EX992 = "<html><body><p>Supplemental Information</p><p>Greater China unit shipments are disclosed quarterly.</p></body></html>"
 DOCUMENTS = {
     f"{ARCHIVE}/000123456725000090/fstc-8k.htm": "<html><body><p>Item 2.02 Results of Operations and Financial Condition. See Exhibit 99.1.</p></body></html>",
     f"{ARCHIVE}/000123456725000090/ex991.htm": EX991,
+    f"{ARCHIVE}/000123456725000090/ex992.htm": EX992,
     f"{ARCHIVE}/000123456725000079/fstc-20250927.htm": IXBRL_10K,
     f"{ARCHIVE}/000123456724000070/fstc-20240928.htm": IXBRL_10K.replace("tariffs", "duties").replace("tariff", "duty"),
     f"{ARCHIVE}/000123456723000060/fstc-20230930.htm": HTAG_10K,
@@ -322,6 +344,7 @@ INDEX_8K = """<html><body><table>
 <tr><th>Seq</th><th>Description</th><th>Document</th><th>Type</th><th>Size</th></tr>
 <tr><td>1</td><td>8-K</td><td><a href="/Archives/edgar/data/1234567/000123456725000090/fstc-8k.htm">fstc-8k.htm</a></td><td>8-K</td><td>10000</td></tr>
 <tr><td>2</td><td>Press release</td><td><a href="/Archives/edgar/data/1234567/000123456725000090/ex991.htm">ex991.htm</a></td><td>EX-99.1</td><td>20000</td></tr>
+<tr><td>3</td><td>EX-99.2</td><td><a href="/Archives/edgar/data/1234567/000123456725000090/ex992.htm">ex992.htm</a></td><td>EX-99.2</td><td>5000</td></tr>
 </table></body></html>"""
 
 CALLS = {
@@ -421,6 +444,7 @@ def _python_e2e() -> dict:
     exhibits = [
         {"sequence": "1", "description": "8-K", "document": "fstc-8k.htm", "type": "8-K", "size": "10000"},
         {"sequence": "2", "description": "Press release", "document": "ex991.htm", "type": "EX-99.1", "size": "20000"},
+        {"sequence": "3", "description": "EX-99.2", "document": "ex992.htm", "type": "EX-99.2", "size": "5000"},
     ]
     out = {}
     with patch.object(srv, "_get_submissions_for_ticker", AsyncMock(return_value=(f"{CIK:010d}", copy.deepcopy(SUBMISSIONS)))), \
@@ -463,10 +487,12 @@ class TestFilingSearchEndToEnd(unittest.TestCase):
 
     def test_exhibits(self) -> None:
         data = self.data("exhibits")
-        self.assertEqual(len(data["matches"]), 1)
-        match = data["matches"][0]
-        self.assertEqual((match["documentType"], match["sectionHeading"]), ("EX-99.1", "EX-99.1: Press release"))
-        self.assertIn("Revenue from Greater China rose 12%.", match["contextText"])
+        by_type = {m["documentType"]: m for m in data["matches"]}
+        self.assertEqual(sorted(by_type), ["EX-99.1", "EX-99.2"])
+        self.assertEqual(by_type["EX-99.1"]["sectionHeading"], "EX-99.1: Press release")
+        self.assertIn("Revenue from Greater China rose 12%.", by_type["EX-99.1"]["contextText"])
+        # An index description that only repeats the type is not repeated in the label.
+        self.assertEqual(by_type["EX-99.2"]["sectionHeading"], "EX-99.2")
 
     def test_pagination_and_term_stats(self) -> None:
         first, second = self.data("page_one"), self.data("page_two")

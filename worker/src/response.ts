@@ -322,6 +322,18 @@ function toolResult(value: unknown): ToolResult {
 }
 
 /** Wrap a tool payload string in the V2 envelope. */
+/**
+ * The code for an error payload that carries only a message: a provider 429 is
+ * a retryable RATE_LIMIT and a timeout a retryable PROVIDER_TIMEOUT, as they
+ * are for thrown errors. Null when the message names neither.
+ */
+export function classifyErrorMessage(message: string): { code: string; retryable: boolean } | null {
+  const lower = message.toLowerCase();
+  if (lower.includes("rate limit") || /\b(?:error|http|status)[:\s]*429\b/.test(lower)) return { code: "RATE_LIMIT", retryable: true };
+  if (lower.includes("timeout") || lower.includes("timed out")) return { code: "PROVIDER_TIMEOUT", retryable: true };
+  return null;
+}
+
 export function mcpSuccess(tool: string, rawData: string, opts?: McpSuccessOptions): string {
   return mcpSuccessResult(tool, rawData, opts).text;
 }
@@ -394,14 +406,15 @@ export function mcpSuccessFromValue(
     }
     if (parsed != null && typeof parsed === "object" && (parsed as Record<string, unknown>).error === true) {
       const inner = parsed as Record<string, unknown>;
-      const errorCode = typeof inner.code === "string" ? inner.code : "PROVIDER_ERROR";
       const errorMessage = typeof inner.message === "string"
         ? inner.message
         : "Tool returned a legacy error envelope without error details.";
+      const classified = typeof inner.code === "string" ? null : classifyErrorMessage(errorMessage);
+      const errorCode = typeof inner.code === "string" ? inner.code : classified?.code ?? "PROVIDER_ERROR";
       const resp: McpResponse = {
         ok: false,
         data: null,
-        meta: buildMeta(tool, opts),
+        meta: classified ? { ...buildMeta(tool, opts), retryable: classified.retryable } as ToolMeta : buildMeta(tool, opts),
         error: {
           code: errorCode,
           message: errorMessage,
