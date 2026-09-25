@@ -190,31 +190,46 @@ of them forecasts, and none may be back-solved into a consensus figure.
   - basic shares from the cover page (summed across share classes);
   - options by the treasury-stock method, per exercise-price range when the
     filing tags ranges;
-  - unvested RSUs and PSUs, counted gross;
-  - warrants by the treasury-stock method, per class;
+  - unvested RSUs and PSUs, counted gross. Without a total, the breakdown on
+    the fewest award or plan axes is summed, so a type-by-plan split is not
+    counted twice;
+  - warrants by the treasury-stock method, per class. The count is the
+    outstanding warrants, else the shares the warrants call for;
   - convertibles if-converted, when the price is at or above the conversion
-    price (the ratio is per $1,000 of principal);
+    price (the ratio is per $1,000 of principal). The principal is the tagged
+    face amount, else the issue's tagged carrying amount; `principalBasis`
+    says which one was used;
   - ATM capacity, as the stated unsold remainder divided by the price, kept
     outside the main total.
 
   `filing_type=latest` reads the newest 10-Q. Anything that 10-Q does not tag
   is taken from the latest 10-K. Every component names the filing it came
   from. `notDisclosed` means "not tagged", not "does not exist".
+  `reportedEpsDilution` gives the company's own weighted basic and diluted
+  EPS share counts, plus the securities it excluded as antidilutive, as a
+  cross-check. When a component is missing, `taggedDilutionConcepts` lists the
+  share-related concepts the filing does tag.
 - `extract_capital_structure` reports, at the filing's period end:
   - cash, short-term investments and total debt, with the concepts used;
   - net cash, defined as cash plus short-term investments minus debt (leases
     excluded);
   - each `DebtInstrumentAxis` member's face amount, carrying amount, coupon,
-    maturity and conversion terms;
+    maturity and conversion terms. The carrying amount is the period-end
+    balance only; an amount tagged on another date, often the issue date, is
+    reported as `taggedAmount` with its date. A member that has only a coupon
+    is dropped, since it usually duplicates another member;
   - the tagged maturity ladder, and instrument maturities by year;
   - the company's own funding, runway, going-concern and ATM sentences, quoted
-    from the filing.
+    from the filing. A sufficiency sentence must mention cash, liquidity or
+    funding. A capital-expenditure sentence must state an amount or a plan.
+    Items from a list (ending in ";") are left out.
 - `extract_analyst_valuation_methods` reads recent news headlines and
   summaries. It extracts multiples (value, metric, EV basis, periods such as
   `2H27`), DCF inputs (WACC, discount rate, terminal growth, exit multiple),
   sum-of-the-parts and rNPV, together with the firm and price target. Price
   targets from news and from rating changes that carry no stated method are
-  listed under `methodNotDisclosed`. The output is `decisionUse=CONTEXT_ONLY`.
+  listed under `methodNotDisclosed`. "$92 price target" is read before
+  "price target of $92", and a number followed by "%" is never a target. The output is `decisionUse=CONTEXT_ONLY`.
   Only the headline and summary are read, not the research note.
 - `scripts/test_capital_structure.py` requires identical output from both
   runtimes. It also drives the tools end to end against a mocked SEC and a
