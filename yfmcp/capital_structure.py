@@ -475,9 +475,30 @@ def _options_component(sources: list[IxSource], price: float) -> dict | None:
     return out
 
 
-def _awards_component(sources: list[IxSource]) -> dict | None:
+# Unvested award counts, most specific first: the us-gaap concept, then the
+# same count under a company prefix, then outstanding or vested-and-expected-
+# to-vest counts (AAOI tags only the last, under its own prefix).
+_AWARD_COUNT_CONCEPTS = [
+    (re.compile(f"^{_UNVESTED_AWARDS}$"), "nonvested"),
+    (re.compile(r"OtherThanOptionsNonvestedNumber$", re.I), "nonvested"),
+    (re.compile(r"(?:OtherThanOptions|Nonoption)EquityInstrumentsOutstandingNumber$", re.I), "outstanding"),
+    (re.compile(r"(?:OtherThanOptions|Nonoption)EquityInstrumentsVestedAndExpectedToVest(?:Number|OutstandingNumber)?$", re.I), "vested_and_expected_to_vest"),
+]
+
+
+def _is_share_count(f: IxFact) -> bool:
+    return f.value is not None and (f.unit is None or bool(re.search(r"shares", f.unit, re.I))) and not re.search(r"USD|EUR|GBP", f.unit or "", re.I)
+
+
+def _awards_component(sources: list[IxSource], table_matches: list | None = None) -> dict | None:
     def find(doc: IxDocument):
-        facts = [f for f in doc.facts if f.local == _UNVESTED_AWARDS and f.value is not None]
+        facts: list[IxFact] = []
+        basis = "nonvested"
+        for rx, label in _AWARD_COUNT_CONCEPTS:
+            facts = [f for f in doc.facts if rx.search(f.local) and _is_share_count(f)]
+            basis = label
+            if facts:
+                break
         if not facts:
             return None
         date = _max_period(facts)
@@ -492,23 +513,76 @@ def _awards_component(sources: list[IxSource]) -> dict | None:
         by_type = [f for f in award_facts if "&".join(sorted(f.dims)) == set_key]
         if plain is None and not by_type:
             return None
-        return date, plain, by_type
+        return date, plain, by_type, basis, (plain or by_type[0]).name
 
     found = _find_in_sources(sources, find)
     if not found:
-        return None
-    (date, plain, by_type), source = found
+        return awards_from_table(table_matches or [])
+    (date, plain, by_type, basis, concept), source = found
     breakdown = [{"awardType": " / ".join(member_label(v) for v in f.dims.values()), "unvested": f.value} for f in by_type]
     summed = sum((f.value or 0) for f in by_type)
     return {
         "component": "unvested_share_awards",
         "unvested": plain.value if plain is not None else summed,
         "breakdown": breakdown,
+        "concept": concept,
+        "countBasis": basis,
         "method": "gross_unvested",
         "incrementalShares": round_half_up(plain.value if plain is not None else summed),
         "note": "Unvested RSUs/PSUs are counted in full; the treasury-stock method on unrecognized compensation would count fewer, and unearned performance awards may never vest.",
         "source": _source_ref(source, date or None),
     }
+
+
+_AWARD_TABLE_RE = re.compile(r"restricted stock|\bRSUs?\b|stock units?|share units?|\bPSUs?\b", _F)
+_AWARD_ROW_RE = re.compile(r"^(?:unvested|nonvested|outstanding|balance)\b[^|]*?\b(?:at|as of)\s+(.+)$", _F)
+_TABLE_NUMBER_RE = re.compile(r"\(?(\d{1,3}(?:,\d{3})+|\d{4,})\)?", _F)
+
+
+def awards_from_table(matches: list) -> dict | None:
+    """Unvested RSU count from the equity-award table rows, when the filing tags none."""
+    best = None
+    for match in matches:
+        if not match.in_table:
+            continue
+        scope = f"{match.table_title or ''} {match.section_heading or ''} {match.context_text}"
+        if not _AWARD_TABLE_RE.search(scope) or re.search(r"\boptions?\b", match.table_title or "", _F):
+            continue
+        cells = [c.strip() for c in _collapse(match.context_text).split(" | ")]
+        label = str(match.row_label) if re.match(r"(?:unvested|nonvested|outstanding|balance)\b", match.row_label or "", _F) else cells[0]
+        row = _AWARD_ROW_RE.match(label)
+        if not row:
+            continue
+        date = normalize_ix_date(re.sub(r"[,.:;]+$", "", row.group(1)))
+        if not date:
+            continue
+        number_cell = next((c for c in (re.sub(r"^\$\s*", "", c) for c in cells[1:]) if _TABLE_NUMBER_RE.fullmatch(c)), None)
+        if number_cell is None:
+            continue
+        value = float(re.sub(r"[(),]", "", number_cell))
+        if re.search(r"in thousands", scope, _F):
+            value *= 1000
+        if best is None or date > best["date"]:
+            best = {"date": date, "value": value, "match": match, "row": match.context_text[:300]}
+    if best is None:
+        return None
+    m = best["match"]
+    return {
+        "component": "unvested_share_awards",
+        "unvested": best["value"],
+        "breakdown": [],
+        "concept": None,
+        "countBasis": "filing_table_text",
+        "method": "gross_unvested",
+        "incrementalShares": round_half_up(best["value"]),
+        "note": "Read from the filing's award table because no unvested count is tagged; check the quoted row. Counted in full, as tagged awards are.",
+        "evidence": {"row": best["row"], "tableTitle": m.table_title, "sectionHeading": m.section_heading, "documentUrl": m.document_url, "filingDate": m.filing_date},
+        "source": {"filingType": None, "filingDate": m.filing_date, "accessionNumber": m.accession_number, "documentUrl": m.document_url, "periodEnd": best["date"]},
+    }
+
+
+# Unvested warrant shares (e.g. a customer warrant that vests with purchases).
+_WARRANT_UNVESTED_RE = re.compile(r"Unvested\w*NumberOfSecuritiesCalledByWarrantsOrRights$|ClassOfWarrantOrRightUnvested\w*$", re.I)
 
 
 def _warrants_component(sources: list[IxSource], price: float) -> dict | None:
@@ -530,25 +604,34 @@ def _warrants_component(sources: list[IxSource], price: float) -> dict | None:
     if not found:
         return None
     facts, source = found
+    unvested_facts = [g for g in source.doc.facts if _WARRANT_UNVESTED_RE.search(g.local) and _is_share_count(g)]
     classes = []
     for f in facts:
         strike = _newest([g for g in source.doc.facts if g.local == _WARRANT_STRIKE and g.value is not None and _dims_key(g.dims) == _dims_key(f.dims)])
         label = " / ".join(member_label(v) for v in f.dims.values()) if f.dims else "Warrants (not itemized)"
+        # Only vested warrant shares can be exercised now; the rest count in the gross total.
+        unvested = _newest([g for g in unvested_facts if _dims_key(g.dims) == _dims_key(f.dims)])
+        if unvested is None and len(facts) == 1:
+            unvested = _newest(unvested_facts)
+        exercisable = max(0, f.value - unvested.value) if unvested is not None else f.value
         classes.append({
             "class": label,
             "concept": f.name,
             "outstanding": f.value,
             "asOf": f.period_end,
+            "unvested": unvested.value if unvested is not None else None,
+            "unvestedAsOf": unvested.period_end if unvested is not None else None,
+            "exercisable": exercisable,
             "exercisePrice": strike.value if strike else None,
             "inTheMoney": price > strike.value if strike else None,
-            "incrementalShares": round_half_up(_treasury_stock(f.value, strike.value, price)) if strike else None,
+            "incrementalShares": round_half_up(_treasury_stock(exercisable, strike.value, price)) if strike else None,
         })
     unresolved = len([c for c in classes if c["incrementalShares"] is None])
     return {
         "component": "warrants",
         "outstanding": sum((c["outstanding"] or 0) for c in classes),
         "classes": classes,
-        "method": "treasury_stock_per_class",
+        "method": "treasury_stock_per_class_on_vested",
         "incrementalShares": None if unresolved == len(classes) else sum((c["incrementalShares"] or 0) for c in classes),
         "unresolvedClasses": unresolved,
         "source": _source_ref(source, facts[0].period_end),
@@ -664,6 +747,9 @@ class TextMatch:
     document_url: str | None
     filing_date: str | None
     accession_number: str | None
+    in_table: bool = False
+    table_title: str | None = None
+    row_label: str | None = None
 
 
 _ATM_RE = re.compile(r"\bat[- ]the[- ]market\b|\bATM (?:program|offering|facility|agreement)\b|\b(?:equity distribution|open market sale|controlled equity offering|sales) agreement\b", _F)
@@ -770,7 +856,10 @@ def _reported_eps_dilution(doc: IxDocument) -> dict | None:
 
     basic = plain("WeightedAverageNumberOfSharesOutstandingBasic")
     diluted = plain("WeightedAverageNumberOfDilutedSharesOutstanding")
-    excluded = _latest_period_facts([f for f in doc.facts if f.local == _ANTIDILUTIVE and f.value is not None and f.dims.get("AntidilutiveSecuritiesAxis") is not None])
+    # Itemized on AntidilutiveSecuritiesAxis, else on whatever single axis the filer used.
+    antidilutive = [f for f in doc.facts if f.local == _ANTIDILUTIVE and f.value is not None]
+    on_standard_axis = [f for f in antidilutive if f.dims.get("AntidilutiveSecuritiesAxis") is not None]
+    excluded = _latest_period_facts(on_standard_axis if on_standard_axis else [f for f in antidilutive if len(f.dims) == 1])
     if basic is None and diluted is None and not excluded:
         return None
     period = basic or diluted or excluded[0]
@@ -779,18 +868,23 @@ def _reported_eps_dilution(doc: IxDocument) -> dict | None:
         "periodEnd": period.period_end,
         "weightedBasicShares": basic.value if basic else None,
         "weightedDilutedShares": diluted.value if diluted else None,
-        "antidilutiveExcluded": [{"security": member_label(f.dims["AntidilutiveSecuritiesAxis"]), "shares": f.value} for f in excluded],
+        "antidilutiveExcluded": [{"security": member_label(f.dims.get("AntidilutiveSecuritiesAxis") or next(iter(f.dims.values()))), "shares": f.value} for f in excluded],
         "note": "The company's own weighted-average EPS counts for the period, and the securities it left out as antidilutive. A cross-check on the bridge's instrument list, not a point-in-time count.",
     }
 
 
 def _tagged_dilution_concepts(sources: list[IxSource]) -> list[str]:
+    """Share-count concepts the filing tags, with their axes: "concept [Axis, ...]"."""
     out: list[str] = []
     for s in sources:
         for f in s.doc.facts:
-            if f.value is not None and _DILUTION_CONCEPT_RE.search(f.local) and f.name not in out:
-                out.append(f.name)
-    return sorted(out)[:40]
+            if not _is_share_count(f) or not (_DILUTION_CONCEPT_RE.search(f.local) or re.search(r"Nonoption|Unvested|Vested", f.local, re.I)):
+                continue
+            axes = sorted(f.dims)
+            key = f"{f.name} [{', '.join(axes)}]" if axes else f.name
+            if key not in out:
+                out.append(key)
+    return sorted(out)[:60]
 
 
 def _is_number(value: Any) -> bool:
@@ -798,12 +892,12 @@ def _is_number(value: Any) -> bool:
 
 
 def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: str | None,
-                    sources: list[IxSource], atm_matches: list[TextMatch]) -> dict:
+                    sources: list[IxSource], atm_matches: list[TextMatch], award_table_matches: list[TextMatch] | None = None) -> dict:
     """Basic to diluted shares at a supplied price, from company disclosures only."""
     primary = sources[0] if sources else None
     basic_found = _find_in_sources(sources, _basic_shares)
     options = _options_component(sources, price)
-    awards = _awards_component(sources)
+    awards = _awards_component(sources, award_table_matches or [])
     warrants = _warrants_component(sources, price)
     convertibles = _convertibles_component(sources, price)
     atm = _atm_component(atm_evidence(atm_matches), price)

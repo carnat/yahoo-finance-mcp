@@ -70,6 +70,8 @@ import {
   extractCapitalStructure,
   extractAnalystValuationMethods,
   getUkCompanyFilings,
+  getValuationSnapshot,
+  comparePeerValuations,
   querySecFilingIndex,
   getLatestEarningsRelease,
   indexEarningsRelease,
@@ -532,6 +534,8 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "extract_china_exposure", description: "Extract China exposure with separate revenue and non-revenue classifications; revenue values are decision-grade only when evidence and status support them.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker"] } },
   { name: "extract_risk_factor_mentions", description: "Extract concise risk-factor term mentions from SEC filings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, terms: { type: "array", items: { type: "string" } }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker", "terms"] } },
   { name: "extract_customer_concentration", description: "Extract customer concentration percentages from SEC filings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker"] } },
+  { name: "get_valuation_snapshot", description: "Valuation context for one ticker at the current price or one you supply: diluted shares from the SEC dilution bridge at that price, the filing's period-end cash and debt, equity and enterprise value (in-the-money convertibles leave the debt), EV/Revenue, EV/EBITDA and P/E on trailing results and Yahoo's current and next fiscal-year consensus with analyst counts, and ATM capacity. Falls back to Yahoo figures for non-USD or non-SEC listings. Mechanical context, not a price target; nothing is back-solved.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, price: { type: "number", exclusiveMinimum: 0 }, filing_type: { type: "string", default: "latest" }, include_sec_filings: { type: "boolean", default: true } }, required: ["ticker"] } },
+  { name: "compare_peer_valuations", description: "The same multiples for a peer set on one Yahoo basis: price x shares outstanding + total debt - total cash, over trailing results and current and next fiscal-year consensus (EV/Revenue, EV/EBITDA, P/E, revenue growth, gross margin). Returns peer medians, min and max excluding the subject, and the subject's premium or discount to each median. Context, not a signal.", inputSchema: { type: "object", properties: { tickers: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 10 }, subject: { type: "string" } }, required: ["tickers"] } },
   { name: "extract_dilution_bridge", description: "Basic-to-diluted share bridge at a price you supply, from the filing's inline XBRL: cover-page basic shares, options (treasury-stock method, by exercise-price range when tagged), unvested RSUs/PSUs (gross), warrants per class (treasury stock), convertibles (if-converted when in the money) and ATM remaining capacity from filing text. Mechanical and company-disclosed, not a consensus diluted share count; never back-solve it into one. filing_type latest uses the newest 10-Q with the last 10-K as fallback.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, price: { type: "number", exclusiveMinimum: 0 }, as_of_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" }, currency: { type: "string", default: "USD" }, filing_type: { type: "string", default: "latest" }, accession_number: { type: "string" }, include_atm: { type: "boolean", default: true } }, required: ["ticker", "price"] } },
   { name: "extract_capital_structure", description: "Company-disclosed capital structure at the filing's period end: cash, short-term investments, total debt and net cash; each debt instrument's face amount, carrying amount, coupon, maturity and conversion terms from dimensional inline XBRL (which companyfacts omits); the tagged maturity ladder; and the company's own funding, runway, going-concern and ATM statements quoted from the filing. Disclosed, not forecast.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "latest" }, accession_number: { type: "string" }, include_funding_statements: { type: "boolean", default: true } }, required: ["ticker"] } },
   { name: "extract_analyst_valuation_methods", description: "Valuation methods analysts name in recent news headlines and summaries: multiples with metric and period (e.g. 41x 2H27 EV/EBITDA), DCF with WACC, discount rate and terminal growth, sum-of-the-parts and rNPV, with firm, price target and source link. Lists firms whose targets carry no disclosed method. Context only: not consensus inputs.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, days_back: { type: "number", minimum: 1, maximum: 365, default: 30 } }, required: ["ticker"] } },
@@ -1288,6 +1292,8 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   extract_risk_factor_mentions: SIMPLE_OBJECT_SCHEMA,
   extract_customer_concentration: SIMPLE_OBJECT_SCHEMA,
   extract_dilution_bridge: SIMPLE_OBJECT_SCHEMA,
+  get_valuation_snapshot: SIMPLE_OBJECT_SCHEMA,
+  compare_peer_valuations: SIMPLE_OBJECT_SCHEMA,
   extract_capital_structure: SIMPLE_OBJECT_SCHEMA,
   extract_analyst_valuation_methods: SIMPLE_OBJECT_SCHEMA,
   get_uk_company_filings: SIMPLE_OBJECT_SCHEMA,
@@ -2334,6 +2340,18 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       return extractRiskFactorMentions(str(args.ticker), Array.isArray(args.terms) ? args.terms.map(String) : [], str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
     case "extract_customer_concentration":
       return extractCustomerConcentration(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
+    case "get_valuation_snapshot":
+      return getValuationSnapshot(
+        str(args.ticker),
+        args.price != null ? Number(args.price) : null,
+        str(args.filing_type, "latest"),
+        args.include_sec_filings !== false,
+      );
+    case "compare_peer_valuations":
+      return comparePeerValuations(
+        Array.isArray(args.tickers) ? args.tickers.map(String) : [],
+        args.subject != null ? str(args.subject) : null,
+      );
     case "extract_dilution_bridge":
       return extractDilutionBridge(
         str(args.ticker),

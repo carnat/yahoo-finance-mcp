@@ -198,6 +198,8 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - get_fund_profile: ETF/mutual fund data with section dates/status. Valuation characteristics are conventional multiples; raw provider yields are retained. Request sections: overview, holdings, allocation, operations, fixed_income.
 - get_financial_statement: Income statement, balance sheet, or cash flow (annual/quarterly/TTM). Optional line_items filter.
 - analyze_financial_ratios: Current P/E, PEG, P/S, P/B, EV/EBITDA, margins, ROE, ROA, debt ratios with explicit unitSemantics; optional valuation history.
+- get_valuation_snapshot: Diluted shares, period-end cash/debt, enterprise value and multiples on trailing and consensus figures; context, not a target.
+- compare_peer_valuations: The same multiples for a peer set on one Yahoo basis, with peer medians.
 - analyze_share_count_trend: Historical shares outstanding for dilution/buyback questions; Yahoo context, not filing confirmation.
 - analyze_credit_health: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag.
 - get_corporate_actions: Dividends, splits, and fund capital-gain distribution history.

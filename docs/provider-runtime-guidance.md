@@ -192,9 +192,16 @@ of them forecasts, and none may be back-solved into a consensus figure.
     filing tags ranges;
   - unvested RSUs and PSUs, counted gross. Without a total, the breakdown on
     the fewest award or plan axes is summed, so a type-by-plan split is not
-    counted twice;
+    counted twice. Without the us-gaap concept, a company-prefixed nonvested,
+    outstanding or vested-and-expected-to-vest count is used (`countBasis`
+    says which). With no tagged count at all, the latest "Unvested at ..." row
+    of the filing's RSU table is read and quoted (`countBasis:
+    filing_table_text`);
   - warrants by the treasury-stock method, per class. The count is the
-    outstanding warrants, else the shares the warrants call for;
+    outstanding warrants, else the shares the warrants call for. When the
+    filing tags an unvested portion (a customer warrant that vests with
+    purchases), only the vested shares are exercisable; the rest count in the
+    gross total;
   - convertibles if-converted, when the price is at or above the conversion
     price (the ratio is per $1,000 of principal). The principal is the tagged
     face amount, else the issue's tagged carrying amount; `principalBasis`
@@ -206,9 +213,10 @@ of them forecasts, and none may be back-solved into a consensus figure.
   is taken from the latest 10-K. Every component names the filing it came
   from. `notDisclosed` means "not tagged", not "does not exist".
   `reportedEpsDilution` gives the company's own weighted basic and diluted
-  EPS share counts, plus the securities it excluded as antidilutive, as a
+  EPS share counts, plus the securities it excluded as antidilutive (on
+  `AntidilutiveSecuritiesAxis`, else on the single axis the filer used), as a
   cross-check. When a component is missing, `taggedDilutionConcepts` lists the
-  share-related concepts the filing does tag.
+  share-count concepts the filing does tag, each with its axes.
 - `extract_capital_structure` reports, at the filing's period end:
   - cash, short-term investments and total debt, with the concepts used;
   - net cash, defined as cash plus short-term investments minus debt (leases
@@ -234,6 +242,37 @@ of them forecasts, and none may be back-solved into a consensus figure.
 - `scripts/test_capital_structure.py` requires identical output from both
   runtimes. It also drives the tools end to end against a mocked SEC and a
   mocked Companies House.
+
+## Valuation Snapshot And Peer Multiples
+
+- `get_valuation_snapshot` values one ticker at the current Yahoo price or a
+  `price` you supply:
+  - diluted shares come from `extract_dilution_bridge` at that price, and
+    cash, short-term investments and debt from `extract_capital_structure` at
+    the filing's period end;
+  - enterprise value = price x diluted shares + debt - cash - short-term
+    investments. In-the-money convertibles counted as shares are removed from
+    the debt (capped at total debt), so they are not counted twice;
+  - EV/Revenue, EV/EBITDA and P/E over Yahoo's trailing results and its
+    current and next fiscal-year consensus, each with the analyst count. A
+    zero or negative denominator leaves the multiple empty, with a note;
+  - ATM capacity is reported beside the share count, not added to it.
+
+  Listings quoted in a minor unit (GBp, ZAc, ILA) are valued in the major
+  currency. Non-USD listings and tickers without SEC filings use Yahoo's
+  shares, cash and debt, and say so in `warnings`. `peerComparableBasis`
+  gives the same ticker on the peer basis below.
+- `compare_peer_valuations` puts up to 10 tickers on one Yahoo basis (price x
+  shares outstanding + total debt - total cash) with the same multiples,
+  revenue growth and gross margin. Peer medians, minimum and maximum exclude
+  the subject, and `subjectVsPeerMedian` gives its premium or discount to
+  each median. A ticker whose financials are in another currency than its
+  quote has no multiples rather than wrong ones.
+- Both are `decisionUse=CONTEXT_ONLY_NOT_A_PRICE_TARGET`: no implied price, no
+  forecast, nothing back-solved from price targets.
+- `worker/src/valuation.ts` and `yfmcp/valuation.py` share one algorithm;
+  `scripts/test_valuation.py` requires identical output and drives both tools
+  end to end against mocked Yahoo and SEC.
 
 ## Non-US Primary Filings
 

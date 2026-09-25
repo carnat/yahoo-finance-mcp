@@ -19,6 +19,7 @@ import {
   type IxSource,
   type TextMatch,
 } from "./capital-structure.js";
+import { majorPrice, marketInputsFromQuoteSummary, peerValuations, valuationSnapshot, type MarketInputs } from "./valuation.js";
 import registryManifest from "./company-ir-page-registry.json";
 import newsSourceCapabilities from "./news-source-capabilities.json";
 
@@ -15379,9 +15380,13 @@ function textMatchesFrom(search: Record<string, unknown>): TextMatch[] {
     documentUrl: (m.documentUrl ?? search.documentUrl ?? null) as string | null,
     filingDate: (m.filingDate ?? search.filingDate ?? null) as string | null,
     accessionNumber: (m.accessionNumber ?? search.accessionNumber ?? null) as string | null,
+    inTable: m.inTable === true,
+    tableTitle: typeof m.tableTitle === "string" ? m.tableTitle : null,
+    rowLabel: typeof m.rowLabel === "string" ? m.rowLabel : null,
   }));
 }
 
+const AWARD_TABLE_SEARCH_TERMS = ["unvested", "nonvested"];
 const ATM_SEARCH_TERMS = ["at-the-market", "at the market offering", "ATM program", "equity distribution agreement", "sales agreement"];
 const FUNDING_SEARCH_TERMS = ["sufficient to fund", "sufficient to meet", "fully funded", "going concern", "cash runway", "next twelve months", "next 12 months", "at-the-market", "capital expenditures"];
 
@@ -15420,14 +15425,27 @@ export async function extractDilutionBridge(
       if (atmMatches.length > 0) break;
     }
   }
-  const out = dilutionBridge({
+  const input = {
     ticker: ticker.toUpperCase(),
     price,
     priceCurrency: (currency || "USD").toUpperCase(),
     asOfDate: asOfDate && /^\d{4}-\d{2}-\d{2}$/.test(asOfDate) ? asOfDate : null,
     sources,
     atmMatches,
-  });
+  };
+  let out = dilutionBridge(input);
+  // No unvested award count is tagged: read it from the filing's award table.
+  if ((out.notDisclosed as string[]).includes("unvested_share_awards")) {
+    for (const { filing } of resolved.filings) {
+      const awardTableMatches = (await filingTextMatches(ticker, filing, AWARD_TABLE_SEARCH_TERMS, 30, 400)).filter((m) => m.inTable);
+      if (awardTableMatches.length === 0) continue;
+      const retried = dilutionBridge({ ...input, awardTableMatches });
+      if (!(retried.notDisclosed as string[]).includes("unvested_share_awards")) {
+        out = retried;
+        break;
+      }
+    }
+  }
   if (loaded.some((l) => l?.truncated)) {
     (out.warnings as Record<string, unknown>[]).push({ code: "FILING_READ_TRUNCATED", message: "A filing exceeded the read limit; facts past that point were not parsed.", severity: "warning" });
   }
@@ -15617,6 +15635,85 @@ export async function getUkCompanyFilings(
     if (/abort|timed? ?out/i.test(message)) return JSON.stringify({ error: true, message: "Companies House request timed out." });
     return JSON.stringify({ error: true, code: "PROVIDER_ERROR", message: `Companies House request failed: ${message}` });
   }
+}
+
+// ── Valuation snapshot and peer multiples (2.4.0) ─────────────────────────
+
+async function valuationMarketInputs(ticker: string): Promise<MarketInputs> {
+  const d = (await yGet(
+    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${enc(ticker)}?modules=price,financialData,defaultKeyStatistics,earningsTrend`
+  )) as Record<string, unknown>;
+  const result = (d?.quoteSummary as Record<string, unknown[]> | undefined)?.result?.[0] as Record<string, unknown> | undefined;
+  if (!result) throw new Error(`No Yahoo quote summary for ${ticker.toUpperCase()}`);
+  return marketInputsFromQuoteSummary(ticker, result);
+}
+
+const SEC_UNAVAILABLE_STATUSES = new Set(["TICKER_NOT_FOUND", "FILING_NOT_FOUND_TRY_OTHER_TYPE", "FILING_TEXT_NOT_AVAILABLE"]);
+
+export async function getValuationSnapshot(
+  ticker: string,
+  price: number | null = null,
+  filingType = "latest",
+  includeSecFilings = true,
+): Promise<string> {
+  if (price != null && !(Number.isFinite(price) && price > 0)) {
+    return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: "price must be a positive number when supplied." });
+  }
+  let market: MarketInputs;
+  try {
+    market = await valuationMarketInputs(ticker);
+  } catch (e) {
+    return JSON.stringify({ error: true, message: `Yahoo quote summary failed for ${ticker.toUpperCase()}: ${e instanceof Error ? e.message : String(e)}` });
+  }
+  const quote = price ?? market.price;
+  const secWarnings: Record<string, unknown>[] = [];
+  let bridge: Record<string, unknown> | null = null;
+  let capital: Record<string, unknown> | null = null;
+  if (quote != null && includeSecFilings) {
+    const major = majorPrice(quote, market.currency);
+    if (major.currency == null || major.currency === "USD") {
+      const [b, c] = await Promise.all([
+        extractDilutionBridge(ticker, major.price, null, "USD", filingType, null, true).then(parseObjectJson),
+        extractCapitalStructure(ticker, filingType, null, false).then(parseObjectJson),
+      ]);
+      if (b.basis === "MECHANICAL_COMPANY_DISCLOSED") bridge = b;
+      if (c.basis === "COMPANY_DISCLOSED") capital = c;
+      const status = String(b.status ?? b.code ?? c.status ?? "");
+      if (!bridge || !capital) {
+        secWarnings.push({
+          code: "SEC_FILINGS_UNAVAILABLE",
+          message: SEC_UNAVAILABLE_STATUSES.has(status) ? `SEC filings were not read (${status}); Yahoo figures are used.` : "SEC filings could not be read in full; Yahoo figures fill the gaps.",
+          severity: "info",
+        });
+      }
+    } else {
+      secWarnings.push({ code: "NON_USD_LISTING", message: `SEC filings are read only for USD listings; ${ticker.toUpperCase()} is quoted in ${market.currency}, so Yahoo figures are used.`, severity: "info" });
+    }
+  }
+  return JSON.stringify(valuationSnapshot({ ticker: ticker.toUpperCase(), market, suppliedPrice: price, bridge, capital, secWarnings }));
+}
+
+const PEER_VALUATION_MAX_TICKERS = 10;
+
+export async function comparePeerValuations(tickers: string[], subject: string | null = null): Promise<string> {
+  const list: string[] = [];
+  for (const t of [subject, ...tickers]) {
+    const u = typeof t === "string" ? t.trim().toUpperCase() : "";
+    if (u && !list.includes(u)) list.push(u);
+  }
+  if (list.length < 2 || list.length > PEER_VALUATION_MAX_TICKERS) {
+    return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: `tickers must name 2 to ${PEER_VALUATION_MAX_TICKERS} distinct symbols, including the subject.` });
+  }
+  const results = await Promise.all(list.map((t) => valuationMarketInputs(t).then(
+    (m) => ({ ok: true as const, m }),
+    (e) => ({ ok: false as const, error: { ticker: t, message: e instanceof Error ? e.message : String(e) } }),
+  )));
+  const markets = results.filter((r): r is { ok: true; m: MarketInputs } => r.ok).map((r) => r.m);
+  const errors = results.filter((r): r is { ok: false; error: { ticker: string; message: string } } => !r.ok).map((r) => r.error);
+  if (markets.length === 0) {
+    return JSON.stringify({ error: true, message: `Yahoo quote summary failed for every ticker: ${errors.map((e) => e.message).join("; ")}` });
+  }
+  return JSON.stringify(peerValuations(subject, markets, errors));
 }
 
 export async function extractChinaExposure(
