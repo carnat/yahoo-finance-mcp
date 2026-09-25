@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re as _re
+import threading
 import time
 import sys
 import urllib.parse as _urlparse
@@ -54,6 +55,7 @@ from yfmcp.util import (
     _filter_paragraphs_by_topics, _safe_json_loads, _compact_excerpt,
 )
 from yfmcp.clients.yahoo import _safe_parse
+from yfmcp import filing_search as _fs
 from yfmcp.clients.edgar import (
     _SEC_REQUIRED_UA, _SMOKE_TICKER_CIK_FALLBACKS,
     _resolve_cik_for_ticker, _get_submissions_for_ticker,
@@ -5573,6 +5575,90 @@ async def get_filing_data(
     }, warn_denominator=(fact_type == FilingFactType.geographic_revenue and denominator is None))
 
 
+# ── search_sec_filing_text ────────────────────────────────────────────────────
+# Mirrors the Worker's searchFilingText: each document is projected once to
+# display text (yfmcp.filing_search) and searched there.
+
+_FILING_TEXT_TTL = 30 * 60
+_FILING_TEXT_MAX_CHARS = 12_000_000
+_FILING_TEXT_CACHE: dict[str, tuple[dict, float]] = {}
+_FILING_TEXT_CACHE_CHARS = 0
+_FILING_TEXT_LOCK = threading.Lock()
+_FILING_SEARCH_MAX_FILINGS = 5
+_FILING_SEARCH_MAX_EXHIBITS = 4
+_FILING_SEARCH_TABLE_ROWS = 40
+_SEC_DOCUMENT_READ_MAX_CHARS = 12_000_000
+
+
+async def _projected_filing_document(url: str) -> dict | None:
+    """A filing document as searchable display text, projected once per process."""
+    global _FILING_TEXT_CACHE_CHARS
+    with _FILING_TEXT_LOCK:
+        hit = _FILING_TEXT_CACHE.get(url)
+        if hit is not None and time.monotonic() - hit[1] < _FILING_TEXT_TTL:
+            return hit[0]
+    html = await _edgar_get_html(url, max_bytes=_SEC_DOCUMENT_READ_MAX_CHARS + 1)
+    if not html:
+        return None
+    truncated = len(html) > _SEC_DOCUMENT_READ_MAX_CHARS or len(html.encode("utf-8", "surrogatepass")) > _SEC_DOCUMENT_READ_MAX_CHARS
+    if len(html) > _SEC_DOCUMENT_READ_MAX_CHARS:
+        html = html[:_SEC_DOCUMENT_READ_MAX_CHARS]
+    projection = _fs.project_filing_text(html, _fs.search_headings(html), _fs.filing_table_spans(html))
+    entry = {"projection": projection, "truncated": truncated}
+    weight = len(projection.text) * 2
+    with _FILING_TEXT_LOCK:
+        previous = _FILING_TEXT_CACHE.pop(url, None)
+        if previous is not None:
+            _FILING_TEXT_CACHE_CHARS -= len(previous[0]["projection"].text) * 2
+        if weight <= _FILING_TEXT_MAX_CHARS:
+            _FILING_TEXT_CACHE[url] = (entry, time.monotonic())
+            _FILING_TEXT_CACHE_CHARS += weight
+            while (_FILING_TEXT_CACHE_CHARS > _FILING_TEXT_MAX_CHARS or len(_FILING_TEXT_CACHE) > 24) and _FILING_TEXT_CACHE:
+                oldest = next(iter(_FILING_TEXT_CACHE))
+                _FILING_TEXT_CACHE_CHARS -= len(_FILING_TEXT_CACHE.pop(oldest)[0]["projection"].text) * 2
+    return entry
+
+
+def _near_specs(values: list | None) -> list:
+    out = []
+    for value in values or []:
+        if not isinstance(value, dict):
+            continue
+        terms = _fs.terms_from_list(value.get("terms") if isinstance(value.get("terms"), list) else [])
+        if len(terms) != 2:
+            continue
+        try:
+            within = int(value.get("within_words", value.get("withinWords", 10)))
+        except (TypeError, ValueError):
+            within = 10
+        out.append(_fs.NearSpec(terms[0], terms[1], max(1, min(200, within))))
+    return out
+
+
+def _fiscal_year_of(report_date: str | None) -> str | None:
+    return f"FY{str(report_date)[:4]}" if report_date else None
+
+
+async def _exhibit_targets(cik_int: int, accession: str, filing_date: str | None, filing_type: str, primary_url: str) -> list[dict]:
+    index_url, _ = _edgar_build_filing_urls(cik_int, accession, None)
+    out: list[dict] = []
+    for exhibit in await _edgar_list_exhibits_from_index(index_url):
+        doc_type = str(exhibit.get("type") or "").upper()
+        name = str(exhibit.get("document") or "")
+        url = f"{index_url.rsplit('/', 1)[0]}/{name}" if name else ""
+        if not doc_type.startswith("EX-99") or not _re.search(r"\.(?:htm|html|txt)$", url, _re.IGNORECASE) or url == primary_url:
+            continue
+        description = str(exhibit.get("description") or "").strip()
+        out.append({
+            "key": url, "url": url, "documentType": doc_type,
+            "defaultSection": f"{doc_type}: {description}" if description else doc_type,
+            "primary": False, "accessionNumber": accession, "filingDate": filing_date, "filingType": filing_type,
+        })
+        if len(out) >= _FILING_SEARCH_MAX_EXHIBITS:
+            break
+    return out
+
+
 async def search_filing_text(
     ticker: str,
     search_terms: list[str] | None = None,
@@ -5580,200 +5666,311 @@ async def search_filing_text(
     filing_type: str = "10-K",
     accession_number: str | None = None,
     context_chars: int = 1500,
-    return_tables: bool = True,
+    return_tables: bool = False,
     document_url: str | None = None,
+    *,
+    search_query: str | None = None,
+    exclude_terms: list[str] | None = None,
+    near: list[dict] | None = None,
+    match: str | None = None,
+    order: str | None = None,
+    max_matches: int = 10,
+    cursor: str | None = None,
+    filing_count: int = 1,
+    since: str | None = None,
+    include_exhibits: bool = False,
 ) -> str:
-    filing_date: str | None = None
-    fiscal_year: str | None = None
-    if document_url:
-        # Mirrors the Worker: an explicit SEC Archives document skips filing
-        # resolution, and an XBRL/XML document is replaced by the primary HTML
-        # of accession_number, which is then required.
-        explicit_url = _safe_sec_url(document_url)
-        if explicit_url is None:
-            return json.dumps({
-                "ticker": ticker,
-                "accessionNumber": accession_number,
-                "documentUrl": None,
-                "fiscalYear": None,
-                "filingType": filing_type,
-                "filingDate": None,
-                "matches": [],
-                "matchCount": 0,
-                "confidence": "PARSED_HTML",
-                "_note": "document_url must be an https://www.sec.gov/Archives/ URL.",
-            })
-        if _is_likely_xbrl_document_url(explicit_url):
-            if not accession_number:
-                return json.dumps({
-                    "ticker": ticker,
-                    "accessionNumber": None,
-                    "documentUrl": explicit_url,
-                    "fiscalYear": None,
-                    "filingType": filing_type,
-                    "filingDate": None,
-                    "matches": [],
-                    "matchCount": 0,
-                    "status": "FILING_TEXT_NOT_AVAILABLE",
-                    "confidence": "FILING_TEXT_NOT_AVAILABLE",
-                    "_note": "document_url appears to be XBRL/XML and no accession_number was supplied to resolve the primary HTML.",
-                })
-            explicit_url = None
-        document_url = explicit_url
-    if not document_url:
-        cik_padded, subs = await _get_submissions_for_ticker(ticker)
-        if not cik_padded or not subs:
-            return json.dumps({
-                "ticker": ticker,
-                "accessionNumber": accession_number,
-                "documentUrl": None,
-                "fiscalYear": None,
-                "filingType": filing_type,
-                "filingDate": None,
-                "matches": [],
-                "matchCount": 0,
-                "confidence": "PARSED_HTML",
-                "_note": "Could not resolve SEC submissions for ticker.",
-            })
+    warnings: list[dict] = []
+    mode = "substring" if match == "substring" else "word"
+    ordering = "document" if order == "document" else "relevance"
+    try:
+        budget = max(200, min(int(context_chars) or 1500, 4000))
+    except (TypeError, ValueError):
+        budget = 1500
+    try:
+        page_size = max(1, min(50, int(max_matches) or 10))
+    except (TypeError, ValueError):
+        page_size = 10
+    try:
+        start_at = max(0, int(str(cursor or "0")))
+    except ValueError:
+        start_at = 0
+    parsed = _fs.parse_search_query(search_query) if search_query else _fs.ParsedQuery()
+    spec = _fs.SearchSpec(
+        terms=[*_fs.terms_from_list(search_terms or []), *parsed.terms],
+        near=[*parsed.near, *_near_specs(near)],
+        exclude=[*parsed.exclude, *_fs.terms_from_list(exclude_terms or [])],
+        mode=mode,
+        budget=budget,
+    )
+    try:
+        count = max(1, min(_FILING_SEARCH_MAX_FILINGS, int(filing_count) or 1))
+    except (TypeError, ValueError):
+        count = 1
+    since_date = since if since and _re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", since) else None
 
-        recent = subs.get("filings", {}).get("recent", {})
-        forms: list[str] = recent.get("form", [])
-        accessions: list[str] = recent.get("accessionNumber", [])
-        primary_docs: list[str] = recent.get("primaryDocument", [])
-        filing_dates: list[str] = recent.get("filingDate", [])
-        report_dates: list[str] = recent.get("reportDate", [])
-
-        target_idx: int | None = None
-        if accession_number:
-            for i, acc in enumerate(accessions):
-                if acc == accession_number:
-                    target_idx = i
-                    break
-        else:
-            for i, form in enumerate(forms):
-                if str(form).upper() == filing_type.upper():
-                    target_idx = i
-                    accession_number = accessions[i] if i < len(accessions) else None
-                    break
-
-        if target_idx is None or not accession_number:
-            return json.dumps({
-                "ticker": ticker,
-                "accessionNumber": accession_number,
-                "documentUrl": None,
-                "fiscalYear": None,
-                "filingType": filing_type,
-                "filingDate": None,
-                "matches": [],
-                "matchCount": 0,
-                "confidence": "PARSED_HTML",
-                "_note": f"No {filing_type} filing found in submissions JSON.",
-            })
-
-        primary_doc = primary_docs[target_idx] if target_idx < len(primary_docs) else None
-        if not primary_doc:
-            return json.dumps({
-                "ticker": ticker,
-                "accessionNumber": accession_number,
-                "documentUrl": None,
-                "fiscalYear": None,
-                "filingType": filing_type,
-                "filingDate": filing_dates[target_idx] if target_idx < len(filing_dates) else None,
-                "matches": [],
-                "matchCount": 0,
-                "confidence": "PARSED_HTML",
-                "_note": "primaryDocument missing in submissions JSON.",
-            })
-
-        cik_int = int(cik_padded)
-        _, document_url = _edgar_build_filing_urls(cik_int, accession_number, primary_doc)
-        filing_date = filing_dates[target_idx] if target_idx < len(filing_dates) else None
-        report_date = report_dates[target_idx] if target_idx < len(report_dates) else None
-        fiscal_year = f"FY{str(report_date)[:4]}" if report_date else None
-        if not document_url:
-            return json.dumps({
-                "ticker": ticker,
-                "accessionNumber": accession_number,
-                "documentUrl": None,
-                "fiscalYear": None,
-                "filingType": filing_type,
-                "filingDate": filing_dates[target_idx] if target_idx < len(filing_dates) else None,
-                "matches": [],
-                "matchCount": 0,
-                "confidence": "PARSED_HTML",
-                "_note": "Failed constructing filing document URL.",
-            })
-    html_text = await _edgar_get_html(document_url, max_bytes=5_000_000)
-    if not html_text:
+    def empty_result(**fields) -> str:
         return json.dumps({
-            "ticker": ticker,
-            "accessionNumber": accession_number,
-            "documentUrl": document_url,
-            "fiscalYear": fiscal_year,
-            "filingType": filing_type,
-            "filingDate": filing_date,
-            "matches": [],
-            "matchCount": 0,
-            "confidence": "PARSED_HTML",
-            "_note": "Unable to fetch filing HTML.",
+            "ticker": ticker, "accessionNumber": accession_number, "documentUrl": None, "fiscalYear": None,
+            "filingType": filing_type, "filingDate": None, "documentKind": "unavailable",
+            "matches": [], "matchCount": 0, **fields,
         })
 
-    html_low = html_text.lower()
-    context_window = max(200, min(int(context_chars), 4000))
-    matches: list[dict] = []
-    seen: set[int] = set()
+    # ── Documents to search ──
+    filings: list[dict] = []
+    explicit_target: dict | None = None
+    if document_url:
+        explicit_url = _safe_sec_url(document_url)
+        if explicit_url is None:
+            return _mcp_failure("search_sec_filing_text", ErrorCode.INPUT_VALIDATION_ERROR, "document_url must be an https://www.sec.gov/Archives/ URL.")
+        if _is_likely_xbrl_document_url(explicit_url):
+            if not accession_number:
+                return empty_result(
+                    documentUrl=explicit_url, documentKind="xbrl_xml", status="FILING_TEXT_NOT_AVAILABLE",
+                    code="FILING_TEXT_NOT_AVAILABLE", confidence="FILING_TEXT_NOT_AVAILABLE",
+                    warnings=[{"code": "FILING_TEXT_NOT_AVAILABLE", "message": "Provided document_url appears to be XBRL/XML and no accession_number was supplied to resolve primary HTML.", "severity": "error"}],
+                )
+            warnings.append({"code": "DOCUMENT_URL_REPLACED_WITH_PRIMARY_HTML", "message": "Provided document_url was XBRL/XML; resolved the accession primary HTML document instead.", "severity": "warning"})
+        else:
+            explicit_target = {
+                "key": explicit_url, "url": explicit_url, "documentType": "primary", "defaultSection": None,
+                "primary": True, "accessionNumber": accession_number, "filingDate": None, "filingType": filing_type,
+            }
+    if explicit_target is None:
+        cik_padded, subs = await _get_submissions_for_ticker(ticker)
+        if not cik_padded or not subs:
+            return empty_result(status="TICKER_NOT_FOUND", code="TICKER_NOT_FOUND", confidence="TICKER_NOT_FOUND",
+                                message=f"Could not resolve EDGAR submissions for ticker '{ticker}'")
+        recent = subs.get("filings", {}).get("recent", {})
+        forms = [str(f) for f in recent.get("form", [])]
+        accessions = recent.get("accessionNumber", [])
+        primary_docs = recent.get("primaryDocument", [])
+        filing_dates = recent.get("filingDate", [])
+        report_dates = recent.get("reportDate", [])
+        cik_int = int(cik_padded)
+        requested = (filing_type or "10-K").upper()
+        wanted = requested
+        if not accession_number and requested == "10-K" and "10-K" not in (f.upper() for f in forms) and "20-F" in (f.upper() for f in forms):
+            wanted = "20-F"
+            warnings.append({"code": "AUTO_20F_FALLBACK", "message": "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).", "severity": "info"})
 
-    def _append_match(term: str, pos: int) -> None:
-        if any(abs(pos - p) < 150 for p in seen):
-            return
-        seen.add(pos)
-        start = max(0, pos - context_window // 2)
-        end = min(len(html_text), pos + context_window // 2)
-        context_html = html_text[start:end]
-        pre_html = html_text[max(0, pos - 8_000):pos]
-        h_matches = _re.findall(r"<h[1-6][^>]*>(.*?)</h[1-6]>", pre_html, _re.IGNORECASE | _re.DOTALL)
-        section_heading = _strip_html_tags(h_matches[-1]) if h_matches else ""
-        item = {
-            "term": term,
-            "sectionHeading": section_heading,
-            "contextText": _strip_html_tags(context_html),
-        }
-        if return_tables:
-            parsed_tables: list[dict] = []
-            for tbl_m in _re.finditer(r"<table[^>]*>([\s\S]*?)</table>", context_html, _re.IGNORECASE):
-                rows = _parse_html_table(tbl_m.group(0))
-                if len(rows) >= 2:
-                    parsed_tables.append({"rows": rows})
-                if len(parsed_tables) >= 3:
+        def filing_at(i: int) -> dict | None:
+            primary = primary_docs[i] if i < len(primary_docs) else None
+            if not primary or i >= len(accessions):
+                return None
+            _, url = _edgar_build_filing_urls(cik_int, accessions[i], primary)
+            if not url or _is_likely_xbrl_document_url(url):
+                return None
+            return {
+                "accessionNumber": accessions[i], "filingType": forms[i], "cikInt": cik_int, "documentUrl": url,
+                "filingDate": filing_dates[i] if i < len(filing_dates) else None,
+                "reportDate": report_dates[i] if i < len(report_dates) else None,
+            }
+
+        if accession_number:
+            index = next((i for i, acc in enumerate(accessions) if acc == accession_number), None)
+            first = filing_at(index) if index is not None else None
+            if first and (count > 1 or since_date):
+                warnings.append({"code": "FILING_COUNT_IGNORED", "message": "accession_number selects one filing; filing_count and since were ignored.", "severity": "info"})
+            filings = [first] if first else []
+        else:
+            limit = _FILING_SEARCH_MAX_FILINGS if since_date and count <= 1 else count
+            capped = False
+            for i, form in enumerate(forms):
+                if form.upper() != wanted:
+                    continue
+                if since_date and str(filing_dates[i] if i < len(filing_dates) else "") < since_date:
+                    continue
+                filing = filing_at(i)
+                if filing is None:
+                    continue
+                if len(filings) >= limit:
+                    capped = since_date is not None
                     break
-            item["tableParsed"] = parsed_tables
-        matches.append(item)
+                filings.append(filing)
+            if capped:
+                warnings.append({"code": "FILINGS_CAPPED", "message": f"Searched the latest {len(filings)} matching filings; older ones were not searched.", "severity": "info"})
+        if not filings:
+            return empty_result(
+                status="FILING_NOT_FOUND_TRY_OTHER_TYPE", code="FILING_NOT_FOUND_TRY_OTHER_TYPE",
+                confidence="FILING_NOT_FOUND_TRY_OTHER_TYPE", requestedFilingType=requested,
+                availableFilingTypes=list(dict.fromkeys(forms))[:12],
+            )
 
-    if section_hint:
-        pos = html_low.find(section_hint.lower())
-        if pos >= 0:
-            _append_match(section_hint, pos)
-    for term in (search_terms or []):
-        pos = 0
-        term_low = term.lower()
-        while len(matches) < 10:
-            found = html_low.find(term_low, pos)
-            if found < 0:
-                break
-            _append_match(term, found)
-            pos = found + 1
-
-    return json.dumps({
+    first = filings[0] if filings else None
+    primary_url = explicit_target["url"] if explicit_target else first["documentUrl"]
+    base = {
         "ticker": ticker,
-        "accessionNumber": accession_number,
-        "documentUrl": document_url,
-        "fiscalYear": fiscal_year,
-        "filingType": filing_type,
-        "filingDate": filing_date,
-        "matches": matches,
-        "matchCount": len(matches),
-        "confidence": "PARSED_HTML",
+        "accessionNumber": first["accessionNumber"] if first else accession_number,
+        "documentUrl": primary_url,
+        "fiscalYear": _fiscal_year_of(first.get("reportDate")) if first else None,
+        "filingType": first["filingType"] if first else filing_type,
+        "filingDate": first["filingDate"] if first else None,
+    }
+    if not spec.terms and not spec.near and not section_hint:
+        # Nothing to look for: the resolved filing alone, without reading it.
+        return json.dumps({
+            **base, "documentKind": "primary_html", "matches": [], "matchCount": 0, "totalMatches": 0,
+            "confidence": "NOT_DISCLOSED",
+            "warnings": [*warnings, {"code": "NO_SEARCH_TERMS", "message": "Pass search_terms, search_query or near to search the filing text.", "severity": "warning"}],
+        })
+
+    groups: list[dict] = (
+        [{"filing": None, "targets": [explicit_target]}] if explicit_target else [
+            {"filing": f, "targets": [{
+                "key": f["documentUrl"], "url": f["documentUrl"], "documentType": "primary", "defaultSection": None,
+                "primary": True, "accessionNumber": f["accessionNumber"], "filingDate": f["filingDate"], "filingType": f["filingType"],
+            }]}
+            for f in filings
+        ]
+    )
+    if include_exhibits:
+        for group in groups:
+            acc = group["filing"]["accessionNumber"] if group["filing"] else accession_number
+            cik_match = _re.search(r"/data/([0-9]+)/", primary_url or "")
+            cik_value = group["filing"]["cikInt"] if group["filing"] else (int(cik_match.group(1)) if cik_match else None)
+            if not acc or cik_value is None:
+                continue
+            group["targets"].extend(await _exhibit_targets(
+                cik_value, acc, group["filing"]["filingDate"] if group["filing"] else None,
+                group["filing"]["filingType"] if group["filing"] else filing_type, group["targets"][0]["url"],
+            ))
+
+    # ── Search each document in turn ──
+    all_matches: list = []
+    term_stats: dict[str, list] = {}
+    documents_searched: list[dict] = []
+    filing_summaries: list[dict] = []
+    doc_order: dict[str, int] = {}
+    excluded_hit_count = 0
+    section_scope: str | None = None
+    hint_missing = False
+    truncated_documents = 0
+    for group in groups:
+        filing_matches: list = []
+        filing_term_hits: dict[str, int] = {}
+        for target in group["targets"]:
+            doc = await _projected_filing_document(target["url"])
+            if doc is None:
+                if target["primary"] and group is groups[0]:
+                    return empty_result(
+                        **base, documentKind="primary_html", status="FILING_TEXT_NOT_AVAILABLE",
+                        code="FILING_TEXT_NOT_AVAILABLE", confidence="FILING_TEXT_NOT_AVAILABLE",
+                        warnings=[*warnings, {"code": "FILING_TEXT_NOT_AVAILABLE", "message": "Unable to fetch primary filing HTML.", "severity": "error"}],
+                    )
+                documents_searched.append({"documentUrl": target["url"], "documentType": target["documentType"], "accessionNumber": target["accessionNumber"], "filingDate": target["filingDate"], "status": "FETCH_FAILED"})
+                continue
+            if doc["truncated"]:
+                truncated_documents += 1
+            projection = doc["projection"]
+            scope_start, scope_end = 0, len(projection.text)
+            scope = None
+            if target["primary"] and section_hint:
+                scope = _fs.section_hint_scope(projection, section_hint)
+                if scope:
+                    scope_start, scope_end = scope[0], scope[1]
+                    section_scope = section_scope or scope[2]
+                else:
+                    hint_missing = True
+            doc_order[target["key"]] = len(doc_order)
+            search_doc = _fs.SearchDocument(target["key"], target["documentType"], target["defaultSection"], projection, scope_start, scope_end)
+            result = _fs.search_document(search_doc, spec)
+            if not spec.terms and not spec.near and scope:
+                # A section hint alone returns the start of that section.
+                result.matches.append(_fs.SearchMatch(
+                    search_doc, [section_hint], 1, scope[0],
+                    _fs.match_context(projection, scope[0], scope[0] + 1, budget), scope[2],
+                ))
+            excluded_hit_count += result.excluded_count
+            doc_hits = 0
+            for label, (hits, capped) in result.term_hits.items():
+                prior = term_stats.get(label, [0, False])
+                term_stats[label] = [prior[0] + hits, prior[1] or capped]
+                filing_term_hits[label] = filing_term_hits.get(label, 0) + hits
+                doc_hits += hits
+            filing_matches.extend(result.matches)
+            entry = {
+                "documentUrl": target["url"], "documentType": target["documentType"],
+                "accessionNumber": target["accessionNumber"], "filingDate": target["filingDate"],
+                "hitCount": doc_hits, "matchCount": len(result.matches), "textChars": len(projection.text),
+                "truncated": doc["truncated"],
+            }
+            if scope:
+                entry["sectionScope"] = scope[2]
+            documents_searched.append(entry)
+        all_matches.extend(filing_matches)
+        if group["filing"]:
+            f = group["filing"]
+            filing_summaries.append({
+                "accessionNumber": f["accessionNumber"], "filingDate": f["filingDate"], "filingType": f["filingType"],
+                "fiscalYear": _fiscal_year_of(f.get("reportDate")), "documentUrl": f["documentUrl"],
+                "totalMatches": len(filing_matches), "termHits": filing_term_hits,
+                "hitsBySection": _fs.hits_by_section(filing_matches),
+            })
+    if hint_missing:
+        warnings.append({"code": "SECTION_HINT_NOT_FOUND", "message": f"No heading matched section_hint '{section_hint}'; the whole document was searched.", "severity": "warning"})
+    if truncated_documents:
+        warnings.append({"code": "FILING_READ_TRUNCATED", "message": f"{truncated_documents} document(s) exceeded {_SEC_DOCUMENT_READ_MAX_CHARS} characters; text past that point was not searched.", "severity": "warning"})
+
+    # ── Order, page and describe ──
+    ordered = _fs.order_matches(all_matches, ordering, doc_order)
+    page = ordered[start_at:start_at + page_size]
+    multi_document = len(documents_searched) > 1
+    target_by_key = {t["key"]: t for g in groups for t in g["targets"]}
+    payloads: list[dict] = []
+    for m in page:
+        payload = _fs.match_payload(m)
+        target = target_by_key.get(m.doc.key)
+        if multi_document and target:
+            payload.update(documentUrl=target["url"], documentType=target["documentType"],
+                           accessionNumber=target["accessionNumber"], filingDate=target["filingDate"])
+        if return_tables:
+            table_parsed: list[dict] = []
+            table = m.context.table
+            if table and target:
+                html = await _edgar_get_html(target["url"], max_bytes=_SEC_DOCUMENT_READ_MAX_CHARS + 1)
+                if html:
+                    rows = [_fs.merge_financial_cells(r) for r in _parse_filing_table_rows(html[table.html_start:table.html_end], _FILING_SEARCH_TABLE_ROWS)]
+                    table_parsed.append({"tableIndex": table.table_index, "rows": rows, "rowsTruncated": len(rows) >= _FILING_SEARCH_TABLE_ROWS})
+            payload["tableParsed"] = table_parsed
+        payloads.append(payload)
+    stats = [
+        {
+            "term": label, "hitCount": value[0], "hitCountCapped": value[1],
+            "matchCount": sum(1 for m in all_matches if label in m.terms),
+            "returnedCount": sum(1 for m in page if label in m.terms),
+        }
+        for label, value in term_stats.items()
+    ]
+    next_cursor = str(start_at + len(page)) if start_at + len(page) < len(ordered) else None
+    out = {
+        **base,
+        "documentKind": "primary_html",
+        **({"sectionScope": section_scope} if section_hint else {}),
+        "query": {
+            "terms": [_fs.term_label(t) for t in spec.terms],
+            "near": [f"{_fs.term_label(n.a)} NEAR/{n.within_words} {_fs.term_label(n.b)}" for n in spec.near],
+            "exclude": [_fs.term_label(t) for t in spec.exclude],
+            "match": mode,
+            "order": ordering,
+        },
+        "matches": payloads,
+        "matchCount": len(payloads),
+        "totalMatches": len(ordered),
+        "excludedHitCount": excluded_hit_count,
+        "termStats": stats,
+    }
+    if len(filing_summaries) > 1:
+        out["filings"] = filing_summaries
+    else:
+        out["hitsBySection"] = _fs.hits_by_section(all_matches)
+    out.update({
+        "documentsSearched": documents_searched,
+        "pagination": {"cursor": str(start_at), "nextCursor": next_cursor, "limit": page_size, "returned": len(payloads), "hasMore": next_cursor is not None},
+        "confidence": "NOT_DISCLOSED" if not payloads else "MEDIUM",
+        "warnings": [*warnings, *([{"code": "RAW_FILING_TEXT", "message": "Returned text is sanitized filing context, not structured fact extraction.", "severity": "info"}] if payloads else [])],
     })
+    return json.dumps(out)
 
 
 # ---------------------------------------------------------------------------
@@ -7797,18 +7994,28 @@ async def search_sec_filing_text(
     ticker: str,
     search_terms: list[str] | None = None,
     search_query: str | None = None,
+    exclude_terms: list[str] | None = None,
+    near: list[dict] | None = None,
+    match: str = "word",
+    order: str = "relevance",
+    max_matches: int = 10,
+    cursor: str | None = None,
     selector: dict | None = None,
     section_hint: str | None = None,
     filing_type: str = "10-K",
     accession_number: str | None = None,
-    context_chars: int = 1500,
-    return_tables: bool = True,
     document_url: str | None = None,
+    filing_count: int = 1,
+    since: str | None = None,
+    include_exhibits: bool = False,
+    context_chars: int = 1500,
+    return_tables: bool = False,
 ) -> str:
-    terms = search_terms or ([search_query] if search_query else [])
-    hint = section_hint or (selector or {}).get("item")
+    hint = section_hint or (selector or {}).get("item") or None
     return await search_filing_text(
-        ticker, terms, hint, filing_type, accession_number, context_chars, return_tables, document_url
+        ticker, search_terms or [], hint, filing_type, accession_number, context_chars, return_tables, document_url,
+        search_query=search_query, exclude_terms=exclude_terms, near=near, match=match, order=order,
+        max_matches=max_matches, cursor=cursor, filing_count=filing_count, since=since, include_exhibits=include_exhibits,
     )
 
 

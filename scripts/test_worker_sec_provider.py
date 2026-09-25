@@ -92,18 +92,22 @@ class TestWorkerSecProvider(unittest.TestCase):
         self.assertIn('const needsIndex = detail === "raw"', section)
         self.assertIn("needsIndex ? parseObjectJson(await getSecFilingIndex", section)
 
-    def test_sec_text_search_is_bounded_for_worker_cpu(self) -> None:
+    def test_sec_text_search_reads_cached_display_text(self) -> None:
         match = re.search(
-            r"export async function searchFilingText\([\s\S]*?return JSON\.stringify\(\{[\s\S]*?\n  \}\);",
+            r"export async function searchFilingText\([\s\S]*?\n\}\n",
             self.worker,
         )
         self.assertIsNotNone(match)
         section = match.group(0)
-        self.assertIn("full-filing text conversion can exhaust Worker CPU", section)
-        self.assertIn("const htmlLower = html.toLowerCase()", section)
-        self.assertIn("isHtmlTagPosition(html, pos)", section)
-        self.assertIn("htmlWindowAtTagBoundaries(html", section)
-        self.assertNotIn("const readableText = cleanFilingDisplayText(htmlToReadableText", section)
+        # Each document is projected to display text once per isolate and
+        # searched there, never as raw HTML.
+        self.assertIn("await projectedFilingDocument(target.url)", section)
+        self.assertIn("searchDocument(searchDoc, spec)", section)
+        self.assertNotIn("html.toLowerCase()", section)
+        self.assertIn("filingTextProjections.set(url, entry, FILING_TEXT_TTL_MS)", self.worker)
+        search = (ROOT / "worker" / "src" / "filing-search.ts").read_text(encoding="utf-8")
+        self.assertIn('"ix:header"', search)
+        self.assertIn("display\\s*:\\s*none", search)
 
     def test_geo_fallback_avoids_full_document_strip(self) -> None:
         self.assertIn("function filingHasRelevantGeoText", self.worker)
