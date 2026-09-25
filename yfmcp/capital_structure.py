@@ -352,6 +352,8 @@ def member_label(member: str) -> str:
     """"aapl:ConvertibleSeniorNotesDue2029Member" -> "Convertible Senior Notes Due 2029"."""
     label = re.sub(r"Member$", "", _local_name(member))
     label = re.sub(r"([a-z])([A-Z])", r"\1 \2", label)
+    # "ClassBCommonStock" -> "Class B Common Stock"
+    label = re.sub(r"([A-Z])([A-Z][a-z])", r"\1 \2", label)
     label = re.sub(r"([A-Za-z])(\d)", r"\1 \2", label)
     label = re.sub(r"(\d)([A-Za-z])", r"\1 \2", label)
     return re.sub(r"\s+", " ", label).strip()
@@ -1005,6 +1007,19 @@ _LADDER = [
 ]
 
 
+_CONVERTIBLE_TOTAL_CONCEPTS = ["ConvertibleNotesPayable", "ConvertibleDebt"]
+_CONVERTIBLE_PART_CONCEPTS = ["ConvertibleNotesPayableCurrent", "ConvertibleLongTermNotesPayable", "ConvertibleDebtCurrent", "ConvertibleDebtNoncurrent"]
+
+
+def _convertible_balance(doc: IxDocument, at: str | None) -> tuple[float, list[dict]] | None:
+    """Convertible notes tagged as balance-sheet lines at a date: a total, else current + noncurrent."""
+    whole = _first_total(doc, _CONVERTIBLE_TOTAL_CONCEPTS, at)
+    if whole:
+        return whole["value"], [whole]
+    parts = [p for p in (_total(doc, c, at) for c in _CONVERTIBLE_PART_CONCEPTS) if p is not None]
+    return (sum(p["value"] for p in parts), parts) if parts else None
+
+
 def _total_debt(doc: IxDocument, at: str | None) -> dict | None:
     short_term = [p for p in (_total(doc, c, at) for c in _SHORT_TERM_BORROWING_CONCEPTS) if p is not None]
 
@@ -1015,14 +1030,22 @@ def _total_debt(doc: IxDocument, at: str | None) -> dict | None:
             "basis": basis,
         }
 
+    # Convertible notes on their own balance-sheet line (AAOI) are outside the
+    # long-term debt lines when they exceed them; add them so debt is complete.
+    def with_convertibles(base: float, parts: list[dict], basis: str) -> dict:
+        conv = _convertible_balance(doc, at)
+        if conv and conv[0] > base:
+            return with_short(base + conv[0], [*parts, *conv[1]], f"{basis}, plus separately reported convertible notes")
+        return with_short(base, parts, basis)
+
     all_debt = _total(doc, "LongTermDebt", at)
     if all_debt:
-        return with_short(all_debt["value"], [all_debt], "LongTermDebt (current and noncurrent) plus short-term borrowings")
+        return with_convertibles(all_debt["value"], [all_debt], "LongTermDebt (current and noncurrent) plus short-term borrowings")
     cur = _total(doc, "LongTermDebtCurrent", at)
     non = _total(doc, "LongTermDebtNoncurrent", at)
     if cur or non:
         parts = [p for p in (cur, non) if p is not None]
-        return with_short(sum(p["value"] for p in parts), parts, "LongTermDebtCurrent + LongTermDebtNoncurrent plus short-term borrowings")
+        return with_convertibles(sum(p["value"] for p in parts), parts, "LongTermDebtCurrent + LongTermDebtNoncurrent plus short-term borrowings")
     lines = [p for p in (_total(doc, c, at) for c in _DEBT_LINE_CONCEPTS) if p is not None]
     if lines:
         return with_short(sum(p["value"] for p in lines), lines, "Sum of tagged debt lines plus short-term borrowings")

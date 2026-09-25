@@ -26,6 +26,7 @@ export type MarketInputs = {
   price: number | null;
   priceTime: string | null;
   sharesOutstanding: number | null;
+  impliedSharesOutstanding: number | null;
   marketCap: number | null;
   totalCash: number | null;
   totalDebt: number | null;
@@ -61,6 +62,7 @@ export function marketInputsFromQuoteSummary(ticker: string, result: Record<stri
     price: rawNum(price.regularMarketPrice),
     priceTime: time != null ? new Date(time * 1000).toISOString() : null,
     sharesOutstanding: rawNum(ks.sharesOutstanding),
+    impliedSharesOutstanding: rawNum(ks.impliedSharesOutstanding),
     marketCap: rawNum(price.marketCap),
     totalCash: rawNum(fd.totalCash),
     totalDebt: rawNum(fd.totalDebt),
@@ -141,15 +143,28 @@ function growth(market: MarketInputs): Record<string, number | null> {
   };
 }
 
+// Yahoo's implied count covers every class (e.g. ASTS's exchangeable Class B/C);
+// it replaces the listed-class count when it is materially larger.
+const IMPLIED_SHARES_MIN_RATIO = 1.02;
+
+function yahooShares(market: MarketInputs): { shares: number | null; basis: string | null } {
+  const listed = market.sharesOutstanding;
+  const implied = market.impliedSharesOutstanding;
+  if (implied != null && (listed == null || implied > listed * IMPLIED_SHARES_MIN_RATIO)) return { shares: implied, basis: "yahoo_implied_shares_outstanding" };
+  if (listed != null) return { shares: listed, basis: "yahoo_shares_outstanding" };
+  return { shares: null, basis: market.marketCap != null ? "yahoo_market_cap" : null };
+}
+
 /** Yahoo-basis equity and enterprise value, as every peer row is computed. */
-function yahooBasis(market: MarketInputs, price: number | null): { marketCap: number | null; enterpriseValue: number | null } {
-  if (price == null) return { marketCap: null, enterpriseValue: null };
+function yahooBasis(market: MarketInputs, price: number | null): { marketCap: number | null; enterpriseValue: number | null; shares: number | null; shareBasis: string | null } {
+  const { shares, basis } = yahooShares(market);
+  if (price == null) return { marketCap: null, enterpriseValue: null, shares, shareBasis: basis };
   const major = majorPrice(price, market.currency);
-  const marketCap = market.sharesOutstanding != null ? major.price * market.sharesOutstanding : market.marketCap;
+  const marketCap = shares != null ? major.price * shares : market.marketCap;
   const enterpriseValue = marketCap != null && market.totalDebt != null && market.totalCash != null
     ? marketCap + market.totalDebt - market.totalCash
     : null;
-  return { marketCap: marketCap != null ? round(marketCap) : null, enterpriseValue: enterpriseValue != null ? round(enterpriseValue) : null };
+  return { marketCap: marketCap != null ? round(marketCap) : null, enterpriseValue: enterpriseValue != null ? round(enterpriseValue) : null, shares, shareBasis: basis };
 }
 
 function comparableCurrency(market: MarketInputs): boolean {
@@ -240,6 +255,7 @@ export function valuationSnapshot(input: SnapshotInput): Record<string, unknown>
       dilutionPctAtPrice: num(bridgeCore?.dilutionPctAtPrice),
       bridgeStatus: bridge?.status ?? null,
       yahooSharesOutstanding: market.sharesOutstanding,
+      yahooImpliedSharesOutstanding: market.impliedSharesOutstanding,
       secVsYahooSharesDiffPct: sharesDiffPct,
     },
     balances: {
@@ -253,7 +269,7 @@ export function valuationSnapshot(input: SnapshotInput): Record<string, unknown>
     equityValue: equityValue != null ? round(equityValue) : null,
     enterpriseValue: enterpriseValue != null ? round(enterpriseValue) : null,
     enterpriseValueFormula: "price x diluted shares + total debt - convertible debt counted as shares - cash - short-term investments",
-    peerComparableBasis: { ...yahoo, note: "Price x Yahoo shares outstanding + Yahoo total debt - Yahoo total cash: the basis compare_peer_valuations uses for every peer." },
+    peerComparableBasis: { ...yahoo, note: "Price x Yahoo shares (the implied all-class count when larger) + Yahoo total debt - Yahoo total cash: the basis compare_peer_valuations uses for every peer." },
     multiples: multiples(enterpriseValue, major.price, market, comparable),
     revenueGrowth: growth(market),
     grossMarginPct: market.grossMarginPct,
@@ -293,6 +309,8 @@ export function peerRow(market: MarketInputs): Record<string, unknown> {
     currency: market.currency,
     marketCap: yahoo.marketCap,
     enterpriseValue: yahoo.enterpriseValue,
+    sharesUsed: yahoo.shares,
+    shareBasis: yahoo.shareBasis,
     evToRevenueTtm: value("EV/Revenue", "trailing_12_months"),
     evToRevenueCurrentFy: value("EV/Revenue", "current_fiscal_year"),
     evToRevenueNextFy: value("EV/Revenue", "next_fiscal_year"),
@@ -341,7 +359,7 @@ export function peerValuations(subject: string | null, markets: MarketInputs[], 
     peerSummary: summary,
     subjectVsPeerMedian: subjectRow ? versus : null,
     notes: [
-      "Every row uses the same basis: Yahoo price x shares outstanding + total debt - total cash, over Yahoo's trailing results and consensus.",
+      "Every row uses the same basis: Yahoo price x shares + total debt - total cash, over Yahoo's trailing results and consensus. Shares are Yahoo's implied all-class count when it is materially larger than the listed class (shareBasis says which).",
       "Peer medians exclude the subject. A premium or discount is context, not a signal; peers differ in growth, margins and risk.",
       "Multiples on zero or negative denominators are left empty rather than shown as meaningless numbers.",
     ],
