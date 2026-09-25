@@ -1,6 +1,6 @@
 import { BoundedTtlCache, setBounded } from "./cache.js";
 import { countCacheEvent, emptyCacheUsage, providerFetch, type CacheEvent, type CacheUsage } from "./request-context.js";
-import { ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
+import { classifyErrorMessage, ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
 import { yahooTranscriptContentSha256 } from "./transcript-contract.js";
 import {
   filingTableSpans, hitsBySection, matchContext, matchPayload, orderMatches, parseSearchQuery, projectFilingText,
@@ -8,6 +8,17 @@ import {
   type FilingTextProjection, type HeadingAnchor, type MatchMode, type MatchOrder, type NearSpec, type SearchDocument,
   type SearchMatch, type SearchSpec,
 } from "./filing-search.js";
+import {
+  analystValuationMethods,
+  capitalStructure,
+  companiesHouseFilings,
+  dilutionBridge,
+  parseIxbrl,
+  pickCompaniesHouseMatch,
+  type IxDocument,
+  type IxSource,
+  type TextMatch,
+} from "./capital-structure.js";
 import registryManifest from "./company-ir-page-registry.json";
 import newsSourceCapabilities from "./news-source-capabilities.json";
 
@@ -8150,6 +8161,11 @@ async function usdConversion(currency: string | null): Promise<UsdConversion> {
   }
 }
 
+/** $14.22B above a billion, else $12.3M. */
+function usdCompact(value: number): string {
+  return value >= 1e9 ? `$${(value / 1e9).toFixed(2)}B` : `$${(value / 1e6).toFixed(1)}M`;
+}
+
 export async function getVolumeGate(ticker: string, foreignExchange: boolean): Promise<string> {
   try {
     const fi = JSON.parse(await getFastInfo(ticker)) as Record<string, unknown>;
@@ -8283,7 +8299,7 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
       adv20dTradedValueUsd = +(adv20dTradedValue / fx.localPerUsd).toFixed(2);
       notionalUsd = +((lastVolume * lastPrice) / fx.localPerUsd).toFixed(2);
       gatePass = adv20dTradedValueUsd >= LIQUIDITY_GATE_MIN_ADV_USD;
-      note = `Volume gate ${gatePass ? "PASS" : "FAIL"} — 20d average traded value $${(adv20dTradedValueUsd / 1_000_000).toFixed(1)}M (${gatePass ? "≥" : "<"} $10M)`
+      note = `Volume gate ${gatePass ? "PASS" : "FAIL"} — 20d average traded value ${usdCompact(adv20dTradedValueUsd)} (${gatePass ? "≥" : "<"} $10M)`
         + (ratio20d != null ? `; latest session ${ratio20d.toFixed(2)}x 20d ADV` : "")
         + fx.note;
     }
@@ -8539,9 +8555,18 @@ export function nextOptionExpiry(dates: string[], today: string): string | null 
   return dates.find((d) => d > today) ?? dates[dates.length - 1] ?? null;
 }
 
+/** A chained tool's JSON; its plain-text error (e.g. an HTTP 429) is raised as-is, not as a JSON syntax error. */
+function chainedJson<T>(raw: string): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    throw new Error(raw.slice(0, 300));
+  }
+}
+
 export async function getOptionsSummary(ticker: string, expiryHint?: string): Promise<string> {
   try {
-    const expData = JSON.parse(await getOptionExpirationDates(ticker)) as string[];
+    const expData = chainedJson<string[]>(await getOptionExpirationDates(ticker));
     if (!expData || expData.length === 0) {
       // Return the legacy failure shape here so callTool's mcpSuccess wrapper
       // can retain its canonical/alias metadata while converting it to V2
@@ -8561,12 +8586,12 @@ export async function getOptionsSummary(ticker: string, expiryHint?: string): Pr
       return JSON.stringify(invalidExpiryPayload(ticker, expiry, expData));
     }
     // Fetch all contracts without illiquid filtering and with strike sort so we get the full chain
-    const callsRaw = JSON.parse(await getOptionChain(ticker, expiry, "calls", 200, 0, 0, null, null, "all", "strike", 20, true)) as Record<string, unknown>;
-    const putsRaw = JSON.parse(await getOptionChain(ticker, expiry, "puts", 200, 0, 0, null, null, "all", "strike", 20, true)) as Record<string, unknown>;
+    const callsRaw = chainedJson<Record<string, unknown>>(await getOptionChain(ticker, expiry, "calls", 200, 0, 0, null, null, "all", "strike", 20, true));
+    const putsRaw = chainedJson<Record<string, unknown>>(await getOptionChain(ticker, expiry, "puts", 200, 0, 0, null, null, "all", "strike", 20, true));
     const calls = ((callsRaw.contracts ?? []) as Record<string, unknown>[]).map(normalizeContractIv);
     const puts = ((putsRaw.contracts ?? []) as Record<string, unknown>[]).map(normalizeContractIv);
 
-    const fi = JSON.parse(await getFastInfo(ticker)) as Record<string, unknown>;
+    const fi = chainedJson<Record<string, unknown>>(await getFastInfo(ticker));
     const currentPrice = fi.lastPrice as number | null;
 
     const summaryWarnings: string[] = [];
@@ -8620,10 +8645,12 @@ export async function getOptionsSummary(ticker: string, expiryHint?: string): Pr
       warnings: summaryWarnings,
     });
   } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
     return JSON.stringify({
       error: true,
-      code: ErrorCode.PROVIDER_ERROR,
-      message: e instanceof Error ? e.message : String(e),
+      // Without a code the envelope classifies the message (429 -> retryable RATE_LIMIT).
+      ...(classifyErrorMessage(message) ? {} : { code: ErrorCode.PROVIDER_ERROR }),
+      message,
       ticker: ticker.toUpperCase(),
     });
   }
@@ -15285,6 +15312,311 @@ export async function extractCustomerConcentration(
   }
   if (String(detailLevel).toLowerCase() === "raw") out.rawMatchCount = matchCount;
   return JSON.stringify(out);
+}
+
+// ── Dilution bridge, capital structure, analyst methods, UK filings (2.3.0) ──
+
+type IxCacheEntry = { doc: IxDocument; truncated: boolean };
+// Parsed inline XBRL of recently read filings; the HTML stays in the SEC document cache.
+const ixbrlDocuments = new BoundedTtlCache<IxCacheEntry>(8);
+const IXBRL_DOCUMENT_TTL_MS = 30 * 60 * 1000;
+
+async function ixbrlSource(role: string, filing: ResolvedSecFiling): Promise<{ source: IxSource; truncated: boolean } | null> {
+  let entry = ixbrlDocuments.get(filing.documentUrl) ?? null;
+  if (entry) {
+    countCacheEvent("sec", "memoryHits");
+  } else {
+    const res = await fetchSecDocument(filing.documentUrl).catch(() => null);
+    if (!res || !res.ok) return null;
+    const truncated = res.text.length > SEC_DOCUMENT_READ_MAX_CHARS;
+    entry = { doc: parseIxbrl(truncated ? res.text.slice(0, SEC_DOCUMENT_READ_MAX_CHARS) : res.text), truncated };
+    ixbrlDocuments.set(filing.documentUrl, entry, IXBRL_DOCUMENT_TTL_MS);
+  }
+  return {
+    source: {
+      role,
+      filingType: filing.filingType,
+      filingDate: filing.filingDate,
+      accessionNumber: filing.accessionNumber,
+      documentUrl: filing.documentUrl,
+      doc: entry.doc,
+    },
+    truncated: entry.truncated,
+  };
+}
+
+/** The newest periodic report, plus the latest annual report when the newest is a 10-Q. */
+async function resolvePeriodicFilings(
+  ticker: string,
+  filingType: string,
+  accessionNumber: string | null,
+): Promise<{ ok: true; filings: { role: string; filing: ResolvedSecFiling }[] } | { ok: false; error: Record<string, unknown> }> {
+  const requested = (filingType || "latest").toUpperCase();
+  if (accessionNumber) {
+    const one = await resolveSecFiling(ticker, requested === "LATEST" ? "10-K" : requested, accessionNumber);
+    return one.ok ? { ok: true, filings: [{ role: "primary", filing: one.filing }] } : one;
+  }
+  if (requested !== "LATEST" && requested !== "10-Q") {
+    const one = await resolveSecFiling(ticker, requested, null);
+    return one.ok ? { ok: true, filings: [{ role: "primary", filing: one.filing }] } : one;
+  }
+  const [annual, quarterly] = await Promise.all([resolveSecFiling(ticker, "10-K", null), resolveSecFiling(ticker, "10-Q", null)]);
+  if (requested === "10-Q" && !quarterly.ok) return quarterly;
+  if (!annual.ok && !quarterly.ok) return annual;
+  if (quarterly.ok && (!annual.ok || String(quarterly.filing.filingDate ?? "") > String(annual.filing.filingDate ?? "") || requested === "10-Q")) {
+    const filings = [{ role: "primary", filing: quarterly.filing }];
+    if (annual.ok) filings.push({ role: "latest_annual_fallback", filing: annual.filing });
+    return { ok: true, filings };
+  }
+  return { ok: true, filings: [{ role: "primary", filing: (annual as { ok: true; filing: ResolvedSecFiling }).filing }] };
+}
+
+function textMatchesFrom(search: Record<string, unknown>): TextMatch[] {
+  const matches = Array.isArray(search.matches) ? search.matches as Record<string, unknown>[] : [];
+  return matches.map((m) => ({
+    contextText: String(m.contextText ?? ""),
+    sectionHeading: typeof m.sectionHeading === "string" && m.sectionHeading ? m.sectionHeading : null,
+    documentUrl: (m.documentUrl ?? search.documentUrl ?? null) as string | null,
+    filingDate: (m.filingDate ?? search.filingDate ?? null) as string | null,
+    accessionNumber: (m.accessionNumber ?? search.accessionNumber ?? null) as string | null,
+  }));
+}
+
+const ATM_SEARCH_TERMS = ["at-the-market", "at the market offering", "ATM program", "equity distribution agreement", "sales agreement"];
+const FUNDING_SEARCH_TERMS = ["sufficient to fund", "sufficient to meet", "fully funded", "going concern", "cash runway", "next twelve months", "next 12 months", "at-the-market", "capital expenditures"];
+
+async function filingTextMatches(ticker: string, filing: ResolvedSecFiling, terms: string[], maxMatches: number, contextChars: number): Promise<TextMatch[]> {
+  const search = parseObjectJson(await searchFilingText(ticker, terms, null, filing.filingType, filing.accessionNumber, contextChars, false, null, { maxMatches }));
+  return textMatchesFrom(search);
+}
+
+function resolveFailure(error: Record<string, unknown>, ticker: string): string {
+  return JSON.stringify({ ticker, ...error });
+}
+
+export async function extractDilutionBridge(
+  ticker: string,
+  price: number,
+  asOfDate: string | null = null,
+  currency = "USD",
+  filingType = "latest",
+  accessionNumber: string | null = null,
+  includeAtm = true,
+): Promise<string> {
+  if (!Number.isFinite(price) || price <= 0) {
+    return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: "price is required and must be a positive number: the bridge is evaluated at the price you supply." });
+  }
+  const resolved = await resolvePeriodicFilings(ticker, filingType, accessionNumber);
+  if (!resolved.ok) return resolveFailure(resolved.error, ticker);
+  const loaded = await Promise.all(resolved.filings.map(({ role, filing }) => ixbrlSource(role, filing)));
+  const sources = loaded.filter((l): l is { source: IxSource; truncated: boolean } => l != null).map((l) => l.source);
+  if (sources.length === 0) {
+    return JSON.stringify({ ticker, status: "FILING_TEXT_NOT_AVAILABLE", code: "FILING_TEXT_NOT_AVAILABLE", message: "The filing document could not be read from SEC." });
+  }
+  let atmMatches: TextMatch[] = [];
+  if (includeAtm) {
+    for (const { filing } of resolved.filings) {
+      atmMatches = await filingTextMatches(ticker, filing, ATM_SEARCH_TERMS, 10, 800);
+      if (atmMatches.length > 0) break;
+    }
+  }
+  const out = dilutionBridge({
+    ticker: ticker.toUpperCase(),
+    price,
+    priceCurrency: (currency || "USD").toUpperCase(),
+    asOfDate: asOfDate && /^\d{4}-\d{2}-\d{2}$/.test(asOfDate) ? asOfDate : null,
+    sources,
+    atmMatches,
+  });
+  if (loaded.some((l) => l?.truncated)) {
+    (out.warnings as Record<string, unknown>[]).push({ code: "FILING_READ_TRUNCATED", message: "A filing exceeded the read limit; facts past that point were not parsed.", severity: "warning" });
+  }
+  return JSON.stringify(out);
+}
+
+export async function extractCapitalStructure(
+  ticker: string,
+  filingType = "latest",
+  accessionNumber: string | null = null,
+  includeFundingStatements = true,
+): Promise<string> {
+  const resolved = await resolvePeriodicFilings(ticker, filingType, accessionNumber);
+  if (!resolved.ok) return resolveFailure(resolved.error, ticker);
+  const primary = resolved.filings[0];
+  const loaded = await ixbrlSource("primary", primary.filing);
+  if (!loaded) {
+    return JSON.stringify({ ticker, status: "FILING_TEXT_NOT_AVAILABLE", code: "FILING_TEXT_NOT_AVAILABLE", message: "The filing document could not be read from SEC." });
+  }
+  const fundingMatches = includeFundingStatements ? await filingTextMatches(ticker, primary.filing, FUNDING_SEARCH_TERMS, 20, 700) : [];
+  const out = capitalStructure({ ticker: ticker.toUpperCase(), source: loaded.source, fundingMatches });
+  if (loaded.truncated) {
+    (out.warnings as Record<string, unknown>[]).push({ code: "FILING_READ_TRUNCATED", message: "The filing exceeded the read limit; facts past that point were not parsed.", severity: "warning" });
+  }
+  return JSON.stringify(out);
+}
+
+export async function extractAnalystValuationMethods(ticker: string, daysBack = 30): Promise<string> {
+  const days = clampInt(daysBack, 30, 1, 365);
+  const [news, radar] = await Promise.all([
+    getCompanyNews(ticker, 100, days).then(parseObjectJson).catch(() => ({} as Record<string, unknown>)),
+    getAnalystUpgradeRadar(ticker, days).then(parseObjectJson).catch(() => ({} as Record<string, unknown>)),
+  ]);
+  const items = Array.isArray(news.items) ? news.items as Record<string, unknown>[] : [];
+  const changes = Array.isArray(radar.changes) ? radar.changes as Record<string, unknown>[] : [];
+  const out = analystValuationMethods(ticker.toUpperCase(), items, changes);
+  const warnings: Record<string, unknown>[] = [];
+  if (news.error || news.code === "INPUT_VALIDATION_ERROR") warnings.push({ code: "NEWS_UNAVAILABLE", message: String(news.message ?? "News could not be read."), severity: "warning" });
+  if (radar.error) warnings.push({ code: "RATING_CHANGES_UNAVAILABLE", message: String(radar.message ?? "Rating changes could not be read."), severity: "warning" });
+  out.windowDays = days;
+  out.newsSourcesUsed = (news.meta as Record<string, unknown> | undefined)?.sourcesUsed ?? [];
+  out.warnings = warnings;
+  return JSON.stringify(out);
+}
+
+const COMPANIES_HOUSE_API = "https://api.company-information.service.gov.uk";
+const COMPANIES_HOUSE_TIMEOUT_MS = 15_000;
+const COMPANIES_HOUSE_CATEGORIES = new Set(["accounts", "capital", "mortgage", "confirmation-statement", "resolution", "incorporation", "officers", "persons-with-significant-control", "address", "annotation", "change-of-name", "miscellaneous"]);
+
+async function companiesHouseGet(path: string, key: string): Promise<{ status: number; body: Record<string, unknown> | null }> {
+  const resp = await fetchProviderWithTimeout(`${COMPANIES_HOUSE_API}${path}`, {
+    headers: { Authorization: `Basic ${btoa(`${key}:`)}`, Accept: "application/json" },
+  }, COMPANIES_HOUSE_TIMEOUT_MS);
+  if (!resp.ok) {
+    await resp.body?.cancel();
+    return { status: resp.status, body: null };
+  }
+  return { status: resp.status, body: await resp.json() as Record<string, unknown> };
+}
+
+function companiesHouseError(status: number, step: string): string {
+  if (status === 429) return JSON.stringify({ error: true, message: `Companies House ${step}: HTTP 429 rate limited (600 requests per 5 minutes).` });
+  if (status === 401 || status === 403) return JSON.stringify({ error: true, code: "PROVIDER_ERROR", status: "AUTH_ERROR", message: `Companies House ${step}: HTTP ${status}; check COMPANIES_HOUSE_API_KEY.` });
+  return JSON.stringify({ error: true, code: "PROVIDER_ERROR", message: `Companies House ${step}: HTTP ${status}.` });
+}
+
+function chargeRows(payload: Record<string, unknown>): Record<string, unknown>[] {
+  const items = Array.isArray(payload.items) ? payload.items as Record<string, unknown>[] : [];
+  return items.map((c) => {
+    const classification = (c.classification && typeof c.classification === "object" ? c.classification : {}) as Record<string, unknown>;
+    const particulars = (c.particulars && typeof c.particulars === "object" ? c.particulars : {}) as Record<string, unknown>;
+    const persons = Array.isArray(c.persons_entitled) ? c.persons_entitled as Record<string, unknown>[] : [];
+    return {
+      chargeCode: c.charge_code ?? null,
+      status: c.status ?? null,
+      createdOn: c.created_on ?? null,
+      deliveredOn: c.delivered_on ?? null,
+      satisfiedOn: c.satisfied_on ?? null,
+      classification: classification.description ?? null,
+      personsEntitled: persons.map((p) => String(p.name ?? "")).filter(Boolean),
+      particulars: typeof particulars.description === "string" ? particulars.description.slice(0, 400) : null,
+    };
+  });
+}
+
+export async function getUkCompanyFilings(
+  ticker: string | null,
+  companyNumber: string | null = null,
+  companyName: string | null = null,
+  category: string | null = null,
+  limit = 25,
+  includeCharges = false,
+): Promise<string> {
+  const key = getWorkerVar("COMPANIES_HOUSE_API_KEY")?.trim();
+  const base = { source: "companies_house", sourceType: "uk_companies_house" };
+  if (!key) {
+    return JSON.stringify({
+      ...base,
+      ticker,
+      status: "SOURCE_UNCONFIGURED",
+      code: "SOURCE_UNCONFIGURED",
+      message: "Companies House is not configured; set the COMPANIES_HOUSE_API_KEY secret (a free key from the Companies House developer hub).",
+      filings: [],
+    });
+  }
+  const cat = category ? category.trim().toLowerCase() : null;
+  if (cat && !COMPANIES_HOUSE_CATEGORIES.has(cat)) {
+    return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: `category must be one of: ${[...COMPANIES_HOUSE_CATEGORIES].join(", ")}.` });
+  }
+  const size = clampInt(limit, 25, 1, 100);
+  const warnings: Record<string, unknown>[] = [];
+  let number = companyNumber ? companyNumber.trim().toUpperCase() : null;
+  if (number && /^\d{1,8}$/.test(number)) number = number.padStart(8, "0");
+  if (number && !/^[A-Z0-9]{8}$/.test(number)) {
+    return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: "company_number must be an 8-character Companies House number, e.g. 01234567 or SC123456." });
+  }
+  let matchedBy = "company_number";
+  let company: Record<string, unknown> | null = null;
+  try {
+    if (!number) {
+      let name = companyName?.trim() || null;
+      matchedBy = "company_name";
+      if (!name && ticker) {
+        const identity = await resolveNewsCompanyIdentity(ticker);
+        name = identity.longName ?? identity.companyName ?? identity.shortName;
+        matchedBy = "ticker_issuer_name";
+        if (!/\.(?:L|IL)$/i.test(ticker)) {
+          warnings.push({ code: "NON_UK_LISTING", message: `${ticker} is not a London listing; the match is by issuer name only.`, severity: "info" });
+        }
+      }
+      if (!name) {
+        return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: "Provide company_number, company_name, or a ticker whose issuer name can be resolved." });
+      }
+      const search = await companiesHouseGet(`/search/companies?q=${encodeURIComponent(name)}&items_per_page=20`, key);
+      if (!search.body) return companiesHouseError(search.status, "company search");
+      const match = pickCompaniesHouseMatch(name, search.body);
+      if (!match) {
+        const items = Array.isArray(search.body.items) ? search.body.items as Record<string, unknown>[] : [];
+        return JSON.stringify({
+          ...base,
+          ticker,
+          status: "COMPANY_NOT_MATCHED",
+          searchedName: name,
+          candidates: items.slice(0, 5).map((i) => ({ companyNumber: i.company_number ?? null, title: i.title ?? null, companyStatus: i.company_status ?? null, addressSnippet: i.address_snippet ?? null })),
+          message: "No registered company name matched the issuer exactly; pass company_number from the candidates.",
+          filings: [],
+          warnings,
+        });
+      }
+      number = String(match.company_number ?? "");
+      company = { companyNumber: number, name: match.title ?? null, status: match.company_status ?? null };
+    }
+    if (!company) {
+      const profile = await companiesHouseGet(`/company/${number}`, key);
+      if (profile.status === 404) return JSON.stringify({ ...base, ticker, status: "COMPANY_NOT_FOUND", companyNumber: number, filings: [] });
+      if (!profile.body) return companiesHouseError(profile.status, "company profile");
+      company = { companyNumber: number, name: profile.body.company_name ?? null, status: profile.body.company_status ?? null };
+    }
+    const history = await companiesHouseGet(`/company/${number}/filing-history?items_per_page=${size}${cat ? `&category=${cat}` : ""}`, key);
+    if (!history.body) return companiesHouseError(history.status, "filing history");
+    const out: Record<string, unknown> = {
+      ...base,
+      ticker,
+      status: "OK",
+      decisionUse: "USE_OFFICIAL_EVIDENCE",
+      company: { ...company, matchedBy },
+      category: cat,
+      filings: companiesHouseFilings(String(number), history.body),
+      totalFilings: typeof history.body.total_count === "number" ? history.body.total_count : null,
+      filingHistoryUrl: `https://find-and-update.company-information.service.gov.uk/company/${number}/filing-history`,
+      notes: [
+        "Companies House holds statutory filings: accounts, share allotments (SH01), charges (MR01), resolutions and confirmation statements.",
+        "Market announcements (RNS) such as results, loan-note terms and trading updates are not filed here; read them on the company's investor site.",
+        "Documents are PDFs; documentContentUrl needs the same API key, viewerUrl opens the public viewer.",
+      ],
+      warnings,
+    };
+    if (includeCharges) {
+      const charges = await companiesHouseGet(`/company/${number}/charges`, key);
+      if (charges.body) out.charges = chargeRows(charges.body);
+      else if (charges.status === 404) out.charges = [];
+      else warnings.push({ code: "CHARGES_UNAVAILABLE", message: `Companies House charges: HTTP ${charges.status}.`, severity: "warning" });
+    }
+    return JSON.stringify(out);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (/abort|timed? ?out/i.test(message)) return JSON.stringify({ error: true, message: "Companies House request timed out." });
+    return JSON.stringify({ error: true, code: "PROVIDER_ERROR", message: `Companies House request failed: ${message}` });
+  }
 }
 
 export async function extractChinaExposure(

@@ -819,6 +819,10 @@ _TOOL_OUTPUT_SCHEMAS.setdefault("extract_revenue_exposure", _SIMPLE_OUTPUT_SCHEM
 _TOOL_OUTPUT_SCHEMAS.setdefault("extract_china_exposure", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("extract_risk_factor_mentions", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("extract_customer_concentration", _SIMPLE_OUTPUT_SCHEMA)
+_TOOL_OUTPUT_SCHEMAS.setdefault("extract_dilution_bridge", _SIMPLE_OUTPUT_SCHEMA)
+_TOOL_OUTPUT_SCHEMAS.setdefault("extract_capital_structure", _SIMPLE_OUTPUT_SCHEMA)
+_TOOL_OUTPUT_SCHEMAS.setdefault("extract_analyst_valuation_methods", _SIMPLE_OUTPUT_SCHEMA)
+_TOOL_OUTPUT_SCHEMAS.setdefault("get_uk_company_filings", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("extract_exposure", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("query_sec_filing_index", _SIMPLE_OUTPUT_SCHEMA)
 

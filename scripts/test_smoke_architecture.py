@@ -120,6 +120,7 @@ class TestSmokeArchitecture(unittest.TestCase):
         self.assertIn("worker_version_promotion.py write-secrets", secrets)
         self.assertIn("ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}", self.workflow)
         self.assertIn("MARKETAUX_API_TOKEN: ${{ secrets.MARKETAUX_API_TOKEN }}", self.workflow)
+        self.assertIn("COMPANIES_HOUSE_API_KEY: ${{ secrets.COMPANIES_HOUSE_API_KEY }}", secrets)
         cleanup = self._step_body("Remove candidate secrets file")
         self.assertIn("always()", cleanup)
         self.assertIn("rm -f", cleanup)
@@ -210,6 +211,7 @@ class TestSmokeArchitecture(unittest.TestCase):
                 "SEC_OPEN_DATA_API_KEY": "",
                 "ALPHA_VANTAGE_API_KEY": "alpha-secret",
                 "MARKETAUX_API_TOKEN": "marketaux-secret",
+                "COMPANIES_HOUSE_API_KEY": "ch-secret",
                 "EDGAR_CONTACT_EMAIL": "ops@example.org",
             }
         )
@@ -220,6 +222,7 @@ class TestSmokeArchitecture(unittest.TestCase):
                 "FINNHUB_API_KEY": "finnhub-secret",
                 "ALPHA_VANTAGE_API_KEY": "alpha-secret",
                 "MARKETAUX_API_TOKEN": "marketaux-secret",
+                "COMPANIES_HOUSE_API_KEY": "ch-secret",
                 "EDGAR_CONTACT_EMAIL": "ops@example.org",
             },
         )

@@ -60,6 +60,7 @@ GATE_DAYS = [d.isoformat() for d in _weekdays_until_today(30)]
 GATE_LISTINGS = {
     "LSEX.L": ("GBp", 250.0, 20_000_000),
     "THIN": ("USD", 5.0, 100_000),
+    "MEGA": ("USD", 200.0, 70_000_000),
 }
 GBP_PER_USD = 0.8
 
@@ -101,6 +102,7 @@ globalThis.fetch = async (req) => {
   const u = new URL(typeof req === "string" ? req : req.url);
   if (u.hostname === "fc.yahoo.com") return new Response("", { headers: { "set-cookie": "A3=abc; Path=/" } });
   if (u.pathname.includes("getcrumb")) return new Response("crumb123");
+  if (u.pathname.includes("/v7/finance/options/")) return new Response("Too Many Requests", { status: 429 });
   const symbol = decodeURIComponent(u.pathname.split("/").pop());
   if (u.pathname.includes("/quoteSummary/")) {
     if (symbol === "GBP=X") return Response.json({ quoteSummary: { result: [{ price: { currency: "GBP", quoteType: "CURRENCY", regularMarketPrice: { raw: data.gbpPerUsd } } }] } });
@@ -123,6 +125,7 @@ globalThis.fetch = async (req) => {
 out.gates = {};
 for (const symbol of Object.keys(data.listings)) out.gates[symbol] = JSON.parse(await m.getVolumeGate(symbol, false));
 out.shortInterest = JSON.parse(await m.getShortInterest("SHRT"));
+out.optionsRateLimited = JSON.parse(m.mcpSuccess("summarize_options_flow", await m.getOptionsSummary("RL")));
 console.log(JSON.stringify(out));
 """
 
@@ -139,7 +142,7 @@ def _worker() -> dict:
         entry.write_text(
             "export {\n"
             "  wilderRsi, macd, annualizedVolatility, indicatorLookback, averageTradedValue, listingCurrencyUnit,\n"
-            "  nextOptionExpiry, usMarketDate, getVolumeGate, getShortInterest,\n"
+            "  nextOptionExpiry, usMarketDate, getVolumeGate, getShortInterest, getOptionsSummary,\n"
             '} from "./src/yahoo-finance.ts";\n'
             'export { classifyErrorMessage, mcpSuccess, setWorkerEnv } from "./src/response.ts";\n',
             encoding="utf-8",
@@ -291,6 +294,9 @@ class TestQuoteCalculations(unittest.TestCase):
                 # $0.5M a day fails, although the latest session is 1.0x its own average.
                 self.assertEqual((thin["gatePass"], thin["adv20dTradedValueUsd"], thin["ratio20d"]), (False, 500_000, 1.0))
                 self.assertEqual((thin["gateBasis"], thin["gateThresholdUsd"]), ("ADV20_TRADED_VALUE_USD", 10_000_000))
+                # Billions read as billions, not "$14000.0M" (2.3.0).
+                self.assertTrue(out["gates"]["MEGA"]["note"].startswith("Volume gate PASS \u2014 20d average traded value $14.00B (\u2265 $10M)"), out["gates"]["MEGA"]["note"])
+                self.assertIn("$0.5M (< $10M)", thin["note"])
         for symbol in GATE_LISTINGS:
             with self.subTest(parity=symbol):
                 worker = {k: self.worker["gates"][symbol].get(k) for k in GATE_FIELDS}
@@ -313,6 +319,12 @@ class TestQuoteCalculations(unittest.TestCase):
                 ])
                 self.assertEqual(out["envelope"]["error"]["code"], "RATE_LIMIT")
                 self.assertIs(out["envelope"]["meta"]["retryable"], True)
+        # summarize_options_flow passes its chain call's error through (2.3.0);
+        # it used to report the JSON syntax error of parsing that message.
+        flow = self.worker["optionsRateLimited"]
+        self.assertEqual(flow["error"]["code"], "RATE_LIMIT", flow)
+        self.assertIs(flow["meta"]["retryable"], True)
+        self.assertIn("429", flow["error"]["message"])
 
     def test_short_interest_dates_are_iso(self) -> None:
         for name, out in self.both():

@@ -124,6 +124,14 @@ merge per passage, rank risk factors and MD&A first, and page with
 `include_exhibits` adds EX-99 exhibits. See
 [provider runtime guidance](docs/provider-runtime-guidance.md#sec-filing-text-search).
 
+`extract_dilution_bridge` builds basic-to-diluted shares at a price you
+supply, and `extract_capital_structure` reports cash, debt, instrument terms
+and maturities. Both read the filing's inline XBRL and are company-disclosed,
+not forecasts. `extract_analyst_valuation_methods` lists the multiples and DCF
+inputs analysts name in the news, as context only. `get_uk_company_filings`
+reads Companies House and needs `COMPANIES_HOUSE_API_KEY`. See
+[provider runtime guidance](docs/provider-runtime-guidance.md#capital-structure-dilution-and-analyst-methods).
+
 Grouped domains:
 
 - `stock_pricing`

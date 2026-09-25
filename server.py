@@ -6,6 +6,7 @@ import html as _html_module
 import functools
 import inspect
 import json
+import math
 import os
 from pathlib import Path
 import re as _re
@@ -36,7 +37,7 @@ from yfmcp.schemas import (
 # ---------------------------------------------------------------------------
 from yfmcp.envelope import (
     SERVER_VERSION, _ENVELOPE_V2, ErrorCode, ToolMeta, ErrorDetail, McpResponse,
-    _mcp_success, _mcp_failure, _wrap_envelope_v2,
+    _mcp_success, _mcp_failure, _wrap_envelope_v2, _classify_error_message,
 )
 from yfmcp.validation import (
     _TICKER_RE, _ACCESSION_RE,
@@ -56,6 +57,7 @@ from yfmcp.util import (
 )
 from yfmcp.clients.yahoo import _safe_parse
 from yfmcp import filing_search as _fs
+from yfmcp import capital_structure as _cs
 from yfmcp.clients.edgar import (
     _SEC_REQUIRED_UA, _SMOKE_TICKER_CIK_FALLBACKS,
     _resolve_cik_for_ticker, _get_submissions_for_ticker,
@@ -3930,11 +3932,12 @@ async def get_options_summary(ticker: str, expiry_hint: str | None = None) -> st
             "warnings": flow_warnings,
         })
     except Exception as e:
+        classified = _classify_error_message(str(e))
         return _mcp_failure(
             "get_options_summary",
-            ErrorCode.PROVIDER_ERROR,
+            classified[0] if classified else ErrorCode.PROVIDER_ERROR,
             str(e),
-            meta_extra={"error_extra": {"ticker": ticker.upper()}},
+            meta_extra={"error_extra": {"ticker": ticker.upper(), **({"retryable": True} if classified else {})}},
         )
 
 
@@ -9285,7 +9288,8 @@ async def extract_customer_concentration(
     for m in (search.get("matches") if isinstance(search.get("matches"), list) else []):
         if not isinstance(m, dict):
             continue
-        ctx = str(m.get("context") or "")
+        # Search matches carry contextText since 2.2.7.
+        ctx = str(m.get("contextText") or m.get("context") or "")
         pct_match = _re.search(r"(\d{1,2}(?:\.\d+)?)\s*%", ctx)
         if not pct_match:
             continue
@@ -9314,6 +9318,397 @@ async def extract_customer_concentration(
     if str(detailLevel).lower() == "raw":
         result["rawMatchCount"] = search.get("matchCount", 0)
     return json.dumps(result)
+
+
+# ── Dilution bridge, capital structure, analyst methods, UK filings (2.3.0) ──
+# Mirrors the Worker; the parsing and arithmetic live in yfmcp.capital_structure.
+
+_IXBRL_DOCUMENTS: dict[str, tuple[_cs.IxDocument, bool, float]] = {}
+_IXBRL_DOCUMENT_TTL = 30 * 60
+_IXBRL_DOCUMENT_MAX = 8
+_ATM_SEARCH_TERMS = ["at-the-market", "at the market offering", "ATM program", "equity distribution agreement", "sales agreement"]
+_FUNDING_SEARCH_TERMS = ["sufficient to fund", "sufficient to meet", "fully funded", "going concern", "cash runway", "next twelve months", "next 12 months", "at-the-market", "capital expenditures"]
+
+
+def _unwrap_payload(raw: str) -> dict:
+    data = _safe_json_loads(raw)
+    if "ok" in data and isinstance(data.get("data"), dict):
+        return data["data"]
+    return data
+
+
+def _clamp_int(value: Any, fallback: int, low: int, high: int) -> int:
+    try:
+        number = float(value)
+        n = int(number) if math.isfinite(number) else fallback
+    except (TypeError, ValueError):
+        n = fallback
+    return min(high, max(low, n))
+
+
+def _filing_not_found(ticker: str, requested: str, available: list[str]) -> dict:
+    return {
+        "status": "FILING_NOT_FOUND_TRY_OTHER_TYPE",
+        "code": "FILING_NOT_FOUND_TRY_OTHER_TYPE",
+        "ticker": ticker,
+        "requestedFilingType": requested,
+        "availableFilingTypes": available,
+        "suggestedFilingTypes": ["20-F"] if requested == "10-K" and "20-F" in available else [],
+        "accessionNumber": None,
+        "filingDate": None,
+        "documentUrl": None,
+        "warnings": [{"code": "FILING_NOT_FOUND_TRY_OTHER_TYPE", "message": f"No {requested} filing found for '{ticker}'.", "severity": "error"}],
+    }
+
+
+async def _resolve_periodic_filings(ticker: str, filing_type: str, accession_number: str | None) -> tuple[list[tuple[str, dict]], dict | None]:
+    """The newest periodic report, plus the latest annual report when the newest is a 10-Q."""
+    cik_padded, subs = await _get_submissions_for_ticker(ticker)
+    if not cik_padded or not subs:
+        return [], {"status": "TICKER_NOT_FOUND", "code": "TICKER_NOT_FOUND", "ticker": ticker, "message": f"Could not resolve EDGAR submissions for ticker '{ticker}'"}
+    recent = subs.get("filings", {}).get("recent", {})
+    forms = [str(f) for f in recent.get("form", [])]
+    accessions = recent.get("accessionNumber", [])
+    primary_docs = recent.get("primaryDocument", [])
+    filing_dates = recent.get("filingDate", [])
+    cik_int = int(cik_padded)
+    available = list(dict.fromkeys(f.upper() for f in forms if f))[:12]
+
+    def row(i: int) -> dict | None:
+        primary = primary_docs[i] if i < len(primary_docs) else None
+        if not primary or i >= len(accessions) or not accessions[i]:
+            return None
+        _, url = _edgar_build_filing_urls(cik_int, accessions[i], primary)
+        if not url or _is_likely_xbrl_document_url(url):
+            return None
+        return {"filingType": forms[i], "filingDate": filing_dates[i] if i < len(filing_dates) else None, "accessionNumber": accessions[i], "documentUrl": url}
+
+    def first(form: str) -> dict | None:
+        index = next((i for i, f in enumerate(forms) if f.upper() == form), None)
+        return row(index) if index is not None else None
+
+    def annual() -> dict | None:
+        return first("10-K") or first("20-F")
+
+    requested = (filing_type or "latest").upper()
+    if accession_number:
+        index = next((i for i, acc in enumerate(accessions) if acc == accession_number), None)
+        one = row(index) if index is not None else None
+        return ([("primary", one)], None) if one else ([], _filing_not_found(ticker, "10-K" if requested == "LATEST" else requested, available))
+    if requested not in ("LATEST", "10-Q"):
+        one = annual() if requested == "10-K" else first(requested)
+        return ([("primary", one)], None) if one else ([], _filing_not_found(ticker, requested, available))
+    yearly = annual()
+    quarterly = first("10-Q")
+    if requested == "10-Q" and not quarterly:
+        return [], _filing_not_found(ticker, "10-Q", available)
+    if not yearly and not quarterly:
+        return [], _filing_not_found(ticker, "10-K", available)
+    if quarterly and (not yearly or str(quarterly["filingDate"] or "") > str(yearly["filingDate"] or "") or requested == "10-Q"):
+        filings = [("primary", quarterly)]
+        if yearly:
+            filings.append(("latest_annual_fallback", yearly))
+        return filings, None
+    return [("primary", yearly)], None
+
+
+async def _ixbrl_source(role: str, filing: dict) -> tuple[_cs.IxSource, bool] | None:
+    url = filing["documentUrl"]
+    hit = _IXBRL_DOCUMENTS.get(url)
+    if hit is not None and time.monotonic() - hit[2] < _IXBRL_DOCUMENT_TTL:
+        doc, truncated = hit[0], hit[1]
+    else:
+        html = await _edgar_get_html(url, max_bytes=_SEC_DOCUMENT_READ_MAX_CHARS + 1)
+        if not html:
+            return None
+        truncated = len(html) > _SEC_DOCUMENT_READ_MAX_CHARS
+        doc = _cs.parse_ixbrl(html[:_SEC_DOCUMENT_READ_MAX_CHARS])
+        _IXBRL_DOCUMENTS.pop(url, None)
+        _IXBRL_DOCUMENTS[url] = (doc, truncated, time.monotonic())
+        while len(_IXBRL_DOCUMENTS) > _IXBRL_DOCUMENT_MAX:
+            _IXBRL_DOCUMENTS.pop(next(iter(_IXBRL_DOCUMENTS)))
+    source = _cs.IxSource(role, filing["filingType"], filing["filingDate"], filing["accessionNumber"], url, doc)
+    return source, truncated
+
+
+async def _filing_text_matches(ticker: str, filing: dict, terms: list[str], max_matches: int, context_chars: int) -> list[_cs.TextMatch]:
+    search = _safe_json_loads(await search_filing_text(
+        ticker, terms, None, filing["filingType"], filing["accessionNumber"], context_chars, False, None, max_matches=max_matches,
+    ))
+    out = []
+    for m in search.get("matches") if isinstance(search.get("matches"), list) else []:
+        if not isinstance(m, dict):
+            continue
+        heading = m.get("sectionHeading")
+        out.append(_cs.TextMatch(
+            context_text=str(m.get("contextText") or ""),
+            section_heading=heading if isinstance(heading, str) and heading else None,
+            document_url=_first_present(m.get("documentUrl"), search.get("documentUrl")),
+            filing_date=_first_present(m.get("filingDate"), search.get("filingDate")),
+            accession_number=_first_present(m.get("accessionNumber"), search.get("accessionNumber")),
+        ))
+    return out
+
+
+def _first_present(*values: Any) -> Any:
+    return next((v for v in values if v is not None), None)
+
+
+@yfinance_server.tool(
+    name="extract_dilution_bridge",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_dilution_bridge"],
+    description="Basic-to-diluted share bridge at a price you supply, from the filing's inline XBRL: cover-page basic shares, options (treasury-stock method, by exercise-price range when tagged), unvested RSUs/PSUs (gross), warrants per class (treasury stock), convertibles (if-converted when in the money) and ATM remaining capacity from filing text. Mechanical and company-disclosed, not a consensus diluted share count; never back-solve it into one. filing_type latest uses the newest 10-Q with the last 10-K as fallback.",
+)
+async def extract_dilution_bridge(
+    ticker: str,
+    price: float,
+    as_of_date: str | None = None,
+    currency: str = "USD",
+    filing_type: str = "latest",
+    accession_number: str | None = None,
+    include_atm: bool = True,
+) -> str:
+    try:
+        price_value = float(price)
+    except (TypeError, ValueError):
+        price_value = math.nan
+    if not math.isfinite(price_value) or price_value <= 0:
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "price is required and must be a positive number: the bridge is evaluated at the price you supply."})
+    filings, error = await _resolve_periodic_filings(ticker, filing_type, accession_number)
+    if error:
+        return json.dumps({"ticker": ticker, **error})
+    loaded = [await _ixbrl_source(role, filing) for role, filing in filings]
+    sources = [item[0] for item in loaded if item is not None]
+    if not sources:
+        return json.dumps({"ticker": ticker, "status": "FILING_TEXT_NOT_AVAILABLE", "code": "FILING_TEXT_NOT_AVAILABLE", "message": "The filing document could not be read from SEC."})
+    atm_matches: list[_cs.TextMatch] = []
+    if include_atm is not False:
+        for _, filing in filings:
+            atm_matches = await _filing_text_matches(ticker, filing, _ATM_SEARCH_TERMS, 10, 800)
+            if atm_matches:
+                break
+    out = _cs.dilution_bridge(
+        ticker.upper(), price_value, (currency or "USD").upper(),
+        as_of_date if as_of_date and _re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", as_of_date) else None,
+        sources, atm_matches,
+    )
+    if any(item is not None and item[1] for item in loaded):
+        out["warnings"].append({"code": "FILING_READ_TRUNCATED", "message": "A filing exceeded the read limit; facts past that point were not parsed.", "severity": "warning"})
+    return json.dumps(out)
+
+
+@yfinance_server.tool(
+    name="extract_capital_structure",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_capital_structure"],
+    description="Company-disclosed capital structure at the filing's period end: cash, short-term investments, total debt and net cash; each debt instrument's face amount, carrying amount, coupon, maturity and conversion terms from dimensional inline XBRL (which companyfacts omits); the tagged maturity ladder; and the company's own funding, runway, going-concern and ATM statements quoted from the filing. Disclosed, not forecast.",
+)
+async def extract_capital_structure(
+    ticker: str,
+    filing_type: str = "latest",
+    accession_number: str | None = None,
+    include_funding_statements: bool = True,
+) -> str:
+    filings, error = await _resolve_periodic_filings(ticker, filing_type, accession_number)
+    if error:
+        return json.dumps({"ticker": ticker, **error})
+    _, primary = filings[0]
+    loaded = await _ixbrl_source("primary", primary)
+    if loaded is None:
+        return json.dumps({"ticker": ticker, "status": "FILING_TEXT_NOT_AVAILABLE", "code": "FILING_TEXT_NOT_AVAILABLE", "message": "The filing document could not be read from SEC."})
+    funding = await _filing_text_matches(ticker, primary, _FUNDING_SEARCH_TERMS, 20, 700) if include_funding_statements is not False else []
+    out = _cs.capital_structure(ticker.upper(), loaded[0], funding)
+    if loaded[1]:
+        out["warnings"].append({"code": "FILING_READ_TRUNCATED", "message": "The filing exceeded the read limit; facts past that point were not parsed.", "severity": "warning"})
+    return json.dumps(out)
+
+
+@yfinance_server.tool(
+    name="extract_analyst_valuation_methods",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_analyst_valuation_methods"],
+    description="Valuation methods analysts name in recent news headlines and summaries: multiples with metric and period (e.g. 41x 2H27 EV/EBITDA), DCF with WACC, discount rate and terminal growth, sum-of-the-parts and rNPV, with firm, price target and source link. Lists firms whose targets carry no disclosed method. Context only: not consensus inputs.",
+)
+async def extract_analyst_valuation_methods(ticker: str, days_back: int = 30) -> str:
+    days = _clamp_int(days_back, 30, 1, 365)
+    news_raw, radar_raw = await asyncio.gather(
+        get_company_news(ticker, max_results=100, lookback_days=days),
+        get_analyst_upgrade_radar(ticker, days),
+        return_exceptions=True,
+    )
+    news = _unwrap_payload(news_raw) if isinstance(news_raw, str) else {}
+    radar = _unwrap_payload(radar_raw) if isinstance(radar_raw, str) else {}
+    items = news.get("items") if isinstance(news.get("items"), list) else []
+    changes = radar.get("changes") if isinstance(radar.get("changes"), list) else []
+    out = _cs.analyst_valuation_methods(ticker.upper(), [i for i in items if isinstance(i, dict)], [c for c in changes if isinstance(c, dict)])
+    warnings = []
+    if news.get("error") or not isinstance(news_raw, str):
+        warnings.append({"code": "NEWS_UNAVAILABLE", "message": str(news.get("message") or "News could not be read."), "severity": "warning"})
+    if radar.get("error") or not isinstance(radar_raw, str):
+        warnings.append({"code": "RATING_CHANGES_UNAVAILABLE", "message": str(radar.get("message") or "Rating changes could not be read."), "severity": "warning"})
+    out["windowDays"] = days
+    out["newsSourcesUsed"] = (news.get("meta") or {}).get("sourcesUsed", []) if isinstance(news.get("meta"), dict) else []
+    out["warnings"] = warnings
+    return json.dumps(out)
+
+
+_COMPANIES_HOUSE_API = "https://api.company-information.service.gov.uk"
+_COMPANIES_HOUSE_CATEGORIES = [
+    "accounts", "capital", "mortgage", "confirmation-statement", "resolution", "incorporation", "officers",
+    "persons-with-significant-control", "address", "annotation", "change-of-name", "miscellaneous",
+]
+
+
+async def _companies_house_get(path: str, key: str) -> tuple[int, dict | None]:
+    import base64
+
+    token = base64.b64encode(f"{key}:".encode()).decode()
+
+    def fetch() -> tuple[int, dict | None]:
+        req = _urlrequest.Request(
+            f"{_COMPANIES_HOUSE_API}{path}",
+            headers={"Authorization": f"Basic {token}", "Accept": "application/json", "User-Agent": _PROVIDER_USER_AGENT},
+        )
+        try:
+            with _urlrequest.urlopen(req, timeout=15) as resp:  # noqa: S310
+                return resp.status, json.loads(resp.read().decode("utf-8", errors="replace"))
+        except _urlerror.HTTPError as exc:
+            return exc.code, None
+
+    return await asyncio.get_event_loop().run_in_executor(None, fetch)
+
+
+def _companies_house_error(status: int, step: str) -> str:
+    if status == 429:
+        return json.dumps({"error": True, "message": f"Companies House {step}: HTTP 429 rate limited (600 requests per 5 minutes)."})
+    if status in (401, 403):
+        return json.dumps({"error": True, "code": "PROVIDER_ERROR", "status": "AUTH_ERROR", "message": f"Companies House {step}: HTTP {status}; check COMPANIES_HOUSE_API_KEY."})
+    return json.dumps({"error": True, "code": "PROVIDER_ERROR", "message": f"Companies House {step}: HTTP {status}."})
+
+
+def _charge_rows(payload: dict) -> list[dict]:
+    out = []
+    for c in payload.get("items") if isinstance(payload.get("items"), list) else []:
+        classification = c.get("classification") if isinstance(c.get("classification"), dict) else {}
+        particulars = c.get("particulars") if isinstance(c.get("particulars"), dict) else {}
+        persons = c.get("persons_entitled") if isinstance(c.get("persons_entitled"), list) else []
+        out.append({
+            "chargeCode": c.get("charge_code"),
+            "status": c.get("status"),
+            "createdOn": c.get("created_on"),
+            "deliveredOn": c.get("delivered_on"),
+            "satisfiedOn": c.get("satisfied_on"),
+            "classification": classification.get("description"),
+            "personsEntitled": [str(p.get("name") or "") for p in persons if isinstance(p, dict) and p.get("name")],
+            "particulars": particulars["description"][:400] if isinstance(particulars.get("description"), str) else None,
+        })
+    return out
+
+
+async def _issuer_name(ticker: str) -> str | None:
+    try:
+        info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
+    except Exception:
+        return None
+    info = info if isinstance(info, dict) else {}
+    return str(info.get("longName") or info.get("shortName") or "").strip() or None
+
+
+@yfinance_server.tool(
+    name="get_uk_company_filings",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_uk_company_filings"],
+    description="UK Companies House filing history for a UK-registered issuer (e.g. IQE.L): accounts, share allotments (SH01), charges (MR01, secured lending) and resolutions, with document links; include_charges adds the charge register. Resolves by company_number, company_name, or the ticker's issuer name. Official statutory filings; RNS market announcements are not held here. Needs the COMPANIES_HOUSE_API_KEY secret.",
+)
+async def get_uk_company_filings(
+    ticker: str | None = None,
+    company_number: str | None = None,
+    company_name: str | None = None,
+    category: str | None = None,
+    limit: int = 25,
+    include_charges: bool = False,
+) -> str:
+    key = (os.environ.get("COMPANIES_HOUSE_API_KEY") or "").strip()
+    base = {"source": "companies_house", "sourceType": "uk_companies_house"}
+    if not key:
+        return json.dumps({
+            **base, "ticker": ticker, "status": "SOURCE_UNCONFIGURED", "code": "SOURCE_UNCONFIGURED",
+            "message": "Companies House is not configured; set the COMPANIES_HOUSE_API_KEY secret (a free key from the Companies House developer hub).",
+            "filings": [],
+        })
+    cat = category.strip().lower() if category else None
+    if cat and cat not in _COMPANIES_HOUSE_CATEGORIES:
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": f"category must be one of: {', '.join(_COMPANIES_HOUSE_CATEGORIES)}."})
+    size = _clamp_int(limit, 25, 1, 100)
+    warnings: list[dict] = []
+    number = company_number.strip().upper() if company_number else None
+    if number and _re.fullmatch(r"[0-9]{1,8}", number):
+        number = number.zfill(8)
+    if number and not _re.fullmatch(r"[A-Z0-9]{8}", number):
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "company_number must be an 8-character Companies House number, e.g. 01234567 or SC123456."})
+    matched_by = "company_number"
+    company: dict | None = None
+    try:
+        if not number:
+            name = (company_name or "").strip() or None
+            matched_by = "company_name"
+            if not name and ticker:
+                name = await _issuer_name(ticker)
+                matched_by = "ticker_issuer_name"
+                if not _re.search(r"\.(?:L|IL)$", ticker, _re.IGNORECASE):
+                    warnings.append({"code": "NON_UK_LISTING", "message": f"{ticker} is not a London listing; the match is by issuer name only.", "severity": "info"})
+            if not name:
+                return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "Provide company_number, company_name, or a ticker whose issuer name can be resolved."})
+            status, body = await _companies_house_get(f"/search/companies?q={_urlparse.quote(name, safe='')}&items_per_page=20", key)
+            if body is None:
+                return _companies_house_error(status, "company search")
+            match = _cs.pick_companies_house_match(name, body)
+            if match is None:
+                items = body.get("items") if isinstance(body.get("items"), list) else []
+                return json.dumps({
+                    **base, "ticker": ticker, "status": "COMPANY_NOT_MATCHED", "searchedName": name,
+                    "candidates": [{"companyNumber": i.get("company_number"), "title": i.get("title"), "companyStatus": i.get("company_status"), "addressSnippet": i.get("address_snippet")} for i in items[:5]],
+                    "message": "No registered company name matched the issuer exactly; pass company_number from the candidates.",
+                    "filings": [], "warnings": warnings,
+                })
+            number = str(match.get("company_number") or "")
+            company = {"companyNumber": number, "name": match.get("title"), "status": match.get("company_status")}
+        if company is None:
+            status, body = await _companies_house_get(f"/company/{number}", key)
+            if status == 404:
+                return json.dumps({**base, "ticker": ticker, "status": "COMPANY_NOT_FOUND", "companyNumber": number, "filings": []})
+            if body is None:
+                return _companies_house_error(status, "company profile")
+            company = {"companyNumber": number, "name": body.get("company_name"), "status": body.get("company_status")}
+        status, history = await _companies_house_get(f"/company/{number}/filing-history?items_per_page={size}{f'&category={cat}' if cat else ''}", key)
+        if history is None:
+            return _companies_house_error(status, "filing history")
+        total = history.get("total_count")
+        out: dict = {
+            **base, "ticker": ticker, "status": "OK", "decisionUse": "USE_OFFICIAL_EVIDENCE",
+            "company": {**company, "matchedBy": matched_by},
+            "category": cat,
+            "filings": _cs.companies_house_filings(str(number), history),
+            "totalFilings": total if isinstance(total, (int, float)) and not isinstance(total, bool) else None,
+            "filingHistoryUrl": f"https://find-and-update.company-information.service.gov.uk/company/{number}/filing-history",
+            "notes": [
+                "Companies House holds statutory filings: accounts, share allotments (SH01), charges (MR01), resolutions and confirmation statements.",
+                "Market announcements (RNS) such as results, loan-note terms and trading updates are not filed here; read them on the company's investor site.",
+                "Documents are PDFs; documentContentUrl needs the same API key, viewerUrl opens the public viewer.",
+            ],
+            "warnings": warnings,
+        }
+        if include_charges:
+            status, charges = await _companies_house_get(f"/company/{number}/charges", key)
+            if charges is not None:
+                out["charges"] = _charge_rows(charges)
+            elif status == 404:
+                out["charges"] = []
+            else:
+                warnings.append({"code": "CHARGES_UNAVAILABLE", "message": f"Companies House charges: HTTP {status}.", "severity": "warning"})
+        return json.dumps(out)
+    except Exception as exc:
+        message = str(exc)
+        if "timed out" in message.lower():
+            return json.dumps({"error": True, "message": "Companies House request timed out."})
+        return json.dumps({"error": True, "code": "PROVIDER_ERROR", "message": f"Companies House request failed: {message}"})
 
 
 async def _warm_sec_submissions(ticker: str) -> None:
