@@ -8616,7 +8616,7 @@ export async function getFilingSection(ticker: string, sectionName: string, docu
 
     if (bounds.startIdx !== null && bounds.endIdx !== null) {
       const sectionHtml = html.slice(bounds.startIdx, bounds.endIdx);
-      const plainSection = sectionHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+      const plainSection = stripHtmlTags(sectionHtml);
       return JSON.stringify({
         ticker,
         sectionName,
@@ -8647,7 +8647,7 @@ export async function getFilingSection(ticker: string, sectionName: string, docu
     }
 
     // Non-Item labels retain the legacy plain-text fallback.
-    const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+    const text = stripHtmlTags(html);
     const idx = text.toLowerCase().indexOf(sectionName.toLowerCase());
     if (idx === -1) {
       return JSON.stringify({
@@ -14208,18 +14208,48 @@ const EXPOSURE_XBRL_TOKEN_RE = /\b(?:us-gaap|srt|country|dei):[A-Za-z0-9_.-]+\b/
 const EXPOSURE_COMPETITION_RE = /\b(?:competitors?|competition|compete(?:s|d|ing)?\s+with)\b/i;
 const EXPOSURE_RELATIONSHIP_RE = /\b(?:supplier|vendor|customer|manufactur\w*|assembl\w*|facilit\w*|factory|subsidiar\w*|operations?|production|procur\w*|sourc\w*|partner\w*|loan|credit|deposit|account|lender|borrow\w*)\b/i;
 
-function exposureTermPresent(text: string, term: string): boolean {
+/** Index of the first whole-word match of term, plural forms included ("tariff" matches "tariffs"); -1 if none. */
+function exposureTermIndex(text: string, term: string): number {
   const escaped = String(term).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return escaped.length > 0 && new RegExp(`(^|[^A-Za-z0-9])${escaped}([^A-Za-z0-9]|$)`, "i").test(text);
+  if (!escaped) return -1;
+  const match = new RegExp(`(^|[^A-Za-z0-9])${escaped}(?:e?s)?(?![A-Za-z0-9])`, "i").exec(text);
+  return match ? match.index + match[1].length : -1;
 }
 
-function readableExposureExcerpt(
+function exposureTermPresent(text: string, term: string): boolean {
+  return exposureTermIndex(text, term) >= 0;
+}
+
+/** About maxLen characters around the first term, starting at its sentence when that fits. */
+export function termCenteredExcerpt(text: string, terms: string[], maxLen: number): string {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (cleaned.length <= maxLen) return cleaned;
+  const starts = terms.map((term) => exposureTermIndex(cleaned, term)).filter((i) => i >= 0);
+  if (starts.length === 0) return compactExcerpt(cleaned, maxLen);
+  const at = Math.min(...starts);
+  let start = Math.max(0, Math.min(at - Math.floor(maxLen / 3), cleaned.length - maxLen));
+  const sentence = cleaned.lastIndexOf(". ", at - 1);
+  if (sentence >= start) {
+    start = sentence + 2;
+  } else if (start > 0) {
+    const space = cleaned.indexOf(" ", start);
+    if (space >= 0 && space < at) start = space + 1;
+  }
+  let end = start + maxLen;
+  if (end < cleaned.length) {
+    const space = cleaned.lastIndexOf(" ", end);
+    if (space > at) end = space;
+  }
+  return `${start > 0 ? "..." : ""}${cleaned.slice(start, end).trim()}${end < cleaned.length ? "..." : ""}`;
+}
+
+export function readableExposureExcerpt(
   value: unknown,
   terms: string[],
   maxLen = 240,
   minWords = 5,
 ): string {
-  const excerpt = compactExcerpt(String(value ?? "").replace(EXPOSURE_XBRL_TOKEN_RE, " "), maxLen);
+  const excerpt = termCenteredExcerpt(String(value ?? "").replace(EXPOSURE_XBRL_TOKEN_RE, " "), terms, maxLen);
   if (!excerpt || !terms.some((term) => exposureTermPresent(excerpt, term))) return "";
   const words = excerpt.match(/[A-Za-z]{2,}/g) ?? [];
   return words.length >= minWords ? excerpt : "";
