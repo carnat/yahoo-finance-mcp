@@ -174,6 +174,74 @@ Sources checked through 2026-08-04:
   and `yfmcp/filing_search.py`); `scripts/test_filing_search.py` requires
   identical output from both on shared fixtures.
 
+## Capital Structure, Dilution And Analyst Methods
+
+These tools answer questions that consensus feeds leave open (forward diluted
+shares, net debt, how a target was built) with disclosed evidence only. None
+of them forecasts, and none may be back-solved into a consensus figure.
+
+- The inline-XBRL parser (`worker/src/capital-structure.ts`,
+  `yfmcp/capital_structure.py`) reads the filing's own contexts, including
+  their dimensions, which the companyfacts API drops. That is what makes
+  per-instrument debt terms and per-class warrants reachable. It reads
+  `ix:nonFraction` with scale, sign, and the zero-dash and number-word formats,
+  and short `ix:nonNumeric` facts such as maturity dates. It skips text blocks.
+- `extract_dilution_bridge` takes a `price` the caller supplies. It adds up:
+  - basic shares from the cover page (summed across share classes);
+  - options by the treasury-stock method, per exercise-price range when the
+    filing tags ranges;
+  - unvested RSUs and PSUs, counted gross;
+  - warrants by the treasury-stock method, per class;
+  - convertibles if-converted, when the price is at or above the conversion
+    price (the ratio is per $1,000 of principal);
+  - ATM capacity, as the stated unsold remainder divided by the price, kept
+    outside the main total.
+
+  `filing_type=latest` reads the newest 10-Q. Anything that 10-Q does not tag
+  is taken from the latest 10-K. Every component names the filing it came
+  from. `notDisclosed` means "not tagged", not "does not exist".
+- `extract_capital_structure` reports, at the filing's period end:
+  - cash, short-term investments and total debt, with the concepts used;
+  - net cash, defined as cash plus short-term investments minus debt (leases
+    excluded);
+  - each `DebtInstrumentAxis` member's face amount, carrying amount, coupon,
+    maturity and conversion terms;
+  - the tagged maturity ladder, and instrument maturities by year;
+  - the company's own funding, runway, going-concern and ATM sentences, quoted
+    from the filing.
+- `extract_analyst_valuation_methods` reads recent news headlines and
+  summaries. It extracts multiples (value, metric, EV basis, periods such as
+  `2H27`), DCF inputs (WACC, discount rate, terminal growth, exit multiple),
+  sum-of-the-parts and rNPV, together with the firm and price target. Price
+  targets from news and from rating changes that carry no stated method are
+  listed under `methodNotDisclosed`. The output is `decisionUse=CONTEXT_ONLY`.
+  Only the headline and summary are read, not the research note.
+- `scripts/test_capital_structure.py` requires identical output from both
+  runtimes. It also drives the tools end to end against a mocked SEC and a
+  mocked Companies House.
+
+## Non-US Primary Filings
+
+- `get_uk_company_filings` reads Companies House, the UK statutory registry:
+  - accounts, SH01 share allotments, MR01 charges (secured lending) and
+    resolutions, with document links;
+  - the charge register, when `include_charges=true`.
+
+  It resolves the company by `company_number`, then `company_name`, then the
+  ticker's issuer name, which must match exactly (legal suffixes ignored). An
+  ambiguous name returns `COMPANY_NOT_MATCHED` together with the candidates.
+  It needs the `COMPANIES_HOUSE_API_KEY` secret, a free key from the Companies
+  House developer hub. Without the key it returns `SOURCE_UNCONFIGURED`. The
+  API allows 600 requests per 5 minutes; a 429 returns a retryable
+  `RATE_LIMIT`.
+- Companies House does not hold RNS market announcements (results, loan-note
+  terms, trading updates). The FCA National Storage Mechanism has only an
+  undocumented search endpoint, so it is not used; this repository reads only
+  documented official APIs.
+- IQE.L and SIVE.ST are in the IR-page registry as `candidate` entries. At
+  runtime a candidate is reported and never fetched. Promote an entry only
+  after confirming that the page lists the issuer's regulatory announcements.
+
 ## SEC EDGAR Rules
 
 - `data.sec.gov` is keyless and public. Do not add API-key or paid-provider

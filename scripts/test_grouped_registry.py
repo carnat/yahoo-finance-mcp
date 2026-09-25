@@ -139,7 +139,7 @@ class TestHandlerRegistry(unittest.TestCase):
             for action in group["actions"]
         }
         self.assertEqual(len(tool_groups.TOOL_GROUPS), 11)
-        self.assertEqual(len(action_names), 79)
+        self.assertEqual(len(action_names), 83)
         self.assertNotIn("get_manifest_diagnostics", action_names)
         self.assertNotIn("index_sec_filing", action_names)
         self.assertIn("health_check", action_names)
@@ -151,7 +151,7 @@ class TestGroupedServer(unittest.TestCase):
         with patch.dict(os.environ, {"TOOL_MODE": "grouped"}):
             self.assertEqual(_public_metadata()["toolCount"], len(tool_groups.TOOL_GROUPS))
         with patch.dict(os.environ, {"TOOL_MODE": "expanded"}):
-            self.assertEqual(_public_metadata()["toolCount"], 79)
+            self.assertEqual(_public_metadata()["toolCount"], 83)
 
     def test_grouped_server_exposes_one_tool_per_group(self):
         original = os.environ.get("TOOL_MODE")

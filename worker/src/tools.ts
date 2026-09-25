@@ -66,6 +66,10 @@ import {
   extractExposure,
   extractRiskFactorMentions,
   extractCustomerConcentration,
+  extractDilutionBridge,
+  extractCapitalStructure,
+  extractAnalystValuationMethods,
+  getUkCompanyFilings,
   querySecFilingIndex,
   getLatestEarningsRelease,
   indexEarningsRelease,
@@ -528,6 +532,10 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "extract_china_exposure", description: "Extract China exposure with separate revenue and non-revenue classifications; revenue values are decision-grade only when evidence and status support them.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker"] } },
   { name: "extract_risk_factor_mentions", description: "Extract concise risk-factor term mentions from SEC filings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, terms: { type: "array", items: { type: "string" } }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker", "terms"] } },
   { name: "extract_customer_concentration", description: "Extract customer concentration percentages from SEC filings.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, detailLevel: { type: "string", default: "compact" } }, required: ["ticker"] } },
+  { name: "extract_dilution_bridge", description: "Basic-to-diluted share bridge at a price you supply, from the filing's inline XBRL: cover-page basic shares, options (treasury-stock method, by exercise-price range when tagged), unvested RSUs/PSUs (gross), warrants per class (treasury stock), convertibles (if-converted when in the money) and ATM remaining capacity from filing text. Mechanical and company-disclosed, not a consensus diluted share count; never back-solve it into one. filing_type latest uses the newest 10-Q with the last 10-K as fallback.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, price: { type: "number", exclusiveMinimum: 0 }, as_of_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" }, currency: { type: "string", default: "USD" }, filing_type: { type: "string", default: "latest" }, accession_number: { type: "string" }, include_atm: { type: "boolean", default: true } }, required: ["ticker", "price"] } },
+  { name: "extract_capital_structure", description: "Company-disclosed capital structure at the filing's period end: cash, short-term investments, total debt and net cash; each debt instrument's face amount, carrying amount, coupon, maturity and conversion terms from dimensional inline XBRL (which companyfacts omits); the tagged maturity ladder; and the company's own funding, runway, going-concern and ATM statements quoted from the filing. Disclosed, not forecast.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "latest" }, accession_number: { type: "string" }, include_funding_statements: { type: "boolean", default: true } }, required: ["ticker"] } },
+  { name: "extract_analyst_valuation_methods", description: "Valuation methods analysts name in recent news headlines and summaries: multiples with metric and period (e.g. 41x 2H27 EV/EBITDA), DCF with WACC, discount rate and terminal growth, sum-of-the-parts and rNPV, with firm, price target and source link. Lists firms whose targets carry no disclosed method. Context only: not consensus inputs.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, days_back: { type: "number", minimum: 1, maximum: 365, default: 30 } }, required: ["ticker"] } },
+  { name: "get_uk_company_filings", description: "UK Companies House filing history for a UK-registered issuer (e.g. IQE.L): accounts, share allotments (SH01), charges (MR01, secured lending) and resolutions, with document links; include_charges adds the charge register. Resolves by company_number, company_name, or the ticker's issuer name. Official statutory filings; RNS market announcements are not held here. Needs the COMPANIES_HOUSE_API_KEY secret.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, company_number: { type: "string" }, company_name: { type: "string" }, category: { type: "string", enum: ["accounts", "capital", "mortgage", "confirmation-statement", "resolution", "incorporation", "officers", "persons-with-significant-control", "address", "annotation", "change-of-name", "miscellaneous"] }, limit: { type: "number", minimum: 1, maximum: 100, default: 25 }, include_charges: { type: "boolean", default: false } } } },
   { name: "extract_exposure", description: "Extract multi-dimensional SEC exposure for a geographic region or named entity/topic. Returns revenue, operational, named-entity, and risk evidence with explicit non-decision-grade statuses when parser/provider limits prevent a value.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Ticker symbol, e.g. 'AAPL'" }, topic: { type: "string", description: "Geographic region or entity to search for, e.g. 'china', 'russia', 'europe', 'huawei'. Case-insensitive." }, filing_type: { type: "string", default: "10-K", description: "SEC filing type: '10-K' or '20-F'." }, period: { type: "string", default: "latest" }, include_risk_factors: { type: "boolean", default: true } }, required: ["ticker", "topic"] } },
   { name: "query_sec_filing_index", description: "Deterministically route supported SEC filing query types to index-backed extractor tools.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, query_type: { type: "string", enum: ["geographic_revenue_share", "revenue_exposure", "china_exposure", "risk_factor_mentions", "customer_concentration", "total_revenue", "segment_revenue"] }, params: { type: "object", default: {} }, return_evidence: { type: "boolean", default: true }, detailLevel: { type: "string", default: "compact", enum: ["compact", "evidence", "raw"] } }, required: ["ticker", "query_type"] } },
   { name: "get_latest_earnings_release", description: "Resolve the latest public earnings release source for a ticker. Fiscal period is returned only when explicit release text resolves it; otherwise it remains unresolved.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" }, period: { type: "string", enum: ["latest"], default: "latest", description: "Period selector. Only 'latest' is supported." } }, required: ["ticker"] } },
@@ -1279,6 +1287,10 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   extract_china_exposure: SIMPLE_OBJECT_SCHEMA,
   extract_risk_factor_mentions: SIMPLE_OBJECT_SCHEMA,
   extract_customer_concentration: SIMPLE_OBJECT_SCHEMA,
+  extract_dilution_bridge: SIMPLE_OBJECT_SCHEMA,
+  extract_capital_structure: SIMPLE_OBJECT_SCHEMA,
+  extract_analyst_valuation_methods: SIMPLE_OBJECT_SCHEMA,
+  get_uk_company_filings: SIMPLE_OBJECT_SCHEMA,
   extract_exposure: SIMPLE_OBJECT_SCHEMA,
   health_check: MANIFEST_DIAGNOSTICS_OUTPUT_SCHEMA,
   get_latest_earnings_release: ENVELOPE_V2_OUTPUT_SCHEMA,
@@ -2322,6 +2334,34 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       return extractRiskFactorMentions(str(args.ticker), Array.isArray(args.terms) ? args.terms.map(String) : [], str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
     case "extract_customer_concentration":
       return extractCustomerConcentration(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), str(args.detailLevel, "compact"));
+    case "extract_dilution_bridge":
+      return extractDilutionBridge(
+        str(args.ticker),
+        Number(args.price),
+        args.as_of_date != null ? str(args.as_of_date) : null,
+        str(args.currency, "USD"),
+        str(args.filing_type, "latest"),
+        args.accession_number != null ? str(args.accession_number) : null,
+        args.include_atm !== false,
+      );
+    case "extract_capital_structure":
+      return extractCapitalStructure(
+        str(args.ticker),
+        str(args.filing_type, "latest"),
+        args.accession_number != null ? str(args.accession_number) : null,
+        args.include_funding_statements !== false,
+      );
+    case "extract_analyst_valuation_methods":
+      return extractAnalystValuationMethods(str(args.ticker), num(args.days_back, 30));
+    case "get_uk_company_filings":
+      return getUkCompanyFilings(
+        args.ticker != null ? str(args.ticker) : null,
+        args.company_number != null ? str(args.company_number) : null,
+        args.company_name != null ? str(args.company_name) : null,
+        args.category != null ? str(args.category) : null,
+        num(args.limit, 25),
+        args.include_charges === true,
+      );
     case "query_sec_filing_index":
       return querySecFilingIndex(
         str(args.ticker),

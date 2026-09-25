@@ -209,6 +209,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - get_earnings_analysis: EPS/revenue estimates, trend, analyst up/down revision counts, history, and growth.
 - get_analyst_recommendations: Raw analyst recommendations or upgrades/downgrades history.
 - get_analyst_rating_changes: Recent rating changes with signal (UPGRADE/DOWNGRADE/MAINTAIN), price target direction, net sentiment.
+- extract_analyst_valuation_methods: Valuation methods named in news (multiples, DCF inputs) with firm and link; context only.
 - analyze_earnings_momentum: EPS revision momentum (7/30/90d), revision direction, beat rate, beat streak.
 - get_company_events_calendar: Upcoming Yahoo provider dates or earnings history; dates are UNVERIFIED.
 - get_market_calendar: Market-wide earnings, economic, IPO, or stock-split calendar with pagination.
@@ -240,6 +241,8 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - extract_china_exposure: China exposure with revenue and non-revenue classifications.
 - extract_risk_factor_mentions: Risk-factor term mentions from SEC filings.
 - extract_customer_concentration: Customer concentration percentages.
+- extract_dilution_bridge: Basic-to-diluted shares at a price you supply, from inline XBRL (mechanical, not consensus).
+- extract_capital_structure: Cash, debt, instruments, maturity ladder and quoted funding statements at period end.
 
 ### Public news & events
 - get_company_news: Recent public company news with strict Yahoo issuer matching. Read coverage/sourceStatus first; Yahoo items require tickerMatch=EXPLICIT and expose matchBasis plus raw/accepted/rejected diagnostics. Escalate decisionUse=CHECK_OFFICIAL_RELEASES to official releases or event verification.
@@ -248,6 +251,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - get_sec_recent_events: Recent SEC filings as structured public events.
 - get_public_event_timeline: Deduplicated chronological timeline across all sources.
 - verify_company_event: Cross-validate an event across sources: CONFIRMED/PARTIAL/NOT_FOUND/STALE/CONFLICTING.
+- get_uk_company_filings: UK Companies House statutory filings (accounts, SH01, MR01 charges) with document links.
 
 ### Earnings intelligence
 - get_latest_earnings_release: Find the latest earnings release evidence from SEC 8-K, IR, or Yahoo.

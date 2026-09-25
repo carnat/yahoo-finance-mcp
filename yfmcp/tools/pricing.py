@@ -1439,6 +1439,13 @@ async def get_short_momentum(ticker: str | list[str]) -> str:
 # A listing passes the liquidity gate when it trades at least this much a day
 # on average (USD). Mirrors the Worker's getVolumeGate.
 LIQUIDITY_GATE_MIN_ADV_USD = 10_000_000
+
+
+def _usd_compact(value: float) -> str:
+    """$14.22B above a billion, else $12.3M (the Worker's usdCompact)."""
+    return f"${value / 1e9:.2f}B" if value >= 1e9 else f"${value / 1e6:.1f}M"
+
+
 # Listings quoted in a currency's minor unit: (ISO currency, minor units per unit).
 _MINOR_UNIT_CURRENCIES = {"GBp": ("GBP", 100), "GBX": ("GBP", 100), "ZAc": ("ZAR", 100), "ILA": ("ILS", 100)}
 
@@ -1620,7 +1627,7 @@ async def get_volume_gate(ticker: str, foreign_exchange: bool = False) -> str:
         gate_pass = adv20d_traded_value_usd >= LIQUIDITY_GATE_MIN_ADV_USD
         note = (
             f"Volume gate {'PASS' if gate_pass else 'FAIL'} — 20d average traded value "
-            f"${adv20d_traded_value_usd / 1_000_000:.1f}M ({'≥' if gate_pass else '<'} $10M)"
+            f"{_usd_compact(adv20d_traded_value_usd)} ({'≥' if gate_pass else '<'} $10M)"
             + (f"; latest session {ratio20d:.2f}x 20d ADV" if ratio20d is not None else "")
             + fx["note"]
         )

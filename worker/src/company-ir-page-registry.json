@@ -1,5 +1,42 @@
 {
   "schemaVersion": "2026-07-10",
-  "registryVersion": "2026-07-12.0754",
-  "sources": []
+  "registryVersion": "2026-09-25.1200",
+  "sources": [
+    {
+      "ticker": "IQE.L",
+      "issuerName": "IQE plc",
+      "status": "candidate",
+      "adapter": "html_article",
+      "canonicalUrl": "https://www.iqep.com/investors/regulatory-news/",
+      "allowedHosts": [
+        "www.iqep.com"
+      ],
+      "allowedPathPrefixes": [
+        "/investors/"
+      ],
+      "candidateReason": "Proposed for 2.3.0 non-US coverage; not fetched during review because the build sandbox cannot reach the host. Confirm the page lists the issuer's regulatory announcements, then set status approved with reviewer metadata.",
+      "discoveredAt": "2026-09-25T12:00:00Z",
+      "reviewedBy": null,
+      "reviewedAt": null,
+      "revalidateAfter": null
+    },
+    {
+      "ticker": "SIVE.ST",
+      "issuerName": "Sivers Semiconductors AB",
+      "status": "candidate",
+      "adapter": "html_article",
+      "canonicalUrl": "https://news.cision.com/sivers-semiconductors",
+      "allowedHosts": [
+        "news.cision.com"
+      ],
+      "allowedPathPrefixes": [
+        "/sivers-semiconductors"
+      ],
+      "candidateReason": "Proposed for 2.3.0 non-US coverage; not fetched during review because the build sandbox cannot reach the host. Confirm the page lists the issuer's regulatory announcements, then set status approved with reviewer metadata. Cision is Sivers' regulatory distribution newsroom rather than a company-domain page.",
+      "discoveredAt": "2026-09-25T12:00:00Z",
+      "reviewedBy": null,
+      "reviewedAt": null,
+      "revalidateAfter": null
+    }
+  ]
 }
