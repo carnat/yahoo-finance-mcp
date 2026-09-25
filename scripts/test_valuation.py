@@ -38,13 +38,13 @@ def _r(value):
     return {"raw": value, "fmt": str(value)}
 
 
-def _qs(*, name, currency, price, fin_currency, shares, cash, debt, revenue, ebitda, gross, eps, fy0, fy1, market_cap=None):
+def _qs(*, name, currency, price, fin_currency, shares, cash, debt, revenue, ebitda, gross, eps, fy0, fy1, market_cap=None, implied=None):
     return {
         "price": {"longName": name, "currency": currency, "regularMarketPrice": _r(price), "regularMarketTime": _r(1790000000),
                   **({"marketCap": _r(market_cap)} if market_cap is not None else {})},
         "financialData": {"financialCurrency": fin_currency, "totalCash": _r(cash), "totalDebt": _r(debt), "totalRevenue": _r(revenue),
                           "ebitda": _r(ebitda), "grossMargins": _r(gross)},
-        "defaultKeyStatistics": {"sharesOutstanding": _r(shares), "trailingEps": _r(eps)},
+        "defaultKeyStatistics": {"sharesOutstanding": _r(shares), "trailingEps": _r(eps), **({"impliedSharesOutstanding": _r(implied)} if implied is not None else {})},
         "earningsTrend": {"trend": [
             {"period": "0q", "revenueEstimate": {"avg": _r(fy0[0] / 4)}, "earningsEstimate": {"avg": _r(0.01)}},
             {"period": "0y", "revenueEstimate": {"avg": _r(fy0[0]), "numberOfAnalysts": _r(fy0[1])}, "earningsEstimate": {"avg": _r(fy0[2]), "numberOfAnalysts": _r(fy0[3])}},
@@ -62,6 +62,9 @@ QUOTE_SUMMARIES = {
     # A pence listing with sterling financials.
     "PEER2.L": _qs(name="Peer Two plc", currency="GBp", price=20.5, fin_currency="GBP", shares=970_000_000, cash=30_000_000, debt=60_000_000,
                    revenue=110_000_000, ebitda=5_000_000, gross=0.2, eps=-0.01, fy0=(120_000_000, 4, 0.001, 3), fy1=(140_000_000, 4, 0.01, 3)),
+    # Up-C (ASTS-like): Yahoo lists the Class A count; the implied count includes exchangeable classes (2.4.1).
+    "UPC": _qs(name="Up-C Co", currency="USD", price=60.0, fin_currency="USD", shares=300_000_000, implied=390_000_000, cash=4_000_000_000, debt=3_000_000_000,
+               revenue=100_000_000, ebitda=-400_000_000, gross=0.4, eps=-2.0, fy0=(170_000_000, 12, -2.3, 8), fy1=(650_000_000, 11, -1.1, 9)),
     # ADR-style mismatch: USD quote, TWD financials.
     "PEER3": _qs(name="Peer Three", currency="USD", price=10.0, fin_currency="TWD", shares=50_000_000, cash=900_000_000, debt=100_000_000,
                  revenue=3_000_000_000, ebitda=300_000_000, gross=0.3, eps=10.0, fy0=(3_300_000_000, 2, 11.0, 2), fy1=(3_600_000_000, 2, 12.0, 2)),
@@ -89,6 +92,7 @@ const markets = Object.fromEntries(Object.entries(data.qs).map(([t, r]) => [t, m
 const out = { markets };
 out.snapshot = m.valuationSnapshot({ ticker: "CSTC", market: markets.CSTC, suppliedPrice: null, bridge: data.bridge, capital: data.capital, secWarnings: [] });
 out.snapshotYahoo = m.valuationSnapshot({ ticker: "CSTC", market: markets.CSTC, suppliedPrice: 30, bridge: null, capital: null, secWarnings: [] });
+out.upcRow = m.peerRow(markets.UPC);
 out.snapshotPence = m.valuationSnapshot({ ticker: "PEER2.L", market: markets["PEER2.L"], suppliedPrice: null, bridge: null, capital: null, secWarnings: [] });
 out.peers = m.peerValuations("CSTC", [markets.CSTC, markets.PEER1, markets["PEER2.L"], markets.PEER3], [{ ticker: "PEER4", message: "No Yahoo quote summary for PEER4" }]);
 console.log(JSON.stringify(out));
@@ -126,6 +130,7 @@ def _python_pure() -> dict:
         "snapshot": vl.valuation_snapshot("CSTC", markets["CSTC"], None, copy.deepcopy(BRIDGE), copy.deepcopy(CAPITAL), []),
         "snapshotYahoo": vl.valuation_snapshot("CSTC", markets["CSTC"], 30, None, None, []),
         "snapshotPence": vl.valuation_snapshot("PEER2.L", markets["PEER2.L"], None, None, None, []),
+        "upcRow": vl.peer_row(markets["UPC"]),
         "peers": vl.peer_valuations("CSTC", [markets["CSTC"], markets["PEER1"], markets["PEER2.L"], markets["PEER3"]],
                                     [{"ticker": "PEER4", "message": "No Yahoo quote summary for PEER4"}]),
     }
@@ -142,7 +147,7 @@ class TestValuationParity(unittest.TestCase):
         cls.local = _python_pure()
 
     def test_runtimes_agree(self) -> None:
-        for key in ("markets", "snapshot", "snapshotYahoo", "snapshotPence", "peers"):
+        for key in ("markets", "snapshot", "snapshotYahoo", "snapshotPence", "upcRow", "peers"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
     def test_yfinance_adapter_matches_quote_summary_parsing(self) -> None:
@@ -192,6 +197,13 @@ class TestValuationValues(unittest.TestCase):
         self.assertEqual((s["price"]["majorUnitAmount"], s["price"]["majorCurrency"]), (0.205, "GBP"))
         self.assertEqual(s["enterpriseValue"], round(0.205 * 970_000_000 + 60_000_000 - 30_000_000))
         self.assertEqual(_multiple(s, "EV/Revenue", "trailing_12_months")["multiple"], 2.08)
+
+    def test_implied_all_class_shares_replace_the_listed_class(self) -> None:
+        row = self.out["upcRow"]
+        self.assertEqual((row["sharesUsed"], row["shareBasis"]), (390_000_000, "yahoo_implied_shares_outstanding"))
+        self.assertEqual(row["enterpriseValue"], 60 * 390_000_000 + 3_000_000_000 - 4_000_000_000)
+        rows = {r["ticker"]: r for r in self.out["peers"]["rows"]}
+        self.assertEqual(rows["PEER1"]["shareBasis"], "yahoo_shares_outstanding")
 
     def test_peer_medians_exclude_the_subject(self) -> None:
         p = self.out["peers"]

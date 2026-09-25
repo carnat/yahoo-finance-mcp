@@ -218,7 +218,10 @@ of them forecasts, and none may be back-solved into a consensus figure.
   cross-check. When a component is missing, `taggedDilutionConcepts` lists the
   share-count concepts the filing does tag, each with its axes.
 - `extract_capital_structure` reports, at the filing's period end:
-  - cash, short-term investments and total debt, with the concepts used;
+  - cash, short-term investments and total debt, with the concepts used.
+    Convertible notes reported on their own balance-sheet line are added to
+    the long-term debt lines when they exceed them, so they cannot already be
+    inside (AAOI);
   - net cash, defined as cash plus short-term investments minus debt (leases
     excluded);
   - each `DebtInstrumentAxis` member's face amount, carrying amount, coupon,
@@ -263,7 +266,10 @@ of them forecasts, and none may be back-solved into a consensus figure.
   shares, cash and debt, and say so in `warnings`. `peerComparableBasis`
   gives the same ticker on the peer basis below.
 - `compare_peer_valuations` puts up to 10 tickers on one Yahoo basis (price x
-  shares outstanding + total debt - total cash) with the same multiples,
+  shares + total debt - total cash) with the same multiples. Shares are
+  Yahoo's implied all-class count when it is more than 2% above the listed
+  class, so Up-C and multi-class issuers such as ASTS count their exchangeable
+  classes; `shareBasis` says which count was used. The rows also carry the same
   revenue growth and gross margin. Peer medians, minimum and maximum exclude
   the subject, and `subjectVsPeerMedian` gives its premium or discount to
   each median. A ticker whose financials are in another currency than its

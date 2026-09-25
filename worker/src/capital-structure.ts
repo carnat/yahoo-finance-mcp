@@ -333,6 +333,8 @@ export function memberLabel(member: string): string {
   return localName(member)
     .replace(/Member$/, "")
     .replace(/([a-z])([A-Z])/g, "$1 $2")
+    // "ClassBCommonStock" -> "Class B Common Stock"
+    .replace(/([A-Z])([A-Z][a-z])/g, "$1 $2")
     .replace(/([A-Za-z])(\d)/g, "$1 $2")
     .replace(/(\d)([A-Za-z])/g, "$1 $2")
     .replace(/\s+/g, " ")
@@ -946,6 +948,17 @@ const LADDER: [string, string, number][] = [
   ["LongTermDebtMaturitiesRepaymentsOfPrincipalAfterYearFive", "after_year_5", 6],
 ];
 
+const CONVERTIBLE_TOTAL_CONCEPTS = ["ConvertibleNotesPayable", "ConvertibleDebt"];
+const CONVERTIBLE_PART_CONCEPTS = ["ConvertibleNotesPayableCurrent", "ConvertibleLongTermNotesPayable", "ConvertibleDebtCurrent", "ConvertibleDebtNoncurrent"];
+
+/** Convertible notes tagged as balance-sheet lines at a date: a total, else current + noncurrent. */
+function convertibleBalance(doc: IxDocument, at: string | null): { total: number; parts: Picked[] } | null {
+  const whole = firstTotal(doc, CONVERTIBLE_TOTAL_CONCEPTS, at);
+  if (whole) return { total: whole.value, parts: [whole] };
+  const parts = CONVERTIBLE_PART_CONCEPTS.map((c) => total(doc, c, at)).filter((p): p is Picked => p != null);
+  return parts.length > 0 ? { total: parts.reduce((sum, p) => sum + p.value, 0), parts } : null;
+}
+
 function totalDebt(doc: IxDocument, at: string | null): Record<string, unknown> | null {
   const shortTerm = SHORT_TERM_BORROWING_CONCEPTS.map((c) => total(doc, c, at)).filter((p): p is Picked => p != null);
   const withShort = (base: number, parts: Picked[], basis: string) => ({
@@ -953,13 +966,22 @@ function totalDebt(doc: IxDocument, at: string | null): Record<string, unknown> 
     components: [...parts, ...shortTerm].map((p) => ({ concept: p.concept, amount: p.value })),
     basis,
   });
+  // Convertible notes on their own balance-sheet line (AAOI) are outside the
+  // long-term debt lines when they exceed them; add them so debt is complete.
+  const withConvertibles = (base: number, parts: Picked[], basis: string) => {
+    const conv = convertibleBalance(doc, at);
+    if (conv && conv.total > base) {
+      return withShort(base + conv.total, [...parts, ...conv.parts], `${basis}, plus separately reported convertible notes`);
+    }
+    return withShort(base, parts, basis);
+  };
   const all = total(doc, "LongTermDebt", at);
-  if (all) return withShort(all.value, [all], "LongTermDebt (current and noncurrent) plus short-term borrowings");
+  if (all) return withConvertibles(all.value, [all], "LongTermDebt (current and noncurrent) plus short-term borrowings");
   const cur = total(doc, "LongTermDebtCurrent", at);
   const non = total(doc, "LongTermDebtNoncurrent", at);
   if (cur || non) {
     const parts = [cur, non].filter((p): p is Picked => p != null);
-    return withShort(parts.reduce((sum, p) => sum + p.value, 0), parts, "LongTermDebtCurrent + LongTermDebtNoncurrent plus short-term borrowings");
+    return withConvertibles(parts.reduce((sum, p) => sum + p.value, 0), parts, "LongTermDebtCurrent + LongTermDebtNoncurrent plus short-term borrowings");
   }
   const lines = DEBT_LINE_CONCEPTS.map((c) => total(doc, c, at)).filter((p): p is Picked => p != null);
   if (lines.length > 0) return withShort(lines.reduce((sum, p) => sum + p.value, 0), lines, "Sum of tagged debt lines plus short-term borrowings");

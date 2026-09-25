@@ -33,7 +33,7 @@ def _text(value: Any) -> str | None:
 def empty_market_inputs(ticker: str) -> dict:
     return {
         "ticker": ticker.upper(), "name": None, "currency": None, "financialCurrency": None,
-        "price": None, "priceTime": None, "sharesOutstanding": None, "marketCap": None,
+        "price": None, "priceTime": None, "sharesOutstanding": None, "impliedSharesOutstanding": None, "marketCap": None,
         "totalCash": None, "totalDebt": None, "ttmRevenue": None, "ttmEbitda": None,
         "grossMarginPct": None, "trailingEps": None, "estimates": [],
     }
@@ -68,6 +68,7 @@ def market_inputs_from_quote_summary(ticker: str, result: dict) -> dict:
         "price": _raw_num(price.get("regularMarketPrice")),
         "priceTime": _iso_time(time),
         "sharesOutstanding": _raw_num(ks.get("sharesOutstanding")),
+        "impliedSharesOutstanding": _raw_num(ks.get("impliedSharesOutstanding")),
         "marketCap": _raw_num(price.get("marketCap")),
         "totalCash": _raw_num(fd.get("totalCash")),
         "totalDebt": _raw_num(fd.get("totalDebt")),
@@ -97,6 +98,7 @@ def market_inputs_from_yfinance(ticker: str, info: dict, revenue_rows: list[dict
         "price": _num(info.get("currentPrice")) if _num(info.get("currentPrice")) is not None else _num(info.get("regularMarketPrice")),
         "priceTime": _iso_time(_num(info.get("regularMarketTime"))),
         "sharesOutstanding": _num(info.get("sharesOutstanding")),
+        "impliedSharesOutstanding": _num(info.get("impliedSharesOutstanding")),
         "marketCap": _num(info.get("marketCap")),
         "totalCash": _num(info.get("totalCash")),
         "totalDebt": _num(info.get("totalDebt")),
@@ -182,13 +184,30 @@ def _growth(market: dict) -> dict:
     }
 
 
+# Yahoo's implied count covers every class (e.g. ASTS's exchangeable Class B/C);
+# it replaces the listed-class count when it is materially larger.
+_IMPLIED_SHARES_MIN_RATIO = 1.02
+
+
+def _yahoo_shares(market: dict) -> tuple[float | None, str | None]:
+    listed = market["sharesOutstanding"]
+    implied = market["impliedSharesOutstanding"]
+    if implied is not None and (listed is None or implied > listed * _IMPLIED_SHARES_MIN_RATIO):
+        return implied, "yahoo_implied_shares_outstanding"
+    if listed is not None:
+        return listed, "yahoo_shares_outstanding"
+    return None, ("yahoo_market_cap" if market["marketCap"] is not None else None)
+
+
 def _yahoo_basis(market: dict, price: float | None) -> dict:
+    shares, basis = _yahoo_shares(market)
     if price is None:
-        return {"marketCap": None, "enterpriseValue": None}
+        return {"marketCap": None, "enterpriseValue": None, "shares": shares, "shareBasis": basis}
     major, _ = _major_price(price, market["currency"])
-    market_cap = major * market["sharesOutstanding"] if market["sharesOutstanding"] is not None else market["marketCap"]
+    market_cap = major * shares if shares is not None else market["marketCap"]
     ev = market_cap + market["totalDebt"] - market["totalCash"] if market_cap is not None and market["totalDebt"] is not None and market["totalCash"] is not None else None
-    return {"marketCap": round_half_up(market_cap) if market_cap is not None else None, "enterpriseValue": round_half_up(ev) if ev is not None else None}
+    return {"marketCap": round_half_up(market_cap) if market_cap is not None else None, "enterpriseValue": round_half_up(ev) if ev is not None else None,
+            "shares": shares, "shareBasis": basis}
 
 
 def _comparable_currency(market: dict) -> bool:
@@ -267,6 +286,7 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
             "dilutionPctAtPrice": _num((bridge_core or {}).get("dilutionPctAtPrice")),
             "bridgeStatus": (bridge or {}).get("status") if bridge else None,
             "yahooSharesOutstanding": market["sharesOutstanding"],
+            "yahooImpliedSharesOutstanding": market["impliedSharesOutstanding"],
             "secVsYahooSharesDiffPct": shares_diff,
         },
         "balances": {
@@ -280,7 +300,7 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
         "equityValue": round_half_up(equity_value) if equity_value is not None else None,
         "enterpriseValue": round_half_up(enterprise_value) if enterprise_value is not None else None,
         "enterpriseValueFormula": "price x diluted shares + total debt - convertible debt counted as shares - cash - short-term investments",
-        "peerComparableBasis": {**yahoo, "note": "Price x Yahoo shares outstanding + Yahoo total debt - Yahoo total cash: the basis compare_peer_valuations uses for every peer."},
+        "peerComparableBasis": {**yahoo, "note": "Price x Yahoo shares (the implied all-class count when larger) + Yahoo total debt - Yahoo total cash: the basis compare_peer_valuations uses for every peer."},
         "multiples": _multiples(enterprise_value, major, market, comparable),
         "revenueGrowth": _growth(market),
         "grossMarginPct": market["grossMarginPct"],
@@ -324,6 +344,8 @@ def peer_row(market: dict) -> dict:
         "currency": market["currency"],
         "marketCap": yahoo["marketCap"],
         "enterpriseValue": yahoo["enterpriseValue"],
+        "sharesUsed": yahoo["shares"],
+        "shareBasis": yahoo["shareBasis"],
         "evToRevenueTtm": value("EV/Revenue", "trailing_12_months"),
         "evToRevenueCurrentFy": value("EV/Revenue", "current_fiscal_year"),
         "evToRevenueNextFy": value("EV/Revenue", "next_fiscal_year"),
@@ -371,7 +393,7 @@ def peer_valuations(subject: str | None, markets: list[dict], errors: list[dict]
         "peerSummary": summary,
         "subjectVsPeerMedian": versus if subject_row else None,
         "notes": [
-            "Every row uses the same basis: Yahoo price x shares outstanding + total debt - total cash, over Yahoo's trailing results and consensus.",
+            "Every row uses the same basis: Yahoo price x shares + total debt - total cash, over Yahoo's trailing results and consensus. Shares are Yahoo's implied all-class count when it is materially larger than the listed class (shareBasis says which).",
             "Peer medians exclude the subject. A premium or discount is context, not a signal; peers differ in growth, margins and risk.",
             "Multiples on zero or negative denominators are left empty rather than shown as meaningless numbers.",
         ],

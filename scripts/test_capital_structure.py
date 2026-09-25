@@ -217,6 +217,8 @@ AAOI_Q = f"""<html><body>
 <p>RSUs vested and expected to vest: {_num("aaoi:SharebasedCompensationArrangementBySharebasedPaymentAwardNonoptionEquityInstrumentsVestedAndExpectedToVest", "xi", "shares", "3,000,000")}</p>
 <p>The warrant is exercisable for {_num("us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights", "xIssue", "shares", "7,945,399")} shares at ${_num("us-gaap:ClassOfWarrantOrRightExercisePriceOfWarrantsOrRights1", "xIssue", "usdPerShare", "23.6956")};
 {_num("aaoi:ClassOfWarrantOrRightUnvestedNumberOfSecuritiesCalledByWarrantsOrRights", "xUnvested", "shares", "5,000,000")} remain unvested.</p>
+<p>Cash {_num("us-gaap:CashAndCashEquivalentsAtCarryingValue", "xi", "usd", "499,737", 3)}; bank loans current {_num("us-gaap:LongTermDebtCurrent", "xi", "usd", "57,258", 3)} and noncurrent {_num("us-gaap:LongTermDebtNoncurrent", "xi", "usd", "1,657", 3)};
+convertible senior notes, net {_num("us-gaap:ConvertibleNotesPayable", "xi", "usd", "124,900", 3)} (a separate balance-sheet line).</p>
 <p>Weighted basic {_num("us-gaap:WeightedAverageNumberOfSharesOutstandingBasic", "xq", "shares", "81,568,000")}; excluded RSUs {_num("us-gaap:AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount", "xAnti", "shares", "1,100,000")}.</p>
 </body></html>"""
 BARE_Q = f"""<html><body><div style="display:none"><ix:header><ix:resources>{_context("bcover", "2026-08-03")}{UNITS}</ix:resources></ix:header></div>
@@ -277,6 +279,8 @@ out.bridgeAaoi = m.dilutionBridge({ ticker: "AAOX", price: 30, priceCurrency: "U
 out.bridgeTable = m.dilutionBridge({ ticker: "BARE", price: 30, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2026-08-06", "0001234568-26-000050", data.qUrl, "bare_q")], atmMatches: [], awardTableMatches: data.tableMatches });
 out.bridgeAwards = m.dilutionBridge({ ticker: "CSTC", price: 25, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2025-08-06", "0001234568-25-000030", data.qUrl, "awards_q")], atmMatches: [] });
 out.capital = m.capitalStructure({ ticker: "CSTC", source: kSource, fundingMatches: atm });
+out.capitalAaoi = m.capitalStructure({ ticker: "AAOX", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000040", data.qUrl, "aaoi_q"), fundingMatches: [] });
+out.labels = ["us-gaap:ClassBCommonStockMember", "us-gaap:RestrictedStockUnitsRSUMember", "cstc:ConvertibleSeniorNotesDue2029Member", "aaoi:SubsidiaryOfAmazonMember"].map(m.memberLabel);
 out.analyst = m.analystValuationMethods("IQE.L", data.news, data.changes);
 out.ch = m.companiesHouseFilings("01234567", data.chHistory);
 out.chPick = m.pickCompaniesHouseMatch("IQE plc", data.chSearch);
@@ -360,6 +364,8 @@ def _python_pure() -> dict:
         ]),
         "bridgeAwards": cs.dilution_bridge("CSTC", 25, "USD", None, [cs.IxSource("primary", "10-Q", "2025-08-06", "0001234568-25-000030", Q_URL, docs["awards_q"])], []),
         "capital": cs.capital_structure("CSTC", k_source, atm),
+        "capitalAaoi": cs.capital_structure("AAOX", cs.IxSource("primary", "10-Q", "2026-08-06", "0001234568-26-000040", Q_URL, docs["aaoi_q"]), []),
+        "labels": [cs.member_label(m) for m in ("us-gaap:ClassBCommonStockMember", "us-gaap:RestrictedStockUnitsRSUMember", "cstc:ConvertibleSeniorNotesDue2029Member", "aaoi:SubsidiaryOfAmazonMember")],
         "analyst": cs.analyst_valuation_methods("IQE.L", copy.deepcopy(NEWS_ITEMS), copy.deepcopy(RATING_CHANGES)),
         "ch": cs.companies_house_filings("01234567", CH_HISTORY),
         "chPick": cs.pick_companies_house_match("IQE plc", CH_SEARCH),
@@ -379,7 +385,7 @@ class TestCapitalStructureParity(unittest.TestCase):
             self.assertEqual(self.worker["documents"][name], self.local["documents"][name], name)
 
     def test_outputs_match(self) -> None:
-        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "capital", "analyst", "ch", "chPick"):
+        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "capital", "capitalAaoi", "labels", "analyst", "ch", "chPick"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
 
@@ -515,6 +521,19 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertEqual(warrant["incrementalShares"], cs.round_half_up(2_945_399 * (1 - 23.6956 / 30)))
         self.assertEqual(b["reportedEpsDilution"]["antidilutiveExcluded"], [{"security": "Restricted Stock Units RSU", "shares": 1_100_000}])
         self.assertEqual(b["bridge"]["grossSharesAllInstruments"], 84_000_000 + 3_000_000 + 7_945_399)
+
+    def test_separately_reported_convertible_notes_are_debt(self) -> None:
+        bal = self.out["capitalAaoi"]["balances"]
+        # Bank loans $58.9M plus the $124.9M convertible line AAOI reports on its own (2.4.1).
+        self.assertEqual(bal["totalDebt"], 57_258_000 + 1_657_000 + 124_900_000)
+        self.assertIn("separately reported convertible notes", bal["totalDebtBasis"])
+        self.assertEqual([c["concept"] for c in bal["totalDebtComponents"]],
+                         ["us-gaap:LongTermDebtCurrent", "us-gaap:LongTermDebtNoncurrent", "us-gaap:ConvertibleNotesPayable"])
+        # A convertible line smaller than the long-term debt it sits inside is not added again.
+        self.assertEqual(self.out["capital"]["balances"]["totalDebt"], 385_000_000)
+
+    def test_member_labels_split_single_letter_classes(self) -> None:
+        self.assertEqual(self.out["labels"], ["Class B Common Stock", "Restricted Stock Units RSU", "Convertible Senior Notes Due 2029", "Subsidiary Of Amazon"])
 
     def test_award_count_from_the_filing_table(self) -> None:
         awards = next(c for c in self.out["bridgeTable"]["components"] if c["component"] == "unvested_share_awards")
