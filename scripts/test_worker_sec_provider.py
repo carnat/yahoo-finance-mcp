@@ -328,7 +328,9 @@ if (taiwan.sourceRows[0][0] !== "Taiwan") throw new Error(`Taiwan fixture row wa
 
     def test_phase3_sec_evidence_contracts_are_wired_in_worker(self) -> None:
         self.assertIn('"SECTION_STRUCTURE_NOT_RESOLVED"', self.worker)
-        self.assertIn("font-weight\\s*:\\s*(?:bold|[6-9]00)", self.worker)
+        # Bold headings: the style value is matched per quote character so
+        # font names quoted inside it (font-family:'Helvetica') do not end it.
+        self.assertIn('"[^"]*font-weight\\\\s*:\\\\s*(?:bold|[6-9]00)[^"]*"', self.worker)
         self.assertIn("parseFilingTableRows", self.worker)
         self.assertIn('"UNUSABLE_TABLE"', self.worker)
         self.assertIn('"LIST_USABLE_TABLES"', self.worker)

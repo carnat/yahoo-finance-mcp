@@ -490,7 +490,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "analyze_financial_ratios", description: "Analyze current financial ratios with explicit unitSemantics and optional historical Yahoo valuation measures.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, history_periods: { type: "integer", minimum: 0, maximum: 20, default: 0 }, frequency: { type: "string", enum: ["quarterly", "monthly", "yearly", "trailing"], default: "quarterly" } }, required: ["ticker"] } },
   { name: "analyze_share_count_trend", description: "Use for dilution, issuance, buyback, or historical shares-outstanding questions. Returns contextual Yahoo data and directs material changes to SEC confirmation.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, start_date: { type: "string" }, end_date: { type: "string" } }, required: ["ticker"] } },
   { name: "analyze_credit_health", description: "Analyze credit health metrics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
-  { name: "get_corporate_actions", description: "Get dividends, stock splits, and fund capital-gain distributions from Yahoo Finance.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+  { name: "get_corporate_actions", description: "Get stock splits, dividends, and fund capital-gain distributions from Yahoo Finance, oldest first. Every split is returned; dividends and capital gains are limited to the most recent `limit` on or after `start_date`.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, start_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$", description: "Earliest dividend/capital-gain date (YYYY-MM-DD)." }, limit: { type: "integer", minimum: 1, maximum: 1000, default: 40, description: "Most recent dividends/capital gains to return." } }, required: ["ticker"] } },
   { name: "get_ownership_holders", description: "Get ownership/holder data. Supported holder_type values: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, holder_type: { type: "string", enum: SUPPORTED_HOLDER_TYPES, description: "One of: major_holders, institutional_holders, mutualfund_holders, insider_transactions, insider_purchases, insider_roster_holders." } }, required: ["ticker", "holder_type"] } },
   { name: "get_expanded_institutional_ownership", description: "Use only when Yahoo's ordinary top-holder view is insufficient. Tries eligible Finnhub coverage first and never spends scarce Alpha quota unless allow_scarce_fallback=true. Results are contextual; verify material ownership claims against SEC 13F filings.", inputSchema: { type: "object", properties: { ticker: { type: "string", minLength: 1 }, allow_scarce_fallback: { type: "boolean", default: false, description: "Explicitly permit one Alpha Vantage call if Finnhub is unavailable, ineligible, or returns no usable holders." }, max_holders: { type: "integer", minimum: 1, maximum: 100, default: 50 } }, required: ["ticker"] } },
   { name: "get_analyst_recommendations", description: "Get analyst recommendations or upgrade/downgrade history. Supported recommendation_type values: recommendations, upgrades_downgrades.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, recommendation_type: { type: "string", enum: SUPPORTED_RECOMMENDATION_TYPES, description: "One of: recommendations, upgrades_downgrades." }, months_back: { type: "number", default: 12 } }, required: ["ticker", "recommendation_type"] } },
@@ -532,10 +532,10 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "query_sec_filing_index", description: "Deterministically route supported SEC filing query types to index-backed extractor tools.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, query_type: { type: "string", enum: ["geographic_revenue_share", "revenue_exposure", "china_exposure", "risk_factor_mentions", "customer_concentration", "total_revenue", "segment_revenue"] }, params: { type: "object", default: {} }, return_evidence: { type: "boolean", default: true }, detailLevel: { type: "string", default: "compact", enum: ["compact", "evidence", "raw"] } }, required: ["ticker", "query_type"] } },
   { name: "get_latest_earnings_release", description: "Resolve the latest public earnings release source for a ticker. Fiscal period is returned only when explicit release text resolves it; otherwise it remains unresolved.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol, e.g. 'AAPL'" }, period: { type: "string", enum: ["latest"], default: "latest", description: "Period selector. Only 'latest' is supported." } }, required: ["ticker"] } },
   { name: "index_earnings_release", description: "Build a compact section/table index of the latest public earnings release for deterministic metric extraction.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, period: { type: "string", enum: ["latest"], default: "latest" }, source_url: { type: "string", description: "Optional override URL (must be https://www.sec.gov/Archives/ or company IR). Paywalled sources are blocked." } }, required: ["ticker"] } },
-  { name: "extract_earnings_metrics", description: "Extract reported earnings metrics from SEC 8-K or public IR source. EX-99 prose or unscoped iXBRL values remain non-decision-grade until their period is structurally matched.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" }, source_preference: { type: "array", items: { type: "string", enum: ["sec_8k", "company_ir", "10-q", "yahoo"] }, description: "Ordered preference list for source resolution.", default: ["sec_8k", "company_ir", "10-q", "yahoo"] } }, required: ["ticker"] } },
+  { name: "extract_earnings_metrics", description: "Extract reported earnings metrics from SEC 8-K or public IR source. EX-99 prose or unscoped iXBRL values remain non-decision-grade until their period is structurally matched.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" }, source_preference: { type: "array", items: { type: "string", enum: ["sec_8k", "company_ir", "10-q", "yahoo"] }, description: "Accepted for compatibility; sources are tried in a fixed order (SEC XBRL quarter facts, then the 8-K release).", default: ["sec_8k", "company_ir", "10-q", "yahoo"] } }, required: ["ticker"] } },
   { name: "extract_guidance", description: "Extract company-provided forward ranges from the resolved official SEC earnings exhibit, including 'between X and Y' wording. Guidance remains non-decision-grade unless separately verified.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" } }, required: ["ticker"] } },
   { name: "extract_management_commentary", description: "Extract topic-keyed management commentary snippets from the latest earnings release. Returns first relevant sentence per topic.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" }, topics: { type: "array", items: { type: "string" }, description: "Topics to search for, e.g. ['AI', 'margins', 'guidance', 'supply chain']" } }, required: ["ticker"] } },
-  { name: "compare_earnings_actual_vs_estimate", description: "Compare official-release actuals with Yahoo's historical estimate row. The official fiscal label remains period/reportedPeriod; estimatePeriod and reportedDate identify the Yahoo row. Read periodAlignmentStatus before using cross-source revenue comparisons. Returns epsDelta and omits percentage surprise for near-zero estimates.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" } }, required: ["ticker"] } },
+  { name: "compare_earnings_actual_vs_estimate", description: "Compare official-release actuals with Yahoo's historical estimate row. The official fiscal label remains period/reportedPeriod; estimatePeriod and reportedDate identify the Yahoo row; releaseDate is the earnings release date. Read periodAlignmentStatus before using cross-source revenue comparisons. Returns epsDelta and omits percentage surprise for near-zero estimates.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, period: { type: "string", enum: ["latest"], default: "latest" } }, required: ["ticker"] } },
   { name: "list_sec_filing_exhibits", description: "List all exhibits/documents attached to a specific SEC filing by accession number.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, accessionNumber: { type: "string", description: "SEC filing accession number, e.g. '0000320193-24-000081'" } }, required: ["ticker", "accessionNumber"] } },
   { name: "get_sec_filing_exhibit_content", description: "Fetch and return the text content of a specific exhibit from an SEC filing. Supports topic-based paragraph filtering to reduce token usage.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, accessionNumber: { type: "string", description: "SEC filing accession number" }, fileName: { type: "string", description: "Exhibit filename from the filing index" }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" } }, required: ["ticker", "accessionNumber", "fileName"] } },
   { name: "parse_public_transcript", description: "Fetch and parse a public transcript page (Motley Fool, company IR, etc.). Supports topic-based paragraph filtering to reduce token usage. Provide raw_text to skip URL fetching.", inputSchema: { type: "object", properties: { url: { type: "string", description: "Public https URL of the transcript page" }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" }, raw_text: { type: "string", description: "Raw HTML or text content to parse directly (bypasses URL fetching)" } } } },
@@ -1908,6 +1908,29 @@ async function callVisibleToolResultInScope(name: string, args: Record<string, u
   return callToolResult(action, actionParams);
 }
 
+/**
+ * The public filing index lists each table's first 8 row labels and its
+ * label count; the full labels stay in the cached index the extractors read.
+ * A 10-K index otherwise runs to tens of thousands of characters.
+ */
+const INDEX_ROW_LABELS_SHOWN = 8;
+function compactFilingIndexPayload(raw: string): string {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return raw;
+  }
+  const index = parsed.index as Record<string, unknown> | undefined;
+  if (!index || !Array.isArray(index.tables)) return raw;
+  index.tables = (index.tables as Record<string, unknown>[]).map((table) => {
+    const labels = Array.isArray(table.rowLabels) ? table.rowLabels : [];
+    if (labels.length <= INDEX_ROW_LABELS_SHOWN) return table;
+    return { ...table, rowLabels: labels.slice(0, INDEX_ROW_LABELS_SHOWN), rowLabelCount: labels.length };
+  });
+  return JSON.stringify(parsed);
+}
+
 async function _dispatchTool(name: string, args: Record<string, unknown>): Promise<string> {
   switch (name) {
     case "search_thai_funds":
@@ -1948,7 +1971,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
           : ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"],
       );
     case "get_corporate_actions":
-      return getStockActions(str(args.ticker));
+      return getStockActions(str(args.ticker), args.start_date != null ? str(args.start_date) : "", num(args.limit, 40));
     case "get_financial_statement":
       return getFinancialStatement(str(args.ticker), str(args.financial_type), Array.isArray(args.line_items) ? args.line_items.map((item) => str(item)) : undefined);
     case "get_ownership_holders":
@@ -2163,7 +2186,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         args.document_url != null ? str(args.document_url) : null,
       );
     case "get_sec_filing_index":
-      return getSecFilingIndex(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null);
+      return compactFilingIndexPayload(await getSecFilingIndex(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null));
     case "list_sec_material_filings":
       return listSecMaterialFilings(str(args.ticker), Array.isArray(args.forms) ? args.forms.map(String) : null, num(args.limit, 5));
     case "get_sec_filing_intelligence":

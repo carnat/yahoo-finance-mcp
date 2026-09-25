@@ -93,5 +93,35 @@ class TestPythonBatchConcurrency(unittest.TestCase):
         self.assertTrue(result["truncated"])
 
 
+# Batch tools defined in server.py (tool, extra positional args after ticker).
+SERVER_BATCH_TOOLS = [
+    ("get_credit_health", ()),
+    ("get_earnings_momentum", ()),
+    ("get_analyst_upgrade_radar", (30,)),
+    ("get_etf_info", (None,)),
+    ("get_stock_info", (None, False)),
+    ("get_analyst_consensus", ()),
+    ("get_financial_ratios", (0, "quarterly")),
+]
+
+
+class TestServerBatchConcurrency(unittest.TestCase):
+    def test_server_batch_tools_run_three_tickers_at_a_time(self) -> None:
+        import server
+
+        for name, extra in SERVER_BATCH_TOOLS:
+            with self.subTest(tool=name):
+                original = getattr(server, name)
+                probe = _Probe()
+                with patch.object(server, name, probe.stub()):
+                    started = time.monotonic()
+                    result = json.loads(asyncio.run(original(TICKERS, *extra)))
+                    elapsed = time.monotonic() - started
+                self.assertEqual(probe.peak, 3)
+                self.assertLess(elapsed, 1.2)
+                self.assertEqual(list(result), TICKERS)
+                self.assertEqual(result["FAIL"], {"error": True, "message": "provider exploded", "ticker": "FAIL"})
+
+
 if __name__ == "__main__":
     unittest.main()

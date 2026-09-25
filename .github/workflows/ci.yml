@@ -139,6 +139,11 @@ jobs:
       - name: Local batch concurrency tests
         run: python scripts/test_python_batch_concurrency.py -v
 
+      - name: Data accuracy tests (Worker and local)
+        run: |
+          python scripts/test_worker_data_accuracy.py -v
+          python scripts/test_local_data_accuracy.py -v
+
       - name: Historical prices contract tests (Worker and local)
         run: python scripts/test_historical_prices_contract.py -v
 

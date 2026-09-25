@@ -8,6 +8,7 @@ server.py re-imports all public names from this module so that
 import datetime
 import json
 import os
+import re
 from typing import TypedDict
 
 from yfmcp.build_info import BUILD_DATE, SERVER_VERSION
@@ -105,6 +106,17 @@ def _mcp_success(
         ),
         "error": None,
     })
+
+
+_DATA_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _payload_data_date(data: object) -> str | None:
+    """meta.dataDate from the payload's own dataDate (YYYY-MM-DD), as the Worker sets it."""
+    if not isinstance(data, dict):
+        return None
+    value = data.get("dataDate")
+    return value[:10] if isinstance(value, str) and _DATA_DATE_RE.match(value) else None
 
 
 def _base_meta(
@@ -483,6 +495,8 @@ def _envelope_tool_result(tool: str, result: object) -> object:
             parsed["meta"] = {**_base_meta(tool), **inner_meta}
             if "cacheSource" not in inner_meta:
                 parsed["meta"]["cacheSource"] = "memory" if parsed["meta"].get("cacheHit") is True else None
+            if parsed["meta"].get("dataDate") is None:
+                parsed["meta"]["dataDate"] = _payload_data_date(parsed.get("data"))
             if parsed["ok"] is True:
                 parsed["data"] = _enrich_facts(parsed.get("data"))
             return json.dumps(parsed)
@@ -499,4 +513,4 @@ def _envelope_tool_result(tool: str, result: object) -> object:
                 str(parsed.get("message") or "Tool returned a legacy error without details."),
                 meta_extra=meta_extra or None,
             )
-    return json.dumps({"ok": True, "data": _enrich_facts(parsed), "meta": _base_meta(tool), "error": None})
+    return json.dumps({"ok": True, "data": _enrich_facts(parsed), "meta": _base_meta(tool, data_date=_payload_data_date(parsed)), "error": None})

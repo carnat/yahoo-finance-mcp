@@ -477,6 +477,10 @@ async def search_thai_funds(
         for result in status_results.values()
         for candidate in result["candidates"]  # type: ignore[index]
     ]
+    # Candidates are listed once, at the top level; per-status results keep
+    # their count and cursor.
+    for result in status_results.values():
+        result["candidateCount"] = len(result.pop("candidates"))  # type: ignore[arg-type]
     next_cursor_state: dict[str, str | None] = {
         status: status_results[status]["nextCursor"] if status in status_results else None  # type: ignore[index]
         for status in _ACTIVE_FUND_STATUSES
