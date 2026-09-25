@@ -116,6 +116,14 @@ describes) when the payload has one.
 
 Batch calls (a list of tickers) run three tickers at a time in both runtimes.
 
+`search_sec_filing_text` searches the visible text of a filing (no hidden
+XBRL data or markup), whole words by default with quotes and dashes folded.
+`search_query` accepts `"exact phrase"`, `A NEAR/n B` and `-excluded`; results
+merge per passage, rank risk factors and MD&A first, and page with
+`max_matches`/`cursor`. `filing_count`/`since` search several filings and
+`include_exhibits` adds EX-99 exhibits. See
+[provider runtime guidance](docs/provider-runtime-guidance.md#sec-filing-text-search).
+
 Grouped domains:
 
 - `stock_pricing`

@@ -508,7 +508,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "list_sec_filing_tables", description: "List only usable SEC filing tables while preserving original tableIndex. Read usableTableCount/excludedTableCount before selecting a table.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, document_url: { type: "string" }, offset: { type: "number", default: 0 }, limit: { type: "number", default: 50 } }, required: ["ticker"] } },
   { name: "get_sec_filing_table", description: "Get a selected SEC filing table. Empty/layout-only candidates return UNUSABLE_TABLE with a deterministic recovery action.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, document_url: { type: "string" }, table_index: { type: "number" }, max_rows: { type: "number", default: 30 } }, required: ["ticker", "table_index"] } },
   { name: "extract_sec_filing_fact", description: "Extract SEC filing fact.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, fact: { type: "string" }, fact_name: { type: "string" }, fact_type: { type: "string" }, region: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, period_mode: { type: "string", default: "auto", description: "quarter, ytd, or annual; auto selects quarter for 10-Q and annual for 10-K." }, document_url: { type: "string" }, accession_number: { type: "string" } }, required: ["ticker"] } },
-  { name: "search_sec_filing_text", description: "Search SEC filing text.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, search_terms: { type: "array", items: { type: "string" } }, search_query: { type: "string" }, section_hint: { type: "string" }, selector: { type: "object" }, filing_type: { type: "string", default: "10-K" }, accession_number: { type: "string" }, document_url: { type: "string" }, context_chars: { type: "number", default: 1500 }, return_tables: { type: "boolean", default: true } }, required: ["ticker"] } },
+  { name: "search_sec_filing_text", description: "Search the visible text of SEC filings: whole words (plurals included) with curly/straight quotes and dashes folded. search_terms are phrases; search_query also takes \"exact phrase\", A NEAR/n B and -excluded. Matches merge per passage, rank risk factors and MD&A first with every term represented, and page with max_matches/cursor; termStats and hitsBySection summarize all hits. filing_count/since search several filings; include_exhibits adds EX-99 exhibits.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, search_terms: { type: "array", items: { type: "string" } }, search_query: { type: "string" }, exclude_terms: { type: "array", items: { type: "string" } }, near: { type: "array", items: { type: "object", properties: { terms: { type: "array", items: { type: "string" }, minItems: 2, maxItems: 2 }, within_words: { type: "number", minimum: 1, maximum: 200, default: 10 } }, required: ["terms"] } }, match: { type: "string", enum: ["word", "substring"], default: "word" }, order: { type: "string", enum: ["relevance", "document"], default: "relevance" }, max_matches: { type: "number", minimum: 1, maximum: 50, default: 10 }, cursor: { type: "string" }, section_hint: { type: "string" }, selector: { type: "object" }, filing_type: { type: "string", default: "10-K" }, accession_number: { type: "string" }, document_url: { type: "string" }, filing_count: { type: "number", minimum: 1, maximum: 5, default: 1 }, since: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" }, include_exhibits: { type: "boolean", default: false }, context_chars: { type: "number", default: 1500 }, return_tables: { type: "boolean", default: false } }, required: ["ticker"] } },
   { name: "get_sec_filing_index", description: "Build or retrieve the cached section/table index for an SEC filing. Identifies headings, tables, row labels, and units. period is reserved for future multi-period support; currently only 'latest' is supported unless accession_number is provided.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest", description: "Reserved. Only 'latest' supported currently." }, accession_number: { type: "string" } }, required: ["ticker"] } },
   { name: "list_sec_material_filings", description: "List latest material SEC filings for a ticker, filtering out noise (Form 4, 144, SC 13G, etc.). Returns only significant filings (10-K, 10-Q, 8-K, S-1, 424B, DEF 14A, 20-F, 6-K by default).", inputSchema: { type: "object", properties: { ticker: { type: "string" }, forms: { type: "array", items: { type: "string" }, default: ["10-K", "10-Q", "8-K", "S-1", "424B", "DEF 14A", "20-F", "6-K"] }, limit: { type: "number", default: 5 } }, required: ["ticker"] } },
   { name: "get_sec_filing_intelligence", description: "Preferred SEC diagnostic call. Returns an accession-matched official companyfacts snapshot, usable section/table index summary, evidence metadata, and recommended follow-ups.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, filing_index: { type: "number", default: 0 } }, required: ["ticker"] } },
@@ -2177,13 +2177,25 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
     case "search_sec_filing_text":
       return searchFilingText(
         str(args.ticker),
-        (args.search_terms as string[]) ?? (args.search_query != null ? [str(args.search_query)] : []),
-        args.section_hint != null ? str(args.section_hint) : (args.selector != null ? str((args.selector as Record<string, unknown>).item, "") : null),
+        Array.isArray(args.search_terms) ? args.search_terms.map(String) : [],
+        args.section_hint != null ? str(args.section_hint) : (args.selector != null ? str((args.selector as Record<string, unknown>).item, "") || null : null),
         str(args.filing_type, "10-K"),
         args.accession_number != null ? str(args.accession_number) : null,
         num(args.context_chars, 1500),
-        args.return_tables !== false,
+        args.return_tables === true,
         args.document_url != null ? str(args.document_url) : null,
+        {
+          query: args.search_query != null ? str(args.search_query) : null,
+          excludeTerms: Array.isArray(args.exclude_terms) ? args.exclude_terms : [],
+          near: Array.isArray(args.near) ? args.near : [],
+          match: args.match != null ? str(args.match) : null,
+          order: args.order != null ? str(args.order) : null,
+          maxMatches: num(args.max_matches, 10),
+          cursor: args.cursor != null ? str(args.cursor) : null,
+          filingCount: num(args.filing_count, 1),
+          since: args.since != null ? str(args.since) : null,
+          includeExhibits: args.include_exhibits === true,
+        },
       );
     case "get_sec_filing_index":
       return compactFilingIndexPayload(await getSecFilingIndex(str(args.ticker), str(args.filing_type, "10-K"), str(args.period, "latest"), args.accession_number != null ? str(args.accession_number) : null));

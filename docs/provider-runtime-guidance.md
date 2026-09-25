@@ -108,6 +108,43 @@ Sources checked through 2026-08-04:
   filings appear within a day; company facts (16) and submissions (256) are
   size-limited.
 
+## SEC Filing Text Search
+
+- `search_sec_filing_text` searches the text a reader sees. Each document is
+  projected once to display text: hidden inline-XBRL data (`ix:header`),
+  scripts, styles and `display:none` blocks are dropped, entities are decoded,
+  paragraphs and table rows end in a line break, and table cells are joined by
+  ` | ` (a "$" or "%" cell joins its value). Projections are cached per
+  isolate (Worker: 30 minutes, 24 documents, 12 million characters of text;
+  local server: the same limits).
+- Matching runs on a folded copy of the same length: lowercase, one apostrophe,
+  one double quote and one dash, so "Company's" finds "Company’s" and
+  "supply chain" finds "supply‑chain". Terms match whole words and their
+  plural or possessive; `"quoted"` terms are exact; `match="substring"` keeps
+  the old substring behaviour.
+- `search_query` takes `"exact phrase"`, `A NEAR/n B` (single words or quoted
+  phrases on each side) and `-excluded`; other consecutive words form one
+  phrase, so a query without operators is a single phrase as before.
+  `exclude_terms` and `near` are the structured forms. An excluded term drops
+  each hit whose sentence (or table row) holds it.
+- Hits in one passage merge into one match that lists every term found there.
+  A match's context is its sentence grown by whole neighbouring sentences of
+  the paragraph up to `context_chars`; a short heading line takes the
+  paragraph after it; a table match is its row, with `rowLabel`, `tableIndex`
+  (as `list_sec_filing_tables` numbers tables) and `tableTitle`.
+- `order="relevance"` (default) ranks risk factors and MD&A first and takes one
+  match per term in turn, so a common term cannot fill the page;
+  `order="document"` keeps filing order. `max_matches` (up to 50) and `cursor`
+  page through every match; `termStats`, `hitsBySection` and `totalMatches`
+  cover all of them.
+- `filing_count` (up to 5) or `since` searches the latest filings of the form
+  and reports `filings[]` with hits per filing; `include_exhibits` adds up to
+  four EX-99 exhibits per filing (for 8-Ks, the press release). With
+  `return_tables`, a table match carries only its own table's rows.
+- The Worker and local server share one algorithm (`worker/src/filing-search.ts`
+  and `yfmcp/filing_search.py`); `scripts/test_filing_search.py` requires
+  identical output from both on shared fixtures.
+
 ## SEC EDGAR Rules
 
 - `data.sec.gov` is keyless and public. Do not add API-key or paid-provider

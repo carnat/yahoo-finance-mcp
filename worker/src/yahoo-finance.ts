@@ -2,6 +2,12 @@ import { BoundedTtlCache, setBounded } from "./cache.js";
 import { countCacheEvent, emptyCacheUsage, providerFetch, type CacheEvent, type CacheUsage } from "./request-context.js";
 import { ErrorCode, getWorkerVar, mcpFailure } from "./response.js";
 import { yahooTranscriptContentSha256 } from "./transcript-contract.js";
+import {
+  filingTableSpans, hitsBySection, matchContext, matchPayload, orderMatches, parseSearchQuery, projectFilingText,
+  searchDocument, sectionHintScope, termLabel, termsFromList,
+  type FilingTextProjection, type HeadingAnchor, type MatchMode, type MatchOrder, type NearSpec, type SearchDocument,
+  type SearchMatch, type SearchSpec,
+} from "./filing-search.js";
 import registryManifest from "./company-ir-page-registry.json";
 import newsSourceCapabilities from "./news-source-capabilities.json";
 
@@ -5963,27 +5969,6 @@ function filingHasRelevantGeoText(html: string, region: string): boolean {
   return false;
 }
 
-function isHtmlTagPosition(html: string, pos: number): boolean {
-  const lastOpen = html.lastIndexOf("<", pos);
-  const lastClose = html.lastIndexOf(">", pos);
-  return lastOpen > lastClose;
-}
-
-function htmlWindowAtTagBoundaries(html: string, start: number, end: number): string {
-  let s = Math.max(0, start);
-  let e = Math.min(html.length, end);
-  const openBeforeStart = html.lastIndexOf("<", s);
-  const closeBeforeStart = html.lastIndexOf(">", s);
-  if (openBeforeStart > closeBeforeStart) s = openBeforeStart;
-  const openBeforeEnd = html.lastIndexOf("<", e);
-  const closeBeforeEnd = html.lastIndexOf(">", e);
-  if (openBeforeEnd > closeBeforeEnd) {
-    const closeAfterEnd = html.indexOf(">", e);
-    if (closeAfterEnd >= 0) e = Math.min(html.length, closeAfterEnd + 1);
-  }
-  return html.slice(s, e);
-}
-
 function normalizeSegmentLabel(segment: unknown): string {
   if (segment == null) return "";
   if (Array.isArray(segment)) return segment.map((s) => normalizeSegmentLabel(s)).join(" ").trim();
@@ -6677,6 +6662,161 @@ export async function getFilingData(
   }, factType === "geographic_revenue" && denominator == null);
 }
 
+// ── search_sec_filing_text ────────────────────────────────────────────────────
+
+export interface FilingSearchOptions {
+  /** search_query syntax: "exact phrase", A NEAR/n B, -excluded. */
+  query?: string | null;
+  excludeTerms?: unknown[];
+  near?: unknown[];
+  match?: string | null;
+  order?: string | null;
+  maxMatches?: number;
+  cursor?: string | null;
+  filingCount?: number;
+  since?: string | null;
+  includeExhibits?: boolean;
+}
+
+type ProjectedFilingDocument = { projection: FilingTextProjection; htmlChars: number; truncated: boolean };
+
+type FilingSearchTarget = {
+  key: string;
+  url: string;
+  documentType: string;
+  defaultSection: string | null;
+  primary: boolean;
+  accessionNumber: string | null;
+  filingDate: string | null;
+  filingType: string;
+};
+
+const FILING_TEXT_TTL_MS = 30 * 60 * 1000;
+// Display text and its folded copy of recently searched documents.
+const filingTextProjections = new BoundedTtlCache<ProjectedFilingDocument>(24, 12_000_000, (doc) => doc.projection.text.length * 2);
+const FILING_SEARCH_MAX_FILINGS = 5;
+const FILING_SEARCH_MAX_EXHIBITS = 4;
+const FILING_SEARCH_TABLE_ROWS = 40;
+
+/** Item and Part headings; filings that mark them with <h1>-<h6> instead of bold text use those. */
+export function searchHeadings(html: string): HeadingAnchor[] {
+  const bold = filingItemHeadings(html);
+  if (bold.length > 0) return bold.map(({ start, level, title }) => ({ start, level, title }));
+  const out: HeadingAnchor[] = [];
+  for (const m of html.matchAll(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi)) {
+    const start = m.index ?? 0;
+    const title = stripHtmlTags(m[2]).trim();
+    const level = /^part\s+[ivx]+\b/i.test(title) ? 1 : /^item\s+\d+[a-z]?\b/i.test(title) ? 2 : 0;
+    if (level === 0 || /\s\d{1,3}$/.test(title) || isTocMatch(html, start, start + m[0].length)) continue;
+    out.push({ start, level, title: title.slice(0, 200) });
+  }
+  return out;
+}
+
+/** A filing document as searchable display text, projected once per isolate. */
+async function projectedFilingDocument(url: string): Promise<ProjectedFilingDocument | null> {
+  const cached = filingTextProjections.get(url);
+  if (cached) {
+    countCacheEvent("sec", "memoryHits");
+    return cached;
+  }
+  let doc: SecDocumentResult;
+  try {
+    doc = await fetchSecDocument(url);
+  } catch {
+    return null;
+  }
+  if (!doc.ok) return null;
+  const truncated = doc.text.length > SEC_DOCUMENT_READ_MAX_CHARS;
+  const html = truncated ? doc.text.slice(0, SEC_DOCUMENT_READ_MAX_CHARS) : doc.text;
+  const projection = projectFilingText(html, searchHeadings(html), filingTableSpans(html));
+  const entry = { projection, htmlChars: doc.text.length, truncated };
+  filingTextProjections.set(url, entry, FILING_TEXT_TTL_MS);
+  return entry;
+}
+
+function nearSpecsFromOptions(values: unknown[] | undefined): NearSpec[] {
+  const out: NearSpec[] = [];
+  for (const value of values ?? []) {
+    if (!value || typeof value !== "object") continue;
+    const item = value as Record<string, unknown>;
+    const terms = termsFromList(Array.isArray(item.terms) ? item.terms : []);
+    if (terms.length !== 2) continue;
+    const within = Number(item.within_words ?? item.withinWords ?? 10);
+    out.push({ a: terms[0], b: terms[1], withinWords: Math.max(1, Math.min(200, Number.isFinite(within) ? Math.trunc(within) : 10)) });
+  }
+  return out;
+}
+
+/** The latest filings of a form for a multi-filing search, newest first. */
+async function resolveSecFilingsForSearch(
+  ticker: string,
+  first: ResolvedSecFiling,
+  filingCount: number,
+  since: string | null,
+): Promise<{ filings: ResolvedSecFiling[]; capped: boolean }> {
+  if (filingCount <= 1 && !since) return { filings: [first], capped: false };
+  const { submissions } = await getSubmissionsForTicker(ticker);
+  const recent = ((submissions?.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+  const forms = (recent.form as string[]) ?? [];
+  const accessions = (recent.accessionNumber as string[]) ?? [];
+  const primaryDocs = (recent.primaryDocument as string[]) ?? [];
+  const filingDates = (recent.filingDate as string[]) ?? [];
+  const acceptedDts = (recent.acceptanceDateTime as string[]) ?? [];
+  const wanted = first.filingType.toUpperCase();
+  const limit = since && filingCount <= 1 ? FILING_SEARCH_MAX_FILINGS : filingCount;
+  const filings: ResolvedSecFiling[] = [];
+  let capped = false;
+  for (let i = 0; i < forms.length; i++) {
+    if (String(forms[i]).toUpperCase() !== wanted || !accessions[i] || !primaryDocs[i]) continue;
+    if (since && String(filingDates[i] ?? "") < since) continue;
+    const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(first.cikInt, accessions[i], String(primaryDocs[i]));
+    if (!edgarPrimaryDocumentUrl || isLikelyXbrlDocumentUrl(edgarPrimaryDocumentUrl)) continue;
+    if (filings.length >= limit) {
+      capped = since != null;
+      break;
+    }
+    filings.push({
+      ...first,
+      filingType: String(forms[i]),
+      filingDate: filingDates[i] ?? null,
+      acceptedAt: acceptedDts[i] ?? null,
+      accessionNumber: accessions[i],
+      primaryDocument: String(primaryDocs[i]),
+      documentUrl: edgarPrimaryDocumentUrl,
+      warnings: [],
+    });
+  }
+  return { filings: filings.length > 0 ? filings : [first], capped };
+}
+
+async function exhibitTargets(cikInt: number, accessionNumber: string, filingDate: string | null, filingType: string, primaryUrl: string): Promise<FilingSearchTarget[]> {
+  const { edgarIndexUrl } = edgarBuildFilingUrls(cikInt, accessionNumber, null);
+  const out: FilingSearchTarget[] = [];
+  for (const exhibit of await edgarListExhibitsFromIndex(edgarIndexUrl)) {
+    const type = String(exhibit.type ?? "").toUpperCase();
+    const url = typeof exhibit.documentUrl === "string" ? exhibit.documentUrl : "";
+    if (!/^EX-99/.test(type) || !/\.(?:htm|html|txt)$/i.test(url) || url === primaryUrl) continue;
+    const description = String(exhibit.description ?? "").trim();
+    out.push({
+      key: url,
+      url,
+      documentType: type,
+      defaultSection: description ? `${type}: ${description}` : type,
+      primary: false,
+      accessionNumber,
+      filingDate,
+      filingType,
+    });
+    if (out.length >= FILING_SEARCH_MAX_EXHIBITS) break;
+  }
+  return out;
+}
+
+function fiscalYearOf(filingDate: string | null): string | null {
+  return filingDate ? `FY${String(filingDate).slice(0, 4)}` : null;
+}
+
 export async function searchFilingText(
   ticker: string,
   searchTerms: string[] = [],
@@ -6684,215 +6824,294 @@ export async function searchFilingText(
   filingType = "10-K",
   accessionNumber: string | null = null,
   contextChars = 1500,
-  returnTables = true,
+  returnTables = false,
   documentUrl: string | null = null,
+  options: FilingSearchOptions = {},
 ): Promise<string> {
   const warnings: Record<string, unknown>[] = [];
-  let edgarPrimaryDocumentUrl: string | null = documentUrl;
-  let filingDate: string | null = null;
-  let fiscalYear: string | null = null;
-  let actualFilingType = filingType;
+  const mode: MatchMode = options.match === "substring" ? "substring" : "word";
+  const order: MatchOrder = options.order === "document" ? "document" : "relevance";
+  const budget = Math.max(200, Math.min(Math.floor(Number(contextChars)) || 1500, 4000));
+  const pageSize = Math.max(1, Math.min(50, Math.trunc(Number(options.maxMatches ?? 10)) || 10));
+  const cursor = Math.max(0, parseInt(String(options.cursor ?? "0"), 10) || 0);
+  const parsedQuery = options.query ? parseSearchQuery(options.query) : { terms: [], near: [], exclude: [] };
+  const spec: SearchSpec = {
+    terms: [...termsFromList(searchTerms ?? []), ...parsedQuery.terms],
+    near: [...parsedQuery.near, ...nearSpecsFromOptions(options.near)],
+    exclude: [...parsedQuery.exclude, ...termsFromList(options.excludeTerms ?? [])],
+    mode,
+    budget,
+  };
+  const filingCount = Math.max(1, Math.min(FILING_SEARCH_MAX_FILINGS, Math.trunc(Number(options.filingCount ?? 1)) || 1));
+  const since = options.since && /^\d{4}-\d{2}-\d{2}$/.test(options.since) ? options.since : null;
+  const emptyResult = (fields: Record<string, unknown>) => JSON.stringify({
+    ticker,
+    accessionNumber,
+    documentUrl: null,
+    fiscalYear: null,
+    filingType,
+    filingDate: null,
+    documentKind: "unavailable",
+    matches: [],
+    matchCount: 0,
+    ...fields,
+  });
 
-  if (documentUrl && isLikelyXbrlDocumentUrl(documentUrl)) {
-    if (!accessionNumber) {
-      return JSON.stringify({
-        ticker,
-        accessionNumber,
-        documentUrl,
-        fiscalYear: null,
-        filingType,
-        filingDate: null,
-        documentKind: "xbrl_xml",
-        matches: [],
-        matchCount: 0,
-        status: "FILING_TEXT_NOT_AVAILABLE",
-        code: "FILING_TEXT_NOT_AVAILABLE",
-        confidence: "FILING_TEXT_NOT_AVAILABLE",
-        warnings: [{ code: "FILING_TEXT_NOT_AVAILABLE", message: "Provided document_url appears to be XBRL/XML and no accession_number was supplied to resolve primary HTML.", severity: "error" }],
-      });
+  // ── Documents to search ──
+  let filings: ResolvedSecFiling[] = [];
+  let explicitTarget: FilingSearchTarget | null = null;
+  if (documentUrl && !isLikelyXbrlDocumentUrl(documentUrl)) {
+    if (!documentUrl.startsWith("https://www.sec.gov/Archives/")) {
+      return mcpFailure("search_sec_filing_text", ErrorCode.INPUT_VALIDATION_ERROR, "document_url must be an https://www.sec.gov/Archives/ URL.");
     }
-    edgarPrimaryDocumentUrl = null;
-    warnings.push({ code: "DOCUMENT_URL_REPLACED_WITH_PRIMARY_HTML", message: "Provided document_url was XBRL/XML; resolved the accession primary HTML document instead.", severity: "warning" });
-  }
-
-  if (!edgarPrimaryDocumentUrl) {
+    explicitTarget = { key: documentUrl, url: documentUrl, documentType: "primary", defaultSection: null, primary: true, accessionNumber, filingDate: null, filingType };
+  } else {
+    if (documentUrl) {
+      if (!accessionNumber) {
+        return emptyResult({
+          documentUrl,
+          documentKind: "xbrl_xml",
+          status: "FILING_TEXT_NOT_AVAILABLE",
+          code: "FILING_TEXT_NOT_AVAILABLE",
+          confidence: "FILING_TEXT_NOT_AVAILABLE",
+          warnings: [{ code: "FILING_TEXT_NOT_AVAILABLE", message: "Provided document_url appears to be XBRL/XML and no accession_number was supplied to resolve primary HTML.", severity: "error" }],
+        });
+      }
+      warnings.push({ code: "DOCUMENT_URL_REPLACED_WITH_PRIMARY_HTML", message: "Provided document_url was XBRL/XML; resolved the accession primary HTML document instead.", severity: "warning" });
+    }
     const resolved = await resolveSecFiling(ticker, filingType, accessionNumber);
     if (!resolved.ok) {
-      return JSON.stringify({
+      return emptyResult({
         ...resolved.error,
         accessionNumber: resolved.error.accessionNumber ?? accessionNumber,
         documentUrl: resolved.error.documentUrl ?? null,
-        fiscalYear: null,
-        filingType,
         filingDate: resolved.error.filingDate ?? null,
-        documentKind: "unavailable",
-        matches: [],
-        matchCount: 0,
         confidence: resolved.error.code,
       });
     }
-    const filing = resolved.filing;
-    edgarPrimaryDocumentUrl = filing.documentUrl;
-    accessionNumber = filing.accessionNumber;
-    filingDate = filing.filingDate;
-    fiscalYear = filing.filingDate ? `FY${String(filing.filingDate).slice(0, 4)}` : null;
-    actualFilingType = filing.filingType;
-    warnings.push(...filing.warnings);
+    warnings.push(...resolved.filing.warnings);
+    if (accessionNumber && (filingCount > 1 || since)) {
+      warnings.push({ code: "FILING_COUNT_IGNORED", message: "accession_number selects one filing; filing_count and since were ignored.", severity: "info" });
+      filings = [resolved.filing];
+    } else {
+      const list = await resolveSecFilingsForSearch(ticker, resolved.filing, filingCount, since);
+      filings = list.filings;
+      if (list.capped) {
+        warnings.push({ code: "FILINGS_CAPPED", message: `Searched the latest ${filings.length} matching filings; older ones were not searched.`, severity: "info" });
+      }
+    }
   }
 
-  if (!edgarPrimaryDocumentUrl) {
+  const first = filings[0] ?? null;
+  const primaryUrl = explicitTarget?.url ?? first?.documentUrl ?? null;
+  const base = {
+    ticker,
+    accessionNumber: first?.accessionNumber ?? accessionNumber,
+    documentUrl: primaryUrl,
+    fiscalYear: fiscalYearOf(first?.filingDate ?? null),
+    filingType: first?.filingType ?? filingType,
+    filingDate: first?.filingDate ?? null,
+  };
+  if (spec.terms.length === 0 && spec.near.length === 0 && !sectionHint) {
+    // Nothing to look for: the resolved filing alone, without reading it.
     return JSON.stringify({
-      ticker,
-      accessionNumber,
-      documentUrl: null,
-      fiscalYear,
-      filingType: actualFilingType,
-      filingDate,
-      documentKind: "unavailable",
-      matches: [],
-      matchCount: 0,
-      status: "FILING_TEXT_NOT_AVAILABLE",
-      code: "FILING_TEXT_NOT_AVAILABLE",
-      confidence: "FILING_TEXT_NOT_AVAILABLE",
-      warnings: [...warnings, { code: "FILING_TEXT_NOT_AVAILABLE", message: "Could not resolve primary filing HTML.", severity: "error" }],
-    });
-  }
-
-  if (isLikelyXbrlDocumentUrl(edgarPrimaryDocumentUrl)) {
-    return JSON.stringify({
-      ticker,
-      accessionNumber,
-      documentUrl: edgarPrimaryDocumentUrl,
-      fiscalYear: null,
-      filingType: actualFilingType,
-      filingDate: null,
-      documentKind: "xbrl_xml",
-      matches: [],
-      matchCount: 0,
-      status: "FILING_TEXT_NOT_AVAILABLE",
-      code: "FILING_TEXT_NOT_AVAILABLE",
-      confidence: "FILING_TEXT_NOT_AVAILABLE",
-      warnings: [{ code: "FILING_TEXT_NOT_AVAILABLE", message: "Only an XBRL/XML document could be resolved; refusing to return tag soup as filing text.", severity: "error" }],
-    });
-  }
-
-  const html = await edgarGetHtml(edgarPrimaryDocumentUrl, 5_000_000);
-  if (!html) {
-    return JSON.stringify({
-      ticker,
-      accessionNumber,
-      documentUrl: edgarPrimaryDocumentUrl,
-      fiscalYear,
-      filingType: actualFilingType,
-      filingDate,
+      ...base,
       documentKind: "primary_html",
       matches: [],
       matchCount: 0,
-      status: "FILING_TEXT_NOT_AVAILABLE",
-      code: "FILING_TEXT_NOT_AVAILABLE",
-      confidence: "FILING_TEXT_NOT_AVAILABLE",
-      warnings: [...warnings, { code: "FILING_TEXT_NOT_AVAILABLE", message: "Unable to fetch primary filing HTML.", severity: "error" }],
+      totalMatches: 0,
+      confidence: "NOT_DISCLOSED",
+      warnings: [...warnings, { code: "NO_SEARCH_TERMS", message: "Pass search_terms, search_query or near to search the filing text.", severity: "warning" }],
     });
   }
 
-  // ponytail: keep search bounded; full-filing text conversion can exhaust Worker CPU on large SEC HTML.
-  const htmlLower = html.toLowerCase();
-  const size = Math.max(200, Math.min(Math.floor(contextChars), 4000));
-  const matches: Record<string, unknown>[] = [];
-  const seen = new Set<number>();
-  // Item headings give each match its section, and a section hint that
-  // names a heading limits the search to that section.
-  const itemHeadings = filingItemHeadings(html);
-  const headingAt = (pos: number): string | null => {
-    let current: string | null = null;
-    for (const heading of itemHeadings) {
-      if (heading.start > pos) break;
-      current = heading.title;
-    }
-    return current;
-  };
-  let scopeStart = 0;
-  let scopeEnd = html.length;
-  let sectionScope: string | null = null;
-  if (sectionHint) {
-    const hintIdx = itemHeadings.findIndex((heading) =>
-      sectionHeadingMatches(sectionHint, heading.title) || heading.title.toLowerCase().includes(sectionHint.toLowerCase()));
-    if (hintIdx >= 0) {
-      const heading = itemHeadings[hintIdx];
-      scopeStart = heading.start;
-      scopeEnd = itemHeadings.slice(hintIdx + 1).find((next) => next.level <= heading.level)?.start ?? html.length;
-      sectionScope = heading.title;
+  const targetsByFiling: { filing: ResolvedSecFiling | null; targets: FilingSearchTarget[] }[] = explicitTarget
+    ? [{ filing: null, targets: [explicitTarget] }]
+    : filings.map((filing) => ({
+      filing,
+      targets: [{
+        key: filing.documentUrl,
+        url: filing.documentUrl,
+        documentType: "primary",
+        defaultSection: null,
+        primary: true,
+        accessionNumber: filing.accessionNumber,
+        filingDate: filing.filingDate,
+        filingType: filing.filingType,
+      }],
+    }));
+  if (options.includeExhibits) {
+    for (const group of targetsByFiling) {
+      const acc = group.filing?.accessionNumber ?? accessionNumber;
+      const cikInt = group.filing?.cikInt ?? (primaryUrl ? parseInt(primaryUrl.match(/\/data\/(\d+)\//)?.[1] ?? "", 10) : NaN);
+      if (!acc || !Number.isFinite(cikInt)) continue;
+      group.targets.push(...await exhibitTargets(cikInt, acc, group.filing?.filingDate ?? null, group.filing?.filingType ?? filingType, group.targets[0].url));
     }
   }
 
-  const addMatch = (term: string, pos: number) => {
-    if (isHtmlTagPosition(html, pos)) return;
-    // Windows of neighbouring matches would repeat the same passage.
-    if ([...seen].some((p) => Math.abs(p - pos) < size * 0.8)) return;
-    seen.add(pos);
-    const start = Math.max(0, pos - Math.floor(size / 2));
-    const end = Math.min(html.length, pos + Math.floor(size / 2));
-    const contextHtml = htmlWindowAtTagBoundaries(html, start, end);
-    const contextText = cleanFilingDisplayText(htmlToReadableText(contextHtml));
-    const preText = cleanFilingDisplayText(htmlToReadableText(htmlWindowAtTagBoundaries(html, Math.max(0, pos - 2_000), pos)));
-    const sectionHeading = headingAt(pos)
-      ?? (preText.match(/(?:Item\s+\d+[A-Z]?\.?\s+[^.]{3,120}|[A-Z][A-Z0-9 ,&/-]{12,120})\s*$/) ?? [""])[0].trim();
-    const match: Record<string, unknown> = {
-      term,
-      sectionHeading,
-      contextText,
-      confidence: "LOW",
-    };
+  // ── Search each document in turn ──
+  const allMatches: SearchMatch[] = [];
+  const termStats = new Map<string, { count: number; capped: boolean }>();
+  const documentsSearched: Record<string, unknown>[] = [];
+  const filingSummaries: Record<string, unknown>[] = [];
+  const docOrder = new Map<string, number>();
+  let excludedHitCount = 0;
+  let sectionScope: string | null = null;
+  let hintMissing = false;
+  let truncatedDocuments = 0;
+  for (const group of targetsByFiling) {
+    const filingMatches: SearchMatch[] = [];
+    const filingTermHits: Record<string, number> = {};
+    for (const target of group.targets) {
+      const doc = await projectedFilingDocument(target.url);
+      if (!doc) {
+        if (target.primary && group === targetsByFiling[0]) {
+          return emptyResult({
+            ...base,
+            documentKind: "primary_html",
+            status: "FILING_TEXT_NOT_AVAILABLE",
+            code: "FILING_TEXT_NOT_AVAILABLE",
+            confidence: "FILING_TEXT_NOT_AVAILABLE",
+            warnings: [...warnings, { code: "FILING_TEXT_NOT_AVAILABLE", message: "Unable to fetch primary filing HTML.", severity: "error" }],
+          });
+        }
+        documentsSearched.push({ documentUrl: target.url, documentType: target.documentType, accessionNumber: target.accessionNumber, filingDate: target.filingDate, status: "FETCH_FAILED" });
+        continue;
+      }
+      if (doc.truncated) truncatedDocuments += 1;
+      const projection = doc.projection;
+      let scopeStart = 0;
+      let scopeEnd = projection.text.length;
+      let scope: { start: number; end: number; title: string } | null = null;
+      if (target.primary && sectionHint) {
+        scope = sectionHintScope(projection, sectionHint, (hint, title) =>
+          sectionHeadingMatches(hint, title) || title.toLowerCase().includes(hint.toLowerCase()));
+        if (scope) {
+          scopeStart = scope.start;
+          scopeEnd = scope.end;
+          sectionScope ??= scope.title;
+        } else {
+          hintMissing = true;
+        }
+      }
+      docOrder.set(target.key, docOrder.size);
+      const searchDoc: SearchDocument = { key: target.key, documentType: target.documentType, defaultSection: target.defaultSection, projection, scopeStart, scopeEnd };
+      const result = searchDocument(searchDoc, spec);
+      if (spec.terms.length === 0 && spec.near.length === 0 && scope) {
+        // A section hint alone returns the start of that section.
+        result.matches.push({
+          doc: searchDoc,
+          terms: [sectionHint as string],
+          hitCount: 1,
+          start: scope.start,
+          context: matchContext(projection, scope.start, scope.start + 1, budget),
+          section: scope.title,
+          score: 0,
+        });
+      }
+      excludedHitCount += result.excludedCount;
+      let docHits = 0;
+      for (const [label, stat] of result.termHits) {
+        const prior = termStats.get(label) ?? { count: 0, capped: false };
+        termStats.set(label, { count: prior.count + stat.count, capped: prior.capped || stat.capped });
+        filingTermHits[label] = (filingTermHits[label] ?? 0) + stat.count;
+        docHits += stat.count;
+      }
+      filingMatches.push(...result.matches);
+      documentsSearched.push({
+        documentUrl: target.url,
+        documentType: target.documentType,
+        accessionNumber: target.accessionNumber,
+        filingDate: target.filingDate,
+        hitCount: docHits,
+        matchCount: result.matches.length,
+        textChars: projection.text.length,
+        truncated: doc.truncated,
+        ...(scope ? { sectionScope: scope.title } : {}),
+      });
+    }
+    allMatches.push(...filingMatches);
+    if (group.filing) {
+      filingSummaries.push({
+        accessionNumber: group.filing.accessionNumber,
+        filingDate: group.filing.filingDate,
+        filingType: group.filing.filingType,
+        fiscalYear: fiscalYearOf(group.filing.filingDate),
+        documentUrl: group.filing.documentUrl,
+        totalMatches: filingMatches.length,
+        termHits: filingTermHits,
+        hitsBySection: hitsBySection(filingMatches),
+      });
+    }
+  }
+  if (hintMissing) {
+    warnings.push({ code: "SECTION_HINT_NOT_FOUND", message: `No heading matched section_hint '${sectionHint}'; the whole document was searched.`, severity: "warning" });
+  }
+  if (truncatedDocuments > 0) {
+    warnings.push({ code: "FILING_READ_TRUNCATED", message: `${truncatedDocuments} document(s) exceeded ${SEC_DOCUMENT_READ_MAX_CHARS} characters; text past that point was not searched.`, severity: "warning" });
+  }
+
+  // ── Order, page and describe ──
+  const ordered = orderMatches(allMatches, order, docOrder);
+  const page = ordered.slice(cursor, cursor + pageSize);
+  const multiDocument = documentsSearched.length > 1;
+  const targetByKey = new Map<string, FilingSearchTarget>();
+  for (const group of targetsByFiling) for (const target of group.targets) targetByKey.set(target.key, target);
+  const payloads: Record<string, unknown>[] = [];
+  for (const match of page) {
+    const payload = matchPayload(match, false);
+    const target = targetByKey.get(match.doc.key);
+    if (multiDocument && target) {
+      payload.documentUrl = target.url;
+      payload.documentType = target.documentType;
+      payload.accessionNumber = target.accessionNumber;
+      payload.filingDate = target.filingDate;
+    }
     if (returnTables) {
       const tableParsed: Record<string, unknown>[] = [];
-      const tableWindow = pos >= 0
-        ? html.slice(Math.max(0, pos - 12_000), Math.min(html.length, pos + 12_000))
-        : "";
-      for (const m of tableWindow.matchAll(/<table[^>]*>([\s\S]*?)<\/table>/gi)) {
-        const rows = parseHtmlTable(m[0]);
-        if (rows.length >= 2 && rows.some(r => r.length > 0 && r.some(c => c.length > 0))) {
-          tableParsed.push({ rows });
+      const table = match.context.table;
+      if (table && target) {
+        const doc = await fetchSecDocument(target.url).catch(() => null);
+        if (doc?.ok) {
+          const rows = parseFilingTableRows(doc.text.slice(table.htmlStart, table.htmlEnd), FILING_SEARCH_TABLE_ROWS).map(mergeFinancialCells);
+          tableParsed.push({ tableIndex: table.tableIndex, rows, rowsTruncated: rows.length >= FILING_SEARCH_TABLE_ROWS });
         }
-        if (tableParsed.length >= 3) break;
       }
-      match.tableParsed = tableParsed;
-      if (tableParsed.length > 0) {
-        match.confidence = "HIGH";
-      } else if ((match.contextText as string).length > 0) {
-        match.confidence = "MEDIUM";
-      }
+      payload.tableParsed = tableParsed;
     }
-    matches.push(match);
-  };
-
-  if (sectionHint && sectionScope == null) {
-    const pos = htmlLower.indexOf(sectionHint.toLowerCase());
-    if (pos >= 0) addMatch(sectionHint, pos);
+    payloads.push(payload);
   }
-  for (const term of searchTerms) {
-    let idx = scopeStart;
-    const termLower = term.toLowerCase();
-    while (matches.length < 10) {
-      const pos = htmlLower.indexOf(termLower, idx);
-      if (pos < 0 || pos >= scopeEnd) break;
-      addMatch(term, pos);
-      idx = pos + 1;
-    }
-  }
-
+  const labels = [...termStats.keys()];
+  const stats = labels.map((label) => ({
+    term: label,
+    hitCount: termStats.get(label)?.count ?? 0,
+    hitCountCapped: termStats.get(label)?.capped ?? false,
+    matchCount: allMatches.filter((m) => m.terms.includes(label)).length,
+    returnedCount: page.filter((m) => m.terms.includes(label)).length,
+  }));
+  const nextCursor = cursor + page.length < ordered.length ? String(cursor + page.length) : null;
   return JSON.stringify({
-    ticker,
-    accessionNumber,
-    documentUrl: edgarPrimaryDocumentUrl,
-    fiscalYear,
-    filingType: actualFilingType,
-    filingDate,
+    ...base,
     documentKind: "primary_html",
     ...(sectionHint ? { sectionScope } : {}),
-    matches,
-    matchCount: matches.length,
-    confidence: matches.length === 0 ? "NOT_DISCLOSED" : (matches.some(m => ((m.tableParsed as unknown[]) ?? []).length > 0) ? "HIGH" : "MEDIUM"),
-    warnings: [...warnings, ...(matches.length > 0 ? [{
+    query: {
+      terms: spec.terms.map(termLabel),
+      near: spec.near.map((n) => `${termLabel(n.a)} NEAR/${n.withinWords} ${termLabel(n.b)}`),
+      exclude: spec.exclude.map(termLabel),
+      match: mode,
+      order,
+    },
+    matches: payloads,
+    matchCount: payloads.length,
+    totalMatches: ordered.length,
+    excludedHitCount,
+    termStats: stats,
+    hitsBySection: filingSummaries.length > 1 ? undefined : hitsBySection(allMatches),
+    ...(filingSummaries.length > 1 ? { filings: filingSummaries } : {}),
+    documentsSearched,
+    pagination: { cursor: String(cursor), nextCursor, limit: pageSize, returned: payloads.length, hasMore: nextCursor != null },
+    confidence: payloads.length === 0 ? "NOT_DISCLOSED" : "MEDIUM",
+    warnings: [...warnings, ...(payloads.length > 0 ? [{
       code: "RAW_FILING_TEXT",
       message: "Returned text is sanitized filing context, not structured fact extraction.",
       severity: "info",
@@ -8450,7 +8669,7 @@ function sectionItemToken(value: string): string | null {
   return match ? `item ${match[1].toLowerCase()}` : null;
 }
 
-function sectionHeadingMatches(requested: string, heading: string): boolean {
+export function sectionHeadingMatches(requested: string, heading: string): boolean {
   const requestedText = requested.toLowerCase().replace(/\s+/g, " ").trim();
   const headingText = heading.toLowerCase().replace(/\s+/g, " ").trim();
   const requestedItem = sectionItemToken(requestedText);
