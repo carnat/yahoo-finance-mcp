@@ -117,8 +117,25 @@ const segmentTable = [
   "</table>",
 ].join("");
 out.merged = m.mergeFinancialCells(["Americas", "$", "178,353", "7", "%", "", "( 95,699 )"]);
+out.unlabeledTotal = m.mergeFinancialCells(["", "$", "455,715", "", "$", "250,000"]);
 out.segments = m.extractSegmentTableFromHtml(`<p>Revenue grew in fiscal 2025, reaching $416 billion.</p>${segmentTable}`);
 out.geo = m.extractGeoRevenueFromHtml(segmentTable, "Greater China");
+// AAOI: an Item 2 properties table (square footage by location) names China
+// before the revenue table, whose total row has no label.
+const aaoi = [
+  `<p>Item 2. Properties. Our principal facilities are:</p><table>`,
+  row("Location", "Owned or leased", "Approximate", "Square Footage", "Use"),
+  row("Ningbo, China", "Owned", "1,203,740", "Administration, sales, manufacturing"),
+  row("Taipei, Taiwan", "Leased", "705,760", "Administration, sales, manufacturing"),
+  `</table><p>The following table presents revenue by geographic region (in thousands):</p><table>`,
+  row("", "2025", "", "2024"),
+  row("United States", "$", "150,000", "$", "120,000"),
+  row("China", "262,140", "100,000"),
+  row("Other", "43,575", "30,000"),
+  row("", "$", "455,715", "$", "250,000"),
+  "</table>",
+].join("");
+out.aaoi = m.extractGeoRevenueFromHtml(aaoi, "China");
 const msftStyle = [
   `<p>Segment revenue and operating income were as follows during the periods presented:</p>`,
   "<table>",
@@ -233,6 +250,7 @@ class TestWorkerDataAccuracy(unittest.TestCase):
 
     def test_financial_cells_are_merged(self) -> None:
         self.assertEqual(self.out["merged"], ["Americas", "$178,353", "7%", "(95,699)"])
+        self.assertEqual(self.out["unlabeledTotal"], ["", "$455,715", "$250,000"])
 
     def test_segment_table_sums_to_total(self) -> None:
         result = self.out["segments"]["result"]
@@ -249,6 +267,11 @@ class TestWorkerDataAccuracy(unittest.TestCase):
         self.assertEqual(geo["usd"], 64377e6)
         self.assertEqual(geo["denominator"], 416161e6)
         self.assertEqual(geo["sourceColumns"], ["2025"])
+
+    def test_geographic_table_must_be_about_revenue(self) -> None:
+        aaoi = self.out["aaoi"]
+        self.assertEqual((aaoi["usd"], aaoi["denominator"], aaoi["unitScale"]), (262140e3, 455715e3, "thousands"))
+        self.assertAlmostEqual(aaoi["pct"], 0.5752, places=4)
 
     def test_unit_scale_comes_from_the_unit_statement(self) -> None:
         self.assertEqual(self.out["unitScale"], {"captionMillions": "millions", "proseOnly": "unknown", "sentence": "millions"})

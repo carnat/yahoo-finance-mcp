@@ -5706,9 +5706,14 @@ function parseHtmlTable(tableHtml: string): string[][] {
 export function mergeFinancialCells(cells: string[]): string[] {
   const out: string[] = [];
   let prefix = "";
-  for (const raw of cells) {
+  for (const [index, raw] of cells.entries()) {
     let cell = raw.replace(/\s+/g, " ").trim();
-    if (!cell) continue;
+    // An empty first cell is the row's (missing) label; keep its position so
+    // an unlabeled total row stays aligned with the labeled rows.
+    if (!cell) {
+      if (index === 0) out.push("");
+      continue;
+    }
     if (/^[$€£¥]$/.test(cell)) {
       prefix += cell;
       continue;
@@ -5728,7 +5733,7 @@ export function mergeFinancialCells(cells: string[]): string[] {
 
 /** Table rows with financial cells merged (see mergeFinancialCells); empty rows dropped. */
 function parseFinancialTableRows(tableHtml: string): string[][] {
-  return parseHtmlTable(tableHtml).map(mergeFinancialCells).filter((row) => row.length > 0);
+  return parseHtmlTable(tableHtml).map(mergeFinancialCells).filter((row) => row.some((cell) => cell !== ""));
 }
 
 /** Parse a numeric cell value, handling commas, parens, and $/%/scale suffixes. */
@@ -5830,19 +5835,31 @@ export function extractGeoRevenueFromHtml(
   sourceRows: string[][];
   sourceColumns: string[];
 } | null {
-  // Every table that names the region is a candidate. (Scanning windows after
-  // the first mentions missed tables late in long filings.)
-  const candidateTables: { pos: number; tableHtml: string; rows: string[][] }[] = [];
+  // Every table that names the region and is about revenue is a candidate
+  // (scanning windows after the first mentions missed tables late in long
+  // filings). Tables introduced as a geographic breakdown come first; a
+  // table without revenue or sales in it or its lead-in (a properties list
+  // of square footage by location) never counts.
+  const candidateTables: { pos: number; tableHtml: string; rows: string[][]; score: number }[] = [];
   let scanned = 0;
   for (const m of html.matchAll(/<table[^>]*>[\s\S]*?<\/table>/gi)) {
     if (++scanned > 800) break;
     const tableHtml = m[0];
     if (!textContainsGeoRegion(tableHtml, region)) continue;
+    const pos = m.index ?? 0;
+    // The lead-in stops at the previous table.
+    const before = html.slice(Math.max(0, pos - 1_500), pos);
+    const lead = stripHtmlTags(before.slice(before.toLowerCase().lastIndexOf("</table>") + 1)).slice(-800);
+    const tableText = stripHtmlTags(tableHtml).slice(0, 600);
+    const context = `${lead} ${tableText}`.toLowerCase();
+    if (!/revenue|net sales|\bsales\b/.test(context) || /square f(?:oo|ee)t/i.test(tableText)) continue;
     const rows = parseFinancialTableRows(tableHtml);
     if (rows.length < 2) continue;
-    candidateTables.push({ pos: m.index ?? 0, tableHtml, rows });
+    const score = /geograph|by region|by country|by location|region of|country of|location of (?:the )?customer/.test(context) ? 2 : 1;
+    candidateTables.push({ pos, tableHtml, rows, score });
   }
   if (candidateTables.length === 0) return null;
+  candidateTables.sort((a, b) => b.score - a.score || a.pos - b.pos);
 
   for (const tbl of candidateTables) {
     const { rows, tableHtml } = tbl;
@@ -5880,7 +5897,8 @@ export function extractGeoRevenueFromHtml(
     const totalVal = valueCol < rows[totalRowIdx].length
       ? parseNumericCell(rows[totalRowIdx][valueCol])
       : null;
-    if (regionVal === null || totalVal === null || totalVal <= 0) continue;
+    // A region cannot exceed the total it is part of.
+    if (regionVal === null || totalVal === null || totalVal <= 0 || regionVal <= 0 || regionVal > totalVal * 1.001) continue;
 
     const pct = Math.round((regionVal / totalVal) * 10000) / 10000;
     const contextHtml = html.slice(Math.max(0, tbl.pos - 3_000), tbl.pos);
@@ -8765,7 +8783,8 @@ export async function getFilingTable(ticker: string, documentUrl: string, tableI
         recommendedNextAction: "LIST_USABLE_TABLES",
       });
     }
-    const parsedRows = allRows.slice(0, Math.max(1, maxRows));
+    // "$" and "%" merged into their values, so each period sits in one column.
+    const parsedRows = allRows.slice(0, Math.max(1, maxRows)).map(mergeFinancialCells);
 
     return JSON.stringify({
       ticker,
@@ -14471,8 +14490,13 @@ export function extractSegmentTableFromHtml(html: string): { result: SegmentTabl
     let total: SegmentTableRow | null = null;
     for (const row of rows.slice(headerIdx + 1)) {
       const label = (row[0] ?? "").trim();
-      if (!label) continue;
       const cell = row.length > 1 ? valueOf(row) : null;
+      if (!label) {
+        // An unlabeled numeric row after the segment rows is their total.
+        if (cell && segments.length >= 2) total = { label: "Total", rawValue: cell.raw, value: cell.value };
+        if (total) break;
+        continue;
+      }
       if (!cell) {
         // A label-only row after segment rows starts another block
         // (for example operating income); before them it is a heading.
