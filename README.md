@@ -129,7 +129,11 @@ supply, and `extract_capital_structure` reports cash, debt, instrument terms
 and maturities. Both read the filing's inline XBRL and are company-disclosed,
 not forecasts. `extract_analyst_valuation_methods` lists the multiples and DCF
 inputs analysts name in the news, as context only. `get_uk_company_filings`
-reads Companies House and needs `COMPANIES_HOUSE_API_KEY`. See
+reads Companies House and needs `COMPANIES_HOUSE_API_KEY`.
+`get_valuation_snapshot` turns the bridge and balances into equity value,
+enterprise value and multiples on trailing and consensus figures, and
+`compare_peer_valuations` puts a peer set on one basis with peer medians;
+both are context, not price targets. See
 [provider runtime guidance](docs/provider-runtime-guidance.md#capital-structure-dilution-and-analyst-methods).
 
 Grouped domains:

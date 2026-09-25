@@ -197,7 +197,38 @@ diluted {_num("us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding", "aq", "
 (six months {_num("us-gaap:AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount", "aAntiYtd", "shares", "950,000")}).</p>
 </body></html>"""
 
-FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q}
+AMZN_DIMS = {"us-gaap:ClassOfWarrantOrRightAxis": "aaoi:CustomerWarrantMember", "srt:CounterpartyNameAxis": "aaoi:SubsidiaryOfAmazonMember"}
+AAOI_CONTEXTS = "".join([
+    _context("xq", "2026-04-01..2026-06-30"),
+    _context("xi", "2026-06-30"),
+    _context("xcover", "2026-08-03"),
+    _context("xIssue", "2025-03-13", AMZN_DIMS),
+    _context("xUnvested", "2026-06-30", AMZN_DIMS),
+    _context("xAnti", "2026-04-01..2026-06-30", {"aaoi:AntidilutiveSecurityTypeAxis": "us-gaap:RestrictedStockUnitsRSUMember"}),
+])
+# Tagged the way AAOI's live 10-Q is (2.4.0): awards only under a company
+# concept, an Amazon warrant with an unvested tranche, exclusions on a custom axis.
+AAOI_Q = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "xq", "10-Q")}
+{_text("dei:DocumentPeriodEndDate", "xq", "June 30, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{AAOI_CONTEXTS}{UNITS}</ix:resources></ix:header></div>
+<p>Shares outstanding: {_num("dei:EntityCommonStockSharesOutstanding", "xcover", "shares", "84,000,000")}</p>
+<p>RSUs vested and expected to vest: {_num("aaoi:SharebasedCompensationArrangementBySharebasedPaymentAwardNonoptionEquityInstrumentsVestedAndExpectedToVest", "xi", "shares", "3,000,000")}</p>
+<p>The warrant is exercisable for {_num("us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights", "xIssue", "shares", "7,945,399")} shares at ${_num("us-gaap:ClassOfWarrantOrRightExercisePriceOfWarrantsOrRights1", "xIssue", "usdPerShare", "23.6956")};
+{_num("aaoi:ClassOfWarrantOrRightUnvestedNumberOfSecuritiesCalledByWarrantsOrRights", "xUnvested", "shares", "5,000,000")} remain unvested.</p>
+<p>Weighted basic {_num("us-gaap:WeightedAverageNumberOfSharesOutstandingBasic", "xq", "shares", "81,568,000")}; excluded RSUs {_num("us-gaap:AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount", "xAnti", "shares", "1,100,000")}.</p>
+</body></html>"""
+BARE_Q = f"""<html><body><div style="display:none"><ix:header><ix:resources>{_context("bcover", "2026-08-03")}{UNITS}</ix:resources></ix:header></div>
+<p>Shares outstanding: {_num("dei:EntityCommonStockSharesOutstanding", "bcover", "shares", "50,000,000")}</p></body></html>"""
+TABLE_MATCHES = [
+    {"contextText": "Unvested at December 31, 2025 | 2,500,000 | $ 14.10", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at December 31, 2025"},
+    {"contextText": "Unvested at June 30, 2026 | 2,750,000 | $ 15.20", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at June 30, 2026"},
+    {"contextText": "Outstanding at June 30, 2026 | 9,999,999 | $ 3.00", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Stock option activity", "rowLabel": "Outstanding at June 30, 2026"},
+    {"contextText": "Unvested at June 30, 2026, restricted stock units totalled 8,888,888 shares.", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": False, "tableTitle": None, "rowLabel": None},
+]
+
+FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q}
 
 NEWS_ITEMS = [
     {"title": "Needham raises IQE price target to 45p from 38p", "summary": "Needham values IQE at 12x 2027 EV/EBITDA, citing gallium nitride demand.", "url": "https://news.example/1", "publishedAt": "2026-09-20T08:00:00Z", "source": "yahoo_finance_news"},
@@ -242,6 +273,8 @@ const kFallback = { ...kSource, role: "latest_annual_fallback" };
 const atm = data.atm.map((t) => ({ contextText: t, sectionHeading: "Liquidity", documentUrl: data.qUrl, filingDate: "2025-05-08", accessionNumber: null }));
 out.bridge = m.dilutionBridge({ ticker: "CSTC", price: 25, priceCurrency: "USD", asOfDate: "2025-05-09", sources: [qSource, kFallback], atmMatches: atm });
 out.bridgeLow = m.dilutionBridge({ ticker: "CSTC", price: 10, priceCurrency: "USD", asOfDate: null, sources: [kSource], atmMatches: [] });
+out.bridgeAaoi = m.dilutionBridge({ ticker: "AAOX", price: 30, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2026-08-06", "0001234568-26-000040", data.qUrl, "aaoi_q")], atmMatches: [] });
+out.bridgeTable = m.dilutionBridge({ ticker: "BARE", price: 30, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2026-08-06", "0001234568-26-000050", data.qUrl, "bare_q")], atmMatches: [], awardTableMatches: data.tableMatches });
 out.bridgeAwards = m.dilutionBridge({ ticker: "CSTC", price: 25, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2025-08-06", "0001234568-25-000030", data.qUrl, "awards_q")], atmMatches: [] });
 out.capital = m.capitalStructure({ ticker: "CSTC", source: kSource, fundingMatches: atm });
 out.analyst = m.analystValuationMethods("IQE.L", data.news, data.changes);
@@ -289,7 +322,7 @@ def _worker_pure() -> dict:
         )
         (tmp_path / "data.json").write_text(json.dumps({
             "fixtures": FIXTURES, "kUrl": K_URL, "qUrl": Q_URL, "atm": ATM_TEXT, "news": NEWS_ITEMS, "changes": RATING_CHANGES,
-            "chHistory": CH_HISTORY, "chSearch": CH_SEARCH,
+            "chHistory": CH_HISTORY, "chSearch": CH_SEARCH, "tableMatches": TABLE_MATCHES,
         }), encoding="utf-8")
         (tmp_path / "harness.mjs").write_text(_WORKER_PURE, encoding="utf-8")
         result = subprocess.run(
@@ -321,6 +354,10 @@ def _python_pure() -> dict:
         "documents": {name: _doc_json(doc) for name, doc in docs.items()},
         "bridge": cs.dilution_bridge("CSTC", 25, "USD", "2025-05-09", [q_source, k_fallback], atm),
         "bridgeLow": cs.dilution_bridge("CSTC", 10, "USD", None, [k_source], []),
+        "bridgeAaoi": cs.dilution_bridge("AAOX", 30, "USD", None, [cs.IxSource("primary", "10-Q", "2026-08-06", "0001234568-26-000040", Q_URL, docs["aaoi_q"])], []),
+        "bridgeTable": cs.dilution_bridge("BARE", 30, "USD", None, [cs.IxSource("primary", "10-Q", "2026-08-06", "0001234568-26-000050", Q_URL, docs["bare_q"])], [], [
+            cs.TextMatch(t["contextText"], t["sectionHeading"], t["documentUrl"], t["filingDate"], t["accessionNumber"], t["inTable"], t["tableTitle"], t["rowLabel"]) for t in TABLE_MATCHES
+        ]),
         "bridgeAwards": cs.dilution_bridge("CSTC", 25, "USD", None, [cs.IxSource("primary", "10-Q", "2025-08-06", "0001234568-25-000030", Q_URL, docs["awards_q"])], []),
         "capital": cs.capital_structure("CSTC", k_source, atm),
         "analyst": cs.analyst_valuation_methods("IQE.L", copy.deepcopy(NEWS_ITEMS), copy.deepcopy(RATING_CHANGES)),
@@ -342,7 +379,7 @@ class TestCapitalStructureParity(unittest.TestCase):
             self.assertEqual(self.worker["documents"][name], self.local["documents"][name], name)
 
     def test_outputs_match(self) -> None:
-        for key in ("bridge", "bridgeLow", "bridgeAwards", "capital", "analyst", "ch", "chPick"):
+        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "capital", "analyst", "ch", "chPick"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
 
@@ -465,7 +502,25 @@ class TestCapitalStructureValues(unittest.TestCase):
                          ("2025-04-01", "2025-06-30", 49_000_000, 49_000_000))
         self.assertEqual(eps["antidilutiveExcluded"], [{"security": "Restricted Stock Units RSU", "shares": 900_000}])
         self.assertEqual(b["notDisclosed"], ["stock_options", "convertible_debt", "atm_program"])
-        self.assertIn("us-gaap:AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount", b["taggedDilutionConcepts"])
+        self.assertIn("us-gaap:AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount [AntidilutiveSecuritiesAxis]", b["taggedDilutionConcepts"])
+
+    def test_company_prefixed_awards_vesting_warrant_and_other_antidilutive_axis(self) -> None:
+        b = self.out["bridgeAaoi"]
+        awards = next(c for c in b["components"] if c["component"] == "unvested_share_awards")
+        self.assertEqual((awards["unvested"], awards["countBasis"]), (3_000_000, "vested_and_expected_to_vest"))
+        self.assertTrue(awards["concept"].startswith("aaoi:"))
+        warrant = next(c for c in b["components"] if c["component"] == "warrants")["classes"][0]
+        # 7,945,399 called for, 5,000,000 still unvested: only 2,945,399 are exercisable.
+        self.assertEqual((warrant["outstanding"], warrant["unvested"], warrant["exercisable"]), (7_945_399, 5_000_000, 2_945_399))
+        self.assertEqual(warrant["incrementalShares"], cs.round_half_up(2_945_399 * (1 - 23.6956 / 30)))
+        self.assertEqual(b["reportedEpsDilution"]["antidilutiveExcluded"], [{"security": "Restricted Stock Units RSU", "shares": 1_100_000}])
+        self.assertEqual(b["bridge"]["grossSharesAllInstruments"], 84_000_000 + 3_000_000 + 7_945_399)
+
+    def test_award_count_from_the_filing_table(self) -> None:
+        awards = next(c for c in self.out["bridgeTable"]["components"] if c["component"] == "unvested_share_awards")
+        # The latest "Unvested at" row of the RSU table; the option table and prose are ignored.
+        self.assertEqual((awards["unvested"], awards["countBasis"], awards["source"]["periodEnd"]), (2_750_000, "filing_table_text", "2026-06-30"))
+        self.assertIn("2,750,000", awards["evidence"]["row"])
 
     def test_analyst_methods(self) -> None:
         a = self.out["analyst"]

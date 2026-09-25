@@ -451,9 +451,29 @@ function optionsComponent(sources: IxSource[], price: number): Record<string, un
   return out;
 }
 
-function awardsComponent(sources: IxSource[]): Record<string, unknown> | null {
+// Unvested award counts, most specific first: the us-gaap concept, then the
+// same count under a company prefix, then outstanding or vested-and-expected-
+// to-vest counts (AAOI tags only the last, under its own prefix).
+const AWARD_COUNT_CONCEPTS: [RegExp, string][] = [
+  [new RegExp(`^${UNVESTED_AWARDS}$`), "nonvested"],
+  [/OtherThanOptionsNonvestedNumber$/i, "nonvested"],
+  [/(?:OtherThanOptions|Nonoption)EquityInstrumentsOutstandingNumber$/i, "outstanding"],
+  [/(?:OtherThanOptions|Nonoption)EquityInstrumentsVestedAndExpectedToVest(?:Number|OutstandingNumber)?$/i, "vested_and_expected_to_vest"],
+];
+
+function isShareCount(f: IxFact): boolean {
+  return f.value != null && (f.unit == null || /shares/i.test(f.unit)) && !/USD|EUR|GBP/i.test(f.unit ?? "");
+}
+
+function awardsComponent(sources: IxSource[], tableMatches: TextMatch[] = []): Record<string, unknown> | null {
   const found = findInSources(sources, (doc) => {
-    const facts = doc.facts.filter((f) => f.local === UNVESTED_AWARDS && f.value != null);
+    let facts: IxFact[] = [];
+    let basis = "nonvested";
+    for (const [re, label] of AWARD_COUNT_CONCEPTS) {
+      facts = doc.facts.filter((f) => re.test(f.local) && isShareCount(f));
+      basis = label;
+      if (facts.length > 0) break;
+    }
     if (facts.length === 0) return null;
     const date = facts.reduce((best, f) => ((f.periodEnd ?? "") > best ? (f.periodEnd ?? "") : best), "");
     const atDate = facts.filter((f) => (f.periodEnd ?? "") === date);
@@ -466,21 +486,64 @@ function awardsComponent(sources: IxSource[]): Record<string, unknown> | null {
     const setKey = axisSet ? Object.keys(axisSet.dims).sort().join("&") : "";
     const byType = awardFacts.filter((f) => Object.keys(f.dims).sort().join("&") === setKey);
     if (!plain && byType.length === 0) return null;
-    return { date, plain, byType };
+    return { date, plain, byType, basis, concept: (plain ?? byType[0]).name };
   });
-  if (!found) return null;
-  const { value: { date, plain, byType }, source } = found;
+  if (!found) return awardsFromTable(tableMatches);
+  const { value: { date, plain, byType, basis, concept }, source } = found;
   const breakdown = byType.map((f) => ({ awardType: Object.values(f.dims).map(memberLabel).join(" / "), unvested: f.value }));
   return {
     component: "unvested_share_awards",
     unvested: plain ? plain.value : byType.reduce((sum, f) => sum + (f.value ?? 0), 0),
     breakdown,
+    concept,
+    countBasis: basis,
     method: "gross_unvested",
     incrementalShares: round(plain ? plain.value! : byType.reduce((sum, f) => sum + (f.value ?? 0), 0)),
     note: "Unvested RSUs/PSUs are counted in full; the treasury-stock method on unrecognized compensation would count fewer, and unearned performance awards may never vest.",
     source: sourceRef(source, date || null),
   };
 }
+
+const AWARD_TABLE_RE = /restricted stock|\bRSUs?\b|stock units?|share units?|\bPSUs?\b/i;
+const AWARD_ROW_RE = /^(?:unvested|nonvested|outstanding|balance)\b[^|]*?\b(?:at|as of)\s+(.+)$/i;
+const TABLE_NUMBER_RE = /^\(?(\d{1,3}(?:,\d{3})+|\d{4,})\)?$/;
+
+/** Unvested RSU count from the equity-award table rows, when the filing tags none. */
+export function awardsFromTable(matches: TextMatch[]): Record<string, unknown> | null {
+  let best: { date: string; value: number; match: TextMatch; row: string } | null = null;
+  for (const match of matches) {
+    if (!match.inTable) continue;
+    const scope = `${match.tableTitle ?? ""} ${match.sectionHeading ?? ""} ${match.contextText}`;
+    if (!AWARD_TABLE_RE.test(scope) || /\boptions?\b/i.test(match.tableTitle ?? "")) continue;
+    const cells = collapse(match.contextText).split(" | ").map((c) => c.trim());
+    const label = /^(?:unvested|nonvested|outstanding|balance)\b/i.test(match.rowLabel ?? "") ? String(match.rowLabel) : cells[0];
+    const row = AWARD_ROW_RE.exec(label);
+    if (!row) continue;
+    const date = normalizeIxDate(row[1].replace(/[,.:;]+$/, ""));
+    if (!date) continue;
+    const numberCell = cells.slice(1).map((c) => c.replace(/^\$\s*/, "")).find((c) => TABLE_NUMBER_RE.test(c));
+    if (!numberCell) continue;
+    let value = parseFloat(numberCell.replace(/[(),]/g, ""));
+    if (/in thousands/i.test(scope)) value *= 1000;
+    if (best == null || date > best.date) best = { date, value, match, row: match.contextText.slice(0, 300) };
+  }
+  if (!best) return null;
+  return {
+    component: "unvested_share_awards",
+    unvested: best.value,
+    breakdown: [],
+    concept: null,
+    countBasis: "filing_table_text",
+    method: "gross_unvested",
+    incrementalShares: round(best.value),
+    note: "Read from the filing's award table because no unvested count is tagged; check the quoted row. Counted in full, as tagged awards are.",
+    evidence: { row: best.row, tableTitle: best.match.tableTitle, sectionHeading: best.match.sectionHeading, documentUrl: best.match.documentUrl, filingDate: best.match.filingDate },
+    source: { filingType: null, filingDate: best.match.filingDate, accessionNumber: best.match.accessionNumber, documentUrl: best.match.documentUrl, periodEnd: best.date },
+  };
+}
+
+// Unvested warrant shares (e.g. a customer warrant that vests with purchases).
+const WARRANT_UNVESTED_RE = /Unvested\w*NumberOfSecuritiesCalledByWarrantsOrRights$|ClassOfWarrantOrRightUnvested\w*$/i;
 
 function warrantsComponent(sources: IxSource[], price: number): Record<string, unknown> | null {
   const found = findInSources(sources, (doc) => {
@@ -498,17 +561,25 @@ function warrantsComponent(sources: IxSource[], price: number): Record<string, u
   });
   if (!found) return null;
   const { value: facts, source } = found;
+  const unvestedFacts = source.doc.facts.filter((g) => WARRANT_UNVESTED_RE.test(g.local) && isShareCount(g));
   const classes = facts.map((f) => {
     const strike = newest(source.doc.facts.filter((g) => g.local === WARRANT_STRIKE && g.value != null && dimsKey(g.dims) === dimsKey(f.dims)));
     const label = hasDims(f) ? Object.values(f.dims).map(memberLabel).join(" / ") : "Warrants (not itemized)";
+    // Only vested warrant shares can be exercised now; the rest count in the gross total.
+    const unvested = newest(unvestedFacts.filter((g) => dimsKey(g.dims) === dimsKey(f.dims)))
+      ?? (facts.length === 1 ? newest(unvestedFacts) : null);
+    const exercisable = unvested ? Math.max(0, f.value! - unvested.value!) : f.value!;
     return {
       class: label,
       concept: f.name,
       outstanding: f.value,
       asOf: f.periodEnd,
+      unvested: unvested ? unvested.value : null,
+      unvestedAsOf: unvested ? unvested.periodEnd : null,
+      exercisable,
       exercisePrice: strike ? strike.value : null,
       inTheMoney: strike ? price > strike.value! : null,
-      incrementalShares: strike ? round(treasuryStock(f.value!, strike.value!, price)) : null,
+      incrementalShares: strike ? round(treasuryStock(exercisable, strike.value!, price)) : null,
     };
   });
   const unresolved = classes.filter((c) => c.incrementalShares == null).length;
@@ -516,7 +587,7 @@ function warrantsComponent(sources: IxSource[], price: number): Record<string, u
     component: "warrants",
     outstanding: classes.reduce((sum, c) => sum + (c.outstanding ?? 0), 0),
     classes,
-    method: "treasury_stock_per_class",
+    method: "treasury_stock_per_class_on_vested",
     incrementalShares: unresolved === classes.length ? null : classes.reduce((sum, c) => sum + (c.incrementalShares ?? 0), 0),
     unresolvedClasses: unresolved,
     source: sourceRef(source, facts[0].periodEnd),
@@ -624,6 +695,9 @@ export type TextMatch = {
   documentUrl: string | null;
   filingDate: string | null;
   accessionNumber: string | null;
+  inTable?: boolean;
+  tableTitle?: string | null;
+  rowLabel?: string | null;
 };
 
 const ATM_RE = /\bat[- ]the[- ]market\b|\bATM (?:program|offering|facility|agreement)\b|\b(?:equity distribution|open market sale|controlled equity offering|sales) agreement\b/i;
@@ -717,7 +791,10 @@ function reportedEpsDilution(doc: IxDocument): Record<string, unknown> | null {
   const plain = (local: string) => latestPeriodFacts(doc.facts.filter((f) => f.local === local && f.value != null && !hasDims(f)))[0] ?? null;
   const basic = plain("WeightedAverageNumberOfSharesOutstandingBasic");
   const diluted = plain("WeightedAverageNumberOfDilutedSharesOutstanding");
-  const excluded = latestPeriodFacts(doc.facts.filter((f) => f.local === ANTIDILUTIVE && f.value != null && f.dims.AntidilutiveSecuritiesAxis != null));
+  // Itemized on AntidilutiveSecuritiesAxis, else on whatever single axis the filer used.
+  const antidilutive = doc.facts.filter((f) => f.local === ANTIDILUTIVE && f.value != null);
+  const onStandardAxis = antidilutive.filter((f) => f.dims.AntidilutiveSecuritiesAxis != null);
+  const excluded = latestPeriodFacts(onStandardAxis.length > 0 ? onStandardAxis : antidilutive.filter((f) => Object.keys(f.dims).length === 1));
   if (!basic && !diluted && excluded.length === 0) return null;
   const period = basic ?? diluted ?? excluded[0];
   return {
@@ -725,19 +802,23 @@ function reportedEpsDilution(doc: IxDocument): Record<string, unknown> | null {
     periodEnd: period.periodEnd,
     weightedBasicShares: basic ? basic.value : null,
     weightedDilutedShares: diluted ? diluted.value : null,
-    antidilutiveExcluded: excluded.map((f) => ({ security: memberLabel(f.dims.AntidilutiveSecuritiesAxis), shares: f.value })),
+    antidilutiveExcluded: excluded.map((f) => ({ security: memberLabel(f.dims.AntidilutiveSecuritiesAxis ?? Object.values(f.dims)[0]), shares: f.value })),
     note: "The company's own weighted-average EPS counts for the period, and the securities it left out as antidilutive. A cross-check on the bridge's instrument list, not a point-in-time count.",
   };
 }
 
+/** Share-count concepts the filing tags, with their axes: "concept [Axis, ...]". */
 function taggedDilutionConcepts(sources: IxSource[]): string[] {
   const out: string[] = [];
   for (const s of sources) {
     for (const f of s.doc.facts) {
-      if (f.value != null && DILUTION_CONCEPT_RE.test(f.local) && !out.includes(f.name)) out.push(f.name);
+      if (!isShareCount(f) || !(DILUTION_CONCEPT_RE.test(f.local) || /Nonoption|Unvested|Vested/i.test(f.local))) continue;
+      const axes = Object.keys(f.dims).sort();
+      const key = axes.length > 0 ? `${f.name} [${axes.join(", ")}]` : f.name;
+      if (!out.includes(key)) out.push(key);
     }
   }
-  return out.sort().slice(0, 40);
+  return out.sort().slice(0, 60);
 }
 
 export type DilutionInput = {
@@ -747,6 +828,7 @@ export type DilutionInput = {
   asOfDate: string | null;
   sources: IxSource[];
   atmMatches: TextMatch[];
+  awardTableMatches?: TextMatch[];
 };
 
 /** Basic to diluted shares at a supplied price, from company disclosures only. */
@@ -755,7 +837,7 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
   const primary = sources[0];
   const basicFound = findInSources(sources, basicShares);
   const options = optionsComponent(sources, price);
-  const awards = awardsComponent(sources);
+  const awards = awardsComponent(sources, input.awardTableMatches ?? []);
   const warrants = warrantsComponent(sources, price);
   const convertibles = convertiblesComponent(sources, price);
   const atm = atmComponent(atmEvidence(input.atmMatches), price);

@@ -70,6 +70,8 @@ EXPECTED_CANONICAL = {
     "extract_risk_factor_mentions",
     "extract_customer_concentration",
     "extract_dilution_bridge",
+    "get_valuation_snapshot",
+    "compare_peer_valuations",
     "extract_capital_structure",
     "extract_analyst_valuation_methods",
     "get_uk_company_filings",

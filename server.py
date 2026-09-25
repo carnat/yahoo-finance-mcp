@@ -58,6 +58,7 @@ from yfmcp.util import (
 from yfmcp.clients.yahoo import _safe_parse
 from yfmcp import filing_search as _fs
 from yfmcp import capital_structure as _cs
+from yfmcp import valuation as _vl
 from yfmcp.clients.edgar import (
     _SEC_REQUIRED_UA, _SMOKE_TICKER_CIK_FALLBACKS,
     _resolve_cik_for_ticker, _get_submissions_for_ticker,
@@ -9326,6 +9327,7 @@ async def extract_customer_concentration(
 _IXBRL_DOCUMENTS: dict[str, tuple[_cs.IxDocument, bool, float]] = {}
 _IXBRL_DOCUMENT_TTL = 30 * 60
 _IXBRL_DOCUMENT_MAX = 8
+_AWARD_TABLE_SEARCH_TERMS = ["unvested", "nonvested"]
 _ATM_SEARCH_TERMS = ["at-the-market", "at the market offering", "ATM program", "equity distribution agreement", "sales agreement"]
 _FUNDING_SEARCH_TERMS = ["sufficient to fund", "sufficient to meet", "fully funded", "going concern", "cash runway", "next twelve months", "next 12 months", "at-the-market", "capital expenditures"]
 
@@ -9446,6 +9448,9 @@ async def _filing_text_matches(ticker: str, filing: dict, terms: list[str], max_
             document_url=_first_present(m.get("documentUrl"), search.get("documentUrl")),
             filing_date=_first_present(m.get("filingDate"), search.get("filingDate")),
             accession_number=_first_present(m.get("accessionNumber"), search.get("accessionNumber")),
+            in_table=m.get("inTable") is True,
+            table_title=m.get("tableTitle") if isinstance(m.get("tableTitle"), str) else None,
+            row_label=m.get("rowLabel") if isinstance(m.get("rowLabel"), str) else None,
         ))
     return out
 
@@ -9487,11 +9492,22 @@ async def extract_dilution_bridge(
             atm_matches = await _filing_text_matches(ticker, filing, _ATM_SEARCH_TERMS, 10, 800)
             if atm_matches:
                 break
-    out = _cs.dilution_bridge(
+    bridge_args = (
         ticker.upper(), price_value, (currency or "USD").upper(),
         as_of_date if as_of_date and _re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", as_of_date) else None,
         sources, atm_matches,
     )
+    out = _cs.dilution_bridge(*bridge_args)
+    # No unvested award count is tagged: read it from the filing's award table.
+    if "unvested_share_awards" in out["notDisclosed"]:
+        for _, filing in filings:
+            table_matches = [m for m in await _filing_text_matches(ticker, filing, _AWARD_TABLE_SEARCH_TERMS, 30, 400) if m.in_table]
+            if not table_matches:
+                continue
+            retried = _cs.dilution_bridge(*bridge_args, table_matches)
+            if "unvested_share_awards" not in retried["notDisclosed"]:
+                out = retried
+                break
     if any(item is not None and item[1] for item in loaded):
         out["warnings"].append({"code": "FILING_READ_TRUNCATED", "message": "A filing exceeded the read limit; facts past that point were not parsed.", "severity": "warning"})
     return json.dumps(out)
@@ -9709,6 +9725,107 @@ async def get_uk_company_filings(
         if "timed out" in message.lower():
             return json.dumps({"error": True, "message": "Companies House request timed out."})
         return json.dumps({"error": True, "code": "PROVIDER_ERROR", "message": f"Companies House request failed: {message}"})
+
+
+# ── Valuation snapshot and peer multiples (2.4.0) ─────────────────────────
+# Mirrors the Worker; the arithmetic lives in yfmcp.valuation.
+
+
+def _estimate_rows(company: Any, attr: str) -> list[dict]:
+    try:
+        df = getattr(company, attr)
+    except Exception:
+        return []
+    if df is None or getattr(df, "empty", True):
+        return []
+    df = df.reset_index()
+    df.columns = ["period", *[str(c) for c in df.columns[1:]]]
+    return df.to_dict(orient="records")
+
+
+async def _valuation_market_inputs(ticker: str) -> dict:
+    def fetch() -> dict:
+        company = yf.Ticker(ticker)
+        info = company.info or {}
+        if not info:
+            raise ValueError(f"No Yahoo quote summary for {ticker.upper()}")
+        return _vl.market_inputs_from_yfinance(ticker, info, _estimate_rows(company, "revenue_estimate"), _estimate_rows(company, "earnings_estimate"))
+
+    return await asyncio.to_thread(fetch)
+
+
+_SEC_UNAVAILABLE_STATUSES = {"TICKER_NOT_FOUND", "FILING_NOT_FOUND_TRY_OTHER_TYPE", "FILING_TEXT_NOT_AVAILABLE"}
+
+
+@yfinance_server.tool(
+    name="get_valuation_snapshot",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_valuation_snapshot"],
+    description="Valuation context for one ticker at the current price or one you supply: diluted shares from the SEC dilution bridge at that price, the filing's period-end cash and debt, equity and enterprise value (in-the-money convertibles leave the debt), EV/Revenue, EV/EBITDA and P/E on trailing results and Yahoo's current and next fiscal-year consensus with analyst counts, and ATM capacity. Falls back to Yahoo figures for non-USD or non-SEC listings. Mechanical context, not a price target; nothing is back-solved.",
+)
+async def get_valuation_snapshot(
+    ticker: str,
+    price: float | None = None,
+    filing_type: str = "latest",
+    include_sec_filings: bool = True,
+) -> str:
+    if price is not None:
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            price = math.nan
+        if not math.isfinite(price) or price <= 0:
+            return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "price must be a positive number when supplied."})
+    try:
+        market = await _valuation_market_inputs(ticker)
+    except Exception as exc:
+        return json.dumps({"error": True, "message": f"Yahoo quote summary failed for {ticker.upper()}: {exc}"})
+    quote = price if price is not None else market["price"]
+    sec_warnings: list[dict] = []
+    bridge = capital = None
+    if quote is not None and include_sec_filings is not False:
+        major, major_currency = _vl._major_price(quote, market["currency"])
+        if major_currency is None or major_currency == "USD":
+            b_raw, c_raw = await asyncio.gather(
+                extract_dilution_bridge(ticker=ticker, price=major, currency="USD", filing_type=filing_type, include_atm=True),
+                extract_capital_structure(ticker=ticker, filing_type=filing_type, include_funding_statements=False),
+            )
+            b, c = _unwrap_payload(b_raw), _unwrap_payload(c_raw)
+            bridge = b if b.get("basis") == "MECHANICAL_COMPANY_DISCLOSED" else None
+            capital = c if c.get("basis") == "COMPANY_DISCLOSED" else None
+            status = str(b.get("status") or b.get("code") or c.get("status") or "")
+            if bridge is None or capital is None:
+                sec_warnings.append({
+                    "code": "SEC_FILINGS_UNAVAILABLE",
+                    "message": f"SEC filings were not read ({status}); Yahoo figures are used." if status in _SEC_UNAVAILABLE_STATUSES else "SEC filings could not be read in full; Yahoo figures fill the gaps.",
+                    "severity": "info",
+                })
+        else:
+            sec_warnings.append({"code": "NON_USD_LISTING", "message": f"SEC filings are read only for USD listings; {ticker.upper()} is quoted in {market['currency']}, so Yahoo figures are used.", "severity": "info"})
+    return json.dumps(_vl.valuation_snapshot(ticker.upper(), market, price, bridge, capital, sec_warnings))
+
+
+_PEER_VALUATION_MAX_TICKERS = 10
+
+
+@yfinance_server.tool(
+    name="compare_peer_valuations",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["compare_peer_valuations"],
+    description="The same multiples for a peer set on one Yahoo basis: price x shares outstanding + total debt - total cash, over trailing results and current and next fiscal-year consensus (EV/Revenue, EV/EBITDA, P/E, revenue growth, gross margin). Returns peer medians, min and max excluding the subject, and the subject's premium or discount to each median. Context, not a signal.",
+)
+async def compare_peer_valuations(tickers: list[str], subject: str | None = None) -> str:
+    names: list[str] = []
+    for t in [subject, *(tickers or [])]:
+        u = t.strip().upper() if isinstance(t, str) else ""
+        if u and u not in names:
+            names.append(u)
+    if len(names) < 2 or len(names) > _PEER_VALUATION_MAX_TICKERS:
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": f"tickers must name 2 to {_PEER_VALUATION_MAX_TICKERS} distinct symbols, including the subject."})
+    results = await asyncio.gather(*(_valuation_market_inputs(t) for t in names), return_exceptions=True)
+    markets = [r for r in results if isinstance(r, dict)]
+    errors = [{"ticker": t, "message": str(r)} for t, r in zip(names, results) if not isinstance(r, dict)]
+    if not markets:
+        return json.dumps({"error": True, "message": "Yahoo quote summary failed for every ticker: " + "; ".join(e["message"] for e in errors)})
+    return json.dumps(_vl.peer_valuations(subject, markets, errors))
 
 
 async def _warm_sec_submissions(ticker: str) -> None:

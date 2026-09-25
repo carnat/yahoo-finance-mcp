@@ -146,6 +146,7 @@ jobs:
           python scripts/test_filing_search.py -v
           python scripts/test_quote_calculations.py -v
           python scripts/test_capital_structure.py -v
+          python scripts/test_valuation.py -v
 
       - name: Historical prices contract tests (Worker and local)
         run: python scripts/test_historical_prices_contract.py -v
