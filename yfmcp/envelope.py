@@ -292,6 +292,8 @@ def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metri
                             "columnLabel": None,
                             "rawRow": ev,
                         })
+                # A row with no populated field is not evidence (fail-closed results).
+                standardised_ev = [row for row in standardised_ev if any(v is not None for v in row.values())]
                 val["evidence"] = standardised_ev if standardised_ev else None
 
             inferred_source_type = None
