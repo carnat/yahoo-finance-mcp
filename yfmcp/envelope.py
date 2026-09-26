@@ -211,6 +211,10 @@ def _enrich_facts(val, parent_source_type=None, parent_confidence=None, is_metri
         # extracted facts that need evidence tagging.
         if _is_price_bar(val):
             return val
+        # Evidence payloads (2.5.0) are returned verbatim: an evidence cut's hash
+        # covers exactly these fields, and provider figures carry their own states.
+        if val.get("decisionUse") == "EVIDENCE_ONLY" or str(val.get("schema") or "").startswith("yfmcp.evidence"):
+            return val
         is_fact = "value" in val or "low" in val or "high" in val or "valueRatio" in val or "valuePct" in val or is_metric
         
         if is_fact:

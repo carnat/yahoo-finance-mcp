@@ -153,6 +153,9 @@ function enrichFacts(val: any, parentSourceType: string | null = null, parentCon
     // OHLC price bars carry high/low keys but are raw exchange prices, not
     // extracted facts that need evidence tagging.
     if (isPriceBar(val)) return val;
+    // Evidence payloads (2.5.0) are returned verbatim: an evidence cut's hash
+    // covers exactly these fields, and provider figures carry their own states.
+    if (val.decisionUse === "EVIDENCE_ONLY" || String(val.schema ?? "").startsWith("yfmcp.evidence")) return val;
     const isFact = ("value" in val) || ("low" in val) || ("high" in val) || ("valueRatio" in val) || ("valuePct" in val) || isMetric;
     
     if (isFact) {

@@ -9,9 +9,11 @@
         "get_company_events_calendar": "get_company_events_calendar",
         "get_market_calendar": "get_market_calendar",
         "get_earnings_analysis": "get_earnings_analysis",
-        "extract_analyst_valuation_methods": "extract_analyst_valuation_methods"
+        "extract_analyst_valuation_methods": "extract_analyst_valuation_methods",
+        "get_consensus_forecast_curve": "get_consensus_forecast_curve",
+        "get_eps_revisions": "get_eps_revisions"
       },
-      "description": "Analyst ratings, forecasts, and market calendars.\n\nActions:\n- get_analyst_consensus: Current market price plus target low/high/mean/median; upside uses mean; priceTargets.numberOfAnalysts counts target contributors, ratingCount the ratings. Params: ticker\n- get_earnings_analysis: EPS/revenue estimates and revision counts. Params: ticker\n- get_analyst_recommendations: Raw recs. recommendation_type: recommendations, upgrades_downgrades\n- get_analyst_rating_changes: Recent changes with signal. Params: ticker\n- analyze_earnings_momentum: Revision momentum. Params: ticker\n- get_company_events_calendar: Upcoming Yahoo dates or earnings history. Params: ticker, mode, limit, offset\n- get_market_calendar: Market-wide earnings/economic/IPO/splits. Params: event_type, start_date, end_date, limit, offset\n- extract_analyst_valuation_methods: Multiples, DCF inputs and other methods named in news with firm, target and link; lists targets with no disclosed method; context only. Params: ticker, days_back"
+      "description": "Analyst ratings, forecasts, and market calendars.\n\nActions:\n- get_analyst_consensus: Current market price plus target low/high/mean/median; upside uses mean; priceTargets.numberOfAnalysts counts target contributors, ratingCount the ratings. Params: ticker\n- get_earnings_analysis: EPS/revenue estimates and revision counts. Params: ticker\n- get_analyst_recommendations: Raw recs. recommendation_type: recommendations, upgrades_downgrades\n- get_analyst_rating_changes: Recent changes with signal. Params: ticker\n- analyze_earnings_momentum: Revision momentum. Params: ticker\n- get_company_events_calendar: Upcoming Yahoo dates or earnings history. Params: ticker, mode, limit, offset\n- get_market_calendar: Market-wide earnings/economic/IPO/splits. Params: event_type, start_date, end_date, limit, offset\n- extract_analyst_valuation_methods: Multiples, DCF inputs and other methods named in news with firm, target and link; lists targets with no disclosed method; context only. Params: ticker, days_back\n- get_consensus_forecast_curve: FY0 to FY+5 EPS and revenue consensus per provider (Yahoo, Alpha Vantage) with coverage per cell: PROVIDER_COVERED, PROVIDER_NOT_COVERED, INSUFFICIENT_ANALYST_COUNT, PROVIDER_CONFLICT; gaps stay visible, nothing is extrapolated; evidence only. Params: ticker, horizon_years, min_analyst_count, conflict_tolerance_pct\n- get_eps_revisions: FY0/FY+1 EPS mean now and 7/30/60/90 days ago with changes, up/down revision counts per provider; revenue revisions not covered; evidence only. Params: ticker"
     },
     "earnings_intelligence": {
       "actions": {
@@ -25,6 +27,15 @@
         "parse_public_transcript": "parse_public_transcript"
       },
       "description": "Earnings release analysis and estimate comparison.\n\nActions:\n- get_latest_earnings_release: Find latest earnings. Params: ticker\n- index_earnings_release: Build earnings index. Params: ticker, period, source_url\n- extract_earnings_metrics: Latest-quarter revenue, EPS, margins; SEC XBRL quarter facts first, then the 8-K release. Params: ticker, period, source_preference (array of sec_8k|company_ir|10-q|yahoo; accepted but the source order is fixed)\n- extract_guidance: Guidance ranges. Params: ticker, period\n- extract_management_commentary: Commentary excerpts. Params: ticker, topics, period\n- compare_earnings_actual_vs_estimate: Actual vs estimate with explicit fiscal-period alignment status. Params: ticker\n- get_earnings_call_transcript: Content-validated SEC transcript, then structured paginated Yahoo/Quartr, with scarce-quota Alpha Vantage last. Preview-only Yahoo data is INCOMPLETE_TRANSCRIPT and falls through; inspect contentCompleteness separately from pageExhausted. contentSha256 uses the cross-runtime canonical text projection named by contentHashBasis. Params: ticker, optional fiscal_quarter, topics, event_id/source_url, paragraph_limit/paragraph_cursor\n- parse_public_transcript: Parse transcript URL. Params: url"
+    },
+    "evidence": {
+      "actions": {
+        "build_valuation_evidence_pack": "build_valuation_evidence_pack",
+        "get_evidence_quality": "get_evidence_quality",
+        "get_evidence_cut": "get_evidence_cut",
+        "list_evidence_cuts": "list_evidence_cuts"
+      },
+      "description": "Reproducible valuation evidence: immutable, content-addressed evidence cuts with a provenance receipt. Evidence composition only, not a valuation engine: decisionUse is EVIDENCE_ONLY and selectedMethod, selectedMultiple, scenarioWeights, priceTarget, g2, opportunity and action are always null.\n\nActions:\n- build_valuation_evidence_pack: Quote, evidence quality, consensus curve, EPS revisions, current capital structure, dilution at the current price, latest guidance and material filings in one evidence cut; each component keeps its source tool, status, warnings and failure; stored when storage is available, returned in full either way. Params: ticker, horizon_years, persist\n- get_evidence_quality: Preflight status, freshness and coverage per evidence family, with blockers, from light requests only. Params: ticker\n- get_evidence_cut: Retrieve a stored evidence cut by id and verify its SHA-256 integrity. Params: evidence_cut_id\n- list_evidence_cuts: Stored evidence cuts for a ticker, newest first. Params: ticker, limit"
     },
     "news_events": {
       "actions": {

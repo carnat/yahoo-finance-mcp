@@ -10664,10 +10664,349 @@ from yfmcp.tools.earnings import (  # re-export for compatibility and grouped ro
 
 
 # ---------------------------------------------------------------------------
+# Evidence tools (2.5.0): consensus curve, EPS revisions, evidence quality,
+# valuation evidence pack and content-addressed evidence cuts. Shared logic
+# lives in yfmcp/evidence.py (parity with worker/src/evidence.ts); storage in
+# yfmcp/evidence_store.py (YFMCP_EVIDENCE_DIR, else UNAVAILABLE).
+# ---------------------------------------------------------------------------
+from yfmcp import evidence as _ev  # noqa: E402
+from yfmcp import evidence_store as _es  # noqa: E402
+from yfmcp.build_info import BUILD_SHA as _BUILD_SHA  # noqa: E402
+from yfmcp.clients.market_providers import fetch_alpha_vantage_json as _fetch_alpha_vantage_json  # noqa: E402
+
+_ALPHA_VANTAGE_ESTIMATES_TTL_SECONDS = 6 * 60 * 60
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _plain(value: Any) -> Any:
+    return value.item() if hasattr(value, "item") else value
+
+
+def _df_period_rows(df: Any) -> dict[str, dict]:
+    if df is None or getattr(df, "empty", True):
+        return {}
+    rows: dict[str, dict] = {}
+    for period, row in df.iterrows():
+        rows[str(period)] = {str(k): _plain(v) for k, v in row.items()}
+    return rows
+
+
+def _add_years(iso_date: str, years: int) -> str:
+    d = datetime.date.fromisoformat(iso_date)
+    try:
+        return d.replace(year=d.year + years).isoformat()
+    except ValueError:  # 29 February
+        return d.replace(year=d.year + years, day=28).isoformat()
+
+
+def _yahoo_consensus_snapshot(ticker: str) -> tuple[dict, dict]:
+    """yfinance estimate tables as the shared Yahoo input, plus the quote. Blocking."""
+    retrieved_at = _now_iso()
+    try:
+        company = yf.Ticker(ticker)
+        info = company.info or {}
+        ee = _df_period_rows(company.earnings_estimate)
+        re_ = _df_period_rows(company.revenue_estimate)
+        et = _df_period_rows(company.eps_trend)
+        er = _df_period_rows(company.eps_revisions)
+    except Exception as exc:  # noqa: BLE001 - each provider fails on its own
+        message = str(exc)
+        return (_ev.yahoo_consensus_input([], retrieved_at=retrieved_at, status="PROVIDER_ERROR", message=message),
+                {"price": None, "currency": None, "priceTime": None, "status": "PROVIDER_ERROR", "message": message})
+    # yfinance tables carry no fiscal period end; FY0 ends at Yahoo's nextFiscalYearEnd.
+    fy_end_epoch = info.get("nextFiscalYearEnd")
+    fiscal_year_ends: dict[str, str] = {}
+    if isinstance(fy_end_epoch, (int, float)) and fy_end_epoch > 0:
+        fy0 = datetime.datetime.fromtimestamp(fy_end_epoch, datetime.timezone.utc).date().isoformat()
+        fiscal_year_ends = {"0y": fy0, "+1y": _add_years(fy0, 1)}
+    trend = [
+        {"period": p, "earningsEstimate": ee.get(p) or {}, "revenueEstimate": re_.get(p) or {}, "epsTrend": et.get(p), "epsRevisions": er.get(p)}
+        for p in ("0y", "+1y") if p in ee or p in re_ or p in et
+    ]
+    yahoo = _ev.yahoo_consensus_input(trend, retrieved_at=retrieved_at, financial_currency=info.get("financialCurrency"),
+                                      fiscal_year_ends=fiscal_year_ends, fiscal_year_end_basis="DERIVED_FROM_NEXT_FISCAL_YEAR_END")
+    price = info.get("regularMarketPrice") if info.get("regularMarketPrice") is not None else info.get("currentPrice")
+    market_time = info.get("regularMarketTime")
+    quote = {
+        "price": _plain(price) if isinstance(_plain(price), (int, float)) else None,
+        "currency": info.get("currency"),
+        "priceTime": datetime.datetime.fromtimestamp(market_time, datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        if isinstance(market_time, (int, float)) else None,
+        "status": "OK" if info else "NO_DATA",
+        "message": None if info else "Yahoo returned no quote summary.",
+    }
+    return yahoo, quote
+
+
+async def _consensus_providers(ticker: str) -> tuple[list[dict], dict]:
+    symbol = ticker.upper()
+    (yahoo, quote), alpha = await asyncio.gather(
+        asyncio.to_thread(_yahoo_consensus_snapshot, symbol),
+        _fetch_alpha_vantage_json("EARNINGS_ESTIMATES", {"symbol": symbol}, ttl_seconds=_ALPHA_VANTAGE_ESTIMATES_TTL_SECONDS),
+    )
+    alpha_input = _ev.alpha_vantage_consensus_input(
+        alpha.payload, retrieved_at=alpha.fetched_at or _now_iso(), status=None if alpha.status == "OK" else alpha.status, message=alpha.message,
+    )
+    return [yahoo, alpha_input], quote
+
+
+def _consensus_policy(horizon_years: Any, min_analyst_count: Any, conflict_tolerance_pct: Any) -> dict | str:
+    try:
+        horizon = float(horizon_years)
+        minimum = float(min_analyst_count)
+        tolerance = float(conflict_tolerance_pct)
+    except (TypeError, ValueError):
+        return "horizon_years, min_analyst_count and conflict_tolerance_pct must be numbers."
+    if not horizon.is_integer() or not 1 <= horizon <= 5:
+        return "horizon_years must be an integer from 1 to 5."
+    if not minimum.is_integer() or not 1 <= minimum <= 50:
+        return "min_analyst_count must be an integer from 1 to 50."
+    if not math.isfinite(tolerance) or not 0 <= tolerance <= 100:
+        return "conflict_tolerance_pct must be from 0 to 100."
+    return {**_ev.DEFAULT_CONSENSUS_POLICY, "horizonYears": int(horizon), "minAnalystCount": int(minimum), "conflictTolerancePct": tolerance}
+
+
+def _write_consensus_observation(ticker: str, curve: dict, observed_at: str) -> dict:
+    key = _ev.consensus_observation_key(ticker, observed_at)
+    body = _ev.canonical_json({
+        "schema": _ev.CONSENSUS_OBSERVATION_SCHEMA, "ticker": ticker.upper(), "observedAt": observed_at,
+        "serverVersion": SERVER_VERSION, "buildSha": _BUILD_SHA, "curve": curve,
+    })
+    written = _es.put_once(key, body, {"ticker": ticker.upper(), "kind": "consensus-observation"})
+    return {"status": written["status"], "key": None if written["status"] == "UNAVAILABLE" else key, **({"message": written["message"]} if written.get("message") else {})}
+
+
+@yfinance_server.tool(
+    name="get_consensus_forecast_curve",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_consensus_forecast_curve"],
+    description="Street consensus by fiscal year, FY0 to FY+horizon, for EPS and revenue from Yahoo Finance and Alpha Vantage, each provider reported separately with fiscal year end, currency, mean/high/low, analyst count and retrieval time. Each metric and period states its coverage: PROVIDER_COVERED, PROVIDER_NOT_COVERED, INSUFFICIENT_ANALYST_COUNT or PROVIDER_CONFLICT (with the cross-provider difference). Years and metrics no provider covers stay PROVIDER_NOT_COVERED; nothing is interpolated, extended by growth rates, or derived. Evidence only.",
+)
+async def get_consensus_forecast_curve(ticker: str, horizon_years: int = 5, min_analyst_count: int = 3, conflict_tolerance_pct: float = 10) -> str:
+    policy = _consensus_policy(horizon_years, min_analyst_count, conflict_tolerance_pct)
+    if isinstance(policy, str):
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": policy})
+    as_of = _now_iso()
+    inputs, _ = await _consensus_providers(ticker)
+    curve = _ev.build_consensus_curve(ticker, inputs, as_of, policy)
+    # The first observation of the day is kept; later calls report ALREADY_STORED.
+    observation = _write_consensus_observation(ticker, curve, as_of)
+    return json.dumps({**curve, "storage": {"consensusObservation": observation}})
+
+
+@yfinance_server.tool(
+    name="get_eps_revisions",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_eps_revisions"],
+    description="EPS estimate revision windows for FY0 and FY+1 as each provider reports them: the mean now and 7, 30, 60 and 90 days ago with change and percent change, and up/down revision counts over 7 and 30 days. Revenue revisions and analyst adds/drops are PROVIDER_NOT_COVERED. Lists the dates of stored daily consensus observations. Evidence only.",
+)
+async def get_eps_revisions(ticker: str) -> str:
+    as_of = _now_iso()
+    inputs, _ = await _consensus_providers(ticker)
+    revisions = _ev.build_eps_revisions(ticker, inputs, as_of)
+    store = _es.get_store()
+    stored: dict = {"storageStatus": "UNAVAILABLE", "observationDates": []}
+    if store is not None:
+        try:
+            keys = store.list(f"consensus-history/{ticker.upper()}/", 400)
+            stored = {"storageStatus": "AVAILABLE", "observationDates": [k.rsplit("/", 1)[-1].removesuffix(".json") for k in keys]}
+        except Exception as exc:  # noqa: BLE001
+            stored = {"storageStatus": "FAILED", "observationDates": [], "message": str(exc)}
+    return json.dumps({**revisions, "storedConsensusObservations": stored})
+
+
+async def _sec_filing_rows(ticker: str) -> tuple[list[dict] | None, str]:
+    try:
+        cik_padded, subs = await _get_submissions_for_ticker(ticker)
+    except Exception as exc:  # noqa: BLE001
+        return None, f"PROVIDER_ERROR: {exc}"
+    if not cik_padded or not subs:
+        return None, "TICKER_NOT_FOUND"
+    recent = (subs.get("filings") or {}).get("recent") or {}
+    forms = recent.get("form") or []
+
+    def at(field: str, i: int) -> Any:
+        values = recent.get(field) or []
+        return values[i] if i < len(values) else None
+
+    rows = []
+    for i, form in enumerate(forms):
+        filing_date = str(at("filingDate", i) or "")
+        if not filing_date:
+            continue
+        inline = at("isInlineXBRL", i)
+        rows.append({
+            "form": str(form),
+            "filingDate": filing_date,
+            "reportDate": str(at("reportDate", i)) if at("reportDate", i) else None,
+            "items": str(at("items", i)) if at("items", i) is not None else None,
+            "isInlineXBRL": (int(inline) == 1) if inline is not None and str(inline).strip() != "" else None,
+        })
+    return rows, "OK"
+
+
+@yfinance_server.tool(
+    name="get_evidence_quality",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_evidence_quality"],
+    description="Preflight before a valuation evidence pack: status, freshness and coverage per evidence family (quote, latest SEC periodic filing, capital structure and dilution readiness, earnings-release guidance, material 8-Ks, FY0/FY+1 consensus cells, durable storage) and the blockers, from light requests only. Evidence only.",
+)
+async def get_evidence_quality(ticker: str) -> str:
+    as_of = _now_iso()
+    (inputs, quote), (rows, status) = await asyncio.gather(_consensus_providers(ticker), _sec_filing_rows(ticker))
+    curve = _ev.build_consensus_curve(ticker, inputs, as_of)
+    return json.dumps(_ev.evidence_quality(ticker=ticker, as_of=as_of, quote=quote, filings=rows, filings_status=status,
+                                           consensus=curve, storage_available=_es.get_store() is not None))
+
+
+async def _run_component(source_tool: str, coro: Any) -> dict:
+    try:
+        text = await coro
+        return _ev.component_from_tool_text(source_tool, text, _now_iso())
+    except Exception as exc:  # noqa: BLE001 - a failed component is evidence of that failure
+        return _ev.component_from_tool_text(source_tool, None, _now_iso(), exc)
+
+
+def _not_applicable(source_tool: str, code: str, message: str, retrieved_at: str) -> dict:
+    return {"status": "NOT_APPLICABLE", "sourceTool": source_tool, "retrievedAt": retrieved_at, "data": None, "warnings": [], "error": {"code": code, "message": message}}
+
+
+@yfinance_server.tool(
+    name="build_valuation_evidence_pack",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["build_valuation_evidence_pack"],
+    description="One evidence cut for valuation work: quote, evidence quality, consensus curve, EPS revisions, current capital structure, dilution bridge at the current price, latest guidance and material filings, each with its source tool, status, warnings and failure, plus a provenance receipt hashing every component. decisionUse is EVIDENCE_ONLY; selectedMethod, selectedMultiple, scenarioWeights, priceTarget, g2, opportunity and action are always null. Stored immutably under a content-addressed evidenceCutId when storage is available; the full payload is returned either way.",
+)
+async def build_valuation_evidence_pack(ticker: str, horizon_years: int = 5, persist: bool = True) -> str:
+    policy = _consensus_policy(horizon_years, _ev.DEFAULT_CONSENSUS_POLICY["minAnalystCount"], _ev.DEFAULT_CONSENSUS_POLICY["conflictTolerancePct"])
+    if isinstance(policy, str):
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": policy})
+    symbol = ticker.upper()
+    cutoff = _now_iso()
+    (inputs, quote), (rows, filings_status) = await asyncio.gather(_consensus_providers(symbol), _sec_filing_rows(symbol))
+    curve = _ev.build_consensus_curve(symbol, inputs, cutoff, policy)
+    major_price, major_currency = _vl._major_price(quote["price"], quote["currency"]) if quote["price"] is not None else (None, None)
+
+    async def dilution() -> dict:
+        if major_price is None:
+            return _not_applicable("extract_dilution_bridge", "PRICE_UNAVAILABLE", "No current price to run the dilution bridge at.", cutoff)
+        if major_currency != "USD":
+            return _not_applicable("extract_dilution_bridge", "NON_USD_LISTING", f"The dilution bridge reads SEC filings for USD listings; {symbol} is quoted in {quote['currency']}.", cutoff)
+        return await _run_component("extract_dilution_bridge", extract_dilution_bridge(ticker=symbol, price=major_price, currency="USD", filing_type="latest", include_atm=True))
+
+    await _warm_sec_submissions(symbol)
+    capital, diluted, guidance, events = await asyncio.gather(
+        _run_component("extract_capital_structure", extract_capital_structure(ticker=symbol, filing_type="latest", include_funding_statements=True)),
+        dilution(),
+        _run_component("extract_guidance", extract_guidance(symbol, "latest")),
+        _run_component("list_sec_material_filings", list_sec_material_filings(symbol, None, 10)),
+    )
+    components = {
+        "quote": {
+            "status": "OK" if quote["price"] is not None else "FAILED",
+            "sourceTool": "yahoo_quote_summary",
+            "retrievedAt": inputs[0]["retrievedAt"],
+            "data": {**quote, "majorUnitPrice": major_price, "majorUnitCurrency": major_currency},
+            "warnings": [],
+            "error": None if quote["price"] is not None else {"code": quote["status"], "message": quote.get("message") or "No price."},
+        },
+        "evidenceQuality": _ev.component_from_value("get_evidence_quality", _ev.evidence_quality(
+            ticker=symbol, as_of=cutoff, quote=quote, filings=rows, filings_status=filings_status, consensus=curve, storage_available=_es.get_store() is not None,
+        ), cutoff),
+        "consensus": _ev.component_from_value("get_consensus_forecast_curve", curve, cutoff),
+        "epsRevisions": _ev.component_from_value("get_eps_revisions", _ev.build_eps_revisions(symbol, inputs, cutoff), cutoff),
+        "currentCapitalStructure": capital,
+        "currentDilution": diluted,
+        "latestGuidance": guidance,
+        "materialEvents": events,
+    }
+    # A pack whose providers all failed is still evidence of that; its components say so.
+    if all(not i["periods"] for i in inputs):
+        components["consensus"]["status"] = "LIMITED"
+    hashes = {name: _es.sha256_hex(_ev.canonical_json(c)) for name, c in components.items()}
+    receipt = _ev.build_receipt(ticker=symbol, evidence_cutoff=cutoff, server_version=SERVER_VERSION, build_sha=_BUILD_SHA, runtime="python_local",
+                                components=components, component_hashes=hashes, components_sha256=_es.sha256_hex(_ev.canonical_json(components)))
+    document = _ev.evidence_cut_document(ticker=symbol, evidence_cutoff=cutoff, components=components, receipt=receipt)
+    body = _ev.canonical_json(document)
+    sha = _es.sha256_hex(body)
+    key = _ev.evidence_cut_key(symbol, _ev.compact_timestamp(cutoff), sha)
+    stored = _es.put_once(key, body, {"ticker": symbol, "sha256": sha, "serverVersion": SERVER_VERSION}) if persist is not False else {"status": "SKIPPED"}
+    observation = _write_consensus_observation(symbol, curve, cutoff) if persist is not False else {"status": "SKIPPED", "key": None}
+    return json.dumps({
+        **document,
+        "evidenceCut": {
+            "evidenceCutId": _ev.evidence_cut_id(symbol, cutoff, sha),
+            "contentSha256": sha,
+            "storageStatus": stored["status"],
+            "storageKey": key if stored["status"] in ("STORED", "ALREADY_STORED") else None,
+            **({"storageMessage": stored["message"]} if stored.get("message") else {}),
+            "consensusObservation": observation,
+            "verification": "contentSha256 is SHA-256 over canonical JSON (sorted keys, no whitespace, ECMAScript numbers) of this payload without the evidenceCut field.",
+        },
+    })
+
+
+@yfinance_server.tool(
+    name="get_evidence_cut",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_evidence_cut"],
+    description="Retrieve a stored evidence cut by evidenceCutId and verify its integrity: the SHA-256 of the stored canonical JSON must equal the hash in the id (integrity VERIFIED or MISMATCH).",
+)
+async def get_evidence_cut(evidence_cut_id: str) -> str:
+    parsed = _ev.parse_evidence_cut_id(evidence_cut_id or "")
+    if parsed is None:
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "evidence_cut_id must look like ec1_<TICKER>_<YYYYMMDDTHHMMSSZ>_<sha256>."})
+    store = _es.get_store()
+    if store is None:
+        return json.dumps({"error": True, "code": "STORAGE_UNAVAILABLE", "message": "Durable evidence storage is not configured; evidence cuts cannot be retrieved."})
+    try:
+        text = store.get(parsed["key"])
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": True, "code": "STORAGE_ERROR", "message": str(exc)})
+    if text is None:
+        return json.dumps({"error": True, "code": "NOT_FOUND", "message": f"No evidence cut is stored under {evidence_cut_id}."})
+    actual = _es.sha256_hex(text)
+    try:
+        document = json.loads(text)
+    except ValueError:
+        document = None
+    return json.dumps({
+        "evidenceCutId": evidence_cut_id,
+        "storageKey": parsed["key"],
+        "integrity": "VERIFIED" if actual == parsed["sha256"] and document is not None else "MISMATCH",
+        "expectedSha256": parsed["sha256"],
+        "actualSha256": actual,
+        "document": document,
+    })
+
+
+@yfinance_server.tool(
+    name="list_evidence_cuts",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["list_evidence_cuts"],
+    description="Stored evidence cuts for a ticker, newest first, with their ids and cutoff times.",
+)
+async def list_evidence_cuts(ticker: str, limit: int = 20) -> str:
+    symbol = ticker.upper()
+    store = _es.get_store()
+    if store is None:
+        return json.dumps({"ticker": symbol, "storageStatus": "UNAVAILABLE", "cuts": []})
+    cap = max(1, min(100, int(limit) if isinstance(limit, (int, float)) else 20))
+    try:
+        keys = store.list(f"evidence-cuts/{symbol}/", 1000)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ticker": symbol, "storageStatus": "FAILED", "cuts": [], "message": str(exc)})
+    cuts = []
+    for key in keys:
+        m = _re.match(r"^evidence-cuts/([^/]+)/(\d{8}T\d{6}Z)/([0-9a-f]{64})\.json$", key)
+        if m:
+            cuts.append({"evidenceCutId": f"ec1_{m.group(1)}_{m.group(2)}_{m.group(3)}", "cutoff": m.group(2), "storageKey": key})
+    cuts.sort(key=lambda c: c["cutoff"], reverse=True)
+    return json.dumps({"ticker": symbol, "storageStatus": "AVAILABLE", "cuts": cuts[:cap]})
+
+
+# ---------------------------------------------------------------------------
 # Grouped (token-efficient) server mode
 # ---------------------------------------------------------------------------
 # TOOL_MODE env var controls which interface is exposed:
-#   - "grouped" (default): 11 domain meta-tools with action routing
+#   - "grouped" (default): 12 domain meta-tools with action routing
 #   - "expanded": all 79 individual tools (compatibility/debug mode)
 # ---------------------------------------------------------------------------
 _TOOL_MODE = os.environ.get("TOOL_MODE", "grouped").lower().strip()
@@ -10728,7 +11067,7 @@ _grouped_server = None
 def get_server():
     """Return the appropriate server based on TOOL_MODE env var.
 
-    - TOOL_MODE=grouped (default): 11 domain meta-tools
+    - TOOL_MODE=grouped (default): 12 domain meta-tools
     - TOOL_MODE=expanded: 79 individual tools
     """
     global _grouped_server

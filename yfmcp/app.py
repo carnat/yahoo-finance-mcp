@@ -213,6 +213,14 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - get_analyst_rating_changes: Recent rating changes with signal (UPGRADE/DOWNGRADE/MAINTAIN), price target direction, net sentiment.
 - extract_analyst_valuation_methods: Valuation methods named in news (multiples, DCF inputs) with firm and link; context only.
 - analyze_earnings_momentum: EPS revision momentum (7/30/90d), revision direction, beat rate, beat streak.
+- get_consensus_forecast_curve: FY0-FY+5 EPS/revenue consensus per provider with coverage per cell (PROVIDER_COVERED, PROVIDER_NOT_COVERED, INSUFFICIENT_ANALYST_COUNT, PROVIDER_CONFLICT); gaps stay visible; evidence only.
+- get_eps_revisions: FY0/FY+1 EPS mean now and 7/30/60/90 days ago, up/down revision counts per provider; evidence only.
+
+### Evidence cuts
+- build_valuation_evidence_pack: Quote, evidence quality, consensus curve, EPS revisions, capital structure, dilution at the current price, guidance and material filings in one content-addressed evidence cut with a provenance receipt. decisionUse EVIDENCE_ONLY; method, multiple, weights, price target, G2, opportunity and action are always null.
+- get_evidence_quality: Preflight status, freshness and blockers per evidence family.
+- get_evidence_cut: Retrieve a stored evidence cut and verify its SHA-256 integrity.
+- list_evidence_cuts: Stored evidence cuts for a ticker, newest first.
 - get_company_events_calendar: Upcoming Yahoo provider dates or earnings history; dates are UNVERIFIED.
 - get_market_calendar: Market-wide earnings, economic, IPO, or stock-split calendar with pagination.
 

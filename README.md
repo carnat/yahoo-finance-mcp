@@ -136,6 +136,19 @@ enterprise value and multiples on trailing and consensus figures, and
 both are context, not price targets. See
 [provider runtime guidance](docs/provider-runtime-guidance.md#capital-structure-dilution-and-analyst-methods).
 
+`build_valuation_evidence_pack` (group `evidence`) composes the quote,
+consensus curve, EPS revisions, capital structure, dilution, guidance and
+material filings into one evidence cut, with a receipt hashing each
+component. It is evidence only: `decisionUse` is `EVIDENCE_ONLY` and the
+method, multiple, scenario weights, price target, G2, opportunity and action
+fields are always null. Cuts are content-addressed and stored in the private
+R2 bucket bound as `EVIDENCE_BUCKET` (locally, `YFMCP_EVIDENCE_DIR`); without
+storage the full payload and receipt still return with
+`storageStatus: UNAVAILABLE`. `get_consensus_forecast_curve` reports FY0 to
+FY+5 per provider with a coverage state for every cell, and leaves uncovered
+years visibly missing. See
+[provider runtime guidance](docs/provider-runtime-guidance.md#evidence-cuts-and-consensus-250).
+
 Grouped domains:
 
 - `stock_pricing`
@@ -149,6 +162,7 @@ Grouped domains:
 - `screening`
 - `system`
 - `thai_funds`
+- `evidence`
 
 Example grouped call:
 

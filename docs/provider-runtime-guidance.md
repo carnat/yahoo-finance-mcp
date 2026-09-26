@@ -416,6 +416,111 @@ proves what a number belongs to before returning it.
   The shared modules keep their own parity tests (`test_capital_structure`,
   `test_valuation`, `test_extraction_rules`).
 
+## Evidence Cuts And Consensus (2.5.0)
+
+MCP supplies reproducible facts and mechanical transformations. Valuation
+method, selected multiple, scenario weights, price target, G2, opportunity and
+capital action belong to the caller's doctrine. The `evidence` group and the
+consensus actions compose evidence and never fill a gap with an assumption.
+
+- Authority boundary: every evidence payload carries `decisionUse:
+  EVIDENCE_ONLY` and `selectedMethod`, `selectedMultiple`, `scenarioWeights`,
+  `priceTarget`, `g2`, `opportunity` and `action`, always null. No other
+  field stands in for them, and no provider value is selected, blended or
+  averaged.
+- `get_consensus_forecast_curve`:
+  - Reports FY0 to FY+horizon (1 to 5 years) for EPS and revenue. Each
+    provider (Yahoo Finance, Alpha Vantage) is reported separately, with:
+    - fiscal year end and its basis;
+    - currency and its basis;
+    - mean, high and low;
+    - analyst count;
+    - retrieval time.
+  - FY0 is Yahoo's current fiscal year (`0y`). The Worker reads the end date
+    Yahoo states. The local server derives it from `nextFiscalYearEnd`,
+    labelled `DERIVED_FROM_NEXT_FISCAL_YEAR_END`.
+  - Every metric and period has a coverage state:
+    - `PROVIDER_COVERED`;
+    - `PROVIDER_NOT_COVERED`;
+    - `INSUFFICIENT_ANALYST_COUNT`, when fewer analysts than
+      `min_analyst_count` (default 3);
+    - `PROVIDER_CONFLICT`, when means differ by more than
+      `conflict_tolerance_pct` (default 10%, or 0.02 per share for EPS),
+      currencies differ, or fiscal year ends differ by more than 10 days.
+  - Today both providers stop at FY+1. FY+2 to FY+5 stay
+    `PROVIDER_NOT_COVERED`: nothing is interpolated or extended from
+    long-term growth rates. EBITDA, EBIT, FCF, capex and margins are listed
+    as not covered rather than derived.
+  - The only dispersion measure is each provider's high-low range; median
+    and standard deviation are unavailable.
+  - Agreement does not establish independence: live ASTS figures from both
+    providers match to the digit.
+- `get_eps_revisions`:
+  - Reports each provider's FY0/FY+1 EPS mean now and 7, 30, 60 and 90 days
+    ago, with change and percent change.
+  - Also reports up/down revision counts over 7 and 30 days.
+  - Unreported fields are listed in `notReported`.
+  - Revenue revisions and analyst adds/drops are `PROVIDER_NOT_COVERED`.
+- Provider interface: providers enter as `ProviderConsensusInput` rows
+  (`evidence.ts` / `evidence.py`). A paid estimates source can be added as
+  one more adapter without changing the curve or its states. Qualify it for:
+  - FY+2 to FY+5 availability and metric coverage;
+  - analyst counts;
+  - currency and fiscal-period identity;
+  - dispersion;
+  - timestamps and provenance.
+- `get_evidence_quality`: a preflight from light requests only (quote, SEC
+  submissions, consensus coverage, storage). It gives a state, freshness and
+  blockers for each of:
+  - quote;
+  - latest periodic filing;
+  - capital structure and dilution readiness;
+  - earnings-release guidance;
+  - material 8-Ks;
+  - FY0/FY+1 consensus cells;
+  - storage.
+- `build_valuation_evidence_pack`:
+  - Composes the canonical tools rather than reimplementing them. The
+    components are:
+    - quote;
+    - `evidenceQuality`;
+    - `consensus`;
+    - `epsRevisions`;
+    - `currentCapitalStructure`;
+    - `currentDilution` (the bridge at the current price; `NOT_APPLICABLE`
+      for non-USD listings);
+    - `latestGuidance`;
+    - `materialEvents`.
+  - Each component keeps its source tool, status (`OK`, `LIMITED`,
+    `FAILED`, `NOT_APPLICABLE`), warnings, error and payload.
+  - `provenance` is the receipt, with:
+    - ticker, cutoff, server version, build SHA and runtime;
+    - each component's SHA-256, retrieval time, provider timestamps and
+      warning codes;
+    - coverage (`COMPLETE`, `PARTIAL` or `FAILED`).
+- Evidence cuts:
+  - Hashing: the pack without `evidenceCut` is serialized as canonical JSON
+    (sorted keys, no whitespace, ECMAScript number formatting; identical in
+    both runtimes). Its SHA-256 is `contentSha256`.
+  - Identity: `evidenceCutId` is `ec1_<TICKER>_<YYYYMMDDTHHMMSSZ>_<sha256>`,
+    stored at `evidence-cuts/<TICKER>/<timestamp>/<sha256>.json`.
+  - Retrieval: `get_evidence_cut` recomputes the hash of the stored bytes and
+    reports `integrity: VERIFIED` or `MISMATCH`. `list_evidence_cuts` lists a
+    ticker's cuts, newest first.
+  - Envelope: evidence payloads pass through the response envelope
+    unchanged, so the returned fields are the hashed fields.
+- Storage:
+  - The Worker uses the private R2 bucket `yfmcp-evidence`, bound as
+    `EVIDENCE_BUCKET`. The local server uses `YFMCP_EVIDENCE_DIR`.
+  - Objects are written once.
+  - The first consensus curve of each day is kept at
+    `consensus-history/<TICKER>/<yyyy-mm-dd>.json`, to build revision history
+    the providers do not publish.
+  - Storage is never a hard dependency. Without it, the pack returns in full
+    with its receipt and `storageStatus: UNAVAILABLE`. Only retrieval and
+    history are unavailable.
+  - No bucket URL or credential appears in a response.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

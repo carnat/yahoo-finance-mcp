@@ -40,7 +40,7 @@ class TestWorkerGroupedMode(unittest.TestCase):
 
     def test_catalog_has_expected_group_surface(self) -> None:
         groups = self.catalog["groups"]
-        self.assertEqual(len(groups), 11)
+        self.assertEqual(len(groups), 12)
         self.assertEqual(
             set(groups),
             {
@@ -55,6 +55,7 @@ class TestWorkerGroupedMode(unittest.TestCase):
                 "screening",
                 "system",
                 "thai_funds",
+                "evidence",
             },
         )
         self.assertIn("get_market_quote", groups["stock_pricing"]["actions"])
