@@ -397,6 +397,25 @@ proves what a number belongs to before returning it.
   similar) without a space, as a browser renders them, so a heading split
   across spans reads "FINANCIAL", not "FINANC IAL". Block tags still separate.
 
+## Regression Locks (2.4.6)
+
+- The response envelope drops evidence rows with no populated field. A
+  fail-closed result such as `NO_FACT_FOR_ACCESSION` returns `evidence: null`
+  rather than one row of nulls; its provenance is `accessionNumber`,
+  `requestedAccession`, `code` and the warning.
+- `scripts/test_release_regressions.py` locks the provider-layer fixes of
+  2.4.2 to 2.4.5 in both runtimes, offline:
+  - a failed pin echoes the requested accession and skips the latest-filing
+    lookup;
+  - currency-mixed multiples are withheld and P/E is kept;
+  - `surprisePercent` is scaled at every size;
+  - exhibits use the issuer's CIK;
+  - event verification matches before the display cap;
+  - the options flow fields keep their descriptive names.
+
+  The shared modules keep their own parity tests (`test_capital_structure`,
+  `test_valuation`, `test_extraction_rules`).
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

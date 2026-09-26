@@ -225,7 +225,9 @@ function enrichFacts(val: any, parentSourceType: string | null = null, parentCon
             };
           }
           return null;
-        }).filter(Boolean);
+        // A row with no populated field is not evidence (an empty `{}` on a
+        // fail-closed result); dropping it leaves evidence null.
+        }).filter((row) => row && Object.values(row).some((v) => v !== null));
         val.evidence = standardisedEv.length > 0 ? standardisedEv : null;
       }
 
