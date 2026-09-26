@@ -34,6 +34,8 @@ export type MarketInputs = {
   ttmEbitda: number | null;
   grossMarginPct: number | null;
   trailingEps: number | null;
+  /** Yahoo's latest balance-sheet quarter end (YYYY-MM-DD), for the freshness check. */
+  mostRecentQuarter: string | null;
   estimates: Estimate[];
 };
 
@@ -54,6 +56,7 @@ export function marketInputsFromQuoteSummary(ticker: string, result: Record<stri
   const trend = (((result.earningsTrend ?? {}) as Record<string, unknown>).trend ?? []) as Record<string, unknown>[];
   const time = rawNum(price.regularMarketTime);
   const gross = rawNum(fd.grossMargins);
+  const quarter = rawNum(ks.mostRecentQuarter);
   return {
     ticker: ticker.toUpperCase(),
     name: text(price.longName) ?? text(price.shortName),
@@ -70,6 +73,7 @@ export function marketInputsFromQuoteSummary(ticker: string, result: Record<stri
     ttmEbitda: rawNum(fd.ebitda),
     grossMarginPct: gross != null ? round(gross * 100, 2) : null,
     trailingEps: rawNum(ks.trailingEps),
+    mostRecentQuarter: quarter != null ? new Date(quarter * 1000).toISOString().slice(0, 10) : null,
     estimates: trend
       .filter((t) => typeof t.period === "string")
       .map((t) => {
@@ -161,7 +165,9 @@ function yahooBasis(market: MarketInputs, price: number | null): { marketCap: nu
   if (price == null) return { marketCap: null, enterpriseValue: null, shares, shareBasis: basis };
   const major = majorPrice(price, market.currency);
   const marketCap = shares != null ? major.price * shares : market.marketCap;
-  const enterpriseValue = marketCap != null && market.totalDebt != null && market.totalCash != null
+  // Cash and debt are in the financial currency; adding them to a quote in
+  // another currency is dimensionally invalid (TSM: USD ADR, TWD balances).
+  const enterpriseValue = marketCap != null && market.totalDebt != null && market.totalCash != null && comparableCurrency(market)
     ? marketCap + market.totalDebt - market.totalCash
     : null;
   return { marketCap: marketCap != null ? round(marketCap) : null, enterpriseValue: enterpriseValue != null ? round(enterpriseValue) : null, shares, shareBasis: basis };
@@ -184,6 +190,37 @@ export type SnapshotInput = {
 // Cash plus investments more than 10% above Yahoo's total, with cash alone within 2% of it.
 const SEC_YAHOO_EXCESS = 0.1;
 const SEC_YAHOO_CASH_MATCH = 0.02;
+// Yahoo's cash and short-term investments more than 5% above the filing's.
+const SEC_YAHOO_SHORTFALL = 0.05;
+// Filing balances more than 45 days older than Yahoo's latest quarter are stale.
+const STALE_BALANCE_DAYS = 45;
+// Yahoo's totals are compared with the filing's only for the same quarter end.
+const SAME_QUARTER_DAYS = 7;
+// SEC ordinary shares within 2% of a whole multiple (2x or more) of Yahoo's
+// count are ADR-quoted: Yahoo counts depositary shares (TSM: 5 per ADS).
+const ADS_MIN_RATIO = 1.9;
+const ADS_RATIO_TOLERANCE = 0.02;
+// Otherwise counts more than 1.5x apart are on different bases; Yahoo's is used.
+const SHARE_BASIS_MAX_RATIO = 1.5;
+
+/** Ordinary shares per quoted share when the two counts are a whole multiple apart, else null. */
+export function adsRatio(secShares: number, quotedShares: number): number | null {
+  if (!(secShares > 0) || !(quotedShares > 0)) return null;
+  const r = secShares / quotedShares;
+  if (r >= ADS_MIN_RATIO) {
+    const n = Math.floor(r + 0.5);
+    return Math.abs(r - n) <= ADS_RATIO_TOLERANCE * n ? n : null;
+  }
+  if (r <= 1 / ADS_MIN_RATIO) {
+    const k = Math.floor(1 / r + 0.5);
+    return Math.abs(1 / r - k) <= ADS_RATIO_TOLERANCE * k ? 1 / k : null;
+  }
+  return null;
+}
+
+function daysBetween(earlier: string, later: string): number {
+  return Math.round((Date.parse(`${later}T00:00:00Z`) - Date.parse(`${earlier}T00:00:00Z`)) / 86_400_000);
+}
 
 function num(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -198,16 +235,54 @@ export function valuationSnapshot(input: SnapshotInput): Record<string, unknown>
     return { ticker: input.ticker, status: "PRICE_UNAVAILABLE", code: "PRICE_UNAVAILABLE", message: "No price was supplied and Yahoo returned none.", warnings };
   }
   const major = majorPrice(quote, market.currency);
+  const comparable = comparableCurrency(market);
   const bridgeCore = (bridge?.bridge ?? null) as Record<string, unknown> | null;
   const bridgeBasic = (bridge?.basicShares ?? null) as Record<string, unknown> | null;
-  const basic = num(bridgeBasic?.shares) ?? market.sharesOutstanding;
-  const diluted = num(bridgeCore?.dilutedSharesAtPrice);
-  const shareBasis = num(bridgeBasic?.shares) != null ? "sec_cover_page" : (market.sharesOutstanding != null ? "yahoo_shares_outstanding" : null);
+  const secBasic = num(bridgeBasic?.shares);
+  const quoted = yahooShares(market);
+  // SEC counts ordinary shares; the quote may be for depositary shares.
+  let ratio: number | null = null;
+  let secUsable = secBasic != null;
+  // Only foreign issuers (20-F, 40-F) have depositary shares; a domestic
+  // dual-class filer near 2x is not read as an ADR.
+  const basicSource = (bridgeBasic?.source ?? null) as Record<string, unknown> | null;
+  const foreignFiler = typeof basicSource?.filingType === "string" && /^(?:20|40)-F/.test(basicSource.filingType);
+  if (secBasic != null && quoted.shares != null && quoted.shares > 0) {
+    ratio = foreignFiler ? adsRatio(secBasic, quoted.shares) : null;
+    const r = secBasic / quoted.shares;
+    if (ratio != null) {
+      warnings.push({ code: "ADR_RATIO_APPLIED", message: `The filing counts ${secBasic} ordinary shares; Yahoo counts ${quoted.shares} quoted shares, ${ratio} ordinary shares each. SEC share counts are divided by ${ratio} before the price is applied.`, severity: "info" });
+    } else if (r > SHARE_BASIS_MAX_RATIO || r < 1 / SHARE_BASIS_MAX_RATIO) {
+      secUsable = false;
+      warnings.push({ code: "SHARE_BASIS_MISMATCH", message: `The filing's ${secBasic} shares and Yahoo's ${quoted.shares} differ by more than 1.5x without a whole-number ratio, so Yahoo's count is used.`, severity: "warning" });
+    }
+  }
+  const perQuoted = (shares: number | null) => (shares != null && ratio != null ? round(shares / ratio) : shares);
+  const basic = secUsable ? perQuoted(secBasic) : (quoted.shares ?? market.sharesOutstanding);
+  const diluted = secUsable ? perQuoted(num(bridgeCore?.dilutedSharesAtPrice)) : null;
+  const shareBasis = secUsable ? "sec_cover_page" : (quoted.shares != null ? quoted.basis : null);
   const valueShares = diluted ?? basic;
 
   // Balances: the filing's period-end values when read, else Yahoo's totals.
   const balances = (capital?.balances ?? null) as Record<string, unknown> | null;
-  const secBalances = balances != null && num(balances.totalDebt) != null && num(balances.cashAndEquivalents) != null;
+  let secBalances = balances != null && num(balances.totalDebt) != null && num(balances.cashAndEquivalents) != null;
+  const secCurrency = balances && typeof balances.currency === "string" ? balances.currency : null;
+  if (secBalances && secCurrency && major.currency && secCurrency !== major.currency) {
+    secBalances = false;
+    warnings.push({ code: "SEC_BALANCES_CURRENCY", message: `The filing's balances are in ${secCurrency}; the quote is in ${major.currency}. They are not used.`, severity: "info" });
+  }
+  // A filing older than Yahoo's latest quarter (20-F filers such as TSEM and
+  // NBIS tag only annual reports) gives way to Yahoo's newer balances.
+  const secPeriodEnd = typeof capital?.periodEnd === "string" ? capital.periodEnd : null;
+  const staleDays = secBalances && secPeriodEnd && market.mostRecentQuarter ? daysBetween(secPeriodEnd, market.mostRecentQuarter) : null;
+  if (staleDays != null && staleDays > STALE_BALANCE_DAYS) {
+    if (market.totalCash != null && market.totalDebt != null) {
+      secBalances = false;
+      warnings.push({ code: "SEC_BALANCES_STALE", message: `The filing's balances are from ${secPeriodEnd}; Yahoo has ${market.mostRecentQuarter}, so Yahoo's newer cash and debt are used (its debt can include leases).`, severity: "warning", secPeriodEnd, yahooMostRecentQuarter: market.mostRecentQuarter });
+    } else {
+      warnings.push({ code: "SEC_BALANCES_STALE", message: `The filing's balances are from ${secPeriodEnd}, older than Yahoo's latest quarter ${market.mostRecentQuarter}, and Yahoo has no newer cash and debt; enterprise value uses the older balances.`, severity: "warning", secPeriodEnd, yahooMostRecentQuarter: market.mostRecentQuarter });
+    }
+  }
   const cash = secBalances ? num(balances!.cashAndEquivalents)! : market.totalCash;
   const shortTerm = secBalances ? (num(balances!.shortTermInvestments) ?? 0) : 0;
   const debt = secBalances ? num(balances!.totalDebt)! : market.totalDebt;
@@ -219,12 +294,26 @@ export function valuationSnapshot(input: SnapshotInput): Record<string, unknown>
   // Yahoo's total cash includes short-term investments. When the filing's cash
   // alone matches it but cash plus investments runs well above it, the
   // investments are probably part of cash already (ASTS, 2.4.2). Flagged, not overridden.
-  const yahooCash = market.totalCash;
+  const yahooCash = comparable ? market.totalCash : null;
   if (secBalances && cash != null && shortTerm > 0 && yahooCash != null && yahooCash > 0
     && cash + shortTerm > (1 + SEC_YAHOO_EXCESS) * yahooCash && Math.abs(cash - yahooCash) <= SEC_YAHOO_CASH_MATCH * yahooCash) {
     warnings.push({
       code: "SEC_YAHOO_CASH_MISMATCH",
       message: "The filing's cash alone matches Yahoo's total cash and short-term investments, but cash plus the filing's short-term investments is well above it; the investments may already be inside cash. Check the filing before relying on enterprise value.",
+      severity: "warning",
+      secCash: cash,
+      secShortTermInvestments: shortTerm,
+      yahooTotalCash: yahooCash,
+    });
+  }
+  // The opposite: Yahoo's cash and short-term investments well above the
+  // filing's, for the same quarter, suggests investments the filing tags under
+  // a concept not read (VRT).
+  const sameQuarter = secPeriodEnd != null && market.mostRecentQuarter != null && Math.abs(daysBetween(secPeriodEnd, market.mostRecentQuarter)) <= SAME_QUARTER_DAYS;
+  if (secBalances && sameQuarter && cash != null && yahooCash != null && yahooCash > (1 + SEC_YAHOO_SHORTFALL) * (cash + shortTerm)) {
+    warnings.push({
+      code: "SEC_YAHOO_CASH_SHORTFALL",
+      message: "Yahoo's cash and short-term investments are more than 5% above the filing's cash plus the investments read from it; an investment line may be tagged under a concept not read. Check the balance sheet before relying on enterprise value.",
       severity: "warning",
       secCash: cash,
       secShortTermInvestments: shortTerm,
@@ -241,17 +330,22 @@ export function valuationSnapshot(input: SnapshotInput): Record<string, unknown>
   if (debt != null) convertibleAdjustment = Math.min(convertibleAdjustment, debt);
 
   const equityValue = valueShares != null ? major.price * valueShares : null;
-  const enterpriseValue = equityValue != null && debt != null && cash != null
+  // Yahoo's balances are in the financial currency; never add them to equity in another.
+  const balancesComparable = secBalances || comparable;
+  const enterpriseValue = equityValue != null && debt != null && cash != null && balancesComparable
     ? equityValue + debt - convertibleAdjustment - cash - shortTerm
     : null;
-  if (enterpriseValue == null) warnings.push({ code: "ENTERPRISE_VALUE_INCOMPLETE", message: "Shares, cash or debt were unavailable, so enterprise value was not computed.", severity: "warning" });
-  const comparable = comparableCurrency(market);
+  if (!balancesComparable) {
+    warnings.push({ code: "ENTERPRISE_VALUE_CURRENCY_MISMATCH", message: `Cash and debt are in ${market.financialCurrency} and the quote is in ${major.currency}; enterprise value is not computed without an exchange rate.`, severity: "warning" });
+  } else if (enterpriseValue == null) {
+    warnings.push({ code: "ENTERPRISE_VALUE_INCOMPLETE", message: "Shares, cash or debt were unavailable, so enterprise value was not computed.", severity: "warning" });
+  }
   if (!comparable) warnings.push({ code: "FINANCIAL_CURRENCY_MISMATCH", message: `Financials are in ${market.financialCurrency}; the quote is in ${market.currency}.`, severity: "warning" });
 
   const atm = (bridge?.atmProgram ?? null) as Record<string, unknown> | null;
   const yahoo = yahooBasis(market, quote);
-  const sharesDiffPct = basic != null && market.sharesOutstanding != null && market.sharesOutstanding > 0 && shareBasis === "sec_cover_page"
-    ? round((basic / market.sharesOutstanding - 1) * 100, 2)
+  const sharesDiffPct = secBasic != null && market.sharesOutstanding != null && market.sharesOutstanding > 0
+    ? round((secBasic / market.sharesOutstanding - 1) * 100, 2)
     : null;
   return {
     ticker: input.ticker,
@@ -272,7 +366,9 @@ export function valuationSnapshot(input: SnapshotInput): Record<string, unknown>
       diluted,
       usedForValue: valueShares,
       basis: shareBasis,
-      dilutionPctAtPrice: num(bridgeCore?.dilutionPctAtPrice),
+      secOrdinaryShares: secBasic,
+      ordinarySharesPerQuotedShare: ratio,
+      dilutionPctAtPrice: secUsable ? num(bridgeCore?.dilutionPctAtPrice) : null,
       bridgeStatus: bridge?.status ?? null,
       yahooSharesOutstanding: market.sharesOutstanding,
       yahooImpliedSharesOutstanding: market.impliedSharesOutstanding,

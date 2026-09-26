@@ -221,7 +221,12 @@ of them forecasts, and none may be back-solved into a consensus figure.
   cross-check. When a component is missing, `taggedDilutionConcepts` lists the
   share-count concepts the filing does tag, each with its axes.
 - `extract_capital_structure` reports, at the filing's period end:
-  - cash, short-term investments and total debt, with the concepts used.
+  - cash, short-term investments and total debt, with the concepts used and
+    the balances' currency. Short-term investments are the tagged total
+    (`ShortTermInvestments`, `MarketableSecuritiesCurrent`); without one, the
+    current available-for-sale, held-to-maturity and other short-term
+    investment lines are added (VRT tags only its held-to-maturity Treasury
+    bills).
     Convertible notes reported on their own balance-sheet line are added to
     the long-term debt lines when they exceed them, so they cannot already be
     inside (AAOI);
@@ -278,6 +283,23 @@ of them forecasts, and none may be back-solved into a consensus figure.
     current and next fiscal-year consensus, each with the analyst count. A
     zero or negative denominator leaves the multiple empty, with a note;
   - ATM capacity is reported beside the share count, not added to it;
+  - the filing's share counts are ordinary shares. For a 20-F or 40-F filer
+    whose count is within 2% of a whole multiple (2x or more) of Yahoo's, the
+    quote is for depositary shares: counts are divided by that ratio
+    (`ordinarySharesPerQuotedShare`, `ADR_RATIO_APPLIED`; TSM is 5). Otherwise
+    counts more than 1.5x apart fall back to Yahoo's (`SHARE_BASIS_MISMATCH`);
+  - balances in another currency than the quote are never added to equity.
+    Filing balances in another currency are not used (`SEC_BALANCES_CURRENCY`),
+    and when Yahoo's financial currency differs from the quote, enterprise
+    value is empty with `ENTERPRISE_VALUE_CURRENCY_MISMATCH` and status
+    `PARTIAL`. The peer basis and `compare_peer_valuations` rows do the same;
+  - filing balances more than 45 days older than Yahoo's latest quarter
+    (`mostRecentQuarter`) give way to Yahoo's newer cash and debt, with
+    `SEC_BALANCES_STALE` naming both dates. 20-F filers such as TSEM and NBIS
+    tag only their annual report, so this is common for them;
+  - `SEC_YAHOO_CASH_SHORTFALL` warns when, for the same quarter, Yahoo's cash
+    and short-term investments are more than 5% above the filing's: an
+    investment line may be tagged under a concept not read;
   - `SEC_YAHOO_CASH_MISMATCH` warns when the filing's cash alone is within 2%
     of Yahoo's total cash (which includes short-term investments) but cash
     plus the filing's investments is more than 10% above it: the investments

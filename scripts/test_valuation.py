@@ -38,13 +38,14 @@ def _r(value):
     return {"raw": value, "fmt": str(value)}
 
 
-def _qs(*, name, currency, price, fin_currency, shares, cash, debt, revenue, ebitda, gross, eps, fy0, fy1, market_cap=None, implied=None):
+def _qs(*, name, currency, price, fin_currency, shares, cash, debt, revenue, ebitda, gross, eps, fy0, fy1, market_cap=None, implied=None, mrq=None):
     return {
         "price": {"longName": name, "currency": currency, "regularMarketPrice": _r(price), "regularMarketTime": _r(1790000000),
                   **({"marketCap": _r(market_cap)} if market_cap is not None else {})},
         "financialData": {"financialCurrency": fin_currency, "totalCash": _r(cash), "totalDebt": _r(debt), "totalRevenue": _r(revenue),
                           "ebitda": _r(ebitda), "grossMargins": _r(gross)},
-        "defaultKeyStatistics": {"sharesOutstanding": _r(shares), "trailingEps": _r(eps), **({"impliedSharesOutstanding": _r(implied)} if implied is not None else {})},
+        "defaultKeyStatistics": {"sharesOutstanding": _r(shares), "trailingEps": _r(eps), **({"impliedSharesOutstanding": _r(implied)} if implied is not None else {}),
+                                 **({"mostRecentQuarter": _r(mrq)} if mrq is not None else {})},
         "earningsTrend": {"trend": [
             {"period": "0q", "revenueEstimate": {"avg": _r(fy0[0] / 4)}, "earningsEstimate": {"avg": _r(0.01)}},
             {"period": "0y", "revenueEstimate": {"avg": _r(fy0[0]), "numberOfAnalysts": _r(fy0[1])}, "earningsEstimate": {"avg": _r(fy0[2]), "numberOfAnalysts": _r(fy0[3])}},
@@ -66,6 +67,12 @@ QUOTE_SUMMARIES = {
     "UPC": _qs(name="Up-C Co", currency="USD", price=60.0, fin_currency="USD", shares=300_000_000, implied=390_000_000, cash=4_000_000_000, debt=3_000_000_000,
                revenue=100_000_000, ebitda=-400_000_000, gross=0.4, eps=-2.0, fy0=(170_000_000, 12, -2.3, 8), fy1=(650_000_000, 11, -1.1, 9)),
     # ADR-style mismatch: USD quote, TWD financials.
+    # TSM-like ADR (2.4.3): USD quote on depositary shares, TWD financials.
+    "ADRX": _qs(name="ADR Co", currency="USD", price=450.0, fin_currency="TWD", shares=5_000_000, cash=3_500_000_000, debt=1_000_000_000,
+                revenue=4_000_000_000, ebitda=3_000_000_000, gross=0.6, eps=13.0, fy0=(5_000_000_000, 40, 17.0, 13), fy1=(7_000_000_000, 40, 22.0, 13)),
+    # Yahoo already has a quarter after the filing's period end (2.4.3).
+    "STALE": _qs(name="Stale Co", currency="USD", price=25.0, fin_currency="USD", shares=101_000_000, cash=500_000_000, debt=450_000_000,
+                 revenue=500_000_000, ebitda=-20_000_000, gross=0.3, eps=-0.5, fy0=(600_000_000, 7, 0.25, 7), fy1=(800_000_000, 6, 1.1, 6), mrq=1782777600),
     "PEER3": _qs(name="Peer Three", currency="USD", price=10.0, fin_currency="TWD", shares=50_000_000, cash=900_000_000, debt=100_000_000,
                  revenue=3_000_000_000, ebitda=300_000_000, gross=0.3, eps=10.0, fy0=(3_300_000_000, 2, 11.0, 2), fy1=(3_600_000_000, 2, 12.0, 2)),
 }
@@ -82,9 +89,22 @@ BRIDGE = {
     "atmProgram": {"remainingCapacityUsd": 140_000_000, "programSizeUsd": None, "potentialShares": 5_600_000},
 }
 CAPITAL = {"basis": "COMPANY_DISCLOSED", "periodEnd": "2025-03-31", "balances": {"cashAndEquivalents": 140_000_000, "shortTermInvestments": None, "totalDebt": 380_000_000}}
-# A filing that tags no borrowings (AEHR, 2.4.2): debt is zero, not Yahoo's lease-inclusive total.
 # Filing cash equals Yahoo's total cash, yet the filing adds investments on top (ASTS-like).
 CAPITAL_CASH_MISMATCH = {"basis": "COMPANY_DISCLOSED", "periodEnd": "2025-03-31", "balances": {"cashAndEquivalents": 190_000_000, "shortTermInvestments": 150_000_000, "totalDebt": 380_000_000}}
+# Yahoo's cash well above the filing's cash plus investments read (VRT-like, 2.4.3).
+CAPITAL_SHORTFALL = {"basis": "COMPANY_DISCLOSED", "periodEnd": "2025-03-31", "balances": {"cashAndEquivalents": 100_000_000, "shortTermInvestments": None, "totalDebt": 380_000_000, "currency": "USD"}}
+# Balances in another currency than the quote are never used against it (2.4.3).
+CAPITAL_EUR = {"basis": "COMPANY_DISCLOSED", "periodEnd": "2025-03-31", "balances": {"cashAndEquivalents": 100_000_000, "shortTermInvestments": None, "totalDebt": 50_000_000, "currency": "EUR"}}
+# An annual report behind Yahoo's latest quarter (TSEM/NBIS-like, 2.4.3).
+CAPITAL_STALE = {"basis": "COMPANY_DISCLOSED", "periodEnd": "2025-12-31", "balances": {"cashAndEquivalents": 140_000_000, "shortTermInvestments": None, "totalDebt": 380_000_000, "currency": "USD"}}
+# A 20-F filer counting ordinary shares while its ADR trades at 5 per ADS (TSM-like, 2.4.3).
+BRIDGE_ADR = {"status": "COMPUTED", "basicShares": {"shares": 25_000_000, "source": {"filingType": "20-F"}}, "bridge": {"dilutedSharesAtPrice": 25_000_000, "dilutionPctAtPrice": 0}}
+# A domestic filer twice Yahoo's count: not an ADR, so Yahoo's count is used.
+BRIDGE_DOMESTIC_2X = {"status": "COMPUTED", "basicShares": {"shares": 40_000_000, "source": {"filingType": "10-K"}}, "bridge": {"dilutedSharesAtPrice": 41_000_000, "dilutionPctAtPrice": 2.5}}
+# The fixture company with Yahoo's quarter matching the filing's period end.
+QUOTE_SUMMARIES["SAMEQ"] = copy.deepcopy(QUOTE_SUMMARIES["CSTC"])
+QUOTE_SUMMARIES["SAMEQ"]["defaultKeyStatistics"]["mostRecentQuarter"] = _r(1743379200)
+# A filing that tags no borrowings (AEHR, 2.4.2): debt is zero, not Yahoo's lease-inclusive total.
 CAPITAL_DEBT_FREE = {"basis": "COMPANY_DISCLOSED", "periodEnd": "2025-03-31", "balances": {"cashAndEquivalents": 140_000_000, "shortTermInvestments": None, "totalDebt": 0}}
 
 _WORKER_PURE = r"""
@@ -97,6 +117,13 @@ const out = { markets };
 out.snapshot = m.valuationSnapshot({ ticker: "CSTC", market: markets.CSTC, suppliedPrice: null, bridge: data.bridge, capital: data.capital, secWarnings: [] });
 out.snapshotCashMismatch = m.valuationSnapshot({ ticker: "CSTC", market: markets.CSTC, suppliedPrice: null, bridge: null, capital: data.capitalCashMismatch, secWarnings: [] });
 out.snapshotDebtFree = m.valuationSnapshot({ ticker: "CSTC", market: markets.CSTC, suppliedPrice: null, bridge: null, capital: data.capitalDebtFree, secWarnings: [] });
+out.snapshotShortfall = m.valuationSnapshot({ ticker: "SAMEQ", market: markets.SAMEQ, suppliedPrice: null, bridge: null, capital: data.capitalShortfall, secWarnings: [] });
+out.snapshotEur = m.valuationSnapshot({ ticker: "CSTC", market: markets.CSTC, suppliedPrice: null, bridge: null, capital: data.capitalEur, secWarnings: [] });
+out.snapshotStale = m.valuationSnapshot({ ticker: "STALE", market: markets.STALE, suppliedPrice: null, bridge: null, capital: data.capitalStale, secWarnings: [] });
+out.snapshotAdr = m.valuationSnapshot({ ticker: "ADRX", market: markets.ADRX, suppliedPrice: null, bridge: data.bridgeAdr, capital: null, secWarnings: [] });
+out.snapshotDomestic2x = m.valuationSnapshot({ ticker: "PEER1", market: markets.PEER1, suppliedPrice: null, bridge: data.bridgeDomestic2x, capital: null, secWarnings: [] });
+out.adrRow = m.peerRow(markets.ADRX);
+out.adsRatios = [[25e6, 5e6], [25.3e6, 5e6], [26e6, 5e6], [5e6, 10e6], [12e6, 10e6], [0, 5e6]].map(([a, b]) => m.adsRatio(a, b));
 out.snapshotYahoo = m.valuationSnapshot({ ticker: "CSTC", market: markets.CSTC, suppliedPrice: 30, bridge: null, capital: null, secWarnings: [] });
 out.upcRow = m.peerRow(markets.UPC);
 out.snapshotPence = m.valuationSnapshot({ ticker: "PEER2.L", market: markets["PEER2.L"], suppliedPrice: null, bridge: null, capital: null, secWarnings: [] });
@@ -122,7 +149,9 @@ def _worker_pure() -> dict:
             [str(ESBUILD), str(WORKER / "src" / "valuation.ts"), "--bundle", "--format=esm", "--platform=neutral", f"--outfile={bundle}", "--log-level=error"],
             cwd=WORKER, check=True, capture_output=True, text=True, timeout=120,
         )
-        (tmp_path / "data.json").write_text(json.dumps({"qs": QUOTE_SUMMARIES, "bridge": BRIDGE, "capital": CAPITAL, "capitalDebtFree": CAPITAL_DEBT_FREE, "capitalCashMismatch": CAPITAL_CASH_MISMATCH}), encoding="utf-8")
+        (tmp_path / "data.json").write_text(json.dumps({"qs": QUOTE_SUMMARIES, "bridge": BRIDGE, "capital": CAPITAL, "capitalDebtFree": CAPITAL_DEBT_FREE, "capitalCashMismatch": CAPITAL_CASH_MISMATCH,
+                                                                "capitalShortfall": CAPITAL_SHORTFALL, "capitalEur": CAPITAL_EUR, "capitalStale": CAPITAL_STALE,
+                                                                "bridgeAdr": BRIDGE_ADR, "bridgeDomestic2x": BRIDGE_DOMESTIC_2X}), encoding="utf-8")
         (tmp_path / "harness.mjs").write_text(_WORKER_PURE, encoding="utf-8")
         result = subprocess.run([node, str(tmp_path / "harness.mjs"), bundle.as_uri(), str(tmp_path / "data.json")],
                                 check=True, capture_output=True, text=True, timeout=120)
@@ -136,6 +165,13 @@ def _python_pure() -> dict:
         "snapshot": vl.valuation_snapshot("CSTC", markets["CSTC"], None, copy.deepcopy(BRIDGE), copy.deepcopy(CAPITAL), []),
         "snapshotCashMismatch": vl.valuation_snapshot("CSTC", markets["CSTC"], None, None, copy.deepcopy(CAPITAL_CASH_MISMATCH), []),
         "snapshotDebtFree": vl.valuation_snapshot("CSTC", markets["CSTC"], None, None, copy.deepcopy(CAPITAL_DEBT_FREE), []),
+        "snapshotShortfall": vl.valuation_snapshot("SAMEQ", markets["SAMEQ"], None, None, copy.deepcopy(CAPITAL_SHORTFALL), []),
+        "snapshotEur": vl.valuation_snapshot("CSTC", markets["CSTC"], None, None, copy.deepcopy(CAPITAL_EUR), []),
+        "snapshotStale": vl.valuation_snapshot("STALE", markets["STALE"], None, None, copy.deepcopy(CAPITAL_STALE), []),
+        "snapshotAdr": vl.valuation_snapshot("ADRX", markets["ADRX"], None, copy.deepcopy(BRIDGE_ADR), None, []),
+        "snapshotDomestic2x": vl.valuation_snapshot("PEER1", markets["PEER1"], None, copy.deepcopy(BRIDGE_DOMESTIC_2X), None, []),
+        "adrRow": vl.peer_row(markets["ADRX"]),
+        "adsRatios": [vl.ads_ratio(a, b) for a, b in [(25e6, 5e6), (25.3e6, 5e6), (26e6, 5e6), (5e6, 10e6), (12e6, 10e6), (0, 5e6)]],
         "snapshotYahoo": vl.valuation_snapshot("CSTC", markets["CSTC"], 30, None, None, []),
         "snapshotPence": vl.valuation_snapshot("PEER2.L", markets["PEER2.L"], None, None, None, []),
         "upcRow": vl.peer_row(markets["UPC"]),
@@ -155,7 +191,8 @@ class TestValuationParity(unittest.TestCase):
         cls.local = _python_pure()
 
     def test_runtimes_agree(self) -> None:
-        for key in ("markets", "snapshot", "snapshotCashMismatch", "snapshotDebtFree", "snapshotYahoo", "snapshotPence", "upcRow", "peers"):
+        for key in ("snapshotShortfall", "snapshotEur", "snapshotStale", "snapshotAdr", "snapshotDomestic2x", "adrRow", "adsRatios",
+                    "markets", "snapshot", "snapshotCashMismatch", "snapshotDebtFree", "snapshotYahoo", "snapshotPence", "upcRow", "peers"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
     def test_yfinance_adapter_matches_quote_summary_parsing(self) -> None:
@@ -201,6 +238,47 @@ class TestValuationValues(unittest.TestCase):
         # Flagged, not overridden: the filing's balances still set enterprise value.
         self.assertEqual(s["enterpriseValue"], 25 * 101_000_000 + 380_000_000 - 190_000_000 - 150_000_000)
         self.assertNotIn("SEC_YAHOO_CASH_MISMATCH", [w["code"] for w in self.out["snapshot"]["warnings"]])
+
+    def test_adr_quote_divides_ordinary_shares_and_never_mixes_currencies(self) -> None:
+        s = self.out["snapshotAdr"]
+        sh = s["shares"]
+        self.assertEqual((sh["basic"], sh["diluted"], sh["secOrdinaryShares"], sh["ordinarySharesPerQuotedShare"], sh["basis"]), (5_000_000, 5_000_000, 25_000_000, 5, "sec_cover_page"))
+        self.assertEqual(s["equityValue"], 450 * 5_000_000)
+        # USD equity plus TWD cash and debt is not a number: EV stays empty, here and on the peer basis.
+        self.assertEqual((s["status"], s["enterpriseValue"], s["peerComparableBasis"]["enterpriseValue"]), ("PARTIAL", None, None))
+        codes = [w["code"] for w in s["warnings"]]
+        self.assertIn("ADR_RATIO_APPLIED", codes)
+        self.assertIn("ENTERPRISE_VALUE_CURRENCY_MISMATCH", codes)
+        self.assertNotIn("ENTERPRISE_VALUE_INCOMPLETE", codes)
+        self.assertIsNone(self.out["adrRow"]["enterpriseValue"])
+        self.assertEqual(self.out["adsRatios"], [5, 5, None, 0.5, None, None])
+
+    def test_domestic_filer_near_twice_yahoo_is_not_an_adr(self) -> None:
+        s = self.out["snapshotDomestic2x"]
+        self.assertEqual((s["shares"]["basic"], s["shares"]["diluted"], s["shares"]["basis"], s["shares"]["ordinarySharesPerQuotedShare"]), (20_000_000, None, "yahoo_shares_outstanding", None))
+        self.assertIn("SHARE_BASIS_MISMATCH", [w["code"] for w in s["warnings"]])
+
+    def test_filing_short_of_yahoo_cash_is_flagged(self) -> None:
+        s = self.out["snapshotShortfall"]
+        w = next(w for w in s["warnings"] if w["code"] == "SEC_YAHOO_CASH_SHORTFALL")
+        self.assertEqual((w["secCash"], w["yahooTotalCash"]), (100_000_000, 190_000_000))
+        self.assertEqual(s["balances"]["basis"], "sec_filing_period_end")
+        # Without Yahoo's quarter end, the same balances are not compared.
+        self.assertNotIn("SEC_YAHOO_CASH_SHORTFALL", [w["code"] for w in self.out["snapshot"]["warnings"]])
+
+    def test_balances_in_another_currency_are_not_used(self) -> None:
+        s = self.out["snapshotEur"]
+        self.assertEqual(s["balances"]["basis"], "yahoo_financial_data")
+        self.assertIn("SEC_BALANCES_CURRENCY", [w["code"] for w in s["warnings"]])
+
+    def test_stale_filing_balances_give_way_to_yahoo(self) -> None:
+        s = self.out["snapshotStale"]
+        self.assertEqual((s["balances"]["basis"], s["balances"]["cash"], s["balances"]["totalDebt"], s["balances"]["periodEnd"]), ("yahoo_financial_data", 500_000_000, 450_000_000, None))
+        w = next(w for w in s["warnings"] if w["code"] == "SEC_BALANCES_STALE")
+        self.assertEqual((w["secPeriodEnd"], w["yahooMostRecentQuarter"]), ("2025-12-31", "2026-06-30"))
+        self.assertEqual(s["enterpriseValue"], 25 * 101_000_000 + 450_000_000 - 500_000_000)
+        self.assertEqual(self.out["markets"]["STALE"]["mostRecentQuarter"], "2026-06-30")
+        self.assertEqual(vl.market_inputs_from_yfinance("STALE", {"mostRecentQuarter": 1782777600}, [], [])["mostRecentQuarter"], "2026-06-30")
 
     def test_debt_free_filing_keeps_filing_balances(self) -> None:
         s = self.out["snapshotDebtFree"]
