@@ -387,6 +387,40 @@ def _extract_xbrl_latest_annual(
     Returns None if no matching XBRL concept has annual data.
     """
     us_gaap: dict = facts_data.get("facts", {}).get("us-gaap", {})
+    if accession_number:
+        # The selected filing's own value, any form (yfmcp/sec_facts.py, 2.4.5):
+        # a 10-Q gives its quarter, not nothing.
+        from yfmcp.sec_facts import filing_fact_in_accession
+        candidates = [{"concept": c, "facts": ((us_gaap.get(c) or {}).get("units") or {}).get("USD") or []} for c in concept_names]
+        hit = filing_fact_in_accession(candidates, accession_number)
+        if hit is None:
+            return None
+        latest = hit["fact"]
+        source_evidence = {
+            "sourceType": "sec_xbrl_companyfacts",
+            "concept": hit["concept"],
+            "taxonomy": "us-gaap",
+            "unit": "USD",
+            "accessionNumber": latest.get("accn"),
+            "filingType": latest.get("form"),
+            "filingDate": latest.get("filed"),
+            "periodStart": latest.get("start"),
+            "periodEnd": latest.get("end"),
+            "documentUrl": document_url,
+        }
+        decision_grade = bool(latest.get("accn") == accession_number and latest.get("end") and document_url)
+        return {
+            "value": latest.get("val"),
+            "unit": "USD",
+            "period": latest.get("end"),
+            "periodStart": latest.get("start"),
+            "form": latest.get("form"),
+            "filed": latest.get("filed"),
+            "confidence": "HIGH",
+            "decisionGrade": decision_grade,
+            "evidence": source_evidence if decision_grade else None,
+            "sourceEvidence": source_evidence,
+        }
     for concept in concept_names:
         concept_data = us_gaap.get(concept)
         if not concept_data:

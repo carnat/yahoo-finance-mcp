@@ -70,6 +70,22 @@ CONCEPTS = [
     {"concept": "Revenues", "facts": []},
 ]
 
+# A 10-Q's own facts (2.4.5): quarter, year to date and the prior-year
+# comparative in one accession, plus an instant balance.
+FILING_CONCEPTS = [
+    {"concept": "Revenues", "facts": []},
+    {"concept": "RevenueFromContractWithCustomerIncludingAssessedTax", "facts": [
+        {"form": "10-Q", "accn": "0001193125-26-342550", "filed": "2026-08-10", "start": "2026-01-01", "end": "2026-06-30", "val": 46255000},
+        {"form": "10-Q", "accn": "0001193125-26-342550", "filed": "2026-08-10", "start": "2026-04-01", "end": "2026-06-30", "val": 31520000},
+        {"form": "10-Q", "accn": "0001193125-26-342550", "filed": "2026-08-10", "start": "2025-04-01", "end": "2025-06-30", "val": 1156000},
+        {"form": "10-Q", "accn": "0001193125-26-200000", "filed": "2026-05-10", "start": "2026-01-01", "end": "2026-03-31", "val": 14735000},
+    ]},
+]
+CASH_CONCEPTS = [{"concept": "CashAndCashEquivalentsAtCarryingValue", "facts": [
+    {"form": "10-Q", "accn": "0001193125-26-342550", "filed": "2026-08-10", "end": "2025-12-31", "val": 1000},
+    {"form": "10-Q", "accn": "0001193125-26-342550", "filed": "2026-08-10", "end": "2026-06-30", "val": 2288253000},
+]}]
+
 _HARNESS = r"""
 import fs from "node:fs";
 const [rulesUrl, factsUrl, dataPath] = process.argv.slice(-3);
@@ -90,6 +106,9 @@ const out = {
   pickLatest10k: f.pickConceptFacts(d.concepts, "10-K", null),
   pickPinned: f.pickConceptFacts(d.concepts, "10-Q", "0000950170-23-063737"),
   pickPinnedMissing: f.pickConceptFacts(d.concepts, "10-Q", "0001193125-26-999999"),
+  filingRevenue: f.filingFactInAccession(d.filingConcepts, "0001193125-26-342550"),
+  filingCash: f.filingFactInAccession(d.cashConcepts, "0001193125-26-342550"),
+  filingMissing: f.filingFactInAccession(d.filingConcepts, "0001193125-26-999999"),
 };
 console.log(JSON.stringify(out));
 """
@@ -106,6 +125,7 @@ def _data() -> dict:
     return {
         "aaoi": AAOI_MATCHES, "negation": NEGATION_MATCHES, "astsRelease": ASTS_RELEASE, "keywordFirst": KEYWORD_FIRST,
         "awardFirst": AWARD_FIRST, "guidanceOnly": GUIDANCE_ONLY, "stemWords": STEM_WORDS, "evidence": EVIDENCE, "concepts": CONCEPTS,
+        "filingConcepts": FILING_CONCEPTS, "cashConcepts": CASH_CONCEPTS,
     }
 
 
@@ -143,6 +163,9 @@ def _python() -> dict:
         "pickLatest10k": sf.pick_concept_facts(d["concepts"], "10-K", None),
         "pickPinned": sf.pick_concept_facts(d["concepts"], "10-Q", "0000950170-23-063737"),
         "pickPinnedMissing": sf.pick_concept_facts(d["concepts"], "10-Q", "0001193125-26-999999"),
+        "filingRevenue": sf.filing_fact_in_accession(d["filingConcepts"], "0001193125-26-342550"),
+        "filingCash": sf.filing_fact_in_accession(d["cashConcepts"], "0001193125-26-342550"),
+        "filingMissing": sf.filing_fact_in_accession(d["filingConcepts"], "0001193125-26-999999"),
     }
 
 
@@ -189,6 +212,22 @@ class TestRules(unittest.TestCase):
         self.assertEqual(self.out["pickLatest10k"]["concept"], "RevenueFromContractWithCustomerIncludingAssessedTax")
         self.assertEqual(self.out["pickPinned"]["concept"], "RevenueFromContractWithCustomerExcludingAssessedTax")
         self.assertIsNone(self.out["pickPinnedMissing"])
+
+
+class TestFilingSnapshot(unittest.TestCase):
+    def test_a_10q_gives_its_quarter(self) -> None:
+        out = _python()
+        rev = out["filingRevenue"]
+        self.assertEqual((rev["concept"], rev["fact"]["val"], rev["fact"]["start"]), ("RevenueFromContractWithCustomerIncludingAssessedTax", 31520000, "2026-04-01"))
+        self.assertEqual(out["filingCash"]["fact"]["val"], 2288253000)
+        self.assertIsNone(out["filingMissing"])
+
+    def test_inline_tags_join_without_a_break(self) -> None:
+        from yfmcp import filing_search
+        from yfmcp.parsing.html import _strip_html_tags
+        html = '<p><span style="a">PART I - FINANC</span><span style="b">IAL INFORMATION</span></p><td>Net</td><td>31.5</td> <b>Item</b> <i>2</i>'
+        self.assertEqual(_strip_html_tags(html), "PART I - FINANCIAL INFORMATION Net 31.5 Item 2")
+        self.assertEqual(filing_search.strip_html_tags(html), "PART I - FINANCIAL INFORMATION Net 31.5 Item 2")
 
 
 if __name__ == "__main__":

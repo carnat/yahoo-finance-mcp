@@ -19,7 +19,7 @@ import {
   type IxSource,
   type TextMatch,
 } from "./capital-structure.js";
-import { pickConceptFacts, REVENUE_CONCEPTS } from "./sec-facts.js";
+import { filingFactInAccession, pickConceptFacts, REVENUE_CONCEPTS } from "./sec-facts.js";
 import { customerConcentration, EPS_AMOUNT, EPS_LABEL, guidanceRanges, PCT_AMOUNT, rankEvidence, reportedTextMetric, REVENUE_LABEL, stemWord, USD_AMOUNT, type ConcentrationFinding } from "./extraction-rules.js";
 import { majorPrice, marketInputsFromQuoteSummary, peerValuations, valuationSnapshot, type MarketInputs } from "./valuation.js";
 import registryManifest from "./company-ir-page-registry.json";
@@ -5688,8 +5688,10 @@ function stripHtmlTags(html: string): string {
     .replace(/<script\b[^>]*>[\s\S]*?<\/script[^>]*>/gi, " ")
     .replace(/<style\b[^>]*>[\s\S]*?<\/style[^>]*>/gi, " ")
     .replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, " ");
-  // Remove all HTML tags first, then decode entities in a single pass to avoid double-unescaping.
-  const noTags = sanitizedHtml.replace(/<[^>]+>/g, " ");
+  // Remove all HTML tags first, then decode entities in a single pass to avoid
+  // double-unescaping. Inline tags render without a break: "FINANC</span><span>IAL"
+  // is one word (ASTS 10-Q headings, 2.4.5); whitespace in the HTML still separates.
+  const noTags = sanitizedHtml.replace(/<\/?(?:span|font|b|i|u|em|strong|a|sup|sub|small|ix:[a-z]+)\b[^>]*>/gi, "").replace(/<[^>]+>/g, " ");
   const ENTITY_MAP: Record<string, string> = {
     "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'",
   };
@@ -6206,8 +6208,10 @@ export async function getFilingData(
     code: string,
     message: string,
     conceptName: string | null,
+    requestedAccession: string | null = null,
   ): Promise<string> => {
-    const resolved = await resolveSecFiling(ticker, filingType, null).catch(() => null);
+    // A failed pin names the filing that was asked for, never the latest one.
+    const resolved = requestedAccession ? null : await resolveSecFiling(ticker, filingType, null).catch(() => null);
     const filing = resolved?.ok ? resolved.filing : null;
     const filingWarnings = resolved?.ok ? resolved.filing.warnings : [];
     return JSON.stringify({
@@ -6225,7 +6229,8 @@ export async function getFilingData(
       period: null,
       filingType: filing?.filingType ?? filingType,
       filingDate: filing?.filingDate ?? null,
-      accessionNumber: filing?.accessionNumber ?? null,
+      accessionNumber: requestedAccession ?? filing?.accessionNumber ?? null,
+      ...(requestedAccession ? { requestedAccession } : {}),
       documentUrl: filing?.documentUrl ?? null,
       indexUrl: null,
       primaryDocumentUrl: filing?.documentUrl ?? null,
@@ -6287,6 +6292,7 @@ export async function getFilingData(
       "NO_FACT_FOR_ACCESSION",
       `SEC companyconcept has no ${candidateNames.join(" / ")} fact in accession ${pinnedAccession} (${filingType}).`,
       concept,
+      pinnedAccession,
     );
   }
   if (!filtered.length) {
@@ -11821,6 +11827,7 @@ async function collectCompanyEvents(
     sources,
     secFilingTypes = ["8-K", "10-Q", "10-K", "S-3", "DEF14A"],
     searchQuery = "",
+    keepAll = false,
   }: {
     maxResults?: number;
     lookbackDays?: number;
@@ -11829,6 +11836,8 @@ async function collectCompanyEvents(
     sources?: string[];
     secFilingTypes?: string[];
     searchQuery?: string;
+    /** Keep every deduplicated item instead of the newest maxResults (event verification matches before capping). */
+    keepAll?: boolean;
   } = {}
 ): Promise<{ items: Record<string, unknown>[]; sourcesUsed: string[]; warnings: Record<string, unknown>[]; watermark: string; sourceDiagnostics: Record<string, unknown> }> {
   const safeMax = clampInt(maxResults, 10, 1, 100);
@@ -12020,7 +12029,8 @@ async function collectCompanyEvents(
     warnings.push(...gnw.warnings);
   }
 
-  const deduped = dedupeEventItems(items, warnings).slice(0, safeMax).map(enrichNewsItemForLlm);
+  const allDeduped = dedupeEventItems(items, warnings);
+  const deduped = (keepAll ? allDeduped : allDeduped.slice(0, safeMax)).map(enrichNewsItemForLlm);
   const uniqueWarnings: Record<string, unknown>[] = [];
   const warningKeys = new Set<string>();
   for (const w of warnings) {
@@ -12405,7 +12415,10 @@ export async function verifyCompanyEvent(
   endDate = "",
   sources: string[] = ["sec", "company_ir", "newswire", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"]
 ): Promise<string> {
-  const out = await collectCompanyEvents(ticker, { maxResults: 50, lookbackDays: 365, startDate, endDate, sources });
+  // Match against everything collected: a cap of the newest 50 let a flood of
+  // aggregator items push the official release out before matching (ASTS
+  // BlueBird launch, 2.4.5).
+  const out = await collectCompanyEvents(ticker, { maxResults: 50, lookbackDays: 365, startDate, endDate, sources, keepAll: true });
   const normalizeEventText = (value: unknown): string =>
     _str(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
   const eventQueryStopwords = new Set([
@@ -12631,7 +12644,9 @@ function _stripHtmlTagsIdx(html: string): string {
   const blockBroken = sanitizedHtml
     .replace(/<(?:br|\/p|\/div|\/li|\/tr|\/h[1-6]|\/section)\b[^>]*>/gi, "\n")
     .replace(/<(?:p|div|li|tr|h[1-6]|section)\b[^>]*>/gi, "\n");
-  const noTags = blockBroken.replace(/<[^>]+>/g, " ");
+  // Inline tags render without a break: "FINANC</span><span>IAL" is one word
+  // (ASTS 10-Q headings, 2.4.5). Whitespace written in the HTML still separates.
+  const noTags = blockBroken.replace(/<\/?(?:span|font|b|i|u|em|strong|a|sup|sub|small|ix:[a-z]+)\b[^>]*>/gi, "").replace(/<[^>]+>/g, " ");
   const ENTITY_MAP: Record<string, string> = {
     "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'",
   };
@@ -12934,7 +12949,8 @@ export async function listSecMaterialFilings(
 }
 
 const XBRL_INTELLIGENCE_CONCEPTS: Record<string, string[]> = {
-  "revenue": ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "RevenueFromContractWithCustomerIncludingAssessedTax", "SalesRevenueNet"],
+  // The shared revenue concepts (sec-facts.ts); each filing is read from the one it tags.
+  "revenue": [...REVENUE_CONCEPTS],
   net_income: ["NetIncomeLoss", "ProfitLoss"],
   cash: ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsAndShortTermInvestments"],
   long_term_debt: ["LongTermDebt", "LongTermDebtNoncurrent"],
@@ -12942,7 +12958,8 @@ const XBRL_INTELLIGENCE_CONCEPTS: Record<string, string[]> = {
   operating_income: ["OperatingIncomeLoss"],
 };
 
-function extractXbrlAnnualFact(
+/** The selected filing's own value for one fact across candidate concepts (sec-facts.ts). */
+function extractXbrlFilingFact(
   factsData: Record<string, unknown>,
   conceptNames: string[],
   accessionNumber: string,
@@ -12954,53 +12971,39 @@ function extractXbrlAnnualFact(
   const usGaap = facts["us-gaap"] && typeof facts["us-gaap"] === "object"
     ? facts["us-gaap"] as Record<string, unknown>
     : {};
-  for (const concept of conceptNames) {
-    const conceptData = usGaap[concept] && typeof usGaap[concept] === "object"
-      ? usGaap[concept] as Record<string, unknown>
-      : null;
-    const units = conceptData?.units && typeof conceptData.units === "object"
-      ? conceptData.units as Record<string, unknown>
-      : {};
-    const usdRows = Array.isArray(units.USD) ? units.USD as Record<string, unknown>[] : [];
-    const annual = usdRows
-      .filter((row) =>
-        ["10-K", "10-K405", "10-KSB", "20-F"].includes(String(row.form ?? ""))
-        && String(row.accn ?? "") === accessionNumber
-        && row.end != null
-        && row.val != null)
-      .sort((a, b) => String(b.end ?? "").localeCompare(String(a.end ?? "")));
-    const latest = annual[0];
-    if (!latest) continue;
-    const sourceEvidence = {
-      sourceType: "sec_xbrl_companyfacts",
-      concept,
-      taxonomy: "us-gaap",
-      unit: "USD",
-      accessionNumber: latest.accn,
-      filingType: latest.form,
-      filingDate: latest.filed,
-      periodEnd: latest.end,
-      documentUrl,
-    };
-    const decisionGrade = Boolean(
-      accessionNumber
-      && latest.accn === accessionNumber
-      && latest.end
-      && documentUrl
-    );
-    return {
-      value: latest.val,
-      unit: "USD",
-      period: latest.end,
-      form: latest.form,
-      filed: latest.filed,
-      confidence: "HIGH",
-      decisionGrade,
-      evidence: decisionGrade ? sourceEvidence : null,
-      sourceEvidence,
-    };
-  }
-  return null;
+  const candidates = conceptNames.map((concept) => {
+    const conceptData = usGaap[concept] && typeof usGaap[concept] === "object" ? usGaap[concept] as Record<string, unknown> : null;
+    const units = conceptData?.units && typeof conceptData.units === "object" ? conceptData.units as Record<string, unknown> : {};
+    return { concept, facts: Array.isArray(units.USD) ? units.USD as Record<string, unknown>[] : [] };
+  });
+  const hit = filingFactInAccession(candidates, accessionNumber);
+  if (!hit) return null;
+  const latest = hit.fact;
+  const sourceEvidence = {
+    sourceType: "sec_xbrl_companyfacts",
+    concept: hit.concept,
+    taxonomy: "us-gaap",
+    unit: "USD",
+    accessionNumber: latest.accn,
+    filingType: latest.form,
+    filingDate: latest.filed,
+    periodStart: latest.start ?? null,
+    periodEnd: latest.end,
+    documentUrl,
+  };
+  const decisionGrade = Boolean(accessionNumber && latest.accn === accessionNumber && latest.end && documentUrl);
+  return {
+    value: latest.val,
+    unit: "USD",
+    period: latest.end,
+    periodStart: latest.start ?? null,
+    form: latest.form,
+    filed: latest.filed,
+    confidence: "HIGH",
+    decisionGrade,
+    evidence: decisionGrade ? sourceEvidence : null,
+    sourceEvidence,
+  };
 }
 
 export async function getSecFilingIntelligence(
@@ -13051,7 +13054,7 @@ export async function getSecFilingIntelligence(
     xbrlAvailable = true;
     xbrlStatus = "OK";
     for (const [factName, concepts] of Object.entries(XBRL_INTELLIGENCE_CONCEPTS)) {
-      const fact = extractXbrlAnnualFact(factsData, concepts, accessionNumber, documentUrl);
+      const fact = extractXbrlFilingFact(factsData, concepts, accessionNumber, documentUrl);
       if (fact) xbrlFacts[factName] = fact;
     }
     if (Object.keys(xbrlFacts).length === 0) xbrlStatus = "AVAILABLE_NO_MATCHING_FACTS";
@@ -13077,6 +13080,14 @@ export async function getSecFilingIntelligence(
     }
   } catch { indexStatus = "ERROR"; }
 
+  // Exhibits are counted from the filing index under the issuer's CIK; the
+  // count had been a constant 0 (2.4.5).
+  let exhibitsCount: number | null = null;
+  try {
+    const { edgarIndexUrl } = edgarBuildFilingUrls(cikInt, accessionNumber, null);
+    exhibitsCount = (await edgarListExhibitsFromIndex(edgarIndexUrl)).length;
+  } catch { exhibitsCount = null; }
+
   let recommendedQueries = ["revenue by segment", "risk factors", "liquidity and capital resources", "customer concentration", "long-term debt"];
   if (filingType.toUpperCase() === "10-K" || filingType.toUpperCase() === "20-F") {
     recommendedQueries.push("geographic revenue", "R&D expense", "guidance");
@@ -13091,7 +13102,7 @@ export async function getSecFilingIntelligence(
     filing: { type: filingType, accessionNumber, filedAt: filingDate, acceptedAt, documentUrl },
     xbrl_available: xbrlAvailable,
     xbrl_facts: xbrlFacts,
-    index: { sections_count: sectionsCount, tables_count: tablesCount, sections: sectionsList, exhibits_count: 0 },
+    index: { sections_count: sectionsCount, tables_count: tablesCount, sections: sectionsList, exhibits_count: exhibitsCount },
     recommended_queries: recommendedQueries,
     status: { xbrl: xbrlStatus, index: indexStatus, sections: sectionsCount > 0 ? "AVAILABLE" : "EMPTY" },
   });

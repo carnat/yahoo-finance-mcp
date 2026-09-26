@@ -42,3 +42,34 @@ export function pickConceptFacts(candidates: ConceptFacts[], form: string, acces
   }
   return best;
 }
+
+function durationDays(fact: Record<string, unknown>): number {
+  const start = typeof fact.start === "string" ? fact.start : "";
+  const end = typeof fact.end === "string" ? fact.end : "";
+  if (!start) return 0;
+  const s = Date.parse(`${start}T00:00:00Z`);
+  const e = Date.parse(`${end}T00:00:00Z`);
+  return Number.isFinite(s) && Number.isFinite(e) ? Math.round((e - s) / 86_400_000) : 1e9;
+}
+
+/**
+ * A filing's own value for a fact (2.4.5): the first concept tagged in the
+ * accession, at the latest period end it reports, and the shortest period
+ * there, so a 10-Q gives its quarter rather than the year to date or the
+ * prior-year comparative. Any form counts; the old snapshot read 10-K forms only.
+ */
+export function filingFactInAccession(candidates: ConceptFacts[], accession: string): { concept: string; fact: Record<string, unknown> } | null {
+  const want = accession.trim();
+  for (const candidate of candidates) {
+    const rows = candidate.facts.filter((f) => String(f.accn ?? "") === want && typeof f.end === "string" && f.end && f.val != null);
+    if (rows.length === 0) continue;
+    const latestEnd = rows.reduce((m, f) => (String(f.end) > m ? String(f.end) : m), "");
+    let best: Record<string, unknown> | null = null;
+    for (const f of rows) {
+      if (String(f.end) !== latestEnd) continue;
+      if (best == null || durationDays(f) < durationDays(best)) best = f;
+    }
+    if (best) return { concept: candidate.concept, fact: best };
+  }
+  return null;
+}

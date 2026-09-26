@@ -11,9 +11,15 @@ import re as _re
 # HTML table parsing helpers
 # ---------------------------------------------------------------------------
 
+# Inline tags render without a break: "FINANC</span><span>IAL" is one word
+# (ASTS 10-Q headings, 2.4.5). Whitespace written in the HTML still separates.
+_INLINE_TAG_RE = _re.compile(r"</?(?:span|font|b|i|u|em|strong|a|sup|sub|small|ix:[a-z]+)\b[^>]*>", _re.IGNORECASE)
+
+
 def _strip_html_tags(html_str: str) -> str:
     """Remove HTML tags and decode entities to produce plain text."""
-    text = _re.sub(r"<[^>]+>", " ", html_str)
+    text = _INLINE_TAG_RE.sub("", html_str)
+    text = _re.sub(r"<[^>]+>", " ", text)
     text = _html_module.unescape(text)
     return _re.sub(r"\s+", " ", text).strip()
 

@@ -2144,6 +2144,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
           filingType: parsed.filingType ?? str(args.filing_type, "10-K"),
           filingDate: parsed.filingDate ?? null,
           accessionNumber: parsed.accessionNumber ?? null,
+          ...(parsed.requestedAccession ? { requestedAccession: parsed.requestedAccession } : {}),
           extractionMethod: parsed.extractionMethod ?? "NONE",
           source: parsed.source ?? "NOT_DISCLOSED",
           confidence: parsed.confidence ?? "NOT_DISCLOSED",

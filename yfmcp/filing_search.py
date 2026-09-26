@@ -264,6 +264,9 @@ def strip_html_tags(html: str) -> str:
     text = re.sub(r"<!--[\s\S]*?-->", " ", html)
     text = re.sub(r"<script\b[^>]*>[\s\S]*?</script[^>]*>", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"<style\b[^>]*>[\s\S]*?</style[^>]*>", " ", text, flags=re.IGNORECASE)
+    # Inline tags render without a break: "FINANC</span><span>IAL" is one word
+    # (ASTS 10-Q headings, 2.4.5). Whitespace written in the HTML still separates.
+    text = re.sub(r"</?(?:span|font|b|i|u|em|strong|a|sup|sub|small|ix:[a-z]+)\b[^>]*>", "", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", text)
 
     def replace(m: re.Match) -> str:

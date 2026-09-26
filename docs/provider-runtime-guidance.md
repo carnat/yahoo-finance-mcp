@@ -378,6 +378,25 @@ proves what a number belongs to before returning it.
   and against the Yahoo count the engine uses, and capital-structure warnings
   travel with the filing balances (`source: extract_capital_structure`).
 
+## Provenance Follow-ups (2.4.5)
+
+- `verify_company_event` matches against every item collected in the date
+  window, before the 50-item display cap. ASTS's official "Successful Orbital
+  Launch of BlueBirds 11, 12, and 13" release had been dropped behind newer
+  headlines before matching ran.
+- A failed accession pin (`NO_FACT_FOR_ACCESSION`) reports the requested
+  accession as `accessionNumber` and `requestedAccession`, never the latest
+  filing's accession.
+- `get_sec_filing_intelligence` reads XBRL facts from the filing itself for
+  any form (`filingFactInAccession` / `filing_fact_in_accession`: latest period
+  end, then the shortest duration), so a 10-Q gives its quarter with
+  `periodStart`. Revenue uses the shared `REVENUE_CONCEPTS`, and
+  `exhibits_count` counts the filing index's exhibits (ASTS Q2 2026 10-Q:
+  revenue $31.52M for 2026-04-01 to 2026-06-30, 7 exhibits).
+- HTML stripping joins inline tags (`span`, `font`, `b`, `i`, `ix:*` and
+  similar) without a space, as a browser renders them, so a heading split
+  across spans reads "FINANCIAL", not "FINANC IAL". Block tags still separate.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
