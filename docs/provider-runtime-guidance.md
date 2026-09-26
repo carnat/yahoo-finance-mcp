@@ -325,6 +325,59 @@ of them forecasts, and none may be back-solved into a consensus figure.
   `scripts/test_valuation.py` requires identical output and drives both tools
   end to end against mocked Yahoo and SEC.
 
+## Extraction Correctness (2.4.4)
+
+A QA sweep of all 85 actions found numbers returned with confident labels
+that belonged to another period, company or metric. Each rule below now
+proves what a number belongs to before returning it.
+
+- SEC facts: equivalent us-gaap concepts are all read and the one filed most
+  recently wins (`worker/src/sec-facts.ts`, `yfmcp/sec_facts.py`). ASTS moved
+  revenue from `RevenueFromContractWithCustomerExcludingAssessedTax` to
+  `...IncludingAssessedTax` after 2023, and the first-concept rule returned a
+  2022 quarter as "latest". `extract_sec_filing_fact` honours
+  `accession_number`: a pin with no matching fact returns
+  `NO_FACT_FOR_ACCESSION`, never a fact from another filing. Within a filing
+  the newest period end comes first in both runtimes, so a 10-Q's prior-year
+  comparative is not returned as the quarter.
+- Issuer CIK: the ticker's CIK is used for exhibits and transcripts; an
+  accession prefix names the filer agent (0001193125 is Donnelley) and is only
+  a fallback.
+- Text rules shared by both runtimes (`worker/src/extraction-rules.ts`,
+  `yfmcp/extraction_rules.py`):
+  - customer concentration reads "<customer> accounted for / represented X%
+    of revenue (or net sales)" only. Named customers keep their name, unnamed
+    ones are `Unnamed customer`, and "our top ten customers" is an aggregate.
+    Receivable shares, thresholds ("more than 10%", "10% or more") and prior
+    years are excluded; the first percentage of a "respectively" list is the
+    first year listed (AAOI FY2025: Digicomm 53.1%, Microsoft 28.8%, top ten
+    96.6%);
+  - guidance reads "revenue guidance of $X to $Y" as well as "expects revenue
+    of $X to $Y" (ASTS FY2026 $150M to $200M);
+  - a reported release metric must follow its own label within the same
+    sentence or bullet, with a result verb and no guidance, award, backlog or
+    order wording (ASTS Q2 2026 revenue $31.5M, not the $125M award value);
+  - event queries match stemmed words ("launch" matches "launched"), and
+    evidence is ranked by source confidence, then recency.
+- Analyst targets: `extract_analyst_valuation_methods` resolves the company
+  name and keeps a target only when its clause names the subject, or the item
+  names the subject and no sentence gives another company's target
+  (`subjectMatch`, `attribution.rejectedForOtherCompany`). Cantor's $122
+  Rocket Lab target is no longer attributed to ASTS.
+- Earnings surprise: Yahoo's `surprisePercent` is a decimal ratio at every
+  size and is always multiplied by 100 (ASTS's -233.7% had been read as -2.3%).
+- Ratios: when the quote and financial currencies differ, P/S, P/B,
+  EV/revenue, EV/EBITDA and the free-cash-flow yield are withheld
+  (`withheldMultiples`, `CURRENCY_MISMATCH_MULTIPLES_WITHHELD`); P/E stays.
+- Options flow window: `ivVsRealizedRangePct` places current ATM IV in the
+  one-year min-max range of rolling 30-day realized volatility, and
+  `putVolPer1PctStockAdv` divides put contracts by 1% of the stock's 10-day
+  average volume. `ivPctile` and `putVolVs10dAvg` remain one release as
+  aliases, explained in `fieldNotes`.
+- Valuation snapshot: `secVsYahooSharesDiffPct` is taken after any ADR ratio
+  and against the Yahoo count the engine uses, and capital-structure warnings
+  travel with the filing balances (`source: extract_capital_structure`).
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

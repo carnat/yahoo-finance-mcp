@@ -19,6 +19,8 @@ import {
   type IxSource,
   type TextMatch,
 } from "./capital-structure.js";
+import { pickConceptFacts, REVENUE_CONCEPTS } from "./sec-facts.js";
+import { customerConcentration, EPS_AMOUNT, EPS_LABEL, guidanceRanges, PCT_AMOUNT, rankEvidence, reportedTextMetric, REVENUE_LABEL, stemWord, USD_AMOUNT, type ConcentrationFinding } from "./extraction-rules.js";
 import { majorPrice, marketInputsFromQuoteSummary, peerValuations, valuationSnapshot, type MarketInputs } from "./valuation.js";
 import registryManifest from "./company-ir-page-registry.json";
 import newsSourceCapabilities from "./news-source-capabilities.json";
@@ -2995,6 +2997,8 @@ export async function getFinancialRatios(
 
   const freeCashflow = raw(fd.freeCashflow) as number | null;
   const marketCap = raw(sd.marketCap) as number | null;
+  // Multiples of a quote-currency value over financial-currency results.
+  const CURRENCY_MIXED_RATIOS = ["priceToSales", "priceToBook", "enterpriseToEbitda", "enterpriseToRevenue", "freeCashflowYield"];
 
   const rawRatios: Record<string, unknown> = {
     ticker,
@@ -3038,6 +3042,19 @@ export async function getFinancialRatios(
       v !== null && typeof v === "object" && !Array.isArray(v) ? null : v,
     ])
   );
+  // Quote and financial currencies must match for value-over-results multiples.
+  const quoteCurrency = typeof sd.currency === "string" ? majorPrice(1, sd.currency).currency : null;
+  const financialCurrency = typeof filtered.currency === "string" ? filtered.currency : null;
+  if (quoteCurrency && financialCurrency && quoteCurrency !== financialCurrency) {
+    const withheld: Record<string, unknown> = {};
+    for (const key of CURRENCY_MIXED_RATIOS) {
+      withheld[key] = filtered[key] ?? null;
+      filtered[key] = null;
+    }
+    filtered.quoteCurrency = quoteCurrency;
+    filtered.withheldMultiples = withheld;
+    filtered.warnings = [{ code: "CURRENCY_MISMATCH_MULTIPLES_WITHHELD", message: "Yahoo's price/sales, price/book and EV multiples, and the free-cash-flow yield, divide a quote-currency market value by financial-currency results; they are withheld when the two currencies differ (TSM: USD ADR, TWD financials). P/E stays, since Yahoo reports EPS per quoted share.", severity: "warning" }];
+  }
   filtered.unitSemantics = {
     currency: filtered.currency ?? null,
     multiples: [
@@ -4552,7 +4569,9 @@ export async function getEarningsMomentum(ticker: string | string[]): Promise<st
           actualEpsValues.push(actual);
           totalQuarters++;
           if (actual > estimate) beatCount++;
-          if (surprise != null) surprises.push(Math.abs(surprise) < 1 ? surprise * 100 : surprise);
+          // Yahoo's surprisePercent is a decimal ratio at every size (-2.337 is
+          // -233.7%); scaling only values under 1 turned ASTS's -117.5% into -27.0%.
+          if (surprise != null) surprises.push(surprise * 100);
         }
       }
       for (const h of earningsHistory) {
@@ -5167,14 +5186,15 @@ const FILING_INDEX_CACHE_MAX = 50;
 const filingIndexCache = new Map<string, { value: string; storedAt: number }>();
 const FILING_INDEX_TTL_MS = 24 * 60 * 60 * 1000;
 
-const FILING_FACT_CONCEPTS: Record<string, { primary: string; fallback?: string }> = {
-  geographic_revenue: { primary: "RevenueFromContractWithCustomerExcludingAssessedTax", fallback: "Revenues" },
-  segment_revenue: { primary: "RevenueFromContractWithCustomerExcludingAssessedTax", fallback: "Revenues" },
+// Equivalent concepts are all read; the one filed most recently wins (sec-facts.ts).
+const FILING_FACT_CONCEPTS: Record<string, { primary: string; fallback?: string; alternates?: string[] }> = {
+  geographic_revenue: { primary: REVENUE_CONCEPTS[0], alternates: REVENUE_CONCEPTS.slice(1) },
+  segment_revenue: { primary: REVENUE_CONCEPTS[0], alternates: REVENUE_CONCEPTS.slice(1) },
   capex: { primary: "PaymentsToAcquirePropertyPlantAndEquipment" },
   rd_expense: { primary: "ResearchAndDevelopmentExpense" },
   operating_income: { primary: "OperatingIncomeLoss" },
   net_income: { primary: "NetIncomeLoss" },
-  total_revenue: { primary: "RevenueFromContractWithCustomerExcludingAssessedTax", fallback: "Revenues" },
+  total_revenue: { primary: REVENUE_CONCEPTS[0], alternates: REVENUE_CONCEPTS.slice(1) },
   long_term_debt: { primary: "LongTermDebt" },
   cash: { primary: "CashAndCashEquivalentsAtCarryingValue" },
 };
@@ -6105,6 +6125,7 @@ export async function getFilingData(
   filingType = "10-K",
   period = "latest",
   periodMode = "auto",
+  pinAccession: string | null = null,
 ): Promise<string> {
   const FLOATING_POINT_EPSILON = 1e-9;
   const RATIO_SCALE = 10000;
@@ -6250,20 +6271,24 @@ export async function getFilingData(
   const fetchConcept = async (concept: string): Promise<Record<string, unknown> | null> =>
     edgarGetJson(`https://data.sec.gov/api/xbrl/companyconcept/CIK${cikPadded}/us-gaap/${concept}.json`);
 
-  let concept = config.primary;
-  let conceptData = await fetchConcept(config.primary);
-  let facts = (((conceptData?.units as Record<string, unknown>)?.USD as Record<string, unknown>[]) ?? []);
-  if (!facts.length && config.fallback) {
-    const fb = await fetchConcept(config.fallback);
-    const fbFacts = (((fb?.units as Record<string, unknown>)?.USD as Record<string, unknown>[]) ?? []);
-    if (fbFacts.length) {
-      concept = config.fallback;
-      conceptData = fb;
-      facts = fbFacts;
-    }
+  // Every equivalent concept is read; the one with the newest filing of this
+  // form wins, so a filer that switched concepts is not read from its old one.
+  const candidateNames = [config.primary, ...(config.alternates ?? []), ...(config.fallback ? [config.fallback] : [])];
+  const fetchedConcepts = await Promise.all(candidateNames.map(async (name) => ({
+    concept: name,
+    facts: (((await fetchConcept(name))?.units as Record<string, unknown>)?.USD as Record<string, unknown>[]) ?? [],
+  })));
+  const pinnedAccession = pinAccession && pinAccession.trim() ? pinAccession.trim() : null;
+  const chosen = pickConceptFacts(fetchedConcepts, filingType, pinnedAccession);
+  const concept = chosen?.concept ?? config.primary;
+  let filtered = chosen?.facts ?? [];
+  if (!filtered.length && pinnedAccession) {
+    return unavailableStructuredFact(
+      "NO_FACT_FOR_ACCESSION",
+      `SEC companyconcept has no ${candidateNames.join(" / ")} fact in accession ${pinnedAccession} (${filingType}).`,
+      concept,
+    );
   }
-
-  let filtered = facts.filter((f) => String(f.form ?? "").toUpperCase() === filingType.toUpperCase());
   if (!filtered.length) {
     if (factType !== "geographic_revenue") {
       return unavailableStructuredFact(
@@ -6274,7 +6299,7 @@ export async function getFilingData(
     }
     // For geographic_revenue, fall through to HTML fallback below (picked remains null)
   }
-  if (filtered.length && period === "latest") {
+  if (filtered.length && period === "latest" && !pinnedAccession) {
     const latestFiled = filtered.map((f) => String(f.filed ?? "")).sort().slice(-1)[0];
     filtered = filtered.filter((f) => String(f.filed ?? "") === latestFiled);
   }
@@ -7894,15 +7919,24 @@ export async function getOptionsFlowScan(ticker: string, windowLabel: string): P
     if (quality === "LOW") {
       formattedBlock = "OPTIONS FLOW: DATA QUALITY LOW — raw chain unreliable; bracket not assigned.";
     } else {
-      const ivStr = ivPctile != null ? `${ivPctile}th%ile` : "N/A";
+      const ivStr = ivPctile != null ? `${ivPctile}%` : "N/A";
       const pvStr = putVolVs10d != null ? `${putVolVs10d.toFixed(2)}x` : "N/A";
       const pcStr = pcRatio != null ? pcRatio.toFixed(2) : "N/A";
-      formattedBlock = `OPTIONS FLOW SCAN [${windowLabel}] ${ticker} | P/C: ${pcStr} | IV: ${ivStr} | Put vol vs 10d avg: ${pvStr} | Trend: ${putVolTrend} | Advisory: ${bracket ?? "N/A"} bracket`;
+      formattedBlock = `OPTIONS FLOW SCAN [${windowLabel}] ${ticker} | P/C: ${pcStr} | IV vs 1y RV range: ${ivStr} | Put vol / 1% stock ADV: ${pvStr} | Trend: ${putVolTrend} | Advisory: ${bracket ?? "N/A"} bracket`;
     }
 
     const resultData: Record<string, unknown> = {
       ticker, windowLabel, dataDate,
-      pcRatio, ivPctile, putVolVs10dAvg: putVolVs10d, putVolTrend,
+      pcRatio,
+      // Named for what they measure (2.4.4); the old names remain one release as aliases.
+      ivVsRealizedRangePct: ivPctile,
+      putVolPer1PctStockAdv: putVolVs10d,
+      ivPctile, putVolVs10dAvg: putVolVs10d,
+      fieldNotes: {
+        ivPctile: "Deprecated alias of ivVsRealizedRangePct: current ATM IV placed in the min-max range of rolling 30-day realized volatility over the past year, not a percentile of historical implied volatility.",
+        putVolVs10dAvg: "Deprecated alias of putVolPer1PctStockAdv: put contracts traded today divided by 1% of the stock's 10-day average share volume, not put volume against its own 10-day average.",
+      },
+      putVolTrend,
       expiry: scanExpiry ?? null,
       expirySelection: "NEXT_AFTER_TODAY",
       maxPainStrike, bracket, formattedBlock,
@@ -12149,7 +12183,8 @@ export async function getCompanyPressReleases(
       const cikFromAccession = accession ? edgarCikFromAccession(accession) : null;
       const cikMatch = /\/data\/(\d+)\//.exec(url);
       const cikFromUrl = cikMatch ? Number.parseInt(cikMatch[1], 10) : null;
-      const cik = [cikFromItem, cikFromAccession, cikFromUrl]
+      // The accession prefix names the filer agent, so it comes last.
+      const cik = [cikFromItem, cikFromUrl, cikFromAccession]
         .find((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0) ?? null;
       if (accession && cik !== null) {
         const ex991Url = await resolveEx991Url(cik, accession);
@@ -12393,8 +12428,9 @@ export async function verifyCompanyEvent(
     requiredTermMatches: number;
   } => {
     const text = normalizeEventText(`${_str(item.title)} ${_str(item.summary)} ${_str(item.evidenceText)} ${_str(item.eventType)} ${_str(item.source)}`);
-    const words = new Set(text.split(" ").filter(Boolean));
-    const matchedTerms = meaningfulTerms.filter(term => words.has(term));
+    // Stemmed, so "launch" matches "launches" and "launched" (extraction-rules.ts).
+    const words = new Set(text.split(" ").filter(Boolean).map(stemWord));
+    const matchedTerms = meaningfulTerms.filter(term => words.has(stemWord(term)));
     if (normalizedQuery && text.includes(normalizedQuery)) {
       return { matched: true, method: "PHRASE", matchedTerms, requiredTermMatches };
     }
@@ -12504,7 +12540,10 @@ export async function verifyCompanyEvent(
     return "LOW";
   };
 
-  const best = (official.length > 0 ? official : (inRange.length > 0 ? inRange : matched)).slice(0, 5).map(ev => {
+  // Stronger evidence first, then newest: a LOW-confidence aggregator item
+  // never outranks a press release that matched the same query.
+  const pool = official.length > 0 ? official : (inRange.length > 0 ? inRange : matched);
+  const best = rankEvidence(pool, (ev) => confidenceForSourceType(ev.sourceType, ev.confidence)).slice(0, 5).map(ev => {
     const relevance = relevanceScore(ev);
     const match = queryMatch(ev);
     return {
@@ -12895,7 +12934,7 @@ export async function listSecMaterialFilings(
 }
 
 const XBRL_INTELLIGENCE_CONCEPTS: Record<string, string[]> = {
-  "revenue": ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet"],
+  "revenue": ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "RevenueFromContractWithCustomerIncludingAssessedTax", "SalesRevenueNet"],
   net_income: ["NetIncomeLoss", "ProfitLoss"],
   cash: ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsAndShortTermInvestments"],
   long_term_debt: ["LongTermDebt", "LongTermDebtNoncurrent"],
@@ -13216,11 +13255,11 @@ export async function listSecFilingExhibits(ticker: string, accessionNumber: str
     return JSON.stringify({ ok: false, error: { code: "INPUT_VALIDATION_ERROR", message: "accessionNumber is required." } });
   }
 
-  let cik = edgarCikFromAccession(accessionNumber);
-  if (!cik) {
-    const { cikPadded } = await getSubmissionsForTicker(ticker);
-    cik = cikPadded ? parseInt(cikPadded, 10) : null;
-  }
+  // The issuer's CIK comes from the ticker; an accession prefix names the filer
+  // agent (0001193125 is Donnelley), so it is only a fallback.
+  const { cikPadded: issuerCik } = await getSubmissionsForTicker(ticker);
+  let cik: number | null = issuerCik ? parseInt(issuerCik, 10) : null;
+  if (!cik) cik = edgarCikFromAccession(accessionNumber);
   if (!cik) {
     return JSON.stringify({ ok: false, error: { code: "TICKER_NOT_FOUND", message: `Could not resolve CIK for ticker '${ticker}'.` } });
   }
@@ -13247,11 +13286,11 @@ export async function getSecFilingExhibitContent(
     return JSON.stringify({ ok: false, error: { code: "INPUT_VALIDATION_ERROR", message: "fileName is required." } });
   }
 
-  let cik = edgarCikFromAccession(accessionNumber);
-  if (!cik) {
-    const { cikPadded } = await getSubmissionsForTicker(ticker);
-    cik = cikPadded ? parseInt(cikPadded, 10) : null;
-  }
+  // The issuer's CIK comes from the ticker; an accession prefix names the filer
+  // agent (0001193125 is Donnelley), so it is only a fallback.
+  const { cikPadded: issuerCik } = await getSubmissionsForTicker(ticker);
+  let cik: number | null = issuerCik ? parseInt(issuerCik, 10) : null;
+  if (!cik) cik = edgarCikFromAccession(accessionNumber);
   if (!cik) {
     return JSON.stringify({ ok: false, error: { code: "TICKER_NOT_FOUND", message: `Could not resolve CIK for ticker '${ticker}'.` } });
   }
@@ -14346,11 +14385,10 @@ export async function getEarningsCallTranscript(
     };
   } else {
     const accessionNumber = String(secSource.accessionNumber ?? "");
-    let cik = edgarCikFromAccession(accessionNumber);
-    if (!cik) {
-      const { cikPadded } = await getSubmissionsForTicker(ticker);
-      cik = cikPadded ? parseInt(cikPadded, 10) : null;
-    }
+    // The issuer's CIK comes from the ticker; the accession prefix is only a fallback.
+    const { cikPadded: issuerCik } = await getSubmissionsForTicker(ticker);
+    let cik: number | null = issuerCik ? parseInt(issuerCik, 10) : null;
+    if (!cik) cik = edgarCikFromAccession(accessionNumber);
     if (!cik) {
       attemptedSources.push(transcriptAttempt("sec_8k_exhibit", "FAILED", {
         accessionNumber, reason: "CIK resolution failed.",
@@ -15223,54 +15261,43 @@ export async function extractRiskFactorMentions(
 }
 
 /**
- * Customers with a revenue percentage in filing text matches, and the first
- * statement that no customer reached the disclosure threshold. Only
- * sentences about customers count, and a negated sentence is never a
- * customer ("no customer accounted for more than 10%").
+ * Revenue-concentration statements in filing text matches (extraction-rules.ts):
+ * named customers, customers the filing leaves unnamed, and aggregates such as
+ * "our top ten customers", for the latest year stated. A negated statement is
+ * never a customer ("no customer accounted for more than 10%"), and a share
+ * of receivables or anything other than revenue never matches.
  */
 export function customerConcentrationFromMatches(
   list: unknown[],
   filingEvidence: Record<string, unknown>,
   period: string | null,
-): { customers: Record<string, unknown>[]; negation: Record<string, unknown> | null } {
-  const customers: Record<string, unknown>[] = [];
-  const seen = new Set<string>();
-  let negation: Record<string, unknown> | null = null;
-  for (const row of list) {
-    if (!row || typeof row !== "object") continue;
-    const item = row as Record<string, unknown>;
-    const ctx = String(item.context ?? item.contextText ?? "");
-    // Only sentences about customers count; a statement that no customer
-    // reached the threshold is evidence of non-disclosure, not a customer.
-    for (const sentence of ctx.split(/(?<=[.;])\s+/)) {
-      if (!/customer/i.test(sentence)) continue;
-      if (/\bno (?:single |one )?customer\b|\bnone of (?:the|its|our) customers\b|did not have any (?:single )?customer|no customers? (?:that )?(?:individually )?accounted/i.test(sentence)) {
-        negation ??= { sectionHeading: item.sectionHeading ?? null, excerpt: compactExcerpt(sentence), ...filingEvidence };
-        continue;
-      }
-      const m = sentence.match(/(\d{1,2}(?:\.\d+)?)\s*%/);
-      if (!m) continue;
-      const pct = Number(m[1]);
-      if (!Number.isFinite(pct)) continue;
-      const key = pct.toFixed(2);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      customers.push({
-        label: `Customer ${String.fromCharCode(65 + customers.length)}`,
-        valuePct: pct,
-        period,
-        confidence: "MEDIUM",
-        evidence: {
-          sectionHeading: item.sectionHeading ?? null,
-          excerpt: compactExcerpt(sentence),
-          ...filingEvidence,
-        },
-      });
-      if (customers.length >= 5) break;
-    }
-    if (customers.length >= 5) break;
-  }
-  return { customers, negation };
+): { customers: Record<string, unknown>[]; aggregates: Record<string, unknown>[]; negation: Record<string, unknown> | null } {
+  const rows = list.filter((row): row is Record<string, unknown> => row != null && typeof row === "object");
+  const { findings, negation } = customerConcentration(rows);
+  const fallbackPeriod = period ? (/^FY/i.test(period) ? period : `FY${period}`) : null;
+  const evidenceFor = (f: ConcentrationFinding): Record<string, unknown> => ({ sectionHeading: f.sectionHeading, excerpt: compactExcerpt(f.sentence), ...filingEvidence });
+  const customers = findings.filter((f) => f.kind === "customer").slice(0, 8).map((f) => ({
+    label: f.name ?? "Unnamed customer",
+    name: f.name,
+    nameDisclosed: f.name != null,
+    description: f.description,
+    valuePct: f.valuePct,
+    period: f.year != null ? `FY${f.year}` : fallbackPeriod,
+    confidence: "MEDIUM",
+    evidence: evidenceFor(f),
+  }));
+  const aggregates = findings.filter((f) => f.kind === "aggregate").slice(0, 4).map((f) => ({
+    description: f.description,
+    valuePct: f.valuePct,
+    period: f.year != null ? `FY${f.year}` : fallbackPeriod,
+    confidence: "MEDIUM",
+    evidence: evidenceFor(f),
+  }));
+  return {
+    customers,
+    aggregates,
+    negation: negation ? { sectionHeading: negation.sectionHeading, excerpt: compactExcerpt(negation.sentence), ...filingEvidence } : null,
+  };
 }
 
 export async function extractCustomerConcentration(
@@ -15279,7 +15306,7 @@ export async function extractCustomerConcentration(
   _period = "latest",
   detailLevel = "compact",
 ): Promise<string> {
-  const searchedTerms = ["major customer", "customers", "customer accounted", "percent of revenue"];
+  const searchedTerms = ["major customer", "customers", "customer accounted", "accounted for", "of our revenue", "of total revenue", "of net sales", "percent of revenue"];
   const search = parseObjectJson(await searchFilingText(ticker, searchedTerms, null, filingType, null, 1200, false));
   const list = Array.isArray(search.matches) ? search.matches : [];
   const filingEvidence = {
@@ -15287,11 +15314,11 @@ export async function extractCustomerConcentration(
     accessionNumber: search.accessionNumber ?? null,
     documentUrl: search.documentUrl ?? null,
   };
-  const { customers, negation } = customerConcentrationFromMatches(list, filingEvidence, search.fiscalYear ? `FY${String(search.fiscalYear)}` : null);
+  const { customers, aggregates, negation } = customerConcentrationFromMatches(list, filingEvidence, search.fiscalYear ? String(search.fiscalYear) : null);
   const matchCount = Number(search.matchCount ?? 0);
   const scanCoverage = { sourceType: "sec_primary_html", ...filingEvidence, matchCount, searchedTerms };
-  const out: Record<string, unknown> = { ticker, customers };
-  if (customers.length > 0) {
+  const out: Record<string, unknown> = { ticker, customers, aggregates };
+  if (customers.length > 0 || aggregates.length > 0) {
     out.status = "FOUND";
   } else if (negation) {
     Object.assign(out, {
@@ -15475,14 +15502,18 @@ export async function extractCapitalStructure(
 
 export async function extractAnalystValuationMethods(ticker: string, daysBack = 30): Promise<string> {
   const days = clampInt(daysBack, 30, 1, 365);
-  const [news, radar] = await Promise.all([
+  const [news, radar, identity] = await Promise.all([
     getCompanyNews(ticker, 100, days).then(parseObjectJson).catch(() => ({} as Record<string, unknown>)),
     getAnalystUpgradeRadar(ticker, days).then(parseObjectJson).catch(() => ({} as Record<string, unknown>)),
+    resolveNewsCompanyIdentity(ticker).catch(() => null),
   ]);
   const items = Array.isArray(news.items) ? news.items as Record<string, unknown>[] : [];
   const changes = Array.isArray(radar.changes) ? radar.changes as Record<string, unknown>[] : [];
-  const out = analystValuationMethods(ticker.toUpperCase(), items, changes);
+  // Targets are attributed to the subject by name; without a name nothing can be checked.
+  const names = [identity?.longName, identity?.shortName, identity?.companyName].filter((n): n is string => typeof n === "string" && n.trim() !== "");
+  const out = analystValuationMethods(ticker.toUpperCase(), items, changes, names.length > 0 ? names : null);
   const warnings: Record<string, unknown>[] = [];
+  if (names.length === 0) warnings.push({ code: "ATTRIBUTION_UNCHECKED", message: "The company name could not be resolved, so targets were not checked against the subject.", severity: "warning" });
   if (news.error || news.code === "INPUT_VALIDATION_ERROR") warnings.push({ code: "NEWS_UNAVAILABLE", message: String(news.message ?? "News could not be read."), severity: "warning" });
   if (radar.error) warnings.push({ code: "RATING_CHANGES_UNAVAILABLE", message: String(radar.message ?? "Rating changes could not be read."), severity: "warning" });
   out.windowDays = days;
@@ -16544,26 +16575,15 @@ function scaleNumberFromText(raw: unknown): number | null {
   return n;
 }
 
+/** A reported release value for a label, anchored after it (extraction-rules.ts), scaled to units. */
 function extractReportedTextMetric(
   text: string,
-  label: RegExp,
-  valuePattern: RegExp,
+  labelSource: string,
+  valueSource: string,
 ): { value: number | null; rawValue: string | null; excerpt: string | null } {
-  const guidanceContext = /\b(?:guidance|outlook|expect(?:s|ed|ation)?|forecast|project(?:s|ed)?|target|range)\b/i;
-  const reportedContext = /\b(?:reported|was|were|totaled|generated|delivered|achieved)\b/i;
-  const sentences = text
-    .replace(/\s+/g, " ")
-    .split(/(?<=[.!?])\s+/)
-    .map((sentence) => sentence.trim())
-    .filter(Boolean);
-  for (const sentence of sentences) {
-    if (!label.test(sentence) || guidanceContext.test(sentence) || !reportedContext.test(sentence)) continue;
-    const match = sentence.match(valuePattern);
-    const rawValue = match?.[1] ?? null;
-    const value = scaleNumberFromText(rawValue);
-    if (value != null) return { value, rawValue, excerpt: compactExcerpt(sentence, 220) };
-  }
-  return { value: null, rawValue: null, excerpt: null };
+  const hit = reportedTextMetric(text, labelSource, valueSource);
+  const value = hit ? scaleNumberFromText(hit.rawValue) : null;
+  return value != null && hit ? { value, rawValue: hit.rawValue, excerpt: compactExcerpt(hit.sentence, 220) } : { value: null, rawValue: null, excerpt: null };
 }
 
 const MANAGEMENT_COMMENTARY_TOPIC_ALIASES: Record<string, string[]> = {
@@ -16974,11 +16994,16 @@ export async function extractEarningsMetrics(
     // by period length, or derived as the difference of two year-to-date
     // facts (for example FY minus nine months for a fourth quarter).
     const fetchQuarterlyFact = async (
-      primary: string,
+      primary: string | string[],
       fallback?: string,
       unitType: "USD" | "USD/shares" = "USD",
     ): Promise<QuarterFact & { concept: string } | null> => {
-      for (const concept of [primary, ...(fallback ? [fallback] : [])]) {
+      // Equivalent concepts (revenue) all compete; the latest quarter wins, the
+      // earlier-listed concept on a tie. A single concept with a fallback is
+      // read in order, as before.
+      const concepts = Array.isArray(primary) ? primary : [primary, ...(fallback ? [fallback] : [])];
+      let best: (QuarterFact & { concept: string }) | null = null;
+      for (const concept of concepts) {
         const d = await edgarGetJson(
           `https://data.sec.gov/api/xbrl/companyconcept/CIK${cikPadded}/us-gaap/${concept}.json`,
         );
@@ -16991,13 +17016,14 @@ export async function extractEarningsMetrics(
           minFiled: releaseFilingDate || undefined,
           derive: unitType === "USD",
         });
-        if (quarter) return { ...quarter, concept };
+        if (quarter && !Array.isArray(primary)) return { ...quarter, concept };
+        if (quarter && (best == null || quarter.end > best.end)) best = { ...quarter, concept };
       }
-      return null;
+      return best;
     };
 
     const [xRev, xEpsRaw, xGpRaw, xOiRaw, xCapexRaw, xOcfRaw] = await Promise.all([
-      fetchQuarterlyFact("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"),
+      fetchQuarterlyFact(REVENUE_CONCEPTS),
       fetchQuarterlyFact("EarningsPerShareDiluted", undefined, "USD/shares"),
       fetchQuarterlyFact("GrossProfit"),
       fetchQuarterlyFact("OperatingIncomeLoss"),
@@ -17126,15 +17152,12 @@ export async function extractEarningsMetrics(
       if (!hasHighConfidence()) {
         const text = _stripHtmlTagsIdx(_sanitizeFilingHtml(html));
         sourcePeriodInfo = extractEarningsPeriodFromText(text);
-        const amount = /(\$\s*[-+]?[0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)/i;
-        const epsAmount = /(\$\s*\(?[-+]?[0-9]+(?:\.[0-9]+)?\)?)/i;
-        const pct = /([0-9]{1,2}(?:\.[0-9]+)?\s*%)/i;
-        const rev = extractReportedTextMetric(text, /\b(?:net sales|revenue(?:s)?)\b/i, amount);
-        const eps = extractReportedTextMetric(text, /\b(?:diluted (?:earnings per share|eps)|eps \(diluted\))\b/i, epsAmount);
-        const gm = extractReportedTextMetric(text, /\bgross margin\b/i, pct);
-        const op = extractReportedTextMetric(text, /\boperating income\b/i, amount);
-        const fcf = extractReportedTextMetric(text, /\bfree cash flow\b/i, amount);
-        const capex = extractReportedTextMetric(text, /\b(?:capital expenditures|capex)\b/i, amount);
+        const rev = extractReportedTextMetric(text, REVENUE_LABEL, USD_AMOUNT);
+        const eps = extractReportedTextMetric(text, EPS_LABEL, EPS_AMOUNT);
+        const gm = extractReportedTextMetric(text, "\\bgross margin\\b", PCT_AMOUNT);
+        const op = extractReportedTextMetric(text, "\\boperating income\\b", USD_AMOUNT);
+        const fcf = extractReportedTextMetric(text, "\\bfree cash flow\\b", USD_AMOUNT);
+        const capex = extractReportedTextMetric(text, "\\b(?:capital expenditures|capex)\\b", USD_AMOUNT);
         const setFallbackMetric = (key: string, val: Record<string, unknown>): void => {
           metrics[key] = val;
           const ev = val.evidence;
@@ -17209,10 +17232,11 @@ export async function extractGuidance(ticker: string, period = "latest"): Promis
   }
   const html = await edgarGetHtml(srcUrl, 5_000_000);
   const text = _stripHtmlTagsIdx(_sanitizeFilingHtml(html ?? ""));
-  // Accept both "between $X and $Y" and "$X to $Y" guidance wording.
-  const rev = text.match(/(?:expects|guidance|outlook)[^.\n]{0,120}revenue[^$]{0,25}\$?\s*([0-9.,]+(?:\s*(?:billion|million|thousand|bn|m|k))?)\s*(?:to|and|[-–—])\s*\$?\s*([0-9.,]+(?:\s*(?:billion|million|thousand|bn|m|k))?)/i);
-  const gm = text.match(/gross margin[^0-9]{0,20}([0-9]{1,2}(?:\.[0-9]+)?)\s*%\s*(?:to|and|[-–—])\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%/i);
-  const eps = text.match(/(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per share)[^$]{0,25}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|and|[-–—])\s*\$?\s*([0-9]+(?:\.[0-9]+)?)/i);
+  // "revenue guidance of $X to $Y" and "expects revenue between $X and $Y" (extraction-rules.ts).
+  const ranges = guidanceRanges(text);
+  const rev = ranges.revenue;
+  const gm = ranges.grossMargin;
+  const eps = ranges.eps;
 
   const ev = (excerpt: string): Record<string, unknown> => ({
     url: srcUrl,
@@ -17223,21 +17247,21 @@ export async function extractGuidance(ticker: string, period = "latest"): Promis
   });
 
   if (rev) {
-    const low = scaleNumberFromText(rev[1]);
-    const high = scaleNumberFromText(rev[2]);
+    const low = scaleNumberFromText(rev.low);
+    const high = scaleNumberFromText(rev.high);
     if (low != null && high != null) {
-      guidance.revenue = { status: "FOUND", low, high, midpoint: (low + high) / 2, unit: "USD", evidence: [ev(rev[0])] };
+      guidance.revenue = { status: "FOUND", low, high, midpoint: (low + high) / 2, unit: "USD", evidence: [ev(rev.excerpt)] };
     }
   }
   if (gm) {
-    const lowPct = Number(gm[1]);
-    const highPct = Number(gm[2]);
-    guidance.grossMargin = { status: "FOUND", lowPct, highPct, midpointPct: (lowPct + highPct) / 2, evidence: [ev(gm[0])] };
+    const lowPct = Number(gm.low);
+    const highPct = Number(gm.high);
+    guidance.grossMargin = { status: "FOUND", lowPct, highPct, midpointPct: (lowPct + highPct) / 2, evidence: [ev(gm.excerpt)] };
   }
   if (eps) {
-    const low = Number(eps[1]);
-    const high = Number(eps[2]);
-    guidance.eps = { status: "FOUND", low, high, midpoint: (low + high) / 2, unit: "USD/share", evidence: [ev(eps[0])] };
+    const low = Number(eps.low);
+    const high = Number(eps.high);
+    guidance.eps = { status: "FOUND", low, high, midpoint: (low + high) / 2, unit: "USD/share", evidence: [ev(eps.excerpt)] };
   }
   const found = ["revenue", "grossMargin", "eps"].some((k) => ((guidance[k] as Record<string, unknown>).status === "FOUND"));
   return JSON.stringify({

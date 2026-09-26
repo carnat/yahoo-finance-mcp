@@ -39,6 +39,7 @@ from yfmcp.clients.edgar import (
     _get_submissions_for_ticker,
 )
 from yfmcp.clients.market_providers import fetch_alpha_vantage_json
+from yfmcp import extraction_rules as _er
 from yfmcp.clients.yahoo_transcripts import (
     assess_yahoo_transcript_payload_completeness,
     fetch_yahoo_quartr_transcript,
@@ -129,30 +130,17 @@ def _extract_reported_text_metric(
     label_pattern: str,
     value_pattern: str,
 ) -> tuple[float | None, str | None, str | None]:
-    """Extract only explicitly reported prose metrics, never guidance wording.
+    """A reported release value for a label, anchored after it (yfmcp/extraction_rules.py), scaled to units.
 
     Free-text release prose cannot be decision-grade without a structured
-    period-matched table or XBRL context.  This helper is intentionally strict:
-    a sentence needs both an actual-result verb and a value near the requested
-    metric label, and guidance/outlook language always wins as an exclusion.
+    period-matched table or XBRL context; guidance, award and backlog wording
+    always excludes a sentence.
     """
-    for sentence in _re.split(r"(?<=[.!?])\s+", _re.sub(r"\s+", " ", text or "")):
-        if not _re.search(label_pattern, sentence, flags=_re.IGNORECASE):
-            continue
-        if _GUIDANCE_CONTEXT_RE.search(sentence) or not _REPORTED_CONTEXT_RE.search(sentence):
-            continue
-        match = _re.search(
-            rf"(?:{label_pattern})\D{{0,100}}?{value_pattern}",
-            sentence,
-            flags=_re.IGNORECASE,
-        )
-        if not match:
-            continue
-        raw = match.group(1)
-        value = _scale_number_from_text(raw)
-        if value is not None:
-            return value, raw, _compact_excerpt(sentence, max_len=220)
-    return None, None, None
+    hit = _er.reported_text_metric(text or "", label_pattern, value_pattern)
+    value = _scale_number_from_text(hit["rawValue"]) if hit else None
+    if hit is None or value is None:
+        return None, None, None
+    return value, hit["rawValue"], _compact_excerpt(hit["sentence"], max_len=220)
 
 
 def _is_paywalled_url(url: str) -> bool:
@@ -469,24 +457,12 @@ async def extract_earnings_metrics(
         html = await _edgar_get_html(src_url, max_bytes=5_000_000)
         text = _strip_html_tags(_sanitize_sec_html(html or ""))
         period_info = _extract_earnings_period_from_text(text)
-        revenue_val, revenue_raw, revenue_ex = _extract_reported_text_metric(
-            text, r"net sales|revenue(?:s)?", r"\$\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)",
-        )
-        eps_val, eps_raw, eps_ex = _extract_reported_text_metric(
-            text, r"diluted (?:earnings per share|eps)|eps \(diluted\)", r"\$\s*([0-9]+(?:\.[0-9]+)?)",
-        )
-        gm_val, gm_raw, gm_ex = _extract_reported_text_metric(
-            text, r"gross margin", r"([0-9]{1,2}(?:\.[0-9]+)?)\s*%",
-        )
-        op_val, op_raw, op_ex = _extract_reported_text_metric(
-            text, r"operating income", r"\$\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)",
-        )
-        fcf_val, fcf_raw, fcf_ex = _extract_reported_text_metric(
-            text, r"free cash flow", r"\$\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)",
-        )
-        capex_val, capex_raw, capex_ex = _extract_reported_text_metric(
-            text, r"capital expenditures|capex", r"\$\s*([0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)",
-        )
+        revenue_val, revenue_raw, revenue_ex = _extract_reported_text_metric(text, _er.REVENUE_LABEL, _er.USD_AMOUNT)
+        eps_val, eps_raw, eps_ex = _extract_reported_text_metric(text, _er.EPS_LABEL, _er.EPS_AMOUNT)
+        gm_val, gm_raw, gm_ex = _extract_reported_text_metric(text, r"\bgross margin\b", _er.PCT_AMOUNT)
+        op_val, op_raw, op_ex = _extract_reported_text_metric(text, r"\boperating income\b", _er.USD_AMOUNT)
+        fcf_val, fcf_raw, fcf_ex = _extract_reported_text_metric(text, r"\bfree cash flow\b", _er.USD_AMOUNT)
+        capex_val, capex_raw, capex_ex = _extract_reported_text_metric(text, r"\b(?:capital expenditures|capex)\b", _er.USD_AMOUNT)
 
         def _ev(excerpt: str | None) -> dict | None:
             if not excerpt:
@@ -613,14 +589,11 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
 
     html = await _edgar_get_html(src_url, max_bytes=5_000_000)
     text = _strip_html_tags(_sanitize_sec_html(html or ""))
-    patterns = {
-        "revenue": _re.search(r"(?:expects|guidance|outlook)[^.\n]{0,120}revenue[^$]{0,25}\$?\s*([0-9.,]+(?:\s*(?:billion|million|thousand|bn|m|k))?)\s*(?:to|and|[-–—])\s*\$?\s*([0-9.,]+(?:\s*(?:billion|million|thousand|bn|m|k))?)", text, flags=_re.IGNORECASE),
-        "grossMargin": _re.search(r"gross margin[^0-9]{0,20}([0-9]{1,2}(?:\.[0-9]+)?)\s*%\s*(?:to|and|[-–—])\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%", text, flags=_re.IGNORECASE),
-        "eps": _re.search(r"(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per share)[^$]{0,25}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|and|[-–—])\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", text, flags=_re.IGNORECASE),
-    }
+    # "revenue guidance of $X to $Y" and "expects revenue between $X and $Y" (yfmcp/extraction_rules.py).
+    patterns = _er.guidance_ranges(text)
     if patterns["revenue"]:
-        lo = _scale_number_from_text(patterns["revenue"].group(1))
-        hi = _scale_number_from_text(patterns["revenue"].group(2))
+        lo = _scale_number_from_text(patterns["revenue"]["low"])
+        hi = _scale_number_from_text(patterns["revenue"]["high"])
         if lo is not None and hi is not None:
             base["revenue"] = {
                 "status": "FOUND",
@@ -628,28 +601,28 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
                 "high": hi,
                 "midpoint": (lo + hi) / 2.0,
                 "unit": "USD",
-                "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["revenue"].group(0))}],
+                "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["revenue"]["excerpt"])}],
             }
     if patterns["grossMargin"]:
-        lo = float(patterns["grossMargin"].group(1))
-        hi = float(patterns["grossMargin"].group(2))
+        lo = float(patterns["grossMargin"]["low"])
+        hi = float(patterns["grossMargin"]["high"])
         base["grossMargin"] = {
             "status": "FOUND",
             "lowPct": lo,
             "highPct": hi,
             "midpointPct": (lo + hi) / 2.0,
-            "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["grossMargin"].group(0))}],
+            "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["grossMargin"]["excerpt"])}],
         }
     if patterns["eps"]:
-        lo = float(patterns["eps"].group(1))
-        hi = float(patterns["eps"].group(2))
+        lo = float(patterns["eps"]["low"])
+        hi = float(patterns["eps"]["high"])
         base["eps"] = {
             "status": "FOUND",
             "low": lo,
             "high": hi,
             "midpoint": (lo + hi) / 2.0,
             "unit": "USD/share",
-            "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["eps"].group(0))}],
+            "evidence": [{"url": src_url, "sourceType": src.get("sourceType", "sec_8k"), "publishedAt": _to_iso_utc(src.get("filingDate")), "retrievedAt": _utc_now_iso(), "excerpt": _compact_excerpt(patterns["eps"]["excerpt"])}],
         }
     found = any(base[k]["status"] == "FOUND" for k in ("revenue", "grossMargin", "eps"))
     return _wrap_envelope_v2("extract_guidance", {
@@ -911,11 +884,12 @@ async def list_sec_filing_exhibits(ticker: str, accessionNumber: str) -> str:
     if not accessionNumber or not accessionNumber.strip():
         return _wrap_envelope_v2("list_sec_filing_exhibits", None, error="accessionNumber is required.", error_code=ErrorCode.INPUT_VALIDATION_ERROR)
 
-    cik = _edgar_cik_from_accession(accessionNumber)
+    # The issuer's CIK comes from the ticker; an accession prefix names the filer
+    # agent (0001193125 is Donnelley), so it is only a fallback.
+    cik_padded, _ = await _get_submissions_for_ticker(ticker)
+    cik = int(cik_padded) if cik_padded else None
     if not cik:
-        # Fall back to ticker-based CIK resolution
-        cik_padded, _ = await _get_submissions_for_ticker(ticker)
-        cik = int(cik_padded) if cik_padded else None
+        cik = _edgar_cik_from_accession(accessionNumber)
     if not cik:
         return _wrap_envelope_v2("list_sec_filing_exhibits", None, error=f"Could not resolve CIK for ticker '{ticker}'.", error_code=ErrorCode.TICKER_NOT_FOUND)
 
@@ -943,10 +917,10 @@ async def get_sec_filing_exhibit_content(ticker: str, accessionNumber: str, file
     if not fileName or not fileName.strip():
         return _wrap_envelope_v2("get_sec_filing_exhibit_content", None, error="fileName is required.", error_code=ErrorCode.INPUT_VALIDATION_ERROR)
 
-    cik = _edgar_cik_from_accession(accessionNumber)
+    cik_padded, _ = await _get_submissions_for_ticker(ticker)
+    cik = int(cik_padded) if cik_padded else None
     if not cik:
-        cik_padded, _ = await _get_submissions_for_ticker(ticker)
-        cik = int(cik_padded) if cik_padded else None
+        cik = _edgar_cik_from_accession(accessionNumber)
     if not cik:
         return _wrap_envelope_v2("get_sec_filing_exhibit_content", None, error=f"Could not resolve CIK for ticker '{ticker}'.", error_code=ErrorCode.TICKER_NOT_FOUND)
 
@@ -1812,10 +1786,11 @@ async def get_earnings_call_transcript(
     else:
         accession = str(sec_source.get("accessionNumber") or "")
         official_release_source = sec_source if sec_source.get("sourceType") == "sec_8k_ex991" else None
-        cik = _edgar_cik_from_accession(accession)
+        # The issuer's CIK comes from the ticker; the accession prefix is only a fallback.
+        cik_padded, _ = await _get_submissions_for_ticker(ticker)
+        cik = int(cik_padded) if cik_padded else None
         if not cik:
-            cik_padded, _ = await _get_submissions_for_ticker(ticker)
-            cik = int(cik_padded) if cik_padded else None
+            cik = _edgar_cik_from_accession(accession)
         if not cik:
             attempted_sources.append(_transcript_attempt(
                 "sec_8k_exhibit", "FAILED", accessionNumber=accession, reason="CIK resolution failed."

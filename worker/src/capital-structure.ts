@@ -1462,7 +1462,49 @@ export type NewsItem = { title?: unknown; summary?: unknown; url?: unknown; publ
 export type RatingChange = { date?: unknown; firm?: unknown; toGrade?: unknown; ptTo?: unknown; ptFrom?: unknown };
 
 /** Valuation methods named in news headlines and summaries: context, never model inputs. */
-export function analystValuationMethods(ticker: string, items: NewsItem[], changes: RatingChange[]): Record<string, unknown> {
+// Target attribution (2.4.4): a headline such as "Rocket Lab climbs as Cantor
+// reiterates $122 target; ... AST SpaceMobile rises" names several companies,
+// and the target belongs to the one in its own clause.
+const LEGAL_SUFFIXES = new Set(["inc", "incorporated", "corp", "corporation", "ltd", "limited", "llc", "plc", "co", "company", "sa", "ag", "nv", "se", "gmbh", "holdings", "group"]);
+
+function normPhrase(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+/** Lowercase phrases that name the subject: the ticker (3+ letters) and the company name with and without its legal suffix. */
+export function subjectAliases(ticker: string, names: string[]): string[] {
+  const out = new Set<string>();
+  const base = normPhrase(ticker.split(".")[0]);
+  if (base.length >= 3) out.add(base);
+  for (const name of names) {
+    const norm = normPhrase(name);
+    if (!norm) continue;
+    const words = norm.split(" ");
+    while (words.length > 1 && LEGAL_SUFFIXES.has(words[words.length - 1])) words.pop();
+    for (const alias of [norm, words.join(" ")]) if (alias.length >= 3) out.add(alias);
+  }
+  return [...out].sort();
+}
+
+function mentionsSubject(text: string, aliases: string[]): boolean {
+  const padded = ` ${normPhrase(text)} `;
+  return aliases.some((a) => padded.includes(` ${a} `));
+}
+
+/** The clause of a sentence (split at "; " and ", ") that carries its price target, else the sentence. */
+function targetClause(sentence: string): string {
+  return sentence.split(/;\s*|,\s+/).find((clause) => priceTarget(clause) != null) ?? sentence;
+}
+
+/**
+ * Valuation methods and targets named in news. With issuerNames, each target
+ * and method must belong to the subject: its clause names the subject, or no
+ * sentence of the item names another company's target while the item names
+ * the subject. Without issuerNames nothing is checked (subjectMatch NOT_CHECKED).
+ */
+export function analystValuationMethods(ticker: string, items: NewsItem[], changes: RatingChange[], issuerNames: string[] | null = null): Record<string, unknown> {
+  const aliases = issuerNames ? subjectAliases(ticker, issuerNames) : null;
+  let rejectedOtherCompany = 0;
   const changeFirms = [...new Set(changes.map((c) => String(c.firm ?? "").trim()).filter(Boolean))];
   const firms = [...changeFirms, ...BROKERS.filter((b) => !changeFirms.some((c) => c.toLowerCase() === b.toLowerCase()))];
   const evidence: Record<string, unknown>[] = [];
@@ -1477,10 +1519,26 @@ export function analystValuationMethods(ticker: string, items: NewsItem[], chang
     seenUrls.add(key);
     const text = collapse(summary && !summary.startsWith(title) ? `${title}. ${summary}` : (summary || title));
     const firm = firmIn(text, firms);
-    for (const sentence of sentences(text)) {
+    const itemSentences = sentences(text);
+    // An item is conflicted when a sentence names the subject but puts a
+    // target in a clause about another company.
+    const conflicted = aliases != null && itemSentences.some((s) =>
+      priceTarget(s) != null && mentionsSubject(s, aliases) && !mentionsSubject(targetClause(s), aliases));
+    const itemNamesSubject = aliases != null && mentionsSubject(text, aliases);
+    for (const sentence of itemSentences) {
       const methods = sentenceMethods(sentence);
       const target = priceTarget(sentence);
       if (methods.length === 0 && !(target && firm)) continue;
+      let subjectMatch = "NOT_CHECKED";
+      if (aliases != null) {
+        const clause = target ? targetClause(sentence) : sentence;
+        if (mentionsSubject(clause, aliases)) subjectMatch = "CLAUSE";
+        else if (!mentionsSubject(sentence, aliases) && itemNamesSubject && !conflicted) subjectMatch = "ITEM";
+        else {
+          rejectedOtherCompany += 1;
+          continue;
+        }
+      }
       if (methods.length > 0 && firm) firmsWithMethod.add(firm);
       evidence.push({
         firm,
@@ -1492,6 +1550,7 @@ export function analystValuationMethods(ticker: string, items: NewsItem[], chang
         priceTarget: target,
         methods,
         methodDisclosed: methods.length > 0,
+        subjectMatch,
       });
     }
   }
@@ -1528,6 +1587,9 @@ export function analystValuationMethods(ticker: string, items: NewsItem[], chang
     methodCounts,
     evidence: evidence.slice(0, 40),
     methodNotDisclosed,
+    attribution: aliases != null
+      ? { checked: true, subjectAliases: aliases, rejectedForOtherCompany: rejectedOtherCompany }
+      : { checked: false, subjectAliases: [], rejectedForOtherCompany: 0 },
     caveats: [
       "Read from headlines and short summaries, not the research notes; a method named here may be one of several the analyst used.",
       "Multiples and rates are the analyst's, quoted as published. Do not treat them as consensus or back-solve targets into forecasts.",

@@ -105,7 +105,8 @@ BRIDGE_DOMESTIC_2X = {"status": "COMPUTED", "basicShares": {"shares": 40_000_000
 QUOTE_SUMMARIES["SAMEQ"] = copy.deepcopy(QUOTE_SUMMARIES["CSTC"])
 QUOTE_SUMMARIES["SAMEQ"]["defaultKeyStatistics"]["mostRecentQuarter"] = _r(1743379200)
 # A filing that tags no borrowings (AEHR, 2.4.2): debt is zero, not Yahoo's lease-inclusive total.
-CAPITAL_DEBT_FREE = {"basis": "COMPANY_DISCLOSED", "periodEnd": "2025-03-31", "balances": {"cashAndEquivalents": 140_000_000, "shortTermInvestments": None, "totalDebt": 0}}
+CAPITAL_DEBT_FREE = {"basis": "COMPANY_DISCLOSED", "periodEnd": "2025-03-31", "balances": {"cashAndEquivalents": 140_000_000, "shortTermInvestments": None, "totalDebt": 0},
+                     "warnings": [{"code": "NO_BORROWINGS_TAGGED", "message": "The filing tags no borrowings at any date, so total debt is taken as zero (leases excluded).", "severity": "info"}]}
 
 _WORKER_PURE = r"""
 import fs from "node:fs";
@@ -252,6 +253,8 @@ class TestValuationValues(unittest.TestCase):
         self.assertNotIn("ENTERPRISE_VALUE_INCOMPLETE", codes)
         self.assertIsNone(self.out["adrRow"]["enterpriseValue"])
         self.assertEqual(self.out["adsRatios"], [5, 5, None, 0.5, None, None])
+        # The share difference is taken after the ratio (2.4.4): the counts agree.
+        self.assertEqual(sh["secVsYahooSharesDiffPct"], 0)
 
     def test_domestic_filer_near_twice_yahoo_is_not_an_adr(self) -> None:
         s = self.out["snapshotDomestic2x"]
@@ -285,6 +288,8 @@ class TestValuationValues(unittest.TestCase):
         self.assertEqual((s["balances"]["basis"], s["balances"]["totalDebt"], s["balances"]["cash"]), ("sec_filing_period_end", 0, 140_000_000))
         self.assertEqual(s["enterpriseValue"], 25 * 101_000_000 - 140_000_000)
         self.assertNotIn("YAHOO_BALANCES", [w["code"] for w in s["warnings"]])
+        # The capital structure's warnings travel with the balances they explain (2.4.4).
+        self.assertIn({"code": "NO_BORROWINGS_TAGGED", "message": "The filing tags no borrowings at any date, so total debt is taken as zero (leases excluded).", "severity": "info", "source": "extract_capital_structure"}, s["warnings"])
 
     def test_snapshot_without_filings_uses_yahoo(self) -> None:
         s = self.out["snapshotYahoo"]

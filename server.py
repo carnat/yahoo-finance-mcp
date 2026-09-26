@@ -59,6 +59,8 @@ from yfmcp.clients.yahoo import _safe_parse
 from yfmcp import filing_search as _fs
 from yfmcp import capital_structure as _cs
 from yfmcp import valuation as _vl
+from yfmcp import sec_facts as _sf
+from yfmcp import extraction_rules as _er
 from yfmcp.clients.edgar import (
     _SEC_REQUIRED_UA, _SMOKE_TICKER_CIK_FALLBACKS,
     _resolve_cik_for_ticker, _get_submissions_for_ticker,
@@ -3204,8 +3206,9 @@ async def verify_company_event(
             str(item.get("eventType") or ""),
             str(item.get("source") or ""),
         ]))
-        words = set(hay.split())
-        matched_terms = [term for term in meaningful_terms if term in words]
+        # Stemmed, so "launch" matches "launches" and "launched" (yfmcp/extraction_rules.py).
+        words = {_er.stem_word(w) for w in hay.split()}
+        matched_terms = [term for term in meaningful_terms if _er.stem_word(term) in words]
         if query_text and query_text in hay:
             return {"matched": True, "method": "PHRASE", "matchedTerms": matched_terms, "requiredTermMatches": required_term_matches}
         if required_term_matches > 0 and len(matched_terms) >= required_term_matches:
@@ -3261,7 +3264,9 @@ async def verify_company_event(
     else:
         status = "NOT_FOUND"
 
-    best = official_in_range or matched_in_range or matched
+    # Stronger evidence first, then newest: a LOW-confidence aggregator item
+    # never outranks a press release that matched the same query.
+    best = _er.rank_evidence(official_in_range or matched_in_range or matched, lambda ev: str(ev.get("confidence") or ""))
 
     # ── Ticker/entity relevance filtering ────────────────────────────────
     # Ensure bestEvidence items actually reference the queried ticker/entity
@@ -4703,6 +4708,17 @@ async def get_financial_ratios(
 
     # Replace any dict values (empty {} or non-numeric wrappers) with None
     ratios = {k: (None if isinstance(v, dict) else v) for k, v in ratios.items()}
+    # Quote and financial currencies must match for value-over-results multiples.
+    quote_currency = _vl._major_price(1, _get("currency"))[1] if isinstance(_get("currency"), str) else None
+    financial_currency = ratios.get("currency") if isinstance(ratios.get("currency"), str) else None
+    if quote_currency and financial_currency and quote_currency != financial_currency:
+        withheld = {}
+        for key in ("priceToSales", "priceToBook", "enterpriseToEbitda", "enterpriseToRevenue", "freeCashflowYield"):
+            withheld[key] = ratios.get(key)
+            ratios[key] = None
+        ratios["quoteCurrency"] = quote_currency
+        ratios["withheldMultiples"] = withheld
+        ratios["warnings"] = [{"code": "CURRENCY_MISMATCH_MULTIPLES_WITHHELD", "message": "Yahoo's price/sales, price/book and EV multiples, and the free-cash-flow yield, divide a quote-currency market value by financial-currency results; they are withheld when the two currencies differ (TSM: USD ADR, TWD financials). P/E stays, since Yahoo reports EPS per quoted share.", "severity": "warning"}]
     ratios["unitSemantics"] = {
         "currency": ratios.get("currency"),
         "multiples": [
@@ -5119,14 +5135,20 @@ async def screen_stocks(screener_name: str, count: int = 25) -> str:
 # Group 3.4b — get_filing_data / search_filing_text
 # ---------------------------------------------------------------------------
 
+# Equivalent concepts are all read; the one filed most recently wins (yfmcp/sec_facts.py).
+_FILING_FACT_ALTERNATES: dict[FilingFactType, list[str]] = {
+    FilingFactType.geographic_revenue: _sf.REVENUE_CONCEPTS[1:],
+    FilingFactType.segment_revenue: _sf.REVENUE_CONCEPTS[1:],
+    FilingFactType.total_revenue: _sf.REVENUE_CONCEPTS[1:],
+}
 _FILING_FACT_CONCEPTS: dict[FilingFactType, tuple[str, str | None]] = {
-    FilingFactType.geographic_revenue: ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"),
-    FilingFactType.segment_revenue: ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"),
+    FilingFactType.geographic_revenue: (_sf.REVENUE_CONCEPTS[0], None),
+    FilingFactType.segment_revenue: (_sf.REVENUE_CONCEPTS[0], None),
     FilingFactType.capex: ("PaymentsToAcquirePropertyPlantAndEquipment", None),
     FilingFactType.rd_expense: ("ResearchAndDevelopmentExpense", None),
     FilingFactType.operating_income: ("OperatingIncomeLoss", None),
     FilingFactType.net_income: ("NetIncomeLoss", None),
-    FilingFactType.total_revenue: ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"),
+    FilingFactType.total_revenue: (_sf.REVENUE_CONCEPTS[0], None),
     FilingFactType.long_term_debt: ("LongTermDebt", None),
     FilingFactType.cash: ("CashAndCashEquivalentsAtCarryingValue", None),
 }
@@ -5149,6 +5171,13 @@ def _manual_lookup_payload(ticker: str, cik_padded: str | None, filing_type: str
     }
 
 
+def _fy_number(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 async def get_filing_data(
     ticker: str,
     fact_type: FilingFactType,
@@ -5156,6 +5185,7 @@ async def get_filing_data(
     filing_type: str = "10-K",
     period: str = "latest",
     period_mode: str = "auto",
+    accession_number: str | None = None,
 ) -> str:
     FLOATING_POINT_EPSILON = 1e-9
     RATIO_DECIMALS = 4
@@ -5266,21 +5296,34 @@ async def get_filing_data(
         except EdgarError:
             return None
 
-    concept_used = concept_primary
-    concept_data = await _concept_json(concept_primary)
-    usd_facts: list[dict] = (
-        concept_data.get("units", {}).get("USD", [])  # type: ignore[union-attr]
-        if concept_data else []
-    )
-    if not usd_facts and concept_fallback:
-        fallback_data = await _concept_json(concept_fallback)
-        fallback_usd = fallback_data.get("units", {}).get("USD", []) if fallback_data else []
-        if fallback_usd:
-            concept_used = concept_fallback
-            concept_data = fallback_data
-            usd_facts = fallback_usd
-
-    filtered = [f for f in usd_facts if str(f.get("form", "")).upper() == filing_type.upper()]
+    # Every equivalent concept is read; the one with the newest filing of this
+    # form wins, so a filer that switched concepts is not read from its old one.
+    candidate_names = [concept_primary, *_FILING_FACT_ALTERNATES.get(fact_type, []), *([concept_fallback] if concept_fallback else [])]
+    fetched_concepts = []
+    for name in candidate_names:
+        data = await _concept_json(name)
+        fetched_concepts.append({"concept": name, "facts": (data.get("units", {}).get("USD", []) if data else [])})
+    pinned_accession = accession_number.strip() if accession_number and accession_number.strip() else None
+    chosen = _sf.pick_concept_facts(fetched_concepts, filing_type, pinned_accession)
+    concept_used = chosen["concept"] if chosen else concept_primary
+    filtered = list(chosen["facts"]) if chosen else []
+    if not filtered and pinned_accession:
+        return _geo_shape({
+            "ticker": ticker,
+            "factType": fact_type.value,
+            "concept": concept_used,
+            "value": None,
+            "denominator": None,
+            "valueRatio": None,
+            "valuePct": None,
+            "extractionMethod": "NONE",
+            "source": "SEC_COMPANYCONCEPT",
+            "confidence": "NOT_DECISION_GRADE",
+            "status": "SEC_FACT_NOT_AVAILABLE",
+            "code": "NO_FACT_FOR_ACCESSION",
+            "evidence": {},
+            "warnings": [{"code": "NO_FACT_FOR_ACCESSION", "message": f"SEC companyconcept has no {' / '.join(candidate_names)} fact in accession {pinned_accession} ({filing_type}).", "severity": "warning"}],
+        })
     if not filtered:
         if fact_type != FilingFactType.geographic_revenue:
             return _geo_shape({
@@ -5301,7 +5344,7 @@ async def get_filing_data(
             })
         # For geographic_revenue, fall through to HTML fallback below (picked remains None)
 
-    if filtered and period == "latest":
+    if filtered and period == "latest" and not pinned_accession:
         latest_filed = max(str(f.get("filed", "")) for f in filtered)
         filtered = [f for f in filtered if str(f.get("filed", "")) == latest_filed]
 
@@ -5351,6 +5394,10 @@ async def get_filing_data(
             mode_filtered = [f for f, d in dur_tagged if d is None or (340 <= d <= 400)]
         if mode_filtered:
             filtered = mode_filtered
+    # A filing reports prior-year comparatives too: the newest period end comes
+    # first, as in the Worker (ASTS's Q2 2026 10-Q also carries Q2 2025).
+    if period == "latest" and filtered:
+        filtered = sorted(filtered, key=lambda f: (str(f.get("end") or ""), _fy_number(f.get("fy")), str(f.get("filed") or "")), reverse=True)
 
     if fact_type == FilingFactType.segment_revenue:
         seg_rows = []
@@ -6423,7 +6470,9 @@ async def get_earnings_momentum(ticker: str | list[str]) -> str:
                 if actual > estimate:
                     beat_count += 1
                 if surprise_pct is not None:
-                    surprises.append(float(surprise_pct) * 100 if abs(float(surprise_pct)) < 1 else float(surprise_pct))
+                    # Yahoo's surprisePercent is a decimal ratio at every size (-2.337 is
+                    # -233.7%); scaling only values under 1 turned ASTS's -117.5% into -27.0%.
+                    surprises.append(float(surprise_pct) * 100)
 
         # Beat streak (consecutive from most recent)
         for row in earnings_history_records:
@@ -7282,14 +7331,14 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
             f"OPTIONS FLOW: DATA QUALITY LOW — raw chain unreliable; not suitable for inference."
         )
     else:
-        iv_str = f"{iv_pctile}th%ile" if iv_pctile is not None else "N/A"
+        iv_str = f"{iv_pctile}%" if iv_pctile is not None else "N/A"
         pv_str = f"{put_vol_vs_10d:.2f}x" if put_vol_vs_10d is not None else "N/A"
         pc_str = f"{pc_ratio:.2f}" if pc_ratio is not None else "N/A"
         formatted_block = (
             f"OPTIONS FLOW SCAN [{window_label}] {ticker} | "
             f"P/C: {pc_str} | "
-            f"IV: {iv_str} | "
-            f"Put vol vs 10d avg: {pv_str} | "
+            f"IV vs 1y RV range: {iv_str} | "
+            f"Put vol / 1% stock ADV: {pv_str} | "
             f"Trend: {put_vol_trend} | "
             f"Advisory: {bracket or 'N/A'} bracket"
         )
@@ -7299,8 +7348,15 @@ async def get_options_flow_scan(ticker: str, window_label: str) -> str:
         "windowLabel": window_label,
         "dataDate": data_date,
         "pcRatio": pc_ratio,
+        # Named for what they measure (2.4.4); the old names remain one release as aliases.
+        "ivVsRealizedRangePct": iv_pctile,
+        "putVolPer1PctStockAdv": put_vol_vs_10d,
         "ivPctile": iv_pctile,
         "putVolVs10dAvg": put_vol_vs_10d,
+        "fieldNotes": {
+            "ivPctile": "Deprecated alias of ivVsRealizedRangePct: current ATM IV placed in the min-max range of rolling 30-day realized volatility over the past year, not a percentile of historical implied volatility.",
+            "putVolVs10dAvg": "Deprecated alias of putVolPer1PctStockAdv: put contracts traded today divided by 1% of the stock's 10-day average share volume, not put volume against its own 10-day average.",
+        },
         "putVolTrend": put_vol_trend,
         "expiry": exp,
         "expirySelection": "NEXT_AFTER_TODAY",
@@ -7956,6 +8012,13 @@ def _is_decision_grade_sec_xbrl_fact(
     )
 
 
+# Revenue names accepted as fact, as the Worker's SEC_XBRL_CONCEPT_ALIASES does.
+_REVENUE_FACT_ALIASES = {
+    "revenue", "revenues", "totalrevenue", "salesrevenuenet",
+    "revenuefromcontractwithcustomerexcludingassessedtax", "revenuefromcontractwithcustomerincludingassessedtax",
+}
+
+
 @yfinance_server.tool(name="extract_sec_filing_fact", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_filing_fact"], description="Canonical SEC fact extractor (routes to get_filing_data or extract_filing_fact).")
 async def extract_sec_filing_fact(
     ticker: str,
@@ -7970,6 +8033,8 @@ async def extract_sec_filing_fact(
     accession_number: str | None = None,
 ) -> str:
     routed_fact_type = fact_type
+    if routed_fact_type is None and fact is not None and _re.sub(r"[^a-z0-9]", "", _re.sub(r"^(?:us-gaap|dei|srt|country):", "", fact, flags=_re.I).lower()) in _REVENUE_FACT_ALIASES:
+        routed_fact_type = FilingFactType.total_revenue
     if routed_fact_type is None and fact is not None:
         try:
             routed_fact_type = FilingFactType(fact)
@@ -7977,7 +8042,8 @@ async def extract_sec_filing_fact(
             routed_fact_type = FilingFactType.geographic_revenue if region is not None else None
     if routed_fact_type is not None or region is not None or fact_name is None:
         routed_fact_type = routed_fact_type or FilingFactType.geographic_revenue
-        raw = await get_filing_data(ticker=ticker, fact_type=routed_fact_type, region=region, filing_type=filing_type, period=period, period_mode=period_mode)
+        raw = await get_filing_data(ticker=ticker, fact_type=routed_fact_type, region=region, filing_type=filing_type, period=period, period_mode=period_mode,
+                                    accession_number=accession_number)
         parsed_payload: dict = {}
         try:
             parsed_any = json.loads(raw)
@@ -8440,7 +8506,7 @@ async def list_sec_material_filings(
 
 # XBRL concept names for the intelligence snapshot
 _XBRL_INTELLIGENCE_CONCEPTS: dict[str, list[str]] = {
-    "revenue": ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet"],
+    "revenue": ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "RevenueFromContractWithCustomerIncludingAssessedTax", "SalesRevenueNet"],
     "net_income": ["NetIncomeLoss", "ProfitLoss"],
     "cash": ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsAndShortTermInvestments"],
     "long_term_debt": ["LongTermDebt", "LongTermDebtNoncurrent"],
@@ -9279,45 +9345,66 @@ async def extract_customer_concentration(
     period: str = "latest",
     detailLevel: str = "compact",
 ) -> str:
-    search = _safe_json_loads(await search_sec_filing_text(
-        ticker=ticker,
-        search_terms=["major customer", "customers", "customer accounted", "percent of revenue"],
-        filing_type=filing_type,
-    ))
-    customers: list[dict] = []
-    seen: set[str] = set()
-    for m in (search.get("matches") if isinstance(search.get("matches"), list) else []):
-        if not isinstance(m, dict):
-            continue
-        # Search matches carry contextText since 2.2.7.
-        ctx = str(m.get("contextText") or m.get("context") or "")
-        pct_match = _re.search(r"(\d{1,2}(?:\.\d+)?)\s*%", ctx)
-        if not pct_match:
-            continue
-        pct = float(pct_match.group(1))
-        key = f"{pct:.2f}"
-        if key in seen:
-            continue
-        seen.add(key)
-        customers.append({
-            "label": f"Customer {chr(64 + len(customers) + 1)}",
-            "valuePct": pct,
-            "period": f"FY{str(search.get('fiscalYear') or '')}".rstrip(),
-            "confidence": "HIGH",
-            "evidence": {
-                "sectionHeading": m.get("sectionHeading"),
-                "excerpt": _compact_excerpt(ctx),
-                "filingDate": search.get("filingDate"),
-                "accessionNumber": search.get("accessionNumber"),
-                "documentUrl": search.get("documentUrl"),
-            },
+    # Mirrors the Worker: revenue-concentration rules live in yfmcp/extraction_rules.py.
+    searched_terms = ["major customer", "customers", "customer accounted", "accounted for", "of our revenue", "of total revenue", "of net sales", "percent of revenue"]
+    search = _safe_json_loads(await search_sec_filing_text(ticker=ticker, search_terms=searched_terms, filing_type=filing_type))
+    matches = [m for m in (search.get("matches") if isinstance(search.get("matches"), list) else []) if isinstance(m, dict)]
+    filing_evidence = {
+        "filingDate": search.get("filingDate"),
+        "accessionNumber": search.get("accessionNumber"),
+        "documentUrl": search.get("documentUrl"),
+    }
+    fiscal_year = str(search.get("fiscalYear") or "")
+    fallback_period = (fiscal_year if fiscal_year.upper().startswith("FY") else f"FY{fiscal_year}") if fiscal_year else None
+    rules = _er.customer_concentration(matches)
+
+    def _evidence(f: dict) -> dict:
+        return {"sectionHeading": f["sectionHeading"], "excerpt": _compact_excerpt(f["sentence"]), **filing_evidence}
+
+    def _period(f: dict) -> str | None:
+        return f"FY{f['year']}" if f["year"] is not None else fallback_period
+
+    customers = [{
+        "label": f["name"] or "Unnamed customer",
+        "name": f["name"],
+        "nameDisclosed": f["name"] is not None,
+        "description": f["description"],
+        "valuePct": f["valuePct"],
+        "period": _period(f),
+        "confidence": "MEDIUM",
+        "evidence": _evidence(f),
+    } for f in rules["findings"] if f["kind"] == "customer"][:8]
+    aggregates = [{
+        "description": f["description"],
+        "valuePct": f["valuePct"],
+        "period": _period(f),
+        "confidence": "MEDIUM",
+        "evidence": _evidence(f),
+    } for f in rules["findings"] if f["kind"] == "aggregate"][:4]
+    negation = rules["negation"]
+    match_count = int(search.get("matchCount") or 0)
+    scan_coverage = {"sourceType": "sec_primary_html", **filing_evidence, "matchCount": match_count, "searchedTerms": searched_terms}
+    result: dict = {"ticker": ticker, "customers": customers, "aggregates": aggregates}
+    if customers or aggregates:
+        result["status"] = "FOUND"
+    elif negation:
+        result.update({
+            "status": "NOT_DISCLOSED",
+            "notDisclosedBasis": "The filing states that no customer reached the disclosure threshold.",
+            "evidence": {"sectionHeading": negation["sectionHeading"], "excerpt": _compact_excerpt(negation["sentence"]), **filing_evidence},
+            "scanCoverage": scan_coverage,
         })
-        if len(customers) >= 5:
-            break
-    status = "FOUND" if customers else ("NOT_DISCLOSED" if (search.get("matchCount") or 0) > 0 else "NOT_FOUND")
-    result = {"ticker": ticker, "customers": customers, "status": status}
+    elif match_count > 0:
+        result.update({
+            "status": "EXTRACTION_FAILED",
+            "code": "EXTRACTION_FAILED",
+            "scanCoverage": scan_coverage,
+            "warnings": [{"code": "CUSTOMER_PERCENT_NOT_PARSED", "message": "Customer disclosures were found, but no customer percentage or no-major-customer statement was parsed.", "severity": "warning"}],
+        })
+    else:
+        result.update({"status": "NOT_FOUND", "scanCoverage": scan_coverage})
     if str(detailLevel).lower() == "raw":
-        result["rawMatchCount"] = search.get("matchCount", 0)
+        result["rawMatchCount"] = match_count
     return json.dumps(result)
 
 
@@ -9545,17 +9632,23 @@ async def extract_capital_structure(
 )
 async def extract_analyst_valuation_methods(ticker: str, days_back: int = 30) -> str:
     days = _clamp_int(days_back, 30, 1, 365)
-    news_raw, radar_raw = await asyncio.gather(
+    news_raw, radar_raw, issuer = await asyncio.gather(
         get_company_news(ticker, max_results=100, lookback_days=days),
         get_analyst_upgrade_radar(ticker, days),
+        _issuer_name(ticker),
         return_exceptions=True,
     )
+    # Targets are attributed to the subject by name; without a name nothing can be checked.
+    names = [issuer] if isinstance(issuer, str) and issuer.strip() else []
     news = _unwrap_payload(news_raw) if isinstance(news_raw, str) else {}
     radar = _unwrap_payload(radar_raw) if isinstance(radar_raw, str) else {}
     items = news.get("items") if isinstance(news.get("items"), list) else []
     changes = radar.get("changes") if isinstance(radar.get("changes"), list) else []
-    out = _cs.analyst_valuation_methods(ticker.upper(), [i for i in items if isinstance(i, dict)], [c for c in changes if isinstance(c, dict)])
+    out = _cs.analyst_valuation_methods(ticker.upper(), [i for i in items if isinstance(i, dict)], [c for c in changes if isinstance(c, dict)],
+                                        names or None)
     warnings = []
+    if not names:
+        warnings.append({"code": "ATTRIBUTION_UNCHECKED", "message": "The company name could not be resolved, so targets were not checked against the subject.", "severity": "warning"})
     if news.get("error") or not isinstance(news_raw, str):
         warnings.append({"code": "NEWS_UNAVAILABLE", "message": str(news.get("message") or "News could not be read."), "severity": "warning"})
     if radar.get("error") or not isinstance(radar_raw, str):

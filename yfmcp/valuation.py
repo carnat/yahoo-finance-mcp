@@ -319,6 +319,11 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
             warnings.append({"code": "SEC_BALANCES_STALE", "message": f"The filing's balances are from {sec_period_end}; Yahoo has {market['mostRecentQuarter']}, so Yahoo's newer cash and debt are used (its debt can include leases).", "severity": "warning", "secPeriodEnd": sec_period_end, "yahooMostRecentQuarter": market["mostRecentQuarter"]})
         else:
             warnings.append({"code": "SEC_BALANCES_STALE", "message": f"The filing's balances are from {sec_period_end}, older than Yahoo's latest quarter {market['mostRecentQuarter']}, and Yahoo has no newer cash and debt; enterprise value uses the older balances.", "severity": "warning", "secPeriodEnd": sec_period_end, "yahooMostRecentQuarter": market["mostRecentQuarter"]})
+    # The capital structure's own warnings (rounded note figures, restated cash,
+    # no borrowings) explain the balances used, so they travel with them.
+    if sec_balances:
+        for w in (capital or {}).get("warnings") or []:
+            warnings.append({**w, "source": "extract_capital_structure"})
     cash = _num(balances["cashAndEquivalents"]) if sec_balances else market["totalCash"]
     short_term = (_num(balances.get("shortTermInvestments")) or 0) if sec_balances else 0
     debt = _num(balances["totalDebt"]) if sec_balances else market["totalDebt"]
@@ -378,8 +383,11 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
 
     atm = (bridge or {}).get("atmProgram") if bridge else None
     yahoo = _yahoo_basis(market, quote)
-    shares_diff = (round_half_up((sec_basic / market["sharesOutstanding"] - 1) * 100, 2)
-                   if sec_basic is not None and market["sharesOutstanding"] and market["sharesOutstanding"] > 0 else None)
+    # After any ADR ratio, against the Yahoo count the engine uses (the implied
+    # all-class count when larger): TSM and ASTS agree, a real gap still shows.
+    normalized_sec = per_quoted(sec_basic) if sec_basic is not None else None
+    shares_diff = (round_half_up((normalized_sec / quoted_shares - 1) * 100, 2)
+                   if normalized_sec is not None and quoted_shares is not None and quoted_shares > 0 else None)
     return {
         "ticker": ticker,
         "name": market["name"],
