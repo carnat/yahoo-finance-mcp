@@ -218,7 +218,11 @@ function parseDecimals(raw: string | null): number | null {
 
 // Investment facts whose surrounding sentence is kept, so one that restates
 // part of cash ("classified as cash equivalents") can be recognised.
-const SENTENCE_CONCEPTS = new Set(["ShortTermInvestments", "MarketableSecuritiesCurrent", "AvailableForSaleSecuritiesDebtSecuritiesCurrent", "MarketableSecuritiesNoncurrent"]);
+const SENTENCE_CONCEPTS = new Set([
+  "ShortTermInvestments", "MarketableSecuritiesCurrent", "AvailableForSaleSecuritiesDebtSecuritiesCurrent", "MarketableSecuritiesNoncurrent",
+  "DebtSecuritiesHeldToMaturityAmortizedCostAfterAllowanceForCreditLossCurrent", "HeldToMaturitySecuritiesCurrent",
+  "DebtSecuritiesHeldToMaturityExcludingAccruedInterestAfterAllowanceForCreditLossCurrent", "OtherShortTermInvestments",
+]);
 const SENTENCE_WINDOW = 1500;
 const SENTENCE_MAX_CHARS = 500;
 
@@ -989,7 +993,15 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
 // ── Capital structure timeline ──────────────────────────────────────────────
 
 const CASH_CONCEPTS = ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents", "Cash"];
-const SHORT_TERM_INVESTMENT_CONCEPTS = ["ShortTermInvestments", "MarketableSecuritiesCurrent", "AvailableForSaleSecuritiesDebtSecuritiesCurrent"];
+// A short-term investments total when tagged; otherwise the current securities
+// categories, which are disjoint, are added. VRT tags only its held-to-maturity
+// Treasury bills (2.4.3).
+const SHORT_TERM_INVESTMENT_TOTALS = ["ShortTermInvestments", "MarketableSecuritiesCurrent"];
+const SHORT_TERM_INVESTMENT_PARTS = [
+  ["AvailableForSaleSecuritiesDebtSecuritiesCurrent"],
+  ["DebtSecuritiesHeldToMaturityAmortizedCostAfterAllowanceForCreditLossCurrent", "HeldToMaturitySecuritiesCurrent", "DebtSecuritiesHeldToMaturityExcludingAccruedInterestAfterAllowanceForCreditLossCurrent"],
+  ["OtherShortTermInvestments"],
+];
 const SHORT_TERM_BORROWING_CONCEPTS = ["ShortTermBorrowings", "CommercialPaper"];
 const DEBT_LINE_CONCEPTS = [
   "ConvertibleNotesPayableCurrent", "ConvertibleLongTermNotesPayable", "LongTermNotesPayable", "NotesPayableCurrent",
@@ -1015,6 +1027,24 @@ function convertibleBalance(doc: IxDocument, at: string | null): { total: number
   if (whole) return { total: whole.value, parts: [whole] };
   const parts = CONVERTIBLE_PART_CONCEPTS.map((c) => total(doc, c, at)).filter((p): p is Picked => p != null);
   return parts.length > 0 ? { total: parts.reduce((sum, p) => sum + p.value, 0), parts } : null;
+}
+
+/** Short-term investments at a date: the tagged total, else the sum of the current securities categories. */
+function shortTermInvestments(doc: IxDocument, at: string | null): Picked | null {
+  const whole = firstTotal(doc, SHORT_TERM_INVESTMENT_TOTALS, at);
+  if (whole) return whole;
+  const parts = SHORT_TERM_INVESTMENT_PARTS.map((group) => firstTotal(doc, group, at)).filter((p): p is Picked => p != null);
+  if (parts.length <= 1) return parts[0] ?? null;
+  let decimals: number | null = null;
+  for (const p of parts) if (p.decimals != null) decimals = decimals == null ? p.decimals : Math.min(decimals, p.decimals);
+  return {
+    value: parts.reduce((sum, p) => sum + p.value, 0),
+    periodEnd: at,
+    concept: parts.map((p) => p.concept).join(" + "),
+    unit: parts[0].unit,
+    decimals,
+    sentence: null,
+  };
 }
 
 // Every concept totalDebt or the instrument rows read; a filing with none of
@@ -1195,11 +1225,11 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
   const warnings: Record<string, unknown>[] = [];
   // Investments and debt are read without rounded note figures or restated cash.
   const balanceDoc = balanceFacts(doc, cash, periodEnd);
-  let shortTerm = firstTotal(balanceDoc, SHORT_TERM_INVESTMENT_CONCEPTS, periodEnd);
+  let shortTerm = shortTermInvestments(balanceDoc, periodEnd);
   const longTermSecurities = total(balanceDoc, "MarketableSecuritiesNoncurrent", periodEnd);
   let debt = totalDebt(balanceDoc, periodEnd);
   const ignored = [
-    [firstTotal(doc, SHORT_TERM_INVESTMENT_CONCEPTS, periodEnd), shortTerm],
+    [shortTermInvestments(doc, periodEnd), shortTerm],
     [total(doc, "MarketableSecuritiesNoncurrent", periodEnd), longTermSecurities],
   ] as [Picked | null, Picked | null][];
   for (const [raw, kept] of ignored) {
@@ -1268,6 +1298,7 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
     periodEnd,
     balances: {
       cashAndEquivalents: cash ? cash.value : null,
+      currency: cash ? cash.unit : null,
       cashConcept: cash ? cash.concept : null,
       shortTermInvestments: shortTerm ? shortTerm.value : null,
       shortTermInvestmentsConcept: shortTerm ? shortTerm.concept : null,

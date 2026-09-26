@@ -266,6 +266,29 @@ AGGREGATE_Q = f"""<html><body>
 <tr><td>Cash, cash equivalents and short-term investments</td><td>{_num("us-gaap:CashCashEquivalentsAndShortTermInvestments", "gi", "usd", "500,000", 3)}</td></tr>
 <tr><td>Long-term debt</td><td>{_num("us-gaap:LongTermDebt", "gi", "usd", "10,000", 3)}</td></tr></table>
 </body></html>"""
+# Tagged the way VRT's live 10-Q is (2.4.3): Treasury bills held to maturity
+# under the post-CECL concept, in millions, with a fair-value twin not read.
+VRT_Q = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "vq", "10-Q")}
+{_text("dei:DocumentPeriodEndDate", "vq", "June 30, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("vq", "2026-01-01..2026-06-30")}{_context("vi", "2026-06-30")}{UNITS}</ix:resources></ix:header></div>
+<table><tr><td>Cash and cash equivalents</td><td>{_num("us-gaap:CashAndCashEquivalentsAtCarryingValue", "vi", "usd", "2,810.6", 6, decimals="-5")}</td></tr>
+<tr><td>Short-term investments</td><td>{_num("us-gaap:DebtSecuritiesHeldToMaturityAmortizedCostAfterAllowanceForCreditLossCurrent", "vi", "usd", "300.0", 6, decimals="-5")}</td></tr>
+<tr><td>Long-term debt, net</td><td>{_num("us-gaap:LongTermDebt", "vi", "usd", "2,939.8", 6, decimals="-5")}</td></tr></table>
+<p>The short-term investments had a fair value of ${_num("us-gaap:DebtSecuritiesHeldToMaturityFairValueCurrent", "vi", "usd", "300.0", 6, decimals="-5")}.</p>
+</body></html>"""
+# Available-for-sale and held-to-maturity lines with no total: they add up.
+PARTS_Q = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "pq", "10-Q")}
+{_text("dei:DocumentPeriodEndDate", "pq", "June 30, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("pq", "2026-01-01..2026-06-30")}{_context("pi", "2026-06-30")}{UNITS}</ix:resources></ix:header></div>
+<table><tr><td>Cash</td><td>{_num("us-gaap:CashAndCashEquivalentsAtCarryingValue", "pi", "usd", "200,000", 3)}</td></tr>
+<tr><td>Available-for-sale</td><td>{_num("us-gaap:AvailableForSaleSecuritiesDebtSecuritiesCurrent", "pi", "usd", "40,000", 3)}</td></tr>
+<tr><td>Held to maturity</td><td>{_num("us-gaap:HeldToMaturitySecuritiesCurrent", "pi", "usd", "60,000", 3)}</td></tr>
+<tr><td>Debt</td><td>{_num("us-gaap:LongTermDebt", "pi", "usd", "10,000", 3)}</td></tr></table>
+</body></html>"""
 TABLE_MATCHES = [
     {"contextText": "Unvested at December 31, 2025 | 2,500,000 | $ 14.10", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at December 31, 2025"},
     {"contextText": "Unvested at June 30, 2026 | 2,750,000 | $ 15.20", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at June 30, 2026"},
@@ -273,7 +296,7 @@ TABLE_MATCHES = [
     {"contextText": "Unvested at June 30, 2026, restricted stock units totalled 8,888,888 shares.", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": False, "tableTitle": None, "rowLabel": None},
 ]
 
-FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q}
+FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q}
 
 NEWS_ITEMS = [
     {"title": "Needham raises IQE price target to 45p from 38p", "summary": "Needham values IQE at 12x 2027 EV/EBITDA, citing gallium nitride demand.", "url": "https://news.example/1", "publishedAt": "2026-09-20T08:00:00Z", "source": "yahoo_finance_news"},
@@ -327,6 +350,8 @@ out.capitalAsts = m.capitalStructure({ ticker: "ASTX", source: src("primary", "1
 out.capitalDebtFree = m.capitalStructure({ ticker: "AEHX", source: src("primary", "10-K", "2026-07-27", "0001234568-26-000070", data.kUrl, "debt_free_k"), fundingMatches: [] });
 out.capitalOverlap = m.capitalStructure({ ticker: "OVLP", source: src("primary", "10-Q", "2026-08-10", "0001234568-26-000080", data.qUrl, "overlap_q"), fundingMatches: [] });
 out.capitalAggregate = m.capitalStructure({ ticker: "AGGR", source: src("primary", "10-Q", "2026-08-10", "0001234568-26-000090", data.qUrl, "aggregate_q"), fundingMatches: [] });
+out.capitalVrt = m.capitalStructure({ ticker: "VRTX", source: src("primary", "10-Q", "2026-07-29", "0001234568-26-000100", data.qUrl, "vrt_q"), fundingMatches: [] });
+out.capitalParts = m.capitalStructure({ ticker: "PRTS", source: src("primary", "10-Q", "2026-07-29", "0001234568-26-000110", data.qUrl, "parts_q"), fundingMatches: [] });
 out.labels = ["us-gaap:ClassBCommonStockMember", "us-gaap:RestrictedStockUnitsRSUMember", "cstc:ConvertibleSeniorNotesDue2029Member", "aaoi:SubsidiaryOfAmazonMember"].map(m.memberLabel);
 out.analyst = m.analystValuationMethods("IQE.L", data.news, data.changes);
 out.ch = m.companiesHouseFilings("01234567", data.chHistory);
@@ -416,6 +441,8 @@ def _python_pure() -> dict:
         "capitalDebtFree": cs.capital_structure("AEHX", cs.IxSource("primary", "10-K", "2026-07-27", "0001234568-26-000070", K_URL, docs["debt_free_k"]), []),
         "capitalOverlap": cs.capital_structure("OVLP", cs.IxSource("primary", "10-Q", "2026-08-10", "0001234568-26-000080", Q_URL, docs["overlap_q"]), []),
         "capitalAggregate": cs.capital_structure("AGGR", cs.IxSource("primary", "10-Q", "2026-08-10", "0001234568-26-000090", Q_URL, docs["aggregate_q"]), []),
+        "capitalVrt": cs.capital_structure("VRTX", cs.IxSource("primary", "10-Q", "2026-07-29", "0001234568-26-000100", Q_URL, docs["vrt_q"]), []),
+        "capitalParts": cs.capital_structure("PRTS", cs.IxSource("primary", "10-Q", "2026-07-29", "0001234568-26-000110", Q_URL, docs["parts_q"]), []),
         "labels": [cs.member_label(m) for m in ("us-gaap:ClassBCommonStockMember", "us-gaap:RestrictedStockUnitsRSUMember", "cstc:ConvertibleSeniorNotesDue2029Member", "aaoi:SubsidiaryOfAmazonMember")],
         "analyst": cs.analyst_valuation_methods("IQE.L", copy.deepcopy(NEWS_ITEMS), copy.deepcopy(RATING_CHANGES)),
         "ch": cs.companies_house_filings("01234567", CH_HISTORY),
@@ -436,7 +463,7 @@ class TestCapitalStructureParity(unittest.TestCase):
             self.assertEqual(self.worker["documents"][name], self.local["documents"][name], name)
 
     def test_outputs_match(self) -> None:
-        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "labels", "analyst", "ch", "chPick"):
+        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "ch", "chPick"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
 
@@ -546,6 +573,16 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertIsNone(c["balances"]["shortTermInvestments"])
         self.assertEqual(c["balances"]["netCash"], 490_000_000)
         self.assertEqual([(w["code"], w["severity"]) for w in c["warnings"]], [("CASH_AGGREGATE_MISMATCH", "info")])
+
+    def test_held_to_maturity_treasury_bills_are_short_term_investments(self) -> None:
+        bal = self.out["capitalVrt"]["balances"]
+        self.assertEqual((bal["cashAndEquivalents"], bal["shortTermInvestments"], bal["currency"]), (2_810_600_000, 300_000_000, "USD"))
+        self.assertEqual(bal["shortTermInvestmentsConcept"], "us-gaap:DebtSecuritiesHeldToMaturityAmortizedCostAfterAllowanceForCreditLossCurrent")
+        self.assertEqual(bal["netCash"], 2_810_600_000 + 300_000_000 - 2_939_800_000)
+        self.assertEqual(self.out["capitalVrt"]["warnings"], [])
+        parts = self.out["capitalParts"]["balances"]
+        self.assertEqual(parts["shortTermInvestments"], 100_000_000)
+        self.assertEqual(parts["shortTermInvestmentsConcept"], "us-gaap:AvailableForSaleSecuritiesDebtSecuritiesCurrent + us-gaap:HeldToMaturitySecuritiesCurrent")
 
     def test_filing_without_borrowings_reports_zero_debt(self) -> None:
         c = self.out["capitalDebtFree"]

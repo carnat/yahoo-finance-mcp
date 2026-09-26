@@ -11,14 +11,46 @@ from __future__ import annotations
 
 import datetime
 import math
+import re
 from typing import Any
 
-from yfmcp.capital_structure import round_half_up
+from yfmcp.capital_structure import _js_number, round_half_up
 
 
 # Cash plus investments more than 10% above Yahoo's total, with cash alone within 2% of it.
 _SEC_YAHOO_EXCESS = 0.1
 _SEC_YAHOO_CASH_MATCH = 0.02
+# Yahoo's cash and short-term investments more than 5% above the filing's.
+_SEC_YAHOO_SHORTFALL = 0.05
+# Filing balances more than 45 days older than Yahoo's latest quarter are stale.
+_STALE_BALANCE_DAYS = 45
+# Yahoo's totals are compared with the filing's only for the same quarter end.
+_SAME_QUARTER_DAYS = 7
+# SEC ordinary shares within 2% of a whole multiple (2x or more) of Yahoo's
+# count are ADR-quoted: Yahoo counts depositary shares (TSM: 5 per ADS).
+_ADS_MIN_RATIO = 1.9
+_ADS_RATIO_TOLERANCE = 0.02
+# Otherwise counts more than 1.5x apart are on different bases; Yahoo's is used.
+_SHARE_BASIS_MAX_RATIO = 1.5
+_FOREIGN_FORM_RE = re.compile(r"^(?:20|40)-F")
+
+
+def ads_ratio(sec_shares: float, quoted_shares: float) -> float | None:
+    """Ordinary shares per quoted share when the two counts are a whole multiple apart, else None."""
+    if not (sec_shares > 0) or not (quoted_shares > 0):
+        return None
+    r = sec_shares / quoted_shares
+    if r >= _ADS_MIN_RATIO:
+        n = math.floor(r + 0.5)
+        return n if abs(r - n) <= _ADS_RATIO_TOLERANCE * n else None
+    if r <= 1 / _ADS_MIN_RATIO:
+        k = math.floor(1 / r + 0.5)
+        return 1 / k if abs(1 / r - k) <= _ADS_RATIO_TOLERANCE * k else None
+    return None
+
+
+def _days_between(earlier: str, later: str) -> int:
+    return (datetime.date.fromisoformat(later) - datetime.date.fromisoformat(earlier)).days
 
 
 def _num(value: Any) -> float | None:
@@ -40,7 +72,7 @@ def empty_market_inputs(ticker: str) -> dict:
         "ticker": ticker.upper(), "name": None, "currency": None, "financialCurrency": None,
         "price": None, "priceTime": None, "sharesOutstanding": None, "impliedSharesOutstanding": None, "marketCap": None,
         "totalCash": None, "totalDebt": None, "ttmRevenue": None, "ttmEbitda": None,
-        "grossMarginPct": None, "trailingEps": None, "estimates": [],
+        "grossMarginPct": None, "trailingEps": None, "mostRecentQuarter": None, "estimates": [],
     }
 
 
@@ -81,8 +113,15 @@ def market_inputs_from_quote_summary(ticker: str, result: dict) -> dict:
         "ttmEbitda": _raw_num(fd.get("ebitda")),
         "grossMarginPct": round_half_up(gross * 100, 2) if gross is not None else None,
         "trailingEps": _raw_num(ks.get("trailingEps")),
+        "mostRecentQuarter": _iso_date(_raw_num(ks.get("mostRecentQuarter"))),
         "estimates": estimates,
     }
+
+
+def _iso_date(epoch: float | None) -> str | None:
+    if epoch is None:
+        return None
+    return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).date().isoformat()
 
 
 def _iso_time(epoch: float | None) -> str | None:
@@ -111,6 +150,7 @@ def market_inputs_from_yfinance(ticker: str, info: dict, revenue_rows: list[dict
         "ttmEbitda": _num(info.get("ebitda")),
         "grossMarginPct": round_half_up(gross * 100, 2) if gross is not None else None,
         "trailingEps": _num(info.get("trailingEps")),
+        "mostRecentQuarter": _iso_date(_num(info.get("mostRecentQuarter"))),
     })
     eps_by_period = {str(r.get("period")): r for r in earnings_rows if isinstance(r, dict)}
     for row in revenue_rows:
@@ -210,7 +250,10 @@ def _yahoo_basis(market: dict, price: float | None) -> dict:
         return {"marketCap": None, "enterpriseValue": None, "shares": shares, "shareBasis": basis}
     major, _ = _major_price(price, market["currency"])
     market_cap = major * shares if shares is not None else market["marketCap"]
-    ev = market_cap + market["totalDebt"] - market["totalCash"] if market_cap is not None and market["totalDebt"] is not None and market["totalCash"] is not None else None
+    # Cash and debt are in the financial currency; adding them to a quote in
+    # another currency is dimensionally invalid (TSM: USD ADR, TWD balances).
+    ev = (market_cap + market["totalDebt"] - market["totalCash"]
+          if market_cap is not None and market["totalDebt"] is not None and market["totalCash"] is not None and _comparable_currency(market) else None)
     return {"marketCap": round_half_up(market_cap) if market_cap is not None else None, "enterpriseValue": round_half_up(ev) if ev is not None else None,
             "shares": shares, "shareBasis": basis}
 
@@ -229,17 +272,53 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
     if quote is None:
         return {"ticker": ticker, "status": "PRICE_UNAVAILABLE", "code": "PRICE_UNAVAILABLE", "message": "No price was supplied and Yahoo returned none.", "warnings": warnings}
     major, major_currency = _major_price(quote, market["currency"])
+    comparable = _comparable_currency(market)
     bridge_core = (bridge or {}).get("bridge") if bridge else None
     bridge_basic = (bridge or {}).get("basicShares") if bridge else None
     sec_basic = _num((bridge_basic or {}).get("shares"))
-    basic = sec_basic if sec_basic is not None else market["sharesOutstanding"]
-    diluted = _num((bridge_core or {}).get("dilutedSharesAtPrice"))
-    share_basis = "sec_cover_page" if sec_basic is not None else ("yahoo_shares_outstanding" if market["sharesOutstanding"] is not None else None)
+    quoted_shares, quoted_basis = _yahoo_shares(market)
+    # SEC counts ordinary shares; the quote may be for depositary shares.
+    ratio = None
+    sec_usable = sec_basic is not None
+    # Only foreign issuers (20-F, 40-F) have depositary shares; a domestic
+    # dual-class filer near 2x is not read as an ADR.
+    basic_source = (bridge_basic or {}).get("source") or {}
+    filing_type = basic_source.get("filingType") if isinstance(basic_source, dict) else None
+    foreign_filer = isinstance(filing_type, str) and bool(_FOREIGN_FORM_RE.match(filing_type))
+    if sec_basic is not None and quoted_shares is not None and quoted_shares > 0:
+        ratio = ads_ratio(sec_basic, quoted_shares) if foreign_filer else None
+        r = sec_basic / quoted_shares
+        if ratio is not None:
+            warnings.append({"code": "ADR_RATIO_APPLIED", "message": f"The filing counts {_js_number(sec_basic)} ordinary shares; Yahoo counts {_js_number(quoted_shares)} quoted shares, {_js_number(ratio)} ordinary shares each. SEC share counts are divided by {_js_number(ratio)} before the price is applied.", "severity": "info"})
+        elif r > _SHARE_BASIS_MAX_RATIO or r < 1 / _SHARE_BASIS_MAX_RATIO:
+            sec_usable = False
+            warnings.append({"code": "SHARE_BASIS_MISMATCH", "message": f"The filing's {_js_number(sec_basic)} shares and Yahoo's {_js_number(quoted_shares)} differ by more than 1.5x without a whole-number ratio, so Yahoo's count is used.", "severity": "warning"})
+
+    def per_quoted(shares: float | None) -> float | None:
+        return round_half_up(shares / ratio) if shares is not None and ratio is not None else shares
+
+    basic = per_quoted(sec_basic) if sec_usable else (quoted_shares if quoted_shares is not None else market["sharesOutstanding"])
+    diluted = per_quoted(_num((bridge_core or {}).get("dilutedSharesAtPrice"))) if sec_usable else None
+    share_basis = "sec_cover_page" if sec_usable else (quoted_basis if quoted_shares is not None else None)
     value_shares = diluted if diluted is not None else basic
 
     # Balances: the filing's period-end values when read, else Yahoo's totals.
     balances = (capital or {}).get("balances") if capital else None
     sec_balances = balances is not None and _num(balances.get("totalDebt")) is not None and _num(balances.get("cashAndEquivalents")) is not None
+    sec_currency = balances.get("currency") if balances and isinstance(balances.get("currency"), str) else None
+    if sec_balances and sec_currency and major_currency and sec_currency != major_currency:
+        sec_balances = False
+        warnings.append({"code": "SEC_BALANCES_CURRENCY", "message": f"The filing's balances are in {sec_currency}; the quote is in {major_currency}. They are not used.", "severity": "info"})
+    # A filing older than Yahoo's latest quarter (20-F filers such as TSEM and
+    # NBIS tag only annual reports) gives way to Yahoo's newer balances.
+    sec_period_end = (capital or {}).get("periodEnd") if capital and isinstance(capital.get("periodEnd"), str) else None
+    stale_days = _days_between(sec_period_end, market["mostRecentQuarter"]) if sec_balances and sec_period_end and market.get("mostRecentQuarter") else None
+    if stale_days is not None and stale_days > _STALE_BALANCE_DAYS:
+        if market["totalCash"] is not None and market["totalDebt"] is not None:
+            sec_balances = False
+            warnings.append({"code": "SEC_BALANCES_STALE", "message": f"The filing's balances are from {sec_period_end}; Yahoo has {market['mostRecentQuarter']}, so Yahoo's newer cash and debt are used (its debt can include leases).", "severity": "warning", "secPeriodEnd": sec_period_end, "yahooMostRecentQuarter": market["mostRecentQuarter"]})
+        else:
+            warnings.append({"code": "SEC_BALANCES_STALE", "message": f"The filing's balances are from {sec_period_end}, older than Yahoo's latest quarter {market['mostRecentQuarter']}, and Yahoo has no newer cash and debt; enterprise value uses the older balances.", "severity": "warning", "secPeriodEnd": sec_period_end, "yahooMostRecentQuarter": market["mostRecentQuarter"]})
     cash = _num(balances["cashAndEquivalents"]) if sec_balances else market["totalCash"]
     short_term = (_num(balances.get("shortTermInvestments")) or 0) if sec_balances else 0
     debt = _num(balances["totalDebt"]) if sec_balances else market["totalDebt"]
@@ -250,12 +329,26 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
     # Yahoo's total cash includes short-term investments. When the filing's cash
     # alone matches it but cash plus investments runs well above it, the
     # investments are probably part of cash already (ASTS, 2.4.2). Flagged, not overridden.
-    yahoo_cash = market["totalCash"]
+    yahoo_cash = market["totalCash"] if comparable else None
     if (sec_balances and cash is not None and short_term > 0 and yahoo_cash is not None and yahoo_cash > 0
             and cash + short_term > (1 + _SEC_YAHOO_EXCESS) * yahoo_cash and abs(cash - yahoo_cash) <= _SEC_YAHOO_CASH_MATCH * yahoo_cash):
         warnings.append({
             "code": "SEC_YAHOO_CASH_MISMATCH",
             "message": "The filing's cash alone matches Yahoo's total cash and short-term investments, but cash plus the filing's short-term investments is well above it; the investments may already be inside cash. Check the filing before relying on enterprise value.",
+            "severity": "warning",
+            "secCash": cash,
+            "secShortTermInvestments": short_term,
+            "yahooTotalCash": yahoo_cash,
+        })
+    # The opposite: Yahoo's cash and short-term investments well above the
+    # filing's, for the same quarter, suggests investments the filing tags under
+    # a concept not read (VRT).
+    same_quarter = (sec_period_end is not None and market.get("mostRecentQuarter") is not None
+                    and abs(_days_between(sec_period_end, market["mostRecentQuarter"])) <= _SAME_QUARTER_DAYS)
+    if sec_balances and same_quarter and cash is not None and yahoo_cash is not None and yahoo_cash > (1 + _SEC_YAHOO_SHORTFALL) * (cash + short_term):
+        warnings.append({
+            "code": "SEC_YAHOO_CASH_SHORTFALL",
+            "message": "Yahoo's cash and short-term investments are more than 5% above the filing's cash plus the investments read from it; an investment line may be tagged under a concept not read. Check the balance sheet before relying on enterprise value.",
             "severity": "warning",
             "secCash": cash,
             "secShortTermInvestments": short_term,
@@ -272,18 +365,21 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
         convertible_adjustment = min(convertible_adjustment, debt)
 
     equity_value = major * value_shares if value_shares is not None else None
+    # Yahoo's balances are in the financial currency; never add them to equity in another.
+    balances_comparable = sec_balances or comparable
     enterprise_value = (equity_value + debt - convertible_adjustment - cash - short_term
-                        if equity_value is not None and debt is not None and cash is not None else None)
-    if enterprise_value is None:
+                        if equity_value is not None and debt is not None and cash is not None and balances_comparable else None)
+    if not balances_comparable:
+        warnings.append({"code": "ENTERPRISE_VALUE_CURRENCY_MISMATCH", "message": f"Cash and debt are in {market['financialCurrency']} and the quote is in {major_currency}; enterprise value is not computed without an exchange rate.", "severity": "warning"})
+    elif enterprise_value is None:
         warnings.append({"code": "ENTERPRISE_VALUE_INCOMPLETE", "message": "Shares, cash or debt were unavailable, so enterprise value was not computed.", "severity": "warning"})
-    comparable = _comparable_currency(market)
     if not comparable:
         warnings.append({"code": "FINANCIAL_CURRENCY_MISMATCH", "message": f"Financials are in {market['financialCurrency']}; the quote is in {market['currency']}.", "severity": "warning"})
 
     atm = (bridge or {}).get("atmProgram") if bridge else None
     yahoo = _yahoo_basis(market, quote)
-    shares_diff = (round_half_up((basic / market["sharesOutstanding"] - 1) * 100, 2)
-                   if basic is not None and market["sharesOutstanding"] and market["sharesOutstanding"] > 0 and share_basis == "sec_cover_page" else None)
+    shares_diff = (round_half_up((sec_basic / market["sharesOutstanding"] - 1) * 100, 2)
+                   if sec_basic is not None and market["sharesOutstanding"] and market["sharesOutstanding"] > 0 else None)
     return {
         "ticker": ticker,
         "name": market["name"],
@@ -303,7 +399,9 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
             "diluted": diluted,
             "usedForValue": value_shares,
             "basis": share_basis,
-            "dilutionPctAtPrice": _num((bridge_core or {}).get("dilutionPctAtPrice")),
+            "secOrdinaryShares": sec_basic,
+            "ordinarySharesPerQuotedShare": ratio,
+            "dilutionPctAtPrice": _num((bridge_core or {}).get("dilutionPctAtPrice")) if sec_usable else None,
             "bridgeStatus": (bridge or {}).get("status") if bridge else None,
             "yahooSharesOutstanding": market["sharesOutstanding"],
             "yahooImpliedSharesOutstanding": market["impliedSharesOutstanding"],

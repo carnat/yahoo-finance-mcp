@@ -257,7 +257,11 @@ def _parse_decimals(raw: str | None) -> int | None:
 
 # Investment facts whose surrounding sentence is kept, so one that restates
 # part of cash ("classified as cash equivalents") can be recognised.
-_SENTENCE_CONCEPTS = {"ShortTermInvestments", "MarketableSecuritiesCurrent", "AvailableForSaleSecuritiesDebtSecuritiesCurrent", "MarketableSecuritiesNoncurrent"}
+_SENTENCE_CONCEPTS = {
+    "ShortTermInvestments", "MarketableSecuritiesCurrent", "AvailableForSaleSecuritiesDebtSecuritiesCurrent", "MarketableSecuritiesNoncurrent",
+    "DebtSecuritiesHeldToMaturityAmortizedCostAfterAllowanceForCreditLossCurrent", "HeldToMaturitySecuritiesCurrent",
+    "DebtSecuritiesHeldToMaturityExcludingAccruedInterestAfterAllowanceForCreditLossCurrent", "OtherShortTermInvestments",
+}
 _SENTENCE_WINDOW = 1500
 _SENTENCE_MAX_CHARS = 500
 _TABLE_RE = re.compile(r"<table\b[\s\S]*?</table\s*>", _F)
@@ -1066,7 +1070,15 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
 # ── Capital structure timeline ──────────────────────────────────────────────
 
 _CASH_CONCEPTS = ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents", "Cash"]
-_SHORT_TERM_INVESTMENT_CONCEPTS = ["ShortTermInvestments", "MarketableSecuritiesCurrent", "AvailableForSaleSecuritiesDebtSecuritiesCurrent"]
+# A short-term investments total when tagged; otherwise the current securities
+# categories, which are disjoint, are added. VRT tags only its held-to-maturity
+# Treasury bills (2.4.3).
+_SHORT_TERM_INVESTMENT_TOTALS = ["ShortTermInvestments", "MarketableSecuritiesCurrent"]
+_SHORT_TERM_INVESTMENT_PARTS = [
+    ["AvailableForSaleSecuritiesDebtSecuritiesCurrent"],
+    ["DebtSecuritiesHeldToMaturityAmortizedCostAfterAllowanceForCreditLossCurrent", "HeldToMaturitySecuritiesCurrent", "DebtSecuritiesHeldToMaturityExcludingAccruedInterestAfterAllowanceForCreditLossCurrent"],
+    ["OtherShortTermInvestments"],
+]
 _SHORT_TERM_BORROWING_CONCEPTS = ["ShortTermBorrowings", "CommercialPaper"]
 _DEBT_LINE_CONCEPTS = [
     "ConvertibleNotesPayableCurrent", "ConvertibleLongTermNotesPayable", "LongTermNotesPayable", "NotesPayableCurrent",
@@ -1095,6 +1107,28 @@ def _convertible_balance(doc: IxDocument, at: str | None) -> tuple[float, list[d
         return whole["value"], [whole]
     parts = [p for p in (_total(doc, c, at) for c in _CONVERTIBLE_PART_CONCEPTS) if p is not None]
     return (sum(p["value"] for p in parts), parts) if parts else None
+
+
+def _short_term_investments(doc: IxDocument, at: str | None) -> dict | None:
+    """Short-term investments at a date: the tagged total, else the sum of the current securities categories."""
+    whole = _first_total(doc, _SHORT_TERM_INVESTMENT_TOTALS, at)
+    if whole:
+        return whole
+    parts = [p for p in (_first_total(doc, group, at) for group in _SHORT_TERM_INVESTMENT_PARTS) if p is not None]
+    if len(parts) <= 1:
+        return parts[0] if parts else None
+    decimals = None
+    for p in parts:
+        if p["decimals"] is not None:
+            decimals = p["decimals"] if decimals is None else min(decimals, p["decimals"])
+    return {
+        "value": sum(p["value"] for p in parts),
+        "periodEnd": at,
+        "concept": " + ".join(p["concept"] for p in parts),
+        "unit": parts[0]["unit"],
+        "decimals": decimals,
+        "sentence": None,
+    }
 
 
 # Every concept _total_debt or the instrument rows read; a filing with none of
@@ -1280,11 +1314,11 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
     warnings: list[dict] = []
     # Investments and debt are read without rounded note figures or restated cash.
     balance_doc = _balance_facts(doc, cash, period_end)
-    short_term = _first_total(balance_doc, _SHORT_TERM_INVESTMENT_CONCEPTS, period_end)
+    short_term = _short_term_investments(balance_doc, period_end)
     long_term_securities = _total(balance_doc, "MarketableSecuritiesNoncurrent", period_end)
     debt = _total_debt(balance_doc, period_end)
     ignored = [
-        (_first_total(doc, _SHORT_TERM_INVESTMENT_CONCEPTS, period_end), short_term),
+        (_short_term_investments(doc, period_end), short_term),
         (_total(doc, "MarketableSecuritiesNoncurrent", period_end), long_term_securities),
     ]
     for raw, kept in ignored:
@@ -1348,6 +1382,7 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
         "periodEnd": period_end,
         "balances": {
             "cashAndEquivalents": cash["value"] if cash else None,
+            "currency": cash["unit"] if cash else None,
             "cashConcept": cash["concept"] if cash else None,
             "shortTermInvestments": short_term["value"] if short_term else None,
             "shortTermInvestmentsConcept": short_term["concept"] if short_term else None,
