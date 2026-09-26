@@ -648,6 +648,8 @@ def build_receipt(*, ticker: str, evidence_cutoff: str, server_version: str, bui
             "okCount": len(names) - len(failures),
             "failedOrLimited": failures,
             "state": "COMPLETE" if not failures else "FAILED" if len(failures) == len(names) else "PARTIAL",
+            "scope": "COMPONENT_WRAPPER_STATUS",
+            "evidenceCompleteness": "NOT_ASSERTED",
         },
     }
 
@@ -682,7 +684,7 @@ def component_from_tool_text(source_tool: str, text: str | None, retrieved_at: s
     return component_from_value(source_tool, parsed, retrieved_at)
 
 
-_LIMITED_RE = re.compile(r"NOT_AVAILABLE|NOT_FOUND|UNAVAILABLE|UNSUPPORTED|NO_DATA|NOT_DISCLOSED|UNCONFIGURED|FAILED")
+_LIMITED_RE = re.compile(r"PARTIAL|INCOMPLETE|STALE|NOT_AVAILABLE|NOT_FOUND|UNAVAILABLE|UNSUPPORTED|NO_DATA|NOT_DISCLOSED|UNCONFIGURED|FAILED")
 
 
 def component_from_value(source_tool: str, parsed: Any, retrieved_at: str) -> dict:
