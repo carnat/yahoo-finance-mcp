@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evidence composition parity (2.5.0): worker/src/evidence.ts vs yfmcp/evidence.py.
+"""Evidence composition parity (2.5.1): worker/src/evidence.ts vs yfmcp/evidence.py.
 
 Covers canonical JSON (the bytes an evidence cut is hashed over), the FY0-FY+5
 consensus curve with per-provider, per-period coverage states, EPS revision
@@ -106,6 +106,8 @@ COMPONENT_TEXTS = [
     ("extract_capital_structure", json.dumps({"basis": "COMPANY_DISCLOSED", "source": {"filingDate": "2026-08-10", "periodEnd": "2026-06-30", "form": "10-Q"}, "warnings": [{"code": "X"}]})),
     ("extract_guidance", json.dumps({"status": "GUIDANCE_NOT_AVAILABLE", "reason": "No guidance found"})),
     ("extract_dilution_bridge", json.dumps({"error": True, "code": "TICKER_NOT_FOUND", "message": "no CIK"})),
+    ("extract_dilution_bridge_partial", json.dumps({"status": "PARTIAL", "unresolved": ["warrants"]})),
+    ("market_series_incomplete", json.dumps({"status": "INCOMPLETE", "message": "missing completed bar"})),
     ("list_sec_material_filings", json.dumps({"ok": False, "data": None, "error": {"code": "RATE_LIMIT", "message": "slow"}})),
     ("get_quote", "not json"),
 ]
@@ -334,9 +336,12 @@ class TestEvidenceQualityAndReceipt(unittest.TestCase):
         c = self.out["components"]
         self.assertEqual({k: v["status"] for k, v in c.items()}, {
             "extract_capital_structure": "OK", "extract_guidance": "LIMITED", "extract_dilution_bridge": "FAILED",
+            "extract_dilution_bridge_partial": "LIMITED", "market_series_incomplete": "LIMITED",
             "list_sec_material_filings": "FAILED", "get_quote": "FAILED"})
         receipt = self.out["receipt"]
         self.assertEqual(receipt["coverage"]["state"], "PARTIAL")
+        self.assertEqual(receipt["coverage"]["scope"], "COMPONENT_WRAPPER_STATUS")
+        self.assertEqual(receipt["coverage"]["evidenceCompleteness"], "NOT_ASSERTED")
         cap = next(r for r in receipt["components"] if r["name"] == "extract_capital_structure")
         self.assertEqual(cap["providerTimestamps"], {"source.filingDate": "2026-08-10", "source.periodEnd": "2026-06-30", "source.form": "10-Q"})
         self.assertEqual(len(cap["sha256"]), 64)

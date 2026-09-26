@@ -595,3 +595,10 @@ Provider/runtime PRs should answer these before implementation:
 - What is cached, for how long, and what happens on rate limit or provider
   outage?
 - Which blocking canary or audit smoke would catch a broken deploy?
+
+
+## Evidence Component Completeness (2.5.1)
+
+- Evidence-pack component wrappers propagate top-level `PARTIAL`, `INCOMPLETE`, and `STALE` source statuses as `LIMITED`. A mechanically successful sub-tool call is not enough to call the component `OK` when its own payload says the evidence is incomplete.
+- `provenance.coverage.state` summarizes component-wrapper status only. The receipt now states `scope: "COMPONENT_WRAPPER_STATUS"` and `evidenceCompleteness: "NOT_ASSERTED"`; `COMPLETE` must never be interpreted as decision-grade evidence completeness, valuation completeness, denominator clearance, or authority to select a method, multiple, scenario, target, G2, opportunity, or action.
+- Consumers must continue to inspect the underlying component payload, `evidenceQuality`, warning codes, coverage cells, and source-specific statuses. In particular, a dilution bridge that reports `PARTIAL` keeps the pack receipt `PARTIAL`.
