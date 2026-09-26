@@ -29,6 +29,10 @@ export type IxFact = {
   periodEnd: string | null;
   periodStart: string | null;
   dims: Record<string, string>;
+  /** The fact's decimals attribute; null when INF or absent (exact). */
+  decimals: number | null;
+  /** For investment concepts outside a table, the sentence the fact sits in; else null. */
+  sentence: string | null;
   order: number;
 };
 
@@ -205,6 +209,42 @@ function parseUnits(html: string): Map<string, string> {
 
 const NON_NUMERIC_MAX_CHARS = 300;
 
+/** An ix decimals attribute as a number; INF, absent or malformed is null (exact). */
+function parseDecimals(raw: string | null): number | null {
+  if (raw == null) return null;
+  const text = raw.trim();
+  return /^-?\d+$/.test(text) ? parseInt(text, 10) : null;
+}
+
+// Investment facts whose surrounding sentence is kept, so one that restates
+// part of cash ("classified as cash equivalents") can be recognised.
+const SENTENCE_CONCEPTS = new Set(["ShortTermInvestments", "MarketableSecuritiesCurrent", "AvailableForSaleSecuritiesDebtSecuritiesCurrent", "MarketableSecuritiesNoncurrent"]);
+const SENTENCE_WINDOW = 1500;
+const SENTENCE_MAX_CHARS = 500;
+
+function lastSentenceStart(text: string): number {
+  let start = 0;
+  for (const m of text.matchAll(/[.!?]\s/g)) start = (m.index ?? 0) + m[0].length;
+  return start;
+}
+
+/** The sentence around a fact outside any table, from the raw HTML either side of it. */
+function factSentence(html: string, open: number, bodyStart: number, bodyEnd: number, closeEnd: number, tables: [number, number][]): string | null {
+  if (tables.some(([a, b]) => open >= a && open < b)) return null;
+  let before = html.slice(Math.max(0, open - SENTENCE_WINDOW), open);
+  const gt = before.indexOf(">");
+  const lt = before.indexOf("<");
+  if (gt >= 0 && (lt < 0 || gt < lt)) before = before.slice(gt + 1);
+  let after = html.slice(closeEnd, closeEnd + SENTENCE_WINDOW);
+  const lastLt = after.lastIndexOf("<");
+  if (lastLt > after.lastIndexOf(">")) after = after.slice(0, lastLt);
+  const beforeText = plainText(before);
+  const afterText = plainText(after);
+  const end = /[.!?](?:\s|$)/.exec(afterText);
+  const sentence = collapse(`${beforeText.slice(lastSentenceStart(beforeText))} ${plainText(html.slice(bodyStart, bodyEnd))} ${end ? afterText.slice(0, end.index + 1) : afterText}`);
+  return sentence.slice(0, SENTENCE_MAX_CHARS) || null;
+}
+
 /** Every numeric fact and short text fact in an inline XBRL document, with its period and dimensions. */
 export function parseIxbrl(html: string): IxDocument {
   const contexts = parseContexts(html);
@@ -212,7 +252,12 @@ export function parseIxbrl(html: string): IxDocument {
   const facts: IxFact[] = [];
   const seen = new Set<string>();
   let order = 0;
-  const push = (name: string, contextRef: string, unit: string | null, value: number | null, text: string | null) => {
+  let tables: [number, number][] | null = null;
+  const tableSpans = (): [number, number][] => {
+    tables ??= [...html.matchAll(/<table\b[\s\S]*?<\/table\s*>/gi)].map((m) => [m.index ?? 0, (m.index ?? 0) + m[0].length] as [number, number]);
+    return tables;
+  };
+  const push = (name: string, contextRef: string, unit: string | null, value: number | null, text: string | null, decimals: number | null = null, sentence: string | null = null) => {
     const ctx = contexts.get(contextRef);
     const key = `${name}|${contextRef}|${unit ?? ""}|${value ?? ""}|${text ?? ""}`;
     if (seen.has(key)) return;
@@ -227,6 +272,8 @@ export function parseIxbrl(html: string): IxDocument {
       periodEnd: ctx ? (ctx.instant ?? ctx.end) : null,
       periodStart: ctx ? ctx.start : null,
       dims: ctx ? ctx.dims : {},
+      decimals,
+      sentence,
       order: order++,
     });
   };
@@ -248,7 +295,10 @@ export function parseIxbrl(html: string): IxDocument {
     value = applyScale(value, attr(attrs, "scale"));
     if (attr(attrs, "sign") === "-") value = -value;
     const unitRef = attr(attrs, "unitRef");
-    push(name, contextRef, unitRef ? (units.get(unitRef) ?? unitRef) : null, value, null);
+    const sentence = SENTENCE_CONCEPTS.has(localName(name))
+      ? factSentence(html, m.index ?? 0, bodyStart, close.index, close.index + close[0].length, tableSpans())
+      : null;
+    push(name, contextRef, unitRef ? (units.get(unitRef) ?? unitRef) : null, value, null, parseDecimals(attr(attrs, "decimals")), sentence);
   }
 
   const textOpen = /<ix:nonNumeric\b([^>]*?)(\/?)>/gi;
@@ -293,22 +343,30 @@ function latestPeriodEnd(facts: IxFact[]): string | null {
 
 // ── Fact selection ──────────────────────────────────────────────────────────
 
-type Picked = { value: number; periodEnd: string | null; concept: string; unit: string | null };
+type Picked = { value: number; periodEnd: string | null; concept: string; unit: string | null; decimals: number | null; sentence: string | null };
 
 function hasDims(f: IxFact): boolean {
   return Object.keys(f.dims).length > 0;
 }
 
+/** Decimal places a fact is accurate to; an exact (INF) fact ranks above any rounding. */
+function precision(decimals: number | null): number {
+  return decimals ?? Number.POSITIVE_INFINITY;
+}
+
+/** The latest fact; on the same date the most precise, so a statement line beats a rounded narrative figure. */
 function newest(facts: IxFact[]): IxFact | null {
   let best: IxFact | null = null;
   for (const f of facts) {
-    if (best == null || (f.periodEnd ?? "") > (best.periodEnd ?? "")) best = f;
+    const end = f.periodEnd ?? "";
+    const bestEnd = best ? (best.periodEnd ?? "") : "";
+    if (best == null || end > bestEnd || (end === bestEnd && precision(f.decimals) > precision(best.decimals))) best = f;
   }
   return best;
 }
 
 function picked(f: IxFact | null): Picked | null {
-  return f && f.value != null ? { value: f.value, periodEnd: f.periodEnd, concept: f.name, unit: f.unit } : null;
+  return f && f.value != null ? { value: f.value, periodEnd: f.periodEnd, concept: f.name, unit: f.unit, decimals: f.decimals, sentence: f.sentence } : null;
 }
 
 /** The newest undimensioned value of a concept, optionally at one date. */
@@ -959,6 +1017,45 @@ function convertibleBalance(doc: IxDocument, at: string | null): { total: number
   return parts.length > 0 ? { total: parts.reduce((sum, p) => sum + p.value, 0), parts } : null;
 }
 
+// Every concept totalDebt or the instrument rows read; a filing with none of
+// them at any date or dimension reports no borrowings.
+const BORROWING_CONCEPTS = new Set([
+  "LongTermDebt", "LongTermDebtCurrent", "LongTermDebtNoncurrent", "NotesPayable", "SeniorNotes", "DebtInstrumentFaceAmount",
+  ...SHORT_TERM_BORROWING_CONCEPTS, ...DEBT_LINE_CONCEPTS, ...CARRYING_CONCEPTS, ...CONVERTIBLE_TOTAL_CONCEPTS, ...CONVERTIBLE_PART_CONCEPTS,
+]);
+
+function tagsNoBorrowings(doc: IxDocument): boolean {
+  return !doc.facts.some((f) => BORROWING_CONCEPTS.has(f.local));
+}
+
+// A balance tagged 100x coarser than the cash line (decimals two or more
+// lower) is a rounded narrative figure, such as "approximately $2.3 billion
+// ... classified as cash equivalents", not a balance-sheet line.
+const ROUNDED_DECIMALS_GAP = 2;
+
+// A sentence that says the amount is cash equivalents or money-market funds
+// restates part of cash; adding it again would count it twice.
+const CASH_OVERLAP_RE = /\bcash equivalents?\b|\bmoney[- ]market\b/i;
+
+type BalanceFact = { value: number | null; periodEnd: string | null; decimals: number | null; sentence: string | null };
+
+/** Why a period-end fact is not a balance-sheet amount: "rounded", "overlaps_cash", or null to keep it. */
+function balanceExclusion(f: BalanceFact, cash: Picked | null, at: string | null): "rounded" | "overlaps_cash" | null {
+  if (!cash || f.value == null || f.periodEnd !== at) return null;
+  if (cash.decimals != null && f.decimals != null && f.decimals <= cash.decimals - ROUNDED_DECIMALS_GAP) return "rounded";
+  if (f.sentence != null && CASH_OVERLAP_RE.test(f.sentence) && f.value <= cash.value) return "overlaps_cash";
+  return null;
+}
+
+/** The document without period-end facts that are rounded note figures or restate cash. */
+function balanceFacts(doc: IxDocument, cash: Picked | null, at: string | null): IxDocument {
+  if (!cash) return doc;
+  return { ...doc, facts: doc.facts.filter((f) => hasDims(f) || balanceExclusion(f, cash, at) == null) };
+}
+
+// Within half a percent, two totals are the same amount.
+const AGGREGATE_TOLERANCE = 0.005;
+
 function totalDebt(doc: IxDocument, at: string | null): Record<string, unknown> | null {
   const shortTerm = SHORT_TERM_BORROWING_CONCEPTS.map((c) => total(doc, c, at)).filter((p): p is Picked => p != null);
   const withShort = (base: number, parts: Picked[], basis: string) => ({
@@ -1095,9 +1192,42 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
   const doc = source.doc;
   const periodEnd = doc.documentPeriodEnd;
   const cash = firstTotal(doc, CASH_CONCEPTS, periodEnd);
-  const shortTerm = firstTotal(doc, SHORT_TERM_INVESTMENT_CONCEPTS, periodEnd);
-  const longTermSecurities = total(doc, "MarketableSecuritiesNoncurrent", periodEnd);
-  const debt = totalDebt(doc, periodEnd);
+  const warnings: Record<string, unknown>[] = [];
+  // Investments and debt are read without rounded note figures or restated cash.
+  const balanceDoc = balanceFacts(doc, cash, periodEnd);
+  let shortTerm = firstTotal(balanceDoc, SHORT_TERM_INVESTMENT_CONCEPTS, periodEnd);
+  const longTermSecurities = total(balanceDoc, "MarketableSecuritiesNoncurrent", periodEnd);
+  let debt = totalDebt(balanceDoc, periodEnd);
+  const ignored = [
+    [firstTotal(doc, SHORT_TERM_INVESTMENT_CONCEPTS, periodEnd), shortTerm],
+    [total(doc, "MarketableSecuritiesNoncurrent", periodEnd), longTermSecurities],
+  ] as [Picked | null, Picked | null][];
+  for (const [raw, kept] of ignored) {
+    if (!raw || (kept && kept.value === raw.value && kept.concept === raw.concept)) continue;
+    if (balanceExclusion(raw, cash, periodEnd) === "overlaps_cash") {
+      warnings.push({ code: "OVERLAPS_CASH_EQUIVALENTS", message: `${raw.concept} ${raw.value} is tagged in a sentence describing cash equivalents or money-market funds; it is part of cash, not added to it.`, severity: "info", sentence: raw.sentence });
+    } else {
+      warnings.push({ code: "ROUNDED_FACT_IGNORED", message: `${raw.concept} ${raw.value} is rounded to ${raw.decimals} decimals against cash at ${cash!.decimals}; read as a narrative figure, not a balance-sheet line.`, severity: "info" });
+    }
+  }
+  // The filing's own cash-plus-investments total, when tagged, must agree.
+  const aggregate = total(balanceDoc, "CashCashEquivalentsAndShortTermInvestments", periodEnd);
+  if (aggregate && cash && shortTerm && Math.abs(cash.value + shortTerm.value - aggregate.value) > AGGREGATE_TOLERANCE * Math.abs(aggregate.value)) {
+    if (Math.abs(aggregate.value - cash.value) <= AGGREGATE_TOLERANCE * Math.abs(aggregate.value)) {
+      warnings.push({ code: "CASH_AGGREGATE_MISMATCH", message: `The filing's cash and short-term investments total ${aggregate.value} equals cash alone, so ${shortTerm.concept} ${shortTerm.value} is already inside cash and is not added.`, severity: "info" });
+      shortTerm = null;
+    } else {
+      warnings.push({ code: "CASH_AGGREGATE_MISMATCH", message: `Cash ${cash.value} plus ${shortTerm.concept} ${shortTerm.value} differs from the filing's cash and short-term investments total ${aggregate.value}.`, severity: "warning" });
+    }
+  }
+  const rawDebt = totalDebt(doc, periodEnd);
+  if (rawDebt && (!debt || debt.value !== rawDebt.value)) {
+    warnings.push({ code: "ROUNDED_FACT_IGNORED", message: `Total debt ${rawDebt.value} includes figures rounded far more coarsely than cash; they were left out.`, severity: "info" });
+  }
+  if (!debt && cash && tagsNoBorrowings(doc)) {
+    debt = { value: 0, components: [], basis: "No borrowing concepts tagged in the filing" };
+    warnings.push({ code: "NO_BORROWINGS_TAGGED", message: "The filing tags no borrowings at any date, so total debt is taken as zero (leases excluded).", severity: "info" });
+  }
   const instrumentRows = instruments(doc, periodEnd);
   const ladder = LADDER.map(([concept, bucket, offset]) => {
     const hit = total(doc, concept, periodEnd);
@@ -1121,7 +1251,6 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
   }
   const instrumentLadder = [...byYear.values()].sort((a, b) => (a.year < b.year ? -1 : a.year > b.year ? 1 : 0));
   const liquid = (cash ? cash.value : 0) + (shortTerm ? shortTerm.value : 0);
-  const warnings: Record<string, unknown>[] = [];
   if (doc.facts.length === 0) {
     warnings.push({ code: "NO_INLINE_XBRL", message: "The filing carries no inline XBRL facts.", severity: "warning" });
   }

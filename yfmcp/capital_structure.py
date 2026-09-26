@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 _F = re.I | re.A
@@ -160,6 +160,10 @@ class IxFact:
     period_start: str | None
     dims: dict[str, str]
     order: int
+    # The fact's decimals attribute; None when INF or absent (exact).
+    decimals: int | None = None
+    # For investment concepts outside a table, the sentence the fact sits in; else None.
+    sentence: str | None = None
 
 
 @dataclass
@@ -236,6 +240,59 @@ def _fmt_key(value: Any) -> str:
     return "" if value is None else repr(value)
 
 
+def _js_number(value: Any) -> str:
+    """A number as JavaScript prints it, so messages match the Worker."""
+    if isinstance(value, float) and value.is_integer() and abs(value) < 1e21:
+        return str(int(value))
+    return str(value)
+
+
+def _parse_decimals(raw: str | None) -> int | None:
+    """An ix decimals attribute as a number; INF, absent or malformed is None (exact)."""
+    if raw is None:
+        return None
+    text = raw.strip()
+    return int(text) if re.fullmatch(r"-?\d+", text, re.A) else None
+
+
+# Investment facts whose surrounding sentence is kept, so one that restates
+# part of cash ("classified as cash equivalents") can be recognised.
+_SENTENCE_CONCEPTS = {"ShortTermInvestments", "MarketableSecuritiesCurrent", "AvailableForSaleSecuritiesDebtSecuritiesCurrent", "MarketableSecuritiesNoncurrent"}
+_SENTENCE_WINDOW = 1500
+_SENTENCE_MAX_CHARS = 500
+_TABLE_RE = re.compile(r"<table\b[\s\S]*?</table\s*>", _F)
+_SENTENCE_BREAK_RE = re.compile(r"[.!?]\s", re.A)
+_SENTENCE_END_RE = re.compile(r"[.!?](?:\s|$)", re.A)
+
+
+def _last_sentence_start(text: str) -> int:
+    start = 0
+    for m in _SENTENCE_BREAK_RE.finditer(text):
+        start = m.end()
+    return start
+
+
+def _fact_sentence(html: str, open_: int, body_start: int, body_end: int, close_end: int, tables: list[tuple[int, int]]) -> str | None:
+    """The sentence around a fact outside any table, from the raw HTML either side of it."""
+    if any(a <= open_ < b for a, b in tables):
+        return None
+    before = html[max(0, open_ - _SENTENCE_WINDOW):open_]
+    gt = before.find(">")
+    lt = before.find("<")
+    if gt >= 0 and (lt < 0 or gt < lt):
+        before = before[gt + 1:]
+    after = html[close_end:close_end + _SENTENCE_WINDOW]
+    last_lt = after.rfind("<")
+    if last_lt > after.rfind(">"):
+        after = after[:last_lt]
+    before_text = _plain_text(before)
+    after_text = _plain_text(after)
+    end = _SENTENCE_END_RE.search(after_text)
+    head = after_text[:end.start() + 1] if end else after_text
+    sentence = _collapse(f"{before_text[_last_sentence_start(before_text):]} {_plain_text(html[body_start:body_end])} {head}")
+    return sentence[:_SENTENCE_MAX_CHARS] or None
+
+
 def parse_ixbrl(html: str) -> IxDocument:
     """Every numeric fact and short text fact in an inline XBRL document, with its period and dimensions."""
     contexts = _parse_contexts(html)
@@ -243,7 +300,15 @@ def parse_ixbrl(html: str) -> IxDocument:
     facts: list[IxFact] = []
     seen: set[str] = set()
 
-    def push(name: str, context_ref: str, unit: str | None, value: float | None, text: str | None) -> None:
+    tables: list[tuple[int, int]] | None = None
+
+    def table_spans() -> list[tuple[int, int]]:
+        nonlocal tables
+        if tables is None:
+            tables = [(m.start(), m.end()) for m in _TABLE_RE.finditer(html)]
+        return tables
+
+    def push(name: str, context_ref: str, unit: str | None, value: float | None, text: str | None, decimals: int | None = None, sentence: str | None = None) -> None:
         ctx = contexts.get(context_ref)
         key = f"{name}|{context_ref}|{unit or ''}|{_fmt_key(value)}|{text or ''}"
         if key in seen:
@@ -255,6 +320,8 @@ def parse_ixbrl(html: str) -> IxDocument:
             period_start=ctx["start"] if ctx else None,
             dims=ctx["dims"] if ctx else {},
             order=len(facts),
+            decimals=decimals,
+            sentence=sentence,
         ))
 
     for m in _NUM_OPEN.finditer(html):
@@ -275,7 +342,9 @@ def parse_ixbrl(html: str) -> IxDocument:
         if _attr(attrs, "sign") == "-":
             value = -value
         unit_ref = _attr(attrs, "unitRef")
-        push(name, context_ref, units.get(unit_ref, unit_ref) if unit_ref else None, value, None)
+        sentence = (_fact_sentence(html, m.start(), m.end(), close.start(), close.end(), table_spans())
+                    if _local_name(name) in _SENTENCE_CONCEPTS else None)
+        push(name, context_ref, units.get(unit_ref, unit_ref) if unit_ref else None, value, None, _parse_decimals(_attr(attrs, "decimals")), sentence)
 
     for m in _TEXT_OPEN.finditer(html):
         if m.group(2) == "/":
@@ -320,16 +389,24 @@ def _latest_period_end(facts: list[IxFact]) -> str | None:
 
 # ── Fact selection ──────────────────────────────────────────────────────────
 
+def _precision(decimals: int | None) -> float:
+    """Decimal places a fact is accurate to; an exact (INF) fact ranks above any rounding."""
+    return float("inf") if decimals is None else decimals
+
+
 def _newest(facts: list[IxFact]) -> IxFact | None:
+    """The latest fact; on the same date the most precise, so a statement line beats a rounded narrative figure."""
     best = None
     for f in facts:
-        if best is None or (f.period_end or "") > (best.period_end or ""):
+        end = f.period_end or ""
+        best_end = (best.period_end or "") if best is not None else ""
+        if best is None or end > best_end or (end == best_end and _precision(f.decimals) > _precision(best.decimals)):
             best = f
     return best
 
 
 def _picked(f: IxFact | None) -> dict | None:
-    return {"value": f.value, "periodEnd": f.period_end, "concept": f.name, "unit": f.unit} if f is not None and f.value is not None else None
+    return {"value": f.value, "periodEnd": f.period_end, "concept": f.name, "unit": f.unit, "decimals": f.decimals, "sentence": f.sentence} if f is not None and f.value is not None else None
 
 
 def _total(doc: IxDocument, local: str, at: str | None = None) -> dict | None:
@@ -1020,6 +1097,52 @@ def _convertible_balance(doc: IxDocument, at: str | None) -> tuple[float, list[d
     return (sum(p["value"] for p in parts), parts) if parts else None
 
 
+# Every concept _total_debt or the instrument rows read; a filing with none of
+# them at any date or dimension reports no borrowings.
+_BORROWING_CONCEPTS = {
+    "LongTermDebt", "LongTermDebtCurrent", "LongTermDebtNoncurrent", "NotesPayable", "SeniorNotes", "DebtInstrumentFaceAmount",
+    *_SHORT_TERM_BORROWING_CONCEPTS, *_DEBT_LINE_CONCEPTS, *_CARRYING_CONCEPTS, *_CONVERTIBLE_TOTAL_CONCEPTS, *_CONVERTIBLE_PART_CONCEPTS,
+}
+
+
+def _tags_no_borrowings(doc: IxDocument) -> bool:
+    return not any(f.local in _BORROWING_CONCEPTS for f in doc.facts)
+
+
+# A balance tagged 100x coarser than the cash line (decimals two or more
+# lower) is a rounded narrative figure, such as "approximately $2.3 billion
+# ... classified as cash equivalents", not a balance-sheet line.
+_ROUNDED_DECIMALS_GAP = 2
+
+
+# A sentence that says the amount is cash equivalents or money-market funds
+# restates part of cash; adding it again would count it twice.
+_CASH_OVERLAP_RE = re.compile(r"\bcash equivalents?\b|\bmoney[- ]market\b", re.I | re.A)
+
+
+def _balance_exclusion(value: float | None, period_end: str | None, decimals: int | None, sentence: str | None, cash: dict | None, at: str | None) -> str | None:
+    """Why a period-end fact is not a balance-sheet amount: "rounded", "overlaps_cash", or None to keep it."""
+    if not cash or value is None or period_end != at:
+        return None
+    if cash["decimals"] is not None and decimals is not None and decimals <= cash["decimals"] - _ROUNDED_DECIMALS_GAP:
+        return "rounded"
+    if sentence is not None and _CASH_OVERLAP_RE.search(sentence) and value <= cash["value"]:
+        return "overlaps_cash"
+    return None
+
+
+def _balance_facts(doc: IxDocument, cash: dict | None, at: str | None) -> IxDocument:
+    """The document without period-end facts that are rounded note figures or restate cash."""
+    if not cash:
+        return doc
+    kept = [f for f in doc.facts if f.dims or _balance_exclusion(f.value, f.period_end, f.decimals, f.sentence, cash, at) is None]
+    return replace(doc, facts=kept)
+
+
+# Within half a percent, two totals are the same amount.
+_AGGREGATE_TOLERANCE = 0.005
+
+
 def _total_debt(doc: IxDocument, at: str | None) -> dict | None:
     short_term = [p for p in (_total(doc, c, at) for c in _SHORT_TERM_BORROWING_CONCEPTS) if p is not None]
 
@@ -1154,9 +1277,37 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
     doc = source.doc
     period_end = doc.document_period_end
     cash = _first_total(doc, _CASH_CONCEPTS, period_end)
-    short_term = _first_total(doc, _SHORT_TERM_INVESTMENT_CONCEPTS, period_end)
-    long_term_securities = _total(doc, "MarketableSecuritiesNoncurrent", period_end)
-    debt = _total_debt(doc, period_end)
+    warnings: list[dict] = []
+    # Investments and debt are read without rounded note figures or restated cash.
+    balance_doc = _balance_facts(doc, cash, period_end)
+    short_term = _first_total(balance_doc, _SHORT_TERM_INVESTMENT_CONCEPTS, period_end)
+    long_term_securities = _total(balance_doc, "MarketableSecuritiesNoncurrent", period_end)
+    debt = _total_debt(balance_doc, period_end)
+    ignored = [
+        (_first_total(doc, _SHORT_TERM_INVESTMENT_CONCEPTS, period_end), short_term),
+        (_total(doc, "MarketableSecuritiesNoncurrent", period_end), long_term_securities),
+    ]
+    for raw, kept in ignored:
+        if not raw or (kept and kept["value"] == raw["value"] and kept["concept"] == raw["concept"]):
+            continue
+        if _balance_exclusion(raw["value"], raw["periodEnd"], raw["decimals"], raw["sentence"], cash, period_end) == "overlaps_cash":
+            warnings.append({"code": "OVERLAPS_CASH_EQUIVALENTS", "message": f"{raw['concept']} {_js_number(raw['value'])} is tagged in a sentence describing cash equivalents or money-market funds; it is part of cash, not added to it.", "severity": "info", "sentence": raw["sentence"]})
+        else:
+            warnings.append({"code": "ROUNDED_FACT_IGNORED", "message": f"{raw['concept']} {_js_number(raw['value'])} is rounded to {raw['decimals']} decimals against cash at {cash['decimals']}; read as a narrative figure, not a balance-sheet line.", "severity": "info"})
+    # The filing's own cash-plus-investments total, when tagged, must agree.
+    aggregate = _total(balance_doc, "CashCashEquivalentsAndShortTermInvestments", period_end)
+    if aggregate and cash and short_term and abs(cash["value"] + short_term["value"] - aggregate["value"]) > _AGGREGATE_TOLERANCE * abs(aggregate["value"]):
+        if abs(aggregate["value"] - cash["value"]) <= _AGGREGATE_TOLERANCE * abs(aggregate["value"]):
+            warnings.append({"code": "CASH_AGGREGATE_MISMATCH", "message": f"The filing's cash and short-term investments total {_js_number(aggregate['value'])} equals cash alone, so {short_term['concept']} {_js_number(short_term['value'])} is already inside cash and is not added.", "severity": "info"})
+            short_term = None
+        else:
+            warnings.append({"code": "CASH_AGGREGATE_MISMATCH", "message": f"Cash {_js_number(cash['value'])} plus {short_term['concept']} {_js_number(short_term['value'])} differs from the filing's cash and short-term investments total {_js_number(aggregate['value'])}.", "severity": "warning"})
+    raw_debt = _total_debt(doc, period_end)
+    if raw_debt and (not debt or debt["value"] != raw_debt["value"]):
+        warnings.append({"code": "ROUNDED_FACT_IGNORED", "message": f"Total debt {_js_number(raw_debt['value'])} includes figures rounded far more coarsely than cash; they were left out.", "severity": "info"})
+    if not debt and cash and _tags_no_borrowings(doc):
+        debt = {"value": 0, "components": [], "basis": "No borrowing concepts tagged in the filing"}
+        warnings.append({"code": "NO_BORROWINGS_TAGGED", "message": "The filing tags no borrowings at any date, so total debt is taken as zero (leases excluded).", "severity": "info"})
     instrument_rows = _instruments(doc, period_end)
     ladder = []
     for concept, bucket, offset in _LADDER:
@@ -1182,7 +1333,6 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
         by_year[year] = entry
     instrument_ladder = sorted(by_year.values(), key=lambda e: e["year"])
     liquid = (cash["value"] if cash else 0) + (short_term["value"] if short_term else 0)
-    warnings: list[dict] = []
     if not doc.facts:
         warnings.append({"code": "NO_INLINE_XBRL", "message": "The filing carries no inline XBRL facts.", "severity": "warning"})
     if cash and cash["concept"].endswith("RestrictedCashEquivalents"):
