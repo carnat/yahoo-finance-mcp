@@ -232,6 +232,13 @@ of them forecasts, and none may be back-solved into a consensus figure.
     `ROUNDED_FACT_IGNORED` warning. They are note sentences, not balance-sheet
     lines: ASTS tags "approximately $2.3 billion ... classified as cash
     equivalents" as short-term investments, which counted part of cash twice;
+  - an investments figure tagged in a sentence (not a table) that calls it cash
+    equivalents or money-market funds, and is no larger than cash, is part of
+    cash and is not added (`OVERLAPS_CASH_EQUIVALENTS`, with the sentence). The
+    parser keeps that sentence only for investment concepts;
+  - when the filing tags its own cash-and-short-term-investments total and it
+    equals cash alone, tagged investments are already inside cash and are
+    dropped; any other disagreement is flagged (`CASH_AGGREGATE_MISMATCH`);
   - a filing that tags cash but no borrowing concept at any date or dimension
     reports total debt as zero, with a `NO_BORROWINGS_TAGGED` warning, so a
     debt-free company (AEHR) is not given Yahoo's lease-inclusive debt;
@@ -270,7 +277,12 @@ of them forecasts, and none may be back-solved into a consensus figure.
   - EV/Revenue, EV/EBITDA and P/E over Yahoo's trailing results and its
     current and next fiscal-year consensus, each with the analyst count. A
     zero or negative denominator leaves the multiple empty, with a note;
-  - ATM capacity is reported beside the share count, not added to it.
+  - ATM capacity is reported beside the share count, not added to it;
+  - `SEC_YAHOO_CASH_MISMATCH` warns when the filing's cash alone is within 2%
+    of Yahoo's total cash (which includes short-term investments) but cash
+    plus the filing's investments is more than 10% above it: the investments
+    are probably inside cash already. It is a warning only; the filing's
+    balances still set enterprise value.
 
   Listings quoted in a minor unit (GBp, ZAc, ILA) are valued in the major
   currency. Non-USD listings and tickers without SEC filings use Yahoo's

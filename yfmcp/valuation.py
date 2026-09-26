@@ -16,6 +16,11 @@ from typing import Any
 from yfmcp.capital_structure import round_half_up
 
 
+# Cash plus investments more than 10% above Yahoo's total, with cash alone within 2% of it.
+_SEC_YAHOO_EXCESS = 0.1
+_SEC_YAHOO_CASH_MATCH = 0.02
+
+
 def _num(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -241,6 +246,21 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
     balance_basis = "sec_filing_period_end" if sec_balances else ("yahoo_financial_data" if market["totalDebt"] is not None else None)
     if not sec_balances:
         warnings.append({"code": "YAHOO_BALANCES", "message": "Cash and debt are Yahoo's totals (debt can include leases), not the filing's period-end balances.", "severity": "info"})
+
+    # Yahoo's total cash includes short-term investments. When the filing's cash
+    # alone matches it but cash plus investments runs well above it, the
+    # investments are probably part of cash already (ASTS, 2.4.2). Flagged, not overridden.
+    yahoo_cash = market["totalCash"]
+    if (sec_balances and cash is not None and short_term > 0 and yahoo_cash is not None and yahoo_cash > 0
+            and cash + short_term > (1 + _SEC_YAHOO_EXCESS) * yahoo_cash and abs(cash - yahoo_cash) <= _SEC_YAHOO_CASH_MATCH * yahoo_cash):
+        warnings.append({
+            "code": "SEC_YAHOO_CASH_MISMATCH",
+            "message": "The filing's cash alone matches Yahoo's total cash and short-term investments, but cash plus the filing's short-term investments is well above it; the investments may already be inside cash. Check the filing before relying on enterprise value.",
+            "severity": "warning",
+            "secCash": cash,
+            "secShortTermInvestments": short_term,
+            "yahooTotalCash": yahoo_cash,
+        })
 
     # Convertibles counted as shares leave the debt, so they are not counted twice.
     convertible_adjustment = 0

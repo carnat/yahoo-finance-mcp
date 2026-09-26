@@ -243,6 +243,29 @@ DEBT_FREE_K = f"""<html><body>
 </ix:hidden><ix:resources>{_context("dy", "2025-05-31..2026-05-29")}{_context("di", "2026-05-29")}{UNITS}</ix:resources></ix:header></div>
 <p>Cash and cash equivalents {_num("us-gaap:CashAndCashEquivalentsAtCarryingValue", "di", "usd", "116,358", 3)}; operating lease liabilities {_num("us-gaap:OperatingLeaseLiability", "di", "usd", "9,882", 3)}.</p>
 </body></html>"""
+# A precise investments figure in a sentence that calls it cash equivalents,
+# ahead of the balance-sheet table whose own investments line must survive.
+OVERLAP_Q = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "oq", "10-Q")}
+{_text("dei:DocumentPeriodEndDate", "oq", "June 30, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("oq", "2026-01-01..2026-06-30")}{_context("oi", "2026-06-30")}{UNITS}</ix:resources></ix:header></div>
+<p>Liquidity. As of June 30, 2026, <span>{_num("us-gaap:ShortTermInvestments", "oi", "usd", "180,000", 3)}</span> of our cash was held in money market funds classified as cash equivalents. We have no other investments.</p>
+<table><tr><td>Cash and cash equivalents</td><td>{_num("us-gaap:CashAndCashEquivalentsAtCarryingValue", "oi", "usd", "400,000", 3)}</td></tr>
+<tr><td>Short-term investments</td><td>{_num("us-gaap:ShortTermInvestments", "oi", "usd", "120,000", 3)}</td></tr></table>
+<p>Our {_num("us-gaap:LongTermDebtNoncurrent", "oi", "usd", "50,000", 3)} term loan matures in 2029.</p>
+</body></html>"""
+# The filing's own cash-plus-investments total equals cash, so the investments are inside it.
+AGGREGATE_Q = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "gq", "10-Q")}
+{_text("dei:DocumentPeriodEndDate", "gq", "June 30, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("gq", "2026-01-01..2026-06-30")}{_context("gi", "2026-06-30")}{UNITS}</ix:resources></ix:header></div>
+<table><tr><td>Cash and cash equivalents</td><td>{_num("us-gaap:CashAndCashEquivalentsAtCarryingValue", "gi", "usd", "500,000", 3)}</td></tr>
+<tr><td>Short-term investments</td><td>{_num("us-gaap:ShortTermInvestments", "gi", "usd", "200,000", 3)}</td></tr>
+<tr><td>Cash, cash equivalents and short-term investments</td><td>{_num("us-gaap:CashCashEquivalentsAndShortTermInvestments", "gi", "usd", "500,000", 3)}</td></tr>
+<tr><td>Long-term debt</td><td>{_num("us-gaap:LongTermDebt", "gi", "usd", "10,000", 3)}</td></tr></table>
+</body></html>"""
 TABLE_MATCHES = [
     {"contextText": "Unvested at December 31, 2025 | 2,500,000 | $ 14.10", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at December 31, 2025"},
     {"contextText": "Unvested at June 30, 2026 | 2,750,000 | $ 15.20", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at June 30, 2026"},
@@ -250,7 +273,7 @@ TABLE_MATCHES = [
     {"contextText": "Unvested at June 30, 2026, restricted stock units totalled 8,888,888 shares.", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": False, "tableTitle": None, "rowLabel": None},
 ]
 
-FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K}
+FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q}
 
 NEWS_ITEMS = [
     {"title": "Needham raises IQE price target to 45p from 38p", "summary": "Needham values IQE at 12x 2027 EV/EBITDA, citing gallium nitride demand.", "url": "https://news.example/1", "publishedAt": "2026-09-20T08:00:00Z", "source": "yahoo_finance_news"},
@@ -302,6 +325,8 @@ out.capital = m.capitalStructure({ ticker: "CSTC", source: kSource, fundingMatch
 out.capitalAaoi = m.capitalStructure({ ticker: "AAOX", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000040", data.qUrl, "aaoi_q"), fundingMatches: [] });
 out.capitalAsts = m.capitalStructure({ ticker: "ASTX", source: src("primary", "10-Q", "2026-08-10", "0001234568-26-000060", data.qUrl, "asts_q"), fundingMatches: [] });
 out.capitalDebtFree = m.capitalStructure({ ticker: "AEHX", source: src("primary", "10-K", "2026-07-27", "0001234568-26-000070", data.kUrl, "debt_free_k"), fundingMatches: [] });
+out.capitalOverlap = m.capitalStructure({ ticker: "OVLP", source: src("primary", "10-Q", "2026-08-10", "0001234568-26-000080", data.qUrl, "overlap_q"), fundingMatches: [] });
+out.capitalAggregate = m.capitalStructure({ ticker: "AGGR", source: src("primary", "10-Q", "2026-08-10", "0001234568-26-000090", data.qUrl, "aggregate_q"), fundingMatches: [] });
 out.labels = ["us-gaap:ClassBCommonStockMember", "us-gaap:RestrictedStockUnitsRSUMember", "cstc:ConvertibleSeniorNotesDue2029Member", "aaoi:SubsidiaryOfAmazonMember"].map(m.memberLabel);
 out.analyst = m.analystValuationMethods("IQE.L", data.news, data.changes);
 out.ch = m.companiesHouseFilings("01234567", data.chHistory);
@@ -362,7 +387,7 @@ def _doc_json(doc: cs.IxDocument) -> dict:
     return {
         "facts": [{
             "name": f.name, "local": f.local, "contextRef": f.context_ref, "unit": f.unit, "value": f.value, "text": f.text,
-            "periodEnd": f.period_end, "periodStart": f.period_start, "dims": f.dims, "decimals": f.decimals, "order": f.order,
+            "periodEnd": f.period_end, "periodStart": f.period_start, "dims": f.dims, "decimals": f.decimals, "sentence": f.sentence, "order": f.order,
         } for f in doc.facts],
         "contextCount": doc.context_count,
         "documentPeriodEnd": doc.document_period_end,
@@ -389,6 +414,8 @@ def _python_pure() -> dict:
         "capitalAaoi": cs.capital_structure("AAOX", cs.IxSource("primary", "10-Q", "2026-08-06", "0001234568-26-000040", Q_URL, docs["aaoi_q"]), []),
         "capitalAsts": cs.capital_structure("ASTX", cs.IxSource("primary", "10-Q", "2026-08-10", "0001234568-26-000060", Q_URL, docs["asts_q"]), []),
         "capitalDebtFree": cs.capital_structure("AEHX", cs.IxSource("primary", "10-K", "2026-07-27", "0001234568-26-000070", K_URL, docs["debt_free_k"]), []),
+        "capitalOverlap": cs.capital_structure("OVLP", cs.IxSource("primary", "10-Q", "2026-08-10", "0001234568-26-000080", Q_URL, docs["overlap_q"]), []),
+        "capitalAggregate": cs.capital_structure("AGGR", cs.IxSource("primary", "10-Q", "2026-08-10", "0001234568-26-000090", Q_URL, docs["aggregate_q"]), []),
         "labels": [cs.member_label(m) for m in ("us-gaap:ClassBCommonStockMember", "us-gaap:RestrictedStockUnitsRSUMember", "cstc:ConvertibleSeniorNotesDue2029Member", "aaoi:SubsidiaryOfAmazonMember")],
         "analyst": cs.analyst_valuation_methods("IQE.L", copy.deepcopy(NEWS_ITEMS), copy.deepcopy(RATING_CHANGES)),
         "ch": cs.companies_house_filings("01234567", CH_HISTORY),
@@ -409,7 +436,7 @@ class TestCapitalStructureParity(unittest.TestCase):
             self.assertEqual(self.worker["documents"][name], self.local["documents"][name], name)
 
     def test_outputs_match(self) -> None:
-        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "labels", "analyst", "ch", "chPick"):
+        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "labels", "analyst", "ch", "chPick"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
 
@@ -502,6 +529,23 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertIn("ShortTermInvestments 2300000000", c["warnings"][0]["message"])
         # Precise facts are unaffected: the base fixture keeps its investments.
         self.assertEqual(self.out["capital"]["warnings"], [])
+
+    def test_investments_described_as_cash_equivalents_are_not_added(self) -> None:
+        sti = self.fact("overlap_q", "ShortTermInvestments")
+        self.assertEqual(sti[0]["sentence"], "As of June 30, 2026, 180,000 of our cash was held in money market funds classified as cash equivalents.")
+        self.assertIsNone(sti[1]["sentence"])  # a balance-sheet table row
+        self.assertIsNone(self.fact("overlap_q", "LongTermDebtNoncurrent")[0]["sentence"])  # only investment concepts keep a sentence
+        c = self.out["capitalOverlap"]
+        self.assertEqual(c["balances"]["shortTermInvestments"], 120_000_000)
+        self.assertEqual(c["balances"]["netCash"], 470_000_000)
+        self.assertEqual([w["code"] for w in c["warnings"]], ["OVERLAPS_CASH_EQUIVALENTS"])
+        self.assertIn("money market funds", c["warnings"][0]["sentence"])
+
+    def test_filing_aggregate_equal_to_cash_drops_investments(self) -> None:
+        c = self.out["capitalAggregate"]
+        self.assertIsNone(c["balances"]["shortTermInvestments"])
+        self.assertEqual(c["balances"]["netCash"], 490_000_000)
+        self.assertEqual([(w["code"], w["severity"]) for w in c["warnings"]], [("CASH_AGGREGATE_MISMATCH", "info")])
 
     def test_filing_without_borrowings_reports_zero_debt(self) -> None:
         c = self.out["capitalDebtFree"]

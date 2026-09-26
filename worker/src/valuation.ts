@@ -181,6 +181,10 @@ export type SnapshotInput = {
   secWarnings: Record<string, unknown>[];
 };
 
+// Cash plus investments more than 10% above Yahoo's total, with cash alone within 2% of it.
+const SEC_YAHOO_EXCESS = 0.1;
+const SEC_YAHOO_CASH_MATCH = 0.02;
+
 function num(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -210,6 +214,22 @@ export function valuationSnapshot(input: SnapshotInput): Record<string, unknown>
   const balanceBasis = secBalances ? "sec_filing_period_end" : (market.totalDebt != null ? "yahoo_financial_data" : null);
   if (!secBalances) {
     warnings.push({ code: "YAHOO_BALANCES", message: "Cash and debt are Yahoo's totals (debt can include leases), not the filing's period-end balances.", severity: "info" });
+  }
+
+  // Yahoo's total cash includes short-term investments. When the filing's cash
+  // alone matches it but cash plus investments runs well above it, the
+  // investments are probably part of cash already (ASTS, 2.4.2). Flagged, not overridden.
+  const yahooCash = market.totalCash;
+  if (secBalances && cash != null && shortTerm > 0 && yahooCash != null && yahooCash > 0
+    && cash + shortTerm > (1 + SEC_YAHOO_EXCESS) * yahooCash && Math.abs(cash - yahooCash) <= SEC_YAHOO_CASH_MATCH * yahooCash) {
+    warnings.push({
+      code: "SEC_YAHOO_CASH_MISMATCH",
+      message: "The filing's cash alone matches Yahoo's total cash and short-term investments, but cash plus the filing's short-term investments is well above it; the investments may already be inside cash. Check the filing before relying on enterprise value.",
+      severity: "warning",
+      secCash: cash,
+      secShortTermInvestments: shortTerm,
+      yahooTotalCash: yahooCash,
+    });
   }
 
   // Convertibles counted as shares leave the debt, so they are not counted twice.
