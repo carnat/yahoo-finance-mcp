@@ -237,7 +237,7 @@ function rememberProviderDenial(denialKey: string, result: ProviderJsonResult): 
   return result;
 }
 
-async function fetchAlphaVantageJson(
+export async function fetchAlphaVantageJson(
   operation: string,
   params: Record<string, unknown>,
   ttlMs: number,
@@ -1105,7 +1105,7 @@ function evictYahooGet(url: string, auth = true): void {
   yahooGetBodies.delete(yahooGetKey(url, auth));
 }
 
-async function yGet(url: string, auth = true): Promise<unknown> {
+export async function yGet(url: string, auth = true): Promise<unknown> {
   const key = yahooGetKey(url, auth);
   let body = yahooGetBodies.get(key);
   if (body !== undefined) {
@@ -5514,7 +5514,7 @@ async function resolveCikForTicker(ticker: string): Promise<string | null> {
   return null;
 }
 
-async function getSubmissionsForTicker(ticker: string): Promise<{ cikPadded: string | null; submissions: Record<string, unknown> | null }> {
+export async function getSubmissionsForTicker(ticker: string): Promise<{ cikPadded: string | null; submissions: Record<string, unknown> | null }> {
   const key = ticker.toUpperCase();
   const cachedSubmissions = filingSubmissionsCache.get(key) ?? null;
   const cikPadded = await resolveCikForTicker(ticker);

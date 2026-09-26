@@ -21,6 +21,7 @@
  */
 
 import { handleMcp } from "./mcp.js";
+import { setEvidenceBucket } from "./evidence-store.js";
 import { getBuildVersion, getServerVersion, setCacheSummaryProvider, setWorkerEnv, getWorkerVar } from "./response.js";
 import { TOOLS, callTool } from "./tools.js";
 import { currentCacheSummary, formatCacheUsage, withCacheScope } from "./request-context.js";
@@ -64,6 +65,7 @@ export default {
       ...env,
       WORKER_VERSION_ID: env.CF_VERSION_METADATA?.id,
     });
+    setEvidenceBucket(env.EVIDENCE_BUCKET);
     markYahooCacheActivity();
     const { method } = request;
     const { pathname } = new URL(request.url);

@@ -72,6 +72,12 @@ EXPECTED_CANONICAL = {
     "extract_dilution_bridge",
     "get_valuation_snapshot",
     "compare_peer_valuations",
+    "get_consensus_forecast_curve",
+    "get_eps_revisions",
+    "get_evidence_quality",
+    "build_valuation_evidence_pack",
+    "get_evidence_cut",
+    "list_evidence_cuts",
     "extract_capital_structure",
     "extract_analyst_valuation_methods",
     "get_uk_company_filings",
@@ -211,8 +217,8 @@ def main():
     catalog = json.loads(TOOL_CATALOG.read_text(encoding="utf-8"))
     catalog_ts = TOOL_CATALOG_TS.read_text(encoding="utf-8")
     groups = catalog.get("groups", {})
-    if not isinstance(groups, dict) or len(groups) != 11:
-        print("ERROR: tool_catalog.json must define exactly 11 grouped tools", file=sys.stderr)
+    if not isinstance(groups, dict) or len(groups) != 12:
+        print("ERROR: tool_catalog.json must define exactly 12 grouped tools", file=sys.stderr)
         return 1
     grouped_actions = {
         action

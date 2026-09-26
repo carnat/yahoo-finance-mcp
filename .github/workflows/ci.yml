@@ -149,6 +149,8 @@ jobs:
           python scripts/test_valuation.py -v
           python scripts/test_extraction_rules.py -v
           python scripts/test_release_regressions.py -v
+          python scripts/test_evidence.py -v
+          python scripts/test_evidence_tools.py -v
 
       - name: Historical prices contract tests (Worker and local)
         run: python scripts/test_historical_prices_contract.py -v

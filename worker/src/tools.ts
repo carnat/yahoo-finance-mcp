@@ -99,6 +99,7 @@ import {
   getThaiFundNavBatch,
 } from "./sec-thailand.js";
 import { validateTicker } from "./validate.js";
+import { buildValuationEvidencePack, getConsensusForecastCurve, getEpsRevisions, getEvidenceCut, getEvidenceQuality, listEvidenceCuts } from "./evidence-pack.js";
 
 export interface Tool {
   name: string;
@@ -539,6 +540,12 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "extract_dilution_bridge", description: "Basic-to-diluted share bridge at a price you supply, from the filing's inline XBRL: cover-page basic shares, options (treasury-stock method, by exercise-price range when tagged), unvested RSUs/PSUs (gross), warrants per class (treasury stock), convertibles (if-converted when in the money) and ATM remaining capacity from filing text. Mechanical and company-disclosed, not a consensus diluted share count; never back-solve it into one. filing_type latest uses the newest 10-Q with the last 10-K as fallback.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, price: { type: "number", exclusiveMinimum: 0 }, as_of_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" }, currency: { type: "string", default: "USD" }, filing_type: { type: "string", default: "latest" }, accession_number: { type: "string" }, include_atm: { type: "boolean", default: true } }, required: ["ticker", "price"] } },
   { name: "extract_capital_structure", description: "Company-disclosed capital structure at the filing's period end: cash, short-term investments, total debt and net cash; each debt instrument's face amount, carrying amount, coupon, maturity and conversion terms from dimensional inline XBRL (which companyfacts omits); the tagged maturity ladder; and the company's own funding, runway, going-concern and ATM statements quoted from the filing. Disclosed, not forecast.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "latest" }, accession_number: { type: "string" }, include_funding_statements: { type: "boolean", default: true } }, required: ["ticker"] } },
   { name: "extract_analyst_valuation_methods", description: "Valuation methods analysts name in recent news headlines and summaries: multiples with metric and period (e.g. 41x 2H27 EV/EBITDA), DCF with WACC, discount rate and terminal growth, sum-of-the-parts and rNPV, with firm, price target and source link. Lists firms whose targets carry no disclosed method. Context only: not consensus inputs.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, days_back: { type: "number", minimum: 1, maximum: 365, default: 30 } }, required: ["ticker"] } },
+  { name: "get_consensus_forecast_curve", description: "Street consensus by fiscal year, FY0 to FY+horizon, for EPS and revenue from Yahoo Finance and Alpha Vantage, each provider reported separately with fiscal year end, currency, mean/high/low, analyst count and retrieval time. Each metric and period states its coverage: PROVIDER_COVERED, PROVIDER_NOT_COVERED, INSUFFICIENT_ANALYST_COUNT or PROVIDER_CONFLICT (with the cross-provider difference). Years and metrics no provider covers stay PROVIDER_NOT_COVERED; nothing is interpolated, extended by growth rates, or derived. Evidence only.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, horizon_years: { type: "integer", minimum: 1, maximum: 5, default: 5 }, min_analyst_count: { type: "integer", minimum: 1, maximum: 50, default: 3 }, conflict_tolerance_pct: { type: "number", minimum: 0, maximum: 100, default: 10 } }, required: ["ticker"] } },
+  { name: "get_eps_revisions", description: "EPS estimate revision windows for FY0 and FY+1 as each provider reports them: the mean now and 7, 30, 60 and 90 days ago with change and percent change, and up/down revision counts over 7 and 30 days. Revenue revisions and analyst adds/drops are PROVIDER_NOT_COVERED. Lists the dates of stored daily consensus observations. Evidence only.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+  { name: "get_evidence_quality", description: "Preflight before a valuation evidence pack: status, freshness and coverage per evidence family (quote, latest SEC periodic filing, capital structure and dilution readiness, earnings-release guidance, material 8-Ks, FY0/FY+1 consensus cells, durable storage) and the blockers, from light requests only. Evidence only.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+  { name: "build_valuation_evidence_pack", description: "One evidence cut for valuation work: quote, evidence quality, consensus curve, EPS revisions, current capital structure, dilution bridge at the current price, latest guidance and material filings, each with its source tool, status, warnings and failure, plus a provenance receipt hashing every component. decisionUse is EVIDENCE_ONLY; selectedMethod, selectedMultiple, scenarioWeights, priceTarget, g2, opportunity and action are always null. Stored immutably under a content-addressed evidenceCutId when storage is available; the full payload is returned either way.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, horizon_years: { type: "integer", minimum: 1, maximum: 5, default: 5 }, persist: { type: "boolean", default: true } }, required: ["ticker"] } },
+  { name: "get_evidence_cut", description: "Retrieve a stored evidence cut by evidenceCutId and verify its integrity: the SHA-256 of the stored canonical JSON must equal the hash in the id (integrity VERIFIED or MISMATCH).", inputSchema: { type: "object", properties: { evidence_cut_id: { type: "string" } }, required: ["evidence_cut_id"] } },
+  { name: "list_evidence_cuts", description: "Stored evidence cuts for a ticker, newest first, with their ids and cutoff times.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100, default: 20 } }, required: ["ticker"] } },
   { name: "get_uk_company_filings", description: "UK Companies House filing history for a UK-registered issuer (e.g. IQE.L): accounts, share allotments (SH01), charges (MR01, secured lending) and resolutions, with document links; include_charges adds the charge register. Resolves by company_number, company_name, or the ticker's issuer name. Official statutory filings; RNS market announcements are not held here. Needs the COMPANIES_HOUSE_API_KEY secret.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, company_number: { type: "string" }, company_name: { type: "string" }, category: { type: "string", enum: ["accounts", "capital", "mortgage", "confirmation-statement", "resolution", "incorporation", "officers", "persons-with-significant-control", "address", "annotation", "change-of-name", "miscellaneous"] }, limit: { type: "number", minimum: 1, maximum: 100, default: 25 }, include_charges: { type: "boolean", default: false } } } },
   { name: "extract_exposure", description: "Extract multi-dimensional SEC exposure for a geographic region or named entity/topic. Returns revenue, operational, named-entity, and risk evidence with explicit non-decision-grade statuses when parser/provider limits prevent a value.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Ticker symbol, e.g. 'AAPL'" }, topic: { type: "string", description: "Geographic region or entity to search for, e.g. 'china', 'russia', 'europe', 'huawei'. Case-insensitive." }, filing_type: { type: "string", default: "10-K", description: "SEC filing type: '10-K' or '20-F'." }, period: { type: "string", default: "latest" }, include_risk_factors: { type: "boolean", default: true } }, required: ["ticker", "topic"] } },
   { name: "query_sec_filing_index", description: "Deterministically route supported SEC filing query types to index-backed extractor tools.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "10-K" }, period: { type: "string", default: "latest" }, accession_number: { type: "string" }, query_type: { type: "string", enum: ["geographic_revenue_share", "revenue_exposure", "china_exposure", "risk_factor_mentions", "customer_concentration", "total_revenue", "segment_revenue"] }, params: { type: "object", default: {} }, return_evidence: { type: "boolean", default: true }, detailLevel: { type: "string", default: "compact", enum: ["compact", "evidence", "raw"] } }, required: ["ticker", "query_type"] } },
@@ -1298,6 +1305,12 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   get_valuation_snapshot: SIMPLE_OBJECT_SCHEMA,
   compare_peer_valuations: SIMPLE_OBJECT_SCHEMA,
   extract_capital_structure: SIMPLE_OBJECT_SCHEMA,
+  get_consensus_forecast_curve: SIMPLE_OBJECT_SCHEMA,
+  get_eps_revisions: SIMPLE_OBJECT_SCHEMA,
+  get_evidence_quality: SIMPLE_OBJECT_SCHEMA,
+  build_valuation_evidence_pack: SIMPLE_OBJECT_SCHEMA,
+  get_evidence_cut: SIMPLE_OBJECT_SCHEMA,
+  list_evidence_cuts: SIMPLE_OBJECT_SCHEMA,
   extract_analyst_valuation_methods: SIMPLE_OBJECT_SCHEMA,
   get_uk_company_filings: SIMPLE_OBJECT_SCHEMA,
   extract_exposure: SIMPLE_OBJECT_SCHEMA,
@@ -2362,6 +2375,18 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         Array.isArray(args.tickers) ? args.tickers.map(String) : [],
         args.subject != null ? str(args.subject) : null,
       );
+    case "get_consensus_forecast_curve":
+      return getConsensusForecastCurve(str(args.ticker), num(args.horizon_years, 5), num(args.min_analyst_count, 3), num(args.conflict_tolerance_pct, 10));
+    case "get_eps_revisions":
+      return getEpsRevisions(str(args.ticker));
+    case "get_evidence_quality":
+      return getEvidenceQuality(str(args.ticker));
+    case "build_valuation_evidence_pack":
+      return buildValuationEvidencePack(str(args.ticker), num(args.horizon_years, 5), args.persist !== false);
+    case "get_evidence_cut":
+      return getEvidenceCut(str(args.evidence_cut_id));
+    case "list_evidence_cuts":
+      return listEvidenceCuts(str(args.ticker), num(args.limit, 20));
     case "extract_dilution_bridge":
       return extractDilutionBridge(
         str(args.ticker),
