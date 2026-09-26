@@ -186,6 +186,9 @@ of them forecasts, and none may be back-solved into a consensus figure.
   per-instrument debt terms and per-class warrants reachable. It reads
   `ix:nonFraction` with scale, sign, and the zero-dash and number-word formats,
   and short `ix:nonNumeric` facts such as maturity dates. It skips text blocks.
+  It keeps each fact's `decimals`. When a concept is tagged more than once on
+  the same date, the most precise fact wins, so a balance-sheet line beats a
+  rounded figure in a note.
 - `extract_dilution_bridge` takes a `price` the caller supplies. It adds up:
   - basic shares from the cover page (summed across share classes);
   - options by the treasury-stock method, per exercise-price range when the
@@ -224,6 +227,14 @@ of them forecasts, and none may be back-solved into a consensus figure.
     inside (AAOI);
   - net cash, defined as cash plus short-term investments minus debt (leases
     excluded);
+  - investments and debt figures rounded 100 times more coarsely than the cash
+    line (`decimals` two or more lower) are left out, with a
+    `ROUNDED_FACT_IGNORED` warning. They are note sentences, not balance-sheet
+    lines: ASTS tags "approximately $2.3 billion ... classified as cash
+    equivalents" as short-term investments, which counted part of cash twice;
+  - a filing that tags cash but no borrowing concept at any date or dimension
+    reports total debt as zero, with a `NO_BORROWINGS_TAGGED` warning, so a
+    debt-free company (AEHR) is not given Yahoo's lease-inclusive debt;
   - each `DebtInstrumentAxis` member's face amount, carrying amount, coupon,
     maturity and conversion terms. The carrying amount is the period-end
     balance only; an amount tagged on another date, often the issue date, is

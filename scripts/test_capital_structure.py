@@ -61,9 +61,9 @@ UNITS = (
 )
 
 
-def _num(name: str, ctx: str, unit: str, text: str, scale: int = 0, fmt: str = "ixt:num-dot-decimal", sign: str = "") -> str:
+def _num(name: str, ctx: str, unit: str, text: str, scale: int = 0, fmt: str = "ixt:num-dot-decimal", sign: str = "", decimals: str = "-3") -> str:
     extra = f' sign="{sign}"' if sign else ""
-    return f'<ix:nonFraction name="{name}" contextRef="{ctx}" unitRef="{unit}" decimals="-3" scale="{scale}" format="{fmt}"{extra}>{text}</ix:nonFraction>'
+    return f'<ix:nonFraction name="{name}" contextRef="{ctx}" unitRef="{unit}" decimals="{decimals}" scale="{scale}" format="{fmt}"{extra}>{text}</ix:nonFraction>'
 
 
 def _text(name: str, ctx: str, text: str, fmt: str = "") -> str:
@@ -223,6 +223,26 @@ convertible senior notes, net {_num("us-gaap:ConvertibleNotesPayable", "xi", "us
 </body></html>"""
 BARE_Q = f"""<html><body><div style="display:none"><ix:header><ix:resources>{_context("bcover", "2026-08-03")}{UNITS}</ix:resources></ix:header></div>
 <p>Shares outstanding: {_num("dei:EntityCommonStockSharesOutstanding", "bcover", "shares", "50,000,000")}</p></body></html>"""
+# Tagged the way ASTS's live 10-Q is (2.4.2): a note sentence tags the
+# money-market part of cash, "approximately $2.3 billion", as short-term
+# investments, and a rounded cash figure precedes the balance-sheet line.
+ASTS_Q = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "sq", "10-Q")}
+{_text("dei:DocumentPeriodEndDate", "sq", "June 30, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("sq", "2026-01-01..2026-06-30")}{_context("si", "2026-06-30")}{_context("sprior", "2025-12-31")}{UNITS}</ix:resources></ix:header></div>
+<p>We ended the quarter with about ${_num("us-gaap:CashAndCashEquivalentsAtCarryingValue", "si", "usd", "2.3", 9, decimals="-8")} billion of cash.</p>
+<p>Cash and cash equivalents {_num("us-gaap:CashAndCashEquivalentsAtCarryingValue", "si", "usd", "2,288,253", 3)}; current portion of long-term debt {_num("us-gaap:LongTermDebtCurrent", "si", "usd", "8,494", 3)}; long-term debt {_num("us-gaap:LongTermDebtNoncurrent", "si", "usd", "2,963,422", 3)}.</p>
+<p>Of which approximately ${_num("us-gaap:ShortTermInvestments", "si", "usd", "2.3", 9, decimals="-8")} billion and ${_num("us-gaap:ShortTermInvestments", "sprior", "usd", "2.0", 9, decimals="-8")} billion, respectively, is classified as cash equivalents.</p>
+</body></html>"""
+# A debt-free filer (AEHR): cash and a lease liability, no borrowing concepts.
+DEBT_FREE_K = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "dy", "10-K")}
+{_text("dei:DocumentPeriodEndDate", "dy", "May 29, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("dy", "2025-05-31..2026-05-29")}{_context("di", "2026-05-29")}{UNITS}</ix:resources></ix:header></div>
+<p>Cash and cash equivalents {_num("us-gaap:CashAndCashEquivalentsAtCarryingValue", "di", "usd", "116,358", 3)}; operating lease liabilities {_num("us-gaap:OperatingLeaseLiability", "di", "usd", "9,882", 3)}.</p>
+</body></html>"""
 TABLE_MATCHES = [
     {"contextText": "Unvested at December 31, 2025 | 2,500,000 | $ 14.10", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at December 31, 2025"},
     {"contextText": "Unvested at June 30, 2026 | 2,750,000 | $ 15.20", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at June 30, 2026"},
@@ -230,7 +250,7 @@ TABLE_MATCHES = [
     {"contextText": "Unvested at June 30, 2026, restricted stock units totalled 8,888,888 shares.", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": False, "tableTitle": None, "rowLabel": None},
 ]
 
-FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q}
+FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K}
 
 NEWS_ITEMS = [
     {"title": "Needham raises IQE price target to 45p from 38p", "summary": "Needham values IQE at 12x 2027 EV/EBITDA, citing gallium nitride demand.", "url": "https://news.example/1", "publishedAt": "2026-09-20T08:00:00Z", "source": "yahoo_finance_news"},
@@ -280,6 +300,8 @@ out.bridgeTable = m.dilutionBridge({ ticker: "BARE", price: 30, priceCurrency: "
 out.bridgeAwards = m.dilutionBridge({ ticker: "CSTC", price: 25, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2025-08-06", "0001234568-25-000030", data.qUrl, "awards_q")], atmMatches: [] });
 out.capital = m.capitalStructure({ ticker: "CSTC", source: kSource, fundingMatches: atm });
 out.capitalAaoi = m.capitalStructure({ ticker: "AAOX", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000040", data.qUrl, "aaoi_q"), fundingMatches: [] });
+out.capitalAsts = m.capitalStructure({ ticker: "ASTX", source: src("primary", "10-Q", "2026-08-10", "0001234568-26-000060", data.qUrl, "asts_q"), fundingMatches: [] });
+out.capitalDebtFree = m.capitalStructure({ ticker: "AEHX", source: src("primary", "10-K", "2026-07-27", "0001234568-26-000070", data.kUrl, "debt_free_k"), fundingMatches: [] });
 out.labels = ["us-gaap:ClassBCommonStockMember", "us-gaap:RestrictedStockUnitsRSUMember", "cstc:ConvertibleSeniorNotesDue2029Member", "aaoi:SubsidiaryOfAmazonMember"].map(m.memberLabel);
 out.analyst = m.analystValuationMethods("IQE.L", data.news, data.changes);
 out.ch = m.companiesHouseFilings("01234567", data.chHistory);
@@ -340,7 +362,7 @@ def _doc_json(doc: cs.IxDocument) -> dict:
     return {
         "facts": [{
             "name": f.name, "local": f.local, "contextRef": f.context_ref, "unit": f.unit, "value": f.value, "text": f.text,
-            "periodEnd": f.period_end, "periodStart": f.period_start, "dims": f.dims, "order": f.order,
+            "periodEnd": f.period_end, "periodStart": f.period_start, "dims": f.dims, "decimals": f.decimals, "order": f.order,
         } for f in doc.facts],
         "contextCount": doc.context_count,
         "documentPeriodEnd": doc.document_period_end,
@@ -365,6 +387,8 @@ def _python_pure() -> dict:
         "bridgeAwards": cs.dilution_bridge("CSTC", 25, "USD", None, [cs.IxSource("primary", "10-Q", "2025-08-06", "0001234568-25-000030", Q_URL, docs["awards_q"])], []),
         "capital": cs.capital_structure("CSTC", k_source, atm),
         "capitalAaoi": cs.capital_structure("AAOX", cs.IxSource("primary", "10-Q", "2026-08-06", "0001234568-26-000040", Q_URL, docs["aaoi_q"]), []),
+        "capitalAsts": cs.capital_structure("ASTX", cs.IxSource("primary", "10-Q", "2026-08-10", "0001234568-26-000060", Q_URL, docs["asts_q"]), []),
+        "capitalDebtFree": cs.capital_structure("AEHX", cs.IxSource("primary", "10-K", "2026-07-27", "0001234568-26-000070", K_URL, docs["debt_free_k"]), []),
         "labels": [cs.member_label(m) for m in ("us-gaap:ClassBCommonStockMember", "us-gaap:RestrictedStockUnitsRSUMember", "cstc:ConvertibleSeniorNotesDue2029Member", "aaoi:SubsidiaryOfAmazonMember")],
         "analyst": cs.analyst_valuation_methods("IQE.L", copy.deepcopy(NEWS_ITEMS), copy.deepcopy(RATING_CHANGES)),
         "ch": cs.companies_house_filings("01234567", CH_HISTORY),
@@ -385,7 +409,7 @@ class TestCapitalStructureParity(unittest.TestCase):
             self.assertEqual(self.worker["documents"][name], self.local["documents"][name], name)
 
     def test_outputs_match(self) -> None:
-        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "capital", "capitalAaoi", "labels", "analyst", "ch", "chPick"):
+        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "labels", "analyst", "ch", "chPick"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
 
@@ -461,6 +485,35 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertEqual(bridge["convertibleDebt"], 0)
         self.assertEqual(bridge["atmPotentialShares"], None)
         self.assertEqual(b["notDisclosed"], ["atm_program"])
+
+    def test_rounded_narrative_facts_do_not_become_balances(self) -> None:
+        # 2.4.2: ASTS tagged "approximately $2.3 billion ... classified as cash
+        # equivalents" as ShortTermInvestments; counting it doubled cash.
+        cash = self.fact("asts_q", "CashAndCashEquivalentsAtCarryingValue")
+        self.assertEqual([f["decimals"] for f in cash], [-8, -3])
+        c = self.out["capitalAsts"]
+        bal = c["balances"]
+        self.assertEqual(bal["cashAndEquivalents"], 2_288_253_000)
+        self.assertIsNone(bal["shortTermInvestments"])
+        self.assertEqual(bal["totalDebt"], 2_971_916_000)
+        self.assertEqual(bal["netCash"], -683_663_000)
+        codes = [w["code"] for w in c["warnings"]]
+        self.assertEqual(codes, ["ROUNDED_FACT_IGNORED"])
+        self.assertIn("ShortTermInvestments 2300000000", c["warnings"][0]["message"])
+        # Precise facts are unaffected: the base fixture keeps its investments.
+        self.assertEqual(self.out["capital"]["warnings"], [])
+
+    def test_filing_without_borrowings_reports_zero_debt(self) -> None:
+        c = self.out["capitalDebtFree"]
+        self.assertEqual(c["status"], "COMPUTED")
+        bal = c["balances"]
+        self.assertEqual(bal["totalDebt"], 0)
+        self.assertEqual(bal["totalDebtBasis"], "No borrowing concepts tagged in the filing")
+        self.assertEqual(bal["netCash"], 116_358_000)
+        self.assertEqual([w["code"] for w in c["warnings"]], ["NO_BORROWINGS_TAGGED"])
+        # A filing whose only tagged facts are shares says nothing about debt.
+        self.assertTrue(cs._tags_no_borrowings(cs.parse_ixbrl(BARE_Q)))
+        self.assertFalse(cs._tags_no_borrowings(cs.parse_ixbrl(AAOI_Q)))
 
     def test_capital_structure(self) -> None:
         c = self.out["capital"]

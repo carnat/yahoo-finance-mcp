@@ -82,6 +82,8 @@ BRIDGE = {
     "atmProgram": {"remainingCapacityUsd": 140_000_000, "programSizeUsd": None, "potentialShares": 5_600_000},
 }
 CAPITAL = {"basis": "COMPANY_DISCLOSED", "periodEnd": "2025-03-31", "balances": {"cashAndEquivalents": 140_000_000, "shortTermInvestments": None, "totalDebt": 380_000_000}}
+# A filing that tags no borrowings (AEHR, 2.4.2): debt is zero, not Yahoo's lease-inclusive total.
+CAPITAL_DEBT_FREE = {"basis": "COMPANY_DISCLOSED", "periodEnd": "2025-03-31", "balances": {"cashAndEquivalents": 140_000_000, "shortTermInvestments": None, "totalDebt": 0}}
 
 _WORKER_PURE = r"""
 import fs from "node:fs";
@@ -91,6 +93,7 @@ const data = JSON.parse(fs.readFileSync(dataPath, "utf8"));
 const markets = Object.fromEntries(Object.entries(data.qs).map(([t, r]) => [t, m.marketInputsFromQuoteSummary(t, r)]));
 const out = { markets };
 out.snapshot = m.valuationSnapshot({ ticker: "CSTC", market: markets.CSTC, suppliedPrice: null, bridge: data.bridge, capital: data.capital, secWarnings: [] });
+out.snapshotDebtFree = m.valuationSnapshot({ ticker: "CSTC", market: markets.CSTC, suppliedPrice: null, bridge: null, capital: data.capitalDebtFree, secWarnings: [] });
 out.snapshotYahoo = m.valuationSnapshot({ ticker: "CSTC", market: markets.CSTC, suppliedPrice: 30, bridge: null, capital: null, secWarnings: [] });
 out.upcRow = m.peerRow(markets.UPC);
 out.snapshotPence = m.valuationSnapshot({ ticker: "PEER2.L", market: markets["PEER2.L"], suppliedPrice: null, bridge: null, capital: null, secWarnings: [] });
@@ -116,7 +119,7 @@ def _worker_pure() -> dict:
             [str(ESBUILD), str(WORKER / "src" / "valuation.ts"), "--bundle", "--format=esm", "--platform=neutral", f"--outfile={bundle}", "--log-level=error"],
             cwd=WORKER, check=True, capture_output=True, text=True, timeout=120,
         )
-        (tmp_path / "data.json").write_text(json.dumps({"qs": QUOTE_SUMMARIES, "bridge": BRIDGE, "capital": CAPITAL}), encoding="utf-8")
+        (tmp_path / "data.json").write_text(json.dumps({"qs": QUOTE_SUMMARIES, "bridge": BRIDGE, "capital": CAPITAL, "capitalDebtFree": CAPITAL_DEBT_FREE}), encoding="utf-8")
         (tmp_path / "harness.mjs").write_text(_WORKER_PURE, encoding="utf-8")
         result = subprocess.run([node, str(tmp_path / "harness.mjs"), bundle.as_uri(), str(tmp_path / "data.json")],
                                 check=True, capture_output=True, text=True, timeout=120)
@@ -128,6 +131,7 @@ def _python_pure() -> dict:
     return {
         "markets": markets,
         "snapshot": vl.valuation_snapshot("CSTC", markets["CSTC"], None, copy.deepcopy(BRIDGE), copy.deepcopy(CAPITAL), []),
+        "snapshotDebtFree": vl.valuation_snapshot("CSTC", markets["CSTC"], None, None, copy.deepcopy(CAPITAL_DEBT_FREE), []),
         "snapshotYahoo": vl.valuation_snapshot("CSTC", markets["CSTC"], 30, None, None, []),
         "snapshotPence": vl.valuation_snapshot("PEER2.L", markets["PEER2.L"], None, None, None, []),
         "upcRow": vl.peer_row(markets["UPC"]),
@@ -147,7 +151,7 @@ class TestValuationParity(unittest.TestCase):
         cls.local = _python_pure()
 
     def test_runtimes_agree(self) -> None:
-        for key in ("markets", "snapshot", "snapshotYahoo", "snapshotPence", "upcRow", "peers"):
+        for key in ("markets", "snapshot", "snapshotDebtFree", "snapshotYahoo", "snapshotPence", "upcRow", "peers"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
     def test_yfinance_adapter_matches_quote_summary_parsing(self) -> None:
@@ -185,6 +189,12 @@ class TestValuationValues(unittest.TestCase):
         self.assertEqual(s["revenueGrowth"], {"currentFiscalYearVsTtmPct": 20, "nextVsCurrentFiscalYearPct": 33.33})
         self.assertEqual(s["atmCapacity"]["potentialSharesAtPrice"], 5_600_000)
         self.assertEqual(s["peerComparableBasis"]["enterpriseValue"], 25 * 101_000_000 + 400_000_000 - 190_000_000)
+
+    def test_debt_free_filing_keeps_filing_balances(self) -> None:
+        s = self.out["snapshotDebtFree"]
+        self.assertEqual((s["balances"]["basis"], s["balances"]["totalDebt"], s["balances"]["cash"]), ("sec_filing_period_end", 0, 140_000_000))
+        self.assertEqual(s["enterpriseValue"], 25 * 101_000_000 - 140_000_000)
+        self.assertNotIn("YAHOO_BALANCES", [w["code"] for w in s["warnings"]])
 
     def test_snapshot_without_filings_uses_yahoo(self) -> None:
         s = self.out["snapshotYahoo"]
