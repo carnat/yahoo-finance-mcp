@@ -283,6 +283,11 @@ export function valuationSnapshot(input: SnapshotInput): Record<string, unknown>
       warnings.push({ code: "SEC_BALANCES_STALE", message: `The filing's balances are from ${secPeriodEnd}, older than Yahoo's latest quarter ${market.mostRecentQuarter}, and Yahoo has no newer cash and debt; enterprise value uses the older balances.`, severity: "warning", secPeriodEnd, yahooMostRecentQuarter: market.mostRecentQuarter });
     }
   }
+  // The capital structure's own warnings (rounded note figures, restated cash,
+  // no borrowings) explain the balances used, so they travel with them.
+  if (secBalances) {
+    for (const w of ((capital?.warnings ?? []) as Record<string, unknown>[])) warnings.push({ ...w, source: "extract_capital_structure" });
+  }
   const cash = secBalances ? num(balances!.cashAndEquivalents)! : market.totalCash;
   const shortTerm = secBalances ? (num(balances!.shortTermInvestments) ?? 0) : 0;
   const debt = secBalances ? num(balances!.totalDebt)! : market.totalDebt;
@@ -344,8 +349,11 @@ export function valuationSnapshot(input: SnapshotInput): Record<string, unknown>
 
   const atm = (bridge?.atmProgram ?? null) as Record<string, unknown> | null;
   const yahoo = yahooBasis(market, quote);
-  const sharesDiffPct = secBasic != null && market.sharesOutstanding != null && market.sharesOutstanding > 0
-    ? round((secBasic / market.sharesOutstanding - 1) * 100, 2)
+  // After any ADR ratio, against the Yahoo count the engine uses (the implied
+  // all-class count when larger): TSM and ASTS agree, a real gap still shows.
+  const normalizedSec = secBasic != null ? perQuoted(secBasic) : null;
+  const sharesDiffPct = normalizedSec != null && quoted.shares != null && quoted.shares > 0
+    ? round((normalizedSec / quoted.shares - 1) * 100, 2)
     : null;
   return {
     ticker: input.ticker,

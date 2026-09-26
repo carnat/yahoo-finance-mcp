@@ -1104,6 +1104,9 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       pcRatio: { type: ["number", "null"] },
       ivPctile: { type: ["number", "null"] },
       putVolVs10dAvg: { type: ["number", "null"] },
+      ivVsRealizedRangePct: { type: ["number", "null"] },
+      putVolPer1PctStockAdv: { type: ["number", "null"] },
+      fieldNotes: { type: "object" },
       putVolTrend: { type: ["string", "null"] },
       maxPainStrike: { type: ["number", "null"] },
       bracket: { type: ["string", "null"] },
@@ -1644,7 +1647,10 @@ const SEC_XBRL_CONCEPT_ALIASES: Record<string, string> = {
   cash: "cash",
   cashandcashequivalentsatcarryingvalue: "cash",
   revenuefromcontractwithcustomerexcludingassessedtax: "total_revenue",
+  revenuefromcontractwithcustomerincludingassessedtax: "total_revenue",
   revenues: "total_revenue",
+  revenue: "total_revenue",
+  salesrevenuenet: "total_revenue",
   totalrevenue: "total_revenue",
 };
 
@@ -1668,7 +1674,9 @@ function supportedXbrlConceptAliases(): string[] {
   return [
     "CashAndCashEquivalentsAtCarryingValue",
     "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "RevenueFromContractWithCustomerIncludingAssessedTax",
     "Revenues",
+    "SalesRevenueNet",
   ];
 }
 
@@ -2092,6 +2100,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
           str(args.filing_type, "10-K"),
           str(args.period, "latest"),
           str(args.period_mode, "auto"),
+          args.accession_number != null ? str(args.accession_number) : null,
         );
         let parsed: Record<string, unknown> = {};
         try {

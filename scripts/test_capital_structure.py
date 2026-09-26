@@ -354,6 +354,7 @@ out.capitalVrt = m.capitalStructure({ ticker: "VRTX", source: src("primary", "10
 out.capitalParts = m.capitalStructure({ ticker: "PRTS", source: src("primary", "10-Q", "2026-07-29", "0001234568-26-000110", data.qUrl, "parts_q"), fundingMatches: [] });
 out.labels = ["us-gaap:ClassBCommonStockMember", "us-gaap:RestrictedStockUnitsRSUMember", "cstc:ConvertibleSeniorNotesDue2029Member", "aaoi:SubsidiaryOfAmazonMember"].map(m.memberLabel);
 out.analyst = m.analystValuationMethods("IQE.L", data.news, data.changes);
+out.analystAsts = m.analystValuationMethods("ASTS", data.astsNews, [], ["AST SpaceMobile, Inc."]);
 out.ch = m.companiesHouseFilings("01234567", data.chHistory);
 out.chPick = m.pickCompaniesHouseMatch("IQE plc", data.chSearch);
 console.log(JSON.stringify(out));
@@ -370,6 +371,15 @@ CH_HISTORY = {"total_count": 2, "items": [
     {"date": "2026-06-30", "category": "capital", "type": "SH01", "description": "capital-allotment-shares", "description_values": {"date": "2026-06-20", "capital": [{"figure": "1,200,000", "currency": "GBP"}]}, "pages": 3, "transaction_id": "MzQ1Njc4OTAx", "links": {"document_metadata": "https://document-api.company-information.service.gov.uk/document/abc123"}},
     {"date": "2026-05-12", "category": "mortgage", "type": "MR01", "description": "mortgage-create-with-deed-with-charge-number-charge-creation-date", "description_values": {"charge_number": "026013160005"}, "transaction_id": "MzQ1Njc4OTAy", "links": {}},
 ]}
+# Live ASTS items (2.4.4): Cantor's $122 target is Rocket Lab's, in a
+# headline that also names AST SpaceMobile; Berenberg's $92 is ASTS's.
+ASTS_NEWS = [
+    {"title": "Rocket Lab Climbs 7% as Cantor Reiterates $122 Target on Launch Record; Intuitive Machines Jumps 10%, AST SpaceMobile Rises 6%", "summary": "Cantor Fitzgerald just restated its bull case for Rocket Lab with a $122 target, yet the stock is trailing a space peer that received no catalyst at all.", "url": "https://news.example/asts1"},
+    {"title": "AST SpaceMobile Soars 12% on Berenberg\u2019s $92 Price Target, Planet Labs Climbs 5%", "summary": "", "url": "https://news.example/asts2"},
+    {"title": "Why Is AST SpaceMobile Stock Up 13% Today?", "summary": "AST SpaceMobile stock jumped as much as 13% Wednesday after Berenberg initiated coverage with a Buy rating and a $92 price target.", "url": "https://news.example/asts3"},
+    {"title": "AST SpaceMobile draws a new bull", "summary": "Berenberg set a $92 price target.", "url": "https://news.example/asts4"},
+    {"title": "Rocket Lab price target raised to $130 at Needham", "summary": "", "url": "https://news.example/asts5"},
+]
 CH_SEARCH = {"items": [
     {"title": "IQE HOLDINGS LIMITED", "company_number": "09999999", "company_status": "dissolved", "address_snippet": "Cardiff"},
     {"title": "IQE PLC", "company_number": "01234567", "company_status": "active", "address_snippet": "Pascal Close, Cardiff"},
@@ -398,7 +408,7 @@ def _worker_pure() -> dict:
         )
         (tmp_path / "data.json").write_text(json.dumps({
             "fixtures": FIXTURES, "kUrl": K_URL, "qUrl": Q_URL, "atm": ATM_TEXT, "news": NEWS_ITEMS, "changes": RATING_CHANGES,
-            "chHistory": CH_HISTORY, "chSearch": CH_SEARCH, "tableMatches": TABLE_MATCHES,
+            "chHistory": CH_HISTORY, "chSearch": CH_SEARCH, "tableMatches": TABLE_MATCHES, "astsNews": ASTS_NEWS,
         }), encoding="utf-8")
         (tmp_path / "harness.mjs").write_text(_WORKER_PURE, encoding="utf-8")
         result = subprocess.run(
@@ -445,6 +455,7 @@ def _python_pure() -> dict:
         "capitalParts": cs.capital_structure("PRTS", cs.IxSource("primary", "10-Q", "2026-07-29", "0001234568-26-000110", Q_URL, docs["parts_q"]), []),
         "labels": [cs.member_label(m) for m in ("us-gaap:ClassBCommonStockMember", "us-gaap:RestrictedStockUnitsRSUMember", "cstc:ConvertibleSeniorNotesDue2029Member", "aaoi:SubsidiaryOfAmazonMember")],
         "analyst": cs.analyst_valuation_methods("IQE.L", copy.deepcopy(NEWS_ITEMS), copy.deepcopy(RATING_CHANGES)),
+        "analystAsts": cs.analyst_valuation_methods("ASTS", copy.deepcopy(ASTS_NEWS), [], ["AST SpaceMobile, Inc."]),
         "ch": cs.companies_house_filings("01234567", CH_HISTORY),
         "chPick": cs.pick_companies_house_match("IQE plc", CH_SEARCH),
     }
@@ -463,7 +474,7 @@ class TestCapitalStructureParity(unittest.TestCase):
             self.assertEqual(self.worker["documents"][name], self.local["documents"][name], name)
 
     def test_outputs_match(self) -> None:
-        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "ch", "chPick"):
+        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
 
@@ -699,6 +710,16 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertEqual({(m["firm"], m["source"]) for m in a["methodNotDisclosed"]},
                          {("Morgan Stanley", "news"), ("Berenberg", "news"), ("Jefferies", "rating_changes")})
         self.assertEqual(a["methodCounts"], {"multiple": 2, "DCF": 1, "sum_of_the_parts": 2})
+
+    def test_targets_are_attributed_to_the_subject(self) -> None:
+        a = self.out["analystAsts"]
+        kept = [(e["url"][-5:], e["firm"], e["priceTarget"]["target"], e["subjectMatch"]) for e in a["evidence"]]
+        # Rocket Lab's $122 (twice) and $130 are rejected; Berenberg's $92 is kept in all three items.
+        self.assertEqual(kept, [("asts2", "Berenberg", 92, "CLAUSE"), ("asts3", "Berenberg", 92, "CLAUSE"), ("asts4", "Berenberg", 92, "ITEM")])
+        self.assertEqual(a["attribution"], {"checked": True, "subjectAliases": ["ast spacemobile", "ast spacemobile inc", "asts"], "rejectedForOtherCompany": 3})
+        self.assertNotIn("Cantor Fitzgerald", [m["firm"] for m in a["methodNotDisclosed"]])
+        # Without issuer names nothing is checked (the parsing fixture above).
+        self.assertEqual(self.out["analyst"]["attribution"]["checked"], False)
 
     def test_companies_house_rows(self) -> None:
         rows = self.out["ch"]

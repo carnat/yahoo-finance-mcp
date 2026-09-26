@@ -1589,8 +1589,55 @@ def _to_number(value: Any) -> float:
         return math.nan
 
 
-def analyst_valuation_methods(ticker: str, items: list[dict], changes: list[dict]) -> dict:
-    """Valuation methods named in news headlines and summaries: context, never model inputs."""
+# Target attribution (2.4.4): a headline such as "Rocket Lab climbs as Cantor
+# reiterates $122 target; ... AST SpaceMobile rises" names several companies,
+# and the target belongs to the one in its own clause.
+_LEGAL_SUFFIXES = {"inc", "incorporated", "corp", "corporation", "ltd", "limited", "llc", "plc", "co", "company", "sa", "ag", "nv", "se", "gmbh", "holdings", "group"}
+
+
+def _norm_phrase(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def subject_aliases(ticker: str, names: list[str]) -> list[str]:
+    """Lowercase phrases that name the subject: the ticker (3+ letters) and the company name with and without its legal suffix."""
+    out: set[str] = set()
+    base = _norm_phrase(ticker.split(".")[0])
+    if len(base) >= 3:
+        out.add(base)
+    for name in names:
+        norm = _norm_phrase(name)
+        if not norm:
+            continue
+        words = norm.split(" ")
+        while len(words) > 1 and words[-1] in _LEGAL_SUFFIXES:
+            words.pop()
+        for alias in (norm, " ".join(words)):
+            if len(alias) >= 3:
+                out.add(alias)
+    return sorted(out)
+
+
+def _mentions_subject(text: str, aliases: list[str]) -> bool:
+    padded = f" {_norm_phrase(text)} "
+    return any(f" {a} " in padded for a in aliases)
+
+
+def _target_clause(sentence: str) -> str:
+    """The clause of a sentence (split at "; " and ", ") that carries its price target, else the sentence."""
+    return next((clause for clause in re.split(r";\s*|,\s+", sentence) if _price_target(clause) is not None), sentence)
+
+
+def analyst_valuation_methods(ticker: str, items: list[dict], changes: list[dict], issuer_names: list[str] | None = None) -> dict:
+    """Valuation methods named in news headlines and summaries: context, never model inputs.
+
+    With issuer_names, each target and method must belong to the subject: its
+    clause names the subject, or no sentence of the item names another
+    company's target while the item names the subject. Without issuer_names
+    nothing is checked (subjectMatch NOT_CHECKED).
+    """
+    aliases = subject_aliases(ticker, issuer_names) if issuer_names is not None else None
+    rejected_other_company = 0
     change_firms = list(dict.fromkeys(f for f in (str(c.get("firm") if c.get("firm") is not None else "").strip() for c in changes) if f))
     firms = [*change_firms, *[b for b in _BROKERS if not any(c.lower() == b.lower() for c in change_firms)]]
     evidence: list[dict] = []
@@ -1606,11 +1653,28 @@ def analyst_valuation_methods(ticker: str, items: list[dict], changes: list[dict
         seen_urls.append(key)
         text = _collapse(f"{title}. {summary}" if summary and not summary.startswith(title) else (summary or title))
         firm = _firm_in(text, firms)
-        for sentence in _sentences(text):
+        item_sentences = _sentences(text)
+        # An item is conflicted when a sentence names the subject but puts a
+        # target in a clause about another company.
+        conflicted = aliases is not None and any(
+            _price_target(s) is not None and _mentions_subject(s, aliases) and not _mentions_subject(_target_clause(s), aliases)
+            for s in item_sentences)
+        item_names_subject = aliases is not None and _mentions_subject(text, aliases)
+        for sentence in item_sentences:
             methods = _sentence_methods(sentence)
             target = _price_target(sentence)
             if not methods and not (target and firm):
                 continue
+            subject_match = "NOT_CHECKED"
+            if aliases is not None:
+                clause = _target_clause(sentence) if target else sentence
+                if _mentions_subject(clause, aliases):
+                    subject_match = "CLAUSE"
+                elif not _mentions_subject(sentence, aliases) and item_names_subject and not conflicted:
+                    subject_match = "ITEM"
+                else:
+                    rejected_other_company += 1
+                    continue
             if methods and firm:
                 firms_with_method.add(firm)
             evidence.append({
@@ -1623,6 +1687,7 @@ def analyst_valuation_methods(ticker: str, items: list[dict], changes: list[dict
                 "priceTarget": target,
                 "methods": methods,
                 "methodDisclosed": bool(methods),
+                "subjectMatch": subject_match,
             })
     method_not_disclosed: list[dict] = []
     noted: set[str] = set()
@@ -1669,6 +1734,8 @@ def analyst_valuation_methods(ticker: str, items: list[dict], changes: list[dict
         "methodCounts": method_counts,
         "evidence": evidence[:40],
         "methodNotDisclosed": method_not_disclosed,
+        "attribution": ({"checked": True, "subjectAliases": aliases, "rejectedForOtherCompany": rejected_other_company}
+                        if aliases is not None else {"checked": False, "subjectAliases": [], "rejectedForOtherCompany": 0}),
         "caveats": [
             "Read from headlines and short summaries, not the research notes; a method named here may be one of several the analyst used.",
             "Multiples and rates are the analyst's, quoted as published. Do not treat them as consensus or back-solve targets into forecasts.",
