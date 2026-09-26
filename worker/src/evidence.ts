@@ -684,6 +684,8 @@ export function buildReceipt(input: {
       okCount: names.length - failures.length,
       failedOrLimited: failures,
       state: failures.length === 0 ? "COMPLETE" : failures.length === names.length ? "FAILED" : "PARTIAL",
+      scope: "COMPONENT_WRAPPER_STATUS",
+      evidenceCompleteness: "NOT_ASSERTED",
     },
   };
 }
@@ -740,7 +742,7 @@ export function componentFromValue(sourceTool: string, parsed: unknown, retrieve
     const err = (obj.error && typeof obj.error === "object" ? obj.error : obj) as Rec;
     return { status: "FAILED", sourceTool, retrievedAt, data: value, warnings, error: { code: String(err.code ?? "PROVIDER_ERROR"), message: String(err.message ?? "") } };
   }
-  const limited = typeof obj.status === "string" && /NOT_AVAILABLE|NOT_FOUND|UNAVAILABLE|UNSUPPORTED|NO_DATA|NOT_DISCLOSED|UNCONFIGURED|FAILED/.test(obj.status);
+  const limited = typeof obj.status === "string" && /PARTIAL|INCOMPLETE|STALE|NOT_AVAILABLE|NOT_FOUND|UNAVAILABLE|UNSUPPORTED|NO_DATA|NOT_DISCLOSED|UNCONFIGURED|FAILED/.test(obj.status);
   return {
     status: limited ? "LIMITED" : "OK",
     sourceTool,
