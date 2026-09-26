@@ -157,6 +157,9 @@ const taiwan = extractGeoRevenueFromHtml(aaoiTable, "Taiwan");
 if (!taiwan) throw new Error("Taiwan fixture returned null");
 if (taiwan.usd !== 174197000) throw new Error(`Taiwan fixture picked ${taiwan.usd}`);
 if (taiwan.sourceRows[0][0] !== "Taiwan") throw new Error(`Taiwan fixture row was ${taiwan.sourceRows[0][0]}`);
+// Inline tags join without a break (ASTS 10-Q headings, 2.4.5); whitespace and block tags still separate.
+const heading = stripHtmlTags('<p><span style="a">PART I - FINANC</span><span style="b">IAL INFORMATION</span></p><td>Net</td><td>31.5</td> <b>Item</b> <i>2</i>');
+if (heading !== "PART I - FINANCIAL INFORMATION Net 31.5 Item 2") throw new Error(`stripHtmlTags gave ${heading}`);
 """
         tmp_path: pathlib.Path | None = None
         try:

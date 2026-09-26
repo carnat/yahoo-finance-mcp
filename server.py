@@ -2445,6 +2445,7 @@ async def _collect_company_events(
     sec_filing_types: list[str] | None = None,
     search_query: str = "",
     include_diagnostics: bool = False,
+    keep_all: bool = False,
 ) -> tuple:
     retrieved_at = _utc_now_iso()
     selected_sources, warnings = _normalize_event_sources(
@@ -2658,7 +2659,9 @@ async def _collect_company_events(
         warnings.extend(gnw_warnings)
 
     deduped = [_enrich_news_item_for_llm(item) for item in _dedupe_event_items(items, warnings)]
-    deduped = deduped[:max_cap]
+    # Event verification keeps every item and matches before capping (keep_all).
+    if not keep_all:
+        deduped = deduped[:max_cap]
     seen_warning_keys: set[str] = set()
     unique_warnings: list[dict] = []
     for w in warnings:
@@ -3173,12 +3176,16 @@ async def verify_company_event(
     if not str(event_query or "").strip():
         return _mcp_failure("verify_company_event", ErrorCode.INPUT_VALIDATION_ERROR, "event_query is required")
     items, sources_used, warnings, retrieved_at, source_diagnostics = _unpack_company_event_result(
+        # Match against everything collected: a cap of the newest 50 let a flood
+        # of aggregator items push the official release out before matching
+        # (ASTS BlueBird launch, 2.4.5).
         await _collect_company_events(
             ticker,
             max_results=50,
             lookback_days=365,
             sources=sources,
             include_diagnostics=True,
+            keep_all=True,
         )
     )
     event_query_stopwords = {
@@ -5321,6 +5328,10 @@ async def get_filing_data(
             "confidence": "NOT_DECISION_GRADE",
             "status": "SEC_FACT_NOT_AVAILABLE",
             "code": "NO_FACT_FOR_ACCESSION",
+            # A failed pin names the filing that was asked for, never the latest one.
+            "filingType": filing_type,
+            "accessionNumber": pinned_accession,
+            "requestedAccession": pinned_accession,
             "evidence": {},
             "warnings": [{"code": "NO_FACT_FOR_ACCESSION", "message": f"SEC companyconcept has no {' / '.join(candidate_names)} fact in accession {pinned_accession} ({filing_type}).", "severity": "warning"}],
         })
@@ -8081,6 +8092,7 @@ async def extract_sec_filing_fact(
             "filingType": parsed_payload.get("filingType", filing_type),
             "filingDate": parsed_payload.get("filingDate"),
             "accessionNumber": parsed_payload.get("accessionNumber"),
+            **({"requestedAccession": parsed_payload["requestedAccession"]} if parsed_payload.get("requestedAccession") else {}),
             "extractionMethod": parsed_payload.get("extractionMethod", "NONE"),
             "source": parsed_payload.get("source", "NOT_DISCLOSED"),
             "confidence": parsed_payload.get("confidence", "NOT_DISCLOSED"),
@@ -8506,7 +8518,8 @@ async def list_sec_material_filings(
 
 # XBRL concept names for the intelligence snapshot
 _XBRL_INTELLIGENCE_CONCEPTS: dict[str, list[str]] = {
-    "revenue": ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "RevenueFromContractWithCustomerIncludingAssessedTax", "SalesRevenueNet"],
+    # The shared revenue concepts (yfmcp/sec_facts.py); each filing is read from the one it tags.
+    "revenue": list(_sf.REVENUE_CONCEPTS),
     "net_income": ["NetIncomeLoss", "ProfitLoss"],
     "cash": ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsAndShortTermInvestments"],
     "long_term_debt": ["LongTermDebt", "LongTermDebtNoncurrent"],
@@ -8597,7 +8610,14 @@ async def get_sec_filing_intelligence(
     sections_list: list[str] = []
     sections_count = 0
     tables_count = 0
-    exhibits_count = 0
+    # Exhibits are counted from the filing index under the issuer's CIK; the
+    # count had been a constant 0 (2.4.5).
+    exhibits_count = None
+    try:
+        exhibits_index_url, _ = _edgar_build_filing_urls(cik_int, accession_number, None)
+        exhibits_count = len(await _edgar_list_exhibits_from_index(exhibits_index_url))
+    except Exception:
+        exhibits_count = None
     try:
         index_raw = await _get_sec_filing_index_impl(ticker, filing_type, accession_number)
         index_data = json.loads(index_raw)
