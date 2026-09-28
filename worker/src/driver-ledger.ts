@@ -212,7 +212,12 @@ export function figuresIn(sentence: string): Rec[] {
       // "Block 2", "BlueBird 8-13", "New Glenn 3": a number in a name is not a figure.
       const pre = sentence.slice(0, m.index ?? 0);
       const name = /([A-Z][A-Za-z-]*)\s?$/.exec(pre);
-      if ((name && name.index > 0) || /[0-9]-$/.test(pre)) continue;
+      // A sentence-initial reporting/quantity word can legitimately precede a number
+      // ("Reported 5 satellites", "Approximately 5 million"). Product/model names
+      // ("Block 2", "BlueBird 8-13", "New Glenn 3") are not figures even at offset 0.
+      const sentenceStartQuantityPrefix = name && name.index === 0
+        && /^(?:Reported|Launched|Shipped|Delivered|Produced|Added|Reached|Had|Was|Were|Signed|Completed|Increased|Decreased|Grew|Approximately|About|Nearly|Over|Under|More|Less)$/.test(name[1]);
+      if ((name && !sentenceStartQuantityPrefix) || /[0-9]-$/.test(pre)) continue;
     }
     const unitWord = m[4] ?? null;
     const unit = unitWord != null && NON_UNIT_WORDS.has(unitWord.toLowerCase()) ? null : unitWord;

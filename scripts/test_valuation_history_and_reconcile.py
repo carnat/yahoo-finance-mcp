@@ -126,6 +126,29 @@ IFRS_FACTS = {"facts": {
 IFRS_BARS = [{"date": "2025-06-02", "close": 10.0}]
 FX = {"pair": "TWDUSD=X", "bars": [{"date": "2025-05-30", "close": 0.03}]}
 
+# Fresh-share / stale-balance and fresh-balance / stale-results fixtures exercise
+# the 2.5.4 live residual where warnings did not invalidate multiples.
+STALE_BAL_FACTS = json.loads(json.dumps(SYN))
+STALE_BAL_FACTS["facts"]["dei"]["EntityCommonStockSharesOutstanding"]["units"]["shares"].append(
+    _f(None, "2026-08-15", 21, "10-Q", "2026-08-20", "q326")
+)
+STALE_BAL_BARS = [{"date": "2026-09-02", "close": 80.0}]
+
+STALE_RESULTS_FACTS = json.loads(json.dumps(SYN))
+STALE_RESULTS_FACTS["facts"]["dei"]["EntityCommonStockSharesOutstanding"]["units"]["shares"].append(
+    _f(None, "2027-01-10", 22, "10-Q", "2027-01-15", "q427")
+)
+for concept, value in (
+    ("CashAndCashEquivalentsAtCarryingValue", 200),
+    ("ShortTermInvestments", 25),
+    ("LongTermDebtCurrent", 40),
+    ("LongTermDebtNoncurrent", 300),
+):
+    STALE_RESULTS_FACTS["facts"]["us-gaap"][concept]["units"]["USD"].append(
+        _f(None, "2026-12-31", value, "10-Q", "2027-01-15", "q427")
+    )
+STALE_RESULTS_BARS = [{"date": "2027-01-20", "close": 90.0}]
+
 
 def _hv(ticker, facts, bars, dates, splits=None, fx=None, ads=None, currency="USD"):
     return {"ticker": ticker, "dates": dates, "companyfacts": facts, "bars": bars, "priceCurrency": currency, "splits": splits or [], "fx": fx, "adsRatio": ads}
@@ -136,8 +159,28 @@ HV_INPUTS = {
     "ifrs": _hv("tsmx", IFRS_FACTS, IFRS_BARS, ["2025-06-02"], fx=FX, ads=5),
     "ifrsNoFx": _hv("tsmx", IFRS_FACTS, IFRS_BARS, ["2025-06-02"], fx={"pair": "TWDUSD=X", "bars": []}, ads=5),
     "gbp": _hv("lse", SYN, BARS, ["2025-09-02"], currency="GBp"),
+    "staleBalance": _hv("stale-bal", STALE_BAL_FACTS, STALE_BAL_BARS, ["2026-09-02"], SPLITS),
+    "staleResults": _hv("stale-results", STALE_RESULTS_FACTS, STALE_RESULTS_BARS, ["2027-01-20"], SPLITS),
+    "staleShares": _hv("stale-shares", SYN, STALE_RESULTS_BARS, ["2027-01-20"], SPLITS),
     "empty": _hv("none", {"facts": {}}, BARS, ["2025-09-02"]),
+    # An annual (20-F) filer's balances 244 days old are its latest: EV stays computed.
+    "ifrsLate": _hv("tsmx", IFRS_FACTS, [{"date": "2025-09-02", "close": 10.0}], ["2025-09-02"],
+                    fx={"pair": "TWDUSD=X", "bars": [{"date": "2025-09-01", "close": 0.03}]}, ads=5),
 }
+
+# NVDA: fiscal year ending late January, so its fiscal Q2 ends in calendar Q3.
+FISCAL_RECON = {"facts": {"us-gaap": {"Revenues": _usd(
+    _f("2025-01-27", "2026-01-25", 215_938_000_000, "10-K", "2026-02-26", "k26"),
+    _f("2026-04-27", "2026-07-26", 96_221_000_000, "10-Q", "2026-08-27", "q227"),
+)}}}
+FISCAL_TEXTS = [
+    "NVIDIA today reported revenue for the second quarter ended July 26, 2026, of $96.2 billion, up 56% from a year ago.",
+    "Revenue for the second quarter of fiscal 2027 was $96.2 billion.",
+    "Second-quarter revenue was $96.2 billion.",
+    "Revenue for the first quarter of fiscal 2027 was $80.1 billion.",
+    "Revenue for the fiscal 2027 second quarter was $96.2 billion.",
+    "Full fiscal year 2026 revenue was $215.9 billion.",
+]
 
 DATE_CASES = [[None, "2026-09-25"], [None, "2028-02-29"], [["2025-03-03", "2024-01-02", "2025-03-03"], None], [["2025-13-01"], None],
               [[f"2025-01-{d:02d}" for d in range(1, 14)], None], [None, None]]
@@ -188,6 +231,8 @@ RELEASE_TEXTS = [
     ["revenue", "Fourth quarter and full year revenue were $20.1 million and $70.9 million."],
     ["revenue", "Revenue backlog increased to approximately $1.30 billion in the second quarter."],
     ["operating_income", "Operating loss for the second quarter was $(118.2) million."],
+    ["revenue", "First quarter revenue was $99.0 million."],
+    ["revenue", "Second quarter revenue was $31.5 million compared to $20.0 million in second quarter 2025."],
 ]
 
 
@@ -208,6 +253,21 @@ def _python_outputs() -> dict:
         "releaseObs": [mr.release_observation({"status": "READ", "text": text, "url": None, "filingDate": None, "accessionNumber": None}, m, quarter, "USD")
                        for m, text in RELEASE_TEXTS],
         "currency": mr.release_observation(RELEASES[1], "revenue", quarter, "TWD"),
+        "noSecAgreement": mr.reconcile_observations([
+            {"source": "ISSUER_RELEASE", "provider": "ISSUER_RELEASE", "status": "FOUND", "value": 100.0, "precision": 0},
+            {"source": "YAHOO", "provider": "YAHOO", "status": "FOUND", "value": 100.0, "precision": 0},
+        ], 0.5),
+        "noSecConflict": mr.reconcile_observations([
+            {"source": "ISSUER_RELEASE", "provider": "ISSUER_RELEASE", "status": "FOUND", "value": 100.0, "precision": 0},
+            {"source": "YAHOO", "provider": "YAHOO", "status": "FOUND", "value": 120.0, "precision": 0},
+        ], 0.5),
+        "fiscalPeriod": mr.resolve_period(FISCAL_RECON, "revenue", "latest_quarter"),
+        "fiscalObs": [mr.release_observation({"status": "READ", "text": t, "url": None, "filingDate": None, "accessionNumber": None}, "revenue",
+                                             mr.resolve_period(FISCAL_RECON, "revenue", "latest_quarter"), "USD") for t in FISCAL_TEXTS],
+        "latestRelease": mr.pick_release_observation([
+            {"source": "ISSUER_RELEASE", "provider": "ISSUER_RELEASE", "status": "FOUND", "value": 31_500_000, "filingDate": "2026-08-10"},
+            {"source": "ISSUER_RELEASE", "provider": "ISSUER_RELEASE", "status": "FOUND", "value": 31_600_000, "filingDate": "2026-08-20"},
+        ]),
     }
 
 
@@ -234,6 +294,27 @@ const out = {
   recon: f.reconCases.map(([m, p, r, y, t]) => mr.metricReconciliation({ ticker: "asts", metric: m, period: mr.resolvePeriod(f.recon, m, p), companyfacts: f.recon, releases: r, yahooRows: y, tolerancePct: t })),
   releaseObs: f.releaseTexts.map(([m, text]) => mr.releaseObservation({ status: "READ", text, url: null, filingDate: null, accessionNumber: null }, m, quarter, "USD")),
   currency: mr.releaseObservation(f.releases[1], "revenue", quarter, "TWD"),
+  noSecAgreement: (() => {
+    const r = mr.reconcileObservations([
+      { source: "ISSUER_RELEASE", provider: "ISSUER_RELEASE", status: "FOUND", value: 100.0, precision: 0 },
+      { source: "YAHOO", provider: "YAHOO", status: "FOUND", value: 100.0, precision: 0 },
+    ], 0.5);
+    return [r.comparisons, r.status, r.restated];
+  })(),
+  noSecConflict: (() => {
+    const r = mr.reconcileObservations([
+      { source: "ISSUER_RELEASE", provider: "ISSUER_RELEASE", status: "FOUND", value: 100.0, precision: 0 },
+      { source: "YAHOO", provider: "YAHOO", status: "FOUND", value: 120.0, precision: 0 },
+    ], 0.5);
+    return [r.comparisons, r.status, r.restated];
+  })(),
+  fiscalPeriod: mr.resolvePeriod(f.fiscalRecon, "revenue", "latest_quarter"),
+  fiscalObs: f.fiscalTexts.map((text) => mr.releaseObservation({ status: "READ", text, url: null, filingDate: null, accessionNumber: null }, "revenue",
+    mr.resolvePeriod(f.fiscalRecon, "revenue", "latest_quarter"), "USD")),
+  latestRelease: mr.pickReleaseObservation([
+    { source: "ISSUER_RELEASE", provider: "ISSUER_RELEASE", status: "FOUND", value: 31_500_000, filingDate: "2026-08-10" },
+    { source: "ISSUER_RELEASE", provider: "ISSUER_RELEASE", status: "FOUND", value: 31_600_000, filingDate: "2026-08-20" },
+  ]),
 };
 console.log(JSON.stringify(out));
 """
@@ -252,7 +333,7 @@ def _worker_outputs() -> dict:
             bundles.append(out.as_uri())
         fx = Path(tmp) / "fixtures.json"
         fx.write_text(json.dumps({"hv": HV_INPUTS, "dateCases": DATE_CASES, "dates": DATES, "syn": SYN, "ifrsFacts": IFRS_FACTS, "periodSpecs": PERIOD_SPECS,
-                                  "recon": RECON, "reconCases": RECON_CASES, "releaseTexts": RELEASE_TEXTS, "releases": RELEASES}), encoding="utf-8")
+                                  "recon": RECON, "reconCases": RECON_CASES, "releaseTexts": RELEASE_TEXTS, "releases": RELEASES, "fiscalRecon": FISCAL_RECON, "fiscalTexts": FISCAL_TEXTS}), encoding="utf-8")
         harness = Path(tmp) / "harness.mjs"
         harness.write_text(_HARNESS, encoding="utf-8")
         result = subprocess.run([node, str(harness), *bundles, str(fx)], check=True, capture_output=True, text=True, timeout=120)
@@ -347,6 +428,34 @@ class TestHistoricalValuation(unittest.TestCase):
         medians = next(m for m in _python_outputs()["medians"] if m["date"] == "2025-09-02")
         self.assertEqual(medians["LTM"]["evToRevenue"], {"median": vh._median([1.39, 3.0]), "count": 2, "tickers": ["P1", "P2"]})
 
+    def test_stale_inputs_fail_closed(self) -> None:
+        balance = vh.historical_valuation(HV_INPUTS["staleBalance"])["points"][0]
+        self.assertEqual(balance["enterpriseValue"]["status"], "BALANCES_STALE")
+        self.assertIsNone(balance["multiples"]["LTM"]["evToRevenue"]["value"])
+        results = vh.historical_valuation(HV_INPUTS["staleResults"])["points"][0]
+        self.assertEqual(results["multiples"]["LTM"]["priceToSales"]["status"], "RESULTS_STALE")
+        self.assertIsNone(results["multiples"]["LTM"]["priceToSales"]["value"])
+        shares = vh.historical_valuation(HV_INPUTS["staleShares"])["points"][0]
+        self.assertEqual(shares["marketCap"]["status"], "SHARE_COUNT_STALE")
+        self.assertIsNone(shares["multiples"]["LTM"]["priceToSales"]["value"])
+
+    def test_preferred_concept_is_stable_across_later_alternate_filing(self) -> None:
+        facts = json.loads(json.dumps(SYN))
+        facts["facts"]["us-gaap"]["ProfitLoss"]["units"]["USD"].append(
+            _f("2024-01-01", "2024-12-31", 999, "10-K/A", "2025-08-20", "alt")
+        )
+        p = _point(vh.historical_valuation({**HV_INPUTS["syn"], "companyfacts": facts}), "2025-09-02")
+        self.assertEqual(p["denominators"]["LFY"]["netIncome"]["components"][0]["concept"], "NetIncomeLoss")
+        self.assertEqual(p["denominators"]["LFY"]["netIncome"]["value"], 100)
+
+    def test_stale_peer_multiple_is_excluded(self) -> None:
+        peers = [
+            {"ticker": "GOOD", "points": [{"date": "2026-09-02", "multiples": {"LTM": {"evToRevenue": {"status": "OK", "value": 5.0}}, "LFY": {}}}]},
+            {"ticker": "STALE", "points": [{"date": "2026-09-02", "multiples": {"LTM": {"evToRevenue": {"status": "RESULTS_STALE", "value": None}}, "LFY": {}}}]},
+        ]
+        m = vh.peer_medians(["2026-09-02"], peers)[0]["LTM"]["evToRevenue"]
+        self.assertEqual(m, {"median": 5.0, "count": 1, "tickers": ["GOOD"]})
+
     def test_authority_boundary(self) -> None:
         for key, value in AUTHORITY_BOUNDARY.items():
             self.assertEqual(self.r[key], value)
@@ -429,6 +538,46 @@ class TestReconciliation(unittest.TestCase):
         self.assertEqual(p["fy 2025"]["periodEnd"], "2025-12-31")
         self.assertEqual(p["Q4 2026"]["status"], "PERIOD_NOT_FOUND")
         self.assertEqual(p["2026"]["status"], "INVALID_PERIOD")
+
+    def test_agreement_requires_sec_baseline(self) -> None:
+        comparisons, status, _ = _python_outputs()["noSecAgreement"]
+        self.assertEqual(status, "PARTIAL")
+        # Without SEC the other sources are still compared, so agreement is visible but never AGREED...
+        self.assertEqual([(c["source"], c["against"], c["result"]) for c in comparisons], [("YAHOO", "ISSUER_RELEASE", "MATCH")])
+        # ...and a disagreement between them is a CONFLICT, not a quiet PARTIAL.
+        comparisons, status, _ = _python_outputs()["noSecConflict"]
+        self.assertEqual((status, comparisons[0]["result"]), ("CONFLICT", "MISMATCH"))
+
+    def test_fiscal_quarter_naming(self) -> None:
+        out = _python_outputs()
+        period = out["fiscalPeriod"]
+        self.assertEqual((period["periodEnd"], period["fiscalQuarter"], period["fiscalYears"]), ("2026-07-26", 2, [2027, 2026]))
+        obs = out["fiscalObs"]
+        # The exact end date, the fiscal quarter and the hyphenated form all name NVDA's fiscal Q2 (calendar Q3).
+        self.assertEqual([o["status"] for o in obs[:3]], ["FOUND", "FOUND", "FOUND"])
+        self.assertEqual(obs[0]["value"], 96_200_000_000)
+        # A different fiscal quarter is still rejected.
+        self.assertEqual((obs[3]["status"], obs[3]["unscopedCandidates"]), ("NOT_FOUND_IN_TEXT", 1))
+        self.assertEqual(obs[4]["status"], "FOUND")
+        # A full-year figure is still not a quarter's.
+        self.assertEqual(obs[5]["status"], "NOT_FOUND_IN_TEXT")
+
+    def test_annual_filer_staleness_limits(self) -> None:
+        r = vh.historical_valuation(HV_INPUTS["ifrsLate"])
+        self.assertEqual((r["reportingCadence"], r["stalenessLimitsDays"]["balances"]), ("ANNUAL", 500))
+        p = r["points"][0]
+        self.assertEqual((p["balances"]["balanceDate"], p["enterpriseValue"]["status"]), ("2024-12-31", "OK"))
+        self.assertEqual(vh.historical_valuation(HV_INPUTS["syn"])["reportingCadence"], "QUARTERLY")
+
+    def test_latest_parseable_release_wins(self) -> None:
+        latest = _python_outputs()["latestRelease"]
+        self.assertEqual((latest["filingDate"], latest["value"]), ("2026-08-20", 31_600_000))
+
+    def test_exact_quarter_scope(self) -> None:
+        obs = _python_outputs()["releaseObs"]
+        self.assertEqual(obs[6]["status"], "NOT_FOUND_IN_TEXT")
+        self.assertEqual(obs[7]["status"], "FOUND")
+        self.assertEqual(obs[7]["value"], 31_500_000)
 
     def test_authority_boundary(self) -> None:
         for key, value in AUTHORITY_BOUNDARY.items():

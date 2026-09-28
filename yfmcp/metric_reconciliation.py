@@ -128,12 +128,24 @@ def resolve_period(companyfacts: Any, metric: str, spec: str) -> dict:
                 "message": f"No {period_type.lower()} period in companyfacts matches {text} (20-F and 40-F filers tag annual periods only)."}
     best = sorted(candidates, key=lambda r: (r["end"], r["start"] or ""))[-1]
     kind = METRICS[metric]["kind"]
+    # The fiscal quarter, counted from the prior fiscal year end, and the years a release may call the fiscal year
+    # (NVDA's year ending January 2027 is "fiscal 2027"; retailers ending early February name the year it began).
+    fiscal: dict = {}
+    if period_type == "QUARTER":
+        prior_ends = sorted(r["end"] for r in rows if _is_annual(r) and r["end"] < best["end"])
+        if prior_ends:
+            prior = prior_ends[-1]
+            quarter = min(4, max(1, math.floor(_days(prior, best["end"]) / 91.25 + 0.5)))
+            prior_year = int(prior[:4])
+            fiscal_years = [prior_year + 1, prior_year] if int(prior[5:7]) <= 3 else [prior_year + 1]
+            fiscal = {"fiscalQuarter": quarter, "fiscalYears": fiscal_years, "fiscalBasis": f"counted from the prior fiscal year end {prior}"}
     return {
         "status": "OK",
         "spec": text,
         "periodType": period_type,
         "periodStart": None if kind == "instant" else best["start"],
         "periodEnd": best["end"],
+        **fiscal,
         "labelBasis": "Q<n> is the calendar quarter of the period end; FY<yyyy> is the fiscal year ending in that year",
     }
 
@@ -189,6 +201,74 @@ _QUARTER_SCOPE_RE = re.compile(r"\b(?:quarter(?:ly)?|three months|Q[1-4])\b", _F
 _ANNUAL_SCOPE_RE = re.compile(r"\b(?:full[- ]year|fiscal (?:year )?20\d\d|years? ended|twelve months|for (?:the )?(?:fiscal )?year|annual)\b", _F)
 _INSTANT_SCOPE_RE = re.compile(r"\b(?:as of|ended (?:the )?(?:quarter|year|period)|at (?:the )?(?:end|close) of|balance)\b", _F)
 _MONEY = r"(\(?)\s?(-?)\s?\$\s?(\(?)(-?)([0-9][0-9,]*)(\.[0-9]+)?\)?(?:\s?(billion|million|thousand)\b)?"
+_QUARTER_ORDINAL = ("first", "second", "third", "fourth")
+_FISCAL_YEAR_OF_QUARTER_RE = re.compile(
+    r"\b(?:(quarter(?:ly)?)(?: of)?(?: the)? fiscal (?:year )?20\d\d|fiscal (?:year )?20\d\d(?= (?:first|second|third|fourth)[- ]quarter))\b", _F)
+
+
+_QUARTER_MENTION = r"\b(?:Q([1-4])|(first|second|third|fourth)[- ]quarter)\b"
+_MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")
+_COMPARATOR_RE = re.compile(r"\b(?:compared (?:with|to)|versus|vs\.?|from)\b", re.I)
+
+
+def _period_end_phrase(end: str) -> str:
+    """"2026-07-26" -> "July 26, 2026"."""
+    return f"{_MONTH_NAMES[int(end[5:7]) - 1]} {int(end[8:10])}, {end[:4]}"
+
+
+def _explicit_period_matches(sentence: str, amount_start: int, period: dict) -> bool:
+    """Whether the quarters and years a sentence names match the period.
+
+    A quarter may be named by its calendar or its fiscal number ("second
+    quarter of fiscal 2027" is NVDA's quarter ended July 26, 2026, calendar
+    Q3); a sentence naming the period's exact end date is scoped to it.
+    """
+    end = str(period.get("periodEnd") or "")
+    if len(end) == 10 and _period_end_phrase(end) in sentence:
+        return True
+    before_amount = sentence[:amount_start]
+    if period.get("periodType") == "QUARTER":
+        quarters = {math.ceil(int(end[5:7]) / 3)}
+        if isinstance(period.get("fiscalQuarter"), int):
+            quarters.add(period["fiscalQuarter"])
+        years = {end[:4], *(str(y) for y in period.get("fiscalYears") or [])}
+
+        def quarter_of(m: re.Match) -> int:
+            return int(m.group(1)) if m.group(1) else _QUARTER_ORDINAL.index(m.group(2).lower()) + 1
+
+        def matches(text: str, m: re.Match) -> bool:
+            if quarter_of(m) not in quarters:
+                return False
+            ym = re.search(r"\b(20\d{2})\b", text[m.start():m.start() + 60])
+            return not (ym and ym.group(1) not in years)
+
+        mentions = list(re.finditer(_QUARTER_MENTION, before_amount, re.I))
+        for m in mentions:
+            if not matches(before_amount, m):
+                return False
+        # If the only explicit period is after the amount in a comparison clause,
+        # it describes the comparator rather than the current-period amount.
+        if not mentions:
+            after = sentence[amount_start:]
+            first_period = re.search(_QUARTER_MENTION, after, re.I)
+            if first_period and not _COMPARATOR_RE.search(after[:first_period.start()]) and not matches(after, first_period):
+                return False
+        return True
+    if period.get("periodType") == "ANNUAL":
+        requested_year = end[:4]
+        before_years = re.findall(r"\b(20\d{2})\b", before_amount)
+        if any(y != requested_year for y in before_years):
+            return False
+        after = sentence[amount_start:]
+        later_year = re.search(r"\b(20\d{2})\b", after)
+        if not before_years and later_year:
+            prefix = after[:later_year.start()]
+            if not _COMPARATOR_RE.search(prefix) and later_year.group(1) != requested_year:
+                return False
+        return True
+    return True
+
+
 _SCALE = {"billion": 1e9, "million": 1e6, "thousand": 1e3}
 
 
@@ -216,13 +296,15 @@ def release_observation(release: dict | None, metric: str, period: dict, reporti
         if not m:
             continue
         quarter = _QUARTER_SCOPE_RE.search(sentence) is not None
-        annual = _ANNUAL_SCOPE_RE.search(sentence) is not None
+        # "second quarter of fiscal 2027" and "fiscal 2026 third quarter" name a quarter, not a year.
+        annual = _ANNUAL_SCOPE_RE.search(_FISCAL_YEAR_OF_QUARTER_RE.sub(r"\1", sentence)) is not None
+        amount_start = m.start() + m.group(0).find("$")
         if spec["kind"] == "instant":
             scoped = _INSTANT_SCOPE_RE.search(sentence) is not None
         elif period.get("periodType") == "QUARTER":
-            scoped = quarter and not annual
+            scoped = quarter and not annual and _explicit_period_matches(sentence, amount_start, period)
         else:
-            scoped = annual and not quarter
+            scoped = annual and not quarter and _explicit_period_matches(sentence, amount_start, period)
         if not scoped:
             unscoped += 1
             continue
@@ -244,7 +326,8 @@ def pick_release_observation(observations: list[dict]) -> dict:
     Every release considered is listed.
     """
     considered = [{"filingDate": o.get("filingDate"), "accessionNumber": o.get("accessionNumber"), "status": o.get("status")} for o in observations]
-    chosen = next((o for o in observations if o.get("status") == "FOUND"), observations[0] if observations else
+    found = [o for o in observations if o.get("status") == "FOUND"]
+    chosen = found[-1] if found else (observations[0] if observations else
                   {"source": "ISSUER_RELEASE", "provider": "ISSUER_RELEASE", "status": "NOT_RESOLVED", "value": None})
     return {**chosen, "releasesConsidered": considered}
 
@@ -268,22 +351,25 @@ def yahoo_observation(rows: list[dict] | None, metric: str, period: dict, freque
 def reconcile_observations(observations: list[dict], tolerance_pct: float) -> tuple[list[dict], str, bool]:
     """Each found value against the baseline, and the overall agreement."""
     found = [o for o in observations if o.get("status") == "FOUND" and _num(o.get("value"))]
-    baseline = next((o for o in found if o["source"] == "SEC_XBRL_LATEST"), found[0] if found else None)
+    baseline = next((o for o in found if o["source"] == "SEC_XBRL_LATEST"), None)
+    # Without SEC, the other sources are still compared with each other so a disagreement is visible;
+    # they can never be AGREED.
+    reference = baseline if baseline is not None else (found[0] if found else None)
     comparisons: list[dict] = []
     conflict = False
     restated = False
-    if baseline is not None:
-        b = baseline["value"]
+    if reference is not None:
+        b = reference["value"]
         for o in found:
-            if o is baseline:
+            if o is reference:
                 continue
             v = o["value"]
             difference = v - b
-            tolerance = max(abs(b) * tolerance_pct / 100, float(o.get("precision") or 0), float(baseline.get("precision") or 0))
+            tolerance = max(abs(b) * tolerance_pct / 100, float(o.get("precision") or 0), float(reference.get("precision") or 0))
             match = abs(difference) <= tolerance + 1e-9 * max(1, abs(b))
             row = {
                 "source": o["source"],
-                "against": baseline["source"],
+                "against": reference["source"],
                 "value": v,
                 "baselineValue": b,
                 "difference": _round(difference, 6),
@@ -298,7 +384,7 @@ def reconcile_observations(observations: list[dict], tolerance_pct: float) -> tu
                 conflict = True
             comparisons.append(row)
     providers = {o["provider"] for o in found}
-    status = "NOT_FOUND" if not found else "CONFLICT" if conflict else "AGREED" if len(providers) >= 2 else "PARTIAL"
+    status = "NOT_FOUND" if not found else "CONFLICT" if conflict else "PARTIAL" if baseline is None else "AGREED" if len(providers) >= 2 else "PARTIAL"
     return comparisons, status, restated
 
 
@@ -332,7 +418,8 @@ def metric_reconciliation(*, ticker: str, metric: str, period: dict, companyfact
             {"source": "COMPANIES_HOUSE", "reason": "UK statutory filings; not applicable to SEC registrants and not tagged for these metrics."},
         ],
         "notes": [
-            "AGREED: at least two providers found the value and all agree within tolerance. PARTIAL: one provider found it. CONFLICT: a provider differs from the latest SEC value beyond tolerance. NOT_FOUND: none found it.",
+            "AGREED: latest SEC plus at least one independent provider found the value and all agree within tolerance. PARTIAL: SEC is absent or only one provider found it. CONFLICT: a provider differs from the latest SEC value (or, without SEC, from another provider) beyond tolerance. NOT_FOUND: none found it.",
+            "A release quarter may be named by its calendar or fiscal number; a sentence naming the period's exact end date is scoped to it.",
             "A difference between the SEC value as first filed and as latest filed is a restatement (restated: true), not a conflict.",
             "The tolerance is the larger of tolerancePct of the SEC value and half the last stated digit of a release figure.",
             "Release figures are read only from sentences scoped to the period (quarter or full year); unscopedCandidates counts sentences skipped for scope.",

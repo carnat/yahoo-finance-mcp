@@ -227,7 +227,19 @@ def figures_in(sentence: str) -> list[dict]:
             # "Block 2", "BlueBird 8-13", "New Glenn 3": a number in a name is not a figure.
             pre = sentence[:m.start()]
             name = re.search(r"([A-Z][A-Za-z-]*)\s?$", pre)
-            if (name and name.start() > 0) or re.search(r"[0-9]-$", pre):
+            # A sentence-initial reporting/quantity word can legitimately precede a
+            # number ("Reported 5 satellites", "Approximately 5 million"). Product/
+            # model names ("Block 2", "BlueBird 8-13", "New Glenn 3") are not figures
+            # even when the name begins at offset zero.
+            sentence_start_quantity_prefix = bool(
+                name
+                and name.start() == 0
+                and re.fullmatch(
+                    r"Reported|Launched|Shipped|Delivered|Produced|Added|Reached|Had|Was|Were|Signed|Completed|Increased|Decreased|Grew|Approximately|About|Nearly|Over|Under|More|Less",
+                    name.group(1),
+                )
+            )
+            if (name and not sentence_start_quantity_prefix) or re.search(r"[0-9]-$", pre):
                 continue
         unit_word = m.group(4)
         unit = None if unit_word is not None and unit_word.lower() in _NON_UNIT_WORDS else unit_word
