@@ -210,11 +210,18 @@ def _explicit_period_matches(sentence: str, amount_start: int, period: dict) -> 
                 return False
         if not mentions:
             after = sentence[amount_start:]
-            first_period = re.search(r"\b(?:Q[1-4]|(?:first|second|third|fourth) quarter)\b", after, re.I)
+            first_period = re.search(r"\b(?:Q([1-4])|(?:first|second|third|fourth) quarter)\b", after, re.I)
             if first_period:
                 prefix = after[:first_period.start()]
                 if not re.search(r"\b(?:compared (?:with|to)|versus|vs\.?|from)\b", prefix, re.I):
-                    return False
+                    token = first_period.group(0).lower()
+                    observed_q = int(first_period.group(1)) if first_period.group(1) else next((i + 1 for i, x in enumerate(_QUARTER_ORDINAL) if token.startswith(x)), 0)
+                    if observed_q != q:
+                        return False
+                    nearby = after[first_period.start():first_period.start() + 60]
+                    ym = re.search(r"\b(20\d{2})\b", nearby)
+                    if ym and ym.group(1) != year:
+                        return False
         return True
     if period.get("periodType") == "ANNUAL":
         requested_year = str(period.get("periodEnd") or "")[:4]
