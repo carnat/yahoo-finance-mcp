@@ -581,6 +581,76 @@ consensus actions compose evidence and never fill a gap with an assumption.
     ASTS's pack reported guidance `NOT_DISCLOSED` while a standalone call
     found $150–200M.
 
+## Guidance History And Operating Drivers (2.5.3)
+
+- `get_guidance_history` (group `earnings_intelligence`) reads up to
+  `max_releases` (default 8, at most 12) of the newest 8-Ks with Item 2.02,
+  results of operations. It reads EX-99.1 when the filing index names one,
+  else the 8-K itself.
+  - Each revenue, gross-margin and EPS range carries its target period and
+    source. The period comes from the range's own sentence or bullet first
+    ("expects EPS of $0.10 to $0.20 for fiscal 2027"), else from the 200
+    characters before it; `scope` says which (`SENTENCE`,
+    `PRECEDING_TEXT`). SEC-rendered " o " bullets are sentence breaks.
+  - Quarters and halves win over the fiscal year inside them: "first quarter
+    of fiscal 2026" is `Q1 2026`, "second-half 2025" and "2H25" are
+    `H2 2025`. A range with no stated period is listed but not compared.
+  - `revisions` compare consecutive releases for the same metric and period:
+    `INITIATED`, `RAISED` or `LOWERED` (midpoint), `NARROWED` or `WIDENED`
+    (same midpoint), `REAFFIRMED` (same range), and `WITHDRAWN`.
+  - `outcomes` compare the later reported actual (SEC companyfacts, newest
+    10-K/10-Q filing per period) with the first and last range: `BELOW`,
+    `WITHIN` or `ABOVE`. Statuses:
+    - `EVALUATED`;
+    - `ACTUAL_NOT_YET_REPORTED`;
+    - `NOT_EVALUATED_METRIC` (gross margin);
+    - `NOT_EVALUATED_FISCAL_QUARTER_MAPPING` (quarters of a non-calendar
+      fiscal year);
+    - `NOT_EVALUATED_HALF_YEAR` (a second half is never filed as a period,
+      and FY minus H1 is not derived);
+    - `ACTUALS_NOT_READ` (companyfacts unavailable; retryable).
+  - An unread release is listed with `status: NOT_READ` and contributes
+    nothing; it is never read as a withdrawal. `guidanceFound` counts ranges
+    stated in text, so guidance given only in a table is not read.
+  - ASTS, live on 2.5.3 locally: `H2 2025` $50–75M `INITIATED` (Aug 2025)
+    then `REAFFIRMED` (Nov 2025); `FY2026` $150–200M `INITIATED` (May 2026)
+    then `REAFFIRMED` (Aug 2026).
+- `extract_operating_driver_ledger` (group `sec_extractors`) reads the
+  latest periodic filing, SEC companyfacts and the newest Item 2.02 release.
+  - `xbrlSeries`: revenue, gross profit, R&D, capex, remaining performance
+    obligations and contract liabilities (total, current, noncurrent).
+    - Each point is `QUARTER`, `ANNUAL`, `YEAR_TO_DATE` or `INSTANT`, from
+      the newest 10-K/10-Q filing of that period.
+    - Year-to-date cash-flow periods stay year-to-date; no quarter is
+      derived.
+    - `latestPeriodEnd` shows when a company stopped tagging a series (ASTS
+      gross profit ends in 2023).
+    - A series the company does not tag is `NOT_REPORTED` (`notReported`);
+      when companyfacts could not be read it is `NOT_READ` (`notRead`).
+  - `companySpecificSeries`: the filer's own non-monetary inline XBRL
+    concepts, custom units first (ASTS: patents granted, pending claims).
+    - Monetary extension line items are counted in `excludedMonetaryConcepts`.
+    - Financing, equity and acquisition concepts are counted in
+      `excludedCapitalStructureConcepts`; those belong to the capital and
+      dilution tools.
+  - `textDrivers`: sentences and bullets with a figure, in categories
+    capacity, production, deliveries, launches and deployments, customers,
+    backlog and bookings, utilization, pricing, yield and headcount.
+    - `basis` is `REPORTED_ACTUAL`, `TARGET_OR_PLAN`, or `UNCLEAR` when the
+      sentence does both or neither.
+    - Each carries timing (as in the funding schedule) and its source.
+    - A number inside a name ("Block 2", "BlueBird 8-13") and a bare year
+      are not figures.
+    - A search window's cut-off first and last pieces are dropped.
+    - Pieces over 600 characters, such as flattened highlight tables, are
+      skipped.
+- Both tools carry the evidence-only authority fields (`decisionUse:
+  EVIDENCE_ONLY`, method, multiple, weights, target, G2, opportunity and
+  action null). They return `status` `OK` or `PARTIAL` with warnings for
+  each unread source and `retryable`.
+- The range rules now also read "expectations for revenue of $X to $Y"
+  (ASTS, Aug 2025), in `extract_guidance` too.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

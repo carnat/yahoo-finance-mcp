@@ -131,8 +131,8 @@ _AMOUNT = r"([0-9][0-9.,]*(?:\s*(?:billion|million|thousand|bn|m|k))?)"
 _RANGE_SEP = r"\s*(?:to|and|-|–|—)\s*"
 # "full year 2026 revenue guidance of $150.0 million to $200.0 million" (ASTS)
 _REVENUE_FIRST_RE = re.compile(rf"\brevenues?\s+(?:guidance|outlook|forecast)\b[^$.]{{0,40}}\$\s*{_AMOUNT}{_RANGE_SEP}\$?\s*{_AMOUNT}", _F)
-# "expects revenue between $X and $Y" / "guidance: revenue of $X to $Y"
-_KEYWORD_FIRST_RE = re.compile(rf"(?:expects|guidance|outlook)[^.\n]{{0,120}}revenue[^$]{{0,25}}\$?\s*{_AMOUNT}{_RANGE_SEP}\$?\s*{_AMOUNT}", _F)
+# "expects revenue between $X and $Y" / "guidance: revenue of $X to $Y" / "expectations for revenue of $X to $Y" (ASTS)
+_KEYWORD_FIRST_RE = re.compile(rf"(?:expects|expectations?|guidance|outlook)[^.\n]{{0,120}}revenue[^$]{{0,25}}\$?\s*{_AMOUNT}{_RANGE_SEP}\$?\s*{_AMOUNT}", _F)
 _GROSS_MARGIN_RE = re.compile(r"gross margin[^0-9]{0,20}([0-9]{1,2}(?:\.[0-9]+)?)\s*%\s*(?:to|and|-|–|—)\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%", _F)
 _EPS_RE = re.compile(r"(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per share)[^$]{0,25}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|and|-|–|—)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", _F)
 

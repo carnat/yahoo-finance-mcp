@@ -22,6 +22,8 @@ import {
 } from "./capital-structure.js";
 import { filingFactInAccession, pickConceptFacts, REVENUE_CONCEPTS } from "./sec-facts.js";
 import { fundingCapexSchedule } from "./funding-schedule.js";
+import { guidanceHistory, type ReleaseText } from "./guidance-history.js";
+import { operatingDriverLedger } from "./driver-ledger.js";
 import { parseShareScenarios, shareCountScenarios } from "./share-scenarios.js";
 import { customerConcentration, EPS_AMOUNT, EPS_LABEL, guidanceRanges, PCT_AMOUNT, rankEvidence, reportedTextMetric, REVENUE_LABEL, stemWord, USD_AMOUNT, type ConcentrationFinding } from "./extraction-rules.js";
 import { majorPrice, marketInputsFromQuoteSummary, peerValuations, valuationSnapshot, type MarketInputs } from "./valuation.js";
@@ -15583,6 +15585,79 @@ export async function extractFundingCapexSchedule(ticker: string, filingType = "
   return JSON.stringify(out);
 }
 
+const DRIVER_SEARCH_TERMS = [
+  "capacity", "backlog", "bookings", "deliveries", "shipments", "customers", "subscribers", "launched", "deployed",
+  "production", "utilization", "average selling price", "employees", "remaining performance obligations",
+];
+
+/** The newest earnings-release 8-Ks (Item 2.02, results of operations) in SEC's recent submissions. */
+function earningsReleasePicks(submissions: Record<string, unknown>, cikInt: number, limit: number): { filingDate: string; accessionNumber: string; primaryUrl: string }[] {
+  const recent = ((submissions.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
+  const forms = (recent.form as string[]) ?? [];
+  const picks: { filingDate: string; accessionNumber: string; primaryUrl: string }[] = [];
+  for (let i = 0; i < forms.length && picks.length < limit; i++) {
+    if ((forms[i] ?? "").toUpperCase() !== "8-K" || !String(recent.items?.[i] ?? "").includes("2.02")) continue;
+    const acc = String(recent.accessionNumber?.[i] ?? "");
+    const doc = String(recent.primaryDocument?.[i] ?? "");
+    if (!acc || !doc) continue;
+    picks.push({ filingDate: String(recent.filingDate?.[i] ?? ""), accessionNumber: acc, primaryUrl: `https://www.sec.gov/Archives/edgar/data/${cikInt}/${acc.replace(/-/g, "")}/${doc}` });
+  }
+  return picks;
+}
+
+/** An earnings-release 8-K's text: EX-99.1 when the index names one, else the 8-K itself. */
+async function readReleaseText(cikInt: number, accessionNumber: string, primaryUrl: string): Promise<{ url: string; status: string; text: string | null }> {
+  const ex991 = await resolveEx991Url(cikInt, accessionNumber).catch(() => null);
+  const url = ex991 ?? primaryUrl;
+  const html = await edgarGetHtml(url, 5_000_000).catch(() => null);
+  return html ? { url, status: "READ", text: _stripHtmlTagsIdx(_sanitizeFilingHtml(html)) } : { url, status: "NOT_READ", text: null };
+}
+
+/** Operating-driver ledger (2.5.3): XBRL driver series, the filer's own tagged KPIs, and operating statements with figures. */
+export async function extractOperatingDriverLedger(ticker: string, filingType = "latest", accessionNumber: string | null = null): Promise<string> {
+  const resolved = await resolvePeriodicFilings(ticker, filingType, accessionNumber);
+  if (!resolved.ok) return resolveFailure(resolved.error, ticker);
+  const primary = resolved.filings[0].filing;
+  const [loaded, matches, companyfacts, release] = await Promise.all([
+    ixbrlSource("primary", primary).catch(() => null),
+    filingTextMatches(ticker, primary, DRIVER_SEARCH_TERMS, 30, 700).catch(() => [] as TextMatch[]),
+    edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${primary.cikPadded}.json`).catch(() => null),
+    getSubmissionsForTicker(ticker).then(async ({ submissions }): Promise<Record<string, unknown>> => {
+      // The newest results-of-operations 8-K, as in get_guidance_history.
+      const pick = submissions ? earningsReleasePicks(submissions, primary.cikInt, 1)[0] : undefined;
+      if (!pick) return { status: "RELEASE_NOT_RESOLVED", url: null, filingDate: null, accessionNumber: null, text: null };
+      const read = await readReleaseText(primary.cikInt, pick.accessionNumber, pick.primaryUrl);
+      return { ...read, filingDate: pick.filingDate, accessionNumber: pick.accessionNumber };
+    }).catch((): Record<string, unknown> => ({ status: "RELEASE_NOT_RESOLVED", url: null, filingDate: null, accessionNumber: null, text: null })),
+  ]);
+  const statements = [
+    ...(typeof release.text === "string" ? [{
+      contextText: release.text, sectionHeading: null, documentUrl: (release.url as string | null) ?? null,
+      filingDate: (release.filingDate as string | null) ?? null, accessionNumber: (release.accessionNumber as string | null) ?? null, source: "EARNINGS_RELEASE",
+    }] : []),
+    ...matches.map((m) => ({ contextText: m.contextText, sectionHeading: m.sectionHeading, documentUrl: m.documentUrl, filingDate: m.filingDate, accessionNumber: m.accessionNumber, source: "PERIODIC_FILING" })),
+  ];
+  const out = operatingDriverLedger({
+    ticker,
+    companyfacts,
+    inlineFacts: loaded ? loaded.source.doc.facts.map((f) => ({ name: f.name, unit: f.unit, value: f.value, periodStart: f.periodStart, periodEnd: f.periodEnd, dims: f.dims })) : null,
+    filing: { filingType: primary.filingType, filingDate: primary.filingDate, accessionNumber: primary.accessionNumber, documentUrl: primary.documentUrl,
+      status: loaded ? "READ" : "NOT_READ", textMatches: matches.length },
+    release: { filingDate: release.filingDate ?? null, accessionNumber: release.accessionNumber ?? null, url: release.url ?? null, status: release.status },
+    statements,
+  });
+  const warnings: Record<string, unknown>[] = [];
+  if (!loaded) warnings.push({ code: "FILING_TEXT_NOT_AVAILABLE", message: "The periodic filing could not be read from SEC, so company-specific series were not read; retry.", severity: "warning" });
+  else if (loaded.truncated) warnings.push({ code: "FILING_READ_TRUNCATED", message: "The filing exceeded the read limit; facts past that point were not parsed.", severity: "warning" });
+  if (!companyfacts) warnings.push({ code: "COMPANYFACTS_NOT_AVAILABLE", message: "SEC companyfacts could not be read, so standard driver series were not read; retry.", severity: "warning" });
+  if (release.status === "NOT_READ") warnings.push({ code: "RELEASE_TEXT_NOT_AVAILABLE", message: `The earnings release ${String(release.url)} could not be read from SEC; retry.`, severity: "warning" });
+  else if (release.status === "RELEASE_NOT_RESOLVED") warnings.push({ code: "RELEASE_NOT_RESOLVED", message: "No SEC earnings release was resolved, so release statements were not read.", severity: "warning" });
+  out.status = warnings.some((w) => w.code !== "FILING_READ_TRUNCATED" && w.code !== "RELEASE_NOT_RESOLVED") ? "PARTIAL" : "OK";
+  out.retryable = !loaded || !companyfacts || release.status === "NOT_READ";
+  out.warnings = warnings;
+  return JSON.stringify(out);
+}
+
 export async function extractAnalystValuationMethods(ticker: string, daysBack = 30): Promise<string> {
   const days = clampInt(daysBack, 30, 1, 365);
   const [news, radar, identity] = await Promise.all([
@@ -17366,6 +17441,42 @@ export async function extractGuidance(ticker: string, period = "latest"): Promis
     confidence: found ? "HIGH" : "NOT_DISCLOSED",
     warnings: [],
   });
+}
+
+/** Guidance history (2.5.3): guidance ranges across recent earnings releases, their revisions, and outcomes against reported XBRL actuals. */
+export async function getGuidanceHistory(ticker: string, maxReleases = 8): Promise<string> {
+  const limit = clampInt(maxReleases, 8, 1, 12);
+  const upper = ticker.toUpperCase();
+  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
+  if (!cikPadded) {
+    const tickerIndex = await getEdgarTickerCikMap().catch(() => null);
+    const code = tickerIndex ? "NO_SEC_REGISTRANT" : "SEC_LOOKUP_UNAVAILABLE";
+    const message = tickerIndex ? `SEC has no registrant CIK for ticker ${upper}.` : `SEC's ticker index could not be read, so ${upper} was not resolved to a CIK; retry.`;
+    return JSON.stringify({ ticker: upper, status: code, code, retryable: !tickerIndex, message });
+  }
+  if (!submissions) {
+    return JSON.stringify({ ticker: upper, status: "SEC_LOOKUP_UNAVAILABLE", code: "SEC_LOOKUP_UNAVAILABLE", retryable: true, message: "SEC submissions could not be read; retry." });
+  }
+  const cikInt = parseInt(cikPadded, 10);
+  const picks = earningsReleasePicks(submissions, cikInt, limit);
+  const releases: ReleaseText[] = [];
+  // Four at a time keeps within SEC's request-rate guidance.
+  for (let i = 0; i < picks.length; i += 4) {
+    releases.push(...await Promise.all(picks.slice(i, i + 4).map(async (p) => ({
+      filingDate: p.filingDate, accessionNumber: p.accessionNumber, ...(await readReleaseText(cikInt, p.accessionNumber, p.primaryUrl)),
+    }))));
+  }
+  const companyfacts = await edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`).catch(() => null);
+  const out = guidanceHistory(ticker, releases, companyfacts);
+  const unread = releases.filter((r) => r.status !== "READ").length;
+  const warnings: Record<string, unknown>[] = [];
+  if (picks.length === 0) warnings.push({ code: "NO_EARNINGS_RELEASES_FOUND", message: "No 8-K reporting results of operations (Item 2.02) is in SEC's recent submissions.", severity: "warning" });
+  if (unread > 0) warnings.push({ code: "RELEASE_TEXT_NOT_AVAILABLE", message: `${unread} of ${releases.length} earnings releases could not be read from SEC; their guidance is missing, not withdrawn. Retry.`, severity: "warning" });
+  if (!companyfacts) warnings.push({ code: "ACTUALS_NOT_READ", message: "SEC companyfacts could not be read, so outcomes were not evaluated; retry.", severity: "warning" });
+  out.status = picks.length === 0 ? "NO_EARNINGS_RELEASES_FOUND" : unread === releases.length ? "RELEASE_TEXT_NOT_AVAILABLE" : unread > 0 || !companyfacts ? "PARTIAL" : "OK";
+  out.retryable = unread > 0 || !companyfacts;
+  out.warnings = warnings;
+  return JSON.stringify(out);
 }
 
 export async function extractManagementCommentary(

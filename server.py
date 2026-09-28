@@ -61,6 +61,8 @@ from yfmcp import capital_structure as _cs
 from yfmcp import valuation as _vl
 from yfmcp import sec_facts as _sf
 from yfmcp import extraction_rules as _er
+from yfmcp import driver_ledger as _dl
+from yfmcp import guidance_history as _gh
 from yfmcp.clients.edgar import (
     _SEC_REQUIRED_UA, _SMOKE_TICKER_CIK_FALLBACKS,
     _resolve_cik_for_ticker, _get_submissions_for_ticker,
@@ -9727,6 +9729,163 @@ async def extract_funding_capex_schedule(ticker: str, filing_type: str = "latest
     )
     if truncated:
         out["warnings"].append({"code": "FILING_READ_TRUNCATED", "message": "The filing exceeded the read limit; facts past that point were not parsed.", "severity": "warning"})
+    return json.dumps(out)
+
+
+_DRIVER_SEARCH_TERMS = [
+    "capacity", "backlog", "bookings", "deliveries", "shipments", "customers", "subscribers", "launched", "deployed",
+    "production", "utilization", "average selling price", "employees", "remaining performance obligations",
+]
+
+
+def _earnings_release_picks(subs: dict, cik_int: int, limit: int) -> list[dict]:
+    """The newest earnings-release 8-Ks (Item 2.02, results of operations) in SEC's recent submissions."""
+    recent = (subs.get("filings") or {}).get("recent") or {}
+
+    def at(key: str, i: int) -> str:
+        values = recent.get(key) or []
+        return str(values[i] or "") if i < len(values) else ""
+
+    picks: list[dict] = []
+    for i, form in enumerate(recent.get("form") or []):
+        if len(picks) >= limit:
+            break
+        if str(form or "").upper() != "8-K" or "2.02" not in at("items", i):
+            continue
+        acc, doc = at("accessionNumber", i), at("primaryDocument", i)
+        if not acc or not doc:
+            continue
+        picks.append({"filingDate": at("filingDate", i), "accessionNumber": acc,
+                      "primaryUrl": f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc.replace('-', '')}/{doc}"})
+    return picks
+
+
+async def _read_release_text(cik_int: int, accession_number: str, primary_url: str) -> dict:
+    """An earnings-release 8-K's text: EX-99.1 when the index names one, else the 8-K itself."""
+    from yfmcp.tools.earnings import _resolve_ex991_url
+    try:
+        ex991 = await _resolve_ex991_url(accession_number, cik_int)
+    except Exception:  # noqa: BLE001 - fall back to the 8-K document
+        ex991 = None
+    url = ex991 or primary_url
+    try:
+        html = await _edgar_get_html(url, max_bytes=5_000_000)
+    except Exception:  # noqa: BLE001 - reported as unread
+        html = None
+    if not html:
+        return {"url": url, "status": "NOT_READ", "text": None}
+    return {"url": url, "status": "READ", "text": _strip_html_tags(_sanitize_sec_html(html))}
+
+
+@yfinance_server.tool(
+    name="extract_operating_driver_ledger",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_operating_driver_ledger"],
+    description="Operating drivers as the company discloses them: SEC XBRL series (revenue, gross profit, R&D, capex, remaining performance obligations, contract liabilities; newest filing per period, year-to-date periods kept as filed), the filer's own tagged KPIs from its latest periodic filing, and filing and earnings-release statements with figures by category (capacity, production, deliveries, launches and deployments, customers, backlog and bookings, utilization, pricing, yield, headcount), each marked REPORTED_ACTUAL, TARGET_OR_PLAN or UNCLEAR with timing and the quoted source. Untagged drivers are listed as not reported and unread sources as not read; nothing is derived or annualized. Evidence only.",
+)
+async def extract_operating_driver_ledger(ticker: str, filing_type: str = "latest", accession_number: str | None = None) -> str:
+    filings, error = await _resolve_periodic_filings(ticker, filing_type, accession_number)
+    if error:
+        return json.dumps({"ticker": ticker, **error})
+    _, primary = filings[0]
+    cik_padded, subs = await _get_submissions_for_ticker(ticker)
+
+    async def release_text() -> dict:
+        # The newest results-of-operations 8-K, as in get_guidance_history.
+        picks = _earnings_release_picks(subs, int(cik_padded), 1) if cik_padded and subs else []
+        if not picks:
+            return {"status": "RELEASE_NOT_RESOLVED", "url": None, "filingDate": None, "accessionNumber": None, "text": None}
+        read = await _read_release_text(int(cik_padded), picks[0]["accessionNumber"], picks[0]["primaryUrl"])
+        return {**read, "filingDate": picks[0]["filingDate"], "accessionNumber": picks[0]["accessionNumber"]}
+
+    async def companyfacts() -> dict | None:
+        return await _edgar_get_company_facts(cik_padded) if cik_padded else None
+
+    loaded, matches, facts, release = await asyncio.gather(
+        _ixbrl_source("primary", primary),
+        _filing_text_matches(ticker, primary, _DRIVER_SEARCH_TERMS, 30, 700),
+        companyfacts(),
+        release_text(),
+        return_exceptions=True,
+    )
+    loaded = None if isinstance(loaded, BaseException) else loaded
+    matches = [] if isinstance(matches, BaseException) else matches
+    facts = None if isinstance(facts, BaseException) else facts
+    if isinstance(release, BaseException):
+        release = {"status": "RELEASE_NOT_RESOLVED", "url": None, "filingDate": None, "accessionNumber": None, "text": None}
+    statements = []
+    if isinstance(release.get("text"), str):
+        statements.append({"contextText": release["text"], "sectionHeading": None, "documentUrl": release.get("url"),
+                           "filingDate": release.get("filingDate"), "accessionNumber": release.get("accessionNumber"), "source": "EARNINGS_RELEASE"})
+    statements += [{"contextText": m.context_text, "sectionHeading": m.section_heading, "documentUrl": m.document_url,
+                    "filingDate": m.filing_date, "accessionNumber": m.accession_number, "source": "PERIODIC_FILING"} for m in matches]
+    source, truncated = loaded if loaded else (None, False)
+    out = _dl.operating_driver_ledger(
+        ticker=ticker,
+        companyfacts=facts,
+        inline_facts=[{"name": f.name, "unit": f.unit, "value": f.value, "periodStart": f.period_start, "periodEnd": f.period_end, "dims": f.dims}
+                      for f in source.doc.facts] if source else None,
+        filing={"filingType": primary["filingType"], "filingDate": primary["filingDate"], "accessionNumber": primary["accessionNumber"],
+                "documentUrl": primary["documentUrl"], "status": "READ" if source else "NOT_READ", "textMatches": len(matches)},
+        release={"filingDate": release.get("filingDate"), "accessionNumber": release.get("accessionNumber"), "url": release.get("url"), "status": release["status"]},
+        statements=statements,
+    )
+    warnings = []
+    if not source:
+        warnings.append({"code": "FILING_TEXT_NOT_AVAILABLE", "message": "The periodic filing could not be read from SEC, so company-specific series were not read; retry.", "severity": "warning"})
+    elif truncated:
+        warnings.append({"code": "FILING_READ_TRUNCATED", "message": "The filing exceeded the read limit; facts past that point were not parsed.", "severity": "warning"})
+    if not facts:
+        warnings.append({"code": "COMPANYFACTS_NOT_AVAILABLE", "message": "SEC companyfacts could not be read, so standard driver series were not read; retry.", "severity": "warning"})
+    if release["status"] == "NOT_READ":
+        warnings.append({"code": "RELEASE_TEXT_NOT_AVAILABLE", "message": f"The earnings release {release.get('url')} could not be read from SEC; retry.", "severity": "warning"})
+    elif release["status"] == "RELEASE_NOT_RESOLVED":
+        warnings.append({"code": "RELEASE_NOT_RESOLVED", "message": "No SEC earnings release was resolved, so release statements were not read.", "severity": "warning"})
+    out["status"] = "PARTIAL" if any(w["code"] not in ("FILING_READ_TRUNCATED", "RELEASE_NOT_RESOLVED") for w in warnings) else "OK"
+    out["retryable"] = not source or not facts or release["status"] == "NOT_READ"
+    out["warnings"] = warnings
+    return json.dumps(out)
+
+
+@yfinance_server.tool(
+    name="get_guidance_history",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_guidance_history"],
+    description="Company guidance across recent earnings releases (SEC 8-K Item 2.02, EX-99.1): each revenue, gross-margin and EPS range with its stated target period and source; revisions between consecutive releases for the same metric and period (INITIATED, RAISED, LOWERED, NARROWED, WIDENED, REAFFIRMED, WITHDRAWN); and outcomes comparing the later reported SEC XBRL actual with the first and last range (BELOW, WITHIN, ABOVE). Ranges without a stated period are listed but not compared; unread releases are reported, never treated as withdrawn. Evidence only.",
+)
+async def get_guidance_history(ticker: str, max_releases: int = 8) -> str:
+    limit = _clamp_int(max_releases, 8, 1, 12)
+    upper = ticker.upper()
+    cik_padded, subs = await _get_submissions_for_ticker(ticker)
+    if not cik_padded:
+        ticker_index = await _load_edgar_tickers()
+        code = "NO_SEC_REGISTRANT" if ticker_index else "SEC_LOOKUP_UNAVAILABLE"
+        message = (f"SEC has no registrant CIK for ticker {upper}." if ticker_index
+                   else f"SEC's ticker index could not be read, so {upper} was not resolved to a CIK; retry.")
+        return json.dumps({"ticker": upper, "status": code, "code": code, "retryable": not ticker_index, "message": message})
+    if not subs:
+        return json.dumps({"ticker": upper, "status": "SEC_LOOKUP_UNAVAILABLE", "code": "SEC_LOOKUP_UNAVAILABLE", "retryable": True,
+                           "message": "SEC submissions could not be read; retry."})
+    cik_int = int(cik_padded)
+    picks = _earnings_release_picks(subs, cik_int, limit)
+    releases = []
+    # Four at a time keeps within SEC's request-rate guidance.
+    for i in range(0, len(picks), 4):
+        batch = picks[i:i + 4]
+        reads = await asyncio.gather(*(_read_release_text(cik_int, p["accessionNumber"], p["primaryUrl"]) for p in batch))
+        releases += [{"filingDate": p["filingDate"], "accessionNumber": p["accessionNumber"], **r} for p, r in zip(batch, reads)]
+    facts = await _edgar_get_company_facts(cik_padded)
+    out = _gh.guidance_history(ticker, releases, facts)
+    unread = len([r for r in releases if r["status"] != "READ"])
+    warnings = []
+    if not picks:
+        warnings.append({"code": "NO_EARNINGS_RELEASES_FOUND", "message": "No 8-K reporting results of operations (Item 2.02) is in SEC's recent submissions.", "severity": "warning"})
+    if unread:
+        warnings.append({"code": "RELEASE_TEXT_NOT_AVAILABLE", "message": f"{unread} of {len(releases)} earnings releases could not be read from SEC; their guidance is missing, not withdrawn. Retry.", "severity": "warning"})
+    if not facts:
+        warnings.append({"code": "ACTUALS_NOT_READ", "message": "SEC companyfacts could not be read, so outcomes were not evaluated; retry.", "severity": "warning"})
+    out["status"] = ("NO_EARNINGS_RELEASES_FOUND" if not picks else "RELEASE_TEXT_NOT_AVAILABLE" if unread == len(releases)
+                     else "PARTIAL" if unread or not facts else "OK")
+    out["retryable"] = bool(unread) or not facts
+    out["warnings"] = warnings
     return json.dumps(out)
 
 

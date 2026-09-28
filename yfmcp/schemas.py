@@ -828,6 +828,8 @@ _TOOL_OUTPUT_SCHEMAS.setdefault("compare_peer_valuations", _SIMPLE_OUTPUT_SCHEMA
 _TOOL_OUTPUT_SCHEMAS.setdefault("extract_capital_structure", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("get_share_count_scenarios", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("extract_funding_capex_schedule", _SIMPLE_OUTPUT_SCHEMA)
+_TOOL_OUTPUT_SCHEMAS.setdefault("extract_operating_driver_ledger", _SIMPLE_OUTPUT_SCHEMA)
+_TOOL_OUTPUT_SCHEMAS.setdefault("get_guidance_history", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("extract_analyst_valuation_methods", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("get_consensus_forecast_curve", _SIMPLE_OUTPUT_SCHEMA)
 _TOOL_OUTPUT_SCHEMAS.setdefault("get_eps_revisions", _SIMPLE_OUTPUT_SCHEMA)

@@ -1,0 +1,359 @@
+/**
+ * Guidance history (2.5.3), shared with yfmcp/guidance_history.py (parity in
+ * scripts/test_guidance_and_drivers.py). Pure.
+ *
+ * Every guidance range is read from an earnings-release exhibit with its
+ * target period and source; revisions compare consecutive releases for the
+ * same metric and target period; outcomes compare the company's later
+ * reported actual (XBRL) with the first and last range. Nothing is inferred:
+ * a range whose target period the release does not state is kept but not
+ * compared, and an actual that cannot be matched to the period is not
+ * evaluated.
+ */
+
+import { AUTHORITY_BOUNDARY } from "./evidence.js";
+import { guidanceRanges } from "./extraction-rules.js";
+import { REVENUE_CONCEPTS } from "./sec-facts.js";
+
+type Rec = Record<string, unknown>;
+
+export interface ReleaseText {
+  filingDate: string;
+  accessionNumber: string;
+  url: string | null;
+  status: string;
+  text: string | null;
+}
+
+const SCALE: Record<string, number> = { billion: 1e9, bn: 1e9, million: 1e6, m: 1e6, thousand: 1e3, k: 1e3 };
+
+/** "150.0 million" -> 150000000; the scale of the other end of a range applies when this end has none. */
+export function parseAmount(text: string, fallbackUnit: string | null = null): { value: number | null; unit: string | null } {
+  const m = /^\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(billion|million|thousand|bn|m|k)?\s*$/i.exec(text);
+  if (!m) return { value: null, unit: null };
+  const unit = (m[2] ?? fallbackUnit ?? "").toLowerCase() || null;
+  const base = parseFloat(m[1].replace(/,/g, ""));
+  return { value: unit ? base * (SCALE[unit] ?? 1) : base, unit };
+}
+
+function unitOf(text: string): string | null {
+  const m = /(billion|million|thousand|bn|m|k)\s*$/i.exec(text.trim());
+  return m ? m[1].toLowerCase() : null;
+}
+
+const ORDINAL: Record<string, number> = { first: 1, second: 2, third: 3, fourth: 4 };
+
+function year4(text: string | undefined): number | null {
+  if (!text) return null;
+  const n = parseInt(text, 10);
+  return text.length === 2 ? 2000 + n : n;
+}
+
+/**
+ * The target period a context names for the guidance ending at `anchor`: the
+ * closest named before the anchor, else the first after it. Quarters and
+ * halves ("first quarter of fiscal 2026", "second-half 2025", "2H25") win
+ * over the fiscal year inside them.
+ */
+export function guidanceTargetPeriod(context: string, anchor: number = context.length): Rec {
+  type Hit = { index: number; end: number; fiscalYear: number | null; quarter: number | null; half: number | null };
+  const found: Hit[] = [];
+  const add = (m: RegExpMatchArray, fiscalYear: number | null, quarter: number | null, half: number | null) => {
+    const index = m.index ?? 0;
+    found.push({ index, end: index + m[0].length, fiscalYear, quarter, half });
+  };
+  for (const m of context.matchAll(/\b(?:full[- ]year|fiscal(?: year)?|FY)\s*'?(20\d\d|\d\d)\b/gi)) add(m, year4(m[1]), null, null);
+  for (const m of context.matchAll(/\b(20\d\d)\s+(?:full[- ]year|annual)\b/gi)) add(m, year4(m[1]), null, null);
+  for (const m of context.matchAll(/\b(first|second|third|fourth) quarter(?: of)?(?: fiscal)?(?: year)?\s*(20\d\d)?/gi)) {
+    add(m, year4(m[2]), ORDINAL[m[1].toLowerCase()], null);
+  }
+  for (const m of context.matchAll(/\bQ([1-4])\s*(?:of\s+)?(?:FY)?\s*'?(20\d\d)?\b/g)) add(m, year4(m[2]), Number(m[1]), null);
+  for (const m of context.matchAll(/\b(first|second)[- ]half(?: of)?(?: fiscal)?(?: year)?\s*'?(20\d\d)?\b/gi)) {
+    add(m, year4(m[2]), null, ORDINAL[m[1].toLowerCase()]);
+  }
+  for (const m of context.matchAll(/\b([12])H\s?'?(20\d\d|\d\d)\b/g)) add(m, year4(m[2]), null, Number(m[1]));
+  for (const m of context.matchAll(/\bH([12])\s*'?(20\d\d|\d\d)?\b/g)) add(m, year4(m[2]), null, Number(m[1]));
+  const parts = found.filter((h) => h.quarter != null || h.half != null);
+  const hits = found.filter((h) => h.quarter != null || h.half != null || !parts.some((q) => h.index >= q.index && h.index < q.end));
+  if (hits.length === 0) return { label: null, fiscalYear: null, quarter: null, half: null, basis: "NOT_STATED" };
+  const before = hits.filter((h) => h.index < anchor);
+  const best = before.length > 0
+    ? before.reduce((a, b) => (b.index >= a.index ? b : a))
+    : hits.reduce((a, b) => (b.index < a.index ? b : a));
+  const year = best.fiscalYear != null ? ` ${best.fiscalYear}` : "";
+  const label = best.quarter != null ? `Q${best.quarter}${year}` : best.half != null ? `H${best.half}${year}` : `FY${best.fiscalYear}`;
+  return {
+    label,
+    fiscalYear: best.fiscalYear,
+    quarter: best.quarter,
+    half: best.half,
+    basis: best.fiscalYear == null ? "TEXT_YEAR_NOT_STATED" : "TEXT",
+  };
+}
+
+// Sentence and bullet boundaries, including the " o " bullets SEC-rendered releases carry.
+const WS = "[\\t\\n\\v\\f\\r \\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]";
+const BOUNDARY_SOURCE = `[.!?]${WS}|${WS}[\u2022\u25cf\u25aa\u25e6\u00b7]${WS}|${WS}o${WS}(?=[A-Z])`;
+
+/** [start, end) of the sentence or bullet around an excerpt at [at, at + len). */
+export function sentenceBounds(text: string, at: number, len: number): [number, number] {
+  const windowStart = Math.max(0, at - 300);
+  let start = windowStart;
+  for (const m of text.slice(windowStart, at).matchAll(new RegExp(BOUNDARY_SOURCE, "g"))) start = windowStart + (m.index ?? 0) + m[0].length;
+  const tail = text.slice(at + len, at + len + 200);
+  const m = new RegExp(BOUNDARY_SOURCE).exec(tail);
+  return [start, at + len + (m ? m.index : tail.length)];
+}
+
+/**
+ * The period for an excerpt at [at, at + len): from its own sentence first
+ * ("expects EPS of $0.10 to $0.20 for fiscal 2027"), else from the 200
+ * characters before it (a heading or lead-in). scope says which.
+ */
+export function periodForExcerpt(text: string, at: number, len: number): Rec {
+  const [start, end] = sentenceBounds(text, at, len);
+  const inSentence = guidanceTargetPeriod(text.slice(start, end), at + len - start);
+  if (inSentence.basis !== "NOT_STATED") return { ...inSentence, scope: "SENTENCE" };
+  const preceding = guidanceTargetPeriod(text.slice(Math.max(0, at - 200), at + len));
+  return { ...preceding, scope: preceding.basis === "NOT_STATED" ? null : "PRECEDING_TEXT" };
+}
+
+const WITHDRAWN_RE = /\bwithdr[ae]w(?:s|n|ing)?\b[^.]{0,60}\b(?:guidance|outlook)\b|\b(?:guidance|outlook)\b[^.]{0,60}\bwithdrawn\b|\bsuspend(?:s|ed|ing)?\b[^.]{0,40}\b(?:guidance|outlook)\b/i;
+const REAFFIRM_RE = /\breaffirm(?:s|ed|ing)?\b|\breiterat(?:e|es|ed|ing)\b|\bmaintain(?:s|ed|ing)?\b[^.]{0,30}\b(?:guidance|outlook)\b/i;
+
+/** Guidance ranges stated in one release, each with its target period. */
+export function guidanceEntries(release: ReleaseText): Rec[] {
+  if (release.status !== "READ" || !release.text) return [];
+  const text = release.text;
+  const ranges = guidanceRanges(text);
+  const out: Rec[] = [];
+  for (const metric of ["revenue", "grossMargin", "eps"] as const) {
+    const r = ranges[metric];
+    if (!r) continue;
+    const at = text.indexOf(r.excerpt);
+    const [sStart, sEnd] = sentenceBounds(text, at, r.excerpt.length);
+    const sentence = text.slice(sStart, sEnd);
+    let low: number | null;
+    let high: number | null;
+    let unit: string;
+    if (metric === "revenue") {
+      const fallback = unitOf(r.high) ?? unitOf(r.low);
+      low = parseAmount(r.low, fallback).value;
+      high = parseAmount(r.high, fallback).value;
+      unit = "USD";
+    } else {
+      low = Number(r.low);
+      high = Number(r.high);
+      unit = metric === "eps" ? "USD/share" : "percent";
+    }
+    if (low == null || high == null || !Number.isFinite(low) || !Number.isFinite(high)) continue;
+    out.push({
+      metric,
+      targetPeriod: periodForExcerpt(text, at, r.excerpt.length),
+      low,
+      high,
+      midpoint: (low + high) / 2,
+      unit,
+      statedAction: REAFFIRM_RE.test(sentence) ? "REAFFIRMED_IN_TEXT" : null,
+      releaseDate: release.filingDate,
+      accessionNumber: release.accessionNumber,
+      sourceUrl: release.url,
+      excerpt: r.excerpt.slice(0, 300),
+    });
+  }
+  const withdrawn = WITHDRAWN_RE.exec(text);
+  if (withdrawn) {
+    const at = withdrawn.index;
+    out.push({
+      metric: "any",
+      targetPeriod: periodForExcerpt(text, at, withdrawn[0].length),
+      event: "WITHDRAWN",
+      releaseDate: release.filingDate,
+      accessionNumber: release.accessionNumber,
+      sourceUrl: release.url,
+      excerpt: withdrawn[0].slice(0, 300),
+    });
+  }
+  return out;
+}
+
+/** Code-unit order, as Python compares strings (localeCompare is locale-dependent). */
+function cmp(a: unknown, b: unknown): number {
+  const x = String(a);
+  const y = String(b);
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+function compare(prev: Rec, cur: Rec): string {
+  const eq = (a: unknown, b: unknown) => Math.abs(Number(a) - Number(b)) <= 1e-9 * Math.max(1, Math.abs(Number(a)));
+  if (eq(prev.low, cur.low) && eq(prev.high, cur.high)) return "REAFFIRMED";
+  const pm = Number(prev.midpoint);
+  const cm = Number(cur.midpoint);
+  if (!eq(pm, cm)) return cm > pm ? "RAISED" : "LOWERED";
+  const pw = Number(prev.high) - Number(prev.low);
+  const cw = Number(cur.high) - Number(cur.low);
+  return cw < pw ? "NARROWED" : "WIDENED";
+}
+
+/** Changes between consecutive releases for the same metric and target period. */
+export function guidanceRevisions(entries: Rec[]): Rec[] {
+  const groups = new Map<string, Rec[]>();
+  for (const e of entries) {
+    const tp = e.targetPeriod as Rec;
+    if (e.event || tp.label == null || tp.fiscalYear == null) continue;
+    const key = `${e.metric}|${tp.label}`;
+    groups.set(key, [...(groups.get(key) ?? []), e]);
+  }
+  const out: Rec[] = [];
+  for (const [key, list] of groups) {
+    const sorted = [...list].sort((a, b) => cmp(a.releaseDate, b.releaseDate));
+    const [metric, label] = key.split("|");
+    sorted.forEach((cur, i) => {
+      const prev = i > 0 ? sorted[i - 1] : null;
+      out.push({
+        metric,
+        targetPeriod: label,
+        releaseDate: cur.releaseDate,
+        change: prev ? compare(prev, cur) : "INITIATED",
+        from: prev ? { low: prev.low, high: prev.high, releaseDate: prev.releaseDate } : null,
+        to: { low: cur.low, high: cur.high },
+        accessionNumber: cur.accessionNumber,
+      });
+    });
+  }
+  for (const e of entries) {
+    if (e.event !== "WITHDRAWN") continue;
+    out.push({ metric: "any", targetPeriod: (e.targetPeriod as Rec).label, releaseDate: e.releaseDate, change: "WITHDRAWN", from: null, to: null, accessionNumber: e.accessionNumber });
+  }
+  return out.sort((a, b) => cmp(a.releaseDate, b.releaseDate) || cmp(a.metric, b.metric));
+}
+
+function days(start: string, end: string): number {
+  return Math.round((Date.parse(`${end.slice(0, 10)}T00:00:00Z`) - Date.parse(`${start.slice(0, 10)}T00:00:00Z`)) / 86_400_000);
+}
+
+/**
+ * Reported actuals by period label from companyfacts: FY<year of period end>
+ * for ~1-year durations; Q<n> <year> for ~quarter durations only when every
+ * annual period ends in December (calendar fiscal year). The newest filing of
+ * each period wins.
+ */
+export function actualsFromCompanyFacts(companyfacts: unknown): Rec {
+  const usgaap = (((companyfacts ?? {}) as Rec).facts as Rec | undefined)?.["us-gaap"] as Rec | undefined;
+  const collect = (concepts: string[], unit: string) => {
+    const byPeriod = new Map<string, Rec>();
+    for (const concept of concepts) {
+      const units = ((usgaap?.[concept] as Rec | undefined)?.units ?? {}) as Record<string, Rec[]>;
+      for (const f of units[unit] ?? []) {
+        if (typeof f.start !== "string" || typeof f.end !== "string" || typeof f.val !== "number") continue;
+        if (!/^10-[KQ]/.test(String(f.form ?? ""))) continue;
+        const key = `${f.start}|${f.end}`;
+        const prev = byPeriod.get(key);
+        if (!prev || String(f.filed ?? "") > String(prev.filed ?? "")) byPeriod.set(key, { ...f, concept });
+      }
+    }
+    return [...byPeriod.values()];
+  };
+  const revenue = collect([...REVENUE_CONCEPTS], "USD");
+  const eps = collect(["EarningsPerShareDiluted"], "USD/shares");
+  const annualEnds = [...revenue, ...eps].filter((f) => { const d = days(String(f.start), String(f.end)); return d >= 350 && d <= 380; }).map((f) => String(f.end));
+  const calendarFy = annualEnds.length > 0 && annualEnds.every((e) => e.slice(5, 7) === "12");
+  const label = (f: Rec): string | null => {
+    const d = days(String(f.start), String(f.end));
+    const end = String(f.end);
+    if (d >= 350 && d <= 380) return `FY${end.slice(0, 4)}`;
+    if (d >= 80 && d <= 100 && calendarFy) return `Q${Math.ceil(Number(end.slice(5, 7)) / 3)} ${end.slice(0, 4)}`;
+    // A first half is filed as the six-month year-to-date period; a second half is never filed as a period.
+    if (d >= 170 && d <= 190 && calendarFy && end.slice(5, 7) === "06") return `H1 ${end.slice(0, 4)}`;
+    return null;
+  };
+  const table = (facts: Rec[]) => {
+    const out: Rec = {};
+    for (const f of facts) {
+      const l = label(f);
+      if (l) out[l] = { value: f.val, concept: f.concept, periodStart: f.start, periodEnd: f.end, form: f.form ?? null, filed: f.filed ?? null, accessionNumber: f.accn ?? null };
+    }
+    return out;
+  };
+  // An unread companyfacts is not an unreported actual.
+  return { read: companyfacts != null, revenue: table(revenue), eps: table(eps), calendarFiscalYear: calendarFy };
+}
+
+/** First and last guidance for each metric and target period against the reported actual. */
+export function guidanceOutcomes(entries: Rec[], actuals: Rec): Rec[] {
+  const out: Rec[] = [];
+  const groups = new Map<string, Rec[]>();
+  for (const e of entries) {
+    const tp = e.targetPeriod as Rec;
+    if (e.event || tp.label == null || tp.fiscalYear == null) continue;
+    const key = `${e.metric}|${tp.label}`;
+    groups.set(key, [...(groups.get(key) ?? []), e]);
+  }
+  for (const [key, list] of groups) {
+    const [metric, label] = key.split("|");
+    const sorted = [...list].sort((a, b) => cmp(a.releaseDate, b.releaseDate));
+    const first = sorted[0];
+    const last = sorted[sorted.length - 1];
+    const table = (actuals[metric] ?? null) as Rec | null;
+    const actual = table ? (table[label] as Rec | undefined) ?? null : null;
+    const position = (g: Rec) => {
+      if (!actual) return null;
+      const v = Number(actual.value);
+      return v < Number(g.low) ? "BELOW" : v > Number(g.high) ? "ABOVE" : "WITHIN";
+    };
+    let status = "EVALUATED";
+    if (actuals.read === false && metric !== "grossMargin") status = "ACTUALS_NOT_READ";
+    else if (!table) status = "NOT_EVALUATED_METRIC";
+    else if (!actual) {
+      if (/^H/.test(label) && (label.startsWith("H2") || actuals.calendarFiscalYear !== true)) status = "NOT_EVALUATED_HALF_YEAR";
+      else if (/^Q/.test(label) && actuals.calendarFiscalYear !== true) status = "NOT_EVALUATED_FISCAL_QUARTER_MAPPING";
+      else status = "ACTUAL_NOT_YET_REPORTED";
+    }
+    out.push({
+      metric,
+      targetPeriod: label,
+      status,
+      actual,
+      initialGuidance: { low: first.low, high: first.high, releaseDate: first.releaseDate },
+      lastGuidance: { low: last.low, high: last.high, releaseDate: last.releaseDate },
+      positionVsInitial: position(first),
+      positionVsLast: position(last),
+    });
+  }
+  return out.sort((a, b) => cmp(a.targetPeriod, b.targetPeriod) || cmp(a.metric, b.metric));
+}
+
+export function guidanceHistory(ticker: string, releases: ReleaseText[], companyfacts: unknown): Rec {
+  const entries = releases.flatMap(guidanceEntries);
+  const actuals = actualsFromCompanyFacts(companyfacts);
+  return {
+    ticker: ticker.toUpperCase(),
+    basis: "COMPANY_DISCLOSED",
+    releases: releases.map((r) => ({
+      filingDate: r.filingDate,
+      accessionNumber: r.accessionNumber,
+      url: r.url,
+      status: r.status,
+      guidanceFound: guidanceEntries(r).filter((e) => !e.event).length,
+    })),
+    guidance: entries.filter((e) => !e.event),
+    withdrawals: entries.filter((e) => e.event === "WITHDRAWN"),
+    revisions: guidanceRevisions(entries),
+    outcomes: guidanceOutcomes(entries, actuals),
+    actualsBasis: {
+      revenue: "SEC XBRL revenue concepts, newest filing per period",
+      eps: "us-gaap:EarningsPerShareDiluted, newest filing per period",
+      grossMargin: "not evaluated",
+      periodLabels: "FY<year of period end>; quarters and first halves only for calendar fiscal years; second halves are not filed as a period and are not derived",
+      calendarFiscalYear: actuals.calendarFiscalYear,
+      read: actuals.read,
+    },
+    notes: [
+      "Guidance is read from earnings-release exhibits as written; a range whose target period the release does not state is listed but not compared.",
+      "Revisions compare consecutive releases for the same metric and target period by midpoint, then width.",
+      "Outcomes compare the reported actual with the first and last guidance; nothing is estimated.",
+      "guidanceFound counts ranges stated in text; guidance given only in a table is not read, and a release with none found is not a withdrawal.",
+    ],
+    ...AUTHORITY_BOUNDARY,
+  };
+}

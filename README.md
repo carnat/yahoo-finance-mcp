@@ -154,6 +154,13 @@ selecting a denominator. `extract_funding_capex_schedule` classifies each
 funding and capex amount as contractual, committed, guided,
 awarded-but-contingent or unresolved, with its timing and source. See
 [provider runtime guidance](docs/provider-runtime-guidance.md#share-scenarios-funding-schedule-and-unread-sources-252).
+`get_guidance_history` lists each guidance range across recent earnings
+releases with its stated target period, how it changed from release to
+release, and where the later reported SEC actual landed.
+`extract_operating_driver_ledger` lists operating drivers as disclosed: SEC
+XBRL driver series, the filer's own tagged KPIs, and statements with figures,
+each marked as a reported actual or a target. See
+[provider runtime guidance](docs/provider-runtime-guidance.md#guidance-history-and-operating-drivers-253).
 
 Grouped domains:
 
