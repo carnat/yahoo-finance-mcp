@@ -80,6 +80,8 @@ EXPECTED_CANONICAL = {
     "list_evidence_cuts",
     "get_share_count_scenarios",
     "extract_funding_capex_schedule",
+    "extract_operating_driver_ledger",
+    "get_guidance_history",
     "extract_capital_structure",
     "extract_analyst_valuation_methods",
     "get_uk_company_filings",

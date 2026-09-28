@@ -114,8 +114,8 @@ const AMOUNT = "([0-9][0-9.,]*(?:\\s*(?:billion|million|thousand|bn|m|k))?)";
 const RANGE_SEP = "\\s*(?:to|and|-|\\u2013|\\u2014)\\s*";
 // "full year 2026 revenue guidance of $150.0 million to $200.0 million" (ASTS)
 const REVENUE_FIRST_RE = new RegExp(`\\brevenues?\\s+(?:guidance|outlook|forecast)\\b[^$.]{0,40}\\$\\s*${AMOUNT}${RANGE_SEP}\\$?\\s*${AMOUNT}`, "i");
-// "expects revenue between $X and $Y" / "guidance: revenue of $X to $Y"
-const KEYWORD_FIRST_RE = new RegExp(`(?:expects|guidance|outlook)[^.\\n]{0,120}revenue[^$]{0,25}\\$?\\s*${AMOUNT}${RANGE_SEP}\\$?\\s*${AMOUNT}`, "i");
+// "expects revenue between $X and $Y" / "guidance: revenue of $X to $Y" / "expectations for revenue of $X to $Y" (ASTS)
+const KEYWORD_FIRST_RE = new RegExp(`(?:expects|expectations?|guidance|outlook)[^.\\n]{0,120}revenue[^$]{0,25}\\$?\\s*${AMOUNT}${RANGE_SEP}\\$?\\s*${AMOUNT}`, "i");
 const GROSS_MARGIN_RE = /gross margin[^0-9]{0,20}([0-9]{1,2}(?:\.[0-9]+)?)\s*%\s*(?:to|and|-|–|—)\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%/i;
 const EPS_RE = /(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per share)[^$]{0,25}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|and|-|–|—)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)/i;
 

@@ -202,6 +202,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - compare_peer_valuations: The same multiples for a peer set on one Yahoo basis, with peer medians.
 - get_share_count_scenarios: Share counts under caller-defined scenarios (price, per-instrument treatment, known issuance); every instrument included/excluded/unresolved with mechanics; no denominator selected.
 - extract_funding_capex_schedule: Contractual schedules by due period and funding/capex statements classified CONTRACTUAL, COMPANY_DISCLOSED_COMMITTED, COMPANY_GUIDED, AWARDED_CONTINGENT or UNRESOLVED, with timing and source.
+- extract_operating_driver_ledger: Operating drivers as disclosed: XBRL driver series, the filer's own tagged KPIs, and filing/release statements with figures by category, each REPORTED_ACTUAL, TARGET_OR_PLAN or UNCLEAR with timing and source; nothing derived.
 - analyze_share_count_trend: Historical shares outstanding for dilution/buyback questions; Yahoo context, not filing confirmation.
 - analyze_credit_health: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag.
 - get_corporate_actions: Dividends, splits, and fund capital-gain distribution history.
@@ -270,6 +271,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - index_earnings_release: Build a section/table index for an earnings release.
 - extract_earnings_metrics: Extract reported revenue, EPS, gross margin, operating income, FCF, capex.
 - extract_guidance: Extract company-provided guidance ranges.
+- get_guidance_history: Guidance ranges across recent earnings releases with target period, revisions between releases and outcomes against the later reported SEC actual; unread releases stay visible.
 - extract_management_commentary: Extract topic-specific management commentary with evidence excerpts.
 - compare_earnings_actual_vs_estimate: Compare actual earnings vs analyst estimates with surprise %.
 

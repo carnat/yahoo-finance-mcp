@@ -1,0 +1,408 @@
+"""Guidance history (2.5.3), mirroring worker/src/guidance-history.ts.
+
+Parity is tested in scripts/test_guidance_and_drivers.py. Pure.
+
+Every guidance range is read from an earnings-release exhibit with its
+target period and source; revisions compare consecutive releases for the
+same metric and target period; outcomes compare the company's later
+reported actual (XBRL) with the first and last range. Nothing is inferred:
+a range whose target period the release does not state is kept but not
+compared, and an actual that cannot be matched to the period is not
+evaluated.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import math
+import re
+from typing import Any
+
+from yfmcp.evidence import AUTHORITY_BOUNDARY
+from yfmcp.extraction_rules import guidance_ranges
+from yfmcp.sec_facts import REVENUE_CONCEPTS
+
+_F = re.I | re.A
+
+_SCALE = {"billion": 1e9, "bn": 1e9, "million": 1e6, "m": 1e6, "thousand": 1e3, "k": 1e3}
+_AMOUNT_RE = re.compile(r"\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(billion|million|thousand|bn|m|k)?\s*", _F)
+_UNIT_RE = re.compile(r"(billion|million|thousand|bn|m|k)\s*$", _F)
+
+
+def parse_amount(text: str, fallback_unit: str | None = None) -> dict:
+    """"150.0 million" -> 150000000; the scale of the other end of a range applies when this end has none."""
+    m = _AMOUNT_RE.fullmatch(text)
+    if not m:
+        return {"value": None, "unit": None}
+    unit = (m.group(2) or fallback_unit or "").lower() or None
+    base = float(m.group(1).replace(",", ""))
+    return {"value": base * _SCALE.get(unit, 1) if unit else base, "unit": unit}
+
+
+def _unit_of(text: str) -> str | None:
+    m = _UNIT_RE.search(text.strip())
+    return m.group(1).lower() if m else None
+
+
+_ORDINAL = {"first": 1, "second": 2, "third": 3, "fourth": 4}
+_FY_RE = re.compile(r"\b(?:full[- ]year|fiscal(?: year)?|FY)\s*'?(20\d\d|\d\d)\b", _F)
+_YEAR_FIRST_RE = re.compile(r"\b(20\d\d)\s+(?:full[- ]year|annual)\b", _F)
+_ORDINAL_QUARTER_RE = re.compile(r"\b(first|second|third|fourth) quarter(?: of)?(?: fiscal)?(?: year)?\s*(20\d\d)?", _F)
+_Q_RE = re.compile(r"\bQ([1-4])\s*(?:of\s+)?(?:FY)?\s*'?(20\d\d)?\b", re.A)
+_HALF_WORD_RE = re.compile(r"\b(first|second)[- ]half(?: of)?(?: fiscal)?(?: year)?\s*'?(20\d\d)?\b", _F)
+_HALF_LEAD_RE = re.compile(r"\b([12])H\s?'?(20\d\d|\d\d)\b", re.A)
+_HALF_TRAIL_RE = re.compile(r"\bH([12])\s*'?(20\d\d|\d\d)?\b", re.A)
+
+
+def _year4(text: str | None) -> int | None:
+    if not text:
+        return None
+    n = int(text)
+    return 2000 + n if len(text) == 2 else n
+
+
+def guidance_target_period(context: str, anchor: int | None = None) -> dict:
+    """The target period a context names for the guidance ending at anchor.
+
+    The closest named before the anchor, else the first after it. Quarters
+    and halves ("first quarter of fiscal 2026", "second-half 2025", "2H25")
+    win over the fiscal year inside them.
+    """
+    anchor = len(context) if anchor is None else anchor
+    found: list[dict] = []
+
+    def add(m: re.Match, fiscal_year: int | None, quarter: int | None, half: int | None) -> None:
+        found.append({"index": m.start(), "end": m.end(), "fiscalYear": fiscal_year, "quarter": quarter, "half": half})
+
+    for m in _FY_RE.finditer(context):
+        add(m, _year4(m.group(1)), None, None)
+    for m in _YEAR_FIRST_RE.finditer(context):
+        add(m, _year4(m.group(1)), None, None)
+    for m in _ORDINAL_QUARTER_RE.finditer(context):
+        add(m, _year4(m.group(2)), _ORDINAL[m.group(1).lower()], None)
+    for m in _Q_RE.finditer(context):
+        add(m, _year4(m.group(2)), int(m.group(1)), None)
+    for m in _HALF_WORD_RE.finditer(context):
+        add(m, _year4(m.group(2)), None, _ORDINAL[m.group(1).lower()])
+    for m in _HALF_LEAD_RE.finditer(context):
+        add(m, _year4(m.group(2)), None, int(m.group(1)))
+    for m in _HALF_TRAIL_RE.finditer(context):
+        add(m, _year4(m.group(2)), None, int(m.group(1)))
+    parts = [h for h in found if h["quarter"] is not None or h["half"] is not None]
+    hits = [h for h in found if h["quarter"] is not None or h["half"] is not None
+            or not any(q["index"] <= h["index"] < q["end"] for q in parts)]
+    if not hits:
+        return {"label": None, "fiscalYear": None, "quarter": None, "half": None, "basis": "NOT_STATED"}
+    before = [h for h in hits if h["index"] < anchor]
+    if before:
+        best = before[0]
+        for h in before[1:]:
+            if h["index"] >= best["index"]:
+                best = h
+    else:
+        best = hits[0]
+        for h in hits[1:]:
+            if h["index"] < best["index"]:
+                best = h
+    year = f" {best['fiscalYear']}" if best["fiscalYear"] is not None else ""
+    if best["quarter"] is not None:
+        label = f"Q{best['quarter']}{year}"
+    elif best["half"] is not None:
+        label = f"H{best['half']}{year}"
+    else:
+        label = f"FY{best['fiscalYear']}"
+    return {
+        "label": label,
+        "fiscalYear": best["fiscalYear"],
+        "quarter": best["quarter"],
+        "half": best["half"],
+        "basis": "TEXT_YEAR_NOT_STATED" if best["fiscalYear"] is None else "TEXT",
+    }
+
+
+# Sentence and bullet boundaries, including the " o " bullets SEC-rendered releases carry.
+_WS = "[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]"
+_BOUNDARY_RE = re.compile(f"[.!?]{_WS}|{_WS}[\u2022\u25cf\u25aa\u25e6\u00b7]{_WS}|{_WS}o{_WS}(?=[A-Z])")
+
+
+def sentence_bounds(text: str, at: int, length: int) -> tuple[int, int]:
+    """[start, end) of the sentence or bullet around an excerpt at [at, at + length)."""
+    window_start = max(0, at - 300)
+    start = window_start
+    for m in _BOUNDARY_RE.finditer(text[window_start:at]):
+        start = window_start + m.end()
+    tail = text[at + length: at + length + 200]
+    m = _BOUNDARY_RE.search(tail)
+    return start, at + length + (m.start() if m else len(tail))
+
+
+def period_for_excerpt(text: str, at: int, length: int) -> dict:
+    """The period for an excerpt at [at, at + length).
+
+    From its own sentence first ("expects EPS of $0.10 to $0.20 for fiscal
+    2027"), else from the 200 characters before it (a heading or lead-in).
+    scope says which.
+    """
+    start, end = sentence_bounds(text, at, length)
+    in_sentence = guidance_target_period(text[start:end], at + length - start)
+    if in_sentence["basis"] != "NOT_STATED":
+        return {**in_sentence, "scope": "SENTENCE"}
+    preceding = guidance_target_period(text[max(0, at - 200): at + length])
+    return {**preceding, "scope": None if preceding["basis"] == "NOT_STATED" else "PRECEDING_TEXT"}
+
+
+_WITHDRAWN_RE = re.compile(
+    r"\bwithdr[ae]w(?:s|n|ing)?\b[^.]{0,60}\b(?:guidance|outlook)\b|\b(?:guidance|outlook)\b[^.]{0,60}\bwithdrawn\b"
+    r"|\bsuspend(?:s|ed|ing)?\b[^.]{0,40}\b(?:guidance|outlook)\b",
+    _F,
+)
+_REAFFIRM_RE = re.compile(
+    r"\breaffirm(?:s|ed|ing)?\b|\breiterat(?:e|es|ed|ing)\b|\bmaintain(?:s|ed|ing)?\b[^.]{0,30}\b(?:guidance|outlook)\b", _F
+)
+
+
+def _number(text: str) -> float | None:
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def guidance_entries(release: dict) -> list[dict]:
+    """Guidance ranges stated in one release, each with its target period."""
+    text = release.get("text")
+    if release.get("status") != "READ" or not text:
+        return []
+    ranges = guidance_ranges(text)
+    out: list[dict] = []
+    for metric in ("revenue", "grossMargin", "eps"):
+        r = ranges.get(metric)
+        if not r:
+            continue
+        at = text.find(r["excerpt"])
+        s_start, s_end = sentence_bounds(text, at, len(r["excerpt"]))
+        sentence = text[s_start:s_end]
+        if metric == "revenue":
+            fallback = _unit_of(r["high"]) or _unit_of(r["low"])
+            low = parse_amount(r["low"], fallback)["value"]
+            high = parse_amount(r["high"], fallback)["value"]
+            unit = "USD"
+        else:
+            low = _number(r["low"])
+            high = _number(r["high"])
+            unit = "USD/share" if metric == "eps" else "percent"
+        if low is None or high is None or not math.isfinite(low) or not math.isfinite(high):
+            continue
+        out.append({
+            "metric": metric,
+            "targetPeriod": period_for_excerpt(text, at, len(r["excerpt"])),
+            "low": low,
+            "high": high,
+            "midpoint": (low + high) / 2,
+            "unit": unit,
+            "statedAction": "REAFFIRMED_IN_TEXT" if _REAFFIRM_RE.search(sentence) else None,
+            "releaseDate": release.get("filingDate"),
+            "accessionNumber": release.get("accessionNumber"),
+            "sourceUrl": release.get("url"),
+            "excerpt": r["excerpt"][:300],
+        })
+    withdrawn = _WITHDRAWN_RE.search(text)
+    if withdrawn:
+        at = withdrawn.start()
+        out.append({
+            "metric": "any",
+            "targetPeriod": period_for_excerpt(text, at, len(withdrawn.group(0))),
+            "event": "WITHDRAWN",
+            "releaseDate": release.get("filingDate"),
+            "accessionNumber": release.get("accessionNumber"),
+            "sourceUrl": release.get("url"),
+            "excerpt": withdrawn.group(0)[:300],
+        })
+    return out
+
+
+def _eq(a: float, b: float) -> bool:
+    return abs(a - b) <= 1e-9 * max(1, abs(a))
+
+
+def _compare(prev: dict, cur: dict) -> str:
+    if _eq(prev["low"], cur["low"]) and _eq(prev["high"], cur["high"]):
+        return "REAFFIRMED"
+    pm, cm = prev["midpoint"], cur["midpoint"]
+    if not _eq(pm, cm):
+        return "RAISED" if cm > pm else "LOWERED"
+    return "NARROWED" if (cur["high"] - cur["low"]) < (prev["high"] - prev["low"]) else "WIDENED"
+
+
+def _groups(entries: list[dict]) -> dict[tuple[str, str], list[dict]]:
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for e in entries:
+        tp = e["targetPeriod"]
+        if e.get("event") or tp.get("label") is None or tp.get("fiscalYear") is None:
+            continue
+        groups.setdefault((e["metric"], tp["label"]), []).append(e)
+    return groups
+
+
+def guidance_revisions(entries: list[dict]) -> list[dict]:
+    """Changes between consecutive releases for the same metric and target period."""
+    out: list[dict] = []
+    for (metric, label), items in _groups(entries).items():
+        ordered = sorted(items, key=lambda e: str(e["releaseDate"]))
+        for i, cur in enumerate(ordered):
+            prev = ordered[i - 1] if i > 0 else None
+            out.append({
+                "metric": metric,
+                "targetPeriod": label,
+                "releaseDate": cur["releaseDate"],
+                "change": _compare(prev, cur) if prev else "INITIATED",
+                "from": {"low": prev["low"], "high": prev["high"], "releaseDate": prev["releaseDate"]} if prev else None,
+                "to": {"low": cur["low"], "high": cur["high"]},
+                "accessionNumber": cur["accessionNumber"],
+            })
+    for e in entries:
+        if e.get("event") != "WITHDRAWN":
+            continue
+        out.append({"metric": "any", "targetPeriod": e["targetPeriod"]["label"], "releaseDate": e["releaseDate"], "change": "WITHDRAWN",
+                    "from": None, "to": None, "accessionNumber": e["accessionNumber"]})
+    return sorted(out, key=lambda r: (str(r["releaseDate"]), str(r["metric"])))
+
+
+def _days(start: str, end: str) -> int:
+    return (_dt.date.fromisoformat(end[:10]) - _dt.date.fromisoformat(start[:10])).days
+
+
+def actuals_from_company_facts(companyfacts: Any) -> dict:
+    """Reported actuals by period label from companyfacts.
+
+    FY<year of period end> for ~1-year durations; Q<n> <year> for ~quarter
+    durations only when every annual period ends in December (calendar fiscal
+    year). The newest filing of each period wins.
+    """
+    facts = (companyfacts or {}).get("facts") if isinstance(companyfacts, dict) else None
+    usgaap = (facts or {}).get("us-gaap") or {}
+
+    def collect(concepts: list[str], unit: str) -> list[dict]:
+        by_period: dict[str, dict] = {}
+        for concept in concepts:
+            units = (usgaap.get(concept) or {}).get("units") or {}
+            for f in units.get(unit) or []:
+                val = f.get("val")
+                if not isinstance(f.get("start"), str) or not isinstance(f.get("end"), str):
+                    continue
+                if isinstance(val, bool) or not isinstance(val, (int, float)):
+                    continue
+                if not re.match(r"10-[KQ]", str(f.get("form") or "")):
+                    continue
+                key = f"{f['start']}|{f['end']}"
+                prev = by_period.get(key)
+                if prev is None or str(f.get("filed") or "") > str(prev.get("filed") or ""):
+                    by_period[key] = {**f, "concept": concept}
+        return list(by_period.values())
+
+    revenue = collect(list(REVENUE_CONCEPTS), "USD")
+    eps = collect(["EarningsPerShareDiluted"], "USD/shares")
+    annual_ends = [f["end"] for f in revenue + eps if 350 <= _days(f["start"], f["end"]) <= 380]
+    calendar_fy = bool(annual_ends) and all(e[5:7] == "12" for e in annual_ends)
+
+    def label(f: dict) -> str | None:
+        d = _days(f["start"], f["end"])
+        end = f["end"]
+        if 350 <= d <= 380:
+            return f"FY{end[:4]}"
+        if 80 <= d <= 100 and calendar_fy:
+            return f"Q{math.ceil(int(end[5:7]) / 3)} {end[:4]}"
+        # A first half is filed as the six-month year-to-date period; a second half is never filed as a period.
+        if 170 <= d <= 190 and calendar_fy and end[5:7] == "06":
+            return f"H1 {end[:4]}"
+        return None
+
+    def table(items: list[dict]) -> dict:
+        out: dict = {}
+        for f in items:
+            lab = label(f)
+            if lab:
+                out[lab] = {"value": f["val"], "concept": f["concept"], "periodStart": f["start"], "periodEnd": f["end"],
+                            "form": f.get("form"), "filed": f.get("filed"), "accessionNumber": f.get("accn")}
+        return out
+
+    # An unread companyfacts is not an unreported actual.
+    return {"read": companyfacts is not None, "revenue": table(revenue), "eps": table(eps), "calendarFiscalYear": calendar_fy}
+
+
+def guidance_outcomes(entries: list[dict], actuals: dict) -> list[dict]:
+    """First and last guidance for each metric and target period against the reported actual."""
+    out: list[dict] = []
+    for (metric, label), items in _groups(entries).items():
+        ordered = sorted(items, key=lambda e: str(e["releaseDate"]))
+        first, last = ordered[0], ordered[-1]
+        table = actuals.get(metric)
+        actual = table.get(label) if table else None
+
+        def position(g: dict, actual: dict | None = actual) -> str | None:
+            if not actual:
+                return None
+            v = actual["value"]
+            return "BELOW" if v < g["low"] else "ABOVE" if v > g["high"] else "WITHIN"
+
+        status = "EVALUATED"
+        if actuals.get("read") is False and metric != "grossMargin":
+            status = "ACTUALS_NOT_READ"
+        elif not table:
+            status = "NOT_EVALUATED_METRIC"
+        elif not actual:
+            if label.startswith("H") and (label.startswith("H2") or actuals.get("calendarFiscalYear") is not True):
+                status = "NOT_EVALUATED_HALF_YEAR"
+            elif label.startswith("Q") and actuals.get("calendarFiscalYear") is not True:
+                status = "NOT_EVALUATED_FISCAL_QUARTER_MAPPING"
+            else:
+                status = "ACTUAL_NOT_YET_REPORTED"
+        out.append({
+            "metric": metric,
+            "targetPeriod": label,
+            "status": status,
+            "actual": actual,
+            "initialGuidance": {"low": first["low"], "high": first["high"], "releaseDate": first["releaseDate"]},
+            "lastGuidance": {"low": last["low"], "high": last["high"], "releaseDate": last["releaseDate"]},
+            "positionVsInitial": position(first),
+            "positionVsLast": position(last),
+        })
+    return sorted(out, key=lambda r: (str(r["targetPeriod"]), str(r["metric"])))
+
+
+def guidance_history(ticker: str, releases: list[dict], companyfacts: Any) -> dict:
+    entries = [e for r in releases for e in guidance_entries(r)]
+    actuals = actuals_from_company_facts(companyfacts)
+    return {
+        "ticker": ticker.upper(),
+        "basis": "COMPANY_DISCLOSED",
+        "releases": [
+            {
+                "filingDate": r.get("filingDate"),
+                "accessionNumber": r.get("accessionNumber"),
+                "url": r.get("url"),
+                "status": r.get("status"),
+                "guidanceFound": len([e for e in guidance_entries(r) if not e.get("event")]),
+            }
+            for r in releases
+        ],
+        "guidance": [e for e in entries if not e.get("event")],
+        "withdrawals": [e for e in entries if e.get("event") == "WITHDRAWN"],
+        "revisions": guidance_revisions(entries),
+        "outcomes": guidance_outcomes(entries, actuals),
+        "actualsBasis": {
+            "revenue": "SEC XBRL revenue concepts, newest filing per period",
+            "eps": "us-gaap:EarningsPerShareDiluted, newest filing per period",
+            "grossMargin": "not evaluated",
+            "periodLabels": "FY<year of period end>; quarters and first halves only for calendar fiscal years; second halves are not filed as a period and are not derived",
+            "calendarFiscalYear": actuals["calendarFiscalYear"],
+            "read": actuals["read"],
+        },
+        "notes": [
+            "Guidance is read from earnings-release exhibits as written; a range whose target period the release does not state is listed but not compared.",
+            "Revisions compare consecutive releases for the same metric and target period by midpoint, then width.",
+            "Outcomes compare the reported actual with the first and last guidance; nothing is estimated.",
+            "guidanceFound counts ranges stated in text; guidance given only in a table is not read, and a release with none found is not a withdrawal.",
+        ],
+        **AUTHORITY_BOUNDARY,
+    }
