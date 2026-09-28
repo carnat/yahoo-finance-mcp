@@ -609,10 +609,56 @@ export function awardsFromTable(matches: TextMatch[]): Record<string, unknown> |
 // Unvested warrant shares (e.g. a customer warrant that vests with purchases).
 const WARRANT_UNVESTED_RE = /Unvested\w*NumberOfSecuritiesCalledByWarrantsOrRights$|ClassOfWarrantOrRightUnvested\w*$/i;
 
+// A warrant count can be an event rather than warrants outstanding (2.5.9). VRT's 2025 10-K tags
+// ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights = 4,812,521 on 2024-12-06, the shares
+// issued when its private placement warrants were exercised cashlessly (5,266,667 warrants exercised, tagged
+// on the same date and class), in the equity statement; none of those warrants remained at 2025-12-31.
+// A count on the equity-statement axis, or with a warrants-exercised count for the same class and date, is
+// not read as outstanding. A count dated before the period end is still read (AAOI tags its outstanding
+// Amazon warrant only at issuance) and is flagged.
+const EQUITY_STATEMENT_AXIS = "StatementEquityComponentsAxis";
+const WARRANT_EXERCISED_CONCEPTS = ["ClassOfWarrantOrRightNumberOfWarrantsExercised", "ClassOfWarrantOrRightExercised"];
+
+function dimsWithin(inner: Record<string, string>, outer: Record<string, string>): boolean {
+  return Object.entries(inner).every(([axis, member]) => outer[axis] === member);
+}
+
+/** Why a tagged warrant count is an exercise or equity movement, not warrants outstanding; null when it is a count. */
+function warrantCountEvent(doc: IxDocument, f: IxFact): string | null {
+  if (Object.keys(f.dims).some((axis) => axis.endsWith(EQUITY_STATEMENT_AXIS))) return "EQUITY_STATEMENT_MOVEMENT";
+  const exercised = doc.facts.some((g) => WARRANT_EXERCISED_CONCEPTS.includes(g.local) && g.value != null && g.periodEnd === f.periodEnd && dimsWithin(g.dims, f.dims));
+  return exercised ? "WARRANT_EXERCISE" : null;
+}
+
+/** Warrant counts not read as outstanding because they record an exercise or an equity movement. */
+export function warrantCountEvents(sources: IxSource[]): Record<string, unknown>[] {
+  const out = new Map<string, Record<string, unknown>>();
+  for (const source of sources) {
+    for (const f of source.doc.facts) {
+      if (!WARRANT_COUNT_CONCEPTS.includes(f.local) || f.value == null) continue;
+      const reason = warrantCountEvent(source.doc, f);
+      if (!reason) continue;
+      const key = `${f.name}|${dimsKey(f.dims)}|${f.periodEnd}|${f.value}`;
+      if (out.has(key)) continue;
+      out.set(key, {
+        class: hasDims(f) ? Object.values(f.dims).map(memberLabel).join(" / ") : "Warrants (not itemized)",
+        concept: f.name,
+        value: f.value,
+        asOf: f.periodEnd,
+        reason,
+        filingType: source.filingType,
+        accessionNumber: source.accessionNumber,
+      });
+    }
+  }
+  return [...out.values()];
+}
+
 function warrantsComponent(sources: IxSource[], price: number): Record<string, unknown> | null {
   const found = findInSources(sources, (doc) => {
-    const concept = WARRANT_COUNT_CONCEPTS.find((c) => doc.facts.some((f) => f.local === c && f.value != null));
-    const facts = doc.facts.filter((f) => f.local === concept && f.value != null);
+    const counts = doc.facts.filter((f) => f.value != null && WARRANT_COUNT_CONCEPTS.includes(f.local) && warrantCountEvent(doc, f) == null);
+    const concept = WARRANT_COUNT_CONCEPTS.find((c) => counts.some((f) => f.local === c));
+    const facts = counts.filter((f) => f.local === concept);
     if (facts.length === 0) return null;
     const groups = new Map<string, IxFact>();
     for (const f of facts) {
@@ -633,17 +679,21 @@ function warrantsComponent(sources: IxSource[], price: number): Record<string, u
     const unvested = newest(unvestedFacts.filter((g) => dimsKey(g.dims) === dimsKey(f.dims)))
       ?? (facts.length === 1 ? newest(unvestedFacts) : null);
     const exercisable = unvested ? Math.max(0, f.value! - unvested.value!) : f.value!;
+    const periodEnd = source.doc.documentPeriodEnd;
     return {
       class: label,
       concept: f.name,
       outstanding: f.value,
       asOf: f.periodEnd,
+      // Tagged at an earlier date (an issuance) and not restated at the period end.
+      countBeforePeriodEnd: periodEnd != null && f.periodEnd != null && f.periodEnd < periodEnd,
       unvested: unvested ? unvested.value : null,
       unvestedAsOf: unvested ? unvested.periodEnd : null,
       exercisable,
       exercisePrice: strike ? strike.value : null,
       inTheMoney: strike ? price > strike.value! : null,
-      incrementalShares: strike ? round(treasuryStock(exercisable, strike.value!, price)) : null,
+      // No warrants exercisable adds no shares, whatever the strike.
+      incrementalShares: strike ? round(treasuryStock(exercisable, strike.value!, price)) : exercisable === 0 ? 0 : null,
     };
   });
   const unresolved = classes.filter((c) => c.incrementalShares == null).length;
@@ -927,6 +977,23 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
     if (unit !== input.priceCurrency) {
       warnings.push({ code: "PRICE_CURRENCY_MISMATCH", message: `Strikes are reported in ${unit}; the supplied price is treated as ${input.priceCurrency}.`, severity: "warning" });
     }
+  }
+  const warrantEvents = warrantCountEvents(sources);
+  if (warrantEvents.length > 0) {
+    warnings.push({
+      code: "WARRANT_EXERCISE_NOT_OUTSTANDING",
+      message: `${warrantEvents.length} tagged warrant count(s) record an exercise or an equity-statement movement, so they are not counted as warrants outstanding: ${warrantEvents.map((w) => `${w.class} ${w.value} on ${w.asOf}`).join("; ")}.`,
+      severity: "info",
+      counts: warrantEvents,
+    });
+  }
+  const earlyCounts = ((warrants?.classes ?? []) as Record<string, unknown>[]).filter((c) => c.countBeforePeriodEnd === true);
+  if (earlyCounts.length > 0) {
+    warnings.push({
+      code: "WARRANT_COUNT_BEFORE_PERIOD_END",
+      message: `${earlyCounts.length} warrant class(es) are counted from a figure tagged before the report's period end and not restated at it; the filing text should confirm they remain outstanding: ${earlyCounts.map((c) => `${c.class} ${c.outstanding} as of ${c.asOf}`).join("; ")}.`,
+      severity: "warning",
+    });
   }
   if (sources.every((s) => s.doc.facts.length === 0)) {
     warnings.push({ code: "NO_INLINE_XBRL", message: "The filing carries no inline XBRL facts; the bridge needs tagged share and instrument counts.", severity: "warning" });

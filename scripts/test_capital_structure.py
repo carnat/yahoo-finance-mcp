@@ -289,6 +289,24 @@ PARTS_Q = f"""<html><body>
 <tr><td>Held to maturity</td><td>{_num("us-gaap:HeldToMaturitySecuritiesCurrent", "pi", "usd", "60,000", 3)}</td></tr>
 <tr><td>Debt</td><td>{_num("us-gaap:LongTermDebt", "pi", "usd", "10,000", 3)}</td></tr></table>
 </body></html>"""
+# Tagged the way VRT's 2025 10-K is (2.5.9): the private placement warrants' cashless exercise on 2024-12-06
+# as the shares issued (on the equity-statement axis) and the warrants exercised; a public warrant class whose
+# only count is an exercise-date figure with a warrants-exercised twin. None is outstanding at 2025-12-31.
+PPW = {"us-gaap:ClassOfWarrantOrRightAxis": "vrt:PrivatePlacementWarrantMember", "us-gaap:StatementClassOfStockAxis": "us-gaap:CommonClassAMember"}
+PUBW = {"us-gaap:ClassOfWarrantOrRightAxis": "vrt:PublicWarrantMember"}
+VRT_WARRANT_K = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "wy", "10-K")}
+{_text("dei:DocumentPeriodEndDate", "wy", "December 31, 2025", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("wy", "2025-01-01..2025-12-31")}{_context("wcover", "2026-02-06")}
+{_context("wEx", "2024-12-06", PPW)}{_context("wExEq", "2024-12-06", {**PPW, "us-gaap:StatementEquityComponentsAxis": "us-gaap:CommonStockMember"})}
+{_context("wPub", "2024-06-03", PUBW)}{UNITS}</ix:resources></ix:header></div>
+<p>Shares outstanding: {_num("dei:EntityCommonStockSharesOutstanding", "wcover", "shares", "382,000,000")}</p>
+<p>On December 6, 2024, holders exercised {_num("us-gaap:ClassOfWarrantOrRightNumberOfWarrantsExercised", "wEx", "shares", "5,266,667")} private placement warrants on a cashless basis
+for {_num("us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights", "wExEq", "shares", "4,812,521")} shares. There were no outstanding Private Placement Warrants as of December 31, 2025.</p>
+<p>On June 3, 2024, {_num("us-gaap:ClassOfWarrantOrRightNumberOfWarrantsExercised", "wPub", "shares", "3,000,000")} public warrants were exercised for
+{_num("us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights", "wPub", "shares", "1,000,000")} shares.</p>
+</body></html>"""
 TABLE_MATCHES = [
     {"contextText": "Unvested at December 31, 2025 | 2,500,000 | $ 14.10", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at December 31, 2025"},
     {"contextText": "Unvested at June 30, 2026 | 2,750,000 | $ 15.20", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at June 30, 2026"},
@@ -296,7 +314,7 @@ TABLE_MATCHES = [
     {"contextText": "Unvested at June 30, 2026, restricted stock units totalled 8,888,888 shares.", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": False, "tableTitle": None, "rowLabel": None},
 ]
 
-FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q}
+FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K}
 
 NEWS_ITEMS = [
     {"title": "Needham raises IQE price target to 45p from 38p", "summary": "Needham values IQE at 12x 2027 EV/EBITDA, citing gallium nitride demand.", "url": "https://news.example/1", "publishedAt": "2026-09-20T08:00:00Z", "source": "yahoo_finance_news"},
@@ -344,6 +362,7 @@ out.bridgeLow = m.dilutionBridge({ ticker: "CSTC", price: 10, priceCurrency: "US
 out.bridgeAaoi = m.dilutionBridge({ ticker: "AAOX", price: 30, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2026-08-06", "0001234568-26-000040", data.qUrl, "aaoi_q")], atmMatches: [] });
 out.bridgeTable = m.dilutionBridge({ ticker: "BARE", price: 30, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2026-08-06", "0001234568-26-000050", data.qUrl, "bare_q")], atmMatches: [], awardTableMatches: data.tableMatches });
 out.bridgeAwards = m.dilutionBridge({ ticker: "CSTC", price: 25, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2025-08-06", "0001234568-25-000030", data.qUrl, "awards_q")], atmMatches: [] });
+out.bridgeVrtWarrants = m.dilutionBridge({ ticker: "VRTW", price: 150, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-K", "2026-02-13", "0001234568-26-000120", data.kUrl, "vrt_warrant_k")], atmMatches: [] });
 out.capital = m.capitalStructure({ ticker: "CSTC", source: kSource, fundingMatches: atm });
 out.capitalAaoi = m.capitalStructure({ ticker: "AAOX", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000040", data.qUrl, "aaoi_q"), fundingMatches: [] });
 out.capitalAsts = m.capitalStructure({ ticker: "ASTX", source: src("primary", "10-Q", "2026-08-10", "0001234568-26-000060", data.qUrl, "asts_q"), fundingMatches: [] });
@@ -445,6 +464,7 @@ def _python_pure() -> dict:
             cs.TextMatch(t["contextText"], t["sectionHeading"], t["documentUrl"], t["filingDate"], t["accessionNumber"], t["inTable"], t["tableTitle"], t["rowLabel"]) for t in TABLE_MATCHES
         ]),
         "bridgeAwards": cs.dilution_bridge("CSTC", 25, "USD", None, [cs.IxSource("primary", "10-Q", "2025-08-06", "0001234568-25-000030", Q_URL, docs["awards_q"])], []),
+        "bridgeVrtWarrants": cs.dilution_bridge("VRTW", 150, "USD", None, [cs.IxSource("primary", "10-K", "2026-02-13", "0001234568-26-000120", K_URL, docs["vrt_warrant_k"])], []),
         "capital": cs.capital_structure("CSTC", k_source, atm),
         "capitalAaoi": cs.capital_structure("AAOX", cs.IxSource("primary", "10-Q", "2026-08-06", "0001234568-26-000040", Q_URL, docs["aaoi_q"]), []),
         "capitalAsts": cs.capital_structure("ASTX", cs.IxSource("primary", "10-Q", "2026-08-10", "0001234568-26-000060", Q_URL, docs["asts_q"]), []),
@@ -639,6 +659,17 @@ class TestCapitalStructureValues(unittest.TestCase):
         for noise in ("performance obligations", "expected life", "operating expenses and capital expenditures;"):
             self.assertNotIn(noise, statements)
 
+    def test_exercised_warrants_are_not_outstanding(self) -> None:
+        bridge = _python_pure()["bridgeVrtWarrants"]
+        # VRT (2.5.9): the 4,812,521 shares issued on exercise are not 4,812,521 warrants outstanding.
+        self.assertNotIn("warrants", [c["component"] for c in bridge["components"]])
+        self.assertIn("warrants", bridge["notDisclosed"])
+        self.assertIsNone(bridge["bridge"]["warrants"])
+        self.assertEqual(bridge["bridge"]["grossSharesAllInstruments"], 382_000_000)
+        events = next(w for w in bridge["warnings"] if w["code"] == "WARRANT_EXERCISE_NOT_OUTSTANDING")
+        self.assertEqual(sorted((c["value"], c["reason"]) for c in events["counts"]),
+                         [(1_000_000, "WARRANT_EXERCISE"), (4_812_521, "EQUITY_STATEMENT_MOVEMENT")])
+
     def test_awards_warrants_and_eps_tagged_the_aaoi_way(self) -> None:
         b = self.out["bridgeAwards"]
         awards = next(c for c in b["components"] if c["component"] == "unvested_share_awards")
@@ -666,6 +697,10 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertEqual(warrant["incrementalShares"], cs.round_half_up(2_945_399 * (1 - 23.6956 / 30)))
         self.assertEqual(b["reportedEpsDilution"]["antidilutiveExcluded"], [{"security": "Restricted Stock Units RSU", "shares": 1_100_000}])
         self.assertEqual(b["bridge"]["grossSharesAllInstruments"], 84_000_000 + 3_000_000 + 7_945_399)
+        # Tagged only at issuance (2025-03-13), before the 2026-06-30 period end: still counted, and flagged (2.5.9).
+        self.assertTrue(warrant["countBeforePeriodEnd"])
+        self.assertIn("WARRANT_COUNT_BEFORE_PERIOD_END", [w["code"] for w in b["warnings"]])
+        self.assertNotIn("WARRANT_EXERCISE_NOT_OUTSTANDING", [w["code"] for w in b["warnings"]])
 
     def test_separately_reported_convertible_notes_are_debt(self) -> None:
         bal = self.out["capitalAaoi"]["balances"]

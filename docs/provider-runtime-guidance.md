@@ -897,6 +897,36 @@ consensus actions compose evidence and never fill a gap with an assumption.
   payload to carry fields. A missing authority field on an error means no
   authority, never an implied selection.
 
+## Exercised Warrants Are Not Outstanding (2.5.9)
+
+- The dilution bridge, and `get_share_count_scenarios`, which reads it, no
+  longer count an exercise as warrants outstanding.
+  - VRT's 2025 10-K tags `ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights`
+    = 4,812,521 on 2024-12-06. That figure is the shares issued when its
+    private placement warrants were exercised cashlessly. The same date and
+    class also carry `ClassOfWarrantOrRightNumberOfWarrantsExercised` =
+    5,266,667, and the count sits on the equity-statement axis.
+  - Before this fix the bridge read the 4,812,521 as private placement
+    warrants outstanding. The 10-K states that none were outstanding at
+    2025-12-31.
+- A warrant count is not read as outstanding when it is:
+  - on `StatementEquityComponentsAxis` (an equity-statement movement); or
+  - tagged together with a warrants-exercised count for the same class and
+    date.
+
+  These counts are listed in `WARRANT_EXERCISE_NOT_OUTSTANDING` with their
+  reason. VRT's warrants are now `notDisclosed`, and its scenarios carry
+  options and share awards only.
+- A count dated before the period end is still read, because some outstanding
+  warrants are tagged only at issuance (AAOI's Amazon warrant, 2025-03-13).
+  Such a class carries `countBeforePeriodEnd: true` and a
+  `WARRANT_COUNT_BEFORE_PERIOD_END` warning, so the filing text can confirm it
+  is still outstanding.
+- A class with no exercisable warrants adds 0 shares whatever its strike.
+- Not changed: warrants that expired or were redeemed without an
+  exercised-count tag are still read from their last tagged count. Such a
+  count is flagged when it predates the period end.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

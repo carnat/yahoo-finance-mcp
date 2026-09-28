@@ -668,10 +668,60 @@ def awards_from_table(matches: list) -> dict | None:
 _WARRANT_UNVESTED_RE = re.compile(r"Unvested\w*NumberOfSecuritiesCalledByWarrantsOrRights$|ClassOfWarrantOrRightUnvested\w*$", re.I)
 
 
+# A warrant count can be an event rather than warrants outstanding (2.5.9). VRT's 2025 10-K tags
+# ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights = 4,812,521 on 2024-12-06, the shares
+# issued when its private placement warrants were exercised cashlessly (5,266,667 warrants exercised, tagged
+# on the same date and class), in the equity statement; none of those warrants remained at 2025-12-31.
+# A count on the equity-statement axis, or with a warrants-exercised count for the same class and date, is
+# not read as outstanding. A count dated before the period end is still read (AAOI tags its outstanding
+# Amazon warrant only at issuance) and is flagged.
+_EQUITY_STATEMENT_AXIS = "StatementEquityComponentsAxis"
+_WARRANT_EXERCISED_CONCEPTS = ("ClassOfWarrantOrRightNumberOfWarrantsExercised", "ClassOfWarrantOrRightExercised")
+
+
+def _dims_within(inner: dict[str, str], outer: dict[str, str]) -> bool:
+    return all(outer.get(axis) == member for axis, member in inner.items())
+
+
+def _warrant_count_event(doc: IxDocument, f: IxFact) -> str | None:
+    """Why a tagged warrant count is an exercise or equity movement, not warrants outstanding; None when it is a count."""
+    if any(axis.endswith(_EQUITY_STATEMENT_AXIS) for axis in f.dims):
+        return "EQUITY_STATEMENT_MOVEMENT"
+    exercised = any(g.local in _WARRANT_EXERCISED_CONCEPTS and g.value is not None and g.period_end == f.period_end and _dims_within(g.dims, f.dims)
+                    for g in doc.facts)
+    return "WARRANT_EXERCISE" if exercised else None
+
+
+def warrant_count_events(sources: list[IxSource]) -> list[dict]:
+    """Warrant counts not read as outstanding because they record an exercise or an equity movement."""
+    out: dict[str, dict] = {}
+    for source in sources:
+        for f in source.doc.facts:
+            if f.local not in _WARRANT_COUNT_CONCEPTS or f.value is None:
+                continue
+            reason = _warrant_count_event(source.doc, f)
+            if not reason:
+                continue
+            key = f"{f.name}|{_dims_key(f.dims)}|{f.period_end}|{f.value}"
+            if key in out:
+                continue
+            out[key] = {
+                "class": " / ".join(member_label(v) for v in f.dims.values()) if f.dims else "Warrants (not itemized)",
+                "concept": f.name,
+                "value": f.value,
+                "asOf": f.period_end,
+                "reason": reason,
+                "filingType": source.filing_type,
+                "accessionNumber": source.accession_number,
+            }
+    return list(out.values())
+
+
 def _warrants_component(sources: list[IxSource], price: float) -> dict | None:
     def find(doc: IxDocument):
-        concept = next((c for c in _WARRANT_COUNT_CONCEPTS if any(f.local == c and f.value is not None for f in doc.facts)), None)
-        facts = [f for f in doc.facts if f.local == concept and f.value is not None]
+        counts = [f for f in doc.facts if f.value is not None and f.local in _WARRANT_COUNT_CONCEPTS and _warrant_count_event(doc, f) is None]
+        concept = next((c for c in _WARRANT_COUNT_CONCEPTS if any(f.local == c for f in counts)), None)
+        facts = [f for f in counts if f.local == concept]
         if not facts:
             return None
         groups: dict[str, IxFact] = {}
@@ -697,17 +747,21 @@ def _warrants_component(sources: list[IxSource], price: float) -> dict | None:
         if unvested is None and len(facts) == 1:
             unvested = _newest(unvested_facts)
         exercisable = max(0, f.value - unvested.value) if unvested is not None else f.value
+        period_end = source.doc.document_period_end
         classes.append({
             "class": label,
             "concept": f.name,
             "outstanding": f.value,
             "asOf": f.period_end,
+            # Tagged at an earlier date (an issuance) and not restated at the period end.
+            "countBeforePeriodEnd": period_end is not None and f.period_end is not None and f.period_end < period_end,
             "unvested": unvested.value if unvested is not None else None,
             "unvestedAsOf": unvested.period_end if unvested is not None else None,
             "exercisable": exercisable,
             "exercisePrice": strike.value if strike else None,
             "inTheMoney": price > strike.value if strike else None,
-            "incrementalShares": round_half_up(_treasury_stock(exercisable, strike.value, price)) if strike else None,
+            # No warrants exercisable adds no shares, whatever the strike.
+            "incrementalShares": round_half_up(_treasury_stock(exercisable, strike.value, price)) if strike else 0 if exercisable == 0 else None,
         })
     unresolved = len([c for c in classes if c["incrementalShares"] is None])
     return {
@@ -1004,6 +1058,25 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
     for unit in currency_units:
         if unit != price_currency:
             warnings.append({"code": "PRICE_CURRENCY_MISMATCH", "message": f"Strikes are reported in {unit}; the supplied price is treated as {price_currency}.", "severity": "warning"})
+    warrant_events = warrant_count_events(sources)
+    if warrant_events:
+        listed = "; ".join(f"{w['class']} {_js_number(w['value'])} on {w['asOf']}" for w in warrant_events)
+        warnings.append({
+            "code": "WARRANT_EXERCISE_NOT_OUTSTANDING",
+            "message": (f"{len(warrant_events)} tagged warrant count(s) record an exercise or an equity-statement movement, so they are not counted "
+                        f"as warrants outstanding: {listed}."),
+            "severity": "info",
+            "counts": warrant_events,
+        })
+    early_counts = [c for c in ((warrants or {}).get("classes") or []) if c.get("countBeforePeriodEnd") is True]
+    if early_counts:
+        listed = "; ".join(f"{c['class']} {_js_number(c['outstanding'])} as of {c['asOf']}" for c in early_counts)
+        warnings.append({
+            "code": "WARRANT_COUNT_BEFORE_PERIOD_END",
+            "message": (f"{len(early_counts)} warrant class(es) are counted from a figure tagged before the report's period end and not restated at "
+                        f"it; the filing text should confirm they remain outstanding: {listed}."),
+            "severity": "warning",
+        })
     if all(not s.doc.facts for s in sources):
         warnings.append({"code": "NO_INLINE_XBRL", "message": "The filing carries no inline XBRL facts; the bridge needs tagged share and instrument counts.", "severity": "warning"})
 
