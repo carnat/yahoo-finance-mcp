@@ -124,8 +124,13 @@ function factsFor(tax: Rec | null, concepts: string[], unit: string, asOf: strin
       const start = typeof f.start === "string" ? f.start : null;
       const key = `${start ?? ""}|${f.end}`;
       const prev = byPeriod.get(key);
-      if (!prev || f.filed > prev.filed) {
-        byPeriod.set(key, { concept, start, end: f.end, val: f.val, filed: f.filed, form: String(f.form), accn: typeof f.accn === "string" ? f.accn : null });
+      const candidate = { concept, start, end: f.end, val: f.val, filed: f.filed, form: String(f.form), accn: typeof f.accn === "string" ? f.accn : null };
+      const candidatePriority = concepts.indexOf(concept);
+      const previousPriority = prev ? concepts.indexOf(prev.concept) : Number.POSITIVE_INFINITY;
+      // Concept order is semantic precedence. A later filing may update the same
+      // concept, but a lower-priority alternate concept must not silently replace it.
+      if (!prev || candidatePriority < previousPriority || (candidatePriority === previousPriority && f.filed > prev.filed)) {
+        byPeriod.set(key, candidate);
       }
     }
   }
@@ -309,7 +314,8 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
     if (shares.basis === "WEIGHTED_AVERAGE_BASIC") {
       warnings.push({ code: "SHARE_COUNT_WEIGHTED_AVERAGE", message: "No undimensioned cover-page or balance-sheet share count is in companyfacts (companies with several share classes tag them per class), so the latest weighted-average basic count is used; it may cover only the listed class.", severity: "warning" });
     }
-    if (days(String(shares.asOf), date) > 400) {
+    const shareCountStale = days(String(shares.asOf), date) > 400;
+    if (shareCountStale) {
       warnings.push({ code: "SHARE_COUNT_STALE", message: `The latest share count filed by ${date} is as of ${shares.asOf}.`, severity: "warning" });
     }
     const splitAfterCount = input.splits.find((s) => s.date > String(shares.asOf) && s.date <= bar.date);
@@ -317,7 +323,9 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
     if (input.adsRatio != null) (shares as Rec).quotedShareEquivalent = round(quoted);
     marketCap = splitAfterCount
       ? { status: "SPLIT_AFTER_SHARE_COUNT", value: null, split: splitAfterCount }
-      : { status: "OK", value: round(major.price * quoted), currency: priceCurrency };
+      : shareCountStale
+        ? { status: "SHARE_COUNT_STALE", value: null, asOf: shares.asOf }
+        : { status: "OK", value: round(major.price * quoted), currency: priceCurrency };
   }
 
   let fxRate: number | null = null;
@@ -346,17 +354,20 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
     const cash = ((balances.cash as Rec).value as number);
     const sti = ((balances.shortTermInvestments as Rec).value as number | null) ?? 0;
     const debt = ((balances.debt as Rec).value as number);
-    enterpriseValue = {
-      status: "OK",
-      value: round(mcap + (debt - cash - sti) * fxRate),
-      currency: priceCurrency,
-      formula: "market cap + debt - cash - short-term investments (untagged short-term investments are left out)",
-      balanceDate: balances.balanceDate,
-    };
+    const balancesStale = days(String(balances.balanceDate), date) > 200;
+    enterpriseValue = balancesStale
+      ? { status: "BALANCES_STALE", value: null, balanceDate: balances.balanceDate, currency: priceCurrency }
+      : {
+          status: "OK",
+          value: round(mcap + (debt - cash - sti) * fxRate),
+          currency: priceCurrency,
+          formula: "market cap + debt - cash - short-term investments (untagged short-term investments are left out)",
+          balanceDate: balances.balanceDate,
+        };
     if (((balances.shortTermInvestments as Rec).status) !== "OK") {
       warnings.push({ code: "SHORT_TERM_INVESTMENTS_NOT_TAGGED", message: "No short-term investment concept is tagged at the balance date; enterprise value subtracts cash only.", severity: "info" });
     }
-    if (days(String(balances.balanceDate), date) > 200) {
+    if (balancesStale) {
       warnings.push({ code: "BALANCES_STALE", message: `The latest balance sheet filed by ${date} is as of ${balances.balanceDate}.`, severity: "warning" });
     }
   }
@@ -375,11 +386,17 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
     const e = ebitda(oi[basis], da[basis].value, da[basis].concepts);
     denominators[basis] = { revenue: revenue[basis], ebitda: e, netIncome: ni[basis] };
     const ev = enterpriseValue.status === "OK" ? (enterpriseValue.value as number) : null;
+    const withFreshness = (m: Rec, denominator: Rec): Rec => {
+      const periodEnd = typeof denominator.periodEnd === "string" ? denominator.periodEnd : null;
+      return periodEnd && days(periodEnd, date) > 500
+        ? { ...m, value: null, status: "RESULTS_STALE", denominatorPeriodEnd: periodEnd }
+        : m;
+    };
     multiples[basis] = {
-      evToRevenue: multiple(ev, revenue[basis], fxRate, "enterpriseValue", basis, "revenue"),
-      evToEbitda: multiple(ev, e, fxRate, "enterpriseValue", basis, "ebitda"),
-      priceToEarnings: multiple(mcap, ni[basis], fxRate, "marketCap", basis, "netIncome"),
-      priceToSales: multiple(mcap, revenue[basis], fxRate, "marketCap", basis, "revenue"),
+      evToRevenue: withFreshness(multiple(ev, revenue[basis], fxRate, "enterpriseValue", basis, "revenue"), revenue[basis]),
+      evToEbitda: withFreshness(multiple(ev, e, fxRate, "enterpriseValue", basis, "ebitda"), e),
+      priceToEarnings: withFreshness(multiple(mcap, ni[basis], fxRate, "marketCap", basis, "netIncome"), ni[basis]),
+      priceToSales: withFreshness(multiple(mcap, revenue[basis], fxRate, "marketCap", basis, "revenue"), revenue[basis]),
     };
   }
   const allOk = marketCap.status === "OK" && enterpriseValue.status === "OK";
