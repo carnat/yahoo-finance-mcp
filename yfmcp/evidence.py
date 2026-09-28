@@ -34,6 +34,43 @@ AUTHORITY_BOUNDARY: dict[str, Any] = {
 }
 
 
+# Actions whose payloads are evidence only; each result they return carries AUTHORITY_BOUNDARY (2.5.8).
+EVIDENCE_ONLY_ACTIONS = frozenset({
+    "build_valuation_evidence_pack",
+    "extract_funding_capex_schedule",
+    "extract_operating_driver_ledger",
+    "get_consensus_forecast_curve",
+    "get_eps_revisions",
+    "get_evidence_cut",
+    "get_evidence_quality",
+    "get_guidance_history",
+    "get_historical_valuation_context",
+    "get_share_count_scenarios",
+    "list_evidence_cuts",
+    "reconcile_metric_sources",
+})
+
+
+def with_authority_boundary(action: str, raw: object) -> object:
+    """An evidence-only action's result object with AUTHORITY_BOUNDARY.
+
+    A terminal status such as PERIOD_NOT_FOUND or NO_SEC_REGISTRANT then has the same shape as a full
+    result. Errors ({"error": true}) become failure envelopes with no data and are left alone, as are other
+    tools and non-object results.
+    """
+    if action not in EVIDENCE_ONLY_ACTIONS or not isinstance(raw, str):
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return raw
+    if not isinstance(parsed, dict) or parsed.get("error") is True or isinstance(parsed.get("ok"), bool):
+        return raw
+    if all(k in parsed and parsed[k] == v for k, v in AUTHORITY_BOUNDARY.items()):
+        return raw
+    return json.dumps({**parsed, **AUTHORITY_BOUNDARY})
+
+
 # ── Canonical JSON ───────────────────────────────────────────────────────────
 
 def _es_number(value: float) -> str:

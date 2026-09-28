@@ -106,6 +106,7 @@ import {
 } from "./sec-thailand.js";
 import { validateTicker } from "./validate.js";
 import { buildValuationEvidencePack, getConsensusForecastCurve, getEpsRevisions, getEvidenceCut, getEvidenceQuality, listEvidenceCuts } from "./evidence-pack.js";
+import { withAuthorityBoundary } from "./evidence.js";
 
 export interface Tool {
   name: string;
@@ -1874,7 +1875,7 @@ export async function callToolResult(name: string, args: Record<string, unknown>
 async function callToolResultInScope(name: string, args: Record<string, unknown>): Promise<ToolResult> {
   let raw: string;
   try {
-    raw = await _dispatchTool(name, args);
+    raw = withAuthorityBoundary(name, await _dispatchTool(name, args));
   } catch (error) {
     const rawMessage = error instanceof Error ? error.message : String(error);
     const lower = rawMessage.toLowerCase();

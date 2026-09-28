@@ -870,6 +870,33 @@ consensus actions compose evidence and never fill a gap with an assumption.
 - `labelBasis` now states this rule. `Q<n> <yyyy>` stays a calendar-quarter
   selector; `fiscalQuarter` gives the issuer's quarter.
 
+## Authority Fields On Every Evidence Result (2.5.8)
+
+- The 12 evidence-only actions now carry `decisionUse: EVIDENCE_ONLY` and
+  null `selectedMethod`, `selectedMultiple`, `scenarioWeights`,
+  `priceTarget`, `g2`, `opportunity` and `action` on every result, including
+  terminal statuses. The actions are:
+  - `get_historical_valuation_context`, `reconcile_metric_sources`;
+  - `get_share_count_scenarios`, `extract_funding_capex_schedule`;
+  - `extract_operating_driver_ledger`, `get_guidance_history`;
+  - `get_consensus_forecast_curve`, `get_eps_revisions`,
+    `get_evidence_quality`;
+  - `build_valuation_evidence_pack`, `get_evidence_cut`,
+    `list_evidence_cuts`.
+- Terminal statuses such as `PERIOD_NOT_FOUND`, `INVALID_PERIOD`,
+  `NO_SEC_REGISTRANT` and `COMPANYFACTS_NOT_AVAILABLE` returned early,
+  without these fields.
+- The fields are added where each runtime dispatches an action: after
+  `_dispatchTool` in the Worker, and in `_envelope_tool_result` in Python.
+  A payload that already carries them is passed through unchanged. A stray
+  non-null value is overwritten to null.
+- Historical valuation's failed subject and peer entries (`NO_SEC_REGISTRANT`,
+  `COMPANYFACTS_NOT_AVAILABLE`, `PRICE_HISTORY_NOT_AVAILABLE`) carry them
+  too.
+- Errors are unchanged: `ok: false` with `data: null`, so there is no
+  payload to carry fields. A missing authority field on an error means no
+  authority, never an implied selection.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

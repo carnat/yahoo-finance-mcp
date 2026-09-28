@@ -495,6 +495,9 @@ def _envelope_tool_result(tool: str, result: object) -> object:
     else becomes ``{"ok": true, "data": ...}`` with fact enrichment. With
     MCP_ENVELOPE_V2 disabled the raw result is returned unchanged.
     """
+    from yfmcp.evidence import with_authority_boundary
+
+    result = with_authority_boundary(tool, result)
     if not _ENVELOPE_V2 or not isinstance(result, str):
         return result
     text = result.strip()

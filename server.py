@@ -9970,14 +9970,14 @@ async def _valuation_history_for(ticker: str, dates: list[str] | None, from_date
     if not cik_padded:
         ticker_index = await _load_edgar_tickers()
         code = "NO_SEC_REGISTRANT" if ticker_index else "SEC_LOOKUP_UNAVAILABLE"
-        return {"ticker": upper, "status": code, "code": code, "retryable": not ticker_index}
+        return {"ticker": upper, "status": code, "code": code, "retryable": not ticker_index, **_AUTHORITY_BOUNDARY}
     facts, history = await asyncio.gather(_edgar_get_company_facts(cik_padded), _daily_history(ticker, from_date), return_exceptions=True)
     facts = None if isinstance(facts, BaseException) else facts
     history = None if isinstance(history, BaseException) else history
     if not facts:
-        return {"ticker": upper, "status": "COMPANYFACTS_NOT_AVAILABLE", "code": "COMPANYFACTS_NOT_AVAILABLE", "retryable": True}
+        return {"ticker": upper, "status": "COMPANYFACTS_NOT_AVAILABLE", "code": "COMPANYFACTS_NOT_AVAILABLE", "retryable": True, **_AUTHORITY_BOUNDARY}
     if not history or not history["bars"]:
-        return {"ticker": upper, "status": "PRICE_HISTORY_NOT_AVAILABLE", "code": "PRICE_HISTORY_NOT_AVAILABLE", "retryable": True}
+        return {"ticker": upper, "status": "PRICE_HISTORY_NOT_AVAILABLE", "code": "PRICE_HISTORY_NOT_AVAILABLE", "retryable": True, **_AUTHORITY_BOUNDARY}
     use_dates = dates if dates is not None else _vh.valuation_dates(None, history["bars"][-1]["date"])[0]
     _, currency = _vh.taxonomy_of(facts)
     price_currency = _vl._major_price(1, history["currency"])[1] if history["currency"] else None

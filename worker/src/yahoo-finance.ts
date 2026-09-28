@@ -15738,14 +15738,14 @@ async function valuationHistoryFor(ticker: string, dates: string[] | null, fromD
   if (!cikPadded) {
     const tickerIndex = await getEdgarTickerCikMap().catch(() => null);
     const code = tickerIndex ? "NO_SEC_REGISTRANT" : "SEC_LOOKUP_UNAVAILABLE";
-    return { ticker: upper, status: code, code, retryable: !tickerIndex };
+    return { ticker: upper, status: code, code, retryable: !tickerIndex, ...AUTHORITY_BOUNDARY };
   }
   const [facts, history] = await Promise.all([
     edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`).catch(() => null),
     dailyHistory(ticker, fromDate).catch(() => null),
   ]);
-  if (!facts) return { ticker: upper, status: "COMPANYFACTS_NOT_AVAILABLE", code: "COMPANYFACTS_NOT_AVAILABLE", retryable: true };
-  if (!history || history.bars.length === 0) return { ticker: upper, status: "PRICE_HISTORY_NOT_AVAILABLE", code: "PRICE_HISTORY_NOT_AVAILABLE", retryable: true };
+  if (!facts) return { ticker: upper, status: "COMPANYFACTS_NOT_AVAILABLE", code: "COMPANYFACTS_NOT_AVAILABLE", retryable: true, ...AUTHORITY_BOUNDARY };
+  if (!history || history.bars.length === 0) return { ticker: upper, status: "PRICE_HISTORY_NOT_AVAILABLE", code: "PRICE_HISTORY_NOT_AVAILABLE", retryable: true, ...AUTHORITY_BOUNDARY };
   const useDates = dates ?? valuationDates(null, history.bars[history.bars.length - 1].date).dates;
   const { currency } = taxonomyOf(facts);
   const priceCurrency = history.currency ? majorPrice(1, history.currency).currency : null;
