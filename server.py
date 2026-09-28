@@ -10068,8 +10068,6 @@ async def reconcile_metric_sources(ticker: str, metric: str, period: str = "late
             except Exception:  # noqa: BLE001 - reported as unread
                 r = {"status": "NOT_READ", "url": c["primaryUrl"], "filingDate": c["filingDate"], "accessionNumber": c["accessionNumber"], "text": None}
             read.append(r)
-            if _mr.release_observation(r, metric, resolved, reporting_unit)["status"] == "FOUND":
-                break
         return read
 
     async def yahoo_rows() -> list[dict] | None:
