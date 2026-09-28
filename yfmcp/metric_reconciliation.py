@@ -95,12 +95,36 @@ def _is_annual(r: dict) -> bool:
     return r["start"] is not None and 350 <= _days(r["start"], r["end"]) <= 380
 
 
+def _first_reported(rows: list[dict], r: dict) -> dict:
+    """The row that first reported a period: its fy/fp are the issuer's names for that period."""
+    same = sorted((x for x in rows if x["end"] == r["end"] and x["start"] == r["start"]), key=lambda x: (x["filed"], x["accn"] or ""))
+    return same[0] if same else r
+
+
+def _annual_fiscal_year(rows: list[dict], r: dict) -> tuple[int, str, dict]:
+    """An annual period's fiscal year: the issuer's, else the year it ends in.
+
+    The issuer's is companyfacts fy with fp FY, from the filing that first reported it, within a year of the
+    end. Dollar General's year ended 2026-01-30 is fiscal 2025; NVDA's ended 2026-01-25 is fiscal 2026.
+    """
+    first = _first_reported(rows, r)
+    end_year = int(r["end"][:4])
+    if first.get("fy") is not None and first.get("fp") == "FY" and first["fy"] in (end_year, end_year - 1):
+        return first["fy"], "SEC_FY_FP", first
+    return end_year, "PERIOD_END_YEAR", first
+
+
+LABEL_BASIS = ("FY<yyyy> is the issuer's fiscal year (SEC fy/fp) when companyfacts gives it, else the fiscal year ending in that year; "
+               "Q<n> <yyyy> is the calendar quarter of the period end (fiscalQuarter gives the issuer's)")
+
+
 def resolve_period(companyfacts: Any, metric: str, spec: str) -> dict:
     """The period a spec names.
 
-    latest_quarter, latest_annual, FY<year> (the fiscal year ending in that
-    year) or Q<n> <year> (the quarter ending in that calendar quarter).
-    Instants take the end of the matching revenue period.
+    latest_quarter, latest_annual, FY<year> (the issuer's fiscal year, else
+    the fiscal year ending in that year) or Q<n> <year> (the quarter ending in
+    that calendar quarter). Instants take the end of the matching revenue
+    period.
     """
     # The company's reporting periods come from its revenue (ASTS stopped tagging undimensioned EPS in 2022,
     # so its own latest EPS quarter is not the latest quarter); without revenue, the metric's own or net income's.
@@ -116,8 +140,13 @@ def resolve_period(companyfacts: Any, metric: str, spec: str) -> dict:
         candidates = [r for r in rows if _is_annual(r)]
     elif (m := re.fullmatch(r"FY\s?(\d{4})", text, re.I)):
         period_type = "ANNUAL"
-        year = m.group(1)
-        candidates = [r for r in rows if _is_annual(r) and r["end"][:4] == year]
+        # By the issuer's fiscal year where companyfacts names it; a period the issuer names is never chosen
+        # for a different year because of the calendar year it ends in.
+        year = int(m.group(1))
+        named = [(r, _annual_fiscal_year(rows, r)) for r in rows if _is_annual(r)]
+        named = [(r, fid) for r, fid in named if fid[0] == year]
+        by_sec = [(r, fid) for r, fid in named if fid[1] == "SEC_FY_FP"]
+        candidates = [r for r, _ in (by_sec or named)]
     elif (m := re.fullmatch(r"Q([1-4])\s?(\d{4})", text, re.I)):
         period_type = "QUARTER"
         q = int(m.group(1))
@@ -126,6 +155,12 @@ def resolve_period(companyfacts: Any, metric: str, spec: str) -> dict:
     else:
         return {"status": "INVALID_PERIOD", "message": "period must be latest_quarter, latest_annual, FY<yyyy> or Q<n> <yyyy>."}
     if not candidates:
+        if re.match(r"FY", text, re.I):
+            fy_years = sorted({_annual_fiscal_year(rows, r)[0] for r in rows if _is_annual(r)})
+            asked = re.sub(r"^FY\s?", "", text, flags=re.I)
+            return {"status": "PERIOD_NOT_FOUND", "spec": text, "periodType": period_type,
+                    "message": f"No annual period in companyfacts is fiscal year {asked} (the issuer's SEC fy, else the year the period ends).",
+                    "fiscalYearsAvailable": fy_years[-5:], "labelBasis": LABEL_BASIS}
         return {"status": "PERIOD_NOT_FOUND", "spec": text, "periodType": period_type,
                 "message": f"No {period_type.lower()} period in companyfacts matches {text} (20-F and 40-F filers tag annual periods only)."}
     best = sorted(candidates, key=lambda r: (r["end"], r["start"] or ""))[-1]
@@ -134,8 +169,7 @@ def resolve_period(companyfacts: Any, metric: str, spec: str) -> dict:
     # reported it (NVDA's quarter ended 2026-07-26 is fy 2027 Q2; Dollar General's ended 2026-07-31 is fy 2026 Q2).
     # Without usable metadata the quarter is counted from the prior fiscal year end and, for a year ending in
     # January to March, either naming convention is accepted and flagged as ambiguous.
-    same = sorted((r for r in rows if r["end"] == best["end"] and r["start"] == best["start"]), key=lambda r: (r["filed"], r["accn"] or ""))
-    first = same[0] if same else None
+    first = _first_reported(rows, best)
     fy = first["fy"] if first else None
     fp = first["fp"] if first else None
     end_year = int(best["end"][:4])
@@ -158,11 +192,13 @@ def resolve_period(companyfacts: Any, metric: str, spec: str) -> dict:
                 fiscal["fiscalYearAmbiguous"] = True
             if fy is not None or fp is not None:
                 fiscal["fiscalMetadataNotUsed"] = {"fy": fy, "fp": fp}
-    elif fy is not None and fp == "FY" and fy in (end_year, end_year - 1):
-        fiscal = {"fiscalYears": [fy], "fiscalYearSource": "SEC_FY_FP",
-                  "fiscalBasis": f"companyfacts fy {fy} fp {fp} of the filing that first reported the period ({first['accn']})"}
     else:
-        fiscal = {"fiscalYears": [end_year], "fiscalYearSource": "PERIOD_END_YEAR", "fiscalBasis": "the calendar year the fiscal year ends in"}
+        year_id, source, _ = _annual_fiscal_year(rows, best)
+        if source == "SEC_FY_FP":
+            fiscal = {"fiscalYears": [year_id], "fiscalYearSource": "SEC_FY_FP",
+                      "fiscalBasis": f"companyfacts fy {fy} fp {fp} of the filing that first reported the period ({first['accn']})"}
+        else:
+            fiscal = {"fiscalYears": [year_id], "fiscalYearSource": "PERIOD_END_YEAR", "fiscalBasis": "the calendar year the fiscal year ends in"}
     return {
         "status": "OK",
         "spec": text,
@@ -170,7 +206,7 @@ def resolve_period(companyfacts: Any, metric: str, spec: str) -> dict:
         "periodStart": None if kind == "instant" else best["start"],
         "periodEnd": best["end"],
         **fiscal,
-        "labelBasis": "Q<n> is the calendar quarter of the period end; FY<yyyy> is the fiscal year ending in that year",
+        "labelBasis": LABEL_BASIS,
     }
 
 

@@ -87,10 +87,33 @@ export function metricFacts(companyfacts: unknown, metric: string): { taxonomy: 
 const isQuarter = (r: { start: string | null; end: string }) => r.start != null && days(r.start, r.end) >= 80 && days(r.start, r.end) <= 100;
 const isAnnual = (r: { start: string | null; end: string }) => r.start != null && days(r.start, r.end) >= 350 && days(r.start, r.end) <= 380;
 
+/** The row that first reported a period: its fy/fp are the issuer's names for that period. */
+function firstReported(rows: Row[], r: Row): Row {
+  return rows
+    .filter((x) => x.end === r.end && x.start === r.start)
+    .sort((a, b) => cmp(a.filed, b.filed) || cmp(a.accn, b.accn))[0] ?? r;
+}
+
+/**
+ * An annual period's fiscal year: the issuer's (companyfacts fy with fp FY, from the filing that first
+ * reported it, within a year of the end), else the year it ends in. Dollar General's year ended
+ * 2026-01-30 is fiscal 2025; NVDA's ended 2026-01-25 is fiscal 2026.
+ */
+function annualFiscalYear(rows: Row[], r: Row): { year: number; source: string; first: Row } {
+  const first = firstReported(rows, r);
+  const endYear = Number(r.end.slice(0, 4));
+  return first.fy != null && first.fp === "FY" && (first.fy === endYear || first.fy === endYear - 1)
+    ? { year: first.fy, source: "SEC_FY_FP", first }
+    : { year: endYear, source: "PERIOD_END_YEAR", first };
+}
+
+const LABEL_BASIS = "FY<yyyy> is the issuer's fiscal year (SEC fy/fp) when companyfacts gives it, else the fiscal year ending in that year; Q<n> <yyyy> is the calendar quarter of the period end (fiscalQuarter gives the issuer's)";
+
 /**
  * The period a spec names: latest_quarter, latest_annual, FY<year> (the
- * fiscal year ending in that year) or Q<n> <year> (the quarter ending in that
- * calendar quarter). Instants take the end of the matching revenue period.
+ * issuer's fiscal year, else the fiscal year ending in that year) or Q<n>
+ * <year> (the quarter ending in that calendar quarter). Instants take the end
+ * of the matching revenue period.
  */
 export function resolvePeriod(companyfacts: unknown, metric: string, spec: string): Rec {
   // The company's reporting periods come from its revenue (ASTS stopped tagging undimensioned EPS in 2022,
@@ -109,8 +132,12 @@ export function resolvePeriod(companyfacts: unknown, metric: string, spec: strin
     candidates = rows.filter(isAnnual);
   } else if ((m = /^FY\s?(\d{4})$/i.exec(text))) {
     periodType = "ANNUAL";
-    const year = m[1];
-    candidates = rows.filter((r) => isAnnual(r) && r.end.slice(0, 4) === year);
+    // By the issuer's fiscal year where companyfacts names it; a period the issuer names is never chosen
+    // for a different year because of the calendar year it ends in.
+    const year = Number(m[1]);
+    const named = rows.filter(isAnnual).map((r) => ({ r, id: annualFiscalYear(rows, r) })).filter((x) => x.id.year === year);
+    const bySec = named.filter((x) => x.id.source === "SEC_FY_FP");
+    candidates = (bySec.length > 0 ? bySec : named).map((x) => x.r);
   } else if ((m = /^Q([1-4])\s?(\d{4})$/i.exec(text))) {
     periodType = "QUARTER";
     const q = Number(m[1]);
@@ -120,7 +147,10 @@ export function resolvePeriod(companyfacts: unknown, metric: string, spec: strin
     return { status: "INVALID_PERIOD", message: "period must be latest_quarter, latest_annual, FY<yyyy> or Q<n> <yyyy>." };
   }
   if (candidates.length === 0) {
-    return { status: "PERIOD_NOT_FOUND", spec: text, periodType, message: `No ${periodType.toLowerCase()} period in companyfacts matches ${text} (20-F and 40-F filers tag annual periods only).` };
+    const fyYears = [...new Set(rows.filter(isAnnual).map((r) => annualFiscalYear(rows, r).year))].sort((a, b) => a - b);
+    return /^FY/i.test(text)
+      ? { status: "PERIOD_NOT_FOUND", spec: text, periodType, message: `No annual period in companyfacts is fiscal year ${text.replace(/^FY\s?/i, "")} (the issuer's SEC fy, else the year the period ends).`, fiscalYearsAvailable: fyYears.slice(-5), labelBasis: LABEL_BASIS }
+      : { status: "PERIOD_NOT_FOUND", spec: text, periodType, message: `No ${periodType.toLowerCase()} period in companyfacts matches ${text} (20-F and 40-F filers tag annual periods only).` };
   }
   const best = [...candidates].sort((a, b) => cmp(a.end, b.end) || cmp(a.start, b.start))[candidates.length - 1];
   const kind = METRICS[metric].kind;
@@ -128,9 +158,7 @@ export function resolvePeriod(companyfacts: unknown, metric: string, spec: strin
   // reported it (NVDA's quarter ended 2026-07-26 is fy 2027 Q2; Dollar General's ended 2026-07-31 is fy 2026 Q2).
   // Without usable metadata the quarter is counted from the prior fiscal year end and, for a year ending in
   // January to March, either naming convention is accepted and flagged as ambiguous.
-  const first = rows
-    .filter((r) => r.end === best.end && r.start === best.start)
-    .sort((a, b) => cmp(a.filed, b.filed) || cmp(a.accn, b.accn))[0];
+  const first = firstReported(rows, best);
   const fy = first?.fy ?? null;
   const fp = first?.fp ?? null;
   const endYear = Number(best.end.slice(0, 4));
@@ -156,9 +184,10 @@ export function resolvePeriod(companyfacts: unknown, metric: string, spec: strin
       };
     }
   } else {
-    fiscal = fy != null && fp === "FY" && (fy === endYear || fy === endYear - 1)
-      ? { fiscalYears: [fy], fiscalYearSource: "SEC_FY_FP", fiscalBasis: `companyfacts fy ${fy} fp ${fp} of the filing that first reported the period (${first.accn})` }
-      : { fiscalYears: [endYear], fiscalYearSource: "PERIOD_END_YEAR", fiscalBasis: "the calendar year the fiscal year ends in" };
+    const id = annualFiscalYear(rows, best);
+    fiscal = id.source === "SEC_FY_FP"
+      ? { fiscalYears: [id.year], fiscalYearSource: "SEC_FY_FP", fiscalBasis: `companyfacts fy ${fy} fp ${fp} of the filing that first reported the period (${first.accn})` }
+      : { fiscalYears: [id.year], fiscalYearSource: "PERIOD_END_YEAR", fiscalBasis: "the calendar year the fiscal year ends in" };
   }
   return {
     status: "OK",
@@ -167,7 +196,7 @@ export function resolvePeriod(companyfacts: unknown, metric: string, spec: strin
     periodStart: kind === "instant" ? null : best.start,
     periodEnd: best.end,
     ...fiscal,
-    labelBasis: "Q<n> is the calendar quarter of the period end; FY<yyyy> is the fiscal year ending in that year",
+    labelBasis: LABEL_BASIS,
   };
 }
 

@@ -692,9 +692,9 @@ consensus actions compose evidence and never fill a gap with an assumption.
     that date. The Worker reads one peer at a time to bound memory.
 - `reconcile_metric_sources` (group `evidence`) takes `metric` (`revenue`,
   `net_income`, `operating_income`, `eps_diluted`, `cash_and_equivalents`),
-  `period` (`latest_quarter`, `latest_annual`, `FY<yyyy>`, or `Q<n> <yyyy>`
-  for the calendar quarter of the period end) and `tolerance_pct` (default
-  0.5).
+  `period` (`latest_quarter`, `latest_annual`, `FY<yyyy>` for the issuer's
+  fiscal year since 2.5.7, or `Q<n> <yyyy>` for the calendar quarter of the
+  period end) and `tolerance_pct` (default 0.5).
   - Periods come from the company's revenue periods. ASTS stopped tagging
     undimensioned EPS after 2022, so its Q2 2026 EPS is SEC `NOT_FOUND`
     rather than a 2022 quarter.
@@ -833,7 +833,8 @@ consensus actions compose evidence and never fill a gap with an assumption.
     For a January–March year end both adjacent years are accepted, and
     `fiscalYearAmbiguous` is set.
   - Annual periods also take the issuer's fiscal year: Dollar General's year
-    ended January 30, 2026 is fiscal 2025.
+    ended January 30, 2026 is fiscal 2025. Before 2.5.7 an explicit
+    `FY<yyyy>` still selected by the year the period ends (below).
 - More fiscal-quarter wordings are read:
   - Shorthand is spelled out before scoping: `FY27`/`FY2027` becomes fiscal
     2027, `Q2FY27` becomes Q2 fiscal 2027, `Q2'27` becomes Q2 2027 and `2Q26`
@@ -846,6 +847,28 @@ consensus actions compose evidence and never fill a gap with an assumption.
   100-day window are read, so a later correction is not crowded out.
   `releaseCandidates` counts those in the window and those read, and lists
   any older ones not read (`OLDER_RELEASE_CANDIDATES_NOT_READ`).
+
+## Issuer Fiscal-Year Selection (2.5.7)
+
+- An explicit `FY<yyyy>` in `reconcile_metric_sources` selects the annual
+  period the issuer calls fiscal `yyyy`. That is companyfacts `fy` with `fp`
+  `FY`, from the filing that first reported the period, within a year of its
+  end. The year the period ends is used only when a period has no such
+  metadata.
+  - Dollar General: `FY2025` is the year ended January 30, 2026, and
+    `FY2024` is the year ended January 31, 2025.
+  - Dollar General `FY2026` is `PERIOD_NOT_FOUND` until it is filed, with
+    `fiscalYearsAvailable`, instead of returning fiscal 2025 because that
+    year ends in 2026.
+  - A later 10-K's comparative carries that filing's `fy`. The
+    first-reported row names the period, so the comparative does not
+    rename it.
+  - NVDA and calendar-year filers name a year by its end, so their
+    selection is unchanged.
+- `latest_annual`, `FY<yyyy>` and the annual `fiscalYears` field share one
+  rule, so the period selected and the fiscal year reported for it agree.
+- `labelBasis` now states this rule. `Q<n> <yyyy>` stays a calendar-quarter
+  selector; `fiscalQuarter` gives the issuer's quarter.
 
 ## Non-US Primary Filings
 
