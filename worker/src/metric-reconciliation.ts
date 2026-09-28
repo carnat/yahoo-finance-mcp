@@ -239,7 +239,7 @@ export function releaseObservation(release: Rec | null, metric: string, period: 
     if (!m) continue;
     const quarter = QUARTER_SCOPE_RE.test(sentence);
     const annual = ANNUAL_SCOPE_RE.test(sentence);
-    const amountStart = m.index + m[0].indexOf(m[2] ?? "$");
+    const amountStart = m.index + m[0].indexOf("$");
     const scoped = spec.kind === "instant"
       ? INSTANT_SCOPE_RE.test(sentence)
       : period.periodType === "QUARTER"
