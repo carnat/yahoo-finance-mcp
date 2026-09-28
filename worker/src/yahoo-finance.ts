@@ -27,7 +27,7 @@ import { operatingDriverLedger } from "./driver-ledger.js";
 import { parseShareScenarios, shareCountScenarios } from "./share-scenarios.js";
 import { customerConcentration, EPS_AMOUNT, EPS_LABEL, guidanceRanges, PCT_AMOUNT, rankEvidence, reportedTextMetric, REVENUE_LABEL, stemWord, USD_AMOUNT, type ConcentrationFinding } from "./extraction-rules.js";
 import { adsRatio, majorPrice, marketInputsFromQuoteSummary, peerValuations, valuationSnapshot, type MarketInputs } from "./valuation.js";
-import { foreignFiler, historicalValuation, latestShareCount, peerMedians, taxonomyOf, valuationDates, type Bar, type Split } from "./valuation-history.js";
+import { coverReadsNeeded, coverShareCounts, foreignFiler, historicalValuation, latestShareCount, peerMedians, taxonomyOf, valuationDates, type Bar, type PeriodicFiling, type Split } from "./valuation-history.js";
 import { DEFAULT_TOLERANCE_PCT, METRICS as RECONCILE_METRICS, metricReconciliation, resolvePeriod } from "./metric-reconciliation.js";
 import { AUTHORITY_BOUNDARY } from "./evidence.js";
 import registryManifest from "./company-ir-page-registry.json";
@@ -15597,17 +15597,18 @@ const DRIVER_SEARCH_TERMS = [
   "production", "utilization", "average selling price", "employees", "remaining performance obligations",
 ];
 
-/** The newest earnings-release 8-Ks (Item 2.02, results of operations) in SEC's recent submissions. */
-function earningsReleasePicks(submissions: Record<string, unknown>, cikInt: number, limit: number): { filingDate: string; accessionNumber: string; primaryUrl: string }[] {
+/** The newest earnings-release 8-Ks (Item 2.02, results of operations) in SEC's recent submissions; 8-K/As too when asked. */
+function earningsReleasePicks(submissions: Record<string, unknown>, cikInt: number, limit: number, includeAmendments = false): { filingDate: string; accessionNumber: string; primaryUrl: string; form: string }[] {
   const recent = ((submissions.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
   const forms = (recent.form as string[]) ?? [];
-  const picks: { filingDate: string; accessionNumber: string; primaryUrl: string }[] = [];
+  const picks: { filingDate: string; accessionNumber: string; primaryUrl: string; form: string }[] = [];
   for (let i = 0; i < forms.length && picks.length < limit; i++) {
-    if ((forms[i] ?? "").toUpperCase() !== "8-K" || !String(recent.items?.[i] ?? "").includes("2.02")) continue;
+    const form = (forms[i] ?? "").toUpperCase();
+    if (!(form === "8-K" || (includeAmendments && form === "8-K/A")) || !String(recent.items?.[i] ?? "").includes("2.02")) continue;
     const acc = String(recent.accessionNumber?.[i] ?? "");
     const doc = String(recent.primaryDocument?.[i] ?? "");
     if (!acc || !doc) continue;
-    picks.push({ filingDate: String(recent.filingDate?.[i] ?? ""), accessionNumber: acc, primaryUrl: `https://www.sec.gov/Archives/edgar/data/${cikInt}/${acc.replace(/-/g, "")}/${doc}` });
+    picks.push({ filingDate: String(recent.filingDate?.[i] ?? ""), accessionNumber: acc, primaryUrl: `https://www.sec.gov/Archives/edgar/data/${cikInt}/${acc.replace(/-/g, "")}/${doc}`, form });
   }
   return picks;
 }
@@ -15692,6 +15693,45 @@ async function dailyHistory(ticker: string, fromDate: string): Promise<{ bars: B
   return { bars, splits, currency: typeof meta.currency === "string" ? meta.currency : null };
 }
 
+// Cover pages sit at the top of a periodic report with the header contexts; the first 900 KB is read, not
+// the whole report (ASTS's 10-Q is 3.5 MB, its class counts end near 194 KB).
+const COVER_READ_MAX_BYTES = 900_000;
+
+const PERIODIC_REPORT_FORMS = new Set(["10-K", "10-Q", "20-F", "40-F"]);
+
+/** The filer's periodic reports in SEC's recent submissions, with their primary documents. */
+function periodicReports(submissions: Record<string, unknown> | null, cikPadded: string | null): (PeriodicFiling & { documentUrl: string })[] {
+  if (!submissions || !cikPadded) return [];
+  const recent = ((submissions.filings as Record<string, unknown> | undefined)?.recent ?? {}) as Record<string, unknown[]>;
+  const out: (PeriodicFiling & { documentUrl: string })[] = [];
+  const forms = (recent.form ?? []) as string[];
+  for (let i = 0; i < forms.length; i++) {
+    const form = String(forms[i] ?? "").toUpperCase();
+    const acc = String(recent.accessionNumber?.[i] ?? "");
+    const doc = String(recent.primaryDocument?.[i] ?? "");
+    if (!PERIODIC_REPORT_FORMS.has(form) || !acc || !doc) continue;
+    out.push({
+      accessionNumber: acc,
+      form,
+      filed: String(recent.filingDate?.[i] ?? ""),
+      reportDate: recent.reportDate?.[i] ? String(recent.reportDate[i]) : null,
+      documentUrl: `https://www.sec.gov/Archives/edgar/data/${parseInt(cikPadded, 10)}/${acc.replace(/-/g, "")}/${doc}`,
+    });
+  }
+  return out;
+}
+
+/** Per-class cover-page share counts from the periodic reports companyfacts cannot give a point-in-time count for. */
+async function coverCountsFor(companyfacts: unknown, reports: (PeriodicFiling & { documentUrl: string })[], dates: string[]): Promise<Record<string, Record<string, unknown>>> {
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const n of coverReadsNeeded(companyfacts, reports, dates)) {
+    const url = (n as PeriodicFiling & { documentUrl: string }).documentUrl;
+    const html = await edgarGetHtml(url, COVER_READ_MAX_BYTES).catch(() => null);
+    out[n.accessionNumber] = html ? { ...coverShareCounts(html), documentUrl: url } : { status: "NOT_READ", value: null, documentUrl: url };
+  }
+  return out;
+}
+
 async function valuationHistoryFor(ticker: string, dates: string[] | null, fromDate: string): Promise<Record<string, unknown>> {
   const upper = ticker.toUpperCase();
   const cikPadded = await resolveCikForTicker(ticker);
@@ -15727,7 +15767,12 @@ async function valuationHistoryFor(ticker: string, dates: string[] | null, fromD
       warnings.push({ code: "ADR_RATIO_APPLIED", message: `SEC counts ${sec} ordinary shares; Yahoo counts ${quoted} quoted shares, ${r} ordinary shares each. Share counts are divided by ${r} at every date.`, severity: "info" });
     }
   }
-  const out = historicalValuation({ ticker, dates: useDates, companyfacts: facts, bars: history.bars, priceCurrency: history.currency, splits: history.splits, fx, adsRatio: ratio });
+  const { submissions } = await getSubmissionsForTicker(ticker).catch(() => ({ submissions: null }));
+  const reports = periodicReports(submissions, cikPadded);
+  const coverCounts = await coverCountsFor(facts, reports, useDates);
+  const periodicFilings = reports.map(({ accessionNumber, form, filed, reportDate }) => ({ accessionNumber, form, filed, reportDate }));
+  const out = historicalValuation({ ticker, dates: useDates, companyfacts: facts, bars: history.bars, priceCurrency: history.currency, splits: history.splits, fx, adsRatio: ratio, coverCounts, periodicFilings });
+  if (!submissions) warnings.push({ code: "SUBMISSIONS_NOT_AVAILABLE", message: "SEC submissions could not be read, so no cover page was read; filers without an undimensioned share count have no market cap. Retry.", severity: "warning" });
   out.warnings = warnings;
   return out;
 }
@@ -15769,6 +15814,7 @@ export async function getHistoricalValuationContext(ticker: string, dates: strin
   });
 }
 
+const RELEASE_READ_MAX = 4;
 const RECONCILE_INCOME_TYPES = ["TotalRevenue", "NetIncome", "NetIncomeCommonStockholders", "OperatingIncome", "DilutedEPS"];
 
 /** Metric source reconciliation (2.5.4): one metric for one period across SEC XBRL, the issuer release and Yahoo. */
@@ -15790,14 +15836,17 @@ export async function reconcileMetricSources(ticker: string, metric: string, per
   if (resolved.status !== "OK") return JSON.stringify({ ticker: upper, metric, ...resolved });
   const cikInt = parseInt(cikPadded, 10);
   const end = String(resolved.periodEnd);
-  // Results releases filed within 100 days after the period ended, oldest first; an early Item 2.02 8-K
-  // (ASTS filed one on 2026-07-15) is not always the results release, so up to three are read.
-  const candidates = submissions
-    ? earningsReleasePicks(submissions, cikInt, 40)
+  // Results releases (Item 2.02 8-Ks and 8-K/As) filed within 100 days after the period ended. The newest
+  // RELEASE_READ_MAX are read, so a later correction is never crowded out by earlier filings; they are kept
+  // oldest first, and the latest with a scoped figure wins (an early Item 2.02 8-K, as ASTS filed on
+  // 2026-07-15, is not always the results release).
+  const inWindow = submissions
+    ? earningsReleasePicks(submissions, cikInt, 40, true)
       .filter((p) => p.filingDate > end && (Date.parse(`${p.filingDate}T00:00:00Z`) - Date.parse(`${end}T00:00:00Z`)) / 86_400_000 <= 100)
-      .sort((a, b) => (a.filingDate < b.filingDate ? -1 : a.filingDate > b.filingDate ? 1 : 0))
-      .slice(0, 3)
+      .sort((a, b) => (a.filingDate < b.filingDate ? -1 : a.filingDate > b.filingDate ? 1 : a.accessionNumber < b.accessionNumber ? -1 : a.accessionNumber > b.accessionNumber ? 1 : 0))
     : [];
+  const candidates = inWindow.slice(-RELEASE_READ_MAX);
+  const notRead = inWindow.slice(0, inWindow.length - candidates.length);
   const annual = resolved.periodType === "ANNUAL";
   const spec = RECONCILE_METRICS[metric];
   const readReleases = async (): Promise<Record<string, unknown>[]> => {
@@ -15819,6 +15868,8 @@ export async function reconcileMetricSources(ticker: string, metric: string, per
   const unread = releases.filter((r) => r.status === "NOT_READ");
   if (unread.length > 0) warnings.push({ code: "RELEASE_TEXT_NOT_AVAILABLE", message: `${unread.length} earnings release(s) could not be read from SEC; retry.`, severity: "warning" });
   if (yahooRows == null) warnings.push({ code: "YAHOO_NOT_AVAILABLE", message: "Yahoo's statements could not be read; retry.", severity: "warning" });
+  out.releaseCandidates = { inWindow: inWindow.length, read: candidates.length, notRead: notRead.map((p) => ({ filingDate: p.filingDate, accessionNumber: p.accessionNumber, form: p.form })) };
+  if (notRead.length > 0) warnings.push({ code: "OLDER_RELEASE_CANDIDATES_NOT_READ", message: `${notRead.length} older Item 2.02 filing(s) in the 100-day window were not read; the ${candidates.length} newest were.`, severity: "info" });
   out.retryable = unread.length > 0 || yahooRows == null;
   out.warnings = warnings;
   return JSON.stringify(out);

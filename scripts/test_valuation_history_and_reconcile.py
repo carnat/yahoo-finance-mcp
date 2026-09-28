@@ -150,8 +150,75 @@ for concept, value in (
 STALE_RESULTS_BARS = [{"date": "2027-01-20", "close": 90.0}]
 
 
-def _hv(ticker, facts, bars, dates, splits=None, fx=None, ads=None, currency="USD"):
-    return {"ticker": ticker, "dates": dates, "companyfacts": facts, "bars": bars, "priceCurrency": currency, "splits": splits or [], "fx": fx, "adsRatio": ads}
+def _hv(ticker, facts, bars, dates, splits=None, fx=None, ads=None, currency="USD", covers=None):
+    out = {"ticker": ticker, "dates": dates, "companyfacts": facts, "bars": bars, "priceCurrency": currency, "splits": splits or [], "fx": fx, "adsRatio": ads}
+    if covers is not None:
+        out["coverCounts"] = covers
+        out["periodicFilings"] = FILINGS
+    return out
+
+
+# The periodic reports SEC submissions list for the synthetic filer.
+FILINGS = [
+    {"accessionNumber": "k24", "form": "10-K", "filed": "2025-02-15", "reportDate": "2024-12-31"},
+    {"accessionNumber": "q125", "form": "10-Q", "filed": "2025-05-05", "reportDate": "2025-03-31"},
+    {"accessionNumber": "q225", "form": "10-Q", "filed": "2025-08-05", "reportDate": "2025-06-30"},
+]
+
+
+# A multi-class filer (ASTS): no undimensioned cover or balance-sheet count, only a weighted-average basic count.
+MULTI = json.loads(json.dumps(SYN))
+del MULTI["facts"]["dei"]
+MULTI["facts"]["us-gaap"]["WeightedAverageNumberOfSharesOutstandingBasic"] = {"units": {"shares": [
+    _f("2025-01-01", "2025-06-30", 14, *Q225),
+    _f("2025-04-01", "2025-06-30", 15, *Q225),
+]}}
+CLASS_SUM = {"q225": {"status": "OK", "value": 25, "asOf": "2025-08-01", "basis": "COVER_PAGE_CLASS_SUM", "documentUrl": "https://www.sec.gov/q225.htm",
+                      "classes": [{"class": "Common Class A", "member": "us-gaap:CommonClassAMember", "shares": 20},
+                                  {"class": "Common Class B", "member": "us-gaap:CommonClassBMember", "shares": 5}]}}
+COVER_FAILED = {"q225": {"status": "CONTEXT_NOT_READ", "value": None, "documentUrl": "https://www.sec.gov/q225.htm"}}
+
+# A filer that moved from 20-F to 10-K: each date takes the cadence of the annual report filed by then.
+REGIME = {"facts": {"us-gaap": {"Revenues": _usd(
+    _f("2022-01-01", "2022-12-31", 100, "20-F", "2023-04-01", "f22"),
+    _f("2023-01-01", "2023-12-31", 110, "20-F", "2024-04-01", "f23"),
+    _f("2024-01-01", "2024-12-31", 120, "10-K", "2025-03-01", "k24r"),
+)}}}
+REGIME_BARS = [{"date": "2024-06-03", "close": 10.0}, {"date": "2025-06-02", "close": 11.0}]
+
+
+def _ctx(cid, date, members=()):
+    segment = "".join(f'<xbrldi:explicitMember dimension="{d}">{m}</xbrldi:explicitMember>' for d, m in members)
+    entity = f"<xbrli:entity><xbrli:identifier>1</xbrli:identifier>{f'<xbrli:segment>{segment}</xbrli:segment>' if segment else ''}</xbrli:entity>"
+    return f'<xbrli:context id="{cid}">{entity}<xbrli:period><xbrli:instant>{date}</xbrli:instant></xbrli:period></xbrli:context>'
+
+
+def _cover(cid, text, fmt="ixt:num-dot-decimal", scale=None):
+    scale_attr = f' scale="{scale}"' if scale is not None else ""
+    return (f'<ix:nonFraction contextRef="{cid}" name="dei:EntityCommonStockSharesOutstanding" unitRef="shares" decimals="INF" format="{fmt}"{scale_attr}>'
+            f"{text}</ix:nonFraction>")
+
+
+CLASS_A = ("us-gaap:StatementClassOfStockAxis", "us-gaap:CommonClassAMember")
+CLASS_B = ("us-gaap:StatementClassOfStockAxis", "us-gaap:CommonClassBMember")
+COVER_HTML = [
+    # Two classes, the Class A fact repeated (hidden and visible), and an older cover date ignored.
+    "<ix:header><ix:resources>" + _ctx("a", "2026-08-06", [CLASS_A]) + _ctx("b", "2026-08-06", [CLASS_B]) + _ctx("old", "2025-08-06", [CLASS_A])
+    + "</ix:resources></ix:header><p>" + _cover("a", "299,789,305") + _cover("b", "<span>11,215,111</span>") + _cover("a", "299,789,305")
+    + _cover("old", "1") + "</p>",
+    # An undimensioned count is the total.
+    _ctx("t", "2026-08-06") + _ctx("a", "2026-08-06", [CLASS_A]) + _cover("t", "311,004,416") + _cover("a", "299,789,305"),
+    # A second dimension (co-registrants) is not summed.
+    _ctx("a", "2026-08-06", [CLASS_A, ("dei:LegalEntityAxis", "x:SubMember")]) + _cover("a", "5"),
+    # A context outside the read leaves every class unresolved.
+    _ctx("a", "2026-08-06", [CLASS_A]) + _cover("a", "10") + _cover("missing", "3"),
+    "<p>No cover count.</p>",
+    # Scale and comma-decimal formats; a dash is zero.
+    _ctx("a", "2026-08-06", [CLASS_A]) + _ctx("b", "2026-08-06", [CLASS_B]) + _cover("a", "1.234,00", fmt="ixt:num-comma-decimal", scale=3)
+    + _cover("b", "—", fmt="ixt:fixed-zero"),
+    # An unparsed value fails the read.
+    _ctx("a", "2026-08-06", [CLASS_A]) + _cover("a", "n/a"),
+]
 
 
 HV_INPUTS = {
@@ -166,6 +233,10 @@ HV_INPUTS = {
     # An annual (20-F) filer's balances 244 days old are its latest: EV stays computed.
     "ifrsLate": _hv("tsmx", IFRS_FACTS, [{"date": "2025-09-02", "close": 10.0}], ["2025-09-02"],
                     fx={"pair": "TWDUSD=X", "bars": [{"date": "2025-09-01", "close": 0.03}]}, ads=5),
+    "multiWeighted": _hv("multi", MULTI, BARS, ["2025-09-02"], SPLITS),
+    "multiCoverFailed": _hv("multi", MULTI, BARS, ["2025-09-02"], SPLITS, covers=COVER_FAILED),
+    "multiClassSum": _hv("multi", MULTI, BARS, ["2025-09-02"], SPLITS, covers=CLASS_SUM),
+    "regime": _hv("regime", REGIME, REGIME_BARS, ["2024-06-03", "2025-06-02"]),
 }
 
 # NVDA: fiscal year ending late January, so its fiscal Q2 ends in calendar Q3.
@@ -180,6 +251,40 @@ FISCAL_TEXTS = [
     "Revenue for the first quarter of fiscal 2027 was $80.1 billion.",
     "Revenue for the fiscal 2027 second quarter was $96.2 billion.",
     "Full fiscal year 2026 revenue was $215.9 billion.",
+]
+
+
+def _fy(row, fy, fp):
+    return {**row, "fy": fy, "fp": fp}
+
+
+# The same periods with the issuer's fiscal metadata (companyfacts fy/fp), and Dollar General, which names a year
+# ending in late January by the year it began.
+FISCAL_META = {"facts": {"us-gaap": {"Revenues": _usd(
+    _fy(_f("2025-01-27", "2026-01-25", 215_938_000_000, "10-K", "2026-02-26", "k26"), 2026, "FY"),
+    _fy(_f("2026-04-27", "2026-07-26", 96_221_000_000, "10-Q", "2026-08-27", "q227"), 2027, "Q2"),
+)}}}
+DG_META = {"facts": {"us-gaap": {"RevenueFromContractWithCustomerExcludingAssessedTax": _usd(
+    _fy(_f("2025-02-01", "2026-01-30", 42_000_000_000, "10-K", "2026-03-20", "dgk"), 2025, "FY"),
+    _fy(_f("2026-05-02", "2026-07-31", 11_000_000_000, "10-Q", "2026-08-27", "dgq"), 2026, "Q2"),
+)}}}
+FISCAL_META_TEXTS = [
+    "Revenue for the second quarter of fiscal 2027 was $96.2 billion.",
+    "Second quarter fiscal 2026 revenue was $46.7 billion.",
+    "Q2 fiscal 2027 revenue was $96.2 billion.",
+    "Q2 FY27 revenue was $96.2 billion.",
+    "FY2027 Q2 revenue was $96.2 billion.",
+    "Fiscal 2026 second quarter revenue was $46.7 billion.",
+    "Revenue for the fiscal second quarter was $96.2 billion.",
+    "Revenue in the second fiscal quarter of fiscal 2027 was $96.2 billion.",
+    "Q2'27 revenue was $96.2 billion.",
+    "Full-year FY2026 revenue was $215.9 billion.",
+    "Third quarter 2026 revenue was $96.2 billion.",
+]
+DG_TEXTS = [
+    ["latest_annual", "Net sales for fiscal 2025 were $42.0 billion."],
+    ["latest_annual", "Net sales for fiscal 2026 were $44.0 billion."],
+    ["latest_quarter", "Second quarter fiscal 2026 net sales were $11.0 billion."],
 ]
 
 DATE_CASES = [[None, "2026-09-25"], [None, "2028-02-29"], [["2025-03-03", "2024-01-02", "2025-03-03"], None], [["2025-13-01"], None],
@@ -268,7 +373,21 @@ def _python_outputs() -> dict:
             {"source": "ISSUER_RELEASE", "provider": "ISSUER_RELEASE", "status": "FOUND", "value": 31_500_000, "filingDate": "2026-08-10"},
             {"source": "ISSUER_RELEASE", "provider": "ISSUER_RELEASE", "status": "FOUND", "value": 31_600_000, "filingDate": "2026-08-20"},
         ]),
+        "cover": [vh.cover_share_counts(h) for h in COVER_HTML],
+        "coverNeeded": [vh.cover_reads_needed(MULTI, FILINGS, ["2025-03-03", "2025-09-02"]), vh.cover_reads_needed(SYN, FILINGS, DATES),
+                        vh.cover_reads_needed(MULTI, None, DATES), vh.cover_reads_needed({}, FILINGS, DATES)],
+        "foreignAsOf": [vh.foreign_filer(REGIME, "2024-06-03"), vh.foreign_filer(REGIME, "2025-06-02"), vh.foreign_filer(REGIME)],
+        "fiscalMetaPeriod": mr.resolve_period(FISCAL_META, "revenue", "latest_quarter"),
+        "fiscalMetaObs": [_read_obs(t, mr.resolve_period(FISCAL_META, "revenue", "latest_quarter")) for t in FISCAL_META_TEXTS],
+        "fiscalDerivedObs": [_read_obs(t, mr.resolve_period(FISCAL_RECON, "revenue", "latest_quarter")) for t in FISCAL_META_TEXTS],
+        "dgPeriods": [mr.resolve_period(DG_META, "revenue", s) for s in ("latest_quarter", "latest_annual")],
+        "dgObs": [_read_obs(t, mr.resolve_period(DG_META, "revenue", s)) for s, t in DG_TEXTS],
+        "normalized": [mr.normalize_fiscal_tokens(t) for t in FISCAL_META_TEXTS],
     }
+
+
+def _read_obs(text: str, period: dict) -> dict:
+    return mr.release_observation({"status": "READ", "text": text, "url": None, "filingDate": None, "accessionNumber": None}, "revenue", period, "USD")
 
 
 _HARNESS = r"""
@@ -277,6 +396,7 @@ const vh = await import(vhUrl);
 const mr = await import(mrUrl);
 const { readFileSync } = await import("node:fs");
 const f = JSON.parse(readFileSync(fixturesPath, "utf8"));
+const readObs = (text, period) => mr.releaseObservation({ status: "READ", text, url: null, filingDate: null, accessionNumber: null }, "revenue", period, "USD");
 const periods = {};
 for (const spec of f.periodSpecs) periods[spec] = mr.resolvePeriod(f.recon, "revenue", spec);
 const quarter = mr.resolvePeriod(f.recon, "revenue", "Q2 2026");
@@ -315,6 +435,16 @@ const out = {
     { source: "ISSUER_RELEASE", provider: "ISSUER_RELEASE", status: "FOUND", value: 31_500_000, filingDate: "2026-08-10" },
     { source: "ISSUER_RELEASE", provider: "ISSUER_RELEASE", status: "FOUND", value: 31_600_000, filingDate: "2026-08-20" },
   ]),
+  cover: f.coverHtml.map((h) => vh.coverShareCounts(h)),
+  coverNeeded: [vh.coverReadsNeeded(f.multi, f.filings, ["2025-03-03", "2025-09-02"]), vh.coverReadsNeeded(f.syn, f.filings, f.dates),
+    vh.coverReadsNeeded(f.multi, null, f.dates), vh.coverReadsNeeded({}, f.filings, f.dates)],
+  foreignAsOf: [vh.foreignFiler(f.regime, "2024-06-03"), vh.foreignFiler(f.regime, "2025-06-02"), vh.foreignFiler(f.regime)],
+  fiscalMetaPeriod: mr.resolvePeriod(f.fiscalMeta, "revenue", "latest_quarter"),
+  fiscalMetaObs: f.fiscalMetaTexts.map((t) => readObs(t, mr.resolvePeriod(f.fiscalMeta, "revenue", "latest_quarter"))),
+  fiscalDerivedObs: f.fiscalMetaTexts.map((t) => readObs(t, mr.resolvePeriod(f.fiscalRecon, "revenue", "latest_quarter"))),
+  dgPeriods: ["latest_quarter", "latest_annual"].map((s) => mr.resolvePeriod(f.dgMeta, "revenue", s)),
+  dgObs: f.dgTexts.map(([s, t]) => readObs(t, mr.resolvePeriod(f.dgMeta, "revenue", s))),
+  normalized: f.fiscalMetaTexts.map((t) => mr.normalizeFiscalTokens(t)),
 };
 console.log(JSON.stringify(out));
 """
@@ -333,7 +463,9 @@ def _worker_outputs() -> dict:
             bundles.append(out.as_uri())
         fx = Path(tmp) / "fixtures.json"
         fx.write_text(json.dumps({"hv": HV_INPUTS, "dateCases": DATE_CASES, "dates": DATES, "syn": SYN, "ifrsFacts": IFRS_FACTS, "periodSpecs": PERIOD_SPECS,
-                                  "recon": RECON, "reconCases": RECON_CASES, "releaseTexts": RELEASE_TEXTS, "releases": RELEASES, "fiscalRecon": FISCAL_RECON, "fiscalTexts": FISCAL_TEXTS}), encoding="utf-8")
+                                  "recon": RECON, "reconCases": RECON_CASES, "releaseTexts": RELEASE_TEXTS, "releases": RELEASES, "fiscalRecon": FISCAL_RECON, "fiscalTexts": FISCAL_TEXTS,
+                                  "coverHtml": COVER_HTML, "multi": MULTI, "filings": FILINGS, "regime": REGIME, "fiscalMeta": FISCAL_META, "fiscalMetaTexts": FISCAL_META_TEXTS,
+                                  "dgMeta": DG_META, "dgTexts": DG_TEXTS}), encoding="utf-8")
         harness = Path(tmp) / "harness.mjs"
         harness.write_text(_HARNESS, encoding="utf-8")
         result = subprocess.run([node, str(harness), *bundles, str(fx)], check=True, capture_output=True, text=True, timeout=120)
@@ -456,6 +588,66 @@ class TestHistoricalValuation(unittest.TestCase):
         m = vh.peer_medians(["2026-09-02"], peers)[0]["LTM"]["evToRevenue"]
         self.assertEqual(m, {"median": 5.0, "count": 1, "tickers": ["GOOD"]})
 
+    def test_weighted_average_never_sets_market_cap(self) -> None:
+        for key, cover_status in (("multiWeighted", "NO_PERIODIC_FILING"), ("multiCoverFailed", "CONTEXT_NOT_READ")):
+            p = vh.historical_valuation(HV_INPUTS[key])["points"][0]
+            self.assertEqual((p["shares"]["basis"], p["shares"]["value"], p["shares"]["pointInTime"]), ("WEIGHTED_AVERAGE_BASIC", 15, False))
+            self.assertEqual(p["shares"]["coverPageRead"]["status"], cover_status)
+            self.assertEqual(p["shares"]["coverPageRead"]["accessionNumber"], "q225" if key == "multiCoverFailed" else None)
+            self.assertEqual((p["marketCap"]["status"], p["marketCap"]["value"]), ("POINT_IN_TIME_SHARES_UNRESOLVED", None))
+            self.assertEqual(p["enterpriseValue"]["status"], "MARKET_CAP_NOT_AVAILABLE")
+            self.assertEqual((p["status"], p["coreStatus"]), ("PARTIAL", "PARTIAL"))
+            self.assertIn("POINT_IN_TIME_SHARES_UNRESOLVED", [w["code"] for w in p["warnings"]])
+
+    def test_cover_page_classes_are_summed(self) -> None:
+        p = vh.historical_valuation(HV_INPUTS["multiClassSum"])["points"][0]
+        self.assertEqual((p["shares"]["basis"], p["shares"]["value"], p["shares"]["asOf"], p["shares"]["accessionNumber"]),
+                         ("COVER_PAGE_CLASS_SUM", 25, "2025-08-01", "q225"))
+        self.assertEqual(p["marketCap"]["value"], 70 * 25)
+        self.assertEqual(p["enterpriseValue"]["value"], 1750 + 315 - 150 - 20)
+        self.assertIn("Common Class A: 20, Common Class B: 5", next(w["message"] for w in p["warnings"] if w["code"] == "SHARE_CLASSES_SUMMED"))
+        needed = _python_outputs()["coverNeeded"]
+        # The latest report filed by each date, when companyfacts has no undimensioned count as new as its period:
+        # every date for the multi-class filer; for the other, only where its cover count lags a later 10-Q.
+        self.assertEqual([[f["accessionNumber"] for f in n] for n in needed], [["k24", "q225"], ["q125"], [], []])
+        # A multi-class filer whose weighted-average count stopped (ASTS after 2022) still gets the current cover page.
+        facts = json.loads(json.dumps(MULTI))
+        facts["facts"]["us-gaap"]["WeightedAverageNumberOfSharesOutstandingBasic"]["units"]["shares"] = [_f("2024-07-01", "2024-09-30", 9, "10-Q", "2024-11-05", "q324")]
+        p = vh.historical_valuation({**HV_INPUTS["multiClassSum"], "companyfacts": facts})["points"][0]
+        self.assertEqual((p["shares"]["basis"], p["shares"]["accessionNumber"], p["shares"]["value"]), ("COVER_PAGE_CLASS_SUM", "q225", 25))
+
+    def test_cover_share_counts(self) -> None:
+        out = _python_outputs()["cover"]
+        self.assertEqual((out[0]["status"], out[0]["basis"], out[0]["value"], out[0]["asOf"]), ("OK", "COVER_PAGE_CLASS_SUM", 311_004_416, "2026-08-06"))
+        self.assertEqual([c["class"] for c in out[0]["classes"]], ["Common Class A", "Common Class B"])
+        self.assertEqual((out[1]["basis"], out[1]["value"]), ("COVER_PAGE", 311_004_416))
+        self.assertEqual([o["status"] for o in out[2:5]], ["OTHER_DIMENSIONS", "CONTEXT_NOT_READ", "NOT_TAGGED"])
+        self.assertEqual(out[5]["value"], 1_234_000)
+        self.assertEqual(out[6]["status"], "VALUE_NOT_PARSED")
+
+    def test_status_requires_every_multiple(self) -> None:
+        full = _point(self.r, "2025-09-02")
+        self.assertEqual((full["status"], full["coreStatus"], full["coverage"]["multiplesAvailable"]), ("OK", "OK", 8))
+        facts = json.loads(json.dumps(SYN))
+        for concept in ("DepreciationDepletionAndAmortization", "Depreciation", "AmortizationOfIntangibleAssets"):
+            del facts["facts"]["us-gaap"][concept]
+        r = vh.historical_valuation({**HV_INPUTS["syn"], "companyfacts": facts})
+        p = _point(r, "2025-09-02")
+        # EV/EBITDA without D&A: the core values stand, the point does not claim completeness.
+        self.assertEqual((p["status"], p["coreStatus"]), ("PARTIAL", "OK"))
+        self.assertEqual(p["coverage"]["multiplesAvailable"], 6)
+        self.assertEqual({(u["basis"], u["multiple"], u["status"]) for u in p["coverage"]["unavailable"]},
+                         {("LTM", "evToEbitda", "DENOMINATOR_NOT_AVAILABLE"), ("LFY", "evToEbitda", "DENOMINATOR_NOT_AVAILABLE")})
+        self.assertEqual(r["status"], "PARTIAL")
+
+    def test_cadence_is_point_in_time(self) -> None:
+        self.assertEqual(_python_outputs()["foreignAsOf"], [True, False, False])
+        r = vh.historical_valuation(HV_INPUTS["regime"])
+        self.assertEqual([p["secCompanyfactsCadence"] for p in r["points"]], ["ANNUAL", "QUARTERLY"])
+        self.assertEqual(r["secCompanyfactsCadence"], "MIXED")
+        self.assertEqual((r["stalenessLimitsDays"]["ANNUAL"]["balances"], r["stalenessLimitsDays"]["QUARTERLY"]["balances"]), (500, 200))
+        self.assertNotIn("reportingCadence", r)
+
     def test_authority_boundary(self) -> None:
         for key, value in AUTHORITY_BOUNDARY.items():
             self.assertEqual(self.r[key], value)
@@ -564,10 +756,29 @@ class TestReconciliation(unittest.TestCase):
 
     def test_annual_filer_staleness_limits(self) -> None:
         r = vh.historical_valuation(HV_INPUTS["ifrsLate"])
-        self.assertEqual((r["reportingCadence"], r["stalenessLimitsDays"]["balances"]), ("ANNUAL", 500))
+        self.assertEqual((r["secCompanyfactsCadence"], r["stalenessLimitsDays"]["ANNUAL"]["balances"]), ("ANNUAL", 500))
         p = r["points"][0]
         self.assertEqual((p["balances"]["balanceDate"], p["enterpriseValue"]["status"]), ("2024-12-31", "OK"))
-        self.assertEqual(vh.historical_valuation(HV_INPUTS["syn"])["reportingCadence"], "QUARTERLY")
+        self.assertEqual(vh.historical_valuation(HV_INPUTS["syn"])["secCompanyfactsCadence"], "QUARTERLY")
+
+    def test_fiscal_identity_from_issuer_metadata(self) -> None:
+        out = _python_outputs()
+        period = out["fiscalMetaPeriod"]
+        self.assertEqual((period["fiscalQuarter"], period["fiscalYears"], period["fiscalYearSource"]), (2, [2027], "SEC_FY_FP"))
+        self.assertNotIn("fiscalYearAmbiguous", period)
+        found = [o["status"] == "FOUND" for o in out["fiscalMetaObs"]]
+        # Q2 fiscal 2027 in every wording; never fiscal 2026's second quarter; calendar Q3 2026 is the same period.
+        self.assertEqual(found, [True, False, True, True, True, False, True, True, True, False, True])
+        # Without metadata, both adjacent years remain possible for a January year end, and that is flagged.
+        derived = mr.resolve_period(FISCAL_RECON, "revenue", "latest_quarter")
+        self.assertEqual((derived["fiscalYears"], derived["fiscalYearAmbiguous"]), ([2027, 2026], True))
+        self.assertEqual(out["fiscalDerivedObs"][1]["status"], "FOUND")
+        dg_quarter, dg_annual = out["dgPeriods"]
+        self.assertEqual((dg_quarter["fiscalQuarter"], dg_quarter["fiscalYears"], dg_annual["fiscalYears"]), (2, [2026], [2025]))
+        self.assertEqual([o["status"] for o in out["dgObs"]], ["FOUND", "NOT_FOUND_IN_TEXT", "FOUND"])
+        self.assertEqual(out["normalized"][3], "Q2 fiscal 2027 revenue was $96.2 billion.")
+        # The evidence keeps the sentence as written.
+        self.assertEqual(out["fiscalMetaObs"][3]["sentence"], "Q2 FY27 revenue was $96.2 billion.")
 
     def test_latest_parseable_release_wins(self) -> None:
         latest = _python_outputs()["latestRelease"]

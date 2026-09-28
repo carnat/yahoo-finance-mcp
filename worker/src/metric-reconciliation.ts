@@ -52,7 +52,7 @@ function cmp(a: unknown, b: unknown): number {
   return x < y ? -1 : x > y ? 1 : 0;
 }
 
-interface Row { concept: string; start: string | null; end: string; val: number; filed: string; form: string; accn: string | null }
+interface Row { concept: string; start: string | null; end: string; val: number; filed: string; form: string; accn: string | null; fy: number | null; fp: string | null }
 
 /** The taxonomy, reporting unit and facts for a metric (all periodic filings, every filing kept). */
 export function metricFacts(companyfacts: unknown, metric: string): { taxonomy: string | null; unit: string | null; rows: Row[] } {
@@ -72,7 +72,7 @@ export function metricFacts(companyfacts: unknown, metric: string): { taxonomy: 
           const start = typeof f.start === "string" ? f.start : null;
           if ((spec.kind === "instant") !== (start == null)) continue;
           const rows = byUnit.get(unit) ?? [];
-          rows.push({ concept, start, end: f.end, val: f.val, filed: f.filed, form: String(f.form), accn: typeof f.accn === "string" ? f.accn : null });
+          rows.push({ concept, start, end: f.end, val: f.val, filed: f.filed, form: String(f.form), accn: typeof f.accn === "string" ? f.accn : null, fy: typeof f.fy === "number" ? f.fy : null, fp: typeof f.fp === "string" ? f.fp : null });
           byUnit.set(unit, rows);
         }
       }
@@ -124,18 +124,41 @@ export function resolvePeriod(companyfacts: unknown, metric: string, spec: strin
   }
   const best = [...candidates].sort((a, b) => cmp(a.end, b.end) || cmp(a.start, b.start))[candidates.length - 1];
   const kind = METRICS[metric].kind;
-  // The fiscal quarter, counted from the prior fiscal year end, and the years a release may call the fiscal year
-  // (NVDA's year ending January 2027 is "fiscal 2027"; retailers ending early February name the year it began).
+  // The fiscal year and quarter the issuer gives the period: companyfacts' fy/fp of the filing that first
+  // reported it (NVDA's quarter ended 2026-07-26 is fy 2027 Q2; Dollar General's ended 2026-07-31 is fy 2026 Q2).
+  // Without usable metadata the quarter is counted from the prior fiscal year end and, for a year ending in
+  // January to March, either naming convention is accepted and flagged as ambiguous.
+  const first = rows
+    .filter((r) => r.end === best.end && r.start === best.start)
+    .sort((a, b) => cmp(a.filed, b.filed) || cmp(a.accn, b.accn))[0];
+  const fy = first?.fy ?? null;
+  const fp = first?.fp ?? null;
+  const endYear = Number(best.end.slice(0, 4));
   let fiscal: Rec = {};
   if (periodType === "QUARTER") {
     const priorEnds = rows.filter(isAnnual).map((r) => r.end).filter((e) => e < best.end).sort();
     const prior = priorEnds.length > 0 ? priorEnds[priorEnds.length - 1] : null;
-    if (prior) {
-      const quarter = Math.min(4, Math.max(1, Math.floor(days(prior, best.end) / 91.25 + 0.5)));
-      const priorYear = Number(prior.slice(0, 4));
+    const priorYear = prior ? Number(prior.slice(0, 4)) : null;
+    const counted = prior ? Math.min(4, Math.max(1, Math.floor(days(prior, best.end) / 91.25 + 0.5))) : null;
+    const fpQuarter = fp && /^Q[1-3]$/.test(fp) ? Number(fp[1]) : fp === "FY" ? 4 : null;
+    const fyFits = fy != null && (priorYear == null ? fy === endYear || fy === endYear + 1 || fy === endYear - 1 : fy === priorYear || fy === priorYear + 1);
+    if (fy != null && fpQuarter != null && fyFits && (counted == null || counted === fpQuarter)) {
+      fiscal = { fiscalQuarter: fpQuarter, fiscalYears: [fy], fiscalYearSource: "SEC_FY_FP", fiscalBasis: `companyfacts fy ${fy} fp ${fp} of the filing that first reported the period (${first.accn})` };
+    } else if (prior && counted != null && priorYear != null) {
       const fiscalYears = Number(prior.slice(5, 7)) <= 3 ? [priorYear + 1, priorYear] : [priorYear + 1];
-      fiscal = { fiscalQuarter: quarter, fiscalYears, fiscalBasis: `counted from the prior fiscal year end ${prior}` };
+      fiscal = {
+        fiscalQuarter: counted,
+        fiscalYears,
+        fiscalYearSource: "DERIVED_FROM_PRIOR_YEAR_END",
+        fiscalBasis: `counted from the prior fiscal year end ${prior}`,
+        ...(fiscalYears.length > 1 ? { fiscalYearAmbiguous: true } : {}),
+        ...(fy != null || fp != null ? { fiscalMetadataNotUsed: { fy, fp } } : {}),
+      };
     }
+  } else {
+    fiscal = fy != null && fp === "FY" && (fy === endYear || fy === endYear - 1)
+      ? { fiscalYears: [fy], fiscalYearSource: "SEC_FY_FP", fiscalBasis: `companyfacts fy ${fy} fp ${fp} of the filing that first reported the period (${first.accn})` }
+      : { fiscalYears: [endYear], fiscalYearSource: "PERIOD_END_YEAR", fiscalBasis: "the calendar year the fiscal year ends in" };
   }
   return {
     status: "OK",
@@ -190,9 +213,26 @@ const ANNUAL_SCOPE_RE = /\b(?:full[- ]year|fiscal (?:year )?20\d\d|years? ended|
 const INSTANT_SCOPE_RE = /\b(?:as of|ended (?:the )?(?:quarter|year|period)|at (?:the )?(?:end|close) of|balance)\b/i;
 const MONEY_RE = /(\(?)\s?(-?)\s?\$\s?(\(?)(-?)([0-9][0-9,]*)(\.[0-9]+)?\)?(?:\s?(billion|million|thousand)\b)?/i;
 const QUARTER_ORDINAL = ["first", "second", "third", "fourth"];
-const FISCAL_YEAR_OF_QUARTER_RE = /\b(?:(quarter(?:ly)?)(?: of)?(?: the)? fiscal (?:year )?20\d\d|fiscal (?:year )?20\d\d(?= (?:first|second|third|fourth)[- ]quarter))\b/gi;
+// "quarter of fiscal 2027", "Q2 fiscal 2027", "fiscal 2027 second quarter", "fiscal year 2027 Q2": a fiscal year
+// naming the quarter it qualifies (the quarter word is kept, the year dropped), not a full-year scope.
+const FISCAL_YEAR_OF_QUARTER_RE = /\b(?:(quarter(?:ly)?|Q[1-4])(?: of)?(?: the)? fiscal (?:year )?20\d\d|fiscal (?:year )?20\d\d(?=,? (?:(?:first|second|third|fourth)[- ](?:fiscal[- ])?quarter|Q[1-4])\b))\b/gi;
 
-const QUARTER_MENTION_SOURCE = "\\b(?:Q([1-4])|(first|second|third|fourth)[- ]quarter)\\b";
+const QUARTER_MENTION_SOURCE = "\\b(?:Q([1-4])|(first|second|third|fourth)[- ](?:fiscal[- ])?quarter)\\b";
+
+/**
+ * Fiscal shorthand spelled out so one set of patterns reads it: "FY27" and "FY2027" -> "fiscal 2027",
+ * "Q2FY27" -> "Q2 fiscal 2027", "Q2'27" -> "Q2 2027", "2Q26" -> "Q2 2026". Dollar amounts are untouched.
+ */
+export function normalizeFiscalTokens(text: string): string {
+  return text
+    .replace(/\b(Q[1-4])\s?FY\s?'?(\d{2})\b/gi, "$1 fiscal 20$2")
+    .replace(/\b(Q[1-4])\s?FY\s?(20\d{2})\b/gi, "$1 fiscal $2")
+    .replace(/\bFY\s?'?(\d{2})\b/gi, "fiscal 20$1")
+    .replace(/\bFY\s?(20\d{2})\b/gi, "fiscal $1")
+    .replace(/\b(Q[1-4])\s?'(\d{2})\b/gi, "$1 20$2")
+    .replace(/\b([1-4])Q'?(\d{2})\b/gi, "Q$1 20$2")
+    .replace(/\b([1-4])Q\b/gi, "Q$1");
+}
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 const COMPARATOR_RE = /\b(?:compared (?:with|to)|versus|vs\.?|from)\b/i;
 
@@ -212,15 +252,22 @@ function explicitPeriodMatches(sentence: string, amountStart: number, period: Re
   if (end.length === 10 && sentence.includes(periodEndPhrase(end))) return true;
   const beforeAmount = sentence.slice(0, amountStart);
   if (period.periodType === "QUARTER") {
-    const quarters = new Set<number>([Math.ceil(Number(end.slice(5, 7)) / 3)]);
-    if (typeof period.fiscalQuarter === "number") quarters.add(period.fiscalQuarter);
-    const years = new Set<string>([end.slice(0, 4), ...((period.fiscalYears ?? []) as unknown[]).map(String)]);
+    // A quarter and year name the period as a pair: its calendar quarter in the calendar year, or its fiscal
+    // quarter in its fiscal year. NVDA's quarter ended 2026-07-26 is Q3 2026 or Q2 fiscal 2027, never
+    // "second quarter fiscal 2026" (the prior year's quarter).
+    const pairs: [number, string][] = [[Math.ceil(Number(end.slice(5, 7)) / 3), end.slice(0, 4)]];
+    if (typeof period.fiscalQuarter === "number") {
+      for (const y of (period.fiscalYears ?? []) as unknown[]) pairs.push([period.fiscalQuarter, String(y)]);
+    }
     const quarterOf = (m: RegExpMatchArray) => (m[1] ? Number(m[1]) : QUARTER_ORDINAL.indexOf(m[2].toLowerCase()) + 1);
+    // The year written just before the quarter ("fiscal 2026 second quarter") or after it ("Q2 fiscal 2026").
     const matches = (text: string, m: RegExpMatchArray) => {
-      if (!quarters.has(quarterOf(m))) return false;
-      const nearby = text.slice(m.index ?? 0, Math.min(text.length, (m.index ?? 0) + 60));
-      const ym = /\b(20\d{2})\b/.exec(nearby);
-      return !(ym && !years.has(ym[1]));
+      const q = quarterOf(m);
+      const at = m.index ?? 0;
+      const before = /\b(20\d{2}),?\s+$/.exec(text.slice(Math.max(0, at - 24), at));
+      const after = /\b(20\d{2})\b/.exec(text.slice(at, Math.min(text.length, at + 60)));
+      const named = [before?.[1], after?.[1]].filter((y): y is string => y != null);
+      return pairs.some(([pq, py]) => pq === q && named.every((y) => y === py));
     };
     const quarterMentions = [...beforeAmount.matchAll(new RegExp(QUARTER_MENTION_SOURCE, "gi"))];
     for (const m of quarterMentions) {
@@ -236,14 +283,15 @@ function explicitPeriodMatches(sentence: string, amountStart: number, period: Re
     return true;
   }
   if (period.periodType === "ANNUAL") {
-    const requestedYear = end.slice(0, 4);
+    // The issuer's name for the year (Dollar General's year ended 2026-01-30 is fiscal 2025), else the end year.
+    const years = new Set<string>(((period.fiscalYears ?? [end.slice(0, 4)]) as unknown[]).map(String));
     const beforeYears = [...beforeAmount.matchAll(/\b(20\d{2})\b/g)].map((m) => m[1]);
-    if (beforeYears.some((y) => y !== requestedYear)) return false;
+    if (beforeYears.some((y) => !years.has(y))) return false;
     const after = sentence.slice(amountStart);
     const laterYear = /\b(20\d{2})\b/.exec(after);
     if (beforeYears.length === 0 && laterYear) {
       const prefix = after.slice(0, laterYear.index);
-      if (!COMPARATOR_RE.test(prefix) && laterYear[1] !== requestedYear) return false;
+      if (!COMPARATOR_RE.test(prefix) && !years.has(laterYear[1])) return false;
     }
     return true;
   }
@@ -265,17 +313,19 @@ export function releaseObservation(release: Rec | null, metric: string, period: 
     const sentence = raw.trim();
     if (!sentence || sentence.length > 600 || !label.test(sentence)) continue;
     if (GUIDANCE_RE.test(sentence) || NON_RESULT_RE.test(sentence)) continue;
-    const m = anchored.exec(sentence);
+    // Scope is read on the sentence with fiscal shorthand spelled out; the evidence is the sentence as written.
+    const text = normalizeFiscalTokens(sentence);
+    const m = anchored.exec(text);
     if (!m) continue;
-    const quarter = QUARTER_SCOPE_RE.test(sentence);
+    const quarter = QUARTER_SCOPE_RE.test(text);
     // "second quarter of fiscal 2027" and "fiscal 2026 third quarter" name a quarter, not a year.
-    const annual = ANNUAL_SCOPE_RE.test(sentence.replace(FISCAL_YEAR_OF_QUARTER_RE, "$1"));
+    const annual = ANNUAL_SCOPE_RE.test(text.replace(FISCAL_YEAR_OF_QUARTER_RE, "$1"));
     const amountStart = m.index + m[0].indexOf("$");
     const scoped = spec.kind === "instant"
-      ? INSTANT_SCOPE_RE.test(sentence)
+      ? INSTANT_SCOPE_RE.test(text)
       : period.periodType === "QUARTER"
-        ? quarter && !annual && explicitPeriodMatches(sentence, amountStart, period)
-        : annual && !quarter && explicitPeriodMatches(sentence, amountStart, period);
+        ? quarter && !annual && explicitPeriodMatches(text, amountStart, period)
+        : annual && !quarter && explicitPeriodMatches(text, amountStart, period);
     if (!scoped) {
       unscoped += 1;
       continue;

@@ -662,10 +662,10 @@ consensus actions compose evidence and never fill a gap with an assumption.
     (`laterSplitFactor`) so the price matches the share count reported then.
     A split between the share count's date and the price date leaves market
     cap null (`SPLIT_AFTER_SHARE_COUNT`).
-  - Shares are the cover-page count, else the balance-sheet count, else the
-    weighted-average basic count (`SHARE_COUNT_WEIGHTED_AVERAGE`), from facts
-    filed by the date. Companies with several share classes tag cover counts
-    per class, which companyfacts omits; ASTS's count is Class A only.
+  - Shares are a point-in-time count filed by the date: the cover-page count,
+    else the balance-sheet count, else (since 2.5.6, below) the filing's
+    per-class cover-page counts summed. A weighted-average count never sets
+    market cap.
   - Balances are read at the latest cash balance date filed by the date.
     Debt is `LongTermDebt`, else current plus noncurrent, else convertible or
     notes payable, plus short-term borrowings and commercial paper. A concept
@@ -703,10 +703,10 @@ consensus actions compose evidence and never fill a gap with an assumption.
     tie). `otherConcepts` lists the rest: ASTS's `ProfitLoss`, which includes
     noncontrolling interests. A difference is a restatement (`restated:
     true`), not a conflict.
-  - Issuer release: up to three Item 2.02 8-Ks filed within 100 days after
-    the period; since 2.5.5 all are read and the latest with a figure wins. ASTS filed an Item
-    2.02 8-K on 2026-07-15 before its results release. A figure is read only
-    from a sentence or bullet that:
+  - Issuer release: Item 2.02 8-Ks filed within 100 days after the period
+    (since 2.5.6 the four newest, 8-K/As included); the latest with a figure
+    wins. ASTS filed an Item 2.02 8-K on 2026-07-15 before its results
+    release. A figure is read only from a sentence or bullet that:
     - names the metric and a dollar amount;
     - is scoped to the period (a quarter alone, a full year alone, or "as of"
       for cash);
@@ -740,7 +740,8 @@ consensus actions compose evidence and never fill a gap with an assumption.
 
   So stale peer multiples cannot enter peer medians: NVT's stale-balance EV
   multiples no longer count in VRT's.
-- Limits follow reporting cadence (`reportingCadence`,
+- Limits follow the cadence of the facts SEC companyfacts holds (named
+  `secCompanyfactsCadence` and set per date since 2.5.6, below;
   `stalenessLimitsDays`):
   - quarterly filers: 400 days for shares, 200 for balances, 500 for
     results;
@@ -758,9 +759,9 @@ consensus actions compose evidence and never fill a gap with an assumption.
     a figure wins.
   - A quarter a sentence names must be the period's calendar or fiscal
     quarter, in its calendar or fiscal year. The period carries
-    `fiscalQuarter` and `fiscalYears`, counted from the prior fiscal year
-    end. NVDA's quarter ended July 26, 2026 is its fiscal Q2 of fiscal 2027
-    but calendar Q3.
+    `fiscalQuarter` and `fiscalYears` (from the issuer's `fy`/`fp` since
+    2.5.6). NVDA's quarter ended July 26, 2026 is its fiscal Q2 of fiscal
+    2027 but calendar Q3.
   - A sentence naming the period's exact end date ("the second quarter ended
     July 26, 2026") is scoped to it.
   - "Second-quarter" is read like "second quarter".
@@ -780,6 +781,71 @@ consensus actions compose evidence and never fill a gap with an assumption.
   - a segment bullet under a heading ("Data Center • Second-quarter revenue
     was …"), which reads like a company total when it is the only matching
     sentence.
+
+## Share Denominators, Coverage And Fiscal Identity (2.5.6)
+
+- Historical valuation shares are point in time only:
+  - Filers with several share classes tag cover counts per class, and
+    companyfacts omits those. When there is no undimensioned cover-page or
+    balance-sheet count as new as the latest periodic report filed by the
+    date (10-K, 10-Q, 20-F or 40-F, from SEC submissions), the tool reads
+    that report's cover page. It reads the first 900 KB, which holds the
+    cover and the header contexts. The per-class counts are summed
+    (`COVER_PAGE_CLASS_SUM`, with `classes`, and a `SHARE_CLASSES_SUMMED`
+    note). Every class is valued at the quoted class's close. ASTS stopped
+    tagging an undimensioned weighted-average count after 2022, so the report
+    is chosen by filing date, not from companyfacts.
+  - ASTS's Q2 2026 10-Q counts Class A 299,789,305, Class B 11,215,111 and
+    Class C 78,163,078, a total of 389,167,494. Before this, market cap used
+    299,061,662 weighted-average Class A shares and was about 23% low.
+  - A read that leaves any class unresolved (context or value not read, or a
+    dimension other than class of stock) is not summed.
+  - A weighted-average count never sets market cap. Without a point-in-time
+    count, market cap and EV are null (`POINT_IN_TIME_SHARES_UNRESOLVED`).
+    The weighted-average count is shown for context, with `coverPageRead`.
+    Without SEC submissions no cover page is read
+    (`SUBMISSIONS_NOT_AVAILABLE`).
+- `status` no longer overstates completeness:
+  - Each point has `coreStatus` (market cap and EV) and `coverage`: the
+    eight multiples requested and available, and each unavailable one with
+    its status.
+  - `status` is `OK` only when the core values and all eight multiples are
+    usable. COHR and MRVL, whose LTM EV/EBITDA is
+    `DENOMINATOR_NOT_AVAILABLE`, are now `PARTIAL` with `coreStatus` `OK`.
+  - The top level carries both.
+- Cadence is named for what it measures and set per date:
+  - `reportingCadence` is now `secCompanyfactsCadence`. It is `ANNUAL` for
+    20-F/40-F filers, which tag annual periods only; it is not the issuer's
+    disclosure cadence. Interim 6-K, IR and exchange disclosures are outside
+    this engine.
+  - Each point sets its cadence and limits from the annual report filed by
+    its own date, so a filer that moved between 20-F and 10-K keeps its
+    earlier cadence at earlier dates. The top level is `MIXED` when dates
+    differ, and `stalenessLimitsDays` is keyed by cadence.
+- `reconcile_metric_sources` fiscal identity:
+  - `fiscalQuarter` and `fiscalYears` come from companyfacts' `fy`/`fp` for
+    the filing that first reported the period (`fiscalYearSource:
+    SEC_FY_FP`). NVDA's quarter ended July 26, 2026 is fy 2027 Q2 only.
+    "Second quarter fiscal 2026 revenue" is therefore the prior year and is
+    not read as the current quarter. Dollar General's quarter ended July 31,
+    2026 is fy 2026 Q2.
+  - Without usable metadata, the quarter is counted from the prior year end.
+    For a January–March year end both adjacent years are accepted, and
+    `fiscalYearAmbiguous` is set.
+  - Annual periods also take the issuer's fiscal year: Dollar General's year
+    ended January 30, 2026 is fiscal 2025.
+- More fiscal-quarter wordings are read:
+  - Shorthand is spelled out before scoping: `FY27`/`FY2027` becomes fiscal
+    2027, `Q2FY27` becomes Q2 fiscal 2027, `Q2'27` becomes Q2 2027 and `2Q26`
+    becomes Q2 2026. The evidence keeps the sentence as written.
+  - "Q2 fiscal 2027", "fiscal 2027 Q2", "second fiscal quarter" and "fiscal
+    second quarter" are quarter scope.
+  - A year written just before the quarter ("fiscal 2026 second quarter")
+    must match, like one written after it.
+- Release candidates: the four newest Item 2.02 8-Ks and 8-K/As in the
+  100-day window are read, so a later correction is not crowded out.
+  `releaseCandidates` counts those in the window and those read, and lists
+  any older ones not read (`OLDER_RELEASE_CANDIDATES_NOT_READ`).
 
 ## Non-US Primary Filings
 

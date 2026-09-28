@@ -77,7 +77,9 @@ def metric_facts(companyfacts: Any, metric: str) -> tuple[str | None, str | None
                     if (spec["kind"] == "instant") != (start is None):
                         continue
                     by_unit.setdefault(unit, []).append({"concept": concept, "start": start, "end": f["end"], "val": f["val"], "filed": f["filed"],
-                                                         "form": str(f["form"]), "accn": f.get("accn") if isinstance(f.get("accn"), str) else None})
+                                                         "form": str(f["form"]), "accn": f.get("accn") if isinstance(f.get("accn"), str) else None,
+                                                         "fy": f.get("fy") if isinstance(f.get("fy"), int) and not isinstance(f.get("fy"), bool) else None,
+                                                         "fp": f.get("fp") if isinstance(f.get("fp"), str) else None})
         if not by_unit:
             continue
         unit, rows = sorted(by_unit.items(), key=lambda kv: (-len(kv[1]), kv[0]))[0]
@@ -128,17 +130,39 @@ def resolve_period(companyfacts: Any, metric: str, spec: str) -> dict:
                 "message": f"No {period_type.lower()} period in companyfacts matches {text} (20-F and 40-F filers tag annual periods only)."}
     best = sorted(candidates, key=lambda r: (r["end"], r["start"] or ""))[-1]
     kind = METRICS[metric]["kind"]
-    # The fiscal quarter, counted from the prior fiscal year end, and the years a release may call the fiscal year
-    # (NVDA's year ending January 2027 is "fiscal 2027"; retailers ending early February name the year it began).
+    # The fiscal year and quarter the issuer gives the period: companyfacts' fy/fp of the filing that first
+    # reported it (NVDA's quarter ended 2026-07-26 is fy 2027 Q2; Dollar General's ended 2026-07-31 is fy 2026 Q2).
+    # Without usable metadata the quarter is counted from the prior fiscal year end and, for a year ending in
+    # January to March, either naming convention is accepted and flagged as ambiguous.
+    same = sorted((r for r in rows if r["end"] == best["end"] and r["start"] == best["start"]), key=lambda r: (r["filed"], r["accn"] or ""))
+    first = same[0] if same else None
+    fy = first["fy"] if first else None
+    fp = first["fp"] if first else None
+    end_year = int(best["end"][:4])
     fiscal: dict = {}
     if period_type == "QUARTER":
         prior_ends = sorted(r["end"] for r in rows if _is_annual(r) and r["end"] < best["end"])
-        if prior_ends:
-            prior = prior_ends[-1]
-            quarter = min(4, max(1, math.floor(_days(prior, best["end"]) / 91.25 + 0.5)))
-            prior_year = int(prior[:4])
+        prior = prior_ends[-1] if prior_ends else None
+        prior_year = int(prior[:4]) if prior else None
+        counted = min(4, max(1, math.floor(_days(prior, best["end"]) / 91.25 + 0.5))) if prior else None
+        fp_quarter = int(fp[1]) if fp and re.fullmatch(r"Q[1-3]", fp) else 4 if fp == "FY" else None
+        fy_fits = fy is not None and (fy in (end_year, end_year + 1, end_year - 1) if prior_year is None else fy in (prior_year, prior_year + 1))
+        if fy is not None and fp_quarter is not None and fy_fits and (counted is None or counted == fp_quarter):
+            fiscal = {"fiscalQuarter": fp_quarter, "fiscalYears": [fy], "fiscalYearSource": "SEC_FY_FP",
+                      "fiscalBasis": f"companyfacts fy {fy} fp {fp} of the filing that first reported the period ({first['accn']})"}
+        elif prior and counted is not None and prior_year is not None:
             fiscal_years = [prior_year + 1, prior_year] if int(prior[5:7]) <= 3 else [prior_year + 1]
-            fiscal = {"fiscalQuarter": quarter, "fiscalYears": fiscal_years, "fiscalBasis": f"counted from the prior fiscal year end {prior}"}
+            fiscal = {"fiscalQuarter": counted, "fiscalYears": fiscal_years, "fiscalYearSource": "DERIVED_FROM_PRIOR_YEAR_END",
+                      "fiscalBasis": f"counted from the prior fiscal year end {prior}"}
+            if len(fiscal_years) > 1:
+                fiscal["fiscalYearAmbiguous"] = True
+            if fy is not None or fp is not None:
+                fiscal["fiscalMetadataNotUsed"] = {"fy": fy, "fp": fp}
+    elif fy is not None and fp == "FY" and fy in (end_year, end_year - 1):
+        fiscal = {"fiscalYears": [fy], "fiscalYearSource": "SEC_FY_FP",
+                  "fiscalBasis": f"companyfacts fy {fy} fp {fp} of the filing that first reported the period ({first['accn']})"}
+    else:
+        fiscal = {"fiscalYears": [end_year], "fiscalYearSource": "PERIOD_END_YEAR", "fiscalBasis": "the calendar year the fiscal year ends in"}
     return {
         "status": "OK",
         "spec": text,
@@ -202,11 +226,29 @@ _ANNUAL_SCOPE_RE = re.compile(r"\b(?:full[- ]year|fiscal (?:year )?20\d\d|years?
 _INSTANT_SCOPE_RE = re.compile(r"\b(?:as of|ended (?:the )?(?:quarter|year|period)|at (?:the )?(?:end|close) of|balance)\b", _F)
 _MONEY = r"(\(?)\s?(-?)\s?\$\s?(\(?)(-?)([0-9][0-9,]*)(\.[0-9]+)?\)?(?:\s?(billion|million|thousand)\b)?"
 _QUARTER_ORDINAL = ("first", "second", "third", "fourth")
+# "quarter of fiscal 2027", "Q2 fiscal 2027", "fiscal 2027 second quarter", "fiscal year 2027 Q2": a fiscal year
+# naming the quarter it qualifies (the quarter word is kept, the year dropped), not a full-year scope.
 _FISCAL_YEAR_OF_QUARTER_RE = re.compile(
-    r"\b(?:(quarter(?:ly)?)(?: of)?(?: the)? fiscal (?:year )?20\d\d|fiscal (?:year )?20\d\d(?= (?:first|second|third|fourth)[- ]quarter))\b", _F)
+    r"\b(?:(quarter(?:ly)?|Q[1-4])(?: of)?(?: the)? fiscal (?:year )?20\d\d"
+    r"|fiscal (?:year )?20\d\d(?=,? (?:(?:first|second|third|fourth)[- ](?:fiscal[- ])?quarter|Q[1-4])\b))\b", _F)
 
 
-_QUARTER_MENTION = r"\b(?:Q([1-4])|(first|second|third|fourth)[- ]quarter)\b"
+_QUARTER_MENTION = r"\b(?:Q([1-4])|(first|second|third|fourth)[- ](?:fiscal[- ])?quarter)\b"
+
+
+def normalize_fiscal_tokens(text: str) -> str:
+    """Fiscal shorthand spelled out so one set of patterns reads it.
+
+    "FY27" and "FY2027" -> "fiscal 2027", "Q2FY27" -> "Q2 fiscal 2027", "Q2'27" -> "Q2 2027", "2Q26" -> "Q2 2026".
+    Dollar amounts are untouched.
+    """
+    text = re.sub(r"\b(Q[1-4])\s?FY\s?'?(\d{2})\b", r"\1 fiscal 20\2", text, flags=_F)
+    text = re.sub(r"\b(Q[1-4])\s?FY\s?(20\d{2})\b", r"\1 fiscal \2", text, flags=_F)
+    text = re.sub(r"\bFY\s?'?(\d{2})\b", r"fiscal 20\1", text, flags=_F)
+    text = re.sub(r"\bFY\s?(20\d{2})\b", r"fiscal \1", text, flags=_F)
+    text = re.sub(r"\b(Q[1-4])\s?'(\d{2})\b", r"\1 20\2", text, flags=_F)
+    text = re.sub(r"\b([1-4])Q'?(\d{2})\b", r"Q\1 20\2", text, flags=_F)
+    return re.sub(r"\b([1-4])Q\b", r"Q\1", text, flags=_F)
 _MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")
 _COMPARATOR_RE = re.compile(r"\b(?:compared (?:with|to)|versus|vs\.?|from)\b", re.I)
 
@@ -228,19 +270,23 @@ def _explicit_period_matches(sentence: str, amount_start: int, period: dict) -> 
         return True
     before_amount = sentence[:amount_start]
     if period.get("periodType") == "QUARTER":
-        quarters = {math.ceil(int(end[5:7]) / 3)}
+        # A quarter and year name the period as a pair: its calendar quarter in the calendar year, or its fiscal
+        # quarter in its fiscal year. NVDA's quarter ended 2026-07-26 is Q3 2026 or Q2 fiscal 2027, never
+        # "second quarter fiscal 2026" (the prior year's quarter).
+        pairs = [(math.ceil(int(end[5:7]) / 3), end[:4])]
         if isinstance(period.get("fiscalQuarter"), int):
-            quarters.add(period["fiscalQuarter"])
-        years = {end[:4], *(str(y) for y in period.get("fiscalYears") or [])}
+            pairs += [(period["fiscalQuarter"], str(y)) for y in period.get("fiscalYears") or []]
 
         def quarter_of(m: re.Match) -> int:
             return int(m.group(1)) if m.group(1) else _QUARTER_ORDINAL.index(m.group(2).lower()) + 1
 
+        # The year written just before the quarter ("fiscal 2026 second quarter") or after it ("Q2 fiscal 2026").
         def matches(text: str, m: re.Match) -> bool:
-            if quarter_of(m) not in quarters:
-                return False
-            ym = re.search(r"\b(20\d{2})\b", text[m.start():m.start() + 60])
-            return not (ym and ym.group(1) not in years)
+            q = quarter_of(m)
+            before = re.search(r"\b(20\d{2}),?\s+$", text[max(0, m.start() - 24):m.start()])
+            after = re.search(r"\b(20\d{2})\b", text[m.start():m.start() + 60])
+            named = [y.group(1) for y in (before, after) if y]
+            return any(pq == q and all(y == py for y in named) for pq, py in pairs)
 
         mentions = list(re.finditer(_QUARTER_MENTION, before_amount, re.I))
         for m in mentions:
@@ -255,15 +301,16 @@ def _explicit_period_matches(sentence: str, amount_start: int, period: dict) -> 
                 return False
         return True
     if period.get("periodType") == "ANNUAL":
-        requested_year = end[:4]
+        # The issuer's name for the year (Dollar General's year ended 2026-01-30 is fiscal 2025), else the end year.
+        years = {str(y) for y in (period.get("fiscalYears") or [end[:4]])}
         before_years = re.findall(r"\b(20\d{2})\b", before_amount)
-        if any(y != requested_year for y in before_years):
+        if any(y not in years for y in before_years):
             return False
         after = sentence[amount_start:]
         later_year = re.search(r"\b(20\d{2})\b", after)
         if not before_years and later_year:
             prefix = after[:later_year.start()]
-            if not _COMPARATOR_RE.search(prefix) and later_year.group(1) != requested_year:
+            if not _COMPARATOR_RE.search(prefix) and later_year.group(1) not in years:
                 return False
         return True
     return True
@@ -292,19 +339,21 @@ def release_observation(release: dict | None, metric: str, period: dict, reporti
             continue
         if _GUIDANCE_RE.search(sentence) or _NON_RESULT_RE.search(sentence):
             continue
-        m = anchored.search(sentence)
+        # Scope is read on the sentence with fiscal shorthand spelled out; the evidence is the sentence as written.
+        text = normalize_fiscal_tokens(sentence)
+        m = anchored.search(text)
         if not m:
             continue
-        quarter = _QUARTER_SCOPE_RE.search(sentence) is not None
+        quarter = _QUARTER_SCOPE_RE.search(text) is not None
         # "second quarter of fiscal 2027" and "fiscal 2026 third quarter" name a quarter, not a year.
-        annual = _ANNUAL_SCOPE_RE.search(_FISCAL_YEAR_OF_QUARTER_RE.sub(r"\1", sentence)) is not None
+        annual = _ANNUAL_SCOPE_RE.search(_FISCAL_YEAR_OF_QUARTER_RE.sub(r"\1", text)) is not None
         amount_start = m.start() + m.group(0).find("$")
         if spec["kind"] == "instant":
-            scoped = _INSTANT_SCOPE_RE.search(sentence) is not None
+            scoped = _INSTANT_SCOPE_RE.search(text) is not None
         elif period.get("periodType") == "QUARTER":
-            scoped = quarter and not annual and _explicit_period_matches(sentence, amount_start, period)
+            scoped = quarter and not annual and _explicit_period_matches(text, amount_start, period)
         else:
-            scoped = annual and not quarter and _explicit_period_matches(sentence, amount_start, period)
+            scoped = annual and not quarter and _explicit_period_matches(text, amount_start, period)
         if not scoped:
             unscoped += 1
             continue
