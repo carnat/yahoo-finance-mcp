@@ -200,6 +200,8 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - analyze_financial_ratios: Current P/E, PEG, P/S, P/B, EV/EBITDA, margins, ROE, ROA, debt ratios with explicit unitSemantics; optional valuation history.
 - get_valuation_snapshot: Diluted shares, period-end cash/debt, enterprise value and multiples on trailing and consensus figures; context, not a target.
 - compare_peer_valuations: The same multiples for a peer set on one Yahoo basis, with peer medians.
+- get_share_count_scenarios: Share counts under caller-defined scenarios (price, per-instrument treatment, known issuance); every instrument included/excluded/unresolved with mechanics; no denominator selected.
+- extract_funding_capex_schedule: Contractual schedules by due period and funding/capex statements classified CONTRACTUAL, COMPANY_DISCLOSED_COMMITTED, COMPANY_GUIDED, AWARDED_CONTINGENT or UNRESOLVED, with timing and source.
 - analyze_share_count_trend: Historical shares outstanding for dilution/buyback questions; Yahoo context, not filing confirmation.
 - analyze_credit_health: Net Debt/EBITDA, interest coverage, debt tier, credit stress flag.
 - get_corporate_actions: Dividends, splits, and fund capital-gain distribution history.

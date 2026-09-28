@@ -234,12 +234,16 @@ export async function buildValuationEvidencePack(ticker: string, horizonYears = 
     }
     return runComponent("extract_dilution_bridge", () => extractDilutionBridge(symbol, major.price, null, "USD", "latest", null, true));
   };
-  const [capital, dilution, guidance, events] = await Promise.all([
+  const [capital, dilution, firstGuidance, events] = await Promise.all([
     runComponent("extract_capital_structure", () => extractCapitalStructure(symbol, "latest", null, true)),
     dilutionRun(),
     runComponent("extract_guidance", () => extractGuidance(symbol, "latest")),
     runComponent("list_sec_material_filings", () => listSecMaterialFilings(symbol, null, 10)),
   ]);
+  // The release can fail to load while the other SEC reads run; one sequential retry, and the result says which.
+  const guidance = firstGuidance.error?.code === "RELEASE_TEXT_NOT_AVAILABLE"
+    ? await runComponent("extract_guidance", () => extractGuidance(symbol, "latest"))
+    : firstGuidance;
 
   const components: Record<string, ComponentRecord> = {
     quote: {

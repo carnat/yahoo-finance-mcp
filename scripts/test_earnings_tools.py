@@ -294,6 +294,7 @@ class TestExtractGuidance(unittest.TestCase):
             mocked_html.return_value = "No guidance provided in this release."
             data = _parse(_run(srv.extract_guidance("AAPL")))
             self.assertEqual(data.get("confidence"), "NOT_DISCLOSED")
+            self.assertEqual(data.get("status"), "NOT_DISCLOSED")
             self.assertEqual(data["guidance"]["revenue"]["status"], "NOT_DISCLOSED")
 
     def test_does_not_infer_from_estimates(self):
@@ -304,8 +305,23 @@ class TestExtractGuidance(unittest.TestCase):
                 "sources": [{"sourceType": "yahoo_estimate", "url": "https://finance.yahoo.com/quote/AAPL/analysis"}],
             }
             data = _parse(_run(srv.extract_guidance("AAPL")))
-            self.assertEqual(data["guidance"]["eps"]["status"], "NOT_DISCLOSED")
-            self.assertEqual(data.get("confidence"), "NOT_DISCLOSED")
+            # Estimates are never read as guidance; no SEC release means guidance was not read (2.5.2).
+            self.assertEqual(data["guidance"]["eps"]["status"], "NOT_READ")
+            self.assertEqual((data.get("status"), data.get("confidence")), ("RELEASE_NOT_RESOLVED", "NOT_DECISION_GRADE"))
+
+    def test_unreadable_release_is_not_reported_as_undisclosed(self):
+        with patch("yfmcp.tools.earnings._resolve_latest_earnings_release", new_callable=AsyncMock) as mocked_release, patch(
+            "yfmcp.tools.earnings._edgar_get_html", new_callable=AsyncMock
+        ) as mocked_html:
+            mocked_release.return_value = {
+                "ticker": "ASTS",
+                "period": "latest",
+                "sources": [{"sourceType": "sec_8k", "url": "https://www.sec.gov/Archives/asts_ex991.htm", "filingDate": "2026-08-10"}],
+            }
+            mocked_html.return_value = None
+            data = _parse(_run(srv.extract_guidance("ASTS")))
+            self.assertEqual((data.get("status"), data.get("retryable"), data.get("confidence")), ("RELEASE_TEXT_NOT_AVAILABLE", True, "NOT_DECISION_GRADE"))
+            self.assertEqual(data["guidance"]["revenue"]["status"], "NOT_READ")
 
 
 class TestExtractManagementCommentary(unittest.TestCase):

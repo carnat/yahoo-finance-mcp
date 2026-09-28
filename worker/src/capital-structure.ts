@@ -56,7 +56,7 @@ const ENTITY_RE = /&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi;
 // An explicit whitespace class, so both runtimes collapse the same characters.
 const WS_RUN_RE = /[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/g;
 
-function collapse(text: string): string {
+export function collapse(text: string): string {
   return text.replace(WS_RUN_RE, " ").trim();
 }
 
@@ -767,7 +767,7 @@ export type TextMatch = {
 const ATM_RE = /\bat[- ]the[- ]market\b|\bATM (?:program|offering|facility|agreement)\b|\b(?:equity distribution|open market sale|controlled equity offering|sales) agreement\b/i;
 const MONEY_RE = /(?:US)?\$\s?(\d[\d,]*(?:\.\d+)?)\s*(billion|million|thousand|bn|mm|m|k)?\b/gi;
 
-function moneyValue(amount: string, unit: string | undefined): number {
+export function moneyValue(amount: string, unit: string | undefined): number {
   const base = parseFloat(amount.replace(/,/g, ""));
   const u = (unit ?? "").toLowerCase();
   if (u === "billion" || u === "bn") return base * 1e9;
@@ -776,7 +776,7 @@ function moneyValue(amount: string, unit: string | undefined): number {
   return base;
 }
 
-function sentences(text: string): string[] {
+export function sentences(text: string): string[] {
   return text.split(/(?<=[.!?])\s+(?=[A-Z(\u201c"])/).map((s) => s.trim()).filter(Boolean);
 }
 

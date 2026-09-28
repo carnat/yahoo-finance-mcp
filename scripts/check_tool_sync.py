@@ -78,6 +78,8 @@ EXPECTED_CANONICAL = {
     "build_valuation_evidence_pack",
     "get_evidence_cut",
     "list_evidence_cuts",
+    "get_share_count_scenarios",
+    "extract_funding_capex_schedule",
     "extract_capital_structure",
     "extract_analyst_valuation_methods",
     "get_uk_company_filings",

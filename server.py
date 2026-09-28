@@ -5278,6 +5278,16 @@ async def get_filing_data(
     concept_primary, concept_fallback = _FILING_FACT_CONCEPTS[fact_type]
     cik_padded = await _resolve_cik_for_ticker(ticker)
     if not cik_padded:
+        # No CIK is a lookup outcome, not a disclosure: say whether SEC's ticker
+        # index was unreachable (retry) or has no such registrant, and keep the
+        # accession a caller pinned.
+        ticker_index = await _load_edgar_tickers()
+        code = "NO_SEC_REGISTRANT" if ticker_index else "SEC_LOOKUP_UNAVAILABLE"
+        requested = accession_number.strip() if accession_number and accession_number.strip() else None
+        message = (
+            f"SEC has no registrant CIK for ticker {ticker.upper()}." if ticker_index
+            else f"SEC's ticker index could not be read, so {ticker.upper()} was not resolved to a CIK; retry."
+        )
         return _geo_shape({
             "ticker": ticker,
             "factType": fact_type.value,
@@ -5285,11 +5295,17 @@ async def get_filing_data(
             "denominator": None,
             "valueRatio": None,
             "valuePct": None,
+            "filingType": filing_type,
+            "accessionNumber": requested,
+            **({"requestedAccession": requested} if requested else {}),
             "extractionMethod": "NONE",
-            "source": "NOT_DISCLOSED",
-            "confidence": "NOT_DISCLOSED",
-            "evidence": {},
-            "warnings": [],
+            "source": "NONE",
+            "confidence": "NOT_DECISION_GRADE",
+            "status": "SEC_FACT_NOT_AVAILABLE",
+            "code": code,
+            "retryable": code == "SEC_LOOKUP_UNAVAILABLE",
+            "evidence": None,
+            "warnings": [{"code": code, "message": message, "severity": "warning"}],
             "_manualLookup": _manual_lookup_payload(
                 ticker, None, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."
             ),
@@ -8098,6 +8114,7 @@ async def extract_sec_filing_fact(
             "confidence": parsed_payload.get("confidence", "NOT_DISCLOSED"),
             "status": status,
             "code": parsed_payload.get("code"),
+            **({"retryable": parsed_payload["retryable"]} if isinstance(parsed_payload.get("retryable"), bool) else {}),
             "decisionGrade": decision_grade,
             "xbrlContext": xbrl_context,
             "retrieval_path": _map_extraction_to_retrieval_path(parsed_payload.get("extractionMethod", "NONE")),
@@ -9645,6 +9662,74 @@ async def extract_capital_structure(
     return json.dumps(out)
 
 
+from yfmcp import share_scenarios as _ss  # noqa: E402
+from yfmcp import funding_schedule as _fsched  # noqa: E402
+
+
+@yfinance_server.tool(
+    name="get_share_count_scenarios",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_share_count_scenarios"],
+    description="Share counts under scenarios you define: for each scenario's price and treatments (options treasury-stock/gross/exclude, unvested awards gross/exclude, warrants treasury-stock/gross/exclude on vested or all, convertibles if-converted when in the money/all/exclude, ATM remaining capacity include/exclude, and known issuance you supply), every instrument from the filing's inline XBRL is listed as included or excluded with its treasury-stock or if-converted mechanics and threshold price; unresolved instruments are listed and left out. Scenarios are reported side by side; no denominator is selected. Evidence only.",
+)
+async def get_share_count_scenarios(
+    ticker: str,
+    scenarios: list[dict],
+    filing_type: str = "latest",
+    accession_number: str | None = None,
+    currency: str = "USD",
+) -> str:
+    parsed = _ss.parse_share_scenarios(scenarios)
+    if "error" in parsed:
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": parsed["error"]})
+    raw = await extract_dilution_bridge(ticker=ticker, price=parsed["scenarios"][0]["price"], currency=currency, filing_type=filing_type,
+                                        accession_number=accession_number, include_atm=True)
+    bridge = _unwrap_payload(raw)
+    if bridge.get("error") is True or bridge.get("basis") != "MECHANICAL_COMPANY_DISCLOSED":
+        return raw
+    return json.dumps(_ss.share_count_scenarios(ticker, bridge, parsed["scenarios"]))
+
+
+_SCHEDULE_SEARCH_TERMS = [
+    "capital expenditures", "purchase commitments", "purchase obligations", "non-cancelable", "committed to",
+    "contractual obligations", "grant agreement", "awarded", "milestone payments", "CHIPS", "incentive agreement",
+    "expect to invest", "sufficient to fund", "at-the-market",
+]
+
+
+@yfinance_server.tool(
+    name="extract_funding_capex_schedule",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["extract_funding_capex_schedule"],
+    description="Funding and capex schedule from the latest periodic filing: tagged contractual schedules (debt principal, operating and finance lease payments, purchase and contractual obligations by due period; purchase commitments) and funding or capex statements from the text, each classified CONTRACTUAL, COMPANY_DISCLOSED_COMMITTED, COMPANY_GUIDED, AWARDED_CONTINGENT or UNRESOLVED with amount, timing and the quoted source; plus liquidity sources (cash, undrawn facilities, ATM capacity). Nothing is netted or forecast. Evidence only.",
+)
+async def extract_funding_capex_schedule(ticker: str, filing_type: str = "latest", accession_number: str | None = None) -> str:
+    filings, error = await _resolve_periodic_filings(ticker, filing_type, accession_number)
+    if error:
+        return json.dumps({"ticker": ticker, **error})
+    _, primary = filings[0]
+    loaded = await _ixbrl_source("primary", primary)
+    if loaded is None:
+        return json.dumps({"ticker": ticker, "status": "FILING_TEXT_NOT_AVAILABLE", "code": "FILING_TEXT_NOT_AVAILABLE", "message": "The filing document could not be read from SEC."})
+    matches = await _filing_text_matches(ticker, primary, _SCHEDULE_SEARCH_TERMS, 30, 700)
+    source, truncated = loaded
+    capital = _cs.capital_structure(ticker.upper(), source, [])
+    remaining = next((e for e in _cs.atm_evidence(matches) if e.get("kind") == "remaining_capacity"), None)
+    doc = source.doc
+    out = _fsched.funding_capex_schedule(
+        ticker=ticker,
+        period_end=doc.document_period_end,
+        source=capital.get("source"),
+        facts=[{"local": f.local, "value": f.value, "periodEnd": f.period_end, "dims": f.dims, "unit": f.unit} for f in doc.facts],
+        statements=[{"contextText": m.context_text, "sectionHeading": m.section_heading, "documentUrl": m.document_url,
+                     "filingDate": m.filing_date, "accessionNumber": m.accession_number} for m in matches],
+        balances=capital.get("balances"),
+        atm_remaining_usd=remaining["amountUsd"] if remaining else None,
+        atm_evidence=remaining,
+    )
+    if truncated:
+        out["warnings"].append({"code": "FILING_READ_TRUNCATED", "message": "The filing exceeded the read limit; facts past that point were not parsed.", "severity": "warning"})
+    return json.dumps(out)
+
+
 @yfinance_server.tool(
     name="extract_analyst_valuation_methods",
     output_schema=_TOOL_OUTPUT_SCHEMAS["extract_analyst_valuation_methods"],
@@ -10900,6 +10985,9 @@ async def build_valuation_evidence_pack(ticker: str, horizon_years: int = 5, per
         _run_component("extract_guidance", extract_guidance(symbol, "latest")),
         _run_component("list_sec_material_filings", list_sec_material_filings(symbol, None, 10)),
     )
+    # The release can fail to load while the other SEC reads run; one sequential retry, and the result says which.
+    if (guidance.get("error") or {}).get("code") == "RELEASE_TEXT_NOT_AVAILABLE":
+        guidance = await _run_component("extract_guidance", extract_guidance(symbol, "latest"))
     components = {
         "quote": {
             "status": "OK" if quote["price"] is not None else "FAILED",
