@@ -368,6 +368,9 @@ if (heading !== "PART I - FINANCIAL INFORMATION Net 31.5 Item 2") throw new Erro
         self.assertIn("await resolveEarningsContentSource(src)", section)
         self.assertIn("sourceType: content.sourceType", section)
         self.assertRegex(section, r"between[\s\S]+and")
+        # An unreadable or unresolved release is reported as not read, never as undisclosed (2.5.2).
+        self.assertIn('notRead("RELEASE_TEXT_NOT_AVAILABLE"', section)
+        self.assertIn('notRead("RELEASE_NOT_RESOLVED"', section)
 
     def test_management_commentary_uses_topic_alias_families(self) -> None:
         self.assertIn("MANAGEMENT_COMMENTARY_TOPIC_ALIASES", self.worker)

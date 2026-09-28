@@ -10,6 +10,7 @@ import {
 } from "./filing-search.js";
 import {
   analystValuationMethods,
+  atmEvidence,
   capitalStructure,
   companiesHouseFilings,
   dilutionBridge,
@@ -20,6 +21,8 @@ import {
   type TextMatch,
 } from "./capital-structure.js";
 import { filingFactInAccession, pickConceptFacts, REVENUE_CONCEPTS } from "./sec-facts.js";
+import { fundingCapexSchedule } from "./funding-schedule.js";
+import { parseShareScenarios, shareCountScenarios } from "./share-scenarios.js";
 import { customerConcentration, EPS_AMOUNT, EPS_LABEL, guidanceRanges, PCT_AMOUNT, rankEvidence, reportedTextMetric, REVENUE_LABEL, stemWord, USD_AMOUNT, type ConcentrationFinding } from "./extraction-rules.js";
 import { majorPrice, marketInputsFromQuoteSummary, peerValuations, valuationSnapshot, type MarketInputs } from "./valuation.js";
 import registryManifest from "./company-ir-page-registry.json";
@@ -6257,6 +6260,15 @@ export async function getFilingData(
     });
   };
   if (!cikPadded) {
+    // No CIK is a lookup outcome, not a disclosure: say whether SEC's ticker
+    // index was unreachable (retry) or has no such registrant, and keep the
+    // accession a caller pinned.
+    const tickerIndex = await getEdgarTickerCikMap().catch(() => null);
+    const code = tickerIndex ? "NO_SEC_REGISTRANT" : "SEC_LOOKUP_UNAVAILABLE";
+    const requested = pinAccession && pinAccession.trim() ? pinAccession.trim() : null;
+    const message = tickerIndex
+      ? `SEC has no registrant CIK for ticker ${ticker.toUpperCase()}.`
+      : `SEC's ticker index could not be read, so ${ticker.toUpperCase()} was not resolved to a CIK; retry.`;
     return withGeoShape({
       ticker,
       factType,
@@ -6264,11 +6276,17 @@ export async function getFilingData(
       denominator: null,
       valueRatio: null,
       valuePct: null,
+      filingType,
+      accessionNumber: requested,
+      ...(requested ? { requestedAccession: requested } : {}),
       extractionMethod: "NONE",
-      source: "NOT_DISCLOSED",
-      confidence: "NOT_DISCLOSED",
-      evidence: {},
-      warnings: [],
+      source: "NONE",
+      confidence: "NOT_DECISION_GRADE",
+      status: "SEC_FACT_NOT_AVAILABLE",
+      code,
+      retryable: code === "SEC_LOOKUP_UNAVAILABLE",
+      evidence: null,
+      warnings: [{ code, message, severity: "warning" }],
       _manualLookup: filingManualLookup(ticker, null, filingType),
     });
   }
@@ -15511,6 +15529,60 @@ export async function extractCapitalStructure(
   return JSON.stringify(out);
 }
 
+/**
+ * Share counts under caller scenarios (2.5.2): the dilution bridge's
+ * instrument inventory, re-evaluated at each scenario's price and treatments.
+ */
+export async function getShareCountScenarios(
+  ticker: string,
+  scenarios: unknown,
+  filingType = "latest",
+  accessionNumber: string | null = null,
+  currency = "USD",
+): Promise<string> {
+  const parsed = parseShareScenarios(scenarios);
+  if ("error" in parsed) return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: parsed.error });
+  const bridge = parseObjectJson(await extractDilutionBridge(ticker, parsed.scenarios[0].price, null, currency, filingType, accessionNumber, true));
+  if (bridge.error === true || bridge.basis !== "MECHANICAL_COMPANY_DISCLOSED") return JSON.stringify(bridge);
+  return JSON.stringify(shareCountScenarios(ticker, bridge, parsed.scenarios));
+}
+
+const SCHEDULE_SEARCH_TERMS = [
+  "capital expenditures", "purchase commitments", "purchase obligations", "non-cancelable", "committed to",
+  "contractual obligations", "grant agreement", "awarded", "milestone payments", "CHIPS", "incentive agreement",
+  "expect to invest", "sufficient to fund", "at-the-market",
+];
+
+/** Funding and capex schedule (2.5.2): tagged contractual schedules plus classified funding and capex statements. */
+export async function extractFundingCapexSchedule(ticker: string, filingType = "latest", accessionNumber: string | null = null): Promise<string> {
+  const resolved = await resolvePeriodicFilings(ticker, filingType, accessionNumber);
+  if (!resolved.ok) return resolveFailure(resolved.error, ticker);
+  const primary = resolved.filings[0];
+  const loaded = await ixbrlSource("primary", primary.filing);
+  if (!loaded) {
+    return JSON.stringify({ ticker, status: "FILING_TEXT_NOT_AVAILABLE", code: "FILING_TEXT_NOT_AVAILABLE", message: "The filing document could not be read from SEC." });
+  }
+  const matches = await filingTextMatches(ticker, primary.filing, SCHEDULE_SEARCH_TERMS, 30, 700);
+  const capital = capitalStructure({ ticker: ticker.toUpperCase(), source: loaded.source, fundingMatches: [] });
+  const atm = atmEvidence(matches);
+  const remaining = atm.find((e) => e.kind === "remaining_capacity") ?? null;
+  const doc = loaded.source.doc;
+  const out = fundingCapexSchedule({
+    ticker,
+    periodEnd: doc.documentPeriodEnd,
+    source: (capital.source as Record<string, unknown> | undefined) ?? null,
+    facts: doc.facts.map((f) => ({ local: f.local, value: f.value, periodEnd: f.periodEnd, dims: f.dims, unit: f.unit })),
+    statements: matches.map((m) => ({ contextText: m.contextText, sectionHeading: m.sectionHeading, documentUrl: m.documentUrl, filingDate: m.filingDate, accessionNumber: m.accessionNumber })),
+    balances: (capital.balances as Record<string, unknown> | undefined) ?? null,
+    atmRemainingUsd: remaining ? (remaining.amountUsd as number) : null,
+    atmEvidence: remaining,
+  });
+  if (loaded.truncated) {
+    (out.warnings as Record<string, unknown>[]).push({ code: "FILING_READ_TRUNCATED", message: "The filing exceeded the read limit; facts past that point were not parsed.", severity: "warning" });
+  }
+  return JSON.stringify(out);
+}
+
 export async function extractAnalystValuationMethods(ticker: string, daysBack = 30): Promise<string> {
   const days = clampInt(daysBack, 30, 1, 365);
   const [news, radar, identity] = await Promise.all([
@@ -17238,11 +17310,21 @@ export async function extractGuidance(ticker: string, period = "latest"): Promis
     : {};
   const content = await resolveEarningsContentSource(src);
   const srcUrl = content.url;
+  // A release that was not found or not read is not a company that gave no guidance (2.5.2).
+  const notRead = (code: string, message: string, retryable: boolean): string => {
+    for (const key of ["revenue", "grossMargin", "eps"]) (guidance[key] as Record<string, unknown>).status = "NOT_READ";
+    return JSON.stringify({
+      ticker: ticker.toUpperCase(), period: release.period ?? period, status: code, code, retryable,
+      sourceUrl: srcUrl || null, guidance, confidence: "NOT_DECISION_GRADE",
+      warnings: [{ code, message, severity: "warning" }],
+    });
+  };
   if (!srcUrl.startsWith("https://www.sec.gov/Archives/")) {
-    return JSON.stringify({ ticker: ticker.toUpperCase(), period: release.period ?? period, guidance, confidence: "NOT_DISCLOSED", warnings: [] });
+    return notRead("RELEASE_NOT_RESOLVED", "No SEC earnings release was resolved, so guidance was not read.", false);
   }
   const html = await edgarGetHtml(srcUrl, 5_000_000);
-  const text = _stripHtmlTagsIdx(_sanitizeFilingHtml(html ?? ""));
+  if (!html) return notRead("RELEASE_TEXT_NOT_AVAILABLE", `The earnings release ${srcUrl} could not be read from SEC; retry.`, true);
+  const text = _stripHtmlTagsIdx(_sanitizeFilingHtml(html));
   // "revenue guidance of $X to $Y" and "expects revenue between $X and $Y" (extraction-rules.ts).
   const ranges = guidanceRanges(text);
   const rev = ranges.revenue;
@@ -17278,6 +17360,8 @@ export async function extractGuidance(ticker: string, period = "latest"): Promis
   return JSON.stringify({
     ticker: ticker.toUpperCase(),
     period: release.period ?? period,
+    status: found ? "FOUND" : "NOT_DISCLOSED",
+    sourceUrl: srcUrl,
     guidance,
     confidence: found ? "HIGH" : "NOT_DISCLOSED",
     warnings: [],

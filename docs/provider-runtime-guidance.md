@@ -521,6 +521,66 @@ consensus actions compose evidence and never fill a gap with an assumption.
     history are unavailable.
   - No bucket URL or credential appears in a response.
 
+## Share Scenarios, Funding Schedule And Unread Sources (2.5.2)
+
+- `get_share_count_scenarios` (group `sec_extractors`) takes up to 8 caller
+  scenarios. Each scenario has a `name`, a `price`, and one treatment per
+  instrument:
+  - options: `treasury_stock`, `gross` or `exclude`;
+  - unvested awards: `gross` or `exclude`;
+  - warrants: `treasury_stock`, `gross` or `exclude`, on vested or all;
+  - convertibles: `if_converted_when_in_the_money`, `if_converted_all` or
+    `exclude`;
+  - ATM: `exclude` or `full_remaining_capacity`;
+  - optional `known_issuance` rows.
+
+  The instrument inventory is the dilution bridge's company-disclosed inline
+  XBRL.
+  - Every instrument line reports its treatment, whether it is included, its
+    mechanics (count, exercise or conversion price, threshold price, method)
+    and why it is unresolved when it is.
+  - Unresolved instruments are left out of `resultingShares` and listed.
+  - Treatments the caller omits take the documented defaults and are listed
+    in `defaulted`.
+  - Scenarios are reported side by side. `selectedScenario` and
+    `selectedDenominator` are always null, and MCP never picks the
+    denominator.
+- `extract_funding_capex_schedule` (group `sec_extractors`) reads the latest
+  periodic filing and classifies every amount:
+  - `CONTRACTUAL`: debt principal, operating and finance lease payments,
+    purchase and contractual obligations, tagged by due bucket with
+    `periodThrough`; purchase commitments by category. A range tagged as
+    Minimum/Maximum becomes one row with `amountLow`/`amountHigh`.
+  - `COMPANY_DISCLOSED_COMMITTED`: text stating committed, non-cancelable or
+    obligated amounts. A stated commitment stays a commitment even when the
+    sentence also uses a forward-looking word.
+  - `COMPANY_GUIDED`: amounts the company expects, plans or budgets.
+  - `AWARDED_CONTINGENT`: grants, awards, incentives and milestone payments.
+    Equity-compensation wording is excluded.
+  - `UNRESOLVED`: a funding or capex statement with no amount, or whose type
+    the wording does not state. Text without an amount is kept only when it
+    names an obligation outright; list items ending in `;` are skipped.
+
+  Timing is read from the sentence (quarter, next 12 months, remainder of the
+  year, a year, a year range, through a year), else `UNSTATED`.
+  - An amount below $100,000 with no scale word, such as VRT's "$550.0 to
+    $570.0" in a filing reporting in millions, keeps its wording in
+    `amountAsWritten` and is `SCALE_NOT_STATED`, not read at face value.
+  - Liquidity sources are listed separately and not netted: cash, undrawn
+    facilities (`CONTRACTUAL_AVAILABILITY`), and ATM remaining capacity
+    (`AVAILABLE_AT_COMPANY_DISCRETION`).
+- Unread is not undisclosed:
+  - `extract_sec_filing_fact` without a CIK returns `NO_SEC_REGISTRANT`, or
+    `SEC_LOOKUP_UNAVAILABLE` (`retryable: true`) when SEC's ticker index could
+    not be read. A pinned accession is still echoed.
+  - `extract_guidance` returns `RELEASE_NOT_RESOLVED` or
+    `RELEASE_TEXT_NOT_AVAILABLE` (`retryable: true`), with each metric
+    `NOT_READ`, instead of `NOT_DISCLOSED`. A read release reports `status`
+    `FOUND` or `NOT_DISCLOSED` and its `sourceUrl`.
+  - The evidence pack retries an unreadable release once. Live on 2.5.1,
+    ASTS's pack reported guidance `NOT_DISCLOSED` while a standalone call
+    found $150–200M.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

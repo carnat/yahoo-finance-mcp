@@ -52,11 +52,13 @@ m.setWorkerEnv({ MCP_ENVELOPE_V2: "true" });
 const out = {};
 const fetched = [];
 const yahoo = {};
+let tickerIndexDown = false;
 globalThis.fetch = async (req) => {
   const u = new URL(typeof req === "string" ? req : req.url);
   fetched.push(u.toString());
   if (u.hostname === "fc.yahoo.com") return new Response("", { headers: { "set-cookie": "A3=abc; Path=/" } });
   if (u.pathname.includes("getcrumb")) return new Response("crumb123");
+  if (u.pathname.endsWith("company_tickers.json") && tickerIndexDown) return new Response("unavailable", { status: 404 });
   if (u.pathname.endsWith("company_tickers.json")) {
     return Response.json({ "0": { cik_str: 1780312, ticker: "ASTS", title: "AST SpaceMobile, Inc." } });
   }
@@ -71,6 +73,12 @@ globalThis.fetch = async (req) => {
   if (u.pathname.includes("/quoteSummary/")) return Response.json({ quoteSummary: { result: [yahoo.summary], error: null } });
   return new Response("not found", { status: 404 });
 };
+
+// CIK lookup failure keeps the pin and says why (2.5.2): SEC's ticker index unreachable, then a ticker it lacks.
+tickerIndexDown = true;
+out.cikDown = JSON.parse(await m.getFilingData("ZZZZ", "total_revenue", null, "10-K", "latest", "auto", "0001193125-26-999999"));
+tickerIndexDown = false;
+out.cikMissing = JSON.parse(await m.getFilingData("ZZZZ", "total_revenue", null, "10-K", "latest", "auto", null));
 
 // Failed accession pin (2.4.5, 2.4.6).
 const pin = JSON.parse(await m.getFilingData("ASTS", "total_revenue", null, "10-K", "latest", "auto", "0001193125-26-999999"));
@@ -141,6 +149,15 @@ class TestWorkerRegressions(unittest.TestCase):
     def test_failed_pin_carries_no_evidence_row(self) -> None:
         self.assertIsNone(self.out["pinEnvelope"]["data"]["evidence"])
         self.assertIsNone(self.out["emptyRowEnvelope"]["data"]["evidence"])
+
+    def test_cik_lookup_failure_is_not_a_disclosure(self) -> None:
+        down, missing = self.out["cikDown"], self.out["cikMissing"]
+        self.assertEqual((down["code"], down["retryable"], down["accessionNumber"], down["requestedAccession"]),
+                         ("SEC_LOOKUP_UNAVAILABLE", True, REQUESTED, REQUESTED))
+        self.assertEqual((missing["code"], missing["retryable"], missing["accessionNumber"]), ("NO_SEC_REGISTRANT", False, None))
+        for payload in (down, missing):
+            self.assertEqual((payload["status"], payload["source"], payload["confidence"]), ("SEC_FACT_NOT_AVAILABLE", "NONE", "NOT_DECISION_GRADE"))
+            self.assertIsNone(payload["evidence"])
 
     def test_currency_mismatch_withholds_multiples(self) -> None:
         ratios = self.out["ratios"]
@@ -230,6 +247,17 @@ class TestPythonRegressions(unittest.TestCase):
         self.assertEqual(data["code"], "NO_FACT_FOR_ACCESSION")
         self.assertEqual((data["accessionNumber"], data["requestedAccession"]), (REQUESTED, REQUESTED))
         self.assertFalse(data["evidence"])
+
+    def test_cik_lookup_failure_is_not_a_disclosure(self) -> None:
+        cases = {"SEC_LOOKUP_UNAVAILABLE": {}, "NO_SEC_REGISTRANT": {"ASTS": 1780312}}
+        for code, index in cases.items():
+            with patch("server._resolve_cik_for_ticker", new=AsyncMock(return_value=None)), \
+                    patch("server._load_edgar_tickers", new=AsyncMock(return_value=index)):
+                data = json.loads(_run(srv.extract_sec_filing_fact("ZZZZ", fact="total_revenue", accession_number=REQUESTED)))
+            data = data.get("data", data) if "ok" in data else data
+            self.assertEqual((data["code"], data["retryable"], data["status"], data["source"]), (code, code == "SEC_LOOKUP_UNAVAILABLE", "SEC_FACT_NOT_AVAILABLE", "NONE"))
+            self.assertEqual((data["accessionNumber"], data["requestedAccession"]), (REQUESTED, REQUESTED))
+            self.assertFalse(data["evidence"])
 
     def test_envelope_drops_empty_evidence_rows(self) -> None:
         enriched = _envelope._enrich_facts({"value": None, "evidence": [{}, {"url": None}]})

@@ -584,11 +584,26 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
     sources = release.get("sources") if isinstance(release.get("sources"), list) else []
     src = sources[0] if sources and isinstance(sources[0], dict) else {}
     src_url = str(src.get("url") or "")
-    if not src_url.startswith("https://www.sec.gov/Archives/"):
-        return _wrap_envelope_v2("extract_guidance", {"ticker": ticker.upper(), "period": release.get("period") or period, "guidance": base, "confidence": "NOT_DISCLOSED"})
 
-    html = await _edgar_get_html(src_url, max_bytes=5_000_000)
-    text = _strip_html_tags(_sanitize_sec_html(html or ""))
+    # A release that was not found or not read is not a company that gave no guidance (2.5.2).
+    def not_read(code: str, message: str, retryable: bool) -> str:
+        for key in ("revenue", "grossMargin", "eps"):
+            base[key]["status"] = "NOT_READ"
+        return _wrap_envelope_v2("extract_guidance", {
+            "ticker": ticker.upper(), "period": release.get("period") or period, "status": code, "code": code, "retryable": retryable,
+            "sourceUrl": src_url or None, "guidance": base, "confidence": "NOT_DECISION_GRADE",
+            "warnings": [{"code": code, "message": message, "severity": "warning"}],
+        })
+
+    if not src_url.startswith("https://www.sec.gov/Archives/"):
+        return not_read("RELEASE_NOT_RESOLVED", "No SEC earnings release was resolved, so guidance was not read.", False)
+    try:
+        html = await _edgar_get_html(src_url, max_bytes=5_000_000)
+    except Exception:  # noqa: BLE001 - reported as unread, never as undisclosed
+        html = None
+    if not html:
+        return not_read("RELEASE_TEXT_NOT_AVAILABLE", f"The earnings release {src_url} could not be read from SEC; retry.", True)
+    text = _strip_html_tags(_sanitize_sec_html(html))
     # "revenue guidance of $X to $Y" and "expects revenue between $X and $Y" (yfmcp/extraction_rules.py).
     patterns = _er.guidance_ranges(text)
     if patterns["revenue"]:
@@ -628,6 +643,8 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
     return _wrap_envelope_v2("extract_guidance", {
         "ticker": ticker.upper(),
         "period": release.get("period") or period,
+        "status": "FOUND" if found else "NOT_DISCLOSED",
+        "sourceUrl": src_url,
         "guidance": base,
         "confidence": "HIGH" if found else "NOT_DISCLOSED",
     })

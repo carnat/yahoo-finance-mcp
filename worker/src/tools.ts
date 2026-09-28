@@ -68,6 +68,8 @@ import {
   extractCustomerConcentration,
   extractDilutionBridge,
   extractCapitalStructure,
+  extractFundingCapexSchedule,
+  getShareCountScenarios,
   extractAnalystValuationMethods,
   getUkCompanyFilings,
   getValuationSnapshot,
@@ -538,6 +540,8 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_valuation_snapshot", description: "Valuation context for one ticker at the current price or one you supply: diluted shares from the SEC dilution bridge at that price, the filing's period-end cash and debt, equity and enterprise value (in-the-money convertibles leave the debt), EV/Revenue, EV/EBITDA and P/E on trailing results and Yahoo's current and next fiscal-year consensus with analyst counts, and ATM capacity. Falls back to Yahoo figures for non-USD or non-SEC listings. Mechanical context, not a price target; nothing is back-solved.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, price: { type: "number", exclusiveMinimum: 0 }, filing_type: { type: "string", default: "latest" }, include_sec_filings: { type: "boolean", default: true } }, required: ["ticker"] } },
   { name: "compare_peer_valuations", description: "The same multiples for a peer set on one Yahoo basis: price x shares outstanding + total debt - total cash, over trailing results and current and next fiscal-year consensus (EV/Revenue, EV/EBITDA, P/E, revenue growth, gross margin). Returns peer medians, min and max excluding the subject, and the subject's premium or discount to each median. Context, not a signal.", inputSchema: { type: "object", properties: { tickers: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 10 }, subject: { type: "string" } }, required: ["tickers"] } },
   { name: "extract_dilution_bridge", description: "Basic-to-diluted share bridge at a price you supply, from the filing's inline XBRL: cover-page basic shares, options (treasury-stock method, by exercise-price range when tagged), unvested RSUs/PSUs (gross), warrants per class (treasury stock), convertibles (if-converted when in the money) and ATM remaining capacity from filing text. Mechanical and company-disclosed, not a consensus diluted share count; never back-solve it into one. filing_type latest uses the newest 10-Q with the last 10-K as fallback.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, price: { type: "number", exclusiveMinimum: 0 }, as_of_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" }, currency: { type: "string", default: "USD" }, filing_type: { type: "string", default: "latest" }, accession_number: { type: "string" }, include_atm: { type: "boolean", default: true } }, required: ["ticker", "price"] } },
+  { name: "get_share_count_scenarios", description: "Share counts under scenarios you define: for each scenario's price and treatments (options treasury-stock/gross/exclude, unvested awards gross/exclude, warrants treasury-stock/gross/exclude on vested or all, convertibles if-converted when in the money/all/exclude, ATM remaining capacity include/exclude, and known issuance you supply), every instrument from the filing's inline XBRL is listed as included or excluded with its treasury-stock or if-converted mechanics and threshold price; unresolved instruments are listed and left out. Scenarios are reported side by side; no denominator is selected. Evidence only.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, scenarios: { type: "array", minItems: 1, maxItems: 8, items: { type: "object", properties: { name: { type: "string" }, price: { type: "number", exclusiveMinimum: 0 }, options: { type: "string", enum: ["treasury_stock", "gross", "exclude"] }, unvested_awards: { type: "string", enum: ["gross", "exclude"] }, warrants: { type: "string", enum: ["treasury_stock", "gross", "exclude"] }, warrant_vesting: { type: "string", enum: ["vested_only", "all"] }, convertibles: { type: "string", enum: ["if_converted_when_in_the_money", "if_converted_all", "exclude"] }, atm: { type: "string", enum: ["exclude", "full_remaining_capacity"] }, known_issuance: { type: "array", maxItems: 10, items: { type: "object", properties: { label: { type: "string" }, shares: { type: "number" }, source: { type: "string" } }, required: ["label", "shares"] } } }, required: ["name", "price"] } }, filing_type: { type: "string", default: "latest" }, accession_number: { type: "string" }, currency: { type: "string", default: "USD" } }, required: ["ticker", "scenarios"] } },
+  { name: "extract_funding_capex_schedule", description: "Funding and capex schedule from the latest periodic filing: tagged contractual schedules (debt principal, operating and finance lease payments, purchase and contractual obligations by due period; purchase commitments) and funding or capex statements from the text, each classified CONTRACTUAL, COMPANY_DISCLOSED_COMMITTED, COMPANY_GUIDED, AWARDED_CONTINGENT or UNRESOLVED with amount, timing and the quoted source; plus liquidity sources (cash, undrawn facilities, ATM capacity). Nothing is netted or forecast. Evidence only.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "latest" }, accession_number: { type: "string" } }, required: ["ticker"] } },
   { name: "extract_capital_structure", description: "Company-disclosed capital structure at the filing's period end: cash, short-term investments, total debt and net cash; each debt instrument's face amount, carrying amount, coupon, maturity and conversion terms from dimensional inline XBRL (which companyfacts omits); the tagged maturity ladder; and the company's own funding, runway, going-concern and ATM statements quoted from the filing. Disclosed, not forecast.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, filing_type: { type: "string", default: "latest" }, accession_number: { type: "string" }, include_funding_statements: { type: "boolean", default: true } }, required: ["ticker"] } },
   { name: "extract_analyst_valuation_methods", description: "Valuation methods analysts name in recent news headlines and summaries: multiples with metric and period (e.g. 41x 2H27 EV/EBITDA), DCF with WACC, discount rate and terminal growth, sum-of-the-parts and rNPV, with firm, price target and source link. Lists firms whose targets carry no disclosed method. Context only: not consensus inputs.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, days_back: { type: "number", minimum: 1, maximum: 365, default: 30 } }, required: ["ticker"] } },
   { name: "get_consensus_forecast_curve", description: "Street consensus by fiscal year, FY0 to FY+horizon, for EPS and revenue from Yahoo Finance and Alpha Vantage, each provider reported separately with fiscal year end, currency, mean/high/low, analyst count and retrieval time. Each metric and period states its coverage: PROVIDER_COVERED, PROVIDER_NOT_COVERED, INSUFFICIENT_ANALYST_COUNT or PROVIDER_CONFLICT (with the cross-provider difference). Years and metrics no provider covers stay PROVIDER_NOT_COVERED; nothing is interpolated, extended by growth rates, or derived. Evidence only.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, horizon_years: { type: "integer", minimum: 1, maximum: 5, default: 5 }, min_analyst_count: { type: "integer", minimum: 1, maximum: 50, default: 3 }, conflict_tolerance_pct: { type: "number", minimum: 0, maximum: 100, default: 10 } }, required: ["ticker"] } },
@@ -1305,6 +1309,8 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   get_valuation_snapshot: SIMPLE_OBJECT_SCHEMA,
   compare_peer_valuations: SIMPLE_OBJECT_SCHEMA,
   extract_capital_structure: SIMPLE_OBJECT_SCHEMA,
+  get_share_count_scenarios: SIMPLE_OBJECT_SCHEMA,
+  extract_funding_capex_schedule: SIMPLE_OBJECT_SCHEMA,
   get_consensus_forecast_curve: SIMPLE_OBJECT_SCHEMA,
   get_eps_revisions: SIMPLE_OBJECT_SCHEMA,
   get_evidence_quality: SIMPLE_OBJECT_SCHEMA,
@@ -2163,6 +2169,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
           confidence: parsed.confidence ?? "NOT_DISCLOSED",
           status,
           code: parsed.code ?? null,
+          ...(typeof parsed.retryable === "boolean" ? { retryable: parsed.retryable } : {}),
           decisionGrade,
           documentUrl: parsed.documentUrl ?? null,
           indexUrl: parsed.indexUrl ?? null,
@@ -2397,6 +2404,16 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         args.accession_number != null ? str(args.accession_number) : null,
         args.include_atm !== false,
       );
+    case "get_share_count_scenarios":
+      return getShareCountScenarios(
+        str(args.ticker),
+        args.scenarios,
+        str(args.filing_type, "latest"),
+        args.accession_number != null ? str(args.accession_number) : null,
+        str(args.currency, "USD"),
+      );
+    case "extract_funding_capex_schedule":
+      return extractFundingCapexSchedule(str(args.ticker), str(args.filing_type, "latest"), args.accession_number != null ? str(args.accession_number) : null);
     case "extract_capital_structure":
       return extractCapitalStructure(
         str(args.ticker),

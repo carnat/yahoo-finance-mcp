@@ -148,6 +148,12 @@ storage the full payload and receipt still return with
 FY+5 per provider with a coverage state for every cell, and leaves uncovered
 years visibly missing. See
 [provider runtime guidance](docs/provider-runtime-guidance.md#evidence-cuts-and-consensus-250).
+`get_share_count_scenarios` recomputes the share count under price and
+per-instrument treatments you choose, instrument by instrument, without
+selecting a denominator. `extract_funding_capex_schedule` classifies each
+funding and capex amount as contractual, committed, guided,
+awarded-but-contingent or unresolved, with its timing and source. See
+[provider runtime guidance](docs/provider-runtime-guidance.md#share-scenarios-funding-schedule-and-unread-sources-252).
 
 Grouped domains:
 
