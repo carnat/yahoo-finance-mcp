@@ -10026,7 +10026,7 @@ def _yahoo_statement_rows_sync(ticker: str, annual: bool, balance: bool) -> list
 @yfinance_server.tool(
     name="reconcile_metric_sources",
     output_schema=_TOOL_OUTPUT_SCHEMAS["reconcile_metric_sources"],
-    description="One metric for one period as each source states it: SEC XBRL as first filed and as latest filed (a difference is a restatement), the issuer's earnings release (only sentences naming the metric, an amount and the period's scope) and Yahoo's statement row, each compared with the latest SEC value with difference, percentage and tolerance (the larger of tolerance_pct and half the release's last stated digit). Status AGREED (two or more providers agree), PARTIAL (one provider), CONFLICT or NOT_FOUND, with source evidence. Metrics: revenue, net_income, operating_income, eps_diluted, cash_and_equivalents. Evidence only.",
+    description="One metric for one period as each source states it: SEC XBRL as first filed and as latest filed (a difference is a restatement), the issuer's earnings release (only sentences naming the metric, an amount and the period's scope) and Yahoo's statement row, each compared with the latest SEC value with difference, percentage and tolerance (the larger of tolerance_pct and half the release's last stated digit). Status AGREED requires latest SEC plus at least one independent matching provider; PARTIAL covers a missing SEC baseline or only one provider; otherwise CONFLICT or NOT_FOUND, with source evidence. Metrics: revenue, net_income, operating_income, eps_diluted, cash_and_equivalents. Evidence only.",
 )
 async def reconcile_metric_sources(ticker: str, metric: str, period: str = "latest_quarter", tolerance_pct: float = _mr.DEFAULT_TOLERANCE_PCT) -> str:
     upper = ticker.upper()
