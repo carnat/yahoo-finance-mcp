@@ -63,6 +63,9 @@ from yfmcp import sec_facts as _sf
 from yfmcp import extraction_rules as _er
 from yfmcp import driver_ledger as _dl
 from yfmcp import guidance_history as _gh
+from yfmcp import metric_reconciliation as _mr
+from yfmcp.evidence import AUTHORITY_BOUNDARY as _AUTHORITY_BOUNDARY
+from yfmcp import valuation_history as _vh
 from yfmcp.clients.edgar import (
     _SEC_REQUIRED_UA, _SMOKE_TICKER_CIK_FALLBACKS,
     _resolve_cik_for_ticker, _get_submissions_for_ticker,
@@ -9885,6 +9888,206 @@ async def get_guidance_history(ticker: str, max_releases: int = 8) -> str:
     out["status"] = ("NO_EARNINGS_RELEASES_FOUND" if not picks else "RELEASE_TEXT_NOT_AVAILABLE" if unread == len(releases)
                      else "PARTIAL" if unread or not facts else "OK")
     out["retryable"] = bool(unread) or not facts
+    out["warnings"] = warnings
+    return json.dumps(out)
+
+
+# ── Historical valuation context and metric reconciliation (2.5.4) ────────
+
+def _daily_history_sync(ticker: str, from_date: str) -> dict | None:
+    """Daily closes (Yahoo split-adjusted), split events and the quote currency from from_date to now."""
+    company = yf.Ticker(ticker)
+    df = company.history(start=from_date, interval="1d", auto_adjust=False, actions=True)
+    if df is None or getattr(df, "empty", True):
+        return None
+    bars: list[dict] = []
+    splits: list[dict] = []
+    for idx, row in df.iterrows():
+        date = idx.strftime("%Y-%m-%d")
+        close = row.get("Close")
+        if close is not None and math.isfinite(float(close)):
+            bars.append({"date": date, "close": float(close)})
+        ratio = row.get("Stock Splits")
+        if ratio is not None and math.isfinite(float(ratio)) and float(ratio) > 0:
+            splits.append({"date": date, "ratio": float(ratio)})
+    meta = getattr(company, "history_metadata", None) or {}
+    return {"bars": bars, "splits": splits, "currency": meta.get("currency")}
+
+
+async def _daily_history(ticker: str, from_date: str) -> dict | None:
+    try:
+        return await asyncio.to_thread(_daily_history_sync, ticker, from_date)
+    except Exception:  # noqa: BLE001 - reported as unread
+        return None
+
+
+async def _valuation_history_for(ticker: str, dates: list[str] | None, from_date: str) -> dict:
+    upper = ticker.upper()
+    cik_padded = await _resolve_cik_for_ticker(ticker)
+    if not cik_padded:
+        ticker_index = await _load_edgar_tickers()
+        code = "NO_SEC_REGISTRANT" if ticker_index else "SEC_LOOKUP_UNAVAILABLE"
+        return {"ticker": upper, "status": code, "code": code, "retryable": not ticker_index}
+    facts, history = await asyncio.gather(_edgar_get_company_facts(cik_padded), _daily_history(ticker, from_date), return_exceptions=True)
+    facts = None if isinstance(facts, BaseException) else facts
+    history = None if isinstance(history, BaseException) else history
+    if not facts:
+        return {"ticker": upper, "status": "COMPANYFACTS_NOT_AVAILABLE", "code": "COMPANYFACTS_NOT_AVAILABLE", "retryable": True}
+    if not history or not history["bars"]:
+        return {"ticker": upper, "status": "PRICE_HISTORY_NOT_AVAILABLE", "code": "PRICE_HISTORY_NOT_AVAILABLE", "retryable": True}
+    use_dates = dates if dates is not None else _vh.valuation_dates(None, history["bars"][-1]["date"])[0]
+    _, currency = _vh.taxonomy_of(facts)
+    price_currency = _vl._major_price(1, history["currency"])[1] if history["currency"] else None
+    warnings: list[dict] = []
+    fx = None
+    if currency and price_currency and currency != price_currency:
+        pair = f"{currency}{price_currency}=X"
+        fx_history = await _daily_history(pair, from_date)
+        fx = {"pair": pair, "bars": (fx_history or {}).get("bars") or []}
+    ratio = None
+    if _vh.foreign_filer(facts):
+        try:
+            market = await _valuation_market_inputs(ticker)
+        except Exception:  # noqa: BLE001 - no ratio without Yahoo's count
+            market = None
+        sec = _vh.latest_share_count(facts)
+        quoted = (market or {}).get("sharesOutstanding")
+        r = _vl.ads_ratio(sec, quoted) if sec is not None and quoted is not None else None
+        if r is not None and r != 1:
+            ratio = r
+            warnings.append({"code": "ADR_RATIO_APPLIED", "message": (
+                f"SEC counts {sec} ordinary shares; Yahoo counts {quoted} quoted shares, {r} ordinary shares each. Share counts are divided by "
+                f"{r} at every date."), "severity": "info"})
+    out = _vh.historical_valuation({"ticker": ticker, "dates": use_dates, "companyfacts": facts, "bars": history["bars"],
+                                    "priceCurrency": history["currency"], "splits": history["splits"], "fx": fx, "adsRatio": ratio})
+    out["warnings"] = warnings
+    return out
+
+
+@yfinance_server.tool(
+    name="get_historical_valuation_context",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["get_historical_valuation_context"],
+    description="Market cap, enterprise value and EV/Revenue, EV/EBITDA, P/E and P/S as they stood at each date, for a ticker and caller-named peers on the same dates. Point in time: SEC companyfacts filed on or before each date; the close on or before it with later split adjustments undone; balances at the latest balance date then filed; LTM (LFY + YTD - prior YTD) and LFY denominators with their periods, concepts and filings; reporting currency converted at that date's FX close; ADR share counts divided by ordinary shares per ADS. EBITDA is computed (operating income + D&A). Untagged or unfiled figures leave their multiples null with a status; peer medians are unweighted. No multiple is selected. Evidence only.",
+)
+async def get_historical_valuation_context(ticker: str, dates: list[str] | None = None, peers: list[str] | None = None) -> str:
+    requested = None
+    if dates:
+        requested, error = _vh.valuation_dates([str(d).strip() for d in dates], None)
+        if error:
+            return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": error})
+    peer_list = list(dict.fromkeys(p for p in (str(x).strip().upper() for x in (peers or [])) if p and p != ticker.upper()))
+    if len(peer_list) > 5:
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "At most 5 peers."})
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    earliest = requested[0] if requested else f"{int(today[:4]) - 5}{today[4:]}"
+    from_date = (datetime.date.fromisoformat(earliest[:4] + ("-02-28" if earliest[4:] == "-02-29" else earliest[4:])) - datetime.timedelta(days=15)).isoformat()
+    subject = await _valuation_history_for(ticker, requested, from_date)
+    final_dates = requested if requested else [str(p["date"]) for p in subject.get("points") or []]
+    peer_results: list[dict] = []
+    # Three at a time keeps SEC and Yahoo request rates modest.
+    for i in range(0, len(peer_list), 3):
+        peer_results += await asyncio.gather(*(_valuation_history_for(p, final_dates or None, from_date) for p in peer_list[i:i + 3]))
+    return json.dumps({
+        "ticker": ticker.upper(),
+        "status": str(subject.get("status") or "NOT_AVAILABLE"),
+        "dates": final_dates,
+        "subject": subject,
+        "peers": peer_results,
+        "peerMedians": _vh.peer_medians(final_dates, [p for p in peer_results if isinstance(p.get("points"), list)]) if peer_list and final_dates else [],
+        "notes": [
+            "Peers are the caller's; their medians are unweighted and count only peers with that multiple on that date. Each peer's denominators are its own fiscal periods, named in its points.",
+            "The latest date's close can be intraday while the market is open.",
+        ],
+        **_AUTHORITY_BOUNDARY,
+    })
+
+
+def _yahoo_statement_rows_sync(ticker: str, annual: bool, balance: bool) -> list[dict]:
+    """Yahoo statement columns as rows keyed by camelCase line item: {"date": "2026-06-30", "totalRevenue": ...}."""
+    company = yf.Ticker(ticker)
+    if balance:
+        df = company.balance_sheet if annual else company.quarterly_balance_sheet
+    else:
+        df = company.income_stmt if annual else company.quarterly_income_stmt
+    if df is None or getattr(df, "empty", True):
+        return []
+    rows = []
+    for col in df.columns:
+        row: dict = {"date": pd.Timestamp(col).strftime("%Y-%m-%d")}
+        for name, value in df[col].items():
+            if value is None or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                continue
+            key = str(name).replace(" ", "")
+            row[key[:1].lower() + key[1:]] = float(value)
+        rows.append(row)
+    return rows
+
+
+@yfinance_server.tool(
+    name="reconcile_metric_sources",
+    output_schema=_TOOL_OUTPUT_SCHEMAS["reconcile_metric_sources"],
+    description="One metric for one period as each source states it: SEC XBRL as first filed and as latest filed (a difference is a restatement), the issuer's earnings release (only sentences naming the metric, an amount and the period's scope) and Yahoo's statement row, each compared with the latest SEC value with difference, percentage and tolerance (the larger of tolerance_pct and half the release's last stated digit). Status AGREED (two or more providers agree), PARTIAL (one provider), CONFLICT or NOT_FOUND, with source evidence. Metrics: revenue, net_income, operating_income, eps_diluted, cash_and_equivalents. Evidence only.",
+)
+async def reconcile_metric_sources(ticker: str, metric: str, period: str = "latest_quarter", tolerance_pct: float = _mr.DEFAULT_TOLERANCE_PCT) -> str:
+    upper = ticker.upper()
+    if metric not in _mr.METRICS:
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": f"metric must be one of: {', '.join(_mr.METRICS)}"})
+    try:
+        tolerance = min(10.0, max(0.0, float(tolerance_pct)))
+        if not math.isfinite(tolerance):
+            raise ValueError
+    except (TypeError, ValueError):
+        tolerance = _mr.DEFAULT_TOLERANCE_PCT
+    cik_padded, subs = await _get_submissions_for_ticker(ticker)
+    if not cik_padded:
+        ticker_index = await _load_edgar_tickers()
+        code = "NO_SEC_REGISTRANT" if ticker_index else "SEC_LOOKUP_UNAVAILABLE"
+        return json.dumps({"ticker": upper, "metric": metric, "status": code, "code": code, "retryable": not ticker_index})
+    facts = await _edgar_get_company_facts(cik_padded)
+    if not facts:
+        return json.dumps({"ticker": upper, "metric": metric, "status": "COMPANYFACTS_NOT_AVAILABLE", "code": "COMPANYFACTS_NOT_AVAILABLE", "retryable": True})
+    resolved = _mr.resolve_period(facts, metric, period)
+    if resolved["status"] != "OK":
+        return json.dumps({"ticker": upper, "metric": metric, **resolved})
+    cik_int = int(cik_padded)
+    end = str(resolved["periodEnd"])
+    # Results releases filed within 100 days after the period ended, oldest first; an early Item 2.02 8-K
+    # (ASTS filed one on 2026-07-15) is not always the results release, so up to three are read.
+    candidates = sorted((p for p in (_earnings_release_picks(subs, cik_int, 40) if subs else [])
+                         if p["filingDate"] > end and (datetime.date.fromisoformat(p["filingDate"]) - datetime.date.fromisoformat(end)).days <= 100),
+                        key=lambda p: p["filingDate"])[:3]
+    annual = resolved["periodType"] == "ANNUAL"
+    instant = _mr.METRICS[metric]["kind"] == "instant"
+    _, reporting_unit, _ = _mr.metric_facts(facts, metric)
+
+    async def read_releases() -> list[dict]:
+        read = []
+        for c in candidates:
+            try:
+                r = {**await _read_release_text(cik_int, c["accessionNumber"], c["primaryUrl"]), "filingDate": c["filingDate"], "accessionNumber": c["accessionNumber"]}
+            except Exception:  # noqa: BLE001 - reported as unread
+                r = {"status": "NOT_READ", "url": c["primaryUrl"], "filingDate": c["filingDate"], "accessionNumber": c["accessionNumber"], "text": None}
+            read.append(r)
+            if _mr.release_observation(r, metric, resolved, reporting_unit)["status"] == "FOUND":
+                break
+        return read
+
+    async def yahoo_rows() -> list[dict] | None:
+        try:
+            return await asyncio.to_thread(_yahoo_statement_rows_sync, ticker, annual, instant)
+        except Exception:  # noqa: BLE001 - reported as unread
+            return None
+
+    releases, rows = await asyncio.gather(read_releases(), yahoo_rows())
+    out = _mr.metric_reconciliation(ticker=ticker, metric=metric, period=resolved, companyfacts=facts, releases=releases, yahoo_rows=rows,
+                                    tolerance_pct=tolerance)
+    warnings = []
+    unread = [r for r in releases if r["status"] == "NOT_READ"]
+    if unread:
+        warnings.append({"code": "RELEASE_TEXT_NOT_AVAILABLE", "message": f"{len(unread)} earnings release(s) could not be read from SEC; retry.", "severity": "warning"})
+    if rows is None:
+        warnings.append({"code": "YAHOO_NOT_AVAILABLE", "message": "Yahoo's statements could not be read; retry.", "severity": "warning"})
+    out["retryable"] = bool(unread) or rows is None
     out["warnings"] = warnings
     return json.dumps(out)
 

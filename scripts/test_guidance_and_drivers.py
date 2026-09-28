@@ -398,6 +398,9 @@ class TestDriverLedger(unittest.TestCase):
         self.assertEqual([f["asWritten"] for f in dl.figures_in(
             "Orbital launch of BlueBird 8-13 marks six spacecraft, with Block 2 satellites and 45 satellites planned.")], ["45 satellites"])
         self.assertEqual([f["asWritten"] for f in dl.figures_in("Reported 5 satellites launched.")], ["5 satellites"])
+        # A year before a word is not a figure (live ASTS release, 2.5.3).
+        self.assertEqual([f["asWritten"] for f in dl.figures_in("Reaffirmed 2026 revenue of $150.0 million to $200.0 million.")],
+                         ["$150.0 million", "$200.0 million"])
 
     def test_authority_boundary(self) -> None:
         for key, value in AUTHORITY_BOUNDARY.items():

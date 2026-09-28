@@ -233,7 +233,9 @@ def figures_in(sentence: str) -> list[dict]:
         unit = None if unit_word is not None and unit_word.lower() in _NON_UNIT_WORDS else unit_word
         int_part = m.group(2)
         number = float(int_part.replace(",", "") + (m.group(3) or ""))
-        if not dollar and unit is None and m.group(3) is None and re.fullmatch(r"(?:19|20)[0-9]{2}", int_part):
+        # A year is not a figure, bare or before a word ("2026 revenue"); "2025 MW" or "2025%" still is.
+        if (not dollar and m.group(3) is None and re.fullmatch(r"(?:19|20)[0-9]{2}", int_part)
+                and not (unit is not None and re.fullmatch(r"%|percent|billion|million|thousand|bn|MW|GW|megawatts?|gigawatts?", unit))):
             continue
         if not dollar and unit is None:
             continue

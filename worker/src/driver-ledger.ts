@@ -218,7 +218,9 @@ export function figuresIn(sentence: string): Rec[] {
     const unit = unitWord != null && NON_UNIT_WORDS.has(unitWord.toLowerCase()) ? null : unitWord;
     const intPart = m[2];
     const number = parseFloat(`${intPart.replace(/,/g, "")}${m[3] ?? ""}`);
-    if (!dollar && unit == null && m[3] == null && /^(?:19|20)[0-9]{2}$/.test(intPart)) continue;
+    // A year is not a figure, bare or before a word ("2026 revenue"); "2025 MW" or "2025%" still is.
+    if (!dollar && m[3] == null && /^(?:19|20)[0-9]{2}$/.test(intPart)
+      && !(unit != null && /^(?:%|percent|billion|million|thousand|bn|MW|GW|megawatts?|gigawatts?)$/.test(unit))) continue;
     if (!dollar && unit == null) continue;
     const asWritten = unit != null ? m[0] : `${m[1] ?? ""}${intPart}${m[3] ?? ""}`;
     out.push({ asWritten: asWritten.trim(), number, currency: dollar ? "USD" : null, unitAsWritten: unit });
