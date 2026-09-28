@@ -101,9 +101,14 @@ def _facts_for(tax: dict | None, concepts: list[str], unit: str, as_of: str) -> 
             start = f.get("start") if isinstance(f.get("start"), str) else None
             key = f"{start or ''}|{f['end']}"
             prev = by_period.get(key)
-            if prev is None or f["filed"] > prev["filed"]:
-                by_period[key] = {"concept": concept, "start": start, "end": f["end"], "val": f["val"], "filed": f["filed"], "form": str(f["form"]),
-                                  "accn": f.get("accn") if isinstance(f.get("accn"), str) else None}
+            candidate = {"concept": concept, "start": start, "end": f["end"], "val": f["val"], "filed": f["filed"], "form": str(f["form"]),
+                         "accn": f.get("accn") if isinstance(f.get("accn"), str) else None}
+            candidate_priority = concepts.index(concept)
+            previous_priority = concepts.index(prev["concept"]) if prev is not None else 10**9
+            # Concept order is semantic precedence. A later filing may update the
+            # same concept, but a lower-priority alternate concept must not silently replace it.
+            if prev is None or candidate_priority < previous_priority or (candidate_priority == previous_priority and f["filed"] > prev["filed"]):
+                by_period[key] = candidate
     return list(by_period.values())
 
 
@@ -332,15 +337,19 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
             warnings.append({"code": "SHARE_COUNT_WEIGHTED_AVERAGE", "message": (
                 "No undimensioned cover-page or balance-sheet share count is in companyfacts (companies with several share classes tag them "
                 "per class), so the latest weighted-average basic count is used; it may cover only the listed class."), "severity": "warning"})
-        if days(str(shares["asOf"]), date) > 400:
+        share_count_stale = days(str(shares["asOf"]), date) > 400
+        if share_count_stale:
             warnings.append({"code": "SHARE_COUNT_STALE", "message": f"The latest share count filed by {date} is as of {shares['asOf']}.", "severity": "warning"})
         split_after_count = next((s for s in inp["splits"] if str(shares["asOf"]) < s["date"] <= bar["date"]), None)
         ads = inp.get("adsRatio")
         quoted = shares["value"] / ads if ads is not None and ads > 0 else shares["value"]
         if ads is not None:
             shares["quotedShareEquivalent"] = _round(quoted)
-        market_cap = ({"status": "SPLIT_AFTER_SHARE_COUNT", "value": None, "split": split_after_count} if split_after_count else
-                      {"status": "OK", "value": _round(major_price * quoted), "currency": price_currency})
+        market_cap = (
+            {"status": "SPLIT_AFTER_SHARE_COUNT", "value": None, "split": split_after_count} if split_after_count else
+            {"status": "SHARE_COUNT_STALE", "value": None, "asOf": shares["asOf"]} if share_count_stale else
+            {"status": "OK", "value": _round(major_price * quoted), "currency": price_currency}
+        )
 
     fx_rate: float | None = None
     fx: dict | None = None
@@ -373,17 +382,22 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
         sti = balances["shortTermInvestments"]["value"]
         sti = 0 if sti is None else sti
         debt = balances["debt"]["value"]
-        enterprise_value = {
-            "status": "OK",
-            "value": _round(mcap + (debt - cash - sti) * fx_rate),
-            "currency": price_currency,
-            "formula": "market cap + debt - cash - short-term investments (untagged short-term investments are left out)",
-            "balanceDate": balances["balanceDate"],
-        }
+        balances_stale = days(str(balances["balanceDate"]), date) > 200
+        enterprise_value = (
+            {"status": "BALANCES_STALE", "value": None, "balanceDate": balances["balanceDate"], "currency": price_currency}
+            if balances_stale
+            else {
+                "status": "OK",
+                "value": _round(mcap + (debt - cash - sti) * fx_rate),
+                "currency": price_currency,
+                "formula": "market cap + debt - cash - short-term investments (untagged short-term investments are left out)",
+                "balanceDate": balances["balanceDate"],
+            }
+        )
         if balances["shortTermInvestments"]["status"] != "OK":
             warnings.append({"code": "SHORT_TERM_INVESTMENTS_NOT_TAGGED", "message": (
                 "No short-term investment concept is tagged at the balance date; enterprise value subtracts cash only."), "severity": "info"})
-        if days(str(balances["balanceDate"]), date) > 200:
+        if balances_stale:
             warnings.append({"code": "BALANCES_STALE", "message": f"The latest balance sheet filed by {date} is as of {balances['balanceDate']}.",
                              "severity": "warning"})
 
@@ -401,11 +415,17 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
     for basis in ("LTM", "LFY"):
         e = _ebitda(oi[basis], da[basis]["value"], da[basis]["concepts"])
         denominators[basis] = {"revenue": revenue[basis], "ebitda": e, "netIncome": ni[basis]}
+        def with_freshness(m: dict, denominator: dict) -> dict:
+            period_end = denominator.get("periodEnd")
+            if isinstance(period_end, str) and days(period_end, date) > 500:
+                return {**m, "value": None, "status": "RESULTS_STALE", "denominatorPeriodEnd": period_end}
+            return m
+
         multiples[basis] = {
-            "evToRevenue": _multiple(ev, revenue[basis], fx_rate, "enterpriseValue", basis, "revenue"),
-            "evToEbitda": _multiple(ev, e, fx_rate, "enterpriseValue", basis, "ebitda"),
-            "priceToEarnings": _multiple(mcap, ni[basis], fx_rate, "marketCap", basis, "netIncome"),
-            "priceToSales": _multiple(mcap, revenue[basis], fx_rate, "marketCap", basis, "revenue"),
+            "evToRevenue": with_freshness(_multiple(ev, revenue[basis], fx_rate, "enterpriseValue", basis, "revenue"), revenue[basis]),
+            "evToEbitda": with_freshness(_multiple(ev, e, fx_rate, "enterpriseValue", basis, "ebitda"), e),
+            "priceToEarnings": with_freshness(_multiple(mcap, ni[basis], fx_rate, "marketCap", basis, "netIncome"), ni[basis]),
+            "priceToSales": with_freshness(_multiple(mcap, revenue[basis], fx_rate, "marketCap", basis, "revenue"), revenue[basis]),
         }
     all_ok = market_cap["status"] == "OK" and enterprise_value["status"] == "OK"
     return {
