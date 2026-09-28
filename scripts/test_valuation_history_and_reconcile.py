@@ -270,10 +270,13 @@ const out = {
   recon: f.reconCases.map(([m, p, r, y, t]) => mr.metricReconciliation({ ticker: "asts", metric: m, period: mr.resolvePeriod(f.recon, m, p), companyfacts: f.recon, releases: r, yahooRows: y, tolerancePct: t })),
   releaseObs: f.releaseTexts.map(([m, text]) => mr.releaseObservation({ status: "READ", text, url: null, filingDate: null, accessionNumber: null }, m, quarter, "USD")),
   currency: mr.releaseObservation(f.releases[1], "revenue", quarter, "TWD"),
-  noSecAgreement: mr.reconcileObservations([
-    { source: "ISSUER_RELEASE", provider: "ISSUER_RELEASE", status: "FOUND", value: 100.0, precision: 0 },
-    { source: "YAHOO", provider: "YAHOO", status: "FOUND", value: 100.0, precision: 0 },
-  ], 0.5),
+  noSecAgreement: (() => {
+    const r = mr.reconcileObservations([
+      { source: "ISSUER_RELEASE", provider: "ISSUER_RELEASE", status: "FOUND", value: 100.0, precision: 0 },
+      { source: "YAHOO", provider: "YAHOO", status: "FOUND", value: 100.0, precision: 0 },
+    ], 0.5);
+    return [r.comparisons, r.status, r.restated];
+  })(),
   latestRelease: mr.pickReleaseObservation([
     { source: "ISSUER_RELEASE", provider: "ISSUER_RELEASE", status: "FOUND", value: 31_500_000, filingDate: "2026-08-10" },
     { source: "ISSUER_RELEASE", provider: "ISSUER_RELEASE", status: "FOUND", value: 31_600_000, filingDate: "2026-08-20" },
