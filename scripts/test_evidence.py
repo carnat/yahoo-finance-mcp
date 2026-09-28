@@ -112,6 +112,26 @@ COMPONENT_TEXTS = [
     ("get_quote", "not json"),
 ]
 
+# An evidence-only action's result object always carries AUTHORITY_BOUNDARY (2.5.8).
+COMPLETE = json.dumps({"status": "OK", **ev.AUTHORITY_BOUNDARY})
+BOUNDARY_CASES = [
+    ["reconcile_metric_sources", json.dumps({"ticker": "DG", "metric": "revenue", "status": "PERIOD_NOT_FOUND", "spec": "FY2026"})],
+    ["get_historical_valuation_context", json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "At most 5 peers."})],
+    ["get_quote", json.dumps({"status": "OK"})],
+    ["get_guidance_history", COMPLETE],
+    ["get_share_count_scenarios", json.dumps({"status": "OK", "decisionUse": "EVIDENCE_ONLY", "priceTarget": 5})],
+    ["list_evidence_cuts", "not json"],
+    ["get_evidence_quality", "[1, 2]"],
+    ["build_valuation_evidence_pack", json.dumps({"ok": True, "data": {}, "meta": {}, "error": None})],
+]
+
+
+def _boundary_out(raw: object) -> object:
+    try:
+        return json.loads(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return raw
+
 
 def _python_outputs() -> dict:
     yahoo = ev.yahoo_consensus_input(YAHOO_TREND, retrieved_at=AS_OF, financial_currency="USD")
@@ -149,6 +169,8 @@ def _python_outputs() -> dict:
         "parsed": ev.parse_evidence_cut_id(ev.evidence_cut_id("brk.b", AS_OF, "b" * 64)),
         "parsedBad": ev.parse_evidence_cut_id("ec1_../x_20260926T080000Z_" + "c" * 64),
         "observationKey": ev.consensus_observation_key("asts", AS_OF),
+        "boundary": [_boundary_out(ev.with_authority_boundary(a, raw)) for a, raw in BOUNDARY_CASES],
+        "boundaryActions": sorted(ev.EVIDENCE_ONLY_ACTIONS),
     }
 
 
@@ -190,6 +212,8 @@ const out = {
   parsed: m.parseEvidenceCutId(m.evidenceCutId("brk.b", AS_OF, "b".repeat(64))),
   parsedBad: m.parseEvidenceCutId("ec1_../x_20260926T080000Z_" + "c".repeat(64)),
   observationKey: m.consensusObservationKey("asts", AS_OF),
+  boundary: f.boundaryCases.map(([a, raw]) => { const o = m.withAuthorityBoundary(a, raw); try { return JSON.parse(o); } catch { return o; } }),
+  boundaryActions: [...m.EVIDENCE_ONLY_ACTIONS].sort(),
 };
 console.log(JSON.stringify(out));
 """
@@ -204,6 +228,7 @@ def _worker_outputs() -> dict:
         "derivedTrend": DERIVED_TREND, "filings": FILINGS, "staleFilings": STALE_FILINGS, "componentTexts": COMPONENT_TEXTS,
         # JSON cannot carry -0.0 distinctly from 0 in every parser; both runtimes format it as 0.
         "canonical": CANONICAL_CASES,
+        "boundaryCases": BOUNDARY_CASES,
     }
     with tempfile.TemporaryDirectory() as tmp:
         bundle = Path(tmp) / "evidence.mjs"
@@ -351,6 +376,40 @@ class TestEvidenceQualityAndReceipt(unittest.TestCase):
         self.assertEqual(self.out["parsed"]["key"], "evidence-cuts/BRK.B/20260926T080000Z/" + "b" * 64 + ".json")
         self.assertIsNone(self.out["parsedBad"])
         self.assertEqual(self.out["observationKey"], "consensus-history/ASTS/2026-09-26.json")
+
+
+class TestAuthorityBoundaryOnEveryResult(unittest.TestCase):
+    """Terminal statuses of evidence-only actions carry the same authority fields as full results (2.5.8)."""
+
+    def test_terminal_status_gains_the_boundary(self) -> None:
+        out = _python_outputs()["boundary"]
+        self.assertEqual({k: out[0][k] for k in ev.AUTHORITY_BOUNDARY}, ev.AUTHORITY_BOUNDARY)
+        self.assertEqual((out[0]["status"], out[0]["spec"]), ("PERIOD_NOT_FOUND", "FY2026"))
+        # Errors, other tools, envelopes and non-objects are unchanged.
+        self.assertNotIn("decisionUse", out[1])
+        self.assertNotIn("decisionUse", out[2])
+        self.assertEqual((out[5], out[6]), ("not json", [1, 2]))
+        self.assertNotIn("decisionUse", out[7])
+        # A stray value is overwritten, never passed through as authority.
+        self.assertIsNone(out[4]["priceTarget"])
+        # A complete payload is returned as is, byte for byte.
+        self.assertIs(ev.with_authority_boundary("get_guidance_history", COMPLETE), COMPLETE)
+
+    def test_envelope_carries_it_and_errors_carry_no_data(self) -> None:
+        from yfmcp.envelope import _envelope_tool_result
+
+        ok = json.loads(_envelope_tool_result("reconcile_metric_sources", BOUNDARY_CASES[0][1]))
+        self.assertTrue(ok["ok"])
+        self.assertEqual({k: ok["data"][k] for k in ev.AUTHORITY_BOUNDARY}, ev.AUTHORITY_BOUNDARY)
+        failed = json.loads(_envelope_tool_result("get_historical_valuation_context", BOUNDARY_CASES[1][1]))
+        self.assertEqual((failed["ok"], failed["data"]), (False, None))
+
+    def test_every_evidence_only_action_is_a_catalog_action_and_worker_applies_it(self) -> None:
+        catalog = (ROOT / "tool_catalog.json").read_text(encoding="utf-8")
+        for action in ev.EVIDENCE_ONLY_ACTIONS:
+            self.assertIn(f'"{action}"', catalog, action)
+        tools_ts = (WORKER / "src" / "tools.ts").read_text(encoding="utf-8")
+        self.assertIn("raw = withAuthorityBoundary(name, await _dispatchTool(name, args));", tools_ts)
 
 
 if __name__ == "__main__":

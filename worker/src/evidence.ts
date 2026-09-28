@@ -26,6 +26,42 @@ export const AUTHORITY_BOUNDARY = {
 
 type Rec = Record<string, unknown>;
 
+/** Actions whose payloads are evidence only; each result they return carries AUTHORITY_BOUNDARY (2.5.8). */
+export const EVIDENCE_ONLY_ACTIONS: ReadonlySet<string> = new Set([
+  "build_valuation_evidence_pack",
+  "extract_funding_capex_schedule",
+  "extract_operating_driver_ledger",
+  "get_consensus_forecast_curve",
+  "get_eps_revisions",
+  "get_evidence_cut",
+  "get_evidence_quality",
+  "get_guidance_history",
+  "get_historical_valuation_context",
+  "get_share_count_scenarios",
+  "list_evidence_cuts",
+  "reconcile_metric_sources",
+]);
+
+/**
+ * An evidence-only action's result object with AUTHORITY_BOUNDARY, so a terminal status such as
+ * PERIOD_NOT_FOUND or NO_SEC_REGISTRANT has the same shape as a full result. Errors ({ error: true })
+ * become failure envelopes with no data and are left alone, as are other tools and non-object results.
+ */
+export function withAuthorityBoundary(action: string, raw: string): string {
+  if (!EVIDENCE_ONLY_ACTIONS.has(action)) return raw;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+  if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) return raw;
+  const rec = parsed as Rec;
+  if (rec.error === true || typeof rec.ok === "boolean") return raw;
+  if (Object.entries(AUTHORITY_BOUNDARY).every(([k, v]) => rec[k] === v)) return raw;
+  return JSON.stringify({ ...rec, ...AUTHORITY_BOUNDARY });
+}
+
 // ── Canonical JSON ───────────────────────────────────────────────────────────
 
 /** Canonical JSON: the bytes an evidence cut's SHA-256 is taken over. */
