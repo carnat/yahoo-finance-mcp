@@ -189,6 +189,46 @@ _QUARTER_SCOPE_RE = re.compile(r"\b(?:quarter(?:ly)?|three months|Q[1-4])\b", _F
 _ANNUAL_SCOPE_RE = re.compile(r"\b(?:full[- ]year|fiscal (?:year )?20\d\d|years? ended|twelve months|for (?:the )?(?:fiscal )?year|annual)\b", _F)
 _INSTANT_SCOPE_RE = re.compile(r"\b(?:as of|ended (?:the )?(?:quarter|year|period)|at (?:the )?(?:end|close) of|balance)\b", _F)
 _MONEY = r"(\(?)\s?(-?)\s?\$\s?(\(?)(-?)([0-9][0-9,]*)(\.[0-9]+)?\)?(?:\s?(billion|million|thousand)\b)?"
+_QUARTER_ORDINAL = ("first", "second", "third", "fourth")
+
+
+def _explicit_period_matches(sentence: str, amount_start: int, period: dict) -> bool:
+    before_amount = sentence[:amount_start]
+    if period.get("periodType") == "QUARTER":
+        end = str(period.get("periodEnd") or "")
+        q = math.ceil(int(end[5:7]) / 3)
+        year = end[:4]
+        mentions = list(re.finditer(r"\b(?:Q([1-4])|(?:first|second|third|fourth) quarter)\b", before_amount, re.I))
+        for m in mentions:
+            token = m.group(0).lower()
+            observed_q = int(m.group(1)) if m.group(1) else next((i + 1 for i, x in enumerate(_QUARTER_ORDINAL) if token.startswith(x)), 0)
+            if observed_q != q:
+                return False
+            nearby = before_amount[m.start():m.start() + 60]
+            ym = re.search(r"\b(20\d{2})\b", nearby)
+            if ym and ym.group(1) != year:
+                return False
+        if not mentions:
+            after = sentence[amount_start:]
+            first_period = re.search(r"\b(?:Q[1-4]|(?:first|second|third|fourth) quarter)\b", after, re.I)
+            if first_period:
+                prefix = after[:first_period.start()]
+                if not re.search(r"\b(?:compared (?:with|to)|versus|vs\.?|from)\b", prefix, re.I):
+                    return False
+        return True
+    if period.get("periodType") == "ANNUAL":
+        requested_year = str(period.get("periodEnd") or "")[:4]
+        before_years = re.findall(r"\b(20\d{2})\b", before_amount)
+        if any(y != requested_year for y in before_years):
+            return False
+        after = sentence[amount_start:]
+        later_year = re.search(r"\b(20\d{2})\b", after)
+        if not before_years and later_year:
+            prefix = after[:later_year.start()]
+            if not re.search(r"\b(?:compared (?:with|to)|versus|vs\.?|from)\b", prefix, re.I) and later_year.group(1) != requested_year:
+                return False
+        return True
+    return True
 _SCALE = {"billion": 1e9, "million": 1e6, "thousand": 1e3}
 
 
@@ -217,12 +257,13 @@ def release_observation(release: dict | None, metric: str, period: dict, reporti
             continue
         quarter = _QUARTER_SCOPE_RE.search(sentence) is not None
         annual = _ANNUAL_SCOPE_RE.search(sentence) is not None
+        amount_start = m.start() + m.group(0).find("$")
         if spec["kind"] == "instant":
             scoped = _INSTANT_SCOPE_RE.search(sentence) is not None
         elif period.get("periodType") == "QUARTER":
-            scoped = quarter and not annual
+            scoped = quarter and not annual and _explicit_period_matches(sentence, amount_start, period)
         else:
-            scoped = annual and not quarter
+            scoped = annual and not quarter and _explicit_period_matches(sentence, amount_start, period)
         if not scoped:
             unscoped += 1
             continue
@@ -244,7 +285,8 @@ def pick_release_observation(observations: list[dict]) -> dict:
     Every release considered is listed.
     """
     considered = [{"filingDate": o.get("filingDate"), "accessionNumber": o.get("accessionNumber"), "status": o.get("status")} for o in observations]
-    chosen = next((o for o in observations if o.get("status") == "FOUND"), observations[0] if observations else
+    found = [o for o in observations if o.get("status") == "FOUND"]
+    chosen = found[-1] if found else (observations[0] if observations else
                   {"source": "ISSUER_RELEASE", "provider": "ISSUER_RELEASE", "status": "NOT_RESOLVED", "value": None})
     return {**chosen, "releasesConsidered": considered}
 
@@ -268,7 +310,7 @@ def yahoo_observation(rows: list[dict] | None, metric: str, period: dict, freque
 def reconcile_observations(observations: list[dict], tolerance_pct: float) -> tuple[list[dict], str, bool]:
     """Each found value against the baseline, and the overall agreement."""
     found = [o for o in observations if o.get("status") == "FOUND" and _num(o.get("value"))]
-    baseline = next((o for o in found if o["source"] == "SEC_XBRL_LATEST"), found[0] if found else None)
+    baseline = next((o for o in found if o["source"] == "SEC_XBRL_LATEST"), None)
     comparisons: list[dict] = []
     conflict = False
     restated = False
@@ -298,7 +340,7 @@ def reconcile_observations(observations: list[dict], tolerance_pct: float) -> tu
                 conflict = True
             comparisons.append(row)
     providers = {o["provider"] for o in found}
-    status = "NOT_FOUND" if not found else "CONFLICT" if conflict else "AGREED" if len(providers) >= 2 else "PARTIAL"
+    status = "NOT_FOUND" if not found else "PARTIAL" if baseline is None else "CONFLICT" if conflict else "AGREED" if len(providers) >= 2 else "PARTIAL"
     return comparisons, status, restated
 
 
