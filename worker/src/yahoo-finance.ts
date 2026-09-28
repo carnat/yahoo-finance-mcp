@@ -15808,7 +15808,6 @@ export async function reconcileMetricSources(ticker: string, metric: string, per
         .then((x): Record<string, unknown> => ({ ...x, filingDate: c.filingDate, accessionNumber: c.accessionNumber }))
         .catch((): Record<string, unknown> => ({ status: "NOT_READ", url: c.primaryUrl, filingDate: c.filingDate, accessionNumber: c.accessionNumber, text: null }));
       read.push(r);
-      if (releaseObservation(r, metric, resolved, reportingUnit).status === "FOUND") break;
     }
     return read;
   };
