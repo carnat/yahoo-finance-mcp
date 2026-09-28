@@ -9741,8 +9741,8 @@ _DRIVER_SEARCH_TERMS = [
 ]
 
 
-def _earnings_release_picks(subs: dict, cik_int: int, limit: int) -> list[dict]:
-    """The newest earnings-release 8-Ks (Item 2.02, results of operations) in SEC's recent submissions."""
+def _earnings_release_picks(subs: dict, cik_int: int, limit: int, include_amendments: bool = False) -> list[dict]:
+    """The newest earnings-release 8-Ks (Item 2.02, results of operations) in SEC's recent submissions; 8-K/As too when asked."""
     recent = (subs.get("filings") or {}).get("recent") or {}
 
     def at(key: str, i: int) -> str:
@@ -9753,13 +9753,14 @@ def _earnings_release_picks(subs: dict, cik_int: int, limit: int) -> list[dict]:
     for i, form in enumerate(recent.get("form") or []):
         if len(picks) >= limit:
             break
-        if str(form or "").upper() != "8-K" or "2.02" not in at("items", i):
+        form_upper = str(form or "").upper()
+        if not (form_upper == "8-K" or (include_amendments and form_upper == "8-K/A")) or "2.02" not in at("items", i):
             continue
         acc, doc = at("accessionNumber", i), at("primaryDocument", i)
         if not acc or not doc:
             continue
         picks.append({"filingDate": at("filingDate", i), "accessionNumber": acc,
-                      "primaryUrl": f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc.replace('-', '')}/{doc}"})
+                      "primaryUrl": f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc.replace('-', '')}/{doc}", "form": form_upper})
     return picks
 
 
@@ -9921,6 +9922,48 @@ async def _daily_history(ticker: str, from_date: str) -> dict | None:
         return None
 
 
+# Cover pages sit at the top of a periodic report with the header contexts; the first 900 KB is read, not
+# the whole report (ASTS's 10-Q is 3.5 MB, its class counts end near 194 KB).
+_COVER_READ_MAX_BYTES = 900_000
+
+
+_PERIODIC_REPORT_FORMS = {"10-K", "10-Q", "20-F", "40-F"}
+
+
+def _periodic_reports(subs: dict | None, cik_padded: str | None) -> list[dict]:
+    """The filer's periodic reports in SEC's recent submissions, with their primary documents."""
+    if not subs or not cik_padded:
+        return []
+    recent = (subs.get("filings") or {}).get("recent") or {}
+
+    def at(key: str, i: int) -> str:
+        values = recent.get(key) or []
+        return str(values[i] or "") if i < len(values) and values[i] is not None else ""
+
+    out = []
+    for i, form in enumerate(recent.get("form") or []):
+        form_upper = str(form or "").upper()
+        acc, doc = at("accessionNumber", i), at("primaryDocument", i)
+        if form_upper not in _PERIODIC_REPORT_FORMS or not acc or not doc:
+            continue
+        out.append({"accessionNumber": acc, "form": form_upper, "filed": at("filingDate", i), "reportDate": at("reportDate", i) or None,
+                    "documentUrl": f"https://www.sec.gov/Archives/edgar/data/{int(cik_padded)}/{acc.replace('-', '')}/{doc}"})
+    return out
+
+
+async def _cover_counts_for(companyfacts: dict, reports: list[dict], dates: list[str]) -> dict:
+    """Per-class cover-page share counts from the periodic reports companyfacts cannot give a point-in-time count for."""
+    out: dict = {}
+    for n in _vh.cover_reads_needed(companyfacts, reports, dates):
+        url = n["documentUrl"]
+        try:
+            html = await _edgar_get_html(url, max_bytes=_COVER_READ_MAX_BYTES)
+        except Exception:  # noqa: BLE001 - reported as unread
+            html = None
+        out[n["accessionNumber"]] = {**_vh.cover_share_counts(html), "documentUrl": url} if html else {"status": "NOT_READ", "value": None, "documentUrl": url}
+    return out
+
+
 async def _valuation_history_for(ticker: str, dates: list[str] | None, from_date: str) -> dict:
     upper = ticker.upper()
     cik_padded = await _resolve_cik_for_ticker(ticker)
@@ -9958,8 +10001,20 @@ async def _valuation_history_for(ticker: str, dates: list[str] | None, from_date
             warnings.append({"code": "ADR_RATIO_APPLIED", "message": (
                 f"SEC counts {sec} ordinary shares; Yahoo counts {quoted} quoted shares, {r} ordinary shares each. Share counts are divided by "
                 f"{r} at every date."), "severity": "info"})
+    try:
+        _, subs = await _get_submissions_for_ticker(ticker)
+    except Exception:  # noqa: BLE001 - reported below
+        subs = None
+    reports = _periodic_reports(subs, cik_padded)
+    cover_counts = await _cover_counts_for(facts, reports, use_dates)
+    periodic_filings = [{k: r[k] for k in ("accessionNumber", "form", "filed", "reportDate")} for r in reports]
     out = _vh.historical_valuation({"ticker": ticker, "dates": use_dates, "companyfacts": facts, "bars": history["bars"],
-                                    "priceCurrency": history["currency"], "splits": history["splits"], "fx": fx, "adsRatio": ratio})
+                                    "priceCurrency": history["currency"], "splits": history["splits"], "fx": fx, "adsRatio": ratio,
+                                    "coverCounts": cover_counts, "periodicFilings": periodic_filings})
+    if not subs:
+        warnings.append({"code": "SUBMISSIONS_NOT_AVAILABLE", "message": (
+            "SEC submissions could not be read, so no cover page was read; filers without an undimensioned share count have no market cap. Retry."),
+            "severity": "warning"})
     out["warnings"] = warnings
     return out
 
@@ -9967,7 +10022,7 @@ async def _valuation_history_for(ticker: str, dates: list[str] | None, from_date
 @yfinance_server.tool(
     name="get_historical_valuation_context",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_historical_valuation_context"],
-    description="Market cap, enterprise value and EV/Revenue, EV/EBITDA, P/E and P/S as they stood at each date, for a ticker and caller-named peers on the same dates. Point in time: SEC companyfacts filed on or before each date; the close on or before it with later split adjustments undone; balances at the latest balance date then filed; LTM (LFY + YTD - prior YTD) and LFY denominators with their periods, concepts and filings; reporting currency converted at that date's FX close; ADR share counts divided by ordinary shares per ADS. EBITDA is computed (operating income + D&A). Untagged or unfiled figures leave their multiples null with a status; peer medians are unweighted. No multiple is selected. Evidence only.",
+    description="Market cap, enterprise value and EV/Revenue, EV/EBITDA, P/E and P/S as they stood at each date, for a ticker and caller-named peers on the same dates. Point in time: SEC companyfacts filed on or before each date; the close on or before it with later split adjustments undone; balances at the latest balance date then filed; LTM (LFY + YTD - prior YTD) and LFY denominators with their periods, concepts and filings; reporting currency converted at that date's FX close; ADR share counts divided by ordinary shares per ADS. Shares are point in time: the cover-page or balance-sheet count, else the filing's per-class cover counts summed; a weighted-average count never sets market cap (POINT_IN_TIME_SHARES_UNRESOLVED). EBITDA is computed (operating income + D&A). Untagged or unfiled figures leave their multiples null with a status; status is OK only when all eight multiples are usable (coreStatus covers market cap and EV, coverage lists the rest); peer medians are unweighted. No multiple is selected. Evidence only.",
 )
 async def get_historical_valuation_context(ticker: str, dates: list[str] | None = None, peers: list[str] | None = None) -> str:
     requested = None
@@ -10000,6 +10055,9 @@ async def get_historical_valuation_context(ticker: str, dates: list[str] | None 
         ],
         **_AUTHORITY_BOUNDARY,
     })
+
+
+_RELEASE_READ_MAX = 4
 
 
 def _yahoo_statement_rows_sync(ticker: str, annual: bool, balance: bool) -> list[dict]:
@@ -10051,11 +10109,15 @@ async def reconcile_metric_sources(ticker: str, metric: str, period: str = "late
         return json.dumps({"ticker": upper, "metric": metric, **resolved})
     cik_int = int(cik_padded)
     end = str(resolved["periodEnd"])
-    # Results releases filed within 100 days after the period ended, oldest first; an early Item 2.02 8-K
-    # (ASTS filed one on 2026-07-15) is not always the results release, so up to three are read.
-    candidates = sorted((p for p in (_earnings_release_picks(subs, cik_int, 40) if subs else [])
-                         if p["filingDate"] > end and (datetime.date.fromisoformat(p["filingDate"]) - datetime.date.fromisoformat(end)).days <= 100),
-                        key=lambda p: p["filingDate"])[:3]
+    # Results releases (Item 2.02 8-Ks and 8-K/As) filed within 100 days after the period ended. The newest
+    # _RELEASE_READ_MAX are read, so a later correction is never crowded out by earlier filings; they are kept
+    # oldest first, and the latest with a scoped figure wins (an early Item 2.02 8-K, as ASTS filed on
+    # 2026-07-15, is not always the results release).
+    in_window = sorted((p for p in (_earnings_release_picks(subs, cik_int, 40, True) if subs else [])
+                        if p["filingDate"] > end and (datetime.date.fromisoformat(p["filingDate"]) - datetime.date.fromisoformat(end)).days <= 100),
+                       key=lambda p: (p["filingDate"], p["accessionNumber"]))
+    candidates = in_window[-_RELEASE_READ_MAX:]
+    not_read = in_window[:len(in_window) - len(candidates)]
     annual = resolved["periodType"] == "ANNUAL"
     instant = _mr.METRICS[metric]["kind"] == "instant"
 
@@ -10084,6 +10146,11 @@ async def reconcile_metric_sources(ticker: str, metric: str, period: str = "late
         warnings.append({"code": "RELEASE_TEXT_NOT_AVAILABLE", "message": f"{len(unread)} earnings release(s) could not be read from SEC; retry.", "severity": "warning"})
     if rows is None:
         warnings.append({"code": "YAHOO_NOT_AVAILABLE", "message": "Yahoo's statements could not be read; retry.", "severity": "warning"})
+    out["releaseCandidates"] = {"inWindow": len(in_window), "read": len(candidates),
+                                "notRead": [{"filingDate": p["filingDate"], "accessionNumber": p["accessionNumber"], "form": p["form"]} for p in not_read]}
+    if not_read:
+        warnings.append({"code": "OLDER_RELEASE_CANDIDATES_NOT_READ", "message": (
+            f"{len(not_read)} older Item 2.02 filing(s) in the 100-day window were not read; the {len(candidates)} newest were."), "severity": "info"})
     out["retryable"] = bool(unread) or rows is None
     out["warnings"] = warnings
     return json.dumps(out)

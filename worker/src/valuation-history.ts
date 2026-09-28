@@ -38,6 +38,24 @@ export interface ValuationHistoryInput {
   fx: { pair: string; bars: Bar[] } | null;
   /** Ordinary shares per quoted share (ADS), when the quote is for depositary shares. */
   adsRatio: number | null;
+  /**
+   * Cover-page share counts read from periodic filings' inline XBRL (coverShareCounts), keyed by
+   * accession number: the counts companyfacts leaves out when a filer tags them per share class.
+   */
+  coverCounts?: Record<string, Rec> | null;
+  /** The filer's 10-K, 10-Q, 20-F and 40-F filings (SEC submissions), whose cover pages coverCounts holds. */
+  periodicFilings?: PeriodicFiling[] | null;
+}
+
+export interface PeriodicFiling { accessionNumber: string; form: string; filed: string; reportDate: string | null }
+
+/** The periodic report filed most recently on or before asOf. */
+function latestFiling(filings: PeriodicFiling[] | null | undefined, asOf: string): PeriodicFiling | null {
+  let best: PeriodicFiling | null = null;
+  for (const f of filings ?? []) {
+    if (f.filed <= asOf && (best == null || cmp(f.filed, best.filed) > 0 || (f.filed === best.filed && cmp(f.accessionNumber, best.accessionNumber) > 0))) best = f;
+  }
+  return best;
 }
 
 interface Fact { concept: string; start: string | null; end: string; val: number; filed: string; form: string; accn: string | null }
@@ -192,18 +210,161 @@ export function rateAt(bars: Bar[], date: string): Bar | null {
   return best;
 }
 
-function sharesAt(dei: Rec | null, tax: Rec | null, map: TaxonomyMap, asOf: string): Rec | null {
-  const latest = (fs: Fact[]): Fact | null => {
-    const sorted = [...fs].sort((a, b) => cmp(a.end, b.end) || days(b.start ?? b.end, b.end) - days(a.start ?? a.end, a.end));
-    return sorted.length > 0 ? sorted[sorted.length - 1] : null;
-  };
-  const cover = latest(factsFor(dei, ["EntityCommonStockSharesOutstanding"], "shares", asOf).filter((f) => f.start == null));
-  if (cover) return { value: cover.val, asOf: cover.end, basis: "COVER_PAGE", ...component(cover) };
-  const balance = latest(factsFor(tax, map.sharesInstant, "shares", asOf).filter((f) => f.start == null));
-  if (balance) return { value: balance.val, asOf: balance.end, basis: "BALANCE_SHEET", ...component(balance) };
-  const weighted = latest(factsFor(tax, map.sharesWeighted, "shares", asOf).filter((f) => f.start != null));
-  if (weighted) return { value: weighted.val, asOf: weighted.end, basis: "WEIGHTED_AVERAGE_BASIC", ...component(weighted) };
+const latestFact = (fs: Fact[]): Fact | null => {
+  const sorted = [...fs].sort((a, b) => cmp(a.end, b.end) || days(b.start ?? b.end, b.end) - days(a.start ?? a.end, a.end));
+  return sorted.length > 0 ? sorted[sorted.length - 1] : null;
+};
+
+/** The undimensioned point-in-time count (cover page, else balance sheet) and the latest weighted-average basic count filed by asOf. */
+function shareFactsAt(dei: Rec | null, tax: Rec | null, map: TaxonomyMap, asOf: string): { pointInTime: Rec | null; weighted: Fact | null } {
+  const cover = latestFact(factsFor(dei, ["EntityCommonStockSharesOutstanding"], "shares", asOf).filter((f) => f.start == null));
+  const balance = cover ? null : latestFact(factsFor(tax, map.sharesInstant, "shares", asOf).filter((f) => f.start == null));
+  const weighted = latestFact(factsFor(tax, map.sharesWeighted, "shares", asOf).filter((f) => f.start != null));
+  const pointInTime = cover
+    ? { value: cover.val, asOf: cover.end, basis: "COVER_PAGE", ...component(cover) }
+    : balance
+      ? { value: balance.val, asOf: balance.end, basis: "BALANCE_SHEET", ...component(balance) }
+      : null;
+  return { pointInTime, weighted };
+}
+
+/**
+ * The share count at asOf. An undimensioned cover-page or balance-sheet count comes from companyfacts; when
+ * there is none, or the latest periodic report filed by asOf has a newer cover page, that report's per-class
+ * cover counts are summed. A weighted-average count is returned only as context: it is an average over a
+ * period, may cover one class, and never sets a point-in-time market value.
+ */
+function sharesAt(dei: Rec | null, tax: Rec | null, map: TaxonomyMap, asOf: string, coverCounts: Record<string, Rec> | null = null, filings: PeriodicFiling[] | null = null): Rec | null {
+  const { pointInTime, weighted } = shareFactsAt(dei, tax, map, asOf);
+  const filing = latestFiling(filings, asOf);
+  const read = filing ? coverCounts?.[filing.accessionNumber] ?? null : null;
+  if (filing && read && read.status === "OK" && (!pointInTime || String(read.asOf) > String(pointInTime.asOf))) {
+    return {
+      value: read.value,
+      asOf: read.asOf,
+      basis: read.basis,
+      classes: read.classes,
+      form: filing.form,
+      filed: filing.filed,
+      accessionNumber: filing.accessionNumber,
+      documentUrl: read.documentUrl ?? null,
+    };
+  }
+  if (pointInTime) return pointInTime;
+  if (weighted) {
+    return {
+      value: weighted.val,
+      asOf: weighted.end,
+      basis: "WEIGHTED_AVERAGE_BASIC",
+      pointInTime: false,
+      coverPageRead: read
+        ? { status: read.status, accessionNumber: filing?.accessionNumber ?? null, documentUrl: read.documentUrl ?? null }
+        : { status: filing ? "NOT_READ" : "NO_PERIODIC_FILING", accessionNumber: filing?.accessionNumber ?? null },
+      ...component(weighted),
+    };
+  }
   return null;
+}
+
+/**
+ * The periodic reports whose cover pages are needed: at each date, the latest report filed by then when
+ * companyfacts has no undimensioned count as new as that report's period.
+ */
+export function coverReadsNeeded(companyfacts: unknown, filings: PeriodicFiling[] | null, dates: string[]): PeriodicFiling[] {
+  const { taxonomy } = taxonomyOf(companyfacts);
+  if (!taxonomy) return [];
+  const facts = (((companyfacts ?? {}) as Rec).facts ?? {}) as Rec;
+  const map = taxonomy === "ifrs-full" ? IFRS : US_GAAP;
+  const out = new Map<string, PeriodicFiling>();
+  for (const date of dates) {
+    const filing = latestFiling(filings, date);
+    if (!filing) continue;
+    const { pointInTime } = shareFactsAt((facts.dei ?? null) as Rec | null, (facts[taxonomy] ?? null) as Rec | null, map, date);
+    if (pointInTime && String(pointInTime.asOf) >= (filing.reportDate ?? filing.filed)) continue;
+    out.set(filing.accessionNumber, filing);
+  }
+  return [...out.values()].sort((a, b) => cmp(a.filed, b.filed) || cmp(a.accessionNumber, b.accessionNumber));
+}
+
+const COVER_FACT_RE = /<ix:nonfraction\b([^>]*\bname="dei:EntityCommonStockSharesOutstanding"[^>]*)>([\s\S]*?)<\/ix:nonfraction>/gi;
+const CLASS_AXIS_RE = /ClassOfStockAxis$/;
+
+function attr(attrs: string, name: string): string | null {
+  const m = new RegExp(`\\b${name}="([^"]*)"`, "i").exec(attrs);
+  return m ? m[1] : null;
+}
+
+/** "us-gaap:CommonClassAMember" -> "Common Class A". */
+function memberName(member: string): string {
+  return member.replace(/^[^:]*:/, "").replace(/Member$/, "").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/([A-Z])([A-Z][a-z])/g, "$1 $2");
+}
+
+/**
+ * dei:EntityCommonStockSharesOutstanding from a periodic filing's inline XBRL (its first part: the cover page
+ * and the header contexts). At the latest cover date: the undimensioned count, else the sum of the per-class
+ * counts. Counts carrying any dimension other than the class-of-stock axis are not summed.
+ */
+export function coverShareCounts(html: string): Rec {
+  const facts: { value: number; date: string; members: { dimension: string; member: string }[]; context: string }[] = [];
+  let unresolved = 0;
+  let unparsed = 0;
+  const contexts = new Map<string, { date: string; members: { dimension: string; member: string }[] } | null>();
+  const contextOf = (id: string) => {
+    if (contexts.has(id)) return contexts.get(id) ?? null;
+    const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const m = new RegExp(`<(?:[a-z]+:)?context\\b[^>]*\\bid="${escaped}"[^>]*>([\\s\\S]*?)</(?:[a-z]+:)?context>`, "i").exec(html);
+    const instant = m ? /<(?:[a-z]+:)?instant>\s*(\d{4}-\d{2}-\d{2})\s*</i.exec(m[1]) : null;
+    const value = m && instant
+      ? {
+          date: instant[1],
+          members: [...m[1].matchAll(/<(?:[a-z]+:)?explicitMember\b[^>]*\bdimension="([^"]+)"[^>]*>\s*([^<\s]+)\s*</gi)].map((x) => ({ dimension: x[1], member: x[2] })),
+        }
+      : null;
+    contexts.set(id, value);
+    return value;
+  };
+  const seen = new Set<string>();
+  for (const m of html.matchAll(COVER_FACT_RE)) {
+    const attrs = m[1];
+    const contextRef = attr(attrs, "contextRef");
+    if (!contextRef) continue;
+    const ctx = contextOf(contextRef);
+    if (!ctx) {
+      unresolved += 1;
+      continue;
+    }
+    if (seen.has(contextRef)) continue;
+    seen.add(contextRef);
+    const text = m[2].replace(/<[^>]*>/g, "").trim();
+    const format = attr(attrs, "format") ?? "";
+    let value: number;
+    if (/zero|dash/i.test(format) || /^[-\u2013\u2014]$/.test(text)) {
+      value = 0;
+    } else {
+      const digits = /comma-?decimal|numcommadecimal/i.test(format) ? text.replace(/[.\s\u00a0]/g, "").replace(/,\d*$/, "") : text.replace(/[,\s\u00a0]/g, "").replace(/\.\d*$/, "");
+      if (!/^\d+$/.test(digits)) {
+        unparsed += 1;
+        continue;
+      }
+      value = Number(digits) * 10 ** Number(attr(attrs, "scale") ?? 0);
+    }
+    facts.push({ value, date: ctx.date, members: ctx.members, context: contextRef });
+  }
+  // A class whose context or value was not read would make any sum partial.
+  if (unresolved > 0) return { status: "CONTEXT_NOT_READ", value: null };
+  if (unparsed > 0) return { status: "VALUE_NOT_PARSED", value: null };
+  if (facts.length === 0) return { status: "NOT_TAGGED", value: null };
+  const date = facts.reduce((d, f) => (f.date > d ? f.date : d), "");
+  const atDate = facts.filter((f) => f.date === date);
+  const plain = atDate.find((f) => f.members.length === 0);
+  if (plain) return { status: "OK", value: plain.value, asOf: date, basis: "COVER_PAGE", classes: [] };
+  if (atDate.some((f) => f.members.length !== 1 || !CLASS_AXIS_RE.test(f.members[0].dimension))) {
+    return { status: "OTHER_DIMENSIONS", value: null, asOf: date, dimensions: [...new Set(atDate.flatMap((f) => f.members.map((x) => x.dimension)))].sort() };
+  }
+  const classes = atDate
+    .map((f) => ({ class: memberName(f.members[0].member), member: f.members[0].member, shares: f.value }))
+    .sort((a, b) => cmp(a.member, b.member));
+  return { status: "OK", value: classes.reduce((sum, c) => sum + c.shares, 0), asOf: date, basis: "COVER_PAGE_CLASS_SUM", classes };
 }
 
 function balancesAt(tax: Rec | null, map: TaxonomyMap, currency: string, asOf: string): Rec {
@@ -289,20 +450,25 @@ function daFor(tax: Rec | null, map: TaxonomyMap, currency: string, asOf: string
   return { LFY: pick("LFY"), LTM: pick("LTM") };
 }
 
-/** Market value, balances, denominators and multiples as they stood on one date. */
 /**
- * Staleness limits in days. Annual-only (20-F/40-F) filers publish balances and
- * share counts once a year, about four months after year end, so a quarterly
- * filer's 200-day balance limit would leave their EV null for most of each year.
+ * Staleness limits in days, by the cadence of the periodic facts SEC companyfacts holds as of a date:
+ * annual-only when the latest annual report filed by then is a 20-F or 40-F (those filers tag annual periods
+ * only; their interim 6-K, IR or exchange disclosures are not in companyfacts). Balances and share counts then
+ * arrive once a year, about four months after year end, so a quarterly filer's 200-day balance limit would
+ * leave their EV null for most of each year. This is not the issuer's disclosure cadence.
  */
-export function stalenessLimits(companyfacts: unknown): { cadence: string; shareCountDays: number; balancesDays: number; resultsDays: number } {
-  return foreignFiler(companyfacts)
+export function stalenessLimits(companyfacts: unknown, asOf = "9999-12-31"): { cadence: string; shareCountDays: number; balancesDays: number; resultsDays: number } {
+  return foreignFiler(companyfacts, asOf)
     ? { cadence: "ANNUAL", shareCountDays: 500, balancesDays: 500, resultsDays: 500 }
     : { cadence: "QUARTERLY", shareCountDays: 400, balancesDays: 200, resultsDays: 500 };
 }
 
+const MULTIPLE_NAMES = ["evToRevenue", "evToEbitda", "priceToEarnings", "priceToSales"];
+
+/** Market value, balances, denominators and multiples as they stood on one date. */
 export function valuationAtDate(input: ValuationHistoryInput, date: string, taxonomy: string, currency: string): Rec {
-  const limits = stalenessLimits(input.companyfacts);
+  const limits = stalenessLimits(input.companyfacts, date);
+  const cadence = { secCompanyfactsCadence: limits.cadence, stalenessLimitsDays: { shareCount: limits.shareCountDays, balances: limits.balancesDays, results: limits.resultsDays } };
   const facts = ((input.companyfacts ?? {}) as Rec).facts as Rec;
   const tax = (facts[taxonomy] ?? null) as Rec | null;
   const dei = (facts.dei ?? null) as Rec | null;
@@ -310,7 +476,7 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
   const warnings: Rec[] = [];
 
   const bar = rateAt(input.bars, date);
-  if (!bar) return { date, status: "PRICE_UNAVAILABLE", warnings: [{ code: "PRICE_UNAVAILABLE", message: `No close within 7 days on or before ${date}.`, severity: "warning" }] };
+  if (!bar) return { date, status: "PRICE_UNAVAILABLE", coreStatus: "PRICE_UNAVAILABLE", ...cadence, warnings: [{ code: "PRICE_UNAVAILABLE", message: `No close within 7 days on or before ${date}.`, severity: "warning" }] };
   // Yahoo's closes are adjusted for every later split; undo that so the price matches the share count reported then.
   const laterSplits = input.splits.filter((s) => s.date > bar.date && s.ratio > 0);
   const splitFactor = laterSplits.reduce((f, s) => f * s.ratio, 1);
@@ -318,13 +484,19 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
   const priceCurrency = major.currency;
   const price = { tradingDate: bar.date, closeAsAdjusted: bar.close, laterSplitFactor: splitFactor, close: round(major.price, 4), currency: priceCurrency, laterSplits };
 
-  const shares = sharesAt(dei, tax, map, date);
+  const shares = sharesAt(dei, tax, map, date, input.coverCounts ?? null, input.periodicFilings ?? null);
   let marketCap: Rec;
   if (!shares) {
     marketCap = { status: "SHARES_NOT_AVAILABLE", value: null };
+  } else if (shares.basis === "WEIGHTED_AVERAGE_BASIC") {
+    // An average over a period, possibly of one class: not a count of the shares outstanding on the date.
+    marketCap = { status: "POINT_IN_TIME_SHARES_UNRESOLVED", value: null };
+    const coverStatus = String(((shares.coverPageRead ?? {}) as Rec).status ?? "NOT_READ");
+    warnings.push({ code: "POINT_IN_TIME_SHARES_UNRESOLVED", message: `No undimensioned cover-page or balance-sheet share count is in companyfacts and the filing's cover page gave no usable count (${coverStatus}); the weighted-average basic count ${shares.value} (period ending ${shares.asOf}) is shown but not used, so market cap and enterprise value are null.`, severity: "warning" });
   } else {
-    if (shares.basis === "WEIGHTED_AVERAGE_BASIC") {
-      warnings.push({ code: "SHARE_COUNT_WEIGHTED_AVERAGE", message: "No undimensioned cover-page or balance-sheet share count is in companyfacts (companies with several share classes tag them per class), so the latest weighted-average basic count is used; it may cover only the listed class.", severity: "warning" });
+    if (shares.basis === "COVER_PAGE_CLASS_SUM") {
+      const classes = (shares.classes ?? []) as Rec[];
+      warnings.push({ code: "SHARE_CLASSES_SUMMED", message: `The cover page of ${shares.form} ${shares.accessionNumber} counts ${classes.length} share classes as of ${shares.asOf} (${classes.map((c) => `${c.class}: ${c.shares}`).join(", ")}); market cap values every class at the quoted class's close.`, severity: "info" });
     }
     const shareCountStale = days(String(shares.asOf), date) > limits.shareCountDays;
     if (shareCountStale) {
@@ -411,10 +583,22 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
       priceToSales: withFreshness(multiple(mcap, revenue[basis], fxRate, "marketCap", basis, "revenue"), revenue[basis]),
     };
   }
-  const allOk = marketCap.status === "OK" && enterpriseValue.status === "OK";
+  const coreStatus = marketCap.status === "OK" && enterpriseValue.status === "OK" ? "OK" : "PARTIAL";
+  const unavailable: Rec[] = [];
+  for (const basis of ["LTM", "LFY"]) {
+    for (const name of MULTIPLE_NAMES) {
+      const m = (multiples[basis] as Rec)[name] as Rec;
+      if (m.status !== "OK") unavailable.push({ basis, multiple: name, status: m.status });
+    }
+  }
+  const requested = 2 * MULTIPLE_NAMES.length;
   return {
     date,
-    status: allOk ? "OK" : "PARTIAL",
+    // OK only when market cap, enterprise value and all eight multiples are usable; coreStatus covers the first two.
+    status: coreStatus === "OK" && unavailable.length === 0 ? "OK" : "PARTIAL",
+    coreStatus,
+    coverage: { multiplesRequested: requested, multiplesAvailable: requested - unavailable.length, unavailable },
+    ...cadence,
     price,
     shares,
     marketCap,
@@ -427,12 +611,15 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
   };
 }
 
-/** Whether the latest annual report is a 20-F or 40-F: a foreign private issuer, whose quote may be for ADSs. */
-export function foreignFiler(companyfacts: unknown): boolean {
+/**
+ * Whether the latest annual report filed by asOf is a 20-F or 40-F: a foreign private issuer, whose quote may
+ * be for ADSs. Judged per date, so a filer that changed regime keeps its earlier cadence at earlier dates.
+ */
+export function foreignFiler(companyfacts: unknown, asOf = "9999-12-31"): boolean {
   const { taxonomy, currency } = taxonomyOf(companyfacts);
   if (!taxonomy || !currency) return false;
   const tax = ((((companyfacts ?? {}) as Rec).facts as Rec)[taxonomy] ?? null) as Rec | null;
-  const annual = factsFor(tax, (taxonomy === "ifrs-full" ? IFRS : US_GAAP).revenue, currency, "9999-12-31").filter(isAnnual).sort((a, b) => cmp(a.end, b.end));
+  const annual = factsFor(tax, (taxonomy === "ifrs-full" ? IFRS : US_GAAP).revenue, currency, asOf).filter(isAnnual).sort((a, b) => cmp(a.end, b.end) || cmp(a.filed, b.filed));
   return annual.length > 0 && /^(?:20|40)-F/.test(annual[annual.length - 1].form);
 }
 
@@ -483,25 +670,31 @@ export function historicalValuation(input: ValuationHistoryInput): Rec {
     return { ...base, status: "FUNDAMENTALS_NOT_AVAILABLE", points: [], notes: ["No us-gaap or ifrs-full revenue facts are in companyfacts."], ...AUTHORITY_BOUNDARY };
   }
   const points = input.dates.map((d) => valuationAtDate(input, d, taxonomy, currency));
-  const limits = stalenessLimits(input.companyfacts);
+  const cadences = [...new Set(points.map((p) => String(p.secCompanyfactsCadence)))].sort();
+  const limitsByCadence: Rec = {};
+  for (const p of points) limitsByCadence[String(p.secCompanyfactsCadence)] = p.stalenessLimitsDays;
   return {
     ...base,
-    reportingCadence: limits.cadence,
-    stalenessLimitsDays: { shareCount: limits.shareCountDays, balances: limits.balancesDays, results: limits.resultsDays },
+    secCompanyfactsCadence: cadences.length === 1 ? cadences[0] : "MIXED",
+    stalenessLimitsDays: limitsByCadence,
     status: points.every((p) => p.status === "OK") ? "OK" : "PARTIAL",
+    coreStatus: points.every((p) => p.coreStatus === "OK") ? "OK" : "PARTIAL",
     points,
     notes: [
       "Each date uses only SEC facts filed on or before it; the price is that day's close (or the last within 7 days) with later split adjustments undone.",
+      "Shares are a point-in-time count: the undimensioned cover-page or balance-sheet count, else the per-class cover-page counts of the latest periodic filing summed. A weighted-average count is shown but never sets market cap.",
       "LTM = last fiscal year + current year-to-date - prior year-to-date, from the filings named in components; LFY is the last reported fiscal year.",
       "EBITDA is computed as operating income plus depreciation and amortization; it is not a reported figure.",
       "Balances are read at the latest cash balance date filed by the date; a concept not tagged at that date is not carried forward.",
       "Multiples with a missing or non-positive denominator are null with a status; none is selected or weighted.",
+      "status is OK only when market cap, enterprise value and all eight multiples are usable; coreStatus covers market cap and enterprise value, and coverage lists each unavailable multiple.",
+      "secCompanyfactsCadence is the cadence of the periodic facts SEC companyfacts holds as of each date (ANNUAL for 20-F/40-F filers), not the issuer's disclosure cadence; interim 6-K, IR and exchange disclosures are outside this engine.",
     ],
     ...AUTHORITY_BOUNDARY,
   };
 }
 
-const MULTIPLE_KEYS = ["evToRevenue", "evToEbitda", "priceToEarnings", "priceToSales"];
+const MULTIPLE_KEYS = MULTIPLE_NAMES;
 
 function median(values: number[]): number | null {
   if (values.length === 0) return null;

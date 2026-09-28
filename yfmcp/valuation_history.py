@@ -23,6 +23,7 @@ import datetime as _dt
 import re
 from typing import Any
 
+from yfmcp.capital_structure import _js_number as _js_num
 from yfmcp.capital_structure import round_half_up as _round
 from yfmcp.evidence import AUTHORITY_BOUNDARY
 from yfmcp.sec_facts import REVENUE_CONCEPTS
@@ -179,17 +180,178 @@ def _latest(facts: list[dict]) -> dict | None:
     return ordered[-1]
 
 
-def _shares_at(dei: dict | None, tax: dict | None, mapping: dict, as_of: str) -> dict | None:
+def _share_facts_at(dei: dict | None, tax: dict | None, mapping: dict, as_of: str) -> tuple[dict | None, dict | None]:
+    """The undimensioned point-in-time count (cover page, else balance sheet) and the latest weighted-average basic count filed by as_of."""
     cover = _latest([f for f in _facts_for(dei, ["EntityCommonStockSharesOutstanding"], "shares", as_of) if f["start"] is None])
-    if cover:
-        return {"value": cover["val"], "asOf": cover["end"], "basis": "COVER_PAGE", **_component(cover)}
-    balance = _latest([f for f in _facts_for(tax, mapping["sharesInstant"], "shares", as_of) if f["start"] is None])
-    if balance:
-        return {"value": balance["val"], "asOf": balance["end"], "basis": "BALANCE_SHEET", **_component(balance)}
+    balance = None if cover else _latest([f for f in _facts_for(tax, mapping["sharesInstant"], "shares", as_of) if f["start"] is None])
     weighted = _latest([f for f in _facts_for(tax, mapping["sharesWeighted"], "shares", as_of) if f["start"] is not None])
+    if cover:
+        point_in_time: dict | None = {"value": cover["val"], "asOf": cover["end"], "basis": "COVER_PAGE", **_component(cover)}
+    elif balance:
+        point_in_time = {"value": balance["val"], "asOf": balance["end"], "basis": "BALANCE_SHEET", **_component(balance)}
+    else:
+        point_in_time = None
+    return point_in_time, weighted
+
+
+def _latest_filing(filings: list[dict] | None, as_of: str) -> dict | None:
+    """The periodic report filed most recently on or before as_of."""
+    best = None
+    for f in filings or []:
+        if f["filed"] <= as_of and (best is None or (f["filed"], f["accessionNumber"]) > (best["filed"], best["accessionNumber"])):
+            best = f
+    return best
+
+
+def _shares_at(dei: dict | None, tax: dict | None, mapping: dict, as_of: str, cover_counts: dict | None = None,
+               filings: list[dict] | None = None) -> dict | None:
+    """The share count at as_of.
+
+    An undimensioned cover-page or balance-sheet count comes from companyfacts; when there is none, or the
+    latest periodic report filed by as_of has a newer cover page, that report's per-class cover counts are
+    summed. A weighted-average count is returned only as context: it is an average over a period, may cover
+    one class, and never sets a point-in-time market value.
+    """
+    point_in_time, weighted = _share_facts_at(dei, tax, mapping, as_of)
+    filing = _latest_filing(filings, as_of)
+    read = (cover_counts or {}).get(filing["accessionNumber"]) if filing else None
+    if filing and read and read.get("status") == "OK" and (not point_in_time or str(read["asOf"]) > str(point_in_time["asOf"])):
+        return {
+            "value": read["value"],
+            "asOf": read["asOf"],
+            "basis": read["basis"],
+            "classes": read.get("classes"),
+            "form": filing["form"],
+            "filed": filing["filed"],
+            "accessionNumber": filing["accessionNumber"],
+            "documentUrl": read.get("documentUrl"),
+        }
+    if point_in_time:
+        return point_in_time
     if weighted:
-        return {"value": weighted["val"], "asOf": weighted["end"], "basis": "WEIGHTED_AVERAGE_BASIC", **_component(weighted)}
+        if read:
+            cover_read = {"status": read["status"], "accessionNumber": filing["accessionNumber"] if filing else None, "documentUrl": read.get("documentUrl")}
+        else:
+            cover_read = {"status": "NOT_READ" if filing else "NO_PERIODIC_FILING", "accessionNumber": filing["accessionNumber"] if filing else None}
+        return {
+            "value": weighted["val"],
+            "asOf": weighted["end"],
+            "basis": "WEIGHTED_AVERAGE_BASIC",
+            "pointInTime": False,
+            "coverPageRead": cover_read,
+            **_component(weighted),
+        }
     return None
+
+
+def cover_reads_needed(companyfacts: Any, filings: list[dict] | None, dates: list[str]) -> list[dict]:
+    """The periodic reports whose cover pages are needed.
+
+    At each date, the latest report filed by then when companyfacts has no undimensioned count as new as that
+    report's period.
+    """
+    taxonomy, _ = taxonomy_of(companyfacts)
+    if not taxonomy:
+        return []
+    facts = (companyfacts or {}).get("facts") or {}
+    mapping = IFRS if taxonomy == "ifrs-full" else US_GAAP
+    out: dict[str, dict] = {}
+    for date in dates:
+        filing = _latest_filing(filings, date)
+        if not filing:
+            continue
+        point_in_time, _ = _share_facts_at(facts.get("dei"), facts.get(taxonomy), mapping, date)
+        if point_in_time and str(point_in_time["asOf"]) >= (filing.get("reportDate") or filing["filed"]):
+            continue
+        out[filing["accessionNumber"]] = filing
+    return sorted(out.values(), key=lambda r: (r["filed"], r["accessionNumber"]))
+
+
+_COVER_FACT_RE = re.compile(r'<ix:nonfraction\b([^>]*\bname="dei:EntityCommonStockSharesOutstanding"[^>]*)>([\s\S]*?)</ix:nonfraction>', re.I)
+_CLASS_AXIS_RE = re.compile(r"ClassOfStockAxis$")
+
+
+def _attr(attrs: str, name: str) -> str | None:
+    m = re.search(rf'\b{name}="([^"]*)"', attrs, re.I)
+    return m.group(1) if m else None
+
+
+def _member_name(member: str) -> str:
+    """"us-gaap:CommonClassAMember" -> "Common Class A"."""
+    out = re.sub(r"Member$", "", re.sub(r"^[^:]*:", "", member))
+    out = re.sub(r"([a-z])([A-Z])", r"\1 \2", out)
+    return re.sub(r"([A-Z])([A-Z][a-z])", r"\1 \2", out)
+
+
+def cover_share_counts(html: str) -> dict:
+    """dei:EntityCommonStockSharesOutstanding from a periodic filing's inline XBRL (its cover page and header contexts).
+
+    At the latest cover date: the undimensioned count, else the sum of the per-class counts. Counts carrying
+    any dimension other than the class-of-stock axis are not summed.
+    """
+    facts: list[dict] = []
+    unresolved = 0
+    unparsed = 0
+    contexts: dict[str, dict | None] = {}
+
+    def context_of(cid: str) -> dict | None:
+        if cid in contexts:
+            return contexts[cid]
+        m = re.search(rf'<(?:[a-z]+:)?context\b[^>]*\bid="{re.escape(cid)}"[^>]*>([\s\S]*?)</(?:[a-z]+:)?context>', html, re.I)
+        instant = re.search(r"<(?:[a-z]+:)?instant>\s*(\d{4}-\d{2}-\d{2})\s*<", m.group(1), re.I) if m else None
+        value = {
+            "date": instant.group(1),
+            "members": [{"dimension": x.group(1), "member": x.group(2)}
+                        for x in re.finditer(r'<(?:[a-z]+:)?explicitMember\b[^>]*\bdimension="([^"]+)"[^>]*>\s*([^<\s]+)\s*<', m.group(1), re.I)],
+        } if m and instant else None
+        contexts[cid] = value
+        return value
+
+    seen: set[str] = set()
+    for m in _COVER_FACT_RE.finditer(html):
+        attrs = m.group(1)
+        context_ref = _attr(attrs, "contextRef")
+        if not context_ref:
+            continue
+        ctx = context_of(context_ref)
+        if not ctx:
+            unresolved += 1
+            continue
+        if context_ref in seen:
+            continue
+        seen.add(context_ref)
+        text = re.sub(r"<[^>]*>", "", m.group(2)).strip()
+        fmt = _attr(attrs, "format") or ""
+        if re.search(r"zero|dash", fmt, re.I) or re.fullmatch(r"[-\u2013\u2014]", text):
+            value: float = 0
+        else:
+            if re.search(r"comma-?decimal|numcommadecimal", fmt, re.I):
+                digits = re.sub(r",\d*$", "", re.sub(r"[.\s\u00a0]", "", text))
+            else:
+                digits = re.sub(r"\.\d*$", "", re.sub(r"[,\s\u00a0]", "", text))
+            if not re.fullmatch(r"\d+", digits):
+                unparsed += 1
+                continue
+            value = int(digits) * 10 ** int(_attr(attrs, "scale") or 0)
+        facts.append({"value": value, "date": ctx["date"], "members": ctx["members"], "context": context_ref})
+    # A class whose context or value was not read would make any sum partial.
+    if unresolved > 0:
+        return {"status": "CONTEXT_NOT_READ", "value": None}
+    if unparsed > 0:
+        return {"status": "VALUE_NOT_PARSED", "value": None}
+    if not facts:
+        return {"status": "NOT_TAGGED", "value": None}
+    date = max(f["date"] for f in facts)
+    at_date = [f for f in facts if f["date"] == date]
+    plain = next((f for f in at_date if not f["members"]), None)
+    if plain:
+        return {"status": "OK", "value": plain["value"], "asOf": date, "basis": "COVER_PAGE", "classes": []}
+    if any(len(f["members"]) != 1 or not _CLASS_AXIS_RE.search(f["members"][0]["dimension"]) for f in at_date):
+        return {"status": "OTHER_DIMENSIONS", "value": None, "asOf": date,
+                "dimensions": sorted({x["dimension"] for f in at_date for x in f["members"]})}
+    classes = sorted(({"class": _member_name(f["members"][0]["member"]), "member": f["members"][0]["member"], "shares": f["value"]} for f in at_date),
+                     key=lambda c: c["member"])
+    return {"status": "OK", "value": sum(c["shares"] for c in classes), "asOf": date, "basis": "COVER_PAGE_CLASS_SUM", "classes": classes}
 
 
 def _balances_at(tax: dict | None, mapping: dict, currency: str, as_of: str) -> dict:
@@ -308,21 +470,27 @@ def _da_for(tax: dict | None, mapping: dict, currency: str, as_of: str, oi: dict
     return {"LFY": pick("LFY"), "LTM": pick("LTM")}
 
 
-def staleness_limits(companyfacts: Any) -> dict:
-    """Staleness limits in days.
+def staleness_limits(companyfacts: Any, as_of: str = "9999-12-31") -> dict:
+    """Staleness limits in days, by the cadence of the periodic facts SEC companyfacts holds as of a date.
 
-    Annual-only (20-F/40-F) filers publish balances and share counts once a
-    year, about four months after year end, so a quarterly filer's 200-day
-    balance limit would leave their EV null for most of each year.
+    Annual-only when the latest annual report filed by then is a 20-F or 40-F (those filers tag annual periods
+    only; their interim 6-K, IR or exchange disclosures are not in companyfacts). Balances and share counts then
+    arrive once a year, about four months after year end, so a quarterly filer's 200-day balance limit would
+    leave their EV null for most of each year. This is not the issuer's disclosure cadence.
     """
-    if foreign_filer(companyfacts):
+    if foreign_filer(companyfacts, as_of):
         return {"cadence": "ANNUAL", "shareCountDays": 500, "balancesDays": 500, "resultsDays": 500}
     return {"cadence": "QUARTERLY", "shareCountDays": 400, "balancesDays": 200, "resultsDays": 500}
 
 
+_MULTIPLE_NAMES = ["evToRevenue", "evToEbitda", "priceToEarnings", "priceToSales"]
+
+
 def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dict:
     """Market value, balances, denominators and multiples as they stood on one date."""
-    limits = staleness_limits(inp["companyfacts"])
+    limits = staleness_limits(inp["companyfacts"], date)
+    cadence = {"secCompanyfactsCadence": limits["cadence"],
+               "stalenessLimitsDays": {"shareCount": limits["shareCountDays"], "balances": limits["balancesDays"], "results": limits["resultsDays"]}}
     facts = inp["companyfacts"]["facts"]
     tax = facts.get(taxonomy)
     dei = facts.get("dei")
@@ -331,7 +499,7 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
 
     bar = rate_at(inp["bars"], date)
     if bar is None:
-        return {"date": date, "status": "PRICE_UNAVAILABLE",
+        return {"date": date, "status": "PRICE_UNAVAILABLE", "coreStatus": "PRICE_UNAVAILABLE", **cadence,
                 "warnings": [{"code": "PRICE_UNAVAILABLE", "message": f"No close within 7 days on or before {date}.", "severity": "warning"}]}
     # Yahoo's closes are adjusted for every later split; undo that so the price matches the share count reported then.
     later_splits = [s for s in inp["splits"] if s["date"] > bar["date"] and s["ratio"] > 0]
@@ -342,14 +510,24 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
     price = {"tradingDate": bar["date"], "closeAsAdjusted": bar["close"], "laterSplitFactor": split_factor, "close": _round(major_price, 4),
              "currency": price_currency, "laterSplits": later_splits}
 
-    shares = _shares_at(dei, tax, mapping, date)
+    shares = _shares_at(dei, tax, mapping, date, inp.get("coverCounts"), inp.get("periodicFilings"))
     if shares is None:
         market_cap: dict = {"status": "SHARES_NOT_AVAILABLE", "value": None}
+    elif shares["basis"] == "WEIGHTED_AVERAGE_BASIC":
+        # An average over a period, possibly of one class: not a count of the shares outstanding on the date.
+        market_cap = {"status": "POINT_IN_TIME_SHARES_UNRESOLVED", "value": None}
+        cover_status = str((shares.get("coverPageRead") or {}).get("status") or "NOT_READ")
+        warnings.append({"code": "POINT_IN_TIME_SHARES_UNRESOLVED", "message": (
+            f"No undimensioned cover-page or balance-sheet share count is in companyfacts and the filing's cover page gave no usable count "
+            f"({cover_status}); the weighted-average basic count {_js_num(shares['value'])} (period ending {shares['asOf']}) is shown but not used, "
+            "so market cap and enterprise value are null."), "severity": "warning"})
     else:
-        if shares["basis"] == "WEIGHTED_AVERAGE_BASIC":
-            warnings.append({"code": "SHARE_COUNT_WEIGHTED_AVERAGE", "message": (
-                "No undimensioned cover-page or balance-sheet share count is in companyfacts (companies with several share classes tag them "
-                "per class), so the latest weighted-average basic count is used; it may cover only the listed class."), "severity": "warning"})
+        if shares["basis"] == "COVER_PAGE_CLASS_SUM":
+            classes = shares.get("classes") or []
+            listed = ", ".join(f"{c['class']}: {_js_num(c['shares'])}" for c in classes)
+            warnings.append({"code": "SHARE_CLASSES_SUMMED", "message": (
+                f"The cover page of {shares['form']} {shares['accessionNumber']} counts {len(classes)} share classes as of {shares['asOf']} ({listed}); "
+                "market cap values every class at the quoted class's close."), "severity": "info"})
         share_count_stale = days(str(shares["asOf"]), date) > limits["shareCountDays"]
         if share_count_stale:
             warnings.append({"code": "SHARE_COUNT_STALE", "message": f"The latest share count filed by {date} is as of {shares['asOf']}.", "severity": "warning"})
@@ -440,10 +618,17 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
             "priceToEarnings": with_freshness(_multiple(mcap, ni[basis], fx_rate, "marketCap", basis, "netIncome"), ni[basis]),
             "priceToSales": with_freshness(_multiple(mcap, revenue[basis], fx_rate, "marketCap", basis, "revenue"), revenue[basis]),
         }
-    all_ok = market_cap["status"] == "OK" and enterprise_value["status"] == "OK"
+    core_status = "OK" if market_cap["status"] == "OK" and enterprise_value["status"] == "OK" else "PARTIAL"
+    unavailable = [{"basis": basis, "multiple": name, "status": multiples[basis][name]["status"]}
+                   for basis in ("LTM", "LFY") for name in _MULTIPLE_NAMES if multiples[basis][name]["status"] != "OK"]
+    requested = 2 * len(_MULTIPLE_NAMES)
     return {
         "date": date,
-        "status": "OK" if all_ok else "PARTIAL",
+        # OK only when market cap, enterprise value and all eight multiples are usable; coreStatus covers the first two.
+        "status": "OK" if core_status == "OK" and not unavailable else "PARTIAL",
+        "coreStatus": core_status,
+        "coverage": {"multiplesRequested": requested, "multiplesAvailable": requested - len(unavailable), "unavailable": unavailable},
+        **cadence,
         "price": price,
         "shares": shares,
         "marketCap": market_cap,
@@ -456,14 +641,17 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
     }
 
 
-def foreign_filer(companyfacts: Any) -> bool:
-    """Whether the latest annual report is a 20-F or 40-F: a foreign private issuer, whose quote may be for ADSs."""
+def foreign_filer(companyfacts: Any, as_of: str = "9999-12-31") -> bool:
+    """Whether the latest annual report filed by as_of is a 20-F or 40-F: a foreign private issuer, whose quote may be for ADSs.
+
+    Judged per date, so a filer that changed regime keeps its earlier cadence at earlier dates.
+    """
     taxonomy, currency = taxonomy_of(companyfacts)
     if not taxonomy or not currency:
         return False
     tax = companyfacts["facts"].get(taxonomy)
     mapping = IFRS if taxonomy == "ifrs-full" else US_GAAP
-    annual = sorted([f for f in _facts_for(tax, mapping["revenue"], currency, "9999-12-31") if _is_annual(f)], key=lambda f: f["end"])
+    annual = sorted([f for f in _facts_for(tax, mapping["revenue"], currency, as_of) if _is_annual(f)], key=lambda f: (f["end"], f["filed"]))
     return bool(annual) and re.match(r"(?:20|40)-F", annual[-1]["form"]) is not None
 
 
@@ -520,25 +708,30 @@ def historical_valuation(inp: dict) -> dict:
         return {**base, "status": "FUNDAMENTALS_NOT_AVAILABLE", "points": [], "notes": ["No us-gaap or ifrs-full revenue facts are in companyfacts."],
                 **AUTHORITY_BOUNDARY}
     points = [valuation_at_date(inp, d, taxonomy, currency) for d in inp["dates"]]
-    limits = staleness_limits(inp["companyfacts"])
+    cadences = sorted({str(p["secCompanyfactsCadence"]) for p in points})
+    limits_by_cadence = {str(p["secCompanyfactsCadence"]): p["stalenessLimitsDays"] for p in points}
     return {
         **base,
-        "reportingCadence": limits["cadence"],
-        "stalenessLimitsDays": {"shareCount": limits["shareCountDays"], "balances": limits["balancesDays"], "results": limits["resultsDays"]},
+        "secCompanyfactsCadence": cadences[0] if len(cadences) == 1 else "MIXED",
+        "stalenessLimitsDays": limits_by_cadence,
         "status": "OK" if all(p["status"] == "OK" for p in points) else "PARTIAL",
+        "coreStatus": "OK" if all(p["coreStatus"] == "OK" for p in points) else "PARTIAL",
         "points": points,
         "notes": [
             "Each date uses only SEC facts filed on or before it; the price is that day's close (or the last within 7 days) with later split adjustments undone.",
+            "Shares are a point-in-time count: the undimensioned cover-page or balance-sheet count, else the per-class cover-page counts of the latest periodic filing summed. A weighted-average count is shown but never sets market cap.",
             "LTM = last fiscal year + current year-to-date - prior year-to-date, from the filings named in components; LFY is the last reported fiscal year.",
             "EBITDA is computed as operating income plus depreciation and amortization; it is not a reported figure.",
             "Balances are read at the latest cash balance date filed by the date; a concept not tagged at that date is not carried forward.",
             "Multiples with a missing or non-positive denominator are null with a status; none is selected or weighted.",
+            "status is OK only when market cap, enterprise value and all eight multiples are usable; coreStatus covers market cap and enterprise value, and coverage lists each unavailable multiple.",
+            "secCompanyfactsCadence is the cadence of the periodic facts SEC companyfacts holds as of each date (ANNUAL for 20-F/40-F filers), not the issuer's disclosure cadence; interim 6-K, IR and exchange disclosures are outside this engine.",
         ],
         **AUTHORITY_BOUNDARY,
     }
 
 
-_MULTIPLE_KEYS = ["evToRevenue", "evToEbitda", "priceToEarnings", "priceToSales"]
+_MULTIPLE_KEYS = _MULTIPLE_NAMES
 
 
 def _median(values: list[float]) -> float | None:
