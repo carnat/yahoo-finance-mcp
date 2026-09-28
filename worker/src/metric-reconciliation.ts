@@ -197,10 +197,17 @@ function explicitPeriodMatches(sentence: string, amountStart: number, period: Re
     // it describes the comparator rather than the current-period amount.
     if (quarterMentions.length === 0) {
       const after = sentence.slice(amountStart);
-      const firstPeriod = /\b(?:Q[1-4]|(?:first|second|third|fourth) quarter)\b/i.exec(after);
+      const firstPeriod = /\b(?:Q([1-4])|(?:first|second|third|fourth) quarter)\b/i.exec(after);
       if (firstPeriod) {
         const prefix = after.slice(0, firstPeriod.index);
-        if (!/\b(?:compared (?:with|to)|versus|vs\.?|from)\b/i.test(prefix)) return false;
+        if (!/\b(?:compared (?:with|to)|versus|vs\.?|from)\b/i.test(prefix)) {
+          const token = firstPeriod[0].toLowerCase();
+          const observedQ = firstPeriod[1] ? Number(firstPeriod[1]) : QUARTER_ORDINAL.findIndex((x) => token.startsWith(x)) + 1;
+          if (observedQ !== q) return false;
+          const nearby = after.slice(firstPeriod.index, Math.min(after.length, firstPeriod.index + 60));
+          const ym = /\b(20\d{2})\b/.exec(nearby);
+          if (ym && ym[1] !== year) return false;
+        }
       }
     }
     return true;
