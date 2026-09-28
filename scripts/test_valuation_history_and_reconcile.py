@@ -265,6 +265,9 @@ FISCAL_META = {"facts": {"us-gaap": {"Revenues": _usd(
     _fy(_f("2026-04-27", "2026-07-26", 96_221_000_000, "10-Q", "2026-08-27", "q227"), 2027, "Q2"),
 )}}}
 DG_META = {"facts": {"us-gaap": {"RevenueFromContractWithCustomerExcludingAssessedTax": _usd(
+    _fy(_f("2024-02-03", "2025-01-31", 40_612_308_000, "10-K", "2025-03-24", "dgk24"), 2024, "FY"),
+    # The next 10-K's comparative carries that filing's fy (2025); the period stays fiscal 2024.
+    _fy(_f("2024-02-03", "2025-01-31", 40_612_308_000, "10-K", "2026-03-20", "dgk"), 2025, "FY"),
     _fy(_f("2025-02-01", "2026-01-30", 42_000_000_000, "10-K", "2026-03-20", "dgk"), 2025, "FY"),
     _fy(_f("2026-05-02", "2026-07-31", 11_000_000_000, "10-Q", "2026-08-27", "dgq"), 2026, "Q2"),
 )}}}
@@ -280,6 +283,12 @@ FISCAL_META_TEXTS = [
     "Q2'27 revenue was $96.2 billion.",
     "Full-year FY2026 revenue was $215.9 billion.",
     "Third quarter 2026 revenue was $96.2 billion.",
+]
+# Explicit FY<yyyy> selects by the issuer's fiscal year where companyfacts names it.
+FY_SELECT = [
+    [DG_META, "FY2025"], [DG_META, "FY2026"], [DG_META, "FY2024"],
+    [FISCAL_META, "FY2026"], [FISCAL_META, "FY2027"],
+    [FISCAL_RECON, "FY2026"],
 ]
 DG_TEXTS = [
     ["latest_annual", "Net sales for fiscal 2025 were $42.0 billion."],
@@ -383,6 +392,7 @@ def _python_outputs() -> dict:
         "dgPeriods": [mr.resolve_period(DG_META, "revenue", s) for s in ("latest_quarter", "latest_annual")],
         "dgObs": [_read_obs(t, mr.resolve_period(DG_META, "revenue", s)) for s, t in DG_TEXTS],
         "normalized": [mr.normalize_fiscal_tokens(t) for t in FISCAL_META_TEXTS],
+        "fySelect": [mr.resolve_period(f, "revenue", spec) for f, spec in FY_SELECT],
     }
 
 
@@ -445,6 +455,7 @@ const out = {
   dgPeriods: ["latest_quarter", "latest_annual"].map((s) => mr.resolvePeriod(f.dgMeta, "revenue", s)),
   dgObs: f.dgTexts.map(([s, t]) => readObs(t, mr.resolvePeriod(f.dgMeta, "revenue", s))),
   normalized: f.fiscalMetaTexts.map((t) => mr.normalizeFiscalTokens(t)),
+  fySelect: f.fySelect.map(([facts, spec]) => mr.resolvePeriod(facts, "revenue", spec)),
 };
 console.log(JSON.stringify(out));
 """
@@ -465,7 +476,7 @@ def _worker_outputs() -> dict:
         fx.write_text(json.dumps({"hv": HV_INPUTS, "dateCases": DATE_CASES, "dates": DATES, "syn": SYN, "ifrsFacts": IFRS_FACTS, "periodSpecs": PERIOD_SPECS,
                                   "recon": RECON, "reconCases": RECON_CASES, "releaseTexts": RELEASE_TEXTS, "releases": RELEASES, "fiscalRecon": FISCAL_RECON, "fiscalTexts": FISCAL_TEXTS,
                                   "coverHtml": COVER_HTML, "multi": MULTI, "filings": FILINGS, "regime": REGIME, "fiscalMeta": FISCAL_META, "fiscalMetaTexts": FISCAL_META_TEXTS,
-                                  "dgMeta": DG_META, "dgTexts": DG_TEXTS}), encoding="utf-8")
+                                  "dgMeta": DG_META, "dgTexts": DG_TEXTS, "fySelect": FY_SELECT}), encoding="utf-8")
         harness = Path(tmp) / "harness.mjs"
         harness.write_text(_HARNESS, encoding="utf-8")
         result = subprocess.run([node, str(harness), *bundles, str(fx)], check=True, capture_output=True, text=True, timeout=120)
@@ -753,6 +764,25 @@ class TestReconciliation(unittest.TestCase):
         self.assertEqual(obs[4]["status"], "FOUND")
         # A full-year figure is still not a quarter's.
         self.assertEqual(obs[5]["status"], "NOT_FOUND_IN_TEXT")
+
+    def test_fy_selector_uses_issuer_fiscal_year(self) -> None:
+        dg25, dg26, dg24, nv26, nv27, derived = _python_outputs()["fySelect"]
+        # Dollar General's fiscal 2025 is the year ended 2026-01-30, not the one ending in calendar 2025.
+        self.assertEqual((dg25["periodStart"], dg25["periodEnd"], dg25["fiscalYears"], dg25["fiscalYearSource"]),
+                         ("2025-02-01", "2026-01-30", [2025], "SEC_FY_FP"))
+        # Fiscal 2026 is not filed yet: not found, rather than fiscal 2025 by its end year.
+        self.assertEqual((dg26["status"], dg26["fiscalYearsAvailable"]), ("PERIOD_NOT_FOUND", [2024, 2025]))
+        # The first-reported fy names the period; a later 10-K's comparative tagged fy 2025 does not.
+        self.assertEqual((dg24["periodEnd"], dg24["fiscalYears"]), ("2025-01-31", [2024]))
+        # NVDA names a year by its end: fiscal 2026 ended 2026-01-25; fiscal 2027 is not filed yet.
+        self.assertEqual((nv26["periodEnd"], nv26["fiscalYears"]), ("2026-01-25", [2026]))
+        self.assertEqual(nv27["status"], "PERIOD_NOT_FOUND")
+        # Without fy/fp the year the period ends is used, as before.
+        self.assertEqual((derived["periodEnd"], derived["fiscalYearSource"]), ("2026-01-25", "PERIOD_END_YEAR"))
+        self.assertIn("issuer's fiscal year", dg25["labelBasis"])
+        # Calendar filers are unchanged.
+        cal = _python_outputs()["periods"]["FY2025"]
+        self.assertEqual((cal["periodEnd"], cal["fiscalYears"]), ("2025-12-31", [2025]))
 
     def test_annual_filer_staleness_limits(self) -> None:
         r = vh.historical_valuation(HV_INPUTS["ifrsLate"])
