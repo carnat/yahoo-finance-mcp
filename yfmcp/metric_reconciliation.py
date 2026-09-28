@@ -381,7 +381,7 @@ def metric_reconciliation(*, ticker: str, metric: str, period: dict, companyfact
             {"source": "COMPANIES_HOUSE", "reason": "UK statutory filings; not applicable to SEC registrants and not tagged for these metrics."},
         ],
         "notes": [
-            "AGREED: at least two providers found the value and all agree within tolerance. PARTIAL: one provider found it. CONFLICT: a provider differs from the latest SEC value beyond tolerance. NOT_FOUND: none found it.",
+            "AGREED: latest SEC plus at least one independent provider found the value and all agree within tolerance. PARTIAL: SEC is absent or only one provider found it. CONFLICT: a provider differs from the latest SEC value beyond tolerance. NOT_FOUND: none found it.",
             "A difference between the SEC value as first filed and as latest filed is a restatement (restated: true), not a conflict.",
             "The tolerance is the larger of tolerancePct of the SEC value and half the last stated digit of a release figure.",
             "Release figures are read only from sentences scoped to the period (quarter or full year); unscopedCandidates counts sentences skipped for scope.",
