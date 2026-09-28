@@ -10058,7 +10058,6 @@ async def reconcile_metric_sources(ticker: str, metric: str, period: str = "late
                         key=lambda p: p["filingDate"])[:3]
     annual = resolved["periodType"] == "ANNUAL"
     instant = _mr.METRICS[metric]["kind"] == "instant"
-    _, reporting_unit, _ = _mr.metric_facts(facts, metric)
 
     async def read_releases() -> list[dict]:
         read = []
