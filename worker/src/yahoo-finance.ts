@@ -28,7 +28,7 @@ import { parseShareScenarios, shareCountScenarios } from "./share-scenarios.js";
 import { customerConcentration, EPS_AMOUNT, EPS_LABEL, guidanceRanges, PCT_AMOUNT, rankEvidence, reportedTextMetric, REVENUE_LABEL, stemWord, USD_AMOUNT, type ConcentrationFinding } from "./extraction-rules.js";
 import { adsRatio, majorPrice, marketInputsFromQuoteSummary, peerValuations, valuationSnapshot, type MarketInputs } from "./valuation.js";
 import { foreignFiler, historicalValuation, latestShareCount, peerMedians, taxonomyOf, valuationDates, type Bar, type Split } from "./valuation-history.js";
-import { DEFAULT_TOLERANCE_PCT, METRICS as RECONCILE_METRICS, metricFacts, metricReconciliation, releaseObservation, resolvePeriod } from "./metric-reconciliation.js";
+import { DEFAULT_TOLERANCE_PCT, METRICS as RECONCILE_METRICS, metricReconciliation, resolvePeriod } from "./metric-reconciliation.js";
 import { AUTHORITY_BOUNDARY } from "./evidence.js";
 import registryManifest from "./company-ir-page-registry.json";
 import newsSourceCapabilities from "./news-source-capabilities.json";
@@ -15800,7 +15800,6 @@ export async function reconcileMetricSources(ticker: string, metric: string, per
     : [];
   const annual = resolved.periodType === "ANNUAL";
   const spec = RECONCILE_METRICS[metric];
-  const reportingUnit = metricFacts(facts, metric).unit;
   const readReleases = async (): Promise<Record<string, unknown>[]> => {
     const read: Record<string, unknown>[] = [];
     for (const c of candidates) {
