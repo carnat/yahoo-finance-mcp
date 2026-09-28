@@ -175,6 +175,50 @@ const QUARTER_SCOPE_RE = /\b(?:quarter(?:ly)?|three months|Q[1-4])\b/i;
 const ANNUAL_SCOPE_RE = /\b(?:full[- ]year|fiscal (?:year )?20\d\d|years? ended|twelve months|for (?:the )?(?:fiscal )?year|annual)\b/i;
 const INSTANT_SCOPE_RE = /\b(?:as of|ended (?:the )?(?:quarter|year|period)|at (?:the )?(?:end|close) of|balance)\b/i;
 const MONEY_RE = /(\(?)\s?(-?)\s?\$\s?(\(?)(-?)([0-9][0-9,]*)(\.[0-9]+)?\)?(?:\s?(billion|million|thousand)\b)?/i;
+const QUARTER_ORDINAL = ["first", "second", "third", "fourth"];
+
+function explicitPeriodMatches(sentence: string, amountStart: number, period: Rec): boolean {
+  const beforeAmount = sentence.slice(0, amountStart);
+  if (period.periodType === "QUARTER") {
+    const end = String(period.periodEnd ?? "");
+    const month = Number(end.slice(5, 7));
+    const q = Math.ceil(month / 3);
+    const year = end.slice(0, 4);
+    const quarterMentions = [...beforeAmount.matchAll(/\b(?:Q([1-4])|(?:first|second|third|fourth) quarter)\b/gi)];
+    for (const m of quarterMentions) {
+      const token = m[0].toLowerCase();
+      const observedQ = m[1] ? Number(m[1]) : QUARTER_ORDINAL.findIndex((x) => token.startsWith(x)) + 1;
+      if (observedQ !== q) return false;
+      const nearby = beforeAmount.slice(m.index ?? 0, Math.min(beforeAmount.length, (m.index ?? 0) + 60));
+      const ym = /\b(20\d{2})\b/.exec(nearby);
+      if (ym && ym[1] !== year) return false;
+    }
+    // If the only explicit period is after the amount in a comparison clause,
+    // it describes the comparator rather than the current-period amount.
+    if (quarterMentions.length === 0) {
+      const after = sentence.slice(amountStart);
+      const firstPeriod = /\b(?:Q[1-4]|(?:first|second|third|fourth) quarter)\b/i.exec(after);
+      if (firstPeriod) {
+        const prefix = after.slice(0, firstPeriod.index);
+        if (!/\b(?:compared (?:with|to)|versus|vs\.?|from)\b/i.test(prefix)) return false;
+      }
+    }
+    return true;
+  }
+  if (period.periodType === "ANNUAL") {
+    const requestedYear = String(period.periodEnd ?? "").slice(0, 4);
+    const beforeYears = [...beforeAmount.matchAll(/\b(20\d{2})\b/g)].map((m) => m[1]);
+    if (beforeYears.some((y) => y !== requestedYear)) return false;
+    const after = sentence.slice(amountStart);
+    const laterYear = /\b(20\d{2})\b/.exec(after);
+    if (beforeYears.length === 0 && laterYear) {
+      const prefix = after.slice(0, laterYear.index);
+      if (!/\b(?:compared (?:with|to)|versus|vs\.?|from)\b/i.test(prefix) && laterYear[1] !== requestedYear) return false;
+    }
+    return true;
+  }
+  return true;
+}
 const SCALE: Record<string, number> = { billion: 1e9, million: 1e6, thousand: 1e3 };
 
 /** A release sentence's figure for the metric and period, or why none was read. */
@@ -195,9 +239,12 @@ export function releaseObservation(release: Rec | null, metric: string, period: 
     if (!m) continue;
     const quarter = QUARTER_SCOPE_RE.test(sentence);
     const annual = ANNUAL_SCOPE_RE.test(sentence);
+    const amountStart = m.index + m[0].indexOf(m[2] ?? "$");
     const scoped = spec.kind === "instant"
       ? INSTANT_SCOPE_RE.test(sentence)
-      : period.periodType === "QUARTER" ? quarter && !annual : annual && !quarter;
+      : period.periodType === "QUARTER"
+        ? quarter && !annual && explicitPeriodMatches(sentence, amountStart, period)
+        : annual && !quarter && explicitPeriodMatches(sentence, amountStart, period);
     if (!scoped) {
       unscoped += 1;
       continue;
@@ -220,7 +267,8 @@ export function releaseObservation(release: Rec | null, metric: string, period: 
  */
 export function pickReleaseObservation(observations: Rec[]): Rec {
   const considered = observations.map((o) => ({ filingDate: o.filingDate ?? null, accessionNumber: o.accessionNumber ?? null, status: o.status }));
-  const chosen = observations.find((o) => o.status === "FOUND") ?? observations[0] ?? { source: "ISSUER_RELEASE", provider: "ISSUER_RELEASE", status: "NOT_RESOLVED", value: null };
+  const found = observations.filter((o) => o.status === "FOUND");
+  const chosen = found.length > 0 ? found[found.length - 1] : observations[0] ?? { source: "ISSUER_RELEASE", provider: "ISSUER_RELEASE", status: "NOT_RESOLVED", value: null };
   return { ...chosen, releasesConsidered: considered };
 }
 
@@ -241,7 +289,7 @@ export function yahooObservation(rows: Rec[] | null, metric: string, period: Rec
 /** Each found value against the baseline, and the overall agreement. */
 export function reconcileObservations(observations: Rec[], tolerancePct: number): { comparisons: Rec[]; status: string; restated: boolean } {
   const found = observations.filter((o) => o.status === "FOUND" && typeof o.value === "number");
-  const baseline = found.find((o) => o.source === "SEC_XBRL_LATEST") ?? found[0] ?? null;
+  const baseline = found.find((o) => o.source === "SEC_XBRL_LATEST") ?? null;
   const comparisons: Rec[] = [];
   let conflict = false;
   let restated = false;
@@ -273,7 +321,11 @@ export function reconcileObservations(observations: Rec[], tolerancePct: number)
     }
   }
   const providers = new Set(found.map((o) => o.provider));
-  const status = found.length === 0 ? "NOT_FOUND" : conflict ? "CONFLICT" : providers.size >= 2 ? "AGREED" : "PARTIAL";
+  const status = found.length === 0 ? "NOT_FOUND"
+    : !baseline ? "PARTIAL"
+    : conflict ? "CONFLICT"
+    : providers.size >= 2 ? "AGREED"
+    : "PARTIAL";
   return { comparisons, status, restated };
 }
 
