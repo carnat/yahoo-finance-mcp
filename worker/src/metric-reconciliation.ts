@@ -124,12 +124,26 @@ export function resolvePeriod(companyfacts: unknown, metric: string, spec: strin
   }
   const best = [...candidates].sort((a, b) => cmp(a.end, b.end) || cmp(a.start, b.start))[candidates.length - 1];
   const kind = METRICS[metric].kind;
+  // The fiscal quarter, counted from the prior fiscal year end, and the years a release may call the fiscal year
+  // (NVDA's year ending January 2027 is "fiscal 2027"; retailers ending early February name the year it began).
+  let fiscal: Rec = {};
+  if (periodType === "QUARTER") {
+    const priorEnds = rows.filter(isAnnual).map((r) => r.end).filter((e) => e < best.end).sort();
+    const prior = priorEnds.length > 0 ? priorEnds[priorEnds.length - 1] : null;
+    if (prior) {
+      const quarter = Math.min(4, Math.max(1, Math.floor(days(prior, best.end) / 91.25 + 0.5)));
+      const priorYear = Number(prior.slice(0, 4));
+      const fiscalYears = Number(prior.slice(5, 7)) <= 3 ? [priorYear + 1, priorYear] : [priorYear + 1];
+      fiscal = { fiscalQuarter: quarter, fiscalYears, fiscalBasis: `counted from the prior fiscal year end ${prior}` };
+    }
+  }
   return {
     status: "OK",
     spec: text,
     periodType,
     periodStart: kind === "instant" ? null : best.start,
     periodEnd: best.end,
+    ...fiscal,
     labelBasis: "Q<n> is the calendar quarter of the period end; FY<yyyy> is the fiscal year ending in that year",
   };
 }
@@ -176,51 +190,60 @@ const ANNUAL_SCOPE_RE = /\b(?:full[- ]year|fiscal (?:year )?20\d\d|years? ended|
 const INSTANT_SCOPE_RE = /\b(?:as of|ended (?:the )?(?:quarter|year|period)|at (?:the )?(?:end|close) of|balance)\b/i;
 const MONEY_RE = /(\(?)\s?(-?)\s?\$\s?(\(?)(-?)([0-9][0-9,]*)(\.[0-9]+)?\)?(?:\s?(billion|million|thousand)\b)?/i;
 const QUARTER_ORDINAL = ["first", "second", "third", "fourth"];
+const FISCAL_YEAR_OF_QUARTER_RE = /\b(?:(quarter(?:ly)?)(?: of)?(?: the)? fiscal (?:year )?20\d\d|fiscal (?:year )?20\d\d(?= (?:first|second|third|fourth)[- ]quarter))\b/gi;
 
+const QUARTER_MENTION_SOURCE = "\\b(?:Q([1-4])|(first|second|third|fourth)[- ]quarter)\\b";
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const COMPARATOR_RE = /\b(?:compared (?:with|to)|versus|vs\.?|from)\b/i;
+
+/** "2026-07-26" -> "July 26, 2026". */
+function periodEndPhrase(end: string): string {
+  return `${MONTH_NAMES[Number(end.slice(5, 7)) - 1]} ${Number(end.slice(8, 10))}, ${end.slice(0, 4)}`;
+}
+
+/**
+ * Whether the quarters and years a sentence names match the period. A quarter
+ * may be named by its calendar or its fiscal number ("second quarter of fiscal
+ * 2027" is NVDA's quarter ended July 26, 2026, calendar Q3); a sentence naming
+ * the period's exact end date is scoped to it.
+ */
 function explicitPeriodMatches(sentence: string, amountStart: number, period: Rec): boolean {
+  const end = String(period.periodEnd ?? "");
+  if (end.length === 10 && sentence.includes(periodEndPhrase(end))) return true;
   const beforeAmount = sentence.slice(0, amountStart);
   if (period.periodType === "QUARTER") {
-    const end = String(period.periodEnd ?? "");
-    const month = Number(end.slice(5, 7));
-    const q = Math.ceil(month / 3);
-    const year = end.slice(0, 4);
-    const quarterMentions = [...beforeAmount.matchAll(/\b(?:Q([1-4])|(?:first|second|third|fourth) quarter)\b/gi)];
-    for (const m of quarterMentions) {
-      const token = m[0].toLowerCase();
-      const observedQ = m[1] ? Number(m[1]) : QUARTER_ORDINAL.findIndex((x) => token.startsWith(x)) + 1;
-      if (observedQ !== q) return false;
-      const nearby = beforeAmount.slice(m.index ?? 0, Math.min(beforeAmount.length, (m.index ?? 0) + 60));
+    const quarters = new Set<number>([Math.ceil(Number(end.slice(5, 7)) / 3)]);
+    if (typeof period.fiscalQuarter === "number") quarters.add(period.fiscalQuarter);
+    const years = new Set<string>([end.slice(0, 4), ...((period.fiscalYears ?? []) as unknown[]).map(String)]);
+    const quarterOf = (m: RegExpMatchArray) => (m[1] ? Number(m[1]) : QUARTER_ORDINAL.indexOf(m[2].toLowerCase()) + 1);
+    const matches = (text: string, m: RegExpMatchArray) => {
+      if (!quarters.has(quarterOf(m))) return false;
+      const nearby = text.slice(m.index ?? 0, Math.min(text.length, (m.index ?? 0) + 60));
       const ym = /\b(20\d{2})\b/.exec(nearby);
-      if (ym && ym[1] !== year) return false;
+      return !(ym && !years.has(ym[1]));
+    };
+    const quarterMentions = [...beforeAmount.matchAll(new RegExp(QUARTER_MENTION_SOURCE, "gi"))];
+    for (const m of quarterMentions) {
+      if (!matches(beforeAmount, m)) return false;
     }
     // If the only explicit period is after the amount in a comparison clause,
     // it describes the comparator rather than the current-period amount.
     if (quarterMentions.length === 0) {
       const after = sentence.slice(amountStart);
-      const firstPeriod = /\b(?:Q([1-4])|(?:first|second|third|fourth) quarter)\b/i.exec(after);
-      if (firstPeriod) {
-        const prefix = after.slice(0, firstPeriod.index);
-        if (!/\b(?:compared (?:with|to)|versus|vs\.?|from)\b/i.test(prefix)) {
-          const token = firstPeriod[0].toLowerCase();
-          const observedQ = firstPeriod[1] ? Number(firstPeriod[1]) : QUARTER_ORDINAL.findIndex((x) => token.startsWith(x)) + 1;
-          if (observedQ !== q) return false;
-          const nearby = after.slice(firstPeriod.index, Math.min(after.length, firstPeriod.index + 60));
-          const ym = /\b(20\d{2})\b/.exec(nearby);
-          if (ym && ym[1] !== year) return false;
-        }
-      }
+      const firstPeriod = new RegExp(QUARTER_MENTION_SOURCE, "i").exec(after);
+      if (firstPeriod && !COMPARATOR_RE.test(after.slice(0, firstPeriod.index)) && !matches(after, firstPeriod)) return false;
     }
     return true;
   }
   if (period.periodType === "ANNUAL") {
-    const requestedYear = String(period.periodEnd ?? "").slice(0, 4);
+    const requestedYear = end.slice(0, 4);
     const beforeYears = [...beforeAmount.matchAll(/\b(20\d{2})\b/g)].map((m) => m[1]);
     if (beforeYears.some((y) => y !== requestedYear)) return false;
     const after = sentence.slice(amountStart);
     const laterYear = /\b(20\d{2})\b/.exec(after);
     if (beforeYears.length === 0 && laterYear) {
       const prefix = after.slice(0, laterYear.index);
-      if (!/\b(?:compared (?:with|to)|versus|vs\.?|from)\b/i.test(prefix) && laterYear[1] !== requestedYear) return false;
+      if (!COMPARATOR_RE.test(prefix) && laterYear[1] !== requestedYear) return false;
     }
     return true;
   }
@@ -245,7 +268,8 @@ export function releaseObservation(release: Rec | null, metric: string, period: 
     const m = anchored.exec(sentence);
     if (!m) continue;
     const quarter = QUARTER_SCOPE_RE.test(sentence);
-    const annual = ANNUAL_SCOPE_RE.test(sentence);
+    // "second quarter of fiscal 2027" and "fiscal 2026 third quarter" name a quarter, not a year.
+    const annual = ANNUAL_SCOPE_RE.test(sentence.replace(FISCAL_YEAR_OF_QUARTER_RE, "$1"));
     const amountStart = m.index + m[0].indexOf("$");
     const scoped = spec.kind === "instant"
       ? INSTANT_SCOPE_RE.test(sentence)
@@ -297,20 +321,23 @@ export function yahooObservation(rows: Rec[] | null, metric: string, period: Rec
 export function reconcileObservations(observations: Rec[], tolerancePct: number): { comparisons: Rec[]; status: string; restated: boolean } {
   const found = observations.filter((o) => o.status === "FOUND" && typeof o.value === "number");
   const baseline = found.find((o) => o.source === "SEC_XBRL_LATEST") ?? null;
+  // Without SEC, the other sources are still compared with each other so a disagreement is visible;
+  // they can never be AGREED.
+  const reference = baseline ?? found[0] ?? null;
   const comparisons: Rec[] = [];
   let conflict = false;
   let restated = false;
-  if (baseline) {
-    const b = baseline.value as number;
+  if (reference) {
+    const b = reference.value as number;
     for (const o of found) {
-      if (o === baseline) continue;
+      if (o === reference) continue;
       const v = o.value as number;
       const difference = v - b;
-      const tolerance = Math.max((Math.abs(b) * tolerancePct) / 100, Number(o.precision ?? 0), Number(baseline.precision ?? 0));
+      const tolerance = Math.max((Math.abs(b) * tolerancePct) / 100, Number(o.precision ?? 0), Number(reference.precision ?? 0));
       const match = Math.abs(difference) <= tolerance + 1e-9 * Math.max(1, Math.abs(b));
       const row: Rec = {
         source: o.source,
-        against: baseline.source,
+        against: reference.source,
         value: v,
         baselineValue: b,
         difference: round(difference, 6),
@@ -329,8 +356,8 @@ export function reconcileObservations(observations: Rec[], tolerancePct: number)
   }
   const providers = new Set(found.map((o) => o.provider));
   const status = found.length === 0 ? "NOT_FOUND"
-    : !baseline ? "PARTIAL"
     : conflict ? "CONFLICT"
+    : !baseline ? "PARTIAL"
     : providers.size >= 2 ? "AGREED"
     : "PARTIAL";
   return { comparisons, status, restated };
@@ -375,7 +402,8 @@ export function metricReconciliation(input: ReconcileInput): Rec {
       { source: "COMPANIES_HOUSE", reason: "UK statutory filings; not applicable to SEC registrants and not tagged for these metrics." },
     ],
     notes: [
-      "AGREED: latest SEC plus at least one independent provider found the value and all agree within tolerance. PARTIAL: SEC is absent or only one provider found it. CONFLICT: a provider differs from the latest SEC value beyond tolerance. NOT_FOUND: none found it.",
+      "AGREED: latest SEC plus at least one independent provider found the value and all agree within tolerance. PARTIAL: SEC is absent or only one provider found it. CONFLICT: a provider differs from the latest SEC value (or, without SEC, from another provider) beyond tolerance. NOT_FOUND: none found it.",
+      "A release quarter may be named by its calendar or fiscal number; a sentence naming the period's exact end date is scoped to it.",
       "A difference between the SEC value as first filed and as latest filed is a restatement (restated: true), not a conflict.",
       "The tolerance is the larger of tolerancePct of the SEC value and half the last stated digit of a release figure.",
       "Release figures are read only from sentences scoped to the period (quarter or full year); unscopedCandidates counts sentences skipped for scope.",

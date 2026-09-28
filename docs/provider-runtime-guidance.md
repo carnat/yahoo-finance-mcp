@@ -685,9 +685,9 @@ consensus actions compose evidence and never fill a gap with an assumption.
     ADS (TSM: 5).
   - Multiples: EV/Revenue, EV/EBITDA, P/E (market cap / net income) and P/S
     on both bases. A missing, unfiled or non-positive figure leaves the
-    multiple null with a status. `RESULTS_STALE` warns when the latest
-    results are over 500 days old: TSM's 2026 20-F financials are not in
-    companyfacts.
+    multiple null with a status. Stale inputs fail closed (2.5.5, below):
+    TSM's 2026 20-F financials are not in companyfacts, so its 2026
+    multiples are null with `RESULTS_STALE`.
   - `peerMedians` are unweighted and count only peers with that multiple on
     that date. The Worker reads one peer at a time to bound memory.
 - `reconcile_metric_sources` (group `evidence`) takes `metric` (`revenue`,
@@ -704,7 +704,7 @@ consensus actions compose evidence and never fill a gap with an assumption.
     noncontrolling interests. A difference is a restatement (`restated:
     true`), not a conflict.
   - Issuer release: up to three Item 2.02 8-Ks filed within 100 days after
-    the period, oldest first, until one yields a figure. ASTS filed an Item
+    the period; since 2.5.5 all are read and the latest with a figure wins. ASTS filed an Item
     2.02 8-K on 2026-07-15 before its results release. A figure is read only
     from a sentence or bullet that:
     - names the metric and a dollar amount;
@@ -718,8 +718,8 @@ consensus actions compose evidence and never fill a gap with an assumption.
     percentage and tolerance. The tolerance is the larger of `tolerance_pct`
     and half the release's last stated digit ("$31.5 million" is within
     $50,000).
-  - `status`: `AGREED` (two or more providers agree), `PARTIAL` (one
-    provider), `CONFLICT` or `NOT_FOUND`. Alpha Vantage, filing tables and
+  - `status`: `AGREED` (since 2.5.5: the latest SEC value plus another
+    provider agree), `PARTIAL`, `CONFLICT` or `NOT_FOUND`. Alpha Vantage, filing tables and
     Companies House are listed in `sourcesNotCompared` with the reason.
 - Both tools carry the evidence-only authority fields. No multiple, peer or
   source is selected.
@@ -728,6 +728,58 @@ consensus actions compose evidence and never fill a gap with an assumption.
   release bullets split in both runtimes. Before this, the 2.5.3 driver
   ledger merged two ASTS bullets on the Worker.
 - A year before a word ("2026 revenue") is no longer a driver-ledger figure.
+
+## Evidence Integrity Guards (2.5.5)
+
+- Historical valuation fails closed on stale inputs instead of only warning:
+  - a share count older than the limit leaves market cap null
+    (`SHARE_COUNT_STALE`);
+  - balances older than the limit leave EV null (`BALANCES_STALE`);
+  - results older than 500 days leave the multiples they feed null
+    (`RESULTS_STALE`).
+
+  So stale peer multiples cannot enter peer medians: NVT's stale-balance EV
+  multiples no longer count in VRT's.
+- Limits follow reporting cadence (`reportingCadence`,
+  `stalenessLimitsDays`):
+  - quarterly filers: 400 days for shares, 200 for balances, 500 for
+    results;
+  - annual-only 20-F/40-F filers: 500 for each. They file balances and
+    cover counts once a year, about four months after year end, so a
+    200-day limit would leave TSM's EV null on every default date.
+- Concept order is precedence per period: a later filing updates the same
+  concept, but a lower-priority alternate concept cannot replace it.
+- `reconcile_metric_sources`:
+  - `AGREED` requires the latest SEC value plus at least one independent
+    provider that agrees.
+  - Without SEC, the other sources are still compared with each other:
+    agreement stays `PARTIAL`, and disagreement is `CONFLICT`.
+  - All release candidates (up to three) are read, and the latest one with
+    a figure wins.
+  - A quarter a sentence names must be the period's calendar or fiscal
+    quarter, in its calendar or fiscal year. The period carries
+    `fiscalQuarter` and `fiscalYears`, counted from the prior fiscal year
+    end. NVDA's quarter ended July 26, 2026 is its fiscal Q2 of fiscal 2027
+    but calendar Q3.
+  - A sentence naming the period's exact end date ("the second quarter ended
+    July 26, 2026") is scoped to it.
+  - "Second-quarter" is read like "second quarter".
+  - "Quarter of fiscal 2027" and "fiscal 2026 third quarter" are quarter
+    scope, not full year.
+  - A quarter named only in a comparison clause ("compared to Q2 2025")
+    does not decide the scope.
+- Driver ledger: a number after a sentence-initial product name ("Block 2
+  satellites", "New Glenn 3") is not a figure. A sentence-initial reporting
+  or quantity word ("Reported 5", "Approximately 5") still precedes one.
+- Not yet covered:
+  - historical changes in the ADS ratio (the current ratio is applied to
+    every date);
+  - defaulting the latest date to a completed session;
+  - release tables such as ASTS's Q2 net-income table, which are not
+    sentences;
+  - a segment bullet under a heading ("Data Center • Second-quarter revenue
+    was …"), which reads like a company total when it is the only matching
+    sentence.
 
 ## Non-US Primary Filings
 

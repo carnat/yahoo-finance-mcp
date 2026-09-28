@@ -308,8 +308,21 @@ def _da_for(tax: dict | None, mapping: dict, currency: str, as_of: str, oi: dict
     return {"LFY": pick("LFY"), "LTM": pick("LTM")}
 
 
+def staleness_limits(companyfacts: Any) -> dict:
+    """Staleness limits in days.
+
+    Annual-only (20-F/40-F) filers publish balances and share counts once a
+    year, about four months after year end, so a quarterly filer's 200-day
+    balance limit would leave their EV null for most of each year.
+    """
+    if foreign_filer(companyfacts):
+        return {"cadence": "ANNUAL", "shareCountDays": 500, "balancesDays": 500, "resultsDays": 500}
+    return {"cadence": "QUARTERLY", "shareCountDays": 400, "balancesDays": 200, "resultsDays": 500}
+
+
 def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dict:
     """Market value, balances, denominators and multiples as they stood on one date."""
+    limits = staleness_limits(inp["companyfacts"])
     facts = inp["companyfacts"]["facts"]
     tax = facts.get(taxonomy)
     dei = facts.get("dei")
@@ -337,7 +350,7 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
             warnings.append({"code": "SHARE_COUNT_WEIGHTED_AVERAGE", "message": (
                 "No undimensioned cover-page or balance-sheet share count is in companyfacts (companies with several share classes tag them "
                 "per class), so the latest weighted-average basic count is used; it may cover only the listed class."), "severity": "warning"})
-        share_count_stale = days(str(shares["asOf"]), date) > 400
+        share_count_stale = days(str(shares["asOf"]), date) > limits["shareCountDays"]
         if share_count_stale:
             warnings.append({"code": "SHARE_COUNT_STALE", "message": f"The latest share count filed by {date} is as of {shares['asOf']}.", "severity": "warning"})
         split_after_count = next((s for s in inp["splits"] if str(shares["asOf"]) < s["date"] <= bar["date"]), None)
@@ -382,7 +395,7 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
         sti = balances["shortTermInvestments"]["value"]
         sti = 0 if sti is None else sti
         debt = balances["debt"]["value"]
-        balances_stale = days(str(balances["balanceDate"]), date) > 200
+        balances_stale = days(str(balances["balanceDate"]), date) > limits["balancesDays"]
         enterprise_value = (
             {"status": "BALANCES_STALE", "value": None, "balanceDate": balances["balanceDate"], "currency": price_currency}
             if balances_stale
@@ -406,7 +419,7 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
     ni = flow_bases(_facts_for(tax, mapping["netIncome"], currency, date))
     da = _da_for(tax, mapping, currency, date, oi)
     ltm_end = str(revenue["LTM"]["periodEnd"]) if revenue["LTM"]["status"] == "OK" else None
-    if ltm_end and days(ltm_end, date) > 500:
+    if ltm_end and days(ltm_end, date) > limits["resultsDays"]:
         warnings.append({"code": "RESULTS_STALE", "message": (
             f"The latest results in SEC companyfacts filed by {date} end {ltm_end}."), "severity": "warning"})
     denominators: dict = {}
@@ -417,7 +430,7 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
         denominators[basis] = {"revenue": revenue[basis], "ebitda": e, "netIncome": ni[basis]}
         def with_freshness(m: dict, denominator: dict) -> dict:
             period_end = denominator.get("periodEnd")
-            if isinstance(period_end, str) and days(period_end, date) > 500:
+            if isinstance(period_end, str) and days(period_end, date) > limits["resultsDays"]:
                 return {**m, "value": None, "status": "RESULTS_STALE", "denominatorPeriodEnd": period_end}
             return m
 
@@ -507,8 +520,11 @@ def historical_valuation(inp: dict) -> dict:
         return {**base, "status": "FUNDAMENTALS_NOT_AVAILABLE", "points": [], "notes": ["No us-gaap or ifrs-full revenue facts are in companyfacts."],
                 **AUTHORITY_BOUNDARY}
     points = [valuation_at_date(inp, d, taxonomy, currency) for d in inp["dates"]]
+    limits = staleness_limits(inp["companyfacts"])
     return {
         **base,
+        "reportingCadence": limits["cadence"],
+        "stalenessLimitsDays": {"shareCount": limits["shareCountDays"], "balances": limits["balancesDays"], "results": limits["resultsDays"]},
         "status": "OK" if all(p["status"] == "OK" for p in points) else "PARTIAL",
         "points": points,
         "notes": [
