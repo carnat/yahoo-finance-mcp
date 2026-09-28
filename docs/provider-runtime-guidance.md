@@ -651,6 +651,84 @@ consensus actions compose evidence and never fill a gap with an assumption.
 - The range rules now also read "expectations for revenue of $X to $Y"
   (ASTS, Aug 2025), in `extract_guidance` too.
 
+## Historical Valuation Context And Metric Reconciliation (2.5.4)
+
+- `get_historical_valuation_context` (group `stock_fundamentals`) takes up to
+  12 `dates` (default: the latest close and its anniversaries over five
+  years) and up to 5 `peers`, valued on the same dates. Each date is point in
+  time:
+  - The price is the close on or before the date, within 7 days. Yahoo
+    adjusts historical closes for later splits; that adjustment is undone
+    (`laterSplitFactor`) so the price matches the share count reported then.
+    A split between the share count's date and the price date leaves market
+    cap null (`SPLIT_AFTER_SHARE_COUNT`).
+  - Shares are the cover-page count, else the balance-sheet count, else the
+    weighted-average basic count (`SHARE_COUNT_WEIGHTED_AVERAGE`), from facts
+    filed by the date. Companies with several share classes tag cover counts
+    per class, which companyfacts omits; ASTS's count is Class A only.
+  - Balances are read at the latest cash balance date filed by the date.
+    Debt is `LongTermDebt`, else current plus noncurrent, else convertible or
+    notes payable, plus short-term borrowings and commercial paper. A concept
+    last tagged at an earlier date is not carried forward (ASTS last tagged
+    `LongTermDebt` in 2023). Untagged debt leaves EV null (`DEBT_NOT_TAGGED`).
+    Untagged short-term investments are left out, with a warning.
+  - Denominators: `LFY` is the last reported fiscal year. `LTM` is LFY +
+    current year-to-date - prior year-to-date, with every component's
+    concept, period and filing. EBITDA is computed as operating income plus
+    depreciation and amortization, and is labelled as computed. D&A is taken
+    from the concept group that matches operating income's period: VRT tags
+    the total only in 10-Ks and depreciation and amortization separately in
+    10-Qs.
+  - Reporting-currency figures are converted at that date's FX close
+    (`<reporting><quote>=X`). For 20-F and 40-F filers whose SEC count is a
+    whole multiple of Yahoo's, shares are divided by the ordinary shares per
+    ADS (TSM: 5).
+  - Multiples: EV/Revenue, EV/EBITDA, P/E (market cap / net income) and P/S
+    on both bases. A missing, unfiled or non-positive figure leaves the
+    multiple null with a status. `RESULTS_STALE` warns when the latest
+    results are over 500 days old: TSM's 2026 20-F financials are not in
+    companyfacts.
+  - `peerMedians` are unweighted and count only peers with that multiple on
+    that date. The Worker reads one peer at a time to bound memory.
+- `reconcile_metric_sources` (group `evidence`) takes `metric` (`revenue`,
+  `net_income`, `operating_income`, `eps_diluted`, `cash_and_equivalents`),
+  `period` (`latest_quarter`, `latest_annual`, `FY<yyyy>`, or `Q<n> <yyyy>`
+  for the calendar quarter of the period end) and `tolerance_pct` (default
+  0.5).
+  - Periods come from the company's revenue periods. ASTS stopped tagging
+    undimensioned EPS after 2022, so its Q2 2026 EPS is SEC `NOT_FOUND`
+    rather than a 2022 quarter.
+  - SEC: the value as first filed and as most recently filed for the period,
+    from the concept filed most recently for it (the earlier-listed on a
+    tie). `otherConcepts` lists the rest: ASTS's `ProfitLoss`, which includes
+    noncontrolling interests. A difference is a restatement (`restated:
+    true`), not a conflict.
+  - Issuer release: up to three Item 2.02 8-Ks filed within 100 days after
+    the period, oldest first, until one yields a figure. ASTS filed an Item
+    2.02 8-K on 2026-07-15 before its results release. A figure is read only
+    from a sentence or bullet that:
+    - names the metric and a dollar amount;
+    - is scoped to the period (a quarter alone, a full year alone, or "as of"
+      for cash);
+    - is not guidance, backlog or awards, and not a different aggregate
+      ("cash, cash equivalents, and restricted cash").
+  - Yahoo: the quarterly or annual statement row within 7 days of the period
+    end.
+  - Each found value is compared with the latest SEC value, with difference,
+    percentage and tolerance. The tolerance is the larger of `tolerance_pct`
+    and half the release's last stated digit ("$31.5 million" is within
+    $50,000).
+  - `status`: `AGREED` (two or more providers agree), `PARTIAL` (one
+    provider), `CONFLICT` or `NOT_FOUND`. Alpha Vantage, filing tables and
+    Companies House are listed in `sourcesNotCompared` with the reason.
+- Both tools carry the evidence-only authority fields. No multiple, peer or
+  source is selected.
+- The Worker's HTML text now decodes hex entities (`&#x2022;`) and common
+  named ones (`&bull;`, `&rsquo;`), as Python's `html.unescape` does, so
+  release bullets split in both runtimes. Before this, the 2.5.3 driver
+  ledger merged two ASTS bullets on the Worker.
+- A year before a word ("2026 revenue") is no longer a driver-ledger figure.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

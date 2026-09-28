@@ -161,6 +161,12 @@ release, and where the later reported SEC actual landed.
 XBRL driver series, the filer's own tagged KPIs, and statements with figures,
 each marked as a reported actual or a target. See
 [provider runtime guidance](docs/provider-runtime-guidance.md#guidance-history-and-operating-drivers-253).
+`get_historical_valuation_context` reports market cap, enterprise value and
+EV/Revenue, EV/EBITDA, P/E and P/S as they stood at each date, from SEC facts
+filed by then, for a ticker and the peers you name. `reconcile_metric_sources`
+compares one metric for one period across SEC XBRL, the issuer's release and
+Yahoo, and reports AGREED, PARTIAL or CONFLICT with each difference. See
+[provider runtime guidance](docs/provider-runtime-guidance.md#historical-valuation-context-and-metric-reconciliation-254).
 
 Grouped domains:
 

@@ -71,6 +71,8 @@ import {
   extractFundingCapexSchedule,
   extractOperatingDriverLedger,
   getGuidanceHistory,
+  getHistoricalValuationContext,
+  reconcileMetricSources,
   getShareCountScenarios,
   extractAnalystValuationMethods,
   getUkCompanyFilings,
@@ -549,6 +551,8 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "extract_analyst_valuation_methods", description: "Valuation methods analysts name in recent news headlines and summaries: multiples with metric and period (e.g. 41x 2H27 EV/EBITDA), DCF with WACC, discount rate and terminal growth, sum-of-the-parts and rNPV, with firm, price target and source link. Lists firms whose targets carry no disclosed method. Context only: not consensus inputs.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, days_back: { type: "number", minimum: 1, maximum: 365, default: 30 } }, required: ["ticker"] } },
   { name: "get_consensus_forecast_curve", description: "Street consensus by fiscal year, FY0 to FY+horizon, for EPS and revenue from Yahoo Finance and Alpha Vantage, each provider reported separately with fiscal year end, currency, mean/high/low, analyst count and retrieval time. Each metric and period states its coverage: PROVIDER_COVERED, PROVIDER_NOT_COVERED, INSUFFICIENT_ANALYST_COUNT or PROVIDER_CONFLICT (with the cross-provider difference). Years and metrics no provider covers stay PROVIDER_NOT_COVERED; nothing is interpolated, extended by growth rates, or derived. Evidence only.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, horizon_years: { type: "integer", minimum: 1, maximum: 5, default: 5 }, min_analyst_count: { type: "integer", minimum: 1, maximum: 50, default: 3 }, conflict_tolerance_pct: { type: "number", minimum: 0, maximum: 100, default: 10 } }, required: ["ticker"] } },
   { name: "get_eps_revisions", description: "EPS estimate revision windows for FY0 and FY+1 as each provider reports them: the mean now and 7, 30, 60 and 90 days ago with change and percent change, and up/down revision counts over 7 and 30 days. Revenue revisions and analyst adds/drops are PROVIDER_NOT_COVERED. Lists the dates of stored daily consensus observations. Evidence only.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
+  { name: "get_historical_valuation_context", description: "Market cap, enterprise value and EV/Revenue, EV/EBITDA, P/E and P/S as they stood at each date, for a ticker and caller-named peers on the same dates. Point in time: SEC companyfacts filed on or before each date; the close on or before it with later split adjustments undone; balances at the latest balance date then filed; LTM (LFY + YTD - prior YTD) and LFY denominators with their periods, concepts and filings; reporting currency converted at that date's FX close; ADR share counts divided by ordinary shares per ADS. EBITDA is computed (operating income + D&A). Untagged or unfiled figures leave their multiples null with a status; peer medians are unweighted. No multiple is selected. Evidence only.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, dates: { type: "array", items: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" }, maxItems: 12, description: "Default: the latest close and its anniversaries over five years." }, peers: { type: "array", items: { type: "string" }, maxItems: 5 } }, required: ["ticker"] } },
+  { name: "reconcile_metric_sources", description: "One metric for one period as each source states it: SEC XBRL as first filed and as latest filed (a difference is a restatement), the issuer's earnings release (only sentences naming the metric, an amount and the period's scope) and Yahoo's statement row, each compared with the latest SEC value with difference, percentage and tolerance (the larger of tolerance_pct and half the release's last stated digit). Status AGREED (two or more providers agree), PARTIAL (one provider), CONFLICT or NOT_FOUND, with source evidence. Metrics: revenue, net_income, operating_income, eps_diluted, cash_and_equivalents. Evidence only.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, metric: { type: "string", enum: ["revenue", "net_income", "operating_income", "eps_diluted", "cash_and_equivalents"] }, period: { type: "string", default: "latest_quarter", description: "latest_quarter, latest_annual, FY<yyyy> or Q<n> <yyyy> (calendar quarter of the period end)" }, tolerance_pct: { type: "number", minimum: 0, maximum: 10, default: 0.5 } }, required: ["ticker", "metric"] } },
   { name: "get_evidence_quality", description: "Preflight before a valuation evidence pack: status, freshness and coverage per evidence family (quote, latest SEC periodic filing, capital structure and dilution readiness, earnings-release guidance, material 8-Ks, FY0/FY+1 consensus cells, durable storage) and the blockers, from light requests only. Evidence only.", inputSchema: { type: "object", properties: { ticker: { type: "string" } }, required: ["ticker"] } },
   { name: "build_valuation_evidence_pack", description: "One evidence cut for valuation work: quote, evidence quality, consensus curve, EPS revisions, current capital structure, dilution bridge at the current price, latest guidance and material filings, each with its source tool, status, warnings and failure, plus a provenance receipt hashing every component. decisionUse is EVIDENCE_ONLY; selectedMethod, selectedMultiple, scenarioWeights, priceTarget, g2, opportunity and action are always null. Stored immutably under a content-addressed evidenceCutId when storage is available; the full payload is returned either way.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, horizon_years: { type: "integer", minimum: 1, maximum: 5, default: 5 }, persist: { type: "boolean", default: true } }, required: ["ticker"] } },
   { name: "get_evidence_cut", description: "Retrieve a stored evidence cut by evidenceCutId and verify its integrity: the SHA-256 of the stored canonical JSON must equal the hash in the id (integrity VERIFIED or MISMATCH).", inputSchema: { type: "object", properties: { evidence_cut_id: { type: "string" } }, required: ["evidence_cut_id"] } },
@@ -1317,6 +1321,8 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
   extract_funding_capex_schedule: SIMPLE_OBJECT_SCHEMA,
   extract_operating_driver_ledger: SIMPLE_OBJECT_SCHEMA,
   get_guidance_history: SIMPLE_OBJECT_SCHEMA,
+  get_historical_valuation_context: SIMPLE_OBJECT_SCHEMA,
+  reconcile_metric_sources: SIMPLE_OBJECT_SCHEMA,
   get_consensus_forecast_curve: SIMPLE_OBJECT_SCHEMA,
   get_eps_revisions: SIMPLE_OBJECT_SCHEMA,
   get_evidence_quality: SIMPLE_OBJECT_SCHEMA,
@@ -2388,6 +2394,14 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
         Array.isArray(args.tickers) ? args.tickers.map(String) : [],
         args.subject != null ? str(args.subject) : null,
       );
+    case "get_historical_valuation_context":
+      return getHistoricalValuationContext(
+        str(args.ticker),
+        Array.isArray(args.dates) ? args.dates.map(String) : null,
+        Array.isArray(args.peers) ? args.peers.map(String) : null,
+      );
+    case "reconcile_metric_sources":
+      return reconcileMetricSources(str(args.ticker), str(args.metric), str(args.period, "latest_quarter"), num(args.tolerance_pct, 0.5));
     case "get_consensus_forecast_curve":
       return getConsensusForecastCurve(str(args.ticker), num(args.horizon_years, 5), num(args.min_analyst_count, 3), num(args.conflict_tolerance_pct, 10));
     case "get_eps_revisions":

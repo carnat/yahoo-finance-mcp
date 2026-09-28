@@ -82,6 +82,8 @@ EXPECTED_CANONICAL = {
     "extract_funding_capex_schedule",
     "extract_operating_driver_ledger",
     "get_guidance_history",
+    "get_historical_valuation_context",
+    "reconcile_metric_sources",
     "extract_capital_structure",
     "extract_analyst_valuation_methods",
     "get_uk_company_filings",

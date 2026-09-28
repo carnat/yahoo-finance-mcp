@@ -26,7 +26,10 @@ import { guidanceHistory, type ReleaseText } from "./guidance-history.js";
 import { operatingDriverLedger } from "./driver-ledger.js";
 import { parseShareScenarios, shareCountScenarios } from "./share-scenarios.js";
 import { customerConcentration, EPS_AMOUNT, EPS_LABEL, guidanceRanges, PCT_AMOUNT, rankEvidence, reportedTextMetric, REVENUE_LABEL, stemWord, USD_AMOUNT, type ConcentrationFinding } from "./extraction-rules.js";
-import { majorPrice, marketInputsFromQuoteSummary, peerValuations, valuationSnapshot, type MarketInputs } from "./valuation.js";
+import { adsRatio, majorPrice, marketInputsFromQuoteSummary, peerValuations, valuationSnapshot, type MarketInputs } from "./valuation.js";
+import { foreignFiler, historicalValuation, latestShareCount, peerMedians, taxonomyOf, valuationDates, type Bar, type Split } from "./valuation-history.js";
+import { DEFAULT_TOLERANCE_PCT, METRICS as RECONCILE_METRICS, metricFacts, metricReconciliation, releaseObservation, resolvePeriod } from "./metric-reconciliation.js";
+import { AUTHORITY_BOUNDARY } from "./evidence.js";
 import registryManifest from "./company-ir-page-registry.json";
 import newsSourceCapabilities from "./news-source-capabilities.json";
 
@@ -5697,18 +5700,32 @@ function stripHtmlTags(html: string): string {
   // double-unescaping. Inline tags render without a break: "FINANC</span><span>IAL"
   // is one word (ASTS 10-Q headings, 2.4.5); whitespace in the HTML still separates.
   const noTags = sanitizedHtml.replace(/<\/?(?:span|font|b|i|u|em|strong|a|sup|sub|small|ix:[a-z]+)\b[^>]*>/gi, "").replace(/<[^>]+>/g, " ");
-  const ENTITY_MAP: Record<string, string> = {
-    "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'",
-  };
-  const decoded = noTags.replace(/&(?:nbsp|amp|lt|gt|quot|apos|#\d+|[a-z]+);/gi, (entity) => {
-    if (entity in ENTITY_MAP) return ENTITY_MAP[entity];
+  const decoded = decodeHtmlEntities(noTags);
+  return decoded.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+const HTML_ENTITY_MAP: Record<string, string> = {
+  "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'",
+  // Bullets and punctuation releases use, decoded as Python's html.unescape does (2.5.4).
+  "&bull;": "\u2022", "&middot;": "\u00b7", "&rsquo;": "\u2019", "&lsquo;": "\u2018", "&ldquo;": "\u201c", "&rdquo;": "\u201d",
+  "&ndash;": "\u2013", "&mdash;": "\u2014", "&hellip;": "\u2026",
+};
+
+/** Decode HTML entities in one pass; other named entities become a space. */
+function decodeHtmlEntities(text: string): string {
+  return text.replace(/&(?:nbsp|amp|lt|gt|quot|apos|#\d+|#x[0-9a-f]+|[a-z]+);/gi, (entity) => {
+    if (entity in HTML_ENTITY_MAP) return HTML_ENTITY_MAP[entity];
+    if (/^&#x/i.test(entity)) {
+      // "&#x2022;" (ASTS release bullets) was left undecoded, so bullets did not split.
+      const code = parseInt(entity.slice(3, -1), 16);
+      return Number.isFinite(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : " ";
+    }
     if (entity.startsWith("&#")) {
       const code = parseInt(entity.slice(2, -1), 10);
       return isNaN(code) ? " " : String.fromCharCode(code);
     }
     return " ";
   });
-  return decoded.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function sanitizeFilingHtml(html: string): string {
@@ -12667,17 +12684,7 @@ function _stripHtmlTagsIdx(html: string): string {
   // Inline tags render without a break: "FINANC</span><span>IAL" is one word
   // (ASTS 10-Q headings, 2.4.5). Whitespace written in the HTML still separates.
   const noTags = blockBroken.replace(/<\/?(?:span|font|b|i|u|em|strong|a|sup|sub|small|ix:[a-z]+)\b[^>]*>/gi, "").replace(/<[^>]+>/g, " ");
-  const ENTITY_MAP: Record<string, string> = {
-    "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'",
-  };
-  const decoded = noTags.replace(/&(?:nbsp|amp|lt|gt|quot|apos|#\d+|[a-z]+);/gi, (entity) => {
-    if (entity in ENTITY_MAP) return ENTITY_MAP[entity];
-    if (entity.startsWith("&#")) {
-      const code = parseInt(entity.slice(2, -1), 10);
-      return isNaN(code) ? " " : String.fromCharCode(code);
-    }
-    return " ";
-  });
+  const decoded = decodeHtmlEntities(noTags);
   const lines = decoded.split("\n").map(line => line.replace(/[ \t]+/g, " ").trim());
   return lines.filter(Boolean).join("\n");
 }
@@ -15654,6 +15661,167 @@ export async function extractOperatingDriverLedger(ticker: string, filingType = 
   else if (release.status === "RELEASE_NOT_RESOLVED") warnings.push({ code: "RELEASE_NOT_RESOLVED", message: "No SEC earnings release was resolved, so release statements were not read.", severity: "warning" });
   out.status = warnings.some((w) => w.code !== "FILING_READ_TRUNCATED" && w.code !== "RELEASE_NOT_RESOLVED") ? "PARTIAL" : "OK";
   out.retryable = !loaded || !companyfacts || release.status === "NOT_READ";
+  out.warnings = warnings;
+  return JSON.stringify(out);
+}
+
+// ── Historical valuation context and metric reconciliation (2.5.4) ────────
+
+/** Daily closes (Yahoo split-adjusted), split events and the quote currency from fromDate to now. */
+async function dailyHistory(ticker: string, fromDate: string): Promise<{ bars: Bar[]; splits: Split[]; currency: string | null } | null> {
+  const p1 = Math.floor(Date.parse(`${fromDate}T00:00:00Z`) / 1000);
+  const p2 = Math.floor(Date.now() / 1000);
+  const d = (await yGet(`https://query1.finance.yahoo.com/v8/finance/chart/${enc(ticker)}?period1=${p1}&period2=${p2}&interval=1d&events=split`, false)) as Record<string, unknown>;
+  const result = (d?.chart as Record<string, unknown[]> | undefined)?.result?.[0] as Record<string, unknown> | undefined;
+  if (!result) return null;
+  const meta = (result.meta as Record<string, unknown> | undefined) ?? {};
+  const tz = typeof meta.exchangeTimezoneName === "string" ? meta.exchangeTimezoneName : "UTC";
+  const timestamps = (result.timestamp as number[]) ?? [];
+  const closes = (((result.indicators as Record<string, unknown[]>)?.quote?.[0] as Record<string, (number | null)[]>) ?? {}).close ?? [];
+  const bars: Bar[] = [];
+  timestamps.forEach((t, i) => {
+    const date = dailyBarDate(t, tz);
+    const close = closes[i];
+    if (date && typeof close === "number" && Number.isFinite(close)) bars.push({ date, close });
+  });
+  const rawSplits = (((result.events as Record<string, unknown> | undefined)?.splits ?? {}) as Record<string, Record<string, unknown>>);
+  const splits: Split[] = Object.values(rawSplits)
+    .map((e) => ({ date: dailyBarDate(Number(e.date), tz) ?? "", ratio: Number(e.numerator) / Number(e.denominator) }))
+    .filter((e) => e.date !== "" && Number.isFinite(e.ratio) && e.ratio > 0)
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  return { bars, splits, currency: typeof meta.currency === "string" ? meta.currency : null };
+}
+
+async function valuationHistoryFor(ticker: string, dates: string[] | null, fromDate: string): Promise<Record<string, unknown>> {
+  const upper = ticker.toUpperCase();
+  const cikPadded = await resolveCikForTicker(ticker);
+  if (!cikPadded) {
+    const tickerIndex = await getEdgarTickerCikMap().catch(() => null);
+    const code = tickerIndex ? "NO_SEC_REGISTRANT" : "SEC_LOOKUP_UNAVAILABLE";
+    return { ticker: upper, status: code, code, retryable: !tickerIndex };
+  }
+  const [facts, history] = await Promise.all([
+    edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`).catch(() => null),
+    dailyHistory(ticker, fromDate).catch(() => null),
+  ]);
+  if (!facts) return { ticker: upper, status: "COMPANYFACTS_NOT_AVAILABLE", code: "COMPANYFACTS_NOT_AVAILABLE", retryable: true };
+  if (!history || history.bars.length === 0) return { ticker: upper, status: "PRICE_HISTORY_NOT_AVAILABLE", code: "PRICE_HISTORY_NOT_AVAILABLE", retryable: true };
+  const useDates = dates ?? valuationDates(null, history.bars[history.bars.length - 1].date).dates;
+  const { currency } = taxonomyOf(facts);
+  const priceCurrency = history.currency ? majorPrice(1, history.currency).currency : null;
+  const warnings: Record<string, unknown>[] = [];
+  let fx: { pair: string; bars: Bar[] } | null = null;
+  if (currency && priceCurrency && currency !== priceCurrency) {
+    const pair = `${currency}${priceCurrency}=X`;
+    const fxHistory = await dailyHistory(pair, fromDate).catch(() => null);
+    fx = { pair, bars: fxHistory?.bars ?? [] };
+  }
+  let ratio: number | null = null;
+  if (foreignFiler(facts)) {
+    const market = await valuationMarketInputs(ticker).catch(() => null);
+    const sec = latestShareCount(facts);
+    const quoted = market?.sharesOutstanding ?? null;
+    const r = sec != null && quoted != null ? adsRatio(sec, quoted) : null;
+    if (r != null && r !== 1) {
+      ratio = r;
+      warnings.push({ code: "ADR_RATIO_APPLIED", message: `SEC counts ${sec} ordinary shares; Yahoo counts ${quoted} quoted shares, ${r} ordinary shares each. Share counts are divided by ${r} at every date.`, severity: "info" });
+    }
+  }
+  const out = historicalValuation({ ticker, dates: useDates, companyfacts: facts, bars: history.bars, priceCurrency: history.currency, splits: history.splits, fx, adsRatio: ratio });
+  out.warnings = warnings;
+  return out;
+}
+
+/** Historical valuation context (2.5.4): point-in-time market value, EV and multiples at dates, for a ticker and caller-named peers. */
+export async function getHistoricalValuationContext(ticker: string, dates: string[] | null = null, peers: string[] | null = null): Promise<string> {
+  let requested: string[] | null = null;
+  if (dates && dates.length > 0) {
+    const check = valuationDates(dates.map((d) => String(d).trim()), null);
+    if (check.error) return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: check.error });
+    requested = check.dates;
+  }
+  const peerList = [...new Set((peers ?? []).map((p) => String(p).trim().toUpperCase()).filter((p) => p !== "" && p !== ticker.toUpperCase()))];
+  if (peerList.length > 5) return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: "At most 5 peers." });
+  const today = new Date().toISOString().slice(0, 10);
+  const earliestRaw = requested ? requested[0] : `${Number(today.slice(0, 4)) - 5}${today.slice(4)}`;
+  const earliest = earliestRaw.slice(4) === "-02-29" ? `${earliestRaw.slice(0, 4)}-02-28` : earliestRaw;
+  const fromDate = new Date(Date.parse(`${earliest}T00:00:00Z`) - 15 * 86_400_000).toISOString().slice(0, 10);
+  const subject = await valuationHistoryFor(ticker, requested, fromDate);
+  const finalDates = requested ?? ((subject.points ?? []) as Record<string, unknown>[]).map((p) => String(p.date));
+  const peerResults: Record<string, unknown>[] = [];
+  // One peer at a time: each parsed companyfacts document can be tens of megabytes, and the
+  // Worker's memory is bounded; only one is held at once.
+  for (const p of peerList) {
+    peerResults.push(await valuationHistoryFor(p, finalDates.length > 0 ? finalDates : null, fromDate));
+  }
+  return JSON.stringify({
+    ticker: ticker.toUpperCase(),
+    status: String(subject.status ?? "NOT_AVAILABLE"),
+    dates: finalDates,
+    subject,
+    peers: peerResults,
+    peerMedians: peerList.length > 0 && finalDates.length > 0 ? peerMedians(finalDates, peerResults.filter((p) => Array.isArray(p.points))) : [],
+    notes: [
+      "Peers are the caller's; their medians are unweighted and count only peers with that multiple on that date. Each peer's denominators are its own fiscal periods, named in its points.",
+      "The latest date's close can be intraday while the market is open.",
+    ],
+    ...AUTHORITY_BOUNDARY,
+  });
+}
+
+const RECONCILE_INCOME_TYPES = ["TotalRevenue", "NetIncome", "NetIncomeCommonStockholders", "OperatingIncome", "DilutedEPS"];
+
+/** Metric source reconciliation (2.5.4): one metric for one period across SEC XBRL, the issuer release and Yahoo. */
+export async function reconcileMetricSources(ticker: string, metric: string, period = "latest_quarter", tolerancePct: number = DEFAULT_TOLERANCE_PCT): Promise<string> {
+  const upper = ticker.toUpperCase();
+  if (!(metric in RECONCILE_METRICS)) {
+    return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: `metric must be one of: ${Object.keys(RECONCILE_METRICS).join(", ")}` });
+  }
+  const tolerance = Number.isFinite(tolerancePct) ? Math.min(10, Math.max(0, tolerancePct)) : DEFAULT_TOLERANCE_PCT;
+  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
+  if (!cikPadded) {
+    const tickerIndex = await getEdgarTickerCikMap().catch(() => null);
+    const code = tickerIndex ? "NO_SEC_REGISTRANT" : "SEC_LOOKUP_UNAVAILABLE";
+    return JSON.stringify({ ticker: upper, metric, status: code, code, retryable: !tickerIndex });
+  }
+  const facts = await edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`).catch(() => null);
+  if (!facts) return JSON.stringify({ ticker: upper, metric, status: "COMPANYFACTS_NOT_AVAILABLE", code: "COMPANYFACTS_NOT_AVAILABLE", retryable: true });
+  const resolved = resolvePeriod(facts, metric, period);
+  if (resolved.status !== "OK") return JSON.stringify({ ticker: upper, metric, ...resolved });
+  const cikInt = parseInt(cikPadded, 10);
+  const end = String(resolved.periodEnd);
+  // Results releases filed within 100 days after the period ended, oldest first; an early Item 2.02 8-K
+  // (ASTS filed one on 2026-07-15) is not always the results release, so up to three are read.
+  const candidates = submissions
+    ? earningsReleasePicks(submissions, cikInt, 40)
+      .filter((p) => p.filingDate > end && (Date.parse(`${p.filingDate}T00:00:00Z`) - Date.parse(`${end}T00:00:00Z`)) / 86_400_000 <= 100)
+      .sort((a, b) => (a.filingDate < b.filingDate ? -1 : a.filingDate > b.filingDate ? 1 : 0))
+      .slice(0, 3)
+    : [];
+  const annual = resolved.periodType === "ANNUAL";
+  const spec = RECONCILE_METRICS[metric];
+  const reportingUnit = metricFacts(facts, metric).unit;
+  const readReleases = async (): Promise<Record<string, unknown>[]> => {
+    const read: Record<string, unknown>[] = [];
+    for (const c of candidates) {
+      const r: Record<string, unknown> = await readReleaseText(cikInt, c.accessionNumber, c.primaryUrl)
+        .then((x): Record<string, unknown> => ({ ...x, filingDate: c.filingDate, accessionNumber: c.accessionNumber }))
+        .catch((): Record<string, unknown> => ({ status: "NOT_READ", url: c.primaryUrl, filingDate: c.filingDate, accessionNumber: c.accessionNumber, text: null }));
+      read.push(r);
+      if (releaseObservation(r, metric, resolved, reportingUnit).status === "FOUND") break;
+    }
+    return read;
+  };
+  const [releases, yahooRows] = await Promise.all([
+    readReleases(),
+    fetchTimeseriesByDate(ticker, annual ? "annual" : "quarterly", spec.kind === "instant" ? ["CashAndCashEquivalents"] : RECONCILE_INCOME_TYPES).catch(() => null),
+  ]);
+  const out = metricReconciliation({ ticker, metric, period: resolved, companyfacts: facts, releases, yahooRows, tolerancePct: tolerance });
+  const warnings: Record<string, unknown>[] = [];
+  const unread = releases.filter((r) => r.status === "NOT_READ");
+  if (unread.length > 0) warnings.push({ code: "RELEASE_TEXT_NOT_AVAILABLE", message: `${unread.length} earnings release(s) could not be read from SEC; retry.`, severity: "warning" });
+  if (yahooRows == null) warnings.push({ code: "YAHOO_NOT_AVAILABLE", message: "Yahoo's statements could not be read; retry.", severity: "warning" });
+  out.retryable = unread.length > 0 || yahooRows == null;
   out.warnings = warnings;
   return JSON.stringify(out);
 }

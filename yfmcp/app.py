@@ -200,6 +200,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - analyze_financial_ratios: Current P/E, PEG, P/S, P/B, EV/EBITDA, margins, ROE, ROA, debt ratios with explicit unitSemantics; optional valuation history.
 - get_valuation_snapshot: Diluted shares, period-end cash/debt, enterprise value and multiples on trailing and consensus figures; context, not a target.
 - compare_peer_valuations: The same multiples for a peer set on one Yahoo basis, with peer medians.
+- get_historical_valuation_context: Point-in-time market cap, EV and multiples at dates for a ticker and caller-named peers, with named LTM/LFY denominators; no multiple selected.
 - get_share_count_scenarios: Share counts under caller-defined scenarios (price, per-instrument treatment, known issuance); every instrument included/excluded/unresolved with mechanics; no denominator selected.
 - extract_funding_capex_schedule: Contractual schedules by due period and funding/capex statements classified CONTRACTUAL, COMPANY_DISCLOSED_COMMITTED, COMPANY_GUIDED, AWARDED_CONTINGENT or UNRESOLVED, with timing and source.
 - extract_operating_driver_ledger: Operating drivers as disclosed: XBRL driver series, the filer's own tagged KPIs, and filing/release statements with figures by category, each REPORTED_ACTUAL, TARGET_OR_PLAN or UNCLEAR with timing and source; nothing derived.
@@ -224,6 +225,7 @@ This server provides financial market data from Yahoo Finance and SEC EDGAR via 
 - get_evidence_quality: Preflight status, freshness and blockers per evidence family.
 - get_evidence_cut: Retrieve a stored evidence cut and verify its SHA-256 integrity.
 - list_evidence_cuts: Stored evidence cuts for a ticker, newest first.
+- reconcile_metric_sources: One metric for one period across SEC XBRL, the issuer release and Yahoo; AGREED, PARTIAL, CONFLICT or NOT_FOUND with variances and evidence.
 - get_company_events_calendar: Upcoming Yahoo provider dates or earnings history; dates are UNVERIFIED.
 - get_market_calendar: Market-wide earnings, economic, IPO, or stock-split calendar with pagination.
 
