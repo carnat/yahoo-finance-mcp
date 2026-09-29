@@ -9,6 +9,8 @@
  * nothing is interpolated, extrapolated or derived and called consensus.
  */
 
+import { fiscalYearOfPeriodEnd } from "./fiscal-calendar.js";
+
 export const EVIDENCE_CUT_SCHEMA = "yfmcp.evidence-cut/1";
 export const CONSENSUS_OBSERVATION_SCHEMA = "yfmcp.consensus-observation/1";
 export const CANONICALIZATION = "yfmcp-canonical-json/1: sorted keys, no whitespace, ECMAScript number formatting, UTF-8";
@@ -439,7 +441,8 @@ export function buildConsensusCurve(
     }
     periods.push({
       label,
-      fiscalYear: fy0 ? Number(fy0.fiscalYearEnd.slice(0, 4)) + k : null,
+      // A 52/53-week year ending in early January is the prior year's (2.5.11).
+      fiscalYear: fy0 && fiscalYearOfPeriodEnd(fy0.fiscalYearEnd) != null ? (fiscalYearOfPeriodEnd(fy0.fiscalYearEnd) as number) + k : null,
       fiscalYearEnds,
       metrics,
     });

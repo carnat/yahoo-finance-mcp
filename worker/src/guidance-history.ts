@@ -13,6 +13,7 @@
 
 import { AUTHORITY_BOUNDARY } from "./evidence.js";
 import { guidanceRanges } from "./extraction-rules.js";
+import { fiscalQuarterOf, fiscalYearOfPeriodEnd, nominalPeriodEnd, TEXT_DATE_SOURCE, textDate } from "./fiscal-calendar.js";
 import { REVENUE_CONCEPTS } from "./sec-facts.js";
 
 type Rec = Record<string, unknown>;
@@ -57,12 +58,22 @@ function year4(text: string | undefined): number | null {
  * over the fiscal year inside them.
  */
 export function guidanceTargetPeriod(context: string, anchor: number = context.length): Rec {
-  type Hit = { index: number; end: number; fiscalYear: number | null; quarter: number | null; half: number | null };
+  type Hit = { index: number; end: number; fiscalYear: number | null; quarter: number | null; half: number | null; periodEnd: string | null; fromDate: boolean };
   const found: Hit[] = [];
   const add = (m: RegExpMatchArray, fiscalYear: number | null, quarter: number | null, half: number | null) => {
     const index = m.index ?? 0;
-    found.push({ index, end: index + m[0].length, fiscalYear, quarter, half });
+    const end = index + m[0].length;
+    // "fiscal 2027 ending June 25, 2027", "third quarter ended October 31, 2026": the stated end date (2.5.11).
+    const d = PERIOD_END_AFTER_RE.exec(context.slice(end, end + 60));
+    found.push({ index, end, fiscalYear, quarter, half, periodEnd: d ? textDate(d[1], d[2], d[3]) : null, fromDate: false });
   };
+  // "the fiscal year ending June 25, 2027" names a 52/53-week year by its end date only: its year is the
+  // fiscal year of that date (fiscal-calendar.ts) (2.5.11, AEHR).
+  for (const m of context.matchAll(FISCAL_YEAR_ENDING_RE)) {
+    const periodEnd = textDate(m[1], m[2], m[3]);
+    const index = m.index ?? 0;
+    if (periodEnd) found.push({ index, end: index + m[0].length, fiscalYear: fiscalYearOfPeriodEnd(periodEnd), quarter: null, half: null, periodEnd, fromDate: true });
+  }
   for (const m of context.matchAll(/\b(?:full[- ]year|fiscal(?: year)?|FY)\s*'?(20\d\d|\d\d)\b/gi)) add(m, year4(m[1]), null, null);
   for (const m of context.matchAll(/\b(20\d\d)\s+(?:full[- ]year|annual)\b/gi)) add(m, year4(m[1]), null, null);
   for (const m of context.matchAll(/\b(first|second|third|fourth) quarter(?: of)?(?: fiscal)?(?: year)?\s*(20\d\d)?/gi)) {
@@ -76,7 +87,7 @@ export function guidanceTargetPeriod(context: string, anchor: number = context.l
   for (const m of context.matchAll(/\bH([12])\s*'?(20\d\d|\d\d)?\b/g)) add(m, year4(m[2]), null, Number(m[1]));
   const parts = found.filter((h) => h.quarter != null || h.half != null);
   const hits = found.filter((h) => h.quarter != null || h.half != null || !parts.some((q) => h.index >= q.index && h.index < q.end));
-  if (hits.length === 0) return { label: null, fiscalYear: null, quarter: null, half: null, basis: "NOT_STATED" };
+  if (hits.length === 0) return { label: null, fiscalYear: null, quarter: null, half: null, periodEnd: null, basis: "NOT_STATED" };
   const before = hits.filter((h) => h.index < anchor);
   const best = before.length > 0
     ? before.reduce((a, b) => (b.index >= a.index ? b : a))
@@ -88,9 +99,13 @@ export function guidanceTargetPeriod(context: string, anchor: number = context.l
     fiscalYear: best.fiscalYear,
     quarter: best.quarter,
     half: best.half,
-    basis: best.fiscalYear == null ? "TEXT_YEAR_NOT_STATED" : "TEXT",
+    periodEnd: best.periodEnd,
+    basis: best.fiscalYear == null ? "TEXT_YEAR_NOT_STATED" : best.fromDate ? "TEXT_PERIOD_END" : "TEXT",
   };
 }
+
+const FISCAL_YEAR_ENDING_RE = new RegExp(`\\bfiscal year (?:ending|ended|that (?:ends|ended)|which (?:ends|ended))(?: on)?\\s+${TEXT_DATE_SOURCE}\\b`, "gi");
+const PERIOD_END_AFTER_RE = new RegExp(`^\\s*,?\\s*(?:ending|ended)(?: on)?\\s+${TEXT_DATE_SOURCE}\\b`, "i");
 
 // Sentence and bullet boundaries, including the " o " bullets SEC-rendered releases carry.
 const WS = "[\\t\\n\\v\\f\\r \\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]";
@@ -248,38 +263,77 @@ function days(start: string, end: string): number {
 }
 
 /**
- * Reported actuals by period label from companyfacts: FY<year of period end>
- * for ~1-year durations; Q<n> <year> for ~quarter durations only when every
- * annual period ends in December (calendar fiscal year). The newest filing of
- * each period wins.
+ * Reported actuals by period label from companyfacts: FY<fiscal year> for
+ * ~1-year durations, the fiscal year the annual report states (companyfacts fy
+ * of the 10-K whose own year it is) else the fiscal year of the period end
+ * (fiscal-calendar.ts). Quarters: calendar quarters when every annual period
+ * ends in December (a 52/53-week year ending in the first week of January
+ * counts); otherwise fiscal quarters of a year whose annual report states its
+ * fiscal year, counted back from that year's end. The newest filing of each
+ * period wins.
  */
 export function actualsFromCompanyFacts(companyfacts: unknown): Rec {
   const usgaap = (((companyfacts ?? {}) as Rec).facts as Rec | undefined)?.["us-gaap"] as Rec | undefined;
-  const collect = (concepts: string[], unit: string) => {
+  const raw = (concepts: string[], unit: string): Rec[] => concepts.flatMap((concept) => {
+    const units = ((usgaap?.[concept] as Rec | undefined)?.units ?? {}) as Record<string, Rec[]>;
+    return (units[unit] ?? [])
+      .filter((f) => typeof f.start === "string" && typeof f.end === "string" && typeof f.val === "number" && /^10-[KQ]/.test(String(f.form ?? "")))
+      .map((f) => ({ ...f, concept }));
+  });
+  const collect = (facts: Rec[]) => {
     const byPeriod = new Map<string, Rec>();
-    for (const concept of concepts) {
-      const units = ((usgaap?.[concept] as Rec | undefined)?.units ?? {}) as Record<string, Rec[]>;
-      for (const f of units[unit] ?? []) {
-        if (typeof f.start !== "string" || typeof f.end !== "string" || typeof f.val !== "number") continue;
-        if (!/^10-[KQ]/.test(String(f.form ?? ""))) continue;
-        const key = `${f.start}|${f.end}`;
-        const prev = byPeriod.get(key);
-        if (!prev || String(f.filed ?? "") > String(prev.filed ?? "")) byPeriod.set(key, { ...f, concept });
-      }
+    for (const f of facts) {
+      const key = `${f.start}|${f.end}`;
+      const prev = byPeriod.get(key);
+      if (!prev || String(f.filed ?? "") > String(prev.filed ?? "")) byPeriod.set(key, f);
     }
     return [...byPeriod.values()];
   };
-  const revenue = collect([...REVENUE_CONCEPTS], "USD");
-  const eps = collect(["EarningsPerShareDiluted"], "USD/shares");
-  const annualEnds = [...revenue, ...eps].filter((f) => { const d = days(String(f.start), String(f.end)); return d >= 350 && d <= 380; }).map((f) => String(f.end));
-  const calendarFy = annualEnds.length > 0 && annualEnds.every((e) => e.slice(5, 7) === "12");
+  const rawRevenue = raw([...REVENUE_CONCEPTS], "USD");
+  const rawEps = raw(["EarningsPerShareDiluted"], "USD/shares");
+  const revenue = collect(rawRevenue);
+  const eps = collect(rawEps);
+  const isAnnual = (f: Rec) => { const d = days(String(f.start), String(f.end)); return d >= 350 && d <= 380; };
+  // The fiscal year an annual report states for its own year: the fy of the 10-K's latest annual period (2.5.11).
+  const statedFy = new Map<string, number>();
+  const newestByAccession = new Map<string, Rec>();
+  for (const f of [...rawRevenue, ...rawEps]) {
+    if (!isAnnual(f) || !/^10-K/.test(String(f.form ?? "")) || f.fp !== "FY" || typeof f.fy !== "number" || typeof f.accn !== "string") continue;
+    const prev = newestByAccession.get(f.accn);
+    if (!prev || String(f.end) > String(prev.end)) newestByAccession.set(f.accn, f);
+  }
+  for (const f of [...newestByAccession.values()].sort((a, b) => cmp(a.filed, b.filed))) statedFy.set(String(f.end), f.fy as number);
+  const annualEnds = [...new Set([...revenue, ...eps].filter(isAnnual).map((f) => String(f.end)))].sort();
+  const calendarFy = annualEnds.length > 0 && annualEnds.every((e) => (nominalPeriodEnd(e) ?? "").slice(5, 7) === "12");
+  const fiscalQuarterMapping = calendarFy ? "CALENDAR" : statedFy.size > 0 ? "FILING_STATED_FISCAL_YEAR" : "NONE";
+  const fiscalYear = (end: string) => statedFy.get(end) ?? fiscalYearOfPeriodEnd(end);
+  // The fiscal year a non-calendar quarter falls in: the first annual end on or after it, else (the year in
+  // progress) a year after the latest, only when an annual report states that year's number.
+  const fiscalQuarter = (end: string): string | null => {
+    const yearEnd = annualEnds.find((a) => days(end, a) >= -7 && days(end, a) <= 280);
+    if (yearEnd) {
+      const fy = statedFy.get(yearEnd);
+      const q = fiscalQuarterOf(end, yearEnd);
+      return fy != null && q != null ? `Q${q} ${fy}` : null;
+    }
+    const latest = annualEnds[annualEnds.length - 1];
+    const fy = latest ? statedFy.get(latest) : undefined;
+    if (!latest || fy == null || end <= latest) return null;
+    const projected = new Date(Date.parse(`${latest}T00:00:00Z`) + 364 * 86_400_000).toISOString().slice(0, 10);
+    const q = fiscalQuarterOf(end, projected);
+    return q != null ? `Q${q} ${fy + 1}` : null;
+  };
   const label = (f: Rec): string | null => {
     const d = days(String(f.start), String(f.end));
     const end = String(f.end);
-    if (d >= 350 && d <= 380) return `FY${end.slice(0, 4)}`;
-    if (d >= 80 && d <= 100 && calendarFy) return `Q${Math.ceil(Number(end.slice(5, 7)) / 3)} ${end.slice(0, 4)}`;
+    const nominal = nominalPeriodEnd(end) ?? end;
+    if (d >= 350 && d <= 380) return `FY${fiscalYear(end)}`;
+    if (d >= 80 && d <= 100) {
+      if (calendarFy) return `Q${Math.ceil(Number(nominal.slice(5, 7)) / 3)} ${nominal.slice(0, 4)}`;
+      return fiscalQuarterMapping === "FILING_STATED_FISCAL_YEAR" ? fiscalQuarter(end) : null;
+    }
     // A first half is filed as the six-month year-to-date period; a second half is never filed as a period.
-    if (d >= 170 && d <= 190 && calendarFy && end.slice(5, 7) === "06") return `H1 ${end.slice(0, 4)}`;
+    if (d >= 170 && d <= 190 && calendarFy && nominal.slice(5, 7) === "06") return `H1 ${nominal.slice(0, 4)}`;
     return null;
   };
   const table = (facts: Rec[]) => {
@@ -291,7 +345,14 @@ export function actualsFromCompanyFacts(companyfacts: unknown): Rec {
     return out;
   };
   // An unread companyfacts is not an unreported actual.
-  return { read: companyfacts != null, revenue: table(revenue), eps: table(eps), calendarFiscalYear: calendarFy };
+  return {
+    read: companyfacts != null,
+    revenue: table(revenue),
+    eps: table(eps),
+    calendarFiscalYear: calendarFy,
+    fiscalQuarterMapping,
+    statedFiscalYears: Object.fromEntries([...statedFy.entries()].sort()),
+  };
 }
 
 /** First and last guidance for each metric and target period against the reported actual. */
@@ -324,7 +385,7 @@ export function guidanceOutcomes(entries: Rec[], actuals: Rec): Rec[] {
     else if (nonGaap) status = "NOT_EVALUATED_NON_GAAP_BASIS";
     else if (!actual) {
       if (/^H/.test(label) && (label.startsWith("H2") || actuals.calendarFiscalYear !== true)) status = "NOT_EVALUATED_HALF_YEAR";
-      else if (/^Q/.test(label) && actuals.calendarFiscalYear !== true) status = "NOT_EVALUATED_FISCAL_QUARTER_MAPPING";
+      else if (/^Q/.test(label) && (actuals.fiscalQuarterMapping ?? "NONE") === "NONE") status = "NOT_EVALUATED_FISCAL_QUARTER_MAPPING";
       else status = "ACTUAL_NOT_YET_REPORTED";
     }
     out.push({
@@ -363,8 +424,9 @@ export function guidanceHistory(ticker: string, releases: ReleaseText[], company
       revenue: "SEC XBRL revenue concepts, newest filing per period",
       eps: "us-gaap:EarningsPerShareDiluted, newest filing per period",
       grossMargin: "not evaluated",
-      periodLabels: "FY<year of period end>; quarters and first halves only for calendar fiscal years; second halves are not filed as a period and are not derived",
+      periodLabels: "FY<the fiscal year the annual report states, else the year of the period end less a week (a 52/53-week year ending in early January is the prior year's)>; calendar quarters and first halves for calendar fiscal years; fiscal quarters counted back from a year end whose fiscal year an annual report states; second halves are not filed as a period and are not derived",
       calendarFiscalYear: actuals.calendarFiscalYear,
+      fiscalQuarterMapping: actuals.fiscalQuarterMapping,
       read: actuals.read,
     },
     notes: [

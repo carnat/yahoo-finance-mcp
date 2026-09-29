@@ -11,6 +11,8 @@
 // yfmcp/capital_structure.py mirrors this file; scripts/test_capital_structure.py
 // requires identical output from both.
 
+import { TEXT_DATE_SOURCE, textDate } from "./fiscal-calendar.js";
+
 export type IxContext = {
   id: string;
   instant: string | null;
@@ -782,7 +784,119 @@ function warrantClassKey(f: IxFact): string {
   return axis ? `${axis}=${f.dims[axis]}` : dimsKey(f.dims);
 }
 
-function warrantsComponent(sources: IxSource[], price: number): Record<string, unknown> | null {
+// ── Warrant lifecycle stated in text (2.5.11) ───────────────────────────────
+//
+// A warrant count tagged before the period end (an issuance, a prior year end) says nothing of what
+// happened since; filers often state an exercise, expiry or redemption only in text. ASTS's 10-Q counts
+// 122,000 Private Placement Warrants as of 2025-12-31 and says "the remaining 122,000 Private Placement
+// Warrants were exercised" in the quarter ended March 31, 2026; RKLB's 10-K counts 728,835 warrants
+// issued on 2023-12-29 and says "On November 14, 2024, all 728,835 common stock warrants were exercised".
+// A sentence retires a class only when it names the class (its tagged count, or its class name of two or
+// more words), states the whole class exercised, expired or redeemed in the past tense, and dates that
+// after the tagged count and by the period end. Anything less leaves the class counted.
+export const WARRANT_LIFECYCLE_SEARCH_TERMS = [
+  "warrants were exercised", "warrant was exercised", "were fully exercised", "was fully exercised", "exercised in full",
+  "warrants expired", "warrant expired", "warrants were redeemed", "redemption of all", "redeemed all",
+];
+const LIFECYCLE_EVENTS: { event: string; re: RegExp }[] = [
+  { event: "EXERCISED", re: /\bwarrants?\b[^.]{0,160}?\b(?:were|was|have been|has been|had been)\s+(?:fully\s+|all\s+)?exercised\b|\bexercised\s+(?:all|the remaining|in full)\b[^.]{0,100}?\bwarrants?\b/i },
+  { event: "REDEEMED", re: /\bwarrants?\b[^.]{0,160}?\b(?:were|was|have been|has been|had been)\s+(?:fully\s+)?redeemed\b|\bredeemed\s+(?:all|the remaining)\b[^.]{0,100}?\bwarrants?\b|\bredemption of all\b[^.]{0,100}?\bwarrants?\b/i },
+  { event: "EXPIRED", re: /\bwarrants?\b[^.]{0,160}?\b(?:expired|lapsed)\b/i },
+];
+// A negated, future or conditional sentence states no event ("No Private Placement Warrants were exercised").
+// Case-sensitive past the first letter, so the month "May" is not the verb "may".
+const LIFECYCLE_SKIP_RE = /\b(?:[Nn]o|[Nn]one|[Nn]ot|[Nn]either|nor|will|would|may|might|could|shall|[Uu]nless|[Ii]f)\b/;
+// The whole class: all or the remaining warrants, in full; an expiry or redemption ends every unexercised warrant.
+const WHOLE_CLASS_RE = /\b(?:all|remaining|fully|in full|in their entirety|each of the)\b/i;
+const TEXT_DATE_RE = new RegExp(TEXT_DATE_SOURCE, "gi");
+
+export type WarrantLifecycleSentence = {
+  event: string;
+  sentence: string;
+  dates: string[];
+  sectionHeading: string | null;
+  documentUrl: string | null;
+  filingDate: string | null;
+  accessionNumber: string | null;
+};
+
+/** Past-tense exercise, expiry and redemption sentences about warrants, each with the dates it states. */
+export function warrantLifecycleSentences(matches: TextMatch[]): WarrantLifecycleSentence[] {
+  const out: WarrantLifecycleSentence[] = [];
+  const seen = new Set<string>();
+  for (const match of matches) {
+    for (const raw of collapse(match.contextText).split(CLAIM_SENTENCE_SPLIT_RE)) {
+      const sentence = raw.trim();
+      if (!sentence || seen.has(sentence) || LIFECYCLE_SKIP_RE.test(sentence)) continue;
+      const event = LIFECYCLE_EVENTS.find((e) => e.re.test(sentence))?.event;
+      if (!event) continue;
+      const dates = [...sentence.matchAll(TEXT_DATE_RE)].map((m) => textDate(m[1], m[2], m[3])).filter((d): d is string => d != null);
+      if (dates.length === 0) continue;
+      seen.add(sentence);
+      out.push({
+        event,
+        sentence: sentence.slice(0, 600),
+        dates,
+        sectionHeading: match.sectionHeading,
+        documentUrl: match.documentUrl,
+        filingDate: match.filingDate,
+        accessionNumber: match.accessionNumber,
+      });
+    }
+  }
+  return out;
+}
+
+/** 728835 -> "728,835". */
+export function groupedCount(count: number): string {
+  return String(count).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/** "728,835" as a whole number in the text, not part of a longer one. */
+function statesCount(sentence: string, count: number): boolean {
+  if (!Number.isInteger(count) || count < 1000) return false;
+  const text = groupedCount(count);
+  return new RegExp(`(?<![\\d,.])${text}(?!\\d|,\\d)`).test(sentence);
+}
+
+/** The class-of-warrant member's name when it is specific ("Private Placement Warrants"), never a bare "Warrants". */
+function specificClassName(f: IxFact): string | null {
+  const axis = Object.keys(f.dims).find((a) => a.endsWith(CLASS_OF_WARRANT_AXIS));
+  if (!axis) return null;
+  const name = memberLabel(f.dims[axis]).toLowerCase().replace(/\s+/g, " ").trim();
+  return name.split(" ").length >= 2 ? name.replace(/s$/, "") : null;
+}
+
+/** How a sentence names the class of a tagged count: by the count itself or by the class name; null when it does not. */
+function namesClass(sentence: string, f: IxFact): string | null {
+  if (f.value != null && statesCount(sentence, f.value)) return "STATED_COUNT";
+  const name = specificClassName(f);
+  return name && collapse(sentence).toLowerCase().includes(name) ? "CLASS_NAME" : null;
+}
+
+/**
+ * The stated event that retired a class counted before the period end: a sentence naming the class
+ * that states it exercised, expired or redeemed in whole, dated after the count and by the period end.
+ * The earliest such event wins (ASTS's warrants were exercised in the first quarter, then expired in April).
+ */
+function textRetirement(f: IxFact, sentences: WarrantLifecycleSentence[], periodEnd: string | null): Record<string, unknown> | null {
+  if (periodEnd == null || f.periodEnd == null || f.periodEnd >= periodEnd) return null;
+  let best: Record<string, unknown> | null = null;
+  for (const s of sentences) {
+    const matchedBy = namesClass(s.sentence, f);
+    if (!matchedBy) continue;
+    if (s.event === "EXERCISED" && matchedBy !== "STATED_COUNT" && !WHOLE_CLASS_RE.test(s.sentence)) continue;
+    // The latest date the sentence states by the period end: "During the three months ended March 31, 2026".
+    const dated = s.dates.filter((d) => d <= periodEnd).sort();
+    const eventDate = dated[dated.length - 1];
+    if (!eventDate || eventDate <= f.periodEnd) continue;
+    if (best && String(best.eventDate) <= eventDate) continue;
+    best = { event: s.event, eventDate, matchedBy, sentence: s.sentence, sectionHeading: s.sectionHeading, documentUrl: s.documentUrl, filingDate: s.filingDate, accessionNumber: s.accessionNumber };
+  }
+  return best;
+}
+
+function warrantsComponent(sources: IxSource[], price: number, lifecycle: WarrantLifecycleSentence[] | null = null): Record<string, unknown> | null {
   // Classes a newer filing shows exercised or retired; an older fallback filing must not restore them
   // (BE's 2025 10-K still counts the Oracle warrant its 2026 10-Q shows exercised).
   const retired = new Set<string>();
@@ -815,7 +929,9 @@ function warrantsComponent(sources: IxSource[], price: number): Record<string, u
   const docEnd = source.doc.documentPeriodEnd;
   const expiryOf = (f: IxFact) => normalizeIxDate(newest(source.doc.facts.filter((g) => WARRANT_EXPIRY_RE.test(g.local) && g.text != null && dimsKey(g.dims) === dimsKey(f.dims)))?.text ?? null);
   const expired = facts.filter((f) => { const e = expiryOf(f); return e != null && docEnd != null && e < docEnd; });
-  const live = facts.filter((f) => !expired.includes(f));
+  // A count tagged before the period end that the filing text says was since exercised, expired or redeemed (2.5.11).
+  const retiredInText = facts.filter((f) => !expired.includes(f)).map((f) => ({ f, stated: lifecycle ? textRetirement(f, lifecycle, docEnd) : null })).filter((r) => r.stated != null);
+  const live = facts.filter((f) => !expired.includes(f) && !retiredInText.some((r) => r.f === f));
   const classes = live.map((f) => {
     const strike = newest(source.doc.facts.filter((g) => g.local === WARRANT_STRIKE && g.value != null && dimsKey(g.dims) === dimsKey(f.dims)));
     const label = hasDims(f) ? Object.values(f.dims).map(memberLabel).join(" / ") : "Warrants (not itemized)";
@@ -840,6 +956,8 @@ function warrantsComponent(sources: IxSource[], price: number): Record<string, u
       asOf: f.periodEnd,
       // Tagged at an earlier date (an issuance) and not restated at the period end.
       countBeforePeriodEnd: periodEnd != null && f.periodEnd != null && f.periodEnd < periodEnd,
+      // Whether the filing text was read for this earlier count's exercise, expiry or redemption (2.5.11).
+      ...(periodEnd != null && f.periodEnd != null && f.periodEnd < periodEnd ? { lifecycleText: lifecycle ? "NO_EVENT_STATED" : "NOT_READ" } : {}),
       expirationDate: expiry,
       // A term counted from the tagged date that ended before the period end: possibly expired unexercised.
       ...(expiry == null && termEnd != null && periodEnd != null && f.periodEnd! < periodEnd && termEnd < periodEnd ? { termElapsedBy: termEnd } : {}),
@@ -859,6 +977,7 @@ function warrantsComponent(sources: IxSource[], price: number): Record<string, u
     outstanding: classes.reduce((sum, c) => sum + (c.outstanding ?? 0), 0),
     classes,
     ...(expired.length > 0 ? { expiredClasses: expired.map((f) => ({ class: hasDims(f) ? Object.values(f.dims).map(memberLabel).join(" / ") : "Warrants (not itemized)", count: f.value, asOf: f.periodEnd, expirationDate: expiryOf(f) })) } : {}),
+    ...(retiredInText.length > 0 ? { retiredInText: retiredInText.map(({ f, stated }) => ({ class: hasDims(f) ? Object.values(f.dims).map(memberLabel).join(" / ") : "Warrants (not itemized)", count: f.value, asOf: f.periodEnd, ...stated })) } : {}),
     method: "treasury_stock_per_class_on_vested",
     incrementalShares: classes.length === 0 ? 0 : unresolved === classes.length ? null : classes.reduce((sum, c) => sum + (c.incrementalShares ?? 0), 0),
     unresolvedClasses: unresolved,
@@ -944,7 +1063,56 @@ function instrumentValue(group: DebtGroup, locals: string[], at: string): Picked
   return null;
 }
 
-function convertiblesComponent(sources: IxSource[], price: number): Record<string, unknown> | null {
+// ── Principal settled in cash (2.5.11, LITE) ────────────────────────────────
+//
+// LITE's 10-K: "The principal amounts of all of our outstanding convertible notes must be settled in cash."
+// When principal is settled in cash, conversion delivers shares only for the conversion value above
+// principal: max(0, if-converted shares - principal / price) at the price. The if-converted count (the
+// EPS basis) stays the bridge's count; the net-share count is reported beside it, only for notes whose
+// cash settlement of principal the filing states, never assumed. Capped calls are not modeled.
+export const CONVERTIBLE_SETTLEMENT_SEARCH_TERMS = [
+  "settled in cash", "pay cash up to", "principal amount in cash", "principal amounts of all", "settle the principal", "cash equal to the aggregate principal",
+];
+const CASH_PRINCIPAL_RE = /\bprincipal(?: amounts?)?\b[^.]{0,160}?\b(?:must|will|shall|is required to|are required to) be (?:settled|paid) (?:solely |only )?in cash\b|\b(?:pay|paying|deliver|delivering) cash (?:equal to|up to) the (?:aggregate )?principal amount\b|\belected to (?:settle|pay) (?:the )?(?:aggregate )?principal(?: amounts?)?\b[^.]{0,80}?\bin cash\b/i;
+// A settlement method the issuer may still choose is not a stated cash settlement.
+const SETTLEMENT_OPTION_RE = /\bmay\b|\bcan\b|\bat (?:our|its|the company['’]s) (?:option|election)\b/;
+const ALL_NOTES_RE = /\ball (?:of )?(?:our |the )?(?:outstanding )?(?:convertible )?(?:senior )?notes\b|\beach (?:series|issue) of (?:our |the )?(?:convertible )?(?:senior )?notes\b/i;
+const NOTE_YEAR_RE = /\b(20\d\d) (?:convertible )?(?:senior )?notes\b|\bnotes due (20\d\d)\b/gi;
+
+export type SettlementSentence = { sentence: string; scope: string; years: string[]; sectionHeading: string | null; documentUrl: string | null; filingDate: string | null; accessionNumber: string | null };
+
+/** Sentences stating convertible principal is settled in cash, with the notes they name. */
+export function principalCashSettlement(matches: TextMatch[]): SettlementSentence[] {
+  const out: SettlementSentence[] = [];
+  const seen = new Set<string>();
+  for (const match of matches) {
+    for (const raw of collapse(match.contextText).split(CLAIM_SENTENCE_SPLIT_RE)) {
+      const sentence = raw.trim();
+      if (!sentence || seen.has(sentence) || !CASH_PRINCIPAL_RE.test(sentence) || SETTLEMENT_OPTION_RE.test(sentence)) continue;
+      seen.add(sentence);
+      const years = [...new Set([...sentence.matchAll(NOTE_YEAR_RE)].map((m) => m[1] ?? m[2]))];
+      out.push({
+        sentence: sentence.slice(0, 600),
+        scope: ALL_NOTES_RE.test(sentence) ? "ALL_NOTES" : years.length > 0 ? "NAMED_NOTES" : "UNNAMED_NOTES",
+        years,
+        sectionHeading: match.sectionHeading,
+        documentUrl: match.documentUrl,
+        filingDate: match.filingDate,
+        accessionNumber: match.accessionNumber,
+      });
+    }
+  }
+  return out;
+}
+
+/** The sentence that states cash settlement of this instrument's principal: every note, its year, or the only note. */
+function settlementFor(instrument: string, count: number, sentences: SettlementSentence[]): SettlementSentence | null {
+  return sentences.find((s) => s.scope === "ALL_NOTES")
+    ?? sentences.find((s) => s.scope === "NAMED_NOTES" && s.years.some((y) => instrument.includes(y)))
+    ?? (count === 1 ? sentences.find((s) => s.scope === "UNNAMED_NOTES") ?? null : null);
+}
+
+function convertiblesComponent(sources: IxSource[], price: number, settlement: SettlementSentence[] | null = null): Record<string, unknown> | null {
   const found = findInSources(sources, (doc) => {
     const groups = debtGroups(doc).filter((g) => groupValue(g, [CONVERSION_PRICE, CONVERSION_RATIO]) != null);
     if (groups.length > 0) return groups;
@@ -1007,15 +1175,34 @@ function convertiblesComponent(sources: IxSource[], price: number): Record<strin
       incrementalShares: shares != null && inTheMoney ? round(shares) : (shares != null ? 0 : null),
     };
   });
-  const unresolved = instruments.filter((i) => i.ifConvertedShares == null).length;
+  // Stated cash settlement of principal: the shares for the conversion value above principal at the price (2.5.11).
+  const settled = instruments.map((i) => {
+    if (settlement == null) return i;
+    const stated = settlementFor(String(i.instrument), instruments.length, settlement);
+    const nss = !stated || i.ifConvertedShares == null ? null
+      : !i.inTheMoney ? 0
+      : i.principal != null ? round(Math.max(0, i.ifConvertedShares - i.principal / price)) : null;
+    return {
+      ...i,
+      principalSettlement: stated ? { stated: "PRINCIPAL_IN_CASH", scope: stated.scope, sentence: stated.sentence, sectionHeading: stated.sectionHeading, documentUrl: stated.documentUrl, filingDate: stated.filingDate, accessionNumber: stated.accessionNumber } : null,
+      netShareSettlementShares: nss,
+    };
+  });
+  const unresolved = settled.filter((i) => i.ifConvertedShares == null).length;
+  const cashSettled = settled.filter((i) => (i as Record<string, unknown>).principalSettlement != null);
+  const nssUnresolved = cashSettled.some((i) => (i as Record<string, unknown>).netShareSettlementShares == null);
   return {
     component: "convertible_debt",
-    instruments,
+    instruments: settled,
     method: "if_converted_when_in_the_money",
-    ifConvertedShares: instruments.reduce((sum, i) => sum + (i.ifConvertedShares ?? 0), 0),
-    incrementalShares: unresolved === instruments.length ? null : instruments.reduce((sum, i) => sum + (i.incrementalShares ?? 0), 0),
+    ifConvertedShares: settled.reduce((sum, i) => sum + (i.ifConvertedShares ?? 0), 0),
+    incrementalShares: unresolved === settled.length ? null : settled.reduce((sum, i) => sum + (i.incrementalShares ?? 0), 0),
     unresolvedInstruments: unresolved,
-    note: "Shares are the filing's count issuable on conversion at the period end when tagged (it can be the maximum, make-whole included); else principal outstanding at the period end (a face amount then, or a carrying amount well below the issue's face), else the face amount or an issue-date carrying amount (principalBasis says which), times a conversion ratio that agrees with the conversion price, else divided by the price. Net-share or cash settlement and capped calls are not modeled.",
+    settlementText: settlement == null ? "NOT_READ" : "READ",
+    // The same count with each note whose principal the filing says is settled in cash at its net shares; null when none is.
+    incrementalSharesNetShareSettlement: cashSettled.length === 0 || unresolved === settled.length || nssUnresolved ? null
+      : settled.reduce((sum, i) => sum + Number((i as Record<string, unknown>).principalSettlement != null ? (i as Record<string, unknown>).netShareSettlementShares : (i.incrementalShares ?? 0)), 0),
+    note: "Shares are the filing's count issuable on conversion at the period end when tagged (it can be the maximum, make-whole included); else principal outstanding at the period end (a face amount then, or a carrying amount well below the issue's face), else the face amount or an issue-date carrying amount (principalBasis says which), times a conversion ratio that agrees with the conversion price, else divided by the price. Where the filing states principal is settled in cash, netShareSettlementShares is the conversion value above principal in shares at the price; capped calls are not modeled.",
     source: sourceRef(source, null),
   };
 }
@@ -1033,13 +1220,16 @@ const PREFERRED_DIVIDEND_RATE = ["PreferredStockDividendRatePercentage"];
  * common shares issuable on conversion and the conversion price. MRVL's Series A (2.0M preferred
  * shares, issued to NVIDIA) converts into up to 21.8M common shares at $91.84.
  */
-// A preferred conversion the filing states in words, in two exact forms only (2.5.10): a per-share
+// A preferred conversion the filing states in words (2.5.10; more wordings in 2.5.11): a per-share
 // ratio ("The Preferred Stock will convert on a one-for-one basis into shares of our common stock",
 // LITE; "each share of Preferred Stock is convertible into 10 shares of common stock") or an aggregate
 // ("convertible in the aggregate into a maximum of approximately 21.8 million shares of our common stock").
-const PREF_ONE_FOR_ONE_RE = /\bpreferred stock\b[^.]{0,120}\bconvert(?:s|ible)?\b[^.]{0,40}\bon a one[- ]for[- ]one basis\b/i;
-const PREF_PER_SHARE_RE = /\beach share of (?:the |our )?(?:series [a-z0-9-]+ )?(?:convertible )?preferred stock\b[^.]{0,80}\bconvertible into ([0-9][0-9,]*(?:\.[0-9]+)?) shares of (?:our |the company['’]s )?common stock\b/i;
-const PREF_AGGREGATE_RE = /\bpreferred stock\b[^.]{0,120}\bconvertible in the aggregate into (?:a maximum of )?(?:approximately )?([0-9][0-9,]*(?:\.[0-9]+)?)( million)? shares of (?:our |the company['’]s )?common stock\b/i;
+const PREF_ONE_FOR_ONE_RE = /\bpreferred stock\b[^.]{0,120}\bconvert(?:s|ible)?\b[^.]{0,40}\bon a (?:one[- ](?:for|to)[- ]one|1[- ]for[- ]1|1:1) basis\b/i;
+// "each share of Series A Preferred Stock is convertible, at the option of the holder, into 10 shares of common stock" (2.5.11: text between).
+const PREF_PER_SHARE_RE = /\beach share of (?:the |our )?(?:series [a-z0-9-]+ )?(?:convertible )?preferred stock\b[^.]{0,80}\bconvertible\b[^.]{0,60}?\binto ([0-9][0-9,]*(?:\.[0-9]+)?) shares of (?:our |the company['’]s )?(?:class [a-z] )?common stock\b/i;
+// "a conversion rate of 10 shares of common stock for each share of Series A Preferred Stock" (2.5.11).
+const PREF_RATE_RE = /\bconversion (?:rate|ratio) of ([0-9][0-9,]*(?:\.[0-9]+)?) shares of (?:our |the company['’]s )?(?:class [a-z] )?common stock (?:for each|per) share of (?:the |our )?(?:series [a-z0-9-]+ )?(?:convertible )?preferred stock\b/i;
+const PREF_AGGREGATE_RE = /\bpreferred stock\b[^.]{0,120}\bconvertible (?:in the aggregate into|into an aggregate of) (?:a maximum of |up to )?(?:approximately )?([0-9][0-9,]*(?:\.[0-9]+)?)( million)? shares of (?:our |the company['’]s )?(?:class [a-z] )?common stock\b/i;
 
 export type PreferredConversionText = { ratio: number | null; aggregateShares: number | null; approximate: boolean; sentence: string; documentUrl: string | null };
 
@@ -1048,7 +1238,7 @@ export function preferredConversionTerms(matches: TextMatch[]): PreferredConvers
   for (const match of matches) {
     for (const sentence of collapse(match.contextText).split(CLAIM_SENTENCE_SPLIT_RE).map((x) => x.trim())) {
       const one = PREF_ONE_FOR_ONE_RE.test(sentence);
-      const per = PREF_PER_SHARE_RE.exec(sentence);
+      const per = PREF_PER_SHARE_RE.exec(sentence) ?? PREF_RATE_RE.exec(sentence);
       const agg = PREF_AGGREGATE_RE.exec(sentence);
       if (!one && !per && !agg) continue;
       const aggregate = agg ? parseFloat(agg[1].replace(/,/g, "")) * (agg[2] ? 1_000_000 : 1) : null;
@@ -1237,17 +1427,23 @@ export const SHARE_CLAIM_SEARCH_TERMS = [
   "one-for-one basis", "convertible in the aggregate",
   "exchangeable for shares", "exchangeable into shares", "redeemable for shares of", "simple agreement for future equity",
   "payable in shares", "settled in shares", "standby equity purchase agreement", "equity line of credit", "committed equity facility",
+  // 2.5.11: holdback and milestone shares, share-settled CVRs, issuance commitments, more preferred conversion wordings.
+  "holdback shares", "escrow shares", "milestone shares", "contingent value right", "obligated to issue", "committed to issue", "required to issue",
+  "one-to-one basis", "shares of common stock for each share of", "convertible into an aggregate of",
 ];
 const SHARE_CLAIM_KINDS: { kind: string; re: RegExp }[] = [
   { kind: "PRICE_PROTECTION", re: /\bprice[- ]protection\b/i },
   { kind: "ANTI_DILUTION_RIGHT", re: /\banti-?dilution (?:rights?|protections?|provisions?)\b/i },
   { kind: "FORWARD_SALE", re: /\bforward (?:sale|equity sale) agreements?\b/i },
-  { kind: "CONTINGENT_SHARES", re: /\bearn-?out shares\b|\bcontingently issuable (?:shares|common stock)\b|\bcontingent consideration\b[^.]{0,120}\b(?:in|of) (?:shares|common stock)\b/i },
+  { kind: "CONTINGENT_SHARES", re: /\bearn-?out shares\b|\bcontingently issuable (?:shares|common stock)\b|\bcontingent consideration\b[^.]{0,120}\b(?:in|of) (?:shares|common stock)\b|\b(?:holdback|escrow(?:ed)?|milestone) shares\b|\bshares (?:held|placed) in escrow\b/i },
   { kind: "CONVERTIBLE_PREFERRED", re: /\bconvertible preferred (?:stock|shares)\b/i },
   // Up-C units or exchangeable shares (2.5.10).
   { kind: "EXCHANGEABLE_INTERESTS", re: /\b(?:units?|interests?|shares|stock)\b[^.]{0,100}\b(?:exchangeable|redeemable) (?:for|into) (?:an equal number of )?(?:newly[- ]issued )?(?:shares of )?(?:our |the company['’]s )?(?:class [a-z] )?common stock\b/i },
   { kind: "SAFE", re: /\bsimple agreements? for future equity\b|\bSAFEs?\b/ },
   { kind: "SHARE_SETTLED_OBLIGATION", re: /\b(?:payable|settled|settleable|issuable)\b[^.]{0,30}\bin (?:shares of )?(?:our |the company['’]s )?(?:class [a-z] )?common stock\b/i },
+  // Contingent value rights settled in shares, and commitments to issue shares (2.5.11).
+  { kind: "CONTINGENT_VALUE_RIGHT", re: /\bcontingent value rights?\b/i },
+  { kind: "SHARE_ISSUANCE_COMMITMENT", re: /\b(?:obligated|committed|required) to issue\b[^.]{0,80}\b(?:shares|common stock)\b/i },
   { kind: "EQUITY_LINE", re: /\b(?:standby equity purchase agreement|equity line of credit|committed equity facility|equity purchase facility)\b/i },
   { kind: "WARRANT_AFTER_PERIOD_END", re: /\bsubsequent to (?:the )?(?:quarter|year|period)[- ]end\b[^.]{0,200}\bwarrants?\b|\bsubsequent to the end of the (?:quarter|year|period)\b[^.]{0,200}\bwarrants?\b/i },
 ];
@@ -1286,7 +1482,9 @@ export function shareClaimSignals(matches: TextMatch[]): Record<string, unknown>
       if (kind === "PRICE_PROTECTION" && REVENUE_TERM_RE.test(sentence)) return;
       if (kind === "ANTI_DILUTION_RIGHT" && INSTRUMENT_TERM_RE.test(sentence)) return;
       // Awards, notes and dividends settled in shares belong elsewhere; a claim is present or future, not past.
-      if ((kind === "SHARE_SETTLED_OBLIGATION" || kind === "EXCHANGEABLE_INTERESTS") && (AWARD_OR_NOTE_RE.test(sentence) || !PRESENT_OR_FUTURE_RE.test(sentence))) return;
+      if ((kind === "SHARE_SETTLED_OBLIGATION" || kind === "EXCHANGEABLE_INTERESTS" || kind === "SHARE_ISSUANCE_COMMITMENT") && (AWARD_OR_NOTE_RE.test(sentence) || !PRESENT_OR_FUTURE_RE.test(sentence))) return;
+      // A contingent value right is a share claim only when the sentence says it can be paid in shares.
+      if (kind === "CONTINGENT_VALUE_RIGHT" && !/\b(?:shares|common stock)\b/i.test(sentence)) return;
       const leadIn = list.slice(Math.max(0, i - 2), i).join(" ");
       if (!EQUITY_TERM_RE.test(`${leadIn} ${sentence}`)) return;
       seen.add(`${kind}|${sentence}`);
@@ -1409,6 +1607,9 @@ export type DilutionInput = {
   awardTableMatches?: TextMatch[];
   // Filing text read for untagged share claims; null when it was not read.
   claimMatches?: TextMatch[] | null;
+  // Filing text read for the exercise, expiry or redemption of warrants counted before the period end (2.5.11).
+  warrantLifecycleMatches?: TextMatch[] | null;  // Filing text read for a stated cash settlement of convertible principal (2.5.11).
+  convertibleSettlementMatches?: TextMatch[] | null;
 };
 
 /** Basic to diluted shares at a supplied price, from company disclosures only. */
@@ -1418,8 +1619,8 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
   const basicFound = findInSources(sources, basicShares);
   const options = optionsComponent(sources, price);
   const awards = awardsComponent(sources, input.awardTableMatches ?? []);
-  const warrants = warrantsComponent(sources, price);
-  const convertibles = convertiblesComponent(sources, price);
+  const warrants = warrantsComponent(sources, price, Array.isArray(input.warrantLifecycleMatches) ? warrantLifecycleSentences(input.warrantLifecycleMatches) : null);
+  const convertibles = convertiblesComponent(sources, price, Array.isArray(input.convertibleSettlementMatches) ? principalCashSettlement(input.convertibleSettlementMatches) : null);
   const preferred = convertiblePreferredComponent(sources, price, Array.isArray(input.claimMatches) ? preferredConversionTerms(input.claimMatches) : null);
   const atm = atmComponent(atmEvidence(input.atmMatches), price);
   const components = [options, awards, warrants, convertibles, preferred].filter((c): c is Record<string, unknown> => c != null);
@@ -1464,15 +1665,32 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
   if (badRatios.length > 0) {
     warnings.push({ code: "CONVERSION_RATIO_INCONSISTENT", message: `The tagged conversion ratio of ${badRatios.map((i) => `${i.instrument} (${i.conversionRatioPer1000} per 1,000 against a $${i.conversionPrice} price)`).join(", ")} is not the conversion rate (often a make-whole increase) and is not used.`, severity: "info" });
   }
+  const cashPrincipal = notes.filter((i) => i.principalSettlement != null);
+  if (cashPrincipal.length > 0) {
+    warnings.push({
+      code: "CONVERTIBLE_PRINCIPAL_SETTLED_IN_CASH",
+      message: `The filing states the principal of ${cashPrincipal.map((i) => i.instrument).join(", ")} is settled in cash, so conversion delivers shares only for the value above principal. dilutedSharesAtPrice counts them if-converted (the EPS basis); dilutedSharesAtPriceNetShareSettlement counts ${cashPrincipal.map((i) => `${i.netShareSettlementShares ?? "unresolved"} for ${i.instrument}`).join(", ")} instead.`,
+      severity: "info",
+    });
+  }
   const redeemed = notes.filter((i) => i.afterPeriodEnd != null);
   if (redeemed.length > 0) {
     warnings.push({ code: "CONVERTIBLE_REDEMPTION_AFTER_PERIOD_END", message: `A redemption or repurchase after the period end is tagged for ${redeemed.map((i) => `${i.instrument} (${(i.afterPeriodEnd as Record<string, unknown>).date})`).join(", ")}; its shares are counted as of the period end.`, severity: "warning" });
   }
+  const retiredText = (warrants?.retiredInText ?? []) as Record<string, unknown>[];
+  if (retiredText.length > 0) {
+    warnings.push({
+      code: "WARRANT_RETIRED_IN_TEXT",
+      message: `${retiredText.map((c) => `${c.class} (${c.count} as of ${c.asOf}: ${String(c.event).toLowerCase()} by ${c.eventDate})`).join("; ")}: the filing text states the class was exercised, expired or redeemed after its tagged count, so it is not counted; the sentence is quoted in retiredInText.`,
+      severity: "info",
+    });
+  }
   const earlyCounts = ((warrants?.classes ?? []) as Record<string, unknown>[]).filter((c) => c.countBeforePeriodEnd === true);
   if (earlyCounts.length > 0) {
+    const read = earlyCounts.every((c) => c.lifecycleText === "NO_EVENT_STATED");
     warnings.push({
       code: "WARRANT_COUNT_BEFORE_PERIOD_END",
-      message: `${earlyCounts.length} warrant class(es) are counted from a figure tagged before the report's period end and not restated at it; the filing text should confirm they remain outstanding: ${earlyCounts.map((c) => `${c.class} ${c.outstanding} as of ${c.asOf}`).join("; ")}.`,
+      message: `${earlyCounts.length} warrant class(es) are counted from a figure tagged before the report's period end and not restated at it; ${read ? "the filing text was read and states no exercise, expiry or redemption of them, which does not prove they remain outstanding" : "the filing text should confirm they remain outstanding"}: ${earlyCounts.map((c) => `${c.class} ${c.outstanding} as of ${c.asOf}`).join("; ")}.`,
       severity: "warning",
     });
   }
@@ -1558,6 +1776,9 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
       dilutionPctAtPrice: basic > 0 ? round(((diluted - basic) / basic) * 100, 2) : null,
       grossSharesAllInstruments: round(gross),
       grossDilutionPct: basic > 0 ? round(((gross - basic) / basic) * 100, 2) : null,
+      // Convertibles whose principal the filing says is settled in cash at their net shares; null when none is (2.5.11).
+      convertibleDebtNetShareSettlement: convertibles && convertibles.incrementalSharesNetShareSettlement != null ? convertibles.incrementalSharesNetShareSettlement : null,
+      dilutedSharesAtPriceNetShareSettlement: convertibles && typeof convertibles.incrementalSharesNetShareSettlement === "number" ? round(diluted - inc(convertibles) + convertibles.incrementalSharesNetShareSettlement) : null,
       atmPotentialShares: atmShares,
       dilutedSharesAtPriceWithAtm: atmShares != null ? round(diluted + atmShares) : null,
       formula: "basic + options (treasury stock) + unvested awards (gross) + warrants (treasury stock, vested) + convertibles and convertible preferred (if-converted when in the money)",

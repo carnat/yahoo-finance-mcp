@@ -529,8 +529,8 @@ consensus actions compose evidence and never fill a gap with an assumption.
   - options: `treasury_stock`, `gross` or `exclude`;
   - unvested awards: `gross` or `exclude`;
   - warrants: `treasury_stock`, `gross` or `exclude`, on vested or all;
-  - convertibles: `if_converted_when_in_the_money`, `if_converted_all` or
-    `exclude`;
+  - convertibles: `if_converted_when_in_the_money`, `if_converted_all`,
+    `net_share_settlement_when_stated` (2.5.11) or `exclude`;
   - ATM: `exclude` or `full_remaining_capacity`;
   - optional `known_issuance` rows.
 
@@ -1228,10 +1228,110 @@ consensus actions compose evidence and never fill a gap with an assumption.
     value for preferred that is not counted as shares at the price
     (`balances.preferredLiquidationPreferenceInEv`).
   - Without a tag it warns `PREFERRED_NOT_IN_ENTERPRISE_VALUE`.
-- Not changed:
-  - Net-share settlement of convertible notes is not modeled. LITE's notes
+- Not changed in 2.5.10 (both addressed in 2.5.11, below):
+  - Net-share settlement of convertible notes was not modeled. LITE's notes
     settle principal in cash, so if-converted shares overstate them.
-  - 52/53-week fiscal calendars still resolve to conventional period labels.
+  - 52/53-week fiscal calendars resolved to conventional period labels.
+
+## Warrant Lifecycle Text, Net-Share Settlement And 52/53-Week Years (2.5.11)
+
+- **Warrant exercise, expiry and redemption stated in text.**
+  - A warrant count tagged before the period end (an issuance, a prior year
+    end) says nothing about what happened since. Examples:
+    - ASTS's 10-Q counts 122,000 Private Placement Warrants as of 2025-12-31.
+      Its text says "the remaining 122,000 Private Placement Warrants were
+      exercised" in the quarter ended March 31, 2026.
+    - RKLB's 10-K counts 728,835 warrants issued on 2023-12-29. Its text says
+      "On November 14, 2024, all 728,835 common stock warrants were exercised".
+  - When a class is counted before the period end, the bridge searches the
+    filing text for past-tense exercise, expiry and redemption sentences,
+    using fixed phrases plus each class's count.
+  - A sentence retires the class only when all of these hold:
+    - it names the class, by its tagged count (`matchedBy: STATED_COUNT`) or by
+      a class name of two or more words (`CLASS_NAME`);
+    - it states the event for the whole class ("all", "the remaining", "in
+      full", or the class's own count; an expiry or redemption covers every
+      unexercised warrant);
+    - it dates the event after the tagged count and by the period end. The
+      latest date the sentence states by the period end is used, and the
+      earliest qualifying event wins.
+  - A retired class is listed in `retiredInText` with the quoted sentence
+    (`WARRANT_RETIRED_IN_TEXT`) and is not counted.
+  - These sentences never retire a class: negated ("No … were exercised"),
+    future or conditional sentences, partial exercises, and events after the
+    period end.
+  - Each class counted before the period end carries `lifecycleText`:
+    `NO_EVENT_STATED` when the text was read, `NOT_READ` otherwise.
+    `WARRANT_COUNT_BEFORE_PERIOD_END` says which applies. A class the text
+    says nothing about stays counted, since silence does not prove it is
+    outstanding or retired.
+- **Convertible principal settled in cash (LITE).**
+  - LITE's 10-K says "The principal amounts of all of our outstanding
+    convertible notes must be settled in cash."
+  - For a stated cash settlement, a note's `principalSettlement` quotes the
+    sentence, with a scope:
+    - `ALL_NOTES`: the sentence covers every note;
+    - `NAMED_NOTES`: it names the note's year ("2029 Notes", "notes due 2029");
+    - `UNNAMED_NOTES`: it names no note, and the company has only one.
+  - Such a note's `netShareSettlementShares` is
+    `max(0, if-converted shares − principal / price)` in the money, else 0.
+  - Settlement "at our election", "may" or "can" is not a stated cash
+    settlement. Those notes stay if-converted only.
+  - `dilutedSharesAtPrice` keeps the if-converted count (the EPS basis).
+    `bridge.dilutedSharesAtPriceNetShareSettlement` and
+    `convertibleDebtNetShareSettlement` report the net-share view beside it
+    (`CONVERTIBLE_PRINCIPAL_SETTLED_IN_CASH`).
+  - At $700, LITE's four notes are 9,449,102 shares if-converted and
+    7,228,673 net.
+  - `get_share_count_scenarios` takes
+    `convertibles: net_share_settlement_when_stated`. Notes without a stated
+    cash settlement stay if-converted, and their method says so.
+  - Capped calls are not modeled.
+- **52/53-week fiscal identity.**
+  - `fiscal-calendar.ts` / `fiscal_calendar.py` read a period's fiscal year
+    and quarter from the date a week before its end. A year ending January 2,
+    2027 is fiscal 2026. AEHR's year ending May 29, 2026 is fiscal 2026.
+  - A retailer that names its year by the start (a "fiscal 2025" ending
+    February 2026) is not detected. Where a filing states the fiscal year,
+    that stated year wins.
+  - **Guidance target periods.**
+    - "For the fiscal year ending June 25, 2027" (AEHR) now reads as FY2027,
+      with `periodEnd: 2027-06-25` and basis `TEXT_PERIOD_END`. Before, its
+      `targetPeriod` was null.
+    - An end date after a named period ("third quarter of fiscal 2027 ending
+      October 30, 2026") is kept in `periodEnd`. An impossible date is not
+      read.
+  - **Guidance-history actuals.**
+    - FY labels use the fiscal year the annual report states (companyfacts
+      `fy` of a 10-K's own latest year), else the period-end rule.
+    - Calendar quarters and first halves use the week-shifted end: a quarter
+      ending April 5 is Q1.
+    - For non-calendar years whose fiscal year an annual report states,
+      quarters are counted back from the year end
+      (`fiscalQuarterMapping: FILING_STATED_FISCAL_YEAR`). The year in
+      progress is counted from a projected end 52 weeks after the latest.
+    - Without a stated year, fiscal quarters stay
+      `NOT_EVALUATED_FISCAL_QUARTER_MAPPING`.
+  - The consensus curve's `fiscalYear` uses the same rule.
+  - Filing search results and annual geographic revenue now take the fiscal
+    year from the filing's period of report, not its filing date, in both
+    runtimes. The Worker had labelled a December 2025 10-K filed in February
+    2026 as FY2026.
+- **Claim census.** Three kinds are added:
+  - `CONTINGENT_SHARES` now also covers holdback, escrow and milestone shares.
+  - `CONTINGENT_VALUE_RIGHT`: counted only when the sentence mentions shares
+    or common stock.
+  - `SHARE_ISSUANCE_COMMITMENT`: "obligated/committed/required to issue …
+    shares". Awards are excluded, and the sentence must be present or future
+    tense.
+- **Preferred conversion wordings.** These are added:
+  - one-to-one and 1:1;
+  - "each share … convertible, at the option of the holder, into N shares";
+  - "a conversion rate of N shares of common stock for each share of …
+    preferred stock";
+  - "convertible into an aggregate of N shares".
+
+  The scan remains a fixed list (`completeClaimInventory: false`).
 
 ## Non-US Primary Filings
 

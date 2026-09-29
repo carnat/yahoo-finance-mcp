@@ -307,6 +307,12 @@ class TestConsensusCurve(unittest.TestCase):
         self.assertEqual(_cell(thin, "FY+1", "eps")["coverage"], "PROVIDER_COVERED")  # 2027-09-25 is FY+1 of 2026-09-26
         self.assertEqual(_cell(thin, "FY+1", "revenue")["coverage"], "PROVIDER_NOT_COVERED")
 
+    def test_fiscal_year_ending_in_early_january(self) -> None:
+        # 2.5.11: a 52/53-week year ending January 2, 2027 is fiscal 2026, not 2027.
+        trend = [{"period": "0y", "endDate": "2027-01-02", "earningsEstimate": {"avg": 1.0, "numberOfAnalysts": 5}, "revenueEstimate": {}}]
+        curve = ev.build_consensus_curve("amdx", [ev.yahoo_consensus_input(trend, retrieved_at=AS_OF, financial_currency="USD")], AS_OF)
+        self.assertEqual([p["fiscalYear"] for p in curve["periods"][:2]], [2026, 2027])
+
     def test_currency_and_period_identity_conflicts(self) -> None:
         adr = self.out["curveAdr"]
         fy0 = _cell(adr, "FY0", "eps")
