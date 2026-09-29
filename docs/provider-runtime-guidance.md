@@ -897,6 +897,246 @@ consensus actions compose evidence and never fill a gap with an assumption.
   payload to carry fields. A missing authority field on an error means no
   authority, never an implied selection.
 
+## Exercised Warrants And Convertibles At Period End (2.5.9)
+
+- The dilution bridge, and `get_share_count_scenarios`, which reads it, no
+  longer count an exercise as warrants outstanding, and read convertible notes
+  as of the period end.
+  - VRT's 2025 10-K tags `ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights`
+    = 4,812,521 on 2024-12-06. That figure is the shares issued when its
+    private placement warrants were exercised cashlessly. The same date and
+    class also carry `ClassOfWarrantOrRightNumberOfWarrantsExercised` =
+    5,266,667, and the count sits on the equity-statement axis.
+  - Before this fix the bridge read the 4,812,521 as private placement
+    warrants outstanding. The 10-K states that none were outstanding at
+    2025-12-31.
+- A warrant count is not read as outstanding when it is:
+  - on `StatementEquityComponentsAxis` (an equity-statement movement); or
+  - tagged together with a warrants-exercised count for the same class and
+    date.
+
+  These counts are listed in `WARRANT_EXERCISE_NOT_OUTSTANDING` with their
+  reason. VRT's warrants are now `notDisclosed`, and its scenarios carry
+  options and share awards only.
+- A count dated before the period end is still read, because some outstanding
+  warrants are tagged only at issuance (AAOI's Amazon warrant, 2025-03-13).
+  Such a class carries `countBeforePeriodEnd: true` and a
+  `WARRANT_COUNT_BEFORE_PERIOD_END` warning, so the filing text can confirm it
+  is still outstanding.
+- A class with no exercisable warrants adds 0 shares whatever its strike.
+- A count followed by an exercise of the same class, dated after the count
+  and by the period end, is not read as outstanding (`EXERCISED_AFTER_COUNT`).
+  The exercise concepts include
+  `StockIssuedDuringPeriodSharesExerciseOfWarrants`. BE's Oracle warrant
+  (3,531,073 shares at $113.28, tagged at issuance 2025-10-28) was exercised
+  on a cashless basis on 2026-05-01 for 1,905,433 shares. Its entry in the
+  warning names that exercise.
+- A class that a newer filing shows exercised or retired is not restored from
+  an older fallback filing. BE's 2025 10-K still counts the Oracle warrant.
+- Convertible notes are read as of the period end:
+  - Shares come from the filing's own count issuable on conversion at the
+    period end (`DebtInstrumentConvertibleNumberOfSharesAvailableForConversion`),
+    when tagged (`ifConvertedBasis: shares_issuable_tagged_at_period_end`).
+    BE tags the maximum, make-whole included: 2030 notes 19,554,000; 2029
+    notes 1,714,619; 2028 notes 59,486.
+  - Otherwise shares come from principal outstanding at the period end
+    (`principalBasis: outstanding_at_period_end`). That principal is a face
+    amount tagged then, or the instrument's carrying amount when it is below
+    95% of the issue's face. BE's 2028 notes had $0.787M left of $632.5M, and
+    its 2029 notes $26.971M of $402.5M. A carrying amount close to face is the
+    same notes net of discount, so the face is kept. Without either figure the
+    issue's face is used, with `CONVERTIBLE_PRINCIPAL_NOT_AT_PERIOD_END`.
+  - A tagged conversion ratio is used only when ratio × conversion price is
+    within 2% of $1,000. BE tags only each note's make-whole increase (2030:
+    2.6926 against $194.97, whose rate is 5.1290), so it is flagged
+    `RATIO_INCONSISTENT_WITH_PRICE` (`CONVERSION_RATIO_INCONSISTENT`) and the
+    price is used.
+  - A redemption or repurchase tagged after the period end is flagged
+    (`afterPeriodEnd`, `CONVERTIBLE_REDEMPTION_AFTER_PERIOD_END`), and the
+    notes are still counted as of the period end. BE's 2028 notes were
+    redeemed in July 2026, so the bridge total 21,328,105 includes their
+    59,486 shares.
+- `get_valuation_snapshot` reads the bridge. Its diluted shares and the
+  convertible principal it removes from debt follow these fixes.
+- Not changed: warrants that expired or were redeemed without an exercise tag
+  are still read from their last tagged count. Such a count is flagged when
+  it predates the period end.
+
+### Claim coverage and untagged share claims (2.5.9, COHR)
+
+- The bridge's `status` covers tagged instruments only. `COMPUTED` means every
+  tagged instrument was resolved. It never means every claim on the equity was
+  found.
+  - Every bridge carries `claimCoverage`:
+    - `scope: TAGGED_INSTRUMENTS`;
+    - `completeClaimInventory: false`;
+    - `modeledComponents`;
+    - `textScan` (`READ` or `NOT_READ`), with the claim kinds it looks for;
+    - the count of open claims.
+  - COHR's FY2026 10-K tags options and awards only; nothing else beyond the
+    cover count. Before this fix it read `COMPUTED` at about 201M shares.
+- The filing text is searched for share claims that no tagged component
+  models (`SHARE_CLAIM_SEARCH_TERMS`):
+  - `PRICE_PROTECTION`: price protection granted with a share sale;
+  - `ANTI_DILUTION_RIGHT`: an investor's anti-dilution right;
+  - `FORWARD_SALE`: a forward sale agreement;
+  - `CONTINGENT_SHARES`: earnout or contingent-consideration shares;
+  - `CONVERTIBLE_PREFERRED`: convertible preferred stock.
+
+  Each claim is quoted in `unquantifiedShareClaims`: up to four sentences,
+  their lead-in, and the document and filing date.
+- A claim is never quantified or added to any count.
+  - An open claim (`UNQUANTIFIED`) makes the bridge `PARTIAL` and raises
+    `UNQUANTIFIED_SHARE_CLAIMS`.
+  - COHR's March 2, 2026 NVIDIA purchase agreement (7,788,161 shares at
+    $256.80) carries a six-month price-protection provision. The provision
+    can be settled in additional shares, so COHR now reads `PARTIAL`.
+  - The count itself is unchanged.
+- The scan skips terms that are not share claims:
+  - A price-protection sentence about distributors, customers, revenue,
+    returns or inventory is revenue recognition, not a share claim. An
+    example is COHR's variable-consideration policy.
+  - An anti-dilution sentence about a warrant's or note's own adjustment
+    terms is skipped, because the bridge already reads that instrument.
+  - A context window's cut first and last sentences are never quoted.
+  - An initialism such as "U.S." does not end a sentence.
+- Convertible preferred status comes from tags, not text:
+  - If the preferred and temporary-equity share counts tagged at the period
+    end are all zero, the claim is closed (`TAGGED_NONE_OUTSTANDING`).
+  - If any is positive, the claim stays open and the count is quoted.
+  - Text saying a series was converted only sets `extinguishmentStated`,
+    because the sentence can describe another series.
+  - COHR's Series B and BE's SK ecoplant preferred are tagged zero and
+    closed.
+- If the text search fails, `textScan` is `NOT_READ` and the bridge warns
+  `SHARE_CLAIM_TEXT_NOT_READ`. An unread search is never reported as "no
+  claims".
+- `get_share_count_scenarios` completeness is scoped the same way:
+  - `COMPLETE` is replaced by `TAGGED_INSTRUMENTS_RESOLVED`.
+  - `EXCLUDES_UNQUANTIFIED_CLAIMS` and `CLAIM_TEXT_NOT_READ` make the
+    scenarios `PARTIAL`.
+  - The claims and `claimCoverage` are passed through.
+- `get_valuation_snapshot` passes the open claim kinds through as
+  `shares.unquantifiedShareClaims`, with `shares.claimScope`, and raises
+  `UNQUANTIFIED_SHARE_CLAIMS`.
+
+### Metric-first guidance and its basis (2.5.9, COHR)
+
+- `extract_guidance` returned `NOT_DISCLOSED` for COHR's Q4 FY2026 release.
+  Its outlook puts the metric first: "Revenue for the first quarter of fiscal
+  2027 is expected to be between $2.2 billion and $2.4 billion".
+  - The keyword-first patterns needed "expects" or "guidance" before the
+    metric.
+  - The gross-margin pattern allowed no digits between the label and the
+    range, and "fiscal 2027" has digits.
+- Keyword-first wording still wins. Metric-first wording is read when there is
+  none:
+  - the metric (revenue, gross margin, EPS or earnings per share);
+  - up to 120 characters with no period, dollar sign or percent sign;
+  - "expected, projected, forecast, anticipated or estimated to be, range or
+    total";
+  - the range.
+
+  Nothing reported can sit between the metric and the verb, so a reported
+  value is never read as guidance.
+- Every range carries `basis`: `NON_GAAP`, `GAAP` or `NOT_STATED`. It is read
+  from the range's own clause: the sentence up to the range, and the words
+  after it up to the next value or clause break.
+  - COHR's gross margin (39.5–41.5%) and EPS ($1.85–2.05) are `NON_GAAP`.
+  - Its revenue ($2.2–2.4B) is `NOT_STATED`.
+  - In "GAAP EPS … $1.00 and $1.20 and non-GAAP EPS between …", the first
+    range stays `GAAP`.
+- `get_guidance_history` entries and outcomes carry the basis.
+  - A non-GAAP range is never scored against a reported GAAP actual:
+    `NOT_EVALUATED_NON_GAAP_BASIS`, with both positions null.
+  - The actual stays visible.
+- A scaled amount is a whole number: 2.05 billion reads 2050000000, not
+  2049999999.9999998. This covers guidance history amounts and
+  `extract_guidance`/`extract_earnings_metrics` text values.
+- The local server now reads the same release as the Worker: the newest 8-K
+  reporting results of operations (Item 2.02). Before this fix it took the
+  newest 8-K of any kind. For COHR that was the Aug 31, 2026 8-K (Items 5.02,
+  8.01), whose text has no guidance.
+  - Any 8-K is still the fallback when none reports Item 2.02.
+  - `list_sec_company_filings` rows carry each 8-K's `items`, in both
+    runtimes.
+
+### Geographic denominators, ± guidance and customer warrants (2.5.9, MRVL)
+
+- **Geographic share.** MRVL's 10-Q geographic table puts a "% of Total"
+  cell beside each value. Its total row has no label and no percent cells,
+  so the cell index of China's value landed on the prior year's total.
+  - China's $1,161.5M was divided by $2,006.1M, which read 57.9%. The table
+    states 42%.
+  - The value and the total are now paired by position among amount cells:
+    - percent cells, including a number followed by a bare "%" cell, are
+      skipped;
+    - dash cells count as zero placeholders.
+
+    China now reads $1,161.5M of $2,739.3M, 42.4%.
+  - Under a "% of Total" header, the table's own percentage must agree with
+    the computed share within 1 point. Otherwise the table is not read.
+  - A "Change" column is not a share and is not checked.
+  - An unlabeled total row is quoted as "Total (unlabeled row)".
+  - The column is named from the header rows: "Three Months Ended August 1,
+    2026".
+  - A quarterly report's period is that column, not "FY" plus the filing
+    year.
+  - The XBRL path now pairs a region fact only with the total for the same
+    period. A 10-Q also carries the prior year's total.
+  - The local server also checks the table that encloses a match. MRVL's
+    table tag starts about 5,000 characters before "China", because of
+    inline styles.
+- **Midpoint and tolerance guidance.** Ranges stated as "Net revenue is
+  expected to be $3.150 billion +/- 5%" and "GAAP diluted net income per
+  share is expected to be $0.53 +/- $0.05" are read (`statedAs:
+  MIDPOINT_PLUS_MINUS`).
+  - The bounds are computed with exact decimal arithmetic: $2.9925–3.3075B
+    and $0.48–0.58.
+  - A tolerance can be a percent, or an amount in its own unit (the
+    midpoint's when it names none). A bare tolerance with no $, % or unit is
+    not read.
+  - "Net income per share" counts as EPS.
+  - A range for the same metric on another basis is kept in `alternates`:
+    MRVL's non-GAAP gross margin 57.5–58.5% and EPS $1.05–1.15 beside the
+    GAAP ranges.
+- **Warrant vesting.**
+  - The bridge now reads `ClassOfWarrantOrRightSharesVested`. MRVL's fiscal
+    2025 customer warrant has 1.2M of its 4.2M shares vested, and its fiscal
+    2026 warrant 0 of 1.0M. Before this fix, all of them were treated as
+    exercisable.
+  - A class with a tagged vesting term but no vested or unvested count has an
+    unresolved exercisable count (`WARRANT_VESTING_NOT_TAGGED`). It is never
+    taken as all outstanding, in the bridge or in scenarios.
+  - `exercisableBasis` says which rule applied.
+- **Warrants after the period end.**
+  - A warrant count dated after the report's period end, or tagged as a
+    subsequent event, is not a period-end class.
+  - Before this fix, MRVL's 59.0M customer warrant at $206.58, issued after
+    the quarter, was counted as a class named "Subsequent Event".
+  - It is now a `WARRANT_AFTER_PERIOD_END` claim, `UNQUANTIFIED` and out of
+    every count. The claim quotes the filing's sentence and the next one
+    (`leadOut`): "eligible for vesting from our third quarter of fiscal 2027
+    through the end of fiscal 2033, upon meeting certain revenue milestone
+    conditions or time-based conditions".
+  - Which fiscal year's milestones vest which shares is not tagged, so no
+    split by year is given.
+- **Convertible preferred component.**
+  - A new `convertible_preferred` component covers preferred stock
+    outstanding at the period end. It uses the tagged
+    `PreferredStockConvertibleSharesIssuable` and
+    `PreferredStockConvertibleConversionPrice`, if-converted when in the
+    money.
+  - MRVL's Series A (2.0M preferred shares, issued to NVIDIA) converts into up
+    to 21.8M common shares at $91.84. It adds 0 at $80, 21.8M at $100, and
+    21.8M to the gross count.
+  - The issuable count is tagged at issuance, so it is flagged
+    `countBeforePeriodEnd`.
+  - A text claim for a preferred series the component resolves reads
+    `MODELED_IN_BRIDGE`.
+  - Scenarios give it the `convertibles` treatment.
+  - Liquidation preference, dividends and redemption are not modeled.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

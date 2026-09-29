@@ -137,14 +137,116 @@ _GROSS_MARGIN_RE = re.compile(r"gross margin[^0-9]{0,20}([0-9]{1,2}(?:\.[0-9]+)?
 _EPS_RE = re.compile(r"(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per share)[^$]{0,25}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|and|-|–|—)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", _F)
 
 
+# Metric first, forward verb after it (2.5.9, COHR): "Revenue for the first
+# quarter of fiscal 2027 is expected to be between $2.2 billion and $2.4
+# billion." No period, dollar sign or percent sign may sit between the metric
+# and the verb, so a reported value is never read as the range.
+_FORWARD_VERB = r"\b(?:expected|projected|forecast(?:ed)?|anticipated|estimated)\s+to\s+(?:be|range|total)\b"
+_METRIC_FIRST_REVENUE_RE = re.compile(rf"\brevenues?\b[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%]{{0,30}}\$\s*{_AMOUNT}{_RANGE_SEP}\$?\s*{_AMOUNT}", _F)
+_METRIC_FIRST_GROSS_MARGIN_RE = re.compile(rf"\bgross margin\b[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%0-9]{{0,30}}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%{_RANGE_SEP}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%", _F)
+_EPS_LABEL = r"\b(?:eps|earnings per share|net (?:income|earnings|loss) per share)\b"
+_METRIC_FIRST_EPS_RE = re.compile(rf"{_EPS_LABEL}[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%]{{0,30}}\$\s*([0-9]+(?:\.[0-9]+)?){_RANGE_SEP}\$?\s*([0-9]+(?:\.[0-9]+)?)", _F)
+# A midpoint and a tolerance (2.5.9, MRVL): "Net revenue is expected to be
+# $3.150 billion +/- 5%", "... net income per share is expected to be $0.53
+# +/- $0.05 per share". The bounds are computed exactly (_pm_bounds).
+_PLUS_MINUS = r"(?:\+\s*/\s*[-−]|±|plus or minus)"
+_PM_NUMBER = r"([0-9][0-9,]*(?:\.[0-9]+)?)"
+_PM_UNIT = r"(?:\s*(billion|million|thousand|bn|m|k)\b)?"
+_PM_TOLERANCE = rf"\s*{_PLUS_MINUS}\s*(\$)?\s*{_PM_NUMBER}\s*(%|(?:billion|million|thousand|bn|m|k)\b)?"
+_METRIC_FIRST_REVENUE_PM_RE = re.compile(rf"\brevenues?\b[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%]{{0,30}}\$\s*{_PM_NUMBER}{_PM_UNIT}{_PM_TOLERANCE}", _F)
+_METRIC_FIRST_EPS_PM_RE = re.compile(rf"{_EPS_LABEL}[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%]{{0,30}}\$\s*{_PM_NUMBER}{_PM_UNIT}{_PM_TOLERANCE}", _F)
+_UNIT_EXP = {"billion": 9, "bn": 9, "million": 6, "m": 6, "thousand": 3, "k": 3}
+
+
+def _dec(text: str) -> tuple[int, int]:
+    t = text.replace(",", "")
+    dot = t.find(".")
+    return (int(t), 0) if dot < 0 else (int(t.replace(".", "")), -(len(t) - dot - 1))
+
+
+def _dec_text(n: int, exp: int, unit_exp: int) -> str:
+    """An exact decimal n x 10^exp written in units of 10^unit_exp, trailing zeros dropped."""
+    places = unit_exp - exp
+    neg = n < 0
+    digits = str(-n if neg else n)
+    if places > 0:
+        digits = digits.rjust(places + 1, "0")
+        digits = re.sub(r"\.?0+$", "", f"{digits[:-places]}.{digits[-places:]}")
+    elif places < 0:
+        digits = digits + "0" * (-places)
+    return f"{'-' if neg else ''}{digits}"
+
+
+def _pm_bounds(mid: str, mid_unit: str | None, dollar: str | None, tol: str, tol_unit: str | None) -> dict | None:
+    """The low and high of "midpoint +/- tolerance", in the midpoint's unit: a
+    percentage of the midpoint, or an amount in its own unit (the midpoint's
+    when it names none). A bare tolerance with no $, % or unit is not read."""
+    m_n, m_exp = _dec(mid)
+    t_n, t_exp = _dec(tol)
+    mid_exp = _UNIT_EXP.get((mid_unit or "").lower(), 0)
+    suffix = f" {mid_unit}" if mid_unit else ""
+    if tol_unit == "%":
+        # mid x (100 -/+ p) / 100
+        hundred = 100 * 10 ** (-t_exp)
+        exp = m_exp + t_exp - 2
+        return {"low": _dec_text(m_n * (hundred - t_n), exp, 0) + suffix, "high": _dec_text(m_n * (hundred + t_n), exp, 0) + suffix}
+    if not dollar and not tol_unit:
+        return None
+    tol_exp = _UNIT_EXP.get(tol_unit.lower(), 0) if tol_unit else mid_exp
+    exp = min(m_exp + mid_exp, t_exp + tol_exp)
+    mn = m_n * 10 ** (m_exp + mid_exp - exp)
+    tn = t_n * 10 ** (t_exp + tol_exp - exp)
+    return {"low": _dec_text(mn - tn, exp, mid_exp) + suffix, "high": _dec_text(mn + tn, exp, mid_exp) + suffix}
+
+
+# The basis a range is stated on, read from its own clause: the sentence up
+# to the range, and the words after it up to the next value or clause break
+# ("... between $1.85 and $2.05 on a non-GAAP basis.").
+_CLAUSE_START_RE = re.compile(r"(?:[.;!?]\s|•)", _F)
+_CLAUSE_TAIL_RE = re.compile(r"^[^.;,$%•]{0,80}?(?=[.;,$%•]|\sand\s|$)", _F)
+_NON_GAAP_RE = re.compile(r"\bnon-?\s?GAAP\b|\badjusted\b", _F)
+_GAAP_RE = re.compile(r"\bGAAP\b", _F)
+
+
+def _range_basis(text: str, at: int, length: int) -> str:
+    before = text[max(0, at - 200):at]
+    start = 0
+    for m in _CLAUSE_START_RE.finditer(before):
+        start = m.end()
+    tail = _CLAUSE_TAIL_RE.match(text[at + length:])
+    clause = before[start:] + text[at:at + length] + (tail.group(0) if tail else "")
+    if _NON_GAAP_RE.search(clause):
+        return "NON_GAAP"
+    return "GAAP" if _GAAP_RE.search(clause) else "NOT_STATED"
+
+
 def guidance_ranges(text: str) -> dict:
-    """Guidance ranges stated in release text; low and high are the number text as written."""
-    def pick(m):
-        return {"excerpt": m.group(0), "low": m.group(1), "high": m.group(2)} if m else None
+    """Guidance ranges stated in release text; low and high are the number text as
+    written (computed exactly for a midpoint and tolerance). Keyword-first wording
+    wins; metric-first wording ("revenue ... is expected to be between") is read
+    when there is none. Ranges for the same metric on another basis are kept as
+    alternates."""
+    def pick(*patterns):
+        found = []
+        for pattern, pm in patterns:
+            for m in pattern.finditer(text):
+                bounds = _pm_bounds(m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)) if pm else {"low": m.group(1), "high": m.group(2)}
+                if not bounds:
+                    continue
+                found.append({"excerpt": m.group(0), "low": bounds["low"], "high": bounds["high"],
+                              "basis": _range_basis(text, m.start(), len(m.group(0))), "statedAs": "MIDPOINT_PLUS_MINUS" if pm else "RANGE"})
+        if not found:
+            return None
+        primary, rest = found[0], found[1:]
+        alternates: list[dict] = []
+        for r in rest:
+            if r["basis"] != primary["basis"] and not any(a["basis"] == r["basis"] for a in alternates):
+                alternates.append(r)
+        return {**primary, "alternates": alternates}
     return {
-        "revenue": pick(_REVENUE_FIRST_RE.search(text)) or pick(_KEYWORD_FIRST_RE.search(text)),
-        "grossMargin": pick(_GROSS_MARGIN_RE.search(text)),
-        "eps": pick(_EPS_RE.search(text)),
+        "revenue": pick((_REVENUE_FIRST_RE, False), (_KEYWORD_FIRST_RE, False), (_METRIC_FIRST_REVENUE_RE, False), (_METRIC_FIRST_REVENUE_PM_RE, True)),
+        "grossMargin": pick((_GROSS_MARGIN_RE, False), (_METRIC_FIRST_GROSS_MARGIN_RE, False)),
+        "eps": pick((_EPS_RE, False), (_METRIC_FIRST_EPS_RE, False), (_METRIC_FIRST_EPS_PM_RE, True)),
     }
 
 

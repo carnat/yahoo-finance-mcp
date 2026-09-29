@@ -55,6 +55,23 @@ BRIDGE = {
     "warnings": [],
 }
 
+# 2.5.9 (COHR): tagged instruments all resolved is not a full claim inventory.
+_COVERED = {"scope": "TAGGED_INSTRUMENTS", "completeClaimInventory": False, "textScan": "READ"}
+_PP = {"kind": "PRICE_PROTECTION", "status": "UNQUANTIFIED", "sentences": ["The Purchase Agreement includes a price protection provision."]}
+CLAIM_BRIDGES = [
+    {"basicShares": {"shares": 195_832_246}, "components": [], "atmProgram": None, "claimCoverage": _COVERED, "unquantifiedShareClaims": []},
+    {"basicShares": {"shares": 195_832_246}, "components": [], "atmProgram": None, "claimCoverage": _COVERED, "unquantifiedShareClaims": [_PP]},
+    {"basicShares": {"shares": 195_832_246}, "components": [], "atmProgram": None},
+    # MRVL-like (2.5.9): convertible preferred, and a warrant class vesting on untagged conditions.
+    {"basicShares": {"shares": 876_900_000}, "atmProgram": None, "claimCoverage": _COVERED, "unquantifiedShareClaims": [],
+     "components": [
+         {"component": "warrants", "classes": [{"class": "Customer Warrant C", "outstanding": 500_000, "exercisable": None,
+                                                "exercisableBasis": "vesting_terms_without_vested_count", "exercisePrice": 50.0}]},
+         {"component": "convertible_preferred", "instruments": [{"instrument": "Convertible preferred stock", "ifConvertedShares": 21_800_000,
+                                                                 "ifConvertedBasis": "shares_issuable_tagged", "conversionPrice": 91.84}]},
+     ]},
+]
+
 SCENARIOS = [
     {"name": "base", "price": 40},
     {"name": "all-in", "price": 40, "options": "gross", "warrants": "gross", "warrant_vesting": "all", "convertibles": "if_converted_all",
@@ -137,6 +154,7 @@ def _python_outputs() -> dict:
     return {
         "scenarios": ss.share_count_scenarios("asts", BRIDGE, parsed["scenarios"]),
         "noBasic": ss.share_count_scenarios("asts", {**BRIDGE, "basicShares": None}, parsed["scenarios"][:1]),
+        "claims": [ss.share_count_scenarios("cohr", b, parsed["scenarios"][:1]) for b in CLAIM_BRIDGES],
         "invalid": [ss.parse_share_scenarios(case) for case in INVALID],
         "schedule": schedule,
         "emptySchedule": fs.funding_capex_schedule(ticker="none", period_end=None, source=None, facts=[], statements=[], balances=None,
@@ -155,6 +173,7 @@ const parsed = ss.parseShareScenarios(f.scenarios);
 const out = {
   scenarios: ss.shareCountScenarios("asts", f.bridge, parsed.scenarios),
   noBasic: ss.shareCountScenarios("asts", { ...f.bridge, basicShares: null }, parsed.scenarios.slice(0, 1)),
+  claims: f.claimBridges.map((b) => ss.shareCountScenarios("cohr", b, parsed.scenarios.slice(0, 1))),
   invalid: f.invalid.map((c) => ss.parseShareScenarios(c)),
   schedule: fs.fundingCapexSchedule({ ticker: "asts", periodEnd: f.pe, source: { filingType: "10-Q" }, facts: f.facts, statements: f.statements,
     balances: { cashAndEquivalents: 2288253000, shortTermInvestments: null }, atmRemainingUsd: 400000000, atmEvidence: { kind: "remaining_capacity", amountUsd: 400000000 } }),
@@ -177,7 +196,7 @@ def _worker_outputs() -> dict:
                            cwd=WORKER, check=True, capture_output=True, text=True, timeout=120)
             bundles.append(out.as_uri())
         fx = Path(tmp) / "fixtures.json"
-        fx.write_text(json.dumps({"bridge": BRIDGE, "scenarios": SCENARIOS, "invalid": INVALID, "pe": PE, "facts": FACTS,
+        fx.write_text(json.dumps({"bridge": BRIDGE, "claimBridges": CLAIM_BRIDGES, "scenarios": SCENARIOS, "invalid": INVALID, "pe": PE, "facts": FACTS,
                                   "statements": STATEMENTS, "timingCases": TIMING_CASES}), encoding="utf-8")
         harness = Path(tmp) / "harness.mjs"
         harness.write_text(_HARNESS, encoding="utf-8")
@@ -252,6 +271,24 @@ class TestShareScenarios(unittest.TestCase):
         self.assertEqual((out["selectedScenario"], out["selectedDenominator"], out["decisionUse"], out["status"]), (None, None, "EVIDENCE_ONLY", "PARTIAL"))
         self.assertEqual(self.out["noBasic"]["status"], "NOT_FOUND")
         self.assertIsNone(self.out["noBasic"]["scenarios"][0]["totals"]["resultingShares"])
+
+    def test_claim_coverage(self) -> None:
+        clean, claimed, unread = self.out["claims"][:3]
+        self.assertEqual((clean["status"], clean["scenarios"][0]["completeness"]), ("COMPUTED", "TAGGED_INSTRUMENTS_RESOLVED"))
+        self.assertFalse(clean["claimCoverage"]["completeClaimInventory"])
+        self.assertEqual((claimed["status"], claimed["scenarios"][0]["completeness"]), ("PARTIAL", "EXCLUDES_UNQUANTIFIED_CLAIMS"))
+        self.assertEqual(claimed["scenarios"][0]["totals"]["resultingShares"], 195_832_246, "an unquantified claim adds no shares")
+        self.assertEqual(claimed["unquantifiedShareClaims"][0]["kind"], "PRICE_PROTECTION")
+        self.assertEqual((unread["status"], unread["scenarios"][0]["completeness"], unread["claimCoverage"]["textScan"]), ("PARTIAL", "CLAIM_TEXT_NOT_READ", "NOT_READ"))
+
+    def test_convertible_preferred_and_unknown_vesting(self) -> None:
+        mrvl = self.out["claims"][3]["scenarios"][0]
+        pref = next(ln for ln in mrvl["instruments"] if ln["component"] == "convertible_preferred")
+        self.assertEqual((pref["thresholdPrice"], pref["count"]), (91.84, 21_800_000))
+        warrant = next(ln for ln in mrvl["instruments"] if ln["component"] == "warrants")
+        self.assertEqual((warrant["count"], warrant["included"], warrant["unresolvedReason"]), (None, False, "count not tagged"),
+                         "a class vesting on untagged conditions is never counted as all 500,000")
+        self.assertEqual(mrvl["completeness"], "EXCLUDES_UNRESOLVED_INSTRUMENTS")
 
     def test_validation(self) -> None:
         errors = [r.get("error") for r in self.out["invalid"]]

@@ -666,48 +666,164 @@ def awards_from_table(matches: list) -> dict | None:
 
 # Unvested warrant shares (e.g. a customer warrant that vests with purchases).
 _WARRANT_UNVESTED_RE = re.compile(r"Unvested\w*NumberOfSecuritiesCalledByWarrantsOrRights$|ClassOfWarrantOrRightUnvested\w*$", re.I)
+# Vested warrant shares at the period end (MRVL tags ClassOfWarrantOrRightSharesVested
+# per customer warrant: 1.2M of 4.2M, and 0 of 1.0M). Case-sensitive, so "Unvested" never matches (2.5.9).
+_WARRANT_VESTED_RE = re.compile(r"^ClassOfWarrantOrRight\w*Vested(?:Number)?$")
+# A vesting term tagged for a class says its shares vest on conditions; without a vested or
+# unvested count, how many are exercisable is unknown, never assumed to be all of them.
+_WARRANT_VESTING_TERM = "WarrantsAndRightsOutstandingVestingTerm"
+
+
+def _after_period_end(doc: IxDocument, f: IxFact) -> bool:
+    """A count dated after the report's period end, or tagged as a subsequent event: not a period-end instrument."""
+    end = doc.document_period_end
+    return any(re.search(r"SubsequentEventTypeAxis$", axis) for axis in f.dims) or (end is not None and f.period_end is not None and f.period_end > end)
+
+
+# A warrant count can be an event rather than warrants outstanding (2.5.9). VRT's 2025 10-K tags
+# ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights = 4,812,521 on 2024-12-06, the shares
+# issued when its private placement warrants were exercised cashlessly (5,266,667 warrants exercised, tagged
+# on the same date and class), in the equity statement; none of those warrants remained at 2025-12-31.
+# A count on the equity-statement axis, or with a warrants-exercised count for the same class and date, is
+# not read as outstanding. A count dated before the period end is still read (AAOI tags its outstanding
+# Amazon warrant only at issuance) and is flagged.
+_EQUITY_STATEMENT_AXIS = "StatementEquityComponentsAxis"
+_WARRANT_EXERCISED_CONCEPTS = ("ClassOfWarrantOrRightNumberOfWarrantsExercised", "ClassOfWarrantOrRightExercised")
+
+
+def _dims_within(inner: dict[str, str], outer: dict[str, str]) -> bool:
+    return all(outer.get(axis) == member for axis, member in inner.items())
+
+
+# An exercise of the class: warrants exercised or shares issued on exercise (BE tags Oracle's cashless exercise
+# on 2026-05-01 as StockIssuedDuringPeriodSharesExerciseOfWarrants on the warrant's class member).
+_WARRANT_EXERCISE_EVENT_RE = re.compile(r"WarrantsExercised|ExerciseOfWarrants")
+_CLASS_OF_WARRANT_AXIS = "ClassOfWarrantOrRightAxis"
+
+
+def _later_exercise(doc: IxDocument, f: IxFact) -> IxFact | None:
+    """An exercise of the same warrant class after the count and by the period end: the count no longer describes what is outstanding."""
+    axis = next((a for a in f.dims if a.endswith(_CLASS_OF_WARRANT_AXIS)), None)
+    if not axis or not f.period_end:
+        return None
+    member = f.dims[axis]
+    end = doc.document_period_end
+    hits = [g for g in doc.facts if _WARRANT_EXERCISE_EVENT_RE.search(g.local) and g.value is not None and g.value > 0 and g.dims.get(axis) == member
+            and g.period_end is not None and g.period_end > f.period_end and (end is None or g.period_end <= end)]
+    return _newest(hits)
+
+
+def _warrant_count_event(doc: IxDocument, f: IxFact) -> str | None:
+    """Why a tagged warrant count is an exercise or equity movement, not warrants outstanding; None when it is a count."""
+    if any(axis.endswith(_EQUITY_STATEMENT_AXIS) for axis in f.dims):
+        return "EQUITY_STATEMENT_MOVEMENT"
+    exercised = any(g.local in _WARRANT_EXERCISED_CONCEPTS and g.value is not None and g.period_end == f.period_end and _dims_within(g.dims, f.dims)
+                    for g in doc.facts)
+    if exercised:
+        return "WARRANT_EXERCISE"
+    return "EXERCISED_AFTER_COUNT" if _later_exercise(doc, f) else None
+
+
+def warrant_count_events(sources: list[IxSource]) -> list[dict]:
+    """Warrant counts not read as outstanding because they record an exercise or an equity movement."""
+    out: dict[str, dict] = {}
+    for source in sources:
+        for f in source.doc.facts:
+            if f.local not in _WARRANT_COUNT_CONCEPTS or f.value is None:
+                continue
+            reason = _warrant_count_event(source.doc, f)
+            if not reason:
+                continue
+            key = f"{f.name}|{_dims_key(f.dims)}|{f.period_end}|{f.value}"
+            if key in out:
+                continue
+            exercise = _later_exercise(source.doc, f) if reason == "EXERCISED_AFTER_COUNT" else None
+            out[key] = {
+                "class": " / ".join(member_label(v) for v in f.dims.values()) if f.dims else "Warrants (not itemized)",
+                "concept": f.name,
+                "value": f.value,
+                "asOf": f.period_end,
+                "reason": reason,
+                **({"exercise": {"concept": exercise.name, "value": exercise.value, "date": exercise.period_end}} if exercise else {}),
+                "filingType": source.filing_type,
+                "accessionNumber": source.accession_number,
+            }
+    return list(out.values())
+
+
+def _warrant_class_key(f: IxFact) -> str:
+    """A warrant class's identity across filings: its class-of-warrant member, else its dimensions."""
+    axis = next((a for a in f.dims if a.endswith(_CLASS_OF_WARRANT_AXIS)), None)
+    return f"{axis}={f.dims[axis]}" if axis else _dims_key(f.dims)
 
 
 def _warrants_component(sources: list[IxSource], price: float) -> dict | None:
-    def find(doc: IxDocument):
-        concept = next((c for c in _WARRANT_COUNT_CONCEPTS if any(f.local == c and f.value is not None for f in doc.facts)), None)
-        facts = [f for f in doc.facts if f.local == concept and f.value is not None]
-        if not facts:
-            return None
-        groups: dict[str, IxFact] = {}
-        for f in facts:
-            key = _dims_key(f.dims)
-            prev = groups.get(key)
-            if prev is None or (f.period_end or "") > (prev.period_end or ""):
-                groups[key] = f
-        dimmed = [f for key, f in groups.items() if key != ""]
-        return dimmed if dimmed else [groups[""]]
-
-    found = _find_in_sources(sources, find)
+    # Classes a newer filing shows exercised or retired; an older fallback filing must not restore them
+    # (BE's 2025 10-K still counts the Oracle warrant its 2026 10-Q shows exercised).
+    retired: set[str] = set()
+    found = None
+    for source in sources:
+        doc = source.doc
+        counts = [f for f in doc.facts if f.value is not None and f.local in _WARRANT_COUNT_CONCEPTS and _warrant_count_event(doc, f) is None
+                  and not _after_period_end(doc, f) and _warrant_class_key(f) not in retired]
+        concept = next((c for c in _WARRANT_COUNT_CONCEPTS if any(f.local == c for f in counts)), None)
+        facts = [f for f in counts if f.local == concept]
+        if facts:
+            groups: dict[str, IxFact] = {}
+            for f in facts:
+                key = _dims_key(f.dims)
+                prev = groups.get(key)
+                if prev is None or (f.period_end or "") > (prev.period_end or ""):
+                    groups[key] = f
+            dimmed = [f for key, f in groups.items() if key != ""]
+            found = (dimmed if dimmed else [groups[""]], source)
+            break
+        for f in doc.facts:
+            if f.value is not None and f.local in _WARRANT_COUNT_CONCEPTS and _warrant_count_event(doc, f) is not None:
+                retired.add(_warrant_class_key(f))
     if not found:
         return None
     facts, source = found
     unvested_facts = [g for g in source.doc.facts if _WARRANT_UNVESTED_RE.search(g.local) and _is_share_count(g)]
+    vested_facts = [g for g in source.doc.facts if _WARRANT_VESTED_RE.search(g.local) and g.value is not None and not _after_period_end(source.doc, g)]
     classes = []
     for f in facts:
         strike = _newest([g for g in source.doc.facts if g.local == _WARRANT_STRIKE and g.value is not None and _dims_key(g.dims) == _dims_key(f.dims)])
         label = " / ".join(member_label(v) for v in f.dims.values()) if f.dims else "Warrants (not itemized)"
         # Only vested warrant shares can be exercised now; the rest count in the gross total.
-        unvested = _newest([g for g in unvested_facts if _dims_key(g.dims) == _dims_key(f.dims)])
-        if unvested is None and len(facts) == 1:
-            unvested = _newest(unvested_facts)
-        exercisable = max(0, f.value - unvested.value) if unvested is not None else f.value
+        vested = _newest([g for g in vested_facts if _dims_key(g.dims) == _dims_key(f.dims)])
+        unvested = None
+        if vested is None:
+            unvested = _newest([g for g in unvested_facts if _dims_key(g.dims) == _dims_key(f.dims)])
+            if unvested is None and len(facts) == 1:
+                unvested = _newest(unvested_facts)
+        vesting_term = any(g.local == _WARRANT_VESTING_TERM and _dims_key(g.dims) == _dims_key(f.dims) for g in source.doc.facts)
+        if vested is not None:
+            exercisable, exercisable_basis = min(f.value, vested.value), "vested_count_tagged"
+        elif unvested is not None:
+            exercisable, exercisable_basis = max(0, f.value - unvested.value), "outstanding_less_unvested_tagged"
+        elif vesting_term:
+            exercisable, exercisable_basis = None, "vesting_terms_without_vested_count"
+        else:
+            exercisable, exercisable_basis = f.value, "no_vesting_terms_tagged"
+        period_end = source.doc.document_period_end
         classes.append({
             "class": label,
             "concept": f.name,
             "outstanding": f.value,
             "asOf": f.period_end,
-            "unvested": unvested.value if unvested is not None else None,
-            "unvestedAsOf": unvested.period_end if unvested is not None else None,
+            # Tagged at an earlier date (an issuance) and not restated at the period end.
+            "countBeforePeriodEnd": period_end is not None and f.period_end is not None and f.period_end < period_end,
+            "unvested": max(0, f.value - vested.value) if vested is not None else unvested.value if unvested is not None else None,
+            "unvestedAsOf": vested.period_end if vested is not None else unvested.period_end if unvested is not None else None,
             "exercisable": exercisable,
+            "exercisableBasis": exercisable_basis,
             "exercisePrice": strike.value if strike else None,
             "inTheMoney": price > strike.value if strike else None,
-            "incrementalShares": round_half_up(_treasury_stock(exercisable, strike.value, price)) if strike else None,
+            # No warrants exercisable adds no shares, whatever the strike; an unknown exercisable count adds an unknown number.
+            "incrementalShares": (None if exercisable is None
+                                  else round_half_up(_treasury_stock(exercisable, strike.value, price)) if strike
+                                  else 0 if exercisable == 0 else None),
         })
     unresolved = len([c for c in classes if c["incrementalShares"] is None])
     return {
@@ -719,6 +835,42 @@ def _warrants_component(sources: list[IxSource], price: float) -> dict | None:
         "unresolvedClasses": unresolved,
         "source": _source_ref(source, facts[0].period_end),
     }
+
+
+def post_period_warrants(source: IxSource | None) -> list[dict]:
+    """Warrants the primary report tags after its period end (MRVL's 59.0M customer warrant at $206.58,
+    issued after the quarter): claims to quote, never counted as outstanding at the period end."""
+    if source is None:
+        return []
+    doc = source.doc
+    by_key: dict[str, IxFact] = {}
+    for f in doc.facts:
+        if f.value is None or f.local not in _WARRANT_COUNT_CONCEPTS or not _after_period_end(doc, f) or _warrant_count_event(doc, f) is not None:
+            continue
+        prev = by_key.get(_dims_key(f.dims))
+        if prev is None or (f.period_end or "") > (prev.period_end or ""):
+            by_key[_dims_key(f.dims)] = f
+    out = []
+    for f in by_key.values():
+        strike = _newest([g for g in doc.facts if g.local == _WARRANT_STRIKE and g.value is not None and _dims_key(g.dims) == _dims_key(f.dims)])
+        class_member = f.dims.get(_CLASS_OF_WARRANT_AXIS)
+        out.append({
+            "kind": "WARRANT_AFTER_PERIOD_END",
+            "status": "UNQUANTIFIED",
+            "class": member_label(class_member) if class_member else None,
+            "shares": f.value,
+            "exercisePrice": strike.value if strike else None,
+            "asOf": f.period_end,
+            "periodEnd": doc.document_period_end,
+            "concept": f.name,
+            "sentences": [],
+            "leadIn": None,
+            "leadOut": None,
+            "documentUrl": source.document_url,
+            "filingDate": source.filing_date,
+            "accessionNumber": source.accession_number,
+        })
+    return out
 
 
 @dataclass
@@ -759,6 +911,34 @@ def _group_text(group: _DebtGroup, local: str) -> str | None:
     return best.text if best is not None else None
 
 
+# The filing's own count of shares issuable on conversion at the period end (BE tags the maximum, make-whole
+# included, per note), and principal outstanding then: after conversions and repurchases the issue's face
+# amount overstates both (BE's 2028 notes: $632.5M issued, $0.787M left at 2026-06-30) (2.5.9).
+_SHARES_ISSUABLE_CONCEPTS = ["DebtInstrumentConvertibleNumberOfSharesAvailableForConversion", "DebtInstrumentConvertibleNumberOfEquityInstruments"]
+# Principal at the period end: a face amount tagged then, else the instrument's carrying amount when it is well
+# below the issue's face (conversions or repurchases), not a balance-sheet line net of discount and costs
+# (LongTermDebt $290M against $300M issued is the same notes, net).
+_PERIOD_END_FACE_CONCEPTS = ["DebtInstrumentFaceAmount"]
+_PERIOD_END_CARRYING_CONCEPTS = ["DebtInstrumentCarryingAmount"]
+_REDUCED_PRINCIPAL_SHARE = 0.95
+_INSTRUMENT_AXES_RE = re.compile(r"(?:DebtInstrumentAxis|LongtermDebtTypeAxis)$")
+_SUBSEQUENT_EVENT_AXIS_RE = re.compile(r"SubsequentEventTypeAxis$")
+_REDEMPTION_RE = re.compile(r"Redemption|Redeem|Repurchase|Extinguish|Repaid|Repayment")
+# A tagged conversion ratio that disagrees with the tagged conversion price is not the conversion rate
+# (BE tags only the make-whole increase, e.g. 2.6926 against $194.97, whose rate is 5.1290 per $1,000).
+_RATIO_PRICE_TOLERANCE = 0.02
+
+
+def _instrument_value(group: _DebtGroup, locals_: list[str], at: str) -> dict | None:
+    """A value tagged only on the instrument's own axes, at a date."""
+    for local in locals_:
+        hit = _newest([f for f in group.facts if f.local == local and f.value is not None and f.period_end == at
+                       and all(_INSTRUMENT_AXES_RE.search(axis) for axis in f.dims)])
+        if hit:
+            return _picked(hit)
+    return None
+
+
 def _convertibles_component(sources: list[IxSource], price: float) -> dict | None:
     def find(doc: IxDocument):
         groups = [g for g in _debt_groups(doc) if _group_value(g, [_CONVERSION_PRICE, _CONVERSION_RATIO]) is not None]
@@ -773,41 +953,65 @@ def _convertibles_component(sources: list[IxSource], price: float) -> dict | Non
     if not found:
         return None
     groups, source = found
+    end = source.doc.document_period_end
     instruments = []
     for g in groups:
         face_tagged = _group_value(g, [_FACE_AMOUNT])
+        face_at_end = _instrument_value(g, _PERIOD_END_FACE_CONCEPTS, end) if end and g.member else None
+        carrying_at_end = _instrument_value(g, _PERIOD_END_CARRYING_CONCEPTS, end) if end and g.member and not face_at_end else None
+        current = face_at_end or (carrying_at_end if carrying_at_end and (face_tagged is None or carrying_at_end["value"] < _REDUCED_PRINCIPAL_SHARE * face_tagged["value"])
+                                  else None)
         # Some issuers tag each issue's principal only under a carrying-amount
         # concept, often at the issue date; use it and say so.
-        face = face_tagged or _group_value(g, _PRINCIPAL_FALLBACK_CONCEPTS)
+        face = current or face_tagged or _group_value(g, _PRINCIPAL_FALLBACK_CONCEPTS)
+        issuable = _instrument_value(g, _SHARES_ISSUABLE_CONCEPTS, end) if end and g.member else None
         conv_price = _group_value(g, [_CONVERSION_PRICE])
         ratio = _group_value(g, [_CONVERSION_RATIO])
-        implied = conv_price["value"] if conv_price else (1000 / ratio["value"] if ratio and ratio["value"] > 0 else None)
+        ratio_consistent = (ratio is not None and ratio["value"] > 0
+                            and (conv_price is None or abs(ratio["value"] * conv_price["value"] / 1000 - 1) <= _RATIO_PRICE_TOLERANCE))
+        usable_ratio = ratio if ratio_consistent else None
+        implied = conv_price["value"] if conv_price else (1000 / usable_ratio["value"] if usable_ratio else None)
         shares = None
         basis = None
-        if face and ratio and ratio["value"] > 0:
-            shares = (face["value"] / 1000) * ratio["value"]
+        if issuable:
+            shares = issuable["value"]
+            basis = "shares_issuable_tagged_at_period_end"
+        elif face and usable_ratio:
+            shares = (face["value"] / 1000) * usable_ratio["value"]
             basis = "principal / 1000 * conversion_ratio"
         elif face and conv_price and conv_price["value"] > 0:
             shares = face["value"] / conv_price["value"]
             basis = "principal / conversion_price"
+        redemption = _newest([f for f in g.facts if _REDEMPTION_RE.search(f.local) and any(_SUBSEQUENT_EVENT_AXIS_RE.search(axis) for axis in f.dims)])
         in_the_money = price >= implied if implied is not None else None
-        instruments.append({
+        inst = {
             "instrument": member_label(g.member) if g.member else "Convertible notes (not itemized)",
             "member": g.member,
             "faceAmount": face_tagged["value"] if face_tagged else None,
             "principal": face["value"] if face else None,
             "principalConcept": face["concept"] if face else None,
             "principalDate": face["periodEnd"] if face else None,
-            "principalBasis": "face_amount" if face_tagged else ("tagged_amount_fallback" if face else None),
+            "principalBasis": "outstanding_at_period_end" if current else ("face_amount" if face_tagged else ("tagged_amount_fallback" if face else None)),
             "conversionPrice": conv_price["value"] if conv_price else (round_half_up(implied, 4) if implied is not None else None),
             "conversionPriceBasis": "tagged" if conv_price else ("1000 / conversion_ratio" if implied is not None else None),
             "conversionRatioPer1000": ratio["value"] if ratio else None,
+            "conversionRatioUsed": usable_ratio is not None and not issuable,
+        }
+        if ratio and not ratio_consistent:
+            inst["conversionRatioNote"] = "RATIO_INCONSISTENT_WITH_PRICE"
+        inst.update({
             "maturityDate": normalize_ix_date(_group_text(g, "DebtInstrumentMaturityDate")),
             "ifConvertedShares": round_half_up(shares) if shares is not None else None,
             "ifConvertedBasis": basis,
+            "sharesIssuableDate": issuable["periodEnd"] if issuable else None,
+        })
+        if redemption:
+            inst["afterPeriodEnd"] = {"concept": redemption.name, "date": redemption.period_end}
+        inst.update({
             "inTheMoney": in_the_money,
             "incrementalShares": round_half_up(shares) if shares is not None and in_the_money else (0 if shares is not None else None),
         })
+        instruments.append(inst)
     unresolved = len([i for i in instruments if i["ifConvertedShares"] is None])
     return {
         "component": "convertible_debt",
@@ -816,8 +1020,71 @@ def _convertibles_component(sources: list[IxSource], price: float) -> dict | Non
         "ifConvertedShares": sum((i["ifConvertedShares"] or 0) for i in instruments),
         "incrementalShares": None if unresolved == len(instruments) else sum((i["incrementalShares"] or 0) for i in instruments),
         "unresolvedInstruments": unresolved,
-        "note": "Principal is the tagged face amount, else the issue's tagged carrying amount (principalBasis says which); either can be the original principal before repurchases. Net-share or cash settlement, capped calls and make-whole adjustments are not modeled.",
+        "note": ("Shares are the filing's count issuable on conversion at the period end when tagged (it can be the maximum, make-whole included); "
+                 "else principal outstanding at the period end (a face amount then, or a carrying amount well below the issue's face), else the face "
+                 "amount or an issue-date carrying amount (principalBasis says which), "
+                 "times a conversion ratio that agrees with the conversion price, else divided by the price. Net-share or cash settlement and capped "
+                 "calls are not modeled."),
         "source": _source_ref(source, None),
+    }
+
+
+# ── Convertible preferred stock (2.5.9, MRVL) ───────────────────────────────
+
+_PREFERRED_SHARES_ISSUABLE = "PreferredStockConvertibleSharesIssuable"
+_PREFERRED_CONVERSION_PRICE = "PreferredStockConvertibleConversionPrice"
+
+
+def _convertible_preferred_component(sources: list[IxSource], price: float) -> dict | None:
+    """Convertible preferred outstanding at the period end, if-converted when in the money: the tagged
+    common shares issuable on conversion and the conversion price. MRVL's Series A (2.0M preferred
+    shares, issued to NVIDIA) converts into up to 21.8M common shares at $91.84."""
+    def find(doc: IxDocument):
+        end = doc.document_period_end
+        if not end:
+            return None
+        outstanding = [f for f in doc.facts if f.local in _PREFERRED_OUTSTANDING_CONCEPTS and f.value is not None and f.period_end == end
+                       and not any(re.search(r"StatementEquityComponentsAxis$", axis) for axis in f.dims)]
+        plain = [f for f in outstanding if not f.dims]
+        shares = sum(f.value for f in (plain or outstanding))
+        if not shares > 0:
+            return None
+        issuable = _newest([f for f in doc.facts if f.local == _PREFERRED_SHARES_ISSUABLE and f.value is not None and not _after_period_end(doc, f)])
+        conv = _newest([f for f in doc.facts if f.local == _PREFERRED_CONVERSION_PRICE and f.value is not None and not _after_period_end(doc, f)])
+        if issuable is None and conv is None:
+            return None
+        return {"shares": shares, "asOf": end, "issuable": issuable, "conv": conv}
+
+    found = _find_in_sources(sources, find)
+    if not found:
+        return None
+    v, source = found
+    conv_price = v["conv"].value if v["conv"] is not None else None
+    if_converted = v["issuable"].value if v["issuable"] is not None else None
+    in_the_money = price >= conv_price if conv_price is not None else None
+    instrument = {
+        "instrument": "Convertible preferred stock",
+        "preferredSharesOutstanding": v["shares"],
+        "asOf": v["asOf"],
+        "ifConvertedShares": if_converted,
+        "ifConvertedBasis": "shares_issuable_tagged" if if_converted is not None else None,
+        "sharesIssuableDate": v["issuable"].period_end if v["issuable"] is not None else None,
+        # The issuable count was tagged at issuance and not restated at the period end.
+        "countBeforePeriodEnd": v["issuable"] is not None and v["issuable"].period_end is not None and v["issuable"].period_end < v["asOf"],
+        "conversionPrice": conv_price,
+        "inTheMoney": in_the_money,
+        "incrementalShares": None if if_converted is None or in_the_money is None else round_half_up(if_converted) if in_the_money else 0,
+    }
+    return {
+        "component": "convertible_preferred",
+        "instruments": [instrument],
+        "method": "if_converted_when_in_the_money",
+        "ifConvertedShares": if_converted if if_converted is not None else 0,
+        "incrementalShares": instrument["incrementalShares"],
+        "unresolvedInstruments": 1 if instrument["incrementalShares"] is None else 0,
+        "note": ("Common shares issuable on conversion as tagged (often the maximum at issuance) and the tagged conversion price; if-converted when "
+                 "the price is at or above it. Liquidation preference, dividends and redemption are not modeled."),
+        "source": _source_ref(source, v["asOf"]),
     }
 
 
@@ -916,6 +1183,126 @@ def _atm_component(evidence: list[dict], price: float) -> dict | None:
     return out
 
 
+# ── Untagged share claims (2.5.9, COHR) ─────────────────────────────────────
+
+# Claims on the equity that the bridge's tagged components do not model: a
+# price-protection or anti-dilution right granted with a share sale, a forward
+# sale, shares issuable as contingent consideration, and convertible preferred
+# stock. They are read from filing text, quoted, and never quantified.
+SHARE_CLAIM_SEARCH_TERMS = [
+    "price protection", "anti-dilution", "antidilution", "forward sale agreement", "earnout shares", "earn-out shares",
+    "contingent consideration", "contingently issuable", "convertible preferred",
+    "subsequent to quarter end", "subsequent to year end", "subsequent to the end of the quarter",
+]
+_SHARE_CLAIM_KINDS = [
+    ("PRICE_PROTECTION", re.compile(r"\bprice[- ]protection\b", _F)),
+    ("ANTI_DILUTION_RIGHT", re.compile(r"\banti-?dilution (?:rights?|protections?|provisions?)\b", _F)),
+    ("FORWARD_SALE", re.compile(r"\bforward (?:sale|equity sale) agreements?\b", _F)),
+    ("CONTINGENT_SHARES", re.compile(r"\bearn-?out shares\b|\bcontingently issuable (?:shares|common stock)\b|\bcontingent consideration\b[^.]{0,120}\b(?:in|of) (?:shares|common stock)\b", _F)),
+    ("CONVERTIBLE_PREFERRED", re.compile(r"\bconvertible preferred (?:stock|shares)\b", _F)),
+    ("WARRANT_AFTER_PERIOD_END", re.compile(r"\bsubsequent to (?:the )?(?:quarter|year|period)[- ]end\b[^.]{0,200}\bwarrants?\b|\bsubsequent to the end of the (?:quarter|year|period)\b[^.]{0,200}\bwarrants?\b", _F)),
+]
+# A customer or distributor price-protection term is a revenue reduction, not a
+# claim on shares (COHR's variable-consideration policy).
+_REVENUE_TERM_RE = re.compile(r"\b(?:distributors?|customers?|revenues?|variable consideration|product returns?|sales price|price reductions?|inventor(?:y|ies)|rebates?)\b", _F)
+# Anti-dilution adjustments of a warrant's or note's own terms belong to an
+# instrument the bridge already reads.
+_INSTRUMENT_TERM_RE = re.compile(r"\b(?:warrants?|convertible (?:senior )?notes?|conversion (?:rate|price)|exercise price|debentures?)\b", _F)
+_EQUITY_TERM_RE = re.compile(r"\b(?:shares?|stock|equity|securities purchase agreement|purchase agreement|investors?|stockholders?|shareholders?)\b", _F)
+_EXTINGUISHED_RE = re.compile(r"\bwere (?:all )?converted\b|\bno shares of\b[^.]{0,120}\b(?:are|were|remain)\b[^.]{0,30}\boutstanding\b|\b(?:was|were) redeemed in full\b|\b(?:expired|terminated) (?:unexercised|without)\b", _F)
+# Sentence breaks, except after an initialism such as "U.S." ("applicable U.S. GAAP").
+_CLAIM_SENTENCE_SPLIT_RE = re.compile(r"(?<![A-Z]\.[A-Z]\.)(?<=[.!?])\s+(?=[A-Z(\u201c\"])")
+_PREFERRED_OUTSTANDING_CONCEPTS = ("PreferredStockSharesOutstanding", "TemporaryEquitySharesOutstanding")
+
+
+def share_claim_signals(matches: list[TextMatch]) -> list[dict]:
+    """Share claims stated in filing text that no tagged component covers, one per
+    kind and document, each with up to four quoted sentences and the lead-in
+    before the first. Every claim is UNQUANTIFIED; text saying an instrument was
+    converted or redeemed is flagged (extinguishmentStated) but never closes the
+    claim, since the sentence can describe another series."""
+    groups: dict[str, dict] = {}
+    seen: set[str] = set()
+    for match in matches:
+        items = [x.strip() for x in _CLAIM_SENTENCE_SPLIT_RE.split(_collapse(match.context_text)) if x.strip()]
+        # A context window cuts its first and last sentences mid-way.
+        if items and not re.match(r"[A-Z(\u201c\"]", items[0]):
+            items.pop(0)
+        if items and not re.search(r"[.!?\u201d\")]$", items[-1]):
+            items.pop()
+        for i, sentence in enumerate(items):
+            kind = next((k for k, pattern in _SHARE_CLAIM_KINDS if pattern.search(sentence)), None)
+            if kind is None or f"{kind}|{sentence}" in seen:
+                continue
+            if kind == "PRICE_PROTECTION" and _REVENUE_TERM_RE.search(sentence):
+                continue
+            if kind == "ANTI_DILUTION_RIGHT" and _INSTRUMENT_TERM_RE.search(sentence):
+                continue
+            lead_in = " ".join(items[max(0, i - 2):i])
+            if not _EQUITY_TERM_RE.search(f"{lead_in} {sentence}"):
+                continue
+            seen.add(f"{kind}|{sentence}")
+            key = f"{kind}|{match.document_url or ''}"
+            group = groups.get(key)
+            if group is None:
+                group = {
+                    "kind": kind,
+                    "status": "UNQUANTIFIED",
+                    "sentences": [],
+                    "leadIn": lead_in[-600:] or None,
+                    # The sentence after the first quoted one ("The warrant is eligible for vesting ...").
+                    "leadOut": items[i + 1][:600] if i + 1 < len(items) else None,
+                    "extinguishmentStated": False,
+                    "sectionHeading": match.section_heading,
+                    "documentUrl": match.document_url,
+                    "filingDate": match.filing_date,
+                    "accessionNumber": match.accession_number,
+                }
+                groups[key] = group
+            if len(group["sentences"]) < 4:
+                group["sentences"].append(sentence[:600])
+            if _EXTINGUISHED_RE.search(sentence):
+                group["extinguishmentStated"] = True
+    return list(groups.values())
+
+
+def _preferred_claims_with_tags(claims: list[dict], sources: list[IxSource], component: dict | None = None) -> list[dict]:
+    """Convertible preferred claims checked against the preferred and temporary
+    equity share counts tagged at a filing's period end: all zero closes the
+    claim (TAGGED_NONE_OUTSTANDING); a positive count keeps it open and quotes it."""
+    tagged = None
+    for s in sources:
+        end = s.doc.document_period_end
+        facts = [f for f in s.doc.facts if f.local in _PREFERRED_OUTSTANDING_CONCEPTS and f.value is not None and end is not None and f.period_end == end]
+        if facts:
+            tagged = facts
+            break
+    out = []
+    for c in claims:
+        if c["kind"] != "CONVERTIBLE_PREFERRED" or tagged is None:
+            out.append(c)
+            continue
+        rows = [{"concept": f.name, "class": member_label(next(iter(f.dims.values()))) if f.dims else None, "shares": f.value, "asOf": f.period_end}
+                for f in tagged]
+        # Outstanding and resolved by the convertible_preferred component: counted, not open (2.5.9).
+        status = ("TAGGED_NONE_OUTSTANDING" if all(f.value == 0 for f in tagged)
+                  else "MODELED_IN_BRIDGE" if component is not None and component.get("incrementalShares") is not None else "UNQUANTIFIED")
+        out.append({**c, "status": status, "taggedOutstanding": rows})
+    return out
+
+
+def _with_post_period_warrants(claims: list[dict], tagged: list[dict]) -> list[dict]:
+    """Post-period warrants from the tags, each quoting the filing text's subsequent-event warrant
+    sentences when the scan found them (which then stop being a separate claim)."""
+    if not tagged:
+        return claims
+    text = next((c for c in claims if c["kind"] == "WARRANT_AFTER_PERIOD_END"), None)
+    rest = [c for c in claims if c is not text]
+    merged = [{**t, "sentences": text["sentences"], "leadIn": text["leadIn"], "leadOut": text["leadOut"], "sectionHeading": text["sectionHeading"]}
+              if text is not None and i == 0 else t for i, t in enumerate(tagged)]
+    return rest + merged
+
+
 _ANTIDILUTIVE = "AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount"
 _DILUTION_CONCEPT_RE = re.compile(r"Warrant|Option|Nonvested|RestrictedStock|Convertible|Antidilutive|EarningsPerShare|SharesOutstanding", _F)
 
@@ -975,7 +1362,8 @@ def _is_number(value: Any) -> bool:
 
 
 def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: str | None,
-                    sources: list[IxSource], atm_matches: list[TextMatch], award_table_matches: list[TextMatch] | None = None) -> dict:
+                    sources: list[IxSource], atm_matches: list[TextMatch], award_table_matches: list[TextMatch] | None = None,
+                    claim_matches: list[TextMatch] | None = None) -> dict:
     """Basic to diluted shares at a supplied price, from company disclosures only."""
     primary = sources[0] if sources else None
     basic_found = _find_in_sources(sources, _basic_shares)
@@ -983,11 +1371,12 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
     awards = _awards_component(sources, award_table_matches or [])
     warrants = _warrants_component(sources, price)
     convertibles = _convertibles_component(sources, price)
+    preferred = _convertible_preferred_component(sources, price)
     atm = _atm_component(atm_evidence(atm_matches), price)
-    components = [c for c in (options, awards, warrants, convertibles) if c is not None]
+    components = [c for c in (options, awards, warrants, convertibles, preferred) if c is not None]
     not_disclosed = [name for name, c in (
         ("stock_options", options), ("unvested_share_awards", awards), ("warrants", warrants),
-        ("convertible_debt", convertibles), ("atm_program", atm),
+        ("convertible_debt", convertibles), ("convertible_preferred", preferred), ("atm_program", atm),
     ) if c is None]
     unresolved = [c["component"] for c in components if c.get("incrementalShares") is None]
     partial = [
@@ -1004,6 +1393,70 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
     for unit in currency_units:
         if unit != price_currency:
             warnings.append({"code": "PRICE_CURRENCY_MISMATCH", "message": f"Strikes are reported in {unit}; the supplied price is treated as {price_currency}.", "severity": "warning"})
+    warrant_events = warrant_count_events(sources)
+    if warrant_events:
+        listed = "; ".join(
+            f"{w['class']} {_js_number(w['value'])} on {w['asOf']}"
+            + (f" (exercised: {_js_number(w['exercise']['value'])} on {w['exercise']['date']})" if w.get("exercise") else "")
+            for w in warrant_events)
+        warnings.append({
+            "code": "WARRANT_EXERCISE_NOT_OUTSTANDING",
+            "message": (f"{len(warrant_events)} tagged warrant count(s) record an exercise or an equity-statement movement, or predate an exercise of "
+                        f"the same class, so they are not counted as warrants outstanding: {listed}."),
+            "severity": "info",
+            "counts": warrant_events,
+        })
+    notes = (convertibles or {}).get("instruments") or []
+    face_only = [i for i in notes if i.get("ifConvertedBasis") != "shares_issuable_tagged_at_period_end" and i.get("principalBasis") != "outstanding_at_period_end"
+                 and i.get("principal") is not None]
+    if face_only:
+        names = ", ".join(i["instrument"] for i in face_only)
+        used = ", ".join(f"{i['principalBasis']} {_js_number(i['principal'])} ({i['principalDate']})" for i in face_only)
+        warnings.append({"code": "CONVERTIBLE_PRINCIPAL_NOT_AT_PERIOD_END", "message": (
+            f"No principal or shares issuable is tagged at the period end for {names}; the {used} is used and can include notes since converted "
+            "or repurchased."), "severity": "warning"})
+    bad_ratios = [i for i in notes if i.get("conversionRatioNote") == "RATIO_INCONSISTENT_WITH_PRICE"]
+    if bad_ratios:
+        listed = ", ".join(f"{i['instrument']} ({_js_number(i['conversionRatioPer1000'])} per 1,000 against a ${_js_number(i['conversionPrice'])} price)" for i in bad_ratios)
+        warnings.append({"code": "CONVERSION_RATIO_INCONSISTENT", "message": (
+            f"The tagged conversion ratio of {listed} is not the conversion rate (often a make-whole increase) and is not used."), "severity": "info"})
+    redeemed = [i for i in notes if i.get("afterPeriodEnd") is not None]
+    if redeemed:
+        listed = ", ".join(f"{i['instrument']} ({i['afterPeriodEnd']['date']})" for i in redeemed)
+        warnings.append({"code": "CONVERTIBLE_REDEMPTION_AFTER_PERIOD_END", "message": (
+            f"A redemption or repurchase after the period end is tagged for {listed}; its shares are counted as of the period end."), "severity": "warning"})
+    early_counts = [c for c in ((warrants or {}).get("classes") or []) if c.get("countBeforePeriodEnd") is True]
+    if early_counts:
+        listed = "; ".join(f"{c['class']} {_js_number(c['outstanding'])} as of {c['asOf']}" for c in early_counts)
+        warnings.append({
+            "code": "WARRANT_COUNT_BEFORE_PERIOD_END",
+            "message": (f"{len(early_counts)} warrant class(es) are counted from a figure tagged before the report's period end and not restated at "
+                        f"it; the filing text should confirm they remain outstanding: {listed}."),
+            "severity": "warning",
+        })
+    # claim_matches is the filing text read for untagged share claims; None when it was not read.
+    claims_read = claim_matches is not None
+    claims = _with_post_period_warrants(
+        _preferred_claims_with_tags(share_claim_signals(claim_matches), sources, preferred) if claim_matches is not None else [],
+        post_period_warrants(primary),
+    )
+    open_claims = [c for c in claims if c["status"] == "UNQUANTIFIED"]
+    if open_claims:
+        warnings.append({
+            "code": "UNQUANTIFIED_SHARE_CLAIMS",
+            "message": (f"The filing text states {len(open_claims)} share claim(s) no tagged component covers ({', '.join(c['kind'] for c in open_claims)}); "
+                        "they are quoted in unquantifiedShareClaims and are not in any share count."),
+            "severity": "warning",
+        })
+    vesting_unknown = [c for c in ((warrants or {}).get("classes") or []) if c.get("exercisableBasis") == "vesting_terms_without_vested_count"]
+    if vesting_unknown:
+        warnings.append({"code": "WARRANT_VESTING_NOT_TAGGED", "message": (
+            f"{', '.join(str(c['class']) for c in vesting_unknown)} vest on conditions, and no vested or unvested count is tagged; their exercisable "
+            f"shares are unresolved, not assumed to be all {', '.join(_js_number(c['outstanding']) for c in vesting_unknown)}."), "severity": "warning"})
+    if not claims_read:
+        warnings.append({"code": "SHARE_CLAIM_TEXT_NOT_READ", "message": (
+            "The filing text was not read for untagged share claims (price protection, anti-dilution rights, forward sales, contingent shares, "
+            "convertible preferred); retry."), "severity": "warning"})
     if all(not s.doc.facts for s in sources):
         warnings.append({"code": "NO_INLINE_XBRL", "message": "The filing carries no inline XBRL facts; the bridge needs tagged share and instrument counts.", "severity": "warning"})
 
@@ -1020,6 +1473,17 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
         "notDisclosed": not_disclosed,
         "unresolved": unresolved,
         "partiallyResolved": partial,
+        "unquantifiedShareClaims": claims,
+        "claimCoverage": {
+            "scope": "TAGGED_INSTRUMENTS",
+            "completeClaimInventory": False,
+            "modeledComponents": ["stock_options", "unvested_share_awards", "warrants", "convertible_debt", "convertible_preferred", "atm_program"],
+            "textScan": "READ" if claims_read else "NOT_READ",
+            "textScanKinds": [k for k, _ in _SHARE_CLAIM_KINDS],
+            "unquantifiedClaims": len(open_claims),
+            "note": ("status describes the tagged instruments only. COMPUTED means every tagged instrument was resolved, never that every claim on the "
+                     "equity was found; the text scan covers a fixed list of claim kinds, and a claim it does not find is not proof none exists."),
+        },
     }
     if not basic_found:
         out["status"] = "NOT_FOUND"
@@ -1031,12 +1495,13 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
         def inc(c: dict | None) -> float:
             return c["incrementalShares"] if c and _is_number(c.get("incrementalShares")) else 0
 
-        diluted = basic + inc(options) + inc(awards) + inc(warrants) + inc(convertibles)
+        diluted = basic + inc(options) + inc(awards) + inc(warrants) + inc(convertibles) + inc(preferred)
         gross = (basic
                  + (float(options.get("outstanding") or 0) if options else 0)
                  + (float(awards.get("unvested") or 0) if awards else 0)
                  + (float(warrants.get("outstanding") or 0) if warrants else 0)
-                 + (float(convertibles.get("ifConvertedShares") or 0) if convertibles else 0))
+                 + (float(convertibles.get("ifConvertedShares") or 0) if convertibles else 0)
+                 + (float(preferred.get("ifConvertedShares") or 0) if preferred else 0))
         atm_shares = atm["potentialShares"] if atm and _is_number(atm.get("potentialShares")) else None
         out["bridge"] = {
             "basicShares": basic,
@@ -1044,21 +1509,27 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
             "unvestedShareAwards": awards["incrementalShares"] if awards else None,
             "warrants": warrants["incrementalShares"] if warrants else None,
             "convertibleDebt": convertibles["incrementalShares"] if convertibles else None,
+            "convertiblePreferred": preferred["incrementalShares"] if preferred else None,
             "dilutedSharesAtPrice": round_half_up(diluted),
             "dilutionPctAtPrice": round_half_up(((diluted - basic) / basic) * 100, 2) if basic > 0 else None,
             "grossSharesAllInstruments": round_half_up(gross),
             "grossDilutionPct": round_half_up(((gross - basic) / basic) * 100, 2) if basic > 0 else None,
             "atmPotentialShares": atm_shares,
             "dilutedSharesAtPriceWithAtm": round_half_up(diluted + atm_shares) if atm_shares is not None else None,
-            "formula": "basic + options (treasury stock) + unvested awards (gross) + warrants (treasury stock) + convertibles (if-converted when in the money)",
+            "formula": ("basic + options (treasury stock) + unvested awards (gross) + warrants (treasury stock, vested) + convertibles and "
+                        "convertible preferred (if-converted when in the money)"),
         }
-        out["status"] = "PARTIAL" if unresolved or partial else "COMPUTED"
+        # A share claim the filing states but no tagged component covers leaves the count partial (2.5.9).
+        out["status"] = "PARTIAL" if unresolved or partial or open_claims else "COMPUTED"
     out["methodology"] = [
         "Every count is a company disclosure tagged in the filing's inline XBRL; the only external input is the price you supplied.",
         "This is a mechanical bridge, not a consensus or forecast diluted share count, and must not be back-solved into one.",
         "A component missing from notDisclosed was not tagged in the filing; that is not proof the instrument does not exist.",
+        ("COMPUTED covers the tagged instruments only; it is not a full claim inventory. Share claims found in the filing text are quoted in "
+         "unquantifiedShareClaims and left out of every count."),
     ]
-    if not_disclosed or unresolved:
+    # Convertible preferred is rare; its absence alone does not call for the concept list.
+    if any(c != "convertible_preferred" for c in not_disclosed) or unresolved:
         # What the filing does tag, so a missing component can be traced to a concept this bridge does not read.
         out["taggedDilutionConcepts"] = _tagged_dilution_concepts(sources)
     out["warnings"] = warnings

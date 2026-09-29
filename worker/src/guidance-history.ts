@@ -33,7 +33,8 @@ export function parseAmount(text: string, fallbackUnit: string | null = null): {
   if (!m) return { value: null, unit: null };
   const unit = (m[2] ?? fallbackUnit ?? "").toLowerCase() || null;
   const base = parseFloat(m[1].replace(/,/g, ""));
-  return { value: unit ? base * (SCALE[unit] ?? 1) : base, unit };
+  // Whole units once scaled: 2.05 billion is 2050000000, not 2049999999.9999998.
+  return { value: unit ? Math.floor(base * (SCALE[unit] ?? 1) + 0.5) : base, unit };
 }
 
 function unitOf(text: string): string | null {
@@ -154,6 +155,7 @@ export function guidanceEntries(release: ReleaseText): Rec[] {
       high,
       midpoint: (low + high) / 2,
       unit,
+      basis: r.basis,
       statedAction: REAFFIRM_RE.test(sentence) ? "REAFFIRMED_IN_TEXT" : null,
       releaseDate: release.filingDate,
       accessionNumber: release.accessionNumber,
@@ -297,13 +299,16 @@ export function guidanceOutcomes(entries: Rec[], actuals: Rec): Rec[] {
     const table = (actuals[metric] ?? null) as Rec | null;
     const actual = table ? (table[label] as Rec | undefined) ?? null : null;
     const position = (g: Rec) => {
-      if (!actual) return null;
+      if (!actual || g.basis === "NON_GAAP") return null;
       const v = Number(actual.value);
       return v < Number(g.low) ? "BELOW" : v > Number(g.high) ? "ABOVE" : "WITHIN";
     };
+    // Reported actuals are GAAP: a non-GAAP range is never scored against them (2.5.9).
+    const nonGaap = sorted.some((g) => g.basis === "NON_GAAP");
     let status = "EVALUATED";
     if (actuals.read === false && metric !== "grossMargin") status = "ACTUALS_NOT_READ";
     else if (!table) status = "NOT_EVALUATED_METRIC";
+    else if (nonGaap) status = "NOT_EVALUATED_NON_GAAP_BASIS";
     else if (!actual) {
       if (/^H/.test(label) && (label.startsWith("H2") || actuals.calendarFiscalYear !== true)) status = "NOT_EVALUATED_HALF_YEAR";
       else if (/^Q/.test(label) && actuals.calendarFiscalYear !== true) status = "NOT_EVALUATED_FISCAL_QUARTER_MAPPING";
@@ -316,6 +321,7 @@ export function guidanceOutcomes(entries: Rec[], actuals: Rec): Rec[] {
       actual,
       initialGuidance: { low: first.low, high: first.high, releaseDate: first.releaseDate },
       lastGuidance: { low: last.low, high: last.high, releaseDate: last.releaseDate },
+      basis: last.basis ?? "NOT_STATED",
       positionVsInitial: position(first),
       positionVsLast: position(last),
     });

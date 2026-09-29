@@ -51,6 +51,23 @@ ASTS_RELEASE = (
 AWARD_FIRST = "Received awards with an aggregate value of over $125 million; revenue was $31.5 million."
 KEYWORD_FIRST = "The Company expects revenue of between $40 million and $45 million for the third quarter. Gross margin of 38% to 40% is expected."
 GUIDANCE_ONLY = "For the fourth quarter we expect revenue to be $500 million."
+# COHR Q4 FY26 EX-99.1: metric first, forward verb after it, basis after the range (2.5.9).
+COHR_OUTLOOK = (
+    "Revenue for the fourth quarter of fiscal 2026 was $1.83 billion. GAAP gross margin was 36.1%. "
+    "Business Outlook – First Quarter Fiscal 2027 (1) • Revenue for the first quarter of fiscal 2027 is expected to be between $2.2 billion and $2.4 billion. "
+    "• Gross margin percentage for the first quarter of fiscal 2027 is expected to be between 39.5% and 41.5% on a non-GAAP basis. "
+    "• Total operating expenses for the first quarter of fiscal 2027 are expected to be between $400 million and $420 million on a non-GAAP basis. "
+    "• EPS for the first quarter of fiscal 2027 is expected to be between $1.85 and $2.05 on a non-GAAP basis."
+)
+# MRVL Q2 FY27 EX-99.1: a midpoint and a tolerance, GAAP and non-GAAP (2.5.9).
+MRVL_OUTLOOK = (
+    "Third Quarter of Fiscal 2027 Financial Outlook \u2022 Net revenue is expected to be $3.150 billion +/- 5%. "
+    "\u2022 GAAP gross margin is expected to be 52.9% to 53.9%. \u2022 Non-GAAP gross margin is expected to be 57.5% to 58.5%. "
+    "\u2022 Diluted weighted-average shares outstanding are expected to be 921 million. "
+    "\u2022 GAAP diluted net income per share is expected to be $0.53 +/- $0.05 per share. "
+    "\u2022 Non-GAAP diluted net income per share is expected to be $1.10 +/- $0.05 per share."
+)
+MIXED_BASIS = "GAAP EPS for the quarter is expected to be between $1.00 and $1.20 and non-GAAP EPS between $1.85 and $2.05."
 STEM_WORDS = ["launch", "launches", "launched", "launching", "BlueBirds", "release", "released", "offering", "class", "guidance"]
 EVIDENCE = [
     {"id": "finnhub", "confidence": "LOW", "publishedAt": "2026-09-17"},
@@ -97,6 +114,9 @@ const out = {
   negation: r.customerConcentration(d.negation),
   guidanceAsts: r.guidanceRanges(d.astsRelease),
   guidanceKeyword: r.guidanceRanges(d.keywordFirst),
+  guidanceCohr: r.guidanceRanges(d.cohrOutlook),
+  guidanceMixed: r.guidanceRanges(d.mixedBasis),
+  guidanceMrvl: r.guidanceRanges(d.mrvlOutlook),
   revenueAsts: r.reportedTextMetric(d.astsRelease, r.REVENUE_LABEL, r.USD_AMOUNT),
   revenueAwardFirst: r.reportedTextMetric(d.awardFirst, r.REVENUE_LABEL, r.USD_AMOUNT),
   revenueGuidanceOnly: r.reportedTextMetric(d.guidanceOnly, r.REVENUE_LABEL, r.USD_AMOUNT),
@@ -126,6 +146,7 @@ def _data() -> dict:
         "aaoi": AAOI_MATCHES, "negation": NEGATION_MATCHES, "astsRelease": ASTS_RELEASE, "keywordFirst": KEYWORD_FIRST,
         "awardFirst": AWARD_FIRST, "guidanceOnly": GUIDANCE_ONLY, "stemWords": STEM_WORDS, "evidence": EVIDENCE, "concepts": CONCEPTS,
         "filingConcepts": FILING_CONCEPTS, "cashConcepts": CASH_CONCEPTS,
+        "cohrOutlook": COHR_OUTLOOK, "mixedBasis": MIXED_BASIS, "mrvlOutlook": MRVL_OUTLOOK,
     }
 
 
@@ -154,6 +175,9 @@ def _python() -> dict:
         "negation": er.customer_concentration(d["negation"]),
         "guidanceAsts": er.guidance_ranges(d["astsRelease"]),
         "guidanceKeyword": er.guidance_ranges(d["keywordFirst"]),
+        "guidanceCohr": er.guidance_ranges(d["cohrOutlook"]),
+        "guidanceMixed": er.guidance_ranges(d["mixedBasis"]),
+        "guidanceMrvl": er.guidance_ranges(d["mrvlOutlook"]),
         "revenueAsts": er.reported_text_metric(d["astsRelease"], er.REVENUE_LABEL, er.USD_AMOUNT),
         "revenueAwardFirst": er.reported_text_metric(d["awardFirst"], er.REVENUE_LABEL, er.USD_AMOUNT),
         "revenueGuidanceOnly": er.reported_text_metric(d["guidanceOnly"], er.REVENUE_LABEL, er.USD_AMOUNT),
@@ -193,9 +217,30 @@ class TestRules(unittest.TestCase):
         self.assertIn("No single customer", n["negation"]["sentence"])
 
     def test_guidance_after_the_metric_word(self) -> None:
-        self.assertEqual(self.out["guidanceAsts"]["revenue"], {"excerpt": "revenue guidance of $150.0 million to $200.0 million", "low": "150.0 million", "high": "200.0 million"})
+        self.assertEqual(self.out["guidanceAsts"]["revenue"], {"excerpt": "revenue guidance of $150.0 million to $200.0 million", "low": "150.0 million", "high": "200.0 million", "basis": "NOT_STATED", "statedAs": "RANGE", "alternates": []})
         self.assertEqual((self.out["guidanceKeyword"]["revenue"]["low"], self.out["guidanceKeyword"]["revenue"]["high"]), ("40 million", "45 million"))
         self.assertEqual((self.out["guidanceKeyword"]["grossMargin"]["low"], self.out["guidanceKeyword"]["grossMargin"]["high"]), ("38", "40"))
+
+    def test_metric_first_guidance_and_its_basis(self) -> None:
+        cohr = self.out["guidanceCohr"]
+        self.assertEqual((cohr["revenue"]["low"], cohr["revenue"]["high"], cohr["revenue"]["basis"]), ("2.2 billion", "2.4 billion", "NOT_STATED"))
+        self.assertTrue(cohr["revenue"]["excerpt"].startswith("Revenue for the first quarter of fiscal 2027"), "the reported fourth-quarter revenue is never the range")
+        self.assertEqual((cohr["grossMargin"]["low"], cohr["grossMargin"]["high"], cohr["grossMargin"]["basis"]), ("39.5", "41.5", "NON_GAAP"))
+        self.assertEqual((cohr["eps"]["low"], cohr["eps"]["high"], cohr["eps"]["basis"]), ("1.85", "2.05", "NON_GAAP"))
+        mixed = self.out["guidanceMixed"]["eps"]
+        self.assertEqual((mixed["low"], mixed["high"], mixed["basis"]), ("1.00", "1.20", "GAAP"), "the next clause's non-GAAP range does not relabel this one")
+
+    def test_midpoint_plus_minus_and_alternate_basis(self) -> None:
+        mrvl = self.out["guidanceMrvl"]
+        rev, gm, eps = mrvl["revenue"], mrvl["grossMargin"], mrvl["eps"]
+        # $3.150 billion +/- 5%, exactly: never 2.9924999999999997.
+        self.assertEqual((rev["low"], rev["high"], rev["statedAs"]), ("2.9925 billion", "3.3075 billion", "MIDPOINT_PLUS_MINUS"))
+        self.assertEqual((gm["low"], gm["high"], gm["basis"]), ("52.9", "53.9", "GAAP"))
+        self.assertEqual([(a["low"], a["high"], a["basis"]) for a in gm["alternates"]], [("57.5", "58.5", "NON_GAAP")])
+        self.assertEqual((eps["low"], eps["high"], eps["basis"], eps["statedAs"]), ("0.48", "0.58", "GAAP", "MIDPOINT_PLUS_MINUS"))
+        self.assertEqual([(a["low"], a["high"], a["basis"]) for a in eps["alternates"]], [("1.05", "1.15", "NON_GAAP")])
+        # A share count is not a revenue or EPS range.
+        self.assertNotIn("921", rev["excerpt"] + eps["excerpt"])
 
     def test_reported_revenue_skips_awards_backlog_and_guidance(self) -> None:
         self.assertEqual(self.out["revenueAsts"]["rawValue"], "$31.5 million")

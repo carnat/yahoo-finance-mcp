@@ -9,6 +9,7 @@ import asyncio
 import datetime
 import hashlib
 import json
+import math
 import os
 import re as _re
 import urllib.error as _urlerror
@@ -194,12 +195,13 @@ def _scale_number_from_text(raw: str) -> float | None:
         return None
     n = float(m.group(0))
     low = s.lower()
+    # Whole units once scaled: 2.05 billion is 2050000000, not 2049999999.9999998.
     if "billion" in low or low.endswith("b") or " bn" in low:
-        n *= 1_000_000_000
+        n = float(math.floor(n * 1_000_000_000 + 0.5))
     elif "million" in low or low.endswith("m"):
-        n *= 1_000_000
+        n = float(math.floor(n * 1_000_000 + 0.5))
     elif "thousand" in low or low.endswith("k"):
-        n *= 1_000
+        n = float(math.floor(n * 1_000 + 0.5))
     return n
 
 
@@ -231,7 +233,7 @@ async def _resolve_ex991_url(accession_number: str, cik: int | None) -> str | No
 
 
 async def _resolve_latest_earnings_sec_source(ticker: str) -> dict | None:
-    raw = await _server_attr("list_sec_company_filings")(ticker=ticker, filing_type="8-K", limit=10)
+    raw = await _server_attr("list_sec_company_filings")(ticker=ticker, filing_type="8-K", limit=20)
     payload = _safe_json_loads(raw)
     filings = payload.get("filings") if isinstance(payload.get("filings"), list) else []
     try:
@@ -240,9 +242,12 @@ async def _resolve_latest_earnings_sec_source(ticker: str) -> dict | None:
         issuer_cik = None
     if not filings:
         return None
-    for filing in filings:
-        if not isinstance(filing, dict):
-            continue
+    # An 8-K reporting results of operations (Item 2.02) first, as the Worker
+    # does; a later 8-K for another item (COHR's Items 5.02/8.01) is not the
+    # earnings release. Any 8-K is the fallback.
+    dicts = [f for f in filings if isinstance(f, dict)]
+    ordered = [f for f in dicts if "2.02" in str(f.get("items") or "")] + dicts
+    for filing in ordered:
         doc_url = str(filing.get("documentUrl") or "")
         if not doc_url.startswith("https://www.sec.gov/Archives/"):
             continue
@@ -606,12 +611,27 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
     text = _strip_html_tags(_sanitize_sec_html(html))
     # "revenue guidance of $X to $Y" and "expects revenue between $X and $Y" (yfmcp/extraction_rules.py).
     patterns = _er.guidance_ranges(text)
+
+    def _plain(t: str) -> float | None:
+        try:
+            return float(t)
+        except (TypeError, ValueError):
+            return None
+
+    def _alternates(r: dict, parse, low_key: str, high_key: str) -> list[dict]:
+        # The same metric on another basis ("GAAP ...; non-GAAP ..."), each with its own excerpt (2.5.9).
+        return [{"basis": a["basis"], "statedAs": a["statedAs"], low_key: parse(a["low"]), high_key: parse(a["high"]), "excerpt": _compact_excerpt(a["excerpt"])}
+                for a in r.get("alternates") or []]
+
     if patterns["revenue"]:
         lo = _scale_number_from_text(patterns["revenue"]["low"])
         hi = _scale_number_from_text(patterns["revenue"]["high"])
         if lo is not None and hi is not None:
             base["revenue"] = {
                 "status": "FOUND",
+                "basis": patterns["revenue"]["basis"],
+                "statedAs": patterns["revenue"]["statedAs"],
+                "alternates": _alternates(patterns["revenue"], _scale_number_from_text, "low", "high"),
                 "low": lo,
                 "high": hi,
                 "midpoint": (lo + hi) / 2.0,
@@ -623,6 +643,9 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
         hi = float(patterns["grossMargin"]["high"])
         base["grossMargin"] = {
             "status": "FOUND",
+            "basis": patterns["grossMargin"]["basis"],
+            "statedAs": patterns["grossMargin"]["statedAs"],
+            "alternates": _alternates(patterns["grossMargin"], _plain, "lowPct", "highPct"),
             "lowPct": lo,
             "highPct": hi,
             "midpointPct": (lo + hi) / 2.0,
@@ -633,6 +656,9 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
         hi = float(patterns["eps"]["high"])
         base["eps"] = {
             "status": "FOUND",
+            "basis": patterns["eps"]["basis"],
+            "statedAs": patterns["eps"]["statedAs"],
+            "alternates": _alternates(patterns["eps"], _plain, "low", "high"),
             "low": lo,
             "high": hi,
             "midpoint": (lo + hi) / 2.0,

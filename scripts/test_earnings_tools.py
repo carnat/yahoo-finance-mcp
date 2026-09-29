@@ -156,6 +156,28 @@ class TestGetLatestEarningsRelease(unittest.TestCase):
                 "https://www.sec.gov/Archives/edgar/data/1040470/000165495426006655/aehr_ex991.htm",
             )
 
+    def test_results_8k_is_preferred_over_a_later_8k_for_another_item(self):
+        # COHR (2.5.9): the Aug 31 8-K (Items 5.02, 8.01) is not the Aug 12 earnings release (Item 2.02).
+        base = "https://www.sec.gov/Archives/edgar/data/820318"
+        filings_payload = {"cik": "0000820318", "filings": [
+            {"filingDate": "2026-08-31", "accessionNumber": "0001193125-26-375462", "documentUrl": f"{base}/000119312526375462/d110649d8k.htm", "items": "5.02,8.01"},
+            {"filingDate": "2026-08-12", "accessionNumber": "0001193125-26-346860", "documentUrl": f"{base}/000119312526346860/d128030d8k.htm", "items": "2.02,7.01,9.01"},
+        ]}
+        with patch("server.list_sec_company_filings", new_callable=AsyncMock) as mocked_filings, patch(
+            "yfmcp.tools.earnings._edgar_list_exhibits_from_index", new_callable=AsyncMock
+        ) as mocked_exhibits:
+            mocked_filings.return_value = json.dumps(filings_payload)
+            mocked_exhibits.return_value = [{"type": "EX-99.1", "document": "d128030dex991.htm"}]
+            source = _run(earnings_tools._resolve_latest_earnings_sec_source("COHR"))
+            self.assertEqual((source["accessionNumber"], source["url"]), ("0001193125-26-346860", f"{base}/000119312526346860/d128030dex991.htm"))
+        # With no Item 2.02 8-K listed, the newest 8-K is still read.
+        with patch("server.list_sec_company_filings", new_callable=AsyncMock) as mocked_filings, patch(
+            "yfmcp.tools.earnings._edgar_list_exhibits_from_index", new_callable=AsyncMock
+        ) as mocked_exhibits:
+            mocked_filings.return_value = json.dumps({**filings_payload, "filings": filings_payload["filings"][:1]})
+            mocked_exhibits.return_value = []
+            self.assertEqual(_run(earnings_tools._resolve_latest_earnings_sec_source("COHR"))["accessionNumber"], "0001193125-26-375462")
+
     def test_period_prefers_current_release_heading_over_prior_year_comparison(self):
         period = earnings_tools._extract_earnings_period_from_text(
             "Aehr Reports Fiscal 2026 Fourth Quarter Results. Net revenue was $18.8 million, "

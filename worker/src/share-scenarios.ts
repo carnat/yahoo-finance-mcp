@@ -184,18 +184,21 @@ function scenarioLines(bridge: Rec, s: ShareScenario): Line[] {
   if (warrants) {
     for (const cls of (Array.isArray(warrants.classes) ? warrants.classes : []) as Rec[]) {
       const all = t.warrant_vesting === "all";
-      const count = all ? num(cls.outstanding) : num(cls.exercisable) ?? num(cls.outstanding);
+      // A class that vests on untagged conditions has no known exercisable count; it is never taken as all outstanding (2.5.9).
+      const count = all ? num(cls.outstanding) : cls.exercisable === undefined ? num(cls.outstanding) : num(cls.exercisable);
       lines.push(exercisable("warrants", String(cls.class ?? "Warrants"), count, all ? "outstanding" : "vested_exercisable", num(cls.exercisePrice), t.warrants, price));
     }
   }
 
-  const convertibles = byName("convertible_debt");
-  if (convertibles) {
+  // Convertible notes and convertible preferred stock (2.5.9) take the same if-converted treatment.
+  for (const name of ["convertible_debt", "convertible_preferred"]) {
+    const convertibles = byName(name);
+    if (!convertibles) continue;
     for (const inst of (Array.isArray(convertibles.instruments) ? convertibles.instruments : []) as Rec[]) {
       const shares = num(inst.ifConvertedShares);
       const conv = num(inst.conversionPrice);
       const base = {
-        component: "convertible_debt", instrument: String(inst.instrument ?? "Convertible notes"), treatment: t.convertibles,
+        component: name, instrument: String(inst.instrument ?? "Convertible notes"), treatment: t.convertibles,
         count: shares, countBasis: String(inst.ifConvertedBasis ?? "if_converted"), exercisePrice: conv, price,
       };
       const itm = conv != null ? price >= conv : null;
@@ -235,6 +238,11 @@ function scenarioLines(bridge: Rec, s: ShareScenario): Line[] {
 export function shareCountScenarios(ticker: string, bridge: Rec, scenarios: ShareScenario[]): Rec {
   const basicRec = (bridge.basicShares && typeof bridge.basicShares === "object" ? bridge.basicShares : null) as Rec | null;
   const basic = basicRec ? num(basicRec.shares) : null;
+  // Claims the filing text states but no tagged instrument covers (2.5.9).
+  const claims = (Array.isArray(bridge.unquantifiedShareClaims) ? bridge.unquantifiedShareClaims : []) as Rec[];
+  const openClaims = claims.filter((c) => c.status === "UNQUANTIFIED");
+  const coverage = (bridge.claimCoverage && typeof bridge.claimCoverage === "object" ? bridge.claimCoverage : null) as Rec | null;
+  const claimTextRead = coverage?.textScan === "READ";
   const results = scenarios.map((s) => {
     const lines = scenarioLines(bridge, s);
     const byComponent: Record<string, number> = {};
@@ -259,7 +267,12 @@ export function shareCountScenarios(ticker: string, bridge: Rec, scenarios: Shar
         dilutionPct: basic != null && basic > 0 && resulting != null ? round(((resulting - basic) / basic) * 100, 2) : null,
       },
       unresolvedInstruments: unresolved.map((l) => ({ component: l.component, instrument: l.instrument, reason: l.unresolvedReason })),
-      completeness: basic == null ? "NO_BASIC_SHARES" : unresolved.length > 0 ? "EXCLUDES_UNRESOLVED_INSTRUMENTS" : "COMPLETE",
+      // Resolved tagged instruments are never a full claim inventory.
+      completeness: basic == null ? "NO_BASIC_SHARES"
+        : unresolved.length > 0 ? "EXCLUDES_UNRESOLVED_INSTRUMENTS"
+        : openClaims.length > 0 ? "EXCLUDES_UNQUANTIFIED_CLAIMS"
+        : !claimTextRead ? "CLAIM_TEXT_NOT_READ"
+        : "TAGGED_INSTRUMENTS_RESOLVED",
       priceSensitiveInstruments: lines
         .filter((l) => l.thresholdPrice != null)
         .map((l) => ({ component: l.component, instrument: l.instrument, thresholdPrice: l.thresholdPrice, inTheMoney: l.inTheMoney })),
@@ -268,12 +281,14 @@ export function shareCountScenarios(ticker: string, bridge: Rec, scenarios: Shar
   return {
     ticker: ticker.toUpperCase(),
     basis: "MECHANICAL_COMPANY_DISCLOSED",
-    status: basic == null ? "NOT_FOUND" : results.some((r) => r.completeness !== "COMPLETE") ? "PARTIAL" : "COMPUTED",
+    status: basic == null ? "NOT_FOUND" : results.some((r) => r.completeness !== "TAGGED_INSTRUMENTS_RESOLVED") ? "PARTIAL" : "COMPUTED",
     periodEnd: bridge.periodEnd ?? null,
     basicShares: basicRec,
     sources: bridge.sources ?? [],
     scenarios: results,
     notDisclosed: bridge.notDisclosed ?? [],
+    unquantifiedShareClaims: claims,
+    claimCoverage: coverage ?? { scope: "TAGGED_INSTRUMENTS", completeClaimInventory: false, textScan: "NOT_READ" },
     reportedEpsDilution: bridge.reportedEpsDilution ?? null,
     bridgeWarnings: Array.isArray(bridge.warnings) ? bridge.warnings : [],
     treatmentOptions: TREATMENTS,
@@ -283,6 +298,7 @@ export function shareCountScenarios(ticker: string, bridge: Rec, scenarios: Shar
       "Each scenario is reported as computed; no scenario is recommended and no denominator is selected.",
       "An unresolved instrument is left out of resultingShares and listed; an instrument in notDisclosed was not tagged, which is not proof it does not exist.",
       "Net-share or cash settlement, capped calls, make-whole adjustments and performance conditions are not modeled.",
+      "TAGGED_INSTRUMENTS_RESOLVED means every tagged instrument was resolved, not that every claim on the equity was found; claims quoted in unquantifiedShareClaims are in no scenario's resultingShares.",
     ],
     selectedScenario: null,
     selectedDenominator: null,

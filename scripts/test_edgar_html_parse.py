@@ -110,6 +110,20 @@ MOCK_NO_CHINA = """\
 """
 
 # Variant: nested tables (outer layout table + inner data table)
+# MRVL (2.5.9): "% of Total" beside each value, an unlabeled total row without
+# them, and a table tag far ahead of its first "China" (inline styles).
+MOCK_MRVL = (
+    '<p>Net revenue by geographic area (in millions):</p><table style="' + "x" * 6000 + '">'
+    "<tr><td></td><td>Three Months Ended</td></tr>"
+    "<tr><td></td><td>August 1, 2026</td><td>% of Total</td><td>August 2, 2025</td><td>% of Total</td></tr>"
+    "<tr><td>Net revenue based on destination of shipment:</td></tr>"
+    "<tr><td>China</td><td>$</td><td>1,161.5</td><td>42</td><td>%</td><td>$</td><td>583.4</td><td>29</td><td>%</td></tr>"
+    "<tr><td>Taiwan</td><td>456.8</td><td>17</td><td>%</td><td>541.2</td><td>27</td><td>%</td></tr>"
+    "<tr><td>Other</td><td>1,121.0</td><td>41</td><td>%</td><td>881.5</td><td>44</td><td>%</td></tr>"
+    "<tr><td>$</td><td>2,739.3</td><td>$</td><td>2,006.1</td></tr>"
+    "</table>"
+)
+
 MOCK_NESTED_TABLES = """\
 <html><body>
 <h3>Note 20 Geographic Information</h3>
@@ -239,6 +253,14 @@ class TestExtractGeoRevenueFromHtml(unittest.TestCase):
         self.assertIsNotNone(evidence, "Evidence must not be None")
         rows = evidence.get("sourceRows")
         self.assertTrue(len(rows) >= 2, f"Table must have at least 2 rows, got {len(rows)}")
+
+    def test_value_and_total_share_a_column(self):
+        pct, usd, total, _, evidence = _extract_geo_revenue_from_html(MOCK_MRVL, "China")
+        self.assertEqual((pct, usd, total), (0.424, 1_161_500_000, 2_739_300_000), "not the prior year's $2,006.1 total")
+        self.assertEqual(evidence["sourceRows"][-1], ["Total (unlabeled row)", "2,739.3"])
+        self.assertEqual(evidence["sourceColumns"], ["Three Months Ended August 1, 2026"])
+        misread, _, _, _, _ = _extract_geo_revenue_from_html(MOCK_MRVL.replace(">42<", ">58<"), "China")
+        self.assertIsNone(misread, "a computed share 16 points from the stated 58% is a misread column")
 
     def test_china_not_present_returns_none(self):
         pct, usd, _, _, _ = _extract_geo_revenue_from_html(MOCK_NO_CHINA, "China")
