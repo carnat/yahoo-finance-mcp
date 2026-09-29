@@ -16,6 +16,7 @@ import {
   dilutionBridge,
   parseIxbrl,
   pickCompaniesHouseMatch,
+  SHARE_CLAIM_SEARCH_TERMS,
   type IxDocument,
   type IxSource,
   type TextMatch,
@@ -8750,6 +8751,7 @@ export async function listSecCompanyFilings(ticker: string, filingType: string =
   const accessions = (recent.accessionNumber as string[]) ?? [];
   const primaryDocs = (recent.primaryDocument as string[]) ?? [];
   const acceptedDts = (recent.acceptanceDateTime as string[]) ?? [];
+  const itemLists = (recent.items as string[]) ?? [];
 
   const cap = Math.min(Math.max(1, limit), 20);
   const results: Record<string, unknown>[] = [];
@@ -8768,6 +8770,7 @@ export async function listSecCompanyFilings(ticker: string, filingType: string =
       accessionNumber: acc,
       primaryDocument: primaryDoc,
       documentUrl,
+      items: itemLists[i] != null ? String(itemLists[i]) : "",
     });
   }
 
@@ -15460,6 +15463,17 @@ async function filingTextMatches(ticker: string, filing: ResolvedSecFiling, term
   return textMatchesFrom(search);
 }
 
+/** Share-claim text across the resolved filings; null when a filing's text could not be searched. */
+async function shareClaimMatches(ticker: string, filings: { filing: ResolvedSecFiling }[]): Promise<TextMatch[] | null> {
+  const out: TextMatch[] = [];
+  for (const { filing } of filings) {
+    const search = parseObjectJson(await searchFilingText(ticker, SHARE_CLAIM_SEARCH_TERMS, null, filing.filingType, filing.accessionNumber, 900, false, null, { maxMatches: 24 }));
+    if (search.error || search.code || !Array.isArray(search.matches)) return null;
+    out.push(...textMatchesFrom(search));
+  }
+  return out;
+}
+
 function resolveFailure(error: Record<string, unknown>, ticker: string): string {
   return JSON.stringify({ ticker, ...error });
 }
@@ -15490,6 +15504,7 @@ export async function extractDilutionBridge(
       if (atmMatches.length > 0) break;
     }
   }
+  const claimMatches = await shareClaimMatches(ticker, resolved.filings);
   const input = {
     ticker: ticker.toUpperCase(),
     price,
@@ -15497,6 +15512,7 @@ export async function extractDilutionBridge(
     asOfDate: asOfDate && /^\d{4}-\d{2}-\d{2}$/.test(asOfDate) ? asOfDate : null,
     sources,
     atmMatches,
+    claimMatches,
   };
   let out = dilutionBridge(input);
   // No unvested award count is tagged: read it from the filing's award table.
@@ -16944,9 +16960,10 @@ function scaleNumberFromText(raw: unknown): number | null {
   let n = Number(m[0]);
   if (!Number.isFinite(n)) return null;
   const low = s.toLowerCase();
-  if (low.includes("billion") || /\bbn\b/.test(low) || /b$/.test(low)) n *= 1_000_000_000;
-  else if (low.includes("million") || /m$/.test(low)) n *= 1_000_000;
-  else if (low.includes("thousand") || /k$/.test(low)) n *= 1_000;
+  // Whole units once scaled: 2.05 billion is 2050000000, not 2049999999.9999998.
+  if (low.includes("billion") || /\bbn\b/.test(low) || /b$/.test(low)) n = Math.floor(n * 1_000_000_000 + 0.5);
+  else if (low.includes("million") || /m$/.test(low)) n = Math.floor(n * 1_000_000 + 0.5);
+  else if (low.includes("thousand") || /k$/.test(low)) n = Math.floor(n * 1_000 + 0.5);
   return n;
 }
 
@@ -17635,18 +17652,18 @@ export async function extractGuidance(ticker: string, period = "latest"): Promis
     const low = scaleNumberFromText(rev.low);
     const high = scaleNumberFromText(rev.high);
     if (low != null && high != null) {
-      guidance.revenue = { status: "FOUND", low, high, midpoint: (low + high) / 2, unit: "USD", evidence: [ev(rev.excerpt)] };
+      guidance.revenue = { status: "FOUND", basis: rev.basis, low, high, midpoint: (low + high) / 2, unit: "USD", evidence: [ev(rev.excerpt)] };
     }
   }
   if (gm) {
     const lowPct = Number(gm.low);
     const highPct = Number(gm.high);
-    guidance.grossMargin = { status: "FOUND", lowPct, highPct, midpointPct: (lowPct + highPct) / 2, evidence: [ev(gm.excerpt)] };
+    guidance.grossMargin = { status: "FOUND", basis: gm.basis, lowPct, highPct, midpointPct: (lowPct + highPct) / 2, evidence: [ev(gm.excerpt)] };
   }
   if (eps) {
     const low = Number(eps.low);
     const high = Number(eps.high);
-    guidance.eps = { status: "FOUND", low, high, midpoint: (low + high) / 2, unit: "USD/share", evidence: [ev(eps.excerpt)] };
+    guidance.eps = { status: "FOUND", basis: eps.basis, low, high, midpoint: (low + high) / 2, unit: "USD/share", evidence: [ev(eps.excerpt)] };
   }
   const found = ["revenue", "grossMargin", "eps"].some((k) => ((guidance[k] as Record<string, unknown>).status === "FOUND"));
   return JSON.stringify({

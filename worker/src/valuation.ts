@@ -283,6 +283,12 @@ export function valuationSnapshot(input: SnapshotInput): Record<string, unknown>
       warnings.push({ code: "SEC_BALANCES_STALE", message: `The filing's balances are from ${secPeriodEnd}, older than Yahoo's latest quarter ${market.mostRecentQuarter}, and Yahoo has no newer cash and debt; enterprise value uses the older balances.`, severity: "warning", secPeriodEnd, yahooMostRecentQuarter: market.mostRecentQuarter });
     }
   }
+  // Share claims the filing states but the bridge leaves out of its count (2.5.9).
+  const openClaims = ((Array.isArray(bridge?.unquantifiedShareClaims) ? bridge!.unquantifiedShareClaims : []) as Record<string, unknown>[])
+    .filter((c) => c.status === "UNQUANTIFIED");
+  if (secUsable && openClaims.length > 0) {
+    warnings.push({ code: "UNQUANTIFIED_SHARE_CLAIMS", message: `The diluted share count leaves out ${openClaims.length} share claim(s) the filing states (${openClaims.map((c) => c.kind).join(", ")}); see extract_dilution_bridge unquantifiedShareClaims.`, severity: "warning" });
+  }
   // The capital structure's own warnings (rounded note figures, restated cash,
   // no borrowings) explain the balances used, so they travel with them.
   if (secBalances) {
@@ -378,6 +384,8 @@ export function valuationSnapshot(input: SnapshotInput): Record<string, unknown>
       ordinarySharesPerQuotedShare: ratio,
       dilutionPctAtPrice: secUsable ? num(bridgeCore?.dilutionPctAtPrice) : null,
       bridgeStatus: bridge?.status ?? null,
+      claimScope: bridge ? "TAGGED_INSTRUMENTS" : null,
+      unquantifiedShareClaims: openClaims.map((c) => c.kind),
       yahooSharesOutstanding: market.sharesOutstanding,
       yahooImpliedSharesOutstanding: market.impliedSharesOutstanding,
       secVsYahooSharesDiffPct: sharesDiffPct,

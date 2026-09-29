@@ -87,6 +87,8 @@ BRIDGE = {
         {"principal": 200_000_000, "incrementalShares": 0},
     ]}],
     "atmProgram": {"remainingCapacityUsd": 140_000_000, "programSizeUsd": None, "potentialShares": 5_600_000},
+    # 2.5.9: a claim the filing states but the count leaves out; a closed one is not repeated.
+    "unquantifiedShareClaims": [{"kind": "PRICE_PROTECTION", "status": "UNQUANTIFIED"}, {"kind": "CONVERTIBLE_PREFERRED", "status": "TAGGED_NONE_OUTSTANDING"}],
 }
 CAPITAL = {"basis": "COMPANY_DISCLOSED", "periodEnd": "2025-03-31", "balances": {"cashAndEquivalents": 140_000_000, "shortTermInvestments": None, "totalDebt": 380_000_000}}
 # Filing cash equals Yahoo's total cash, yet the filing adds investments on top (ASTS-like).
@@ -230,6 +232,8 @@ class TestValuationValues(unittest.TestCase):
         self.assertEqual(_multiple(s, "P/E", "next_fiscal_year")["multiple"], 22.73)
         self.assertEqual(s["revenueGrowth"], {"currentFiscalYearVsTtmPct": 20, "nextVsCurrentFiscalYearPct": 33.33})
         self.assertEqual(s["atmCapacity"]["potentialSharesAtPrice"], 5_600_000)
+        self.assertEqual((s["shares"]["claimScope"], s["shares"]["unquantifiedShareClaims"]), ("TAGGED_INSTRUMENTS", ["PRICE_PROTECTION"]))
+        self.assertIn("UNQUANTIFIED_SHARE_CLAIMS", [w["code"] for w in s["warnings"]])
         self.assertEqual(s["peerComparableBasis"]["enterpriseValue"], 25 * 101_000_000 + 400_000_000 - 190_000_000)
 
     def test_filing_investments_above_yahoo_cash_are_flagged(self) -> None:

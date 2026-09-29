@@ -137,14 +137,49 @@ _GROSS_MARGIN_RE = re.compile(r"gross margin[^0-9]{0,20}([0-9]{1,2}(?:\.[0-9]+)?
 _EPS_RE = re.compile(r"(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per share)[^$]{0,25}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|and|-|–|—)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", _F)
 
 
+# Metric first, forward verb after it (2.5.9, COHR): "Revenue for the first
+# quarter of fiscal 2027 is expected to be between $2.2 billion and $2.4
+# billion." No period, dollar sign or percent sign may sit between the metric
+# and the verb, so a reported value is never read as the range.
+_FORWARD_VERB = r"\b(?:expected|projected|forecast(?:ed)?|anticipated|estimated)\s+to\s+(?:be|range|total)\b"
+_METRIC_FIRST_REVENUE_RE = re.compile(rf"\brevenues?\b[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%]{{0,30}}\$\s*{_AMOUNT}{_RANGE_SEP}\$?\s*{_AMOUNT}", _F)
+_METRIC_FIRST_GROSS_MARGIN_RE = re.compile(rf"\bgross margin\b[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%0-9]{{0,30}}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%{_RANGE_SEP}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%", _F)
+_METRIC_FIRST_EPS_RE = re.compile(rf"\b(?:eps|earnings per share)\b[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%]{{0,30}}\$\s*([0-9]+(?:\.[0-9]+)?){_RANGE_SEP}\$?\s*([0-9]+(?:\.[0-9]+)?)", _F)
+# The basis a range is stated on, read from its own clause: the sentence up
+# to the range, and the words after it up to the next value or clause break
+# ("... between $1.85 and $2.05 on a non-GAAP basis.").
+_CLAUSE_START_RE = re.compile(r"(?:[.;!?]\s|•)", _F)
+_CLAUSE_TAIL_RE = re.compile(r"^[^.;,$%•]{0,80}?(?=[.;,$%•]|\sand\s|$)", _F)
+_NON_GAAP_RE = re.compile(r"\bnon-?\s?GAAP\b|\badjusted\b", _F)
+_GAAP_RE = re.compile(r"\bGAAP\b", _F)
+
+
+def _range_basis(text: str, at: int, length: int) -> str:
+    before = text[max(0, at - 200):at]
+    start = 0
+    for m in _CLAUSE_START_RE.finditer(before):
+        start = m.end()
+    tail = _CLAUSE_TAIL_RE.match(text[at + length:])
+    clause = before[start:] + text[at:at + length] + (tail.group(0) if tail else "")
+    if _NON_GAAP_RE.search(clause):
+        return "NON_GAAP"
+    return "GAAP" if _GAAP_RE.search(clause) else "NOT_STATED"
+
+
 def guidance_ranges(text: str) -> dict:
-    """Guidance ranges stated in release text; low and high are the number text as written."""
-    def pick(m):
-        return {"excerpt": m.group(0), "low": m.group(1), "high": m.group(2)} if m else None
+    """Guidance ranges stated in release text; low and high are the number text as
+    written. Keyword-first wording wins; metric-first wording ("revenue ... is
+    expected to be between") is read when there is none."""
+    def pick(*patterns):
+        for pattern in patterns:
+            m = pattern.search(text)
+            if m:
+                return {"excerpt": m.group(0), "low": m.group(1), "high": m.group(2), "basis": _range_basis(text, m.start(), len(m.group(0)))}
+        return None
     return {
-        "revenue": pick(_REVENUE_FIRST_RE.search(text)) or pick(_KEYWORD_FIRST_RE.search(text)),
-        "grossMargin": pick(_GROSS_MARGIN_RE.search(text)),
-        "eps": pick(_EPS_RE.search(text)),
+        "revenue": pick(_REVENUE_FIRST_RE, _KEYWORD_FIRST_RE, _METRIC_FIRST_REVENUE_RE),
+        "grossMargin": pick(_GROSS_MARGIN_RE, _METRIC_FIRST_GROSS_MARGIN_RE),
+        "eps": pick(_EPS_RE, _METRIC_FIRST_EPS_RE),
     }
 
 

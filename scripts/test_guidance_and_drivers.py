@@ -93,6 +93,13 @@ BULLET_RELEASES = [
         "second-half 2025 revenue guidance of $50.0 million to $75.0 million \u2022 Started launch campaign")},
 ]
 
+# Non-GAAP guidance is never scored against a GAAP actual (2.5.9).
+NON_GAAP_RELEASES = [
+    {"filingDate": "2025-03-03", "accessionNumber": "n1", "url": None, "status": "READ", "text": (
+        "Business Outlook \u2022 EPS for fiscal 2025 is expected to be between $0.10 and $0.20 on a non-GAAP basis. "
+        "\u2022 Revenue for fiscal 2025 is expected to be between $4.0 million and $5.0 million.")},
+]
+
 FISCAL_FACTS = {"facts": {"us-gaap": {"Revenues": {"units": {"USD": [
     _fact("2024-10-01", "2025-09-30", 1_000_000, "10-K", "2025-11-20"),
     _fact("2025-10-01", "2025-12-31", 300_000, "10-Q", "2026-02-05"),
@@ -153,6 +160,7 @@ def _python_outputs() -> dict:
         "history": gh.guidance_history("asts", RELEASES, COMPANYFACTS),
         "historyUnreadFacts": gh.guidance_history("asts", RELEASES[:3], None),
         "bullets": gh.guidance_history("asts", BULLET_RELEASES, COMPANYFACTS),
+        "nonGaap": gh.guidance_history("x", NON_GAAP_RELEASES, COMPANYFACTS),
         "fiscalActuals": gh.actuals_from_company_facts(FISCAL_FACTS),
         "periods": [gh.guidance_target_period(c) if a is None else gh.guidance_target_period(c, a) for c, a in PERIOD_CASES],
         "amounts": [gh.parse_amount("150.0 million"), gh.parse_amount("250.0", "million"), gh.parse_amount("1,250"), gh.parse_amount("abc")],
@@ -175,6 +183,7 @@ const out = {
   history: gh.guidanceHistory("asts", f.releases, f.companyfacts),
   historyUnreadFacts: gh.guidanceHistory("asts", f.releases.slice(0, 3), null),
   bullets: gh.guidanceHistory("asts", f.bulletReleases, f.companyfacts),
+  nonGaap: gh.guidanceHistory("x", f.nonGaapReleases, f.companyfacts),
   fiscalActuals: gh.actualsFromCompanyFacts(f.fiscalFacts),
   periods: f.periodCases.map(([c, a]) => (a == null ? gh.guidanceTargetPeriod(c) : gh.guidanceTargetPeriod(c, a))),
   amounts: [gh.parseAmount("150.0 million"), gh.parseAmount("250.0", "million"), gh.parseAmount("1,250"), gh.parseAmount("abc")],
@@ -202,7 +211,8 @@ def _worker_outputs() -> dict:
             bundles.append(out.as_uri())
         fx = Path(tmp) / "fixtures.json"
         fx.write_text(json.dumps({"releases": RELEASES, "companyfacts": COMPANYFACTS, "fiscalFacts": FISCAL_FACTS, "inlineFacts": INLINE_FACTS,
-                                  "statements": STATEMENTS, "periodCases": PERIOD_CASES, "bulletReleases": BULLET_RELEASES}), encoding="utf-8")
+                                  "statements": STATEMENTS, "periodCases": PERIOD_CASES, "bulletReleases": BULLET_RELEASES,
+                                  "nonGaapReleases": NON_GAAP_RELEASES}), encoding="utf-8")
         harness = Path(tmp) / "harness.mjs"
         harness.write_text(_HARNESS, encoding="utf-8")
         result = subprocess.run([node, str(harness), *bundles, str(fx)], check=True, capture_output=True, text=True, timeout=120)
@@ -280,6 +290,15 @@ class TestGuidanceHistory(unittest.TestCase):
         gm = _outcome(self.h, "grossMargin", "Q1 2026")
         self.assertEqual(gm["status"], "NOT_EVALUATED_METRIC")
         self.assertIsNone(gm["positionVsLast"])
+
+    def test_non_gaap_guidance_is_not_scored(self) -> None:
+        h = gh.guidance_history("x", NON_GAAP_RELEASES, COMPANYFACTS)
+        eps = _outcome(h, "eps", "FY2025")
+        self.assertEqual((eps["status"], eps["basis"]), ("NOT_EVALUATED_NON_GAAP_BASIS", "NON_GAAP"))
+        self.assertIsNone(eps["positionVsLast"])
+        self.assertEqual(eps["actual"]["value"], -1.2, "the GAAP actual stays visible")
+        rev = _outcome(h, "revenue", "FY2025")
+        self.assertEqual((rev["status"], rev["basis"], rev["positionVsLast"]), ("EVALUATED", "NOT_STATED", "WITHIN"))
 
     def test_unread_companyfacts(self) -> None:
         h = gh.guidance_history("asts", RELEASES[:3], None)

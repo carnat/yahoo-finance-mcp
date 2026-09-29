@@ -319,6 +319,13 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
             warnings.append({"code": "SEC_BALANCES_STALE", "message": f"The filing's balances are from {sec_period_end}; Yahoo has {market['mostRecentQuarter']}, so Yahoo's newer cash and debt are used (its debt can include leases).", "severity": "warning", "secPeriodEnd": sec_period_end, "yahooMostRecentQuarter": market["mostRecentQuarter"]})
         else:
             warnings.append({"code": "SEC_BALANCES_STALE", "message": f"The filing's balances are from {sec_period_end}, older than Yahoo's latest quarter {market['mostRecentQuarter']}, and Yahoo has no newer cash and debt; enterprise value uses the older balances.", "severity": "warning", "secPeriodEnd": sec_period_end, "yahooMostRecentQuarter": market["mostRecentQuarter"]})
+    # Share claims the filing states but the bridge leaves out of its count (2.5.9).
+    claims = (bridge or {}).get("unquantifiedShareClaims")
+    open_claims = [c for c in (claims if isinstance(claims, list) else []) if isinstance(c, dict) and c.get("status") == "UNQUANTIFIED"]
+    if sec_usable and open_claims:
+        warnings.append({"code": "UNQUANTIFIED_SHARE_CLAIMS", "message": (
+            f"The diluted share count leaves out {len(open_claims)} share claim(s) the filing states ({', '.join(c['kind'] for c in open_claims)}); "
+            "see extract_dilution_bridge unquantifiedShareClaims."), "severity": "warning"})
     # The capital structure's own warnings (rounded note figures, restated cash,
     # no borrowings) explain the balances used, so they travel with them.
     if sec_balances:
@@ -411,6 +418,8 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
             "ordinarySharesPerQuotedShare": ratio,
             "dilutionPctAtPrice": _num((bridge_core or {}).get("dilutionPctAtPrice")) if sec_usable else None,
             "bridgeStatus": (bridge or {}).get("status") if bridge else None,
+            "claimScope": "TAGGED_INSTRUMENTS" if bridge else None,
+            "unquantifiedShareClaims": [c["kind"] for c in open_claims],
             "yahooSharesOutstanding": market["sharesOutstanding"],
             "yahooImpliedSharesOutstanding": market["impliedSharesOutstanding"],
             "secVsYahooSharesDiffPct": shares_diff,

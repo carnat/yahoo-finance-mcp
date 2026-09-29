@@ -36,7 +36,8 @@ def parse_amount(text: str, fallback_unit: str | None = None) -> dict:
         return {"value": None, "unit": None}
     unit = (m.group(2) or fallback_unit or "").lower() or None
     base = float(m.group(1).replace(",", ""))
-    return {"value": base * _SCALE.get(unit, 1) if unit else base, "unit": unit}
+    # Whole units once scaled: 2.05 billion is 2050000000, not 2049999999.9999998.
+    return {"value": math.floor(base * _SCALE.get(unit, 1) + 0.5) if unit else base, "unit": unit}
 
 
 def _unit_of(text: str) -> str | None:
@@ -200,6 +201,7 @@ def guidance_entries(release: dict) -> list[dict]:
             "high": high,
             "midpoint": (low + high) / 2,
             "unit": unit,
+            "basis": r["basis"],
             "statedAction": "REAFFIRMED_IN_TEXT" if _REAFFIRM_RE.search(sentence) else None,
             "releaseDate": release.get("filingDate"),
             "accessionNumber": release.get("accessionNumber"),
@@ -340,16 +342,20 @@ def guidance_outcomes(entries: list[dict], actuals: dict) -> list[dict]:
         actual = table.get(label) if table else None
 
         def position(g: dict, actual: dict | None = actual) -> str | None:
-            if not actual:
+            if not actual or g.get("basis") == "NON_GAAP":
                 return None
             v = actual["value"]
             return "BELOW" if v < g["low"] else "ABOVE" if v > g["high"] else "WITHIN"
 
+        # Reported actuals are GAAP: a non-GAAP range is never scored against them (2.5.9).
+        non_gaap = any(g.get("basis") == "NON_GAAP" for g in ordered)
         status = "EVALUATED"
         if actuals.get("read") is False and metric != "grossMargin":
             status = "ACTUALS_NOT_READ"
         elif not table:
             status = "NOT_EVALUATED_METRIC"
+        elif non_gaap:
+            status = "NOT_EVALUATED_NON_GAAP_BASIS"
         elif not actual:
             if label.startswith("H") and (label.startswith("H2") or actuals.get("calendarFiscalYear") is not True):
                 status = "NOT_EVALUATED_HALF_YEAR"
@@ -364,6 +370,7 @@ def guidance_outcomes(entries: list[dict], actuals: dict) -> list[dict]:
             "actual": actual,
             "initialGuidance": {"low": first["low"], "high": first["high"], "releaseDate": first["releaseDate"]},
             "lastGuidance": {"low": last["low"], "high": last["high"], "releaseDate": last["releaseDate"]},
+            "basis": last.get("basis") or "NOT_STATED",
             "positionVsInitial": position(first),
             "positionVsLast": position(last),
         })

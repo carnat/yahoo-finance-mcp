@@ -118,16 +118,52 @@ const REVENUE_FIRST_RE = new RegExp(`\\brevenues?\\s+(?:guidance|outlook|forecas
 const KEYWORD_FIRST_RE = new RegExp(`(?:expects|expectations?|guidance|outlook)[^.\\n]{0,120}revenue[^$]{0,25}\\$?\\s*${AMOUNT}${RANGE_SEP}\\$?\\s*${AMOUNT}`, "i");
 const GROSS_MARGIN_RE = /gross margin[^0-9]{0,20}([0-9]{1,2}(?:\.[0-9]+)?)\s*%\s*(?:to|and|-|–|—)\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%/i;
 const EPS_RE = /(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per share)[^$]{0,25}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|and|-|–|—)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)/i;
+// Metric first, forward verb after it (2.5.9, COHR): "Revenue for the first
+// quarter of fiscal 2027 is expected to be between $2.2 billion and $2.4
+// billion." No period, dollar sign or percent sign may sit between the metric
+// and the verb, so a reported value is never read as the range.
+const FORWARD_VERB = "\\b(?:expected|projected|forecast(?:ed)?|anticipated|estimated)\\s+to\\s+(?:be|range|total)\\b";
+const METRIC_FIRST_REVENUE_RE = new RegExp(`\\brevenues?\\b[^.$%]{0,120}?${FORWARD_VERB}[^$.%]{0,30}\\$\\s*${AMOUNT}${RANGE_SEP}\\$?\\s*${AMOUNT}`, "i");
+const METRIC_FIRST_GROSS_MARGIN_RE = new RegExp(`\\bgross margin\\b[^.$%]{0,120}?${FORWARD_VERB}[^$.%0-9]{0,30}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%${RANGE_SEP}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%`, "i");
+const METRIC_FIRST_EPS_RE = new RegExp(`\\b(?:eps|earnings per share)\\b[^.$%]{0,120}?${FORWARD_VERB}[^$.%]{0,30}\\$\\s*([0-9]+(?:\\.[0-9]+)?)${RANGE_SEP}\\$?\\s*([0-9]+(?:\\.[0-9]+)?)`, "i");
+// The basis a range is stated on, read from its own clause: the sentence up
+// to the range, and the words after it up to the next value or clause break
+// ("... between $1.85 and $2.05 on a non-GAAP basis.").
+const CLAUSE_START_RE = /(?:[.;!?]\s|•)/g;
+const CLAUSE_TAIL_RE = /^[^.;,$%•]{0,80}?(?=[.;,$%•]|\sand\s|$)/;
+const NON_GAAP_RE = /\bnon-?\s?GAAP\b|\badjusted\b/i;
+const GAAP_RE = /\bGAAP\b/i;
 
-export type RangeMatch = { excerpt: string; low: string; high: string } | null;
+export type RangeBasis = "NON_GAAP" | "GAAP" | "NOT_STATED";
+export type RangeMatch = { excerpt: string; low: string; high: string; basis: RangeBasis } | null;
 
-/** Guidance ranges stated in release text; low and high are the number text as written. */
+function rangeBasis(text: string, at: number, len: number): RangeBasis {
+  const before = text.slice(Math.max(0, at - 200), at);
+  let start = 0;
+  for (const m of before.matchAll(CLAUSE_START_RE)) start = (m.index ?? 0) + m[0].length;
+  const tail = CLAUSE_TAIL_RE.exec(text.slice(at + len))?.[0] ?? "";
+  const clause = `${before.slice(start)}${text.slice(at, at + len)}${tail}`;
+  if (NON_GAAP_RE.test(clause)) return "NON_GAAP";
+  return GAAP_RE.test(clause) ? "GAAP" : "NOT_STATED";
+}
+
+/**
+ * Guidance ranges stated in release text; low and high are the number text as
+ * written. Keyword-first wording wins; metric-first wording ("revenue ... is
+ * expected to be between") is read when there is none.
+ */
 export function guidanceRanges(text: string): { revenue: RangeMatch; grossMargin: RangeMatch; eps: RangeMatch } {
-  const pick = (m: RegExpMatchArray | null): RangeMatch => (m ? { excerpt: m[0], low: m[1], high: m[2] } : null);
+  const pick = (...res: RegExp[]): RangeMatch => {
+    for (const re of res) {
+      const m = re.exec(text);
+      if (m) return { excerpt: m[0], low: m[1], high: m[2], basis: rangeBasis(text, m.index, m[0].length) };
+    }
+    return null;
+  };
   return {
-    revenue: pick(text.match(REVENUE_FIRST_RE)) ?? pick(text.match(KEYWORD_FIRST_RE)),
-    grossMargin: pick(text.match(GROSS_MARGIN_RE)),
-    eps: pick(text.match(EPS_RE)),
+    revenue: pick(REVENUE_FIRST_RE, KEYWORD_FIRST_RE, METRIC_FIRST_REVENUE_RE),
+    grossMargin: pick(GROSS_MARGIN_RE, METRIC_FIRST_GROSS_MARGIN_RE),
+    eps: pick(EPS_RE, METRIC_FIRST_EPS_RE),
   };
 }
 

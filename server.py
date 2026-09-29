@@ -7872,6 +7872,7 @@ async def list_sec_company_filings(ticker: str, filing_type: str = "10-K", limit
     accessions: list[str] = recent.get("accessionNumber", [])
     primary_docs: list[str] = recent.get("primaryDocument", [])
     accepted_dts: list[str] = recent.get("acceptanceDateTime", [])
+    items: list[str] = recent.get("items", [])
 
     results: list[dict] = []
     for i, form in enumerate(forms):
@@ -7891,6 +7892,7 @@ async def list_sec_company_filings(ticker: str, filing_type: str = "10-K", limit
             "accessionNumber": acc,
             "primaryDocument": primary_doc,
             "documentUrl": doc_url,
+            "items": str(items[i]) if i < len(items) and items[i] is not None else "",
         })
 
     retrieved_at = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
@@ -9566,6 +9568,23 @@ async def _filing_text_matches(ticker: str, filing: dict, terms: list[str], max_
     search = _safe_json_loads(await search_filing_text(
         ticker, terms, None, filing["filingType"], filing["accessionNumber"], context_chars, False, None, max_matches=max_matches,
     ))
+    return _text_matches_from(search)
+
+
+async def _share_claim_matches(ticker: str, filings: list[tuple[str, dict]]) -> list[_cs.TextMatch] | None:
+    """Share-claim text across the resolved filings; None when a filing's text could not be searched."""
+    out: list[_cs.TextMatch] = []
+    for _, filing in filings:
+        search = _safe_json_loads(await search_filing_text(
+            ticker, _cs.SHARE_CLAIM_SEARCH_TERMS, None, filing["filingType"], filing["accessionNumber"], 900, False, None, max_matches=24,
+        ))
+        if search.get("error") or search.get("code") or not isinstance(search.get("matches"), list):
+            return None
+        out.extend(_text_matches_from(search))
+    return out
+
+
+def _text_matches_from(search: dict) -> list[_cs.TextMatch]:
     out = []
     for m in search.get("matches") if isinstance(search.get("matches"), list) else []:
         if not isinstance(m, dict):
@@ -9591,7 +9610,7 @@ def _first_present(*values: Any) -> Any:
 @yfinance_server.tool(
     name="extract_dilution_bridge",
     output_schema=_TOOL_OUTPUT_SCHEMAS["extract_dilution_bridge"],
-    description="Basic-to-diluted share bridge at a price you supply, from the filing's inline XBRL: cover-page basic shares, options (treasury-stock method, by exercise-price range when tagged), unvested RSUs/PSUs (gross), warrants per class (treasury stock), convertibles (if-converted when in the money) and ATM remaining capacity from filing text. Mechanical and company-disclosed, not a consensus diluted share count; never back-solve it into one. filing_type latest uses the newest 10-Q with the last 10-K as fallback.",
+    description="Basic-to-diluted share bridge at a price you supply, from the filing's inline XBRL: cover-page basic shares, options (treasury-stock method, by exercise-price range when tagged), unvested RSUs/PSUs (gross), warrants per class (treasury stock), convertibles (if-converted when in the money) and ATM remaining capacity from filing text. Mechanical and company-disclosed, not a consensus diluted share count; never back-solve it into one. status covers tagged instruments only, never a full claim inventory: share claims stated only in filing text (price protection, anti-dilution rights, forward sales, contingent shares, convertible preferred) are quoted in unquantifiedShareClaims and never counted. filing_type latest uses the newest 10-Q with the last 10-K as fallback.",
 )
 async def extract_dilution_bridge(
     ticker: str,
@@ -9621,19 +9640,20 @@ async def extract_dilution_bridge(
             atm_matches = await _filing_text_matches(ticker, filing, _ATM_SEARCH_TERMS, 10, 800)
             if atm_matches:
                 break
+    claim_matches = await _share_claim_matches(ticker, filings)
     bridge_args = (
         ticker.upper(), price_value, (currency or "USD").upper(),
         as_of_date if as_of_date and _re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", as_of_date) else None,
         sources, atm_matches,
     )
-    out = _cs.dilution_bridge(*bridge_args)
+    out = _cs.dilution_bridge(*bridge_args, None, claim_matches)
     # No unvested award count is tagged: read it from the filing's award table.
     if "unvested_share_awards" in out["notDisclosed"]:
         for _, filing in filings:
             table_matches = [m for m in await _filing_text_matches(ticker, filing, _AWARD_TABLE_SEARCH_TERMS, 30, 400) if m.in_table]
             if not table_matches:
                 continue
-            retried = _cs.dilution_bridge(*bridge_args, table_matches)
+            retried = _cs.dilution_bridge(*bridge_args, table_matches, claim_matches)
             if "unvested_share_awards" not in retried["notDisclosed"]:
                 out = retried
                 break

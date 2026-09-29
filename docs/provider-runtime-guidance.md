@@ -962,6 +962,105 @@ consensus actions compose evidence and never fill a gap with an assumption.
   are still read from their last tagged count. Such a count is flagged when
   it predates the period end.
 
+### Claim coverage and untagged share claims (2.5.9, COHR)
+
+- The bridge's `status` covers tagged instruments only. `COMPUTED` means every
+  tagged instrument was resolved. It never means every claim on the equity was
+  found.
+  - Every bridge carries `claimCoverage`:
+    - `scope: TAGGED_INSTRUMENTS`;
+    - `completeClaimInventory: false`;
+    - `modeledComponents`;
+    - `textScan` (`READ` or `NOT_READ`), with the claim kinds it looks for;
+    - the count of open claims.
+  - COHR's FY2026 10-K tags options and awards only; nothing else beyond the
+    cover count. Before this fix it read `COMPUTED` at about 201M shares.
+- The filing text is searched for share claims that no tagged component
+  models (`SHARE_CLAIM_SEARCH_TERMS`):
+  - `PRICE_PROTECTION`: price protection granted with a share sale;
+  - `ANTI_DILUTION_RIGHT`: an investor's anti-dilution right;
+  - `FORWARD_SALE`: a forward sale agreement;
+  - `CONTINGENT_SHARES`: earnout or contingent-consideration shares;
+  - `CONVERTIBLE_PREFERRED`: convertible preferred stock.
+
+  Each claim is quoted in `unquantifiedShareClaims`: up to four sentences,
+  their lead-in, and the document and filing date.
+- A claim is never quantified or added to any count.
+  - An open claim (`UNQUANTIFIED`) makes the bridge `PARTIAL` and raises
+    `UNQUANTIFIED_SHARE_CLAIMS`.
+  - COHR's March 2, 2026 NVIDIA purchase agreement (7,788,161 shares at
+    $256.80) carries a six-month price-protection provision. The provision
+    can be settled in additional shares, so COHR now reads `PARTIAL`.
+  - The count itself is unchanged.
+- The scan skips terms that are not share claims:
+  - A price-protection sentence about distributors, customers, revenue,
+    returns or inventory is revenue recognition, not a share claim. An
+    example is COHR's variable-consideration policy.
+  - An anti-dilution sentence about a warrant's or note's own adjustment
+    terms is skipped, because the bridge already reads that instrument.
+  - A context window's cut first and last sentences are never quoted.
+  - An initialism such as "U.S." does not end a sentence.
+- Convertible preferred status comes from tags, not text:
+  - If the preferred and temporary-equity share counts tagged at the period
+    end are all zero, the claim is closed (`TAGGED_NONE_OUTSTANDING`).
+  - If any is positive, the claim stays open and the count is quoted.
+  - Text saying a series was converted only sets `extinguishmentStated`,
+    because the sentence can describe another series.
+  - COHR's Series B and BE's SK ecoplant preferred are tagged zero and
+    closed.
+- If the text search fails, `textScan` is `NOT_READ` and the bridge warns
+  `SHARE_CLAIM_TEXT_NOT_READ`. An unread search is never reported as "no
+  claims".
+- `get_share_count_scenarios` completeness is scoped the same way:
+  - `COMPLETE` is replaced by `TAGGED_INSTRUMENTS_RESOLVED`.
+  - `EXCLUDES_UNQUANTIFIED_CLAIMS` and `CLAIM_TEXT_NOT_READ` make the
+    scenarios `PARTIAL`.
+  - The claims and `claimCoverage` are passed through.
+- `get_valuation_snapshot` passes the open claim kinds through as
+  `shares.unquantifiedShareClaims`, with `shares.claimScope`, and raises
+  `UNQUANTIFIED_SHARE_CLAIMS`.
+
+### Metric-first guidance and its basis (2.5.9, COHR)
+
+- `extract_guidance` returned `NOT_DISCLOSED` for COHR's Q4 FY2026 release.
+  Its outlook puts the metric first: "Revenue for the first quarter of fiscal
+  2027 is expected to be between $2.2 billion and $2.4 billion".
+  - The keyword-first patterns needed "expects" or "guidance" before the
+    metric.
+  - The gross-margin pattern allowed no digits between the label and the
+    range, and "fiscal 2027" has digits.
+- Keyword-first wording still wins. Metric-first wording is read when there is
+  none:
+  - the metric (revenue, gross margin, EPS or earnings per share);
+  - up to 120 characters with no period, dollar sign or percent sign;
+  - "expected, projected, forecast, anticipated or estimated to be, range or
+    total";
+  - the range.
+
+  Nothing reported can sit between the metric and the verb, so a reported
+  value is never read as guidance.
+- Every range carries `basis`: `NON_GAAP`, `GAAP` or `NOT_STATED`. It is read
+  from the range's own clause: the sentence up to the range, and the words
+  after it up to the next value or clause break.
+  - COHR's gross margin (39.5–41.5%) and EPS ($1.85–2.05) are `NON_GAAP`.
+  - Its revenue ($2.2–2.4B) is `NOT_STATED`.
+  - In "GAAP EPS … $1.00 and $1.20 and non-GAAP EPS between …", the first
+    range stays `GAAP`.
+- `get_guidance_history` entries and outcomes carry the basis.
+  - A non-GAAP range is never scored against a reported GAAP actual:
+    `NOT_EVALUATED_NON_GAAP_BASIS`, with both positions null.
+  - The actual stays visible.
+- A scaled amount is a whole number: 2.05 billion reads 2050000000, not
+  2049999999.9999998. This covers guidance history amounts and
+  `extract_guidance`/`extract_earnings_metrics` text values.
+- The local server now reads the same release as the Worker: the newest 8-K
+  reporting results of operations (Item 2.02). Before this fix it took the
+  newest 8-K of any kind. For COHR that was the Aug 31, 2026 8-K (Items 5.02,
+  8.01), whose text has no guidance.
+  - Any 8-K is still the fallback when none reports Item 2.02.
+  - `list_sec_company_filings` rows carry each 8-K's `items`, in both
+    runtimes.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

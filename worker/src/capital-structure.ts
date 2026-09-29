@@ -968,6 +968,104 @@ function atmComponent(evidence: Record<string, unknown>[], price: number): Recor
   return out;
 }
 
+// ── Untagged share claims (2.5.9, COHR) ─────────────────────────────────────
+
+// Claims on the equity that the bridge's tagged components do not model: a
+// price-protection or anti-dilution right granted with a share sale, a forward
+// sale, shares issuable as contingent consideration, and convertible preferred
+// stock. They are read from filing text, quoted, and never quantified.
+export const SHARE_CLAIM_SEARCH_TERMS = [
+  "price protection", "anti-dilution", "antidilution", "forward sale agreement", "earnout shares", "earn-out shares",
+  "contingent consideration", "contingently issuable", "convertible preferred",
+];
+const SHARE_CLAIM_KINDS: { kind: string; re: RegExp }[] = [
+  { kind: "PRICE_PROTECTION", re: /\bprice[- ]protection\b/i },
+  { kind: "ANTI_DILUTION_RIGHT", re: /\banti-?dilution (?:rights?|protections?|provisions?)\b/i },
+  { kind: "FORWARD_SALE", re: /\bforward (?:sale|equity sale) agreements?\b/i },
+  { kind: "CONTINGENT_SHARES", re: /\bearn-?out shares\b|\bcontingently issuable (?:shares|common stock)\b|\bcontingent consideration\b[^.]{0,120}\b(?:in|of) (?:shares|common stock)\b/i },
+  { kind: "CONVERTIBLE_PREFERRED", re: /\bconvertible preferred (?:stock|shares)\b/i },
+];
+// A customer or distributor price-protection term is a revenue reduction, not a
+// claim on shares (COHR's variable-consideration policy).
+const REVENUE_TERM_RE = /\b(?:distributors?|customers?|revenues?|variable consideration|product returns?|sales price|price reductions?|inventor(?:y|ies)|rebates?)\b/i;
+// Anti-dilution adjustments of a warrant's or note's own terms belong to an
+// instrument the bridge already reads.
+const INSTRUMENT_TERM_RE = /\b(?:warrants?|convertible (?:senior )?notes?|conversion (?:rate|price)|exercise price|debentures?)\b/i;
+const EQUITY_TERM_RE = /\b(?:shares?|stock|equity|securities purchase agreement|purchase agreement|investors?|stockholders?|shareholders?)\b/i;
+const EXTINGUISHED_RE = /\bwere (?:all )?converted\b|\bno shares of\b[^.]{0,120}\b(?:are|were|remain)\b[^.]{0,30}\boutstanding\b|\b(?:was|were) redeemed in full\b|\b(?:expired|terminated) (?:unexercised|without)\b/i;
+// Sentence breaks, except after an initialism such as "U.S." ("applicable U.S. GAAP").
+const CLAIM_SENTENCE_SPLIT_RE = /(?<![A-Z]\.[A-Z]\.)(?<=[.!?])\s+(?=[A-Z(\u201c"])/;
+const PREFERRED_OUTSTANDING_CONCEPTS = ["PreferredStockSharesOutstanding", "TemporaryEquitySharesOutstanding"];
+
+/**
+ * Share claims stated in filing text that no tagged component covers, one per
+ * kind and document, each with up to four quoted sentences and the lead-in
+ * before the first. Every claim is UNQUANTIFIED; text saying an instrument was
+ * converted or redeemed is flagged (extinguishmentStated) but never closes the
+ * claim, since the sentence can describe another series.
+ */
+export function shareClaimSignals(matches: TextMatch[]): Record<string, unknown>[] {
+  const groups = new Map<string, Record<string, unknown>>();
+  const seen = new Set<string>();
+  for (const match of matches) {
+    const list = collapse(match.contextText).split(CLAIM_SENTENCE_SPLIT_RE).map((x) => x.trim()).filter(Boolean);
+    // A context window cuts its first and last sentences mid-way.
+    if (list.length > 0 && !/^[A-Z(\u201c"]/.test(list[0])) list.shift();
+    if (list.length > 0 && !/[.!?\u201d")]$/.test(list[list.length - 1])) list.pop();
+    list.forEach((sentence, i) => {
+      const kind = SHARE_CLAIM_KINDS.find((k) => k.re.test(sentence))?.kind;
+      if (!kind || seen.has(`${kind}|${sentence}`)) return;
+      if (kind === "PRICE_PROTECTION" && REVENUE_TERM_RE.test(sentence)) return;
+      if (kind === "ANTI_DILUTION_RIGHT" && INSTRUMENT_TERM_RE.test(sentence)) return;
+      const leadIn = list.slice(Math.max(0, i - 2), i).join(" ");
+      if (!EQUITY_TERM_RE.test(`${leadIn} ${sentence}`)) return;
+      seen.add(`${kind}|${sentence}`);
+      const key = `${kind}|${match.documentUrl ?? ""}`;
+      let group = groups.get(key);
+      if (!group) {
+        group = {
+          kind,
+          status: "UNQUANTIFIED",
+          sentences: [] as string[],
+          leadIn: leadIn.slice(-600) || null,
+          extinguishmentStated: false,
+          sectionHeading: match.sectionHeading,
+          documentUrl: match.documentUrl,
+          filingDate: match.filingDate,
+          accessionNumber: match.accessionNumber,
+        };
+        groups.set(key, group);
+      }
+      const quoted = group.sentences as string[];
+      if (quoted.length < 4) quoted.push(sentence.slice(0, 600));
+      if (EXTINGUISHED_RE.test(sentence)) group.extinguishmentStated = true;
+    });
+  }
+  return [...groups.values()];
+}
+
+/**
+ * Convertible preferred claims checked against the preferred and temporary
+ * equity share counts tagged at a filing's period end: all zero closes the
+ * claim (TAGGED_NONE_OUTSTANDING); a positive count keeps it open and quotes it.
+ */
+function preferredClaimsWithTags(claims: Record<string, unknown>[], sources: IxSource[]): Record<string, unknown>[] {
+  let tagged: IxFact[] | null = null;
+  for (const s of sources) {
+    const end = s.doc.documentPeriodEnd;
+    const facts = s.doc.facts.filter((f) => PREFERRED_OUTSTANDING_CONCEPTS.includes(f.local) && f.value != null && end != null && f.periodEnd === end);
+    if (facts.length > 0) {
+      tagged = facts;
+      break;
+    }
+  }
+  return claims.map((c) => {
+    if (c.kind !== "CONVERTIBLE_PREFERRED" || tagged == null) return c;
+    const rows = tagged.map((f) => ({ concept: f.name, class: Object.values(f.dims)[0] ? memberLabel(Object.values(f.dims)[0]) : null, shares: f.value, asOf: f.periodEnd }));
+    return { ...c, status: tagged.every((f) => f.value === 0) ? "TAGGED_NONE_OUTSTANDING" : "UNQUANTIFIED", taggedOutstanding: rows };
+  });
+}
+
 const ANTIDILUTIVE = "AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount";
 const DILUTION_CONCEPT_RE = /Warrant|Option|Nonvested|RestrictedStock|Convertible|Antidilutive|EarningsPerShare|SharesOutstanding/i;
 
@@ -1022,6 +1120,8 @@ export type DilutionInput = {
   sources: IxSource[];
   atmMatches: TextMatch[];
   awardTableMatches?: TextMatch[];
+  // Filing text read for untagged share claims; null when it was not read.
+  claimMatches?: TextMatch[] | null;
 };
 
 /** Basic to diluted shares at a supplied price, from company disclosures only. */
@@ -1087,6 +1187,19 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
       severity: "warning",
     });
   }
+  const claimsRead = Array.isArray(input.claimMatches);
+  const claims = claimsRead ? preferredClaimsWithTags(shareClaimSignals(input.claimMatches as TextMatch[]), sources) : [];
+  const openClaims = claims.filter((c) => c.status === "UNQUANTIFIED");
+  if (openClaims.length > 0) {
+    warnings.push({
+      code: "UNQUANTIFIED_SHARE_CLAIMS",
+      message: `The filing text states ${openClaims.length} share claim(s) no tagged component covers (${openClaims.map((c) => c.kind).join(", ")}); they are quoted in unquantifiedShareClaims and are not in any share count.`,
+      severity: "warning",
+    });
+  }
+  if (!claimsRead) {
+    warnings.push({ code: "SHARE_CLAIM_TEXT_NOT_READ", message: "The filing text was not read for untagged share claims (price protection, anti-dilution rights, forward sales, contingent shares, convertible preferred); retry.", severity: "warning" });
+  }
   if (sources.every((s) => s.doc.facts.length === 0)) {
     warnings.push({ code: "NO_INLINE_XBRL", message: "The filing carries no inline XBRL facts; the bridge needs tagged share and instrument counts.", severity: "warning" });
   }
@@ -1104,6 +1217,16 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
     notDisclosed,
     unresolved,
     partiallyResolved: partial,
+    unquantifiedShareClaims: claims,
+    claimCoverage: {
+      scope: "TAGGED_INSTRUMENTS",
+      completeClaimInventory: false,
+      modeledComponents: ["stock_options", "unvested_share_awards", "warrants", "convertible_debt", "atm_program"],
+      textScan: claimsRead ? "READ" : "NOT_READ",
+      textScanKinds: SHARE_CLAIM_KINDS.map((k) => k.kind),
+      unquantifiedClaims: openClaims.length,
+      note: "status describes the tagged instruments only. COMPUTED means every tagged instrument was resolved, never that every claim on the equity was found; the text scan covers a fixed list of claim kinds, and a claim it does not find is not proof none exists.",
+    },
   };
   if (!basicFound) {
     out.status = "NOT_FOUND";
@@ -1133,12 +1256,14 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
       dilutedSharesAtPriceWithAtm: atmShares != null ? round(diluted + atmShares) : null,
       formula: "basic + options (treasury stock) + unvested awards (gross) + warrants (treasury stock) + convertibles (if-converted when in the money)",
     };
-    out.status = unresolved.length > 0 || partial.length > 0 ? "PARTIAL" : "COMPUTED";
+    // A share claim the filing states but no tagged component covers leaves the count partial (2.5.9).
+    out.status = unresolved.length > 0 || partial.length > 0 || openClaims.length > 0 ? "PARTIAL" : "COMPUTED";
   }
   out.methodology = [
     "Every count is a company disclosure tagged in the filing's inline XBRL; the only external input is the price you supplied.",
     "This is a mechanical bridge, not a consensus or forecast diluted share count, and must not be back-solved into one.",
     "A component missing from notDisclosed was not tagged in the filing; that is not proof the instrument does not exist.",
+    "COMPUTED covers the tagged instruments only; it is not a full claim inventory. Share claims found in the filing text are quoted in unquantifiedShareClaims and left out of every count.",
   ];
   if (notDisclosed.length > 0 || unresolved.length > 0) {
     // What the filing does tag, so a missing component can be traced to a concept this bridge does not read.

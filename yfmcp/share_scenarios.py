@@ -218,6 +218,11 @@ def share_count_scenarios(ticker: str, bridge: dict, scenarios: list[dict]) -> d
     """Share counts under each caller scenario, from the dilution bridge's price-independent inventory."""
     basic_rec = bridge.get("basicShares") if isinstance(bridge.get("basicShares"), dict) else None
     basic = _num(basic_rec.get("shares")) if basic_rec else None
+    # Claims the filing text states but no tagged instrument covers (2.5.9).
+    claims = bridge.get("unquantifiedShareClaims") if isinstance(bridge.get("unquantifiedShareClaims"), list) else []
+    open_claims = [c for c in claims if isinstance(c, dict) and c.get("status") == "UNQUANTIFIED"]
+    coverage = bridge.get("claimCoverage") if isinstance(bridge.get("claimCoverage"), dict) else None
+    claim_text_read = bool(coverage) and coverage.get("textScan") == "READ"
     results = []
     for s in scenarios:
         lines = _scenario_lines(bridge, s)
@@ -243,7 +248,12 @@ def share_count_scenarios(ticker: str, bridge: dict, scenarios: list[dict]) -> d
                 "dilutionPct": _round((resulting - basic) / basic * 100, 2) if basic is not None and basic > 0 and resulting is not None else None,
             },
             "unresolvedInstruments": [{"component": ln["component"], "instrument": ln["instrument"], "reason": ln["unresolvedReason"]} for ln in unresolved],
-            "completeness": "NO_BASIC_SHARES" if basic is None else "EXCLUDES_UNRESOLVED_INSTRUMENTS" if unresolved else "COMPLETE",
+            # Resolved tagged instruments are never a full claim inventory.
+            "completeness": ("NO_BASIC_SHARES" if basic is None
+                             else "EXCLUDES_UNRESOLVED_INSTRUMENTS" if unresolved
+                             else "EXCLUDES_UNQUANTIFIED_CLAIMS" if open_claims
+                             else "CLAIM_TEXT_NOT_READ" if not claim_text_read
+                             else "TAGGED_INSTRUMENTS_RESOLVED"),
             "priceSensitiveInstruments": [
                 {"component": ln["component"], "instrument": ln["instrument"], "thresholdPrice": ln["thresholdPrice"], "inTheMoney": ln["inTheMoney"]}
                 for ln in lines if ln["thresholdPrice"] is not None
@@ -252,12 +262,14 @@ def share_count_scenarios(ticker: str, bridge: dict, scenarios: list[dict]) -> d
     return {
         "ticker": ticker.upper(),
         "basis": "MECHANICAL_COMPANY_DISCLOSED",
-        "status": "NOT_FOUND" if basic is None else "PARTIAL" if any(r["completeness"] != "COMPLETE" for r in results) else "COMPUTED",
+        "status": "NOT_FOUND" if basic is None else "PARTIAL" if any(r["completeness"] != "TAGGED_INSTRUMENTS_RESOLVED" for r in results) else "COMPUTED",
         "periodEnd": bridge.get("periodEnd"),
         "basicShares": basic_rec,
         "sources": _first(bridge.get("sources"), []),
         "scenarios": results,
         "notDisclosed": _first(bridge.get("notDisclosed"), []),
+        "unquantifiedShareClaims": claims,
+        "claimCoverage": coverage or {"scope": "TAGGED_INSTRUMENTS", "completeClaimInventory": False, "textScan": "NOT_READ"},
         "reportedEpsDilution": bridge.get("reportedEpsDilution"),
         "bridgeWarnings": bridge.get("warnings") if isinstance(bridge.get("warnings"), list) else [],
         "treatmentOptions": TREATMENTS,
@@ -267,6 +279,8 @@ def share_count_scenarios(ticker: str, bridge: dict, scenarios: list[dict]) -> d
             "Each scenario is reported as computed; no scenario is recommended and no denominator is selected.",
             "An unresolved instrument is left out of resultingShares and listed; an instrument in notDisclosed was not tagged, which is not proof it does not exist.",
             "Net-share or cash settlement, capped calls, make-whole adjustments and performance conditions are not modeled.",
+            ("TAGGED_INSTRUMENTS_RESOLVED means every tagged instrument was resolved, not that every claim on the equity was found; claims quoted in "
+             "unquantifiedShareClaims are in no scenario's resultingShares."),
         ],
         "selectedScenario": None,
         "selectedDenominator": None,

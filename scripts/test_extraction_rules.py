@@ -51,6 +51,15 @@ ASTS_RELEASE = (
 AWARD_FIRST = "Received awards with an aggregate value of over $125 million; revenue was $31.5 million."
 KEYWORD_FIRST = "The Company expects revenue of between $40 million and $45 million for the third quarter. Gross margin of 38% to 40% is expected."
 GUIDANCE_ONLY = "For the fourth quarter we expect revenue to be $500 million."
+# COHR Q4 FY26 EX-99.1: metric first, forward verb after it, basis after the range (2.5.9).
+COHR_OUTLOOK = (
+    "Revenue for the fourth quarter of fiscal 2026 was $1.83 billion. GAAP gross margin was 36.1%. "
+    "Business Outlook – First Quarter Fiscal 2027 (1) • Revenue for the first quarter of fiscal 2027 is expected to be between $2.2 billion and $2.4 billion. "
+    "• Gross margin percentage for the first quarter of fiscal 2027 is expected to be between 39.5% and 41.5% on a non-GAAP basis. "
+    "• Total operating expenses for the first quarter of fiscal 2027 are expected to be between $400 million and $420 million on a non-GAAP basis. "
+    "• EPS for the first quarter of fiscal 2027 is expected to be between $1.85 and $2.05 on a non-GAAP basis."
+)
+MIXED_BASIS = "GAAP EPS for the quarter is expected to be between $1.00 and $1.20 and non-GAAP EPS between $1.85 and $2.05."
 STEM_WORDS = ["launch", "launches", "launched", "launching", "BlueBirds", "release", "released", "offering", "class", "guidance"]
 EVIDENCE = [
     {"id": "finnhub", "confidence": "LOW", "publishedAt": "2026-09-17"},
@@ -97,6 +106,8 @@ const out = {
   negation: r.customerConcentration(d.negation),
   guidanceAsts: r.guidanceRanges(d.astsRelease),
   guidanceKeyword: r.guidanceRanges(d.keywordFirst),
+  guidanceCohr: r.guidanceRanges(d.cohrOutlook),
+  guidanceMixed: r.guidanceRanges(d.mixedBasis),
   revenueAsts: r.reportedTextMetric(d.astsRelease, r.REVENUE_LABEL, r.USD_AMOUNT),
   revenueAwardFirst: r.reportedTextMetric(d.awardFirst, r.REVENUE_LABEL, r.USD_AMOUNT),
   revenueGuidanceOnly: r.reportedTextMetric(d.guidanceOnly, r.REVENUE_LABEL, r.USD_AMOUNT),
@@ -126,6 +137,7 @@ def _data() -> dict:
         "aaoi": AAOI_MATCHES, "negation": NEGATION_MATCHES, "astsRelease": ASTS_RELEASE, "keywordFirst": KEYWORD_FIRST,
         "awardFirst": AWARD_FIRST, "guidanceOnly": GUIDANCE_ONLY, "stemWords": STEM_WORDS, "evidence": EVIDENCE, "concepts": CONCEPTS,
         "filingConcepts": FILING_CONCEPTS, "cashConcepts": CASH_CONCEPTS,
+        "cohrOutlook": COHR_OUTLOOK, "mixedBasis": MIXED_BASIS,
     }
 
 
@@ -154,6 +166,8 @@ def _python() -> dict:
         "negation": er.customer_concentration(d["negation"]),
         "guidanceAsts": er.guidance_ranges(d["astsRelease"]),
         "guidanceKeyword": er.guidance_ranges(d["keywordFirst"]),
+        "guidanceCohr": er.guidance_ranges(d["cohrOutlook"]),
+        "guidanceMixed": er.guidance_ranges(d["mixedBasis"]),
         "revenueAsts": er.reported_text_metric(d["astsRelease"], er.REVENUE_LABEL, er.USD_AMOUNT),
         "revenueAwardFirst": er.reported_text_metric(d["awardFirst"], er.REVENUE_LABEL, er.USD_AMOUNT),
         "revenueGuidanceOnly": er.reported_text_metric(d["guidanceOnly"], er.REVENUE_LABEL, er.USD_AMOUNT),
@@ -193,9 +207,18 @@ class TestRules(unittest.TestCase):
         self.assertIn("No single customer", n["negation"]["sentence"])
 
     def test_guidance_after_the_metric_word(self) -> None:
-        self.assertEqual(self.out["guidanceAsts"]["revenue"], {"excerpt": "revenue guidance of $150.0 million to $200.0 million", "low": "150.0 million", "high": "200.0 million"})
+        self.assertEqual(self.out["guidanceAsts"]["revenue"], {"excerpt": "revenue guidance of $150.0 million to $200.0 million", "low": "150.0 million", "high": "200.0 million", "basis": "NOT_STATED"})
         self.assertEqual((self.out["guidanceKeyword"]["revenue"]["low"], self.out["guidanceKeyword"]["revenue"]["high"]), ("40 million", "45 million"))
         self.assertEqual((self.out["guidanceKeyword"]["grossMargin"]["low"], self.out["guidanceKeyword"]["grossMargin"]["high"]), ("38", "40"))
+
+    def test_metric_first_guidance_and_its_basis(self) -> None:
+        cohr = self.out["guidanceCohr"]
+        self.assertEqual((cohr["revenue"]["low"], cohr["revenue"]["high"], cohr["revenue"]["basis"]), ("2.2 billion", "2.4 billion", "NOT_STATED"))
+        self.assertTrue(cohr["revenue"]["excerpt"].startswith("Revenue for the first quarter of fiscal 2027"), "the reported fourth-quarter revenue is never the range")
+        self.assertEqual((cohr["grossMargin"]["low"], cohr["grossMargin"]["high"], cohr["grossMargin"]["basis"]), ("39.5", "41.5", "NON_GAAP"))
+        self.assertEqual((cohr["eps"]["low"], cohr["eps"]["high"], cohr["eps"]["basis"]), ("1.85", "2.05", "NON_GAAP"))
+        mixed = self.out["guidanceMixed"]["eps"]
+        self.assertEqual((mixed["low"], mixed["high"], mixed["basis"]), ("1.00", "1.20", "GAAP"), "the next clause's non-GAAP range does not relabel this one")
 
     def test_reported_revenue_skips_awards_backlog_and_guidance(self) -> None:
         self.assertEqual(self.out["revenueAsts"]["rawValue"], "$31.5 million")

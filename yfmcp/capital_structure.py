@@ -1061,6 +1061,107 @@ def _atm_component(evidence: list[dict], price: float) -> dict | None:
     return out
 
 
+# ── Untagged share claims (2.5.9, COHR) ─────────────────────────────────────
+
+# Claims on the equity that the bridge's tagged components do not model: a
+# price-protection or anti-dilution right granted with a share sale, a forward
+# sale, shares issuable as contingent consideration, and convertible preferred
+# stock. They are read from filing text, quoted, and never quantified.
+SHARE_CLAIM_SEARCH_TERMS = [
+    "price protection", "anti-dilution", "antidilution", "forward sale agreement", "earnout shares", "earn-out shares",
+    "contingent consideration", "contingently issuable", "convertible preferred",
+]
+_SHARE_CLAIM_KINDS = [
+    ("PRICE_PROTECTION", re.compile(r"\bprice[- ]protection\b", _F)),
+    ("ANTI_DILUTION_RIGHT", re.compile(r"\banti-?dilution (?:rights?|protections?|provisions?)\b", _F)),
+    ("FORWARD_SALE", re.compile(r"\bforward (?:sale|equity sale) agreements?\b", _F)),
+    ("CONTINGENT_SHARES", re.compile(r"\bearn-?out shares\b|\bcontingently issuable (?:shares|common stock)\b|\bcontingent consideration\b[^.]{0,120}\b(?:in|of) (?:shares|common stock)\b", _F)),
+    ("CONVERTIBLE_PREFERRED", re.compile(r"\bconvertible preferred (?:stock|shares)\b", _F)),
+]
+# A customer or distributor price-protection term is a revenue reduction, not a
+# claim on shares (COHR's variable-consideration policy).
+_REVENUE_TERM_RE = re.compile(r"\b(?:distributors?|customers?|revenues?|variable consideration|product returns?|sales price|price reductions?|inventor(?:y|ies)|rebates?)\b", _F)
+# Anti-dilution adjustments of a warrant's or note's own terms belong to an
+# instrument the bridge already reads.
+_INSTRUMENT_TERM_RE = re.compile(r"\b(?:warrants?|convertible (?:senior )?notes?|conversion (?:rate|price)|exercise price|debentures?)\b", _F)
+_EQUITY_TERM_RE = re.compile(r"\b(?:shares?|stock|equity|securities purchase agreement|purchase agreement|investors?|stockholders?|shareholders?)\b", _F)
+_EXTINGUISHED_RE = re.compile(r"\bwere (?:all )?converted\b|\bno shares of\b[^.]{0,120}\b(?:are|were|remain)\b[^.]{0,30}\boutstanding\b|\b(?:was|were) redeemed in full\b|\b(?:expired|terminated) (?:unexercised|without)\b", _F)
+# Sentence breaks, except after an initialism such as "U.S." ("applicable U.S. GAAP").
+_CLAIM_SENTENCE_SPLIT_RE = re.compile(r"(?<![A-Z]\.[A-Z]\.)(?<=[.!?])\s+(?=[A-Z(\u201c\"])")
+_PREFERRED_OUTSTANDING_CONCEPTS = ("PreferredStockSharesOutstanding", "TemporaryEquitySharesOutstanding")
+
+
+def share_claim_signals(matches: list[TextMatch]) -> list[dict]:
+    """Share claims stated in filing text that no tagged component covers, one per
+    kind and document, each with up to four quoted sentences and the lead-in
+    before the first. Every claim is UNQUANTIFIED; text saying an instrument was
+    converted or redeemed is flagged (extinguishmentStated) but never closes the
+    claim, since the sentence can describe another series."""
+    groups: dict[str, dict] = {}
+    seen: set[str] = set()
+    for match in matches:
+        items = [x.strip() for x in _CLAIM_SENTENCE_SPLIT_RE.split(_collapse(match.context_text)) if x.strip()]
+        # A context window cuts its first and last sentences mid-way.
+        if items and not re.match(r"[A-Z(\u201c\"]", items[0]):
+            items.pop(0)
+        if items and not re.search(r"[.!?\u201d\")]$", items[-1]):
+            items.pop()
+        for i, sentence in enumerate(items):
+            kind = next((k for k, pattern in _SHARE_CLAIM_KINDS if pattern.search(sentence)), None)
+            if kind is None or f"{kind}|{sentence}" in seen:
+                continue
+            if kind == "PRICE_PROTECTION" and _REVENUE_TERM_RE.search(sentence):
+                continue
+            if kind == "ANTI_DILUTION_RIGHT" and _INSTRUMENT_TERM_RE.search(sentence):
+                continue
+            lead_in = " ".join(items[max(0, i - 2):i])
+            if not _EQUITY_TERM_RE.search(f"{lead_in} {sentence}"):
+                continue
+            seen.add(f"{kind}|{sentence}")
+            key = f"{kind}|{match.document_url or ''}"
+            group = groups.get(key)
+            if group is None:
+                group = {
+                    "kind": kind,
+                    "status": "UNQUANTIFIED",
+                    "sentences": [],
+                    "leadIn": lead_in[-600:] or None,
+                    "extinguishmentStated": False,
+                    "sectionHeading": match.section_heading,
+                    "documentUrl": match.document_url,
+                    "filingDate": match.filing_date,
+                    "accessionNumber": match.accession_number,
+                }
+                groups[key] = group
+            if len(group["sentences"]) < 4:
+                group["sentences"].append(sentence[:600])
+            if _EXTINGUISHED_RE.search(sentence):
+                group["extinguishmentStated"] = True
+    return list(groups.values())
+
+
+def _preferred_claims_with_tags(claims: list[dict], sources: list[IxSource]) -> list[dict]:
+    """Convertible preferred claims checked against the preferred and temporary
+    equity share counts tagged at a filing's period end: all zero closes the
+    claim (TAGGED_NONE_OUTSTANDING); a positive count keeps it open and quotes it."""
+    tagged = None
+    for s in sources:
+        end = s.doc.document_period_end
+        facts = [f for f in s.doc.facts if f.local in _PREFERRED_OUTSTANDING_CONCEPTS and f.value is not None and end is not None and f.period_end == end]
+        if facts:
+            tagged = facts
+            break
+    out = []
+    for c in claims:
+        if c["kind"] != "CONVERTIBLE_PREFERRED" or tagged is None:
+            out.append(c)
+            continue
+        rows = [{"concept": f.name, "class": member_label(next(iter(f.dims.values()))) if f.dims else None, "shares": f.value, "asOf": f.period_end}
+                for f in tagged]
+        out.append({**c, "status": "TAGGED_NONE_OUTSTANDING" if all(f.value == 0 for f in tagged) else "UNQUANTIFIED", "taggedOutstanding": rows})
+    return out
+
+
 _ANTIDILUTIVE = "AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount"
 _DILUTION_CONCEPT_RE = re.compile(r"Warrant|Option|Nonvested|RestrictedStock|Convertible|Antidilutive|EarningsPerShare|SharesOutstanding", _F)
 
@@ -1120,7 +1221,8 @@ def _is_number(value: Any) -> bool:
 
 
 def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: str | None,
-                    sources: list[IxSource], atm_matches: list[TextMatch], award_table_matches: list[TextMatch] | None = None) -> dict:
+                    sources: list[IxSource], atm_matches: list[TextMatch], award_table_matches: list[TextMatch] | None = None,
+                    claim_matches: list[TextMatch] | None = None) -> dict:
     """Basic to diluted shares at a supplied price, from company disclosures only."""
     primary = sources[0] if sources else None
     basic_found = _find_in_sources(sources, _basic_shares)
@@ -1190,6 +1292,21 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
                         f"it; the filing text should confirm they remain outstanding: {listed}."),
             "severity": "warning",
         })
+    # claim_matches is the filing text read for untagged share claims; None when it was not read.
+    claims_read = claim_matches is not None
+    claims = _preferred_claims_with_tags(share_claim_signals(claim_matches), sources) if claim_matches is not None else []
+    open_claims = [c for c in claims if c["status"] == "UNQUANTIFIED"]
+    if open_claims:
+        warnings.append({
+            "code": "UNQUANTIFIED_SHARE_CLAIMS",
+            "message": (f"The filing text states {len(open_claims)} share claim(s) no tagged component covers ({', '.join(c['kind'] for c in open_claims)}); "
+                        "they are quoted in unquantifiedShareClaims and are not in any share count."),
+            "severity": "warning",
+        })
+    if not claims_read:
+        warnings.append({"code": "SHARE_CLAIM_TEXT_NOT_READ", "message": (
+            "The filing text was not read for untagged share claims (price protection, anti-dilution rights, forward sales, contingent shares, "
+            "convertible preferred); retry."), "severity": "warning"})
     if all(not s.doc.facts for s in sources):
         warnings.append({"code": "NO_INLINE_XBRL", "message": "The filing carries no inline XBRL facts; the bridge needs tagged share and instrument counts.", "severity": "warning"})
 
@@ -1206,6 +1323,17 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
         "notDisclosed": not_disclosed,
         "unresolved": unresolved,
         "partiallyResolved": partial,
+        "unquantifiedShareClaims": claims,
+        "claimCoverage": {
+            "scope": "TAGGED_INSTRUMENTS",
+            "completeClaimInventory": False,
+            "modeledComponents": ["stock_options", "unvested_share_awards", "warrants", "convertible_debt", "atm_program"],
+            "textScan": "READ" if claims_read else "NOT_READ",
+            "textScanKinds": [k for k, _ in _SHARE_CLAIM_KINDS],
+            "unquantifiedClaims": len(open_claims),
+            "note": ("status describes the tagged instruments only. COMPUTED means every tagged instrument was resolved, never that every claim on the "
+                     "equity was found; the text scan covers a fixed list of claim kinds, and a claim it does not find is not proof none exists."),
+        },
     }
     if not basic_found:
         out["status"] = "NOT_FOUND"
@@ -1238,11 +1366,14 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
             "dilutedSharesAtPriceWithAtm": round_half_up(diluted + atm_shares) if atm_shares is not None else None,
             "formula": "basic + options (treasury stock) + unvested awards (gross) + warrants (treasury stock) + convertibles (if-converted when in the money)",
         }
-        out["status"] = "PARTIAL" if unresolved or partial else "COMPUTED"
+        # A share claim the filing states but no tagged component covers leaves the count partial (2.5.9).
+        out["status"] = "PARTIAL" if unresolved or partial or open_claims else "COMPUTED"
     out["methodology"] = [
         "Every count is a company disclosure tagged in the filing's inline XBRL; the only external input is the price you supplied.",
         "This is a mechanical bridge, not a consensus or forecast diluted share count, and must not be back-solved into one.",
         "A component missing from notDisclosed was not tagged in the filing; that is not proof the instrument does not exist.",
+        ("COMPUTED covers the tagged instruments only; it is not a full claim inventory. Share claims found in the filing text are quoted in "
+         "unquantifiedShareClaims and left out of every count."),
     ]
     if not_disclosed or unresolved:
         # What the filing does tag, so a missing component can be traced to a concept this bridge does not read.

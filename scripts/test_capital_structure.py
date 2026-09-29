@@ -338,6 +338,39 @@ BE_K = f"""<html><body>
 </ix:hidden><ix:resources>{_context("ey", "2025-01-01..2025-12-31")}{_context("eyw", "2025-10-28", FSW)}{UNITS}</ix:resources></ix:header></div>
 <p>The warrant is exercisable for {_num("us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights", "eyw", "shares", "3,531,073")} shares at ${_num("us-gaap:ClassOfWarrantOrRightExercisePriceOfWarrantsOrRights1", "eyw", "usdPerShare", "113.28")}.</p>
 </body></html>"""
+# COHR's FY2026 10-K (2.5.9): no warrant or convertible is tagged, the NVIDIA share sale carries a
+# price-protection provision stated only in text, and the Series B preferred is tagged at zero.
+COHR_K = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "cy", "10-K")}
+{_text("dei:DocumentPeriodEndDate", "cy", "June 30, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("cy", "2025-07-01..2026-06-30")}{_context("ccover", "2026-08-10")}{_context("cend", "2026-06-30")}
+{_context("cendB", "2026-06-30", {"us-gaap:StatementClassOfStockAxis": "iivi:SeriesBConvertiblePreferredStockMember"})}{UNITS}</ix:resources></ix:header></div>
+<p>Shares outstanding: {_num("dei:EntityCommonStockSharesOutstanding", "ccover", "shares", "195,832,246")}</p>
+<p>Temporary equity shares outstanding {_num("us-gaap:TemporaryEquitySharesOutstanding", "cend", "shares", "0")}; Series B {_num("us-gaap:TemporaryEquitySharesOutstanding", "cendB", "shares", "0")}.</p>
+</body></html>"""
+# A preferred series still outstanding at the period end.
+PREF_Q = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "pq", "10-Q")}
+{_text("dei:DocumentPeriodEndDate", "pq", "March 31, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("pq", "2026-01-01..2026-03-31")}{_context("pcover", "2026-05-01")}{_context("pend", "2026-03-31")}{UNITS}</ix:resources></ix:header></div>
+<p>Shares outstanding: {_num("dei:EntityCommonStockSharesOutstanding", "pcover", "shares", "150,000,000")}</p>
+<p>Temporary equity shares outstanding {_num("us-gaap:TemporaryEquitySharesOutstanding", "pend", "shares", "215,000")}.</p>
+</body></html>"""
+COHR_CLAIM_TEXT = [
+    # The window opens mid-sentence; that fragment is never quoted.
+    "ansion. On March 2, 2026, the Company entered into a Securities Purchase Agreement (the \u201cPurchase Agreement\u201d) with NVIDIA Corporation, pursuant to which the Company issued and sold 7,788,161 shares of Common Stock at a price of $ 256.80 per share. "
+    "The Purchase Agreement includes a price protection provision that is effective for a period of six months following execution of the Purchase Agreement. "
+    "The Company evaluated the price protection provision under applicable U.S. GAAP and determined that the provision is indexed to the Company\u2019s own stock and meets the criteria for equity classification. "
+    "Any potential issuance of additional shares or cash settlement pursuant to the price protection provision, if triggered, will be accounted for as an adjustment to equity.",
+    # Revenue recognition, not a claim on shares.
+    "We determine variable consideration, which primarily consists of product returns and distributor sales price reductions resulting from price protection agreements, by estimating the impact of such reductions.",
+    # An instrument's own adjustment terms: the warrant component reads the warrant.
+    "The warrants contain customary anti-dilution provisions that adjust the exercise price upon stock splits.",
+    "All outstanding shares of Series B Convertible Preferred Stock were converted to Company Common Stock in the quarter ended December 31, 2025, and no shares of Series B Convertible Preferred Stock are currently issued and outstanding.",
+]
+
 TABLE_MATCHES = [
     {"contextText": "Unvested at December 31, 2025 | 2,500,000 | $ 14.10", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at December 31, 2025"},
     {"contextText": "Unvested at June 30, 2026 | 2,750,000 | $ 15.20", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at June 30, 2026"},
@@ -345,7 +378,7 @@ TABLE_MATCHES = [
     {"contextText": "Unvested at June 30, 2026, restricted stock units totalled 8,888,888 shares.", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": False, "tableTitle": None, "rowLabel": None},
 ]
 
-FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K}
+FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K, "cohr_k": COHR_K, "pref_q": PREF_Q}
 
 NEWS_ITEMS = [
     {"title": "Needham raises IQE price target to 45p from 38p", "summary": "Needham values IQE at 12x 2027 EV/EBITDA, citing gallium nitride demand.", "url": "https://news.example/1", "publishedAt": "2026-09-20T08:00:00Z", "source": "yahoo_finance_news"},
@@ -395,6 +428,12 @@ out.bridgeTable = m.dilutionBridge({ ticker: "BARE", price: 30, priceCurrency: "
 out.bridgeAwards = m.dilutionBridge({ ticker: "CSTC", price: 25, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2025-08-06", "0001234568-25-000030", data.qUrl, "awards_q")], atmMatches: [] });
 out.bridgeBe = m.dilutionBridge({ ticker: "BEX", price: 30, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2026-07-28", "0001234568-26-000130", data.qUrl, "be_q"), src("latest_annual_fallback", "10-K", "2026-02-27", "0001234568-26-000140", data.kUrl, "be_k")], atmMatches: [] });
 out.bridgeVrtWarrants = m.dilutionBridge({ ticker: "VRTW", price: 150, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-K", "2026-02-13", "0001234568-26-000120", data.kUrl, "vrt_warrant_k")], atmMatches: [] });
+const claims = data.cohrClaims.map((t) => ({ contextText: t, sectionHeading: "Equity", documentUrl: data.kUrl, filingDate: "2026-08-14", accessionNumber: null }));
+const cohrSrc = src("primary", "10-K", "2026-08-14", "0001234568-26-000150", data.kUrl, "cohr_k");
+out.bridgeCohr = m.dilutionBridge({ ticker: "COHX", price: 300, priceCurrency: "USD", asOfDate: null, sources: [cohrSrc], atmMatches: [], claimMatches: claims });
+out.bridgeCohrUnread = m.dilutionBridge({ ticker: "COHX", price: 300, priceCurrency: "USD", asOfDate: null, sources: [cohrSrc], atmMatches: [], claimMatches: null });
+out.bridgeCohrClean = m.dilutionBridge({ ticker: "COHX", price: 300, priceCurrency: "USD", asOfDate: null, sources: [cohrSrc], atmMatches: [], claimMatches: claims.slice(1) });
+out.bridgePrefOpen = m.dilutionBridge({ ticker: "PREF", price: 30, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2026-05-08", "0001234568-26-000160", data.qUrl, "pref_q")], atmMatches: [], claimMatches: claims.slice(3) });
 out.capital = m.capitalStructure({ ticker: "CSTC", source: kSource, fundingMatches: atm });
 out.capitalAaoi = m.capitalStructure({ ticker: "AAOX", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000040", data.qUrl, "aaoi_q"), fundingMatches: [] });
 out.capitalAsts = m.capitalStructure({ ticker: "ASTX", source: src("primary", "10-Q", "2026-08-10", "0001234568-26-000060", data.qUrl, "asts_q"), fundingMatches: [] });
@@ -460,6 +499,7 @@ def _worker_pure() -> dict:
         (tmp_path / "data.json").write_text(json.dumps({
             "fixtures": FIXTURES, "kUrl": K_URL, "qUrl": Q_URL, "atm": ATM_TEXT, "news": NEWS_ITEMS, "changes": RATING_CHANGES,
             "chHistory": CH_HISTORY, "chSearch": CH_SEARCH, "tableMatches": TABLE_MATCHES, "astsNews": ASTS_NEWS,
+            "cohrClaims": COHR_CLAIM_TEXT,
         }), encoding="utf-8")
         (tmp_path / "harness.mjs").write_text(_WORKER_PURE, encoding="utf-8")
         result = subprocess.run(
@@ -487,7 +527,14 @@ def _python_pure() -> dict:
     q_source = cs.IxSource("primary", "10-Q", "2025-05-08", "0001234568-25-000020", Q_URL, docs["ten_q"])
     k_fallback = cs.IxSource("latest_annual_fallback", "10-K", "2025-02-20", "0001234568-25-000010", K_URL, docs["ten_k"])
     atm = [cs.TextMatch(t, "Liquidity", Q_URL, "2025-05-08", None) for t in ATM_TEXT]
+    claims = [cs.TextMatch(t, "Equity", K_URL, "2026-08-14", None) for t in COHR_CLAIM_TEXT]
+    cohr_src = cs.IxSource("primary", "10-K", "2026-08-14", "0001234568-26-000150", K_URL, docs["cohr_k"])
+    pref_src = cs.IxSource("primary", "10-Q", "2026-05-08", "0001234568-26-000160", Q_URL, docs["pref_q"])
     return {
+        "bridgeCohr": cs.dilution_bridge("COHX", 300, "USD", None, [cohr_src], [], None, claims),
+        "bridgeCohrUnread": cs.dilution_bridge("COHX", 300, "USD", None, [cohr_src], [], None, None),
+        "bridgeCohrClean": cs.dilution_bridge("COHX", 300, "USD", None, [cohr_src], [], None, claims[1:]),
+        "bridgePrefOpen": cs.dilution_bridge("PREF", 30, "USD", None, [pref_src], [], None, claims[3:]),
         "documents": {name: _doc_json(doc) for name, doc in docs.items()},
         "bridge": cs.dilution_bridge("CSTC", 25, "USD", "2025-05-09", [q_source, k_fallback], atm),
         "bridgeLow": cs.dilution_bridge("CSTC", 10, "USD", None, [k_source], []),
@@ -528,7 +575,7 @@ class TestCapitalStructureParity(unittest.TestCase):
             self.assertEqual(self.worker["documents"][name], self.local["documents"][name], name)
 
     def test_outputs_match(self) -> None:
-        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
+        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
 
@@ -716,6 +763,37 @@ class TestCapitalStructureValues(unittest.TestCase):
         event = next(w for w in b["warnings"] if w["code"] == "WARRANT_EXERCISE_NOT_OUTSTANDING")["counts"][0]
         self.assertEqual((event["value"], event["reason"], event["exercise"]["value"], event["exercise"]["date"]),
                          (3_531_073, "EXERCISED_AFTER_COUNT", 1_905_433, "2026-05-01"))
+
+    def test_untagged_share_claims_leave_the_count_partial(self) -> None:
+        b = _python_pure()["bridgeCohr"]
+        # COHR (2.5.9): nothing beyond the cover count is tagged, but the NVIDIA price protection is a claim on shares.
+        self.assertEqual(b["status"], "PARTIAL")
+        self.assertEqual(b["bridge"]["dilutedSharesAtPrice"], 195_832_246, "an unquantified claim is never added to the count")
+        claims = {c["kind"]: c for c in b["unquantifiedShareClaims"]}
+        self.assertEqual(sorted(claims), ["CONVERTIBLE_PREFERRED", "PRICE_PROTECTION"], "revenue price protection and warrant terms are not claims")
+        pp = claims["PRICE_PROTECTION"]
+        self.assertEqual(pp["status"], "UNQUANTIFIED")
+        self.assertEqual(len(pp["sentences"]), 3)
+        self.assertTrue(pp["sentences"][1].startswith("The Company evaluated") and "U.S. GAAP" in pp["sentences"][1], "an initialism does not end a sentence")
+        self.assertIn("Any potential issuance of additional shares", pp["sentences"][2])
+        self.assertTrue(pp["leadIn"].startswith("On March 2, 2026"), "the window's cut first sentence is dropped")
+        pref = claims["CONVERTIBLE_PREFERRED"]
+        self.assertEqual((pref["status"], pref["extinguishmentStated"]), ("TAGGED_NONE_OUTSTANDING", True))
+        self.assertEqual([r["shares"] for r in pref["taggedOutstanding"]], [0, 0])
+        cov = b["claimCoverage"]
+        self.assertEqual((cov["scope"], cov["completeClaimInventory"], cov["textScan"], cov["unquantifiedClaims"]), ("TAGGED_INSTRUMENTS", False, "READ", 1))
+        self.assertIn("UNQUANTIFIED_SHARE_CLAIMS", [w["code"] for w in b["warnings"]])
+        # Without the NVIDIA text the tagged instruments are all resolved: COMPUTED, still not a full claim inventory.
+        clean = _python_pure()["bridgeCohrClean"]
+        self.assertEqual((clean["status"], clean["claimCoverage"]["completeClaimInventory"], clean["claimCoverage"]["unquantifiedClaims"]), ("COMPUTED", False, 0))
+        unread = _python_pure()["bridgeCohrUnread"]
+        self.assertEqual((unread["claimCoverage"]["textScan"], unread["unquantifiedShareClaims"]), ("NOT_READ", []))
+        self.assertIn("SHARE_CLAIM_TEXT_NOT_READ", [w["code"] for w in unread["warnings"]])
+        # A preferred series tagged outstanding stays open, whatever the text says about another series.
+        open_pref = _python_pure()["bridgePrefOpen"]
+        pref = open_pref["unquantifiedShareClaims"][0]
+        self.assertEqual((pref["kind"], pref["status"], pref["taggedOutstanding"][0]["shares"]), ("CONVERTIBLE_PREFERRED", "UNQUANTIFIED", 215_000))
+        self.assertEqual(open_pref["status"], "PARTIAL")
 
     def test_exercised_warrants_are_not_outstanding(self) -> None:
         bridge = _python_pure()["bridgeVrtWarrants"]
