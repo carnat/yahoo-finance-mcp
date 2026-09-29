@@ -21,7 +21,7 @@ export const TREATMENTS = {
   unvested_awards: ["gross", "exclude"],
   warrants: ["treasury_stock", "gross", "exclude"],
   warrant_vesting: ["vested_only", "all"],
-  convertibles: ["if_converted_when_in_the_money", "if_converted_all", "exclude"],
+  convertibles: ["if_converted_when_in_the_money", "if_converted_all", "net_share_settlement_when_stated", "exclude"],
   atm: ["exclude", "full_remaining_capacity"],
 } as const;
 
@@ -210,8 +210,14 @@ function scenarioLines(bridge: Rec, s: ShareScenario): Line[] {
         lines.push(line({ ...base, inTheMoney: itm, thresholdPrice: null, method: "if_converted: every note converted", incrementalShares: round(shares) }));
       } else if (conv == null) {
         lines.push(line({ ...base, inTheMoney: null, thresholdPrice: null, method: t.convertibles, incrementalShares: null, unresolvedReason: "conversion price not tagged" }));
+      } else if (t.convertibles === "net_share_settlement_when_stated" && inst.principalSettlement != null) {
+        // The filing states principal is settled in cash: shares only for the conversion value above principal (2.5.11).
+        const principal = num(inst.principal);
+        if (principal == null) lines.push(line({ ...base, inTheMoney: itm, thresholdPrice: conv, method: t.convertibles, incrementalShares: null, unresolvedReason: "principal not tagged" }));
+        else lines.push(line({ ...base, inTheMoney: itm, thresholdPrice: conv, method: "net share settlement: (if-converted shares - principal / price) when price >= conversion price; principal in cash as the filing states", incrementalShares: itm ? round(Math.max(0, shares - principal / price)) : 0 }));
       } else {
-        lines.push(line({ ...base, inTheMoney: itm, thresholdPrice: conv, method: "if_converted when price >= conversion price", incrementalShares: itm ? round(shares) : 0 }));
+        const unstated = t.convertibles === "net_share_settlement_when_stated" ? "; cash settlement of principal not stated" : "";
+        lines.push(line({ ...base, inTheMoney: itm, thresholdPrice: conv, method: `if_converted when price >= conversion price${unstated}`, incrementalShares: itm ? round(shares) : 0 }));
       }
     }
   }

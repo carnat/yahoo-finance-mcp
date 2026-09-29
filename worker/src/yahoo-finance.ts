@@ -14,9 +14,13 @@ import {
   capitalStructure,
   companiesHouseFilings,
   dilutionBridge,
+  groupedCount,
   parseIxbrl,
   pickCompaniesHouseMatch,
+  CONVERTIBLE_SETTLEMENT_SEARCH_TERMS,
   SHARE_CLAIM_SEARCH_TERMS,
+  WARRANT_LIFECYCLE_SEARCH_TERMS,
+  type DilutionInput,
   type IxDocument,
   type IxSource,
   type TextMatch,
@@ -31,6 +35,7 @@ import { adsRatio, majorPrice, marketInputsFromQuoteSummary, peerValuations, val
 import { coverReadsNeeded, coverShareCounts, foreignFiler, historicalValuation, latestShareCount, peerMedians, taxonomyOf, valuationDates, type Bar, type PeriodicFiling, type Split } from "./valuation-history.js";
 import { DEFAULT_TOLERANCE_PCT, METRICS as RECONCILE_METRICS, metricReconciliation, resolvePeriod } from "./metric-reconciliation.js";
 import { AUTHORITY_BOUNDARY } from "./evidence.js";
+import { fiscalYearLabel } from "./fiscal-calendar.js";
 import registryManifest from "./company-ir-page-registry.json";
 import newsSourceCapabilities from "./news-source-capabilities.json";
 
@@ -5544,6 +5549,8 @@ type ResolvedSecFiling = {
   requestedFilingType: string;
   filingType: string;
   filingDate: string | null;
+  // The period of report (SEC submissions reportDate): the fiscal period the filing covers.
+  reportDate?: string | null;
   acceptedAt: string | null;
   accessionNumber: string;
   primaryDocument: string;
@@ -5604,6 +5611,7 @@ async function resolveSecFiling(
   const accessions = (recent.accessionNumber as string[]) ?? [];
   const primaryDocs = (recent.primaryDocument as string[]) ?? [];
   const filingDates = (recent.filingDate as string[]) ?? [];
+  const reportDates = (recent.reportDate as string[]) ?? [];
   const acceptedDts = (recent.acceptanceDateTime as string[]) ?? [];
   const availableFilingTypes = uniqueRecentForms(forms);
 
@@ -5680,6 +5688,7 @@ async function resolveSecFiling(
       requestedFilingType: requested,
       filingType: String(forms[targetIdx] ?? requested),
       filingDate: filingDates[targetIdx] ?? null,
+      reportDate: reportDates[targetIdx] || null,
       acceptedAt: acceptedDts[targetIdx] ?? null,
       accessionNumber: accessions[targetIdx],
       primaryDocument,
@@ -6569,11 +6578,11 @@ export async function getFilingData(
       if (htmlText) {
         const geo = extractGeoRevenueFromHtml(htmlText, region ?? "");
         if (geo) {
-          const reportDate = filing.filingDate ?? "";
           // A quarterly report's table is a quarter or year-to-date, never a fiscal year: its own column
-          // header says which ("Three Months Ended August 1, 2026"), not the filing date (2.5.9, MRVL).
+          // header says which ("Three Months Ended August 1, 2026"), not the filing date (2.5.9, MRVL). An
+          // annual report's year is its period of report's fiscal year, not its filing date's (2.5.11).
           const annual = /^(?:10-K|20-F|40-F)/i.test(String(filing.filingType ?? ""));
-          const fiscalYear = !annual ? (geo.sourceColumns[0] ?? "") : reportDate ? `FY${String(reportDate).slice(0, 4)}` : "";
+          const fiscalYear = !annual ? (geo.sourceColumns[0] ?? "") : (fiscalYearLabel(filing.reportDate ?? null) ?? "");
           const warnings = geo.denominator == null && geo.usd != null
             ? [{
                 code: "DENOMINATOR_NOT_FOUND",
@@ -6958,6 +6967,7 @@ async function resolveSecFilingsForSearch(
   const accessions = (recent.accessionNumber as string[]) ?? [];
   const primaryDocs = (recent.primaryDocument as string[]) ?? [];
   const filingDates = (recent.filingDate as string[]) ?? [];
+  const reportDates = (recent.reportDate as string[]) ?? [];
   const acceptedDts = (recent.acceptanceDateTime as string[]) ?? [];
   const wanted = first.filingType.toUpperCase();
   const limit = since && filingCount <= 1 ? FILING_SEARCH_MAX_FILINGS : filingCount;
@@ -6976,6 +6986,7 @@ async function resolveSecFilingsForSearch(
       ...first,
       filingType: String(forms[i]),
       filingDate: filingDates[i] ?? null,
+      reportDate: reportDates[i] || null,
       acceptedAt: acceptedDts[i] ?? null,
       accessionNumber: accessions[i],
       primaryDocument: String(primaryDocs[i]),
@@ -7010,8 +7021,9 @@ async function exhibitTargets(cikInt: number, accessionNumber: string, filingDat
   return out;
 }
 
-function fiscalYearOf(filingDate: string | null): string | null {
-  return filingDate ? `FY${String(filingDate).slice(0, 4)}` : null;
+/** A filing's fiscal year from its period of report, never its filing date (a December year is filed the next spring) (2.5.11). */
+function fiscalYearOf(filing: { reportDate?: string | null } | null): string | null {
+  return fiscalYearLabel(filing?.reportDate ?? null);
 }
 
 export async function searchFilingText(
@@ -7105,7 +7117,7 @@ export async function searchFilingText(
     ticker,
     accessionNumber: first?.accessionNumber ?? accessionNumber,
     documentUrl: primaryUrl,
-    fiscalYear: fiscalYearOf(first?.filingDate ?? null),
+    fiscalYear: fiscalYearOf(first),
     filingType: first?.filingType ?? filingType,
     filingDate: first?.filingDate ?? null,
   };
@@ -7233,7 +7245,7 @@ export async function searchFilingText(
         accessionNumber: group.filing.accessionNumber,
         filingDate: group.filing.filingDate,
         filingType: group.filing.filingType,
-        fiscalYear: fiscalYearOf(group.filing.filingDate),
+        fiscalYear: fiscalYearOf(group.filing),
         documentUrl: group.filing.documentUrl,
         totalMatches: filingMatches.length,
         termHits: filingTermHits,
@@ -7394,7 +7406,7 @@ export async function getFilingTextSearch(
         for (let i = 0; i < accessions.length; i++) {
           if (accessions[i] === accessionNumber) {
             const period = periods[i];
-            if (period) fiscalYear = `FY${period.slice(0, 4)}`;
+            if (period) fiscalYear = fiscalYearLabel(period);
             const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(cik, accessions[i], primaryDocs[i] ?? null);
             primaryDocUrl = edgarPrimaryDocumentUrl;
             break;
@@ -7420,7 +7432,7 @@ export async function getFilingTextSearch(
           for (let i = 0; i < accessions.length; i++) {
             if (accessions[i] === accessionNumber) {
               const period = periods[i];
-              if (period && !fiscalYear) fiscalYear = `FY${period.slice(0, 4)}`;
+              if (period && !fiscalYear) fiscalYear = fiscalYearLabel(period);
               const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(derivedCik, accessions[i], primaryDocs[i] ?? null);
               primaryDocUrl = edgarPrimaryDocumentUrl;
               break;
@@ -7604,7 +7616,7 @@ export async function getFilingDocument(
         for (let i = 0; i < accessions.length; i++) {
           if (accessions[i] === accessionNumber) {
             const period = periods[i];
-            if (period) fiscalYear = `FY${period.slice(0, 4)}`;
+            if (period) fiscalYear = fiscalYearLabel(period);
             const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(cik, accessions[i], primaryDocs[i] ?? null);
             primaryDocUrl = edgarPrimaryDocumentUrl;
             break;
@@ -7630,7 +7642,7 @@ export async function getFilingDocument(
           for (let i = 0; i < accessions.length; i++) {
             if (accessions[i] === accessionNumber) {
               const period = periods[i];
-              if (period && !fiscalYear) fiscalYear = `FY${period.slice(0, 4)}`;
+              if (period && !fiscalYear) fiscalYear = fiscalYearLabel(period);
               const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(derivedCik, accessions[i], primaryDocs[i] ?? null);
               primaryDocUrl = edgarPrimaryDocumentUrl;
               break;
@@ -15542,6 +15554,25 @@ async function shareClaimMatches(ticker: string, filings: { filing: ResolvedSecF
   return out;
 }
 
+/**
+ * Exercise, expiry and redemption text for warrant classes counted before the period end, searched by
+ * the lifecycle phrases and each class's count; null when a filing's text could not be searched (2.5.11).
+ */
+async function warrantLifecycleMatches(ticker: string, filings: { filing: ResolvedSecFiling }[], counts: number[]): Promise<TextMatch[] | null> {
+  return searchedMatches(ticker, filings, [...WARRANT_LIFECYCLE_SEARCH_TERMS, ...counts.filter((n) => Number.isInteger(n) && n >= 1000).map(groupedCount)]);
+}
+
+/** Text matches for the terms across the resolved filings; null when a filing's text could not be searched. */
+async function searchedMatches(ticker: string, filings: { filing: ResolvedSecFiling }[], terms: string[]): Promise<TextMatch[] | null> {
+  const out: TextMatch[] = [];
+  for (const { filing } of filings) {
+    const search = parseObjectJson(await searchFilingText(ticker, terms, null, filing.filingType, filing.accessionNumber, 900, false, null, { maxMatches: 32 }));
+    if (search.error || search.code || !Array.isArray(search.matches)) return null;
+    out.push(...textMatchesFrom(search));
+  }
+  return out;
+}
+
 function resolveFailure(error: Record<string, unknown>, ticker: string): string {
   return JSON.stringify({ ticker, ...error });
 }
@@ -15573,7 +15604,7 @@ export async function extractDilutionBridge(
     }
   }
   const claimMatches = await shareClaimMatches(ticker, resolved.filings);
-  const input = {
+  const input: DilutionInput = {
     ticker: ticker.toUpperCase(),
     price,
     priceCurrency: (currency || "USD").toUpperCase(),
@@ -15583,6 +15614,15 @@ export async function extractDilutionBridge(
     claimMatches,
   };
   let out = dilutionBridge(input);
+  // A warrant class counted before the period end: read the filing text for its exercise, expiry or redemption (2.5.11).
+  const warrantComponent = (out.components as Record<string, unknown>[]).find((c) => c.component === "warrants");
+  const earlyCounts = ((warrantComponent?.classes ?? []) as Record<string, unknown>[]).filter((c) => c.countBeforePeriodEnd === true).map((c) => Number(c.outstanding));
+  if (earlyCounts.length > 0) input.warrantLifecycleMatches = await warrantLifecycleMatches(ticker, resolved.filings, earlyCounts);
+  // Convertible notes: read the filing text for a stated cash settlement of principal (2.5.11).
+  if ((out.components as Record<string, unknown>[]).some((c) => c.component === "convertible_debt")) {
+    input.convertibleSettlementMatches = await searchedMatches(ticker, resolved.filings, CONVERTIBLE_SETTLEMENT_SEARCH_TERMS);
+  }
+  if ("warrantLifecycleMatches" in input || "convertibleSettlementMatches" in input) out = dilutionBridge(input);
   // No unvested award count is tagged: read it from the filing's award table.
   if ((out.notDisclosed as string[]).includes("unvested_share_awards")) {
     for (const { filing } of resolved.filings) {

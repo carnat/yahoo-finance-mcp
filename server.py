@@ -65,6 +65,7 @@ from yfmcp import driver_ledger as _dl
 from yfmcp import guidance_history as _gh
 from yfmcp import metric_reconciliation as _mr
 from yfmcp.evidence import AUTHORITY_BOUNDARY as _AUTHORITY_BOUNDARY
+from yfmcp.fiscal_calendar import fiscal_year_label
 from yfmcp import valuation_history as _vh
 from yfmcp.clients.edgar import (
     _SEC_REQUIRED_UA, _SMOKE_TICKER_CIK_FALLBACKS,
@@ -5537,7 +5538,7 @@ async def get_filing_data(
                                     acc_num = accessions_list[idx] if idx < len(accessions_list) else ""
                                     filing_date_str = filing_dates_list[idx] if idx < len(filing_dates_list) else ""
                                     report_date_str = report_dates_list[idx] if idx < len(report_dates_list) else ""
-                                    fiscal_year = f"FY{report_date_str[:4]}" if report_date_str else ""
+                                    fiscal_year = (fiscal_year_label(report_date_str) or "") if report_date_str else ""
                                     # A quarterly report's table is a quarter or year-to-date, never a fiscal year: its own
                                     # column header says which ("Three Months Ended August 1, 2026") (2.5.9, MRVL).
                                     if not _re.match(r"(?:10-K|20-F|40-F)", str(forms[idx]), _re.IGNORECASE):
@@ -5767,7 +5768,8 @@ def _near_specs(values: list | None) -> list:
 
 
 def _fiscal_year_of(report_date: str | None) -> str | None:
-    return f"FY{str(report_date)[:4]}" if report_date else None
+    """A filing's fiscal year from its period of report; a 52/53-week year ending in early January is the prior year's (2.5.11)."""
+    return fiscal_year_label(str(report_date)) if report_date else None
 
 
 async def _exhibit_targets(cik_int: int, accession: str, filing_date: str | None, filing_type: str, primary_url: str) -> list[dict]:
@@ -9591,6 +9593,29 @@ async def _share_claim_matches(ticker: str, filings: list[tuple[str, dict]]) -> 
     return out
 
 
+async def _warrant_lifecycle_matches(ticker: str, filings: list[tuple[str, dict]], counts: list[float]) -> list[_cs.TextMatch] | None:
+    """Exercise, expiry and redemption text for warrant classes counted before the period end (2.5.11).
+
+    Searched by the lifecycle phrases and each class's count; None when a filing's text could not be searched.
+    """
+    terms = [*_cs.WARRANT_LIFECYCLE_SEARCH_TERMS,
+             *(f"{int(n):,}" for n in counts if isinstance(n, (int, float)) and not isinstance(n, bool) and float(n).is_integer() and n >= 1000)]
+    return await _searched_matches(ticker, filings, terms)
+
+
+async def _searched_matches(ticker: str, filings: list[tuple[str, dict]], terms: list[str]) -> list[_cs.TextMatch] | None:
+    """Text matches for the terms across the resolved filings; None when a filing's text could not be searched."""
+    out: list[_cs.TextMatch] = []
+    for _, filing in filings:
+        search = _safe_json_loads(await search_filing_text(
+            ticker, terms, None, filing["filingType"], filing["accessionNumber"], 900, False, None, max_matches=32,
+        ))
+        if search.get("error") or search.get("code") or not isinstance(search.get("matches"), list):
+            return None
+        out.extend(_text_matches_from(search))
+    return out
+
+
 def _text_matches_from(search: dict) -> list[_cs.TextMatch]:
     out = []
     for m in search.get("matches") if isinstance(search.get("matches"), list) else []:
@@ -9654,13 +9679,26 @@ async def extract_dilution_bridge(
         sources, atm_matches,
     )
     out = _cs.dilution_bridge(*bridge_args, None, claim_matches)
+    # A warrant class counted before the period end: read the filing text for its exercise, expiry or redemption (2.5.11).
+    lifecycle_matches: list[_cs.TextMatch] | None = None
+    warrant_component = next((c for c in out["components"] if c.get("component") == "warrants"), None)
+    early_counts = [c.get("outstanding") for c in ((warrant_component or {}).get("classes") or []) if c.get("countBeforePeriodEnd") is True]
+    if early_counts:
+        lifecycle_matches = await _warrant_lifecycle_matches(ticker, filings, early_counts)
+    # Convertible notes: read the filing text for a stated cash settlement of principal (2.5.11).
+    settlement_matches: list[_cs.TextMatch] | None = None
+    has_convertibles = any(c.get("component") == "convertible_debt" for c in out["components"])
+    if has_convertibles:
+        settlement_matches = await _searched_matches(ticker, filings, list(_cs.CONVERTIBLE_SETTLEMENT_SEARCH_TERMS))
+    if early_counts or has_convertibles:
+        out = _cs.dilution_bridge(*bridge_args, None, claim_matches, lifecycle_matches, settlement_matches)
     # No unvested award count is tagged: read it from the filing's award table.
     if "unvested_share_awards" in out["notDisclosed"]:
         for _, filing in filings:
             table_matches = [m for m in await _filing_text_matches(ticker, filing, _AWARD_TABLE_SEARCH_TERMS, 30, 400) if m.in_table]
             if not table_matches:
                 continue
-            retried = _cs.dilution_bridge(*bridge_args, table_matches, claim_matches)
+            retried = _cs.dilution_bridge(*bridge_args, table_matches, claim_matches, lifecycle_matches, settlement_matches)
             if "unvested_share_awards" not in retried["notDisclosed"]:
                 out = retried
                 break
@@ -9701,7 +9739,7 @@ from yfmcp import funding_schedule as _fsched  # noqa: E402
 @yfinance_server.tool(
     name="get_share_count_scenarios",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_share_count_scenarios"],
-    description="Share counts under scenarios you define: for each scenario's price and treatments (options treasury-stock/gross/exclude, unvested awards gross/exclude, warrants treasury-stock/gross/exclude on vested or all, convertibles if-converted when in the money/all/exclude, ATM remaining capacity include/exclude, and known issuance you supply), every instrument from the filing's inline XBRL is listed as included or excluded with its treasury-stock or if-converted mechanics and threshold price; unresolved instruments are listed and left out. Scenarios are reported side by side; no denominator is selected. Evidence only.",
+    description="Share counts under scenarios you define: for each scenario's price and treatments (options treasury-stock/gross/exclude, unvested awards gross/exclude, warrants treasury-stock/gross/exclude on vested or all, convertibles if-converted when in the money/all/net-share settlement where the filing states principal is settled in cash/exclude, ATM remaining capacity include/exclude, and known issuance you supply), every instrument from the filing's inline XBRL is listed as included or excluded with its treasury-stock or if-converted mechanics and threshold price; unresolved instruments are listed and left out. Scenarios are reported side by side; no denominator is selected. Evidence only.",
 )
 async def get_share_count_scenarios(
     ticker: str,

@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
+from yfmcp.fiscal_calendar import TEXT_DATE_SOURCE, text_date
+
 _F = re.I | re.A
 _ENTITY_RE = re.compile(r"&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);", _F)
 # An explicit whitespace class, so both runtimes collapse the same characters.
@@ -830,7 +832,117 @@ def _warrant_class_key(f: IxFact) -> str:
     return f"{axis}={f.dims[axis]}" if axis else _dims_key(f.dims)
 
 
-def _warrants_component(sources: list[IxSource], price: float) -> dict | None:
+# ── Warrant lifecycle stated in text (2.5.11) ───────────────────────────────
+#
+# A warrant count tagged before the period end (an issuance, a prior year end) says nothing of what
+# happened since; filers often state an exercise, expiry or redemption only in text. ASTS's 10-Q counts
+# 122,000 Private Placement Warrants as of 2025-12-31 and says "the remaining 122,000 Private Placement
+# Warrants were exercised" in the quarter ended March 31, 2026; RKLB's 10-K counts 728,835 warrants
+# issued on 2023-12-29 and says "On November 14, 2024, all 728,835 common stock warrants were exercised".
+# A sentence retires a class only when it names the class (its tagged count, or its class name of two or
+# more words), states the whole class exercised, expired or redeemed in the past tense, and dates that
+# after the tagged count and by the period end. Anything less leaves the class counted.
+WARRANT_LIFECYCLE_SEARCH_TERMS = [
+    "warrants were exercised", "warrant was exercised", "were fully exercised", "was fully exercised", "exercised in full",
+    "warrants expired", "warrant expired", "warrants were redeemed", "redemption of all", "redeemed all",
+]
+_LIFECYCLE_EVENTS = [
+    ("EXERCISED", re.compile(r"\bwarrants?\b[^.]{0,160}?\b(?:were|was|have been|has been|had been)\s+(?:fully\s+|all\s+)?exercised\b"
+                             r"|\bexercised\s+(?:all|the remaining|in full)\b[^.]{0,100}?\bwarrants?\b", _F)),
+    ("REDEEMED", re.compile(r"\bwarrants?\b[^.]{0,160}?\b(?:were|was|have been|has been|had been)\s+(?:fully\s+)?redeemed\b"
+                            r"|\bredeemed\s+(?:all|the remaining)\b[^.]{0,100}?\bwarrants?\b|\bredemption of all\b[^.]{0,100}?\bwarrants?\b", _F)),
+    ("EXPIRED", re.compile(r"\bwarrants?\b[^.]{0,160}?\b(?:expired|lapsed)\b", _F)),
+]
+# A negated, future or conditional sentence states no event ("No Private Placement Warrants were exercised").
+# Case-sensitive past the first letter, so the month "May" is not the verb "may".
+_LIFECYCLE_SKIP_RE = re.compile(r"\b(?:[Nn]o|[Nn]one|[Nn]ot|[Nn]either|nor|will|would|may|might|could|shall|[Uu]nless|[Ii]f)\b", re.A)
+# The whole class: all or the remaining warrants, in full; an expiry or redemption ends every unexercised warrant.
+_WHOLE_CLASS_RE = re.compile(r"\b(?:all|remaining|fully|in full|in their entirety|each of the)\b", _F)
+_TEXT_DATE_RE = re.compile(TEXT_DATE_SOURCE, _F)
+
+
+def warrant_lifecycle_sentences(matches: list[TextMatch]) -> list[dict]:
+    """Past-tense exercise, expiry and redemption sentences about warrants, each with the dates it states."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for match in matches:
+        for raw in _CLAIM_SENTENCE_SPLIT_RE.split(_collapse(match.context_text)):
+            sentence = raw.strip()
+            if not sentence or sentence in seen or _LIFECYCLE_SKIP_RE.search(sentence):
+                continue
+            event = next((name for name, rx in _LIFECYCLE_EVENTS if rx.search(sentence)), None)
+            if not event:
+                continue
+            dates = [d for d in (text_date(m.group(1), m.group(2), m.group(3)) for m in _TEXT_DATE_RE.finditer(sentence)) if d is not None]
+            if not dates:
+                continue
+            seen.add(sentence)
+            out.append({
+                "event": event,
+                "sentence": sentence[:600],
+                "dates": dates,
+                "sectionHeading": match.section_heading,
+                "documentUrl": match.document_url,
+                "filingDate": match.filing_date,
+                "accessionNumber": match.accession_number,
+            })
+    return out
+
+
+def _states_count(sentence: str, count: float) -> bool:
+    """"728,835" as a whole number in the text, not part of a longer one."""
+    if isinstance(count, bool) or not float(count).is_integer() or count < 1000:
+        return False
+    return re.search(r"(?<![\d,.])" + re.escape(f"{int(count):,}") + r"(?!\d|,\d)", sentence) is not None
+
+
+def _specific_class_name(f: IxFact) -> str | None:
+    """The class-of-warrant member's name when it is specific ("Private Placement Warrants"), never a bare "Warrants"."""
+    axis = next((a for a in f.dims if a.endswith(_CLASS_OF_WARRANT_AXIS)), None)
+    if axis is None:
+        return None
+    name = re.sub(r"\s+", " ", member_label(f.dims[axis]).lower()).strip()
+    return re.sub(r"s$", "", name) if len(name.split(" ")) >= 2 else None
+
+
+def _names_class(sentence: str, f: IxFact) -> str | None:
+    """How a sentence names the class of a tagged count: by the count itself or by the class name; None when it does not."""
+    if f.value is not None and _states_count(sentence, f.value):
+        return "STATED_COUNT"
+    name = _specific_class_name(f)
+    return "CLASS_NAME" if name and name in _collapse(sentence).lower() else None
+
+
+def _text_retirement(f: IxFact, sentences: list[dict], period_end: str | None) -> dict | None:
+    """The stated event that retired a class counted before the period end.
+
+    A sentence naming the class that states it exercised, expired or redeemed in whole, dated after the
+    count and by the period end. The earliest such event wins (ASTS's warrants were exercised in the
+    first quarter, then expired in April).
+    """
+    if period_end is None or f.period_end is None or f.period_end >= period_end:
+        return None
+    best: dict | None = None
+    for s in sentences:
+        matched_by = _names_class(s["sentence"], f)
+        if not matched_by:
+            continue
+        if s["event"] == "EXERCISED" and matched_by != "STATED_COUNT" and not _WHOLE_CLASS_RE.search(s["sentence"]):
+            continue
+        # The latest date the sentence states by the period end: "During the three months ended March 31, 2026".
+        dated = sorted(d for d in s["dates"] if d <= period_end)
+        event_date = dated[-1] if dated else None
+        if not event_date or event_date <= f.period_end:
+            continue
+        if best is not None and str(best["eventDate"]) <= event_date:
+            continue
+        best = {"event": s["event"], "eventDate": event_date, "matchedBy": matched_by, "sentence": s["sentence"],
+                "sectionHeading": s["sectionHeading"], "documentUrl": s["documentUrl"], "filingDate": s["filingDate"],
+                "accessionNumber": s["accessionNumber"]}
+    return best
+
+
+def _warrants_component(sources: list[IxSource], price: float, lifecycle: list[dict] | None = None) -> dict | None:
     # Classes a newer filing shows exercised or retired; an older fallback filing must not restore them
     # (BE's 2025 10-K still counts the Oracle warrant its 2026 10-Q shows exercised).
     retired: set[str] = set()
@@ -866,7 +978,11 @@ def _warrants_component(sources: list[IxSource], price: float) -> dict | None:
         return normalize_ix_date(hit.text if hit else None)
 
     expired = [f for f in facts if (lambda e: e is not None and doc_end is not None and e < doc_end)(expiry_of(f))]
-    live = [f for f in facts if f not in expired]
+    # A count tagged before the period end that the filing text says was since exercised, expired or redeemed (2.5.11).
+    retired_in_text = [(f, stated) for f, stated in
+                       ((f, _text_retirement(f, lifecycle, doc_end) if lifecycle is not None else None) for f in facts if f not in expired)
+                       if stated is not None]
+    live = [f for f in facts if f not in expired and not any(r[0] is f for r in retired_in_text)]
     classes = []
     for f in live:
         strike = _newest([g for g in source.doc.facts if g.local == _WARRANT_STRIKE and g.value is not None and _dims_key(g.dims) == _dims_key(f.dims)])
@@ -899,6 +1015,9 @@ def _warrants_component(sources: list[IxSource], price: float) -> dict | None:
             "asOf": f.period_end,
             # Tagged at an earlier date (an issuance) and not restated at the period end.
             "countBeforePeriodEnd": period_end is not None and f.period_end is not None and f.period_end < period_end,
+            # Whether the filing text was read for this earlier count's exercise, expiry or redemption (2.5.11).
+            **({"lifecycleText": "NO_EVENT_STATED" if lifecycle is not None else "NOT_READ"}
+               if period_end is not None and f.period_end is not None and f.period_end < period_end else {}),
             "expirationDate": expiry,
             # A term counted from the tagged date that ended before the period end: possibly expired unexercised.
             **({"termElapsedBy": term_end} if expiry is None and term_end is not None and period_end is not None and f.period_end < period_end
@@ -921,6 +1040,8 @@ def _warrants_component(sources: list[IxSource], price: float) -> dict | None:
         "classes": classes,
         **({"expiredClasses": [{"class": " / ".join(member_label(v) for v in f.dims.values()) if f.dims else "Warrants (not itemized)",
                                 "count": f.value, "asOf": f.period_end, "expirationDate": expiry_of(f)} for f in expired]} if expired else {}),
+        **({"retiredInText": [{"class": " / ".join(member_label(v) for v in f.dims.values()) if f.dims else "Warrants (not itemized)",
+                               "count": f.value, "asOf": f.period_end, **stated} for f, stated in retired_in_text]} if retired_in_text else {}),
         "method": "treasury_stock_per_class_on_vested",
         "incrementalShares": 0 if not classes else None if unresolved == len(classes) else sum((c["incrementalShares"] or 0) for c in classes),
         "unresolvedClasses": unresolved,
@@ -1047,7 +1168,65 @@ def normalized_ratio(ratio: float | None, conv_price: float | None) -> dict:
     return {"per1000": ratio, "usable": True, "note": None} if ratio >= 1 else {"per1000": None, "usable": False, "note": "RATIO_UNIT_UNCERTAIN"}
 
 
-def _convertibles_component(sources: list[IxSource], price: float) -> dict | None:
+# ── Principal settled in cash (2.5.11, LITE) ────────────────────────────────
+#
+# LITE's 10-K: "The principal amounts of all of our outstanding convertible notes must be settled in cash."
+# When principal is settled in cash, conversion delivers shares only for the conversion value above
+# principal: max(0, if-converted shares - principal / price) at the price. The if-converted count (the
+# EPS basis) stays the bridge's count; the net-share count is reported beside it, only for notes whose
+# cash settlement of principal the filing states, never assumed. Capped calls are not modeled.
+CONVERTIBLE_SETTLEMENT_SEARCH_TERMS = [
+    "settled in cash", "pay cash up to", "principal amount in cash", "principal amounts of all", "settle the principal", "cash equal to the aggregate principal",
+]
+_CASH_PRINCIPAL_RE = re.compile(
+    r"\bprincipal(?: amounts?)?\b[^.]{0,160}?\b(?:must|will|shall|is required to|are required to) be (?:settled|paid) (?:solely |only )?in cash\b"
+    r"|\b(?:pay|paying|deliver|delivering) cash (?:equal to|up to) the (?:aggregate )?principal amount\b"
+    r"|\belected to (?:settle|pay) (?:the )?(?:aggregate )?principal(?: amounts?)?\b[^.]{0,80}?\bin cash\b", _F)
+# A settlement method the issuer may still choose is not a stated cash settlement.
+_SETTLEMENT_OPTION_RE = re.compile(r"\bmay\b|\bcan\b|\bat (?:our|its|the company['’]s) (?:option|election)\b", re.A)
+_ALL_NOTES_RE = re.compile(r"\ball (?:of )?(?:our |the )?(?:outstanding )?(?:convertible )?(?:senior )?notes\b"
+                           r"|\beach (?:series|issue) of (?:our |the )?(?:convertible )?(?:senior )?notes\b", _F)
+_NOTE_YEAR_RE = re.compile(r"\b(20\d\d) (?:convertible )?(?:senior )?notes\b|\bnotes due (20\d\d)\b", _F)
+
+
+def principal_cash_settlement(matches: list[TextMatch]) -> list[dict]:
+    """Sentences stating convertible principal is settled in cash, with the notes they name."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for match in matches:
+        for raw in _CLAIM_SENTENCE_SPLIT_RE.split(_collapse(match.context_text)):
+            sentence = raw.strip()
+            if not sentence or sentence in seen or not _CASH_PRINCIPAL_RE.search(sentence) or _SETTLEMENT_OPTION_RE.search(sentence):
+                continue
+            seen.add(sentence)
+            years: list[str] = []
+            for m in _NOTE_YEAR_RE.finditer(sentence):
+                y = m.group(1) or m.group(2)
+                if y not in years:
+                    years.append(y)
+            out.append({
+                "sentence": sentence[:600],
+                "scope": "ALL_NOTES" if _ALL_NOTES_RE.search(sentence) else "NAMED_NOTES" if years else "UNNAMED_NOTES",
+                "years": years,
+                "sectionHeading": match.section_heading,
+                "documentUrl": match.document_url,
+                "filingDate": match.filing_date,
+                "accessionNumber": match.accession_number,
+            })
+    return out
+
+
+def _settlement_for(instrument: str, count: int, sentences: list[dict]) -> dict | None:
+    """The sentence that states cash settlement of this instrument's principal: every note, its year, or the only note."""
+    hit = next((s for s in sentences if s["scope"] == "ALL_NOTES"), None)
+    if hit is None:
+        hit = next((s for s in sentences if s["scope"] == "NAMED_NOTES" and any(y in instrument for y in s["years"])), None)
+    if hit is None and count == 1:
+        hit = next((s for s in sentences if s["scope"] == "UNNAMED_NOTES"), None)
+    return hit
+
+
+def _convertibles_component(sources: list[IxSource], price: float, settlement: list[dict] | None = None) -> dict | None:
     def find(doc: IxDocument):
         groups = [g for g in _debt_groups(doc) if _group_value(g, [_CONVERSION_PRICE, _CONVERSION_RATIO]) is not None]
         if groups:
@@ -1120,7 +1299,23 @@ def _convertibles_component(sources: list[IxSource], price: float) -> dict | Non
             "incrementalShares": round_half_up(shares) if shares is not None and in_the_money else (0 if shares is not None else None),
         })
         instruments.append(inst)
+    # Stated cash settlement of principal: the shares for the conversion value above principal at the price (2.5.11).
+    if settlement is not None:
+        for inst in instruments:
+            stated = _settlement_for(str(inst["instrument"]), len(instruments), settlement)
+            if not stated or inst["ifConvertedShares"] is None:
+                nss = None
+            elif not inst["inTheMoney"]:
+                nss = 0
+            else:
+                nss = round_half_up(max(0, inst["ifConvertedShares"] - inst["principal"] / price)) if inst["principal"] is not None else None
+            inst["principalSettlement"] = ({"stated": "PRINCIPAL_IN_CASH", "scope": stated["scope"], "sentence": stated["sentence"],
+                                            "sectionHeading": stated["sectionHeading"], "documentUrl": stated["documentUrl"],
+                                            "filingDate": stated["filingDate"], "accessionNumber": stated["accessionNumber"]} if stated else None)
+            inst["netShareSettlementShares"] = nss
     unresolved = len([i for i in instruments if i["ifConvertedShares"] is None])
+    cash_settled = [i for i in instruments if i.get("principalSettlement") is not None]
+    nss_unresolved = any(i.get("netShareSettlementShares") is None for i in cash_settled)
     return {
         "component": "convertible_debt",
         "instruments": instruments,
@@ -1128,11 +1323,17 @@ def _convertibles_component(sources: list[IxSource], price: float) -> dict | Non
         "ifConvertedShares": sum((i["ifConvertedShares"] or 0) for i in instruments),
         "incrementalShares": None if unresolved == len(instruments) else sum((i["incrementalShares"] or 0) for i in instruments),
         "unresolvedInstruments": unresolved,
+        "settlementText": "NOT_READ" if settlement is None else "READ",
+        # The same count with each note whose principal the filing says is settled in cash at its net shares; None when none is.
+        "incrementalSharesNetShareSettlement": (
+            None if not cash_settled or unresolved == len(instruments) or nss_unresolved
+            else sum((i["netShareSettlementShares"] if i.get("principalSettlement") is not None else (i["incrementalShares"] or 0)) for i in instruments)),
         "note": ("Shares are the filing's count issuable on conversion at the period end when tagged (it can be the maximum, make-whole included); "
                  "else principal outstanding at the period end (a face amount then, or a carrying amount well below the issue's face), else the face "
                  "amount or an issue-date carrying amount (principalBasis says which), "
-                 "times a conversion ratio that agrees with the conversion price, else divided by the price. Net-share or cash settlement and capped "
-                 "calls are not modeled."),
+                 "times a conversion ratio that agrees with the conversion price, else divided by the price. Where the filing states principal is "
+                 "settled in cash, netShareSettlementShares is the conversion value above principal in shares at the price; capped calls are not "
+                 "modeled."),
         "source": _source_ref(source, None),
     }
 
@@ -1150,9 +1351,15 @@ _PREFERRED_DIVIDEND_RATE = ("PreferredStockDividendRatePercentage",)
 # ratio ("The Preferred Stock will convert on a one-for-one basis into shares of our common stock",
 # LITE; "each share of Preferred Stock is convertible into 10 shares of common stock") or an aggregate
 # ("convertible in the aggregate into a maximum of approximately 21.8 million shares of our common stock").
-_PREF_ONE_FOR_ONE_RE = re.compile(r"\bpreferred stock\b[^.]{0,120}\bconvert(?:s|ible)?\b[^.]{0,40}\bon a one[- ]for[- ]one basis\b", _F)
-_PREF_PER_SHARE_RE = re.compile(r"\beach share of (?:the |our )?(?:series [a-z0-9-]+ )?(?:convertible )?preferred stock\b[^.]{0,80}\bconvertible into ([0-9][0-9,]*(?:\.[0-9]+)?) shares of (?:our |the company['’]s )?common stock\b", _F)
-_PREF_AGGREGATE_RE = re.compile(r"\bpreferred stock\b[^.]{0,120}\bconvertible in the aggregate into (?:a maximum of )?(?:approximately )?([0-9][0-9,]*(?:\.[0-9]+)?)( million)? shares of (?:our |the company['’]s )?common stock\b", _F)
+_PREF_ONE_FOR_ONE_RE = re.compile(r"\bpreferred stock\b[^.]{0,120}\bconvert(?:s|ible)?\b[^.]{0,40}\bon a (?:one[- ](?:for|to)[- ]one|1[- ]for[- ]1|1:1) basis\b", _F)
+# "each share of Series A Preferred Stock is convertible, at the option of the holder, into 10 shares of common stock" (2.5.11: text between).
+_PREF_PER_SHARE_RE = re.compile(r"\beach share of (?:the |our )?(?:series [a-z0-9-]+ )?(?:convertible )?preferred stock\b[^.]{0,80}\bconvertible\b[^.]{0,60}?\binto "
+                                r"([0-9][0-9,]*(?:\.[0-9]+)?) shares of (?:our |the company['’]s )?(?:class [a-z] )?common stock\b", _F)
+# "a conversion rate of 10 shares of common stock for each share of Series A Preferred Stock" (2.5.11).
+_PREF_RATE_RE = re.compile(r"\bconversion (?:rate|ratio) of ([0-9][0-9,]*(?:\.[0-9]+)?) shares of (?:our |the company['’]s )?(?:class [a-z] )?common stock "
+                           r"(?:for each|per) share of (?:the |our )?(?:series [a-z0-9-]+ )?(?:convertible )?preferred stock\b", _F)
+_PREF_AGGREGATE_RE = re.compile(r"\bpreferred stock\b[^.]{0,120}\bconvertible (?:in the aggregate into|into an aggregate of) (?:a maximum of |up to )?(?:approximately )?"
+                                r"([0-9][0-9,]*(?:\.[0-9]+)?)( million)? shares of (?:our |the company['’]s )?(?:class [a-z] )?common stock\b", _F)
 
 
 def preferred_conversion_terms(matches: list[TextMatch]) -> dict | None:
@@ -1160,7 +1367,7 @@ def preferred_conversion_terms(matches: list[TextMatch]) -> dict | None:
     for match in matches:
         for sentence in (x.strip() for x in _CLAIM_SENTENCE_SPLIT_RE.split(_collapse(match.context_text))):
             one = _PREF_ONE_FOR_ONE_RE.search(sentence)
-            per = _PREF_PER_SHARE_RE.search(sentence)
+            per = _PREF_PER_SHARE_RE.search(sentence) or _PREF_RATE_RE.search(sentence)
             agg = _PREF_AGGREGATE_RE.search(sentence)
             if not one and not per and not agg:
                 continue
@@ -1373,17 +1580,24 @@ SHARE_CLAIM_SEARCH_TERMS = [
     "one-for-one basis", "convertible in the aggregate",
     "exchangeable for shares", "exchangeable into shares", "redeemable for shares of", "simple agreement for future equity",
     "payable in shares", "settled in shares", "standby equity purchase agreement", "equity line of credit", "committed equity facility",
+    # 2.5.11: holdback and milestone shares, share-settled CVRs, issuance commitments, more preferred conversion wordings.
+    "holdback shares", "escrow shares", "milestone shares", "contingent value right", "obligated to issue", "committed to issue", "required to issue",
+    "one-to-one basis", "shares of common stock for each share of", "convertible into an aggregate of",
 ]
 _SHARE_CLAIM_KINDS = [
     ("PRICE_PROTECTION", re.compile(r"\bprice[- ]protection\b", _F)),
     ("ANTI_DILUTION_RIGHT", re.compile(r"\banti-?dilution (?:rights?|protections?|provisions?)\b", _F)),
     ("FORWARD_SALE", re.compile(r"\bforward (?:sale|equity sale) agreements?\b", _F)),
-    ("CONTINGENT_SHARES", re.compile(r"\bearn-?out shares\b|\bcontingently issuable (?:shares|common stock)\b|\bcontingent consideration\b[^.]{0,120}\b(?:in|of) (?:shares|common stock)\b", _F)),
+    ("CONTINGENT_SHARES", re.compile(r"\bearn-?out shares\b|\bcontingently issuable (?:shares|common stock)\b|\bcontingent consideration\b[^.]{0,120}\b(?:in|of) (?:shares|common stock)\b"
+                                  r"|\b(?:holdback|escrow(?:ed)?|milestone) shares\b|\bshares (?:held|placed) in escrow\b", _F)),
     ("CONVERTIBLE_PREFERRED", re.compile(r"\bconvertible preferred (?:stock|shares)\b", _F)),
     # Up-C units or exchangeable shares (2.5.10).
     ("EXCHANGEABLE_INTERESTS", re.compile(r"\b(?:units?|interests?|shares|stock)\b[^.]{0,100}\b(?:exchangeable|redeemable) (?:for|into) (?:an equal number of )?(?:newly[- ]issued )?(?:shares of )?(?:our |the company['’]s )?(?:class [a-z] )?common stock\b", _F)),
     ("SAFE", re.compile(r"\bsimple agreements? for future equity\b|\bSAFEs?\b")),
     ("SHARE_SETTLED_OBLIGATION", re.compile(r"\b(?:payable|settled|settleable|issuable)\b[^.]{0,30}\bin (?:shares of )?(?:our |the company['’]s )?(?:class [a-z] )?common stock\b", _F)),
+    # Contingent value rights settled in shares, and commitments to issue shares (2.5.11).
+    ("CONTINGENT_VALUE_RIGHT", re.compile(r"\bcontingent value rights?\b", _F)),
+    ("SHARE_ISSUANCE_COMMITMENT", re.compile(r"\b(?:obligated|committed|required) to issue\b[^.]{0,80}\b(?:shares|common stock)\b", _F)),
     ("EQUITY_LINE", re.compile(r"\b(?:standby equity purchase agreement|equity line of credit|committed equity facility|equity purchase facility)\b", _F)),
     ("WARRANT_AFTER_PERIOD_END", re.compile(r"\bsubsequent to (?:the )?(?:quarter|year|period)[- ]end\b[^.]{0,200}\bwarrants?\b|\bsubsequent to the end of the (?:quarter|year|period)\b[^.]{0,200}\bwarrants?\b", _F)),
 ]
@@ -1426,7 +1640,11 @@ def share_claim_signals(matches: list[TextMatch]) -> list[dict]:
             if kind == "ANTI_DILUTION_RIGHT" and _INSTRUMENT_TERM_RE.search(sentence):
                 continue
             # Awards, notes and dividends settled in shares belong elsewhere; a claim is present or future, not past.
-            if kind in ("SHARE_SETTLED_OBLIGATION", "EXCHANGEABLE_INTERESTS") and (_AWARD_OR_NOTE_RE.search(sentence) or not _PRESENT_OR_FUTURE_RE.search(sentence)):
+            if kind in ("SHARE_SETTLED_OBLIGATION", "EXCHANGEABLE_INTERESTS", "SHARE_ISSUANCE_COMMITMENT") and (
+                    _AWARD_OR_NOTE_RE.search(sentence) or not _PRESENT_OR_FUTURE_RE.search(sentence)):
+                continue
+            # A contingent value right is a share claim only when the sentence says it can be paid in shares.
+            if kind == "CONTINGENT_VALUE_RIGHT" and not re.search(r"\b(?:shares|common stock)\b", sentence, _F):
                 continue
             lead_in = " ".join(items[max(0, i - 2):i])
             if not _EQUITY_TERM_RE.search(f"{lead_in} {sentence}"):
@@ -1553,14 +1771,20 @@ def _is_number(value: Any) -> bool:
 
 def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: str | None,
                     sources: list[IxSource], atm_matches: list[TextMatch], award_table_matches: list[TextMatch] | None = None,
-                    claim_matches: list[TextMatch] | None = None) -> dict:
-    """Basic to diluted shares at a supplied price, from company disclosures only."""
+                    claim_matches: list[TextMatch] | None = None, warrant_lifecycle_matches: list[TextMatch] | None = None,
+                    convertible_settlement_matches: list[TextMatch] | None = None) -> dict:
+    """Basic to diluted shares at a supplied price, from company disclosures only.
+
+    warrant_lifecycle_matches is the filing text read for the exercise, expiry or redemption of warrants
+    counted before the period end (2.5.11); convertible_settlement_matches the text read for a stated cash
+    settlement of convertible principal (2.5.11). Each is None when it was not read.
+    """
     primary = sources[0] if sources else None
     basic_found = _find_in_sources(sources, _basic_shares)
     options = _options_component(sources, price)
     awards = _awards_component(sources, award_table_matches or [])
-    warrants = _warrants_component(sources, price)
-    convertibles = _convertibles_component(sources, price)
+    warrants = _warrants_component(sources, price, warrant_lifecycle_sentences(warrant_lifecycle_matches) if warrant_lifecycle_matches is not None else None)
+    convertibles = _convertibles_component(sources, price, principal_cash_settlement(convertible_settlement_matches) if convertible_settlement_matches is not None else None)
     preferred = _convertible_preferred_component(sources, price, preferred_conversion_terms(claim_matches) if claim_matches is not None else None)
     atm = _atm_component(atm_evidence(atm_matches), price)
     components = [c for c in (options, awards, warrants, convertibles, preferred) if c is not None]
@@ -1610,18 +1834,41 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
         listed = ", ".join(f"{i['instrument']} ({_js_number(i['conversionRatioPer1000'])} per 1,000 against a ${_js_number(i['conversionPrice'])} price)" for i in bad_ratios)
         warnings.append({"code": "CONVERSION_RATIO_INCONSISTENT", "message": (
             f"The tagged conversion ratio of {listed} is not the conversion rate (often a make-whole increase) and is not used."), "severity": "info"})
+    cash_principal = [i for i in notes if i.get("principalSettlement") is not None]
+    if cash_principal:
+        counts = ", ".join(f"{'unresolved' if i.get('netShareSettlementShares') is None else _js_number(i['netShareSettlementShares'])} for {i['instrument']}"
+                           for i in cash_principal)
+        warnings.append({
+            "code": "CONVERTIBLE_PRINCIPAL_SETTLED_IN_CASH",
+            "message": (f"The filing states the principal of {', '.join(str(i['instrument']) for i in cash_principal)} is settled in cash, so conversion "
+                        "delivers shares only for the value above principal. dilutedSharesAtPrice counts them if-converted (the EPS basis); "
+                        f"dilutedSharesAtPriceNetShareSettlement counts {counts} instead."),
+            "severity": "info",
+        })
     redeemed = [i for i in notes if i.get("afterPeriodEnd") is not None]
     if redeemed:
         listed = ", ".join(f"{i['instrument']} ({i['afterPeriodEnd']['date']})" for i in redeemed)
         warnings.append({"code": "CONVERTIBLE_REDEMPTION_AFTER_PERIOD_END", "message": (
             f"A redemption or repurchase after the period end is tagged for {listed}; its shares are counted as of the period end."), "severity": "warning"})
+    retired_text = (warrants or {}).get("retiredInText") or []
+    if retired_text:
+        listed = "; ".join(f"{c['class']} ({_js_number(c['count'])} as of {c['asOf']}: {str(c['event']).lower()} by {c['eventDate']})" for c in retired_text)
+        warnings.append({
+            "code": "WARRANT_RETIRED_IN_TEXT",
+            "message": (f"{listed}: the filing text states the class was exercised, expired or redeemed after its tagged count, so it is not "
+                        "counted; the sentence is quoted in retiredInText."),
+            "severity": "info",
+        })
     early_counts = [c for c in ((warrants or {}).get("classes") or []) if c.get("countBeforePeriodEnd") is True]
     if early_counts:
         listed = "; ".join(f"{c['class']} {_js_number(c['outstanding'])} as of {c['asOf']}" for c in early_counts)
+        read = all(c.get("lifecycleText") == "NO_EVENT_STATED" for c in early_counts)
+        state = ("the filing text was read and states no exercise, expiry or redemption of them, which does not prove they remain outstanding"
+                 if read else "the filing text should confirm they remain outstanding")
         warnings.append({
             "code": "WARRANT_COUNT_BEFORE_PERIOD_END",
             "message": (f"{len(early_counts)} warrant class(es) are counted from a figure tagged before the report's period end and not restated at "
-                        f"it; the filing text should confirm they remain outstanding: {listed}."),
+                        f"it; {state}: {listed}."),
             "severity": "warning",
         })
     # claim_matches is the filing text read for untagged share claims; None when it was not read.
@@ -1714,6 +1961,12 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
             "dilutionPctAtPrice": round_half_up(((diluted - basic) / basic) * 100, 2) if basic > 0 else None,
             "grossSharesAllInstruments": round_half_up(gross),
             "grossDilutionPct": round_half_up(((gross - basic) / basic) * 100, 2) if basic > 0 else None,
+            # Convertibles whose principal the filing says is settled in cash at their net shares; None when none is (2.5.11).
+            "convertibleDebtNetShareSettlement": (convertibles["incrementalSharesNetShareSettlement"]
+                                                  if convertibles and convertibles.get("incrementalSharesNetShareSettlement") is not None else None),
+            "dilutedSharesAtPriceNetShareSettlement": (
+                round_half_up(diluted - inc(convertibles) + convertibles["incrementalSharesNetShareSettlement"])
+                if convertibles and _is_number(convertibles.get("incrementalSharesNetShareSettlement")) else None),
             "atmPotentialShares": atm_shares,
             "dilutedSharesAtPriceWithAtm": round_half_up(diluted + atm_shares) if atm_shares is not None else None,
             "formula": ("basic + options (treasury stock) + unvested awards (gross) + warrants (treasury stock, vested) + convertibles and "

@@ -24,7 +24,7 @@ TREATMENTS: dict[str, list[str]] = {
     "unvested_awards": ["gross", "exclude"],
     "warrants": ["treasury_stock", "gross", "exclude"],
     "warrant_vesting": ["vested_only", "all"],
-    "convertibles": ["if_converted_when_in_the_money", "if_converted_all", "exclude"],
+    "convertibles": ["if_converted_when_in_the_money", "if_converted_all", "net_share_settlement_when_stated", "exclude"],
     "atm": ["exclude", "full_remaining_capacity"],
 }
 
@@ -202,8 +202,17 @@ def _scenario_lines(bridge: dict, s: dict) -> list[dict]:
                 lines.append(_line(*args, itm, None, "if_converted: every note converted", _round(shares)))
             elif conv is None:
                 lines.append(_line(*args, None, None, t["convertibles"], None, "conversion price not tagged"))
+            elif t["convertibles"] == "net_share_settlement_when_stated" and inst.get("principalSettlement") is not None:
+                # The filing states principal is settled in cash: shares only for the conversion value above principal (2.5.11).
+                principal = _num(inst.get("principal"))
+                if principal is None:
+                    lines.append(_line(*args, itm, conv, t["convertibles"], None, "principal not tagged"))
+                else:
+                    lines.append(_line(*args, itm, conv, "net share settlement: (if-converted shares - principal / price) when price >= conversion price; "
+                                       "principal in cash as the filing states", _round(max(0, shares - principal / price)) if itm else 0))
             else:
-                lines.append(_line(*args, itm, conv, "if_converted when price >= conversion price", _round(shares) if itm else 0))
+                unstated = "; cash settlement of principal not stated" if t["convertibles"] == "net_share_settlement_when_stated" else ""
+                lines.append(_line(*args, itm, conv, f"if_converted when price >= conversion price{unstated}", _round(shares) if itm else 0))
 
     atm = bridge.get("atmProgram") if isinstance(bridge.get("atmProgram"), dict) else None
     if atm:

@@ -28,6 +28,7 @@ ESBUILD = WORKER / "node_modules" / ".bin" / "esbuild"
 sys.path.insert(0, str(ROOT))
 
 from yfmcp import driver_ledger as dl  # noqa: E402
+from yfmcp import fiscal_calendar as fc  # noqa: E402
 from yfmcp import guidance_history as gh  # noqa: E402
 from yfmcp.evidence import AUTHORITY_BOUNDARY  # noqa: E402
 
@@ -152,7 +153,41 @@ PERIOD_CASES = [
     ["no period here", None],
     ["For the first quarter of 2026 guidance of X compared with the first quarter of 2025", 45],
     ["guidance of X for fiscal 2027", 0],
+    # 2.5.11: a year named by its end date (AEHR), a stated quarter end, and an impossible date.
+    ["For the fiscal year ending June 25, 2027, Aehr expects total company revenue to be between $130 million and $150 million", None],
+    ["For the third quarter of fiscal 2027 ending October 30, 2026, revenue guidance of X", None],
+    ["For the fiscal year ending January 2, 2027, guidance of X", None],
+    ["For the fiscal year ended February 30, 2027, guidance of X", None],
 ]
+
+# 2.5.11: a 52/53-week year the annual reports state (AEHR-like, ending near May 31), and a calendar
+# 52/53-week year ending on January 3 with no stated fiscal year.
+def _stated(start, end, val, form, filed, accn, fy, fp):
+    return {**_fact(start, end, val, form, filed, accn), "fy": fy, "fp": fp}
+
+
+STATED_FACTS = {"facts": {"us-gaap": {"Revenues": {"units": {"USD": [
+    _stated("2024-06-01", "2025-05-30", 59_000_000, "10-K", "2025-08-01", "a25", 2025, "FY"),
+    _stated("2025-05-31", "2026-05-29", 50_000_000, "10-K", "2026-07-28", "a26", 2026, "FY"),
+    # The FY2025 year again in the FY2026 10-K: that filing's fy (2026) is not this year's.
+    _stated("2024-06-01", "2025-05-30", 59_000_000, "10-K", "2026-07-28", "a26", 2026, "FY"),
+    _stated("2025-08-30", "2025-11-28", 9_000_000, "10-Q", "2026-01-08", "q2", 2026, "Q2"),
+    _stated("2026-05-30", "2026-08-28", 30_000_000, "10-Q", "2026-10-08", "q1", 2027, "Q1"),
+]}}}}}
+WEEK53_FACTS = {"facts": {"us-gaap": {"Revenues": {"units": {"USD": [
+    _fact("2024-12-29", "2026-01-03", 5_000_000, "10-K", "2026-02-20", "w25"),
+    _fact("2024-12-29", "2025-04-05", 1_000_000, "10-Q", "2025-05-05", "w1"),
+    _fact("2024-12-29", "2025-07-05", 2_100_000, "10-Q", "2025-08-05", "w2"),
+]}}}}}
+AEHR_RELEASES = [
+    {"filingDate": "2026-07-14", "accessionNumber": "0001-26-000700", "url": "https://www.sec.gov/aehr.htm", "status": "READ", "text": (
+        "Financial Guidance: For the fiscal year ending June 25, 2027, Aehr expects total company revenue to be between $130 million and $150 million.")},
+    {"filingDate": "2026-06-02", "accessionNumber": "0001-26-000650", "url": "https://www.sec.gov/aehr-q.htm", "status": "READ", "text": (
+        "Business update. For the first quarter of fiscal 2027, Aehr expects revenue between $25 million and $35 million.")},
+]
+FISCAL_DATES = ["2026-01-03", "2026-01-08", "2025-12-27", "2026-05-29", "2027-06-25", None, "bad"]
+FISCAL_QUARTERS = [["2025-11-28", "2026-05-29"], ["2025-08-29", "2026-05-29"], ["2026-05-29", "2026-05-29"], ["2025-04-05", "2026-01-03"],
+                   ["2025-01-15", "2026-05-29"], ["2025-10-15", "2026-05-29"]]
 
 
 def _python_outputs() -> dict:
@@ -162,6 +197,12 @@ def _python_outputs() -> dict:
         "bullets": gh.guidance_history("asts", BULLET_RELEASES, COMPANYFACTS),
         "nonGaap": gh.guidance_history("x", NON_GAAP_RELEASES, COMPANYFACTS),
         "fiscalActuals": gh.actuals_from_company_facts(FISCAL_FACTS),
+        "statedActuals": gh.actuals_from_company_facts(STATED_FACTS),
+        "week53Actuals": gh.actuals_from_company_facts(WEEK53_FACTS),
+        "aehr": gh.guidance_history("aehr", AEHR_RELEASES, STATED_FACTS),
+        "fiscal": [[fc.fiscal_year_of_period_end(d), fc.nominal_period_end(d), fc.fiscal_year_label(d)] for d in FISCAL_DATES],
+        "fiscalQuarters": [fc.fiscal_quarter_of(a, b) for a, b in FISCAL_QUARTERS],
+        "textDates": [fc.text_date("Sept.", "30", "2026"), fc.text_date("Jan", "2", "2027"), fc.text_date("February", "30", "2027"), fc.text_date("Foo", "1", "2026")],
         "periods": [gh.guidance_target_period(c) if a is None else gh.guidance_target_period(c, a) for c, a in PERIOD_CASES],
         "amounts": [gh.parse_amount("150.0 million"), gh.parse_amount("250.0", "million"), gh.parse_amount("1,250"), gh.parse_amount("abc")],
         "ledger": dl.operating_driver_ledger(ticker="asts", companyfacts=COMPANYFACTS, inline_facts=INLINE_FACTS,
@@ -174,9 +215,10 @@ def _python_outputs() -> dict:
 
 
 _HARNESS = r"""
-const [ghUrl, dlUrl, fixturesPath] = process.argv.slice(-3);
+const [ghUrl, dlUrl, fcUrl, fixturesPath] = process.argv.slice(-4);
 const gh = await import(ghUrl);
 const dl = await import(dlUrl);
+const fc = await import(fcUrl);
 const { readFileSync } = await import("node:fs");
 const f = JSON.parse(readFileSync(fixturesPath, "utf8"));
 const out = {
@@ -185,6 +227,12 @@ const out = {
   bullets: gh.guidanceHistory("asts", f.bulletReleases, f.companyfacts),
   nonGaap: gh.guidanceHistory("x", f.nonGaapReleases, f.companyfacts),
   fiscalActuals: gh.actualsFromCompanyFacts(f.fiscalFacts),
+  statedActuals: gh.actualsFromCompanyFacts(f.statedFacts),
+  week53Actuals: gh.actualsFromCompanyFacts(f.week53Facts),
+  aehr: gh.guidanceHistory("aehr", f.aehrReleases, f.statedFacts),
+  fiscal: f.fiscalDates.map((d) => [fc.fiscalYearOfPeriodEnd(d), fc.nominalPeriodEnd(d), fc.fiscalYearLabel(d)]),
+  fiscalQuarters: f.fiscalQuarters.map(([a, b]) => fc.fiscalQuarterOf(a, b)),
+  textDates: [fc.textDate("Sept.", "30", "2026"), fc.textDate("Jan", "2", "2027"), fc.textDate("February", "30", "2027"), fc.textDate("Foo", "1", "2026")],
   periods: f.periodCases.map(([c, a]) => (a == null ? gh.guidanceTargetPeriod(c) : gh.guidanceTargetPeriod(c, a))),
   amounts: [gh.parseAmount("150.0 million"), gh.parseAmount("250.0", "million"), gh.parseAmount("1,250"), gh.parseAmount("abc")],
   ledger: dl.operatingDriverLedger({ ticker: "asts", companyfacts: f.companyfacts, inlineFacts: f.inlineFacts,
@@ -204,7 +252,7 @@ def _worker_outputs() -> dict:
         raise unittest.SkipTest("node and worker/node_modules (npm ci) are required")
     with tempfile.TemporaryDirectory() as tmp:
         bundles = []
-        for name in ("guidance-history", "driver-ledger"):
+        for name in ("guidance-history", "driver-ledger", "fiscal-calendar"):
             out = Path(tmp) / f"{name}.mjs"
             subprocess.run([str(ESBUILD), str(WORKER / "src" / f"{name}.ts"), "--bundle", "--format=esm", "--platform=neutral", f"--outfile={out}", "--log-level=error"],
                            cwd=WORKER, check=True, capture_output=True, text=True, timeout=120)
@@ -212,7 +260,8 @@ def _worker_outputs() -> dict:
         fx = Path(tmp) / "fixtures.json"
         fx.write_text(json.dumps({"releases": RELEASES, "companyfacts": COMPANYFACTS, "fiscalFacts": FISCAL_FACTS, "inlineFacts": INLINE_FACTS,
                                   "statements": STATEMENTS, "periodCases": PERIOD_CASES, "bulletReleases": BULLET_RELEASES,
-                                  "nonGaapReleases": NON_GAAP_RELEASES}), encoding="utf-8")
+                                  "nonGaapReleases": NON_GAAP_RELEASES, "statedFacts": STATED_FACTS, "week53Facts": WEEK53_FACTS,
+                                  "aehrReleases": AEHR_RELEASES, "fiscalDates": FISCAL_DATES, "fiscalQuarters": FISCAL_QUARTERS}), encoding="utf-8")
         harness = Path(tmp) / "harness.mjs"
         harness.write_text(_HARNESS, encoding="utf-8")
         result = subprocess.run([node, str(harness), *bundles, str(fx)], check=True, capture_output=True, text=True, timeout=120)
@@ -319,6 +368,31 @@ class TestGuidanceHistory(unittest.TestCase):
         h = gh.guidance_history("x", [{"filingDate": "2025-11-01", "accessionNumber": "a", "url": None, "status": "READ",
                                         "text": "For the first quarter of fiscal 2026, the company expects revenue between $1 million and $2 million."}], FISCAL_FACTS)
         self.assertEqual(h["outcomes"][0]["status"], "NOT_EVALUATED_FISCAL_QUARTER_MAPPING")
+
+    def test_52_53_week_fiscal_identity(self) -> None:
+        # 2.5.11 (AEHR): a year named only by its end date is that date's fiscal year.
+        aehr = gh.guidance_target_period("For the fiscal year ending June 25, 2027, Aehr expects revenue between $130 million and $150 million")
+        self.assertEqual((aehr["label"], aehr["periodEnd"], aehr["basis"]), ("FY2027", "2027-06-25", "TEXT_PERIOD_END"))
+        q3 = gh.guidance_target_period("For the third quarter of fiscal 2027 ending October 30, 2026, revenue guidance of X")
+        self.assertEqual((q3["label"], q3["periodEnd"], q3["basis"]), ("Q3 2027", "2026-10-30", "TEXT"))
+        self.assertEqual(gh.guidance_target_period("For the fiscal year ending January 2, 2027, guidance of X")["label"], "FY2026")
+        self.assertEqual(gh.guidance_target_period("For the fiscal year ended February 30, 2027, guidance of X")["basis"], "NOT_STATED")
+        stated = gh.actuals_from_company_facts(STATED_FACTS)
+        # The stated fiscal years label the years; quarters count back from the year end (Q1 FY2027 from the projected end).
+        self.assertEqual(stated["statedFiscalYears"], {"2025-05-30": 2025, "2026-05-29": 2026})
+        self.assertEqual(stated["fiscalQuarterMapping"], "FILING_STATED_FISCAL_YEAR")
+        self.assertEqual(sorted(stated["revenue"]), ["FY2025", "FY2026", "Q1 2027", "Q2 2026"])
+        week = gh.actuals_from_company_facts(WEEK53_FACTS)
+        # A year ending January 3, 2026 is fiscal 2025; its quarter ending April 5 is Q1 and July 5 is Q2.
+        self.assertTrue(week["calendarFiscalYear"])
+        self.assertEqual(sorted(week["revenue"]), ["FY2025", "H1 2025", "Q1 2025"])
+        h = gh.guidance_history("aehr", AEHR_RELEASES, STATED_FACTS)
+        outcomes = {o["targetPeriod"]: o for o in h["outcomes"]}
+        self.assertEqual(outcomes["FY2027"]["status"], "ACTUAL_NOT_YET_REPORTED")
+        self.assertEqual((outcomes["Q1 2027"]["status"], outcomes["Q1 2027"]["positionVsLast"]), ("EVALUATED", "WITHIN"))
+        self.assertEqual(fc.fiscal_year_of_period_end("2026-01-03"), 2025)
+        self.assertEqual(fc.fiscal_year_of_period_end("2026-01-08"), 2026)
+        self.assertEqual([fc.fiscal_quarter_of(a, b) for a, b in FISCAL_QUARTERS], [2, 1, 4, 1, None, None])
 
     def test_bullets_and_half_years(self) -> None:
         h = gh.guidance_history("asts", BULLET_RELEASES, COMPANYFACTS)

@@ -478,6 +478,62 @@ PREFLIQ_Q = f"""<html><body>
 liquidation preference ${_num("us-gaap:PreferredStockLiquidationPreference", "fend", "usdPerShare", "100.00")} per share; dividend {_num("us-gaap:PreferredStockDividendRatePercentage", "fend", "pure", "6", -2)}%.</p>
 </body></html>"""
 
+# Warrant lifecycle stated in text (2.5.11): counts tagged before the period end that the text says were
+# exercised (ASTS's 122,000 private placement warrants; RKLB's 728,835 lender warrants), one it does not.
+SPW = {"us-gaap:ClassOfWarrantOrRightAxis": "stl:PrivatePlacementWarrantsMember"}
+SLW = {"us-gaap:ClassOfWarrantOrRightAxis": "stl:LenderWarrantMember"}
+SDW = {"us-gaap:ClassOfWarrantOrRightAxis": "stl:DeltaWarrantsMember"}
+SPUB = {"us-gaap:ClassOfWarrantOrRightAxis": "stl:PublicWarrantsMember"}
+STALE_Q = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "sq", "10-Q")}
+{_text("dei:DocumentPeriodEndDate", "sq", "June 30, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("sq", "2026-04-01..2026-06-30")}{_context("scover", "2026-08-01")}
+{_context("spw", "2025-12-31", SPW)}{_context("slw", "2023-12-29", SLW)}{_context("sdw", "2022-10-07", SDW)}{_context("spub", "2026-06-30", SPUB)}{UNITS}</ix:resources></ix:header></div>
+<p>Shares outstanding: {_num("dei:EntityCommonStockSharesOutstanding", "scover", "shares", "100,000,000")}</p>
+<p>Private placement: {_num("us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights", "spw", "shares", "122,000")} at
+${_num("us-gaap:ClassOfWarrantOrRightExercisePriceOfWarrantsOrRights1", "spw", "usdPerShare", "11.50")}.</p>
+<p>Lender: {_num("us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights", "slw", "shares", "728,835")} at
+${_num("us-gaap:ClassOfWarrantOrRightExercisePriceOfWarrantsOrRights1", "slw", "usdPerShare", "4.87")}.</p>
+<p>Delta: {_num("us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights", "sdw", "shares", "7,000,000")} at
+${_num("us-gaap:ClassOfWarrantOrRightExercisePriceOfWarrantsOrRights1", "sdw", "usdPerShare", "0.01")}.</p>
+<p>Public: {_num("us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights", "spub", "shares", "3,000,000")} at
+${_num("us-gaap:ClassOfWarrantOrRightExercisePriceOfWarrantsOrRights1", "spub", "usdPerShare", "11.50")}.</p>
+</body></html>"""
+LIFECYCLE_TEXT = [
+    "As of December 31, 2025, there were 122,000 Private Placement Warrants that remained outstanding. During the three months ended March 31, 2026, "
+    "the remaining 122,000 Private Placement Warrants were exercised for 109,499 shares of Class A Common Stock on a cashless basis. "
+    "The Private Placement Warrants expired on April 6, 2026, five years after the closing of the Business Combination.",
+    "In connection with the Loan Agreement, the Company issued a warrant, dated December 29, 2023, to purchase up to 728,835 shares. "
+    "On November 14, 2024, all 728,835 common stock warrants were exercised on a cashless basis, which resulted in the holder receiving 540,336 shares of common stock.",
+    # Not events that retire the Delta Warrants: negated, partial, and after the period end.
+    "No Delta Warrants were exercised during the three months ended June 30, 2025. On May 5, 2026, 300,000 of the Delta Warrants were exercised. "
+    "All of the Delta Warrants were exercised on August 5, 2026.",
+]
+# Convertible principal settled in cash (2.5.11): the 2029 notes by name, and every note (LITE).
+SETTLEMENT_TEXT = [
+    "Upon conversion of the 2029 Notes, we will pay cash up to the aggregate principal amount of the notes being converted and pay or deliver shares of our common stock for the remainder of our conversion obligation. "
+    "For the 2031 Notes, we may settle conversions in cash, shares of our common stock or a combination, at our election.",
+]
+LITE_SETTLEMENT_TEXT = [
+    "The principal amounts of all of our outstanding convertible notes must be settled in cash. The actual cash settlement may be higher if we decide to settle the conversion value in excess of the principal amounts in cash.",
+]
+# Claim kinds and preferred wordings added in 2.5.11, and the sentences that must not count.
+CENSUS2_CLAIM_TEXT = [
+    "In connection with the acquisition, 1,200,000 holdback shares are held by the Company and will be released to the sellers in 2027.",
+    "Each contingent value right entitles the holder to receive shares of our common stock upon regulatory approval of the product.",
+    "We are obligated to issue 500,000 shares of common stock to the licensor upon the first commercial sale.",
+    # Not claims: a cash-only CVR and an award commitment.
+    "Each contingent value right entitles the holder to a cash payment of $1.00 upon approval.",
+    "We are required to issue shares of common stock to employees under the ESPP.",
+]
+PREFERRED_WORDINGS = [
+    ["The Series B Preferred Stock has a conversion rate of 12.5 shares of common stock for each share of Series B Preferred Stock."],
+    ["The Series C Preferred Stock is convertible into an aggregate of 4.2 million shares of our common stock."],
+    ["Each share of Series D Preferred Stock is convertible, at the option of the holder, into 3 shares of our common stock."],
+    ["The Series E Preferred Stock converts on a one-to-one basis into shares of common stock."],
+]
+
 TABLE_MATCHES = [
     {"contextText": "Unvested at December 31, 2025 | 2,500,000 | $ 14.10", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at December 31, 2025"},
     {"contextText": "Unvested at June 30, 2026 | 2,750,000 | $ 15.20", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at June 30, 2026"},
@@ -485,7 +541,7 @@ TABLE_MATCHES = [
     {"contextText": "Unvested at June 30, 2026, restricted stock units totalled 8,888,888 shares.", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": False, "tableTitle": None, "rowLabel": None},
 ]
 
-FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K, "cohr_k": COHR_K, "pref_q": PREF_Q, "mrvl_q": MRVL_Q, "life_k": LIFE_K, "aehr_k": AEHR_K, "lite_k": LITE_K, "prefliq_q": PREFLIQ_Q}
+FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K, "cohr_k": COHR_K, "pref_q": PREF_Q, "mrvl_q": MRVL_Q, "life_k": LIFE_K, "aehr_k": AEHR_K, "lite_k": LITE_K, "prefliq_q": PREFLIQ_Q, "stale_q": STALE_Q}
 
 NEWS_ITEMS = [
     {"title": "Needham raises IQE price target to 45p from 38p", "summary": "Needham values IQE at 12x 2027 EV/EBITDA, citing gallium nitride demand.", "url": "https://news.example/1", "publishedAt": "2026-09-20T08:00:00Z", "source": "yahoo_finance_news"},
@@ -551,6 +607,13 @@ out.bridgeAehr = m.dilutionBridge({ ticker: "AEHX", price: 20, priceCurrency: "U
 out.bridgeLite = m.dilutionBridge({ ticker: "LITX", price: 700, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-K", "2026-08-20", "0001234568-26-000200", data.kUrl, "lite_k")], atmMatches: [], claimMatches: tm(data.liteClaims) });
 out.bridgeCensus = m.dilutionBridge({ ticker: "AEHX", price: 20, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-K", "2026-07-27", "0001234568-26-000190", data.kUrl, "aehr_k")], atmMatches: [], claimMatches: tm(data.censusClaims) });
 out.bridgePrefLiq = m.dilutionBridge({ ticker: "PLQ", price: 10, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2026-08-05", "0001234568-26-000210", data.qUrl, "prefliq_q")], atmMatches: [], claimMatches: [] });
+const staleSrc = src("primary", "10-Q", "2026-08-10", "0001234568-26-000220", data.qUrl, "stale_q");
+out.bridgeStale = m.dilutionBridge({ ticker: "STLX", price: 20, priceCurrency: "USD", asOfDate: null, sources: [staleSrc], atmMatches: [], claimMatches: [], warrantLifecycleMatches: tm(data.lifecycle) });
+out.bridgeStaleUnread = m.dilutionBridge({ ticker: "STLX", price: 20, priceCurrency: "USD", asOfDate: null, sources: [staleSrc], atmMatches: [], claimMatches: [] });
+out.bridgeSettled = m.dilutionBridge({ ticker: "CSTC", price: 25, priceCurrency: "USD", asOfDate: "2025-05-09", sources: [qSource, kFallback], atmMatches: atm, convertibleSettlementMatches: tm(data.settlement) });
+out.bridgeLiteSettled = m.dilutionBridge({ ticker: "LITX", price: 700, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-K", "2026-08-20", "0001234568-26-000200", data.kUrl, "lite_k")], atmMatches: [], claimMatches: tm(data.liteClaims), convertibleSettlementMatches: tm(data.liteSettlement) });
+out.bridgeCensus2 = m.dilutionBridge({ ticker: "AEHX", price: 20, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-K", "2026-07-27", "0001234568-26-000190", data.kUrl, "aehr_k")], atmMatches: [], claimMatches: tm(data.census2Claims) });
+out.preferredWordings = data.preferredWordings.map((texts) => m.preferredConversionTerms(tm(texts)));
 out.capital = m.capitalStructure({ ticker: "CSTC", source: kSource, fundingMatches: atm });
 out.capitalAaoi = m.capitalStructure({ ticker: "AAOX", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000040", data.qUrl, "aaoi_q"), fundingMatches: [] });
 out.capitalAsts = m.capitalStructure({ ticker: "ASTX", source: src("primary", "10-Q", "2026-08-10", "0001234568-26-000060", data.qUrl, "asts_q"), fundingMatches: [] });
@@ -617,6 +680,8 @@ def _worker_pure() -> dict:
             "fixtures": FIXTURES, "kUrl": K_URL, "qUrl": Q_URL, "atm": ATM_TEXT, "news": NEWS_ITEMS, "changes": RATING_CHANGES,
             "chHistory": CH_HISTORY, "chSearch": CH_SEARCH, "tableMatches": TABLE_MATCHES, "astsNews": ASTS_NEWS,
             "cohrClaims": COHR_CLAIM_TEXT, "mrvlClaims": MRVL_CLAIM_TEXT, "liteClaims": LITE_CLAIM_TEXT, "censusClaims": CENSUS_CLAIM_TEXT,
+            "lifecycle": LIFECYCLE_TEXT, "settlement": SETTLEMENT_TEXT, "liteSettlement": LITE_SETTLEMENT_TEXT, "census2Claims": CENSUS2_CLAIM_TEXT,
+            "preferredWordings": PREFERRED_WORDINGS,
         }), encoding="utf-8")
         (tmp_path / "harness.mjs").write_text(_WORKER_PURE, encoding="utf-8")
         result = subprocess.run(
@@ -651,7 +716,15 @@ def _python_pure() -> dict:
     mrvl_src = cs.IxSource("primary", "10-Q", "2026-08-28", "0001234568-26-000170", Q_URL, docs["mrvl_q"])
     tm = lambda texts: [cs.TextMatch(t, "Equity", K_URL, "2026-08-20", None) for t in texts]
     aehr_src = cs.IxSource("primary", "10-K", "2026-07-27", "0001234568-26-000190", K_URL, docs["aehr_k"])
+    stale_src = cs.IxSource("primary", "10-Q", "2026-08-10", "0001234568-26-000220", Q_URL, docs["stale_q"])
+    lite_src = cs.IxSource("primary", "10-K", "2026-08-20", "0001234568-26-000200", K_URL, docs["lite_k"])
     return {
+        "bridgeStale": cs.dilution_bridge("STLX", 20, "USD", None, [stale_src], [], None, [], tm(LIFECYCLE_TEXT)),
+        "bridgeStaleUnread": cs.dilution_bridge("STLX", 20, "USD", None, [stale_src], [], None, []),
+        "bridgeSettled": cs.dilution_bridge("CSTC", 25, "USD", "2025-05-09", [q_source, k_fallback], atm, None, None, None, tm(SETTLEMENT_TEXT)),
+        "bridgeLiteSettled": cs.dilution_bridge("LITX", 700, "USD", None, [lite_src], [], None, tm(LITE_CLAIM_TEXT), None, tm(LITE_SETTLEMENT_TEXT)),
+        "bridgeCensus2": cs.dilution_bridge("AEHX", 20, "USD", None, [aehr_src], [], None, tm(CENSUS2_CLAIM_TEXT)),
+        "preferredWordings": [cs.preferred_conversion_terms(tm(texts)) for texts in PREFERRED_WORDINGS],
         "bridgeAehr": cs.dilution_bridge("AEHX", 20, "USD", None, [aehr_src], [], None, []),
         "bridgeLite": cs.dilution_bridge("LITX", 700, "USD", None, [cs.IxSource("primary", "10-K", "2026-08-20", "0001234568-26-000200", K_URL, docs["lite_k"])], [], None, tm(LITE_CLAIM_TEXT)),
         "bridgeCensus": cs.dilution_bridge("AEHX", 20, "USD", None, [aehr_src], [], None, tm(CENSUS_CLAIM_TEXT)),
@@ -703,7 +776,7 @@ class TestCapitalStructureParity(unittest.TestCase):
             self.assertEqual(self.worker["documents"][name], self.local["documents"][name], name)
 
     def test_outputs_match(self) -> None:
-        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
+        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "bridgeStale", "bridgeStaleUnread", "bridgeSettled", "bridgeLiteSettled", "bridgeCensus2", "preferredWordings", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
 
@@ -978,6 +1051,66 @@ class TestCapitalStructureValues(unittest.TestCase):
         quoted = claims["SHARE_SETTLED_OBLIGATION"]["sentences"]
         self.assertEqual(len(quoted), 1, "award, note and past settlements are not claims")
         self.assertIn("deferred acquisition consideration", quoted[0])
+
+    def test_warrant_lifecycle_stated_in_text(self) -> None:
+        out = _python_pure()
+        b = out["bridgeStale"]
+        w = next(c for c in b["components"] if c["component"] == "warrants")
+        # 2.5.11: the private placement warrants (exercised by March 31, before their April expiry) and the lender
+        # warrants (all 728,835 exercised on November 14, 2024) are retired; the Delta and public warrants remain.
+        self.assertEqual([c["class"] for c in w["classes"]], ["Delta Warrants", "Public Warrants"])
+        retired = {r["class"]: r for r in w["retiredInText"]}
+        self.assertEqual((retired["Private Placement Warrants"]["event"], retired["Private Placement Warrants"]["eventDate"], retired["Private Placement Warrants"]["matchedBy"]),
+                         ("EXERCISED", "2026-03-31", "STATED_COUNT"))
+        self.assertEqual((retired["Lender Warrant"]["event"], retired["Lender Warrant"]["eventDate"], retired["Lender Warrant"]["count"]),
+                         ("EXERCISED", "2024-11-14", 728_835))
+        self.assertIn("all 728,835 common stock warrants were exercised", retired["Lender Warrant"]["sentence"])
+        # The negated, partial and post-period Delta sentences leave it counted, read.
+        self.assertEqual(w["classes"][0]["lifecycleText"], "NO_EVENT_STATED")
+        self.assertNotIn("lifecycleText", w["classes"][1], "a count at the period end needs no lifecycle read")
+        self.assertEqual(w["outstanding"], 10_000_000)
+        codes = [x["code"] for x in b["warnings"]]
+        self.assertIn("WARRANT_RETIRED_IN_TEXT", codes)
+        early = next(x for x in b["warnings"] if x["code"] == "WARRANT_COUNT_BEFORE_PERIOD_END")
+        self.assertIn("states no exercise, expiry or redemption", early["message"])
+        unread = next(c for c in out["bridgeStaleUnread"]["components"] if c["component"] == "warrants")
+        self.assertEqual(len(unread["classes"]), 4)
+        self.assertEqual({c.get("lifecycleText") for c in unread["classes"]}, {"NOT_READ", None})
+        self.assertNotIn("retiredInText", unread)
+        sentences = cs.warrant_lifecycle_sentences([cs.TextMatch(t, None, None, None, None) for t in LIFECYCLE_TEXT])
+        self.assertEqual([s["event"] for s in sentences], ["EXERCISED", "EXPIRED", "EXERCISED", "EXERCISED", "EXERCISED"])
+
+    def test_principal_settled_in_cash(self) -> None:
+        out = _python_pure()
+        conv = next(c for c in out["bridgeSettled"]["components"] if c["component"] == "convertible_debt")
+        n29, n31 = conv["instruments"]
+        # 2029 notes, principal in cash as stated: 15,000,000 if-converted less $300M / $25 = 3,000,000 net shares.
+        self.assertEqual((n29["principalSettlement"]["scope"], n29["netShareSettlementShares"], n29["incrementalShares"]), ("NAMED_NOTES", 3_000_000, 15_000_000))
+        # The 2031 notes settle at the issuer's election: not a stated cash settlement.
+        self.assertIsNone(n31["principalSettlement"])
+        self.assertIsNone(n31["netShareSettlementShares"])
+        self.assertEqual((conv["settlementText"], conv["incrementalSharesNetShareSettlement"]), ("READ", 3_000_000))
+        bridge = out["bridgeSettled"]["bridge"]
+        self.assertEqual(bridge["dilutedSharesAtPrice"] - bridge["dilutedSharesAtPriceNetShareSettlement"], 12_000_000)
+        self.assertEqual(bridge["convertibleDebtNetShareSettlement"], 3_000_000)
+        self.assertIn("CONVERTIBLE_PRINCIPAL_SETTLED_IN_CASH", [w["code"] for w in out["bridgeSettled"]["warnings"]])
+        # Unread: the if-converted count only.
+        plain = next(c for c in out["bridge"]["components"] if c["component"] == "convertible_debt")
+        self.assertEqual((plain["settlementText"], plain["incrementalSharesNetShareSettlement"]), ("NOT_READ", None))
+        self.assertNotIn("principalSettlement", plain["instruments"][0])
+        self.assertIsNone(out["bridge"]["bridge"]["dilutedSharesAtPriceNetShareSettlement"])
+        # LITE: every note; 1,370,689 if-converted less $179.6M / $700.
+        lite = next(c for c in out["bridgeLiteSettled"]["components"] if c["component"] == "convertible_debt")["instruments"][0]
+        self.assertEqual((lite["principalSettlement"]["scope"], lite["netShareSettlementShares"]), ("ALL_NOTES", 1_114_118))
+
+    def test_claim_census_2_5_11(self) -> None:
+        out = _python_pure()
+        claims = {c["kind"]: c for c in out["bridgeCensus2"]["unquantifiedShareClaims"]}
+        self.assertEqual(sorted(claims), ["CONTINGENT_SHARES", "CONTINGENT_VALUE_RIGHT", "SHARE_ISSUANCE_COMMITMENT"])
+        self.assertEqual(len(claims["CONTINGENT_VALUE_RIGHT"]["sentences"]), 1, "a cash-only CVR is not a share claim")
+        self.assertEqual(len(claims["SHARE_ISSUANCE_COMMITMENT"]["sentences"]), 1, "an ESPP commitment is an award")
+        self.assertEqual([(w or {}).get("ratio") for w in out["preferredWordings"]], [12.5, None, 3, 1])
+        self.assertEqual(out["preferredWordings"][1]["aggregateShares"], 4_200_000)
 
     def test_warrant_expiry_and_elapsed_terms(self) -> None:
         b = _python_pure()["bridgeLife"]

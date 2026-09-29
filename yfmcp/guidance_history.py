@@ -20,6 +20,7 @@ from typing import Any
 
 from yfmcp.evidence import AUTHORITY_BOUNDARY
 from yfmcp.extraction_rules import guidance_ranges
+from yfmcp.fiscal_calendar import TEXT_DATE_SOURCE, fiscal_quarter_of, fiscal_year_of_period_end, nominal_period_end, text_date
 from yfmcp.sec_facts import REVENUE_CONCEPTS
 
 _F = re.I | re.A
@@ -53,6 +54,9 @@ _Q_RE = re.compile(r"\bQ([1-4])\s*(?:of\s+)?(?:FY)?\s*'?(20\d\d)?\b", re.A)
 _HALF_WORD_RE = re.compile(r"\b(first|second)[- ]half(?: of)?(?: fiscal)?(?: year)?\s*'?(20\d\d)?\b", _F)
 _HALF_LEAD_RE = re.compile(r"\b([12])H\s?'?(20\d\d|\d\d)\b", re.A)
 _HALF_TRAIL_RE = re.compile(r"\bH([12])\s*'?(20\d\d|\d\d)?\b", re.A)
+# "the fiscal year ending June 25, 2027" and "... quarter ended October 31, 2026" (2.5.11).
+_FISCAL_YEAR_ENDING_RE = re.compile(r"\bfiscal year (?:ending|ended|that (?:ends|ended)|which (?:ends|ended))(?: on)?\s+" + TEXT_DATE_SOURCE + r"\b", _F)
+_PERIOD_END_AFTER_RE = re.compile(r"\s*,?\s*(?:ending|ended)(?: on)?\s+" + TEXT_DATE_SOURCE + r"\b", _F)
 
 
 def _year4(text: str | None) -> int | None:
@@ -73,8 +77,18 @@ def guidance_target_period(context: str, anchor: int | None = None) -> dict:
     found: list[dict] = []
 
     def add(m: re.Match, fiscal_year: int | None, quarter: int | None, half: int | None) -> None:
-        found.append({"index": m.start(), "end": m.end(), "fiscalYear": fiscal_year, "quarter": quarter, "half": half})
+        # "fiscal 2027 ending June 25, 2027", "third quarter ended October 31, 2026": the stated end date (2.5.11).
+        d = _PERIOD_END_AFTER_RE.match(context[m.end():m.end() + 60])
+        found.append({"index": m.start(), "end": m.end(), "fiscalYear": fiscal_year, "quarter": quarter, "half": half,
+                      "periodEnd": text_date(d.group(1), d.group(2), d.group(3)) if d else None, "fromDate": False})
 
+    # "the fiscal year ending June 25, 2027" names a 52/53-week year by its end date only: its year is the
+    # fiscal year of that date (fiscal_calendar.py) (2.5.11, AEHR).
+    for m in _FISCAL_YEAR_ENDING_RE.finditer(context):
+        period_end = text_date(m.group(1), m.group(2), m.group(3))
+        if period_end:
+            found.append({"index": m.start(), "end": m.end(), "fiscalYear": fiscal_year_of_period_end(period_end), "quarter": None,
+                          "half": None, "periodEnd": period_end, "fromDate": True})
     for m in _FY_RE.finditer(context):
         add(m, _year4(m.group(1)), None, None)
     for m in _YEAR_FIRST_RE.finditer(context):
@@ -93,7 +107,7 @@ def guidance_target_period(context: str, anchor: int | None = None) -> dict:
     hits = [h for h in found if h["quarter"] is not None or h["half"] is not None
             or not any(q["index"] <= h["index"] < q["end"] for q in parts)]
     if not hits:
-        return {"label": None, "fiscalYear": None, "quarter": None, "half": None, "basis": "NOT_STATED"}
+        return {"label": None, "fiscalYear": None, "quarter": None, "half": None, "periodEnd": None, "basis": "NOT_STATED"}
     before = [h for h in hits if h["index"] < anchor]
     if before:
         best = before[0]
@@ -117,7 +131,8 @@ def guidance_target_period(context: str, anchor: int | None = None) -> dict:
         "fiscalYear": best["fiscalYear"],
         "quarter": best["quarter"],
         "half": best["half"],
-        "basis": "TEXT_YEAR_NOT_STATED" if best["fiscalYear"] is None else "TEXT",
+        "periodEnd": best["periodEnd"],
+        "basis": "TEXT_YEAR_NOT_STATED" if best["fiscalYear"] is None else "TEXT_PERIOD_END" if best["fromDate"] else "TEXT",
     }
 
 
@@ -290,15 +305,19 @@ def _days(start: str, end: str) -> int:
 def actuals_from_company_facts(companyfacts: Any) -> dict:
     """Reported actuals by period label from companyfacts.
 
-    FY<year of period end> for ~1-year durations; Q<n> <year> for ~quarter
-    durations only when every annual period ends in December (calendar fiscal
-    year). The newest filing of each period wins.
+    FY<fiscal year> for ~1-year durations: the fiscal year the annual report
+    states (companyfacts fy of the 10-K whose own year it is), else the fiscal
+    year of the period end (fiscal_calendar.py). Quarters: calendar quarters
+    when every annual period ends in December (a 52/53-week year ending in the
+    first week of January counts); otherwise fiscal quarters of a year whose
+    annual report states its fiscal year, counted back from that year's end.
+    The newest filing of each period wins.
     """
     facts = (companyfacts or {}).get("facts") if isinstance(companyfacts, dict) else None
     usgaap = (facts or {}).get("us-gaap") or {}
 
-    def collect(concepts: list[str], unit: str) -> list[dict]:
-        by_period: dict[str, dict] = {}
+    def raw(concepts: list[str], unit: str) -> list[dict]:
+        out: list[dict] = []
         for concept in concepts:
             units = (usgaap.get(concept) or {}).get("units") or {}
             for f in units.get(unit) or []:
@@ -309,27 +328,75 @@ def actuals_from_company_facts(companyfacts: Any) -> dict:
                     continue
                 if not re.match(r"10-[KQ]", str(f.get("form") or "")):
                     continue
-                key = f"{f['start']}|{f['end']}"
-                prev = by_period.get(key)
-                if prev is None or str(f.get("filed") or "") > str(prev.get("filed") or ""):
-                    by_period[key] = {**f, "concept": concept}
+                out.append({**f, "concept": concept})
+        return out
+
+    def collect(items: list[dict]) -> list[dict]:
+        by_period: dict[str, dict] = {}
+        for f in items:
+            key = f"{f['start']}|{f['end']}"
+            prev = by_period.get(key)
+            if prev is None or str(f.get("filed") or "") > str(prev.get("filed") or ""):
+                by_period[key] = f
         return list(by_period.values())
 
-    revenue = collect(list(REVENUE_CONCEPTS), "USD")
-    eps = collect(["EarningsPerShareDiluted"], "USD/shares")
-    annual_ends = [f["end"] for f in revenue + eps if 350 <= _days(f["start"], f["end"]) <= 380]
-    calendar_fy = bool(annual_ends) and all(e[5:7] == "12" for e in annual_ends)
+    raw_revenue = raw(list(REVENUE_CONCEPTS), "USD")
+    raw_eps = raw(["EarningsPerShareDiluted"], "USD/shares")
+    revenue = collect(raw_revenue)
+    eps = collect(raw_eps)
+
+    def is_annual(f: dict) -> bool:
+        return 350 <= _days(f["start"], f["end"]) <= 380
+
+    # The fiscal year an annual report states for its own year: the fy of the 10-K's latest annual period (2.5.11).
+    newest_by_accession: dict[str, dict] = {}
+    for f in raw_revenue + raw_eps:
+        fy = f.get("fy")
+        if (not is_annual(f) or not str(f.get("form") or "").startswith("10-K") or f.get("fp") != "FY"
+                or isinstance(fy, bool) or not isinstance(fy, int) or not isinstance(f.get("accn"), str)):
+            continue
+        prev = newest_by_accession.get(f["accn"])
+        if prev is None or str(f["end"]) > str(prev["end"]):
+            newest_by_accession[f["accn"]] = f
+    stated_fy: dict[str, int] = {}
+    for f in sorted(newest_by_accession.values(), key=lambda x: str(x.get("filed") or "")):
+        stated_fy[str(f["end"])] = f["fy"]
+    annual_ends = sorted({str(f["end"]) for f in revenue + eps if is_annual(f)})
+    calendar_fy = bool(annual_ends) and all((nominal_period_end(e) or "")[5:7] == "12" for e in annual_ends)
+    mapping = "CALENDAR" if calendar_fy else "FILING_STATED_FISCAL_YEAR" if stated_fy else "NONE"
+
+    def fiscal_year(end: str) -> int | None:
+        return stated_fy.get(end, fiscal_year_of_period_end(end))
+
+    # The fiscal year a non-calendar quarter falls in: the first annual end on or after it, else (the year in
+    # progress) a year after the latest, only when an annual report states that year's number.
+    def fiscal_quarter(end: str) -> str | None:
+        year_end = next((a for a in annual_ends if -7 <= _days(end, a) <= 280), None)
+        if year_end:
+            fy = stated_fy.get(year_end)
+            q = fiscal_quarter_of(end, year_end)
+            return f"Q{q} {fy}" if fy is not None and q is not None else None
+        latest = annual_ends[-1] if annual_ends else None
+        fy = stated_fy.get(latest) if latest else None
+        if not latest or fy is None or end <= latest:
+            return None
+        projected = (_dt.date.fromisoformat(latest) + _dt.timedelta(days=364)).isoformat()
+        q = fiscal_quarter_of(end, projected)
+        return f"Q{q} {fy + 1}" if q is not None else None
 
     def label(f: dict) -> str | None:
         d = _days(f["start"], f["end"])
         end = f["end"]
+        nominal = nominal_period_end(end) or end
         if 350 <= d <= 380:
-            return f"FY{end[:4]}"
-        if 80 <= d <= 100 and calendar_fy:
-            return f"Q{math.ceil(int(end[5:7]) / 3)} {end[:4]}"
+            return f"FY{fiscal_year(end)}"
+        if 80 <= d <= 100:
+            if calendar_fy:
+                return f"Q{math.ceil(int(nominal[5:7]) / 3)} {nominal[:4]}"
+            return fiscal_quarter(end) if mapping == "FILING_STATED_FISCAL_YEAR" else None
         # A first half is filed as the six-month year-to-date period; a second half is never filed as a period.
-        if 170 <= d <= 190 and calendar_fy and end[5:7] == "06":
-            return f"H1 {end[:4]}"
+        if 170 <= d <= 190 and calendar_fy and nominal[5:7] == "06":
+            return f"H1 {nominal[:4]}"
         return None
 
     def table(items: list[dict]) -> dict:
@@ -342,7 +409,8 @@ def actuals_from_company_facts(companyfacts: Any) -> dict:
         return out
 
     # An unread companyfacts is not an unreported actual.
-    return {"read": companyfacts is not None, "revenue": table(revenue), "eps": table(eps), "calendarFiscalYear": calendar_fy}
+    return {"read": companyfacts is not None, "revenue": table(revenue), "eps": table(eps), "calendarFiscalYear": calendar_fy,
+            "fiscalQuarterMapping": mapping, "statedFiscalYears": dict(sorted(stated_fy.items()))}
 
 
 def guidance_outcomes(entries: list[dict], actuals: dict) -> list[dict]:
@@ -372,7 +440,7 @@ def guidance_outcomes(entries: list[dict], actuals: dict) -> list[dict]:
         elif not actual:
             if label.startswith("H") and (label.startswith("H2") or actuals.get("calendarFiscalYear") is not True):
                 status = "NOT_EVALUATED_HALF_YEAR"
-            elif label.startswith("Q") and actuals.get("calendarFiscalYear") is not True:
+            elif label.startswith("Q") and (actuals.get("fiscalQuarterMapping") or "NONE") == "NONE":
                 status = "NOT_EVALUATED_FISCAL_QUARTER_MAPPING"
             else:
                 status = "ACTUAL_NOT_YET_REPORTED"
@@ -414,8 +482,12 @@ def guidance_history(ticker: str, releases: list[dict], companyfacts: Any) -> di
             "revenue": "SEC XBRL revenue concepts, newest filing per period",
             "eps": "us-gaap:EarningsPerShareDiluted, newest filing per period",
             "grossMargin": "not evaluated",
-            "periodLabels": "FY<year of period end>; quarters and first halves only for calendar fiscal years; second halves are not filed as a period and are not derived",
+            "periodLabels": ("FY<the fiscal year the annual report states, else the year of the period end less a week (a 52/53-week year"
+                             " ending in early January is the prior year's)>; calendar quarters and first halves for calendar fiscal years;"
+                             " fiscal quarters counted back from a year end whose fiscal year an annual report states; second halves are"
+                             " not filed as a period and are not derived"),
             "calendarFiscalYear": actuals["calendarFiscalYear"],
+            "fiscalQuarterMapping": actuals["fiscalQuarterMapping"],
             "read": actuals["read"],
         },
         "notes": [

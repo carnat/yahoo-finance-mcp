@@ -18,6 +18,8 @@ import re
 from decimal import Decimal
 from typing import Any
 
+from yfmcp.fiscal_calendar import fiscal_year_of_period_end
+
 EVIDENCE_CUT_SCHEMA = "yfmcp.evidence-cut/1"
 CONSENSUS_OBSERVATION_SCHEMA = "yfmcp.consensus-observation/1"
 CANONICALIZATION = "yfmcp-canonical-json/1: sorted keys, no whitespace, ECMAScript number formatting, UTF-8"
@@ -433,7 +435,9 @@ def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: d
             }
         periods.append({
             "label": label,
-            "fiscalYear": int(fy0["fiscalYearEnd"][:4]) + k if fy0 else None,
+            # A 52/53-week year ending in early January is the prior year's (2.5.11).
+            "fiscalYear": (fiscal_year_of_period_end(fy0["fiscalYearEnd"]) + k
+                           if fy0 and fiscal_year_of_period_end(fy0["fiscalYearEnd"]) is not None else None),
             "fiscalYearEnds": fiscal_year_ends,
             "metrics": metrics,
         })

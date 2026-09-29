@@ -72,6 +72,20 @@ CLAIM_BRIDGES = [
      ]},
 ]
 
+# 2.5.11 (LITE): principal settled in cash as the filing states, one note stated and one not.
+NSS_BRIDGE = {"basicShares": {"shares": 74_000_000}, "atmProgram": None, "claimCoverage": _COVERED, "unquantifiedShareClaims": [],
+              "components": [{"component": "convertible_debt", "instruments": [
+                  {"instrument": "Notes due 2032", "principal": 1_000_000_000, "ifConvertedShares": 20_000_000, "conversionPrice": 50.0,
+                   "ifConvertedBasis": "principal / conversion_price", "principalSettlement": {"stated": "PRINCIPAL_IN_CASH", "scope": "ALL_NOTES"}},
+                  {"instrument": "Notes due 2030", "principal": 100_000_000, "ifConvertedShares": 2_000_000, "conversionPrice": 50.0,
+                   "ifConvertedBasis": "principal / conversion_price", "principalSettlement": None},
+              ]}]}
+NSS_SCENARIOS = [
+    {"name": "net-share", "price": 80, "convertibles": "net_share_settlement_when_stated"},
+    {"name": "net-share-below", "price": 40, "convertibles": "net_share_settlement_when_stated"},
+    {"name": "if-converted", "price": 80},
+]
+
 SCENARIOS = [
     {"name": "base", "price": 40},
     {"name": "all-in", "price": 40, "options": "gross", "warrants": "gross", "warrant_vesting": "all", "convertibles": "if_converted_all",
@@ -155,6 +169,7 @@ def _python_outputs() -> dict:
         "scenarios": ss.share_count_scenarios("asts", BRIDGE, parsed["scenarios"]),
         "noBasic": ss.share_count_scenarios("asts", {**BRIDGE, "basicShares": None}, parsed["scenarios"][:1]),
         "claims": [ss.share_count_scenarios("cohr", b, parsed["scenarios"][:1]) for b in CLAIM_BRIDGES],
+        "netShare": ss.share_count_scenarios("lite", NSS_BRIDGE, ss.parse_share_scenarios(NSS_SCENARIOS)["scenarios"]),
         "invalid": [ss.parse_share_scenarios(case) for case in INVALID],
         "schedule": schedule,
         "emptySchedule": fs.funding_capex_schedule(ticker="none", period_end=None, source=None, facts=[], statements=[], balances=None,
@@ -174,6 +189,7 @@ const out = {
   scenarios: ss.shareCountScenarios("asts", f.bridge, parsed.scenarios),
   noBasic: ss.shareCountScenarios("asts", { ...f.bridge, basicShares: null }, parsed.scenarios.slice(0, 1)),
   claims: f.claimBridges.map((b) => ss.shareCountScenarios("cohr", b, parsed.scenarios.slice(0, 1))),
+  netShare: ss.shareCountScenarios("lite", f.nssBridge, ss.parseShareScenarios(f.nssScenarios).scenarios),
   invalid: f.invalid.map((c) => ss.parseShareScenarios(c)),
   schedule: fs.fundingCapexSchedule({ ticker: "asts", periodEnd: f.pe, source: { filingType: "10-Q" }, facts: f.facts, statements: f.statements,
     balances: { cashAndEquivalents: 2288253000, shortTermInvestments: null }, atmRemainingUsd: 400000000, atmEvidence: { kind: "remaining_capacity", amountUsd: 400000000 } }),
@@ -197,7 +213,8 @@ def _worker_outputs() -> dict:
             bundles.append(out.as_uri())
         fx = Path(tmp) / "fixtures.json"
         fx.write_text(json.dumps({"bridge": BRIDGE, "claimBridges": CLAIM_BRIDGES, "scenarios": SCENARIOS, "invalid": INVALID, "pe": PE, "facts": FACTS,
-                                  "statements": STATEMENTS, "timingCases": TIMING_CASES}), encoding="utf-8")
+                                  "statements": STATEMENTS, "timingCases": TIMING_CASES,
+                                  "nssBridge": NSS_BRIDGE, "nssScenarios": NSS_SCENARIOS}), encoding="utf-8")
         harness = Path(tmp) / "harness.mjs"
         harness.write_text(_HARNESS, encoding="utf-8")
         result = subprocess.run([node, str(harness), *bundles, str(fx)], check=True, capture_output=True, text=True, timeout=120)
@@ -289,6 +306,17 @@ class TestShareScenarios(unittest.TestCase):
         self.assertEqual((warrant["count"], warrant["included"], warrant["unresolvedReason"]), (None, False, "count not tagged"),
                          "a class vesting on untagged conditions is never counted as all 500,000")
         self.assertEqual(mrvl["completeness"], "EXCLUDES_UNRESOLVED_INSTRUMENTS")
+
+    def test_net_share_settlement_treatment(self) -> None:
+        out = self.out["netShare"]["scenarios"]
+        by = {s["name"]: {ln["instrument"]: ln for ln in s["instruments"]} for s in out}
+        # 20,000,000 if-converted less $1B / $80 = 7,500,000; the unstated note stays if-converted.
+        self.assertEqual(by["net-share"]["Notes due 2032"]["incrementalShares"], 7_500_000)
+        self.assertIn("net share settlement", by["net-share"]["Notes due 2032"]["method"])
+        self.assertEqual(by["net-share"]["Notes due 2030"]["incrementalShares"], 2_000_000)
+        self.assertIn("cash settlement of principal not stated", by["net-share"]["Notes due 2030"]["method"])
+        self.assertEqual(by["net-share-below"]["Notes due 2032"]["incrementalShares"], 0)
+        self.assertEqual(by["if-converted"]["Notes due 2032"]["incrementalShares"], 20_000_000)
 
     def test_validation(self) -> None:
         errors = [r.get("error") for r in self.out["invalid"]]
