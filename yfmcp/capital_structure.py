@@ -519,21 +519,72 @@ def _option_tranches(doc: IxDocument, at: str | None) -> list[dict]:
     return out
 
 
+def _award_axis_options(doc: IxDocument) -> dict | None:
+    """Options tagged only on award or plan axes, with no undimensioned total (AEHR tags its 316,000
+    outstanding options at $5.11 only under aehr:OutstandingOptionsStockOptionTransactionsMember on
+    AwardTypeAxis) (2.5.10). The latest date, on the fewest such axes, one entry per member."""
+    facts = [f for f in doc.facts if f.local == _OPTIONS_OUTSTANDING and f.value is not None and f.dims
+             and all(_AWARD_AXIS_RE.search(axis) for axis in f.dims)]
+    if not facts:
+        return None
+    date = max((f.period_end or "") for f in facts)
+    at_date = [f for f in facts if (f.period_end or "") == date]
+    fewest = min(len(f.dims) for f in at_date)
+    axes = "|".join(sorted(next(f for f in at_date if len(f.dims) == fewest).dims))
+    chosen = [f for f in at_date if "|".join(sorted(f.dims)) == axes]
+
+    def same(local: str, f: IxFact) -> IxFact | None:
+        return next((g for g in doc.facts if g.local == local and g.value is not None and g.period_end == f.period_end and _dims_key(g.dims) == _dims_key(f.dims)), None)
+
+    members = []
+    for f in chosen:
+        exercisable = same(_OPTIONS_EXERCISABLE, f)
+        members.append({"label": " / ".join(member_label(v) for v in f.dims.values()), "count": f.value,
+                        "strike": _picked(same(_OPTIONS_STRIKE, f)), "exercisable": exercisable.value if exercisable is not None else None})
+    return {"periodEnd": date, "members": members}
+
+
 def _options_component(sources: list[IxSource], price: float) -> dict | None:
-    found = _find_in_sources(sources, lambda doc: _total(doc, _OPTIONS_OUTSTANDING))
+    def find(doc: IxDocument):
+        plain = _total(doc, _OPTIONS_OUTSTANDING)
+        if plain:
+            return {"plain": plain, "axis": None}
+        axis = _award_axis_options(doc)
+        return {"plain": None, "axis": axis} if axis else None
+
+    found = _find_in_sources(sources, find)
     if not found:
         return None
-    outstanding, source = found
-    strike = _total(source.doc, _OPTIONS_STRIKE, outstanding["periodEnd"])
-    exercisable = _total(source.doc, _OPTIONS_EXERCISABLE, outstanding["periodEnd"])
-    tranches = _option_tranches(source.doc, outstanding["periodEnd"])
+    hit, source = found
+    plain, axis = hit["plain"], hit["axis"]
+    members = axis["members"] if axis else []
+    period_end = plain["periodEnd"] if plain else axis["periodEnd"]
+    outstanding_count = plain["value"] if plain else sum(m["count"] for m in members)
+    strike = _total(source.doc, _OPTIONS_STRIKE, period_end) if plain else (members[0]["strike"] if len(members) == 1 else None)
+    if plain:
+        ex = _total(source.doc, _OPTIONS_EXERCISABLE, period_end)
+        exercisable = ex["value"] if ex else None
+    else:
+        exercisable = sum(m["exercisable"] for m in members) if all(m["exercisable"] is not None for m in members) else None
+    # Several members, each with its own strike, are priced like exercise-price ranges.
+    if plain:
+        tranches = _option_tranches(source.doc, period_end)
+    elif len(members) > 1 and all(m["strike"] for m in members):
+        tranches = [{"count": m["count"], "strike": m["strike"]["value"], "label": m["label"]} for m in members]
+    else:
+        tranches = []
+    unit = strike["unit"] if strike else next((m["strike"]["unit"] for m in members if m["strike"]), None)
+    outstanding = {"value": outstanding_count}
     out: dict = {
         "component": "stock_options",
-        "outstanding": outstanding["value"],
-        "exercisable": exercisable["value"] if exercisable else None,
+        "outstanding": outstanding_count,
+        "exercisable": exercisable,
         "weightedAverageExercisePrice": strike["value"] if strike else None,
-        "strikeUnit": strike["unit"] if strike else None,
-        "source": _source_ref(source, outstanding["periodEnd"]),
+        "strikeUnit": unit,
+        **({"countBasis": "award_axis_members", "members": [
+            {"member": m["label"], "outstanding": m["count"], "weightedAverageExercisePrice": m["strike"]["value"] if m["strike"] else None,
+             "exercisable": m["exercisable"]} for m in members]} if axis else {}),
+        "source": _source_ref(source, period_end),
     }
     if tranches:
         inc = sum(_treasury_stock(t["count"], t["strike"], price) for t in tranches)
@@ -674,6 +725,28 @@ _WARRANT_VESTED_RE = re.compile(r"^ClassOfWarrantOrRight\w*Vested(?:Number)?$")
 _WARRANT_VESTING_TERM = "WarrantsAndRightsOutstandingVestingTerm"
 
 
+# A warrant's expiry: a tagged maturity or expiration date closes a class that expired before the
+# period end; a tagged term from a count dated before the period end that has since elapsed is flagged
+# (the term can run from a later exercisability date, so it never closes a class) (2.5.10).
+_WARRANT_EXPIRY_RE = re.compile(r"^(?:WarrantsAndRightsOutstandingMaturityDate|ClassOfWarrant\w*Expir\w*Date|Warrant\w*Expir\w*Date)$")
+_WARRANT_TERM = "WarrantsAndRightsOutstandingTerm"
+_TERM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+
+
+def term_years(text: str | None) -> int | None:
+    """Whole years in a tagged term: "P5Y", "5 years", "five years"; None when it is not whole years."""
+    if not text:
+        return None
+    t = _collapse(text).lower()
+    iso = re.fullmatch(r"p(\d+)y", t)
+    if iso:
+        return int(iso.group(1))
+    m = re.fullmatch(r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten)(?:\s*|-)years?", t)
+    if not m:
+        return None
+    return int(m.group(1)) if m.group(1).isdigit() else _TERM_WORDS[m.group(1)]
+
+
 def _after_period_end(doc: IxDocument, f: IxFact) -> bool:
     """A count dated after the report's period end, or tagged as a subsequent event: not a period-end instrument."""
     end = doc.document_period_end
@@ -786,8 +859,16 @@ def _warrants_component(sources: list[IxSource], price: float) -> dict | None:
     facts, source = found
     unvested_facts = [g for g in source.doc.facts if _WARRANT_UNVESTED_RE.search(g.local) and _is_share_count(g)]
     vested_facts = [g for g in source.doc.facts if _WARRANT_VESTED_RE.search(g.local) and g.value is not None and not _after_period_end(source.doc, g)]
+    doc_end = source.doc.document_period_end
+
+    def expiry_of(f: IxFact) -> str | None:
+        hit = _newest([g for g in source.doc.facts if _WARRANT_EXPIRY_RE.search(g.local) and g.text is not None and _dims_key(g.dims) == _dims_key(f.dims)])
+        return normalize_ix_date(hit.text if hit else None)
+
+    expired = [f for f in facts if (lambda e: e is not None and doc_end is not None and e < doc_end)(expiry_of(f))]
+    live = [f for f in facts if f not in expired]
     classes = []
-    for f in facts:
+    for f in live:
         strike = _newest([g for g in source.doc.facts if g.local == _WARRANT_STRIKE and g.value is not None and _dims_key(g.dims) == _dims_key(f.dims)])
         label = " / ".join(member_label(v) for v in f.dims.values()) if f.dims else "Warrants (not itemized)"
         # Only vested warrant shares can be exercised now; the rest count in the gross total.
@@ -807,6 +888,10 @@ def _warrants_component(sources: list[IxSource], price: float) -> dict | None:
         else:
             exercisable, exercisable_basis = f.value, "no_vesting_terms_tagged"
         period_end = source.doc.document_period_end
+        expiry = expiry_of(f)
+        term_hit = _newest([g for g in source.doc.facts if g.local == _WARRANT_TERM and _dims_key(g.dims) == _dims_key(f.dims)])
+        years = term_years(term_hit.text if term_hit else None)
+        term_end = _add_years(f.period_end, years) if years is not None and f.period_end else None
         classes.append({
             "class": label,
             "concept": f.name,
@@ -814,6 +899,10 @@ def _warrants_component(sources: list[IxSource], price: float) -> dict | None:
             "asOf": f.period_end,
             # Tagged at an earlier date (an issuance) and not restated at the period end.
             "countBeforePeriodEnd": period_end is not None and f.period_end is not None and f.period_end < period_end,
+            "expirationDate": expiry,
+            # A term counted from the tagged date that ended before the period end: possibly expired unexercised.
+            **({"termElapsedBy": term_end} if expiry is None and term_end is not None and period_end is not None and f.period_end < period_end
+               and term_end < period_end else {}),
             "unvested": max(0, f.value - vested.value) if vested is not None else unvested.value if unvested is not None else None,
             "unvestedAsOf": vested.period_end if vested is not None else unvested.period_end if unvested is not None else None,
             "exercisable": exercisable,
@@ -830,8 +919,10 @@ def _warrants_component(sources: list[IxSource], price: float) -> dict | None:
         "component": "warrants",
         "outstanding": sum((c["outstanding"] or 0) for c in classes),
         "classes": classes,
+        **({"expiredClasses": [{"class": " / ".join(member_label(v) for v in f.dims.values()) if f.dims else "Warrants (not itemized)",
+                                "count": f.value, "asOf": f.period_end, "expirationDate": expiry_of(f)} for f in expired]} if expired else {}),
         "method": "treasury_stock_per_class_on_vested",
-        "incrementalShares": None if unresolved == len(classes) else sum((c["incrementalShares"] or 0) for c in classes),
+        "incrementalShares": 0 if not classes else None if unresolved == len(classes) else sum((c["incrementalShares"] or 0) for c in classes),
         "unresolvedClasses": unresolved,
         "source": _source_ref(source, facts[0].period_end),
     }
@@ -939,6 +1030,23 @@ def _instrument_value(group: _DebtGroup, locals_: list[str], at: str) -> dict | 
     return None
 
 
+def normalized_ratio(ratio: float | None, conv_price: float | None) -> dict:
+    """A tagged conversion ratio in shares per $1,000 of principal. Some filers tag it per $1 (LITE's
+    0.0076319 against a $131.03 price is 7.6319 per $1,000): a ratio whose product with the conversion
+    price is ~1 is scaled by 1,000 (RATIO_PER_1_PRINCIPAL_SCALED). One that agrees with neither scale is
+    not the conversion rate (RATIO_INCONSISTENT_WITH_PRICE); without a price, a ratio below 1 has no
+    provable unit (RATIO_UNIT_UNCERTAIN). The tagged value stays visible (2.5.10)."""
+    if ratio is None or not ratio > 0:
+        return {"per1000": None, "usable": False, "note": None}
+    if conv_price is not None:
+        if abs(ratio * conv_price / 1000 - 1) <= _RATIO_PRICE_TOLERANCE:
+            return {"per1000": ratio, "usable": True, "note": None}
+        if abs(ratio * conv_price - 1) <= _RATIO_PRICE_TOLERANCE:
+            return {"per1000": round_half_up(ratio * 1000, 6), "usable": True, "note": "RATIO_PER_1_PRINCIPAL_SCALED"}
+        return {"per1000": ratio, "usable": False, "note": "RATIO_INCONSISTENT_WITH_PRICE"}
+    return {"per1000": ratio, "usable": True, "note": None} if ratio >= 1 else {"per1000": None, "usable": False, "note": "RATIO_UNIT_UNCERTAIN"}
+
+
 def _convertibles_component(sources: list[IxSource], price: float) -> dict | None:
     def find(doc: IxDocument):
         groups = [g for g in _debt_groups(doc) if _group_value(g, [_CONVERSION_PRICE, _CONVERSION_RATIO]) is not None]
@@ -967,9 +1075,8 @@ def _convertibles_component(sources: list[IxSource], price: float) -> dict | Non
         issuable = _instrument_value(g, _SHARES_ISSUABLE_CONCEPTS, end) if end and g.member else None
         conv_price = _group_value(g, [_CONVERSION_PRICE])
         ratio = _group_value(g, [_CONVERSION_RATIO])
-        ratio_consistent = (ratio is not None and ratio["value"] > 0
-                            and (conv_price is None or abs(ratio["value"] * conv_price["value"] / 1000 - 1) <= _RATIO_PRICE_TOLERANCE))
-        usable_ratio = ratio if ratio_consistent else None
+        norm = normalized_ratio(ratio["value"] if ratio else None, conv_price["value"] if conv_price else None)
+        usable_ratio = {**ratio, "value": norm["per1000"]} if norm["usable"] else None
         implied = conv_price["value"] if conv_price else (1000 / usable_ratio["value"] if usable_ratio else None)
         shares = None
         basis = None
@@ -994,11 +1101,12 @@ def _convertibles_component(sources: list[IxSource], price: float) -> dict | Non
             "principalBasis": "outstanding_at_period_end" if current else ("face_amount" if face_tagged else ("tagged_amount_fallback" if face else None)),
             "conversionPrice": conv_price["value"] if conv_price else (round_half_up(implied, 4) if implied is not None else None),
             "conversionPriceBasis": "tagged" if conv_price else ("1000 / conversion_ratio" if implied is not None else None),
-            "conversionRatioPer1000": ratio["value"] if ratio else None,
+            "conversionRatioPer1000": norm["per1000"],
+            "conversionRatioTagged": ratio["value"] if ratio else None,
             "conversionRatioUsed": usable_ratio is not None and not issuable,
         }
-        if ratio and not ratio_consistent:
-            inst["conversionRatioNote"] = "RATIO_INCONSISTENT_WITH_PRICE"
+        if norm["note"]:
+            inst["conversionRatioNote"] = norm["note"]
         inst.update({
             "maturityDate": normalize_ix_date(_group_text(g, "DebtInstrumentMaturityDate")),
             "ifConvertedShares": round_half_up(shares) if shares is not None else None,
@@ -1033,9 +1141,41 @@ def _convertibles_component(sources: list[IxSource], price: float) -> dict | Non
 
 _PREFERRED_SHARES_ISSUABLE = "PreferredStockConvertibleSharesIssuable"
 _PREFERRED_CONVERSION_PRICE = "PreferredStockConvertibleConversionPrice"
+_PREFERRED_LIQUIDATION_AGGREGATE = ("PreferredStockLiquidationPreferenceValue", "TemporaryEquityLiquidationPreference")
+_PREFERRED_LIQUIDATION_PER_SHARE = ("PreferredStockLiquidationPreference", "TemporaryEquityLiquidationPreferencePerShare")
+_PREFERRED_DIVIDEND_RATE = ("PreferredStockDividendRatePercentage",)
 
 
-def _convertible_preferred_component(sources: list[IxSource], price: float) -> dict | None:
+# A preferred conversion the filing states in words, in two exact forms only (2.5.10): a per-share
+# ratio ("The Preferred Stock will convert on a one-for-one basis into shares of our common stock",
+# LITE; "each share of Preferred Stock is convertible into 10 shares of common stock") or an aggregate
+# ("convertible in the aggregate into a maximum of approximately 21.8 million shares of our common stock").
+_PREF_ONE_FOR_ONE_RE = re.compile(r"\bpreferred stock\b[^.]{0,120}\bconvert(?:s|ible)?\b[^.]{0,40}\bon a one[- ]for[- ]one basis\b", _F)
+_PREF_PER_SHARE_RE = re.compile(r"\beach share of (?:the |our )?(?:series [a-z0-9-]+ )?(?:convertible )?preferred stock\b[^.]{0,80}\bconvertible into ([0-9][0-9,]*(?:\.[0-9]+)?) shares of (?:our |the company['’]s )?common stock\b", _F)
+_PREF_AGGREGATE_RE = re.compile(r"\bpreferred stock\b[^.]{0,120}\bconvertible in the aggregate into (?:a maximum of )?(?:approximately )?([0-9][0-9,]*(?:\.[0-9]+)?)( million)? shares of (?:our |the company['’]s )?common stock\b", _F)
+
+
+def preferred_conversion_terms(matches: list[TextMatch]) -> dict | None:
+    """The first stated preferred conversion in filing text, quoted."""
+    for match in matches:
+        for sentence in (x.strip() for x in _CLAIM_SENTENCE_SPLIT_RE.split(_collapse(match.context_text))):
+            one = _PREF_ONE_FOR_ONE_RE.search(sentence)
+            per = _PREF_PER_SHARE_RE.search(sentence)
+            agg = _PREF_AGGREGATE_RE.search(sentence)
+            if not one and not per and not agg:
+                continue
+            aggregate = float(agg.group(1).replace(",", "")) * (1_000_000 if agg.group(2) else 1) if agg else None
+            return {
+                "ratio": 1 if one else float(per.group(1).replace(",", "")) if per else None,
+                "aggregateShares": round_half_up(aggregate) if aggregate is not None else None,
+                "approximate": agg is not None and re.search(r"approximately", agg.group(0), re.I) is not None,
+                "sentence": sentence[:600],
+                "documentUrl": match.document_url,
+            }
+    return None
+
+
+def _convertible_preferred_component(sources: list[IxSource], price: float, stated: dict | None = None) -> dict | None:
     """Convertible preferred outstanding at the period end, if-converted when in the money: the tagged
     common shares issuable on conversion and the conversion price. MRVL's Series A (2.0M preferred
     shares, issued to NVIDIA) converts into up to 21.8M common shares at $91.84."""
@@ -1045,35 +1185,72 @@ def _convertible_preferred_component(sources: list[IxSource], price: float) -> d
             return None
         outstanding = [f for f in doc.facts if f.local in _PREFERRED_OUTSTANDING_CONCEPTS and f.value is not None and f.period_end == end
                        and not any(re.search(r"StatementEquityComponentsAxis$", axis) for axis in f.dims)]
-        plain = [f for f in outstanding if not f.dims]
-        shares = sum(f.value for f in (plain or outstanding))
+        # The same shares can be tagged under both concepts (LITE: 2.9M preferred and 2.9M temporary
+        # equity): the larger concept count, never their sum.
+        per_concept = []
+        for c in _PREFERRED_OUTSTANDING_CONCEPTS:
+            facts = [f for f in outstanding if f.local == c]
+            plain = [f for f in facts if not f.dims]
+            per_concept.append(sum(f.value for f in (plain or facts)))
+        shares = max(per_concept)
         if not shares > 0:
             return None
         issuable = _newest([f for f in doc.facts if f.local == _PREFERRED_SHARES_ISSUABLE and f.value is not None and not _after_period_end(doc, f)])
         conv = _newest([f for f in doc.facts if f.local == _PREFERRED_CONVERSION_PRICE and f.value is not None and not _after_period_end(doc, f)])
-        if issuable is None and conv is None:
+        if issuable is None and conv is None and stated is None:
             return None
-        return {"shares": shares, "asOf": end, "issuable": issuable, "conv": conv}
+
+        # Preferred economics as tagged (2.5.10): the liquidation preference, aggregate or per share, and the dividend rate.
+        def tagged(locals_: tuple[str, ...]) -> IxFact | None:
+            return _newest([f for f in doc.facts if f.local in locals_ and f.value is not None and not _after_period_end(doc, f)
+                            and not any(re.search(r"StatementEquityComponentsAxis$", axis) for axis in f.dims)])
+
+        return {"shares": shares, "asOf": end, "issuable": issuable, "conv": conv, "liqAggregate": tagged(_PREFERRED_LIQUIDATION_AGGREGATE),
+                "liqPerShare": tagged(_PREFERRED_LIQUIDATION_PER_SHARE), "dividend": tagged(_PREFERRED_DIVIDEND_RATE)}
 
     found = _find_in_sources(sources, find)
     if not found:
         return None
     v, source = found
     conv_price = v["conv"].value if v["conv"] is not None else None
-    if_converted = v["issuable"].value if v["issuable"] is not None else None
+    # Tags first; else the conversion the filing states in words (quoted in statedConversion).
+    from_text = v["issuable"] is None and stated is not None
+    if v["issuable"] is not None:
+        if_converted, basis = v["issuable"].value, "shares_issuable_tagged"
+    elif stated is not None and stated["ratio"] is not None:
+        if_converted, basis = round_half_up(v["shares"] * stated["ratio"]), "ratio_stated_in_text"
+    elif stated is not None and stated["aggregateShares"] is not None:
+        if_converted, basis = stated["aggregateShares"], "aggregate_stated_in_text"
+    else:
+        if_converted, basis = None, None
+    # A per-share ratio with no conversion price converts without payment: the preferred is
+    # common-equivalent at any price (LITE's one-for-one Series A participates as converted).
+    as_converted = conv_price is None and basis == "ratio_stated_in_text"
     in_the_money = price >= conv_price if conv_price is not None else None
+    if if_converted is None:
+        incremental = None
+    elif as_converted:
+        incremental = round_half_up(if_converted)
+    else:
+        incremental = None if in_the_money is None else round_half_up(if_converted) if in_the_money else 0
     instrument = {
         "instrument": "Convertible preferred stock",
         "preferredSharesOutstanding": v["shares"],
         "asOf": v["asOf"],
         "ifConvertedShares": if_converted,
-        "ifConvertedBasis": "shares_issuable_tagged" if if_converted is not None else None,
+        "ifConvertedBasis": basis,
         "sharesIssuableDate": v["issuable"].period_end if v["issuable"] is not None else None,
         # The issuable count was tagged at issuance and not restated at the period end.
         "countBeforePeriodEnd": v["issuable"] is not None and v["issuable"].period_end is not None and v["issuable"].period_end < v["asOf"],
         "conversionPrice": conv_price,
         "inTheMoney": in_the_money,
-        "incrementalShares": None if if_converted is None or in_the_money is None else round_half_up(if_converted) if in_the_money else 0,
+        "incrementalShares": incremental,
+        "liquidationPreference": ({"amount": v["liqAggregate"].value, "basis": "aggregate_tagged", "asOf": v["liqAggregate"].period_end} if v["liqAggregate"] is not None
+                                  else {"amount": round_half_up(v["liqPerShare"].value * v["shares"], 2), "basis": "per_share_tagged_x_shares_outstanding",
+                                        "perShare": v["liqPerShare"].value, "asOf": v["liqPerShare"].period_end} if v["liqPerShare"] is not None else None),
+        "dividendRatePct": round_half_up(v["dividend"].value * 100, 4) if v["dividend"] is not None else None,
+        **({"statedConversion": {k: stated[k] for k in ("ratio", "aggregateShares", "approximate", "sentence", "documentUrl")}} if from_text else {}),
+        **({"method": "as_converted_no_conversion_price"} if as_converted else {}),
     }
     return {
         "component": "convertible_preferred",
@@ -1083,7 +1260,7 @@ def _convertible_preferred_component(sources: list[IxSource], price: float) -> d
         "incrementalShares": instrument["incrementalShares"],
         "unresolvedInstruments": 1 if instrument["incrementalShares"] is None else 0,
         "note": ("Common shares issuable on conversion as tagged (often the maximum at issuance) and the tagged conversion price; if-converted when "
-                 "the price is at or above it. Liquidation preference, dividends and redemption are not modeled."),
+                 "the price is at or above it. The liquidation preference and dividend rate are reported as tagged; redemption is not modeled."),
         "source": _source_ref(source, v["asOf"]),
     }
 
@@ -1193,6 +1370,9 @@ SHARE_CLAIM_SEARCH_TERMS = [
     "price protection", "anti-dilution", "antidilution", "forward sale agreement", "earnout shares", "earn-out shares",
     "contingent consideration", "contingently issuable", "convertible preferred",
     "subsequent to quarter end", "subsequent to year end", "subsequent to the end of the quarter",
+    "one-for-one basis", "convertible in the aggregate",
+    "exchangeable for shares", "exchangeable into shares", "redeemable for shares of", "simple agreement for future equity",
+    "payable in shares", "settled in shares", "standby equity purchase agreement", "equity line of credit", "committed equity facility",
 ]
 _SHARE_CLAIM_KINDS = [
     ("PRICE_PROTECTION", re.compile(r"\bprice[- ]protection\b", _F)),
@@ -1200,6 +1380,11 @@ _SHARE_CLAIM_KINDS = [
     ("FORWARD_SALE", re.compile(r"\bforward (?:sale|equity sale) agreements?\b", _F)),
     ("CONTINGENT_SHARES", re.compile(r"\bearn-?out shares\b|\bcontingently issuable (?:shares|common stock)\b|\bcontingent consideration\b[^.]{0,120}\b(?:in|of) (?:shares|common stock)\b", _F)),
     ("CONVERTIBLE_PREFERRED", re.compile(r"\bconvertible preferred (?:stock|shares)\b", _F)),
+    # Up-C units or exchangeable shares (2.5.10).
+    ("EXCHANGEABLE_INTERESTS", re.compile(r"\b(?:units?|interests?|shares|stock)\b[^.]{0,100}\b(?:exchangeable|redeemable) (?:for|into) (?:an equal number of )?(?:newly[- ]issued )?(?:shares of )?(?:our |the company['’]s )?(?:class [a-z] )?common stock\b", _F)),
+    ("SAFE", re.compile(r"\bsimple agreements? for future equity\b|\bSAFEs?\b")),
+    ("SHARE_SETTLED_OBLIGATION", re.compile(r"\b(?:payable|settled|settleable|issuable)\b[^.]{0,30}\bin (?:shares of )?(?:our |the company['’]s )?(?:class [a-z] )?common stock\b", _F)),
+    ("EQUITY_LINE", re.compile(r"\b(?:standby equity purchase agreement|equity line of credit|committed equity facility|equity purchase facility)\b", _F)),
     ("WARRANT_AFTER_PERIOD_END", re.compile(r"\bsubsequent to (?:the )?(?:quarter|year|period)[- ]end\b[^.]{0,200}\bwarrants?\b|\bsubsequent to the end of the (?:quarter|year|period)\b[^.]{0,200}\bwarrants?\b", _F)),
 ]
 # A customer or distributor price-protection term is a revenue reduction, not a
@@ -1208,6 +1393,8 @@ _REVENUE_TERM_RE = re.compile(r"\b(?:distributors?|customers?|revenues?|variable
 # Anti-dilution adjustments of a warrant's or note's own terms belong to an
 # instrument the bridge already reads.
 _INSTRUMENT_TERM_RE = re.compile(r"\b(?:warrants?|convertible (?:senior )?notes?|conversion (?:rate|price)|exercise price|debentures?)\b", _F)
+_AWARD_OR_NOTE_RE = re.compile(r"\b(?:restricted stock|RSUs?|PSUs?|awards?|stock options?|employees?|compensation|ESPP|dividend reinvestment|convertible|notes|debentures?|warrants?)\b", _F)
+_PRESENT_OR_FUTURE_RE = re.compile(r"\b(?:is|are|may|will|would|can|could|remain|remains)\b", _F)
 _EQUITY_TERM_RE = re.compile(r"\b(?:shares?|stock|equity|securities purchase agreement|purchase agreement|investors?|stockholders?|shareholders?)\b", _F)
 _EXTINGUISHED_RE = re.compile(r"\bwere (?:all )?converted\b|\bno shares of\b[^.]{0,120}\b(?:are|were|remain)\b[^.]{0,30}\boutstanding\b|\b(?:was|were) redeemed in full\b|\b(?:expired|terminated) (?:unexercised|without)\b", _F)
 # Sentence breaks, except after an initialism such as "U.S." ("applicable U.S. GAAP").
@@ -1237,6 +1424,9 @@ def share_claim_signals(matches: list[TextMatch]) -> list[dict]:
             if kind == "PRICE_PROTECTION" and _REVENUE_TERM_RE.search(sentence):
                 continue
             if kind == "ANTI_DILUTION_RIGHT" and _INSTRUMENT_TERM_RE.search(sentence):
+                continue
+            # Awards, notes and dividends settled in shares belong elsewhere; a claim is present or future, not past.
+            if kind in ("SHARE_SETTLED_OBLIGATION", "EXCHANGEABLE_INTERESTS") and (_AWARD_OR_NOTE_RE.search(sentence) or not _PRESENT_OR_FUTURE_RE.search(sentence)):
                 continue
             lead_in = " ".join(items[max(0, i - 2):i])
             if not _EQUITY_TERM_RE.search(f"{lead_in} {sentence}"):
@@ -1371,7 +1561,7 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
     awards = _awards_component(sources, award_table_matches or [])
     warrants = _warrants_component(sources, price)
     convertibles = _convertibles_component(sources, price)
-    preferred = _convertible_preferred_component(sources, price)
+    preferred = _convertible_preferred_component(sources, price, preferred_conversion_terms(claim_matches) if claim_matches is not None else None)
     atm = _atm_component(atm_evidence(atm_matches), price)
     components = [c for c in (options, awards, warrants, convertibles, preferred) if c is not None]
     not_disclosed = [name for name, c in (
@@ -1448,6 +1638,17 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
                         "they are quoted in unquantifiedShareClaims and are not in any share count."),
             "severity": "warning",
         })
+    expired_classes = (warrants or {}).get("expiredClasses") or []
+    if expired_classes:
+        listed = "; ".join(f"{c['class']} ({_js_number(c['count'])}, expired {c['expirationDate']})" for c in expired_classes)
+        warnings.append({"code": "WARRANT_EXPIRED_BEFORE_PERIOD_END", "message": (
+            f"{listed} expired before the period end by their tagged expiration date and are not counted."), "severity": "info"})
+    elapsed = [c for c in ((warrants or {}).get("classes") or []) if c.get("termElapsedBy") is not None]
+    if elapsed:
+        listed = "; ".join(f"{c['class']} ({_js_number(c['outstanding'])} as of {c['asOf']}, term through {c['termElapsedBy']})" for c in elapsed)
+        warnings.append({"code": "WARRANT_TERM_ELAPSED", "message": (
+            f"{listed}: the tagged term, counted from the tagged date, ended before the period end. They may have expired unexercised; they are still "
+            "counted until the filing says otherwise."), "severity": "warning"})
     vesting_unknown = [c for c in ((warrants or {}).get("classes") or []) if c.get("exercisableBasis") == "vesting_terms_without_vested_count"]
     if vesting_unknown:
         warnings.append({"code": "WARRANT_VESTING_NOT_TAGGED", "message": (
@@ -1455,8 +1656,7 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
             f"shares are unresolved, not assumed to be all {', '.join(_js_number(c['outstanding']) for c in vesting_unknown)}."), "severity": "warning"})
     if not claims_read:
         warnings.append({"code": "SHARE_CLAIM_TEXT_NOT_READ", "message": (
-            "The filing text was not read for untagged share claims (price protection, anti-dilution rights, forward sales, contingent shares, "
-            "convertible preferred); retry."), "severity": "warning"})
+            "The filing text was not read for untagged share claims (the kinds in claimCoverage.textScanKinds); retry."), "severity": "warning"})
     if all(not s.doc.facts for s in sources):
         warnings.append({"code": "NO_INLINE_XBRL", "message": "The filing carries no inline XBRL facts; the bridge needs tagged share and instrument counts.", "severity": "warning"})
 
@@ -1726,7 +1926,8 @@ def _instruments(doc: IxDocument, period_end: str | None) -> list[dict]:
             "maturityDate": maturity,
             "convertible": conv_price is not None or ratio is not None,
             "conversionPrice": conv_price["value"] if conv_price else None,
-            "conversionRatioPer1000": ratio["value"] if ratio else None,
+            "conversionRatioPer1000": normalized_ratio(ratio["value"] if ratio else None, conv_price["value"] if conv_price else None)["per1000"],
+            "conversionRatioTagged": ratio["value"] if ratio else None,
             "latestFactDate": latest or None,
             "status": status,
         })

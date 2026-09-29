@@ -339,12 +339,22 @@ export function valuationSnapshot(input: SnapshotInput): Record<string, unknown>
     if ((num(inst.incrementalShares) ?? 0) > 0) convertibleAdjustment += num(inst.principal) ?? 0;
   }
   if (debt != null) convertibleAdjustment = Math.min(convertibleAdjustment, debt);
+  // Convertible preferred the bridge does not count as shares at this price is a senior claim: its
+  // tagged liquidation preference joins enterprise value; without one it is left out and said so (2.5.10).
+  let preferredAdjustment = 0;
+  const preferredInstruments = (((bridge?.components ?? []) as Record<string, unknown>[]).find((c) => c.component === "convertible_preferred")?.instruments ?? []) as Record<string, unknown>[];
+  for (const inst of secUsable ? preferredInstruments : []) {
+    if ((num(inst.incrementalShares) ?? 0) > 0) continue;
+    const liq = num((inst.liquidationPreference as Record<string, unknown> | null)?.amount);
+    if (liq != null) preferredAdjustment += liq;
+    else warnings.push({ code: "PREFERRED_NOT_IN_ENTERPRISE_VALUE", message: `Convertible preferred (${inst.preferredSharesOutstanding} shares) is not counted as shares at this price and no liquidation preference is tagged, so enterprise value leaves it out.`, severity: "warning" });
+  }
 
   const equityValue = valueShares != null ? major.price * valueShares : null;
   // Yahoo's balances are in the financial currency; never add them to equity in another.
   const balancesComparable = secBalances || comparable;
   const enterpriseValue = equityValue != null && debt != null && cash != null && balancesComparable
-    ? equityValue + debt - convertibleAdjustment - cash - shortTerm
+    ? equityValue + debt - convertibleAdjustment + preferredAdjustment - cash - shortTerm
     : null;
   if (!balancesComparable) {
     warnings.push({ code: "ENTERPRISE_VALUE_CURRENCY_MISMATCH", message: `Cash and debt are in ${market.financialCurrency} and the quote is in ${major.currency}; enterprise value is not computed without an exchange rate.`, severity: "warning" });
@@ -395,12 +405,13 @@ export function valuationSnapshot(input: SnapshotInput): Record<string, unknown>
       shortTermInvestments: secBalances ? shortTerm : null,
       totalDebt: debt,
       convertibleDebtCountedAsShares: round(convertibleAdjustment),
+      preferredLiquidationPreferenceInEv: round(preferredAdjustment),
       basis: balanceBasis,
       periodEnd: secBalances ? (capital?.periodEnd ?? null) : null,
     },
     equityValue: equityValue != null ? round(equityValue) : null,
     enterpriseValue: enterpriseValue != null ? round(enterpriseValue) : null,
-    enterpriseValueFormula: "price x diluted shares + total debt - convertible debt counted as shares - cash - short-term investments",
+    enterpriseValueFormula: "price x diluted shares + total debt - convertible debt counted as shares + preferred liquidation preference not counted as shares - cash - short-term investments",
     peerComparableBasis: { ...yahoo, note: "Price x Yahoo shares (the implied all-class count when larger) + Yahoo total debt - Yahoo total cash: the basis compare_peer_valuations uses for every peer." },
     multiples: multiples(enterpriseValue, major.price, market, comparable),
     revenueGrowth: growth(market),

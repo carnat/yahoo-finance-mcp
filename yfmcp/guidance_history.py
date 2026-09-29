@@ -148,8 +148,21 @@ def period_for_excerpt(text: str, at: int, length: int) -> dict:
     in_sentence = guidance_target_period(text[start:end], at + length - start)
     if in_sentence["basis"] != "NOT_STATED":
         return {**in_sentence, "scope": "SENTENCE"}
+    # The nearest guidance or outlook heading above, read whole: a fixed look-back can cut "third
+    # quarter of fiscal 2027" to "fiscal 2027" (NVDA), and bullets can sit far below it (MRVL) (2.5.10).
+    # Nearest mention first; one that names no period ("... in its outlook") gives way to the next.
+    base = max(0, at - _HEADING_LOOKBACK)
+    for heading in reversed([base + m.start() for m in _HEADING_WORD_RE.finditer(text[base:at])]):
+        start_h = max(0, heading - 100)
+        from_heading = guidance_target_period(text[start_h:min(at, heading + 100)], heading - start_h)
+        if from_heading["basis"] != "NOT_STATED":
+            return {**from_heading, "scope": "GUIDANCE_MENTION"}
     preceding = guidance_target_period(text[max(0, at - 200): at + length])
     return {**preceding, "scope": None if preceding["basis"] == "NOT_STATED" else "PRECEDING_TEXT"}
+
+
+_HEADING_LOOKBACK = 1500
+_HEADING_WORD_RE = re.compile(r"\b(?:outlook|guidance)\b", _F)
 
 
 _WITHDRAWN_RE = re.compile(
@@ -174,7 +187,7 @@ def guidance_entries(release: dict) -> list[dict]:
     text = release.get("text")
     if release.get("status") != "READ" or not text:
         return []
-    ranges = guidance_ranges(text)
+    ranges = guidance_ranges(text, lambda at, n: period_for_excerpt(text, at, n).get("label"))
     out: list[dict] = []
     for metric in ("revenue", "grossMargin", "eps"):
         r = ranges.get(metric)

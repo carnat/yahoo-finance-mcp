@@ -100,6 +100,11 @@ CAPITAL_EUR = {"basis": "COMPANY_DISCLOSED", "periodEnd": "2025-03-31", "balance
 # An annual report behind Yahoo's latest quarter (TSEM/NBIS-like, 2.4.3).
 CAPITAL_STALE = {"basis": "COMPANY_DISCLOSED", "periodEnd": "2025-12-31", "balances": {"cashAndEquivalents": 140_000_000, "shortTermInvestments": None, "totalDebt": 380_000_000, "currency": "USD"}}
 # A 20-F filer counting ordinary shares while its ADR trades at 5 per ADS (TSM-like, 2.4.3).
+# 2.5.10: convertible preferred not converted at the price; with and without a tagged liquidation preference.
+_PREF = {"component": "convertible_preferred", "instruments": [{"preferredSharesOutstanding": 1_000_000, "ifConvertedShares": 5_000_000, "incrementalShares": 0,
+                                                              "liquidationPreference": {"amount": 100_000_000, "basis": "per_share_tagged_x_shares_outstanding"}}]}
+BRIDGE_PREF = {**BRIDGE, "components": BRIDGE["components"] + [_PREF]}
+BRIDGE_PREF_NO_LIQ = {**BRIDGE, "components": BRIDGE["components"] + [{**_PREF, "instruments": [{**_PREF["instruments"][0], "liquidationPreference": None}]}]}
 BRIDGE_ADR = {"status": "COMPUTED", "basicShares": {"shares": 25_000_000, "source": {"filingType": "20-F"}}, "bridge": {"dilutedSharesAtPrice": 25_000_000, "dilutionPctAtPrice": 0}}
 # A domestic filer twice Yahoo's count: not an ADR, so Yahoo's count is used.
 BRIDGE_DOMESTIC_2X = {"status": "COMPUTED", "basicShares": {"shares": 40_000_000, "source": {"filingType": "10-K"}}, "bridge": {"dilutedSharesAtPrice": 41_000_000, "dilutionPctAtPrice": 2.5}}
@@ -123,6 +128,8 @@ out.snapshotDebtFree = m.valuationSnapshot({ ticker: "CSTC", market: markets.CST
 out.snapshotShortfall = m.valuationSnapshot({ ticker: "SAMEQ", market: markets.SAMEQ, suppliedPrice: null, bridge: null, capital: data.capitalShortfall, secWarnings: [] });
 out.snapshotEur = m.valuationSnapshot({ ticker: "CSTC", market: markets.CSTC, suppliedPrice: null, bridge: null, capital: data.capitalEur, secWarnings: [] });
 out.snapshotStale = m.valuationSnapshot({ ticker: "STALE", market: markets.STALE, suppliedPrice: null, bridge: null, capital: data.capitalStale, secWarnings: [] });
+out.snapshotPref = m.valuationSnapshot({ ticker: "CSTC", market: markets.CSTC, suppliedPrice: null, bridge: data.bridgePref, capital: data.capital, secWarnings: [] });
+out.snapshotPrefNoLiq = m.valuationSnapshot({ ticker: "CSTC", market: markets.CSTC, suppliedPrice: null, bridge: data.bridgePrefNoLiq, capital: data.capital, secWarnings: [] });
 out.snapshotAdr = m.valuationSnapshot({ ticker: "ADRX", market: markets.ADRX, suppliedPrice: null, bridge: data.bridgeAdr, capital: null, secWarnings: [] });
 out.snapshotDomestic2x = m.valuationSnapshot({ ticker: "PEER1", market: markets.PEER1, suppliedPrice: null, bridge: data.bridgeDomestic2x, capital: null, secWarnings: [] });
 out.adrRow = m.peerRow(markets.ADRX);
@@ -154,7 +161,8 @@ def _worker_pure() -> dict:
         )
         (tmp_path / "data.json").write_text(json.dumps({"qs": QUOTE_SUMMARIES, "bridge": BRIDGE, "capital": CAPITAL, "capitalDebtFree": CAPITAL_DEBT_FREE, "capitalCashMismatch": CAPITAL_CASH_MISMATCH,
                                                                 "capitalShortfall": CAPITAL_SHORTFALL, "capitalEur": CAPITAL_EUR, "capitalStale": CAPITAL_STALE,
-                                                                "bridgeAdr": BRIDGE_ADR, "bridgeDomestic2x": BRIDGE_DOMESTIC_2X}), encoding="utf-8")
+                                                                "bridgeAdr": BRIDGE_ADR, "bridgeDomestic2x": BRIDGE_DOMESTIC_2X,
+                                                                "bridgePref": BRIDGE_PREF, "bridgePrefNoLiq": BRIDGE_PREF_NO_LIQ}), encoding="utf-8")
         (tmp_path / "harness.mjs").write_text(_WORKER_PURE, encoding="utf-8")
         result = subprocess.run([node, str(tmp_path / "harness.mjs"), bundle.as_uri(), str(tmp_path / "data.json")],
                                 check=True, capture_output=True, text=True, timeout=120)
@@ -171,6 +179,8 @@ def _python_pure() -> dict:
         "snapshotShortfall": vl.valuation_snapshot("SAMEQ", markets["SAMEQ"], None, None, copy.deepcopy(CAPITAL_SHORTFALL), []),
         "snapshotEur": vl.valuation_snapshot("CSTC", markets["CSTC"], None, None, copy.deepcopy(CAPITAL_EUR), []),
         "snapshotStale": vl.valuation_snapshot("STALE", markets["STALE"], None, None, copy.deepcopy(CAPITAL_STALE), []),
+        "snapshotPref": vl.valuation_snapshot("CSTC", markets["CSTC"], None, copy.deepcopy(BRIDGE_PREF), copy.deepcopy(CAPITAL), []),
+        "snapshotPrefNoLiq": vl.valuation_snapshot("CSTC", markets["CSTC"], None, copy.deepcopy(BRIDGE_PREF_NO_LIQ), copy.deepcopy(CAPITAL), []),
         "snapshotAdr": vl.valuation_snapshot("ADRX", markets["ADRX"], None, copy.deepcopy(BRIDGE_ADR), None, []),
         "snapshotDomestic2x": vl.valuation_snapshot("PEER1", markets["PEER1"], None, copy.deepcopy(BRIDGE_DOMESTIC_2X), None, []),
         "adrRow": vl.peer_row(markets["ADRX"]),
@@ -194,7 +204,7 @@ class TestValuationParity(unittest.TestCase):
         cls.local = _python_pure()
 
     def test_runtimes_agree(self) -> None:
-        for key in ("snapshotShortfall", "snapshotEur", "snapshotStale", "snapshotAdr", "snapshotDomestic2x", "adrRow", "adsRatios",
+        for key in ("snapshotShortfall", "snapshotEur", "snapshotStale", "snapshotAdr", "snapshotPref", "snapshotPrefNoLiq", "snapshotDomestic2x", "adrRow", "adsRatios",
                     "markets", "snapshot", "snapshotCashMismatch", "snapshotDebtFree", "snapshotYahoo", "snapshotPence", "upcRow", "peers"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
@@ -235,6 +245,14 @@ class TestValuationValues(unittest.TestCase):
         self.assertEqual((s["shares"]["claimScope"], s["shares"]["unquantifiedShareClaims"]), ("TAGGED_INSTRUMENTS", ["PRICE_PROTECTION"]))
         self.assertIn("UNQUANTIFIED_SHARE_CLAIMS", [w["code"] for w in s["warnings"]])
         self.assertEqual(s["peerComparableBasis"]["enterpriseValue"], 25 * 101_000_000 + 400_000_000 - 190_000_000)
+
+    def test_unconverted_preferred_joins_enterprise_value(self) -> None:
+        base, pref, no_liq = self.out["snapshot"], self.out["snapshotPref"], self.out["snapshotPrefNoLiq"]
+        # 2.5.10: out of the money, the preferred is a senior claim at its $100M liquidation preference.
+        self.assertEqual(pref["enterpriseValue"], base["enterpriseValue"] + 100_000_000)
+        self.assertEqual(pref["balances"]["preferredLiquidationPreferenceInEv"], 100_000_000)
+        self.assertEqual(no_liq["enterpriseValue"], base["enterpriseValue"])
+        self.assertIn("PREFERRED_NOT_IN_ENTERPRISE_VALUE", [w["code"] for w in no_liq["warnings"]])
 
     def test_filing_investments_above_yahoo_cash_are_flagged(self) -> None:
         s = self.out["snapshotCashMismatch"]

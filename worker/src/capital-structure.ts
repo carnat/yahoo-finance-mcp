@@ -476,20 +476,58 @@ function optionTranches(doc: IxDocument, at: string | null): { count: number; st
   return out;
 }
 
+/**
+ * Options tagged only on award or plan axes, with no undimensioned total (AEHR tags its 316,000
+ * outstanding options at $5.11 only under aehr:OutstandingOptionsStockOptionTransactionsMember on
+ * AwardTypeAxis) (2.5.10). The latest date, on the fewest such axes, one entry per member.
+ */
+function awardAxisOptions(doc: IxDocument): { periodEnd: string; members: { label: string; count: number; strike: Picked | null; exercisable: number | null }[] } | null {
+  const facts = doc.facts.filter((f) => f.local === OPTIONS_OUTSTANDING && f.value != null && hasDims(f)
+    && Object.keys(f.dims).every((axis) => AWARD_AXIS_RE.test(axis)));
+  if (facts.length === 0) return null;
+  const date = facts.reduce((best, f) => ((f.periodEnd ?? "") > best ? (f.periodEnd ?? "") : best), "");
+  const atDate = facts.filter((f) => (f.periodEnd ?? "") === date);
+  const fewest = atDate.reduce((min, f) => Math.min(min, Object.keys(f.dims).length), Infinity);
+  const axes = Object.keys(atDate.find((f) => Object.keys(f.dims).length === fewest)!.dims).sort().join("|");
+  const chosen = atDate.filter((f) => Object.keys(f.dims).sort().join("|") === axes);
+  const same = (local: string, f: IxFact) => doc.facts.find((g) => g.local === local && g.value != null && g.periodEnd === f.periodEnd && dimsKey(g.dims) === dimsKey(f.dims)) ?? null;
+  return {
+    periodEnd: date,
+    members: chosen.map((f) => ({
+      label: Object.values(f.dims).map(memberLabel).join(" / "),
+      count: f.value!,
+      strike: picked(same(OPTIONS_STRIKE, f)),
+      exercisable: same(OPTIONS_EXERCISABLE, f)?.value ?? null,
+    })),
+  };
+}
+
 function optionsComponent(sources: IxSource[], price: number): Record<string, unknown> | null {
-  const found = findInSources(sources, (doc) => total(doc, OPTIONS_OUTSTANDING));
+  const found = findInSources(sources, (doc) => {
+    const plain = total(doc, OPTIONS_OUTSTANDING);
+    if (plain) return { plain, axis: null };
+    const axis = awardAxisOptions(doc);
+    return axis ? { plain: null, axis } : null;
+  });
   if (!found) return null;
-  const { value: outstanding, source } = found;
-  const strike = total(source.doc, OPTIONS_STRIKE, outstanding.periodEnd);
-  const exercisable = total(source.doc, OPTIONS_EXERCISABLE, outstanding.periodEnd);
-  const tranches = optionTranches(source.doc, outstanding.periodEnd);
+  const { value: { plain, axis }, source } = found;
+  const members = axis ? axis.members : [];
+  const periodEnd = plain ? plain.periodEnd : axis!.periodEnd;
+  const outstanding = plain ? plain.value : members.reduce((sum, m) => sum + m.count, 0);
+  const strike = plain ? total(source.doc, OPTIONS_STRIKE, periodEnd) : members.length === 1 ? members[0].strike : null;
+  const exercisable = plain ? total(source.doc, OPTIONS_EXERCISABLE, periodEnd)?.value ?? null
+    : members.every((m) => m.exercisable != null) ? members.reduce((sum, m) => sum + m.exercisable!, 0) : null;
+  // Several members, each with its own strike, are priced like exercise-price ranges.
+  const tranches = plain ? optionTranches(source.doc, periodEnd)
+    : members.length > 1 && members.every((m) => m.strike) ? members.map((m) => ({ count: m.count, strike: m.strike!.value, label: m.label })) : [];
   const out: Record<string, unknown> = {
     component: "stock_options",
-    outstanding: outstanding.value,
-    exercisable: exercisable ? exercisable.value : null,
+    outstanding,
+    exercisable,
     weightedAverageExercisePrice: strike ? strike.value : null,
-    strikeUnit: strike ? strike.unit : null,
-    source: sourceRef(source, outstanding.periodEnd),
+    strikeUnit: strike ? strike.unit : (members.find((m) => m.strike)?.strike?.unit ?? null),
+    ...(axis ? { countBasis: "award_axis_members", members: members.map((m) => ({ member: m.label, outstanding: m.count, weightedAverageExercisePrice: m.strike ? m.strike.value : null, exercisable: m.exercisable })) } : {}),
+    source: sourceRef(source, periodEnd),
   };
   if (tranches.length > 0) {
     const inc = tranches.reduce((sum, t) => sum + treasuryStock(t.count, t.strike, price), 0);
@@ -505,7 +543,7 @@ function optionsComponent(sources: IxSource[], price: number): Record<string, un
   } else if (strike) {
     out.method = "treasury_stock_on_weighted_average_strike";
     out.inTheMoney = price > strike.value;
-    out.incrementalShares = round(treasuryStock(outstanding.value, strike.value, price));
+    out.incrementalShares = round(treasuryStock(outstanding, strike.value, price));
     out.note = "One weighted-average strike stands in for every tranche; tranche-level strikes can give a different count.";
   } else {
     out.method = "not_computed";
@@ -614,6 +652,24 @@ const WARRANT_VESTED_RE = /^ClassOfWarrantOrRight\w*Vested(?:Number)?$/;
 // A vesting term tagged for a class says its shares vest on conditions; without a vested or
 // unvested count, how many are exercisable is unknown, never assumed to be all of them.
 const WARRANT_VESTING_TERM = "WarrantsAndRightsOutstandingVestingTerm";
+
+// A warrant's expiry: a tagged maturity or expiration date closes a class that expired before the
+// period end; a tagged term from a count dated before the period end that has since elapsed is flagged
+// (the term can run from a later exercisability date, so it never closes a class) (2.5.10).
+const WARRANT_EXPIRY_RE = /^(?:WarrantsAndRightsOutstandingMaturityDate|ClassOfWarrant\w*Expir\w*Date|Warrant\w*Expir\w*Date)$/;
+const WARRANT_TERM = "WarrantsAndRightsOutstandingTerm";
+const TERM_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+
+/** Whole years in a tagged term: "P5Y", "5 years", "five years"; null when it is not whole years. */
+export function termYears(text: string | null): number | null {
+  if (!text) return null;
+  const t = collapse(text).toLowerCase();
+  const iso = /^p(\d+)y$/.exec(t);
+  if (iso) return Number(iso[1]);
+  const m = /^(\d+|one|two|three|four|five|six|seven|eight|nine|ten)(?:\s*|-)years?$/.exec(t);
+  if (!m) return null;
+  return /^\d+$/.test(m[1]) ? Number(m[1]) : TERM_WORDS[m[1]];
+}
 
 /** A count dated after the report's period end, or tagged as a subsequent event: not a period-end instrument. */
 function afterPeriodEnd(doc: IxDocument, f: IxFact): boolean {
@@ -756,7 +812,11 @@ function warrantsComponent(sources: IxSource[], price: number): Record<string, u
   const { value: facts, source } = found;
   const unvestedFacts = source.doc.facts.filter((g) => WARRANT_UNVESTED_RE.test(g.local) && isShareCount(g));
   const vestedFacts = source.doc.facts.filter((g) => WARRANT_VESTED_RE.test(g.local) && g.value != null && !afterPeriodEnd(source.doc, g));
-  const classes = facts.map((f) => {
+  const docEnd = source.doc.documentPeriodEnd;
+  const expiryOf = (f: IxFact) => normalizeIxDate(newest(source.doc.facts.filter((g) => WARRANT_EXPIRY_RE.test(g.local) && g.text != null && dimsKey(g.dims) === dimsKey(f.dims)))?.text ?? null);
+  const expired = facts.filter((f) => { const e = expiryOf(f); return e != null && docEnd != null && e < docEnd; });
+  const live = facts.filter((f) => !expired.includes(f));
+  const classes = live.map((f) => {
     const strike = newest(source.doc.facts.filter((g) => g.local === WARRANT_STRIKE && g.value != null && dimsKey(g.dims) === dimsKey(f.dims)));
     const label = hasDims(f) ? Object.values(f.dims).map(memberLabel).join(" / ") : "Warrants (not itemized)";
     // Only vested warrant shares can be exercised now; the rest count in the gross total.
@@ -770,6 +830,9 @@ function warrantsComponent(sources: IxSource[], price: number): Record<string, u
     const exercisableBasis = vested ? "vested_count_tagged" : unvested ? "outstanding_less_unvested_tagged"
       : vestingTerm ? "vesting_terms_without_vested_count" : "no_vesting_terms_tagged";
     const periodEnd = source.doc.documentPeriodEnd;
+    const expiry = expiryOf(f);
+    const years = termYears(newest(source.doc.facts.filter((g) => g.local === WARRANT_TERM && dimsKey(g.dims) === dimsKey(f.dims)))?.text ?? null);
+    const termEnd = years != null && f.periodEnd ? addYears(f.periodEnd, years) : null;
     return {
       class: label,
       concept: f.name,
@@ -777,6 +840,9 @@ function warrantsComponent(sources: IxSource[], price: number): Record<string, u
       asOf: f.periodEnd,
       // Tagged at an earlier date (an issuance) and not restated at the period end.
       countBeforePeriodEnd: periodEnd != null && f.periodEnd != null && f.periodEnd < periodEnd,
+      expirationDate: expiry,
+      // A term counted from the tagged date that ended before the period end: possibly expired unexercised.
+      ...(expiry == null && termEnd != null && periodEnd != null && f.periodEnd! < periodEnd && termEnd < periodEnd ? { termElapsedBy: termEnd } : {}),
       unvested: vested ? Math.max(0, f.value! - vested.value!) : unvested ? unvested.value : null,
       unvestedAsOf: vested ? vested.periodEnd : unvested ? unvested.periodEnd : null,
       exercisable,
@@ -792,8 +858,9 @@ function warrantsComponent(sources: IxSource[], price: number): Record<string, u
     component: "warrants",
     outstanding: classes.reduce((sum, c) => sum + (c.outstanding ?? 0), 0),
     classes,
+    ...(expired.length > 0 ? { expiredClasses: expired.map((f) => ({ class: hasDims(f) ? Object.values(f.dims).map(memberLabel).join(" / ") : "Warrants (not itemized)", count: f.value, asOf: f.periodEnd, expirationDate: expiryOf(f) })) } : {}),
     method: "treasury_stock_per_class_on_vested",
-    incrementalShares: unresolved === classes.length ? null : classes.reduce((sum, c) => sum + (c.incrementalShares ?? 0), 0),
+    incrementalShares: classes.length === 0 ? 0 : unresolved === classes.length ? null : classes.reduce((sum, c) => sum + (c.incrementalShares ?? 0), 0),
     unresolvedClasses: unresolved,
     source: sourceRef(source, facts[0].periodEnd),
   };
@@ -850,6 +917,23 @@ const REDEMPTION_RE = /Redemption|Redeem|Repurchase|Extinguish|Repaid|Repayment/
 // (BE tags only the make-whole increase, e.g. 2.6926 against $194.97, whose rate is 5.1290 per $1,000).
 const RATIO_PRICE_TOLERANCE = 0.02;
 
+/**
+ * A tagged conversion ratio in shares per $1,000 of principal. Some filers tag it per $1 (LITE's
+ * 0.0076319 against a $131.03 price is 7.6319 per $1,000): a ratio whose product with the conversion
+ * price is ~1 is scaled by 1,000 (RATIO_PER_1_PRINCIPAL_SCALED). One that agrees with neither scale is
+ * not the conversion rate (RATIO_INCONSISTENT_WITH_PRICE); without a price, a ratio below 1 has no
+ * provable unit (RATIO_UNIT_UNCERTAIN). The tagged value stays visible (2.5.10).
+ */
+export function normalizedRatio(ratio: number | null, convPrice: number | null): { per1000: number | null; usable: boolean; note: string | null } {
+  if (ratio == null || !(ratio > 0)) return { per1000: null, usable: false, note: null };
+  if (convPrice != null) {
+    if (Math.abs((ratio * convPrice) / 1000 - 1) <= RATIO_PRICE_TOLERANCE) return { per1000: ratio, usable: true, note: null };
+    if (Math.abs(ratio * convPrice - 1) <= RATIO_PRICE_TOLERANCE) return { per1000: round(ratio * 1000, 6), usable: true, note: "RATIO_PER_1_PRINCIPAL_SCALED" };
+    return { per1000: ratio, usable: false, note: "RATIO_INCONSISTENT_WITH_PRICE" };
+  }
+  return ratio >= 1 ? { per1000: ratio, usable: true, note: null } : { per1000: null, usable: false, note: "RATIO_UNIT_UNCERTAIN" };
+}
+
 /** A value tagged only on the instrument's own axes, at a date. */
 function instrumentValue(group: DebtGroup, locals: string[], at: string): Picked | null {
   for (const local of locals) {
@@ -883,9 +967,8 @@ function convertiblesComponent(sources: IxSource[], price: number): Record<strin
     const issuable = end && g.member ? instrumentValue(g, SHARES_ISSUABLE_CONCEPTS, end) : null;
     const convPrice = groupValue(g, [CONVERSION_PRICE]);
     const ratio = groupValue(g, [CONVERSION_RATIO]);
-    const ratioConsistent = ratio != null && ratio.value > 0
-      && (convPrice == null || Math.abs((ratio.value * convPrice.value) / 1000 - 1) <= RATIO_PRICE_TOLERANCE);
-    const usableRatio = ratioConsistent ? ratio : null;
+    const norm = normalizedRatio(ratio ? ratio.value : null, convPrice ? convPrice.value : null);
+    const usableRatio = norm.usable ? { ...ratio!, value: norm.per1000! } : null;
     const impliedPrice = convPrice ? convPrice.value : (usableRatio ? 1000 / usableRatio.value : null);
     let shares: number | null = null;
     let basis: string | null = null;
@@ -911,9 +994,10 @@ function convertiblesComponent(sources: IxSource[], price: number): Record<strin
       principalBasis: current ? "outstanding_at_period_end" : faceTagged ? "face_amount" : (face ? "tagged_amount_fallback" : null),
       conversionPrice: convPrice ? convPrice.value : (impliedPrice != null ? round(impliedPrice, 4) : null),
       conversionPriceBasis: convPrice ? "tagged" : (impliedPrice != null ? "1000 / conversion_ratio" : null),
-      conversionRatioPer1000: ratio ? ratio.value : null,
+      conversionRatioPer1000: norm.per1000,
+      conversionRatioTagged: ratio ? ratio.value : null,
       conversionRatioUsed: usableRatio != null && !issuable,
-      ...(ratio && !ratioConsistent ? { conversionRatioNote: "RATIO_INCONSISTENT_WITH_PRICE" } : {}),
+      ...(norm.note ? { conversionRatioNote: norm.note } : {}),
       maturityDate: normalizeIxDate(groupText(g, "DebtInstrumentMaturityDate")),
       ifConvertedShares: shares != null ? round(shares) : null,
       ifConvertedBasis: basis,
@@ -940,43 +1024,105 @@ function convertiblesComponent(sources: IxSource[], price: number): Record<strin
 
 const PREFERRED_SHARES_ISSUABLE = "PreferredStockConvertibleSharesIssuable";
 const PREFERRED_CONVERSION_PRICE = "PreferredStockConvertibleConversionPrice";
+const PREFERRED_LIQUIDATION_AGGREGATE = ["PreferredStockLiquidationPreferenceValue", "TemporaryEquityLiquidationPreference"];
+const PREFERRED_LIQUIDATION_PER_SHARE = ["PreferredStockLiquidationPreference", "TemporaryEquityLiquidationPreferencePerShare"];
+const PREFERRED_DIVIDEND_RATE = ["PreferredStockDividendRatePercentage"];
 
 /**
  * Convertible preferred outstanding at the period end, if-converted when in the money: the tagged
  * common shares issuable on conversion and the conversion price. MRVL's Series A (2.0M preferred
  * shares, issued to NVIDIA) converts into up to 21.8M common shares at $91.84.
  */
-function convertiblePreferredComponent(sources: IxSource[], price: number): Record<string, unknown> | null {
+// A preferred conversion the filing states in words, in two exact forms only (2.5.10): a per-share
+// ratio ("The Preferred Stock will convert on a one-for-one basis into shares of our common stock",
+// LITE; "each share of Preferred Stock is convertible into 10 shares of common stock") or an aggregate
+// ("convertible in the aggregate into a maximum of approximately 21.8 million shares of our common stock").
+const PREF_ONE_FOR_ONE_RE = /\bpreferred stock\b[^.]{0,120}\bconvert(?:s|ible)?\b[^.]{0,40}\bon a one[- ]for[- ]one basis\b/i;
+const PREF_PER_SHARE_RE = /\beach share of (?:the |our )?(?:series [a-z0-9-]+ )?(?:convertible )?preferred stock\b[^.]{0,80}\bconvertible into ([0-9][0-9,]*(?:\.[0-9]+)?) shares of (?:our |the company['’]s )?common stock\b/i;
+const PREF_AGGREGATE_RE = /\bpreferred stock\b[^.]{0,120}\bconvertible in the aggregate into (?:a maximum of )?(?:approximately )?([0-9][0-9,]*(?:\.[0-9]+)?)( million)? shares of (?:our |the company['’]s )?common stock\b/i;
+
+export type PreferredConversionText = { ratio: number | null; aggregateShares: number | null; approximate: boolean; sentence: string; documentUrl: string | null };
+
+/** The first stated preferred conversion in filing text, quoted. */
+export function preferredConversionTerms(matches: TextMatch[]): PreferredConversionText | null {
+  for (const match of matches) {
+    for (const sentence of collapse(match.contextText).split(CLAIM_SENTENCE_SPLIT_RE).map((x) => x.trim())) {
+      const one = PREF_ONE_FOR_ONE_RE.test(sentence);
+      const per = PREF_PER_SHARE_RE.exec(sentence);
+      const agg = PREF_AGGREGATE_RE.exec(sentence);
+      if (!one && !per && !agg) continue;
+      const aggregate = agg ? parseFloat(agg[1].replace(/,/g, "")) * (agg[2] ? 1_000_000 : 1) : null;
+      return {
+        ratio: one ? 1 : per ? parseFloat(per[1].replace(/,/g, "")) : null,
+        aggregateShares: aggregate != null ? round(aggregate) : null,
+        approximate: agg != null && /approximately/i.test(agg[0]),
+        sentence: sentence.slice(0, 600),
+        documentUrl: match.documentUrl,
+      };
+    }
+  }
+  return null;
+}
+
+function convertiblePreferredComponent(sources: IxSource[], price: number, stated: PreferredConversionText | null = null): Record<string, unknown> | null {
   const found = findInSources(sources, (doc) => {
     const end = doc.documentPeriodEnd;
     if (!end) return null;
     const outstanding = doc.facts.filter((f) => PREFERRED_OUTSTANDING_CONCEPTS.includes(f.local) && f.value != null && f.periodEnd === end
       && !Object.keys(f.dims).some((axis) => /StatementEquityComponentsAxis$/.test(axis)));
-    const plain = outstanding.filter((f) => !hasDims(f));
-    const shares = (plain.length > 0 ? plain : outstanding).reduce((sum, f) => sum + f.value!, 0);
+    // The same shares can be tagged under both concepts (LITE: 2.9M preferred and 2.9M temporary
+    // equity): the larger concept count, never their sum.
+    const perConcept = PREFERRED_OUTSTANDING_CONCEPTS.map((c) => {
+      const facts = outstanding.filter((f) => f.local === c);
+      const plain = facts.filter((f) => !hasDims(f));
+      return (plain.length > 0 ? plain : facts).reduce((sum, f) => sum + f.value!, 0);
+    });
+    const shares = Math.max(...perConcept);
     if (!(shares > 0)) return null;
     const issuable = newest(doc.facts.filter((f) => f.local === PREFERRED_SHARES_ISSUABLE && f.value != null && !afterPeriodEnd(doc, f)));
     const conv = newest(doc.facts.filter((f) => f.local === PREFERRED_CONVERSION_PRICE && f.value != null && !afterPeriodEnd(doc, f)));
-    if (!issuable && !conv) return null;
-    return { shares, asOf: end, issuable, conv };
+    if (!issuable && !conv && !stated) return null;
+    // Preferred economics as tagged (2.5.10): the liquidation preference, aggregate or per share, and the dividend rate.
+    const tagged = (locals: string[]) => newest(doc.facts.filter((f) => locals.includes(f.local) && f.value != null && !afterPeriodEnd(doc, f)
+      && !Object.keys(f.dims).some((axis) => /StatementEquityComponentsAxis$/.test(axis))));
+    const liqAggregate = tagged(PREFERRED_LIQUIDATION_AGGREGATE);
+    const liqPerShare = tagged(PREFERRED_LIQUIDATION_PER_SHARE);
+    const dividend = tagged(PREFERRED_DIVIDEND_RATE);
+    return { shares, asOf: end, issuable, conv, liqAggregate, liqPerShare, dividend };
   });
   if (!found) return null;
   const { value: v, source } = found;
   const convPrice = v.conv ? v.conv.value! : null;
-  const ifConverted = v.issuable ? v.issuable.value! : null;
+  // Tags first; else the conversion the filing states in words (quoted in statedConversion).
+  const fromText = !v.issuable && stated != null;
+  const ifConverted = v.issuable ? v.issuable.value!
+    : stated?.ratio != null ? round(v.shares * stated.ratio)
+    : stated?.aggregateShares ?? null;
+  const basis = v.issuable ? "shares_issuable_tagged"
+    : stated?.ratio != null ? "ratio_stated_in_text"
+    : stated?.aggregateShares != null ? "aggregate_stated_in_text" : null;
+  // A per-share ratio with no conversion price converts without payment: the preferred is
+  // common-equivalent at any price (LITE's one-for-one Series A participates as converted).
+  const asConverted = convPrice == null && basis === "ratio_stated_in_text";
   const inTheMoney = convPrice != null ? price >= convPrice : null;
   const instrument = {
     instrument: "Convertible preferred stock",
     preferredSharesOutstanding: v.shares,
     asOf: v.asOf,
     ifConvertedShares: ifConverted,
-    ifConvertedBasis: ifConverted != null ? "shares_issuable_tagged" : null,
+    ifConvertedBasis: basis,
     sharesIssuableDate: v.issuable ? v.issuable.periodEnd : null,
     // The issuable count was tagged at issuance and not restated at the period end.
     countBeforePeriodEnd: v.issuable != null && v.issuable.periodEnd != null && v.issuable.periodEnd < v.asOf,
     conversionPrice: convPrice,
     inTheMoney,
-    incrementalShares: ifConverted == null || inTheMoney == null ? null : inTheMoney ? round(ifConverted) : 0,
+    incrementalShares: ifConverted == null ? null : asConverted ? round(ifConverted) : inTheMoney == null ? null : inTheMoney ? round(ifConverted) : 0,
+    liquidationPreference: v.liqAggregate ? { amount: v.liqAggregate.value, basis: "aggregate_tagged", asOf: v.liqAggregate.periodEnd }
+      : v.liqPerShare ? { amount: round(v.liqPerShare.value! * v.shares, 2), basis: "per_share_tagged_x_shares_outstanding", perShare: v.liqPerShare.value, asOf: v.liqPerShare.periodEnd }
+      : null,
+    dividendRatePct: v.dividend ? round(v.dividend.value! * 100, 4) : null,
+    ...(fromText ? { statedConversion: { ratio: stated!.ratio, aggregateShares: stated!.aggregateShares, approximate: stated!.approximate, sentence: stated!.sentence, documentUrl: stated!.documentUrl } } : {}),
+    ...(asConverted ? { method: "as_converted_no_conversion_price" } : {}),
   };
   return {
     component: "convertible_preferred",
@@ -985,7 +1131,7 @@ function convertiblePreferredComponent(sources: IxSource[], price: number): Reco
     ifConvertedShares: ifConverted ?? 0,
     incrementalShares: instrument.incrementalShares,
     unresolvedInstruments: instrument.incrementalShares == null ? 1 : 0,
-    note: "Common shares issuable on conversion as tagged (often the maximum at issuance) and the tagged conversion price; if-converted when the price is at or above it. Liquidation preference, dividends and redemption are not modeled.",
+    note: "Common shares issuable on conversion as tagged (often the maximum at issuance) and the tagged conversion price; if-converted when the price is at or above it. The liquidation preference and dividend rate are reported as tagged; redemption is not modeled.",
     source: sourceRef(source, v.asOf),
   };
 }
@@ -1088,6 +1234,9 @@ export const SHARE_CLAIM_SEARCH_TERMS = [
   "price protection", "anti-dilution", "antidilution", "forward sale agreement", "earnout shares", "earn-out shares",
   "contingent consideration", "contingently issuable", "convertible preferred",
   "subsequent to quarter end", "subsequent to year end", "subsequent to the end of the quarter",
+  "one-for-one basis", "convertible in the aggregate",
+  "exchangeable for shares", "exchangeable into shares", "redeemable for shares of", "simple agreement for future equity",
+  "payable in shares", "settled in shares", "standby equity purchase agreement", "equity line of credit", "committed equity facility",
 ];
 const SHARE_CLAIM_KINDS: { kind: string; re: RegExp }[] = [
   { kind: "PRICE_PROTECTION", re: /\bprice[- ]protection\b/i },
@@ -1095,6 +1244,11 @@ const SHARE_CLAIM_KINDS: { kind: string; re: RegExp }[] = [
   { kind: "FORWARD_SALE", re: /\bforward (?:sale|equity sale) agreements?\b/i },
   { kind: "CONTINGENT_SHARES", re: /\bearn-?out shares\b|\bcontingently issuable (?:shares|common stock)\b|\bcontingent consideration\b[^.]{0,120}\b(?:in|of) (?:shares|common stock)\b/i },
   { kind: "CONVERTIBLE_PREFERRED", re: /\bconvertible preferred (?:stock|shares)\b/i },
+  // Up-C units or exchangeable shares (2.5.10).
+  { kind: "EXCHANGEABLE_INTERESTS", re: /\b(?:units?|interests?|shares|stock)\b[^.]{0,100}\b(?:exchangeable|redeemable) (?:for|into) (?:an equal number of )?(?:newly[- ]issued )?(?:shares of )?(?:our |the company['’]s )?(?:class [a-z] )?common stock\b/i },
+  { kind: "SAFE", re: /\bsimple agreements? for future equity\b|\bSAFEs?\b/ },
+  { kind: "SHARE_SETTLED_OBLIGATION", re: /\b(?:payable|settled|settleable|issuable)\b[^.]{0,30}\bin (?:shares of )?(?:our |the company['’]s )?(?:class [a-z] )?common stock\b/i },
+  { kind: "EQUITY_LINE", re: /\b(?:standby equity purchase agreement|equity line of credit|committed equity facility|equity purchase facility)\b/i },
   { kind: "WARRANT_AFTER_PERIOD_END", re: /\bsubsequent to (?:the )?(?:quarter|year|period)[- ]end\b[^.]{0,200}\bwarrants?\b|\bsubsequent to the end of the (?:quarter|year|period)\b[^.]{0,200}\bwarrants?\b/i },
 ];
 // A customer or distributor price-protection term is a revenue reduction, not a
@@ -1103,6 +1257,8 @@ const REVENUE_TERM_RE = /\b(?:distributors?|customers?|revenues?|variable consid
 // Anti-dilution adjustments of a warrant's or note's own terms belong to an
 // instrument the bridge already reads.
 const INSTRUMENT_TERM_RE = /\b(?:warrants?|convertible (?:senior )?notes?|conversion (?:rate|price)|exercise price|debentures?)\b/i;
+const AWARD_OR_NOTE_RE = /\b(?:restricted stock|RSUs?|PSUs?|awards?|stock options?|employees?|compensation|ESPP|dividend reinvestment|convertible|notes|debentures?|warrants?)\b/i;
+const PRESENT_OR_FUTURE_RE = /\b(?:is|are|may|will|would|can|could|remain|remains)\b/i;
 const EQUITY_TERM_RE = /\b(?:shares?|stock|equity|securities purchase agreement|purchase agreement|investors?|stockholders?|shareholders?)\b/i;
 const EXTINGUISHED_RE = /\bwere (?:all )?converted\b|\bno shares of\b[^.]{0,120}\b(?:are|were|remain)\b[^.]{0,30}\boutstanding\b|\b(?:was|were) redeemed in full\b|\b(?:expired|terminated) (?:unexercised|without)\b/i;
 // Sentence breaks, except after an initialism such as "U.S." ("applicable U.S. GAAP").
@@ -1129,6 +1285,8 @@ export function shareClaimSignals(matches: TextMatch[]): Record<string, unknown>
       if (!kind || seen.has(`${kind}|${sentence}`)) return;
       if (kind === "PRICE_PROTECTION" && REVENUE_TERM_RE.test(sentence)) return;
       if (kind === "ANTI_DILUTION_RIGHT" && INSTRUMENT_TERM_RE.test(sentence)) return;
+      // Awards, notes and dividends settled in shares belong elsewhere; a claim is present or future, not past.
+      if ((kind === "SHARE_SETTLED_OBLIGATION" || kind === "EXCHANGEABLE_INTERESTS") && (AWARD_OR_NOTE_RE.test(sentence) || !PRESENT_OR_FUTURE_RE.test(sentence))) return;
       const leadIn = list.slice(Math.max(0, i - 2), i).join(" ");
       if (!EQUITY_TERM_RE.test(`${leadIn} ${sentence}`)) return;
       seen.add(`${kind}|${sentence}`);
@@ -1262,7 +1420,7 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
   const awards = awardsComponent(sources, input.awardTableMatches ?? []);
   const warrants = warrantsComponent(sources, price);
   const convertibles = convertiblesComponent(sources, price);
-  const preferred = convertiblePreferredComponent(sources, price);
+  const preferred = convertiblePreferredComponent(sources, price, Array.isArray(input.claimMatches) ? preferredConversionTerms(input.claimMatches) : null);
   const atm = atmComponent(atmEvidence(input.atmMatches), price);
   const components = [options, awards, warrants, convertibles, preferred].filter((c): c is Record<string, unknown> => c != null);
   const notDisclosed = [
@@ -1331,12 +1489,20 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
       severity: "warning",
     });
   }
+  const expiredClasses = (warrants?.expiredClasses ?? []) as Record<string, unknown>[];
+  if (expiredClasses.length > 0) {
+    warnings.push({ code: "WARRANT_EXPIRED_BEFORE_PERIOD_END", message: `${expiredClasses.map((c) => `${c.class} (${c.count}, expired ${c.expirationDate})`).join("; ")} expired before the period end by their tagged expiration date and are not counted.`, severity: "info" });
+  }
+  const elapsed = ((warrants?.classes ?? []) as Record<string, unknown>[]).filter((c) => c.termElapsedBy != null);
+  if (elapsed.length > 0) {
+    warnings.push({ code: "WARRANT_TERM_ELAPSED", message: `${elapsed.map((c) => `${c.class} (${c.outstanding} as of ${c.asOf}, term through ${c.termElapsedBy})`).join("; ")}: the tagged term, counted from the tagged date, ended before the period end. They may have expired unexercised; they are still counted until the filing says otherwise.`, severity: "warning" });
+  }
   const vestingUnknown = ((warrants?.classes ?? []) as Record<string, unknown>[]).filter((c) => c.exercisableBasis === "vesting_terms_without_vested_count");
   if (vestingUnknown.length > 0) {
     warnings.push({ code: "WARRANT_VESTING_NOT_TAGGED", message: `${vestingUnknown.map((c) => c.class).join(", ")} vest on conditions, and no vested or unvested count is tagged; their exercisable shares are unresolved, not assumed to be all ${vestingUnknown.map((c) => c.outstanding).join(", ")}.`, severity: "warning" });
   }
   if (!claimsRead) {
-    warnings.push({ code: "SHARE_CLAIM_TEXT_NOT_READ", message: "The filing text was not read for untagged share claims (price protection, anti-dilution rights, forward sales, contingent shares, convertible preferred); retry.", severity: "warning" });
+    warnings.push({ code: "SHARE_CLAIM_TEXT_NOT_READ", message: "The filing text was not read for untagged share claims (the kinds in claimCoverage.textScanKinds); retry.", severity: "warning" });
   }
   if (sources.every((s) => s.doc.facts.length === 0)) {
     warnings.push({ code: "NO_INLINE_XBRL", message: "The filing carries no inline XBRL facts; the bridge needs tagged share and instrument counts.", severity: "warning" });
@@ -1582,7 +1748,8 @@ function instruments(doc: IxDocument, periodEnd: string | null): Record<string, 
       maturityDate,
       convertible: convPrice != null || ratio != null,
       conversionPrice: convPrice ? convPrice.value : null,
-      conversionRatioPer1000: ratio ? ratio.value : null,
+      conversionRatioPer1000: normalizedRatio(ratio ? ratio.value : null, convPrice ? convPrice.value : null).per1000,
+      conversionRatioTagged: ratio ? ratio.value : null,
       latestFactDate: latest || null,
       status,
     });

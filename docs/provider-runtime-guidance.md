@@ -1137,6 +1137,102 @@ consensus actions compose evidence and never fill a gap with an assumption.
   - Scenarios give it the `convertibles` treatment.
   - Liquidation preference, dividends and redemption are not modeled.
 
+## Option Axes, Conversion Units, Outlook Tables And Claim Lifecycle (2.5.10)
+
+- **Options on award axes (AEHR).**
+  - AEHR tags its options only under a company member on `AwardTypeAxis`:
+    316,000 outstanding at $5.11, 310,000 exercisable. There is no
+    undimensioned total, so options were `notDisclosed` and share scenarios
+    understated.
+  - With no undimensioned count, the bridge now reads option counts tagged
+    only on award or plan axes, at the latest date and on the fewest axes
+    (`countBasis: award_axis_members`, one entry per member).
+  - One member uses its own weighted-average strike. Several members, each
+    with a strike, are priced like exercise-price ranges.
+- **Conversion-rate units (LITE).**
+  - LITE tags `DebtInstrumentConvertibleConversionRatio1` per $1 of principal:
+    0.0076319 against a $131.03 price is 7.6319 per $1,000.
+  - A ratio whose product with the conversion price is about 1 is scaled by
+    1,000 (`RATIO_PER_1_PRINCIPAL_SCALED`) and used.
+  - One that agrees with neither scale is still `RATIO_INCONSISTENT_WITH_PRICE`
+    (BE's make-whole increases).
+  - Without a price, a ratio below 1 has no provable unit
+    (`RATIO_UNIT_UNCERTAIN`) and is not used.
+  - `conversionRatioPer1000` is the normalized rate, and `conversionRatioTagged`
+    keeps the tag.
+- **Guidance in outlook tables and bullets.** Rows are read after every
+  sentence pattern (`statedAs: OUTLOOK_ROW`):
+  - a release-table row, e.g. VRT's "Third Quarter 2026 Guidance Net sales
+    $3,650M - $3,850M … Adjusted diluted EPS (1) $1.77 - $1.83";
+  - an outlook bullet, e.g. LITE's "Non-GAAP diluted net income per share of
+    $4.05 to $4.35".
+
+  A row counts only under a guidance or outlook heading, within 400 characters
+  and with no sentence break between. Its basis comes from its own label.
+- **More guidance wording.**
+  - A comma before a tolerance ("$108.0 billion, plus or minus 2%").
+  - A margin tolerance in basis or percentage points ("74.0%, plus or minus
+    50 basis points", computed exactly).
+  - Plural "gross margins".
+  - A second range in the same sentence ("… and adjusted diluted EPS of $6.65
+    to $6.75").
+  - One range stated for both bases reads `GAAP_AND_NON_GAAP` (NVDA).
+- **Target periods.**
+  - `extract_guidance` gives each range and alternate a `targetPeriod`.
+  - Alternates must share the primary's period: VRT's Q3 table row is not the
+    full year's non-GAAP alternate.
+  - When a range's own sentence names no period, the nearest guidance or
+    outlook mention above it, within 1,500 characters, is read whole
+    (`scope: GUIDANCE_MENTION`). A mention that names no period gives way to
+    the next.
+  - Before this fix, a fixed 200-character look-back cut NVDA's "third quarter
+    of fiscal 2027" to "fiscal 2027", and missed MRVL's heading entirely.
+- **Warrant lifecycle.**
+  - A class whose tagged expiration date (`WarrantsAndRightsOutstandingMaturityDate`
+    or an expiration-date concept) is before the period end is closed. It is
+    listed in `expiredClasses` (`WARRANT_EXPIRED_BEFORE_PERIOD_END`).
+  - A class counted from a date before the period end, whose tagged term
+    (`WarrantsAndRightsOutstandingTerm`: "P5Y", "5 years", "five years") has
+    since elapsed, is flagged `termElapsedBy` (`WARRANT_TERM_ELAPSED`) and
+    still counted. The term can run from a later exercisability date.
+- **Claim census.** Four kinds are added:
+  - `EXCHANGEABLE_INTERESTS`: Up-C units or shares exchangeable for common
+    stock;
+  - `SAFE`: simple agreements for future equity;
+  - `SHARE_SETTLED_OBLIGATION`: amounts payable or settled in common stock;
+  - `EQUITY_LINE`: standby equity purchase agreements and committed equity
+    facilities.
+
+  Award, note, warrant and dividend settlement in shares is excluded. So is a
+  settlement stated in the past tense. The scan remains a fixed list
+  (`completeClaimInventory: false`).
+- **Convertible preferred stated in text (LITE).**
+  - LITE's Series A (2.9M shares, issued to NVIDIA) has no conversion tags.
+    Its note says "The Preferred Stock will convert on a one-for-one basis into
+    shares of our common stock".
+  - A stated conversion is now read in exact forms only: one-for-one; "each
+    share … convertible into N shares"; "convertible in the aggregate into N
+    shares".
+  - The sentence is quoted in `statedConversion`.
+  - A per-share ratio with no conversion price is common-equivalent at any
+    price (`method: as_converted_no_conversion_price`). An aggregate with no
+    price joins the gross count only.
+  - Shares tagged under both `PreferredStockSharesOutstanding` and
+    `TemporaryEquitySharesOutstanding` are the larger count, never the sum.
+    LITE was 5.8M before this fix.
+- **Preferred economics.**
+  - The tagged liquidation preference is reported as `liquidationPreference`:
+    aggregate, or per share × shares outstanding.
+  - The dividend rate is reported as `dividendRatePct`.
+  - `get_valuation_snapshot` adds the liquidation preference to enterprise
+    value for preferred that is not counted as shares at the price
+    (`balances.preferredLiquidationPreferenceInEv`).
+  - Without a tag it warns `PREFERRED_NOT_IN_ENTERPRISE_VALUE`.
+- Not changed:
+  - Net-share settlement of convertible notes is not modeled. LITE's notes
+    settle principal in cash, so if-converted shares overstate them.
+  - 52/53-week fiscal calendars still resolve to conventional period labels.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
