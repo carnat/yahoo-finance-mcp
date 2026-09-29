@@ -683,13 +683,33 @@ def _dims_within(inner: dict[str, str], outer: dict[str, str]) -> bool:
     return all(outer.get(axis) == member for axis, member in inner.items())
 
 
+# An exercise of the class: warrants exercised or shares issued on exercise (BE tags Oracle's cashless exercise
+# on 2026-05-01 as StockIssuedDuringPeriodSharesExerciseOfWarrants on the warrant's class member).
+_WARRANT_EXERCISE_EVENT_RE = re.compile(r"WarrantsExercised|ExerciseOfWarrants")
+_CLASS_OF_WARRANT_AXIS = "ClassOfWarrantOrRightAxis"
+
+
+def _later_exercise(doc: IxDocument, f: IxFact) -> IxFact | None:
+    """An exercise of the same warrant class after the count and by the period end: the count no longer describes what is outstanding."""
+    axis = next((a for a in f.dims if a.endswith(_CLASS_OF_WARRANT_AXIS)), None)
+    if not axis or not f.period_end:
+        return None
+    member = f.dims[axis]
+    end = doc.document_period_end
+    hits = [g for g in doc.facts if _WARRANT_EXERCISE_EVENT_RE.search(g.local) and g.value is not None and g.value > 0 and g.dims.get(axis) == member
+            and g.period_end is not None and g.period_end > f.period_end and (end is None or g.period_end <= end)]
+    return _newest(hits)
+
+
 def _warrant_count_event(doc: IxDocument, f: IxFact) -> str | None:
     """Why a tagged warrant count is an exercise or equity movement, not warrants outstanding; None when it is a count."""
     if any(axis.endswith(_EQUITY_STATEMENT_AXIS) for axis in f.dims):
         return "EQUITY_STATEMENT_MOVEMENT"
     exercised = any(g.local in _WARRANT_EXERCISED_CONCEPTS and g.value is not None and g.period_end == f.period_end and _dims_within(g.dims, f.dims)
                     for g in doc.facts)
-    return "WARRANT_EXERCISE" if exercised else None
+    if exercised:
+        return "WARRANT_EXERCISE"
+    return "EXERCISED_AFTER_COUNT" if _later_exercise(doc, f) else None
 
 
 def warrant_count_events(sources: list[IxSource]) -> list[dict]:
@@ -705,35 +725,50 @@ def warrant_count_events(sources: list[IxSource]) -> list[dict]:
             key = f"{f.name}|{_dims_key(f.dims)}|{f.period_end}|{f.value}"
             if key in out:
                 continue
+            exercise = _later_exercise(source.doc, f) if reason == "EXERCISED_AFTER_COUNT" else None
             out[key] = {
                 "class": " / ".join(member_label(v) for v in f.dims.values()) if f.dims else "Warrants (not itemized)",
                 "concept": f.name,
                 "value": f.value,
                 "asOf": f.period_end,
                 "reason": reason,
+                **({"exercise": {"concept": exercise.name, "value": exercise.value, "date": exercise.period_end}} if exercise else {}),
                 "filingType": source.filing_type,
                 "accessionNumber": source.accession_number,
             }
     return list(out.values())
 
 
+def _warrant_class_key(f: IxFact) -> str:
+    """A warrant class's identity across filings: its class-of-warrant member, else its dimensions."""
+    axis = next((a for a in f.dims if a.endswith(_CLASS_OF_WARRANT_AXIS)), None)
+    return f"{axis}={f.dims[axis]}" if axis else _dims_key(f.dims)
+
+
 def _warrants_component(sources: list[IxSource], price: float) -> dict | None:
-    def find(doc: IxDocument):
-        counts = [f for f in doc.facts if f.value is not None and f.local in _WARRANT_COUNT_CONCEPTS and _warrant_count_event(doc, f) is None]
+    # Classes a newer filing shows exercised or retired; an older fallback filing must not restore them
+    # (BE's 2025 10-K still counts the Oracle warrant its 2026 10-Q shows exercised).
+    retired: set[str] = set()
+    found = None
+    for source in sources:
+        doc = source.doc
+        counts = [f for f in doc.facts if f.value is not None and f.local in _WARRANT_COUNT_CONCEPTS and _warrant_count_event(doc, f) is None
+                  and _warrant_class_key(f) not in retired]
         concept = next((c for c in _WARRANT_COUNT_CONCEPTS if any(f.local == c for f in counts)), None)
         facts = [f for f in counts if f.local == concept]
-        if not facts:
-            return None
-        groups: dict[str, IxFact] = {}
-        for f in facts:
-            key = _dims_key(f.dims)
-            prev = groups.get(key)
-            if prev is None or (f.period_end or "") > (prev.period_end or ""):
-                groups[key] = f
-        dimmed = [f for key, f in groups.items() if key != ""]
-        return dimmed if dimmed else [groups[""]]
-
-    found = _find_in_sources(sources, find)
+        if facts:
+            groups: dict[str, IxFact] = {}
+            for f in facts:
+                key = _dims_key(f.dims)
+                prev = groups.get(key)
+                if prev is None or (f.period_end or "") > (prev.period_end or ""):
+                    groups[key] = f
+            dimmed = [f for key, f in groups.items() if key != ""]
+            found = (dimmed if dimmed else [groups[""]], source)
+            break
+        for f in doc.facts:
+            if f.value is not None and f.local in _WARRANT_COUNT_CONCEPTS and _warrant_count_event(doc, f) is not None:
+                retired.add(_warrant_class_key(f))
     if not found:
         return None
     facts, source = found
@@ -813,6 +848,34 @@ def _group_text(group: _DebtGroup, local: str) -> str | None:
     return best.text if best is not None else None
 
 
+# The filing's own count of shares issuable on conversion at the period end (BE tags the maximum, make-whole
+# included, per note), and principal outstanding then: after conversions and repurchases the issue's face
+# amount overstates both (BE's 2028 notes: $632.5M issued, $0.787M left at 2026-06-30) (2.5.9).
+_SHARES_ISSUABLE_CONCEPTS = ["DebtInstrumentConvertibleNumberOfSharesAvailableForConversion", "DebtInstrumentConvertibleNumberOfEquityInstruments"]
+# Principal at the period end: a face amount tagged then, else the instrument's carrying amount when it is well
+# below the issue's face (conversions or repurchases), not a balance-sheet line net of discount and costs
+# (LongTermDebt $290M against $300M issued is the same notes, net).
+_PERIOD_END_FACE_CONCEPTS = ["DebtInstrumentFaceAmount"]
+_PERIOD_END_CARRYING_CONCEPTS = ["DebtInstrumentCarryingAmount"]
+_REDUCED_PRINCIPAL_SHARE = 0.95
+_INSTRUMENT_AXES_RE = re.compile(r"(?:DebtInstrumentAxis|LongtermDebtTypeAxis)$")
+_SUBSEQUENT_EVENT_AXIS_RE = re.compile(r"SubsequentEventTypeAxis$")
+_REDEMPTION_RE = re.compile(r"Redemption|Redeem|Repurchase|Extinguish|Repaid|Repayment")
+# A tagged conversion ratio that disagrees with the tagged conversion price is not the conversion rate
+# (BE tags only the make-whole increase, e.g. 2.6926 against $194.97, whose rate is 5.1290 per $1,000).
+_RATIO_PRICE_TOLERANCE = 0.02
+
+
+def _instrument_value(group: _DebtGroup, locals_: list[str], at: str) -> dict | None:
+    """A value tagged only on the instrument's own axes, at a date."""
+    for local in locals_:
+        hit = _newest([f for f in group.facts if f.local == local and f.value is not None and f.period_end == at
+                       and all(_INSTRUMENT_AXES_RE.search(axis) for axis in f.dims)])
+        if hit:
+            return _picked(hit)
+    return None
+
+
 def _convertibles_component(sources: list[IxSource], price: float) -> dict | None:
     def find(doc: IxDocument):
         groups = [g for g in _debt_groups(doc) if _group_value(g, [_CONVERSION_PRICE, _CONVERSION_RATIO]) is not None]
@@ -827,41 +890,65 @@ def _convertibles_component(sources: list[IxSource], price: float) -> dict | Non
     if not found:
         return None
     groups, source = found
+    end = source.doc.document_period_end
     instruments = []
     for g in groups:
         face_tagged = _group_value(g, [_FACE_AMOUNT])
+        face_at_end = _instrument_value(g, _PERIOD_END_FACE_CONCEPTS, end) if end and g.member else None
+        carrying_at_end = _instrument_value(g, _PERIOD_END_CARRYING_CONCEPTS, end) if end and g.member and not face_at_end else None
+        current = face_at_end or (carrying_at_end if carrying_at_end and (face_tagged is None or carrying_at_end["value"] < _REDUCED_PRINCIPAL_SHARE * face_tagged["value"])
+                                  else None)
         # Some issuers tag each issue's principal only under a carrying-amount
         # concept, often at the issue date; use it and say so.
-        face = face_tagged or _group_value(g, _PRINCIPAL_FALLBACK_CONCEPTS)
+        face = current or face_tagged or _group_value(g, _PRINCIPAL_FALLBACK_CONCEPTS)
+        issuable = _instrument_value(g, _SHARES_ISSUABLE_CONCEPTS, end) if end and g.member else None
         conv_price = _group_value(g, [_CONVERSION_PRICE])
         ratio = _group_value(g, [_CONVERSION_RATIO])
-        implied = conv_price["value"] if conv_price else (1000 / ratio["value"] if ratio and ratio["value"] > 0 else None)
+        ratio_consistent = (ratio is not None and ratio["value"] > 0
+                            and (conv_price is None or abs(ratio["value"] * conv_price["value"] / 1000 - 1) <= _RATIO_PRICE_TOLERANCE))
+        usable_ratio = ratio if ratio_consistent else None
+        implied = conv_price["value"] if conv_price else (1000 / usable_ratio["value"] if usable_ratio else None)
         shares = None
         basis = None
-        if face and ratio and ratio["value"] > 0:
-            shares = (face["value"] / 1000) * ratio["value"]
+        if issuable:
+            shares = issuable["value"]
+            basis = "shares_issuable_tagged_at_period_end"
+        elif face and usable_ratio:
+            shares = (face["value"] / 1000) * usable_ratio["value"]
             basis = "principal / 1000 * conversion_ratio"
         elif face and conv_price and conv_price["value"] > 0:
             shares = face["value"] / conv_price["value"]
             basis = "principal / conversion_price"
+        redemption = _newest([f for f in g.facts if _REDEMPTION_RE.search(f.local) and any(_SUBSEQUENT_EVENT_AXIS_RE.search(axis) for axis in f.dims)])
         in_the_money = price >= implied if implied is not None else None
-        instruments.append({
+        inst = {
             "instrument": member_label(g.member) if g.member else "Convertible notes (not itemized)",
             "member": g.member,
             "faceAmount": face_tagged["value"] if face_tagged else None,
             "principal": face["value"] if face else None,
             "principalConcept": face["concept"] if face else None,
             "principalDate": face["periodEnd"] if face else None,
-            "principalBasis": "face_amount" if face_tagged else ("tagged_amount_fallback" if face else None),
+            "principalBasis": "outstanding_at_period_end" if current else ("face_amount" if face_tagged else ("tagged_amount_fallback" if face else None)),
             "conversionPrice": conv_price["value"] if conv_price else (round_half_up(implied, 4) if implied is not None else None),
             "conversionPriceBasis": "tagged" if conv_price else ("1000 / conversion_ratio" if implied is not None else None),
             "conversionRatioPer1000": ratio["value"] if ratio else None,
+            "conversionRatioUsed": usable_ratio is not None and not issuable,
+        }
+        if ratio and not ratio_consistent:
+            inst["conversionRatioNote"] = "RATIO_INCONSISTENT_WITH_PRICE"
+        inst.update({
             "maturityDate": normalize_ix_date(_group_text(g, "DebtInstrumentMaturityDate")),
             "ifConvertedShares": round_half_up(shares) if shares is not None else None,
             "ifConvertedBasis": basis,
+            "sharesIssuableDate": issuable["periodEnd"] if issuable else None,
+        })
+        if redemption:
+            inst["afterPeriodEnd"] = {"concept": redemption.name, "date": redemption.period_end}
+        inst.update({
             "inTheMoney": in_the_money,
             "incrementalShares": round_half_up(shares) if shares is not None and in_the_money else (0 if shares is not None else None),
         })
+        instruments.append(inst)
     unresolved = len([i for i in instruments if i["ifConvertedShares"] is None])
     return {
         "component": "convertible_debt",
@@ -870,7 +957,11 @@ def _convertibles_component(sources: list[IxSource], price: float) -> dict | Non
         "ifConvertedShares": sum((i["ifConvertedShares"] or 0) for i in instruments),
         "incrementalShares": None if unresolved == len(instruments) else sum((i["incrementalShares"] or 0) for i in instruments),
         "unresolvedInstruments": unresolved,
-        "note": "Principal is the tagged face amount, else the issue's tagged carrying amount (principalBasis says which); either can be the original principal before repurchases. Net-share or cash settlement, capped calls and make-whole adjustments are not modeled.",
+        "note": ("Shares are the filing's count issuable on conversion at the period end when tagged (it can be the maximum, make-whole included); "
+                 "else principal outstanding at the period end (a face amount then, or a carrying amount well below the issue's face), else the face "
+                 "amount or an issue-date carrying amount (principalBasis says which), "
+                 "times a conversion ratio that agrees with the conversion price, else divided by the price. Net-share or cash settlement and capped "
+                 "calls are not modeled."),
         "source": _source_ref(source, None),
     }
 
@@ -1060,14 +1151,36 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
             warnings.append({"code": "PRICE_CURRENCY_MISMATCH", "message": f"Strikes are reported in {unit}; the supplied price is treated as {price_currency}.", "severity": "warning"})
     warrant_events = warrant_count_events(sources)
     if warrant_events:
-        listed = "; ".join(f"{w['class']} {_js_number(w['value'])} on {w['asOf']}" for w in warrant_events)
+        listed = "; ".join(
+            f"{w['class']} {_js_number(w['value'])} on {w['asOf']}"
+            + (f" (exercised: {_js_number(w['exercise']['value'])} on {w['exercise']['date']})" if w.get("exercise") else "")
+            for w in warrant_events)
         warnings.append({
             "code": "WARRANT_EXERCISE_NOT_OUTSTANDING",
-            "message": (f"{len(warrant_events)} tagged warrant count(s) record an exercise or an equity-statement movement, so they are not counted "
-                        f"as warrants outstanding: {listed}."),
+            "message": (f"{len(warrant_events)} tagged warrant count(s) record an exercise or an equity-statement movement, or predate an exercise of "
+                        f"the same class, so they are not counted as warrants outstanding: {listed}."),
             "severity": "info",
             "counts": warrant_events,
         })
+    notes = (convertibles or {}).get("instruments") or []
+    face_only = [i for i in notes if i.get("ifConvertedBasis") != "shares_issuable_tagged_at_period_end" and i.get("principalBasis") != "outstanding_at_period_end"
+                 and i.get("principal") is not None]
+    if face_only:
+        names = ", ".join(i["instrument"] for i in face_only)
+        used = ", ".join(f"{i['principalBasis']} {_js_number(i['principal'])} ({i['principalDate']})" for i in face_only)
+        warnings.append({"code": "CONVERTIBLE_PRINCIPAL_NOT_AT_PERIOD_END", "message": (
+            f"No principal or shares issuable is tagged at the period end for {names}; the {used} is used and can include notes since converted "
+            "or repurchased."), "severity": "warning"})
+    bad_ratios = [i for i in notes if i.get("conversionRatioNote") == "RATIO_INCONSISTENT_WITH_PRICE"]
+    if bad_ratios:
+        listed = ", ".join(f"{i['instrument']} ({_js_number(i['conversionRatioPer1000'])} per 1,000 against a ${_js_number(i['conversionPrice'])} price)" for i in bad_ratios)
+        warnings.append({"code": "CONVERSION_RATIO_INCONSISTENT", "message": (
+            f"The tagged conversion ratio of {listed} is not the conversion rate (often a make-whole increase) and is not used."), "severity": "info"})
+    redeemed = [i for i in notes if i.get("afterPeriodEnd") is not None]
+    if redeemed:
+        listed = ", ".join(f"{i['instrument']} ({i['afterPeriodEnd']['date']})" for i in redeemed)
+        warnings.append({"code": "CONVERTIBLE_REDEMPTION_AFTER_PERIOD_END", "message": (
+            f"A redemption or repurchase after the period end is tagged for {listed}; its shares are counted as of the period end."), "severity": "warning"})
     early_counts = [c for c in ((warrants or {}).get("classes") or []) if c.get("countBeforePeriodEnd") is True]
     if early_counts:
         listed = "; ".join(f"{c['class']} {_js_number(c['outstanding'])} as of {c['asOf']}" for c in early_counts)

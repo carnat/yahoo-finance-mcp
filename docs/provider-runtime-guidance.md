@@ -897,10 +897,11 @@ consensus actions compose evidence and never fill a gap with an assumption.
   payload to carry fields. A missing authority field on an error means no
   authority, never an implied selection.
 
-## Exercised Warrants Are Not Outstanding (2.5.9)
+## Exercised Warrants And Convertibles At Period End (2.5.9)
 
 - The dilution bridge, and `get_share_count_scenarios`, which reads it, no
-  longer count an exercise as warrants outstanding.
+  longer count an exercise as warrants outstanding, and read convertible notes
+  as of the period end.
   - VRT's 2025 10-K tags `ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights`
     = 4,812,521 on 2024-12-06. That figure is the shares issued when its
     private placement warrants were exercised cashlessly. The same date and
@@ -923,9 +924,43 @@ consensus actions compose evidence and never fill a gap with an assumption.
   `WARRANT_COUNT_BEFORE_PERIOD_END` warning, so the filing text can confirm it
   is still outstanding.
 - A class with no exercisable warrants adds 0 shares whatever its strike.
-- Not changed: warrants that expired or were redeemed without an
-  exercised-count tag are still read from their last tagged count. Such a
-  count is flagged when it predates the period end.
+- A count followed by an exercise of the same class, dated after the count
+  and by the period end, is not read as outstanding (`EXERCISED_AFTER_COUNT`).
+  The exercise concepts include
+  `StockIssuedDuringPeriodSharesExerciseOfWarrants`. BE's Oracle warrant
+  (3,531,073 shares at $113.28, tagged at issuance 2025-10-28) was exercised
+  on a cashless basis on 2026-05-01 for 1,905,433 shares. Its entry in the
+  warning names that exercise.
+- A class that a newer filing shows exercised or retired is not restored from
+  an older fallback filing. BE's 2025 10-K still counts the Oracle warrant.
+- Convertible notes are read as of the period end:
+  - Shares come from the filing's own count issuable on conversion at the
+    period end (`DebtInstrumentConvertibleNumberOfSharesAvailableForConversion`),
+    when tagged (`ifConvertedBasis: shares_issuable_tagged_at_period_end`).
+    BE tags the maximum, make-whole included: 2030 notes 19,554,000; 2029
+    notes 1,714,619; 2028 notes 59,486.
+  - Otherwise shares come from principal outstanding at the period end
+    (`principalBasis: outstanding_at_period_end`). That principal is a face
+    amount tagged then, or the instrument's carrying amount when it is below
+    95% of the issue's face. BE's 2028 notes had $0.787M left of $632.5M, and
+    its 2029 notes $26.971M of $402.5M. A carrying amount close to face is the
+    same notes net of discount, so the face is kept. Without either figure the
+    issue's face is used, with `CONVERTIBLE_PRINCIPAL_NOT_AT_PERIOD_END`.
+  - A tagged conversion ratio is used only when ratio × conversion price is
+    within 2% of $1,000. BE tags only each note's make-whole increase (2030:
+    2.6926 against $194.97, whose rate is 5.1290), so it is flagged
+    `RATIO_INCONSISTENT_WITH_PRICE` (`CONVERSION_RATIO_INCONSISTENT`) and the
+    price is used.
+  - A redemption or repurchase tagged after the period end is flagged
+    (`afterPeriodEnd`, `CONVERTIBLE_REDEMPTION_AFTER_PERIOD_END`), and the
+    notes are still counted as of the period end. BE's 2028 notes were
+    redeemed in July 2026, so the bridge total 21,328,105 includes their
+    59,486 shares.
+- `get_valuation_snapshot` reads the bridge. Its diluted shares and the
+  convertible principal it removes from debt follow these fixes.
+- Not changed: warrants that expired or were redeemed without an exercise tag
+  are still read from their last tagged count. Such a count is flagged when
+  it predates the period end.
 
 ## Non-US Primary Filings
 

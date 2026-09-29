@@ -623,11 +623,28 @@ function dimsWithin(inner: Record<string, string>, outer: Record<string, string>
   return Object.entries(inner).every(([axis, member]) => outer[axis] === member);
 }
 
+// An exercise of the class: warrants exercised or shares issued on exercise (BE tags Oracle's cashless exercise
+// on 2026-05-01 as StockIssuedDuringPeriodSharesExerciseOfWarrants on the warrant's class member).
+const WARRANT_EXERCISE_EVENT_RE = /WarrantsExercised|ExerciseOfWarrants/;
+const CLASS_OF_WARRANT_AXIS = "ClassOfWarrantOrRightAxis";
+
+/** An exercise of the same warrant class after the count and by the period end: the count no longer describes what is outstanding. */
+function laterExercise(doc: IxDocument, f: IxFact): IxFact | null {
+  const axis = Object.keys(f.dims).find((a) => a.endsWith(CLASS_OF_WARRANT_AXIS));
+  if (!axis || !f.periodEnd) return null;
+  const member = f.dims[axis];
+  const end = doc.documentPeriodEnd;
+  const hits = doc.facts.filter((g) => WARRANT_EXERCISE_EVENT_RE.test(g.local) && g.value != null && g.value > 0 && g.dims[axis] === member
+    && g.periodEnd != null && g.periodEnd > f.periodEnd! && (end == null || g.periodEnd <= end));
+  return newest(hits);
+}
+
 /** Why a tagged warrant count is an exercise or equity movement, not warrants outstanding; null when it is a count. */
 function warrantCountEvent(doc: IxDocument, f: IxFact): string | null {
   if (Object.keys(f.dims).some((axis) => axis.endsWith(EQUITY_STATEMENT_AXIS))) return "EQUITY_STATEMENT_MOVEMENT";
   const exercised = doc.facts.some((g) => WARRANT_EXERCISED_CONCEPTS.includes(g.local) && g.value != null && g.periodEnd === f.periodEnd && dimsWithin(g.dims, f.dims));
-  return exercised ? "WARRANT_EXERCISE" : null;
+  if (exercised) return "WARRANT_EXERCISE";
+  return laterExercise(doc, f) ? "EXERCISED_AFTER_COUNT" : null;
 }
 
 /** Warrant counts not read as outstanding because they record an exercise or an equity movement. */
@@ -640,12 +657,14 @@ export function warrantCountEvents(sources: IxSource[]): Record<string, unknown>
       if (!reason) continue;
       const key = `${f.name}|${dimsKey(f.dims)}|${f.periodEnd}|${f.value}`;
       if (out.has(key)) continue;
+      const exercise = reason === "EXERCISED_AFTER_COUNT" ? laterExercise(source.doc, f) : null;
       out.set(key, {
         class: hasDims(f) ? Object.values(f.dims).map(memberLabel).join(" / ") : "Warrants (not itemized)",
         concept: f.name,
         value: f.value,
         asOf: f.periodEnd,
         reason,
+        ...(exercise ? { exercise: { concept: exercise.name, value: exercise.value, date: exercise.periodEnd } } : {}),
         filingType: source.filingType,
         accessionNumber: source.accessionNumber,
       });
@@ -654,21 +673,37 @@ export function warrantCountEvents(sources: IxSource[]): Record<string, unknown>
   return [...out.values()];
 }
 
+/** A warrant class's identity across filings: its class-of-warrant member, else its dimensions. */
+function warrantClassKey(f: IxFact): string {
+  const axis = Object.keys(f.dims).find((a) => a.endsWith(CLASS_OF_WARRANT_AXIS));
+  return axis ? `${axis}=${f.dims[axis]}` : dimsKey(f.dims);
+}
+
 function warrantsComponent(sources: IxSource[], price: number): Record<string, unknown> | null {
-  const found = findInSources(sources, (doc) => {
-    const counts = doc.facts.filter((f) => f.value != null && WARRANT_COUNT_CONCEPTS.includes(f.local) && warrantCountEvent(doc, f) == null);
+  // Classes a newer filing shows exercised or retired; an older fallback filing must not restore them
+  // (BE's 2025 10-K still counts the Oracle warrant its 2026 10-Q shows exercised).
+  const retired = new Set<string>();
+  let found: { value: IxFact[]; source: IxSource } | null = null;
+  for (const source of sources) {
+    const doc = source.doc;
+    const counts = doc.facts.filter((f) => f.value != null && WARRANT_COUNT_CONCEPTS.includes(f.local) && warrantCountEvent(doc, f) == null && !retired.has(warrantClassKey(f)));
     const concept = WARRANT_COUNT_CONCEPTS.find((c) => counts.some((f) => f.local === c));
     const facts = counts.filter((f) => f.local === concept);
-    if (facts.length === 0) return null;
-    const groups = new Map<string, IxFact>();
-    for (const f of facts) {
-      const key = dimsKey(f.dims);
-      const prev = groups.get(key);
-      if (!prev || (f.periodEnd ?? "") > (prev.periodEnd ?? "")) groups.set(key, f);
+    if (facts.length > 0) {
+      const groups = new Map<string, IxFact>();
+      for (const f of facts) {
+        const key = dimsKey(f.dims);
+        const prev = groups.get(key);
+        if (!prev || (f.periodEnd ?? "") > (prev.periodEnd ?? "")) groups.set(key, f);
+      }
+      const dimmed = [...groups.entries()].filter(([key]) => key !== "");
+      found = { value: dimmed.length > 0 ? dimmed.map(([, f]) => f) : [groups.get("")!], source };
+      break;
     }
-    const dimmed = [...groups.entries()].filter(([key]) => key !== "");
-    return dimmed.length > 0 ? dimmed.map(([, f]) => f) : [groups.get("")!];
-  });
+    for (const f of doc.facts) {
+      if (f.value != null && WARRANT_COUNT_CONCEPTS.includes(f.local) && warrantCountEvent(doc, f) != null) retired.add(warrantClassKey(f));
+    }
+  }
   if (!found) return null;
   const { value: facts, source } = found;
   const unvestedFacts = source.doc.facts.filter((g) => WARRANT_UNVESTED_RE.test(g.local) && isShareCount(g));
@@ -742,6 +777,33 @@ function groupText(group: DebtGroup, local: string): string | null {
   return best ? best.text : null;
 }
 
+// The filing's own count of shares issuable on conversion at the period end (BE tags the maximum, make-whole
+// included, per note), and principal outstanding then: after conversions and repurchases the issue's face
+// amount overstates both (BE's 2028 notes: $632.5M issued, $0.787M left at 2026-06-30) (2.5.9).
+const SHARES_ISSUABLE_CONCEPTS = ["DebtInstrumentConvertibleNumberOfSharesAvailableForConversion", "DebtInstrumentConvertibleNumberOfEquityInstruments"];
+// Principal at the period end: a face amount tagged then, else the instrument's carrying amount when it is well
+// below the issue's face (conversions or repurchases), not a balance-sheet line net of discount and costs
+// (LongTermDebt $290M against $300M issued is the same notes, net).
+const PERIOD_END_FACE_CONCEPTS = ["DebtInstrumentFaceAmount"];
+const PERIOD_END_CARRYING_CONCEPTS = ["DebtInstrumentCarryingAmount"];
+const REDUCED_PRINCIPAL_SHARE = 0.95;
+const INSTRUMENT_AXES_RE = /(?:DebtInstrumentAxis|LongtermDebtTypeAxis)$/;
+const SUBSEQUENT_EVENT_AXIS_RE = /SubsequentEventTypeAxis$/;
+const REDEMPTION_RE = /Redemption|Redeem|Repurchase|Extinguish|Repaid|Repayment/;
+// A tagged conversion ratio that disagrees with the tagged conversion price is not the conversion rate
+// (BE tags only the make-whole increase, e.g. 2.6926 against $194.97, whose rate is 5.1290 per $1,000).
+const RATIO_PRICE_TOLERANCE = 0.02;
+
+/** A value tagged only on the instrument's own axes, at a date. */
+function instrumentValue(group: DebtGroup, locals: string[], at: string): Picked | null {
+  for (const local of locals) {
+    const hit = newest(group.facts.filter((f) => f.local === local && f.value != null && f.periodEnd === at
+      && Object.keys(f.dims).every((axis) => INSTRUMENT_AXES_RE.test(axis))));
+    if (hit) return picked(hit);
+  }
+  return null;
+}
+
 function convertiblesComponent(sources: IxSource[], price: number): Record<string, unknown> | null {
   const found = findInSources(sources, (doc) => {
     const groups = debtGroups(doc).filter((g) => groupValue(g, [CONVERSION_PRICE, CONVERSION_RATIO]) != null);
@@ -752,23 +814,36 @@ function convertiblesComponent(sources: IxSource[], price: number): Record<strin
   });
   if (!found) return null;
   const { value: groups, source } = found;
+  const end = source.doc.documentPeriodEnd;
   const instruments = groups.map((g) => {
     const faceTagged = groupValue(g, [FACE_AMOUNT]);
+    const faceAtEnd = end && g.member ? instrumentValue(g, PERIOD_END_FACE_CONCEPTS, end) : null;
+    const carryingAtEnd = end && g.member && !faceAtEnd ? instrumentValue(g, PERIOD_END_CARRYING_CONCEPTS, end) : null;
+    const current = faceAtEnd
+      ?? (carryingAtEnd && (faceTagged == null || carryingAtEnd.value < REDUCED_PRINCIPAL_SHARE * faceTagged.value) ? carryingAtEnd : null);
     // Some issuers tag each issue's principal only under a carrying-amount
     // concept, often at the issue date; use it and say so.
-    const face = faceTagged ?? groupValue(g, PRINCIPAL_FALLBACK_CONCEPTS);
+    const face = current ?? faceTagged ?? groupValue(g, PRINCIPAL_FALLBACK_CONCEPTS);
+    const issuable = end && g.member ? instrumentValue(g, SHARES_ISSUABLE_CONCEPTS, end) : null;
     const convPrice = groupValue(g, [CONVERSION_PRICE]);
     const ratio = groupValue(g, [CONVERSION_RATIO]);
-    const impliedPrice = convPrice ? convPrice.value : (ratio && ratio.value > 0 ? 1000 / ratio.value : null);
+    const ratioConsistent = ratio != null && ratio.value > 0
+      && (convPrice == null || Math.abs((ratio.value * convPrice.value) / 1000 - 1) <= RATIO_PRICE_TOLERANCE);
+    const usableRatio = ratioConsistent ? ratio : null;
+    const impliedPrice = convPrice ? convPrice.value : (usableRatio ? 1000 / usableRatio.value : null);
     let shares: number | null = null;
     let basis: string | null = null;
-    if (face && ratio && ratio.value > 0) {
-      shares = (face.value / 1000) * ratio.value;
+    if (issuable) {
+      shares = issuable.value;
+      basis = "shares_issuable_tagged_at_period_end";
+    } else if (face && usableRatio) {
+      shares = (face.value / 1000) * usableRatio.value;
       basis = "principal / 1000 * conversion_ratio";
     } else if (face && convPrice && convPrice.value > 0) {
       shares = face.value / convPrice.value;
       basis = "principal / conversion_price";
     }
+    const redemption = newest(g.facts.filter((f) => REDEMPTION_RE.test(f.local) && Object.keys(f.dims).some((axis) => SUBSEQUENT_EVENT_AXIS_RE.test(axis))));
     const inTheMoney = impliedPrice != null ? price >= impliedPrice : null;
     return {
       instrument: g.member ? memberLabel(g.member) : "Convertible notes (not itemized)",
@@ -777,13 +852,17 @@ function convertiblesComponent(sources: IxSource[], price: number): Record<strin
       principal: face ? face.value : null,
       principalConcept: face ? face.concept : null,
       principalDate: face ? face.periodEnd : null,
-      principalBasis: faceTagged ? "face_amount" : (face ? "tagged_amount_fallback" : null),
+      principalBasis: current ? "outstanding_at_period_end" : faceTagged ? "face_amount" : (face ? "tagged_amount_fallback" : null),
       conversionPrice: convPrice ? convPrice.value : (impliedPrice != null ? round(impliedPrice, 4) : null),
       conversionPriceBasis: convPrice ? "tagged" : (impliedPrice != null ? "1000 / conversion_ratio" : null),
       conversionRatioPer1000: ratio ? ratio.value : null,
+      conversionRatioUsed: usableRatio != null && !issuable,
+      ...(ratio && !ratioConsistent ? { conversionRatioNote: "RATIO_INCONSISTENT_WITH_PRICE" } : {}),
       maturityDate: normalizeIxDate(groupText(g, "DebtInstrumentMaturityDate")),
       ifConvertedShares: shares != null ? round(shares) : null,
       ifConvertedBasis: basis,
+      sharesIssuableDate: issuable ? issuable.periodEnd : null,
+      ...(redemption ? { afterPeriodEnd: { concept: redemption.name, date: redemption.periodEnd } } : {}),
       inTheMoney,
       incrementalShares: shares != null && inTheMoney ? round(shares) : (shares != null ? 0 : null),
     };
@@ -796,7 +875,7 @@ function convertiblesComponent(sources: IxSource[], price: number): Record<strin
     ifConvertedShares: instruments.reduce((sum, i) => sum + (i.ifConvertedShares ?? 0), 0),
     incrementalShares: unresolved === instruments.length ? null : instruments.reduce((sum, i) => sum + (i.incrementalShares ?? 0), 0),
     unresolvedInstruments: unresolved,
-    note: "Principal is the tagged face amount, else the issue's tagged carrying amount (principalBasis says which); either can be the original principal before repurchases. Net-share or cash settlement, capped calls and make-whole adjustments are not modeled.",
+    note: "Shares are the filing's count issuable on conversion at the period end when tagged (it can be the maximum, make-whole included); else principal outstanding at the period end (a face amount then, or a carrying amount well below the issue's face), else the face amount or an issue-date carrying amount (principalBasis says which), times a conversion ratio that agrees with the conversion price, else divided by the price. Net-share or cash settlement and capped calls are not modeled.",
     source: sourceRef(source, null),
   };
 }
@@ -982,10 +1061,23 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
   if (warrantEvents.length > 0) {
     warnings.push({
       code: "WARRANT_EXERCISE_NOT_OUTSTANDING",
-      message: `${warrantEvents.length} tagged warrant count(s) record an exercise or an equity-statement movement, so they are not counted as warrants outstanding: ${warrantEvents.map((w) => `${w.class} ${w.value} on ${w.asOf}`).join("; ")}.`,
+      message: `${warrantEvents.length} tagged warrant count(s) record an exercise or an equity-statement movement, or predate an exercise of the same class, so they are not counted as warrants outstanding: ${warrantEvents.map((w) => `${w.class} ${w.value} on ${w.asOf}${w.exercise ? ` (exercised: ${(w.exercise as Record<string, unknown>).value} on ${(w.exercise as Record<string, unknown>).date})` : ""}`).join("; ")}.`,
       severity: "info",
       counts: warrantEvents,
     });
+  }
+  const notes = (convertibles?.instruments ?? []) as Record<string, unknown>[];
+  const faceOnly = notes.filter((i) => i.ifConvertedBasis !== "shares_issuable_tagged_at_period_end" && i.principalBasis !== "outstanding_at_period_end" && i.principal != null);
+  if (faceOnly.length > 0) {
+    warnings.push({ code: "CONVERTIBLE_PRINCIPAL_NOT_AT_PERIOD_END", message: `No principal or shares issuable is tagged at the period end for ${faceOnly.map((i) => i.instrument).join(", ")}; the ${faceOnly.map((i) => `${i.principalBasis} ${i.principal} (${i.principalDate})`).join(", ")} is used and can include notes since converted or repurchased.`, severity: "warning" });
+  }
+  const badRatios = notes.filter((i) => i.conversionRatioNote === "RATIO_INCONSISTENT_WITH_PRICE");
+  if (badRatios.length > 0) {
+    warnings.push({ code: "CONVERSION_RATIO_INCONSISTENT", message: `The tagged conversion ratio of ${badRatios.map((i) => `${i.instrument} (${i.conversionRatioPer1000} per 1,000 against a $${i.conversionPrice} price)`).join(", ")} is not the conversion rate (often a make-whole increase) and is not used.`, severity: "info" });
+  }
+  const redeemed = notes.filter((i) => i.afterPeriodEnd != null);
+  if (redeemed.length > 0) {
+    warnings.push({ code: "CONVERTIBLE_REDEMPTION_AFTER_PERIOD_END", message: `A redemption or repurchase after the period end is tagged for ${redeemed.map((i) => `${i.instrument} (${(i.afterPeriodEnd as Record<string, unknown>).date})`).join(", ")}; its shares are counted as of the period end.`, severity: "warning" });
   }
   const earlyCounts = ((warrants?.classes ?? []) as Record<string, unknown>[]).filter((c) => c.countBeforePeriodEnd === true);
   if (earlyCounts.length > 0) {

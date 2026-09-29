@@ -307,6 +307,37 @@ for {_num("us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRigh
 <p>On June 3, 2024, {_num("us-gaap:ClassOfWarrantOrRightNumberOfWarrantsExercised", "wPub", "shares", "3,000,000")} public warrants were exercised for
 {_num("us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights", "wPub", "shares", "1,000,000")} shares.</p>
 </body></html>"""
+# Tagged the way BE's Q2 2026 10-Q is (2.5.9): notes mostly converted since issue, their tagged
+# ratios the make-whole increases, a redemption after the period end, and a freestanding warrant tagged at
+# issuance whose holder exercised it in May.
+N28 = {"us-gaap:DebtInstrumentAxis": "be:GreenConvertibleSeniorNotesDueJune2028Member", "us-gaap:LongtermDebtTypeAxis": "us-gaap:SeniorNotesMember"}
+N30 = {"us-gaap:DebtInstrumentAxis": "be:ConvertibleSeniorNotesDueNovember2030Member", "us-gaap:LongtermDebtTypeAxis": "us-gaap:SeniorNotesMember"}
+FSW = {"us-gaap:ClassOfWarrantOrRightAxis": "be:FreestandingWarrantMember"}
+BE_Q = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "eq", "10-Q")}
+{_text("dei:DocumentPeriodEndDate", "eq", "June 30, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("eq", "2026-01-01..2026-06-30")}{_context("ecover", "2026-07-24")}
+{_context("e28issue", "2023-05-16", N28)}{_context("e28end", "2026-06-30", N28)}{_context("e28sub", "2026-07-10..2026-07-10", {**N28, "us-gaap:SubsequentEventTypeAxis": "us-gaap:SubsequentEventMember"})}
+{_context("e30issue", "2025-11-04", N30)}{_context("e30end", "2026-06-30", N30)}
+{_context("ewIssue", "2025-10-28", FSW)}{_context("ewEx", "2026-05-01..2026-05-01", FSW)}{UNITS}</ix:resources></ix:header></div>
+<p>Shares outstanding: {_num("dei:EntityCommonStockSharesOutstanding", "ecover", "shares", "294,527,346")}</p>
+<p>2028 notes: issued {_num("us-gaap:DebtInstrumentFaceAmount", "e28issue", "usd", "632.5", 6)}, conversion price ${_num("us-gaap:DebtInstrumentConvertibleConversionPrice1", "e28issue", "usdPerShare", "18.85")},
+make-whole increase {_num("us-gaap:DebtInstrumentConvertibleConversionRatio1", "e28issue", "pure", "22.543")}; principal outstanding {_num("us-gaap:DebtInstrumentCarryingAmount", "e28end", "usd", "0.787", 6)};
+shares issuable {_num("us-gaap:DebtInstrumentConvertibleNumberOfSharesAvailableForConversion", "e28end", "shares", "59,486")}; redeemed at {_num("us-gaap:DebtInstrumentRedemptionPricePercentage", "e28sub", "pure", "100", -2)}% in July.</p>
+<p>2030 notes: issued {_num("us-gaap:DebtInstrumentFaceAmount", "e30issue", "usd", "2,500", 6)}, conversion price ${_num("us-gaap:DebtInstrumentConvertibleConversionPrice1", "e30issue", "usdPerShare", "194.97")},
+make-whole increase {_num("us-gaap:DebtInstrumentConvertibleConversionRatio1", "e30issue", "pure", "2.6926")}; principal {_num("us-gaap:DebtInstrumentCarryingAmount", "e30end", "usd", "2,500", 6)}.</p>
+<p>The warrant was issued for {_num("us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights", "ewIssue", "shares", "3,531,073")} shares at ${_num("us-gaap:ClassOfWarrantOrRightExercisePriceOfWarrantsOrRights1", "ewIssue", "usdPerShare", "113.28")};
+on May 1, 2026 it was exercised on a cashless basis for {_num("us-gaap:StockIssuedDuringPeriodSharesExerciseOfWarrants", "ewEx", "shares", "1,905,433")} shares.</p>
+</body></html>"""
+# BE's 2025 10-K, the bridge's annual fallback: the warrant is still outstanding at its year end.
+BE_K = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "ey", "10-K")}
+{_text("dei:DocumentPeriodEndDate", "ey", "December 31, 2025", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("ey", "2025-01-01..2025-12-31")}{_context("eyw", "2025-10-28", FSW)}{UNITS}</ix:resources></ix:header></div>
+<p>The warrant is exercisable for {_num("us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights", "eyw", "shares", "3,531,073")} shares at ${_num("us-gaap:ClassOfWarrantOrRightExercisePriceOfWarrantsOrRights1", "eyw", "usdPerShare", "113.28")}.</p>
+</body></html>"""
 TABLE_MATCHES = [
     {"contextText": "Unvested at December 31, 2025 | 2,500,000 | $ 14.10", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at December 31, 2025"},
     {"contextText": "Unvested at June 30, 2026 | 2,750,000 | $ 15.20", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at June 30, 2026"},
@@ -314,7 +345,7 @@ TABLE_MATCHES = [
     {"contextText": "Unvested at June 30, 2026, restricted stock units totalled 8,888,888 shares.", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": False, "tableTitle": None, "rowLabel": None},
 ]
 
-FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K}
+FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K}
 
 NEWS_ITEMS = [
     {"title": "Needham raises IQE price target to 45p from 38p", "summary": "Needham values IQE at 12x 2027 EV/EBITDA, citing gallium nitride demand.", "url": "https://news.example/1", "publishedAt": "2026-09-20T08:00:00Z", "source": "yahoo_finance_news"},
@@ -362,6 +393,7 @@ out.bridgeLow = m.dilutionBridge({ ticker: "CSTC", price: 10, priceCurrency: "US
 out.bridgeAaoi = m.dilutionBridge({ ticker: "AAOX", price: 30, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2026-08-06", "0001234568-26-000040", data.qUrl, "aaoi_q")], atmMatches: [] });
 out.bridgeTable = m.dilutionBridge({ ticker: "BARE", price: 30, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2026-08-06", "0001234568-26-000050", data.qUrl, "bare_q")], atmMatches: [], awardTableMatches: data.tableMatches });
 out.bridgeAwards = m.dilutionBridge({ ticker: "CSTC", price: 25, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2025-08-06", "0001234568-25-000030", data.qUrl, "awards_q")], atmMatches: [] });
+out.bridgeBe = m.dilutionBridge({ ticker: "BEX", price: 30, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2026-07-28", "0001234568-26-000130", data.qUrl, "be_q"), src("latest_annual_fallback", "10-K", "2026-02-27", "0001234568-26-000140", data.kUrl, "be_k")], atmMatches: [] });
 out.bridgeVrtWarrants = m.dilutionBridge({ ticker: "VRTW", price: 150, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-K", "2026-02-13", "0001234568-26-000120", data.kUrl, "vrt_warrant_k")], atmMatches: [] });
 out.capital = m.capitalStructure({ ticker: "CSTC", source: kSource, fundingMatches: atm });
 out.capitalAaoi = m.capitalStructure({ ticker: "AAOX", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000040", data.qUrl, "aaoi_q"), fundingMatches: [] });
@@ -464,6 +496,8 @@ def _python_pure() -> dict:
             cs.TextMatch(t["contextText"], t["sectionHeading"], t["documentUrl"], t["filingDate"], t["accessionNumber"], t["inTable"], t["tableTitle"], t["rowLabel"]) for t in TABLE_MATCHES
         ]),
         "bridgeAwards": cs.dilution_bridge("CSTC", 25, "USD", None, [cs.IxSource("primary", "10-Q", "2025-08-06", "0001234568-25-000030", Q_URL, docs["awards_q"])], []),
+        "bridgeBe": cs.dilution_bridge("BEX", 30, "USD", None, [cs.IxSource("primary", "10-Q", "2026-07-28", "0001234568-26-000130", Q_URL, docs["be_q"]),
+                                                               cs.IxSource("latest_annual_fallback", "10-K", "2026-02-27", "0001234568-26-000140", K_URL, docs["be_k"])], []),
         "bridgeVrtWarrants": cs.dilution_bridge("VRTW", 150, "USD", None, [cs.IxSource("primary", "10-K", "2026-02-13", "0001234568-26-000120", K_URL, docs["vrt_warrant_k"])], []),
         "capital": cs.capital_structure("CSTC", k_source, atm),
         "capitalAaoi": cs.capital_structure("AAOX", cs.IxSource("primary", "10-Q", "2026-08-06", "0001234568-26-000040", Q_URL, docs["aaoi_q"]), []),
@@ -658,6 +692,30 @@ class TestCapitalStructureValues(unittest.TestCase):
         statements = " ".join(s["statement"] for s in c["fundingStatements"])
         for noise in ("performance obligations", "expected life", "operating expenses and capital expenditures;"):
             self.assertNotIn(noise, statements)
+
+    def test_convertibles_at_period_end_and_warrant_exercised_after_count(self) -> None:
+        b = _python_pure()["bridgeBe"]
+        notes = {i["instrument"]: i for i in next(c for c in b["components"] if c["component"] == "convertible_debt")["instruments"]}
+        n28 = next(v for k, v in notes.items() if "2028" in k)
+        n30 = next(v for k, v in notes.items() if "2030" in k)
+        # BE (2.5.9): the 2028 notes had $0.787M left of $632.5M; the filing counts 59,486 shares issuable.
+        self.assertEqual((n28["principal"], n28["principalBasis"], n28["ifConvertedShares"], n28["ifConvertedBasis"]),
+                         (787_000, "outstanding_at_period_end", 59_486, "shares_issuable_tagged_at_period_end"))
+        self.assertEqual(n28["afterPeriodEnd"]["date"], "2026-07-10")
+        # The tagged 2.6926 is a make-whole increase, not the rate: $2.5B / $194.97, out of the money at $30.
+        self.assertEqual((n30["principalBasis"], n30["conversionRatioNote"], n30["ifConvertedBasis"], n30["inTheMoney"]),
+                         ("face_amount", "RATIO_INCONSISTENT_WITH_PRICE", "principal / conversion_price", False))
+        self.assertEqual(n30["ifConvertedShares"], cs.round_half_up(2_500_000_000 / 194.97))
+        self.assertEqual(b["bridge"]["convertibleDebt"], 59_486)
+        codes = [w["code"] for w in b["warnings"]]
+        self.assertIn("CONVERSION_RATIO_INCONSISTENT", codes)
+        self.assertIn("CONVERTIBLE_REDEMPTION_AFTER_PERIOD_END", codes)
+        # Oracle's warrant, tagged at issuance, was exercised in May: not outstanding, and the 2025 10-K fallback,
+        # where it was still outstanding, does not restore it.
+        self.assertIn("warrants", b["notDisclosed"])
+        event = next(w for w in b["warnings"] if w["code"] == "WARRANT_EXERCISE_NOT_OUTSTANDING")["counts"][0]
+        self.assertEqual((event["value"], event["reason"], event["exercise"]["value"], event["exercise"]["date"]),
+                         (3_531_073, "EXERCISED_AFTER_COUNT", 1_905_433, "2026-05-01"))
 
     def test_exercised_warrants_are_not_outstanding(self) -> None:
         bridge = _python_pure()["bridgeVrtWarrants"]
