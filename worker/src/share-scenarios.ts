@@ -23,6 +23,7 @@ export const TREATMENTS = {
   warrant_vesting: ["vested_only", "all"],
   convertibles: ["if_converted_when_in_the_money", "if_converted_all", "net_share_settlement_when_stated", "exclude"],
   atm: ["exclude", "full_remaining_capacity"],
+  capped_calls: ["ignore", "offset_when_stated"],
 } as const;
 
 type TreatmentKey = keyof typeof TREATMENTS;
@@ -34,6 +35,7 @@ const DEFAULTS: Record<TreatmentKey, string> = {
   warrant_vesting: "vested_only",
   convertibles: "if_converted_when_in_the_money",
   atm: "exclude",
+  capped_calls: "ignore",
 };
 
 export interface KnownIssuance {
@@ -222,6 +224,27 @@ function scenarioLines(bridge: Rec, s: ShareScenario): Line[] {
     }
   }
 
+  // Capped calls the filing states for convertible notes, netted only when the caller asks (2.5.12).
+  if (t.capped_calls === "offset_when_stated") {
+    for (const inst of (Array.isArray(byName("convertible_debt")?.instruments) ? byName("convertible_debt")!.instruments : []) as Rec[]) {
+      const call = inst.cappedCall && typeof inst.cappedCall === "object" ? inst.cappedCall as Rec : null;
+      if (!call) continue;
+      const strike = num(call.strikePrice);
+      const cap = num(call.capPrice);
+      const covered = num(call.coveredShares);
+      const base = {
+        component: "capped_call", instrument: `${String(inst.instrument ?? "Convertible notes")} capped call`, treatment: t.capped_calls,
+        count: covered, countBasis: String(call.coverageBasis ?? "NOT_STATED"), exercisePrice: strike, price,
+        inTheMoney: strike != null ? price > strike : null, thresholdPrice: strike,
+      };
+      if (strike == null || cap == null || covered == null) {
+        lines.push(line({ ...base, method: t.capped_calls, incrementalShares: null, unresolvedReason: String(call.unresolvedReason ?? "capped call terms not stated") }));
+      } else {
+        lines.push(line({ ...base, method: "capped call: minus covered x (min(price, cap) - strike) / price, delivered back to the company (economic, not the EPS count)", incrementalShares: 0 - round((covered * Math.max(0, Math.min(price, cap) - strike)) / price) }));
+      }
+    }
+  }
+
   const atm = bridge.atmProgram && typeof bridge.atmProgram === "object" ? bridge.atmProgram as Rec : null;
   if (atm) {
     const remaining = num(atm.remainingCapacityUsd);
@@ -303,7 +326,7 @@ export function shareCountScenarios(ticker: string, bridge: Rec, scenarios: Shar
       "Counts, exercise prices and conversion terms are the company's inline XBRL disclosures (the dilution bridge's inventory); prices and treatments are the caller's.",
       "Each scenario is reported as computed; no scenario is recommended and no denominator is selected.",
       "An unresolved instrument is left out of resultingShares and listed; an instrument in notDisclosed was not tagged, which is not proof it does not exist.",
-      "Net-share or cash settlement, capped calls, make-whole adjustments and performance conditions are not modeled.",
+      "Net-share settlement applies only to notes whose principal the filing says is settled in cash (convertibles: net_share_settlement_when_stated); capped calls offset only with capped_calls: offset_when_stated and only when their strike, cap and covered shares are stated. Make-whole adjustments and performance conditions are not modeled.",
       "TAGGED_INSTRUMENTS_RESOLVED means every tagged instrument was resolved, not that every claim on the equity was found; claims quoted in unquantifiedShareClaims are in no scenario's resultingShares.",
     ],
     selectedScenario: null,

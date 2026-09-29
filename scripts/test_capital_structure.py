@@ -518,6 +518,27 @@ SETTLEMENT_TEXT = [
 LITE_SETTLEMENT_TEXT = [
     "The principal amounts of all of our outstanding convertible notes must be settled in cash. The actual cash settlement may be higher if we decide to settle the conversion value in excess of the principal amounts in cash.",
 ]
+# Capped calls (2.5.12): the 2029 notes' capped call by its passage (strike, cap, the notes' underlying shares);
+# BE's stated count that outlasted conversions; RKLB's stated count above the notes' shares; LITE's missing strike.
+CAPPED_TEXT = [
+    "In connection with the 2029 Notes, we entered into capped call transactions. The capped calls have an initial strike price of $20.00 per share, "
+    "which corresponds to the initial conversion price of the 2029 Notes, and an initial cap price of $35.00 per share. "
+    "The capped calls cover, subject to anti-dilution adjustments, the number of shares of common stock that initially underlie the 2029 Notes.",
+]
+BE_CAPPED_TEXT = [
+    "The Capped Calls have an initial strike price of approximately $18.85 per share of Class A common stock, subject to certain adjustments. "
+    "The strike price of $18.85 corresponds to the initial conversion price of the 3.0% Green Notes due June 2028. "
+    "The number of shares underlying the Capped Calls is 33,549,508 shares of Class A common stock. The cap price of the Capped Calls is initially $26.46 per share of Class A common stock.",
+    "The Capped Calls were not impacted by the induced conversion of 3.0% Green Notes due June 2028 in the fourth quarter of fiscal year 2025.",
+]
+RKLB_CAPPED_TEXT = [
+    "The Capped Call Transactions have a strike price of $5.1255 per share with a cap price of $8.04 per share, covering approximately 69.3 million shares of common stock.",
+]
+LITE_CAPPED_TEXT = [
+    "The 2032 Capped Call Options cover, subject to anti-dilution adjustments, the number of shares of our common stock that initially underlie the 2032 Notes. "
+    "The cap price of the 2032 Capped Call Options was initially $268.24 per share, and is subject to certain adjustments.",
+]
+
 # Claim kinds and preferred wordings added in 2.5.11, and the sentences that must not count.
 CENSUS2_CLAIM_TEXT = [
     "In connection with the acquisition, 1,200,000 holdback shares are held by the Company and will be released to the sellers in 2027.",
@@ -614,6 +635,10 @@ out.bridgeSettled = m.dilutionBridge({ ticker: "CSTC", price: 25, priceCurrency:
 out.bridgeLiteSettled = m.dilutionBridge({ ticker: "LITX", price: 700, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-K", "2026-08-20", "0001234568-26-000200", data.kUrl, "lite_k")], atmMatches: [], claimMatches: tm(data.liteClaims), convertibleSettlementMatches: tm(data.liteSettlement) });
 out.bridgeCensus2 = m.dilutionBridge({ ticker: "AEHX", price: 20, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-K", "2026-07-27", "0001234568-26-000190", data.kUrl, "aehr_k")], atmMatches: [], claimMatches: tm(data.census2Claims) });
 out.preferredWordings = data.preferredWordings.map((texts) => m.preferredConversionTerms(tm(texts)));
+out.bridgeCapped = m.dilutionBridge({ ticker: "CSTC", price: 25, priceCurrency: "USD", asOfDate: "2025-05-09", sources: [qSource, kFallback], atmMatches: atm, cappedCallMatches: tm(data.capped) });
+out.bridgeCappedHigh = m.dilutionBridge({ ticker: "CSTC", price: 50, priceCurrency: "USD", asOfDate: "2025-05-09", sources: [qSource, kFallback], atmMatches: atm, convertibleSettlementMatches: tm(data.settlement), cappedCallMatches: tm(data.capped) });
+out.bridgeLiteCapped = m.dilutionBridge({ ticker: "LITX", price: 700, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-K", "2026-08-20", "0001234568-26-000200", data.kUrl, "lite_k")], atmMatches: [], claimMatches: tm(data.liteClaims), cappedCallMatches: tm(data.liteCapped) });
+out.cappedTerms = [data.capped, data.beCapped, data.rklbCapped, data.liteCapped].map((texts) => m.cappedCallTerms(tm(texts)));
 out.capital = m.capitalStructure({ ticker: "CSTC", source: kSource, fundingMatches: atm });
 out.capitalAaoi = m.capitalStructure({ ticker: "AAOX", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000040", data.qUrl, "aaoi_q"), fundingMatches: [] });
 out.capitalAsts = m.capitalStructure({ ticker: "ASTX", source: src("primary", "10-Q", "2026-08-10", "0001234568-26-000060", data.qUrl, "asts_q"), fundingMatches: [] });
@@ -681,7 +706,8 @@ def _worker_pure() -> dict:
             "chHistory": CH_HISTORY, "chSearch": CH_SEARCH, "tableMatches": TABLE_MATCHES, "astsNews": ASTS_NEWS,
             "cohrClaims": COHR_CLAIM_TEXT, "mrvlClaims": MRVL_CLAIM_TEXT, "liteClaims": LITE_CLAIM_TEXT, "censusClaims": CENSUS_CLAIM_TEXT,
             "lifecycle": LIFECYCLE_TEXT, "settlement": SETTLEMENT_TEXT, "liteSettlement": LITE_SETTLEMENT_TEXT, "census2Claims": CENSUS2_CLAIM_TEXT,
-            "preferredWordings": PREFERRED_WORDINGS,
+            "preferredWordings": PREFERRED_WORDINGS, "capped": CAPPED_TEXT, "beCapped": BE_CAPPED_TEXT, "rklbCapped": RKLB_CAPPED_TEXT,
+            "liteCapped": LITE_CAPPED_TEXT,
         }), encoding="utf-8")
         (tmp_path / "harness.mjs").write_text(_WORKER_PURE, encoding="utf-8")
         result = subprocess.run(
@@ -725,6 +751,10 @@ def _python_pure() -> dict:
         "bridgeLiteSettled": cs.dilution_bridge("LITX", 700, "USD", None, [lite_src], [], None, tm(LITE_CLAIM_TEXT), None, tm(LITE_SETTLEMENT_TEXT)),
         "bridgeCensus2": cs.dilution_bridge("AEHX", 20, "USD", None, [aehr_src], [], None, tm(CENSUS2_CLAIM_TEXT)),
         "preferredWordings": [cs.preferred_conversion_terms(tm(texts)) for texts in PREFERRED_WORDINGS],
+        "bridgeCapped": cs.dilution_bridge("CSTC", 25, "USD", "2025-05-09", [q_source, k_fallback], atm, None, None, None, None, tm(CAPPED_TEXT)),
+        "bridgeCappedHigh": cs.dilution_bridge("CSTC", 50, "USD", "2025-05-09", [q_source, k_fallback], atm, None, None, None, tm(SETTLEMENT_TEXT), tm(CAPPED_TEXT)),
+        "bridgeLiteCapped": cs.dilution_bridge("LITX", 700, "USD", None, [lite_src], [], None, tm(LITE_CLAIM_TEXT), None, None, tm(LITE_CAPPED_TEXT)),
+        "cappedTerms": [cs.capped_call_terms(tm(texts)) for texts in (CAPPED_TEXT, BE_CAPPED_TEXT, RKLB_CAPPED_TEXT, LITE_CAPPED_TEXT)],
         "bridgeAehr": cs.dilution_bridge("AEHX", 20, "USD", None, [aehr_src], [], None, []),
         "bridgeLite": cs.dilution_bridge("LITX", 700, "USD", None, [cs.IxSource("primary", "10-K", "2026-08-20", "0001234568-26-000200", K_URL, docs["lite_k"])], [], None, tm(LITE_CLAIM_TEXT)),
         "bridgeCensus": cs.dilution_bridge("AEHX", 20, "USD", None, [aehr_src], [], None, tm(CENSUS_CLAIM_TEXT)),
@@ -776,7 +806,7 @@ class TestCapitalStructureParity(unittest.TestCase):
             self.assertEqual(self.worker["documents"][name], self.local["documents"][name], name)
 
     def test_outputs_match(self) -> None:
-        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "bridgeStale", "bridgeStaleUnread", "bridgeSettled", "bridgeLiteSettled", "bridgeCensus2", "preferredWordings", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
+        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "bridgeStale", "bridgeStaleUnread", "bridgeSettled", "bridgeLiteSettled", "bridgeCensus2", "preferredWordings", "bridgeCapped", "bridgeCappedHigh", "bridgeLiteCapped", "cappedTerms", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
 
@@ -1102,6 +1132,45 @@ class TestCapitalStructureValues(unittest.TestCase):
         # LITE: every note; 1,370,689 if-converted less $179.6M / $700.
         lite = next(c for c in out["bridgeLiteSettled"]["components"] if c["component"] == "convertible_debt")["instruments"][0]
         self.assertEqual((lite["principalSettlement"]["scope"], lite["netShareSettlementShares"]), ("ALL_NOTES", 1_114_118))
+
+    def test_capped_calls(self) -> None:
+        out = _python_pure()
+        conv = next(c for c in out["bridgeCapped"]["components"] if c["component"] == "convertible_debt")
+        n29, n31 = conv["instruments"]
+        call = n29["cappedCall"]
+        # 2.5.12: strike $20, cap $35, the 2029 notes' 15,000,000 shares: 15,000,000 x (25 - 20) / 25 = 3,000,000 back at $25.
+        self.assertEqual((call["strikePrice"], call["strikeBasis"], call["capPrice"], call["coveredShares"], call["coverageBasis"], call["offsetSharesAtPrice"]),
+                         (20.0, "STATED", 35.0, 15_000_000, "SHARES_UNDERLYING_NOTES_AT_PERIOD_END", 3_000_000))
+        self.assertIsNone(n31["cappedCall"], "the passage names only the 2029 notes")
+        bridge = out["bridgeCapped"]["bridge"]
+        self.assertEqual((bridge["cappedCallOffsetShares"], bridge["dilutedSharesAtPrice"] - bridge["dilutedSharesAtPriceNetOfCappedCalls"]), (3_000_000, 3_000_000))
+        self.assertIsNone(bridge["dilutedSharesAtPriceNetShareSettlementNetOfCappedCalls"], "no stated cash settlement in this read")
+        self.assertIn("CAPPED_CALL_OFFSET", [w["code"] for w in out["bridgeCapped"]["warnings"]])
+        # At $50 the cap binds: 15,000,000 x (35 - 20) / 50 = 4,500,000; with the 2029 notes net-share settled too.
+        high = out["bridgeCappedHigh"]["bridge"]
+        self.assertEqual(high["cappedCallOffsetShares"], 4_500_000)
+        self.assertEqual(high["dilutedSharesAtPriceNetShareSettlement"] - high["dilutedSharesAtPriceNetShareSettlementNetOfCappedCalls"], 4_500_000)
+        # Unread: no capped call fields on the notes, no offset.
+        plain = next(c for c in out["bridge"]["components"] if c["component"] == "convertible_debt")
+        self.assertEqual((plain["cappedCallText"], plain["cappedCallOffsetShares"]), ("NOT_READ", None))
+        self.assertNotIn("cappedCall", plain["instruments"][0])
+        # LITE: the cap and coverage are stated, the strike is not: reported, not netted.
+        lite = next(c for c in out["bridgeLiteCapped"]["components"] if c["component"] == "convertible_debt")["instruments"][0]
+        self.assertIsNone(lite["cappedCall"], "the fixture's LITE note is the 2028 notes; the 2032 capped call names another note")
+        terms = out["cappedTerms"]
+        self.assertEqual((terms[1][0]["strikePrice"], terms[1][0]["capPrice"], terms[1][0]["coveredShares"], terms[1][0]["survivesConversions"], terms[1][0]["years"]),
+                         (18.85, 26.46, 33_549_508, True, ["2028"]))
+        self.assertEqual((terms[2][0]["coveredShares"], terms[2][0]["strikePrice"], terms[2][0]["capPrice"]), (69_300_000, 5.1255, 8.04))
+        self.assertEqual((terms[3][0]["strikePrice"], terms[3][0]["capPrice"], terms[3][0]["coversNoteShares"], terms[3][0]["years"]), (None, 268.24, True, ["2032"]))
+        # A stated count above the notes' shares: used when the capped calls outlasted conversions, bounded otherwise.
+        note = {"conversionPrice": 18.85, "ifConvertedShares": 59_486}
+        be = cs._capped_call_at(terms[1][0], note, 30)
+        self.assertEqual((be["coveredShares"], be["coverageBasis"], be["offsetSharesAtPrice"]), (33_549_508, "STATED_COUNT_SURVIVES_CONVERSIONS", 8_510_392))
+        rklb = cs._capped_call_at(terms[2][0], {"conversionPrice": 5.13, "ifConvertedShares": 27_736_452}, 20)
+        self.assertEqual((rklb["coveredShares"], rklb["coverageBasis"], rklb["statedCoveredShares"], rklb["offsetSharesAtPrice"]),
+                         (27_736_452, "SHARES_UNDERLYING_NOTES_AT_PERIOD_END_BELOW_STATED_COUNT", 69_300_000, 4_041_894))
+        lite_call = cs._capped_call_at(terms[3][0], {"conversionPrice": 187.77, "ifConvertedShares": 6_737_011}, 700)
+        self.assertEqual((lite_call["strikeBasis"], lite_call["offsetSharesAtPrice"], lite_call["unresolvedReason"]), ("NOT_STATED", None, "strike price not stated"))
 
     def test_claim_census_2_5_11(self) -> None:
         out = _python_pure()

@@ -1226,7 +1226,138 @@ def _settlement_for(instrument: str, count: int, sentences: list[dict]) -> dict 
     return hit
 
 
-def _convertibles_component(sources: list[IxSource], price: float, settlement: list[dict] | None = None) -> dict | None:
+# ── Capped calls (2.5.12) ───────────────────────────────────────────────────
+#
+# A capped call bought with a convertible delivers to the company, at settlement, the value of the
+# covered shares between the strike and the cap: covered x (min(price, cap) - strike) / price shares at
+# the price. BE's 10-K: "The Capped Calls have an initial strike price of approximately $18.85 per share
+# … The number of shares underlying the Capped Calls is 33,549,508 shares … The cap price of the Capped
+# Calls is initially $26.46 per share", and they "were not impacted by the induced conversion" of the
+# notes. The offset is economic, not the EPS count (capped calls are antidilutive and excluded from
+# diluted EPS); it is computed only when the strike, the cap and the covered shares are all stated.
+# LITE states the cap ($268.24) and that its 2032 capped calls cover the shares that initially underlie
+# the 2032 Notes, but no strike: that capped call is reported and left unresolved.
+CAPPED_CALL_SEARCH_TERMS = ["cap price", "capped call"]
+_CAPPED_CALL_RE = re.compile(r"\bcapped calls?\b", _F)
+_CAP_PRICE_RE = re.compile(r"\bcap price\b[^.$]{0,80}?\$\s?(\d[\d,]*(?:\.\d+)?)", _F)
+_CC_STRIKE_RE = re.compile(r"\bstrike price\b[^.$]{0,80}?\$\s?(\d[\d,]*(?:\.\d+)?)", _F)
+_CC_STRIKE_IS_CONVERSION_RE = re.compile(r"\bstrike price\b[^.]{0,120}?\bcorrespond(?:s|ing)? to the (?:initial )?conversion price\b", _F)
+# "The number of shares underlying the Capped Calls is 33,549,508 shares" (BE); "covering approximately 69.3 million shares" (RKLB).
+_CC_COUNT_RE = re.compile(r"\bnumber of shares\b[^.\d]{0,80}?\bunderlying the capped calls?\b\D{0,30}?(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)? million)"
+                          r"|\bcover(?:s|ing|ed)?\b\D{0,60}?(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)? million) shares\b", _F)
+# The capped calls outlast conversions of their notes: "were not impacted by the induced conversion" (BE).
+_CC_SURVIVE_RE = re.compile(r"\bcapped calls?\b[^.]{0,80}?\b(?:were|was|have|has)(?: not been| not)\s+(?:impacted|affected|terminated|unwound|settled)\b"
+                            r"|\bcapped calls?\b[^.]{0,80}?\bremain(?:s|ed)? outstanding\b", _F)
+_CC_UNDERLIE_RE = re.compile(r"\bcover\w*\b[^.]{0,200}?\b(?:initially )?underl(?:ie|ies|ying)\b[^.]{0,60}?\bnotes\b", _F)
+_CC_YEAR_RE = re.compile(r"\b(20\d\d) capped calls?\b|\bnotes due (?:[A-Z][a-z]+ )?(20\d\d)\b|\b(20\d\d) (?:convertible )?(?:senior )?notes\b", _F)
+
+
+def _dollars(m: re.Match | None) -> float | None:
+    return float(m.group(1).replace(",", "")) if m else None
+
+
+def _shares_stated(text: str) -> float:
+    """"33,549,508" -> 33549508; "69.3 million" -> 69300000."""
+    m = re.fullmatch(r"(\d+(?:\.\d+)?) million", text, _F)
+    return round_half_up(float(m.group(1)) * 1_000_000) if m else int(text.replace(",", ""))
+
+
+def capped_call_terms(matches: list[TextMatch]) -> list[dict]:
+    """Capped call terms stated in filing text, merged per set of notes named (by year) in the passage."""
+    groups: dict[str, dict] = {}
+    for match in matches:
+        text = _collapse(match.context_text)
+        if not _CAPPED_CALL_RE.search(text):
+            continue
+        years = sorted({next(y for y in m.groups() if y) for m in _CC_YEAR_RE.finditer(text)})
+        key = "+".join(years)
+        g = groups.get(key)
+        if g is None:
+            g = {"years": years, "strikePrice": None, "strikeIsConversionPrice": False, "capPrice": None, "coveredShares": None,
+                 "coversNoteShares": False, "survivesConversions": False, "sentences": [], "documentUrl": match.document_url,
+                 "filingDate": match.filing_date, "accessionNumber": match.accession_number}
+            groups[key] = g
+        # Each term is read from one sentence about the capped calls (or the sentence after one that names them).
+        items = [x.strip() for x in _CLAIM_SENTENCE_SPLIT_RE.split(text)]
+        about = [x for i, x in enumerate(items) if _CAPPED_CALL_RE.search(x) or (i > 0 and _CAPPED_CALL_RE.search(items[i - 1]))]
+
+        def apply(field: str, m: re.Match, g: dict = g) -> None:
+            if field == "strikePrice" and g["strikePrice"] is None:
+                g["strikePrice"] = _dollars(m)
+            elif field == "strikeIsConversionPrice":
+                g["strikeIsConversionPrice"] = True
+            elif field == "capPrice" and g["capPrice"] is None:
+                g["capPrice"] = _dollars(m)
+            elif field == "coveredShares" and g["coveredShares"] is None:
+                g["coveredShares"] = _shares_stated(m.group(1) or m.group(2))
+            elif field == "coversNoteShares":
+                g["coversNoteShares"] = True
+            elif field == "survivesConversions":
+                g["survivesConversions"] = True
+
+        for field, rx in (("strikePrice", _CC_STRIKE_RE), ("strikeIsConversionPrice", _CC_STRIKE_IS_CONVERSION_RE), ("capPrice", _CAP_PRICE_RE),
+                          ("coveredShares", _CC_COUNT_RE), ("coversNoteShares", _CC_UNDERLIE_RE), ("survivesConversions", _CC_SURVIVE_RE)):
+            for sentence in about:
+                m = rx.search(sentence)
+                if not m:
+                    continue
+                apply(field, m)
+                # The sentence that states it, quoted once.
+                if sentence not in g["sentences"] and len(g["sentences"]) < 5:
+                    g["sentences"].append(sentence[:600])
+                break
+    return [g for g in groups.values()
+            if g["capPrice"] is not None or g["strikePrice"] is not None or g["coveredShares"] is not None or g["coversNoteShares"]]
+
+
+def _capped_call_for(instrument: str, count: int, terms: list[dict]) -> dict | None:
+    """The capped call terms for a note: the passage naming its year, else the only passage when there is one note."""
+    hit = next((t for t in terms if len(t["years"]) == 1 and t["years"][0] in instrument), None)
+    if hit is None and count == 1:
+        hit = next((t for t in terms if not t["years"]), None)
+    return hit
+
+
+def _capped_call_at(t: dict, note: dict, price: float) -> dict:
+    """A note's capped call at the price: its stated terms and the shares its value between strike and cap offsets."""
+    conversion = note.get("conversionPrice") if _is_number(note.get("conversionPrice")) else None
+    strike = t["strikePrice"] if t["strikePrice"] is not None else (conversion if t["strikeIsConversionPrice"] else None)
+    strike_basis = "STATED" if t["strikePrice"] is not None else "STATED_AS_CONVERSION_PRICE" if strike is not None else "NOT_STATED"
+    note_shares = note.get("ifConvertedShares") if _is_number(note.get("ifConvertedShares")) else None
+    # A stated count above the notes' shares today (issue-date coverage after conversions) is used only when the
+    # filing says the capped calls outlasted those conversions (BE); otherwise the notes' shares bound it (RKLB).
+    stated_exceeds = t["coveredShares"] is not None and note_shares is not None and t["coveredShares"] > note_shares * 1.01
+    if t["coveredShares"] is not None and not (stated_exceeds and not t["survivesConversions"]):
+        covered = t["coveredShares"]
+    elif t["coversNoteShares"] or stated_exceeds:
+        covered = note_shares
+    else:
+        covered = None
+    if covered is None:
+        coverage_basis = "NOT_STATED"
+    elif covered == t["coveredShares"]:
+        coverage_basis = "STATED_COUNT_SURVIVES_CONVERSIONS" if stated_exceeds else "STATED_COUNT"
+    else:
+        coverage_basis = "SHARES_UNDERLYING_NOTES_AT_PERIOD_END_BELOW_STATED_COUNT" if stated_exceeds else "SHARES_UNDERLYING_NOTES_AT_PERIOD_END"
+    missing = [x for x, v in (("strike price", strike), ("cap price", t["capPrice"]), ("covered shares", covered)) if v is None]
+    offset = None if missing else round_half_up(covered * max(0, min(price, t["capPrice"]) - strike) / price)
+    out = {
+        "strikePrice": strike,
+        "strikeBasis": strike_basis,
+        "capPrice": t["capPrice"],
+        "coveredShares": covered,
+        "coverageBasis": coverage_basis,
+        "statedCoveredShares": t["coveredShares"],
+        "offsetSharesAtPrice": offset,
+    }
+    if missing:
+        out["unresolvedReason"] = f"{', '.join(missing)} not stated"
+    out.update({"sentences": t["sentences"], "documentUrl": t["documentUrl"], "filingDate": t["filingDate"], "accessionNumber": t["accessionNumber"]})
+    return out
+
+
+def _convertibles_component(sources: list[IxSource], price: float, settlement: list[dict] | None = None,
+                            capped_calls: list[dict] | None = None) -> dict | None:
     def find(doc: IxDocument):
         groups = [g for g in _debt_groups(doc) if _group_value(g, [_CONVERSION_PRICE, _CONVERSION_RATIO]) is not None]
         if groups:
@@ -1313,6 +1444,13 @@ def _convertibles_component(sources: list[IxSource], price: float, settlement: l
                                             "sectionHeading": stated["sectionHeading"], "documentUrl": stated["documentUrl"],
                                             "filingDate": stated["filingDate"], "accessionNumber": stated["accessionNumber"]} if stated else None)
             inst["netShareSettlementShares"] = nss
+    # Capped call terms the filing states for each note (2.5.12).
+    if capped_calls is not None:
+        for inst in instruments:
+            terms = _capped_call_for(str(inst["instrument"]), len(instruments), capped_calls)
+            inst["cappedCall"] = _capped_call_at(terms, inst, price) if terms else None
+    calls = [i["cappedCall"] for i in instruments if i.get("cappedCall") is not None]
+    resolved_calls = [c for c in calls if _is_number(c.get("offsetSharesAtPrice"))]
     unresolved = len([i for i in instruments if i["ifConvertedShares"] is None])
     cash_settled = [i for i in instruments if i.get("principalSettlement") is not None]
     nss_unresolved = any(i.get("netShareSettlementShares") is None for i in cash_settled)
@@ -1328,12 +1466,17 @@ def _convertibles_component(sources: list[IxSource], price: float, settlement: l
         "incrementalSharesNetShareSettlement": (
             None if not cash_settled or unresolved == len(instruments) or nss_unresolved
             else sum((i["netShareSettlementShares"] if i.get("principalSettlement") is not None else (i["incrementalShares"] or 0)) for i in instruments)),
+        "cappedCallText": "NOT_READ" if capped_calls is None else "READ",
+        # Shares the stated capped calls deliver back at the price; None when none is fully stated (2.5.12).
+        "cappedCallOffsetShares": sum(c["offsetSharesAtPrice"] for c in resolved_calls) if resolved_calls else None,
+        "cappedCallsUnresolved": len(calls) - len(resolved_calls),
         "note": ("Shares are the filing's count issuable on conversion at the period end when tagged (it can be the maximum, make-whole included); "
                  "else principal outstanding at the period end (a face amount then, or a carrying amount well below the issue's face), else the face "
                  "amount or an issue-date carrying amount (principalBasis says which), "
                  "times a conversion ratio that agrees with the conversion price, else divided by the price. Where the filing states principal is "
-                 "settled in cash, netShareSettlementShares is the conversion value above principal in shares at the price; capped calls are not "
-                 "modeled."),
+                 "settled in cash, netShareSettlementShares is the conversion value above principal in shares at the price. Where the filing states "
+                 "a capped call's strike, cap and covered shares, cappedCall.offsetSharesAtPrice is covered x (min(price, cap) - strike) / price: an "
+                 "economic offset, not part of the EPS count."),
         "source": _source_ref(source, None),
     }
 
@@ -1772,19 +1915,21 @@ def _is_number(value: Any) -> bool:
 def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: str | None,
                     sources: list[IxSource], atm_matches: list[TextMatch], award_table_matches: list[TextMatch] | None = None,
                     claim_matches: list[TextMatch] | None = None, warrant_lifecycle_matches: list[TextMatch] | None = None,
-                    convertible_settlement_matches: list[TextMatch] | None = None) -> dict:
+                    convertible_settlement_matches: list[TextMatch] | None = None, capped_call_matches: list[TextMatch] | None = None) -> dict:
     """Basic to diluted shares at a supplied price, from company disclosures only.
 
     warrant_lifecycle_matches is the filing text read for the exercise, expiry or redemption of warrants
     counted before the period end (2.5.11); convertible_settlement_matches the text read for a stated cash
-    settlement of convertible principal (2.5.11). Each is None when it was not read.
+    settlement of convertible principal (2.5.11); capped_call_matches the text read for capped call terms
+    (2.5.12). Each is None when it was not read.
     """
     primary = sources[0] if sources else None
     basic_found = _find_in_sources(sources, _basic_shares)
     options = _options_component(sources, price)
     awards = _awards_component(sources, award_table_matches or [])
     warrants = _warrants_component(sources, price, warrant_lifecycle_sentences(warrant_lifecycle_matches) if warrant_lifecycle_matches is not None else None)
-    convertibles = _convertibles_component(sources, price, principal_cash_settlement(convertible_settlement_matches) if convertible_settlement_matches is not None else None)
+    convertibles = _convertibles_component(sources, price, principal_cash_settlement(convertible_settlement_matches) if convertible_settlement_matches is not None else None,
+                                           capped_call_terms(capped_call_matches) if capped_call_matches is not None else None)
     preferred = _convertible_preferred_component(sources, price, preferred_conversion_terms(claim_matches) if claim_matches is not None else None)
     atm = _atm_component(atm_evidence(atm_matches), price)
     components = [c for c in (options, awards, warrants, convertibles, preferred) if c is not None]
@@ -1845,6 +1990,22 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
                         f"dilutedSharesAtPriceNetShareSettlement counts {counts} instead."),
             "severity": "info",
         })
+    capped = [(i["instrument"], i["cappedCall"]) for i in notes if i.get("cappedCall") is not None]
+    capped_resolved = [(n, c) for n, c in capped if _is_number(c.get("offsetSharesAtPrice"))]
+    if capped_resolved:
+        listed = "; ".join(f"{n} (strike ${_js_number(c['strikePrice'])}, cap ${_js_number(c['capPrice'])}, {_js_number(c['coveredShares'])} shares: "
+                           f"{_js_number(c['offsetSharesAtPrice'])} shares back at the price)" for n, c in capped_resolved)
+        warnings.append({
+            "code": "CAPPED_CALL_OFFSET",
+            "message": (f"The filing states capped call terms for {listed}. dilutedSharesAtPrice does not net them (diluted EPS excludes capped calls "
+                        "as antidilutive); dilutedSharesAtPriceNetOfCappedCalls does."),
+            "severity": "info",
+        })
+    capped_open = [(n, c) for n, c in capped if not _is_number(c.get("offsetSharesAtPrice"))]
+    if capped_open:
+        listed = "; ".join(f"{n} ({c['unresolvedReason']})" for n, c in capped_open)
+        warnings.append({"code": "CAPPED_CALL_TERMS_INCOMPLETE",
+                         "message": f"The filing describes capped calls for {listed}; no offset is computed for them.", "severity": "info"})
     redeemed = [i for i in notes if i.get("afterPeriodEnd") is not None]
     if redeemed:
         listed = ", ".join(f"{i['instrument']} ({i['afterPeriodEnd']['date']})" for i in redeemed)
@@ -1967,6 +2128,14 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
             "dilutedSharesAtPriceNetShareSettlement": (
                 round_half_up(diluted - inc(convertibles) + convertibles["incrementalSharesNetShareSettlement"])
                 if convertibles and _is_number(convertibles.get("incrementalSharesNetShareSettlement")) else None),
+            # Stated capped calls netted at the price: an economic view beside the EPS count (2.5.12).
+            "cappedCallOffsetShares": convertibles["cappedCallOffsetShares"] if convertibles and _is_number(convertibles.get("cappedCallOffsetShares")) else None,
+            "dilutedSharesAtPriceNetOfCappedCalls": (round_half_up(diluted - convertibles["cappedCallOffsetShares"])
+                                                     if convertibles and _is_number(convertibles.get("cappedCallOffsetShares")) else None),
+            "dilutedSharesAtPriceNetShareSettlementNetOfCappedCalls": (
+                round_half_up(diluted - inc(convertibles) + convertibles["incrementalSharesNetShareSettlement"] - convertibles["cappedCallOffsetShares"])
+                if convertibles and _is_number(convertibles.get("cappedCallOffsetShares")) and _is_number(convertibles.get("incrementalSharesNetShareSettlement"))
+                else None),
             "atmPotentialShares": atm_shares,
             "dilutedSharesAtPriceWithAtm": round_half_up(diluted + atm_shares) if atm_shares is not None else None,
             "formula": ("basic + options (treasury stock) + unvested awards (gross) + warrants (treasury stock, vested) + convertibles and "

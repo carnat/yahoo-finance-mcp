@@ -9687,18 +9687,21 @@ async def extract_dilution_bridge(
         lifecycle_matches = await _warrant_lifecycle_matches(ticker, filings, early_counts)
     # Convertible notes: read the filing text for a stated cash settlement of principal (2.5.11).
     settlement_matches: list[_cs.TextMatch] | None = None
+    capped_call_matches: list[_cs.TextMatch] | None = None
     has_convertibles = any(c.get("component") == "convertible_debt" for c in out["components"])
     if has_convertibles:
         settlement_matches = await _searched_matches(ticker, filings, list(_cs.CONVERTIBLE_SETTLEMENT_SEARCH_TERMS))
+        # And for capped call terms (2.5.12).
+        capped_call_matches = await _searched_matches(ticker, filings, list(_cs.CAPPED_CALL_SEARCH_TERMS))
     if early_counts or has_convertibles:
-        out = _cs.dilution_bridge(*bridge_args, None, claim_matches, lifecycle_matches, settlement_matches)
+        out = _cs.dilution_bridge(*bridge_args, None, claim_matches, lifecycle_matches, settlement_matches, capped_call_matches)
     # No unvested award count is tagged: read it from the filing's award table.
     if "unvested_share_awards" in out["notDisclosed"]:
         for _, filing in filings:
             table_matches = [m for m in await _filing_text_matches(ticker, filing, _AWARD_TABLE_SEARCH_TERMS, 30, 400) if m.in_table]
             if not table_matches:
                 continue
-            retried = _cs.dilution_bridge(*bridge_args, table_matches, claim_matches, lifecycle_matches, settlement_matches)
+            retried = _cs.dilution_bridge(*bridge_args, table_matches, claim_matches, lifecycle_matches, settlement_matches, capped_call_matches)
             if "unvested_share_awards" not in retried["notDisclosed"]:
                 out = retried
                 break
@@ -9739,7 +9742,7 @@ from yfmcp import funding_schedule as _fsched  # noqa: E402
 @yfinance_server.tool(
     name="get_share_count_scenarios",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_share_count_scenarios"],
-    description="Share counts under scenarios you define: for each scenario's price and treatments (options treasury-stock/gross/exclude, unvested awards gross/exclude, warrants treasury-stock/gross/exclude on vested or all, convertibles if-converted when in the money/all/net-share settlement where the filing states principal is settled in cash/exclude, ATM remaining capacity include/exclude, and known issuance you supply), every instrument from the filing's inline XBRL is listed as included or excluded with its treasury-stock or if-converted mechanics and threshold price; unresolved instruments are listed and left out. Scenarios are reported side by side; no denominator is selected. Evidence only.",
+    description="Share counts under scenarios you define: for each scenario's price and treatments (options treasury-stock/gross/exclude, unvested awards gross/exclude, warrants treasury-stock/gross/exclude on vested or all, convertibles if-converted when in the money/all/net-share settlement where the filing states principal is settled in cash/exclude, ATM remaining capacity include/exclude, capped calls ignored or offset where the filing states their strike, cap and covered shares, and known issuance you supply), every instrument from the filing's inline XBRL is listed as included or excluded with its treasury-stock or if-converted mechanics and threshold price; unresolved instruments are listed and left out. Scenarios are reported side by side; no denominator is selected. Evidence only.",
 )
 async def get_share_count_scenarios(
     ticker: str,

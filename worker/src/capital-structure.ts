@@ -1112,7 +1112,127 @@ function settlementFor(instrument: string, count: number, sentences: SettlementS
     ?? (count === 1 ? sentences.find((s) => s.scope === "UNNAMED_NOTES") ?? null : null);
 }
 
-function convertiblesComponent(sources: IxSource[], price: number, settlement: SettlementSentence[] | null = null): Record<string, unknown> | null {
+// ── Capped calls (2.5.12) ───────────────────────────────────────────────────
+//
+// A capped call bought with a convertible delivers to the company, at settlement, the value of the
+// covered shares between the strike and the cap: covered x (min(price, cap) - strike) / price shares at
+// the price. BE's 10-K: "The Capped Calls have an initial strike price of approximately $18.85 per share
+// … The number of shares underlying the Capped Calls is 33,549,508 shares … The cap price of the Capped
+// Calls is initially $26.46 per share", and they "were not impacted by the induced conversion" of the
+// notes. The offset is economic, not the EPS count (capped calls are antidilutive and excluded from
+// diluted EPS); it is computed only when the strike, the cap and the covered shares are all stated.
+// LITE states the cap ($268.24) and that its 2032 capped calls cover the shares that initially underlie
+// the 2032 Notes, but no strike: that capped call is reported and left unresolved.
+export const CAPPED_CALL_SEARCH_TERMS = ["cap price", "capped call"];
+const CAPPED_CALL_RE = /\bcapped calls?\b/i;
+const CAP_PRICE_RE = /\bcap price\b[^.$]{0,80}?\$\s?(\d[\d,]*(?:\.\d+)?)/i;
+const CC_STRIKE_RE = /\bstrike price\b[^.$]{0,80}?\$\s?(\d[\d,]*(?:\.\d+)?)/i;
+const CC_STRIKE_IS_CONVERSION_RE = /\bstrike price\b[^.]{0,120}?\bcorrespond(?:s|ing)? to the (?:initial )?conversion price\b/i;
+// "The number of shares underlying the Capped Calls is 33,549,508 shares" (BE); "covering approximately 69.3 million shares" (RKLB).
+const CC_COUNT_RE = /\bnumber of shares\b[^.\d]{0,80}?\bunderlying the capped calls?\b\D{0,30}?(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)? million)|\bcover(?:s|ing|ed)?\b\D{0,60}?(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)? million) shares\b/i;
+// The capped calls outlast conversions of their notes: "were not impacted by the induced conversion" (BE).
+const CC_SURVIVE_RE = /\bcapped calls?\b[^.]{0,80}?\b(?:were|was|have|has)(?: not been| not)\s+(?:impacted|affected|terminated|unwound|settled)\b|\bcapped calls?\b[^.]{0,80}?\bremain(?:s|ed)? outstanding\b/i;
+const CC_UNDERLIE_RE = /\bcover\w*\b[^.]{0,200}?\b(?:initially )?underl(?:ie|ies|ying)\b[^.]{0,60}?\bnotes\b/i;
+const CC_YEAR_RE = /\b(20\d\d) capped calls?\b|\bnotes due (?:[A-Z][a-z]+ )?(20\d\d)\b|\b(20\d\d) (?:convertible )?(?:senior )?notes\b/gi;
+
+export type CappedCallTerms = {
+  years: string[];
+  strikePrice: number | null;
+  strikeIsConversionPrice: boolean;
+  capPrice: number | null;
+  coveredShares: number | null;
+  coversNoteShares: boolean;
+  survivesConversions: boolean;
+  sentences: string[];
+  documentUrl: string | null;
+  filingDate: string | null;
+  accessionNumber: string | null;
+};
+
+const dollars = (m: RegExpExecArray | null): number | null => (m ? parseFloat(m[1].replace(/,/g, "")) : null);
+/** "33,549,508" -> 33549508; "69.3 million" -> 69300000. */
+function sharesStated(text: string): number {
+  const m = /^(\d+(?:\.\d+)?) million$/i.exec(text);
+  return m ? round(parseFloat(m[1]) * 1_000_000) : parseInt(text.replace(/,/g, ""), 10);
+}
+
+/** Capped call terms stated in filing text, merged per set of notes named (by year) in the passage. */
+export function cappedCallTerms(matches: TextMatch[]): CappedCallTerms[] {
+  const groups = new Map<string, CappedCallTerms>();
+  for (const match of matches) {
+    const text = collapse(match.contextText);
+    if (!CAPPED_CALL_RE.test(text)) continue;
+    const years = [...new Set([...text.matchAll(CC_YEAR_RE)].map((m) => m[1] ?? m[2] ?? m[3]))].sort();
+    const key = years.join("+");
+    let g = groups.get(key);
+    if (!g) {
+      g = { years, strikePrice: null, strikeIsConversionPrice: false, capPrice: null, coveredShares: null, coversNoteShares: false, survivesConversions: false, sentences: [], documentUrl: match.documentUrl, filingDate: match.filingDate, accessionNumber: match.accessionNumber };
+      groups.set(key, g);
+    }
+    // Each term is read from one sentence about the capped calls (or the sentence after one that names them).
+    const list = text.split(CLAIM_SENTENCE_SPLIT_RE).map((x) => x.trim());
+    const about = list.filter((x, i) => CAPPED_CALL_RE.test(x) || (i > 0 && CAPPED_CALL_RE.test(list[i - 1])));
+    const facts: [RegExp, (m: RegExpExecArray) => void][] = [
+      [CC_STRIKE_RE, (m) => { g!.strikePrice ??= dollars(m); }],
+      [CC_STRIKE_IS_CONVERSION_RE, () => { g!.strikeIsConversionPrice = true; }],
+      [CAP_PRICE_RE, (m) => { g!.capPrice ??= dollars(m); }],
+      [CC_COUNT_RE, (m) => { g!.coveredShares ??= sharesStated(m[1] ?? m[2]); }],
+      [CC_UNDERLIE_RE, () => { g!.coversNoteShares = true; }],
+      [CC_SURVIVE_RE, () => { g!.survivesConversions = true; }],
+    ];
+    for (const [re, apply] of facts) {
+      for (const sentence of about) {
+        const m = re.exec(sentence);
+        if (!m) continue;
+        apply(m);
+        // The sentence that states it, quoted once.
+        if (!g.sentences.includes(sentence) && g.sentences.length < 5) g.sentences.push(sentence.slice(0, 600));
+        break;
+      }
+    }
+  }
+  return [...groups.values()].filter((g) => g.capPrice != null || g.strikePrice != null || g.coveredShares != null || g.coversNoteShares);
+}
+
+/** The capped call terms for a note: the passage naming its year, else the only passage when there is one note. */
+function cappedCallFor(instrument: string, count: number, terms: CappedCallTerms[]): CappedCallTerms | null {
+  return terms.find((t) => t.years.length === 1 && instrument.includes(t.years[0]))
+    ?? (count === 1 ? terms.find((t) => t.years.length === 0) ?? null : null);
+}
+
+/** A note's capped call at the price: its stated terms and the shares its value between strike and cap offsets. */
+function cappedCallAt(t: CappedCallTerms, note: Record<string, unknown>, price: number): Record<string, unknown> {
+  const conversion = typeof note.conversionPrice === "number" ? note.conversionPrice : null;
+  const strike = t.strikePrice ?? (t.strikeIsConversionPrice ? conversion : null);
+  const strikeBasis = t.strikePrice != null ? "STATED" : strike != null ? "STATED_AS_CONVERSION_PRICE" : "NOT_STATED";
+  const noteShares = typeof note.ifConvertedShares === "number" ? note.ifConvertedShares : null;
+  // A stated count above the notes' shares today (issue-date coverage after conversions) is used only when the
+  // filing says the capped calls outlasted those conversions (BE); otherwise the notes' shares bound it (RKLB).
+  const statedExceeds = t.coveredShares != null && noteShares != null && t.coveredShares > noteShares * 1.01;
+  const covered = t.coveredShares != null && !(statedExceeds && !t.survivesConversions) ? t.coveredShares
+    : (t.coversNoteShares || statedExceeds) ? noteShares : null;
+  const coverageBasis = covered == null ? "NOT_STATED"
+    : covered === t.coveredShares ? (statedExceeds ? "STATED_COUNT_SURVIVES_CONVERSIONS" : "STATED_COUNT")
+    : statedExceeds ? "SHARES_UNDERLYING_NOTES_AT_PERIOD_END_BELOW_STATED_COUNT" : "SHARES_UNDERLYING_NOTES_AT_PERIOD_END";
+  const missing = [strike == null ? "strike price" : null, t.capPrice == null ? "cap price" : null, covered == null ? "covered shares" : null].filter((x): x is string => x != null);
+  const offset = missing.length > 0 ? null : round((covered! * Math.max(0, Math.min(price, t.capPrice!) - strike!)) / price);
+  return {
+    strikePrice: strike,
+    strikeBasis,
+    capPrice: t.capPrice,
+    coveredShares: covered,
+    coverageBasis,
+    statedCoveredShares: t.coveredShares,
+    offsetSharesAtPrice: offset,
+    ...(missing.length > 0 ? { unresolvedReason: `${missing.join(", ")} not stated` } : {}),
+    sentences: t.sentences,
+    documentUrl: t.documentUrl,
+    filingDate: t.filingDate,
+    accessionNumber: t.accessionNumber,
+  };
+}
+
+function convertiblesComponent(sources: IxSource[], price: number, settlement: SettlementSentence[] | null = null, cappedCalls: CappedCallTerms[] | null = null): Record<string, unknown> | null {
   const found = findInSources(sources, (doc) => {
     const groups = debtGroups(doc).filter((g) => groupValue(g, [CONVERSION_PRICE, CONVERSION_RATIO]) != null);
     if (groups.length > 0) return groups;
@@ -1177,17 +1297,27 @@ function convertiblesComponent(sources: IxSource[], price: number, settlement: S
   });
   // Stated cash settlement of principal: the shares for the conversion value above principal at the price (2.5.11).
   const settled = instruments.map((i) => {
-    if (settlement == null) return i;
-    const stated = settlementFor(String(i.instrument), instruments.length, settlement);
-    const nss = !stated || i.ifConvertedShares == null ? null
-      : !i.inTheMoney ? 0
-      : i.principal != null ? round(Math.max(0, i.ifConvertedShares - i.principal / price)) : null;
-    return {
-      ...i,
-      principalSettlement: stated ? { stated: "PRINCIPAL_IN_CASH", scope: stated.scope, sentence: stated.sentence, sectionHeading: stated.sectionHeading, documentUrl: stated.documentUrl, filingDate: stated.filingDate, accessionNumber: stated.accessionNumber } : null,
-      netShareSettlementShares: nss,
-    };
+    let out: Record<string, unknown> = i;
+    if (settlement != null) {
+      const stated = settlementFor(String(i.instrument), instruments.length, settlement);
+      const nss = !stated || i.ifConvertedShares == null ? null
+        : !i.inTheMoney ? 0
+        : i.principal != null ? round(Math.max(0, i.ifConvertedShares - i.principal / price)) : null;
+      out = {
+        ...out,
+        principalSettlement: stated ? { stated: "PRINCIPAL_IN_CASH", scope: stated.scope, sentence: stated.sentence, sectionHeading: stated.sectionHeading, documentUrl: stated.documentUrl, filingDate: stated.filingDate, accessionNumber: stated.accessionNumber } : null,
+        netShareSettlementShares: nss,
+      };
+    }
+    // Capped call terms the filing states for this note (2.5.12).
+    if (cappedCalls != null) {
+      const terms = cappedCallFor(String(i.instrument), instruments.length, cappedCalls);
+      out = { ...out, cappedCall: terms ? cappedCallAt(terms, i, price) : null };
+    }
+    return out as typeof i & Record<string, unknown>;
   });
+  const calls = settled.map((i) => (i as Record<string, unknown>).cappedCall as Record<string, unknown> | null | undefined).filter((c): c is Record<string, unknown> => c != null);
+  const resolvedCalls = calls.filter((c) => typeof c.offsetSharesAtPrice === "number");
   const unresolved = settled.filter((i) => i.ifConvertedShares == null).length;
   const cashSettled = settled.filter((i) => (i as Record<string, unknown>).principalSettlement != null);
   const nssUnresolved = cashSettled.some((i) => (i as Record<string, unknown>).netShareSettlementShares == null);
@@ -1202,7 +1332,11 @@ function convertiblesComponent(sources: IxSource[], price: number, settlement: S
     // The same count with each note whose principal the filing says is settled in cash at its net shares; null when none is.
     incrementalSharesNetShareSettlement: cashSettled.length === 0 || unresolved === settled.length || nssUnresolved ? null
       : settled.reduce((sum, i) => sum + Number((i as Record<string, unknown>).principalSettlement != null ? (i as Record<string, unknown>).netShareSettlementShares : (i.incrementalShares ?? 0)), 0),
-    note: "Shares are the filing's count issuable on conversion at the period end when tagged (it can be the maximum, make-whole included); else principal outstanding at the period end (a face amount then, or a carrying amount well below the issue's face), else the face amount or an issue-date carrying amount (principalBasis says which), times a conversion ratio that agrees with the conversion price, else divided by the price. Where the filing states principal is settled in cash, netShareSettlementShares is the conversion value above principal in shares at the price; capped calls are not modeled.",
+    cappedCallText: cappedCalls == null ? "NOT_READ" : "READ",
+    // Shares the stated capped calls deliver back at the price; null when none is fully stated (2.5.12).
+    cappedCallOffsetShares: resolvedCalls.length === 0 ? null : resolvedCalls.reduce((sum, c) => sum + Number(c.offsetSharesAtPrice), 0),
+    cappedCallsUnresolved: calls.length - resolvedCalls.length,
+    note: "Shares are the filing's count issuable on conversion at the period end when tagged (it can be the maximum, make-whole included); else principal outstanding at the period end (a face amount then, or a carrying amount well below the issue's face), else the face amount or an issue-date carrying amount (principalBasis says which), times a conversion ratio that agrees with the conversion price, else divided by the price. Where the filing states principal is settled in cash, netShareSettlementShares is the conversion value above principal in shares at the price. Where the filing states a capped call's strike, cap and covered shares, cappedCall.offsetSharesAtPrice is covered x (min(price, cap) - strike) / price: an economic offset, not part of the EPS count.",
     source: sourceRef(source, null),
   };
 }
@@ -1610,6 +1744,8 @@ export type DilutionInput = {
   // Filing text read for the exercise, expiry or redemption of warrants counted before the period end (2.5.11).
   warrantLifecycleMatches?: TextMatch[] | null;  // Filing text read for a stated cash settlement of convertible principal (2.5.11).
   convertibleSettlementMatches?: TextMatch[] | null;
+  // Filing text read for capped call terms (2.5.12).
+  cappedCallMatches?: TextMatch[] | null;
 };
 
 /** Basic to diluted shares at a supplied price, from company disclosures only. */
@@ -1620,7 +1756,8 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
   const options = optionsComponent(sources, price);
   const awards = awardsComponent(sources, input.awardTableMatches ?? []);
   const warrants = warrantsComponent(sources, price, Array.isArray(input.warrantLifecycleMatches) ? warrantLifecycleSentences(input.warrantLifecycleMatches) : null);
-  const convertibles = convertiblesComponent(sources, price, Array.isArray(input.convertibleSettlementMatches) ? principalCashSettlement(input.convertibleSettlementMatches) : null);
+  const convertibles = convertiblesComponent(sources, price, Array.isArray(input.convertibleSettlementMatches) ? principalCashSettlement(input.convertibleSettlementMatches) : null,
+    Array.isArray(input.cappedCallMatches) ? cappedCallTerms(input.cappedCallMatches) : null);
   const preferred = convertiblePreferredComponent(sources, price, Array.isArray(input.claimMatches) ? preferredConversionTerms(input.claimMatches) : null);
   const atm = atmComponent(atmEvidence(input.atmMatches), price);
   const components = [options, awards, warrants, convertibles, preferred].filter((c): c is Record<string, unknown> => c != null);
@@ -1672,6 +1809,19 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
       message: `The filing states the principal of ${cashPrincipal.map((i) => i.instrument).join(", ")} is settled in cash, so conversion delivers shares only for the value above principal. dilutedSharesAtPrice counts them if-converted (the EPS basis); dilutedSharesAtPriceNetShareSettlement counts ${cashPrincipal.map((i) => `${i.netShareSettlementShares ?? "unresolved"} for ${i.instrument}`).join(", ")} instead.`,
       severity: "info",
     });
+  }
+  const capped = notes.filter((i) => i.cappedCall != null).map((i) => ({ instrument: i.instrument, call: i.cappedCall as Record<string, unknown> }));
+  const cappedResolved = capped.filter((c) => typeof c.call.offsetSharesAtPrice === "number");
+  if (cappedResolved.length > 0) {
+    warnings.push({
+      code: "CAPPED_CALL_OFFSET",
+      message: `The filing states capped call terms for ${cappedResolved.map((c) => `${c.instrument} (strike $${c.call.strikePrice}, cap $${c.call.capPrice}, ${c.call.coveredShares} shares: ${c.call.offsetSharesAtPrice} shares back at the price)`).join("; ")}. dilutedSharesAtPrice does not net them (diluted EPS excludes capped calls as antidilutive); dilutedSharesAtPriceNetOfCappedCalls does.`,
+      severity: "info",
+    });
+  }
+  const cappedOpen = capped.filter((c) => typeof c.call.offsetSharesAtPrice !== "number");
+  if (cappedOpen.length > 0) {
+    warnings.push({ code: "CAPPED_CALL_TERMS_INCOMPLETE", message: `The filing describes capped calls for ${cappedOpen.map((c) => `${c.instrument} (${c.call.unresolvedReason})`).join("; ")}; no offset is computed for them.`, severity: "info" });
   }
   const redeemed = notes.filter((i) => i.afterPeriodEnd != null);
   if (redeemed.length > 0) {
@@ -1779,6 +1929,11 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
       // Convertibles whose principal the filing says is settled in cash at their net shares; null when none is (2.5.11).
       convertibleDebtNetShareSettlement: convertibles && convertibles.incrementalSharesNetShareSettlement != null ? convertibles.incrementalSharesNetShareSettlement : null,
       dilutedSharesAtPriceNetShareSettlement: convertibles && typeof convertibles.incrementalSharesNetShareSettlement === "number" ? round(diluted - inc(convertibles) + convertibles.incrementalSharesNetShareSettlement) : null,
+      // Stated capped calls netted at the price: an economic view beside the EPS count (2.5.12).
+      cappedCallOffsetShares: convertibles && typeof convertibles.cappedCallOffsetShares === "number" ? convertibles.cappedCallOffsetShares : null,
+      dilutedSharesAtPriceNetOfCappedCalls: convertibles && typeof convertibles.cappedCallOffsetShares === "number" ? round(diluted - convertibles.cappedCallOffsetShares) : null,
+      dilutedSharesAtPriceNetShareSettlementNetOfCappedCalls: convertibles && typeof convertibles.cappedCallOffsetShares === "number" && typeof convertibles.incrementalSharesNetShareSettlement === "number"
+        ? round(diluted - inc(convertibles) + convertibles.incrementalSharesNetShareSettlement - convertibles.cappedCallOffsetShares) : null,
       atmPotentialShares: atmShares,
       dilutedSharesAtPriceWithAtm: atmShares != null ? round(diluted + atmShares) : null,
       formula: "basic + options (treasury stock) + unvested awards (gross) + warrants (treasury stock, vested) + convertibles and convertible preferred (if-converted when in the money)",

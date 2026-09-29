@@ -26,6 +26,7 @@ TREATMENTS: dict[str, list[str]] = {
     "warrant_vesting": ["vested_only", "all"],
     "convertibles": ["if_converted_when_in_the_money", "if_converted_all", "net_share_settlement_when_stated", "exclude"],
     "atm": ["exclude", "full_remaining_capacity"],
+    "capped_calls": ["ignore", "offset_when_stated"],
 }
 
 DEFAULTS: dict[str, str] = {
@@ -35,6 +36,7 @@ DEFAULTS: dict[str, str] = {
     "warrant_vesting": "vested_only",
     "convertibles": "if_converted_when_in_the_money",
     "atm": "exclude",
+    "capped_calls": "ignore",
 }
 
 
@@ -214,6 +216,23 @@ def _scenario_lines(bridge: dict, s: dict) -> list[dict]:
                 unstated = "; cash settlement of principal not stated" if t["convertibles"] == "net_share_settlement_when_stated" else ""
                 lines.append(_line(*args, itm, conv, f"if_converted when price >= conversion price{unstated}", _round(shares) if itm else 0))
 
+    # Capped calls the filing states for convertible notes, netted only when the caller asks (2.5.12).
+    if t["capped_calls"] == "offset_when_stated":
+        notes = by_name("convertible_debt") or {}
+        for inst in notes.get("instruments") if isinstance(notes.get("instruments"), list) else []:
+            call = inst.get("cappedCall") if isinstance(inst.get("cappedCall"), dict) else None
+            if not call:
+                continue
+            strike, cap, covered = _num(call.get("strikePrice")), _num(call.get("capPrice")), _num(call.get("coveredShares"))
+            args = ("capped_call", f"{_first(inst.get('instrument'), 'Convertible notes')} capped call", t["capped_calls"], covered,
+                    str(_first(call.get("coverageBasis"), "NOT_STATED")), strike, price)
+            itm = price > strike if strike is not None else None
+            if strike is None or cap is None or covered is None:
+                lines.append(_line(*args, itm, strike, t["capped_calls"], None, str(_first(call.get("unresolvedReason"), "capped call terms not stated"))))
+            else:
+                lines.append(_line(*args, itm, strike, "capped call: minus covered x (min(price, cap) - strike) / price, delivered back to the company "
+                                   "(economic, not the EPS count)", 0 - _round(covered * max(0, min(price, cap) - strike) / price)))
+
     atm = bridge.get("atmProgram") if isinstance(bridge.get("atmProgram"), dict) else None
     if atm:
         remaining = _num(atm.get("remainingCapacityUsd"))
@@ -291,7 +310,9 @@ def share_count_scenarios(ticker: str, bridge: dict, scenarios: list[dict]) -> d
             "Counts, exercise prices and conversion terms are the company's inline XBRL disclosures (the dilution bridge's inventory); prices and treatments are the caller's.",
             "Each scenario is reported as computed; no scenario is recommended and no denominator is selected.",
             "An unresolved instrument is left out of resultingShares and listed; an instrument in notDisclosed was not tagged, which is not proof it does not exist.",
-            "Net-share or cash settlement, capped calls, make-whole adjustments and performance conditions are not modeled.",
+            ("Net-share settlement applies only to notes whose principal the filing says is settled in cash (convertibles: "
+             "net_share_settlement_when_stated); capped calls offset only with capped_calls: offset_when_stated and only when their strike, cap and "
+             "covered shares are stated. Make-whole adjustments and performance conditions are not modeled."),
             ("TAGGED_INSTRUMENTS_RESOLVED means every tagged instrument was resolved, not that every claim on the equity was found; claims quoted in "
              "unquantifiedShareClaims are in no scenario's resultingShares."),
         ],
