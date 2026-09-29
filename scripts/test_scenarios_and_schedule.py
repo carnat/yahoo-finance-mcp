@@ -76,14 +76,20 @@ CLAIM_BRIDGES = [
 NSS_BRIDGE = {"basicShares": {"shares": 74_000_000}, "atmProgram": None, "claimCoverage": _COVERED, "unquantifiedShareClaims": [],
               "components": [{"component": "convertible_debt", "instruments": [
                   {"instrument": "Notes due 2032", "principal": 1_000_000_000, "ifConvertedShares": 20_000_000, "conversionPrice": 50.0,
-                   "ifConvertedBasis": "principal / conversion_price", "principalSettlement": {"stated": "PRINCIPAL_IN_CASH", "scope": "ALL_NOTES"}},
+                   "ifConvertedBasis": "principal / conversion_price", "principalSettlement": {"stated": "PRINCIPAL_IN_CASH", "scope": "ALL_NOTES"},
+                   # 2.5.12: a capped call with stated terms.
+                   "cappedCall": {"strikePrice": 50.0, "capPrice": 100.0, "coveredShares": 20_000_000, "coverageBasis": "STATED_COUNT"}},
                   {"instrument": "Notes due 2030", "principal": 100_000_000, "ifConvertedShares": 2_000_000, "conversionPrice": 50.0,
-                   "ifConvertedBasis": "principal / conversion_price", "principalSettlement": None},
+                   "ifConvertedBasis": "principal / conversion_price", "principalSettlement": None,
+                   "cappedCall": {"strikePrice": None, "capPrice": 90.0, "coveredShares": 2_000_000, "coverageBasis": "SHARES_UNDERLYING_NOTES_AT_PERIOD_END",
+                                  "unresolvedReason": "strike price not stated"}},
               ]}]}
 NSS_SCENARIOS = [
     {"name": "net-share", "price": 80, "convertibles": "net_share_settlement_when_stated"},
     {"name": "net-share-below", "price": 40, "convertibles": "net_share_settlement_when_stated"},
     {"name": "if-converted", "price": 80},
+    {"name": "capped", "price": 80, "capped_calls": "offset_when_stated"},
+    {"name": "above-cap", "price": 120, "capped_calls": "offset_when_stated"},
 ]
 
 SCENARIOS = [
@@ -247,7 +253,7 @@ class TestShareScenarios(unittest.TestCase):
 
     def test_base_scenario_mechanics(self) -> None:
         base = _scenario(self.out, "base")
-        self.assertEqual(base["parameters"]["defaulted"], ["options", "unvested_awards", "warrants", "warrant_vesting", "convertibles", "atm"])
+        self.assertEqual(base["parameters"]["defaulted"], ["options", "unvested_awards", "warrants", "warrant_vesting", "convertibles", "atm", "capped_calls"])
         self.assertEqual(_line(base, "Options $0.00 - $5.00")["incrementalShares"], 1_850_000)
         self.assertEqual(_line(base, "Options $20.00 - $40.00")["incrementalShares"], 250_000)
         self.assertEqual(_line(base, "Public Warrants")["incrementalShares"], 7_125_000)
@@ -317,6 +323,20 @@ class TestShareScenarios(unittest.TestCase):
         self.assertIn("cash settlement of principal not stated", by["net-share"]["Notes due 2030"]["method"])
         self.assertEqual(by["net-share-below"]["Notes due 2032"]["incrementalShares"], 0)
         self.assertEqual(by["if-converted"]["Notes due 2032"]["incrementalShares"], 20_000_000)
+
+    def test_capped_call_treatment(self) -> None:
+        out = {sc["name"]: sc for sc in self.out["netShare"]["scenarios"]}
+        lines = {ln["instrument"]: ln for ln in out["capped"]["instruments"]}
+        # 20,000,000 x (80 - 50) / 80 = 7,500,000 shares back; above the $100 cap the value stops at $50 a share.
+        self.assertEqual(lines["Notes due 2032 capped call"]["incrementalShares"], -7_500_000)
+        above = {ln["instrument"]: ln for ln in out["above-cap"]["instruments"]}
+        self.assertEqual(above["Notes due 2032 capped call"]["incrementalShares"], -8_333_333)
+        # A capped call without a stated strike is unresolved, never netted.
+        self.assertEqual(lines["Notes due 2030 capped call"]["unresolvedReason"], "strike price not stated")
+        self.assertEqual(out["capped"]["completeness"], "EXCLUDES_UNRESOLVED_INSTRUMENTS")
+        self.assertEqual(out["capped"]["totals"]["incrementalByComponent"]["capped_call"], -7_500_000)
+        # Ignored by default: no capped call line.
+        self.assertFalse(any(ln["component"] == "capped_call" for ln in out["if-converted"]["instruments"]))
 
     def test_validation(self) -> None:
         errors = [r.get("error") for r in self.out["invalid"]]

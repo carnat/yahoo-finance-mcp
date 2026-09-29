@@ -17,6 +17,7 @@ import {
   groupedCount,
   parseIxbrl,
   pickCompaniesHouseMatch,
+  CAPPED_CALL_SEARCH_TERMS,
   CONVERTIBLE_SETTLEMENT_SEARCH_TERMS,
   SHARE_CLAIM_SEARCH_TERMS,
   WARRANT_LIFECYCLE_SEARCH_TERMS,
@@ -15621,6 +15622,8 @@ export async function extractDilutionBridge(
   // Convertible notes: read the filing text for a stated cash settlement of principal (2.5.11).
   if ((out.components as Record<string, unknown>[]).some((c) => c.component === "convertible_debt")) {
     input.convertibleSettlementMatches = await searchedMatches(ticker, resolved.filings, CONVERTIBLE_SETTLEMENT_SEARCH_TERMS);
+    // And for capped call terms (2.5.12).
+    input.cappedCallMatches = await searchedMatches(ticker, resolved.filings, CAPPED_CALL_SEARCH_TERMS);
   }
   if ("warrantLifecycleMatches" in input || "convertibleSettlementMatches" in input) out = dilutionBridge(input);
   // No unvested award count is tagged: read it from the filing's award table.

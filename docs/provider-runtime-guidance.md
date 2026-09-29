@@ -531,6 +531,7 @@ consensus actions compose evidence and never fill a gap with an assumption.
   - warrants: `treasury_stock`, `gross` or `exclude`, on vested or all;
   - convertibles: `if_converted_when_in_the_money`, `if_converted_all`,
     `net_share_settlement_when_stated` (2.5.11) or `exclude`;
+  - capped calls: `ignore` or `offset_when_stated` (2.5.12);
   - ATM: `exclude` or `full_remaining_capacity`;
   - optional `known_issuance` rows.
 
@@ -1286,7 +1287,7 @@ consensus actions compose evidence and never fill a gap with an assumption.
   - `get_share_count_scenarios` takes
     `convertibles: net_share_settlement_when_stated`. Notes without a stated
     cash settlement stay if-converted, and their method says so.
-  - Capped calls are not modeled.
+  - Capped calls were not modeled in 2.5.11. See "Capped Calls (2.5.12)" below.
 - **52/53-week fiscal identity.**
   - `fiscal-calendar.ts` / `fiscal_calendar.py` read a period's fiscal year
     and quarter from the date a week before its end. A year ending January 2,
@@ -1332,6 +1333,57 @@ consensus actions compose evidence and never fill a gap with an assumption.
   - "convertible into an aggregate of N shares".
 
   The scan remains a fixed list (`completeClaimInventory: false`).
+
+## Capped Calls (2.5.12)
+
+- **What is read.** When the bridge has convertible notes, the filing text is
+  searched for capped call passages ("cap price", "capped call"). From
+  sentences about the capped calls (and the sentence after one) it reads:
+  - the strike price. It is `STATED` when the text gives it, and
+    `STATED_AS_CONVERSION_PRICE` when the text says only that the strike
+    corresponds to the conversion price; then the note's tagged conversion
+    price is used;
+  - the cap price;
+  - the covered shares: a stated count ("33,549,508 shares", "69.3 million
+    shares"), or a statement that the calls cover the shares underlying the
+    notes;
+  - whether the capped calls outlasted conversions of their notes ("were not
+    impacted by the induced conversion").
+
+  A passage belongs to the note whose year it names, e.g. "2032 Capped Call
+  Options" or "Notes due June 2028". When the company has only one note, a
+  passage that names no year is assigned to it.
+- **Offset.**
+  - Formula: `cappedCall.offsetSharesAtPrice = covered × (min(price, cap) − strike) / price`.
+    This is the value the capped call delivers back to the company, in shares
+    at the price.
+  - It is computed only when the strike, cap and covered shares are all
+    stated. Otherwise the capped call is listed with an `unresolvedReason`
+    (`CAPPED_CALL_TERMS_INCOMPLETE`).
+  - A stated count larger than the notes' shares today (coverage at issue,
+    after conversions) is used only when the filing says the capped calls
+    outlasted those conversions (`STATED_COUNT_SURVIVES_CONVERSIONS`).
+    Otherwise the notes' shares at the period end bound it
+    (`SHARES_UNDERLYING_NOTES_AT_PERIOD_END_BELOW_STATED_COUNT`), and the
+    stated count is kept in `statedCoveredShares`.
+- **Bridge fields.**
+  - `dilutedSharesAtPrice` is unchanged: diluted EPS excludes capped calls as
+    antidilutive.
+  - `bridge.cappedCallOffsetShares`, `dilutedSharesAtPriceNetOfCappedCalls`
+    and `dilutedSharesAtPriceNetShareSettlementNetOfCappedCalls` report the
+    economic view beside it (`CAPPED_CALL_OFFSET`).
+- **Live examples.**
+  - **BE:** its 2028 capped calls state strike $18.85, cap $26.46 and
+    33,549,508 shares, and say they were not impacted by the induced
+    conversion. At $30 they offset 8,510,392 shares.
+  - **RKLB:** strike $5.1255, cap $8.04. The stated 69.3 million shares are
+    bounded by the notes' 27,736,452 shares, which offset 4,041,894 at $20.
+  - **LITE:** the 2032 capped calls state the cap ($268.24) and their
+    coverage but no strike, so they are reported and not netted.
+- **Share scenarios.** `get_share_count_scenarios` takes
+  `capped_calls: ignore` (the default) or `offset_when_stated`. The latter
+  adds a negative `capped_call` line per note with fully stated terms. A
+  capped call with incomplete terms is an unresolved line.
 
 ## Non-US Primary Filings
 
