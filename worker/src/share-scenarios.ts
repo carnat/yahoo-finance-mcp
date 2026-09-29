@@ -238,7 +238,7 @@ function scenarioLines(bridge: Rec, s: ShareScenario): Line[] {
         inTheMoney: strike != null ? price > strike : null, thresholdPrice: strike,
       };
       if (strike == null || cap == null || covered == null) {
-        lines.push(line({ ...base, method: t.capped_calls, incrementalShares: null, unresolvedReason: String(call.unresolvedReason ?? "capped call terms not stated") }));
+        lines.push(line({ ...base, method: t.capped_calls, incrementalShares: null, unresolvedReason: `capped call terms not stated: ${(Array.isArray(call.missingTerms) ? call.missingTerms as string[] : []).join(", ") || "unknown"}` }));
       } else {
         lines.push(line({ ...base, method: "capped call: minus covered x (min(price, cap) - strike) / price, delivered back to the company (economic, not the EPS count)", incrementalShares: 0 - round((covered * Math.max(0, Math.min(price, cap) - strike)) / price) }));
       }
@@ -269,7 +269,7 @@ export function shareCountScenarios(ticker: string, bridge: Rec, scenarios: Shar
   const basic = basicRec ? num(basicRec.shares) : null;
   // Claims the filing text states but no tagged instrument covers (2.5.9).
   const claims = (Array.isArray(bridge.unquantifiedShareClaims) ? bridge.unquantifiedShareClaims : []) as Rec[];
-  const openClaims = claims.filter((c) => c.status === "UNQUANTIFIED");
+  const openClaims = claims.filter((c) => c.status === "UNQUANTIFIED" || c.status === "REPORTED_NOT_MODELED");
   const coverage = (bridge.claimCoverage && typeof bridge.claimCoverage === "object" ? bridge.claimCoverage : null) as Rec | null;
   const claimTextRead = coverage?.textScan === "READ";
   const results = scenarios.map((s) => {

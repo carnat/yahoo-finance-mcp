@@ -65,7 +65,7 @@ from yfmcp import driver_ledger as _dl
 from yfmcp import guidance_history as _gh
 from yfmcp import metric_reconciliation as _mr
 from yfmcp.evidence import AUTHORITY_BOUNDARY as _AUTHORITY_BOUNDARY
-from yfmcp.fiscal_calendar import fiscal_year_label
+from yfmcp.fiscal_calendar import document_fiscal_year_focus, fiscal_year_label, fiscal_year_naming
 from yfmcp import valuation_history as _vh
 from yfmcp.clients.edgar import (
     _SEC_REQUIRED_UA, _SMOKE_TICKER_CIK_FALLBACKS,
@@ -5538,7 +5538,10 @@ async def get_filing_data(
                                     acc_num = accessions_list[idx] if idx < len(accessions_list) else ""
                                     filing_date_str = filing_dates_list[idx] if idx < len(filing_dates_list) else ""
                                     report_date_str = report_dates_list[idx] if idx < len(report_dates_list) else ""
-                                    fiscal_year = (fiscal_year_label(report_date_str) or "") if report_date_str else ""
+                                    # The fiscal year the filing states for itself wins over the period-end rule (DG's year ending
+                                    # January 2026 is its FY2025) (2.5.13).
+                                    focus = document_fiscal_year_focus(html_text)
+                                    fiscal_year = f"FY{focus}" if focus is not None else (fiscal_year_label(report_date_str) or "") if report_date_str else ""
                                     # A quarterly report's table is a quarter or year-to-date, never a fiscal year: its own
                                     # column header says which ("Three Months Ended August 1, 2026") (2.5.9, MRVL).
                                     if not _re.match(r"(?:10-K|20-F|40-F)", str(forms[idx]), _re.IGNORECASE):
@@ -11332,6 +11335,16 @@ async def _consensus_providers(ticker: str) -> tuple[list[dict], dict]:
     return [yahoo, alpha_input], quote
 
 
+async def _consensus_naming(ticker: str) -> dict:
+    """How the company names its fiscal years, from its annual reports' stated fy (2.5.13); the period-end rule when SEC is not read."""
+    try:
+        cik_padded = await _resolve_cik_for_ticker(ticker)
+        facts = await _edgar_get_company_facts(cik_padded) if cik_padded else None
+    except Exception:  # noqa: BLE001 - SEC is optional here; the curve falls back to the period-end rule
+        facts = None
+    return fiscal_year_naming(facts)
+
+
 def _consensus_policy(horizon_years: Any, min_analyst_count: Any, conflict_tolerance_pct: Any) -> dict | str:
     try:
         horizon = float(horizon_years)
@@ -11368,8 +11381,8 @@ async def get_consensus_forecast_curve(ticker: str, horizon_years: int = 5, min_
     if isinstance(policy, str):
         return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": policy})
     as_of = _now_iso()
-    inputs, _ = await _consensus_providers(ticker)
-    curve = _ev.build_consensus_curve(ticker, inputs, as_of, policy)
+    (inputs, _), naming = await asyncio.gather(_consensus_providers(ticker), _consensus_naming(ticker))
+    curve = _ev.build_consensus_curve(ticker, inputs, as_of, policy, naming)
     # The first observation of the day is kept; later calls report ALREADY_STORED.
     observation = _write_consensus_observation(ticker, curve, as_of)
     return json.dumps({**curve, "storage": {"consensusObservation": observation}})
@@ -11432,8 +11445,8 @@ async def _sec_filing_rows(ticker: str) -> tuple[list[dict] | None, str]:
 )
 async def get_evidence_quality(ticker: str) -> str:
     as_of = _now_iso()
-    (inputs, quote), (rows, status) = await asyncio.gather(_consensus_providers(ticker), _sec_filing_rows(ticker))
-    curve = _ev.build_consensus_curve(ticker, inputs, as_of)
+    (inputs, quote), (rows, status), naming = await asyncio.gather(_consensus_providers(ticker), _sec_filing_rows(ticker), _consensus_naming(ticker))
+    curve = _ev.build_consensus_curve(ticker, inputs, as_of, None, naming)
     return json.dumps(_ev.evidence_quality(ticker=ticker, as_of=as_of, quote=quote, filings=rows, filings_status=status,
                                            consensus=curve, storage_available=_es.get_store() is not None))
 
@@ -11461,8 +11474,8 @@ async def build_valuation_evidence_pack(ticker: str, horizon_years: int = 5, per
         return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": policy})
     symbol = ticker.upper()
     cutoff = _now_iso()
-    (inputs, quote), (rows, filings_status) = await asyncio.gather(_consensus_providers(symbol), _sec_filing_rows(symbol))
-    curve = _ev.build_consensus_curve(symbol, inputs, cutoff, policy)
+    (inputs, quote), (rows, filings_status), naming = await asyncio.gather(_consensus_providers(symbol), _sec_filing_rows(symbol), _consensus_naming(symbol))
+    curve = _ev.build_consensus_curve(symbol, inputs, cutoff, policy, naming)
     major_price, major_currency = _vl._major_price(quote["price"], quote["currency"]) if quote["price"] is not None else (None, None)
 
     async def dilution() -> dict:

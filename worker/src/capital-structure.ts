@@ -896,6 +896,30 @@ function textRetirement(f: IxFact, sentences: WarrantLifecycleSentence[], period
   return best;
 }
 
+/**
+ * Counts whose dimensions extend another counted class's (the class and a tranche or holder axis) are
+ * parts of it. Parts that add up to the class (within 0.5%) replace it, keeping their own terms; parts
+ * that do not ("of which 104,157") are left out and the class total is counted.
+ */
+function unnestWarrantCounts(facts: IxFact[]): { kept: IxFact[]; nested: Record<string, unknown>[] } {
+  const label = (f: IxFact) => (hasDims(f) ? Object.values(f.dims).map(memberLabel).join(" / ") : "Warrants (not itemized)");
+  const partsOf = (p: IxFact) => facts.filter((c) => c !== p && hasDims(p) && Object.keys(c.dims).length > Object.keys(p.dims).length && dimsWithin(p.dims, c.dims));
+  const dropped = new Map<IxFact, Record<string, unknown>>();
+  // Widest classes first, so a part of a part is judged against its own class.
+  for (const p of [...facts].sort((a, b) => Object.keys(a.dims).length - Object.keys(b.dims).length)) {
+    if (dropped.has(p)) continue;
+    const parts = partsOf(p).filter((c) => !dropped.has(c));
+    if (parts.length === 0) continue;
+    const sum = parts.reduce((t, c) => t + (c.value ?? 0), 0);
+    if (p.value != null && p.value > 0 && Math.abs(sum - p.value) <= p.value * 0.005) {
+      dropped.set(p, { class: label(p), count: p.value, asOf: p.periodEnd, reason: "SUM_OF_COUNTED_PARTS", parts: parts.map(label) });
+    } else {
+      for (const c of parts) dropped.set(c, { class: label(c), count: c.value, asOf: c.periodEnd, reason: "PART_OF_COUNTED_CLASS", partOf: label(p) });
+    }
+  }
+  return { kept: facts.filter((f) => !dropped.has(f)), nested: facts.filter((f) => dropped.has(f)).map((f) => dropped.get(f)!) };
+}
+
 function warrantsComponent(sources: IxSource[], price: number, lifecycle: WarrantLifecycleSentence[] | null = null): Record<string, unknown> | null {
   // Classes a newer filing shows exercised or retired; an older fallback filing must not restore them
   // (BE's 2025 10-K still counts the Oracle warrant its 2026 10-Q shows exercised).
@@ -923,7 +947,11 @@ function warrantsComponent(sources: IxSource[], price: number, lifecycle: Warran
     }
   }
   if (!found) return null;
-  const { value: facts, source } = found;
+  const { value: tagged, source } = found;
+  // A class tagged both as a total and in parts is counted once (2.5.13): JOBY tags its Delta Warrants
+  // (12,833,333) and the two tranches (7,000,000 and 5,833,333); LUNR its 541,667 preferred investor
+  // warrants and the 104,157 of them a related party holds.
+  const { kept: facts, nested } = unnestWarrantCounts(tagged);
   const unvestedFacts = source.doc.facts.filter((g) => WARRANT_UNVESTED_RE.test(g.local) && isShareCount(g));
   const vestedFacts = source.doc.facts.filter((g) => WARRANT_VESTED_RE.test(g.local) && g.value != null && !afterPeriodEnd(source.doc, g));
   const docEnd = source.doc.documentPeriodEnd;
@@ -978,6 +1006,7 @@ function warrantsComponent(sources: IxSource[], price: number, lifecycle: Warran
     classes,
     ...(expired.length > 0 ? { expiredClasses: expired.map((f) => ({ class: hasDims(f) ? Object.values(f.dims).map(memberLabel).join(" / ") : "Warrants (not itemized)", count: f.value, asOf: f.periodEnd, expirationDate: expiryOf(f) })) } : {}),
     ...(retiredInText.length > 0 ? { retiredInText: retiredInText.map(({ f, stated }) => ({ class: hasDims(f) ? Object.values(f.dims).map(memberLabel).join(" / ") : "Warrants (not itemized)", count: f.value, asOf: f.periodEnd, ...stated })) } : {}),
+    ...(nested.length > 0 ? { nestedCounts: nested } : {}),
     method: "treasury_stock_per_class_on_vested",
     incrementalShares: classes.length === 0 ? 0 : unresolved === classes.length ? null : classes.reduce((sum, c) => sum + (c.incrementalShares ?? 0), 0),
     unresolvedClasses: unresolved,
@@ -1214,7 +1243,8 @@ function cappedCallAt(t: CappedCallTerms, note: Record<string, unknown>, price: 
   const coverageBasis = covered == null ? "NOT_STATED"
     : covered === t.coveredShares ? (statedExceeds ? "STATED_COUNT_SURVIVES_CONVERSIONS" : "STATED_COUNT")
     : statedExceeds ? "SHARES_UNDERLYING_NOTES_AT_PERIOD_END_BELOW_STATED_COUNT" : "SHARES_UNDERLYING_NOTES_AT_PERIOD_END";
-  const missing = [strike == null ? "strike price" : null, t.capPrice == null ? "cap price" : null, covered == null ? "covered shares" : null].filter((x): x is string => x != null);
+  // Stable enums: unresolvedReason is CAPPED_CALL_TERMS_INCOMPLETE and missingTerms names each term not stated.
+  const missing = [strike == null ? "STRIKE_PRICE" : null, t.capPrice == null ? "CAP_PRICE" : null, covered == null ? "COVERED_SHARES" : null].filter((x): x is string => x != null);
   const offset = missing.length > 0 ? null : round((covered! * Math.max(0, Math.min(price, t.capPrice!) - strike!)) / price);
   return {
     strikePrice: strike,
@@ -1224,7 +1254,7 @@ function cappedCallAt(t: CappedCallTerms, note: Record<string, unknown>, price: 
     coverageBasis,
     statedCoveredShares: t.coveredShares,
     offsetSharesAtPrice: offset,
-    ...(missing.length > 0 ? { unresolvedReason: `${missing.join(", ")} not stated` } : {}),
+    ...(missing.length > 0 ? { unresolvedReason: "CAPPED_CALL_TERMS_INCOMPLETE", missingTerms: missing } : {}),
     sentences: t.sentences,
     documentUrl: t.documentUrl,
     filingDate: t.filingDate,
@@ -1731,6 +1761,85 @@ function taggedDilutionConcepts(sources: IxSource[]): string[] {
   return out.sort().slice(0, 60);
 }
 
+// ── The company's antidilutive-securities table (2.5.13) ────────────────────
+//
+// The EPS note lists every class of potentially dilutive security the company left out of diluted EPS,
+// with its own share count for the period. Each row is matched to a bridge component by its label. A row
+// no component models becomes a share claim with the company's count (REPORTED_NOT_MODELED): ASTS's
+// Class B and Class C common stock exchangeable for Class A (89.4M), LUNR's escrow shares, SOUN's
+// contingently issuable shares, RKLB's collared forward transactions. The table's warrant total is also
+// set against the bridge's (LUNR reports 4,857,302; the bridge counts 541,667). The counts can be
+// weighted averages over the period, so they are evidence beside the bridge, never added into it.
+const ANTIDILUTIVE_CATEGORIES: { category: string; component: string | null; kind: string; re: RegExp }[] = [
+  { category: "warrants", component: "warrants", kind: "WARRANTS_NOT_TAGGED", re: /warrant/i },
+  { category: "convertible_preferred", component: "convertible_preferred", kind: "CONVERTIBLE_PREFERRED", re: /preferred/i },
+  { category: "convertible_debt", component: "convertible_debt", kind: "CONVERTIBLE_DEBT_NOT_TAGGED", re: /convertible|\bnotes?\b|debentures?/i },
+  { category: "forward_sale", component: null, kind: "FORWARD_SALE", re: /forward/i },
+  { category: "contingent_shares", component: null, kind: "CONTINGENT_SHARES", re: /contingent|earn-?out|escrow|holdback|milestone/i },
+  { category: "stock_options", component: "stock_options", kind: "EQUITY_COMPENSATION_NOT_TAGGED", re: /option/i },
+  { category: "share_awards", component: "unvested_share_awards", kind: "EQUITY_COMPENSATION_NOT_TAGGED", re: /restricted|\bRSUs?\b|\bPSUs?\b|stock units?|share units?|award|performance|unvested|nonvested/i },
+  { category: "equity_compensation", component: "equity_compensation", kind: "EQUITY_COMPENSATION_NOT_TAGGED", re: /compensation|incentive|equity plan|employee stock|\bESPP\b|purchase plan/i },
+  { category: "exchangeable_interests", component: null, kind: "EXCHANGEABLE_INTERESTS", re: /\bunits?\b|class [a-z]\b|common stock|common shares|exchangeable|noncontrolling|\bLLC\b|partnership/i },
+];
+const EQUITY_COMPENSATION_COMPONENTS = ["stock_options", "unvested_share_awards"];
+
+/** The antidilutive rows matched to components, the claims no component models, and the warrant totals set side by side. */
+function antidilutiveReconciliation(eps: Record<string, unknown> | null, components: Record<string, unknown>[], source: IxSource | null): { reconciliation: Record<string, unknown> | null; claims: Record<string, unknown>[]; warrants: { reported: number; bridge: number | null } | null } {
+  const rows = ((eps?.antidilutiveExcluded ?? []) as Record<string, unknown>[]).filter((r) => typeof r.shares === "number" && (r.shares as number) > 0);
+  if (!eps || rows.length === 0) return { reconciliation: null, claims: [], warrants: null };
+  const present = new Set(components.map((c) => String(c.component)));
+  const modeled = (component: string | null) => component != null && (component === "equity_compensation" ? EQUITY_COMPENSATION_COMPONENTS.some((c) => present.has(c)) : present.has(component)
+    || (EQUITY_COMPENSATION_COMPONENTS.includes(component) && EQUITY_COMPENSATION_COMPONENTS.some((c) => present.has(c))));
+  const matched = rows.map((r) => {
+    const cat = ANTIDILUTIVE_CATEGORIES.find((c) => c.re.test(String(r.security)));
+    return { security: r.security, shares: r.shares, category: cat?.category ?? "other", modeledBy: cat && modeled(cat.component) ? cat.component : null, kind: cat?.kind ?? "OTHER_REPORTED_SECURITY" };
+  });
+  const groups = new Map<string, typeof matched>();
+  for (const m of matched.filter((m) => m.modeledBy == null)) groups.set(m.kind, [...(groups.get(m.kind) ?? []), m]);
+  const claims = [...groups.entries()].map(([kind, list]) => ({
+    kind,
+    status: "REPORTED_NOT_MODELED",
+    reportedShares: list.reduce((t, m) => t + Number(m.shares), 0),
+    reportedSecurities: list.map((m) => ({ security: m.security, shares: m.shares })),
+    reportedPeriod: { start: eps.periodStart ?? null, end: eps.periodEnd ?? null },
+    evidence: "ANTIDILUTIVE_TABLE",
+    sentences: [] as string[],
+    leadIn: null,
+    leadOut: null,
+    documentUrl: source?.documentUrl ?? null,
+    filingDate: source?.filingDate ?? null,
+    accessionNumber: source?.accessionNumber ?? null,
+  }));
+  const reportedWarrants = matched.filter((m) => m.category === "warrants").reduce((t, m) => t + Number(m.shares), 0);
+  const bridgeWarrants = components.find((c) => c.component === "warrants");
+  return {
+    reconciliation: {
+      periodStart: eps.periodStart ?? null,
+      periodEnd: eps.periodEnd ?? null,
+      rows: matched.map(({ kind: _kind, ...m }) => m),
+      note: "The company's own antidilutive-securities counts for the period (possibly weighted averages), matched to bridge components by label. A row no component models is listed in unquantifiedShareClaims with the company's count; nothing here is added to the bridge.",
+    },
+    claims,
+    warrants: reportedWarrants > 0 && bridgeWarrants ? { reported: reportedWarrants, bridge: typeof bridgeWarrants.outstanding === "number" ? bridgeWarrants.outstanding : null } : null,
+  };
+}
+
+/** Text claims of a kind the antidilutive table also reports carry its count; the table's other rows are their own claims. */
+function mergeReportedClaims(claims: Record<string, unknown>[], reported: Record<string, unknown>[]): Record<string, unknown>[] {
+  const out = claims.map((c) => ({ ...c }));
+  for (const r of reported) {
+    const text = out.find((c) => c.kind === r.kind && c.status === "UNQUANTIFIED");
+    if (text) Object.assign(text, { status: "REPORTED_NOT_MODELED", reportedShares: r.reportedShares, reportedSecurities: r.reportedSecurities, reportedPeriod: r.reportedPeriod });
+    else out.push(r);
+  }
+  return out;
+}
+
+/** A claim the bridge leaves out: quoted only in text, or reported with a count no component models. */
+export function isOpenClaim(c: Record<string, unknown>): boolean {
+  return c.status === "UNQUANTIFIED" || c.status === "REPORTED_NOT_MODELED";
+}
+
 export type DilutionInput = {
   ticker: string;
   price: number;
@@ -1821,11 +1930,19 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
   }
   const cappedOpen = capped.filter((c) => typeof c.call.offsetSharesAtPrice !== "number");
   if (cappedOpen.length > 0) {
-    warnings.push({ code: "CAPPED_CALL_TERMS_INCOMPLETE", message: `The filing describes capped calls for ${cappedOpen.map((c) => `${c.instrument} (${c.call.unresolvedReason})`).join("; ")}; no offset is computed for them.`, severity: "info" });
+    warnings.push({ code: "CAPPED_CALL_TERMS_INCOMPLETE", message: `The filing describes capped calls for ${cappedOpen.map((c) => `${c.instrument} (not stated: ${(c.call.missingTerms as string[]).join(", ")})`).join("; ")}; no offset is computed for them.`, severity: "info" });
   }
   const redeemed = notes.filter((i) => i.afterPeriodEnd != null);
   if (redeemed.length > 0) {
     warnings.push({ code: "CONVERTIBLE_REDEMPTION_AFTER_PERIOD_END", message: `A redemption or repurchase after the period end is tagged for ${redeemed.map((i) => `${i.instrument} (${(i.afterPeriodEnd as Record<string, unknown>).date})`).join(", ")}; its shares are counted as of the period end.`, severity: "warning" });
+  }
+  const nestedCounts = (warrants?.nestedCounts ?? []) as Record<string, unknown>[];
+  if (nestedCounts.length > 0) {
+    warnings.push({
+      code: "WARRANT_NESTED_COUNT",
+      message: `${nestedCounts.map((c) => (c.reason === "SUM_OF_COUNTED_PARTS" ? `${c.class} (${c.count}) is counted through its parts ${(c.parts as string[]).join(", ")}` : `${c.class} (${c.count}) is part of ${c.partOf} and not counted again`)).join("; ")}.`,
+      severity: "info",
+    });
   }
   const retiredText = (warrants?.retiredInText ?? []) as Record<string, unknown>[];
   if (retiredText.length > 0) {
@@ -1845,15 +1962,26 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
     });
   }
   const claimsRead = Array.isArray(input.claimMatches);
-  const claims = withPostPeriodWarrants(
+  const epsFound = findInSources(sources, reportedEpsDilution);
+  const antidilutive = antidilutiveReconciliation(epsFound?.value ?? null, components, epsFound?.source ?? null);
+  const claims = mergeReportedClaims(withPostPeriodWarrants(
     claimsRead ? preferredClaimsWithTags(shareClaimSignals(input.claimMatches as TextMatch[]), sources, preferred) : [],
     postPeriodWarrants(primary),
-  );
-  const openClaims = claims.filter((c) => c.status === "UNQUANTIFIED");
+  ), antidilutive.claims);
+  const openClaims = claims.filter(isOpenClaim);
   if (openClaims.length > 0) {
     warnings.push({
       code: "UNQUANTIFIED_SHARE_CLAIMS",
-      message: `The filing text states ${openClaims.length} share claim(s) no tagged component covers (${openClaims.map((c) => c.kind).join(", ")}); they are quoted in unquantifiedShareClaims and are not in any share count.`,
+      message: `The filing states ${openClaims.length} share claim(s) no tagged component covers (${openClaims.map((c) => (typeof c.reportedShares === "number" ? `${c.kind}: ${c.reportedShares} reported` : c.kind)).join(", ")}); they are listed in unquantifiedShareClaims and are not in any share count.`,
+      severity: "warning",
+    });
+  }
+  // The company's warrant total against the bridge's: a stale, missing or double count shows as a gap (2.5.13).
+  const aw = antidilutive.warrants;
+  if (aw && aw.bridge != null && Math.abs(aw.reported - aw.bridge) > Math.max(aw.reported * 0.05, 100_000)) {
+    warnings.push({
+      code: "WARRANT_COUNT_DIFFERS_FROM_REPORTED",
+      message: `The bridge counts ${aw.bridge} warrant shares; the company's antidilutive-securities table reports ${aw.reported} for the period ${epsFound?.value.periodStart} to ${epsFound?.value.periodEnd}. The table can be a weighted average, but a gap this size usually means a class is stale, untagged or tagged only in part; check the warrant note.`,
       severity: "warning",
     });
   }
@@ -1885,7 +2013,8 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
     basicShares: basicFound ? { ...basicFound.value, source: sourceRef(basicFound.source, basicFound.value.asOf as string | null) } : null,
     components,
     atmProgram: atm,
-    reportedEpsDilution: findInSources(sources, reportedEpsDilution)?.value ?? null,
+    reportedEpsDilution: epsFound?.value ?? null,
+    antidilutiveReconciliation: antidilutive.reconciliation,
     notDisclosed,
     unresolved,
     partiallyResolved: partial,
@@ -1895,9 +2024,11 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
       completeClaimInventory: false,
       modeledComponents: ["stock_options", "unvested_share_awards", "warrants", "convertible_debt", "convertible_preferred", "atm_program"],
       textScan: claimsRead ? "READ" : "NOT_READ",
+      // The company's antidilutive-securities table, read from the inline XBRL (2.5.13).
+      antidilutiveTable: antidilutive.reconciliation ? "READ" : "NOT_TAGGED",
       textScanKinds: SHARE_CLAIM_KINDS.map((k) => k.kind),
       unquantifiedClaims: openClaims.length,
-      note: "status describes the tagged instruments only. COMPUTED means every tagged instrument was resolved, never that every claim on the equity was found; the text scan covers a fixed list of claim kinds, and a claim it does not find is not proof none exists.",
+      note: "status describes the tagged instruments only. COMPUTED means every tagged instrument was resolved, never that every claim on the equity was found; the text scan covers a fixed list of claim kinds, and a claim it does not find is not proof none exists. The company's antidilutive-securities table adds any class of potentially dilutive security it reports that no component models, with its count.",
     },
   };
   if (!basicFound) {

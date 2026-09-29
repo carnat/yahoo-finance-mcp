@@ -40,6 +40,7 @@ import {
   fetchAlphaVantageJson,
   getSubmissionsForTicker,
   listSecMaterialFilings,
+  secFiscalYearNaming,
   yGet,
 } from "./yahoo-finance.js";
 
@@ -139,8 +140,8 @@ export async function getConsensusForecastCurve(
   const policy = consensusPolicy(horizonYears, minAnalystCount, conflictTolerancePct);
   if (typeof policy === "string") return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: policy });
   const asOf = new Date().toISOString();
-  const { inputs } = await consensusProviders(ticker);
-  const curve = buildConsensusCurve(ticker, inputs, asOf, policy);
+  const [{ inputs }, naming] = await Promise.all([consensusProviders(ticker), secFiscalYearNaming(ticker)]);
+  const curve = buildConsensusCurve(ticker, inputs, asOf, policy, naming);
   // The first observation of the day is kept; later calls report ALREADY_STORED.
   const observation = await writeConsensusObservation(ticker, curve, asOf);
   return JSON.stringify({ ...curve, storage: { consensusObservation: observation } });
@@ -184,8 +185,8 @@ async function secFilingRows(ticker: string): Promise<{ rows: FilingRow[] | null
 
 export async function getEvidenceQuality(ticker: string): Promise<string> {
   const asOf = new Date().toISOString();
-  const [{ inputs, quote }, filings] = await Promise.all([consensusProviders(ticker), secFilingRows(ticker)]);
-  const curve = buildConsensusCurve(ticker, inputs, asOf);
+  const [{ inputs, quote }, filings, naming] = await Promise.all([consensusProviders(ticker), secFilingRows(ticker), secFiscalYearNaming(ticker)]);
+  const curve = buildConsensusCurve(ticker, inputs, asOf, DEFAULT_CONSENSUS_POLICY, naming);
   return JSON.stringify(evidenceQuality({
     ticker,
     asOf,
@@ -223,8 +224,8 @@ export async function buildValuationEvidencePack(ticker: string, horizonYears = 
   const symbol = ticker.toUpperCase();
   const cutoff = new Date().toISOString();
 
-  const [{ inputs, quote }, filings] = await Promise.all([consensusProviders(symbol), secFilingRows(symbol)]);
-  const curve = buildConsensusCurve(symbol, inputs, cutoff, policy);
+  const [{ inputs, quote }, filings, naming] = await Promise.all([consensusProviders(symbol), secFilingRows(symbol), secFiscalYearNaming(symbol)]);
+  const curve = buildConsensusCurve(symbol, inputs, cutoff, policy, naming);
   const major = quote.price != null ? majorPrice(quote.price, quote.currency) : null;
 
   const dilutionRun = (): Promise<ComponentRecord> => {

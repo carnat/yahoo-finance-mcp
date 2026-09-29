@@ -86,3 +86,67 @@ def fiscal_quarter_of(end: str, year_end: str) -> int | None:
         return None
     q = 4 - quarters_left
     return q if 1 <= q <= 4 else None
+
+
+# ── Fiscal-year naming (2.5.13) ─────────────────────────────────────────────
+#
+# Companies name a year that ends early in a calendar year differently: DG's year ending January 30,
+# 2026 is its fiscal 2025 (named for the year it starts in), WMT's year ending January 31, 2026 its
+# fiscal 2026. Only the company says which. Its annual reports state it (companyfacts fy of each 10-K's
+# own year); the offset between that stated year and the period-end rule, when every recent annual
+# report agrees, names the company's other fiscal years.
+
+_NAMING_CONCEPTS = ("Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet", "NetIncomeLoss", "EarningsPerShareDiluted")
+_NAMING_REPORTS = 3
+
+
+def stated_fiscal_years(companyfacts) -> list[dict]:
+    """Each 10-K's own year: its latest annual period end and the fiscal year it states (companyfacts fy), newest first."""
+    facts = companyfacts.get("facts") if isinstance(companyfacts, dict) else None
+    usgaap = (facts or {}).get("us-gaap") or {}
+    by_accession: dict[str, dict] = {}
+    for concept in _NAMING_CONCEPTS:
+        units = (usgaap.get(concept) or {}).get("units") or {}
+        for rows in units.values():
+            for f in rows or []:
+                fy = f.get("fy")
+                if (not str(f.get("form") or "").startswith("10-K") or f.get("fp") != "FY" or isinstance(fy, bool) or not isinstance(fy, int)
+                        or not isinstance(f.get("accn"), str) or not isinstance(f.get("end"), str) or not isinstance(f.get("start"), str)):
+                    continue
+                try:
+                    days = (_dt.date.fromisoformat(f["end"][:10]) - _dt.date.fromisoformat(f["start"][:10])).days
+                except ValueError:
+                    continue
+                if not 350 <= days <= 380:
+                    continue
+                prev = by_accession.get(f["accn"])
+                if prev is None or f["end"] > prev["periodEnd"]:
+                    by_accession[f["accn"]] = {"periodEnd": f["end"], "fiscalYear": fy}
+    by_end: dict[str, int] = {}
+    for v in by_accession.values():
+        by_end[v["periodEnd"]] = v["fiscalYear"]
+    return [{"periodEnd": e, "fiscalYear": y} for e, y in sorted(by_end.items(), reverse=True)]
+
+
+def fiscal_year_naming(companyfacts) -> dict:
+    """The company's fiscal-year naming against the period-end rule, from its latest annual reports; offset 0 when they are not read or disagree."""
+    if companyfacts is None:
+        return {"offset": 0, "basis": "PERIOD_END_RULE_SEC_NOT_READ", "periodEnd": None, "statedFiscalYear": None}
+    recent = stated_fiscal_years(companyfacts)[:_NAMING_REPORTS]
+    if not recent:
+        return {"offset": 0, "basis": "PERIOD_END_RULE_NO_STATED_YEAR", "periodEnd": None, "statedFiscalYear": None}
+    offsets = [r["fiscalYear"] - (fiscal_year_of_period_end(r["periodEnd"]) or r["fiscalYear"]) for r in recent]
+    if any(o != offsets[0] for o in offsets) or abs(offsets[0]) > 1:
+        return {"offset": 0, "basis": "PERIOD_END_RULE_STATED_YEARS_INCONSISTENT", "periodEnd": recent[0]["periodEnd"], "statedFiscalYear": recent[0]["fiscalYear"]}
+    return {"offset": offsets[0], "basis": "SEC_STATED_FISCAL_YEAR", "periodEnd": recent[0]["periodEnd"], "statedFiscalYear": recent[0]["fiscalYear"]}
+
+
+_FY_FOCUS_RE = re.compile(r'name="dei:DocumentFiscalYearFocus"[^>]*>\s*(?:<[^>]+>\s*)*(\d{4})\s*<')
+
+
+def document_fiscal_year_focus(html: str | None) -> int | None:
+    """The fiscal year an inline XBRL filing states for itself (dei:DocumentFiscalYearFocus); None when it is not tagged."""
+    if not html:
+        return None
+    m = _FY_FOCUS_RE.search(html)
+    return int(m.group(1)) if m else None

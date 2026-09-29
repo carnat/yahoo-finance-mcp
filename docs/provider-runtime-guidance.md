@@ -1358,8 +1358,11 @@ consensus actions compose evidence and never fill a gap with an assumption.
     This is the value the capped call delivers back to the company, in shares
     at the price.
   - It is computed only when the strike, cap and covered shares are all
-    stated. Otherwise the capped call is listed with an `unresolvedReason`
-    (`CAPPED_CALL_TERMS_INCOMPLETE`).
+    stated. Otherwise the capped call carries the stable enum
+    `unresolvedReason: CAPPED_CALL_TERMS_INCOMPLETE` and `missingTerms`, a
+    list of `STRIKE_PRICE`, `CAP_PRICE` and `COVERED_SHARES` (2.5.13; 2.5.12
+    put free text such as "strike price not stated" in `unresolvedReason`).
+    The bridge also warns `CAPPED_CALL_TERMS_INCOMPLETE`.
   - A stated count larger than the notes' shares today (coverage at issue,
     after conversions) is used only when the filing says the capped calls
     outlasted those conversions (`STATED_COUNT_SURVIVES_CONVERSIONS`).
@@ -1379,11 +1382,74 @@ consensus actions compose evidence and never fill a gap with an assumption.
   - **RKLB:** strike $5.1255, cap $8.04. The stated 69.3 million shares are
     bounded by the notes' 27,736,452 shares, which offset 4,041,894 at $20.
   - **LITE:** the 2032 capped calls state the cap ($268.24) and their
-    coverage but no strike, so they are reported and not netted.
+    coverage but no strike, so they are reported and not netted
+    (`missingTerms: [STRIKE_PRICE]`).
 - **Share scenarios.** `get_share_count_scenarios` takes
   `capped_calls: ignore` (the default) or `offset_when_stated`. The latter
   adds a negative `capped_call` line per note with fully stated terms. A
   capped call with incomplete terms is an unresolved line.
+
+## Nested Warrants, The Antidilutive Table And Fiscal-Year Naming (2.5.13)
+
+- **Warrant classes tagged as a total and in parts are counted once.**
+  - A count whose dimensions extend another counted class (the class plus a
+    tranche or holder axis) is a part of that class.
+  - Parts that add up to the class (within 0.5%) replace it and keep their
+    own terms. JOBY's Delta Warrants (12,833,333) are counted through their
+    tranches (7,000,000 and 5,833,333), not as 25.7M.
+  - Parts that do not add up are left out. LUNR's 104,157 related-party
+    warrants are part of its 541,667, and the bridge previously counted
+    645,824.
+  - `nestedCounts` lists what was set aside (`WARRANT_NESTED_COUNT`).
+- **The company's antidilutive-securities table.**
+  - The EPS note tags every class of potentially dilutive security left out
+    of diluted EPS, with the company's own count for the period
+    (`AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount`).
+  - Each non-zero row is matched to a bridge component by its label in
+    `antidilutiveReconciliation.rows`, with its category and `modeledBy`.
+  - A row no component models becomes a claim with the company's count
+    (`status: REPORTED_NOT_MODELED`, `reportedShares`,
+    `reportedSecurities`, `evidence: ANTIDILUTIVE_TABLE`). A text claim of
+    the same kind takes the count. Examples:
+    - ASTS's Class B and Class C common stock exchangeable for Class A;
+    - LUNR's escrow shares;
+    - SOUN's contingently issuable shares;
+    - RKLB's collared forward transactions (7,451,200), which joins its
+      forward-sale text claim.
+  - Open claims (`UNQUANTIFIED` or `REPORTED_NOT_MODELED`) keep the bridge
+    `PARTIAL` and share scenarios at `EXCLUDES_UNQUANTIFIED_CLAIMS`.
+  - The table's warrant total is set against the bridge's. A gap over 5%
+    (and 100,000 shares) is flagged `WARRANT_COUNT_DIFFERS_FROM_REPORTED`,
+    e.g. LUNR reports 4,857,302 against the bridge's 541,667. The counts can
+    be weighted averages, so they are never added into the bridge.
+  - `claimCoverage.antidilutiveTable` says whether the table was tagged. The
+    claim inventory is still not complete: the table lists only securities
+    that were antidilutive for the period.
+- **Fiscal-year naming.**
+  - Companies name a year ending early in a calendar year differently. DG's
+    year ending January 30, 2026 is its fiscal 2025; WMT's year ending
+    January 31, 2026 is its fiscal 2026.
+  - `fiscalYearNaming` compares the fiscal year each recent 10-K states for
+    itself (companyfacts `fy`) with the period-end rule:
+    - when the latest three agree, their offset (DG: −1) names the company's
+      other years (`basis: SEC_STATED_FISCAL_YEAR`);
+    - otherwise the rule stands (`PERIOD_END_RULE_STATED_YEARS_INCONSISTENT`,
+      `..._NO_STATED_YEAR`, `..._SEC_NOT_READ`).
+  - `get_consensus_forecast_curve`, `get_evidence_quality` and the valuation
+    evidence pack apply it and report `fiscalYearNaming`. DG's FY0 ending
+    January 2027 is now fiscal 2026, not 2027.
+  - Guidance history applies it to a year named only by its end date
+    (`namingBasis`).
+  - An annual report's geographic revenue period uses the filing's own
+    `dei:DocumentFiscalYearFocus` when tagged.
+  - Filing-search `fiscalYear` labels still use the period of report and the
+    period-end rule.
+- **Capped call contract.** `unresolvedReason` is the stable enum
+  `CAPPED_CALL_TERMS_INCOMPLETE`, with `missingTerms` listing
+  `STRIKE_PRICE`, `CAP_PRICE` and `COVERED_SHARES`.
+- **Parity fix.** A guidance outcome for a metric whose actuals table is
+  empty is `ACTUAL_NOT_YET_REPORTED` in both runtimes. Python had reported
+  `NOT_EVALUATED_METRIC`.
 
 ## Non-US Primary Filings
 

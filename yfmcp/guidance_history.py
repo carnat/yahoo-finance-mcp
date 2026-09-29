@@ -20,7 +20,7 @@ from typing import Any
 
 from yfmcp.evidence import AUTHORITY_BOUNDARY
 from yfmcp.extraction_rules import guidance_ranges
-from yfmcp.fiscal_calendar import TEXT_DATE_SOURCE, fiscal_quarter_of, fiscal_year_of_period_end, nominal_period_end, text_date
+from yfmcp.fiscal_calendar import TEXT_DATE_SOURCE, fiscal_quarter_of, fiscal_year_naming, fiscal_year_of_period_end, nominal_period_end, text_date
 from yfmcp.sec_facts import REVENUE_CONCEPTS
 
 _F = re.I | re.A
@@ -433,7 +433,8 @@ def guidance_outcomes(entries: list[dict], actuals: dict) -> list[dict]:
         status = "EVALUATED"
         if actuals.get("read") is False and metric != "grossMargin":
             status = "ACTUALS_NOT_READ"
-        elif not table:
+        # An empty table is a metric read with no actual yet, as in the Worker; only a missing one is not evaluated (2.5.13).
+        elif table is None:
             status = "NOT_EVALUATED_METRIC"
         elif non_gaap:
             status = "NOT_EVALUATED_NON_GAAP_BASIS"
@@ -458,8 +459,18 @@ def guidance_outcomes(entries: list[dict], actuals: dict) -> list[dict]:
     return sorted(out, key=lambda r: (str(r["targetPeriod"]), str(r["metric"])))
 
 
+def _with_naming(e: dict, naming: dict) -> dict:
+    """A year named only by its end date takes the company's own naming (DG's year ending January 2027 is its fiscal 2026) (2.5.13)."""
+    tp = e.get("targetPeriod")
+    if not isinstance(tp, dict) or tp.get("basis") != "TEXT_PERIOD_END" or naming["offset"] == 0 or not isinstance(tp.get("fiscalYear"), int):
+        return e
+    fiscal_year = tp["fiscalYear"] + naming["offset"]
+    return {**e, "targetPeriod": {**tp, "fiscalYear": fiscal_year, "label": f"FY{fiscal_year}", "namingBasis": naming["basis"]}}
+
+
 def guidance_history(ticker: str, releases: list[dict], companyfacts: Any) -> dict:
-    entries = [e for r in releases for e in guidance_entries(r)]
+    naming = fiscal_year_naming(companyfacts)
+    entries = [_with_naming(e, naming) for r in releases for e in guidance_entries(r)]
     actuals = actuals_from_company_facts(companyfacts)
     return {
         "ticker": ticker.upper(),

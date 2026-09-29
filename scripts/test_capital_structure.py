@@ -539,6 +539,38 @@ LITE_CAPPED_TEXT = [
     "The cap price of the 2032 Capped Call Options was initially $268.24 per share, and is subject to certain adjustments.",
 ]
 
+# Nested warrant counts and the antidilutive-securities table (2.5.13): a class tagged as a total and in
+# tranches that sum to it (JOBY), a class with an "of which" part (LUNR), and the company's own table
+# listing warrants, escrow shares, Class C units and a forward the bridge does not model.
+NDW = {"us-gaap:ClassOfWarrantOrRightAxis": "nst:DeltaWarrantsMember"}
+NDW1 = {**NDW, "nst:TrancheAxis": "nst:TrancheOneMember"}
+NDW2 = {**NDW, "nst:TrancheAxis": "nst:TrancheTwoMember"}
+NPW = {"us-gaap:ClassOfWarrantOrRightAxis": "nst:PreferredInvestorWarrantsMember"}
+NPW1 = {**NPW, "srt:CounterpartyNameAxis": "nst:GhaffarianEnterprisesMember"}
+ANTI = "us-gaap:AntidilutiveSecuritiesAxis"
+NEST_Q = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "nq", "10-Q")}
+{_text("dei:DocumentPeriodEndDate", "nq", "June 30, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("nq", "2026-04-01..2026-06-30")}{_context("ncover", "2026-08-01")}
+{_context("ndw", "2026-06-30", NDW)}{_context("ndw1", "2026-06-30", NDW1)}{_context("ndw2", "2026-06-30", NDW2)}{_context("npw", "2026-06-30", NPW)}{_context("npw1", "2026-06-30", NPW1)}
+{_context("aw", "2026-04-01..2026-06-30", {ANTI: "us-gaap:WarrantMember"})}{_context("ae", "2026-04-01..2026-06-30", {ANTI: "nst:EscrowSharesMember"})}
+{_context("ac", "2026-04-01..2026-06-30", {ANTI: "us-gaap:CommonClassCMember"})}{_context("af", "2026-04-01..2026-06-30", {ANTI: "nst:CollaredForwardTransactionsMember"})}
+{_context("ao", "2026-04-01..2026-06-30", {ANTI: "us-gaap:EmployeeStockOptionMember"})}{UNITS}</ix:resources></ix:header></div>
+<p>Shares outstanding: {_num("dei:EntityCommonStockSharesOutstanding", "ncover", "shares", "100,000,000")}</p>
+<p>Delta: {_num("us-gaap:ClassOfWarrantOrRightOutstanding", "ndw", "shares", "12,833,333")}, tranche one {_num("us-gaap:ClassOfWarrantOrRightOutstanding", "ndw1", "shares", "7,000,000")},
+tranche two {_num("us-gaap:ClassOfWarrantOrRightOutstanding", "ndw2", "shares", "5,833,333")}.</p>
+<p>Preferred investor: {_num("us-gaap:ClassOfWarrantOrRightOutstanding", "npw", "shares", "541,667")}, of which a related party holds {_num("us-gaap:ClassOfWarrantOrRightOutstanding", "npw1", "shares", "104,157")}.</p>
+<p>Antidilutive: warrants {_num("us-gaap:AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount", "aw", "shares", "20,000,000")};
+escrow shares {_num("us-gaap:AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount", "ae", "shares", "316,237")};
+Class C common stock {_num("us-gaap:AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount", "ac", "shares", "78,163,078")};
+collared forward {_num("us-gaap:AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount", "af", "shares", "7,451,200")};
+options {_num("us-gaap:AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount", "ao", "shares", "0")}.</p>
+</body></html>"""
+NEST_CLAIM_TEXT = [
+    "We entered into a forward sale agreement with the bank covering 7,451,200 shares of common stock, which will settle in 2027.",
+]
+
 # Claim kinds and preferred wordings added in 2.5.11, and the sentences that must not count.
 CENSUS2_CLAIM_TEXT = [
     "In connection with the acquisition, 1,200,000 holdback shares are held by the Company and will be released to the sellers in 2027.",
@@ -562,7 +594,7 @@ TABLE_MATCHES = [
     {"contextText": "Unvested at June 30, 2026, restricted stock units totalled 8,888,888 shares.", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": False, "tableTitle": None, "rowLabel": None},
 ]
 
-FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K, "cohr_k": COHR_K, "pref_q": PREF_Q, "mrvl_q": MRVL_Q, "life_k": LIFE_K, "aehr_k": AEHR_K, "lite_k": LITE_K, "prefliq_q": PREFLIQ_Q, "stale_q": STALE_Q}
+FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K, "cohr_k": COHR_K, "pref_q": PREF_Q, "mrvl_q": MRVL_Q, "life_k": LIFE_K, "aehr_k": AEHR_K, "lite_k": LITE_K, "prefliq_q": PREFLIQ_Q, "stale_q": STALE_Q, "nest_q": NEST_Q}
 
 NEWS_ITEMS = [
     {"title": "Needham raises IQE price target to 45p from 38p", "summary": "Needham values IQE at 12x 2027 EV/EBITDA, citing gallium nitride demand.", "url": "https://news.example/1", "publishedAt": "2026-09-20T08:00:00Z", "source": "yahoo_finance_news"},
@@ -638,6 +670,9 @@ out.preferredWordings = data.preferredWordings.map((texts) => m.preferredConvers
 out.bridgeCapped = m.dilutionBridge({ ticker: "CSTC", price: 25, priceCurrency: "USD", asOfDate: "2025-05-09", sources: [qSource, kFallback], atmMatches: atm, cappedCallMatches: tm(data.capped) });
 out.bridgeCappedHigh = m.dilutionBridge({ ticker: "CSTC", price: 50, priceCurrency: "USD", asOfDate: "2025-05-09", sources: [qSource, kFallback], atmMatches: atm, convertibleSettlementMatches: tm(data.settlement), cappedCallMatches: tm(data.capped) });
 out.bridgeLiteCapped = m.dilutionBridge({ ticker: "LITX", price: 700, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-K", "2026-08-20", "0001234568-26-000200", data.kUrl, "lite_k")], atmMatches: [], claimMatches: tm(data.liteClaims), cappedCallMatches: tm(data.liteCapped) });
+const nestSrc = src("primary", "10-Q", "2026-08-10", "0001234568-26-000230", data.qUrl, "nest_q");
+out.bridgeNest = m.dilutionBridge({ ticker: "NSTX", price: 20, priceCurrency: "USD", asOfDate: null, sources: [nestSrc], atmMatches: [], claimMatches: tm(data.nestClaims) });
+out.bridgeNestUnread = m.dilutionBridge({ ticker: "NSTX", price: 20, priceCurrency: "USD", asOfDate: null, sources: [nestSrc], atmMatches: [] });
 out.cappedTerms = [data.capped, data.beCapped, data.rklbCapped, data.liteCapped].map((texts) => m.cappedCallTerms(tm(texts)));
 out.capital = m.capitalStructure({ ticker: "CSTC", source: kSource, fundingMatches: atm });
 out.capitalAaoi = m.capitalStructure({ ticker: "AAOX", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000040", data.qUrl, "aaoi_q"), fundingMatches: [] });
@@ -707,7 +742,7 @@ def _worker_pure() -> dict:
             "cohrClaims": COHR_CLAIM_TEXT, "mrvlClaims": MRVL_CLAIM_TEXT, "liteClaims": LITE_CLAIM_TEXT, "censusClaims": CENSUS_CLAIM_TEXT,
             "lifecycle": LIFECYCLE_TEXT, "settlement": SETTLEMENT_TEXT, "liteSettlement": LITE_SETTLEMENT_TEXT, "census2Claims": CENSUS2_CLAIM_TEXT,
             "preferredWordings": PREFERRED_WORDINGS, "capped": CAPPED_TEXT, "beCapped": BE_CAPPED_TEXT, "rklbCapped": RKLB_CAPPED_TEXT,
-            "liteCapped": LITE_CAPPED_TEXT,
+            "liteCapped": LITE_CAPPED_TEXT, "nestClaims": NEST_CLAIM_TEXT,
         }), encoding="utf-8")
         (tmp_path / "harness.mjs").write_text(_WORKER_PURE, encoding="utf-8")
         result = subprocess.run(
@@ -744,6 +779,7 @@ def _python_pure() -> dict:
     aehr_src = cs.IxSource("primary", "10-K", "2026-07-27", "0001234568-26-000190", K_URL, docs["aehr_k"])
     stale_src = cs.IxSource("primary", "10-Q", "2026-08-10", "0001234568-26-000220", Q_URL, docs["stale_q"])
     lite_src = cs.IxSource("primary", "10-K", "2026-08-20", "0001234568-26-000200", K_URL, docs["lite_k"])
+    nest_src = cs.IxSource("primary", "10-Q", "2026-08-10", "0001234568-26-000230", Q_URL, docs["nest_q"])
     return {
         "bridgeStale": cs.dilution_bridge("STLX", 20, "USD", None, [stale_src], [], None, [], tm(LIFECYCLE_TEXT)),
         "bridgeStaleUnread": cs.dilution_bridge("STLX", 20, "USD", None, [stale_src], [], None, []),
@@ -755,6 +791,8 @@ def _python_pure() -> dict:
         "bridgeCappedHigh": cs.dilution_bridge("CSTC", 50, "USD", "2025-05-09", [q_source, k_fallback], atm, None, None, None, tm(SETTLEMENT_TEXT), tm(CAPPED_TEXT)),
         "bridgeLiteCapped": cs.dilution_bridge("LITX", 700, "USD", None, [lite_src], [], None, tm(LITE_CLAIM_TEXT), None, None, tm(LITE_CAPPED_TEXT)),
         "cappedTerms": [cs.capped_call_terms(tm(texts)) for texts in (CAPPED_TEXT, BE_CAPPED_TEXT, RKLB_CAPPED_TEXT, LITE_CAPPED_TEXT)],
+        "bridgeNest": cs.dilution_bridge("NSTX", 20, "USD", None, [nest_src], [], None, tm(NEST_CLAIM_TEXT)),
+        "bridgeNestUnread": cs.dilution_bridge("NSTX", 20, "USD", None, [nest_src], []),
         "bridgeAehr": cs.dilution_bridge("AEHX", 20, "USD", None, [aehr_src], [], None, []),
         "bridgeLite": cs.dilution_bridge("LITX", 700, "USD", None, [cs.IxSource("primary", "10-K", "2026-08-20", "0001234568-26-000200", K_URL, docs["lite_k"])], [], None, tm(LITE_CLAIM_TEXT)),
         "bridgeCensus": cs.dilution_bridge("AEHX", 20, "USD", None, [aehr_src], [], None, tm(CENSUS_CLAIM_TEXT)),
@@ -806,7 +844,7 @@ class TestCapitalStructureParity(unittest.TestCase):
             self.assertEqual(self.worker["documents"][name], self.local["documents"][name], name)
 
     def test_outputs_match(self) -> None:
-        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "bridgeStale", "bridgeStaleUnread", "bridgeSettled", "bridgeLiteSettled", "bridgeCensus2", "preferredWordings", "bridgeCapped", "bridgeCappedHigh", "bridgeLiteCapped", "cappedTerms", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
+        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "bridgeStale", "bridgeStaleUnread", "bridgeSettled", "bridgeLiteSettled", "bridgeCensus2", "preferredWordings", "bridgeCapped", "bridgeCappedHigh", "bridgeLiteCapped", "cappedTerms", "bridgeNest", "bridgeNestUnread", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
 
@@ -1133,6 +1171,35 @@ class TestCapitalStructureValues(unittest.TestCase):
         lite = next(c for c in out["bridgeLiteSettled"]["components"] if c["component"] == "convertible_debt")["instruments"][0]
         self.assertEqual((lite["principalSettlement"]["scope"], lite["netShareSettlementShares"]), ("ALL_NOTES", 1_114_118))
 
+    def test_nested_warrants_and_antidilutive_table(self) -> None:
+        out = _python_pure()
+        b = out["bridgeNest"]
+        w = next(c for c in b["components"] if c["component"] == "warrants")
+        # 2.5.13: the Delta tranches replace their total; the related party's 104,157 is part of the 541,667.
+        self.assertEqual(sorted(c["class"] for c in w["classes"]), ["Delta Warrants / Tranche One", "Delta Warrants / Tranche Two", "Preferred Investor Warrants"])
+        self.assertEqual(w["outstanding"], 7_000_000 + 5_833_333 + 541_667)
+        self.assertEqual(sorted((n["class"], n["reason"]) for n in w["nestedCounts"]),
+                         [("Delta Warrants", "SUM_OF_COUNTED_PARTS"), ("Preferred Investor Warrants / Ghaffarian Enterprises", "PART_OF_COUNTED_CLASS")])
+        codes = [x["code"] for x in b["warnings"]]
+        self.assertIn("WARRANT_NESTED_COUNT", codes)
+        # The company reports 20,000,000 warrants: the gap is flagged, never added.
+        self.assertIn("WARRANT_COUNT_DIFFERS_FROM_REPORTED", codes)
+        rows = {r["security"]: r for r in b["antidilutiveReconciliation"]["rows"]}
+        self.assertEqual((rows["Warrant"]["category"], rows["Warrant"]["modeledBy"]), ("warrants", "warrants"))
+        self.assertNotIn("Employee Stock Option", rows, "a zero row is not a security")
+        claims = {c["kind"]: c for c in b["unquantifiedShareClaims"]}
+        # The text's forward sale takes the table's count; escrow shares and Class C units are claims from the table alone.
+        self.assertEqual((claims["FORWARD_SALE"]["status"], claims["FORWARD_SALE"]["reportedShares"], len(claims["FORWARD_SALE"]["sentences"])),
+                         ("REPORTED_NOT_MODELED", 7_451_200, 1))
+        self.assertEqual((claims["CONTINGENT_SHARES"]["reportedShares"], claims["CONTINGENT_SHARES"]["evidence"]), (316_237, "ANTIDILUTIVE_TABLE"))
+        self.assertEqual(claims["EXCHANGEABLE_INTERESTS"]["reportedShares"], 78_163_078)
+        self.assertEqual(b["status"], "PARTIAL")
+        self.assertEqual(b["claimCoverage"]["antidilutiveTable"], "READ")
+        self.assertTrue(cs.is_open_claim(claims["FORWARD_SALE"]))
+        # Without the text read, the table's rows are still claims.
+        unread = {c["kind"]: c for c in out["bridgeNestUnread"]["unquantifiedShareClaims"]}
+        self.assertEqual((unread["FORWARD_SALE"]["sentences"], unread["FORWARD_SALE"]["reportedShares"]), ([], 7_451_200))
+
     def test_capped_calls(self) -> None:
         out = _python_pure()
         conv = next(c for c in out["bridgeCapped"]["components"] if c["component"] == "convertible_debt")
@@ -1170,7 +1237,8 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertEqual((rklb["coveredShares"], rklb["coverageBasis"], rklb["statedCoveredShares"], rklb["offsetSharesAtPrice"]),
                          (27_736_452, "SHARES_UNDERLYING_NOTES_AT_PERIOD_END_BELOW_STATED_COUNT", 69_300_000, 4_041_894))
         lite_call = cs._capped_call_at(terms[3][0], {"conversionPrice": 187.77, "ifConvertedShares": 6_737_011}, 700)
-        self.assertEqual((lite_call["strikeBasis"], lite_call["offsetSharesAtPrice"], lite_call["unresolvedReason"]), ("NOT_STATED", None, "strike price not stated"))
+        self.assertEqual((lite_call["strikeBasis"], lite_call["offsetSharesAtPrice"], lite_call["unresolvedReason"], lite_call["missingTerms"]),
+                         ("NOT_STATED", None, "CAPPED_CALL_TERMS_INCOMPLETE", ["STRIKE_PRICE"]))
 
     def test_claim_census_2_5_11(self) -> None:
         out = _python_pure()

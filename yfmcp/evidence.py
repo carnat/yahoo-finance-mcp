@@ -403,13 +403,15 @@ def _unavailable_statistic() -> dict:
     return {"value": None, "state": "PROVIDER_NOT_COVERED"}
 
 
-def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: dict | None = None) -> dict:
+def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: dict | None = None, naming: dict | None = None) -> dict:
     """FY0 to FY+horizon consensus, per provider, per fiscal period and metric.
 
     Periods no provider covers are listed as PROVIDER_NOT_COVERED rather than
     filled; no provider value is selected.
     """
     policy = dict(policy or DEFAULT_CONSENSUS_POLICY)
+    # How the company names its fiscal years, from its annual reports (2.5.13); the period-end rule without it.
+    year_naming = naming or {"offset": 0, "basis": "PERIOD_END_RULE", "periodEnd": None, "statedFiscalYear": None}
     horizon = max(1, min(5, int(policy["horizonYears"])))
     fy0 = resolve_fy0(inputs, as_of)
     periods = []
@@ -435,8 +437,9 @@ def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: d
             }
         periods.append({
             "label": label,
-            # A 52/53-week year ending in early January is the prior year's (2.5.11).
-            "fiscalYear": (fiscal_year_of_period_end(fy0["fiscalYearEnd"]) + k
+            # A 52/53-week year ending in early January is the prior year's (2.5.11); the company's own naming
+            # (DG's year ending January 2026 is its fiscal 2025) shifts it (2.5.13).
+            "fiscalYear": (fiscal_year_of_period_end(fy0["fiscalYearEnd"]) + year_naming["offset"] + k
                            if fy0 and fiscal_year_of_period_end(fy0["fiscalYearEnd"]) is not None else None),
             "fiscalYearEnds": fiscal_year_ends,
             "metrics": metrics,
@@ -445,6 +448,7 @@ def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: d
         "ticker": ticker.upper(),
         "asOf": as_of,
         "fiscalYearBasis": fy0 or {"fiscalYearEnd": None, "basis": "NO_PROVIDER_FISCAL_YEAR"},
+        "fiscalYearNaming": year_naming,
         "policy": {**policy, "horizonYears": horizon},
         "providers": [
             {
