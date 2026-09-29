@@ -285,7 +285,7 @@ export function valuationSnapshot(input: SnapshotInput): Record<string, unknown>
   }
   // Share claims the filing states but the bridge leaves out of its count (2.5.9).
   const openClaims = ((Array.isArray(bridge?.unquantifiedShareClaims) ? bridge!.unquantifiedShareClaims : []) as Record<string, unknown>[])
-    .filter((c) => c.status === "UNQUANTIFIED");
+    .filter((c) => c.status === "UNQUANTIFIED" || c.status === "REPORTED_NOT_MODELED");
   if (secUsable && openClaims.length > 0) {
     warnings.push({ code: "UNQUANTIFIED_SHARE_CLAIMS", message: `The diluted share count leaves out ${openClaims.length} share claim(s) the filing states (${openClaims.map((c) => c.kind).join(", ")}); see extract_dilution_bridge unquantifiedShareClaims.`, severity: "warning" });
   }

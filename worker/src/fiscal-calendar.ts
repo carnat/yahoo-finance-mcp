@@ -73,3 +73,56 @@ export function fiscalQuarterOf(end: string, yearEnd: string): number | null {
   const q = 4 - quartersLeft;
   return q >= 1 && q <= 4 ? q : null;
 }
+
+// ── Fiscal-year naming (2.5.13) ─────────────────────────────────────────────
+//
+// Companies name a year that ends early in a calendar year differently: DG's year ending January 30,
+// 2026 is its fiscal 2025 (named for the year it starts in), WMT's year ending January 31, 2026 its
+// fiscal 2026. Only the company says which. Its annual reports state it (companyfacts fy of each 10-K's
+// own year); the offset between that stated year and the period-end rule, when every recent annual
+// report agrees, names the company's other fiscal years.
+
+const NAMING_CONCEPTS = ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet", "NetIncomeLoss", "EarningsPerShareDiluted"];
+const NAMING_REPORTS = 3;
+
+export type FiscalYearNaming = { offset: number; basis: string; periodEnd: string | null; statedFiscalYear: number | null };
+
+/** Each 10-K's own year: its latest annual period end and the fiscal year it states (companyfacts fy), newest first. */
+export function statedFiscalYears(companyfacts: unknown): { periodEnd: string; fiscalYear: number }[] {
+  const usgaap = ((((companyfacts ?? {}) as Record<string, unknown>).facts ?? {}) as Record<string, unknown>)["us-gaap"] as Record<string, unknown> | undefined;
+  const byAccession = new Map<string, { periodEnd: string; fiscalYear: number }>();
+  for (const concept of NAMING_CONCEPTS) {
+    const units = (((usgaap?.[concept] ?? {}) as Record<string, unknown>).units ?? {}) as Record<string, Record<string, unknown>[]>;
+    for (const rows of Object.values(units)) {
+      for (const f of rows) {
+        if (!/^10-K/.test(String(f.form ?? "")) || f.fp !== "FY" || typeof f.fy !== "number" || typeof f.accn !== "string" || typeof f.end !== "string" || typeof f.start !== "string") continue;
+        const days = (Date.parse(`${f.end}T00:00:00Z`) - Date.parse(`${f.start}T00:00:00Z`)) / 86_400_000;
+        if (!(days >= 350 && days <= 380)) continue;
+        const prev = byAccession.get(f.accn);
+        if (!prev || f.end > prev.periodEnd) byAccession.set(f.accn, { periodEnd: f.end, fiscalYear: f.fy });
+      }
+    }
+  }
+  const byEnd = new Map<string, number>();
+  for (const v of byAccession.values()) byEnd.set(v.periodEnd, v.fiscalYear);
+  return [...byEnd.entries()].map(([periodEnd, fiscalYear]) => ({ periodEnd, fiscalYear })).sort((a, b) => (a.periodEnd < b.periodEnd ? 1 : -1));
+}
+
+/** The company's fiscal-year naming against the period-end rule, from its latest annual reports; offset 0 when they are not read or disagree. */
+export function fiscalYearNaming(companyfacts: unknown): FiscalYearNaming {
+  if (companyfacts == null) return { offset: 0, basis: "PERIOD_END_RULE_SEC_NOT_READ", periodEnd: null, statedFiscalYear: null };
+  const recent = statedFiscalYears(companyfacts).slice(0, NAMING_REPORTS);
+  if (recent.length === 0) return { offset: 0, basis: "PERIOD_END_RULE_NO_STATED_YEAR", periodEnd: null, statedFiscalYear: null };
+  const offsets = recent.map((r) => r.fiscalYear - (fiscalYearOfPeriodEnd(r.periodEnd) ?? r.fiscalYear));
+  if (offsets.some((o) => o !== offsets[0]) || Math.abs(offsets[0]) > 1) {
+    return { offset: 0, basis: "PERIOD_END_RULE_STATED_YEARS_INCONSISTENT", periodEnd: recent[0].periodEnd, statedFiscalYear: recent[0].fiscalYear };
+  }
+  return { offset: offsets[0], basis: "SEC_STATED_FISCAL_YEAR", periodEnd: recent[0].periodEnd, statedFiscalYear: recent[0].fiscalYear };
+}
+
+/** The fiscal year an inline XBRL filing states for itself (dei:DocumentFiscalYearFocus); null when it is not tagged. */
+export function documentFiscalYearFocus(html: string | null | undefined): number | null {
+  if (!html) return null;
+  const m = /name="dei:DocumentFiscalYearFocus"[^>]*>\s*(?:<[^>]+>\s*)*(\d{4})\s*</.exec(html);
+  return m ? Number(m[1]) : null;
+}

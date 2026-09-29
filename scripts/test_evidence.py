@@ -313,6 +313,16 @@ class TestConsensusCurve(unittest.TestCase):
         curve = ev.build_consensus_curve("amdx", [ev.yahoo_consensus_input(trend, retrieved_at=AS_OF, financial_currency="USD")], AS_OF)
         self.assertEqual([p["fiscalYear"] for p in curve["periods"][:2]], [2026, 2027])
 
+    def test_company_fiscal_year_naming(self) -> None:
+        # 2.5.13: DG's year ending January 29, 2027 is its fiscal 2026 by its own naming.
+        trend = [{"period": "0y", "endDate": "2027-01-29", "earningsEstimate": {"avg": 6.0, "numberOfAnalysts": 20}, "revenueEstimate": {}}]
+        naming = {"offset": -1, "basis": "SEC_STATED_FISCAL_YEAR", "periodEnd": "2026-01-30", "statedFiscalYear": 2025}
+        inp = ev.yahoo_consensus_input(trend, retrieved_at=AS_OF, financial_currency="USD")
+        curve = ev.build_consensus_curve("dg", [inp], AS_OF, None, naming)
+        self.assertEqual([p["fiscalYear"] for p in curve["periods"][:2]], [2026, 2027])
+        self.assertEqual(curve["fiscalYearNaming"], naming)
+        self.assertEqual(ev.build_consensus_curve("dg", [inp], AS_OF)["fiscalYearNaming"]["basis"], "PERIOD_END_RULE")
+
     def test_currency_and_period_identity_conflicts(self) -> None:
         adr = self.out["curveAdr"]
         fy0 = _cell(adr, "FY0", "eps")

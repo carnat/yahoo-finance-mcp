@@ -185,6 +185,24 @@ AEHR_RELEASES = [
     {"filingDate": "2026-06-02", "accessionNumber": "0001-26-000650", "url": "https://www.sec.gov/aehr-q.htm", "status": "READ", "text": (
         "Business update. For the first quarter of fiscal 2027, Aehr expects revenue between $25 million and $35 million.")},
 ]
+# 2.5.13: DG names its years for the year they start in (the year ending January 30, 2026 is its fiscal 2025).
+DG_FACTS = {"facts": {"us-gaap": {"NetIncomeLoss": {"units": {"USD": [
+    _stated("2023-02-04", "2024-02-02", 1_600_000_000, "10-K", "2024-03-22", "d23", 2023, "FY"),
+    _stated("2024-02-03", "2025-01-31", 1_100_000_000, "10-K", "2025-03-21", "d24", 2024, "FY"),
+    _stated("2025-02-01", "2026-01-30", 1_300_000_000, "10-K", "2026-03-20", "d25", 2025, "FY"),
+    _stated("2025-02-01", "2026-01-30", 1_300_000_000, "10-K", "2026-03-20", "d25", 2025, "FY"),
+]}}}}}
+MIXED_FACTS = {"facts": {"us-gaap": {"NetIncomeLoss": {"units": {"USD": [
+    _stated("2024-02-03", "2025-01-31", 1, "10-K", "2025-03-21", "m24", 2024, "FY"),
+    _stated("2025-02-01", "2026-01-30", 1, "10-K", "2026-03-20", "m25", 2026, "FY"),
+]}}}}}
+DG_RELEASES = [
+    {"filingDate": "2026-03-12", "accessionNumber": "0001-26-000800", "url": "https://www.sec.gov/dg.htm", "status": "READ", "text": (
+        "Outlook: For the fiscal year ending January 29, 2027, the company expects revenue between $42.0 billion and $43.0 billion.")},
+]
+FOCUS_HTML = ['<ix:nonNumeric name="dei:DocumentFiscalYearFocus" contextRef="c-1">2025</ix:nonNumeric>',
+              '<ix:nonNumeric contextRef="c" name="dei:DocumentFiscalYearFocus" id="f"><span>2026</span></ix:nonNumeric>', "<p>no tag</p>", None]
+
 FISCAL_DATES = ["2026-01-03", "2026-01-08", "2025-12-27", "2026-05-29", "2027-06-25", None, "bad"]
 FISCAL_QUARTERS = [["2025-11-28", "2026-05-29"], ["2025-08-29", "2026-05-29"], ["2026-05-29", "2026-05-29"], ["2025-04-05", "2026-01-03"],
                    ["2025-01-15", "2026-05-29"], ["2025-10-15", "2026-05-29"]]
@@ -203,6 +221,10 @@ def _python_outputs() -> dict:
         "fiscal": [[fc.fiscal_year_of_period_end(d), fc.nominal_period_end(d), fc.fiscal_year_label(d)] for d in FISCAL_DATES],
         "fiscalQuarters": [fc.fiscal_quarter_of(a, b) for a, b in FISCAL_QUARTERS],
         "textDates": [fc.text_date("Sept.", "30", "2026"), fc.text_date("Jan", "2", "2027"), fc.text_date("February", "30", "2027"), fc.text_date("Foo", "1", "2026")],
+        "naming": [fc.fiscal_year_naming(DG_FACTS), fc.fiscal_year_naming(MIXED_FACTS), fc.fiscal_year_naming(STATED_FACTS), fc.fiscal_year_naming(None),
+                   fc.fiscal_year_naming({"facts": {}})],
+        "focus": [fc.document_fiscal_year_focus(h) for h in FOCUS_HTML],
+        "dg": gh.guidance_history("dg", DG_RELEASES, DG_FACTS),
         "periods": [gh.guidance_target_period(c) if a is None else gh.guidance_target_period(c, a) for c, a in PERIOD_CASES],
         "amounts": [gh.parse_amount("150.0 million"), gh.parse_amount("250.0", "million"), gh.parse_amount("1,250"), gh.parse_amount("abc")],
         "ledger": dl.operating_driver_ledger(ticker="asts", companyfacts=COMPANYFACTS, inline_facts=INLINE_FACTS,
@@ -233,6 +255,9 @@ const out = {
   fiscal: f.fiscalDates.map((d) => [fc.fiscalYearOfPeriodEnd(d), fc.nominalPeriodEnd(d), fc.fiscalYearLabel(d)]),
   fiscalQuarters: f.fiscalQuarters.map(([a, b]) => fc.fiscalQuarterOf(a, b)),
   textDates: [fc.textDate("Sept.", "30", "2026"), fc.textDate("Jan", "2", "2027"), fc.textDate("February", "30", "2027"), fc.textDate("Foo", "1", "2026")],
+  naming: [fc.fiscalYearNaming(f.dgFacts), fc.fiscalYearNaming(f.mixedFacts), fc.fiscalYearNaming(f.statedFacts), fc.fiscalYearNaming(null), fc.fiscalYearNaming({ facts: {} })],
+  focus: f.focusHtml.map((h) => fc.documentFiscalYearFocus(h)),
+  dg: gh.guidanceHistory("dg", f.dgReleases, f.dgFacts),
   periods: f.periodCases.map(([c, a]) => (a == null ? gh.guidanceTargetPeriod(c) : gh.guidanceTargetPeriod(c, a))),
   amounts: [gh.parseAmount("150.0 million"), gh.parseAmount("250.0", "million"), gh.parseAmount("1,250"), gh.parseAmount("abc")],
   ledger: dl.operatingDriverLedger({ ticker: "asts", companyfacts: f.companyfacts, inlineFacts: f.inlineFacts,
@@ -261,7 +286,8 @@ def _worker_outputs() -> dict:
         fx.write_text(json.dumps({"releases": RELEASES, "companyfacts": COMPANYFACTS, "fiscalFacts": FISCAL_FACTS, "inlineFacts": INLINE_FACTS,
                                   "statements": STATEMENTS, "periodCases": PERIOD_CASES, "bulletReleases": BULLET_RELEASES,
                                   "nonGaapReleases": NON_GAAP_RELEASES, "statedFacts": STATED_FACTS, "week53Facts": WEEK53_FACTS,
-                                  "aehrReleases": AEHR_RELEASES, "fiscalDates": FISCAL_DATES, "fiscalQuarters": FISCAL_QUARTERS}), encoding="utf-8")
+                                  "aehrReleases": AEHR_RELEASES, "fiscalDates": FISCAL_DATES, "fiscalQuarters": FISCAL_QUARTERS,
+                                  "dgFacts": DG_FACTS, "mixedFacts": MIXED_FACTS, "dgReleases": DG_RELEASES, "focusHtml": FOCUS_HTML}), encoding="utf-8")
         harness = Path(tmp) / "harness.mjs"
         harness.write_text(_HARNESS, encoding="utf-8")
         result = subprocess.run([node, str(harness), *bundles, str(fx)], check=True, capture_output=True, text=True, timeout=120)
@@ -393,6 +419,17 @@ class TestGuidanceHistory(unittest.TestCase):
         self.assertEqual(fc.fiscal_year_of_period_end("2026-01-03"), 2025)
         self.assertEqual(fc.fiscal_year_of_period_end("2026-01-08"), 2026)
         self.assertEqual([fc.fiscal_quarter_of(a, b) for a, b in FISCAL_QUARTERS], [2, 1, 4, 1, None, None])
+
+    def test_fiscal_year_naming(self) -> None:
+        # 2.5.13: DG's stated years sit one below the period-end rule; mixed statements give no offset.
+        self.assertEqual(fc.fiscal_year_naming(DG_FACTS), {"offset": -1, "basis": "SEC_STATED_FISCAL_YEAR", "periodEnd": "2026-01-30", "statedFiscalYear": 2025})
+        self.assertEqual(fc.fiscal_year_naming(MIXED_FACTS)["basis"], "PERIOD_END_RULE_STATED_YEARS_INCONSISTENT")
+        self.assertEqual(fc.fiscal_year_naming(MIXED_FACTS)["offset"], 0)
+        self.assertEqual(fc.fiscal_year_naming(None)["basis"], "PERIOD_END_RULE_SEC_NOT_READ")
+        self.assertEqual([fc.document_fiscal_year_focus(h) for h in FOCUS_HTML], [2025, 2026, None, None])
+        # "the fiscal year ending January 29, 2027" is DG's fiscal 2026, not 2027.
+        g = gh.guidance_history("dg", DG_RELEASES, DG_FACTS)["guidance"][0]["targetPeriod"]
+        self.assertEqual((g["label"], g["fiscalYear"], g["basis"], g["namingBasis"]), ("FY2026", 2026, "TEXT_PERIOD_END", "SEC_STATED_FISCAL_YEAR"))
 
     def test_bullets_and_half_years(self) -> None:
         h = gh.guidance_history("asts", BULLET_RELEASES, COMPANYFACTS)

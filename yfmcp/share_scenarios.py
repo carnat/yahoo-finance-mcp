@@ -228,7 +228,7 @@ def _scenario_lines(bridge: dict, s: dict) -> list[dict]:
                     str(_first(call.get("coverageBasis"), "NOT_STATED")), strike, price)
             itm = price > strike if strike is not None else None
             if strike is None or cap is None or covered is None:
-                lines.append(_line(*args, itm, strike, t["capped_calls"], None, str(_first(call.get("unresolvedReason"), "capped call terms not stated"))))
+                lines.append(_line(*args, itm, strike, t["capped_calls"], None, "capped call terms not stated: " + (", ".join(call.get("missingTerms") or []) or "unknown")))
             else:
                 lines.append(_line(*args, itm, strike, "capped call: minus covered x (min(price, cap) - strike) / price, delivered back to the company "
                                    "(economic, not the EPS count)", 0 - _round(covered * max(0, min(price, cap) - strike) / price)))
@@ -252,7 +252,7 @@ def share_count_scenarios(ticker: str, bridge: dict, scenarios: list[dict]) -> d
     basic = _num(basic_rec.get("shares")) if basic_rec else None
     # Claims the filing text states but no tagged instrument covers (2.5.9).
     claims = bridge.get("unquantifiedShareClaims") if isinstance(bridge.get("unquantifiedShareClaims"), list) else []
-    open_claims = [c for c in claims if isinstance(c, dict) and c.get("status") == "UNQUANTIFIED"]
+    open_claims = [c for c in claims if isinstance(c, dict) and c.get("status") in ("UNQUANTIFIED", "REPORTED_NOT_MODELED")]
     coverage = bridge.get("claimCoverage") if isinstance(bridge.get("claimCoverage"), dict) else None
     claim_text_read = bool(coverage) and coverage.get("textScan") == "READ"
     results = []

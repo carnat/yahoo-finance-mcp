@@ -321,7 +321,7 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
             warnings.append({"code": "SEC_BALANCES_STALE", "message": f"The filing's balances are from {sec_period_end}, older than Yahoo's latest quarter {market['mostRecentQuarter']}, and Yahoo has no newer cash and debt; enterprise value uses the older balances.", "severity": "warning", "secPeriodEnd": sec_period_end, "yahooMostRecentQuarter": market["mostRecentQuarter"]})
     # Share claims the filing states but the bridge leaves out of its count (2.5.9).
     claims = (bridge or {}).get("unquantifiedShareClaims")
-    open_claims = [c for c in (claims if isinstance(claims, list) else []) if isinstance(c, dict) and c.get("status") == "UNQUANTIFIED"]
+    open_claims = [c for c in (claims if isinstance(claims, list) else []) if isinstance(c, dict) and c.get("status") in ("UNQUANTIFIED", "REPORTED_NOT_MODELED")]
     if sec_usable and open_claims:
         warnings.append({"code": "UNQUANTIFIED_SHARE_CLAIMS", "message": (
             f"The diluted share count leaves out {len(open_claims)} share claim(s) the filing states ({', '.join(c['kind'] for c in open_claims)}); "

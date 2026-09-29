@@ -13,7 +13,7 @@
 
 import { AUTHORITY_BOUNDARY } from "./evidence.js";
 import { guidanceRanges } from "./extraction-rules.js";
-import { fiscalQuarterOf, fiscalYearOfPeriodEnd, nominalPeriodEnd, TEXT_DATE_SOURCE, textDate } from "./fiscal-calendar.js";
+import { fiscalQuarterOf, fiscalYearNaming, fiscalYearOfPeriodEnd, nominalPeriodEnd, TEXT_DATE_SOURCE, textDate, type FiscalYearNaming } from "./fiscal-calendar.js";
 import { REVENUE_CONCEPTS } from "./sec-facts.js";
 
 type Rec = Record<string, unknown>;
@@ -403,8 +403,17 @@ export function guidanceOutcomes(entries: Rec[], actuals: Rec): Rec[] {
   return out.sort((a, b) => cmp(a.targetPeriod, b.targetPeriod) || cmp(a.metric, b.metric));
 }
 
+/** A year named only by its end date takes the company's own naming (DG's year ending January 2027 is its fiscal 2026) (2.5.13). */
+function withNaming(e: Rec, naming: FiscalYearNaming): Rec {
+  const tp = e.targetPeriod as Rec | undefined;
+  if (!tp || tp.basis !== "TEXT_PERIOD_END" || naming.offset === 0 || typeof tp.fiscalYear !== "number") return e;
+  const fiscalYear = tp.fiscalYear + naming.offset;
+  return { ...e, targetPeriod: { ...tp, fiscalYear, label: `FY${fiscalYear}`, namingBasis: naming.basis } };
+}
+
 export function guidanceHistory(ticker: string, releases: ReleaseText[], companyfacts: unknown): Rec {
-  const entries = releases.flatMap(guidanceEntries);
+  const naming = fiscalYearNaming(companyfacts);
+  const entries = releases.flatMap(guidanceEntries).map((e) => withNaming(e, naming));
   const actuals = actualsFromCompanyFacts(companyfacts);
   return {
     ticker: ticker.toUpperCase(),

@@ -82,7 +82,7 @@ NSS_BRIDGE = {"basicShares": {"shares": 74_000_000}, "atmProgram": None, "claimC
                   {"instrument": "Notes due 2030", "principal": 100_000_000, "ifConvertedShares": 2_000_000, "conversionPrice": 50.0,
                    "ifConvertedBasis": "principal / conversion_price", "principalSettlement": None,
                    "cappedCall": {"strikePrice": None, "capPrice": 90.0, "coveredShares": 2_000_000, "coverageBasis": "SHARES_UNDERLYING_NOTES_AT_PERIOD_END",
-                                  "unresolvedReason": "strike price not stated"}},
+                                  "unresolvedReason": "CAPPED_CALL_TERMS_INCOMPLETE", "missingTerms": ["STRIKE_PRICE"]}},
               ]}]}
 NSS_SCENARIOS = [
     {"name": "net-share", "price": 80, "convertibles": "net_share_settlement_when_stated"},
@@ -332,7 +332,7 @@ class TestShareScenarios(unittest.TestCase):
         above = {ln["instrument"]: ln for ln in out["above-cap"]["instruments"]}
         self.assertEqual(above["Notes due 2032 capped call"]["incrementalShares"], -8_333_333)
         # A capped call without a stated strike is unresolved, never netted.
-        self.assertEqual(lines["Notes due 2030 capped call"]["unresolvedReason"], "strike price not stated")
+        self.assertEqual(lines["Notes due 2030 capped call"]["unresolvedReason"], "capped call terms not stated: STRIKE_PRICE")
         self.assertEqual(out["capped"]["completeness"], "EXCLUDES_UNRESOLVED_INSTRUMENTS")
         self.assertEqual(out["capped"]["totals"]["incrementalByComponent"]["capped_call"], -7_500_000)
         # Ignored by default: no capped call line.

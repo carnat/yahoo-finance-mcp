@@ -942,6 +942,35 @@ def _text_retirement(f: IxFact, sentences: list[dict], period_end: str | None) -
     return best
 
 
+def _unnest_warrant_counts(facts: list[IxFact]) -> tuple[list[IxFact], list[dict]]:
+    """Counts whose dimensions extend another counted class's (the class and a tranche or holder axis) are parts of it.
+
+    Parts that add up to the class (within 0.5%) replace it, keeping their own terms; parts that do not
+    ("of which 104,157") are left out and the class total is counted.
+    """
+    def label(f: IxFact) -> str:
+        return " / ".join(member_label(v) for v in f.dims.values()) if f.dims else "Warrants (not itemized)"
+
+    def parts_of(p: IxFact) -> list[IxFact]:
+        return [c for c in facts if c is not p and p.dims and len(c.dims) > len(p.dims) and _dims_within(p.dims, c.dims)]
+
+    dropped: dict[int, dict] = {}
+    # Widest classes first, so a part of a part is judged against its own class.
+    for p in sorted(facts, key=lambda f: len(f.dims)):
+        if id(p) in dropped:
+            continue
+        parts = [c for c in parts_of(p) if id(c) not in dropped]
+        if not parts:
+            continue
+        total = sum((c.value or 0) for c in parts)
+        if p.value is not None and p.value > 0 and abs(total - p.value) <= p.value * 0.005:
+            dropped[id(p)] = {"class": label(p), "count": p.value, "asOf": p.period_end, "reason": "SUM_OF_COUNTED_PARTS", "parts": [label(c) for c in parts]}
+        else:
+            for c in parts:
+                dropped[id(c)] = {"class": label(c), "count": c.value, "asOf": c.period_end, "reason": "PART_OF_COUNTED_CLASS", "partOf": label(p)}
+    return [f for f in facts if id(f) not in dropped], [dropped[id(f)] for f in facts if id(f) in dropped]
+
+
 def _warrants_component(sources: list[IxSource], price: float, lifecycle: list[dict] | None = None) -> dict | None:
     # Classes a newer filing shows exercised or retired; an older fallback filing must not restore them
     # (BE's 2025 10-K still counts the Oracle warrant its 2026 10-Q shows exercised).
@@ -968,7 +997,11 @@ def _warrants_component(sources: list[IxSource], price: float, lifecycle: list[d
                 retired.add(_warrant_class_key(f))
     if not found:
         return None
-    facts, source = found
+    tagged, source = found
+    # A class tagged both as a total and in parts is counted once (2.5.13): JOBY tags its Delta Warrants
+    # (12,833,333) and the two tranches (7,000,000 and 5,833,333); LUNR its 541,667 preferred investor
+    # warrants and the 104,157 of them a related party holds.
+    facts, nested = _unnest_warrant_counts(tagged)
     unvested_facts = [g for g in source.doc.facts if _WARRANT_UNVESTED_RE.search(g.local) and _is_share_count(g)]
     vested_facts = [g for g in source.doc.facts if _WARRANT_VESTED_RE.search(g.local) and g.value is not None and not _after_period_end(source.doc, g)]
     doc_end = source.doc.document_period_end
@@ -1042,6 +1075,7 @@ def _warrants_component(sources: list[IxSource], price: float, lifecycle: list[d
                                 "count": f.value, "asOf": f.period_end, "expirationDate": expiry_of(f)} for f in expired]} if expired else {}),
         **({"retiredInText": [{"class": " / ".join(member_label(v) for v in f.dims.values()) if f.dims else "Warrants (not itemized)",
                                "count": f.value, "asOf": f.period_end, **stated} for f, stated in retired_in_text]} if retired_in_text else {}),
+        **({"nestedCounts": nested} if nested else {}),
         "method": "treasury_stock_per_class_on_vested",
         "incrementalShares": 0 if not classes else None if unresolved == len(classes) else sum((c["incrementalShares"] or 0) for c in classes),
         "unresolvedClasses": unresolved,
@@ -1339,7 +1373,8 @@ def _capped_call_at(t: dict, note: dict, price: float) -> dict:
         coverage_basis = "STATED_COUNT_SURVIVES_CONVERSIONS" if stated_exceeds else "STATED_COUNT"
     else:
         coverage_basis = "SHARES_UNDERLYING_NOTES_AT_PERIOD_END_BELOW_STATED_COUNT" if stated_exceeds else "SHARES_UNDERLYING_NOTES_AT_PERIOD_END"
-    missing = [x for x, v in (("strike price", strike), ("cap price", t["capPrice"]), ("covered shares", covered)) if v is None]
+    # Stable enums: unresolvedReason is CAPPED_CALL_TERMS_INCOMPLETE and missingTerms names each term not stated.
+    missing = [x for x, v in (("STRIKE_PRICE", strike), ("CAP_PRICE", t["capPrice"]), ("COVERED_SHARES", covered)) if v is None]
     offset = None if missing else round_half_up(covered * max(0, min(price, t["capPrice"]) - strike) / price)
     out = {
         "strikePrice": strike,
@@ -1351,7 +1386,8 @@ def _capped_call_at(t: dict, note: dict, price: float) -> dict:
         "offsetSharesAtPrice": offset,
     }
     if missing:
-        out["unresolvedReason"] = f"{', '.join(missing)} not stated"
+        out["unresolvedReason"] = "CAPPED_CALL_TERMS_INCOMPLETE"
+        out["missingTerms"] = missing
     out.update({"sentences": t["sentences"], "documentUrl": t["documentUrl"], "filingDate": t["filingDate"], "accessionNumber": t["accessionNumber"]})
     return out
 
@@ -1912,6 +1948,101 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+# ── The company's antidilutive-securities table (2.5.13) ────────────────────
+#
+# The EPS note lists every class of potentially dilutive security the company left out of diluted EPS,
+# with its own share count for the period. Each row is matched to a bridge component by its label. A row
+# no component models becomes a share claim with the company's count (REPORTED_NOT_MODELED): ASTS's
+# Class B and Class C common stock exchangeable for Class A (89.4M), LUNR's escrow shares, SOUN's
+# contingently issuable shares, RKLB's collared forward transactions. The table's warrant total is also
+# set against the bridge's (LUNR reports 4,857,302; the bridge counts 541,667). The counts can be
+# weighted averages over the period, so they are evidence beside the bridge, never added into it.
+_ANTIDILUTIVE_CATEGORIES = [
+    ("warrants", "warrants", "WARRANTS_NOT_TAGGED", re.compile(r"warrant", _F)),
+    ("convertible_preferred", "convertible_preferred", "CONVERTIBLE_PREFERRED", re.compile(r"preferred", _F)),
+    ("convertible_debt", "convertible_debt", "CONVERTIBLE_DEBT_NOT_TAGGED", re.compile(r"convertible|\bnotes?\b|debentures?", _F)),
+    ("forward_sale", None, "FORWARD_SALE", re.compile(r"forward", _F)),
+    ("contingent_shares", None, "CONTINGENT_SHARES", re.compile(r"contingent|earn-?out|escrow|holdback|milestone", _F)),
+    ("stock_options", "stock_options", "EQUITY_COMPENSATION_NOT_TAGGED", re.compile(r"option", _F)),
+    ("share_awards", "unvested_share_awards", "EQUITY_COMPENSATION_NOT_TAGGED",
+     re.compile(r"restricted|\bRSUs?\b|\bPSUs?\b|stock units?|share units?|award|performance|unvested|nonvested", _F)),
+    ("equity_compensation", "equity_compensation", "EQUITY_COMPENSATION_NOT_TAGGED",
+     re.compile(r"compensation|incentive|equity plan|employee stock|\bESPP\b|purchase plan", _F)),
+    ("exchangeable_interests", None, "EXCHANGEABLE_INTERESTS",
+     re.compile(r"\bunits?\b|class [a-z]\b|common stock|common shares|exchangeable|noncontrolling|\bLLC\b|partnership", _F)),
+]
+_EQUITY_COMPENSATION_COMPONENTS = ("stock_options", "unvested_share_awards")
+
+
+def _antidilutive_reconciliation(eps: dict | None, components: list[dict], source: IxSource | None) -> tuple[dict | None, list[dict], dict | None]:
+    """The antidilutive rows matched to components, the claims no component models, and the warrant totals set side by side."""
+    rows = [r for r in ((eps or {}).get("antidilutiveExcluded") or []) if _is_number(r.get("shares")) and r["shares"] > 0]
+    if not eps or not rows:
+        return None, [], None
+    present = {str(c.get("component")) for c in components}
+
+    def modeled(component: str | None) -> bool:
+        if component is None:
+            return False
+        if component == "equity_compensation":
+            return any(c in present for c in _EQUITY_COMPENSATION_COMPONENTS)
+        return component in present or (component in _EQUITY_COMPENSATION_COMPONENTS and any(c in present for c in _EQUITY_COMPENSATION_COMPONENTS))
+
+    matched = []
+    for r in rows:
+        cat = next((c for c in _ANTIDILUTIVE_CATEGORIES if c[3].search(str(r["security"]))), None)
+        matched.append({"security": r["security"], "shares": r["shares"], "category": cat[0] if cat else "other",
+                        "modeledBy": cat[1] if cat and modeled(cat[1]) else None, "kind": cat[2] if cat else "OTHER_REPORTED_SECURITY"})
+    groups: dict[str, list[dict]] = {}
+    for m in matched:
+        if m["modeledBy"] is None:
+            groups.setdefault(m["kind"], []).append(m)
+    claims = [{
+        "kind": kind,
+        "status": "REPORTED_NOT_MODELED",
+        "reportedShares": sum(m["shares"] for m in items),
+        "reportedSecurities": [{"security": m["security"], "shares": m["shares"]} for m in items],
+        "reportedPeriod": {"start": eps.get("periodStart"), "end": eps.get("periodEnd")},
+        "evidence": "ANTIDILUTIVE_TABLE",
+        "sentences": [],
+        "leadIn": None,
+        "leadOut": None,
+        "documentUrl": source.document_url if source else None,
+        "filingDate": source.filing_date if source else None,
+        "accessionNumber": source.accession_number if source else None,
+    } for kind, items in groups.items()]
+    reported_warrants = sum(m["shares"] for m in matched if m["category"] == "warrants")
+    bridge_warrants = next((c for c in components if c.get("component") == "warrants"), None)
+    reconciliation = {
+        "periodStart": eps.get("periodStart"),
+        "periodEnd": eps.get("periodEnd"),
+        "rows": [{k: v for k, v in m.items() if k != "kind"} for m in matched],
+        "note": ("The company's own antidilutive-securities counts for the period (possibly weighted averages), matched to bridge components by "
+                 "label. A row no component models is listed in unquantifiedShareClaims with the company's count; nothing here is added to the bridge."),
+    }
+    warrants = ({"reported": reported_warrants, "bridge": bridge_warrants.get("outstanding") if _is_number(bridge_warrants.get("outstanding")) else None}
+                if reported_warrants > 0 and bridge_warrants else None)
+    return reconciliation, claims, warrants
+
+
+def _merge_reported_claims(claims: list[dict], reported: list[dict]) -> list[dict]:
+    """Text claims of a kind the antidilutive table also reports carry its count; the table's other rows are their own claims."""
+    out = [dict(c) for c in claims]
+    for r in reported:
+        text = next((c for c in out if c["kind"] == r["kind"] and c["status"] == "UNQUANTIFIED"), None)
+        if text is not None:
+            text.update({"status": "REPORTED_NOT_MODELED", "reportedShares": r["reportedShares"], "reportedSecurities": r["reportedSecurities"],
+                         "reportedPeriod": r["reportedPeriod"]})
+        else:
+            out.append(r)
+    return out
+
+
+def is_open_claim(c: dict) -> bool:
+    """A claim the bridge leaves out: quoted only in text, or reported with a count no component models."""
+    return c.get("status") in ("UNQUANTIFIED", "REPORTED_NOT_MODELED")
+
+
 def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: str | None,
                     sources: list[IxSource], atm_matches: list[TextMatch], award_table_matches: list[TextMatch] | None = None,
                     claim_matches: list[TextMatch] | None = None, warrant_lifecycle_matches: list[TextMatch] | None = None,
@@ -2003,7 +2134,7 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
         })
     capped_open = [(n, c) for n, c in capped if not _is_number(c.get("offsetSharesAtPrice"))]
     if capped_open:
-        listed = "; ".join(f"{n} ({c['unresolvedReason']})" for n, c in capped_open)
+        listed = "; ".join(f"{n} (not stated: {', '.join(c['missingTerms'])})" for n, c in capped_open)
         warnings.append({"code": "CAPPED_CALL_TERMS_INCOMPLETE",
                          "message": f"The filing describes capped calls for {listed}; no offset is computed for them.", "severity": "info"})
     redeemed = [i for i in notes if i.get("afterPeriodEnd") is not None]
@@ -2011,6 +2142,12 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
         listed = ", ".join(f"{i['instrument']} ({i['afterPeriodEnd']['date']})" for i in redeemed)
         warnings.append({"code": "CONVERTIBLE_REDEMPTION_AFTER_PERIOD_END", "message": (
             f"A redemption or repurchase after the period end is tagged for {listed}; its shares are counted as of the period end."), "severity": "warning"})
+    nested_counts = (warrants or {}).get("nestedCounts") or []
+    if nested_counts:
+        listed = "; ".join(
+            f"{c['class']} ({_js_number(c['count'])}) is counted through its parts {', '.join(c['parts'])}" if c["reason"] == "SUM_OF_COUNTED_PARTS"
+            else f"{c['class']} ({_js_number(c['count'])}) is part of {c['partOf']} and not counted again" for c in nested_counts)
+        warnings.append({"code": "WARRANT_NESTED_COUNT", "message": f"{listed}.", "severity": "info"})
     retired_text = (warrants or {}).get("retiredInText") or []
     if retired_text:
         listed = "; ".join(f"{c['class']} ({_js_number(c['count'])} as of {c['asOf']}: {str(c['event']).lower()} by {c['eventDate']})" for c in retired_text)
@@ -2034,16 +2171,30 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
         })
     # claim_matches is the filing text read for untagged share claims; None when it was not read.
     claims_read = claim_matches is not None
-    claims = _with_post_period_warrants(
+    eps_found = _find_in_sources(sources, _reported_eps_dilution)
+    eps_value, eps_source = eps_found if eps_found else (None, None)
+    reconciliation, reported_claims, reported_warrants = _antidilutive_reconciliation(eps_value, components, eps_source)
+    claims = _merge_reported_claims(_with_post_period_warrants(
         _preferred_claims_with_tags(share_claim_signals(claim_matches), sources, preferred) if claim_matches is not None else [],
         post_period_warrants(primary),
-    )
-    open_claims = [c for c in claims if c["status"] == "UNQUANTIFIED"]
+    ), reported_claims)
+    open_claims = [c for c in claims if is_open_claim(c)]
     if open_claims:
+        listed = ", ".join(f"{c['kind']}: {_js_number(c['reportedShares'])} reported" if _is_number(c.get("reportedShares")) else c["kind"] for c in open_claims)
         warnings.append({
             "code": "UNQUANTIFIED_SHARE_CLAIMS",
-            "message": (f"The filing text states {len(open_claims)} share claim(s) no tagged component covers ({', '.join(c['kind'] for c in open_claims)}); "
-                        "they are quoted in unquantifiedShareClaims and are not in any share count."),
+            "message": (f"The filing states {len(open_claims)} share claim(s) no tagged component covers ({listed}); "
+                        "they are listed in unquantifiedShareClaims and are not in any share count."),
+            "severity": "warning",
+        })
+    # The company's warrant total against the bridge's: a stale, missing or double count shows as a gap (2.5.13).
+    aw = reported_warrants
+    if aw and aw["bridge"] is not None and abs(aw["reported"] - aw["bridge"]) > max(aw["reported"] * 0.05, 100_000):
+        warnings.append({
+            "code": "WARRANT_COUNT_DIFFERS_FROM_REPORTED",
+            "message": (f"The bridge counts {_js_number(aw['bridge'])} warrant shares; the company's antidilutive-securities table reports "
+                        f"{_js_number(aw['reported'])} for the period {eps_value.get('periodStart')} to {eps_value.get('periodEnd')}. The table can be a "
+                        "weighted average, but a gap this size usually means a class is stale, untagged or tagged only in part; check the warrant note."),
             "severity": "warning",
         })
     expired_classes = (warrants or {}).get("expiredClasses") or []
@@ -2077,7 +2228,8 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
         "basicShares": {**basic_found[0], "source": _source_ref(basic_found[1], basic_found[0]["asOf"])} if basic_found else None,
         "components": components,
         "atmProgram": atm,
-        "reportedEpsDilution": (_find_in_sources(sources, _reported_eps_dilution) or (None,))[0],
+        "reportedEpsDilution": eps_value,
+        "antidilutiveReconciliation": reconciliation,
         "notDisclosed": not_disclosed,
         "unresolved": unresolved,
         "partiallyResolved": partial,
@@ -2087,10 +2239,14 @@ def dilution_bridge(ticker: str, price: float, price_currency: str, as_of_date: 
             "completeClaimInventory": False,
             "modeledComponents": ["stock_options", "unvested_share_awards", "warrants", "convertible_debt", "convertible_preferred", "atm_program"],
             "textScan": "READ" if claims_read else "NOT_READ",
+            # The company's antidilutive-securities table, read from the inline XBRL (2.5.13).
+            "antidilutiveTable": "READ" if reconciliation else "NOT_TAGGED",
             "textScanKinds": [k for k, _ in _SHARE_CLAIM_KINDS],
             "unquantifiedClaims": len(open_claims),
             "note": ("status describes the tagged instruments only. COMPUTED means every tagged instrument was resolved, never that every claim on the "
-                     "equity was found; the text scan covers a fixed list of claim kinds, and a claim it does not find is not proof none exists."),
+                     "equity was found; the text scan covers a fixed list of claim kinds, and a claim it does not find is not proof none exists. The "
+                     "company's antidilutive-securities table adds any class of potentially dilutive security it reports that no component models, "
+                     "with its count."),
         },
     }
     if not basic_found:

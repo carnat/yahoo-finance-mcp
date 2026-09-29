@@ -36,7 +36,7 @@ import { adsRatio, majorPrice, marketInputsFromQuoteSummary, peerValuations, val
 import { coverReadsNeeded, coverShareCounts, foreignFiler, historicalValuation, latestShareCount, peerMedians, taxonomyOf, valuationDates, type Bar, type PeriodicFiling, type Split } from "./valuation-history.js";
 import { DEFAULT_TOLERANCE_PCT, METRICS as RECONCILE_METRICS, metricReconciliation, resolvePeriod } from "./metric-reconciliation.js";
 import { AUTHORITY_BOUNDARY } from "./evidence.js";
-import { fiscalYearLabel } from "./fiscal-calendar.js";
+import { documentFiscalYearFocus, fiscalYearLabel, fiscalYearNaming, type FiscalYearNaming } from "./fiscal-calendar.js";
 import registryManifest from "./company-ir-page-registry.json";
 import newsSourceCapabilities from "./news-source-capabilities.json";
 
@@ -5529,6 +5529,17 @@ async function resolveCikForTicker(ticker: string): Promise<string | null> {
   return null;
 }
 
+/** How the company names its fiscal years, from its annual reports' stated fy (2.5.13); the period-end rule when SEC is not read. */
+export async function secFiscalYearNaming(ticker: string): Promise<FiscalYearNaming> {
+  try {
+    const cikPadded = await resolveCikForTicker(ticker);
+    const facts = cikPadded ? await edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`) : null;
+    return fiscalYearNaming(facts);
+  } catch {
+    return fiscalYearNaming(null);
+  }
+}
+
 export async function getSubmissionsForTicker(ticker: string): Promise<{ cikPadded: string | null; submissions: Record<string, unknown> | null }> {
   const key = ticker.toUpperCase();
   const cachedSubmissions = filingSubmissionsCache.get(key) ?? null;
@@ -6583,7 +6594,9 @@ export async function getFilingData(
           // header says which ("Three Months Ended August 1, 2026"), not the filing date (2.5.9, MRVL). An
           // annual report's year is its period of report's fiscal year, not its filing date's (2.5.11).
           const annual = /^(?:10-K|20-F|40-F)/i.test(String(filing.filingType ?? ""));
-          const fiscalYear = !annual ? (geo.sourceColumns[0] ?? "") : (fiscalYearLabel(filing.reportDate ?? null) ?? "");
+          // The fiscal year the filing states for itself wins over the period-end rule (DG's year ending January 2026 is its FY2025) (2.5.13).
+          const focus = annual ? documentFiscalYearFocus(htmlText) : null;
+          const fiscalYear = !annual ? (geo.sourceColumns[0] ?? "") : focus != null ? `FY${focus}` : (fiscalYearLabel(filing.reportDate ?? null) ?? "");
           const warnings = geo.denominator == null && geo.usd != null
             ? [{
                 code: "DENOMINATOR_NOT_FOUND",

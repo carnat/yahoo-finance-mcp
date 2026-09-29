@@ -9,7 +9,7 @@
  * nothing is interpolated, extrapolated or derived and called consensus.
  */
 
-import { fiscalYearOfPeriodEnd } from "./fiscal-calendar.js";
+import { fiscalYearOfPeriodEnd, type FiscalYearNaming } from "./fiscal-calendar.js";
 
 export const EVIDENCE_CUT_SCHEMA = "yfmcp.evidence-cut/1";
 export const CONSENSUS_OBSERVATION_SCHEMA = "yfmcp.consensus-observation/1";
@@ -413,8 +413,11 @@ export function buildConsensusCurve(
   inputs: ProviderConsensusInput[],
   asOf: string,
   policy: ConsensusPolicy = DEFAULT_CONSENSUS_POLICY,
+  // How the company names its fiscal years, from its annual reports (2.5.13); the period-end rule without it.
+  naming: FiscalYearNaming | null = null,
 ): Rec {
   const horizon = Math.max(1, Math.min(5, Math.trunc(policy.horizonYears)));
+  const yearNaming: FiscalYearNaming = naming ?? { offset: 0, basis: "PERIOD_END_RULE", periodEnd: null, statedFiscalYear: null };
   const fy0 = resolveFy0(inputs, asOf);
   const periods: Rec[] = [];
   const summary: Record<string, number> = {};
@@ -441,8 +444,9 @@ export function buildConsensusCurve(
     }
     periods.push({
       label,
-      // A 52/53-week year ending in early January is the prior year's (2.5.11).
-      fiscalYear: fy0 && fiscalYearOfPeriodEnd(fy0.fiscalYearEnd) != null ? (fiscalYearOfPeriodEnd(fy0.fiscalYearEnd) as number) + k : null,
+      // A 52/53-week year ending in early January is the prior year's (2.5.11); the company's own naming
+      // (DG's year ending January 2026 is its fiscal 2025) shifts it (2.5.13).
+      fiscalYear: fy0 && fiscalYearOfPeriodEnd(fy0.fiscalYearEnd) != null ? (fiscalYearOfPeriodEnd(fy0.fiscalYearEnd) as number) + yearNaming.offset + k : null,
       fiscalYearEnds,
       metrics,
     });
@@ -451,6 +455,7 @@ export function buildConsensusCurve(
     ticker: ticker.toUpperCase(),
     asOf,
     fiscalYearBasis: fy0 ?? { fiscalYearEnd: null, basis: "NO_PROVIDER_FISCAL_YEAR" },
+    fiscalYearNaming: yearNaming,
     policy: { ...policy, horizonYears: horizon },
     providers: inputs.map((i) => ({
       provider: i.provider,
