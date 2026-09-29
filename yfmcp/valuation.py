@@ -375,11 +375,25 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
             convertible_adjustment += _num(inst.get("principal")) or 0
     if debt is not None:
         convertible_adjustment = min(convertible_adjustment, debt)
+    # Convertible preferred the bridge does not count as shares at this price is a senior claim: its
+    # tagged liquidation preference joins enterprise value; without one it is left out and said so (2.5.10).
+    preferred_adjustment = 0
+    preferred = next((c for c in ((bridge or {}).get("components") or []) if c.get("component") == "convertible_preferred"), None)
+    for inst in ((preferred or {}).get("instruments") or []) if sec_usable else []:
+        if (_num(inst.get("incrementalShares")) or 0) > 0:
+            continue
+        liq = _num((inst.get("liquidationPreference") or {}).get("amount"))
+        if liq is not None:
+            preferred_adjustment += liq
+        else:
+            warnings.append({"code": "PREFERRED_NOT_IN_ENTERPRISE_VALUE", "message": (
+                f"Convertible preferred ({_js_number(inst.get('preferredSharesOutstanding'))} shares) is not counted as shares at this price and no "
+                "liquidation preference is tagged, so enterprise value leaves it out."), "severity": "warning"})
 
     equity_value = major * value_shares if value_shares is not None else None
     # Yahoo's balances are in the financial currency; never add them to equity in another.
     balances_comparable = sec_balances or comparable
-    enterprise_value = (equity_value + debt - convertible_adjustment - cash - short_term
+    enterprise_value = (equity_value + debt - convertible_adjustment + preferred_adjustment - cash - short_term
                         if equity_value is not None and debt is not None and cash is not None and balances_comparable else None)
     if not balances_comparable:
         warnings.append({"code": "ENTERPRISE_VALUE_CURRENCY_MISMATCH", "message": f"Cash and debt are in {market['financialCurrency']} and the quote is in {major_currency}; enterprise value is not computed without an exchange rate.", "severity": "warning"})
@@ -429,12 +443,14 @@ def valuation_snapshot(ticker: str, market: dict, supplied_price: float | None, 
             "shortTermInvestments": short_term if sec_balances else None,
             "totalDebt": debt,
             "convertibleDebtCountedAsShares": round_half_up(convertible_adjustment),
+            "preferredLiquidationPreferenceInEv": round_half_up(preferred_adjustment),
             "basis": balance_basis,
             "periodEnd": (capital or {}).get("periodEnd") if sec_balances else None,
         },
         "equityValue": round_half_up(equity_value) if equity_value is not None else None,
         "enterpriseValue": round_half_up(enterprise_value) if enterprise_value is not None else None,
-        "enterpriseValueFormula": "price x diluted shares + total debt - convertible debt counted as shares - cash - short-term investments",
+        "enterpriseValueFormula": ("price x diluted shares + total debt - convertible debt counted as shares + preferred liquidation preference not "
+                                   "counted as shares - cash - short-term investments"),
         "peerComparableBasis": {**yahoo, "note": "Price x Yahoo shares (the implied all-class count when larger) + Yahoo total debt - Yahoo total cash: the basis compare_peer_valuations uses for every peer."},
         "multiples": _multiples(enterprise_value, major, market, comparable),
         "revenueGrowth": _growth(market),

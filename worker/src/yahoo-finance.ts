@@ -23,7 +23,7 @@ import {
 } from "./capital-structure.js";
 import { filingFactInAccession, pickConceptFacts, REVENUE_CONCEPTS } from "./sec-facts.js";
 import { fundingCapexSchedule } from "./funding-schedule.js";
-import { guidanceHistory, type ReleaseText } from "./guidance-history.js";
+import { guidanceHistory, periodForExcerpt, type ReleaseText } from "./guidance-history.js";
 import { operatingDriverLedger } from "./driver-ledger.js";
 import { parseShareScenarios, shareCountScenarios } from "./share-scenarios.js";
 import { customerConcentration, EPS_AMOUNT, EPS_LABEL, guidanceRanges, PCT_AMOUNT, rankEvidence, reportedTextMetric, REVENUE_LABEL, stemWord, USD_AMOUNT, type ConcentrationFinding } from "./extraction-rules.js";
@@ -15535,7 +15535,7 @@ async function filingTextMatches(ticker: string, filing: ResolvedSecFiling, term
 async function shareClaimMatches(ticker: string, filings: { filing: ResolvedSecFiling }[]): Promise<TextMatch[] | null> {
   const out: TextMatch[] = [];
   for (const { filing } of filings) {
-    const search = parseObjectJson(await searchFilingText(ticker, SHARE_CLAIM_SEARCH_TERMS, null, filing.filingType, filing.accessionNumber, 900, false, null, { maxMatches: 24 }));
+    const search = parseObjectJson(await searchFilingText(ticker, SHARE_CLAIM_SEARCH_TERMS, null, filing.filingType, filing.accessionNumber, 900, false, null, { maxMatches: 32 }));
     if (search.error || search.code || !Array.isArray(search.matches)) return null;
     out.push(...textMatchesFrom(search));
   }
@@ -17703,7 +17703,10 @@ export async function extractGuidance(ticker: string, period = "latest"): Promis
   if (!html) return notRead("RELEASE_TEXT_NOT_AVAILABLE", `The earnings release ${srcUrl} could not be read from SEC; retry.`, true);
   const text = _stripHtmlTagsIdx(_sanitizeFilingHtml(html));
   // "revenue guidance of $X to $Y" and "expects revenue between $X and $Y" (extraction-rules.ts).
-  const ranges = guidanceRanges(text);
+  const periodLabel = (at: number, len: number) => (at < 0 ? null : (periodForExcerpt(text, at, len).label as string | null) ?? null);
+  const ranges = guidanceRanges(text, periodLabel);
+  // The period each range targets, from its own sentence or the heading above it (2.5.10).
+  const targetPeriod = (excerpt: string) => periodLabel(text.indexOf(excerpt), excerpt.length);
   const rev = ranges.revenue;
   const gm = ranges.grossMargin;
   const eps = ranges.eps;
@@ -17718,24 +17721,24 @@ export async function extractGuidance(ticker: string, period = "latest"): Promis
 
   // The same metric on another basis ("GAAP ...; non-GAAP ..."), each with its own excerpt (2.5.9).
   const alternates = (r: NonNullable<typeof rev>, parse: (t: string) => number | null, lowKey: string, highKey: string) =>
-    r.alternates.map((a) => ({ basis: a.basis, statedAs: a.statedAs, [lowKey]: parse(a.low), [highKey]: parse(a.high), excerpt: compactExcerpt(a.excerpt) }));
+    r.alternates.map((a) => ({ basis: a.basis, statedAs: a.statedAs, targetPeriod: targetPeriod(a.excerpt), [lowKey]: parse(a.low), [highKey]: parse(a.high), excerpt: compactExcerpt(a.excerpt) }));
   const plain = (t: string): number | null => (Number.isFinite(Number(t)) ? Number(t) : null);
   if (rev) {
     const low = scaleNumberFromText(rev.low);
     const high = scaleNumberFromText(rev.high);
     if (low != null && high != null) {
-      guidance.revenue = { status: "FOUND", basis: rev.basis, statedAs: rev.statedAs, low, high, midpoint: (low + high) / 2, unit: "USD", evidence: [ev(rev.excerpt)], alternates: alternates(rev, scaleNumberFromText, "low", "high") };
+      guidance.revenue = { status: "FOUND", basis: rev.basis, statedAs: rev.statedAs, targetPeriod: targetPeriod(rev.excerpt), low, high, midpoint: (low + high) / 2, unit: "USD", evidence: [ev(rev.excerpt)], alternates: alternates(rev, scaleNumberFromText, "low", "high") };
     }
   }
   if (gm) {
     const lowPct = Number(gm.low);
     const highPct = Number(gm.high);
-    guidance.grossMargin = { status: "FOUND", basis: gm.basis, statedAs: gm.statedAs, lowPct, highPct, midpointPct: (lowPct + highPct) / 2, evidence: [ev(gm.excerpt)], alternates: alternates(gm, plain, "lowPct", "highPct") };
+    guidance.grossMargin = { status: "FOUND", basis: gm.basis, statedAs: gm.statedAs, targetPeriod: targetPeriod(gm.excerpt), lowPct, highPct, midpointPct: (lowPct + highPct) / 2, evidence: [ev(gm.excerpt)], alternates: alternates(gm, plain, "lowPct", "highPct") };
   }
   if (eps) {
     const low = Number(eps.low);
     const high = Number(eps.high);
-    guidance.eps = { status: "FOUND", basis: eps.basis, statedAs: eps.statedAs, low, high, midpoint: (low + high) / 2, unit: "USD/share", evidence: [ev(eps.excerpt)], alternates: alternates(eps, plain, "low", "high") };
+    guidance.eps = { status: "FOUND", basis: eps.basis, statedAs: eps.statedAs, targetPeriod: targetPeriod(eps.excerpt), low, high, midpoint: (low + high) / 2, unit: "USD/share", evidence: [ev(eps.excerpt)], alternates: alternates(eps, plain, "low", "high") };
   }
   const found = ["revenue", "grossMargin", "eps"].some((k) => ((guidance[k] as Record<string, unknown>).status === "FOUND"));
   return JSON.stringify({

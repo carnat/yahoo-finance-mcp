@@ -117,14 +117,15 @@ const REVENUE_FIRST_RE = new RegExp(`\\brevenues?\\s+(?:guidance|outlook|forecas
 // "expects revenue between $X and $Y" / "guidance: revenue of $X to $Y" / "expectations for revenue of $X to $Y" (ASTS)
 const KEYWORD_FIRST_RE = new RegExp(`(?:expects|expectations?|guidance|outlook)[^.\\n]{0,120}revenue[^$]{0,25}\\$?\\s*${AMOUNT}${RANGE_SEP}\\$?\\s*${AMOUNT}`, "i");
 const GROSS_MARGIN_RE = /gross margin[^0-9]{0,20}([0-9]{1,2}(?:\.[0-9]+)?)\s*%\s*(?:to|and|-|–|—)\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%/i;
-const EPS_RE = /(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per share)[^$]{0,25}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|and|-|–|—)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)/i;
+// "net income per share" is EPS too (2.5.10, LITE: "Non-GAAP diluted net income per share of $4.05 to $4.35").
+const EPS_RE = /(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per share|net (?:income|earnings|loss) per share)[^$]{0,25}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|and|-|–|—)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)/i;
 // Metric first, forward verb after it (2.5.9, COHR): "Revenue for the first
 // quarter of fiscal 2027 is expected to be between $2.2 billion and $2.4
 // billion." No period, dollar sign or percent sign may sit between the metric
 // and the verb, so a reported value is never read as the range.
 const FORWARD_VERB = "\\b(?:expected|projected|forecast(?:ed)?|anticipated|estimated)\\s+to\\s+(?:be|range|total)\\b";
 const METRIC_FIRST_REVENUE_RE = new RegExp(`\\brevenues?\\b[^.$%]{0,120}?${FORWARD_VERB}[^$.%]{0,30}\\$\\s*${AMOUNT}${RANGE_SEP}\\$?\\s*${AMOUNT}`, "i");
-const METRIC_FIRST_GROSS_MARGIN_RE = new RegExp(`\\bgross margin\\b[^.$%]{0,120}?${FORWARD_VERB}[^$.%0-9]{0,30}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%${RANGE_SEP}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%`, "i");
+const METRIC_FIRST_GROSS_MARGIN_RE = new RegExp(`\\bgross margins?\\b[^.$%]{0,120}?${FORWARD_VERB}[^$.%0-9]{0,30}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%${RANGE_SEP}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%`, "i");
 const EPS_LABEL_SOURCE = "\\b(?:eps|earnings per share|net (?:income|earnings|loss) per share)\\b";
 const METRIC_FIRST_EPS_RE = new RegExp(`${EPS_LABEL_SOURCE}[^.$%]{0,120}?${FORWARD_VERB}[^$.%]{0,30}\\$\\s*([0-9]+(?:\\.[0-9]+)?)${RANGE_SEP}\\$?\\s*([0-9]+(?:\\.[0-9]+)?)`, "i");
 // A midpoint and a tolerance (2.5.9, MRVL): "Net revenue is expected to be
@@ -133,10 +134,34 @@ const METRIC_FIRST_EPS_RE = new RegExp(`${EPS_LABEL_SOURCE}[^.$%]{0,120}?${FORWA
 const PLUS_MINUS = "(?:\\+\\s*/\\s*[-\\u2212]|\\u00b1|plus or minus)";
 const PM_NUMBER = "([0-9][0-9,]*(?:\\.[0-9]+)?)";
 const PM_UNIT = "(?:\\s*(billion|million|thousand|bn|m|k)\\b)?";
-const PM_TOLERANCE = `\\s*${PLUS_MINUS}\\s*(\\$)?\\s*${PM_NUMBER}\\s*(%|(?:billion|million|thousand|bn|m|k)\\b)?`;
+// A comma may precede the tolerance (NVDA: "$108.0 billion, plus or minus 2%").
+const PM_TOLERANCE = `\\s*,?\\s*${PLUS_MINUS}\\s*(\\$)?\\s*${PM_NUMBER}\\s*(%|(?:billion|million|thousand|bn|m|k)\\b)?`;
 const METRIC_FIRST_REVENUE_PM_RE = new RegExp(`\\brevenues?\\b[^.$%]{0,120}?${FORWARD_VERB}[^$.%]{0,30}\\$\\s*${PM_NUMBER}${PM_UNIT}${PM_TOLERANCE}`, "i");
 const METRIC_FIRST_EPS_PM_RE = new RegExp(`${EPS_LABEL_SOURCE}[^.$%]{0,120}?${FORWARD_VERB}[^$.%]{0,30}\\$\\s*${PM_NUMBER}${PM_UNIT}${PM_TOLERANCE}`, "i");
 const UNIT_EXP: Record<string, number> = { billion: 9, bn: 9, million: 6, m: 6, thousand: 3, k: 3 };
+// A margin and a tolerance in points (NVDA: "gross margins are expected to be 74.0%, plus or minus 50 basis points").
+const METRIC_FIRST_GROSS_MARGIN_PM_RE = new RegExp(`\\bgross margins?\\b[^.$%]{0,120}?${FORWARD_VERB}[^$.%0-9]{0,30}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%\\s*,?\\s*${PLUS_MINUS}\\s*([0-9]+(?:\\.[0-9]+)?)\\s*(basis points?|bps|percentage points?|%)`, "i");
+// Release tables, read as flattened text (2.5.10, VRT): "Third Quarter 2026 Guidance Net sales $3,650M -
+// $3,850M ... Adjusted diluted EPS (1) $1.77 - $1.83". A row is a label, an optional footnote marker and
+// the range, under a guidance or outlook heading with no sentence break between them.
+const TABLE_FOOTNOTE = "(?:\\s*\\(\\d\\))?";
+// An outlook bullet puts "of" or "in the range of" between label and range (LITE: "Non-GAAP diluted net
+// income per share of $4.05 to $4.35").
+const ROW_LEAD = "\\s*(?:of\\s+|in the range of\\s+|:\\s*)?";
+// "... diluted EPS of $5.82 to $5.92 and adjusted diluted EPS of $6.65 to $6.75" (VRT): the second range.
+const EPS_CONTINUATION_RE = /\band (?:adjusted|non-GAAP|GAAP) (?:diluted )?(?:eps|earnings per share|net income per share) of \$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|-|–|—)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)/i;
+const TABLE_REVENUE_RE = new RegExp(`\\b(?:net sales|(?:total )?(?:net )?revenues?)${TABLE_FOOTNOTE}${ROW_LEAD}\\$\\s*${AMOUNT}${RANGE_SEP}\\$?\\s*${AMOUNT}`, "i");
+const TABLE_GROSS_MARGIN_RE = new RegExp(`\\b(?:(?:adjusted|non-GAAP|GAAP)\\s+)?gross margins?${TABLE_FOOTNOTE}${ROW_LEAD}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%${RANGE_SEP}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%`, "i");
+const TABLE_EPS_RE = new RegExp(`\\b(?:(?:adjusted|non-GAAP|GAAP)\\s+)?(?:diluted\\s+)?(?:eps|earnings per share|net income per share)${TABLE_FOOTNOTE}${ROW_LEAD}\\$\\s*([0-9]+(?:\\.[0-9]+)?)${RANGE_SEP}\\$?\\s*([0-9]+(?:\\.[0-9]+)?)`, "i");
+const TABLE_HEADING_RE = /\b(?:guidance|outlook)\b/gi;
+
+/** A table row sits under a guidance or outlook heading within 400 characters, with no sentence break between. */
+function underGuidanceHeading(text: string, at: number): boolean {
+  const before = text.slice(Math.max(0, at - 400), at);
+  let last = -1;
+  for (const m of before.matchAll(TABLE_HEADING_RE)) last = (m.index ?? 0) + m[0].length;
+  return last >= 0 && !/[.!?]\s+[A-Z]/.test(before.slice(last));
+}
 
 type Dec = { n: bigint; exp: number };
 
@@ -169,6 +194,17 @@ function decText(n: bigint, exp: number, unitExp: number): string {
  * percentage of the midpoint, or an amount in its own unit (the midpoint's
  * when it names none). A bare tolerance with no $, % or unit is not read.
  */
+/** The low and high of a margin "N% +/- M basis points" (or percentage points), exactly. */
+function pointBounds(mid: string, tol: string, unit: string): { low: string; high: string } {
+  const m = dec(mid);
+  const t = dec(tol);
+  const tExp = /basis|bps/i.test(unit) ? t.exp - 2 : t.exp;
+  const exp = Math.min(m.exp, tExp);
+  const mn = decAt(m, exp);
+  const tn = decAt({ n: t.n, exp: tExp }, exp);
+  return { low: decText(mn - tn, exp, 0), high: decText(mn + tn, exp, 0) };
+}
+
 function pmBounds(mid: string, midUnit: string | undefined, dollar: string | undefined, tol: string, tolUnit: string | undefined): { low: string; high: string } | null {
   const m = dec(mid);
   const t = dec(tol);
@@ -195,61 +231,86 @@ const CLAUSE_START_RE = /(?:[.;!?]\s|•)/g;
 const CLAUSE_TAIL_RE = /^[^.;,$%•]{0,80}?(?=[.;,$%•]|\sand\s|$)/;
 const NON_GAAP_RE = /\bnon-?\s?GAAP\b|\badjusted\b/i;
 const GAAP_RE = /\bGAAP\b/i;
+const BOTH_BASES_RE = /\bGAAP and non-?\s?GAAP\b|\bnon-?\s?GAAP and GAAP\b/i;
 
-export type RangeBasis = "NON_GAAP" | "GAAP" | "NOT_STATED";
+export type RangeBasis = "NON_GAAP" | "GAAP" | "GAAP_AND_NON_GAAP" | "NOT_STATED";
 export type RangeMatch = {
   excerpt: string;
   low: string;
   high: string;
   basis: RangeBasis;
-  // RANGE: "$X to $Y"; MIDPOINT_PLUS_MINUS: "$X +/- 5%", bounds computed exactly.
-  statedAs: "RANGE" | "MIDPOINT_PLUS_MINUS";
+  // RANGE: "$X to $Y"; MIDPOINT_PLUS_MINUS: "$X +/- 5%", bounds computed exactly;
+  // OUTLOOK_ROW: a release-table row or outlook bullet under a guidance heading.
+  statedAs: "RANGE" | "MIDPOINT_PLUS_MINUS" | "OUTLOOK_ROW";
   // The same metric stated on another basis ("GAAP ... ; non-GAAP ..."), one per basis.
   alternates: Omit<NonNullable<RangeMatch>, "alternates">[];
 } | null;
+
+function clauseBasis(clause: string): RangeBasis {
+  // One range for both (NVDA: "GAAP and non-GAAP gross margins are expected to be 74.0% ...") (2.5.10).
+  if (BOTH_BASES_RE.test(clause)) return "GAAP_AND_NON_GAAP";
+  if (NON_GAAP_RE.test(clause)) return "NON_GAAP";
+  return GAAP_RE.test(clause) ? "GAAP" : "NOT_STATED";
+}
 
 function rangeBasis(text: string, at: number, len: number): RangeBasis {
   const before = text.slice(Math.max(0, at - 200), at);
   let start = 0;
   for (const m of before.matchAll(CLAUSE_START_RE)) start = (m.index ?? 0) + m[0].length;
   const tail = CLAUSE_TAIL_RE.exec(text.slice(at + len))?.[0] ?? "";
-  const clause = `${before.slice(start)}${text.slice(at, at + len)}${tail}`;
-  if (NON_GAAP_RE.test(clause)) return "NON_GAAP";
-  return GAAP_RE.test(clause) ? "GAAP" : "NOT_STATED";
+  return clauseBasis(`${before.slice(start)}${text.slice(at, at + len)}${tail}`);
 }
 
-type Pattern = { re: RegExp; pm: boolean };
+type Pattern = { re: RegExp; kind: "range" | "pm_amount" | "pm_points" | "table" };
 
 /**
  * Guidance ranges stated in release text; low and high are the number text as
  * written (computed exactly for a midpoint and tolerance). Keyword-first
  * wording wins; metric-first wording ("revenue ... is expected to be
- * between") is read when there is none. Ranges for the same metric on another
- * basis are kept as alternates.
+ * between") is read when there is none, then release-table rows under a
+ * guidance heading. Ranges for the same metric on another basis are kept as
+ * alternates.
  */
-export function guidanceRanges(text: string): { revenue: RangeMatch; grossMargin: RangeMatch; eps: RangeMatch } {
+export function guidanceRanges(text: string, periodOf: ((at: number, len: number) => string | null) | null = null): { revenue: RangeMatch; grossMargin: RangeMatch; eps: RangeMatch } {
   const pick = (...patterns: Pattern[]): RangeMatch => {
     const found: Omit<NonNullable<RangeMatch>, "alternates">[] = [];
-    for (const { re, pm } of patterns) {
+    const periods: (string | null)[] = [];
+    for (const { re, kind } of patterns) {
       for (const m of text.matchAll(new RegExp(re.source, `${re.flags}g`))) {
         const at = m.index ?? 0;
-        const bounds = pm ? pmBounds(m[1], m[2], m[3], m[4], m[5]) : { low: m[1], high: m[2] };
+        if (kind === "table" && !underGuidanceHeading(text, at)) continue;
+        const bounds = kind === "pm_amount" ? pmBounds(m[1], m[2], m[3], m[4], m[5])
+          : kind === "pm_points" ? pointBounds(m[1], m[2], m[3])
+          : { low: m[1], high: m[2] };
         if (!bounds) continue;
-        found.push({ excerpt: m[0], low: bounds.low, high: bounds.high, basis: rangeBasis(text, at, m[0].length), statedAs: pm ? "MIDPOINT_PLUS_MINUS" : "RANGE" });
+        found.push({
+          excerpt: m[0],
+          low: bounds.low,
+          high: bounds.high,
+          // A table row's basis is its own label: the rows above it belong to other metrics.
+          basis: kind === "table" ? clauseBasis(m[0]) : rangeBasis(text, at, m[0].length),
+          statedAs: kind === "table" ? "OUTLOOK_ROW" : kind === "range" ? "RANGE" : "MIDPOINT_PLUS_MINUS",
+        });
+        periods.push(periodOf ? periodOf(at, m[0].length) : null);
       }
     }
     if (found.length === 0) return null;
     const [primary, ...rest] = found;
     const alternates: typeof found = [];
-    for (const r of rest) {
-      if (r.basis !== primary.basis && !alternates.some((a) => a.basis === r.basis)) alternates.push(r);
-    }
+    // Another basis for the same target period only: a quarter's row is not a year's alternate (2.5.10).
+    rest.forEach((r, i) => {
+      const samePeriod = periods[0] == null || periods[i + 1] == null || periods[i + 1] === periods[0];
+      if (samePeriod && r.basis !== primary.basis && !alternates.some((a) => a.basis === r.basis)) alternates.push(r);
+    });
     return { ...primary, alternates };
   };
   return {
-    revenue: pick({ re: REVENUE_FIRST_RE, pm: false }, { re: KEYWORD_FIRST_RE, pm: false }, { re: METRIC_FIRST_REVENUE_RE, pm: false }, { re: METRIC_FIRST_REVENUE_PM_RE, pm: true }),
-    grossMargin: pick({ re: GROSS_MARGIN_RE, pm: false }, { re: METRIC_FIRST_GROSS_MARGIN_RE, pm: false }),
-    eps: pick({ re: EPS_RE, pm: false }, { re: METRIC_FIRST_EPS_RE, pm: false }, { re: METRIC_FIRST_EPS_PM_RE, pm: true }),
+    revenue: pick({ re: REVENUE_FIRST_RE, kind: "range" }, { re: KEYWORD_FIRST_RE, kind: "range" }, { re: METRIC_FIRST_REVENUE_RE, kind: "range" },
+      { re: METRIC_FIRST_REVENUE_PM_RE, kind: "pm_amount" }, { re: TABLE_REVENUE_RE, kind: "table" }),
+    grossMargin: pick({ re: GROSS_MARGIN_RE, kind: "range" }, { re: METRIC_FIRST_GROSS_MARGIN_RE, kind: "range" },
+      { re: METRIC_FIRST_GROSS_MARGIN_PM_RE, kind: "pm_points" }, { re: TABLE_GROSS_MARGIN_RE, kind: "table" }),
+    eps: pick({ re: EPS_RE, kind: "range" }, { re: EPS_CONTINUATION_RE, kind: "range" }, { re: METRIC_FIRST_EPS_RE, kind: "range" }, { re: METRIC_FIRST_EPS_PM_RE, kind: "pm_amount" },
+      { re: TABLE_EPS_RE, kind: "table" }),
   };
 }
 

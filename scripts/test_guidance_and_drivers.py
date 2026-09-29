@@ -270,7 +270,7 @@ class TestGuidanceHistory(unittest.TestCase):
     def test_range_without_period_is_kept_not_compared(self) -> None:
         stray = next(g for g in self.h["guidance"] if g["releaseDate"] == "2025-08-11" and g["metric"] == "revenue")
         self.assertEqual(stray["targetPeriod"]["label"], "FY2025")
-        self.assertEqual(stray["targetPeriod"]["scope"], "PRECEDING_TEXT")
+        self.assertEqual(stray["targetPeriod"]["scope"], "GUIDANCE_MENTION", "the nearest guidance mention names the year")
 
     def test_unread_release_is_visible(self) -> None:
         unread = next(r for r in self.h["releases"] if r["status"] == "NOT_READ")

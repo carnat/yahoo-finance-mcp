@@ -134,7 +134,8 @@ _REVENUE_FIRST_RE = re.compile(rf"\brevenues?\s+(?:guidance|outlook|forecast)\b[
 # "expects revenue between $X and $Y" / "guidance: revenue of $X to $Y" / "expectations for revenue of $X to $Y" (ASTS)
 _KEYWORD_FIRST_RE = re.compile(rf"(?:expects|expectations?|guidance|outlook)[^.\n]{{0,120}}revenue[^$]{{0,25}}\$?\s*{_AMOUNT}{_RANGE_SEP}\$?\s*{_AMOUNT}", _F)
 _GROSS_MARGIN_RE = re.compile(r"gross margin[^0-9]{0,20}([0-9]{1,2}(?:\.[0-9]+)?)\s*%\s*(?:to|and|-|–|—)\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%", _F)
-_EPS_RE = re.compile(r"(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per share)[^$]{0,25}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|and|-|–|—)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", _F)
+# "net income per share" is EPS too (2.5.10, LITE: "Non-GAAP diluted net income per share of $4.05 to $4.35").
+_EPS_RE = re.compile(r"(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per share|net (?:income|earnings|loss) per share)[^$]{0,25}\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|and|-|–|—)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", _F)
 
 
 # Metric first, forward verb after it (2.5.9, COHR): "Revenue for the first
@@ -143,7 +144,7 @@ _EPS_RE = re.compile(r"(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings 
 # and the verb, so a reported value is never read as the range.
 _FORWARD_VERB = r"\b(?:expected|projected|forecast(?:ed)?|anticipated|estimated)\s+to\s+(?:be|range|total)\b"
 _METRIC_FIRST_REVENUE_RE = re.compile(rf"\brevenues?\b[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%]{{0,30}}\$\s*{_AMOUNT}{_RANGE_SEP}\$?\s*{_AMOUNT}", _F)
-_METRIC_FIRST_GROSS_MARGIN_RE = re.compile(rf"\bgross margin\b[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%0-9]{{0,30}}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%{_RANGE_SEP}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%", _F)
+_METRIC_FIRST_GROSS_MARGIN_RE = re.compile(rf"\bgross margins?\b[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%0-9]{{0,30}}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%{_RANGE_SEP}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%", _F)
 _EPS_LABEL = r"\b(?:eps|earnings per share|net (?:income|earnings|loss) per share)\b"
 _METRIC_FIRST_EPS_RE = re.compile(rf"{_EPS_LABEL}[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%]{{0,30}}\$\s*([0-9]+(?:\.[0-9]+)?){_RANGE_SEP}\$?\s*([0-9]+(?:\.[0-9]+)?)", _F)
 # A midpoint and a tolerance (2.5.9, MRVL): "Net revenue is expected to be
@@ -152,10 +153,35 @@ _METRIC_FIRST_EPS_RE = re.compile(rf"{_EPS_LABEL}[^.$%]{{0,120}}?{_FORWARD_VERB}
 _PLUS_MINUS = r"(?:\+\s*/\s*[-−]|±|plus or minus)"
 _PM_NUMBER = r"([0-9][0-9,]*(?:\.[0-9]+)?)"
 _PM_UNIT = r"(?:\s*(billion|million|thousand|bn|m|k)\b)?"
-_PM_TOLERANCE = rf"\s*{_PLUS_MINUS}\s*(\$)?\s*{_PM_NUMBER}\s*(%|(?:billion|million|thousand|bn|m|k)\b)?"
+# A comma may precede the tolerance (NVDA: "$108.0 billion, plus or minus 2%").
+_PM_TOLERANCE = rf"\s*,?\s*{_PLUS_MINUS}\s*(\$)?\s*{_PM_NUMBER}\s*(%|(?:billion|million|thousand|bn|m|k)\b)?"
 _METRIC_FIRST_REVENUE_PM_RE = re.compile(rf"\brevenues?\b[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%]{{0,30}}\$\s*{_PM_NUMBER}{_PM_UNIT}{_PM_TOLERANCE}", _F)
 _METRIC_FIRST_EPS_PM_RE = re.compile(rf"{_EPS_LABEL}[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%]{{0,30}}\$\s*{_PM_NUMBER}{_PM_UNIT}{_PM_TOLERANCE}", _F)
 _UNIT_EXP = {"billion": 9, "bn": 9, "million": 6, "m": 6, "thousand": 3, "k": 3}
+# A margin and a tolerance in points (NVDA: "gross margins are expected to be 74.0%, plus or minus 50 basis points").
+_METRIC_FIRST_GROSS_MARGIN_PM_RE = re.compile(rf"\bgross margins?\b[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%0-9]{{0,30}}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%\s*,?\s*{_PLUS_MINUS}\s*([0-9]+(?:\.[0-9]+)?)\s*(basis points?|bps|percentage points?|%)", _F)
+# Release tables, read as flattened text (2.5.10, VRT): "Third Quarter 2026 Guidance Net sales $3,650M -
+# $3,850M ... Adjusted diluted EPS (1) $1.77 - $1.83". A row is a label, an optional footnote marker and
+# the range, under a guidance or outlook heading with no sentence break between them.
+_TABLE_FOOTNOTE = r"(?:\s*\(\d\))?"
+# An outlook bullet puts "of" or "in the range of" between label and range (LITE: "Non-GAAP diluted net
+# income per share of $4.05 to $4.35").
+_ROW_LEAD = r"\s*(?:of\s+|in the range of\s+|:\s*)?"
+_TABLE_REVENUE_RE = re.compile(rf"\b(?:net sales|(?:total )?(?:net )?revenues?){_TABLE_FOOTNOTE}{_ROW_LEAD}\$\s*{_AMOUNT}{_RANGE_SEP}\$?\s*{_AMOUNT}", _F)
+_TABLE_GROSS_MARGIN_RE = re.compile(rf"\b(?:(?:adjusted|non-GAAP|GAAP)\s+)?gross margins?{_TABLE_FOOTNOTE}{_ROW_LEAD}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%{_RANGE_SEP}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%", _F)
+_TABLE_EPS_RE = re.compile(rf"\b(?:(?:adjusted|non-GAAP|GAAP)\s+)?(?:diluted\s+)?(?:eps|earnings per share|net income per share){_TABLE_FOOTNOTE}{_ROW_LEAD}\$\s*([0-9]+(?:\.[0-9]+)?){_RANGE_SEP}\$?\s*([0-9]+(?:\.[0-9]+)?)", _F)
+_TABLE_HEADING_RE = re.compile(r"\b(?:guidance|outlook)\b", _F)
+# "... diluted EPS of $5.82 to $5.92 and adjusted diluted EPS of $6.65 to $6.75" (VRT): the second range.
+_EPS_CONTINUATION_RE = re.compile(r"\band (?:adjusted|non-GAAP|GAAP) (?:diluted )?(?:eps|earnings per share|net income per share) of \$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|-|–|—)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", _F)
+
+
+def _under_guidance_heading(text: str, at: int) -> bool:
+    """A table row sits under a guidance or outlook heading within 400 characters, with no sentence break between."""
+    before = text[max(0, at - 400):at]
+    last = -1
+    for m in _TABLE_HEADING_RE.finditer(before):
+        last = m.end()
+    return last >= 0 and not re.search(r"[.!?]\s+[A-Z]", before[last:])
 
 
 def _dec(text: str) -> tuple[int, int]:
@@ -175,6 +201,17 @@ def _dec_text(n: int, exp: int, unit_exp: int) -> str:
     elif places < 0:
         digits = digits + "0" * (-places)
     return f"{'-' if neg else ''}{digits}"
+
+
+def _point_bounds(mid: str, tol: str, unit: str) -> dict:
+    """The low and high of a margin "N% +/- M basis points" (or percentage points), exactly."""
+    m_n, m_exp = _dec(mid)
+    t_n, t_exp = _dec(tol)
+    t_exp = t_exp - 2 if re.search(r"basis|bps", unit, re.I) else t_exp
+    exp = min(m_exp, t_exp)
+    mn = m_n * 10 ** (m_exp - exp)
+    tn = t_n * 10 ** (t_exp - exp)
+    return {"low": _dec_text(mn - tn, exp, 0), "high": _dec_text(mn + tn, exp, 0)}
 
 
 def _pm_bounds(mid: str, mid_unit: str | None, dollar: str | None, tol: str, tol_unit: str | None) -> dict | None:
@@ -206,6 +243,16 @@ _CLAUSE_START_RE = re.compile(r"(?:[.;!?]\s|•)", _F)
 _CLAUSE_TAIL_RE = re.compile(r"^[^.;,$%•]{0,80}?(?=[.;,$%•]|\sand\s|$)", _F)
 _NON_GAAP_RE = re.compile(r"\bnon-?\s?GAAP\b|\badjusted\b", _F)
 _GAAP_RE = re.compile(r"\bGAAP\b", _F)
+_BOTH_BASES_RE = re.compile(r"\bGAAP and non-?\s?GAAP\b|\bnon-?\s?GAAP and GAAP\b", _F)
+
+
+def _clause_basis(clause: str) -> str:
+    # One range for both (NVDA: "GAAP and non-GAAP gross margins are expected to be 74.0% ...") (2.5.10).
+    if _BOTH_BASES_RE.search(clause):
+        return "GAAP_AND_NON_GAAP"
+    if _NON_GAAP_RE.search(clause):
+        return "NON_GAAP"
+    return "GAAP" if _GAAP_RE.search(clause) else "NOT_STATED"
 
 
 def _range_basis(text: str, at: int, length: int) -> str:
@@ -214,39 +261,55 @@ def _range_basis(text: str, at: int, length: int) -> str:
     for m in _CLAUSE_START_RE.finditer(before):
         start = m.end()
     tail = _CLAUSE_TAIL_RE.match(text[at + length:])
-    clause = before[start:] + text[at:at + length] + (tail.group(0) if tail else "")
-    if _NON_GAAP_RE.search(clause):
-        return "NON_GAAP"
-    return "GAAP" if _GAAP_RE.search(clause) else "NOT_STATED"
+    return _clause_basis(before[start:] + text[at:at + length] + (tail.group(0) if tail else ""))
 
 
-def guidance_ranges(text: str) -> dict:
+def guidance_ranges(text: str, period_of=None) -> dict:
     """Guidance ranges stated in release text; low and high are the number text as
     written (computed exactly for a midpoint and tolerance). Keyword-first wording
     wins; metric-first wording ("revenue ... is expected to be between") is read
-    when there is none. Ranges for the same metric on another basis are kept as
-    alternates."""
+    when there is none, then release-table rows under a guidance heading. Ranges
+    for the same metric on another basis are kept as alternates."""
     def pick(*patterns):
         found = []
-        for pattern, pm in patterns:
+        periods = []
+        for pattern, kind in patterns:
             for m in pattern.finditer(text):
-                bounds = _pm_bounds(m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)) if pm else {"low": m.group(1), "high": m.group(2)}
+                at = m.start()
+                if kind == "table" and not _under_guidance_heading(text, at):
+                    continue
+                if kind == "pm_amount":
+                    bounds = _pm_bounds(m.group(1), m.group(2), m.group(3), m.group(4), m.group(5))
+                elif kind == "pm_points":
+                    bounds = _point_bounds(m.group(1), m.group(2), m.group(3))
+                else:
+                    bounds = {"low": m.group(1), "high": m.group(2)}
                 if not bounds:
                     continue
-                found.append({"excerpt": m.group(0), "low": bounds["low"], "high": bounds["high"],
-                              "basis": _range_basis(text, m.start(), len(m.group(0))), "statedAs": "MIDPOINT_PLUS_MINUS" if pm else "RANGE"})
+                found.append({
+                    "excerpt": m.group(0), "low": bounds["low"], "high": bounds["high"],
+                    # A table row's basis is its own label: the rows above it belong to other metrics.
+                    "basis": _clause_basis(m.group(0)) if kind == "table" else _range_basis(text, at, len(m.group(0))),
+                    "statedAs": "OUTLOOK_ROW" if kind == "table" else "RANGE" if kind == "range" else "MIDPOINT_PLUS_MINUS",
+                })
+                periods.append(period_of(at, len(m.group(0))) if period_of else None)
         if not found:
             return None
         primary, rest = found[0], found[1:]
         alternates: list[dict] = []
-        for r in rest:
-            if r["basis"] != primary["basis"] and not any(a["basis"] == r["basis"] for a in alternates):
+        # Another basis for the same target period only: a quarter's row is not a year's alternate (2.5.10).
+        for i, r in enumerate(rest):
+            same_period = periods[0] is None or periods[i + 1] is None or periods[i + 1] == periods[0]
+            if same_period and r["basis"] != primary["basis"] and not any(a["basis"] == r["basis"] for a in alternates):
                 alternates.append(r)
         return {**primary, "alternates": alternates}
     return {
-        "revenue": pick((_REVENUE_FIRST_RE, False), (_KEYWORD_FIRST_RE, False), (_METRIC_FIRST_REVENUE_RE, False), (_METRIC_FIRST_REVENUE_PM_RE, True)),
-        "grossMargin": pick((_GROSS_MARGIN_RE, False), (_METRIC_FIRST_GROSS_MARGIN_RE, False)),
-        "eps": pick((_EPS_RE, False), (_METRIC_FIRST_EPS_RE, False), (_METRIC_FIRST_EPS_PM_RE, True)),
+        "revenue": pick((_REVENUE_FIRST_RE, "range"), (_KEYWORD_FIRST_RE, "range"), (_METRIC_FIRST_REVENUE_RE, "range"),
+                        (_METRIC_FIRST_REVENUE_PM_RE, "pm_amount"), (_TABLE_REVENUE_RE, "table")),
+        "grossMargin": pick((_GROSS_MARGIN_RE, "range"), (_METRIC_FIRST_GROSS_MARGIN_RE, "range"),
+                            (_METRIC_FIRST_GROSS_MARGIN_PM_RE, "pm_points"), (_TABLE_GROSS_MARGIN_RE, "table")),
+        "eps": pick((_EPS_RE, "range"), (_EPS_CONTINUATION_RE, "range"), (_METRIC_FIRST_EPS_RE, "range"),
+                    (_METRIC_FIRST_EPS_PM_RE, "pm_amount"), (_TABLE_EPS_RE, "table")),
     }
 
 

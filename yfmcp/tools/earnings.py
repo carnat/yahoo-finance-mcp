@@ -610,7 +610,16 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
         return not_read("RELEASE_TEXT_NOT_AVAILABLE", f"The earnings release {src_url} could not be read from SEC; retry.", True)
     text = _strip_html_tags(_sanitize_sec_html(html))
     # "revenue guidance of $X to $Y" and "expects revenue between $X and $Y" (yfmcp/extraction_rules.py).
-    patterns = _er.guidance_ranges(text)
+    from yfmcp.guidance_history import period_for_excerpt as _period_for_excerpt
+
+    def _period_label(at: int, n: int) -> str | None:
+        return None if at < 0 else _period_for_excerpt(text, at, n).get("label")
+
+    patterns = _er.guidance_ranges(text, _period_label)
+
+    def _target(excerpt: str) -> str | None:
+        # The period each range targets, from its own sentence or the heading above it (2.5.10).
+        return _period_label(text.find(excerpt), len(excerpt))
 
     def _plain(t: str) -> float | None:
         try:
@@ -620,7 +629,8 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
 
     def _alternates(r: dict, parse, low_key: str, high_key: str) -> list[dict]:
         # The same metric on another basis ("GAAP ...; non-GAAP ..."), each with its own excerpt (2.5.9).
-        return [{"basis": a["basis"], "statedAs": a["statedAs"], low_key: parse(a["low"]), high_key: parse(a["high"]), "excerpt": _compact_excerpt(a["excerpt"])}
+        return [{"basis": a["basis"], "statedAs": a["statedAs"], "targetPeriod": _target(a["excerpt"]), low_key: parse(a["low"]), high_key: parse(a["high"]),
+                 "excerpt": _compact_excerpt(a["excerpt"])}
                 for a in r.get("alternates") or []]
 
     if patterns["revenue"]:
@@ -631,6 +641,7 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
                 "status": "FOUND",
                 "basis": patterns["revenue"]["basis"],
                 "statedAs": patterns["revenue"]["statedAs"],
+                "targetPeriod": _target(patterns["revenue"]["excerpt"]),
                 "alternates": _alternates(patterns["revenue"], _scale_number_from_text, "low", "high"),
                 "low": lo,
                 "high": hi,
@@ -645,6 +656,7 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
             "status": "FOUND",
             "basis": patterns["grossMargin"]["basis"],
             "statedAs": patterns["grossMargin"]["statedAs"],
+            "targetPeriod": _target(patterns["grossMargin"]["excerpt"]),
             "alternates": _alternates(patterns["grossMargin"], _plain, "lowPct", "highPct"),
             "lowPct": lo,
             "highPct": hi,
@@ -658,6 +670,7 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
             "status": "FOUND",
             "basis": patterns["eps"]["basis"],
             "statedAs": patterns["eps"]["statedAs"],
+            "targetPeriod": _target(patterns["eps"]["excerpt"]),
             "alternates": _alternates(patterns["eps"], _plain, "low", "high"),
             "low": lo,
             "high": hi,

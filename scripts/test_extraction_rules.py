@@ -67,6 +67,26 @@ MRVL_OUTLOOK = (
     "\u2022 GAAP diluted net income per share is expected to be $0.53 +/- $0.05 per share. "
     "\u2022 Non-GAAP diluted net income per share is expected to be $1.10 +/- $0.05 per share."
 )
+# VRT Q2 2026 EX-99.1 (2.5.10): guidance only in release tables, and a second EPS range in the same sentence.
+VRT_OUTLOOK = (
+    "Full Year 2026 Guidance \u2022 Expects full year 2026 net sales of $14,000 million and organic sales growth of 31%, each at the midpoint of guidance. "
+    "\u2022 Expects full year 2026 diluted EPS of $5.82 to $5.92 and adjusted diluted EPS of $6.65 to $6.75, a midpoint increase of 72% and 60%. "
+    "Second quarter net sales were $3,274 million. Updated Full Year and Third Quarter 2026 Guidance The data center market continues to demonstrate strong momentum. "
+    "Third Quarter 2026 Guidance Net sales $3,650M - $3,850M Organic net sales growth (2) 34% - 36% Adjusted operating margin (2) 24.0% - 25.0% "
+    "Adjusted diluted EPS (1) $1.77 - $1.83 Full Year 2026 Guidance Net sales $13,800M - $14,200M Adjusted diluted EPS (1) $6.65 - $6.75"
+)
+# NVDA Q2 FY27: a comma before the tolerance, and a margin tolerance in basis points for both bases.
+NVDA_OUTLOOK = (
+    "Outlook NVIDIA\u2019s outlook for the third quarter of fiscal 2027 is as follows: \u2022 Revenue is expected to be $108.0 billion, plus or minus 2%. "
+    "\u2022 GAAP and non-GAAP gross margins are expected to be 74.0%, plus or minus 50 basis points."
+)
+# LITE Q4 FY26: outlook bullets under a lead-in, no verb per bullet.
+LITE_OUTLOOK = (
+    "Business Outlook Lumentum expects the following for the first quarter of fiscal year 2027: \u2022 Net revenue in the range of $1.225 billion to $1.275 billion "
+    "\u2022 Non-GAAP operating margin of 39.5% - 40.5% \u2022 Non-GAAP diluted net income per share of $4.05 to $4.35 We have not provided reconciliations."
+)
+# A results table is not guidance: no guidance heading above it.
+RESULTS_TABLE = "Second Quarter 2026 Results Net sales $3,100M - $3,274M reported. Diluted EPS $1.20 - $1.27 in the prior periods."
 MIXED_BASIS = "GAAP EPS for the quarter is expected to be between $1.00 and $1.20 and non-GAAP EPS between $1.85 and $2.05."
 STEM_WORDS = ["launch", "launches", "launched", "launching", "BlueBirds", "release", "released", "offering", "class", "guidance"]
 EVIDENCE = [
@@ -117,6 +137,10 @@ const out = {
   guidanceCohr: r.guidanceRanges(d.cohrOutlook),
   guidanceMixed: r.guidanceRanges(d.mixedBasis),
   guidanceMrvl: r.guidanceRanges(d.mrvlOutlook),
+  guidanceVrt: r.guidanceRanges(d.vrtOutlook),
+  guidanceNvda: r.guidanceRanges(d.nvdaOutlook),
+  guidanceLite: r.guidanceRanges(d.liteOutlook),
+  guidanceResults: r.guidanceRanges(d.resultsTable),
   revenueAsts: r.reportedTextMetric(d.astsRelease, r.REVENUE_LABEL, r.USD_AMOUNT),
   revenueAwardFirst: r.reportedTextMetric(d.awardFirst, r.REVENUE_LABEL, r.USD_AMOUNT),
   revenueGuidanceOnly: r.reportedTextMetric(d.guidanceOnly, r.REVENUE_LABEL, r.USD_AMOUNT),
@@ -146,7 +170,8 @@ def _data() -> dict:
         "aaoi": AAOI_MATCHES, "negation": NEGATION_MATCHES, "astsRelease": ASTS_RELEASE, "keywordFirst": KEYWORD_FIRST,
         "awardFirst": AWARD_FIRST, "guidanceOnly": GUIDANCE_ONLY, "stemWords": STEM_WORDS, "evidence": EVIDENCE, "concepts": CONCEPTS,
         "filingConcepts": FILING_CONCEPTS, "cashConcepts": CASH_CONCEPTS,
-        "cohrOutlook": COHR_OUTLOOK, "mixedBasis": MIXED_BASIS, "mrvlOutlook": MRVL_OUTLOOK,
+        "cohrOutlook": COHR_OUTLOOK, "mixedBasis": MIXED_BASIS, "mrvlOutlook": MRVL_OUTLOOK, "vrtOutlook": VRT_OUTLOOK,
+        "nvdaOutlook": NVDA_OUTLOOK, "liteOutlook": LITE_OUTLOOK, "resultsTable": RESULTS_TABLE,
     }
 
 
@@ -178,6 +203,10 @@ def _python() -> dict:
         "guidanceCohr": er.guidance_ranges(d["cohrOutlook"]),
         "guidanceMixed": er.guidance_ranges(d["mixedBasis"]),
         "guidanceMrvl": er.guidance_ranges(d["mrvlOutlook"]),
+        "guidanceVrt": er.guidance_ranges(d["vrtOutlook"]),
+        "guidanceNvda": er.guidance_ranges(d["nvdaOutlook"]),
+        "guidanceLite": er.guidance_ranges(d["liteOutlook"]),
+        "guidanceResults": er.guidance_ranges(d["resultsTable"]),
         "revenueAsts": er.reported_text_metric(d["astsRelease"], er.REVENUE_LABEL, er.USD_AMOUNT),
         "revenueAwardFirst": er.reported_text_metric(d["awardFirst"], er.REVENUE_LABEL, er.USD_AMOUNT),
         "revenueGuidanceOnly": er.reported_text_metric(d["guidanceOnly"], er.REVENUE_LABEL, er.USD_AMOUNT),
@@ -241,6 +270,33 @@ class TestRules(unittest.TestCase):
         self.assertEqual([(a["low"], a["high"], a["basis"]) for a in eps["alternates"]], [("1.05", "1.15", "NON_GAAP")])
         # A share count is not a revenue or EPS range.
         self.assertNotIn("921", rev["excerpt"] + eps["excerpt"])
+
+    def test_release_tables_bullets_and_point_tolerances(self) -> None:
+        vrt = self.out["guidanceVrt"]
+        # VRT (2.5.10): the text states only a revenue midpoint; the table row carries the range.
+        self.assertEqual((vrt["revenue"]["low"], vrt["revenue"]["high"], vrt["revenue"]["statedAs"], vrt["revenue"]["basis"]),
+                         ("3,650M", "3,850M", "OUTLOOK_ROW", "NOT_STATED"))
+        self.assertEqual((vrt["eps"]["low"], vrt["eps"]["high"]), ("5.82", "5.92"))
+        self.assertEqual([(a["low"], a["high"], a["basis"]) for a in vrt["eps"]["alternates"]][0], ("6.65", "6.75", "NON_GAAP"),
+                         "the adjusted range in the same sentence")
+        self.assertNotIn("organic", vrt["revenue"]["excerpt"].lower())
+        nvda = self.out["guidanceNvda"]
+        self.assertEqual((nvda["revenue"]["low"], nvda["revenue"]["high"]), ("105.84 billion", "110.16 billion"))
+        self.assertEqual((nvda["grossMargin"]["low"], nvda["grossMargin"]["high"], nvda["grossMargin"]["basis"]), ("73.5", "74.5", "GAAP_AND_NON_GAAP"))
+        lite = self.out["guidanceLite"]
+        self.assertEqual((lite["eps"]["low"], lite["eps"]["high"], lite["eps"]["basis"]), ("4.05", "4.35", "NON_GAAP"))
+        self.assertIsNone(lite["grossMargin"], "an operating margin is not a gross margin")
+        results = self.out["guidanceResults"]
+        self.assertEqual((results["revenue"], results["eps"]), (None, None), "a table without a guidance heading is not guidance")
+
+    def test_alternates_share_the_target_period(self) -> None:
+        from yfmcp.guidance_history import period_for_excerpt
+        text = VRT_OUTLOOK.replace("and adjusted diluted EPS of $6.65 to $6.75", "")
+        ranges = er.guidance_ranges(text, lambda at, n: period_for_excerpt(text, at, n).get("label"))
+        # Without the resolver the Q3 table row would stand in for the full year's non-GAAP range.
+        self.assertEqual([(a["low"], a["high"]) for a in ranges["eps"]["alternates"]], [("6.65", "6.75")])
+        nvda_at = NVDA_OUTLOOK.find("gross margins")
+        self.assertEqual(period_for_excerpt(NVDA_OUTLOOK, nvda_at, 40)["label"], "Q3 2027", "not the FY2027 a cut look-back reads")
 
     def test_reported_revenue_skips_awards_backlog_and_guidance(self) -> None:
         self.assertEqual(self.out["revenueAsts"]["rawValue"], "$31.5 million")

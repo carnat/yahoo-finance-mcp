@@ -9583,7 +9583,7 @@ async def _share_claim_matches(ticker: str, filings: list[tuple[str, dict]]) -> 
     out: list[_cs.TextMatch] = []
     for _, filing in filings:
         search = _safe_json_loads(await search_filing_text(
-            ticker, _cs.SHARE_CLAIM_SEARCH_TERMS, None, filing["filingType"], filing["accessionNumber"], 900, False, None, max_matches=24,
+            ticker, _cs.SHARE_CLAIM_SEARCH_TERMS, None, filing["filingType"], filing["accessionNumber"], 900, False, None, max_matches=32,
         ))
         if search.get("error") or search.get("code") or not isinstance(search.get("matches"), list):
             return None
@@ -9617,7 +9617,7 @@ def _first_present(*values: Any) -> Any:
 @yfinance_server.tool(
     name="extract_dilution_bridge",
     output_schema=_TOOL_OUTPUT_SCHEMAS["extract_dilution_bridge"],
-    description="Basic-to-diluted share bridge at a price you supply, from the filing's inline XBRL: cover-page basic shares, options (treasury-stock method, by exercise-price range when tagged), unvested RSUs/PSUs (gross), warrants per class (treasury stock), convertibles and convertible preferred (if-converted when in the money) and ATM remaining capacity from filing text. Mechanical and company-disclosed, not a consensus diluted share count; never back-solve it into one. status covers tagged instruments only, never a full claim inventory: share claims stated only in filing text (price protection, anti-dilution rights, forward sales, contingent shares, convertible preferred) are quoted in unquantifiedShareClaims and never counted. filing_type latest uses the newest 10-Q with the last 10-K as fallback.",
+    description="Basic-to-diluted share bridge at a price you supply, from the filing's inline XBRL: cover-page basic shares, options (treasury-stock method, by exercise-price range when tagged), unvested RSUs/PSUs (gross), warrants per class (treasury stock), convertibles and convertible preferred (if-converted when in the money) and ATM remaining capacity from filing text. Mechanical and company-disclosed, not a consensus diluted share count; never back-solve it into one. status covers tagged instruments only, never a full claim inventory: share claims stated only in filing text (price protection, anti-dilution rights, forward sales, contingent or share-settled obligations, exchangeable interests, SAFEs, equity lines, post-period warrants) are quoted in unquantifiedShareClaims and never counted. filing_type latest uses the newest 10-Q with the last 10-K as fallback.",
 )
 async def extract_dilution_bridge(
     ticker: str,

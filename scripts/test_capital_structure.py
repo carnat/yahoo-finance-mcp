@@ -405,6 +405,79 @@ MRVL_CLAIM_TEXT = [
     "On March 31, 2026, we completed the issuance and sale of 2.0 million shares of our Series A Convertible Preferred Stock to NVIDIA for an aggregate purchase price of $2.0 billion in cash.",
 ]
 
+# Warrant lifecycle (2.5.10): a class past its tagged expiration date, a class whose tagged term from an
+# old count has elapsed, and a live class.
+WA = {"us-gaap:ClassOfWarrantOrRightAxis": "lcx:SeriesAWarrantsMember"}
+WB = {"us-gaap:ClassOfWarrantOrRightAxis": "lcx:SeriesBWarrantsMember"}
+WL = {"us-gaap:ClassOfWarrantOrRightAxis": "lcx:PublicWarrantsMember"}
+LIFE_K = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "ly", "10-K")}
+{_text("dei:DocumentPeriodEndDate", "ly", "December 31, 2025", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("ly", "2025-01-01..2025-12-31")}{_context("lcover", "2026-02-20")}
+{_context("la", "2021-06-30", WA)}{_context("lb", "2019-03-31", WB)}{_context("ll", "2025-12-31", WL)}{UNITS}</ix:resources></ix:header></div>
+<p>Shares outstanding: {_num("dei:EntityCommonStockSharesOutstanding", "lcover", "shares", "50,000,000")}</p>
+<p>Series A: {_num("us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights", "la", "shares", "2,000,000")} at
+${_num("us-gaap:ClassOfWarrantOrRightExercisePriceOfWarrantsOrRights1", "la", "usdPerShare", "5.00")}, expiring {_text("us-gaap:WarrantsAndRightsOutstandingMaturityDate", "la", "June 30, 2025", "ixt:date-monthname-day-year-en")}.</p>
+<p>Series B: {_num("us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights", "lb", "shares", "1,000,000")} at
+${_num("us-gaap:ClassOfWarrantOrRightExercisePriceOfWarrantsOrRights1", "lb", "usdPerShare", "4.00")}, term {_text("us-gaap:WarrantsAndRightsOutstandingTerm", "lb", "five years")}.</p>
+<p>Public: {_num("us-gaap:ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights", "ll", "shares", "3,000,000")} at
+${_num("us-gaap:ClassOfWarrantOrRightExercisePriceOfWarrantsOrRights1", "ll", "usdPerShare", "11.50")}.</p>
+</body></html>"""
+
+# AEHR FY2026 10-K (2.5.10): options tagged only under a company member on AwardTypeAxis.
+AOPT = {"us-gaap:AwardTypeAxis": "aehr:OutstandingOptionsStockOptionTransactionsMember"}
+AEHR_K = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "ay", "10-K")}
+{_text("dei:DocumentPeriodEndDate", "ay", "May 29, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("ay", "2025-05-31..2026-05-29")}{_context("acover", "2026-07-20")}{_context("aend", "2026-05-29", AOPT)}{_context("aprior", "2025-05-30", AOPT)}{UNITS}</ix:resources></ix:header></div>
+<p>Shares outstanding: {_num("dei:EntityCommonStockSharesOutstanding", "acover", "shares", "30,000,000")}</p>
+<p>Options outstanding {_num("us-gaap:ShareBasedCompensationArrangementByShareBasedPaymentAwardOptionsOutstandingNumber", "aprior", "shares", "645")} thousand then
+{_num("us-gaap:ShareBasedCompensationArrangementByShareBasedPaymentAwardOptionsOutstandingNumber", "aend", "shares", "316", 3)} at
+${_num("us-gaap:ShareBasedCompensationArrangementByShareBasedPaymentAwardOptionsOutstandingWeightedAverageExercisePrice", "aend", "usdPerShare", "5.11")};
+exercisable {_num("us-gaap:ShareBasedCompensationArrangementByShareBasedPaymentAwardOptionsExercisableNumber", "aend", "shares", "310", 3)}.</p>
+</body></html>"""
+# LITE FY2026 10-K (2.5.10): conversion ratios tagged per $1 of principal, and a one-for-one Series A
+# preferred tagged under both preferred and temporary-equity counts, with no conversion tags.
+L28 = {"us-gaap:DebtInstrumentAxis": "lite:ConvertibleSeniorNotesDue2028Member"}
+LITE_K = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "ty", "10-K")}
+{_text("dei:DocumentPeriodEndDate", "ty", "June 27, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("ty", "2025-06-29..2026-06-27")}{_context("tcover", "2026-08-15")}{_context("tend", "2026-06-27")}{_context("t28", "2026-06-27", L28)}{UNITS}</ix:resources></ix:header></div>
+<p>Shares outstanding: {_num("dei:EntityCommonStockSharesOutstanding", "tcover", "shares", "74,000,000")}</p>
+<p>2028 notes {_num("us-gaap:DebtInstrumentFaceAmount", "t28", "usd", "179.6", 6)} at ${_num("us-gaap:DebtInstrumentConvertibleConversionPrice1", "t28", "usdPerShare", "131.03")},
+{_num("us-gaap:DebtInstrumentConvertibleConversionRatio1", "t28", "pure", "0.0076319", 0, decimals="INF")} shares per dollar.</p>
+<p>Preferred {_num("us-gaap:PreferredStockSharesOutstanding", "tend", "shares", "2.9", 6)}; temporary equity {_num("us-gaap:TemporaryEquitySharesOutstanding", "tend", "shares", "2.9", 6)}.</p>
+</body></html>"""
+LITE_CLAIM_TEXT = [
+    "Conversion. The Preferred Stock will convert on a one-for-one basis into shares of our common stock (i) at the option of the holder, subject to the waiting period under the Hart-Scott-Rodino Act. "
+    "Dividends. Each holder of Preferred Stock will be entitled to receive dividends in the same manner as holders of our common stock.",
+]
+# Claim kinds added in 2.5.10, and the sentences that must not count.
+CENSUS_CLAIM_TEXT = [
+    "Holdings LLC units held by the continuing members are exchangeable for shares of our Class A common stock on a one-for-one basis at the holder's election.",
+    "In 2025 we issued simple agreements for future equity to two investors, which convert at the next equity financing.",
+    "The deferred acquisition consideration of $40.0 million is payable in shares of our common stock in 2027 at our election.",
+    "We entered into a standby equity purchase agreement under which we may sell up to $100.0 million of common stock to the investor.",
+    # Not claims: award settlement, note settlement, past settlement.
+    "Restricted stock units are settled in shares of our common stock upon vesting.",
+    "The convertible notes may be settled in shares of our common stock, cash or a combination.",
+    "The earnout was settled in shares of common stock in 2024.",
+]
+# A preferred series with a tagged liquidation preference and dividend rate, not convertible at $10.
+PREFLIQ_Q = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "fq", "10-Q")}
+{_text("dei:DocumentPeriodEndDate", "fq", "June 30, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("fq", "2026-04-01..2026-06-30")}{_context("fcover", "2026-08-01")}{_context("fend", "2026-06-30")}{UNITS}</ix:resources></ix:header></div>
+<p>Shares outstanding: {_num("dei:EntityCommonStockSharesOutstanding", "fcover", "shares", "100,000,000")}</p>
+<p>Preferred outstanding {_num("us-gaap:PreferredStockSharesOutstanding", "fend", "shares", "1,000,000")}, convertible into
+{_num("us-gaap:PreferredStockConvertibleSharesIssuable", "fend", "shares", "5,000,000")} shares at ${_num("us-gaap:PreferredStockConvertibleConversionPrice", "fend", "usdPerShare", "20.00")};
+liquidation preference ${_num("us-gaap:PreferredStockLiquidationPreference", "fend", "usdPerShare", "100.00")} per share; dividend {_num("us-gaap:PreferredStockDividendRatePercentage", "fend", "pure", "6", -2)}%.</p>
+</body></html>"""
+
 TABLE_MATCHES = [
     {"contextText": "Unvested at December 31, 2025 | 2,500,000 | $ 14.10", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at December 31, 2025"},
     {"contextText": "Unvested at June 30, 2026 | 2,750,000 | $ 15.20", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": True, "tableTitle": "Restricted stock unit activity", "rowLabel": "Unvested at June 30, 2026"},
@@ -412,7 +485,7 @@ TABLE_MATCHES = [
     {"contextText": "Unvested at June 30, 2026, restricted stock units totalled 8,888,888 shares.", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": False, "tableTitle": None, "rowLabel": None},
 ]
 
-FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K, "cohr_k": COHR_K, "pref_q": PREF_Q, "mrvl_q": MRVL_Q}
+FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K, "cohr_k": COHR_K, "pref_q": PREF_Q, "mrvl_q": MRVL_Q, "life_k": LIFE_K, "aehr_k": AEHR_K, "lite_k": LITE_K, "prefliq_q": PREFLIQ_Q}
 
 NEWS_ITEMS = [
     {"title": "Needham raises IQE price target to 45p from 38p", "summary": "Needham values IQE at 12x 2027 EV/EBITDA, citing gallium nitride demand.", "url": "https://news.example/1", "publishedAt": "2026-09-20T08:00:00Z", "source": "yahoo_finance_news"},
@@ -472,6 +545,12 @@ const mrvlClaims = data.mrvlClaims.map((t) => ({ contextText: t, sectionHeading:
 const mrvlSrc = src("primary", "10-Q", "2026-08-28", "0001234568-26-000170", data.qUrl, "mrvl_q");
 out.bridgeMrvl = m.dilutionBridge({ ticker: "MRVX", price: 80, priceCurrency: "USD", asOfDate: null, sources: [mrvlSrc], atmMatches: [], claimMatches: mrvlClaims });
 out.bridgeMrvlHigh = m.dilutionBridge({ ticker: "MRVX", price: 100, priceCurrency: "USD", asOfDate: null, sources: [mrvlSrc], atmMatches: [], claimMatches: mrvlClaims });
+out.bridgeLife = m.dilutionBridge({ ticker: "LCX", price: 20, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-K", "2026-02-27", "0001234568-26-000180", data.kUrl, "life_k")], atmMatches: [], claimMatches: [] });
+const tm = (list) => list.map((t) => ({ contextText: t, sectionHeading: "Equity", documentUrl: data.kUrl, filingDate: "2026-08-20", accessionNumber: null }));
+out.bridgeAehr = m.dilutionBridge({ ticker: "AEHX", price: 20, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-K", "2026-07-27", "0001234568-26-000190", data.kUrl, "aehr_k")], atmMatches: [], claimMatches: [] });
+out.bridgeLite = m.dilutionBridge({ ticker: "LITX", price: 700, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-K", "2026-08-20", "0001234568-26-000200", data.kUrl, "lite_k")], atmMatches: [], claimMatches: tm(data.liteClaims) });
+out.bridgeCensus = m.dilutionBridge({ ticker: "AEHX", price: 20, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-K", "2026-07-27", "0001234568-26-000190", data.kUrl, "aehr_k")], atmMatches: [], claimMatches: tm(data.censusClaims) });
+out.bridgePrefLiq = m.dilutionBridge({ ticker: "PLQ", price: 10, priceCurrency: "USD", asOfDate: null, sources: [src("primary", "10-Q", "2026-08-05", "0001234568-26-000210", data.qUrl, "prefliq_q")], atmMatches: [], claimMatches: [] });
 out.capital = m.capitalStructure({ ticker: "CSTC", source: kSource, fundingMatches: atm });
 out.capitalAaoi = m.capitalStructure({ ticker: "AAOX", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000040", data.qUrl, "aaoi_q"), fundingMatches: [] });
 out.capitalAsts = m.capitalStructure({ ticker: "ASTX", source: src("primary", "10-Q", "2026-08-10", "0001234568-26-000060", data.qUrl, "asts_q"), fundingMatches: [] });
@@ -537,7 +616,7 @@ def _worker_pure() -> dict:
         (tmp_path / "data.json").write_text(json.dumps({
             "fixtures": FIXTURES, "kUrl": K_URL, "qUrl": Q_URL, "atm": ATM_TEXT, "news": NEWS_ITEMS, "changes": RATING_CHANGES,
             "chHistory": CH_HISTORY, "chSearch": CH_SEARCH, "tableMatches": TABLE_MATCHES, "astsNews": ASTS_NEWS,
-            "cohrClaims": COHR_CLAIM_TEXT, "mrvlClaims": MRVL_CLAIM_TEXT,
+            "cohrClaims": COHR_CLAIM_TEXT, "mrvlClaims": MRVL_CLAIM_TEXT, "liteClaims": LITE_CLAIM_TEXT, "censusClaims": CENSUS_CLAIM_TEXT,
         }), encoding="utf-8")
         (tmp_path / "harness.mjs").write_text(_WORKER_PURE, encoding="utf-8")
         result = subprocess.run(
@@ -570,7 +649,14 @@ def _python_pure() -> dict:
     pref_src = cs.IxSource("primary", "10-Q", "2026-05-08", "0001234568-26-000160", Q_URL, docs["pref_q"])
     mrvl_claims = [cs.TextMatch(t, "Subsequent Event", Q_URL, "2026-08-28", None) for t in MRVL_CLAIM_TEXT]
     mrvl_src = cs.IxSource("primary", "10-Q", "2026-08-28", "0001234568-26-000170", Q_URL, docs["mrvl_q"])
+    tm = lambda texts: [cs.TextMatch(t, "Equity", K_URL, "2026-08-20", None) for t in texts]
+    aehr_src = cs.IxSource("primary", "10-K", "2026-07-27", "0001234568-26-000190", K_URL, docs["aehr_k"])
     return {
+        "bridgeAehr": cs.dilution_bridge("AEHX", 20, "USD", None, [aehr_src], [], None, []),
+        "bridgeLite": cs.dilution_bridge("LITX", 700, "USD", None, [cs.IxSource("primary", "10-K", "2026-08-20", "0001234568-26-000200", K_URL, docs["lite_k"])], [], None, tm(LITE_CLAIM_TEXT)),
+        "bridgeCensus": cs.dilution_bridge("AEHX", 20, "USD", None, [aehr_src], [], None, tm(CENSUS_CLAIM_TEXT)),
+        "bridgePrefLiq": cs.dilution_bridge("PLQ", 10, "USD", None, [cs.IxSource("primary", "10-Q", "2026-08-05", "0001234568-26-000210", Q_URL, docs["prefliq_q"])], [], None, []),
+        "bridgeLife": cs.dilution_bridge("LCX", 20, "USD", None, [cs.IxSource("primary", "10-K", "2026-02-27", "0001234568-26-000180", K_URL, docs["life_k"])], [], None, []),
         "bridgeMrvl": cs.dilution_bridge("MRVX", 80, "USD", None, [mrvl_src], [], None, mrvl_claims),
         "bridgeMrvlHigh": cs.dilution_bridge("MRVX", 100, "USD", None, [mrvl_src], [], None, mrvl_claims),
         "bridgeCohr": cs.dilution_bridge("COHX", 300, "USD", None, [cohr_src], [], None, claims),
@@ -617,7 +703,7 @@ class TestCapitalStructureParity(unittest.TestCase):
             self.assertEqual(self.worker["documents"][name], self.local["documents"][name], name)
 
     def test_outputs_match(self) -> None:
-        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
+        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
 
@@ -863,6 +949,51 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertEqual(b["status"], "PARTIAL")
         high = _python_pure()["bridgeMrvlHigh"]
         self.assertEqual(high["bridge"]["convertiblePreferred"], 21_800_000)
+
+    def test_award_axis_options_ratio_units_and_stated_preferred(self) -> None:
+        out = _python_pure()
+        opts = next(c for c in out["bridgeAehr"]["components"] if c["component"] == "stock_options")
+        # AEHR (2.5.10): 316,000 options at $5.11 tagged only on AwardTypeAxis, at the latest date.
+        self.assertEqual((opts["outstanding"], opts["exercisable"], opts["weightedAverageExercisePrice"], opts["countBasis"]), (316_000, 310_000, 5.11, "award_axis_members"))
+        self.assertEqual(opts["incrementalShares"], cs.round_half_up(316_000 - 316_000 * 5.11 / 20))
+        self.assertNotIn("stock_options", out["bridgeAehr"]["notDisclosed"])
+        lite = out["bridgeLite"]
+        note = next(c for c in lite["components"] if c["component"] == "convertible_debt")["instruments"][0]
+        # LITE: 0.0076319 per $1 is 7.6319 per $1,000.
+        self.assertEqual((note["conversionRatioPer1000"], note["conversionRatioTagged"], note["conversionRatioNote"], note["ifConvertedBasis"]),
+                         (7.6319, 0.0076319, "RATIO_PER_1_PRINCIPAL_SCALED", "principal / 1000 * conversion_ratio"))
+        pref = next(c for c in lite["components"] if c["component"] == "convertible_preferred")["instruments"][0]
+        # 2.9M tagged twice is 2.9M, one-for-one as the filing states, common-equivalent at any price.
+        self.assertEqual((pref["preferredSharesOutstanding"], pref["ifConvertedShares"], pref["ifConvertedBasis"], pref["incrementalShares"], pref["method"]),
+                         (2_900_000, 2_900_000, "ratio_stated_in_text", 2_900_000, "as_converted_no_conversion_price"))
+        self.assertIn("one-for-one", pref["statedConversion"]["sentence"])
+        self.assertEqual(cs.normalized_ratio(0.5, None)["note"], "RATIO_UNIT_UNCERTAIN")
+        liq = next(c for c in out["bridgePrefLiq"]["components"] if c["component"] == "convertible_preferred")["instruments"][0]
+        self.assertEqual((liq["liquidationPreference"]["amount"], liq["liquidationPreference"]["basis"], liq["dividendRatePct"], liq["incrementalShares"]),
+                         (100_000_000, "per_share_tagged_x_shares_outstanding", 6, 0))
+
+    def test_claim_census_breadth(self) -> None:
+        claims = {c["kind"]: c for c in _python_pure()["bridgeCensus"]["unquantifiedShareClaims"]}
+        self.assertEqual(sorted(claims), ["EQUITY_LINE", "EXCHANGEABLE_INTERESTS", "SAFE", "SHARE_SETTLED_OBLIGATION"])
+        quoted = claims["SHARE_SETTLED_OBLIGATION"]["sentences"]
+        self.assertEqual(len(quoted), 1, "award, note and past settlements are not claims")
+        self.assertIn("deferred acquisition consideration", quoted[0])
+
+    def test_warrant_expiry_and_elapsed_terms(self) -> None:
+        b = _python_pure()["bridgeLife"]
+        w = next(c for c in b["components"] if c["component"] == "warrants")
+        # 2.5.10: Series A expired on 2025-06-30 by its tagged date; it is closed, and listed.
+        self.assertEqual([c["class"] for c in w["classes"]], ["Series B Warrants", "Public Warrants"])
+        self.assertEqual(w["expiredClasses"], [{"class": "Series A Warrants", "count": 2_000_000, "asOf": "2021-06-30", "expirationDate": "2025-06-30"}])
+        # Series B's five-year term from its 2019-03-31 count ended 2024-03-31: flagged, still counted.
+        series_b = w["classes"][0]
+        self.assertEqual((series_b["termElapsedBy"], series_b["outstanding"]), ("2024-03-31", 1_000_000))
+        self.assertNotIn("termElapsedBy", w["classes"][1])
+        codes = [x["code"] for x in b["warnings"]]
+        self.assertIn("WARRANT_EXPIRED_BEFORE_PERIOD_END", codes)
+        self.assertIn("WARRANT_TERM_ELAPSED", codes)
+        self.assertEqual(b["bridge"]["grossSharesAllInstruments"], 50_000_000 + 1_000_000 + 3_000_000)
+        self.assertEqual((cs.term_years("P7Y"), cs.term_years("5 years"), cs.term_years("six years"), cs.term_years("18 months")), (7, 5, 6, None))
 
     def test_exercised_warrants_are_not_outstanding(self) -> None:
         bridge = _python_pure()["bridgeVrtWarrants"]

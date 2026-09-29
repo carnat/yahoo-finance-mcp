@@ -115,9 +115,22 @@ export function periodForExcerpt(text: string, at: number, len: number): Rec {
   const [start, end] = sentenceBounds(text, at, len);
   const inSentence = guidanceTargetPeriod(text.slice(start, end), at + len - start);
   if (inSentence.basis !== "NOT_STATED") return { ...inSentence, scope: "SENTENCE" };
+  // The nearest guidance or outlook heading above, read whole: a fixed look-back can cut "third
+  // quarter of fiscal 2027" to "fiscal 2027" (NVDA), and bullets can sit far below it (MRVL) (2.5.10).
+  // Nearest mention first; one that names no period ("... in its outlook") gives way to the next.
+  const base = Math.max(0, at - HEADING_LOOKBACK);
+  const mentions = [...text.slice(base, at).matchAll(HEADING_WORD_RE)].map((m) => base + (m.index ?? 0)).reverse();
+  for (const heading of mentions) {
+    const from = Math.max(0, heading - 100);
+    const fromHeading = guidanceTargetPeriod(text.slice(from, Math.min(at, heading + 100)), heading - from);
+    if (fromHeading.basis !== "NOT_STATED") return { ...fromHeading, scope: "GUIDANCE_MENTION" };
+  }
   const preceding = guidanceTargetPeriod(text.slice(Math.max(0, at - 200), at + len));
   return { ...preceding, scope: preceding.basis === "NOT_STATED" ? null : "PRECEDING_TEXT" };
 }
+
+const HEADING_LOOKBACK = 1500;
+const HEADING_WORD_RE = /\b(?:outlook|guidance)\b/gi;
 
 const WITHDRAWN_RE = /\bwithdr[ae]w(?:s|n|ing)?\b[^.]{0,60}\b(?:guidance|outlook)\b|\b(?:guidance|outlook)\b[^.]{0,60}\bwithdrawn\b|\bsuspend(?:s|ed|ing)?\b[^.]{0,40}\b(?:guidance|outlook)\b/i;
 const REAFFIRM_RE = /\breaffirm(?:s|ed|ing)?\b|\breiterat(?:e|es|ed|ing)\b|\bmaintain(?:s|ed|ing)?\b[^.]{0,30}\b(?:guidance|outlook)\b/i;
@@ -126,7 +139,7 @@ const REAFFIRM_RE = /\breaffirm(?:s|ed|ing)?\b|\breiterat(?:e|es|ed|ing)\b|\bmai
 export function guidanceEntries(release: ReleaseText): Rec[] {
   if (release.status !== "READ" || !release.text) return [];
   const text = release.text;
-  const ranges = guidanceRanges(text);
+  const ranges = guidanceRanges(text, (at, len) => (periodForExcerpt(text, at, len).label as string | null) ?? null);
   const out: Rec[] = [];
   for (const metric of ["revenue", "grossMargin", "eps"] as const) {
     const r = ranges[metric];
