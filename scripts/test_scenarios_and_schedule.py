@@ -62,6 +62,14 @@ CLAIM_BRIDGES = [
     {"basicShares": {"shares": 195_832_246}, "components": [], "atmProgram": None, "claimCoverage": _COVERED, "unquantifiedShareClaims": []},
     {"basicShares": {"shares": 195_832_246}, "components": [], "atmProgram": None, "claimCoverage": _COVERED, "unquantifiedShareClaims": [_PP]},
     {"basicShares": {"shares": 195_832_246}, "components": [], "atmProgram": None},
+    # MRVL-like (2.5.9): convertible preferred, and a warrant class vesting on untagged conditions.
+    {"basicShares": {"shares": 876_900_000}, "atmProgram": None, "claimCoverage": _COVERED, "unquantifiedShareClaims": [],
+     "components": [
+         {"component": "warrants", "classes": [{"class": "Customer Warrant C", "outstanding": 500_000, "exercisable": None,
+                                                "exercisableBasis": "vesting_terms_without_vested_count", "exercisePrice": 50.0}]},
+         {"component": "convertible_preferred", "instruments": [{"instrument": "Convertible preferred stock", "ifConvertedShares": 21_800_000,
+                                                                 "ifConvertedBasis": "shares_issuable_tagged", "conversionPrice": 91.84}]},
+     ]},
 ]
 
 SCENARIOS = [
@@ -265,13 +273,22 @@ class TestShareScenarios(unittest.TestCase):
         self.assertIsNone(self.out["noBasic"]["scenarios"][0]["totals"]["resultingShares"])
 
     def test_claim_coverage(self) -> None:
-        clean, claimed, unread = self.out["claims"]
+        clean, claimed, unread = self.out["claims"][:3]
         self.assertEqual((clean["status"], clean["scenarios"][0]["completeness"]), ("COMPUTED", "TAGGED_INSTRUMENTS_RESOLVED"))
         self.assertFalse(clean["claimCoverage"]["completeClaimInventory"])
         self.assertEqual((claimed["status"], claimed["scenarios"][0]["completeness"]), ("PARTIAL", "EXCLUDES_UNQUANTIFIED_CLAIMS"))
         self.assertEqual(claimed["scenarios"][0]["totals"]["resultingShares"], 195_832_246, "an unquantified claim adds no shares")
         self.assertEqual(claimed["unquantifiedShareClaims"][0]["kind"], "PRICE_PROTECTION")
         self.assertEqual((unread["status"], unread["scenarios"][0]["completeness"], unread["claimCoverage"]["textScan"]), ("PARTIAL", "CLAIM_TEXT_NOT_READ", "NOT_READ"))
+
+    def test_convertible_preferred_and_unknown_vesting(self) -> None:
+        mrvl = self.out["claims"][3]["scenarios"][0]
+        pref = next(ln for ln in mrvl["instruments"] if ln["component"] == "convertible_preferred")
+        self.assertEqual((pref["thresholdPrice"], pref["count"]), (91.84, 21_800_000))
+        warrant = next(ln for ln in mrvl["instruments"] if ln["component"] == "warrants")
+        self.assertEqual((warrant["count"], warrant["included"], warrant["unresolvedReason"]), (None, False, "count not tagged"),
+                         "a class vesting on untagged conditions is never counted as all 500,000")
+        self.assertEqual(mrvl["completeness"], "EXCLUDES_UNRESOLVED_INSTRUMENTS")
 
     def test_validation(self) -> None:
         errors = [r.get("error") for r in self.out["invalid"]]

@@ -49,6 +49,80 @@ def _region_matches(label: str, region: str, include_asia_fallback: bool = False
 # HTML geographic revenue extractor
 # ---------------------------------------------------------------------------
 
+# Amount cells of a table row: numbers and dash placeholders, never percent
+# cells. A total row often carries no label and no "% of total" cells, so a
+# cell index taken from a region row can land on another period's total
+# (MRVL: China $1,161.5 against the prior year's $2,006.1 read 57.9%; the
+# table states 42%) (2.5.9). Mirrors alignedGeoAmounts in the Worker.
+_DASH_CELL_RE = _re.compile(r"^[\s$]*[-\u2013\u2014]+\s*$")
+# A computed share more than this many points from the table's own percentage is a misread column.
+_STATED_PCT_TOLERANCE = 1.0
+# A percent beside a value is a share only under a "% of total" header; a "Change" column is not.
+_SHARE_HEADER_RE = _re.compile(r"%\s*of\b|\bpercent(?:age)?\s+of\b", _re.IGNORECASE)
+
+
+def _has_share_header(rows: list[list[str]], before: int) -> bool:
+    return any(_SHARE_HEADER_RE.search(c) for r in rows[:before] for c in r)
+
+
+def _is_pct_cell(row: list[str], col: int) -> bool:
+    """A percent cell, or a number whose "%" sign sits in the next cell."""
+    return "%" in row[col] or (col + 1 < len(row) and row[col + 1].strip() == "%")
+
+
+def _amount_cells(row: list[str]) -> list[tuple[int, float]]:
+    out: list[tuple[int, float]] = []
+    for col, cell in enumerate(row):
+        if _is_pct_cell(row, col):
+            continue
+        if _DASH_CELL_RE.match(cell):
+            out.append((col, 0.0))
+            continue
+        v = _parse_numeric_cell(cell)
+        if v is not None:
+            out.append((col, v))
+    return out
+
+
+def _first_positive_ordinal(row: list[str]) -> int | None:
+    return next((k for k, (_, v) in enumerate(_amount_cells(row)) if v > 0), None)
+
+
+def _amount_at(row: list[str], k: int) -> tuple[int, float] | None:
+    cells = _amount_cells(row)
+    return cells[k] if k < len(cells) else None
+
+
+def _stated_pct_after(row: list[str], col: int) -> float | None:
+    nxt = col + 1
+    return _parse_numeric_cell(row[nxt]) if nxt < len(row) and _is_pct_cell(row, nxt) and row[nxt].strip() != "%" else None
+
+
+def _geo_column_header(rows: list[list[str]], region_row_idx: int, k: int) -> str:
+    """The header of the k-th amount column: the header row with one label per amount column
+    ("% of Total" headers dropped), prefixed by a period group ("Three Months Ended") when a row
+    above spans the columns evenly (2.5.9). Mirrors geoColumnHeader in the Worker."""
+    n = len(_amount_cells(rows[region_row_idx]))
+    label = ""
+    group = ""
+    for i in range(region_row_idx):
+        cells = [c.strip() for c in rows[i] if c.strip() and not _SHARE_HEADER_RE.search(c)]
+        if not cells or any(_parse_numeric_cell(c) is not None and not _re.search(r"\d{4}", c) for c in cells):
+            continue
+        if len(cells) == n and not label:
+            label = cells[k]
+        elif 0 < len(cells) < n and n % len(cells) == 0 and not group and not label:
+            group = cells[k // (n // len(cells))]
+    return " ".join(x for x in (group, label) if x)
+
+
+def _row_label(row: list[str], fallback: str) -> str:
+    """A row's label; an unlabeled total row's first cell is a number."""
+    if not row:
+        return fallback
+    return str(row[0]) if _re.search(r"[A-Za-z]", str(row[0])) else "Total (unlabeled row)"
+
+
 def _extract_geo_revenue_from_html(
     html_text: str,
     region: str,
@@ -94,9 +168,14 @@ def _extract_geo_revenue_from_html(
         search_start = max(0, pos - 1_000)
         search_end = min(len(html_text), pos + 60_000)
         chunk = html_text[search_start:search_end]
+        starts = [search_start + tbl_m.start() for tbl_m in _re.finditer(r"<table[^>]*>", chunk, _re.IGNORECASE)]
+        # The table the match sits in, however far back its tag starts: inline
+        # styles put MRVL's region table tag ~5,000 characters before "China" (2.5.9).
+        enclosing = html_lower.rfind("<table", 0, pos)
+        if enclosing != -1 and enclosing < search_start and html_lower.find("</table>", enclosing) > pos:
+            starts.insert(0, enclosing)
 
-        for tbl_m in _re.finditer(r"<table[^>]*>", chunk, _re.IGNORECASE):
-            abs_start = search_start + tbl_m.start()
+        for abs_start in starts:
             if abs_start in checked_tables:
                 continue
             checked_tables.add(abs_start)
@@ -196,22 +275,29 @@ def _extract_geo_revenue_from_html(
                 elif "china" in label:
                     generic_china_idx = i
 
-            # Find first numeric column in total row
-            value_col = None
-            total_row = rows[total_row_idx]
-            for j in range(1, len(total_row)):
-                if _parse_numeric_cell(total_row[j]) is not None:
-                    value_col = j
-                    break
-
-            if value_col is None:
+            # One column for every row, paired by position among amount cells:
+            # the first positive amount of the main China row.
+            lead_idx = next((i for i in (generic_china_idx, greater_china_idx, mainland_idx, hongkong_idx) if i is not None), None)
+            ordinal = _first_positive_ordinal(rows[lead_idx]) if lead_idx is not None else None
+            if ordinal is None:
                 continue
+            total_cell = _amount_at(rows[total_row_idx], ordinal)
+            if total_cell is None:
+                continue
+            value_col, total_val = total_cell
 
-            mainland_val = _parse_numeric_cell(rows[mainland_idx][value_col]) if mainland_idx is not None and value_col < len(rows[mainland_idx]) else None
-            hongkong_val = _parse_numeric_cell(rows[hongkong_idx][value_col]) if hongkong_idx is not None and value_col < len(rows[hongkong_idx]) else None
-            greater_china_val = _parse_numeric_cell(rows[greater_china_idx][value_col]) if greater_china_idx is not None and value_col < len(rows[greater_china_idx]) else None
-            generic_china_val = _parse_numeric_cell(rows[generic_china_idx][value_col]) if generic_china_idx is not None and value_col < len(rows[generic_china_idx]) else None
-            total_val = _parse_numeric_cell(rows[total_row_idx][value_col]) if total_row_idx is not None and value_col < len(rows[total_row_idx]) else None
+            def _val(idx: int | None) -> float | None:
+                cell = _amount_at(rows[idx], ordinal) if idx is not None else None
+                return cell[1] if cell else None
+
+            def _raw(idx: int) -> str:
+                cell = _amount_at(rows[idx], ordinal)
+                return str(rows[idx][cell[0]]) if cell else ""
+
+            mainland_val = _val(mainland_idx)
+            hongkong_val = _val(hongkong_idx)
+            greater_china_val = _val(greater_china_idx)
+            generic_china_val = _val(generic_china_idx)
 
             region_val = None
             interpretation_warning = None
@@ -233,6 +319,13 @@ def _extract_geo_revenue_from_html(
                 continue
 
             ratio = round(region_val / total_val, 4)
+            # A single row's own "% of total" must agree with the computed share.
+            single_idx = None if (mainland_idx is not None and hongkong_idx is not None) else lead_idx
+            if single_idx is not None and _has_share_header(rows, single_idx):
+                cell = _amount_at(rows[single_idx], ordinal)
+                stated = _stated_pct_after(rows[single_idx], cell[0]) if cell else None
+                if stated is not None and abs(ratio * 100 - stated) > _STATED_PCT_TOLERANCE:
+                    continue
 
             # Detect unit scale for USD conversion
             context_html = html_text[max(0, tbl["pos"] - 3_000): tbl["pos"]]
@@ -248,7 +341,7 @@ def _extract_geo_revenue_from_html(
                 heading = _strip_html_tags(h_matches[-1])
 
             header_row = rows[0] if rows else []
-            source_col = str(header_row[value_col]).strip() if value_col < len(header_row) else ""
+            source_col = _geo_column_header(rows, lead_idx, ordinal) or (str(header_row[value_col]).strip() if value_col < len(header_row) else "")
             unit_scale = (
                 "thousands" if unit_mult == 1_000.0
                 else "millions" if unit_mult == 1_000_000.0
@@ -258,14 +351,14 @@ def _extract_geo_revenue_from_html(
 
             source_rows = []
             if mainland_idx is not None:
-                source_rows.append([str(rows[mainland_idx][0]), str(rows[mainland_idx][value_col])])
+                source_rows.append([str(rows[mainland_idx][0]), _raw(mainland_idx)])
             if hongkong_idx is not None:
-                source_rows.append([str(rows[hongkong_idx][0]), str(rows[hongkong_idx][value_col])])
+                source_rows.append([str(rows[hongkong_idx][0]), _raw(hongkong_idx)])
             if greater_china_idx is not None:
-                source_rows.append([str(rows[greater_china_idx][0]), str(rows[greater_china_idx][value_col])])
+                source_rows.append([str(rows[greater_china_idx][0]), _raw(greater_china_idx)])
             if generic_china_idx is not None and mainland_idx is None and greater_china_idx is None:
-                source_rows.append([str(rows[generic_china_idx][0]), str(rows[generic_china_idx][value_col])])
-            source_rows.append([str(rows[total_row_idx][0]), str(rows[total_row_idx][value_col])])
+                source_rows.append([str(rows[generic_china_idx][0]), _raw(generic_china_idx)])
+            source_rows.append([_row_label(rows[total_row_idx], "Total revenue"), str(rows[total_row_idx][value_col])])
 
             breakdown = {}
             if total_val > 0:
@@ -303,28 +396,22 @@ def _extract_geo_revenue_from_html(
             if region_row_idx is None or total_row_idx == region_row_idx:
                 continue
 
-            # Find the first numeric column in the region row (skip label column)
-            region_row = rows[region_row_idx]
-            value_col: int | None = None
-            for j, cell in enumerate(region_row):
-                v = _parse_numeric_cell(cell)
-                if v is not None and v > 0:
-                    value_col = j
-                    break
-            if value_col is None:
+            # The value and the total in the same column, paired among amount cells.
+            ordinal = _first_positive_ordinal(rows[region_row_idx])
+            if ordinal is None:
                 continue
-
-            region_val = _parse_numeric_cell(
-                rows[region_row_idx][value_col] if value_col < len(rows[region_row_idx]) else ""
-            )
-            total_val = _parse_numeric_cell(
-                rows[total_row_idx][value_col] if value_col < len(rows[total_row_idx]) else ""
-            )
-
-            if region_val is None or total_val is None or total_val <= 0:
+            region_cell = _amount_at(rows[region_row_idx], ordinal)
+            total_cell = _amount_at(rows[total_row_idx], ordinal)
+            if region_cell is None or total_cell is None:
+                continue
+            (value_col, region_val), (total_col, total_val) = region_cell, total_cell
+            if total_val <= 0:
                 continue
 
             ratio = round(region_val / total_val, 4)
+            stated = _stated_pct_after(rows[region_row_idx], value_col) if _has_share_header(rows, region_row_idx) else None
+            if stated is not None and abs(ratio * 100 - stated) > _STATED_PCT_TOLERANCE:
+                continue
 
             # Detect unit scale for USD conversion
             context_html = html_text[max(0, tbl["pos"] - 3_000): tbl["pos"]]
@@ -340,7 +427,7 @@ def _extract_geo_revenue_from_html(
                 heading = _strip_html_tags(h_matches[-1])
 
             header_row = rows[0] if rows else []
-            source_col = str(header_row[value_col]).strip() if value_col < len(header_row) else ""
+            source_col = _geo_column_header(rows, region_row_idx, ordinal) or (str(header_row[value_col]).strip() if value_col < len(header_row) else "")
             unit_scale = (
                 "thousands" if unit_mult == 1_000.0
                 else "millions" if unit_mult == 1_000_000.0
@@ -357,14 +444,14 @@ def _extract_geo_revenue_from_html(
                         str(rows[region_row_idx][value_col]) if value_col < len(rows[region_row_idx]) else "",
                     ],
                     [
-                        str(rows[total_row_idx][0] if rows[total_row_idx] else "Total revenue"),
-                        str(rows[total_row_idx][value_col]) if value_col < len(rows[total_row_idx]) else "",
+                        _row_label(rows[total_row_idx], "Total revenue"),
+                        str(rows[total_row_idx][total_col]),
                     ],
                 ],
                 "sourceColumns": [source_col] if source_col else [],
                 "unitScale": unit_scale,
                 "rawValue": str(rows[region_row_idx][value_col]) if value_col < len(rows[region_row_idx]) else None,
-                "rawDenominator": str(rows[total_row_idx][value_col]) if value_col < len(rows[total_row_idx]) else None,
+                "rawDenominator": str(rows[total_row_idx][total_col]),
             }
             return ratio, region_usd, total_usd, heading, evidence
 

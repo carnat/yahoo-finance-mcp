@@ -138,6 +138,22 @@ const aaoi = [
   "</table>",
 ].join("");
 out.aaoi = m.extractGeoRevenueFromHtml(aaoi, "China");
+// MRVL (2.5.9): "% of Total" beside each value and an unlabeled total row
+// without them; the cell index of China's value is the prior year's total there.
+const mrvl = [
+  `<p>Net revenue by geographic area (in millions):</p><table>`,
+  row("", "Three Months Ended"),
+  row("", "August 1, 2026", "% of Total", "August 2, 2025", "% of Total"),
+  row("Net revenue based on destination of shipment:"),
+  row("China", "$", "1,161.5", "42", "%", "$", "583.4", "29", "%"),
+  row("Taiwan", "456.8", "17", "%", "541.2", "27", "%"),
+  row("Other", "1,121.0", "41", "%", "881.5", "44", "%"),
+  row("", "$", "2,739.3", "", "$", "2,006.1"),
+  "</table>",
+].join("");
+out.mrvl = m.extractGeoRevenueFromHtml(mrvl, "China");
+// A table whose stated share disagrees with the computed one is not read.
+out.mrvlMisread = m.extractGeoRevenueFromHtml(mrvl.replace("42", "58"), "China");
 const msftStyle = [
   `<p>Segment revenue and operating income were as follows during the periods presented:</p>`,
   "<table>",
@@ -277,6 +293,13 @@ class TestWorkerDataAccuracy(unittest.TestCase):
         self.assertEqual(geo["usd"], 64377e6)
         self.assertEqual(geo["denominator"], 416161e6)
         self.assertEqual(geo["sourceColumns"], ["2025"])
+
+    def test_geographic_value_and_total_share_a_column(self) -> None:
+        mrvl = self.out["mrvl"]
+        self.assertEqual((mrvl["pct"], mrvl["usd"], mrvl["denominator"], mrvl["statedPct"]), (0.424, 1_161_500_000, 2_739_300_000, 42))
+        self.assertEqual(mrvl["sourceRows"][1], ["Total (unlabeled row)", "$2,739.3"])
+        self.assertEqual(mrvl["sourceColumns"], ["Three Months Ended August 1, 2026"])
+        self.assertIsNone(self.out["mrvlMisread"], "a computed share 16 points from the stated 58% is a misread column")
 
     def test_geographic_table_must_be_about_revenue(self) -> None:
         aaoi = self.out["aaoi"]

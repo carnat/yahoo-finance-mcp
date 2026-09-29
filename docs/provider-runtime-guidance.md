@@ -1061,6 +1061,82 @@ consensus actions compose evidence and never fill a gap with an assumption.
   - `list_sec_company_filings` rows carry each 8-K's `items`, in both
     runtimes.
 
+### Geographic denominators, ± guidance and customer warrants (2.5.9, MRVL)
+
+- **Geographic share.** MRVL's 10-Q geographic table puts a "% of Total"
+  cell beside each value. Its total row has no label and no percent cells,
+  so the cell index of China's value landed on the prior year's total.
+  - China's $1,161.5M was divided by $2,006.1M, which read 57.9%. The table
+    states 42%.
+  - The value and the total are now paired by position among amount cells:
+    - percent cells, including a number followed by a bare "%" cell, are
+      skipped;
+    - dash cells count as zero placeholders.
+
+    China now reads $1,161.5M of $2,739.3M, 42.4%.
+  - Under a "% of Total" header, the table's own percentage must agree with
+    the computed share within 1 point. Otherwise the table is not read.
+  - A "Change" column is not a share and is not checked.
+  - An unlabeled total row is quoted as "Total (unlabeled row)".
+  - The column is named from the header rows: "Three Months Ended August 1,
+    2026".
+  - A quarterly report's period is that column, not "FY" plus the filing
+    year.
+  - The XBRL path now pairs a region fact only with the total for the same
+    period. A 10-Q also carries the prior year's total.
+  - The local server also checks the table that encloses a match. MRVL's
+    table tag starts about 5,000 characters before "China", because of
+    inline styles.
+- **Midpoint and tolerance guidance.** Ranges stated as "Net revenue is
+  expected to be $3.150 billion +/- 5%" and "GAAP diluted net income per
+  share is expected to be $0.53 +/- $0.05" are read (`statedAs:
+  MIDPOINT_PLUS_MINUS`).
+  - The bounds are computed with exact decimal arithmetic: $2.9925–3.3075B
+    and $0.48–0.58.
+  - A tolerance can be a percent, or an amount in its own unit (the
+    midpoint's when it names none). A bare tolerance with no $, % or unit is
+    not read.
+  - "Net income per share" counts as EPS.
+  - A range for the same metric on another basis is kept in `alternates`:
+    MRVL's non-GAAP gross margin 57.5–58.5% and EPS $1.05–1.15 beside the
+    GAAP ranges.
+- **Warrant vesting.**
+  - The bridge now reads `ClassOfWarrantOrRightSharesVested`. MRVL's fiscal
+    2025 customer warrant has 1.2M of its 4.2M shares vested, and its fiscal
+    2026 warrant 0 of 1.0M. Before this fix, all of them were treated as
+    exercisable.
+  - A class with a tagged vesting term but no vested or unvested count has an
+    unresolved exercisable count (`WARRANT_VESTING_NOT_TAGGED`). It is never
+    taken as all outstanding, in the bridge or in scenarios.
+  - `exercisableBasis` says which rule applied.
+- **Warrants after the period end.**
+  - A warrant count dated after the report's period end, or tagged as a
+    subsequent event, is not a period-end class.
+  - Before this fix, MRVL's 59.0M customer warrant at $206.58, issued after
+    the quarter, was counted as a class named "Subsequent Event".
+  - It is now a `WARRANT_AFTER_PERIOD_END` claim, `UNQUANTIFIED` and out of
+    every count. The claim quotes the filing's sentence and the next one
+    (`leadOut`): "eligible for vesting from our third quarter of fiscal 2027
+    through the end of fiscal 2033, upon meeting certain revenue milestone
+    conditions or time-based conditions".
+  - Which fiscal year's milestones vest which shares is not tagged, so no
+    split by year is given.
+- **Convertible preferred component.**
+  - A new `convertible_preferred` component covers preferred stock
+    outstanding at the period end. It uses the tagged
+    `PreferredStockConvertibleSharesIssuable` and
+    `PreferredStockConvertibleConversionPrice`, if-converted when in the
+    money.
+  - MRVL's Series A (2.0M preferred shares, issued to NVIDIA) converts into up
+    to 21.8M common shares at $91.84. It adds 0 at $80, 21.8M at $100, and
+    21.8M to the gross count.
+  - The issuable count is tagged at issuance, so it is flagged
+    `countBeforePeriodEnd`.
+  - A text claim for a preferred series the component resolves reads
+    `MODELED_IN_BRIDGE`.
+  - Scenarios give it the `convertibles` treatment.
+  - Liquidation preference, dividends and redemption are not modeled.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

@@ -184,18 +184,21 @@ function scenarioLines(bridge: Rec, s: ShareScenario): Line[] {
   if (warrants) {
     for (const cls of (Array.isArray(warrants.classes) ? warrants.classes : []) as Rec[]) {
       const all = t.warrant_vesting === "all";
-      const count = all ? num(cls.outstanding) : num(cls.exercisable) ?? num(cls.outstanding);
+      // A class that vests on untagged conditions has no known exercisable count; it is never taken as all outstanding (2.5.9).
+      const count = all ? num(cls.outstanding) : cls.exercisable === undefined ? num(cls.outstanding) : num(cls.exercisable);
       lines.push(exercisable("warrants", String(cls.class ?? "Warrants"), count, all ? "outstanding" : "vested_exercisable", num(cls.exercisePrice), t.warrants, price));
     }
   }
 
-  const convertibles = byName("convertible_debt");
-  if (convertibles) {
+  // Convertible notes and convertible preferred stock (2.5.9) take the same if-converted treatment.
+  for (const name of ["convertible_debt", "convertible_preferred"]) {
+    const convertibles = byName(name);
+    if (!convertibles) continue;
     for (const inst of (Array.isArray(convertibles.instruments) ? convertibles.instruments : []) as Rec[]) {
       const shares = num(inst.ifConvertedShares);
       const conv = num(inst.conversionPrice);
       const base = {
-        component: "convertible_debt", instrument: String(inst.instrument ?? "Convertible notes"), treatment: t.convertibles,
+        component: name, instrument: String(inst.instrument ?? "Convertible notes"), treatment: t.convertibles,
         count: shares, countBasis: String(inst.ifConvertedBasis ?? "if_converted"), exercisePrice: conv, price,
       };
       const itm = conv != null ? price >= conv : null;

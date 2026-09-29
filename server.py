@@ -5484,8 +5484,10 @@ async def get_filing_data(
             accn = str(picked.get("accn") or "")
             total_fact = next(
                 (
+                    # The total for the same period: a 10-Q also carries the prior year's total (2.5.9, MRVL).
                     f for f in filtered
                     if str(f.get("accn") or "") == accn and not f.get("segment")
+                    and str(f.get("start") or "") == str(picked.get("start") or "") and str(f.get("end") or "") == str(picked.get("end") or "")
                 ),
                 None,
             )
@@ -5536,6 +5538,11 @@ async def get_filing_data(
                                     filing_date_str = filing_dates_list[idx] if idx < len(filing_dates_list) else ""
                                     report_date_str = report_dates_list[idx] if idx < len(report_dates_list) else ""
                                     fiscal_year = f"FY{report_date_str[:4]}" if report_date_str else ""
+                                    # A quarterly report's table is a quarter or year-to-date, never a fiscal year: its own
+                                    # column header says which ("Three Months Ended August 1, 2026") (2.5.9, MRVL).
+                                    if not _re.match(r"(?:10-K|20-F|40-F)", str(forms[idx]), _re.IGNORECASE):
+                                        headers = geo_evidence.get("sourceColumns") if isinstance(geo_evidence, dict) else None
+                                        fiscal_year = headers[0] if headers else ""
                                     raw_value = (
                                         geo_evidence.get("rawValue") if isinstance(geo_evidence, dict) else None
                                     ) or _format_raw_number(geo_usd)
@@ -9610,7 +9617,7 @@ def _first_present(*values: Any) -> Any:
 @yfinance_server.tool(
     name="extract_dilution_bridge",
     output_schema=_TOOL_OUTPUT_SCHEMAS["extract_dilution_bridge"],
-    description="Basic-to-diluted share bridge at a price you supply, from the filing's inline XBRL: cover-page basic shares, options (treasury-stock method, by exercise-price range when tagged), unvested RSUs/PSUs (gross), warrants per class (treasury stock), convertibles (if-converted when in the money) and ATM remaining capacity from filing text. Mechanical and company-disclosed, not a consensus diluted share count; never back-solve it into one. status covers tagged instruments only, never a full claim inventory: share claims stated only in filing text (price protection, anti-dilution rights, forward sales, contingent shares, convertible preferred) are quoted in unquantifiedShareClaims and never counted. filing_type latest uses the newest 10-Q with the last 10-K as fallback.",
+    description="Basic-to-diluted share bridge at a price you supply, from the filing's inline XBRL: cover-page basic shares, options (treasury-stock method, by exercise-price range when tagged), unvested RSUs/PSUs (gross), warrants per class (treasury stock), convertibles and convertible preferred (if-converted when in the money) and ATM remaining capacity from filing text. Mechanical and company-disclosed, not a consensus diluted share count; never back-solve it into one. status covers tagged instruments only, never a full claim inventory: share claims stated only in filing text (price protection, anti-dilution rights, forward sales, contingent shares, convertible preferred) are quoted in unquantifiedShareClaims and never counted. filing_type latest uses the newest 10-Q with the last 10-K as fallback.",
 )
 async def extract_dilution_bridge(
     ticker: str,

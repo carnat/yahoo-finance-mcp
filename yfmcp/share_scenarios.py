@@ -178,17 +178,21 @@ def _scenario_lines(bridge: dict, s: dict) -> list[dict]:
     if warrants:
         for cls in warrants.get("classes") if isinstance(warrants.get("classes"), list) else []:
             all_ = t["warrant_vesting"] == "all"
-            count = _num(cls.get("outstanding")) if all_ else _first(_num(cls.get("exercisable")), _num(cls.get("outstanding")))
+            # A class that vests on untagged conditions has no known exercisable count; it is never taken as all outstanding (2.5.9).
+            count = _num(cls.get("outstanding")) if all_ or "exercisable" not in cls else _num(cls.get("exercisable"))
             lines.append(_exercisable("warrants", str(_first(cls.get("class"), "Warrants")), count, "outstanding" if all_ else "vested_exercisable",
                                       _num(cls.get("exercisePrice")), t["warrants"], price))
 
-    convertibles = by_name("convertible_debt")
-    if convertibles:
+    # Convertible notes and convertible preferred stock (2.5.9) take the same if-converted treatment.
+    for name in ("convertible_debt", "convertible_preferred"):
+        convertibles = by_name(name)
+        if not convertibles:
+            continue
         for inst in convertibles.get("instruments") if isinstance(convertibles.get("instruments"), list) else []:
             shares = _num(inst.get("ifConvertedShares"))
             conv = _num(inst.get("conversionPrice"))
             itm = price >= conv if conv is not None else None
-            args = ("convertible_debt", str(_first(inst.get("instrument"), "Convertible notes")), t["convertibles"], shares,
+            args = (name, str(_first(inst.get("instrument"), "Convertible notes")), t["convertibles"], shares,
                     str(_first(inst.get("ifConvertedBasis"), "if_converted")), conv, price)
             if t["convertibles"] == "exclude":
                 lines.append(_line(*args, itm, None, "excluded by scenario", 0))

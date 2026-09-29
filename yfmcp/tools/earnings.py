@@ -611,6 +611,18 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
     text = _strip_html_tags(_sanitize_sec_html(html))
     # "revenue guidance of $X to $Y" and "expects revenue between $X and $Y" (yfmcp/extraction_rules.py).
     patterns = _er.guidance_ranges(text)
+
+    def _plain(t: str) -> float | None:
+        try:
+            return float(t)
+        except (TypeError, ValueError):
+            return None
+
+    def _alternates(r: dict, parse, low_key: str, high_key: str) -> list[dict]:
+        # The same metric on another basis ("GAAP ...; non-GAAP ..."), each with its own excerpt (2.5.9).
+        return [{"basis": a["basis"], "statedAs": a["statedAs"], low_key: parse(a["low"]), high_key: parse(a["high"]), "excerpt": _compact_excerpt(a["excerpt"])}
+                for a in r.get("alternates") or []]
+
     if patterns["revenue"]:
         lo = _scale_number_from_text(patterns["revenue"]["low"])
         hi = _scale_number_from_text(patterns["revenue"]["high"])
@@ -618,6 +630,8 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
             base["revenue"] = {
                 "status": "FOUND",
                 "basis": patterns["revenue"]["basis"],
+                "statedAs": patterns["revenue"]["statedAs"],
+                "alternates": _alternates(patterns["revenue"], _scale_number_from_text, "low", "high"),
                 "low": lo,
                 "high": hi,
                 "midpoint": (lo + hi) / 2.0,
@@ -630,6 +644,8 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
         base["grossMargin"] = {
             "status": "FOUND",
             "basis": patterns["grossMargin"]["basis"],
+            "statedAs": patterns["grossMargin"]["statedAs"],
+            "alternates": _alternates(patterns["grossMargin"], _plain, "lowPct", "highPct"),
             "lowPct": lo,
             "highPct": hi,
             "midpointPct": (lo + hi) / 2.0,
@@ -641,6 +657,8 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
         base["eps"] = {
             "status": "FOUND",
             "basis": patterns["eps"]["basis"],
+            "statedAs": patterns["eps"]["statedAs"],
+            "alternates": _alternates(patterns["eps"], _plain, "low", "high"),
             "low": lo,
             "high": hi,
             "midpoint": (lo + hi) / 2.0,

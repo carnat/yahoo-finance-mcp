@@ -5858,6 +5858,68 @@ function parseNumericCell(text: string): number | null {
   return isNaN(n) ? null : n * mult;
 }
 
+// Amount cells of a table row: numbers and dash placeholders, never percent
+// cells. A total row often carries no label and no "% of total" cells, so a
+// cell index taken from a region row can land on another period's total
+// (MRVL: China $1,161.5 against the prior year's $2,006.1 read 57.9%; the
+// table states 42%) (2.5.9).
+const DASH_CELL_RE = /^[\s$]*[-\u2013\u2014]+[\s]*$/;
+
+/** A percent cell, or a number whose "%" sign sits in the next cell. */
+function isPctCell(row: string[], col: number): boolean {
+  return row[col].includes("%") || (col + 1 < row.length && row[col + 1].trim() === "%");
+}
+
+function amountCells(row: string[]): { col: number; value: number }[] {
+  const out: { col: number; value: number }[] = [];
+  row.forEach((cell, col) => {
+    if (isPctCell(row, col)) return;
+    if (DASH_CELL_RE.test(cell)) { out.push({ col, value: 0 }); return; }
+    const v = parseNumericCell(cell);
+    if (v !== null) out.push({ col, value: v });
+  });
+  return out;
+}
+
+/**
+ * A region row's first positive amount and the total row's amount in the same
+ * column, paired by position among amount cells. statedPct is the table's own
+ * percentage in the cell after the region's value, when it has one.
+ */
+export function alignedGeoAmounts(regionRow: string[], totalRow: string[]): { regionVal: number; totalVal: number; valueCol: number; totalCol: number; statedPct: number | null } | null {
+  const region = amountCells(regionRow);
+  const k = region.findIndex((c) => c.value > 0);
+  if (k < 0) return null;
+  const total = amountCells(totalRow)[k];
+  if (!total) return null;
+  const nextCol = region[k].col + 1;
+  const statedPct = nextCol < regionRow.length && isPctCell(regionRow, nextCol) && regionRow[nextCol].trim() !== "%" ? parseNumericCell(regionRow[nextCol]) : null;
+  return { regionVal: region[k].value, totalVal: total.value, valueCol: region[k].col, totalCol: total.col, statedPct };
+}
+
+/**
+ * The header of the k-th amount column: the header row with one label per amount column ("% of
+ * Total" headers dropped), prefixed by a period group ("Three Months Ended") when a row above
+ * spans the columns evenly (2.5.9).
+ */
+export function geoColumnHeader(rows: string[][], regionRowIdx: number, k: number): string {
+  const n = amountCells(rows[regionRowIdx]).length;
+  const labels = (r: string[]) => r.map((c) => c.trim()).filter((c) => c && !SHARE_HEADER_RE.test(c));
+  let label = "";
+  let group = "";
+  for (let i = 0; i < regionRowIdx; i++) {
+    const cells = labels(rows[i]);
+    if (cells.length === 0 || cells.some((c) => parseNumericCell(c) !== null && !/\d{4}/.test(c))) continue;
+    if (cells.length === n && !label) label = cells[k];
+    else if (cells.length > 0 && cells.length < n && n % cells.length === 0 && !group && !label) group = cells[Math.floor(k / (n / cells.length))];
+  }
+  return [group, label].filter(Boolean).join(" ");
+}
+
+// A computed share more than this many points from the table's own percentage is a misread column.
+const STATED_PCT_TOLERANCE = 1.0;
+const SHARE_HEADER_RE = /%\s*of\b|\bpercent(?:age)?\s+of\b/i;
+
 /** Detect the monetary unit multiplier from table HTML and surrounding context. */
 function detectUnitMultiplier(tableHtml: string, contextHtml: string): number {
   const combined = (tableHtml + contextHtml).toLowerCase();
@@ -5944,6 +6006,7 @@ export function extractGeoRevenueFromHtml(
   rawDenominator: string | null;
   sourceRows: string[][];
   sourceColumns: string[];
+  statedPct: number | null;
 } | null {
   // Every table that names the region and is about revenue is a candidate
   // (scanning windows after the first mentions missed tables late in long
@@ -5993,24 +6056,20 @@ export function extractGeoRevenueFromHtml(
     }
     if (totalRowIdx === null || totalRowIdx === regionRowIdx) continue;
 
-    // Find value column
-    let valueCol: number | null = null;
-    for (let j = 0; j < rows[regionRowIdx].length; j++) {
-      const v = parseNumericCell(rows[regionRowIdx][j]);
-      if (v !== null && v > 0) { valueCol = j; break; }
-    }
-    if (valueCol === null) continue;
-
-    const regionVal = valueCol < rows[regionRowIdx].length
-      ? parseNumericCell(rows[regionRowIdx][valueCol])
-      : null;
-    const totalVal = valueCol < rows[totalRowIdx].length
-      ? parseNumericCell(rows[totalRowIdx][valueCol])
-      : null;
+    // The value and the total in the same column, paired among amount cells.
+    const aligned = alignedGeoAmounts(rows[regionRowIdx], rows[totalRowIdx]);
+    if (!aligned) continue;
+    const { regionVal, totalVal, valueCol, totalCol, statedPct } = aligned;
     // A region cannot exceed the total it is part of.
-    if (regionVal === null || totalVal === null || totalVal <= 0 || regionVal <= 0 || regionVal > totalVal * 1.001) continue;
+    if (totalVal <= 0 || regionVal <= 0 || regionVal > totalVal * 1.001) continue;
 
     const pct = Math.round((regionVal / totalVal) * 10000) / 10000;
+    // The table's own share for the region must agree with the computed one. A
+    // percent beside a value is a share only under a "% of total" header; a
+    // "Change" column is not.
+    const shareHeader = rows.slice(0, regionRowIdx).some((r) => r.some((c) => SHARE_HEADER_RE.test(c)));
+    const statedShare = shareHeader ? statedPct : null;
+    if (statedShare != null && Math.abs(pct * 100 - statedShare) > STATED_PCT_TOLERANCE) continue;
     const contextHtml = html.slice(Math.max(0, tbl.pos - 3_000), tbl.pos);
     const unitMult = detectUnitMultiplier(tableHtml, contextHtml);
     const usd = regionVal * unitMult;
@@ -6028,12 +6087,15 @@ export function extractGeoRevenueFromHtml(
     // A header row without a label cell is one cell shorter than the data rows.
     const headerOffset = Math.max(0, rows[regionRowIdx].length - headerRow.length);
     const headerCol = valueCol - headerOffset;
-    const sourceColumn = headerCol >= 0 && headerCol < headerRow.length ? String(headerRow[headerCol]).trim() : "";
+    const ordinal = amountCells(rows[regionRowIdx]).findIndex((c) => c.col === valueCol);
+    const sourceColumn = geoColumnHeader(rows, regionRowIdx, ordinal)
+      || (headerCol >= 0 && headerCol < headerRow.length ? String(headerRow[headerCol]).trim() : "");
     const rawValue = valueCol < rows[regionRowIdx].length ? String(rows[regionRowIdx][valueCol]) : null;
-    const rawDenominator = valueCol < rows[totalRowIdx].length ? String(rows[totalRowIdx][valueCol]) : null;
+    const rawDenominator = String(rows[totalRowIdx][totalCol]);
     const sourceRows = [
       [String(rows[regionRowIdx][0] ?? region), rawValue ?? ""],
-      [String(rows[totalRowIdx][0] ?? "Total revenue"), rawDenominator ?? ""],
+      // An unlabeled total row's first cell is a number, not a label.
+      [/[A-Za-z]/.test(String(rows[totalRowIdx][0] ?? "")) ? String(rows[totalRowIdx][0]) : "Total (unlabeled row)", rawDenominator ?? ""],
     ];
     return {
       pct,
@@ -6046,6 +6108,7 @@ export function extractGeoRevenueFromHtml(
       rawDenominator,
       sourceRows,
       sourceColumns: sourceColumn ? [sourceColumn] : [],
+      statedPct: statedShare,
     };
   }
 
@@ -6464,7 +6527,9 @@ export async function getFilingData(
     }
     if (picked) {
       const accn = String(picked.accn ?? "");
-      const total = filtered.find((f) => String(f.accn ?? "") === accn && f.segment == null) ?? null;
+      // The total for the same period: a 10-Q also carries the prior year's total (2.5.9, MRVL).
+      const total = filtered.find((f) => String(f.accn ?? "") === accn && f.segment == null
+        && String(f.start ?? "") === String(picked!.start ?? "") && String(f.end ?? "") === String(picked!.end ?? "")) ?? null;
       const totalVal = total ? Number(total.val ?? 0) : 0;
       const partVal = picked.val != null ? Number(picked.val) : null;
       if (partVal != null && totalVal > 0) {
@@ -6505,7 +6570,10 @@ export async function getFilingData(
         const geo = extractGeoRevenueFromHtml(htmlText, region ?? "");
         if (geo) {
           const reportDate = filing.filingDate ?? "";
-          const fiscalYear = reportDate ? `FY${String(reportDate).slice(0, 4)}` : "";
+          // A quarterly report's table is a quarter or year-to-date, never a fiscal year: its own column
+          // header says which ("Three Months Ended August 1, 2026"), not the filing date (2.5.9, MRVL).
+          const annual = /^(?:10-K|20-F|40-F)/i.test(String(filing.filingType ?? ""));
+          const fiscalYear = !annual ? (geo.sourceColumns[0] ?? "") : reportDate ? `FY${String(reportDate).slice(0, 4)}` : "";
           const warnings = geo.denominator == null && geo.usd != null
             ? [{
                 code: "DENOMINATOR_NOT_FOUND",
@@ -17648,22 +17716,26 @@ export async function extractGuidance(ticker: string, period = "latest"): Promis
     excerpt: compactExcerpt(excerpt),
   });
 
+  // The same metric on another basis ("GAAP ...; non-GAAP ..."), each with its own excerpt (2.5.9).
+  const alternates = (r: NonNullable<typeof rev>, parse: (t: string) => number | null, lowKey: string, highKey: string) =>
+    r.alternates.map((a) => ({ basis: a.basis, statedAs: a.statedAs, [lowKey]: parse(a.low), [highKey]: parse(a.high), excerpt: compactExcerpt(a.excerpt) }));
+  const plain = (t: string): number | null => (Number.isFinite(Number(t)) ? Number(t) : null);
   if (rev) {
     const low = scaleNumberFromText(rev.low);
     const high = scaleNumberFromText(rev.high);
     if (low != null && high != null) {
-      guidance.revenue = { status: "FOUND", basis: rev.basis, low, high, midpoint: (low + high) / 2, unit: "USD", evidence: [ev(rev.excerpt)] };
+      guidance.revenue = { status: "FOUND", basis: rev.basis, statedAs: rev.statedAs, low, high, midpoint: (low + high) / 2, unit: "USD", evidence: [ev(rev.excerpt)], alternates: alternates(rev, scaleNumberFromText, "low", "high") };
     }
   }
   if (gm) {
     const lowPct = Number(gm.low);
     const highPct = Number(gm.high);
-    guidance.grossMargin = { status: "FOUND", basis: gm.basis, lowPct, highPct, midpointPct: (lowPct + highPct) / 2, evidence: [ev(gm.excerpt)] };
+    guidance.grossMargin = { status: "FOUND", basis: gm.basis, statedAs: gm.statedAs, lowPct, highPct, midpointPct: (lowPct + highPct) / 2, evidence: [ev(gm.excerpt)], alternates: alternates(gm, plain, "lowPct", "highPct") };
   }
   if (eps) {
     const low = Number(eps.low);
     const high = Number(eps.high);
-    guidance.eps = { status: "FOUND", basis: eps.basis, low, high, midpoint: (low + high) / 2, unit: "USD/share", evidence: [ev(eps.excerpt)] };
+    guidance.eps = { status: "FOUND", basis: eps.basis, statedAs: eps.statedAs, low, high, midpoint: (low + high) / 2, unit: "USD/share", evidence: [ev(eps.excerpt)], alternates: alternates(eps, plain, "low", "high") };
   }
   const found = ["revenue", "grossMargin", "eps"].some((k) => ((guidance[k] as Record<string, unknown>).status === "FOUND"));
   return JSON.stringify({

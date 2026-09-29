@@ -608,6 +608,53 @@ export function awardsFromTable(matches: TextMatch[]): Record<string, unknown> |
 
 // Unvested warrant shares (e.g. a customer warrant that vests with purchases).
 const WARRANT_UNVESTED_RE = /Unvested\w*NumberOfSecuritiesCalledByWarrantsOrRights$|ClassOfWarrantOrRightUnvested\w*$/i;
+// Vested warrant shares at the period end (MRVL tags ClassOfWarrantOrRightSharesVested
+// per customer warrant: 1.2M of 4.2M, and 0 of 1.0M). Case-sensitive, so "Unvested" never matches (2.5.9).
+const WARRANT_VESTED_RE = /^ClassOfWarrantOrRight\w*Vested(?:Number)?$/;
+// A vesting term tagged for a class says its shares vest on conditions; without a vested or
+// unvested count, how many are exercisable is unknown, never assumed to be all of them.
+const WARRANT_VESTING_TERM = "WarrantsAndRightsOutstandingVestingTerm";
+
+/** A count dated after the report's period end, or tagged as a subsequent event: not a period-end instrument. */
+function afterPeriodEnd(doc: IxDocument, f: IxFact): boolean {
+  const end = doc.documentPeriodEnd;
+  return Object.keys(f.dims).some((axis) => SUBSEQUENT_EVENT_AXIS_RE.test(axis)) || (end != null && f.periodEnd != null && f.periodEnd > end);
+}
+
+/**
+ * Warrants the primary report tags after its period end (MRVL's 59.0M customer warrant at $206.58,
+ * issued after the quarter): claims to quote, never counted as outstanding at the period end.
+ */
+export function postPeriodWarrants(source: IxSource | undefined): Record<string, unknown>[] {
+  if (!source) return [];
+  const doc = source.doc;
+  const counts = doc.facts.filter((f) => f.value != null && WARRANT_COUNT_CONCEPTS.includes(f.local) && afterPeriodEnd(doc, f) && warrantCountEvent(doc, f) == null);
+  const byKey = new Map<string, IxFact>();
+  for (const f of counts) {
+    const prev = byKey.get(dimsKey(f.dims));
+    if (!prev || (f.periodEnd ?? "") > (prev.periodEnd ?? "")) byKey.set(dimsKey(f.dims), f);
+  }
+  return [...byKey.values()].map((f) => {
+    const strike = newest(doc.facts.filter((g) => g.local === WARRANT_STRIKE && g.value != null && dimsKey(g.dims) === dimsKey(f.dims)));
+    const classMember = f.dims[CLASS_OF_WARRANT_AXIS];
+    return {
+      kind: "WARRANT_AFTER_PERIOD_END",
+      status: "UNQUANTIFIED",
+      class: classMember ? memberLabel(classMember) : null,
+      shares: f.value,
+      exercisePrice: strike ? strike.value : null,
+      asOf: f.periodEnd,
+      periodEnd: doc.documentPeriodEnd,
+      concept: f.name,
+      sentences: [] as string[],
+      leadIn: null,
+      leadOut: null,
+      documentUrl: source.documentUrl,
+      filingDate: source.filingDate,
+      accessionNumber: source.accessionNumber,
+    };
+  });
+}
 
 // A warrant count can be an event rather than warrants outstanding (2.5.9). VRT's 2025 10-K tags
 // ClassOfWarrantOrRightNumberOfSecuritiesCalledByWarrantsOrRights = 4,812,521 on 2024-12-06, the shares
@@ -686,7 +733,8 @@ function warrantsComponent(sources: IxSource[], price: number): Record<string, u
   let found: { value: IxFact[]; source: IxSource } | null = null;
   for (const source of sources) {
     const doc = source.doc;
-    const counts = doc.facts.filter((f) => f.value != null && WARRANT_COUNT_CONCEPTS.includes(f.local) && warrantCountEvent(doc, f) == null && !retired.has(warrantClassKey(f)));
+    const counts = doc.facts.filter((f) => f.value != null && WARRANT_COUNT_CONCEPTS.includes(f.local) && warrantCountEvent(doc, f) == null
+      && !afterPeriodEnd(doc, f) && !retired.has(warrantClassKey(f)));
     const concept = WARRANT_COUNT_CONCEPTS.find((c) => counts.some((f) => f.local === c));
     const facts = counts.filter((f) => f.local === concept);
     if (facts.length > 0) {
@@ -707,13 +755,20 @@ function warrantsComponent(sources: IxSource[], price: number): Record<string, u
   if (!found) return null;
   const { value: facts, source } = found;
   const unvestedFacts = source.doc.facts.filter((g) => WARRANT_UNVESTED_RE.test(g.local) && isShareCount(g));
+  const vestedFacts = source.doc.facts.filter((g) => WARRANT_VESTED_RE.test(g.local) && g.value != null && !afterPeriodEnd(source.doc, g));
   const classes = facts.map((f) => {
     const strike = newest(source.doc.facts.filter((g) => g.local === WARRANT_STRIKE && g.value != null && dimsKey(g.dims) === dimsKey(f.dims)));
     const label = hasDims(f) ? Object.values(f.dims).map(memberLabel).join(" / ") : "Warrants (not itemized)";
     // Only vested warrant shares can be exercised now; the rest count in the gross total.
-    const unvested = newest(unvestedFacts.filter((g) => dimsKey(g.dims) === dimsKey(f.dims)))
+    const vested = newest(vestedFacts.filter((g) => dimsKey(g.dims) === dimsKey(f.dims)));
+    const unvested = vested ? null : newest(unvestedFacts.filter((g) => dimsKey(g.dims) === dimsKey(f.dims)))
       ?? (facts.length === 1 ? newest(unvestedFacts) : null);
-    const exercisable = unvested ? Math.max(0, f.value! - unvested.value!) : f.value!;
+    const vestingTerm = source.doc.facts.some((g) => g.local === WARRANT_VESTING_TERM && dimsKey(g.dims) === dimsKey(f.dims));
+    const exercisable = vested ? Math.min(f.value!, vested.value!)
+      : unvested ? Math.max(0, f.value! - unvested.value!)
+      : vestingTerm ? null : f.value!;
+    const exercisableBasis = vested ? "vested_count_tagged" : unvested ? "outstanding_less_unvested_tagged"
+      : vestingTerm ? "vesting_terms_without_vested_count" : "no_vesting_terms_tagged";
     const periodEnd = source.doc.documentPeriodEnd;
     return {
       class: label,
@@ -722,13 +777,14 @@ function warrantsComponent(sources: IxSource[], price: number): Record<string, u
       asOf: f.periodEnd,
       // Tagged at an earlier date (an issuance) and not restated at the period end.
       countBeforePeriodEnd: periodEnd != null && f.periodEnd != null && f.periodEnd < periodEnd,
-      unvested: unvested ? unvested.value : null,
-      unvestedAsOf: unvested ? unvested.periodEnd : null,
+      unvested: vested ? Math.max(0, f.value! - vested.value!) : unvested ? unvested.value : null,
+      unvestedAsOf: vested ? vested.periodEnd : unvested ? unvested.periodEnd : null,
       exercisable,
+      exercisableBasis,
       exercisePrice: strike ? strike.value : null,
       inTheMoney: strike ? price > strike.value! : null,
-      // No warrants exercisable adds no shares, whatever the strike.
-      incrementalShares: strike ? round(treasuryStock(exercisable, strike.value!, price)) : exercisable === 0 ? 0 : null,
+      // No warrants exercisable adds no shares, whatever the strike; an unknown exercisable count adds an unknown number.
+      incrementalShares: exercisable == null ? null : strike ? round(treasuryStock(exercisable, strike.value!, price)) : exercisable === 0 ? 0 : null,
     };
   });
   const unresolved = classes.filter((c) => c.incrementalShares == null).length;
@@ -880,6 +936,60 @@ function convertiblesComponent(sources: IxSource[], price: number): Record<strin
   };
 }
 
+// ── Convertible preferred stock (2.5.9, MRVL) ───────────────────────────────
+
+const PREFERRED_SHARES_ISSUABLE = "PreferredStockConvertibleSharesIssuable";
+const PREFERRED_CONVERSION_PRICE = "PreferredStockConvertibleConversionPrice";
+
+/**
+ * Convertible preferred outstanding at the period end, if-converted when in the money: the tagged
+ * common shares issuable on conversion and the conversion price. MRVL's Series A (2.0M preferred
+ * shares, issued to NVIDIA) converts into up to 21.8M common shares at $91.84.
+ */
+function convertiblePreferredComponent(sources: IxSource[], price: number): Record<string, unknown> | null {
+  const found = findInSources(sources, (doc) => {
+    const end = doc.documentPeriodEnd;
+    if (!end) return null;
+    const outstanding = doc.facts.filter((f) => PREFERRED_OUTSTANDING_CONCEPTS.includes(f.local) && f.value != null && f.periodEnd === end
+      && !Object.keys(f.dims).some((axis) => /StatementEquityComponentsAxis$/.test(axis)));
+    const plain = outstanding.filter((f) => !hasDims(f));
+    const shares = (plain.length > 0 ? plain : outstanding).reduce((sum, f) => sum + f.value!, 0);
+    if (!(shares > 0)) return null;
+    const issuable = newest(doc.facts.filter((f) => f.local === PREFERRED_SHARES_ISSUABLE && f.value != null && !afterPeriodEnd(doc, f)));
+    const conv = newest(doc.facts.filter((f) => f.local === PREFERRED_CONVERSION_PRICE && f.value != null && !afterPeriodEnd(doc, f)));
+    if (!issuable && !conv) return null;
+    return { shares, asOf: end, issuable, conv };
+  });
+  if (!found) return null;
+  const { value: v, source } = found;
+  const convPrice = v.conv ? v.conv.value! : null;
+  const ifConverted = v.issuable ? v.issuable.value! : null;
+  const inTheMoney = convPrice != null ? price >= convPrice : null;
+  const instrument = {
+    instrument: "Convertible preferred stock",
+    preferredSharesOutstanding: v.shares,
+    asOf: v.asOf,
+    ifConvertedShares: ifConverted,
+    ifConvertedBasis: ifConverted != null ? "shares_issuable_tagged" : null,
+    sharesIssuableDate: v.issuable ? v.issuable.periodEnd : null,
+    // The issuable count was tagged at issuance and not restated at the period end.
+    countBeforePeriodEnd: v.issuable != null && v.issuable.periodEnd != null && v.issuable.periodEnd < v.asOf,
+    conversionPrice: convPrice,
+    inTheMoney,
+    incrementalShares: ifConverted == null || inTheMoney == null ? null : inTheMoney ? round(ifConverted) : 0,
+  };
+  return {
+    component: "convertible_preferred",
+    instruments: [instrument],
+    method: "if_converted_when_in_the_money",
+    ifConvertedShares: ifConverted ?? 0,
+    incrementalShares: instrument.incrementalShares,
+    unresolvedInstruments: instrument.incrementalShares == null ? 1 : 0,
+    note: "Common shares issuable on conversion as tagged (often the maximum at issuance) and the tagged conversion price; if-converted when the price is at or above it. Liquidation preference, dividends and redemption are not modeled.",
+    source: sourceRef(source, v.asOf),
+  };
+}
+
 // ── Text evidence (ATM programs, funding statements) ────────────────────────
 
 export type TextMatch = {
@@ -977,6 +1087,7 @@ function atmComponent(evidence: Record<string, unknown>[], price: number): Recor
 export const SHARE_CLAIM_SEARCH_TERMS = [
   "price protection", "anti-dilution", "antidilution", "forward sale agreement", "earnout shares", "earn-out shares",
   "contingent consideration", "contingently issuable", "convertible preferred",
+  "subsequent to quarter end", "subsequent to year end", "subsequent to the end of the quarter",
 ];
 const SHARE_CLAIM_KINDS: { kind: string; re: RegExp }[] = [
   { kind: "PRICE_PROTECTION", re: /\bprice[- ]protection\b/i },
@@ -984,6 +1095,7 @@ const SHARE_CLAIM_KINDS: { kind: string; re: RegExp }[] = [
   { kind: "FORWARD_SALE", re: /\bforward (?:sale|equity sale) agreements?\b/i },
   { kind: "CONTINGENT_SHARES", re: /\bearn-?out shares\b|\bcontingently issuable (?:shares|common stock)\b|\bcontingent consideration\b[^.]{0,120}\b(?:in|of) (?:shares|common stock)\b/i },
   { kind: "CONVERTIBLE_PREFERRED", re: /\bconvertible preferred (?:stock|shares)\b/i },
+  { kind: "WARRANT_AFTER_PERIOD_END", re: /\bsubsequent to (?:the )?(?:quarter|year|period)[- ]end\b[^.]{0,200}\bwarrants?\b|\bsubsequent to the end of the (?:quarter|year|period)\b[^.]{0,200}\bwarrants?\b/i },
 ];
 // A customer or distributor price-protection term is a revenue reduction, not a
 // claim on shares (COHR's variable-consideration policy).
@@ -1028,6 +1140,8 @@ export function shareClaimSignals(matches: TextMatch[]): Record<string, unknown>
           status: "UNQUANTIFIED",
           sentences: [] as string[],
           leadIn: leadIn.slice(-600) || null,
+          // The sentence after the first quoted one ("The warrant is eligible for vesting ...").
+          leadOut: i + 1 < list.length ? list[i + 1].slice(0, 600) : null,
           extinguishmentStated: false,
           sectionHeading: match.sectionHeading,
           documentUrl: match.documentUrl,
@@ -1049,7 +1163,7 @@ export function shareClaimSignals(matches: TextMatch[]): Record<string, unknown>
  * equity share counts tagged at a filing's period end: all zero closes the
  * claim (TAGGED_NONE_OUTSTANDING); a positive count keeps it open and quotes it.
  */
-function preferredClaimsWithTags(claims: Record<string, unknown>[], sources: IxSource[]): Record<string, unknown>[] {
+function preferredClaimsWithTags(claims: Record<string, unknown>[], sources: IxSource[], component: Record<string, unknown> | null = null): Record<string, unknown>[] {
   let tagged: IxFact[] | null = null;
   for (const s of sources) {
     const end = s.doc.documentPeriodEnd;
@@ -1062,8 +1176,23 @@ function preferredClaimsWithTags(claims: Record<string, unknown>[], sources: IxS
   return claims.map((c) => {
     if (c.kind !== "CONVERTIBLE_PREFERRED" || tagged == null) return c;
     const rows = tagged.map((f) => ({ concept: f.name, class: Object.values(f.dims)[0] ? memberLabel(Object.values(f.dims)[0]) : null, shares: f.value, asOf: f.periodEnd }));
-    return { ...c, status: tagged.every((f) => f.value === 0) ? "TAGGED_NONE_OUTSTANDING" : "UNQUANTIFIED", taggedOutstanding: rows };
+    // Outstanding and resolved by the convertible_preferred component: counted, not open (2.5.9).
+    const status = tagged.every((f) => f.value === 0) ? "TAGGED_NONE_OUTSTANDING"
+      : component && component.incrementalShares != null ? "MODELED_IN_BRIDGE" : "UNQUANTIFIED";
+    return { ...c, status, taggedOutstanding: rows };
   });
+}
+
+/**
+ * Post-period warrants from the tags, each quoting the filing text's subsequent-event warrant
+ * sentences when the scan found them (which then stop being a separate claim).
+ */
+function withPostPeriodWarrants(claims: Record<string, unknown>[], tagged: Record<string, unknown>[]): Record<string, unknown>[] {
+  if (tagged.length === 0) return claims;
+  const text = claims.find((c) => c.kind === "WARRANT_AFTER_PERIOD_END");
+  const rest = claims.filter((c) => c !== text);
+  const merged = tagged.map((t, i) => (text && i === 0 ? { ...t, sentences: text.sentences, leadIn: text.leadIn, leadOut: text.leadOut, sectionHeading: text.sectionHeading } : t));
+  return [...rest, ...merged];
 }
 
 const ANTIDILUTIVE = "AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount";
@@ -1133,13 +1262,15 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
   const awards = awardsComponent(sources, input.awardTableMatches ?? []);
   const warrants = warrantsComponent(sources, price);
   const convertibles = convertiblesComponent(sources, price);
+  const preferred = convertiblePreferredComponent(sources, price);
   const atm = atmComponent(atmEvidence(input.atmMatches), price);
-  const components = [options, awards, warrants, convertibles].filter((c): c is Record<string, unknown> => c != null);
+  const components = [options, awards, warrants, convertibles, preferred].filter((c): c is Record<string, unknown> => c != null);
   const notDisclosed = [
     options ? null : "stock_options",
     awards ? null : "unvested_share_awards",
     warrants ? null : "warrants",
     convertibles ? null : "convertible_debt",
+    preferred ? null : "convertible_preferred",
     atm ? null : "atm_program",
   ].filter((c): c is string => c != null);
   const unresolved = components.filter((c) => c.incrementalShares == null).map((c) => c.component as string);
@@ -1188,7 +1319,10 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
     });
   }
   const claimsRead = Array.isArray(input.claimMatches);
-  const claims = claimsRead ? preferredClaimsWithTags(shareClaimSignals(input.claimMatches as TextMatch[]), sources) : [];
+  const claims = withPostPeriodWarrants(
+    claimsRead ? preferredClaimsWithTags(shareClaimSignals(input.claimMatches as TextMatch[]), sources, preferred) : [],
+    postPeriodWarrants(primary),
+  );
   const openClaims = claims.filter((c) => c.status === "UNQUANTIFIED");
   if (openClaims.length > 0) {
     warnings.push({
@@ -1196,6 +1330,10 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
       message: `The filing text states ${openClaims.length} share claim(s) no tagged component covers (${openClaims.map((c) => c.kind).join(", ")}); they are quoted in unquantifiedShareClaims and are not in any share count.`,
       severity: "warning",
     });
+  }
+  const vestingUnknown = ((warrants?.classes ?? []) as Record<string, unknown>[]).filter((c) => c.exercisableBasis === "vesting_terms_without_vested_count");
+  if (vestingUnknown.length > 0) {
+    warnings.push({ code: "WARRANT_VESTING_NOT_TAGGED", message: `${vestingUnknown.map((c) => c.class).join(", ")} vest on conditions, and no vested or unvested count is tagged; their exercisable shares are unresolved, not assumed to be all ${vestingUnknown.map((c) => c.outstanding).join(", ")}.`, severity: "warning" });
   }
   if (!claimsRead) {
     warnings.push({ code: "SHARE_CLAIM_TEXT_NOT_READ", message: "The filing text was not read for untagged share claims (price protection, anti-dilution rights, forward sales, contingent shares, convertible preferred); retry.", severity: "warning" });
@@ -1221,7 +1359,7 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
     claimCoverage: {
       scope: "TAGGED_INSTRUMENTS",
       completeClaimInventory: false,
-      modeledComponents: ["stock_options", "unvested_share_awards", "warrants", "convertible_debt", "atm_program"],
+      modeledComponents: ["stock_options", "unvested_share_awards", "warrants", "convertible_debt", "convertible_preferred", "atm_program"],
       textScan: claimsRead ? "READ" : "NOT_READ",
       textScanKinds: SHARE_CLAIM_KINDS.map((k) => k.kind),
       unquantifiedClaims: openClaims.length,
@@ -1235,12 +1373,13 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
   } else {
     const basic = basicFound.value.shares as number;
     const inc = (c: Record<string, unknown> | null) => (c && typeof c.incrementalShares === "number" ? c.incrementalShares : 0);
-    const diluted = basic + inc(options) + inc(awards) + inc(warrants) + inc(convertibles);
+    const diluted = basic + inc(options) + inc(awards) + inc(warrants) + inc(convertibles) + inc(preferred);
     const gross = basic
       + (options ? Number(options.outstanding ?? 0) : 0)
       + (awards ? Number(awards.unvested ?? 0) : 0)
       + (warrants ? Number(warrants.outstanding ?? 0) : 0)
-      + (convertibles ? Number(convertibles.ifConvertedShares ?? 0) : 0);
+      + (convertibles ? Number(convertibles.ifConvertedShares ?? 0) : 0)
+      + (preferred ? Number(preferred.ifConvertedShares ?? 0) : 0);
     const atmShares = atm && typeof atm.potentialShares === "number" ? atm.potentialShares : null;
     out.bridge = {
       basicShares: basic,
@@ -1248,13 +1387,14 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
       unvestedShareAwards: awards ? awards.incrementalShares : null,
       warrants: warrants ? warrants.incrementalShares : null,
       convertibleDebt: convertibles ? convertibles.incrementalShares : null,
+      convertiblePreferred: preferred ? preferred.incrementalShares : null,
       dilutedSharesAtPrice: round(diluted),
       dilutionPctAtPrice: basic > 0 ? round(((diluted - basic) / basic) * 100, 2) : null,
       grossSharesAllInstruments: round(gross),
       grossDilutionPct: basic > 0 ? round(((gross - basic) / basic) * 100, 2) : null,
       atmPotentialShares: atmShares,
       dilutedSharesAtPriceWithAtm: atmShares != null ? round(diluted + atmShares) : null,
-      formula: "basic + options (treasury stock) + unvested awards (gross) + warrants (treasury stock) + convertibles (if-converted when in the money)",
+      formula: "basic + options (treasury stock) + unvested awards (gross) + warrants (treasury stock, vested) + convertibles and convertible preferred (if-converted when in the money)",
     };
     // A share claim the filing states but no tagged component covers leaves the count partial (2.5.9).
     out.status = unresolved.length > 0 || partial.length > 0 || openClaims.length > 0 ? "PARTIAL" : "COMPUTED";
@@ -1265,7 +1405,8 @@ export function dilutionBridge(input: DilutionInput): Record<string, unknown> {
     "A component missing from notDisclosed was not tagged in the filing; that is not proof the instrument does not exist.",
     "COMPUTED covers the tagged instruments only; it is not a full claim inventory. Share claims found in the filing text are quoted in unquantifiedShareClaims and left out of every count.",
   ];
-  if (notDisclosed.length > 0 || unresolved.length > 0) {
+  // Convertible preferred is rare; its absence alone does not call for the concept list.
+  if (notDisclosed.some((c) => c !== "convertible_preferred") || unresolved.length > 0) {
     // What the filing does tag, so a missing component can be traced to a concept this bridge does not read.
     out.taggedDilutionConcepts = taggedDilutionConcepts(sources);
   }

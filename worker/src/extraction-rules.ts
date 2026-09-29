@@ -125,7 +125,69 @@ const EPS_RE = /(?:expects|guidance|outlook)[^.\n]{0,120}(?:eps|earnings per sha
 const FORWARD_VERB = "\\b(?:expected|projected|forecast(?:ed)?|anticipated|estimated)\\s+to\\s+(?:be|range|total)\\b";
 const METRIC_FIRST_REVENUE_RE = new RegExp(`\\brevenues?\\b[^.$%]{0,120}?${FORWARD_VERB}[^$.%]{0,30}\\$\\s*${AMOUNT}${RANGE_SEP}\\$?\\s*${AMOUNT}`, "i");
 const METRIC_FIRST_GROSS_MARGIN_RE = new RegExp(`\\bgross margin\\b[^.$%]{0,120}?${FORWARD_VERB}[^$.%0-9]{0,30}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%${RANGE_SEP}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%`, "i");
-const METRIC_FIRST_EPS_RE = new RegExp(`\\b(?:eps|earnings per share)\\b[^.$%]{0,120}?${FORWARD_VERB}[^$.%]{0,30}\\$\\s*([0-9]+(?:\\.[0-9]+)?)${RANGE_SEP}\\$?\\s*([0-9]+(?:\\.[0-9]+)?)`, "i");
+const EPS_LABEL_SOURCE = "\\b(?:eps|earnings per share|net (?:income|earnings|loss) per share)\\b";
+const METRIC_FIRST_EPS_RE = new RegExp(`${EPS_LABEL_SOURCE}[^.$%]{0,120}?${FORWARD_VERB}[^$.%]{0,30}\\$\\s*([0-9]+(?:\\.[0-9]+)?)${RANGE_SEP}\\$?\\s*([0-9]+(?:\\.[0-9]+)?)`, "i");
+// A midpoint and a tolerance (2.5.9, MRVL): "Net revenue is expected to be
+// $3.150 billion +/- 5%", "... net income per share is expected to be $0.53
+// +/- $0.05 per share". The bounds are computed exactly (pmBounds).
+const PLUS_MINUS = "(?:\\+\\s*/\\s*[-\\u2212]|\\u00b1|plus or minus)";
+const PM_NUMBER = "([0-9][0-9,]*(?:\\.[0-9]+)?)";
+const PM_UNIT = "(?:\\s*(billion|million|thousand|bn|m|k)\\b)?";
+const PM_TOLERANCE = `\\s*${PLUS_MINUS}\\s*(\\$)?\\s*${PM_NUMBER}\\s*(%|(?:billion|million|thousand|bn|m|k)\\b)?`;
+const METRIC_FIRST_REVENUE_PM_RE = new RegExp(`\\brevenues?\\b[^.$%]{0,120}?${FORWARD_VERB}[^$.%]{0,30}\\$\\s*${PM_NUMBER}${PM_UNIT}${PM_TOLERANCE}`, "i");
+const METRIC_FIRST_EPS_PM_RE = new RegExp(`${EPS_LABEL_SOURCE}[^.$%]{0,120}?${FORWARD_VERB}[^$.%]{0,30}\\$\\s*${PM_NUMBER}${PM_UNIT}${PM_TOLERANCE}`, "i");
+const UNIT_EXP: Record<string, number> = { billion: 9, bn: 9, million: 6, m: 6, thousand: 3, k: 3 };
+
+type Dec = { n: bigint; exp: number };
+
+function dec(text: string): Dec {
+  const t = text.replace(/,/g, "");
+  const dot = t.indexOf(".");
+  return dot < 0 ? { n: BigInt(t), exp: 0 } : { n: BigInt(t.replace(".", "")), exp: -(t.length - dot - 1) };
+}
+
+function decAt(d: Dec, exp: number): bigint {
+  return d.n * 10n ** BigInt(d.exp - exp);
+}
+
+/** An exact decimal n x 10^exp written in units of 10^unitExp, trailing zeros dropped. */
+function decText(n: bigint, exp: number, unitExp: number): string {
+  const places = unitExp - exp;
+  const neg = n < 0n;
+  let digits = (neg ? -n : n).toString();
+  if (places > 0) {
+    digits = digits.padStart(places + 1, "0");
+    digits = `${digits.slice(0, -places)}.${digits.slice(-places)}`.replace(/\.?0+$/, "");
+  } else if (places < 0) {
+    digits = digits + "0".repeat(-places);
+  }
+  return `${neg ? "-" : ""}${digits}`;
+}
+
+/**
+ * The low and high of "midpoint +/- tolerance", in the midpoint's unit: a
+ * percentage of the midpoint, or an amount in its own unit (the midpoint's
+ * when it names none). A bare tolerance with no $, % or unit is not read.
+ */
+function pmBounds(mid: string, midUnit: string | undefined, dollar: string | undefined, tol: string, tolUnit: string | undefined): { low: string; high: string } | null {
+  const m = dec(mid);
+  const t = dec(tol);
+  const midExp = UNIT_EXP[(midUnit ?? "").toLowerCase()] ?? 0;
+  const suffix = midUnit ? ` ${midUnit}` : "";
+  if (tolUnit === "%") {
+    // mid x (100 -/+ p) / 100
+    const hundred = 100n * 10n ** BigInt(-t.exp);
+    const exp = m.exp + t.exp - 2;
+    return { low: decText(m.n * (hundred - t.n), exp, 0) + suffix, high: decText(m.n * (hundred + t.n), exp, 0) + suffix };
+  }
+  if (!dollar && !tolUnit) return null;
+  const tolExp = tolUnit ? UNIT_EXP[tolUnit.toLowerCase()] ?? 0 : midExp;
+  const exp = Math.min(m.exp + midExp, t.exp + tolExp);
+  const mn = decAt({ n: m.n, exp: m.exp + midExp }, exp);
+  const tn = decAt({ n: t.n, exp: t.exp + tolExp }, exp);
+  return { low: decText(mn - tn, exp, midExp) + suffix, high: decText(mn + tn, exp, midExp) + suffix };
+}
+
 // The basis a range is stated on, read from its own clause: the sentence up
 // to the range, and the words after it up to the next value or clause break
 // ("... between $1.85 and $2.05 on a non-GAAP basis.").
@@ -135,7 +197,16 @@ const NON_GAAP_RE = /\bnon-?\s?GAAP\b|\badjusted\b/i;
 const GAAP_RE = /\bGAAP\b/i;
 
 export type RangeBasis = "NON_GAAP" | "GAAP" | "NOT_STATED";
-export type RangeMatch = { excerpt: string; low: string; high: string; basis: RangeBasis } | null;
+export type RangeMatch = {
+  excerpt: string;
+  low: string;
+  high: string;
+  basis: RangeBasis;
+  // RANGE: "$X to $Y"; MIDPOINT_PLUS_MINUS: "$X +/- 5%", bounds computed exactly.
+  statedAs: "RANGE" | "MIDPOINT_PLUS_MINUS";
+  // The same metric stated on another basis ("GAAP ... ; non-GAAP ..."), one per basis.
+  alternates: Omit<NonNullable<RangeMatch>, "alternates">[];
+} | null;
 
 function rangeBasis(text: string, at: number, len: number): RangeBasis {
   const before = text.slice(Math.max(0, at - 200), at);
@@ -147,23 +218,38 @@ function rangeBasis(text: string, at: number, len: number): RangeBasis {
   return GAAP_RE.test(clause) ? "GAAP" : "NOT_STATED";
 }
 
+type Pattern = { re: RegExp; pm: boolean };
+
 /**
  * Guidance ranges stated in release text; low and high are the number text as
- * written. Keyword-first wording wins; metric-first wording ("revenue ... is
- * expected to be between") is read when there is none.
+ * written (computed exactly for a midpoint and tolerance). Keyword-first
+ * wording wins; metric-first wording ("revenue ... is expected to be
+ * between") is read when there is none. Ranges for the same metric on another
+ * basis are kept as alternates.
  */
 export function guidanceRanges(text: string): { revenue: RangeMatch; grossMargin: RangeMatch; eps: RangeMatch } {
-  const pick = (...res: RegExp[]): RangeMatch => {
-    for (const re of res) {
-      const m = re.exec(text);
-      if (m) return { excerpt: m[0], low: m[1], high: m[2], basis: rangeBasis(text, m.index, m[0].length) };
+  const pick = (...patterns: Pattern[]): RangeMatch => {
+    const found: Omit<NonNullable<RangeMatch>, "alternates">[] = [];
+    for (const { re, pm } of patterns) {
+      for (const m of text.matchAll(new RegExp(re.source, `${re.flags}g`))) {
+        const at = m.index ?? 0;
+        const bounds = pm ? pmBounds(m[1], m[2], m[3], m[4], m[5]) : { low: m[1], high: m[2] };
+        if (!bounds) continue;
+        found.push({ excerpt: m[0], low: bounds.low, high: bounds.high, basis: rangeBasis(text, at, m[0].length), statedAs: pm ? "MIDPOINT_PLUS_MINUS" : "RANGE" });
+      }
     }
-    return null;
+    if (found.length === 0) return null;
+    const [primary, ...rest] = found;
+    const alternates: typeof found = [];
+    for (const r of rest) {
+      if (r.basis !== primary.basis && !alternates.some((a) => a.basis === r.basis)) alternates.push(r);
+    }
+    return { ...primary, alternates };
   };
   return {
-    revenue: pick(REVENUE_FIRST_RE, KEYWORD_FIRST_RE, METRIC_FIRST_REVENUE_RE),
-    grossMargin: pick(GROSS_MARGIN_RE, METRIC_FIRST_GROSS_MARGIN_RE),
-    eps: pick(EPS_RE, METRIC_FIRST_EPS_RE),
+    revenue: pick({ re: REVENUE_FIRST_RE, pm: false }, { re: KEYWORD_FIRST_RE, pm: false }, { re: METRIC_FIRST_REVENUE_RE, pm: false }, { re: METRIC_FIRST_REVENUE_PM_RE, pm: true }),
+    grossMargin: pick({ re: GROSS_MARGIN_RE, pm: false }, { re: METRIC_FIRST_GROSS_MARGIN_RE, pm: false }),
+    eps: pick({ re: EPS_RE, pm: false }, { re: METRIC_FIRST_EPS_RE, pm: false }, { re: METRIC_FIRST_EPS_PM_RE, pm: true }),
   };
 }
 
