@@ -1642,6 +1642,38 @@ Vantage and IBKR produced these fixes.
 - **Quarters** are not named by `period`. Use `"latest"` with `10-Q`, an
   `accession_number`, or `reconcile_metric_sources` (`"Q3 2025"`, `"latest_quarter"`).
 
+## Failed SEC Reads And Python Payload Parity (2.5.17)
+
+- **Defect.** The SEC fact reader (`extract_total_revenue`,
+  `extract_sec_filing_fact` and the extractors built on it) read
+  companyconcept and companyfacts through a helper that returned nothing for
+  a 404 and for a failure alike. A throttled read (429), a server error or a
+  dropped connection was reported as `NO_COMPANYCONCEPT_FACT_FOR_FORM`, "the
+  company tags no such fact". Seen live on BE under concurrent calls, and
+  correct on retry.
+- **Absence and failure are now separate.**
+  - A 404 from SEC is absence: the concept is not tagged. The "no facts"
+    results (`NO_COMPANYCONCEPT_FACT_FOR_FORM`, `NO_FACT_FOR_ACCESSION`,
+    `SEC_FACTS_IFRS_ONLY`, `PERIOD_NOT_FOUND`) need every read they rest on
+    to have succeeded.
+  - Any other status, a network error or an unreadable body is a failed
+    read. If any companyconcept read, or a companyfacts read the answer
+    depends on, fails, the result is status `PROVIDER_ERROR`, code
+    `SEC_READ_FAILED`, `retryable: true`, and `failedReads`:
+    `[{endpoint, concept, httpStatus}]` (`httpStatus` null when there was no
+    response).
+  - It fails closed even when other concepts were read: the concept choice
+    (newest filing, larger revenue) needs every candidate, so a partial read
+    could return the wrong concept's figure.
+  - A pinned accession is echoed as `requestedAccession`.
+  - Geographic revenue does not fall back to the filing's HTML table after a
+    failed read.
+- **Python payload parity.** Python's fact reader now returns an integral
+  `value` as an integer, as the Worker does (it was `2023994000.0`), and the
+  evidence `sourceRows` label cell as `""` rather than null.
+  `scripts/test_sec_fact_payloads.py` compares `sourceRows` and the value's
+  JSON type.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
