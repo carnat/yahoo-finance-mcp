@@ -32,11 +32,12 @@ export function nominalPeriodEnd(end: string | null | undefined): string | null 
 }
 
 /**
- * The fiscal year a period ending on `end` is named for: the calendar year it
- * ends in, except that a year ending in the first week of January (a 52/53-week
- * year nearest December 31) belongs to the year before. A company that names its
- * years otherwise (a retailer's "fiscal 2025" ending February 2026) is not
- * detected; a fiscal year the filing states wins wherever one is read.
+ * The fiscal year a period ending on `end` is named for by the period-end rule: the
+ * calendar year it ends in, except that a year ending in the first week of January
+ * (a 52/53-week year nearest December 31) belongs to the year before. This rule alone
+ * cannot see a company that names its years otherwise (DG's "fiscal 2025" ended
+ * January 30, 2026); `filingFiscalYearLabel` (a filing's own tagged year) and
+ * `fiscalYearNaming` (the company's stated years) correct it where they are read.
  */
 export function fiscalYearOfPeriodEnd(end: string | null | undefined): number | null {
   const nominal = nominalPeriodEnd(end);
@@ -125,4 +126,16 @@ export function documentFiscalYearFocus(html: string | null | undefined): number
   if (!html) return null;
   const m = /name="dei:DocumentFiscalYearFocus"[^>]*>\s*(?:<[^>]+>\s*)*(\d{4})\s*</.exec(html);
   return m ? Number(m[1]) : null;
+}
+
+/**
+ * A filing's fiscal-year label (2.5.14): the year it tags for itself (dei:DocumentFiscalYearFocus), so DG's
+ * 10-K for the year ended January 30, 2026 reads FY2025 and AAPL's December-quarter 10-Q reads its next
+ * fiscal year. A tagged year more than one year from the period-end rule is taken as a mistag and the rule
+ * is used; so is an untagged filing (8-Ks, older HTML filings).
+ */
+export function filingFiscalYearLabel(focus: number | null, reportDate: string | null | undefined): string | null {
+  const ruleYear = fiscalYearOfPeriodEnd(reportDate);
+  if (focus != null && (ruleYear == null || Math.abs(focus - ruleYear) <= 1)) return `FY${focus}`;
+  return ruleYear == null ? null : `FY${ruleYear}`;
 }

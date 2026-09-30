@@ -65,7 +65,7 @@ from yfmcp import driver_ledger as _dl
 from yfmcp import guidance_history as _gh
 from yfmcp import metric_reconciliation as _mr
 from yfmcp.evidence import AUTHORITY_BOUNDARY as _AUTHORITY_BOUNDARY
-from yfmcp.fiscal_calendar import document_fiscal_year_focus, fiscal_year_label, fiscal_year_naming
+from yfmcp.fiscal_calendar import document_fiscal_year_focus, filing_fiscal_year_label, fiscal_year_naming
 from yfmcp import valuation_history as _vh
 from yfmcp.clients.edgar import (
     _SEC_REQUIRED_UA, _SMOKE_TICKER_CIK_FALLBACKS,
@@ -5541,7 +5541,7 @@ async def get_filing_data(
                                     # The fiscal year the filing states for itself wins over the period-end rule (DG's year ending
                                     # January 2026 is its FY2025) (2.5.13).
                                     focus = document_fiscal_year_focus(html_text)
-                                    fiscal_year = f"FY{focus}" if focus is not None else (fiscal_year_label(report_date_str) or "") if report_date_str else ""
+                                    fiscal_year = filing_fiscal_year_label(focus, report_date_str or None) or ""
                                     # A quarterly report's table is a quarter or year-to-date, never a fiscal year: its own
                                     # column header says which ("Three Months Ended August 1, 2026") (2.5.9, MRVL).
                                     if not _re.match(r"(?:10-K|20-F|40-F)", str(forms[idx]), _re.IGNORECASE):
@@ -5735,11 +5735,13 @@ async def _projected_filing_document(url: str) -> dict | None:
     html = await _edgar_get_html(url, max_bytes=_SEC_DOCUMENT_READ_MAX_CHARS + 1)
     if not html:
         return None
+    full_html = html
     truncated = len(html) > _SEC_DOCUMENT_READ_MAX_CHARS or len(html.encode("utf-8", "surrogatepass")) > _SEC_DOCUMENT_READ_MAX_CHARS
     if len(html) > _SEC_DOCUMENT_READ_MAX_CHARS:
         html = html[:_SEC_DOCUMENT_READ_MAX_CHARS]
     projection = _fs.project_filing_text(html, _fs.search_headings(html), _fs.filing_table_spans(html))
-    entry = {"projection": projection, "truncated": truncated}
+    # fiscalYearFocus: the fiscal year the document tags for itself (dei:DocumentFiscalYearFocus), read before truncation.
+    entry = {"projection": projection, "truncated": truncated, "fiscalYearFocus": document_fiscal_year_focus(full_html)}
     weight = len(projection.text) * 2
     with _FILING_TEXT_LOCK:
         previous = _FILING_TEXT_CACHE.pop(url, None)
@@ -5770,9 +5772,9 @@ def _near_specs(values: list | None) -> list:
     return out
 
 
-def _fiscal_year_of(report_date: str | None) -> str | None:
-    """A filing's fiscal year from its period of report; a 52/53-week year ending in early January is the prior year's (2.5.11)."""
-    return fiscal_year_label(str(report_date)) if report_date else None
+def _fiscal_year_of(report_date: str | None, focus: int | None = None) -> str | None:
+    """A filing's fiscal year from the year its primary document tags for itself once read (2.5.14), else from its period of report (2.5.11)."""
+    return filing_fiscal_year_label(focus, str(report_date) if report_date else None)
 
 
 async def _exhibit_targets(cik_int: int, accession: str, filing_date: str | None, filing_type: str, primary_url: str) -> list[dict]:
@@ -5986,6 +5988,7 @@ async def search_filing_text(
     for group in groups:
         filing_matches: list = []
         filing_term_hits: dict[str, int] = {}
+        primary_focus: int | None = None
         for target in group["targets"]:
             doc = await _projected_filing_document(target["url"])
             if doc is None:
@@ -5999,6 +6002,11 @@ async def search_filing_text(
                 continue
             if doc["truncated"]:
                 truncated_documents += 1
+            if target["primary"]:
+                primary_focus = doc["fiscalYearFocus"]
+                # The resolved (first) filing's label follows the year its document tags for itself.
+                if group is groups[0] and group["filing"] is first:
+                    base["fiscalYear"] = _fiscal_year_of(first.get("reportDate") if first else None, primary_focus)
             projection = doc["projection"]
             scope_start, scope_end = 0, len(projection.text)
             scope = None
@@ -6040,7 +6048,7 @@ async def search_filing_text(
             f = group["filing"]
             filing_summaries.append({
                 "accessionNumber": f["accessionNumber"], "filingDate": f["filingDate"], "filingType": f["filingType"],
-                "fiscalYear": _fiscal_year_of(f.get("reportDate")), "documentUrl": f["documentUrl"],
+                "fiscalYear": _fiscal_year_of(f.get("reportDate"), primary_focus), "documentUrl": f["documentUrl"],
                 "totalMatches": len(filing_matches), "termHits": filing_term_hits,
                 "hitsBySection": _fs.hits_by_section(filing_matches),
             })

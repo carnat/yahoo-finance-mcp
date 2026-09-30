@@ -1442,14 +1442,44 @@ consensus actions compose evidence and never fill a gap with an assumption.
     (`namingBasis`).
   - An annual report's geographic revenue period uses the filing's own
     `dei:DocumentFiscalYearFocus` when tagged.
-  - Filing-search `fiscalYear` labels still use the period of report and the
-    period-end rule.
+  - Filing-search `fiscalYear` labels still used the period of report and the
+    period-end rule in 2.5.13; 2.5.14 moves them to the filing's tagged year.
 - **Capped call contract.** `unresolvedReason` is the stable enum
   `CAPPED_CALL_TERMS_INCOMPLETE`, with `missingTerms` listing
   `STRIKE_PRICE`, `CAP_PRICE` and `COVERED_SHARES`.
 - **Parity fix.** A guidance outcome for a metric whose actuals table is
   empty is `ACTUAL_NOT_YET_REPORTED` in both runtimes. Python had reported
   `NOT_EVALUATED_METRIC`.
+
+## Filing Fiscal-Year Labels (2.5.14)
+
+- **The problem.** Filing search (`search_sec_filing_text`) labelled each
+  filing's `fiscalYear` from its period of report (the period-end rule). For
+  companies that name a year by the calendar year it starts in, that label was
+  one year high: DG's 10-K for the year ended January 30, 2026 read FY2026,
+  although DG calls that year fiscal 2025.
+- **The rule.**
+  - Once a filing's primary document is read, its label is the fiscal year the
+    document tags for itself (`dei:DocumentFiscalYearFocus`).
+  - It applies to the top-level `fiscalYear` (the first filing) and to each
+    `filings[].fiscalYear` summary.
+  - DG's 10-K now reads FY2025. A 10-Q whose quarter ends before the fiscal
+    year's calendar year (AAPL's December quarter) reads the fiscal year the
+    company assigns it.
+  - The geographic-revenue path already used the tagged year for annual
+    reports. It now shares the same rule.
+- **Guard.** A tagged year more than one year away from the period-end rule is
+  treated as a mistag, and the period-end rule is used. Untagged filings
+  (8-Ks, older non-inline filings) and the "no search terms" response, which
+  does not read the document, keep the period-end rule.
+- **Contract.** No field was added or renamed; only label values change.
+- **Unchanged.**
+  - The consensus curve's `fiscalYearNaming` (2.5.13) is unchanged.
+  - The curve's `fiscalYearEnds` remains the provider-stated date (for example
+    Yahoo's 2027-01-31 for DG), not the company's 52/53-week end date.
+- **Runtimes and tests.** Both runtimes.
+  `scripts/test_guidance_and_drivers.py` checks parity through
+  `FILING_LABEL_CASES`.
 
 ## Non-US Primary Filings
 
