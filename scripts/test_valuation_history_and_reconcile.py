@@ -337,6 +337,49 @@ RECON_CASES = [
     ["revenue", "latest_quarter", [RELEASES[0]], None, 0.5],
     ["revenue", "latest_quarter", [{"status": "NOT_READ", "url": "u", "filingDate": "2026-08-10", "accessionNumber": "x", "text": None}], YAHOO_Q, 0.0],
 ]
+# 2.5.15 fixtures. NBIS reported in RUB as Yandex to FY2023 and in USD from FY2024: the longer RUB history is not its unit.
+NBIS_FACTS = {"facts": {"us-gaap": {"Revenues": {"units": {
+    "RUB": [_f("2021-01-01", "2021-12-31", 1_000, "10-K", "2022-03-01", "n21"),
+            _f("2022-01-01", "2022-12-31", 2_000, "10-K", "2023-03-01", "n22"),
+            _f("2023-01-01", "2023-12-31", 3_000, "10-K", "2024-03-01", "n23")],
+    "USD": [_f("2024-01-01", "2024-12-31", 117_500_000, "10-K", "2026-03-01", "n24"),
+            _f("2025-01-01", "2025-12-31", 530_000_000, "10-K", "2026-03-01", "n25")],
+}}}}}
+# Same newest filing: the unit with more rows, then the name.
+UNIT_TIE_FACTS = {"facts": {"us-gaap": {"Revenues": {"units": {
+    "USD": [_f("2025-01-01", "2025-12-31", 10, "10-K", "2026-03-01", "u25")],
+    "EUR": [_f("2024-01-01", "2024-12-31", 8, "10-K", "2026-03-01", "u25"), _f("2025-01-01", "2025-12-31", 9, "10-K", "2026-03-01", "u25")],
+}}}}}
+# BE FY2025: Revenues and contract revenue in one 10-K, and net income tagged only as ProfitLoss with its NCI share.
+BE_FILED = ("10-K", "2026-02-26", "be26")
+BE_FACTS = {"facts": {"us-gaap": {
+    "RevenueFromContractWithCustomerExcludingAssessedTax": _usd(_f("2025-01-01", "2025-12-31", 2_001_614_000, *BE_FILED)),
+    "Revenues": _usd(_f("2025-01-01", "2025-12-31", 2_023_994_000, *BE_FILED)),
+    "ProfitLoss": _usd(_f("2025-01-01", "2025-12-31", -87_140_000, *BE_FILED)),
+    "NetIncomeLossAttributableToNoncontrollingInterest": _usd(_f("2025-01-01", "2025-12-31", 1_294_000, *BE_FILED)),
+}}}
+BE_NO_NCI = json.loads(json.dumps(BE_FACTS))
+del BE_NO_NCI["facts"]["us-gaap"]["NetIncomeLossAttributableToNoncontrollingInterest"]
+BE_NCI_OTHER_FILING = json.loads(json.dumps(BE_FACTS))
+BE_NCI_OTHER_FILING["facts"]["us-gaap"]["NetIncomeLossAttributableToNoncontrollingInterest"] = _usd(_f("2025-01-01", "2025-12-31", 1_294_000, "10-K", "2026-02-26", "other"))
+BE_CASES = [["revenue", BE_FACTS], ["net_income", BE_FACTS], ["net_income", BE_NO_NCI], ["net_income", BE_NCI_OTHER_FILING]]
+
+# Release text parsing (2.5.15), read against the file's Q2 2026 period (ended 2026-06-30).
+RELEASE_TEXTS_2515 = [
+    ["revenue", "Q2 revenue of $1.81B, up 12% year over year."],
+    ["revenue", "Second quarter revenue was $808.4M and $2.5 bn a year ago."],
+    ["net_income", "GAAP net income of $0.97 per diluted share for the second quarter."],
+    ["net_income", "Second quarter GAAP net income was $12.0 million, or $0.97 per diluted share."],
+    ["net_income", "Non-GAAP net income was $5.0 million; GAAP net income was $4.0 million for the second quarter."],
+    ["net_income", "Adjusted net income of $5.0 million for the second quarter."],
+    ["eps_diluted", "Diluted EPS was $0.77 per diluted share for the second quarter."],
+    ["revenue", "Consolidated Statements of Operations (in thousands, except per share data) Three months ended June 30, 2026 Revenues $ 1,214,293"],
+    ["revenue", "Consolidated Statements of Operations (in thousands) Segment table (in millions) Three months ended June 30, 2026 Revenues $ 1,214,293"],
+    ["revenue", "Consolidated Statements of Operations (in millions) Three months ended June 30, 2026 Revenues $ 1,214"],
+    ["revenue", "Statements (in thousands) Second quarter revenue was $31.5 million."],
+    ["eps_diluted", "Statements (in thousands) Diluted net income per share was $0.77 for the second quarter."],
+    ["revenue", "Second quarter revenue was $31,520,000."],
+]
 PERIOD_SPECS = ["latest_quarter", "latest_annual", "FY2025", "fy 2025", "Q2 2026", "Q4 2026", "2026", "Q2 2025"]
 RELEASE_TEXTS = [
     ["eps_diluted", "Diluted loss per share of $(0.77) for the second quarter."],
@@ -367,6 +410,12 @@ def _python_outputs() -> dict:
         "releaseObs": [mr.release_observation({"status": "READ", "text": text, "url": None, "filingDate": None, "accessionNumber": None}, m, quarter, "USD")
                        for m, text in RELEASE_TEXTS],
         "currency": mr.release_observation(RELEASES[1], "revenue", quarter, "TWD"),
+        "unitChoice": [_mf(NBIS_FACTS), _mf(UNIT_TIE_FACTS)],
+        "beSecObs": [mr.sec_observations(facts, m, mr.resolve_period(facts, m, "latest_annual")) for m, facts in BE_CASES],
+        "beRecon": mr.metric_reconciliation(ticker="be", metric="net_income", period=mr.resolve_period(BE_FACTS, "net_income", "latest_annual"),
+                                            companyfacts=BE_FACTS, releases=[], yahoo_rows=None, tolerance_pct=0.5),
+        "releaseObs2515": [mr.release_observation({"status": "READ", "text": text, "url": None, "filingDate": None, "accessionNumber": None}, m, quarter, "USD")
+                           for m, text in RELEASE_TEXTS_2515],
         "noSecAgreement": mr.reconcile_observations([
             {"source": "ISSUER_RELEASE", "provider": "ISSUER_RELEASE", "status": "FOUND", "value": 100.0, "precision": 0},
             {"source": "YAHOO", "provider": "YAHOO", "status": "FOUND", "value": 100.0, "precision": 0},
@@ -394,6 +443,11 @@ def _python_outputs() -> dict:
         "normalized": [mr.normalize_fiscal_tokens(t) for t in FISCAL_META_TEXTS],
         "fySelect": [mr.resolve_period(f, "revenue", spec) for f, spec in FY_SELECT],
     }
+
+
+def _mf(facts: dict) -> dict:
+    taxonomy, unit, rows = mr.metric_facts(facts, "revenue")
+    return {"taxonomy": taxonomy, "unit": unit, "rows": rows}
 
 
 def _read_obs(text: str, period: dict) -> dict:
@@ -424,6 +478,10 @@ const out = {
   recon: f.reconCases.map(([m, p, r, y, t]) => mr.metricReconciliation({ ticker: "asts", metric: m, period: mr.resolvePeriod(f.recon, m, p), companyfacts: f.recon, releases: r, yahooRows: y, tolerancePct: t })),
   releaseObs: f.releaseTexts.map(([m, text]) => mr.releaseObservation({ status: "READ", text, url: null, filingDate: null, accessionNumber: null }, m, quarter, "USD")),
   currency: mr.releaseObservation(f.releases[1], "revenue", quarter, "TWD"),
+  unitChoice: [f.nbisFacts, f.unitTieFacts].map((facts) => mr.metricFacts(facts, "revenue")),
+  beSecObs: f.beCases.map(([m, facts]) => mr.secObservations(facts, m, mr.resolvePeriod(facts, m, "latest_annual"))),
+  beRecon: mr.metricReconciliation({ ticker: "be", metric: "net_income", period: mr.resolvePeriod(f.beFacts, "net_income", "latest_annual"), companyfacts: f.beFacts, releases: [], yahooRows: null, tolerancePct: 0.5 }),
+  releaseObs2515: f.releaseTexts2515.map(([m, text]) => mr.releaseObservation({ status: "READ", text, url: null, filingDate: null, accessionNumber: null }, m, quarter, "USD")),
   noSecAgreement: (() => {
     const r = mr.reconcileObservations([
       { source: "ISSUER_RELEASE", provider: "ISSUER_RELEASE", status: "FOUND", value: 100.0, precision: 0 },
@@ -476,7 +534,9 @@ def _worker_outputs() -> dict:
         fx.write_text(json.dumps({"hv": HV_INPUTS, "dateCases": DATE_CASES, "dates": DATES, "syn": SYN, "ifrsFacts": IFRS_FACTS, "periodSpecs": PERIOD_SPECS,
                                   "recon": RECON, "reconCases": RECON_CASES, "releaseTexts": RELEASE_TEXTS, "releases": RELEASES, "fiscalRecon": FISCAL_RECON, "fiscalTexts": FISCAL_TEXTS,
                                   "coverHtml": COVER_HTML, "multi": MULTI, "filings": FILINGS, "regime": REGIME, "fiscalMeta": FISCAL_META, "fiscalMetaTexts": FISCAL_META_TEXTS,
-                                  "dgMeta": DG_META, "dgTexts": DG_TEXTS, "fySelect": FY_SELECT}), encoding="utf-8")
+                                  "dgMeta": DG_META, "dgTexts": DG_TEXTS, "fySelect": FY_SELECT,
+                                  "nbisFacts": NBIS_FACTS, "unitTieFacts": UNIT_TIE_FACTS, "beFacts": BE_FACTS, "beCases": BE_CASES,
+                                  "releaseTexts2515": RELEASE_TEXTS_2515}), encoding="utf-8")
         harness = Path(tmp) / "harness.mjs"
         harness.write_text(_HARNESS, encoding="utf-8")
         result = subprocess.run([node, str(harness), *bundles, str(fx)], check=True, capture_output=True, text=True, timeout=120)
@@ -734,6 +794,67 @@ class TestReconciliation(unittest.TestCase):
         self.assertEqual(obs[3]["unscopedCandidates"], 1)
         self.assertEqual(obs[5]["value"], -118_200_000)
         self.assertEqual(_python_outputs()["currency"]["status"], "NOT_COMPARED_CURRENCY")
+
+    def test_reporting_unit_is_the_one_filed_most_recently(self) -> None:
+        nbis, tie = _python_outputs()["unitChoice"]
+        # NBIS: three RUB rows filed to 2024 against two USD rows filed 2026: USD.
+        self.assertEqual((nbis["taxonomy"], nbis["unit"], [r["val"] for r in nbis["rows"]]), ("us-gaap", "USD", [117_500_000, 530_000_000]))
+        # The same newest filing: the unit with more rows.
+        self.assertEqual((tie["unit"], len(tie["rows"])), ("EUR", 2))
+
+    def test_revenue_takes_the_larger_of_two_concepts_in_one_filing(self) -> None:
+        latest, first = _python_outputs()["beSecObs"][0]
+        self.assertEqual((latest["value"], latest["evidence"]["concept"]), (2_023_994_000, "Revenues"))
+        self.assertEqual(latest["otherConcepts"], [{"concept": "RevenueFromContractWithCustomerExcludingAssessedTax", "value": 2_001_614_000,
+                                                    "form": "10-K", "filed": "2026-02-26", "accessionNumber": "be26"}])
+        self.assertEqual(first["value"], 2_023_994_000)
+
+    def test_profit_loss_is_reduced_by_the_noncontrolling_share(self) -> None:
+        latest, first = _python_outputs()["beSecObs"][1]
+        self.assertEqual((latest["value"], latest["basis"]), (-88_434_000, "PARENT_DERIVED_FROM_PROFITLOSS"))
+        self.assertEqual((first["value"], first["basis"]), (-88_434_000, "PARENT_DERIVED_FROM_PROFITLOSS"))
+        self.assertEqual({k: latest["evidence"][k] for k in ("concept", "value", "profitLoss", "noncontrollingInterest", "derivation")},
+                         {"concept": "ProfitLoss", "value": -88_434_000, "profitLoss": -87_140_000, "noncontrollingInterest": 1_294_000,
+                          "derivation": "ProfitLoss - NetIncomeLossAttributableToNoncontrollingInterest"})
+        self.assertEqual((latest["filedValues"], latest["otherConcepts"]), ([-87_140_000], []))
+        # Without the NCI share in the same accession, ProfitLoss stands as tagged and carries no basis.
+        for plain in _python_outputs()["beSecObs"][2:]:
+            self.assertEqual(plain[0]["value"], -87_140_000)
+            self.assertNotIn("basis", plain[0])
+        # NetIncomeLoss, when tagged, is never adjusted (asserted by test_concept_precedence).
+        recon = _python_outputs()["beRecon"]
+        self.assertEqual(_obs(recon, "SEC_XBRL_LATEST")["value"], -88_434_000)
+
+    def test_release_abbreviations_per_share_and_non_gaap(self) -> None:
+        obs = _python_outputs()["releaseObs2515"]
+        self.assertEqual((obs[0]["status"], obs[0]["value"], obs[0]["precision"]), ("FOUND", 1_810_000_000, 5_000_000))
+        self.assertEqual(obs[1]["value"], 808_400_000, "the first amount, scaled by M; the bn amount after it is not read")
+        # A per-share figure is not net income; the rejection is counted.
+        self.assertEqual((obs[2]["status"], obs[2]["value"], obs[2]["rejectedCandidates"]), ("NOT_FOUND_IN_TEXT", None, 1))
+        self.assertEqual(obs[3]["value"], 12_000_000)
+        # The GAAP figure after a non-GAAP one is read; an adjusted-only sentence is not.
+        self.assertEqual((obs[4]["status"], obs[4]["value"]), ("FOUND", 4_000_000))
+        self.assertEqual((obs[5]["status"], obs[5]["rejectedCandidates"]), ("NOT_FOUND_IN_TEXT", 1))
+        # A per-share metric keeps its per-share figure.
+        self.assertEqual((obs[6]["status"], obs[6]["value"]), ("FOUND", 0.77))
+        self.assertNotIn("rejectedCandidates", obs[4])
+
+    def test_release_table_scale(self) -> None:
+        obs = _python_outputs()["releaseObs2515"]
+        # "(in thousands, except per share data)" scales an unscaled table figure, and says so.
+        self.assertEqual((obs[7]["status"], obs[7]["value"], obs[7]["scaleBasis"]), ("FOUND", 1_214_293_000, "RELEASE_TABLE_IN_THOUSANDS"))
+        self.assertEqual(obs[7]["asWritten"], "$ 1,214,293")
+        # Two declared scales: an unscaled amount is not read.
+        self.assertEqual((obs[8]["status"], obs[8]["value"], obs[8]["rejectedCandidates"]), ("NOT_FOUND_IN_TEXT", None, 1))
+        self.assertEqual((obs[9]["value"], obs[9]["scaleBasis"]), (1_214_000_000, "RELEASE_TABLE_IN_MILLIONS"))
+        # A written scale beats the table's, and per-share figures are never table-scaled.
+        self.assertEqual(obs[10]["value"], 31_500_000)
+        self.assertNotIn("scaleBasis", obs[10])
+        self.assertEqual(obs[11]["value"], 0.77)
+        self.assertNotIn("scaleBasis", obs[11])
+        # No declared scale: as written.
+        self.assertEqual(obs[12]["value"], 31_520_000)
+        self.assertNotIn("scaleBasis", obs[12])
 
     def test_periods(self) -> None:
         p = _python_outputs()["periods"]
