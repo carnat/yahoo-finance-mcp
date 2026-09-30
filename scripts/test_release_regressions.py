@@ -155,8 +155,9 @@ class TestWorkerRegressions(unittest.TestCase):
         self.assertEqual((down["code"], down["retryable"], down["accessionNumber"], down["requestedAccession"]),
                          ("SEC_LOOKUP_UNAVAILABLE", True, REQUESTED, REQUESTED))
         self.assertEqual((missing["code"], missing["retryable"], missing["accessionNumber"]), ("NO_SEC_REGISTRANT", False, None))
-        for payload in (down, missing):
-            self.assertEqual((payload["status"], payload["source"], payload["confidence"]), ("SEC_FACT_NOT_AVAILABLE", "NONE", "NOT_DECISION_GRADE"))
+        # An unreadable ticker index is a failed read (PROVIDER_ERROR); no such registrant is a missing fact (2.5.18).
+        for payload, status in ((down, "PROVIDER_ERROR"), (missing, "SEC_FACT_NOT_AVAILABLE")):
+            self.assertEqual((payload["status"], payload["source"], payload["confidence"]), (status, "NONE", "NOT_DECISION_GRADE"))
             self.assertIsNone(payload["evidence"])
 
     def test_currency_mismatch_withholds_multiples(self) -> None:
@@ -250,12 +251,13 @@ class TestPythonRegressions(unittest.TestCase):
 
     def test_cik_lookup_failure_is_not_a_disclosure(self) -> None:
         cases = {"SEC_LOOKUP_UNAVAILABLE": {}, "NO_SEC_REGISTRANT": {"ASTS": 1780312}}
+        statuses = {"SEC_LOOKUP_UNAVAILABLE": "PROVIDER_ERROR", "NO_SEC_REGISTRANT": "SEC_FACT_NOT_AVAILABLE"}
         for code, index in cases.items():
             with patch("server._resolve_cik_for_ticker", new=AsyncMock(return_value=None)), \
                     patch("server._load_edgar_tickers", new=AsyncMock(return_value=index)):
                 data = json.loads(_run(srv.extract_sec_filing_fact("ZZZZ", fact="total_revenue", accession_number=REQUESTED)))
             data = data.get("data", data) if "ok" in data else data
-            self.assertEqual((data["code"], data["retryable"], data["status"], data["source"]), (code, code == "SEC_LOOKUP_UNAVAILABLE", "SEC_FACT_NOT_AVAILABLE", "NONE"))
+            self.assertEqual((data["code"], data["retryable"], data["status"], data["source"]), (code, code == "SEC_LOOKUP_UNAVAILABLE", statuses[code], "NONE"))
             self.assertEqual((data["accessionNumber"], data["requestedAccession"]), (REQUESTED, REQUESTED))
             self.assertFalse(data["evidence"])
 

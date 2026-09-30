@@ -1684,14 +1684,50 @@ Vantage and IBKR produced these fixes.
   - `scripts/test_sec_fact_payloads.py` compares whole payloads as JSON,
     which covers key order and integer vs float. It also runs
     `normalizeStatus` itself against `_as_status`.
-- **Known Python gap.** Python's `extract_geographic_revenue`,
-  `extract_revenue_exposure` and `extract_china_exposure` never carried the
-  Worker's `status`, `code`, `scanCoverage`, `searchedTerms` and
-  `notDisclosedBasis`. Through those Python tools a failed SEC read shows
-  only as the `SEC_READ_FAILED` warning, and `extract_revenue_exposure`
-  still says NOT_FOUND. This predates 2.5.17 and is left for a separate
-  change. The deployed Worker reports `PROVIDER_ERROR` / `SEC_READ_FAILED`
-  through all of them.
+- **Known Python gap.** Python's geographic and exposure tools lacked the
+  Worker's status fields. Closed in 2.5.18.
+
+## Failed Lookups And Geographic Parity (2.5.18)
+
+- **Unreadable ticker index.** When SEC's ticker index cannot be read, the
+  SEC fact reader's result is status `PROVIDER_ERROR` with code
+  `SEC_LOOKUP_UNAVAILABLE`, `retryable: true`. It was
+  `SEC_FACT_NOT_AVAILABLE`, which `extract_total_revenue` showed as
+  NOT_FOUND. A ticker SEC does not list keeps `NO_SEC_REGISTRANT` and
+  `SEC_FACT_NOT_AVAILABLE`.
+- **`extract_china_exposure`.** A failed revenue read (`SEC_READ_FAILED`,
+  `SEC_LOOKUP_UNAVAILABLE`) gives `overallStatus` `PROVIDER_ERROR` and that
+  code. It was `NOT_FOUND` with no code. A found non-revenue exposure still
+  reads `FOUND_NON_REVENUE_EXPOSURE`, with the revenue failure in `code`.
+- **Pinned geographic reads.** When a pinned accession's XBRL facts do not
+  name the region, the HTML fallback reads that filing's tables. It used to
+  read the latest filing of the form, answering from a different filing.
+- **Geographic payloads** keep `retryable` (`true` for a failed lookup,
+  `false` for `NO_SEC_REGISTRANT`).
+- **Python geographic and exposure tools match the Worker.**
+  - `extract_geographic_revenue`, `extract_revenue_exposure`,
+    `extract_china_exposure` and the geographic `get_filing_data` payload
+    now have the Worker's keys, order, statuses and codes on every path:
+    found, NOT_DISCLOSED, TABLE_NOT_PARSED, FILING_TEXT_NOT_AVAILABLE,
+    FILING_NOT_FOUND_TRY_OTHER_TYPE, the 20-F switch, SEC_READ_FAILED and
+    SEC_LOOKUP_UNAVAILABLE.
+  - Python's filing-table parser is a port of the Worker's
+    `extractGeoRevenueFromHtml`. It now reads the tables the Worker reads:
+    live 10-Ks for AAOI (China 0.5752), AXTI (0.6236) and QCOM (0.4593) were
+    NOT_DISCLOSED in Python. China is no longer the sum of Mainland China
+    and Hong Kong rows.
+  - Python's `extract_china_exposure` adds the Worker's "Bank of China"
+    risk term and its filing-text search for China manufacturing when the
+    tables show none.
+  - Ratios round half up and `charsScanned` counts UTF-16 units, as in the
+    Worker.
+  - `scripts/test_sec_fact_payloads.py` compares whole payloads of both
+    runtimes: 18 geographic scenarios through `get_filing_data` and the
+    three tools, and 35 parser cases, including trimmed AAOI, AXTI and QCOM
+    tables (`fixtures/sec_geo_revenue_tables.json`).
+- **Remaining difference.** With `detailLevel` `raw`, `rawContext.filingIndex`
+  still differs: Python's `get_sec_filing_index` has no 20-F fallback and
+  its own failure codes. Compact output, the default, is identical.
 
 ## Non-US Primary Filings
 

@@ -3,14 +3,10 @@
 Extracted from server.py in Phase 1 of the refactoring plan.
 """
 
+import math
 import re as _re
 
-from yfmcp.parsing.html import (
-    _parse_html_table,
-    _parse_numeric_cell,
-    _detect_unit_multiplier,
-    _strip_html_tags,
-)
+from yfmcp.parsing.html import _detect_unit_multiplier
 
 
 # ---------------------------------------------------------------------------
@@ -48,21 +44,112 @@ def _region_matches(label: str, region: str, include_asia_fallback: bool = False
 # ---------------------------------------------------------------------------
 # HTML geographic revenue extractor
 # ---------------------------------------------------------------------------
+# A port of the Worker's extractGeoRevenueFromHtml and the helpers it calls (stripHtmlTags, parseFinancialTableRows,
+# parseNumericCell, alignedGeoAmounts, geoColumnHeader), so both runtimes read a filing's tables the same way (2.5.18).
+# The shared helpers of yfmcp.parsing.html (_strip_html_tags, _parse_numeric_cell) differ from the Worker's in small
+# ways (entities, footnote suffixes), so the geographic reader has its own.
 
-# Amount cells of a table row: numbers and dash placeholders, never percent
-# cells. A total row often carries no label and no "% of total" cells, so a
-# cell index taken from a region row can land on another period's total
-# (MRVL: China $1,161.5 against the prior year's $2,006.1 read 57.9%; the
-# table states 42%) (2.5.9). Mirrors alignedGeoAmounts in the Worker.
-_DASH_CELL_RE = _re.compile(r"^[\s$]*[-\u2013\u2014]+\s*$")
+_HTML_ENTITY_MAP = {
+    "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'",
+    "&bull;": "•", "&middot;": "·", "&rsquo;": "’", "&lsquo;": "‘", "&ldquo;": "“", "&rdquo;": "”",
+    "&ndash;": "–", "&mdash;": "—", "&hellip;": "…",
+}
+_ENTITY_RE = _re.compile(r"&(?:nbsp|amp|lt|gt|quot|apos|#\d+|#x[0-9a-f]+|[a-z]+);", _re.IGNORECASE)
+_INLINE_TAG_RE = _re.compile(r"</?(?:span|font|b|i|u|em|strong|a|sup|sub|small|ix:[a-z]+)\b[^>]*>", _re.IGNORECASE)
+
+
+def _decode_entity(match: "_re.Match[str]") -> str:
+    entity = match.group(0)
+    if entity in _HTML_ENTITY_MAP:
+        return _HTML_ENTITY_MAP[entity]
+    if entity[:3].lower() == "&#x":
+        code = int(entity[3:-1], 16)
+        return chr(code) if 0 < code <= 0x10FFFF else " "
+    if entity.startswith("&#"):
+        return chr(int(entity[2:-1], 10) % 65536)  # String.fromCharCode
+    return " "
+
+
+def _geo_strip_html_tags(html: str) -> str:
+    """The Worker's stripHtmlTags."""
+    text = _re.sub(r"<!--[\s\S]*?-->", " ", html)
+    text = _re.sub(r"<script\b[^>]*>[\s\S]*?</script[^>]*>", " ", text, flags=_re.IGNORECASE)
+    text = _re.sub(r"<style\b[^>]*>[\s\S]*?</style[^>]*>", " ", text, flags=_re.IGNORECASE)
+    text = _re.sub(r"""\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", " ", text, flags=_re.IGNORECASE)
+    text = _INLINE_TAG_RE.sub("", text)
+    text = _re.sub(r"<[^>]+>", " ", text)
+    text = _ENTITY_RE.sub(_decode_entity, text)
+    return _re.sub(r"\s+", " ", _re.sub(r"<[^>]+>", " ", text)).strip()
+
+
+_JS_FLOAT_RE = _re.compile(r"[+-]?(?:Infinity|\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?)")
+
+
+def _geo_parse_numeric_cell(text: str) -> float | None:
+    """The Worker's parseNumericCell: commas, parentheses, currency signs, %, b/m/k suffixes and JavaScript's lenient parseFloat."""
+    s = _re.sub(r"[$€£¥]", "", _re.sub(r"\s", "", text.replace(",", ""))).replace("%", "")
+    if s.startswith("(") and s.endswith(")"):
+        s = "-" + s[1:-1]
+    mult = 1.0
+    if s[-1:] in ("b", "B"):
+        mult, s = 1e9, s[:-1]
+    elif s[-1:] in ("m", "M"):
+        mult, s = 1e6, s[:-1]
+    elif s[-1:] in ("k", "K"):
+        mult, s = 1e3, s[:-1]
+    m = _JS_FLOAT_RE.match(s)
+    if m is None:
+        return None
+    value = float(m.group(0).replace("Infinity", "inf"))
+    return value * mult
+
+
+def _merge_financial_cells(cells: list[str]) -> list[str]:
+    """The Worker's mergeFinancialCells: "$", "%" and ")" cells join the adjacent value; empty cells go."""
+    out: list[str] = []
+    prefix = ""
+    for index, raw in enumerate(cells):
+        cell = _re.sub(r"\s+", " ", raw).strip()
+        if not cell:
+            if index == 0:
+                out.append("")
+            continue
+        if _re.fullmatch(r"[$€£¥]", cell):
+            prefix += cell
+            continue
+        if _re.fullmatch(r"%|\)|\)%|%\)", cell) and out:
+            out[-1] += cell
+            continue
+        cell = _re.sub(r"\s+\)$", ")", _re.sub(r"^\(\s+", "(", cell))
+        out.append(prefix + cell)
+        prefix = ""
+    if prefix:
+        out.append(prefix)
+    return out
+
+
+def _financial_table_rows(table_html: str) -> list[list[str]]:
+    """The Worker's parseFinancialTableRows."""
+    rows: list[list[str]] = []
+    for tr in _re.finditer(r"<tr[^>]*>([\s\S]*?)</tr>", table_html, _re.IGNORECASE):
+        cells = [_geo_strip_html_tags(td.group(1)) for td in _re.finditer(r"<t[dh][^>]*>([\s\S]*?)</t[dh]>", tr.group(1), _re.IGNORECASE)]
+        if cells:
+            merged = _merge_financial_cells(cells)
+            if any(c != "" for c in merged):
+                rows.append(merged)
+    return rows
+
+
+# Amount cells of a table row: numbers and dash placeholders, never percent cells (MRVL, 2.5.9).
+_DASH_CELL_RE = _re.compile(r"[\s$]*[-–—]+\s*")
 # A computed share more than this many points from the table's own percentage is a misread column.
 _STATED_PCT_TOLERANCE = 1.0
 # A percent beside a value is a share only under a "% of total" header; a "Change" column is not.
 _SHARE_HEADER_RE = _re.compile(r"%\s*of\b|\bpercent(?:age)?\s+of\b", _re.IGNORECASE)
-
-
-def _has_share_header(rows: list[list[str]], before: int) -> bool:
-    return any(_SHARE_HEADER_RE.search(c) for r in rows[:before] for c in r)
+_TOTAL_LABELS = frozenset({
+    "total", "consolidated", "total revenues", "total net revenues", "net revenues", "revenues", "total revenue",
+    "total net sales", "net sales", "total net revenue",
+})
 
 
 def _is_pct_cell(row: list[str], col: int) -> bool:
@@ -75,39 +162,40 @@ def _amount_cells(row: list[str]) -> list[tuple[int, float]]:
     for col, cell in enumerate(row):
         if _is_pct_cell(row, col):
             continue
-        if _DASH_CELL_RE.match(cell):
+        if _DASH_CELL_RE.fullmatch(cell):
             out.append((col, 0.0))
             continue
-        v = _parse_numeric_cell(cell)
+        v = _geo_parse_numeric_cell(cell)
         if v is not None:
             out.append((col, v))
     return out
 
 
-def _first_positive_ordinal(row: list[str]) -> int | None:
-    return next((k for k, (_, v) in enumerate(_amount_cells(row)) if v > 0), None)
-
-
-def _amount_at(row: list[str], k: int) -> tuple[int, float] | None:
-    cells = _amount_cells(row)
-    return cells[k] if k < len(cells) else None
-
-
-def _stated_pct_after(row: list[str], col: int) -> float | None:
-    nxt = col + 1
-    return _parse_numeric_cell(row[nxt]) if nxt < len(row) and _is_pct_cell(row, nxt) and row[nxt].strip() != "%" else None
+def _aligned_geo_amounts(region_row: list[str], total_row: list[str]) -> tuple[float, float, int, int, float | None] | None:
+    """The Worker's alignedGeoAmounts: (regionVal, totalVal, valueCol, totalCol, statedPct), paired by position among amount cells."""
+    region = _amount_cells(region_row)
+    k = next((i for i, (_, v) in enumerate(region) if v > 0), None)
+    if k is None:
+        return None
+    totals = _amount_cells(total_row)
+    if k >= len(totals):
+        return None
+    next_col = region[k][0] + 1
+    stated = (
+        _geo_parse_numeric_cell(region_row[next_col])
+        if next_col < len(region_row) and _is_pct_cell(region_row, next_col) and region_row[next_col].strip() != "%" else None
+    )
+    return region[k][1], totals[k][1], region[k][0], totals[k][0], stated
 
 
 def _geo_column_header(rows: list[list[str]], region_row_idx: int, k: int) -> str:
-    """The header of the k-th amount column: the header row with one label per amount column
-    ("% of Total" headers dropped), prefixed by a period group ("Three Months Ended") when a row
-    above spans the columns evenly (2.5.9). Mirrors geoColumnHeader in the Worker."""
+    """The Worker's geoColumnHeader: the header of the k-th amount column, prefixed by a period group when a row above spans them evenly."""
     n = len(_amount_cells(rows[region_row_idx]))
     label = ""
     group = ""
     for i in range(region_row_idx):
-        cells = [c.strip() for c in rows[i] if c.strip() and not _SHARE_HEADER_RE.search(c)]
-        if not cells or any(_parse_numeric_cell(c) is not None and not _re.search(r"\d{4}", c) for c in cells):
+        cells = [c.strip() for c in rows[i] if c.strip() and not _SHARE_HEADER_RE.search(c.strip())]
+        if not cells or any(_geo_parse_numeric_cell(c) is not None and not _re.search(r"\d{4}", c) for c in cells):
             continue
         if len(cells) == n and not label:
             label = cells[k]
@@ -116,11 +204,119 @@ def _geo_column_header(rows: list[list[str]], region_row_idx: int, k: int) -> st
     return " ".join(x for x in (group, label) if x)
 
 
-def _row_label(row: list[str], fallback: str) -> str:
-    """A row's label; an unlabeled total row's first cell is a number."""
-    if not row:
-        return fallback
-    return str(row[0]) if _re.search(r"[A-Za-z]", str(row[0])) else "Total (unlabeled row)"
+def _geo_region_aliases(region: str) -> list[str]:
+    """The Worker's geoRegionAliases: the spellings of a region a filing may use."""
+    lower = str(region).lower().strip()
+    compact = _re.sub(r"\s+", "", lower)
+    aliases = [lower]
+    if lower in ("china", "prc", "mainland china"):
+        aliases += ["china", "mainland china", "people's republic of china", "peoples republic of china", "prc",
+                    "country:cn", "srt:chinamember", "chinamember", "mainlandchinamember"]
+    elif lower == "greater china" or compact == "greaterchina":
+        aliases += ["greater china", "greaterchinamember"]
+    elif lower == "hong kong" or compact == "hongkong":
+        aliases += ["hong kong", "hongkong", "country:hk", "srt:hongkongmember", "hongkongmember"]
+    elif lower == "taiwan":
+        aliases += ["taiwan", "country:tw", "srt:taiwanmember", "taiwanmember"]
+    return [a for a in dict.fromkeys(aliases) if a]
+
+
+def _text_contains_geo_region(text: str, region: str) -> bool:
+    lower = text.lower()
+    for term in _geo_region_aliases(region):
+        if _re.fullmatch(r"[a-z0-9 ]+", term):
+            pattern = r"\b" + r"\s+".join(_re.escape(part) for part in _re.split(r"\s+", term)) + r"\b"
+            if _re.search(pattern, lower, _re.IGNORECASE | _re.ASCII):
+                return True
+        elif term in lower:
+            return True
+    return False
+
+
+def _js_round(value: float) -> int:
+    """JavaScript's Math.round: halves round up."""
+    return math.floor(value + 0.5)
+
+
+def extract_geo_revenue_from_html(html: str, region: str) -> dict | None:
+    """The Worker's extractGeoRevenueFromHtml: a geographic revenue table that names the region, or None.
+
+    Every table that names the region and is about revenue is a candidate; tables introduced as a geographic breakdown
+    come first, and a table without revenue or sales in it or its lead-in (a properties list) never counts.
+    """
+    candidates: list[tuple[int, int, str, list[list[str]]]] = []
+    for scanned, m in enumerate(_re.finditer(r"<table[^>]*>[\s\S]*?</table>", html, _re.IGNORECASE), start=1):
+        if scanned > 800:
+            break
+        table_html = m.group(0)
+        if not _text_contains_geo_region(table_html, region):
+            continue
+        pos = m.start()
+        # The lead-in stops at the previous table.
+        before = html[max(0, pos - 1_500): pos]
+        lead = _geo_strip_html_tags(before[before.lower().rfind("</table>") + 1:])[-800:]
+        table_text = _geo_strip_html_tags(table_html)[:600]
+        context = f"{lead} {table_text}".lower()
+        if not _re.search(r"revenue|net sales|\bsales\b", context, _re.ASCII) or _re.search(r"square f(?:oo|ee)t", table_text, _re.IGNORECASE):
+            continue
+        rows = _financial_table_rows(table_html)
+        if len(rows) < 2:
+            continue
+        score = 2 if _re.search(r"geograph|by region|by country|by location|region of|country of|location of (?:the )?customer", context) else 1
+        candidates.append((-score, pos, table_html, rows))
+    candidates.sort(key=lambda c: (c[0], c[1]))
+
+    for neg_score, pos, table_html, rows in candidates:
+        region_row = next((i for i, row in enumerate(rows) if any(_text_contains_geo_region(cell, region) for cell in row)), None)
+        if region_row is None:
+            continue
+        total_row = next((i for i, row in enumerate(rows) if any(c.strip().lower() in _TOTAL_LABELS for c in row)), None)
+        if total_row is None:
+            total_row = next((i for i in range(len(rows) - 1, -1, -1) if any(_geo_parse_numeric_cell(c) is not None for c in rows[i])), None)
+        if total_row is None or total_row == region_row:
+            continue
+        aligned = _aligned_geo_amounts(rows[region_row], rows[total_row])
+        if aligned is None:
+            continue
+        region_val, total_val, value_col, total_col, stated_pct = aligned
+        # A region cannot exceed the total it is part of.
+        if total_val <= 0 or region_val <= 0 or region_val > total_val * 1.001:
+            continue
+        pct = _js_round(region_val / total_val * 10000) / 10000
+        # The table's own share for the region must agree with the computed one, under a "% of total" header only.
+        share_header = any(_SHARE_HEADER_RE.search(c) for r in rows[:region_row] for c in r)
+        stated_share = stated_pct if share_header else None
+        if stated_share is not None and abs(pct * 100 - stated_share) > _STATED_PCT_TOLERANCE:
+            continue
+        unit_mult = _detect_unit_multiplier(table_html, html[max(0, pos - 3_000): pos])
+        unit_scale = "thousands" if unit_mult == 1e3 else "millions" if unit_mult == 1e6 else "actual"
+        headings = _re.findall(r"<h[1-6][^>]*>([\s\S]*?)</h[1-6]>", html[max(0, pos - 6_000): pos], _re.IGNORECASE)
+        section_heading = _geo_strip_html_tags(headings[-1]) if headings else ""
+        header_row = rows[0]
+        # A header row without a label cell is one cell shorter than the data rows.
+        header_col = value_col - max(0, len(rows[region_row]) - len(header_row))
+        ordinal = next((k for k, (col, _) in enumerate(_amount_cells(rows[region_row])) if col == value_col), -1)
+        source_column = _geo_column_header(rows, region_row, ordinal) or (
+            str(header_row[header_col]).strip() if 0 <= header_col < len(header_row) else "")
+        raw_value = str(rows[region_row][value_col]) if value_col < len(rows[region_row]) else None
+        raw_denominator = str(rows[total_row][total_col])
+        total_label = str(rows[total_row][0]) if rows[total_row] else ""
+        return {
+            "pct": pct,
+            "usd": region_val * unit_mult,
+            "denominator": total_val * unit_mult,
+            "sectionHeading": section_heading,
+            "unitScale": unit_scale,
+            "rawValue": raw_value,
+            "rawDenominator": raw_denominator,
+            "sourceRows": [
+                [str(rows[region_row][0]) if rows[region_row] else region, raw_value if raw_value is not None else ""],
+                [total_label if _re.search(r"[A-Za-z]", total_label) else "Total (unlabeled row)", raw_denominator],
+            ],
+            "sourceColumns": [source_column] if source_column else [],
+            "statedPct": stated_share,
+        }
+    return None
 
 
 def _extract_geo_revenue_from_html(
@@ -129,333 +325,23 @@ def _extract_geo_revenue_from_html(
 ) -> tuple[float | None, float | None, float | None, str, dict | None]:
     """Search an SEC filing HTML document for a geographic revenue table.
 
-    Returns (regionRevenueRatio, regionRevenueUSD, totalRevenueUSD, sectionHeading, evidence).
-    Parses the first table that contains the target region and a numeric total row.
+    Returns (regionRevenueRatio, regionRevenueUSD, totalRevenueUSD, sectionHeading, evidence), as the Worker's
+    extractGeoRevenueFromHtml reads it (extract_geo_revenue_from_html); all None (heading "") when there is no table.
     """
-    region_lower = region.lower()
-    html_lower = html_text.lower()
-
-    # Candidate search terms ordered by specificity
-    search_terms = [
-        "geographic information",
-        "geographic areas",
-        "geographic segment",
-        "revenue by region",
-        "revenues by geography",
-        region_lower,
-    ]
-
-    # Collect positions of all search-term matches (cap to keep runtime bounded)
-    term_positions: list[int] = []
-    for term in search_terms:
-        idx = 0
-        while len(term_positions) < 30:
-            pos = html_lower.find(term, idx)
-            if pos == -1:
-                break
-            term_positions.append(pos)
-            idx = pos + 1
-
-    if not term_positions:
+    geo = extract_geo_revenue_from_html(html_text, region)
+    if geo is None:
         return None, None, None, "", None
-
-    # For each match, find the nearest enclosing or following <table>
-    checked_tables: set[int] = set()
-    candidate_tables: list[dict] = []
-
-    for pos in sorted(set(term_positions))[:20]:
-        # Search window: 1 000 chars before match → 60 000 chars after
-        search_start = max(0, pos - 1_000)
-        search_end = min(len(html_text), pos + 60_000)
-        chunk = html_text[search_start:search_end]
-        starts = [search_start + tbl_m.start() for tbl_m in _re.finditer(r"<table[^>]*>", chunk, _re.IGNORECASE)]
-        # The table the match sits in, however far back its tag starts: inline
-        # styles put MRVL's region table tag ~5,000 characters before "China" (2.5.9).
-        enclosing = html_lower.rfind("<table", 0, pos)
-        if enclosing != -1 and enclosing < search_start and html_lower.find("</table>", enclosing) > pos:
-            starts.insert(0, enclosing)
-
-        for abs_start in starts:
-            if abs_start in checked_tables:
-                continue
-            checked_tables.add(abs_start)
-
-            # Walk forward tracking nested table depth to find matching </table>
-            depth = 0
-            i = abs_start
-            table_end = abs_start
-            while i < min(len(html_text), abs_start + 200_000):
-                o = html_lower.find("<table", i)
-                c = html_lower.find("</table>", i)
-                if o == -1 and c == -1:
-                    break
-                if o != -1 and (c == -1 or o < c):
-                    depth += 1
-                    i = o + 6
-                else:
-                    depth -= 1
-                    if depth == 0:
-                        table_end = c + 8
-                        break
-                    i = c + 8
-
-            table_html = html_text[abs_start:table_end]
-            if region_lower not in table_html.lower():
-                continue
-
-            parsed = _parse_html_table(table_html)
-            if len(parsed) < 2:
-                continue
-
-            candidate_tables.append({
-                "pos": abs_start,
-                "table_html": table_html,
-                "rows": parsed,
-            })
-
-    if not candidate_tables:
-        return None, None, None, "", None
-
-    _TOTAL_LABELS = frozenset({
-        "total", "consolidated", "total revenues", "total net revenues",
-        "net revenues", "revenues", "total revenue",
-    })
-
-    def _local_format_raw_number(n: float | int | None) -> str | None:
-        if n is None:
-            return None
-        try:
-            f = float(n)
-            if abs(f - round(f)) < 1e-9:
-                return f"{int(round(f)):,}"
-            return f"{f:,.2f}"
-        except Exception:
-            return None
-
-    is_china_query = region_lower in ("china", "greater china")
-
-    for tbl in candidate_tables:
-        rows: list[list[str]] = tbl["rows"]
-
-        # Find a "Total" row
-        total_row_idx: int | None = None
-        for i, row in enumerate(rows):
-            if any(cell.strip().lower() in _TOTAL_LABELS for cell in row):
-                total_row_idx = i
-                break
-        if total_row_idx is None:
-            # Fall back: last row that has any numeric value
-            for i in range(len(rows) - 1, -1, -1):
-                if any(_parse_numeric_cell(c) is not None for c in rows[i]):
-                    total_row_idx = i
-                    break
-
-        if total_row_idx is None:
-            continue
-
-        if is_china_query:
-            # China query: extract and sum Mainland China / Hong Kong rows
-            mainland_idx = None
-            hongkong_idx = None
-            greater_china_idx = None
-            generic_china_idx = None
-
-            for i, row in enumerate(rows):
-                if not row or i == total_row_idx:
-                    continue
-                label = str(row[0]).lower()
-                if any(t in label for t in ["total", "consolidated"]) and not "china" in label:
-                    continue
-                if "hong kong" in label or "hongkong" in label:
-                    hongkong_idx = i
-                elif "mainland" in label or "excluding hong kong" in label or "exclude hong kong" in label:
-                    mainland_idx = i
-                elif "greater china" in label:
-                    greater_china_idx = i
-                elif "china" in label:
-                    generic_china_idx = i
-
-            # One column for every row, paired by position among amount cells:
-            # the first positive amount of the main China row.
-            lead_idx = next((i for i in (generic_china_idx, greater_china_idx, mainland_idx, hongkong_idx) if i is not None), None)
-            ordinal = _first_positive_ordinal(rows[lead_idx]) if lead_idx is not None else None
-            if ordinal is None:
-                continue
-            total_cell = _amount_at(rows[total_row_idx], ordinal)
-            if total_cell is None:
-                continue
-            value_col, total_val = total_cell
-
-            def _val(idx: int | None) -> float | None:
-                cell = _amount_at(rows[idx], ordinal) if idx is not None else None
-                return cell[1] if cell else None
-
-            def _raw(idx: int) -> str:
-                cell = _amount_at(rows[idx], ordinal)
-                return str(rows[idx][cell[0]]) if cell else ""
-
-            mainland_val = _val(mainland_idx)
-            hongkong_val = _val(hongkong_idx)
-            greater_china_val = _val(greater_china_idx)
-            generic_china_val = _val(generic_china_idx)
-
-            region_val = None
-            interpretation_warning = None
-            if mainland_val is not None and hongkong_val is not None:
-                region_val = mainland_val + hongkong_val
-                interpretation_warning = "Combined Mainland China and Hong Kong revenue to represent total China exposure."
-            elif mainland_val is not None:
-                region_val = mainland_val
-                interpretation_warning = "Mainland China revenue only; Hong Kong revenue was not separately identified."
-            elif greater_china_val is not None:
-                region_val = greater_china_val
-            elif generic_china_val is not None:
-                region_val = generic_china_val
-            elif hongkong_val is not None:
-                region_val = hongkong_val
-                interpretation_warning = "Hong Kong revenue only; Mainland China revenue was not separately identified."
-
-            if region_val is None or total_val is None or total_val <= 0:
-                continue
-
-            ratio = round(region_val / total_val, 4)
-            # A single row's own "% of total" must agree with the computed share.
-            single_idx = None if (mainland_idx is not None and hongkong_idx is not None) else lead_idx
-            if single_idx is not None and _has_share_header(rows, single_idx):
-                cell = _amount_at(rows[single_idx], ordinal)
-                stated = _stated_pct_after(rows[single_idx], cell[0]) if cell else None
-                if stated is not None and abs(ratio * 100 - stated) > _STATED_PCT_TOLERANCE:
-                    continue
-
-            # Detect unit scale for USD conversion
-            context_html = html_text[max(0, tbl["pos"] - 3_000): tbl["pos"]]
-            unit_mult = _detect_unit_multiplier(tbl["table_html"], context_html)
-            region_usd = region_val * unit_mult
-            total_usd = total_val * unit_mult
-
-            # Extract nearest section heading
-            heading = ""
-            pre_html = html_text[max(0, tbl["pos"] - 6_000): tbl["pos"]]
-            h_matches = _re.findall(r"<h[1-6][^>]*>(.*?)</h[1-6]>", pre_html, _re.IGNORECASE | _re.DOTALL)
-            if h_matches:
-                heading = _strip_html_tags(h_matches[-1])
-
-            header_row = rows[0] if rows else []
-            source_col = _geo_column_header(rows, lead_idx, ordinal) or (str(header_row[value_col]).strip() if value_col < len(header_row) else "")
-            unit_scale = (
-                "thousands" if unit_mult == 1_000.0
-                else "millions" if unit_mult == 1_000_000.0
-                else "actual" if unit_mult == 1.0
-                else "actual"
-            )
-
-            source_rows = []
-            if mainland_idx is not None:
-                source_rows.append([str(rows[mainland_idx][0]), _raw(mainland_idx)])
-            if hongkong_idx is not None:
-                source_rows.append([str(rows[hongkong_idx][0]), _raw(hongkong_idx)])
-            if greater_china_idx is not None:
-                source_rows.append([str(rows[greater_china_idx][0]), _raw(greater_china_idx)])
-            if generic_china_idx is not None and mainland_idx is None and greater_china_idx is None:
-                source_rows.append([str(rows[generic_china_idx][0]), _raw(generic_china_idx)])
-            source_rows.append([_row_label(rows[total_row_idx], "Total revenue"), str(rows[total_row_idx][value_col])])
-
-            breakdown = {}
-            if total_val > 0:
-                if mainland_val is not None:
-                    breakdown["mainlandPct"] = round(mainland_val / total_val * 100, 2)
-                    breakdown["mainlandUSD"] = mainland_val * unit_mult
-                if hongkong_val is not None:
-                    breakdown["hongKongPct"] = round(hongkong_val / total_val * 100, 2)
-                    breakdown["hongKongUSD"] = hongkong_val * unit_mult
-                if mainland_val is not None and hongkong_val is not None:
-                    breakdown["combinedPct"] = round((mainland_val + hongkong_val) / total_val * 100, 2)
-                    breakdown["combinedUSD"] = (mainland_val + hongkong_val) * unit_mult
-
-            evidence = {
-                "sectionHeading": heading or None,
-                "tableTitle": None,
-                "sourceTableId": 1,
-                "sourceRows": source_rows,
-                "sourceColumns": [source_col] if source_col else [],
-                "unitScale": unit_scale,
-                "rawValue": _local_format_raw_number(region_val),
-                "rawDenominator": _local_format_raw_number(total_val),
-                "breakdown": breakdown,
-                "allChinaInterpretationWarning": interpretation_warning,
-            }
-            return ratio, region_usd, total_usd, heading, evidence
-
-        else:
-            # Standard single-row matching
-            region_row_idx: int | None = None
-            for i, row in enumerate(rows):
-                if any(region_lower in cell.lower() for cell in row):
-                    region_row_idx = i
-                    break
-            if region_row_idx is None or total_row_idx == region_row_idx:
-                continue
-
-            # The value and the total in the same column, paired among amount cells.
-            ordinal = _first_positive_ordinal(rows[region_row_idx])
-            if ordinal is None:
-                continue
-            region_cell = _amount_at(rows[region_row_idx], ordinal)
-            total_cell = _amount_at(rows[total_row_idx], ordinal)
-            if region_cell is None or total_cell is None:
-                continue
-            (value_col, region_val), (total_col, total_val) = region_cell, total_cell
-            if total_val <= 0:
-                continue
-
-            ratio = round(region_val / total_val, 4)
-            stated = _stated_pct_after(rows[region_row_idx], value_col) if _has_share_header(rows, region_row_idx) else None
-            if stated is not None and abs(ratio * 100 - stated) > _STATED_PCT_TOLERANCE:
-                continue
-
-            # Detect unit scale for USD conversion
-            context_html = html_text[max(0, tbl["pos"] - 3_000): tbl["pos"]]
-            unit_mult = _detect_unit_multiplier(tbl["table_html"], context_html)
-            region_usd = region_val * unit_mult
-            total_usd = total_val * unit_mult
-
-            # Extract nearest section heading
-            heading = ""
-            pre_html = html_text[max(0, tbl["pos"] - 6_000): tbl["pos"]]
-            h_matches = _re.findall(r"<h[1-6][^>]*>(.*?)</h[1-6]>", pre_html, _re.IGNORECASE | _re.DOTALL)
-            if h_matches:
-                heading = _strip_html_tags(h_matches[-1])
-
-            header_row = rows[0] if rows else []
-            source_col = _geo_column_header(rows, region_row_idx, ordinal) or (str(header_row[value_col]).strip() if value_col < len(header_row) else "")
-            unit_scale = (
-                "thousands" if unit_mult == 1_000.0
-                else "millions" if unit_mult == 1_000_000.0
-                else "actual" if unit_mult == 1.0
-                else "actual"
-            )
-            evidence = {
-                "sectionHeading": heading or None,
-                "tableTitle": None,
-                "sourceTableId": 1,
-                "sourceRows": [
-                    [
-                        str(rows[region_row_idx][0] if rows[region_row_idx] else region),
-                        str(rows[region_row_idx][value_col]) if value_col < len(rows[region_row_idx]) else "",
-                    ],
-                    [
-                        _row_label(rows[total_row_idx], "Total revenue"),
-                        str(rows[total_row_idx][total_col]),
-                    ],
-                ],
-                "sourceColumns": [source_col] if source_col else [],
-                "unitScale": unit_scale,
-                "rawValue": str(rows[region_row_idx][value_col]) if value_col < len(rows[region_row_idx]) else None,
-                "rawDenominator": str(rows[total_row_idx][total_col]),
-            }
-            return ratio, region_usd, total_usd, heading, evidence
-
-    return None, None, None, "", None
+    evidence = {
+        "sectionHeading": geo["sectionHeading"] or None,
+        "tableTitle": None,
+        "sourceTableId": 1,
+        "sourceRows": geo["sourceRows"],
+        "sourceColumns": geo["sourceColumns"],
+        "unitScale": geo["unitScale"],
+        "rawValue": geo["rawValue"],
+        "rawDenominator": geo["rawDenominator"],
+    }
+    return geo["pct"], geo["usd"], geo["denominator"], geo["sectionHeading"], evidence
 
 
 # ---------------------------------------------------------------------------

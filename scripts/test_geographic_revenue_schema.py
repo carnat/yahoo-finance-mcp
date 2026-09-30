@@ -213,8 +213,15 @@ def main() -> int:
     axti = call("extract_sec_filing_fact", {"ticker": "AXTI", "fact": "geographic_revenue", "region": "China"}, 5)
     axti_data = data_of(axti)
     assert_geo_shape(axti_data)
-    if axti_data.get("confidence") not in ("NOT_DISCLOSED", "NOT_DECISION_GRADE", "LOW"):
-        raise AssertionError(f"AXTI expected undisclosed confidence, got {axti_data.get('confidence')!r}")
+    # AXTI's 10-K geographic table is parsed since 2.5.18 (Python ported the Worker's parser): a value is a
+    # share of revenue; anything else must say it is not decision grade.
+    axti_confidence = axti_data.get("confidence")
+    if axti_confidence == "HIGH":
+        ratio = axti_data.get("valueRatio")
+        if not isinstance(ratio, (int, float)) or not 0 < ratio <= 1:
+            raise AssertionError(f"AXTI HIGH confidence needs a valueRatio in (0, 1], got {ratio!r}")
+    elif axti_confidence not in ("NOT_DISCLOSED", "NOT_DECISION_GRADE", "LOW"):
+        raise AssertionError(f"AXTI unexpected confidence {axti_confidence!r}")
 
     qcom = call("extract_sec_filing_fact", {"ticker": "QCOM", "fact": "geographic_revenue", "region": "China"}, 1)
     qcom_data = data_of(qcom)

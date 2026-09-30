@@ -457,6 +457,7 @@ class TestExposureFanOut(unittest.TestCase):
         with patch("server._get_submissions_for_ticker", new_callable=AsyncMock), \
              patch("server.get_sec_filing_index", side_effect=self._slow({"index": {}})), \
              patch("server.extract_revenue_exposure", side_effect=self._slow({"status": "NOT_DISCLOSED"})), \
+             patch("server.search_sec_filing_text", side_effect=self._slow({"matches": []})), \
              patch("server.extract_risk_factor_mentions", side_effect=self._slow({"matches": []})):
             started = time.monotonic()
             result = _parse(_run(srv.extract_china_exposure(ticker="AAPL")))
