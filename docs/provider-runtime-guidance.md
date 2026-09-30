@@ -1581,6 +1581,30 @@ Vantage and IBKR produced these fixes.
 - **Runtimes and tests.** Both runtimes. `scripts/test_guidance_and_drivers.py`
   (`CALENDAR_CASES`) and `scripts/test_evidence.py`.
 
+### SEC Fact Payload Parity And Dead Worker Code (2.5.16)
+
+- **Missing facts (Python).** When no us-gaap fact exists for the requested
+  form, Python returned `source`/`confidence` NOT_DISCLOSED with no code, so
+  `extract_total_revenue` read NOT_DISCLOSED where the Worker reads NOT_FOUND
+  with `code` NO_COMPANYCONCEPT_FACT_FOR_FORM. Python now returns the
+  Worker's payload: `status` SEC_FACT_NOT_AVAILABLE, the code
+  (NO_COMPANYCONCEPT_FACT_FOR_FORM, or SEC_FACTS_IFRS_ONLY for an IFRS-only
+  filer), the latest filing of that form as evidence (with AUTO_20F_FALLBACK
+  when a 20-F stands in for a 10-K), warnings and `_manualLookup`. A form a
+  company tags no facts in is a lookup outcome, not a non-disclosure.
+- **Found facts (Python).** A found fact's `xbrlContext` now carries the
+  Worker's `concept`, `taxonomy`, `unit`, `instant`, `accessionNumber`,
+  `filedAt` and `dimensions`. Without the concept, Python's decision-grade
+  check failed: `extract_total_revenue` read `decisionGrade: false` for
+  ANET's and BE's FY2025 revenue, where the Worker reads true.
+- **Dead Worker code.** `getFilingTextSearch` and `getFilingDocument` had no
+  callers (the public tools use `searchFilingText`); they and the helpers only
+  they used (`filingTextOnlyMatches`, `edgarPrimaryDocFromIndex`) are removed.
+  No public output changes.
+- **Tests.** `scripts/test_sec_fact_payloads.py` runs both runtimes against
+  mocked SEC responses (found, no facts for the form, IFRS-only, malformed
+  concept) and compares their payloads.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
