@@ -96,6 +96,21 @@ FILINGS = [
     {"form": "8-K", "filingDate": "2026-03-01", "reportDate": "2026-03-01", "items": "2.02", "isInlineXBRL": True},
 ]
 STALE_FILINGS = [{"form": "10-K", "filingDate": "2025-03-01", "reportDate": "2024-12-31", "items": "", "isInlineXBRL": False}]
+# Foreign private issuers (2.5.15): one annual report a year and interim results on 6-K; stale only when the next
+# 20-F is overdue. AS_OF_LATER is 273 days after the 2025-12-31 period end.
+AS_OF_LATER = "2026-09-30T08:00:00.000Z"
+FPI_FILINGS = [
+    {"form": "20-F", "filingDate": "2026-04-30", "reportDate": "2025-12-31", "items": "", "isInlineXBRL": True},
+    {"form": "6-K", "filingDate": "2026-08-20", "reportDate": "2026-08-20", "items": "", "isInlineXBRL": False},
+    {"form": "6-K", "filingDate": "2026-07-16", "reportDate": "2026-07-16", "items": "", "isInlineXBRL": False},
+]
+FPI_STALE_FILINGS = [
+    {"form": "20-F", "filingDate": "2025-04-30", "reportDate": "2024-12-31", "items": "", "isInlineXBRL": True},
+    {"form": "6-K", "filingDate": "2026-08-20", "reportDate": "2026-08-20", "items": "", "isInlineXBRL": False},
+]
+FPI_40FA_FILINGS = [{"form": "40-F/A", "filingDate": "2026-03-20", "reportDate": "2025-12-31", "items": "", "isInlineXBRL": False}]
+QUOTE_FAILED = {"price": None, "currency": None, "priceTime": None, "status": "PROVIDER_ERROR"}
+QUOTE_NO_DATA = {"price": None, "currency": None, "priceTime": None, "status": "NO_DATA"}
 
 CANONICAL_CASES = [
     {"b": [1, 2.5, -0.0, 1e21, 1.5e21, 1e-7, 0.000001, 123.456, 31520000.0, -2.2839, 1e16, 5e-324], "a": "é\n\"q\"\u0001", "c": None, "d": True},
@@ -144,6 +159,16 @@ def _python_outputs() -> dict:
     curve = ev.build_consensus_curve("asts", [yahoo, av], AS_OF)
     quality = ev.evidence_quality(ticker="ASTS", as_of=AS_OF, quote={"price": 81.2, "currency": "USD", "priceTime": "2026-09-25T20:00:00.000Z", "status": "OK"},
                                   filings=FILINGS, filings_status="OK", consensus=curve, storage_available=True)
+    failed_yahoo = ev.yahoo_consensus_input([], retrieved_at=AS_OF, status="PROVIDER_ERROR", message="down")
+    failed_av = ev.alpha_vantage_consensus_input({}, retrieved_at=AS_OF, status="RATE_LIMIT", message="25 requests per day")
+    curve_failed = ev.build_consensus_curve("asts", [failed_yahoo, failed_av], AS_OF)
+    curve_failed_one = ev.build_consensus_curve("asts", [failed_yahoo, av], AS_OF)
+    curve_no_data = ev.build_consensus_curve("asts", [ev.yahoo_consensus_input([], retrieved_at=AS_OF, status="NO_DATA")], AS_OF)
+
+    def later(**kw: object) -> dict:
+        return ev.evidence_quality(ticker="tsm", as_of=AS_OF_LATER, quote=kw.get("quote", {"price": 81.2, "currency": "USD", "priceTime": "2026-09-29T20:00:00.000Z", "status": "OK"}),  # type: ignore[arg-type]
+                                   filings=kw.get("filings", FILINGS), filings_status="OK", consensus=kw.get("consensus"), storage_available=True)  # type: ignore[arg-type]
+
     components = {name: ev.component_from_tool_text(name, text, AS_OF) for name, text in COMPONENT_TEXTS}
     hashes = {name: hashlib.sha256(ev.canonical_json(c).encode()).hexdigest() for name, c in components.items()}
     receipt = ev.build_receipt(ticker="asts", evidence_cutoff=AS_OF, server_version="2.5.0", build_sha="abc", runtime="test",
@@ -163,6 +188,15 @@ def _python_outputs() -> dict:
         "qualityStale": ev.evidence_quality(ticker="old", as_of=AS_OF, quote=None, filings=STALE_FILINGS, filings_status="OK", consensus=None, storage_available=False),
         "qualityNoSec": ev.evidence_quality(ticker="iqe.l", as_of=AS_OF, quote={"price": 12.5, "currency": "GBp", "priceTime": "2026-09-10T16:00:00.000Z", "status": "OK"},
                                             filings=None, filings_status="TICKER_NOT_FOUND", consensus=curve, storage_available=True),
+        "qualityFpiReady": later(filings=FPI_FILINGS),
+        "qualityFpiStale": later(filings=FPI_STALE_FILINGS),
+        "qualityFpi40FA": later(filings=FPI_40FA_FILINGS),
+        "qualityQuarterlyLater": later(filings=FILINGS),
+        "qualityQuoteFailed": later(quote=QUOTE_FAILED, filings=FPI_FILINGS),
+        "qualityQuoteNoData": later(quote=QUOTE_NO_DATA, filings=FPI_FILINGS),
+        "qualityConsensusFailed": later(consensus=curve_failed),
+        "qualityConsensusOneFailed": later(consensus=curve_failed_one),
+        "qualityConsensusNoData": later(consensus=curve_no_data),
         "components": components,
         "receipt": receipt,
         "cutId": ev.evidence_cut_id("asts", AS_OF, "a" * 64),
@@ -188,6 +222,12 @@ const derived = m.yahooConsensusInput(f.derivedTrend, { retrievedAt: AS_OF, fina
 const conflict = m.alphaVantageConsensusInput({ estimates: [{ ...f.av.estimates[1], revenue_estimate_average: "120000000" }] }, { retrievedAt: AS_OF });
 const curve = m.buildConsensusCurve("asts", [yahoo, av], AS_OF);
 const quality = m.evidenceQuality({ ticker: "ASTS", asOf: AS_OF, quote: { price: 81.2, currency: "USD", priceTime: "2026-09-25T20:00:00.000Z", status: "OK" }, filings: f.filings, filingsStatus: "OK", consensus: curve, storageAvailable: true });
+const failedYahoo = m.yahooConsensusInput([], { retrievedAt: AS_OF, status: "PROVIDER_ERROR", message: "down" });
+const failedAv = m.alphaVantageConsensusInput({}, { retrievedAt: AS_OF, status: "RATE_LIMIT", message: "25 requests per day" });
+const curveFailed = m.buildConsensusCurve("asts", [failedYahoo, failedAv], AS_OF);
+const curveFailedOne = m.buildConsensusCurve("asts", [failedYahoo, av], AS_OF);
+const curveNoData = m.buildConsensusCurve("asts", [m.yahooConsensusInput([], { retrievedAt: AS_OF, status: "NO_DATA" })], AS_OF);
+const later = (o) => m.evidenceQuality({ ticker: "tsm", asOf: f.asOfLater, quote: "quote" in o ? o.quote : { price: 81.2, currency: "USD", priceTime: "2026-09-29T20:00:00.000Z", status: "OK" }, filings: "filings" in o ? o.filings : f.filings, filingsStatus: "OK", consensus: o.consensus ?? null, storageAvailable: true });
 const components = Object.fromEntries(f.componentTexts.map(([name, text]) => [name, m.componentFromToolText(name, text, AS_OF)]));
 const { createHash } = await import("node:crypto");
 const hashes = Object.fromEntries(Object.entries(components).map(([k, c]) => [k, createHash("sha256").update(m.canonicalJson(c)).digest("hex")]));
@@ -206,6 +246,15 @@ const out = {
   quality,
   qualityStale: m.evidenceQuality({ ticker: "old", asOf: AS_OF, quote: null, filings: f.staleFilings, filingsStatus: "OK", consensus: null, storageAvailable: false }),
   qualityNoSec: m.evidenceQuality({ ticker: "iqe.l", asOf: AS_OF, quote: { price: 12.5, currency: "GBp", priceTime: "2026-09-10T16:00:00.000Z", status: "OK" }, filings: null, filingsStatus: "TICKER_NOT_FOUND", consensus: curve, storageAvailable: true }),
+  qualityFpiReady: later({ filings: f.fpiFilings }),
+  qualityFpiStale: later({ filings: f.fpiStaleFilings }),
+  qualityFpi40FA: later({ filings: f.fpi40faFilings }),
+  qualityQuarterlyLater: later({ filings: f.filings }),
+  qualityQuoteFailed: later({ quote: f.quoteFailed, filings: f.fpiFilings }),
+  qualityQuoteNoData: later({ quote: f.quoteNoData, filings: f.fpiFilings }),
+  qualityConsensusFailed: later({ consensus: curveFailed }),
+  qualityConsensusOneFailed: later({ consensus: curveFailedOne }),
+  qualityConsensusNoData: later({ consensus: curveNoData }),
   components,
   receipt,
   cutId: m.evidenceCutId("asts", AS_OF, "a".repeat(64)),
@@ -226,6 +275,8 @@ def _worker_outputs() -> dict:
     fixtures = {
         "asOf": AS_OF, "yahooTrend": YAHOO_TREND, "av": AV, "thinTrend": THIN_TREND, "adrTrend": ADR_TREND_NEXT, "adrOther": ADR_OTHER,
         "derivedTrend": DERIVED_TREND, "filings": FILINGS, "staleFilings": STALE_FILINGS, "componentTexts": COMPONENT_TEXTS,
+        "asOfLater": AS_OF_LATER, "fpiFilings": FPI_FILINGS, "fpiStaleFilings": FPI_STALE_FILINGS, "fpi40faFilings": FPI_40FA_FILINGS,
+        "quoteFailed": QUOTE_FAILED, "quoteNoData": QUOTE_NO_DATA,
         # JSON cannot carry -0.0 distinctly from 0 in every parser; both runtimes format it as 0.
         "canonical": CANONICAL_CASES,
         "boundaryCases": BOUNDARY_CASES,
@@ -372,6 +423,61 @@ class TestEvidenceQualityAndReceipt(unittest.TestCase):
                          ("MISSING", "STALE", "PARTIAL", "UNAVAILABLE"))
         no_sec = self.out["qualityNoSec"]["families"]
         self.assertEqual((no_sec["quote"]["state"], no_sec["secPeriodicFiling"]["state"], no_sec["dilution"]["state"]), ("STALE", "UNAVAILABLE", "UNAVAILABLE"))
+
+    def test_annual_filers_are_stale_only_when_the_next_20f_is_overdue(self) -> None:
+        # 2026-09-30 is 273 days after 2025-12-31: STALE for a 135-day quarterly filer, READY for a 20-F filer (2.5.15).
+        ready = self.out["qualityFpiReady"]["families"]["secPeriodicFiling"]
+        self.assertEqual((ready["state"], ready["cadence"], ready["staleAfterDays"], ready["periodAgeDays"], ready["latestInterim6k"]),
+                         ("READY", "ANNUAL", 492, 273, "2026-08-20"))
+        self.assertEqual(list(ready), ["state", "form", "filingDate", "periodEnd", "periodAgeDays", "cadence", "staleAfterDays", "latestInterim6k", "inlineXbrl", "sourceStatus"])
+        self.assertFalse([b for b in self.out["qualityFpiReady"]["blockers"] if b["family"] == "secPeriodicFiling"])
+        stale = self.out["qualityFpiStale"]["families"]["secPeriodicFiling"]
+        self.assertEqual((stale["state"], stale["cadence"], stale["periodAgeDays"], stale["latestInterim6k"]), ("STALE", "ANNUAL", 638, "2026-08-20"))
+        self.assertIn("SEC_PERIODIC_STALE", [b["code"] for b in self.out["qualityFpiStale"]["blockers"]])
+        # 40-F/A is a periodic form; a filer with no 6-K has a null interim date, not a missing key.
+        amended = self.out["qualityFpi40FA"]["families"]["secPeriodicFiling"]
+        self.assertEqual((amended["form"], amended["state"], amended["cadence"], amended["latestInterim6k"]), ("40-F/A", "READY", "ANNUAL", None))
+        # A quarterly filer keeps 135 days and has no interim key.
+        quarterly = self.out["qualityQuarterlyLater"]["families"]["secPeriodicFiling"]
+        self.assertEqual((quarterly["state"], quarterly["cadence"], quarterly["staleAfterDays"], quarterly["periodAgeDays"]), ("READY", "QUARTERLY", 135, 92))
+        self.assertNotIn("latestInterim6k", quarterly)
+        old_10k = self.out["qualityStale"]["families"]["secPeriodicFiling"]
+        self.assertEqual((old_10k["state"], old_10k["cadence"], old_10k["staleAfterDays"]), ("STALE", "QUARTERLY", 135))
+        no_filings = self.out["qualityNoSec"]["families"]["secPeriodicFiling"]
+        self.assertEqual((no_filings["state"], no_filings["cadence"], no_filings["staleAfterDays"]), ("UNAVAILABLE", None, None))
+
+    def test_a_failed_quote_is_unavailable_and_retryable(self) -> None:
+        failed = self.out["qualityQuoteFailed"]
+        self.assertEqual((failed["families"]["quote"]["state"], failed["families"]["quote"]["sourceStatus"]), ("UNAVAILABLE", "PROVIDER_ERROR"))
+        self.assertEqual([b for b in failed["blockers"] if b["family"] == "quote"], [{
+            "family": "quote", "code": "QUOTE_UNAVAILABLE", "retryable": True,
+            "message": "The price request failed (PROVIDER_ERROR); retry. Mechanical dilution at price cannot run without it."}])
+        # No data is a missing price, not a failed request.
+        no_data = self.out["qualityQuoteNoData"]
+        self.assertEqual(no_data["families"]["quote"]["state"], "MISSING")
+        self.assertEqual([b["code"] for b in no_data["blockers"] if b["family"] == "quote"], ["QUOTE_MISSING"])
+        self.assertEqual(self.out["qualityStale"]["families"]["quote"]["state"], "MISSING")
+
+    def test_consensus_that_every_provider_failed_to_read_is_one_retryable_blocker(self) -> None:
+        failed = self.out["qualityConsensusFailed"]
+        consensus = failed["families"]["consensus"]
+        self.assertEqual((consensus["state"], consensus["cells"]), ("UNAVAILABLE", {}))
+        self.assertEqual(consensus["providerStatuses"], [{"provider": "yahoo_finance", "status": "PROVIDER_ERROR"}, {"provider": "alpha_vantage", "status": "RATE_LIMIT"}])
+        blockers = [b for b in failed["blockers"] if b["family"] == "consensus"]
+        self.assertEqual(len(blockers), 1)
+        self.assertEqual((blockers[0]["code"], blockers[0]["retryable"]), ("CONSENSUS_PROVIDER_ERROR", True))
+        self.assertEqual(blockers[0]["message"], "No estimates were read: yahoo_finance PROVIDER_ERROR, alpha_vantage RATE_LIMIT; retry. Analyst coverage is unknown, not absent.")
+        # One provider read is enough to report coverage cell by cell; no data from anyone is missing coverage, not an error.
+        one = self.out["qualityConsensusOneFailed"]["families"]["consensus"]
+        self.assertNotEqual(one["state"], "UNAVAILABLE")
+        self.assertTrue(one["cells"])
+        self.assertNotIn("CONSENSUS_PROVIDER_ERROR", [b["code"] for b in self.out["qualityConsensusOneFailed"]["blockers"]])
+        no_data = self.out["qualityConsensusNoData"]["families"]["consensus"]
+        self.assertEqual(no_data["providerStatuses"], [{"provider": "yahoo_finance", "status": "NO_DATA"}])
+        self.assertNotIn("CONSENSUS_PROVIDER_ERROR", [b["code"] for b in self.out["qualityConsensusNoData"]["blockers"]])
+        # providerStatuses is always present, including when consensus was not read at all.
+        self.assertEqual(self.out["qualityStale"]["families"]["consensus"]["providerStatuses"], [])
+        self.assertEqual(self.out["quality"]["families"]["consensus"]["providerStatuses"], [{"provider": "yahoo_finance", "status": "OK"}, {"provider": "alpha_vantage", "status": "OK"}])
 
     def test_components_and_receipt(self) -> None:
         c = self.out["components"]

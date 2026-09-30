@@ -5216,7 +5216,12 @@ async def get_filing_data(
         except Exception:
             return None
 
-    def _geo_shape(payload: dict, *, warn_denominator: bool = False) -> str:
+    # Warnings raised while reading SEC facts, carried on every result (2.5.15).
+    read_warnings: list[dict] = []
+
+    def _geo_shape(payload: dict, *, warn_denominator: bool = False, add_read_warnings: bool = True) -> str:
+        if read_warnings and add_read_warnings:
+            payload = {**payload, "warnings": [*(payload["warnings"] if isinstance(payload.get("warnings"), list) else []), *read_warnings]}
         if fact_type != FilingFactType.geographic_revenue:
             return json.dumps(payload)
         shaped = {
@@ -5328,12 +5333,42 @@ async def get_filing_data(
     # Every equivalent concept is read; the one with the newest filing of this
     # form wins, so a filer that switched concepts is not read from its old one.
     candidate_names = [concept_primary, *_FILING_FACT_ALTERNATES.get(fact_type, []), *([concept_fallback] if concept_fallback else [])]
+    # SEC's companyconcept endpoint has served a concept's USD facts as an empty object instead of a list (BE,
+    # 2026-09): those facts are read from companyfacts, which carries them (2.5.15). Fetched at most once.
+    malformed_concepts: list[str] = []
+    companyfacts_read: list[dict | None] = []
+
+    async def _concept_rows(name: str) -> list:
+        data = await _concept_json(name)
+        units = data.get("units") if isinstance(data, dict) else None
+        usd = units.get("USD") if isinstance(units, dict) else None
+        if usd is None or isinstance(usd, list):
+            return usd or []
+        malformed_concepts.append(name)
+        if not companyfacts_read:
+            try:
+                companyfacts_read.append(await _edgar_get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_padded}.json"))
+            except EdgarError:
+                companyfacts_read.append(None)
+        cf = companyfacts_read[0]
+        facts = cf.get("facts") if isinstance(cf, dict) else None
+        us_gaap = facts.get("us-gaap") if isinstance(facts, dict) else None
+        entry = us_gaap.get(name) if isinstance(us_gaap, dict) else None
+        entry_units = entry.get("units") if isinstance(entry, dict) else None
+        rows = entry_units.get("USD") if isinstance(entry_units, dict) else None
+        return rows if isinstance(rows, list) else []
+
     fetched_concepts = []
     for name in candidate_names:
-        data = await _concept_json(name)
-        fetched_concepts.append({"concept": name, "facts": (data.get("units", {}).get("USD", []) if data else [])})
+        fetched_concepts.append({"concept": name, "facts": await _concept_rows(name)})
+    if malformed_concepts:
+        read_warnings.append({
+            "code": "SEC_COMPANYCONCEPT_MALFORMED",
+            "message": f"SEC companyconcept returned no fact list for {', '.join(malformed_concepts)}; those facts were read from companyfacts.",
+            "severity": "info",
+        })
     pinned_accession = accession_number.strip() if accession_number and accession_number.strip() else None
-    chosen = _sf.pick_concept_facts(fetched_concepts, filing_type, pinned_accession)
+    chosen = _sf.pick_concept_facts(fetched_concepts, filing_type, pinned_accession, "larger" if fact_type == FilingFactType.total_revenue else "first")
     concept_used = chosen["concept"] if chosen else concept_primary
     filtered = list(chosen["facts"]) if chosen else []
     if not filtered and pinned_accession:
@@ -5355,10 +5390,40 @@ async def get_filing_data(
             "accessionNumber": pinned_accession,
             "requestedAccession": pinned_accession,
             "evidence": {},
-            "warnings": [{"code": "NO_FACT_FOR_ACCESSION", "message": f"SEC companyconcept has no {' / '.join(candidate_names)} fact in accession {pinned_accession} ({filing_type}).", "severity": "warning"}],
-        })
+            # As in the Worker's unavailableStructuredFact: the read warnings come before this result's own.
+            "warnings": [*read_warnings, {"code": "NO_FACT_FOR_ACCESSION", "message": f"SEC companyconcept has no {' / '.join(candidate_names)} fact in accession {pinned_accession} ({filing_type}).", "severity": "warning"}],
+        }, add_read_warnings=False)
     if not filtered:
         if fact_type != FilingFactType.geographic_revenue:
+            # An IFRS filer (TSM's 20-F) tags ifrs-full, never us-gaap: say so rather than report the fact
+            # missing (2.5.15). Same code, status and warnings as the Worker's unavailableStructuredFact.
+            if not companyfacts_read:
+                try:
+                    companyfacts_read.append(await _edgar_get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_padded}.json"))
+                except EdgarError:
+                    companyfacts_read.append(None)
+            cf = companyfacts_read[0]
+            taxonomies = cf.get("facts") if isinstance(cf, dict) else None
+            if isinstance(taxonomies, dict) and taxonomies.get("ifrs-full") and not taxonomies.get("us-gaap"):
+                message = (f"{ticker.upper()} reports its SEC facts under IFRS (ifrs-full), which this action does not read; "
+                           "reconcile_metric_sources reads IFRS facts in the reporting currency.")
+                return _geo_shape({
+                    "ticker": ticker,
+                    "factType": fact_type.value,
+                    "concept": concept_used,
+                    "value": None,
+                    "denominator": None,
+                    "valueRatio": None,
+                    "valuePct": None,
+                    "extractionMethod": "NONE",
+                    "source": "SEC_COMPANYCONCEPT",
+                    "confidence": "NOT_DECISION_GRADE",
+                    "status": "SEC_FACT_NOT_AVAILABLE",
+                    "code": "SEC_FACTS_IFRS_ONLY",
+                    "filingType": filing_type,
+                    "evidence": {},
+                    "warnings": [*read_warnings, {"code": "SEC_FACTS_IFRS_ONLY", "message": message, "severity": "warning"}],
+                }, add_read_warnings=False)
             return _geo_shape({
                 "ticker": ticker,
                 "factType": fact_type.value,
@@ -9226,7 +9291,8 @@ async def extract_total_revenue(
         "factType": "total_revenue",
         "value": val,
         "period": payload.get("period"),
-        "unit": payload.get("unit") or "USD",
+        # No value, no unit: a missing fact has no currency (2.5.15).
+        "unit": (payload.get("unit") or "USD") if val is not None else None,
         "unitScale": payload.get("unitScale"),
         "confidence": payload.get("confidence", "NOT_DISCLOSED" if val is None else "HIGH"),
         "extractionMethod": payload.get("extractionMethod", "NONE"),
@@ -9235,6 +9301,10 @@ async def extract_total_revenue(
         "xbrlContext": payload.get("xbrlContext"),
         "decisionGrade": decision_grade,
         "status": status,
+        # Why there is no value (NO_SEC_REGISTRANT, SEC_FACTS_IFRS_ONLY, ...) and the read's warnings (2.5.15).
+        "code": None if val is not None else (payload.get("code") if isinstance(payload.get("code"), str) else None),
+        "message": None if val is not None else (payload.get("message") if isinstance(payload.get("message"), str) else None),
+        "warnings": payload.get("warnings") if isinstance(payload.get("warnings"), list) else [],
     })
 
 

@@ -549,7 +549,12 @@ export interface FilingRow {
   isInlineXBRL: boolean | null;
 }
 
-const PERIODIC_FORMS = new Set(["10-K", "10-Q", "20-F", "40-F", "10-K/A", "10-Q/A", "20-F/A"]);
+const PERIODIC_FORMS = new Set(["10-K", "10-Q", "20-F", "40-F", "10-K/A", "10-Q/A", "20-F/A", "40-F/A"]);
+const QUARTERLY_REPORT_STALE_DAYS = 135;
+// A year plus the four months a 20-F has after year end, plus a week of 52/53-week drift.
+const ANNUAL_REPORT_STALE_DAYS = 365 + 120 + 7;
+// Provider statuses that mean the request failed, as opposed to the provider having nothing (NO_DATA).
+const PROVIDER_FAILURE_STATUSES = new Set(["PROVIDER_ERROR", "RATE_LIMIT", "PROVIDER_TIMEOUT", "ERROR", "TIMEOUT"]);
 
 /**
  * Status, freshness and coverage per doctrine-relevant evidence family, from
@@ -571,27 +576,41 @@ export function evidenceQuality(input: {
 
   const q = input.quote;
   const quoteAge = q?.priceTime ? daysBetween(q.priceTime, input.asOf) : null;
+  // A quote request that failed is not a missing price: it is unavailable and worth a retry (2.5.15).
+  const quoteFailed = q?.price == null && PROVIDER_FAILURE_STATUSES.has(String(q?.status ?? ""));
   families.quote = {
-    state: q?.price != null ? (quoteAge != null && quoteAge > 4 ? "STALE" : "READY") : "MISSING",
+    state: q?.price != null ? (quoteAge != null && quoteAge > 4 ? "STALE" : "READY") : quoteFailed ? "UNAVAILABLE" : "MISSING",
     price: q?.price ?? null,
     currency: q?.currency ?? null,
     priceTime: q?.priceTime ?? null,
     ageDays: quoteAge,
     sourceStatus: q?.status ?? "NOT_RETRIEVED",
   };
-  if (q?.price == null) block("quote", "QUOTE_MISSING", "No current price; mechanical dilution at price cannot run.");
+  if (quoteFailed) blockers.push({ family: "quote", code: "QUOTE_UNAVAILABLE", message: `The price request failed (${q?.status}); retry. Mechanical dilution at price cannot run without it.`, retryable: true });
+  else if (q?.price == null) block("quote", "QUOTE_MISSING", "No current price; mechanical dilution at price cannot run.");
 
   const filings = input.filings ?? [];
   const periodic = filings.filter((f) => PERIODIC_FORMS.has(f.form)).sort((a, b) => b.filingDate.localeCompare(a.filingDate))[0] ?? null;
   const periodEnd = periodic?.reportDate ?? null;
   const periodAge = periodEnd ? daysBetween(periodEnd, input.asOf) : null;
-  const periodicState = !input.filings ? "UNAVAILABLE" : !periodic ? "MISSING" : periodAge != null && periodAge > 135 ? "STALE" : "READY";
+  // A foreign private issuer files one periodic report a year (20-F within four months of year end, 40-F
+  // likewise) and furnishes interim results on 6-K; its periodic report is stale only once the next one is
+  // overdue (2.5.15: TSM, TSEM, NBIS were STALE at 273 days).
+  const annualCadence = periodic != null && /^(?:20-F|40-F)/.test(periodic.form);
+  const staleAfterDays = annualCadence ? ANNUAL_REPORT_STALE_DAYS : QUARTERLY_REPORT_STALE_DAYS;
+  const periodicState = !input.filings ? "UNAVAILABLE" : !periodic ? "MISSING" : periodAge != null && periodAge > staleAfterDays ? "STALE" : "READY";
+  const latest6k = annualCadence
+    ? filings.filter((f) => f.form === "6-K").map((f) => f.filingDate).sort().slice(-1)[0] ?? null
+    : undefined;
   families.secPeriodicFiling = {
     state: periodicState,
     form: periodic?.form ?? null,
     filingDate: periodic?.filingDate ?? null,
     periodEnd,
     periodAgeDays: periodAge,
+    cadence: periodic == null ? null : annualCadence ? "ANNUAL" : "QUARTERLY",
+    staleAfterDays: periodic == null ? null : staleAfterDays,
+    ...(latest6k !== undefined ? { latestInterim6k: latest6k } : {}),
     inlineXbrl: periodic?.isInlineXBRL ?? null,
     sourceStatus: input.filingsStatus,
   };
@@ -625,6 +644,12 @@ export function evidenceQuality(input: {
     latest8k: recent8k.map((f) => f.filingDate).sort().slice(-1)[0] ?? null,
   };
 
+  // No provider returned estimates because every request failed (Yahoo errored, Alpha Vantage rate-limited):
+  // that says nothing about analyst coverage, so the family is UNAVAILABLE with one retryable blocker (2.5.15).
+  const providerStatuses = ((input.consensus?.providers ?? []) as Rec[]).map((p) => ({ provider: String(p.provider ?? ""), status: String(p.status ?? "") }));
+  const consensusFailed = providerStatuses.length > 0
+    && !providerStatuses.some((p) => p.status === "OK")
+    && providerStatuses.some((p) => PROVIDER_FAILURE_STATUSES.has(p.status));
   const periodsOut = ((input.consensus?.periods ?? []) as Rec[]).slice(0, 2);
   const cells: Rec = {};
   for (const p of periodsOut) {
@@ -633,12 +658,22 @@ export function evidenceQuality(input: {
   }
   const covered = Object.values(cells).filter((c) => c === "PROVIDER_COVERED").length;
   families.consensus = {
-    state: !input.consensus ? "UNAVAILABLE" : covered === Object.keys(cells).length && covered > 0 ? "READY" : covered > 0 ? "PARTIAL" : "MISSING",
-    cells,
+    state: !input.consensus || consensusFailed ? "UNAVAILABLE" : covered === Object.keys(cells).length && covered > 0 ? "READY" : covered > 0 ? "PARTIAL" : "MISSING",
+    cells: consensusFailed ? {} : cells,
     beyondFy1: "PROVIDER_NOT_COVERED",
+    providerStatuses,
   };
-  for (const [cell, coverage] of Object.entries(cells)) {
-    if (coverage !== "PROVIDER_COVERED") block("consensus", String(coverage), `${cell} is ${coverage}.`);
+  if (consensusFailed) {
+    blockers.push({
+      family: "consensus",
+      code: "CONSENSUS_PROVIDER_ERROR",
+      message: `No estimates were read: ${providerStatuses.map((p) => `${p.provider} ${p.status}`).join(", ")}; retry. Analyst coverage is unknown, not absent.`,
+      retryable: true,
+    });
+  } else {
+    for (const [cell, coverage] of Object.entries(cells)) {
+      if (coverage !== "PROVIDER_COVERED") block("consensus", String(coverage), `${cell} is ${coverage}.`);
+    }
   }
 
   families.evidenceStorage = { state: input.storageAvailable ? "READY" : "UNAVAILABLE", durable: input.storageAvailable };

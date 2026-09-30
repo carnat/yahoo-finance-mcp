@@ -118,6 +118,20 @@ FILING_CONCEPTS = [
         {"form": "10-Q", "accn": "0001193125-26-200000", "filed": "2026-05-10", "start": "2026-01-01", "end": "2026-03-31", "val": 14735000},
     ]},
 ]
+# BE FY2025 (2.5.15): both revenue concepts tagged in one 10-K; contract revenue is a part of the total. The
+# earlier-listed concept is the smaller. A malformed companyconcept leaves `facts` an object, not a list.
+BE_TIE_CONCEPTS = [
+    {"concept": "RevenueFromContractWithCustomerExcludingAssessedTax", "facts": [
+        {"form": "10-K", "accn": "0001664703-26-000010", "filed": "2026-02-26", "start": "2025-01-01", "end": "2025-12-31", "val": 2001614000},
+    ]},
+    {"concept": "Revenues", "facts": [
+        {"form": "10-K", "accn": "0001664703-26-000010", "filed": "2026-02-26", "start": "2025-01-01", "end": "2025-12-31", "val": 2023994000},
+    ]},
+]
+MALFORMED_CONCEPTS = [
+    {"concept": "RevenueFromContractWithCustomerIncludingAssessedTax", "facts": {}},
+    *BE_TIE_CONCEPTS,
+]
 CASH_CONCEPTS = [{"concept": "CashAndCashEquivalentsAtCarryingValue", "facts": [
     {"form": "10-Q", "accn": "0001193125-26-342550", "filed": "2026-08-10", "end": "2025-12-31", "val": 1000},
     {"form": "10-Q", "accn": "0001193125-26-342550", "filed": "2026-08-10", "end": "2026-06-30", "val": 2288253000},
@@ -150,6 +164,13 @@ const out = {
   pickLatest10k: f.pickConceptFacts(d.concepts, "10-K", null),
   pickPinned: f.pickConceptFacts(d.concepts, "10-Q", "0000950170-23-063737"),
   pickPinnedMissing: f.pickConceptFacts(d.concepts, "10-Q", "0001193125-26-999999"),
+  tieFirst: f.pickConceptFacts(d.beTie, "10-K", null),
+  tieFirstExplicit: f.pickConceptFacts(d.beTie, "10-K", null, "first"),
+  tieLarger: f.pickConceptFacts(d.beTie, "10-K", null, "larger"),
+  tieLargerReversed: f.pickConceptFacts([...d.beTie].reverse(), "10-K", null, "larger"),
+  malformedSkipped: f.pickConceptFacts(d.malformed, "10-K", null, "larger"),
+  malformedAlone: f.pickConceptFacts([d.malformed[0]], "10-K", null),
+  malformedFiling: f.filingFactInAccession(d.malformed, "0001664703-26-000010"),
   filingRevenue: f.filingFactInAccession(d.filingConcepts, "0001193125-26-342550"),
   filingCash: f.filingFactInAccession(d.cashConcepts, "0001193125-26-342550"),
   filingMissing: f.filingFactInAccession(d.filingConcepts, "0001193125-26-999999"),
@@ -169,7 +190,7 @@ def _data() -> dict:
     return {
         "aaoi": AAOI_MATCHES, "negation": NEGATION_MATCHES, "astsRelease": ASTS_RELEASE, "keywordFirst": KEYWORD_FIRST,
         "awardFirst": AWARD_FIRST, "guidanceOnly": GUIDANCE_ONLY, "stemWords": STEM_WORDS, "evidence": EVIDENCE, "concepts": CONCEPTS,
-        "filingConcepts": FILING_CONCEPTS, "cashConcepts": CASH_CONCEPTS,
+        "filingConcepts": FILING_CONCEPTS, "cashConcepts": CASH_CONCEPTS, "beTie": BE_TIE_CONCEPTS, "malformed": MALFORMED_CONCEPTS,
         "cohrOutlook": COHR_OUTLOOK, "mixedBasis": MIXED_BASIS, "mrvlOutlook": MRVL_OUTLOOK, "vrtOutlook": VRT_OUTLOOK,
         "nvdaOutlook": NVDA_OUTLOOK, "liteOutlook": LITE_OUTLOOK, "resultsTable": RESULTS_TABLE,
     }
@@ -216,6 +237,13 @@ def _python() -> dict:
         "pickLatest10k": sf.pick_concept_facts(d["concepts"], "10-K", None),
         "pickPinned": sf.pick_concept_facts(d["concepts"], "10-Q", "0000950170-23-063737"),
         "pickPinnedMissing": sf.pick_concept_facts(d["concepts"], "10-Q", "0001193125-26-999999"),
+        "tieFirst": sf.pick_concept_facts(d["beTie"], "10-K", None),
+        "tieFirstExplicit": sf.pick_concept_facts(d["beTie"], "10-K", None, "first"),
+        "tieLarger": sf.pick_concept_facts(d["beTie"], "10-K", None, "larger"),
+        "tieLargerReversed": sf.pick_concept_facts(list(reversed(d["beTie"])), "10-K", None, "larger"),
+        "malformedSkipped": sf.pick_concept_facts(d["malformed"], "10-K", None, "larger"),
+        "malformedAlone": sf.pick_concept_facts([d["malformed"][0]], "10-K", None),
+        "malformedFiling": sf.filing_fact_in_accession(d["malformed"], "0001664703-26-000010"),
         "filingRevenue": sf.filing_fact_in_accession(d["filingConcepts"], "0001193125-26-342550"),
         "filingCash": sf.filing_fact_in_accession(d["cashConcepts"], "0001193125-26-342550"),
         "filingMissing": sf.filing_fact_in_accession(d["filingConcepts"], "0001193125-26-999999"),
@@ -313,6 +341,31 @@ class TestRules(unittest.TestCase):
         self.assertEqual(self.out["pickLatest10k"]["concept"], "RevenueFromContractWithCustomerIncludingAssessedTax")
         self.assertEqual(self.out["pickPinned"]["concept"], "RevenueFromContractWithCustomerExcludingAssessedTax")
         self.assertIsNone(self.out["pickPinnedMissing"])
+
+
+class TestRevenueTieAndMalformedFacts(unittest.TestCase):
+    """2.5.15: BE tags Revenues and contract revenue in one filing, and SEC has served an object where a fact list belongs."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.out = _python()
+
+    def test_first_keeps_the_earlier_listed_concept_on_a_tie(self) -> None:
+        for key in ("tieFirst", "tieFirstExplicit"):
+            picked = self.out[key]
+            self.assertEqual((picked["concept"], [f["val"] for f in picked["facts"]]),
+                             ("RevenueFromContractWithCustomerExcludingAssessedTax", [2001614000]), key)
+
+    def test_larger_takes_the_bigger_newest_period_on_a_tie(self) -> None:
+        for key in ("tieLarger", "tieLargerReversed"):
+            picked = self.out[key]
+            self.assertEqual((picked["concept"], [f["val"] for f in picked["facts"]]), ("Revenues", [2023994000]), key)
+
+    def test_a_concept_without_a_fact_list_is_skipped(self) -> None:
+        self.assertEqual(self.out["malformedSkipped"]["concept"], "Revenues")
+        self.assertIsNone(self.out["malformedAlone"])
+        self.assertEqual(self.out["malformedFiling"]["concept"], "RevenueFromContractWithCustomerExcludingAssessedTax")
+        self.assertEqual(self.out["malformedFiling"]["fact"]["val"], 2001614000)
 
 
 class TestFilingSnapshot(unittest.TestCase):

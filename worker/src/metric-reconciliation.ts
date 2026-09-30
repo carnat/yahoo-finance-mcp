@@ -78,7 +78,10 @@ export function metricFacts(companyfacts: unknown, metric: string): { taxonomy: 
       }
     }
     if (byUnit.size === 0) continue;
-    const [unit, rows] = [...byUnit.entries()].sort((a, b) => b[1].length - a[1].length || cmp(a[0], b[0]))[0];
+    // The unit the issuer reports in now: the one filed most recently (NBIS reported in RUB as Yandex to
+    // FY2023 and in USD from FY2024; the longer RUB history is not its reporting unit), then the most facts (2.5.15).
+    const newest = (rows: Row[]) => rows.reduce((m, r) => (r.filed > m ? r.filed : m), "");
+    const [unit, rows] = [...byUnit.entries()].sort((a, b) => cmp(newest(b[1]), newest(a[1])) || b[1].length - a[1].length || cmp(a[0], b[0]))[0];
     return { taxonomy, unit, rows };
   }
   return { taxonomy: null, unit: null, rows: [] };
@@ -200,6 +203,14 @@ export function resolvePeriod(companyfacts: unknown, metric: string, spec: strin
   };
 }
 
+/** NetIncomeLossAttributableToNoncontrollingInterest for a ProfitLoss row's period, in the same filing; null when not tagged. */
+function nciShare(companyfacts: unknown, unit: string | null, r: Row): number | null {
+  const list = ((((((companyfacts ?? {}) as Rec).facts as Rec | undefined)?.["us-gaap"] as Rec | undefined)?.NetIncomeLossAttributableToNoncontrollingInterest as Rec | undefined)?.units as Record<string, Rec[]> | undefined)?.[unit ?? ""];
+  if (!Array.isArray(list)) return null;
+  const hit = list.find((f) => f.accn === r.accn && f.end === r.end && f.start === r.start && typeof f.val === "number");
+  return hit ? (hit.val as number) : null;
+}
+
 function rowRef(r: Row): Rec {
   return { concept: r.concept, value: r.val, form: r.form, filed: r.filed, accessionNumber: r.accn };
 }
@@ -216,10 +227,28 @@ export function secObservations(companyfacts: unknown, metric: string, period: R
   // is not compared with ProfitLoss (which includes noncontrolling interests) from the same filing.
   const concepts = taxonomy === "ifrs-full" ? spec.ifrs : spec.gaap;
   const newestFiled = (c: string) => all.filter((r) => r.concept === c).reduce((m, r) => (r.filed > m ? r.filed : m), "");
-  const concept = concepts.filter((c) => newestFiled(c) !== "").reduce((best, c) => (newestFiled(c) > newestFiled(best) ? c : best));
+  // Revenue tagged under two concepts in the same filing is its total under the larger: contract revenue is a
+  // part of Revenues (BE FY2025: 2,001,614,000 of 2,023,994,000) (2.5.15).
+  const newestMagnitude = (c: string) => Math.max(...all.filter((r) => r.concept === c && r.filed === newestFiled(c)).map((r) => Math.abs(r.val)));
+  const concept = concepts.filter((c) => newestFiled(c) !== "").reduce((best, c) =>
+    newestFiled(c) > newestFiled(best) || (metric === "revenue" && newestFiled(c) === newestFiled(best) && newestMagnitude(c) > newestMagnitude(best)) ? c : best);
   const matching = all.filter((r) => r.concept === concept).sort((a, b) => cmp(a.filed, b.filed) || cmp(a.accn, b.accn));
   const first = matching[0];
   const last = matching[matching.length - 1];
+  // Net income is the parent's: a filer that tags only ProfitLoss (BE) includes noncontrolling interests, so
+  // the NCI share tagged for the same period in the same filing is taken off and the derivation shown (2.5.15).
+  if (metric === "net_income" && taxonomy === "us-gaap" && concept === "ProfitLoss") {
+    const nci = (r: Row) => nciShare(companyfacts, unit, r);
+    const lastNci = nci(last);
+    const firstNci = nci(first);
+    if (lastNci != null && firstNci != null) {
+      const derived = (r: Row, share: number) => ({ ...rowRef(r), value: r.val - share, profitLoss: r.val, noncontrollingInterest: share, derivation: "ProfitLoss - NetIncomeLossAttributableToNoncontrollingInterest" });
+      return [
+        { source: "SEC_XBRL_LATEST", provider: "SEC", status: "FOUND", value: last.val - lastNci, unit, taxonomy, precision: 0, basis: "PARENT_DERIVED_FROM_PROFITLOSS", evidence: derived(last, lastNci), filedValues: [...new Set(matching.map((r) => r.val))], otherConcepts: [] },
+        { source: "SEC_XBRL_AS_FIRST_FILED", provider: "SEC", status: "FOUND", value: first.val - firstNci, unit, taxonomy, precision: 0, basis: "PARENT_DERIVED_FROM_PROFITLOSS", evidence: derived(first, firstNci) },
+      ];
+    }
+  }
   const distinct = [...new Set(matching.map((r) => r.val))];
   const otherConcepts = concepts
     .filter((c) => c !== concept && newestFiled(c) !== "")
@@ -240,7 +269,8 @@ const NON_RESULT_RE = /\b(?:awards?|awarded|contract value|aggregate value|backl
 const QUARTER_SCOPE_RE = /\b(?:quarter(?:ly)?|three months|Q[1-4])\b/i;
 const ANNUAL_SCOPE_RE = /\b(?:full[- ]year|fiscal (?:year )?20\d\d|years? ended|twelve months|for (?:the )?(?:fiscal )?year|annual)\b/i;
 const INSTANT_SCOPE_RE = /\b(?:as of|ended (?:the )?(?:quarter|year|period)|at (?:the )?(?:end|close) of|balance)\b/i;
-const MONEY_RE = /(\(?)\s?(-?)\s?\$\s?(\(?)(-?)([0-9][0-9,]*)(\.[0-9]+)?\)?(?:\s?(billion|million|thousand)\b)?/i;
+// Scale words and their abbreviations ("$1.81B", "$808.4M", "$2.5 bn") (2.5.15: COHR's "$1.81B" read as 1.81).
+const MONEY_RE = /(\(?)\s?(-?)\s?\$\s?(\(?)(-?)([0-9][0-9,]*)(\.[0-9]+)?\)?(?:\s?(billion|million|thousand|bn|mn|mm|[bmk])\b)?/i;
 const QUARTER_ORDINAL = ["first", "second", "third", "fourth"];
 // "quarter of fiscal 2027", "Q2 fiscal 2027", "fiscal 2027 second quarter", "fiscal year 2027 Q2": a fiscal year
 // naming the quarter it qualifies (the quarter word is kept, the year dropped), not a full-year scope.
@@ -326,7 +356,13 @@ function explicitPeriodMatches(sentence: string, amountStart: number, period: Re
   }
   return true;
 }
-const SCALE: Record<string, number> = { billion: 1e9, million: 1e6, thousand: 1e3 };
+const SCALE: Record<string, number> = { billion: 1e9, million: 1e6, thousand: 1e3, bn: 1e9, b: 1e9, mn: 1e6, mm: 1e6, m: 1e6, k: 1e3 };
+// A figure that is a per-share amount, or a non-GAAP/adjusted one, is never a GAAP total (2.5.15: "GAAP net
+// income of $0.97 per diluted share" read as COHR's net income; SNDK's "Non-GAAP diluted net income per share").
+const PER_SHARE_RE = /\bper\s+(?:diluted\s+|basic\s+)?(?:common\s+)?(?:share|ADS|ADR)\b|\bEPS\b/i;
+const NON_GAAP_RE = /\bnon-?\s?GAAP\b|\badjusted\b/i;
+// "(in thousands, except per share data)": the scale of a release's statement tables.
+const TABLE_SCALE_RE = /\(\s*(?:\$|US\$|dollars|amounts)?\s*in\s+(thousands|millions|billions)\b/gi;
 
 /** A release sentence's figure for the metric and period, or why none was read. */
 export function releaseObservation(release: Rec | null, metric: string, period: Rec, reportingUnit: string | null): Rec {
@@ -336,15 +372,47 @@ export function releaseObservation(release: Rec | null, metric: string, period: 
   if (reportingUnit && !/^USD/.test(reportingUnit)) return { ...base, status: "NOT_COMPARED_CURRENCY", value: null, reportingUnit };
   const spec = METRICS[metric];
   const label = new RegExp(spec.releaseLabel, "i");
-  const anchored = new RegExp(`(${spec.releaseLabel})[^$]{0,80}?${MONEY_RE.source}`, "i");
+  const anchored = new RegExp(`(${spec.releaseLabel})[^$]{0,80}?${MONEY_RE.source}`, "gi");
+  // An unscaled table figure takes the release's table scale only when the release declares exactly one;
+  // with none it is read as written, with several it is not read (2.5.15: FN's "$ 1,214,293" in thousands).
+  const tableScales = [...new Set([...collapse(release.text).matchAll(TABLE_SCALE_RE)].map((x) => x[1].toLowerCase().replace(/s$/, "")))];
   let unscoped = 0;
+  let rejected = 0;
   for (const raw of collapse(release.text).split(PIECE_SPLIT_RE)) {
     const sentence = raw.trim();
     if (!sentence || sentence.length > 600 || !label.test(sentence)) continue;
     if (GUIDANCE_RE.test(sentence) || NON_RESULT_RE.test(sentence)) continue;
     // Scope is read on the sentence with fiscal shorthand spelled out; the evidence is the sentence as written.
     const text = normalizeFiscalTokens(sentence);
-    const m = anchored.exec(text);
+    // Every label-and-amount pair in the sentence, not only the first: "Non-GAAP net income was $X; GAAP net
+    // income was $Y" holds a GAAP figure after a rejected one.
+    anchored.lastIndex = 0;
+    let m: RegExpExecArray | null = null;
+    let scale = 1;
+    let scaleBasis: string | null = null;
+    for (let c = anchored.exec(text); c; c = anchored.exec(text)) {
+      const amountEnd = c.index + c[0].length;
+      const lead = text.slice(Math.max(0, c.index - 40), c.index + c[0].indexOf("$"));
+      const tail = text.slice(amountEnd, amountEnd + 30);
+      if (NON_GAAP_RE.test(lead)) { rejected += 1; continue; }
+      if (spec.unit === "money" && (PER_SHARE_RE.test(c[0].slice(c[1].length)) || /^\s*(?:per|a)\s+(?:diluted\s+|basic\s+)?(?:common\s+)?(?:share|ADS|ADR)\b/i.test(tail))) { rejected += 1; continue; }
+      const word = c[8];
+      if (word) {
+        scale = SCALE[word.toLowerCase()];
+        scaleBasis = "AS_WRITTEN";
+      } else if (spec.unit === "money" && tableScales.length > 1) {
+        rejected += 1;
+        continue;
+      } else if (spec.unit === "money" && tableScales.length === 1) {
+        scale = SCALE[tableScales[0]];
+        scaleBasis = `RELEASE_TABLE_IN_${tableScales[0].toUpperCase()}S`;
+      } else {
+        scale = 1;
+        scaleBasis = null;
+      }
+      m = c;
+      break;
+    }
     if (!m) continue;
     const quarter = QUARTER_SCOPE_RE.test(text);
     // "second quarter of fiscal 2027" and "fiscal 2026 third quarter" name a quarter, not a year.
@@ -359,16 +427,15 @@ export function releaseObservation(release: Rec | null, metric: string, period: 
       unscoped += 1;
       continue;
     }
-    const [, labelText, openParen, minus, innerParen, innerMinus, intPart, frac, scaleWord] = m;
-    const scale = scaleWord ? SCALE[scaleWord.toLowerCase()] : 1;
+    const [, labelText, openParen, minus, innerParen, innerMinus, intPart, frac] = m;
     const magnitude = parseFloat(`${intPart.replace(/,/g, "")}${frac ?? ""}`) * scale;
     const negative = openParen === "(" || innerParen === "(" || minus === "-" || innerMinus === "-" || /\bloss\b/i.test(labelText);
     const decimals = frac ? frac.length - 1 : 0;
     const precision = 0.5 * 10 ** -decimals * scale;
     const asWritten = m[0].slice(labelText.length).replace(/^[^$(-]*/, "").trim();
-    return { ...base, status: "FOUND", value: negative ? -magnitude : magnitude, precision, asWritten, sentence: sentence.slice(0, 400) };
+    return { ...base, status: "FOUND", value: negative ? -magnitude : magnitude, precision, asWritten, ...(scaleBasis && scaleBasis !== "AS_WRITTEN" ? { scaleBasis } : {}), sentence: sentence.slice(0, 400) };
   }
-  return { ...base, status: "NOT_FOUND_IN_TEXT", value: null, unscopedCandidates: unscoped };
+  return { ...base, status: "NOT_FOUND_IN_TEXT", value: null, unscopedCandidates: unscoped, ...(rejected ? { rejectedCandidates: rejected } : {}) };
 }
 
 /**

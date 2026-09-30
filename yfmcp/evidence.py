@@ -538,7 +538,12 @@ def days_between(from_iso: str, to_iso: str) -> int:
     return _day(to_iso) - _day(from_iso)
 
 
-_PERIODIC_FORMS = {"10-K", "10-Q", "20-F", "40-F", "10-K/A", "10-Q/A", "20-F/A"}
+_PERIODIC_FORMS = {"10-K", "10-Q", "20-F", "40-F", "10-K/A", "10-Q/A", "20-F/A", "40-F/A"}
+QUARTERLY_REPORT_STALE_DAYS = 135
+# A year plus the four months a 20-F has after year end, plus a week of 52/53-week drift.
+ANNUAL_REPORT_STALE_DAYS = 365 + 120 + 7
+# Provider statuses that mean the request failed, as opposed to the provider having nothing (NO_DATA).
+PROVIDER_FAILURE_STATUSES = {"PROVIDER_ERROR", "RATE_LIMIT", "PROVIDER_TIMEOUT", "ERROR", "TIMEOUT"}
 
 
 def evidence_quality(*, ticker: str, as_of: str, quote: dict | None, filings: list[dict] | None, filings_status: str,
@@ -555,15 +560,19 @@ def evidence_quality(*, ticker: str, as_of: str, quote: dict | None, filings: li
 
     q = quote
     quote_age = days_between(q["priceTime"], as_of) if q and q.get("priceTime") else None
+    # A quote request that failed is not a missing price: it is unavailable and worth a retry (2.5.15).
+    quote_failed = (not q or q.get("price") is None) and str((q.get("status") if q else None) or "") in PROVIDER_FAILURE_STATUSES
     families["quote"] = {
-        "state": ("STALE" if quote_age is not None and quote_age > 4 else "READY") if q and q.get("price") is not None else "MISSING",
+        "state": ("STALE" if quote_age is not None and quote_age > 4 else "READY") if q and q.get("price") is not None else "UNAVAILABLE" if quote_failed else "MISSING",
         "price": q.get("price") if q else None,
         "currency": q.get("currency") if q else None,
         "priceTime": q.get("priceTime") if q else None,
         "ageDays": quote_age,
         "sourceStatus": q.get("status") if q else "NOT_RETRIEVED",
     }
-    if not q or q.get("price") is None:
+    if quote_failed:
+        blockers.append({"family": "quote", "code": "QUOTE_UNAVAILABLE", "message": f"The price request failed ({q.get('status')}); retry. Mechanical dilution at price cannot run without it.", "retryable": True})
+    elif not q or q.get("price") is None:
         block("quote", "QUOTE_MISSING", "No current price; mechanical dilution at price cannot run.")
 
     rows = filings or []
@@ -571,13 +580,22 @@ def evidence_quality(*, ticker: str, as_of: str, quote: dict | None, filings: li
     periodic = periodic_rows[0] if periodic_rows else None
     period_end = periodic["reportDate"] if periodic else None
     period_age = days_between(period_end, as_of) if period_end else None
-    periodic_state = "UNAVAILABLE" if filings is None else "MISSING" if not periodic else "STALE" if period_age is not None and period_age > 135 else "READY"
+    # A foreign private issuer files one periodic report a year (20-F within four months of year end, 40-F
+    # likewise) and furnishes interim results on 6-K; its periodic report is stale only once the next one is
+    # overdue (2.5.15: TSM, TSEM, NBIS were STALE at 273 days).
+    annual_cadence = periodic is not None and re.match(r"(?:20-F|40-F)", periodic["form"]) is not None
+    stale_after_days = ANNUAL_REPORT_STALE_DAYS if annual_cadence else QUARTERLY_REPORT_STALE_DAYS
+    periodic_state = "UNAVAILABLE" if filings is None else "MISSING" if not periodic else "STALE" if period_age is not None and period_age > stale_after_days else "READY"
+    latest_6k = sorted(f["filingDate"] for f in rows if f["form"] == "6-K")[-1:] if annual_cadence else None
     families["secPeriodicFiling"] = {
         "state": periodic_state,
         "form": periodic["form"] if periodic else None,
         "filingDate": periodic["filingDate"] if periodic else None,
         "periodEnd": period_end,
         "periodAgeDays": period_age,
+        "cadence": None if periodic is None else "ANNUAL" if annual_cadence else "QUARTERLY",
+        "staleAfterDays": None if periodic is None else stale_after_days,
+        **({"latestInterim6k": latest_6k[0] if latest_6k else None} if annual_cadence else {}),
         "inlineXbrl": periodic["isInlineXBRL"] if periodic else None,
         "sourceStatus": filings_status,
     }
@@ -615,6 +633,13 @@ def evidence_quality(*, ticker: str, as_of: str, quote: dict | None, filings: li
         "latest8k": latest[-1] if latest else None,
     }
 
+    # No provider returned estimates because every request failed (Yahoo errored, Alpha Vantage rate-limited):
+    # that says nothing about analyst coverage, so the family is UNAVAILABLE with one retryable blocker (2.5.15).
+    provider_statuses = [{"provider": str(p.get("provider") if p.get("provider") is not None else ""), "status": str(p.get("status") if p.get("status") is not None else "")}
+                         for p in ((consensus or {}).get("providers") or [])]
+    consensus_failed = (len(provider_statuses) > 0
+                        and not any(p["status"] == "OK" for p in provider_statuses)
+                        and any(p["status"] in PROVIDER_FAILURE_STATUSES for p in provider_statuses))
     cells: dict[str, str] = {}
     for p in ((consensus or {}).get("periods") or [])[:2]:
         m = p.get("metrics") or {}
@@ -622,13 +647,22 @@ def evidence_quality(*, ticker: str, as_of: str, quote: dict | None, filings: li
             cells[f"{p['label']}.{metric}"] = (m.get(metric) or {}).get("coverage") or "PROVIDER_NOT_COVERED"
     covered = sum(1 for c in cells.values() if c == "PROVIDER_COVERED")
     families["consensus"] = {
-        "state": "UNAVAILABLE" if not consensus else "READY" if covered == len(cells) and covered > 0 else "PARTIAL" if covered > 0 else "MISSING",
-        "cells": cells,
+        "state": "UNAVAILABLE" if not consensus or consensus_failed else "READY" if covered == len(cells) and covered > 0 else "PARTIAL" if covered > 0 else "MISSING",
+        "cells": {} if consensus_failed else cells,
         "beyondFy1": "PROVIDER_NOT_COVERED",
+        "providerStatuses": provider_statuses,
     }
-    for cell, coverage in cells.items():
-        if coverage != "PROVIDER_COVERED":
-            block("consensus", coverage, f"{cell} is {coverage}.")
+    if consensus_failed:
+        blockers.append({
+            "family": "consensus",
+            "code": "CONSENSUS_PROVIDER_ERROR",
+            "message": f"No estimates were read: {', '.join(p['provider'] + ' ' + p['status'] for p in provider_statuses)}; retry. Analyst coverage is unknown, not absent.",
+            "retryable": True,
+        })
+    else:
+        for cell, coverage in cells.items():
+            if coverage != "PROVIDER_COVERED":
+                block("consensus", coverage, f"{cell} is {coverage}.")
 
     families["evidenceStorage"] = {"state": "READY" if storage_available else "UNAVAILABLE", "durable": storage_available}
 

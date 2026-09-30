@@ -24,23 +24,43 @@ export type ConceptFacts = { concept: string; facts: Record<string, unknown>[] }
  * accession only facts from that filing count, so the first concept tagged in
  * it wins. The returned facts are already limited to the form and accession.
  */
-export function pickConceptFacts(candidates: ConceptFacts[], form: string, accession: string | null = null): ConceptFacts | null {
+export function pickConceptFacts(
+  candidates: ConceptFacts[],
+  form: string,
+  accession: string | null = null,
+  onTie: "first" | "larger" = "first",
+): ConceptFacts | null {
   const wantForm = form.toUpperCase();
   const wantAccession = accession ? accession.trim() : "";
   let best: ConceptFacts | null = null;
   let bestFiled = "";
+  let bestSize = -1;
   for (const candidate of candidates) {
+    if (!Array.isArray(candidate.facts)) continue;
     const rows = candidate.facts.filter((f) =>
       String(f.form ?? "").toUpperCase() === wantForm
       && (!wantAccession || String(f.accn ?? "") === wantAccession));
     if (rows.length === 0) continue;
     const filed = rows.reduce((latest, f) => (String(f.filed ?? "") > latest ? String(f.filed ?? "") : latest), "");
-    if (best == null || filed > bestFiled) {
+    const size = newestPeriodMagnitude(rows, filed);
+    if (best == null || filed > bestFiled || (onTie === "larger" && filed === bestFiled && size > bestSize)) {
       best = { concept: candidate.concept, facts: rows };
       bestFiled = filed;
+      bestSize = size;
     }
   }
   return best;
+}
+
+/**
+ * The largest magnitude a concept reports for the latest period end in its newest filing. For revenue, a
+ * filer tagging both Revenues and RevenueFromContractWithCustomer... in one filing (BE: 2,023,994,000 and
+ * 2,001,614,000) reports its total under the larger; contract revenue is a part of it (2.5.15).
+ */
+function newestPeriodMagnitude(rows: Record<string, unknown>[], filed: string): number {
+  const inFiling = rows.filter((f) => String(f.filed ?? "") === filed && typeof f.val === "number");
+  const end = inFiling.reduce((m, f) => (String(f.end ?? "") > m ? String(f.end ?? "") : m), "");
+  return inFiling.filter((f) => String(f.end ?? "") === end).reduce((m, f) => Math.max(m, Math.abs(f.val as number)), -1);
 }
 
 function durationDays(fact: Record<string, unknown>): number {
@@ -61,6 +81,7 @@ function durationDays(fact: Record<string, unknown>): number {
 export function filingFactInAccession(candidates: ConceptFacts[], accession: string): { concept: string; fact: Record<string, unknown> } | null {
   const want = accession.trim();
   for (const candidate of candidates) {
+    if (!Array.isArray(candidate.facts)) continue;
     const rows = candidate.facts.filter((f) => String(f.accn ?? "") === want && typeof f.end === "string" && f.end && f.val != null);
     if (rows.length === 0) continue;
     const latestEnd = rows.reduce((m, f) => (String(f.end) > m ? String(f.end) : m), "");

@@ -20,28 +20,48 @@ REVENUE_CONCEPTS = [
 ]
 
 
-def pick_concept_facts(candidates: list[dict], form: str, accession: str | None = None) -> dict | None:
+def pick_concept_facts(candidates: list[dict], form: str, accession: str | None = None, on_tie: str = "first") -> dict | None:
     """Of several concepts for one fact, the one whose facts for the form were filed most recently.
 
     The earlier-listed concept wins a tie. With a pinned accession only facts
     from that filing count, so the first concept tagged in it wins. The
     returned facts are already limited to the form and accession.
+
+    With on_tie="larger" (2.5.15), a candidate filed on the same date as the
+    best replaces it when its newest-period magnitude is larger. Candidates
+    whose facts are not a list are skipped.
     """
     want_form = form.upper()
     want_accession = accession.strip() if accession else ""
     best = None
     best_filed = ""
+    best_size = -1
     for candidate in candidates:
+        if not isinstance(candidate.get("facts"), list):
+            continue
         rows = [f for f in candidate["facts"]
                 if str(f.get("form") or "").upper() == want_form
                 and (not want_accession or str(f.get("accn") or "") == want_accession)]
         if not rows:
             continue
         filed = max(str(f.get("filed") or "") for f in rows)
-        if best is None or filed > best_filed:
+        size = _newest_period_magnitude(rows, filed)
+        if best is None or filed > best_filed or (on_tie == "larger" and filed == best_filed and size > best_size):
             best = {"concept": candidate["concept"], "facts": rows}
             best_filed = filed
+            best_size = size
     return best
+
+
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _newest_period_magnitude(rows: list[dict], filed: str) -> float:
+    """The largest magnitude a concept reports for the latest period end in its newest filing (2.5.15)."""
+    in_filing = [f for f in rows if str(f.get("filed") or "") == filed and _is_number(f.get("val"))]
+    end = max((str(f.get("end") or "") for f in in_filing), default="")
+    return max((abs(f["val"]) for f in in_filing if str(f.get("end") or "") == end), default=-1)
 
 
 def _duration_days(fact: dict) -> float:
@@ -66,6 +86,8 @@ def filing_fact_in_accession(candidates: list[dict], accession: str) -> dict | N
     """
     want = accession.strip()
     for candidate in candidates:
+        if not isinstance(candidate.get("facts"), list):
+            continue
         rows = [f for f in candidate["facts"]
                 if str(f.get("accn") or "") == want and isinstance(f.get("end"), str) and f.get("end") and f.get("val") is not None]
         if not rows:

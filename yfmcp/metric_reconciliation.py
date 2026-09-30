@@ -82,7 +82,13 @@ def metric_facts(companyfacts: Any, metric: str) -> tuple[str | None, str | None
                                                          "fp": f.get("fp") if isinstance(f.get("fp"), str) else None})
         if not by_unit:
             continue
-        unit, rows = sorted(by_unit.items(), key=lambda kv: (-len(kv[1]), kv[0]))[0]
+        # The unit the issuer reports in now: the one filed most recently (NBIS reported in RUB as Yandex to
+        # FY2023 and in USD from FY2024; the longer RUB history is not its reporting unit), then the most facts (2.5.15).
+        # Stable sorts from the least to the most significant key: name ascending, rows descending, newest filing descending.
+        ranked = sorted(by_unit.items(), key=lambda kv: kv[0])
+        ranked.sort(key=lambda kv: len(kv[1]), reverse=True)
+        ranked.sort(key=lambda kv: max(r["filed"] for r in kv[1]), reverse=True)
+        unit, rows = ranked[0]
         return taxonomy, unit, rows
     return None, None, []
 
@@ -214,6 +220,21 @@ def _row_ref(r: dict) -> dict:
     return {"concept": r["concept"], "value": r["val"], "form": r["form"], "filed": r["filed"], "accessionNumber": r["accn"]}
 
 
+def _nci_share(companyfacts: Any, unit: str | None, r: dict) -> float | int | None:
+    """NetIncomeLossAttributableToNoncontrollingInterest for a ProfitLoss row's period, in the same filing; None when not tagged."""
+    facts = companyfacts.get("facts") if isinstance(companyfacts, dict) else None
+    us_gaap = facts.get("us-gaap") if isinstance(facts, dict) else None
+    entry = us_gaap.get("NetIncomeLossAttributableToNoncontrollingInterest") if isinstance(us_gaap, dict) else None
+    units = entry.get("units") if isinstance(entry, dict) else None
+    rows = units.get(unit or "") if isinstance(units, dict) else None
+    if not isinstance(rows, list):
+        return None
+    for f in rows:
+        if isinstance(f, dict) and "accn" in f and f["accn"] == r["accn"] and f.get("end") == r["end"] and f.get("start") == r["start"] and _num(f.get("val")):
+            return f["val"]
+    return None
+
+
 def sec_observations(companyfacts: Any, metric: str, period: dict) -> list[dict]:
     """SEC values for the period: as first filed and as most recently filed, with every distinct value filed."""
     taxonomy, unit, rows = metric_facts(companyfacts, metric)
@@ -232,10 +253,16 @@ def sec_observations(companyfacts: Any, metric: str, period: dict) -> list[dict]
                 filed = r["filed"]
         return filed
 
+    # Revenue tagged under two concepts in the same filing is its total under the larger: contract revenue is a
+    # part of Revenues (BE FY2025: 2,001,614,000 of 2,023,994,000) (2.5.15).
+    def newest_magnitude(c: str) -> float:
+        newest = newest_filed(c)
+        return max(abs(r["val"]) for r in all_rows if r["concept"] == c and r["filed"] == newest)
+
     present = [c for c in concepts if newest_filed(c) != ""]
     concept = present[0]
     for c in present[1:]:
-        if newest_filed(c) > newest_filed(concept):
+        if newest_filed(c) > newest_filed(concept) or (metric == "revenue" and newest_filed(c) == newest_filed(concept) and newest_magnitude(c) > newest_magnitude(concept)):
             concept = c
 
     def ordered(c: str) -> list[dict]:
@@ -243,6 +270,21 @@ def sec_observations(companyfacts: Any, metric: str, period: dict) -> list[dict]
 
     matching = ordered(concept)
     first, last = matching[0], matching[-1]
+    # Net income is the parent's: a filer that tags only ProfitLoss (BE) includes noncontrolling interests, so
+    # the NCI share tagged for the same period in the same filing is taken off and the derivation shown (2.5.15).
+    if metric == "net_income" and taxonomy == "us-gaap" and concept == "ProfitLoss":
+        last_nci = _nci_share(companyfacts, unit, last)
+        first_nci = _nci_share(companyfacts, unit, first)
+        if last_nci is not None and first_nci is not None:
+            def derived(r: dict, share: float | int) -> dict:
+                return {**_row_ref(r), "value": r["val"] - share, "profitLoss": r["val"], "noncontrollingInterest": share,
+                        "derivation": "ProfitLoss - NetIncomeLossAttributableToNoncontrollingInterest"}
+            return [
+                {"source": "SEC_XBRL_LATEST", "provider": "SEC", "status": "FOUND", "value": last["val"] - last_nci, "unit": unit, "taxonomy": taxonomy, "precision": 0,
+                 "basis": "PARENT_DERIVED_FROM_PROFITLOSS", "evidence": derived(last, last_nci), "filedValues": list(dict.fromkeys(r["val"] for r in matching)), "otherConcepts": []},
+                {"source": "SEC_XBRL_AS_FIRST_FILED", "provider": "SEC", "status": "FOUND", "value": first["val"] - first_nci, "unit": unit, "taxonomy": taxonomy, "precision": 0,
+                 "basis": "PARENT_DERIVED_FROM_PROFITLOSS", "evidence": derived(first, first_nci)},
+            ]
     distinct = list(dict.fromkeys(r["val"] for r in matching))
     other_concepts = [_row_ref(ordered(c)[-1]) for c in present if c != concept]
     return [
@@ -260,7 +302,8 @@ _NON_RESULT_RE = re.compile(r"\b(?:awards?|awarded|contract value|aggregate valu
 _QUARTER_SCOPE_RE = re.compile(r"\b(?:quarter(?:ly)?|three months|Q[1-4])\b", _F)
 _ANNUAL_SCOPE_RE = re.compile(r"\b(?:full[- ]year|fiscal (?:year )?20\d\d|years? ended|twelve months|for (?:the )?(?:fiscal )?year|annual)\b", _F)
 _INSTANT_SCOPE_RE = re.compile(r"\b(?:as of|ended (?:the )?(?:quarter|year|period)|at (?:the )?(?:end|close) of|balance)\b", _F)
-_MONEY = r"(\(?)\s?(-?)\s?\$\s?(\(?)(-?)([0-9][0-9,]*)(\.[0-9]+)?\)?(?:\s?(billion|million|thousand)\b)?"
+# Scale words and their abbreviations ("$1.81B", "$808.4M", "$2.5 bn") (2.5.15: COHR's "$1.81B" read as 1.81).
+_MONEY = r"(\(?)\s?(-?)\s?\$\s?(\(?)(-?)([0-9][0-9,]*)(\.[0-9]+)?\)?(?:\s?(billion|million|thousand|bn|mn|mm|[bmk])\b)?"
 _QUARTER_ORDINAL = ("first", "second", "third", "fourth")
 # "quarter of fiscal 2027", "Q2 fiscal 2027", "fiscal 2027 second quarter", "fiscal year 2027 Q2": a fiscal year
 # naming the quarter it qualifies (the quarter word is kept, the year dropped), not a full-year scope.
@@ -352,7 +395,14 @@ def _explicit_period_matches(sentence: str, amount_start: int, period: dict) -> 
     return True
 
 
-_SCALE = {"billion": 1e9, "million": 1e6, "thousand": 1e3}
+_SCALE = {"billion": 1e9, "million": 1e6, "thousand": 1e3, "bn": 1e9, "b": 1e9, "mn": 1e6, "mm": 1e6, "m": 1e6, "k": 1e3}
+# A figure that is a per-share amount, or a non-GAAP/adjusted one, is never a GAAP total (2.5.15: "GAAP net
+# income of $0.97 per diluted share" read as COHR's net income; SNDK's "Non-GAAP diluted net income per share").
+_PER_SHARE_RE = re.compile(r"\bper\s+(?:diluted\s+|basic\s+)?(?:common\s+)?(?:share|ADS|ADR)\b|\bEPS\b", _F)
+_PER_SHARE_TAIL_RE = re.compile(r"^\s*(?:per|a)\s+(?:diluted\s+|basic\s+)?(?:common\s+)?(?:share|ADS|ADR)\b", _F)
+_NON_GAAP_RE = re.compile(r"\bnon-?\s?GAAP\b|\badjusted\b", _F)
+# "(in thousands, except per share data)": the scale of a release's statement tables.
+_TABLE_SCALE_RE = re.compile(r"\(\s*(?:\$|US\$|dollars|amounts)?\s*in\s+(thousands|millions|billions)\b", _F)
 
 
 def release_observation(release: dict | None, metric: str, period: dict, reporting_unit: str | None) -> dict:
@@ -368,7 +418,11 @@ def release_observation(release: dict | None, metric: str, period: dict, reporti
     spec = METRICS[metric]
     label = re.compile(spec["releaseLabel"], _F)
     anchored = re.compile(f"({spec['releaseLabel']})[^$]{{0,80}}?{_MONEY}", _F)
+    # An unscaled table figure takes the release's table scale only when the release declares exactly one;
+    # with none it is read as written, with several it is not read (2.5.15: FN's "$ 1,214,293" in thousands).
+    table_scales = list(dict.fromkeys(x.group(1).lower().removesuffix("s") for x in _TABLE_SCALE_RE.finditer(_collapse(release["text"]))))
     unscoped = 0
+    rejected = 0
     for raw in _PIECE_SPLIT_RE.split(_collapse(release["text"])):
         sentence = raw.strip()
         if not sentence or len(sentence) > 600 or not label.search(sentence):
@@ -377,7 +431,36 @@ def release_observation(release: dict | None, metric: str, period: dict, reporti
             continue
         # Scope is read on the sentence with fiscal shorthand spelled out; the evidence is the sentence as written.
         text = normalize_fiscal_tokens(sentence)
-        m = anchored.search(text)
+        # Every label-and-amount pair in the sentence, not only the first: "Non-GAAP net income was $X; GAAP net
+        # income was $Y" holds a GAAP figure after a rejected one.
+        m = None
+        scale = 1
+        scale_basis = None
+        for c in anchored.finditer(text):
+            amount_end = c.end()
+            lead = text[max(0, c.start() - 40):c.start() + c.group(0).find("$")]
+            tail = text[amount_end:amount_end + 30]
+            if _NON_GAAP_RE.search(lead):
+                rejected += 1
+                continue
+            if spec["unit"] == "money" and (_PER_SHARE_RE.search(c.group(0)[len(c.group(1)):]) or _PER_SHARE_TAIL_RE.search(tail)):
+                rejected += 1
+                continue
+            word = c.group(8)
+            if word:
+                scale = _SCALE[word.lower()]
+                scale_basis = "AS_WRITTEN"
+            elif spec["unit"] == "money" and len(table_scales) > 1:
+                rejected += 1
+                continue
+            elif spec["unit"] == "money" and len(table_scales) == 1:
+                scale = _SCALE[table_scales[0]]
+                scale_basis = f"RELEASE_TABLE_IN_{table_scales[0].upper()}S"
+            else:
+                scale = 1
+                scale_basis = None
+            m = c
+            break
         if not m:
             continue
         quarter = _QUARTER_SCOPE_RE.search(text) is not None
@@ -393,16 +476,15 @@ def release_observation(release: dict | None, metric: str, period: dict, reporti
         if not scoped:
             unscoped += 1
             continue
-        label_text, open_paren, minus, inner_paren, inner_minus, int_part, frac, scale_word = m.groups()
-        scale = _SCALE[scale_word.lower()] if scale_word else 1
+        label_text, open_paren, minus, inner_paren, inner_minus, int_part, frac, _scale_word = m.groups()
         magnitude = float(int_part.replace(",", "") + (frac or "")) * scale
         negative = open_paren == "(" or inner_paren == "(" or minus == "-" or inner_minus == "-" or re.search(r"\bloss\b", label_text, _F) is not None
         decimals = len(frac) - 1 if frac else 0
         precision = 0.5 * 10 ** -decimals * scale
         as_written = re.sub(r"^[^$(-]*", "", m.group(0)[len(label_text):]).strip()
         return {**base, "status": "FOUND", "value": -magnitude if negative else magnitude, "precision": precision, "asWritten": as_written,
-                "sentence": sentence[:400]}
-    return {**base, "status": "NOT_FOUND_IN_TEXT", "value": None, "unscopedCandidates": unscoped}
+                **({"scaleBasis": scale_basis} if scale_basis and scale_basis != "AS_WRITTEN" else {}), "sentence": sentence[:400]}
+    return {**base, "status": "NOT_FOUND_IN_TEXT", "value": None, "unscopedCandidates": unscoped, **({"rejectedCandidates": rejected} if rejected else {})}
 
 
 def pick_release_observation(observations: list[dict]) -> dict:

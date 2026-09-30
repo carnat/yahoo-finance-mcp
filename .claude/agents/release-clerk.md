@@ -16,6 +16,8 @@ Then run `python scripts/test_version_contract.py`.
 
 Docs: add the release section to `docs/provider-runtime-guidance.md` from the summary you are given, matching the heading style (`## <Title> (<version>)`) and tone of the previous sections. Do not invent behaviour the summary does not state; ask for anything missing.
 
+Use `.venv/bin/python` for every Python command; the system `python` lacks the project's dependencies. Never run `git stash`, `git checkout` of files, `git commit` or anything else that changes the working tree or history: the planner may be committing at the same time. To tell whether a failure is pre-existing, run the same check on a separate `git worktree` of the base branch.
+
 Checks: run the steps in `.github/workflows/ci.yml` that run locally (tool sync, version contract, py_compile, `npx tsc --noEmit` in `worker/`, and the acceptance test scripts) and report pass/fail counts with the output of any failure.
 
 PR body: summary of changes per item, the contract changes (new fields, enums, warning codes), and the test results. Do not open the PR, push, or merge unless explicitly told to.
