@@ -1605,6 +1605,39 @@ Vantage and IBKR produced these fixes.
   mocked SEC responses (found, no facts for the form, IFRS-only, malformed
   concept) and compares their payloads.
 
+### Named Fiscal-Year Periods In SEC Fact Extractors (2.5.16)
+
+- **Defect.** `period` was honoured only as `"latest"`. Any other string
+  (`"FY2025"`, `"2025"`, a typo) skipped the latest-filed filter and the
+  sort, so the first companyconcept row came back: BE 10-K `"FY2025"` gave
+  208,540,000, the 2016 revenue, labelled FY2018 (the fy of the later filing
+  that carried it as a comparative).
+- **Accepted values.** `period` is `"latest"` (the default) or a fiscal year,
+  `"FY2025"` or `"2025"`. Any other value is an `INPUT_VALIDATION_ERROR` for
+  `extract_sec_filing_fact`, `extract_geographic_revenue`,
+  `extract_segment_revenue`, `extract_total_revenue`,
+  `extract_revenue_exposure` and `extract_china_exposure`, grouped or
+  expanded.
+- **Selection.** A fiscal year selects the annual period the issuer calls
+  that year. That is the `fy` (with `fp` FY) of the filing that first
+  reported the period, when it is the period's end year or the year before.
+  Otherwise it is the year the period ends in, counted from seven days before
+  the end so a 52/53-week year ending in early January belongs to the year
+  before. This is the rule `reconcile_metric_sources` uses. The latest filed
+  value for that period wins (a restatement), and the result is labelled
+  with the requested year.
+  - BE `"FY2025"`: 2,023,994,000.
+  - DG `"FY2025"`: 42,724,369,000 for the year ended 2026-01-30.
+- **Refusals.**
+  - A fiscal year with a quarterly filing type or `period_mode` is
+    `INVALID_PERIOD`.
+  - A year with no annual fact is `PERIOD_NOT_FOUND`, listing the fiscal
+    years found.
+  - Both come back as the `SEC_FACT_NOT_AVAILABLE` payload with the latest
+    filing of the form as evidence.
+- **Quarters** are not named by `period`. Use `"latest"` with `10-Q`, an
+  `accession_number`, or `reconcile_metric_sources` (`"Q3 2025"`, `"latest_quarter"`).
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
