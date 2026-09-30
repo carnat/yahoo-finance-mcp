@@ -1,0 +1,243 @@
+name: Delete Merged Branches (one-off)
+
+# One-off cleanup (2026-09-30): deletes remote branches whose work is already in main.
+# Listed: 48 merged into main, 2 whose merge would change nothing, 139 whose tip is in a
+# merged PR, codex/official-ir-rss-news (its one extra commit is in main) and
+# codex/alpaca-overnight-provider-local (same commit as merged PR #112).
+# A branch is deleted only if it still points at the commit recorded here; one pushed to
+# since is skipped. Run with dry_run first. Restore a branch with
+#   git push origin <sha>:refs/heads/<branch>
+# Remove this workflow once it has run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "List what would be deleted without deleting"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete listed branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          deleted=0; would=0; gone=0; changed=0; failed=0
+          while read -r sha branch; do
+            [ -z "$branch" ] && continue
+            case "$branch" in
+              main|claude/busy-carson-yfxx5n|automation/ir-source-review)
+                echo "::error::refusing to delete $branch"; exit 1 ;;
+            esac
+            current=$(gh api "repos/$REPO/git/ref/heads/$branch" --jq .object.sha 2>/dev/null || true)
+            if [ -z "$current" ]; then echo "already gone: $branch"; gone=$((gone+1)); continue; fi
+            if [ "$current" != "$sha" ]; then echo "::warning::skipped, pushed to since: $branch"; changed=$((changed+1)); continue; fi
+            if [ "$DRY_RUN" = "true" ]; then echo "would delete: $branch"; would=$((would+1)); continue; fi
+            if gh api -X DELETE "repos/$REPO/git/refs/heads/$branch" >/dev/null; then
+              echo "deleted: $branch"; deleted=$((deleted+1))
+            else
+              echo "::warning::could not delete: $branch"; failed=$((failed+1))
+            fi
+          done <<'LIST'
+          68d2d29700e0f6aff305e792efa0763b5195e1fb claude/code-refactoring-plan-aloxs5
+          4fc2c688bbea0ddaa80ab9af0f39f12bc772edbf claude/explain-codebase-mmeo9sredor41z7f-thtpG
+          7da16aeb018f6362538fbb115854d9a485212b60 claude/focused-goodall-y8j4fw
+          e2eab92b1151eee2d49a0b1044befd9525fd9ed6 claude/tool-count-pr102-ajxl6q
+          7061afd7e090ac2e249955c89b2f64e308ff8292 codex-globenewswire-feed-precision
+          9129c637cfd0b74079fe14e00884f4524b36d898 codex-harden-globenewswire-rss
+          1cf02a684a3986a7eddaa051d8bea5dcbf5ce5a6 codex/alias-envelope-behavior-tests
+          d75808d1d8f0413dfc1e380342904b9ffb51cd71 codex/alpaca-overnight-provider
+          d75808d1d8f0413dfc1e380342904b9ffb51cd71 codex/alpaca-overnight-provider-local
+          cb1dffe4f4a4f71edf3f8d05d0c4122d8cfd9f49 codex/analyst-enum-exhibit-handoff
+          bbd8dce5f76ddd058e4471dabf52497f85d695dc codex/approved-ir-page-registry
+          a84171946704e58f4ec2e2fba8111a4b20ff76d2 codex/audit-phase2-options-fund
+          b200d1d5b58fe211b7c3058b10bdf8f1a2121305 codex/audit-phase3-sec-evidence
+          cad986e6de8b02ceb5a07f013355fa7e4a726f19 codex/audit-phase4-contracts
+          46576d79d343b64688ce33beaa50d4128f2ad392 codex/audit-phase5-grouped-default
+          ef9d5f69a6f9a0bbedce2cbb0933fb807e44e32f codex/commentary-false-positive-fix
+          e67d2b492f3c955f27f9f38b7abafb780a971ea3 codex/commentary-smoke-contract-fix
+          0c03c54e0e9bb61b2eac334fd2ac4f385a95e8cc codex/commentary-status-metadata
+          eed2123f1b0161b72d5d66a39205ac91b0eeea3b codex/completed-bar-integrity
+          135a67857f7a927111f3c4fe78f1d26b522cc205 codex/completed-derived-bars
+          55689f6d703179f0f0fc8818eb9b9f462c19a898 codex/completed-price-slope
+          9ca51af9f975b92ea9bb992117148346f2776c58 codex/deploy-smoke-paths
+          453079cf479234979610adade226640acb86237a codex/docs-live-smoke-tool-descriptions
+          2973386458ddf4d2ce99fba9a916d8aa9d30dde7 codex/doctrine-safety-envelope
+          1cfd839e4789d66d4cafa2bb85151a22b1980196 codex/earnings-ex99-safety
+          78a7697b41467547795e26b02da76fe892520847 codex/fix-alias-warning-ci-429
+          ead19a0cd1cca4f86cee3f090550116463e31b68 codex/fix-alpha-transcript-fallback
+          8b032ee6d014c227da3f3518eccf38cc2b90e404 codex/fix-china-geo-row-match
+          8fb7f705ed06c79fd67fb30cd2dec950f70c202d codex/fix-ci-smoke-test
+          99c6f353a021fc6028e3dacd939380cb726444ba codex/fix-end-to-end-tools-test
+          6719eede3ede192b7f7b9f3ea23247d916808343 codex/fix-extract-exposure-aaoi
+          22fe6d28184c4f4bfca11535f51afbee0d7b3f55 codex/fix-extract-exposure-null-topic
+          82c6ef3aaaad6560f4c7284ac2a68939d26fe717 codex/fix-geographic-revenue-schema
+          d39639b82b94d31a604c105862070b2df3f78adb codex/fix-option-chain-smoke
+          b367046653b22a94407db63581c7a17793b3c01e codex/fix-options-envelope
+          b699b34b019f0fbba720d26c036c979a69640a75 codex/fix-overnight-smoke
+          d2e24cead3d618b6d35fe066f6a256b0dfc1549a codex/fix-sec-exposure-smoke-evidence
+          6e87b7461379213c78fa6d0f656ac41aeb03a0aa codex/fix-sec-facts-sidecar-smoke-test
+          a82195ef08300ba5a8d596f78591bd0e94662656 codex/fix-sec-provider-smoke-evidence
+          9651b6d5ce01d833fce78431b13e70d4d1f7f3a1 codex/fix-structured-provider-secret
+          b58c364ba3cdfb6c9093eadca0dc74972b4f0cac codex/fix-yahoo-press-release-tab
+          3c0d8baecfd156a0fc1f05c9a97e0d56f64c0e05 codex/free-worker-sec-exposure
+          1fbc475deddf4611e5a3df1713c31f700fa81771 codex/geographic-revenue-table-quality
+          2e55c3611d3d92c8703da32edfaaf329ab51a3d9 codex/harden-live-smoke-tests
+          00b7a66d42e9d46ad719d2dc3d974a4b4efab674 codex/health-smoke-contract
+          425c33603c093307b7f2e8e06d8ce156f4dfc87f codex/holder-enum-sec-outline-fix
+          33c1ec61d45f7d8ea185fc60bef51e104d25db51 codex/ir-discovery-improvements
+          76ad0cac8a3a3de50468f5a1087d37b3c61c2c59 codex/ir-registry-audit
+          36614290ed01851d772fe4590edb8dc007c98f92 codex/lean-deploy-smoke-gate
+          8580eaaeb2c021404787dbc70171e474c3edad67 codex/marketaux-priority-routing
+          50bedf9437eec2d306e24dbd8be319269a4489cf codex/mcp-catalog-grouped-cleanup
+          42db34b54a6d6c9f84b97d86c69500da42975314 codex/mcp-contract-canary-registry
+          68c74eaf2d3b3d94e31a7b53d1f007fb26ce94ed codex/mcp-contract-doctrine-truth
+          976a17552a7229bb423fb9bdcb04603eef663d8d codex/mcp-contract-reliability
+          a7d7eae88f31a65d8ce61c242fc4b0e915ed757e codex/mcp-earnings-refactor
+          c81d0c387d4ba7b2557c05594920d1c130cd446f codex/mcp-edgartools-sidecar
+          87786e317f1e8b77610ab13a4476f6d51d4e824a codex/mcp-sec-output-smoke
+          7cef570d2e0fc4f38851da5c20c83a70972dc55b codex/mcp-sec-reliability
+          028d10326da37516c030f36e83d0ede7e0b37240 codex/mcp-version-contract
+          e7bd822d9008b7b8f28fe19c819d34e502f5215c codex/mrvl-and-subdomain-fixes
+          0d0e3f4582c6cb7058155c4c6324b6a564e52b79 codex/news-coverage-correctness
+          3239e02f9f49a43e6a54db8ea2a3efbe9455b8a4 codex/news-routing-llm-contract
+          1d78684c645c10c38f95909212f84ede16d5e357 codex/official-ir-rss-news
+          d2b6ca0c4539698fff7e9118d7e80bfe4fc903a9 codex/official-ir-rss-subdomains
+          44cb9c233a19e7f46f2efc5a2f7485c369b9e0d7 codex/old-file-cleanup
+          de8b73bede68a4ac1b8df14483c9e1edc522f10d codex/overnight-quote-deprecation
+          dda3f0ff57c4e52705536d47d6e7adfef441b7f5 codex/phase1-safety
+          32f7387e74bef40aaa63c96071f7a607b22f5f93 codex/phase2b-pricing-domain
+          a5604eb689625a1412b3efee18d140a41b0d9380 codex/post-merge-smoke-repair
+          428e895faf4edf1d3e92ec17bb8f63e64519f812 codex/post-overnight-cleanup
+          2473e112e72698d29b2bb32b2e5988711e16c13a codex/post183-smoke-output-schema
+          6787cfe808f2cd49769e55eda32a8294226db94b codex/press-release-ex99-resolver
+          680d706315b318e5648c07976620a66c3fb98a03 codex/press-release-truthful-status
+          884510aa9a139efdc2bf7459d224299f6a85b6bf codex/price-observation-contract
+          8e794d908b8dcb283bac8f91e7cf023ea863afd7 codex/provider-gap-routing-pr2
+          1d7c6d695f77f4982772aa262cdc2a99b663a97b codex/quote-freshness
+          8c716c34a504257f3ef2371ea2a6b1f2cd3d4532 codex/readme-live-tool-status
+          06e90e68ebae87a808bd59afe246db117394fa90 codex/remove-dead-provider-scaffolding
+          998a5843a7ce93bf98b7245b7a555aa4bb71dadf codex/remove-duplicate-tools-pr2
+          fbfe4eac023026e30f150e80094321a227dd9ea5 codex/remove-stale-python-deploy-surfaces
+          1f6c4ea63c0ce797ced37b7db9f4674964173c2c codex/remove-volatile-mu-canary
+          11f085501f225f2972c54a25dce3a8527ee53bbe codex/repair-grouped-catalog-contract
+          5b2a7bfac6bb6868dc667e8684fd29b713e76a0c codex/repair-grouped-validation
+          5d02a529eb28211f1dc91c2f8f76daeb59a03378 codex/repair-pr3-mcp-contract
+          1867e8a3da8d2c28d57b0cecb34f61f2f772983e codex/sec-cloudflare-guidance
+          0b7f4a7a63f6725562684789371bac044521ad34 codex/sec-evidence-semantics
+          26cd1e154768b89348d911cc62669ea10be034a2 codex/sec-fact-context-metadata
+          87de565a61bfe96256ce0d84f182cd3d8c349726 codex/sec-fact-latest-period
+          fd31d96776f14ec68159d77c7983e21959c5b0f5 codex/sec-fact-source-evidence-fix
+          cf34ee14e6e831c7264e57e6f96752322fb7cc76 codex/sec-fact-useful-evidence
+          ce425322c8cb11b9a0459202acca6e70c8fd18d5 codex/sec-quality-grouped-degraded-cleanup
+          70308a2ac567316c6f0865c1aac3ac484b2c3503 codex/sec-search-readable-windows
+          39cd51cf3a3b58470bd41ec17081160f73cd1daf codex/sec-section-markdown-status
+          49fbbad13bcf50493d816e55facbe0e13f728aa7 codex/sec-worker-503-stability
+          960cd2cc36e2ec39ee361fbfc879435229e244ce codex/smoke-gate-consolidation
+          e154afe865d4dd84684b6fcebed385426647fff8 codex/thai-sec-discovery-batch
+          87438e10a3d2b122659e33b8b91c0c05d77df69c codex/thai-sec-fund-v1
+          f72fc5745f0622cd9233d7f23fe2dc337d2d0c49 codex/thai-sec-nav-proj-id
+          d043786c344c016f7aef9b0472fd895f2546e7dd codex/thai-sec-profiles-contract
+          761d4b1d1afe12997e7edf7c39abed3fc1daa4ee codex/transcript-contract-hardening
+          31fc165af09cf48058883de87ea5fcaede8780e1 codex/transcript-cursor-dispatch-fix
+          bdd6ad38cb52f12a456db3eaa310480ba6cbeb0a codex/verify-event-source-limits
+          c49596202c0160f1fda6ba9cd9e4be684a77f9f2 codex/version-promotion
+          44326aaebb9c6fc438bc7e1e2a1fb62a7534cbee codex/yahoo-news-precision-contract
+          d9a43b31e46ec5e9454d763ecde30f2139b01106 codex/yahoo-quartr-transcripts
+          d5a0e7adacdeb9e02a1ee187f0467552e0fab6b4 codex/yahoo-transcript-completeness
+          743f5a5aba6c295988640a0525080812b2a25b67 codex/yahoo-transcript-metadata-validation
+          b40435cc4825f02e26539843b9b1eae8170892d6 codex/yfinance-api-coverage
+          ac8271c7c6a92ee5c44c3197d004e0304aa30097 copilot/add-earnings-report-checking
+          14f90caa525c6d083346ab3e0ca19ed8ceb8c583 copilot/add-full-text-search-tool
+          a158d5b073049ebaa7e543fb2781fe22959ca267 copilot/add-globenewswire-rss-support
+          dffb30911bf85f9447f37f9659d8301be801b0e0 copilot/add-pre-computed-tools
+          d03320309ae9750d255dd6ab637db4acf932d904 copilot/add-query-sec-filing-index
+          322e8338c305429b5d7b8336876790f7b2391616 copilot/add-sec-filing-intelligence-layer
+          acab8a2eb66d3605a7c2887b7c6d1aef39bdb44c copilot/add-short-interest-percentage
+          c80a23fa283f33fc6f5d7576345f5c8c4134eaae copilot/analyze-test-coverage-improve-tests
+          cd4abbbaef01088f7dc7a39c2dc26f610bd4778b copilot/bugfix-python-server-crash
+          6eacdc5daed95db339da1d625bf2b6bf9e7f1233 copilot/check-deprecated-sdk-functions
+          abac9e9bd23ffcdea5821980070ba5c607743d5e copilot/check-mcp-wrapping
+          a1f468f22bea8a69059ec4feef98fbec913d3377 copilot/claudemove-tool-handlers
+          fe677943ef46e2a27a62fd1198f0e3bb1c1ff547 copilot/continue-phase-1
+          13891d8d1e6a2af42bef557d08e8499bc8168d8f copilot/cr-04-fix-last-trading-day
+          d0dd4335af70d73ee3428dc38a0e153e1901bdff copilot/debug-glw-filing-request-issues
+          594d3413903865e98882df8b4bd34207c1411d49 copilot/define-assert-sec-index-shape-helper
+          683b140a5648ee057413c6b90ab208f79e1cd772 copilot/fix-ci-failure-pr-69
+          0881b598d72cf02db3c2f29160e8ff42e5942805 copilot/fix-cloudflare-deploy-error
+          63254370d938adbd1a020abed2353b778270408e copilot/fix-deploy-worker-yml-secrets-expression
+          9d7ec52db1c2d902ea925e14e74fe948220fd731 copilot/fix-deployed-discovery-runtime-mismatch
+          eff408ee8f9798d15cd508da44766c4abd5d9efb copilot/fix-deployed-mcp-envelope-v2
+          4bd9bb55911128e2b2c32ea039ffce97ebadb2c7 copilot/fix-deployed-sec-ticker-resolution
+          764841650758cec6aa1265290025ff706f6cd4fb copilot/fix-deployed-smoke-script
+          3c8d3a9c26b733e4bfc8d5275d650151c0817e47 copilot/fix-document-url-resolution
+          8c60d3a53180babe2d3a86581cdcf87f12462624 copilot/fix-existing-schemas
+          f9fc69b7ba92366489f824bbaa5b8fa175895e80 copilot/fix-geographic-revenue-null
+          1c6da32108e07e84a8480e168da67e3002a46b88 copilot/fix-get-analyst-upgrade-radar-bug
+          05de662963e96f2ffbfe7b247fab9c4cf888d88a copilot/fix-get-sustainability-endpoint
+          f21dfae44e1180a573cb6c176ddc1acfe395f854 copilot/fix-mcp-server-connection
+          e1954c108830bd7a88fac4e26378014d21af7c6e copilot/fix-news-sources-configuration
+          e8837a2db9edd166c6dba3c2e0eebcb9e4d85223 copilot/fix-node-deprecation-errors
+          c81ea5062510d34fb324aba34d582a2debdf05c7 copilot/fix-overnight-quote-communication
+          a1330273d2d065b95c2a603b162cc91009307acd copilot/fix-overnight-quote-null-values
+          2011affbfbae1f257203710e6c67a181c4027cb8 copilot/fix-phase-2-bugs
+          9c45e0010032a32c6aef02b287f2edcc77de22a8 copilot/fix-premarket-price-issue
+          30c315ce4070d67c3f4f0ff8f6658b530c6fbf44 copilot/fix-production-bug-yahoo-finance-news
+          30a2851e65809ded1eb55cd5e55425bff5d006dc copilot/fix-sec-filing-list-bug
+          8b438f9b987185e8a3fa1340d027f6333459ec8c copilot/fix-smoke-test-deployed-worker
+          2dd2bf04003217a02c102cd69856afb2afa2bf2f copilot/fix-stalled-http-response
+          2b8581cdde34c60b271a965e5fa8e8929c08e029 copilot/fix-test-tools-failure
+          23c006304c3d2145a54346009294de18aec2e11a copilot/fix-tools-down-report
+          81dc474ffab955bf08d72e411c8c6c3602d2ef4f copilot/fix-tools-errors-acc-extraction
+          abc07ab0ebe8a199f51591d67f615ef150a229f8 copilot/fix-yahoo-finance-news
+          da6c33a551665d1bdcde5b996d9a866b483a5eec copilot/implement-phase-6b-news-layer
+          b9ae9732e7b5917734f739f620e07330387672c7 copilot/improve-mcp-news-events-layer
+          1e9514100495e7cc0e401af4876474c3f439dd35 copilot/investigate-cloudflare-worker-issue
+          f1437610fc00055f6f721dbbfe3c15d3140bc86e copilot/investigate-failed-tools
+          400cb3885c4213d830a4e4c398d7745c7a66d125 copilot/investigate-merge-pull-request-action
+          33b1646198fc429819ea9371515904e4a448531a copilot/mcp-public-evidence-scope
+          d9581129b127bf47907f67d8e59cfc9bec3c5851 copilot/mcp-server-integration-doctrine-adaptation
+          85825d1be9fc6675c0cbaf89d47bde62edb0a2e1 copilot/mcp-support-array-stock-fetching
+          cb7787a5e352f59371e7ee66aa0b6a11a7ab206c copilot/mod-sec-parser-utilities
+          56e3204e035985030b8e996e5df6ed7a5d3c0e8e copilot/patch-options-data-quality
+          2e519f80ece0cbed4d4ff18f37df5543dcbb848e copilot/phase-3b-extractor-validation
+          85bd5bde4ad123fb5595b90f7876677476fe6e89 copilot/phase-6-multi-source-news
+          4de89ae3b87912d708a174a3428e741f025e0de5 copilot/phase-8-readme-diagnostics-snapshot
+          556e7e1e1b51c67a654d2d093b59fb6799f8ae00 copilot/plan-llm-token-usage
+          f3376aa68723828a6301a87beb4cc1412b4c4e78 copilot/post-pr59-fix-aaoi-geographic-revenue
+          2ac27f9c81350320b9fcd814c776841ad4cbe4ac copilot/recheck-new-call-works
+          54da0bd49e0018e1ff6a77ea5d9712618988391e copilot/reduce-mcp-token-overhead
+          ff0ffa31be39df55ffb259eeecbe8c4b006037d8 copilot/refactor-sec-edgar-tools
+          a84bdfdb542df23080d4428098ee7ff247444a96 copilot/refactor-sec-edgar-tools-again
+          5025ca45337654c7504adb3fcad3a365fb949dfd copilot/refactor-tool-names
+          cf383981f0df64a1797293e90c1d648ada9b48cb copilot/research-yfinance-gaps
+          6c06fcebf909409648337ea5b29cd5dec6bcf048 copilot/review-pr-38-errors
+          e6cf97000c41ace66725b8aad42571e2a8295241 copilot/review-yfinance-docs
+          969aa80f4506cae7cf30187caf30cf7af48cd75b copilot/sniper-doctrine-change-requests
+          488baf94f78c8988b9443702c7df37712ce2b1a2 copilot/update-actions-for-node-24
+          877117eca44aa444c42085157db3e4ae31d3e6d3 copilot/update-actions-to-node-24
+          bc15a49f70898f3706ddc2a96d1ce10c63676a62 copilot/update-output-schema-remove-deprecated-tools
+          1c76f139ebaee985ceeea6d1abdf9fafea3f4a07 copilot/update-readme-new-tools
+          65c8ea509e5717bee2c90f64b1e9c10d223168d2 copilot/upgrade-overnight-price-fetching
+          ea49fc358c1d1b6cb72f8f26812fbebf8410ba22 copilot/verify-worker-related-code
+          c466bca1963d911f76c982222f38dffe36d5863e copilot/verify-wrangler-deploy-todays-commit
+          6e5461be36d0c61487ee599795efd21ce91712f4 feature/doctrine-programmer-fixes
+          e9869f2d07d39120070b875e4595d82aaf245595 fix/2.5.5-evidence-integrity-guards-20260928
+          5a82b1fb6180dd362d8ab907d2c7b63f25fbd37e fix/evidence-partial-propagation-2.5.1
+          b16307033238d7a56a5093cf38a0034c2cb8df88 fix/option-chain-expiry-smoke
+          3f8e897f5c433b5fa0809a33c80f8c579716c79a yfmcp-form4-html
+          d0a313198daaad74249ddd42448b8e570af2038a yfmcp-pr2-data-quality
+          f7c48066ab8ee87901c6f33bd85387655a1f6ef1 yfmcp-pr3-data-accuracy
+          d6a8379385477dfc6d040f19b4c121ab93a3c67a yfmcp-pr4-transcript-reliability
+          1ad7ac69fd1aed434c9f1f7dc8015e0a6524fe41 yfmcp-worker-hotfix
+          LIST
+          echo "dry_run=$DRY_RUN deleted=$deleted would_delete=$would already_gone=$gone skipped_changed=$changed failed=$failed" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$failed" -eq 0 ]
