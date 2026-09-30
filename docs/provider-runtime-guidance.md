@@ -1481,6 +1481,65 @@ consensus actions compose evidence and never fill a gap with an assumption.
   `scripts/test_guidance_and_drivers.py` checks parity through
   `FILING_LABEL_CASES`.
 
+## SEC Fact Reads, Evidence Preflight And Reconciliation Fixes (2.5.15)
+
+A live cross-check of 16 tickers against SEC, Yahoo, issuer releases, Alpha
+Vantage and IBKR produced these fixes.
+
+- **SEC fact reads**
+  - SEC's companyconcept endpoint served BE's revenue as `"USD": {}` (an
+    object, not a list). That crashed the Worker and made Python return
+    NOT_DISCLOSED.
+  - Such a concept is now read from companyfacts, with the info warning
+    `SEC_COMPANYCONCEPT_MALFORMED`.
+  - When one filing tags revenue under two concepts, the larger is taken as
+    the total. BE FY2025: Revenues 2,023,994,000 against
+    RevenueFromContractWithCustomerExcludingAssessedTax 2,001,614,000.
+- **`extract_total_revenue`**
+  - It passes through `code`, `message` and `warnings`.
+  - `unit` is null when there is no value. It used to say USD.
+  - IFRS-only filers (TSM) get `SEC_FACTS_IFRS_ONLY`, pointing to
+    `reconcile_metric_sources`, which reads IFRS facts.
+  - A non-SEC ticker (SIVE.ST) shows `NO_SEC_REGISTRANT`.
+- **`get_evidence_quality`**
+  - 20-F/40-F filers have an annual cadence. Their periodic filing is STALE
+    only after 492 days (365, plus the 120-day filing window, plus 7). The new
+    family fields are `cadence`, `staleAfterDays` and `latestInterim6k` (the
+    latter for annual filers). TSM, TSEM and NBIS were falsely STALE at 273
+    days.
+  - A failed quote request is UNAVAILABLE with a retryable
+    `QUOTE_UNAVAILABLE` blocker, not `QUOTE_MISSING`.
+  - When every consensus provider request failed (none OK, at least one
+    PROVIDER_ERROR, RATE_LIMIT or timeout), the consensus family is
+    UNAVAILABLE, with one retryable `CONSENSUS_PROVIDER_ERROR` blocker
+    instead of per-cell PROVIDER_NOT_COVERED blockers.
+  - `providerStatuses` is always listed.
+- **`reconcile_metric_sources`**
+  - The reporting unit is the one filed most recently. NBIS reported in RUB
+    as Yandex to FY2023 and in USD from FY2024, and was compared in RUB.
+  - Revenue ties go to the larger concept.
+  - Net income from ProfitLoss alone is the parent's. It is derived by
+    subtracting NetIncomeLossAttributableToNoncontrollingInterest from the
+    same filing, with `basis: PARENT_DERIVED_FROM_PROFITLOSS` and the
+    derivation shown. BE FY2025: -87,140,000 - 1,294,000 = -88,434,000.
+- **Release parser**
+  - It reads B/M/K and bn/mn/mm abbreviations. COHR's "$1.81B" was read as
+    1.81.
+  - It applies a statement-table scale only when the release declares exactly
+    one "(in thousands|millions|billions)", flagged `scaleBasis`. FN's
+    "$ 1,214,293" was read unscaled.
+  - It rejects per-share figures for money metrics, and non-GAAP or adjusted
+    figures for all metrics. COHR, LITE and SNDK EPS were read as net income;
+    SNDK's non-GAAP EPS was compared with GAAP.
+  - It checks every label/amount pair in a sentence, and reports
+    `rejectedCandidates`.
+- **Both runtimes.** Python also returns `SEC_FACTS_IFRS_ONLY` on its no-facts
+  path. Its other no-facts payload (NOT_DISCLOSED) still differs from the
+  Worker's SEC_FACT_NOT_AVAILABLE, as before 2.5.15; that is a known
+  follow-up.
+- **Tests.** `scripts/test_extraction_rules.py`, `scripts/test_evidence.py`,
+  `scripts/test_valuation_history_and_reconcile.py`.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
