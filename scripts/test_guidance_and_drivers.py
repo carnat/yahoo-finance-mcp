@@ -203,6 +203,10 @@ DG_RELEASES = [
 FOCUS_HTML = ['<ix:nonNumeric name="dei:DocumentFiscalYearFocus" contextRef="c-1">2025</ix:nonNumeric>',
               '<ix:nonNumeric contextRef="c" name="dei:DocumentFiscalYearFocus" id="f"><span>2026</span></ix:nonNumeric>', "<p>no tag</p>", None]
 
+# 2.5.14: (tagged DocumentFiscalYearFocus, period of report) -> filing label. DG's 10-K, AAPL's December-quarter
+# 10-Q, a mistag two years off, untagged, no date.
+FILING_LABEL_CASES = [[2025, "2026-01-30"], [2025, "2024-12-28"], [2019, "2026-01-30"], [None, "2026-01-30"], [2025, None], [None, None]]
+
 FISCAL_DATES = ["2026-01-03", "2026-01-08", "2025-12-27", "2026-05-29", "2027-06-25", None, "bad"]
 FISCAL_QUARTERS = [["2025-11-28", "2026-05-29"], ["2025-08-29", "2026-05-29"], ["2026-05-29", "2026-05-29"], ["2025-04-05", "2026-01-03"],
                    ["2025-01-15", "2026-05-29"], ["2025-10-15", "2026-05-29"]]
@@ -224,6 +228,7 @@ def _python_outputs() -> dict:
         "naming": [fc.fiscal_year_naming(DG_FACTS), fc.fiscal_year_naming(MIXED_FACTS), fc.fiscal_year_naming(STATED_FACTS), fc.fiscal_year_naming(None),
                    fc.fiscal_year_naming({"facts": {}})],
         "focus": [fc.document_fiscal_year_focus(h) for h in FOCUS_HTML],
+        "filingLabels": [fc.filing_fiscal_year_label(f, d) for f, d in FILING_LABEL_CASES],
         "dg": gh.guidance_history("dg", DG_RELEASES, DG_FACTS),
         "periods": [gh.guidance_target_period(c) if a is None else gh.guidance_target_period(c, a) for c, a in PERIOD_CASES],
         "amounts": [gh.parse_amount("150.0 million"), gh.parse_amount("250.0", "million"), gh.parse_amount("1,250"), gh.parse_amount("abc")],
@@ -257,6 +262,7 @@ const out = {
   textDates: [fc.textDate("Sept.", "30", "2026"), fc.textDate("Jan", "2", "2027"), fc.textDate("February", "30", "2027"), fc.textDate("Foo", "1", "2026")],
   naming: [fc.fiscalYearNaming(f.dgFacts), fc.fiscalYearNaming(f.mixedFacts), fc.fiscalYearNaming(f.statedFacts), fc.fiscalYearNaming(null), fc.fiscalYearNaming({ facts: {} })],
   focus: f.focusHtml.map((h) => fc.documentFiscalYearFocus(h)),
+  filingLabels: f.filingLabelCases.map(([focus, d]) => fc.filingFiscalYearLabel(focus, d)),
   dg: gh.guidanceHistory("dg", f.dgReleases, f.dgFacts),
   periods: f.periodCases.map(([c, a]) => (a == null ? gh.guidanceTargetPeriod(c) : gh.guidanceTargetPeriod(c, a))),
   amounts: [gh.parseAmount("150.0 million"), gh.parseAmount("250.0", "million"), gh.parseAmount("1,250"), gh.parseAmount("abc")],
@@ -287,7 +293,8 @@ def _worker_outputs() -> dict:
                                   "statements": STATEMENTS, "periodCases": PERIOD_CASES, "bulletReleases": BULLET_RELEASES,
                                   "nonGaapReleases": NON_GAAP_RELEASES, "statedFacts": STATED_FACTS, "week53Facts": WEEK53_FACTS,
                                   "aehrReleases": AEHR_RELEASES, "fiscalDates": FISCAL_DATES, "fiscalQuarters": FISCAL_QUARTERS,
-                                  "dgFacts": DG_FACTS, "mixedFacts": MIXED_FACTS, "dgReleases": DG_RELEASES, "focusHtml": FOCUS_HTML}), encoding="utf-8")
+                                  "dgFacts": DG_FACTS, "mixedFacts": MIXED_FACTS, "dgReleases": DG_RELEASES, "focusHtml": FOCUS_HTML,
+                                  "filingLabelCases": FILING_LABEL_CASES}), encoding="utf-8")
         harness = Path(tmp) / "harness.mjs"
         harness.write_text(_HARNESS, encoding="utf-8")
         result = subprocess.run([node, str(harness), *bundles, str(fx)], check=True, capture_output=True, text=True, timeout=120)
@@ -427,6 +434,9 @@ class TestGuidanceHistory(unittest.TestCase):
         self.assertEqual(fc.fiscal_year_naming(MIXED_FACTS)["offset"], 0)
         self.assertEqual(fc.fiscal_year_naming(None)["basis"], "PERIOD_END_RULE_SEC_NOT_READ")
         self.assertEqual([fc.document_fiscal_year_focus(h) for h in FOCUS_HTML], [2025, 2026, None, None])
+        # 2.5.14: a filing's label is the year it tags for itself, unless that is a mistag beyond one year.
+        self.assertEqual([fc.filing_fiscal_year_label(f, d) for f, d in FILING_LABEL_CASES],
+                         ["FY2025", "FY2025", "FY2026", "FY2026", "FY2025", None])
         # "the fiscal year ending January 29, 2027" is DG's fiscal 2026, not 2027.
         g = gh.guidance_history("dg", DG_RELEASES, DG_FACTS)["guidance"][0]["targetPeriod"]
         self.assertEqual((g["label"], g["fiscalYear"], g["basis"], g["namingBasis"]), ("FY2026", 2026, "TEXT_PERIOD_END", "SEC_STATED_FISCAL_YEAR"))

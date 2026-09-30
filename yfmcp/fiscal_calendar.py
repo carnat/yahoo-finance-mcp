@@ -37,13 +37,15 @@ def nominal_period_end(end: str | None) -> str | None:
 
 
 def fiscal_year_of_period_end(end: str | None) -> int | None:
-    """The fiscal year a period ending on `end` is named for.
+    """The fiscal year a period ending on `end` is named for by the period-end rule.
 
     The calendar year it ends in, except that a year ending in the first week
     of January (a 52/53-week year nearest December 31) belongs to the year
-    before. A company that names its years otherwise (a retailer's "fiscal
-    2025" ending February 2026) is not detected; a fiscal year the filing
-    states wins wherever one is read.
+    before. This rule alone cannot see a company that names its years
+    otherwise (DG's "fiscal 2025" ended January 30, 2026);
+    `filing_fiscal_year_label` (a filing's own tagged year) and
+    `fiscal_year_naming` (the company's stated years) correct it where they
+    are read.
     """
     nominal = nominal_period_end(end)
     return int(nominal[:4]) if nominal else None
@@ -150,3 +152,17 @@ def document_fiscal_year_focus(html: str | None) -> int | None:
         return None
     m = _FY_FOCUS_RE.search(html)
     return int(m.group(1)) if m else None
+
+
+def filing_fiscal_year_label(focus: int | None, report_date: str | None) -> str | None:
+    """A filing's fiscal-year label (2.5.14): the year it tags for itself (dei:DocumentFiscalYearFocus).
+
+    DG's 10-K for the year ended January 30, 2026 reads FY2025 and AAPL's
+    December-quarter 10-Q reads its next fiscal year. A tagged year more than
+    one year from the period-end rule is taken as a mistag and the rule is
+    used; so is an untagged filing (8-Ks, older HTML filings).
+    """
+    rule_year = fiscal_year_of_period_end(report_date)
+    if focus is not None and (rule_year is None or abs(focus - rule_year) <= 1):
+        return f"FY{focus}"
+    return None if rule_year is None else f"FY{rule_year}"

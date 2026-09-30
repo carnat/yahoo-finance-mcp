@@ -36,7 +36,7 @@ import { adsRatio, majorPrice, marketInputsFromQuoteSummary, peerValuations, val
 import { coverReadsNeeded, coverShareCounts, foreignFiler, historicalValuation, latestShareCount, peerMedians, taxonomyOf, valuationDates, type Bar, type PeriodicFiling, type Split } from "./valuation-history.js";
 import { DEFAULT_TOLERANCE_PCT, METRICS as RECONCILE_METRICS, metricReconciliation, resolvePeriod } from "./metric-reconciliation.js";
 import { AUTHORITY_BOUNDARY } from "./evidence.js";
-import { documentFiscalYearFocus, fiscalYearLabel, fiscalYearNaming, type FiscalYearNaming } from "./fiscal-calendar.js";
+import { documentFiscalYearFocus, filingFiscalYearLabel, fiscalYearLabel, fiscalYearNaming, type FiscalYearNaming } from "./fiscal-calendar.js";
 import registryManifest from "./company-ir-page-registry.json";
 import newsSourceCapabilities from "./news-source-capabilities.json";
 
@@ -6596,7 +6596,7 @@ export async function getFilingData(
           const annual = /^(?:10-K|20-F|40-F)/i.test(String(filing.filingType ?? ""));
           // The fiscal year the filing states for itself wins over the period-end rule (DG's year ending January 2026 is its FY2025) (2.5.13).
           const focus = annual ? documentFiscalYearFocus(htmlText) : null;
-          const fiscalYear = !annual ? (geo.sourceColumns[0] ?? "") : focus != null ? `FY${focus}` : (fiscalYearLabel(filing.reportDate ?? null) ?? "");
+          const fiscalYear = !annual ? (geo.sourceColumns[0] ?? "") : (filingFiscalYearLabel(focus, filing.reportDate ?? null) ?? "");
           const warnings = geo.denominator == null && geo.usd != null
             ? [{
                 code: "DENOMINATOR_NOT_FOUND",
@@ -6897,7 +6897,8 @@ export interface FilingSearchOptions {
   includeExhibits?: boolean;
 }
 
-type ProjectedFilingDocument = { projection: FilingTextProjection; htmlChars: number; truncated: boolean };
+// fiscalYearFocus: the fiscal year the document tags for itself (dei:DocumentFiscalYearFocus), read before truncation.
+type ProjectedFilingDocument = { projection: FilingTextProjection; htmlChars: number; truncated: boolean; fiscalYearFocus: number | null };
 
 type FilingSearchTarget = {
   key: string;
@@ -6949,7 +6950,7 @@ async function projectedFilingDocument(url: string): Promise<ProjectedFilingDocu
   const truncated = doc.text.length > SEC_DOCUMENT_READ_MAX_CHARS;
   const html = truncated ? doc.text.slice(0, SEC_DOCUMENT_READ_MAX_CHARS) : doc.text;
   const projection = projectFilingText(html, searchHeadings(html), filingTableSpans(html));
-  const entry = { projection, htmlChars: doc.text.length, truncated };
+  const entry = { projection, htmlChars: doc.text.length, truncated, fiscalYearFocus: documentFiscalYearFocus(doc.text) };
   filingTextProjections.set(url, entry, FILING_TEXT_TTL_MS);
   return entry;
 }
@@ -7035,9 +7036,12 @@ async function exhibitTargets(cikInt: number, accessionNumber: string, filingDat
   return out;
 }
 
-/** A filing's fiscal year from its period of report, never its filing date (a December year is filed the next spring) (2.5.11). */
-function fiscalYearOf(filing: { reportDate?: string | null } | null): string | null {
-  return fiscalYearLabel(filing?.reportDate ?? null);
+/**
+ * A filing's fiscal year from the year its primary document tags for itself once read (2.5.14), else from its
+ * period of report, never its filing date (a December year is filed the next spring) (2.5.11).
+ */
+function fiscalYearOf(filing: { reportDate?: string | null } | null, focus: number | null = null): string | null {
+  return filingFiscalYearLabel(focus, filing?.reportDate ?? null);
 }
 
 export async function searchFilingText(
@@ -7185,6 +7189,7 @@ export async function searchFilingText(
   for (const group of targetsByFiling) {
     const filingMatches: SearchMatch[] = [];
     const filingTermHits: Record<string, number> = {};
+    let primaryFocus: number | null = null;
     for (const target of group.targets) {
       const doc = await projectedFilingDocument(target.url);
       if (!doc) {
@@ -7202,6 +7207,11 @@ export async function searchFilingText(
         continue;
       }
       if (doc.truncated) truncatedDocuments += 1;
+      if (target.primary) {
+        primaryFocus = doc.fiscalYearFocus;
+        // The resolved (first) filing's label follows the year its document tags for itself.
+        if (group === targetsByFiling[0] && group.filing === first) base.fiscalYear = fiscalYearOf(first, primaryFocus);
+      }
       const projection = doc.projection;
       let scopeStart = 0;
       let scopeEnd = projection.text.length;
@@ -7259,7 +7269,7 @@ export async function searchFilingText(
         accessionNumber: group.filing.accessionNumber,
         filingDate: group.filing.filingDate,
         filingType: group.filing.filingType,
-        fiscalYear: fiscalYearOf(group.filing),
+        fiscalYear: fiscalYearOf(group.filing, primaryFocus),
         documentUrl: group.filing.documentUrl,
         totalMatches: filingMatches.length,
         termHits: filingTermHits,
