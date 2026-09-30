@@ -6373,7 +6373,8 @@ export async function getFilingData(
       extractionMethod: "NONE",
       source: "NONE",
       confidence: "NOT_DECISION_GRADE",
-      status: "SEC_FACT_NOT_AVAILABLE",
+      // An unreadable ticker index is a failed read, like SEC_READ_FAILED, not a missing fact (2.5.18).
+      status: code === "SEC_LOOKUP_UNAVAILABLE" ? "PROVIDER_ERROR" : "SEC_FACT_NOT_AVAILABLE",
       code,
       retryable: code === "SEC_LOOKUP_UNAVAILABLE",
       evidence: null,
