@@ -1540,6 +1540,47 @@ Vantage and IBKR produced these fixes.
 - **Tests.** `scripts/test_extraction_rules.py`, `scripts/test_evidence.py`,
   `scripts/test_valuation_history_and_reconcile.py`.
 
+## Company Fiscal-Year End In The Consensus Curve (2.5.16)
+
+- **The problem.** Providers date a fiscal year by a nominal month end. Yahoo
+  gives DG's current year as ending 2027-01-31; DG's year ends on the Friday
+  nearest January 31, which is 2027-01-29.
+- **`fiscalYearNaming.calendar`.**
+  - `fiscalYearNaming` (in `get_consensus_forecast_curve` and the evidence
+    pack) gains `calendar`: `{patterns, month, weekday, basis:
+    "SEC_ANNUAL_PERIOD_ENDS", periodEnds}`.
+  - It is read from the company's 10-K annual period ends (companyfacts) and
+    kept only if it reproduces every one of them.
+  - The patterns are:
+    - `MONTH_END`;
+    - `WEEKDAY_NEAREST_MONTH_END` (within 3 days of the month's last day);
+    - `LAST_WEEKDAY_OF_MONTH`.
+  - `calendar` is null when SEC was not read, when fewer than two annual ends
+    exist, or when no pattern fits.
+- **How the pattern is chosen.**
+  - The newest two ends are read first, and older ones are added one at a time
+    until a single pattern is left.
+  - An end that no pattern fits (a changed calendar) stops the look-back.
+  - MU's Thursday nearest August 31 and its last Thursday of August fit 2023
+    to 2025; an older year settles it.
+- **`companyFiscalYearEnd`.**
+  - Each consensus-curve period gains `companyFiscalYearEnd`: the company's own
+    end for the year the providers date. `fiscalYearEnds` stays as the
+    providers state it.
+  - It is null when there is no calendar, when the provider's month differs
+    from the calendar's, or when two fitting patterns give different dates for
+    that year (they then say nothing).
+  - Live examples:
+    - DG 2027-01-29;
+    - MRVL 2027-01-30 (Saturday nearest Jan 31);
+    - FN 2027-06-25 (last Friday of June);
+    - LITE 2027-07-03;
+    - SNDK 2027-07-02;
+    - MU 2026-09-03 (Yahoo: 2026-08-31);
+    - ANET 2026-12-31.
+- **Runtimes and tests.** Both runtimes. `scripts/test_guidance_and_drivers.py`
+  (`CALENDAR_CASES`) and `scripts/test_evidence.py`.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
