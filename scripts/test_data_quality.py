@@ -1271,10 +1271,20 @@ class TestPr2DataQuality(unittest.TestCase):
         async def fake_risk(**kwargs):
             return json.dumps({"status": "FOUND", "matches": [{"term": "China", "excerpt": ""}]})
 
+        async def fake_resolve(ticker, filing_type, accession_number=None):
+            return {"filingType": "10-K", "accessionNumber": "0000000001-26-000001"}, None
+
+        async def fake_search(**kwargs):
+            return json.dumps({"matches": []})
+
         old_index = srv.get_sec_filing_index
         old_revenue = srv.extract_revenue_exposure
         old_risk = srv.extract_risk_factor_mentions
+        old_resolve = srv._resolve_sec_filing
+        old_search = srv.search_sec_filing_text
         try:
+            srv._resolve_sec_filing = fake_resolve
+            srv.search_sec_filing_text = fake_search
             srv.get_sec_filing_index = fake_index
             srv.extract_revenue_exposure = fake_revenue
             srv.extract_risk_factor_mentions = fake_risk
@@ -1283,6 +1293,8 @@ class TestPr2DataQuality(unittest.TestCase):
             srv.get_sec_filing_index = old_index
             srv.extract_revenue_exposure = old_revenue
             srv.extract_risk_factor_mentions = old_risk
+            srv._resolve_sec_filing = old_resolve
+            srv.search_sec_filing_text = old_search
         entity_evidence = data["manufacturingExposure"]["evidence"][0]
         self.assertTrue(entity_evidence["excerptAvailable"])
         self.assertEqual(data["riskFactorExposure"]["status"], "NOT_FOUND")

@@ -84,7 +84,7 @@ from yfmcp.parsing.html import (
 )
 from yfmcp.parsing.extractors import (
     _normalize_segment_label, _region_matches,
-    _extract_geo_revenue_from_html,
+    _extract_geo_revenue_from_html, _geo_region_aliases, _js_round,
     _extract_xbrl_latest_annual,
 )
 
@@ -5219,6 +5219,98 @@ def _js_json_numbers(value: Any) -> Any:
     return value
 
 
+async def _resolve_sec_filing(ticker: str, requested_filing_type: str = "10-K", accession_number: str | None = None) -> tuple[dict | None, dict | None]:
+    """The Worker's resolveSecFiling: (filing, None), or (None, error) with the Worker's error payloads.
+
+    A 10-K that is not filed falls to the latest 20-F (AUTO_20F_FALLBACK); a pinned accession is matched exactly.
+    """
+    requested = (requested_filing_type or "10-K").upper()
+    cik_padded, subs = await _get_submissions_for_ticker(ticker)
+    if not cik_padded or not subs:
+        return None, {"status": "TICKER_NOT_FOUND", "code": "TICKER_NOT_FOUND", "ticker": ticker,
+                      "message": f"Could not resolve EDGAR submissions for ticker '{ticker}'"}
+    recent = (subs.get("filings") or {}).get("recent") or {}
+    forms = [str(f) for f in (recent.get("form") or [])]
+    accessions = recent.get("accessionNumber") or []
+    primary_docs = recent.get("primaryDocument") or []
+    filing_dates = recent.get("filingDate") or []
+    report_dates = recent.get("reportDate") or []
+    accepted = recent.get("acceptanceDateTime") or []
+    available = list(dict.fromkeys(f.upper() for f in forms if f))[:12]
+
+    warnings: list[dict] = []
+    target: int | None = None
+    if accession_number:
+        target = next((i for i, a in enumerate(accessions) if a == accession_number), None)
+    else:
+        target = next((i for i, f in enumerate(forms) if f.upper() == requested), None)
+        if target is None and requested == "10-K":
+            target = next((i for i, f in enumerate(forms) if f.upper() == "20-F"), None)
+            if target is not None:
+                warnings.append({
+                    "code": "AUTO_20F_FALLBACK",
+                    "message": "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).",
+                    "severity": "info",
+                })
+    if target is None or target >= len(accessions) or not accessions[target]:
+        return None, _filing_not_found(ticker, requested, available)
+
+    def _at(values: list, default: object = None) -> object:
+        return values[target] if target < len(values) and values[target] is not None else default
+
+    primary_document = str(_at(primary_docs, ""))
+    filing_type = str(forms[target]) if target < len(forms) else requested
+    if not primary_document:
+        return None, {
+            "status": "FILING_TEXT_NOT_AVAILABLE", "code": "FILING_TEXT_NOT_AVAILABLE", "ticker": ticker,
+            "requestedFilingType": requested, "filingType": filing_type, "filingDate": _at(filing_dates),
+            "accessionNumber": accessions[target], "documentUrl": None, "availableFilingTypes": available,
+            "suggestedFilingTypes": [],
+            "warnings": [{"code": "PRIMARY_DOCUMENT_MISSING", "message": "SEC submissions entry has no primaryDocument.", "severity": "error"}],
+        }
+    cik_int = int(cik_padded)
+    _, document_url = _edgar_build_filing_urls(cik_int, accessions[target], primary_document)
+    if not document_url or _is_likely_xbrl_document_url(document_url):
+        return None, {
+            "status": "FILING_TEXT_NOT_AVAILABLE", "code": "FILING_TEXT_NOT_AVAILABLE", "ticker": ticker,
+            "requestedFilingType": requested, "filingType": filing_type, "filingDate": _at(filing_dates),
+            "accessionNumber": accessions[target], "documentUrl": document_url, "availableFilingTypes": available,
+            "suggestedFilingTypes": [],
+            "warnings": [{"code": "PRIMARY_HTML_NOT_FOUND", "message": "Could not resolve a human-readable primary filing HTML document.", "severity": "error"}],
+        }
+    return {
+        "ticker": ticker, "cikPadded": cik_padded, "cikInt": cik_int, "requestedFilingType": requested,
+        "filingType": filing_type, "filingDate": _at(filing_dates), "reportDate": (report_dates[target] if target < len(report_dates) else None) or None,
+        "acceptedAt": _at(accepted), "accessionNumber": accessions[target], "primaryDocument": primary_document,
+        "documentUrl": document_url, "availableFilingTypes": available,
+        "suggestedFilingTypes": ["20-F"] if requested == "10-K" and filing_type.upper() == "20-F" else [],
+        "warnings": warnings,
+    }, None
+
+
+def _utf16_length(text: str) -> int:
+    """A string's length as JavaScript counts it (UTF-16 code units)."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def _filing_has_relevant_geo_text(html: str, region: str) -> bool:
+    """The Worker's filingHasRelevantGeoText: a region mention within 4,000 characters of revenue, sales, geographic or segment."""
+    html_lower = html.lower()
+    aliases = _geo_region_aliases(region)
+    if not aliases:
+        return False
+    start = 0
+    for _ in range(20):
+        positions = [pos for pos in (html_lower.find(term, start) for term in aliases) if pos >= 0]
+        if not positions:
+            return False
+        pos = min(positions)
+        if _re.search(r"revenue|sales|geographic|segment", html_lower[max(0, pos - 4_000): min(len(html_lower), pos + 4_000)]):
+            return True
+        start = pos + 1
+    return False
+
+
 async def get_filing_data(
     ticker: str,
     fact_type: FilingFactType,
@@ -5229,8 +5321,6 @@ async def get_filing_data(
     accession_number: str | None = None,
 ) -> str:
     FLOATING_POINT_EPSILON = 1e-9
-    RATIO_DECIMALS = 4
-    PCT_DECIMALS = 2
     PCT_MULTIPLIER = 100
 
     def _format_raw_number(n: float | int | None) -> str | None:
@@ -5248,42 +5338,65 @@ async def get_filing_data(
     read_warnings: list[dict] = []
 
     def _geo_shape(payload: dict, *, warn_denominator: bool = False, add_read_warnings: bool = True) -> str:
+        """The Worker's withGeoShape: the geographic_revenue payload, with every key it carries, in its order."""
         if read_warnings and add_read_warnings:
             payload = {**payload, "warnings": [*(payload["warnings"] if isinstance(payload.get("warnings"), list) else []), *read_warnings]}
         if fact_type != FilingFactType.geographic_revenue:
             return json.dumps(_js_json_numbers(payload))
-        shaped = {
-            "ticker": payload.get("ticker", ticker),
-            "factType": payload.get("factType", FilingFactType.geographic_revenue.value),
-            "region": payload.get("region", region),
-            "period": payload.get("period"),
-            "rawValue": payload.get("rawValue"),
-            "rawDenominator": payload.get("rawDenominator"),
-            "unit": payload.get("unit", "USD"),
-            "unitScale": payload.get("unitScale", "actual"),
-            "value": payload.get("value"),
-            "denominator": payload.get("denominator"),
-            "valueRatio": payload.get("valueRatio"),
-            "valuePct": payload.get("valuePct"),
-            "extractionMethod": payload.get("extractionMethod", "NONE"),
-            "source": payload.get("source", "NOT_DISCLOSED"),
-            "confidence": payload.get("confidence", "NOT_DISCLOSED"),
-            "filingType": payload.get("filingType", filing_type),
-            "filingDate": payload.get("filingDate"),
-            "accessionNumber": payload.get("accessionNumber"),
-            "documentUrl": payload.get("documentUrl"),
-            "indexUrl": payload.get("indexUrl"),
-            "primaryDocumentUrl": payload.get("primaryDocumentUrl"),
-            "evidence": payload.get("evidence", {}),
-            "calculation": payload.get("calculation"),
-            "warnings": list(payload.get("warnings", [])) if isinstance(payload.get("warnings"), list) else [],
+
+        def _field(key: str, default: object = None) -> object:
+            # JavaScript's `payload.key ?? default`: only null/missing falls back, never "" or 0.
+            value = payload.get(key)
+            return default if value is None else value
+
+        warnings = list(payload["warnings"]) if isinstance(payload.get("warnings"), list) else []
+        has_denominator = payload.get("denominator") is not None
+        shaped: dict = {
+            "ticker": _field("ticker", ticker),
+            "factType": _field("factType", FilingFactType.geographic_revenue.value),
+            "region": _field("region", region),
+            "period": _field("period"),
+            "rawValue": _field("rawValue"),
+            "rawDenominator": _field("rawDenominator"),
+            "unit": _field("unit", "USD"),
+            "unitScale": _field("unitScale", "actual"),
+            "value": _field("value"),
+            "denominator": _field("denominator"),
+            "valueRatio": _field("valueRatio") if has_denominator else None,
+            "valuePct": _field("valuePct") if has_denominator else None,
+            "extractionMethod": _field("extractionMethod", "NONE"),
+            "source": _field("source", "NOT_DISCLOSED"),
+            "confidence": _field("confidence", "NOT_DISCLOSED"),
+            "filingType": _field("filingType", filing_type),
+            "filingDate": _field("filingDate"),
+            "accessionNumber": _field("accessionNumber"),
+            "documentUrl": _field("documentUrl"),
+            "indexUrl": _field("indexUrl"),
+            "primaryDocumentUrl": _field("primaryDocumentUrl"),
+            "evidence": _field("evidence", {}),
+            "calculation": _field("calculation"),
+            "scanCoverage": _field("scanCoverage"),
+            "searchedTerms": _field("searchedTerms", []),
+            "notDisclosedBasis": _field("notDisclosedBasis"),
+            "status": _field("status", "FOUND" if payload.get("value") is not None else _field("confidence", "NOT_DISCLOSED")),
+            "code": _field("code"),
+            **({"retryable": payload["retryable"]} if isinstance(payload.get("retryable"), bool) else {}),
+            "xbrlContext": _field("xbrlContext"),
+            "warnings": warnings,
         }
-        has_denominator = shaped["denominator"] is not None
-        if not has_denominator:
-            shaped["valueRatio"] = None
-            shaped["valuePct"] = None
-        if warn_denominator and shaped.get("value") is not None and not has_denominator:
-            shaped["warnings"].append({
+        if (
+            shaped["value"] is not None
+            and shaped["extractionMethod"] == "XBRL"
+            and shaped["xbrlContext"] is None
+            and not any(isinstance(w, dict) and w.get("code") == "XBRL_CONTEXT_METADATA_UNAVAILABLE" for w in warnings)
+        ):
+            warnings.append({
+                "code": "XBRL_CONTEXT_METADATA_UNAVAILABLE",
+                "message": "XBRL fact value was found, but SEC context metadata was unavailable.",
+                "severity": "warning",
+            })
+        if warn_denominator and shaped["value"] is not None and shaped["denominator"] is None:
+            warnings.append({
                 "code": "DENOMINATOR_NOT_FOUND",
                 "message": "Could not compute geographic revenue percentage due to missing denominator.",
                 "severity": "warning",
@@ -5349,7 +5462,8 @@ async def get_filing_data(
             "extractionMethod": "NONE",
             "source": "NONE",
             "confidence": "NOT_DECISION_GRADE",
-            "status": "SEC_FACT_NOT_AVAILABLE",
+            # An unreadable ticker index is a failed read, like SEC_READ_FAILED, not a missing fact (2.5.18).
+            "status": "PROVIDER_ERROR" if code == "SEC_LOOKUP_UNAVAILABLE" else "SEC_FACT_NOT_AVAILABLE",
             "code": code,
             "retryable": code == "SEC_LOOKUP_UNAVAILABLE",
             "evidence": None,
@@ -5682,8 +5796,9 @@ async def get_filing_data(
                 picked_val = picked.get("val")
                 if total_fact and picked_val is not None and float(total_fact.get("val", 0)) > 0:
                     denominator = float(total_fact.get("val", 0))
-                    value_ratio = round(float(picked_val) / denominator, RATIO_DECIMALS)
-                    value_pct = round(value_ratio * PCT_MULTIPLIER, PCT_DECIMALS)
+                    # JavaScript's Math.round (halves up), as the Worker's ratio and ratioToPct.
+                    value_ratio = _js_round((float(picked_val) / denominator) * 10000) / 10000
+                    value_pct = _js_round(value_ratio * PCT_MULTIPLIER * 100) / 100
             except Exception:
                 denominator = None
                 value_ratio = None
@@ -5696,105 +5811,192 @@ async def get_filing_data(
         # Some companies (e.g. GLW) do not XBRL-tag geographic-revenue segments.
         # Fall through to the same HTML-parsing path used by search_filing_text.
         if fact_type == FilingFactType.geographic_revenue:
-            _, subs = await _get_submissions_for_ticker(ticker)
-            if subs:
-                recent = subs.get("filings", {}).get("recent", {})
-                forms: list[str] = recent.get("form", [])
-                accessions_list: list[str] = recent.get("accessionNumber", [])
-                primary_docs_list: list[str] = recent.get("primaryDocument", [])
-                filing_dates_list: list[str] = recent.get("filingDate", [])
-                report_dates_list: list[str] = recent.get("reportDate", [])
-                idx: int | None = None
-                for i, form in enumerate(forms):
-                    if str(form).upper() == filing_type.upper():
-                        idx = i
-                        break
-                if idx is not None:
-                    primary_doc = primary_docs_list[idx] if idx < len(primary_docs_list) else None
-                    if primary_doc:
-                        cik_int = int(cik_padded)
-                        _, doc_url = _edgar_build_filing_urls(cik_int, accessions_list[idx], primary_doc)
-                        if doc_url:
-                            html_text = await _edgar_get_html(doc_url, max_bytes=5_000_000)
-                            if html_text:
-                                geo_ratio, geo_usd, geo_denominator, geo_heading, geo_evidence = _extract_geo_revenue_from_html(
-                                    html_text, region or ""
-                                )
-                                if geo_usd is not None:
-                                    acc_num = accessions_list[idx] if idx < len(accessions_list) else ""
-                                    filing_date_str = filing_dates_list[idx] if idx < len(filing_dates_list) else ""
-                                    report_date_str = report_dates_list[idx] if idx < len(report_dates_list) else ""
-                                    # The fiscal year the filing states for itself wins over the period-end rule (DG's year ending
-                                    # January 2026 is its FY2025) (2.5.13).
-                                    focus = document_fiscal_year_focus(html_text)
-                                    fiscal_year = filing_fiscal_year_label(focus, report_date_str or None) or ""
-                                    # A quarterly report's table is a quarter or year-to-date, never a fiscal year: its own
-                                    # column header says which ("Three Months Ended August 1, 2026") (2.5.9, MRVL).
-                                    if not _re.match(r"(?:10-K|20-F|40-F)", str(forms[idx]), _re.IGNORECASE):
-                                        headers = geo_evidence.get("sourceColumns") if isinstance(geo_evidence, dict) else None
-                                        fiscal_year = headers[0] if headers else ""
-                                    raw_value = (
-                                        geo_evidence.get("rawValue") if isinstance(geo_evidence, dict) else None
-                                    ) or _format_raw_number(geo_usd)
-                                    raw_den = (
-                                        geo_evidence.get("rawDenominator") if isinstance(geo_evidence, dict) else None
-                                    ) or _format_raw_number(geo_denominator)
-                                    source_rows = (
-                                        geo_evidence.get("sourceRows") if isinstance(geo_evidence, dict) else None
-                                    ) or [
-                                        [region or "Region", raw_value],
-                                        ["Total revenue", raw_den],
-                                    ]
-                                    source_cols = (
-                                        geo_evidence.get("sourceColumns") if isinstance(geo_evidence, dict) else None
-                                    ) or [fiscal_year]
-                                    warnings = []
-                                    if geo_denominator is None and geo_usd is not None:
-                                        warnings.append({
-                                            "code": "DENOMINATOR_NOT_FOUND",
-                                            "message": "Could not compute geographic revenue percentage due to missing denominator.",
-                                            "severity": "warning",
-                                        })
-                                    return _geo_shape({
-                                        "ticker": ticker,
-                                        "factType": fact_type.value,
-                                        "region": region,
-                                        "period": fiscal_year or None,
-                                        "rawValue": raw_value,
-                                        "rawDenominator": raw_den,
-                                        "unit": "USD",
-                                        "unitScale": (geo_evidence.get("unitScale") if isinstance(geo_evidence, dict) else "actual") or "actual",
-                                        "value": geo_usd,
-                                        "denominator": geo_denominator,
-                                        "valueRatio": geo_ratio,
-                                        "valuePct": round(geo_ratio * PCT_MULTIPLIER, PCT_DECIMALS) if geo_ratio is not None else None,
-                                        "extractionMethod": "PARSED_TABLE",
-                                        "source": "PARSED_TABLE",
-                                        "confidence": "HIGH" if geo_denominator is not None else "LOW",
-                                        "filingType": filing_type,
-                                        "filingDate": filing_date_str,
-                                        "accessionNumber": acc_num,
-                                        "documentUrl": doc_url,
-                                        "indexUrl": None,
-                                        "primaryDocumentUrl": doc_url,
-                                        "evidence": {
-                                            "sectionHeading": geo_heading or (geo_evidence.get("sectionHeading") if isinstance(geo_evidence, dict) else None),
-                                            "tableTitle": geo_evidence.get("tableTitle") if isinstance(geo_evidence, dict) else None,
-                                            "sourceTableId": geo_evidence.get("sourceTableId") if isinstance(geo_evidence, dict) else 1,
-                                            "sourceRows": source_rows,
-                                            "sourceColumns": source_cols,
-                                        },
-                                        "calculation": (
-                                            {
-                                                "formula": "value / denominator * 100",
-                                                "valueSource": "sourceRows[0]",
-                                                "denominatorSource": "sourceRows[1]",
-                                                "resultPct": round(geo_ratio * PCT_MULTIPLIER, PCT_DECIMALS),
-                                            }
-                                            if geo_ratio is not None and geo_denominator is not None else None
-                                        ),
-                                        "warnings": warnings,
-                                    })
+            # The Worker's path: the filing (the pinned one, else the latest of the form, a 10-K falling to the latest
+            # 20-F), its primary HTML, then the table, or why there is none (2.5.18).
+            filing, resolve_error = await _resolve_sec_filing(ticker, filing_type, pinned_accession)
+            if filing is None:
+                resolve_error = resolve_error or {}
+                return _geo_shape({
+                    **resolve_error,
+                    "factType": fact_type.value,
+                    "region": region,
+                    "value": None,
+                    "denominator": None,
+                    "valueRatio": None,
+                    "valuePct": None,
+                    "extractionMethod": "NONE",
+                    "source": resolve_error.get("code"),
+                    "confidence": resolve_error.get("code"),
+                    "filingType": filing_type,
+                    "evidence": {},
+                })
+            html_text = await _edgar_get_html(filing["documentUrl"], max_bytes=_SEC_DOCUMENT_READ_MAX_CHARS + 1)
+            # The read is bounded in UTF-16 code units, as the Worker's string length.
+            html_length = _utf16_length(html_text) if html_text else 0
+            if html_length > _SEC_DOCUMENT_READ_MAX_CHARS:
+                html_text = html_text.encode("utf-16-le", "surrogatepass")[: 2 * _SEC_DOCUMENT_READ_MAX_CHARS].decode("utf-16-le", "ignore")
+                html_length = _utf16_length(html_text)
+            filing_evidence = {
+                "sourceType": "sec_filing",
+                "filingType": filing["filingType"],
+                "filingDate": filing["filingDate"],
+                "accessionNumber": filing["accessionNumber"],
+                "documentUrl": filing["documentUrl"],
+            }
+            if html_text:
+                geo_ratio, geo_usd, geo_denominator, geo_heading, geo_evidence = _extract_geo_revenue_from_html(html_text, region or "")
+                if geo_usd is not None:
+                    geo_evidence = geo_evidence if isinstance(geo_evidence, dict) else {}
+                    # A quarterly report's table is a quarter or year-to-date, never a fiscal year: its own column
+                    # header says which ("Three Months Ended August 1, 2026"), not the filing date (2.5.9, MRVL). An
+                    # annual report's year is its period of report's fiscal year, not its filing date's (2.5.11).
+                    annual = bool(_re.match(r"(?:10-K|20-F|40-F)", str(filing["filingType"] or ""), _re.IGNORECASE))
+                    # The fiscal year the filing states for itself wins over the period-end rule (DG's year ending
+                    # January 2026 is its FY2025) (2.5.13).
+                    if annual:
+                        fiscal_year = filing_fiscal_year_label(document_fiscal_year_focus(html_text), filing.get("reportDate")) or ""
+                    else:
+                        headers = geo_evidence.get("sourceColumns")
+                        fiscal_year = headers[0] if headers else ""
+                    raw_value = geo_evidence.get("rawValue") if geo_evidence.get("rawValue") is not None else _format_raw_number(geo_usd)
+                    raw_den = geo_evidence.get("rawDenominator") if geo_evidence.get("rawDenominator") is not None else _format_raw_number(geo_denominator)
+                    source_cols = geo_evidence.get("sourceColumns") or [fiscal_year]
+                    warnings = []
+                    if geo_denominator is None and geo_usd is not None:
+                        warnings.append({
+                            "code": "DENOMINATOR_NOT_FOUND",
+                            "message": "Could not compute geographic revenue percentage due to missing denominator.",
+                            "severity": "warning",
+                        })
+                    return _geo_shape({
+                        "ticker": ticker,
+                        "factType": fact_type.value,
+                        "region": region,
+                        "period": fiscal_year or None,
+                        "rawValue": raw_value,
+                        "rawDenominator": raw_den,
+                        "unit": "USD",
+                        "unitScale": geo_evidence.get("unitScale"),
+                        "value": geo_usd,
+                        "denominator": geo_denominator,
+                        "valueRatio": geo_ratio,
+                        "valuePct": _js_round(geo_ratio * PCT_MULTIPLIER * 100) / 100 if geo_denominator is not None else None,
+                        "extractionMethod": "PARSED_TABLE",
+                        "source": "PARSED_TABLE",
+                        "confidence": "HIGH" if geo_denominator is not None else "LOW",
+                        "filingType": filing["filingType"],
+                        "filingDate": filing["filingDate"],
+                        "accessionNumber": filing["accessionNumber"],
+                        "documentUrl": filing["documentUrl"],
+                        "indexUrl": None,
+                        "primaryDocumentUrl": filing["documentUrl"],
+                        "evidence": {
+                            "sectionHeading": geo_heading or None,
+                            "tableTitle": None,
+                            "sourceTableId": 1,
+                            "sourceRows": geo_evidence.get("sourceRows"),
+                            "sourceColumns": source_cols,
+                        },
+                        "calculation": (
+                            {
+                                "formula": "value / denominator * 100",
+                                "valueSource": "sourceRows[0]",
+                                "denominatorSource": "sourceRows[1]",
+                                "resultPct": _js_round(geo_ratio * PCT_MULTIPLIER * 100) / 100,
+                            }
+                            if geo_denominator is not None else None
+                        ),
+                        "warnings": [*warnings, *filing["warnings"]],
+                    })
+                region_text = str(region or "")
+                searched_terms = _geo_region_aliases(region_text)
+                relevant_geo_text = _filing_has_relevant_geo_text(html_text, region_text)
+                read_truncated = html_length >= _SEC_DOCUMENT_READ_MAX_CHARS
+                scan_coverage = {
+                    "sourceType": "sec_primary_html",
+                    "documentUrl": filing["documentUrl"],
+                    "charsScanned": html_length,
+                    "maxCharsRequested": _SEC_DOCUMENT_READ_MAX_CHARS,
+                    "filingReadTruncated": read_truncated,
+                    "relevantGeoTextFound": relevant_geo_text,
+                    "searchedTerms": searched_terms,
+                }
+                if relevant_geo_text or read_truncated:
+                    extraction_warnings = list(filing["warnings"])
+                    if relevant_geo_text:
+                        extraction_warnings.append({"code": "TABLE_NOT_PARSED", "message": "Relevant filing text exists, but no geographic revenue table was parsed.", "severity": "warning"})
+                    if read_truncated:
+                        extraction_warnings.append({"code": "FILING_READ_TRUNCATED", "message": "Geographic revenue scan read only the bounded filing prefix; relevant tables may appear later in the filing.", "severity": "warning"})
+                    return _geo_shape({
+                        "ticker": ticker,
+                        "factType": fact_type.value,
+                        "region": region,
+                        "value": None,
+                        "denominator": None,
+                        "valueRatio": None,
+                        "valuePct": None,
+                        "extractionMethod": "NONE",
+                        "source": "EXTRACTION_FAILED",
+                        "confidence": "EXTRACTION_FAILED",
+                        "status": "EXTRACTION_FAILED",
+                        "code": "EXTRACTION_FAILED",
+                        "filingType": filing["filingType"],
+                        "filingDate": filing["filingDate"],
+                        "accessionNumber": filing["accessionNumber"],
+                        "documentUrl": filing["documentUrl"],
+                        "primaryDocumentUrl": filing["documentUrl"],
+                        "evidence": filing_evidence,
+                        "scanCoverage": scan_coverage,
+                        "searchedTerms": searched_terms,
+                        "warnings": extraction_warnings,
+                    })
+                return _geo_shape({
+                    "ticker": ticker,
+                    "factType": fact_type.value,
+                    "region": region,
+                    "value": None,
+                    "denominator": None,
+                    "valueRatio": None,
+                    "valuePct": None,
+                    "extractionMethod": "NONE",
+                    "source": "NOT_DISCLOSED",
+                    "confidence": "NOT_DISCLOSED",
+                    "status": "NOT_DISCLOSED",
+                    "filingType": filing["filingType"],
+                    "filingDate": filing["filingDate"],
+                    "accessionNumber": filing["accessionNumber"],
+                    "documentUrl": filing["documentUrl"],
+                    "primaryDocumentUrl": filing["documentUrl"],
+                    "evidence": filing_evidence,
+                    "scanCoverage": scan_coverage,
+                    "searchedTerms": searched_terms,
+                    "notDisclosedBasis": "Resolved and scanned the primary SEC filing HTML; no matching geographic revenue disclosure text or parseable table was found for the requested region.",
+                    "warnings": list(filing["warnings"]),
+                })
+            return _geo_shape({
+                "ticker": ticker,
+                "factType": fact_type.value,
+                "region": region,
+                "value": None,
+                "denominator": None,
+                "valueRatio": None,
+                "valuePct": None,
+                "extractionMethod": "NONE",
+                "source": "EXTRACTION_FAILED",
+                "confidence": "EXTRACTION_FAILED",
+                "status": "EXTRACTION_FAILED",
+                "code": "FILING_TEXT_NOT_AVAILABLE",
+                "filingType": filing["filingType"],
+                "filingDate": filing["filingDate"],
+                "accessionNumber": filing["accessionNumber"],
+                "documentUrl": filing["documentUrl"],
+                "primaryDocumentUrl": filing["documentUrl"],
+                "evidence": filing_evidence,
+                "warnings": [
+                    *filing["warnings"],
+                    {"code": "FILING_TEXT_NOT_AVAILABLE", "message": "Resolved SEC filing, but primary HTML text could not be fetched for geographic revenue scan.", "severity": "warning"},
+                ],
+            })
         return _geo_shape({
             "ticker": ticker,
             "factType": fact_type.value,
@@ -9183,34 +9385,29 @@ def _as_status(source_payload: dict) -> str:
     return "NOT_FOUND"
 
 
-async def _extract_geo_payload(
-    ticker: str,
-    region: str,
-    filing_type: str,
-    period: str,
-) -> dict:
-    raw = await get_filing_data(
-        ticker=ticker,
-        fact_type=FilingFactType.geographic_revenue,
-        region=region,
-        filing_type=filing_type,
-        period=period,
-    )
-    payload = _safe_json_loads(raw)
-    warnings = payload.get("warnings")
-    if not isinstance(warnings, list):
-        warnings = []
-    if payload.get("value") is not None and payload.get("denominator") is None:
-        payload["valueRatio"] = None
-        payload["valuePct"] = None
-        if not any(isinstance(w, dict) and w.get("code") == "DENOMINATOR_NOT_FOUND" for w in warnings):
-            warnings.append({
-                "code": "DENOMINATOR_NOT_FOUND",
-                "message": "Could not compute geographic revenue percentage due to missing denominator.",
-                "severity": "warning",
-            })
-    payload["warnings"] = warnings
-    return payload
+# The revenue statuses that say why there is no value (the Worker's NON_DECISION_REVENUE_STATUSES).
+_NON_DECISION_REVENUE_STATUSES = frozenset({
+    "EXTRACTION_FAILED", "TABLE_NOT_PARSED", "PROVIDER_LIMITATION", "NO_DIMENSIONAL_REVENUE_FACT",
+    "FILING_NOT_FOUND_TRY_OTHER_TYPE", "FILING_TEXT_NOT_AVAILABLE",
+})
+
+
+def _explicit_revenue_limitation_status(status: object, warnings: list | None = None) -> str | None:
+    """The Worker's explicitRevenueLimitationStatus: a named limitation, from the status or from a warning code."""
+    normalized = "" if status is None else str(status).upper()
+    if normalized in _NON_DECISION_REVENUE_STATUSES:
+        return normalized
+    codes = {w.get("code") for w in (warnings or []) if isinstance(w, dict)}
+    if "TABLE_NOT_PARSED" in codes:
+        return "TABLE_NOT_PARSED"
+    if "NO_DIMENSIONAL_REVENUE_FACT" in codes:
+        return "NO_DIMENSIONAL_REVENUE_FACT"
+    return None
+
+
+def _nn(value: object, default: object = None) -> object:
+    """JavaScript's `value ?? default`: only None falls back, never "", 0 or False."""
+    return default if value is None else value
 
 
 async def _may_be_20f_filer(ticker: str) -> bool:
@@ -9258,9 +9455,37 @@ async def extract_geographic_revenue(
             "warnings": [{"code": "INPUT_VALIDATION_ERROR", "message": "region is required", "severity": "error"}],
         })
 
-    payload = await _extract_geo_payload(ticker, region, filing_type, period)
-    idx_payload = _safe_json_loads(await get_sec_filing_index(ticker, filing_type, period, accession_number))
-    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+    payload = _safe_json_loads(await get_filing_data(
+        ticker=ticker, fact_type=FilingFactType.geographic_revenue, region=region, filing_type=filing_type, period=period,
+    ))
+    detail = str(detailLevel).lower()
+    # The filing index is read for detailLevel raw only, as the Worker does (compact evidence comes from the payload).
+    idx_payload = _safe_json_loads(await get_sec_filing_index(ticker, filing_type, period, accession_number)) if detail == "raw" else {}
+    warnings = list(payload["warnings"]) if isinstance(payload.get("warnings"), list) else []
+    payload_status = str(_nn(payload.get("status"), _nn(payload.get("code"), _nn(payload.get("confidence"), "")))).strip()
+    if payload.get("value") is not None and payload.get("denominator") is None and not any(isinstance(w, dict) and w.get("code") == "DENOMINATOR_NOT_FOUND" for w in warnings):
+        warnings.append({
+            "code": "DENOMINATOR_NOT_FOUND",
+            "message": "Could not compute geographic revenue percentage due to missing denominator.",
+            "severity": "warning",
+        })
+
+    def _evidence(source: dict, index: dict, default_filing_type: str) -> dict:
+        found = source.get("evidence") if isinstance(source.get("evidence"), dict) else {}
+        return {
+            "filingType": _nn(index.get("filingType"), _nn(source.get("filingType"), default_filing_type)),
+            "filingDate": _nn(index.get("filingDate"), source.get("filingDate")),
+            "acceptedAt": index.get("acceptedAt"),
+            "accessionNumber": _nn(index.get("accessionNumber"), source.get("accessionNumber")),
+            "documentUrl": _nn(index.get("documentUrl"), source.get("documentUrl")),
+            "sectionHeading": found.get("sectionHeading"),
+            "tableTitle": found.get("tableTitle"),
+            "sourceTableId": found.get("sourceTableId"),
+            "sourceRows": found.get("sourceRows") if isinstance(found.get("sourceRows"), list) else [],
+            "sourceColumns": found.get("sourceColumns") if isinstance(found.get("sourceColumns"), list) else [],
+        }
+
+    has_denominator = payload.get("denominator") is not None
     shaped = {
         "ticker": ticker,
         "factType": "geographic_revenue",
@@ -9268,103 +9493,72 @@ async def extract_geographic_revenue(
         "period": payload.get("period"),
         "rawValue": payload.get("rawValue"),
         "rawDenominator": payload.get("rawDenominator"),
-        "unit": payload.get("unit", "USD"),
-        "unitScale": payload.get("unitScale", "unknown"),
+        "unit": _nn(payload.get("unit"), "USD"),
+        "unitScale": _nn(payload.get("unitScale"), "unknown"),
         "value": payload.get("value"),
         "denominator": payload.get("denominator"),
-        "valueRatio": payload.get("valueRatio"),
-        "valuePct": payload.get("valuePct"),
-        "extractionMethod": payload.get("extractionMethod", "NONE"),
-        "confidence": payload.get("confidence", "NOT_DISCLOSED"),
-        "evidence": {
-            "filingType": idx_payload.get("filingType") or payload.get("filingType") or filing_type,
-            "filingDate": idx_payload.get("filingDate") or payload.get("filingDate"),
-            "acceptedAt": idx_payload.get("acceptedAt"),
-            "accessionNumber": idx_payload.get("accessionNumber") or payload.get("accessionNumber"),
-            "documentUrl": idx_payload.get("documentUrl") or payload.get("documentUrl"),
-            "sectionHeading": evidence.get("sectionHeading"),
-            "tableTitle": evidence.get("tableTitle"),
-            "sourceTableId": evidence.get("sourceTableId"),
-            "sourceRows": evidence.get("sourceRows") if isinstance(evidence.get("sourceRows"), list) else [],
-            "sourceColumns": evidence.get("sourceColumns") if isinstance(evidence.get("sourceColumns"), list) else [],
-        },
+        "valueRatio": payload.get("valueRatio") if has_denominator else None,
+        "valuePct": payload.get("valuePct") if has_denominator else None,
+        "extractionMethod": _nn(payload.get("extractionMethod"), "NONE"),
+        "confidence": _nn(payload.get("confidence"), "NOT_DISCLOSED"),
+        "evidence": _evidence(payload, idx_payload, filing_type),
         "calculation": payload.get("calculation"),
-        "warnings": payload.get("warnings") if isinstance(payload.get("warnings"), list) else [],
+        "scanCoverage": payload.get("scanCoverage"),
+        "searchedTerms": payload["searchedTerms"] if isinstance(payload.get("searchedTerms"), list) else [],
+        "notDisclosedBasis": payload.get("notDisclosedBasis"),
+        "status": "FOUND" if payload.get("value") is not None else (payload_status or "NOT_DISCLOSED"),
+        "code": _nn(payload.get("code"), payload_status if payload_status and payload_status not in ("FOUND", "NOT_DISCLOSED") else None),
+        "warnings": warnings,
     }
-    if shaped["denominator"] is None:
-        shaped["valueRatio"] = None
-        shaped["valuePct"] = None
-    if (
-        str(filing_type or "").upper() == "10-K"
-        and str(shaped.get("confidence") or "").upper() == "NOT_DISCLOSED"
-    ):
-        evidence_filing_type = str((shaped.get("evidence") or {}).get("filingType") or "").upper()
+    if str(filing_type or "").upper() == "10-K" and str(shaped["confidence"] or "").upper() == "NOT_DISCLOSED":
+        evidence_filing_type = str(shaped["evidence"].get("filingType") or "").upper()
         maybe_20f = evidence_filing_type == "20-F"
         if not maybe_20f and evidence_filing_type in ("", "10-K"):
             maybe_20f = await _may_be_20f_filer(ticker)
         if maybe_20f:
             # Automatic 20-F fallback: retry extraction with 20-F filing type
-            fallback_payload = await _extract_geo_payload(ticker, region, "20-F", period)
+            fallback_payload = _safe_json_loads(await get_filing_data(
+                ticker=ticker, fact_type=FilingFactType.geographic_revenue, region=region, filing_type="20-F", period=period,
+            ))
             fallback_idx = _safe_json_loads(await get_sec_filing_index(ticker, "20-F", period, accession_number))
             if fallback_payload.get("value") is not None:
-                # 20-F extraction succeeded — replace shaped with fallback data
-                fallback_evidence = fallback_payload.get("evidence") if isinstance(fallback_payload.get("evidence"), dict) else {}
-                shaped = {
-                    "ticker": ticker,
-                    "factType": "geographic_revenue",
-                    "region": region,
-                    "period": fallback_payload.get("period"),
-                    "rawValue": fallback_payload.get("rawValue"),
-                    "rawDenominator": fallback_payload.get("rawDenominator"),
-                    "unit": fallback_payload.get("unit", "USD"),
-                    "unitScale": fallback_payload.get("unitScale", "unknown"),
-                    "value": fallback_payload.get("value"),
-                    "denominator": fallback_payload.get("denominator"),
-                    "valueRatio": fallback_payload.get("valueRatio"),
-                    "valuePct": fallback_payload.get("valuePct"),
-                    "extractionMethod": fallback_payload.get("extractionMethod", "NONE"),
-                    "confidence": fallback_payload.get("confidence", "HIGH"),
-                    "evidence": {
-                        "filingType": fallback_idx.get("filingType") or fallback_payload.get("filingType") or "20-F",
-                        "filingDate": fallback_idx.get("filingDate") or fallback_payload.get("filingDate"),
-                        "acceptedAt": fallback_idx.get("acceptedAt"),
-                        "accessionNumber": fallback_idx.get("accessionNumber") or fallback_payload.get("accessionNumber"),
-                        "documentUrl": fallback_idx.get("documentUrl") or fallback_payload.get("documentUrl"),
-                        "sectionHeading": fallback_evidence.get("sectionHeading"),
-                        "tableTitle": fallback_evidence.get("tableTitle"),
-                        "sourceTableId": fallback_evidence.get("sourceTableId"),
-                        "sourceRows": fallback_evidence.get("sourceRows") if isinstance(fallback_evidence.get("sourceRows"), list) else [],
-                        "sourceColumns": fallback_evidence.get("sourceColumns") if isinstance(fallback_evidence.get("sourceColumns"), list) else [],
-                    },
-                    "calculation": fallback_payload.get("calculation"),
-                    "warnings": fallback_payload.get("warnings") if isinstance(fallback_payload.get("warnings"), list) else [],
-                }
-                if shaped["denominator"] is None:
-                    shaped["valueRatio"] = None
-                    shaped["valuePct"] = None
+                # 20-F extraction succeeded — replace the output with the fallback data
+                fallback_denominator = fallback_payload.get("denominator") is not None
+                shaped["period"] = fallback_payload.get("period")
+                shaped["rawValue"] = fallback_payload.get("rawValue")
+                shaped["rawDenominator"] = fallback_payload.get("rawDenominator")
+                shaped["unit"] = _nn(fallback_payload.get("unit"), "USD")
+                shaped["unitScale"] = _nn(fallback_payload.get("unitScale"), "unknown")
+                shaped["value"] = fallback_payload.get("value")
+                shaped["denominator"] = fallback_payload.get("denominator")
+                shaped["valueRatio"] = fallback_payload.get("valueRatio") if fallback_denominator else None
+                shaped["valuePct"] = fallback_payload.get("valuePct") if fallback_denominator else None
+                shaped["extractionMethod"] = _nn(fallback_payload.get("extractionMethod"), "NONE")
+                shaped["confidence"] = _nn(fallback_payload.get("confidence"), "HIGH")
+                shaped["evidence"] = _evidence(fallback_payload, fallback_idx, "20-F")
+                shaped["calculation"] = fallback_payload.get("calculation")
+                shaped["scanCoverage"] = fallback_payload.get("scanCoverage")
+                shaped["searchedTerms"] = fallback_payload["searchedTerms"] if isinstance(fallback_payload.get("searchedTerms"), list) else []
+                shaped["notDisclosedBasis"] = fallback_payload.get("notDisclosedBasis")
+                shaped["status"] = "FOUND"
+                shaped["code"] = fallback_payload.get("code")
                 # Append advisory warning noting automatic 20-F selection
-                shaped_warnings = shaped.get("warnings")
-                if not isinstance(shaped_warnings, list):
-                    shaped_warnings = []
-                shaped_warnings.append({
-                    "code": "AUTO_20F_FALLBACK",
-                    "message": "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).",
-                    "severity": "info",
+                shaped["warnings"] = [
+                    *(fallback_payload["warnings"] if isinstance(fallback_payload.get("warnings"), list) else []),
+                    {
+                        "code": "AUTO_20F_FALLBACK",
+                        "message": "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).",
+                        "severity": "info",
+                    },
+                ]
+            elif not any(isinstance(w, dict) and w.get("code") == "POSSIBLE_20F_FILER" for w in warnings):
+                # 20-F extraction also failed — keep the original and add an advisory warning
+                warnings.append({
+                    "code": "POSSIBLE_20F_FILER",
+                    "message": "POSSIBLE_20F_FILER: Ticker may file 20-F. Retry with filing_type='20-F' or use IR web search.",
+                    "severity": "warning",
                 })
-                shaped["warnings"] = shaped_warnings
-            else:
-                # 20-F extraction also failed — keep original shaped and add advisory warning
-                warnings = shaped.get("warnings")
-                if not isinstance(warnings, list):
-                    warnings = []
-                if not any(isinstance(w, dict) and w.get("code") == "POSSIBLE_20F_FILER" for w in warnings):
-                    warnings.append({
-                        "code": "POSSIBLE_20F_FILER",
-                        "message": "POSSIBLE_20F_FILER: Ticker may file 20-F. Retry with filing_type='20-F' or use IR web search.",
-                        "severity": "warning",
-                    })
-                shaped["warnings"] = warnings
-    if str(detailLevel).lower() == "raw":
+    if detail == "raw":
         shaped["rawContext"] = {"filingIndex": idx_payload}
     return json.dumps(shaped)
 
@@ -9501,6 +9695,7 @@ async def extract_revenue_exposure(
     geo = _safe_json_loads(await extract_geographic_revenue(ticker=ticker, region=exposure_query, filing_type=filing_type, period=period, detailLevel=detailLevel))
     found = geo.get("value") is not None
     status = "FOUND_REVENUE_EXPOSURE" if found else _as_status(geo)
+    warnings = geo["warnings"] if isinstance(geo.get("warnings"), list) else []
     matches = []
     if found:
         matches.append({
@@ -9511,10 +9706,26 @@ async def extract_revenue_exposure(
             "valueRatio": geo.get("valueRatio"),
             "valuePct": geo.get("valuePct"),
             "period": geo.get("period"),
-            "confidence": geo.get("confidence", "HIGH"),
-            "evidence": geo.get("evidence", {}),
+            "confidence": _nn(geo.get("confidence"), "HIGH"),
+            "evidence": _nn(geo.get("evidence"), {}),
         })
-    return json.dumps({"ticker": ticker, "query": exposure_query, "matches": matches, "status": status})
+    geo_evidence = geo["evidence"] if isinstance(geo.get("evidence"), dict) else {}
+    return json.dumps({
+        "ticker": ticker,
+        "query": exposure_query,
+        "matches": matches,
+        "status": status,
+        # Why there is no value (SEC_READ_FAILED, FILING_NOT_FOUND_TRY_OTHER_TYPE, ...); a plain NOT_DISCLOSED has no code.
+        "code": None if found else _nn(geo.get("code"), None if status == "NOT_DISCLOSED" else status),
+        "requestedFilingType": _nn(geo.get("requestedFilingType"), filing_type),
+        "filingType": _nn(geo_evidence.get("filingType"), _nn(geo.get("filingType"), filing_type)),
+        "filingDate": _nn(geo_evidence.get("filingDate"), geo.get("filingDate")),
+        "accessionNumber": _nn(geo_evidence.get("accessionNumber"), geo.get("accessionNumber")),
+        "documentUrl": _nn(geo_evidence.get("documentUrl"), geo.get("documentUrl")),
+        "availableFilingTypes": _nn(geo.get("availableFilingTypes"), []),
+        "suggestedFilingTypes": _nn(geo.get("suggestedFilingTypes"), []),
+        "warnings": warnings,
+    })
 
 
 _EXPOSURE_XBRL_TOKEN_RE = _re.compile(
@@ -10797,6 +11008,29 @@ async def _warm_sec_submissions(ticker: str) -> None:
         pass
 
 
+def _china_filing_not_found(ticker: str, filing_type: str, source: dict) -> str:
+    """The Worker's extractChinaExposure payload for a filing that is not there: no read past the lookup."""
+    return json.dumps({
+        "ticker": ticker,
+        "exposureType": "china_exposure",
+        "filingType": filing_type,
+        "filingDate": None,
+        "accessionNumber": None,
+        "documentUrl": None,
+        "revenueExposure": {"status": "FILING_NOT_FOUND_TRY_OTHER_TYPE", "value": None, "denominator": None, "valueRatio": None, "valuePct": None, "confidence": "FILING_NOT_FOUND_TRY_OTHER_TYPE", "evidence": []},
+        "manufacturingExposure": {"status": "NOT_FOUND", "confidence": "LOW", "evidence": []},
+        "entityExposure": {"status": "NOT_FOUND", "entities": [], "confidence": "LOW", "evidence": []},
+        "bankExposure": {"status": "NOT_FOUND", "entities": [], "confidence": "LOW", "evidence": []},
+        "riskFactorExposure": {"status": "NOT_FOUND", "confidence": "LOW", "evidence": []},
+        "overallStatus": "FILING_NOT_FOUND_TRY_OTHER_TYPE",
+        "code": "FILING_NOT_FOUND_TRY_OTHER_TYPE",
+        "requestedFilingType": _nn(source.get("requestedFilingType"), filing_type),
+        "availableFilingTypes": _nn(source.get("availableFilingTypes"), []),
+        "suggestedFilingTypes": _nn(source.get("suggestedFilingTypes"), []),
+        "warnings": _nn(source.get("warnings"), []),
+    })
+
+
 @yfinance_server.tool(name="extract_china_exposure", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_china_exposure"], description="Extract China exposure with separate revenue and non-revenue classifications; revenue values are decision-grade only when evidence and status support them.")
 async def extract_china_exposure(
     ticker: str,
@@ -10808,18 +11042,47 @@ async def extract_china_exposure(
     failure = _filing_period_failure("extract_china_exposure", period)
     if failure:
         return failure
-    risk_terms = ["China", "tariff", "export control"]
+    risk_terms = ["China", "tariff", "export control", "Bank of China"]
     # Warm the shared submissions cache once, then fetch the three
     # independent filing reads together.
     await _warm_sec_submissions(ticker)
+    # The filing the Worker reads: a 10-K not filed falls to the latest 20-F, a pinned accession is exact. One with no
+    # such filing is FILING_NOT_FOUND_TRY_OTHER_TYPE before any other read (the Worker's resolveSecFiling).
+    resolved_filing: dict | None = None
+    resolve_error: dict | None = None
+    try:
+        resolved_filing, resolve_error = await _resolve_sec_filing(ticker, filing_type, accession_number)
+    except Exception:
+        pass
+    if resolve_error and resolve_error.get("status") == "FILING_NOT_FOUND_TRY_OTHER_TYPE":
+        return _china_filing_not_found(ticker, filing_type, resolve_error)
+
+    async def _no_index() -> str:
+        # The Worker reads the index from the resolved filing; one that could not be resolved (no primary document, an
+        # XBRL-only one, no submissions) is its error payload, read from as the index (the Worker's {ok: false, ...error}).
+        return json.dumps(resolve_error)
+
     idx_raw, revenue_raw, risk_raw = await asyncio.gather(
-        get_sec_filing_index(ticker=ticker, filing_type=filing_type, period=period, accession_number=accession_number),
+        get_sec_filing_index(
+            ticker=ticker,
+            filing_type=resolved_filing["filingType"],
+            period=period,
+            accession_number=resolved_filing["accessionNumber"],
+        ) if resolved_filing else (_no_index() if resolve_error else get_sec_filing_index(
+            ticker=ticker, filing_type=filing_type, period=period, accession_number=accession_number)),
         extract_revenue_exposure(ticker=ticker, exposure_query="China", filing_type=filing_type, period=period),
         extract_risk_factor_mentions(ticker=ticker, terms=risk_terms, filing_type=filing_type, period=period),
     )
     idx = _safe_json_loads(idx_raw)
     revenue = _safe_json_loads(revenue_raw)
-    revenue_status = "FOUND" if revenue.get("status") == "FOUND_REVENUE_EXPOSURE" else revenue.get("status", "NOT_FOUND")
+    if revenue.get("status") == "FILING_NOT_FOUND_TRY_OTHER_TYPE":
+        return _china_filing_not_found(ticker, filing_type, revenue)
+    revenue_status_text = str(_nn(revenue.get("status"), "NOT_FOUND"))
+    revenue_warnings = revenue["warnings"] if isinstance(revenue.get("warnings"), list) else []
+    explicit_revenue_status = _explicit_revenue_limitation_status(revenue_status_text, revenue_warnings)
+    revenue_status = "FOUND" if revenue_status_text == "FOUND_REVENUE_EXPOSURE" else revenue_status_text
+    # A revenue read that failed (SEC_READ_FAILED, SEC_LOOKUP_UNAVAILABLE) is not a missing exposure (2.5.18).
+    revenue_read_failed = revenue_status_text == "PROVIDER_ERROR"
 
     index = idx.get("index") if isinstance(idx.get("index"), dict) else {}
     sections = index.get("sections") if isinstance(index.get("sections"), list) else []
@@ -10900,14 +11163,38 @@ async def extract_china_exposure(
                 shaped["excerptAvailable"] = True
                 risk_evidence.append(shaped)
 
+    if not manu_evidence:
+        # Headings and table labels rarely name manufacturing locations; the filing text does (as extract_exposure's
+        # operational scan reads it).
+        china_text = _safe_json_loads(await search_sec_filing_text(
+            ticker=ticker, search_terms=["China"], filing_type=filing_type, accession_number=accession_number,
+            context_chars=800, return_tables=False,
+        ))
+        for m in china_text["matches"] if isinstance(china_text.get("matches"), list) else []:
+            if not isinstance(m, dict):
+                continue
+            excerpt = _readable_exposure_excerpt(_nn(m.get("contextText"), ""), ["China"], max_len=240, min_words=3)
+            term = next((t for t in manuf_terms if t in excerpt.lower()), None) if excerpt else None
+            if not excerpt or not term:
+                continue
+            manu_evidence.append({"source": "text", "term": term, "sectionHeading": m.get("sectionHeading"), "excerpt": excerpt, "excerptAvailable": True})
+            if len(manu_evidence) >= 5:
+                break
+
     non_revenue_found = bool(entity_evidence or bank_evidence or manu_evidence or risk_evidence)
-    if revenue.get("status") == "FOUND_REVENUE_EXPOSURE":
+    revenue_matches = revenue["matches"] if isinstance(revenue.get("matches"), list) else []
+    first_revenue = revenue_matches[0] if revenue_matches and isinstance(revenue_matches[0], dict) else {}
+    if revenue_status == "FOUND":
         overall = "FOUND_REVENUE_EXPOSURE"
     elif non_revenue_found:
         overall = "FOUND_NON_REVENUE_EXPOSURE"
-    elif revenue.get("status") == "NOT_DISCLOSED":
+    elif explicit_revenue_status:
+        overall = explicit_revenue_status
+    elif revenue_read_failed:
+        overall = "PROVIDER_ERROR"
+    elif revenue_status_text == "NOT_DISCLOSED":
         overall = "NOT_DISCLOSED"
-    elif revenue.get("status") == "CONFLICTING":
+    elif revenue_status_text == "CONFLICTING":
         overall = "CONFLICTING"
     else:
         overall = "NOT_FOUND"
@@ -10915,25 +11202,26 @@ async def extract_china_exposure(
     out = {
         "ticker": ticker,
         "exposureType": "china_exposure",
-        "filingType": idx.get("filingType", filing_type),
+        "filingType": _nn(idx.get("filingType"), filing_type),
         "filingDate": idx.get("filingDate"),
         "accessionNumber": idx.get("accessionNumber"),
         "documentUrl": idx.get("documentUrl"),
         "revenueExposure": {
             "status": revenue_status,
-            "value": revenue.get("matches", [{}])[0].get("value") if revenue.get("matches") else None,
-            "denominator": revenue.get("matches", [{}])[0].get("denominator") if revenue.get("matches") else None,
-            "valueRatio": revenue.get("matches", [{}])[0].get("valueRatio") if revenue.get("matches") else None,
-            "valuePct": revenue.get("matches", [{}])[0].get("valuePct") if revenue.get("matches") else None,
-            "confidence": "HIGH" if revenue_status == "FOUND" else ("NOT_DISCLOSED" if revenue_status == "NOT_DISCLOSED" else "LOW"),
-            "evidence": revenue.get("matches", [{}])[0].get("evidence") if revenue.get("matches") else [],
+            "value": first_revenue.get("value"),
+            "denominator": first_revenue.get("denominator"),
+            "valueRatio": first_revenue.get("valueRatio"),
+            "valuePct": first_revenue.get("valuePct"),
+            "confidence": "HIGH" if revenue_status == "FOUND" else (explicit_revenue_status or ("NOT_DISCLOSED" if revenue_status_text == "NOT_DISCLOSED" else "LOW")),
+            "evidence": _nn(first_revenue.get("evidence"), []),
         },
         "manufacturingExposure": {"status": "FOUND" if manu_evidence else "NOT_FOUND", "confidence": "MEDIUM", "evidence": manu_evidence, "rejectedNoiseCount": manu_rejected},
         "entityExposure": {"status": "FOUND" if entity_evidence else "NOT_FOUND", "entities": entity_terms if entity_evidence else [], "confidence": "MEDIUM", "evidence": entity_evidence, "rejectedNoiseCount": entity_rejected},
         "bankExposure": {"status": "FOUND" if bank_evidence else "NOT_FOUND", "entities": bank_terms if bank_evidence else [], "confidence": "MEDIUM", "evidence": bank_evidence, "rejectedNoiseCount": bank_rejected},
         "riskFactorExposure": {"status": "FOUND" if risk_evidence else "NOT_FOUND", "confidence": "MEDIUM", "evidence": risk_evidence},
         "overallStatus": overall,
-        "warnings": [],
+        "code": explicit_revenue_status or ((revenue["code"] if isinstance(revenue.get("code"), str) else "PROVIDER_ERROR") if revenue_read_failed else None),
+        "warnings": revenue_warnings,
     }
     if str(detailLevel).lower() == "raw":
         out["rawContext"] = {"filingIndex": idx}

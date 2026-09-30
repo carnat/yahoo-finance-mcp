@@ -257,7 +257,7 @@ class TestExtractGeoRevenueFromHtml(unittest.TestCase):
     def test_value_and_total_share_a_column(self):
         pct, usd, total, _, evidence = _extract_geo_revenue_from_html(MOCK_MRVL, "China")
         self.assertEqual((pct, usd, total), (0.424, 1_161_500_000, 2_739_300_000), "not the prior year's $2,006.1 total")
-        self.assertEqual(evidence["sourceRows"][-1], ["Total (unlabeled row)", "2,739.3"])
+        self.assertEqual(evidence["sourceRows"][-1], ["Total (unlabeled row)", "$2,739.3"])
         self.assertEqual(evidence["sourceColumns"], ["Three Months Ended August 1, 2026"])
         misread, _, _, _, _ = _extract_geo_revenue_from_html(MOCK_MRVL.replace(">42<", ">58<"), "China")
         self.assertIsNone(misread, "a computed share 16 points from the stated 58% is a misread column")
