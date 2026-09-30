@@ -5358,6 +5358,60 @@ async def get_filing_data(
         rows = entry_units.get("USD") if isinstance(entry_units, dict) else None
         return rows if isinstance(rows, list) else []
 
+    async def _unavailable_structured_fact(code: str, message: str, concept_name: str | None) -> str:
+        """The Worker's unavailableStructuredFact: no fact, why, and the latest filing of the form it looked in (2.5.16)."""
+        filing: dict | None = None
+        filing_warnings: list[dict] = []
+        try:
+            resolved, _error = await _resolve_periodic_filings(ticker, filing_type, None)
+        except Exception:
+            resolved = []
+        if resolved:
+            filing = resolved[0][1]
+            if (filing_type or "").upper() == "10-K" and str(filing.get("filingType") or "").upper() == "20-F":
+                filing_warnings.append({
+                    "code": "AUTO_20F_FALLBACK",
+                    "message": "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).",
+                    "severity": "info",
+                })
+        return _geo_shape({
+            "ticker": ticker,
+            "factType": fact_type.value,
+            "concept": concept_name,
+            "value": None,
+            "denominator": None,
+            "valueRatio": None,
+            "valuePct": None,
+            "rawValue": None,
+            "rawDenominator": None,
+            "unit": "USD",
+            "unitScale": "actual",
+            "period": None,
+            "filingType": filing["filingType"] if filing else filing_type,
+            "filingDate": filing.get("filingDate") if filing else None,
+            "accessionNumber": filing.get("accessionNumber") if filing else None,
+            "documentUrl": filing.get("documentUrl") if filing else None,
+            "indexUrl": None,
+            "primaryDocumentUrl": filing.get("documentUrl") if filing else None,
+            "extractionMethod": "NONE",
+            "source": "SEC_COMPANYCONCEPT",
+            "confidence": "NOT_DECISION_GRADE",
+            "status": "SEC_FACT_NOT_AVAILABLE",
+            "code": code,
+            "decisionGrade": False,
+            "evidence": {
+                "sourceType": "sec_filing",
+                "filingType": filing["filingType"],
+                "filingDate": filing.get("filingDate"),
+                "accessionNumber": filing.get("accessionNumber"),
+                "documentUrl": filing.get("documentUrl"),
+            } if filing else {},
+            "xbrlContext": None,
+            "calculation": None,
+            "warnings": [*filing_warnings, *read_warnings, {"code": code, "message": message, "severity": "warning"}],
+            "_manualLookup": _manual_lookup_payload(ticker, cik_padded, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."),
+        }, add_read_warnings=False)
+
     fetched_concepts = []
     for name in candidate_names:
         fetched_concepts.append({"concept": name, "facts": await _concept_rows(name)})
@@ -5405,41 +5459,19 @@ async def get_filing_data(
             cf = companyfacts_read[0]
             taxonomies = cf.get("facts") if isinstance(cf, dict) else None
             if isinstance(taxonomies, dict) and taxonomies.get("ifrs-full") and not taxonomies.get("us-gaap"):
-                message = (f"{ticker.upper()} reports its SEC facts under IFRS (ifrs-full), which this action does not read; "
-                           "reconcile_metric_sources reads IFRS facts in the reporting currency.")
-                return _geo_shape({
-                    "ticker": ticker,
-                    "factType": fact_type.value,
-                    "concept": concept_used,
-                    "value": None,
-                    "denominator": None,
-                    "valueRatio": None,
-                    "valuePct": None,
-                    "extractionMethod": "NONE",
-                    "source": "SEC_COMPANYCONCEPT",
-                    "confidence": "NOT_DECISION_GRADE",
-                    "status": "SEC_FACT_NOT_AVAILABLE",
-                    "code": "SEC_FACTS_IFRS_ONLY",
-                    "filingType": filing_type,
-                    "evidence": {},
-                    "warnings": [*read_warnings, {"code": "SEC_FACTS_IFRS_ONLY", "message": message, "severity": "warning"}],
-                }, add_read_warnings=False)
-            return _geo_shape({
-                "ticker": ticker,
-                "factType": fact_type.value,
-                "value": None,
-                "denominator": None,
-                "valueRatio": None,
-                "valuePct": None,
-                "extractionMethod": "NONE",
-                "source": "NOT_DISCLOSED",
-                "confidence": "NOT_DISCLOSED",
-                "evidence": {},
-                "warnings": [],
-                "_manualLookup": _manual_lookup_payload(
-                    ticker, cik_padded, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."
-                ),
-            })
+                return await _unavailable_structured_fact(
+                    "SEC_FACTS_IFRS_ONLY",
+                    f"{ticker.upper()} reports its SEC facts under IFRS (ifrs-full), which this action does not read; "
+                    "reconcile_metric_sources reads IFRS facts in the reporting currency.",
+                    concept_used,
+                )
+            # No fact for the form is a lookup outcome, not a non-disclosure: the Worker's payload, with the
+            # latest filing of the form it looked in (2.5.16; was NOT_DISCLOSED with no code).
+            return await _unavailable_structured_fact(
+                "NO_COMPANYCONCEPT_FACT_FOR_FORM",
+                f"SEC companyconcept has no {concept_used} facts for filing type {filing_type}.",
+                concept_used,
+            )
         # For geographic_revenue, fall through to HTML fallback below (picked remains None)
 
     if filtered and period == "latest" and not pinned_accession:
@@ -5702,15 +5734,27 @@ async def get_filing_data(
         period_label = f"FY{period_label}"
 
     # ── XBRL context metadata ─────────────────────────────────────────────
+    # The Worker's full context (2.5.16): without concept and taxonomy, a found fact failed the decision-grade
+    # check (ANET's FY2025 revenue read decisionGrade false in Python, true in the Worker).
     xbrl_context: dict = {
+        "concept": concept_used,
+        "taxonomy": "us-gaap",
+        "unit": "USD",
         "periodStart": picked.get("start"),
         "periodEnd": picked.get("end"),
+        "instant": None if picked.get("start") else picked.get("end"),
         "durationDays": None,
         "fiscalPeriod": str(picked.get("fp") or ""),
         "fiscalYear": str(picked.get("fy") or ""),
         "form": str(picked.get("form") or ""),
         "frame": picked.get("frame"),
+        "accessionNumber": picked.get("accn"),
+        "filedAt": picked.get("filed"),
         "periodMode": resolved_mode,
+        "dimensions": {
+            **({"segment": segment_label} if segment_label else {}),
+            **({"rawSegment": picked.get("segment")} if picked.get("segment") is not None else {}),
+        },
     }
     if picked.get("start") and picked.get("end"):
         try:
