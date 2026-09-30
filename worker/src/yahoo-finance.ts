@@ -6253,6 +6253,7 @@ export async function getFilingData(
       notDisclosedBasis: payload.notDisclosedBasis ?? null,
       status: payload.status ?? (payload.value != null ? "FOUND" : (payload.confidence ?? "NOT_DISCLOSED")),
       code: payload.code ?? null,
+      ...(typeof payload.retryable === "boolean" ? { retryable: payload.retryable } : {}),
       xbrlContext: payload.xbrlContext ?? null,
       warnings,
     };
@@ -6631,7 +6632,8 @@ export async function getFilingData(
     // Some companies (e.g. GLW) do not XBRL-tag geographic-revenue segments.
     // Fall through to the same HTML-parsing path used by searchFilingText.
     if (factType === "geographic_revenue") {
-      const resolved = await resolveSecFiling(ticker, filingType, null);
+      // A pinned read falls back to that filing's tables, never to the latest filing's (2.5.18).
+      const resolved = await resolveSecFiling(ticker, filingType, pinnedAccession);
       if (!resolved.ok) {
         return withGeoShape({
           ...resolved.error,
@@ -16013,12 +16015,16 @@ export async function extractChinaExposure(
   const revenueMatches = Array.isArray(revenue.matches) ? revenue.matches : [];
   const firstRevenue = revenueMatches.length > 0 && typeof revenueMatches[0] === "object" ? revenueMatches[0] as Record<string, unknown> : {};
 
+  // A revenue read that failed (SEC_READ_FAILED, SEC_LOOKUP_UNAVAILABLE) is not a missing exposure (2.5.18).
+  const revenueReadFailed = revStatus === "PROVIDER_ERROR";
   const overallStatus = revFound
     ? "FOUND_REVENUE_EXPOSURE"
     : nonRevenueFound
       ? "FOUND_NON_REVENUE_EXPOSURE"
       : explicitRevenueStatus
         ? explicitRevenueStatus
+      : revenueReadFailed
+        ? "PROVIDER_ERROR"
       : revStatus === "NOT_DISCLOSED"
         ? "NOT_DISCLOSED"
         : revStatus === "CONFLICTING"
@@ -16046,7 +16052,7 @@ export async function extractChinaExposure(
     bankExposure: { status: bankEvidence.length > 0 ? "FOUND" : "NOT_FOUND", entities: bankEvidence.length > 0 ? bankTerms : [], confidence: "MEDIUM", evidence: bankEvidence, rejectedNoiseCount: bankCollected.rejectedNoiseCount },
     riskFactorExposure: { status: riskEvidence.length > 0 ? "FOUND" : "NOT_FOUND", confidence: "MEDIUM", evidence: riskEvidence },
     overallStatus,
-    code: explicitRevenueStatus,
+    code: explicitRevenueStatus ?? (revenueReadFailed ? (typeof revenue.code === "string" ? revenue.code : "PROVIDER_ERROR") : null),
     warnings: Array.isArray(revenue.warnings) ? revenue.warnings : [],
   };
   if (String(detailLevel).toLowerCase() === "raw") out.rawContext = { filingIndex: idx };
