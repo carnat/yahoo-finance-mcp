@@ -26,7 +26,7 @@ import {
   type IxSource,
   type TextMatch,
 } from "./capital-structure.js";
-import { filingFactInAccession, pickConceptFacts, REVENUE_CONCEPTS } from "./sec-facts.js";
+import { FILING_PERIOD_HELP, filingFactInAccession, parseFilingPeriod, pickConceptFacts, REVENUE_CONCEPTS, selectFiscalYearRows } from "./sec-facts.js";
 import { fundingCapexSchedule } from "./funding-schedule.js";
 import { guidanceHistory, periodForExcerpt, type ReleaseText } from "./guidance-history.js";
 import { operatingDriverLedger } from "./driver-ledger.js";
@@ -6263,6 +6263,16 @@ export async function getFilingData(
 
   const config = FILING_FACT_CONCEPTS[factType];
   if (!config) return JSON.stringify({ error: true, message: `Unsupported fact_type '${factType}'`, ticker });
+  // A period this reader cannot resolve is refused, never answered with an arbitrary fact (2.5.16).
+  const namedPeriod = parseFilingPeriod(period);
+  if (!namedPeriod) {
+    return JSON.stringify({
+      ticker, factType, value: null, unit: null, period: null, filingType,
+      extractionMethod: "NONE", source: "INPUT", confidence: "NOT_DECISION_GRADE",
+      status: "INVALID_PERIOD", code: "INVALID_PERIOD", decisionGrade: false, requestedPeriod: period,
+      warnings: [{ code: "INVALID_PERIOD", message: FILING_PERIOD_HELP, severity: "error" }],
+    });
+  }
   if (factType === "geographic_revenue" && !region) {
     return JSON.stringify({ error: true, message: "region is required for fact_type='geographic_revenue'", ticker });
   }
@@ -6411,7 +6421,7 @@ export async function getFilingData(
     }
     // For geographic_revenue, fall through to HTML fallback below (picked remains null)
   }
-  if (filtered.length && period === "latest" && !pinnedAccession) {
+  if (filtered.length && namedPeriod.kind === "latest" && !pinnedAccession) {
     const latestFiled = filtered.map((f) => String(f.filed ?? "")).sort().slice(-1)[0];
     filtered = filtered.filter((f) => String(f.filed ?? "") === latestFiled);
   }
@@ -6459,7 +6469,28 @@ export async function getFilingData(
       filtered = modeFiltered;
     }
   }
-  if (period === "latest" && filtered.length) {
+  // A named fiscal year is an annual period: the rows for the period the issuer calls that year (2.5.16).
+  let namedYearLabel: string | null = null;
+  if (namedPeriod.kind === "fiscalYear") {
+    if (resolvedMode !== "annual") {
+      return unavailableStructuredFact(
+        "INVALID_PERIOD",
+        `period ${period} names a fiscal year, an annual period; request filing_type 10-K or 20-F (or period_mode annual).`,
+        concept,
+      );
+    }
+    const selected = selectFiscalYearRows(filtered, namedPeriod.year);
+    if (!selected.rows.length) {
+      return unavailableStructuredFact(
+        "PERIOD_NOT_FOUND",
+        `No annual ${concept} fact is fiscal year ${namedPeriod.year} (the issuer's stated fiscal year, else the year the period ends); fiscal years found: ${selected.fiscalYears.slice(-6).join(", ") || "none"}.`,
+        concept,
+      );
+    }
+    filtered = selected.rows;
+    namedYearLabel = `FY${namedPeriod.year}`;
+  }
+  if (namedPeriod.kind === "latest" && filtered.length) {
     filtered = [...filtered].sort((a, b) => {
       const endCmp = String(b.end ?? "").localeCompare(String(a.end ?? ""));
       if (endCmp !== 0) return endCmp;
@@ -6774,7 +6805,8 @@ export async function getFilingData(
   }
   const documentUrl = primaryDocumentUrl ?? indexUrl;
   const periodLabelRaw = String(picked.fy ?? "");
-  const periodLabel = periodLabelRaw && !periodLabelRaw.startsWith("FY") ? `FY${periodLabelRaw}` : periodLabelRaw;
+  // A named year is labelled as the period it selected, not by the fy of the filing that carried it (2.5.16).
+  const periodLabel = namedYearLabel ?? (periodLabelRaw && !periodLabelRaw.startsWith("FY") ? `FY${periodLabelRaw}` : periodLabelRaw);
   const valueNum = picked.val != null ? Number(picked.val) : null;
   const rawValue = formatRawNumber(valueNum);
   const rawDenominator = formatRawNumber(denominator);
