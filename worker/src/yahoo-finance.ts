@@ -6246,7 +6246,12 @@ export async function getFilingData(
     if (Math.abs(n - Math.round(n)) < FLOATING_POINT_EPSILON) return Math.round(n).toLocaleString("en-US");
     return n.toLocaleString("en-US", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
   };
-  const withGeoShape = (payload: Record<string, unknown>, addDenominatorWarning = false): string => {
+  // Warnings raised while reading SEC facts, carried on every result (2.5.15).
+  const readWarnings: Record<string, unknown>[] = [];
+  const withGeoShape = (input: Record<string, unknown>, addDenominatorWarning = false): string => {
+    const payload = readWarnings.length
+      ? { ...input, warnings: [...(Array.isArray(input.warnings) ? input.warnings : []), ...readWarnings] }
+      : input;
     if (factType !== "geographic_revenue") return JSON.stringify(payload);
     const warnings = Array.isArray(payload.warnings) ? [...payload.warnings] : [];
     const hasDenominator = payload.denominator != null;
@@ -6358,6 +6363,7 @@ export async function getFilingData(
       calculation: null,
       warnings: [
         ...filingWarnings,
+        ...readWarnings,
         { code, message, severity: "warning" },
       ],
       _manualLookup: filingManualLookup(ticker, cikPadded, filingType),
@@ -6401,12 +6407,28 @@ export async function getFilingData(
   // Every equivalent concept is read; the one with the newest filing of this
   // form wins, so a filer that switched concepts is not read from its old one.
   const candidateNames = [config.primary, ...(config.alternates ?? []), ...(config.fallback ? [config.fallback] : [])];
-  const fetchedConcepts = await Promise.all(candidateNames.map(async (name) => ({
-    concept: name,
-    facts: (((await fetchConcept(name))?.units as Record<string, unknown>)?.USD as Record<string, unknown>[]) ?? [],
-  })));
+  // SEC's companyconcept endpoint has served a concept's USD facts as an empty object instead of a list (BE,
+  // 2026-09): those facts are read from companyfacts, which carries them (2.5.15).
+  const malformedConcepts: string[] = [];
+  let companyfacts: Promise<Record<string, unknown> | null> | null = null;
+  const conceptRows = async (name: string): Promise<Record<string, unknown>[]> => {
+    const usd = ((await fetchConcept(name))?.units as Record<string, unknown> | undefined)?.USD;
+    if (usd == null || Array.isArray(usd)) return (usd as Record<string, unknown>[] | undefined) ?? [];
+    malformedConcepts.push(name);
+    companyfacts ??= edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`).catch(() => null);
+    const rows = (((((await companyfacts)?.facts as Record<string, unknown> | undefined)?.["us-gaap"] as Record<string, unknown> | undefined)?.[name] as Record<string, unknown> | undefined)?.units as Record<string, unknown> | undefined)?.USD;
+    return Array.isArray(rows) ? rows as Record<string, unknown>[] : [];
+  };
+  const fetchedConcepts = await Promise.all(candidateNames.map(async (name) => ({ concept: name, facts: await conceptRows(name) })));
+  if (malformedConcepts.length) {
+    readWarnings.push({
+      code: "SEC_COMPANYCONCEPT_MALFORMED",
+      message: `SEC companyconcept returned no fact list for ${malformedConcepts.join(", ")}; those facts were read from companyfacts.`,
+      severity: "info",
+    });
+  }
   const pinnedAccession = pinAccession && pinAccession.trim() ? pinAccession.trim() : null;
-  const chosen = pickConceptFacts(fetchedConcepts, filingType, pinnedAccession);
+  const chosen = pickConceptFacts(fetchedConcepts, filingType, pinnedAccession, factType === "total_revenue" ? "larger" : "first");
   const concept = chosen?.concept ?? config.primary;
   let filtered = chosen?.facts ?? [];
   if (!filtered.length && pinnedAccession) {
@@ -6419,6 +6441,16 @@ export async function getFilingData(
   }
   if (!filtered.length) {
     if (factType !== "geographic_revenue") {
+      // An IFRS filer (TSM's 20-F) tags ifrs-full, never us-gaap: say so rather than report the fact missing (2.5.15).
+      companyfacts ??= edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`).catch(() => null);
+      const taxonomies = (((await companyfacts)?.facts ?? {}) as Record<string, unknown>);
+      if (taxonomies["ifrs-full"] && !taxonomies["us-gaap"]) {
+        return unavailableStructuredFact(
+          "SEC_FACTS_IFRS_ONLY",
+          `${ticker.toUpperCase()} reports its SEC facts under IFRS (ifrs-full), which this action does not read; reconcile_metric_sources reads IFRS facts in the reporting currency.`,
+          concept,
+        );
+      }
       return unavailableStructuredFact(
         "NO_COMPANYCONCEPT_FACT_FOR_FORM",
         `SEC companyconcept has no ${concept} facts for filing type ${filingType}.`,
@@ -15282,7 +15314,8 @@ export async function extractTotalRevenue(ticker: string, filingType = "10-K", p
     factType: "total_revenue",
     value,
     period: payload.period ?? null,
-    unit: payload.unit ?? "USD",
+    // No value, no unit: a missing fact has no currency (2.5.15).
+    unit: value != null ? (payload.unit ?? "USD") : null,
     unitScale: payload.unitScale ?? null,
     confidence: payload.confidence ?? (value != null ? "HIGH" : "NOT_DISCLOSED"),
     extractionMethod: payload.extractionMethod ?? "NONE",
@@ -15291,6 +15324,10 @@ export async function extractTotalRevenue(ticker: string, filingType = "10-K", p
     xbrlContext: payload.xbrlContext ?? null,
     decisionGrade,
     status,
+    // Why there is no value (NO_SEC_REGISTRANT, SEC_FACTS_IFRS_ONLY, ...) and the read's warnings (2.5.15).
+    code: value != null ? null : (typeof payload.code === "string" ? payload.code : null),
+    message: value != null ? null : (typeof payload.message === "string" ? payload.message : null),
+    warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
   });
 }
 
