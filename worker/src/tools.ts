@@ -2199,6 +2199,7 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
           status,
           code: parsed.code ?? null,
           ...(typeof parsed.retryable === "boolean" ? { retryable: parsed.retryable } : {}),
+          ...(Array.isArray(parsed.failedReads) ? { failedReads: parsed.failedReads } : {}),
           decisionGrade,
           documentUrl: parsed.documentUrl ?? null,
           indexUrl: parsed.indexUrl ?? null,

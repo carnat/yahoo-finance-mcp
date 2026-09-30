@@ -19,6 +19,11 @@ field by field. Cases, for ticker XYZ (CIK 0000000001):
   INVALID_PERIOD, and "junk" is INVALID_PERIOD at get_filing_data and
   INPUT_VALIDATION_ERROR at the tool (the Worker's _dispatchTool).
 
+- f. failed SEC reads (2.5.17): a case's "faults" map a URL to an HTTP status (429, 500) or "network" (the fetch
+  throws) in both mocks. A 404 is absence (NO_COMPANYCONCEPT_FACT_FOR_FORM); any other failure the answer depends
+  on is PROVIDER_ERROR / SEC_READ_FAILED with retryable and failedReads, and the same through
+  extract_sec_filing_fact.
+
 The Worker runs in Node (esbuild bundle, stubbed fetch), one process per case
 because it caches CIKs and submissions per isolate.
 """
@@ -186,6 +191,36 @@ CASES: dict[str, dict] = {
     },
 }
 
+# Failed SEC reads (2.5.17). "faults": URL -> HTTP status, or "network" for a fetch that throws; unlisted URLs are 404.
+_SUBMISSIONS_10K = {SUBMISSIONS: _submissions(_10K_ROW)}
+_ALL_CONCEPTS_NETWORK = {CONCEPT_BASE + f"{name}.json": "network" for name in REVENUE_CONCEPTS}
+_READ_FAILED_CASES: dict[str, dict] = {
+    "read_429": {"filingType": "10-K", "routes": {COMPANYFACTS: _US_GAAP_FACTS, **_SUBMISSIONS_10K},
+                 "faults": {CONCEPT_BASE + "Revenues.json": 429}},
+    "absent_404_us_gaap": {"filingType": "10-K", "routes": {COMPANYFACTS: _US_GAAP_FACTS, **_SUBMISSIONS_10K}},
+    "absent_404_facts_500": {"filingType": "10-K", "routes": dict(_SUBMISSIONS_10K), "faults": {COMPANYFACTS: 500}},
+    "malformed_facts_500": {"filingType": "10-K", "routes": {CONCEPT_BASE + "Revenues.json": {"units": {"USD": {}}}, **_SUBMISSIONS_10K},
+                            "faults": {COMPANYFACTS: 500}},
+    "network_all_concepts": {"filingType": "10-K", "routes": {COMPANYFACTS: _US_GAAP_FACTS, **_SUBMISSIONS_10K}, "faults": _ALL_CONCEPTS_NETWORK},
+    "mixed_status_and_network": {"filingType": "10-K", "routes": {COMPANYFACTS: _US_GAAP_FACTS, **_SUBMISSIONS_10K},
+                                 "faults": {CONCEPT_BASE + f"{REVENUE}.json": 500, CONCEPT_BASE + "SalesRevenueNet.json": "network"}},
+    "pinned_429": {"filingType": "10-K", "routes": {COMPANYFACTS: _US_GAAP_FACTS, **_SUBMISSIONS_10K}, "accession": ACCN_10K,
+                   "faults": {CONCEPT_BASE + f"{REVENUE}.json": 429}},
+}
+for _name, _case in _READ_FAILED_CASES.items():
+    CASES[_name] = _case
+    CASES[f"{_name}_filing_data"] = {**_case, "call": "get_filing_data"}
+CASES["read_429_dispatch"] = {**_READ_FAILED_CASES["read_429"], "call": "dispatch", "tool": "extract_sec_filing_fact",
+                              "args": {"ticker": TICKER, "fact_type": "total_revenue"}}
+# Geographic revenue (2.5.17): unavailable results are the Worker's unshaped payload, not the geographic shape.
+_GEO = {"factType": "geographic_revenue", "region": "China"}
+CASES["geo_read_429_filing_data"] = {**_READ_FAILED_CASES["read_429"], **_GEO, "call": "get_filing_data"}
+CASES["geo_read_429_tool"] = {**_READ_FAILED_CASES["read_429"], **_GEO, "call": "extract_geographic_revenue"}
+CASES["geo_pinned_no_fact_filing_data"] = {"filingType": "10-K", "routes": {COMPANYFACTS: _US_GAAP_FACTS, **_SUBMISSIONS_10K, CONCEPT_BASE + f"{REVENUE}.json": {"units": {"USD": [FACT]}}},
+                                          "accession": ACCN_20F, **_GEO, "call": "get_filing_data"}
+CASES["pinned_no_fact_filing_data"] = {**CASES["geo_pinned_no_fact_filing_data"], "factType": "total_revenue", "region": None}
+CASES["found_filing_data"] = {**CASES["found"], "call": "get_filing_data"}
+
 # The tool-level check, through the Worker's callTool (_dispatchTool) and the Python tool functions.
 _PERIOD_TOOLS = {
     "extract_sec_filing_fact": {"ticker": TICKER, "fact_type": "total_revenue"},
@@ -202,7 +237,7 @@ for _tool, _args in _PERIOD_TOOLS.items():
 CASES["dispatch_fy25_extract_total_revenue"] = {"call": "dispatch", "tool": "extract_total_revenue", "args": {"ticker": TICKER, "period": "FY25"}, "filingType": "10-K", "routes": {}}
 
 _ENTRY = """
-export { extractTotalRevenue, getFilingData } from "./src/yahoo-finance.ts";
+export { extractTotalRevenue, extractGeographicRevenue, getFilingData } from "./src/yahoo-finance.ts";
 export { callTool } from "./src/tools.ts";
 export { setWorkerEnv } from "./src/response.ts";
 """
@@ -220,12 +255,16 @@ globalThis.fetch = async (req) => {
   if (u.pathname.includes("getcrumb")) return new Response("crumb123");
   if (u.pathname.includes("/quoteSummary/")) return json({ quoteSummary: { result: [{}], error: null } });
   if (u.pathname.endsWith("company_tickers.json")) return json({ "0": { cik_str: 1, ticker: "XYZ", title: "XYZ Corp" } });
+  const fault = c.faults?.[u.toString()];
+  if (fault === "network") throw new TypeError("fetch failed");
+  if (fault !== undefined) return new Response("fault", { status: fault });
   const body = c.routes[u.toString()];
   return body === undefined ? new Response("not found", { status: 404 }) : json(body);
 };
 const period = c.period ?? "latest";
 let out;
-if (c.call === "get_filing_data") out = await m.getFilingData("XYZ", "total_revenue", null, c.filingType, period);
+if (c.call === "get_filing_data") out = await m.getFilingData("XYZ", c.factType ?? "total_revenue", c.region ?? null, c.filingType, period, "auto", c.accession ?? null);
+else if (c.call === "extract_geographic_revenue") out = await m.extractGeographicRevenue("XYZ", c.region, c.filingType, period, c.accession ?? null);
 else if (c.call === "dispatch") out = await m.callTool(c.tool, c.args);
 else out = await m.extractTotalRevenue("XYZ", c.filingType, period);
 console.log(JSON.stringify(JSON.parse(out)));
@@ -271,6 +310,11 @@ def _python(name: str) -> dict:
     case = CASES[name]
 
     async def edgar_get(url: str) -> dict:
+        fault = case.get("faults", {}).get(url)
+        if fault == "network":
+            raise EdgarError("SEC API connection failed: fetch failed")
+        if fault is not None:
+            raise EdgarError(f"SEC API returned HTTP {fault}: fault", status_code=fault)
         if url not in case["routes"]:
             raise EdgarError("SEC API returned HTTP 404: Not Found", status_code=404)
         return json.loads(json.dumps(case["routes"][url]))
@@ -284,9 +328,13 @@ def _python(name: str) -> dict:
         call = case.get("call", "total_revenue")
         period = case.get("period", "latest")
         if call == "dispatch":
-            return json.loads(asyncio.run(getattr(srv, case["tool"])(**case["args"])))
+            args = {**case["args"], **({"fact_type": srv.FilingFactType(case["args"]["fact_type"])} if "fact_type" in case["args"] else {})}
+            return json.loads(asyncio.run(getattr(srv, case["tool"])(**args)))
         if call == "get_filing_data":
-            return json.loads(asyncio.run(srv.get_filing_data(TICKER, srv.FilingFactType.total_revenue, None, case["filingType"], period)))
+            return json.loads(asyncio.run(srv.get_filing_data(TICKER, srv.FilingFactType(case.get("factType", "total_revenue")), case.get("region"), case["filingType"], period,
+                                                              accession_number=case.get("accession"))))
+        if call == "extract_geographic_revenue":
+            return json.loads(asyncio.run(srv.extract_geographic_revenue(TICKER, case["region"], case["filingType"], period, case.get("accession"))))
         return json.loads(asyncio.run(srv.extract_total_revenue(TICKER, case["filingType"], period)))
 
 
@@ -311,6 +359,8 @@ def _fields(payload: dict) -> dict:
         "warningSeverities": [w.get("severity") for w in payload.get("warnings") or []],
         "error": payload.get("error"),
         "ok": payload.get("ok"),
+        "retryable": payload.get("retryable"),
+        "failedReads": payload.get("failedReads"),
     }
 
 
@@ -324,13 +374,13 @@ class TestSecFactPayloadsAgree(unittest.TestCase):
         return local
 
     def _same_payload(self, name: str) -> dict:
-        """The whole payload, top-level key order included (1e9 and 1e9.0 are the same number)."""
+        """The whole payload, sourceRows included, top-level key order included, and the same JSON number types."""
         worker, local = _worker(name), _python(name)
-        for payload in (worker, local):
-            # Left out: an existing difference outside this change (the Worker's empty-string denominator cell is None in Python).
-            (payload.get("evidence") or {}).pop("sourceRows", None)
         self.assertEqual(worker, local, name)
         self.assertEqual(list(worker), list(local), f"{name}: key order")
+        # 2023994000 and 2023994000.0 compare equal but are different JSON: value is an int in both runtimes.
+        self.assertIs(type(worker.get("value")), type(local.get("value")), f"{name}: value type worker={worker.get('value')!r} python={local.get('value')!r}")
+        self.assertEqual(json.dumps(worker), json.dumps(local), f"{name}: serialised payload")
         return local
 
     def test_found(self) -> None:
@@ -358,6 +408,167 @@ class TestSecFactPayloadsAgree(unittest.TestCase):
         self.assertEqual((got["status"], got["value"]), ("FOUND", 1000000))
         self.assertEqual(got["warningCodes"], ["SEC_COMPANYCONCEPT_MALFORMED"])
         self.assertEqual(got["sourceEvidence.concept"], "Revenues")
+
+
+class TestFoundPayloadAgrees(unittest.TestCase):
+    """A found non-geographic fact: value is an int, and sourceRows carries '' (not null) for the missing denominator."""
+
+    _same_payload = TestSecFactPayloadsAgree._same_payload
+
+    def test_found_get_filing_data(self) -> None:
+        got = self._same_payload("found_filing_data")
+        self.assertIsInstance(got["value"], int)
+        self.assertEqual(got["value"], 1000000)
+        self.assertEqual(got["evidence"]["sourceRows"], [["Region", "1,000,000"], ["Total revenue", ""]])
+        self.assertIsNone(got["denominator"])
+
+
+class TestFailedSecReads(unittest.TestCase):
+    """2.5.17: a failed SEC read is SEC_READ_FAILED (retry), never a missing fact; a 404 is still absence."""
+
+    _same = TestSecFactPayloadsAgree._same
+    _same_payload = TestSecFactPayloadsAgree._same_payload
+
+    def _failed(self, name: str, failed_reads: list[dict], message_reads: str) -> dict:
+        """Both entry points agree, and carry the same SEC_READ_FAILED payload."""
+        data = self._same_payload(f"{name}_filing_data")
+        self.assertEqual((data["status"], data["code"], data["retryable"], data["value"], data["decisionGrade"]), ("PROVIDER_ERROR", "SEC_READ_FAILED", True, None, False), name)
+        self.assertEqual(data["failedReads"], failed_reads, name)
+        message = f"SEC could not be read for {TICKER}: {message_reads}. Whether the fact exists is unknown; retry."
+        self.assertEqual(data["warnings"][-1], {"code": "SEC_READ_FAILED", "message": message, "severity": "warning"}, name)
+        # Key order: status keeps its place; retryable and failedReads follow _manualLookup.
+        keys = list(data)
+        self.assertEqual(keys[keys.index("status") - 1: keys.index("status") + 2], ["confidence", "status", "code"], name)
+        self.assertEqual(keys[-3:], ["_manualLookup", "retryable", "failedReads"], name)
+        total = self._same(name)
+        self.assertEqual((total["status"], total["code"], total["retryable"], total["failedReads"], total["message"]), ("PROVIDER_ERROR", "SEC_READ_FAILED", True, failed_reads, None), name)
+        keys = list(_python(name))
+        self.assertEqual(keys[keys.index("message"): keys.index("message") + 4], ["message", "retryable", "failedReads", "warnings"], name)
+        self.assertEqual(keys, list(_worker(name)), f"{name}: extract_total_revenue key order")
+        return data
+
+    def test_a_throttled_companyconcept_read_is_not_a_missing_fact(self) -> None:
+        data = self._failed("read_429", [{"endpoint": "companyconcept", "concept": "Revenues", "httpStatus": 429}],
+                            "companyconcept Revenues (HTTP 429)")
+        self.assertEqual(data["concept"], REVENUE)
+        # The latest filing of the form it looked in is still named.
+        self.assertEqual((data["evidence"]["accessionNumber"], data["accessionNumber"]), (ACCN_10K, ACCN_10K))
+        self.assertNotIn("requestedAccession", data)
+
+    def test_a_404_on_every_concept_is_absence(self) -> None:
+        data = self._same_payload("absent_404_us_gaap_filing_data")
+        self.assertEqual((data["status"], data["code"]), ("SEC_FACT_NOT_AVAILABLE", "NO_COMPANYCONCEPT_FACT_FOR_FORM"))
+        self.assertNotIn("retryable", data)
+        self.assertNotIn("failedReads", data)
+        got = self._same("absent_404_us_gaap")
+        self.assertEqual((got["status"], got["code"], got["retryable"], got["failedReads"]), ("NOT_FOUND", "NO_COMPANYCONCEPT_FACT_FOR_FORM", None, None))
+
+    def test_the_ifrs_check_that_could_not_be_read_is_a_failed_read(self) -> None:
+        self._failed("absent_404_facts_500", [{"endpoint": "companyfacts", "concept": None, "httpStatus": 500}], "companyfacts (HTTP 500)")
+
+    def test_a_malformed_concept_with_unreadable_companyfacts_keeps_its_warning(self) -> None:
+        data = self._failed("malformed_facts_500", [{"endpoint": "companyfacts", "concept": None, "httpStatus": 500}], "companyfacts (HTTP 500)")
+        self.assertEqual([w["code"] for w in data["warnings"]], ["SEC_COMPANYCONCEPT_MALFORMED", "SEC_READ_FAILED"])
+        self.assertEqual(self._same("malformed_facts_500")["warningCodes"], ["SEC_COMPANYCONCEPT_MALFORMED", "SEC_READ_FAILED"])
+
+    def test_a_network_error_has_no_http_status(self) -> None:
+        reads = [{"endpoint": "companyconcept", "concept": name, "httpStatus": None} for name in REVENUE_CONCEPTS]
+        self._failed("network_all_concepts", reads, ", ".join(f"companyconcept {name} (no response)" for name in REVENUE_CONCEPTS))
+
+    def test_a_pinned_accession_is_echoed_not_replaced_by_the_latest_filing(self) -> None:
+        data = self._failed("pinned_429", [{"endpoint": "companyconcept", "concept": REVENUE, "httpStatus": 429}], f"companyconcept {REVENUE} (HTTP 429)")
+        self.assertEqual((data["accessionNumber"], data["requestedAccession"], data["evidence"]), (ACCN_10K, ACCN_10K, {}))
+        keys = list(data)
+        self.assertEqual(keys[keys.index("accessionNumber") + 1], "requestedAccession")
+        self.assertIsNone(data["filingDate"])
+
+    def test_extract_sec_filing_fact_passes_failed_reads_through(self) -> None:
+        """Through the tool: failedReads follows retryable. The Worker's callTool also runs the response envelope, which
+        decorates nested objects (each failedReads entry and warning) with evidence fields; the Python tool's payload is
+        the pre-envelope one, so only the keys this change adds are compared."""
+        envelope, local = _worker("read_429_dispatch"), _python("read_429_dispatch")
+        self.assertTrue(envelope["ok"])
+        worker = json.loads(envelope["data"]) if isinstance(envelope["data"], str) else envelope["data"]
+        reads = [{"endpoint": "companyconcept", "concept": "Revenues", "httpStatus": 429}]
+        for name, got in (("worker", worker), ("python", local)):
+            self.assertEqual((got["status"], got["code"], got["retryable"]), ("PROVIDER_ERROR", "SEC_READ_FAILED", True), name)
+            self.assertEqual([{k: r[k] for k in ("endpoint", "concept", "httpStatus")} for r in got["failedReads"]], reads, name)
+            keys = list(got)
+            self.assertEqual(keys[keys.index("code"): keys.index("code") + 3], ["code", "retryable", "failedReads"], name)
+        self.assertEqual(local["failedReads"], reads)
+
+
+class TestFailedReadsOrder(unittest.TestCase):
+    """The Worker lists failedReads in candidate order, companyfacts last (it sorts; its reads finish in network order)."""
+
+    _same_payload = TestSecFactPayloadsAgree._same_payload
+
+    def test_a_status_and_a_network_error_are_listed_in_concept_order(self) -> None:
+        data = self._same_payload("mixed_status_and_network_filing_data")
+        self.assertEqual(data["failedReads"], [{"endpoint": "companyconcept", "concept": REVENUE, "httpStatus": 500},
+                                               {"endpoint": "companyconcept", "concept": "SalesRevenueNet", "httpStatus": None}])
+        self.assertEqual(data["warnings"][-1]["message"],
+                         f"SEC could not be read for {TICKER}: companyconcept {REVENUE} (HTTP 500), companyconcept SalesRevenueNet (no response). "
+                         "Whether the fact exists is unknown; retry.")
+
+
+class TestGeographicUnavailableAgrees(unittest.TestCase):
+    """2.5.17: geographic_revenue returns the Worker's unshaped unavailable payload (status, code, retryable, failedReads kept)."""
+
+    _same_payload = TestSecFactPayloadsAgree._same_payload
+
+    def test_a_failed_read_keeps_status_and_code(self) -> None:
+        data = self._same_payload("geo_read_429_filing_data")
+        self.assertEqual((data["status"], data["code"], data["retryable"], data["factType"], data["concept"]), ("PROVIDER_ERROR", "SEC_READ_FAILED", True, "geographic_revenue", REVENUE))
+        self.assertEqual(data["failedReads"], [{"endpoint": "companyconcept", "concept": "Revenues", "httpStatus": 429}])
+        self.assertEqual(list(data)[-3:], ["_manualLookup", "retryable", "failedReads"])
+
+    def test_a_pinned_accession_with_no_fact_is_the_full_unavailable_payload(self) -> None:
+        for name in ("geo_pinned_no_fact_filing_data", "pinned_no_fact_filing_data"):
+            data = self._same_payload(name)
+            self.assertEqual((data["status"], data["code"], data["accessionNumber"], data["requestedAccession"], data["evidence"]), ("SEC_FACT_NOT_AVAILABLE", "NO_FACT_FOR_ACCESSION", ACCN_20F, ACCN_20F, {}), name)
+            self.assertIn("_manualLookup", data)
+
+    def test_extract_geographic_revenue_reads_a_failed_read_alike(self) -> None:
+        """Compared on the keys both runtimes emit. Python's extract_geographic_revenue has no status, code, scanCoverage,
+        searchedTerms or notDisclosedBasis (an existing difference, reported to the planner), so a failed read shows there
+        only as the SEC_READ_FAILED warning."""
+        worker, local = _worker("geo_read_429_tool"), _python("geo_read_429_tool")
+        missing_in_python = {"status", "code", "scanCoverage", "searchedTerms", "notDisclosedBasis"}
+        self.assertEqual({k: v for k, v in worker.items() if k not in missing_in_python}, local)
+        self.assertEqual([k for k in worker if k not in missing_in_python], list(local))
+        self.assertEqual((worker["status"], worker["code"]), ("PROVIDER_ERROR", "SEC_READ_FAILED"))
+        self.assertEqual([w["code"] for w in local["warnings"]], ["SEC_READ_FAILED"])
+        # Neither runtime starts the 20-F fallback (confidence is NOT_DECISION_GRADE, not NOT_DISCLOSED) or adds POSSIBLE_20F_FILER.
+        self.assertEqual(local["confidence"], "NOT_DECISION_GRADE")
+
+
+class TestAsStatusAgrees(unittest.TestCase):
+    """_as_status is the Worker's normalizeStatus (not exported: its source is sliced from yahoo-finance.ts and run in Node)."""
+
+    PAYLOADS = [
+        {}, {"status": "FILING_NOT_FOUND_TRY_OTHER_TYPE"}, {"code": "filing_text_not_available"}, {"status": "EXTRACTION_FAILED"},
+        {"status": "table_not_parsed"}, {"code": "PROVIDER_LIMITATION"}, {"status": "NO_DIMENSIONAL_REVENUE_FACT"}, {"status": "PROVIDER_ERROR"},
+        {"code": "PROVIDER_ERROR"}, {"status": "FOUND", "code": "PROVIDER_ERROR"}, {"status": None, "code": "EXTRACTION_FAILED"}, {"status": "", "code": "EXTRACTION_FAILED"},
+        {"source": "FILING_NOT_FOUND_TRY_OTHER_TYPE"}, {"confidence": "filing_not_found_try_other_type"}, {"source": "EXTRACTION_FAILED"},
+        {"confidence": "TABLE_NOT_PARSED"}, {"source": "PROVIDER_LIMITATION"}, {"confidence": "NO_DIMENSIONAL_REVENUE_FACT"},
+        {"source": "FILING_TEXT_NOT_AVAILABLE"}, {"confidence": "NOT_DISCLOSED"}, {"source": "NOT_DISCLOSED", "confidence": "CONFLICTING"},
+        {"source": "CONFLICTING"}, {"source": "NOT_DISCLOSED", "confidence": "EXTRACTION_FAILED"}, {"confidence": "NOT_DECISION_GRADE"},
+        {"status": "SEC_FACT_NOT_AVAILABLE", "code": "PROVIDER_ERROR"}, {"status": "SEC_FACT_NOT_AVAILABLE", "source": "SEC_COMPANYCONCEPT"},
+        {"status": "PROVIDER_ERROR", "confidence": "NOT_DISCLOSED"}, {"status": "FOUND", "confidence": "HIGH"},
+    ]
+
+    def test_every_branch(self) -> None:
+        node = _node()
+        source = (WORKER / "src" / "yahoo-finance.ts").read_text(encoding="utf-8")
+        start = source.index("function normalizeStatus(")
+        body = source[start:source.index("\n}\n", start) + 3]
+        js = subprocess.run([str(ESBUILD), "--loader=ts", "--log-level=error"], input=body, capture_output=True, text=True, check=True, timeout=60).stdout
+        script = js + "\nconst cases = JSON.parse(process.argv[1]);\nconsole.log(JSON.stringify(cases.map(normalizeStatus)));\n"
+        out = subprocess.run([node, "--input-type=module", "-e", script, json.dumps(self.PAYLOADS)], capture_output=True, text=True, check=True, timeout=60)
+        expected = json.loads(out.stdout.strip().splitlines()[-1])
+        self.assertEqual([srv._as_status(p) for p in self.PAYLOADS], expected)
+        self.assertGreaterEqual(len(set(expected)), 8)
 
 
 class TestNamedFiscalYearAgrees(unittest.TestCase):

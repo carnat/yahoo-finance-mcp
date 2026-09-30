@@ -5229,6 +5229,23 @@ async function edgarGetJson(url: string): Promise<Record<string, unknown> | null
   }
 }
 
+/**
+ * An EDGAR JSON read that tells absence from failure (2.5.17): a 404 is SEC saying the resource does not
+ * exist (json null); any other non-OK status, a network error or an unreadable body is a failed read.
+ */
+type EdgarJsonRead = { ok: true; json: Record<string, unknown> | null } | { ok: false; httpStatus: number | null };
+
+async function edgarReadJson(url: string): Promise<EdgarJsonRead> {
+  try {
+    const resp = await edgarFetch(url);
+    if (resp.status === 404) { await resp.body?.cancel(); return { ok: true, json: null }; }
+    if (!resp.ok) { await resp.body?.cancel(); return { ok: false, httpStatus: resp.status }; }
+    return { ok: true, json: await resp.json() as Record<string, unknown> };
+  } catch {
+    return { ok: false, httpStatus: null };
+  }
+}
+
 /** Fetch an EDGAR HTML/text document. Reads at most maxBytes from the response
  *  stream and cancels the rest, avoiding large memory allocations for big filings. */
 async function edgarGetHtml(url: string, maxBytes = 5_000_000): Promise<string | null> {
@@ -6283,6 +6300,7 @@ export async function getFilingData(
     message: string,
     conceptName: string | null,
     requestedAccession: string | null = null,
+    extra: Record<string, unknown> = {},
   ): Promise<string> => {
     // A failed pin names the filing that was asked for, never the latest one.
     const resolved = requestedAccession ? null : await resolveSecFiling(ticker, filingType, null).catch(() => null);
@@ -6329,6 +6347,7 @@ export async function getFilingData(
         { code, message, severity: "warning" },
       ],
       _manualLookup: filingManualLookup(ticker, cikPadded, filingType),
+      ...extra,
     });
   };
   if (!cikPadded) {
@@ -6363,8 +6382,34 @@ export async function getFilingData(
     });
   }
 
+  // A read that failed (not a 404) leaves a fact's absence unproven: the result is SEC_READ_FAILED, never
+  // "no facts" (2.5.17).
+  const failedReads: { endpoint: string; concept: string | null; httpStatus: number | null }[] = [];
+  const readSecJson = async (url: string, endpoint: string, conceptName: string | null): Promise<Record<string, unknown> | null> => {
+    const read = await edgarReadJson(url);
+    if (read.ok) return read.json;
+    failedReads.push({ endpoint, concept: conceptName, httpStatus: read.httpStatus });
+    return null;
+  };
+  const companyfactsUrl = `https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`;
+  const secReadFailed = (conceptName: string | null): Promise<string> => {
+    // Reads finish in network order; list them in candidate order, companyfacts last, so the result is stable.
+    const rank = (r: { endpoint: string; concept: string | null }): number =>
+      r.endpoint === "companyconcept" ? candidateNames.indexOf(r.concept ?? "") : candidateNames.length;
+    failedReads.sort((a, b) => rank(a) - rank(b));
+    const reads = failedReads
+      .map((r) => `${r.endpoint}${r.concept ? ` ${r.concept}` : ""} (${r.httpStatus != null ? `HTTP ${r.httpStatus}` : "no response"})`)
+      .join(", ");
+    return unavailableStructuredFact(
+      "SEC_READ_FAILED",
+      `SEC could not be read for ${ticker.toUpperCase()}: ${reads}. Whether the fact exists is unknown; retry.`,
+      conceptName,
+      pinAccession && pinAccession.trim() ? pinAccession.trim() : null,
+      { status: "PROVIDER_ERROR", retryable: true, failedReads: [...failedReads] },
+    );
+  };
   const fetchConcept = async (concept: string): Promise<Record<string, unknown> | null> =>
-    edgarGetJson(`https://data.sec.gov/api/xbrl/companyconcept/CIK${cikPadded}/us-gaap/${concept}.json`);
+    readSecJson(`https://data.sec.gov/api/xbrl/companyconcept/CIK${cikPadded}/us-gaap/${concept}.json`, "companyconcept", concept);
 
   // Every equivalent concept is read; the one with the newest filing of this
   // form wins, so a filer that switched concepts is not read from its old one.
@@ -6377,7 +6422,7 @@ export async function getFilingData(
     const usd = ((await fetchConcept(name))?.units as Record<string, unknown> | undefined)?.USD;
     if (usd == null || Array.isArray(usd)) return (usd as Record<string, unknown>[] | undefined) ?? [];
     malformedConcepts.push(name);
-    companyfacts ??= edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`).catch(() => null);
+    companyfacts ??= readSecJson(companyfactsUrl, "companyfacts", null);
     const rows = (((((await companyfacts)?.facts as Record<string, unknown> | undefined)?.["us-gaap"] as Record<string, unknown> | undefined)?.[name] as Record<string, unknown> | undefined)?.units as Record<string, unknown> | undefined)?.USD;
     return Array.isArray(rows) ? rows as Record<string, unknown>[] : [];
   };
@@ -6389,6 +6434,7 @@ export async function getFilingData(
       severity: "info",
     });
   }
+  if (failedReads.length) return secReadFailed(config.primary);
   const pinnedAccession = pinAccession && pinAccession.trim() ? pinAccession.trim() : null;
   const chosen = pickConceptFacts(fetchedConcepts, filingType, pinnedAccession, factType === "total_revenue" ? "larger" : "first");
   const concept = chosen?.concept ?? config.primary;
@@ -6404,8 +6450,9 @@ export async function getFilingData(
   if (!filtered.length) {
     if (factType !== "geographic_revenue") {
       // An IFRS filer (TSM's 20-F) tags ifrs-full, never us-gaap: say so rather than report the fact missing (2.5.15).
-      companyfacts ??= edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`).catch(() => null);
+      companyfacts ??= readSecJson(companyfactsUrl, "companyfacts", null);
       const taxonomies = (((await companyfacts)?.facts ?? {}) as Record<string, unknown>);
+      if (failedReads.length) return secReadFailed(concept);
       if (taxonomies["ifrs-full"] && !taxonomies["us-gaap"]) {
         return unavailableStructuredFact(
           "SEC_FACTS_IFRS_ONLY",
@@ -14335,6 +14382,8 @@ function normalizeStatus(payload: Record<string, unknown>): string {
   if (status === "TABLE_NOT_PARSED") return "TABLE_NOT_PARSED";
   if (status === "PROVIDER_LIMITATION") return "PROVIDER_LIMITATION";
   if (status === "NO_DIMENSIONAL_REVENUE_FACT") return "NO_DIMENSIONAL_REVENUE_FACT";
+  // A failed SEC read is not a missing fact (2.5.17).
+  if (status === "PROVIDER_ERROR") return "PROVIDER_ERROR";
   const source = String(payload.source ?? "").toUpperCase();
   const confidence = String(payload.confidence ?? "").toUpperCase();
   if (source === "FILING_NOT_FOUND_TRY_OTHER_TYPE" || confidence === "FILING_NOT_FOUND_TRY_OTHER_TYPE") return "FILING_NOT_FOUND_TRY_OTHER_TYPE";
@@ -14847,6 +14896,9 @@ export async function extractTotalRevenue(ticker: string, filingType = "10-K", p
     // Why there is no value (NO_SEC_REGISTRANT, SEC_FACTS_IFRS_ONLY, ...) and the read's warnings (2.5.15).
     code: value != null ? null : (typeof payload.code === "string" ? payload.code : null),
     message: value != null ? null : (typeof payload.message === "string" ? payload.message : null),
+    // A failed SEC read says so and which reads failed; retry rather than treat the fact as missing (2.5.17).
+    ...(value == null && payload.retryable === true ? { retryable: true } : {}),
+    ...(value == null && Array.isArray(payload.failedReads) ? { failedReads: payload.failedReads } : {}),
     warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
   });
 }

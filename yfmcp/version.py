@@ -1,3 +1,3 @@
 """Canonical public release version for both MCP runtimes."""
 
-RELEASE_VERSION = "2.5.16"
+RELEASE_VERSION = "2.5.17"

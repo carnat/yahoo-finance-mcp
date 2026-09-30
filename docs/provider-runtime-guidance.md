@@ -1642,6 +1642,57 @@ Vantage and IBKR produced these fixes.
 - **Quarters** are not named by `period`. Use `"latest"` with `10-Q`, an
   `accession_number`, or `reconcile_metric_sources` (`"Q3 2025"`, `"latest_quarter"`).
 
+## Failed SEC Reads And Python Payload Parity (2.5.17)
+
+- **Defect.** The SEC fact reader (`extract_total_revenue`,
+  `extract_sec_filing_fact` and the extractors built on it) read
+  companyconcept and companyfacts through a helper that returned nothing for
+  a 404 and for a failure alike. A throttled read (429), a server error or a
+  dropped connection was reported as `NO_COMPANYCONCEPT_FACT_FOR_FORM`, "the
+  company tags no such fact". Seen live on BE under concurrent calls, and
+  correct on retry.
+- **Absence and failure are now separate.**
+  - A 404 from SEC is absence: the concept is not tagged. The "no facts"
+    results (`NO_COMPANYCONCEPT_FACT_FOR_FORM`, `NO_FACT_FOR_ACCESSION`,
+    `SEC_FACTS_IFRS_ONLY`, `PERIOD_NOT_FOUND`) need every read they rest on
+    to have succeeded.
+  - Any other status, a network error or an unreadable body is a failed
+    read. If any companyconcept read, or a companyfacts read the answer
+    depends on, fails, the result is status `PROVIDER_ERROR`, code
+    `SEC_READ_FAILED`, `retryable: true`, and `failedReads`:
+    `[{endpoint, concept, httpStatus}]` (`httpStatus` null when there was no
+    response).
+  - It fails closed even when other concepts were read: the concept choice
+    (newest filing, larger revenue) needs every candidate, so a partial read
+    could return the wrong concept's figure.
+  - A pinned accession is echoed as `requestedAccession`.
+  - Geographic revenue does not fall back to the filing's HTML table after a
+    failed read.
+- **Failed reads are listed in a fixed order.** `failedReads` and the
+  message list the candidate concepts in order, then companyfacts, whatever
+  order the reads finished in.
+- **Python payload parity.**
+  - Python's fact reader writes integral numbers as integers, as the Worker's
+    JSON does: `value` was `2023994000.0`.
+  - An empty `sourceRows` value cell is `""`, not null.
+  - Python's "no fact" payload (`SEC_FACT_NOT_AVAILABLE`, `PROVIDER_ERROR`)
+    is now the Worker's whole payload for every fact type. Geographic revenue
+    used to be reshaped without `status` and `code`, and a pinned accession
+    with no fact returned a shorter payload.
+  - Python's status mapping (`_as_status`) now has every branch of the
+    Worker's `normalizeStatus`.
+  - `scripts/test_sec_fact_payloads.py` compares whole payloads as JSON,
+    which covers key order and integer vs float. It also runs
+    `normalizeStatus` itself against `_as_status`.
+- **Known Python gap.** Python's `extract_geographic_revenue`,
+  `extract_revenue_exposure` and `extract_china_exposure` never carried the
+  Worker's `status`, `code`, `scanCoverage`, `searchedTerms` and
+  `notDisclosedBasis`. Through those Python tools a failed SEC read shows
+  only as the `SEC_READ_FAILED` warning, and `extract_revenue_exposure`
+  still says NOT_FOUND. This predates 2.5.17 and is left for a separate
+  change. The deployed Worker reports `PROVIDER_ERROR` / `SEC_READ_FAILED`
+  through all of them.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
