@@ -94,3 +94,56 @@ export function filingFactInAccession(candidates: ConceptFacts[], accession: str
   }
   return null;
 }
+
+// ── Named fiscal-year periods (2.5.16) ──────────────────────────────────────
+//
+// `period` was honoured only as "latest"; any other string ("FY2025", "2025", a typo) left the rows
+// unselected, so the first fact came back: BE's 2016 revenue labelled FY2018 for "FY2025". A period is now
+// "latest" or the issuer's fiscal year ("FY2025" or "2025"); anything else is refused.
+
+export type FilingPeriod = { kind: "latest" } | { kind: "fiscalYear"; year: number };
+
+export const FILING_PERIOD_HELP = 'period must be "latest" or a fiscal year ("FY2025" or "2025").';
+
+/** The period a caller named, or null when it is not one this reader resolves. */
+export function parseFilingPeriod(raw: string | null | undefined): FilingPeriod | null {
+  const text = String(raw ?? "latest").trim();
+  if (text === "" || /^latest$/i.test(text)) return { kind: "latest" };
+  const m = /^(?:FY\s?)?(\d{4})$/i.exec(text);
+  return m ? { kind: "fiscalYear", year: Number(m[1]) } : null;
+}
+
+function periodEndYear(end: string): number | null {
+  const day = Date.parse(`${end.slice(0, 10)}T00:00:00Z`);
+  if (!Number.isFinite(day)) return null;
+  // A 52/53-week year ending in the first week of January belongs to the year before.
+  return Number(new Date(day - 7 * 86_400_000).toISOString().slice(0, 4));
+}
+
+/**
+ * The rows for the annual period the issuer calls fiscal `year`: its fy (fp FY) as the filing that first
+ * reported the period states it, within a year of the period end, else the year the period ends in (the rule
+ * reconcile_metric_sources uses). The latest filed rows come first (a restated value wins). The fiscal years
+ * found are listed for a miss.
+ */
+export function selectFiscalYearRows(rows: Record<string, unknown>[], year: number): { rows: Record<string, unknown>[]; fiscalYears: number[] } {
+  const groups = new Map<string, Record<string, unknown>[]>();
+  for (const f of rows) {
+    if (typeof f.end !== "string") continue;
+    const key = `${String(f.start ?? "")}|${f.end}`;
+    groups.set(key, [...(groups.get(key) ?? []), f]);
+  }
+  const years = new Set<number>();
+  const matched: Record<string, unknown>[] = [];
+  for (const group of groups.values()) {
+    const first = [...group].sort((a, b) => String(a.filed ?? "").localeCompare(String(b.filed ?? "")))[0];
+    const endYear = periodEndYear(String(first.end));
+    if (endYear == null) continue;
+    const fy = typeof first.fy === "number" ? first.fy : Number(first.fy);
+    const issuerYear = String(first.fp ?? "").toUpperCase() === "FY" && Number.isFinite(fy) && (fy === endYear || fy === endYear - 1) ? fy : endYear;
+    years.add(issuerYear);
+    if (issuerYear === year) matched.push(...group);
+  }
+  matched.sort((a, b) => String(b.filed ?? "").localeCompare(String(a.filed ?? "")) || String(b.end ?? "").localeCompare(String(a.end ?? "")));
+  return { rows: matched, fiscalYears: [...years].sort((a, b) => a - b) };
+}

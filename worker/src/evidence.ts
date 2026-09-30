@@ -9,7 +9,7 @@
  * nothing is interpolated, extrapolated or derived and called consensus.
  */
 
-import { fiscalYearOfPeriodEnd, type FiscalYearNaming } from "./fiscal-calendar.js";
+import { companyFiscalYearEnd, fiscalYearOfPeriodEnd, type FiscalYearNaming } from "./fiscal-calendar.js";
 
 export const EVIDENCE_CUT_SCHEMA = "yfmcp.evidence-cut/1";
 export const CONSENSUS_OBSERVATION_SCHEMA = "yfmcp.consensus-observation/1";
@@ -417,7 +417,7 @@ export function buildConsensusCurve(
   naming: FiscalYearNaming | null = null,
 ): Rec {
   const horizon = Math.max(1, Math.min(5, Math.trunc(policy.horizonYears)));
-  const yearNaming: FiscalYearNaming = naming ?? { offset: 0, basis: "PERIOD_END_RULE", periodEnd: null, statedFiscalYear: null };
+  const yearNaming: FiscalYearNaming = naming ?? { offset: 0, basis: "PERIOD_END_RULE", periodEnd: null, statedFiscalYear: null, calendar: null };
   const fy0 = resolveFy0(inputs, asOf);
   const periods: Rec[] = [];
   const summary: Record<string, number> = {};
@@ -448,6 +448,9 @@ export function buildConsensusCurve(
       // (DG's year ending January 2026 is its fiscal 2025) shifts it (2.5.13).
       fiscalYear: fy0 && fiscalYearOfPeriodEnd(fy0.fiscalYearEnd) != null ? (fiscalYearOfPeriodEnd(fy0.fiscalYearEnd) as number) + yearNaming.offset + k : null,
       fiscalYearEnds,
+      // The company's own year end for that year, from its SEC fiscal calendar; fiscalYearEnds stays as the
+      // providers state it (2.5.16: DG's 2027-01-31 from Yahoo is its Friday 2027-01-29).
+      companyFiscalYearEnd: companyFiscalYearEnd(yearNaming.calendar, fiscalYearEnds[0] ?? null),
       metrics,
     });
   }

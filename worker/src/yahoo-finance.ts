@@ -26,7 +26,7 @@ import {
   type IxSource,
   type TextMatch,
 } from "./capital-structure.js";
-import { filingFactInAccession, pickConceptFacts, REVENUE_CONCEPTS } from "./sec-facts.js";
+import { FILING_PERIOD_HELP, filingFactInAccession, parseFilingPeriod, pickConceptFacts, REVENUE_CONCEPTS, selectFiscalYearRows } from "./sec-facts.js";
 import { fundingCapexSchedule } from "./funding-schedule.js";
 import { guidanceHistory, periodForExcerpt, type ReleaseText } from "./guidance-history.js";
 import { operatingDriverLedger } from "./driver-ledger.js";
@@ -36,7 +36,7 @@ import { adsRatio, majorPrice, marketInputsFromQuoteSummary, peerValuations, val
 import { coverReadsNeeded, coverShareCounts, foreignFiler, historicalValuation, latestShareCount, peerMedians, taxonomyOf, valuationDates, type Bar, type PeriodicFiling, type Split } from "./valuation-history.js";
 import { DEFAULT_TOLERANCE_PCT, METRICS as RECONCILE_METRICS, metricReconciliation, resolvePeriod } from "./metric-reconciliation.js";
 import { AUTHORITY_BOUNDARY } from "./evidence.js";
-import { documentFiscalYearFocus, filingFiscalYearLabel, fiscalYearLabel, fiscalYearNaming, type FiscalYearNaming } from "./fiscal-calendar.js";
+import { documentFiscalYearFocus, filingFiscalYearLabel, fiscalYearNaming, type FiscalYearNaming } from "./fiscal-calendar.js";
 import registryManifest from "./company-ir-page-registry.json";
 import newsSourceCapabilities from "./news-source-capabilities.json";
 
@@ -5331,54 +5331,6 @@ function edgarDocumentUrlFromIndexUrl(indexUrl: string, rawRef: string): string 
   return fileName ? `${baseUrl}${fileName}` : null;
 }
 
-/**
- * Fetch the EDGAR filing index HTM and return the primary document filename.
- *
- * The EDGAR filing index page (e.g. ``0000024741-26-000124-index.htm``) lists all
- * documents for a filing. The sequence-1 entry is the primary document (e.g.
- * ``glw-20251231.htm``). This function is ticker- and naming-convention-agnostic and
- * works regardless of the EDGAR submissions window size.
- *
- * Returns the bare filename (suitable for passing to edgarBuildFilingUrls), or null on
- * failure.
- */
-async function edgarPrimaryDocFromIndex(indexUrl: string): Promise<string | null> {
-  const html = await edgarGetHtml(indexUrl);
-  if (!html) return null;
-  const normalizeHref = (rawHref: string): string | null => {
-    const href = normalizeEdgarDocumentRef(rawHref);
-    if (!href) return null;
-    const fname = href.includes("/") ? (href.split("/").pop() ?? "") : href;
-    return fname.trim() || null;
-  };
-
-  // Prefer the first row matching Sequence=1 OR Type=10-K.
-  for (const rowM of html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)) {
-    const rowHtml = rowM[1];
-    const cells = [...rowHtml.matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(m => stripHtmlTags(m[1]));
-    if (cells.length === 0) continue;
-    const seq = (cells[0] ?? "").trim();
-    const documentType = (cells[1] ?? "").trim().toUpperCase();
-    if (seq === "1" || documentType.startsWith("10-K")) {
-      const hrefM = rowHtml.match(/<a[^>]+href=["']([^"']+)["']/i);
-      if (hrefM) {
-        const fname = normalizeHref(hrefM[1]);
-        if (fname && !fname.toLowerCase().endsWith("-index.htm") && !fname.toLowerCase().endsWith("-index.html")) {
-          return fname;
-        }
-      }
-    }
-  }
-
-  // Fallback: return the first document-like link that is not the index file itself.
-  const allHrefs = [...html.matchAll(/href=["']([^"']+)["']/gi)].map(m => m[1]);
-  for (const href of allHrefs) {
-    const fname = normalizeHref(href);
-    if (fname && /\.(html?)$/i.test(fname) && !fname.toLowerCase().endsWith("-index.htm") && !fname.toLowerCase().endsWith("-index.html")) return fname;
-  }
-  return null;
-}
-
 async function edgarListExhibitsFromIndex(indexUrl: string): Promise<Record<string, unknown>[]> {
   const html = await edgarGetHtml(indexUrl, 500_000);
   if (!html) return [];
@@ -6311,6 +6263,16 @@ export async function getFilingData(
 
   const config = FILING_FACT_CONCEPTS[factType];
   if (!config) return JSON.stringify({ error: true, message: `Unsupported fact_type '${factType}'`, ticker });
+  // A period this reader cannot resolve is refused, never answered with an arbitrary fact (2.5.16).
+  const namedPeriod = parseFilingPeriod(period);
+  if (!namedPeriod) {
+    return JSON.stringify({
+      ticker, factType, value: null, unit: null, period: null, filingType,
+      extractionMethod: "NONE", source: "INPUT", confidence: "NOT_DECISION_GRADE",
+      status: "INVALID_PERIOD", code: "INVALID_PERIOD", decisionGrade: false, requestedPeriod: period,
+      warnings: [{ code: "INVALID_PERIOD", message: FILING_PERIOD_HELP, severity: "error" }],
+    });
+  }
   if (factType === "geographic_revenue" && !region) {
     return JSON.stringify({ error: true, message: "region is required for fact_type='geographic_revenue'", ticker });
   }
@@ -6459,7 +6421,7 @@ export async function getFilingData(
     }
     // For geographic_revenue, fall through to HTML fallback below (picked remains null)
   }
-  if (filtered.length && period === "latest" && !pinnedAccession) {
+  if (filtered.length && namedPeriod.kind === "latest" && !pinnedAccession) {
     const latestFiled = filtered.map((f) => String(f.filed ?? "")).sort().slice(-1)[0];
     filtered = filtered.filter((f) => String(f.filed ?? "") === latestFiled);
   }
@@ -6507,7 +6469,28 @@ export async function getFilingData(
       filtered = modeFiltered;
     }
   }
-  if (period === "latest" && filtered.length) {
+  // A named fiscal year is an annual period: the rows for the period the issuer calls that year (2.5.16).
+  let namedYearLabel: string | null = null;
+  if (namedPeriod.kind === "fiscalYear") {
+    if (resolvedMode !== "annual") {
+      return unavailableStructuredFact(
+        "INVALID_PERIOD",
+        `period ${period} names a fiscal year, an annual period; request filing_type 10-K or 20-F (or period_mode annual).`,
+        concept,
+      );
+    }
+    const selected = selectFiscalYearRows(filtered, namedPeriod.year);
+    if (!selected.rows.length) {
+      return unavailableStructuredFact(
+        "PERIOD_NOT_FOUND",
+        `No annual ${concept} fact is fiscal year ${namedPeriod.year} (the issuer's stated fiscal year, else the year the period ends); fiscal years found: ${selected.fiscalYears.slice(-6).join(", ") || "none"}.`,
+        concept,
+      );
+    }
+    filtered = selected.rows;
+    namedYearLabel = `FY${namedPeriod.year}`;
+  }
+  if (namedPeriod.kind === "latest" && filtered.length) {
     filtered = [...filtered].sort((a, b) => {
       const endCmp = String(b.end ?? "").localeCompare(String(a.end ?? ""));
       if (endCmp !== 0) return endCmp;
@@ -6822,7 +6805,8 @@ export async function getFilingData(
   }
   const documentUrl = primaryDocumentUrl ?? indexUrl;
   const periodLabelRaw = String(picked.fy ?? "");
-  const periodLabel = periodLabelRaw && !periodLabelRaw.startsWith("FY") ? `FY${periodLabelRaw}` : periodLabelRaw;
+  // A named year is labelled as the period it selected, not by the fy of the filing that carried it (2.5.16).
+  const periodLabel = namedYearLabel ?? (periodLabelRaw && !periodLabelRaw.startsWith("FY") ? `FY${periodLabelRaw}` : periodLabelRaw);
   const valueNum = picked.val != null ? Number(picked.val) : null;
   const rawValue = formatRawNumber(valueNum);
   const rawDenominator = formatRawNumber(denominator);
@@ -7396,470 +7380,6 @@ function cleanFilingDisplayText(text: string): string {
 
 function looksLikeFilingMarkupText(text: string): boolean {
   return /[<>]=?|(?:^|\s)(?:contextRef|unitRef|decimals|style|class|id|name)=|(?:xbrli|ix|dei|us-gaap|srt|country):|https?:\/\//i.test(text);
-}
-
-type FilingTextSearchMatch = {
-  term: string;
-  sectionHeading: string | null;
-  contextText: string;
-  tableParsed: unknown[] | null;
-};
-
-function filingTextOnlyMatches(text: string, searchTerms: string[], contextChars: number): FilingTextSearchMatch[] {
-  const textLower = text.toLowerCase();
-  const matches: FilingTextSearchMatch[] = [];
-  const seenPositions = new Set<number>();
-  const half = Math.floor(contextChars / 2);
-  for (const term of searchTerms) {
-    const termLower = term.toLowerCase();
-    let idx = 0;
-    while (matches.length < 5) {
-      const pos = textLower.indexOf(termLower, idx);
-      if (pos === -1) break;
-      idx = pos + 1;
-      if ([...seenPositions].some(sp => Math.abs(pos - sp) < 200)) continue;
-      seenPositions.add(pos);
-      const ctxStart = Math.max(0, pos - half);
-      const ctxEnd = Math.min(text.length, pos + half);
-      matches.push({
-        term,
-        sectionHeading: null,
-        contextText: text.slice(ctxStart, ctxEnd).trim(),
-        tableParsed: null,
-      });
-    }
-  }
-  return matches;
-}
-
-export async function getFilingTextSearch(
-  ticker: string,
-  accessionNumber: string,
-  searchTerms: string[],
-  contextChars: number = 1500,
-  returnTables: boolean = true,
-  textOnly: boolean = false,
-  documentUrl: string | null = null,
-): Promise<string> {
-  // Resolve primary document URL from EDGAR submissions
-  // When the caller already provides the resolved document URL (e.g. from
-  // get_sec_filings edgarPrimaryDocumentUrl), skip all EDGAR resolution calls
-  // and use it directly.  This is the fast path that avoids EDGAR API failures.
-  let primaryDocUrl: string | null = documentUrl;
-  let fiscalYear: string | null = null;
-  let fallbackIndexUrl: string | null = null;
-  if (!primaryDocUrl) {
-  try {
-    const cik = await edgarResolveCik(ticker);
-    if (cik != null) {
-      const cikPadded = String(cik).padStart(10, "0");
-      const subs = await edgarGetJson(`https://data.sec.gov/submissions/CIK${cikPadded}.json`);
-      if (subs) {
-        const recent = ((subs.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
-        const accessions = (recent.accessionNumber as string[]) ?? [];
-        const primaryDocs = (recent.primaryDocument as string[]) ?? [];
-        const periods = (recent.reportDate as string[]) ?? [];
-        for (let i = 0; i < accessions.length; i++) {
-          if (accessions[i] === accessionNumber) {
-            const period = periods[i];
-            if (period) fiscalYear = fiscalYearLabel(period);
-            const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(cik, accessions[i], primaryDocs[i] ?? null);
-            primaryDocUrl = edgarPrimaryDocumentUrl;
-            break;
-          }
-        }
-      }
-    }
-  } catch { /* non-fatal */ }
-
-  // Fallback: derive CIK from the accession number prefix when ticker→CIK lookup failed
-  // or when the accession is not present in the most-recent submissions window.
-  if (!primaryDocUrl) {
-    const derivedCik = edgarCikFromAccession(accessionNumber);
-    if (derivedCik != null) {
-      try {
-        const cikPadded = String(derivedCik).padStart(10, "0");
-        const subs = await edgarGetJson(`https://data.sec.gov/submissions/CIK${cikPadded}.json`);
-        if (subs) {
-          const recent = ((subs.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
-          const accessions = (recent.accessionNumber as string[]) ?? [];
-          const primaryDocs = (recent.primaryDocument as string[]) ?? [];
-          const periods = (recent.reportDate as string[]) ?? [];
-          for (let i = 0; i < accessions.length; i++) {
-            if (accessions[i] === accessionNumber) {
-              const period = periods[i];
-              if (period && !fiscalYear) fiscalYear = fiscalYearLabel(period);
-              const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(derivedCik, accessions[i], primaryDocs[i] ?? null);
-              primaryDocUrl = edgarPrimaryDocumentUrl;
-              break;
-            }
-          }
-        }
-      } catch { /* non-fatal */ }
-    }
-  }
-
-  // Third fallback: derive CIK directly from the accession number and parse the primary
-  // document from the EDGAR filing index HTM. This approach is ticker-agnostic and works
-  // even when the filing falls outside the EDGAR submissions window or when the submissions
-  // JSON has an empty/missing primaryDocument field.
-  if (!primaryDocUrl) {
-    const fbCik = edgarCikFromAccession(accessionNumber);
-    if (fbCik != null) {
-      try {
-        const { edgarIndexUrl } = edgarBuildFilingUrls(fbCik, accessionNumber, null);
-        fallbackIndexUrl = edgarIndexUrl;
-        const pdocFname = await edgarPrimaryDocFromIndex(edgarIndexUrl);
-        if (pdocFname) {
-          const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(fbCik, accessionNumber, pdocFname);
-          primaryDocUrl = edgarPrimaryDocumentUrl;
-        }
-      } catch { /* non-fatal */ }
-    }
-  }
-  } // end if (!primaryDocUrl) — EDGAR resolution block
-
-  if (!primaryDocUrl) {
-    const indexHtml = fallbackIndexUrl ? await edgarGetHtml(fallbackIndexUrl, 500_000) : null;
-    const indexText = indexHtml ? stripHtmlTags(indexHtml) : null;
-    const fallbackMatches = indexText
-      ? filingTextOnlyMatches(indexText, searchTerms, Math.max(contextChars, 1200))
-      : [];
-    return JSON.stringify({
-      ticker,
-      accessionNumber,
-      filingUrl: null,
-      indexUrl: fallbackIndexUrl,
-      fiscalYear,
-      searchTerms,
-      matches: fallbackMatches,
-      matchCount: fallbackMatches.length,
-      searchMode: "index_text_fallback",
-      _note: `Primary document URL could not be resolved for accession '${accessionNumber}'. Returned text-only fallback from filing index page when available.`,
-    });
-  }
-
-  const html = await edgarGetHtml(primaryDocUrl);
-  if (!html) {
-    const indexHtml = fallbackIndexUrl ? await edgarGetHtml(fallbackIndexUrl, 500_000) : null;
-    const indexText = indexHtml ? stripHtmlTags(indexHtml) : null;
-    const fallbackMatches = indexText
-      ? filingTextOnlyMatches(indexText, searchTerms, Math.max(contextChars, 1200))
-      : [];
-    return JSON.stringify({
-      ticker,
-      accessionNumber,
-      filingUrl: primaryDocUrl,
-      indexUrl: fallbackIndexUrl,
-      fiscalYear,
-      searchTerms,
-      matches: fallbackMatches,
-      matchCount: fallbackMatches.length,
-      searchMode: "index_text_fallback",
-      _note: `Could not fetch filing document from ${primaryDocUrl}. Returned text-only fallback from filing index page when available.`,
-    });
-  }
-
-  if (textOnly) {
-    const plainText = stripHtmlTags(html);
-    const matches = filingTextOnlyMatches(plainText, searchTerms, contextChars);
-    return JSON.stringify({
-      ticker,
-      accessionNumber,
-      filingUrl: primaryDocUrl,
-      indexUrl: fallbackIndexUrl,
-      fiscalYear,
-      searchTerms,
-      matches,
-      matchCount: matches.length,
-      searchMode: "text_only",
-      _note: "Keyword search executed over stripped filing text (table parsing disabled).",
-    });
-  }
-
-  const htmlLower = html.toLowerCase();
-  const matches: unknown[] = [];
-  const seenPositions = new Set<number>();
-  const half = Math.floor(contextChars / 2);
-
-  for (const term of searchTerms) {
-    const termLower = term.toLowerCase();
-    let idx = 0;
-    while (matches.length < 5) {
-      const pos = htmlLower.indexOf(termLower, idx);
-      if (pos === -1) break;
-      idx = pos + 1;
-
-      // Deduplicate nearby matches
-      if ([...seenPositions].some(sp => Math.abs(pos - sp) < 200)) continue;
-      seenPositions.add(pos);
-
-      const ctxStart = Math.max(0, pos - half);
-      const ctxEnd = Math.min(html.length, pos + half);
-      const contextText = stripHtmlTags(html.slice(ctxStart, ctxEnd));
-
-      // Nearest section heading
-      const preHtml = html.slice(Math.max(0, pos - 8_000), pos);
-      const hMatches = [...preHtml.matchAll(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi)];
-      const sectionHeading = hMatches.length > 0
-        ? stripHtmlTags(hMatches[hMatches.length - 1][1])
-        : null;
-
-      // Parse nearby tables
-      const tableParsed: unknown[] = [];
-      if (returnTables) {
-        const tblSearch = html.slice(Math.max(0, pos - 2_000), Math.min(html.length, pos + 60_000));
-        const tblRe = /<table[^>]*>/gi;
-        let tblM: RegExpExecArray | null;
-        while ((tblM = tblRe.exec(tblSearch)) !== null && tableParsed.length < 3) {
-          const absStart = Math.max(0, pos - 2_000) + tblM.index;
-          let depth = 0;
-          let i = absStart;
-          let tableEnd = absStart;
-          while (i < Math.min(html.length, absStart + 200_000)) {
-            const o = htmlLower.indexOf("<table", i);
-            const c = htmlLower.indexOf("</table>", i);
-            if (o === -1 && c === -1) break;
-            if (o !== -1 && (c === -1 || o < c)) { depth++; i = o + 6; }
-            else { depth--; if (depth === 0) { tableEnd = c + 8; break; } i = c + 8; }
-          }
-          const rows = parseHtmlTable(html.slice(absStart, tableEnd));
-          if (rows.length >= 2) tableParsed.push({ rows });
-        }
-      }
-
-      matches.push({ term, sectionHeading, contextText, tableParsed: returnTables ? tableParsed : null });
-    }
-  }
-
-  return JSON.stringify({
-    ticker,
-    accessionNumber,
-    filingUrl: primaryDocUrl,
-    indexUrl: fallbackIndexUrl,
-    fiscalYear,
-    searchTerms,
-    matches,
-    matchCount: matches.length,
-    searchMode: "html_context",
-  });
-}
-
-// ── SEC filing document/section retrieval ─────────────────────────────────────
-
-export async function getFilingDocument(
-  ticker: string,
-  accessionNumber: string,
-  sectionHint: string | null = null,
-  filingType: string = "10-K",
-  documentUrl: string | null = null,
-): Promise<string> {
-  // When the caller already provides the resolved document URL (e.g. from
-  // get_sec_filings edgarPrimaryDocumentUrl), skip all EDGAR resolution calls.
-  let primaryDocUrl: string | null = documentUrl;
-  let fiscalYear: string | null = null;
-  if (!primaryDocUrl) {
-  try {
-    const cik = await edgarResolveCik(ticker);
-    if (cik != null) {
-      const cikPadded = String(cik).padStart(10, "0");
-      const subs = await edgarGetJson(`https://data.sec.gov/submissions/CIK${cikPadded}.json`);
-      if (subs) {
-        const recent = ((subs.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
-        const accessions = (recent.accessionNumber as string[]) ?? [];
-        const primaryDocs = (recent.primaryDocument as string[]) ?? [];
-        const periods = (recent.reportDate as string[]) ?? [];
-        for (let i = 0; i < accessions.length; i++) {
-          if (accessions[i] === accessionNumber) {
-            const period = periods[i];
-            if (period) fiscalYear = fiscalYearLabel(period);
-            const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(cik, accessions[i], primaryDocs[i] ?? null);
-            primaryDocUrl = edgarPrimaryDocumentUrl;
-            break;
-          }
-        }
-      }
-    }
-  } catch { /* non-fatal */ }
-
-  // Fallback: derive CIK from the accession number prefix when ticker→CIK lookup failed
-  // or when the accession is not present in the most-recent submissions window.
-  if (!primaryDocUrl) {
-    const derivedCik = edgarCikFromAccession(accessionNumber);
-    if (derivedCik != null) {
-      try {
-        const cikPadded = String(derivedCik).padStart(10, "0");
-        const subs = await edgarGetJson(`https://data.sec.gov/submissions/CIK${cikPadded}.json`);
-        if (subs) {
-          const recent = ((subs.filings as Record<string, unknown>)?.recent as Record<string, unknown[]>) ?? {};
-          const accessions = (recent.accessionNumber as string[]) ?? [];
-          const primaryDocs = (recent.primaryDocument as string[]) ?? [];
-          const periods = (recent.reportDate as string[]) ?? [];
-          for (let i = 0; i < accessions.length; i++) {
-            if (accessions[i] === accessionNumber) {
-              const period = periods[i];
-              if (period && !fiscalYear) fiscalYear = fiscalYearLabel(period);
-              const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(derivedCik, accessions[i], primaryDocs[i] ?? null);
-              primaryDocUrl = edgarPrimaryDocumentUrl;
-              break;
-            }
-          }
-        }
-      } catch { /* non-fatal */ }
-    }
-  }
-
-  // Third fallback: derive CIK directly from the accession number and parse the primary
-  // document from the EDGAR filing index HTM. This approach is ticker-agnostic and works
-  // even when the filing falls outside the EDGAR submissions window or when the submissions
-  // JSON has an empty/missing primaryDocument field.
-  if (!primaryDocUrl) {
-    const fbCik = edgarCikFromAccession(accessionNumber);
-    if (fbCik != null) {
-      try {
-        const { edgarIndexUrl } = edgarBuildFilingUrls(fbCik, accessionNumber, null);
-        const pdocFname = await edgarPrimaryDocFromIndex(edgarIndexUrl);
-        if (pdocFname) {
-          const { edgarPrimaryDocumentUrl } = edgarBuildFilingUrls(fbCik, accessionNumber, pdocFname);
-          primaryDocUrl = edgarPrimaryDocumentUrl;
-        }
-      } catch { /* non-fatal */ }
-    }
-  }
-  } // end if (!primaryDocUrl) — EDGAR resolution block
-
-  if (!primaryDocUrl) {
-    const fbCik = edgarCikFromAccession(accessionNumber);
-    const indexUrl = fbCik != null
-      ? edgarBuildFilingUrls(fbCik, accessionNumber, null).edgarIndexUrl
-      : null;
-    const indexHtml = indexUrl ? await edgarGetHtml(indexUrl, 500_000) : null;
-    const indexText = indexHtml ? stripHtmlTags(indexHtml) : null;
-    const fallbackContent = sectionHint && indexText
-      ? filingTextOnlyMatches(indexText, [sectionHint], 5_000)[0]?.contextText ?? null
-      : null;
-    return JSON.stringify({
-      ticker,
-      accessionNumber,
-      documentUrl: null,
-      indexUrl,
-      fiscalYear,
-      filingType,
-      sectionsFound: [],
-      sectionContent: fallbackContent,
-      tablesInSection: null,
-      _note: `Primary document URL could not be resolved for accession '${accessionNumber}'. Returned text-only fallback from filing index page when available.`,
-    });
-  }
-
-  const html = await edgarGetHtml(primaryDocUrl);
-  if (!html) {
-    const fbCik = edgarCikFromAccession(accessionNumber);
-    const indexUrl = fbCik != null
-      ? edgarBuildFilingUrls(fbCik, accessionNumber, null).edgarIndexUrl
-      : null;
-    const indexHtml = indexUrl ? await edgarGetHtml(indexUrl, 500_000) : null;
-    const indexText = indexHtml ? stripHtmlTags(indexHtml) : null;
-    const fallbackContent = sectionHint && indexText
-      ? filingTextOnlyMatches(indexText, [sectionHint], 5_000)[0]?.contextText ?? null
-      : null;
-    return JSON.stringify({
-      ticker,
-      accessionNumber,
-      documentUrl: primaryDocUrl,
-      indexUrl,
-      fiscalYear,
-      filingType,
-      sectionsFound: [],
-      sectionContent: fallbackContent,
-      tablesInSection: null,
-      _note: `Could not fetch filing document from ${primaryDocUrl}. Returned text-only fallback from filing index page when available.`,
-    });
-  }
-
-  // Extract section headings
-  const sectionsFound = [...html.matchAll(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi)]
-    .map(m => stripHtmlTags(m[1]))
-    .filter(h => h.length > 0);
-
-  if (!sectionHint) {
-    return JSON.stringify({
-      ticker,
-      accessionNumber,
-      documentUrl: primaryDocUrl,
-      fiscalYear,
-      filingType,
-      sectionsFound,
-      sectionContent: null,
-      tablesInSection: null,
-      _note: "Provide section_hint to retrieve specific section content.",
-    });
-  }
-
-  const hintLower = sectionHint.toLowerCase();
-  const htmlLower = html.toLowerCase();
-  let matchPos: number | null = null;
-
-  // Try heading tags first
-  for (const m of html.matchAll(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi)) {
-    if (stripHtmlTags(m[1]).toLowerCase().includes(hintLower)) {
-      matchPos = m.index ?? null;
-      break;
-    }
-  }
-
-  // Fallback: any occurrence
-  if (matchPos === null) {
-    const p = htmlLower.indexOf(hintLower);
-    if (p !== -1) matchPos = p;
-  }
-
-  if (matchPos === null) {
-    return JSON.stringify({
-      ticker,
-      accessionNumber,
-      documentUrl: primaryDocUrl,
-      fiscalYear,
-      filingType,
-      sectionsFound,
-      sectionContent: null,
-      tablesInSection: null,
-      _note: `Section hint '${sectionHint}' not found in the filing document.`,
-    });
-  }
-
-  const sectionContent = stripHtmlTags(html.slice(matchPos, Math.min(html.length, matchPos + 5_000)));
-
-  const tablesInSection: unknown[] = [];
-  const wideHtml = html.slice(matchPos, Math.min(html.length, matchPos + 60_000));
-  const tblRe = /<table[^>]*>/gi;
-  let tblM: RegExpExecArray | null;
-  while ((tblM = tblRe.exec(wideHtml)) !== null && tablesInSection.length < 5) {
-    const absStart = matchPos + tblM.index;
-    let depth = 0;
-    let i = absStart;
-    let tableEnd = absStart;
-    while (i < Math.min(html.length, absStart + 200_000)) {
-      const o = htmlLower.indexOf("<table", i);
-      const c = htmlLower.indexOf("</table>", i);
-      if (o === -1 && c === -1) break;
-      if (o !== -1 && (c === -1 || o < c)) { depth++; i = o + 6; }
-      else { depth--; if (depth === 0) { tableEnd = c + 8; break; } i = c + 8; }
-    }
-    const rows = parseHtmlTable(html.slice(absStart, tableEnd));
-    if (rows.length >= 2) tablesInSection.push({ rows });
-  }
-
-  return JSON.stringify({
-    ticker,
-    accessionNumber,
-    documentUrl: primaryDocUrl,
-    fiscalYear,
-    filingType,
-    sectionsFound,
-    sectionContent,
-    tablesInSection,
-  });
 }
 
 // ── get_options_flow_scan ─────────────────────────────────────────────────────

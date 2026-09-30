@@ -1540,6 +1540,108 @@ Vantage and IBKR produced these fixes.
 - **Tests.** `scripts/test_extraction_rules.py`, `scripts/test_evidence.py`,
   `scripts/test_valuation_history_and_reconcile.py`.
 
+## Company Fiscal-Year End In The Consensus Curve (2.5.16)
+
+- **The problem.** Providers date a fiscal year by a nominal month end. Yahoo
+  gives DG's current year as ending 2027-01-31; DG's year ends on the Friday
+  nearest January 31, which is 2027-01-29.
+- **`fiscalYearNaming.calendar`.**
+  - `fiscalYearNaming` (in `get_consensus_forecast_curve` and the evidence
+    pack) gains `calendar`: `{patterns, month, weekday, basis:
+    "SEC_ANNUAL_PERIOD_ENDS", periodEnds}`.
+  - It is read from the company's 10-K annual period ends (companyfacts) and
+    kept only if it reproduces every one of them.
+  - The patterns are:
+    - `MONTH_END`;
+    - `WEEKDAY_NEAREST_MONTH_END` (within 3 days of the month's last day);
+    - `LAST_WEEKDAY_OF_MONTH`.
+  - `calendar` is null when SEC was not read, when fewer than two annual ends
+    exist, or when no pattern fits.
+- **How the pattern is chosen.**
+  - The newest two ends are read first, and older ones are added one at a time
+    until a single pattern is left.
+  - An end that no pattern fits (a changed calendar) stops the look-back.
+  - MU's Thursday nearest August 31 and its last Thursday of August fit 2023
+    to 2025; an older year settles it.
+- **`companyFiscalYearEnd`.**
+  - Each consensus-curve period gains `companyFiscalYearEnd`: the company's own
+    end for the year the providers date. `fiscalYearEnds` stays as the
+    providers state it.
+  - It is null when there is no calendar, when the provider's month differs
+    from the calendar's, or when two fitting patterns give different dates for
+    that year (they then say nothing).
+  - Live examples:
+    - DG 2027-01-29;
+    - MRVL 2027-01-30 (Saturday nearest Jan 31);
+    - FN 2027-06-25 (last Friday of June);
+    - LITE 2027-07-03;
+    - SNDK 2027-07-02;
+    - MU 2026-09-03 (Yahoo: 2026-08-31);
+    - ANET 2026-12-31.
+- **Runtimes and tests.** Both runtimes. `scripts/test_guidance_and_drivers.py`
+  (`CALENDAR_CASES`) and `scripts/test_evidence.py`.
+
+### SEC Fact Payload Parity And Dead Worker Code (2.5.16)
+
+- **Missing facts (Python).** When no us-gaap fact exists for the requested
+  form, Python returned `source`/`confidence` NOT_DISCLOSED with no code, so
+  `extract_total_revenue` read NOT_DISCLOSED where the Worker reads NOT_FOUND
+  with `code` NO_COMPANYCONCEPT_FACT_FOR_FORM. Python now returns the
+  Worker's payload: `status` SEC_FACT_NOT_AVAILABLE, the code
+  (NO_COMPANYCONCEPT_FACT_FOR_FORM, or SEC_FACTS_IFRS_ONLY for an IFRS-only
+  filer), the latest filing of that form as evidence (with AUTO_20F_FALLBACK
+  when a 20-F stands in for a 10-K), warnings and `_manualLookup`. A form a
+  company tags no facts in is a lookup outcome, not a non-disclosure.
+- **Found facts (Python).** A found fact's `xbrlContext` now carries the
+  Worker's `concept`, `taxonomy`, `unit`, `instant`, `accessionNumber`,
+  `filedAt` and `dimensions`. Without the concept, Python's decision-grade
+  check failed: `extract_total_revenue` read `decisionGrade: false` for
+  ANET's and BE's FY2025 revenue, where the Worker reads true.
+- **Dead Worker code.** `getFilingTextSearch` and `getFilingDocument` had no
+  callers (the public tools use `searchFilingText`); they and the helpers only
+  they used (`filingTextOnlyMatches`, `edgarPrimaryDocFromIndex`) are removed.
+  No public output changes.
+- **Tests.** `scripts/test_sec_fact_payloads.py` runs both runtimes against
+  mocked SEC responses (found, no facts for the form, IFRS-only, malformed
+  concept) and compares their payloads.
+
+### Named Fiscal-Year Periods In SEC Fact Extractors (2.5.16)
+
+- **Defect.** `period` was honoured only as `"latest"`. Any other string
+  (`"FY2025"`, `"2025"`, a typo) skipped the latest-filed filter and the
+  sort, so the first companyconcept row came back: BE 10-K `"FY2025"` gave
+  208,540,000, the 2016 revenue, labelled FY2018 (the fy of the later filing
+  that carried it as a comparative).
+- **Accepted values.** `period` is `"latest"` (the default) or a fiscal year,
+  `"FY2025"` or `"2025"`. Any other value is an `INPUT_VALIDATION_ERROR` for
+  `extract_sec_filing_fact`, `extract_geographic_revenue`,
+  `extract_segment_revenue`, `extract_total_revenue`,
+  `extract_revenue_exposure`, `extract_china_exposure`, `extract_exposure`
+  and `query_sec_filing_index`, grouped or expanded, checked before any
+  internal call so both runtimes fail the same way.
+- **Selection.** A fiscal year selects the annual period the issuer calls
+  that year. That is the `fy` (with `fp` FY) of the filing that first
+  reported the period, when it is the period's end year or the year before.
+  Otherwise it is the year the period ends in, counted from seven days before
+  the end so a 52/53-week year ending in early January belongs to the year
+  before. This is the rule `reconcile_metric_sources` uses. The latest filed
+  value for that period wins (a restatement), and the result is labelled
+  with the requested year.
+  - BE `"FY2025"`: 2,023,994,000.
+  - DG `"FY2025"`: 42,724,369,000 for the year ended 2026-01-30.
+- **Refusals.**
+  - A fiscal year with a quarterly filing type or `period_mode` is
+    `INVALID_PERIOD`.
+  - A year with no annual fact is `PERIOD_NOT_FOUND`, listing the fiscal
+    years found.
+  - Both come back as the `SEC_FACT_NOT_AVAILABLE` payload with the latest
+    filing of the form as evidence.
+  - Geographic revenue with a named year and no tagged rows refuses the same
+    way instead of reading the latest filing's table, which may be another
+    year.
+- **Quarters** are not named by `period`. Use `"latest"` with `10-Q`, an
+  `accession_number`, or `reconcile_metric_sources` (`"Q3 2025"`, `"latest_quarter"`).
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
