@@ -6393,6 +6393,10 @@ export async function getFilingData(
   };
   const companyfactsUrl = `https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`;
   const secReadFailed = (conceptName: string | null): Promise<string> => {
+    // Reads finish in network order; list them in candidate order, companyfacts last, so the result is stable.
+    const rank = (r: { endpoint: string; concept: string | null }): number =>
+      r.endpoint === "companyconcept" ? candidateNames.indexOf(r.concept ?? "") : candidateNames.length;
+    failedReads.sort((a, b) => rank(a) - rank(b));
     const reads = failedReads
       .map((r) => `${r.endpoint}${r.concept ? ` ${r.concept}` : ""} (${r.httpStatus != null ? `HTTP ${r.httpStatus}` : "no response"})`)
       .join(", ");
