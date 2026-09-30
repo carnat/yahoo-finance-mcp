@@ -5192,6 +5192,33 @@ def _fy_number(value: Any) -> float:
         return 0.0
 
 
+async def _edgar_read_json(url: str) -> dict:
+    """The Worker's edgarReadJson (2.5.17): an EDGAR JSON read that tells absence from failure.
+
+    A 404 is SEC saying the resource does not exist ({"ok": True, "json": None}); any other non-OK status is
+    {"ok": False, "httpStatus": <code>}; a network error or an unreadable body is {"ok": False, "httpStatus": None}.
+    """
+    try:
+        return {"ok": True, "json": await _edgar_get(url)}
+    except EdgarError as e:
+        if e.status_code == 404:
+            return {"ok": True, "json": None}
+        return {"ok": False, "httpStatus": e.status_code}
+    except Exception:
+        return {"ok": False, "httpStatus": None}
+
+
+def _js_json_numbers(value: Any) -> Any:
+    """The payload as JavaScript's JSON.stringify writes its numbers: an integral float is an int (2023994000.0 -> 2023994000)."""
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else value
+    if isinstance(value, dict):
+        return {k: _js_json_numbers(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_js_json_numbers(v) for v in value]
+    return value
+
+
 async def get_filing_data(
     ticker: str,
     fact_type: FilingFactType,
@@ -5224,7 +5251,7 @@ async def get_filing_data(
         if read_warnings and add_read_warnings:
             payload = {**payload, "warnings": [*(payload["warnings"] if isinstance(payload.get("warnings"), list) else []), *read_warnings]}
         if fact_type != FilingFactType.geographic_revenue:
-            return json.dumps(payload)
+            return json.dumps(_js_json_numbers(payload))
         shaped = {
             "ticker": payload.get("ticker", ticker),
             "factType": payload.get("factType", FilingFactType.geographic_revenue.value),
@@ -5261,7 +5288,7 @@ async def get_filing_data(
                 "message": "Could not compute geographic revenue percentage due to missing denominator.",
                 "severity": "warning",
             })
-        return json.dumps(shaped)
+        return json.dumps(_js_json_numbers(shaped))
 
     async def _resolve_filing_urls_for_accession(accn: str) -> tuple[str | None, str | None]:
         if not accn:
@@ -5332,13 +5359,25 @@ async def get_filing_data(
             ),
         })
 
+    # A read that failed (not a 404) leaves a fact's absence unproven: the result is SEC_READ_FAILED, never
+    # "no facts" (2.5.17). Mirrors the Worker's readSecJson.
+    failed_reads: list[dict] = []
+
+    async def _read_sec_json(url: str, endpoint: str, concept_name: str | None) -> dict | None:
+        read = await _edgar_read_json(url)
+        if read["ok"]:
+            return read["json"]
+        failed_reads.append({"endpoint": endpoint, "concept": concept_name, "httpStatus": read["httpStatus"]})
+        return None
+
+    companyfacts_url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_padded}.json"
+
     async def _concept_json(concept_name: str) -> dict | None:
-        try:
-            return await _edgar_get(
-                f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik_padded}/us-gaap/{concept_name}.json"
-            )
-        except EdgarError:
-            return None
+        return await _read_sec_json(
+            f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik_padded}/us-gaap/{concept_name}.json",
+            "companyconcept",
+            concept_name,
+        )
 
     # Every equivalent concept is read; the one with the newest filing of this
     # form wins, so a filer that switched concepts is not read from its old one.
@@ -5356,10 +5395,7 @@ async def get_filing_data(
             return usd or []
         malformed_concepts.append(name)
         if not companyfacts_read:
-            try:
-                companyfacts_read.append(await _edgar_get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_padded}.json"))
-            except EdgarError:
-                companyfacts_read.append(None)
+            companyfacts_read.append(await _read_sec_json(companyfacts_url, "companyfacts", None))
         cf = companyfacts_read[0]
         facts = cf.get("facts") if isinstance(cf, dict) else None
         us_gaap = facts.get("us-gaap") if isinstance(facts, dict) else None
@@ -5368,14 +5404,26 @@ async def get_filing_data(
         rows = entry_units.get("USD") if isinstance(entry_units, dict) else None
         return rows if isinstance(rows, list) else []
 
-    async def _unavailable_structured_fact(code: str, message: str, concept_name: str | None) -> str:
-        """The Worker's unavailableStructuredFact: no fact, why, and the latest filing of the form it looked in (2.5.16)."""
+    async def _unavailable_structured_fact(
+        code: str,
+        message: str,
+        concept_name: str | None,
+        requested_accession: str | None = None,
+        extra: dict | None = None,
+    ) -> str:
+        """The Worker's unavailableStructuredFact: no fact, why, and the latest filing of the form it looked in (2.5.16).
+
+        A pinned accession is echoed as requestedAccession and no other filing is looked up. `extra` is applied last,
+        as the Worker spreads it at the end of the payload: an existing key keeps its position, a new one is appended.
+        """
         filing: dict | None = None
         filing_warnings: list[dict] = []
-        try:
-            resolved, _error = await _resolve_periodic_filings(ticker, filing_type, None)
-        except Exception:
-            resolved = []
+        resolved: list = []
+        if not requested_accession:
+            try:
+                resolved, _error = await _resolve_periodic_filings(ticker, filing_type, None)
+            except Exception:
+                resolved = []
         if resolved:
             filing = resolved[0][1]
             if (filing_type or "").upper() == "10-K" and str(filing.get("filingType") or "").upper() == "20-F":
@@ -5384,7 +5432,7 @@ async def get_filing_data(
                     "message": "Filing type automatically adapted from 10-K to 20-F (foreign private issuer detected).",
                     "severity": "info",
                 })
-        return _geo_shape({
+        payload: dict = {
             "ticker": ticker,
             "factType": fact_type.value,
             "concept": concept_name,
@@ -5399,7 +5447,8 @@ async def get_filing_data(
             "period": None,
             "filingType": filing["filingType"] if filing else filing_type,
             "filingDate": filing.get("filingDate") if filing else None,
-            "accessionNumber": filing.get("accessionNumber") if filing else None,
+            "accessionNumber": requested_accession or (filing.get("accessionNumber") if filing else None),
+            **({"requestedAccession": requested_accession} if requested_accession else {}),
             "documentUrl": filing.get("documentUrl") if filing else None,
             "indexUrl": None,
             "primaryDocumentUrl": filing.get("documentUrl") if filing else None,
@@ -5420,7 +5469,31 @@ async def get_filing_data(
             "calculation": None,
             "warnings": [*filing_warnings, *read_warnings, {"code": code, "message": message, "severity": "warning"}],
             "_manualLookup": _manual_lookup_payload(ticker, cik_padded, filing_type, "Fact not XBRL-tagged. Use search_filing_text instead."),
-        }, add_read_warnings=False)
+        }
+        payload.update(extra or {})
+        # Unshaped, as the Worker's unavailableStructuredFact: the geographic_revenue shape (_geo_shape) would drop status/code.
+        return json.dumps(_js_json_numbers(payload))
+
+    async def _sec_read_failed(concept_name: str | None) -> str:
+        """The Worker's secReadFailed (2.5.17): a failed SEC read is not a missing fact; retry."""
+        # Reads finish in network order; list them in candidate order, companyfacts last, so the result is stable.
+        def _rank(r: dict) -> int:
+            if r["endpoint"] != "companyconcept":
+                return len(candidate_names)
+            return candidate_names.index(r["concept"] or "") if (r["concept"] or "") in candidate_names else -1
+
+        failed_reads.sort(key=_rank)
+        reads = ", ".join(
+            f"{r['endpoint']}{' ' + r['concept'] if r['concept'] else ''} ({'HTTP ' + str(r['httpStatus']) if r['httpStatus'] is not None else 'no response'})"
+            for r in failed_reads
+        )
+        return await _unavailable_structured_fact(
+            "SEC_READ_FAILED",
+            f"SEC could not be read for {ticker.upper()}: {reads}. Whether the fact exists is unknown; retry.",
+            concept_name,
+            accession_number.strip() if accession_number and accession_number.strip() else None,
+            {"status": "PROVIDER_ERROR", "retryable": True, "failedReads": list(failed_reads)},
+        )
 
     fetched_concepts = []
     for name in candidate_names:
@@ -5431,43 +5504,30 @@ async def get_filing_data(
             "message": f"SEC companyconcept returned no fact list for {', '.join(malformed_concepts)}; those facts were read from companyfacts.",
             "severity": "info",
         })
+    if failed_reads:
+        return await _sec_read_failed(concept_primary)
     pinned_accession = accession_number.strip() if accession_number and accession_number.strip() else None
     chosen = _sf.pick_concept_facts(fetched_concepts, filing_type, pinned_accession, "larger" if fact_type == FilingFactType.total_revenue else "first")
     concept_used = chosen["concept"] if chosen else concept_primary
     filtered = list(chosen["facts"]) if chosen else []
     if not filtered and pinned_accession:
-        return _geo_shape({
-            "ticker": ticker,
-            "factType": fact_type.value,
-            "concept": concept_used,
-            "value": None,
-            "denominator": None,
-            "valueRatio": None,
-            "valuePct": None,
-            "extractionMethod": "NONE",
-            "source": "SEC_COMPANYCONCEPT",
-            "confidence": "NOT_DECISION_GRADE",
-            "status": "SEC_FACT_NOT_AVAILABLE",
-            "code": "NO_FACT_FOR_ACCESSION",
-            # A failed pin names the filing that was asked for, never the latest one.
-            "filingType": filing_type,
-            "accessionNumber": pinned_accession,
-            "requestedAccession": pinned_accession,
-            "evidence": {},
-            # As in the Worker's unavailableStructuredFact: the read warnings come before this result's own.
-            "warnings": [*read_warnings, {"code": "NO_FACT_FOR_ACCESSION", "message": f"SEC companyconcept has no {' / '.join(candidate_names)} fact in accession {pinned_accession} ({filing_type}).", "severity": "warning"}],
-        }, add_read_warnings=False)
+        # A failed pin names the filing that was asked for, never the latest one (the Worker's unavailableStructuredFact).
+        return await _unavailable_structured_fact(
+            "NO_FACT_FOR_ACCESSION",
+            f"SEC companyconcept has no {' / '.join(candidate_names)} fact in accession {pinned_accession} ({filing_type}).",
+            concept_used,
+            pinned_accession,
+        )
     if not filtered:
         if fact_type != FilingFactType.geographic_revenue:
             # An IFRS filer (TSM's 20-F) tags ifrs-full, never us-gaap: say so rather than report the fact
             # missing (2.5.15). Same code, status and warnings as the Worker's unavailableStructuredFact.
             if not companyfacts_read:
-                try:
-                    companyfacts_read.append(await _edgar_get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_padded}.json"))
-                except EdgarError:
-                    companyfacts_read.append(None)
+                companyfacts_read.append(await _read_sec_json(companyfacts_url, "companyfacts", None))
             cf = companyfacts_read[0]
             taxonomies = cf.get("facts") if isinstance(cf, dict) else None
+            if failed_reads:
+                return await _sec_read_failed(concept_used)
             if isinstance(taxonomies, dict) and taxonomies.get("ifrs-full") and not taxonomies.get("us-gaap"):
                 return await _unavailable_structured_fact(
                     "SEC_FACTS_IFRS_ONLY",
@@ -5572,7 +5632,7 @@ async def get_filing_data(
                 "filingDate": str(f.get("filed") or ""),
                 "accessionNumber": str(f.get("accn") or ""),
             })
-        return json.dumps({
+        return json.dumps(_js_json_numbers({
             "ticker": ticker,
             "factType": fact_type.value,
             "concept": concept_used,
@@ -5586,7 +5646,7 @@ async def get_filing_data(
             "source": "XBRL",
             "confidence": "HIGH",
             "allSegments": seg_rows,
-        })
+        }))
 
     picked: dict | None = None
     value_ratio: float | None = None
@@ -5833,8 +5893,8 @@ async def get_filing_data(
             "tableTitle": None,
             "sourceTableId": None,
             "sourceRows": [
-                [segment_label or (region or "Region"), raw_value],
-                ["Total revenue", raw_denominator],
+                [segment_label or (region or "Region"), raw_value if raw_value is not None else ""],
+                ["Total revenue", raw_denominator if raw_denominator is not None else ""],
             ],
             "sourceColumns": [period_label or str(picked.get("fp") or "")],
         },
@@ -8301,6 +8361,7 @@ async def extract_sec_filing_fact(
             "status": status,
             "code": parsed_payload.get("code"),
             **({"retryable": parsed_payload["retryable"]} if isinstance(parsed_payload.get("retryable"), bool) else {}),
+            **({"failedReads": parsed_payload["failedReads"]} if isinstance(parsed_payload.get("failedReads"), list) else {}),
             "decisionGrade": decision_grade,
             "xbrlContext": xbrl_context,
             "retrieval_path": _map_extraction_to_retrieval_path(parsed_payload.get("extractionMethod", "NONE")),
@@ -9101,12 +9162,24 @@ async def get_sec_filing_section_markdown(
 
 
 def _as_status(source_payload: dict) -> str:
-    confidence = str(source_payload.get("confidence") or "").upper()
-    source = str(source_payload.get("source") or "").upper()
-    if source in {"NOT_DISCLOSED"} or confidence in {"NOT_DISCLOSED"}:
-        return "NOT_DISCLOSED"
-    if source in {"CONFLICTING"} or confidence in {"CONFLICTING"}:
-        return "CONFLICTING"
+    """The Worker's normalizeStatus: status/code first, then source/confidence, then NOT_DISCLOSED, CONFLICTING, NOT_FOUND."""
+    def _text(value: object) -> str:
+        return "" if value is None else str(value).upper()
+
+    status = _text(source_payload.get("status") if source_payload.get("status") is not None else source_payload.get("code"))
+    for named in ("FILING_NOT_FOUND_TRY_OTHER_TYPE", "FILING_TEXT_NOT_AVAILABLE", "EXTRACTION_FAILED", "TABLE_NOT_PARSED",
+                  "PROVIDER_LIMITATION", "NO_DIMENSIONAL_REVENUE_FACT"):
+        if status == named:
+            return named
+    # A failed SEC read is not a missing fact (2.5.17).
+    if status == "PROVIDER_ERROR":
+        return "PROVIDER_ERROR"
+    source = _text(source_payload.get("source"))
+    confidence = _text(source_payload.get("confidence"))
+    for named in ("FILING_NOT_FOUND_TRY_OTHER_TYPE", "EXTRACTION_FAILED", "TABLE_NOT_PARSED", "PROVIDER_LIMITATION",
+                  "NO_DIMENSIONAL_REVENUE_FACT", "NOT_DISCLOSED", "CONFLICTING"):
+        if source == named or confidence == named:
+            return named
     return "NOT_FOUND"
 
 
@@ -9407,6 +9480,9 @@ async def extract_total_revenue(
         # Why there is no value (NO_SEC_REGISTRANT, SEC_FACTS_IFRS_ONLY, ...) and the read's warnings (2.5.15).
         "code": None if val is not None else (payload.get("code") if isinstance(payload.get("code"), str) else None),
         "message": None if val is not None else (payload.get("message") if isinstance(payload.get("message"), str) else None),
+        # A failed SEC read says so and which reads failed; retry rather than treat the fact as missing (2.5.17).
+        **({"retryable": True} if val is None and payload.get("retryable") is True else {}),
+        **({"failedReads": payload["failedReads"]} if val is None and isinstance(payload.get("failedReads"), list) else {}),
         "warnings": payload.get("warnings") if isinstance(payload.get("warnings"), list) else [],
     })
 

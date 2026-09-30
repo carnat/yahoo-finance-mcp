@@ -1668,11 +1668,30 @@ Vantage and IBKR produced these fixes.
   - A pinned accession is echoed as `requestedAccession`.
   - Geographic revenue does not fall back to the filing's HTML table after a
     failed read.
-- **Python payload parity.** Python's fact reader now returns an integral
-  `value` as an integer, as the Worker does (it was `2023994000.0`), and the
-  evidence `sourceRows` label cell as `""` rather than null.
-  `scripts/test_sec_fact_payloads.py` compares `sourceRows` and the value's
-  JSON type.
+- **Failed reads are listed in a fixed order.** `failedReads` and the
+  message list the candidate concepts in order, then companyfacts, whatever
+  order the reads finished in.
+- **Python payload parity.**
+  - Python's fact reader writes integral numbers as integers, as the Worker's
+    JSON does: `value` was `2023994000.0`.
+  - An empty `sourceRows` value cell is `""`, not null.
+  - Python's "no fact" payload (`SEC_FACT_NOT_AVAILABLE`, `PROVIDER_ERROR`)
+    is now the Worker's whole payload for every fact type. Geographic revenue
+    used to be reshaped without `status` and `code`, and a pinned accession
+    with no fact returned a shorter payload.
+  - Python's status mapping (`_as_status`) now has every branch of the
+    Worker's `normalizeStatus`.
+  - `scripts/test_sec_fact_payloads.py` compares whole payloads as JSON,
+    which covers key order and integer vs float. It also runs
+    `normalizeStatus` itself against `_as_status`.
+- **Known Python gap.** Python's `extract_geographic_revenue`,
+  `extract_revenue_exposure` and `extract_china_exposure` never carried the
+  Worker's `status`, `code`, `scanCoverage`, `searchedTerms` and
+  `notDisclosedBasis`. Through those Python tools a failed SEC read shows
+  only as the `SEC_READ_FAILED` warning, and `extract_revenue_exposure`
+  still says NOT_FOUND. This predates 2.5.17 and is left for a separate
+  change. The deployed Worker reports `PROVIDER_ERROR` / `SEC_READ_FAILED`
+  through all of them.
 
 ## Non-US Primary Filings
 
