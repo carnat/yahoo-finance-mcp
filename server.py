@@ -17,11 +17,12 @@ import urllib.parse as _urlparse
 import urllib.request as _urlrequest
 import urllib.error as _urlerror
 import xml.etree.ElementTree as _ET
-from typing import Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 import zoneinfo
 
 import pandas as pd
 import yfinance as yf
+from pydantic import Field
 
 # Phase 2b: yfmcp.app owns the FastMCP compat shim, yfinance_server instance, and
 # build_handler_registry.  Import first so the compat shim fires before any decorator runs.
@@ -5283,10 +5284,19 @@ async def get_filing_data(
             pass
         return index_url, primary_url
 
+    concept_primary, concept_fallback = _FILING_FACT_CONCEPTS[fact_type]
+    # A period this reader cannot resolve is refused, never answered with an arbitrary fact (2.5.16).
+    named_period = _sf.parse_filing_period(period)
+    if named_period is None:
+        return json.dumps({
+            "ticker": ticker, "factType": fact_type.value, "value": None, "unit": None, "period": None, "filingType": filing_type,
+            "extractionMethod": "NONE", "source": "INPUT", "confidence": "NOT_DECISION_GRADE",
+            "status": "INVALID_PERIOD", "code": "INVALID_PERIOD", "decisionGrade": False, "requestedPeriod": period,
+            "warnings": [{"code": "INVALID_PERIOD", "message": _sf.FILING_PERIOD_HELP, "severity": "error"}],
+        })
     if fact_type == FilingFactType.geographic_revenue and not region:
         return json.dumps({"error": True, "message": "region is required for fact_type='geographic_revenue'"})
 
-    concept_primary, concept_fallback = _FILING_FACT_CONCEPTS[fact_type]
     cik_padded = await _resolve_cik_for_ticker(ticker)
     if not cik_padded:
         # No CIK is a lookup outcome, not a disclosure: say whether SEC's ticker
@@ -5474,7 +5484,7 @@ async def get_filing_data(
             )
         # For geographic_revenue, fall through to HTML fallback below (picked remains None)
 
-    if filtered and period == "latest" and not pinned_accession:
+    if filtered and named_period["kind"] == "latest" and not pinned_accession:
         latest_filed = max(str(f.get("filed", "")) for f in filtered)
         filtered = [f for f in filtered if str(f.get("filed", "")) == latest_filed]
 
@@ -5524,9 +5534,28 @@ async def get_filing_data(
             mode_filtered = [f for f, d in dur_tagged if d is None or (340 <= d <= 400)]
         if mode_filtered:
             filtered = mode_filtered
+    # A named fiscal year is an annual period: the rows for the period the issuer calls that year (2.5.16).
+    named_year_label: str | None = None
+    if named_period["kind"] == "fiscalYear":
+        if resolved_mode != "annual":
+            return await _unavailable_structured_fact(
+                "INVALID_PERIOD",
+                f"period {period} names a fiscal year, an annual period; request filing_type 10-K or 20-F (or period_mode annual).",
+                concept_used,
+            )
+        selected = _sf.select_fiscal_year_rows(filtered, named_period["year"])
+        if not selected["rows"]:
+            years_found = ", ".join(str(y) for y in selected["fiscalYears"][-6:]) or "none"
+            return await _unavailable_structured_fact(
+                "PERIOD_NOT_FOUND",
+                f"No annual {concept_used} fact is fiscal year {named_period['year']} (the issuer's stated fiscal year, else the year the period ends); fiscal years found: {years_found}.",
+                concept_used,
+            )
+        filtered = selected["rows"]
+        named_year_label = f"FY{named_period['year']}"
     # A filing reports prior-year comparatives too: the newest period end comes
     # first, as in the Worker (ASTS's Q2 2026 10-Q also carries Q2 2025).
-    if period == "latest" and filtered:
+    if named_period["kind"] == "latest" and filtered:
         filtered = sorted(filtered, key=lambda f: (str(f.get("end") or ""), _fy_number(f.get("fy")), str(f.get("filed") or "")), reverse=True)
 
     if fact_type == FilingFactType.segment_revenue:
@@ -5732,6 +5761,9 @@ async def get_filing_data(
     period_label = str(picked.get("fy") or "")
     if period_label and not period_label.startswith("FY"):
         period_label = f"FY{period_label}"
+    # A named year is labelled as the period it selected, not by the fy of the filing that carried it (2.5.16).
+    if named_year_label:
+        period_label = named_year_label
 
     # ── XBRL context metadata ─────────────────────────────────────────────
     # The Worker's full context (2.5.16): without concept and taxonomy, a found fact failed the decision-grade
@@ -8175,6 +8207,21 @@ def _is_decision_grade_sec_xbrl_fact(
     )
 
 
+# The period parameter of the SEC fact extractors, as the Worker's inputSchema describes it (2.5.16).
+_FILING_PERIOD_DESCRIPTION = (
+    '"latest" or a fiscal year ("FY2025" or "2025"); a fiscal year selects the annual period the issuer calls that year. '
+    "Other values are rejected."
+)
+_FilingPeriodParam = Annotated[str, Field(description=_FILING_PERIOD_DESCRIPTION)]
+
+
+def _filing_period_failure(tool: str, period: Any) -> str | None:
+    """The Worker's _dispatchTool check for the SEC fact tools: a period that is not "latest" or a fiscal year is refused (2.5.16)."""
+    if period is not None and _sf.parse_filing_period(str(period)) is None:
+        return _mcp_failure(tool, ErrorCode.INPUT_VALIDATION_ERROR, f"{_sf.FILING_PERIOD_HELP} Got '{period}'.")
+    return None
+
+
 # Revenue names accepted as fact, as the Worker's SEC_XBRL_CONCEPT_ALIASES does.
 _REVENUE_FACT_ALIASES = {
     "revenue", "revenues", "totalrevenue", "salesrevenuenet",
@@ -8190,11 +8237,14 @@ async def extract_sec_filing_fact(
     fact_type: FilingFactType | None = None,
     region: str | None = None,
     filing_type: str = "10-K",
-    period: str = "latest",
+    period: _FilingPeriodParam = "latest",
     period_mode: str = "auto",
     document_url: str | None = None,
     accession_number: str | None = None,
 ) -> str:
+    failure = _filing_period_failure("extract_sec_filing_fact", period)
+    if failure:
+        return failure
     routed_fact_type = fact_type
     if routed_fact_type is None and fact is not None and _re.sub(r"[^a-z0-9]", "", _re.sub(r"^(?:us-gaap|dei|srt|country):", "", fact, flags=_re.I).lower()) in _REVENUE_FACT_ALIASES:
         routed_fact_type = FilingFactType.total_revenue
@@ -9107,10 +9157,13 @@ async def extract_geographic_revenue(
     ticker: str,
     region: str,
     filing_type: str = "10-K",
-    period: str = "latest",
+    period: _FilingPeriodParam = "latest",
     accession_number: str | None = None,
     detailLevel: str = "compact",
 ) -> str:
+    failure = _filing_period_failure("extract_geographic_revenue", period)
+    if failure:
+        return failure
     if not region or not str(region).strip():
         return json.dumps({
             "ticker": ticker,
@@ -9247,9 +9300,12 @@ async def extract_geographic_revenue(
 async def extract_segment_revenue(
     ticker: str,
     filing_type: str = "10-K",
-    period: str = "latest",
+    period: _FilingPeriodParam = "latest",
     detailLevel: str = "compact",
 ) -> str:
+    failure = _filing_period_failure("extract_segment_revenue", period)
+    if failure:
+        return failure
     payload = _safe_json_loads(await get_filing_data(ticker=ticker, fact_type=FilingFactType.segment_revenue, filing_type=filing_type, period=period))
     segments = payload.get("allSegments") if isinstance(payload.get("allSegments"), list) else []
     rows = []
@@ -9313,8 +9369,11 @@ async def extract_segment_revenue(
 async def extract_total_revenue(
     ticker: str,
     filing_type: str = "10-K",
-    period: str = "latest",
+    period: _FilingPeriodParam = "latest",
 ) -> str:
+    failure = _filing_period_failure("extract_total_revenue", period)
+    if failure:
+        return failure
     payload = _safe_json_loads(await get_filing_data(ticker=ticker, fact_type=FilingFactType.total_revenue, filing_type=filing_type, period=period))
     val = payload.get("value")
     status = "FOUND" if val is not None else _as_status(payload)
@@ -9357,9 +9416,12 @@ async def extract_revenue_exposure(
     ticker: str,
     exposure_query: str,
     filing_type: str = "10-K",
-    period: str = "latest",
+    period: _FilingPeriodParam = "latest",
     detailLevel: str = "compact",
 ) -> str:
+    failure = _filing_period_failure("extract_revenue_exposure", period)
+    if failure:
+        return failure
     geo = _safe_json_loads(await extract_geographic_revenue(ticker=ticker, region=exposure_query, filing_type=filing_type, period=period, detailLevel=detailLevel))
     found = geo.get("value") is not None
     status = "FOUND_REVENUE_EXPOSURE" if found else _as_status(geo)
@@ -10663,10 +10725,13 @@ async def _warm_sec_submissions(ticker: str) -> None:
 async def extract_china_exposure(
     ticker: str,
     filing_type: str = "10-K",
-    period: str = "latest",
+    period: _FilingPeriodParam = "latest",
     accession_number: str | None = None,
     detailLevel: str = "compact",
 ) -> str:
+    failure = _filing_period_failure("extract_china_exposure", period)
+    if failure:
+        return failure
     risk_terms = ["China", "tariff", "export control"]
     # Warm the shared submissions cache once, then fetch the three
     # independent filing reads together.
@@ -10808,9 +10873,12 @@ async def extract_exposure(
     ticker: str,
     topic: str,
     filing_type: str = "10-K",
-    period: str = "latest",
+    period: _FilingPeriodParam = "latest",
     include_risk_factors: bool = True,
 ) -> str:
+    failure = _filing_period_failure("extract_exposure", period)
+    if failure:
+        return failure
     err = _validate_ticker(ticker)
     if err:
         return _mcp_failure("extract_exposure", ErrorCode.INPUT_VALIDATION_ERROR, err)
@@ -11052,12 +11120,15 @@ async def query_sec_filing_index(
         "segment_revenue",
     ],
     filing_type: str = "10-K",
-    period: str = "latest",
+    period: _FilingPeriodParam = "latest",
     accession_number: str | None = None,
     params: dict | None = None,
     return_evidence: bool = True,
     detailLevel: str = "compact",
 ) -> str:
+    failure = _filing_period_failure("query_sec_filing_index", period)
+    if failure:
+        return failure
     err = _validate_ticker(ticker)
     if err:
         return _mcp_failure("query_sec_filing_index", ErrorCode.INPUT_VALIDATION_ERROR, err)

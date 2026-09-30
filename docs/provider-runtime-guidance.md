@@ -1616,8 +1616,9 @@ Vantage and IBKR produced these fixes.
   `"FY2025"` or `"2025"`. Any other value is an `INPUT_VALIDATION_ERROR` for
   `extract_sec_filing_fact`, `extract_geographic_revenue`,
   `extract_segment_revenue`, `extract_total_revenue`,
-  `extract_revenue_exposure` and `extract_china_exposure`, grouped or
-  expanded.
+  `extract_revenue_exposure`, `extract_china_exposure`, `extract_exposure`
+  and `query_sec_filing_index`, grouped or expanded, checked before any
+  internal call so both runtimes fail the same way.
 - **Selection.** A fiscal year selects the annual period the issuer calls
   that year. That is the `fy` (with `fp` FY) of the filing that first
   reported the period, when it is the period's end year or the year before.
@@ -1635,6 +1636,9 @@ Vantage and IBKR produced these fixes.
     years found.
   - Both come back as the `SEC_FACT_NOT_AVAILABLE` payload with the latest
     filing of the form as evidence.
+  - Geographic revenue with a named year and no tagged rows refuses the same
+    way instead of reading the latest filing's table, which may be another
+    year.
 - **Quarters** are not named by `period`. Use `"latest"` with `10-Q`, an
   `accession_number`, or `reconcile_metric_sources` (`"Q3 2025"`, `"latest_quarter"`).
 

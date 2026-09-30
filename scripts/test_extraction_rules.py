@@ -137,6 +137,71 @@ CASH_CONCEPTS = [{"concept": "CashAndCashEquivalentsAtCarryingValue", "facts": [
     {"form": "10-Q", "accn": "0001193125-26-342550", "filed": "2026-08-10", "end": "2026-06-30", "val": 2288253000},
 ]}]
 
+
+
+def _row(start, end, val, filed, fy, fp="FY", form="10-K"):
+    return {"start": start, "end": end, "val": val, "accn": f"0000000001-{filed[2:4]}-{filed[5:7]}{filed[8:10]}", "fy": fy, "fp": fp, "form": form, "filed": filed}
+
+
+# Named fiscal years (2.5.16). BE's 10-K reports each year again as a comparative in the next filing, carrying THAT
+# filing's fy: the 2016 revenue arrives with fy 2018 and the 2016 period must still be FY2016.
+BE_YEARS = [
+    _row("2016-01-01", "2016-12-31", 208540000, "2017-03-01", 2016),
+    _row("2018-01-01", "2018-12-31", 785000000, "2019-03-01", 2018),
+    _row("2016-01-01", "2016-12-31", 208540000, "2019-03-01", 2018),
+    _row("2017-01-01", "2017-12-31", 376000000, "2018-03-01", 2017),
+    _row("2017-01-01", "2017-12-31", 376000000, "2019-03-01", 2018),
+    _row("2024-01-01", "2024-12-31", 1330000000, "2025-02-27", 2024),
+    _row("2024-01-01", "2024-12-31", 1330000000, "2026-02-26", 2025),
+    _row("2025-01-01", "2025-12-31", 2001614000, "2026-02-26", 2025),
+    _row("2025-01-01", "2025-12-31", 2001614000, "2026-08-14", 2026, "Q2", "10-Q"),
+]
+# DG: a 52/53-week year ending 2026-01-30 is its fiscal 2025 (the filing's fy), not 2026.
+DG_YEAR = [_row("2025-02-01", "2026-01-30", 41000000000, "2026-03-20", 2025), _row("2024-02-03", "2025-01-31", 40600000000, "2025-03-20", 2024)]
+# A year ending 2026-01-02 (end less 7 days is 2025-12-26) is 2025 when the row states no year.
+JAN_2_YEAR = [{"start": "2025-01-04", "end": "2026-01-02", "val": 5, "filed": "2026-02-10", "form": "10-K"}]
+FY_EDGE_ROWS = [
+    _row("2025-01-01", "2025-12-31", 1, "2026-02-10", "2025"),
+    _row("2024-01-01", "2024-12-31", 2, "2025-02-10", "2027"),
+    _row("2023-01-01", "2023-12-31", 3, "2024-02-10", None),
+    _row("2022-01-01", "2022-12-31", 4, "2023-02-10", "junk"),
+    {"start": "2021-01-01", "end": None, "val": 5, "filed": "2022-02-10", "fy": 2021, "fp": "FY"},
+    {"start": "2020-01-01", "val": 6, "filed": "2021-02-10", "fy": 2020, "fp": "FY"},
+    _row("2019-01-01", "not-a-date", 7, "2020-02-10", 2019),
+    _row("2018-01-01", "2018-12-31", 8, "2019-02-10", 2018, "fy"),
+]
+Q4_ROW = [_row("2025-10-01", "2025-12-31", 9, "2026-02-10", 2026, "Q4", "10-K")]
+FILED_TIES = [
+    _row("2025-01-01", "2025-12-31", 10, "2026-02-10", 2025),
+    _row("2025-01-01", "2025-12-31", 11, "2026-02-10", 2025),
+    _row("2024-01-01", "2024-12-31", 12, "2026-02-10", 2025),
+]
+FILING_PERIODS = [None, "", "  ", "latest", "LATEST", " Latest ", "FY2025", "fy2025", "fy 2025", "FY 2025", "FY  2025", "2025", " 2025 ",
+                  "FY25", "25", "20255", "FY-2025", "2025Q1", "FY2025.0", "junk", "next", "FY0999", "0000"]
+FY_CASES = [
+    {"name": "be2025", "rows": BE_YEARS, "year": 2025},
+    {"name": "be2016", "rows": BE_YEARS, "year": 2016},
+    {"name": "be2018", "rows": BE_YEARS, "year": 2018},
+    {"name": "be2026", "rows": BE_YEARS, "year": 2026},
+    {"name": "be2030", "rows": BE_YEARS, "year": 2030},
+    {"name": "dg2025", "rows": DG_YEAR, "year": 2025},
+    {"name": "dg2026", "rows": DG_YEAR, "year": 2026},
+    {"name": "dg2024", "rows": DG_YEAR, "year": 2024},
+    {"name": "jan2_2025", "rows": JAN_2_YEAR, "year": 2025},
+    {"name": "jan2_2026", "rows": JAN_2_YEAR, "year": 2026},
+    {"name": "q4_2025", "rows": Q4_ROW, "year": 2025},
+    {"name": "q4_2026", "rows": Q4_ROW, "year": 2026},
+    {"name": "edge2025", "rows": FY_EDGE_ROWS, "year": 2025},
+    {"name": "edge2024", "rows": FY_EDGE_ROWS, "year": 2024},
+    {"name": "edge2023", "rows": FY_EDGE_ROWS, "year": 2023},
+    {"name": "edge2022", "rows": FY_EDGE_ROWS, "year": 2022},
+    {"name": "edge2018", "rows": FY_EDGE_ROWS, "year": 2018},
+    {"name": "edge2027", "rows": FY_EDGE_ROWS, "year": 2027},
+    {"name": "ties2025", "rows": FILED_TIES, "year": 2025},
+    {"name": "ties2024", "rows": FILED_TIES, "year": 2024},
+    {"name": "empty", "rows": [], "year": 2025},
+]
+
 _HARNESS = r"""
 import fs from "node:fs";
 const [rulesUrl, factsUrl, dataPath] = process.argv.slice(-3);
@@ -174,6 +239,10 @@ const out = {
   filingRevenue: f.filingFactInAccession(d.filingConcepts, "0001193125-26-342550"),
   filingCash: f.filingFactInAccession(d.cashConcepts, "0001193125-26-342550"),
   filingMissing: f.filingFactInAccession(d.filingConcepts, "0001193125-26-999999"),
+  periodHelp: f.FILING_PERIOD_HELP,
+  periods: d.filingPeriods.map((p) => f.parseFilingPeriod(p)),
+  periodsDefault: f.parseFilingPeriod(undefined),
+  fiscalYears: Object.fromEntries(d.fyCases.map((c) => [c.name, f.selectFiscalYearRows(c.rows, c.year)])),
 };
 console.log(JSON.stringify(out));
 """
@@ -193,6 +262,7 @@ def _data() -> dict:
         "filingConcepts": FILING_CONCEPTS, "cashConcepts": CASH_CONCEPTS, "beTie": BE_TIE_CONCEPTS, "malformed": MALFORMED_CONCEPTS,
         "cohrOutlook": COHR_OUTLOOK, "mixedBasis": MIXED_BASIS, "mrvlOutlook": MRVL_OUTLOOK, "vrtOutlook": VRT_OUTLOOK,
         "nvdaOutlook": NVDA_OUTLOOK, "liteOutlook": LITE_OUTLOOK, "resultsTable": RESULTS_TABLE,
+        "filingPeriods": FILING_PERIODS, "fyCases": FY_CASES,
     }
 
 
@@ -247,6 +317,10 @@ def _python() -> dict:
         "filingRevenue": sf.filing_fact_in_accession(d["filingConcepts"], "0001193125-26-342550"),
         "filingCash": sf.filing_fact_in_accession(d["cashConcepts"], "0001193125-26-342550"),
         "filingMissing": sf.filing_fact_in_accession(d["filingConcepts"], "0001193125-26-999999"),
+        "periodHelp": sf.FILING_PERIOD_HELP,
+        "periods": [sf.parse_filing_period(p) for p in d["filingPeriods"]],
+        "periodsDefault": sf.parse_filing_period(None),
+        "fiscalYears": {c["name"]: sf.select_fiscal_year_rows(c["rows"], c["year"]) for c in d["fyCases"]},
     }
 
 
@@ -366,6 +440,72 @@ class TestRevenueTieAndMalformedFacts(unittest.TestCase):
         self.assertIsNone(self.out["malformedAlone"])
         self.assertEqual(self.out["malformedFiling"]["concept"], "RevenueFromContractWithCustomerExcludingAssessedTax")
         self.assertEqual(self.out["malformedFiling"]["fact"]["val"], 2001614000)
+
+
+class TestNamedFiscalYear(unittest.TestCase):
+    """2.5.16: period is "latest" or a fiscal year; a year selects the annual period the issuer calls that year."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.out = _python()
+        cls.years = cls.out["fiscalYears"]
+
+    def _vals(self, name: str) -> list:
+        return [f["val"] for f in self.years[name]["rows"]]
+
+    def test_period_parsing(self) -> None:
+        latest, year = {"kind": "latest"}, lambda y: {"kind": "fiscalYear", "year": y}
+        got = dict(zip(map(repr, FILING_PERIODS), self.out["periods"]))
+        self.assertEqual(got, {
+            "None": latest, "''": latest, "'  '": latest, "'latest'": latest, "'LATEST'": latest, "' Latest '": latest,
+            "'FY2025'": year(2025), "'fy2025'": year(2025), "'fy 2025'": year(2025), "'FY 2025'": year(2025), "'FY  2025'": None,
+            "'2025'": year(2025), "' 2025 '": year(2025), "'FY25'": None, "'25'": None, "'20255'": None, "'FY-2025'": None,
+            "'2025Q1'": None, "'FY2025.0'": None, "'junk'": None, "'next'": None, "'FY0999'": year(999), "'0000'": year(0),
+        })
+        self.assertEqual(self.out["periodsDefault"], latest)
+        self.assertEqual(self.out["periodHelp"], 'period must be "latest" or a fiscal year ("FY2025" or "2025").')
+
+    def test_a_comparative_carrying_a_later_fy_stays_in_its_own_year(self) -> None:
+        # BE: the 2016 revenue arrives again in the FY2018 10-K with fy 2018; "FY2025" once returned it labelled FY2018.
+        rows = self.years["be2025"]["rows"]
+        self.assertEqual({f["end"] for f in rows}, {"2025-12-31"})
+        self.assertEqual([f["filed"] for f in rows], ["2026-08-14", "2026-02-26"])
+        self.assertEqual({f["end"] for f in self.years["be2016"]["rows"]}, {"2016-12-31"})
+        self.assertEqual([f["filed"] for f in self.years["be2016"]["rows"]], ["2019-03-01", "2017-03-01"])
+        self.assertEqual({f["end"] for f in self.years["be2018"]["rows"]}, {"2018-12-31"})
+        self.assertEqual({f["end"] for f in self.years["be2025"]["rows"]}, {"2025-12-31"})
+
+    def test_a_miss_lists_the_fiscal_years_found(self) -> None:
+        for name in ("be2026", "be2030"):
+            self.assertEqual(self.years[name], {"rows": [], "fiscalYears": [2016, 2017, 2018, 2024, 2025]}, name)
+        self.assertEqual(self.years["empty"], {"rows": [], "fiscalYears": []})
+
+    def test_a_52_53_week_year_belongs_to_the_year_the_issuer_states(self) -> None:
+        self.assertEqual(self._vals("dg2025"), [41000000000])
+        self.assertEqual(self._vals("dg2024"), [40600000000])
+        self.assertEqual(self.years["dg2026"], {"rows": [], "fiscalYears": [2024, 2025]})
+
+    def test_a_year_ending_in_the_first_week_of_january_belongs_to_the_year_before(self) -> None:
+        self.assertEqual(self._vals("jan2_2025"), [5])
+        self.assertEqual(self.years["jan2_2026"], {"rows": [], "fiscalYears": [2025]})
+
+    def test_a_fourth_quarter_row_uses_the_year_its_period_ends_in(self) -> None:
+        self.assertEqual(self._vals("q4_2025"), [9])
+        self.assertEqual(self.years["q4_2026"], {"rows": [], "fiscalYears": [2025]})
+
+    def test_fy_edge_cases(self) -> None:
+        # fy as a numeric string counts; a year more than one away from the period end, a missing or non-numeric fy,
+        # a fp other than FY, a row without an end string or with an unparseable end are decided by the period end.
+        self.assertEqual(self._vals("edge2025"), [1])
+        self.assertEqual(self._vals("edge2024"), [2])
+        self.assertEqual(self._vals("edge2023"), [3])
+        self.assertEqual(self._vals("edge2022"), [4])
+        self.assertEqual(self._vals("edge2018"), [8])
+        self.assertEqual(self.years["edge2027"], {"rows": [], "fiscalYears": [2018, 2022, 2023, 2024, 2025]})
+
+    def test_ties_keep_the_order_the_rows_came_in(self) -> None:
+        self.assertEqual(self._vals("ties2025"), [10, 11])
+        self.assertEqual(self._vals("ties2024"), [12])
 
 
 class TestFilingSnapshot(unittest.TestCase):

@@ -12,6 +12,9 @@ output from both.
 
 from __future__ import annotations
 
+import datetime
+import re
+
 REVENUE_CONCEPTS = [
     "RevenueFromContractWithCustomerExcludingAssessedTax",
     "RevenueFromContractWithCustomerIncludingAssessedTax",
@@ -102,3 +105,101 @@ def filing_fact_in_accession(candidates: list[dict], accession: str) -> dict | N
         if best is not None:
             return {"concept": candidate["concept"], "fact": best}
     return None
+
+
+# ── Named fiscal-year periods (2.5.16) ───────────────────────────────────────
+#
+# `period` was honoured only as "latest"; any other string ("FY2025", "2025", a typo) left the rows
+# unselected, so the first fact came back: BE's 2016 revenue labelled FY2018 for "FY2025". A period is now
+# "latest" or the issuer's fiscal year ("FY2025" or "2025"); anything else is refused.
+
+FILING_PERIOD_HELP = 'period must be "latest" or a fiscal year ("FY2025" or "2025").'
+
+_FISCAL_YEAR_PERIOD = re.compile(r"(?:FY\s?)?([0-9]{4})", re.IGNORECASE)
+_ISO_DAY = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})")
+
+
+def parse_filing_period(raw) -> dict | None:
+    """The period a caller named, or None when it is not one this reader resolves."""
+    text = str("latest" if raw is None else raw).strip()
+    if text == "" or text.lower() == "latest":
+        return {"kind": "latest"}
+    m = _FISCAL_YEAR_PERIOD.fullmatch(text)
+    return {"kind": "fiscalYear", "year": int(m.group(1))} if m else None
+
+
+def _period_end_year(end: str) -> int | None:
+    """The year of the period end less a week: a 52/53-week year ending in the first week of January belongs to the year before."""
+    m = _ISO_DAY.match(end[:10])
+    if not m:
+        return None
+    year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    # Date.parse takes any day 1-31 of a valid month and rolls it over (Feb 30 is Mar 2).
+    if year < 1 or not 1 <= month <= 12 or not 1 <= day <= 31:
+        return None
+    try:
+        return (datetime.date(year, month, 1) + datetime.timedelta(days=day - 1 - 7)).year
+    except OverflowError:
+        return None
+
+
+def _js_string(value) -> str:
+    """String(value ?? "") for the scalars SEC facts carry."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _js_number(value) -> float:
+    """Number(value): a number as is, a numeric string parsed, null/"" zero, anything else NaN."""
+    nan = float("nan")
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return value
+    if not isinstance(value, str):
+        return nan
+    text = value.strip()
+    if text == "":
+        return 0
+    try:
+        if re.fullmatch(r"0[xXoObB][0-9a-fA-F]+", text):
+            return int(text, 0)
+        if "_" in text or text.lower().lstrip("+-") in ("nan", "inf", "infinity"):
+            return nan
+        return float(text)
+    except ValueError:
+        return nan
+
+
+def select_fiscal_year_rows(rows: list[dict], year: int) -> dict:
+    """The rows for the annual period the issuer calls fiscal `year`.
+
+    Its fy (fp FY) as the filing that first reported the period states it, within a year of the period end,
+    else the year the period ends in (the rule reconcile_metric_sources uses). The latest filed rows come
+    first (a restated value wins). The fiscal years found are listed for a miss.
+    """
+    groups: dict[str, list[dict]] = {}
+    for f in rows:
+        if not isinstance(f.get("end"), str):
+            continue
+        groups.setdefault(f"{_js_string(f.get('start'))}|{f['end']}", []).append(f)
+    years: set[int] = set()
+    matched: list[dict] = []
+    for group in groups.values():
+        first = min(group, key=lambda f: _js_string(f.get("filed")))
+        end_year = _period_end_year(first["end"])
+        if end_year is None:
+            continue
+        fy = _js_number(first.get("fy"))
+        finite = fy == fy and fy not in (float("inf"), float("-inf"))
+        issuer_year = int(fy) if (_js_string(first.get("fp")).upper() == "FY" and finite and fy in (end_year, end_year - 1)) else end_year
+        years.add(issuer_year)
+        if issuer_year == year:
+            matched.extend(group)
+    matched.sort(key=lambda f: (_js_string(f.get("filed")), _js_string(f.get("end"))), reverse=True)
+    return {"rows": matched, "fiscalYears": sorted(years)}
