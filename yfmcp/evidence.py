@@ -18,7 +18,7 @@ import re
 from decimal import Decimal
 from typing import Any
 
-from yfmcp.fiscal_calendar import fiscal_year_of_period_end
+from yfmcp.fiscal_calendar import company_fiscal_year_end, fiscal_year_of_period_end
 
 EVIDENCE_CUT_SCHEMA = "yfmcp.evidence-cut/1"
 CONSENSUS_OBSERVATION_SCHEMA = "yfmcp.consensus-observation/1"
@@ -411,7 +411,7 @@ def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: d
     """
     policy = dict(policy or DEFAULT_CONSENSUS_POLICY)
     # How the company names its fiscal years, from its annual reports (2.5.13); the period-end rule without it.
-    year_naming = naming or {"offset": 0, "basis": "PERIOD_END_RULE", "periodEnd": None, "statedFiscalYear": None}
+    year_naming = naming or {"offset": 0, "basis": "PERIOD_END_RULE", "periodEnd": None, "statedFiscalYear": None, "calendar": None}
     horizon = max(1, min(5, int(policy["horizonYears"])))
     fy0 = resolve_fy0(inputs, as_of)
     periods = []
@@ -442,6 +442,9 @@ def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: d
             "fiscalYear": (fiscal_year_of_period_end(fy0["fiscalYearEnd"]) + year_naming["offset"] + k
                            if fy0 and fiscal_year_of_period_end(fy0["fiscalYearEnd"]) is not None else None),
             "fiscalYearEnds": fiscal_year_ends,
+            # The company's own year end for that year, from its SEC fiscal calendar; fiscalYearEnds stays as the
+            # providers state it (2.5.16: DG's 2027-01-31 from Yahoo is its Friday 2027-01-29).
+            "companyFiscalYearEnd": company_fiscal_year_end(year_naming.get("calendar"), fiscal_year_ends[0] if fiscal_year_ends else None),
             "metrics": metrics,
         })
     return {

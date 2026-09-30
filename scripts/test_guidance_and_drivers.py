@@ -207,6 +207,26 @@ FOCUS_HTML = ['<ix:nonNumeric name="dei:DocumentFiscalYearFocus" contextRef="c-1
 # 10-Q, a mistag two years off, untagged, no date.
 FILING_LABEL_CASES = [[2025, "2026-01-30"], [2025, "2024-12-28"], [2019, "2026-01-30"], [None, "2026-01-30"], [2025, None], [None, None]]
 
+# 2.5.16: (annual period ends newest first, provider year end). DG, MRVL, FN, LITE with three ends (both rules fit and
+# disagree), LITE settled by a fourth, ANET (month end), a provider month the calendar does not have, one end, a changed calendar.
+CALENDAR_CASES = [
+    [["2026-01-30", "2025-01-31", "2024-02-02"], "2027-01-31"],
+    [["2026-01-31", "2025-02-01", "2024-02-03"], "2027-01-31"],
+    [["2026-06-26", "2025-06-27", "2024-06-28"], "2027-06-30"],
+    [["2026-06-27", "2025-06-28", "2024-06-29"], "2027-06-30"],
+    [["2026-06-27", "2025-06-28", "2024-06-29", "2021-07-03"], "2027-06-30"],
+    [["2025-12-31", "2024-12-31"], "2026-12-31"],
+    [["2026-01-30", "2025-01-31", "2024-02-02"], "2027-06-30"],
+    [["2026-01-30"], "2027-01-31"],
+    [["2026-06-30", "2025-12-31"], "2027-06-30"],
+]
+
+
+def _calendar_cases_py() -> list:
+    return [[fc.fiscal_calendar(ends), fc.settled_fiscal_calendar(ends), fc.company_fiscal_year_end(fc.settled_fiscal_calendar(ends), provider)]
+            for ends, provider in CALENDAR_CASES]
+
+
 FISCAL_DATES = ["2026-01-03", "2026-01-08", "2025-12-27", "2026-05-29", "2027-06-25", None, "bad"]
 FISCAL_QUARTERS = [["2025-11-28", "2026-05-29"], ["2025-08-29", "2026-05-29"], ["2026-05-29", "2026-05-29"], ["2025-04-05", "2026-01-03"],
                    ["2025-01-15", "2026-05-29"], ["2025-10-15", "2026-05-29"]]
@@ -227,6 +247,7 @@ def _python_outputs() -> dict:
         "textDates": [fc.text_date("Sept.", "30", "2026"), fc.text_date("Jan", "2", "2027"), fc.text_date("February", "30", "2027"), fc.text_date("Foo", "1", "2026")],
         "naming": [fc.fiscal_year_naming(DG_FACTS), fc.fiscal_year_naming(MIXED_FACTS), fc.fiscal_year_naming(STATED_FACTS), fc.fiscal_year_naming(None),
                    fc.fiscal_year_naming({"facts": {}})],
+        "calendars": _calendar_cases_py(),
         "focus": [fc.document_fiscal_year_focus(h) for h in FOCUS_HTML],
         "filingLabels": [fc.filing_fiscal_year_label(f, d) for f, d in FILING_LABEL_CASES],
         "dg": gh.guidance_history("dg", DG_RELEASES, DG_FACTS),
@@ -261,6 +282,7 @@ const out = {
   fiscalQuarters: f.fiscalQuarters.map(([a, b]) => fc.fiscalQuarterOf(a, b)),
   textDates: [fc.textDate("Sept.", "30", "2026"), fc.textDate("Jan", "2", "2027"), fc.textDate("February", "30", "2027"), fc.textDate("Foo", "1", "2026")],
   naming: [fc.fiscalYearNaming(f.dgFacts), fc.fiscalYearNaming(f.mixedFacts), fc.fiscalYearNaming(f.statedFacts), fc.fiscalYearNaming(null), fc.fiscalYearNaming({ facts: {} })],
+  calendars: f.calendarCases.map(([ends, provider]) => [fc.fiscalCalendar(ends), fc.settledFiscalCalendar(ends), fc.companyFiscalYearEnd(fc.settledFiscalCalendar(ends), provider)]),
   focus: f.focusHtml.map((h) => fc.documentFiscalYearFocus(h)),
   filingLabels: f.filingLabelCases.map(([focus, d]) => fc.filingFiscalYearLabel(focus, d)),
   dg: gh.guidanceHistory("dg", f.dgReleases, f.dgFacts),
@@ -294,7 +316,7 @@ def _worker_outputs() -> dict:
                                   "nonGaapReleases": NON_GAAP_RELEASES, "statedFacts": STATED_FACTS, "week53Facts": WEEK53_FACTS,
                                   "aehrReleases": AEHR_RELEASES, "fiscalDates": FISCAL_DATES, "fiscalQuarters": FISCAL_QUARTERS,
                                   "dgFacts": DG_FACTS, "mixedFacts": MIXED_FACTS, "dgReleases": DG_RELEASES, "focusHtml": FOCUS_HTML,
-                                  "filingLabelCases": FILING_LABEL_CASES}), encoding="utf-8")
+                                  "filingLabelCases": FILING_LABEL_CASES, "calendarCases": CALENDAR_CASES}), encoding="utf-8")
         harness = Path(tmp) / "harness.mjs"
         harness.write_text(_HARNESS, encoding="utf-8")
         result = subprocess.run([node, str(harness), *bundles, str(fx)], check=True, capture_output=True, text=True, timeout=120)
@@ -429,7 +451,11 @@ class TestGuidanceHistory(unittest.TestCase):
 
     def test_fiscal_year_naming(self) -> None:
         # 2.5.13: DG's stated years sit one below the period-end rule; mixed statements give no offset.
-        self.assertEqual(fc.fiscal_year_naming(DG_FACTS), {"offset": -1, "basis": "SEC_STATED_FISCAL_YEAR", "periodEnd": "2026-01-30", "statedFiscalYear": 2025})
+        # 2.5.16: with the calendar its year ends fit, settled by the third year (2024-02-02 is the Friday nearest
+        # January 31, not the last Friday of January).
+        self.assertEqual(fc.fiscal_year_naming(DG_FACTS), {"offset": -1, "basis": "SEC_STATED_FISCAL_YEAR", "periodEnd": "2026-01-30", "statedFiscalYear": 2025,
+                                                           "calendar": {"patterns": ["WEEKDAY_NEAREST_MONTH_END"], "month": 1, "weekday": "Friday",
+                                                                        "basis": "SEC_ANNUAL_PERIOD_ENDS", "periodEnds": ["2026-01-30", "2025-01-31", "2024-02-02"]}})
         self.assertEqual(fc.fiscal_year_naming(MIXED_FACTS)["basis"], "PERIOD_END_RULE_STATED_YEARS_INCONSISTENT")
         self.assertEqual(fc.fiscal_year_naming(MIXED_FACTS)["offset"], 0)
         self.assertEqual(fc.fiscal_year_naming(None)["basis"], "PERIOD_END_RULE_SEC_NOT_READ")
@@ -440,6 +466,39 @@ class TestGuidanceHistory(unittest.TestCase):
         # "the fiscal year ending January 29, 2027" is DG's fiscal 2026, not 2027.
         g = gh.guidance_history("dg", DG_RELEASES, DG_FACTS)["guidance"][0]["targetPeriod"]
         self.assertEqual((g["label"], g["fiscalYear"], g["basis"], g["namingBasis"]), ("FY2026", 2026, "TEXT_PERIOD_END", "SEC_STATED_FISCAL_YEAR"))
+
+    def test_fiscal_calendar(self) -> None:
+        # 2.5.16: the company's year end from its SEC annual period ends, projected only when the rules that fit agree.
+        def year_end(ends: list, provider: str | None):
+            return fc.company_fiscal_year_end(fc.settled_fiscal_calendar(ends), provider)
+
+        dg = fc.fiscal_calendar(["2026-01-30", "2025-01-31", "2024-02-02"])
+        self.assertEqual(dg, {"patterns": ["WEEKDAY_NEAREST_MONTH_END"], "month": 1, "weekday": "Friday",
+                              "basis": "SEC_ANNUAL_PERIOD_ENDS", "periodEnds": ["2026-01-30", "2025-01-31", "2024-02-02"]})
+        self.assertEqual(fc.company_fiscal_year_end(dg, "2027-01-31"), "2027-01-29")
+        self.assertEqual(year_end(["2026-01-31", "2025-02-01", "2024-02-03"], "2027-01-31"), "2027-01-30")
+        fn = fc.fiscal_calendar(["2026-06-26", "2025-06-27", "2024-06-28"])
+        self.assertEqual(fn["patterns"], ["LAST_WEEKDAY_OF_MONTH"])
+        self.assertEqual(fc.company_fiscal_year_end(fn, "2027-06-30"), "2027-06-25")
+        # LITE: three ends fit two rules that disagree for 2027, so no date; a fourth end settles it.
+        lite = ["2026-06-27", "2025-06-28", "2024-06-29"]
+        self.assertEqual(fc.fiscal_calendar(lite)["patterns"], ["WEEKDAY_NEAREST_MONTH_END", "LAST_WEEKDAY_OF_MONTH"])
+        self.assertIsNone(year_end(lite, "2027-06-30"))
+        settled = fc.settled_fiscal_calendar([*lite, "2021-07-03"])
+        self.assertEqual(settled["patterns"], ["WEEKDAY_NEAREST_MONTH_END"])
+        self.assertEqual(fc.company_fiscal_year_end(settled, "2027-06-30"), "2027-07-03")
+        anet = fc.fiscal_calendar(["2025-12-31", "2024-12-31"])
+        self.assertEqual((anet["patterns"], anet["weekday"]), (["MONTH_END"], None))
+        self.assertEqual(fc.company_fiscal_year_end(anet, "2026-12-31"), "2026-12-31")
+        # No date for another month, a single end, a changed calendar, or no calendar / provider end.
+        self.assertIsNone(fc.company_fiscal_year_end(dg, "2027-06-30"))
+        self.assertIsNone(fc.fiscal_calendar(["2026-01-30"]))
+        self.assertIsNone(fc.fiscal_calendar(["2026-06-30", "2025-12-31"]))
+        self.assertIsNone(fc.company_fiscal_year_end(None, "2027-01-31"))
+        self.assertIsNone(fc.company_fiscal_year_end(dg, None))
+        # Naming carries the calendar; not read or no stated year gives none.
+        self.assertIsNone(fc.fiscal_year_naming(None)["calendar"])
+        self.assertIsNone(fc.fiscal_year_naming({"facts": {}})["calendar"])
 
     def test_bullets_and_half_years(self) -> None:
         h = gh.guidance_history("asts", BULLET_RELEASES, COMPANYFACTS)

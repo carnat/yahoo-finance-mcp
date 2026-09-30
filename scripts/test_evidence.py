@@ -98,6 +98,11 @@ FILINGS = [
 STALE_FILINGS = [{"form": "10-K", "filingDate": "2025-03-01", "reportDate": "2024-12-31", "items": "", "isInlineXBRL": False}]
 # Foreign private issuers (2.5.15): one annual report a year and interim results on 6-K; stale only when the next
 # 20-F is overdue. AS_OF_LATER is 273 days after the 2025-12-31 period end.
+# 2.5.16: DG as Yahoo states its year (a month end) and the naming with the calendar its SEC year ends fit.
+DG_TREND = [{"period": "0y", "endDate": "2027-01-31", "earningsEstimate": {"avg": 6.0, "numberOfAnalysts": 20}, "revenueEstimate": {}}]
+DG_NAMING = {"offset": -1, "basis": "SEC_STATED_FISCAL_YEAR", "periodEnd": "2026-01-30", "statedFiscalYear": 2025,
+             "calendar": {"patterns": ["WEEKDAY_NEAREST_MONTH_END"], "month": 1, "weekday": "Friday", "basis": "SEC_ANNUAL_PERIOD_ENDS",
+                          "periodEnds": ["2026-01-30", "2025-01-31", "2024-02-02"]}}
 AS_OF_LATER = "2026-09-30T08:00:00.000Z"
 FPI_FILINGS = [
     {"form": "20-F", "filingDate": "2026-04-30", "reportDate": "2025-12-31", "items": "", "isInlineXBRL": True},
@@ -182,6 +187,8 @@ def _python_outputs() -> dict:
         "curveDerived": ev.build_consensus_curve("sap", [derived], AS_OF),
         "curveConflict": ev.build_consensus_curve("asts", [yahoo, conflict], AS_OF),
         "curveAvOnly": ev.build_consensus_curve("asts", [av], AS_OF),
+        "curveDgCalendar": ev.build_consensus_curve("dg", [ev.yahoo_consensus_input(DG_TREND, retrieved_at=AS_OF, financial_currency="USD")], AS_OF, None, DG_NAMING),
+        "curveDgNoNaming": ev.build_consensus_curve("dg", [ev.yahoo_consensus_input(DG_TREND, retrieved_at=AS_OF, financial_currency="USD")], AS_OF),
         "curveNone": ev.build_consensus_curve("none", [ev.yahoo_consensus_input([], retrieved_at=AS_OF, status="PROVIDER_ERROR", message="down")], AS_OF),
         "revisions": ev.build_eps_revisions("asts", [yahoo, av], AS_OF),
         "quality": quality,
@@ -241,6 +248,8 @@ const out = {
   curveDerived: m.buildConsensusCurve("sap", [derived], AS_OF),
   curveConflict: m.buildConsensusCurve("asts", [yahoo, conflict], AS_OF),
   curveAvOnly: m.buildConsensusCurve("asts", [av], AS_OF),
+  curveDgCalendar: m.buildConsensusCurve("dg", [m.yahooConsensusInput(f.dgTrend, { retrievedAt: AS_OF, financialCurrency: "USD" })], AS_OF, undefined, f.dgNaming),
+  curveDgNoNaming: m.buildConsensusCurve("dg", [m.yahooConsensusInput(f.dgTrend, { retrievedAt: AS_OF, financialCurrency: "USD" })], AS_OF),
   curveNone: m.buildConsensusCurve("none", [m.yahooConsensusInput([], { retrievedAt: AS_OF, status: "PROVIDER_ERROR", message: "down" })], AS_OF),
   revisions: m.buildEpsRevisions("asts", [yahoo, av], AS_OF),
   quality,
@@ -277,6 +286,7 @@ def _worker_outputs() -> dict:
         "derivedTrend": DERIVED_TREND, "filings": FILINGS, "staleFilings": STALE_FILINGS, "componentTexts": COMPONENT_TEXTS,
         "asOfLater": AS_OF_LATER, "fpiFilings": FPI_FILINGS, "fpiStaleFilings": FPI_STALE_FILINGS, "fpi40faFilings": FPI_40FA_FILINGS,
         "quoteFailed": QUOTE_FAILED, "quoteNoData": QUOTE_NO_DATA,
+        "dgTrend": DG_TREND, "dgNaming": DG_NAMING,
         # JSON cannot carry -0.0 distinctly from 0 in every parser; both runtimes format it as 0.
         "canonical": CANONICAL_CASES,
         "boundaryCases": BOUNDARY_CASES,
@@ -373,6 +383,18 @@ class TestConsensusCurve(unittest.TestCase):
         self.assertEqual([p["fiscalYear"] for p in curve["periods"][:2]], [2026, 2027])
         self.assertEqual(curve["fiscalYearNaming"], naming)
         self.assertEqual(ev.build_consensus_curve("dg", [inp], AS_OF)["fiscalYearNaming"]["basis"], "PERIOD_END_RULE")
+
+    def test_company_fiscal_year_end(self) -> None:
+        # 2.5.16: Yahoo dates DG's year 2027-01-31; its own calendar (Friday nearest January 31) ends it 2027-01-29.
+        curve = self.out["curveDgCalendar"]
+        fy0 = curve["periods"][0]
+        self.assertEqual((fy0["fiscalYearEnds"], fy0["companyFiscalYearEnd"]), (["2027-01-31"], "2027-01-29"))
+        self.assertEqual(list(fy0)[:4], ["label", "fiscalYear", "fiscalYearEnds", "companyFiscalYearEnd"])
+        self.assertIsNone(self.out["curveDgNoNaming"]["periods"][0]["companyFiscalYearEnd"])
+        self.assertIsNone(self.out["curveDgNoNaming"]["fiscalYearNaming"]["calendar"])
+        # A naming passed without a calendar behaves as none.
+        legacy = {"offset": -1, "basis": "SEC_STATED_FISCAL_YEAR", "periodEnd": "2026-01-30", "statedFiscalYear": 2025}
+        self.assertIsNone(ev.build_consensus_curve("dg", [ev.yahoo_consensus_input(DG_TREND, retrieved_at=AS_OF, financial_currency="USD")], AS_OF, None, legacy)["periods"][0]["companyFiscalYearEnd"])
 
     def test_currency_and_period_identity_conflicts(self) -> None:
         adr = self.out["curveAdr"]

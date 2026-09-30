@@ -86,7 +86,7 @@ export function fiscalQuarterOf(end: string, yearEnd: string): number | null {
 const NAMING_CONCEPTS = ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet", "NetIncomeLoss", "EarningsPerShareDiluted"];
 const NAMING_REPORTS = 3;
 
-export type FiscalYearNaming = { offset: number; basis: string; periodEnd: string | null; statedFiscalYear: number | null };
+export type FiscalYearNaming = { offset: number; basis: string; periodEnd: string | null; statedFiscalYear: number | null; calendar: FiscalCalendar | null };
 
 /** Each 10-K's own year: its latest annual period end and the fiscal year it states (companyfacts fy), newest first. */
 export function statedFiscalYears(companyfacts: unknown): { periodEnd: string; fiscalYear: number }[] {
@@ -111,14 +111,94 @@ export function statedFiscalYears(companyfacts: unknown): { periodEnd: string; f
 
 /** The company's fiscal-year naming against the period-end rule, from its latest annual reports; offset 0 when they are not read or disagree. */
 export function fiscalYearNaming(companyfacts: unknown): FiscalYearNaming {
-  if (companyfacts == null) return { offset: 0, basis: "PERIOD_END_RULE_SEC_NOT_READ", periodEnd: null, statedFiscalYear: null };
+  if (companyfacts == null) return { offset: 0, basis: "PERIOD_END_RULE_SEC_NOT_READ", periodEnd: null, statedFiscalYear: null, calendar: null };
   const recent = statedFiscalYears(companyfacts).slice(0, NAMING_REPORTS);
-  if (recent.length === 0) return { offset: 0, basis: "PERIOD_END_RULE_NO_STATED_YEAR", periodEnd: null, statedFiscalYear: null };
+  if (recent.length === 0) return { offset: 0, basis: "PERIOD_END_RULE_NO_STATED_YEAR", periodEnd: null, statedFiscalYear: null, calendar: null };
+  const calendar = settledFiscalCalendar(statedFiscalYears(companyfacts).map((r) => r.periodEnd));
   const offsets = recent.map((r) => r.fiscalYear - (fiscalYearOfPeriodEnd(r.periodEnd) ?? r.fiscalYear));
   if (offsets.some((o) => o !== offsets[0]) || Math.abs(offsets[0]) > 1) {
-    return { offset: 0, basis: "PERIOD_END_RULE_STATED_YEARS_INCONSISTENT", periodEnd: recent[0].periodEnd, statedFiscalYear: recent[0].fiscalYear };
+    return { offset: 0, basis: "PERIOD_END_RULE_STATED_YEARS_INCONSISTENT", periodEnd: recent[0].periodEnd, statedFiscalYear: recent[0].fiscalYear, calendar };
   }
-  return { offset: offsets[0], basis: "SEC_STATED_FISCAL_YEAR", periodEnd: recent[0].periodEnd, statedFiscalYear: recent[0].fiscalYear };
+  return { offset: offsets[0], basis: "SEC_STATED_FISCAL_YEAR", periodEnd: recent[0].periodEnd, statedFiscalYear: recent[0].fiscalYear, calendar };
+}
+
+// ── Fiscal calendar rule (2.5.16) ───────────────────────────────────────────
+//
+// A provider states a fiscal year's end as a nominal month end (Yahoo: DG's year ends 2027-01-31); the
+// company's own year ends on the Friday nearest January 31, 2027-01-29. The rule is read from the company's
+// recent annual period ends and kept only if it reproduces every one of them: the month end, the weekday
+// nearest the month end, or the last such weekday of the month. When two rules fit the past but part ways
+// for the year asked about, no date is projected.
+
+const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+export type FiscalCalendarPattern = "MONTH_END" | "WEEKDAY_NEAREST_MONTH_END" | "LAST_WEEKDAY_OF_MONTH";
+export type FiscalCalendar = { patterns: FiscalCalendarPattern[]; month: number; weekday: string | null; basis: string; periodEnds: string[] };
+
+function lastDayOfMonth(year: number, month: number): number {
+  return Math.floor(Date.UTC(year, month, 1) / 86_400_000) - 1;
+}
+
+function weekdayOfDay(day: number): number {
+  return new Date(day * 86_400_000).getUTCDay();
+}
+
+/** The year end a pattern gives for a nominal month and year; null when the pattern needs a weekday and has none. */
+function yearEndFor(pattern: FiscalCalendarPattern, year: number, month: number, weekday: number | null): string | null {
+  const last = lastDayOfMonth(year, month);
+  if (pattern === "MONTH_END") return isoOfDay(last);
+  if (weekday == null) return null;
+  if (pattern === "LAST_WEEKDAY_OF_MONTH") return isoOfDay(last - ((weekdayOfDay(last) - weekday + 7) % 7));
+  for (let d = -3; d <= 3; d++) if (weekdayOfDay(last + d) === weekday) return isoOfDay(last + d);
+  return null;
+}
+
+/** The company's fiscal calendar from its annual period ends (newest first; two or more), or null when no rule fits them all. */
+export function fiscalCalendar(periodEnds: string[]): FiscalCalendar | null {
+  const ends = periodEnds.filter((e) => nominalPeriodEnd(e) != null);
+  if (ends.length < 2) return null;
+  const nominal = ends.map((e) => nominalPeriodEnd(e) as string);
+  const month = Number(nominal[0].slice(5, 7));
+  if (nominal.some((n) => Number(n.slice(5, 7)) !== month)) return null;
+  const weekday = weekdayOfDay(dayNumber(ends[0]));
+  const fits = (pattern: FiscalCalendarPattern) => ends.every((e, i) => yearEndFor(pattern, Number(nominal[i].slice(0, 4)), month, weekday) === e.slice(0, 10));
+  const patterns = fits("MONTH_END")
+    ? ["MONTH_END" as const]
+    : (["WEEKDAY_NEAREST_MONTH_END", "LAST_WEEKDAY_OF_MONTH"] as const).filter(fits);
+  if (patterns.length === 0) return null;
+  return {
+    patterns: [...patterns],
+    month,
+    weekday: patterns[0] === "MONTH_END" ? null : WEEKDAYS[weekday],
+    basis: "SEC_ANNUAL_PERIOD_ENDS",
+    periodEnds: ends.map((e) => e.slice(0, 10)),
+  };
+}
+
+/**
+ * The calendar read from as few recent year ends as settle it: older ends are added one at a time while a
+ * rule still fits them all, until one rule is left (MU's Thursday nearest August 31 and its last Thursday of
+ * August agree for 2023-2025; 2020's September 3 settles it). An end no rule fits (a changed calendar) stops
+ * the look-back.
+ */
+export function settledFiscalCalendar(periodEnds: string[]): FiscalCalendar | null {
+  let settled: FiscalCalendar | null = null;
+  for (let n = 2; n <= periodEnds.length; n++) {
+    const cal = fiscalCalendar(periodEnds.slice(0, n));
+    if (!cal) break;
+    settled = cal;
+    if (cal.patterns.length === 1) break;
+  }
+  return settled;
+}
+
+/** The company's year end for the fiscal year a provider dates `providerEnd`; null without a rule, in another month, or when the fitting rules disagree. */
+export function companyFiscalYearEnd(calendar: FiscalCalendar | null, providerEnd: string | null | undefined): string | null {
+  if (!calendar || !providerEnd) return null;
+  const nominal = nominalPeriodEnd(providerEnd);
+  if (!nominal || Number(nominal.slice(5, 7)) !== calendar.month) return null;
+  const weekday = calendar.weekday == null ? null : WEEKDAYS.indexOf(calendar.weekday);
+  const dates = [...new Set(calendar.patterns.map((p) => yearEndFor(p, Number(nominal.slice(0, 4)), calendar.month, weekday)))];
+  return dates.length === 1 ? dates[0] : null;
 }
 
 /** The fiscal year an inline XBRL filing states for itself (dei:DocumentFiscalYearFocus); null when it is not tagged. */

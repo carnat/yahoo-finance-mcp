@@ -133,14 +133,115 @@ def stated_fiscal_years(companyfacts) -> list[dict]:
 def fiscal_year_naming(companyfacts) -> dict:
     """The company's fiscal-year naming against the period-end rule, from its latest annual reports; offset 0 when they are not read or disagree."""
     if companyfacts is None:
-        return {"offset": 0, "basis": "PERIOD_END_RULE_SEC_NOT_READ", "periodEnd": None, "statedFiscalYear": None}
-    recent = stated_fiscal_years(companyfacts)[:_NAMING_REPORTS]
+        return {"offset": 0, "basis": "PERIOD_END_RULE_SEC_NOT_READ", "periodEnd": None, "statedFiscalYear": None, "calendar": None}
+    stated = stated_fiscal_years(companyfacts)
+    recent = stated[:_NAMING_REPORTS]
     if not recent:
-        return {"offset": 0, "basis": "PERIOD_END_RULE_NO_STATED_YEAR", "periodEnd": None, "statedFiscalYear": None}
+        return {"offset": 0, "basis": "PERIOD_END_RULE_NO_STATED_YEAR", "periodEnd": None, "statedFiscalYear": None, "calendar": None}
+    calendar = settled_fiscal_calendar([r["periodEnd"] for r in stated])
     offsets = [r["fiscalYear"] - (fiscal_year_of_period_end(r["periodEnd"]) or r["fiscalYear"]) for r in recent]
     if any(o != offsets[0] for o in offsets) or abs(offsets[0]) > 1:
-        return {"offset": 0, "basis": "PERIOD_END_RULE_STATED_YEARS_INCONSISTENT", "periodEnd": recent[0]["periodEnd"], "statedFiscalYear": recent[0]["fiscalYear"]}
-    return {"offset": offsets[0], "basis": "SEC_STATED_FISCAL_YEAR", "periodEnd": recent[0]["periodEnd"], "statedFiscalYear": recent[0]["fiscalYear"]}
+        return {"offset": 0, "basis": "PERIOD_END_RULE_STATED_YEARS_INCONSISTENT", "periodEnd": recent[0]["periodEnd"], "statedFiscalYear": recent[0]["fiscalYear"],
+                "calendar": calendar}
+    return {"offset": offsets[0], "basis": "SEC_STATED_FISCAL_YEAR", "periodEnd": recent[0]["periodEnd"], "statedFiscalYear": recent[0]["fiscalYear"], "calendar": calendar}
+
+
+# ── Fiscal calendar rule (2.5.16) ───────────────────────────────────────────
+#
+# A provider states a fiscal year's end as a nominal month end (Yahoo: DG's year ends 2027-01-31); the
+# company's own year ends on the Friday nearest January 31, 2027-01-29. The rule is read from the company's
+# recent annual period ends and kept only if it reproduces every one of them: the month end, the weekday
+# nearest the month end, or the last such weekday of the month. When two rules fit the past but part ways
+# for the year asked about, no date is projected.
+
+_WEEKDAYS = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
+
+
+def _last_day_of_month(year: int, month: int) -> int:
+    """Day number (proleptic ordinal) of the last day of `month` (1-12) in `year`."""
+    first_of_next = _dt.date(year + 1, 1, 1) if month == 12 else _dt.date(year, month + 1, 1)
+    return first_of_next.toordinal() - 1
+
+
+def _weekday_of_day(day: int) -> int:
+    """0 = Sunday .. 6 = Saturday, as JavaScript's getUTCDay."""
+    return day % 7
+
+
+def _iso_of_day(day: int) -> str:
+    return _dt.date.fromordinal(day).isoformat()
+
+
+def _year_end_for(pattern: str, year: int, month: int, weekday: int | None) -> str | None:
+    """The year end a pattern gives for a nominal month and year; None when the pattern needs a weekday and has none."""
+    last = _last_day_of_month(year, month)
+    if pattern == "MONTH_END":
+        return _iso_of_day(last)
+    if weekday is None:
+        return None
+    if pattern == "LAST_WEEKDAY_OF_MONTH":
+        return _iso_of_day(last - ((_weekday_of_day(last) - weekday + 7) % 7))
+    for d in range(-3, 4):
+        if _weekday_of_day(last + d) == weekday:
+            return _iso_of_day(last + d)
+    return None
+
+
+def fiscal_calendar(period_ends: list[str]) -> dict | None:
+    """The company's fiscal calendar from its annual period ends (newest first; two or more), or None when no rule fits them all."""
+    ends = [e for e in period_ends if nominal_period_end(e) is not None]
+    if len(ends) < 2:
+        return None
+    nominal = [nominal_period_end(e) for e in ends]
+    month = int(nominal[0][5:7])
+    if any(int(n[5:7]) != month for n in nominal):
+        return None
+    weekday = _weekday_of_day(_day(ends[0]))
+
+    def fits(pattern: str) -> bool:
+        return all(_year_end_for(pattern, int(nominal[i][:4]), month, weekday) == e[:10] for i, e in enumerate(ends))
+
+    if fits("MONTH_END"):
+        patterns = ["MONTH_END"]
+    else:
+        patterns = [p for p in ("WEEKDAY_NEAREST_MONTH_END", "LAST_WEEKDAY_OF_MONTH") if fits(p)]
+    if not patterns:
+        return None
+    return {
+        "patterns": patterns,
+        "month": month,
+        "weekday": None if patterns[0] == "MONTH_END" else _WEEKDAYS[weekday],
+        "basis": "SEC_ANNUAL_PERIOD_ENDS",
+        "periodEnds": [e[:10] for e in ends],
+    }
+
+
+def settled_fiscal_calendar(period_ends: list[str]) -> dict | None:
+    """The calendar read from as few recent year ends as settle it: older ends are added one at a time while a
+    rule still fits them all, until one rule is left (MU's Thursday nearest August 31 and its last Thursday of
+    August agree for 2023-2025; 2020's September 3 settles it). An end no rule fits (a changed calendar) stops
+    the look-back."""
+    settled = None
+    for n in range(2, len(period_ends) + 1):
+        cal = fiscal_calendar(period_ends[:n])
+        if not cal:
+            break
+        settled = cal
+        if len(cal["patterns"]) == 1:
+            break
+    return settled
+
+
+def company_fiscal_year_end(calendar: dict | None, provider_end: str | None) -> str | None:
+    """The company's year end for the fiscal year a provider dates `provider_end`; None without a rule, in another month, or when the fitting rules disagree."""
+    if not calendar or not provider_end:
+        return None
+    nominal = nominal_period_end(provider_end)
+    if not nominal or int(nominal[5:7]) != calendar["month"]:
+        return None
+    weekday = None if calendar["weekday"] is None else _WEEKDAYS.index(calendar["weekday"])
+    dates = {_year_end_for(p, int(nominal[:4]), calendar["month"], weekday) for p in calendar["patterns"]}
+    return next(iter(dates)) if len(dates) == 1 else None
 
 
 _FY_FOCUS_RE = re.compile(r'name="dei:DocumentFiscalYearFocus"[^>]*>\s*(?:<[^>]+>\s*)*(\d{4})\s*<')
