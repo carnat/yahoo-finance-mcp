@@ -198,7 +198,8 @@ export const DRIVER_CATEGORIES: [string, RegExp][] = [
 ];
 
 // A figure: a dollar amount, a percentage, or a number with a scale or unit; bare years are not figures.
-const FIGURE_RE = /(\$\s?)?\b([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(\.[0-9]+)?(?:\s?(%|percent\b|billion\b|million\b|thousand\b|bn\b|MW\b|GW\b|megawatts?\b|gigawatts?\b|square (?:feet|foot|meters?)\b|[a-z][a-z-]{1,19}[a-z]\b))?/g;
+// "$2.05B" keeps its "B" (2.5.20).
+const FIGURE_RE = /(\$\s?)?\b([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(\.[0-9]+)?(?:\s?(%|percent\b|billion\b|million\b|thousand\b|bn\b|mn\b|[BMK]\b|MW\b|GW\b|megawatts?\b|gigawatts?\b|square (?:feet|foot|meters?)\b|[a-z][a-z-]{1,19}[a-z]\b))?/g;
 const NON_UNIT_WORDS = new Set(["and", "or", "to", "of", "in", "the", "for", "from", "with", "at", "on", "as", "by", "per", "compared", "versus", "vs", "year", "years",
   "quarter", "quarters", "month", "months", "days", "day", "was", "were", "is", "are", "will", "would", "through", "into", "over", "under", "within", "than", "more",
   "less", "higher", "lower", "increase", "increases", "decrease", "decreases", "respectively", "marks", "which", "that", "this", "these", "each", "both", "after",

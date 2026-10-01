@@ -24,6 +24,31 @@ def _strip_html_tags(html_str: str) -> str:
     return _re.sub(r"\s+", " ", text).strip()
 
 
+_COMMENT_RE = _re.compile(r"<!--[\s\S]*?-->")
+_SCRIPT_RE = _re.compile(r"<script\b[^>]*>[\s\S]*?</script[^>]*>", _re.IGNORECASE)
+_STYLE_RE = _re.compile(r"<style\b[^>]*>[\s\S]*?</style[^>]*>", _re.IGNORECASE)
+_HANDLER_ATTR_RE = _re.compile(r"\s+on[a-z]+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", _re.IGNORECASE)
+_BLOCK_CLOSE_RE = _re.compile(r"<(?:br|/p|/div|/li|/tr|/h[1-6]|/section)\b[^>]*>", _re.IGNORECASE)
+_BLOCK_OPEN_RE = _re.compile(r"<(?:p|div|li|tr|h[1-6]|section)\b[^>]*>", _re.IGNORECASE)
+
+
+def _strip_html_blocks(html_str: str) -> str:
+    """Plain text with one line per block element, as the Worker's _stripHtmlTagsIdx reads a release (2.5.20).
+
+    Release readers need the line breaks: a table row or a bullet is its own line, so "Non-GAAP(1)" in an
+    outlook table's header and the "Revenue" row under it are read the same way in both runtimes.
+    """
+    text = _COMMENT_RE.sub(" ", html_str)
+    text = _SCRIPT_RE.sub(" ", text)
+    text = _STYLE_RE.sub(" ", text)
+    text = _HANDLER_ATTR_RE.sub(" ", text)
+    text = _BLOCK_OPEN_RE.sub("\n", _BLOCK_CLOSE_RE.sub("\n", text))
+    text = _re.sub(r"<[^>]+>", " ", _INLINE_TAG_RE.sub("", text))
+    text = _html_module.unescape(_re.sub(r"&nbsp;", " ", text, flags=_re.IGNORECASE))
+    lines = [_re.sub(r"[ \t\xa0]+", " ", line).strip() for line in text.split("\n")]
+    return "\n".join(line for line in lines if line)
+
+
 def _parse_html_table(table_html: str) -> list[list[str]]:
     """Parse an HTML table into a list of rows, each a list of plain-text cell strings."""
     rows: list[list[str]] = []
@@ -55,20 +80,35 @@ def _parse_numeric_cell(text: str) -> float | None:
         return None
 
 
-def _detect_unit_multiplier(table_html: str, context_html: str) -> float:
-    """Detect the monetary unit scale from a table caption/nearby headings.
+# A table's stated scale: "(in thousands)", "$ millions", "thousands of dollars", "($000)", "(000s)" (2.5.20:
+# COHR's "by market ($000):" was read as millions, 1000x too large). Mirrors worker/src/yahoo-finance.ts.
+_UNIT_SCALE_RE = _re.compile(
+    r"\bin\s+(billions|millions|thousands)\b|\$\s*(billions|millions|thousands)\b|\b(billions|millions|thousands)\s+of\s+(?:u\.?s\.?\s+)?dollars\b"
+    r"|\(\s*(?:in\s+)?\$?\s*(000)'?s?\s*\)|\$\s*(000)'?s\b",
+    _re.I | _re.A,
+)
+_UNIT_SCALE_WORD = {"billions": 1e9, "millions": 1e6, "thousands": 1e3, "000": 1e3}
 
-    Returns 1_000_000 (millions) if not found — the most common 10-K scale.
+
+def _stated_unit_scales(html: str) -> list[float]:
+    text = _re.sub(r"<[^>]+>", " ", html)
+    text = _re.sub(r"&nbsp;|&#160;|&#xa0;", " ", text, flags=_re.I)
+    text = _re.sub(r"&#36;|&dollar;", "$", text, flags=_re.I)
+    text = _re.sub(r"[\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+", " ", text)
+    return [_UNIT_SCALE_WORD[next(g for g in m.groups() if g).lower()] for m in _UNIT_SCALE_RE.finditer(text)]
+
+
+def _detect_unit_multiplier(table_html: str, context_html: str) -> float:
+    """The monetary unit multiplier for a table.
+
+    The scale the table itself states, else the statement in its lead-in nearest the table, else millions (the
+    most common 10-K scale).
     """
-    combined = (table_html + context_html).lower()
-    if "in billions" in combined or "$ billions" in combined:
-        return 1_000_000_000.0
-    if "in thousands" in combined or "$ thousands" in combined or "in thousands)" in combined:
-        return 1_000.0
-    if "in millions" in combined or "$ millions" in combined or "in millions)" in combined:
-        return 1_000_000.0
-    # Default assumption for 10-K financials: millions
-    return 1_000_000.0
+    own = _stated_unit_scales(table_html)
+    if own:
+        return own[0]
+    lead = _stated_unit_scales(context_html)
+    return lead[-1] if lead else 1_000_000.0
 
 
 # ---------------------------------------------------------------------------

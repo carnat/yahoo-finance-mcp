@@ -167,7 +167,8 @@ function amounts(sentence: string): Amount {
   if (matches.length === 0) return none;
   const a = matches[0];
   const b = matches[1];
-  const isRange = b != null && RANGE_JOIN_RE.test(sentence.slice(a.end, b.index));
+  // Two amounts are a range only when they run low to high: "committed $1.2 billion and $300 million" is two (2.5.20).
+  const isRange = b != null && RANGE_JOIN_RE.test(sentence.slice(a.end, b.index)) && moneyValue(a.amount, a.unit ?? b.unit) <= moneyValue(b.amount, b.unit ?? a.unit);
   const unit = isRange ? (a.unit ?? b.unit) : a.unit;
   const low = moneyValue(a.amount, unit);
   const high = isRange ? moneyValue(b.amount, b.unit ?? unit) : low;

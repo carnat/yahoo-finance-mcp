@@ -25,9 +25,9 @@ from yfmcp.sec_facts import REVENUE_CONCEPTS
 
 _F = re.I | re.A
 
-_SCALE = {"billion": 1e9, "bn": 1e9, "million": 1e6, "m": 1e6, "thousand": 1e3, "k": 1e3}
-_AMOUNT_RE = re.compile(r"\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(billion|million|thousand|bn|m|k)?\s*", _F)
-_UNIT_RE = re.compile(r"(billion|million|thousand|bn|m|k)\s*$", _F)
+_SCALE = {"billion": 1e9, "bn": 1e9, "b": 1e9, "million": 1e6, "mn": 1e6, "m": 1e6, "thousand": 1e3, "k": 1e3}
+_AMOUNT_RE = re.compile(r"\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(billion|million|thousand|bn|mn|b|m|k)?\s*", _F)
+_UNIT_RE = re.compile(r"(billion|million|thousand|bn|mn|b|m|k)\s*$", _F)
 
 
 def parse_amount(text: str, fallback_unit: str | None = None) -> dict:
@@ -41,7 +41,7 @@ def parse_amount(text: str, fallback_unit: str | None = None) -> dict:
     return {"value": math.floor(base * _SCALE.get(unit, 1) + 0.5) if unit else base, "unit": unit}
 
 
-def _unit_of(text: str) -> str | None:
+def unit_of(text: str) -> str | None:
     m = _UNIT_RE.search(text.strip())
     return m.group(1).lower() if m else None
 
@@ -212,7 +212,7 @@ def guidance_entries(release: dict) -> list[dict]:
         s_start, s_end = sentence_bounds(text, at, len(r["excerpt"]))
         sentence = text[s_start:s_end]
         if metric == "revenue":
-            fallback = _unit_of(r["high"]) or _unit_of(r["low"])
+            fallback = unit_of(r["high"]) or unit_of(r["low"])
             low = parse_amount(r["low"], fallback)["value"]
             high = parse_amount(r["high"], fallback)["value"]
             unit = "USD"

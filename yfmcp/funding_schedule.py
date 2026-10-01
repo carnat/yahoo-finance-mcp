@@ -129,7 +129,9 @@ def _amounts(sentence: str) -> dict:
         return {"low": None, "high": None, "qualifier": None, "amountStatus": "NOT_STATED", "asWritten": None}
     a = matches[0]
     b = matches[1] if len(matches) > 1 else None
-    is_range = b is not None and bool(_RANGE_JOIN_RE.match(sentence[a[1]:b[0]]))
+    # Two amounts are a range only when they run low to high: "committed $1.2 billion and $300 million" is two (2.5.20).
+    is_range = (b is not None and bool(_RANGE_JOIN_RE.match(sentence[a[1]:b[0]]))
+                and _money_value(a[3], a[4] if a[4] is not None else b[4]) <= _money_value(b[3], b[4] if b[4] is not None else a[4]))
     unit = (a[4] if a[4] is not None else b[4]) if is_range else a[4]
     low = _money_value(a[3], unit)
     high = _money_value(b[3], b[4] if b[4] is not None else unit) if is_range else low

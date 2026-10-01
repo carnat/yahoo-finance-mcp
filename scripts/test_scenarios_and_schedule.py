@@ -142,6 +142,8 @@ STATEMENTS = [
                     "We will need to fund significant capital expenditures for the deployment of our constellation. "
                     "We recognized stock-based compensation expense related to equity awards granted in 2026 of $12.3 million. "
                     "We anticipate spending $50 million in Q4 2026 on the new facility. "
+                    # Two amounts, not a range: the second is smaller than the first (2.5.20).
+                    "We have committed $1.2 billion and $300 million to two facility expansions through 2028. "
                     "Restricted stock awarded to directors will vest in full on the one-year anniversary of the grant date. "
                     "We have reached a steady production stage and secured supply for our satellites and facilities funding. "
                     "As of June 30, 2026, the Company has purchase commitments of approximately $775.0 - $795.0 million primarily related to research and development, expected to be paid through 2027.",
@@ -390,7 +392,9 @@ class TestFundingSchedule(unittest.TestCase):
         per_unit = items["We committed to purchase equip"]
         self.assertEqual((per_unit["classification"], per_unit["amountStatus"]), ("UNRESOLVED", "NOT_STATED"))
         self.assertEqual(guided["amountStatus"], "STATED")
-        self.assertEqual(self.out["byClassification"], {"CONTRACTUAL": 8, "COMPANY_DISCLOSED_COMMITTED": 2, "COMPANY_GUIDED": 3, "AWARDED_CONTINGENT": 1, "UNRESOLVED": 2})
+        two_amounts = items["We have committed $1.2 billion"]
+        self.assertEqual((two_amounts["amountLow"], two_amounts["amountHigh"], two_amounts["amountQualifier"]), (1_200_000_000, 1_200_000_000, "stated"))
+        self.assertEqual(self.out["byClassification"], {"CONTRACTUAL": 8, "COMPANY_DISCLOSED_COMMITTED": 3, "COMPANY_GUIDED": 3, "AWARDED_CONTINGENT": 1, "UNRESOLVED": 2})
 
     def test_liquidity_and_boundary(self) -> None:
         self.assertEqual([(l["source"], l["classification"]) for l in self.out["liquiditySources"]], [

@@ -204,6 +204,42 @@ class TestDetectUnitMultiplier(unittest.TestCase):
         self.assertEqual(_detect_unit_multiplier("", "expressed in billions of dollars"), 1_000_000_000.0)
 
 
+class TestStatedUnitScale(unittest.TestCase):
+    """2.5.20: "($000)" and "(000s)" are thousands; the table's own statement, then the nearest lead-in statement, wins."""
+
+    def test_thousand_markers(self):
+        self.assertEqual(_detect_unit_multiplier("", "disaggregated revenue by market ($000):"), 1_000.0)
+        self.assertEqual(_detect_unit_multiplier("<td>(000s)</td>", ""), 1_000.0)
+        self.assertEqual(_detect_unit_multiplier("", "thousands of U.S. dollars"), 1_000.0)
+
+    def test_table_statement_then_nearest_lead(self):
+        self.assertEqual(_detect_unit_multiplier("<td>(in thousands)</td>", "(in millions)"), 1_000.0)
+        self.assertEqual(_detect_unit_multiplier("", "(in millions) ... (in thousands)"), 1_000.0)
+        self.assertEqual(_detect_unit_multiplier("", "tens of thousands of customers"), 1_000_000.0)
+
+
+class TestCohrGeographicTables(unittest.TestCase):
+    """2.5.20 (COHR): the "Revenues" caption row is not the total; a long-lived assets table is not revenue."""
+
+    ROWS = staticmethod(lambda *cells: "<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>")
+
+    def _html(self):
+        r = self.ROWS
+        assets = ("<p>Major customers accounted for 20% of consolidated revenue. Geographic information for long-lived assets by country ($000):</p><table>"
+                  + r("Long-Lived Assets", "June 30, 2026", "2025") + r("China", "968,796", "402,960") + r("Total", "$", "3,432,316", "$", "2,147,530") + "</table>")
+        revenue = ("<p>Geographic information for revenues, by location of the customer's headquarters, were as follows ($000):</p><table>"
+                   + r("Revenues") + r("Year Ended June 30,", "2026", "2025") + r("North America", "$", "4,633,696", "$", "3,564,846")
+                   + r("China", "813,377", "680,110") + r("Rest of World", "1,671,108", "1,565,159") + r("Total", "$", "7,118,181", "$", "5,810,115") + "</table>")
+        return revenue + assets, assets
+
+    def test_revenue_table_in_thousands(self):
+        from yfmcp.parsing.extractors import extract_geo_revenue_from_html
+        both, assets = self._html()
+        geo = extract_geo_revenue_from_html(both, "China")
+        self.assertEqual((geo["pct"], geo["usd"], geo["denominator"], geo["unitScale"]), (0.1143, 813_377_000, 7_118_181_000, "thousands"))
+        self.assertIsNone(extract_geo_revenue_from_html(assets, "China"))
+
+
 class TestParseHtmlTable(unittest.TestCase):
     def test_basic_table(self):
         html = "<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>"

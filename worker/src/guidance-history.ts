@@ -26,11 +26,11 @@ export interface ReleaseText {
   text: string | null;
 }
 
-const SCALE: Record<string, number> = { billion: 1e9, bn: 1e9, million: 1e6, m: 1e6, thousand: 1e3, k: 1e3 };
+const SCALE: Record<string, number> = { billion: 1e9, bn: 1e9, b: 1e9, million: 1e6, mn: 1e6, m: 1e6, thousand: 1e3, k: 1e3 };
 
 /** "150.0 million" -> 150000000; the scale of the other end of a range applies when this end has none. */
 export function parseAmount(text: string, fallbackUnit: string | null = null): { value: number | null; unit: string | null } {
-  const m = /^\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(billion|million|thousand|bn|m|k)?\s*$/i.exec(text);
+  const m = /^\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(billion|million|thousand|bn|mn|b|m|k)?\s*$/i.exec(text);
   if (!m) return { value: null, unit: null };
   const unit = (m[2] ?? fallbackUnit ?? "").toLowerCase() || null;
   const base = parseFloat(m[1].replace(/,/g, ""));
@@ -38,8 +38,8 @@ export function parseAmount(text: string, fallbackUnit: string | null = null): {
   return { value: unit ? Math.floor(base * (SCALE[unit] ?? 1) + 0.5) : base, unit };
 }
 
-function unitOf(text: string): string | null {
-  const m = /(billion|million|thousand|bn|m|k)\s*$/i.exec(text.trim());
+export function unitOf(text: string): string | null {
+  const m = /(billion|million|thousand|bn|mn|b|m|k)\s*$/i.exec(text.trim());
   return m ? m[1].toLowerCase() : null;
 }
 

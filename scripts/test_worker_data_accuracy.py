@@ -26,11 +26,13 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 WORKER = ROOT / "worker"
 ESBUILD = WORKER / "node_modules" / ".bin" / "esbuild"
 
@@ -39,14 +41,25 @@ export {
   selectQuarterFact, getCreditHealth, filingItemHeadings, findSectionBounds, mergeFinancialCells,
   extractSegmentTableFromHtml, extractGeoRevenueFromHtml, tableUnitScale, analystPriceTargetChange,
   computeMaxPainStrike, rankNewsItemsByRelevance, limitCorporateActions, unwrapYahooValues,
-  yahooItemIssuer, customerConcentrationFromMatches, readableExposureExcerpt,
+  yahooItemIssuer, customerConcentrationFromMatches, readableExposureExcerpt, _stripHtmlTagsIdx,
 } from "./src/yahoo-finance.ts";
 """
+
+# A release fragment with the shapes the release readers depend on (2.5.20).
+BLOCK_HTML = (
+    "<html><head><style>p{x}</style><script>var a=1;</script></head><body><!-- note -->"
+    "<p>Fiscal Q4 2026 Highlights</p><div><span>&#8226;</span><span>Revenue of $54.23&nbsp;billion</span></div>"
+    "<div>&#8226;GAAP net income of $37.70&#160;billion, or $32.87 per diluted share</div>"
+    "<p onclick=\"x()\">FINANC</span><span>IAL Outlook &amp; more</p>"
+    "<table><tr><td>GAAP</td></tr><tr><td>Non-GAAP<sup>(1)</sup></td></tr><tr><td>Revenue</td><td>$10,300 - $10,800</td></tr></table>"
+    "<h2>Tail&nbsp;&nbsp; heading</h2><br/>last</body></html>"
+)
 
 _HARNESS = r"""
 const [bundleUrl] = process.argv.slice(-1);
 const m = await import(bundleUrl);
 const out = {};
+const BLOCK_HTML = __BLOCK_HTML__;
 
 // ── Quarterly XBRL facts ─────────────────────────────────────────────────────
 const fact = (start, end, val, form, filed) => ({ start, end, val, form, filed });
@@ -168,6 +181,39 @@ const msftStyle = [
   "</table>",
 ].join("");
 out.msftSegments = m.extractSegmentTableFromHtml(msftStyle);
+// COHR (2.5.20): "($000)" is thousands, the "Revenues" caption row is not the total, and the long-lived
+// assets table after a revenue paragraph is not revenue.
+const cohrAssets = [
+  `<p>Major customers accounted for 20% of consolidated revenue. Geographic information for long-lived assets by country ($000):</p><table>`,
+  row("Long-Lived Assets", "June 30, 2026", "2025"),
+  row("China", "968,796", "402,960"),
+  row("Total", "$", "3,432,316", "$", "2,147,530"),
+  "</table>",
+].join("");
+const cohr = [
+  `<p>Geographic information for revenues, by location of the customer's headquarters, were as follows ($000):</p><table>`,
+  row("Revenues"),
+  row("Year Ended June 30,", "2026", "2025"),
+  row("North America", "$", "4,633,696", "$", "3,564,846"),
+  row("China", "813,377", "680,110"),
+  row("Rest of World", "1,671,108", "1,565,159"),
+  row("Total", "$", "7,118,181", "$", "5,810,115"),
+  "</table>",
+].join("") + cohrAssets;
+out.cohrGeo = m.extractGeoRevenueFromHtml(cohr, "China");
+out.cohrAssetsOnly = m.extractGeoRevenueFromHtml(cohrAssets, "China");
+// VRT (2.5.20): a disaggregation table by region with a Total column and no year column.
+const vrt = [
+  `<p>Disaggregation of Revenues. The following table disaggregates revenue by business segment and product and service offering (in millions):</p><table>`,
+  row("Year Ended December 31, 2025", "Americas", "Asia Pacific", "EMEA", "Total"),
+  row("Products", "$", "5,270.1", "1,510.9", "1,426.0", "$", "8,207.0"),
+  row("Services & spares", "1,116.2", "508.3", "398.4", "2,022.9"),
+  row("Total", "$", "6,386.3", "2,019.2", "1,824.4", "$", "10,229.9"),
+  "</table>",
+].join("");
+out.vrtSegments = m.extractSegmentTableFromHtml(vrt);
+// The release text both runtimes read (2.5.20): one line per block, inline tags joined, no-break spaces as spaces.
+out.blockText = m._stripHtmlTagsIdx(BLOCK_HTML);
 out.unitScale = {
   captionMillions: m.tableUnitScale("<table><tr><td>(In millions)</td></tr></table>", "<p>Net sales rose to $416.2 billion.</p>"),
   proseOnly: m.tableUnitScale("<table><tr><td>2025</td></tr></table>", "<p>Net sales rose to $416.2 billion.</p>"),
@@ -221,7 +267,7 @@ def _run() -> dict:
         entry = WORKER / ".data-accuracy-test-entry.ts"
         bundle = Path(tmp) / "bundle.mjs"
         harness = Path(tmp) / "harness.mjs"
-        harness.write_text(_HARNESS, encoding="utf-8")
+        harness.write_text(_HARNESS.replace("__BLOCK_HTML__", json.dumps(BLOCK_HTML)), encoding="utf-8")
         entry.write_text(_ENTRY, encoding="utf-8")
         try:
             subprocess.run(
@@ -305,6 +351,22 @@ class TestWorkerDataAccuracy(unittest.TestCase):
         aaoi = self.out["aaoi"]
         self.assertEqual((aaoi["usd"], aaoi["denominator"], aaoi["unitScale"]), (262140e3, 455715e3, "thousands"))
         self.assertAlmostEqual(aaoi["pct"], 0.5752, places=4)
+
+    def test_geographic_table_scale_caption_and_asset_tables(self) -> None:
+        cohr = self.out["cohrGeo"]
+        self.assertEqual((cohr["pct"], cohr["usd"], cohr["denominator"], cohr["unitScale"]), (0.1143, 813_377_000, 7_118_181_000, "thousands"))
+        self.assertIsNone(self.out["cohrAssetsOnly"], "long-lived assets by country are not revenue")
+
+    def test_segment_table_without_a_year_column_reads_the_total_column(self) -> None:
+        vrt = self.out["vrtSegments"]["result"]
+        self.assertEqual([row["value"] for row in vrt["segments"]], [8207.0, 2022.9])
+        self.assertEqual((vrt["total"]["value"], vrt["column"], vrt["unitScale"]), (10229.9, "Total", "millions"))
+
+    def test_release_text_matches_python(self) -> None:
+        from yfmcp.parsing.html import _strip_html_blocks
+        self.assertEqual(self.out["blockText"], _strip_html_blocks(BLOCK_HTML))
+        self.assertIn("\u2022Revenue of $54.23 billion", self.out["blockText"].split("\n"))
+        self.assertIn("Non-GAAP(1)", self.out["blockText"].split("\n"))
 
     def test_unit_scale_comes_from_the_unit_statement(self) -> None:
         self.assertEqual(self.out["unitScale"], {"captionMillions": "millions", "proseOnly": "unknown", "sentence": "millions"})
