@@ -17,6 +17,8 @@ import urllib.parse as _urlparse
 import urllib.request as _urlrequest
 from typing import Annotated
 
+from yfmcp.earnings_period import extract_earnings_period_from_text as _extract_release_period
+
 import pandas as pd
 from pydantic import Field
 
@@ -55,12 +57,6 @@ def _server_attr(name: str):
     return getattr(_server, name)
 
 
-_QUARTER_WORDS = {
-    "first": "1", "1st": "1",
-    "second": "2", "2nd": "2",
-    "third": "3", "3rd": "3",
-    "fourth": "4", "4th": "4",
-}
 _GUIDANCE_CONTEXT_RE = _re.compile(
     r"\b(?:guidance|outlook|expects?|expected|forecast|projects?|target|range)\b",
     flags=_re.IGNORECASE,
@@ -72,47 +68,12 @@ _REPORTED_CONTEXT_RE = _re.compile(
 
 
 def _extract_earnings_period_from_text(text: str) -> dict[str, str | None]:
-    """Return an issuer fiscal period explicitly stated in earnings-release text.
+    """Return an issuer fiscal period explicitly stated in earnings-release text (yfmcp.earnings_period, 2.5.19).
 
     Never infer a fiscal quarter from an SEC filing date.  This deliberately
     returns an unresolved period when a release does not state one.
     """
-    normalized = _re.sub(r"\s+", " ", text or " ").strip()
-    patterns = (
-        _re.compile(
-            r"\b(first|1st|second|2nd|third|3rd|fourth|4th)\s+quarter"
-            r"(?:\s+and\s+(?:full\s+)?fiscal\s+year)?(?:\s+of)?\s+(?:fiscal\s+)?(20\d{2})\b",
-            flags=_re.IGNORECASE,
-        ),
-        _re.compile(r"\bQ([1-4])\s*(?:of\s*)?(?:FY|fiscal\s+year)\s*(20\d{2})\b", flags=_re.IGNORECASE),
-        _re.compile(
-            r"\bfiscal\s+(20\d{2})\b.{0,80}?\b(first|1st|second|2nd|third|3rd|fourth|4th)\s+quarter\b",
-            flags=_re.IGNORECASE,
-        ),
-    )
-    matches = [(index, match) for index, pattern in enumerate(patterns) if (match := pattern.search(normalized))]
-    if matches:
-        # Prefer the first explicit period in the release. Comparative prior-year
-        # figures appear later in the results bullets (AEHR is a concrete case).
-        index, match = min(matches, key=lambda item: item[1].start())
-        if index == 2:
-            year, quarter_word = match.group(1), match.group(2).lower()
-            quarter = _QUARTER_WORDS[quarter_word]
-        elif index == 1:
-            quarter, year = match.group(1), match.group(2)
-        else:
-            quarter_word, year = match.group(1).lower(), match.group(2)
-            quarter = _QUARTER_WORDS[quarter_word]
-        return {
-            "period": f"FY{year} Q{quarter}",
-            "periodStatus": "EX99_TEXT_RESOLVED",
-            "periodEvidence": _compact_excerpt(match.group(0), max_len=220),
-        }
-    return {
-        "period": None,
-        "periodStatus": "UNRESOLVED",
-        "periodEvidence": None,
-    }
+    return _extract_release_period(text)
 
 
 async def _resolve_earnings_period_from_source(source: dict) -> dict[str, str | None]:

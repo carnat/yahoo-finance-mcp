@@ -11,6 +11,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
 YF_TS = ROOT / "worker" / "src" / "yahoo-finance.ts"
+EARNINGS_PERIOD_TS = ROOT / "worker" / "src" / "earnings-period.ts"
 
 
 class TestSecReliabilityWorker(unittest.TestCase):
@@ -46,8 +47,11 @@ class TestSecReliabilityWorker(unittest.TestCase):
         self.assertIn("FILING_TEXT_NOT_AVAILABLE", self.worker)
 
     def test_earnings_ex99_text_is_period_resolved_and_non_decision_grade(self) -> None:
-        self.assertIn("function extractEarningsPeriodFromText", self.worker)
-        self.assertIn('periodStatus: "EX99_TEXT_RESOLVED"', self.worker)
+        # The period resolver lives in earnings-period.ts since 2.5.19 (scripts/test_earnings_period.py runs it).
+        period_module = EARNINGS_PERIOD_TS.read_text(encoding="utf-8")
+        self.assertIn("export function extractEarningsPeriodFromText", period_module)
+        self.assertIn('periodStatus: "EX99_TEXT_RESOLVED"', period_module)
+        self.assertIn('from "./earnings-period.js"', self.worker)
         self.assertIn("async function resolveEarningsPeriodFromSource", self.worker)
         self.assertIn("function extractReportedTextMetric", self.worker)
         self.assertIn("EX99_TEXT_CONTEXT", self.worker)

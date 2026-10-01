@@ -26,6 +26,7 @@ import {
   type IxSource,
   type TextMatch,
 } from "./capital-structure.js";
+import { extractEarningsPeriodFromText, type EarningsPeriodInfo } from "./earnings-period.js";
 import { FILING_PERIOD_HELP, filingFactInAccession, parseFilingPeriod, pickConceptFacts, REVENUE_CONCEPTS, selectFiscalYearRows } from "./sec-facts.js";
 import { fundingCapexSchedule } from "./funding-schedule.js";
 import { guidanceHistory, periodForExcerpt, type ReleaseText } from "./guidance-history.js";
@@ -16591,50 +16592,6 @@ function toIsoUtc(ts: unknown): string | null {
   return Number.isFinite(d.getTime()) ? d.toISOString() : null;
 }
 
-type EarningsPeriodInfo = {
-  period: string | null;
-  periodStatus: "EX99_TEXT_RESOLVED" | "UNRESOLVED";
-  periodEvidence: string | null;
-};
-
-const EARNINGS_QUARTER_WORDS: Record<string, string> = {
-  first: "Q1",
-  second: "Q2",
-  third: "Q3",
-  fourth: "Q4",
-};
-
-function extractEarningsPeriodFromText(text: string): EarningsPeriodInfo {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  const quarter = /\b(first|second|third|fourth)\s+quarter\b|\bQ([1-4])\b/i;
-  const fiscalYear = /\b(?:fiscal\s+(?:year\s+)?|FY\s*)(20\d{2})\b/i;
-  const candidates = [
-    new RegExp(`${quarter.source}[\\s\\S]{0,180}?${fiscalYear.source}`, "i"),
-    new RegExp(`${fiscalYear.source}[\\s\\S]{0,180}?${quarter.source}`, "i"),
-  ];
-  let best: RegExpMatchArray | null = null;
-  for (const re of candidates) {
-    const match = normalized.match(re);
-    if (!match) continue;
-    // Prefer the first explicit period in the release. Comparative prior-year
-    // figures appear later in results bullets (AEHR is a concrete case).
-    if (!best || (match.index ?? Number.MAX_SAFE_INTEGER) < (best.index ?? Number.MAX_SAFE_INTEGER)) best = match;
-  }
-  if (best) {
-    const qMatch = best[0].match(quarter);
-    const fyMatch = best[0].match(fiscalYear);
-    const q = qMatch?.[2] ? `Q${qMatch[2]}` : (qMatch?.[1] ? EARNINGS_QUARTER_WORDS[qMatch[1].toLowerCase()] : null);
-    const fy = fyMatch?.[1] ?? null;
-    if (q && fy) {
-      return {
-        period: `FY${fy} ${q}`,
-        periodStatus: "EX99_TEXT_RESOLVED",
-        periodEvidence: compactExcerpt(best[0], 220),
-      };
-    }
-  }
-  return { period: null, periodStatus: "UNRESOLVED", periodEvidence: null };
-}
 
 async function resolveEarningsPeriodFromSource(src: Record<string, unknown>): Promise<EarningsPeriodInfo> {
   const content = await resolveEarningsContentSource(src);
