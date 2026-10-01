@@ -1729,6 +1729,39 @@ Vantage and IBKR produced these fixes.
   still differs: Python's `get_sec_filing_index` has no 20-F fallback and
   its own failure codes. Compact output, the default, is identical.
 
+## Earnings Release Periods (2.5.19)
+
+- **Defect.** The Worker read an earnings release's fiscal period as any
+  quarter word and any "fiscal YYYY" up to 180 characters apart, the
+  earliest such pair winning. MU's FQ4 2026 release opens with a subheadline
+  ending "...position Micron for a record fiscal 2027", 140 characters before
+  "results for its fourth quarter and full year of fiscal 2026". The release
+  was labelled FY2027 Q4 in `get_latest_earnings_release`,
+  `extract_earnings_metrics` and `get_earnings_call_transcript`, and Alpha
+  Vantage was asked for quarter 2027Q4. Python used different patterns: it
+  happened to read FY2026 Q4 but missed other phrasings.
+- **Rule (both runtimes, `worker/src/earnings-period.ts`,
+  `yfmcp/earnings_period.py`).** A period is read only from one phrase that
+  joins a quarter to a year:
+  - "fourth quarter [and full (fiscal) year] [of] [fiscal (year) | FY] 2026",
+    hyphens allowed ("FOURTH-QUARTER AND FULL-YEAR 2026");
+  - "fiscal (year) 2026 ... fourth quarter", at most 40 characters apart
+    with no sentence, colon, bullet, dash or pipe between them;
+  - "Q4 [of] fiscal (year) 2026", "Q4 FY2026", "fiscal Q4 2026".
+  A quarter with only an end date ("fourth quarter ended January 30, 2026")
+  states no fiscal year and stays UNRESOLVED. The first phrase in the release
+  still wins, so a prior-year comparison later in the text is not read
+  (AEHR).
+- **Effect.** On 23 current releases the deployed resolver labelled 4 (one
+  wrong, MU); the new one labels 21, each matching the issuer's calendar
+  (for example MRVL FY2027 Q2, ORCL FY2027 Q1, AVGO FY2026 Q3, calendar
+  filers such as ANET Q2 2026), with no change for AEHR, DG and NKE. TSEM
+  and NBIS (6-K filers) stay unresolved.
+- **Tests.** `scripts/test_earnings_period.py` (in CI) runs both runtimes on
+  17 phrasings, including the MU text, forward-looking years across a
+  sentence or dash, and end-date-only quarters, and requires identical
+  output and the stated period.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
