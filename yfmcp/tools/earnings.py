@@ -49,7 +49,7 @@ from yfmcp.clients.yahoo_transcripts import (
     parse_yahoo_transcript_source_url,
     validate_yahoo_transcript_payload_identity,
 )
-from yfmcp.parsing.html import _strip_html_tags
+from yfmcp.parsing.html import _strip_html_blocks, _strip_html_tags
 
 
 def _server_attr(name: str):
@@ -84,25 +84,20 @@ async def _resolve_earnings_period_from_source(source: dict) -> dict[str, str | 
         html = await _edgar_get_html(source_url, max_bytes=500_000)
     else:
         html = _fetch_public_html(source_url, max_bytes=500_000)
-    return _extract_earnings_period_from_text(_strip_html_tags(_sanitize_sec_html(html or "")))
+    return _extract_earnings_period_from_text(_strip_html_blocks(_sanitize_sec_html(html or "")))
 
 
-def _extract_reported_text_metric(
-    text: str,
-    label_pattern: str,
-    value_pattern: str,
-) -> tuple[float | None, str | None, str | None]:
-    """A reported release value for a label, anchored after it (yfmcp/extraction_rules.py), scaled to units.
+def _extract_release_text_metric(text: str, metric: str) -> dict:
+    """A reported release figure under the 2.5.20 rules (yfmcp/extraction_rules.py), in units, with its excerpt.
 
     Free-text release prose cannot be decision-grade without a structured
     period-matched table or XBRL context; guidance, award and backlog wording
     always excludes a sentence.
     """
-    hit = _er.reported_text_metric(text or "", label_pattern, value_pattern)
-    value = _scale_number_from_text(hit["rawValue"]) if hit else None
-    if hit is None or value is None:
-        return None, None, None
-    return value, hit["rawValue"], _compact_excerpt(hit["sentence"], max_len=220)
+    hit = _er.release_text_metric(text or "", metric)
+    if hit is None:
+        return {"value": None, "rawValue": None, "scaleBasis": None, "excerpt": None}
+    return {"value": hit["value"], "rawValue": hit["rawValue"], "scaleBasis": hit["scaleBasis"], "excerpt": _compact_excerpt(hit["sentence"], max_len=220)}
 
 
 def _is_paywalled_url(url: str) -> bool:
@@ -355,7 +350,7 @@ async def index_earnings_release(ticker: str, period: str = "latest", source_url
         return _wrap_envelope_v2("index_earnings_release", None, error=f"Failed to fetch source: {source_url}", error_code=ErrorCode.PROVIDER_ERROR)
 
     idx = _server_attr("_build_filing_index_from_html")(_sanitize_sec_html(html))
-    period_info = _extract_earnings_period_from_text(_strip_html_tags(_sanitize_sec_html(html)))
+    period_info = _extract_earnings_period_from_text(_strip_html_blocks(_sanitize_sec_html(html)))
     out_data = {
         "ticker": ticker.upper(),
         "period": period_info["period"] or period,
@@ -421,14 +416,9 @@ async def extract_earnings_metrics(
 
     if src_url and src_url.startswith("https://www.sec.gov/Archives/"):
         html = await _edgar_get_html(src_url, max_bytes=5_000_000)
-        text = _strip_html_tags(_sanitize_sec_html(html or ""))
+        text = _strip_html_blocks(_sanitize_sec_html(html or ""))
         period_info = _extract_earnings_period_from_text(text)
-        revenue_val, revenue_raw, revenue_ex = _extract_reported_text_metric(text, _er.REVENUE_LABEL, _er.USD_AMOUNT)
-        eps_val, eps_raw, eps_ex = _extract_reported_text_metric(text, _er.EPS_LABEL, _er.EPS_AMOUNT)
-        gm_val, gm_raw, gm_ex = _extract_reported_text_metric(text, r"\bgross margin\b", _er.PCT_AMOUNT)
-        op_val, op_raw, op_ex = _extract_reported_text_metric(text, r"\boperating income\b", _er.USD_AMOUNT)
-        fcf_val, fcf_raw, fcf_ex = _extract_reported_text_metric(text, r"\bfree cash flow\b", _er.USD_AMOUNT)
-        capex_val, capex_raw, capex_ex = _extract_reported_text_metric(text, r"\b(?:capital expenditures|capex)\b", _er.USD_AMOUNT)
+        hits = {key: _extract_release_text_metric(text, key) for key in ("revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex")}
 
         def _ev(excerpt: str | None) -> dict | None:
             if not excerpt:
@@ -441,67 +431,26 @@ async def extract_earnings_metrics(
                 "excerpt": excerpt,
             }
 
-        if revenue_val is not None:
-            metrics["revenue"] = {
-                "value": revenue_val,
-                "unit": "USD",
-                "rawValue": revenue_raw,
+        def _text_metric(value: dict, excerpt: str | None) -> dict:
+            return {
+                **value,
+                "evidence": _ev(excerpt),
                 "confidence": "LOW",
                 "extractionMethod": "EX99_TEXT_CONTEXT",
                 "periodMatch": bool(period_info["period"]),
-                "evidence": _ev(revenue_ex),
             }
-        if eps_val is not None:
-            metrics["epsDiluted"] = {
-                "value": eps_val,
-                "unit": "USD/share",
-                "rawValue": f"${eps_raw}" if eps_raw else None,
-                "confidence": "LOW",
-                "extractionMethod": "EX99_TEXT_CONTEXT",
-                "periodMatch": bool(period_info["period"]),
-                "evidence": _ev(eps_ex),
-            }
-        if gm_val is not None:
-            gm_pct = float(gm_val)
-            metrics["grossMargin"] = {
-                "valueRatio": round(gm_pct / 100.0, 6),
-                "valuePct": gm_pct,
-                "rawValue": f"{gm_raw}%" if gm_raw and "%" not in gm_raw else gm_raw,
-                "confidence": "LOW",
-                "extractionMethod": "EX99_TEXT_CONTEXT",
-                "periodMatch": bool(period_info["period"]),
-                "evidence": _ev(gm_ex),
-            }
-        if op_val is not None:
-            metrics["operatingIncome"] = {
-                "value": op_val,
-                "unit": "USD",
-                "rawValue": op_raw,
-                "confidence": "LOW",
-                "extractionMethod": "EX99_TEXT_CONTEXT",
-                "periodMatch": bool(period_info["period"]),
-                "evidence": _ev(op_ex),
-            }
-        if fcf_val is not None:
-            metrics["freeCashFlow"] = {
-                "value": fcf_val,
-                "unit": "USD",
-                "rawValue": fcf_raw,
-                "confidence": "LOW",
-                "extractionMethod": "EX99_TEXT_CONTEXT",
-                "periodMatch": bool(period_info["period"]),
-                "evidence": _ev(fcf_ex),
-            }
-        if capex_val is not None:
-            metrics["capex"] = {
-                "value": capex_val,
-                "unit": "USD",
-                "rawValue": capex_raw,
-                "confidence": "LOW",
-                "extractionMethod": "EX99_TEXT_CONTEXT",
-                "periodMatch": bool(period_info["period"]),
-                "evidence": _ev(capex_ex),
-            }
+
+        for key in ("revenue", "operatingIncome", "freeCashFlow", "capex"):
+            hit = hits[key]
+            if hit["value"] is not None:
+                metrics[key] = _text_metric({"value": hit["value"], "unit": "USD", "rawValue": hit["rawValue"], "scaleBasis": hit["scaleBasis"]}, hit["excerpt"])
+        eps = hits["epsDiluted"]
+        if eps["value"] is not None:
+            metrics["epsDiluted"] = _text_metric({"value": eps["value"], "unit": "USD/share", "rawValue": eps["rawValue"]}, eps["excerpt"])
+        gm = hits["grossMargin"]
+        if gm["value"] is not None:
+            gm_pct = gm["value"]
+            metrics["grossMargin"] = _text_metric({"valueRatio": float(f"{gm_pct / 100:.6f}"), "valuePct": gm_pct, "rawValue": gm["rawValue"]}, gm["excerpt"])
         for key in ("revenue", "epsDiluted", "grossMargin", "operatingIncome", "freeCashFlow", "capex"):
             ev = metrics[key].get("evidence") if isinstance(metrics[key], dict) else None
             conf = str(metrics[key].get("confidence") or "")
@@ -569,9 +518,11 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
         html = None
     if not html:
         return not_read("RELEASE_TEXT_NOT_AVAILABLE", f"The earnings release {src_url} could not be read from SEC; retry.", True)
-    text = _strip_html_tags(_sanitize_sec_html(html))
+    text = _strip_html_blocks(_sanitize_sec_html(html))
     # "revenue guidance of $X to $Y" and "expects revenue between $X and $Y" (yfmcp/extraction_rules.py).
+    from yfmcp.guidance_history import parse_amount as _parse_amount
     from yfmcp.guidance_history import period_for_excerpt as _period_for_excerpt
+    from yfmcp.guidance_history import unit_of as _unit_of
 
     def _period_label(at: int, n: int) -> str | None:
         return None if at < 0 else _period_for_excerpt(text, at, n).get("label")
@@ -594,16 +545,21 @@ async def extract_guidance(ticker: str, period: str = "latest") -> str:
                  "excerpt": _compact_excerpt(a["excerpt"])}
                 for a in r.get("alternates") or []]
 
+    def _amounts(r: dict) -> dict:
+        # An end without a unit takes the other end's ("$2.0 to $2.4 billion"), as get_guidance_history reads it (2.5.20).
+        fallback = _unit_of(r["high"]) or _unit_of(r["low"])
+        return {"low": _parse_amount(r["low"], fallback)["value"], "high": _parse_amount(r["high"], fallback)["value"]}
+
     if patterns["revenue"]:
-        lo = _scale_number_from_text(patterns["revenue"]["low"])
-        hi = _scale_number_from_text(patterns["revenue"]["high"])
+        lo, hi = _amounts(patterns["revenue"]).values()
         if lo is not None and hi is not None:
             base["revenue"] = {
                 "status": "FOUND",
                 "basis": patterns["revenue"]["basis"],
                 "statedAs": patterns["revenue"]["statedAs"],
                 "targetPeriod": _target(patterns["revenue"]["excerpt"]),
-                "alternates": _alternates(patterns["revenue"], _scale_number_from_text, "low", "high"),
+                "alternates": [{"basis": a["basis"], "statedAs": a["statedAs"], "targetPeriod": _target(a["excerpt"]), **_amounts(a),
+                                "excerpt": _compact_excerpt(a["excerpt"])} for a in patterns["revenue"].get("alternates") or []],
                 "low": lo,
                 "high": hi,
                 "midpoint": (lo + hi) / 2.0,
@@ -664,9 +620,9 @@ async def extract_management_commentary(ticker: str, period: str = "latest", top
     text = ""
     if src_url.startswith("https://www.sec.gov/Archives/"):
         html = await _edgar_get_html(src_url, max_bytes=5_000_000)
-        text = _strip_html_tags(_sanitize_sec_html(html or ""))
+        text = _strip_html_blocks(_sanitize_sec_html(html or ""))
     elif src_url:
-        text = _strip_html_tags(_sanitize_sec_html(_fetch_public_html(src_url) or ""))
+        text = _strip_html_blocks(_sanitize_sec_html(_fetch_public_html(src_url) or ""))
     out_topics: list[dict] = []
     for topic in topic_list:
         excerpt = _first_sentence_for_topic(text, topic) if text else None

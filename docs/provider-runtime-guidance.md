@@ -1762,6 +1762,91 @@ Vantage and IBKR produced these fixes.
   sentence or dash, and end-date-only quarters, and requires identical
   output and the stated period.
 
+## Release And Table Amounts (2.5.20)
+
+- **Defect.** `extract_earnings_metrics` read MU's FQ4 2026 revenue as 54229
+  USD and missed its EPS. The highlights bullet "Revenue of $54.23 billion
+  versus..." has no result verb, so the text fallback read the statement
+  table's "$ 54,229" (in millions) as written, and "$32.87 per diluted share"
+  was not an EPS form it knew. An audit of the other readers that turn
+  filing or release text into amounts found the same kinds of errors:
+  - text metrics: AVGO capex read as the FCF figure that follows it, ORCL
+    "Services revenues" read as total revenue and "negative $5 billion" FCF
+    read as positive, MRVL and BE full-year revenue read as the quarter's,
+    NVDA "Gaming revenue" read as total;
+  - filing tables: COHR segment and geographic revenue 1000x too large
+    ("($000)" was not a scale statement), COHR's China share read from its
+    long-lived assets table (the "Revenues" caption row was taken as the
+    total of the real table), VRT segment revenue read from the Americas
+    column;
+  - guidance: SNDK's outlook table "(in millions)" read unscaled in
+    `extract_guidance` and `get_guidance_history` (every outcome compared
+    10300 USD with dollar actuals), its GAAP column labelled non-GAAP, and
+    its EPS row ("N/A $44.00 - $46.00") missed; "$2.0 to $2.4 billion" read
+    as $2 in `extract_guidance` only; "$3.9B" not read; "$1,234 more" read
+    as millions.
+- **Release figures (both runtimes, `releaseTextMetric` /
+  `release_text_metric`).** `extract_earnings_metrics`' text tier reads a
+  figure for a metric only when its sentence proves it is that metric's
+  result for the quarter:
+  - no guidance, award, backlog or ± wording, and no sentence that names only
+    an annual period ("in 2025", "fiscal 2026 revenue", "full year");
+  - the label leads the sentence or bullet ("Revenue of $X") or follows a
+    period or GAAP qualifier; a segment word before it ("Gaming", "Services")
+    refuses it;
+  - after a change verb the figure follows "to" ("increased 5.2% to
+    $11.3 billion"), never the change itself;
+  - a non-GAAP or adjusted figure, a per-share figure for a total, and a
+    figure attributed to another metric ("$13.7 billion of free cash flow")
+    are not read; "$X per diluted share" after GAAP net income or net loss is
+    diluted EPS, negative for a loss; "negative $5 billion" is negative;
+  - a scale word is used as written; an unscaled figure takes the release's
+    table scale only when the release declares exactly one, else it is not
+    read.
+  Text metrics carry `scaleBasis` (`AS_WRITTEN`,
+  `RELEASE_TABLE_IN_MILLIONS`, ..., or null), the vocabulary
+  `reconcile_metric_sources` uses. They stay LOW confidence with
+  `TEXT_METRIC_VERIFY_REQUIRED`.
+- **Filing tables (both runtimes; segment tables are Worker-only).** A
+  table's scale is the one it states itself, else the statement in its
+  lead-in nearest the table; "($000)", "(000s)" and "thousands of dollars"
+  are thousands; millions remains the default when nothing is stated. A
+  total row must carry amounts. A geographic candidate whose own text names
+  long-lived assets, property and equipment or total assets and not revenue
+  is not read. A segment table without a year column reads its "Total"
+  column. Geographic `unitScale` gains `billions` (it was `actual`).
+- **Guidance (both runtimes).** An unscaled revenue range takes the
+  "(in millions ...)" statement of its outlook block (no sentence break
+  between). Under an adjacent "GAAP Non-GAAP" column header a range takes its
+  column's basis, the second column's range is an alternate, and an "N/A"
+  first cell puts a range in the second column. Amounts accept "b" and "mn"
+  and need a word boundary after the unit. `extract_guidance` reads a range
+  whose low end has no unit with the high end's unit, as
+  `get_guidance_history` already did.
+- **Other readers.** `extract_funding_capex_schedule` reads two amounts
+  joined by "and" as a range only when they run low to high. The driver
+  ledger keeps a "B", "M" or "K" after a figure as its unit as written.
+- **Release text parity.** Python's earnings release readers (period,
+  metrics, guidance, guidance history, commentary) now read the same
+  block-per-line text as the Worker (`_strip_html_blocks` mirrors
+  `_stripHtmlTagsIdx`); both treat a no-break space as a space.
+- **Effect.** Over 48 recent releases of 17 issuers, every changed text
+  reading is a correction (MU, LITE, BE, MRVL, ORCL, DG, FN, COHR now read;
+  AVGO capex, NVDA segment and ORCL services and annual readings refused).
+  Live: MU revenue $54.23B and EPS $32.87; COHR segments $5.27B / $1.84B of
+  $7.12B and China 11.43% of revenue; VRT segments $8.207B / $2.023B of
+  $10.230B; SNDK guidance $10.3B-$10.8B GAAP with gross margin 83.0-84.9%
+  GAAP and 83.0-85.0% non-GAAP.
+- **Not changed (open).** A "±" outlook table without a forward verb (MU's
+  "Revenue $61.5 billion ± $1.5 billion") is still not read and reports
+  `NOT_DISCLOSED`; a table with no stated scale still defaults to millions.
+- **Tests.** `scripts/test_extraction_rules.py` runs both runtimes on the
+  release-figure and outlook-table cases;
+  `scripts/test_worker_data_accuracy.py` and
+  `scripts/test_edgar_html_parse.py` cover the COHR, VRT and stripper cases;
+  `scripts/test_scenarios_and_schedule.py` and
+  `scripts/test_guidance_and_drivers.py` cover the funding and ledger cases.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

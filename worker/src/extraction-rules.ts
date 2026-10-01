@@ -110,7 +110,8 @@ export function customerConcentration(matches: Record<string, unknown>[]): { fin
 
 // ── Guidance ranges ─────────────────────────────────────────────────────────
 
-const AMOUNT = "([0-9][0-9.,]*(?:\\s*(?:billion|million|thousand|bn|m|k))?)";
+// "$3.9B" carries its unit; "$1,234 more" carries none (2.5.20).
+const AMOUNT = "([0-9][0-9.,]*(?:\\s*(?:billion|million|thousand|bn|mn|b|m|k)\\b)?)";
 const RANGE_SEP = "\\s*(?:to|and|-|\\u2013|\\u2014)\\s*";
 // "full year 2026 revenue guidance of $150.0 million to $200.0 million" (ASTS)
 const REVENUE_FIRST_RE = new RegExp(`\\brevenues?\\s+(?:guidance|outlook|forecast)\\b[^$.]{0,40}\\$\\s*${AMOUNT}${RANGE_SEP}\\$?\\s*${AMOUNT}`, "i");
@@ -133,12 +134,12 @@ const METRIC_FIRST_EPS_RE = new RegExp(`${EPS_LABEL_SOURCE}[^.$%]{0,120}?${FORWA
 // +/- $0.05 per share". The bounds are computed exactly (pmBounds).
 const PLUS_MINUS = "(?:\\+\\s*/\\s*[-\\u2212]|\\u00b1|plus or minus)";
 const PM_NUMBER = "([0-9][0-9,]*(?:\\.[0-9]+)?)";
-const PM_UNIT = "(?:\\s*(billion|million|thousand|bn|m|k)\\b)?";
+const PM_UNIT = "(?:\\s*(billion|million|thousand|bn|mn|b|m|k)\\b)?";
 // A comma may precede the tolerance (NVDA: "$108.0 billion, plus or minus 2%").
-const PM_TOLERANCE = `\\s*,?\\s*${PLUS_MINUS}\\s*(\\$)?\\s*${PM_NUMBER}\\s*(%|(?:billion|million|thousand|bn|m|k)\\b)?`;
+const PM_TOLERANCE = `\\s*,?\\s*${PLUS_MINUS}\\s*(\\$)?\\s*${PM_NUMBER}\\s*(%|(?:billion|million|thousand|bn|mn|b|m|k)\\b)?`;
 const METRIC_FIRST_REVENUE_PM_RE = new RegExp(`\\brevenues?\\b[^.$%]{0,120}?${FORWARD_VERB}[^$.%]{0,30}\\$\\s*${PM_NUMBER}${PM_UNIT}${PM_TOLERANCE}`, "i");
 const METRIC_FIRST_EPS_PM_RE = new RegExp(`${EPS_LABEL_SOURCE}[^.$%]{0,120}?${FORWARD_VERB}[^$.%]{0,30}\\$\\s*${PM_NUMBER}${PM_UNIT}${PM_TOLERANCE}`, "i");
-const UNIT_EXP: Record<string, number> = { billion: 9, bn: 9, million: 6, m: 6, thousand: 3, k: 3 };
+const UNIT_EXP: Record<string, number> = { billion: 9, bn: 9, b: 9, million: 6, mn: 6, m: 6, thousand: 3, k: 3 };
 // A margin and a tolerance in points (NVDA: "gross margins are expected to be 74.0%, plus or minus 50 basis points").
 const METRIC_FIRST_GROSS_MARGIN_PM_RE = new RegExp(`\\bgross margins?\\b[^.$%]{0,120}?${FORWARD_VERB}[^$.%0-9]{0,30}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%\\s*,?\\s*${PLUS_MINUS}\\s*([0-9]+(?:\\.[0-9]+)?)\\s*(basis points?|bps|percentage points?|%)`, "i");
 // Release tables, read as flattened text (2.5.10, VRT): "Third Quarter 2026 Guidance Net sales $3,650M -
@@ -146,14 +147,36 @@ const METRIC_FIRST_GROSS_MARGIN_PM_RE = new RegExp(`\\bgross margins?\\b[^.$%]{0
 // the range, under a guidance or outlook heading with no sentence break between them.
 const TABLE_FOOTNOTE = "(?:\\s*\\(\\d\\))?";
 // An outlook bullet puts "of" or "in the range of" between label and range (LITE: "Non-GAAP diluted net
-// income per share of $4.05 to $4.35").
-const ROW_LEAD = "\\s*(?:of\\s+|in the range of\\s+|:\\s*)?";
+// income per share of $4.05 to $4.35"); a two-column table may put an "N/A" first cell there (SNDK, 2.5.20).
+const ROW_LEAD = "\\s*(?:of\\s+|in the range of\\s+|:\\s*)?(?:N/A\\s+)?";
 // "... diluted EPS of $5.82 to $5.92 and adjusted diluted EPS of $6.65 to $6.75" (VRT): the second range.
 const EPS_CONTINUATION_RE = /\band (?:adjusted|non-GAAP|GAAP) (?:diluted )?(?:eps|earnings per share|net income per share) of \$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|-|–|—)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)/i;
 const TABLE_REVENUE_RE = new RegExp(`\\b(?:net sales|(?:total )?(?:net )?revenues?)${TABLE_FOOTNOTE}${ROW_LEAD}\\$\\s*${AMOUNT}${RANGE_SEP}\\$?\\s*${AMOUNT}`, "i");
 const TABLE_GROSS_MARGIN_RE = new RegExp(`\\b(?:(?:adjusted|non-GAAP|GAAP)\\s+)?gross margins?${TABLE_FOOTNOTE}${ROW_LEAD}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%${RANGE_SEP}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%`, "i");
 const TABLE_EPS_RE = new RegExp(`\\b(?:(?:adjusted|non-GAAP|GAAP)\\s+)?(?:diluted\\s+)?(?:eps|earnings per share|net income per share)${TABLE_FOOTNOTE}${ROW_LEAD}\\$\\s*([0-9]+(?:\\.[0-9]+)?)${RANGE_SEP}\\$?\\s*([0-9]+(?:\\.[0-9]+)?)`, "i");
 const TABLE_HEADING_RE = /\b(?:guidance|outlook)\b/gi;
+
+// An outlook table's scale and columns (2.5.20, SNDK: "Business Outlook ... (in millions, except per share
+// amounts) GAAP Non-GAAP (1) Revenue $10,300 - $10,800 $10,300 - $10,800 Gross Margin 83.0% - 84.9% 83.0% -
+// 85.0% ... Diluted Net Income Per Share N/A $44.00 - $46.00"). Both are read only between the outlook heading
+// and the row, with no sentence break after them.
+const OUTLOOK_SCALE_RE = /\(\s*(?:\$|US\$|dollars|amounts)?\s*in\s+(thousands|millions|billions)\b/gi;
+const OUTLOOK_COLUMNS_RE = /\b(Non-?\s?GAAP|GAAP)(?:\s*\(\d\))?\s+(Non-?\s?GAAP|GAAP)(?:\s*\(\d\))?(?=\s+[A-Z])/gi;
+const SENTENCE_BREAK_RE = /[.!?]\s+[A-Z]/;
+const SECOND_AMOUNT_CELL_RE = new RegExp(`^\\s*\\$\\s*${AMOUNT}${RANGE_SEP}\\$?\\s*${AMOUNT}`, "i");
+const SECOND_PCT_CELL_RE = /^\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%\s*(?:to|and|-|–|—)\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%/i;
+
+/** The last statement a pattern finds in the 400 characters before `at`, if no sentence break follows it. */
+function outlookStatement(text: string, at: number, re: RegExp): RegExpMatchArray | null {
+  const before = text.slice(Math.max(0, at - 400), at);
+  let last: RegExpMatchArray | null = null;
+  for (const m of before.matchAll(re)) last = m;
+  return last && !SENTENCE_BREAK_RE.test(before.slice((last.index ?? 0) + last[0].length)) ? last : null;
+}
+
+function columnBasis(word: string): RangeBasis {
+  return NON_GAAP_RE.test(word) ? "NON_GAAP" : "GAAP";
+}
 
 /** A table row sits under a guidance or outlook heading within 400 characters, with no sentence break between. */
 function underGuidanceHeading(text: string, at: number): boolean {
@@ -272,26 +295,43 @@ type Pattern = { re: RegExp; kind: "range" | "pm_amount" | "pm_points" | "table"
  * alternates.
  */
 export function guidanceRanges(text: string, periodOf: ((at: number, len: number) => string | null) | null = null): { revenue: RangeMatch; grossMargin: RangeMatch; eps: RangeMatch } {
-  const pick = (...patterns: Pattern[]): RangeMatch => {
+  const pick = (money: boolean, ...patterns: Pattern[]): RangeMatch => {
     const found: Omit<NonNullable<RangeMatch>, "alternates">[] = [];
     const periods: (string | null)[] = [];
     for (const { re, kind } of patterns) {
-      for (const m of text.matchAll(new RegExp(re.source, `${re.flags}g`))) {
+      for (const m of text.matchAll(new RegExp(re.source, `${re.flags.replace("d", "")}gd`))) {
         const at = m.index ?? 0;
         if (kind === "table" && !underGuidanceHeading(text, at)) continue;
         const bounds = kind === "pm_amount" ? pmBounds(m[1], m[2], m[3], m[4], m[5])
           : kind === "pm_points" ? pointBounds(m[1], m[2], m[3])
           : { low: m[1], high: m[2] };
         if (!bounds) continue;
+        const firstAt = m.indices?.[1]?.[0] ?? at;
+        // An unscaled amount takes the outlook table's stated scale: "$10,300 - $10,800" (in millions).
+        const scaleWord = money && !/[a-z]\s*$/i.test(bounds.low) && !/[a-z]\s*$/i.test(bounds.high)
+          ? outlookStatement(text, firstAt, OUTLOOK_SCALE_RE)?.[1].toLowerCase().replace(/s$/, "") ?? null : null;
+        const scaled = (t: string): string => (scaleWord ? `${t} ${scaleWord}` : t);
+        // Under a "GAAP Non-GAAP" header a range takes its column's basis; an "N/A" first cell puts it in the second.
+        const columns = outlookStatement(text, firstAt, OUTLOOK_COLUMNS_RE);
+        const twoColumns = columns && columnBasis(columns[1]) !== columnBasis(columns[2]) ? [columnBasis(columns[1]), columnBasis(columns[2])] : null;
+        const column = twoColumns && /\bN\/A\s*\$?\s*$/i.test(text.slice(Math.max(0, firstAt - 12), firstAt)) ? 1 : 0;
         found.push({
           excerpt: m[0],
-          low: bounds.low,
-          high: bounds.high,
+          low: scaled(bounds.low),
+          high: scaled(bounds.high),
           // A table row's basis is its own label: the rows above it belong to other metrics.
-          basis: kind === "table" ? clauseBasis(m[0]) : rangeBasis(text, at, m[0].length),
+          basis: twoColumns ? twoColumns[column] : kind === "table" ? clauseBasis(m[0]) : rangeBasis(text, at, m[0].length),
           statedAs: kind === "table" ? "OUTLOOK_ROW" : kind === "range" ? "RANGE" : "MIDPOINT_PLUS_MINUS",
         });
         periods.push(periodOf ? periodOf(at, m[0].length) : null);
+        if (twoColumns && column === 0 && (kind === "range" || kind === "table")) {
+          const rest = text.slice(at + m[0].length);
+          const second = (/%\s*$/.test(m[0]) ? SECOND_PCT_CELL_RE : SECOND_AMOUNT_CELL_RE).exec(rest);
+          if (second) {
+            found.push({ excerpt: `${m[0]}${second[0]}`, low: scaled(second[1]), high: scaled(second[2]), basis: twoColumns[1], statedAs: kind === "table" ? "OUTLOOK_ROW" : "RANGE" });
+            periods.push(periodOf ? periodOf(at, m[0].length) : null);
+          }
+        }
       }
     }
     if (found.length === 0) return null;
@@ -305,46 +345,152 @@ export function guidanceRanges(text: string, periodOf: ((at: number, len: number
     return { ...primary, alternates };
   };
   return {
-    revenue: pick({ re: REVENUE_FIRST_RE, kind: "range" }, { re: KEYWORD_FIRST_RE, kind: "range" }, { re: METRIC_FIRST_REVENUE_RE, kind: "range" },
+    revenue: pick(true, { re: REVENUE_FIRST_RE, kind: "range" }, { re: KEYWORD_FIRST_RE, kind: "range" }, { re: METRIC_FIRST_REVENUE_RE, kind: "range" },
       { re: METRIC_FIRST_REVENUE_PM_RE, kind: "pm_amount" }, { re: TABLE_REVENUE_RE, kind: "table" }),
-    grossMargin: pick({ re: GROSS_MARGIN_RE, kind: "range" }, { re: METRIC_FIRST_GROSS_MARGIN_RE, kind: "range" },
+    grossMargin: pick(false, { re: GROSS_MARGIN_RE, kind: "range" }, { re: METRIC_FIRST_GROSS_MARGIN_RE, kind: "range" },
       { re: METRIC_FIRST_GROSS_MARGIN_PM_RE, kind: "pm_points" }, { re: TABLE_GROSS_MARGIN_RE, kind: "table" }),
-    eps: pick({ re: EPS_RE, kind: "range" }, { re: EPS_CONTINUATION_RE, kind: "range" }, { re: METRIC_FIRST_EPS_RE, kind: "range" }, { re: METRIC_FIRST_EPS_PM_RE, kind: "pm_amount" },
+    eps: pick(false, { re: EPS_RE, kind: "range" }, { re: EPS_CONTINUATION_RE, kind: "range" }, { re: METRIC_FIRST_EPS_RE, kind: "range" }, { re: METRIC_FIRST_EPS_PM_RE, kind: "pm_amount" },
       { re: TABLE_EPS_RE, kind: "table" }),
   };
 }
 
-// ── Reported release metrics ────────────────────────────────────────────────
+// ── Reported release metrics (2.5.20) ───────────────────────────────────────
+//
+// extract_earnings_metrics' text fallback read MU's FQ4 2026 revenue as 54229 USD: the highlights bullet
+// "Revenue of $54.23 billion versus…" has no result verb, so the statement table's "$ 54,229" (in millions)
+// was read as written. A figure is read for a metric only when the sentence proves it is that metric's
+// result for the quarter:
+// - a sentence with guidance, award, backlog or ± wording is never read, nor one that names only an annual
+//   period ("in 2025", "fiscal 2026 revenue", "full year");
+// - the label leads the sentence or follows a period or GAAP qualifier: "Gaming revenue" and "Services
+//   revenues" are segments, not the total;
+// - a change verb ("increased 5.2% to") reads the figure after "to", never the change itself;
+// - a non-GAAP or adjusted figure, a per-share figure for a total, and a figure attributed to another metric
+//   ("$13.7 billion of free cash flow" after "capital expenditures") are never read;
+// - an unscaled figure takes the release's table scale only when the release declares exactly one.
 
-// Sentences end at . ! ? and at bullet markers, including the " o " bullets
-// SEC-rendered press releases carry, so one bullet's value is never read for
-// another's label.
-const METRIC_SPLIT_RE = /(?<=[.!?])\s+|\s+[•●▪◦·]\s+|\s+o\s+(?=[A-Z])/;
-const GUIDANCE_CONTEXT_RE = /\b(?:guidance|outlook|expect(?:s|ed|ation)?|forecast|project(?:s|ed)?|target|range)\b/i;
-const REPORTED_CONTEXT_RE = /\b(?:reported|was|were|totaled|totalled|generated|delivered|achieved)\b/i;
+// Sentences end at . ! ? (also before a closing quote) and at bullet markers ("•Revenue" needs no space after
+// the bullet, MU 2.5.20), including the " o " bullets
+// SEC-rendered press releases carry, so one bullet's value is never read for another's label.
+const RELEASE_SPLIT_RE = /(?<=[.!?])\s+|(?<=[.!?]["”’])\s+|\s+[•●▪◦]\s*|\s+·\s+|\s+o\s+(?=[A-Z])/;
+const GUIDANCE_CONTEXT_RE = /\b(?:guidance|outlook|expect(?:s|ed|ation)?|forecast(?:s|ing)?|project(?:s|ed)?|target|range)\b/i;
+const REPORTED_CONTEXT_RE = /\b(?:reported|was|were|totaled|totalled|generated|delivered|achieved|increased|decreased|grew|rose|declined|fell)\b/i;
 // "$125 million" of government awards is not revenue (ASTS Q2 2026).
 const NON_RESULT_CONTEXT_RE = /\b(?:awards?|awarded|contract value|aggregate value|backlog|bookings|orders?|pipeline|contracted)\b/i;
+const ANNUAL_CONTEXT_RE = /\b(?:full[\s-]year|(?:full )?fiscal year|year[\s-]to[\s-]date|twelve months|12 months|annual|in (?:fiscal )?(?:19|20)[0-9]{2}|fiscal (?:19|20)[0-9]{2}|FY ?(?:19|20)?[0-9]{2})\b/i;
+const QUARTER_CONTEXT_RE = /\b(?:quarter(?:ly)?|Q[1-4]|three months|13 weeks)\b/i;
 
-export const REVENUE_LABEL = "\\b(?:net sales|revenues?)\\b";
-export const USD_AMOUNT = "(\\$\\s*[-+]?[0-9][0-9,.\\s]*(?:billion|million|thousand|bn|m|k)?)";
-export const EPS_LABEL = "\\b(?:diluted (?:earnings per share|eps)|eps \\(diluted\\))\\b";
-export const EPS_AMOUNT = "(\\$\\s*\\(?[-+]?[0-9]+(?:\\.[0-9]+)?\\)?)";
-export const PCT_AMOUNT = "([0-9]{1,2}(?:\\.[0-9]+)?\\s*%)";
+export type ReleaseMetricName = "revenue" | "epsDiluted" | "grossMargin" | "operatingIncome" | "freeCashFlow" | "capex";
+export type ReleaseMetricHit = { value: number; rawValue: string; scaleBasis: string | null; sentence: string };
 
-/**
- * The first explicitly reported value for a label: a sentence with a result
- * verb, no guidance or award wording, and the value within 100 non-digit
- * characters after the label.
- */
-export function reportedTextMetric(text: string, labelSource: string, valueSource: string): { rawValue: string; sentence: string } | null {
+const RELEASE_LABELS: Record<ReleaseMetricName, string> = {
+  revenue: "\\b(?:net sales|net revenues?|total revenues?|revenues?)\\b",
+  epsDiluted: "\\b(?:diluted (?:earnings|net income|net loss|income|loss)(?: \\(loss\\))? per (?:common )?share|diluted eps|eps \\(diluted\\))(?![\\w(])",
+  grossMargin: "\\bgross margin\\b",
+  operatingIncome: "\\boperating income\\b",
+  freeCashFlow: "\\bfree cash flow\\b",
+  capex: "\\b(?:capital expenditures|capex)\\b",
+};
+// Between a label and its figure: words, and the period tokens a release puts there ("for the fourth quarter
+// of fiscal 2026 was", "ended July 27, 2025, of", "in Q1 FY27") or a change ("increased 5.2% to"). Never another figure.
+const RELEASE_GAP = "(?:[^$0-9%]|\\b(?:19|20)[0-9]{2}\\b|\\b[0-3]?[0-9], (?:19|20)[0-9]{2}\\b|\\bQ[1-4]\\b|\\bFY ?[0-9]{2,4}\\b|\\b[0-9]{1,3}(?:\\.[0-9]+)?\\s*(?:%|percent)(?=\\s+to\\b))";
+// Groups: "(" before the $, "(" after it, "-", integer, fraction, scale word. "($0.12)" and "$ (0.12)" are negative.
+const RELEASE_MONEY = "(\\(\\s*)?\\$\\s*(\\()?\\s*(-)?\\s*([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(\\.[0-9]+)?\\s*\\)?(?:\\s*(billion|million|thousand|bn|mn|mm|b|m|k)\\b)?";
+const RELEASE_PCT = "()()(-)?([0-9]{1,2})(\\.[0-9]+)?\\s*%()";
+const RELEASE_SCALE: Record<string, number> = { billion: 1e9, bn: 1e9, b: 1e9, million: 1e6, mn: 1e6, mm: 1e6, m: 1e6, thousand: 1e3, k: 1e3 };
+const RELEASE_TABLE_SCALE_RE = /\(\s*(?:\$|US\$|dollars|amounts)?\s*in\s+(thousands|millions|billions)\b/gi;
+const RELEASE_NON_GAAP_RE = /\bnon-?\s?GAAP\b|\badjusted\b/i;
+const RELEASE_PLUS_MINUS_RE = /±|\+\/-|\bplus or minus\b/i;
+const RELEASE_PER_SHARE_AFTER_RE = /^\s*(?:per|a)\s+(?:diluted\s+|basic\s+)?(?:common\s+)?(?:share|ADS|ADR)\b/i;
+const RELEASE_PER_DILUTED_WORDING_RE = /\bper\s+diluted\s+(?:common\s+)?share\b/i;
+const RELEASE_CHANGE_RE = /\b(?:increase[sd]?|decrease[sd]?|grew|grow(?:s|th)?|rose|declined?|fell|up|down|improved?)\b/i;
+const RELEASE_ATTRIBUTED_RE = /^\s*(?:of|in)\s+(?:[A-Za-z-]+\s+){0,2}?(free cash flow|operating cash flow|cash|revenues?|net sales|net income|net loss|operating income|capital expenditures|gross margin|earnings)\b/i;
+// The word before a label: a period or GAAP qualifier, a result verb, or a sentence, clause or heading boundary.
+const RELEASE_QUALIFIER_RE = /^(?:gaap|total|record|quarterly|consolidated|reported|delivered|achieved|generated|posted|preliminary|the|our|its|with|and|of|in|for|q[1-4]|fy[0-9]{2,4}|(?:19|20)[0-9]{2}|first|second|third|fourth|(?:first|second|third|fourth)-quarter|quarter|fiscal)$/i;
+
+function releaseScales(text: string): string[] {
+  return [...new Set([...text.matchAll(RELEASE_TABLE_SCALE_RE)].map((m) => m[1].toLowerCase().replace(/s$/, "")))];
+}
+
+function qualifiedLabel(before: string): boolean {
+  const raw = before.match(/(\S+)\s*$/)?.[1] ?? "";
+  if (/[:;,]$/.test(raw)) return true;
+  const token = raw.replace(/^\W+|\W+$/g, "");
+  return token === "" || RELEASE_QUALIFIER_RE.test(token);
+}
+
+/** The first reported release figure for a metric under the 2.5.20 rules, or null. */
+export function releaseTextMetric(text: string, metric: ReleaseMetricName): ReleaseMetricHit | null {
+  const collapsed = collapseWs(text);
+  const tableScales = releaseScales(collapsed);
+  const labelSource = RELEASE_LABELS[metric];
+  const money = metric !== "grossMargin" && metric !== "epsDiluted";
+  const amountSource = metric === "grossMargin" ? RELEASE_PCT : RELEASE_MONEY;
   const label = new RegExp(labelSource, "i");
-  const anchored = new RegExp(`(?:${labelSource})\\D{0,100}?${valueSource}`, "i");
-  for (const raw of collapseWs(text).split(METRIC_SPLIT_RE)) {
-    const sentence = raw.trim();
-    if (!sentence || !label.test(sentence)) continue;
-    if (GUIDANCE_CONTEXT_RE.test(sentence) || NON_RESULT_CONTEXT_RE.test(sentence) || !REPORTED_CONTEXT_RE.test(sentence)) continue;
-    const m = anchored.exec(sentence);
-    if (m && m[1]) return { rawValue: m[1].trim(), sentence };
+  const resultLead = new RegExp(`^(?:GAAP\\s+|total\\s+)?(?:${labelSource})\\s*(?:of|:|was|were|totaled|totalled)\\b`, "i");
+  const labelFirst = new RegExp(`(${labelSource})(${RELEASE_GAP}{0,100}?)(${amountSource})`, "gi");
+  // "net income of $37.70 billion, or $32.87 per diluted share"
+  const perDilutedShare = new RegExp(`${RELEASE_MONEY.replace("(?:\\s*(billion|million|thousand|bn|mn|mm|b|m|k)\\b)?", "()")}\\s+per\\s+diluted\\s+(?:common\\s+)?share\\b`, "gi");
+  for (const raw of collapsed.split(RELEASE_SPLIT_RE)) {
+    const piece = raw.trim();
+    if (!piece || piece.length > 600) continue;
+    if (GUIDANCE_CONTEXT_RE.test(piece) || NON_RESULT_CONTEXT_RE.test(piece) || RELEASE_PLUS_MINUS_RE.test(piece)) continue;
+    if (ANNUAL_CONTEXT_RE.test(piece) && !QUARTER_CONTEXT_RE.test(piece)) continue;
+    const labelled = label.test(piece);
+    const perShareForm = metric === "epsDiluted" && RELEASE_PER_DILUTED_WORDING_RE.test(piece);
+    if (!labelled && !perShareForm) continue;
+    if (!REPORTED_CONTEXT_RE.test(piece) && !resultLead.test(piece) && !perShareForm) continue;
+    const candidates: { kind: "label" | "perShare"; m: RegExpExecArray }[] = [];
+    if (labelled) {
+      labelFirst.lastIndex = 0;
+      for (let m = labelFirst.exec(piece); m; m = labelFirst.exec(piece)) candidates.push({ kind: "label", m });
+    }
+    if (metric === "epsDiluted") {
+      perDilutedShare.lastIndex = 0;
+      for (let m = perDilutedShare.exec(piece); m; m = perDilutedShare.exec(piece)) candidates.push({ kind: "perShare", m });
+    }
+    candidates.sort((x, y) => x.m.index - y.m.index);
+    for (const { kind, m } of candidates) {
+      const [outerParen, innerParen, minus, intPart, frac, word] = kind === "label" ? m.slice(4) : m.slice(1);
+      const amountStart = kind === "label" ? m.index + m[0].length - m[3].length : m.index;
+      const gap = kind === "label" ? m[2] : "";
+      if (kind === "label") {
+        if (!qualifiedLabel(piece.slice(0, m.index))) continue;
+        if (RELEASE_CHANGE_RE.test(gap) && !/\bto\s*$/i.test(gap)) continue;
+      }
+      // A label-first figure: its label and the 40 characters before it; a per-share figure: the piece before it.
+      const lead = piece.slice(kind === "label" ? Math.max(0, m.index - 40) : 0, amountStart);
+      if (RELEASE_NON_GAAP_RE.test(lead)) continue;
+      const after = piece.slice(m.index + m[0].length);
+      if (money && RELEASE_PER_SHARE_AFTER_RE.test(after)) continue;
+      const attributed = after.match(RELEASE_ATTRIBUTED_RE);
+      if (kind === "label" && attributed && !label.test(attributed[1])) continue;
+      let scale = 1;
+      let scaleBasis: string | null = null;
+      if (money) {
+        if (word) {
+          scale = RELEASE_SCALE[word.toLowerCase()];
+          scaleBasis = "AS_WRITTEN";
+        } else if (tableScales.length > 1) {
+          continue;
+        } else if (tableScales.length === 1) {
+          scale = RELEASE_SCALE[tableScales[0]];
+          scaleBasis = `RELEASE_TABLE_IN_${tableScales[0].toUpperCase()}S`;
+        }
+      }
+      const magnitude = Number(`${intPart.replace(/,/g, "")}${frac ?? ""}`);
+      if (!Number.isFinite(magnitude)) continue;
+      const scaled = scale === 1 ? magnitude : Math.round(magnitude * scale);
+      // An unsigned figure stated as a loss is negative: "diluted net loss per share of $0.12", "net loss of $0.12 per
+      // diluted share", "free cash flow was negative $5 billion".
+      const statedLoss = /\bnegative\s*$/i.test(gap) || (metric === "epsDiluted" && (kind === "label"
+        ? /\bloss\b/i.test(m[1]) && !/\b(?:income|earnings)\b/i.test(m[1])
+        : /\bnet loss\b/i.test(lead.match(/\bnet (?:income|earnings|loss)\b/gi)?.pop() ?? "")));
+      const negative = !!outerParen || innerParen === "(" || minus === "-" || statedLoss;
+      const value = negative && scaled !== 0 ? -scaled : scaled;
+      const rawValue = (kind === "label" ? m[3] : m[0]).trim();
+      return { value, rawValue, scaleBasis, sentence: piece };
+    }
   }
   return null;
 }

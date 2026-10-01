@@ -49,6 +49,52 @@ ASTS_RELEASE = (
     "o Revenue backlog increased to approximately $1.30 billion in aggregate contracted revenue agreements"
 )
 AWARD_FIRST = "Received awards with an aggregate value of over $125 million; revenue was $31.5 million."
+# MU FQ4 2026 EX-99.1 (2.5.20): the highlights bullet has no result verb; the statement table is in millions.
+MU_HIGHLIGHTS = (
+    "Fourth Quarter Highlights • Revenue of $54.23 billion versus $37.38 billion for the prior year "
+    "• GAAP net income of $37.70 billion, or $32.87 per diluted share "
+    "• Non-GAAP net income of $38.10 billion, or $33.20 per diluted share "
+    "• Operating cash flow of $41.20 billion versus $28.60 billion for the prior year"
+)
+RELEASE_CASES = [
+    {"name": "muRevenue", "metric": "revenue", "text": MU_HIGHLIGHTS},
+    {"name": "muEps", "metric": "epsDiluted", "text": MU_HIGHLIGHTS},
+    {"name": "tableInMillions", "metric": "revenue", "text": "(in millions, except per share amounts) Quarter ended August 27, 2026 Revenue was $ 54,229."},
+    {"name": "twoTableScales", "metric": "revenue", "text": "(in millions) Revenue was $ 54,229. (in thousands) Other income was $ 3,000."},
+    {"name": "unscaledAsWritten", "metric": "revenue", "text": "Revenue was $ 1,234 for the period."},
+    {"name": "nonGaapRevenue", "metric": "revenue", "text": "Non-GAAP revenue was $5.0 billion."},
+    {"name": "adjustedEps", "metric": "epsDiluted", "text": "Adjusted diluted EPS was $1.20."},
+    {"name": "plusMinus", "metric": "revenue", "text": "Revenue was $5.0 billion ± $200 million."},
+    {"name": "netLossPerShare", "metric": "epsDiluted", "text": "GAAP net loss was $5.0 million, or $0.12 per diluted share."},
+    {"name": "lossLabelParen", "metric": "epsDiluted", "text": "Diluted net loss per share was $(0.12)."},
+    {"name": "incomeLossOuterParen", "metric": "epsDiluted", "text": "Diluted net income (loss) per share was ($0.40)."},
+    {"name": "grossMargin", "metric": "grossMargin", "text": "GAAP gross margin was 56.0%, operating income was $1.2 billion and free cash flow was $800 million."},
+    {"name": "operatingIncome", "metric": "operatingIncome", "text": "GAAP gross margin was 56.0%, operating income was $1.2 billion and free cash flow was $800 million."},
+    {"name": "freeCashFlow", "metric": "freeCashFlow", "text": "GAAP gross margin was 56.0%, operating income was $1.2 billion and free cash flow was $800 million."},
+    {"name": "revenuePerShare", "metric": "revenue", "text": "Revenue was $2.10 per share."},
+    {"name": "capexParen", "metric": "capex", "text": "Capital expenditures were $(1,234) million."},
+    {"name": "asts", "metric": "revenue", "text": ASTS_RELEASE},
+    {"name": "awardFirst", "metric": "revenue", "text": AWARD_FIRST},
+    {"name": "guidanceOnly", "metric": "revenue", "text": "For the fourth quarter we expect revenue to be $500 million."},
+    # Real release forms (2.5.20 corpus): segments, annual figures, change verbs, attribution, closing quotes.
+    {"name": "segmentRevenue", "metric": "revenue", "text": "Gaming revenue was $2.04 billion, down 44% sequentially. Services revenues were $1.4 billion, up 5%."},
+    {"name": "annualRevenue", "metric": "revenue", "text": "Revenue of $2.02 billion in 2025, an increase of 37.3% compared to $1.47 billion in 2024."},
+    {"name": "annualFiscalRevenue", "metric": "revenue", "text": "Marvell delivered record fiscal 2026 revenue of $8.195 billion, growing 42% year-over-year."},
+    {"name": "yearInGap", "metric": "revenue", "text": "Revenue for the fourth quarter of fiscal 2026 was $2.05 billion, with GAAP gross margin of 38.5%."},
+    {"name": "changeTo", "metric": "revenue", "text": "Net Sales Increased 5.2% to $11.3 Billion"},
+    {"name": "changeBy", "metric": "revenue", "text": "Revenue increased $500 million, or 10%, to $5.5 billion in the quarter."},
+    {"name": "attributedElsewhere", "metric": "capex", "text": "The Company generated $14.2 billion in cash from operations and spent $0.5 billion on capital expenditures, resulting in $13.7 billion of free cash flow."},
+    {"name": "negativeWord", "metric": "freeCashFlow", "text": "Free cash flow was negative $5 billion for Q1 as Oracle continued to invest."},
+    {"name": "closingQuote", "metric": "epsDiluted",
+     "text": "\u201cOur Q1 revenue guidance midpoint is $1.25 billion.\u201d Net revenue for the fourth quarter of fiscal year 2026 was $1.01 billion, with GAAP net loss of $7.2 billion, or $84.65 per diluted share."},
+]
+# SNDK FQ4 2026 EX-99.1 outlook table (2.5.20): a stated table scale and GAAP / Non-GAAP columns.
+SNDK_OUTLOOK = (
+    "Business Outlook for Fiscal First Quarter of 2027 (in millions, except per share amounts) GAAP Non-GAAP (1) "
+    "Revenue $10,300 - $10,800 $10,300 - $10,800 Gross Margin 83.0% - 84.9% 83.0% - 85.0% Operating Expenses $574 - $614 $520 - $540 "
+    "Tax Expense (2) N/A 15.0% Diluted Net Income Per Share N/A $44.00 - $46.00 Diluted Shares Outstanding ~ 155 ~ 155"
+)
+UNIT_FORMS = "Guidance Bloom Energy increases financial guidance for the full-year 2026: • Revenue: $3.4B - $3.8B • Revenue was $ 1,234 more than last year."
 KEYWORD_FIRST = "The Company expects revenue of between $40 million and $45 million for the third quarter. Gross margin of 38% to 40% is expected."
 GUIDANCE_ONLY = "For the fourth quarter we expect revenue to be $500 million."
 # COHR Q4 FY26 EX-99.1: metric first, forward verb after it, basis after the range (2.5.9).
@@ -220,9 +266,9 @@ const out = {
   guidanceNvda: r.guidanceRanges(d.nvdaOutlook),
   guidanceLite: r.guidanceRanges(d.liteOutlook),
   guidanceResults: r.guidanceRanges(d.resultsTable),
-  revenueAsts: r.reportedTextMetric(d.astsRelease, r.REVENUE_LABEL, r.USD_AMOUNT),
-  revenueAwardFirst: r.reportedTextMetric(d.awardFirst, r.REVENUE_LABEL, r.USD_AMOUNT),
-  revenueGuidanceOnly: r.reportedTextMetric(d.guidanceOnly, r.REVENUE_LABEL, r.USD_AMOUNT),
+  guidanceSndk: r.guidanceRanges(d.sndkOutlook),
+  guidanceUnitForms: r.guidanceRanges(d.unitForms),
+  releaseMetrics: Object.fromEntries(d.releaseCases.map((c) => [c.name, r.releaseTextMetric(c.text, c.metric)])),
   stems: d.stemWords.map(r.stemWord),
   ranked: r.rankEvidence(d.evidence, (e) => e.confidence).map((e) => e.id),
   pickLatest10q: f.pickConceptFacts(d.concepts, "10-Q", null),
@@ -258,7 +304,7 @@ def _node() -> str:
 def _data() -> dict:
     return {
         "aaoi": AAOI_MATCHES, "negation": NEGATION_MATCHES, "astsRelease": ASTS_RELEASE, "keywordFirst": KEYWORD_FIRST,
-        "awardFirst": AWARD_FIRST, "guidanceOnly": GUIDANCE_ONLY, "stemWords": STEM_WORDS, "evidence": EVIDENCE, "concepts": CONCEPTS,
+        "awardFirst": AWARD_FIRST, "guidanceOnly": GUIDANCE_ONLY, "releaseCases": RELEASE_CASES, "sndkOutlook": SNDK_OUTLOOK, "unitForms": UNIT_FORMS, "stemWords": STEM_WORDS, "evidence": EVIDENCE, "concepts": CONCEPTS,
         "filingConcepts": FILING_CONCEPTS, "cashConcepts": CASH_CONCEPTS, "beTie": BE_TIE_CONCEPTS, "malformed": MALFORMED_CONCEPTS,
         "cohrOutlook": COHR_OUTLOOK, "mixedBasis": MIXED_BASIS, "mrvlOutlook": MRVL_OUTLOOK, "vrtOutlook": VRT_OUTLOOK,
         "nvdaOutlook": NVDA_OUTLOOK, "liteOutlook": LITE_OUTLOOK, "resultsTable": RESULTS_TABLE,
@@ -298,9 +344,9 @@ def _python() -> dict:
         "guidanceNvda": er.guidance_ranges(d["nvdaOutlook"]),
         "guidanceLite": er.guidance_ranges(d["liteOutlook"]),
         "guidanceResults": er.guidance_ranges(d["resultsTable"]),
-        "revenueAsts": er.reported_text_metric(d["astsRelease"], er.REVENUE_LABEL, er.USD_AMOUNT),
-        "revenueAwardFirst": er.reported_text_metric(d["awardFirst"], er.REVENUE_LABEL, er.USD_AMOUNT),
-        "revenueGuidanceOnly": er.reported_text_metric(d["guidanceOnly"], er.REVENUE_LABEL, er.USD_AMOUNT),
+        "guidanceSndk": er.guidance_ranges(d["sndkOutlook"]),
+        "guidanceUnitForms": er.guidance_ranges(d["unitForms"]),
+        "releaseMetrics": {c["name"]: er.release_text_metric(c["text"], c["metric"]) for c in d["releaseCases"]},
         "stems": [er.stem_word(w) for w in d["stemWords"]],
         "ranked": [e["id"] for e in er.rank_evidence(d["evidence"], lambda e: e["confidence"])],
         "pickLatest10q": sf.pick_concept_facts(d["concepts"], "10-Q", None),
@@ -401,9 +447,49 @@ class TestRules(unittest.TestCase):
         self.assertEqual(period_for_excerpt(NVDA_OUTLOOK, nvda_at, 40)["label"], "Q3 2027", "not the FY2027 a cut look-back reads")
 
     def test_reported_revenue_skips_awards_backlog_and_guidance(self) -> None:
-        self.assertEqual(self.out["revenueAsts"]["rawValue"], "$31.5 million")
-        self.assertIsNone(self.out["revenueAwardFirst"], "a sentence with award wording is never a revenue result")
-        self.assertIsNone(self.out["revenueGuidanceOnly"])
+        m = self.out["releaseMetrics"]
+        self.assertEqual((m["asts"]["value"], m["asts"]["rawValue"]), (31_500_000, "$31.5 million"))
+        self.assertIsNone(m["awardFirst"], "a sentence with award wording is never a revenue result")
+        self.assertIsNone(m["guidanceOnly"])
+        self.assertIsNone(m["plusMinus"], "a midpoint ± tolerance is guidance wording")
+
+    def test_outlook_table_scale_and_columns(self) -> None:
+        g = self.out["guidanceSndk"]
+        # The table's "(in millions" scales unscaled amounts; each column carries its own basis.
+        self.assertEqual((g["revenue"]["low"], g["revenue"]["high"], g["revenue"]["basis"]), ("10,300 million", "10,800 million", "GAAP"))
+        self.assertEqual([(a["low"], a["basis"]) for a in g["revenue"]["alternates"]], [("10,300 million", "NON_GAAP")])
+        self.assertEqual((g["grossMargin"]["low"], g["grossMargin"]["high"], g["grossMargin"]["basis"]), ("83.0", "84.9", "GAAP"))
+        self.assertEqual([(a["low"], a["high"], a["basis"]) for a in g["grossMargin"]["alternates"]], [("83.0", "85.0", "NON_GAAP")])
+        self.assertEqual((g["eps"]["low"], g["eps"]["high"], g["eps"]["basis"]), ("44.00", "46.00", "NON_GAAP"), "an N/A GAAP cell puts the range in the Non-GAAP column")
+
+    def test_abbreviated_units_and_unit_boundaries(self) -> None:
+        g = self.out["guidanceUnitForms"]
+        self.assertEqual((g["revenue"]["low"], g["revenue"]["high"]), ("3.4B", "3.8B"))
+        self.assertNotIn("1,234", g["revenue"]["excerpt"])
+
+    def test_release_metrics_take_scale_basis_and_gaap_figures(self) -> None:
+        m = self.out["releaseMetrics"]
+        # MU FQ4 2026: a label-led bullet counts without a result verb; the per-diluted-share form is EPS.
+        self.assertEqual((m["muRevenue"]["value"], m["muRevenue"]["scaleBasis"]), (54_230_000_000, "AS_WRITTEN"))
+        self.assertEqual((m["muEps"]["value"], m["muEps"]["rawValue"]), (32.87, "$32.87 per diluted share"))
+        self.assertEqual((m["tableInMillions"]["value"], m["tableInMillions"]["scaleBasis"]), (54_229_000_000, "RELEASE_TABLE_IN_MILLIONS"))
+        self.assertIsNone(m["twoTableScales"], "an unscaled figure is never guessed between two declared scales")
+        self.assertEqual((m["unscaledAsWritten"]["value"], m["unscaledAsWritten"]["scaleBasis"]), (1234, None))
+        self.assertIsNone(m["nonGaapRevenue"])
+        self.assertIsNone(m["adjustedEps"])
+        self.assertIsNone(m["revenuePerShare"], "a per-share figure is not a total")
+        self.assertEqual([m[k]["value"] for k in ("netLossPerShare", "lossLabelParen", "incomeLossOuterParen")], [-0.12, -0.12, -0.4])
+        self.assertEqual((m["grossMargin"]["value"], m["operatingIncome"]["value"], m["freeCashFlow"]["value"]), (56, 1_200_000_000, 800_000_000))
+        self.assertEqual(m["capexParen"]["value"], -1_234_000_000)
+
+    def test_release_metrics_refuse_segments_annual_and_attributed_figures(self) -> None:
+        m = self.out["releaseMetrics"]
+        for name in ("segmentRevenue", "annualRevenue", "annualFiscalRevenue", "changeBy", "attributedElsewhere"):
+            self.assertIsNone(m[name], name)
+        self.assertEqual(m["yearInGap"]["value"], 2_050_000_000, "a fiscal year inside the quarter phrase is not another figure")
+        self.assertEqual(m["changeTo"]["value"], 11_300_000_000)
+        self.assertEqual(m["negativeWord"]["value"], -5_000_000_000)
+        self.assertEqual(m["closingQuote"]["value"], -84.65, "a quote's closing mark ends its sentence")
 
     def test_stems_and_ranking(self) -> None:
         self.assertEqual(self.out["stems"], ["launch", "launch", "launch", "launch", "bluebird", "releas", "releas", "offer", "class", "guidanc"])

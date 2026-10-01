@@ -79,7 +79,7 @@ from yfmcp.clients.edgar import (
     _edgar_list_exhibits_from_index, _edgar_get_html,
 )
 from yfmcp.parsing.html import (
-    _strip_html_tags, _parse_html_table, _parse_numeric_cell, _detect_unit_multiplier,
+    _strip_html_tags, _strip_html_blocks, _parse_html_table, _parse_numeric_cell, _detect_unit_multiplier,
     _MD_MAX_CELL_CHARS, _html_table_to_markdown, _html_to_markdown_fallback,
 )
 from yfmcp.parsing.extractors import (
@@ -10320,7 +10320,7 @@ async def _read_release_text(cik_int: int, accession_number: str, primary_url: s
         html = None
     if not html:
         return {"url": url, "status": "NOT_READ", "text": None}
-    return {"url": url, "status": "READ", "text": _strip_html_tags(_sanitize_sec_html(html))}
+    return {"url": url, "status": "READ", "text": _strip_html_blocks(_sanitize_sec_html(html))}
 
 
 @yfinance_server.tool(

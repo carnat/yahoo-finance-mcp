@@ -29,10 +29,10 @@ import {
 import { extractEarningsPeriodFromText, type EarningsPeriodInfo } from "./earnings-period.js";
 import { FILING_PERIOD_HELP, filingFactInAccession, parseFilingPeriod, pickConceptFacts, REVENUE_CONCEPTS, selectFiscalYearRows } from "./sec-facts.js";
 import { fundingCapexSchedule } from "./funding-schedule.js";
-import { guidanceHistory, periodForExcerpt, type ReleaseText } from "./guidance-history.js";
+import { guidanceHistory, parseAmount, periodForExcerpt, unitOf as guidanceUnitOf, type ReleaseText } from "./guidance-history.js";
 import { operatingDriverLedger } from "./driver-ledger.js";
 import { parseShareScenarios, shareCountScenarios } from "./share-scenarios.js";
-import { customerConcentration, EPS_AMOUNT, EPS_LABEL, guidanceRanges, PCT_AMOUNT, rankEvidence, reportedTextMetric, REVENUE_LABEL, stemWord, USD_AMOUNT, type ConcentrationFinding } from "./extraction-rules.js";
+import { customerConcentration, guidanceRanges, rankEvidence, releaseTextMetric, stemWord, type ConcentrationFinding, type ReleaseMetricName } from "./extraction-rules.js";
 import { adsRatio, majorPrice, marketInputsFromQuoteSummary, peerValuations, valuationSnapshot, type MarketInputs } from "./valuation.js";
 import { coverReadsNeeded, coverShareCounts, foreignFiler, historicalValuation, latestShareCount, peerMedians, taxonomyOf, valuationDates, type Bar, type PeriodicFiling, type Split } from "./valuation-history.js";
 import { DEFAULT_TOLERANCE_PCT, METRICS as RECONCILE_METRICS, metricReconciliation, resolvePeriod } from "./metric-reconciliation.js";
@@ -5911,13 +5911,25 @@ export function geoColumnHeader(rows: string[][], regionRowIdx: number, k: numbe
 const STATED_PCT_TOLERANCE = 1.0;
 const SHARE_HEADER_RE = /%\s*of\b|\bpercent(?:age)?\s+of\b/i;
 
-/** Detect the monetary unit multiplier from table HTML and surrounding context. */
+// A table's stated scale: "(in thousands)", "$ millions", "thousands of dollars", "($000)", "(000s)" (2.5.20:
+// COHR's "by market ($000):" was read as millions, 1000x too large).
+const UNIT_SCALE_RE = /\bin\s+(billions|millions|thousands)\b|\$\s*(billions|millions|thousands)\b|\b(billions|millions|thousands)\s+of\s+(?:u\.?s\.?\s+)?dollars\b|\(\s*(?:in\s+)?\$?\s*(000)'?s?\s*\)|\$\s*(000)'?s\b/gi;
+const UNIT_SCALE_WORD: Record<string, number> = { billions: 1e9, millions: 1e6, thousands: 1e3, "000": 1e3 };
+
+function statedUnitScales(html: string): number[] {
+  const text = html.replace(/<[^>]+>/g, " ").replace(/&nbsp;|&#160;|&#xa0;/gi, " ").replace(/&#36;|&dollar;/gi, "$").replace(/\s+/g, " ");
+  return [...text.matchAll(UNIT_SCALE_RE)].map((m) => UNIT_SCALE_WORD[(m.slice(1).find(Boolean) ?? "").toLowerCase()]);
+}
+
+/**
+ * The monetary unit multiplier for a table: the scale the table itself states, else the statement in its
+ * lead-in nearest the table, else millions (the most common 10-K scale).
+ */
 function detectUnitMultiplier(tableHtml: string, contextHtml: string): number {
-  const combined = (tableHtml + contextHtml).toLowerCase();
-  if (/in billions|\$ billions/.test(combined)) return 1e9;
-  if (/in thousands|\$ thousands/.test(combined)) return 1e3;
-  if (/in millions|\$ millions/.test(combined)) return 1e6;
-  return 1e6; // most common 10-K scale
+  const own = statedUnitScales(tableHtml);
+  if (own.length > 0) return own[0];
+  const lead = statedUnitScales(contextHtml);
+  return lead.length > 0 ? lead[lead.length - 1] : 1e6;
 }
 
 const TOTAL_LABELS = new Set([
@@ -5992,7 +6004,7 @@ export function extractGeoRevenueFromHtml(
   denominator: number | null;
   sectionHeading: string;
   parsedTables: unknown[];
-  unitScale: "thousands" | "millions" | "actual";
+  unitScale: "thousands" | "millions" | "billions" | "actual";
   rawValue: string | null;
   rawDenominator: string | null;
   sourceRows: string[][];
@@ -6017,6 +6029,8 @@ export function extractGeoRevenueFromHtml(
     const tableText = stripHtmlTags(tableHtml).slice(0, 600);
     const context = `${lead} ${tableText}`.toLowerCase();
     if (!/revenue|net sales|\bsales\b/.test(context) || /square f(?:oo|ee)t/i.test(tableText)) continue;
+    // An asset table after a revenue paragraph is not revenue: COHR's long-lived assets by country (2.5.20).
+    if (/long-lived assets|property,? plant,? and equipment|\btotal assets\b|identifiable assets/i.test(tableText) && !/revenue|net sales|\bsales\b/i.test(tableText)) continue;
     const rows = parseFinancialTableRows(tableHtml);
     if (rows.length < 2) continue;
     const score = /geograph|by region|by country|by location|region of|country of|location of (?:the )?customer/.test(context) ? 2 : 1;
@@ -6038,7 +6052,8 @@ export function extractGeoRevenueFromHtml(
     // Find total row
     let totalRowIdx: number | null = null;
     for (let i = 0; i < rows.length; i++) {
-      if (rows[i].some(c => TOTAL_LABELS.has(c.trim().toLowerCase()))) { totalRowIdx = i; break; }
+      // A total row carries amounts: COHR's "Revenues" header row is a caption, not the total (2.5.20).
+      if (rows[i].some(c => TOTAL_LABELS.has(c.trim().toLowerCase())) && rows[i].some(c => parseNumericCell(c) !== null)) { totalRowIdx = i; break; }
     }
     if (totalRowIdx === null) {
       for (let i = rows.length - 1; i >= 0; i--) {
@@ -6065,7 +6080,7 @@ export function extractGeoRevenueFromHtml(
     const unitMult = detectUnitMultiplier(tableHtml, contextHtml);
     const usd = regionVal * unitMult;
     const denominator = totalVal * unitMult;
-    const unitScale = unitMult === 1e3 ? "thousands" : unitMult === 1e6 ? "millions" : "actual";
+    const unitScale = unitMult === 1e3 ? "thousands" : unitMult === 1e6 ? "millions" : unitMult === 1e9 ? "billions" : "actual";
 
     // Find nearest section heading
     const preHtml = html.slice(Math.max(0, tbl.pos - 6_000), tbl.pos);
@@ -12382,7 +12397,7 @@ const _INDEX_KEYWORDS = [
   "japan", "asia", "rest of asia",
 ];
 
-function _stripHtmlTagsIdx(html: string): string {
+export function _stripHtmlTagsIdx(html: string): string {
   const sanitizedHtml = html
     .replace(/<!--[\s\S]*?-->/g, " ")
     .replace(/<script\b[^>]*>[\s\S]*?<\/script[^>]*>/gi, " ")
@@ -12395,7 +12410,8 @@ function _stripHtmlTagsIdx(html: string): string {
   // (ASTS 10-Q headings, 2.4.5). Whitespace written in the HTML still separates.
   const noTags = blockBroken.replace(/<\/?(?:span|font|b|i|u|em|strong|a|sup|sub|small|ix:[a-z]+)\b[^>]*>/gi, "").replace(/<[^>]+>/g, " ");
   const decoded = decodeHtmlEntities(noTags);
-  const lines = decoded.split("\n").map(line => line.replace(/[ \t]+/g, " ").trim());
+  // A no-break space is a space (2.5.20): Python's ASCII \s would not match it in the mirrored readers.
+  const lines = decoded.split("\n").map(line => line.replace(/[ \t\u00a0]+/g, " ").trim());
   return lines.filter(Boolean).join("\n");
 }
 
@@ -14622,10 +14638,15 @@ export function extractSegmentTableFromHtml(html: string): { result: SegmentTabl
         }
       });
     }
+    // Without a year column, a "Total" column is the company figure: VRT's disaggregation table is by region
+    // ("Americas | Asia Pacific | EMEA | Total"), and its first amount column is the Americas (2.5.20).
+    const totalHeaderIdx = headerIdx >= 0 ? -1 : rows.findIndex((row) => row.slice(1).some((cell) => /^total$/i.test(cell.trim())) && !row.some((cell) => parseNumericCell(cell) != null));
+    const columnHeader = header ?? (totalHeaderIdx >= 0 ? rows[totalHeaderIdx] : null);
+    const valueCol: number | null = header ? yearCol : totalHeaderIdx >= 0 ? rows[totalHeaderIdx].findIndex((cell, i) => i > 0 && /^total$/i.test(cell.trim())) : null;
     const valueOf = (row: string[]): { raw: string; value: number } | null => {
-      if (header && yearCol != null) {
-        const offset = Math.max(0, row.length - header.length);
-        const raw = row[yearCol + offset];
+      if (columnHeader && valueCol != null) {
+        const offset = Math.max(0, row.length - columnHeader.length);
+        const raw = row[valueCol + offset];
         const value = raw != null ? parseNumericCell(raw) : null;
         return raw != null && value != null ? { raw, value } : null;
       }
@@ -14637,7 +14658,7 @@ export function extractSegmentTableFromHtml(html: string): { result: SegmentTabl
     };
     const segments: SegmentTableRow[] = [];
     let total: SegmentTableRow | null = null;
-    for (const row of rows.slice(headerIdx + 1)) {
+    for (const row of rows.slice(Math.max(headerIdx, totalHeaderIdx) + 1)) {
       const label = (row[0] ?? "").trim();
       const cell = row.length > 1 ? valueOf(row) : null;
       if (!label) {
@@ -14668,7 +14689,7 @@ export function extractSegmentTableFromHtml(html: string): { result: SegmentTabl
         total,
         tableIndex,
         title: before.slice(-300).split(/(?<=[.:])\s+/).pop() ?? null,
-        column: header && yearCol != null ? header[yearCol] : null,
+        column: columnHeader && valueCol != null ? columnHeader[valueCol] : null,
         unitScale: unitMultiplier === 1e9 ? "billions" : unitMultiplier === 1e6 ? "millions" : unitMultiplier === 1e3 ? "thousands" : "actual",
         unitMultiplier,
       },
@@ -16659,30 +16680,10 @@ async function fetchPublicHtml(url: string, maxBytes = 3_000_000): Promise<strin
   }
 }
 
-function scaleNumberFromText(raw: unknown): number | null {
-  if (typeof raw !== "string" && typeof raw !== "number") return null;
-  const s = String(raw).trim().replace(/,/g, "");
-  const m = s.match(/[-+]?\d+(?:\.\d+)?/);
-  if (!m) return null;
-  let n = Number(m[0]);
-  if (!Number.isFinite(n)) return null;
-  const low = s.toLowerCase();
-  // Whole units once scaled: 2.05 billion is 2050000000, not 2049999999.9999998.
-  if (low.includes("billion") || /\bbn\b/.test(low) || /b$/.test(low)) n = Math.floor(n * 1_000_000_000 + 0.5);
-  else if (low.includes("million") || /m$/.test(low)) n = Math.floor(n * 1_000_000 + 0.5);
-  else if (low.includes("thousand") || /k$/.test(low)) n = Math.floor(n * 1_000 + 0.5);
-  return n;
-}
-
-/** A reported release value for a label, anchored after it (extraction-rules.ts), scaled to units. */
-function extractReportedTextMetric(
-  text: string,
-  labelSource: string,
-  valueSource: string,
-): { value: number | null; rawValue: string | null; excerpt: string | null } {
-  const hit = reportedTextMetric(text, labelSource, valueSource);
-  const value = hit ? scaleNumberFromText(hit.rawValue) : null;
-  return value != null && hit ? { value, rawValue: hit.rawValue, excerpt: compactExcerpt(hit.sentence, 220) } : { value: null, rawValue: null, excerpt: null };
+/** A reported release figure under the 2.5.20 rules (extraction-rules.ts), in units, with its excerpt. */
+function extractReleaseTextMetric(text: string, metric: ReleaseMetricName): { value: number | null; rawValue: string | null; scaleBasis: string | null; excerpt: string | null } {
+  const hit = releaseTextMetric(text, metric);
+  return hit ? { value: hit.value, rawValue: hit.rawValue, scaleBasis: hit.scaleBasis, excerpt: compactExcerpt(hit.sentence, 220) } : { value: null, rawValue: null, scaleBasis: null, excerpt: null };
 }
 
 const MANAGEMENT_COMMENTARY_TOPIC_ALIASES: Record<string, string[]> = {
@@ -17251,12 +17252,12 @@ export async function extractEarningsMetrics(
       if (!hasHighConfidence()) {
         const text = _stripHtmlTagsIdx(_sanitizeFilingHtml(html));
         sourcePeriodInfo = extractEarningsPeriodFromText(text);
-        const rev = extractReportedTextMetric(text, REVENUE_LABEL, USD_AMOUNT);
-        const eps = extractReportedTextMetric(text, EPS_LABEL, EPS_AMOUNT);
-        const gm = extractReportedTextMetric(text, "\\bgross margin\\b", PCT_AMOUNT);
-        const op = extractReportedTextMetric(text, "\\boperating income\\b", USD_AMOUNT);
-        const fcf = extractReportedTextMetric(text, "\\bfree cash flow\\b", USD_AMOUNT);
-        const capex = extractReportedTextMetric(text, "\\b(?:capital expenditures|capex)\\b", USD_AMOUNT);
+        const rev = extractReleaseTextMetric(text, "revenue");
+        const eps = extractReleaseTextMetric(text, "epsDiluted");
+        const gm = extractReleaseTextMetric(text, "grossMargin");
+        const op = extractReleaseTextMetric(text, "operatingIncome");
+        const fcf = extractReleaseTextMetric(text, "freeCashFlow");
+        const capex = extractReleaseTextMetric(text, "capex");
         const setFallbackMetric = (key: string, val: Record<string, unknown>): void => {
           metrics[key] = val;
           const ev = val.evidence;
@@ -17269,15 +17270,15 @@ export async function extractEarningsMetrics(
           periodMatch: Boolean(sourcePeriodInfo.period),
         });
 
-        if (rev.value != null) setFallbackMetric("revenue", textMetric({ value: rev.value, unit: "USD", rawValue: rev.rawValue, evidence: contentEv(rev.excerpt) }));
+        if (rev.value != null) setFallbackMetric("revenue", textMetric({ value: rev.value, unit: "USD", rawValue: rev.rawValue, scaleBasis: rev.scaleBasis, evidence: contentEv(rev.excerpt) }));
         if (eps.value != null) setFallbackMetric("epsDiluted", textMetric({ value: eps.value, unit: "USD/share", rawValue: eps.rawValue, evidence: contentEv(eps.excerpt) }));
         if (gm.value != null) {
           const pct = Number(gm.value);
           setFallbackMetric("grossMargin", textMetric({ valueRatio: Number((pct / 100).toFixed(6)), valuePct: pct, rawValue: gm.rawValue, evidence: contentEv(gm.excerpt) }));
         }
-        if (op.value != null) setFallbackMetric("operatingIncome", textMetric({ value: op.value, unit: "USD", rawValue: op.rawValue, evidence: contentEv(op.excerpt) }));
-        if (fcf.value != null) setFallbackMetric("freeCashFlow", textMetric({ value: fcf.value, unit: "USD", rawValue: fcf.rawValue, evidence: contentEv(fcf.excerpt) }));
-        if (capex.value != null) setFallbackMetric("capex", textMetric({ value: capex.value, unit: "USD", rawValue: capex.rawValue, evidence: contentEv(capex.excerpt) }));
+        if (op.value != null) setFallbackMetric("operatingIncome", textMetric({ value: op.value, unit: "USD", rawValue: op.rawValue, scaleBasis: op.scaleBasis, evidence: contentEv(op.excerpt) }));
+        if (fcf.value != null) setFallbackMetric("freeCashFlow", textMetric({ value: fcf.value, unit: "USD", rawValue: fcf.rawValue, scaleBasis: fcf.scaleBasis, evidence: contentEv(fcf.excerpt) }));
+        if (capex.value != null) setFallbackMetric("capex", textMetric({ value: capex.value, unit: "USD", rawValue: capex.rawValue, scaleBasis: capex.scaleBasis, evidence: contentEv(capex.excerpt) }));
       }
     }
   } else if (!hasHighConfidence() && !srcUrl.startsWith("https://www.sec.gov/Archives/")) {
@@ -17362,11 +17363,16 @@ export async function extractGuidance(ticker: string, period = "latest"): Promis
   const alternates = (r: NonNullable<typeof rev>, parse: (t: string) => number | null, lowKey: string, highKey: string) =>
     r.alternates.map((a) => ({ basis: a.basis, statedAs: a.statedAs, targetPeriod: targetPeriod(a.excerpt), [lowKey]: parse(a.low), [highKey]: parse(a.high), excerpt: compactExcerpt(a.excerpt) }));
   const plain = (t: string): number | null => (Number.isFinite(Number(t)) ? Number(t) : null);
+  // An end without a unit takes the other end's ("$2.0 to $2.4 billion"), as get_guidance_history reads it (2.5.20).
+  const amounts = (r: { low: string; high: string }): { low: number | null; high: number | null } => {
+    const fallback = guidanceUnitOf(r.high) ?? guidanceUnitOf(r.low);
+    return { low: parseAmount(r.low, fallback).value, high: parseAmount(r.high, fallback).value };
+  };
   if (rev) {
-    const low = scaleNumberFromText(rev.low);
-    const high = scaleNumberFromText(rev.high);
+    const { low, high } = amounts(rev);
     if (low != null && high != null) {
-      guidance.revenue = { status: "FOUND", basis: rev.basis, statedAs: rev.statedAs, targetPeriod: targetPeriod(rev.excerpt), low, high, midpoint: (low + high) / 2, unit: "USD", evidence: [ev(rev.excerpt)], alternates: alternates(rev, scaleNumberFromText, "low", "high") };
+      const revAlternates = rev.alternates.map((a) => ({ basis: a.basis, statedAs: a.statedAs, targetPeriod: targetPeriod(a.excerpt), ...amounts(a), excerpt: compactExcerpt(a.excerpt) }));
+      guidance.revenue = { status: "FOUND", basis: rev.basis, statedAs: rev.statedAs, targetPeriod: targetPeriod(rev.excerpt), low, high, midpoint: (low + high) / 2, unit: "USD", evidence: [ev(rev.excerpt)], alternates: revAlternates };
     }
   }
   if (gm) {

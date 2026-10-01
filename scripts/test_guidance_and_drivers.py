@@ -258,7 +258,8 @@ def _python_outputs() -> dict:
         "ledgerUnread": dl.operating_driver_ledger(ticker="asts", companyfacts=None, inline_facts=None, filing=None, release=None, statements=[]),
         "figures": [dl.figures_in(s) for s in ("Revenue was $14.7 million in 2026.", "We had 1,020 full-time employees.", "In 2025 and 2026 we grew 12%.",
                                                 "The 10-Q lists 3 of 4 items.", "Capacity reached 1.5 GW and 300 MW.",
-                                                "Orbital launch of BlueBird 8-13 marks six spacecraft, with Block 2 satellites and 45 satellites planned.")],
+                                                "Orbital launch of BlueBird 8-13 marks six spacecraft, with Block 2 satellites and 45 satellites planned.",
+                                                "Revenue: $3.4B - $3.8B")],
     }
 
 
@@ -293,7 +294,8 @@ const out = {
   ledgerUnread: dl.operatingDriverLedger({ ticker: "asts", companyfacts: null, inlineFacts: null, filing: null, release: null, statements: [] }),
   figures: ["Revenue was $14.7 million in 2026.", "We had 1,020 full-time employees.", "In 2025 and 2026 we grew 12%.",
     "The 10-Q lists 3 of 4 items.", "Capacity reached 1.5 GW and 300 MW.",
-    "Orbital launch of BlueBird 8-13 marks six spacecraft, with Block 2 satellites and 45 satellites planned."].map((s) => dl.figuresIn(s)),
+    "Orbital launch of BlueBird 8-13 marks six spacecraft, with Block 2 satellites and 45 satellites planned.",
+    "Revenue: $3.4B - $3.8B"].map((s) => dl.figuresIn(s)),
 };
 console.log(JSON.stringify(out));
 """
@@ -591,6 +593,7 @@ class TestDriverLedger(unittest.TestCase):
     def test_figures(self) -> None:
         self.assertEqual([f["asWritten"] for f in dl.figures_in("Revenue was $14.7 million in 2026.")], ["$14.7 million"])
         self.assertEqual([f["asWritten"] for f in dl.figures_in("In 2025 and 2026 we grew 12%.")], ["12%"])
+        self.assertEqual([(f["asWritten"], f["unitAsWritten"]) for f in dl.figures_in("Revenue: $3.4B - $3.8B")], [("$3.4B", "B"), ("$3.8B", "B")], "2.5.20")
         self.assertEqual(dl.figures_in("The 10-Q lists 3 of 4 items."), [{"asWritten": "4 items", "number": 4.0, "currency": None, "unitAsWritten": "items"}])
         self.assertEqual([f["unitAsWritten"] for f in dl.figures_in("Capacity reached 1.5 GW and 300 MW.")], ["GW", "MW"])
         # Numbers inside names are not figures.

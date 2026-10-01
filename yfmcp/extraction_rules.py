@@ -13,6 +13,7 @@ requires identical output from both.
 
 from __future__ import annotations
 
+import math
 import re
 
 _F = re.I | re.A
@@ -127,7 +128,8 @@ def _js_num(value: float) -> str:
 
 # ── Guidance ranges ─────────────────────────────────────────────────────────
 
-_AMOUNT = r"([0-9][0-9.,]*(?:\s*(?:billion|million|thousand|bn|m|k))?)"
+# "$3.9B" carries its unit; "$1,234 more" carries none (2.5.20).
+_AMOUNT = r"([0-9][0-9.,]*(?:\s*(?:billion|million|thousand|bn|mn|b|m|k)\b)?)"
 _RANGE_SEP = r"\s*(?:to|and|-|–|—)\s*"
 # "full year 2026 revenue guidance of $150.0 million to $200.0 million" (ASTS)
 _REVENUE_FIRST_RE = re.compile(rf"\brevenues?\s+(?:guidance|outlook|forecast)\b[^$.]{{0,40}}\$\s*{_AMOUNT}{_RANGE_SEP}\$?\s*{_AMOUNT}", _F)
@@ -152,12 +154,12 @@ _METRIC_FIRST_EPS_RE = re.compile(rf"{_EPS_LABEL}[^.$%]{{0,120}}?{_FORWARD_VERB}
 # +/- $0.05 per share". The bounds are computed exactly (_pm_bounds).
 _PLUS_MINUS = r"(?:\+\s*/\s*[-−]|±|plus or minus)"
 _PM_NUMBER = r"([0-9][0-9,]*(?:\.[0-9]+)?)"
-_PM_UNIT = r"(?:\s*(billion|million|thousand|bn|m|k)\b)?"
+_PM_UNIT = r"(?:\s*(billion|million|thousand|bn|mn|b|m|k)\b)?"
 # A comma may precede the tolerance (NVDA: "$108.0 billion, plus or minus 2%").
-_PM_TOLERANCE = rf"\s*,?\s*{_PLUS_MINUS}\s*(\$)?\s*{_PM_NUMBER}\s*(%|(?:billion|million|thousand|bn|m|k)\b)?"
+_PM_TOLERANCE = rf"\s*,?\s*{_PLUS_MINUS}\s*(\$)?\s*{_PM_NUMBER}\s*(%|(?:billion|million|thousand|bn|mn|b|m|k)\b)?"
 _METRIC_FIRST_REVENUE_PM_RE = re.compile(rf"\brevenues?\b[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%]{{0,30}}\$\s*{_PM_NUMBER}{_PM_UNIT}{_PM_TOLERANCE}", _F)
 _METRIC_FIRST_EPS_PM_RE = re.compile(rf"{_EPS_LABEL}[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%]{{0,30}}\$\s*{_PM_NUMBER}{_PM_UNIT}{_PM_TOLERANCE}", _F)
-_UNIT_EXP = {"billion": 9, "bn": 9, "million": 6, "m": 6, "thousand": 3, "k": 3}
+_UNIT_EXP = {"billion": 9, "bn": 9, "b": 9, "million": 6, "mn": 6, "m": 6, "thousand": 3, "k": 3}
 # A margin and a tolerance in points (NVDA: "gross margins are expected to be 74.0%, plus or minus 50 basis points").
 _METRIC_FIRST_GROSS_MARGIN_PM_RE = re.compile(rf"\bgross margins?\b[^.$%]{{0,120}}?{_FORWARD_VERB}[^$.%0-9]{{0,30}}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%\s*,?\s*{_PLUS_MINUS}\s*([0-9]+(?:\.[0-9]+)?)\s*(basis points?|bps|percentage points?|%)", _F)
 # Release tables, read as flattened text (2.5.10, VRT): "Third Quarter 2026 Guidance Net sales $3,650M -
@@ -165,14 +167,34 @@ _METRIC_FIRST_GROSS_MARGIN_PM_RE = re.compile(rf"\bgross margins?\b[^.$%]{{0,120
 # the range, under a guidance or outlook heading with no sentence break between them.
 _TABLE_FOOTNOTE = r"(?:\s*\(\d\))?"
 # An outlook bullet puts "of" or "in the range of" between label and range (LITE: "Non-GAAP diluted net
-# income per share of $4.05 to $4.35").
-_ROW_LEAD = r"\s*(?:of\s+|in the range of\s+|:\s*)?"
+# income per share of $4.05 to $4.35"); a two-column table may put an "N/A" first cell there (SNDK, 2.5.20).
+_ROW_LEAD = r"\s*(?:of\s+|in the range of\s+|:\s*)?(?:N/A\s+)?"
 _TABLE_REVENUE_RE = re.compile(rf"\b(?:net sales|(?:total )?(?:net )?revenues?){_TABLE_FOOTNOTE}{_ROW_LEAD}\$\s*{_AMOUNT}{_RANGE_SEP}\$?\s*{_AMOUNT}", _F)
 _TABLE_GROSS_MARGIN_RE = re.compile(rf"\b(?:(?:adjusted|non-GAAP|GAAP)\s+)?gross margins?{_TABLE_FOOTNOTE}{_ROW_LEAD}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%{_RANGE_SEP}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%", _F)
 _TABLE_EPS_RE = re.compile(rf"\b(?:(?:adjusted|non-GAAP|GAAP)\s+)?(?:diluted\s+)?(?:eps|earnings per share|net income per share){_TABLE_FOOTNOTE}{_ROW_LEAD}\$\s*([0-9]+(?:\.[0-9]+)?){_RANGE_SEP}\$?\s*([0-9]+(?:\.[0-9]+)?)", _F)
 _TABLE_HEADING_RE = re.compile(r"\b(?:guidance|outlook)\b", _F)
 # "... diluted EPS of $5.82 to $5.92 and adjusted diluted EPS of $6.65 to $6.75" (VRT): the second range.
 _EPS_CONTINUATION_RE = re.compile(r"\band (?:adjusted|non-GAAP|GAAP) (?:diluted )?(?:eps|earnings per share|net income per share) of \$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|-|–|—)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", _F)
+
+
+# An outlook table's scale and columns (2.5.20, SNDK: "Business Outlook ... (in millions, except per share
+# amounts) GAAP Non-GAAP (1) Revenue $10,300 - $10,800 $10,300 - $10,800 Gross Margin 83.0% - 84.9% 83.0% -
+# 85.0% ... Diluted Net Income Per Share N/A $44.00 - $46.00"). Both are read only between the outlook heading
+# and the row, with no sentence break after them.
+_OUTLOOK_SCALE_RE = re.compile(r"\(\s*(?:\$|US\$|dollars|amounts)?\s*in\s+(thousands|millions|billions)\b", _F)
+_OUTLOOK_COLUMNS_RE = re.compile(r"\b(Non-?\s?GAAP|GAAP)(?:\s*\(\d\))?\s+(Non-?\s?GAAP|GAAP)(?:\s*\(\d\))?(?=\s+[A-Z])", _F)
+_SENTENCE_BREAK_RE = re.compile(r"[.!?]\s+[A-Z]")
+_SECOND_AMOUNT_CELL_RE = re.compile(rf"^\s*\$\s*{_AMOUNT}{_RANGE_SEP}\$?\s*{_AMOUNT}", _F)
+_SECOND_PCT_CELL_RE = re.compile(r"^\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%\s*(?:to|and|-|–|—)\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%", _F)
+
+
+def _outlook_statement(text: str, at: int, pattern: re.Pattern) -> re.Match | None:
+    """The last statement a pattern finds in the 400 characters before `at`, if no sentence break follows it."""
+    before = text[max(0, at - 400):at]
+    last = None
+    for m in pattern.finditer(before):
+        last = m
+    return last if last is not None and not _SENTENCE_BREAK_RE.search(before[last.end():]) else None
 
 
 def _under_guidance_heading(text: str, at: int) -> bool:
@@ -255,6 +277,10 @@ def _clause_basis(clause: str) -> str:
     return "GAAP" if _GAAP_RE.search(clause) else "NOT_STATED"
 
 
+def _column_basis(word: str) -> str:
+    return "NON_GAAP" if _NON_GAAP_RE.search(word) else "GAAP"
+
+
 def _range_basis(text: str, at: int, length: int) -> str:
     before = text[max(0, at - 200):at]
     start = 0
@@ -270,7 +296,7 @@ def guidance_ranges(text: str, period_of=None) -> dict:
     wins; metric-first wording ("revenue ... is expected to be between") is read
     when there is none, then release-table rows under a guidance heading. Ranges
     for the same metric on another basis are kept as alternates."""
-    def pick(*patterns):
+    def pick(money, *patterns):
         found = []
         periods = []
         for pattern, kind in patterns:
@@ -286,13 +312,36 @@ def guidance_ranges(text: str, period_of=None) -> dict:
                     bounds = {"low": m.group(1), "high": m.group(2)}
                 if not bounds:
                     continue
+                first_at = m.start(1) if m.start(1) >= 0 else at
+                # An unscaled amount takes the outlook table's stated scale: "$10,300 - $10,800" (in millions).
+                scale_word = None
+                if money and not re.search(r"[a-z]\s*$", bounds["low"], _F) and not re.search(r"[a-z]\s*$", bounds["high"], _F):
+                    stated = _outlook_statement(text, first_at, _OUTLOOK_SCALE_RE)
+                    scale_word = re.sub(r"s$", "", stated.group(1).lower()) if stated else None
+
+                def scaled(t: str, word=scale_word) -> str:
+                    return f"{t} {word}" if word else t
+
+                # Under a "GAAP Non-GAAP" header a range takes its column's basis; an "N/A" first cell puts it in the second.
+                columns = _outlook_statement(text, first_at, _OUTLOOK_COLUMNS_RE)
+                two_columns = None
+                if columns and _column_basis(columns.group(1)) != _column_basis(columns.group(2)):
+                    two_columns = [_column_basis(columns.group(1)), _column_basis(columns.group(2))]
+                column = 1 if two_columns and re.search(r"\bN/A\s*\$?\s*$", text[max(0, first_at - 12):first_at], _F) else 0
                 found.append({
-                    "excerpt": m.group(0), "low": bounds["low"], "high": bounds["high"],
+                    "excerpt": m.group(0), "low": scaled(bounds["low"]), "high": scaled(bounds["high"]),
                     # A table row's basis is its own label: the rows above it belong to other metrics.
-                    "basis": _clause_basis(m.group(0)) if kind == "table" else _range_basis(text, at, len(m.group(0))),
+                    "basis": two_columns[column] if two_columns else _clause_basis(m.group(0)) if kind == "table" else _range_basis(text, at, len(m.group(0))),
                     "statedAs": "OUTLOOK_ROW" if kind == "table" else "RANGE" if kind == "range" else "MIDPOINT_PLUS_MINUS",
                 })
                 periods.append(period_of(at, len(m.group(0))) if period_of else None)
+                if two_columns and column == 0 and kind in ("range", "table"):
+                    rest = text[m.end():]
+                    second = (_SECOND_PCT_CELL_RE if re.search(r"%\s*$", m.group(0)) else _SECOND_AMOUNT_CELL_RE).search(rest)
+                    if second:
+                        found.append({"excerpt": m.group(0) + second.group(0), "low": scaled(second.group(1)), "high": scaled(second.group(2)),
+                                      "basis": two_columns[1], "statedAs": "OUTLOOK_ROW" if kind == "table" else "RANGE"})
+                        periods.append(period_of(at, len(m.group(0))) if period_of else None)
         if not found:
             return None
         primary, rest = found[0], found[1:]
@@ -304,50 +353,175 @@ def guidance_ranges(text: str, period_of=None) -> dict:
                 alternates.append(r)
         return {**primary, "alternates": alternates}
     return {
-        "revenue": pick((_REVENUE_FIRST_RE, "range"), (_KEYWORD_FIRST_RE, "range"), (_METRIC_FIRST_REVENUE_RE, "range"),
+        "revenue": pick(True, (_REVENUE_FIRST_RE, "range"), (_KEYWORD_FIRST_RE, "range"), (_METRIC_FIRST_REVENUE_RE, "range"),
                         (_METRIC_FIRST_REVENUE_PM_RE, "pm_amount"), (_TABLE_REVENUE_RE, "table")),
-        "grossMargin": pick((_GROSS_MARGIN_RE, "range"), (_METRIC_FIRST_GROSS_MARGIN_RE, "range"),
+        "grossMargin": pick(False, (_GROSS_MARGIN_RE, "range"), (_METRIC_FIRST_GROSS_MARGIN_RE, "range"),
                             (_METRIC_FIRST_GROSS_MARGIN_PM_RE, "pm_points"), (_TABLE_GROSS_MARGIN_RE, "table")),
-        "eps": pick((_EPS_RE, "range"), (_EPS_CONTINUATION_RE, "range"), (_METRIC_FIRST_EPS_RE, "range"),
+        "eps": pick(False, (_EPS_RE, "range"), (_EPS_CONTINUATION_RE, "range"), (_METRIC_FIRST_EPS_RE, "range"),
                     (_METRIC_FIRST_EPS_PM_RE, "pm_amount"), (_TABLE_EPS_RE, "table")),
     }
 
 
-# ── Reported release metrics ────────────────────────────────────────────────
+# ── Reported release metrics (2.5.20) ───────────────────────────────────────
+#
+# extract_earnings_metrics' text fallback read MU's FQ4 2026 revenue as 54229 USD: the highlights bullet
+# "Revenue of $54.23 billion versus…" has no result verb, so the statement table's "$ 54,229" (in millions)
+# was read as written. A figure is read for a metric only when the sentence proves it is that metric's
+# result for the quarter:
+# - a sentence with guidance, award, backlog or ± wording is never read, nor one that names only an annual
+#   period ("in 2025", "fiscal 2026 revenue", "full year");
+# - the label leads the sentence or follows a period or GAAP qualifier: "Gaming revenue" and "Services
+#   revenues" are segments, not the total;
+# - a change verb ("increased 5.2% to") reads the figure after "to", never the change itself;
+# - a non-GAAP or adjusted figure, a per-share figure for a total, and a figure attributed to another metric
+#   ("$13.7 billion of free cash flow" after "capital expenditures") are never read;
+# - an unscaled figure takes the release's table scale only when the release declares exactly one.
 
-# Sentences end at . ! ? and at bullet markers, including the " o " bullets
-# SEC-rendered press releases carry, so one bullet's value is never read for
-# another's label.
-_METRIC_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\s+[•●▪◦·]\s+|\s+o\s+(?=[A-Z])", re.A)
-_GUIDANCE_CONTEXT_RE = re.compile(r"\b(?:guidance|outlook|expect(?:s|ed|ation)?|forecast|project(?:s|ed)?|target|range)\b", _F)
-_REPORTED_CONTEXT_RE = re.compile(r"\b(?:reported|was|were|totaled|totalled|generated|delivered|achieved)\b", _F)
+# Sentences end at . ! ? (also before a closing quote) and at bullet markers ("•Revenue" needs no space after
+# the bullet, MU 2.5.20), including the " o " bullets
+# SEC-rendered press releases carry, so one bullet's value is never read for another's label.
+_RELEASE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|(?<=[.!?][\"”’])\s+|\s+[•●▪◦]\s*|\s+·\s+|\s+o\s+(?=[A-Z])", re.A)
+_GUIDANCE_CONTEXT_RE = re.compile(r"\b(?:guidance|outlook|expect(?:s|ed|ation)?|forecast(?:s|ing)?|project(?:s|ed)?|target|range)\b", _F)
+_REPORTED_CONTEXT_RE = re.compile(r"\b(?:reported|was|were|totaled|totalled|generated|delivered|achieved|increased|decreased|grew|rose|declined|fell)\b", _F)
 # "$125 million" of government awards is not revenue (ASTS Q2 2026).
 _NON_RESULT_CONTEXT_RE = re.compile(r"\b(?:awards?|awarded|contract value|aggregate value|backlog|bookings|orders?|pipeline|contracted)\b", _F)
+_ANNUAL_CONTEXT_RE = re.compile(
+    r"\b(?:full[\s-]year|(?:full )?fiscal year|year[\s-]to[\s-]date|twelve months|12 months|annual|in (?:fiscal )?(?:19|20)[0-9]{2}|fiscal (?:19|20)[0-9]{2}|FY ?(?:19|20)?[0-9]{2})\b", _F)
+_QUARTER_CONTEXT_RE = re.compile(r"\b(?:quarter(?:ly)?|Q[1-4]|three months|13 weeks)\b", _F)
 
-REVENUE_LABEL = r"\b(?:net sales|revenues?)\b"
-USD_AMOUNT = r"(\$\s*[-+]?[0-9][0-9,.\s]*(?:billion|million|thousand|bn|m|k)?)"
-EPS_LABEL = r"\b(?:diluted (?:earnings per share|eps)|eps \(diluted\))\b"
-EPS_AMOUNT = r"(\$\s*\(?[-+]?[0-9]+(?:\.[0-9]+)?\)?)"
-PCT_AMOUNT = r"([0-9]{1,2}(?:\.[0-9]+)?\s*%)"
+_RELEASE_LABELS = {
+    "revenue": r"\b(?:net sales|net revenues?|total revenues?|revenues?)\b",
+    "epsDiluted": r"\b(?:diluted (?:earnings|net income|net loss|income|loss)(?: \(loss\))? per (?:common )?share|diluted eps|eps \(diluted\))(?![\w(])",
+    "grossMargin": r"\bgross margin\b",
+    "operatingIncome": r"\boperating income\b",
+    "freeCashFlow": r"\bfree cash flow\b",
+    "capex": r"\b(?:capital expenditures|capex)\b",
+}
+# Between a label and its figure: words, and the period tokens a release puts there ("for the fourth quarter
+# of fiscal 2026 was", "ended July 27, 2025, of", "in Q1 FY27") or a change ("increased 5.2% to"). Never another figure.
+_RELEASE_GAP = r"(?:[^$0-9%]|\b(?:19|20)[0-9]{2}\b|\b[0-3]?[0-9], (?:19|20)[0-9]{2}\b|\bQ[1-4]\b|\bFY ?[0-9]{2,4}\b|\b[0-9]{1,3}(?:\.[0-9]+)?\s*(?:%|percent)(?=\s+to\b))"
+# Groups: "(" before the $, "(" after it, "-", integer, fraction, scale word. "($0.12)" and "$ (0.12)" are negative.
+_RELEASE_MONEY_BASE = r"(\(\s*)?\$\s*(\()?\s*(-)?\s*([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(\.[0-9]+)?\s*\)?"
+_RELEASE_MONEY = _RELEASE_MONEY_BASE + r"(?:\s*(billion|million|thousand|bn|mn|mm|b|m|k)\b)?"
+_RELEASE_PCT = r"()()(-)?([0-9]{1,2})(\.[0-9]+)?\s*%()"
+_RELEASE_SCALE = {"billion": 1e9, "bn": 1e9, "b": 1e9, "million": 1e6, "mn": 1e6, "mm": 1e6, "m": 1e6, "thousand": 1e3, "k": 1e3}
+_RELEASE_TABLE_SCALE_RE = re.compile(r"\(\s*(?:\$|US\$|dollars|amounts)?\s*in\s+(thousands|millions|billions)\b", _F)
+_RELEASE_NON_GAAP_RE = re.compile(r"\bnon-?\s?GAAP\b|\badjusted\b", _F)
+_RELEASE_PLUS_MINUS_RE = re.compile(r"±|\+/-|\bplus or minus\b", _F)
+_RELEASE_PER_SHARE_AFTER_RE = re.compile(r"^\s*(?:per|a)\s+(?:diluted\s+|basic\s+)?(?:common\s+)?(?:share|ADS|ADR)\b", _F)
+_RELEASE_PER_DILUTED_WORDING_RE = re.compile(r"\bper\s+diluted\s+(?:common\s+)?share\b", _F)
+_RELEASE_PER_DILUTED_SHARE_RE = re.compile(_RELEASE_MONEY_BASE + r"()\s+per\s+diluted\s+(?:common\s+)?share\b", _F)
+_RELEASE_CHANGE_RE = re.compile(r"\b(?:increase[sd]?|decrease[sd]?|grew|grow(?:s|th)?|rose|declined?|fell|up|down|improved?)\b", _F)
+_RELEASE_CHANGE_TO_RE = re.compile(r"\bto\s*$", _F)
+_RELEASE_ATTRIBUTED_RE = re.compile(
+    r"^\s*(?:of|in)\s+(?:[A-Za-z-]+\s+){0,2}?(free cash flow|operating cash flow|cash|revenues?|net sales|net income|net loss|operating income|capital expenditures|gross margin|earnings)\b", _F)
+# The word before a label: a period or GAAP qualifier, a result verb, or a sentence, clause or heading boundary.
+_RELEASE_QUALIFIER_RE = re.compile(
+    r"^(?:gaap|total|record|quarterly|consolidated|reported|delivered|achieved|generated|posted|preliminary|the|our|its|with|and|of|in|for|q[1-4]|fy[0-9]{2,4}|(?:19|20)[0-9]{2}|first|second|third|fourth|(?:first|second|third|fourth)-quarter|quarter|fiscal)$", _F)
+_RELEASE_NEGATIVE_RE = re.compile(r"\bnegative\s*$", _F)
+_RELEASE_LOSS_RE = re.compile(r"\bloss\b", _F)
+_RELEASE_INCOME_RE = re.compile(r"\b(?:income|earnings)\b", _F)
+_RELEASE_NET_RESULT_RE = re.compile(r"\bnet (?:income|earnings|loss)\b", _F)
+_RELEASE_NET_LOSS_RE = re.compile(r"\bnet loss\b", _F)
 
 
-def reported_text_metric(text: str, label_source: str, value_source: str) -> dict | None:
-    """The first explicitly reported value for a label.
+def _release_scales(text: str) -> list[str]:
+    scales: list[str] = []
+    for m in _RELEASE_TABLE_SCALE_RE.finditer(text):
+        unit = re.sub(r"s$", "", m.group(1).lower())
+        if unit not in scales:
+            scales.append(unit)
+    return scales
 
-    A sentence with a result verb, no guidance or award wording, and the value
-    within 100 non-digit characters after the label.
-    """
+
+def _qualified_label(before: str) -> bool:
+    found = re.search(r"(\S+)\s*$", before, re.A)
+    raw = found.group(1) if found else ""
+    if raw.endswith((":", ";", ",")):
+        return True
+    token = re.sub(r"^\W+|\W+$", "", raw, flags=re.A)
+    return token == "" or bool(_RELEASE_QUALIFIER_RE.match(token))
+
+
+def _whole(n: float) -> float | int:
+    return int(n) if n == int(n) else n
+
+
+def release_text_metric(text: str, metric: str) -> dict | None:
+    """The first reported release figure for a metric under the 2.5.20 rules, or None."""
+    collapsed = _collapse_ws(text or "")
+    table_scales = _release_scales(collapsed)
+    label_source = _RELEASE_LABELS[metric]
+    money = metric not in ("grossMargin", "epsDiluted")
+    amount_source = _RELEASE_PCT if metric == "grossMargin" else _RELEASE_MONEY
     label = re.compile(label_source, _F)
-    anchored = re.compile(rf"(?:{label_source})\D{{0,100}}?{value_source}", _F)
-    for raw in _METRIC_SPLIT_RE.split(_collapse_ws(text)):
-        sentence = raw.strip(" ")
-        if not sentence or not label.search(sentence):
+    result_lead = re.compile(rf"^(?:GAAP\s+|total\s+)?(?:{label_source})\s*(?:of|:|was|were|totaled|totalled)\b", _F)
+    label_first = re.compile(rf"({label_source})({_RELEASE_GAP}{{0,100}}?)({amount_source})", _F)
+    for raw in _RELEASE_SPLIT_RE.split(collapsed):
+        piece = raw.strip(" ")
+        if not piece or len(piece) > 600:
             continue
-        if _GUIDANCE_CONTEXT_RE.search(sentence) or _NON_RESULT_CONTEXT_RE.search(sentence) or not _REPORTED_CONTEXT_RE.search(sentence):
+        if _GUIDANCE_CONTEXT_RE.search(piece) or _NON_RESULT_CONTEXT_RE.search(piece) or _RELEASE_PLUS_MINUS_RE.search(piece):
             continue
-        m = anchored.search(sentence)
-        if m and m.group(1):
-            return {"rawValue": m.group(1).strip(" "), "sentence": sentence}
+        if _ANNUAL_CONTEXT_RE.search(piece) and not _QUARTER_CONTEXT_RE.search(piece):
+            continue
+        labelled = bool(label.search(piece))
+        per_share_form = metric == "epsDiluted" and bool(_RELEASE_PER_DILUTED_WORDING_RE.search(piece))
+        if not labelled and not per_share_form:
+            continue
+        if not _REPORTED_CONTEXT_RE.search(piece) and not result_lead.search(piece) and not per_share_form:
+            continue
+        candidates: list[tuple[str, re.Match]] = []
+        if labelled:
+            candidates.extend(("label", m) for m in label_first.finditer(piece))
+        if metric == "epsDiluted":
+            candidates.extend(("perShare", m) for m in _RELEASE_PER_DILUTED_SHARE_RE.finditer(piece))
+        candidates.sort(key=lambda c: c[1].start())
+        for kind, m in candidates:
+            outer_paren, inner_paren, minus, int_part, frac, word = m.groups()[3:9] if kind == "label" else m.groups()[0:6]
+            amount_start = m.end() - len(m.group(3)) if kind == "label" else m.start()
+            gap = m.group(2) if kind == "label" else ""
+            if kind == "label":
+                if not _qualified_label(piece[:m.start()]):
+                    continue
+                if _RELEASE_CHANGE_RE.search(gap) and not _RELEASE_CHANGE_TO_RE.search(gap):
+                    continue
+            # A label-first figure: its label and the 40 characters before it; a per-share figure: the piece before it.
+            lead = piece[max(0, m.start() - 40) if kind == "label" else 0:amount_start]
+            if _RELEASE_NON_GAAP_RE.search(lead):
+                continue
+            after = piece[m.end():]
+            if money and _RELEASE_PER_SHARE_AFTER_RE.search(after):
+                continue
+            attributed = _RELEASE_ATTRIBUTED_RE.search(after)
+            if kind == "label" and attributed and not label.search(attributed.group(1)):
+                continue
+            scale = 1.0
+            scale_basis = None
+            if money:
+                if word:
+                    scale = _RELEASE_SCALE[word.lower()]
+                    scale_basis = "AS_WRITTEN"
+                elif len(table_scales) > 1:
+                    continue
+                elif len(table_scales) == 1:
+                    scale = _RELEASE_SCALE[table_scales[0]]
+                    scale_basis = f"RELEASE_TABLE_IN_{table_scales[0].upper()}S"
+            magnitude = float(int_part.replace(",", "") + (frac or ""))
+            scaled = _whole(magnitude) if scale == 1 else int(math.floor(magnitude * scale + 0.5))
+            # An unsigned figure stated as a loss is negative: "diluted net loss per share of $0.12", "net loss of $0.12 per
+            # diluted share", "free cash flow was negative $5 billion".
+            stated_loss = bool(_RELEASE_NEGATIVE_RE.search(gap))
+            if not stated_loss and metric == "epsDiluted":
+                if kind == "label":
+                    stated_loss = bool(_RELEASE_LOSS_RE.search(m.group(1))) and not _RELEASE_INCOME_RE.search(m.group(1))
+                else:
+                    results = _RELEASE_NET_RESULT_RE.findall(lead)
+                    stated_loss = bool(results) and bool(_RELEASE_NET_LOSS_RE.search(results[-1]))
+            negative = bool(outer_paren) or inner_paren == "(" or minus == "-" or stated_loss
+            value = -scaled if negative and scaled != 0 else scaled
+            raw_value = (m.group(3) if kind == "label" else m.group(0)).strip(" ")
+            return {"value": value, "rawValue": raw_value, "scaleBasis": scale_basis, "sentence": piece}
     return None
 
 

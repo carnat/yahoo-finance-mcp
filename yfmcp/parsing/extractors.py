@@ -259,6 +259,9 @@ def extract_geo_revenue_from_html(html: str, region: str) -> dict | None:
         context = f"{lead} {table_text}".lower()
         if not _re.search(r"revenue|net sales|\bsales\b", context, _re.ASCII) or _re.search(r"square f(?:oo|ee)t", table_text, _re.IGNORECASE):
             continue
+        # An asset table after a revenue paragraph is not revenue: COHR's long-lived assets by country (2.5.20).
+        if _re.search(r"long-lived assets|property,? plant,? and equipment|\btotal assets\b|identifiable assets", table_text, _re.IGNORECASE) and not _re.search(r"revenue|net sales|\bsales\b", table_text, _re.IGNORECASE):
+            continue
         rows = _financial_table_rows(table_html)
         if len(rows) < 2:
             continue
@@ -270,7 +273,9 @@ def extract_geo_revenue_from_html(html: str, region: str) -> dict | None:
         region_row = next((i for i, row in enumerate(rows) if any(_text_contains_geo_region(cell, region) for cell in row)), None)
         if region_row is None:
             continue
-        total_row = next((i for i, row in enumerate(rows) if any(c.strip().lower() in _TOTAL_LABELS for c in row)), None)
+        # A total row carries amounts: COHR's "Revenues" header row is a caption, not the total (2.5.20).
+        total_row = next((i for i, row in enumerate(rows)
+                          if any(c.strip().lower() in _TOTAL_LABELS for c in row) and any(_geo_parse_numeric_cell(c) is not None for c in row)), None)
         if total_row is None:
             total_row = next((i for i in range(len(rows) - 1, -1, -1) if any(_geo_parse_numeric_cell(c) is not None for c in rows[i])), None)
         if total_row is None or total_row == region_row:
@@ -289,7 +294,7 @@ def extract_geo_revenue_from_html(html: str, region: str) -> dict | None:
         if stated_share is not None and abs(pct * 100 - stated_share) > _STATED_PCT_TOLERANCE:
             continue
         unit_mult = _detect_unit_multiplier(table_html, html[max(0, pos - 3_000): pos])
-        unit_scale = "thousands" if unit_mult == 1e3 else "millions" if unit_mult == 1e6 else "actual"
+        unit_scale = "thousands" if unit_mult == 1e3 else "millions" if unit_mult == 1e6 else "billions" if unit_mult == 1e9 else "actual"
         headings = _re.findall(r"<h[1-6][^>]*>([\s\S]*?)</h[1-6]>", html[max(0, pos - 6_000): pos], _re.IGNORECASE)
         section_heading = _geo_strip_html_tags(headings[-1]) if headings else ""
         header_row = rows[0]

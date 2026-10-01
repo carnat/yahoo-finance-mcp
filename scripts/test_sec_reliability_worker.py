@@ -53,7 +53,8 @@ class TestSecReliabilityWorker(unittest.TestCase):
         self.assertIn('periodStatus: "EX99_TEXT_RESOLVED"', period_module)
         self.assertIn('from "./earnings-period.js"', self.worker)
         self.assertIn("async function resolveEarningsPeriodFromSource", self.worker)
-        self.assertIn("function extractReportedTextMetric", self.worker)
+        # Release figures are read under the 2.5.20 rules (scripts/test_extraction_rules.py runs releaseTextMetric).
+        self.assertIn("function extractReleaseTextMetric", self.worker)
         self.assertIn("EX99_TEXT_CONTEXT", self.worker)
         self.assertIn("EX99_IXBRL_UNSCOPED", self.worker)
         self.assertIn("TEXT_METRIC_VERIFY_REQUIRED", self.worker)
