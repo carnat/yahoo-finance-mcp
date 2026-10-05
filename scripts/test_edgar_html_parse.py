@@ -217,6 +217,13 @@ class TestStatedUnitScale(unittest.TestCase):
         self.assertEqual(_detect_unit_multiplier("", "(in millions) ... (in thousands)"), 1_000.0)
         self.assertEqual(_detect_unit_multiplier("", "tens of thousands of customers"), 1_000_000.0)
 
+    def test_scale_source(self):
+        """2.5.21: where the scale came from; the multiplier is the same as _detect_unit_multiplier's."""
+        from yfmcp.parsing.html import _detect_unit_scale
+        self.assertEqual(_detect_unit_scale("<td>(in thousands)</td>", ""), (1_000.0, "STATED_IN_TABLE"))
+        self.assertEqual(_detect_unit_scale("", "disaggregated revenue by market ($000):"), (1_000.0, "STATED_BEFORE_TABLE"))
+        self.assertEqual(_detect_unit_scale("", ""), (1_000_000.0, "ASSUMED_MILLIONS"))
+
 
 class TestCohrGeographicTables(unittest.TestCase):
     """2.5.20 (COHR): the "Revenues" caption row is not the total; a long-lived assets table is not revenue."""
@@ -237,6 +244,7 @@ class TestCohrGeographicTables(unittest.TestCase):
         both, assets = self._html()
         geo = extract_geo_revenue_from_html(both, "China")
         self.assertEqual((geo["pct"], geo["usd"], geo["denominator"], geo["unitScale"]), (0.1143, 813_377_000, 7_118_181_000, "thousands"))
+        self.assertEqual(geo["unitScaleSource"], "STATED_BEFORE_TABLE")
         self.assertIsNone(extract_geo_revenue_from_html(assets, "China"))
 
 

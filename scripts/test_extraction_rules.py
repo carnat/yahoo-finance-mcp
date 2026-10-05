@@ -94,6 +94,18 @@ SNDK_OUTLOOK = (
     "Revenue $10,300 - $10,800 $10,300 - $10,800 Gross Margin 83.0% - 84.9% 83.0% - 85.0% Operating Expenses $574 - $614 $520 - $540 "
     "Tax Expense (2) N/A 15.0% Diluted Net Income Per Share N/A $44.00 - $46.00 Diluted Shares Outstanding ~ 155 ~ 155"
 )
+# MU FQ1-27 outlook table (2.5.21): "GAAP(1) Outlook" / "Non-GAAP(2) Outlook" columns, midpoint and tolerance cells, an approximate margin.
+MU_OUTLOOK = (
+    "Business Outlook The following table presents Micron\u2019s guidance for the first quarter of 2027:\nFQ1-27\nGAAP(1) Outlook\nNon-GAAP(2) Outlook\n"
+    "Revenue\n$61.5 billion \u00b1 $1.5 billion $61.5 billion \u00b1 $1.5 billion\nGross margin\nApproximately 85.95% Approximately 86.25%\n"
+    "Operating expenses\nApproximately $2.31 billion Approximately $2.06 billion\nDiluted earnings per share\n$37.84 \u00b1 $1.00 $38.15 \u00b1 $1.00\n"
+    "Further information regarding Micron\u2019s business outlook is included in the prepared remarks."
+)
+# BE (2.5.21): a "GAAP to Non-GAAP" sentence before the guidance heading does not make the revenue range non-GAAP.
+BE_CLAUSE = (
+    "A reconciliation of GAAP to Non-GAAP financial measures is provided at the end of this press release. 2 Guidance Bloom Energy increases "
+    "financial guidance for the full-year 2026: \u2022 Revenue: $3.4B - $3.8B \u2022 Non-GAAP Gross Margin: ~34% \u2022 Non-GAAP EPS: $1.85 - $2.25"
+)
 UNIT_FORMS = "Guidance Bloom Energy increases financial guidance for the full-year 2026: • Revenue: $3.4B - $3.8B • Revenue was $ 1,234 more than last year."
 KEYWORD_FIRST = "The Company expects revenue of between $40 million and $45 million for the third quarter. Gross margin of 38% to 40% is expected."
 GUIDANCE_ONLY = "For the fourth quarter we expect revenue to be $500 million."
@@ -268,6 +280,8 @@ const out = {
   guidanceResults: r.guidanceRanges(d.resultsTable),
   guidanceSndk: r.guidanceRanges(d.sndkOutlook),
   guidanceUnitForms: r.guidanceRanges(d.unitForms),
+  guidanceMu: r.guidanceRanges(d.muOutlook),
+  guidanceBe: r.guidanceRanges(d.beClause),
   releaseMetrics: Object.fromEntries(d.releaseCases.map((c) => [c.name, r.releaseTextMetric(c.text, c.metric)])),
   stems: d.stemWords.map(r.stemWord),
   ranked: r.rankEvidence(d.evidence, (e) => e.confidence).map((e) => e.id),
@@ -304,7 +318,7 @@ def _node() -> str:
 def _data() -> dict:
     return {
         "aaoi": AAOI_MATCHES, "negation": NEGATION_MATCHES, "astsRelease": ASTS_RELEASE, "keywordFirst": KEYWORD_FIRST,
-        "awardFirst": AWARD_FIRST, "guidanceOnly": GUIDANCE_ONLY, "releaseCases": RELEASE_CASES, "sndkOutlook": SNDK_OUTLOOK, "unitForms": UNIT_FORMS, "stemWords": STEM_WORDS, "evidence": EVIDENCE, "concepts": CONCEPTS,
+        "awardFirst": AWARD_FIRST, "guidanceOnly": GUIDANCE_ONLY, "releaseCases": RELEASE_CASES, "sndkOutlook": SNDK_OUTLOOK, "unitForms": UNIT_FORMS, "muOutlook": MU_OUTLOOK, "beClause": BE_CLAUSE, "stemWords": STEM_WORDS, "evidence": EVIDENCE, "concepts": CONCEPTS,
         "filingConcepts": FILING_CONCEPTS, "cashConcepts": CASH_CONCEPTS, "beTie": BE_TIE_CONCEPTS, "malformed": MALFORMED_CONCEPTS,
         "cohrOutlook": COHR_OUTLOOK, "mixedBasis": MIXED_BASIS, "mrvlOutlook": MRVL_OUTLOOK, "vrtOutlook": VRT_OUTLOOK,
         "nvdaOutlook": NVDA_OUTLOOK, "liteOutlook": LITE_OUTLOOK, "resultsTable": RESULTS_TABLE,
@@ -346,6 +360,8 @@ def _python() -> dict:
         "guidanceResults": er.guidance_ranges(d["resultsTable"]),
         "guidanceSndk": er.guidance_ranges(d["sndkOutlook"]),
         "guidanceUnitForms": er.guidance_ranges(d["unitForms"]),
+        "guidanceMu": er.guidance_ranges(d["muOutlook"]),
+        "guidanceBe": er.guidance_ranges(d["beClause"]),
         "releaseMetrics": {c["name"]: er.release_text_metric(c["text"], c["metric"]) for c in d["releaseCases"]},
         "stems": [er.stem_word(w) for w in d["stemWords"]],
         "ranked": [e["id"] for e in er.rank_evidence(d["evidence"], lambda e: e["confidence"])],
@@ -461,6 +477,22 @@ class TestRules(unittest.TestCase):
         self.assertEqual((g["grossMargin"]["low"], g["grossMargin"]["high"], g["grossMargin"]["basis"]), ("83.0", "84.9", "GAAP"))
         self.assertEqual([(a["low"], a["high"], a["basis"]) for a in g["grossMargin"]["alternates"]], [("83.0", "85.0", "NON_GAAP")])
         self.assertEqual((g["eps"]["low"], g["eps"]["high"], g["eps"]["basis"]), ("44.00", "46.00", "NON_GAAP"), "an N/A GAAP cell puts the range in the Non-GAAP column")
+
+    def test_outlook_rows_stated_as_midpoint_tolerance_or_point(self) -> None:
+        mu = self.out["guidanceMu"]
+        rev, gm, eps = mu["revenue"], mu["grossMargin"], mu["eps"]
+        self.assertEqual((rev["low"], rev["high"], rev["basis"], rev["statedAs"]), ("60 billion", "63 billion", "GAAP", "MIDPOINT_PLUS_MINUS"))
+        self.assertEqual([(a["low"], a["high"], a["basis"]) for a in rev["alternates"]], [("60 billion", "63 billion", "NON_GAAP")])
+        self.assertEqual((gm["low"], gm["high"], gm["basis"], gm["statedAs"]), ("85.95", "85.95", "GAAP", "POINT_ESTIMATE"))
+        self.assertEqual([(a["low"], a["high"], a["basis"]) for a in gm["alternates"]], [("86.25", "86.25", "NON_GAAP")])
+        self.assertEqual((eps["low"], eps["high"], eps["basis"], eps["statedAs"]), ("36.84", "38.84", "GAAP", "MIDPOINT_PLUS_MINUS"))
+        self.assertEqual([(a["low"], a["high"], a["basis"]) for a in eps["alternates"]], [("37.15", "39.15", "NON_GAAP")])
+
+    def test_a_range_takes_its_basis_from_the_clause_holding_its_first_amount(self) -> None:
+        be = self.out["guidanceBe"]
+        self.assertEqual((be["revenue"]["basis"], be["revenue"]["low"], be["revenue"]["high"], be["revenue"]["alternates"]), ("NOT_STATED", "3.4B", "3.8B", []))
+        gm = be["grossMargin"]
+        self.assertEqual((gm["low"], gm["high"], gm["basis"], gm["statedAs"], gm["alternates"]), ("34", "34", "NON_GAAP", "POINT_ESTIMATE", []))
 
     def test_abbreviated_units_and_unit_boundaries(self) -> None:
         g = self.out["guidanceUnitForms"]

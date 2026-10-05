@@ -79,7 +79,7 @@ from yfmcp.clients.edgar import (
     _edgar_list_exhibits_from_index, _edgar_get_html,
 )
 from yfmcp.parsing.html import (
-    _strip_html_tags, _strip_html_blocks, _parse_html_table, _parse_numeric_cell, _detect_unit_multiplier,
+    _strip_html_tags, _strip_html_blocks, _parse_html_table, _parse_numeric_cell, _detect_unit_multiplier, _UNIT_SCALE_ASSUMED_WARNING,
     _MD_MAX_CELL_CHARS, _html_table_to_markdown, _html_to_markdown_fallback,
 )
 from yfmcp.parsing.extractors import (
@@ -5360,6 +5360,8 @@ async def get_filing_data(
             "rawDenominator": _field("rawDenominator"),
             "unit": _field("unit", "USD"),
             "unitScale": _field("unitScale", "actual"),
+            # How a parsed table's scale was known (2.5.21); null for XBRL facts and when nothing was parsed.
+            "unitScaleSource": _field("unitScaleSource"),
             "value": _field("value"),
             "denominator": _field("denominator"),
             "valueRatio": _field("valueRatio") if has_denominator else None,
@@ -5868,6 +5870,9 @@ async def get_filing_data(
                             "message": "Could not compute geographic revenue percentage due to missing denominator.",
                             "severity": "warning",
                         })
+                    scale_assumed = geo_evidence.get("unitScaleSource") == "ASSUMED_MILLIONS"
+                    if scale_assumed:
+                        warnings.append(dict(_UNIT_SCALE_ASSUMED_WARNING))
                     return _geo_shape({
                         "ticker": ticker,
                         "factType": fact_type.value,
@@ -5877,13 +5882,15 @@ async def get_filing_data(
                         "rawDenominator": raw_den,
                         "unit": "USD",
                         "unitScale": geo_evidence.get("unitScale"),
+                        "unitScaleSource": geo_evidence.get("unitScaleSource"),
                         "value": geo_usd,
                         "denominator": geo_denominator,
                         "valueRatio": geo_ratio,
                         "valuePct": _js_round(geo_ratio * PCT_MULTIPLIER * 100) / 100 if geo_denominator is not None else None,
                         "extractionMethod": "PARSED_TABLE",
                         "source": "PARSED_TABLE",
-                        "confidence": "HIGH" if geo_denominator is not None else "LOW",
+                        # An assumed scale leaves the amounts unproven, not the share (2.5.21).
+                        "confidence": "LOW" if geo_denominator is None else "MEDIUM" if scale_assumed else "HIGH",
                         "filingType": filing["filingType"],
                         "filingDate": filing["filingDate"],
                         "accessionNumber": filing["accessionNumber"],
@@ -9495,6 +9502,7 @@ async def extract_geographic_revenue(
         "rawDenominator": payload.get("rawDenominator"),
         "unit": _nn(payload.get("unit"), "USD"),
         "unitScale": _nn(payload.get("unitScale"), "unknown"),
+        "unitScaleSource": payload.get("unitScaleSource"),
         "value": payload.get("value"),
         "denominator": payload.get("denominator"),
         "valueRatio": payload.get("valueRatio") if has_denominator else None,
@@ -9529,6 +9537,7 @@ async def extract_geographic_revenue(
                 shaped["rawDenominator"] = fallback_payload.get("rawDenominator")
                 shaped["unit"] = _nn(fallback_payload.get("unit"), "USD")
                 shaped["unitScale"] = _nn(fallback_payload.get("unitScale"), "unknown")
+                shaped["unitScaleSource"] = fallback_payload.get("unitScaleSource")
                 shaped["value"] = fallback_payload.get("value")
                 shaped["denominator"] = fallback_payload.get("denominator")
                 shaped["valueRatio"] = fallback_payload.get("valueRatio") if fallback_denominator else None

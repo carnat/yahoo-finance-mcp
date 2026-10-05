@@ -148,7 +148,8 @@ const INCENTIVE_OFFSET_RE = /\bnet of (?:the )?(?:proceeds|receipts) from (?:gov
 // A reported period's spending or receipts: "For the first nine months of 2026, net cash used for investing activities ...".
 const REPORTED_RE = /\bnet cash (?:used|provided)\b|\b(?:during|for|in) the (?:first |last )?(?:three|six|nine|twelve) months\b|\bwe (?:spent|paid|received)\b|\b(?:was|were) (?:spent|paid|received)\b/i;
 const GUIDED_RE = /\bexpects?\b|\bexpected\b|\banticipates?\b|\banticipated\b|\bplans?\b|\bplanned\b|\bintends?\b|\bestimates?\b|\bestimated\b|\bprojects?\b|\bbudget(?:s|ed)?\b|\bguidance\b|\bforecasts?\b/i;
-const CAPEX_RE = /\bcapital expenditures?\b|\bcapex\b|\bconstruction\b|\bpurchase (?:commitments?|obligations?)\b|\binvest(?:ment)?s? (?:of|in)\b|\bspend(?:ing)?\b|\bfacilit(?:y|ies)\b|\bmanufactur\w*\b|\bsatellites?\b|\bdeploy\w*\b/i;
+// "expenditures for property, plant, and equipment" is capex wording too (MU, 2.5.21).
+const CAPEX_RE = /\bcapital expenditures?\b|\b(?:expenditures for|purchases? of) property,? plant,? and equipment\b|\bcapex\b|\bconstruction\b|\bpurchase (?:commitments?|obligations?)\b|\binvest(?:ment)?s? (?:of|in)\b|\bspend(?:ing)?\b|\bfacilit(?:y|ies)\b|\bmanufactur\w*\b|\bsatellites?\b|\bdeploy\w*\b/i;
 const FUNDING_RE = /\bfund(?:s|ed|ing)?\b|\bfinanc\w*|\bliquidity\b|\bcash\b|\bproceeds\b/i;
 const RANGE_JOIN_RE = /^\s*(?:to|-|–|—|and)\s*$/i;
 

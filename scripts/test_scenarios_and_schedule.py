@@ -151,6 +151,11 @@ STATEMENTS = [
     {"contextText": "We expect to have capital expenditures (including capitalized software) of $550.0 to $570.0 for the full year 2026 in order to support capacity. "
                     "We committed to purchase equipment at $2.50 per unit under the supply agreement.",
      "sectionHeading": "Liquidity", "documentUrl": "https://www.sec.gov/x/vrt.htm", "filingDate": "2026-07-30", "accessionNumber": "0001628280-26-000001"},
+    # MU (2.5.21): a capex estimate net of incentive proceeds, a reported nine-month figure and purchase obligations.
+    {"contextText": "We estimate capital expenditures for property, plant, and equipment, net of proceeds from government incentives, to be approximately $27 billion in 2026. "
+                    "For the first nine months of 2026, net cash used for investing activities consisted primarily of $19.60 billion of expenditures for property, plant, and equipment. "
+                    "As of June 30, 2026, we had purchase obligations of approximately $2.93 billion for equipment, substantially all of which is expected to be paid within one year. ",
+     "sectionHeading": "Liquidity and Capital Resources", "documentUrl": "https://www.sec.gov/x/mu.htm", "filingDate": "2026-10-02", "accessionNumber": "0000723125-26-000001"},
     {"contextText": "Risks include our ability to continue to raise funds to finance our capital expenditures;",
      "sectionHeading": "Forward-Looking Statements", "documentUrl": "https://www.sec.gov/x/10q.htm", "filingDate": "2026-08-10", "accessionNumber": "0001193125-26-342550"},
 ]
@@ -394,7 +399,21 @@ class TestFundingSchedule(unittest.TestCase):
         self.assertEqual(guided["amountStatus"], "STATED")
         two_amounts = items["We have committed $1.2 billion"]
         self.assertEqual((two_amounts["amountLow"], two_amounts["amountHigh"], two_amounts["amountQualifier"]), (1_200_000_000, 1_200_000_000, "stated"))
-        self.assertEqual(self.out["byClassification"], {"CONTRACTUAL": 8, "COMPANY_DISCLOSED_COMMITTED": 3, "COMPANY_GUIDED": 3, "AWARDED_CONTINGENT": 1, "UNRESOLVED": 2})
+        # MU (2.5.21): net of incentive proceeds is not an award; purchase obligations are a commitment.
+        net_capex = items["We estimate capital expenditur"]
+        self.assertEqual((net_capex["classification"], net_capex["category"], net_capex["amountLow"], net_capex["timing"]["year"]), ("COMPANY_GUIDED", "capital_expenditure", 27_000_000_000, 2026))
+        obligations = items["As of June 30, 2026, we had pu"]
+        self.assertEqual((obligations["classification"], obligations["amountLow"]), ("COMPANY_DISCLOSED_COMMITTED", 2_930_000_000))
+        reported = items["For the first nine months of 2"]
+        self.assertEqual((reported["classification"], reported["category"], reported["amountLow"]), ("REPORTED_ACTUAL", "capital_expenditure", 19_600_000_000))
+        self.assertEqual(self.out["byClassification"], {"CONTRACTUAL": 8, "COMPANY_DISCLOSED_COMMITTED": 4, "COMPANY_GUIDED": 4, "AWARDED_CONTINGENT": 1, "REPORTED_ACTUAL": 1, "UNRESOLVED": 2})
+
+    def test_reported_period_spending_is_history(self) -> None:
+        from yfmcp.funding_schedule import classify_sentence
+        self.assertEqual(classify_sentence("For the first nine months of 2026, we spent $19.60 billion of capital expenditures for property, plant, and equipment."),
+                         {"classification": "REPORTED_ACTUAL", "category": "capital_expenditure"})
+        # A forward-looking word keeps it guidance.
+        self.assertEqual(classify_sentence("For the first nine months of 2026, we spent $19.60 billion and expect capital expenditures of $27 billion for the year.")["classification"], "COMPANY_GUIDED")
 
     def test_liquidity_and_boundary(self) -> None:
         self.assertEqual([(l["source"], l["classification"]) for l in self.out["liquiditySources"]], [

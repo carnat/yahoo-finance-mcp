@@ -10,6 +10,8 @@ Every amount keeps its classification, timing and source:
 - COMPANY_GUIDED: amounts the company expects, plans or budgets;
 - AWARDED_CONTINGENT: grants, awards, incentives and milestone payments that
   depend on conditions;
+- REPORTED_ACTUAL: amounts already spent or received in a reported period
+  (2.5.21), context rather than a future amount;
 - UNRESOLVED: a funding or capex statement whose amount or type cannot be
   classified from its wording.
 Liquidity sources (cash, ATM capacity, undrawn facilities) are listed
@@ -31,6 +33,7 @@ CLASSIFICATIONS: dict[str, str] = {
     "COMPANY_DISCLOSED_COMMITTED": "Amounts the company states it has committed or is obligated to spend, from filing text.",
     "COMPANY_GUIDED": "Amounts the company expects, plans, estimates or budgets; forward-looking and not binding.",
     "AWARDED_CONTINGENT": "Grants, awards, incentives and milestone payments that depend on conditions being met.",
+    "REPORTED_ACTUAL": "Amounts already spent or received in a reported period (\"for the first nine months of 2026 ... $19.60 billion of expenditures\"); context, not a future amount.",
     "UNRESOLVED": "A funding or capex statement whose amount or type cannot be classified from its wording.",
 }
 
@@ -106,9 +109,15 @@ _EQUITY_AWARD_RE = re.compile(r"\b(?:stock|share|equity|RSU|option|incentive)[- 
 # Without an amount, a sentence is kept only when it names a funding or capex obligation outright.
 _STRONG_RE = re.compile(r"\bcapital expenditures?\b|\bcapex\b|\bpurchase (?:commitments?|obligations?)\b|\bcommitments?\b|\bcommitted\b|\bnon-?cancell?able\b|\bobligated\b|\bgrants?\b|\bmilestones?\b|\bCHIPS\b|\bincentive agreement\b", _F)
 _CONTINGENT_RE = re.compile(r"\bgrants?\b|\bawarded\b|\baward agreement\b|\bCHIPS\b|\bincentives?\b|\bsubsid(?:y|ies)\b|\bmilestones?\b|\bpreliminary memorandum of terms\b|\bcontingent\b|\bsubject to (?:the )?(?:achievement|completion|satisfaction|conditions?|approval)\b", _F)
-_COMMITTED_RE = re.compile(r"\bcommitted\b|\bcommitments?\b|\bnon-?cancell?able\b|\bobligated\b|\bfirm purchase\b", _F)
+# "Purchase obligations of approximately $2.93 billion ... expected to be paid within one year" is a commitment (MU, 2.5.21).
+_COMMITTED_RE = re.compile(r"\bcommitted\b|\bcommitments?\b|\bnon-?cancell?able\b|\bobligated\b|\bfirm purchase\b|\bpurchase obligations?\b", _F)
+# A capex figure "net of proceeds from government incentives" is not an award (MU, 2.5.21).
+_INCENTIVE_OFFSET_RE = re.compile(r"\bnet of (?:the )?(?:proceeds|receipts) from (?:government )?incentives\b|\bnet of (?:government )?incentives\b|\b(?:proceeds|receipts) from government incentives\b", _F)
+# A reported period's spending or receipts: "For the first nine months of 2026, net cash used for investing activities ...".
+_REPORTED_RE = re.compile(r"\bnet cash (?:used|provided)\b|\b(?:during|for|in) the (?:first |last )?(?:three|six|nine|twelve) months\b|\bwe (?:spent|paid|received)\b|\b(?:was|were) (?:spent|paid|received)\b", _F)
 _GUIDED_RE = re.compile(r"\bexpects?\b|\bexpected\b|\banticipates?\b|\banticipated\b|\bplans?\b|\bplanned\b|\bintends?\b|\bestimates?\b|\bestimated\b|\bprojects?\b|\bbudget(?:s|ed)?\b|\bguidance\b|\bforecasts?\b", _F)
-_CAPEX_RE = re.compile(r"\bcapital expenditures?\b|\bcapex\b|\bconstruction\b|\bpurchase (?:commitments?|obligations?)\b|\binvest(?:ment)?s? (?:of|in)\b|\bspend(?:ing)?\b|\bfacilit(?:y|ies)\b|\bmanufactur\w*\b|\bsatellites?\b|\bdeploy\w*\b", _F)
+# "expenditures for property, plant, and equipment" is capex wording too (MU, 2.5.21).
+_CAPEX_RE = re.compile(r"\bcapital expenditures?\b|\b(?:expenditures for|purchases? of) property,? plant,? and equipment\b|\bcapex\b|\bconstruction\b|\bpurchase (?:commitments?|obligations?)\b|\binvest(?:ment)?s? (?:of|in)\b|\bspend(?:ing)?\b|\bfacilit(?:y|ies)\b|\bmanufactur\w*\b|\bsatellites?\b|\bdeploy\w*\b", _F)
 _FUNDING_RE = re.compile(r"\bfund(?:s|ed|ing)?\b|\bfinanc\w*|\bliquidity\b|\bcash\b|\bproceeds\b", _F)
 _RANGE_JOIN_RE = re.compile(r"^\s*(?:to|-|–|—|and)\s*$", re.I)
 
@@ -179,7 +188,7 @@ def timing_of(sentence: str) -> dict:
 
 def classify_sentence(sentence: str) -> dict | None:
     """A funding or capex sentence's classification, or None when it speaks to neither."""
-    contingent = bool(_CONTINGENT_RE.search(sentence)) and not _EQUITY_AWARD_RE.search(sentence)
+    contingent = bool(_CONTINGENT_RE.search(_INCENTIVE_OFFSET_RE.sub(" ", sentence))) and not _EQUITY_AWARD_RE.search(sentence)
     capex = bool(_CAPEX_RE.search(sentence))
     committed = bool(_COMMITTED_RE.search(sentence))
     if not contingent and not capex and not committed:
@@ -187,6 +196,9 @@ def classify_sentence(sentence: str) -> dict | None:
     if not contingent and not committed and not _FUNDING_RE.search(sentence) and not re.search(r"\$\s?\d", sentence):
         return None
     category = "award_or_incentive" if contingent else "capital_expenditure" if capex else "commitment"
+    # What a reported period spent or received is history, whatever it was spent on (2.5.21).
+    if _REPORTED_RE.search(sentence) and not _GUIDED_RE.search(sentence):
+        return {"classification": "REPORTED_ACTUAL", "category": category}
     if contingent:
         return {"classification": "AWARDED_CONTINGENT", "category": category}
     # A stated commitment stays a commitment even when the sentence also uses a forward-looking word.

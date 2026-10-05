@@ -98,17 +98,31 @@ def _stated_unit_scales(html: str) -> list[float]:
     return [_UNIT_SCALE_WORD[next(g for g in m.groups() if g).lower()] for m in _UNIT_SCALE_RE.finditer(text)]
 
 
-def _detect_unit_multiplier(table_html: str, context_html: str) -> float:
-    """The monetary unit multiplier for a table.
+# Where a table's scale came from (2.5.21). ASSUMED_MILLIONS: neither the table nor its lead-in states one, so amounts
+# are read in millions and carry UNIT_SCALE_ASSUMED; a share is unaffected.
+_UNIT_SCALE_ASSUMED_WARNING = {
+    "code": "UNIT_SCALE_ASSUMED",
+    "message": "Neither the table nor the text before it states a scale; amounts are read in millions. Check the filing before using the amounts (a percentage share is not affected).",
+    "severity": "warning",
+}
 
-    The scale the table itself states, else the statement in its lead-in nearest the table, else millions (the
-    most common 10-K scale).
+
+def _detect_unit_scale(table_html: str, context_html: str) -> tuple[float, str]:
+    """The monetary unit multiplier for a table, and where it came from (2.5.21).
+
+    The scale the table itself states (STATED_IN_TABLE), else the statement in its lead-in nearest the table
+    (STATED_BEFORE_TABLE), else millions, the most common 10-K scale, marked ASSUMED_MILLIONS.
     """
     own = _stated_unit_scales(table_html)
     if own:
-        return own[0]
+        return own[0], "STATED_IN_TABLE"
     lead = _stated_unit_scales(context_html)
-    return lead[-1] if lead else 1_000_000.0
+    return (lead[-1], "STATED_BEFORE_TABLE") if lead else (1_000_000.0, "ASSUMED_MILLIONS")
+
+
+def _detect_unit_multiplier(table_html: str, context_html: str) -> float:
+    """The monetary unit multiplier for a table (the multiplier of _detect_unit_scale)."""
+    return _detect_unit_scale(table_html, context_html)[0]
 
 
 # ---------------------------------------------------------------------------
