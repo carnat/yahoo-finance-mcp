@@ -1837,15 +1837,76 @@ Vantage and IBKR produced these fixes.
   $7.12B and China 11.43% of revenue; VRT segments $8.207B / $2.023B of
   $10.230B; SNDK guidance $10.3B-$10.8B GAAP with gross margin 83.0-84.9%
   GAAP and 83.0-85.0% non-GAAP.
-- **Not changed (open).** A "±" outlook table without a forward verb (MU's
-  "Revenue $61.5 billion ± $1.5 billion") is still not read and reports
-  `NOT_DISCLOSED`; a table with no stated scale still defaults to millions.
+- **Not changed in 2.5.20.** A "±" outlook table without a forward verb (MU's
+  "Revenue $61.5 billion ± $1.5 billion") was not read and reported
+  `NOT_DISCLOSED`, and a table with no stated scale defaulted to millions
+  silently; both are resolved in 2.5.21 below.
 - **Tests.** `scripts/test_extraction_rules.py` runs both runtimes on the
   release-figure and outlook-table cases;
   `scripts/test_worker_data_accuracy.py` and
   `scripts/test_edgar_html_parse.py` cover the COHR, VRT and stripper cases;
   `scripts/test_scenarios_and_schedule.py` and
   `scripts/test_guidance_and_drivers.py` cover the funding and ledger cases.
+
+## Outlook Rows, Table Scales And Funding Classes (2.5.21)
+
+- **Defect (all left open in 2.5.20).**
+  - MU's outlook table ("Revenue $61.5 billion ± $1.5 billion", "Gross margin
+    Approximately 85.95%", "Diluted earnings per share $37.84 ± $1.00" under
+    the columns "GAAP(1) Outlook" and "Non-GAAP(2) Outlook") was not read, so
+    `extract_guidance` reported `NOT_DISCLOSED`.
+  - A filing table with no stated scale was silently read in millions.
+  - A guidance range's basis could come from an earlier sentence. In older BE
+    and LITE releases, "A reconciliation of GAAP to Non-GAAP measures..."
+    before "• Revenue: $3.4B - $3.8B" labelled the revenue range non-GAAP.
+  - `extract_funding_capex_schedule` labelled MU's capex estimate "net of
+    proceeds from government incentives" and its nine-month investing cash
+    flows `AWARDED_CONTINGENT`, and its "purchase obligations of approximately
+    $2.93 billion ... expected to be paid within one year" `COMPANY_GUIDED`.
+- **Guidance (both runtimes, `extraction-rules.ts` /
+  `extraction_rules.py`).**
+  - Outlook-table rows under a guidance or outlook heading may be stated as a
+    midpoint ± tolerance (revenue, EPS; the bounds are computed exactly,
+    `statedAs` `MIDPOINT_PLUS_MINUS`) or as one approximate value
+    ("Approximately N%", "~N%" gross margin; low = high, new `statedAs` value
+    `POINT_ESTIMATE`).
+  - A two-column header may read "GAAP(1) Outlook Non-GAAP(2) Outlook", with
+    an "Adjustments" column between them. Each range takes its column's basis
+    and the second column's value is an alternate.
+  - A range's basis is read from the clause holding its first amount (from the
+    last sentence, semicolon or bullet break before it), not from the clause
+    before its guidance keyword.
+- **Table scales (geographic in both runtimes, segment in the Worker).**
+  Table results carry `unitScaleSource`: `STATED_IN_TABLE`,
+  `STATED_BEFORE_TABLE` or `ASSUMED_MILLIONS`. When assumed, amounts are still
+  read in millions but carry the warning `UNIT_SCALE_ASSUMED` and a lower
+  confidence (geographic HIGH to MEDIUM; segment rows and total MEDIUM to
+  LOW); a percentage share is unaffected. The segment total now states its own
+  confidence (MEDIUM, LOW when assumed) instead of a decorated default.
+  `unitScaleSource` is null for XBRL facts.
+- **Funding schedule (both runtimes).** New classification `REPORTED_ACTUAL`
+  for amounts a reported period spent or received ("net cash used", "for the
+  first nine months", "we spent"); it is checked before the others unless the
+  sentence also uses forward wording. "Net of (proceeds from) government
+  incentives" no longer makes an amount an award. "Purchase obligations" are
+  commitments. "Expenditures for" and "purchases of property, plant and
+  equipment" are capex wording.
+- **Effect.**
+  - MU guidance: revenue $60.0B-$63.0B GAAP (the non-GAAP alternate is the
+    same), gross margin 85.95% GAAP and 86.25% non-GAAP (`POINT_ESTIMATE`),
+    EPS $36.84-$38.84 GAAP and $37.15-$39.15 non-GAAP. Prior MU releases read
+    the same way.
+  - BE's latest revenue guidance basis stays `NOT_STATED`, and its "Non-GAAP
+    Gross Margin: ~34%" is read as a non-GAAP point.
+  - MU funding: the $27B 2026 capex estimate is `COMPANY_GUIDED`, the $2.93B
+    purchase obligations `COMPANY_DISCLOSED_COMMITTED`, and the $19.60B and
+    $10.20B nine-month expenditures `REPORTED_ACTUAL`; the CHIPS grants stay
+    `AWARDED_CONTINGENT`.
+- **Tests.** `scripts/test_extraction_rules.py` (MU outlook, BE clause),
+  `scripts/test_scenarios_and_schedule.py` (MU funding sentences,
+  `REPORTED_ACTUAL`), `scripts/test_edgar_html_parse.py` (scale sources),
+  `scripts/test_worker_data_accuracy.py` (segment scale source) and
+  `scripts/test_sec_fact_payloads.py` (geographic key lists).
 
 ## Non-US Primary Filings
 

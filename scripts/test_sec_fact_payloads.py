@@ -815,10 +815,10 @@ _GEO_EXPECTED: dict[str, dict[str, tuple[str, str | None]]] = {
     "lookup_unavailable": {"get_filing_data": ("PROVIDER_ERROR", "SEC_LOOKUP_UNAVAILABLE"), "extract_geographic_revenue": ("PROVIDER_ERROR", "SEC_LOOKUP_UNAVAILABLE"), "extract_revenue_exposure": ("PROVIDER_ERROR", "SEC_LOOKUP_UNAVAILABLE"), "extract_china_exposure": ("PROVIDER_ERROR", "SEC_LOOKUP_UNAVAILABLE")},
     "no_registrant": {"get_filing_data": ("SEC_FACT_NOT_AVAILABLE", "NO_SEC_REGISTRANT"), "extract_geographic_revenue": ("SEC_FACT_NOT_AVAILABLE", "NO_SEC_REGISTRANT"), "extract_revenue_exposure": ("NOT_FOUND", "NO_SEC_REGISTRANT"), "extract_china_exposure": ("NOT_FOUND", None)},
 }
-_GEO_KEYS = ["ticker", "factType", "region", "period", "rawValue", "rawDenominator", "unit", "unitScale", "value", "denominator", "valueRatio", "valuePct",
+_GEO_KEYS = ["ticker", "factType", "region", "period", "rawValue", "rawDenominator", "unit", "unitScale", "unitScaleSource", "value", "denominator", "valueRatio", "valuePct",
              "extractionMethod", "source", "confidence", "filingType", "filingDate", "accessionNumber", "documentUrl", "indexUrl", "primaryDocumentUrl",
              "evidence", "calculation", "scanCoverage", "searchedTerms", "notDisclosedBasis", "status", "code", "xbrlContext", "warnings"]
-_GEO_TOOL_KEYS = ["ticker", "factType", "region", "period", "rawValue", "rawDenominator", "unit", "unitScale", "value", "denominator", "valueRatio", "valuePct",
+_GEO_TOOL_KEYS = ["ticker", "factType", "region", "period", "rawValue", "rawDenominator", "unit", "unitScale", "unitScaleSource", "value", "denominator", "valueRatio", "valuePct",
                   "extractionMethod", "confidence", "evidence", "calculation", "scanCoverage", "searchedTerms", "notDisclosedBasis", "status", "code", "warnings"]
 _EXPOSURE_KEYS = ["ticker", "query", "matches", "status", "code", "requestedFilingType", "filingType", "filingDate", "accessionNumber", "documentUrl",
                   "availableFilingTypes", "suggestedFilingTypes", "warnings"]
@@ -1024,7 +1024,7 @@ class TestGeoTableReaderAgrees(unittest.TestCase):
         from yfmcp.parsing.extractors import _extract_geo_revenue_from_html
         ratio, usd, total, heading, evidence = _extract_geo_revenue_from_html(PARSE_CASES["thousands"][0], "China")
         self.assertEqual((ratio, usd, total, heading), (0.6236, 55076000, 88326000, "Geographic Areas"))
-        self.assertEqual(list(evidence), ["sectionHeading", "tableTitle", "sourceTableId", "sourceRows", "sourceColumns", "unitScale", "rawValue", "rawDenominator"])
+        self.assertEqual(list(evidence), ["sectionHeading", "tableTitle", "sourceTableId", "sourceRows", "sourceColumns", "unitScale", "unitScaleSource", "rawValue", "rawDenominator"])
         self.assertEqual(_extract_geo_revenue_from_html("", "China"), (None, None, None, "", None))
 
 

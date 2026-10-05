@@ -5921,15 +5921,25 @@ function statedUnitScales(html: string): number[] {
   return [...text.matchAll(UNIT_SCALE_RE)].map((m) => UNIT_SCALE_WORD[(m.slice(1).find(Boolean) ?? "").toLowerCase()]);
 }
 
+// Where a table's scale came from (2.5.21). ASSUMED_MILLIONS: neither the table nor its lead-in states one, so
+// amounts are read in millions (the most common 10-K scale) and carry UNIT_SCALE_ASSUMED; a share is unaffected.
+export type UnitScaleSource = "STATED_IN_TABLE" | "STATED_BEFORE_TABLE" | "ASSUMED_MILLIONS";
+
+const UNIT_SCALE_ASSUMED_WARNING = {
+  code: "UNIT_SCALE_ASSUMED",
+  message: "Neither the table nor the text before it states a scale; amounts are read in millions. Check the filing before using the amounts (a percentage share is not affected).",
+  severity: "warning",
+};
+
 /**
  * The monetary unit multiplier for a table: the scale the table itself states, else the statement in its
- * lead-in nearest the table, else millions (the most common 10-K scale).
+ * lead-in nearest the table, else millions, marked as assumed.
  */
-function detectUnitMultiplier(tableHtml: string, contextHtml: string): number {
+function detectUnitScale(tableHtml: string, contextHtml: string): { multiplier: number; source: UnitScaleSource } {
   const own = statedUnitScales(tableHtml);
-  if (own.length > 0) return own[0];
+  if (own.length > 0) return { multiplier: own[0], source: "STATED_IN_TABLE" };
   const lead = statedUnitScales(contextHtml);
-  return lead.length > 0 ? lead[lead.length - 1] : 1e6;
+  return lead.length > 0 ? { multiplier: lead[lead.length - 1], source: "STATED_BEFORE_TABLE" } : { multiplier: 1e6, source: "ASSUMED_MILLIONS" };
 }
 
 const TOTAL_LABELS = new Set([
@@ -6005,6 +6015,7 @@ export function extractGeoRevenueFromHtml(
   sectionHeading: string;
   parsedTables: unknown[];
   unitScale: "thousands" | "millions" | "billions" | "actual";
+  unitScaleSource: UnitScaleSource;
   rawValue: string | null;
   rawDenominator: string | null;
   sourceRows: string[][];
@@ -6077,7 +6088,7 @@ export function extractGeoRevenueFromHtml(
     const statedShare = shareHeader ? statedPct : null;
     if (statedShare != null && Math.abs(pct * 100 - statedShare) > STATED_PCT_TOLERANCE) continue;
     const contextHtml = html.slice(Math.max(0, tbl.pos - 3_000), tbl.pos);
-    const unitMult = detectUnitMultiplier(tableHtml, contextHtml);
+    const { multiplier: unitMult, source: unitScaleSource } = detectUnitScale(tableHtml, contextHtml);
     const usd = regionVal * unitMult;
     const denominator = totalVal * unitMult;
     const unitScale = unitMult === 1e3 ? "thousands" : unitMult === 1e6 ? "millions" : unitMult === 1e9 ? "billions" : "actual";
@@ -6110,6 +6121,7 @@ export function extractGeoRevenueFromHtml(
       sectionHeading,
       parsedTables: [{ rows }],
       unitScale,
+      unitScaleSource,
       rawValue,
       rawDenominator,
       sourceRows,
@@ -6249,6 +6261,8 @@ export async function getFilingData(
       rawDenominator: payload.rawDenominator ?? null,
       unit: payload.unit ?? "USD",
       unitScale: payload.unitScale ?? "actual",
+      // How a parsed table's scale was known (2.5.21); null for XBRL facts and when nothing was parsed.
+      unitScaleSource: payload.unitScaleSource ?? null,
       value: payload.value ?? null,
       denominator: payload.denominator ?? null,
       valueRatio: hasDenominator ? (payload.valueRatio ?? null) : null,
@@ -6678,13 +6692,15 @@ export async function getFilingData(
           // The fiscal year the filing states for itself wins over the period-end rule (DG's year ending January 2026 is its FY2025) (2.5.13).
           const focus = annual ? documentFiscalYearFocus(htmlText) : null;
           const fiscalYear = !annual ? (geo.sourceColumns[0] ?? "") : (filingFiscalYearLabel(focus, filing.reportDate ?? null) ?? "");
-          const warnings = geo.denominator == null && geo.usd != null
+          const warnings: Array<Record<string, unknown>> = geo.denominator == null && geo.usd != null
             ? [{
                 code: "DENOMINATOR_NOT_FOUND",
                 message: "Could not compute geographic revenue percentage due to missing denominator.",
                 severity: "warning",
               }]
             : [];
+          const scaleAssumed = geo.unitScaleSource === "ASSUMED_MILLIONS";
+          if (scaleAssumed) warnings.push(UNIT_SCALE_ASSUMED_WARNING);
           return withGeoShape({
             ticker,
             factType,
@@ -6694,13 +6710,15 @@ export async function getFilingData(
             rawDenominator: geo.rawDenominator ?? formatRawNumber(geo.denominator ?? null),
             unit: "USD",
             unitScale: geo.unitScale,
+            unitScaleSource: geo.unitScaleSource,
             value: geo.usd ?? null,
             denominator: geo.denominator ?? null,
             valueRatio: geo.pct,
             valuePct: geo.denominator != null ? ratioToPct(geo.pct) : null,
             extractionMethod: "PARSED_TABLE",
             source: "PARSED_TABLE",
-            confidence: geo.denominator != null ? "HIGH" : "LOW",
+            // An assumed scale leaves the amounts unproven, not the share (2.5.21).
+            confidence: geo.denominator == null ? "LOW" : scaleAssumed ? "MEDIUM" : "HIGH",
             filingType: filing.filingType,
             filingDate: filing.filingDate,
             accessionNumber: filing.accessionNumber,
@@ -14494,6 +14512,7 @@ export async function extractGeographicRevenue(
     rawDenominator: payload.rawDenominator ?? null,
     unit: payload.unit ?? "USD",
     unitScale: payload.unitScale ?? "unknown",
+    unitScaleSource: payload.unitScaleSource ?? null,
     value: payload.value ?? null,
     denominator: payload.denominator ?? null,
     valueRatio: payload.denominator != null ? (payload.valueRatio ?? null) : null,
@@ -14541,6 +14560,7 @@ export async function extractGeographicRevenue(
         out.rawDenominator = fallbackPayload.rawDenominator ?? null;
         out.unit = fallbackPayload.unit ?? "USD";
         out.unitScale = fallbackPayload.unitScale ?? "unknown";
+        out.unitScaleSource = fallbackPayload.unitScaleSource ?? null;
         out.value = fallbackPayload.value ?? null;
         out.denominator = fallbackPayload.denominator ?? null;
         out.valueRatio = fallbackPayload.denominator != null ? (fallbackPayload.valueRatio ?? null) : null;
@@ -14602,6 +14622,7 @@ export interface SegmentTableResult {
   column: string | null;
   unitScale: "thousands" | "millions" | "billions" | "actual";
   unitMultiplier: number;
+  unitScaleSource: UnitScaleSource;
 }
 
 const YEAR_CELL = /^(?:fy\s*)?(?:19|20)\d{2}$/i;
@@ -14682,7 +14703,7 @@ export function extractSegmentTableFromHtml(html: string): { result: SegmentTabl
     if (!total || segments.length < 2 || total.value <= 0) continue;
     const sum = segments.reduce((acc, row) => acc + row.value, 0);
     if (Math.abs(sum - total.value) > total.value * 0.01) continue;
-    const unitMultiplier = detectUnitMultiplier(m[0], html.slice(Math.max(0, pos - 3_000), pos));
+    const { multiplier: unitMultiplier, source: unitScaleSource } = detectUnitScale(m[0], html.slice(Math.max(0, pos - 3_000), pos));
     return {
       result: {
         segments,
@@ -14692,6 +14713,7 @@ export function extractSegmentTableFromHtml(html: string): { result: SegmentTabl
         column: columnHeader && valueCol != null ? columnHeader[valueCol] : null,
         unitScale: unitMultiplier === 1e9 ? "billions" : unitMultiplier === 1e6 ? "millions" : unitMultiplier === 1e3 ? "thousands" : "actual",
         unitMultiplier,
+        unitScaleSource,
       },
       segmentTablesSeen,
       tablesScanned: tableIndex + 1,
@@ -14803,18 +14825,21 @@ async function segmentRevenueFromFilingTable(
   };
   if (result) {
     const period = result.column ? `FY${result.column.replace(/\D/g, "")}` : null;
+    const scaleAssumed = result.unitScaleSource === "ASSUMED_MILLIONS";
+    if (scaleAssumed) warnings.push(UNIT_SCALE_ASSUMED_WARNING);
     return {
       ...filingMeta,
       status: "FOUND",
       extractionMethod: "PARSED_TABLE",
       decisionGrade: false,
       unitScale: result.unitScale,
+      unitScaleSource: result.unitScaleSource,
       segments: result.segments.map((row) => ({
         label: row.label,
         value: row.value * result.unitMultiplier,
         rawValue: row.rawValue,
         period,
-        confidence: "MEDIUM",
+        confidence: scaleAssumed ? "LOW" : "MEDIUM",
         evidence: {
           documentUrl: filing.documentUrl,
           filingType: filing.filingType,
@@ -14826,7 +14851,8 @@ async function segmentRevenueFromFilingTable(
           sourceColumns: result.column ? [result.column] : [],
         },
       })),
-      total: { label: result.total.label, value: result.total.value * result.unitMultiplier, rawValue: result.total.rawValue },
+      // A parsed table's total is no surer than its rows (2.5.21).
+      total: { label: result.total.label, value: result.total.value * result.unitMultiplier, rawValue: result.total.rawValue, confidence: scaleAssumed ? "LOW" : "MEDIUM" },
       evidence: {
         sourceType: "sec_filing_table",
         documentUrl: filing.documentUrl,

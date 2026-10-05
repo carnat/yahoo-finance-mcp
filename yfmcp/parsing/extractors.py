@@ -6,7 +6,7 @@ Extracted from server.py in Phase 1 of the refactoring plan.
 import math
 import re as _re
 
-from yfmcp.parsing.html import _detect_unit_multiplier
+from yfmcp.parsing.html import _detect_unit_scale
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +293,7 @@ def extract_geo_revenue_from_html(html: str, region: str) -> dict | None:
         stated_share = stated_pct if share_header else None
         if stated_share is not None and abs(pct * 100 - stated_share) > _STATED_PCT_TOLERANCE:
             continue
-        unit_mult = _detect_unit_multiplier(table_html, html[max(0, pos - 3_000): pos])
+        unit_mult, unit_scale_source = _detect_unit_scale(table_html, html[max(0, pos - 3_000): pos])
         unit_scale = "thousands" if unit_mult == 1e3 else "millions" if unit_mult == 1e6 else "billions" if unit_mult == 1e9 else "actual"
         headings = _re.findall(r"<h[1-6][^>]*>([\s\S]*?)</h[1-6]>", html[max(0, pos - 6_000): pos], _re.IGNORECASE)
         section_heading = _geo_strip_html_tags(headings[-1]) if headings else ""
@@ -312,6 +312,7 @@ def extract_geo_revenue_from_html(html: str, region: str) -> dict | None:
             "denominator": total_val * unit_mult,
             "sectionHeading": section_heading,
             "unitScale": unit_scale,
+            "unitScaleSource": unit_scale_source,
             "rawValue": raw_value,
             "rawDenominator": raw_denominator,
             "sourceRows": [
@@ -343,6 +344,7 @@ def _extract_geo_revenue_from_html(
         "sourceRows": geo["sourceRows"],
         "sourceColumns": geo["sourceColumns"],
         "unitScale": geo["unitScale"],
+        "unitScaleSource": geo["unitScaleSource"],
         "rawValue": geo["rawValue"],
         "rawDenominator": geo["rawDenominator"],
     }

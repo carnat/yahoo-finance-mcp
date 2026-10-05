@@ -212,6 +212,8 @@ const vrt = [
   "</table>",
 ].join("");
 out.vrtSegments = m.extractSegmentTableFromHtml(vrt);
+// No scale stated anywhere: read in millions but marked as assumed (2.5.21).
+out.unscaledSegments = m.extractSegmentTableFromHtml(vrt.replace(" (in millions)", ""));
 // The release text both runtimes read (2.5.20): one line per block, inline tags joined, no-break spaces as spaces.
 out.blockText = m._stripHtmlTagsIdx(BLOCK_HTML);
 out.unitScale = {
@@ -361,6 +363,9 @@ class TestWorkerDataAccuracy(unittest.TestCase):
         vrt = self.out["vrtSegments"]["result"]
         self.assertEqual([row["value"] for row in vrt["segments"]], [8207.0, 2022.9])
         self.assertEqual((vrt["total"]["value"], vrt["column"], vrt["unitScale"]), (10229.9, "Total", "millions"))
+        self.assertEqual(vrt["unitScaleSource"], "STATED_BEFORE_TABLE")
+        unscaled = self.out["unscaledSegments"]["result"]
+        self.assertEqual((unscaled["unitScale"], unscaled["unitScaleSource"]), ("millions", "ASSUMED_MILLIONS"))
 
     def test_release_text_matches_python(self) -> None:
         from yfmcp.parsing.html import _strip_html_blocks

@@ -172,6 +172,12 @@ _ROW_LEAD = r"\s*(?:of\s+|in the range of\s+|:\s*)?(?:N/A\s+)?"
 _TABLE_REVENUE_RE = re.compile(rf"\b(?:net sales|(?:total )?(?:net )?revenues?){_TABLE_FOOTNOTE}{_ROW_LEAD}\$\s*{_AMOUNT}{_RANGE_SEP}\$?\s*{_AMOUNT}", _F)
 _TABLE_GROSS_MARGIN_RE = re.compile(rf"\b(?:(?:adjusted|non-GAAP|GAAP)\s+)?gross margins?{_TABLE_FOOTNOTE}{_ROW_LEAD}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%{_RANGE_SEP}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%", _F)
 _TABLE_EPS_RE = re.compile(rf"\b(?:(?:adjusted|non-GAAP|GAAP)\s+)?(?:diluted\s+)?(?:eps|earnings per share|net income per share){_TABLE_FOOTNOTE}{_ROW_LEAD}\$\s*([0-9]+(?:\.[0-9]+)?){_RANGE_SEP}\$?\s*([0-9]+(?:\.[0-9]+)?)", _F)
+# An outlook row stated as a midpoint and tolerance, or as an approximate point (2.5.21, MU: "Revenue $61.5 billion
+# ± $1.5 billion", "Diluted earnings per share $37.84 ± $1.00", "Gross margin Approximately 85.95%").
+_TABLE_REVENUE_PM_RE = re.compile(rf"\b(?:net sales|(?:total )?(?:net )?revenues?){_TABLE_FOOTNOTE}{_ROW_LEAD}\$\s*{_PM_NUMBER}{_PM_UNIT}{_PM_TOLERANCE}", _F)
+_TABLE_EPS_PM_RE = re.compile(rf"\b(?:(?:adjusted|non-GAAP|GAAP)\s+)?(?:diluted\s+)?(?:eps|earnings per share|net income per share){_TABLE_FOOTNOTE}{_ROW_LEAD}\$\s*{_PM_NUMBER}{_PM_UNIT}{_PM_TOLERANCE}", _F)
+_APPROX = r"(?:approximately|about|~)\s*"
+_TABLE_GROSS_MARGIN_POINT_RE = re.compile(rf"\b(?:(?:adjusted|non-GAAP|GAAP)\s+)?gross margins?{_TABLE_FOOTNOTE}{_ROW_LEAD}{_APPROX}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%", _F)
 _TABLE_HEADING_RE = re.compile(r"\b(?:guidance|outlook)\b", _F)
 # "... diluted EPS of $5.82 to $5.92 and adjusted diluted EPS of $6.65 to $6.75" (VRT): the second range.
 _EPS_CONTINUATION_RE = re.compile(r"\band (?:adjusted|non-GAAP|GAAP) (?:diluted )?(?:eps|earnings per share|net income per share) of \$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:to|-|–|—)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", _F)
@@ -182,10 +188,13 @@ _EPS_CONTINUATION_RE = re.compile(r"\band (?:adjusted|non-GAAP|GAAP) (?:diluted 
 # 85.0% ... Diluted Net Income Per Share N/A $44.00 - $46.00"). Both are read only between the outlook heading
 # and the row, with no sentence break after them.
 _OUTLOOK_SCALE_RE = re.compile(r"\(\s*(?:\$|US\$|dollars|amounts)?\s*in\s+(thousands|millions|billions)\b", _F)
-_OUTLOOK_COLUMNS_RE = re.compile(r"\b(Non-?\s?GAAP|GAAP)(?:\s*\(\d\))?\s+(Non-?\s?GAAP|GAAP)(?:\s*\(\d\))?(?=\s+[A-Z])", _F)
+# A header may name its columns "GAAP(1) Outlook Non-GAAP(2) Outlook", with an "Adjustments" column between (MU, 2.5.21).
+_OUTLOOK_COLUMNS_RE = re.compile(r"\b(Non-?\s?GAAP|GAAP)(?:\s*\(\d\))?(?:\s+Outlook)?(?:\s+Adjustments)?\s+(Non-?\s?GAAP|GAAP)(?:\s*\(\d\))?(?:\s+Outlook)?(?=\s+[A-Z])", _F)
 _SENTENCE_BREAK_RE = re.compile(r"[.!?]\s+[A-Z]")
 _SECOND_AMOUNT_CELL_RE = re.compile(rf"^\s*\$\s*{_AMOUNT}{_RANGE_SEP}\$?\s*{_AMOUNT}", _F)
 _SECOND_PCT_CELL_RE = re.compile(r"^\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%\s*(?:to|and|-|–|—)\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%", _F)
+_SECOND_PM_CELL_RE = re.compile(rf"^\s*\$\s*{_PM_NUMBER}{_PM_UNIT}{_PM_TOLERANCE}", _F)
+_SECOND_POINT_CELL_RE = re.compile(rf"^\s*{_APPROX}([0-9]{{1,2}}(?:\.[0-9]+)?)\s*%", _F)
 
 
 def _outlook_statement(text: str, at: int, pattern: re.Pattern) -> re.Match | None:
@@ -281,13 +290,18 @@ def _column_basis(word: str) -> str:
     return "NON_GAAP" if _NON_GAAP_RE.search(word) else "GAAP"
 
 
-def _range_basis(text: str, at: int, length: int) -> str:
-    before = text[max(0, at - 200):at]
+def _range_basis(text: str, at: int, length: int, anchor: int | None = None) -> str:
+    """The basis of the clause holding a range: from the last clause break before its first amount (`anchor`) to the
+    words after it. A break inside the match ends an earlier clause: BE's "...GAAP to Non-GAAP financial measures
+    ... Guidance ... • Revenue: $3.4B - $3.8B" is not a non-GAAP range (2.5.21)."""
+    if anchor is None:
+        anchor = at
+    before = text[max(0, anchor - 200):anchor]
     start = 0
     for m in _CLAUSE_START_RE.finditer(before):
         start = m.end()
     tail = _CLAUSE_TAIL_RE.match(text[at + length:])
-    return _clause_basis(before[start:] + text[at:at + length] + (tail.group(0) if tail else ""))
+    return _clause_basis(before[start:] + text[anchor:at + length] + (tail.group(0) if tail else ""))
 
 
 def guidance_ranges(text: str, period_of=None) -> dict:
@@ -302,12 +316,15 @@ def guidance_ranges(text: str, period_of=None) -> dict:
         for pattern, kind in patterns:
             for m in pattern.finditer(text):
                 at = m.start()
-                if kind == "table" and not _under_guidance_heading(text, at):
+                table_row = kind in ("table", "table_pm", "table_point")
+                if table_row and not _under_guidance_heading(text, at):
                     continue
-                if kind == "pm_amount":
+                if kind in ("pm_amount", "table_pm"):
                     bounds = _pm_bounds(m.group(1), m.group(2), m.group(3), m.group(4), m.group(5))
                 elif kind == "pm_points":
                     bounds = _point_bounds(m.group(1), m.group(2), m.group(3))
+                elif kind == "table_point":
+                    bounds = {"low": m.group(1), "high": m.group(1)}
                 else:
                     bounds = {"low": m.group(1), "high": m.group(2)}
                 if not bounds:
@@ -328,19 +345,30 @@ def guidance_ranges(text: str, period_of=None) -> dict:
                 if columns and _column_basis(columns.group(1)) != _column_basis(columns.group(2)):
                     two_columns = [_column_basis(columns.group(1)), _column_basis(columns.group(2))]
                 column = 1 if two_columns and re.search(r"\bN/A\s*\$?\s*$", text[max(0, first_at - 12):first_at], _F) else 0
+                stated_as = "OUTLOOK_ROW" if kind == "table" else "RANGE" if kind == "range" else "POINT_ESTIMATE" if kind == "table_point" else "MIDPOINT_PLUS_MINUS"
                 found.append({
                     "excerpt": m.group(0), "low": scaled(bounds["low"]), "high": scaled(bounds["high"]),
                     # A table row's basis is its own label: the rows above it belong to other metrics.
-                    "basis": two_columns[column] if two_columns else _clause_basis(m.group(0)) if kind == "table" else _range_basis(text, at, len(m.group(0))),
-                    "statedAs": "OUTLOOK_ROW" if kind == "table" else "RANGE" if kind == "range" else "MIDPOINT_PLUS_MINUS",
+                    "basis": two_columns[column] if two_columns else _clause_basis(m.group(0)) if table_row else _range_basis(text, at, len(m.group(0)), first_at),
+                    "statedAs": stated_as,
                 })
                 periods.append(period_of(at, len(m.group(0))) if period_of else None)
-                if two_columns and column == 0 and kind in ("range", "table"):
+                if two_columns and column == 0 and kind not in ("pm_amount", "pm_points"):
                     rest = text[m.end():]
-                    second = (_SECOND_PCT_CELL_RE if re.search(r"%\s*$", m.group(0)) else _SECOND_AMOUNT_CELL_RE).search(rest)
+                    second = None
+                    if kind == "table_pm":
+                        c = _SECOND_PM_CELL_RE.search(rest)
+                        b = _pm_bounds(c.group(1), c.group(2), c.group(3), c.group(4), c.group(5)) if c else None
+                        second = {"text": c.group(0), **b} if c and b else None
+                    elif kind == "table_point":
+                        c = _SECOND_POINT_CELL_RE.search(rest)
+                        second = {"text": c.group(0), "low": c.group(1), "high": c.group(1)} if c else None
+                    else:
+                        c = (_SECOND_PCT_CELL_RE if re.search(r"%\s*$", m.group(0)) else _SECOND_AMOUNT_CELL_RE).search(rest)
+                        second = {"text": c.group(0), "low": c.group(1), "high": c.group(2)} if c else None
                     if second:
-                        found.append({"excerpt": m.group(0) + second.group(0), "low": scaled(second.group(1)), "high": scaled(second.group(2)),
-                                      "basis": two_columns[1], "statedAs": "OUTLOOK_ROW" if kind == "table" else "RANGE"})
+                        found.append({"excerpt": m.group(0) + second["text"], "low": scaled(second["low"]), "high": scaled(second["high"]),
+                                      "basis": two_columns[1], "statedAs": stated_as})
                         periods.append(period_of(at, len(m.group(0))) if period_of else None)
         if not found:
             return None
@@ -354,11 +382,11 @@ def guidance_ranges(text: str, period_of=None) -> dict:
         return {**primary, "alternates": alternates}
     return {
         "revenue": pick(True, (_REVENUE_FIRST_RE, "range"), (_KEYWORD_FIRST_RE, "range"), (_METRIC_FIRST_REVENUE_RE, "range"),
-                        (_METRIC_FIRST_REVENUE_PM_RE, "pm_amount"), (_TABLE_REVENUE_RE, "table")),
+                        (_METRIC_FIRST_REVENUE_PM_RE, "pm_amount"), (_TABLE_REVENUE_RE, "table"), (_TABLE_REVENUE_PM_RE, "table_pm")),
         "grossMargin": pick(False, (_GROSS_MARGIN_RE, "range"), (_METRIC_FIRST_GROSS_MARGIN_RE, "range"),
-                            (_METRIC_FIRST_GROSS_MARGIN_PM_RE, "pm_points"), (_TABLE_GROSS_MARGIN_RE, "table")),
+                            (_METRIC_FIRST_GROSS_MARGIN_PM_RE, "pm_points"), (_TABLE_GROSS_MARGIN_RE, "table"), (_TABLE_GROSS_MARGIN_POINT_RE, "table_point")),
         "eps": pick(False, (_EPS_RE, "range"), (_EPS_CONTINUATION_RE, "range"), (_METRIC_FIRST_EPS_RE, "range"),
-                    (_METRIC_FIRST_EPS_PM_RE, "pm_amount"), (_TABLE_EPS_RE, "table")),
+                    (_METRIC_FIRST_EPS_PM_RE, "pm_amount"), (_TABLE_EPS_RE, "table"), (_TABLE_EPS_PM_RE, "table_pm")),
     }
 
 
