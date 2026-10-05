@@ -154,6 +154,12 @@ const EPS_CONTINUATION_RE = /\band (?:adjusted|non-GAAP|GAAP) (?:diluted )?(?:ep
 const TABLE_REVENUE_RE = new RegExp(`\\b(?:net sales|(?:total )?(?:net )?revenues?)${TABLE_FOOTNOTE}${ROW_LEAD}\\$\\s*${AMOUNT}${RANGE_SEP}\\$?\\s*${AMOUNT}`, "i");
 const TABLE_GROSS_MARGIN_RE = new RegExp(`\\b(?:(?:adjusted|non-GAAP|GAAP)\\s+)?gross margins?${TABLE_FOOTNOTE}${ROW_LEAD}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%${RANGE_SEP}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%`, "i");
 const TABLE_EPS_RE = new RegExp(`\\b(?:(?:adjusted|non-GAAP|GAAP)\\s+)?(?:diluted\\s+)?(?:eps|earnings per share|net income per share)${TABLE_FOOTNOTE}${ROW_LEAD}\\$\\s*([0-9]+(?:\\.[0-9]+)?)${RANGE_SEP}\\$?\\s*([0-9]+(?:\\.[0-9]+)?)`, "i");
+// An outlook row stated as a midpoint and tolerance, or as an approximate point (2.5.21, MU: "Revenue $61.5 billion
+// ± $1.5 billion", "Diluted earnings per share $37.84 ± $1.00", "Gross margin Approximately 85.95%").
+const TABLE_REVENUE_PM_RE = new RegExp(`\\b(?:net sales|(?:total )?(?:net )?revenues?)${TABLE_FOOTNOTE}${ROW_LEAD}\\$\\s*${PM_NUMBER}${PM_UNIT}${PM_TOLERANCE}`, "i");
+const TABLE_EPS_PM_RE = new RegExp(`\\b(?:(?:adjusted|non-GAAP|GAAP)\\s+)?(?:diluted\\s+)?(?:eps|earnings per share|net income per share)${TABLE_FOOTNOTE}${ROW_LEAD}\\$\\s*${PM_NUMBER}${PM_UNIT}${PM_TOLERANCE}`, "i");
+const APPROX = "(?:approximately|about|~)\\s*";
+const TABLE_GROSS_MARGIN_POINT_RE = new RegExp(`\\b(?:(?:adjusted|non-GAAP|GAAP)\\s+)?gross margins?${TABLE_FOOTNOTE}${ROW_LEAD}${APPROX}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%`, "i");
 const TABLE_HEADING_RE = /\b(?:guidance|outlook)\b/gi;
 
 // An outlook table's scale and columns (2.5.20, SNDK: "Business Outlook ... (in millions, except per share
@@ -161,10 +167,13 @@ const TABLE_HEADING_RE = /\b(?:guidance|outlook)\b/gi;
 // 85.0% ... Diluted Net Income Per Share N/A $44.00 - $46.00"). Both are read only between the outlook heading
 // and the row, with no sentence break after them.
 const OUTLOOK_SCALE_RE = /\(\s*(?:\$|US\$|dollars|amounts)?\s*in\s+(thousands|millions|billions)\b/gi;
-const OUTLOOK_COLUMNS_RE = /\b(Non-?\s?GAAP|GAAP)(?:\s*\(\d\))?\s+(Non-?\s?GAAP|GAAP)(?:\s*\(\d\))?(?=\s+[A-Z])/gi;
+// A header may name its columns "GAAP(1) Outlook Non-GAAP(2) Outlook", with an "Adjustments" column between (MU, 2.5.21).
+const OUTLOOK_COLUMNS_RE = /\b(Non-?\s?GAAP|GAAP)(?:\s*\(\d\))?(?:\s+Outlook)?(?:\s+Adjustments)?\s+(Non-?\s?GAAP|GAAP)(?:\s*\(\d\))?(?:\s+Outlook)?(?=\s+[A-Z])/gi;
 const SENTENCE_BREAK_RE = /[.!?]\s+[A-Z]/;
 const SECOND_AMOUNT_CELL_RE = new RegExp(`^\\s*\\$\\s*${AMOUNT}${RANGE_SEP}\\$?\\s*${AMOUNT}`, "i");
 const SECOND_PCT_CELL_RE = /^\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%\s*(?:to|and|-|–|—)\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*%/i;
+const SECOND_PM_CELL_RE = new RegExp(`^\\s*\\$\\s*${PM_NUMBER}${PM_UNIT}${PM_TOLERANCE}`, "i");
+const SECOND_POINT_CELL_RE = new RegExp(`^\\s*${APPROX}([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%`, "i");
 
 /** The last statement a pattern finds in the 400 characters before `at`, if no sentence break follows it. */
 function outlookStatement(text: string, at: number, re: RegExp): RegExpMatchArray | null {
@@ -263,8 +272,9 @@ export type RangeMatch = {
   high: string;
   basis: RangeBasis;
   // RANGE: "$X to $Y"; MIDPOINT_PLUS_MINUS: "$X +/- 5%", bounds computed exactly;
-  // OUTLOOK_ROW: a release-table row or outlook bullet under a guidance heading.
-  statedAs: "RANGE" | "MIDPOINT_PLUS_MINUS" | "OUTLOOK_ROW";
+  // OUTLOOK_ROW: a release-table row or outlook bullet under a guidance heading;
+  // POINT_ESTIMATE: an outlook row stated as one approximate value ("Approximately 85.95%"), low equal to high.
+  statedAs: "RANGE" | "MIDPOINT_PLUS_MINUS" | "OUTLOOK_ROW" | "POINT_ESTIMATE";
   // The same metric stated on another basis ("GAAP ... ; non-GAAP ..."), one per basis.
   alternates: Omit<NonNullable<RangeMatch>, "alternates">[];
 } | null;
@@ -276,15 +286,20 @@ function clauseBasis(clause: string): RangeBasis {
   return GAAP_RE.test(clause) ? "GAAP" : "NOT_STATED";
 }
 
-function rangeBasis(text: string, at: number, len: number): RangeBasis {
-  const before = text.slice(Math.max(0, at - 200), at);
+/**
+ * The basis of the clause holding a range: from the last clause break before its first amount (`anchor`) to the
+ * words after it. A break inside the match ends an earlier clause: BE's "...GAAP to Non-GAAP financial measures
+ * ... Guidance ... • Revenue: $3.4B - $3.8B" is not a non-GAAP range (2.5.21).
+ */
+function rangeBasis(text: string, at: number, len: number, anchor: number = at): RangeBasis {
+  const before = text.slice(Math.max(0, anchor - 200), anchor);
   let start = 0;
   for (const m of before.matchAll(CLAUSE_START_RE)) start = (m.index ?? 0) + m[0].length;
   const tail = CLAUSE_TAIL_RE.exec(text.slice(at + len))?.[0] ?? "";
-  return clauseBasis(`${before.slice(start)}${text.slice(at, at + len)}${tail}`);
+  return clauseBasis(`${before.slice(start)}${text.slice(anchor, at + len)}${tail}`);
 }
 
-type Pattern = { re: RegExp; kind: "range" | "pm_amount" | "pm_points" | "table" };
+type Pattern = { re: RegExp; kind: "range" | "pm_amount" | "pm_points" | "table" | "table_pm" | "table_point" };
 
 /**
  * Guidance ranges stated in release text; low and high are the number text as
@@ -301,9 +316,11 @@ export function guidanceRanges(text: string, periodOf: ((at: number, len: number
     for (const { re, kind } of patterns) {
       for (const m of text.matchAll(new RegExp(re.source, `${re.flags.replace("d", "")}gd`))) {
         const at = m.index ?? 0;
-        if (kind === "table" && !underGuidanceHeading(text, at)) continue;
-        const bounds = kind === "pm_amount" ? pmBounds(m[1], m[2], m[3], m[4], m[5])
+        const tableRow = kind === "table" || kind === "table_pm" || kind === "table_point";
+        if (tableRow && !underGuidanceHeading(text, at)) continue;
+        const bounds = kind === "pm_amount" || kind === "table_pm" ? pmBounds(m[1], m[2], m[3], m[4], m[5])
           : kind === "pm_points" ? pointBounds(m[1], m[2], m[3])
+          : kind === "table_point" ? { low: m[1], high: m[1] }
           : { low: m[1], high: m[2] };
         if (!bounds) continue;
         const firstAt = m.indices?.[1]?.[0] ?? at;
@@ -315,20 +332,32 @@ export function guidanceRanges(text: string, periodOf: ((at: number, len: number
         const columns = outlookStatement(text, firstAt, OUTLOOK_COLUMNS_RE);
         const twoColumns = columns && columnBasis(columns[1]) !== columnBasis(columns[2]) ? [columnBasis(columns[1]), columnBasis(columns[2])] : null;
         const column = twoColumns && /\bN\/A\s*\$?\s*$/i.test(text.slice(Math.max(0, firstAt - 12), firstAt)) ? 1 : 0;
+        const statedAs: NonNullable<RangeMatch>["statedAs"] = kind === "table" ? "OUTLOOK_ROW" : kind === "range" ? "RANGE" : kind === "table_point" ? "POINT_ESTIMATE" : "MIDPOINT_PLUS_MINUS";
         found.push({
           excerpt: m[0],
           low: scaled(bounds.low),
           high: scaled(bounds.high),
           // A table row's basis is its own label: the rows above it belong to other metrics.
-          basis: twoColumns ? twoColumns[column] : kind === "table" ? clauseBasis(m[0]) : rangeBasis(text, at, m[0].length),
-          statedAs: kind === "table" ? "OUTLOOK_ROW" : kind === "range" ? "RANGE" : "MIDPOINT_PLUS_MINUS",
+          basis: twoColumns ? twoColumns[column] : tableRow ? clauseBasis(m[0]) : rangeBasis(text, at, m[0].length, firstAt),
+          statedAs,
         });
         periods.push(periodOf ? periodOf(at, m[0].length) : null);
-        if (twoColumns && column === 0 && (kind === "range" || kind === "table")) {
+        if (twoColumns && column === 0 && kind !== "pm_amount" && kind !== "pm_points") {
           const rest = text.slice(at + m[0].length);
-          const second = (/%\s*$/.test(m[0]) ? SECOND_PCT_CELL_RE : SECOND_AMOUNT_CELL_RE).exec(rest);
+          let second: { text: string; low: string; high: string } | null = null;
+          if (kind === "table_pm") {
+            const c = SECOND_PM_CELL_RE.exec(rest);
+            const b = c ? pmBounds(c[1], c[2], c[3], c[4], c[5]) : null;
+            second = c && b ? { text: c[0], ...b } : null;
+          } else if (kind === "table_point") {
+            const c = SECOND_POINT_CELL_RE.exec(rest);
+            second = c ? { text: c[0], low: c[1], high: c[1] } : null;
+          } else {
+            const c = (/%\s*$/.test(m[0]) ? SECOND_PCT_CELL_RE : SECOND_AMOUNT_CELL_RE).exec(rest);
+            second = c ? { text: c[0], low: c[1], high: c[2] } : null;
+          }
           if (second) {
-            found.push({ excerpt: `${m[0]}${second[0]}`, low: scaled(second[1]), high: scaled(second[2]), basis: twoColumns[1], statedAs: kind === "table" ? "OUTLOOK_ROW" : "RANGE" });
+            found.push({ excerpt: `${m[0]}${second.text}`, low: scaled(second.low), high: scaled(second.high), basis: twoColumns[1], statedAs });
             periods.push(periodOf ? periodOf(at, m[0].length) : null);
           }
         }
@@ -346,11 +375,11 @@ export function guidanceRanges(text: string, periodOf: ((at: number, len: number
   };
   return {
     revenue: pick(true, { re: REVENUE_FIRST_RE, kind: "range" }, { re: KEYWORD_FIRST_RE, kind: "range" }, { re: METRIC_FIRST_REVENUE_RE, kind: "range" },
-      { re: METRIC_FIRST_REVENUE_PM_RE, kind: "pm_amount" }, { re: TABLE_REVENUE_RE, kind: "table" }),
+      { re: METRIC_FIRST_REVENUE_PM_RE, kind: "pm_amount" }, { re: TABLE_REVENUE_RE, kind: "table" }, { re: TABLE_REVENUE_PM_RE, kind: "table_pm" }),
     grossMargin: pick(false, { re: GROSS_MARGIN_RE, kind: "range" }, { re: METRIC_FIRST_GROSS_MARGIN_RE, kind: "range" },
-      { re: METRIC_FIRST_GROSS_MARGIN_PM_RE, kind: "pm_points" }, { re: TABLE_GROSS_MARGIN_RE, kind: "table" }),
+      { re: METRIC_FIRST_GROSS_MARGIN_PM_RE, kind: "pm_points" }, { re: TABLE_GROSS_MARGIN_RE, kind: "table" }, { re: TABLE_GROSS_MARGIN_POINT_RE, kind: "table_point" }),
     eps: pick(false, { re: EPS_RE, kind: "range" }, { re: EPS_CONTINUATION_RE, kind: "range" }, { re: METRIC_FIRST_EPS_RE, kind: "range" }, { re: METRIC_FIRST_EPS_PM_RE, kind: "pm_amount" },
-      { re: TABLE_EPS_RE, kind: "table" }),
+      { re: TABLE_EPS_RE, kind: "table" }, { re: TABLE_EPS_PM_RE, kind: "table_pm" }),
   };
 }
 
