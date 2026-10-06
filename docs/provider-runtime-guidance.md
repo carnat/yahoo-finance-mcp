@@ -1981,7 +1981,7 @@ Vantage and IBKR produced these fixes.
   `scripts/test_edgar_html_parse.py` and
   `scripts/test_worker_data_accuracy.py` (document scale).
 
-## Impossible Provider Rows And Split Adjustment (2.5.23)
+## Impossible Provider Rows, Split Adjustment And Published Precision (2.5.23)
 
 - **Defects (a user audit, findings F-001 and F-002, on Alpha Vantage
   EARNINGS_ESTIMATES for ANET).**
@@ -2026,6 +2026,19 @@ Vantage and IBKR produced these fixes.
   - An unreadable split history is not read as "no splits". `splitHistory.
     status` says so and a `SPLIT_HISTORY_UNAVAILABLE` warning states that
     EPS gaps or windows were not checked against splits.
+- **Identical at published precision (both runtimes; F-013, the residual of
+  2.5.22's F-005).** `IDENTICAL` compared raw numbers. So Yahoo's 5.20199 and
+  Alpha Vantage's "5.2020" (the live ANET FY2027 EPS, with high, low and
+  analyst count equal) read `AGREED` with independence `UNVERIFIED`, and the
+  curve read `CROSS_CHECKED` instead of `NOT_INDEPENDENT`.
+  - Figures a provider publishes as text now keep their decimal places
+    ("5.2020" is four). Mean, high and low are compared at the coarsest
+    precision any provider published.
+  - A number (Yahoo's raw values) states no rounding and is taken as exact,
+    so two numeric feeds still compare exactly.
+  - Analyst counts must still be equal.
+  - `IDENTICAL` now reports the actual `absoluteDiff` and `relativeDiffPct`
+    (0.00001 for ANET) rather than zero.
 - **Effect.** An ANET-shaped fixture (Alpha Vantage revenue mean above its
   high, and an Alpha Vantage FY0 EPS still on the pre-split count 16 days
   after a 4-for-1) gives the following:
