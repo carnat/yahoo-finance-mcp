@@ -748,6 +748,27 @@ class TestReconciliation(unittest.TestCase):
         comparisons, status, _ = mr.reconcile_observations([sec, {**rel, "value": 31_400_000}], 0)
         self.assertEqual((comparisons[0]["result"], status), ("MISMATCH", "CONFLICT"))
 
+    def test_agreement_basis_names_what_agreed_rests_on(self) -> None:
+        # 2.5.22 (F-004): AGREED is SEC plus one or two of the release and Yahoo; Alpha Vantage is never read.
+        read = ["SEC", "ISSUER_RELEASE", "YAHOO"]
+        full = self.out[0]["agreementBasis"]
+        self.assertEqual(full, {"providersRead": read, "providersFound": read, "providersAgreeingWithSec": ["ISSUER_RELEASE", "YAHOO"],
+                                "independentChecks": 2, "notRead": ["ALPHA_VANTAGE"]})
+        self.assertEqual(list(self.out[0])[5:7], ["status", "agreementBasis"])
+        # The release was not found: Yahoo alone agrees with SEC (the as-first-filed SEC row is not an independent check).
+        one = self.out[3]
+        self.assertEqual((one["status"], one["agreementBasis"]["providersFound"], one["agreementBasis"]["providersAgreeingWithSec"], one["agreementBasis"]["independentChecks"]),
+                         ("AGREED", ["SEC", "YAHOO"], ["YAHOO"], 1))
+        # A provider that differs from SEC is not counted; PARTIAL and CONFLICT carry the basis too.
+        conflict = self.out[4]["agreementBasis"]
+        self.assertEqual((conflict["providersAgreeingWithSec"], conflict["independentChecks"]), ([], 0))
+        self.assertEqual(self.out[2]["agreementBasis"]["providersFound"], ["YAHOO"])
+        self.assertEqual(self.out[6]["agreementBasis"]["independentChecks"], 0)
+        for r in self.out:
+            self.assertEqual(r["agreementBasis"]["independentChecks"], len(r["agreementBasis"]["providersAgreeingWithSec"]))
+            self.assertEqual(r["agreementBasis"]["notRead"], ["ALPHA_VANTAGE"])
+            self.assertIn("agreementBasis names the providers that matched SEC", r["notes"][0])
+
     def test_concept_precedence(self) -> None:
         r = self.out[1]
         sec = _obs(r, "SEC_XBRL_LATEST")

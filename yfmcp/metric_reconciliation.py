@@ -567,6 +567,14 @@ def metric_reconciliation(*, ticker: str, metric: str, period: dict, companyfact
     ]
     comparisons, status, restated = reconcile_observations(observations, tolerance_pct)
     found = {o["provider"] for o in observations if o.get("status") == "FOUND"}
+    # What AGREED rests on (2.5.22, F-004): the providers whose value matched the latest SEC value. Alpha Vantage
+    # is never read here, so AGREED is SEC plus one or two of the issuer release and Yahoo, no more.
+    provider_of = {str(o.get("source")): str(o.get("provider")) for o in observations}
+    agreeing = list(dict.fromkeys(
+        provider_of.get(str(c.get("source")))
+        for c in comparisons
+        if c.get("result") == "MATCH" and c.get("against") == "SEC_XBRL_LATEST" and provider_of.get(str(c.get("source"))) != "SEC"
+    ))
     return {
         "ticker": ticker.upper(),
         "metric": metric,
@@ -574,6 +582,13 @@ def metric_reconciliation(*, ticker: str, metric: str, period: dict, companyfact
         "taxonomy": taxonomy,
         "unit": unit,
         "status": status,
+        "agreementBasis": {
+            "providersRead": ["SEC", "ISSUER_RELEASE", "YAHOO"],
+            "providersFound": [p for p in ("SEC", "ISSUER_RELEASE", "YAHOO") if p in found],
+            "providersAgreeingWithSec": agreeing,
+            "independentChecks": len(agreeing),
+            "notRead": ["ALPHA_VANTAGE"],
+        },
         "restated": restated,
         "tolerancePct": tolerance_pct,
         "observations": observations,
@@ -585,7 +600,7 @@ def metric_reconciliation(*, ticker: str, metric: str, period: dict, companyfact
             {"source": "COMPANIES_HOUSE", "reason": "UK statutory filings; not applicable to SEC registrants and not tagged for these metrics."},
         ],
         "notes": [
-            "AGREED: latest SEC plus at least one independent provider found the value and all agree within tolerance. PARTIAL: SEC is absent or only one provider found it. CONFLICT: a provider differs from the latest SEC value (or, without SEC, from another provider) beyond tolerance. NOT_FOUND: none found it.",
+            "AGREED: latest SEC plus at least one independent provider found the value and all agree within tolerance; agreementBasis names the providers that matched SEC (independentChecks is one or two, never Alpha Vantage, which is not read). PARTIAL: SEC is absent or only one provider found it. CONFLICT: a provider differs from the latest SEC value (or, without SEC, from another provider) beyond tolerance. NOT_FOUND: none found it.",
             "A release quarter may be named by its calendar or fiscal number; a sentence naming the period's exact end date is scoped to it.",
             "A difference between the SEC value as first filed and as latest filed is a restatement (restated: true), not a conflict.",
             "The tolerance is the larger of tolerancePct of the SEC value and half the last stated digit of a release figure.",

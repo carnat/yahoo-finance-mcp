@@ -67,6 +67,16 @@ AV = {"symbol": "ASTS", "estimates": [
      "revenue_estimate_average": "0.00", "revenue_estimate_analyst_count": "0.00"},
 ]}
 
+# 2.5.22: Alpha Vantage rows carrying Yahoo's published figures to the last digit (one upstream feed, not two checks).
+AV_IDENTICAL = {"symbol": "ASTS", "estimates": [
+    {"date": "2026-12-31", "horizon": "fiscal year", "eps_estimate_average": "-2.27", "eps_estimate_high": "-2.04", "eps_estimate_low": "-2.49",
+     "eps_estimate_analyst_count": "8", "revenue_estimate_average": "168000000", "revenue_estimate_high": "189000000", "revenue_estimate_low": "150980000",
+     "revenue_estimate_analyst_count": "12"},
+    {"date": "2027-12-31", "horizon": "fiscal year", "eps_estimate_average": "-1.1", "eps_estimate_high": "1.48", "eps_estimate_low": "-1.98",
+     "eps_estimate_analyst_count": "9", "revenue_estimate_average": "520000000", "revenue_estimate_high": "834100000", "revenue_estimate_low": "345057500",
+     "revenue_estimate_analyst_count": "11"},
+]}
+
 # A 52/53-week filer with two thinly covered years, a TWD ADR, and a provider fiscal-year mismatch.
 THIN_TREND = [
     {"period": "0y", "endDate": "2026-09-26", "earningsEstimate": {"avg": 1.2, "numberOfAnalysts": 2}, "revenueEstimate": {"avg": 5e8, "numberOfAnalysts": 2}},
@@ -169,6 +179,9 @@ def _python_outputs() -> dict:
     curve_failed = ev.build_consensus_curve("asts", [failed_yahoo, failed_av], AS_OF)
     curve_failed_one = ev.build_consensus_curve("asts", [failed_yahoo, av], AS_OF)
     curve_no_data = ev.build_consensus_curve("asts", [ev.yahoo_consensus_input([], retrieved_at=AS_OF, status="NO_DATA")], AS_OF)
+    av_identical = ev.alpha_vantage_consensus_input(AV_IDENTICAL, retrieved_at=AS_OF)
+    av_limited = ev.alpha_vantage_consensus_input({}, retrieved_at=AS_OF, status="RATE_LIMIT", message="25 requests per day")
+    av_limited_silent = ev.alpha_vantage_consensus_input({}, retrieved_at=AS_OF, status="RATE_LIMIT", message="")
 
     def later(**kw: object) -> dict:
         return ev.evidence_quality(ticker="tsm", as_of=AS_OF_LATER, quote=kw.get("quote", {"price": 81.2, "currency": "USD", "priceTime": "2026-09-29T20:00:00.000Z", "status": "OK"}),  # type: ignore[arg-type]
@@ -187,6 +200,10 @@ def _python_outputs() -> dict:
         "curveDerived": ev.build_consensus_curve("sap", [derived], AS_OF),
         "curveConflict": ev.build_consensus_curve("asts", [yahoo, conflict], AS_OF),
         "curveAvOnly": ev.build_consensus_curve("asts", [av], AS_OF),
+        "curveIdentical": ev.build_consensus_curve("asts", [yahoo, av_identical], AS_OF),
+        "curveAvRateLimited": ev.build_consensus_curve("asts", [yahoo, av_limited], AS_OF),
+        "curveAvRateLimitedSilent": ev.build_consensus_curve("asts", [yahoo, av_limited_silent], AS_OF),
+        "curveBothFailed": curve_failed,
         "curveDgCalendar": ev.build_consensus_curve("dg", [ev.yahoo_consensus_input(DG_TREND, retrieved_at=AS_OF, financial_currency="USD")], AS_OF, None, DG_NAMING),
         "curveDgNoNaming": ev.build_consensus_curve("dg", [ev.yahoo_consensus_input(DG_TREND, retrieved_at=AS_OF, financial_currency="USD")], AS_OF),
         "curveNone": ev.build_consensus_curve("none", [ev.yahoo_consensus_input([], retrieved_at=AS_OF, status="PROVIDER_ERROR", message="down")], AS_OF),
@@ -234,6 +251,9 @@ const failedAv = m.alphaVantageConsensusInput({}, { retrievedAt: AS_OF, status: 
 const curveFailed = m.buildConsensusCurve("asts", [failedYahoo, failedAv], AS_OF);
 const curveFailedOne = m.buildConsensusCurve("asts", [failedYahoo, av], AS_OF);
 const curveNoData = m.buildConsensusCurve("asts", [m.yahooConsensusInput([], { retrievedAt: AS_OF, status: "NO_DATA" })], AS_OF);
+const avIdentical = m.alphaVantageConsensusInput(f.avIdentical, { retrievedAt: AS_OF });
+const avLimited = m.alphaVantageConsensusInput({}, { retrievedAt: AS_OF, status: "RATE_LIMIT", message: "25 requests per day" });
+const avLimitedSilent = m.alphaVantageConsensusInput({}, { retrievedAt: AS_OF, status: "RATE_LIMIT", message: "" });
 const later = (o) => m.evidenceQuality({ ticker: "tsm", asOf: f.asOfLater, quote: "quote" in o ? o.quote : { price: 81.2, currency: "USD", priceTime: "2026-09-29T20:00:00.000Z", status: "OK" }, filings: "filings" in o ? o.filings : f.filings, filingsStatus: "OK", consensus: o.consensus ?? null, storageAvailable: true });
 const components = Object.fromEntries(f.componentTexts.map(([name, text]) => [name, m.componentFromToolText(name, text, AS_OF)]));
 const { createHash } = await import("node:crypto");
@@ -248,6 +268,10 @@ const out = {
   curveDerived: m.buildConsensusCurve("sap", [derived], AS_OF),
   curveConflict: m.buildConsensusCurve("asts", [yahoo, conflict], AS_OF),
   curveAvOnly: m.buildConsensusCurve("asts", [av], AS_OF),
+  curveIdentical: m.buildConsensusCurve("asts", [yahoo, avIdentical], AS_OF),
+  curveAvRateLimited: m.buildConsensusCurve("asts", [yahoo, avLimited], AS_OF),
+  curveAvRateLimitedSilent: m.buildConsensusCurve("asts", [yahoo, avLimitedSilent], AS_OF),
+  curveBothFailed: curveFailed,
   curveDgCalendar: m.buildConsensusCurve("dg", [m.yahooConsensusInput(f.dgTrend, { retrievedAt: AS_OF, financialCurrency: "USD" })], AS_OF, undefined, f.dgNaming),
   curveDgNoNaming: m.buildConsensusCurve("dg", [m.yahooConsensusInput(f.dgTrend, { retrievedAt: AS_OF, financialCurrency: "USD" })], AS_OF),
   curveNone: m.buildConsensusCurve("none", [m.yahooConsensusInput([], { retrievedAt: AS_OF, status: "PROVIDER_ERROR", message: "down" })], AS_OF),
@@ -282,7 +306,7 @@ def _worker_outputs() -> dict:
     if node is None or not ESBUILD.exists():
         raise unittest.SkipTest("node and worker/node_modules (npm ci) are required")
     fixtures = {
-        "asOf": AS_OF, "yahooTrend": YAHOO_TREND, "av": AV, "thinTrend": THIN_TREND, "adrTrend": ADR_TREND_NEXT, "adrOther": ADR_OTHER,
+        "asOf": AS_OF, "yahooTrend": YAHOO_TREND, "av": AV, "avIdentical": AV_IDENTICAL, "thinTrend": THIN_TREND, "adrTrend": ADR_TREND_NEXT, "adrOther": ADR_OTHER,
         "derivedTrend": DERIVED_TREND, "filings": FILINGS, "staleFilings": STALE_FILINGS, "componentTexts": COMPONENT_TEXTS,
         "asOfLater": AS_OF_LATER, "fpiFilings": FPI_FILINGS, "fpiStaleFilings": FPI_STALE_FILINGS, "fpi40faFilings": FPI_40FA_FILINGS,
         "quoteFailed": QUOTE_FAILED, "quoteNoData": QUOTE_NO_DATA,
@@ -338,6 +362,63 @@ class TestConsensusCurve(unittest.TestCase):
         rev = _cell(curve, "FY+1", "revenue")
         self.assertEqual(rev["coverage"], "PROVIDER_CONFLICT")  # 520M vs 650.8M
         self.assertEqual(rev["agreement"]["relativeDiffPct"], 20.1)
+
+    def test_identical_figures_are_one_feed_not_two_checks(self) -> None:
+        # 2.5.22 (F-005): equal mean, high, low and analyst count is IDENTICAL, and a curve of only those is NOT_INDEPENDENT.
+        curve = self.out["curveIdentical"]
+        for label, metric in (("FY0", "eps"), ("FY0", "revenue"), ("FY+1", "eps"), ("FY+1", "revenue")):
+            agreement = _cell(curve, label, metric)["agreement"]
+            self.assertEqual(agreement, {
+                "status": "IDENTICAL", "providersCompared": ["yahoo_finance", "alpha_vantage"], "relativeDiffPct": 0, "absoluteDiff": 0,
+                "currencyIdentity": "UNVERIFIED", "independence": "NOT_INDEPENDENT"})
+            self.assertEqual(list(agreement), ["status", "providersCompared", "relativeDiffPct", "absoluteDiff", "currencyIdentity", "independence"])
+            self.assertEqual(_cell(curve, label, metric)["coverage"], "PROVIDER_COVERED")
+        self.assertEqual(curve["crossCheck"], {
+            "status": "NOT_INDEPENDENT", "providersAnswered": ["yahoo_finance", "alpha_vantage"], "providersFailed": [],
+            "cellsCompared": 4, "cellsIdentical": 4})
+        self.assertEqual([w["code"] for w in curve["warnings"]], ["PROVIDERS_NOT_INDEPENDENT"])
+        self.assertEqual(curve["warnings"][0]["severity"], "warning")
+        # Distinct figures keep the numeric agreement and an unverified independence.
+        normal = _cell(self.out["curve"], "FY0", "eps")["agreement"]
+        self.assertEqual((normal["status"], normal["independence"]), ("AGREED", "UNVERIFIED"))
+        self.assertEqual(list(normal), ["status", "providersCompared", "relativeDiffPct", "absoluteDiff", "currencyIdentity", "independence"])
+        self.assertEqual(self.out["curve"]["crossCheck"]["status"], "CROSS_CHECKED")
+        self.assertEqual(self.out["curve"]["warnings"], [])
+        # A cell without an analyst count on every provider is never IDENTICAL.
+        entry = {"mean": 1.0, "high": None, "low": None, "analystCount": None, "currency": "USD", "fiscalYearEnd": "2026-12-31"}
+        other = {**entry, "provider": "b"}
+        self.assertEqual(ev._agreement([{**entry, "provider": "a"}, other], "eps", ev.DEFAULT_CONSENSUS_POLICY)["status"], "AGREED")
+        # A field present on both providers must match.
+        a = {**entry, "provider": "a", "analystCount": 5, "high": 2.0}
+        b = {**entry, "provider": "b", "analystCount": 5, "high": 2.5}
+        self.assertEqual(ev._agreement([a, b], "eps", ev.DEFAULT_CONSENSUS_POLICY)["status"], "AGREED")
+
+    def test_cross_check_reports_a_failed_provider(self) -> None:
+        # 2.5.22 (F-003): a rate-limited Alpha Vantage leaves a single-provider curve with a warning, not silence.
+        curve = self.out["curveAvRateLimited"]
+        self.assertEqual(curve["crossCheck"], {
+            "status": "SINGLE_PROVIDER", "providersAnswered": ["yahoo_finance"],
+            "providersFailed": [{"provider": "alpha_vantage", "status": "RATE_LIMIT", "message": "25 requests per day"}],
+            "cellsCompared": 0, "cellsIdentical": 0})
+        self.assertEqual(len(curve["warnings"]), 1)
+        warning = curve["warnings"][0]
+        self.assertEqual((warning["code"], warning["severity"]), ("CROSS_CHECK_DEGRADED", "warning"))
+        self.assertEqual(warning["message"], "alpha_vantage returned RATE_LIMIT: 25 requests per day. The curve is not cross-checked against it. "
+                         "This server's Alpha Vantage key and its quota are its own, separate from any key used directly.")
+        self.assertIn("separate from any key used directly", warning["message"])
+        # An empty message adds no ": " suffix.
+        silent = self.out["curveAvRateLimitedSilent"]["warnings"][0]["message"]
+        self.assertTrue(silent.startswith("alpha_vantage returned RATE_LIMIT. The curve is not cross-checked against it."))
+        # Both providers failed: NO_PROVIDER and one warning each, the quota sentence on Alpha Vantage only.
+        both = self.out["curveBothFailed"]
+        self.assertEqual(both["crossCheck"]["status"], "NO_PROVIDER")
+        self.assertEqual([w["code"] for w in both["warnings"]], ["CROSS_CHECK_DEGRADED", "CROSS_CHECK_DEGRADED"])
+        self.assertNotIn("quota", both["warnings"][0]["message"])
+        self.assertIn("quota", both["warnings"][1]["message"])
+        # Key order: crossCheck follows asOf, warnings follow notes.
+        keys = list(curve)
+        self.assertEqual(keys[:3], ["ticker", "asOf", "crossCheck"])
+        self.assertEqual(keys[keys.index("notes") + 1], "warnings")
 
     def test_years_beyond_fy1_stay_visibly_missing(self) -> None:
         curve = self.out["curve"]

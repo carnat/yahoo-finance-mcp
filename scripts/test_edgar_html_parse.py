@@ -224,6 +224,28 @@ class TestStatedUnitScale(unittest.TestCase):
         self.assertEqual(_detect_unit_scale("", "disaggregated revenue by market ($000):"), (1_000.0, "STATED_BEFORE_TABLE"))
         self.assertEqual(_detect_unit_scale("", ""), (1_000_000.0, "ASSUMED_MILLIONS"))
 
+    def test_scale_stated_elsewhere_in_the_document(self):
+        """2.5.22: the table and its lead-in state none; the filing's single stated scale applies, else millions are assumed."""
+        from yfmcp.parsing.html import _detect_unit_scale, _document_unit_scale, _lazy_document_scale
+        self.assertEqual(_detect_unit_scale("", "", lambda: 1_000_000.0), (1_000_000.0, "STATED_IN_DOCUMENT"))
+        self.assertEqual(_detect_unit_scale("", "", lambda: 1_000.0), (1_000.0, "STATED_IN_DOCUMENT"))
+        # The table's own statement and its lead-in come first.
+        self.assertEqual(_detect_unit_scale("<td>(in thousands)</td>", "", lambda: 1e9), (1_000.0, "STATED_IN_TABLE"))
+        self.assertEqual(_detect_unit_scale("", "($000):", lambda: 1e9), (1_000.0, "STATED_BEFORE_TABLE"))
+        self.assertEqual(_detect_unit_scale("", "", lambda: None), (1_000_000.0, "ASSUMED_MILLIONS"))
+        # Every statement agreeing is one scale; two different scales, or none, is None.
+        self.assertEqual(_document_unit_scale("<p>(Dollars in millions)</p><p>(in millions)</p>"), 1_000_000.0)
+        self.assertIsNone(_document_unit_scale("<p>(Dollars in millions)</p><p>(in thousands)</p>"))
+        self.assertIsNone(_document_unit_scale("<p>no statement</p>"))
+        calls = []
+        scale = _lazy_document_scale("<p>(in thousands)</p>")
+        self.assertEqual((scale(), scale()), (1_000.0, 1_000.0))
+        self.assertEqual(_detect_unit_scale("", "", lambda: calls.append(1) or 1e9)[1], "STATED_IN_DOCUMENT")
+        self.assertEqual(calls, [1])
+        # The document callable is not consulted when the table or lead-in states a scale.
+        _detect_unit_scale("<td>(in thousands)</td>", "", lambda: calls.append(1) or 1e9)
+        self.assertEqual(calls, [1])
+
 
 class TestCohrGeographicTables(unittest.TestCase):
     """2.5.20 (COHR): the "Revenues" caption row is not the total; a long-lived assets table is not revenue."""
@@ -246,6 +268,19 @@ class TestCohrGeographicTables(unittest.TestCase):
         self.assertEqual((geo["pct"], geo["usd"], geo["denominator"], geo["unitScale"]), (0.1143, 813_377_000, 7_118_181_000, "thousands"))
         self.assertEqual(geo["unitScaleSource"], "STATED_BEFORE_TABLE")
         self.assertIsNone(extract_geo_revenue_from_html(assets, "China"))
+
+    def test_geographic_scale_stated_elsewhere_in_the_document(self):
+        """2.5.22: a geographic table with no scale of its own reads the filing's one stated scale."""
+        from yfmcp.parsing.extractors import extract_geo_revenue_from_html
+        r = self.ROWS
+        table = ("<p>Revenue by geographic region.</p><table>" + r("Region", "2026", "2025") + r("United States", "600", "500")
+                 + r("China", "400", "300") + r("Total", "1,000", "800") + "</table>")
+        assumed = extract_geo_revenue_from_html(table, "China")
+        self.assertEqual((assumed["usd"], assumed["unitScale"], assumed["unitScaleSource"]), (400e6, "millions", "ASSUMED_MILLIONS"))
+        stated = extract_geo_revenue_from_html(table + "<p>(Dollars in thousands)</p>", "China")
+        self.assertEqual((stated["usd"], stated["denominator"], stated["unitScale"], stated["unitScaleSource"]), (400e3, 1_000e3, "thousands", "STATED_IN_DOCUMENT"))
+        two = extract_geo_revenue_from_html(table + "<p>(Dollars in thousands)</p><p>(in millions)</p>", "China")
+        self.assertEqual((two["unitScale"], two["unitScaleSource"]), ("millions", "ASSUMED_MILLIONS"))
 
 
 class TestParseHtmlTable(unittest.TestCase):

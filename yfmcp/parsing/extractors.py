@@ -6,7 +6,7 @@ Extracted from server.py in Phase 1 of the refactoring plan.
 import math
 import re as _re
 
-from yfmcp.parsing.html import _detect_unit_scale
+from yfmcp.parsing.html import _detect_unit_scale, _lazy_document_scale
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +244,7 @@ def extract_geo_revenue_from_html(html: str, region: str) -> dict | None:
     Every table that names the region and is about revenue is a candidate; tables introduced as a geographic breakdown
     come first, and a table without revenue or sales in it or its lead-in (a properties list) never counts.
     """
+    document_scale = _lazy_document_scale(html)
     candidates: list[tuple[int, int, str, list[list[str]]]] = []
     for scanned, m in enumerate(_re.finditer(r"<table[^>]*>[\s\S]*?</table>", html, _re.IGNORECASE), start=1):
         if scanned > 800:
@@ -293,7 +294,7 @@ def extract_geo_revenue_from_html(html: str, region: str) -> dict | None:
         stated_share = stated_pct if share_header else None
         if stated_share is not None and abs(pct * 100 - stated_share) > _STATED_PCT_TOLERANCE:
             continue
-        unit_mult, unit_scale_source = _detect_unit_scale(table_html, html[max(0, pos - 3_000): pos])
+        unit_mult, unit_scale_source = _detect_unit_scale(table_html, html[max(0, pos - 3_000): pos], document_scale)
         unit_scale = "thousands" if unit_mult == 1e3 else "millions" if unit_mult == 1e6 else "billions" if unit_mult == 1e9 else "actual"
         headings = _re.findall(r"<h[1-6][^>]*>([\s\S]*?)</h[1-6]>", html[max(0, pos - 6_000): pos], _re.IGNORECASE)
         section_heading = _geo_strip_html_tags(headings[-1]) if headings else ""

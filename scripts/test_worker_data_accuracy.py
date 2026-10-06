@@ -214,6 +214,11 @@ const vrt = [
 out.vrtSegments = m.extractSegmentTableFromHtml(vrt);
 // No scale stated anywhere: read in millions but marked as assumed (2.5.21).
 out.unscaledSegments = m.extractSegmentTableFromHtml(vrt.replace(" (in millions)", ""));
+// 2.5.22: the table and its lead-in state no scale, but another paragraph of the filing does, and only that one scale.
+const vrtBare = vrt.replace(" (in millions)", "");
+out.documentScaleSegments = m.extractSegmentTableFromHtml(vrtBare + `<p>Amounts in this report are stated in thousands.</p>`);
+out.documentMillionsSegments = m.extractSegmentTableFromHtml(vrtBare + `<p>(Dollars in millions)</p>`);
+out.conflictingScaleSegments = m.extractSegmentTableFromHtml(vrtBare + `<p>(Dollars in millions)</p><p>Other amounts are in thousands.</p>`);
 // The release text both runtimes read (2.5.20): one line per block, inline tags joined, no-break spaces as spaces.
 out.blockText = m._stripHtmlTagsIdx(BLOCK_HTML);
 out.unitScale = {
@@ -366,6 +371,18 @@ class TestWorkerDataAccuracy(unittest.TestCase):
         self.assertEqual(vrt["unitScaleSource"], "STATED_BEFORE_TABLE")
         unscaled = self.out["unscaledSegments"]["result"]
         self.assertEqual((unscaled["unitScale"], unscaled["unitScaleSource"]), ("millions", "ASSUMED_MILLIONS"))
+
+    def test_scale_stated_elsewhere_in_the_document(self) -> None:
+        # 2.5.22: neither the table nor its lead-in states a scale; the filing states exactly one, elsewhere.
+        millions = self.out["documentMillionsSegments"]["result"]
+        self.assertEqual((millions["unitScale"], millions["unitScaleSource"]), ("millions", "STATED_IN_DOCUMENT"))
+        self.assertEqual(millions["total"]["value"], 10229.9)
+        # The stated scale is used, not the assumed millions.
+        thousands = self.out["documentScaleSegments"]["result"]
+        self.assertEqual((thousands["unitScale"], thousands["unitScaleSource"]), ("thousands", "STATED_IN_DOCUMENT"))
+        # Two different statements in one filing leave the scale assumed.
+        conflicting = self.out["conflictingScaleSegments"]["result"]
+        self.assertEqual((conflicting["unitScale"], conflicting["unitScaleSource"]), ("millions", "ASSUMED_MILLIONS"))
 
     def test_release_text_matches_python(self) -> None:
         from yfmcp.parsing.html import _strip_html_blocks

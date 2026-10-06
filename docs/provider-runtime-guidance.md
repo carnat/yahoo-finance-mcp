@@ -1908,6 +1908,79 @@ Vantage and IBKR produced these fixes.
   `scripts/test_worker_data_accuracy.py` (segment scale source) and
   `scripts/test_sec_fact_payloads.py` (geographic key lists).
 
+## Cross-Checks, Stored Observations And Document Scales (2.5.22)
+
+- **Defects (a user audit, findings F-003 to F-006, plus one 2.5.21
+  follow-up).**
+  - F-003: `get_consensus_forecast_curve`'s cross-check quietly fell back to
+    Yahoo alone when Alpha Vantage answered "rate limited". The server's Alpha
+    Vantage key is its own free-tier key (25 requests a day, shared by every
+    caller and every tool that reads Alpha Vantage), separate from any key a
+    user calls directly, so a direct call can work while the server's is
+    exhausted. Only the per-cell `SINGLE_PROVIDER` showed it.
+  - F-004: `reconcile_metric_sources`' `AGREED` rested on SEC plus one or two
+    of the issuer release and Yahoo, and never Alpha Vantage, without saying
+    which.
+  - F-005: Yahoo and Alpha Vantage consensus matched to the last published
+    digit (one upstream feed), yet their agreement read as `AGREED`, as if
+    they were two checks.
+  - F-006: daily consensus observations were stored
+    (`consensus-history/{TICKER}/{date}.json`; AAOI has seven, including
+    2026-10-04) but no tool could read one back, so AAOI's stored FY2027
+    revenue consensus could not be retrieved.
+  - 2.5.21 follow-up: VRT's segment table and MU's geographic table were
+    marked `ASSUMED_MILLIONS` although the filings state "(Dollars in millions
+    ...)" elsewhere (VRT's 10-K states it 14 times and no other scale).
+- **Consensus cross-check (both runtimes, `evidence.ts` / `evidence.py`).**
+  The curve carries `crossCheck` {`status`, `providersAnswered`,
+  `providersFailed`, `cellsCompared`, `cellsIdentical`} and a `warnings` list.
+  - `status` is `NO_PROVIDER`, `SINGLE_PROVIDER`, `NOT_COMPARED`,
+    `NOT_INDEPENDENT` or `CROSS_CHECKED`.
+  - A provider that failed (any status other than `OK` or `NO_DATA`) gives
+    the warning `CROSS_CHECK_DEGRADED`, naming its status and message. For
+    Alpha Vantage the message adds that the server's key and quota are
+    separate from a key used directly.
+  - A cell whose providers publish the same mean, high, low and analyst count
+    has agreement status `IDENTICAL` (independence `NOT_INDEPENDENT`) instead
+    of `AGREED`; other compared cells carry independence `UNVERIFIED`.
+  - When every compared cell is `IDENTICAL`, `crossCheck` is
+    `NOT_INDEPENDENT` with the warning `PROVIDERS_NOT_INDEPENDENT`.
+- **Remembered denials (Worker).** A remembered Alpha Vantage daily-quota or
+  entitlement denial now states when it expires ("remembered until <time>;
+  not retried"). The daily quota denial lasts to the next UTC day.
+- **Stored observations (both runtimes).** `get_consensus_forecast_curve`
+  with `observation_date` (`YYYY-MM-DD`) returns the curve stored that day as
+  written, with `storage` {`source` `STORED_OBSERVATION`, `key`, `schema`,
+  `observedAt`, `serverVersion`, `buildSha`}.
+  - `OBSERVATION_NOT_FOUND` lists the stored dates (`get_eps_revisions` lists
+    them too).
+  - `STORAGE_UNAVAILABLE` and `STORAGE_FAILED` (retryable) are returned when
+    the store cannot be read.
+  - A malformed date is `INPUT_VALIDATION_ERROR`.
+- **Reconciliation (both runtimes).** `reconcile_metric_sources` adds
+  `agreementBasis` {`providersRead`, `providersFound`,
+  `providersAgreeingWithSec`, `independentChecks`, `notRead`:
+  `["ALPHA_VANTAGE"]`}. `AGREED` means SEC plus `independentChecks` (one or
+  two) of the issuer release and Yahoo.
+- **Document scales (geographic in both runtimes, segment in the Worker).**
+  `unitScaleSource` gains `STATED_IN_DOCUMENT`: the table and its lead-in
+  state no scale, but every scale statement in the filing names the same one.
+  A filing that states two scales (COHR mixes "$000" and "millions") lends
+  none, and an unstated table stays `ASSUMED_MILLIONS`.
+- **Effect.** Live AAOI on 2.5.21 returned Alpha Vantage `RATE_LIMIT` ("25
+  requests per day") with Yahoo alone; 2.5.22 reports `crossCheck`
+  `SINGLE_PROVIDER` with `CROSS_CHECK_DEGRADED`. VRT segment revenue is
+  `STATED_IN_DOCUMENT` (millions, no warning, MEDIUM confidence); COHR is
+  unchanged (`STATED_BEFORE_TABLE`).
+- **Not changed.** The server's Alpha Vantage quota itself (a configuration
+  matter: a paid `ALPHA_VANTAGE_API_KEY` on the Worker); reconciliation still
+  does not read Alpha Vantage.
+- **Tests.** `scripts/test_evidence.py` (identical feeds, failed provider),
+  `scripts/test_evidence_tools.py` (stored observation read),
+  `scripts/test_valuation_history_and_reconcile.py` (`agreementBasis`),
+  `scripts/test_edgar_html_parse.py` and
+  `scripts/test_worker_data_accuracy.py` (document scale).
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
