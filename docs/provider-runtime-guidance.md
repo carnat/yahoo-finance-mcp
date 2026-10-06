@@ -1981,6 +1981,60 @@ Vantage and IBKR produced these fixes.
   `scripts/test_edgar_html_parse.py` and
   `scripts/test_worker_data_accuracy.py` (document scale).
 
+## Impossible Provider Rows And Split Adjustment (2.5.23)
+
+- **Defects (a user audit, findings F-001 and F-002, on Alpha Vantage
+  EARNINGS_ESTIMATES for ANET).**
+  - F-001: consensus rows whose average lies outside their own range. ANET Q1
+    2021 revenue averaged 667.6M against a stated high of 652.7M, and Q2 2018
+    did the same (519.8M vs 518.4M). A mean above its own high cannot be a
+    consensus, yet any such row would have been compared like any other.
+  - F-002: EPS history not split-adjusted. ANET's quarterly EPS consensus
+    drops 2.73 → 0.73 at the 2021 4-for-1 split and 2.08 → 0.57 at the 2024
+    one. One 2021 row mixes the two bases (current 0.73, 90 days ago 2.93).
+  - The quarterly rows themselves never reach our outputs (both runtimes read
+    only fiscal-year rows), and ANET's current fiscal-year rows are clean. The
+    same defects in a fiscal-year row would have reached the curve and the
+    revision windows, so both are now guarded for both providers.
+- **Impossible rows (both runtimes, `evidence.ts` / `evidence.py`).** A
+  provider row whose mean is above its high, below its low, or whose low is
+  above its high has state `PROVIDER_INCONSISTENT` and `inconsistency`
+  `MEAN_ABOVE_HIGH`, `MEAN_BELOW_LOW` or `LOW_ABOVE_HIGH`.
+  - The row is shown as given. It is left out of the agreement check
+    (`providersExcluded` [{`provider`, `reason`}]) and named in a
+    `PROVIDER_ROW_INCONSISTENT` warning.
+  - When every row in a cell is inconsistent, the cell's coverage and
+    agreement are `PROVIDER_INCONSISTENT`.
+  - In `get_eps_revisions` the provider gets the same `state`; its windows
+    carry no change (window state `PROVIDER_INCONSISTENT`).
+- **Split adjustment (both runtimes).** Yahoo's split history for the last two
+  years is read with the consensus providers. The Worker reads chart events;
+  the local server reads yfinance `Ticker.splits`.
+  - The curve: an EPS gap between two providers that would be a `CONFLICT` is
+    `NOT_SPLIT_ADJUSTED` when the ratio of their means is within 15% of the
+    ratio of a split from the last 400 days (or of those splits combined).
+    The agreement names the `split` {`date`, `ratio`} and
+    `providersNotAdjusted`: the larger magnitude after a forward split, the
+    smaller after a reverse one. Warning: `PROVIDER_NOT_SPLIT_ADJUSTED`.
+    Coverage stays `PROVIDER_CONFLICT`. The curve carries `splitHistory`
+    {`status`, `lookbackDays`, `recentSplits`}.
+  - `get_eps_revisions`: every window has a `state`: `COMPARED`,
+    `NOT_REPORTED`, `PROVIDER_INCONSISTENT` or `SPLIT_IN_WINDOW`. A window
+    with a split inside it (one day of margin) carries no change, plus the
+    `split`, with a `SPLIT_IN_WINDOW` warning. The result adds
+    `splitHistory` (91-day lookback) and `warnings`.
+  - An unreadable split history is not read as "no splits". `splitHistory.
+    status` says so and a `SPLIT_HISTORY_UNAVAILABLE` warning states that
+    EPS gaps or windows were not checked against splits.
+- **Effect.** An ANET-shaped fixture (Alpha Vantage revenue mean above its
+  high, and an Alpha Vantage FY0 EPS still on the pre-split count 16 days
+  after a 4-for-1) gives the following:
+  - Revenue `SINGLE_PROVIDER` with Alpha Vantage excluded, instead of a
+    comparison against an impossible figure.
+  - EPS `NOT_SPLIT_ADJUSTED` naming Alpha Vantage, instead of a 75%
+    `CONFLICT`.
+  - Yahoo's 30/60/90-day windows `SPLIT_IN_WINDOW`, instead of a −74% "revision".
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
