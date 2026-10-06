@@ -77,6 +77,16 @@ AV_IDENTICAL = {"symbol": "ASTS", "estimates": [
      "revenue_estimate_analyst_count": "11"},
 ]}
 
+# 2.5.23 (F-013): the live ANET FY2027 EPS cell, one feed published at two precisions: Yahoo's 5.20199 is Alpha
+# Vantage's "5.2020". AV_NEAR differs at Alpha Vantage's fourth place; AV_ZEROS shows trailing zeros count as precision.
+F013_TREND = [{"period": "0y", "endDate": "2026-12-31",
+               "earningsEstimate": {"avg": _r(5.20199), "high": _r(5.73), "low": _r(4.66), "numberOfAnalysts": _r(29)},
+               "revenueEstimate": {"avg": _r(2.54), "high": _r(2.9), "low": _r(2.1), "numberOfAnalysts": _r(29)}}]
+F013_AV = {"symbol": "ANET", "estimates": [{"date": "2026-12-31", "horizon": "fiscal year", "eps_estimate_average": "5.2020", "eps_estimate_high": "5.7300",
+                                            "eps_estimate_low": "4.6600", "eps_estimate_analyst_count": "29.0000", "revenue_estimate_average": "2.5000",
+                                            "revenue_estimate_high": "2.9000", "revenue_estimate_low": "2.1000", "revenue_estimate_analyst_count": "29.00"}]}
+F013_AV_NEAR = {"symbol": "ANET", "estimates": [dict(F013_AV["estimates"][0], eps_estimate_average="5.2021")]}
+
 # A 52/53-week filer with two thinly covered years, a TWD ADR, and a provider fiscal-year mismatch.
 THIN_TREND = [
     {"period": "0y", "endDate": "2026-09-26", "earningsEstimate": {"avg": 1.2, "numberOfAnalysts": 2}, "revenueEstimate": {"avg": 5e8, "numberOfAnalysts": 2}},
@@ -156,6 +166,7 @@ REVERSE_A = {"provider": "yahoo_finance", "status": "OK", "retrievedAt": ANET_AS
      "epsTrend": None, "epsRevisions": None}]}
 REVERSE_B = {**REVERSE_A, "provider": "alpha_vantage", "periods": [{**REVERSE_A["periods"][0], "providerPeriodLabel": "fiscal year",
     "eps": {"mean": -0.52, "high": -0.4, "low": -0.6, "analystCount": 5, "currency": None, "currencyBasis": "NOT_STATED"}}]}
+F013_DECIMAL_CASES = ["5.2020", "168843670.00", "-2", "1e-7", " 3.10 ", "abc", "", 5.20199, 168843670, {"raw": "5.20"}, {"raw": 2.54, "fmt": "2.54"}, None, True]
 QUOTE_FAILED = {"price": None, "currency": None, "priceTime": None, "status": "PROVIDER_ERROR"}
 QUOTE_NO_DATA = {"price": None, "currency": None, "priceTime": None, "status": "NO_DATA"}
 
@@ -216,6 +227,7 @@ def _python_outputs() -> dict:
     av_limited_silent = ev.alpha_vantage_consensus_input({}, retrieved_at=AS_OF, status="RATE_LIMIT", message="")
     anet_yahoo = ev.yahoo_consensus_input(ANET_TREND, retrieved_at=ANET_AS_OF, financial_currency="USD")
     anet_av = ev.alpha_vantage_consensus_input(ANET_AV, retrieved_at=ANET_AS_OF)
+    f013_yahoo = ev.yahoo_consensus_input(F013_TREND, retrieved_at=AS_OF, financial_currency="USD")
 
     def later(**kw: object) -> dict:
         return ev.evidence_quality(ticker="tsm", as_of=AS_OF_LATER, quote=kw.get("quote", {"price": 81.2, "currency": "USD", "priceTime": "2026-09-29T20:00:00.000Z", "status": "OK"}),  # type: ignore[arg-type]
@@ -247,6 +259,9 @@ def _python_outputs() -> dict:
         "curveAnetSplitsFailed": ev.build_consensus_curve("anet", [anet_yahoo, anet_av], ANET_AS_OF, None, None, SPLITS_FAILED),
         "curveAnetAvOnly": ev.build_consensus_curve("anet", [anet_av], ANET_AS_OF, None, None, ANET_SPLITS),
         "curveReverse": ev.build_consensus_curve("rev", [REVERSE_A, REVERSE_B], ANET_AS_OF, None, None, REVERSE_SPLITS),
+        "curveF013": ev.build_consensus_curve("anet", [f013_yahoo, ev.alpha_vantage_consensus_input(F013_AV, retrieved_at=AS_OF)], AS_OF),
+        "curveF013Near": ev.build_consensus_curve("anet", [f013_yahoo, ev.alpha_vantage_consensus_input(F013_AV_NEAR, retrieved_at=AS_OF)], AS_OF),
+        "publishedDecimals": [ev.published_decimals(v) for v in F013_DECIMAL_CASES],
         "revisionsAnet": ev.build_eps_revisions("anet", [anet_yahoo, anet_av], ANET_AS_OF, ANET_SPLITS),
         "revisionsAnetSplitsFailed": ev.build_eps_revisions("anet", [anet_yahoo, anet_av], ANET_AS_OF, SPLITS_FAILED),
         "quality": quality,
@@ -297,6 +312,7 @@ const avLimited = m.alphaVantageConsensusInput({}, { retrievedAt: AS_OF, status:
 const avLimitedSilent = m.alphaVantageConsensusInput({}, { retrievedAt: AS_OF, status: "RATE_LIMIT", message: "" });
 const anetYahoo = m.yahooConsensusInput(f.anetTrend, { retrievedAt: f.anetAsOf, financialCurrency: "USD" });
 const anetAv = m.alphaVantageConsensusInput(f.anetAv, { retrievedAt: f.anetAsOf });
+const f013Yahoo = m.yahooConsensusInput(f.f013Trend, { retrievedAt: AS_OF, financialCurrency: "USD" });
 const later = (o) => m.evidenceQuality({ ticker: "tsm", asOf: f.asOfLater, quote: "quote" in o ? o.quote : { price: 81.2, currency: "USD", priceTime: "2026-09-29T20:00:00.000Z", status: "OK" }, filings: "filings" in o ? o.filings : f.filings, filingsStatus: "OK", consensus: o.consensus ?? null, storageAvailable: true });
 const components = Object.fromEntries(f.componentTexts.map(([name, text]) => [name, m.componentFromToolText(name, text, AS_OF)]));
 const { createHash } = await import("node:crypto");
@@ -324,6 +340,9 @@ const out = {
   curveAnetSplitsFailed: m.buildConsensusCurve("anet", [anetYahoo, anetAv], f.anetAsOf, undefined, null, f.splitsFailed),
   curveAnetAvOnly: m.buildConsensusCurve("anet", [anetAv], f.anetAsOf, undefined, null, f.anetSplits),
   curveReverse: m.buildConsensusCurve("rev", [f.reverseA, f.reverseB], f.anetAsOf, undefined, null, f.reverseSplits),
+  curveF013: m.buildConsensusCurve("anet", [f013Yahoo, m.alphaVantageConsensusInput(f.f013Av, { retrievedAt: AS_OF })], AS_OF),
+  curveF013Near: m.buildConsensusCurve("anet", [f013Yahoo, m.alphaVantageConsensusInput(f.f013AvNear, { retrievedAt: AS_OF })], AS_OF),
+  publishedDecimals: f.f013DecimalCases.map((v) => m.publishedDecimals(v)),
   revisionsAnet: m.buildEpsRevisions("anet", [anetYahoo, anetAv], f.anetAsOf, f.anetSplits),
   revisionsAnetSplitsFailed: m.buildEpsRevisions("anet", [anetYahoo, anetAv], f.anetAsOf, f.splitsFailed),
   quality,
@@ -362,6 +381,7 @@ def _worker_outputs() -> dict:
         "quoteFailed": QUOTE_FAILED, "quoteNoData": QUOTE_NO_DATA,
         "dgTrend": DG_TREND, "dgNaming": DG_NAMING,
         "anetAsOf": ANET_AS_OF, "anetTrend": ANET_TREND, "anetAv": ANET_AV, "anetSplits": ANET_SPLITS, "anetOldSplits": ANET_OLD_SPLITS,
+        "f013Trend": F013_TREND, "f013Av": F013_AV, "f013AvNear": F013_AV_NEAR, "f013DecimalCases": F013_DECIMAL_CASES,
         "splitsFailed": SPLITS_FAILED, "reverseSplits": REVERSE_SPLITS, "reverseA": REVERSE_A, "reverseB": REVERSE_B,
         # JSON cannot carry -0.0 distinctly from 0 in every parser; both runtimes format it as 0.
         "canonical": CANONICAL_CASES,
@@ -444,6 +464,23 @@ class TestConsensusCurve(unittest.TestCase):
         a = {**entry, "provider": "a", "analystCount": 5, "high": 2.0}
         b = {**entry, "provider": "b", "analystCount": 5, "high": 2.5}
         self.assertEqual(ev._agreement([a, b], "eps", ev.DEFAULT_CONSENSUS_POLICY)["status"], "AGREED")
+
+    def test_identical_at_the_coarser_published_precision(self) -> None:
+        # 2.5.23 (F-013): Yahoo 5.20199 and Alpha Vantage "5.2020" are one figure at Alpha Vantage's four places.
+        curve = self.out["curveF013"]
+        eps = _cell(curve, "FY0", "eps")["agreement"]
+        self.assertEqual(eps, {"status": "IDENTICAL", "providersCompared": ["yahoo_finance", "alpha_vantage"], "relativeDiffPct": 0,
+                               "absoluteDiff": 1e-05, "currencyIdentity": "UNVERIFIED", "independence": "NOT_INDEPENDENT"})
+        # "2.5000" is four places, so Yahoo's 2.54 is not it, though 2.5 would round from it at one place.
+        self.assertEqual(_cell(curve, "FY0", "revenue")["agreement"]["status"], "AGREED")
+        self.assertEqual(curve["crossCheck"]["cellsIdentical"], 1)
+        near = _cell(self.out["curveF013Near"], "FY0", "eps")["agreement"]
+        self.assertEqual((near["status"], near["independence"]), ("AGREED", "UNVERIFIED"))
+        self.assertEqual(self.out["publishedDecimals"], [4, 2, 0, None, 2, None, None, None, None, 2, None, None, None])
+        # Numbers state no rounding: without published text the comparison stays exact.
+        entry = {"high": None, "low": None, "analystCount": 9, "currency": "USD", "fiscalYearEnd": "2026-12-31"}
+        pair = [{**entry, "provider": "a", "mean": 5.2}, {**entry, "provider": "b", "mean": 5.20199}]
+        self.assertEqual(ev._agreement(pair, "eps", ev.DEFAULT_CONSENSUS_POLICY)["status"], "AGREED")
 
     def test_cross_check_reports_a_failed_provider(self) -> None:
         # 2.5.22 (F-003): a rate-limited Alpha Vantage leaves a single-provider curve with a warning, not silence.

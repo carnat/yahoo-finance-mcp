@@ -117,6 +117,19 @@ function num(value: unknown): number | null {
   return null;
 }
 
+/**
+ * Decimal places a provider published a figure with, when it published it as text (2.5.23, F-013): Alpha Vantage's
+ * "5.2020" is four places. A number (Yahoo's raw 5.20199) states no rounding and is taken as exact.
+ */
+export function publishedDecimals(value: unknown): number | null {
+  const v = value && typeof value === "object" && !Array.isArray(value) ? (value as Rec).raw : value;
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  if (!/^[+-]?\d+(\.\d+)?$/.test(t)) return null;
+  const dot = t.indexOf(".");
+  return dot < 0 ? 0 : t.length - dot - 1;
+}
+
 function round(value: number, digits: number): number {
   const f = 10 ** digits;
   return Math.round(value * f) / f;
@@ -140,6 +153,8 @@ export interface MetricEstimate {
   analystCount: number | null;
   currency: string | null;
   currencyBasis: string;
+  /** Decimal places each figure was published with as text; figures compare at the coarsest (F-013). */
+  decimals?: { mean: number | null; high: number | null; low: number | null };
 }
 
 export interface EpsTrend {
@@ -233,6 +248,7 @@ function estimate(block: unknown, currency: string | null, currencyBasis: string
     analystCount,
     currency,
     currencyBasis,
+    decimals: { mean: publishedDecimals(b.avg ?? b.mean), high: publishedDecimals(b.high), low: publishedDecimals(b.low) },
   };
 }
 
@@ -414,11 +430,13 @@ function providerEntry(input: ProviderConsensusInput, period: ProviderPeriod, me
   };
 }
 
-function agreement(entries: Rec[], metric: ConsensusMetric, policy: ConsensusPolicy, splits: SplitEvent[] = []): Rec {
+function agreement(entries: Rec[], metric: ConsensusMetric, policy: ConsensusPolicy, splits: SplitEvent[] = [], published: (MetricEstimate | undefined)[] = []): Rec {
   // An impossible row is not a second opinion (2.5.23, F-001): it is left out of the comparison and named.
   const inconsistent = entries.filter((e) => typeof e.mean === "number" && e.state === "PROVIDER_INCONSISTENT");
   const excluded = inconsistent.length ? { providersExcluded: inconsistent.map((e) => ({ provider: e.provider, reason: e.inconsistency })) } : {};
-  const valued = entries.filter((e) => typeof e.mean === "number" && e.state !== "PROVIDER_INCONSISTENT");
+  const usable = (e: Rec) => typeof e.mean === "number" && e.state !== "PROVIDER_INCONSISTENT";
+  const valued = entries.filter(usable);
+  const valuedPublished = entries.map((e, i) => (usable(e) ? published[i] : null)).filter((x) => x !== null);
   const providersCompared = valued.map((e) => e.provider);
   if (valued.length === 0 && inconsistent.length) return { status: "PROVIDER_INCONSISTENT", providersCompared, relativeDiffPct: null, absoluteDiff: null, ...excluded };
   if (valued.length === 0) return { status: "NO_PROVIDER", providersCompared, relativeDiffPct: null, absoluteDiff: null };
@@ -431,17 +449,18 @@ function agreement(entries: Rec[], metric: ConsensusMetric, policy: ConsensusPol
   const currencies = [...new Set(valued.map((e) => e.currency).filter((c): c is string => typeof c === "string"))];
   if (currencies.length > 1) return { status: "CURRENCY_MISMATCH", providersCompared, currencies, relativeDiffPct: null, absoluteDiff: null, ...excluded };
   const currencyIdentity = currencies.length === 1 && valued.every((e) => e.currency === currencies[0]) ? "VERIFIED" : "UNVERIFIED";
-  // The same mean, high, low and analyst count wherever both publish them: one upstream feed carried twice, not
-  // two checks (2.5.22, F-005: Yahoo and Alpha Vantage matched to the last published digit).
-  if (identicalAtPublishedPrecision(valued)) {
-    return { status: "IDENTICAL", providersCompared, relativeDiffPct: 0, absoluteDiff: 0, currencyIdentity, independence: "NOT_INDEPENDENT", ...excluded };
-  }
   const means = valued.map((e) => e.mean as number);
   const hi = Math.max(...means);
   const lo = Math.min(...means);
   const absoluteDiff = round(hi - lo, 6);
   const scale = Math.max(Math.abs(hi), Math.abs(lo));
   const relativeDiffPct = scale > 0 ? round(((hi - lo) / scale) * 100, 2) : 0;
+  // The same mean, high, low and analyst count wherever both publish them: one upstream feed carried twice, not
+  // two checks (2.5.22, F-005). Compared at the coarser provider's published precision (2.5.23, F-013: Yahoo's
+  // 5.20199 is Alpha Vantage's "5.2020").
+  if (identicalAtPublishedPrecision(valued, valuedPublished as (MetricEstimate | undefined)[])) {
+    return { status: "IDENTICAL", providersCompared, relativeDiffPct, absoluteDiff, currencyIdentity, independence: "NOT_INDEPENDENT", ...excluded };
+  }
   const withinAbsolute = metric === "eps" && absoluteDiff <= policy.epsAbsoluteTolerance;
   const status = withinAbsolute || relativeDiffPct <= policy.conflictTolerancePct ? "AGREED" : "CONFLICT";
   if (status === "CONFLICT" && metric === "eps") {
@@ -479,11 +498,19 @@ function splitExplains(valued: Rec[], splits: SplitEvent[]): { split: Rec; notAd
   return null;
 }
 
-function identicalAtPublishedPrecision(valued: Rec[]): boolean {
-  for (const field of ["mean", "high", "low", "analystCount"]) {
-    const values = valued.map((e) => e[field]).filter((v): v is number => typeof v === "number");
-    if (values.length >= 2 && new Set(values).size > 1) return false;
+function identicalAtPublishedPrecision(valued: Rec[], published: (MetricEstimate | undefined)[] = []): boolean {
+  for (const field of ["mean", "high", "low"] as const) {
+    const cells = valued
+      .map((e, i) => ({ v: e[field], d: published[i]?.decimals?.[field] ?? null }))
+      .filter((c): c is { v: number; d: number | null } => typeof c.v === "number");
+    if (cells.length < 2) continue;
+    // The coarsest precision any provider published; exact when none published one.
+    const places = cells.map((c) => c.d).filter((x): x is number => x != null);
+    const d = places.length ? Math.min(10, ...places) : null;
+    if (new Set(cells.map((c) => (d == null ? c.v : round(c.v, d)))).size > 1) return false;
   }
+  const counts = valued.map((e) => e.analystCount).filter((v): v is number => typeof v === "number");
+  if (counts.length >= 2 && new Set(counts).size > 1) return false;
   return valued.every((e) => typeof e.analystCount === "number");
 }
 
@@ -609,7 +636,7 @@ export function buildConsensusCurve(
     const metrics: Rec = {};
     for (const metric of CONSENSUS_METRICS) {
       const entries = matching.map(({ input, p }) => providerEntry(input, p, metric, policy));
-      const agree = agreement(entries, metric, policy, recentSplits);
+      const agree = agreement(entries, metric, policy, recentSplits, matching.map(({ p }) => p[metric]));
       const coverage = metricCoverage(entries, String(agree.status));
       summary[coverage] = (summary[coverage] ?? 0) + 1;
       metrics[metric] = {
