@@ -176,6 +176,52 @@ export interface ProviderConsensusInput {
   periods: ProviderPeriod[];
 }
 
+/** A stock split: `ratio` is new shares per old share (4 for a 4-for-1, 0.1 for a 1-for-10 reverse split). */
+export interface SplitEvent {
+  date: string;
+  ratio: number;
+}
+
+/** The ticker's split history as fetched; `status` is not OK when it could not be read and no split check ran. */
+export interface SplitHistory {
+  status: string;
+  splits: SplitEvent[];
+  message?: string | null;
+}
+
+/** How far back a split can explain a provider EPS gap (2.5.23, F-002): stale rows outlive a split by months. */
+export const SPLIT_LOOKBACK_DAYS = 400;
+/** A provider EPS ratio within this fraction of a split's ratio is read as an unadjusted row, not a conflict. */
+export const SPLIT_RATIO_TOLERANCE = 0.15;
+
+/** "4-for-1" for a forward split, "1-for-10" for a reverse one. */
+export function splitText(ratio: number): string {
+  return ratio >= 1 ? `${round(ratio, 4)}-for-1` : `1-for-${round(1 / ratio, 4)}`;
+}
+
+/** Splits dated on or before asOf and within `days` of it, oldest first. */
+export function splitsWithin(history: SplitHistory | null, asOf: string, days: number): SplitEvent[] {
+  if (!history || history.status !== "OK") return [];
+  const end = dayNumber(asOf.slice(0, 10));
+  return history.splits
+    .filter((s) => typeof s.ratio === "number" && Number.isFinite(s.ratio) && s.ratio > 0 && s.ratio !== 1 && /^\d{4}-\d{2}-\d{2}/.test(s.date))
+    .filter((s) => { const d = dayNumber(s.date.slice(0, 10)); return d <= end && end - d <= days; })
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/**
+ * A provider row whose mean lies outside its own high-low range, or whose low is above its high, cannot be a
+ * consensus (2.5.23, F-001: Alpha Vantage ANET revenue averaged 667.6M against a 652.7M high).
+ */
+export function rangeInconsistency(e: { mean: number | null; high: number | null; low: number | null }): string | null {
+  const tol = (v: number) => 1e-9 * Math.max(1, Math.abs(v));
+  if (e.high != null && e.low != null && e.low - e.high > tol(e.high)) return "LOW_ABOVE_HIGH";
+  if (e.mean == null) return null;
+  if (e.high != null && e.mean - e.high > tol(e.high)) return "MEAN_ABOVE_HIGH";
+  if (e.low != null && e.low - e.mean > tol(e.low)) return "MEAN_BELOW_LOW";
+  return null;
+}
+
 function estimate(block: unknown, currency: string | null, currencyBasis: string, allowZeroCount = false): MetricEstimate {
   const b = (block && typeof block === "object" ? block : {}) as Rec;
   const analystCount = num(b.numberOfAnalysts ?? b.analystCount);
@@ -343,8 +389,10 @@ export const DEFAULT_CONSENSUS_POLICY: ConsensusPolicy = {
 function providerEntry(input: ProviderConsensusInput, period: ProviderPeriod, metric: ConsensusMetric, policy: ConsensusPolicy): Rec {
   const e = period[metric];
   const range = e.high != null && e.low != null ? e.high - e.low : null;
+  const inconsistency = rangeInconsistency(e);
   let state = "PROVIDER_COVERED";
   if (e.mean == null) state = "PROVIDER_NOT_COVERED";
+  else if (inconsistency) state = "PROVIDER_INCONSISTENT";
   else if (e.analystCount == null || e.analystCount < policy.minAnalystCount) state = "INSUFFICIENT_ANALYST_COUNT";
   return {
     provider: input.provider,
@@ -362,26 +410,31 @@ function providerEntry(input: ProviderConsensusInput, period: ProviderPeriod, me
     providerTimestamp: input.providerTimestamp,
     retrievedAt: input.retrievedAt,
     state,
+    ...(inconsistency ? { inconsistency } : {}),
   };
 }
 
-function agreement(entries: Rec[], metric: ConsensusMetric, policy: ConsensusPolicy): Rec {
-  const valued = entries.filter((e) => typeof e.mean === "number");
+function agreement(entries: Rec[], metric: ConsensusMetric, policy: ConsensusPolicy, splits: SplitEvent[] = []): Rec {
+  // An impossible row is not a second opinion (2.5.23, F-001): it is left out of the comparison and named.
+  const inconsistent = entries.filter((e) => typeof e.mean === "number" && e.state === "PROVIDER_INCONSISTENT");
+  const excluded = inconsistent.length ? { providersExcluded: inconsistent.map((e) => ({ provider: e.provider, reason: e.inconsistency })) } : {};
+  const valued = entries.filter((e) => typeof e.mean === "number" && e.state !== "PROVIDER_INCONSISTENT");
   const providersCompared = valued.map((e) => e.provider);
+  if (valued.length === 0 && inconsistent.length) return { status: "PROVIDER_INCONSISTENT", providersCompared, relativeDiffPct: null, absoluteDiff: null, ...excluded };
   if (valued.length === 0) return { status: "NO_PROVIDER", providersCompared, relativeDiffPct: null, absoluteDiff: null };
-  if (valued.length === 1) return { status: "SINGLE_PROVIDER", providersCompared, relativeDiffPct: null, absoluteDiff: null };
+  if (valued.length === 1) return { status: "SINGLE_PROVIDER", providersCompared, relativeDiffPct: null, absoluteDiff: null, ...excluded };
   const ends = valued.map((e) => String(e.fiscalYearEnd ?? ""));
   const endDays = ends.filter(Boolean).map(dayNumber);
   if (endDays.length === valued.length && Math.max(...endDays) - Math.min(...endDays) > 10) {
-    return { status: "PERIOD_IDENTITY_MISMATCH", providersCompared, fiscalYearEnds: ends, relativeDiffPct: null, absoluteDiff: null };
+    return { status: "PERIOD_IDENTITY_MISMATCH", providersCompared, fiscalYearEnds: ends, relativeDiffPct: null, absoluteDiff: null, ...excluded };
   }
   const currencies = [...new Set(valued.map((e) => e.currency).filter((c): c is string => typeof c === "string"))];
-  if (currencies.length > 1) return { status: "CURRENCY_MISMATCH", providersCompared, currencies, relativeDiffPct: null, absoluteDiff: null };
+  if (currencies.length > 1) return { status: "CURRENCY_MISMATCH", providersCompared, currencies, relativeDiffPct: null, absoluteDiff: null, ...excluded };
   const currencyIdentity = currencies.length === 1 && valued.every((e) => e.currency === currencies[0]) ? "VERIFIED" : "UNVERIFIED";
   // The same mean, high, low and analyst count wherever both publish them: one upstream feed carried twice, not
   // two checks (2.5.22, F-005: Yahoo and Alpha Vantage matched to the last published digit).
   if (identicalAtPublishedPrecision(valued)) {
-    return { status: "IDENTICAL", providersCompared, relativeDiffPct: 0, absoluteDiff: 0, currencyIdentity, independence: "NOT_INDEPENDENT" };
+    return { status: "IDENTICAL", providersCompared, relativeDiffPct: 0, absoluteDiff: 0, currencyIdentity, independence: "NOT_INDEPENDENT", ...excluded };
   }
   const means = valued.map((e) => e.mean as number);
   const hi = Math.max(...means);
@@ -391,7 +444,39 @@ function agreement(entries: Rec[], metric: ConsensusMetric, policy: ConsensusPol
   const relativeDiffPct = scale > 0 ? round(((hi - lo) / scale) * 100, 2) : 0;
   const withinAbsolute = metric === "eps" && absoluteDiff <= policy.epsAbsoluteTolerance;
   const status = withinAbsolute || relativeDiffPct <= policy.conflictTolerancePct ? "AGREED" : "CONFLICT";
-  return { status, providersCompared, relativeDiffPct, absoluteDiff, currencyIdentity, independence: "UNVERIFIED" };
+  if (status === "CONFLICT" && metric === "eps") {
+    // An EPS gap that is a recent split's ratio is one provider not split-adjusted, not two views (2.5.23, F-002).
+    const split = splitExplains(valued, splits);
+    if (split) {
+      return { status: "NOT_SPLIT_ADJUSTED", providersCompared, relativeDiffPct, absoluteDiff, currencyIdentity, independence: "UNVERIFIED",
+        split: split.split, providersNotAdjusted: split.notAdjusted, ...excluded };
+    }
+  }
+  return { status, providersCompared, relativeDiffPct, absoluteDiff, currencyIdentity, independence: "UNVERIFIED", ...excluded };
+}
+
+/**
+ * The recent split (or run of recent splits) whose ratio matches the gap between two same-sign EPS means, and the
+ * provider still on the pre-split basis: the larger magnitude after a forward split, the smaller after a reverse one.
+ */
+function splitExplains(valued: Rec[], splits: SplitEvent[]): { split: Rec; notAdjusted: string[] } | null {
+  if (valued.length !== 2 || !splits.length) return null;
+  const [a, b] = valued.map((e) => e.mean as number);
+  if (a === 0 || b === 0 || Math.sign(a) !== Math.sign(b)) return null;
+  const gap = Math.max(Math.abs(a), Math.abs(b)) / Math.min(Math.abs(a), Math.abs(b));
+  const candidates: { split: Rec; ratio: number }[] = splits.map((s) => ({ split: { date: s.date.slice(0, 10), ratio: s.ratio }, ratio: s.ratio }));
+  if (splits.length > 1) {
+    const ratio = splits.reduce((p, s) => p * s.ratio, 1);
+    candidates.push({ split: { date: splits[splits.length - 1].date.slice(0, 10), ratio: round(ratio, 6), cumulativeOf: splits.length }, ratio });
+  }
+  for (const c of candidates) {
+    const factor = Math.max(c.ratio, 1 / c.ratio);
+    if (factor < 1.5 || Math.abs(gap / factor - 1) > SPLIT_RATIO_TOLERANCE) continue;
+    const larger = Math.abs(a) > Math.abs(b) ? valued[0] : valued[1];
+    const smaller = larger === valued[0] ? valued[1] : valued[0];
+    return { split: c.split, notAdjusted: [String((c.ratio > 1 ? larger : smaller).provider)] };
+  }
+  return null;
 }
 
 function identicalAtPublishedPrecision(valued: Rec[]): boolean {
@@ -402,7 +487,7 @@ function identicalAtPublishedPrecision(valued: Rec[]): boolean {
   return valued.every((e) => typeof e.analystCount === "number");
 }
 
-const COMPARED = new Set(["AGREED", "CONFLICT", "IDENTICAL"]);
+const COMPARED = new Set(["AGREED", "CONFLICT", "IDENTICAL", "NOT_SPLIT_ADJUSTED"]);
 
 /**
  * Whether the curve is a cross-check at all (2.5.22, F-003/F-005): which providers answered, which failed and
@@ -452,9 +537,41 @@ function crossCheck(inputs: ProviderConsensusInput[], periods: Rec[]): { summary
 
 function metricCoverage(entries: Rec[], agreementStatus: string): string {
   if (!entries.some((e) => typeof e.mean === "number")) return "PROVIDER_NOT_COVERED";
-  if (["CONFLICT", "PERIOD_IDENTITY_MISMATCH", "CURRENCY_MISMATCH"].includes(agreementStatus)) return "PROVIDER_CONFLICT";
+  if (agreementStatus === "PROVIDER_INCONSISTENT") return "PROVIDER_INCONSISTENT";
+  if (["CONFLICT", "PERIOD_IDENTITY_MISMATCH", "CURRENCY_MISMATCH", "NOT_SPLIT_ADJUSTED"].includes(agreementStatus)) return "PROVIDER_CONFLICT";
   if (!entries.some((e) => e.state === "PROVIDER_COVERED")) return "INSUFFICIENT_ANALYST_COUNT";
   return "PROVIDER_COVERED";
+}
+
+const INCONSISTENCY_TEXT: Record<string, string> = {
+  MEAN_ABOVE_HIGH: "its mean is above its own high",
+  MEAN_BELOW_LOW: "its mean is below its own low",
+  LOW_ABOVE_HIGH: "its low is above its own high",
+};
+
+/** One warning per impossible provider row (F-001) and per EPS gap read as a missed split adjustment (F-002). */
+function cellWarnings(label: string, metric: string, cell: Rec): Rec[] {
+  const out: Rec[] = [];
+  for (const e of cell.providers as Rec[]) {
+    if (e.state !== "PROVIDER_INCONSISTENT") continue;
+    out.push({
+      code: "PROVIDER_ROW_INCONSISTENT",
+      message: `${e.provider} ${label} ${metric} (fiscal year ending ${e.fiscalYearEnd ?? "not stated"}): ${INCONSISTENCY_TEXT[String(e.inconsistency)]} `
+        + `(mean ${e.mean}, low ${e.low}, high ${e.high}). The row is shown as given and left out of the agreement check.`,
+      severity: "warning",
+    });
+  }
+  const agree = cell.agreement as Rec;
+  if (agree.status === "NOT_SPLIT_ADJUSTED") {
+    const split = agree.split as Rec;
+    out.push({
+      code: "PROVIDER_NOT_SPLIT_ADJUSTED",
+      message: `${label} EPS: the providers differ by the ratio of the ${splitText(split.ratio as number)} split on ${split.date}; `
+        + `${(agree.providersNotAdjusted as string[]).join(", ")} appears not split-adjusted. Reported as NOT_SPLIT_ADJUSTED, not as a conflict between views.`,
+      severity: "warning",
+    });
+  }
+  return out;
 }
 
 const UNAVAILABLE_STATISTIC = { value: null, state: "PROVIDER_NOT_COVERED" };
@@ -471,7 +588,11 @@ export function buildConsensusCurve(
   policy: ConsensusPolicy = DEFAULT_CONSENSUS_POLICY,
   // How the company names its fiscal years, from its annual reports (2.5.13); the period-end rule without it.
   naming: FiscalYearNaming | null = null,
+  // The ticker's split history (2.5.23); without it EPS gaps are not checked against splits.
+  splitHistory: SplitHistory | null = null,
 ): Rec {
+  const recentSplits = splitsWithin(splitHistory, asOf, SPLIT_LOOKBACK_DAYS);
+  const cellWarningList: Rec[] = [];
   const horizon = Math.max(1, Math.min(5, Math.trunc(policy.horizonYears)));
   const yearNaming: FiscalYearNaming = naming ?? { offset: 0, basis: "PERIOD_END_RULE", periodEnd: null, statedFiscalYear: null, calendar: null };
   const fy0 = resolveFy0(inputs, asOf);
@@ -488,7 +609,7 @@ export function buildConsensusCurve(
     const metrics: Rec = {};
     for (const metric of CONSENSUS_METRICS) {
       const entries = matching.map(({ input, p }) => providerEntry(input, p, metric, policy));
-      const agree = agreement(entries, metric, policy);
+      const agree = agreement(entries, metric, policy, recentSplits);
       const coverage = metricCoverage(entries, String(agree.status));
       summary[coverage] = (summary[coverage] ?? 0) + 1;
       metrics[metric] = {
@@ -497,6 +618,7 @@ export function buildConsensusCurve(
         agreement: agree,
         dispersionStatistics: { highLowRange: "PER_PROVIDER", median: UNAVAILABLE_STATISTIC, standardDeviation: UNAVAILABLE_STATISTIC },
       };
+      cellWarningList.push(...cellWarnings(label, metric, metrics[metric] as Rec));
     }
     periods.push({
       label,
@@ -515,6 +637,7 @@ export function buildConsensusCurve(
     ticker: ticker.toUpperCase(),
     asOf,
     crossCheck: check.summary,
+    splitHistory: splitHistorySummary(splitHistory, recentSplits),
     fiscalYearBasis: fy0 ?? { fiscalYearEnd: null, basis: "NO_PROVIDER_FISCAL_YEAR" },
     fiscalYearNaming: yearNaming,
     policy: { ...policy, horizonYears: horizon },
@@ -535,27 +658,68 @@ export function buildConsensusCurve(
       "Median and standard deviation are not published by the configured providers; the high-low range per provider is the only dispersion measure.",
       "Agreement between providers does not establish independence: they may redistribute the same underlying estimates. IDENTICAL marks figures equal to the last published digit, which is one feed carried twice.",
     ],
-    warnings: check.warnings,
+    warnings: [...check.warnings, ...cellWarningList, ...splitHistoryWarnings(splitHistory, "EPS gaps between providers are not checked against splits.")],
     ...AUTHORITY_BOUNDARY,
   };
 }
 
+function splitHistorySummary(history: SplitHistory | null, recent: SplitEvent[]): Rec {
+  return {
+    status: history ? history.status : "NOT_REQUESTED",
+    lookbackDays: SPLIT_LOOKBACK_DAYS,
+    recentSplits: recent.map((s) => ({ date: s.date.slice(0, 10), ratio: s.ratio })),
+    ...(history?.message ? { message: history.message } : {}),
+  };
+}
+
+function splitHistoryWarnings(history: SplitHistory | null, consequence: string): Rec[] {
+  if (!history || history.status === "OK") return [];
+  return [{
+    code: "SPLIT_HISTORY_UNAVAILABLE",
+    message: `Split history returned ${history.status}${history.message ? `: ${history.message}` : ""}. ${consequence}`,
+    severity: "warning",
+  }];
+}
+
 // ── EPS revision windows ─────────────────────────────────────────────────────
 
-const WINDOWS: [string, keyof EpsTrend][] = [["7d", "d7"], ["30d", "d30"], ["60d", "d60"], ["90d", "d90"]];
+const WINDOWS: [string, keyof EpsTrend, number][] = [["7d", "d7", 7], ["30d", "d30", 30], ["60d", "d60", 60], ["90d", "d90", 90]];
 
-function revisionProvider(input: ProviderConsensusInput, p: ProviderPeriod): Rec {
+/**
+ * Each window's change, unless it cannot mean anything (2.5.23): the row is impossible (F-001), or a split falls
+ * inside the window so the past mean may be on the pre-split share count (F-002: ANET 2.73 → 0.73 at its 4-for-1).
+ * A day of margin covers providers that adjust the day after the split.
+ */
+function revisionProvider(input: ProviderConsensusInput, p: ProviderPeriod, label: string, asOf: string, splits: SplitEvent[], warnings: Rec[]): Rec {
   const trend = p.epsTrend;
   const current = trend?.current ?? null;
+  const inconsistency = rangeInconsistency(p.eps);
+  if (inconsistency) {
+    warnings.push({
+      code: "PROVIDER_ROW_INCONSISTENT",
+      message: `${input.provider} ${label} eps (fiscal year ending ${p.fiscalYearEnd ?? "not stated"}): ${INCONSISTENCY_TEXT[inconsistency]} `
+        + `(mean ${p.eps.mean}, low ${p.eps.low}, high ${p.eps.high}). No window change is computed from it.`,
+      severity: "warning",
+    });
+  }
   const windows: Rec = {};
   const notReported: string[] = [];
-  for (const [name, key] of WINDOWS) {
+  for (const [name, key, days] of WINDOWS) {
     const past = trend ? trend[key] : null;
     if (past == null) notReported.push(`${name}.mean`);
+    const inWindow = splitsWithin({ status: "OK", splits }, asOf, days + 1);
+    const split = inWindow.length ? inWindow[inWindow.length - 1] : null;
+    const state = past == null || current == null ? "NOT_REPORTED"
+      : inconsistency ? "PROVIDER_INCONSISTENT"
+      : split ? "SPLIT_IN_WINDOW"
+      : "COMPARED";
+    const compared = state === "COMPARED";
     windows[name] = {
       mean: past,
-      change: past != null && current != null ? round(current - past, 6) : null,
-      changePct: past != null && current != null && past !== 0 ? round(((current - past) / Math.abs(past)) * 100, 2) : null,
+      change: compared ? round((current as number) - (past as number), 6) : null,
+      changePct: compared && past !== 0 ? round((((current as number) - (past as number)) / Math.abs(past as number)) * 100, 2) : null,
+      state,
+      ...(state === "SPLIT_IN_WINDOW" && split ? { split: { date: split.date.slice(0, 10), ratio: split.ratio } } : {}),
     };
   }
   const counts = p.epsRevisions ?? { up7d: null, down7d: null, up30d: null, down30d: null };
@@ -564,6 +728,8 @@ function revisionProvider(input: ProviderConsensusInput, p: ProviderPeriod): Rec
     provider: input.provider,
     providerPeriodLabel: p.providerPeriodLabel,
     fiscalYearEnd: p.fiscalYearEnd,
+    state: inconsistency ? "PROVIDER_INCONSISTENT" : "PROVIDER_COVERED",
+    ...(inconsistency ? { inconsistency } : {}),
     current,
     windows,
     revisionCounts: counts,
@@ -574,17 +740,29 @@ function revisionProvider(input: ProviderConsensusInput, p: ProviderPeriod): Rec
 }
 
 /** EPS estimate windows (7/30/60/90 days) and revision counts as each provider reports them for FY0 and FY+1. */
-export function buildEpsRevisions(ticker: string, inputs: ProviderConsensusInput[], asOf: string): Rec {
+export function buildEpsRevisions(ticker: string, inputs: ProviderConsensusInput[], asOf: string, splitHistory: SplitHistory | null = null): Rec {
   const fy0 = resolveFy0(inputs, asOf);
+  const windowSplits = splitsWithin(splitHistory, asOf, 91);
+  const warnings: Rec[] = [];
   const periods: Rec[] = [];
   for (const k of [0, 1]) {
+    const label = k === 0 ? "FY0" : "FY+1";
     const providers = fy0
       ? inputs.flatMap((input) => input.periods
         .filter((p) => p.fiscalYearEnd && fiscalYearOffset(fy0.fiscalYearEnd, p.fiscalYearEnd) === k && (p.epsTrend || p.epsRevisions))
-        .map((p) => revisionProvider(input, p)))
+        .map((p) => revisionProvider(input, p, label, asOf, windowSplits, warnings)))
       : [];
-    periods.push({ label: k === 0 ? "FY0" : "FY+1", coverage: providers.length ? "PROVIDER_COVERED" : "PROVIDER_NOT_COVERED", providers });
+    periods.push({ label, coverage: providers.length ? "PROVIDER_COVERED" : "PROVIDER_NOT_COVERED", providers });
   }
+  if (windowSplits.length) {
+    const last = windowSplits[windowSplits.length - 1];
+    warnings.push({
+      code: "SPLIT_IN_WINDOW",
+      message: `A ${splitText(last.ratio)} split on ${last.date.slice(0, 10)} falls inside the revision windows; windows spanning it compare pre- and post-split estimates and carry no change.`,
+      severity: "warning",
+    });
+  }
+  warnings.push(...splitHistoryWarnings(splitHistory, "Revision windows are not checked against splits."));
   return {
     ticker: ticker.toUpperCase(),
     asOf,
@@ -593,6 +771,8 @@ export function buildEpsRevisions(ticker: string, inputs: ProviderConsensusInput
     revenueRevisions: { coverage: "PROVIDER_NOT_COVERED", note: "No configured provider publishes revenue estimate history." },
     analystCountChanges: { coverage: "PROVIDER_NOT_COVERED", note: "No configured provider publishes analyst adds or drops." },
     providers: inputs.map((i) => ({ provider: i.provider, status: i.status, retrievedAt: i.retrievedAt, message: i.message })),
+    splitHistory: { ...splitHistorySummary(splitHistory, windowSplits), lookbackDays: 91 },
+    warnings,
     ...AUTHORITY_BOUNDARY,
   };
 }

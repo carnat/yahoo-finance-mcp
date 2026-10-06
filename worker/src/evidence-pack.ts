@@ -29,6 +29,7 @@ import {
   type ConsensusPolicy,
   type FilingRow,
   type ProviderConsensusInput,
+  type SplitHistory,
 } from "./evidence.js";
 import { getEvidenceStore, putOnce, sha256Hex } from "./evidence-store.js";
 import { getServerVersion, getWorkerVar } from "./response.js";
@@ -65,14 +66,35 @@ function buildSha(): string | null {
   return getWorkerVar("BUILD_SHA")?.trim() || null;
 }
 
+/**
+ * The ticker's splits over the last two years from Yahoo chart events (2.5.23): enough to tell a provider EPS gap
+ * or a revision window that spans a split. A failure is reported, not read as "no splits".
+ */
+async function splitHistory(symbol: string): Promise<SplitHistory> {
+  try {
+    const d = (await yGet(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=2y&interval=1mo&events=split`, false)) as Rec;
+    const result = ((d?.chart as Rec | undefined)?.result as Rec[] | undefined)?.[0];
+    if (!result) return { status: "NO_DATA", splits: [], message: "Yahoo returned no chart result." };
+    const events = ((result.events as Rec | undefined)?.splits ?? {}) as Record<string, Rec>;
+    const splits = Object.values(events)
+      .map((v) => ({ date: typeof v.date === "number" ? new Date(v.date * 1000).toISOString().slice(0, 10) : "", ratio: Number(v.numerator) / Number(v.denominator) }))
+      .filter((v) => v.date && Number.isFinite(v.ratio) && v.ratio > 0)
+      .sort((a, b) => a.date.localeCompare(b.date));
+    return { status: "OK", splits };
+  } catch (e) {
+    return { status: "PROVIDER_ERROR", splits: [], message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 /** Yahoo earningsTrend + quote and Alpha Vantage EARNINGS_ESTIMATES, fetched together; each provider fails on its own. */
-async function consensusProviders(ticker: string): Promise<{ inputs: ProviderConsensusInput[]; quote: MarketQuote }> {
+async function consensusProviders(ticker: string): Promise<{ inputs: ProviderConsensusInput[]; quote: MarketQuote; splits: SplitHistory }> {
   const symbol = ticker.toUpperCase();
-  const [yahoo, alpha] = await Promise.all([
+  const [yahoo, alpha, splits] = await Promise.all([
     yGet(`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=earningsTrend,financialData,price`)
       .then((d) => ({ ok: true as const, d, at: new Date().toISOString() }), (e) => ({ ok: false as const, e, at: new Date().toISOString() })),
     fetchAlphaVantageJson("EARNINGS_ESTIMATES", { symbol }, ALPHA_VANTAGE_ESTIMATES_TTL_MS)
       .then((r) => ({ r, at: new Date().toISOString() })),
+    splitHistory(symbol),
   ]);
 
   let yahooInput: ProviderConsensusInput;
@@ -107,7 +129,7 @@ async function consensusProviders(ticker: string): Promise<{ inputs: ProviderCon
     status: r.status === "OK" ? undefined : r.status,
     message: r.message ?? null,
   });
-  return { inputs: [yahooInput, alphaInput], quote };
+  return { inputs: [yahooInput, alphaInput], quote, splits };
 }
 
 function consensusPolicy(horizonYears: number, minAnalystCount: number, conflictTolerancePct: number): ConsensusPolicy | string {
@@ -187,8 +209,8 @@ export async function getConsensusForecastCurve(
   const policy = consensusPolicy(horizonYears, minAnalystCount, conflictTolerancePct);
   if (typeof policy === "string") return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: policy });
   const asOf = new Date().toISOString();
-  const [{ inputs }, naming] = await Promise.all([consensusProviders(ticker), secFiscalYearNaming(ticker)]);
-  const curve = buildConsensusCurve(ticker, inputs, asOf, policy, naming);
+  const [{ inputs, splits }, naming] = await Promise.all([consensusProviders(ticker), secFiscalYearNaming(ticker)]);
+  const curve = buildConsensusCurve(ticker, inputs, asOf, policy, naming, splits);
   // The first observation of the day is kept; later calls report ALREADY_STORED.
   const observation = await writeConsensusObservation(ticker, curve, asOf);
   return JSON.stringify({ ...curve, storage: { consensusObservation: observation } });
@@ -196,8 +218,8 @@ export async function getConsensusForecastCurve(
 
 export async function getEpsRevisions(ticker: string): Promise<string> {
   const asOf = new Date().toISOString();
-  const { inputs } = await consensusProviders(ticker);
-  const revisions = buildEpsRevisions(ticker, inputs, asOf);
+  const { inputs, splits } = await consensusProviders(ticker);
+  const revisions = buildEpsRevisions(ticker, inputs, asOf, splits);
   const store = getEvidenceStore();
   let stored: Rec = { storageStatus: "UNAVAILABLE", observationDates: [] };
   if (store) {
@@ -232,8 +254,8 @@ async function secFilingRows(ticker: string): Promise<{ rows: FilingRow[] | null
 
 export async function getEvidenceQuality(ticker: string): Promise<string> {
   const asOf = new Date().toISOString();
-  const [{ inputs, quote }, filings, naming] = await Promise.all([consensusProviders(ticker), secFilingRows(ticker), secFiscalYearNaming(ticker)]);
-  const curve = buildConsensusCurve(ticker, inputs, asOf, DEFAULT_CONSENSUS_POLICY, naming);
+  const [{ inputs, quote, splits }, filings, naming] = await Promise.all([consensusProviders(ticker), secFilingRows(ticker), secFiscalYearNaming(ticker)]);
+  const curve = buildConsensusCurve(ticker, inputs, asOf, DEFAULT_CONSENSUS_POLICY, naming, splits);
   return JSON.stringify(evidenceQuality({
     ticker,
     asOf,
@@ -271,8 +293,8 @@ export async function buildValuationEvidencePack(ticker: string, horizonYears = 
   const symbol = ticker.toUpperCase();
   const cutoff = new Date().toISOString();
 
-  const [{ inputs, quote }, filings, naming] = await Promise.all([consensusProviders(symbol), secFilingRows(symbol), secFiscalYearNaming(symbol)]);
-  const curve = buildConsensusCurve(symbol, inputs, cutoff, policy, naming);
+  const [{ inputs, quote, splits }, filings, naming] = await Promise.all([consensusProviders(symbol), secFilingRows(symbol), secFiscalYearNaming(symbol)]);
+  const curve = buildConsensusCurve(symbol, inputs, cutoff, policy, naming, splits);
   const major = quote.price != null ? majorPrice(quote.price, quote.currency) : null;
 
   const dilutionRun = (): Promise<ComponentRecord> => {
@@ -306,7 +328,7 @@ export async function buildValuationEvidencePack(ticker: string, horizonYears = 
       ticker: symbol, asOf: cutoff, quote, filings: filings.rows, filingsStatus: filings.status, consensus: curve, storageAvailable: getEvidenceStore() != null,
     }), cutoff),
     consensus: componentFromValue("get_consensus_forecast_curve", curve, cutoff),
-    epsRevisions: componentFromValue("get_eps_revisions", buildEpsRevisions(symbol, inputs, cutoff), cutoff),
+    epsRevisions: componentFromValue("get_eps_revisions", buildEpsRevisions(symbol, inputs, cutoff, splits), cutoff),
     currentCapitalStructure: capital,
     currentDilution: dilution,
     latestGuidance: guidance,

@@ -124,6 +124,38 @@ FPI_STALE_FILINGS = [
     {"form": "6-K", "filingDate": "2026-08-20", "reportDate": "2026-08-20", "items": "", "isInlineXBRL": False},
 ]
 FPI_40FA_FILINGS = [{"form": "40-F/A", "filingDate": "2026-03-20", "reportDate": "2025-12-31", "items": "", "isInlineXBRL": False}]
+# 2.5.23: ANET-shaped rows. Alpha Vantage FY0 revenue averages above its own high (F-001) and its FY0 EPS is still on
+# the pre-split count after a 4-for-1 split 16 days before as-of (F-002); Yahoo's 30-90 day trend spans that split.
+ANET_AS_OF = "2026-10-06T04:00:00.000Z"
+ANET_TREND = [
+    {"period": "0y", "endDate": "2026-12-31",
+     "earningsEstimate": {"avg": 2.8, "high": 2.95, "low": 2.7, "numberOfAnalysts": 20, "earningsCurrency": "USD"},
+     "revenueEstimate": {"avg": 9.0e9, "high": 9.2e9, "low": 8.8e9, "numberOfAnalysts": 20, "revenueCurrency": "USD"},
+     "epsTrend": {"current": 2.8, "7daysAgo": 2.79, "30daysAgo": 11.0, "60daysAgo": 10.9, "90daysAgo": 10.8}},
+    {"period": "+1y", "endDate": "2027-12-31",
+     "earningsEstimate": {"avg": 3.3, "high": 3.5, "low": 3.1, "numberOfAnalysts": 18},
+     "revenueEstimate": {"avg": 10.5e9, "high": 11.5e9, "low": 10e9, "numberOfAnalysts": 18}},
+]
+ANET_AV = {"symbol": "ANET", "estimates": [
+    {"date": "2026-12-31", "horizon": "fiscal year", "eps_estimate_average": "11.2", "eps_estimate_high": "11.8", "eps_estimate_low": "10.8",
+     "eps_estimate_analyst_count": "20", "eps_estimate_average_7_days_ago": "11.1", "eps_estimate_average_30_days_ago": "11.0",
+     "revenue_estimate_average": "9050000000", "revenue_estimate_high": "8990000000", "revenue_estimate_low": "8800000000", "revenue_estimate_analyst_count": "20"},
+    {"date": "2027-12-31", "horizon": "fiscal year", "eps_estimate_average": "3.31", "eps_estimate_high": "3.5", "eps_estimate_low": "3.1",
+     "eps_estimate_analyst_count": "18", "revenue_estimate_average": "10600000000", "revenue_estimate_high": "10400000000", "revenue_estimate_low": "10500000000",
+     "revenue_estimate_analyst_count": "18"},
+]}
+ANET_SPLITS = {"status": "OK", "splits": [{"date": "2021-11-18", "ratio": 4}, {"date": "2026-09-20", "ratio": 4}]}
+ANET_OLD_SPLITS = {"status": "OK", "splits": [{"date": "2021-11-18", "ratio": 4}]}
+SPLITS_FAILED = {"status": "PROVIDER_ERROR", "splits": [], "message": "chart down"}
+# A 1-for-10 reverse split: the unadjusted provider shows the smaller loss per share.
+REVERSE_SPLITS = {"status": "OK", "splits": [{"date": "2026-08-01", "ratio": 0.1}]}
+REVERSE_A = {"provider": "yahoo_finance", "status": "OK", "retrievedAt": ANET_AS_OF, "providerTimestamp": None, "message": None, "periods": [
+    {"providerPeriodLabel": "0y", "fiscalYearEnd": "2026-12-31", "fiscalYearEndBasis": "PROVIDER_STATED",
+     "eps": {"mean": -5.0, "high": -4.0, "low": -6.0, "analystCount": 5, "currency": "USD", "currencyBasis": "PROVIDER_STATED"},
+     "revenue": {"mean": None, "high": None, "low": None, "analystCount": None, "currency": None, "currencyBasis": "NOT_STATED"},
+     "epsTrend": None, "epsRevisions": None}]}
+REVERSE_B = {**REVERSE_A, "provider": "alpha_vantage", "periods": [{**REVERSE_A["periods"][0], "providerPeriodLabel": "fiscal year",
+    "eps": {"mean": -0.52, "high": -0.4, "low": -0.6, "analystCount": 5, "currency": None, "currencyBasis": "NOT_STATED"}}]}
 QUOTE_FAILED = {"price": None, "currency": None, "priceTime": None, "status": "PROVIDER_ERROR"}
 QUOTE_NO_DATA = {"price": None, "currency": None, "priceTime": None, "status": "NO_DATA"}
 
@@ -182,6 +214,8 @@ def _python_outputs() -> dict:
     av_identical = ev.alpha_vantage_consensus_input(AV_IDENTICAL, retrieved_at=AS_OF)
     av_limited = ev.alpha_vantage_consensus_input({}, retrieved_at=AS_OF, status="RATE_LIMIT", message="25 requests per day")
     av_limited_silent = ev.alpha_vantage_consensus_input({}, retrieved_at=AS_OF, status="RATE_LIMIT", message="")
+    anet_yahoo = ev.yahoo_consensus_input(ANET_TREND, retrieved_at=ANET_AS_OF, financial_currency="USD")
+    anet_av = ev.alpha_vantage_consensus_input(ANET_AV, retrieved_at=ANET_AS_OF)
 
     def later(**kw: object) -> dict:
         return ev.evidence_quality(ticker="tsm", as_of=AS_OF_LATER, quote=kw.get("quote", {"price": 81.2, "currency": "USD", "priceTime": "2026-09-29T20:00:00.000Z", "status": "OK"}),  # type: ignore[arg-type]
@@ -208,6 +242,13 @@ def _python_outputs() -> dict:
         "curveDgNoNaming": ev.build_consensus_curve("dg", [ev.yahoo_consensus_input(DG_TREND, retrieved_at=AS_OF, financial_currency="USD")], AS_OF),
         "curveNone": ev.build_consensus_curve("none", [ev.yahoo_consensus_input([], retrieved_at=AS_OF, status="PROVIDER_ERROR", message="down")], AS_OF),
         "revisions": ev.build_eps_revisions("asts", [yahoo, av], AS_OF),
+        "curveAnet": ev.build_consensus_curve("anet", [anet_yahoo, anet_av], ANET_AS_OF, None, None, ANET_SPLITS),
+        "curveAnetOldSplit": ev.build_consensus_curve("anet", [anet_yahoo, anet_av], ANET_AS_OF, None, None, ANET_OLD_SPLITS),
+        "curveAnetSplitsFailed": ev.build_consensus_curve("anet", [anet_yahoo, anet_av], ANET_AS_OF, None, None, SPLITS_FAILED),
+        "curveAnetAvOnly": ev.build_consensus_curve("anet", [anet_av], ANET_AS_OF, None, None, ANET_SPLITS),
+        "curveReverse": ev.build_consensus_curve("rev", [REVERSE_A, REVERSE_B], ANET_AS_OF, None, None, REVERSE_SPLITS),
+        "revisionsAnet": ev.build_eps_revisions("anet", [anet_yahoo, anet_av], ANET_AS_OF, ANET_SPLITS),
+        "revisionsAnetSplitsFailed": ev.build_eps_revisions("anet", [anet_yahoo, anet_av], ANET_AS_OF, SPLITS_FAILED),
         "quality": quality,
         "qualityStale": ev.evidence_quality(ticker="old", as_of=AS_OF, quote=None, filings=STALE_FILINGS, filings_status="OK", consensus=None, storage_available=False),
         "qualityNoSec": ev.evidence_quality(ticker="iqe.l", as_of=AS_OF, quote={"price": 12.5, "currency": "GBp", "priceTime": "2026-09-10T16:00:00.000Z", "status": "OK"},
@@ -254,6 +295,8 @@ const curveNoData = m.buildConsensusCurve("asts", [m.yahooConsensusInput([], { r
 const avIdentical = m.alphaVantageConsensusInput(f.avIdentical, { retrievedAt: AS_OF });
 const avLimited = m.alphaVantageConsensusInput({}, { retrievedAt: AS_OF, status: "RATE_LIMIT", message: "25 requests per day" });
 const avLimitedSilent = m.alphaVantageConsensusInput({}, { retrievedAt: AS_OF, status: "RATE_LIMIT", message: "" });
+const anetYahoo = m.yahooConsensusInput(f.anetTrend, { retrievedAt: f.anetAsOf, financialCurrency: "USD" });
+const anetAv = m.alphaVantageConsensusInput(f.anetAv, { retrievedAt: f.anetAsOf });
 const later = (o) => m.evidenceQuality({ ticker: "tsm", asOf: f.asOfLater, quote: "quote" in o ? o.quote : { price: 81.2, currency: "USD", priceTime: "2026-09-29T20:00:00.000Z", status: "OK" }, filings: "filings" in o ? o.filings : f.filings, filingsStatus: "OK", consensus: o.consensus ?? null, storageAvailable: true });
 const components = Object.fromEntries(f.componentTexts.map(([name, text]) => [name, m.componentFromToolText(name, text, AS_OF)]));
 const { createHash } = await import("node:crypto");
@@ -276,6 +319,13 @@ const out = {
   curveDgNoNaming: m.buildConsensusCurve("dg", [m.yahooConsensusInput(f.dgTrend, { retrievedAt: AS_OF, financialCurrency: "USD" })], AS_OF),
   curveNone: m.buildConsensusCurve("none", [m.yahooConsensusInput([], { retrievedAt: AS_OF, status: "PROVIDER_ERROR", message: "down" })], AS_OF),
   revisions: m.buildEpsRevisions("asts", [yahoo, av], AS_OF),
+  curveAnet: m.buildConsensusCurve("anet", [anetYahoo, anetAv], f.anetAsOf, undefined, null, f.anetSplits),
+  curveAnetOldSplit: m.buildConsensusCurve("anet", [anetYahoo, anetAv], f.anetAsOf, undefined, null, f.anetOldSplits),
+  curveAnetSplitsFailed: m.buildConsensusCurve("anet", [anetYahoo, anetAv], f.anetAsOf, undefined, null, f.splitsFailed),
+  curveAnetAvOnly: m.buildConsensusCurve("anet", [anetAv], f.anetAsOf, undefined, null, f.anetSplits),
+  curveReverse: m.buildConsensusCurve("rev", [f.reverseA, f.reverseB], f.anetAsOf, undefined, null, f.reverseSplits),
+  revisionsAnet: m.buildEpsRevisions("anet", [anetYahoo, anetAv], f.anetAsOf, f.anetSplits),
+  revisionsAnetSplitsFailed: m.buildEpsRevisions("anet", [anetYahoo, anetAv], f.anetAsOf, f.splitsFailed),
   quality,
   qualityStale: m.evidenceQuality({ ticker: "old", asOf: AS_OF, quote: null, filings: f.staleFilings, filingsStatus: "OK", consensus: null, storageAvailable: false }),
   qualityNoSec: m.evidenceQuality({ ticker: "iqe.l", asOf: AS_OF, quote: { price: 12.5, currency: "GBp", priceTime: "2026-09-10T16:00:00.000Z", status: "OK" }, filings: null, filingsStatus: "TICKER_NOT_FOUND", consensus: curve, storageAvailable: true }),
@@ -311,6 +361,8 @@ def _worker_outputs() -> dict:
         "asOfLater": AS_OF_LATER, "fpiFilings": FPI_FILINGS, "fpiStaleFilings": FPI_STALE_FILINGS, "fpi40faFilings": FPI_40FA_FILINGS,
         "quoteFailed": QUOTE_FAILED, "quoteNoData": QUOTE_NO_DATA,
         "dgTrend": DG_TREND, "dgNaming": DG_NAMING,
+        "anetAsOf": ANET_AS_OF, "anetTrend": ANET_TREND, "anetAv": ANET_AV, "anetSplits": ANET_SPLITS, "anetOldSplits": ANET_OLD_SPLITS,
+        "splitsFailed": SPLITS_FAILED, "reverseSplits": REVERSE_SPLITS, "reverseA": REVERSE_A, "reverseB": REVERSE_B,
         # JSON cannot carry -0.0 distinctly from 0 in every parser; both runtimes format it as 0.
         "canonical": CANONICAL_CASES,
         "boundaryCases": BOUNDARY_CASES,
@@ -500,13 +552,112 @@ class TestConsensusCurve(unittest.TestCase):
         rev = self.out["revisions"]
         fy0 = rev["periods"][0]["providers"]
         yahoo = next(p for p in fy0 if p["provider"] == "yahoo_finance")
-        self.assertEqual(yahoo["windows"]["30d"], {"mean": -1.39, "change": -0.88, "changePct": -63.31})
+        self.assertEqual(yahoo["windows"]["30d"], {"mean": -1.39, "change": -0.88, "changePct": -63.31, "state": "COMPARED"})
+        self.assertEqual(yahoo["state"], "PROVIDER_COVERED")
         self.assertEqual(yahoo["revisionCounts"], {"up7d": 0, "down7d": 1, "up30d": 0, "down30d": 4})
         av1 = next(p for p in rev["periods"][1]["providers"] if p["provider"] == "alpha_vantage")
         self.assertIn("revisionCounts.down7d", av1["notReported"])
         y1 = next(p for p in rev["periods"][1]["providers"] if p["provider"] == "yahoo_finance")
-        self.assertEqual(y1["windows"]["60d"], {"mean": None, "change": None, "changePct": None})
+        self.assertEqual(y1["windows"]["60d"], {"mean": None, "change": None, "changePct": None, "state": "NOT_REPORTED"})
         self.assertEqual(rev["revenueRevisions"]["coverage"], "PROVIDER_NOT_COVERED")
+        self.assertEqual(rev["splitHistory"], {"status": "NOT_REQUESTED", "lookbackDays": 91, "recentSplits": []})
+        self.assertEqual(rev["warnings"], [])
+
+
+class TestProviderRowGuards(unittest.TestCase):
+    """2.5.23: impossible provider rows (F-001) and EPS figures not adjusted for a split (F-002)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.out = _python_outputs()
+
+    def test_mean_outside_its_own_range_is_excluded(self) -> None:
+        cell = _cell(self.out["curveAnet"], "FY0", "revenue")
+        av = next(e for e in cell["providers"] if e["provider"] == "alpha_vantage")
+        self.assertEqual((av["state"], av["inconsistency"], av["mean"], av["high"]), ("PROVIDER_INCONSISTENT", "MEAN_ABOVE_HIGH", 9050000000, 8990000000))
+        self.assertEqual(list(av)[-2:], ["state", "inconsistency"])
+        yahoo = next(e for e in cell["providers"] if e["provider"] == "yahoo_finance")
+        self.assertEqual(yahoo["state"], "PROVIDER_COVERED")
+        self.assertNotIn("inconsistency", yahoo)
+        self.assertEqual(cell["agreement"], {"status": "SINGLE_PROVIDER", "providersCompared": ["yahoo_finance"], "relativeDiffPct": None, "absoluteDiff": None,
+                                             "providersExcluded": [{"provider": "alpha_vantage", "reason": "MEAN_ABOVE_HIGH"}]})
+        self.assertEqual(cell["coverage"], "PROVIDER_COVERED")
+        # FY+1: Alpha Vantage's low is above its high.
+        fy1 = _cell(self.out["curveAnet"], "FY+1", "revenue")
+        self.assertEqual(next(e for e in fy1["providers"] if e["provider"] == "alpha_vantage")["inconsistency"], "LOW_ABOVE_HIGH")
+        # The only provider inconsistent: the cell says so rather than claiming coverage.
+        only = _cell(self.out["curveAnetAvOnly"], "FY0", "revenue")
+        self.assertEqual((only["coverage"], only["agreement"]["status"]), ("PROVIDER_INCONSISTENT", "PROVIDER_INCONSISTENT"))
+        codes = [w["code"] for w in self.out["curveAnet"]["warnings"]]
+        self.assertEqual(codes.count("PROVIDER_ROW_INCONSISTENT"), 2)
+        warning = next(w for w in self.out["curveAnet"]["warnings"] if w["code"] == "PROVIDER_ROW_INCONSISTENT")
+        self.assertEqual(warning["message"], "alpha_vantage FY0 revenue (fiscal year ending 2026-12-31): its mean is above its own high "
+                         "(mean 9050000000, low 8800000000, high 8990000000). The row is shown as given and left out of the agreement check.")
+
+    def test_range_inconsistency_rule(self) -> None:
+        f = ev.range_inconsistency
+        self.assertIsNone(f({"mean": 1.0, "high": 1.0, "low": 1.0}))
+        self.assertIsNone(f({"mean": 1.0, "high": None, "low": None}))
+        self.assertIsNone(f({"mean": None, "high": 2.0, "low": 1.0}))
+        self.assertEqual(f({"mean": 0.9, "high": 2.0, "low": 1.0}), "MEAN_BELOW_LOW")
+        self.assertEqual(f({"mean": None, "high": 1.0, "low": 2.0}), "LOW_ABOVE_HIGH")
+        self.assertEqual(f({"mean": -2.0, "high": -2.1, "low": -3.0}), "MEAN_ABOVE_HIGH")
+
+    def test_eps_gap_matching_a_recent_split_is_not_a_conflict(self) -> None:
+        curve = self.out["curveAnet"]
+        eps = _cell(curve, "FY0", "eps")
+        self.assertEqual(eps["agreement"]["status"], "NOT_SPLIT_ADJUSTED")
+        self.assertEqual(eps["agreement"]["split"], {"date": "2026-09-20", "ratio": 4})
+        self.assertEqual(eps["agreement"]["providersNotAdjusted"], ["alpha_vantage"])
+        self.assertEqual(eps["coverage"], "PROVIDER_CONFLICT")
+        self.assertEqual(curve["splitHistory"], {"status": "OK", "lookbackDays": 400, "recentSplits": [{"date": "2026-09-20", "ratio": 4}]})
+        self.assertEqual(list(curve)[:4], ["ticker", "asOf", "crossCheck", "splitHistory"])
+        w = next(w for w in curve["warnings"] if w["code"] == "PROVIDER_NOT_SPLIT_ADJUSTED")
+        self.assertEqual(w["message"], "FY0 EPS: the providers differ by the ratio of the 4-for-1 split on 2026-09-20; alpha_vantage appears not split-adjusted. "
+                         "Reported as NOT_SPLIT_ADJUSTED, not as a conflict between views.")
+        # The 2021 split is outside the lookback: the same gap is a plain conflict.
+        old = self.out["curveAnetOldSplit"]
+        self.assertEqual(_cell(old, "FY0", "eps")["agreement"]["status"], "CONFLICT")
+        self.assertEqual(old["splitHistory"]["recentSplits"], [])
+        # Split history unreadable: no split check, and the curve says so.
+        failed = self.out["curveAnetSplitsFailed"]
+        self.assertEqual(_cell(failed, "FY0", "eps")["agreement"]["status"], "CONFLICT")
+        self.assertEqual(failed["splitHistory"], {"status": "PROVIDER_ERROR", "lookbackDays": 400, "recentSplits": [], "message": "chart down"})
+        self.assertEqual(failed["warnings"][-1]["code"], "SPLIT_HISTORY_UNAVAILABLE")
+        self.assertEqual(failed["warnings"][-1]["message"], "Split history returned PROVIDER_ERROR: chart down. EPS gaps between providers are not checked against splits.")
+        # A reverse split: the smaller loss per share is the unadjusted one.
+        rev = _cell(self.out["curveReverse"], "FY0", "eps")["agreement"]
+        self.assertEqual((rev["status"], rev["providersNotAdjusted"], rev["split"]), ("NOT_SPLIT_ADJUSTED", ["alpha_vantage"], {"date": "2026-08-01", "ratio": 0.1}))
+        self.assertIn("1-for-10 split", next(w for w in self.out["curveReverse"]["warnings"] if w["code"] == "PROVIDER_NOT_SPLIT_ADJUSTED")["message"])
+
+    def test_revision_windows_spanning_a_split_carry_no_change(self) -> None:
+        rev = self.out["revisionsAnet"]
+        yahoo = next(p for p in rev["periods"][0]["providers"] if p["provider"] == "yahoo_finance")
+        self.assertEqual(yahoo["windows"]["7d"], {"mean": 2.79, "change": 0.01, "changePct": 0.36, "state": "COMPARED"})
+        for name, mean in (("30d", 11.0), ("60d", 10.9), ("90d", 10.8)):
+            self.assertEqual(yahoo["windows"][name], {"mean": mean, "change": None, "changePct": None, "state": "SPLIT_IN_WINDOW",
+                                                      "split": {"date": "2026-09-20", "ratio": 4}})
+        av = next(p for p in rev["periods"][0]["providers"] if p["provider"] == "alpha_vantage")
+        self.assertEqual(av["windows"]["60d"]["state"], "NOT_REPORTED")
+        self.assertEqual(rev["splitHistory"], {"status": "OK", "lookbackDays": 91, "recentSplits": [{"date": "2026-09-20", "ratio": 4}]})
+        self.assertEqual([w["code"] for w in rev["warnings"]], ["SPLIT_IN_WINDOW"])
+        self.assertEqual(rev["warnings"][0]["message"], "A 4-for-1 split on 2026-09-20 falls inside the revision windows; windows spanning it "
+                         "compare pre- and post-split estimates and carry no change.")
+        failed = self.out["revisionsAnetSplitsFailed"]
+        y = next(p for p in failed["periods"][0]["providers"] if p["provider"] == "yahoo_finance")
+        self.assertEqual(y["windows"]["30d"]["state"], "COMPARED")
+        self.assertEqual([w["code"] for w in failed["warnings"]], ["SPLIT_HISTORY_UNAVAILABLE"])
+        self.assertTrue(failed["warnings"][0]["message"].endswith("Revision windows are not checked against splits."))
+
+    def test_inconsistent_eps_row_has_no_window_changes(self) -> None:
+        bad = ev.alpha_vantage_consensus_input({"estimates": [{"date": "2026-12-31", "horizon": "fiscal year", "eps_estimate_average": "3.0",
+                                                               "eps_estimate_high": "2.9", "eps_estimate_low": "2.5", "eps_estimate_analyst_count": "9",
+                                                               "eps_estimate_average_7_days_ago": "2.8"}]}, retrieved_at=ANET_AS_OF)
+        rev = ev.build_eps_revisions("x", [bad], ANET_AS_OF, {"status": "OK", "splits": []})
+        p = rev["periods"][0]["providers"][0]
+        self.assertEqual((p["state"], p["inconsistency"]), ("PROVIDER_INCONSISTENT", "MEAN_ABOVE_HIGH"))
+        self.assertEqual(p["windows"]["7d"], {"mean": 2.8, "change": None, "changePct": None, "state": "PROVIDER_INCONSISTENT"})
+        self.assertEqual([w["code"] for w in rev["warnings"]], ["PROVIDER_ROW_INCONSISTENT"])
 
 
 class TestEvidenceQualityAndReceipt(unittest.TestCase):
