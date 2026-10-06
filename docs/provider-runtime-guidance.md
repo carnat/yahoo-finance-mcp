@@ -2048,6 +2048,84 @@ Vantage and IBKR produced these fixes.
     `CONFLICT`.
   - Yahoo's 30/60/90-day windows `SPLIT_IN_WINDOW`, instead of a −74% "revision".
 
+## Debt Instrument Maturities, Ladder Basis And Reconciliation (2.5.24)
+
+- **Defects (the Engine Zero adapter's report on AAOI's 10-Q, accession
+  0001437749-26-026278, period 2026-06-30; checked against the filing and its
+  XBRL).** The balances were right; the per-instrument rows and the year
+  ladder were not.
+  - F-008: the "Convertible Notes Maturing 2030" row had no maturity date
+    and sat in no year bucket.
+    - The filing tags no `DebtInstrumentMaturityDate` for it. Note 12 states
+      "The 2030 Notes will mature on January 15, 2030".
+    - The ladder held 58.9M of 188.1M of debt (31%) and said nothing about
+      the rest.
+  - F-007: the notes' row showed `carryingAmount` 124,900,000 and
+    `faceAmount` 125,000,000.
+    - The filer tags principal outstanding after a $75,000 conversion as
+      `DebtInstrumentCarryingAmount`. The balance sheet carries the notes at
+      129,142,000.
+    - 125,000,000 is the face amount tagged on the 2024-12-18 issue date.
+  - F-010: the China bank row (one `LoanAgreementMember`, 21,069,000) tags a
+    revolver maturing 2027-06-25 at 2.6% and an equipment term loan
+    maturing 2032-06-12 at 3%. The row kept whichever came first in the
+    document.
+  - F-009: the year buckets' `faceAmount` summed face amounts, else
+    carrying amounts, else other tagged amounts. For AAOI every figure was
+    a carrying amount.
+  - F-011: the member `DebtMaturingDecember282028Member` became "Debt
+    Maturing December 282028", with a 2026-12-28 maturity. The filer's own
+    label linkbase also says 2028, so the tagged date is right and the name
+    carries the typo.
+- **Instrument rows (both runtimes, `capital-structure.ts` /
+  `capital_structure.py`).**
+  - `faceAmountDate` is the date the face amount is tagged at. An issue date
+    before the period end means original principal.
+  - `maturityDateSource` is `XBRL` or `FILING_TEXT`. A row with no tagged
+    maturity takes the one date the filing text states in the year its name
+    carries, and adds `maturityStatement`.
+    - Example: "The 2030 Notes will mature on January 15, 2030" for
+      "Convertible Notes Maturing 2030".
+    - The text is searched only when an outstanding row has no maturity. If
+      the text gives more than one date in that year, none is taken.
+  - A row tagged with several maturities or coupons reports them all
+    (`maturityDates`, `couponPcts`, present only then). Its `maturityDate`
+    is the earliest, and the warning `MULTIPLE_MATURITIES` is raised.
+  - Member labels split a day and year that run together after a month
+    name ("December282028" becomes "December 28, 2028"). A name whose date
+    differs from the tagged maturity gives `LABEL_DATE_DIFFERS_FROM_MATURITY`;
+    the tagged date is used.
+- **Year ladder (both runtimes).** Each `instrumentMaturitiesByYear` bucket
+  has:
+  - `amount`: each row's period-end carrying amount, else its face amount,
+    else a tagged amount;
+  - `amountBasis`: `CARRYING`, `FACE`, `TAGGED` or `MIXED`;
+  - `faceAmount`: only rows with a tagged face amount, else null.
+- **Coverage and reconciliation (both runtimes).**
+  - `ladderCoverage` {`totalDebt`, `ladderedCarryingAmount`, `coveragePct`,
+    `notLaddered`} measures, at carrying amounts like total debt, how much
+    the ladder places. It lists outstanding rows with no maturity
+    (`NO_MATURITY_DATE`).
+  - `MATURITY_LADDER_INCOMPLETE` is raised when such a row exists and the
+    filing tags no maturity ladder of its own.
+  - `instrumentReconciliation` {`status` `RECONCILED` / `NOT_RECONCILED` /
+    `NOT_COMPARABLE`, `instrumentsCarryingTotal`, `totalDebt`, `difference`,
+    `rowsWithoutCarryingAmount`} compares the rows' period-end carrying
+    amounts with total debt, within 0.5%. A mismatch is
+    `INSTRUMENTS_DO_NOT_RECONCILE`: an instrument may be untagged, or a
+    tagged amount may be principal rather than carrying value.
+- **Effect.** AAOI's 10-Q now gives:
+  - the 2030 Notes at 2030-01-15 (`FILING_TEXT`);
+  - ladder coverage of 97.74%, up from 31%;
+  - `NOT_RECONCILED` by 4,242,000, the gap between the notes' tagged
+    principal and their 129,142,000 carrying value;
+  - both China bank maturities;
+  - a flag on the 2028/2026 label mismatch.
+- **Not changed.** The dilution bridge's convertible principal is unchanged.
+  The filing's own 124,925,000 principal and 129,142,000 net carrying amount
+  are tagged on a different member (`LongtermDebtTypeAxis`, the 5.250%
+  notes), and linking the two members would be an inference.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
