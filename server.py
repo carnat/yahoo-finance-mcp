@@ -10213,6 +10213,10 @@ async def extract_capital_structure(
         return json.dumps({"ticker": ticker, "status": "FILING_TEXT_NOT_AVAILABLE", "code": "FILING_TEXT_NOT_AVAILABLE", "message": "The filing document could not be read from SEC."})
     funding = await _filing_text_matches(ticker, primary, _FUNDING_SEARCH_TERMS, 20, 700) if include_funding_statements is not False else []
     out = _cs.capital_structure(ticker.upper(), loaded[0], funding)
+    # An outstanding instrument with no tagged maturity: read the filing's own maturity sentences (2.5.24).
+    if (out.get("ladderCoverage") or {}).get("notLaddered"):
+        maturity_matches = await _filing_text_matches(ticker, primary, _cs.MATURITY_SEARCH_TERMS, 12, 400)
+        out = _cs.capital_structure(ticker.upper(), loaded[0], funding, maturity_matches)
     if loaded[1]:
         out["warnings"].append({"code": "FILING_READ_TRUNCATED", "message": "The filing exceeded the read limit; facts past that point were not parsed.", "severity": "warning"})
     return json.dumps(out)

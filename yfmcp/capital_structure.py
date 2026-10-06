@@ -439,7 +439,13 @@ def member_label(member: str) -> str:
     label = re.sub(r"([A-Z])([A-Z][a-z])", r"\1 \2", label)
     label = re.sub(r"([A-Za-z])(\d)", r"\1 \2", label)
     label = re.sub(r"(\d)([A-Za-z])", r"\1 \2", label)
+    # "December282028" -> "December 28, 2028" (2.5.24, F-011): a day and a year run together after a month name.
+    label = _MONTH_DAY_YEAR_RUN_RE.sub(r"\1 \2, \3", label)
     return re.sub(r"\s+", " ", label).strip()
+
+
+_MONTH_DAY_YEAR_RUN_RE = re.compile(r"\b(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec) (\d{1,2})((?:19|20)\d{2})\b", re.A)
+_LABEL_DATE_RE = re.compile(r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}\b", re.A)
 
 
 def round_half_up(value: float, digits: int = 0) -> float:
@@ -1150,6 +1156,24 @@ def _group_value(group: _DebtGroup, locals_: list[str], at: str | None = None) -
         if hit is not None:
             return _picked(hit)
     return None
+
+
+def _group_texts(group: _DebtGroup, local: str) -> list[str]:
+    """Every distinct text a concept carries on the group's newest date for it, in document order (2.5.24, F-010)."""
+    hits = [f for f in group.facts if f.local == local and f.text is not None]
+    best = _newest(hits)
+    if best is None:
+        return []
+    return list(dict.fromkeys(f.text for f in hits if (f.period_end or "") == (best.period_end or "")))
+
+
+def _group_values(group: _DebtGroup, local: str) -> list[float]:
+    """Every distinct value a concept carries on the group's newest date for it."""
+    hits = [f for f in group.facts if f.local == local and f.value is not None]
+    best = _newest(hits)
+    if best is None:
+        return []
+    return list(dict.fromkeys(f.value for f in hits if (f.period_end or "") == (best.period_end or "")))
 
 
 def _group_text(group: _DebtGroup, local: str) -> str | None:
@@ -2479,7 +2503,11 @@ def _instruments(doc: IxDocument, period_end: str | None) -> list[dict]:
         effective = _group_value(g, ["DebtInstrumentInterestRateEffectivePercentage"])
         conv_price = _group_value(g, [_CONVERSION_PRICE])
         ratio = _group_value(g, [_CONVERSION_RATIO])
-        maturity = normalize_ix_date(_group_text(g, "DebtInstrumentMaturityDate"))
+        # One member can carry two tagged maturities and coupons (AAOI's China bank revolver and equipment term loan,
+        # one amount): all are reported and the row is placed at the earliest (2.5.24, F-010).
+        maturity_dates = sorted({d for d in (normalize_ix_date(t) for t in _group_texts(g, "DebtInstrumentMaturityDate")) if d is not None})
+        maturity = maturity_dates[0] if maturity_dates else None
+        coupons = sorted(round_half_up(v * 100, 4) for v in _group_values(g, "DebtInstrumentInterestRateStatedPercentage"))
         # A coupon alone is often a duplicate member of an instrument listed elsewhere.
         if not face and not carrying and not tagged and not maturity:
             continue
@@ -2494,6 +2522,8 @@ def _instruments(doc: IxDocument, period_end: str | None) -> list[dict]:
             "member": g.member,
             "axis": g.axis,
             "faceAmount": face["value"] if face else None,
+            # The date the face amount is tagged at: an issue date before the period end is original principal (F-007).
+            "faceAmountDate": face["periodEnd"] if face else None,
             "carryingAmount": carrying["value"] if carrying else None,
             "carryingAmountConcept": carrying["concept"] if carrying else None,
             "taggedAmount": tagged["value"] if tagged else None,
@@ -2502,6 +2532,9 @@ def _instruments(doc: IxDocument, period_end: str | None) -> list[dict]:
             "couponPct": round_half_up(coupon["value"] * 100, 4) if coupon else None,
             "effectiveRatePct": round_half_up(effective["value"] * 100, 4) if effective else None,
             "maturityDate": maturity,
+            "maturityDateSource": "XBRL" if maturity else None,
+            **({"maturityDates": maturity_dates} if len(maturity_dates) > 1 else {}),
+            **({"couponPcts": coupons} if len(coupons) > 1 else {}),
             "convertible": conv_price is not None or ratio is not None,
             "conversionPrice": conv_price["value"] if conv_price else None,
             "conversionRatioPer1000": normalized_ratio(ratio["value"] if ratio else None, conv_price["value"] if conv_price else None)["per1000"],
@@ -2556,7 +2589,58 @@ def funding_statements(matches: list[TextMatch], limit: int = 10) -> list[dict]:
     return out
 
 
-def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextMatch]) -> dict:
+# Filing text stating when instruments mature, read only when an outstanding row has no tagged maturity (2.5.24).
+MATURITY_SEARCH_TERMS = ["will mature on", "mature on", "matures on"]
+_MATURITY_TEXT_RE = re.compile(r"\bmatur(?:e|es)\s+on\s+((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4})", _F)
+
+
+def _maturity_statements(matches: list[TextMatch]) -> list[dict]:
+    """"... will mature on January 15, 2030 ..." sentences, each with the ISO date it states."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for match in matches:
+        for sentence in _sentences(_collapse(match.context_text)):
+            for m in _MATURITY_TEXT_RE.finditer(sentence):
+                date = normalize_ix_date(m.group(1))
+                if not date or len(date) != 10 or f"{date}|{sentence}" in seen:
+                    continue
+                seen.add(f"{date}|{sentence}")
+                out.append({"date": date, "sentence": sentence[:400]})
+    return out
+
+
+def _unplaced_rows(rows: list[dict]) -> list[dict]:
+    """Rows still outstanding with an amount but no maturity: what a maturity ladder cannot place."""
+    return [r for r in rows if r.get("maturityDate") is None and r.get("status") != "matured_before_period_end" and _ladder_amount(r) is not None]
+
+
+def _maturity_from_text(rows: list[dict], statements: list[dict]) -> None:
+    """A row with no tagged maturity takes the one date the filing text gives for its year (2.5.24, F-008: "The 2030
+    Notes will mature on January 15, 2030" for "Convertible Notes Maturing 2030"). The year must appear in the
+    instrument's name and the text must give exactly one date in it."""
+    for row in _unplaced_rows(rows):
+        years = set(re.findall(r"\b(?:19|20)\d{2}\b", str(row["instrument"]), re.A))
+        hits = [s for s in statements if s["date"][:4] in years]
+        dates = list(dict.fromkeys(h["date"] for h in hits))
+        if len(dates) != 1:
+            continue
+        row["maturityDate"] = dates[0]
+        row["maturityDateSource"] = "FILING_TEXT"
+        row["maturityStatement"] = hits[0]["sentence"]
+
+
+def _ladder_amount(row: dict) -> dict | None:
+    """The amount a row adds to the year ladder and on what basis: the period-end carrying amount, else face, else a tagged amount."""
+    if _is_number(row.get("carryingAmount")):
+        return {"amount": row["carryingAmount"], "basis": "CARRYING"}
+    if _is_number(row.get("faceAmount")):
+        return {"amount": row["faceAmount"], "basis": "FACE"}
+    if _is_number(row.get("taggedAmount")):
+        return {"amount": row["taggedAmount"], "basis": "TAGGED"}
+    return None
+
+
+def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextMatch], maturity_matches: list[TextMatch] | None = None) -> dict:
     """Cash, debt, instruments and maturities at the filing's period end, with the company's own funding statements."""
     doc = source.doc
     period_end = doc.document_period_end
@@ -2593,6 +2677,15 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
         debt = {"value": 0, "components": [], "basis": "No borrowing concepts tagged in the filing"}
         warnings.append({"code": "NO_BORROWINGS_TAGGED", "message": "The filing tags no borrowings at any date, so total debt is taken as zero (leases excluded).", "severity": "info"})
     instrument_rows = _instruments(doc, period_end)
+    if maturity_matches:
+        _maturity_from_text(instrument_rows, _maturity_statements(maturity_matches))
+    for row in instrument_rows:
+        if isinstance(row.get("maturityDates"), list):
+            warnings.append({"code": "MULTIPLE_MATURITIES", "message": f"{row['instrument']} carries {len(row['maturityDates'])} tagged maturities ({', '.join(row['maturityDates'])}) on one amount; the year ladder places it at the earliest.", "severity": "info"})
+        named = _LABEL_DATE_RE.search(str(row["instrument"]))
+        named_date = normalize_ix_date(named.group(0)) if named else None
+        if named_date and row.get("maturityDateSource") == "XBRL" and named_date not in (row.get("maturityDates") or [row["maturityDate"]]):
+            warnings.append({"code": "LABEL_DATE_DIFFERS_FROM_MATURITY", "message": f"{row['instrument']} is named for {named.group(0)} but its tagged maturity is {row['maturityDate']}; the tagged date is used.", "severity": "info"})
     ladder = []
     for concept, bucket, offset in _LADDER:
         hit = _total(doc, concept, period_end)
@@ -2604,18 +2697,73 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
             "amount": hit["value"],
             "concept": hit["concept"],
         })
+    # Each bucket states its amount's basis; faceAmount sums only rows tagged with a face amount (2.5.24, F-009:
+    # it summed carrying amounts under the face name).
     by_year: dict[str, dict] = {}
+    laddered = 0
     for row in instrument_rows:
         maturity = row["maturityDate"]
-        if not maturity or row["status"] == "matured_before_period_end":
+        amount = _ladder_amount(row)
+        if not maturity or not amount or row["status"] == "matured_before_period_end":
             continue
         year = maturity[:4]
-        entry = by_year.get(year) or {"year": year, "faceAmount": 0, "instruments": []}
-        amount = _first_not_none(row["faceAmount"], row["carryingAmount"], row["taggedAmount"])
-        entry["faceAmount"] += float(amount if amount is not None else 0)
+        entry = by_year.get(year) or {"year": year, "amount": 0, "bases": [], "faceAmount": None, "instruments": []}
+        entry["amount"] += amount["amount"]
+        if amount["basis"] not in entry["bases"]:
+            entry["bases"].append(amount["basis"])
+        if _is_number(row["faceAmount"]):
+            entry["faceAmount"] = (entry["faceAmount"] or 0) + row["faceAmount"]
         entry["instruments"].append(str(row["instrument"]))
         by_year[year] = entry
-    instrument_ladder = sorted(by_year.values(), key=lambda e: e["year"])
+        if _is_number(row["carryingAmount"]):
+            laddered += row["carryingAmount"]
+    instrument_ladder = [
+        {"year": e["year"], "amount": e["amount"], "amountBasis": e["bases"][0] if len(e["bases"]) == 1 else "MIXED", "faceAmount": e["faceAmount"], "instruments": e["instruments"]}
+        for e in sorted(by_year.values(), key=lambda e: e["year"])
+    ]
+    # How much of total debt the year ladder places, at carrying amounts like total debt, and what it cannot
+    # (2.5.24, F-008: AAOI's ladder held 58.9M of 188.1M with nothing said).
+    debt_value = debt["value"] if debt and _is_number(debt["value"]) else None
+    unplaced = [{"instrument": r["instrument"], "amount": _ladder_amount(r)["amount"], "amountBasis": _ladder_amount(r)["basis"], "reason": "NO_MATURITY_DATE"} for r in _unplaced_rows(instrument_rows)]
+    ladder_coverage = {
+        "totalDebt": debt_value,
+        "ladderedCarryingAmount": laddered,
+        "coveragePct": round_half_up((laddered / debt_value) * 100, 2) if debt_value and debt_value > 0 else None,
+        "notLaddered": unplaced,
+    }
+    # When an outstanding instrument has no maturity and the filing tags no maturity ladder of its own.
+    if unplaced and not ladder:
+        listed = ", ".join(f"{u['instrument']} ({_js_number(u['amount'])})" for u in unplaced)
+        of_total = f" of total debt {_js_number(debt_value)} ({'null' if ladder_coverage['coveragePct'] is None else _js_number(ladder_coverage['coveragePct'])}%)" if debt_value else ""
+        warnings.append({
+            "code": "MATURITY_LADDER_INCOMPLETE",
+            "message": f"No maturity date for {listed}; the year ladder places {_js_number(laddered)}{of_total}.",
+            "severity": "warning",
+        })
+    # Instrument rows' period-end carrying amounts against total debt (2.5.24, F-007: AAOI tags 124.9M principal as
+    # the 2030 Notes' carrying amount; the balance sheet carries 129.1M).
+    outstanding = [r for r in instrument_rows if r["status"] != "matured_before_period_end" and _ladder_amount(r) is not None]
+    carried = [r for r in outstanding if _is_number(r["carryingAmount"])]
+    carried_total = sum((r["carryingAmount"] for r in carried), 0)
+    without_carrying = len(outstanding) - len(carried)
+    if not debt_value or not carried:
+        reconciliation = {"status": "NOT_COMPARABLE", "instrumentsCarryingTotal": None, "totalDebt": debt_value, "difference": None, "rowsWithoutCarryingAmount": without_carrying}
+    else:
+        reconciliation = {
+            "status": "RECONCILED" if abs(carried_total - debt_value) <= _AGGREGATE_TOLERANCE * abs(debt_value) else "NOT_RECONCILED",
+            "instrumentsCarryingTotal": carried_total,
+            "totalDebt": debt_value,
+            "difference": debt_value - carried_total,
+            "rowsWithoutCarryingAmount": without_carrying,
+        }
+    if reconciliation["status"] == "NOT_RECONCILED":
+        extra = f"; {without_carrying} row(s) have no period-end carrying amount" if without_carrying else ""
+        warnings.append({
+            "code": "INSTRUMENTS_DO_NOT_RECONCILE",
+            "message": f"Instrument rows carry {_js_number(carried_total)} at the period end against total debt {_js_number(debt_value)} (difference {_js_number(reconciliation['difference'])}"
+                       f"{extra}): an instrument may be untagged, or a tagged amount may be principal rather than carrying value.",
+            "severity": "warning",
+        })
     liquid = (cash["value"] if cash else 0) + (short_term["value"] if short_term else 0)
     if not doc.facts:
         warnings.append({"code": "NO_INLINE_XBRL", "message": "The filing carries no inline XBRL facts.", "severity": "warning"})
@@ -2646,10 +2794,13 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
         "instruments": instrument_rows,
         "maturityLadder": ladder,
         "instrumentMaturitiesByYear": instrument_ladder,
+        "ladderCoverage": ladder_coverage,
+        "instrumentReconciliation": reconciliation,
         "fundingStatements": funding,
         "methodology": [
             "Balances are the filing's own tagged values at its period end; nothing is projected forward.",
-            "Instrument rows come from facts dimensioned by debt instrument, which companyfacts omits; face amounts can be original principal.",
+            "Instrument rows come from facts dimensioned by debt instrument, which companyfacts omits; face amounts can be original principal (faceAmountDate says when it was tagged).",
+            "The year ladder sums each row's period-end carrying amount, else its face amount, else a tagged amount (amountBasis); a row with no tagged maturity takes one only when the filing text states a single maturity date in the year its name carries.",
             "Funding statements are quoted from the filing so the company's own runway and sufficiency claims can be read in context.",
         ],
         "warnings": warnings,
