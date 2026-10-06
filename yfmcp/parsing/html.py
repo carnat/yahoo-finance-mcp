@@ -99,7 +99,8 @@ def _stated_unit_scales(html: str) -> list[float]:
 
 
 # Where a table's scale came from (2.5.21). ASSUMED_MILLIONS: neither the table nor its lead-in states one, so amounts
-# are read in millions and carry UNIT_SCALE_ASSUMED; a share is unaffected.
+# are read in millions and carry UNIT_SCALE_ASSUMED; a share is unaffected. STATED_IN_DOCUMENT (2.5.22): the table and
+# its lead-in state none, but every scale statement in the filing agrees.
 _UNIT_SCALE_ASSUMED_WARNING = {
     "code": "UNIT_SCALE_ASSUMED",
     "message": "Neither the table nor the text before it states a scale; amounts are read in millions. Check the filing before using the amounts (a percentage share is not affected).",
@@ -107,17 +108,39 @@ _UNIT_SCALE_ASSUMED_WARNING = {
 }
 
 
-def _detect_unit_scale(table_html: str, context_html: str) -> tuple[float, str]:
-    """The monetary unit multiplier for a table, and where it came from (2.5.21).
+def _document_unit_scale(html: str) -> float | None:
+    """The one scale every statement in a filing names, or None when it states none or several (2.5.22)."""
+    scales = set(_stated_unit_scales(html))
+    return next(iter(scales)) if len(scales) == 1 else None
+
+
+def _lazy_document_scale(html: str):
+    """A filing's single stated scale, computed once per document on first use (the Worker's lazyDocumentScale)."""
+    state: dict = {}
+
+    def scale() -> float | None:
+        if "value" not in state:
+            state["value"] = _document_unit_scale(html)
+        return state["value"]
+
+    return scale
+
+
+def _detect_unit_scale(table_html: str, context_html: str, document_scale=lambda: None) -> tuple[float, str]:
+    """The monetary unit multiplier for a table, and where it came from (2.5.21, 2.5.22).
 
     The scale the table itself states (STATED_IN_TABLE), else the statement in its lead-in nearest the table
-    (STATED_BEFORE_TABLE), else millions, the most common 10-K scale, marked ASSUMED_MILLIONS.
+    (STATED_BEFORE_TABLE), else the filing's single stated scale (STATED_IN_DOCUMENT), else millions, the most
+    common 10-K scale, marked ASSUMED_MILLIONS.
     """
     own = _stated_unit_scales(table_html)
     if own:
         return own[0], "STATED_IN_TABLE"
     lead = _stated_unit_scales(context_html)
-    return (lead[-1], "STATED_BEFORE_TABLE") if lead else (1_000_000.0, "ASSUMED_MILLIONS")
+    if lead:
+        return lead[-1], "STATED_BEFORE_TABLE"
+    doc = document_scale()
+    return (doc, "STATED_IN_DOCUMENT") if doc is not None else (1_000_000.0, "ASSUMED_MILLIONS")
 
 
 def _detect_unit_multiplier(table_html: str, context_html: str) -> float:

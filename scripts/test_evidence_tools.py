@@ -95,6 +95,11 @@ m.setEvidenceStoreForTests(store);
 out.curve1 = JSON.parse(await m.getConsensusForecastCurve("ASTS"));
 out.curve2 = JSON.parse(await m.getConsensusForecastCurve("ASTS"));
 out.badHorizon = JSON.parse(await m.getConsensusForecastCurve("ASTS", 9));
+const observedOn = out.curve1.storage.consensusObservation.key.split("/").pop().replace(/\.json$/, "");
+out.storedObservation = JSON.parse(await m.getConsensusForecastCurve("ASTS", 5, 3, 10, observedOn));
+out.storedObservationLower = JSON.parse(await m.getConsensusForecastCurve("asts", 5, 3, 10, observedOn));
+out.storedMissing = JSON.parse(await m.getConsensusForecastCurve("ASTS", 5, 3, 10, "2020-01-02"));
+out.storedBadDate = JSON.parse(await m.getConsensusForecastCurve("ASTS", 5, 3, 10, "10/04/2026"));
 out.revisions = JSON.parse(await m.getEpsRevisions("ASTS"));
 out.quality = JSON.parse(await m.getEvidenceQuality("ASTS"));
 const packText = await m.buildValuationEvidencePack("ASTS");
@@ -110,6 +115,7 @@ out.keys = [...store.objects.keys()].sort();
 m.setEvidenceStoreForTests(null);
 out.noStorePack = JSON.parse(await m.buildValuationEvidencePack("ASTS", 2));
 out.noStoreGet = JSON.parse(await m.getEvidenceCut(out.pack.evidenceCut.evidenceCutId));
+out.noStoreObservation = JSON.parse(await m.getConsensusForecastCurve("ASTS", 5, 3, 10, observedOn));
 out.noStoreList = JSON.parse(await m.listEvidenceCuts("ASTS"));
 console.log(JSON.stringify(out));
 """
@@ -148,6 +154,29 @@ class _PackAssertions:
         self.assertEqual((fy0["coverage"], len(fy0["providers"])), ("PROVIDER_COVERED", 2))
         self.assertEqual(self.out["badHorizon"]["code"], "INPUT_VALIDATION_ERROR")
         self.assertEqual(len(self.out["revisions"]["storedConsensusObservations"]["observationDates"]), 1)
+
+    def test_stored_observation_is_read_back_as_written(self) -> None:
+        # 2.5.22 (F-006): observation_date returns the stored curve with a storage object, never a fresh fetch.
+        written = self.out["curve1"]
+        stored = self.out["storedObservation"]
+        key = written["storage"]["consensusObservation"]["key"]
+        self.assertEqual({k: v for k, v in stored.items() if k != "storage"}, {k: v for k, v in written.items() if k != "storage"})
+        self.assertEqual(list(stored)[-1], "storage")
+        storage = stored["storage"]
+        self.assertEqual((storage["source"], storage["storageStatus"], storage["key"]), ("STORED_OBSERVATION", "AVAILABLE", key))
+        self.assertEqual(list(storage), ["source", "storageStatus", "key", "schema", "observedAt", "serverVersion", "buildSha"])
+        self.assertEqual((storage["schema"], storage["observedAt"], storage["serverVersion"]), ("yfmcp.consensus-observation/1", written["asOf"], storage["serverVersion"]))
+        self.assertTrue(storage["serverVersion"])
+        self.assertEqual(self.out["storedObservationLower"], stored)
+        missing = self.out["storedMissing"]
+        self.assertEqual(missing, {
+            "ticker": "ASTS", "status": "OBSERVATION_NOT_FOUND", "observationDate": "2020-01-02",
+            "storage": {"source": "STORED_OBSERVATION", "storageStatus": "AVAILABLE", "key": "consensus-history/ASTS/2020-01-02.json",
+                        "observationDates": [key.rsplit("/", 1)[-1].removesuffix(".json")]}})
+        self.assertEqual(self.out["storedBadDate"], {"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "observation_date must be YYYY-MM-DD."})
+        self.assertEqual(self.out["noStoreObservation"], {
+            "ticker": "ASTS", "status": "STORAGE_UNAVAILABLE", "observationDate": key.rsplit("/", 1)[-1].removesuffix(".json"),
+            "storage": {"source": "STORED_OBSERVATION", "storageStatus": "UNAVAILABLE"}})
 
     def test_pack_authority_boundary_and_components(self) -> None:
         pack = self.out["pack"]
@@ -292,6 +321,11 @@ def _python_outputs() -> dict:
             out["curve1"] = run(srv.get_consensus_forecast_curve("ASTS"))
             out["curve2"] = run(srv.get_consensus_forecast_curve("ASTS"))
             out["badHorizon"] = run(srv.get_consensus_forecast_curve("ASTS", horizon_years=9))
+            observed_on = out["curve1"]["storage"]["consensusObservation"]["key"].rsplit("/", 1)[-1].removesuffix(".json")
+            out["storedObservation"] = run(srv.get_consensus_forecast_curve("ASTS", observation_date=observed_on))
+            out["storedObservationLower"] = run(srv.get_consensus_forecast_curve("asts", observation_date=observed_on))
+            out["storedMissing"] = run(srv.get_consensus_forecast_curve("ASTS", observation_date="2020-01-02"))
+            out["storedBadDate"] = run(srv.get_consensus_forecast_curve("ASTS", observation_date="10/04/2026"))
             out["revisions"] = run(srv.get_eps_revisions("ASTS"))
             out["quality"] = run(srv.get_evidence_quality("ASTS"))
             pack_text = asyncio.run(srv.build_valuation_evidence_pack("ASTS"))
@@ -308,6 +342,7 @@ def _python_outputs() -> dict:
             es.set_store_for_tests(None)
             out["noStorePack"] = run(srv.build_valuation_evidence_pack("ASTS", horizon_years=2))
             out["noStoreGet"] = run(srv.get_evidence_cut(cut_id))
+            out["noStoreObservation"] = run(srv.get_consensus_forecast_curve("ASTS", observation_date=observed_on))
             out["noStoreList"] = run(srv.list_evidence_cuts("ASTS"))
         finally:
             es.set_store_for_tests(es._UNSET)
@@ -321,6 +356,25 @@ class TestPythonEvidenceTools(_PackAssertions, unittest.TestCase):
 
     def test_envelope_passes_evidence_through_verbatim(self) -> None:
         self.assertEqual(self.out["envelopeData"], self.out["pack"])
+
+    def test_observation_read_reports_a_failing_store_as_retryable(self) -> None:
+        from yfmcp import evidence_store as es
+
+        class _Failing(es.MemoryStore):
+            def get(self, key: str) -> str | None:
+                raise RuntimeError("bucket offline")
+
+        _ensure_mcp_available()
+        import server as srv
+
+        es.set_store_for_tests(_Failing())
+        try:
+            out = json.loads(asyncio.run(srv.get_consensus_forecast_curve("asts", observation_date="2026-10-04")))
+        finally:
+            es.set_store_for_tests(es._UNSET)
+        self.assertEqual(out, {
+            "ticker": "ASTS", "status": "STORAGE_FAILED", "observationDate": "2026-10-04", "retryable": True,
+            "storage": {"source": "STORED_OBSERVATION", "storageStatus": "FAILED", "key": "consensus-history/ASTS/2026-10-04.json", "message": "bucket offline"}})
 
     def test_local_dir_store_round_trip(self) -> None:
         from yfmcp import evidence_store as es

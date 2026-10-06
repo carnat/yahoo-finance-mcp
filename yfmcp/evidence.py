@@ -372,6 +372,13 @@ def _agreement(entries: list[dict], metric: str, policy: dict) -> dict:
     currencies = list(dict.fromkeys(e["currency"] for e in valued if isinstance(e["currency"], str)))
     if len(currencies) > 1:
         return {"status": "CURRENCY_MISMATCH", "providersCompared": compared, "currencies": currencies, "relativeDiffPct": None, "absoluteDiff": None}
+    verified = len(currencies) == 1 and all(e["currency"] == currencies[0] for e in valued)
+    currency_identity = "VERIFIED" if verified else "UNVERIFIED"
+    # The same mean, high, low and analyst count wherever both publish them: one upstream feed carried twice, not
+    # two checks (2.5.22, F-005: Yahoo and Alpha Vantage matched to the last published digit).
+    if _identical_at_published_precision(valued):
+        return {"status": "IDENTICAL", "providersCompared": compared, "relativeDiffPct": 0, "absoluteDiff": 0,
+                "currencyIdentity": currency_identity, "independence": "NOT_INDEPENDENT"}
     means = [e["mean"] for e in valued]
     hi, lo = max(means), min(means)
     absolute = _round(hi - lo, 6)
@@ -379,14 +386,75 @@ def _agreement(entries: list[dict], metric: str, policy: dict) -> dict:
     relative = _round((hi - lo) / scale * 100, 2) if scale > 0 else 0
     within_absolute = metric == "eps" and absolute <= policy["epsAbsoluteTolerance"]
     status = "AGREED" if within_absolute or relative <= policy["conflictTolerancePct"] else "CONFLICT"
-    verified = len(currencies) == 1 and all(e["currency"] == currencies[0] for e in valued)
     return {
         "status": status,
         "providersCompared": compared,
         "relativeDiffPct": relative,
         "absoluteDiff": absolute,
-        "currencyIdentity": "VERIFIED" if verified else "UNVERIFIED",
+        "currencyIdentity": currency_identity,
+        "independence": "UNVERIFIED",
     }
+
+
+def _is_number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _identical_at_published_precision(valued: list[dict]) -> bool:
+    for field in ("mean", "high", "low", "analystCount"):
+        values = [e[field] for e in valued if _is_number(e[field])]
+        if len(values) >= 2 and len(set(values)) > 1:
+            return False
+    return all(_is_number(e["analystCount"]) for e in valued)
+
+
+_COMPARED = {"AGREED", "CONFLICT", "IDENTICAL"}
+
+
+def _cross_check(inputs: list[dict], periods: list[dict]) -> tuple[dict, list[dict]]:
+    """Whether the curve is a cross-check at all (2.5.22, F-003/F-005): which providers answered, which failed and
+    why, and whether the ones that answered are independent. A failed provider or identical feeds is a warning,
+    not a quiet single-source curve."""
+    answered = [i["provider"] for i in inputs if i["status"] == "OK"]
+    failed = [{"provider": i["provider"], "status": i["status"], "message": i["message"]}
+              for i in inputs if i["status"] != "OK" and i["status"] != "NO_DATA"]
+    compared = 0
+    identical = 0
+    for period in periods:
+        for cell in period["metrics"].values():
+            status = str(cell["agreement"]["status"])
+            if status in _COMPARED:
+                compared += 1
+            if status == "IDENTICAL":
+                identical += 1
+    if not answered:
+        status = "NO_PROVIDER"
+    elif len(answered) == 1:
+        status = "SINGLE_PROVIDER"
+    elif compared == 0:
+        status = "NOT_COMPARED"
+    elif identical == compared:
+        status = "NOT_INDEPENDENT"
+    else:
+        status = "CROSS_CHECKED"
+    warnings: list[dict] = []
+    for f in failed:
+        quota = (" This server's Alpha Vantage key and its quota are its own, separate from any key used directly."
+                 if f["provider"] == "alpha_vantage" else "")
+        suffix = f": {f['message']}" if f["message"] else ""
+        warnings.append({
+            "code": "CROSS_CHECK_DEGRADED",
+            "message": f"{f['provider']} returned {f['status']}{suffix}. The curve is not cross-checked against it.{quota}",
+            "severity": "warning",
+        })
+    if status == "NOT_INDEPENDENT":
+        warnings.append({
+            "code": "PROVIDERS_NOT_INDEPENDENT",
+            "message": "Every compared figure is identical at the providers' published precision: they carry one upstream feed, so their agreement is one source, not two.",
+            "severity": "warning",
+        })
+    return ({"status": status, "providersAnswered": answered, "providersFailed": failed, "cellsCompared": compared, "cellsIdentical": identical},
+            warnings)
 
 
 def _metric_coverage(entries: list[dict], agreement_status: str) -> str:
@@ -447,9 +515,11 @@ def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: d
             "companyFiscalYearEnd": company_fiscal_year_end(year_naming.get("calendar"), fiscal_year_ends[0] if fiscal_year_ends else None),
             "metrics": metrics,
         })
+    check, check_warnings = _cross_check(inputs, periods)
     return {
         "ticker": ticker.upper(),
         "asOf": as_of,
+        "crossCheck": check,
         "fiscalYearBasis": fy0 or {"fiscalYearEnd": None, "basis": "NO_PROVIDER_FISCAL_YEAR"},
         "fiscalYearNaming": year_naming,
         "policy": {**policy, "horizonYears": horizon},
@@ -471,8 +541,9 @@ def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: d
             "Each provider's figures are reported as given; no provider value is selected, blended or averaged.",
             "Periods and metrics no provider covers are PROVIDER_NOT_COVERED; nothing is interpolated or extended from long-term growth rates.",
             "Median and standard deviation are not published by the configured providers; the high-low range per provider is the only dispersion measure.",
-            "Agreement between providers does not establish independence: they may redistribute the same underlying estimates.",
+            "Agreement between providers does not establish independence: they may redistribute the same underlying estimates. IDENTICAL marks figures equal to the last published digit, which is one feed carried twice.",
         ],
+        "warnings": check_warnings,
         **AUTHORITY_BOUNDARY,
     }
 

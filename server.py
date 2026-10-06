@@ -11937,12 +11937,57 @@ def _write_consensus_observation(ticker: str, curve: dict, observed_at: str) -> 
     return {"status": written["status"], "key": None if written["status"] == "UNAVAILABLE" else key, **({"message": written["message"]} if written.get("message") else {})}
 
 
+def _read_consensus_observation(ticker: str, observation_date: str) -> str:
+    """A stored daily consensus observation, read back as it was written (2.5.22, F-006). Not found lists the stored dates."""
+    symbol = ticker.upper()
+    if not _re.fullmatch(r"\d{4}-\d{2}-\d{2}", observation_date, _re.ASCII):
+        return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "observation_date must be YYYY-MM-DD."})
+    store = _es.get_store()
+    if store is None:
+        return json.dumps({"ticker": symbol, "status": "STORAGE_UNAVAILABLE", "observationDate": observation_date,
+                           "storage": {"source": "STORED_OBSERVATION", "storageStatus": "UNAVAILABLE"}})
+    key = _ev.consensus_observation_key(symbol, observation_date)
+    dates: list[str] = []
+    try:
+        text = store.get(key)
+        if text is None:
+            dates = [k.rsplit("/", 1)[-1].removesuffix(".json") for k in store.list(f"consensus-history/{symbol}/", 400)]
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ticker": symbol, "status": "STORAGE_FAILED", "observationDate": observation_date, "retryable": True,
+                           "storage": {"source": "STORED_OBSERVATION", "storageStatus": "FAILED", "key": key, "message": str(exc)}})
+    if text is None:
+        return json.dumps({"ticker": symbol, "status": "OBSERVATION_NOT_FOUND", "observationDate": observation_date,
+                           "storage": {"source": "STORED_OBSERVATION", "storageStatus": "AVAILABLE", "key": key, "observationDates": dates}})
+    stored = json.loads(text)
+    curve = stored.get("curve") or {}
+    return json.dumps({
+        **curve,
+        "storage": {
+            "source": "STORED_OBSERVATION",
+            "storageStatus": "AVAILABLE",
+            "key": key,
+            "schema": stored.get("schema"),
+            "observedAt": stored.get("observedAt"),
+            "serverVersion": stored.get("serverVersion"),
+            "buildSha": stored.get("buildSha"),
+        },
+    })
+
+
 @yfinance_server.tool(
     name="get_consensus_forecast_curve",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_consensus_forecast_curve"],
-    description="Street consensus by fiscal year, FY0 to FY+horizon, for EPS and revenue from Yahoo Finance and Alpha Vantage, each provider reported separately with fiscal year end, currency, mean/high/low, analyst count and retrieval time. Each metric and period states its coverage: PROVIDER_COVERED, PROVIDER_NOT_COVERED, INSUFFICIENT_ANALYST_COUNT or PROVIDER_CONFLICT (with the cross-provider difference). Years and metrics no provider covers stay PROVIDER_NOT_COVERED; nothing is interpolated, extended by growth rates, or derived. Evidence only.",
+    description="Street consensus by fiscal year, FY0 to FY+horizon, for EPS and revenue from Yahoo Finance and Alpha Vantage, each provider reported separately with fiscal year end, currency, mean/high/low, analyst count and retrieval time. Each metric and period states its coverage: PROVIDER_COVERED, PROVIDER_NOT_COVERED, INSUFFICIENT_ANALYST_COUNT or PROVIDER_CONFLICT (with the cross-provider difference). Years and metrics no provider covers stay PROVIDER_NOT_COVERED; nothing is interpolated, extended by growth rates, or derived. crossCheck states whether the providers were actually compared: a failed provider (CROSS_CHECK_DEGRADED) or figures identical to the last digit (IDENTICAL, PROVIDERS_NOT_INDEPENDENT) are flagged. With observation_date, returns the curve stored that day. Evidence only.",
 )
-async def get_consensus_forecast_curve(ticker: str, horizon_years: int = 5, min_analyst_count: int = 3, conflict_tolerance_pct: float = 10) -> str:
+async def get_consensus_forecast_curve(
+    ticker: str,
+    horizon_years: int = 5,
+    min_analyst_count: int = 3,
+    conflict_tolerance_pct: float = 10,
+    observation_date: Annotated[str | None, Field(description="Read the consensus observation stored on this date (YYYY-MM-DD) instead of fetching providers now; get_eps_revisions lists the stored dates.")] = None,
+) -> str:
+    if observation_date:
+        return _read_consensus_observation(ticker, observation_date)
     policy = _consensus_policy(horizon_years, min_analyst_count, conflict_tolerance_pct)
     if isinstance(policy, str):
         return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": policy})
