@@ -2285,6 +2285,32 @@ Vantage and IBKR produced these fixes.
 - **Not changed.** A filer that tags `LongTermDebt` keeps the existing basis.
   Linkbases are still not read.
 
+## Maturity Years Written In Words (2.5.28)
+
+- **Defect (live 2.5.27 on FDX).** Seven FDX notes, about 5.5B, sat outside
+  the year ladder. Their members name the year in words, for example
+  "Five Point Two Five Percent Senior Unsecured Debt Due Twenty Thirty Six"
+  and "One Point Eight Seven Five Zero Percent Due In February Two Thousand
+  Thirty Four". Name dating (2.5.25) read only digits. No warning appeared,
+  because FDX tags a maturity ladder of its own.
+- **Years in words (both runtimes, `capital-structure.ts` /
+  `capital_structure.py`).** Before a row is dated from its name, years
+  written in words are read as digits. The displayed name is unchanged. Two
+  forms count:
+  - "Twenty" followed by a teen or a tens word, optionally with a ones word
+    ("Twenty Thirty Six" is 2036, "Twenty Twenty Nine" 2029, "Twenty Ten"
+    2010);
+  - "Two Thousand", optionally followed by "And", then a number up to 99
+    ("Two Thousand Thirty Four" is 2034, "Two Thousand And Nine" 2009).
+
+  Spaces or hyphens may separate the words. "Twenty" followed by a ones word
+  alone ("Twenty Five Percent", "Due Twenty Nine") is not a year. The
+  existing rules still apply: the year must follow "Due" or "Maturing", and
+  a date before the period end is not taken.
+- **Effect.** In an FDX-shaped fixture, the notes date to 2036, 2029 and
+  2034-02 (source `INSTRUMENT_NAME`). "Twenty Five Percent Notes" stays
+  undated.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
