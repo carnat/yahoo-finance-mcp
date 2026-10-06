@@ -2174,6 +2174,54 @@ Vantage and IBKR produced these fixes.
   debt is not tagged on the lines `totalDebt` reads. That is separate from
   the ladder and is not addressed here.
 
+## Convertible Rows Checked Against The Balance Sheet (2.5.26)
+
+- **Defect (F-007, still open after 2.5.24; reported by the Engine Zero
+  adapter).**
+  - AAOI's "Convertible Notes Maturing 2030" row showed `carryingAmount`
+    124,900,000 under `us-gaap:DebtInstrumentCarryingAmount`. That figure
+    is the "approximately $124.9 million" principal from Note 12.
+  - The balance sheet, the Note 12 table and Note 10 all carry the notes at
+    129,142,000.
+  - 2.5.24's `INSTRUMENTS_DO_NOT_RECONCILE` showed the 4,242,000 gap, but
+    the row itself still read as carrying value. `ladderCoverage` reported
+    97.74% with nothing unplaced and did not say where the 2.26% went.
+- **Convertible balance-sheet check (both runtimes, `capital-structure.ts`
+  / `capital_structure.py`).**
+  - Convertible rows with a period-end amount are summed and compared with
+    the balance sheet's own convertible line (`ConvertibleNotesPayable` or
+    `ConvertibleDebt`, else current plus noncurrent).
+  - The comparison is reported as
+    `instrumentReconciliation.convertibleBalanceSheet` {`status`,
+    `concept`, `balanceSheetAmount`, `instrumentRowsTotal`, `difference`}.
+  - When the two differ by more than 0.5%:
+    - each convertible row is marked `carryingAmountBasis`
+      `MAY_BE_PRINCIPAL`;
+    - the warning `CARRYING_AMOUNT_MAY_BE_PRINCIPAL` names both figures and
+      their concepts.
+  - The row's amount is not replaced. The filing tags the balance-sheet
+    line, and its 124,925,000 principal / 129,142,000 net carrying table, on
+    a different member from the instrument, so moving them onto the row
+    would be an inference.
+- **Ladder gap (both runtimes).** `ladderCoverage.gap` {`amount`,
+  `inNotLaddered`, `inReconciliationDifference`} splits the shortfall
+  between the laddered carrying amount and total debt into two parts:
+  - rows the ladder cannot place;
+  - the reconciliation difference.
+- **Ladder warning wording (both runtimes; from the live verification of
+  2.5.25 on VRT).** `MATURITY_LADDER_INCOMPLETE` said the ladder "places 0 of
+  total debt (0%)" while VRT's ladder held 2.95B of face amounts. When the
+  ladder is on a face, tagged or mixed basis, the message now gives the
+  laddered amount, its basis and its share at carrying amounts.
+- **Effect.** AAOI's 10-Q now gives:
+  - the 2030 Notes marked `MAY_BE_PRINCIPAL`;
+  - `convertibleBalanceSheet` `NOT_RECONCILED` (129,142,000 against
+    124,900,000);
+  - `CARRYING_AMOUNT_MAY_BE_PRINCIPAL`;
+  - `ladderCoverage.gap` {4,242,000; 0; 4,242,000}.
+- **Not affected.** A filing with no separately tagged convertible line gets
+  no check and no mark.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

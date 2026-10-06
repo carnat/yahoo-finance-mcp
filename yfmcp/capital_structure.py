@@ -2775,10 +2775,17 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
     # When an outstanding instrument has no maturity and the filing tags no maturity ladder of its own.
     if unplaced and not ladder:
         listed = ", ".join(f"{u['instrument']} ({_js_number(u['amount'])})" for u in unplaced)
-        of_total = f" of total debt {_js_number(debt_value)} ({'null' if ladder_coverage['coveragePct'] is None else _js_number(ladder_coverage['coveragePct'])}%)" if debt_value else ""
+        # A ladder on face or tagged amounts says so, rather than "places 0" at carrying amounts (2.5.26: VRT).
+        basis = ladder_coverage["ladderedAmountBasis"]
+        if basis is None or basis == "CARRYING":
+            of_total = f" of total debt {_js_number(debt_value)} ({'null' if ladder_coverage['coveragePct'] is None else _js_number(ladder_coverage['coveragePct'])}%)" if debt_value else ""
+            placed = f"the year ladder places {_js_number(laddered)}{of_total}."
+        else:
+            against = f" against total debt {_js_number(debt_value)}" if debt_value else ""
+            placed = f"the year ladder places {_js_number(laddered_any)} on a {basis} basis ({_js_number(laddered)} at carrying amounts){against}."
         warnings.append({
             "code": "MATURITY_LADDER_INCOMPLETE",
-            "message": f"No maturity date for {listed}; the year ladder places {_js_number(laddered)}{of_total}.",
+            "message": f"No maturity date for {listed}; {placed}",
             "severity": "warning",
         })
     # Instrument rows' period-end carrying amounts against total debt (2.5.24, F-007: AAOI tags 124.9M principal as
@@ -2806,6 +2813,41 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
                        "an instrument may be untagged, or a tagged amount may be principal rather than carrying value.",
             "severity": "warning",
         })
+    # Convertible rows against the balance sheet's own convertible line (2.5.26, F-007: AAOI tags the 2030 Notes'
+    # "approximately $124.9 million" principal as DebtInstrumentCarryingAmount; the balance sheet carries them at
+    # 129,142,000). The rows are marked, not rewritten: the balance-sheet line is not tagged to the instrument.
+    convertible_rows = [r for r in carried if r.get("convertible") is True]
+    convertible_line = _convertible_balance(balance_doc, period_end) if convertible_rows else None
+    if convertible_line:
+        line_total, line_parts = convertible_line
+        rows_total = sum((r["carryingAmount"] for r in convertible_rows), 0)
+        line_concept = " + ".join(part["concept"] for part in line_parts)
+        matches = abs(rows_total - line_total) <= _AGGREGATE_TOLERANCE * abs(line_total)
+        reconciliation["convertibleBalanceSheet"] = {
+            "status": "RECONCILED" if matches else "NOT_RECONCILED",
+            "concept": line_concept,
+            "balanceSheetAmount": line_total,
+            "instrumentRowsTotal": rows_total,
+            "difference": line_total - rows_total,
+        }
+        if not matches:
+            for row in convertible_rows:
+                row["carryingAmountBasis"] = "MAY_BE_PRINCIPAL"
+            carried_list = "; ".join(f"{r['instrument']} carries {_js_number(r['carryingAmount'])} under {r['carryingAmountConcept']}" for r in convertible_rows)
+            warnings.append({
+                "code": "CARRYING_AMOUNT_MAY_BE_PRINCIPAL",
+                "message": f"{carried_list}, "
+                           f"but the balance sheet carries convertible notes at {_js_number(line_total)} ({line_concept}); the row amount may be principal, not carrying value.",
+                "severity": "warning",
+            })
+    # What separates the ladder from total debt: rows it cannot place, and rows whose amounts do not add up to it.
+    if debt_value is not None:
+        unplaced_total = sum((u["amount"] for u in unplaced), 0)
+        ladder_coverage["gap"] = {
+            "amount": debt_value - laddered,
+            "inNotLaddered": unplaced_total,
+            "inReconciliationDifference": reconciliation["difference"] if reconciliation["status"] == "NOT_RECONCILED" else None,
+        }
     liquid = (cash["value"] if cash else 0) + (short_term["value"] if short_term else 0)
     if not doc.facts:
         warnings.append({"code": "NO_INLINE_XBRL", "message": "The filing carries no inline XBRL facts.", "severity": "warning"})

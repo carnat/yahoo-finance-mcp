@@ -2535,7 +2535,11 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
   if (unplaced.length > 0 && ladder.length === 0) {
     warnings.push({
       code: "MATURITY_LADDER_INCOMPLETE",
-      message: `No maturity date for ${unplaced.map((u) => `${u.instrument} (${u.amount})`).join(", ")}; the year ladder places ${laddered}${debtValue ? ` of total debt ${debtValue} (${ladderCoverage.coveragePct}%)` : ""}.`,
+      // A ladder on face or tagged amounts says so, rather than "places 0" at carrying amounts (2.5.26: VRT).
+      message: `No maturity date for ${unplaced.map((u) => `${u.instrument} (${u.amount})`).join(", ")}; `
+        + (ladderCoverage.ladderedAmountBasis == null || ladderCoverage.ladderedAmountBasis === "CARRYING"
+          ? `the year ladder places ${laddered}${debtValue ? ` of total debt ${debtValue} (${ladderCoverage.coveragePct}%)` : ""}.`
+          : `the year ladder places ${ladderedAny} on a ${ladderCoverage.ladderedAmountBasis} basis (${laddered} at carrying amounts)${debtValue ? ` against total debt ${debtValue}` : ""}.`),
       severity: "warning",
     });
   }
@@ -2563,6 +2567,41 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
         + "an instrument may be untagged, or a tagged amount may be principal rather than carrying value.",
       severity: "warning",
     });
+  }
+  // Convertible rows against the balance sheet's own convertible line (2.5.26, F-007: AAOI tags the 2030 Notes'
+  // "approximately $124.9 million" principal as DebtInstrumentCarryingAmount; the balance sheet carries them at
+  // 129,142,000). The rows are marked, not rewritten: the balance-sheet line is not tagged to the instrument.
+  const convertibleRows = carried.filter((r) => r.convertible === true);
+  const convertibleLine = convertibleRows.length > 0 ? convertibleBalance(balanceDoc, periodEnd) : null;
+  if (convertibleLine) {
+    const rowsTotal = convertibleRows.reduce((sum, r) => sum + (r.carryingAmount as number), 0);
+    const lineConcept = convertibleLine.parts.map((part) => part.concept).join(" + ");
+    const matches = Math.abs(rowsTotal - convertibleLine.total) <= AGGREGATE_TOLERANCE * Math.abs(convertibleLine.total);
+    (instrumentReconciliation as Record<string, unknown>).convertibleBalanceSheet = {
+      status: matches ? "RECONCILED" : "NOT_RECONCILED",
+      concept: lineConcept,
+      balanceSheetAmount: convertibleLine.total,
+      instrumentRowsTotal: rowsTotal,
+      difference: convertibleLine.total - rowsTotal,
+    };
+    if (!matches) {
+      for (const row of convertibleRows) row.carryingAmountBasis = "MAY_BE_PRINCIPAL";
+      warnings.push({
+        code: "CARRYING_AMOUNT_MAY_BE_PRINCIPAL",
+        message: `${convertibleRows.map((r) => `${r.instrument} carries ${r.carryingAmount} under ${r.carryingAmountConcept}`).join("; ")}, `
+          + `but the balance sheet carries convertible notes at ${convertibleLine.total} (${lineConcept}); the row amount may be principal, not carrying value.`,
+        severity: "warning",
+      });
+    }
+  }
+  // What separates the ladder from total debt: rows it cannot place, and rows whose amounts do not add up to it.
+  if (debtValue != null) {
+    const unplacedTotal = unplaced.reduce((sum, u) => sum + (u.amount as number), 0);
+    (ladderCoverage as Record<string, unknown>).gap = {
+      amount: debtValue - laddered,
+      inNotLaddered: unplacedTotal,
+      inReconciliationDifference: instrumentReconciliation.status === "NOT_RECONCILED" ? instrumentReconciliation.difference : null,
+    };
   }
   const liquid = (cash ? cash.value : 0) + (shortTerm ? shortTerm.value : 0);
   if (doc.facts.length === 0) {
