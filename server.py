@@ -11889,16 +11889,37 @@ def _yahoo_consensus_snapshot(ticker: str) -> tuple[dict, dict]:
     return yahoo, quote
 
 
-async def _consensus_providers(ticker: str) -> tuple[list[dict], dict]:
+def _consensus_split_history(symbol: str) -> dict:
+    """The ticker's splits over the last two years (2.5.23): enough to tell a provider EPS gap or a revision window
+    that spans a split. A failure is reported, not read as "no splits". Blocking."""
+    try:
+        series = yf.Ticker(symbol).splits
+        if series is None:
+            return {"status": "NO_DATA", "splits": [], "message": "Yahoo returned no split history."}
+        cutoff = datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=2 * 365 + 1)
+        splits = []
+        for index, value in series.items():
+            ratio = float(value)
+            date = index.date() if hasattr(index, "date") else datetime.date.fromisoformat(str(index)[:10])
+            if math.isfinite(ratio) and ratio > 0 and date >= cutoff:
+                splits.append({"date": date.isoformat(), "ratio": ratio})
+        splits.sort(key=lambda sp: sp["date"])
+        return {"status": "OK", "splits": splits}
+    except Exception as exc:  # noqa: BLE001 - reported as PROVIDER_ERROR, not read as no splits
+        return {"status": "PROVIDER_ERROR", "splits": [], "message": str(exc)}
+
+
+async def _consensus_providers(ticker: str) -> tuple[list[dict], dict, dict]:
     symbol = ticker.upper()
-    (yahoo, quote), alpha = await asyncio.gather(
+    (yahoo, quote), alpha, splits = await asyncio.gather(
         asyncio.to_thread(_yahoo_consensus_snapshot, symbol),
         _fetch_alpha_vantage_json("EARNINGS_ESTIMATES", {"symbol": symbol}, ttl_seconds=_ALPHA_VANTAGE_ESTIMATES_TTL_SECONDS),
+        asyncio.to_thread(_consensus_split_history, symbol),
     )
     alpha_input = _ev.alpha_vantage_consensus_input(
         alpha.payload, retrieved_at=alpha.fetched_at or _now_iso(), status=None if alpha.status == "OK" else alpha.status, message=alpha.message,
     )
-    return [yahoo, alpha_input], quote
+    return [yahoo, alpha_input], quote, splits
 
 
 async def _consensus_naming(ticker: str) -> dict:
@@ -11977,7 +11998,7 @@ def _read_consensus_observation(ticker: str, observation_date: str) -> str:
 @yfinance_server.tool(
     name="get_consensus_forecast_curve",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_consensus_forecast_curve"],
-    description="Street consensus by fiscal year, FY0 to FY+horizon, for EPS and revenue from Yahoo Finance and Alpha Vantage, each provider reported separately with fiscal year end, currency, mean/high/low, analyst count and retrieval time. Each metric and period states its coverage: PROVIDER_COVERED, PROVIDER_NOT_COVERED, INSUFFICIENT_ANALYST_COUNT or PROVIDER_CONFLICT (with the cross-provider difference). Years and metrics no provider covers stay PROVIDER_NOT_COVERED; nothing is interpolated, extended by growth rates, or derived. crossCheck states whether the providers were actually compared: a failed provider (CROSS_CHECK_DEGRADED) or figures identical to the last digit (IDENTICAL, PROVIDERS_NOT_INDEPENDENT) are flagged. With observation_date, returns the curve stored that day. Evidence only.",
+    description="Street consensus by fiscal year, FY0 to FY+horizon, for EPS and revenue from Yahoo Finance and Alpha Vantage, each provider reported separately with fiscal year end, currency, mean/high/low, analyst count and retrieval time. Each metric and period states its coverage: PROVIDER_COVERED, PROVIDER_NOT_COVERED, INSUFFICIENT_ANALYST_COUNT or PROVIDER_CONFLICT (with the cross-provider difference). Years and metrics no provider covers stay PROVIDER_NOT_COVERED; nothing is interpolated, extended by growth rates, or derived. crossCheck states whether the providers were actually compared: a failed provider (CROSS_CHECK_DEGRADED) or figures identical to the last digit (IDENTICAL, PROVIDERS_NOT_INDEPENDENT) are flagged. A provider row whose mean falls outside its own high-low range is PROVIDER_INCONSISTENT and left out of the comparison; an EPS gap between providers that matches a recent stock split is NOT_SPLIT_ADJUSTED, not a conflict. With observation_date, returns the curve stored that day. Evidence only.",
 )
 async def get_consensus_forecast_curve(
     ticker: str,
@@ -11992,8 +12013,8 @@ async def get_consensus_forecast_curve(
     if isinstance(policy, str):
         return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": policy})
     as_of = _now_iso()
-    (inputs, _), naming = await asyncio.gather(_consensus_providers(ticker), _consensus_naming(ticker))
-    curve = _ev.build_consensus_curve(ticker, inputs, as_of, policy, naming)
+    (inputs, _, splits), naming = await asyncio.gather(_consensus_providers(ticker), _consensus_naming(ticker))
+    curve = _ev.build_consensus_curve(ticker, inputs, as_of, policy, naming, splits)
     # The first observation of the day is kept; later calls report ALREADY_STORED.
     observation = _write_consensus_observation(ticker, curve, as_of)
     return json.dumps({**curve, "storage": {"consensusObservation": observation}})
@@ -12002,12 +12023,12 @@ async def get_consensus_forecast_curve(
 @yfinance_server.tool(
     name="get_eps_revisions",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_eps_revisions"],
-    description="EPS estimate revision windows for FY0 and FY+1 as each provider reports them: the mean now and 7, 30, 60 and 90 days ago with change and percent change, and up/down revision counts over 7 and 30 days. Revenue revisions and analyst adds/drops are PROVIDER_NOT_COVERED. Lists the dates of stored daily consensus observations. Evidence only.",
+    description="EPS estimate revision windows for FY0 and FY+1 as each provider reports them: the mean now and 7, 30, 60 and 90 days ago with change and percent change, and up/down revision counts over 7 and 30 days. A window spanning a stock split carries no change (SPLIT_IN_WINDOW), nor does a row whose mean falls outside its own range (PROVIDER_INCONSISTENT). Revenue revisions and analyst adds/drops are PROVIDER_NOT_COVERED. Lists the dates of stored daily consensus observations. Evidence only.",
 )
 async def get_eps_revisions(ticker: str) -> str:
     as_of = _now_iso()
-    inputs, _ = await _consensus_providers(ticker)
-    revisions = _ev.build_eps_revisions(ticker, inputs, as_of)
+    inputs, _, splits = await _consensus_providers(ticker)
+    revisions = _ev.build_eps_revisions(ticker, inputs, as_of, splits)
     store = _es.get_store()
     stored: dict = {"storageStatus": "UNAVAILABLE", "observationDates": []}
     if store is not None:
@@ -12056,8 +12077,8 @@ async def _sec_filing_rows(ticker: str) -> tuple[list[dict] | None, str]:
 )
 async def get_evidence_quality(ticker: str) -> str:
     as_of = _now_iso()
-    (inputs, quote), (rows, status), naming = await asyncio.gather(_consensus_providers(ticker), _sec_filing_rows(ticker), _consensus_naming(ticker))
-    curve = _ev.build_consensus_curve(ticker, inputs, as_of, None, naming)
+    (inputs, quote, splits), (rows, status), naming = await asyncio.gather(_consensus_providers(ticker), _sec_filing_rows(ticker), _consensus_naming(ticker))
+    curve = _ev.build_consensus_curve(ticker, inputs, as_of, None, naming, splits)
     return json.dumps(_ev.evidence_quality(ticker=ticker, as_of=as_of, quote=quote, filings=rows, filings_status=status,
                                            consensus=curve, storage_available=_es.get_store() is not None))
 
@@ -12085,8 +12106,8 @@ async def build_valuation_evidence_pack(ticker: str, horizon_years: int = 5, per
         return json.dumps({"error": True, "code": "INPUT_VALIDATION_ERROR", "message": policy})
     symbol = ticker.upper()
     cutoff = _now_iso()
-    (inputs, quote), (rows, filings_status), naming = await asyncio.gather(_consensus_providers(symbol), _sec_filing_rows(symbol), _consensus_naming(symbol))
-    curve = _ev.build_consensus_curve(symbol, inputs, cutoff, policy, naming)
+    (inputs, quote, splits), (rows, filings_status), naming = await asyncio.gather(_consensus_providers(symbol), _sec_filing_rows(symbol), _consensus_naming(symbol))
+    curve = _ev.build_consensus_curve(symbol, inputs, cutoff, policy, naming, splits)
     major_price, major_currency = _vl._major_price(quote["price"], quote["currency"]) if quote["price"] is not None else (None, None)
 
     async def dilution() -> dict:
@@ -12119,7 +12140,7 @@ async def build_valuation_evidence_pack(ticker: str, horizon_years: int = 5, per
             ticker=symbol, as_of=cutoff, quote=quote, filings=rows, filings_status=filings_status, consensus=curve, storage_available=_es.get_store() is not None,
         ), cutoff),
         "consensus": _ev.component_from_value("get_consensus_forecast_curve", curve, cutoff),
-        "epsRevisions": _ev.component_from_value("get_eps_revisions", _ev.build_eps_revisions(symbol, inputs, cutoff), cutoff),
+        "epsRevisions": _ev.component_from_value("get_eps_revisions", _ev.build_eps_revisions(symbol, inputs, cutoff, splits), cutoff),
         "currentCapitalStructure": capital,
         "currentDilution": diluted,
         "latestGuidance": guidance,

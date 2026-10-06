@@ -163,6 +163,19 @@ def _num(value: Any) -> float | int | None:
     return None
 
 
+def published_decimals(value: Any) -> int | None:
+    """Decimal places a provider published a figure with, when it published it as text (2.5.23, F-013): Alpha Vantage's
+    "5.2020" is four places. A number (Yahoo's raw 5.20199) states no rounding and is taken as exact."""
+    v = value.get("raw") if isinstance(value, dict) else value
+    if not isinstance(v, str):
+        return None
+    t = v.strip()
+    if not re.fullmatch(r"[+-]?\d+(\.\d+)?", t, re.ASCII):
+        return None
+    dot = t.find(".")
+    return 0 if dot < 0 else len(t) - dot - 1
+
+
 def _round(value: float, digits: int) -> float:
     f = 10 ** digits
     return math.floor(value * f + 0.5) / f
@@ -189,6 +202,12 @@ def _estimate(block: Any, currency: str | None, currency_basis: str) -> dict:
         "analystCount": count,
         "currency": currency,
         "currencyBasis": currency_basis,
+        # Decimal places each figure was published with as text; figures compare at the coarsest (F-013). Internal.
+        "decimals": {
+            "mean": published_decimals(b.get("avg") if b.get("avg") is not None else b.get("mean")),
+            "high": published_decimals(b.get("high")),
+            "low": published_decimals(b.get("low")),
+        },
     }
 
 
@@ -331,12 +350,74 @@ def fiscal_year_offset(fy0_end: str, fiscal_year_end: str) -> int:
 DEFAULT_CONSENSUS_POLICY = {"horizonYears": 5, "minAnalystCount": 3, "conflictTolerancePct": 10, "epsAbsoluteTolerance": 0.02}
 
 
+# How far back a split can explain a provider EPS gap (2.5.23, F-002): stale rows outlive a split by months.
+SPLIT_LOOKBACK_DAYS = 400
+# A provider EPS ratio within this fraction of a split's ratio is read as an unadjusted row, not a conflict.
+SPLIT_RATIO_TOLERANCE = 0.15
+
+
+def _js(value: Any) -> str:
+    """A value as a JS template literal prints it: ECMAScript numbers, null for None."""
+    if value is None:
+        return "null"
+    if _is_number(value):
+        return _es_number(float(value))
+    return str(value)
+
+
+def split_text(ratio: float) -> str:
+    """"4-for-1" for a forward split, "1-for-10" for a reverse one."""
+    return f"{_js(_round(ratio, 4))}-for-1" if ratio >= 1 else f"1-for-{_js(_round(1 / ratio, 4))}"
+
+
+def splits_within(history: dict | None, as_of: str, days: int) -> list[dict]:
+    """Splits dated on or before as_of and within `days` of it, oldest first."""
+    if not history or history.get("status") != "OK":
+        return []
+    end = _day(as_of[:10])
+    out = []
+    for s in history.get("splits") or []:
+        ratio = s.get("ratio")
+        date = s.get("date")
+        if not (_is_number(ratio) and math.isfinite(ratio) and ratio > 0 and ratio != 1):
+            continue
+        if not (isinstance(date, str) and re.match(r"^\d{4}-\d{2}-\d{2}", date)):
+            continue
+        try:
+            d = _day(date[:10])
+        except ValueError:
+            continue
+        if d <= end and end - d <= days:
+            out.append(s)
+    return sorted(out, key=lambda s: s["date"])
+
+
+def range_inconsistency(e: dict) -> str | None:
+    """A provider row whose mean lies outside its own high-low range, or whose low is above its high, cannot be a
+    consensus (2.5.23, F-001: Alpha Vantage ANET revenue averaged 667.6M against a 652.7M high)."""
+    def tol(v: float) -> float:
+        return 1e-9 * max(1, abs(v))
+    mean, high, low = e["mean"], e["high"], e["low"]
+    if high is not None and low is not None and low - high > tol(high):
+        return "LOW_ABOVE_HIGH"
+    if mean is None:
+        return None
+    if high is not None and mean - high > tol(high):
+        return "MEAN_ABOVE_HIGH"
+    if low is not None and low - mean > tol(low):
+        return "MEAN_BELOW_LOW"
+    return None
+
+
 def _provider_entry(inp: dict, period: dict, metric: str, policy: dict) -> dict:
     e = period[metric]
     rng = e["high"] - e["low"] if e["high"] is not None and e["low"] is not None else None
+    inconsistency = range_inconsistency(e)
     state = "PROVIDER_COVERED"
     if e["mean"] is None:
         state = "PROVIDER_NOT_COVERED"
+    elif inconsistency:
+        state = "PROVIDER_INCONSISTENT"
     elif e["analystCount"] is None or e["analystCount"] < policy["minAnalystCount"]:
         state = "INSUFFICIENT_ANALYST_COUNT"
     return {
@@ -355,37 +436,56 @@ def _provider_entry(inp: dict, period: dict, metric: str, policy: dict) -> dict:
         "providerTimestamp": inp["providerTimestamp"],
         "retrievedAt": inp["retrievedAt"],
         "state": state,
+        **({"inconsistency": inconsistency} if inconsistency else {}),
     }
 
 
-def _agreement(entries: list[dict], metric: str, policy: dict) -> dict:
-    valued = [e for e in entries if isinstance(e["mean"], (int, float)) and not isinstance(e["mean"], bool)]
+def _agreement(entries: list[dict], metric: str, policy: dict, splits: list[dict] | None = None, published: list | None = None) -> dict:
+    splits = splits or []
+    published = published or []
+    # An impossible row is not a second opinion (2.5.23, F-001): it is left out of the comparison and named.
+    inconsistent = [e for e in entries if _is_number(e["mean"]) and e.get("state") == "PROVIDER_INCONSISTENT"]
+    excluded = {"providersExcluded": [{"provider": e["provider"], "reason": e.get("inconsistency")} for e in inconsistent]} if inconsistent else {}
+    def usable(e: dict) -> bool:
+        return _is_number(e["mean"]) and e.get("state") != "PROVIDER_INCONSISTENT"
+    valued = [e for e in entries if usable(e)]
+    valued_published = [published[i] if i < len(published) else None for i, e in enumerate(entries) if usable(e)]
     compared = [e["provider"] for e in valued]
+    if not valued and inconsistent:
+        return {"status": "PROVIDER_INCONSISTENT", "providersCompared": compared, "relativeDiffPct": None, "absoluteDiff": None, **excluded}
     if not valued:
         return {"status": "NO_PROVIDER", "providersCompared": compared, "relativeDiffPct": None, "absoluteDiff": None}
     if len(valued) == 1:
-        return {"status": "SINGLE_PROVIDER", "providersCompared": compared, "relativeDiffPct": None, "absoluteDiff": None}
+        return {"status": "SINGLE_PROVIDER", "providersCompared": compared, "relativeDiffPct": None, "absoluteDiff": None, **excluded}
     ends = [str(e["fiscalYearEnd"] or "") for e in valued]
     end_days = [_day(x) for x in ends if x]
     if len(end_days) == len(valued) and max(end_days) - min(end_days) > 10:
-        return {"status": "PERIOD_IDENTITY_MISMATCH", "providersCompared": compared, "fiscalYearEnds": ends, "relativeDiffPct": None, "absoluteDiff": None}
+        return {"status": "PERIOD_IDENTITY_MISMATCH", "providersCompared": compared, "fiscalYearEnds": ends, "relativeDiffPct": None, "absoluteDiff": None, **excluded}
     currencies = list(dict.fromkeys(e["currency"] for e in valued if isinstance(e["currency"], str)))
     if len(currencies) > 1:
-        return {"status": "CURRENCY_MISMATCH", "providersCompared": compared, "currencies": currencies, "relativeDiffPct": None, "absoluteDiff": None}
+        return {"status": "CURRENCY_MISMATCH", "providersCompared": compared, "currencies": currencies, "relativeDiffPct": None, "absoluteDiff": None, **excluded}
     verified = len(currencies) == 1 and all(e["currency"] == currencies[0] for e in valued)
     currency_identity = "VERIFIED" if verified else "UNVERIFIED"
-    # The same mean, high, low and analyst count wherever both publish them: one upstream feed carried twice, not
-    # two checks (2.5.22, F-005: Yahoo and Alpha Vantage matched to the last published digit).
-    if _identical_at_published_precision(valued):
-        return {"status": "IDENTICAL", "providersCompared": compared, "relativeDiffPct": 0, "absoluteDiff": 0,
-                "currencyIdentity": currency_identity, "independence": "NOT_INDEPENDENT"}
     means = [e["mean"] for e in valued]
     hi, lo = max(means), min(means)
     absolute = _round(hi - lo, 6)
     scale = max(abs(hi), abs(lo))
     relative = _round((hi - lo) / scale * 100, 2) if scale > 0 else 0
+    # The same mean, high, low and analyst count wherever both publish them: one upstream feed carried twice, not
+    # two checks (2.5.22, F-005). Compared at the coarser provider's published precision (2.5.23, F-013: Yahoo's
+    # 5.20199 is Alpha Vantage's "5.2020").
+    if _identical_at_published_precision(valued, valued_published):
+        return {"status": "IDENTICAL", "providersCompared": compared, "relativeDiffPct": relative, "absoluteDiff": absolute,
+                "currencyIdentity": currency_identity, "independence": "NOT_INDEPENDENT", **excluded}
     within_absolute = metric == "eps" and absolute <= policy["epsAbsoluteTolerance"]
     status = "AGREED" if within_absolute or relative <= policy["conflictTolerancePct"] else "CONFLICT"
+    if status == "CONFLICT" and metric == "eps":
+        # An EPS gap that is a recent split's ratio is one provider not split-adjusted, not two views (2.5.23, F-002).
+        explained = _split_explains(valued, splits)
+        if explained:
+            return {"status": "NOT_SPLIT_ADJUSTED", "providersCompared": compared, "relativeDiffPct": relative, "absoluteDiff": absolute,
+                    "currencyIdentity": currency_identity, "independence": "UNVERIFIED",
+                    "split": explained["split"], "providersNotAdjusted": explained["notAdjusted"], **excluded}
     return {
         "status": status,
         "providersCompared": compared,
@@ -393,22 +493,63 @@ def _agreement(entries: list[dict], metric: str, policy: dict) -> dict:
         "absoluteDiff": absolute,
         "currencyIdentity": currency_identity,
         "independence": "UNVERIFIED",
+        **excluded,
     }
+
+
+def _split_explains(valued: list[dict], splits: list[dict]) -> dict | None:
+    """The recent split (or run of recent splits) whose ratio matches the gap between two same-sign EPS means, and the
+    provider still on the pre-split basis: the larger magnitude after a forward split, the smaller after a reverse one."""
+    if len(valued) != 2 or not splits:
+        return None
+    a, b = valued[0]["mean"], valued[1]["mean"]
+    if a == 0 or b == 0 or (a > 0) != (b > 0):
+        return None
+    gap = max(abs(a), abs(b)) / min(abs(a), abs(b))
+    candidates = [{"split": {"date": s["date"][:10], "ratio": s["ratio"]}, "ratio": s["ratio"]} for s in splits]
+    if len(splits) > 1:
+        product = 1
+        for s in splits:
+            product = product * s["ratio"]
+        candidates.append({"split": {"date": splits[-1]["date"][:10], "ratio": _round(product, 6), "cumulativeOf": len(splits)}, "ratio": product})
+    for c in candidates:
+        factor = max(c["ratio"], 1 / c["ratio"])
+        if factor < 1.5 or abs(gap / factor - 1) > SPLIT_RATIO_TOLERANCE:
+            continue
+        larger = valued[0] if abs(a) > abs(b) else valued[1]
+        smaller = valued[1] if larger is valued[0] else valued[0]
+        return {"split": c["split"], "notAdjusted": [str((larger if c["ratio"] > 1 else smaller)["provider"])]}
+    return None
 
 
 def _is_number(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
-def _identical_at_published_precision(valued: list[dict]) -> bool:
-    for field in ("mean", "high", "low", "analystCount"):
-        values = [e[field] for e in valued if _is_number(e[field])]
-        if len(values) >= 2 and len(set(values)) > 1:
+def _identical_at_published_precision(valued: list[dict], published: list | None = None) -> bool:
+    published = published or []
+    for field in ("mean", "high", "low"):
+        cells = []
+        for i, e in enumerate(valued):
+            if not _is_number(e[field]):
+                continue
+            est = published[i] if i < len(published) else None
+            dec = ((est or {}).get("decimals") or {}).get(field)
+            cells.append((e[field], dec))
+        if len(cells) < 2:
+            continue
+        # The coarsest precision any provider published; exact when none published one.
+        places = [d for _, d in cells if d is not None]
+        d = min(10, *places) if places else None
+        if len({v if d is None else _round(v, d) for v, _ in cells}) > 1:
             return False
+    counts = [e["analystCount"] for e in valued if _is_number(e["analystCount"])]
+    if len(counts) >= 2 and len(set(counts)) > 1:
+        return False
     return all(_is_number(e["analystCount"]) for e in valued)
 
 
-_COMPARED = {"AGREED", "CONFLICT", "IDENTICAL"}
+_COMPARED = {"AGREED", "CONFLICT", "IDENTICAL", "NOT_SPLIT_ADJUSTED"}
 
 
 def _cross_check(inputs: list[dict], periods: list[dict]) -> tuple[dict, list[dict]]:
@@ -460,24 +601,62 @@ def _cross_check(inputs: list[dict], periods: list[dict]) -> tuple[dict, list[di
 def _metric_coverage(entries: list[dict], agreement_status: str) -> str:
     if not any(isinstance(e["mean"], (int, float)) for e in entries):
         return "PROVIDER_NOT_COVERED"
-    if agreement_status in ("CONFLICT", "PERIOD_IDENTITY_MISMATCH", "CURRENCY_MISMATCH"):
+    if agreement_status == "PROVIDER_INCONSISTENT":
+        return "PROVIDER_INCONSISTENT"
+    if agreement_status in ("CONFLICT", "PERIOD_IDENTITY_MISMATCH", "CURRENCY_MISMATCH", "NOT_SPLIT_ADJUSTED"):
         return "PROVIDER_CONFLICT"
     if not any(e["state"] == "PROVIDER_COVERED" for e in entries):
         return "INSUFFICIENT_ANALYST_COUNT"
     return "PROVIDER_COVERED"
 
 
+_INCONSISTENCY_TEXT = {
+    "MEAN_ABOVE_HIGH": "its mean is above its own high",
+    "MEAN_BELOW_LOW": "its mean is below its own low",
+    "LOW_ABOVE_HIGH": "its low is above its own high",
+}
+
+
+def _cell_warnings(label: str, metric: str, cell: dict) -> list[dict]:
+    """One warning per impossible provider row (F-001) and per EPS gap read as a missed split adjustment (F-002)."""
+    out: list[dict] = []
+    for e in cell["providers"]:
+        if e["state"] != "PROVIDER_INCONSISTENT":
+            continue
+        fy_end = e["fiscalYearEnd"] if e["fiscalYearEnd"] is not None else "not stated"
+        out.append({
+            "code": "PROVIDER_ROW_INCONSISTENT",
+            "message": f"{e['provider']} {label} {metric} (fiscal year ending {fy_end}): {_INCONSISTENCY_TEXT.get(str(e['inconsistency']), 'undefined')} "
+                       f"(mean {_js(e['mean'])}, low {_js(e['low'])}, high {_js(e['high'])}). The row is shown as given and left out of the agreement check.",
+            "severity": "warning",
+        })
+    agree = cell["agreement"]
+    if agree["status"] == "NOT_SPLIT_ADJUSTED":
+        split = agree["split"]
+        out.append({
+            "code": "PROVIDER_NOT_SPLIT_ADJUSTED",
+            "message": f"{label} EPS: the providers differ by the ratio of the {split_text(split['ratio'])} split on {split['date']}; "
+                       f"{', '.join(agree['providersNotAdjusted'])} appears not split-adjusted. Reported as NOT_SPLIT_ADJUSTED, not as a conflict between views.",
+            "severity": "warning",
+        })
+    return out
+
+
 def _unavailable_statistic() -> dict:
     return {"value": None, "state": "PROVIDER_NOT_COVERED"}
 
 
-def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: dict | None = None, naming: dict | None = None) -> dict:
+def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: dict | None = None, naming: dict | None = None,
+                          split_history: dict | None = None) -> dict:
     """FY0 to FY+horizon consensus, per provider, per fiscal period and metric.
 
     Periods no provider covers are listed as PROVIDER_NOT_COVERED rather than
     filled; no provider value is selected.
     """
     policy = dict(policy or DEFAULT_CONSENSUS_POLICY)
+    # The ticker's split history (2.5.23); without it EPS gaps are not checked against splits.
+    recent_splits = splits_within(split_history, as_of, SPLIT_LOOKBACK_DAYS)
+    cell_warning_list: list[dict] = []
     # How the company names its fiscal years, from its annual reports (2.5.13); the period-end rule without it.
     year_naming = naming or {"offset": 0, "basis": "PERIOD_END_RULE", "periodEnd": None, "statedFiscalYear": None, "calendar": None}
     horizon = max(1, min(5, int(policy["horizonYears"])))
@@ -494,7 +673,7 @@ def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: d
         metrics = {}
         for metric in CONSENSUS_METRICS:
             entries = [_provider_entry(inp, p, metric, policy) for inp, p in matching]
-            agree = _agreement(entries, metric, policy)
+            agree = _agreement(entries, metric, policy, recent_splits, [p[metric] for _, p in matching])
             coverage = _metric_coverage(entries, str(agree["status"]))
             summary[coverage] = summary.get(coverage, 0) + 1
             metrics[metric] = {
@@ -503,6 +682,7 @@ def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: d
                 "agreement": agree,
                 "dispersionStatistics": {"highLowRange": "PER_PROVIDER", "median": _unavailable_statistic(), "standardDeviation": _unavailable_statistic()},
             }
+            cell_warning_list.extend(_cell_warnings(label, metric, metrics[metric]))
         periods.append({
             "label": label,
             # A 52/53-week year ending in early January is the prior year's (2.5.11); the company's own naming
@@ -520,6 +700,7 @@ def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: d
         "ticker": ticker.upper(),
         "asOf": as_of,
         "crossCheck": check,
+        "splitHistory": _split_history_summary(split_history, recent_splits),
         "fiscalYearBasis": fy0 or {"fiscalYearEnd": None, "basis": "NO_PROVIDER_FISCAL_YEAR"},
         "fiscalYearNaming": year_naming,
         "policy": {**policy, "horizonYears": horizon},
@@ -543,29 +724,75 @@ def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: d
             "Median and standard deviation are not published by the configured providers; the high-low range per provider is the only dispersion measure.",
             "Agreement between providers does not establish independence: they may redistribute the same underlying estimates. IDENTICAL marks figures equal to the last published digit, which is one feed carried twice.",
         ],
-        "warnings": check_warnings,
+        "warnings": [*check_warnings, *cell_warning_list,
+                     *_split_history_warnings(split_history, "EPS gaps between providers are not checked against splits.")],
         **AUTHORITY_BOUNDARY,
     }
 
 
+def _split_history_summary(history: dict | None, recent: list[dict]) -> dict:
+    return {
+        "status": history["status"] if history else "NOT_REQUESTED",
+        "lookbackDays": SPLIT_LOOKBACK_DAYS,
+        "recentSplits": [{"date": s["date"][:10], "ratio": s["ratio"]} for s in recent],
+        **({"message": history["message"]} if history and history.get("message") else {}),
+    }
+
+
+def _split_history_warnings(history: dict | None, consequence: str) -> list[dict]:
+    if not history or history["status"] == "OK":
+        return []
+    suffix = f": {history['message']}" if history.get("message") else ""
+    return [{
+        "code": "SPLIT_HISTORY_UNAVAILABLE",
+        "message": f"Split history returned {history['status']}{suffix}. {consequence}",
+        "severity": "warning",
+    }]
+
+
 # ── EPS revision windows ─────────────────────────────────────────────────────
 
-_WINDOWS = [("7d", "d7"), ("30d", "d30"), ("60d", "d60"), ("90d", "d90")]
+_WINDOWS = [("7d", "d7", 7), ("30d", "d30", 30), ("60d", "d60", 60), ("90d", "d90", 90)]
 
 
-def _revision_provider(inp: dict, p: dict) -> dict:
+def _revision_provider(inp: dict, p: dict, label: str, as_of: str, splits: list[dict], warnings: list[dict]) -> dict:
+    """Each window's change, unless it cannot mean anything (2.5.23): the row is impossible (F-001), or a split falls
+    inside the window so the past mean may be on the pre-split share count (F-002: ANET 2.73 -> 0.73 at its 4-for-1).
+    A day of margin covers providers that adjust the day after the split."""
     trend = p["epsTrend"]
     current = trend["current"] if trend else None
+    inconsistency = range_inconsistency(p["eps"])
+    if inconsistency:
+        fy_end = p["fiscalYearEnd"] if p["fiscalYearEnd"] is not None else "not stated"
+        warnings.append({
+            "code": "PROVIDER_ROW_INCONSISTENT",
+            "message": f"{inp['provider']} {label} eps (fiscal year ending {fy_end}): {_INCONSISTENCY_TEXT[inconsistency]} "
+                       f"(mean {_js(p['eps']['mean'])}, low {_js(p['eps']['low'])}, high {_js(p['eps']['high'])}). No window change is computed from it.",
+            "severity": "warning",
+        })
     windows = {}
     not_reported = []
-    for name, key in _WINDOWS:
+    for name, key, days in _WINDOWS:
         past = trend[key] if trend else None
         if past is None:
             not_reported.append(f"{name}.mean")
+        in_window = splits_within({"status": "OK", "splits": splits}, as_of, days + 1)
+        split = in_window[-1] if in_window else None
+        if past is None or current is None:
+            state = "NOT_REPORTED"
+        elif inconsistency:
+            state = "PROVIDER_INCONSISTENT"
+        elif split:
+            state = "SPLIT_IN_WINDOW"
+        else:
+            state = "COMPARED"
+        compared = state == "COMPARED"
         windows[name] = {
             "mean": past,
-            "change": _round(current - past, 6) if past is not None and current is not None else None,
-            "changePct": _round((current - past) / abs(past) * 100, 2) if past is not None and current is not None and past != 0 else None,
+            "change": _round(current - past, 6) if compared else None,
+            "changePct": _round((current - past) / abs(past) * 100, 2) if compared and past != 0 else None,
+            "state": state,
+            **({"split": {"date": split["date"][:10], "ratio": split["ratio"]}} if state == "SPLIT_IN_WINDOW" and split else {}),
         }
     counts = p["epsRevisions"] or {"up7d": None, "down7d": None, "up30d": None, "down30d": None}
     for k, v in counts.items():
@@ -575,6 +802,8 @@ def _revision_provider(inp: dict, p: dict) -> dict:
         "provider": inp["provider"],
         "providerPeriodLabel": p["providerPeriodLabel"],
         "fiscalYearEnd": p["fiscalYearEnd"],
+        "state": "PROVIDER_INCONSISTENT" if inconsistency else "PROVIDER_COVERED",
+        **({"inconsistency": inconsistency} if inconsistency else {}),
         "current": current,
         "windows": windows,
         "revisionCounts": counts,
@@ -584,16 +813,28 @@ def _revision_provider(inp: dict, p: dict) -> dict:
     }
 
 
-def build_eps_revisions(ticker: str, inputs: list[dict], as_of: str) -> dict:
+def build_eps_revisions(ticker: str, inputs: list[dict], as_of: str, split_history: dict | None = None) -> dict:
     """EPS estimate windows (7/30/60/90 days) and revision counts as each provider reports them for FY0 and FY+1."""
     fy0 = resolve_fy0(inputs, as_of)
+    window_splits = splits_within(split_history, as_of, 91)
+    warnings: list[dict] = []
     periods = []
     for k in (0, 1):
+        label = "FY0" if k == 0 else "FY+1"
         providers = [
-            _revision_provider(inp, p) for inp in inputs for p in inp["periods"]
+            _revision_provider(inp, p, label, as_of, window_splits, warnings) for inp in inputs for p in inp["periods"]
             if fy0 and p["fiscalYearEnd"] and fiscal_year_offset(fy0["fiscalYearEnd"], p["fiscalYearEnd"]) == k and (p["epsTrend"] or p["epsRevisions"])
-        ]
-        periods.append({"label": "FY0" if k == 0 else "FY+1", "coverage": "PROVIDER_COVERED" if providers else "PROVIDER_NOT_COVERED", "providers": providers})
+        ] if fy0 else []
+        periods.append({"label": label, "coverage": "PROVIDER_COVERED" if providers else "PROVIDER_NOT_COVERED", "providers": providers})
+    if window_splits:
+        last = window_splits[-1]
+        warnings.append({
+            "code": "SPLIT_IN_WINDOW",
+            "message": f"A {split_text(last['ratio'])} split on {last['date'][:10]} falls inside the revision windows; "
+                       "windows spanning it compare pre- and post-split estimates and carry no change.",
+            "severity": "warning",
+        })
+    warnings.extend(_split_history_warnings(split_history, "Revision windows are not checked against splits."))
     return {
         "ticker": ticker.upper(),
         "asOf": as_of,
@@ -602,6 +843,8 @@ def build_eps_revisions(ticker: str, inputs: list[dict], as_of: str) -> dict:
         "revenueRevisions": {"coverage": "PROVIDER_NOT_COVERED", "note": "No configured provider publishes revenue estimate history."},
         "analystCountChanges": {"coverage": "PROVIDER_NOT_COVERED", "note": "No configured provider publishes analyst adds or drops."},
         "providers": [{"provider": i["provider"], "status": i["status"], "retrievedAt": i["retrievedAt"], "message": i["message"]} for i in inputs],
+        "splitHistory": {**_split_history_summary(split_history, window_splits), "lookbackDays": 91},
+        "warnings": warnings,
         **AUTHORITY_BOUNDARY,
     }
 
