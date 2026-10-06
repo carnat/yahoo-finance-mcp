@@ -2663,6 +2663,32 @@ def wants_maturity_text(out: dict) -> bool:
 
 _NAME_MATURITY_RE = re.compile(r"\b(?:Due|Maturing|Matures)\s+(?:In\s+)?((?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\.?\s+(?:\d{1,2},\s+)?(?:19|20)\d{2}|(?:19|20)\d{2})\b", re.A)
 
+_ONES_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9}
+_TEENS_WORDS = {"ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+                "seventeen": 17, "eighteen": 18, "nineteen": 19}
+_TENS_WORDS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
+_ONES_ALT = "|".join(_ONES_WORDS)
+_TWO_DIGIT_ALT = f"(?:{'|'.join(_TEENS_WORDS)})|(?:{'|'.join(_TENS_WORDS)})(?:[\\s-]+(?:{_ONES_ALT}))?"
+# "Twenty Thirty Six" (2036) needs a teen or tens word after "Twenty", so "Twenty Five Percent" is no year;
+# "Two Thousand Thirty Four" (2034) and "Two Thousand Nine" (2009) take any number to 99.
+_SPELLED_YEAR_RE = re.compile(
+    rf"\b(?:twenty[\s-]+({_TWO_DIGIT_ALT})|two[\s-]+thousand(?:[\s-]+and)?[\s-]+({_TWO_DIGIT_ALT}|{_ONES_ALT}))\b",
+    re.IGNORECASE,
+)
+
+
+def _words_to_number(words: str) -> int:
+    return sum(
+        _ONES_WORDS.get(w, _TEENS_WORDS.get(w, _TENS_WORDS.get(w, 0)))
+        for w in re.split(r"[\s-]+", words.lower())
+    )
+
+
+def spelled_years_as_digits(name: str) -> str:
+    """A name's years written in words as digits (2.5.28: FDX's "Senior Unsecured Debt Due Twenty Thirty Six")."""
+    return _SPELLED_YEAR_RE.sub(
+        lambda m: str(2000 + _words_to_number(m.group(1) if m.group(1) is not None else m.group(2))), name)
+
 
 def _maturity_from_name(rows: list[dict], period_end: str | None) -> None:
     """Last resort for a row with no tagged or stated maturity (2.5.25): the date its name gives after "Due" or
@@ -2671,7 +2697,7 @@ def _maturity_from_name(rows: list[dict], period_end: str | None) -> None:
     for row in rows:
         if row.get("maturityDate") is not None or row.get("status") == "matured_before_period_end":
             continue
-        m = _NAME_MATURITY_RE.search(str(row["instrument"]))
+        m = _NAME_MATURITY_RE.search(spelled_years_as_digits(str(row["instrument"])))
         date = normalize_ix_date(m.group(1)) if m else None
         if not date or (period_end and date < period_end[:len(date)]):
             continue

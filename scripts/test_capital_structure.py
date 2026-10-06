@@ -695,7 +695,24 @@ AGG_Q = _agg_q([("vrt:SeniorNotesDue2036Member", "600"), ("vrt:SeniorNotesDue204
 AGG_AMBIGUOUS_Q = _agg_q([("vrt:SeniorNotesDue2036Member", "600"), ("vrt:SeniorNotesDue2046Member", "500"), ("vrt:SeniorNotesDue2056Member", "500"),
                           ("vrt:SeniorUnsecuredNotesMember", "1,100")])
 
-FIXTURES = {"ten_k": TEN_K, "aaoi_debt_q": AAOI_DEBT_Q, "mu_debt_q": MU_DEBT_Q, "vrt_debt_q": VRT_DEBT_Q,
+# 2.5.28: FDX names its notes with years in words.
+FDX_NOTES = [("fdx:FivePointTwoFivePercentSeniorUnsecuredDebtDueTwentyThirtySixMember", "1,000"),
+             ("fdx:FourPointThreePercentSeniorUnsecuredDebtDueTwentyTwentyNineMember", "1,000"),
+             ("fdx:OnePointEightSevenFiveZeroPercentDueInFebruaryTwoThousandThirtyFourMember", "970"),
+             ("fdx:TwentyFivePercentNotesMember", "50")]
+FDX_Q = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "fq", "10-K")}
+{_text("dei:DocumentPeriodEndDate", "fq", "May 31, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("fq", "2025-06-01..2026-05-31")}{_context("fi", "2026-05-31")}{"".join(_context(f"n{i}", "2026-05-31", {DEBT: m}) for i, (m, _) in enumerate(FDX_NOTES))}{UNITS}</ix:resources></ix:header></div>
+<p>Cash {_num("us-gaap:CashAndCashEquivalentsAtCarryingValue", "fi", "usd", "5,000", 6)}; long-term debt {_num("us-gaap:LongTermDebt", "fi", "usd", "3,020", 6)}.</p>
+<table>{"".join(f'<tr><td>{m}</td><td>{_num("us-gaap:LongTermDebt", f"n{i}", "usd", v, 6)}</td></tr>' for i, (m, v) in enumerate(FDX_NOTES))}</table>
+</body></html>"""
+
+SPELLED_CASES = ["Senior Unsecured Debt Due Twenty Thirty Six", "Due In February Two Thousand Thirty Four", "Twenty Five Percent Notes",
+                 "Notes Due Twenty Nine", "Two Thousand And Nine Notes", "Notes Due Twenty-Thirty-One", "Senior Notes Due 2036", "Debt Due twenty twenty"]
+
+FIXTURES = {"ten_k": TEN_K, "aaoi_debt_q": AAOI_DEBT_Q, "mu_debt_q": MU_DEBT_Q, "vrt_debt_q": VRT_DEBT_Q, "fdx_q": FDX_Q,
             "lease_total_q": LEASE_TOTAL_Q, "lease_parts_q": LEASE_PARTS_Q, "lease_unsplit_q": LEASE_UNSPLIT_Q, "agg_q": AGG_Q, "agg_ambiguous_q": AGG_AMBIGUOUS_Q, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K, "cohr_k": COHR_K, "pref_q": PREF_Q, "mrvl_q": MRVL_Q, "life_k": LIFE_K, "aehr_k": AEHR_K, "lite_k": LITE_K, "prefliq_q": PREFLIQ_Q, "stale_q": STALE_Q, "nest_q": NEST_Q}
 
 NEWS_ITEMS = [
@@ -781,9 +798,10 @@ out.capitalAaoiDebt = m.capitalStructure({ ticker: "AAOD", source: src("primary"
 out.capitalAaoiDebtNoText = m.capitalStructure({ ticker: "AAOD", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000041", data.qUrl, "aaoi_debt_q"), fundingMatches: [] });
 out.capitalMuDebt = m.capitalStructure({ ticker: "MUD", source: src("primary", "10-Q", "2026-06-25", "0001234568-26-000042", data.qUrl, "mu_debt_q"), fundingMatches: [] });
 out.capitalVrtDebt = m.capitalStructure({ ticker: "VRTD", source: src("primary", "10-Q", "2026-07-30", "0001234568-26-000043", data.qUrl, "vrt_debt_q"), fundingMatches: [] });
-for (const k of ["lease_total_q", "lease_parts_q", "lease_unsplit_q", "agg_q", "agg_ambiguous_q"]) {
+for (const k of ["lease_total_q", "lease_parts_q", "lease_unsplit_q", "agg_q", "agg_ambiguous_q", "fdx_q"]) {
   out[`capital_${k}`] = m.capitalStructure({ ticker: "L", source: src("primary", "10-Q", "2026-07-01", "0001234568-26-000044", data.qUrl, k), fundingMatches: [] });
 }
+out.spelledYears = data.spelledCases.map(m.spelledYearsAsDigits);
 out.wantsText = [out.capitalMuDebt, out.capitalAaoiDebt, out.capitalAaoiDebtNoText, out.capital].map(m.wantsMaturityText);
 out.labelsDated = ["aaoi:DebtMaturingDecember282028Member", "aaoi:DebtMaturingJul7132026Member", "aaoi:DebtMaturingJune112027Member", "x:NotesDue2029Member", "x:Series2028Member"].map(m.memberLabel);
 out.capitalAaoi = m.capitalStructure({ ticker: "AAOX", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000040", data.qUrl, "aaoi_q"), fundingMatches: [] });
@@ -853,7 +871,7 @@ def _worker_pure() -> dict:
             "cohrClaims": COHR_CLAIM_TEXT, "mrvlClaims": MRVL_CLAIM_TEXT, "liteClaims": LITE_CLAIM_TEXT, "censusClaims": CENSUS_CLAIM_TEXT,
             "lifecycle": LIFECYCLE_TEXT, "settlement": SETTLEMENT_TEXT, "liteSettlement": LITE_SETTLEMENT_TEXT, "census2Claims": CENSUS2_CLAIM_TEXT,
             "preferredWordings": PREFERRED_WORDINGS, "capped": CAPPED_TEXT, "beCapped": BE_CAPPED_TEXT, "rklbCapped": RKLB_CAPPED_TEXT,
-            "liteCapped": LITE_CAPPED_TEXT, "nestClaims": NEST_CLAIM_TEXT, "aaoiMaturity": AAOI_MATURITY_TEXT,
+            "liteCapped": LITE_CAPPED_TEXT, "nestClaims": NEST_CLAIM_TEXT, "aaoiMaturity": AAOI_MATURITY_TEXT, "spelledCases": SPELLED_CASES,
         }), encoding="utf-8")
         (tmp_path / "harness.mjs").write_text(_WORKER_PURE, encoding="utf-8")
         result = subprocess.run(
@@ -946,8 +964,9 @@ def _python_pure() -> dict:
         "ch": cs.companies_house_filings("01234567", CH_HISTORY),
         "chPick": cs.pick_companies_house_match("IQE plc", CH_SEARCH),
     }
-    for k in ("lease_total_q", "lease_parts_q", "lease_unsplit_q", "agg_q", "agg_ambiguous_q"):
+    for k in ("lease_total_q", "lease_parts_q", "lease_unsplit_q", "agg_q", "agg_ambiguous_q", "fdx_q"):
         out[f"capital_{k}"] = cs.capital_structure("L", cs.IxSource("primary", "10-Q", "2026-07-01", "0001234568-26-000044", Q_URL, docs[k]), [])
+    out["spelledYears"] = [cs.spelled_years_as_digits(x) for x in SPELLED_CASES]
     out["wantsText"] = [cs.wants_maturity_text(out[k]) for k in ("capitalMuDebt", "capitalAaoiDebt", "capitalAaoiDebtNoText", "capital")]
     return out
 
@@ -965,7 +984,7 @@ class TestCapitalStructureParity(unittest.TestCase):
             self.assertEqual(self.worker["documents"][name], self.local["documents"][name], name)
 
     def test_outputs_match(self) -> None:
-        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "bridgeStale", "bridgeStaleUnread", "bridgeSettled", "bridgeLiteSettled", "bridgeCensus2", "preferredWordings", "bridgeCapped", "bridgeCappedHigh", "bridgeLiteCapped", "cappedTerms", "bridgeNest", "bridgeNestUnread", "capital", "capitalAaoi", "capitalAaoiDebt", "capitalAaoiDebtNoText", "capitalMuDebt", "capitalVrtDebt", "capital_lease_total_q", "capital_lease_parts_q", "capital_lease_unsplit_q", "capital_agg_q", "capital_agg_ambiguous_q", "wantsText", "labelsDated", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
+        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "bridgeStale", "bridgeStaleUnread", "bridgeSettled", "bridgeLiteSettled", "bridgeCensus2", "preferredWordings", "bridgeCapped", "bridgeCappedHigh", "bridgeLiteCapped", "cappedTerms", "bridgeNest", "bridgeNestUnread", "capital", "capitalAaoi", "capitalAaoiDebt", "capitalAaoiDebtNoText", "capitalMuDebt", "capitalVrtDebt", "capital_lease_total_q", "capital_lease_parts_q", "capital_lease_unsplit_q", "capital_agg_q", "capital_agg_ambiguous_q", "capital_fdx_q", "spelledYears", "wantsText", "labelsDated", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
 
@@ -1279,6 +1298,20 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertEqual([u["instrument"] for u in amb["ladderCoverage"]["notLaddered"]], ["Senior Unsecured Notes"])
         # VRT_DEBT_Q's 1,400 aggregate matches no set of rows.
         self.assertFalse(any("aggregateOf" in r for r in self.out["capitalVrtDebt"]["instruments"]))
+
+    def test_maturity_years_written_in_words(self) -> None:
+        # 2.5.28: FDX's notes name their years in words; the names are dated, and stay as written.
+        c = self.out["capital_fdx_q"]
+        rows = {r["instrument"]: (r["maturityDate"], r["maturityDateSource"]) for r in c["instruments"]}
+        self.assertEqual(rows, {
+            "Five Point Two Five Percent Senior Unsecured Debt Due Twenty Thirty Six": ("2036", "INSTRUMENT_NAME"),
+            "Four Point Three Percent Senior Unsecured Debt Due Twenty Twenty Nine": ("2029", "INSTRUMENT_NAME"),
+            "One Point Eight Seven Five Zero Percent Due In February Two Thousand Thirty Four": ("2034-02", "INSTRUMENT_NAME"),
+            "Twenty Five Percent Notes": (None, None)})
+        self.assertEqual([(y["year"], y["amount"]) for y in c["instrumentMaturitiesByYear"]], [("2029", 1_000_000_000), ("2034", 970_000_000), ("2036", 1_000_000_000)])
+        self.assertEqual([u["instrument"] for u in c["ladderCoverage"]["notLaddered"]], ["Twenty Five Percent Notes"])
+        self.assertEqual(self.out["spelledYears"], ["Senior Unsecured Debt Due 2036", "Due In February 2034", "Twenty Five Percent Notes", "Notes Due Twenty Nine",
+                                                    "2009 Notes", "Notes Due 2031", "Senior Notes Due 2036", "Debt Due 2020"])
 
     def test_convertibles_at_period_end_and_warrant_exercised_after_count(self) -> None:
         b = _python_pure()["bridgeBe"]

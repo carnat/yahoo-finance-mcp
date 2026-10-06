@@ -2454,6 +2454,25 @@ export function wantsMaturityText(out: Record<string, unknown>): boolean {
 
 const NAME_MATURITY_RE = /\b(?:Due|Maturing|Matures)\s+(?:In\s+)?((?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\.?\s+(?:\d{1,2},\s+)?(?:19|20)\d{2}|(?:19|20)\d{2})\b/;
 
+const ONES_WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
+const TEENS_WORDS: Record<string, number> = { ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+const TENS_WORDS: Record<string, number> = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const ONES_ALT = Object.keys(ONES_WORDS).join("|");
+const TWO_DIGIT_ALT = `(?:${Object.keys(TEENS_WORDS).join("|")})|(?:${Object.keys(TENS_WORDS).join("|")})(?:[\\s-]+(?:${ONES_ALT}))?`;
+// "Twenty Thirty Six" (2036) needs a teen or tens word after "Twenty", so "Twenty Five Percent" is no year;
+// "Two Thousand Thirty Four" (2034) and "Two Thousand Nine" (2009) take any number to 99.
+const SPELLED_YEAR_RE = new RegExp(`\\b(?:twenty[\\s-]+(${TWO_DIGIT_ALT})|two[\\s-]+thousand(?:[\\s-]+and)?[\\s-]+(${TWO_DIGIT_ALT}|${ONES_ALT}))\\b`, "gi");
+
+function wordsToNumber(words: string): number {
+  return words.toLowerCase().split(/[\s-]+/).reduce((sum, w) => sum + (ONES_WORDS[w] ?? TEENS_WORDS[w] ?? TENS_WORDS[w] ?? 0), 0);
+}
+
+/** A name's years written in words as digits (2.5.28: FDX's "Senior Unsecured Debt Due Twenty Thirty Six"). */
+export function spelledYearsAsDigits(name: string): string {
+  return name.replace(SPELLED_YEAR_RE, (_, twenty: string | undefined, thousand: string | undefined) =>
+    String(2000 + wordsToNumber((twenty ?? thousand) as string)));
+}
+
 /**
  * Last resort for a row with no tagged or stated maturity (2.5.25): the date its name gives after "Due" or
  * "Maturing" ("Due January 2031" -> 2031-01, "Due 2036" -> 2036), only when that is not before the period end.
@@ -2462,7 +2481,7 @@ const NAME_MATURITY_RE = /\b(?:Due|Maturing|Matures)\s+(?:In\s+)?((?:January|Feb
 function maturityFromName(rows: Record<string, unknown>[], periodEnd: string | null): void {
   for (const row of rows) {
     if (row.maturityDate != null || row.status === "matured_before_period_end") continue;
-    const m = NAME_MATURITY_RE.exec(String(row.instrument));
+    const m = NAME_MATURITY_RE.exec(spelledYearsAsDigits(String(row.instrument)));
     const date = m ? normalizeIxDate(m[1]) : null;
     if (!date || (periodEnd && date < periodEnd.slice(0, date.length))) continue;
     row.maturityDate = date;
