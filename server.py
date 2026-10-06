@@ -10214,7 +10214,7 @@ async def extract_capital_structure(
     funding = await _filing_text_matches(ticker, primary, _FUNDING_SEARCH_TERMS, 20, 700) if include_funding_statements is not False else []
     out = _cs.capital_structure(ticker.upper(), loaded[0], funding)
     # An outstanding instrument with no tagged maturity: read the filing's own maturity sentences (2.5.24).
-    if (out.get("ladderCoverage") or {}).get("notLaddered"):
+    if _cs.wants_maturity_text(out):
         maturity_matches = await _filing_text_matches(ticker, primary, _cs.MATURITY_SEARCH_TERMS, 12, 400)
         out = _cs.capital_structure(ticker.upper(), loaded[0], funding, maturity_matches)
     if loaded[1]:
