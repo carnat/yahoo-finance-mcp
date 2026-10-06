@@ -19,6 +19,7 @@ import {
   pickCompaniesHouseMatch,
   CAPPED_CALL_SEARCH_TERMS,
   CONVERTIBLE_SETTLEMENT_SEARCH_TERMS,
+  MATURITY_SEARCH_TERMS,
   SHARE_CLAIM_SEARCH_TERMS,
   WARRANT_LIFECYCLE_SEARCH_TERMS,
   type DilutionInput,
@@ -15374,7 +15375,12 @@ export async function extractCapitalStructure(
     return JSON.stringify({ ticker, status: "FILING_TEXT_NOT_AVAILABLE", code: "FILING_TEXT_NOT_AVAILABLE", message: "The filing document could not be read from SEC." });
   }
   const fundingMatches = includeFundingStatements ? await filingTextMatches(ticker, primary.filing, FUNDING_SEARCH_TERMS, 20, 700) : [];
-  const out = capitalStructure({ ticker: ticker.toUpperCase(), source: loaded.source, fundingMatches });
+  let out = capitalStructure({ ticker: ticker.toUpperCase(), source: loaded.source, fundingMatches });
+  // An outstanding instrument with no tagged maturity: read the filing's own maturity sentences (2.5.24).
+  if (((out.ladderCoverage as Record<string, unknown> | undefined)?.notLaddered as unknown[] | undefined)?.length) {
+    const maturityMatches = await filingTextMatches(ticker, primary.filing, MATURITY_SEARCH_TERMS, 12, 400);
+    out = capitalStructure({ ticker: ticker.toUpperCase(), source: loaded.source, fundingMatches, maturityMatches });
+  }
   if (loaded.truncated) {
     (out.warnings as Record<string, unknown>[]).push({ code: "FILING_READ_TRUNCATED", message: "The filing exceeded the read limit; facts past that point were not parsed.", severity: "warning" });
   }

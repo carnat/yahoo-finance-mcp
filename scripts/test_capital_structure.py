@@ -594,7 +594,47 @@ TABLE_MATCHES = [
     {"contextText": "Unvested at June 30, 2026, restricted stock units totalled 8,888,888 shares.", "sectionHeading": "Stock-Based Compensation", "documentUrl": "https://www.sec.gov/Archives/x.htm", "filingDate": "2026-08-06", "accessionNumber": None, "inTable": False, "tableTitle": None, "rowLabel": None},
 ]
 
-FIXTURES = {"ten_k": TEN_K, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K, "cohr_k": COHR_K, "pref_q": PREF_Q, "mrvl_q": MRVL_Q, "life_k": LIFE_K, "aehr_k": AEHR_K, "lite_k": LITE_K, "prefliq_q": PREFLIQ_Q, "stale_q": STALE_Q, "nest_q": NEST_Q}
+# 2.5.24: AAOI's debt as its 10-Q tags it (F-007 to F-011). The 2030 Notes carry no tagged maturity and tag principal
+# outstanding (124.9M) as their carrying amount; the China bank row tags two maturities and two coupons on one amount;
+# the December 28, 2026 revolver's member name says 2028. The balance sheet carries the notes at 129,142.
+CONV30 = "aaoi:ConvertibleNotesMaturing2030Member"
+LOAN = "aaoi:LoanAgreementMember"
+DEC28 = "aaoi:DebtMaturingDecember282028Member"
+AAOI_DEBT_CONTEXTS = "".join([
+    _context("dq", "2026-01-01..2026-06-30"),
+    _context("di", "2026-06-30"),
+    _context("c30", "2026-06-30", {DEBT: CONV30}),
+    _context("c30Issue", "2024-12-18", {DEBT: CONV30}),
+    _context("loan", "2026-06-30", {DEBT: LOAN, "us-gaap:LineOfCreditFacilityAxis": "aaoi:ChinaBankMember"}),
+    _context("loanRevD", "2026-01-01..2026-06-30", {DEBT: LOAN, "us-gaap:CreditFacilityAxis": "us-gaap:RevolvingCreditFacilityMember"}),
+    _context("loanTermD", "2026-01-01..2026-06-30", {DEBT: LOAN, "us-gaap:LongtermDebtTypeAxis": "aaoi:EquipmentTermLoanMember"}),
+    _context("loanRev", "2026-06-30", {DEBT: LOAN, "us-gaap:CreditFacilityAxis": "us-gaap:RevolvingCreditFacilityMember"}),
+    _context("loanTerm", "2026-06-30", {DEBT: LOAN, "us-gaap:LongtermDebtTypeAxis": "aaoi:EquipmentTermLoanMember"}),
+    _context("dec", "2026-06-30", {DEBT: DEC28}),
+    _context("decD", "2026-01-01..2026-06-30", {DEBT: DEC28}),
+])
+AAOI_DEBT_Q = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "dq", "10-Q")}
+{_text("dei:DocumentPeriodEndDate", "dq", "June 30, 2026", "ixt:date-monthname-day-year-en")}
+{_text("us-gaap:DebtInstrumentMaturityDate", "loanRevD", "2027-06-25")}
+{_text("us-gaap:DebtInstrumentMaturityDate", "loanTermD", "2032-06-12")}
+{_text("us-gaap:DebtInstrumentMaturityDate", "decD", "2026-12-28")}
+</ix:hidden><ix:resources>{AAOI_DEBT_CONTEXTS}{UNITS}</ix:resources></ix:header></div>
+<p>Cash {_num("us-gaap:CashAndCashEquivalentsAtCarryingValue", "di", "usd", "499,737", 3)}; bank loans current {_num("us-gaap:LongTermDebtCurrent", "di", "usd", "21,069", 3)};
+convertible senior notes {_num("us-gaap:ConvertibleNotesPayable", "di", "usd", "129,142", 3)}.</p>
+<p>On December 23, 2024 the Company issued ${_num("us-gaap:DebtInstrumentFaceAmount", "c30Issue", "usd", "125", 6, decimals="-6")} million of notes.
+Following this conversion, the aggregate principal amount of 2030 Notes outstanding was approximately ${_num("us-gaap:DebtInstrumentCarryingAmount", "c30", "usd", "124.9", 6, decimals="-5")} million.</p>
+<table><tr><td>Revolving line of credit and equipment term loan with a China bank, interest at {_num("us-gaap:DebtInstrumentInterestRateStatedPercentage", "loanRev", "pure", "2.6", -2)}% and {_num("us-gaap:DebtInstrumentInterestRateStatedPercentage", "loanTerm", "pure", "3", -2)}%</td>
+<td>{_num("us-gaap:DebtInstrumentCarryingAmount", "loan", "usd", "21,069", 3)}</td></tr>
+<tr><td>Revolving line of credit with a China bank, maturing December 28, 2026</td><td>{_num("us-gaap:DebtInstrumentCarryingAmount", "dec", "usd", "0", 3)}</td></tr></table>
+</body></html>"""
+AAOI_MATURITY_TEXT = [
+    "The 2030 Notes bear interest at a rate of 2.75% per year. The 2030 Notes will mature on January 15, 2030, unless earlier converted, redeemed or repurchased in accordance with their terms.",
+    "The revolving line of credit matures on June 25, 2027 and the equipment term loan on June 12, 2032.",
+]
+
+FIXTURES = {"ten_k": TEN_K, "aaoi_debt_q": AAOI_DEBT_Q, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K, "cohr_k": COHR_K, "pref_q": PREF_Q, "mrvl_q": MRVL_Q, "life_k": LIFE_K, "aehr_k": AEHR_K, "lite_k": LITE_K, "prefliq_q": PREFLIQ_Q, "stale_q": STALE_Q, "nest_q": NEST_Q}
 
 NEWS_ITEMS = [
     {"title": "Needham raises IQE price target to 45p from 38p", "summary": "Needham values IQE at 12x 2027 EV/EBITDA, citing gallium nitride demand.", "url": "https://news.example/1", "publishedAt": "2026-09-20T08:00:00Z", "source": "yahoo_finance_news"},
@@ -675,6 +715,9 @@ out.bridgeNest = m.dilutionBridge({ ticker: "NSTX", price: 20, priceCurrency: "U
 out.bridgeNestUnread = m.dilutionBridge({ ticker: "NSTX", price: 20, priceCurrency: "USD", asOfDate: null, sources: [nestSrc], atmMatches: [] });
 out.cappedTerms = [data.capped, data.beCapped, data.rklbCapped, data.liteCapped].map((texts) => m.cappedCallTerms(tm(texts)));
 out.capital = m.capitalStructure({ ticker: "CSTC", source: kSource, fundingMatches: atm });
+out.capitalAaoiDebt = m.capitalStructure({ ticker: "AAOD", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000041", data.qUrl, "aaoi_debt_q"), fundingMatches: [], maturityMatches: tm(data.aaoiMaturity) });
+out.capitalAaoiDebtNoText = m.capitalStructure({ ticker: "AAOD", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000041", data.qUrl, "aaoi_debt_q"), fundingMatches: [] });
+out.labelsDated = ["aaoi:DebtMaturingDecember282028Member", "aaoi:DebtMaturingJul7132026Member", "aaoi:DebtMaturingJune112027Member", "x:NotesDue2029Member", "x:Series2028Member"].map(m.memberLabel);
 out.capitalAaoi = m.capitalStructure({ ticker: "AAOX", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000040", data.qUrl, "aaoi_q"), fundingMatches: [] });
 out.capitalAsts = m.capitalStructure({ ticker: "ASTX", source: src("primary", "10-Q", "2026-08-10", "0001234568-26-000060", data.qUrl, "asts_q"), fundingMatches: [] });
 out.capitalDebtFree = m.capitalStructure({ ticker: "AEHX", source: src("primary", "10-K", "2026-07-27", "0001234568-26-000070", data.kUrl, "debt_free_k"), fundingMatches: [] });
@@ -742,7 +785,7 @@ def _worker_pure() -> dict:
             "cohrClaims": COHR_CLAIM_TEXT, "mrvlClaims": MRVL_CLAIM_TEXT, "liteClaims": LITE_CLAIM_TEXT, "censusClaims": CENSUS_CLAIM_TEXT,
             "lifecycle": LIFECYCLE_TEXT, "settlement": SETTLEMENT_TEXT, "liteSettlement": LITE_SETTLEMENT_TEXT, "census2Claims": CENSUS2_CLAIM_TEXT,
             "preferredWordings": PREFERRED_WORDINGS, "capped": CAPPED_TEXT, "beCapped": BE_CAPPED_TEXT, "rklbCapped": RKLB_CAPPED_TEXT,
-            "liteCapped": LITE_CAPPED_TEXT, "nestClaims": NEST_CLAIM_TEXT,
+            "liteCapped": LITE_CAPPED_TEXT, "nestClaims": NEST_CLAIM_TEXT, "aaoiMaturity": AAOI_MATURITY_TEXT,
         }), encoding="utf-8")
         (tmp_path / "harness.mjs").write_text(_WORKER_PURE, encoding="utf-8")
         result = subprocess.run(
@@ -816,6 +859,10 @@ def _python_pure() -> dict:
                                                                cs.IxSource("latest_annual_fallback", "10-K", "2026-02-27", "0001234568-26-000140", K_URL, docs["be_k"])], []),
         "bridgeVrtWarrants": cs.dilution_bridge("VRTW", 150, "USD", None, [cs.IxSource("primary", "10-K", "2026-02-13", "0001234568-26-000120", K_URL, docs["vrt_warrant_k"])], []),
         "capital": cs.capital_structure("CSTC", k_source, atm),
+        "capitalAaoiDebt": cs.capital_structure("AAOD", cs.IxSource("primary", "10-Q", "2026-08-06", "0001234568-26-000041", Q_URL, docs["aaoi_debt_q"]), [],
+                                                maturity_matches=tm(AAOI_MATURITY_TEXT)),
+        "capitalAaoiDebtNoText": cs.capital_structure("AAOD", cs.IxSource("primary", "10-Q", "2026-08-06", "0001234568-26-000041", Q_URL, docs["aaoi_debt_q"]), []),
+        "labelsDated": [cs.member_label(x) for x in ["aaoi:DebtMaturingDecember282028Member", "aaoi:DebtMaturingJul7132026Member", "aaoi:DebtMaturingJune112027Member", "x:NotesDue2029Member", "x:Series2028Member"]],
         "capitalAaoi": cs.capital_structure("AAOX", cs.IxSource("primary", "10-Q", "2026-08-06", "0001234568-26-000040", Q_URL, docs["aaoi_q"]), []),
         "capitalAsts": cs.capital_structure("ASTX", cs.IxSource("primary", "10-Q", "2026-08-10", "0001234568-26-000060", Q_URL, docs["asts_q"]), []),
         "capitalDebtFree": cs.capital_structure("AEHX", cs.IxSource("primary", "10-K", "2026-07-27", "0001234568-26-000070", K_URL, docs["debt_free_k"]), []),
@@ -844,7 +891,7 @@ class TestCapitalStructureParity(unittest.TestCase):
             self.assertEqual(self.worker["documents"][name], self.local["documents"][name], name)
 
     def test_outputs_match(self) -> None:
-        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "bridgeStale", "bridgeStaleUnread", "bridgeSettled", "bridgeLiteSettled", "bridgeCensus2", "preferredWordings", "bridgeCapped", "bridgeCappedHigh", "bridgeLiteCapped", "cappedTerms", "bridgeNest", "bridgeNestUnread", "capital", "capitalAaoi", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
+        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "bridgeStale", "bridgeStaleUnread", "bridgeSettled", "bridgeLiteSettled", "bridgeCensus2", "preferredWordings", "bridgeCapped", "bridgeCappedHigh", "bridgeLiteCapped", "cappedTerms", "bridgeNest", "bridgeNestUnread", "capital", "capitalAaoi", "capitalAaoiDebt", "capitalAaoiDebtNoText", "labelsDated", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
 
@@ -996,8 +1043,13 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertEqual([r["member"] for r in c["instruments"]], [OLD, TERM, CONV, CONV31])
         self.assertEqual((rows[CONV31]["carryingAmount"], rows[CONV31]["taggedAmount"], rows[CONV31]["taggedAmountDate"]), (None, 200_000_000, "2024-06-01"))
         self.assertEqual(rows[TERM]["carryingAmountConcept"], "us-gaap:LongTermDebt")
-        self.assertEqual([(y["year"], y["faceAmount"]) for y in c["instrumentMaturitiesByYear"]],
-                         [("2027", 100_000_000), ("2029", 300_000_000), ("2031", 200_000_000)])
+        # 2.5.24 (F-009): each bucket states its amount's basis; faceAmount sums only face-tagged rows.
+        self.assertEqual([(y["year"], y["amount"], y["amountBasis"], y["faceAmount"]) for y in c["instrumentMaturitiesByYear"]],
+                         [("2027", 95_000_000, "CARRYING", 100_000_000), ("2029", 290_000_000, "CARRYING", 300_000_000), ("2031", 200_000_000, "TAGGED", None)])
+        self.assertEqual(c["ladderCoverage"], {"totalDebt": 385_000_000, "ladderedCarryingAmount": 385_000_000, "coveragePct": 100, "notLaddered": []})
+        self.assertEqual(c["instrumentReconciliation"], {"status": "RECONCILED", "instrumentsCarryingTotal": 385_000_000, "totalDebt": 385_000_000,
+                                                         "difference": 0, "rowsWithoutCarryingAmount": 1})
+        self.assertEqual((rows[CONV]["faceAmountDate"], rows[CONV]["maturityDateSource"]), ("2024-03-15", "XBRL"))
         ladder = {r["bucket"]: r for r in c["maturityLadder"]}
         self.assertEqual(ladder["year_3"]["periodThrough"], "2027-12-31")
         self.assertEqual(ladder["year_4"]["amount"], 0)
@@ -1008,6 +1060,52 @@ class TestCapitalStructureValues(unittest.TestCase):
         statements = " ".join(s["statement"] for s in c["fundingStatements"])
         for noise in ("performance obligations", "expected life", "operating expenses and capital expenditures;"):
             self.assertNotIn(noise, statements)
+
+    def test_aaoi_debt_rows_ladder_and_reconciliation(self) -> None:
+        # 2.5.24 (F-007 to F-011): AAOI's 10-Q debt as tagged.
+        c = self.out["capitalAaoiDebt"]
+        self.assertEqual(c["balances"]["totalDebt"], 150_211_000)
+        rows = {r["member"]: r for r in c["instruments"]}
+        notes = rows[CONV30]
+        # F-008: the maturity comes from the filing's own sentence, matched on the year in the instrument's name.
+        self.assertEqual((notes["maturityDate"], notes["maturityDateSource"]), ("2030-01-15", "FILING_TEXT"))
+        self.assertTrue(notes["maturityStatement"].startswith("The 2030 Notes will mature on January 15, 2030"))
+        # F-007: the face amount is the issue-date figure, and says so.
+        self.assertEqual((notes["faceAmount"], notes["faceAmountDate"], notes["carryingAmount"], notes["carryingAmountConcept"]),
+                         (125_000_000, "2024-12-18", 124_900_000, "us-gaap:DebtInstrumentCarryingAmount"))
+        # F-010: both tagged maturities and coupons; the row sits at the earliest.
+        loan = rows[LOAN]
+        self.assertEqual((loan["maturityDate"], loan["maturityDates"], loan["couponPcts"], loan["maturityDateSource"]),
+                         ("2027-06-25", ["2027-06-25", "2032-06-12"], [2.6, 3], "XBRL"))
+        self.assertNotIn("maturityDates", notes)
+        # F-011: a day and year run together in the member name are split, and the name's date is checked.
+        dec = rows[DEC28]
+        self.assertEqual((dec["instrument"], dec["maturityDate"]), ("Debt Maturing December 28, 2028", "2026-12-28"))
+        # F-009: buckets on a stated basis.
+        self.assertEqual([(y["year"], y["amount"], y["amountBasis"], y["faceAmount"]) for y in c["instrumentMaturitiesByYear"]],
+                         [("2026", 0, "CARRYING", None), ("2027", 21_069_000, "CARRYING", None), ("2030", 124_900_000, "CARRYING", 125_000_000)])
+        self.assertEqual(c["ladderCoverage"], {"totalDebt": 150_211_000, "ladderedCarryingAmount": 145_969_000, "coveragePct": 97.18, "notLaddered": []})
+        # F-007: the rows do not add up to the balance sheet: the notes' tagged amount is principal, not carrying value.
+        self.assertEqual(c["instrumentReconciliation"], {"status": "NOT_RECONCILED", "instrumentsCarryingTotal": 145_969_000, "totalDebt": 150_211_000,
+                                                         "difference": 4_242_000, "rowsWithoutCarryingAmount": 0})
+        codes = [w["code"] for w in c["warnings"]]
+        self.assertEqual(codes, ["LABEL_DATE_DIFFERS_FROM_MATURITY", "MULTIPLE_MATURITIES", "INSTRUMENTS_DO_NOT_RECONCILE"])
+        warn = {w["code"]: w["message"] for w in c["warnings"]}
+        self.assertEqual(warn["MULTIPLE_MATURITIES"], "Loan Agreement carries 2 tagged maturities (2027-06-25, 2032-06-12) on one amount; the year ladder places it at the earliest.")
+        self.assertEqual(warn["LABEL_DATE_DIFFERS_FROM_MATURITY"], "Debt Maturing December 28, 2028 is named for December 28, 2028 but its tagged maturity is 2026-12-28; the tagged date is used.")
+        self.assertEqual(warn["INSTRUMENTS_DO_NOT_RECONCILE"], "Instrument rows carry 145969000 at the period end against total debt 150211000 (difference 4242000): "
+                         "an instrument may be untagged, or a tagged amount may be principal rather than carrying value.")
+        # Without the maturity text the notes stay unplaced and the ladder says so.
+        bare = self.out["capitalAaoiDebtNoText"]
+        bare_notes = next(r for r in bare["instruments"] if r["member"] == CONV30)
+        self.assertEqual((bare_notes["maturityDate"], bare_notes["maturityDateSource"]), (None, None))
+        self.assertNotIn("maturityStatement", bare_notes)
+        self.assertEqual(bare["ladderCoverage"], {"totalDebt": 150_211_000, "ladderedCarryingAmount": 21_069_000, "coveragePct": 14.03,
+                                                  "notLaddered": [{"instrument": "Convertible Notes Maturing 2030", "amount": 124_900_000, "amountBasis": "CARRYING", "reason": "NO_MATURITY_DATE"}]})
+        warn = {w["code"]: w["message"] for w in bare["warnings"]}
+        self.assertEqual(warn["MATURITY_LADDER_INCOMPLETE"], "No maturity date for Convertible Notes Maturing 2030 (124900000); the year ladder places 21069000 of total debt 150211000 (14.03%).")
+        # Labels: month, day and year run together are split; other digit runs are left as they are.
+        self.assertEqual(self.out["labelsDated"], ["Debt Maturing December 28, 2028", "Debt Maturing Jul 7132026", "Debt Maturing June 11, 2027", "Notes Due 2029", "Series 2028"])
 
     def test_convertibles_at_period_end_and_warrant_exercised_after_count(self) -> None:
         b = _python_pure()["bridgeBe"]
