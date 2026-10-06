@@ -2775,10 +2775,17 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
     # When an outstanding instrument has no maturity and the filing tags no maturity ladder of its own.
     if unplaced and not ladder:
         listed = ", ".join(f"{u['instrument']} ({_js_number(u['amount'])})" for u in unplaced)
-        of_total = f" of total debt {_js_number(debt_value)} ({'null' if ladder_coverage['coveragePct'] is None else _js_number(ladder_coverage['coveragePct'])}%)" if debt_value else ""
+        # A ladder on face or tagged amounts says so, rather than "places 0" at carrying amounts (2.5.26: VRT).
+        basis = ladder_coverage["ladderedAmountBasis"]
+        if basis is None or basis == "CARRYING":
+            of_total = f" of total debt {_js_number(debt_value)} ({'null' if ladder_coverage['coveragePct'] is None else _js_number(ladder_coverage['coveragePct'])}%)" if debt_value else ""
+            placed = f"the year ladder places {_js_number(laddered)}{of_total}."
+        else:
+            against = f" against total debt {_js_number(debt_value)}" if debt_value else ""
+            placed = f"the year ladder places {_js_number(laddered_any)} on a {basis} basis ({_js_number(laddered)} at carrying amounts){against}."
         warnings.append({
             "code": "MATURITY_LADDER_INCOMPLETE",
-            "message": f"No maturity date for {listed}; the year ladder places {_js_number(laddered)}{of_total}.",
+            "message": f"No maturity date for {listed}; {placed}",
             "severity": "warning",
         })
     # Instrument rows' period-end carrying amounts against total debt (2.5.24, F-007: AAOI tags 124.9M principal as
