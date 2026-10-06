@@ -2311,6 +2311,60 @@ Vantage and IBKR produced these fixes.
   2034-02 (source `INSTRUMENT_NAME`). "Twenty Five Percent Notes" stays
   undated.
 
+## Alpha Vantage Estimates: Daily Cache And Stale Fallback (2.5.29)
+
+- **Defect (live 2.5.28 on ANET).** The server's Alpha Vantage key is on the
+  free tier, which allows 25 requests a day. Once the quota was spent,
+  `get_consensus_forecast_curve` reported `SINGLE_PROVIDER` with
+  `CROSS_CHECK_DEGRADED` until the next UTC day, even though Alpha Vantage
+  had answered for the same ticker hours earlier. `EARNINGS_ESTIMATES` was
+  cached for 6 hours, so one ticker could use up to four requests a day.
+- **Daily cache (both runtimes).** `EARNINGS_ESTIMATES` is cached for 24
+  hours, so each ticker uses at most one request a day per cache.
+- **Stored snapshots (both runtimes, `evidence-pack.ts` / `server.py`).**
+  - Each good payload (one with estimate rows) is written once a day to the
+    evidence store under
+    `provider-snapshots/alpha_vantage/EARNINGS_ESTIMATES/<TICKER>/<YYYY-MM-DD>.json`
+    (schema `yfmcp.provider-snapshot/1`). The store is R2 in the Worker and
+    `YFMCP_EVIDENCE_DIR` locally.
+  - The payload is kept as the provider published it, so the 2.5.23
+    published-precision rule (F-013) still sees text such as "5.2020".
+- **Stale fallback (both runtimes, `evidence.ts` / `evidence.py`,
+  `staleSnapshot`).**
+  - When the live request returns `RATE_LIMIT`, `TIMEOUT` or
+    `PROVIDER_ERROR`, the store is read for the newest snapshot from that day
+    back to 7 days earlier. This is at most eight reads, made only after a
+    refusal.
+  - A snapshot stands in only when it is for the same provider, operation and
+    ticker, was fetched no later than now, and is at most 7 days old.
+    `AUTH_ERROR`, `ENTITLEMENT_REQUIRED` and `SOURCE_UNCONFIGURED` never fall
+    back: they are configuration faults and stay visible.
+  - With a snapshot standing in, the Alpha Vantage input is `OK` and its
+    `retrievedAt` is the snapshot's fetch time. It carries
+    `staleFallback` {`liveStatus`, `liveMessage`, `ageHours`, `snapshotKey`}.
+- **Output (additive; present only when a snapshot stood in).**
+  - In `get_consensus_forecast_curve`:
+    - the provider's entry in `providers` carries `staleFallback`;
+    - `crossCheck.providersStale` lists {`provider`, `retrievedAt`, and the
+      `staleFallback` fields};
+    - the warning `PROVIDER_DATA_STALE` replaces `CROSS_CHECK_DEGRADED` for
+      that provider. It names the refusal and the snapshot's age, and says
+      that a difference from another provider may be a revision since then,
+      not a disagreement.
+  - The stale figures are compared like live ones: `IDENTICAL`, `AGREED` and
+    `CONFLICT` are unchanged.
+  - In `get_eps_revisions`, `providers` carries `staleFallback`, and
+    `PROVIDER_DATA_STALE` says the provider's windows end at the snapshot's
+    retrieval time, not at `asOf`.
+- **Not changed.**
+  - Other Alpha Vantage calls neither keep snapshots nor fall back.
+  - Yahoo has no fallback.
+  - The remembered daily denial (2.5.22) still saves the request.
+  - A curve whose providers all answered live carries none of the new fields.
+  - The day's stored consensus observation (2.5.22) is still the day's first
+    curve. If that curve used a stale stand-in, the stored copy carries
+    `staleFallback` and `PROVIDER_DATA_STALE` too.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

@@ -11826,7 +11826,8 @@ from yfmcp import evidence_store as _es  # noqa: E402
 from yfmcp.build_info import BUILD_SHA as _BUILD_SHA  # noqa: E402
 from yfmcp.clients.market_providers import fetch_alpha_vantage_json as _fetch_alpha_vantage_json  # noqa: E402
 
-_ALPHA_VANTAGE_ESTIMATES_TTL_SECONDS = 6 * 60 * 60
+# Estimates move slowly and the server's key allows 25 requests a day: one request per ticker per day (2.5.29).
+_ALPHA_VANTAGE_ESTIMATES_TTL_SECONDS = 24 * 60 * 60
 
 
 def _now_iso() -> str:
@@ -11913,15 +11914,52 @@ def _consensus_split_history(symbol: str) -> dict:
         return {"status": "PROVIDER_ERROR", "splits": [], "message": str(exc)}
 
 
+def _latest_provider_snapshot(provider: str, operation: str, symbol: str, as_of: str) -> dict | None:
+    """The newest stored snapshot in the stale-fallback window, or None; a storage failure reads as none. At most eight reads, and only after a refusal."""
+    store = _es.get_store()
+    if store is None:
+        return None
+    try:
+        for key in _ev.provider_snapshot_candidate_keys(provider, operation, symbol, as_of):
+            text = store.get(key)
+            if text is not None:
+                return {"key": key, "text": text}
+    except Exception:  # noqa: BLE001 - a storage failure means no fallback, not a failed curve
+        return None
+    return None
+
+
+async def _alpha_vantage_estimates(symbol: str) -> dict:
+    """Alpha Vantage EARNINGS_ESTIMATES as a consensus input (2.5.29). A good payload is kept once a day; when a live
+    request is refused for a reason that passes, the newest kept payload within the window stands in, marked stale."""
+    r = await _fetch_alpha_vantage_json("EARNINGS_ESTIMATES", {"symbol": symbol}, ttl_seconds=_ALPHA_VANTAGE_ESTIMATES_TTL_SECONDS)
+    now = _now_iso()
+    expect = {"provider": "alpha_vantage", "operation": "EARNINGS_ESTIMATES", "ticker": symbol}
+    if r.status == "OK":
+        fetched_at = r.fetched_at or now
+        estimates = r.payload.get("estimates") if isinstance(r.payload, dict) else None
+        if isinstance(estimates, list) and estimates:
+            await asyncio.to_thread(
+                _es.put_once,
+                _ev.provider_snapshot_key(expect["provider"], expect["operation"], symbol, fetched_at),
+                _ev.provider_snapshot_body(expect["provider"], expect["operation"], symbol, fetched_at, r.payload),
+                {"ticker": symbol, "kind": "provider-snapshot"},
+            )
+        return _ev.alpha_vantage_consensus_input(r.payload, retrieved_at=fetched_at)
+    stored = (await asyncio.to_thread(_latest_provider_snapshot, expect["provider"], expect["operation"], symbol, now)
+              if r.status in _ev.STALE_FALLBACK_STATUSES else None)
+    stale = _ev.stale_snapshot(stored, expect, {"status": r.status, "message": r.message}, now)
+    if stale:
+        return _ev.alpha_vantage_consensus_input(stale["payload"], retrieved_at=stale["fetchedAt"], stale_fallback=stale["staleFallback"])
+    return _ev.alpha_vantage_consensus_input(r.payload, retrieved_at=r.fetched_at or now, status=r.status, message=r.message)
+
+
 async def _consensus_providers(ticker: str) -> tuple[list[dict], dict, dict]:
     symbol = ticker.upper()
-    (yahoo, quote), alpha, splits = await asyncio.gather(
+    (yahoo, quote), alpha_input, splits = await asyncio.gather(
         asyncio.to_thread(_yahoo_consensus_snapshot, symbol),
-        _fetch_alpha_vantage_json("EARNINGS_ESTIMATES", {"symbol": symbol}, ttl_seconds=_ALPHA_VANTAGE_ESTIMATES_TTL_SECONDS),
+        _alpha_vantage_estimates(symbol),
         asyncio.to_thread(_consensus_split_history, symbol),
-    )
-    alpha_input = _ev.alpha_vantage_consensus_input(
-        alpha.payload, retrieved_at=alpha.fetched_at or _now_iso(), status=None if alpha.status == "OK" else alpha.status, message=alpha.message,
     )
     return [yahoo, alpha_input], quote, splits
 
@@ -12002,7 +12040,7 @@ def _read_consensus_observation(ticker: str, observation_date: str) -> str:
 @yfinance_server.tool(
     name="get_consensus_forecast_curve",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_consensus_forecast_curve"],
-    description="Street consensus by fiscal year, FY0 to FY+horizon, for EPS and revenue from Yahoo Finance and Alpha Vantage, each provider reported separately with fiscal year end, currency, mean/high/low, analyst count and retrieval time. Each metric and period states its coverage: PROVIDER_COVERED, PROVIDER_NOT_COVERED, INSUFFICIENT_ANALYST_COUNT or PROVIDER_CONFLICT (with the cross-provider difference). Years and metrics no provider covers stay PROVIDER_NOT_COVERED; nothing is interpolated, extended by growth rates, or derived. crossCheck states whether the providers were actually compared: a failed provider (CROSS_CHECK_DEGRADED) or figures identical to the last digit (IDENTICAL, PROVIDERS_NOT_INDEPENDENT) are flagged. A provider row whose mean falls outside its own high-low range is PROVIDER_INCONSISTENT and left out of the comparison; an EPS gap between providers that matches a recent stock split is NOT_SPLIT_ADJUSTED, not a conflict. With observation_date, returns the curve stored that day. Evidence only.",
+    description="Street consensus by fiscal year, FY0 to FY+horizon, for EPS and revenue from Yahoo Finance and Alpha Vantage, each provider reported separately with fiscal year end, currency, mean/high/low, analyst count and retrieval time. Each metric and period states its coverage: PROVIDER_COVERED, PROVIDER_NOT_COVERED, INSUFFICIENT_ANALYST_COUNT or PROVIDER_CONFLICT (with the cross-provider difference). Years and metrics no provider covers stay PROVIDER_NOT_COVERED; nothing is interpolated, extended by growth rates, or derived. crossCheck states whether the providers were actually compared: a failed provider (CROSS_CHECK_DEGRADED) or figures identical to the last digit (IDENTICAL, PROVIDERS_NOT_INDEPENDENT) are flagged. A provider row whose mean falls outside its own high-low range is PROVIDER_INCONSISTENT and left out of the comparison; an EPS gap between providers that matches a recent stock split is NOT_SPLIT_ADJUSTED, not a conflict. When Alpha Vantage refuses a request for quota, a timeout or an upstream error, its figures stored up to 7 days earlier stand in, marked with their retrieval time, staleFallback and PROVIDER_DATA_STALE. With observation_date, returns the curve stored that day. Evidence only.",
 )
 async def get_consensus_forecast_curve(
     ticker: str,
@@ -12027,7 +12065,7 @@ async def get_consensus_forecast_curve(
 @yfinance_server.tool(
     name="get_eps_revisions",
     output_schema=_TOOL_OUTPUT_SCHEMAS["get_eps_revisions"],
-    description="EPS estimate revision windows for FY0 and FY+1 as each provider reports them: the mean now and 7, 30, 60 and 90 days ago with change and percent change, and up/down revision counts over 7 and 30 days. A window spanning a stock split carries no change (SPLIT_IN_WINDOW), nor does a row whose mean falls outside its own range (PROVIDER_INCONSISTENT). Revenue revisions and analyst adds/drops are PROVIDER_NOT_COVERED. Lists the dates of stored daily consensus observations. Evidence only.",
+    description="EPS estimate revision windows for FY0 and FY+1 as each provider reports them: the mean now and 7, 30, 60 and 90 days ago with change and percent change, and up/down revision counts over 7 and 30 days. A window spanning a stock split carries no change (SPLIT_IN_WINDOW), nor does a row whose mean falls outside its own range (PROVIDER_INCONSISTENT). Stored figures standing in for a refused provider request (PROVIDER_DATA_STALE) have windows ending at their retrieval time. Revenue revisions and analyst adds/drops are PROVIDER_NOT_COVERED. Lists the dates of stored daily consensus observations. Evidence only.",
 )
 async def get_eps_revisions(ticker: str) -> str:
     as_of = _now_iso()

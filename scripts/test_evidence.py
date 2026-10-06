@@ -199,6 +199,45 @@ BOUNDARY_CASES = [
 ]
 
 
+# 2.5.29: a stored Alpha Vantage snapshot standing in for a refused live request.
+STALE_FETCHED_AT = "2026-09-25T02:00:00.000Z"
+# [stored, live status, live message, asOf, expected ticker]; stored is "good", "bad" (not JSON) or "none".
+STALE_CASES = [
+    ["good", "RATE_LIMIT", "25 requests per day", AS_OF, "asts"],
+    ["good", "TIMEOUT", "", AS_OF, "ASTS"],
+    ["good", "PROVIDER_ERROR", None, AS_OF, "asts"],
+    ["good", "AUTH_ERROR", "bad key", AS_OF, "asts"],
+    ["good", "SOURCE_UNCONFIGURED", None, AS_OF, "asts"],
+    ["good", "RATE_LIMIT", None, "2026-10-02T02:00:00.000Z", "asts"],
+    ["good", "RATE_LIMIT", None, "2026-10-02T02:00:00.001Z", "asts"],
+    ["good", "RATE_LIMIT", None, "2026-09-25T01:59:59.000Z", "asts"],
+    ["good", "RATE_LIMIT", None, AS_OF, "msft"],
+    ["bad", "RATE_LIMIT", None, AS_OF, "asts"],
+    ["none", "RATE_LIMIT", None, AS_OF, "asts"],
+]
+
+
+def _stale_stored(kind: str) -> dict | None:
+    key = ev.provider_snapshot_key("alpha_vantage", "EARNINGS_ESTIMATES", "asts", STALE_FETCHED_AT)
+    if kind == "good":
+        return {"key": key, "text": ev.provider_snapshot_body("alpha_vantage", "EARNINGS_ESTIMATES", "asts", STALE_FETCHED_AT, AV)}
+    return {"key": key, "text": "not json"} if kind == "bad" else None
+
+
+def _stale_outputs(yahoo: dict) -> dict:
+    expect = lambda t: {"provider": "alpha_vantage", "operation": "EARNINGS_ESTIMATES", "ticker": t}  # noqa: E731
+    cases = [ev.stale_snapshot(_stale_stored(kind), expect(t), {"status": st, "message": msg}, at) for kind, st, msg, at, t in STALE_CASES]
+    hit = cases[0]
+    av_stale = ev.alpha_vantage_consensus_input(hit["payload"], retrieved_at=hit["fetchedAt"], stale_fallback=hit["staleFallback"])
+    return {
+        "staleCases": [None if c is None else {"fetchedAt": c["fetchedAt"], "staleFallback": c["staleFallback"], "estimates": len(c["payload"]["estimates"])} for c in cases],
+        "staleBody": _stale_stored("good"),
+        "staleCandidateKeys": ev.provider_snapshot_candidate_keys("alpha_vantage", "EARNINGS_ESTIMATES", "asts", "2026-10-03T08:00:00.000Z"),
+        "curveAvStale": ev.build_consensus_curve("asts", [yahoo, av_stale], AS_OF),
+        "revisionsAvStale": ev.build_eps_revisions("asts", [yahoo, av_stale], AS_OF),
+    }
+
+
 def _boundary_out(raw: object) -> object:
     try:
         return json.loads(raw)  # type: ignore[arg-type]
@@ -285,6 +324,7 @@ def _python_outputs() -> dict:
         "observationKey": ev.consensus_observation_key("asts", AS_OF),
         "boundary": [_boundary_out(ev.with_authority_boundary(a, raw)) for a, raw in BOUNDARY_CASES],
         "boundaryActions": sorted(ev.EVIDENCE_ONLY_ACTIONS),
+        **_stale_outputs(yahoo),
     }
 
 
@@ -366,6 +406,22 @@ const out = {
   boundary: f.boundaryCases.map(([a, raw]) => { const o = m.withAuthorityBoundary(a, raw); try { return JSON.parse(o); } catch { return o; } }),
   boundaryActions: [...m.EVIDENCE_ONLY_ACTIONS].sort(),
 };
+const staleStored = (kind) => {
+  const key = m.providerSnapshotKey("alpha_vantage", "EARNINGS_ESTIMATES", "asts", f.staleFetchedAt);
+  if (kind === "good") return { key, text: m.providerSnapshotBody("alpha_vantage", "EARNINGS_ESTIMATES", "asts", f.staleFetchedAt, f.av) };
+  return kind === "bad" ? { key, text: "not json" } : null;
+};
+const staleCases = f.staleCases.map(([kind, status, message, at, t]) =>
+  m.staleSnapshot(staleStored(kind), { provider: "alpha_vantage", operation: "EARNINGS_ESTIMATES", ticker: t }, { status, message }, at));
+const hit = staleCases[0];
+const avStale = m.alphaVantageConsensusInput(hit.payload, { retrievedAt: hit.fetchedAt, staleFallback: hit.staleFallback });
+Object.assign(out, {
+  staleCases: staleCases.map((c) => c === null ? null : { fetchedAt: c.fetchedAt, staleFallback: c.staleFallback, estimates: c.payload.estimates.length }),
+  staleBody: staleStored("good"),
+  staleCandidateKeys: m.providerSnapshotCandidateKeys("alpha_vantage", "EARNINGS_ESTIMATES", "asts", "2026-10-03T08:00:00.000Z"),
+  curveAvStale: m.buildConsensusCurve("asts", [yahoo, avStale], AS_OF),
+  revisionsAvStale: m.buildEpsRevisions("asts", [yahoo, avStale], AS_OF),
+});
 console.log(JSON.stringify(out));
 """
 
@@ -382,6 +438,7 @@ def _worker_outputs() -> dict:
         "dgTrend": DG_TREND, "dgNaming": DG_NAMING,
         "anetAsOf": ANET_AS_OF, "anetTrend": ANET_TREND, "anetAv": ANET_AV, "anetSplits": ANET_SPLITS, "anetOldSplits": ANET_OLD_SPLITS,
         "f013Trend": F013_TREND, "f013Av": F013_AV, "f013AvNear": F013_AV_NEAR, "f013DecimalCases": F013_DECIMAL_CASES,
+        "staleFetchedAt": STALE_FETCHED_AT, "staleCases": STALE_CASES,
         "splitsFailed": SPLITS_FAILED, "reverseSplits": REVERSE_SPLITS, "reverseA": REVERSE_A, "reverseB": REVERSE_B,
         # JSON cannot carry -0.0 distinctly from 0 in every parser; both runtimes format it as 0.
         "canonical": CANONICAL_CASES,
@@ -599,6 +656,74 @@ class TestConsensusCurve(unittest.TestCase):
         self.assertEqual(rev["revenueRevisions"]["coverage"], "PROVIDER_NOT_COVERED")
         self.assertEqual(rev["splitHistory"], {"status": "NOT_REQUESTED", "lookbackDays": 91, "recentSplits": []})
         self.assertEqual(rev["warnings"], [])
+
+
+class TestStaleProviderFallback(unittest.TestCase):
+    """2.5.29: a refused Alpha Vantage request falls back to its last stored payload, marked stale."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.out = _python_outputs()
+
+    def test_which_refusals_and_snapshots_stand_in(self) -> None:
+        key = "provider-snapshots/alpha_vantage/EARNINGS_ESTIMATES/ASTS/2026-09-25.json"
+        cases = self.out["staleCases"]
+        self.assertEqual(cases[0], {"fetchedAt": STALE_FETCHED_AT, "estimates": 4, "staleFallback": {
+            "liveStatus": "RATE_LIMIT", "liveMessage": "25 requests per day", "ageHours": 30, "snapshotKey": key}})
+        # A timeout or upstream error passes too; an empty message reads as none.
+        self.assertEqual(cases[1]["staleFallback"]["liveMessage"], None)
+        self.assertEqual(cases[2]["staleFallback"]["liveStatus"], "PROVIDER_ERROR")
+        # A bad key or no key is not something that passes: no stand-in.
+        self.assertEqual(cases[3:5], [None, None])
+        # Exactly seven days old is in; a millisecond older, or fetched after asOf, is out.
+        self.assertEqual(cases[5]["staleFallback"]["ageHours"], 168)
+        self.assertEqual(cases[6:8], [None, None])
+        # Another ticker's snapshot, an unreadable one or none at all: no stand-in.
+        self.assertEqual(cases[8:], [None, None, None])
+
+    def test_snapshot_keys_and_body(self) -> None:
+        self.assertEqual(self.out["staleBody"]["key"], "provider-snapshots/alpha_vantage/EARNINGS_ESTIMATES/ASTS/2026-09-25.json")
+        body = json.loads(self.out["staleBody"]["text"])
+        self.assertEqual({k: body[k] for k in ("schema", "provider", "operation", "ticker", "fetchedAt")}, {
+            "schema": "yfmcp.provider-snapshot/1", "provider": "alpha_vantage", "operation": "EARNINGS_ESTIMATES", "ticker": "ASTS", "fetchedAt": STALE_FETCHED_AT})
+        # Published text survives the round trip, so F-013's precision rule still sees "5.2020"-style strings.
+        self.assertEqual(body["payload"], AV)
+        keys = self.out["staleCandidateKeys"]
+        self.assertEqual([k.rsplit("/", 1)[-1] for k in keys], [f"2026-10-0{d}.json" for d in (3, 2, 1)] + [f"2026-09-{d}.json" for d in (30, 29, 28, 27, 26)])
+
+    def test_stale_figures_are_compared_and_flagged(self) -> None:
+        curve = self.out["curveAvStale"]
+        key = "provider-snapshots/alpha_vantage/EARNINGS_ESTIMATES/ASTS/2026-09-25.json"
+        stale = {"liveStatus": "RATE_LIMIT", "liveMessage": "25 requests per day", "ageHours": 30, "snapshotKey": key}
+        check = curve["crossCheck"]
+        self.assertEqual(check["providersAnswered"], ["yahoo_finance", "alpha_vantage"])
+        self.assertEqual(check["providersFailed"], [])
+        self.assertEqual(check["providersStale"], [{"provider": "alpha_vantage", "retrievedAt": STALE_FETCHED_AT, **stale}])
+        self.assertEqual(list(check)[-1], "providersStale")
+        av = next(p for p in curve["providers"] if p["provider"] == "alpha_vantage")
+        self.assertEqual((av["status"], av["retrievedAt"], av["staleFallback"]), ("OK", STALE_FETCHED_AT, stale))
+        self.assertNotIn("staleFallback", next(p for p in curve["providers"] if p["provider"] == "yahoo_finance"))
+        entry = next(e for e in _cell(curve, "FY0", "eps")["providers"] if e["provider"] == "alpha_vantage")
+        self.assertEqual(entry["retrievedAt"], STALE_FETCHED_AT)
+        codes = [w["code"] for w in curve["warnings"]]
+        self.assertNotIn("CROSS_CHECK_DEGRADED", codes)
+        warning = next(w for w in curve["warnings"] if w["code"] == "PROVIDER_DATA_STALE")
+        self.assertEqual((warning["severity"], warning["message"]), ("warning",
+            f"alpha_vantage returned RATE_LIMIT: 25 requests per day. Its figures retrieved at {STALE_FETCHED_AT} (30 hours before asOf) stand in. "
+            "A difference from another provider may be a revision since then, not a disagreement. "
+            "This server's Alpha Vantage key and its quota are its own, separate from any key used directly."))
+        # The same comparison as live figures would get.
+        self.assertEqual(_cell(curve, "FY0", "eps")["agreement"], _cell(self.out["curve"], "FY0", "eps")["agreement"])
+        # A live curve carries no stale fields.
+        self.assertNotIn("providersStale", self.out["curve"]["crossCheck"])
+        self.assertNotIn("staleFallback", self.out["curve"]["providers"][1])
+
+    def test_stale_revision_windows_are_flagged(self) -> None:
+        rev = self.out["revisionsAvStale"]
+        av = next(p for p in rev["providers"] if p["provider"] == "alpha_vantage")
+        self.assertEqual(av["staleFallback"]["ageHours"], 30)
+        self.assertEqual([w["code"] for w in rev["warnings"]], ["PROVIDER_DATA_STALE"])
+        self.assertIn("Its windows end at that time, not at asOf.", rev["warnings"][0]["message"])
 
 
 class TestProviderRowGuards(unittest.TestCase):

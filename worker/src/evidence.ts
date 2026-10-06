@@ -13,6 +13,7 @@ import { companyFiscalYearEnd, fiscalYearOfPeriodEnd, type FiscalYearNaming } fr
 
 export const EVIDENCE_CUT_SCHEMA = "yfmcp.evidence-cut/1";
 export const CONSENSUS_OBSERVATION_SCHEMA = "yfmcp.consensus-observation/1";
+export const PROVIDER_SNAPSHOT_SCHEMA = "yfmcp.provider-snapshot/1";
 export const CANONICALIZATION = "yfmcp-canonical-json/1: sorted keys, no whitespace, ECMAScript number formatting, UTF-8";
 
 export const AUTHORITY_BOUNDARY = {
@@ -108,6 +109,65 @@ export function consensusObservationKey(ticker: string, isoDate: string): string
   return `consensus-history/${ticker.toUpperCase()}/${isoDate.slice(0, 10)}.json`;
 }
 
+// ── Provider snapshots (2.5.29) ──────────────────────────────────────────────
+// A provider's last good payload, kept once a day, stands in when a live request is refused for a reason that
+// passes (quota, timeout, upstream error). It never stands in for a missing key or entitlement, and never past
+// STALE_FALLBACK_MAX_AGE_DAYS.
+
+export const STALE_FALLBACK_MAX_AGE_DAYS = 7;
+export const STALE_FALLBACK_STATUSES = new Set(["RATE_LIMIT", "TIMEOUT", "PROVIDER_ERROR"]);
+
+export interface StaleFallback {
+  liveStatus: string;
+  liveMessage: string | null;
+  ageHours: number;
+  snapshotKey: string;
+}
+
+export function providerSnapshotKey(provider: string, operation: string, ticker: string, isoDate: string): string {
+  return `provider-snapshots/${provider}/${operation}/${ticker.toUpperCase()}/${isoDate.slice(0, 10)}.json`;
+}
+
+/** The snapshot keys a STALE_FALLBACK_MAX_AGE_DAYS window can reach, newest day first (asOf's day back to the oldest). */
+export function providerSnapshotCandidateKeys(provider: string, operation: string, ticker: string, asOf: string): string[] {
+  const day = dayNumber(asOf);
+  return Array.from({ length: STALE_FALLBACK_MAX_AGE_DAYS + 1 }, (_, k) =>
+    providerSnapshotKey(provider, operation, ticker, new Date((day - k) * 86_400_000).toISOString()));
+}
+
+export function providerSnapshotBody(provider: string, operation: string, ticker: string, fetchedAt: string, payload: unknown): string {
+  return canonicalJson({ schema: PROVIDER_SNAPSHOT_SCHEMA, provider, operation, ticker: ticker.toUpperCase(), fetchedAt, payload });
+}
+
+/**
+ * The stored snapshot that may stand in for a refused live request, or null: the live status must be one that
+ * passes, and the snapshot must be this provider's, operation's and ticker's, fetched no later than asOf and no
+ * more than STALE_FALLBACK_MAX_AGE_DAYS before it.
+ */
+export function staleSnapshot(
+  stored: { key: string; text: string } | null,
+  expect: { provider: string; operation: string; ticker: string },
+  live: { status: string; message: string | null },
+  asOf: string,
+): { payload: unknown; fetchedAt: string; staleFallback: StaleFallback } | null {
+  if (!stored || !STALE_FALLBACK_STATUSES.has(live.status)) return null;
+  let value: Rec;
+  try {
+    value = JSON.parse(stored.text) as Rec;
+  } catch {
+    return null;
+  }
+  if (!value || value.schema !== PROVIDER_SNAPSHOT_SCHEMA || value.provider !== expect.provider || value.operation !== expect.operation
+    || value.ticker !== expect.ticker.toUpperCase() || typeof value.fetchedAt !== "string" || value.payload == null) return null;
+  const ageMs = Date.parse(asOf) - Date.parse(value.fetchedAt);
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > STALE_FALLBACK_MAX_AGE_DAYS * 86_400_000) return null;
+  return {
+    payload: value.payload,
+    fetchedAt: value.fetchedAt,
+    staleFallback: { liveStatus: live.status, liveMessage: live.message || null, ageHours: round(ageMs / 3_600_000, 1), snapshotKey: stored.key },
+  };
+}
+
 // ── Numbers ──────────────────────────────────────────────────────────────────
 
 function num(value: unknown): number | null {
@@ -189,6 +249,8 @@ export interface ProviderConsensusInput {
   providerTimestamp: string | null;
   message: string | null;
   periods: ProviderPeriod[];
+  // Present only when a stored snapshot stood in for a refused live request (2.5.29).
+  staleFallback?: StaleFallback;
 }
 
 /** A stock split: `ratio` is new shares per old share (4 for a 4-for-1, 0.1 for a 1-for-10 reverse split). */
@@ -318,7 +380,7 @@ export function yahooConsensusInput(
 /** Alpha Vantage EARNINGS_ESTIMATES fiscal-year rows as provider periods. */
 export function alphaVantageConsensusInput(
   payload: unknown,
-  opts: { retrievedAt: string | null; status?: string; message?: string | null },
+  opts: { retrievedAt: string | null; status?: string; message?: string | null; staleFallback?: StaleFallback | null },
 ): ProviderConsensusInput {
   const rows = ((payload && typeof payload === "object" ? (payload as Rec).estimates : null) ?? []) as Rec[];
   const periods: ProviderPeriod[] = [];
@@ -361,6 +423,7 @@ export function alphaVantageConsensusInput(
     providerTimestamp: null,
     message: opts.message ?? null,
     periods,
+    ...(opts.staleFallback ? { staleFallback: opts.staleFallback } : {}),
   };
 }
 
@@ -538,14 +601,19 @@ function crossCheck(inputs: ProviderConsensusInput[], periods: Rec[]): { summary
     : compared === 0 ? "NOT_COMPARED"
     : identical === compared ? "NOT_INDEPENDENT"
     : "CROSS_CHECKED";
+  const stale = inputs.filter((i) => i.status === "OK" && i.staleFallback);
   const warnings: Rec[] = [];
   for (const f of failed) {
-    const quota = f.provider === "alpha_vantage"
-      ? " This server's Alpha Vantage key and its quota are its own, separate from any key used directly."
-      : "";
     warnings.push({
       code: "CROSS_CHECK_DEGRADED",
-      message: `${f.provider} returned ${f.status}${f.message ? `: ${f.message}` : ""}. The curve is not cross-checked against it.${quota}`,
+      message: `${f.provider} returned ${f.status}${f.message ? `: ${f.message}` : ""}. The curve is not cross-checked against it.${quotaNote(f.provider)}`,
+      severity: "warning",
+    });
+  }
+  for (const i of stale) {
+    warnings.push({
+      code: "PROVIDER_DATA_STALE",
+      message: `${staleText(i)} A difference from another provider may be a revision since then, not a disagreement.${quotaNote(i.provider)}`,
       severity: "warning",
     });
   }
@@ -557,9 +625,26 @@ function crossCheck(inputs: ProviderConsensusInput[], periods: Rec[]): { summary
     });
   }
   return {
-    summary: { status, providersAnswered: answered, providersFailed: failed, cellsCompared: compared, cellsIdentical: identical },
+    summary: {
+      status, providersAnswered: answered, providersFailed: failed, cellsCompared: compared, cellsIdentical: identical,
+      ...(stale.length ? { providersStale: stale.map((i) => ({ provider: i.provider, retrievedAt: i.retrievedAt, ...i.staleFallback })) } : {}),
+    },
     warnings,
   };
+}
+
+function quotaNote(provider: string): string {
+  return provider === "alpha_vantage" ? " This server's Alpha Vantage key and its quota are its own, separate from any key used directly." : "";
+}
+
+/** "alpha_vantage returned RATE_LIMIT: …. Its figures retrieved at … (30.5 hours before asOf) stand in." */
+function staleText(i: ProviderConsensusInput): string {
+  const f = i.staleFallback as StaleFallback;
+  return `${i.provider} returned ${f.liveStatus}${f.liveMessage ? `: ${f.liveMessage}` : ""}. Its figures retrieved at ${i.retrievedAt} (${f.ageHours} hours before asOf) stand in.`;
+}
+
+function providerSummary(i: ProviderConsensusInput): Rec {
+  return i.staleFallback ? { staleFallback: i.staleFallback } : {};
 }
 
 function metricCoverage(entries: Rec[], agreementStatus: string): string {
@@ -675,6 +760,7 @@ export function buildConsensusCurve(
       providerTimestamp: i.providerTimestamp,
       message: i.message,
       fiscalYearsReturned: i.periods.map((p) => p.fiscalYearEnd).filter(Boolean),
+      ...providerSummary(i),
     })),
     periods,
     coverageSummary: summary,
@@ -790,6 +876,13 @@ export function buildEpsRevisions(ticker: string, inputs: ProviderConsensusInput
     });
   }
   warnings.push(...splitHistoryWarnings(splitHistory, "Revision windows are not checked against splits."));
+  for (const i of inputs.filter((x) => x.status === "OK" && x.staleFallback)) {
+    warnings.push({
+      code: "PROVIDER_DATA_STALE",
+      message: `${staleText(i)} Its windows end at that time, not at asOf.${quotaNote(i.provider)}`,
+      severity: "warning",
+    });
+  }
   return {
     ticker: ticker.toUpperCase(),
     asOf,
@@ -797,7 +890,7 @@ export function buildEpsRevisions(ticker: string, inputs: ProviderConsensusInput
     periods,
     revenueRevisions: { coverage: "PROVIDER_NOT_COVERED", note: "No configured provider publishes revenue estimate history." },
     analystCountChanges: { coverage: "PROVIDER_NOT_COVERED", note: "No configured provider publishes analyst adds or drops." },
-    providers: inputs.map((i) => ({ provider: i.provider, status: i.status, retrievedAt: i.retrievedAt, message: i.message })),
+    providers: inputs.map((i) => ({ provider: i.provider, status: i.status, retrievedAt: i.retrievedAt, message: i.message, ...providerSummary(i) })),
     splitHistory: { ...splitHistorySummary(splitHistory, windowSplits), lookbackDays: 91 },
     warnings,
     ...AUTHORITY_BOUNDARY,
