@@ -2166,10 +2166,18 @@ function shortTermInvestments(doc: IxDocument, at: string | null): Picked | null
   };
 }
 
+// Debt totals that include finance leases (2.5.27: MU, XOM, CMCSA and MPC tag their debt only this way), and the
+// finance-lease liabilities that take them back to debt alone.
+const LEASE_INCLUSIVE_TOTAL = "DebtAndCapitalLeaseObligations";
+const LEASE_INCLUSIVE_PARTS = ["DebtCurrent", "LongTermDebtAndCapitalLeaseObligationsCurrent", "LongTermDebtAndCapitalLeaseObligations"];
+const FINANCE_LEASE_TOTAL = "FinanceLeaseLiability";
+const FINANCE_LEASE_PARTS = ["FinanceLeaseLiabilityCurrent", "FinanceLeaseLiabilityNoncurrent"];
+
 // Every concept totalDebt or the instrument rows read; a filing with none of
 // them at any date or dimension reports no borrowings.
 const BORROWING_CONCEPTS = new Set([
   "LongTermDebt", "LongTermDebtCurrent", "LongTermDebtNoncurrent", "NotesPayable", "SeniorNotes", "DebtInstrumentFaceAmount",
+  LEASE_INCLUSIVE_TOTAL, ...LEASE_INCLUSIVE_PARTS,
   ...SHORT_TERM_BORROWING_CONCEPTS, ...DEBT_LINE_CONCEPTS, ...CARRYING_CONCEPTS, ...CONVERTIBLE_TOTAL_CONCEPTS, ...CONVERTIBLE_PART_CONCEPTS,
 ]);
 
@@ -2229,12 +2237,42 @@ function totalDebt(doc: IxDocument, at: string | null): Record<string, unknown> 
     const parts = [cur, non].filter((p): p is Picked => p != null);
     return withConvertibles(parts.reduce((sum, p) => sum + p.value, 0), parts, "LongTermDebtCurrent + LongTermDebtNoncurrent plus short-term borrowings");
   }
+  const leaseInclusive = leaseInclusiveDebt(doc, at);
+  if (leaseInclusive) return leaseInclusive;
   const lines = DEBT_LINE_CONCEPTS.map((c) => total(doc, c, at)).filter((p): p is Picked => p != null);
   if (lines.length > 0) return withShort(lines.reduce((sum, p) => sum + p.value, 0), lines, "Sum of tagged debt lines plus short-term borrowings");
   const fallback = firstTotal(doc, ["ConvertibleNotesPayable", "NotesPayable", "SeniorNotes"], at);
   if (fallback) return withShort(fallback.value, [fallback], `${fallback.concept} plus short-term borrowings`);
   if (shortTerm.length > 0) return withShort(0, [], "Short-term borrowings only");
   return null;
+}
+
+/**
+ * Debt from totals that include finance leases, less the finance-lease liabilities when the filing tags them
+ * (2.5.27: MU tags DebtAndCapitalLeaseObligations 5,722 and FinanceLeaseLiability 2,670, so debt is 3,052, the sum
+ * of its notes). Current debt in these totals already holds short-term borrowings, so none are added. `leases`
+ * says whether the leases were taken out or could not be.
+ */
+function leaseInclusiveDebt(doc: IxDocument, at: string | null): Record<string, unknown> | null {
+  const whole = total(doc, LEASE_INCLUSIVE_TOTAL, at);
+  const parts = whole ? [whole] : LEASE_INCLUSIVE_PARTS.map((c) => total(doc, c, at)).filter((p): p is Picked => p != null);
+  if (parts.length === 0) return null;
+  // DebtCurrent and the current lease-inclusive line are alternatives for the same current debt.
+  const used = parts.some((p) => localName(p.concept) === "DebtCurrent") ? parts.filter((p) => localName(p.concept) !== "LongTermDebtAndCapitalLeaseObligationsCurrent") : parts;
+  const gross = used.reduce((sum, p) => sum + p.value, 0);
+  const leaseWhole = total(doc, FINANCE_LEASE_TOTAL, at);
+  const leaseParts = leaseWhole ? [leaseWhole] : FINANCE_LEASE_PARTS.map((c) => total(doc, c, at)).filter((p): p is Picked => p != null);
+  const lease = leaseParts.reduce((sum, p) => sum + p.value, 0);
+  const grossBasis = used.map((p) => localName(p.concept)).join(" + ");
+  if (leaseParts.length > 0 && lease <= gross) {
+    return {
+      value: gross - lease,
+      components: [...used.map((p) => ({ concept: p.concept, amount: p.value })), ...leaseParts.map((p) => ({ concept: p.concept, amount: -p.value }))],
+      basis: `${grossBasis} (debt including finance leases) less ${leaseParts.map((p) => localName(p.concept)).join(" + ")}`,
+      leases: "SUBTRACTED",
+    };
+  }
+  return { value: gross, components: used.map((p) => ({ concept: p.concept, amount: p.value })), basis: `${grossBasis} (debt including finance leases; no finance-lease liability tagged to take out)`, leases: "INCLUDED" };
 }
 
 function addYears(date: string, years: number): string {
@@ -2369,7 +2407,39 @@ function maturityStatements(matches: TextMatch[]): { date: string; sentence: str
 
 /** Rows still outstanding with a non-zero amount but no maturity: what a maturity ladder cannot place. */
 function unplacedRows(rows: Record<string, unknown>[]): Record<string, unknown>[] {
-  return rows.filter((r) => r.maturityDate == null && r.status !== "matured_before_period_end" && (ladderAmount(r)?.amount ?? 0) !== 0);
+  return rows.filter((r) => r.maturityDate == null && r.status !== "matured_before_period_end" && !r.aggregateOf && (ladderAmount(r)?.amount ?? 0) !== 0);
+}
+
+const AGGREGATE_MAX_ROWS = 16;
+
+/**
+ * An undated row whose amount is, within half a percent, the sum of exactly one set of two or more other rows on
+ * the same basis, each named for the same kind of instrument, is their aggregate (2.5.27: VRT's "Senior Unsecured
+ * Notes" 2,100.0 is its 2036, 2046, 2056 and 2066 notes, 600 + 500 + 500 + 500; the filing tags them side by side
+ * with no link). Each such row is marked aggregateOf and returned.
+ */
+function markAggregates(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  const marked: Record<string, unknown>[] = [];
+  const live = rows.filter((r) => r.status !== "matured_before_period_end" && (ladderAmount(r)?.amount ?? 0) > 0);
+  for (const row of live) {
+    if (row.maturityDate != null) continue;
+    const own = ladderAmount(row)!;
+    const kind = String(row.instrument).trim().split(/\s+/).pop()?.toLowerCase() ?? "";
+    const others = live.filter((r) => r !== row && !r.aggregateOf && ladderAmount(r)!.basis === own.basis
+      && String(r.instrument).toLowerCase().split(/\s+/).includes(kind));
+    if (others.length < 2 || others.length > AGGREGATE_MAX_ROWS) continue;
+    const matches: number[] = [];
+    for (let mask = 1; mask < 1 << others.length && matches.length < 2; mask++) {
+      if ((mask & (mask - 1)) === 0) continue;
+      let sum = 0;
+      for (let i = 0; i < others.length; i++) if (mask & (1 << i)) sum += ladderAmount(others[i])!.amount;
+      if (Math.abs(sum - own.amount) <= AGGREGATE_TOLERANCE * own.amount) matches.push(mask);
+    }
+    if (matches.length !== 1) continue;
+    row.aggregateOf = others.filter((_, i) => matches[0] & (1 << i)).map((r) => r.instrument);
+    marked.push(row);
+  }
+  return marked;
 }
 
 /**
@@ -2378,7 +2448,7 @@ function unplacedRows(rows: Record<string, unknown>[]): Record<string, unknown>[
  */
 export function wantsMaturityText(out: Record<string, unknown>): boolean {
   return ((out.instruments ?? []) as Record<string, unknown>[]).some((r) =>
-    r.status !== "matured_before_period_end" && (ladderAmount(r)?.amount ?? 0) !== 0
+    r.status !== "matured_before_period_end" && !r.aggregateOf && (ladderAmount(r)?.amount ?? 0) !== 0
     && (r.maturityDateSource == null || r.maturityDateSource === "INSTRUMENT_NAME"));
 }
 
@@ -2467,9 +2537,17 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
     debt = { value: 0, components: [], basis: "No borrowing concepts tagged in the filing" };
     warnings.push({ code: "NO_BORROWINGS_TAGGED", message: "The filing tags no borrowings at any date, so total debt is taken as zero (leases excluded).", severity: "info" });
   }
+  if (debt?.leases === "SUBTRACTED") {
+    warnings.push({ code: "FINANCE_LEASES_SUBTRACTED", message: `The filing tags debt only with finance leases included; total debt is ${debt.basis} = ${debt.value}.`, severity: "info" });
+  } else if (debt?.leases === "INCLUDED") {
+    warnings.push({ code: "TOTAL_DEBT_INCLUDES_FINANCE_LEASES", message: `The filing tags debt only with finance leases included and tags no finance-lease liability to take out; total debt ${debt.value} includes finance leases.`, severity: "warning" });
+  }
   const instrumentRows = instruments(doc, periodEnd);
   if (input.maturityMatches?.length) maturityFromText(instrumentRows, maturityStatements(input.maturityMatches));
   maturityFromName(instrumentRows, periodEnd);
+  for (const row of markAggregates(instrumentRows)) {
+    warnings.push({ code: "AGGREGATE_ROW_EXCLUDED", message: `${row.instrument} (${ladderAmount(row)!.amount}) equals the sum of ${(row.aggregateOf as string[]).join(", ")}; it is left out of the ladder, coverage and reconciliation so it is not counted twice.`, severity: "info" });
+  }
   const named = instrumentRows.filter((r) => r.maturityDateSource === "INSTRUMENT_NAME");
   if (named.length > 0) {
     warnings.push({ code: "MATURITY_FROM_INSTRUMENT_NAME", message: `No tagged or stated maturity date for ${named.map((r) => `${r.instrument} (${r.maturityDate})`).join(", ")}; dated from the instrument name, to the year or month it gives.`, severity: "info" });
@@ -2503,7 +2581,7 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
   for (const row of instrumentRows) {
     const maturity = row.maturityDate as string | null;
     const amount = ladderAmount(row);
-    if (!maturity || !amount || row.status === "matured_before_period_end") continue;
+    if (!maturity || !amount || row.status === "matured_before_period_end" || row.aggregateOf) continue;
     const year = maturity.slice(0, 4);
     const entry = byYear.get(year) ?? { year, amount: 0, bases: new Set<string>(), faceAmount: null, instruments: [] };
     entry.amount += amount.amount;
@@ -2545,7 +2623,7 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
   }
   // Instrument rows' period-end carrying amounts against total debt (2.5.24, F-007: AAOI tags 124.9M principal as
   // the 2030 Notes' carrying amount; the balance sheet carries 129.1M).
-  const outstanding = instrumentRows.filter((r) => r.status !== "matured_before_period_end" && ladderAmount(r) != null);
+  const outstanding = instrumentRows.filter((r) => r.status !== "matured_before_period_end" && !r.aggregateOf && ladderAmount(r) != null);
   const carried = outstanding.filter((r) => typeof r.carryingAmount === "number");
   const carriedTotal = carried.reduce((sum, r) => sum + (r.carryingAmount as number), 0);
   const withoutCarrying = outstanding.length - carried.length;

@@ -2404,10 +2404,18 @@ def _short_term_investments(doc: IxDocument, at: str | None) -> dict | None:
     }
 
 
+# Debt totals that include finance leases (2.5.27: MU, XOM, CMCSA and MPC tag their debt only this way), and the
+# finance-lease liabilities that take them back to debt alone.
+_LEASE_INCLUSIVE_TOTAL = "DebtAndCapitalLeaseObligations"
+_LEASE_INCLUSIVE_PARTS = ["DebtCurrent", "LongTermDebtAndCapitalLeaseObligationsCurrent", "LongTermDebtAndCapitalLeaseObligations"]
+_FINANCE_LEASE_TOTAL = "FinanceLeaseLiability"
+_FINANCE_LEASE_PARTS = ["FinanceLeaseLiabilityCurrent", "FinanceLeaseLiabilityNoncurrent"]
+
 # Every concept _total_debt or the instrument rows read; a filing with none of
 # them at any date or dimension reports no borrowings.
 _BORROWING_CONCEPTS = {
     "LongTermDebt", "LongTermDebtCurrent", "LongTermDebtNoncurrent", "NotesPayable", "SeniorNotes", "DebtInstrumentFaceAmount",
+    _LEASE_INCLUSIVE_TOTAL, *_LEASE_INCLUSIVE_PARTS,
     *_SHORT_TERM_BORROWING_CONCEPTS, *_DEBT_LINE_CONCEPTS, *_CARRYING_CONCEPTS, *_CONVERTIBLE_TOTAL_CONCEPTS, *_CONVERTIBLE_PART_CONCEPTS,
 }
 
@@ -2476,6 +2484,9 @@ def _total_debt(doc: IxDocument, at: str | None) -> dict | None:
     if cur or non:
         parts = [p for p in (cur, non) if p is not None]
         return with_convertibles(sum(p["value"] for p in parts), parts, "LongTermDebtCurrent + LongTermDebtNoncurrent plus short-term borrowings")
+    lease_inclusive = _lease_inclusive_debt(doc, at)
+    if lease_inclusive:
+        return lease_inclusive
     lines = [p for p in (_total(doc, c, at) for c in _DEBT_LINE_CONCEPTS) if p is not None]
     if lines:
         return with_short(sum(p["value"] for p in lines), lines, "Sum of tagged debt lines plus short-term borrowings")
@@ -2485,6 +2496,32 @@ def _total_debt(doc: IxDocument, at: str | None) -> dict | None:
     if short_term:
         return with_short(0, [], "Short-term borrowings only")
     return None
+
+
+def _lease_inclusive_debt(doc: IxDocument, at: str | None) -> dict | None:
+    """Debt from totals that include finance leases, less the finance-lease liabilities when the filing tags them
+    (2.5.27: MU tags DebtAndCapitalLeaseObligations 5,722 and FinanceLeaseLiability 2,670, so debt is 3,052, the sum
+    of its notes). Current debt in these totals already holds short-term borrowings, so none are added. `leases`
+    says whether the leases were taken out or could not be."""
+    whole = _total(doc, _LEASE_INCLUSIVE_TOTAL, at)
+    parts = [whole] if whole else [p for p in (_total(doc, c, at) for c in _LEASE_INCLUSIVE_PARTS) if p is not None]
+    if not parts:
+        return None
+    # DebtCurrent and the current lease-inclusive line are alternatives for the same current debt.
+    used = [p for p in parts if _local_name(p["concept"]) != "LongTermDebtAndCapitalLeaseObligationsCurrent"] if any(_local_name(p["concept"]) == "DebtCurrent" for p in parts) else parts
+    gross = sum((p["value"] for p in used), 0)
+    lease_whole = _total(doc, _FINANCE_LEASE_TOTAL, at)
+    lease_parts = [lease_whole] if lease_whole else [p for p in (_total(doc, c, at) for c in _FINANCE_LEASE_PARTS) if p is not None]
+    lease = sum((p["value"] for p in lease_parts), 0)
+    gross_basis = " + ".join(_local_name(p["concept"]) for p in used)
+    if lease_parts and lease <= gross:
+        return {
+            "value": gross - lease,
+            "components": [*({"concept": p["concept"], "amount": p["value"]} for p in used), *({"concept": p["concept"], "amount": -p["value"]} for p in lease_parts)],
+            "basis": f"{gross_basis} (debt including finance leases) less {' + '.join(_local_name(p['concept']) for p in lease_parts)}",
+            "leases": "SUBTRACTED",
+        }
+    return {"value": gross, "components": [{"concept": p["concept"], "amount": p["value"]} for p in used], "basis": f"{gross_basis} (debt including finance leases; no finance-lease liability tagged to take out)", "leases": "INCLUDED"}
 
 
 def _add_years(date: str, years: int) -> str:
@@ -2611,14 +2648,14 @@ def _maturity_statements(matches: list[TextMatch]) -> list[dict]:
 
 def _unplaced_rows(rows: list[dict]) -> list[dict]:
     """Rows still outstanding with a non-zero amount but no maturity: what a maturity ladder cannot place."""
-    return [r for r in rows if r.get("maturityDate") is None and r.get("status") != "matured_before_period_end" and (_ladder_amount(r) or {"amount": 0})["amount"] != 0]
+    return [r for r in rows if r.get("maturityDate") is None and r.get("status") != "matured_before_period_end" and not r.get("aggregateOf") and (_ladder_amount(r) or {"amount": 0})["amount"] != 0]
 
 
 def wants_maturity_text(out: dict) -> bool:
     """Whether the filing text should be searched for maturity sentences: an outstanding row with an amount is dated
     neither by XBRL nor by the text (a date read from its name is only a year or month)."""
     return any(
-        r.get("status") != "matured_before_period_end" and (_ladder_amount(r) or {"amount": 0})["amount"] != 0
+        r.get("status") != "matured_before_period_end" and not r.get("aggregateOf") and (_ladder_amount(r) or {"amount": 0})["amount"] != 0
         and (r.get("maturityDateSource") is None or r.get("maturityDateSource") == "INSTRUMENT_NAME")
         for r in (out.get("instruments") or [])
     )
@@ -2640,6 +2677,45 @@ def _maturity_from_name(rows: list[dict], period_end: str | None) -> None:
             continue
         row["maturityDate"] = date
         row["maturityDateSource"] = "INSTRUMENT_NAME"
+
+
+_AGGREGATE_MAX_ROWS = 16
+
+
+def _mark_aggregates(rows: list[dict]) -> list[dict]:
+    """An undated row whose amount is, within half a percent, the sum of exactly one set of two or more other rows on
+    the same basis, each named for the same kind of instrument, is their aggregate (2.5.27: VRT's "Senior Unsecured
+    Notes" 2,100.0 is its 2036, 2046, 2056 and 2066 notes, 600 + 500 + 500 + 500; the filing tags them side by side
+    with no link). Each such row is marked aggregateOf and returned."""
+    marked: list[dict] = []
+    live = [r for r in rows if r.get("status") != "matured_before_period_end" and (_ladder_amount(r) or {"amount": 0})["amount"] > 0]
+    for row in live:
+        if row.get("maturityDate") is not None:
+            continue
+        own = _ladder_amount(row)
+        words = re.split(r"\s+", str(row["instrument"]).strip())
+        kind = words[-1].lower() if words else ""
+        others = [r for r in live if r is not row and not r.get("aggregateOf") and _ladder_amount(r)["basis"] == own["basis"]
+                  and kind in re.split(r"\s+", str(r["instrument"]).lower())]
+        if len(others) < 2 or len(others) > _AGGREGATE_MAX_ROWS:
+            continue
+        matches: list[int] = []
+        for mask in range(1, 1 << len(others)):
+            if len(matches) >= 2:
+                break
+            if mask & (mask - 1) == 0:
+                continue
+            total = 0
+            for i, other in enumerate(others):
+                if mask & (1 << i):
+                    total += _ladder_amount(other)["amount"]
+            if abs(total - own["amount"]) <= _AGGREGATE_TOLERANCE * own["amount"]:
+                matches.append(mask)
+        if len(matches) != 1:
+            continue
+        row["aggregateOf"] = [r["instrument"] for i, r in enumerate(others) if matches[0] & (1 << i)]
+        marked.append(row)
+    return marked
 
 
 def _maturity_from_text(rows: list[dict], statements: list[dict]) -> None:
@@ -2704,10 +2780,16 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
     if not debt and cash and _tags_no_borrowings(doc):
         debt = {"value": 0, "components": [], "basis": "No borrowing concepts tagged in the filing"}
         warnings.append({"code": "NO_BORROWINGS_TAGGED", "message": "The filing tags no borrowings at any date, so total debt is taken as zero (leases excluded).", "severity": "info"})
+    if debt and debt.get("leases") == "SUBTRACTED":
+        warnings.append({"code": "FINANCE_LEASES_SUBTRACTED", "message": f"The filing tags debt only with finance leases included; total debt is {debt['basis']} = {_js_number(debt['value'])}.", "severity": "info"})
+    elif debt and debt.get("leases") == "INCLUDED":
+        warnings.append({"code": "TOTAL_DEBT_INCLUDES_FINANCE_LEASES", "message": f"The filing tags debt only with finance leases included and tags no finance-lease liability to take out; total debt {_js_number(debt['value'])} includes finance leases.", "severity": "warning"})
     instrument_rows = _instruments(doc, period_end)
     if maturity_matches:
         _maturity_from_text(instrument_rows, _maturity_statements(maturity_matches))
     _maturity_from_name(instrument_rows, period_end)
+    for row in _mark_aggregates(instrument_rows):
+        warnings.append({"code": "AGGREGATE_ROW_EXCLUDED", "message": f"{row['instrument']} ({_js_number(_ladder_amount(row)['amount'])}) equals the sum of {', '.join(row['aggregateOf'])}; it is left out of the ladder, coverage and reconciliation so it is not counted twice.", "severity": "info"})
     from_name = [r for r in instrument_rows if r.get("maturityDateSource") == "INSTRUMENT_NAME"]
     if from_name:
         listed_names = ", ".join(f"{r['instrument']} ({r['maturityDate']})" for r in from_name)
@@ -2739,7 +2821,7 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
     for row in instrument_rows:
         maturity = row["maturityDate"]
         amount = _ladder_amount(row)
-        if not maturity or not amount or row["status"] == "matured_before_period_end":
+        if not maturity or not amount or row["status"] == "matured_before_period_end" or row.get("aggregateOf"):
             continue
         year = maturity[:4]
         entry = by_year.get(year) or {"year": year, "amount": 0, "bases": [], "faceAmount": None, "instruments": []}
@@ -2790,7 +2872,7 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
         })
     # Instrument rows' period-end carrying amounts against total debt (2.5.24, F-007: AAOI tags 124.9M principal as
     # the 2030 Notes' carrying amount; the balance sheet carries 129.1M).
-    outstanding = [r for r in instrument_rows if r["status"] != "matured_before_period_end" and _ladder_amount(r) is not None]
+    outstanding = [r for r in instrument_rows if r["status"] != "matured_before_period_end" and not r.get("aggregateOf") and _ladder_amount(r) is not None]
     carried = [r for r in outstanding if _is_number(r["carryingAmount"])]
     carried_total = sum((r["carryingAmount"] for r in carried), 0)
     without_carrying = len(outstanding) - len(carried)

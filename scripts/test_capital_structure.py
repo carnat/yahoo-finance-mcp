@@ -659,7 +659,44 @@ VRT_DEBT_Q = f"""<html><body>
 <p>Notes issued: {_num("us-gaap:DebtInstrumentFaceAmount", "v36", "usd", "600", 6)} and in aggregate {_num("us-gaap:DebtInstrumentFaceAmount", "vu", "usd", "1,400", 6)}.</p>
 </body></html>"""
 
-FIXTURES = {"ten_k": TEN_K, "aaoi_debt_q": AAOI_DEBT_Q, "mu_debt_q": MU_DEBT_Q, "vrt_debt_q": VRT_DEBT_Q, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K, "cohr_k": COHR_K, "pref_q": PREF_Q, "mrvl_q": MRVL_Q, "life_k": LIFE_K, "aehr_k": AEHR_K, "lite_k": LITE_K, "prefliq_q": PREFLIQ_Q, "stale_q": STALE_Q, "nest_q": NEST_Q}
+# 2.5.27: debt tagged only with finance leases included. MU tags the total and its finance-lease liability; another
+# filer tags current and long-term parts with lease parts; XOM tags the parts and no lease liability at all.
+def _lease_q(facts: list[tuple[str, str]]) -> str:
+    return f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "lq", "10-Q")}
+{_text("dei:DocumentPeriodEndDate", "lq", "May 28, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("lq", "2026-03-01..2026-05-28")}{_context("li", "2026-05-28")}{UNITS}</ix:resources></ix:header></div>
+<p>Cash {_num("us-gaap:CashAndCashEquivalentsAtCarryingValue", "li", "usd", "9,000", 6)}.</p>
+<table>{"".join(f'<tr><td>{c}</td><td>{_num("us-gaap:" + c, "li", "usd", v, 6)}</td></tr>' for c, v in facts)}</table>
+</body></html>"""
+
+
+LEASE_TOTAL_Q = _lease_q([("DebtAndCapitalLeaseObligations", "5,722"), ("FinanceLeaseLiability", "2,670")])
+LEASE_PARTS_Q = _lease_q([("DebtCurrent", "582"), ("LongTermDebtAndCapitalLeaseObligations", "5,140"),
+                          ("FinanceLeaseLiabilityCurrent", "582"), ("FinanceLeaseLiabilityNoncurrent", "2,088")])
+LEASE_UNSPLIT_Q = _lease_q([("DebtCurrent", "10,139"), ("LongTermDebtAndCapitalLeaseObligations", "32,229")])
+# 2.5.27: an aggregate row the filing tags beside its own tranches (VRT's "Senior Unsecured Notes" = 2036 + 2046 + ...),
+# and the same shape where two sets of rows add up to it, so no aggregate can be named.
+def _agg_q(rows: list[tuple[str, str]]) -> str:
+    ctx = "".join(_context(f"g{i}", "2026-06-30", {DEBT: m}) for i, (m, _) in enumerate(rows))
+    return f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "gq", "10-Q")}
+{_text("dei:DocumentPeriodEndDate", "gq", "June 30, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("gq", "2026-01-01..2026-06-30")}{_context("gi", "2026-06-30")}{ctx}{UNITS}</ix:resources></ix:header></div>
+<p>Cash {_num("us-gaap:CashAndCashEquivalentsAtCarryingValue", "gi", "usd", "1,000", 6)}; long-term debt {_num("us-gaap:LongTermDebt", "gi", "usd", "1,950", 6)}.</p>
+<table>{"".join(f'<tr><td>{m}</td><td>{_num("us-gaap:DebtInstrumentFaceAmount", f"g{i}", "usd", v, 6)}</td></tr>' for i, (m, v) in enumerate(rows))}</table>
+</body></html>"""
+
+
+AGG_Q = _agg_q([("vrt:SeniorNotesDue2036Member", "600"), ("vrt:SeniorNotesDue2046Member", "500"), ("vrt:SeniorSecuredNotesDue2028Member", "850"),
+                ("vrt:SeniorUnsecuredNotesMember", "1,100")])
+AGG_AMBIGUOUS_Q = _agg_q([("vrt:SeniorNotesDue2036Member", "600"), ("vrt:SeniorNotesDue2046Member", "500"), ("vrt:SeniorNotesDue2056Member", "500"),
+                          ("vrt:SeniorUnsecuredNotesMember", "1,100")])
+
+FIXTURES = {"ten_k": TEN_K, "aaoi_debt_q": AAOI_DEBT_Q, "mu_debt_q": MU_DEBT_Q, "vrt_debt_q": VRT_DEBT_Q,
+            "lease_total_q": LEASE_TOTAL_Q, "lease_parts_q": LEASE_PARTS_Q, "lease_unsplit_q": LEASE_UNSPLIT_Q, "agg_q": AGG_Q, "agg_ambiguous_q": AGG_AMBIGUOUS_Q, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K, "cohr_k": COHR_K, "pref_q": PREF_Q, "mrvl_q": MRVL_Q, "life_k": LIFE_K, "aehr_k": AEHR_K, "lite_k": LITE_K, "prefliq_q": PREFLIQ_Q, "stale_q": STALE_Q, "nest_q": NEST_Q}
 
 NEWS_ITEMS = [
     {"title": "Needham raises IQE price target to 45p from 38p", "summary": "Needham values IQE at 12x 2027 EV/EBITDA, citing gallium nitride demand.", "url": "https://news.example/1", "publishedAt": "2026-09-20T08:00:00Z", "source": "yahoo_finance_news"},
@@ -744,6 +781,9 @@ out.capitalAaoiDebt = m.capitalStructure({ ticker: "AAOD", source: src("primary"
 out.capitalAaoiDebtNoText = m.capitalStructure({ ticker: "AAOD", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000041", data.qUrl, "aaoi_debt_q"), fundingMatches: [] });
 out.capitalMuDebt = m.capitalStructure({ ticker: "MUD", source: src("primary", "10-Q", "2026-06-25", "0001234568-26-000042", data.qUrl, "mu_debt_q"), fundingMatches: [] });
 out.capitalVrtDebt = m.capitalStructure({ ticker: "VRTD", source: src("primary", "10-Q", "2026-07-30", "0001234568-26-000043", data.qUrl, "vrt_debt_q"), fundingMatches: [] });
+for (const k of ["lease_total_q", "lease_parts_q", "lease_unsplit_q", "agg_q", "agg_ambiguous_q"]) {
+  out[`capital_${k}`] = m.capitalStructure({ ticker: "L", source: src("primary", "10-Q", "2026-07-01", "0001234568-26-000044", data.qUrl, k), fundingMatches: [] });
+}
 out.wantsText = [out.capitalMuDebt, out.capitalAaoiDebt, out.capitalAaoiDebtNoText, out.capital].map(m.wantsMaturityText);
 out.labelsDated = ["aaoi:DebtMaturingDecember282028Member", "aaoi:DebtMaturingJul7132026Member", "aaoi:DebtMaturingJune112027Member", "x:NotesDue2029Member", "x:Series2028Member"].map(m.memberLabel);
 out.capitalAaoi = m.capitalStructure({ ticker: "AAOX", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000040", data.qUrl, "aaoi_q"), fundingMatches: [] });
@@ -906,6 +946,8 @@ def _python_pure() -> dict:
         "ch": cs.companies_house_filings("01234567", CH_HISTORY),
         "chPick": cs.pick_companies_house_match("IQE plc", CH_SEARCH),
     }
+    for k in ("lease_total_q", "lease_parts_q", "lease_unsplit_q", "agg_q", "agg_ambiguous_q"):
+        out[f"capital_{k}"] = cs.capital_structure("L", cs.IxSource("primary", "10-Q", "2026-07-01", "0001234568-26-000044", Q_URL, docs[k]), [])
     out["wantsText"] = [cs.wants_maturity_text(out[k]) for k in ("capitalMuDebt", "capitalAaoiDebt", "capitalAaoiDebtNoText", "capital")]
     return out
 
@@ -923,7 +965,7 @@ class TestCapitalStructureParity(unittest.TestCase):
             self.assertEqual(self.worker["documents"][name], self.local["documents"][name], name)
 
     def test_outputs_match(self) -> None:
-        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "bridgeStale", "bridgeStaleUnread", "bridgeSettled", "bridgeLiteSettled", "bridgeCensus2", "preferredWordings", "bridgeCapped", "bridgeCappedHigh", "bridgeLiteCapped", "cappedTerms", "bridgeNest", "bridgeNestUnread", "capital", "capitalAaoi", "capitalAaoiDebt", "capitalAaoiDebtNoText", "capitalMuDebt", "capitalVrtDebt", "wantsText", "labelsDated", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
+        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "bridgeStale", "bridgeStaleUnread", "bridgeSettled", "bridgeLiteSettled", "bridgeCensus2", "preferredWordings", "bridgeCapped", "bridgeCappedHigh", "bridgeLiteCapped", "cappedTerms", "bridgeNest", "bridgeNestUnread", "capital", "capitalAaoi", "capitalAaoiDebt", "capitalAaoiDebtNoText", "capitalMuDebt", "capitalVrtDebt", "capital_lease_total_q", "capital_lease_parts_q", "capital_lease_unsplit_q", "capital_agg_q", "capital_agg_ambiguous_q", "wantsText", "labelsDated", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
 
@@ -1193,6 +1235,50 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertEqual(warn["MATURITY_LADDER_INCOMPLETE"], "No maturity date for Senior Unsecured Notes (1400000000); "
                          "the year ladder places 600000000 on a FACE basis (0 at carrying amounts) against total debt 2000000000.")
         self.assertNotIn("INSTRUMENTS_DO_NOT_RECONCILE", warn)
+
+    def test_debt_tagged_only_with_finance_leases(self) -> None:
+        # 2.5.27: MU tags DebtAndCapitalLeaseObligations and FinanceLeaseLiability; debt is the difference, its notes.
+        mu = self.out["capital_lease_total_q"]
+        self.assertEqual((mu["status"], mu["balances"]["totalDebt"], mu["balances"]["netCash"]), ("COMPUTED", 3_052_000_000, 5_948_000_000))
+        self.assertEqual(mu["balances"]["totalDebtBasis"], "DebtAndCapitalLeaseObligations (debt including finance leases) less FinanceLeaseLiability")
+        self.assertEqual(mu["balances"]["totalDebtComponents"], [{"concept": "us-gaap:DebtAndCapitalLeaseObligations", "amount": 5_722_000_000},
+                                                                 {"concept": "us-gaap:FinanceLeaseLiability", "amount": -2_670_000_000}])
+        self.assertEqual([w["code"] for w in mu["warnings"]], ["FINANCE_LEASES_SUBTRACTED"])
+        self.assertEqual(mu["warnings"][0]["message"], "The filing tags debt only with finance leases included; total debt is "
+                         "DebtAndCapitalLeaseObligations (debt including finance leases) less FinanceLeaseLiability = 3052000000.")
+        # Current and long-term parts, with lease parts.
+        parts = self.out["capital_lease_parts_q"]
+        self.assertEqual(parts["balances"]["totalDebt"], 3_052_000_000)
+        self.assertEqual(parts["balances"]["totalDebtBasis"], "DebtCurrent + LongTermDebtAndCapitalLeaseObligations (debt including finance leases) less "
+                         "FinanceLeaseLiabilityCurrent + FinanceLeaseLiabilityNoncurrent")
+        # XOM: parts and no lease liability. Debt includes the leases, and says so; it is no longer a false zero.
+        xom = self.out["capital_lease_unsplit_q"]
+        self.assertEqual((xom["status"], xom["balances"]["totalDebt"]), ("COMPUTED", 42_368_000_000))
+        self.assertEqual(xom["balances"]["totalDebtBasis"], "DebtCurrent + LongTermDebtAndCapitalLeaseObligations (debt including finance leases; no finance-lease liability tagged to take out)")
+        self.assertEqual([w["code"] for w in xom["warnings"]], ["TOTAL_DEBT_INCLUDES_FINANCE_LEASES"])
+        self.assertNotIn("NO_BORROWINGS_TAGGED", [w["code"] for w in xom["warnings"]])
+        self.assertFalse(cs._tags_no_borrowings(cs.parse_ixbrl(LEASE_UNSPLIT_Q)))
+
+    def test_aggregate_row_is_not_counted_twice(self) -> None:
+        # 2.5.27: VRT's "Senior Unsecured Notes" is the sum of its dated notes, tagged beside them.
+        c = self.out["capital_agg_q"]
+        rows = {r["instrument"]: r for r in c["instruments"]}
+        self.assertEqual(rows["Senior Unsecured Notes"]["aggregateOf"], ["Senior Notes Due 2036", "Senior Notes Due 2046"])
+        self.assertNotIn("aggregateOf", rows["Senior Secured Notes Due 2028"])
+        self.assertEqual([(y["year"], y["amount"]) for y in c["instrumentMaturitiesByYear"]], [("2028", 850_000_000), ("2036", 600_000_000), ("2046", 500_000_000)])
+        self.assertEqual(c["ladderCoverage"]["notLaddered"], [])
+        self.assertEqual(c["ladderCoverage"]["ladderedAmount"], 1_950_000_000)
+        self.assertEqual(c["instrumentReconciliation"]["rowsWithoutCarryingAmount"], 3)
+        warn = {w["code"]: w["message"] for w in c["warnings"]}
+        self.assertEqual(warn["AGGREGATE_ROW_EXCLUDED"], "Senior Unsecured Notes (1100000000) equals the sum of Senior Notes Due 2036, Senior Notes Due 2046; "
+                         "it is left out of the ladder, coverage and reconciliation so it is not counted twice.")
+        self.assertNotIn("MATURITY_LADDER_INCOMPLETE", warn)
+        # Two sets of rows add up to 1,100 (600 + either 500): no aggregate is named, and the row stays unplaced.
+        amb = self.out["capital_agg_ambiguous_q"]
+        self.assertFalse(any("aggregateOf" in r for r in amb["instruments"]))
+        self.assertEqual([u["instrument"] for u in amb["ladderCoverage"]["notLaddered"]], ["Senior Unsecured Notes"])
+        # VRT_DEBT_Q's 1,400 aggregate matches no set of rows.
+        self.assertFalse(any("aggregateOf" in r for r in self.out["capitalVrtDebt"]["instruments"]))
 
     def test_convertibles_at_period_end_and_warrant_exercised_after_count(self) -> None:
         b = _python_pure()["bridgeBe"]
