@@ -2610,8 +2610,36 @@ def _maturity_statements(matches: list[TextMatch]) -> list[dict]:
 
 
 def _unplaced_rows(rows: list[dict]) -> list[dict]:
-    """Rows still outstanding with an amount but no maturity: what a maturity ladder cannot place."""
-    return [r for r in rows if r.get("maturityDate") is None and r.get("status") != "matured_before_period_end" and _ladder_amount(r) is not None]
+    """Rows still outstanding with a non-zero amount but no maturity: what a maturity ladder cannot place."""
+    return [r for r in rows if r.get("maturityDate") is None and r.get("status") != "matured_before_period_end" and (_ladder_amount(r) or {"amount": 0})["amount"] != 0]
+
+
+def wants_maturity_text(out: dict) -> bool:
+    """Whether the filing text should be searched for maturity sentences: an outstanding row with an amount is dated
+    neither by XBRL nor by the text (a date read from its name is only a year or month)."""
+    return any(
+        r.get("status") != "matured_before_period_end" and (_ladder_amount(r) or {"amount": 0})["amount"] != 0
+        and (r.get("maturityDateSource") is None or r.get("maturityDateSource") == "INSTRUMENT_NAME")
+        for r in (out.get("instruments") or [])
+    )
+
+
+_NAME_MATURITY_RE = re.compile(r"\b(?:Due|Maturing|Matures)\s+(?:In\s+)?((?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\.?\s+(?:\d{1,2},\s+)?(?:19|20)\d{2}|(?:19|20)\d{2})\b", re.A)
+
+
+def _maturity_from_name(rows: list[dict], period_end: str | None) -> None:
+    """Last resort for a row with no tagged or stated maturity (2.5.25): the date its name gives after "Due" or
+    "Maturing" ("Due January 2031" -> 2031-01, "Due 2036" -> 2036), only when that is not before the period end.
+    The ladder needs only the year."""
+    for row in rows:
+        if row.get("maturityDate") is not None or row.get("status") == "matured_before_period_end":
+            continue
+        m = _NAME_MATURITY_RE.search(str(row["instrument"]))
+        date = normalize_ix_date(m.group(1)) if m else None
+        if not date or (period_end and date < period_end[:len(date)]):
+            continue
+        row["maturityDate"] = date
+        row["maturityDateSource"] = "INSTRUMENT_NAME"
 
 
 def _maturity_from_text(rows: list[dict], statements: list[dict]) -> None:
@@ -2679,6 +2707,11 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
     instrument_rows = _instruments(doc, period_end)
     if maturity_matches:
         _maturity_from_text(instrument_rows, _maturity_statements(maturity_matches))
+    _maturity_from_name(instrument_rows, period_end)
+    from_name = [r for r in instrument_rows if r.get("maturityDateSource") == "INSTRUMENT_NAME"]
+    if from_name:
+        listed_names = ", ".join(f"{r['instrument']} ({r['maturityDate']})" for r in from_name)
+        warnings.append({"code": "MATURITY_FROM_INSTRUMENT_NAME", "message": f"No tagged or stated maturity date for {listed_names}; dated from the instrument name, to the year or month it gives.", "severity": "info"})
     for row in instrument_rows:
         if isinstance(row.get("maturityDates"), list):
             warnings.append({"code": "MULTIPLE_MATURITIES", "message": f"{row['instrument']} carries {len(row['maturityDates'])} tagged maturities ({', '.join(row['maturityDates'])}) on one amount; the year ladder places it at the earliest.", "severity": "info"})
@@ -2701,6 +2734,8 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
     # it summed carrying amounts under the face name).
     by_year: dict[str, dict] = {}
     laddered = 0
+    laddered_any = 0
+    laddered_bases: list[str] = []
     for row in instrument_rows:
         maturity = row["maturityDate"]
         amount = _ladder_amount(row)
@@ -2717,6 +2752,9 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
         by_year[year] = entry
         if _is_number(row["carryingAmount"]):
             laddered += row["carryingAmount"]
+        laddered_any += amount["amount"]
+        if amount["basis"] not in laddered_bases:
+            laddered_bases.append(amount["basis"])
     instrument_ladder = [
         {"year": e["year"], "amount": e["amount"], "amountBasis": e["bases"][0] if len(e["bases"]) == 1 else "MIXED", "faceAmount": e["faceAmount"], "instruments": e["instruments"]}
         for e in sorted(by_year.values(), key=lambda e: e["year"])
@@ -2729,6 +2767,9 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
         "totalDebt": debt_value,
         "ladderedCarryingAmount": laddered,
         "coveragePct": round_half_up((laddered / debt_value) * 100, 2) if debt_value and debt_value > 0 else None,
+        # Every bucket amount on whatever basis it has (face-only ladders like VRT's carry no carrying amounts).
+        "ladderedAmount": laddered_any,
+        "ladderedAmountBasis": None if not laddered_bases else laddered_bases[0] if len(laddered_bases) == 1 else "MIXED",
         "notLaddered": unplaced,
     }
     # When an outstanding instrument has no maturity and the filing tags no maturity ladder of its own.
@@ -2746,7 +2787,9 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
     carried = [r for r in outstanding if _is_number(r["carryingAmount"])]
     carried_total = sum((r["carryingAmount"] for r in carried), 0)
     without_carrying = len(outstanding) - len(carried)
-    if not debt_value or not carried:
+    # Compared only when every outstanding row has a period-end carrying amount (2.5.25: VRT's notes carry only face
+    # amounts, so its rows summed to 0 against 2.94B and read as a gap).
+    if not debt_value or not carried or without_carrying > 0:
         reconciliation = {"status": "NOT_COMPARABLE", "instrumentsCarryingTotal": None, "totalDebt": debt_value, "difference": None, "rowsWithoutCarryingAmount": without_carrying}
     else:
         reconciliation = {
@@ -2757,11 +2800,10 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
             "rowsWithoutCarryingAmount": without_carrying,
         }
     if reconciliation["status"] == "NOT_RECONCILED":
-        extra = f"; {without_carrying} row(s) have no period-end carrying amount" if without_carrying else ""
         warnings.append({
             "code": "INSTRUMENTS_DO_NOT_RECONCILE",
-            "message": f"Instrument rows carry {_js_number(carried_total)} at the period end against total debt {_js_number(debt_value)} (difference {_js_number(reconciliation['difference'])}"
-                       f"{extra}): an instrument may be untagged, or a tagged amount may be principal rather than carrying value.",
+            "message": f"Instrument rows carry {_js_number(carried_total)} at the period end against total debt {_js_number(debt_value)} (difference {_js_number(reconciliation['difference'])}): "
+                       "an instrument may be untagged, or a tagged amount may be principal rather than carrying value.",
             "severity": "warning",
         })
     liquid = (cash["value"] if cash else 0) + (short_term["value"] if short_term else 0)
@@ -2800,7 +2842,7 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
         "methodology": [
             "Balances are the filing's own tagged values at its period end; nothing is projected forward.",
             "Instrument rows come from facts dimensioned by debt instrument, which companyfacts omits; face amounts can be original principal (faceAmountDate says when it was tagged).",
-            "The year ladder sums each row's period-end carrying amount, else its face amount, else a tagged amount (amountBasis); a row with no tagged maturity takes one only when the filing text states a single maturity date in the year its name carries.",
+            "The year ladder sums each row's period-end carrying amount, else its face amount, else a tagged amount (amountBasis); a row with no tagged maturity takes one only when the filing text states a single maturity date in the year its name carries, else the year or month its name gives after Due or Maturing (maturityDateSource INSTRUMENT_NAME).",
             "Funding statements are quoted from the filing so the company's own runway and sufficiency claims can be read in context.",
         ],
         "warnings": warnings,

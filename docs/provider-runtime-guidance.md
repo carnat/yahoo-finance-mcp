@@ -2126,6 +2126,54 @@ Vantage and IBKR produced these fixes.
   are tagged on a different member (`LongtermDebtTypeAxis`, the 5.250%
   notes), and linking the two members would be an inference.
 
+## Name-Dated Maturities And Comparable Reconciliation (2.5.25)
+
+- **Defects (live 2.5.24 on VRT and MU).**
+  - VRT raised `INSTRUMENTS_DO_NOT_RECONCILE` for 0 against 2,939,800,000
+    of debt. Its notes carry face amounts only, and the one row with a
+    period-end carrying amount was a zero-balance term loan. That compared
+    nothing, not a gap.
+  - MU's notes ("Due January 2031", "Green Bond Due 2032" and others,
+    about 3.05B carried) and VRT's dated tranches ("Senior Notes Due 2036"
+    and others) had no maturity. Neither filing tags
+    `DebtInstrumentMaturityDate` for them, and neither states "will mature
+    on" in its text, so they sat outside the year ladder.
+- **Reconciliation (both runtimes).** `instrumentReconciliation` compares
+  only when every outstanding row with an amount has a period-end carrying
+  amount. Otherwise it is `NOT_COMPARABLE`, with `rowsWithoutCarryingAmount`
+  saying how many rows lack one.
+- **Maturity from the instrument's name (both runtimes).** A row with no
+  tagged maturity and no stated one takes the date its name gives after
+  "Due" or "Maturing":
+  - "Due January 2031" gives `2031-01`, and "Due 2036" gives `2036`.
+  - A full "Month D, YYYY" gives the day as well.
+  - `maturityDateSource` is `INSTRUMENT_NAME`.
+  - A date before the period end is not taken, and a name with no date
+    ("Senior Unsecured Notes") or a range ("Due Between 2027 To 2036") gives
+    none.
+  - The info warning `MATURITY_FROM_INSTRUMENT_NAME` lists the rows dated
+    this way. The year ladder needs only the year.
+  - The filing text is still searched for such rows, so a stated exact date
+    wins: AAOI's "Convertible Notes Maturing 2030" keeps 2030-01-15.
+- **Ladder coverage (both runtimes).**
+  - Zero-balance rows are no longer listed in `notLaddered` and no longer
+    raise `MATURITY_LADDER_INCOMPLETE`.
+  - `ladderCoverage` adds `ladderedAmount`: every bucket amount, on
+    whatever basis it has. `ladderedAmountBasis` gives that basis, or
+    `MIXED`.
+  - This covers ladders built from face or tagged amounts (VRT, ASTS), for
+    which `ladderedCarryingAmount` and `coveragePct`, at carrying amounts
+    like total debt, read 0.
+- **Effect.**
+  - In an MU-shaped fixture, four rows are dated from their names and
+    coverage is 70.47%. The two left out are a row with no date in its name
+    and one naming a year before the period end; they are listed and
+    warned.
+  - AAOI is unchanged.
+- **Not changed.** MU's `totalDebt` is still null (status `PARTIAL`): its
+  debt is not tagged on the lines `totalDebt` reads. That is separate from
+  the ladder and is not addressed here.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
