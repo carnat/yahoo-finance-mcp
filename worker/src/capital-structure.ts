@@ -2505,7 +2505,9 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
   const carried = outstanding.filter((r) => typeof r.carryingAmount === "number");
   const carriedTotal = carried.reduce((sum, r) => sum + (r.carryingAmount as number), 0);
   const withoutCarrying = outstanding.length - carried.length;
-  const instrumentReconciliation = !debtValue || carried.length === 0
+  // Compared only when every outstanding row has a period-end carrying amount (2.5.25: VRT's notes carry only face
+  // amounts, so its rows summed to 0 against 2.94B and read as a gap).
+  const instrumentReconciliation = !debtValue || carried.length === 0 || withoutCarrying > 0
     ? { status: "NOT_COMPARABLE", instrumentsCarryingTotal: null, totalDebt: debtValue, difference: null, rowsWithoutCarryingAmount: withoutCarrying }
     : {
       status: Math.abs(carriedTotal - debtValue) <= AGGREGATE_TOLERANCE * Math.abs(debtValue) ? "RECONCILED" : "NOT_RECONCILED",
@@ -2517,8 +2519,8 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
   if (instrumentReconciliation.status === "NOT_RECONCILED") {
     warnings.push({
       code: "INSTRUMENTS_DO_NOT_RECONCILE",
-      message: `Instrument rows carry ${carriedTotal} at the period end against total debt ${debtValue} (difference ${instrumentReconciliation.difference}`
-        + `${withoutCarrying ? `; ${withoutCarrying} row(s) have no period-end carrying amount` : ""}): an instrument may be untagged, or a tagged amount may be principal rather than carrying value.`,
+      message: `Instrument rows carry ${carriedTotal} at the period end against total debt ${debtValue} (difference ${instrumentReconciliation.difference}): `
+        + "an instrument may be untagged, or a tagged amount may be principal rather than carrying value.",
       severity: "warning",
     });
   }

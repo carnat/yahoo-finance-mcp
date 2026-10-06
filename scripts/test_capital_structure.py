@@ -1047,8 +1047,10 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertEqual([(y["year"], y["amount"], y["amountBasis"], y["faceAmount"]) for y in c["instrumentMaturitiesByYear"]],
                          [("2027", 95_000_000, "CARRYING", 100_000_000), ("2029", 290_000_000, "CARRYING", 300_000_000), ("2031", 200_000_000, "TAGGED", None)])
         self.assertEqual(c["ladderCoverage"], {"totalDebt": 385_000_000, "ladderedCarryingAmount": 385_000_000, "coveragePct": 100, "notLaddered": []})
-        self.assertEqual(c["instrumentReconciliation"], {"status": "RECONCILED", "instrumentsCarryingTotal": 385_000_000, "totalDebt": 385_000_000,
-                                                         "difference": 0, "rowsWithoutCarryingAmount": 1})
+        # 2.5.25: a row with no period-end carrying amount (CONV31, tagged on its issue date) leaves the rows not comparable.
+        self.assertEqual(c["instrumentReconciliation"], {"status": "NOT_COMPARABLE", "instrumentsCarryingTotal": None, "totalDebt": 385_000_000,
+                                                         "difference": None, "rowsWithoutCarryingAmount": 1})
+        self.assertNotIn("INSTRUMENTS_DO_NOT_RECONCILE", [w["code"] for w in c["warnings"]])
         self.assertEqual((rows[CONV]["faceAmountDate"], rows[CONV]["maturityDateSource"]), ("2024-03-15", "XBRL"))
         ladder = {r["bucket"]: r for r in c["maturityLadder"]}
         self.assertEqual(ladder["year_3"]["periodThrough"], "2027-12-31")
