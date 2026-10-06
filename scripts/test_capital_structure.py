@@ -623,7 +623,7 @@ AAOI_DEBT_Q = f"""<html><body>
 </ix:hidden><ix:resources>{AAOI_DEBT_CONTEXTS}{UNITS}</ix:resources></ix:header></div>
 <p>Cash {_num("us-gaap:CashAndCashEquivalentsAtCarryingValue", "di", "usd", "499,737", 3)}; bank loans current {_num("us-gaap:LongTermDebtCurrent", "di", "usd", "21,069", 3)};
 convertible senior notes {_num("us-gaap:ConvertibleNotesPayable", "di", "usd", "129,142", 3)}.</p>
-<p>On December 23, 2024 the Company issued ${_num("us-gaap:DebtInstrumentFaceAmount", "c30Issue", "usd", "125", 6, decimals="-6")} million of notes.
+<p>On December 23, 2024 the Company issued ${_num("us-gaap:DebtInstrumentFaceAmount", "c30Issue", "usd", "125", 6, decimals="-6")} million of notes, convertible at ${_num("us-gaap:DebtInstrumentConvertibleConversionPrice1", "c30Issue", "usdPerShare", "43.31")} per share.
 Following this conversion, the aggregate principal amount of 2030 Notes outstanding was approximately ${_num("us-gaap:DebtInstrumentCarryingAmount", "c30", "usd", "124.9", 6, decimals="-5")} million.</p>
 <table><tr><td>Revolving line of credit and equipment term loan with a China bank, interest at {_num("us-gaap:DebtInstrumentInterestRateStatedPercentage", "loanRev", "pure", "2.6", -2)}% and {_num("us-gaap:DebtInstrumentInterestRateStatedPercentage", "loanTerm", "pure", "3", -2)}%</td>
 <td>{_num("us-gaap:DebtInstrumentCarryingAmount", "loan", "usd", "21,069", 3)}</td></tr>
@@ -1066,7 +1066,10 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertEqual([(y["year"], y["amount"], y["amountBasis"], y["faceAmount"]) for y in c["instrumentMaturitiesByYear"]],
                          [("2027", 95_000_000, "CARRYING", 100_000_000), ("2029", 290_000_000, "CARRYING", 300_000_000), ("2031", 200_000_000, "TAGGED", None)])
         self.assertEqual(c["ladderCoverage"], {"totalDebt": 385_000_000, "ladderedCarryingAmount": 385_000_000, "coveragePct": 100,
-                                               "ladderedAmount": 585_000_000, "ladderedAmountBasis": "MIXED", "notLaddered": []})
+                                               "ladderedAmount": 585_000_000, "ladderedAmountBasis": "MIXED", "notLaddered": [],
+                                               "gap": {"amount": 0, "inNotLaddered": 0, "inReconciliationDifference": None}})
+        # No separately tagged convertible line: nothing to check the convertible rows against.
+        self.assertNotIn("carryingAmountBasis", rows[CONV])
         # 2.5.25: a row with no period-end carrying amount (CONV31, tagged on its issue date) leaves the rows not comparable.
         self.assertEqual(c["instrumentReconciliation"], {"status": "NOT_COMPARABLE", "instrumentsCarryingTotal": None, "totalDebt": 385_000_000,
                                                          "difference": None, "rowsWithoutCarryingAmount": 1})
@@ -1106,16 +1109,25 @@ class TestCapitalStructureValues(unittest.TestCase):
         # F-009: buckets on a stated basis.
         self.assertEqual([(y["year"], y["amount"], y["amountBasis"], y["faceAmount"]) for y in c["instrumentMaturitiesByYear"]],
                          [("2026", 0, "CARRYING", None), ("2027", 21_069_000, "CARRYING", None), ("2030", 124_900_000, "CARRYING", 125_000_000)])
+        # 2.5.26 (F-007): the gap to total debt is the reconciliation difference, not unplaced rows.
         self.assertEqual(c["ladderCoverage"], {"totalDebt": 150_211_000, "ladderedCarryingAmount": 145_969_000, "coveragePct": 97.18,
-                                               "ladderedAmount": 145_969_000, "ladderedAmountBasis": "CARRYING", "notLaddered": []})
+                                               "ladderedAmount": 145_969_000, "ladderedAmountBasis": "CARRYING", "notLaddered": [],
+                                               "gap": {"amount": 4_242_000, "inNotLaddered": 0, "inReconciliationDifference": 4_242_000}})
         # F-007: the rows do not add up to the balance sheet: the notes' tagged amount is principal, not carrying value.
+        # 2.5.26 (F-007): the notes' row is checked against the balance sheet's own convertible line and marked.
         self.assertEqual(c["instrumentReconciliation"], {"status": "NOT_RECONCILED", "instrumentsCarryingTotal": 145_969_000, "totalDebt": 150_211_000,
-                                                         "difference": 4_242_000, "rowsWithoutCarryingAmount": 0})
+                                                         "difference": 4_242_000, "rowsWithoutCarryingAmount": 0,
+                                                         "convertibleBalanceSheet": {"status": "NOT_RECONCILED", "concept": "us-gaap:ConvertibleNotesPayable",
+                                                                                     "balanceSheetAmount": 129_142_000, "instrumentRowsTotal": 124_900_000, "difference": 4_242_000}})
+        self.assertEqual((notes["convertible"], notes["carryingAmountBasis"]), (True, "MAY_BE_PRINCIPAL"))
+        self.assertNotIn("carryingAmountBasis", loan)
         codes = [w["code"] for w in c["warnings"]]
-        self.assertEqual(codes, ["LABEL_DATE_DIFFERS_FROM_MATURITY", "MULTIPLE_MATURITIES", "INSTRUMENTS_DO_NOT_RECONCILE"])
+        self.assertEqual(codes, ["LABEL_DATE_DIFFERS_FROM_MATURITY", "MULTIPLE_MATURITIES", "INSTRUMENTS_DO_NOT_RECONCILE", "CARRYING_AMOUNT_MAY_BE_PRINCIPAL"])
         warn = {w["code"]: w["message"] for w in c["warnings"]}
         self.assertEqual(warn["MULTIPLE_MATURITIES"], "Loan Agreement carries 2 tagged maturities (2027-06-25, 2032-06-12) on one amount; the year ladder places it at the earliest.")
         self.assertEqual(warn["LABEL_DATE_DIFFERS_FROM_MATURITY"], "Debt Maturing December 28, 2028 is named for December 28, 2028 but its tagged maturity is 2026-12-28; the tagged date is used.")
+        self.assertEqual(warn["CARRYING_AMOUNT_MAY_BE_PRINCIPAL"], "Convertible Notes Maturing 2030 carries 124900000 under us-gaap:DebtInstrumentCarryingAmount, "
+                         "but the balance sheet carries convertible notes at 129142000 (us-gaap:ConvertibleNotesPayable); the row amount may be principal, not carrying value.")
         self.assertEqual(warn["INSTRUMENTS_DO_NOT_RECONCILE"], "Instrument rows carry 145969000 at the period end against total debt 150211000 (difference 4242000): "
                          "an instrument may be untagged, or a tagged amount may be principal rather than carrying value.")
         # Without the maturity text the notes are dated from their name, to the year it gives (2.5.25).
@@ -1146,7 +1158,8 @@ class TestCapitalStructureValues(unittest.TestCase):
         self.assertEqual(c["ladderCoverage"], {
             "totalDebt": 2_032_000_000, "ladderedCarryingAmount": 1_432_000_000, "coveragePct": 70.47, "ladderedAmount": 1_432_000_000, "ladderedAmountBasis": "CARRYING",
             "notLaddered": [{"instrument": "Notes Due 2023", "amount": 100_000_000, "amountBasis": "CARRYING", "reason": "NO_MATURITY_DATE"},
-                            {"instrument": "Senior Unsecured Notes", "amount": 500_000_000, "amountBasis": "CARRYING", "reason": "NO_MATURITY_DATE"}]})
+                            {"instrument": "Senior Unsecured Notes", "amount": 500_000_000, "amountBasis": "CARRYING", "reason": "NO_MATURITY_DATE"}],
+            "gap": {"amount": 600_000_000, "inNotLaddered": 600_000_000, "inReconciliationDifference": None}})
         self.assertEqual(c["instrumentReconciliation"]["status"], "RECONCILED")
         self.assertEqual([w["code"] for w in c["warnings"]], ["MATURITY_FROM_INSTRUMENT_NAME", "MATURITY_LADDER_INCOMPLETE"])
         self.assertEqual(c["warnings"][0]["message"], "No tagged or stated maturity date for Debt Due 2029 (2029), Green Bond Due 2032 (2032), Notes Due Feb 2033 (2033-02), "
