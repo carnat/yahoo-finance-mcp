@@ -530,6 +530,12 @@ export function metricReconciliation(input: ReconcileInput): Rec {
   ];
   const result = reconcileObservations(observations, input.tolerancePct);
   const found = new Set(observations.filter((o) => o.status === "FOUND").map((o) => o.provider));
+  // What AGREED rests on (2.5.22, F-004): the providers whose value matched the latest SEC value. Alpha Vantage
+  // is never read here, so AGREED is SEC plus one or two of the issuer release and Yahoo, no more.
+  const providerOf = new Map(observations.map((o) => [String(o.source), String(o.provider)]));
+  const agreeing = [...new Set(result.comparisons
+    .filter((c) => c.result === "MATCH" && c.against === "SEC_XBRL_LATEST" && providerOf.get(String(c.source)) !== "SEC")
+    .map((c) => providerOf.get(String(c.source)) as string))];
   return {
     ticker: input.ticker.toUpperCase(),
     metric: input.metric,
@@ -537,6 +543,13 @@ export function metricReconciliation(input: ReconcileInput): Rec {
     taxonomy,
     unit,
     status: result.status,
+    agreementBasis: {
+      providersRead: ["SEC", "ISSUER_RELEASE", "YAHOO"],
+      providersFound: ["SEC", "ISSUER_RELEASE", "YAHOO"].filter((p) => found.has(p)),
+      providersAgreeingWithSec: agreeing,
+      independentChecks: agreeing.length,
+      notRead: ["ALPHA_VANTAGE"],
+    },
     restated: result.restated,
     tolerancePct: input.tolerancePct,
     observations,
@@ -548,7 +561,7 @@ export function metricReconciliation(input: ReconcileInput): Rec {
       { source: "COMPANIES_HOUSE", reason: "UK statutory filings; not applicable to SEC registrants and not tagged for these metrics." },
     ],
     notes: [
-      "AGREED: latest SEC plus at least one independent provider found the value and all agree within tolerance. PARTIAL: SEC is absent or only one provider found it. CONFLICT: a provider differs from the latest SEC value (or, without SEC, from another provider) beyond tolerance. NOT_FOUND: none found it.",
+      "AGREED: latest SEC plus at least one independent provider found the value and all agree within tolerance; agreementBasis names the providers that matched SEC (independentChecks is one or two, never Alpha Vantage, which is not read). PARTIAL: SEC is absent or only one provider found it. CONFLICT: a provider differs from the latest SEC value (or, without SEC, from another provider) beyond tolerance. NOT_FOUND: none found it.",
       "A release quarter may be named by its calendar or fiscal number; a sentence naming the period's exact end date is scoped to it.",
       "A difference between the SEC value as first filed and as latest filed is a restatement (restated: true), not a conflict.",
       "The tolerance is the larger of tolerancePct of the SEC value and half the last stated digit of a release figure.",

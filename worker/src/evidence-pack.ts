@@ -131,12 +131,59 @@ async function writeConsensusObservation(ticker: string, curve: Rec, observedAt:
   return { status: written.status, key: written.status === "UNAVAILABLE" ? null : key, ...(written.message ? { message: written.message } : {}) };
 }
 
+/**
+ * A stored daily consensus observation, read back as it was written (2.5.22, F-006: AAOI's 2026-10-04 curve was
+ * stored but no tool could read it). Not found lists the dates that are stored.
+ */
+async function readConsensusObservation(ticker: string, observationDate: string): Promise<string> {
+  const symbol = ticker.toUpperCase();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(observationDate)) {
+    return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: "observation_date must be YYYY-MM-DD." });
+  }
+  const store = getEvidenceStore();
+  if (!store) {
+    return JSON.stringify({ ticker: symbol, status: "STORAGE_UNAVAILABLE", observationDate, storage: { source: "STORED_OBSERVATION", storageStatus: "UNAVAILABLE" } });
+  }
+  const key = consensusObservationKey(symbol, observationDate);
+  let text: string | null;
+  let dates: string[] = [];
+  try {
+    text = await store.get(key);
+    if (text == null) {
+      dates = (await store.list(`consensus-history/${symbol}/`, 400)).map((k) => k.split("/").pop()!.replace(/\.json$/, ""));
+    }
+  } catch (e) {
+    return JSON.stringify({ ticker: symbol, status: "STORAGE_FAILED", observationDate, retryable: true,
+      storage: { source: "STORED_OBSERVATION", storageStatus: "FAILED", key, message: e instanceof Error ? e.message : String(e) } });
+  }
+  if (text == null) {
+    return JSON.stringify({ ticker: symbol, status: "OBSERVATION_NOT_FOUND", observationDate,
+      storage: { source: "STORED_OBSERVATION", storageStatus: "AVAILABLE", key, observationDates: dates } });
+  }
+  const stored = JSON.parse(text) as Rec;
+  const curve = (stored.curve ?? {}) as Rec;
+  return JSON.stringify({
+    ...curve,
+    storage: {
+      source: "STORED_OBSERVATION",
+      storageStatus: "AVAILABLE",
+      key,
+      schema: stored.schema ?? null,
+      observedAt: stored.observedAt ?? null,
+      serverVersion: stored.serverVersion ?? null,
+      buildSha: stored.buildSha ?? null,
+    },
+  });
+}
+
 export async function getConsensusForecastCurve(
   ticker: string,
   horizonYears = 5,
   minAnalystCount = DEFAULT_CONSENSUS_POLICY.minAnalystCount,
   conflictTolerancePct = DEFAULT_CONSENSUS_POLICY.conflictTolerancePct,
+  observationDate: string | null = null,
 ): Promise<string> {
+  if (observationDate) return readConsensusObservation(ticker, observationDate);
   const policy = consensusPolicy(horizonYears, minAnalystCount, conflictTolerancePct);
   if (typeof policy === "string") return JSON.stringify({ error: true, code: "INPUT_VALIDATION_ERROR", message: policy });
   const asOf = new Date().toISOString();

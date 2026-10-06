@@ -377,6 +377,12 @@ function agreement(entries: Rec[], metric: ConsensusMetric, policy: ConsensusPol
   }
   const currencies = [...new Set(valued.map((e) => e.currency).filter((c): c is string => typeof c === "string"))];
   if (currencies.length > 1) return { status: "CURRENCY_MISMATCH", providersCompared, currencies, relativeDiffPct: null, absoluteDiff: null };
+  const currencyIdentity = currencies.length === 1 && valued.every((e) => e.currency === currencies[0]) ? "VERIFIED" : "UNVERIFIED";
+  // The same mean, high, low and analyst count wherever both publish them: one upstream feed carried twice, not
+  // two checks (2.5.22, F-005: Yahoo and Alpha Vantage matched to the last published digit).
+  if (identicalAtPublishedPrecision(valued)) {
+    return { status: "IDENTICAL", providersCompared, relativeDiffPct: 0, absoluteDiff: 0, currencyIdentity, independence: "NOT_INDEPENDENT" };
+  }
   const means = valued.map((e) => e.mean as number);
   const hi = Math.max(...means);
   const lo = Math.min(...means);
@@ -385,12 +391,62 @@ function agreement(entries: Rec[], metric: ConsensusMetric, policy: ConsensusPol
   const relativeDiffPct = scale > 0 ? round(((hi - lo) / scale) * 100, 2) : 0;
   const withinAbsolute = metric === "eps" && absoluteDiff <= policy.epsAbsoluteTolerance;
   const status = withinAbsolute || relativeDiffPct <= policy.conflictTolerancePct ? "AGREED" : "CONFLICT";
+  return { status, providersCompared, relativeDiffPct, absoluteDiff, currencyIdentity, independence: "UNVERIFIED" };
+}
+
+function identicalAtPublishedPrecision(valued: Rec[]): boolean {
+  for (const field of ["mean", "high", "low", "analystCount"]) {
+    const values = valued.map((e) => e[field]).filter((v): v is number => typeof v === "number");
+    if (values.length >= 2 && new Set(values).size > 1) return false;
+  }
+  return valued.every((e) => typeof e.analystCount === "number");
+}
+
+const COMPARED = new Set(["AGREED", "CONFLICT", "IDENTICAL"]);
+
+/**
+ * Whether the curve is a cross-check at all (2.5.22, F-003/F-005): which providers answered, which failed and
+ * why, and whether the ones that answered are independent. A failed provider or identical feeds is a warning,
+ * not a quiet single-source curve.
+ */
+function crossCheck(inputs: ProviderConsensusInput[], periods: Rec[]): { summary: Rec; warnings: Rec[] } {
+  const answered = inputs.filter((i) => i.status === "OK").map((i) => i.provider);
+  const failed = inputs.filter((i) => i.status !== "OK" && i.status !== "NO_DATA").map((i) => ({ provider: i.provider, status: i.status, message: i.message }));
+  let compared = 0;
+  let identical = 0;
+  for (const period of periods) {
+    for (const cell of Object.values(period.metrics as Rec)) {
+      const status = String(((cell as Rec).agreement as Rec).status);
+      if (COMPARED.has(status)) compared += 1;
+      if (status === "IDENTICAL") identical += 1;
+    }
+  }
+  const status = answered.length === 0 ? "NO_PROVIDER"
+    : answered.length === 1 ? "SINGLE_PROVIDER"
+    : compared === 0 ? "NOT_COMPARED"
+    : identical === compared ? "NOT_INDEPENDENT"
+    : "CROSS_CHECKED";
+  const warnings: Rec[] = [];
+  for (const f of failed) {
+    const quota = f.provider === "alpha_vantage"
+      ? " This server's Alpha Vantage key and its quota are its own, separate from any key used directly."
+      : "";
+    warnings.push({
+      code: "CROSS_CHECK_DEGRADED",
+      message: `${f.provider} returned ${f.status}${f.message ? `: ${f.message}` : ""}. The curve is not cross-checked against it.${quota}`,
+      severity: "warning",
+    });
+  }
+  if (status === "NOT_INDEPENDENT") {
+    warnings.push({
+      code: "PROVIDERS_NOT_INDEPENDENT",
+      message: "Every compared figure is identical at the providers' published precision: they carry one upstream feed, so their agreement is one source, not two.",
+      severity: "warning",
+    });
+  }
   return {
-    status,
-    providersCompared,
-    relativeDiffPct,
-    absoluteDiff,
-    currencyIdentity: currencies.length === 1 && valued.every((e) => e.currency === currencies[0]) ? "VERIFIED" : "UNVERIFIED",
+    summary: { status, providersAnswered: answered, providersFailed: failed, cellsCompared: compared, cellsIdentical: identical },
+    warnings,
   };
 }
 
@@ -454,9 +510,11 @@ export function buildConsensusCurve(
       metrics,
     });
   }
+  const check = crossCheck(inputs, periods);
   return {
     ticker: ticker.toUpperCase(),
     asOf,
+    crossCheck: check.summary,
     fiscalYearBasis: fy0 ?? { fiscalYearEnd: null, basis: "NO_PROVIDER_FISCAL_YEAR" },
     fiscalYearNaming: yearNaming,
     policy: { ...policy, horizonYears: horizon },
@@ -475,8 +533,9 @@ export function buildConsensusCurve(
       "Each provider's figures are reported as given; no provider value is selected, blended or averaged.",
       "Periods and metrics no provider covers are PROVIDER_NOT_COVERED; nothing is interpolated or extended from long-term growth rates.",
       "Median and standard deviation are not published by the configured providers; the high-low range per provider is the only dispersion measure.",
-      "Agreement between providers does not establish independence: they may redistribute the same underlying estimates.",
+      "Agreement between providers does not establish independence: they may redistribute the same underlying estimates. IDENTICAL marks figures equal to the last published digit, which is one feed carried twice.",
     ],
+    warnings: check.warnings,
     ...AUTHORITY_BOUNDARY,
   };
 }

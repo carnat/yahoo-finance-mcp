@@ -85,6 +85,8 @@ type ProviderJsonResult = {
   httpStatus?: number;
   message?: string;
   retryAfter?: string;
+  // When a remembered denial (daily quota, entitlement) expires and the provider is asked again (2.5.22).
+  deniedUntil?: string;
 };
 
 type ProviderCacheEntry = {
@@ -239,16 +241,22 @@ function rememberedProviderDenial(denialKey: string): ProviderJsonResult | null 
   const denial = providerDenials.get(denialKey);
   if (!denial) return null;
   countCacheEvent(providerCacheName(denialKey), "memoryHits");
-  return { ...denial, providerAttempted: false, cacheStatus: "HIT_PROCESS", message: `${denial.message ?? denial.status} (remembered; not retried)` };
+  const until = denial.deniedUntil ? ` until ${denial.deniedUntil}` : "";
+  return { ...denial, providerAttempted: false, cacheStatus: "HIT_PROCESS", message: `${denial.message ?? denial.status} (remembered${until}; not retried)` };
 }
 
 function rememberProviderDenial(denialKey: string, result: ProviderJsonResult): ProviderJsonResult {
+  const now = Date.now();
   if (result.status === "ENTITLEMENT_REQUIRED" || result.status === "AUTH_ERROR") {
-    providerDenials.set(denialKey, result, PROVIDER_ENTITLEMENT_DENIAL_TTL_MS);
+    const deniedUntil = new Date(now + PROVIDER_ENTITLEMENT_DENIAL_TTL_MS).toISOString();
+    providerDenials.set(denialKey, { ...result, deniedUntil }, PROVIDER_ENTITLEMENT_DENIAL_TTL_MS);
+    return { ...result, deniedUntil };
   } else if (result.status === "RATE_LIMIT" && /per day|daily/i.test(result.message ?? "")) {
-    const now = new Date();
-    const nextUtcDay = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
-    providerDenials.set(denialKey, result, Math.max(60_000, nextUtcDay - now.getTime()));
+    const d = new Date(now);
+    const ttl = Math.max(60_000, Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) - now);
+    const deniedUntil = new Date(now + ttl).toISOString();
+    providerDenials.set(denialKey, { ...result, deniedUntil }, ttl);
+    return { ...result, deniedUntil };
   }
   return result;
 }
@@ -5923,7 +5931,9 @@ function statedUnitScales(html: string): number[] {
 
 // Where a table's scale came from (2.5.21). ASSUMED_MILLIONS: neither the table nor its lead-in states one, so
 // amounts are read in millions (the most common 10-K scale) and carry UNIT_SCALE_ASSUMED; a share is unaffected.
-export type UnitScaleSource = "STATED_IN_TABLE" | "STATED_BEFORE_TABLE" | "ASSUMED_MILLIONS";
+// STATED_IN_DOCUMENT (2.5.22): the table and its lead-in state none, but every scale statement in the filing
+// agrees (VRT's 10-K says "(Dollars in millions ...)" fourteen times and nothing else).
+export type UnitScaleSource = "STATED_IN_TABLE" | "STATED_BEFORE_TABLE" | "STATED_IN_DOCUMENT" | "ASSUMED_MILLIONS";
 
 const UNIT_SCALE_ASSUMED_WARNING = {
   code: "UNIT_SCALE_ASSUMED",
@@ -5931,15 +5941,36 @@ const UNIT_SCALE_ASSUMED_WARNING = {
   severity: "warning",
 };
 
+/** The one scale every statement in a filing names, or null when it states none or several. */
+function documentUnitScale(html: string): number | null {
+  const scales = new Set(statedUnitScales(html));
+  return scales.size === 1 ? [...scales][0] : null;
+}
+
 /**
  * The monetary unit multiplier for a table: the scale the table itself states, else the statement in its
- * lead-in nearest the table, else millions, marked as assumed.
+ * lead-in nearest the table, else the filing's single stated scale, else millions, marked as assumed.
  */
-function detectUnitScale(tableHtml: string, contextHtml: string): { multiplier: number; source: UnitScaleSource } {
+function detectUnitScale(tableHtml: string, contextHtml: string, documentScale: () => number | null = () => null): { multiplier: number; source: UnitScaleSource } {
   const own = statedUnitScales(tableHtml);
   if (own.length > 0) return { multiplier: own[0], source: "STATED_IN_TABLE" };
   const lead = statedUnitScales(contextHtml);
-  return lead.length > 0 ? { multiplier: lead[lead.length - 1], source: "STATED_BEFORE_TABLE" } : { multiplier: 1e6, source: "ASSUMED_MILLIONS" };
+  if (lead.length > 0) return { multiplier: lead[lead.length - 1], source: "STATED_BEFORE_TABLE" };
+  const doc = documentScale();
+  return doc != null ? { multiplier: doc, source: "STATED_IN_DOCUMENT" } : { multiplier: 1e6, source: "ASSUMED_MILLIONS" };
+}
+
+/** A filing's single stated scale, computed once per document on first use. */
+function lazyDocumentScale(html: string): () => number | null {
+  let done = false;
+  let value: number | null = null;
+  return () => {
+    if (!done) {
+      value = documentUnitScale(html);
+      done = true;
+    }
+    return value;
+  };
 }
 
 const TOTAL_LABELS = new Set([
@@ -6022,6 +6053,7 @@ export function extractGeoRevenueFromHtml(
   sourceColumns: string[];
   statedPct: number | null;
 } | null {
+  const documentScale = lazyDocumentScale(html);
   // Every table that names the region and is about revenue is a candidate
   // (scanning windows after the first mentions missed tables late in long
   // filings). Tables introduced as a geographic breakdown come first; a
@@ -6088,7 +6120,7 @@ export function extractGeoRevenueFromHtml(
     const statedShare = shareHeader ? statedPct : null;
     if (statedShare != null && Math.abs(pct * 100 - statedShare) > STATED_PCT_TOLERANCE) continue;
     const contextHtml = html.slice(Math.max(0, tbl.pos - 3_000), tbl.pos);
-    const { multiplier: unitMult, source: unitScaleSource } = detectUnitScale(tableHtml, contextHtml);
+    const { multiplier: unitMult, source: unitScaleSource } = detectUnitScale(tableHtml, contextHtml, documentScale);
     const usd = regionVal * unitMult;
     const denominator = totalVal * unitMult;
     const unitScale = unitMult === 1e3 ? "thousands" : unitMult === 1e6 ? "millions" : unitMult === 1e9 ? "billions" : "actual";
@@ -14635,6 +14667,7 @@ const YEAR_CELL = /^(?:fy\s*)?(?:19|20)\d{2}$/i;
  * them parses, so callers can tell "not parsed" from "not disclosed".
  */
 export function extractSegmentTableFromHtml(html: string): { result: SegmentTableResult | null; segmentTablesSeen: number; tablesScanned: number } {
+  const documentScale = lazyDocumentScale(html);
   let tableIndex = -1;
   let segmentTablesSeen = 0;
   for (const m of html.matchAll(/<table[^>]*>([\s\S]*?)<\/table>/gi)) {
@@ -14703,7 +14736,7 @@ export function extractSegmentTableFromHtml(html: string): { result: SegmentTabl
     if (!total || segments.length < 2 || total.value <= 0) continue;
     const sum = segments.reduce((acc, row) => acc + row.value, 0);
     if (Math.abs(sum - total.value) > total.value * 0.01) continue;
-    const { multiplier: unitMultiplier, source: unitScaleSource } = detectUnitScale(m[0], html.slice(Math.max(0, pos - 3_000), pos));
+    const { multiplier: unitMultiplier, source: unitScaleSource } = detectUnitScale(m[0], html.slice(Math.max(0, pos - 3_000), pos), documentScale);
     return {
       result: {
         segments,
