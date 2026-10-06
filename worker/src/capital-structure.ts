@@ -2367,9 +2367,37 @@ function maturityStatements(matches: TextMatch[]): { date: string; sentence: str
   return out;
 }
 
-/** Rows still outstanding with an amount but no maturity: what a maturity ladder cannot place. */
+/** Rows still outstanding with a non-zero amount but no maturity: what a maturity ladder cannot place. */
 function unplacedRows(rows: Record<string, unknown>[]): Record<string, unknown>[] {
-  return rows.filter((r) => r.maturityDate == null && r.status !== "matured_before_period_end" && ladderAmount(r) != null);
+  return rows.filter((r) => r.maturityDate == null && r.status !== "matured_before_period_end" && (ladderAmount(r)?.amount ?? 0) !== 0);
+}
+
+/**
+ * Whether the filing text should be searched for maturity sentences: an outstanding row with an amount is dated
+ * neither by XBRL nor by the text (a date read from its name is only a year or month).
+ */
+export function wantsMaturityText(out: Record<string, unknown>): boolean {
+  return ((out.instruments ?? []) as Record<string, unknown>[]).some((r) =>
+    r.status !== "matured_before_period_end" && (ladderAmount(r)?.amount ?? 0) !== 0
+    && (r.maturityDateSource == null || r.maturityDateSource === "INSTRUMENT_NAME"));
+}
+
+const NAME_MATURITY_RE = /\b(?:Due|Maturing|Matures)\s+(?:In\s+)?((?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\.?\s+(?:\d{1,2},\s+)?(?:19|20)\d{2}|(?:19|20)\d{2})\b/;
+
+/**
+ * Last resort for a row with no tagged or stated maturity (2.5.25): the date its name gives after "Due" or
+ * "Maturing" ("Due January 2031" -> 2031-01, "Due 2036" -> 2036), only when that is not before the period end.
+ * The ladder needs only the year.
+ */
+function maturityFromName(rows: Record<string, unknown>[], periodEnd: string | null): void {
+  for (const row of rows) {
+    if (row.maturityDate != null || row.status === "matured_before_period_end") continue;
+    const m = NAME_MATURITY_RE.exec(String(row.instrument));
+    const date = m ? normalizeIxDate(m[1]) : null;
+    if (!date || (periodEnd && date < periodEnd.slice(0, date.length))) continue;
+    row.maturityDate = date;
+    row.maturityDateSource = "INSTRUMENT_NAME";
+  }
 }
 
 /**
@@ -2441,14 +2469,19 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
   }
   const instrumentRows = instruments(doc, periodEnd);
   if (input.maturityMatches?.length) maturityFromText(instrumentRows, maturityStatements(input.maturityMatches));
+  maturityFromName(instrumentRows, periodEnd);
+  const named = instrumentRows.filter((r) => r.maturityDateSource === "INSTRUMENT_NAME");
+  if (named.length > 0) {
+    warnings.push({ code: "MATURITY_FROM_INSTRUMENT_NAME", message: `No tagged or stated maturity date for ${named.map((r) => `${r.instrument} (${r.maturityDate})`).join(", ")}; dated from the instrument name, to the year or month it gives.`, severity: "info" });
+  }
   for (const row of instrumentRows) {
     if (Array.isArray(row.maturityDates)) {
       warnings.push({ code: "MULTIPLE_MATURITIES", message: `${row.instrument} carries ${row.maturityDates.length} tagged maturities (${row.maturityDates.join(", ")}) on one amount; the year ladder places it at the earliest.`, severity: "info" });
     }
-    const named = LABEL_DATE_RE.exec(String(row.instrument));
-    const namedDate = named ? normalizeIxDate(named[0]) : null;
-    if (namedDate && row.maturityDateSource === "XBRL" && !(row.maturityDates as string[] | undefined ?? [row.maturityDate]).includes(namedDate)) {
-      warnings.push({ code: "LABEL_DATE_DIFFERS_FROM_MATURITY", message: `${row.instrument} is named for ${named![0]} but its tagged maturity is ${row.maturityDate}; the tagged date is used.`, severity: "info" });
+    const labelled = LABEL_DATE_RE.exec(String(row.instrument));
+    const labelDate = labelled ? normalizeIxDate(labelled[0]) : null;
+    if (labelDate && row.maturityDateSource === "XBRL" && !(row.maturityDates as string[] | undefined ?? [row.maturityDate]).includes(labelDate)) {
+      warnings.push({ code: "LABEL_DATE_DIFFERS_FROM_MATURITY", message: `${row.instrument} is named for ${labelled![0]} but its tagged maturity is ${row.maturityDate}; the tagged date is used.`, severity: "info" });
     }
   }
   const ladder = LADDER.map(([concept, bucket, offset]) => {
@@ -2465,6 +2498,8 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
   // it summed carrying amounts under the face name).
   const byYear = new Map<string, { year: string; amount: number; bases: Set<string>; faceAmount: number | null; instruments: string[] }>();
   let laddered = 0;
+  let ladderedAny = 0;
+  const ladderedBases = new Set<string>();
   for (const row of instrumentRows) {
     const maturity = row.maturityDate as string | null;
     const amount = ladderAmount(row);
@@ -2477,6 +2512,8 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
     entry.instruments.push(String(row.instrument));
     byYear.set(year, entry);
     if (typeof row.carryingAmount === "number") laddered += row.carryingAmount;
+    ladderedAny += amount.amount;
+    ladderedBases.add(amount.basis);
   }
   const instrumentLadder = [...byYear.values()]
     .sort((a, b) => (a.year < b.year ? -1 : a.year > b.year ? 1 : 0))
@@ -2489,6 +2526,9 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
     totalDebt: debtValue,
     ladderedCarryingAmount: laddered,
     coveragePct: debtValue && debtValue > 0 ? round((laddered / debtValue) * 100, 2) : null,
+    // Every bucket amount on whatever basis it has (face-only ladders like VRT's carry no carrying amounts).
+    ladderedAmount: ladderedAny,
+    ladderedAmountBasis: ladderedBases.size === 0 ? null : ladderedBases.size === 1 ? [...ladderedBases][0] : "MIXED",
     notLaddered: unplaced,
   };
   // When an outstanding instrument has no maturity and the filing tags no maturity ladder of its own.
@@ -2562,7 +2602,7 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
     methodology: [
       "Balances are the filing's own tagged values at its period end; nothing is projected forward.",
       "Instrument rows come from facts dimensioned by debt instrument, which companyfacts omits; face amounts can be original principal (faceAmountDate says when it was tagged).",
-      "The year ladder sums each row's period-end carrying amount, else its face amount, else a tagged amount (amountBasis); a row with no tagged maturity takes one only when the filing text states a single maturity date in the year its name carries.",
+      "The year ladder sums each row's period-end carrying amount, else its face amount, else a tagged amount (amountBasis); a row with no tagged maturity takes one only when the filing text states a single maturity date in the year its name carries, else the year or month its name gives after Due or Maturing (maturityDateSource INSTRUMENT_NAME).",
       "Funding statements are quoted from the filing so the company's own runway and sufficiency claims can be read in context.",
     ],
     warnings,

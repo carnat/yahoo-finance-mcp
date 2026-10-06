@@ -20,6 +20,7 @@ import {
   CAPPED_CALL_SEARCH_TERMS,
   CONVERTIBLE_SETTLEMENT_SEARCH_TERMS,
   MATURITY_SEARCH_TERMS,
+  wantsMaturityText,
   SHARE_CLAIM_SEARCH_TERMS,
   WARRANT_LIFECYCLE_SEARCH_TERMS,
   type DilutionInput,
@@ -15377,7 +15378,7 @@ export async function extractCapitalStructure(
   const fundingMatches = includeFundingStatements ? await filingTextMatches(ticker, primary.filing, FUNDING_SEARCH_TERMS, 20, 700) : [];
   let out = capitalStructure({ ticker: ticker.toUpperCase(), source: loaded.source, fundingMatches });
   // An outstanding instrument with no tagged maturity: read the filing's own maturity sentences (2.5.24).
-  if (((out.ladderCoverage as Record<string, unknown> | undefined)?.notLaddered as unknown[] | undefined)?.length) {
+  if (wantsMaturityText(out)) {
     const maturityMatches = await filingTextMatches(ticker, primary.filing, MATURITY_SEARCH_TERMS, 12, 400);
     out = capitalStructure({ ticker: ticker.toUpperCase(), source: loaded.source, fundingMatches, maturityMatches });
   }
