@@ -163,6 +163,19 @@ def _num(value: Any) -> float | int | None:
     return None
 
 
+def published_decimals(value: Any) -> int | None:
+    """Decimal places a provider published a figure with, when it published it as text (2.5.23, F-013): Alpha Vantage's
+    "5.2020" is four places. A number (Yahoo's raw 5.20199) states no rounding and is taken as exact."""
+    v = value.get("raw") if isinstance(value, dict) else value
+    if not isinstance(v, str):
+        return None
+    t = v.strip()
+    if not re.fullmatch(r"[+-]?\d+(\.\d+)?", t, re.ASCII):
+        return None
+    dot = t.find(".")
+    return 0 if dot < 0 else len(t) - dot - 1
+
+
 def _round(value: float, digits: int) -> float:
     f = 10 ** digits
     return math.floor(value * f + 0.5) / f
@@ -189,6 +202,12 @@ def _estimate(block: Any, currency: str | None, currency_basis: str) -> dict:
         "analystCount": count,
         "currency": currency,
         "currencyBasis": currency_basis,
+        # Decimal places each figure was published with as text; figures compare at the coarsest (F-013). Internal.
+        "decimals": {
+            "mean": published_decimals(b.get("avg") if b.get("avg") is not None else b.get("mean")),
+            "high": published_decimals(b.get("high")),
+            "low": published_decimals(b.get("low")),
+        },
     }
 
 
@@ -421,12 +440,16 @@ def _provider_entry(inp: dict, period: dict, metric: str, policy: dict) -> dict:
     }
 
 
-def _agreement(entries: list[dict], metric: str, policy: dict, splits: list[dict] | None = None) -> dict:
+def _agreement(entries: list[dict], metric: str, policy: dict, splits: list[dict] | None = None, published: list | None = None) -> dict:
     splits = splits or []
+    published = published or []
     # An impossible row is not a second opinion (2.5.23, F-001): it is left out of the comparison and named.
     inconsistent = [e for e in entries if _is_number(e["mean"]) and e.get("state") == "PROVIDER_INCONSISTENT"]
     excluded = {"providersExcluded": [{"provider": e["provider"], "reason": e.get("inconsistency")} for e in inconsistent]} if inconsistent else {}
-    valued = [e for e in entries if _is_number(e["mean"]) and e.get("state") != "PROVIDER_INCONSISTENT"]
+    def usable(e: dict) -> bool:
+        return _is_number(e["mean"]) and e.get("state") != "PROVIDER_INCONSISTENT"
+    valued = [e for e in entries if usable(e)]
+    valued_published = [published[i] if i < len(published) else None for i, e in enumerate(entries) if usable(e)]
     compared = [e["provider"] for e in valued]
     if not valued and inconsistent:
         return {"status": "PROVIDER_INCONSISTENT", "providersCompared": compared, "relativeDiffPct": None, "absoluteDiff": None, **excluded}
@@ -443,16 +466,17 @@ def _agreement(entries: list[dict], metric: str, policy: dict, splits: list[dict
         return {"status": "CURRENCY_MISMATCH", "providersCompared": compared, "currencies": currencies, "relativeDiffPct": None, "absoluteDiff": None, **excluded}
     verified = len(currencies) == 1 and all(e["currency"] == currencies[0] for e in valued)
     currency_identity = "VERIFIED" if verified else "UNVERIFIED"
-    # The same mean, high, low and analyst count wherever both publish them: one upstream feed carried twice, not
-    # two checks (2.5.22, F-005: Yahoo and Alpha Vantage matched to the last published digit).
-    if _identical_at_published_precision(valued):
-        return {"status": "IDENTICAL", "providersCompared": compared, "relativeDiffPct": 0, "absoluteDiff": 0,
-                "currencyIdentity": currency_identity, "independence": "NOT_INDEPENDENT", **excluded}
     means = [e["mean"] for e in valued]
     hi, lo = max(means), min(means)
     absolute = _round(hi - lo, 6)
     scale = max(abs(hi), abs(lo))
     relative = _round((hi - lo) / scale * 100, 2) if scale > 0 else 0
+    # The same mean, high, low and analyst count wherever both publish them: one upstream feed carried twice, not
+    # two checks (2.5.22, F-005). Compared at the coarser provider's published precision (2.5.23, F-013: Yahoo's
+    # 5.20199 is Alpha Vantage's "5.2020").
+    if _identical_at_published_precision(valued, valued_published):
+        return {"status": "IDENTICAL", "providersCompared": compared, "relativeDiffPct": relative, "absoluteDiff": absolute,
+                "currencyIdentity": currency_identity, "independence": "NOT_INDEPENDENT", **excluded}
     within_absolute = metric == "eps" and absolute <= policy["epsAbsoluteTolerance"]
     status = "AGREED" if within_absolute or relative <= policy["conflictTolerancePct"] else "CONFLICT"
     if status == "CONFLICT" and metric == "eps":
@@ -502,11 +526,26 @@ def _is_number(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
-def _identical_at_published_precision(valued: list[dict]) -> bool:
-    for field in ("mean", "high", "low", "analystCount"):
-        values = [e[field] for e in valued if _is_number(e[field])]
-        if len(values) >= 2 and len(set(values)) > 1:
+def _identical_at_published_precision(valued: list[dict], published: list | None = None) -> bool:
+    published = published or []
+    for field in ("mean", "high", "low"):
+        cells = []
+        for i, e in enumerate(valued):
+            if not _is_number(e[field]):
+                continue
+            est = published[i] if i < len(published) else None
+            dec = ((est or {}).get("decimals") or {}).get(field)
+            cells.append((e[field], dec))
+        if len(cells) < 2:
+            continue
+        # The coarsest precision any provider published; exact when none published one.
+        places = [d for _, d in cells if d is not None]
+        d = min(10, *places) if places else None
+        if len({v if d is None else _round(v, d) for v, _ in cells}) > 1:
             return False
+    counts = [e["analystCount"] for e in valued if _is_number(e["analystCount"])]
+    if len(counts) >= 2 and len(set(counts)) > 1:
+        return False
     return all(_is_number(e["analystCount"]) for e in valued)
 
 
@@ -634,7 +673,7 @@ def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: d
         metrics = {}
         for metric in CONSENSUS_METRICS:
             entries = [_provider_entry(inp, p, metric, policy) for inp, p in matching]
-            agree = _agreement(entries, metric, policy, recent_splits)
+            agree = _agreement(entries, metric, policy, recent_splits, [p[metric] for _, p in matching])
             coverage = _metric_coverage(entries, str(agree["status"]))
             summary[coverage] = summary.get(coverage, 0) + 1
             metrics[metric] = {
