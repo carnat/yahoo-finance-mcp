@@ -2746,7 +2746,9 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
     carried = [r for r in outstanding if _is_number(r["carryingAmount"])]
     carried_total = sum((r["carryingAmount"] for r in carried), 0)
     without_carrying = len(outstanding) - len(carried)
-    if not debt_value or not carried:
+    # Compared only when every outstanding row has a period-end carrying amount (2.5.25: VRT's notes carry only face
+    # amounts, so its rows summed to 0 against 2.94B and read as a gap).
+    if not debt_value or not carried or without_carrying > 0:
         reconciliation = {"status": "NOT_COMPARABLE", "instrumentsCarryingTotal": None, "totalDebt": debt_value, "difference": None, "rowsWithoutCarryingAmount": without_carrying}
     else:
         reconciliation = {
@@ -2757,11 +2759,10 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
             "rowsWithoutCarryingAmount": without_carrying,
         }
     if reconciliation["status"] == "NOT_RECONCILED":
-        extra = f"; {without_carrying} row(s) have no period-end carrying amount" if without_carrying else ""
         warnings.append({
             "code": "INSTRUMENTS_DO_NOT_RECONCILE",
-            "message": f"Instrument rows carry {_js_number(carried_total)} at the period end against total debt {_js_number(debt_value)} (difference {_js_number(reconciliation['difference'])}"
-                       f"{extra}): an instrument may be untagged, or a tagged amount may be principal rather than carrying value.",
+            "message": f"Instrument rows carry {_js_number(carried_total)} at the period end against total debt {_js_number(debt_value)} (difference {_js_number(reconciliation['difference'])}): "
+                       "an instrument may be untagged, or a tagged amount may be principal rather than carrying value.",
             "severity": "warning",
         })
     liquid = (cash["value"] if cash else 0) + (short_term["value"] if short_term else 0)
