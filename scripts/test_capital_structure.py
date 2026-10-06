@@ -648,7 +648,18 @@ MU_DEBT_Q = f"""<html><body>
 <table>{"".join(f'<tr><td>{m}</td><td>{_num("us-gaap:LongTermDebt", f"m{i}", "usd", v, 6)}</td></tr>' for i, (m, v) in enumerate(zip(MUD, ["261", "996", "175", "500", "100", "0"])))}</table>
 </body></html>"""
 
-FIXTURES = {"ten_k": TEN_K, "aaoi_debt_q": AAOI_DEBT_Q, "mu_debt_q": MU_DEBT_Q, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K, "cohr_k": COHR_K, "pref_q": PREF_Q, "mrvl_q": MRVL_Q, "life_k": LIFE_K, "aehr_k": AEHR_K, "lite_k": LITE_K, "prefliq_q": PREFLIQ_Q, "stale_q": STALE_Q, "nest_q": NEST_Q}
+# 2.5.26: notes tagged with face amounts only, the way VRT's are: one dated by its name, one aggregate with no date.
+VRT36, VRTU = "vrt:SeniorNotesDue2036Member", "vrt:SeniorUnsecuredNotesMember"
+VRT_DEBT_Q = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "vq", "10-Q")}
+{_text("dei:DocumentPeriodEndDate", "vq", "June 30, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("vq", "2026-01-01..2026-06-30")}{_context("vi", "2026-06-30")}{_context("v36", "2026-03-10", {DEBT: VRT36})}{_context("vu", "2026-03-10", {DEBT: VRTU})}{UNITS}</ix:resources></ix:header></div>
+<p>Cash {_num("us-gaap:CashAndCashEquivalentsAtCarryingValue", "vi", "usd", "1,000", 6)}; long-term debt {_num("us-gaap:LongTermDebt", "vi", "usd", "2,000", 6)}.</p>
+<p>Notes issued: {_num("us-gaap:DebtInstrumentFaceAmount", "v36", "usd", "600", 6)} and in aggregate {_num("us-gaap:DebtInstrumentFaceAmount", "vu", "usd", "1,400", 6)}.</p>
+</body></html>"""
+
+FIXTURES = {"ten_k": TEN_K, "aaoi_debt_q": AAOI_DEBT_Q, "mu_debt_q": MU_DEBT_Q, "vrt_debt_q": VRT_DEBT_Q, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K, "cohr_k": COHR_K, "pref_q": PREF_Q, "mrvl_q": MRVL_Q, "life_k": LIFE_K, "aehr_k": AEHR_K, "lite_k": LITE_K, "prefliq_q": PREFLIQ_Q, "stale_q": STALE_Q, "nest_q": NEST_Q}
 
 NEWS_ITEMS = [
     {"title": "Needham raises IQE price target to 45p from 38p", "summary": "Needham values IQE at 12x 2027 EV/EBITDA, citing gallium nitride demand.", "url": "https://news.example/1", "publishedAt": "2026-09-20T08:00:00Z", "source": "yahoo_finance_news"},
@@ -732,6 +743,7 @@ out.capital = m.capitalStructure({ ticker: "CSTC", source: kSource, fundingMatch
 out.capitalAaoiDebt = m.capitalStructure({ ticker: "AAOD", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000041", data.qUrl, "aaoi_debt_q"), fundingMatches: [], maturityMatches: tm(data.aaoiMaturity) });
 out.capitalAaoiDebtNoText = m.capitalStructure({ ticker: "AAOD", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000041", data.qUrl, "aaoi_debt_q"), fundingMatches: [] });
 out.capitalMuDebt = m.capitalStructure({ ticker: "MUD", source: src("primary", "10-Q", "2026-06-25", "0001234568-26-000042", data.qUrl, "mu_debt_q"), fundingMatches: [] });
+out.capitalVrtDebt = m.capitalStructure({ ticker: "VRTD", source: src("primary", "10-Q", "2026-07-30", "0001234568-26-000043", data.qUrl, "vrt_debt_q"), fundingMatches: [] });
 out.wantsText = [out.capitalMuDebt, out.capitalAaoiDebt, out.capitalAaoiDebtNoText, out.capital].map(m.wantsMaturityText);
 out.labelsDated = ["aaoi:DebtMaturingDecember282028Member", "aaoi:DebtMaturingJul7132026Member", "aaoi:DebtMaturingJune112027Member", "x:NotesDue2029Member", "x:Series2028Member"].map(m.memberLabel);
 out.capitalAaoi = m.capitalStructure({ ticker: "AAOX", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000040", data.qUrl, "aaoi_q"), fundingMatches: [] });
@@ -879,6 +891,7 @@ def _python_pure() -> dict:
                                                 maturity_matches=tm(AAOI_MATURITY_TEXT)),
         "capitalAaoiDebtNoText": cs.capital_structure("AAOD", cs.IxSource("primary", "10-Q", "2026-08-06", "0001234568-26-000041", Q_URL, docs["aaoi_debt_q"]), []),
         "capitalMuDebt": cs.capital_structure("MUD", cs.IxSource("primary", "10-Q", "2026-06-25", "0001234568-26-000042", Q_URL, docs["mu_debt_q"]), []),
+        "capitalVrtDebt": cs.capital_structure("VRTD", cs.IxSource("primary", "10-Q", "2026-07-30", "0001234568-26-000043", Q_URL, docs["vrt_debt_q"]), []),
         "labelsDated": [cs.member_label(x) for x in ["aaoi:DebtMaturingDecember282028Member", "aaoi:DebtMaturingJul7132026Member", "aaoi:DebtMaturingJune112027Member", "x:NotesDue2029Member", "x:Series2028Member"]],
         "capitalAaoi": cs.capital_structure("AAOX", cs.IxSource("primary", "10-Q", "2026-08-06", "0001234568-26-000040", Q_URL, docs["aaoi_q"]), []),
         "capitalAsts": cs.capital_structure("ASTX", cs.IxSource("primary", "10-Q", "2026-08-10", "0001234568-26-000060", Q_URL, docs["asts_q"]), []),
@@ -910,7 +923,7 @@ class TestCapitalStructureParity(unittest.TestCase):
             self.assertEqual(self.worker["documents"][name], self.local["documents"][name], name)
 
     def test_outputs_match(self) -> None:
-        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "bridgeStale", "bridgeStaleUnread", "bridgeSettled", "bridgeLiteSettled", "bridgeCensus2", "preferredWordings", "bridgeCapped", "bridgeCappedHigh", "bridgeLiteCapped", "cappedTerms", "bridgeNest", "bridgeNestUnread", "capital", "capitalAaoi", "capitalAaoiDebt", "capitalAaoiDebtNoText", "capitalMuDebt", "wantsText", "labelsDated", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
+        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "bridgeStale", "bridgeStaleUnread", "bridgeSettled", "bridgeLiteSettled", "bridgeCensus2", "preferredWordings", "bridgeCapped", "bridgeCappedHigh", "bridgeLiteCapped", "cappedTerms", "bridgeNest", "bridgeNestUnread", "capital", "capitalAaoi", "capitalAaoiDebt", "capitalAaoiDebtNoText", "capitalMuDebt", "capitalVrtDebt", "wantsText", "labelsDated", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
 
@@ -1166,6 +1179,20 @@ class TestCapitalStructureValues(unittest.TestCase):
                          "Notes Due January 2031 (2031-01); dated from the instrument name, to the year or month it gives.")
         self.assertEqual(c["warnings"][1]["message"], "No maturity date for Notes Due 2023 (100000000), Senior Unsecured Notes (500000000); "
                          "the year ladder places 1432000000 of total debt 2032000000 (70.47%).")
+
+    def test_face_only_ladder_states_its_basis(self) -> None:
+        # 2.5.26: VRT's notes carry face amounts only; the warning no longer says the ladder "places 0".
+        c = self.out["capitalVrtDebt"]
+        self.assertEqual([(y["year"], y["amount"], y["amountBasis"]) for y in c["instrumentMaturitiesByYear"]], [("2036", 600_000_000, "FACE")])
+        self.assertEqual(c["ladderCoverage"], {
+            "totalDebt": 2_000_000_000, "ladderedCarryingAmount": 0, "coveragePct": 0, "ladderedAmount": 600_000_000, "ladderedAmountBasis": "FACE",
+            "notLaddered": [{"instrument": "Senior Unsecured Notes", "amount": 1_400_000_000, "amountBasis": "FACE", "reason": "NO_MATURITY_DATE"}],
+            "gap": {"amount": 2_000_000_000, "inNotLaddered": 1_400_000_000, "inReconciliationDifference": None}})
+        self.assertEqual(c["instrumentReconciliation"]["status"], "NOT_COMPARABLE")
+        warn = {w["code"]: w["message"] for w in c["warnings"]}
+        self.assertEqual(warn["MATURITY_LADDER_INCOMPLETE"], "No maturity date for Senior Unsecured Notes (1400000000); "
+                         "the year ladder places 600000000 on a FACE basis (0 at carrying amounts) against total debt 2000000000.")
+        self.assertNotIn("INSTRUMENTS_DO_NOT_RECONCILE", warn)
 
     def test_convertibles_at_period_end_and_warrant_exercised_after_count(self) -> None:
         b = _python_pure()["bridgeBe"]

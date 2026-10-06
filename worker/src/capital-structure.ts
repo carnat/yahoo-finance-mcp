@@ -2535,7 +2535,11 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
   if (unplaced.length > 0 && ladder.length === 0) {
     warnings.push({
       code: "MATURITY_LADDER_INCOMPLETE",
-      message: `No maturity date for ${unplaced.map((u) => `${u.instrument} (${u.amount})`).join(", ")}; the year ladder places ${laddered}${debtValue ? ` of total debt ${debtValue} (${ladderCoverage.coveragePct}%)` : ""}.`,
+      // A ladder on face or tagged amounts says so, rather than "places 0" at carrying amounts (2.5.26: VRT).
+      message: `No maturity date for ${unplaced.map((u) => `${u.instrument} (${u.amount})`).join(", ")}; `
+        + (ladderCoverage.ladderedAmountBasis == null || ladderCoverage.ladderedAmountBasis === "CARRYING"
+          ? `the year ladder places ${laddered}${debtValue ? ` of total debt ${debtValue} (${ladderCoverage.coveragePct}%)` : ""}.`
+          : `the year ladder places ${ladderedAny} on a ${ladderCoverage.ladderedAmountBasis} basis (${laddered} at carrying amounts)${debtValue ? ` against total debt ${debtValue}` : ""}.`),
       severity: "warning",
     });
   }
