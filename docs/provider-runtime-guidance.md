@@ -2222,6 +2222,69 @@ Vantage and IBKR produced these fixes.
 - **Not affected.** A filing with no separately tagged convertible line gets
   no check and no mark.
 
+## Lease-Inclusive Debt Totals And Aggregate Debt Rows (2.5.27)
+
+- **Defects (live 2.5.25 and 2.5.26).**
+  - MU's `totalDebt` was null (status `PARTIAL`). MU tags its notes only
+    dimensioned, and its balance-sheet debt only as `DebtCurrent` 582 and
+    `LongTermDebtAndCapitalLeaseObligations` 5,140, which include finance
+    leases. It also tags `DebtAndCapitalLeaseObligations` 5,722 and
+    `FinanceLeaseLiability` 2,670. Its calculation linkbase gives debt as the
+    difference, 3,052, the sum of its nine notes.
+  - XOM tags its debt the same way (`DebtCurrent` 10,139 and
+    `LongTermDebtAndCapitalLeaseObligations` 32,229) and nothing
+    `totalDebt` read. The no-borrowings fallback therefore reported total debt
+    0 with `NO_BORROWINGS_TAGGED`, and a net cash about 42B too high.
+  - CMCSA and MPC were `PARTIAL` with null debt.
+  - VRT's "Senior Unsecured Notes" row (face 2,100.0, tagged on the
+    2026-03-03 issue date) is the sum of its 2036, 2046, 2056 and 2066
+    notes. The filing says "issued $2,100.0 in aggregate principal amount of
+    senior unsecured notes consisting of" them. The four are tagged beside
+    it on the same axis, with no linkbase relationship, so the year ladder
+    listed it as a further 2.1B unplaced.
+- **Lease-inclusive totals (both runtimes).** When no `LongTermDebt`,
+  `LongTermDebtCurrent` or `LongTermDebtNoncurrent` line is tagged, total
+  debt comes from:
+  - `DebtAndCapitalLeaseObligations`; or
+  - `DebtCurrent` + `LongTermDebtAndCapitalLeaseObligations`, where
+    `LongTermDebtAndCapitalLeaseObligationsCurrent` stands in for a missing
+    `DebtCurrent`.
+
+  How leases are treated:
+  - When `FinanceLeaseLiability`, or its current and noncurrent parts, is
+    tagged and does not exceed that figure, the leases are taken out. Their
+    components carry negative amounts, and the info warning
+    `FINANCE_LEASES_SUBTRACTED` states the formula.
+  - Otherwise total debt includes the leases. The basis says so, and the
+    warning `TOTAL_DEBT_INCLUDES_FINANCE_LEASES` is raised.
+  - No short-term borrowings are added, since current debt in these totals
+    holds them.
+  - The lease-inclusive concepts count as borrowings, so a filer tagging only
+    them is never reported as debt-free.
+- **Aggregate rows (both runtimes).** An undated row is marked `aggregateOf`
+  (the component instrument names) when all of these hold:
+  - its amount is, within 0.5%, the sum of exactly one set of two or more
+    other rows;
+  - those rows are on the same amount basis;
+  - each of them is named for the same kind of instrument (the row's last
+    word, e.g. "Notes").
+
+  A marked row stays listed but is left out of the year ladder, ladder
+  coverage, `notLaddered`, the reconciliation and the filing-text maturity
+  search. The info warning `AGGREGATE_ROW_EXCLUDED` names its components.
+  When two sets of rows add up to it, no aggregate is named. The search
+  covers at most 16 candidate rows.
+- **Effect** (on the real filings, run locally through the Worker module):
+  - MU: total debt 3,052,000,000, status `COMPUTED`, ladder coverage 100%,
+    reconciliation `RECONCILED`.
+  - XOM: 42,368,000,000 including finance leases, with the warning, instead
+    of 0.
+  - VRT: the 2.1B row is `aggregateOf` its four notes, and only the 17.2M
+    range note is unplaced.
+  - AAOI is unchanged.
+- **Not changed.** A filer that tags `LongTermDebt` keeps the existing basis.
+  Linkbases are still not read.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:
