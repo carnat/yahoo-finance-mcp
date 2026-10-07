@@ -2365,6 +2365,59 @@ Vantage and IBKR produced these fixes.
     curve. If that curve used a stale stand-in, the stored copy carries
     `staleFallback` and `PROVIDER_DATA_STALE` too.
 
+## Companyfacts Coverage And Stale Figures (2.5.30)
+
+- **Defects (F-015 revised and F-018, reported by the Engine Zero adapter on TSM against 2.5.28).**
+  - SEC's companyfacts file for TSM (CIK 0001046179) has no ifrs-full fact from the FY2025 20-F (accession
+    0001628280-26-025362, filed 2026-04-16). That filing contributed only one dei and one srt fact, so the
+    newest IFRS annual period in the file is FY2024. Yahoo's figures matched the file; the gap is in the file
+    itself.
+  - Each path met this differently:
+    - `get_historical_valuation_context` nulled every multiple as `RESULTS_STALE`, but left
+      `denominators.LTM.revenue` at `status` `OK` with period end 2024-12-31 and method
+      `LAST_FISCAL_YEAR_IS_LATEST`. On 2026-06-30 that figure was 546 days old, past the point's 500-day
+      limit, and `balances` was `OK` for a 2024-12-31 balance date.
+    - `extract_total_revenue` returned `SEC_FACTS_IFRS_ONLY`.
+    - `extract_sec_filing_fact` with the FY2025 accession pinned returned `NO_FACT_FOR_ACCESSION`, naming
+      only us-gaap concepts. It did not say that IFRS concepts were not searched.
+    - `reconcile_metric_sources` returned `PERIOD_NOT_FOUND` for FY2025 and did not say why.
+- **A pinned IFRS filing (both runtimes, `getFilingData` / `get_filing_data`).** When a pinned accession has
+  no us-gaap fact and the filer's companyfacts holds ifrs-full facts but no us-gaap facts, the result is
+  `SEC_FACTS_IFRS_ONLY` (status `SEC_FACT_NOT_AVAILABLE`, with `requestedAccession`), not
+  `NO_FACT_FOR_ACCESSION`. Its message names the us-gaap concepts searched and says the accession's IFRS
+  facts were not searched. Geographic revenue is unchanged.
+- **Age on each figure (both runtimes, `valuationAtDate` / `valuation_at_date`).**
+  - Every `denominators.LTM` and `denominators.LFY` entry with `status` `OK` adds `periodAgeDays` (period
+    end to the point's date) and `stale` (true past the point's results limit, `stalenessLimitsDays.results`).
+  - `balances` with `status` `OK` adds `balanceAgeDays` and `stale` (past `stalenessLimitsDays.balances`).
+  - Status and value are unchanged; the multiples' `RESULTS_STALE` and the point warnings are unchanged.
+- **`LATEST_ANNUAL_NOT_IN_COMPANYFACTS` (both runtimes, new `companyfacts-coverage.ts` /
+  `companyfacts_coverage.py`).**
+  - The latest annual report is the newest 10-K, 20-F or 40-F (amendments excluded) in SEC submissions filed
+    on or before the date in question.
+  - The warning is raised when companyfacts holds no us-gaap or ifrs-full fact from that accession (dei and
+    srt facts do not count), unless an annual period companyfacts holds already reaches the report's period
+    end (an amendment may have carried it).
+  - The warning (severity `warning`) carries `form`, `accessionNumber`, `filed`, `reportDate` and
+    `latestCompanyfactsAnnualPeriodEnd`. Its message ends "Figures here come from earlier reports, not from
+    that filing."
+  - Where it is raised:
+    - each `get_historical_valuation_context` point, judged at the point's date;
+    - `reconcile_metric_sources`, including on `PERIOD_NOT_FOUND`;
+    - `extract_sec_filing_fact` and `extract_total_revenue` (and other `get_filing_data` reads) for annual
+      filing types, when the read has no value or its value is from another accession than the latest
+      annual report.
+  - It is not looked for on a failed read, an unresolved ticker or an invalid period. A read whose value
+    comes from the latest annual report costs no extra companyfacts read.
+- **Effect** (TSM-shaped fixtures):
+  - The pinned FY2025 20-F gives `SEC_FACTS_IFRS_ONLY` and `LATEST_ANNUAL_NOT_IN_COMPANYFACTS`.
+  - Reconciliation of FY2025 is `PERIOD_NOT_FOUND` with the warning.
+  - The 2026-06-30 valuation point shows `periodAgeDays` 546 and `stale` true on its FY2024 denominators and
+    balances, plus the warning. The 2025-06-02 point (before the FY2025 20-F) shows 153 days, not stale, and
+    no warning.
+- **Not changed.** No value is filled in from elsewhere, and the accession's own XBRL is not read (F-015
+  option 2, not taken up).
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

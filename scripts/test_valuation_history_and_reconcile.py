@@ -237,6 +237,11 @@ HV_INPUTS = {
     "multiCoverFailed": _hv("multi", MULTI, BARS, ["2025-09-02"], SPLITS, covers=COVER_FAILED),
     "multiClassSum": _hv("multi", MULTI, BARS, ["2025-09-02"], SPLITS, covers=CLASS_SUM),
     "regime": _hv("regime", REGIME, REGIME_BARS, ["2024-06-03", "2025-06-02"]),
+    # TSM-like (2.5.30, F-015/F-018): the FY2025 20-F filed 2026-04-16 is in submissions but not in companyfacts.
+    "ifrsMissingFy": {**_hv("tsmx", IFRS_FACTS, [{"date": "2025-06-02", "close": 10.0}, {"date": "2026-06-30", "close": 12.0}], ["2025-06-02", "2026-06-30"],
+                            fx={"pair": "TWDUSD=X", "bars": [{"date": "2025-05-30", "close": 0.03}, {"date": "2026-06-30", "close": 0.031}]}, ads=5),
+                      "periodicFilings": [{"accessionNumber": "f24", "form": "20-F", "filed": "2025-04-15", "reportDate": "2024-12-31"},
+                                          {"accessionNumber": "f25", "form": "20-F", "filed": "2026-04-16", "reportDate": "2025-12-31"}]},
 }
 
 # NVDA: fiscal year ending late January, so its fiscal Q2 ends in calendar Q3.
@@ -726,6 +731,49 @@ class TestHistoricalValuation(unittest.TestCase):
 
 def _obs(result: dict, source: str) -> dict:
     return next(o for o in result["observations"] if o["source"] == source)
+
+
+class TestStaleFiguresAndCoverage(unittest.TestCase):
+    """2.5.30 (F-018, F-015): each denominator and the balances carry their age and a stale flag; a latest annual
+    report missing from companyfacts is warned at the dates it was already filed."""
+
+    def test_a_stale_denominator_says_so_on_itself(self) -> None:
+        late = _point(vh.historical_valuation(HV_INPUTS["ifrsMissingFy"]), "2026-06-30")
+        revenue = late["denominators"]["LTM"]["revenue"]
+        # Status and value unchanged: the age and the flag are added, so a caller reading only this block sees it.
+        self.assertEqual((revenue["status"], revenue["periodEnd"], revenue["method"], revenue["periodAgeDays"], revenue["stale"]),
+                         ("OK", "2024-12-31", "LAST_FISCAL_YEAR_IS_LATEST", 546, True))
+        self.assertEqual(list(revenue)[-2:], ["periodAgeDays", "stale"])
+        for basis in ("LTM", "LFY"):
+            for name, d in late["denominators"][basis].items():
+                if d["status"] == "OK":
+                    self.assertEqual((d["periodAgeDays"], d["stale"]), (546, True), (basis, name))
+        self.assertEqual((late["balances"]["status"], late["balances"]["balanceAgeDays"], late["balances"]["stale"]), ("OK", 546, True))
+        # The multiples stay null, as before.
+        self.assertEqual(late["coverage"]["multiplesAvailable"], 0)
+
+    def test_a_fresh_denominator_is_not_stale(self) -> None:
+        early = _point(vh.historical_valuation(HV_INPUTS["ifrsMissingFy"]), "2025-06-02")
+        revenue = early["denominators"]["LTM"]["revenue"]
+        self.assertEqual((revenue["periodAgeDays"], revenue["stale"]), (153, False))
+        self.assertEqual((early["balances"]["balanceAgeDays"], early["balances"]["stale"]), (153, False))
+        # A figure that is not OK carries no age.
+        unavailable = [d for inp in HV_INPUTS.values() for pt in vh.historical_valuation(inp)["points"]
+                       for basis in pt.get("denominators", {}).values() for d in basis.values() if d["status"] != "OK"]
+        self.assertTrue(unavailable)
+        self.assertFalse([d for d in unavailable if "periodAgeDays" in d or "stale" in d])
+
+    def test_the_missing_annual_report_is_warned_once_filed(self) -> None:
+        result = vh.historical_valuation(HV_INPUTS["ifrsMissingFy"])
+        late, early = _point(result, "2026-06-30"), _point(result, "2025-06-02")
+        warning = next(w for w in late["warnings"] if w["code"] == "LATEST_ANNUAL_NOT_IN_COMPANYFACTS")
+        self.assertEqual((warning["accessionNumber"], warning["form"], warning["filed"], warning["latestCompanyfactsAnnualPeriodEnd"]), ("f25", "20-F", "2026-04-16", "2024-12-31"))
+        self.assertTrue(warning["message"].startswith("The latest annual report filed by 2026-06-30 (20-F f25, filed 2026-04-16, period 2025-12-31) has no us-gaap or ifrs-full fact"))
+        # Before the FY2025 20-F was filed, the latest annual report (f24) is in companyfacts: no warning.
+        self.assertNotIn("LATEST_ANNUAL_NOT_IN_COMPANYFACTS", [w["code"] for w in early["warnings"]])
+        # Without submissions there is nothing to compare: no warning.
+        bare = _point(vh.historical_valuation(HV_INPUTS["ifrsLate"]), "2025-09-02")
+        self.assertNotIn("LATEST_ANNUAL_NOT_IN_COMPANYFACTS", [w["code"] for w in bare["warnings"]])
 
 
 class TestReconciliation(unittest.TestCase):

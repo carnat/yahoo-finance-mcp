@@ -37,6 +37,7 @@ import { parseShareScenarios, shareCountScenarios } from "./share-scenarios.js";
 import { customerConcentration, guidanceRanges, rankEvidence, releaseTextMetric, stemWord, type ConcentrationFinding, type ReleaseMetricName } from "./extraction-rules.js";
 import { adsRatio, majorPrice, marketInputsFromQuoteSummary, peerValuations, valuationSnapshot, type MarketInputs } from "./valuation.js";
 import { coverReadsNeeded, coverShareCounts, foreignFiler, historicalValuation, latestShareCount, peerMedians, taxonomyOf, valuationDates, type Bar, type PeriodicFiling, type Split } from "./valuation-history.js";
+import { annualFilingsFromSubmissions, latestAnnualCoverageWarning, latestAnnualFiling } from "./companyfacts-coverage.js";
 import { DEFAULT_TOLERANCE_PCT, METRICS as RECONCILE_METRICS, metricReconciliation, resolvePeriod } from "./metric-reconciliation.js";
 import { AUTHORITY_BOUNDARY } from "./evidence.js";
 import { documentFiscalYearFocus, filingFiscalYearLabel, fiscalYearNaming, type FiscalYearNaming } from "./fiscal-calendar.js";
@@ -6258,7 +6259,52 @@ function filingManualLookup(ticker: string, cikPadded: string | null, filingType
   };
 }
 
+const ANNUAL_FILING_TYPE_RE = /^(?:10-K|20-F|40-F)\b/i;
+
+/**
+ * The LATEST_ANNUAL_NOT_IN_COMPANYFACTS warning for an annual-form fact read (2.5.30, F-015), or null. It is
+ * looked for only when the read has no value or its value is from another accession than the latest annual
+ * report, so a fact read from that report costs no companyfacts read. Unreadable SEC data gives none.
+ */
+async function annualCoverageWarningFor(ticker: string, payload: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+  const { cikPadded, submissions } = await getSubmissionsForTicker(ticker).catch(() => ({ cikPadded: null, submissions: null }));
+  if (!cikPadded || !submissions) return null;
+  const filings = annualFilingsFromSubmissions(submissions);
+  const latest = latestAnnualFiling(filings);
+  const used = payload.value != null && typeof payload.accessionNumber === "string" ? payload.accessionNumber.replace(/-/g, "") : null;
+  if (!latest || used === latest.accessionNumber.replace(/-/g, "")) return null;
+  const facts = await edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`).catch(() => null);
+  return facts ? latestAnnualCoverageWarning(filings, facts) : null;
+}
+
 export async function getFilingData(
+  ticker: string,
+  factType: string,
+  region: string | null = null,
+  filingType = "10-K",
+  period = "latest",
+  periodMode = "auto",
+  pinAccession: string | null = null,
+): Promise<string> {
+  const raw = await getFilingDataUnchecked(ticker, factType, region, filingType, period, periodMode, pinAccession);
+  if (!ANNUAL_FILING_TYPE_RE.test(filingType)) return raw;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return raw;
+  const p = payload as Record<string, unknown>;
+  // A failed read, an unresolved ticker or a rejected period says nothing about what companyfacts holds.
+  if (p.status === "PROVIDER_ERROR" || ["NO_SEC_REGISTRANT", "SEC_LOOKUP_UNAVAILABLE", "INVALID_PERIOD"].includes(String(p.code))) return raw;
+  const warning = await annualCoverageWarningFor(ticker, p);
+  if (!warning) return raw;
+  p.warnings = [...(Array.isArray(p.warnings) ? p.warnings : []), warning];
+  return JSON.stringify(p);
+}
+
+async function getFilingDataUnchecked(
   ticker: string,
   factType: string,
   region: string | null = null,
@@ -6506,6 +6552,21 @@ export async function getFilingData(
   const concept = chosen?.concept ?? config.primary;
   let filtered = chosen?.facts ?? [];
   if (!filtered.length && pinnedAccession) {
+    if (factType !== "geographic_revenue") {
+      // A pinned IFRS filing was searched for us-gaap concepts only: say IFRS was not read, not that the filing
+      // has no such fact (2.5.30, F-018).
+      companyfacts ??= readSecJson(companyfactsUrl, "companyfacts", null);
+      const taxonomies = (((await companyfacts)?.facts ?? {}) as Record<string, unknown>);
+      if (failedReads.length) return secReadFailed(concept);
+      if (taxonomies["ifrs-full"] && !taxonomies["us-gaap"]) {
+        return unavailableStructuredFact(
+          "SEC_FACTS_IFRS_ONLY",
+          `${ticker.toUpperCase()} reports its SEC facts under IFRS (ifrs-full), which this action does not read, so accession ${pinnedAccession} was searched for ${candidateNames.join(" / ")} (us-gaap) only and its IFRS facts were not searched; reconcile_metric_sources reads IFRS facts in the reporting currency.`,
+          concept,
+          pinnedAccession,
+        );
+      }
+    }
     return unavailableStructuredFact(
       "NO_FACT_FOR_ACCESSION",
       `SEC companyconcept has no ${candidateNames.join(" / ")} fact in accession ${pinnedAccession} (${filingType}).`,
@@ -15682,8 +15743,10 @@ export async function reconcileMetricSources(ticker: string, metric: string, per
   }
   const facts = await edgarGetJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cikPadded}.json`).catch(() => null);
   if (!facts) return JSON.stringify({ ticker: upper, metric, status: "COMPANYFACTS_NOT_AVAILABLE", code: "COMPANYFACTS_NOT_AVAILABLE", retryable: true });
+  // The latest annual report may be missing from companyfacts (2.5.30, F-015): said on every result, found or not.
+  const coverageWarning = latestAnnualCoverageWarning(annualFilingsFromSubmissions(submissions), facts);
   const resolved = resolvePeriod(facts, metric, period);
-  if (resolved.status !== "OK") return JSON.stringify({ ticker: upper, metric, ...resolved });
+  if (resolved.status !== "OK") return JSON.stringify({ ticker: upper, metric, ...resolved, ...(coverageWarning ? { warnings: [coverageWarning] } : {}) });
   const cikInt = parseInt(cikPadded, 10);
   const end = String(resolved.periodEnd);
   // Results releases (Item 2.02 8-Ks and 8-K/As) filed within 100 days after the period ended. The newest
@@ -15720,6 +15783,7 @@ export async function reconcileMetricSources(ticker: string, metric: string, per
   if (yahooRows == null) warnings.push({ code: "YAHOO_NOT_AVAILABLE", message: "Yahoo's statements could not be read; retry.", severity: "warning" });
   out.releaseCandidates = { inWindow: inWindow.length, read: candidates.length, notRead: notRead.map((p) => ({ filingDate: p.filingDate, accessionNumber: p.accessionNumber, form: p.form })) };
   if (notRead.length > 0) warnings.push({ code: "OLDER_RELEASE_CANDIDATES_NOT_READ", message: `${notRead.length} older Item 2.02 filing(s) in the 100-day window were not read; the ${candidates.length} newest were.`, severity: "info" });
+  if (coverageWarning) warnings.push(coverageWarning);
   out.retryable = unread.length > 0 || yahooRows == null;
   out.warnings = warnings;
   return JSON.stringify(out);

@@ -21,6 +21,7 @@ import { AUTHORITY_BOUNDARY } from "./evidence.js";
 import { round } from "./capital-structure.js";
 import { REVENUE_CONCEPTS } from "./sec-facts.js";
 import { majorPrice } from "./valuation.js";
+import { latestAnnualCoverageWarning } from "./companyfacts-coverage.js";
 
 type Rec = Record<string, unknown>;
 
@@ -583,6 +584,17 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
       priceToSales: withFreshness(multiple(mcap, revenue[basis], fxRate, "marketCap", basis, "revenue"), revenue[basis]),
     };
   }
+  // The latest annual report filed by the date may be missing from companyfacts (2.5.30, F-015).
+  const coverageWarning = latestAnnualCoverageWarning(input.periodicFilings ?? [], input.companyfacts, date);
+  if (coverageWarning) warnings.push(coverageWarning);
+  // Each figure's age at the date, and whether it is past the point's limit, on the figure itself (2.5.30, F-018):
+  // a stale denominator keeps its status, but no longer reads as current to a caller that looks only at it.
+  const aged = (r: Rec, field: string, limit: number): Rec =>
+    r.status === "OK" && typeof r[field] === "string" ? { ...r, [`${field === "balanceDate" ? "balance" : "period"}AgeDays`]: days(r[field] as string, date), stale: days(r[field] as string, date) > limit } : r;
+  for (const basis of ["LTM", "LFY"] as const) {
+    const d = denominators[basis] as Rec;
+    denominators[basis] = Object.fromEntries(Object.entries(d).map(([k, v]) => [k, aged(v as Rec, "periodEnd", limits.resultsDays)]));
+  }
   const coreStatus = marketCap.status === "OK" && enterpriseValue.status === "OK" ? "OK" : "PARTIAL";
   const unavailable: Rec[] = [];
   for (const basis of ["LTM", "LFY"]) {
@@ -603,7 +615,7 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
     shares,
     marketCap,
     fx,
-    balances,
+    balances: aged(balances, "balanceDate", limits.balancesDays),
     enterpriseValue,
     denominators,
     multiples,

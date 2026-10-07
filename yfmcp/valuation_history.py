@@ -27,6 +27,7 @@ from yfmcp.capital_structure import _js_number as _js_num
 from yfmcp.capital_structure import round_half_up as _round
 from yfmcp.evidence import AUTHORITY_BOUNDARY
 from yfmcp.sec_facts import REVENUE_CONCEPTS
+from yfmcp.companyfacts_coverage import latest_annual_coverage_warning
 from yfmcp.valuation import _major_price
 
 US_GAAP: dict = {
@@ -618,6 +619,21 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
             "priceToEarnings": with_freshness(_multiple(mcap, ni[basis], fx_rate, "marketCap", basis, "netIncome"), ni[basis]),
             "priceToSales": with_freshness(_multiple(mcap, revenue[basis], fx_rate, "marketCap", basis, "revenue"), revenue[basis]),
         }
+    # The latest annual report filed by the date may be missing from companyfacts (2.5.30, F-015).
+    coverage_warning = latest_annual_coverage_warning(inp.get("periodicFilings") or [], inp.get("companyfacts"), date)
+    if coverage_warning:
+        warnings.append(coverage_warning)
+
+    def aged(r: dict, field: str, limit: int) -> dict:
+        """Each figure's age at the date, and whether it is past the point's limit, on the figure itself (2.5.30, F-018):
+        a stale denominator keeps its status, but no longer reads as current to a caller that looks only at it."""
+        if r.get("status") != "OK" or not isinstance(r.get(field), str):
+            return r
+        age = days(r[field], date)
+        return {**r, f"{'balance' if field == 'balanceDate' else 'period'}AgeDays": age, "stale": age > limit}
+
+    for basis in ("LTM", "LFY"):
+        denominators[basis] = {k: aged(v, "periodEnd", limits["resultsDays"]) for k, v in denominators[basis].items()}
     core_status = "OK" if market_cap["status"] == "OK" and enterprise_value["status"] == "OK" else "PARTIAL"
     unavailable = [{"basis": basis, "multiple": name, "status": multiples[basis][name]["status"]}
                    for basis in ("LTM", "LFY") for name in _MULTIPLE_NAMES if multiples[basis][name]["status"] != "OK"]
@@ -633,7 +649,7 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
         "shares": shares,
         "marketCap": market_cap,
         "fx": fx,
-        "balances": balances,
+        "balances": aged(balances, "balanceDate", limits["balancesDays"]),
         "enterpriseValue": enterprise_value,
         "denominators": denominators,
         "multiples": multiples,
