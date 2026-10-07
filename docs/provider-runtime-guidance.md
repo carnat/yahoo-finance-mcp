@@ -2418,6 +2418,50 @@ Vantage and IBKR produced these fixes.
 - **Not changed.** No value is filled in from elsewhere, and the accession's own XBRL is not read (F-015
   option 2, not taken up).
 
+## Ticker Lookup, Zero Share Counts, Limits And EPS Basis (2.5.31)
+
+From the Engine Zero adapter's red-team report against 2.5.30 (F-022, F-025, F-027, F-028, F-030). F-023, F-024,
+F-026 and F-029 are scheduled for 2.5.32.
+
+- **F-027: wrong company returned as success (both runtimes, `resolveCikForTicker` /
+  `_resolve_cik_for_ticker`).**
+  - Under parallel load, `list_sec_company_filings` {BE, 10-K} once returned CIK 0001986183 with no
+    filings and `ok: true`.
+  - Cause: when Yahoo's CIK and SEC's ticker index were both unreadable, the last fallback asked EDGAR's
+    company-name search. For "BE" that search lists "BE 2023 Irrevocable Trust" (0001986183) first, ahead of
+    Bloom Energy (0001664703). The result was then cached for the day.
+  - A foreign ticker that SEC's index does not list (for example `IQE.L`) could match an unrelated company
+    the same way, with no load needed.
+  - Now: only EDGAR's ticker lookup (`CIK=<ticker>`) is asked; the company-name search is not. That lookup
+    returns Bloom Energy for BE and no company for a symbol it does not know.
+  - Not changed: a ticker that cannot be resolved while Yahoo and SEC are both unreadable is still reported
+    as `TICKER_NOT_FOUND` on the filing tools. That covers the 13 transient failures in the report; telling
+    a failed lookup from an unknown ticker there is left for a later release.
+- **F-025: zero share count (both runtimes, `valuationAtDate` / `valuation_at_date`).**
+  - BE's 2019-06-28 point counted 0 shares, so market cap was `OK` 0, enterprise value was debt less cash
+    (420,664,000) and EV/Revenue 0.54 was `OK`.
+  - Now a count of zero or less gives `marketCap` {status `SHARE_COUNT_NOT_POSITIVE`, value null} and the
+    warning `SHARE_COUNT_NOT_POSITIVE`. Enterprise value is then `MARKET_CAP_NOT_AVAILABLE` and the multiples
+    that use them are null.
+  - The count is still shown in `shares`.
+- **F-028: material filings limit (both runtimes, `list_sec_material_filings`).**
+  - At most 20 filings are returned, as before.
+  - The result adds `limit` {`requested`, `applied`, `maximum`} and `moreAvailable` (true when further
+    matching filings exist in SEC's recent submissions after the last one returned).
+  - A limit above 20 raises the warning `LIMIT_CAPPED`.
+- **F-030: denominator concepts (both runtimes, `get_historical_valuation_context`).**
+  - Each multiple adds `denominatorConcepts`: the concepts its denominator was read from, in component
+    order. For EBITDA this includes the operating income and D&A concepts.
+  - BE's EV/Revenue now names `RevenueFromContractWithCustomerExcludingAssessedTax` (1,135,346,000 for
+    fiscal 2022, against 1,199,125,000 total revenue from `extract_total_revenue`).
+  - Which concept is chosen is unchanged.
+- **F-022: EPS basis (both runtimes).**
+  - Yahoo Finance and Alpha Vantage do not say whether their EPS is GAAP or adjusted. Year-ago EPS differs
+    from GAAP diluted EPS by +23% to -8% (VRT 4.20 against 3.41).
+  - `get_consensus_forecast_curve`, `get_eps_revisions` and `get_earnings_analysis` add `epsBasis`
+    {`basis` `UNKNOWN`, `determination` `NOT_DISCLOSED_BY_PROVIDER`, `note`}.
+  - The basis is never inferred.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

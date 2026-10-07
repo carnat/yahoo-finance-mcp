@@ -397,9 +397,19 @@ function balancesAt(tax: Rec | null, map: TaxonomyMap, currency: string, asOf: s
   };
 }
 
+/** The concepts a denominator was read from, in component order: EBITDA's operating income and D&A included. */
+function denominatorConcepts(d: Rec | null): string[] {
+  if (!d || d.status !== "OK") return [];
+  const parts = [d, d.operatingIncome as Rec | undefined, d.depreciationAmortization as Rec | undefined].filter((x): x is Rec => !!x);
+  const names = parts.flatMap((x) => ((x.components ?? []) as Rec[]).map((c) => String(c.concept)));
+  return [...new Set(names)];
+}
+
 function multiple(numerator: number | null, denominator: Rec | null, fx: number | null, numeratorName: string, basis: string, metric: string): Rec {
   const den = denominator && denominator.status === "OK" ? (denominator.value as number) : null;
-  const ref = { numerator: numeratorName, denominator: metric, basis, denominatorPeriodEnd: denominator?.periodEnd ?? null };
+  // The denominator's own concepts, on the multiple (2.5.31, F-030: BE's EV/Revenue was read from
+  // RevenueFromContractWithCustomerExcludingAssessedTax, 1,135,346,000, not its 1,199,125,000 total revenue).
+  const ref = { numerator: numeratorName, denominator: metric, basis, denominatorPeriodEnd: denominator?.periodEnd ?? null, denominatorConcepts: denominatorConcepts(denominator) };
   if (numerator == null) return { value: null, status: `${numeratorName.toUpperCase()}_NOT_AVAILABLE`, ...ref };
   if (den == null) return { value: null, status: "DENOMINATOR_NOT_AVAILABLE", ...ref };
   if (fx == null) return { value: null, status: "FX_NOT_AVAILABLE", ...ref };
@@ -489,6 +499,11 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
   let marketCap: Rec;
   if (!shares) {
     marketCap = { status: "SHARES_NOT_AVAILABLE", value: null };
+  } else if (!(typeof shares.value === "number" && shares.value > 0)) {
+    // A count of zero or less is not a share count: BE's 2019-06-28 count of 0 gave market cap OK 0 and EV equal
+    // to debt less cash (2.5.31, F-025). The count is shown; market cap, EV and the multiples are null.
+    marketCap = { status: "SHARE_COUNT_NOT_POSITIVE", value: null };
+    warnings.push({ code: "SHARE_COUNT_NOT_POSITIVE", message: `The share count filed by ${date} (${shares.basis}, as of ${shares.asOf}) is ${shares.value}; no market value is computed from it.`, severity: "warning" });
   } else if (shares.basis === "WEIGHTED_AVERAGE_BASIC") {
     // An average over a period, possibly of one class: not a count of the shares outstanding on the date.
     marketCap = { status: "POINT_IN_TIME_SHARES_UNRESOLVED", value: null };

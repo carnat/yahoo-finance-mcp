@@ -347,15 +347,13 @@ async def _resolve_cik_for_ticker(ticker: str) -> str | None:
                 return m.group(1).zfill(10)
         return None
 
-    # Final fallback: EDGAR CIK lookup by ticker symbol
+    # Final fallback: EDGAR CIK lookup by ticker symbol only. Its company-name search is not a ticker lookup:
+    # "BE" matched "BE 2023 Irrevocable Trust" (CIK 0001986183) ahead of Bloom Energy and was cached as BE's CIK
+    # when Yahoo and SEC's ticker index were both unreadable (2.5.31, F-027).
     atom_urls = [
         (
             "https://www.sec.gov/cgi-bin/browse-edgar?"
             f"action=getcompany&CIK={_urlparse.quote(ticker)}&type=&dateb=&owner=include&count=10&output=atom"
-        ),
-        (
-            "https://www.sec.gov/cgi-bin/browse-edgar?"
-            f"action=getcompany&company={_urlparse.quote(ticker)}&CIK=&type=&dateb=&owner=include&count=10&output=atom"
         ),
     ]
     loop = asyncio.get_event_loop()

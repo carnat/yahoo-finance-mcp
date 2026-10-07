@@ -153,6 +153,7 @@ jobs:
           python scripts/test_evidence_tools.py -v
           python scripts/test_provider_snapshots.py -v
           python scripts/test_companyfacts_coverage.py -v
+          python scripts/test_engine_zero_2531.py -v
           python scripts/test_scenarios_and_schedule.py -v
           python scripts/test_guidance_and_drivers.py -v
           python scripts/test_valuation_history_and_reconcile.py -v
