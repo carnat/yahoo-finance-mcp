@@ -39,7 +39,7 @@ import { adsRatio, majorPrice, marketInputsFromQuoteSummary, peerValuations, val
 import { coverReadsNeeded, coverShareCounts, foreignFiler, historicalValuation, latestShareCount, peerMedians, taxonomyOf, valuationDates, type Bar, type PeriodicFiling, type Split } from "./valuation-history.js";
 import { annualFilingsFromSubmissions, latestAnnualCoverageWarning, latestAnnualFiling } from "./companyfacts-coverage.js";
 import { DEFAULT_TOLERANCE_PCT, METRICS as RECONCILE_METRICS, metricReconciliation, resolvePeriod } from "./metric-reconciliation.js";
-import { AUTHORITY_BOUNDARY } from "./evidence.js";
+import { AUTHORITY_BOUNDARY, EPS_BASIS } from "./evidence.js";
 import { documentFiscalYearFocus, filingFiscalYearLabel, fiscalYearNaming, type FiscalYearNaming } from "./fiscal-calendar.js";
 import registryManifest from "./company-ir-page-registry.json";
 import newsSourceCapabilities from "./news-source-capabilities.json";
@@ -2950,6 +2950,7 @@ export async function getEarningsAnalysis(ticker: string): Promise<string> {
     }));
   }
   output.unitSemantics = EARNINGS_ANALYSIS_UNITS;
+  output.epsBasis = EPS_BASIS;
 
   return JSON.stringify(output);
 }
@@ -5486,9 +5487,11 @@ async function resolveCikForTicker(ticker: string): Promise<string | null> {
     return null;
   };
 
+  // EDGAR's lookup by ticker only. Its company-name search is not a ticker lookup: "BE" matched "BE 2023
+  // Irrevocable Trust" (CIK 0001986183) ahead of Bloom Energy and was cached as BE's CIK when Yahoo and SEC's
+  // ticker index were both unreadable (2.5.31, F-027).
   const atomUrls = [
     `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${encodeURIComponent(ticker)}&type=&dateb=&owner=include&count=10&output=atom`,
-    `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company=${encodeURIComponent(ticker)}&CIK=&type=&dateb=&owner=include&count=10&output=atom`,
   ];
 
   try {
@@ -12759,12 +12762,14 @@ export async function getSecFilingIndex(
 const SEC_MATERIAL_FORMS_DEFAULT = ["10-K", "10-Q", "8-K", "S-1", "424B", "DEF 14A", "20-F", "6-K"];
 const SEC_NOISY_FORMS = new Set(["4", "3", "5", "SC 13G", "SC 13G/A", "SC 13D", "SC 13D/A", "144", "SD", "CORRESP", "UPLOAD", "CT ORDER"]);
 
+const SEC_MATERIAL_FILINGS_MAX = 20;
+
 export async function listSecMaterialFilings(
   ticker: string,
   forms: string[] | null = null,
   limit: number = 5,
 ): Promise<string> {
-  const resolvedLimit = Math.min(Math.max(1, limit), 20);
+  const resolvedLimit = Math.min(Math.max(1, limit), SEC_MATERIAL_FILINGS_MAX);
   const allowedForms = new Set((forms ?? SEC_MATERIAL_FORMS_DEFAULT).map(f => f.toUpperCase()));
 
   const { cikPadded, submissions } = await getSubmissionsForTicker(ticker);
@@ -12784,11 +12789,14 @@ export async function listSecMaterialFilings(
 
   const results: Record<string, unknown>[] = [];
   const cikInt = parseInt(cikPadded, 10);
+  const material = (form: unknown): boolean => {
+    const formUpper = String(form).toUpperCase();
+    return !SEC_NOISY_FORMS.has(formUpper) && Array.from(allowedForms).some(af => formUpper === af || formUpper.startsWith(af));
+  };
+  let lastIndex = -1;
   for (let i = 0; i < formsList.length && results.length < resolvedLimit; i++) {
-    const formUpper = String(formsList[i]).toUpperCase();
-    if (SEC_NOISY_FORMS.has(formUpper)) continue;
-    const matched = Array.from(allowedForms).some(af => formUpper === af || formUpper.startsWith(af));
-    if (!matched) continue;
+    if (!material(formsList[i])) continue;
+    lastIndex = i;
 
     const acc = accessions[i] ?? "";
     const accClean = acc.replace(/-/g, "");
@@ -12806,11 +12814,20 @@ export async function listSecMaterialFilings(
     });
   }
 
+  // The cap and whether it hid filings are stated (2.5.31, F-028: limit 120 returned 20 rows and said nothing).
+  const moreAvailable = results.length === resolvedLimit && formsList.slice(lastIndex + 1).some(material);
+  const warnings: Record<string, unknown>[] = [];
+  if (limit > SEC_MATERIAL_FILINGS_MAX) {
+    warnings.push({ code: "LIMIT_CAPPED", message: `limit ${limit} is above the maximum of ${SEC_MATERIAL_FILINGS_MAX}; at most ${SEC_MATERIAL_FILINGS_MAX} filings are returned${moreAvailable ? ", and more matching filings exist in SEC's recent submissions" : ""}.`, severity: "warning" });
+  }
   return JSON.stringify({
     ticker,
     cik: cikPadded,
     filings: results,
+    limit: { requested: limit, applied: resolvedLimit, maximum: SEC_MATERIAL_FILINGS_MAX },
+    moreAvailable,
     meta: { source: "sec_submissions", materialFormsFilter: Array.from(allowedForms).sort(), retrievedAt: new Date().toISOString() },
+    ...(warnings.length ? { warnings } : {}),
   });
 }
 

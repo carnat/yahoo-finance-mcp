@@ -566,6 +566,14 @@ class TestConsensusCurve(unittest.TestCase):
         self.assertEqual(keys[:3], ["ticker", "asOf", "crossCheck"])
         self.assertEqual(keys[keys.index("notes") + 1], "warnings")
 
+    def test_eps_basis_is_stated_as_unknown(self) -> None:
+        # 2.5.31 (F-022): neither provider states GAAP or adjusted; the curve and the revisions say so.
+        for out in (self.out["curve"], self.out["revisions"], self.out["curveAvRateLimited"]):
+            self.assertEqual(out["epsBasis"], ev.EPS_BASIS)
+        self.assertEqual((ev.EPS_BASIS["basis"], ev.EPS_BASIS["determination"]), ("UNKNOWN", "NOT_DISCLOSED_BY_PROVIDER"))
+        keys = list(self.out["curve"])
+        self.assertEqual(keys[keys.index("fiscalYearNaming") + 1], "epsBasis")
+
     def test_years_beyond_fy1_stay_visibly_missing(self) -> None:
         curve = self.out["curve"]
         self.assertEqual([p["label"] for p in curve["periods"]], ["FY0", "FY+1", "FY+2", "FY+3", "FY+4", "FY+5"])

@@ -25,6 +25,14 @@ CONSENSUS_OBSERVATION_SCHEMA = "yfmcp.consensus-observation/1"
 PROVIDER_SNAPSHOT_SCHEMA = "yfmcp.provider-snapshot/1"
 CANONICALIZATION = "yfmcp-canonical-json/1: sorted keys, no whitespace, ECMAScript number formatting, UTF-8"
 
+# The basis of provider EPS (2.5.31, F-022): neither provider states GAAP or adjusted, so it is UNKNOWN, never
+# assumed. Carried on the consensus curve, the EPS revisions and get_earnings_analysis.
+EPS_BASIS: dict[str, Any] = {
+    "basis": "UNKNOWN",
+    "determination": "NOT_DISCLOSED_BY_PROVIDER",
+    "note": "Yahoo Finance and Alpha Vantage do not state whether EPS estimates and actuals are GAAP or adjusted (non-GAAP); they can differ from reported GAAP diluted EPS (VRT year-ago 4.20 against GAAP 3.41).",
+}
+
 AUTHORITY_BOUNDARY: dict[str, Any] = {
     "decisionUse": "EVIDENCE_ONLY",
     "selectedMethod": None,
@@ -793,6 +801,7 @@ def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: d
         "splitHistory": _split_history_summary(split_history, recent_splits),
         "fiscalYearBasis": fy0 or {"fiscalYearEnd": None, "basis": "NO_PROVIDER_FISCAL_YEAR"},
         "fiscalYearNaming": year_naming,
+        "epsBasis": EPS_BASIS,
         "policy": {**policy, "horizonYears": horizon},
         "providers": [
             {
@@ -937,6 +946,7 @@ def build_eps_revisions(ticker: str, inputs: list[dict], as_of: str, split_histo
         "ticker": ticker.upper(),
         "asOf": as_of,
         "fiscalYearBasis": fy0 or {"fiscalYearEnd": None, "basis": "NO_PROVIDER_FISCAL_YEAR"},
+        "epsBasis": EPS_BASIS,
         "periods": periods,
         "revenueRevisions": {"coverage": "PROVIDER_NOT_COVERED", "note": "No configured provider publishes revenue estimate history."},
         "analystCountChanges": {"coverage": "PROVIDER_NOT_COVERED", "note": "No configured provider publishes analyst adds or drops."},

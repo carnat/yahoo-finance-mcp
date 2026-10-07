@@ -221,6 +221,10 @@ COVER_HTML = [
 ]
 
 
+ZERO_SHARES = json.loads(json.dumps(SYN))
+ZERO_SHARES["facts"]["dei"]["EntityCommonStockSharesOutstanding"]["units"]["shares"][0]["val"] = 0
+
+
 HV_INPUTS = {
     "syn": _hv("syn", SYN, BARS, DATES, SPLITS),
     "ifrs": _hv("tsmx", IFRS_FACTS, IFRS_BARS, ["2025-06-02"], fx=FX, ads=5),
@@ -237,6 +241,8 @@ HV_INPUTS = {
     "multiCoverFailed": _hv("multi", MULTI, BARS, ["2025-09-02"], SPLITS, covers=COVER_FAILED),
     "multiClassSum": _hv("multi", MULTI, BARS, ["2025-09-02"], SPLITS, covers=CLASS_SUM),
     "regime": _hv("regime", REGIME, REGIME_BARS, ["2024-06-03", "2025-06-02"]),
+    # BE-like (2.5.31, F-025): the cover page counts 0 shares.
+    "zeroShares": _hv("zero", ZERO_SHARES, BARS, ["2025-03-03"], SPLITS),
     # TSM-like (2.5.30, F-015/F-018): the FY2025 20-F filed 2026-04-16 is in submissions but not in companyfacts.
     "ifrsMissingFy": {**_hv("tsmx", IFRS_FACTS, [{"date": "2025-06-02", "close": 10.0}, {"date": "2026-06-30", "close": 12.0}], ["2025-06-02", "2026-06-30"],
                             fx={"pair": "TWDUSD=X", "bars": [{"date": "2025-05-30", "close": 0.03}, {"date": "2026-06-30", "close": 0.031}]}, ads=5),
@@ -731,6 +737,36 @@ class TestHistoricalValuation(unittest.TestCase):
 
 def _obs(result: dict, source: str) -> dict:
     return next(o for o in result["observations"] if o["source"] == source)
+
+
+class TestZeroShareCount(unittest.TestCase):
+    """2.5.31 (F-025): a share count of zero is not a market value of zero."""
+
+    def test_a_zero_count_gives_no_market_cap_ev_or_multiples(self) -> None:
+        pt = _point(vh.historical_valuation(HV_INPUTS["zeroShares"]), "2025-03-03")
+        self.assertEqual((pt["shares"]["value"], pt["shares"]["basis"]), (0, "COVER_PAGE"))
+        self.assertEqual(pt["marketCap"], {"status": "SHARE_COUNT_NOT_POSITIVE", "value": None})
+        self.assertEqual(pt["enterpriseValue"]["status"], "MARKET_CAP_NOT_AVAILABLE")
+        self.assertEqual((pt["coreStatus"], pt["status"], pt["coverage"]["multiplesAvailable"]), ("PARTIAL", "PARTIAL", 0))
+        warning = next(w for w in pt["warnings"] if w["code"] == "SHARE_COUNT_NOT_POSITIVE")
+        self.assertEqual(warning["message"], "The share count filed by 2025-03-03 (COVER_PAGE, as of 2025-02-10) is 0; no market value is computed from it.")
+        # The same filer with its real count is unaffected.
+        ok = _point(vh.historical_valuation(HV_INPUTS["syn"]), "2025-03-03")
+        self.assertEqual(ok["marketCap"]["status"], "OK")
+
+
+class TestMultipleNamesItsConcepts(unittest.TestCase):
+    """2.5.31 (F-030): each multiple names the concepts its denominator was read from."""
+
+    def test_denominator_concepts(self) -> None:
+        pt = _point(vh.historical_valuation(HV_INPUTS["syn"]), "2025-09-02")
+        got = {b: {k: m["denominatorConcepts"] for k, m in pt["multiples"][b].items()} for b in ("LTM", "LFY")}
+        self.assertEqual(got["LTM"], {"evToRevenue": ["Revenues"], "evToEbitda": ["OperatingIncomeLoss", "Depreciation", "AmortizationOfIntangibleAssets"],
+                                      "priceToEarnings": ["NetIncomeLoss"], "priceToSales": ["Revenues"]})
+        self.assertEqual(got["LFY"]["evToEbitda"], ["OperatingIncomeLoss", "DepreciationDepletionAndAmortization"])
+        # A multiple with no denominator names none.
+        zero = _point(vh.historical_valuation(HV_INPUTS["ifrsMissingFy"]), "2026-06-30")
+        self.assertTrue(all(isinstance(m["denominatorConcepts"], list) for m in zero["multiples"]["LTM"].values()))
 
 
 class TestStaleFiguresAndCoverage(unittest.TestCase):

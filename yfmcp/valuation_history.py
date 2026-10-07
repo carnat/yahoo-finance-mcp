@@ -396,10 +396,22 @@ def sum_values(facts: list[dict]) -> float:
     return total
 
 
+def _denominator_concepts(d: dict | None) -> list[str]:
+    """The concepts a denominator was read from, in component order: EBITDA's operating income and D&A included."""
+    if not d or d.get("status") != "OK":
+        return []
+    parts = [x for x in (d, d.get("operatingIncome"), d.get("depreciationAmortization")) if x]
+    names = [str(c.get("concept")) for x in parts for c in (x.get("components") or [])]
+    return list(dict.fromkeys(names))
+
+
 def _multiple(numerator: float | None, denominator: dict | None, fx: float | None, numerator_name: str, basis: str, metric: str) -> dict:
     den = denominator["value"] if denominator and denominator.get("status") == "OK" else None
+    # The denominator's own concepts, on the multiple (2.5.31, F-030: BE's EV/Revenue was read from
+    # RevenueFromContractWithCustomerExcludingAssessedTax, 1,135,346,000, not its 1,199,125,000 total revenue).
     ref = {"numerator": numerator_name, "denominator": metric, "basis": basis,
-           "denominatorPeriodEnd": denominator.get("periodEnd") if denominator else None}
+           "denominatorPeriodEnd": denominator.get("periodEnd") if denominator else None,
+           "denominatorConcepts": _denominator_concepts(denominator)}
     if numerator is None:
         return {"value": None, "status": f"{numerator_name.upper()}_NOT_AVAILABLE", **ref}
     if den is None:
@@ -514,6 +526,13 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
     shares = _shares_at(dei, tax, mapping, date, inp.get("coverCounts"), inp.get("periodicFilings"))
     if shares is None:
         market_cap: dict = {"status": "SHARES_NOT_AVAILABLE", "value": None}
+    elif not (isinstance(shares.get("value"), (int, float)) and not isinstance(shares.get("value"), bool) and shares["value"] > 0):
+        # A count of zero or less is not a share count: BE's 2019-06-28 count of 0 gave market cap OK 0 and EV equal
+        # to debt less cash (2.5.31, F-025). The count is shown; market cap, EV and the multiples are null.
+        market_cap = {"status": "SHARE_COUNT_NOT_POSITIVE", "value": None}
+        warnings.append({"code": "SHARE_COUNT_NOT_POSITIVE", "message": (
+            f"The share count filed by {date} ({shares['basis']}, as of {shares['asOf']}) is {_js_num(shares['value'])}; no market value is computed from it."),
+            "severity": "warning"})
     elif shares["basis"] == "WEIGHTED_AVERAGE_BASIC":
         # An average over a period, possibly of one class: not a count of the shares outstanding on the date.
         market_cap = {"status": "POINT_IN_TIME_SHARES_UNRESOLVED", "value": None}

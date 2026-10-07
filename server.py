@@ -65,7 +65,7 @@ from yfmcp import extraction_rules as _er
 from yfmcp import driver_ledger as _dl
 from yfmcp import guidance_history as _gh
 from yfmcp import metric_reconciliation as _mr
-from yfmcp.evidence import AUTHORITY_BOUNDARY as _AUTHORITY_BOUNDARY
+from yfmcp.evidence import AUTHORITY_BOUNDARY as _AUTHORITY_BOUNDARY, EPS_BASIS as _EPS_BASIS
 from yfmcp.fiscal_calendar import document_fiscal_year_focus, filing_fiscal_year_label, fiscal_year_naming
 from yfmcp import valuation_history as _vh
 from yfmcp.clients.edgar import (
@@ -4640,6 +4640,7 @@ async def get_earnings_analysis(ticker: str) -> str:
         "decimalRatios": ["earningsEstimate[].growth", "revenueEstimate[].growth", "earningsHistory[].surprisePercent"],
         "percentValues": ["earningsHistory[].surprisePct"],
     }
+    output["epsBasis"] = _EPS_BASIS
 
     result = json.dumps(output)
     _tool_cache.set(cache_key, result, _STMT_TTL)
@@ -8968,6 +8969,9 @@ _SEC_NOISY_FORMS: set[str] = {
 }
 
 
+_SEC_MATERIAL_FILINGS_MAX = 20
+
+
 @yfinance_server.tool(
     name="list_sec_material_filings",
     output_schema=_TOOL_OUTPUT_SCHEMAS["list_sec_material_filings"],
@@ -8989,7 +8993,7 @@ async def list_sec_material_filings(
     if err:
         return _mcp_failure("list_sec_material_filings", ErrorCode.INPUT_VALIDATION_ERROR, err)
 
-    resolved_limit = min(max(1, limit), 20)
+    resolved_limit = min(max(1, limit), _SEC_MATERIAL_FILINGS_MAX)
     allowed_forms: set[str] = set(f.upper() for f in (forms or _SEC_MATERIAL_FORMS_DEFAULT))
 
     cik_padded, subs = await _get_submissions_for_ticker(ticker)
@@ -9013,18 +9017,19 @@ async def list_sec_material_filings(
         except (IndexError, TypeError, ValueError):
             return False
 
+    def _material(form: Any) -> bool:
+        # Must match an allowed form or prefix (e.g. "424B" matches "424B4") and not be in the noisy set.
+        form_upper = str(form).upper()
+        return form_upper not in _SEC_NOISY_FORMS and any(form_upper == af or form_upper.startswith(af) for af in allowed_forms)
+
     results: list[dict] = []
+    last_index = -1
     for i, form in enumerate(forms_list):
         if len(results) >= resolved_limit:
             break
-        form_upper = str(form).upper()
-        # Filter: must match allowed forms and not be in noisy set
-        if form_upper in _SEC_NOISY_FORMS:
+        if not _material(form):
             continue
-        # Check if form matches any of the allowed prefixes (e.g. "424B" matches "424B4")
-        matched = any(form_upper == af or form_upper.startswith(af) for af in allowed_forms)
-        if not matched:
-            continue
+        last_index = i
         acc = accessions[i] if i < len(accessions) else ""
         date = dates[i] if i < len(dates) else ""
         accepted_at = accepted_dts[i] if i < len(accepted_dts) else None
@@ -9044,16 +9049,26 @@ async def list_sec_material_filings(
             "xbrl_available": xbrl_available,
         })
 
+    # The cap and whether it hid filings are stated (2.5.31, F-028: limit 120 returned 20 rows and said nothing).
+    more_available = len(results) == resolved_limit and any(_material(f) for f in forms_list[last_index + 1:])
+    warnings: list[dict] = []
+    if limit > _SEC_MATERIAL_FILINGS_MAX:
+        more = ", and more matching filings exist in SEC's recent submissions" if more_available else ""
+        warnings.append({"code": "LIMIT_CAPPED", "message": (
+            f"limit {limit} is above the maximum of {_SEC_MATERIAL_FILINGS_MAX}; at most {_SEC_MATERIAL_FILINGS_MAX} filings are returned{more}."), "severity": "warning"})
     retrieved_at = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
     return json.dumps({
         "ticker": ticker,
         "cik": cik_padded,
         "filings": results,
+        "limit": {"requested": limit, "applied": resolved_limit, "maximum": _SEC_MATERIAL_FILINGS_MAX},
+        "moreAvailable": more_available,
         "meta": {
             "source": "sec_submissions",
             "materialFormsFilter": sorted(allowed_forms),
             "retrievedAt": retrieved_at,
         },
+        **({"warnings": warnings} if warnings else {}),
     })
 
 

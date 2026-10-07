@@ -16,6 +16,16 @@ export const CONSENSUS_OBSERVATION_SCHEMA = "yfmcp.consensus-observation/1";
 export const PROVIDER_SNAPSHOT_SCHEMA = "yfmcp.provider-snapshot/1";
 export const CANONICALIZATION = "yfmcp-canonical-json/1: sorted keys, no whitespace, ECMAScript number formatting, UTF-8";
 
+/**
+ * The basis of provider EPS (2.5.31, F-022): neither provider states GAAP or adjusted, so it is UNKNOWN, never
+ * assumed. Carried on the consensus curve, the EPS revisions and get_earnings_analysis.
+ */
+export const EPS_BASIS = {
+  basis: "UNKNOWN",
+  determination: "NOT_DISCLOSED_BY_PROVIDER",
+  note: "Yahoo Finance and Alpha Vantage do not state whether EPS estimates and actuals are GAAP or adjusted (non-GAAP); they can differ from reported GAAP diluted EPS (VRT year-ago 4.20 against GAAP 3.41).",
+};
+
 export const AUTHORITY_BOUNDARY = {
   decisionUse: "EVIDENCE_ONLY",
   selectedMethod: null,
@@ -752,6 +762,7 @@ export function buildConsensusCurve(
     splitHistory: splitHistorySummary(splitHistory, recentSplits),
     fiscalYearBasis: fy0 ?? { fiscalYearEnd: null, basis: "NO_PROVIDER_FISCAL_YEAR" },
     fiscalYearNaming: yearNaming,
+    epsBasis: EPS_BASIS,
     policy: { ...policy, horizonYears: horizon },
     providers: inputs.map((i) => ({
       provider: i.provider,
@@ -887,6 +898,7 @@ export function buildEpsRevisions(ticker: string, inputs: ProviderConsensusInput
     ticker: ticker.toUpperCase(),
     asOf,
     fiscalYearBasis: fy0 ?? { fiscalYearEnd: null, basis: "NO_PROVIDER_FISCAL_YEAR" },
+    epsBasis: EPS_BASIS,
     periods,
     revenueRevisions: { coverage: "PROVIDER_NOT_COVERED", note: "No configured provider publishes revenue estimate history." },
     analystCountChanges: { coverage: "PROVIDER_NOT_COVERED", note: "No configured provider publishes analyst adds or drops." },
