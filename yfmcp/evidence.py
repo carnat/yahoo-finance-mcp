@@ -22,6 +22,7 @@ from yfmcp.fiscal_calendar import company_fiscal_year_end, fiscal_year_of_period
 
 EVIDENCE_CUT_SCHEMA = "yfmcp.evidence-cut/1"
 CONSENSUS_OBSERVATION_SCHEMA = "yfmcp.consensus-observation/1"
+PROVIDER_SNAPSHOT_SCHEMA = "yfmcp.provider-snapshot/1"
 CANONICALIZATION = "yfmcp-canonical-json/1: sorted keys, no whitespace, ECMAScript number formatting, UTF-8"
 
 AUTHORITY_BOUNDARY: dict[str, Any] = {
@@ -144,6 +145,70 @@ def parse_evidence_cut_id(cut_id: str) -> dict | None:
 
 def consensus_observation_key(ticker: str, iso_date: str) -> str:
     return f"consensus-history/{ticker.upper()}/{iso_date[:10]}.json"
+
+
+# ── Provider snapshots (2.5.29) ──────────────────────────────────────────────
+# A provider's last good payload, kept once a day, stands in when a live request is refused for a reason that
+# passes (quota, timeout, upstream error). It never stands in for a missing key or entitlement, and never past
+# STALE_FALLBACK_MAX_AGE_DAYS.
+
+STALE_FALLBACK_MAX_AGE_DAYS = 7
+STALE_FALLBACK_STATUSES = frozenset({"RATE_LIMIT", "TIMEOUT", "PROVIDER_ERROR"})
+
+
+def _epoch_ms(iso: Any) -> float | None:
+    if not isinstance(iso, str):
+        return None
+    try:
+        t = _dt.datetime.fromisoformat(iso.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=_dt.timezone.utc)
+    return t.timestamp() * 1000
+
+
+def provider_snapshot_key(provider: str, operation: str, ticker: str, iso_date: str) -> str:
+    return f"provider-snapshots/{provider}/{operation}/{ticker.upper()}/{iso_date[:10]}.json"
+
+
+def provider_snapshot_candidate_keys(provider: str, operation: str, ticker: str, as_of: str) -> list[str]:
+    """The snapshot keys a STALE_FALLBACK_MAX_AGE_DAYS window can reach, newest day first (as_of's day back to the oldest)."""
+    day = _dt.date.fromisoformat(as_of[:10])
+    return [provider_snapshot_key(provider, operation, ticker, (day - _dt.timedelta(days=k)).isoformat()) for k in range(STALE_FALLBACK_MAX_AGE_DAYS + 1)]
+
+
+def provider_snapshot_body(provider: str, operation: str, ticker: str, fetched_at: str, payload: Any) -> str:
+    return canonical_json({"schema": PROVIDER_SNAPSHOT_SCHEMA, "provider": provider, "operation": operation,
+                           "ticker": ticker.upper(), "fetchedAt": fetched_at, "payload": payload})
+
+
+def stale_snapshot(stored: dict | None, expect: dict, live: dict, as_of: str) -> dict | None:
+    """The stored snapshot that may stand in for a refused live request, or None: the live status must be one that
+    passes, and the snapshot must be this provider's, operation's and ticker's, fetched no later than as_of and no
+    more than STALE_FALLBACK_MAX_AGE_DAYS before it."""
+    if not stored or live.get("status") not in STALE_FALLBACK_STATUSES:
+        return None
+    try:
+        value = json.loads(stored["text"])
+    except (TypeError, ValueError):
+        return None
+    if (not isinstance(value, dict) or value.get("schema") != PROVIDER_SNAPSHOT_SCHEMA or value.get("provider") != expect["provider"]
+            or value.get("operation") != expect["operation"] or value.get("ticker") != expect["ticker"].upper()
+            or not isinstance(value.get("fetchedAt"), str) or value.get("payload") is None):
+        return None
+    now_ms, fetched_ms = _epoch_ms(as_of), _epoch_ms(value["fetchedAt"])
+    if now_ms is None or fetched_ms is None:
+        return None
+    age_ms = now_ms - fetched_ms
+    if age_ms < 0 or age_ms > STALE_FALLBACK_MAX_AGE_DAYS * 86_400_000:
+        return None
+    return {
+        "payload": value["payload"],
+        "fetchedAt": value["fetchedAt"],
+        "staleFallback": {"liveStatus": live["status"], "liveMessage": live.get("message") or None,
+                          "ageHours": _round(age_ms / 3_600_000, 1), "snapshotKey": stored["key"]},
+    }
 
 
 # ── Numbers ──────────────────────────────────────────────────────────────────
@@ -280,7 +345,8 @@ def yahoo_consensus_input(
     }
 
 
-def alpha_vantage_consensus_input(payload: Any, *, retrieved_at: str | None, status: str | None = None, message: str | None = None) -> dict:
+def alpha_vantage_consensus_input(payload: Any, *, retrieved_at: str | None, status: str | None = None, message: str | None = None,
+                                  stale_fallback: dict | None = None) -> dict:
     """Alpha Vantage EARNINGS_ESTIMATES fiscal-year rows as provider periods."""
     rows = (payload.get("estimates") if isinstance(payload, dict) else None) or []
     periods = []
@@ -320,6 +386,7 @@ def alpha_vantage_consensus_input(payload: Any, *, retrieved_at: str | None, sta
         "providerTimestamp": None,
         "message": message,
         "periods": periods,
+        **({"staleFallback": stale_fallback} if stale_fallback else {}),
     }
 
 
@@ -578,14 +645,19 @@ def _cross_check(inputs: list[dict], periods: list[dict]) -> tuple[dict, list[di
         status = "NOT_INDEPENDENT"
     else:
         status = "CROSS_CHECKED"
+    stale = [i for i in inputs if i["status"] == "OK" and i.get("staleFallback")]
     warnings: list[dict] = []
     for f in failed:
-        quota = (" This server's Alpha Vantage key and its quota are its own, separate from any key used directly."
-                 if f["provider"] == "alpha_vantage" else "")
         suffix = f": {f['message']}" if f["message"] else ""
         warnings.append({
             "code": "CROSS_CHECK_DEGRADED",
-            "message": f"{f['provider']} returned {f['status']}{suffix}. The curve is not cross-checked against it.{quota}",
+            "message": f"{f['provider']} returned {f['status']}{suffix}. The curve is not cross-checked against it.{_quota_note(f['provider'])}",
+            "severity": "warning",
+        })
+    for i in stale:
+        warnings.append({
+            "code": "PROVIDER_DATA_STALE",
+            "message": f"{_stale_text(i)} A difference from another provider may be a revision since then, not a disagreement.{_quota_note(i['provider'])}",
             "severity": "warning",
         })
     if status == "NOT_INDEPENDENT":
@@ -594,8 +666,26 @@ def _cross_check(inputs: list[dict], periods: list[dict]) -> tuple[dict, list[di
             "message": "Every compared figure is identical at the providers' published precision: they carry one upstream feed, so their agreement is one source, not two.",
             "severity": "warning",
         })
-    return ({"status": status, "providersAnswered": answered, "providersFailed": failed, "cellsCompared": compared, "cellsIdentical": identical},
-            warnings)
+    summary = {"status": status, "providersAnswered": answered, "providersFailed": failed, "cellsCompared": compared, "cellsIdentical": identical}
+    if stale:
+        summary["providersStale"] = [{"provider": i["provider"], "retrievedAt": i["retrievedAt"], **i["staleFallback"]} for i in stale]
+    return summary, warnings
+
+
+def _quota_note(provider: str) -> str:
+    return " This server's Alpha Vantage key and its quota are its own, separate from any key used directly." if provider == "alpha_vantage" else ""
+
+
+def _stale_text(i: dict) -> str:
+    """"alpha_vantage returned RATE_LIMIT: …. Its figures retrieved at … (30.5 hours before asOf) stand in." """
+    f = i["staleFallback"]
+    suffix = f": {f['liveMessage']}" if f["liveMessage"] else ""
+    return (f"{i['provider']} returned {f['liveStatus']}{suffix}. "
+            f"Its figures retrieved at {i['retrievedAt']} ({_js(f['ageHours'])} hours before asOf) stand in.")
+
+
+def _provider_summary(i: dict) -> dict:
+    return {"staleFallback": i["staleFallback"]} if i.get("staleFallback") else {}
 
 
 def _metric_coverage(entries: list[dict], agreement_status: str) -> str:
@@ -712,6 +802,7 @@ def build_consensus_curve(ticker: str, inputs: list[dict], as_of: str, policy: d
                 "providerTimestamp": i["providerTimestamp"],
                 "message": i["message"],
                 "fiscalYearsReturned": [p["fiscalYearEnd"] for p in i["periods"] if p["fiscalYearEnd"]],
+                **_provider_summary(i),
             }
             for i in inputs
         ],
@@ -835,6 +926,13 @@ def build_eps_revisions(ticker: str, inputs: list[dict], as_of: str, split_histo
             "severity": "warning",
         })
     warnings.extend(_split_history_warnings(split_history, "Revision windows are not checked against splits."))
+    for i in inputs:
+        if i["status"] == "OK" and i.get("staleFallback"):
+            warnings.append({
+                "code": "PROVIDER_DATA_STALE",
+                "message": f"{_stale_text(i)} Its windows end at that time, not at asOf.{_quota_note(i['provider'])}",
+                "severity": "warning",
+            })
     return {
         "ticker": ticker.upper(),
         "asOf": as_of,
@@ -842,7 +940,7 @@ def build_eps_revisions(ticker: str, inputs: list[dict], as_of: str, split_histo
         "periods": periods,
         "revenueRevisions": {"coverage": "PROVIDER_NOT_COVERED", "note": "No configured provider publishes revenue estimate history."},
         "analystCountChanges": {"coverage": "PROVIDER_NOT_COVERED", "note": "No configured provider publishes analyst adds or drops."},
-        "providers": [{"provider": i["provider"], "status": i["status"], "retrievedAt": i["retrievedAt"], "message": i["message"]} for i in inputs],
+        "providers": [{"provider": i["provider"], "status": i["status"], "retrievedAt": i["retrievedAt"], "message": i["message"], **_provider_summary(i)} for i in inputs],
         "splitHistory": {**_split_history_summary(split_history, window_splits), "lookbackDays": 91},
         "warnings": warnings,
         **AUTHORITY_BOUNDARY,

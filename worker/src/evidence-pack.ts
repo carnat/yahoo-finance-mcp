@@ -24,6 +24,11 @@ import {
   evidenceCutKey,
   evidenceQuality,
   parseEvidenceCutId,
+  providerSnapshotBody,
+  providerSnapshotKey,
+  providerSnapshotCandidateKeys,
+  STALE_FALLBACK_STATUSES,
+  staleSnapshot,
   yahooConsensusInput,
   type ComponentRecord,
   type ConsensusPolicy,
@@ -47,7 +52,8 @@ import {
 
 type Rec = Record<string, unknown>;
 
-const ALPHA_VANTAGE_ESTIMATES_TTL_MS = 6 * 60 * 60 * 1000;
+// Estimates move slowly and the server's key allows 25 requests a day: one request per ticker per day (2.5.29).
+const ALPHA_VANTAGE_ESTIMATES_TTL_MS = 24 * 60 * 60 * 1000;
 
 interface MarketQuote {
   price: number | null;
@@ -86,14 +92,50 @@ async function splitHistory(symbol: string): Promise<SplitHistory> {
   }
 }
 
+/** The newest stored snapshot in the stale-fallback window, or null; a storage failure reads as none. At most eight reads, and only after a refusal. */
+async function latestProviderSnapshot(provider: string, operation: string, symbol: string, asOf: string): Promise<{ key: string; text: string } | null> {
+  const store = getEvidenceStore();
+  if (!store) return null;
+  try {
+    for (const key of providerSnapshotCandidateKeys(provider, operation, symbol, asOf)) {
+      const text = await store.get(key);
+      if (text != null) return { key, text };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Alpha Vantage EARNINGS_ESTIMATES as a consensus input (2.5.29). A good payload is kept once a day; when a live
+ * request is refused for a reason that passes, the newest kept payload within the window stands in, marked stale.
+ */
+async function alphaVantageEstimates(symbol: string): Promise<ProviderConsensusInput> {
+  const r = await fetchAlphaVantageJson("EARNINGS_ESTIMATES", { symbol }, ALPHA_VANTAGE_ESTIMATES_TTL_MS);
+  const now = new Date().toISOString();
+  const expect = { provider: "alpha_vantage", operation: "EARNINGS_ESTIMATES", ticker: symbol };
+  if (r.status === "OK") {
+    const fetchedAt = r.fetchedAt ?? now;
+    if (Array.isArray(r.payload?.estimates) && (r.payload.estimates as unknown[]).length) {
+      await putOnce(providerSnapshotKey(expect.provider, expect.operation, symbol, fetchedAt),
+        providerSnapshotBody(expect.provider, expect.operation, symbol, fetchedAt, r.payload), { ticker: symbol, kind: "provider-snapshot" });
+    }
+    return alphaVantageConsensusInput(r.payload, { retrievedAt: fetchedAt });
+  }
+  const stored = STALE_FALLBACK_STATUSES.has(r.status) ? await latestProviderSnapshot(expect.provider, expect.operation, symbol, now) : null;
+  const stale = staleSnapshot(stored, expect, { status: r.status, message: r.message ?? null }, now);
+  if (stale) return alphaVantageConsensusInput(stale.payload, { retrievedAt: stale.fetchedAt, staleFallback: stale.staleFallback });
+  return alphaVantageConsensusInput(r.payload, { retrievedAt: r.fetchedAt ?? now, status: r.status, message: r.message ?? null });
+}
+
 /** Yahoo earningsTrend + quote and Alpha Vantage EARNINGS_ESTIMATES, fetched together; each provider fails on its own. */
 async function consensusProviders(ticker: string): Promise<{ inputs: ProviderConsensusInput[]; quote: MarketQuote; splits: SplitHistory }> {
   const symbol = ticker.toUpperCase();
   const [yahoo, alpha, splits] = await Promise.all([
     yGet(`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=earningsTrend,financialData,price`)
       .then((d) => ({ ok: true as const, d, at: new Date().toISOString() }), (e) => ({ ok: false as const, e, at: new Date().toISOString() })),
-    fetchAlphaVantageJson("EARNINGS_ESTIMATES", { symbol }, ALPHA_VANTAGE_ESTIMATES_TTL_MS)
-      .then((r) => ({ r, at: new Date().toISOString() })),
+    alphaVantageEstimates(symbol),
     splitHistory(symbol),
   ]);
 
@@ -123,13 +165,7 @@ async function consensusProviders(ticker: string): Promise<{ inputs: ProviderCon
     quote = { price: null, currency: null, priceTime: null, status: yahoo.ok ? "NO_DATA" : "PROVIDER_ERROR", message };
   }
 
-  const r = alpha.r;
-  const alphaInput = alphaVantageConsensusInput(r.payload, {
-    retrievedAt: r.fetchedAt ?? alpha.at,
-    status: r.status === "OK" ? undefined : r.status,
-    message: r.message ?? null,
-  });
-  return { inputs: [yahooInput, alphaInput], quote, splits };
+  return { inputs: [yahooInput, alpha], quote, splits };
 }
 
 function consensusPolicy(horizonYears: number, minAnalystCount: number, conflictTolerancePct: number): ConsensusPolicy | string {
