@@ -83,7 +83,6 @@ out.cikMissing = JSON.parse(await m.getFilingData("ZZZZ", "total_revenue", null,
 // Failed accession pin (2.4.5, 2.4.6).
 const pin = JSON.parse(await m.getFilingData("ASTS", "total_revenue", null, "10-K", "latest", "auto", "0001193125-26-999999"));
 out.pin = pin;
-out.pinFetchedSubmissions = fetched.some((f) => f.includes("/submissions/"));
 out.pinEnvelope = JSON.parse(m.mcpSuccess("extract_sec_filing_fact", JSON.stringify(pin)));
 out.emptyRowEnvelope = JSON.parse(m.mcpSuccess("extract_sec_filing_fact", JSON.stringify({ value: null, evidence: [{}, { url: null }] })));
 
@@ -144,7 +143,11 @@ class TestWorkerRegressions(unittest.TestCase):
         self.assertEqual(pin["code"], "NO_FACT_FOR_ACCESSION")
         self.assertEqual((pin["accessionNumber"], pin["requestedAccession"]), (REQUESTED, REQUESTED))
         self.assertIsNone(pin["value"])
-        self.assertFalse(self.out["pinFetchedSubmissions"], "a failed pin must not look up the latest filing")
+        # The payload is not built from the latest filing (2.4.5): no filing date, document or evidence of its own.
+        # Since 2.5.30 SEC submissions may be read after the payload is built, only to warn when the latest annual
+        # report is missing from companyfacts; that read never replaces the requested accession.
+        self.assertEqual((pin["filingDate"], pin["documentUrl"], pin["primaryDocumentUrl"], pin["evidence"]), (None, None, None, {}))
+        self.assertNotIn("LATEST_ANNUAL_NOT_IN_COMPANYFACTS", [w["code"] for w in pin["warnings"]], "these submissions list no annual report")
 
     def test_failed_pin_carries_no_evidence_row(self) -> None:
         self.assertIsNone(self.out["pinEnvelope"]["data"]["evidence"])

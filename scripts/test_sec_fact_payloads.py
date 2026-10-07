@@ -158,10 +158,15 @@ _QUARTER_ROWS = [
 
 
 def _facts_case(rows: list[dict], filing_type: str, period: str, call: str = "total_revenue", *submissions_rows: tuple[str, str, str, str]) -> dict:
+    # The submissions' latest 10-K is the one the newest annual facts come from, as on SEC (2.5.30: a 10-K absent
+    # from companyfacts raises LATEST_ANNUAL_NOT_IN_COMPANYFACTS).
+    annual = [r for r in rows if r["form"] == "10-K"]
+    newest = max(annual, key=lambda r: r["filed"]) if annual else None
+    latest_10k = ("10-K", newest["accn"], "xyz-10k.htm", newest["filed"]) if newest else _10K_ROW
     return {
         "filingType": filing_type, "period": period, "call": call,
         "routes": {CONCEPT_BASE + f"{REVENUE}.json": {"units": {"USD": rows}}, COMPANYFACTS: {"facts": {"us-gaap": {REVENUE: {"units": {"USD": rows}}}}},
-                   SUBMISSIONS: _submissions(*(submissions_rows or (_10K_ROW, _10Q_ROW)))},
+                   SUBMISSIONS: _submissions(*(submissions_rows or (latest_10k, _10Q_ROW)))},
     }
 
 
@@ -235,6 +240,25 @@ CASES["geo_pinned_no_fact_filing_data"] = {"filingType": "10-K", "routes": {COMP
                                           "accession": ACCN_20F, **_GEO, "call": "get_filing_data"}
 CASES["pinned_no_fact_filing_data"] = {**CASES["geo_pinned_no_fact_filing_data"], "factType": "total_revenue", "region": None}
 CASES["found_filing_data"] = {**CASES["found"], "call": "get_filing_data"}
+
+# TSM-like (2.5.30, F-015/F-018): an IFRS filer whose FY2025 20-F added only an administrative dei fact to
+# companyfacts, so the newest ifrs-full annual period is FY2024.
+ACCN_20F_2024 = "0000000001-25-000030"
+ACCN_20F_2025 = "0000000001-26-000030"
+_TSM_FACTS = {"facts": {
+    "dei": {"EntityCommonStockSharesOutstanding": {"units": {"shares": [
+        {"end": "2026-03-31", "val": 25932000000, "accn": ACCN_20F_2025, "fy": 2025, "fp": "FY", "form": "20-F", "filed": "2026-04-16"}]}}},
+    "ifrs-full": {"Revenue": {"units": {"TWD": [
+        {"start": "2024-01-01", "end": "2024-12-31", "val": 2894307699000, "accn": ACCN_20F_2024, "fy": 2024, "fp": "FY", "form": "20-F", "filed": "2025-04-17"}]}}},
+}}
+_TSM_SUBMISSIONS = {SUBMISSIONS: _submissions(("20-F", ACCN_20F_2025, "tsm-20f25.htm", "2026-04-16"), ("20-F", ACCN_20F_2024, "tsm-20f24.htm", "2025-04-17"))}
+CASES["tsm_pinned_fy2025"] = {"call": "get_filing_data", "filingType": "20-F", "accession": ACCN_20F_2025, "routes": {COMPANYFACTS: _TSM_FACTS, **_TSM_SUBMISSIONS}}
+CASES["tsm_total_revenue"] = {"filingType": "20-F", "routes": {COMPANYFACTS: _TSM_FACTS, **_TSM_SUBMISSIONS}}
+# The same filer once companyfacts carries the FY2025 20-F: still IFRS-only, but no coverage warning.
+_TSM_FACTS_COVERED = json.loads(json.dumps(_TSM_FACTS))
+_TSM_FACTS_COVERED["facts"]["ifrs-full"]["Revenue"]["units"]["TWD"].append(
+    {"start": "2025-01-01", "end": "2025-12-31", "val": 3809054000000, "accn": ACCN_20F_2025, "fy": 2025, "fp": "FY", "form": "20-F", "filed": "2026-04-16"})
+CASES["tsm_pinned_fy2025_covered"] = {"call": "get_filing_data", "filingType": "20-F", "accession": ACCN_20F_2025, "routes": {COMPANYFACTS: _TSM_FACTS_COVERED, **_TSM_SUBMISSIONS}}
 
 # Unreadable ticker index (2.5.18). Ticker ZZZZ has no CIK; the index (XYZ only) is unreachable when its URL has a fault.
 _NO_CIK = {"ticker": "ZZZZ", "filingType": "10-K", "routes": {}}
@@ -1054,6 +1078,39 @@ class TestAsStatusAgrees(unittest.TestCase):
         expected = json.loads(out.stdout.strip().splitlines()[-1])
         self.assertEqual([srv._as_status(p) for p in self.PAYLOADS], expected)
         self.assertGreaterEqual(len(set(expected)), 8)
+
+
+class TestCompanyfactsCoverageAgrees(unittest.TestCase):
+    """2.5.30 (F-015/F-018): a pinned IFRS filing says IFRS was not read, and a latest annual report missing from
+    companyfacts is warned on every SEC fact read, the same in both runtimes."""
+
+    _same = TestSecFactPayloadsAgree._same
+    _same_payload = TestSecFactPayloadsAgree._same_payload
+
+    def test_a_pinned_ifrs_filing_names_the_ifrs_limit(self) -> None:
+        data = self._same_payload("tsm_pinned_fy2025")
+        self.assertEqual((data["status"], data["code"], data["requestedAccession"]), ("SEC_FACT_NOT_AVAILABLE", "SEC_FACTS_IFRS_ONLY", ACCN_20F_2025))
+        self.assertEqual([w["code"] for w in data["warnings"]], ["SEC_FACTS_IFRS_ONLY", "LATEST_ANNUAL_NOT_IN_COMPANYFACTS"])
+        ifrs = data["warnings"][0]["message"]
+        self.assertIn(f"accession {ACCN_20F_2025} was searched for {REVENUE}", ifrs)
+        self.assertIn("(us-gaap) only and its IFRS facts were not searched", ifrs)
+
+    def test_the_coverage_warning_names_the_filing_and_the_newest_period(self) -> None:
+        warning = self._same_payload("tsm_pinned_fy2025")["warnings"][1]
+        self.assertEqual({k: warning[k] for k in ("severity", "form", "accessionNumber", "filed", "reportDate", "latestCompanyfactsAnnualPeriodEnd")}, {
+            "severity": "warning", "form": "20-F", "accessionNumber": ACCN_20F_2025, "filed": "2026-04-16", "reportDate": "2026-04-16",
+            "latestCompanyfactsAnnualPeriodEnd": "2024-12-31"})
+        self.assertEqual(warning["message"], f"The latest annual report (20-F {ACCN_20F_2025}, filed 2026-04-16, period 2026-04-16) has no us-gaap or ifrs-full fact in SEC "
+                         "companyfacts; the newest annual period companyfacts holds ends 2024-12-31. Figures here come from earlier reports, not from that filing.")
+
+    def test_extract_total_revenue_carries_the_coverage_warning(self) -> None:
+        got = self._same("tsm_total_revenue")
+        self.assertEqual((got["status"], got["code"]), ("NOT_FOUND", "SEC_FACTS_IFRS_ONLY"))
+        self.assertEqual(got["warningCodes"], ["SEC_FACTS_IFRS_ONLY", "LATEST_ANNUAL_NOT_IN_COMPANYFACTS"])
+
+    def test_no_coverage_warning_once_companyfacts_has_the_filing(self) -> None:
+        data = self._same_payload("tsm_pinned_fy2025_covered")
+        self.assertEqual([w["code"] for w in data["warnings"]], ["SEC_FACTS_IFRS_ONLY"])
 
 
 class TestNamedFiscalYearAgrees(unittest.TestCase):

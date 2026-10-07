@@ -5311,7 +5311,61 @@ def _filing_has_relevant_geo_text(html: str, region: str) -> bool:
     return False
 
 
+_ANNUAL_FILING_TYPE_RE = _re.compile(r"(?:10-K|20-F|40-F)\b", _re.IGNORECASE)
+
+
+async def _annual_coverage_warning_for(ticker: str, payload: dict) -> dict | None:
+    """The Worker's annualCoverageWarningFor (2.5.30, F-015): the LATEST_ANNUAL_NOT_IN_COMPANYFACTS warning for an
+    annual-form fact read, looked for only when the read has no value or its value is from another accession than
+    the latest annual report. Unreadable SEC data gives none."""
+    try:
+        cik_padded, subs = await _get_submissions_for_ticker(ticker)
+    except Exception:  # noqa: BLE001 - no submissions, no check
+        return None
+    if not cik_padded or not subs:
+        return None
+    filings = _cfc.annual_filings_from_submissions(subs)
+    latest = _cfc.latest_annual_filing(filings)
+    used = str(payload["accessionNumber"]).replace("-", "") if payload.get("value") is not None and isinstance(payload.get("accessionNumber"), str) else None
+    if latest is None or used == latest["accessionNumber"].replace("-", ""):
+        return None
+    try:
+        # Read as get_filing_data reads companyfacts; an unreadable file gives no warning.
+        facts = await _edgar_get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_padded}.json")
+    except Exception:  # noqa: BLE001
+        facts = None
+    return _cfc.latest_annual_coverage_warning(filings, facts) if isinstance(facts, dict) else None
+
+
 async def get_filing_data(
+    ticker: str,
+    fact_type: FilingFactType,
+    region: str | None = None,
+    filing_type: str = "10-K",
+    period: str = "latest",
+    period_mode: str = "auto",
+    accession_number: str | None = None,
+) -> str:
+    raw = await _get_filing_data_unchecked(ticker, fact_type, region, filing_type, period, period_mode, accession_number)
+    if not _ANNUAL_FILING_TYPE_RE.match(filing_type or ""):
+        return raw
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return raw
+    if not isinstance(payload, dict):
+        return raw
+    # A failed read, an unresolved ticker or a rejected period says nothing about what companyfacts holds.
+    if payload.get("status") == "PROVIDER_ERROR" or payload.get("code") in ("NO_SEC_REGISTRANT", "SEC_LOOKUP_UNAVAILABLE", "INVALID_PERIOD"):
+        return raw
+    warning = await _annual_coverage_warning_for(ticker, payload)
+    if not warning:
+        return raw
+    payload["warnings"] = [*(payload.get("warnings") if isinstance(payload.get("warnings"), list) else []), warning]
+    return json.dumps(_js_json_numbers(payload))
+
+
+async def _get_filing_data_unchecked(
     ticker: str,
     fact_type: FilingFactType,
     region: str | None = None,
@@ -5627,6 +5681,24 @@ async def get_filing_data(
     concept_used = chosen["concept"] if chosen else concept_primary
     filtered = list(chosen["facts"]) if chosen else []
     if not filtered and pinned_accession:
+        if fact_type != FilingFactType.geographic_revenue:
+            # A pinned IFRS filing was searched for us-gaap concepts only: say IFRS was not read, not that the
+            # filing has no such fact (2.5.30, F-018).
+            if not companyfacts_read:
+                companyfacts_read.append(await _read_sec_json(companyfacts_url, "companyfacts", None))
+            cf = companyfacts_read[0]
+            taxonomies = cf.get("facts") if isinstance(cf, dict) else None
+            if failed_reads:
+                return await _sec_read_failed(concept_used)
+            if isinstance(taxonomies, dict) and taxonomies.get("ifrs-full") and not taxonomies.get("us-gaap"):
+                return await _unavailable_structured_fact(
+                    "SEC_FACTS_IFRS_ONLY",
+                    f"{ticker.upper()} reports its SEC facts under IFRS (ifrs-full), which this action does not read, so accession "
+                    f"{pinned_accession} was searched for {' / '.join(candidate_names)} (us-gaap) only and its IFRS facts were not searched; "
+                    "reconcile_metric_sources reads IFRS facts in the reporting currency.",
+                    concept_used,
+                    pinned_accession,
+                )
         # A failed pin names the filing that was asked for, never the latest one (the Worker's unavailableStructuredFact).
         return await _unavailable_structured_fact(
             "NO_FACT_FOR_ACCESSION",
@@ -10659,9 +10731,11 @@ async def reconcile_metric_sources(ticker: str, metric: str, period: str = "late
     facts = await _edgar_get_company_facts(cik_padded)
     if not facts:
         return json.dumps({"ticker": upper, "metric": metric, "status": "COMPANYFACTS_NOT_AVAILABLE", "code": "COMPANYFACTS_NOT_AVAILABLE", "retryable": True})
+    # The latest annual report may be missing from companyfacts (2.5.30, F-015): said on every result, found or not.
+    coverage_warning = _cfc.latest_annual_coverage_warning(_cfc.annual_filings_from_submissions(subs), facts)
     resolved = _mr.resolve_period(facts, metric, period)
     if resolved["status"] != "OK":
-        return json.dumps({"ticker": upper, "metric": metric, **resolved})
+        return json.dumps({"ticker": upper, "metric": metric, **resolved, **({"warnings": [coverage_warning]} if coverage_warning else {})})
     cik_int = int(cik_padded)
     end = str(resolved["periodEnd"])
     # Results releases (Item 2.02 8-Ks and 8-K/As) filed within 100 days after the period ended. The newest
@@ -10706,6 +10780,8 @@ async def reconcile_metric_sources(ticker: str, metric: str, period: str = "late
     if not_read:
         warnings.append({"code": "OLDER_RELEASE_CANDIDATES_NOT_READ", "message": (
             f"{len(not_read)} older Item 2.02 filing(s) in the 100-day window were not read; the {len(candidates)} newest were."), "severity": "info"})
+    if coverage_warning:
+        warnings.append(coverage_warning)
     out["retryable"] = bool(unread) or rows is None
     out["warnings"] = warnings
     return json.dumps(out)
@@ -11822,6 +11898,7 @@ from yfmcp.tools.earnings import (  # re-export for compatibility and grouped ro
 # yfmcp/evidence_store.py (YFMCP_EVIDENCE_DIR, else UNAVAILABLE).
 # ---------------------------------------------------------------------------
 from yfmcp import evidence as _ev  # noqa: E402
+from yfmcp import companyfacts_coverage as _cfc  # noqa: E402
 from yfmcp import evidence_store as _es  # noqa: E402
 from yfmcp.build_info import BUILD_SHA as _BUILD_SHA  # noqa: E402
 from yfmcp.clients.market_providers import fetch_alpha_vantage_json as _fetch_alpha_vantage_json  # noqa: E402
