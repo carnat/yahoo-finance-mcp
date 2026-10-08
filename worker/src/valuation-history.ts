@@ -18,7 +18,7 @@
  */
 
 import { AUTHORITY_BOUNDARY } from "./evidence.js";
-import { round } from "./capital-structure.js";
+import { BORROWING_CONCEPTS, round } from "./capital-structure.js";
 import { REVENUE_CONCEPTS } from "./sec-facts.js";
 import { majorPrice } from "./valuation.js";
 import { latestAnnualCoverageWarning } from "./companyfacts-coverage.js";
@@ -37,6 +37,11 @@ export interface ValuationHistoryInput {
   splits: Split[];
   /** Converts the reporting currency into the price currency; null when not needed or not read. */
   fx: { pair: string; bars: Bar[] } | null;
+  /**
+   * The same for each other reporting currency the dates use (2.5.32, F-029: Nebius reported in RUB until its
+   * FY2024 20-F, then in USD), keyed by currency.
+   */
+  fxByCurrency?: Record<string, { pair: string; bars: Bar[] }> | null;
   /** Ordinary shares per quoted share (ADS), when the quote is for depositary shares. */
   adsRatio: number | null;
   /**
@@ -72,6 +77,10 @@ interface TaxonomyMap {
   debtAdditions: string[];
   sharesInstant: string[];
   sharesWeighted: string[];
+  // The concepts that would show the filing has borrowings; empty where no such rule applies (2.5.32, F-026).
+  borrowingConcepts: string[];
+  // Depreciation alone stands in for D&A when the amortization concept was never tagged (2.5.32, F-026).
+  depreciationOnly: { depreciation: string; amortization: string } | null;
 }
 
 const US_GAAP: TaxonomyMap = {
@@ -83,6 +92,8 @@ const US_GAAP: TaxonomyMap = {
   shortTermInvestments: ["ShortTermInvestments", "MarketableSecuritiesCurrent", "AvailableForSaleSecuritiesDebtSecuritiesCurrent"],
   debtGroups: [["LongTermDebt"], ["LongTermDebtCurrent", "LongTermDebtNoncurrent"], ["ConvertibleNotesPayableCurrent", "ConvertibleNotesPayable", "ConvertibleLongTermNotesPayable"], ["NotesPayableCurrent", "NotesPayable"]],
   debtAdditions: ["ShortTermBorrowings", "CommercialPaper"],
+  borrowingConcepts: [...BORROWING_CONCEPTS],
+  depreciationOnly: { depreciation: "Depreciation", amortization: "AmortizationOfIntangibleAssets" },
   sharesInstant: ["CommonStockSharesOutstanding"],
   sharesWeighted: ["WeightedAverageNumberOfSharesOutstandingBasic"],
 };
@@ -96,6 +107,8 @@ const IFRS: TaxonomyMap = {
   shortTermInvestments: [],
   debtGroups: [["Borrowings"], ["CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings", "NoncurrentPortionOfNoncurrentBorrowings"], ["ShorttermBorrowings", "CurrentPortionOfLongtermBorrowings", "LongtermBorrowings"]],
   debtAdditions: [],
+  borrowingConcepts: [],
+  depreciationOnly: null,
   sharesInstant: [],
   sharesWeighted: ["WeightedAverageShares"],
 };
@@ -130,6 +143,39 @@ export function taxonomyOf(companyfacts: unknown): { taxonomy: string | null; cu
     return { taxonomy, currency };
   }
   return { taxonomy: null, currency: null };
+}
+
+/**
+ * The reporting currency as of a date: the currency of the newest annual revenue fact filed by then (2.5.32,
+ * F-029). Where that filing tags more than one currency (a convenience translation), the filer's main currency
+ * wins. Falls back to the main currency when no annual revenue is filed by then.
+ */
+export function reportingCurrencyAt(companyfacts: unknown, asOf: string): string | null {
+  const { taxonomy, currency } = taxonomyOf(companyfacts);
+  if (!taxonomy) return null;
+  const tax = ((((companyfacts ?? {}) as Rec).facts as Rec)[taxonomy] ?? {}) as Rec;
+  const day = asOf.slice(0, 10);
+  let best: { key: string; units: Set<string> } | null = null;
+  for (const concept of (taxonomy === "ifrs-full" ? IFRS : US_GAAP).revenue) {
+    for (const [unit, rows] of Object.entries((((tax[concept] as Rec | undefined)?.units ?? {}) as Record<string, Rec[]>))) {
+      if (!/^[A-Z]{3}$/.test(unit) || !Array.isArray(rows)) continue;
+      for (const r of rows) {
+        if (typeof r.start !== "string" || typeof r.end !== "string" || typeof r.filed !== "string" || r.filed > day) continue;
+        const span = days(r.start, r.end);
+        if (span < 350 || span > 380) continue;
+        const key = `${r.filed}|${r.end}`;
+        if (!best || key > best.key) best = { key, units: new Set([unit]) };
+        else if (key === best.key) best.units.add(unit);
+      }
+    }
+  }
+  if (!best) return currency;
+  return currency && best.units.has(currency) ? currency : [...best.units].sort()[0];
+}
+
+/** The distinct reporting currencies the dates use, in date order. */
+export function reportingCurrencies(companyfacts: unknown, dates: string[]): string[] {
+  return [...new Set(dates.map((d) => reportingCurrencyAt(companyfacts, d)).filter((c): c is string => c != null))];
 }
 
 /** Periodic-report facts for concepts in one unit, filed on or before asOf; the newest filing of each period wins. */
@@ -368,6 +414,12 @@ export function coverShareCounts(html: string): Rec {
   return { status: "OK", value: classes.reduce((sum, c) => sum + c.shares, 0), asOf: date, basis: "COVER_PAGE_CLASS_SUM", classes };
 }
 
+/** Whether companyfacts holds a fact of any of the concepts, in any unit and at any date, from the accession. */
+function accessionTagsAny(tax: Rec | null, concepts: string[], accn: string): boolean {
+  return concepts.some((c) => Object.values(((((tax ?? {}) as Rec)[c] as Rec | undefined)?.units ?? {}) as Record<string, unknown>)
+    .some((rows) => Array.isArray(rows) && rows.some((r) => (r as Rec)?.accn === accn)));
+}
+
 function balancesAt(tax: Rec | null, map: TaxonomyMap, currency: string, asOf: string): Rec {
   const cashFacts = factsFor(tax, map.cash, currency, asOf).filter((f) => f.start == null).sort((a, b) => cmp(a.end, b.end));
   if (cashFacts.length === 0) return { status: "NOT_AVAILABLE", reason: "CASH_NOT_TAGGED" };
@@ -384,6 +436,12 @@ function balancesAt(tax: Rec | null, map: TaxonomyMap, currency: string, asOf: s
     const all = [...parts, ...additions];
     debt = { status: "OK", value: all.reduce((s, f) => s + f.val, 0), components: all.map((f) => component(f)) };
     break;
+  }
+  // The filing that reported this balance sheet tags no borrowing concept at any date: debt is zero, as
+  // get_valuation_snapshot reads the same filing (2.5.32, F-026: AEHR's EV was DEBT_NOT_TAGGED here and computed
+  // there). Companyfacts holds undimensioned facts only, so a filing tagging debt only by member is not seen.
+  if (debt.status === "NOT_TAGGED" && cash.accn && map.borrowingConcepts.length > 0 && !accessionTagsAny(tax, map.borrowingConcepts, cash.accn)) {
+    debt = { status: "OK", value: 0, basis: "NO_BORROWINGS_TAGGED", components: [], accessionNumber: cash.accn };
   }
   return {
     status: "OK",
@@ -453,6 +511,11 @@ function daFor(tax: Rec | null, map: TaxonomyMap, currency: string, asOf: string
     };
     return { group, bases: { LFY: sum("LFY"), LTM: sum("LTM") } };
   });
+  // A filer that never tagged the amortization concept by asOf (BE) has depreciation only.
+  const only = map.depreciationOnly;
+  if (only && factsFor(tax, [only.amortization], currency, asOf).length === 0) {
+    groups.push({ group: [only.depreciation], bases: flowBases(factsFor(tax, [only.depreciation], currency, asOf)) });
+  }
   const pick = (key: "LFY" | "LTM") => {
     const ok = groups.filter((g) => g.bases[key].status === "OK");
     const aligned = ok.find((g) => g.bases[key].periodEnd === oi[key].periodEnd) ?? ok[0];
@@ -474,12 +537,15 @@ export function stalenessLimits(companyfacts: unknown, asOf = "9999-12-31"): { c
     : { cadence: "QUARTERLY", shareCountDays: 400, balancesDays: 200, resultsDays: 500 };
 }
 
+// Past this age an annual filer's share count is flagged, though still used (2.5.32, F-029).
+export const SHARE_COUNT_AGED_DAYS = 183;
+
 const MULTIPLE_NAMES = ["evToRevenue", "evToEbitda", "priceToEarnings", "priceToSales"];
 
 /** Market value, balances, denominators and multiples as they stood on one date. */
 export function valuationAtDate(input: ValuationHistoryInput, date: string, taxonomy: string, currency: string): Rec {
   const limits = stalenessLimits(input.companyfacts, date);
-  const cadence = { secCompanyfactsCadence: limits.cadence, stalenessLimitsDays: { shareCount: limits.shareCountDays, balances: limits.balancesDays, results: limits.resultsDays } };
+  const cadence = { reportingCurrency: currency, secCompanyfactsCadence: limits.cadence, stalenessLimitsDays: { shareCount: limits.shareCountDays, balances: limits.balancesDays, results: limits.resultsDays } };
   const facts = ((input.companyfacts ?? {}) as Rec).facts as Rec;
   const tax = (facts[taxonomy] ?? null) as Rec | null;
   const dei = (facts.dei ?? null) as Rec | null;
@@ -496,6 +562,8 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
   const price = { tradingDate: bar.date, closeAsAdjusted: bar.close, laterSplitFactor: splitFactor, close: round(major.price, 4), currency: priceCurrency, laterSplits };
 
   const shares = sharesAt(dei, tax, map, date, input.coverCounts ?? null, input.periodicFilings ?? null);
+  // The count's age at the date, on the count itself (2.5.32, F-029).
+  if (shares && typeof shares.asOf === "string") shares.ageDays = days(shares.asOf, date);
   let marketCap: Rec;
   if (!shares) {
     marketCap = { status: "SHARES_NOT_AVAILABLE", value: null };
@@ -517,6 +585,10 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
     const shareCountStale = days(String(shares.asOf), date) > limits.shareCountDays;
     if (shareCountStale) {
       warnings.push({ code: "SHARE_COUNT_STALE", message: `The latest share count filed by ${date} is as of ${shares.asOf}.`, severity: "warning" });
+    } else if (limits.cadence === "ANNUAL" && (shares.ageDays as number) > SHARE_COUNT_AGED_DAYS) {
+      // An annual filer's count is used for up to 500 days; past half a year, say so (2.5.32, F-029: NBIS's
+      // 2025-12-31 market cap used the 2024-12-31 count, before 17M shares issued in 2025).
+      warnings.push({ code: "SHARE_COUNT_AGED", message: `The latest share count filed by ${date} is as of ${shares.asOf}, ${shares.ageDays} days earlier; SEC companyfacts holds this filer's counts once a year, so shares issued or repurchased since are not reflected.`, severity: "info" });
     }
     const splitAfterCount = input.splits.find((s) => s.date > String(shares.asOf) && s.date <= bar.date);
     const quoted = input.adsRatio != null && input.adsRatio > 0 ? (shares.value as number) / input.adsRatio : (shares.value as number);
@@ -533,17 +605,22 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
   if (priceCurrency == null || priceCurrency === currency) {
     fxRate = 1;
   } else {
-    const r = input.fx ? rateAt(input.fx.bars, date) : null;
+    // This date's currency: its own series, else the main series when it is for this currency.
+    const series = input.fxByCurrency?.[currency] ?? (input.fx && input.fx.pair.startsWith(currency) ? input.fx : null);
+    const r = series ? rateAt(series.bars, date) : null;
     if (r) {
       fxRate = r.close;
-      fx = { pair: input.fx?.pair ?? null, date: r.date, rate: r.close };
+      fx = { pair: series?.pair ?? null, date: r.date, rate: r.close };
     } else {
-      fx = { pair: input.fx?.pair ?? null, status: "NOT_AVAILABLE" };
+      fx = { pair: series?.pair ?? `${currency}${priceCurrency}=X`, status: "NOT_AVAILABLE" };
       warnings.push({ code: "FX_NOT_AVAILABLE", message: `No ${currency} to ${priceCurrency} rate within 7 days on or before ${date}; figures in ${currency} are not converted and the multiples are null.`, severity: "warning" });
     }
   }
 
   const balances = balancesAt(tax, map, currency, date);
+  if (balances.status === "OK" && (balances.debt as Rec).basis === "NO_BORROWINGS_TAGGED") {
+    warnings.push({ code: "NO_BORROWINGS_TAGGED", message: `The filing that reported the ${balances.balanceDate} balance sheet (${(balances.debt as Rec).accessionNumber}) tags no borrowings at any date, so debt is taken as zero (leases excluded).`, severity: "info" });
+  }
   let enterpriseValue: Rec;
   const mcap = marketCap.status === "OK" ? (marketCap.value as number) : null;
   if (mcap == null) enterpriseValue = { status: "MARKET_CAP_NOT_AVAILABLE", value: null };
@@ -576,6 +653,10 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
   const oi = flowBases(factsFor(tax, map.operatingIncome, currency, date));
   const ni = flowBases(factsFor(tax, map.netIncome, currency, date));
   const da = daFor(tax, map, currency, date, oi);
+  const only = map.depreciationOnly;
+  if (only && (["LTM", "LFY"] as const).some((k) => da[k].value.status === "OK" && da[k].concepts?.length === 1 && da[k].concepts?.[0] === only.depreciation)) {
+    warnings.push({ code: "EBITDA_DEPRECIATION_ONLY", message: `No ${only.amortization} is tagged by ${date}, so EBITDA adds ${only.depreciation} alone to operating income.`, severity: "info" });
+  }
   const ltmEnd = revenue.LTM.status === "OK" ? String(revenue.LTM.periodEnd) : null;
   if (ltmEnd && days(ltmEnd, date) > limits.resultsDays) {
     warnings.push({ code: "RESULTS_STALE", message: `The latest results in SEC companyfacts filed by ${date} end ${ltmEnd}.`, severity: "warning" });
@@ -643,7 +724,8 @@ export function valuationAtDate(input: ValuationHistoryInput, date: string, taxo
  * be for ADSs. Judged per date, so a filer that changed regime keeps its earlier cadence at earlier dates.
  */
 export function foreignFiler(companyfacts: unknown, asOf = "9999-12-31"): boolean {
-  const { taxonomy, currency } = taxonomyOf(companyfacts);
+  const { taxonomy } = taxonomyOf(companyfacts);
+  const currency = reportingCurrencyAt(companyfacts, asOf);
   if (!taxonomy || !currency) return false;
   const tax = ((((companyfacts ?? {}) as Rec).facts as Rec)[taxonomy] ?? null) as Rec | null;
   const annual = factsFor(tax, (taxonomy === "ifrs-full" ? IFRS : US_GAAP).revenue, currency, asOf).filter(isAnnual).sort((a, b) => cmp(a.end, b.end) || cmp(a.filed, b.filed));
@@ -696,7 +778,8 @@ export function historicalValuation(input: ValuationHistoryInput): Rec {
   if (!taxonomy || !currency) {
     return { ...base, status: "FUNDAMENTALS_NOT_AVAILABLE", points: [], notes: ["No us-gaap or ifrs-full revenue facts are in companyfacts."], ...AUTHORITY_BOUNDARY };
   }
-  const points = input.dates.map((d) => valuationAtDate(input, d, taxonomy, currency));
+  const points = input.dates.map((d) => valuationAtDate(input, d, taxonomy, reportingCurrencyAt(input.companyfacts, d) ?? currency));
+  const currencies = [...new Set(points.map((p) => String(p.reportingCurrency)))];
   const cadences = [...new Set(points.map((p) => String(p.secCompanyfactsCadence)))].sort();
   const limitsByCadence: Rec = {};
   for (const p of points) limitsByCadence[String(p.secCompanyfactsCadence)] = p.stalenessLimitsDays;
@@ -704,6 +787,7 @@ export function historicalValuation(input: ValuationHistoryInput): Rec {
     ...base,
     secCompanyfactsCadence: cadences.length === 1 ? cadences[0] : "MIXED",
     stalenessLimitsDays: limitsByCadence,
+    ...(currencies.length > 1 ? { reportingCurrencies: currencies } : {}),
     status: points.every((p) => p.status === "OK") ? "OK" : "PARTIAL",
     coreStatus: points.every((p) => p.coreStatus === "OK") ? "OK" : "PARTIAL",
     points,

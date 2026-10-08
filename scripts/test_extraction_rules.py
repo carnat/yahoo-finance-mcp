@@ -41,6 +41,44 @@ NEGATION_MATCHES = [
     {"contextText": "Net sales are diversified. No single customer accounted for more than 10% of net sales in 2025."},
     {"contextText": "One customer accounted for 24% of revenue. Customers include distributors."},
 ]
+# 2.5.32 (F-024): the 10-K wordings and table rows behind Engine Zero's MRVL, AEHR and ANET findings.
+MRVL_TITLE = ("Net revenue attributable to significant customers including both distributor and direct customers whose revenues "
+              "represented 10% or more of total net revenue is presented in the following table:")
+AEHR_TITLE = ("The Company performs credit evaluations of its customers\u2019 financial condition and generally requires no collateral. "
+              "The Company had revenues from individual customers in excess of 10% of total revenues as follows:")
+AEHR_AR_TITLE = "The Company had gross accounts receivable from individual customers in excess of 10% of gross accounts receivable as follows:"
+
+
+def _table_row(title, label, cells):
+    return {"sectionHeading": "Item 8. Financial Statements and Supplementary Data", "inTable": True, "tableTitle": title, "rowLabel": label,
+            "contextText": " | ".join([label, *cells])}
+
+
+F024_MATCHES = {
+    "mrvl": [
+        {"sectionHeading": "Item 1A. Risk Factors", "contextText": "For example, during fiscal 2026, there were two customers (one distributor and one direct customer) whose revenues represented 10% or more of total net revenue. In addition, net revenue from our ten (10) largest customers, inclusive of our distributor and direct customers, represented 82% of our total net revenue for fiscal 2026."},
+        _table_row(MRVL_TITLE, "Customer A", ["14%", "13%", "*"]),
+        _table_row(MRVL_TITLE, "Distributor A", ["37%", "34%", "24%"]),
+    ],
+    "aehr": [
+        {"sectionHeading": "Item 1. Business", "contextText": "EV and power semiconductor revenues accounted for 17%, 41%, and 92% of total revenues in fiscal 2026, 2025, and 2024, respectively."},
+        {"sectionHeading": "Item 1A. Risk Factors", "contextText": "Sales to our five largest customers accounted for approximately 70%, 77%, and 93% of our net sales in fiscal 2026, 2025, and 2024, respectively. During fiscal 2026, three customers accounted for approximately 26%, 14% and 11% of our net sales. During fiscal 2025, two customers accounted for approximately 39% and 15% of our net sales."},
+        {"sectionHeading": "Item 8.", "contextText": "Revenues from the Company\u2019s five largest customers accounted for approximately 70%, 77%, and 93% of its net revenues in fiscal 2026, 2025, and 2024, respectively."},
+        _table_row(AEHR_TITLE, "Customer A", ["26.3%", "*", "*"]),
+        _table_row(AEHR_TITLE, "Customer B", ["14.2%", "*", "*"]),
+        _table_row(AEHR_TITLE, "Customer C", ["10.9%", "15.1%", "*"]),
+        _table_row(AEHR_AR_TITLE, "Customer D", ["35.0%", "*"]),
+    ],
+    # Without the table, the prose is read as three customers, not one 26% total.
+    "aehrProse": [
+        {"sectionHeading": "Item 1A. Risk Factors", "contextText": "During fiscal 2026, three customers accounted for approximately 26%, 14% and 11% of our net sales."},
+    ],
+    "anet": [
+        {"sectionHeading": "Item 1. Business", "contextText": "Two of our customers accounted for more than 10% of our sales for the year ended December 31, 2025. Sales to these two customers represented 26% and 16% of our total revenue for the year ended December 31, 2025, respectively."},
+        {"sectionHeading": "Item 1A. Risk Factors", "contextText": "Two of our customers accounted for more than 10% of our total revenue in each of the last three years. Sales to one end customer represented 16%, 15%, and 21% of our total revenue, and sales to the other end customer represented 26%, 20%, and 18% of our total revenue for the years ended December 31, 2025, 2024, and 2023, respectively."},
+    ],
+}
+
 ASTS_RELEASE = (
     "HIGHLIGHTS o Continued to build out global gateway footprint with nearly 50 gateways in various stages of completion "
     "o Second quarter revenue was $31.5 million, consistent with plans for quarterly revenue ramp during 2026 "
@@ -269,6 +307,7 @@ const d = JSON.parse(fs.readFileSync(dataPath, "utf8"));
 const out = {
   aaoi: r.customerConcentration(d.aaoi),
   negation: r.customerConcentration(d.negation),
+  f024: Object.fromEntries(Object.entries(d.f024).map(([k, v]) => [k, r.customerConcentration(v)])),
   guidanceAsts: r.guidanceRanges(d.astsRelease),
   guidanceKeyword: r.guidanceRanges(d.keywordFirst),
   guidanceCohr: r.guidanceRanges(d.cohrOutlook),
@@ -317,7 +356,7 @@ def _node() -> str:
 
 def _data() -> dict:
     return {
-        "aaoi": AAOI_MATCHES, "negation": NEGATION_MATCHES, "astsRelease": ASTS_RELEASE, "keywordFirst": KEYWORD_FIRST,
+        "aaoi": AAOI_MATCHES, "negation": NEGATION_MATCHES, "f024": F024_MATCHES, "astsRelease": ASTS_RELEASE, "keywordFirst": KEYWORD_FIRST,
         "awardFirst": AWARD_FIRST, "guidanceOnly": GUIDANCE_ONLY, "releaseCases": RELEASE_CASES, "sndkOutlook": SNDK_OUTLOOK, "unitForms": UNIT_FORMS, "muOutlook": MU_OUTLOOK, "beClause": BE_CLAUSE, "stemWords": STEM_WORDS, "evidence": EVIDENCE, "concepts": CONCEPTS,
         "filingConcepts": FILING_CONCEPTS, "cashConcepts": CASH_CONCEPTS, "beTie": BE_TIE_CONCEPTS, "malformed": MALFORMED_CONCEPTS,
         "cohrOutlook": COHR_OUTLOOK, "mixedBasis": MIXED_BASIS, "mrvlOutlook": MRVL_OUTLOOK, "vrtOutlook": VRT_OUTLOOK,
@@ -349,6 +388,7 @@ def _python() -> dict:
     return {
         "aaoi": er.customer_concentration(d["aaoi"]),
         "negation": er.customer_concentration(d["negation"]),
+        "f024": {k: er.customer_concentration(v) for k, v in d["f024"].items()},
         "guidanceAsts": er.guidance_ranges(d["astsRelease"]),
         "guidanceKeyword": er.guidance_ranges(d["keywordFirst"]),
         "guidanceCohr": er.guidance_ranges(d["cohrOutlook"]),
@@ -533,6 +573,39 @@ class TestRules(unittest.TestCase):
         self.assertEqual(self.out["pickLatest10k"]["concept"], "RevenueFromContractWithCustomerIncludingAssessedTax")
         self.assertEqual(self.out["pickPinned"]["concept"], "RevenueFromContractWithCustomerExcludingAssessedTax")
         self.assertIsNone(self.out["pickPinnedMissing"])
+
+
+class TestCustomerConcentrationF024(unittest.TestCase):
+    """2.5.32 (F-024): significant-customer tables, per-customer share lists and revenue categories."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.out = _python()["f024"]
+
+    def found(self, key: str) -> list[tuple]:
+        return [(f["kind"], f["name"], f["description"], f["valuePct"], f["year"]) for f in self.out[key]["findings"]]
+
+    def test_mrvl_table_rows_and_ten_largest(self) -> None:
+        self.assertEqual(self.found("mrvl"), [
+            ("aggregate", None, "our ten (10) largest customers", 82, 2026),
+            ("customer", None, "Customer A", 14, None),
+            ("customer", None, "Distributor A", 37, None),
+        ])
+
+    def test_aehr_table_replaces_prose_and_no_revenue_category(self) -> None:
+        self.assertEqual(self.found("aehr"), [
+            ("aggregate", None, "our five largest customers", 70, 2026),
+            ("customer", None, "Customer A", 26.3, None),
+            ("customer", None, "Customer B", 14.2, None),
+            ("customer", None, "Customer C", 10.9, None),
+        ])
+
+    def test_aehr_prose_is_three_customers(self) -> None:
+        self.assertEqual(self.found("aehrProse"), [("customer", None, "one of three customers", v, 2026) for v in (26, 14, 11)])
+
+    def test_anet_two_customers_once_each(self) -> None:
+        # "for the year ended December 31, 2025" is no "in 2025": the period is the filing's fiscal year.
+        self.assertEqual(self.found("anet"), [("customer", None, "one of these two customers", 26, None), ("customer", None, "one of these two customers", 16, None)])
 
 
 class TestRevenueTieAndMalformedFacts(unittest.TestCase):

@@ -2462,6 +2462,91 @@ F-026 and F-029 are scheduled for 2.5.32.
     {`basis` `UNKNOWN`, `determination` `NOT_DISCLOSED_BY_PROVIDER`, `note`}.
   - The basis is never inferred.
 
+## Debt Rows, Customer Tables, Reporting Currency And Debt-Free Filers (2.5.32)
+
+From the Engine Zero adapter's red-team report against 2.5.30: the four findings held back from 2.5.31 (F-023,
+F-024, F-026, F-029). Both runtimes change alike.
+
+- **F-023: ASTS capital structure (`instruments`, `capitalStructure` / `_instruments`, `capital_structure`).**
+  - In 10-Q 0001193125-26-342550, the 2036 2.00% notes ($1,150.0M) and the UBS bridge loan ($420.0M) were
+    missing as rows. The other rows carried issue-date amounts, and the year buckets summed to 3,185.0M against
+    total debt of 2,971.9M.
+  - Causes:
+    - ASTS tags each note's period-end principal as `ConvertibleDebtNoncurrent`, which was not read.
+    - Its loans sit on `CreditFacilityAxis`, which was not read at all.
+    - The 2034 notes issued on 2026-07-20 (a subsequent event) were counted as period-end debt.
+  - Now:
+    - `ConvertibleDebtNoncurrent`, `ConvertibleDebtCurrent` and `LongTermLineOfCredit` are read as row amounts.
+    - A `CreditFacilityAxis` or `LineOfCreditFacilityAxis` member is a row only when it has a non-zero amount
+      at the period end, so a repaid facility or the bridge loan's restricted-cash collateral is not a row.
+    - A row whose every fact is dated after the period end, or tagged as a subsequent event, has status
+      `issued_after_period_end` and the info warning `ISSUED_AFTER_PERIOD_END`. It is listed, but kept out of
+      the ladder, coverage and reconciliation.
+    - When rows sum to total debt only after the filing's own `UnamortizedDebtIssuanceExpense` (or
+      `DebtInstrumentUnamortizedDiscount`) is taken off:
+      - `instrumentReconciliation.status` is `RECONCILED_NET_OF_UNAMORTIZED_COSTS`, with `unamortizedCosts`
+        {`concept`, `amount`};
+      - each row gets `carryingAmountBasis` `BEFORE_UNAMORTIZED_COSTS`;
+      - the info warning `INSTRUMENT_AMOUNTS_BEFORE_UNAMORTIZED_COSTS` is raised.
+    - Text maturities:
+      - names with spelled-out years count ("Two Thousand Thirty Six" is 2036);
+      - when two notes mature in the same year, the "will mature on" sentence that states the row's own coupon
+        decides which date is which (ASTS's 2.00% notes mature 2036-01-15, its 2.25% notes 2036-04-15).
+  - Result for ASTS:
+    - seven rows;
+    - buckets of 328.5M (2032) and 2,225.0M (2036);
+    - Trinity and UBS listed as having no maturity date;
+    - rows of 3,022.2M reconciling to 2,971.9M after 50.2M of issuance costs.
+  - The added concepts also count as borrowings for the `NO_BORROWINGS_TAGGED` test.
+- **F-024: customer concentration (`customerConcentration` / `customer_concentration`, and the tool
+  wrappers).**
+  - MRVL: a significant-customer table is now read.
+    - The tool runs a second search of the same filing for `Customer A`, `Distributor A` and similar row labels.
+    - A table row is read when its label is a placeholder such as "Distributor A" and its title is about
+      revenue or sales, not receivables. The first percentage column is taken as the latest period.
+    - MRVL gives Distributor A 37% and Customer A 14%.
+    - The "ten (10) largest customers, inclusive of …" sentence had come out with an empty subject. It now gives
+      the 82% aggregate.
+  - AEHR:
+    - "EV and power semiconductor revenues accounted for 17%" is a revenue category, not a customer. A
+      lower-case subject that names no customer, client, distributor or reseller is skipped.
+    - "three customers accounted for approximately 26%, 14% and 11%" is three customers, not a 26% total. A
+      subject counting N customers, with N shares in a sentence naming fewer than N years, gives one share per
+      customer. A ranked subject ("five largest") stays an aggregate.
+    - A prose share within half a point of a table row is that row, so AEHR's table (26.3%, 14.2%, 10.9%)
+      replaces the prose.
+    - "our five largest customers" and "the Company's five largest customers" are one aggregate.
+  - ANET: "Sales to one end customer" is no longer read as a customer named "Sales to one end customer".
+    "Sales to" and "revenue from" are stripped from the subject. Result: two unnamed customers, 26% and 16%.
+  - The Python tool's search now uses the Worker's 1,200-character context (it had used 1,500).
+- **F-026: valuation history debt and EBITDA (`balancesAt`, `daFor`, `valuationAtDate` / `_balances_at`,
+  `_da_for`, `valuation_at_date`).**
+  - AEHR's enterprise value was `DEBT_NOT_TAGGED` at three dates, while `get_valuation_snapshot` took its debt
+    as zero.
+  - Now, when no debt concept is tagged at the balance date and the filing that reported that balance sheet
+    tags no borrowing concept at any date, debt is 0:
+    - `basis` is `NO_BORROWINGS_TAGGED` and `accessionNumber` names the filing;
+    - the info warning `NO_BORROWINGS_TAGGED` is raised.
+    - Companyfacts holds only undimensioned facts, so a filing that tags debt only by member is not seen.
+  - BE's EBITDA was `NOT_AVAILABLE`, because BE tags `Depreciation` but never `AmortizationOfIntangibleAssets`.
+    - When no amortization is tagged by the date, depreciation alone is added to operating income.
+    - The info warning `EBITDA_DEPRECIATION_ONLY` is raised.
+- **F-029: reporting currency by date and share-count age (`reportingCurrencyAt`, `valuationAtDate`,
+  `historicalValuation`, `valuationHistoryFor`, and their Python mirrors).**
+  - NBIS filed revenue in RUB through its FY2023 20-F and in USD from FY2024. Every date used RUB, so at
+    2025-12-31 the results were `RESULTS_STALE` (FY2023), while the market cap used the 2024-12-31 count.
+  - Now each date uses the currency of the newest annual revenue filed by then. When that filing tags two
+    currencies, the filer's main currency wins.
+    - Each point carries `reportingCurrency`.
+    - The result lists `reportingCurrencies` when the dates use more than one.
+    - FX is read per currency (`fxByCurrency`). A missing series names the date's own pair.
+    - The cadence test (`foreignFiler`) uses the date's currency.
+  - `shares.ageDays` is the count's age at each date.
+  - For an annual-cadence (20-F/40-F) filer whose count is more than 183 days old, but within the 500-day
+    limit, the info warning `SHARE_COUNT_AGED` is raised. The count is still used.
+  - Not changed: the 2024-12-31 count of 361.5M was the latest filed at that date, which is correct point in
+    time. A share move announced only in a 6-K never reaches companyfacts.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

@@ -9961,6 +9961,9 @@ async def extract_risk_factor_mentions(
     return json.dumps(result)
 
 
+_CUSTOMER_TABLE_ROW_TERMS = ["Customer A", "Customer B", "Customer C", "Customer 1", "Distributor A", "Distributor B"]
+
+
 @yfinance_server.tool(name="extract_customer_concentration", output_schema=_TOOL_OUTPUT_SCHEMAS["extract_customer_concentration"], description="Extract customer concentration percentages from SEC filing text evidence.")
 async def extract_customer_concentration(
     ticker: str,
@@ -9970,8 +9973,15 @@ async def extract_customer_concentration(
 ) -> str:
     # Mirrors the Worker: revenue-concentration rules live in yfmcp/extraction_rules.py.
     searched_terms = ["major customer", "customers", "customer accounted", "accounted for", "of our revenue", "of total revenue", "of net sales", "percent of revenue"]
-    search = _safe_json_loads(await search_sec_filing_text(ticker=ticker, search_terms=searched_terms, filing_type=filing_type))
+    search = _safe_json_loads(await search_sec_filing_text(ticker=ticker, search_terms=searched_terms, filing_type=filing_type, context_chars=1200))
     matches = [m for m in (search.get("matches") if isinstance(search.get("matches"), list) else []) if isinstance(m, dict)]
+    # The rows of a significant-customer table in the same filing, which the prose search does not reach (2.5.32,
+    # F-024: MRVL's "Distributor A | 37% | 34% | 24%").
+    if search.get("accessionNumber"):
+        table_search = _safe_json_loads(await search_sec_filing_text(
+            ticker=ticker, search_terms=_CUSTOMER_TABLE_ROW_TERMS, filing_type=filing_type, accession_number=str(search["accessionNumber"]),
+            max_matches=12, context_chars=1200))
+        matches += [m for m in (table_search.get("matches") if isinstance(table_search.get("matches"), list) else []) if isinstance(m, dict) and m.get("inTable") is True]
     filing_evidence = {
         "filingDate": search.get("filingDate"),
         "accessionNumber": search.get("accessionNumber"),
@@ -10624,11 +10634,16 @@ async def _valuation_history_for(ticker: str, dates: list[str] | None, from_date
     _, currency = _vh.taxonomy_of(facts)
     price_currency = _vl._major_price(1, history["currency"])[1] if history["currency"] else None
     warnings: list[dict] = []
-    fx = None
-    if currency and price_currency and currency != price_currency:
-        pair = f"{currency}{price_currency}=X"
-        fx_history = await _daily_history(pair, from_date)
-        fx = {"pair": pair, "bars": (fx_history or {}).get("bars") or []}
+    # One FX series per reporting currency the dates use (2.5.32, F-029: NBIS reported in RUB, then USD).
+    fx_by_currency: dict[str, dict] = {}
+    if price_currency:
+        for c in _vh.reporting_currencies(facts, use_dates):
+            if c == price_currency:
+                continue
+            pair = f"{c}{price_currency}=X"
+            fx_history = await _daily_history(pair, from_date)
+            fx_by_currency[c] = {"pair": pair, "bars": (fx_history or {}).get("bars") or []}
+    fx = fx_by_currency.get(currency) if currency else None
     ratio = None
     if _vh.foreign_filer(facts):
         try:
@@ -10651,7 +10666,7 @@ async def _valuation_history_for(ticker: str, dates: list[str] | None, from_date
     cover_counts = await _cover_counts_for(facts, reports, use_dates)
     periodic_filings = [{k: r[k] for k in ("accessionNumber", "form", "filed", "reportDate")} for r in reports]
     out = _vh.historical_valuation({"ticker": ticker, "dates": use_dates, "companyfacts": facts, "bars": history["bars"],
-                                    "priceCurrency": history["currency"], "splits": history["splits"], "fx": fx, "adsRatio": ratio,
+                                    "priceCurrency": history["currency"], "splits": history["splits"], "fx": fx, "fxByCurrency": fx_by_currency, "adsRatio": ratio,
                                     "coverCounts": cover_counts, "periodicFilings": periodic_filings})
     if not subs:
         warnings.append({"code": "SUBMISSIONS_NOT_AVAILABLE", "message": (

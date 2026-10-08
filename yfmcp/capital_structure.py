@@ -2357,7 +2357,17 @@ _DEBT_LINE_CONCEPTS = [
     "ConvertibleNotesPayableCurrent", "ConvertibleLongTermNotesPayable", "LongTermNotesPayable", "NotesPayableCurrent",
     "SeniorLongTermNotes", "LineOfCredit", "LoansPayableCurrent", "LongTermLoansPayable", "OtherLongTermDebtNoncurrent",
 ]
-_CARRYING_CONCEPTS = ["LongTermDebt", "DebtInstrumentCarryingAmount", "LongTermDebtNoncurrent", "ConvertibleNotesPayable", "ConvertibleLongTermNotesPayable", "SeniorNotes", "NotesPayable"]
+# ConvertibleDebt* and LongTermLineOfCredit carry ASTS's per-note and per-loan period-end amounts (2.5.32, F-023).
+_CARRYING_CONCEPTS = ["LongTermDebt", "DebtInstrumentCarryingAmount", "LongTermDebtNoncurrent", "ConvertibleNotesPayable", "ConvertibleLongTermNotesPayable", "SeniorNotes", "NotesPayable",
+                      "ConvertibleDebtNoncurrent", "ConvertibleDebtCurrent", "LongTermLineOfCredit"]
+# A loan tagged by credit facility rather than debt instrument (ASTS's UBS bridge and Trinity equipment loans) is a
+# row only when it has an amount at the period end: a facility's capacity or terms alone are not debt (2.5.32, F-023).
+_CREDIT_FACILITY_AXES = ["CreditFacilityAxis", "LineOfCreditFacilityAxis"]
+# Rows outside the period-end debt: matured before it, or issued after it (a subsequent event).
+_NOT_AT_PERIOD_END = frozenset({"matured_before_period_end", "issued_after_period_end"})
+# Costs that separate the notes' principal from their carrying amount (2.5.32, F-023: ASTS's rows are principal,
+# 3,022,152 less 50,236 of unamortized issuance costs is total debt 2,971,916).
+_UNAMORTIZED_COST_CONCEPTS = ["UnamortizedDebtIssuanceExpense", "DebtInstrumentUnamortizedDiscount"]
 _LADDER = [
     ("LongTermDebtMaturitiesRepaymentsOfPrincipalRemainderOfFiscalYear", "remainder_of_fiscal_year", 0),
     ("LongTermDebtMaturitiesRepaymentsOfPrincipalInNextTwelveMonths", "next_12_months", 1),
@@ -2528,9 +2538,33 @@ def _add_years(date: str, years: int) -> str:
     return f"{int(date[:4]) + years}{date[4:]}"
 
 
+def _credit_facility_groups(doc: IxDocument, period_end: str | None, taken: set[str]) -> list[_DebtGroup]:
+    """Loans tagged only by credit facility, with an amount at the period end, whose member is not already a debt row."""
+    if not period_end:
+        return []
+    groups: dict[str, _DebtGroup] = {}
+    for f in doc.facts:
+        if any(f.dims.get(a) is not None for a in _DEBT_AXES):
+            continue
+        axis = next((a for a in _CREDIT_FACILITY_AXES if f.dims.get(a) is not None), None)
+        if axis is None or f.dims[axis] in taken:
+            continue
+        key = f"{axis}={f.dims[axis]}"
+        groups.setdefault(key, _DebtGroup(key, axis, f.dims[axis])).facts.append(f)
+    return [g for g in groups.values() if ((_group_value(g, _CARRYING_CONCEPTS, period_end) or {}).get("value") or 0) != 0]
+
+
+def _after_period_end_only(group: _DebtGroup, period_end: str | None) -> bool:
+    """Whether every fact of the group is dated after the period end or tagged as a subsequent event."""
+    return period_end is not None and bool(group.facts) and all(
+        (f.period_end or "") > period_end or any(_SUBSEQUENT_EVENT_AXIS_RE.search(axis) for axis in f.dims) for f in group.facts)
+
+
 def _instruments(doc: IxDocument, period_end: str | None) -> list[dict]:
     out: list[dict] = []
-    for g in _debt_groups(doc):
+    groups = _debt_groups(doc)
+    taken = {g.member for g in groups if g.member is not None}
+    for g in [*groups, *_credit_facility_groups(doc, period_end, taken)]:
         face = _group_value(g, [_FACE_AMOUNT])
         # A carrying amount is a balance only at the period end; an amount tagged on
         # another date (often the issue date) is reported as such.
@@ -2550,7 +2584,9 @@ def _instruments(doc: IxDocument, period_end: str | None) -> list[dict]:
             continue
         latest = _max_period(g.facts)
         status = "reported"
-        if maturity and period_end and len(maturity) == 10 and maturity < period_end:
+        if _after_period_end_only(g, period_end):
+            status = "issued_after_period_end"
+        elif maturity and period_end and len(maturity) == 10 and maturity < period_end:
             status = "matured_before_period_end"
         elif period_end and carrying and carrying["periodEnd"] == period_end:
             status = "outstanding_at_period_end"
@@ -2648,14 +2684,14 @@ def _maturity_statements(matches: list[TextMatch]) -> list[dict]:
 
 def _unplaced_rows(rows: list[dict]) -> list[dict]:
     """Rows still outstanding with a non-zero amount but no maturity: what a maturity ladder cannot place."""
-    return [r for r in rows if r.get("maturityDate") is None and r.get("status") != "matured_before_period_end" and not r.get("aggregateOf") and (_ladder_amount(r) or {"amount": 0})["amount"] != 0]
+    return [r for r in rows if r.get("maturityDate") is None and r.get("status") not in _NOT_AT_PERIOD_END and not r.get("aggregateOf") and (_ladder_amount(r) or {"amount": 0})["amount"] != 0]
 
 
 def wants_maturity_text(out: dict) -> bool:
     """Whether the filing text should be searched for maturity sentences: an outstanding row with an amount is dated
     neither by XBRL nor by the text (a date read from its name is only a year or month)."""
     return any(
-        r.get("status") != "matured_before_period_end" and not r.get("aggregateOf") and (_ladder_amount(r) or {"amount": 0})["amount"] != 0
+        r.get("status") not in _NOT_AT_PERIOD_END and not r.get("aggregateOf") and (_ladder_amount(r) or {"amount": 0})["amount"] != 0
         and (r.get("maturityDateSource") is None or r.get("maturityDateSource") == "INSTRUMENT_NAME")
         for r in (out.get("instruments") or [])
     )
@@ -2695,7 +2731,7 @@ def _maturity_from_name(rows: list[dict], period_end: str | None) -> None:
     "Maturing" ("Due January 2031" -> 2031-01, "Due 2036" -> 2036), only when that is not before the period end.
     The ladder needs only the year."""
     for row in rows:
-        if row.get("maturityDate") is not None or row.get("status") == "matured_before_period_end":
+        if row.get("maturityDate") is not None or row.get("status") in _NOT_AT_PERIOD_END:
             continue
         m = _NAME_MATURITY_RE.search(spelled_years_as_digits(str(row["instrument"])))
         date = normalize_ix_date(m.group(1)) if m else None
@@ -2714,7 +2750,7 @@ def _mark_aggregates(rows: list[dict]) -> list[dict]:
     Notes" 2,100.0 is its 2036, 2046, 2056 and 2066 notes, 600 + 500 + 500 + 500; the filing tags them side by side
     with no link). Each such row is marked aggregateOf and returned."""
     marked: list[dict] = []
-    live = [r for r in rows if r.get("status") != "matured_before_period_end" and (_ladder_amount(r) or {"amount": 0})["amount"] > 0]
+    live = [r for r in rows if r.get("status") not in _NOT_AT_PERIOD_END and (_ladder_amount(r) or {"amount": 0})["amount"] > 0]
     for row in live:
         if row.get("maturityDate") is not None:
             continue
@@ -2749,9 +2785,15 @@ def _maturity_from_text(rows: list[dict], statements: list[dict]) -> None:
     Notes will mature on January 15, 2030" for "Convertible Notes Maturing 2030"). The year must appear in the
     instrument's name and the text must give exactly one date in it."""
     for row in _unplaced_rows(rows):
-        years = set(re.findall(r"\b(?:19|20)\d{2}\b", str(row["instrument"]), re.A))
+        years = set(re.findall(r"\b(?:19|20)\d{2}\b", spelled_years_as_digits(str(row["instrument"])), re.A))
         hits = [s for s in statements if s["date"][:4] in years]
         dates = list(dict.fromkeys(h["date"] for h in hits))
+        # Two notes maturing in one year (ASTS's 2036 2.00% and 2.25% notes): the sentence stating the row's own
+        # coupon decides (2.5.32, F-023).
+        coupon = row.get("couponPct")
+        if len(dates) > 1 and _is_number(coupon):
+            hits = [h for h in hits if any(abs(float(m) - coupon) < 1e-9 for m in re.findall(r"(\d+(?:\.\d+)?)\s?%", h["sentence"], re.A))]
+            dates = list(dict.fromkeys(h["date"] for h in hits))
         if len(dates) != 1:
             continue
         row["maturityDate"] = dates[0]
@@ -2816,6 +2858,12 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
     _maturity_from_name(instrument_rows, period_end)
     for row in _mark_aggregates(instrument_rows):
         warnings.append({"code": "AGGREGATE_ROW_EXCLUDED", "message": f"{row['instrument']} ({_js_number(_ladder_amount(row)['amount'])}) equals the sum of {', '.join(row['aggregateOf'])}; it is left out of the ladder, coverage and reconciliation so it is not counted twice.", "severity": "info"})
+    later = [r for r in instrument_rows if r["status"] == "issued_after_period_end"]
+    if later:
+        listed_later = ", ".join(f"{r['instrument']} (tagged {r['latestFactDate']})" for r in later)
+        warnings.append({"code": "ISSUED_AFTER_PERIOD_END", "message": (
+            f"{listed_later} {'is' if len(later) == 1 else 'are'} tagged only after the {period_end} period end or as a subsequent event; "
+            "listed, but left out of the ladder, coverage and reconciliation."), "severity": "info"})
     from_name = [r for r in instrument_rows if r.get("maturityDateSource") == "INSTRUMENT_NAME"]
     if from_name:
         listed_names = ", ".join(f"{r['instrument']} ({r['maturityDate']})" for r in from_name)
@@ -2847,7 +2895,7 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
     for row in instrument_rows:
         maturity = row["maturityDate"]
         amount = _ladder_amount(row)
-        if not maturity or not amount or row["status"] == "matured_before_period_end" or row.get("aggregateOf"):
+        if not maturity or not amount or row["status"] in _NOT_AT_PERIOD_END or row.get("aggregateOf"):
             continue
         year = maturity[:4]
         entry = by_year.get(year) or {"year": year, "amount": 0, "bases": [], "faceAmount": None, "instruments": []}
@@ -2898,22 +2946,44 @@ def capital_structure(ticker: str, source: IxSource, funding_matches: list[TextM
         })
     # Instrument rows' period-end carrying amounts against total debt (2.5.24, F-007: AAOI tags 124.9M principal as
     # the 2030 Notes' carrying amount; the balance sheet carries 129.1M).
-    outstanding = [r for r in instrument_rows if r["status"] != "matured_before_period_end" and not r.get("aggregateOf") and _ladder_amount(r) is not None]
+    outstanding = [r for r in instrument_rows if r["status"] not in _NOT_AT_PERIOD_END and not r.get("aggregateOf") and _ladder_amount(r) is not None]
     carried = [r for r in outstanding if _is_number(r["carryingAmount"])]
     carried_total = sum((r["carryingAmount"] for r in carried), 0)
     without_carrying = len(outstanding) - len(carried)
     # Compared only when every outstanding row has a period-end carrying amount (2.5.25: VRT's notes carry only face
     # amounts, so its rows summed to 0 against 2.94B and read as a gap).
+    def within(a: float, b: float) -> bool:
+        return abs(a - b) <= _AGGREGATE_TOLERANCE * abs(b)
+
+    # Rows at principal reconcile once the filing's own unamortized costs are taken off.
+    costs = _first_total(balance_doc, _UNAMORTIZED_COST_CONCEPTS, period_end)
+    net_of_costs = (debt_value is not None and bool(carried) and without_carrying == 0 and not within(carried_total, debt_value)
+                    and costs is not None and costs["value"] > 0 and within(carried_total - costs["value"], debt_value))
     if not debt_value or not carried or without_carrying > 0:
         reconciliation = {"status": "NOT_COMPARABLE", "instrumentsCarryingTotal": None, "totalDebt": debt_value, "difference": None, "rowsWithoutCarryingAmount": without_carrying}
+    elif net_of_costs:
+        reconciliation = {
+            "status": "RECONCILED_NET_OF_UNAMORTIZED_COSTS",
+            "instrumentsCarryingTotal": carried_total,
+            "totalDebt": debt_value,
+            "difference": debt_value - carried_total,
+            "unamortizedCosts": {"concept": costs["concept"], "amount": costs["value"]},
+            "rowsWithoutCarryingAmount": without_carrying,
+        }
     else:
         reconciliation = {
-            "status": "RECONCILED" if abs(carried_total - debt_value) <= _AGGREGATE_TOLERANCE * abs(debt_value) else "NOT_RECONCILED",
+            "status": "RECONCILED" if within(carried_total, debt_value) else "NOT_RECONCILED",
             "instrumentsCarryingTotal": carried_total,
             "totalDebt": debt_value,
             "difference": debt_value - carried_total,
             "rowsWithoutCarryingAmount": without_carrying,
         }
+    if net_of_costs:
+        for row in carried:
+            row["carryingAmountBasis"] = "BEFORE_UNAMORTIZED_COSTS"
+        warnings.append({"code": "INSTRUMENT_AMOUNTS_BEFORE_UNAMORTIZED_COSTS", "message": (
+            f"Instrument rows sum to {_js_number(carried_total)}; less {costs['concept']} {_js_number(costs['value'])} that is total debt {_js_number(debt_value)}, "
+            "so the row amounts are before unamortized costs, not carrying values."), "severity": "info"})
     if reconciliation["status"] == "NOT_RECONCILED":
         warnings.append({
             "code": "INSTRUMENTS_DO_NOT_RECONCILE",

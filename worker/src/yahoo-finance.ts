@@ -36,7 +36,7 @@ import { operatingDriverLedger } from "./driver-ledger.js";
 import { parseShareScenarios, shareCountScenarios } from "./share-scenarios.js";
 import { customerConcentration, guidanceRanges, rankEvidence, releaseTextMetric, stemWord, type ConcentrationFinding, type ReleaseMetricName } from "./extraction-rules.js";
 import { adsRatio, majorPrice, marketInputsFromQuoteSummary, peerValuations, valuationSnapshot, type MarketInputs } from "./valuation.js";
-import { coverReadsNeeded, coverShareCounts, foreignFiler, historicalValuation, latestShareCount, peerMedians, taxonomyOf, valuationDates, type Bar, type PeriodicFiling, type Split } from "./valuation-history.js";
+import { coverReadsNeeded, coverShareCounts, foreignFiler, historicalValuation, latestShareCount, peerMedians, reportingCurrencies, taxonomyOf, valuationDates, type Bar, type PeriodicFiling, type Split } from "./valuation-history.js";
 import { annualFilingsFromSubmissions, latestAnnualCoverageWarning, latestAnnualFiling } from "./companyfacts-coverage.js";
 import { DEFAULT_TOLERANCE_PCT, METRICS as RECONCILE_METRICS, metricReconciliation, resolvePeriod } from "./metric-reconciliation.js";
 import { AUTHORITY_BOUNDARY, EPS_BASIS } from "./evidence.js";
@@ -15218,6 +15218,8 @@ export function customerConcentrationFromMatches(
   };
 }
 
+const CUSTOMER_TABLE_ROW_TERMS = ["Customer A", "Customer B", "Customer C", "Customer 1", "Distributor A", "Distributor B"];
+
 export async function extractCustomerConcentration(
   ticker: string,
   filingType = "10-K",
@@ -15232,7 +15234,13 @@ export async function extractCustomerConcentration(
     accessionNumber: search.accessionNumber ?? null,
     documentUrl: search.documentUrl ?? null,
   };
-  const { customers, aggregates, negation } = customerConcentrationFromMatches(list, filingEvidence, search.fiscalYear ? String(search.fiscalYear) : null);
+  // The rows of a significant-customer table in the same filing, which the prose search does not reach (2.5.32,
+  // F-024: MRVL's "Distributor A | 37% | 34% | 24%").
+  const tableSearch = search.accessionNumber
+    ? parseObjectJson(await searchFilingText(ticker, CUSTOMER_TABLE_ROW_TERMS, null, filingType, String(search.accessionNumber), 1200, false, null, { maxMatches: 12 }))
+    : {};
+  const tableRows = (Array.isArray(tableSearch.matches) ? tableSearch.matches : []).filter((m: unknown) => m != null && typeof m === "object" && (m as Record<string, unknown>).inTable === true);
+  const { customers, aggregates, negation } = customerConcentrationFromMatches([...list, ...tableRows], filingEvidence, search.fiscalYear ? String(search.fiscalYear) : null);
   const matchCount = Number(search.matchCount ?? 0);
   const scanCoverage = { sourceType: "sec_primary_html", ...filingEvidence, matchCount, searchedTerms };
   const out: Record<string, unknown> = { ticker, customers, aggregates };
@@ -15678,12 +15686,17 @@ async function valuationHistoryFor(ticker: string, dates: string[] | null, fromD
   const { currency } = taxonomyOf(facts);
   const priceCurrency = history.currency ? majorPrice(1, history.currency).currency : null;
   const warnings: Record<string, unknown>[] = [];
-  let fx: { pair: string; bars: Bar[] } | null = null;
-  if (currency && priceCurrency && currency !== priceCurrency) {
-    const pair = `${currency}${priceCurrency}=X`;
-    const fxHistory = await dailyHistory(pair, fromDate).catch(() => null);
-    fx = { pair, bars: fxHistory?.bars ?? [] };
+  // One FX series per reporting currency the dates use (2.5.32, F-029: NBIS reported in RUB, then USD).
+  const fxByCurrency: Record<string, { pair: string; bars: Bar[] }> = {};
+  if (priceCurrency) {
+    for (const c of reportingCurrencies(facts, useDates)) {
+      if (c === priceCurrency) continue;
+      const pair = `${c}${priceCurrency}=X`;
+      const fxHistory = await dailyHistory(pair, fromDate).catch(() => null);
+      fxByCurrency[c] = { pair, bars: fxHistory?.bars ?? [] };
+    }
   }
+  const fx = currency ? fxByCurrency[currency] ?? null : null;
   let ratio: number | null = null;
   if (foreignFiler(facts)) {
     const market = await valuationMarketInputs(ticker).catch(() => null);
@@ -15699,7 +15712,7 @@ async function valuationHistoryFor(ticker: string, dates: string[] | null, fromD
   const reports = periodicReports(submissions, cikPadded);
   const coverCounts = await coverCountsFor(facts, reports, useDates);
   const periodicFilings = reports.map(({ accessionNumber, form, filed, reportDate }) => ({ accessionNumber, form, filed, reportDate }));
-  const out = historicalValuation({ ticker, dates: useDates, companyfacts: facts, bars: history.bars, priceCurrency: history.currency, splits: history.splits, fx, adsRatio: ratio, coverCounts, periodicFilings });
+  const out = historicalValuation({ ticker, dates: useDates, companyfacts: facts, bars: history.bars, priceCurrency: history.currency, splits: history.splits, fx, fxByCurrency, adsRatio: ratio, coverCounts, periodicFilings });
   if (!submissions) warnings.push({ code: "SUBMISSIONS_NOT_AVAILABLE", message: "SEC submissions could not be read, so no cover page was read; filers without an undimensioned share count have no market cap. Retry.", severity: "warning" });
   out.warnings = warnings;
   return out;

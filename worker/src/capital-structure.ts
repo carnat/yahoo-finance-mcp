@@ -2126,7 +2126,17 @@ const DEBT_LINE_CONCEPTS = [
   "ConvertibleNotesPayableCurrent", "ConvertibleLongTermNotesPayable", "LongTermNotesPayable", "NotesPayableCurrent",
   "SeniorLongTermNotes", "LineOfCredit", "LoansPayableCurrent", "LongTermLoansPayable", "OtherLongTermDebtNoncurrent",
 ];
-const CARRYING_CONCEPTS = ["LongTermDebt", "DebtInstrumentCarryingAmount", "LongTermDebtNoncurrent", "ConvertibleNotesPayable", "ConvertibleLongTermNotesPayable", "SeniorNotes", "NotesPayable"];
+// ConvertibleDebt* and LongTermLineOfCredit carry ASTS's per-note and per-loan period-end amounts (2.5.32, F-023).
+const CARRYING_CONCEPTS = ["LongTermDebt", "DebtInstrumentCarryingAmount", "LongTermDebtNoncurrent", "ConvertibleNotesPayable", "ConvertibleLongTermNotesPayable", "SeniorNotes", "NotesPayable",
+  "ConvertibleDebtNoncurrent", "ConvertibleDebtCurrent", "LongTermLineOfCredit"];
+// A loan tagged by credit facility rather than debt instrument (ASTS's UBS bridge and Trinity equipment loans) is a
+// row only when it has an amount at the period end: a facility's capacity or terms alone are not debt (2.5.32, F-023).
+const CREDIT_FACILITY_AXES = ["CreditFacilityAxis", "LineOfCreditFacilityAxis"];
+// Rows outside the period-end debt: matured before it, or issued after it (a subsequent event).
+const NOT_AT_PERIOD_END = new Set(["matured_before_period_end", "issued_after_period_end"]);
+// Costs that separate the notes' principal from their carrying amount (2.5.32, F-023: ASTS's rows are principal,
+// 3,022,152 less 50,236 of unamortized issuance costs is total debt 2,971,916).
+const UNAMORTIZED_COST_CONCEPTS = ["UnamortizedDebtIssuanceExpense", "DebtInstrumentUnamortizedDiscount"];
 const LADDER: [string, string, number][] = [
   ["LongTermDebtMaturitiesRepaymentsOfPrincipalRemainderOfFiscalYear", "remainder_of_fiscal_year", 0],
   ["LongTermDebtMaturitiesRepaymentsOfPrincipalInNextTwelveMonths", "next_12_months", 1],
@@ -2175,7 +2185,7 @@ const FINANCE_LEASE_PARTS = ["FinanceLeaseLiabilityCurrent", "FinanceLeaseLiabil
 
 // Every concept totalDebt or the instrument rows read; a filing with none of
 // them at any date or dimension reports no borrowings.
-const BORROWING_CONCEPTS = new Set([
+export const BORROWING_CONCEPTS = new Set([
   "LongTermDebt", "LongTermDebtCurrent", "LongTermDebtNoncurrent", "NotesPayable", "SeniorNotes", "DebtInstrumentFaceAmount",
   LEASE_INCLUSIVE_TOTAL, ...LEASE_INCLUSIVE_PARTS,
   ...SHORT_TERM_BORROWING_CONCEPTS, ...DEBT_LINE_CONCEPTS, ...CARRYING_CONCEPTS, ...CONVERTIBLE_TOTAL_CONCEPTS, ...CONVERTIBLE_PART_CONCEPTS,
@@ -2280,9 +2290,33 @@ function addYears(date: string, years: number): string {
   return `${y}${date.slice(4)}`;
 }
 
+/** Loans tagged only by credit facility, with an amount at the period end, whose member is not already a debt row. */
+function creditFacilityGroups(doc: IxDocument, periodEnd: string | null, taken: Set<string>): DebtGroup[] {
+  if (!periodEnd) return [];
+  const groups = new Map<string, DebtGroup>();
+  for (const f of doc.facts) {
+    if (DEBT_AXES.some((a) => f.dims[a] != null)) continue;
+    const axis = CREDIT_FACILITY_AXES.find((a) => f.dims[a] != null) ?? null;
+    if (!axis || taken.has(f.dims[axis])) continue;
+    const key = `${axis}=${f.dims[axis]}`;
+    const group = groups.get(key) ?? { key, axis, member: f.dims[axis], facts: [] };
+    group.facts.push(f);
+    groups.set(key, group);
+  }
+  return [...groups.values()].filter((g) => (groupValue(g, CARRYING_CONCEPTS, periodEnd)?.value ?? 0) !== 0);
+}
+
+/** Whether every fact of the group is dated after the period end or tagged as a subsequent event. */
+function afterPeriodEndOnly(group: DebtGroup, periodEnd: string | null): boolean {
+  return periodEnd != null && group.facts.length > 0
+    && group.facts.every((f) => (f.periodEnd ?? "") > periodEnd || Object.keys(f.dims).some((axis) => SUBSEQUENT_EVENT_AXIS_RE.test(axis)));
+}
+
 function instruments(doc: IxDocument, periodEnd: string | null): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = [];
-  for (const g of debtGroups(doc)) {
+  const groups = debtGroups(doc);
+  const taken = new Set(groups.map((g) => g.member).filter((m): m is string => m != null));
+  for (const g of [...groups, ...creditFacilityGroups(doc, periodEnd, taken)]) {
     const face = groupValue(g, [FACE_AMOUNT]);
     // A carrying amount is a balance only at the period end; an amount tagged on
     // another date (often the issue date) is reported as such.
@@ -2301,7 +2335,8 @@ function instruments(doc: IxDocument, periodEnd: string | null): Record<string, 
     if (!face && !carrying && !tagged && !maturityDate) continue;
     const latest = g.facts.reduce((best, f) => ((f.periodEnd ?? "") > best ? (f.periodEnd ?? "") : best), "");
     let status = "reported";
-    if (maturityDate && periodEnd && maturityDate.length === 10 && maturityDate < periodEnd) status = "matured_before_period_end";
+    if (afterPeriodEndOnly(g, periodEnd)) status = "issued_after_period_end";
+    else if (maturityDate && periodEnd && maturityDate.length === 10 && maturityDate < periodEnd) status = "matured_before_period_end";
     else if (periodEnd && carrying && carrying.periodEnd === periodEnd) status = "outstanding_at_period_end";
     out.push({
       instrument: g.member ? memberLabel(g.member) : "",
@@ -2407,7 +2442,7 @@ function maturityStatements(matches: TextMatch[]): { date: string; sentence: str
 
 /** Rows still outstanding with a non-zero amount but no maturity: what a maturity ladder cannot place. */
 function unplacedRows(rows: Record<string, unknown>[]): Record<string, unknown>[] {
-  return rows.filter((r) => r.maturityDate == null && r.status !== "matured_before_period_end" && !r.aggregateOf && (ladderAmount(r)?.amount ?? 0) !== 0);
+  return rows.filter((r) => r.maturityDate == null && !NOT_AT_PERIOD_END.has(String(r.status)) && !r.aggregateOf && (ladderAmount(r)?.amount ?? 0) !== 0);
 }
 
 const AGGREGATE_MAX_ROWS = 16;
@@ -2420,7 +2455,7 @@ const AGGREGATE_MAX_ROWS = 16;
  */
 function markAggregates(rows: Record<string, unknown>[]): Record<string, unknown>[] {
   const marked: Record<string, unknown>[] = [];
-  const live = rows.filter((r) => r.status !== "matured_before_period_end" && (ladderAmount(r)?.amount ?? 0) > 0);
+  const live = rows.filter((r) => !NOT_AT_PERIOD_END.has(String(r.status)) && (ladderAmount(r)?.amount ?? 0) > 0);
   for (const row of live) {
     if (row.maturityDate != null) continue;
     const own = ladderAmount(row)!;
@@ -2448,7 +2483,7 @@ function markAggregates(rows: Record<string, unknown>[]): Record<string, unknown
  */
 export function wantsMaturityText(out: Record<string, unknown>): boolean {
   return ((out.instruments ?? []) as Record<string, unknown>[]).some((r) =>
-    r.status !== "matured_before_period_end" && !r.aggregateOf && (ladderAmount(r)?.amount ?? 0) !== 0
+    !NOT_AT_PERIOD_END.has(String(r.status)) && !r.aggregateOf && (ladderAmount(r)?.amount ?? 0) !== 0
     && (r.maturityDateSource == null || r.maturityDateSource === "INSTRUMENT_NAME"));
 }
 
@@ -2480,7 +2515,7 @@ export function spelledYearsAsDigits(name: string): string {
  */
 function maturityFromName(rows: Record<string, unknown>[], periodEnd: string | null): void {
   for (const row of rows) {
-    if (row.maturityDate != null || row.status === "matured_before_period_end") continue;
+    if (row.maturityDate != null || NOT_AT_PERIOD_END.has(String(row.status))) continue;
     const m = NAME_MATURITY_RE.exec(spelledYearsAsDigits(String(row.instrument)));
     const date = m ? normalizeIxDate(m[1]) : null;
     if (!date || (periodEnd && date < periodEnd.slice(0, date.length))) continue;
@@ -2496,9 +2531,16 @@ function maturityFromName(rows: Record<string, unknown>[], periodEnd: string | n
  */
 function maturityFromText(rows: Record<string, unknown>[], statements: { date: string; sentence: string }[]): void {
   for (const row of unplacedRows(rows)) {
-    const years = new Set(String(row.instrument).match(/\b(?:19|20)\d{2}\b/g) ?? []);
-    const hits = statements.filter((s) => years.has(s.date.slice(0, 4)));
-    const dates = [...new Set(hits.map((h) => h.date))];
+    const years = new Set(spelledYearsAsDigits(String(row.instrument)).match(/\b(?:19|20)\d{2}\b/g) ?? []);
+    let hits = statements.filter((s) => years.has(s.date.slice(0, 4)));
+    let dates = [...new Set(hits.map((h) => h.date))];
+    // Two notes maturing in one year (ASTS's 2036 2.00% and 2.25% notes): the sentence stating the row's own
+    // coupon decides (2.5.32, F-023).
+    const coupon = row.couponPct;
+    if (dates.length > 1 && typeof coupon === "number") {
+      hits = hits.filter((h) => [...h.sentence.matchAll(/(\d+(?:\.\d+)?)\s?%/g)].some((m) => Math.abs(Number(m[1]) - coupon) < 1e-9));
+      dates = [...new Set(hits.map((h) => h.date))];
+    }
     if (dates.length !== 1) continue;
     row.maturityDate = dates[0];
     row.maturityDateSource = "FILING_TEXT";
@@ -2567,6 +2609,10 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
   for (const row of markAggregates(instrumentRows)) {
     warnings.push({ code: "AGGREGATE_ROW_EXCLUDED", message: `${row.instrument} (${ladderAmount(row)!.amount}) equals the sum of ${(row.aggregateOf as string[]).join(", ")}; it is left out of the ladder, coverage and reconciliation so it is not counted twice.`, severity: "info" });
   }
+  const later = instrumentRows.filter((r) => r.status === "issued_after_period_end");
+  if (later.length > 0) {
+    warnings.push({ code: "ISSUED_AFTER_PERIOD_END", message: `${later.map((r) => `${r.instrument} (tagged ${r.latestFactDate})`).join(", ")} ${later.length === 1 ? "is" : "are"} tagged only after the ${periodEnd} period end or as a subsequent event; listed, but left out of the ladder, coverage and reconciliation.`, severity: "info" });
+  }
   const named = instrumentRows.filter((r) => r.maturityDateSource === "INSTRUMENT_NAME");
   if (named.length > 0) {
     warnings.push({ code: "MATURITY_FROM_INSTRUMENT_NAME", message: `No tagged or stated maturity date for ${named.map((r) => `${r.instrument} (${r.maturityDate})`).join(", ")}; dated from the instrument name, to the year or month it gives.`, severity: "info" });
@@ -2600,7 +2646,7 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
   for (const row of instrumentRows) {
     const maturity = row.maturityDate as string | null;
     const amount = ladderAmount(row);
-    if (!maturity || !amount || row.status === "matured_before_period_end" || row.aggregateOf) continue;
+    if (!maturity || !amount || NOT_AT_PERIOD_END.has(String(row.status)) || row.aggregateOf) continue;
     const year = maturity.slice(0, 4);
     const entry = byYear.get(year) ?? { year, amount: 0, bases: new Set<string>(), faceAmount: null, instruments: [] };
     entry.amount += amount.amount;
@@ -2642,21 +2688,39 @@ export function capitalStructure(input: CapitalStructureInput): Record<string, u
   }
   // Instrument rows' period-end carrying amounts against total debt (2.5.24, F-007: AAOI tags 124.9M principal as
   // the 2030 Notes' carrying amount; the balance sheet carries 129.1M).
-  const outstanding = instrumentRows.filter((r) => r.status !== "matured_before_period_end" && !r.aggregateOf && ladderAmount(r) != null);
+  const outstanding = instrumentRows.filter((r) => !NOT_AT_PERIOD_END.has(String(r.status)) && !r.aggregateOf && ladderAmount(r) != null);
   const carried = outstanding.filter((r) => typeof r.carryingAmount === "number");
   const carriedTotal = carried.reduce((sum, r) => sum + (r.carryingAmount as number), 0);
   const withoutCarrying = outstanding.length - carried.length;
   // Compared only when every outstanding row has a period-end carrying amount (2.5.25: VRT's notes carry only face
   // amounts, so its rows summed to 0 against 2.94B and read as a gap).
+  const within = (a: number, b: number) => Math.abs(a - b) <= AGGREGATE_TOLERANCE * Math.abs(b);
+  // Rows at principal reconcile once the filing's own unamortized costs are taken off.
+  const costs = firstTotal(balanceDoc, UNAMORTIZED_COST_CONCEPTS, periodEnd);
+  const netOfCosts = debtValue != null && carried.length > 0 && withoutCarrying === 0 && !within(carriedTotal, debtValue)
+    && costs != null && costs.value > 0 && within(carriedTotal - costs.value, debtValue);
   const instrumentReconciliation = !debtValue || carried.length === 0 || withoutCarrying > 0
     ? { status: "NOT_COMPARABLE", instrumentsCarryingTotal: null, totalDebt: debtValue, difference: null, rowsWithoutCarryingAmount: withoutCarrying }
-    : {
-      status: Math.abs(carriedTotal - debtValue) <= AGGREGATE_TOLERANCE * Math.abs(debtValue) ? "RECONCILED" : "NOT_RECONCILED",
-      instrumentsCarryingTotal: carriedTotal,
-      totalDebt: debtValue,
-      difference: debtValue - carriedTotal,
-      rowsWithoutCarryingAmount: withoutCarrying,
-    };
+    : netOfCosts
+      ? {
+        status: "RECONCILED_NET_OF_UNAMORTIZED_COSTS",
+        instrumentsCarryingTotal: carriedTotal,
+        totalDebt: debtValue,
+        difference: debtValue - carriedTotal,
+        unamortizedCosts: { concept: costs!.concept, amount: costs!.value },
+        rowsWithoutCarryingAmount: withoutCarrying,
+      }
+      : {
+        status: within(carriedTotal, debtValue) ? "RECONCILED" : "NOT_RECONCILED",
+        instrumentsCarryingTotal: carriedTotal,
+        totalDebt: debtValue,
+        difference: debtValue - carriedTotal,
+        rowsWithoutCarryingAmount: withoutCarrying,
+      };
+  if (netOfCosts) {
+    for (const row of carried) row.carryingAmountBasis = "BEFORE_UNAMORTIZED_COSTS";
+    warnings.push({ code: "INSTRUMENT_AMOUNTS_BEFORE_UNAMORTIZED_COSTS", message: `Instrument rows sum to ${carriedTotal}; less ${costs!.concept} ${costs!.value} that is total debt ${debtValue}, so the row amounts are before unamortized costs, not carrying values.`, severity: "info" });
+  }
   if (instrumentReconciliation.status === "NOT_RECONCILED") {
     warnings.push({
       code: "INSTRUMENTS_DO_NOT_RECONCILE",

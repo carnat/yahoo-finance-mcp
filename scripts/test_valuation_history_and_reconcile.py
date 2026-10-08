@@ -221,6 +221,35 @@ COVER_HTML = [
 ]
 
 
+# AEHR-like (2.5.32, F-026): debt tagged until an older 10-K; the 10-K behind the later balance sheet tags none.
+NO_DEBT = json.loads(json.dumps(SYN))
+for concept in ("LongTermDebt", "LongTermDebtCurrent", "LongTermDebtNoncurrent", "CommercialPaper", "ShortTermInvestments"):
+    NO_DEBT["facts"]["us-gaap"].pop(concept)
+NO_DEBT["facts"]["us-gaap"]["LongTermDebt"] = _usd(_f(None, "2023-12-31", 50, "10-K", "2024-02-15", "k23"))
+# BE-like (2.5.32, F-026): Depreciation tagged, AmortizationOfIntangibleAssets and every D&A total never.
+DEP_ONLY = json.loads(json.dumps(SYN))
+for concept in ("DepreciationDepletionAndAmortization", "AmortizationOfIntangibleAssets"):
+    DEP_ONLY["facts"]["us-gaap"].pop(concept)
+
+# NBIS-like (2.5.32, F-029): 20-F revenue in RUB through FY2023, in USD from FY2024 (with a USD FY2023
+# comparative); RUB has more facts, so it is the filer's main currency.
+F23S = ("20-F", "2024-04-26", "s23")
+F24S = ("20-F", "2025-04-30", "s24")
+SWITCH = {"facts": {"us-gaap": {
+    "Revenues": {"units": {
+        "RUB": [_f("2021-01-01", "2021-12-31", 3000, "20-F", "2022-04-01", "s21"), _f("2022-01-01", "2022-12-31", 4000, "20-F", "2023-04-01", "s22"),
+                _f("2023-01-01", "2023-12-31", 5000, *F23S)],
+        "USD": [_f("2023-01-01", "2023-12-31", 60, *F24S), _f("2024-01-01", "2024-12-31", 117, *F24S)],
+    }},
+    "OperatingIncomeLoss": {"units": {"RUB": [_f("2023-01-01", "2023-12-31", 500, *F23S)], "USD": [_f("2024-01-01", "2024-12-31", -40, *F24S)]}},
+    "NetIncomeLoss": {"units": {"RUB": [_f("2023-01-01", "2023-12-31", 400, *F23S)], "USD": [_f("2024-01-01", "2024-12-31", 30, *F24S)]}},
+    "CashAndCashEquivalentsAtCarryingValue": {"units": {"RUB": [_f(None, "2023-12-31", 1000, *F23S)], "USD": [_f(None, "2024-12-31", 200, *F24S)]}},
+    "LongTermDebt": {"units": {"RUB": [_f(None, "2023-12-31", 300, *F23S)], "USD": [_f(None, "2024-12-31", 10, *F24S)]}},
+    "CommonStockSharesOutstanding": {"units": {"shares": [_f(None, "2023-12-31", 300, *F23S), _f(None, "2024-12-31", 236, *F24S)]}},
+}}}
+SWITCH_BARS = [{"date": "2024-06-03", "close": 10.0}, {"date": "2025-12-31", "close": 90.0}]
+RUB_FX = {"pair": "RUBUSD=X", "bars": [{"date": "2024-05-31", "close": 0.011}]}
+
 ZERO_SHARES = json.loads(json.dumps(SYN))
 ZERO_SHARES["facts"]["dei"]["EntityCommonStockSharesOutstanding"]["units"]["shares"][0]["val"] = 0
 
@@ -241,8 +270,13 @@ HV_INPUTS = {
     "multiCoverFailed": _hv("multi", MULTI, BARS, ["2025-09-02"], SPLITS, covers=COVER_FAILED),
     "multiClassSum": _hv("multi", MULTI, BARS, ["2025-09-02"], SPLITS, covers=CLASS_SUM),
     "regime": _hv("regime", REGIME, REGIME_BARS, ["2024-06-03", "2025-06-02"]),
+    "noDebt": _hv("aehr", NO_DEBT, BARS, ["2025-09-02"], SPLITS),
+    "depOnly": _hv("be", DEP_ONLY, BARS, ["2025-09-02"], SPLITS),
     # BE-like (2.5.31, F-025): the cover page counts 0 shares.
     "zeroShares": _hv("zero", ZERO_SHARES, BARS, ["2025-03-03"], SPLITS),
+    "currencySwitch": {**_hv("nbis", SWITCH, SWITCH_BARS, ["2024-06-03", "2025-12-31"], fx=RUB_FX), "fxByCurrency": {"RUB": RUB_FX}},
+    # No FX series read: the missing pair is named for the date's currency.
+    "currencySwitchNoFx": _hv("nbis", SWITCH, SWITCH_BARS, ["2024-06-03", "2025-12-31"]),
     # TSM-like (2.5.30, F-015/F-018): the FY2025 20-F filed 2026-04-16 is in submissions but not in companyfacts.
     "ifrsMissingFy": {**_hv("tsmx", IFRS_FACTS, [{"date": "2025-06-02", "close": 10.0}, {"date": "2026-06-30", "close": 12.0}], ["2025-06-02", "2026-06-30"],
                             fx={"pair": "TWDUSD=X", "bars": [{"date": "2025-05-30", "close": 0.03}, {"date": "2026-06-30", "close": 0.031}]}, ads=5),
@@ -446,6 +480,9 @@ def _python_outputs() -> dict:
         "coverNeeded": [vh.cover_reads_needed(MULTI, FILINGS, ["2025-03-03", "2025-09-02"]), vh.cover_reads_needed(SYN, FILINGS, DATES),
                         vh.cover_reads_needed(MULTI, None, DATES), vh.cover_reads_needed({}, FILINGS, DATES)],
         "foreignAsOf": [vh.foreign_filer(REGIME, "2024-06-03"), vh.foreign_filer(REGIME, "2025-06-02"), vh.foreign_filer(REGIME)],
+        "currencyAt": [vh.reporting_currency_at(SWITCH, d) for d in ("2020-01-01", "2024-06-03", "2025-04-30", "2025-12-31")]
+        + [vh.reporting_currency_at(IFRS_FACTS, "2025-06-02"), vh.reporting_currency_at({}, "2025-06-02")],
+        "currencies": [vh.reporting_currencies(SWITCH, ["2024-06-03", "2025-12-31", "2026-01-02"]), vh.reporting_currencies(SYN, DATES)],
         "fiscalMetaPeriod": mr.resolve_period(FISCAL_META, "revenue", "latest_quarter"),
         "fiscalMetaObs": [_read_obs(t, mr.resolve_period(FISCAL_META, "revenue", "latest_quarter")) for t in FISCAL_META_TEXTS],
         "fiscalDerivedObs": [_read_obs(t, mr.resolve_period(FISCAL_RECON, "revenue", "latest_quarter")) for t in FISCAL_META_TEXTS],
@@ -518,6 +555,9 @@ const out = {
   coverNeeded: [vh.coverReadsNeeded(f.multi, f.filings, ["2025-03-03", "2025-09-02"]), vh.coverReadsNeeded(f.syn, f.filings, f.dates),
     vh.coverReadsNeeded(f.multi, null, f.dates), vh.coverReadsNeeded({}, f.filings, f.dates)],
   foreignAsOf: [vh.foreignFiler(f.regime, "2024-06-03"), vh.foreignFiler(f.regime, "2025-06-02"), vh.foreignFiler(f.regime)],
+  currencyAt: [...["2020-01-01", "2024-06-03", "2025-04-30", "2025-12-31"].map((d) => vh.reportingCurrencyAt(f.switchFacts, d)),
+    vh.reportingCurrencyAt(f.ifrsFacts, "2025-06-02"), vh.reportingCurrencyAt({}, "2025-06-02")],
+  currencies: [vh.reportingCurrencies(f.switchFacts, ["2024-06-03", "2025-12-31", "2026-01-02"]), vh.reportingCurrencies(f.syn, f.dates)],
   fiscalMetaPeriod: mr.resolvePeriod(f.fiscalMeta, "revenue", "latest_quarter"),
   fiscalMetaObs: f.fiscalMetaTexts.map((t) => readObs(t, mr.resolvePeriod(f.fiscalMeta, "revenue", "latest_quarter"))),
   fiscalDerivedObs: f.fiscalMetaTexts.map((t) => readObs(t, mr.resolvePeriod(f.fiscalRecon, "revenue", "latest_quarter"))),
@@ -544,7 +584,7 @@ def _worker_outputs() -> dict:
         fx = Path(tmp) / "fixtures.json"
         fx.write_text(json.dumps({"hv": HV_INPUTS, "dateCases": DATE_CASES, "dates": DATES, "syn": SYN, "ifrsFacts": IFRS_FACTS, "periodSpecs": PERIOD_SPECS,
                                   "recon": RECON, "reconCases": RECON_CASES, "releaseTexts": RELEASE_TEXTS, "releases": RELEASES, "fiscalRecon": FISCAL_RECON, "fiscalTexts": FISCAL_TEXTS,
-                                  "coverHtml": COVER_HTML, "multi": MULTI, "filings": FILINGS, "regime": REGIME, "fiscalMeta": FISCAL_META, "fiscalMetaTexts": FISCAL_META_TEXTS,
+                                  "coverHtml": COVER_HTML, "multi": MULTI, "filings": FILINGS, "regime": REGIME, "switchFacts": SWITCH, "fiscalMeta": FISCAL_META, "fiscalMetaTexts": FISCAL_META_TEXTS,
                                   "dgMeta": DG_META, "dgTexts": DG_TEXTS, "fySelect": FY_SELECT,
                                   "nbisFacts": NBIS_FACTS, "unitTieFacts": UNIT_TIE_FACTS, "beFacts": BE_FACTS, "beCases": BE_CASES,
                                   "releaseTexts2515": RELEASE_TEXTS_2515}), encoding="utf-8")
@@ -753,6 +793,84 @@ class TestZeroShareCount(unittest.TestCase):
         # The same filer with its real count is unaffected.
         ok = _point(vh.historical_valuation(HV_INPUTS["syn"]), "2025-03-03")
         self.assertEqual(ok["marketCap"]["status"], "OK")
+
+
+class TestNoBorrowingsAndDepreciationOnly(unittest.TestCase):
+    """2.5.32 (F-026): the valuation context reads debt and EBITDA as get_valuation_snapshot does."""
+
+    def test_a_filing_with_no_borrowings_has_zero_debt(self) -> None:
+        pt = _point(vh.historical_valuation(HV_INPUTS["noDebt"]), "2025-09-02")
+        debt = pt["balances"]["debt"]
+        self.assertEqual(debt, {"status": "OK", "value": 0, "basis": "NO_BORROWINGS_TAGGED", "components": [], "accessionNumber": "q225"})
+        self.assertEqual(pt["enterpriseValue"]["status"], "OK")
+        warning = next(w for w in pt["warnings"] if w["code"] == "NO_BORROWINGS_TAGGED")
+        self.assertEqual((warning["severity"], warning["message"]), ("info", "The filing that reported the 2025-06-30 balance sheet (q225) tags no borrowings at any date, so debt is taken as zero (leases excluded)."))
+
+    def test_a_filing_that_tags_borrowings_is_not_zero(self) -> None:
+        # The synthetic filer's q225 tags LongTermDebtCurrent/Noncurrent: debt is read, no NO_BORROWINGS_TAGGED.
+        pt = _point(vh.historical_valuation(HV_INPUTS["syn"]), "2025-09-02")
+        self.assertNotEqual(pt["balances"]["debt"].get("basis"), "NO_BORROWINGS_TAGGED")
+        self.assertNotIn("NO_BORROWINGS_TAGGED", [w["code"] for w in pt["warnings"]])
+
+    def test_depreciation_alone_when_amortization_was_never_tagged(self) -> None:
+        pt = _point(vh.historical_valuation(HV_INPUTS["depOnly"]), "2025-09-02")
+        e = pt["denominators"]["LTM"]["ebitda"]
+        self.assertEqual((e["status"], e["value"]), ("OK", (200 + 120 - 90) + (35 + 20 - 18)))  # LTM operating income + LTM depreciation
+        self.assertEqual(e["method"], "operating income + Depreciation (computed, not a reported figure)")
+        self.assertEqual(pt["multiples"]["LTM"]["evToEbitda"]["denominatorConcepts"], ["OperatingIncomeLoss", "Depreciation"])
+        self.assertIn("EBITDA_DEPRECIATION_ONLY", [w["code"] for w in pt["warnings"]])
+        # A filer that does tag amortization keeps the pair and gets no warning.
+        syn = _point(vh.historical_valuation(HV_INPUTS["syn"]), "2025-09-02")
+        self.assertNotIn("EBITDA_DEPRECIATION_ONLY", [w["code"] for w in syn["warnings"]])
+
+
+class TestReportingCurrencyByDate(unittest.TestCase):
+    """2.5.32 (F-029): each date reads the currency its latest annual report used, and an annual filer's aged
+    share count is disclosed."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.r = vh.historical_valuation(HV_INPUTS["currencySwitch"])
+
+    def test_the_currency_follows_the_latest_annual_report(self) -> None:
+        self.assertEqual((self.r["reportingCurrency"], self.r["reportingCurrencies"]), ("RUB", ["RUB", "USD"]))
+        self.assertEqual([vh.reporting_currency_at(SWITCH, d) for d in ("2020-01-01", "2024-06-03", "2025-04-29", "2025-04-30")], ["RUB", "RUB", "RUB", "USD"])
+        # A filing tagging two currencies for one year (TSM's USD translation) keeps the main one.
+        self.assertEqual(vh.reporting_currency_at(IFRS_FACTS, "2025-06-02"), "TWD")
+        self.assertNotIn("reportingCurrencies", vh.historical_valuation(HV_INPUTS["ifrs"]))
+
+    def test_rub_date_converts_with_the_rub_series(self) -> None:
+        p = _point(self.r, "2024-06-03")
+        self.assertEqual(p["reportingCurrency"], "RUB")
+        self.assertEqual(p["fx"], {"pair": "RUBUSD=X", "date": "2024-05-31", "rate": 0.011})
+        self.assertEqual(p["denominators"]["LFY"]["revenue"]["value"], 5000)
+        self.assertEqual(p["enterpriseValue"]["value"], 2992)  # 3000 + (300 - 1000) * 0.011, rounded
+        self.assertEqual((p["shares"]["asOf"], p["shares"]["ageDays"]), ("2023-12-31", 155))
+        self.assertNotIn("SHARE_COUNT_AGED", [w["code"] for w in p["warnings"]])
+
+    def test_usd_date_reads_the_usd_results(self) -> None:
+        p = _point(self.r, "2025-12-31")
+        self.assertEqual((p["reportingCurrency"], p["fx"], p["secCompanyfactsCadence"]), ("USD", None, "ANNUAL"))
+        self.assertEqual((p["denominators"]["LFY"]["revenue"]["value"], p["denominators"]["LFY"]["revenue"]["periodEnd"]), (117, "2024-12-31"))
+        self.assertEqual(p["marketCap"]["value"], 90 * 236)
+        self.assertEqual(p["enterpriseValue"]["value"], 90 * 236 + 10 - 200)
+        self.assertEqual(p["multiples"]["LFY"]["priceToSales"]["status"], "OK")
+        codes = [w["code"] for w in p["warnings"]]
+        self.assertNotIn("RESULTS_STALE", codes)
+        self.assertEqual((p["shares"]["asOf"], p["shares"]["ageDays"]), ("2024-12-31", 365))
+        aged = next(w for w in p["warnings"] if w["code"] == "SHARE_COUNT_AGED")
+        self.assertEqual((aged["severity"], aged["message"]), ("info", "The latest share count filed by 2025-12-31 is as of 2024-12-31, 365 days earlier; SEC companyfacts "
+                                                               "holds this filer's counts once a year, so shares issued or repurchased since are not reflected."))
+
+    def test_a_missing_series_names_the_dates_pair(self) -> None:
+        p = _point(vh.historical_valuation(HV_INPUTS["currencySwitchNoFx"]), "2024-06-03")
+        self.assertEqual(p["fx"], {"pair": "RUBUSD=X", "status": "NOT_AVAILABLE"})
+        self.assertEqual(p["enterpriseValue"]["status"], "FX_NOT_AVAILABLE")
+
+    def test_a_quarterly_filer_gets_no_aged_count_warning(self) -> None:
+        p = _point(vh.historical_valuation(HV_INPUTS["syn"]), "2025-09-02")
+        self.assertIn("ageDays", p["shares"])
+        self.assertNotIn("SHARE_COUNT_AGED", [w["code"] for w in p["warnings"]])
 
 
 class TestMultipleNamesItsConcepts(unittest.TestCase):

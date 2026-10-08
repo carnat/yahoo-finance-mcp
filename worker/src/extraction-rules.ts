@@ -32,6 +32,19 @@ const YEAR_RE = /\b(?:19|20)\d{2}\b/g;
 const SUBJECT_BREAK_RE = /,\s+|;\s+|\band\s+/gi;
 const AGGREGATE_SUBJECT_RE = /\b(?:customers|clients|distributors)\b/i;
 const UNNAMED_SUBJECT_RE = /^(?:(?:our|the|its)\s+)?(?:one|a|single|a single|another|largest)\b.*\b(?:customer|client|distributor)$/i;
+// A lower-case subject naming no customer is a revenue category, not a customer (2.5.32, F-024: AEHR's "EV and power
+// semiconductor revenues accounted for 17%").
+const CUSTOMER_WORD_RE = /\b(?:customers?|clients?|distributors?|resellers?)\b/i;
+// "three customers accounted for approximately 26%, 14% and 11%": as many shares as customers counted, in a sentence
+// naming fewer years, are one share per customer, not a total (2.5.32, F-024: AEHR, ANET).
+const COUNT_WORDS: Record<string, number> = { two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+const COUNTED_SUBJECT_RE = /^(?:(?:these|the|our|its)\s+)?(two|three|four|five|six|seven|eight|nine|ten|\d{1,2})\s+(?:of\s+(?:our|its|the)\s+)?(?:\w+\s+)?(?:customers|clients|distributors)$/i;
+const RANKED_SUBJECT_RE = /\b(?:largest|top|biggest|major)\b/i;
+const PCT_RE = /(\d{1,3}(?:\.\d+)?)\s*%/g;
+// A significant-customer table row (2.5.32, F-024: MRVL's "Distributor A | 37% | 34% | 24%" under a title stating
+// the 10%-of-net-revenue rule); the first column is the latest period.
+const TABLE_CUSTOMER_LABEL_RE = /^(?:(?:direct|end)\s+)?(?:customer|distributor|client|reseller)\s+(?:[A-Z]|\d{1,2})$/i;
+const TABLE_PCT_CELL_RE = /^(\d{1,3}(?:\.\d+)?)\s*%$/;
 
 export type ConcentrationFinding = {
   kind: "customer" | "aggregate";
@@ -44,11 +57,28 @@ export type ConcentrationFinding = {
 };
 
 function concentrationSubject(segment: string): string {
+  // An "inclusive of ..." clause and trailing punctuation are no subject break (MRVL's "net revenue from our ten (10)
+  // largest customers, inclusive of our distributor and direct customers, represented 82%"), and "sales to" or
+  // "revenue from" is not part of the customer (ANET's "Sales to one end customer") (2.5.32, F-024).
+  const trimmed = segment.replace(/,\s*(?:inclusive\s+of|including|excluding)\b[^,]*,?\s*$/i, "").replace(/[\s,;:]+$/, "");
   let start = 0;
-  for (const m of segment.matchAll(SUBJECT_BREAK_RE)) start = (m.index ?? 0) + m[0].length;
-  return segment.slice(start).trim()
+  for (const m of trimmed.matchAll(SUBJECT_BREAK_RE)) start = (m.index ?? 0) + m[0].length;
+  return trimmed.slice(start).trim()
     .replace(/^(?:in|during|for)\s+(?:fiscal\s+)?(?:19|20)\d{2}\s*/i, "")
+    .replace(/^(?:net\s+)?(?:revenues?|sales)\s+(?:from|to)\s+/i, "")
     .replace(/[\s,;:]+$/, "");
+}
+
+function tableRowFinding(item: Record<string, unknown>, sectionHeading: string | null): ConcentrationFinding | null {
+  const label = typeof item.rowLabel === "string" ? collapseWs(item.rowLabel) : "";
+  const title = typeof item.tableTitle === "string" ? collapseWs(item.tableTitle) : "";
+  if (!TABLE_CUSTOMER_LABEL_RE.test(label) || !/\b(?:revenues?|sales)\b/i.test(title) || /receivable/i.test(title)) return null;
+  const cells = collapseWs(String(item.contextText ?? "")).split("|").map((c) => c.trim());
+  const m = cells[0] === label ? TABLE_PCT_CELL_RE.exec(cells[1] ?? "") : null;
+  if (!m) return null;
+  const pct = Number(m[1]);
+  if (!(pct > 0 && pct <= 100)) return null;
+  return { kind: "customer", name: null, description: label, valuePct: pct, year: null, sectionHeading, sentence: `${title} ${cells.join(" | ")}` };
 }
 
 /**
@@ -62,6 +92,11 @@ export function customerConcentration(matches: Record<string, unknown>[]): { fin
   for (const item of matches) {
     const ctx = collapseWs(String(item.contextText ?? item.context ?? ""));
     const sectionHeading = typeof item.sectionHeading === "string" ? item.sectionHeading : null;
+    if (item.inTable === true) {
+      const row = tableRowFinding(item, sectionHeading);
+      if (row) findings.push(row);
+      continue;
+    }
     for (const sentence of ctx.split(/(?<=[.;])\s+/)) {
       if (!/customer|client|distributor/i.test(sentence) && !/\b(?:accounted\s+for|represented)\b/i.test(sentence)) continue;
       if (CUSTOMER_NEGATION_RE.test(sentence)) {
@@ -84,8 +119,19 @@ export function customerConcentration(matches: Record<string, unknown>[]): { fin
         if (!(pct > 0 && pct <= 100)) continue;
         const subject = concentrationSubject(segment);
         if (!subject) continue;
+        const counted = COUNTED_SUBJECT_RE.exec(subject);
+        const shares = [...m[0].matchAll(PCT_RE)].map((p) => Number(p[1]));
+        const count = counted ? (COUNT_WORDS[counted[1].toLowerCase()] ?? Number(counted[1])) : 0;
+        if (counted && !RANKED_SUBJECT_RE.test(subject) && shares.length === count && new Set(sentence.match(YEAR_RE) ?? []).size < count) {
+          for (const share of shares) {
+            if (share > 0 && share <= 100) findings.push({ kind: "customer", name: null, description: `one of ${subject}`, valuePct: share, year, sectionHeading, sentence });
+          }
+          continue;
+        }
         if (AGGREGATE_SUBJECT_RE.test(subject)) {
           findings.push({ kind: "aggregate", name: null, description: subject, valuePct: pct, year, sectionHeading, sentence });
+        } else if (!/^[A-Z]/.test(subject) && !CUSTOMER_WORD_RE.test(subject)) {
+          continue;
         } else if (UNNAMED_SUBJECT_RE.test(subject) || !/^[A-Z]/.test(subject) || subject.length > 60) {
           findings.push({ kind: "customer", name: null, description: subject, valuePct: pct, year, sectionHeading, sentence });
         } else {
@@ -96,11 +142,18 @@ export function customerConcentration(matches: Record<string, unknown>[]): { fin
   }
   const years = findings.map((f) => f.year).filter((y): y is number => y != null);
   const latest = years.length > 0 ? Math.max(...years) : null;
+  // A significant-customer table states the same customers more precisely than the prose ("three customers accounted
+  // for approximately 26%, 14% and 11%" against AEHR's Customer A-C at 26.3%, 14.2% and 10.9%): the prose share
+  // within half a point of a table row is that row (2.5.32, F-024).
+  const tableShares = findings.filter((f) => f.kind === "customer" && f.name == null && TABLE_CUSTOMER_LABEL_RE.test(f.description)).map((f) => f.valuePct);
   const seen = new Set<string>();
   const kept: ConcentrationFinding[] = [];
   for (const f of findings) {
     if (latest != null && f.year != null && f.year !== latest) continue;
-    const key = f.kind === "aggregate" ? `a|${f.description.toLowerCase()}` : (f.name ? `n|${f.name.toLowerCase()}` : `u|${f.valuePct}`);
+    if (f.kind === "customer" && f.name == null && !TABLE_CUSTOMER_LABEL_RE.test(f.description) && tableShares.some((t) => Math.abs(t - f.valuePct) <= 0.5)) continue;
+    // "our five largest customers" and "the Company's five largest customers" are one aggregate.
+    const key = f.kind === "aggregate" ? `a|${f.description.toLowerCase().replace(/^(?:our|its|the company['’]s|the)\s+/, "")}`
+      : f.name ? `n|${f.name.toLowerCase()}` : TABLE_CUSTOMER_LABEL_RE.test(f.description) ? `l|${f.description.toLowerCase()}` : `u|${f.valuePct}`;
     if (seen.has(key)) continue;
     seen.add(key);
     kept.push(f);

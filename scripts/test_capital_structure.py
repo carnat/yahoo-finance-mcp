@@ -709,11 +709,55 @@ FDX_Q = f"""<html><body>
 <table>{"".join(f'<tr><td>{m}</td><td>{_num("us-gaap:LongTermDebt", f"n{i}", "usd", v, 6)}</td></tr>' for i, (m, v) in enumerate(FDX_NOTES))}</table>
 </body></html>"""
 
+# 2.5.32 (F-023), tagged the way ASTS's 10-Q 0001193125-26-342550 is: per-note principal under ConvertibleDebtNoncurrent
+# at the period end (the issue-date carrying amount is older), loans on CreditFacilityAxis, notes issued after the
+# period end as a subsequent event, and total debt net of unamortized issuance costs.
+AD = "asts:"
+CFA = "us-gaap:CreditFacilityAxis"
+ASTS_NOTES = {"n32": AD + "TwoThousandThirtyTwoFourPointTwoFiveConvertibleNotesMember", "n36a": AD + "TwoThousandThirtySixTwoPercentConvertibleNotesMember",
+              "n36b": AD + "TwoThousandThirtySixTwoPointTwoFivePercentConvertibleNotesMember", "n34": AD + "TwoThousandThirtyFourOnePointSixTwoFivePercentConvertibleNotesMember"}
+ASTS_DEBT_Q = f"""<html><body>
+<div style="display:none"><ix:header><ix:hidden>
+{_text("dei:DocumentType", "aq", "10-Q")}
+{_text("dei:DocumentPeriodEndDate", "aq", "June 30, 2026", "ixt:date-monthname-day-year-en")}
+</ix:hidden><ix:resources>{_context("aq", "2026-01-01..2026-06-30")}{_context("ai", "2026-06-30")}{_context("ap", "2025-12-31")}
+{"".join(_context(f"{k}e", "2026-06-30", {DEBT: m}) for k, m in ASTS_NOTES.items() if k != "n34")}
+{_context("n32iss", "2025-01-27", {DEBT: ASTS_NOTES["n32"], "us-gaap:SubsidiarySaleOfStockAxis": "us-gaap:PrivatePlacementMember"})}
+{_context("n32d", "2025-01-27..2025-01-27", {DEBT: ASTS_NOTES["n32"]})}
+{_context("n34s", "2026-07-20", {DEBT: ASTS_NOTES["n34"], "us-gaap:SubsequentEventTypeAxis": "us-gaap:SubsequentEventMember"})}
+{_context("n34d", "2026-07-20..2026-07-20", {DEBT: ASTS_NOTES["n34"], "us-gaap:SubsequentEventTypeAxis": "us-gaap:SubsequentEventMember"})}
+{_context("ubs", "2026-06-30", {CFA: AD + "UBSBridgeMember"})}{_context("ubsc", "2026-06-30", {CFA: AD + "UBSBridgeFinancingLoanMember"})}
+{_context("trin", "2026-06-30", {CFA: AD + "TrinityCapitalEquipmentLoanMember"})}
+{_context("pros", "2026-06-30", {CFA: AD + "ProsperityCapitalMember"})}{_context("prosp", "2025-12-31", {CFA: AD + "ProsperityCapitalMember"})}
+{UNITS}</ix:resources></ix:header></div>
+<p>Cash and cash equivalents {_num("us-gaap:CashAndCashEquivalentsAtCarryingValue", "ai", "usd", "2,288,253", 3)};
+current portion of long-term debt {_num("us-gaap:LongTermDebtCurrent", "ai", "usd", "8,494", 3)}; long-term debt {_num("us-gaap:LongTermDebtNoncurrent", "ai", "usd", "2,638,422", 3)}.</p>
+<table><tr><td>2032 4.25% Convertible Notes</td><td>{_num("us-gaap:ConvertibleDebtNoncurrent", "n32e", "usd", "3,514", 3)}</td></tr>
+<tr><td>2036 2.00% Convertible Notes</td><td>{_num("us-gaap:ConvertibleDebtNoncurrent", "n36ae", "usd", "1,150,000", 3)}</td></tr>
+<tr><td>2036 2.25% Convertible Notes</td><td>{_num("us-gaap:ConvertibleDebtNoncurrent", "n36be", "usd", "1,075,000", 3)}</td></tr>
+<tr><td>Prosperity Capital</td><td>{_num("us-gaap:LongTermLineOfCredit", "pros", "usd", "0", 3)}</td><td>{_num("us-gaap:LongTermLineOfCredit", "prosp", "usd", "12,552", 3)}</td></tr>
+<tr><td>Trinity Capital Equipment Loan</td><td>{_num("us-gaap:LongTermLineOfCredit", "trin", "usd", "48,638", 3)}</td></tr>
+<tr><td>UBS Bridge Financing Loan</td><td>{_num("us-gaap:DebtInstrumentCarryingAmount", "ubs", "usd", "420,000", 3)}</td></tr>
+<tr><td>Less: unamortized debt issuance costs</td><td>{_num("us-gaap:UnamortizedDebtIssuanceExpense", "ai", "usd", "50,236", 3)}</td></tr></table>
+<p>Coupons {_num("us-gaap:DebtInstrumentInterestRateStatedPercentage", "n32e", "pure", "4.25", -2, decimals="4")}%,
+{_num("us-gaap:DebtInstrumentInterestRateStatedPercentage", "n36ae", "pure", "2.00", -2, decimals="4")}% and
+{_num("us-gaap:DebtInstrumentInterestRateStatedPercentage", "n36be", "pure", "2.25", -2, decimals="4")}%.</p>
+<p>On January 27, 2025 the Company issued {_num("us-gaap:DebtInstrumentCarryingAmount", "n32iss", "usd", "460,000", 3)} of 2032 notes maturing
+{_text("us-gaap:DebtInstrumentMaturityDate", "n32d", "March 1, 2032", "ixt:date-monthname-day-year-en")}.</p>
+<p>The bridge loan is collateralized by restricted cash of {_num("us-gaap:RestrictedCashNoncurrent", "ubsc", "usd", "428,400", 3)}.</p>
+<p>Subsequent events: on July 20, 2026 the Company issued {_num("us-gaap:DebtInstrumentCarryingAmount", "n34s", "usd", "1,150,000", 3)} of 2034 notes maturing
+{_text("us-gaap:DebtInstrumentMaturityDate", "n34d", "February 1, 2034", "ixt:date-monthname-day-year-en")}.</p>
+</body></html>"""
+ASTS_MATURITY_TEXT = [
+    "The 2036 2.00% Convertible Notes will mature on January 15, 2036, unless earlier repurchased, redeemed, or converted.",
+    "The 2036 2.25% Convertible Notes will mature on April 15, 2036, unless earlier repurchased or converted.",
+]
+
 SPELLED_CASES = ["Senior Unsecured Debt Due Twenty Thirty Six", "Due In February Two Thousand Thirty Four", "Twenty Five Percent Notes",
                  "Notes Due Twenty Nine", "Two Thousand And Nine Notes", "Notes Due Twenty-Thirty-One", "Senior Notes Due 2036", "Debt Due twenty twenty"]
 
 FIXTURES = {"ten_k": TEN_K, "aaoi_debt_q": AAOI_DEBT_Q, "mu_debt_q": MU_DEBT_Q, "vrt_debt_q": VRT_DEBT_Q, "fdx_q": FDX_Q,
-            "lease_total_q": LEASE_TOTAL_Q, "lease_parts_q": LEASE_PARTS_Q, "lease_unsplit_q": LEASE_UNSPLIT_Q, "agg_q": AGG_Q, "agg_ambiguous_q": AGG_AMBIGUOUS_Q, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K, "cohr_k": COHR_K, "pref_q": PREF_Q, "mrvl_q": MRVL_Q, "life_k": LIFE_K, "aehr_k": AEHR_K, "lite_k": LITE_K, "prefliq_q": PREFLIQ_Q, "stale_q": STALE_Q, "nest_q": NEST_Q}
+            "lease_total_q": LEASE_TOTAL_Q, "lease_parts_q": LEASE_PARTS_Q, "lease_unsplit_q": LEASE_UNSPLIT_Q, "agg_q": AGG_Q, "agg_ambiguous_q": AGG_AMBIGUOUS_Q, "ten_q": TEN_Q, "awards_q": AWARDS_Q, "aaoi_q": AAOI_Q, "bare_q": BARE_Q, "asts_q": ASTS_Q, "debt_free_k": DEBT_FREE_K, "overlap_q": OVERLAP_Q, "aggregate_q": AGGREGATE_Q, "vrt_q": VRT_Q, "parts_q": PARTS_Q, "vrt_warrant_k": VRT_WARRANT_K, "be_q": BE_Q, "be_k": BE_K, "cohr_k": COHR_K, "pref_q": PREF_Q, "mrvl_q": MRVL_Q, "life_k": LIFE_K, "aehr_k": AEHR_K, "lite_k": LITE_K, "prefliq_q": PREFLIQ_Q, "stale_q": STALE_Q, "nest_q": NEST_Q, "asts_debt_q": ASTS_DEBT_Q}
 
 NEWS_ITEMS = [
     {"title": "Needham raises IQE price target to 45p from 38p", "summary": "Needham values IQE at 12x 2027 EV/EBITDA, citing gallium nitride demand.", "url": "https://news.example/1", "publishedAt": "2026-09-20T08:00:00Z", "source": "yahoo_finance_news"},
@@ -796,6 +840,8 @@ out.cappedTerms = [data.capped, data.beCapped, data.rklbCapped, data.liteCapped]
 out.capital = m.capitalStructure({ ticker: "CSTC", source: kSource, fundingMatches: atm });
 out.capitalAaoiDebt = m.capitalStructure({ ticker: "AAOD", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000041", data.qUrl, "aaoi_debt_q"), fundingMatches: [], maturityMatches: tm(data.aaoiMaturity) });
 out.capitalAaoiDebtNoText = m.capitalStructure({ ticker: "AAOD", source: src("primary", "10-Q", "2026-08-06", "0001234568-26-000041", data.qUrl, "aaoi_debt_q"), fundingMatches: [] });
+out.capitalAstsDebt = m.capitalStructure({ ticker: "ASTD", source: src("primary", "10-Q", "2026-08-10", "0001234568-26-000044", data.qUrl, "asts_debt_q"), fundingMatches: [], maturityMatches: tm(data.astsMaturity) });
+out.capitalAstsDebtNoText = m.capitalStructure({ ticker: "ASTD", source: src("primary", "10-Q", "2026-08-10", "0001234568-26-000044", data.qUrl, "asts_debt_q"), fundingMatches: [] });
 out.capitalMuDebt = m.capitalStructure({ ticker: "MUD", source: src("primary", "10-Q", "2026-06-25", "0001234568-26-000042", data.qUrl, "mu_debt_q"), fundingMatches: [] });
 out.capitalVrtDebt = m.capitalStructure({ ticker: "VRTD", source: src("primary", "10-Q", "2026-07-30", "0001234568-26-000043", data.qUrl, "vrt_debt_q"), fundingMatches: [] });
 for (const k of ["lease_total_q", "lease_parts_q", "lease_unsplit_q", "agg_q", "agg_ambiguous_q", "fdx_q"]) {
@@ -871,7 +917,7 @@ def _worker_pure() -> dict:
             "cohrClaims": COHR_CLAIM_TEXT, "mrvlClaims": MRVL_CLAIM_TEXT, "liteClaims": LITE_CLAIM_TEXT, "censusClaims": CENSUS_CLAIM_TEXT,
             "lifecycle": LIFECYCLE_TEXT, "settlement": SETTLEMENT_TEXT, "liteSettlement": LITE_SETTLEMENT_TEXT, "census2Claims": CENSUS2_CLAIM_TEXT,
             "preferredWordings": PREFERRED_WORDINGS, "capped": CAPPED_TEXT, "beCapped": BE_CAPPED_TEXT, "rklbCapped": RKLB_CAPPED_TEXT,
-            "liteCapped": LITE_CAPPED_TEXT, "nestClaims": NEST_CLAIM_TEXT, "aaoiMaturity": AAOI_MATURITY_TEXT, "spelledCases": SPELLED_CASES,
+            "liteCapped": LITE_CAPPED_TEXT, "nestClaims": NEST_CLAIM_TEXT, "aaoiMaturity": AAOI_MATURITY_TEXT, "astsMaturity": ASTS_MATURITY_TEXT, "spelledCases": SPELLED_CASES,
         }), encoding="utf-8")
         (tmp_path / "harness.mjs").write_text(_WORKER_PURE, encoding="utf-8")
         result = subprocess.run(
@@ -948,6 +994,9 @@ def _python_pure() -> dict:
         "capitalAaoiDebt": cs.capital_structure("AAOD", cs.IxSource("primary", "10-Q", "2026-08-06", "0001234568-26-000041", Q_URL, docs["aaoi_debt_q"]), [],
                                                 maturity_matches=tm(AAOI_MATURITY_TEXT)),
         "capitalAaoiDebtNoText": cs.capital_structure("AAOD", cs.IxSource("primary", "10-Q", "2026-08-06", "0001234568-26-000041", Q_URL, docs["aaoi_debt_q"]), []),
+        "capitalAstsDebt": cs.capital_structure("ASTD", cs.IxSource("primary", "10-Q", "2026-08-10", "0001234568-26-000044", Q_URL, docs["asts_debt_q"]), [],
+                                                maturity_matches=tm(ASTS_MATURITY_TEXT)),
+        "capitalAstsDebtNoText": cs.capital_structure("ASTD", cs.IxSource("primary", "10-Q", "2026-08-10", "0001234568-26-000044", Q_URL, docs["asts_debt_q"]), []),
         "capitalMuDebt": cs.capital_structure("MUD", cs.IxSource("primary", "10-Q", "2026-06-25", "0001234568-26-000042", Q_URL, docs["mu_debt_q"]), []),
         "capitalVrtDebt": cs.capital_structure("VRTD", cs.IxSource("primary", "10-Q", "2026-07-30", "0001234568-26-000043", Q_URL, docs["vrt_debt_q"]), []),
         "labelsDated": [cs.member_label(x) for x in ["aaoi:DebtMaturingDecember282028Member", "aaoi:DebtMaturingJul7132026Member", "aaoi:DebtMaturingJune112027Member", "x:NotesDue2029Member", "x:Series2028Member"]],
@@ -984,7 +1033,7 @@ class TestCapitalStructureParity(unittest.TestCase):
             self.assertEqual(self.worker["documents"][name], self.local["documents"][name], name)
 
     def test_outputs_match(self) -> None:
-        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "bridgeStale", "bridgeStaleUnread", "bridgeSettled", "bridgeLiteSettled", "bridgeCensus2", "preferredWordings", "bridgeCapped", "bridgeCappedHigh", "bridgeLiteCapped", "cappedTerms", "bridgeNest", "bridgeNestUnread", "capital", "capitalAaoi", "capitalAaoiDebt", "capitalAaoiDebtNoText", "capitalMuDebt", "capitalVrtDebt", "capital_lease_total_q", "capital_lease_parts_q", "capital_lease_unsplit_q", "capital_agg_q", "capital_agg_ambiguous_q", "capital_fdx_q", "spelledYears", "wantsText", "labelsDated", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
+        for key in ("bridge", "bridgeLow", "bridgeAwards", "bridgeAaoi", "bridgeTable", "bridgeBe", "bridgeVrtWarrants", "bridgeCohr", "bridgeCohrUnread", "bridgeCohrClean", "bridgePrefOpen", "bridgeMrvl", "bridgeMrvlHigh", "bridgeLife", "bridgeAehr", "bridgeLite", "bridgeCensus", "bridgePrefLiq", "bridgeStale", "bridgeStaleUnread", "bridgeSettled", "bridgeLiteSettled", "bridgeCensus2", "preferredWordings", "bridgeCapped", "bridgeCappedHigh", "bridgeLiteCapped", "cappedTerms", "bridgeNest", "bridgeNestUnread", "capital", "capitalAaoi", "capitalAaoiDebt", "capitalAaoiDebtNoText", "capitalAstsDebt", "capitalAstsDebtNoText", "capitalMuDebt", "capitalVrtDebt", "capital_lease_total_q", "capital_lease_parts_q", "capital_lease_unsplit_q", "capital_agg_q", "capital_agg_ambiguous_q", "capital_fdx_q", "spelledYears", "wantsText", "labelsDated", "capitalAsts", "capitalDebtFree", "capitalOverlap", "capitalAggregate", "capitalVrt", "capitalParts", "labels", "analyst", "analystAsts", "ch", "chPick"):
             self.assertEqual(self.worker[key], self.local[key], key)
 
 
@@ -1815,6 +1864,60 @@ def _python_e2e() -> dict:
             out["uk_unconfigured"] = {"data": raw["data"] if isinstance(raw, dict) and "ok" in raw else raw}
     out["chRequests"] = ch_requests
     return out
+
+
+class TestAstsDebtRows(unittest.TestCase):
+    """2.5.32 (F-023): ASTS's 10-Q rows match its debt table."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        out = _python_pure()
+        cls.c, cls.bare = out["capitalAstsDebt"], out["capitalAstsDebtNoText"]
+
+    def rows(self, c: dict) -> dict:
+        return {r["instrument"]: r for r in c["instruments"]}
+
+    def test_every_table_row_is_a_row_at_its_period_end_amount(self) -> None:
+        rows = self.rows(self.c)
+        got = {k: (r["carryingAmount"], r["carryingAmountConcept"], r["axis"], r["status"]) for k, r in rows.items() if r["status"] != "issued_after_period_end"}
+        self.assertEqual(got, {
+            "Two Thousand Thirty Two Four Point Two Five Convertible Notes": (3_514_000, "us-gaap:ConvertibleDebtNoncurrent", "DebtInstrumentAxis", "outstanding_at_period_end"),
+            "Two Thousand Thirty Six Two Percent Convertible Notes": (1_150_000_000, "us-gaap:ConvertibleDebtNoncurrent", "DebtInstrumentAxis", "outstanding_at_period_end"),
+            "Two Thousand Thirty Six Two Point Two Five Percent Convertible Notes": (1_075_000_000, "us-gaap:ConvertibleDebtNoncurrent", "DebtInstrumentAxis", "outstanding_at_period_end"),
+            "Trinity Capital Equipment Loan": (48_638_000, "us-gaap:LongTermLineOfCredit", "CreditFacilityAxis", "outstanding_at_period_end"),
+            "UBS Bridge": (420_000_000, "us-gaap:DebtInstrumentCarryingAmount", "CreditFacilityAxis", "outstanding_at_period_end"),
+        })
+        # The 2032 notes' issue-date amount is no longer reported in place of the period-end one.
+        self.assertIsNone(rows["Two Thousand Thirty Two Four Point Two Five Convertible Notes"]["taggedAmount"])
+        # A repaid facility and the bridge loan's restricted-cash collateral are not debt rows.
+        self.assertNotIn("Prosperity Capital", rows)
+        self.assertNotIn("UBS Bridge Financing Loan", rows)
+
+    def test_notes_issued_after_the_period_end_are_listed_not_counted(self) -> None:
+        row = self.rows(self.c)["Two Thousand Thirty Four One Point Six Two Five Percent Convertible Notes"]
+        self.assertEqual((row["status"], row["taggedAmount"], row["taggedAmountDate"]), ("issued_after_period_end", 1_150_000_000, "2026-07-20"))
+        self.assertNotIn("2034", [b["year"] for b in self.c["instrumentMaturitiesByYear"]])
+        self.assertIn("ISSUED_AFTER_PERIOD_END", [w["code"] for w in self.c["warnings"]])
+
+    def test_buckets_and_reconciliation(self) -> None:
+        self.assertEqual([(b["year"], b["amount"]) for b in self.c["instrumentMaturitiesByYear"]], [("2032", 3_514_000), ("2036", 2_225_000_000)])
+        rec = self.c["instrumentReconciliation"]
+        self.assertEqual((rec["status"], rec["instrumentsCarryingTotal"], rec["totalDebt"], rec["unamortizedCosts"]),
+                         ("RECONCILED_NET_OF_UNAMORTIZED_COSTS", 2_697_152_000, 2_646_916_000, {"concept": "us-gaap:UnamortizedDebtIssuanceExpense", "amount": 50_236_000}))
+        self.assertTrue(all(r.get("carryingAmountBasis") == "BEFORE_UNAMORTIZED_COSTS" for r in self.c["instruments"] if r["status"] == "outstanding_at_period_end"))
+        codes = [w["code"] for w in self.c["warnings"]]
+        self.assertIn("INSTRUMENT_AMOUNTS_BEFORE_UNAMORTIZED_COSTS", codes)
+        self.assertNotIn("INSTRUMENTS_DO_NOT_RECONCILE", codes)
+        self.assertEqual([u["instrument"] for u in self.c["ladderCoverage"]["notLaddered"]], ["Trinity Capital Equipment Loan", "UBS Bridge"])
+
+    def test_two_notes_maturing_in_one_year_are_told_apart_by_coupon(self) -> None:
+        rows = self.rows(self.c)
+        self.assertEqual((rows["Two Thousand Thirty Six Two Percent Convertible Notes"]["maturityDate"], rows["Two Thousand Thirty Six Two Percent Convertible Notes"]["maturityDateSource"]),
+                         ("2036-01-15", "FILING_TEXT"))
+        self.assertEqual(rows["Two Thousand Thirty Six Two Point Two Five Percent Convertible Notes"]["maturityDate"], "2036-04-15")
+        # Without the text neither is dated, and both are named as unplaced.
+        self.assertEqual([b["year"] for b in self.bare["instrumentMaturitiesByYear"]], ["2032"])
+        self.assertEqual(len(self.bare["ladderCoverage"]["notLaddered"]), 4)
 
 
 class TestCapitalStructureEndToEnd(unittest.TestCase):
