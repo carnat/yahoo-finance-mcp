@@ -1437,30 +1437,12 @@ async def _collect_yahoo_events(
 
     try:
         company = yf.Ticker(ticker)
+        # Yahoo retired the endpoint behind get_news(tab=...) (/xhr/ncp: HTTP 404 for every ticker, and yfinance
+        # returns an empty list), so both feeds read the news search feed the Worker reads; press releases are the
+        # issuer's own wire releases in it (2.5.33).
         if feed == "press_releases":
-            try:
-                # ``get_news(tab=...)`` was introduced in yfinance ≥ 0.2.x.
-                raw_news = company.get_news(tab="press releases") or []
-            except Exception:
-                # Do NOT fall back to the general feed — mislabeling generic
-                # news items as press releases would corrupt source fidelity.
-                # The yahoo_finance_news path fetches the general feed separately.
-                warnings.append({
-                    "code": "PRESS_RELEASE_TAB_UNAVAILABLE",
-                    "message": (
-                        "Yahoo Finance press-releases tab unavailable "
-                        "(requires yfinance ≥ 0.2.x with get_news(tab=...) support)."
-                    ),
-                    "severity": "warning",
-                })
-                return items, warnings, False
-        else:
-            try:
-                # ``get_news(tab=...)`` was introduced in yfinance ≥ 0.2.x.
-                # Falls back to company.news on older versions.
-                raw_news = company.get_news(tab="news") or []
-            except Exception:
-                raw_news = company.news or []
+            diagnostics["method"] = _YAHOO_PRESS_RELEASE_METHOD
+        raw_news = _yahoo_search_news(ticker)
     except Exception as exc:
         warnings.append({"code": "SOURCE_UNAVAILABLE", "message": f"Yahoo Finance source unavailable: {exc}", "severity": "warning"})
         return _result(items, False)
@@ -1503,6 +1485,11 @@ async def _collect_yahoo_events(
         # by another company ("Qualcomm renews license with Apple").
         item["mentionedCompany"] = identity.get("companyName")
         item["issuer"] = _yahoo_item_issuer(item, identity)
+        # A press release is the company's own: a wire release whose headline leads with its name or ticker
+        # (AEHR's ACCESS Newswire Sonoma order), not another issuer's release that mentions it (QuickLogic's).
+        if feed == "press_releases" and not (_PRESS_RELEASE_WIRE_RE.match(str(item.get("originalSource") or "")) and item["issuer"]):
+            _reject("NOT_ISSUER_WIRE_RELEASE")
+            continue
         item["matchBasis"] = match_basis
         item["sourceTickerMatch"] = True
         item["tickerRelevance"] = "HIGH"
@@ -1517,6 +1504,16 @@ async def _collect_yahoo_events(
     diagnostics["acceptedCount"] = len(accepted)
     items = [item for item, _rank in accepted[:max_results]]
     return _result(items, True)
+
+
+def _yahoo_search_news(ticker: str) -> list[dict]:
+    """Yahoo's news search feed for a ticker (the Worker's getNews reads the same endpoint)."""
+    return list(yf.Search(ticker, max_results=0, news_count=20, enable_fuzzy_query=False, raise_errors=True).news or [])
+
+
+# Wire services that distribute issuers' own press releases (not news services such as MT Newswires).
+_PRESS_RELEASE_WIRE_RE = _re.compile(r"(?:access\s?newswire|accesswire|globe\s?newswire|business\s?wire|pr\s?newswire|newsfile|prweb|eqs(?:\s+newswire)?|cision)\b", _re.I | _re.A)
+_YAHOO_PRESS_RELEASE_METHOD = "ISSUER_WIRE_RELEASES_IN_NEWS_FEED"
 
 
 async def _collect_globenewswire_events(
@@ -2235,6 +2232,7 @@ def _compute_source_status(
             "rejectionCounts": dict(diagnostic.get("rejectionCounts") or {}),
             "identityStatus": diagnostic.get("identityStatus"),
             "attempted": diagnostic.get("attempted") is not False,
+            **({"method": diagnostic["method"]} if diagnostic.get("method") else {}),
         }
 
     if "sec" in sources:

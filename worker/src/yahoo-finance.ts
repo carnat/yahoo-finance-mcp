@@ -10808,6 +10808,7 @@ function computeSourceStatus(
       rejectionCounts: diagnostic.rejectionCounts ?? {},
       identityStatus: diagnostic.identityStatus ?? null,
       attempted: diagnostic.attempted !== false,
+      ...(diagnostic.method ? { method: diagnostic.method } : {}),
     };
   };
   const identityDiagnostic = (sourceDiagnostics.yahoo_finance_identity && typeof sourceDiagnostics.yahoo_finance_identity === "object")
@@ -11132,7 +11133,7 @@ function isTickerCompatibleWithContext(text: string, ticker: string, companyExch
   return false;
 }
 
-async function collectYahooEvents(
+export async function collectYahooEvents(
   ticker: string,
   maxResults: number,
   retrievedAt: string,
@@ -11160,39 +11161,11 @@ async function collectYahooEvents(
   };
   const feedSource = feed === "press_releases" ? "yahoo_finance_press_releases" : "yahoo_finance_news";
   try {
-    let newsRaw: Record<string, unknown>[];
-    if (feed === "press_releases") {
-      // Mirror yfinance Ticker.get_news(tab="press releases"):
-      // POST https://finance.yahoo.com/xhr/ncp?queryRef=pressRelease&serviceKey=ncp_fin
-      // Body: { serviceConfig: { snippetCount: count, s: [ticker] } }
-      // Response: data.data.tickerStream.stream (filter out ad items)
-      const { cookie } = await getCrumb();
-      const count = Math.min(Math.max(1, maxResults), 100);
-      const prUrl = "https://finance.yahoo.com/xhr/ncp?queryRef=pressRelease&serviceKey=ncp_fin";
-      const resp = await providerFetch(prUrl, {
-        method: "POST",
-        headers: {
-          "User-Agent": UA,
-          "Content-Type": "application/json",
-          Cookie: cookie,
-        },
-        body: JSON.stringify({ serviceConfig: { snippetCount: count, s: [ticker.toUpperCase()] } }),
-      });
-      if (!resp.ok) {
-        await resp.body?.cancel();
-        throw new Error(`HTTP ${resp.status}`);
-      }
-      const prJson = await resp.json() as Record<string, unknown>;
-      const stream = (
-        (prJson.data as Record<string, unknown> | undefined)?.tickerStream as Record<string, unknown> | undefined
-      )?.stream;
-      const raw = Array.isArray(stream) ? (stream as Record<string, unknown>[]) : [];
-      // Filter out ad items, exactly as yfinance does.
-      newsRaw = raw.filter(item => !item.ad || (Array.isArray(item.ad) && item.ad.length === 0));
-    } else {
-      const raw = JSON.parse(await getNews(ticker)) as Record<string, unknown>;
-      newsRaw = (raw.items as Record<string, unknown>[]) ?? [];
-    }
+    // Yahoo retired its press-releases tab endpoint (/xhr/ncp?queryRef=pressRelease: HTTP 404 for every ticker,
+    // 2.5.33), so both feeds read the news search feed; press releases are the issuer's own wire releases in it.
+    if (feed === "press_releases") diagnostics.method = YAHOO_PRESS_RELEASE_METHOD;
+    const raw = JSON.parse(await getNews(ticker)) as Record<string, unknown>;
+    const newsRaw = (raw.items as Record<string, unknown>[]) ?? [];
     diagnostics.rawCount = newsRaw.length;
     diagnostics.retrievedCount = newsRaw.length;
     for (const n of newsRaw) {
@@ -11218,6 +11191,12 @@ async function collectYahooEvents(
       // by another company ("Qualcomm renews license with Apple").
       item.mentionedCompany = identity.companyName;
       item.issuer = yahooItemIssuer(item, identity);
+      // A press release is the company's own: a wire release whose headline leads with its name or ticker
+      // (AEHR's ACCESS Newswire Sonoma order), not another issuer's release that mentions it (QuickLogic's).
+      if (feed === "press_releases" && !(PRESS_RELEASE_WIRE_RE.test(_str(item.originalSource)) && item.issuer)) {
+        reject("NOT_ISSUER_WIRE_RELEASE");
+        continue;
+      }
       item.matchBasis = match.basis;
       item.sourceTickerMatch = true;
       item.tickerRelevance = "HIGH";
@@ -11235,6 +11214,10 @@ async function collectYahooEvents(
   diagnostics.acceptedCount = accepted.length;
   return { items: accepted.slice(0, maxResults).map(entry => entry.item), warnings, used: true, diagnostics };
 }
+
+// Wire services that distribute issuers' own press releases (not news services such as MT Newswires).
+const PRESS_RELEASE_WIRE_RE = /^(?:access\s?newswire|accesswire|globe\s?newswire|business\s?wire|pr\s?newswire|newsfile|prweb|eqs(?:\s+newswire)?|cision)\b/i;
+const YAHOO_PRESS_RELEASE_METHOD = "ISSUER_WIRE_RELEASES_IN_NEWS_FEED";
 
 async function fetchGlobeNewswireFeed(feed: { name: string; url: string }): Promise<string> {
   const cacheKey = `gnw_rss:${feed.name}`;
