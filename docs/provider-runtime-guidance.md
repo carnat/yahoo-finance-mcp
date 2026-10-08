@@ -2547,6 +2547,39 @@ F-024, F-026, F-029). Both runtimes change alike.
   - Not changed: the 2024-12-31 count of 361.5M was the latest filed at that date, which is correct point in
     time. A share move announced only in a 6-K never reaches companyfacts.
 
+## Yahoo Press Releases After The Tab Endpoint Was Retired (2.5.33)
+
+- **Reported:** `get_company_press_releases` (AEHR) gave Yahoo `HTTP 404` / `PROVIDER_ERROR` and
+  `NO_OFFICIAL_RELEASE_SOURCE`, while `get_company_news` (AEHR) returned AEHR's own ACCESS Newswire release of a
+  Sonoma production order. It reproduced on 2.5.31.
+- **Cause:** Yahoo retired the press-releases tab endpoint (`POST /xhr/ncp?queryRef=pressRelease`). It answers HTTP
+  404 for every ticker, AAPL included, so `yahoo_finance_press_releases` was failing for every ticker in the Worker.
+  In Python, yfinance's `get_news(tab=...)` reads the same endpoint and returns an empty list. Python's Yahoo news
+  feed was therefore empty too, while the Worker read Yahoo's news search feed, which still works.
+- **Now (both runtimes; `collectYahooEvents` / `_collect_yahoo_events`):**
+  - Both Yahoo feeds read the news search feed (`/v1/finance/search`; in Python, `yfinance.Search` through
+    `_yahoo_search_news`). Python's Yahoo news now matches the Worker's.
+  - `yahoo_finance_press_releases` keeps the company's own wire releases in that feed. Both conditions must hold:
+    - the publisher is a press-release wire: ACCESS Newswire / Accesswire, GlobeNewswire, Business Wire,
+      PR Newswire, Newsfile, PRWeb, EQS or Cision;
+    - the headline leads with the company's name or ticker, which is the existing issuer rule.
+  - Any other item is rejected as `NOT_ISSUER_WIRE_RELEASE`, counted in `rejectionCounts`:
+    - another issuer's release naming the company (QuickLogic's PR Newswire release mentioning Aehr; REX Shares'
+      ETF launch naming ASTS);
+    - a news-service story (MT Newswires);
+    - a publisher's article (Zacks).
+  - `sourceStatus.yahoo_finance_press_releases.method` is `ISSUER_WIRE_RELEASES_IN_NEWS_FEED`.
+  - The endpoint is no longer called.
+- **Result for AEHR:**
+  - `yahoo_finance_press_releases` is `OK`, with the Sonoma order release and AEHR's other ACCESS Newswire
+    releases.
+  - These items stay `MEDIUM` confidence wire releases, not decision-grade. A resolved SEC 8-K EX-99.1 still sets
+    the tool's status (`SEC_EX99_FOUND`).
+- **Not changed:**
+  - The runtimes still format Yahoo timestamps differently (Python `...Z`, the Worker `...000Z`).
+  - A release that Yahoo's search feed does not carry, such as one older than its 20 most recent items, is not
+    found this way.
+
 ## Non-US Primary Filings
 
 - `get_uk_company_filings` reads Companies House, the UK statutory registry:

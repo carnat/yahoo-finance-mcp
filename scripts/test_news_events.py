@@ -1254,163 +1254,70 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
     # Fix 1: press-release fallback must NOT mislabel generic news
     # ------------------------------------------------------------------
 
-    def test_press_release_tab_unavailable_returns_empty_not_general_feed(self):
-        """If get_news(tab='press releases') fails, return empty + warning (no fallback to general feed)."""
+    def _press_release_run(self, ticker, raw_items, info=None):
+        """Run the press-release feed over a mocked Yahoo news search feed (2.5.33)."""
         import server as srv_mod
-
-        class _BadTicker:
-            """Simulates a yfinance Ticker where get_news(tab='press releases') raises."""
-            def get_news(self, tab="news"):
-                if tab == "press releases":
-                    raise AttributeError("tab parameter not supported in this yfinance version")
-                return []
-
         import datetime
+
         retrieved = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        with patch("server.yf") as mock_yf:
-            mock_yf.Ticker.return_value = _BadTicker()
-            items, warnings, used = _run(
-                srv_mod._collect_yahoo_events(
-                    "AAPL",
-                    retrieved_at=retrieved,
-                    max_results=10,
-                    feed="press_releases",
-                )
-            )
+        class _TickerMock:
+            @property
+            def info(self):
+                if info is None:
+                    raise RuntimeError("profile unavailable")
+                return info
 
-        # Must return empty items — no mislabeled generic news
+        search = patch("server._yahoo_search_news", side_effect=raw_items) if isinstance(raw_items, Exception) \
+            else patch("server._yahoo_search_news", return_value=raw_items)
+        with patch("server.yf") as mock_yf, search:
+            mock_yf.Ticker.return_value = _TickerMock()
+            return _run(srv_mod._collect_yahoo_events(ticker, retrieved_at=retrieved, max_results=10, feed="press_releases", include_diagnostics=True))
+
+    @staticmethod
+    def _search_item(title, publisher, published=1791372600):
+        return {"title": title, "publisher": publisher, "link": "https://finance.yahoo.com/x.html", "providerPublishTime": published, "type": "STORY"}
+
+    def test_press_release_feed_unavailable_returns_empty_with_warning(self):
+        """When Yahoo's news search fails, the press-release feed is empty and says so."""
+        items, warnings, used, _diagnostics = self._press_release_run("AAPL", RuntimeError("HTTP 503"))
         self.assertEqual(items, [])
         self.assertFalse(used)
-        # Must emit a warning explaining why
-        codes = [w.get("code") for w in warnings]
-        self.assertIn("PRESS_RELEASE_TAB_UNAVAILABLE", codes)
+        self.assertIn("SOURCE_UNAVAILABLE", [w.get("code") for w in warnings])
 
-    def test_press_release_tab_success_labels_items_correctly(self):
-        """Successful get_news(tab='press releases') labels all items as yahoo_finance_press_releases."""
-        import server as srv_mod
-        import datetime
-
-        retrieved = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        pr_item = {
-            "content": {
-                "title": "AAPL declares dividend",
-                "summary": "Board approves quarterly dividend",
-                "contentType": "PRESS_RELEASE",
-                # Use a string ISO pubDate (not an int providerPublishTime) so the
-                # active _to_iso_utc implementation can parse it correctly.
-                "pubDate": retrieved,
-                "provider": {"displayName": "BusinessWire"},
-                "canonicalUrl": {"url": "https://businesswire.com/aapl-div"},
-            },
-            # Omit providerPublishTime (integer) — would be mis-parsed by the string-only
-            # _to_iso_utc and produce publishedAt=None, causing the item to be date-filtered.
-        }
-
-        class _GoodTicker:
-            def get_news(self, tab="news"):
-                return [pr_item]
-
-        with patch("server.yf") as mock_yf:
-            mock_yf.Ticker.return_value = _GoodTicker()
-            items, warnings, used = _run(
-                srv_mod._collect_yahoo_events(
-                    "AAPL",
-                    retrieved_at=retrieved,
-                    max_results=10,
-                    feed="press_releases",
-                )
-            )
-
+    def test_issuer_wire_release_is_a_press_release(self):
+        """AEHR's own ACCESS Newswire release is kept and labelled yahoo_finance_press_releases (2.5.33)."""
+        import time
+        now = int(time.time())
+        raw = [
+            self._search_item("Aehr Receives Follow-On Sonoma(TM) Production Orders for Lead Hyperscale Customer's Next-Generation AI Processor", "ACCESS Newswire", now),
+            self._search_item("QuickLogic Announces Participation in 18th Annual CEO Investor Summit with Aehr Test Systems", "PR Newswire", now),
+            self._search_item("Aehr Test Systems Receives $6 Million Order for AI Chip Testing Equipment", "MT Newswires", now),
+        ]
+        items, _warnings, used, diagnostics = self._press_release_run("AEHR", raw, {"shortName": "Aehr Test Systems, Inc.", "exchange": "NCM"})
         self.assertTrue(used)
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["source"], "yahoo_finance_press_releases")
+        self.assertEqual([(i["source"], i["originalSource"], i["issuer"]) for i in items],
+                         [("yahoo_finance_press_releases", "ACCESS Newswire", "Aehr Test Systems, Inc.")])
+        self.assertEqual(diagnostics["method"], "ISSUER_WIRE_RELEASES_IN_NEWS_FEED")
+        # Another issuer's wire release and a news-service story are not the company's press releases.
+        self.assertEqual(diagnostics["rejectionCounts"].get("NOT_ISSUER_WIRE_RELEASE"), 2)
 
-    def test_press_release_tab_story_items_are_accepted(self):
-        """Yahoo press-release tab items can arrive as STORY and must still be kept."""
-        import server as srv_mod
-        import datetime
-
-        retrieved = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        pr_item = {
-            "content": {
-                "title": "REX Shares Launches T-REX 2X ASTS (ASUP) & 2X LITE (LITU) ETFs",
-                "summary": "REX Shares announces leveraged ETFs tied to ASTS and LITE.",
-                "contentType": "STORY",
-                "pubDate": retrieved,
-                "provider": {"displayName": "Business Wire"},
-                "canonicalUrl": {"url": "https://finance.yahoo.com/markets/options/articles/rex-shares-launches-t-rex-120000327.html"},
-            },
-        }
-
-        class _GoodTicker:
-            def get_news(self, tab="news"):
-                self.tab = tab
-                return [pr_item]
-
-        ticker = _GoodTicker()
-        with patch("server.yf") as mock_yf:
-            mock_yf.Ticker.return_value = ticker
-            items, warnings, used = _run(
-                srv_mod._collect_yahoo_events(
-                    "ASTS",
-                    retrieved_at=retrieved,
-                    max_results=10,
-                    feed="press_releases",
-                )
-            )
-
+    def test_another_issuers_release_is_not_a_press_release(self):
+        """REX Shares' Business Wire release naming ASTS is not an ASTS press release (2.5.33)."""
+        import time
+        raw = [self._search_item("REX Shares Launches T-REX 2X ASTS (ASUP) & 2X LITE (LITU) ETFs", "Business Wire", int(time.time()))]
+        items, _warnings, used, diagnostics = self._press_release_run("ASTS", raw)
         self.assertTrue(used)
-        self.assertEqual(ticker.tab, "press releases")
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["source"], "yahoo_finance_press_releases")
-        self.assertEqual(items[0]["sourceType"], "yahoo_finance_press_releases")
-        self.assertEqual(items[0]["originalSource"], "Business Wire")
-        self.assertEqual(warnings, [])
+        self.assertEqual(items, [])
+        self.assertEqual(diagnostics["rejectionCounts"].get("NOT_ISSUER_WIRE_RELEASE"), 1)
 
-    def test_press_release_tab_no_fallback_means_no_mislabeled_items(self):
-        """Items without contentType must not be labeled yahoo_finance_press_releases via fallback."""
-        import server as srv_mod
-
-        generic_news_item = {
-            "title": "AAPL generic news without contentType",
-            "publisher": "Some Publisher",
-            "link": "https://example.com/news",
-            "providerPublishTime": 1747310400,
-            # No content/contentType — typical of older yfinance company.news format
-        }
-
-        class _FallbackTicker:
-            """Simulates get_news(tab=...) failing; has company.news with generic items."""
-            @property
-            def news(self):
-                return [generic_news_item]
-
-            def get_news(self, tab="news"):
-                if tab == "press releases":
-                    raise AttributeError("tab not supported")
-                return []
-
-        import datetime
-        retrieved = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        with patch("server.yf") as mock_yf:
-            mock_yf.Ticker.return_value = _FallbackTicker()
-            items, warnings, used = _run(
-                srv_mod._collect_yahoo_events(
-                    "AAPL",
-                    retrieved_at=retrieved,
-                    max_results=10,
-                    feed="press_releases",
-                )
-            )
-
-        # Must not contain the generic item labeled as press release
-        pr_labeled = [it for it in items if it.get("source") == "yahoo_finance_press_releases"]
-        self.assertEqual(pr_labeled, [], "Generic news items must not be mislabeled as press releases")
-        self.assertFalse(used)
+    def test_generic_news_is_never_labelled_a_press_release(self):
+        """A story from a news publisher is not a press release, even when it leads with the ticker."""
+        import time
+        raw = [self._search_item("AAPL generic news without a wire publisher", "Some Publisher", int(time.time()))]
+        items, _warnings, used, _diagnostics = self._press_release_run("AAPL", raw)
+        self.assertTrue(used)
+        self.assertEqual([it for it in items if it.get("source") == "yahoo_finance_press_releases"], [])
 
     def test_mrvl_cross_ticker_exchange_filtering(self):
         """Yahoo event relevance filtering rejects MRVL ticker matches if prefixed by TSXV."""
@@ -1458,7 +1365,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
                     "exchangeName": "NasdaqGS"
                 }
 
-        with patch("server.yf") as mock_yf:
+        with patch("server.yf") as mock_yf, patch("server._yahoo_search_news", return_value=[bad_item, good_item]):
             mock_yf.Ticker.return_value = _TickerMock([bad_item, good_item])
             items, warnings, used = _run(
                 srv_mod._collect_yahoo_events(
@@ -1518,7 +1425,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
             def info(self):
                 return {"shortName": "Marvell Technology, Inc.", "exchange": "NMS"}
 
-        with patch("server.yf") as mock_yf:
+        with patch("server.yf") as mock_yf, patch("server._yahoo_search_news", return_value=raw_items):
             mock_yf.Ticker.return_value = _TickerMock()
             items, _warnings, used, diagnostics = _run(
                 srv_mod._collect_yahoo_events(
@@ -1557,7 +1464,7 @@ class TestPhase6BYahooFinanceSources(unittest.TestCase):
             def info(self):
                 raise RuntimeError("profile unavailable")
 
-        with patch("server.yf") as mock_yf:
+        with patch("server.yf") as mock_yf, patch("server._yahoo_search_news", return_value=raw_items):
             mock_yf.Ticker.return_value = _TickerMock()
             items, _warnings, used, diagnostics = _run(
                 srv_mod._collect_yahoo_events(
@@ -2445,13 +2352,15 @@ class TestGlobeNewswireRSS(unittest.TestCase):
         self.assertNotIn('["yahoo_finance", "finnhub"]', tools_text)
         self.assertNotIn('["sec", "company_ir", "newswire", "yahoo_finance"]', tools_text)
 
-    def test_worker_press_release_tab_accepts_story_items(self):
-        """Worker must not require PRESS_RELEASE contentType for pressRelease queryRef items."""
+    def test_worker_press_release_feed_reads_the_news_search_feed(self):
+        """Yahoo retired the press-releases tab endpoint (2.5.33): the Worker no longer posts to it and keeps
+        the issuer's own wire releases from the news search feed (behaviour: scripts/test_yahoo_press_releases.py)."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(root, "worker", "src", "yahoo-finance.ts"), encoding="utf-8") as f:
             worker_text = f.read()
 
-        self.assertIn("queryRef=pressRelease", worker_text)
+        self.assertNotIn('"https://finance.yahoo.com/xhr/ncp?queryRef=pressRelease&serviceKey=ncp_fin"', worker_text)
+        self.assertIn("PRESS_RELEASE_WIRE_RE", worker_text)
         self.assertIn("YAHOO_ALLOWED_CONTENT_TYPES", worker_text)
         self.assertNotIn('ct !== "PRESS_RELEASE"', worker_text)
         self.assertNotIn("ct !== 'PRESS_RELEASE'", worker_text)
