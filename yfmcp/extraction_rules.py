@@ -44,17 +44,55 @@ _SUBJECT_BREAK_RE = re.compile(r",\s+|;\s+|\band\s+", _F)
 _AGGREGATE_SUBJECT_RE = re.compile(r"\b(?:customers|clients|distributors)\b", _F)
 _UNNAMED_SUBJECT_RE = re.compile(r"^(?:(?:our|the|its)\s+)?(?:one|a|single|a single|another|largest)\b.*\b(?:customer|client|distributor)$", _F)
 _LEADING_YEAR_RE = re.compile(r"^(?:in|during|for)\s+(?:fiscal\s+)?(?:19|20)\d{2}\s*", _F)
+# A lower-case subject naming no customer is a revenue category, not a customer (2.5.32, F-024: AEHR's "EV and power
+# semiconductor revenues accounted for 17%").
+_CUSTOMER_WORD_RE = re.compile(r"\b(?:customers?|clients?|distributors?|resellers?)\b", _F)
+# "three customers accounted for approximately 26%, 14% and 11%": as many shares as customers counted, in a sentence
+# naming fewer years, are one share per customer, not a total (2.5.32, F-024: AEHR, ANET).
+_COUNT_WORDS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+_COUNTED_SUBJECT_RE = re.compile(
+    r"^(?:(?:these|the|our|its)\s+)?(two|three|four|five|six|seven|eight|nine|ten|\d{1,2})\s+(?:of\s+(?:our|its|the)\s+)?(?:\w+\s+)?(?:customers|clients|distributors)$", _F)
+_RANKED_SUBJECT_RE = re.compile(r"\b(?:largest|top|biggest|major)\b", _F)
+_PCT_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%", _F)
+# A significant-customer table row (2.5.32, F-024: MRVL's "Distributor A | 37% | 34% | 24%" under a title stating
+# the 10%-of-net-revenue rule); the first column is the latest period.
+_TABLE_CUSTOMER_LABEL_RE = re.compile(r"(?:(?:direct|end)\s+)?(?:customer|distributor|client|reseller)\s+(?:[A-Z]|\d{1,2})", _F)
+_TABLE_PCT_CELL_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%", _F)
+_AGGREGATE_DETERMINER_RE = re.compile(r"^(?:our|its|the company['’]s|the)\s+", re.A)
+_INCLUSIVE_CLAUSE_RE = re.compile(r",\s*(?:inclusive\s+of|including|excluding)\b[^,]*,?\s*$", _F)
+_REVENUE_FROM_RE = re.compile(r"^(?:net\s+)?(?:revenues?|sales)\s+(?:from|to)\s+", _F)
 _TRAILING_PUNCT_RE = re.compile(r"[\s,;:]+$", _F)
 _LEADING_ARTICLE_RE = re.compile(r"^(?:our|the|its)\s+", _F)
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;])\s+", _F)
 
 
 def _concentration_subject(segment: str) -> str:
+    # An "inclusive of ..." clause and trailing punctuation are no subject break (MRVL's "net revenue from our ten (10)
+    # largest customers, inclusive of our distributor and direct customers, represented 82%"), and "sales to" or
+    # "revenue from" is not part of the customer (ANET's "Sales to one end customer") (2.5.32, F-024).
+    trimmed = _TRAILING_PUNCT_RE.sub("", _INCLUSIVE_CLAUSE_RE.sub("", segment, count=1), count=1)
     start = 0
-    for m in _SUBJECT_BREAK_RE.finditer(segment):
+    for m in _SUBJECT_BREAK_RE.finditer(trimmed):
         start = m.end()
-    subject = _LEADING_YEAR_RE.sub("", segment[start:].strip(), count=1)
+    subject = _LEADING_YEAR_RE.sub("", trimmed[start:].strip(), count=1)
+    subject = _REVENUE_FROM_RE.sub("", subject, count=1)
     return _TRAILING_PUNCT_RE.sub("", subject, count=1)
+
+
+def _table_row_finding(item: dict, section: str | None) -> dict | None:
+    label = _collapse_ws(item["rowLabel"]) if isinstance(item.get("rowLabel"), str) else ""
+    title = _collapse_ws(item["tableTitle"]) if isinstance(item.get("tableTitle"), str) else ""
+    if not _TABLE_CUSTOMER_LABEL_RE.fullmatch(label) or not re.search(r"\b(?:revenues?|sales)\b", title, _F) or re.search(r"receivable", title, _F):
+        return None
+    raw = item.get("contextText")
+    cells = [c.strip(" ") for c in _collapse_ws(str(raw if raw is not None else "")).split("|")]
+    m = _TABLE_PCT_CELL_RE.fullmatch(cells[1] if len(cells) > 1 else "") if cells[0] == label else None
+    if not m:
+        return None
+    pct = float(m.group(1))
+    if not (0 < pct <= 100):
+        return None
+    return {"kind": "customer", "name": None, "description": label, "valuePct": pct, "year": None, "sectionHeading": section, "sentence": f"{title} {' | '.join(cells)}"}
 
 
 def customer_concentration(matches: list[dict]) -> dict:
@@ -70,6 +108,11 @@ def customer_concentration(matches: list[dict]) -> dict:
         raw_ctx = item.get("contextText") if item.get("contextText") is not None else item.get("context")
         ctx = _collapse_ws(str(raw_ctx if raw_ctx is not None else ""))
         section = item.get("sectionHeading") if isinstance(item.get("sectionHeading"), str) else None
+        if item.get("inTable") is True:
+            row = _table_row_finding(item, section)
+            if row:
+                findings.append(row)
+            continue
         for sentence in _SENTENCE_SPLIT_RE.split(ctx):
             if not re.search(r"customer|client|distributor", sentence, _F) and not re.search(r"\b(?:accounted\s+for|represented)\b", sentence, _F):
                 continue
@@ -96,23 +139,43 @@ def customer_concentration(matches: list[dict]) -> dict:
                 subject = _concentration_subject(segment)
                 if not subject:
                     continue
+                counted = _COUNTED_SUBJECT_RE.match(subject)
+                shares = [float(p) for p in _PCT_RE.findall(m.group(0))]
+                count = (_COUNT_WORDS.get(counted.group(1).lower()) or int(counted.group(1))) if counted else 0
+                if counted and not _RANKED_SUBJECT_RE.search(subject) and len(shares) == count and len(set(_YEAR_RE.findall(sentence))) < count:
+                    for share in shares:
+                        if 0 < share <= 100:
+                            findings.append({"kind": "customer", "name": None, "description": f"one of {subject}", "valuePct": share, "year": year, "sectionHeading": section, "sentence": sentence})
+                    continue
                 if _AGGREGATE_SUBJECT_RE.search(subject):
                     findings.append({"kind": "aggregate", "name": None, "description": subject, "valuePct": pct, "year": year, "sectionHeading": section, "sentence": sentence})
+                elif not re.match(r"[A-Z]", subject) and not _CUSTOMER_WORD_RE.search(subject):
+                    continue
                 elif _UNNAMED_SUBJECT_RE.search(subject) or not re.match(r"[A-Z]", subject) or len(subject) > 60:
                     findings.append({"kind": "customer", "name": None, "description": subject, "valuePct": pct, "year": year, "sectionHeading": section, "sentence": sentence})
                 else:
                     findings.append({"kind": "customer", "name": _LEADING_ARTICLE_RE.sub("", subject, count=1), "description": subject, "valuePct": pct, "year": year, "sectionHeading": section, "sentence": sentence})
     years = [f["year"] for f in findings if f["year"] is not None]
     latest = max(years) if years else None
+    # A significant-customer table states the same customers more precisely than the prose ("three customers accounted
+    # for approximately 26%, 14% and 11%" against AEHR's Customer A-C at 26.3%, 14.2% and 10.9%): the prose share
+    # within half a point of a table row is that row (2.5.32, F-024).
+    table_shares = [f["valuePct"] for f in findings if f["kind"] == "customer" and f["name"] is None and _TABLE_CUSTOMER_LABEL_RE.fullmatch(f["description"])]
     seen: set[str] = set()
     kept: list[dict] = []
     for f in findings:
         if latest is not None and f["year"] is not None and f["year"] != latest:
             continue
+        if (f["kind"] == "customer" and f["name"] is None and not _TABLE_CUSTOMER_LABEL_RE.fullmatch(f["description"])
+                and any(abs(t - f["valuePct"]) <= 0.5 for t in table_shares)):
+            continue
         if f["kind"] == "aggregate":
-            key = f"a|{f['description'].lower()}"
+            # "our five largest customers" and "the Company's five largest customers" are one aggregate.
+            key = f"a|{_AGGREGATE_DETERMINER_RE.sub('', f['description'].lower(), count=1)}"
         elif f["name"]:
             key = f"n|{f['name'].lower()}"
+        elif _TABLE_CUSTOMER_LABEL_RE.fullmatch(f["description"]):
+            key = f"l|{f['description'].lower()}"
         else:
             key = f"u|{_js_num(f['valuePct'])}"
         if key in seen:

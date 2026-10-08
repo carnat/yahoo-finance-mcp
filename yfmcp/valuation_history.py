@@ -23,6 +23,7 @@ import datetime as _dt
 import re
 from typing import Any
 
+from yfmcp.capital_structure import _BORROWING_CONCEPTS
 from yfmcp.capital_structure import _js_number as _js_num
 from yfmcp.capital_structure import round_half_up as _round
 from yfmcp.evidence import AUTHORITY_BOUNDARY
@@ -41,6 +42,10 @@ US_GAAP: dict = {
     "debtGroups": [["LongTermDebt"], ["LongTermDebtCurrent", "LongTermDebtNoncurrent"],
                    ["ConvertibleNotesPayableCurrent", "ConvertibleNotesPayable", "ConvertibleLongTermNotesPayable"], ["NotesPayableCurrent", "NotesPayable"]],
     "debtAdditions": ["ShortTermBorrowings", "CommercialPaper"],
+    # The concepts that would show the filing has borrowings; empty where no such rule applies (2.5.32, F-026).
+    "borrowingConcepts": sorted(_BORROWING_CONCEPTS),
+    # Depreciation alone stands in for D&A when the amortization concept was never tagged (2.5.32, F-026).
+    "depreciationOnly": {"depreciation": "Depreciation", "amortization": "AmortizationOfIntangibleAssets"},
     "sharesInstant": ["CommonStockSharesOutstanding"],
     "sharesWeighted": ["WeightedAverageNumberOfSharesOutstandingBasic"],
 }
@@ -55,6 +60,8 @@ IFRS: dict = {
     "debtGroups": [["Borrowings"], ["CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings", "NoncurrentPortionOfNoncurrentBorrowings"],
                    ["ShorttermBorrowings", "CurrentPortionOfLongtermBorrowings", "LongtermBorrowings"]],
     "debtAdditions": [],
+    "borrowingConcepts": [],
+    "depreciationOnly": None,
     "sharesInstant": [],
     "sharesWeighted": ["WeightedAverageShares"],
 }
@@ -88,6 +95,49 @@ def taxonomy_of(companyfacts: Any) -> tuple[str | None, str | None]:
         currency = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
         return taxonomy, currency
     return None, None
+
+
+def reporting_currency_at(companyfacts: Any, as_of: str) -> str | None:
+    """The reporting currency as of a date: the currency of the newest annual revenue fact filed by then (2.5.32, F-029).
+
+    Where that filing tags more than one currency (a convenience translation), the filer's main currency wins.
+    Falls back to the main currency when no annual revenue is filed by then.
+    """
+    taxonomy, currency = taxonomy_of(companyfacts)
+    if not taxonomy:
+        return None
+    tax = companyfacts["facts"].get(taxonomy) or {}
+    day = as_of[:10]
+    best_key: str | None = None
+    best_units: set[str] = set()
+    for concept in (IFRS if taxonomy == "ifrs-full" else US_GAAP)["revenue"]:
+        for unit, rows in ((tax.get(concept) or {}).get("units") or {}).items():
+            if not re.fullmatch(r"[A-Z]{3}", unit) or not isinstance(rows, list):
+                continue
+            for r in rows:
+                start, end, filed = r.get("start"), r.get("end"), r.get("filed")
+                if not (isinstance(start, str) and isinstance(end, str) and isinstance(filed, str)) or filed > day:
+                    continue
+                if not 350 <= days(start, end) <= 380:
+                    continue
+                key = f"{filed}|{end}"
+                if best_key is None or key > best_key:
+                    best_key, best_units = key, {unit}
+                elif key == best_key:
+                    best_units.add(unit)
+    if best_key is None:
+        return currency
+    return currency if currency and currency in best_units else sorted(best_units)[0]
+
+
+def reporting_currencies(companyfacts: Any, dates: list[str]) -> list[str]:
+    """The distinct reporting currencies the dates use, in date order."""
+    out: list[str] = []
+    for d in dates:
+        c = reporting_currency_at(companyfacts, d)
+        if c is not None and c not in out:
+            out.append(c)
+    return out
 
 
 def _facts_for(tax: dict | None, concepts: list[str], unit: str, as_of: str) -> list[dict]:
@@ -355,6 +405,16 @@ def cover_share_counts(html: str) -> dict:
     return {"status": "OK", "value": sum(c["shares"] for c in classes), "asOf": date, "basis": "COVER_PAGE_CLASS_SUM", "classes": classes}
 
 
+def _accession_tags_any(tax: dict | None, concepts: list[str], accn: str) -> bool:
+    """Whether companyfacts holds a fact of any of the concepts, in any unit and at any date, from the accession."""
+    for c in concepts:
+        units = ((tax or {}).get(c) or {}).get("units") or {}
+        for rows in units.values():
+            if isinstance(rows, list) and any(isinstance(r, dict) and r.get("accn") == accn for r in rows):
+                return True
+    return False
+
+
 def _balances_at(tax: dict | None, mapping: dict, currency: str, as_of: str) -> dict:
     cash_facts = sorted([f for f in _facts_for(tax, mapping["cash"], currency, as_of) if f["start"] is None], key=lambda f: f["end"])
     if not cash_facts:
@@ -377,6 +437,12 @@ def _balances_at(tax: dict | None, mapping: dict, currency: str, as_of: str) -> 
         all_parts = parts + additions
         debt = {"status": "OK", "value": sum_values(all_parts), "components": [_component(f) for f in all_parts]}
         break
+    # The filing that reported this balance sheet tags no borrowing concept at any date: debt is zero, as
+    # get_valuation_snapshot reads the same filing (2.5.32, F-026: AEHR's EV was DEBT_NOT_TAGGED here and computed
+    # there). Companyfacts holds undimensioned facts only, so a filing tagging debt only by member is not seen.
+    if (debt["status"] == "NOT_TAGGED" and cash.get("accn") and mapping["borrowingConcepts"]
+            and not _accession_tags_any(tax, mapping["borrowingConcepts"], cash["accn"])):
+        debt = {"status": "OK", "value": 0, "basis": "NO_BORROWINGS_TAGGED", "components": [], "accessionNumber": cash["accn"]}
     return {
         "status": "OK",
         "balanceDate": at,
@@ -473,6 +539,11 @@ def _da_for(tax: dict | None, mapping: dict, currency: str, as_of: str, oi: dict
 
         groups.append((group, {"LFY": summed("LFY"), "LTM": summed("LTM")}))
 
+    # A filer that never tagged the amortization concept by as_of (BE) has depreciation only.
+    only = mapping.get("depreciationOnly")
+    if only and not _facts_for(tax, [only["amortization"]], currency, as_of):
+        groups.append(([only["depreciation"]], flow_bases(_facts_for(tax, [only["depreciation"]], currency, as_of))))
+
     def pick(key: str) -> dict:
         ok = [(g, b) for g, b in groups if b[key]["status"] == "OK"]
         aligned = next(((g, b) for g, b in ok if b[key].get("periodEnd") == oi[key].get("periodEnd")), ok[0] if ok else None)
@@ -496,13 +567,16 @@ def staleness_limits(companyfacts: Any, as_of: str = "9999-12-31") -> dict:
     return {"cadence": "QUARTERLY", "shareCountDays": 400, "balancesDays": 200, "resultsDays": 500}
 
 
+# Past this age an annual filer's share count is flagged, though still used (2.5.32, F-029).
+SHARE_COUNT_AGED_DAYS = 183
+
 _MULTIPLE_NAMES = ["evToRevenue", "evToEbitda", "priceToEarnings", "priceToSales"]
 
 
 def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dict:
     """Market value, balances, denominators and multiples as they stood on one date."""
     limits = staleness_limits(inp["companyfacts"], date)
-    cadence = {"secCompanyfactsCadence": limits["cadence"],
+    cadence = {"reportingCurrency": currency, "secCompanyfactsCadence": limits["cadence"],
                "stalenessLimitsDays": {"shareCount": limits["shareCountDays"], "balances": limits["balancesDays"], "results": limits["resultsDays"]}}
     facts = inp["companyfacts"]["facts"]
     tax = facts.get(taxonomy)
@@ -524,6 +598,9 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
              "currency": price_currency, "laterSplits": later_splits}
 
     shares = _shares_at(dei, tax, mapping, date, inp.get("coverCounts"), inp.get("periodicFilings"))
+    # The count's age at the date, on the count itself (2.5.32, F-029).
+    if shares is not None and isinstance(shares.get("asOf"), str):
+        shares["ageDays"] = days(shares["asOf"], date)
     if shares is None:
         market_cap: dict = {"status": "SHARES_NOT_AVAILABLE", "value": None}
     elif not (isinstance(shares.get("value"), (int, float)) and not isinstance(shares.get("value"), bool) and shares["value"] > 0):
@@ -551,6 +628,12 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
         share_count_stale = days(str(shares["asOf"]), date) > limits["shareCountDays"]
         if share_count_stale:
             warnings.append({"code": "SHARE_COUNT_STALE", "message": f"The latest share count filed by {date} is as of {shares['asOf']}.", "severity": "warning"})
+        elif limits["cadence"] == "ANNUAL" and shares["ageDays"] > SHARE_COUNT_AGED_DAYS:
+            # An annual filer's count is used for up to 500 days; past half a year, say so (2.5.32, F-029: NBIS's
+            # 2025-12-31 market cap used the 2024-12-31 count, before 17M shares issued in 2025).
+            warnings.append({"code": "SHARE_COUNT_AGED", "message": (
+                f"The latest share count filed by {date} is as of {shares['asOf']}, {shares['ageDays']} days earlier; SEC companyfacts holds this "
+                "filer's counts once a year, so shares issued or repurchased since are not reflected."), "severity": "info"})
         split_after_count = next((s for s in inp["splits"] if str(shares["asOf"]) < s["date"] <= bar["date"]), None)
         ads = inp.get("adsRatio")
         quoted = shares["value"] / ads if ads is not None and ads > 0 else shares["value"]
@@ -567,18 +650,24 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
     if price_currency is None or price_currency == currency:
         fx_rate = 1
     else:
-        fx_in = inp.get("fx")
+        # This date's currency: its own series, else the main series when it is for this currency.
+        main = inp.get("fx")
+        fx_in = (inp.get("fxByCurrency") or {}).get(currency) or (main if main and str(main.get("pair") or "").startswith(currency) else None)
         r = rate_at(fx_in["bars"], date) if fx_in else None
         if r:
             fx_rate = r["close"]
             fx = {"pair": fx_in.get("pair") if fx_in else None, "date": r["date"], "rate": r["close"]}
         else:
-            fx = {"pair": fx_in.get("pair") if fx_in else None, "status": "NOT_AVAILABLE"}
+            fx = {"pair": fx_in.get("pair") if fx_in else f"{currency}{price_currency}=X", "status": "NOT_AVAILABLE"}
             warnings.append({"code": "FX_NOT_AVAILABLE", "message": (
                 f"No {currency} to {price_currency} rate within 7 days on or before {date}; figures in {currency} are not converted and the "
                 "multiples are null."), "severity": "warning"})
 
     balances = _balances_at(tax, mapping, currency, date)
+    if balances["status"] == "OK" and balances["debt"].get("basis") == "NO_BORROWINGS_TAGGED":
+        warnings.append({"code": "NO_BORROWINGS_TAGGED", "message": (
+            f"The filing that reported the {balances['balanceDate']} balance sheet ({balances['debt']['accessionNumber']}) tags no borrowings at any date, "
+            "so debt is taken as zero (leases excluded)."), "severity": "info"})
     mcap = market_cap["value"] if market_cap["status"] == "OK" else None
     if mcap is None:
         enterprise_value: dict = {"status": "MARKET_CAP_NOT_AVAILABLE", "value": None}
@@ -616,6 +705,10 @@ def valuation_at_date(inp: dict, date: str, taxonomy: str, currency: str) -> dic
     oi = flow_bases(_facts_for(tax, mapping["operatingIncome"], currency, date))
     ni = flow_bases(_facts_for(tax, mapping["netIncome"], currency, date))
     da = _da_for(tax, mapping, currency, date, oi)
+    only = mapping.get("depreciationOnly")
+    if only and any(da[k]["value"]["status"] == "OK" and da[k]["concepts"] == [only["depreciation"]] for k in ("LTM", "LFY")):
+        warnings.append({"code": "EBITDA_DEPRECIATION_ONLY", "message": (
+            f"No {only['amortization']} is tagged by {date}, so EBITDA adds {only['depreciation']} alone to operating income."), "severity": "info"})
     ltm_end = str(revenue["LTM"]["periodEnd"]) if revenue["LTM"]["status"] == "OK" else None
     if ltm_end and days(ltm_end, date) > limits["resultsDays"]:
         warnings.append({"code": "RESULTS_STALE", "message": (
@@ -681,7 +774,8 @@ def foreign_filer(companyfacts: Any, as_of: str = "9999-12-31") -> bool:
 
     Judged per date, so a filer that changed regime keeps its earlier cadence at earlier dates.
     """
-    taxonomy, currency = taxonomy_of(companyfacts)
+    taxonomy, _ = taxonomy_of(companyfacts)
+    currency = reporting_currency_at(companyfacts, as_of)
     if not taxonomy or not currency:
         return False
     tax = companyfacts["facts"].get(taxonomy)
@@ -742,13 +836,15 @@ def historical_valuation(inp: dict) -> dict:
     if not taxonomy or not currency:
         return {**base, "status": "FUNDAMENTALS_NOT_AVAILABLE", "points": [], "notes": ["No us-gaap or ifrs-full revenue facts are in companyfacts."],
                 **AUTHORITY_BOUNDARY}
-    points = [valuation_at_date(inp, d, taxonomy, currency) for d in inp["dates"]]
+    points = [valuation_at_date(inp, d, taxonomy, reporting_currency_at(inp["companyfacts"], d) or currency) for d in inp["dates"]]
+    currencies = list(dict.fromkeys(str(p["reportingCurrency"]) for p in points))
     cadences = sorted({str(p["secCompanyfactsCadence"]) for p in points})
     limits_by_cadence = {str(p["secCompanyfactsCadence"]): p["stalenessLimitsDays"] for p in points}
     return {
         **base,
         "secCompanyfactsCadence": cadences[0] if len(cadences) == 1 else "MIXED",
         "stalenessLimitsDays": limits_by_cadence,
+        **({"reportingCurrencies": currencies} if len(currencies) > 1 else {}),
         "status": "OK" if all(p["status"] == "OK" for p in points) else "PARTIAL",
         "coreStatus": "OK" if all(p["coreStatus"] == "OK" for p in points) else "PARTIAL",
         "points": points,
