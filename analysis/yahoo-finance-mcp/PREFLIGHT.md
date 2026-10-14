@@ -8,22 +8,36 @@ Run: 2026-10-14, branch `claude/laughing-pasteur-c8a1hh` @ `f122d0e` (release 2.
 
 ## Check 0 — Human answers (verbatim)
 
-This was a non-interactive cloud run, so nobody answered during the checks. **All five questions are OPEN. The human must fill them in before `/modernize-brief`.**
+Answered by the repo owner on 2026-10-14.
 
 1. **Scope:** Is `legacy/yahoo-finance-mcp` the complete system, or one slice of a larger codebase? If a slice, what *outside* it depends on code *inside* it, and is breaking those consumers acceptable?
-   > **OPEN — unanswered.** (Check 6 found a standalone repository. See below.)
+   > "complete system"
 
 2. **Build & test locally:** Can this environment restore, build, and run the tests? Roughly how long does the full CI pipeline take?
-   > **OPEN — unanswered.** (Measured here: yes. The full acceptance suite ran in about 3.5 min locally. See Check 3.)
+   > "yes , about 3-4 mins"
 
 3. **Bespoke build infrastructure:** Is there organization-specific build or dependency-resolution machinery (an internal package feed, a custom binary store, a code generator, a wrapper around the standard build tool) that someone new to this codebase would not guess? Where is it documented?
-   > **OPEN — unanswered.**
+   > "no"
 
 4. **Prior attempts:** Has anyone tried to modernize any of this before? What went wrong?
-   > **OPEN — unanswered.**
+   > "no"
 
 5. **Off limits:** Is anything under `legacy/yahoo-finance-mcp` not allowed to change in this pass (a component another team owns, a frozen branch, generated code)?
-   > **OPEN — unanswered.** (Candidates from the source: `worker/src/company-ir-page-registry.json` is rewritten by the `ir-source-discovery` bot workflow. Build-stamped fields in `worker/wrangler.toml` `[vars]` are written by `scripts/stamp_worker_build.py` at deploy time.)
+   > "assess that for me"
+
+   **Proposed off-limits list (derived from the source; PROPOSED, the owner must confirm before `/modernize-brief`).** No other team owns anything: there is no CODEOWNERS file, and every commit is by `carnat` or Claude. The constraints are generated files, external contracts and test oracles:
+
+   | Tier | Path | Why | Rule for this pass |
+   |---|---|---|---|
+   | Never hand-edit | `uv.lock`, `worker/package-lock.json` | Generated lockfiles | Regenerate with `uv lock` / `npm install` only |
+   | Never hand-edit | `worker/wrangler.toml` `[vars]` `BUILD_VERSION`, `BUILD_DATE`, `BUILD_SHA`, `DEPLOYED_AT` | `scripts/stamp_worker_build.py` stamps them at deploy time; they must stay empty in git | Leave empty |
+   | Never hand-edit | `worker/src/company-ir-page-registry.json` | The daily `ir-source-discovery` bot rewrites it (`status: candidate` only). Promotion to `approved` is a human source-validation step | Keep schema `2026-07-10` and the `validate_registry` shape. Never auto-promote |
+   | Frozen external contract | `tool_catalog.json`, `tool_groups.py`, `scripts/public_tool_contract.py`, `scripts/deployed_canaries.json`, the MCP envelope (`yfmcp/envelope.py`, `worker/src/response.ts`, `MCP_ENVELOPE_V2`) | Live MCP clients depend on tool names, parameters and envelope shape. The deploy gate checks canaries against production | Change only as a deliberate, versioned contract change (a planner decision under `CLAUDE.md`) |
+   | Equivalence oracle | `fixtures/*.json`, `scripts/aapl_daily_bars_fixture.json`, `scripts/thai_sec_fund_fixtures.json`, `scripts/ir_page_scope.json` | Recorded upstream payloads the parity tests assert against | Do not regenerate or edit during a transformation. They are the golden master |
+   | Guarded process | `.github/workflows/deploy-worker.yml`, `yfmcp/version.py` + `worker/package.json` + `wrangler.toml` `SERVER_VERSION` + `package-lock.json` version | Production promotion with secrets; the four-place version contract (`test_version_contract.py`) | Touch only through `release-clerk`, never as a side effect of a code transformation |
+   | Cross-runtime invariant | `server.py` + `yfmcp/` ↔ `worker/src/` | Strict output parity (`CLAUDE.md`) | Either runtime may change, but never one alone: each change ships with its mirror and the parity tests |
+
+   Everything else (module internals of `yfmcp/` and `worker/src/`, `server.py` structure, tests and docs) is in scope.
 
 ## Check 6 — Scope boundary
 
@@ -39,7 +53,7 @@ This was a non-interactive cloud run, so nobody answered during the checks. **Al
 
 | # | Check | Status | Found | Fix |
 |---|---|---|---|---|
-| 0 | Human answers | ⚠️ | All 5 questions open (headless run) | Human fills in the answers above |
+| 0 | Human answers | ✅ | Complete system; local build/test yes (CI 3–4 min); no bespoke infra; no prior attempts; off-limits list proposed | Owner confirms the proposed off-limits list |
 | 1 | Stack | ✅ | Python 3.11 MCP server (FastMCP/`mcp[cli]`, `yfinance`) plus a TypeScript Cloudflare Worker (wrangler 4, TS 7). Lines in git: `server.py`+`tool_groups.py` 12.8k; `yfmcp/` 20.3k (39 files); `worker/src` 32.7k (31 files); `scripts/` tests 31.8k (80 files); docs 3.0k | — |
 | 2 | Analysis tooling | ⚠️ | `scc`, `cloc`, `lizard`, `glow`, `delta` all missing. `ruff` 0.16.8 and `mypy` 2.3.1 are present | `apt install cloc` (or `go install github.com/boyter/scc/v3@latest`); `pip install lizard`; `apt install glow git-delta` (or the GitHub releases) |
 | 3a | Build definition | ✅ | `.github/workflows/ci.yml` (tool sync, `tsc --noEmit`, transcript contract, 65-step acceptance suite) and `deploy-worker.yml` (stamp → `wrangler versions upload` → candidate canaries → promote → production smoke). Pins **Python 3.11**, **Node 24**. Dependencies come from public PyPI (`uv.lock`) and npm (`package-lock.json`). No private feed | — |
@@ -55,11 +69,11 @@ This was a non-interactive cloud run, so nobody answered during the checks. **Al
 | Command | Verdict | Why |
 |---|---|---|
 | `assess` + `map` + `extract-rules` | **Ready-with-gaps** | No `scc`/`lizard`, so LOC and complexity fall back to `find`+`wc` and keyword counts. History is shallow, so churn data is truncated. No missing includes |
-| `brief` | **Ready-with-gaps** | Needs the three discovery artifacts, and **the five Check 0 answers are open** |
+| `brief` | **Ready** (once discovery artifacts exist) | Check 0 is answered. Carry the off-limits table into the brief as constraints |
 | `transform` + `reimagine` | **Ready (target unspecified)** | Both legacy toolchains are green and the full test suite runs locally, so dual execution is possible. No `[target-stack]` was given; re-run preflight with it to verify the target |
 | `harden` | **Ready-with-gaps** | `ruff`/`mypy` are present. No SAST tools (`semgrep`, `bandit`, `pip-audit`, `npm audit` is available via npm). Install: `pip install semgrep bandit pip-audit` |
 | `uplift` | **Ready-with-gaps (if a version bump is intended)** | Source runtimes are present (Py 3.11, plus 3.12/3.13 for a Python uplift; Node 22 locally vs 24 in CI). No migration tool (`pyupgrade`, `ruff --select UP` works as a substitute). No inbound in-tree consumers, but every change must keep the Python/TS parity and the public MCP contract |
 
 ## Most important fix
 
-Nothing is red. The biggest gap is **Check 0**: the five human answers, especially *prior attempts* and *off limits*, must be filled in before `/modernize-brief`. After that: install `scc` + `lizard` and unshallow the clone before `/modernize-assess`.
+Nothing is red. Confirm (or amend) the proposed off-limits list in Check 0 Q5. Then install `scc` + `lizard` and run `git fetch --unshallow` before `/modernize-assess`. With a 3–4 min CI that also runs locally, validation can be local-first. There is no need to discover failures from CI.
