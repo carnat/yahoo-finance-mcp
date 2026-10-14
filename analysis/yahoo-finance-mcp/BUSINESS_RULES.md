@@ -1,0 +1,7927 @@
+# Business Rules — yahoo-finance-mcp
+
+Generated 2026-10-14 by `/modernize-extract-rules` (workflow run `wf_36b55a43-b0d`, 710 agents, 4 extraction rounds) and rendered by `render_rules.py` from the verbatim workflow output in `rules.json`. Do not hand-edit rule cards; fix `rules.json` or re-run the extraction.
+
+## How these rules were produced
+
+- **Extract:** each round, three extractors read `legacy/yahoo-finance-mcp/` (symlinks to `server.py`, `tool_groups.py`, `yfmcp/`, `worker/src/`, `docs/`, `tool_catalog.json`), each through a different lens (calculations, validations and policies, lifecycle and status). Duplicates across rounds were dropped.
+- **Verify:** a separate referee read each rule's cited code. 455 were confirmed (wrong citations were corrected and the rule downgraded to Medium confidence), and 2 were refuted (Appendix B).
+- **P0 panel:** two independent judges, one on compliance and one on fidelity, reviewed each P0 candidate. Of 120 candidates, **84 stayed P0**. 36 were downgraded to P1 because the judges did not agree they move money, carry a regulatory duty or guard data integrity. Their reasoning is kept verbatim in each card's SME note.
+- **Coverage caveats:**
+  - Extraction hit the 4-round cap before it ran dry. Rounds 3 and 4 still found 88 and 119 new rules, so the long tail is incomplete.
+  - Most rules cite Python: 454 of 455. The Worker (`worker/src/*.ts`) is the parity mirror, and its behaviour is assumed equal unless a card or a suspected defect says otherwise.
+  - Suspected defects (§3) are the places where that assumption is already known to fail.
+  - No instruction-shaped text was found in the source.
+
+**Reading priorities in this system.** This is an analytics MCP server. It files and certifies nothing, and no money moves through it. Here P0 means **data integrity of published figures**: share counts, dilution, enterprise value, fiscal periods, evidence integrity, and the rules that decide whether a figure is presented as decision-grade. A silent change to any of these would mislead every downstream analysis. P1 covers the core calculations and policies. P2 is presentation and convenience.
+
+## 1. Summary
+
+| Domain | P0 | P1 | P2 | Total | Need SME | Suspected defects |
+|---|---:|---:|---:|---:|---:|---:|
+| Envelope, schemas & cross-cutting | 0 | 7 | 4 | 11 | 2 | 4 |
+| Yahoo pricing, technicals, options & screening | 3 | 32 | 11 | 46 | 5 | 9 |
+| Yahoo fundamentals, analyst & calendar | 0 | 9 | 2 | 11 | 2 | 3 |
+| Third-party fallbacks (key-gated) | 0 | 7 | 4 | 11 | 1 | 2 |
+| SEC EDGAR retrieval | 7 | 21 | 6 | 34 | 0 | 0 |
+| SEC extractors & capital structure | 27 | 75 | 19 | 121 | 23 | 11 |
+| Valuation & reconciliation | 36 | 53 | 8 | 97 | 14 | 8 |
+| Earnings intelligence & transcripts | 5 | 33 | 5 | 43 | 8 | 6 |
+| News & public events | 0 | 9 | 1 | 10 | 2 | 4 |
+| Evidence layer | 5 | 35 | 1 | 41 | 2 | 2 |
+| Thai SEC funds | 0 | 5 | 2 | 7 | 0 | 0 |
+| Shared god-file helpers | 1 | 21 | 1 | 23 | 2 | 6 |
+| **Total** | **84** | **307** | **64** | **455** | **61** | **55** |
+
+By category: Calculation 181, Validation 122, Policy 97, Lifecycle 55.
+
+## 2. P0 behaviour contract
+
+These 84 rules must be proven equivalent, in both runtimes, before any phase that touches their code ships. **6** have confidence below High and need SME confirmation before their phase starts (marked ⚠).
+
+| ID | Rule | Category | Source | Confidence |
+|---|---|---|---|---|
+| BR-PRC-001 | Completed-session bar rule (exclude today's unfinished bar) | Lifecycle | `yfmcp/tools/pricing.py:772-822` | High |
+| BR-PRC-002 | Daily price freshness classification (CURRENT / STALE / UNKNOWN) | Validation | `yfmcp/tools/pricing.py:830-864` | Medium ⚠ |
+| BR-PRC-003 | Listing currency to USD conversion with minor units | Calculation | `yfmcp/tools/pricing.py:1449-1489` | High |
+| BR-SEC-001 | Company fiscal-year naming offset | Policy | `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:101-146` | High |
+| BR-SEC-002 | Equivalent SEC concept selection by newest filing | Policy | `yfmcp/sec_facts.py:18-67` | High |
+| BR-SEC-003 | Equivalent-concept fact selection by newest filing | Policy | `legacy/yahoo-finance-mcp/yfmcp/sec_facts.py:18-67` | High |
+| BR-SEC-004 | Filing period must be 'latest' or a fiscal year | Validation | `yfmcp/sec_facts.py:116-128` | High |
+| BR-SEC-005 | Fiscal year of a period end (52/53-week drift) | Calculation | `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:22-57` | High |
+| BR-SEC-006 | Fiscal year of a period end (one-week drift rule) | Calculation | `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:22-57` | High |
+| BR-SEC-007 | Fiscal-year assignment for SEC facts (52/53-week years) | Calculation | `yfmcp/sec_facts.py:131-205` | High |
+| BR-EXT-001 | Conversion ratio unit normalisation (per $1,000 vs per $1) | Validation | `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1197-1226` | High |
+| BR-EXT-002 | Conversion ratio unit normalization | Validation | `yfmcp/capital_structure.py:1197-1226` | High |
+| BR-EXT-003 | Convertible note if-converted shares and principal basis | Calculation | `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1187-1209,1419-1492` | High |
+| BR-EXT-004 | Convertible preferred if-converted and liquidation preference | Calculation | `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1544-1675` | High |
+| BR-EXT-005 | Convertible scenario treatments and net share settlement | Calculation | `legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:188-217` | High |
+| BR-EXT-006 | Debt instrument period-end status | Lifecycle | `yfmcp/capital_structure.py:2585-2592` | High |
+| BR-EXT-007 | Dilution bridge status and diluted share formula | Lifecycle | `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2090-2100,2276-2325` | High |
+| BR-EXT-008 | Dilution bridge totals, dilution percentages and status | Calculation | `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2276-2325` | High |
+| BR-EXT-009 | Geographic revenue table selection and share check | Calculation | `legacy/yahoo-finance-mcp/yfmcp/parsing/extractors.py:146-151,207-233,241-326` | High |
+| BR-EXT-010 | Guidance basis (GAAP / non-GAAP) classification | Validation | `legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:333-367,405-415` | High |
+| BR-EXT-011 | If-converted shares for convertible notes | Calculation | `yfmcp/capital_structure.py:1436-1491` | High |
+| BR-EXT-012 | Instrument-to-total-debt reconciliation | Validation | `yfmcp/capital_structure.py:2947-2993` | High |
+| BR-EXT-013 | Net-share settlement when principal is stated as cash-settled | Calculation | `yfmcp/capital_structure.py:1250-1284,1493-1506; yfmcp/share_scenarios.py:207-214` | High |
+| BR-EXT-014 | Outlook table scale for unscaled amounts | Calculation | `legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:249-269,396-403` | High |
+| BR-EXT-015 | Release figure scale and loss sign | Calculation | `yfmcp/extraction_rules.py:590-613` | Medium ⚠ |
+| BR-EXT-016 | Reported release metric acceptance rules | Validation | `yfmcp/extraction_rules.py:541-616` | High |
+| BR-EXT-017 | Reported release metric eligibility | Validation | `legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:456-616` | High |
+| BR-EXT-018 | Scenario instrument line inclusion and treasury-stock increment | Calculation | `legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:107-142` | High |
+| BR-EXT-019 | Scenario resulting shares, dilution and completeness | Calculation | `yfmcp/share_scenarios.py:249-297` | High |
+| BR-EXT-020 | Scenario totals, dilution % and completeness | Lifecycle | `legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:249-297` | High |
+| BR-EXT-021 | Scenario treasury-stock dilution for options and warrants | Calculation | `yfmcp/share_scenarios.py:43-45,127-142,155-186` | High |
+| BR-EXT-022 | Short-term investments and cash aggregate cross-check | Validation | `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2345-2414,2837-2844` | High |
+| BR-EXT-023 | Total debt concept hierarchy and finance-lease removal | Calculation | `yfmcp/capital_structure.py:2417-2534` | High |
+| BR-EXT-024 | Treasury-stock and if-converted dilution mechanics | Calculation | `yfmcp/share_scenarios.py:127-142,188-217; yfmcp/capital_structure.py:501-502` | High |
+| BR-EXT-025 | Unvested RSU/PSU awards counted gross | Calculation | `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:620-723` | High |
+| BR-EXT-026 | Warrant class retirement by filing text | Lifecycle | `yfmcp/capital_structure.py:851-948` | High |
+| BR-EXT-027 | Warrant exercisable count and treasury-stock dilution | Calculation | `yfmcp/capital_structure.py:1029-1086` | High |
+| BR-VAL-001 | ADR ordinary-shares-per-quoted-share ratio | Calculation | `yfmcp/valuation.py:29-49,280-302` | High |
+| BR-VAL-002 | ADR ratio applied only for foreign filers when share counts are a whole multiple apart | Calculation | `yfmcp/valuation.py:29-49,280-298` | High |
+| BR-VAL-003 | ADR ratio between SEC ordinary shares and Yahoo quoted shares | Calculation | `legacy/yahoo-finance-mcp/yfmcp/valuation.py:29-49,280-302` | High |
+| BR-VAL-004 | ADR ratio detection and share-basis mismatch | Validation | `yfmcp/valuation.py:29-49,280-302` | Medium ⚠ |
+| BR-VAL-005 | Filing balances vs Yahoo balances selection (currency and staleness) | Policy | `yfmcp/valuation.py:25-26,305-339` | High |
+| BR-VAL-006 | Historical balances read at the cash date; no-borrowings means zero debt | Calculation | `yfmcp/valuation_history.py:418-455,666-699` | Medium ⚠ |
+| BR-VAL-007 | Historical enterprise value and multiples | Calculation | `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:474-493,648-733` | High |
+| BR-VAL-008 | Historical EV status precedence and no-borrowings rule | Lifecycle | `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:418-455,666-702` | High |
+| BR-VAL-009 | Historical market cap status precedence | Lifecycle | `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:587-646` | High |
+| BR-VAL-010 | Historical market cap, EV and multiples | Calculation | `yfmcp/valuation_history.py:474-493,600-733` | High |
+| BR-VAL-011 | Historical point-in-time share count selection | Policy | `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:234-295,600-646` | High |
+| BR-VAL-012 | Historical price on or before date with later splits undone | Calculation | `yfmcp/valuation_history.py:219-224,587-598` | High |
+| BR-VAL-013 | Historical price: close within 7 days with later splits undone | Calculation | `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:219-224,587-598` | High |
+| BR-VAL-014 | LTM = LFY + YTD - prior YTD | Calculation | `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:172-216` | High |
+| BR-VAL-015 | LTM and LFY flow figures | Calculation | `yfmcp/valuation_history.py:176-216` | High |
+| BR-VAL-016 | LTM flow derivation | Calculation | `yfmcp/valuation_history.py:176-216` | High |
+| BR-VAL-017 | LTM flow metric = last fiscal year + YTD - prior YTD | Calculation | `yfmcp/valuation_history.py:172-216` | High |
+| BR-VAL-018 | LTM flow metric = LFY + YTD - prior YTD | Calculation | `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:172-216` | High |
+| BR-VAL-019 | Metric reconciliation agreement status | Validation | `yfmcp/metric_reconciliation.py:518-555; server.py:10744-10755` | High |
+| BR-VAL-020 | Metric reconciliation status | Lifecycle | `yfmcp/metric_reconciliation.py:553-555,570-591` | High |
+| BR-VAL-021 | Metric reconciliation tolerance and match | Calculation | `yfmcp/metric_reconciliation.py:45,479-486,518-555; server.py:10744-10753` | High |
+| BR-VAL-022 | Metric source reconciliation status | Calculation | `yfmcp/metric_reconciliation.py:518-555` | Medium ⚠ |
+| BR-VAL-023 | Minor-unit quote conversion and currency comparability | Calculation | `yfmcp/valuation.py:170-177,261-264` | High |
+| BR-VAL-024 | Minor-unit quote conversion and currency comparability for multiples | Calculation | `yfmcp/valuation.py:170-216,261-264` | High |
+| BR-VAL-025 | Parent net income derived from ProfitLoss less NCI | Calculation | `legacy/yahoo-finance-mcp/yfmcp/metric_reconciliation.py:223-295` | Medium ⚠ |
+| BR-VAL-026 | Point-in-time fact selection and concept precedence | Policy | `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:143-164` | High |
+| BR-VAL-027 | Point-in-time fact selection: concept priority beats newer filing | Policy | `yfmcp/valuation_history.py:69,143-164` | High |
+| BR-VAL-028 | Point-in-time price with later splits undone | Calculation | `yfmcp/valuation_history.py:219-224,587-598` | High |
+| BR-VAL-029 | Point-in-time SEC fact precedence | Policy | `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:69,143-164` | High |
+| BR-VAL-030 | Point-in-time share count precedence for historical market cap | Policy | `yfmcp/valuation_history.py:234-295,600-646` | High |
+| BR-VAL-031 | Quote vs financial currency comparability | Validation | `legacy/yahoo-finance-mcp/yfmcp/valuation.py:170-177,261-264,393-403` | High |
+| BR-VAL-032 | SEC balance usage guards (currency, staleness, cash cross-checks) | Validation | `yfmcp/valuation.py:305-368` | High |
+| BR-VAL-033 | SEC balances replaced by Yahoo when stale or in another currency | Policy | `legacy/yahoo-finance-mcp/yfmcp/valuation.py:305-340` | High |
+| BR-VAL-034 | SEC vs Yahoo balance-sheet source selection and staleness | Policy | `yfmcp/valuation.py:305-339` | High |
+| BR-VAL-035 | Share basis mismatch falls back to Yahoo count | Validation | `legacy/yahoo-finance-mcp/yfmcp/valuation.py:33,288-302` | High |
+| BR-VAL-036 | Share basis mismatch falls back to Yahoo share count | Validation | `yfmcp/valuation.py:33,288-302` | High |
+| BR-ERN-001 | Earnings actual vs estimate period alignment and surprise | Calculation | `legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:654-840` | High |
+| BR-ERN-002 | Guidance amount scaling | Calculation | `yfmcp/guidance_history.py:28-46; yfmcp/tools/earnings.py:548-551` | High |
+| BR-ERN-003 | Guidance amount scaling | Calculation | `legacy/yahoo-finance-mcp/yfmcp/guidance_history.py:28-46,214-231` | High |
+| BR-ERN-004 | Guidance extraction status (FOUND / NOT_DISCLOSED / NOT_READ) | Lifecycle | `legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:487-606` | High |
+| BR-ERN-005 | Reported actuals period labelling for guidance outcomes | Calculation | `legacy/yahoo-finance-mcp/yfmcp/guidance_history.py:343-413` | High |
+| BR-EVD-001 | Consensus provider agreement | Calculation | `yfmcp/evidence.py:518-572` | High |
+| BR-EVD-002 | Consensus provider agreement classification | Validation | `yfmcp/evidence.py:470-572,699-708` | High |
+| BR-EVD-003 | Cross-provider consensus agreement status | Calculation | `yfmcp/evidence.py:518-572` | High |
+| BR-EVD-004 | Evidence cut integrity verification | Validation | `server.py:12327-12352` | High |
+| BR-EVD-005 | Evidence storage write-once lifecycle | Lifecycle | `yfmcp/evidence_store.py:93-104` | High |
+| BR-SHR-001 | Decision-grade SEC XBRL fact | Validation | `legacy/yahoo-finance-mcp/server.py:8533-8547` | High |
+
+## 3. Suspected defects found during extraction
+
+While reading the code, the referees and judges noted places where the code contradicts its own documentation, the other runtime, or itself. **These are reported, not fixed.** Under `CLAUDE.md`, resolving a Python/TS divergence, changing an output field or changing a threshold is a planner decision. A modernization phase must preserve today's behaviour, defects included, until each item is decided. Rows marked **parity** are cases where the two runtimes already disagree.
+
+| ID | Pri | Rule | Suspected defect |
+|---|---|---|---|
+| BR-ENV-001 | P1 | Default fact confidence and decision-grade tagging | **parity** A populated value with no confidence inherits HIGH by default (lines 223-225), overstating confidence for untagged facts. |
+| BR-ENV-005 | P1 | SEC accession number format check | **parity** No equivalent accession-format check exists anywhere in worker/src/*.ts (grep found none), so the Worker diverges from Python. |
+| BR-ENV-007 | P1 | Ticker symbol format check | **parity** Parity gap. The Worker's validateTicker (worker/src/validate.ts:1-9) is called only from get_historical_prices, so the Worker accepts malformed tickers in SEC, news and filing tools that Python rejects. |
+| BR-ENV-008 | P2 | Data cache freshness tiers | is_stale (age > 2x TTL) can never be surfaced through get(), which already returns a miss at age >= TTL, so a 'stale but cached' path is unreachable through get(). |
+| BR-PRC-014 | P1 | N-day price slope and direction | **parity** The Python single-ticker path does not validate the ticker, and int(days) raises on non-numeric input. The Worker falls back to 5. |
+| BR-PRC-017 | P1 | Options flow scan: IV vs realized range, put volume proxy, trend and bracket | The deprecated aliases ivPctile and putVolVs10dAvg are still emitted, and their names misdescribe the measures (their fieldNotes say so). |
+| BR-PRC-019 | P1 | Price CAGR over 1, 3 and 5 years | When a listing has less history than the window (e.g. 2 years of data for cagr5y), the code still divides by the nominal 5 years using the earliest available close, understating the annual rate instead of returning null. |
+| BR-PRC-021 | P1 | Price stats: percent distances and CAGR | **parity** When history is shorter than N years (for example a stock listed 2 years ago), the subset is the whole series but the exponent still uses N. The 5-year CAGR is then understated rather than null. Python uses a calendar DateOffset, while the Worker (worker/src/yahoo-finance.ts:2764-2774) uses 365.25-day years and returns null only when the start equals the end, so the two can pick different start b… |
+| BR-PRC-022 | P1 | Price target bracket and tag | **parity** Python uses round() (banker's on binary floats) while TS uses toFixed(1); dataDate falls back to today in TS (yahoo-finance.ts:7899) but null in Python (server.py:7968-7984): a parity divergence |
+| BR-PRC-024 | P1 | Put hedge expiry selection (skip expiries under 7 days) | **parity** The fallback to all expiries brings back the sub-week contracts the rule is meant to skip, and the output does not flag that this happened. |
+| BR-PRC-033 | P1 | Volume ratio and volume flag | **parity** Parity divergence. Python gives ratio null and flag null when lastVolume is 0 ('if last_vol and avg_10d'). The Worker gives ratio 0 and flag LOW (worker/src/yahoo-finance.ts:4170-4177). The Worker also divides by the integer-rounded average while Python uses the unrounded one, so ratios can differ in the third decimal. |
+| BR-PRC-040 | P2 | Market snapshot batch cap and status | **parity** changePct uses `price_stats.pctChangeTodayVsPrevClose or recompute`, so a true 0.0 change falls through to recomputation and precision switches from 4 to 2 decimals; the value stays 0, but the fallback logic treats zero as missing. |
+| BR-PRC-046 | P2 | Stock screener count cap and name allow-list | **parity** The 'US' exchange filter omits NASDAQ Global Market (NGM), Capital Market (NCM) and NYSE American (ASE) listings. |
+| BR-FND-004 | P1 | Credit health operational EBITDA, net debt and coverage | If fewer than 4 income quarters exist, the 'TTM' sum covers fewer quarters but is still treated as annual, which understates EBITDA and coverage. It is flagged only as PARTIAL. |
+| BR-FND-006 | P1 | Credit health: net debt, operational EBITDA and leverage ratios | **parity** If only 'Long Term Debt' exists it stands in for total debt, which understates debt. A TTM built from fewer than 4 quarters is still labelled annual and only flagged PARTIAL. |
+| BR-FND-007 | P1 | Credit stress flag and debt tier | **parity** A loss-making company with net debt gets a negative leverage ratio and is tiered CLEAN. |
+| BR-PRV-002 | P1 | Expanded ownership provider eligibility and scarce fallback opt-in | **parity** If the policy file can't be read, _finnhub_eligible fails open and treats every ticker as eligible. |
+| BR-PRV-003 | P1 | Finnhub market eligibility (fails open) | On any read/parse error the function returns eligible=True, so an unreadable policy silently spends entitlement-dependent calls on ineligible markets. |
+| BR-EXT-003 | P0 | Convertible note if-converted shares and principal basis | **parity** The in-the-money test is price >= conversion price for convertibles and preferred, but price > strike for options and warrants. At exactly the strike, a convertible counts all its shares while an option counts zero (treasury-stock gives 0 anyway), so the boundary rule is inconsistent across instruments. |
+| BR-EXT-035 | P1 | Automatic 20-F fallback for geographic and segment revenue | **parity** On fallback success, confidence defaults to HIGH when the 20-F payload gives none (line 9631), whereas the primary path defaults to NOT_DISCLOSED. |
+| BR-EXT-044 | P1 | Contractual obligation schedule buckets | _add_years copies month-day, so a period end of 2024-02-29 plus one year gives the invalid date '2025-02-29'. |
+| BR-EXT-045 | P1 | Contractual obligation schedule buckets and schedule status | _add_years only replaces the year string. A Feb 29 period end plus 1 year produces an invalid date such as '2025-02-29'. |
+| BR-EXT-059 | P1 | Funding amount range, qualifier and missing-scale rule | **parity** The money regex `(?:US)?\$` also matches the '$' inside 'NT$' or 'A$', but currency is always written as USD, so non-US dollar amounts would be mislabelled. |
+| BR-EXT-063 | P1 | Funding text item amount status and forced UNRESOLVED | **parity** A SCALE_NOT_STATED item keeps its stated classification (for example COMMITTED) with null amounts. It is not moved to UNRESOLVED, even though no usable amount exists. |
+| BR-EXT-064 | P1 | Funding text item eligibility and unresolved reason | **parity** Text amounts are always labelled USD (line 240) regardless of the '$' context (e.g. 'US$' vs other dollar currencies); a non-US filer's dollar figures could be mislabelled. |
+| BR-EXT-082 | P1 | Scenario convertible treatment and in-the-money test | The in-the-money test is inclusive (>=) for convertibles but strict (>) for options and warrants. This may be intentional; confirm with an SME. |
+| BR-EXT-083 | P1 | Scenario convertible treatment including net-share settlement | **parity** In-the-money convention differs: convertibles count at price equal to the conversion price (>=) while options/warrants need price strictly above the strike (>). Probably harmless at equality for treasury stock (yields 0) but should be confirmed for parity with the dilution bridge. |
+| BR-EXT-084 | P1 | Scenario warrant vesting basis | When the 'exercisable' key is missing entirely, outstanding is used under vested_only. Only a key that is present but holds null gives an unresolved line, which seems to go against the stated intent. |
+| BR-EXT-110 | P2 | Contractual obligation bucket dates | **parity** _add_years does string arithmetic on the year, so a 2024-02-29 period end produces the invalid date 2025-02-29 (same in worker addYears and capital_structure.py:2537-2538); server.py:11955-11960 handles Feb 29 correctly. |
+| BR-VAL-019 | P0 | Metric reconciliation agreement status | In Python, float('nan') clamps to 0.0 via min/max before the isfinite check, so a NaN tolerance becomes 0% instead of the documented 0.5% default. |
+| BR-VAL-020 | P0 | Metric reconciliation status | **parity** The worker tool description (worker/src/tools.ts:557) says 'AGREED (two or more providers agree)', while the Python description (server.py:10742) and both codepaths require a latest-SEC baseline. This breaks the documented parity. |
+| BR-VAL-046 | P1 | Enterprise value in valuation snapshot | The convertible-principal deduction (valuation.py:373-377) is not gated on sec_usable, unlike the preferred adjustment (line 382). When SHARE_BASIS_MISMATCH falls back to Yahoo basic shares (no convertible shares counted), debt is still reduced by convertible principal, which understates EV. |
+| BR-VAL-063 | P1 | Reconciliation tolerance input clamp | **parity** Python clamps before the isfinite check, so the check is dead: +inf -> 10, NaN -> 0 (max(0.0, nan) returns 0.0), while TS returns 0.5 for both; violates the runtime parity rule |
+| BR-VAL-064 | P1 | Release figure selection when multiple releases are read | The docstring says 'the first with a scoped figure' but the code takes found[-1] (the newest). Both runtimes match each other but contradict the documentation. |
+| BR-VAL-068 | P1 | Reporting unit and period windows for metric reconciliation | **parity** Q<n> <yyyy> selects by calendar quarter of the period end (ceil(month/3)), so a 52/53-week quarter ending Jan 1-3 is treated as Q1 of the next year, unlike the 7-day drift rule in fiscal_calendar.py. |
+| BR-VAL-074 | P1 | Snapshot enterprise value formula with convertible and preferred adjustments | **parity** The convertible principal is taken out of debt (lines 371-377) whenever the bridge shows incrementalShares > 0, even when the SEC count is unusable (sec_usable false) or the bridge has no dilutedSharesAtPrice, so the shares used are Yahoo/basic counts that do not include the conversion shares. In that case the convertible is in neither debt nor shares and EV is understated. The preferred adjustme… |
+| BR-VAL-082 | P1 | Valuation snapshot enterprise value and status | The convertible principal is taken out of debt whenever the bridge shows incrementalShares > 0, even when sec_usable is false. In that case diluted shares are null and Yahoo's basic count is used, so the convertible is removed from debt without being added to shares. The preferred adjustment does check sec_usable. |
+| BR-ERN-009 | P1 | Earnings call transcript source waterfall | **parity** _next_transcript_fallback treats SKIPPED as untried, and company_ir/public_transcript_url are always SKIPPED, so the recommendation is always company_ir regardless of what else failed. |
+| BR-ERN-010 | P1 | Earnings metrics extraction confidence | No code path assigns HIGH to any metric, so the overall HIGH branch (lines 468-469) is unreachable. |
+| BR-ERN-017 | P1 | Earnings release source URL policy (paywall block) | **parity** The paywall check matches exact hostnames only, so subdomains of blocked publishers pass. The tool description says 'must be SEC or company IR', but no IR check exists. Same in the Worker (worker/src/yahoo-finance.ts:16771-16799). |
+| BR-ERN-018 | P1 | Earnings surprise percentages and near-zero EPS guard | **parity** Actual EPS comes from Yahoo's epsActual first and falls back to the release only when Yahoo has none (lines 738-741). The 'actual' is therefore not the official figure, even though revenue is. Python round() is half-even while the Worker uses toFixed, which can differ on exact .5 ties. |
+| BR-ERN-031 | P1 | Revenue and EPS surprise calculation | **parity** An EPS estimate of exactly 0 goes down the EPS_ESTIMATE_UNAVAILABLE branch, so no epsDelta is calculated, although the near-zero rule exists to give a delta in that case. Also, the actual EPS used is Yahoo's epsActual, not the official release figure. |
+| BR-ERN-039 | P2 | Management commentary confidence by source | The resolver labels EX-99.1 sources 'sec_8k_ex991', which fails the != 'sec_8k' test. So the main SEC press-release path is reported MEDIUM, not HIGH. |
+| BR-NWS-002 | P1 | Event verification query term threshold | Using 0.67 rather than 2/3 means a 3-term query requires all 3 terms (ceil(2.01)=3) and a 6-term query requires 5, which is stricter than the apparent two-thirds intent. |
+| BR-NWS-007 | P1 | News source coverage state and recommended next action | failed_states in _build_coverage (lines 315-320) includes WEBSITE_NOT_AVAILABLE, DISCOVERY_NOT_FOUND, DISCOVERY_BUDGET_EXHAUSTED, FEED_NOT_FOUND and PARSE_ERROR, but _compute_source_coverage (2402-2406) does not, so a response can list failedSources while reporting coverage state FULL. |
+| BR-NWS-008 | P1 | Ticker mention compatible with listing exchange | _normalize_exchange checks 'NYSE' before 'NYSE AMERICAN'/'AMEX', so 'NYSE American' (and 'NYSEArca') normalize to NYSE; also 'GS' substring maps any exchange code containing GS to NASDAQ. |
+| BR-NWS-010 | P2 | Event type from keywords (first matching category wins) | Substring keyword matching misclassifies (e.g. 'takes steps' -> earnings, 'raises capital' -> guidance), which then drives decisionUse for Yahoo items. |
+| BR-EVD-020 | P1 | Evidence cut component status and receipt coverage | The LIMITED regex is a substring match, so for example 'NOT_FOUND' also matches statuses like 'PERIOD_NOT_FOUND' (intended) but would also match any future status containing these fragments. |
+| BR-EVD-041 | P2 | Evidence cut listing order | **parity** LocalDirStore.list sorts ascending then truncates (evidence_store.py:53-54), so 'newest first' drops the newest beyond 1,000 cuts / 400 observation days |
+| BR-SHR-003 | P1 | Analyst price-target direction, mixed signal and strength flag | strengthFlag checks signal == DOWNGRADE before mixed_signal, so a downgrade with a raised target is reported BEARISH, not MIXED, even though mixedSignal is true. Only upgrades can show MIXED. |
+| BR-SHR-004 | P1 | Analyst radar: price-target direction, mixed signal and net sentiment | strengthFlag precedence (server.py:7448-7455) makes a mixed downgrade BEARISH, while a mixed upgrade becomes MIXED, so the treatment is asymmetric. |
+| BR-SHR-006 | P1 | Batch ticker cap of 5 (Worker only) | **parity** Parity divergence. Python processes unlimited batches while the Worker truncates at 5. |
+| BR-SHR-010 | P1 | Current beat streak counted in provider row order | **parity** The code comment says 'consecutive from most recent', but the code iterates in provider order. Yahoo earningsHistory is normally oldest-first (-4q to -1q), so the streak may be measured from the wrong end. The Worker (worker/src/yahoo-finance.ts:4605-4611) does the same. |
+| BR-SHR-012 | P1 | Earnings beat rate, beat streak and pre-revenue rule | **parity** currentBeatStreak walks earningsHistory in provider order and stops at the first miss. If Yahoo/yfinance returns rows oldest first, which yfinance earnings_history usually does, this counts from the oldest quarter, not the most recent. Both runtimes do the same. |
+| BR-SHR-016 | P1 | Form 4 insider transaction value | **parity** Only the first transaction is parsed (root.find / first matching row). A Form 4 with several lines (for example an M exercise followed by an S sale) reports only the first, so the reported value can misstate the filing. |
+
+## 4. Rule cards
+
+### Envelope, schemas & cross-cutting
+
+#### BR-ENV-001 · Default fact confidence and decision-grade tagging
+
+**P1** · Policy · Confidence **Medium**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/envelope.py:208-358`
+
+Every fact in a tool response gets a confidence of HIGH/MEDIUM/LOW/NOT_DECISION_GRADE (NOT_DISCLOSED becomes NOT_DECISION_GRADE, unknown values become LOW), an inferred source type from its evidence URL, evidenceRequired=true, and decisionGrade=false unless the tool set it.
+
+- **Given** A fact {value: 1.2e9} with no confidence and no evidence
+- **When** The envelope is built
+- **Then** confidence HIGH, sourceType from parent or 'unknown', decisionGrade false, evidence null
+- **Parameters:** Source inference: sec.gov companyfacts/submissions/.xml -> sec_xbrl; ix?doc=/index -> sec_table; other sec.gov -> sec_filing; yahoo.com -> yahoo; 'ir.'/'investor' -> company_ir
+- **Edge cases:**
+  - OHLC price bars and evidence-pack payloads are passed through unchanged
+  - Decision-grade XBRL facts keep their sourceEvidence
+- **Suspected defect:** A populated value with no confidence inherits HIGH by default (lines 223-225), overstating confidence for untagged facts.
+- **SME question:** Should a value with no stated confidence and no evidence default to HIGH, or to NOT_DECISION_GRADE?
+
+#### BR-ENV-002 · Input validation for ticker, accession number and SEC URL
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/validation.py:12-35`
+
+Tickers must be 1-20 characters of uppercase letters, digits or . - ^ = (after trimming and uppercasing); accession numbers must be 10 digits-2 digits-6 digits; SEC document URLs must start with https://www.sec.gov/Archives/.
+
+- **Given** Ticker 'brk.b', accession '0001234567-24-000123', URL 'http://sec.gov/x'
+- **When** inputs are validated
+- **Then** the ticker passes as BRK.B, the accession passes, and the URL is rejected
+
+#### BR-ENV-003 · Option chain data quality grade
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/util.py:61,64-170`
+
+An option chain is graded LOW, MEDIUM or HIGH from four shares of contracts: zero bid or ask, zero open interest, placeholder IV, and a last trade more than 5 days old. Any one share over its limit triggers that grade.
+
+- **Given** 100 contracts: 35 with zero bid/ask, 40 with zero OI, 10 with IV <= 0.0001, 5 stale
+- **When** quality is computed
+- **Then** quality MEDIUM (zero bid/ask 35% > 30%); no MAJORITY_* warnings
+- **Parameters:** LOW: zeroBidAsk > 50% or zeroOI > 80% or placeholderIV > 50% or stale > 50%; MEDIUM: > 30% / > 50% / > 30% / > 30%; placeholder IV <= 0.0001; stale > 5 days; empty chain = LOW + NO_CONTRACTS_RETURNED
+- **Edge cases:**
+  - Epoch last-trade values > 1e10 are treated as milliseconds
+  - Unparseable data_date skips the staleness test
+
+#### BR-ENV-004 · Options chain data-quality grade
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/util.py:61-170`
+
+A chain is graded LOW if more than 50% of contracts have zero bid/ask, more than 80% have zero OI, more than 50% have placeholder IV, or more than 50% have a last trade over 5 days old. It is graded MEDIUM at 30% / 50% / 30% / 30%, and HIGH otherwise.
+
+- **Given** 100 contracts, 35 with zero bid or ask, 20 zero OI, 5 placeholder IV, 10 stale
+- **When** Data quality is computed
+- **Then** quality = MEDIUM (zero bid/ask 35% > 30%)
+- **Parameters:** placeholder IV <= 0.0001; stale last trade > 5 days; LOW: 0.50/0.80/0.50/0.50; MEDIUM: 0.30/0.50/0.30/0.30; epoch > 1e10 treated as ms
+- **Edge cases:**
+  - Empty chain: LOW with NO_CONTRACTS_RETURNED
+  - Warnings use the >50% rule for every dimension, including OI
+
+#### BR-ENV-005 · SEC accession number format check
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/validation.py:13,24-28`
+
+An SEC accession number must have the form 10 digits, dash, 2 digits, dash, 6 digits.
+
+- **Given** accession_number '0000320193-24-000123' and another '320193-24-123'
+- **When** get_filing_outline, get_sec_filing_index or query_sec_filing_index runs (server.py:4033, 8951, 11617)
+- **Then** The first is accepted. The second is rejected with INPUT_VALIDATION_ERROR 'Expected format: XXXXXXXXXX-YY-ZZZZZZ.'
+- **Parameters:** Pattern ^\d{10}-\d{2}-\d{6}$
+- **Edge cases:**
+  - Leading and trailing whitespace is stripped before matching
+- **Suspected defect:** No equivalent accession-format check exists anywhere in worker/src/*.ts (grep found none), so the Worker diverges from Python.
+
+#### BR-ENV-006 · SEC document URLs restricted to the EDGAR Archives
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/validation.py:31-35`
+
+Any SEC document URL a caller supplies must start with https://www.sec.gov/Archives/. Other hosts and paths are refused.
+
+- **Given** document_url 'https://www.sec.gov/cgi-bin/browse-edgar?...'
+- **When** get_filing_section, list_filing_tables, get_filing_table, extract_filing_fact or search_sec_filing_text runs
+- **Then** Returns INPUT_VALIDATION_ERROR "Invalid SEC URL: must start with 'https://www.sec.gov/Archives/'."
+- **Parameters:** Allowed prefix https://www.sec.gov/Archives/ (case-sensitive)
+- **Edge cases:**
+  - http:// or upper-case variants are rejected
+  - The Worker enforces the same prefix inline (worker/src/yahoo-finance.ts:7289-7290, 8628, 8854, 8955, 9005)
+
+#### BR-ENV-007 · Ticker symbol format check
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/validation.py:12-21`
+
+A ticker is accepted only if, after trimming and upper-casing, it is 1 to 20 characters made of letters, digits or the characters . - ^ =.
+
+- **Given** A caller passes ticker ' brk-b ' and another passes 'AAPL$'
+- **When** Any tool that validates tickers runs
+- **Then** 'BRK-B' passes. 'AAPL$' is rejected with INPUT_VALIDATION_ERROR: "Invalid ticker symbol: 'AAPL$'. Must be 1-20 characters: uppercase letters, digits, or . - ^ ="
+- **Parameters:** Pattern ^[A-Z0-9.\-\^=]{1,20}$; max length 20
+- **Edge cases:**
+  - Lower-case input is upper-cased before the check, so it passes
+  - Empty string fails the check
+  - The Worker runs this check only in get_historical_prices (worker/src/tools.ts:2024-2031). Python runs it in about 30 tools (server.py:2743, 3967, 4025, 8279, 11613 and others)
+- **Suspected defect:** Parity gap. The Worker's validateTicker (worker/src/validate.ts:1-9) is called only from get_historical_prices, so the Worker accepts malformed tickers in SEC, news and filing tools that Python rejects.
+
+#### BR-ENV-008 · Data cache freshness tiers
+
+**P2** · Policy · Confidence **Medium**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/cache.py:13-80`
+
+Tool results are reused for a fixed time by data type: prices 5 minutes; analyst, options and news 15 minutes; financial statements 4 hours; EDGAR 24 hours. At most 2,048 entries are kept, and expired entries are evicted first, then the oldest.
+
+- **Given** A price quote cached at 10:00:00
+- **When** The same request arrives at 10:04:59 and again at 10:05:00
+- **Then** The first is served from cache with cachedAt; the second is a miss and is refetched
+- **Parameters:** TTL_PRICE 300s, TTL_ANALYST 900s, TTL_OPTIONS 900s, TTL_NEWS 900s, TTL_FINANCIALS 14,400s, TTL_EDGAR 86,400s, max_entries 2048, stale threshold 2 x TTL
+- **Suspected defect:** is_stale (age > 2x TTL) can never be surfaced through get(), which already returns a miss at age >= TTL, so a 'stale but cached' path is unreachable through get().
+- **SME question:** Is a stale-while-revalidate window (serve up to 2x TTL) intended for any tool, or is is_stale dead code?
+
+#### BR-ENV-009 · Error message classification for retry
+
+**P2** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/envelope.py:436-462`
+
+A plain error message mentioning a rate limit or an HTTP 429 status is a retryable RATE_LIMIT; one mentioning a timeout is a retryable PROVIDER_TIMEOUT.
+
+- **Given** Error text 'HTTP 429 Too Many Requests'
+- **When** The failure is classified
+- **Then** errorCode RATE_LIMIT, retryable true; a URL containing '429' alone is not a rate limit
+- **Parameters:** 429 pattern: (error|http|status)[: ]*429
+
+#### BR-ENV-010 · Option contract relevance ordering
+
+**P2** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/util.py:173-221`
+
+Option contracts are listed by: valid two-sided quote, then liquidity (OI or volume > 0), then a valid IV, then closeness to the money, then higher open interest, higher volume and tighter spread.
+
+- **Given** Underlying $100 with a $100 strike (bid 2 / ask 2.2) and a $95 strike (bid 0)
+- **When** _sort_by_relevance runs
+- **Then** The $100 contract sorts first; spread% = (2.2 - 2)/2.1 = 9.5%
+- **Parameters:** Spread for invalid quotes = 9999; IV placeholder threshold _PLACEHOLDER_IV_THRESHOLD (0.0001 per docstring)
+
+#### BR-ENV-011 · Ticker, accession and SEC URL format validation
+
+**P2** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/validation.py:12-35`
+
+Tickers must be 1-20 characters of uppercase letters, digits or . - ^ = (after trim and uppercase). Accession numbers must be NNNNNNNNNN-NN-NNNNNN. SEC document URLs must start with https://www.sec.gov/Archives/.
+
+- **Given** Ticker 'brk.b' and accession '0000320193-24-000123'
+- **When** They are validated
+- **Then** Both pass ('BRK.B'); 'AAPL$' would be rejected
+
+### Yahoo pricing, technicals, options & screening
+
+#### BR-PRC-001 · Completed-session bar rule (exclude today's unfinished bar)
+
+**P0** · Lifecycle · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/tools/pricing.py:772-822`
+
+A daily bar counts as completed only after its trading session has closed and it has a close or adjusted close. While a session is open, today's bar is dropped, and trailing bars with no close are trimmed.
+
+- **Given** Exchange regular session 09:30-16:00 ET, now 11:00 ET, and the last history row is dated today
+- **When** Completed daily history is prepared for slope, volume ratio or historical prices
+- **Then** Today's row is removed from the completed series and excludedIncompleteBar=true. In historical prices that row is marked barStatus INCOMPLETE, isFinal=false.
+- **Parameters:** Session active when regularStart <= now < regularEnd (currentTradingPeriod.regular)
+- **Edge cases:**
+  - Only trailing rows with no close are trimmed; gaps inside the series are kept so later checks fail closed
+  - If metadata is missing, the session is treated as not active
+  - In historical prices, a failure while preparing marks every bar barStatus UNKNOWN, isFinal=false (pricing.py:174-177)
+
+#### BR-PRC-002 · Daily price freshness classification (CURRENT / STALE / UNKNOWN)
+
+**P0** · Validation · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/tools/pricing.py:830-864`
+
+Outside market hours, the latest completed bar must be on or after the date of Yahoo's last regular-market time. During a session, the previous close must match Yahoo's previousClose, or the last bar must be from the weekday before today.
+
+- **Given** Market closed, regularMarketTime is 2026-10-13 and the last completed bar is 2026-10-12
+- **When** Freshness is evaluated
+- **Then** freshnessStatus=STALE and expectedCompletedDate=2026-10-13. During a session, a last close of 100.00 against previousClose 100.005 is CURRENT (tolerance max(0.01, 1e-6 x previousClose)).
+- **Parameters:** Close-match tolerance = max(0.01, |previousClose| x 1e-6); weekday fallback uses Mon-Fri only, ignoring holidays
+- **Edge cases:**
+  - After a Monday holiday the weekday fallback cannot prove Tuesday's prior session, so the result is UNKNOWN
+  - A missing regularMarketTime gives UNKNOWN
+- **SME question:** Should exchange holidays be considered when proving the previous session (the weekday-only fallback reports UNKNOWN after holidays)?
+
+#### BR-PRC-003 · Listing currency to USD conversion with minor units
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/tools/pricing.py:1449-1489`
+
+Prices quoted in minor units (GBp/GBX pence, ZAc cents, ILA agorot) are divided by 100 and then converted at Yahoo's <ISO>=X rate (ISO units per USD). If the rate is missing or not positive, the gate is UNKNOWN.
+
+- **Given** LSE listing in GBp, close 250 GBp, volume 2,000,000/day, GBP=X 0.79
+- **When** traded value is converted
+- **Then** local per USD = 0.79 × 100 = 79; 500,000,000 GBp ÷ 79 = $6.33M; gate FAIL
+- **Parameters:** minor-unit map GBp/GBX→GBP÷100, ZAc→ZAR÷100, ILA→ILS÷100
+
+#### BR-PRC-004 · 30-day annualized volatility
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:581-592,449-451`
+
+Volatility % = sample standard deviation of the last 30 daily log returns x sqrt(252) x 100, rounded to 4 decimals.
+
+- **Given** Daily log-return sample standard deviation of 2%
+- **When** Price stats run
+- **Then** Volatility = 0.02 x 15.875 x 100 = 31.7490%
+- **Parameters:** window 30; 252 trading days; requires 31 closes
+
+#### BR-PRC-005 · Adjusted vs unadjusted close series selection
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:890-909`
+
+Calculations use adjusted closes only when every bar has one, otherwise unadjusted closes if all are present (flagged fallbackUsed), otherwise fail.
+
+- **Given** A window where one adjusted close is null but all raw closes exist
+- **When** A close series is selected
+- **Then** UNADJUSTED_CLOSE series used, fallbackUsed true
+
+#### BR-PRC-006 · ATM IV placed in 1-year realized-volatility range
+
+**P1** · Calculation · Confidence **High**  
+Source: `server.py:7728-7810`
+
+The 'IV percentile' places the nearest-strike call's IV within the min–max range of rolling 30-day realized volatility (annualised with √252) over the last year. It is clamped to 0–100 and left out when bars are stale or incomplete, or when most IVs are placeholders.
+
+- **Given** ATM IV 0.45, rolling RV min 0.30, max 0.60
+- **When** the scan computes ivVsRealizedRangePct
+- **Then** (0.45−0.30)/(0.60−0.30)×100 = 50
+- **Parameters:** window 30 sessions; ≥31 closes; ≥5 RV points; annualisation √252; placeholder IV ≤ 0.0001
+- **Edge cases:**
+  - rv_max == rv_min gives null
+  - STALE daily bars add IV_PERCENTILE_UNAVAILABLE_STALE_DAILY_BARS
+
+#### BR-PRC-007 · Completed daily bar freshness
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `yfmcp/tools/pricing.py:772-875`
+
+During a regular session the in-progress bar is excluded and the series is CURRENT only if the last completed close equals Yahoo's previousClose (within max(0.01, 1e-6 x close)) or the last bar is from the previous weekday; outside a session it is STALE if the last completed date precedes the regularMarketTime session date.
+
+- **Given** Active session, previousClose 187.42, last completed close 185.10
+- **When** A completed daily series is prepared
+- **Then** freshnessStatus STALE, which triggers one reload and STALE_BAR outputs with no indicator values
+- **Parameters:** Tolerance max(0.01, |previousClose| x 1e-6); retry once on STALE (pricing.py:972-987); mirror worker/src/yahoo-finance.ts:3791-3904
+- **Edge cases:**
+  - trailing rows with both closes null are trimmed
+  - previous-weekday test ignores exchange holidays, so it yields UNKNOWN after a holiday
+
+#### BR-PRC-008 · Completed daily bar freshness
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:772-875,944-992`
+
+During a regular session today's bar is excluded; trailing rows with no close are dropped; the latest completed bar is CURRENT if it matches the expected session (or Yahoo's previous close within max(0.01, 0.0001% of price)), STALE otherwise; stale or gappy data is re-fetched once.
+
+- **Given** Market open, previousClose 150.00 and last completed close 150.005
+- **When** History is prepared
+- **Then** Difference 0.005 <= 0.01 tolerance, freshnessStatus CURRENT
+- **Parameters:** Tolerance max(0.01, |prevClose| x 1e-6); one retry
+- **Edge cases:**
+  - Without previousClose, CURRENT only if last bar is the previous weekday
+  - STALE -> tools return STALE_BAR and RETRY
+
+#### BR-PRC-009 · Hedge screen status and budget feasibility
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `server.py:7293-7323`
+
+If chain quality is LOW, or contracts were in the band but none qualified, the hedge screen is PARTIAL and budget feasibility is unknown. Otherwise feasibility is true when at least one candidate fits the budget, and the shortfall to the cheapest candidate is reported.
+
+- **Given** Candidates exist, cheapest costs $620, budget $500, chain quality MEDIUM
+- **When** status is computed
+- **Then** status OK, budgetFeasible false, budgetGapUsd 120.00
+- **Parameters:** recommendedNextAction RETRY when PARTIAL
+- **Edge cases:**
+  - No contracts in the band at all: EMPTY_RESULT with budgetFeasible false
+  - Quality LOW: budgetFeasible null even if candidates fit
+
+#### BR-PRC-010 · Historical price period and interval allow-lists
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/tools/pricing.py:47-58,81-96`
+
+Historical prices can be requested only for the documented Yahoo ranges and bar intervals, because Yahoo answers unknown values with a single misleading live bar instead of an error.
+
+- **Given** ticker 'AAPL', period '2mo', interval '1d'
+- **When** get_historical_stock_prices runs
+- **Then** Returns INPUT_VALIDATION_ERROR 'period must be one of: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max'. A blank ticker returns 'ticker is required'.
+- **Parameters:** Periods {1d,5d,1mo,3mo,6mo,1y,2y,5y,10y,ytd,max}; intervals {1m,2m,5m,15m,30m,60m,90m,1h,1d,5d,1wk,1mo,3mo}; defaults period=1mo, interval=1d
+- **Edge cases:**
+  - The period is checked before the interval, so only the first error is reported
+  - The Worker mirror is worker/src/yahoo-finance.ts:1597-1608 and tools.ts:2032-2035
+
+#### BR-PRC-011 · Liquidity gate: $10M 20-day average traded value
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/tools/pricing.py:1441-1462,1589-1633`
+
+A stock passes the liquidity gate when its average daily traded value (volume × unadjusted close) over the 20 completed sessions before the latest one, converted to USD, is at least $10M.
+
+- **Given** 20 prior sessions each 500,000 shares at £0.25 (GBp listing 25p), GBP=X 0.80 GBP per USD
+- **When** get_volume_gate runs
+- **Then** ADV20 value = 12,500,000 GBp, localPerUsd = 0.80 × 100 = 80, adv20dTradedValueUsd = $156,250, gatePass = false
+- **Parameters:** LIQUIDITY_GATE_MIN_ADV_USD = 10,000,000; window exactly 20 prior sessions; minor units GBp/GBX/ZAc/ILA = 1/100; adv10/20/90 = rounded mean of prior volumes; ratio20d = last volume / adv20 (2dp)
+- **Edge cases:**
+  - Any of the 20 prior sessions missing volume or close: gate UNKNOWN, RETRY
+  - FX quote unavailable: gate UNKNOWN
+  - Stale bars: STALE_BAR, gatePass null
+  - The foreign_exchange parameter is ignored
+
+#### BR-PRC-012 · Liquidity gate: $10M average daily traded value
+
+**P1** · Policy · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/tools/pricing.py:1439-1441,1458-1462,1589-1633`
+
+A listing passes the liquidity gate when its average daily traded value (volume × unadjusted close) over the 20 completed sessions before the latest one, converted to USD, is at least $10M. All 20 sessions must have both volume and close.
+
+- **Given** 20 prior sessions averaging 400,000 shares × $30.00 close, USD listing
+- **When** the volume gate runs
+- **Then** adv20dTradedValueUsd $12,000,000, gatePass true
+- **Parameters:** LIQUIDITY_GATE_MIN_ADV_USD = 10,000,000; window 20 prior sessions; ratio20d = latest volume ÷ prior 20-day ADV
+- **Edge cases:**
+  - Fewer than 20 complete prior sessions gives gatePass null and RETRY
+  - The foreign_exchange argument is ignored; non-USD listings are always converted
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (Faithful: yes. In yfmcp/tools/pricing.py, line 1441 sets LIQUIDITY_GATE_MIN_ADV_USD = 10_000_000. Lines 1458-1462 (_average_traded_value) return the mean of volume x close over exactly the requested number of sessions, and return None if any session is missing either value. Lines 1612-1626 build the window from the 20 sessions before the latest one (iloc[:-1].tail(20)), convert to USD using localPerUsd, and set gate_pass = adv >= 10M. The surrounding code labels the close as UNADJUSTED_CLOSE (priceBasis). ratio20d = last_volume / adv20d, where adv20d is the 20-day average share volume (lines 1590-1609). The example checks out: 400,000 x $30 = $12,000,000 >= $10M, so the gate passes. Two details the rule card leaves out: (a) if FX conversion fails, the gate is UNKNOWN (gate_pass None, RETRY), not a fail; (b) minor-unit currencies are normalized first (GBp/GBX/ZAc/ILA divided by 100, lines 1449-1455).
+
+P0 not justified under the compliance lens. This is a liquidity screening threshold inside an informational options-flow scan tool (CR-12, get_options_flow_scan). It moves no money, books nothing, and enforces no regulatory or compliance rule. No regulator, auditor or finance controller depends on a $10M ADV cutoff in a market-data MCP tool. It is a product heuristic, not a control. The rule that all 20 sessions must be complete, and the UNKNOWN result when FX is missing, guard output quality, not record integrity. It matters as a behavior/parity contract (CLAUDE.md treats evidence thresholds as planner-owned and requires Python/TS parity with the Worker's getVolumeGate), so it should be P1 (core product behavior) rather than P0. No instruction-like text and no credentials were found in the cited lines. | Fidelity: I re-derived the rule from /home/user/yahoo-finance-mcp/yfmcp/tools/pricing.py and it matches the code. LIQUIDITY_GATE_MIN_ADV_USD = 10_000_000 is at line 1441. _average_traded_value (1458-1462) returns the mean of volume x close over exactly `count` rows, and returns None if there are fewer rows or if any volume or close is missing. get_volume_gate builds that window from the 20 sessions before the latest completed bar (prior_volumes/prior_closes = iloc[:-1], tail(20), lines 1589 and 1611-1616). The close really is unadjusted: the loader at line 926 uses auto_adjust=False. The result is divided by localPerUsd, which also converts minor-unit listings such as GBp/GBX/ZAc/ILA, and rounded to 2 decimals (1625). The comparison is >= (1627), so exactly $10M passes. ratio20d = round(last_volume / adv20d, 2) (1610), where adv20d is the rounded prior-20 average share volume. The worked example holds: 400,000 x $30.00 in USD gives 12,000,000.00, which is >= 10M, so gatePass is true.
+
+Details the card leaves out:
+- The average is the mean of the daily products, not average volume times average close. The example only works if each day is 400,000 x $30, so it should say that.
+- The 2-decimal rounding happens before the comparison.
+- When the gate can't be decided, gatePass is null (UNKNOWN) with recommendedNextAction RETRY, not false. That happens when there are fewer than 20 complete sessions, the FX rate fails, the currency is unknown, the latest bar is stale (status STALE_BAR), or the latest session has no volume or close (status PARTIAL).
+- ratio20d needs a valid prior-20 share ADV and is left out of the note when it is null.
+
+Priority: P0 isn't justified. This is an informational liquidity screen in a market-data tool. It doesn't move money, place trades or enforce any regulatory requirement. The only data-integrity part is the guard that returns UNKNOWN instead of a verdict when data is incomplete, and that fits better as a sub-rule. The $10M threshold itself is a tunable analytic policy, so P1 fits better.
+
+No instruction-shaped text or credentials appear in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-PRC-013 · MACD(12,26,9)
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:562-578,707-710`
+
+MACD = 12-period EMA - 26-period EMA (each seeded with its first close, k = 2/(span+1)); signal = 9-period EMA of MACD; histogram = MACD - signal; 4 decimals.
+
+- **Given** At least 26 completed closes
+- **When** Technical indicators run
+- **Then** macd, macdSignal and macdHistogram are returned rounded to 4 decimals
+- **Parameters:** fast 12, slow 26, signal 9
+
+#### BR-PRC-014 · N-day price slope and direction
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/tools/pricing.py:1015-1130`
+
+Price slope compares the close N completed sessions ago with the latest completed close. A move smaller than 0.5% either way is FLAT. Stale data returns STALE_BAR with direction UNKNOWN.
+
+- **Given** days=5, adjusted closes 100.00 (6 bars back) and 103.25 (latest)
+- **When** get_price_slope runs
+- **Then** slopePct=3.25, direction=UP, observationCount=6, priceBasis=ADJUSTED_CLOSE. With an end close of 100.40, slopePct=0.40 and direction=FLAT.
+- **Parameters:** days clamped to 1-500 (default 5); required bars = days+1; FLAT band |slope| < 0.5%; lookback range: <=20 days 1mo, <=60 3mo, <=120 6mo, <=250 1y, else 2y; slope rounded to 2 dp
+- **Edge cases:**
+  - Adjusted closes are used only if every bar in the window has one; otherwise unadjusted closes are used if all present (fallbackUsed=true); otherwise error 'Incomplete completed-close series'
+  - A start close of 0 gives slopePct null and direction FLAT
+  - Fewer than days+1 completed bars returns an error
+  - The Worker clamps the same way (yahoo-finance.ts:3948, 4037-4042)
+- **Suspected defect:** The Python single-ticker path does not validate the ticker, and int(days) raises on non-numeric input. The Worker falls back to 5.
+
+#### BR-PRC-015 · Options flow advisory bracket
+
+**P1** · Policy · Confidence **High**  
+Source: `server.py:7851-7859`
+
+With chain quality not LOW, the bracket is UPPER when P/C ≥ 1.3, or ≥ 1.0 with puts increasing. It is LOWER when P/C ≤ 0.8 and puts are not increasing, otherwise MID. No bracket is given on LOW quality.
+
+- **Given** pcRatio 1.10 and putVolTrend INCREASING
+- **When** bracket is classified
+- **Then** bracket UPPER; with pcRatio 0.75 and STABLE trend the bracket is LOWER
+- **Parameters:** 1.3, 1.0, 0.8
+
+#### BR-PRC-016 · Options flow put/call ratio and max-pain strike
+
+**P1** · Calculation · Confidence **High**  
+Source: `server.py:7698-7726`
+
+The put/call ratio is total put volume ÷ total call volume for the next expiry. Max pain is the strike where option holders would collect the least at expiry. Max pain is not given when total open interest is zero.
+
+- **Given** Put volume 12,000, call volume 10,000
+- **When** the options flow scan runs
+- **Then** pcRatio = 1.20; maxPainStrike = strike minimising Σ max(0,K−strike_call)×callOI + Σ max(0,strike_put−K)×putOI
+- **Parameters:** rounding 2 dp
+- **Edge cases:**
+  - call volume 0 gives pcRatio null
+  - call + put OI <= 0 adds warning MAX_PAIN_UNAVAILABLE_ZERO_OI
+
+#### BR-PRC-017 · Options flow scan: IV vs realized range, put volume proxy, trend and bracket
+
+**P1** · Calculation · Confidence **High**  
+Source: `server.py:7760-7859`
+
+ATM IV is placed in the min-max range of 1-year rolling 30-day annualised realised volatility (0–100). Put volume is expressed as a multiple of 1% of the stock's 10-day ADV. Trend is INCREASING if the metric rose more than 10% against the prior window and DECREASING if it fell more than 10%. The advisory bracket is UPPER, MID or LOWER from the P/C ratio.
+
+- **Given** ATM IV 0.45; rolling RV range 0.25–0.65; put volume 20,000; 10d ADV 1,000,000; prior putVolVs10dAvg 1.5; P/C 1.05
+- **When** Options flow scan runs for window T-7 (prior T-14)
+- **Then** ivVsRealizedRangePct = 50; putVolPer1PctStockAdv = 2.0; trend = INCREASING (2.0/1.5 = 1.33 > 1.1); bracket = UPPER (P/C >= 1.0 and increasing)
+- **Parameters:** RV = std(pct returns, 30) x sqrt(252); need >= 31 closes and >= 5 RV points; trend bands 1.1 / 0.9; window chain T-2 to T-7 to T-14; UPPER: P/C >= 1.3, or >= 1.0 with INCREASING; LOWER: P/C <= 0.8 and not INCREASING; else MID; prior reading cached 72h
+- **Edge cases:**
+  - LOW data quality: no bracket
+  - Placeholder IV in more than 50% of contracts: IV percentile unavailable
+  - Stale daily bars: IV percentile unavailable
+- **Suspected defect:** The deprecated aliases ivPctile and putVolVs10dAvg are still emitted, and their names misdescribe the measures (their fieldNotes say so).
+
+#### BR-PRC-018 · Position score inputs completeness
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `server.py:8050-8061,8105-8125`
+
+The position-score bundle is PARTIAL with a RETRY action if any of its six components failed or came back STALE_BAR or PARTIAL. Otherwise it is OK.
+
+- **Given** Price stats returns status STALE_BAR, the other five are fine
+- **When** get_position_score_inputs runs
+- **Then** status PARTIAL, limitedComponents [priceStats], recommendedNextAction RETRY
+- **Parameters:** components: analystUpgrades, analystConsensus, priceStats, earningsMomentum, technicalIndicators, maPosition
+- **Edge cases:**
+  - Pre-revenue companies have avgSurprisePct suppressed in t4_inputs
+
+#### BR-PRC-019 · Price CAGR over 1, 3 and 5 years
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:453-470`
+
+CAGR % = ((last close / first close in the window) ^ (1/years) - 1) x 100, with the window starting the nominal number of years before the last completed close.
+
+- **Given** Close 100 three years ago and 133.10 now
+- **When** Price stats run
+- **Then** cagr3y = 10.0000
+- **Parameters:** years 1,3,5; 4 decimals; start must be > 0
+- **Edge cases:**
+  - Fewer than 2 closes -> null
+- **Suspected defect:** When a listing has less history than the window (e.g. 2 years of data for cagr5y), the code still divides by the nominal 5 years using the earliest available close, understating the annual rate instead of returning null.
+
+#### BR-PRC-020 · Price slope direction
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:727-736,1021-1023,1091-1102`
+
+N-day slope = (end close - start close) / start close x 100 over N+1 completed bars, with N clamped to 1-500; under 0.5% in absolute value is FLAT.
+
+- **Given** days=5, start close 100.00, end close 100.40
+- **When** get_price_slope runs
+- **Then** slopePct 0.40, direction FLAT
+- **Parameters:** FLAT threshold 0.5%; history period 1mo<=20d, 3mo<=60, 6mo<=120, 1y<=250, else 2y
+
+#### BR-PRC-021 · Price stats: percent distances and CAGR
+
+**P1** · Calculation · Confidence **Medium**  
+Source: `yfmcp/tools/pricing.py:393-470`
+
+Percent change versus previous close, 52-week high/low and 50/200-day averages is (last − reference) ÷ reference × 100 (4dp). CAGR for 1, 3 and 5 years is (end/start)^(1/years) − 1 on completed closes, where start is the first close on or after the end date minus N years.
+
+- **Given** Completed closes: 5 years ago $50, latest $100
+- **When** Price stats run
+- **Then** cagr5y = (100/50)^(1/5) − 1 = 14.8698%
+- **Parameters:** horizons 1/3/5 years; history 5y; rounding 4dp
+- **Edge cases:**
+  - Start close <= 0 or fewer than 2 points: None
+  - Stale bars: status PARTIAL
+- **Suspected defect:** When history is shorter than N years (for example a stock listed 2 years ago), the subset is the whole series but the exponent still uses N. The 5-year CAGR is then understated rather than null. Python uses a calendar DateOffset, while the Worker (worker/src/yahoo-finance.ts:2764-2774) uses 365.25-day years and returns null only when the start equals the end, so the two can pick different start bars.
+- **SME question:** Should CAGR be null when the price history does not span the full horizon, or should the exponent use actual elapsed years?
+
+#### BR-PRC-022 · Price target bracket and tag
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `server.py:7945-7966`
+
+Current price as a percent of a caller's reference target (rounded to 1 dp) maps to bracket STRONG_BUY <= 75, ACCEPTABLE <= 90, CAUTION <= 100, else AVOID, and tag SPECULATIVE < 40, LONG < 80, NEAR < 100, else INVERTED.
+
+- **Given** Price $70, reference target $100
+- **When** calculate_price_target_distance runs
+- **Then** referenceTargetPct 70.0, bracket STRONG_BUY, inferredTag LONG, distanceToTargetPct 42.9
+- **Parameters:** Bracket cutoffs 75/90/100; tag cutoffs 40/80/100; mirror worker/src/yahoo-finance.ts:7866-7877
+- **Edge cases:**
+  - target <= 0 rejected
+  - rounding before classification shifts boundary cases
+- **Suspected defect:** Python uses round() (banker's on binary floats) while TS uses toFixed(1); dataDate falls back to today in TS (yahoo-finance.ts:7899) but null in Python (server.py:7968-7984): a parity divergence
+- **SME question:** Is emitting STRONG_BUY/AVOID buy-sell language intended given every other valuation tool enforces decisionUse EVIDENCE_ONLY with action null, and should classification use the rounded or raw percentage (75.04 rounds to 75.0 and becomes STRONG_BUY)?
+
+#### BR-PRC-023 · Put hedge contract eligibility and ask-based cost
+
+**P1** · Validation · Confidence **Medium** · P0 panel 2/2  
+Source: `server.py:7238-7251`
+
+A put can only be a hedge candidate if it has both a bid and an ask above zero and some open interest or volume. Its cost is the ask × 100 shares, checked against the budget.
+
+- **Given** Put with bid 1.70, ask 1.85, OI 0, volume 12; budget $500
+- **When** the contract is screened
+- **Then** candidate kept; contractCost $185.00 (ask × 100), withinBudget true, mid $1.78
+- **Parameters:** contract multiplier 100; cost basis ASK
+- **Edge cases:**
+  - bid 0 or ask 0 is counted in excludedContracts.noTwoSidedQuote
+  - OI 0 and volume 0 is counted in noLiquidityEvidence
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (I read /home/user/yahoo-finance-mcp/server.py lines 7238-7251. The eligibility and cost logic matches the rule. A put is dropped if bid <= 0 or ask <= 0, and that drop is counted as noTwoSidedQuote (lines 7243-7245). It is also dropped if openInterest <= 0 and volume <= 0, counted as noLiquidityEvidence (lines 7246-7248). Cost is round(ask * 100, 2), and withinBudget is cost <= budget_usd (lines 7250-7251). The basis is labelled "ASK" at line 7272.
+
+Not faithful: the example's mid is wrong. The code computes round((1.70 + 1.85) / 2, 2). In binary floating point, 1.775 is stored as 1.77499..., so Python's round() gives 1.77, not the $1.78 the rule states. I checked this by running that expression in python3, which printed 1.77. It is also not "rounded half-up" as a reader might assume, and any modernised version must copy this float behaviour exactly or the two runtimes will drift. The cost of $185.00, withinBudget true and "candidate kept" are all correct.
+
+P0 not justified: this is a read-only screening and reporting step inside an analytics MCP tool. It suggests hedge candidates and an estimated cost from Yahoo quote data. It places no orders, moves no money, enforces no regulation and protects no stored record. A regulator or auditor would not care if it changed silently. A user or finance controller might care about the cost estimate, so P1 fits better: it is a key output contract and should be covered by parity tests. Quote screening and an ask-based estimate are not a money-moving control.
+
+No instruction-like or credential text appears in the cited lines. | I read server.py:7238-7251 myself. Most of the rule matches the code. A contract is dropped if bid <= 0 or ask <= 0, and counted as noTwoSidedQuote (7243-7245). It is dropped if both open interest and volume are <= 0, and counted as noLiquidityEvidence (7246-7248). Missing or NaN values become 0 through `or 0`. The contract cost is round(ask * 100, 2), with contractCostBasis "ASK" (7250, 7271). The budget check is inclusive: contractCost <= budget_usd (7251). With the inputs given (bid 1.70, ask 1.85, OI 0, volume 12, budget $500), the contract is kept, its cost is 185.0, and withinBudget is true. All of that is correct.
+
+The mid value is wrong. The code computes mid = round((bid + ask) / 2, 2) (7249) with Python's built-in round on binary floats. (1.70 + 1.85) / 2 is 1.775, which is stored as just under 1.775, so round() returns 1.77, not 1.78. I confirmed this by running it: round((1.70+1.85)/2, 2) gives 1.77. The card assumes half-up rounding to cents. The code actually uses binary-float rounding, which is neither half-up nor reliably half-even. This matters for parity with the TS runtime, where Math.round or toFixed can give a different result. So the card needs to say mid = 1.77 and describe the rounding rule exactly.
+
+Edge cases the card leaves out:
+- The quote check runs before the liquidity check. A contract that fails both is counted only as noTwoSidedQuote.
+- Only puts whose strike falls within the OTM band are screened (7230).
+- withinBudget is reported but does not filter anything. Over-budget contracts stay in the candidate list.
+
+P0 is defensible on data-integrity grounds. The filter stops one-sided or zero quotes, and contracts with no liquidity, from showing up as costed hedge candidates. The ask-based cost and budget check feed directly into a user's trading decision. The tool does not execute trades itself. I found no instruction-shaped text in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-PRC-024 · Put hedge expiry selection (skip expiries under 7 days)
+
+**P1** · Policy · Confidence **High**  
+Source: `server.py:7198-7211`
+
+Hedge candidates come from the two nearest expiries on or after the caller's date, or, if no date is given, on or after today + 7 days (UTC).
+
+- **Given** Today 2026-10-14, expiries [2026-10-16, 2026-10-23, 2026-10-30], no expiry_after
+- **When** the hedge screen picks expiries
+- **Then** 2026-10-23 and 2026-10-30 are used (2026-10-16 is under a week out)
+- **Parameters:** default lookahead 7 days; max expiries 2
+- **Edge cases:**
+  - If every expiry is under 7 days away, the code falls back to all expiries, including ones under a week
+  - expiry_after is compared as a string, so a badly formatted date filters unpredictably
+- **Suspected defect:** The fallback to all expiries brings back the sub-week contracts the rule is meant to skip, and the output does not flag that this happened.
+
+#### BR-PRC-025 · Put hedge screen input validation
+
+**P1** · Validation · Confidence **High**  
+Source: `server.py:7170-7183`
+
+A put-hedge screen is refused unless the budget is above zero and the out-of-the-money band is non-negative and ascending.
+
+- **Given** budget_usd = 0, otm_pct_min = 8, otm_pct_max = 12
+- **When** find_put_hedge_candidates is called
+- **Then** INPUT_VALIDATION_ERROR 'budget_usd must be greater than zero'; likewise otm_pct_min = 12, otm_pct_max = 8 (or a negative min) is rejected
+- **Parameters:** defaults otm_pct_min=8, otm_pct_max=12, budget_usd=500 (server.py:8328)
+- **Edge cases:**
+  - otm_pct_min == otm_pct_max is accepted (single-strike band)
+  - No upper bound on otm_pct_max, so 100%+ produces a zero or negative strike floor
+
+#### BR-PRC-026 · Put hedge strike window and OTM percent
+
+**P1** · Calculation · Confidence **High**  
+Source: `server.py:7213-7214,7230,7262`
+
+Eligible put strikes lie between price × (1 − max OTM%) and price × (1 − min OTM%); each candidate's OTM% is (price − strike) ÷ price × 100, rounded to 2 dp.
+
+- **Given** Last price $100.00, OTM band 8%–12%
+- **When** strikes are filtered
+- **Then** strikes from $88.00 to $92.00 inclusive qualify; a $90 put shows otmPct 10.0
+- **Parameters:** otm_pct_min/otm_pct_max from the caller
+
+#### BR-PRC-027 · Put volume proxy and window trend
+
+**P1** · Calculation · Confidence **High**  
+Source: `server.py:7812-7849,7916`
+
+Put activity is today's put contracts ÷ 1% of the stock's 10-day average share volume. Comparing with the prior window's cached reading (T-7 vs T-14, T-2 vs T-7): above 1.1× is INCREASING, below 0.9× is DECREASING, otherwise STABLE.
+
+- **Given** Put volume 15,000, 10-day ADV 1,000,000 shares; prior T-14 reading 1.2
+- **When** scan runs for window T-7
+- **Then** putVolPer1PctStockAdv = 1.50; ratio 1.25 > 1.1 so putVolTrend INCREASING
+- **Parameters:** ADV multiplier 0.01; trend bands 1.1 / 0.9; window map T-7→T-14, T-2→T-7; cache TTL 72 h
+- **Edge cases:**
+  - Falls back to pcRatio when the proxy is null
+  - Other window labels never have a prior reading, so the trend is always STABLE
+
+#### BR-PRC-028 · Put/call ratios and next-expiry selection
+
+**P1** · Calculation · Confidence **High**  
+Source: `server.py:3837-3841,3896-3902`
+
+Put/call by volume is total put volume divided by total call volume, and put/call by OI uses total open interest. The default expiry is the first one after today's New York date, so 0DTE chains are skipped.
+
+- **Given** Today (NY) 2026-10-14; expiries 2026-10-14, 2026-10-16; put volume 1,500, call volume 1,000
+- **When** get_options_summary runs without expiry_hint
+- **Then** expiry 2026-10-16 (2026-10-14 listed in skippedExpiries); pcRatioVolume = 1.5
+- **Parameters:** summary rounding 3dp; flow scan rounding 2dp (server.py:7701); timezone America/New_York
+- **Edge cases:**
+  - Call volume or OI is 0: ratio None
+  - No expiry after today: the last listed expiry is used
+
+#### BR-PRC-029 · Short interest momentum and squeeze risk
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:1362-1399`
+
+Month-over-month change in shares short below 2% is FLAT; squeeze risk is HIGH when short % of float exceeds 30% and days to cover is under 3, MODERATE above 20%, else LOW.
+
+- **Given** Shares short 11,000,000 vs 10,000,000 prior, short % of float 0.35, short ratio 2.5
+- **When** get_short_momentum runs
+- **Then** momDeltaPct 10.00 RISING, shortPctFloat 35.00, squeezeRisk HIGH, flag CRITICAL SHORT
+- **Parameters:** FLAT < 2%; HIGH > 30% and days-to-cover < 3; MODERATE > 20%; flags > 30 critical, > 20 high
+- **Edge cases:**
+  - Over 30% with days to cover >= 3 is MODERATE, not HIGH
+
+#### BR-PRC-030 · Stale or incomplete daily data is retried once
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/tools/pricing.py:944-992`
+
+If the completed series is stale, has a gap in adjusted closes, or is missing the latest volume or raw close (each tool chooses which apply), the history is fetched exactly once more.
+
+- **Given** get_price_slope finds freshnessStatus STALE on the first fetch
+- **When** Completed daily history is loaded
+- **Then** One more fetch runs and retryAttempted=true. If that fetch errors, the first result is kept.
+- **Parameters:** Max retries = 1
+- **Edge cases:**
+  - excludedIncompleteBar stays true if either attempt excluded a bar
+  - The Worker retries only for STALE or an adjusted gap in price slope (worker/src/yahoo-finance.ts:3969-3982)
+
+#### BR-PRC-031 · Volume gate stale or incomplete bar outcomes
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `yfmcp/tools/pricing.py:1514-1588`
+
+If the completed daily bars are stale, the gate returns STALE_BAR with no pass/fail. If the latest completed session has no volume or close, it returns PARTIAL with no pass/fail. Both recommend RETRY.
+
+- **Given** Latest completed bar is two sessions behind the expected date
+- **When** the volume gate runs
+- **Then** status STALE_BAR, gatePass null, note 'Volume gate UNKNOWN — completed daily bars are stale'
+
+#### BR-PRC-032 · Volume ratio and flag
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:1207-1232`
+
+The last completed volume is divided by the average of the prior 10 (and 90) completed sessions, excluding the last bar; the 10-day ratio above 1.5 is HIGH, below 0.7 LOW, else NORMAL.
+
+- **Given** Last volume 3,000,000 and prior 10-day average 1,800,000
+- **When** Volume ratio runs
+- **Then** ratio10d 1.667, volumeFlag HIGH
+- **Parameters:** HIGH > 1.5; LOW < 0.7; 3 decimals; average needs full non-null window
+- **Edge cases:**
+  - Missing latest volume -> PARTIAL with RETRY
+  - Last volume 0 -> ratio null
+
+#### BR-PRC-033 · Volume ratio and volume flag
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/tools/pricing.py:1207-1232`
+
+The last completed session's volume is divided by the average of the prior 10 (and 90) completed sessions. A 10-day ratio above 1.5 is HIGH, below 0.7 is LOW, otherwise NORMAL.
+
+- **Given** Last volume 3,000,000 and prior 10-session average 1,800,000
+- **When** get_volume_ratio runs
+- **Then** ratio10d=1.667 and volumeFlag=HIGH
+- **Parameters:** Windows 10 and 90 prior sessions; HIGH > 1.5; LOW < 0.7; ratio rounded to 3 dp; 6mo history
+- **Edge cases:**
+  - An average is null unless the full window exists with no missing volume
+  - A missing latest volume returns status PARTIAL with RETRY
+  - 90-day average over a 6mo fetch (about 125 bars) is normally available
+- **Suspected defect:** Parity divergence. Python gives ratio null and flag null when lastVolume is 0 ('if last_vol and avg_10d'). The Worker gives ratio 0 and flag LOW (worker/src/yahoo-finance.ts:4170-4177). The Worker also divides by the integer-rounded average while Python uses the unrounded one, so ratios can differ in the third decimal.
+- **SME question:** For a zero-volume session, should the flag be LOW (Worker) or null (Python)?
+
+#### BR-PRC-034 · Wilder RSI(14)
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:539-559,705-706`
+
+RSI seeds average gain/loss from the first 14 changes, then smooths by (prev x 13 + current) / 14; RSI = 100 - 100/(1 + avgGain/avgLoss), rounded to 2 decimals.
+
+- **Given** Final average gain 1.0 and average loss 0.5
+- **When** Technical indicators run
+- **Then** RSI = 66.67
+- **Parameters:** period=14
+- **Edge cases:**
+  - No losses and some gains -> 100
+  - No movement -> 50
+  - 15 or fewer closes -> null
+
+#### BR-PRC-035 · Wilder RSI(14), MACD(12,26,9) and annualised volatility
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/tools/pricing.py:531-592,683-714`
+
+RSI uses Wilder smoothing seeded by the simple average of the first 14 changes. MACD is EMA12 − EMA26, each EMA seeded at its first value, with a 9-period signal line. 30-day volatility is the sample std of daily log returns × √252 × 100. Indicator history is widened to at least 1 year.
+
+- **Given** A completed-close series where every one of 15 changes is a gain
+- **When** RSI is computed
+- **Then** rsi14 = 100.0 (avg loss 0); a flat series gives 50.0
+- **Parameters:** RSI period 14; EMA k = 2/(span+1); MACD 12/26/9; vol window 30, 252 trading days; min bars 26; lookback widened to 1y unless 1y/2y/5y/10y/max; rounding RSI 2dp, MACD 4dp
+- **Edge cases:**
+  - len <= 14: RSI None
+  - fewer than 26 closes: error
+  - Stale bars: STALE_BAR with no indicator values
+
+#### BR-PRC-036 · Hedge IV percentile within chain and high-IV flag
+
+**P2** · Calculation · Confidence **High**  
+Source: `server.py:7255-7261`
+
+Each candidate's IV percentile is the share of puts in the same expiry with IV at or below its own. Above the 70th percentile the candidate is flagged HIGH IV.
+
+- **Given** Expiry chain IVs of 10 puts, candidate IV ranks 8th of 10 (8 at or below)
+- **When** candidate is scored
+- **Then** ivPctile = 80 and ivFlag = 'HIGH IV' (with a warning emoji)
+- **Parameters:** HIGH IV threshold > 70th percentile
+
+#### BR-PRC-037 · Historical price period and interval allow-list
+
+**P2** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:45-58`
+
+Historical prices accept only periods 1d,5d,1mo,3mo,6mo,1y,2y,5y,10y,ytd,max and intervals 1m-3mo from a fixed list, because Yahoo silently returns a fallback series for unknown values.
+
+- **Given** period '7d'
+- **When** get_historical_stock_prices runs
+- **Then** INPUT_VALIDATION_ERROR listing valid periods
+
+#### BR-PRC-038 · Indicator history widening and minimum bars
+
+**P2** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:531-536,653-687`
+
+Indicator history shorter than 1 year is widened to 1 year, at least 26 completed closes are required, and a stale latest bar publishes no indicator values.
+
+- **Given** Caller requests period 3mo
+- **When** Indicators run
+- **Then** 1y of daily closes are used
+- **Parameters:** INDICATOR_MIN_LOOKBACK=1y; long periods 1y,2y,5y,10y,max; min 26 bars
+
+#### BR-PRC-039 · Live quote freshness class
+
+**P2** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:1669-1709`
+
+A quote up to 30 minutes old is FRESH; older during an open market is STALE; when closed, Friday quotes seen on a weekend within 96 hours are WEEKEND_EXPECTED_STALE, others within 96 hours MARKET_CLOSED_EXPECTED_STALE, up to 168 hours STALE, beyond VERY_STALE.
+
+- **Given** Quote Friday 16:00 UTC, retrieved Sunday 12:00 UTC, market closed
+- **When** Snapshot classifies freshness
+- **Then** 44 hours, WEEKEND_EXPECTED_STALE
+- **Parameters:** 0.5h; 96h; 168h; future skew > 5 min -> UNKNOWN
+
+#### BR-PRC-040 · Market snapshot batch cap and status
+
+**P2** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:1719-1736,1809-1818,1890-1899`
+
+Batches are capped at 2 tickers in full mode and 5 in compact (extra tickers dropped and listed); the snapshot is PARTIAL with RETRY if any of its 6 components failed or was limited.
+
+- **Given** 7 tickers in compact mode
+- **When** get_market_snapshot runs
+- **Then** First 5 processed, truncated true, droppedTickers lists the last 2
+- **Parameters:** cap full=2, compact=5; 6 components
+- **Suspected defect:** changePct uses `price_stats.pctChangeTodayVsPrevClose or recompute`, so a true 0.0 change falls through to recomputation and precision switches from 4 to 2 decimals; the value stays 0, but the fallback logic treats zero as missing.
+
+#### BR-PRC-041 · Moving average trend regime
+
+**P2** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:1275-1288`
+
+Price at or above both the 50- and 200-day averages is BULLISH, below both BEARISH, otherwise MIXED.
+
+- **Given** Price 105, 50-day 100, 200-day 110
+- **When** MA position runs
+- **Then** pctVs50dma 5.00 ABOVE, pctVs200dma -4.55 BELOW, trend MIXED
+- **Parameters:** Equality counts as ABOVE
+
+#### BR-PRC-042 · Moving-average regime and trend
+
+**P2** · Calculation · Confidence **High**  
+Source: `yfmcp/tools/pricing.py:1275-1288`
+
+The price's percentage distance from the 50-day and 200-day averages sets ABOVE or BELOW for each. Above both is BULLISH, below both is BEARISH, otherwise MIXED.
+
+- **Given** last price 110, 50-DMA 100, 200-DMA 120
+- **When** get_ma_position runs
+- **Then** pctVs50dma=10.0 (ABOVE), pctVs200dma=-8.33 (BELOW), trend=MIXED
+- **Parameters:** ABOVE when pct >= 0
+- **Edge cases:**
+  - A price exactly at the average counts as ABOVE
+  - A missing price or average gives trend null
+
+#### BR-PRC-043 · Next option expiry excludes same-day expiry
+
+**P2** · Policy · Confidence **High**  
+Source: `server.py:3837-3841`
+
+Options positioning uses the first expiry strictly after today's New York date. If none exists it uses the last listed expiry.
+
+- **Given** NY date 2026-10-16, expiries [2026-10-16, 2026-10-23]
+- **When** expiry is chosen
+- **Then** 2026-10-23
+
+#### BR-PRC-044 · Price change percentages versus references
+
+**P2** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/pricing.py:393-416`
+
+Percent distance from previous close, 52-week high/low and 50/200-day averages = (last - reference) / reference x 100, rounded to 4 decimals.
+
+- **Given** Last price 90 and 52-week high 120
+- **When** Price stats run
+- **Then** pctFromYearHigh = -25.0000
+
+#### BR-PRC-045 · Quote freshness classification
+
+**P2** · Lifecycle · Confidence **High**  
+Source: `yfmcp/tools/pricing.py:1669-1709`
+
+A quote is FRESH within 30 minutes; otherwise STALE if the market is open; when closed, WEEKEND_EXPECTED_STALE (Friday quote read on weekend within 96h), MARKET_CLOSED_EXPECTED_STALE within 96h, STALE within 168h, else VERY_STALE; more than 5 minutes in the future is UNKNOWN.
+
+- **Given** Quote Friday 20:00Z read Sunday 14:00Z, market closed
+- **When** Market snapshot runs
+- **Then** WEEKEND_EXPECTED_STALE
+- **Parameters:** 0.5h, 96h, 168h, -5 min skew; mirror worker/src/yahoo-finance.ts:8000-8031
+- **Edge cases:**
+  - weekday computed in UTC, not exchange local time
+
+#### BR-PRC-046 · Stock screener count cap and name allow-list
+
+**P2** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/server.py:5056-5081,5113-5123`
+
+Screeners must be one of the predefined names and return at most 250 results; ticker search with exchange 'US' keeps only NASDAQ (NMS), NYSE (NYQ) and NYSE Arca (PCX).
+
+- **Given** screen_stocks('day_gainers', count=1000)
+- **When** The screener runs
+- **Then** count reduced to 250.
+- **Parameters:** Max count 250; US exchange set {NMS, NYQ, PCX}
+- **Edge cases:**
+  - count <= 0 is not validated
+  - US filter excludes NYSE American (ASE) and NASDAQ NGM/NCM codes
+- **Suspected defect:** The 'US' exchange filter omits NASDAQ Global Market (NGM), Capital Market (NCM) and NYSE American (ASE) listings.
+- **SME question:** Should the 'US' filter include all NASDAQ tiers and NYSE American?
+
+### Yahoo fundamentals, analyst & calendar
+
+#### BR-FND-001 · Analyst consensus: upside, dominant rating and target-lag signal
+
+**P1** · Calculation · Confidence **High**  
+Source: `server.py:4461-4465,4513-4549`
+
+Upside to the mean target is (mean − last price) ÷ last price × 100. The dominant rating is the bucket with the most votes in the latest period. The target is CURRENT if the mean target is at or above price. Below price, it is LIKELY_STALE_OR_LAGGING if there were upgrades in the last 30 days, and POSSIBLY_STALE otherwise.
+
+- **Given** Last price $120, mean target $100, 2 upgrades in 30 days
+- **When** Analyst consensus runs
+- **Then** pctUpsideFromLastPrice = −16.67; pctBelowCurrentPrice = 16.67; targetLagSignal = LIKELY_STALE_OR_LAGGING with warning CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES
+- **Parameters:** upgrade lookback 30 days; rounding 2dp; rating buckets strongBuy/buy/hold/sell/strongSell
+- **Edge cases:**
+  - Tie in rating counts: the first bucket in strongBuy-to-strongSell order wins
+  - numberOfAnalysts in priceTargets counts target contributors, while top-level ratingCount counts votes
+
+#### BR-FND-002 · Consensus dominant rating, upside and target-lag signal
+
+**P1** · Calculation · Confidence **High**  
+Source: `server.py:4461-4465,4513-4554`
+
+The dominant rating is the bucket with the most analysts in the latest period. Upside is (mean target − price) ÷ price. A mean target below the price counts as LIKELY_STALE_OR_LAGGING if any upgrade came in the last 30 days, otherwise POSSIBLY_STALE.
+
+- **Given** Price $100, mean target $90, 2 upgrades in the last 30 days
+- **When** consensus summary is built
+- **Then** pctUpsideFromLastPrice −10.00, pctBelowCurrentPrice 10.00, targetLagSignal LIKELY_STALE_OR_LAGGING with warning CONSENSUS_TARGET_BELOW_PRICE_DESPITE_UPGRADES
+- **Parameters:** lookback 30 days; buckets strongBuy, buy, hold, sell, strongSell
+- **Edge cases:**
+  - Ties pick the first bucket in strongBuy→strongSell order
+  - target ≥ price gives CURRENT
+
+#### BR-FND-003 · Credit health data warnings
+
+**P1** · Validation · Confidence **High**  
+Source: `server.py:6741-6743,6810-6853`
+
+Warnings are raised when the latest quarter's interest is more than 2× the prior quarters' average, and when Yahoo EBITDA differs from operational EBITDA by at least 25% and at least $100M. A warning is also raised when EBIT or EBITDA is negative. Any missing input marks data PARTIAL.
+
+- **Given** Quarterly interest [30M, 10M, 12M, 11M] newest first
+- **When** credit health warnings are evaluated
+- **Then** INTEREST_EXPENSE_ANOMALY (30M is 2.7× the 11M prior average)
+- **Parameters:** anomaly multiple 2.0; divergence 25% and $100,000,000; basis floor 1.0
+
+#### BR-FND-004 · Credit health operational EBITDA, net debt and coverage
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `server.py:6686-6747`
+
+Leverage uses the latest quarter's debt minus cash, divided by trailing-four-quarter operating income plus D&A. Yahoo EBITDA is used only as a fallback. Interest coverage is TTM EBIT (or EBITDA) ÷ |TTM interest|.
+
+- **Given** Total debt $500M, cash $20M, TTM operating income $120M, TTM D&A $40M, TTM interest $50M
+- **When** credit health is computed
+- **Then** net debt $480M; operational EBITDA $160M; netDebtToEbitda 3.00; interestCoverageEbit 2.40; interestCoverageEbitda 3.20
+- **Parameters:** TTM = sum of up to 4 latest quarters; debt row fallback order Total Debt → TotalDebt → Long Term Debt
+- **Edge cases:**
+  - Fewer than 4 quarters are summed anyway; dataQuality becomes PARTIAL
+  - Falling back to 'Long Term Debt' leaves out current debt
+- **Suspected defect:** If fewer than 4 income quarters exist, the 'TTM' sum covers fewer quarters but is still treated as annual, which understates EBITDA and coverage. It is flagged only as PARTIAL.
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (I read server.py:6686-6747 and the helpers above it (_safe_get, and _ttm_sum at 6649-6665).
+
+Faithful: yes.
+- Total debt is taken from the latest balance-sheet column, trying "Total Debt", then "TotalDebt", then "Long Term Debt" (line 6686). Cash comes from line 6687, and net debt is debt minus cash (line 6723).
+- Every TTM figure is the sum of whichever of the newest quarters (up to 4) have a value (lines 6649-6665 and 6690-6713).
+- Operational EBITDA is TTM operating income plus TTM D&A. Yahoo's EBITDA is used only when either of those is missing (lines 6728-6733).
+- netDebtToEbitda = round(netDebt / operationalEbitda, 2) (line 6745). interestCoverageEbit = round(EBIT / |interest|, 2) (line 6746). interestCoverageEbitda = round(operationalEbitda / |interest|, 2) (line 6747).
+- The example checks out: 500-20 = 480; 120+40 = 160; 480/160 = 3.00; 120/50 = 2.40; 160/50 = 3.20.
+
+Things the rule card leaves out:
+- The EBIT input is itself "Operating Income", with Yahoo "EBIT" only as the last fallback (lines 6693-6695).
+- The plain-English line "EBIT (or EBITDA)" makes it sound like one ratio with a fallback. The code actually outputs both ratios separately, and the headline interestCoverage is the EBIT one (line 6748).
+- data_quality is set to PARTIAL when fewer than 4 income quarters are available (lines 6742-6743). Fewer than 4 quarters gives a partial-year sum, not a true TTM figure.
+- The cash row fallback order is not listed in the parameters.
+- If cash is missing, net debt is None rather than 0.
+
+P0 justified: no, through the compliance lens. This is an analytics output from an MCP research tool built on Yahoo Finance data. It does not move money: it places no trades and charges no fees or interest. It does not enforce any regulatory requirement. And it does not guard the integrity of any system of record. A regulator or auditor would not care if this ratio method changed silently. A user's investment judgement might change, but that makes it a core calculation for the output contract (P1). It should still be covered by the repo's Python/TS parity tests. The same applies to the debt-tier and credit-stress thresholds that use it (2.5 / 3 / 4, lines 6750-6764).
+
+No instruction-shaped text or credentials in the cited lines. The BUG-03 comment at lines 6691-6692 describes the preference for operating income, and the code does what it says. | FIDELITY: The Given/When/Then matches server.py:6686-6747. Net debt is the latest balance-sheet column's debt minus cash (6723), using debt rows in the order Total Debt, TotalDebt, Long Term Debt (6686). Operational EBITDA is TTM operating income plus TTM D&A (6728-6730). The code falls back to the sum of Yahoo's EBITDA rows only when either of those is missing (6731-6733). Leverage is round(netDebt / operationalEbitda, 2) (6745). The EBIT coverage is round(ebit / |interest|, 2) and the EBITDA coverage uses operational EBITDA (6746-6747). The arithmetic checks out: 500-20=480, 120+40=160, 480/160=3.00, 120/50=2.40, 160/50=3.20.
+
+Edge cases the card leaves out, which a contract should state:
+(a) The EBIT input tries Operating Income first, then OperatingIncome, then Yahoo's EBIT row. Cash tries Cash And Cash Equivalents, then CashAndCashEquivalents, then Cash. D&A and interest each have their own list of fallback rows.
+(b) The TTM sum adds only the non-null quarters of the first row that has any value. A sum can therefore cover 1-3 quarters, and operating income and D&A can cover different quarter counts. If fewer than 4 income columns exist, data_quality is set to PARTIAL. Missing values inside a column do not trigger it.
+(c) Leverage is None if net debt is missing or operational EBITDA is exactly 0. A negative EBITDA still gives a (negative) ratio.
+(d) Both coverage ratios are None if interest is None or 0. A negative interest value is handled by abs().
+(e) Rounding is Python's round() on a binary float: round-half-even, with float representation effects. This matters for TS parity.
+
+None of these contradict the card, so I rate it faithful.
+
+P0: Not justified under the stated definition. This is a read-only analytics metric. A downstream threshold uses it (credit stress = leverage > 2.5 and EBIT coverage < 3, debt tier cutoffs 1/2.5/4), but it does not move money or enforce a regulatory requirement. It only guards data integrity in the sense of output parity between the two runtimes. It is a strong P1 calculation contract.
+
+No instruction-shaped text found in the cited lines. The BUG-03 comment at 6691-6692 is an ordinary developer note, and the code matches it.) — confirm criticality.
+
+</details>
+
+#### BR-FND-005 · Credit health warnings: interest anomaly and EBITDA divergence
+
+**P1** · Validation · Confidence **High**  
+Source: `server.py:6816-6853`
+
+The tool warns when the latest quarter's interest expense is more than 2x the average of the prior quarters. It also warns when provider EBITDA and operational EBITDA differ by at least 25% and at least $100M, and when EBIT or EBITDA is negative.
+
+- **Given** Quarterly interest (newest first) $30M, $10M, $10M, $10M; provider EBITDA $500M vs operational $300M
+- **When** Credit health warnings are evaluated
+- **Then** INTEREST_EXPENSE_ANOMALY (30 > 2 x 10, ratio 3.0x) and NON_OPERATING_EBITDA_DIVERGENCE (|200|/300 = 67% >= 25% and $200M >= $100M) are raised
+- **Parameters:** anomaly multiple 2.0x; divergence 25% relative AND $100,000,000 absolute; divergence basis = max(|operational EBITDA|, 1.0)
+- **Edge cases:**
+  - Anomaly needs at least 2 quarterly interest values
+  - Any missing component sets dataQuality=PARTIAL
+
+#### BR-FND-006 · Credit health: net debt, operational EBITDA and leverage ratios
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `server.py:6633-6748`
+
+Net debt is total debt minus cash from the latest quarterly balance sheet. Operational EBITDA is trailing-twelve-month operating income plus D&A (provider EBITDA only as a fallback). Leverage is net debt divided by that EBITDA, and interest coverage is EBIT or EBITDA divided by the absolute TTM interest expense, all rounded to 2 decimals.
+
+- **Given** Latest quarter: Total Debt $500M, Cash $100M; last 4 quarters: Operating Income $40M each, D&A $10M each, Interest Expense $8M each
+- **When** get_credit_health runs
+- **Then** netDebt = $400M; operationalEbitda = $160M + $40M = $200M (source ttm_operating_income_plus_da); netDebtToEbitda = 2.00; interestCoverageEbit = 160/32 = 5.00; interestCoverageEbitda = 200/32 = 6.25
+- **Parameters:** TTM = sum of up to 4 most recent quarters (no x4 annualisation); row fallbacks: Total Debt > TotalDebt > Long Term Debt; Cash And Cash Equivalents > Cash; EBIT prefers 'Operating Income' over 'EBIT' (BUG-03); interest prefers 'Interest Expense Non Operating'; rounding 2dp
+- **Edge cases:**
+  - Fewer than 4 income quarters: TTM sums whatever quarters exist and dataQuality=PARTIAL
+  - A quarter with NaN is skipped, so the TTM can silently cover fewer than 4 quarters
+  - netDebtToEbitda is None when operational EBITDA is 0 or missing
+  - Interest coverage is None when interest is 0 or missing
+- **Suspected defect:** If only 'Long Term Debt' exists it stands in for total debt, which understates debt. A TTM built from fewer than 4 quarters is still labelled annual and only flagged PARTIAL.
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (The rule card matches the code, but I don't think this should be P0 when judged for compliance.
+
+Faithful: yes. I read /home/user/yahoo-finance-mcp/server.py lines 6633-6748, and each part of the card matches:
+- Net debt is total debt minus cash, taken from the most recent quarterly balance sheet only (bs.columns[0], line 6723). If either value is missing, net debt is None.
+- TTM means adding up to the 4 most recent quarters (inc.columns[:4]), with no x4 annualisation (lines 6636, 6735-6739).
+- Operational EBITDA is TTM Operating Income plus TTM D&A, labelled source 'ttm_operating_income_plus_da'. Provider EBITDA is used only as the fallback 'provider_ebitda_fallback' (lines 6726-6733).
+- EBIT looks for 'Operating Income' before 'EBIT'; the code marks this BUG-03 (lines 6693-6695).
+- Interest looks for 'Interest Expense Non Operating' first (lines 6706-6713).
+- Net debt to EBITDA and both interest coverage ratios divide by abs(interest) and round to 2 decimals (lines 6745-6747).
+- The worked example checks out: 400/200 = 2.00, 160/32 = 5.00, 200/32 = 6.25.
+
+Small details the card leaves out:
+- The cash lookup also accepts the 'CashAndCashEquivalents' spelling.
+- A row is used if any of the 4 quarters has a value; missing quarters are skipped, not filled in.
+- The divisions are skipped when EBITDA is 0 or interest is 0.
+- Fewer than 4 income quarters sets dataQuality to PARTIAL (line 6742).
+None of these make the card wrong.
+
+P0: not justified. This is a read-only analytics tool in an MCP server that reports leverage and coverage ratios from Yahoo Finance data. It doesn't move money. It doesn't enforce any regulatory requirement: these are not covenant tests or regulatory capital figures, and nothing is filed. It doesn't protect stored data either; it is a calculation, not a validation of records. A regulator, auditor or finance controller would not be affected if this calculation changed without notice. The real risk is to people using the analysis: a change to the EBIT row order, the TTM window or the rounding would quietly change the downstream debtTier and creditStress labels. That makes this a high-value P1 behaviour contract, guarded by the project's Python/TS parity tests, not a P0 compliance rule.
+
+No instruction-shaped or injection text and no credentials appear in the cited lines. | FIDELITY: I worked through server.py:6633-6748 myself and the Given/When/Then holds. The balance sheet uses only the newest column (bs.columns[0], line 6633). The income statement uses up to 4 columns, summed with no x4 (6636, 6649-6665, 6735-6739). net_debt = total_debt - cash (6723). Operating Income + D&A is preferred, and provider EBITDA is used only when either part is missing (6728-6733), with source labels ttm_operating_income_plus_da / provider_ebitda_fallback. Leverage and both coverage ratios are round(..., 2), and the coverage ratios divide by abs(interest) (6745-6747). The example checks out: netDebt 400, opEBITDA 160+40=200, 400/200=2.00, 160/32=5.00, 200/32=6.25. The row fallback orders match lines 6686-6713 and the 'EBIT' row comes last (BUG-03 comment at 6691-6692; the code matches it).
+
+Edge cases the card leaves out, which an equivalence contract should pin down:
+(1) NaN quarters are skipped, not zero-filled. A row with values in only 2 or 3 of the 4 columns is still summed as 'TTM', and EBIT and D&A can each cover a different number of quarters. PARTIAL data quality is set only from the column count (6742), not from how many values each row actually had.
+(2) An operational EBITDA of exactly 0 is falsy, so leverage comes back None rather than raising a division error. An interest total of 0 gives None for both coverage ratios. A negative EBITDA gives a negative leverage ratio with no guard.
+(3) Rounding is Python round() on floats, which rounds half to even and is affected by binary floating-point. It is not half-up. A TS port using Math.round or toFixed can differ at .xx5 boundaries.
+(4) The card's cash fallback leaves out the 'CashAndCashEquivalents' variant (6687). Minor.
+(5) The interest-expense sign is taken as abs() only in the coverage ratios.
+None of these contradicts the card, so it is faithful but incomplete.
+
+Also, the cited range ends at 6748, so the credit_stress rule (leverage > 2.5 AND EBIT coverage < 3) and the debt-tier cutoffs (<1, <=2.5, <=4) at 6750-6764 fall outside this card.
+
+P0: not justified. This is a read-only analytics output, credit ratios computed from Yahoo Finance data and returned by an MCP tool. It doesn't move money, doesn't enforce a regulatory requirement, and doesn't guard stored data integrity. It belongs at P1 as a calculation rule that needs parity testing (CLAUDE.md requires Python/TS output parity), not P0. I found no instruction-shaped text in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-FND-007 · Credit stress flag and debt tier
+
+**P1** · Policy · Confidence **High**  
+Source: `server.py:6750-6764`
+
+A company is flagged as credit-stressed when net debt/EBITDA is above 2.5x and EBIT interest coverage is below 3x. Debt is tiered CLEAN below 1x, MODERATE up to 2.5x, ELEVATED up to 4x, and STRESSED above 4x.
+
+- **Given** netDebtToEbitda = 3.10 and interestCoverageEbit = 2.40
+- **When** Credit health is classified
+- **Then** creditStressFlag = true; debtTier = ELEVATED
+- **Parameters:** stress: leverage > 2.5 AND coverage < 3; tiers: <1 CLEAN, <=2.5 MODERATE, <=4 ELEVATED, >4 STRESSED (mirrored in worker/src/yahoo-finance.ts:4341-4351)
+- **Edge cases:**
+  - Negative net debt (net cash) gives a negative ratio, which is CLEAN
+  - Negative EBITDA gives a negative ratio, which is also CLEAN. Only the NEGATIVE_EARNINGS_BASE warning signals the problem
+  - Flag is null if either input is missing
+- **Suspected defect:** A loss-making company with net debt gets a negative leverage ratio and is tiered CLEAN.
+
+#### BR-FND-008 · Free-cash-flow yield and currency-mismatch withholding of multiples
+
+**P1** · Validation · Confidence **High**  
+Source: `server.py:4709-4734`
+
+FCF yield is free cash flow ÷ market cap × 100. When the quote currency differs from the financial-statement currency, P/S, P/B, EV/EBITDA, EV/Revenue and FCF yield are withheld. P/E is kept.
+
+- **Given** TSM: quote USD, financials TWD
+- **When** get_financial_ratios runs
+- **Then** priceToSales, priceToBook, enterpriseToEbitda, enterpriseToRevenue and freeCashflowYield are null and moved to withheldMultiples; CURRENCY_MISMATCH_MULTIPLES_WITHHELD warning
+- **Parameters:** FCF yield 4dp; minor-unit quote currencies normalised via valuation._major_price
+- **Edge cases:**
+  - FCF or market cap 0/None: yield None
+  - Dict-shaped provider values become None
+
+#### BR-FND-009 · Share count trend change
+
+**P1** · Calculation · Confidence **High**  
+Source: `server.py:4822-4879`
+
+Over a window (default the last 5×365 days), the share series is de-duplicated to change points. Change is the last count minus the first, and change % is that difference ÷ first × 100. Any change recommends checking SEC filings.
+
+- **Given** Shares 100M at start and 110M at end
+- **When** analyze_share_count_trend runs
+- **Then** changeShares = 10M, changePct = 10.0, recommendedNextAction = CHECK_SEC_FILINGS
+- **Parameters:** default window 1,825 days; observations capped to last 60; rounding 4dp
+- **Edge cases:**
+  - Duplicate dates: the last value wins
+  - start >= end: validation error
+  - Empty series: EMPTY_RESULT
+
+#### BR-FND-010 · Calendar and date-range input guards
+
+**P2** · Validation · Confidence **High**  
+Source: `server.py:4652-4663,4817-4828,4883-4888,4977-5000`
+
+The market calendar window must be 0-31 days. The share-count trend needs start before end (default 5 years). Calendar limits are 1-100 and offsets are at least 0. Financial-ratio history is 0-20 periods with frequency quarterly, monthly, yearly or trailing.
+
+- **Given** get_market_calendar from 2026-10-01 to 2026-11-15
+- **When** The tool runs
+- **Then** Returns INPUT_VALIDATION_ERROR 'date range must be 0 to 31 days'
+- **Parameters:** Market calendar max 31 days (default 7); limit 1-100; history_periods 0-20
+- **Edge cases:**
+  - A non-ISO date gives 'dates must use YYYY-MM-DD'
+
+#### BR-FND-011 · Corporate actions retention
+
+**P2** · Policy · Confidence **High**  
+Source: `server.py:3441-3451`
+
+Every stock split is always returned. Dividends and capital-gain rows are limited to the most recent N on or after the start date, with N clamped to 1–1000 and defaulting to 40.
+
+- **Given** 200 dividends since 2000, 3 splits, limit 40
+- **When** get_stock_actions runs
+- **Then** 3 splits plus the last 40 dividends are returned, oldest first
+- **Parameters:** default 40; min 1; max 1000
+- **Edge cases:**
+  - Splits before start_date are still returned
+
+### Third-party fallbacks (key-gated)
+
+#### BR-PRV-001 · Expanded institutional ownership fallback lifecycle
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/provider_gaps.py:291-429`
+
+Ownership is tried on Finnhub first; Alpha Vantage is used only when the caller explicitly allows it and Finnhub gave no usable rows; identity mismatches discard rows; the result is dated or flagged as undated and is never decision-grade.
+
+- **Given** max_holders=50, allow_scarce_fallback=false, Finnhub returns 0 holders
+- **When** get_expanded_institutional_ownership runs
+- **Then** status NOT_FOUND, recommendedNextAction VERIFY_SEC_13F_OR_ENABLE_SCARCE_FALLBACK, alphaFallbackAllowed=false; with fallback=true and Alpha returning 120 rows, 50 are returned, truncated=true, capacityClass SCARCE_SHARED_QUOTA
+- **Parameters:** max_holders 1-100, default 50; cache TTL 7 days; freshnessStatus DATED when a report date exists else DATE_NOT_DISCLOSED; dataDate = payload date or newest row reportDate
+- **Edge cases:**
+  - Response symbol not equal to request -> PROVIDER_IDENTITY_MISMATCH and rows dropped
+  - Alpha aggregates (holders increased/decreased) only reported for Alpha
+
+#### BR-PRV-002 · Expanded ownership provider eligibility and scarce fallback opt-in
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/tools/provider_gaps.py:217-226,297-363`
+
+Finnhub is tried first unless the ticker or its suffix is on the policy's ineligible list. Alpha Vantage, a scarce shared quota, is called only when the caller sets allow_scarce_fallback and Finnhub gave no usable holders. max_holders must be 1–100.
+
+- **Given** Ticker 'VOD.L' with '.L' an ineligible suffix, allow_scarce_fallback false
+- **When** get_expanded_institutional_ownership runs
+- **Then** Finnhub NOT_ELIGIBLE (not attempted), no Alpha call, status NOT_ELIGIBLE, action USE_YAHOO_OR_OFFICIAL_FILINGS
+- **Parameters:** max_holders default 50, cap 100; ownership cache TTL 7 days; policy file worker/src/news-source-capabilities.json
+- **Edge cases:**
+  - NOT_FOUND without opt-in gives VERIFY_SEC_13F_OR_ENABLE_SCARCE_FALLBACK
+- **Suspected defect:** If the policy file can't be read, _finnhub_eligible fails open and treats every ticker as eligible.
+
+#### BR-PRV-003 · Finnhub market eligibility (fails open)
+
+**P1** · Policy · Confidence **Medium**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/provider_gaps.py:27,217-226,309-324`
+
+Tickers listed as ineligible, or ending with an ineligible suffix, in the news-source policy file are not sent to Finnhub; if the policy file cannot be read, every ticker is treated as eligible.
+
+- **Given** The policy lists suffix '.BK' as ineligible and the ticker is PTT.BK
+- **When** Expanded ownership is requested
+- **Then** No Finnhub call is made; the attempt is NOT_ELIGIBLE with reasonCode from policy (default FINNHUB_MARKET_NOT_ELIGIBLE)
+- **Parameters:** Policy file worker/src/news-source-capabilities.json providers.finnhub.ineligibleTickers / ineligibleTickerSuffixes
+- **Edge cases:**
+  - Suffix match is case-insensitive
+- **Suspected defect:** On any read/parse error the function returns eligible=True, so an unreadable policy silently spends entitlement-dependent calls on ineligible markets.
+- **SME question:** Should a missing or corrupt policy file block Finnhub calls (fail closed) rather than treat all tickers as eligible?
+
+#### BR-PRV-004 · Historical put/call ratio request and response validation
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/provider_gaps.py:23,96-105,119-214`
+
+A historical put/call ratio needs an explicit date after 2008-01-01 and not in the future; a response for a different symbol or date is rejected, an empty response is a provider error, and any success is contextual only.
+
+- **Given** Request AAPL for 2024-03-15; Alpha Vantage replies with symbol AAPL, date 2024-03-14
+- **When** The response is checked
+- **Then** status PROVIDER_IDENTITY_MISMATCH, providerGapFilled=false, recommendedNextAction RETRY_OR_VERIFY_PROVIDER_RESPONSE; a matching reply with no full-chain ratio and no expiry rows is PROVIDER_ERROR; a good reply is OK with freshnessStatus HISTORICAL_OBSERVATION and decisionGrade=false
+- **Parameters:** Earliest date: strictly after 2008-01-01; cache TTL 365 days; capacityClass SCARCE_SHARED_QUOTA
+- **Edge cases:**
+  - 2008-01-01 itself is rejected
+  - Date omitted is not allowed (to protect scarce quota)
+
+#### BR-PRV-005 · Provider failure status mapping
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/clients/market_providers.py:88-109,150-169,189-191,251-253`
+
+Third-party provider (Alpha Vantage, Finnhub) responses are classified into RATE_LIMIT, AUTH_ERROR, ENTITLEMENT_REQUIRED, NOT_FOUND, TIMEOUT, SOURCE_UNCONFIGURED or PROVIDER_ERROR from the HTTP code and message text.
+
+- **Given** Finnhub returns HTTP 403 with message 'You don't have access to this resource'
+- **When** The status is mapped
+- **Then** Status is ENTITLEMENT_REQUIRED; a 403 saying 'invalid token' is AUTH_ERROR; 429 is RATE_LIMIT; 401 AUTH_ERROR; 404 NOT_FOUND; missing API key is SOURCE_UNCONFIGURED with no call attempted
+- **Parameters:** Message patterns: rate limit|frequency|call volume|too many requests -> RATE_LIMIT; premium|subscription|entitlement|not available under your current plan|access to this resource -> ENTITLEMENT_REQUIRED; api key|authentication|unauthorized|invalid token|forbidden -> AUTH_ERROR. API keys read from env ALPHA_VANTAGE_API_KEY / FINNHUB_API_KEY <credential — masked, env only>
+- **Edge cases:**
+  - A 200 response whose body carries a rate-limit 'Note' is mapped by message
+  - Secrets are replaced with REDACTED in messages and public URLs
+
+#### BR-PRV-006 · Provider response identity check
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/tools/provider_gaps.py:154-166,326-340,350-363`
+
+A third-party provider response is rejected as PROVIDER_IDENTITY_MISMATCH if the symbol it echoes differs from the ticker requested. For put/call ratios the echoed date must also match.
+
+- **Given** Request AAPL 2025-03-14; Alpha returns symbol AAPL, date 2025-03-13
+- **When** the response is validated
+- **Then** status PROVIDER_IDENTITY_MISMATCH, providerGapFilled false, action RETRY_OR_VERIFY_PROVIDER_RESPONSE
+
+#### BR-PRV-007 · Recommended next action per provider status
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/provider_gaps.py:57-72`
+
+Each provider-gap failure tells the caller what to do next, keyed by status.
+
+- **Given** Finnhub returns ENTITLEMENT_REQUIRED and the caller did not allow the scarce Alpha fallback
+- **When** The failure payload is built
+- **Then** recommendedNextAction is USE_ALPHA_VANTAGE_EXPLICITLY (CHECK_PROVIDER_ENTITLEMENT if Alpha was already allowed)
+- **Parameters:** SOURCE_UNCONFIGURED->CONFIGURE_PROVIDER; AUTH_ERROR->CHECK_PROVIDER_CREDENTIALS; RATE_LIMIT->RETRY_AFTER_PROVIDER_RESET; TIMEOUT->RETRY_PROVIDER; NOT_ELIGIBLE->USE_YAHOO_OR_OFFICIAL_FILINGS; NOT_FOUND->VERIFY_TICKER_AND_DATE; else RETRY_OR_USE_PRIMARY_PROVIDER
+- **Edge cases:**
+  - Provider failures are returned as ok=true envelopes with status fields, decisionGrade=false
+
+#### BR-PRV-008 · Companies House company number format
+
+**P2** · Validation · Confidence **High**  
+Source: `server.py:10935-10957`
+
+A UK Companies House number must be 8 alphanumeric characters. All-digit numbers shorter than 8 are zero-padded. Without a number, a company name or a ticker's issuer name is required, and non-London tickers get a NON_UK_LISTING note.
+
+- **Given** company_number '1234567'
+- **When** The Companies House filings tool runs
+- **Then** It is padded to '01234567' and accepted. 'SC12' is rejected with INPUT_VALIDATION_ERROR.
+- **Parameters:** Pattern [A-Z0-9]{8}; London suffix .L or .IL; limit 1-100 (default 25)
+- **Edge cases:**
+  - If the API key is missing, the tool returns SOURCE_UNCONFIGURED before validating input
+
+#### BR-PRV-009 · Expanded ownership truncation and freshness
+
+**P2** · Calculation · Confidence **High**  
+Source: `yfmcp/tools/provider_gaps.py:268-276,383-421`
+
+Holder rows are cut to max_holders and marked truncated when the provider had more. The data date is the provider's stated date, else the newest holder report date. With no date the freshness is DATE_NOT_DISCLOSED. Results are never decision-grade.
+
+- **Given** Provider returns 180 rows, max_holders 50
+- **When** payload is built
+- **Then** returnedCount 50, providerRowCount 180, truncated true, recommendedNextAction VERIFY_SEC_13F_FOR_MATERIAL_USE
+
+#### BR-PRV-010 · Historical put/call ratio date window
+
+**P2** · Validation · Confidence **High**  
+Source: `yfmcp/tools/provider_gaps.py:96-105,154-166`
+
+A historical put/call request needs an explicit date later than 2008-01-01 and not in the future. A provider response whose symbol or date differs from the request is rejected as an identity mismatch.
+
+- **Given** date 2007-12-31
+- **When** get_historical_put_call_ratio is called
+- **Then** INPUT_VALIDATION_ERROR 'date must be later than 2008-01-01.'
+- **Parameters:** floor 2008-01-01 (exclusive); cache TTL 365 days; capacity SCARCE_SHARED_QUOTA
+- **Edge cases:**
+  - Response date differs: PROVIDER_IDENTITY_MISMATCH
+
+#### BR-PRV-011 · Provider failure recovery action mapping
+
+**P2** · Policy · Confidence **High**  
+Source: `yfmcp/tools/provider_gaps.py:57-72,366-381`
+
+Each provider failure maps to a next step. Unconfigured means CONFIGURE_PROVIDER, auth means CHECK_PROVIDER_CREDENTIALS, rate limit means RETRY_AFTER_PROVIDER_RESET, timeout means RETRY_PROVIDER, not eligible means USE_YAHOO_OR_OFFICIAL_FILINGS, and not found means VERIFY_TICKER_AND_DATE. An entitlement error suggests Alpha Vantage only if the caller has not already allowed it.
+
+- **Given** Finnhub returns ENTITLEMENT_REQUIRED, allow_scarce_fallback false
+- **When** the failure payload is built
+- **Then** recommendedNextAction USE_ALPHA_VANTAGE_EXPLICITLY
+
+### SEC EDGAR retrieval
+
+#### BR-SEC-001 · Company fiscal-year naming offset
+
+**P0** · Policy · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:101-146`
+
+The company's own naming of fiscal years is learned from its last three 10-K annual reports. If all three show the same offset from the period-end rule, and that offset is at most 1 year, it is applied. Otherwise the period-end rule is used with offset 0.
+
+- **Given** DG 10-Ks: year ended 2026-01-30 stated fy 2025, 2025-01-31 stated 2024, 2024-02-02 stated 2023
+- **When** fiscal_year_naming runs
+- **Then** Each offset is -1 (stated year minus rule year). Result offset -1, basis SEC_STATED_FISCAL_YEAR.
+- **Parameters:** Reports considered: 3; annual duration 350-380 days; concepts Revenues, RevenueFromContractWithCustomerExcludingAssessedTax, SalesRevenueNet, NetIncomeLoss, EarningsPerShareDiluted; forms starting '10-K' with fp=FY
+- **Edge cases:**
+  - companyfacts not read: offset 0, basis PERIOD_END_RULE_SEC_NOT_READ
+  - No stated year: PERIOD_END_RULE_NO_STATED_YEAR
+  - Offsets disagree or |offset| > 1: PERIOD_END_RULE_STATED_YEARS_INCONSISTENT, offset 0
+  - 20-F/40-F filers are not read for naming (10-K only)
+- **SME question:** 20-F and 40-F filers are not used to learn fiscal-year naming. Is that intended for foreign private issuers?
+
+#### BR-SEC-002 · Equivalent SEC concept selection by newest filing
+
+**P0** · Policy · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/sec_facts.py:18-67`
+
+Among equivalent concepts (e.g. four revenue concepts), the one whose facts for the requested form were filed most recently wins; ties go to the earlier-listed concept, or to the larger newest-period magnitude in 'larger' tie mode; a pinned accession restricts facts to that filing.
+
+- **Given** Revenue tagged as ...ExcludingAssessedTax last filed 2023-03-01 and ...IncludingAssessedTax last filed 2025-03-01, form 10-K
+- **When** the revenue concept is picked
+- **Then** ...IncludingAssessedTax wins
+- **Parameters:** REVENUE_CONCEPTS order: ExcludingAssessedTax, IncludingAssessedTax, Revenues, SalesRevenueNet
+
+#### BR-SEC-003 · Equivalent-concept fact selection by newest filing
+
+**P0** · Policy · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/sec_facts.py:18-67`
+
+When a fact can come from several equivalent concepts, the concept with the most recently filed fact of the requested form wins. The earlier-listed concept wins ties, unless on_tie='larger' picks the larger newest-period magnitude. A pinned accession limits facts to that filing.
+
+- **Given** Revenue as ...ExcludingAssessedTax last filed 2023-02-28 and ...IncludingAssessedTax filed 2025-02-27
+- **When** pick_concept_facts runs for 10-K
+- **Then** ...IncludingAssessedTax is selected
+- **Parameters:** REVENUE_CONCEPTS order: ExcludingAssessedTax, IncludingAssessedTax, Revenues, SalesRevenueNet
+
+#### BR-SEC-004 · Filing period must be 'latest' or a fiscal year
+
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/sec_facts.py:116-128`
+
+Filing-based extract tools accept a period only as 'latest' (or blank) or a fiscal year written as 'FY2025', 'FY 2025' or '2025'. Anything else is refused, so the tools never silently return the wrong year.
+
+- **Given** period 'Q3 2025' on extract_total_revenue
+- **When** The tool is dispatched (server.py:8561; worker/src/tools.ts:2010-2012)
+- **Then** Returns INPUT_VALIDATION_ERROR 'period must be "latest" or a fiscal year ("FY2025" or "2025"). Got 'Q3 2025'.'
+- **Parameters:** Pattern (?:FY\s?)?([0-9]{4}), case-insensitive, full match
+- **Edge cases:**
+  - 'fy2025' is accepted
+  - Code comment: earlier versions labelled BE's 2016 revenue as FY2018 for 'FY2025'
+
+#### BR-SEC-005 · Fiscal year of a period end (52/53-week drift)
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:22-57`
+
+A period's fiscal year is the calendar year of the date seven days before its end, so a 52/53-week year ending in the first week of January belongs to the previous year.
+
+- **Given** A fiscal year ending 2027-01-02 (Saturday nearest Dec 31)
+- **When** fiscal_year_of_period_end runs
+- **Then** It returns 2026 (2027-01-02 minus 7 days = 2026-12-26), labelled FY2026. A period ending 2027-01-08 would return 2027.
+- **Parameters:** WEEK_DRIFT_DAYS = 7
+- **Edge cases:**
+  - Invalid or non-ISO dates return None
+  - Companies that name years by start year (DG fiscal 2025 ending 2026-01-30) are not handled by this rule alone; naming offset corrects it
+
+#### BR-SEC-006 · Fiscal year of a period end (one-week drift rule)
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:22-57`
+
+The fiscal year a period belongs to is the calendar year of the date 7 days before its end date. A 52/53-week year that ends in the first week of January therefore counts as the prior year.
+
+- **Given** A fiscal year ending 2027-01-02
+- **When** fiscal_year_of_period_end runs
+- **Then** Year = 2026 (2027-01-02 minus 7 days = 2026-12-26), label FY2026. A year ending 2027-01-08 is FY2027.
+- **Parameters:** WEEK_DRIFT_DAYS = 7
+- **Edge cases:**
+  - Non-ISO or invalid date returns None
+  - Companies that name years by start year (DG) need the naming offset rule to correct this
+
+#### BR-SEC-007 · Fiscal-year assignment for SEC facts (52/53-week years)
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/sec_facts.py:131-205`
+
+An annual SEC fact belongs to the fiscal year the issuer states (fp=FY with an fy equal to the period-end year or the year before). Otherwise it belongs to the year in which the period end, less 7 days, falls. Restated (later-filed) rows come first.
+
+- **Given** A 52-week year ending 2026-01-03 whose first filing has no fp=FY
+- **When** select_fiscal_year_rows assigns its year
+- **Then** It is fiscal 2025, because 2026-01-03 minus 7 days falls in 2025
+- **Parameters:** 7-day back-shift; accepted fy within {endYear, endYear-1}
+- **Edge cases:**
+  - An invalid day (e.g. 31 in a 30-day month) rolls over like JavaScript Date
+  - Groups are keyed by start|end, and the earliest-filed row decides the year
+
+#### BR-SEC-008 · 52/53-week fiscal year from period end (7-day drift)
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:22-57`
+
+A fiscal year is named for the calendar year of the date one week before its period end, so a year ending in the first days of January belongs to the year before.
+
+- **Given** A fiscal year ending 2027-01-02 (Saturday nearest Dec 31)
+- **When** fiscal_year_label runs
+- **Then** 2027-01-02 minus 7 days = 2026-12-26, so the label is FY2026
+- **Parameters:** WEEK_DRIFT_DAYS = 7
+- **Edge cases:**
+  - Invalid or non-ISO date: None
+  - Companies naming years by start year (DG) are corrected elsewhere
+
+#### BR-SEC-009 · A filing's own fact value: latest end, shortest period
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/sec_facts.py:70-107`
+
+A filing's own value for a fact is the first listed concept tagged in that accession, at its latest period end, using the shortest period there. A 10-Q therefore gives the quarter, not the year to date.
+
+- **Given** A 10-Q tagging revenue for a 3-month and a 9-month period both ending 2025-09-30
+- **When** filing_fact_in_accession runs
+- **Then** The 3-month value is returned
+- **Edge cases:**
+  - Instant facts (no start) count as duration 0
+  - Unparseable dates count as very long periods
+
+#### BR-SEC-010 · Company fiscal-year naming offset
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/fiscal_calendar.py:101-146,258-269`
+
+The company's own fiscal-year numbering is learned from its latest 3 annual reports (fy stated vs period-end rule). It applies only if all agree and the offset is at most ±1 year. A filing's own DocumentFiscalYearFocus is trusted when within 1 year of the rule.
+
+- **Given** DG's 10-Ks state fy 2025 for the year ending 2026-01-30 (rule says 2026) in all 3 recent reports
+- **When** naming is resolved
+- **Then** offset = -1, basis SEC_STATED_FISCAL_YEAR, so FY0 consensus is labeled FY2025
+- **Parameters:** _NAMING_REPORTS = 3; annual duration 350-380 days; |offset| <= 1
+- **Edge cases:**
+  - Disagreement gives offset 0 with basis PERIOD_END_RULE_STATED_YEARS_INCONSISTENT
+  - No companyfacts: PERIOD_END_RULE_SEC_NOT_READ
+
+#### BR-SEC-011 · Company fiscal-year naming offset from recent 10-Ks
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:101-146`
+
+The company's own fiscal-year names are learned from its three latest 10-Ks: the offset between each stated fy and the period-end rule is applied only when all three agree and the offset is at most 1 year.
+
+- **Given** DG's last three 10-Ks state fy 2025, 2024, 2023 for years ending 2026-01-30, 2025-01-31, 2024-02-02
+- **When** fiscal_year_naming runs
+- **Then** The period-end rule gives 2026, 2025, 2024, so offset = -1 with basis SEC_STATED_FISCAL_YEAR
+- **Parameters:** _NAMING_REPORTS = 3; annual duration 350-380 days; concepts Revenues, RevenueFromContract..., SalesRevenueNet, NetIncomeLoss, EarningsPerShareDiluted
+- **Edge cases:**
+  - Offsets disagree or |offset| > 1: offset 0, PERIOD_END_RULE_STATED_YEARS_INCONSISTENT
+  - companyfacts not read: PERIOD_END_RULE_SEC_NOT_READ
+
+#### BR-SEC-012 · Filing fiscal-year label from DocumentFiscalYearFocus with mistag guard
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:247-269`
+
+A filing is labelled with the fiscal year it tags for itself unless that tag is more than one year from the period-end rule, in which case it is treated as a mistag and the rule year is used.
+
+- **Given** A 10-K for the period ending 2026-01-30 tagged DocumentFiscalYearFocus 2025
+- **When** filing_fiscal_year_label runs
+- **Then** Rule year = 2026, |2025-2026| = 1, so label FY2025. If the tag were 2022, label FY2026.
+- **Parameters:** Mistag tolerance: 1 year
+- **Edge cases:**
+  - Untagged filings (8-Ks, old HTML) use the rule year
+  - Tagged focus with no report date is accepted as-is
+
+#### BR-SEC-013 · Filing fiscal-year label prefers the filing's own tag within one year
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:247-269`
+
+A filing's fiscal year is its dei:DocumentFiscalYearFocus when that is within one year of the period-end rule. A tag further away is treated as a mistag and the rule is used.
+
+- **Given** A 10-K for the year ended 2026-01-30 tagged DocumentFiscalYearFocus 2025
+- **When** filing_fiscal_year_label runs
+- **Then** FY2025 (|2025 - 2026| <= 1). A tag of 2022 would give FY2026
+- **Edge cases:**
+  - Untagged (8-K, old HTML): period-end rule
+
+#### BR-SEC-014 · Filing fiscal-year label with mistag guard
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:247-269`
+
+A filing's fiscal-year label is the year it tags for itself (dei:DocumentFiscalYearFocus), unless that tag is more than 1 year away from the period-end rule. In that case the tag is treated as a mistag and the rule year is used.
+
+- **Given** 10-K with report date 2026-01-30 and DocumentFiscalYearFocus 2025
+- **When** filing_fiscal_year_label runs
+- **Then** FY2025 (rule year 2026, difference 1, within tolerance). If the tag were 2023, label FY2026.
+- **Parameters:** Tolerance 1 year
+- **Edge cases:**
+  - Untagged filing (8-K, older HTML) uses the rule year
+  - No report date and a tag present: the tag is used
+
+#### BR-SEC-015 · Filing's own fact: latest period end, shortest period
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/sec_facts.py:70-107`
+
+A filing's own value is the first concept tagged in that accession, at its latest period end, preferring the shortest period so a 10-Q gives the quarter rather than year-to-date.
+
+- **Given** A Q3 10-Q tags revenue for the 3 months and 9 months ending 2024-09-30
+- **When** the filing's revenue is read
+- **Then** the 3-month value is returned
+- **Edge cases:**
+  - Instant facts have duration 0 and so win over durations at the same end
+  - Unparseable dates rank last (1e9 days)
+
+#### BR-SEC-016 · Fiscal calendar pattern detection and projection
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:175-244`
+
+A company's year-end rule (month end, weekday nearest month end, or last weekday of month) is accepted only if it reproduces every recent annual period end; older years are added until one rule remains, and a provider's nominal year end is converted to the company date only when the fitting rules agree.
+
+- **Given** Annual period ends 2025-08-28, 2024-08-29, 2023-08-31, 2020-09-03 (MU, Thursday)
+- **When** settled_fiscal_calendar then company_fiscal_year_end('2026-08-31') run
+- **Then** With 2023-2025 both WEEKDAY_NEAREST_MONTH_END and LAST_WEEKDAY_OF_MONTH fit; adding 2020-09-03 leaves only WEEKDAY_NEAREST_MONTH_END; the projected FY2026 year end is the Thursday nearest 2026-08-31 = 2026-09-03.
+- **Parameters:** Minimum 2 period ends; all nominal months must match; weekday-nearest window -3..+3 days; MONTH_END checked first and exclusive
+- **Edge cases:**
+  - Provider end in a different nominal month -> None
+  - Two fitting rules giving different dates -> None (no projection)
+  - A period end no rule fits stops the look-back (calendar change)
+
+#### BR-SEC-017 · Fiscal calendar pattern detection and settling
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:175-232`
+
+The company's year-end rule (month end, weekday nearest the month end, or last such weekday of the month) is kept only if it reproduces every recent annual period end. Older years are added one at a time until a single rule remains, and the look-back stops at a year no rule fits.
+
+- **Given** MU year ends 2025-08-28, 2024-08-29, 2023-08-31 and 2020-09-03 (all Thursdays)
+- **When** settled_fiscal_calendar runs
+- **Then** For 2023-2025 both WEEKDAY_NEAREST_MONTH_END and LAST_WEEKDAY_OF_MONTH fit. Adding 2020-09-03 leaves only WEEKDAY_NEAREST_MONTH_END, weekday Thursday, month 8.
+- **Parameters:** Minimum 2 period ends; nearest-weekday window ±3 days; MONTH_END checked first and used alone if it fits
+- **Edge cases:**
+  - Nominal months differ: no calendar
+  - A changed calendar ends the look-back and keeps the last calendar that fit
+
+#### BR-SEC-018 · Fiscal calendar pattern inference and year-end projection
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:157-244`
+
+The company's year-end rule (month end, weekday nearest month end, or last weekday of month) is kept only if it reproduces every recent annual period end. Older ends are added until one rule remains. No date is projected when the remaining rules disagree.
+
+- **Given** Annual ends on Fridays nearest Jan 31 (2026-01-30, 2025-01-31, 2024-02-02) and a provider year end of 2027-01-31
+- **When** company_fiscal_year_end runs
+- **Then** Pattern WEEKDAY_NEAREST_MONTH_END (Friday), giving 2027-01-29
+- **Parameters:** Nearest-weekday search window ±3 days; at least 2 period ends needed
+- **Edge cases:**
+  - Month mismatch: None
+  - A changed calendar stops the look-back
+  - Two fitting rules giving different dates: None
+
+#### BR-SEC-019 · Fiscal quarter from distance to year end
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:77-90`
+
+The quarter a period closes is 4 minus round(days to year end / 91). The period must fall within 280 days before, or 7 days after, the year end and within 10 days of a quarter boundary.
+
+- **Given** A quarter ending 2026-05-29 in a fiscal year ending 2027-02-26 (273 days apart)
+- **When** fiscal_quarter_of runs
+- **Then** round(273/91) = 3, so Q1
+- **Parameters:** 91 days per quarter; window -7..280 days; tolerance 7 + 3 = 10 days
+- **Edge cases:**
+  - Outside the window or tolerance: None
+
+#### BR-SEC-020 · Fiscal quarter of a period end
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:77-90`
+
+A period's fiscal quarter is counted back from the fiscal year end in 91-day steps. It must fall within 10 days of a quarter boundary and within the same year, otherwise the quarter is unknown.
+
+- **Given** Fiscal year end 2026-12-26 and period end 2026-06-27 (gap 182 days)
+- **When** fiscal_quarter_of runs
+- **Then** quarters_left = round(182/91) = 2, so Q2
+- **Parameters:** Quarter length 91 days; boundary tolerance 7+3 = 10 days; gap allowed -7..280 days
+- **Edge cases:**
+  - Gap above 280 days or below -7 days returns None
+  - Gap off a boundary by more than 10 days returns None
+
+#### BR-SEC-021 · Fiscal quarter of a period within a fiscal year
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:77-90`
+
+Which quarter a period closes is counted from the days between its end and the fiscal year end in 91-day steps, and only if it lands within 10 days of a quarter boundary.
+
+- **Given** Fiscal year end 2026-12-26 and a period ending 2026-06-27
+- **When** fiscal_quarter_of runs
+- **Then** Gap = 182 days, quarters left = round(182/91) = 2, deviation 0 <= 10, so quarter = Q2.
+- **Parameters:** Quarter length 91 days; tolerance WEEK_DRIFT_DAYS + 3 = 10 days; gap must be between -7 and 280 days
+- **Edge cases:**
+  - A period ending more than 7 days after the year end or more than 280 days before it returns None
+  - A period mid-way between boundaries (e.g. gap 135) returns None
+
+#### BR-SEC-022 · Fiscal year of a 52/53-week period end
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/fiscal_calendar.py:22-57`
+
+A period's fiscal year is the calendar year of the date 7 days before its end, so a year ending in the first week of January belongs to the prior year.
+
+- **Given** A fiscal year ending 2027-01-02
+- **When** the fiscal year label is computed
+- **Then** 2027-01-02 minus 7 days = 2026-12-26, so FY2026
+- **Parameters:** WEEK_DRIFT_DAYS = 7
+- **Edge cases:**
+  - Company naming offsets (e.g. DG) are applied separately
+  - An invalid date gives null
+
+#### BR-SEC-023 · Latest annual report missing from SEC companyfacts
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/companyfacts_coverage.py:42-129`
+
+Warn LATEST_ANNUAL_NOT_IN_COMPANYFACTS when the newest 10-K/20-F/40-F filed by the as-of date contributes no us-gaap or ifrs-full fact and no held annual period reaches its report date.
+
+- **Given** TSM's FY2025 20-F (report date 2025-12-31) with no financial facts; companyfacts' newest annual period ends 2024-12-31
+- **When** coverage is checked
+- **Then** warning raised; figures are understood to come from FY2024
+- **Parameters:** Annual forms 10-K, 20-F, 40-F (amendments excluded when choosing latest filing; /A accepted for held-period check)
+- **Edge cases:**
+  - An amendment that put the year into companyfacts suppresses the warning
+  - Ties on filing date are broken by accession number
+
+#### BR-SEC-024 · Latest annual report missing from SEC companyfacts warning
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/companyfacts_coverage.py:13-129`
+
+When the newest 10-K/20-F/40-F filed by the as-of date adds no us-gaap or ifrs-full fact to companyfacts, and no annual period held reaches its report date, figures are flagged as coming from earlier reports.
+
+- **Given** TSM's FY2025 20-F (report date 2025-12-31) contributed only dei facts, and the newest annual period in companyfacts ends 2024-12-31
+- **When** latest_annual_coverage_warning runs
+- **Then** A LATEST_ANNUAL_NOT_IN_COMPANYFACTS warning naming the accession and latestCompanyfactsAnnualPeriodEnd 2024-12-31
+- **Parameters:** Annual forms 10-K, 20-F, 40-F (amendments excluded from the latest-filing pick; /A accepted for held periods); tie on filing date broken by the higher accession
+- **Edge cases:**
+  - No annual report on file: no warning
+  - An amendment that already covers the year suppresses the warning
+
+#### BR-SEC-025 · Named fiscal-year period parsing and issuer fiscal-year matching
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/sec_facts.py:116-143,179-205`
+
+A period must be 'latest' (or blank) or a fiscal year written FY2025 or 2025, otherwise it is refused; a period's fiscal year is the first-filed fy when fp is FY and fy equals the end year or the year before, else the year of (period end minus 7 days).
+
+- **Given** An annual period ending 2026-01-02 first reported with fp FY and fy 2025
+- **When** the caller asks for period 'FY2025'
+- **Then** the period matches (end year less a week = 2025); a request for 'Q3-2025' is refused with the help text
+- **Parameters:** 7-day 52/53-week drift
+
+#### BR-SEC-026 · Named fiscal-year period parsing and row selection
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/sec_facts.py:116-205`
+
+A requested period must be 'latest', 'FY2025' or '2025'; anything else is refused. A fiscal year matches a period's issuer year: the fy of the first filing that reported it with fp=FY, if within one year below the period-end year (end date less 7 days); else that period-end year. The newest-filed rows come first.
+
+- **Given** A period ending 2026-01-02 first reported with fy=2025, fp=FY
+- **When** select_fiscal_year_rows for 2025
+- **Then** The rows match (2026-01-02 less 7 days falls in 2025); 'FY 2025x' would be refused with the help text
+
+#### BR-SEC-027 · Projecting the company's fiscal year end from a provider date
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/fiscal_calendar.py:235-244`
+
+A provider's nominal year-end date is converted to the company's actual year end using the settled calendar. No date is projected when the month differs or when the fitting rules give different dates.
+
+- **Given** Calendar WEEKDAY_NEAREST_MONTH_END, Friday, January; provider says 2027-01-31
+- **When** company_fiscal_year_end runs
+- **Then** Returns 2027-01-29
+- **Parameters:** Uses nominal (end - 7 days) month to match the calendar month
+- **Edge cases:**
+  - Two patterns give different dates: None
+  - No calendar or no provider date: None
+
+#### BR-SEC-028 · Table monetary scale precedence (assume millions last)
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/parsing/html.py:83-148`
+
+A table's unit is taken from its own scale statement, else the nearest statement before it, else the one scale the whole filing uses. If none of these exists, amounts are assumed to be in millions and flagged UNIT_SCALE_ASSUMED.
+
+- **Given** A table headed 'by market ($000):'
+- **When** _detect_unit_scale runs
+- **Then** Multiplier 1,000 (STATED_IN_TABLE), not millions
+- **Parameters:** Scale words: billions 1e9, millions 1e6, thousands/000 1e3; document scale used only if exactly one distinct scale is stated
+- **Edge cases:**
+  - The lead-in uses its last statement
+  - A document with mixed scales falls back to ASSUMED_MILLIONS
+
+#### BR-SEC-029 · Filing search match relevance score and ordering
+
+**P2** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/filing_search.py:802-818,906-940,979-995`
+
+Search matches are scored by distinct terms, section importance (risk factors/MD&A highest), prose over tables and repeat hits; relevance order takes the best match of each term in turn so one common term cannot fill the page; a match with fewer than 5 words of context is LOW confidence.
+
+- **Given** A primary-document match in Risk Factors with 2 terms, 3 hits, not in a table
+- **When** The score is computed
+- **Then** score = 3x2 + 3 + 1 + min(3-1,2) = 12; confidence MEDIUM if context has >=5 words
+- **Parameters:** Section weights: exhibits 2; risk factors/MD&A 3; quantitative-qualitative/Item 1 Business 2; financial statements/legal proceedings 1; other 0; repeat bonus capped at 2
+- **Edge cases:**
+  - Excluded terms drop any hit whose sentence/table row contains them
+  - Document order sorts by filing then offset
+
+#### BR-SEC-030 · Filing search relevance score
+
+**P2** · Calculation · Confidence **High**  
+Source: `yfmcp/filing_search.py:802-813,911-940,989`
+
+A filing-text match scores 3 per distinct term, plus a section weight (Risk Factors/MD&A 3, Business/Quant 2, Financial Statements/Legal 1, exhibits 2), plus 1 if not in a table, plus up to 2 for extra hits. Relevance order interleaves the best match of each term in turn.
+
+- **Given** Match in Risk Factors with 2 terms, prose, 4 hits
+- **When** Score is computed
+- **Then** score = 6 + 3 + 1 + 2 = 12
+- **Parameters:** term weight 3; section weights 3/2/1/0; non-table bonus 1; extra-hit bonus cap 2; context confidence MEDIUM if >= 5 words else LOW
+- **Edge cases:**
+  - Excluded terms drop any hit whose sentence contains them
+
+#### BR-SEC-031 · Filing search relevance score and round-robin ordering
+
+**P2** · Calculation · Confidence **High**  
+Source: `yfmcp/filing_search.py:802-813,911-940,979-990`
+
+A search match scores 3 per matched term, plus a section weight (Risk Factors/MD&A 3, Market Risk/Business 2, Financial Statements/Legal 1, exhibits 2), plus 1 for prose, plus up to 2 for extra hits. Relevance order takes one match per term in turn. Confidence is MEDIUM with 5+ words of context, otherwise LOW.
+
+- **Given** Match with 2 terms in Risk Factors prose with 4 hits
+- **When** scored
+- **Then** 6 + 3 + 1 + 2 = 12
+
+#### BR-SEC-032 · Fiscal calendar rule detection and projection
+
+**P2** · Calculation · Confidence **High**  
+Source: `yfmcp/fiscal_calendar.py:157-244`
+
+From two or more annual period ends, the rule is kept only if it reproduces every one: month end; otherwise weekday nearest month end (within ±3 days) and/or last such weekday of the month. A date is projected only when the fitting rules agree.
+
+- **Given** Year ends 2026-01-30, 2025-01-31, 2024-02-02 (Fridays nearest Jan 31)
+- **When** the calendar is fitted and a provider date of 2027-01-31 is mapped
+- **Then** pattern WEEKDAY_NEAREST_MONTH_END, Friday, so the company year end is 2027-01-29
+- **Parameters:** Look-back adds older ends until one pattern remains or one fails
+- **Edge cases:**
+  - Different nominal months gives no calendar
+  - Two rules disagreeing for the target year gives null
+
+#### BR-SEC-033 · Fiscal quarter from distance to year end
+
+**P2** · Calculation · Confidence **High**  
+Source: `yfmcp/fiscal_calendar.py:77-90`
+
+The quarter = 4 - round(days to fiscal year end / 91), accepted only within 10 days of a quarter boundary and within the year.
+
+- **Given** Quarter end 2026-06-27, fiscal year end 2026-12-26 (182 days)
+- **When** fiscal_quarter_of runs
+- **Then** round(182/91) = 2, so Q2
+- **Parameters:** Gap window -7..280 days; boundary tolerance 7+3 = 10 days; 91 days per quarter
+- **Edge cases:**
+  - Off-boundary or out-of-year periods give null
+
+#### BR-SEC-034 · Table-of-contents hits excluded
+
+**P2** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/filing_search.py:288-301`
+
+A heading match that sits in an in-page anchor link or a dotted leader line with a page number is treated as a table-of-contents entry, not content.
+
+- **Given** 'Risk Factors ........ 12' in a 10-K
+- **When** Headings are located
+- **Then** The match is treated as TOC and skipped
+- **Parameters:** Windows: ±30 chars for anchors, 100 chars before, ±150 chars for leaders
+- **Edge cases:**
+  - Middle-dot entities also mark TOC
+
+### SEC extractors & capital structure
+
+#### BR-EXT-001 · Conversion ratio unit normalisation (per $1,000 vs per $1)
+
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1197-1226`
+
+A tagged conversion ratio is used only when ratio x conversion price is about 1,000, or about 1 (a per-$1 ratio, which is scaled x1,000). A ratio that agrees with neither scale is rejected, and a ratio below 1 with no price has an unknown unit.
+
+- **Given** A filer tags a ratio of 0.0076319 and a conversion price of $131.03
+- **When** The ratio is normalised
+- **Then** 0.0076319 x 131.03 = 1.0000 (within 2%), so per1000 = 7.6319 with note RATIO_PER_1_PRINCIPAL_SCALED. A ratio of 2.6926 against $194.97 (product 525) is RATIO_INCONSISTENT_WITH_PRICE and not used
+- **Parameters:** _RATIO_PRICE_TOLERANCE = 0.02; scaled value rounded half-up to 6 dp
+- **Edge cases:**
+  - Ratio <= 0 or missing: unusable
+  - No price and ratio >= 1: used as-is
+  - No price and ratio < 1: RATIO_UNIT_UNCERTAIN
+
+#### BR-EXT-002 · Conversion ratio unit normalization
+
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/capital_structure.py:1197-1226`
+
+A tagged conversion ratio is trusted only if it agrees with the conversion price (shares per $1,000). A ratio tagged per $1 is scaled by 1,000. A ratio that matches neither is rejected.
+
+- **Given** Tagged ratio 0.0076319 and conversion price $131.03
+- **When** the ratio is normalized
+- **Then** 0.0076319 x 131.03 is about 1.000, which is within 2% of 1, so the ratio is scaled to 7.6319 per $1,000 (note RATIO_PER_1_PRINCIPAL_SCALED). A ratio of 2.6926 against $194.97 (product/1000 = 0.525) is RATIO_INCONSISTENT_WITH_PRICE and not used.
+- **Parameters:** _RATIO_PRICE_TOLERANCE = 0.02; per-1000 check |ratio x price / 1000 - 1| <= 0.02; per-1 check |ratio x price - 1| <= 0.02
+- **Edge cases:**
+  - No conversion price: a ratio >= 1 is accepted, a ratio < 1 is RATIO_UNIT_UNCERTAIN and not used
+  - Ratio <= 0 or missing is not usable
+
+#### BR-EXT-003 · Convertible note if-converted shares and principal basis
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1187-1209,1419-1492`
+
+Shares from convertible notes come first from the tagged shares-issuable count at period end. Otherwise they are principal / 1000 x conversion ratio, else principal / conversion price. The shares count as dilution only when the price is at or above the conversion price.
+
+- **Given** A note with a $300,000,000 face, a period-end carrying amount of $250,000,000 and a $50.00 conversion price, with no shares-issuable tag
+- **When** The bridge runs at a price of $60.00
+- **Then** Principal is $250,000,000, because the carrying amount is below 95% of face (principalBasis outstanding_at_period_end). ifConvertedShares = 250,000,000 / 50 = 5,000,000 and incrementalShares = 5,000,000 because 60 >= 50
+- **Parameters:** _REDUCED_PRINCIPAL_SHARE = 0.95; principal fallbacks: DebtInstrumentCarryingAmount, LongTermDebt, ConvertibleNotesPayable, ConvertibleLongTermNotesPayable, LongTermDebtNoncurrent, SeniorNotes; implied conversion price = 1000 / ratio, rounded to 4 dp
+- **Edge cases:**
+  - A subsequent-event redemption tag adds afterPeriodEnd but the shares still count as of period end
+  - Out of the money: incrementalShares 0
+  - No principal or price: unresolved (null)
+  - Component incrementalShares is null only when every instrument is unresolved
+- **Suspected defect:** The in-the-money test is price >= conversion price for convertibles and preferred, but price > strike for options and warrants. At exactly the strike, a convertible counts all its shares while an option counts zero (treasury-stock gives 0 anyway), so the boundary rule is inconsistent across instruments.
+- **SME question:** Should a convertible whose conversion price equals the market price count as dilutive (current >=), to match the EPS if-converted convention?
+
+#### BR-EXT-004 · Convertible preferred if-converted and liquidation preference
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1544-1675`
+
+Convertible preferred adds its tagged issuable common shares when the price is at or above the conversion price. With no tag, it uses a ratio or aggregate stated in the text. A per-share ratio with no conversion price is treated as common-equivalent at any price.
+
+- **Given** 2,000,000 preferred shares outstanding, 21,800,000 issuable common shares tagged, a $91.84 conversion price and a $1,000 per-share liquidation preference
+- **When** The bridge runs at a price of $80
+- **Then** incrementalShares = 0 (80 < 91.84) and liquidationPreference = 1,000 x 2,000,000 = $2,000,000,000.00. At a price of $95, incrementalShares = 21,800,000
+- **Parameters:** Shares outstanding = the larger of the PreferredStock and TemporaryEquity counts (never their sum). dividendRatePct = tagged rate x 100, rounded to 4 dp. Liquidation per-share x shares is rounded to 2 dp. Text forms accepted: one-for-one, 'each share ... convertible into N shares', 'conversion rate of N shares ... per share', aggregate 'convertible into an aggregate of X million'
+- **Edge cases:**
+  - countBeforePeriodEnd true when the issuable count predates the period end
+  - No conversion price and the basis is not a stated ratio: unresolved (null)
+  - Facts on StatementEquityComponentsAxis are excluded
+
+#### BR-EXT-005 · Convertible scenario treatments and net share settlement
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:188-217`
+
+Convertibles count their if-converted shares when price >= conversion price (inclusive); 'if_converted_all' counts all; net-share settlement (only when the filing states principal settlement) counts max(0, if-converted shares - principal / price).
+
+- **Given** Notes with 10,000,000 if-converted shares, $500M principal, $50 conversion price, cash-settled principal stated; price $75
+- **When** Scenario uses net_share_settlement_when_stated
+- **Then** 10,000,000 - 500,000,000/75 = 3,333,333 incremental shares
+- **Parameters:** ITM test price >= conversion price (options use strict >)
+- **Edge cases:**
+  - Below conversion price -> 0
+  - No principal settlement stated -> falls back to if-converted with note
+  - Applies equally to convertible preferred
+
+#### BR-EXT-006 · Debt instrument period-end status
+
+**P0** · Lifecycle · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/capital_structure.py:2585-2592`
+
+Each tagged debt instrument is issued_after_period_end if all its facts post-date the period end or are subsequent events, matured_before_period_end if its earliest maturity precedes the period end, outstanding_at_period_end if it has a carrying amount at the period end, otherwise reported.
+
+- **Given** Period end 2026-06-30; a note with maturity 2026-03-15
+- **When** Capital structure is extracted
+- **Then** status matured_before_period_end, excluded from outstanding reconciliation
+- **Parameters:** _NOT_AT_PERIOD_END = {matured_before_period_end, issued_after_period_end} (capital_structure.py:2367)
+- **Edge cases:**
+  - rows with no face, carrying, tagged amount or maturity are dropped
+  - a member with multiple maturities is placed at the earliest
+  - maturity must be a full 10-char date
+
+#### BR-EXT-007 · Dilution bridge status and diluted share formula
+
+**P0** · Lifecycle · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2090-2100,2276-2325`
+
+Diluted shares at the caller's price = basic + incremental shares from options, unvested awards, warrants, convertible debt and convertible preferred. The bridge is NOT_FOUND without a basic share count. It is PARTIAL if any component or class is unresolved or any open share claim exists, otherwise COMPUTED.
+
+- **Given** Basic 100,000,000; option incremental 2,000,000; warrant incremental 3,000,000; no open claims
+- **When** dilution_bridge runs
+- **Then** dilutedSharesAtPrice 105,000,000; dilutionPctAtPrice 5.00; status COMPUTED
+- **Parameters:** Rounding half-up (shares to 0 dp, percentages to 2 dp); gross count adds full options outstanding, unvested awards, warrants outstanding and if-converted shares; ATM shares reported separately in dilutedSharesAtPriceWithAtm
+- **Edge cases:**
+  - No basic shares: status NOT_FOUND, bridge null, error warning BASIC_SHARES_NOT_FOUND
+  - A component with null incrementalShares is 'unresolved'; one with unresolvedClasses/Instruments > 0 is 'partiallyResolved'
+  - COMPUTED covers tagged instruments only, not a full claim inventory
+  - Strike currency different from the price currency adds warning PRICE_CURRENCY_MISMATCH
+
+#### BR-EXT-008 · Dilution bridge totals, dilution percentages and status
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2276-2325`
+
+Diluted shares = basic + options + awards + warrants + convertibles + preferred incremental shares. Dilution % = (diluted - basic) / basic x 100. A gross figure adds every instrument's full count. The status is PARTIAL whenever any component is unresolved or partial, or an open share claim exists.
+
+- **Given** Basic shares of 100,000,000; options +600,000; awards +2,500,000; warrants +900,000; convertibles +5,000,000; no preferred
+- **When** The bridge is assembled
+- **Then** dilutedSharesAtPrice = 109,000,000 and dilutionPctAtPrice = 9.00. If any share claim stated in the text is unquantified, status = PARTIAL, otherwise COMPUTED
+- **Parameters:** Rounding half-up to whole shares and to 2 dp for percentages; no percentage when basic <= 0. Basic shares come from the cover page (dei:EntityCommonStockSharesOutstanding at the latest date, summed across classes when no plain total) else the balance sheet
+- **Edge cases:**
+  - No basic shares: status NOT_FOUND, BASIC_SHARES_NOT_FOUND error
+  - PRICE_CURRENCY_MISMATCH warning when strike units differ from the price currency
+  - taggedDilutionConcepts listed when any component other than preferred is missing
+
+#### BR-EXT-009 · Geographic revenue table selection and share check
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/parsing/extractors.py:146-151,207-233,241-326`
+
+A region's revenue share is read from a filing table that names the region and is about revenue (not square footage or assets); geographic-breakdown tables are preferred; the region cannot exceed the total, and a table's own '% of total' figure must agree within 1 percentage point.
+
+- **Given** Table titled 'Revenue by geographic region' with China 150 and Total 1,000 (in millions) and a '% of total' column showing 16.5%
+- **When** extract_geo_revenue_from_html runs for region 'China'
+- **Then** Computed share 15.0% differs from stated 16.5% by 1.5 pts > 1.0, so the table is rejected; without the stated column the result is pct 0.15, usd 150,000,000, denominator 1,000,000,000.
+- **Parameters:** Stated-pct tolerance 1.0 pt; region <= total x 1.001; tables scanned max 800; lead-in window 1,500 chars (last 800 used); geographic score 2 vs 1; China aliases include PRC, mainland china, country:cn, srt:chinamember
+- **Edge cases:**
+  - A total row must carry amounts; otherwise the last numeric row is used
+  - A % beside a value counts as a share only under a '% of'/'percent of' header (not a Change column)
+  - Dash cells read as 0
+
+#### BR-EXT-010 · Guidance basis (GAAP / non-GAAP) classification
+
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:333-367,405-415`
+
+A range's accounting basis is read from its own clause: 'GAAP and non-GAAP' -> both, 'non-GAAP' or 'adjusted' -> NON_GAAP, 'GAAP' -> GAAP, otherwise NOT_STATED; table rows use their own label or column header.
+
+- **Given** '... diluted EPS between $1.85 and $2.05 on a non-GAAP basis.'
+- **When** The basis is read
+- **Then** basis NON_GAAP (such ranges are never scored against GAAP actuals downstream)
+- **Parameters:** Clause = text from last '.;!?' or bullet within 200 chars before the first amount to up to 80 chars after
+- **Edge cases:**
+  - A clause break inside the match ends an earlier clause (BE example)
+
+#### BR-EXT-011 · If-converted shares for convertible notes
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/capital_structure.py:1436-1491`
+
+Convertible notes count as shares when the price is at or above the conversion price. The share count comes from the tagged shares-issuable figure, otherwise principal/1000 x conversion ratio, otherwise principal / conversion price.
+
+- **Given** $300,000,000 principal, conversion price $50.00, no shares-issuable tag and no usable ratio
+- **When** the bridge is evaluated at $50.00 (or $49.99)
+- **Then** if-converted shares = 300,000,000 / 50 = 6,000,000; incremental = 6,000,000 at $50.00 (price >= conversion price) and 0 at $49.99
+- **Parameters:** Order: shares_issuable_tagged_at_period_end > principal/1000 x ratio > principal / conversion price. Implied conversion price = 1000 / ratio when only the ratio is tagged (rounded to 4 dp)
+- **Edge cases:**
+  - Principal outstanding at period end is preferred. A carrying amount is used only if it is below 95% of face (_REDUCED_PRINCIPAL_SHARE = 0.95); then face amount; then fallback concepts
+  - Shares unknown means incremental null (unresolved instrument)
+  - A redemption after period end (tagged on a subsequent-event axis) only raises a warning; shares are still counted as of the period end
+
+#### BR-EXT-012 · Instrument-to-total-debt reconciliation
+
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/capital_structure.py:2947-2993`
+
+Outstanding instrument carrying amounts are summed and compared with balance-sheet total debt within 0.5%: RECONCILED, RECONCILED_NET_OF_UNAMORTIZED_COSTS (if subtracting the filing's unamortized costs closes the gap), NOT_RECONCILED (warning), or NOT_COMPARABLE when any outstanding row lacks a carrying amount.
+
+- **Given** Rows carry 130,000,000; total debt 129,142,000; unamortized costs 858,000
+- **When** The reconciliation runs
+- **Then** Gross diff 0.66% > 0.5%, net 129,142,000 matches -> RECONCILED_NET_OF_UNAMORTIZED_COSTS and rows marked BEFORE_UNAMORTIZED_COSTS
+- **Parameters:** _AGGREGATE_TOLERANCE 0.005 (capital_structure.py:2468)
+- **Edge cases:**
+  - total debt 0 or null -> NOT_COMPARABLE
+  - convertible rows separately reconciled to the balance-sheet convertible line; mismatch marks MAY_BE_PRINCIPAL
+
+#### BR-EXT-013 · Net-share settlement when principal is stated as cash-settled
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/capital_structure.py:1250-1284,1493-1506; yfmcp/share_scenarios.py:207-214`
+
+If the filing says note principal must be paid in cash, conversion delivers shares only for the value above principal: if-converted shares minus principal / price, floored at zero.
+
+- **Given** A note with 6,000,000 if-converted shares, $300,000,000 principal, conversion price $50, and a filing sentence 'principal ... must be settled in cash'
+- **When** the price is $75.00
+- **Then** net-share settlement shares = max(0, 6,000,000 - 300,000,000/75) = 2,000,000. Out of the money (price < $50) gives 0.
+- **Parameters:** Settlement sentence must match _CASH_PRINCIPAL_RE and must NOT contain optional wording (may/can/at our option)
+- **Edge cases:**
+  - The scope can be ALL_NOTES, NAMED_NOTES (matched by year in the instrument name), or UNNAMED_NOTES (used only when there is exactly one note)
+  - Principal untagged gives null (unresolved)
+  - The EPS-basis dilutedSharesAtPrice still uses full if-converted; the net figure is reported alongside it
+
+#### BR-EXT-014 · Outlook table scale for unscaled amounts
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:249-269,396-403`
+
+An unscaled guidance dollar amount takes the outlook table's '(in millions)' style scale if stated within the previous 400 characters without a sentence break.
+
+- **Given** 'Business Outlook (in millions, except per share amounts) ... Revenue $10,300 - $10,800'
+- **When** The revenue range is read
+- **Then** low '10,300 million', high '10,800 million' (10.3-10.8 billion)
+- **Parameters:** Lookback 400 chars; scales thousands/millions/billions
+- **Edge cases:**
+  - Amounts with their own scale word are not rescaled
+
+#### BR-EXT-015 · Release figure scale and loss sign
+
+**P0** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/extraction_rules.py:590-613`
+
+An unscaled dollar figure takes the release's table scale only when the release declares exactly one scale. With more than one, the figure is skipped. Parentheses, a minus sign, 'negative', or 'loss' wording make the value negative. Scaled values are rounded half-up to whole units.
+
+- **Given** Release with a single '(in millions)' and 'Revenue was $54,229'; another sentence 'diluted net loss per share of $0.12'
+- **When** figures are read
+- **Then** revenue 54,229,000,000 (scaleBasis RELEASE_TABLE_IN_MILLIONS); EPS −0.12
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel doubts spec fidelity: I read yfmcp/extraction_rules.py:590-613 and its helpers: _RELEASE_MONEY_BASE/_RELEASE_SCALE/_RELEASE_TABLE_SCALE_RE at 494-499, _RELEASE_NEGATIVE_RE/_RELEASE_LOSS_RE/_RELEASE_INCOME_RE/_RELEASE_NET_LOSS_RE at 512-516, _release_scales at 519-525, _whole at 537-538, and the epsDiluted label at 485.
+
+P0 is justified. This rule sets the size (a 1,000x or 1,000,000x scale) and the sign of reported revenue, net income and EPS. A mistake silently corrupts financial figures, so it guards data integrity.
+
+The worked example is correct when traced through the code. "(in millions)" is the only scale, so the revenue figure is 54229 x 1e6 = 54,229,000,000 with scaleBasis "RELEASE_TABLE_IN_MILLIONS" (line 600). For EPS, the label "diluted net loss per share" contains "loss" and not "income"/"earnings" (line 608), so it becomes -0.12. EPS is not a money metric (line 546), so the table scale is not applied to it.
+
+The plain-English statement is not faithful, and as a behaviour contract it would produce wrong equivalence tests:
+1. Loss wording only turns a value negative for epsDiluted (lines 606-611). For money metrics like revenue, net income or free cash flow, only parentheses, an ASCII "-" or the word "negative" directly before the amount count (line 512 requires `negative\s*$` in the gap). So "net loss of $5 billion" for netIncome stays positive, even though the card says loss wording makes it negative.
+2. Even for EPS, a label that names both outcomes, such as "diluted income (loss) per share", is excluded (line 608). For per-share-form matches, only the last "net income/earnings/loss" mention before the amount decides the sign (lines 610-611).
+3. "Unscaled dollar figure takes the release's table scale" is wrong for EPS. EPS and gross margin never take the table scale or a scale word, and their scaleBasis is None (line 592).
+4. "Exactly one scale" means one distinct unit across the whole text. Repeats are de-duplicated (lines 522-524), so two "(in millions)" headers still count as one.
+5. When there are several scales, only that candidate is skipped (`continue`, line 597). The loop then tries later candidates, which may carry an explicit scale word and be accepted with scaleBasis AS_WRITTEN.
+6. Rounding: floor(magnitude x scale + 0.5) is applied to the unsigned magnitude before the sign (lines 602, 613), so it is effectively half-away-from-zero on the signed value. Unscaled values are not rounded; _whole only turns 5.0 into 5. An explicit scale word like "$1.2 billion" also goes through this rounding, not only table-scaled values.
+7. Only the ASCII hyphen-minus counts as a minus sign (line 495). A Unicode minus is not recognised.
+8. A zero result is never negated (line 613).
+
+No instruction-shaped text or credentials were found in the cited lines.
+
+</details>
+
+#### BR-EXT-016 · Reported release metric acceptance rules
+
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/extraction_rules.py:541-616`
+
+A figure is read from release prose as a quarterly result only when its sentence has a result verb or a leading label. Sentences with guidance, award or backlog wording, sentences with ±, and annual-only sentences are skipped. Non-GAAP figures, per-share figures for totals, and figures attributed to another metric are rejected. Unscaled amounts take the release's table scale only when exactly one scale is declared. Losses and parentheses make the value negative.
+
+- **Given** Release says 'Revenue of $54.23 billion' and also carries '(in millions)' tables
+- **When** Revenue is extracted
+- **Then** value = 54,230,000,000, scaleBasis AS_WRITTEN; a bare '$ 54,229' would scale x1e6 only if the release declares a single table scale
+- **Parameters:** sentence max 600 chars; label-to-figure gap max 100 chars; non-GAAP look-back 40 chars; scale map incl. mm=1e6
+- **Edge cases:**
+  - 'diluted net loss per share of $0.12' gives −0.12
+  - 'increased 5.2% to $X' reads X, never 5.2%
+  - Two different table scales and no unit word: figure skipped
+  - Extracted text metrics are confidence LOW with a TEXT_METRIC_VERIFY_REQUIRED warning (tools/earnings.py:434-463)
+
+#### BR-EXT-017 · Reported release metric eligibility
+
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:456-616`
+
+A press-release figure counts as the quarter's reported metric only if its sentence has a result verb or leads with the label, contains no guidance/award/backlog/± wording, is not annual-only, is not non-GAAP/adjusted, is not per-share for a total, and uses the table scale only when the release declares exactly one scale.
+
+- **Given** Release with one '(in millions)' table header and sentence 'Revenue was $ 54,229 for the fourth quarter'
+- **When** release_text_metric('revenue') runs
+- **Then** value 54,229,000,000 with scaleBasis RELEASE_TABLE_IN_MILLIONS; with two different table scales the unscaled figure is skipped; 'diluted net loss per share of $0.12' gives -0.12
+- **Parameters:** Sentence max 600 chars; gap label->figure up to 100 chars; non-GAAP check 40 chars before label; scaled values rounded half-up to whole units
+- **Edge cases:**
+  - 'increased 5.2% to $X' reads $X, not 5.2%
+  - 'Gaming revenue' (segment) rejected unless label is qualified
+  - '$125 million of awards' rejected
+
+#### BR-EXT-018 · Scenario instrument line inclusion and treasury-stock increment
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:107-142`
+
+In each scenario, an instrument counts toward the resulting shares only when it is not excluded and nothing is unresolved. Options and warrants under treasury stock add count x (1 - exercise price / price), and only when the price is above the exercise price.
+
+- **Given** 1,000,000 options outstanding at a $10.00 weighted-average exercise price, scenario price $25.00, treatment treasury_stock
+- **When** The scenario line is built
+- **Then** Incremental shares = 1,000,000 x (1 - 10/25) = 600,000 (rounded half-up to whole shares), inTheMoney=true, thresholdPrice=10, included=true. With treatment gross the increment is 1,000,000. If the count is untagged the line is unresolved ('count not tagged'); if the strike is untagged under treasury_stock it is unresolved ('exercise price not tagged')
+- **Parameters:** Rounding: floor(x+0.5)
+- **Edge cases:**
+  - At price == strike the increment is 0 (strictly greater-than is required)
+  - An excluded line reports increment 0 and included=false
+
+#### BR-EXT-019 · Scenario resulting shares, dilution and completeness
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/share_scenarios.py:249-297`
+
+Resulting shares = basic + included incremental shares + caller-declared known issuance. The completeness label follows a fixed precedence.
+
+- **Given** Basic 100,000,000, included instrument increments 5,000,000, known issuance 1,000,000
+- **When** a scenario is evaluated
+- **Then** resultingShares = 106,000,000; dilutionPct = 6.00. The status is COMPUTED only if every scenario is TAGGED_INSTRUMENTS_RESOLVED
+- **Parameters:** Completeness order: NO_BASIC_SHARES > EXCLUDES_UNRESOLVED_INSTRUMENTS > EXCLUDES_UNQUANTIFIED_CLAIMS > CLAIM_TEXT_NOT_READ > TAGGED_INSTRUMENTS_RESOLVED
+- **Edge cases:**
+  - Unresolved instruments are left out of the total
+  - A warrant class with vesting conditions but no exercisable count is not assumed fully exercisable
+  - ATM full_remaining_capacity = remaining / price
+
+#### BR-EXT-020 · Scenario totals, dilution % and completeness
+
+**P0** · Lifecycle · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:249-297`
+
+Resulting shares = basic + included incremental shares + known issuance; dilution % = (resulting - basic) / basic x 100; completeness is NO_BASIC_SHARES, then EXCLUDES_UNRESOLVED_INSTRUMENTS, EXCLUDES_UNQUANTIFIED_CLAIMS, CLAIM_TEXT_NOT_READ, else TAGGED_INSTRUMENTS_RESOLVED.
+
+- **Given** Basic 100,000,000, options +600,000, ATM excluded, known issuance 400,000, nothing unresolved, claim text read
+- **When** Totals are computed
+- **Then** Resulting 101,000,000; dilution 1.00%; completeness TAGGED_INSTRUMENTS_RESOLVED; overall status COMPUTED
+- **Parameters:** Status NOT_FOUND without basic shares; PARTIAL if any scenario is not fully resolved; no scenario is ever selected
+
+#### BR-EXT-021 · Scenario treasury-stock dilution for options and warrants
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/share_scenarios.py:43-45,127-142,155-186`
+
+Under treasury_stock, incremental shares = count x (1 - exercise price / scenario price) only when price is strictly above the exercise price; gross counts every share regardless of strike; options use per-range tranches when tagged, else the weighted-average strike.
+
+- **Given** 1,000,000 options at a $10 exercise price and a scenario price of $25
+- **When** the treasury_stock treatment is applied
+- **Then** incremental shares = 1,000,000 x (1 - 10/25) = 600,000; at price $10 the result is 0; under gross it is 1,000,000
+- **Parameters:** Rounding: floor(x + 0.5)
+- **Edge cases:**
+  - Missing count gives unresolved reason 'count not tagged'
+  - Missing strike under treasury_stock gives 'exercise price not tagged'
+  - Unresolved lines are excluded from resultingShares
+
+#### BR-EXT-022 · Short-term investments and cash aggregate cross-check
+
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2345-2414,2837-2844`
+
+Short-term investments are the tagged total, else the sum of the disjoint current categories (AFS, HTM, other). If the filing's cash-plus-investments total equals cash alone (within 0.5%), the investments are already inside cash and are dropped.
+
+- **Given** Cash $500M, AFS current $200M, and CashCashEquivalentsAndShortTermInvestments $500M
+- **When** capital_structure runs
+- **Then** Short-term investments are set to null with CASH_AGGREGATE_MISMATCH (info). If the total were $650M, a mismatch warning is raised and the $200M is kept
+- **Parameters:** _AGGREGATE_TOLERANCE = 0.005; a summed figure's decimals = the minimum of the parts
+- **Edge cases:**
+  - A single part is returned as-is
+
+#### BR-EXT-023 · Total debt concept hierarchy and finance-lease removal
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/capital_structure.py:2417-2534`
+
+Debt = LongTermDebt (else current + noncurrent) plus short-term borrowings, plus separately reported convertibles if larger. Otherwise lease-inclusive totals less the finance-lease liability. Otherwise the sum of debt lines.
+
+- **Given** A filer tagging DebtAndCapitalLeaseObligations $5,722M and FinanceLeaseLiability $2,670M
+- **When** capital structure is extracted
+- **Then** total debt = 5,722 - 2,670 = $3,052M (leases SUBTRACTED)
+- **Parameters:** The lease is subtracted only if it is <= gross; DebtCurrent takes precedence over the current lease-inclusive line
+- **Edge cases:**
+  - No finance lease tagged: leases INCLUDED
+  - No borrowing concept at all: the filing reports no borrowings
+
+#### BR-EXT-024 · Treasury-stock and if-converted dilution mechanics
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/share_scenarios.py:127-142,188-217; yfmcp/capital_structure.py:501-502`
+
+Options and warrants add count x (1 - strike/price) only when price is strictly above strike. Convertibles add all if-converted shares when price is at or above the conversion price. With stated cash settlement of principal, they add only max(0, shares - principal/price).
+
+- **Given** 1,000,000 options at strike $10 with price $25. Notes with 2,000,000 if-converted shares at conversion $20, principal $40M, cash settlement stated, price $25.
+- **When** A scenario is computed
+- **Then** Options add 600,000. Notes under net_share_settlement_when_stated add max(0, 2,000,000 - 1,600,000) = 400,000. Under the default treatment they add 2,000,000.
+- **Parameters:** Options ITM: price > strike; convertibles ITM: price >= conversion price; rounding floor(x+0.5)
+- **Edge cases:**
+  - A missing count, strike or conversion price makes the line unresolved; it is left out of resultingShares and status becomes PARTIAL
+  - A warrant class with an untagged exercisable count is never treated as all outstanding
+  - Capped call offset = -covered x max(0, min(price, cap) - strike) / price, only with offset_when_stated
+  - ATM full capacity = remaining USD / price
+- **SME question:** Is the different in-the-money boundary intended (options strictly greater than strike, convertibles greater than or equal to conversion price)?
+
+#### BR-EXT-025 · Unvested RSU/PSU awards counted gross
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:620-723`
+
+Unvested share awards add their full count to diluted shares, without the treasury-stock method. The count comes from the most specific tagged concept, and from the filing's award table when nothing is tagged.
+
+- **Given** A filing tags no undimensioned nonvested total, but tags RSU 2,000,000 and PSU 500,000 on AwardTypeAxis
+- **When** The awards component is built
+- **Then** unvested = incrementalShares = 2,500,000 (method gross_unvested). If only a table row reads 'Unvested at December 31, 2025 | 1,234' under 'in thousands', the count is 1,234,000 with countBasis filing_table_text
+- **Parameters:** Concept order: us-gaap nonvested, then company-prefix nonvested, then outstanding, then vested-and-expected-to-vest. The breakdown is summed on the fewest award/plan axes only. A table read is scaled x1000 when the scope says 'in thousands'
+- **Edge cases:**
+  - A table titled with 'option' is skipped
+  - When several table rows qualify, the latest row date wins
+  - Units in USD/EUR/GBP are not share counts
+
+#### BR-EXT-026 · Warrant class retirement by filing text
+
+**P0** · Lifecycle · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/capital_structure.py:851-948`
+
+A warrant class counted before the period end is treated as retired when a non-negated past-tense sentence names it (its exact count of at least 1,000 or a 2+ word class name), states it was exercised (in whole), expired or redeemed, and dates the event after the count and on or before the period end; the earliest such event wins.
+
+- **Given** 122,000 Private Placement Warrants counted at 2025-12-31; 10-Q for period ended 2026-03-31 says 'the remaining 122,000 Private Placement Warrants were exercised' during the three months ended March 31, 2026
+- **When** The dilution bridge runs
+- **Then** The class moves to retiredInText (event EXERCISED, eventDate 2026-03-31) and adds no shares
+- **Parameters:** Count must be integer >= 1000; skip words No/None/Not/Neither/nor/will/would/may/might/could/shall/Unless/If
+- **Edge cases:**
+  - exercise named only by class name needs whole-class words (all/remaining/fully/in full)
+  - classes whose tagged expiry precedes the period end are moved to expiredClasses first
+  - classes exercised in a newer filing are not restored from an older fallback filing (capital_structure.py:981-1003)
+
+#### BR-EXT-027 · Warrant exercisable count and treasury-stock dilution
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/capital_structure.py:1029-1086`
+
+Exercisable warrants are the vested count if tagged, else outstanding less unvested, else unknown if vesting terms exist, else all outstanding; incremental shares = exercisable x (1 - strike/price) when price exceeds strike, rounded half-up.
+
+- **Given** 1,000,000 warrants, no vesting tagged, strike $10, price $25
+- **When** The dilution bridge runs
+- **Then** incrementalShares 600,000; at price $8 it is 0
+- **Parameters:** _treasury_stock (capital_structure.py:501-502); round_half_up floor(x+0.5)
+- **Edge cases:**
+  - no strike and exercisable > 0 gives null (unresolved)
+  - component total null only when every class is unresolved
+
+#### BR-EXT-028 · Aggregate debt row detection (subset-sum within 0.5%)
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2744-2780,2859-2860`
+
+An undated row whose amount equals, within 0.5%, the sum of exactly one set of two or more other same-basis rows of the same instrument kind is treated as their total and left out of the ladder and reconciliation.
+
+- **Given** 'Senior Unsecured Notes' 2,100.0 alongside notes of 600 + 500 + 500 + 500
+- **When** _mark_aggregates runs
+- **Then** Marked aggregateOf the four notes, with an AGGREGATE_ROW_EXCLUDED warning
+- **Parameters:** _AGGREGATE_MAX_ROWS = 16; tolerance 0.005; 'kind' = the last word of the instrument name
+- **Edge cases:**
+  - Two or more matching subsets: not marked
+  - Fewer than 2 or more than 16 candidates: skipped
+
+#### BR-EXT-029 · Antidilutive table reconciliation and claim promotion
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2001-2067`
+
+Rows in the company's antidilutive-securities table are matched by label to bridge components. Rows no component models become REPORTED_NOT_MODELED claims with the company's count. A text claim of the same kind moves from UNQUANTIFIED to REPORTED_NOT_MODELED and takes on the count.
+
+- **Given** Antidilutive table lists 'Series A convertible preferred' 21,800,000 shares, no convertible_preferred component, and the text scan found an UNQUANTIFIED CONVERTIBLE_PREFERRED claim
+- **When** The bridge merges claims
+- **Then** The text claim's status becomes REPORTED_NOT_MODELED with reportedShares 21,800,000. Both UNQUANTIFIED and REPORTED_NOT_MODELED count as open claims, so the bridge is PARTIAL.
+- **Parameters:** Rows with shares <= 0 ignored; equity_compensation is modeled if either stock_options or unvested_share_awards is present
+- **Edge cases:**
+  - Unmatched label: category 'other', kind OTHER_REPORTED_SECURITY
+  - Nothing from the table is added to any share count
+
+#### BR-EXT-030 · Antidilutive-securities table reconciliation and warrant gap warning
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1917-1954,1975-2062,2214-2223`
+
+Each row of the company's antidilutive-securities table is matched to a bridge component by its label. Rows that no component models become REPORTED_NOT_MODELED claims, never added to the count. The bridge's warrant total is flagged when it differs from the table by more than the larger of 5% and 100,000 shares.
+
+- **Given** The antidilutive table reports 4,857,302 warrants and the bridge counts 541,667
+- **When** The reconciliation runs
+- **Then** The gap of 4,315,635 exceeds max(242,865, 100,000), so WARRANT_COUNT_DIFFERS_FROM_REPORTED is raised. A row such as 'Class B common stock exchangeable' becomes an EXCHANGEABLE_INTERESTS claim with its count
+- **Parameters:** Category match order: warrants, preferred, convertible debt, forward sale, contingent shares, options, share awards, equity compensation, exchangeable interests. Tolerance max(5% of reported, 100,000). EPS figures use the shortest period ending at the latest date
+- **Edge cases:**
+  - Equity-compensation rows count as modeled when either options or awards exist
+  - Zero or non-numeric rows are dropped
+  - A text claim of the same kind takes on the table count
+
+#### BR-EXT-031 · ATM program full-capacity shares
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:236-245`
+
+With atm = full_remaining_capacity, potential shares = remaining ATM capacity in USD / scenario price.
+
+- **Given** Remaining capacity $100,000,000 and price $25
+- **When** Scenario includes ATM
+- **Then** 4,000,000 shares
+- **Parameters:** Default atm=exclude
+
+#### BR-EXT-032 · ATM program potential shares
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/capital_structure.py:1712-1770`
+
+The remaining at-the-market capacity stated in filing text, divided by the price, gives the potential shares. Amounts under $100,000 are ignored as unscaled.
+
+- **Given** Filing text 'approximately $150 million remains available under the ATM program' and a price of $25
+- **When** the bridge runs
+- **Then** potentialShares = 150,000,000 / 25 = 6,000,000 (shown separately; not in dilutedSharesAtPrice)
+- **Parameters:** Minimum amount 100,000; clause classifier keywords: remaining/available/unsold, sold/issued/proceeds, up to/aggregate offering price; scale words billion/bn, million/mm/m, thousand/k
+- **Edge cases:**
+  - Only program size stated: not_computed, potentialShares null
+  - The first remaining-capacity sentence found wins
+
+#### BR-EXT-033 · ATM program potential shares
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1692-1770`
+
+Shares that an at-the-market program could still issue = remaining unsold capacity / price. When the filing states only the program size, no share count is derived.
+
+- **Given** A 10-Q sentence: 'under the ATM program, $200 million remains available for sale'
+- **When** The bridge runs at a price of $25
+- **Then** potentialShares = 200,000,000 / 25 = 8,000,000, reported separately (dilutedSharesAtPriceWithAtm) and not in the main diluted count
+- **Parameters:** Amounts below $100,000 are ignored. Clause classes: remaining_capacity (remain/available/unsold/unused) > sold_to_date (sold/issued/proceeds) > program_size (up to/aggregate offering price). Units: billion/bn, million/mm/m, thousand/k
+- **Edge cases:**
+  - The first remaining_capacity clause wins
+  - Up to 6 evidence rows kept
+
+#### BR-EXT-034 · ATM program shares under full-remaining-capacity treatment
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/share_scenarios.py:236-245`
+
+ATM programs are excluded by default; under full_remaining_capacity the incremental shares are the remaining dollar capacity divided by the scenario price.
+
+- **Given** ATM remaining capacity $100,000,000 and scenario price $25
+- **When** atm = full_remaining_capacity
+- **Then** incremental shares = 4,000,000
+- **Edge cases:**
+  - Missing remaining capacity gives unresolved 'remaining capacity not stated'
+
+#### BR-EXT-035 · Automatic 20-F fallback for geographic and segment revenue
+
+**P1** · Policy · Confidence **Medium**  
+Source: `legacy/yahoo-finance-mcp/server.py:9505-9510,9606-9654,9686-9700`
+
+When a 10-K revenue extraction returns NOT_DISCLOSED/no rows and the company has ever filed a 20-F, extraction is retried on the 20-F; success replaces the result with an AUTO_20F_FALLBACK note, failure adds a POSSIBLE_20F_FILER warning.
+
+- **Given** Ticker TSM, region 'Taiwan', filing_type 10-K, which returns NOT_DISCLOSED
+- **When** extract_geographic_revenue runs
+- **Then** The 20-F is read; if a value is found the output is replaced (status FOUND) with info warning AUTO_20F_FALLBACK; otherwise POSSIBLE_20F_FILER is added.
+- **Parameters:** Trigger: filing_type 10-K and confidence NOT_DISCLOSED (geo) or zero segment rows; 20-F detection: any '20-F' in recent submissions forms
+- **Edge cases:**
+  - Missing region -> INPUT_VALIDATION_ERROR payload with confidence NOT_DISCLOSED
+  - valueRatio/valuePct withheld when no denominator; DENOMINATOR_NOT_FOUND warning added
+- **Suspected defect:** On fallback success, confidence defaults to HIGH when the 20-F payload gives none (line 9631), whereas the primary path defaults to NOT_DISCLOSED.
+- **SME question:** Should a 20-F fallback value with no stated confidence default to HIGH?
+
+#### BR-EXT-036 · Balance-sheet fact exclusion (rounded or overlapping cash)
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/capital_structure.py:2437-2464`
+
+A period-end fact tagged at least 2 decimal places coarser than the cash line, or whose sentence calls it cash equivalents/money-market and is no larger than cash, is not treated as a balance-sheet amount.
+
+- **Given** Cash tagged with decimals -3 and an investments fact with decimals -8 ('approximately $2.3 billion')
+- **When** balance facts are filtered
+- **Then** the investment fact is excluded as 'rounded'
+- **Parameters:** _ROUNDED_DECIMALS_GAP = 2
+- **Edge cases:**
+  - Dimensioned facts are always kept
+
+#### BR-EXT-037 · Capital structure summary status
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:3030-3038`
+
+The capital-structure result is COMPUTED when both cash and total debt were found, PARTIAL when only some of cash, debt or instrument rows were found, and NOT_FOUND when none were.
+
+- **Given** A filing tags cash of $1.2B but no total-debt concept, and lists two debt instruments
+- **When** capital_structure runs
+- **Then** status = PARTIAL
+- **Parameters:** none
+- **Edge cases:**
+  - Cash tagged only under a restricted-cash-inclusive concept adds info warning CASH_INCLUDES_RESTRICTED
+  - No inline XBRL adds warning NO_INLINE_XBRL
+
+#### BR-EXT-038 · Capped call economic offset
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/capital_structure.py:1379-1416; yfmcp/share_scenarios.py:219-234`
+
+A stated capped call reduces shares by covered x (min(price, cap) - strike) / price. It is computed only when the strike, the cap and the covered shares are all stated, and it is never part of the EPS count.
+
+- **Given** Capped call strike $50, cap $80, 6,000,000 covered shares
+- **When** the price is $75 (or $100)
+- **Then** offset = 6,000,000 x (75-50)/75 = 2,000,000 shares at $75; 6,000,000 x (80-50)/100 = 1,800,000 at $100; 0 at or below $50
+- **Parameters:** A stated covered count is used if it is at most 1.01 x the notes' current if-converted shares, or if the filing says the capped calls survived conversions; otherwise the notes' shares bound it
+- **Edge cases:**
+  - The strike can be taken as the conversion price when the text says it corresponds to it
+  - Missing terms give unresolvedReason CAPPED_CALL_TERMS_INCOMPLETE with missingTerms
+  - In share scenarios it applies only when capped_calls = offset_when_stated
+
+#### BR-EXT-039 · Capped call economic offset
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1287-1416`
+
+A capped call gives back covered x (min(price, cap) - strike) / price shares. This is computed only when the strike, cap and covered shares are all stated, and it is never part of the EPS diluted count.
+
+- **Given** Capped calls with a strike of $18.85, a cap of $26.46 and 33,549,508 covered shares, which the filing says 'were not impacted by the induced conversion'
+- **When** The bridge runs at a price of $30.00
+- **Then** offsetSharesAtPrice = 33,549,508 x (26.46 - 18.85) / 30 = 8,510,392, and dilutedSharesAtPriceNetOfCappedCalls = diluted - 8,510,392
+- **Parameters:** A stated count above 1.01 x the note's if-converted shares is used only when the filing says the calls survived conversions; otherwise the note's shares cap it. The strike may be 'stated as conversion price'. 'X million' shares are rounded half-up
+- **Edge cases:**
+  - Missing any term: unresolvedReason CAPPED_CALL_TERMS_INCOMPLETE with missingTerms
+  - Price below strike: offset 0
+  - Matched to a note by year, or used alone when there is exactly one note and the passage names no year
+
+#### BR-EXT-040 · Capped call economic offset in scenarios
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:219-234`
+
+When the caller opts in, a capped call reduces shares by covered shares x (min(price, cap) - strike) / price, only if strike, cap and covered shares are all stated.
+
+- **Given** Covered 10,000,000 shares, strike $50, cap $100, price $75
+- **When** capped_calls = offset_when_stated
+- **Then** Offset = -10,000,000 x 25 / 75 = -3,333,333 shares
+- **Parameters:** Offset floor at 0 below strike
+- **Edge cases:**
+  - Missing terms -> unresolved listing missingTerms
+
+#### BR-EXT-041 · Capped call economic offset in scenarios
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/share_scenarios.py:219-234`
+
+Only when the caller selects offset_when_stated, a convertible note's capped call reduces shares by covered x (min(price, cap) - strike) / price, and only when strike, cap and covered shares are all stated.
+
+- **Given** Capped call covering 10,000,000 shares, strike $50, cap $75, scenario price $60
+- **When** capped_calls = offset_when_stated
+- **Then** offset = -(10,000,000 x (60 - 50) / 60) = -1,666,667 shares; at $90 it is -(10M x 25/90) = -2,777,778
+- **Edge cases:**
+  - Any missing term makes the line unresolved with the list of missing terms
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (The rule card matches the code. In yfmcp/share_scenarios.py:219-234 the offset is only computed when t["capped_calls"] == "offset_when_stated". It reads only convertible_debt instruments that carry a cappedCall dict. If strikePrice, capPrice or coveredShares is missing, it returns a null amount with a "capped call terms not stated" note (line 230-231). Otherwise the amount is 0 - _round(covered * max(0, min(price, cap) - strike) / price). _round (line 43-45) is floor(x + 0.5), so it rounds half up. Checking the card's numbers: 10M x 10/60 = 1,666,666.67, which rounds to -1,666,667. 10M x 25/90 = 2,777,777.78, which rounds to -2,777,778. Both match. The card leaves out two things that don't affect faithfulness: (a) when the price is at or below the strike, max(0, ...) makes the offset 0; (b) the in-the-money flag uses price > strike, while convertibles use price >= conversion price. There is no instruction-shaped text in the cited lines.
+
+Under the compliance lens, P0 is not justified. This is an opt-in, caller-selected scenario in a market-data and research tool. It does not move money, settle anything, or produce a regulatory figure. The code itself labels the result "economic, not the EPS count". Under GAAP (ASC 260), capped calls are left out of diluted EPS, so no reporting rule requires this number. A regulator or finance controller would not care if it changed silently. Its real risk is to analytical accuracy and to output parity between the Python and TypeScript runtimes, which CLAUDE.md requires to match. Changing it would also count as a planner-level decision (fallback, guard or reason change). So it belongs at P1 as a parity-tested calculation, not a P0 compliance contract. | The rule card matches yfmcp/share_scenarios.py:219-234. The offset is only computed when capped_calls == "offset_when_stated" (line 220). It only looks at convertible_debt instruments that carry a cappedCall dict (lines 221-225). If strike, cap or covered is missing, the line records a "capped call terms not stated" reason and the offset is None (lines 230-231). Otherwise the offset is 0 - _round(covered * max(0, min(price, cap) - strike) / price) (line 234). _round is floor(x + 0.5) (lines 43-45), which rounds halves up. Both worked examples check out: 10M x 10 / 60 = 1,666,666.67, which rounds to -1,666,667; 10M x 25 / 90 = 2,777,777.78, which rounds to -2,777,778 because the $75 cap applies.
+
+The card leaves out three edge cases that the equivalence contract should state:
+1. A max(0, ...) floor sets the offset to 0 when price <= strike. The 'inTheMoney' flag is set only when price is strictly greater than strike.
+2. Rounding is applied to the positive magnitude before the sign is flipped. So x.5 becomes -(x+1), not the floor of the negative value.
+3. Capped calls attached to convertible_preferred are ignored. Only convertible_debt is checked.
+
+None of these contradict the card, so it is faithful but incomplete.
+
+P0 is not justified. This is an opt-in (non-default), "economic, not the EPS count" analytic adjustment inside a share-count scenario tool. It does not move money, enforce a regulation, or guard data integrity. It is an important calculation that must match between the Python and Worker versions, which makes it P1. No instruction-shaped text or credentials appear in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-042 · Capped call offset shares
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1371-1416`
+
+When the filing states a capped call's strike, cap and covered shares, the shares it delivers back = covered × max(0, min(price, cap) − strike) ÷ price. This is an economic offset only and is not part of the EPS count.
+
+- **Given** BE capped calls: strike $18.85, cap $26.46, covered 33,549,508 shares (stated to survive conversions), price $30
+- **When** _capped_call_at runs
+- **Then** offsetSharesAtPrice = 33,549,508 × 7.61 / 30 = 8,510,392
+- **Parameters:** A stated covered count above 1.01 × the notes' current shares is used only if the filing says the capped calls survived conversions; otherwise the notes' shares cap it. A strike stated as 'corresponding to the conversion price' uses the note's conversion price.
+- **Edge cases:**
+  - Any missing term: unresolvedReason CAPPED_CALL_TERMS_INCOMPLETE with missingTerms, and info warning
+  - Passage matched to a note by year, else the only yearless passage when there is one note
+
+#### BR-EXT-043 · Company-specific driver concept exclusion
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/driver_ledger.py:114-193`
+
+Only the filer's own non-monetary extension concepts are listed as operating drivers. Standard taxonomies are skipped. Concepts or axes about stock, debt, warrants, leases, compensation and similar are counted as capital-structure exclusions, and monetary concepts are counted, not listed. Custom units come first, up to 40 series.
+
+- **Given** asts:SatellitesInOrbit (unit 'satellite') and asts:ConvertibleNotesPrincipal (USD)
+- **When** company-specific series are built
+- **Then** SatellitesInOrbit listed; ConvertibleNotesPrincipal counted in excludedCapitalStructureConcepts
+- **Parameters:** COMPANY_SERIES_LIMIT 40; monetary = unit starting with a 3-letter ISO code
+
+#### BR-EXT-044 · Contractual obligation schedule buckets
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:40-90,96-97,258-350`
+
+Debt principal, operating and finance lease payments, purchase obligations and contractual obligations are listed by their tagged due bucket at the period end, each with a 'period through' date of period end + N years for years 1-5. Nothing is netted or summed across classifications.
+
+- **Given** Period end 2025-12-31 and LongTermDebtMaturitiesRepaymentsOfPrincipalInYearThree = $500M
+- **When** The funding schedule is built
+- **Then** A CONTRACTUAL row with bucket year_3 and periodThrough 2028-12-31. Purchase commitments split on RangeAxis min/max become amountLow/amountHigh (tagged_range)
+- **Parameters:** Offsets 0 (remainder of FY), 1-5, 6 (after year 5); periodThrough only for offsets 1-5; one row per bucket per family (the first concept wins). Liquidity sources (cash, short-term investments, undrawn facility, ATM remaining) are listed separately
+- **Edge cases:**
+  - No inline XBRL: NO_INLINE_XBRL warning
+  - Facts but no schedules: NO_TAGGED_SCHEDULES info
+  - Status COMPUTED if any contractual row or text item, else NOT_FOUND
+- **Suspected defect:** _add_years copies month-day, so a period end of 2024-02-29 plus one year gives the invalid date '2025-02-29'.
+- **SME question:** For leap-day period ends, should periodThrough roll to Feb 28 or Mar 1?
+
+#### BR-EXT-045 · Contractual obligation schedule buckets and schedule status
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:40-97,258-350`
+
+Debt principal, operating and finance lease payments, purchase obligations and contractual obligations are read from untagged-dimension XBRL facts at the period end, one value per due bucket. Purchase commitments are grouped by category, and a tagged min/max pair becomes a range. The schedule is COMPUTED when anything was found, otherwise NOT_FOUND.
+
+- **Given** Period end 2026-06-30 with LongTermDebtMaturitiesRepaymentsOfPrincipalInYearTwo = $500M
+- **When** funding_capex_schedule runs
+- **Then** A CONTRACTUAL row: family debt_principal, bucket year_2, periodThrough 2028-06-30, amount 500,000,000. Status COMPUTED.
+- **Parameters:** Bucket offsets 0..6; periodThrough set only for offsets 1-5 (period end + offset years); first concept per bucket wins (purchase-obligation duplicates on anniversary concepts skipped); liquidity: cash, short-term investments (COMPANY_DISCLOSED_BALANCE), undrawn facility (CONTRACTUAL_AVAILABILITY), ATM remaining (AVAILABLE_AT_COMPANY_DISCRETION)
+- **Edge cases:**
+  - No facts at all gives warning NO_INLINE_XBRL
+  - Facts present but no contractual rows gives info warning NO_TAGGED_SCHEDULES
+  - Nothing is netted or summed across classifications
+- **Suspected defect:** _add_years only replaces the year string. A Feb 29 period end plus 1 year produces an invalid date such as '2025-02-29'.
+
+#### BR-EXT-046 · Contractual obligation schedule by due bucket
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:40-102,258-307`
+
+Debt principal, lease, purchase and contractual obligations are listed per due bucket from undimensioned XBRL facts at the period end; the first concept found for a bucket wins, and each bucket's 'period through' date is the period end plus 1-5 years.
+
+- **Given** Period end 2025-12-31 with LongTermDebtMaturitiesRepaymentsOfPrincipalInYearTwo = $500M and PurchaseObligationDueInSecondYear = $80M plus UnrecordedUnconditionalPurchaseObligationBalanceOnSecondAnniversary = $90M
+- **When** The funding schedule is built
+- **Then** Rows: debt_principal year_2 $500M periodThrough 2027-12-31; purchase_obligations year_2 $80M (the 'Unrecorded...' concept for the same bucket is skipped). LongTermPurchaseCommitmentAmount facts are grouped by non-range dimensions; two values in one group become amountLow/amountHigh with basis tagged_range.
+- **Parameters:** Buckets: remainder_of_fiscal_year (offset 0), next_12_months (1), year_2..year_5 (2-5), after_year_5 (6); periodThrough only for offsets 1-5; only facts with no dimensions; last matching fact wins within a concept
+- **Edge cases:**
+  - Remainder-of-year and after-year-5 buckets get periodThrough null
+  - Totals (e.g. LesseeOperatingLeaseLiabilityPaymentsDue) are reported separately and never summed with buckets
+  - Nothing is netted or summed across classifications
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (I read the cited code in /home/user/yahoo-finance-mcp/yfmcp/funding_schedule.py at lines 40-102 and 258-307. The citation's legacy/ prefix does not exist; the file is at this path instead.
+
+Faithful: yes. The rule card matches the code:
+- `_FAMILIES` (40-90) maps each concept to a bucket and an offset (0 to 6).
+- Each family keeps a set of buckets it has already filled (263-270), so the first concept in list order wins. PurchaseObligationDueInSecondYear (line 70) comes before UnrecordedUnconditionalPurchaseObligationBalanceOnSecondAnniversary (line 76). So the example correctly gives $80M for year_2 and skips the $90M fact.
+- `_plain_at` (100-102) keeps only facts with no dimensions, a non-null value and a matching period end, and returns the last hit (`hits[-1]`).
+- periodThrough is the period end plus the offset in years, only when the offset is 1 to 5 (line 275). So debt year_2 for 2025-12-31 is 2027-12-31, as stated.
+- LongTermPurchaseCommitmentAmount facts are grouped by their dimensions, ignoring any axis ending in RangeAxis (286-292). When a group has more than one distinct value, it reports the lowest as amountLow, the highest as amountHigh, and amountBasis "tagged_range" (294-302).
+
+The card leaves out a few details:
+- If period_end is None, `_plain_at` matches facts from any period, and purchase commitments skip the period filter.
+- Each family's totals are also reported (lines 281-284).
+- A "range" is really the min and max of however many distinct values a group has, not exactly two.
+- For offset 0 and offset 6, periodThrough is None.
+
+None of these makes the card wrong.
+
+P0 justified: no. This is read-only extraction and display logic in an MCP data tool. It copies amounts companies have already tagged in their SEC filings into due-period buckets. It does not move money, calculate a charge, or enforce a regulatory requirement. It is not a data-integrity guard either: there is no validation, no reconciliation and no limit check. It is a precedence rule for picking a concept and a date label.
+
+A silent change would hurt how accurately the output describes a company's obligations, and parity between the Python and TypeScript runtimes. A regulator, auditor or finance controller of the operator would not be checking this behaviour. It should be P1: behaviour to test for parity and output fidelity, not part of the P0 contract.
+
+I found no instruction-shaped text or credentials in the cited lines. | I checked the rule against /home/user/yahoo-finance-mcp/yfmcp/funding_schedule.py. The legacy/ path in the citation does not exist, so I used this file. The line numbers match.
+
+FIDELITY: the Given/When/Then matches the code.
+- Buckets and offsets are at lines 40-90. In line 275, periodThrough is _add_years(period_end, offset) only when period_end is set and 0 < offset < 6. So 2025-12-31 with year_2 (offset 2) gives 2027-12-31. remainder_of_fiscal_year (offset 0) and after_year_5 (offset 6) get None.
+- First concept wins per bucket (lines 263-270). Concepts are checked in list order, and seen_buckets is only filled after a hit. PurchaseObligationDueInSecondYear (line 70) comes before UnrecordedUnconditionalPurchaseObligationBalanceOnSecondAnniversary (line 76), so $80M is reported and $90M is skipped. This is correct.
+- Only facts with no dimensions and a non-null value count, and the last match wins (lines 100-102, hits[-1]).
+- LongTermPurchaseCommitmentAmount facts are grouped by their dimensions, ignoring any axis ending in 'RangeAxis' (line 291). If a group has more than one distinct value, amount is None and amountLow/amountHigh are the min and max with amountBasis 'tagged_range' (lines 294-302).
+
+Edge cases the card leaves out. None of them contradict it:
+(a) If period_end is None, _plain_at accepts any period end, so the last matching fact of any period wins. The purchase-commitment loop also stops filtering by period, and every periodThrough is None.
+(b) 'Two values' really means 2 or more distinct values: low = min, high = max, and middle values are dropped. Repeated equal values collapse to a single amount.
+(c) Purchase-commitment rows use dimensioned facts, unlike the bucket rows, and are reported with bucket 'unstated'.
+(d) _add_years (line 97) only changes the year text. A Feb-29 period end becomes an invalid date such as 2025-02-29, and there is no calendar or fiscal-year adjustment.
+(e) The family totals concepts (contractualTotals, lines 281-284) are not described.
+No rounding is involved; amounts pass through as tagged.
+
+P0: not justified. The function only reads and reports filing data. It moves no money, enforces no regulation, and does not guard stored data against corruption. It is a mapping and selection rule whose output must stay identical between the Python and TS versions, which fits P1 (a parity/output contract) better than P0.
+
+No instruction-like text or credentials were found in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-047 · Conversion ratio unit normalisation
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1212-1226`
+
+A tagged conversion ratio is accepted as shares per $1,000 if ratio × price ÷ 1,000 ≈ 1. If ratio × price ≈ 1 it was tagged per $1 and is scaled by 1,000. Any other value is rejected as not the conversion rate.
+
+- **Given** LITE ratio 0.0076319 with conversion price $131.03
+- **When** normalized_ratio runs
+- **Then** 0.0076319 × 131.03 ≈ 1.000, so per1000 = 7.6319, note RATIO_PER_1_PRINCIPAL_SCALED
+- **Parameters:** Tolerance 2% (_RATIO_PRICE_TOLERANCE 0.02)
+- **Edge cases:**
+  - Disagrees with both scales: RATIO_INCONSISTENT_WITH_PRICE, unusable, info warning CONVERSION_RATIO_INCONSISTENT
+  - No price and ratio < 1: RATIO_UNIT_UNCERTAIN, unusable
+  - Ratio <= 0 or missing: unusable
+
+#### BR-EXT-048 · Convertible note principal basis and if-converted shares
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1184-1199,1436-1491`
+
+A convertible note's shares on conversion are taken in this order: the tagged count of shares issuable at the period end; else principal ÷ 1,000 × a usable conversion ratio; else principal ÷ conversion price. Principal is the face amount at the period end, or the carrying amount at the period end if it is below 95% of issue face. Incremental shares count only when the price is at or above the conversion price.
+
+- **Given** BE 2028 notes: face $632.5M issued, carrying $0.787M at 2026-06-30, conversion price $194.97, no issuable count, price $250
+- **When** _convertibles_component runs
+- **Then** Principal $787,000, basis outstanding_at_period_end. Shares = 787,000 / 194.97 = 4,036. In the money, so incrementalShares 4,036.
+- **Parameters:** _REDUCED_PRINCIPAL_SHARE 0.95; if price < conversion price then incremental 0
+- **Edge cases:**
+  - No period-end principal: face or fallback amount used, warning CONVERTIBLE_PRINCIPAL_NOT_AT_PERIOD_END
+  - Redemption tagged on a subsequent-event axis: still counted, warning CONVERTIBLE_REDEMPTION_AFTER_PERIOD_END
+  - All instruments unresolved: component incrementalShares null
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (I read /home/user/yahoo-finance-mcp/yfmcp/capital_structure.py lines 1184-1199 and 1436-1491. The cited lines contain no instruction-shaped text.
+
+Is it faithful? Mostly, but the worked example has the wrong number.
+- The rule's structure matches the code. Shares come from the tagged issuable count first (line 1453), then principal / 1000 x usable ratio (1456-1458), then principal / conversion price when the price is above 0 (1459-1461).
+- The 95% test also matches. The carrying amount at the period end is used only when no period-end face amount is tagged and the carrying amount is below 0.95 x the tagged issue face (1439-1441). In that case the basis is reported as "outstanding_at_period_end" (1471).
+- The arithmetic is wrong. 787,000 / 194.97 = 4,036.52. The result goes through round_half_up (lines 1482 and 1490), so the code outputs 4,037 for both ifConvertedShares and incrementalShares, not the 4,036 the spec states. A test built from this spec would fail against the legacy code.
+
+The plain-English text also leaves out conditions that affect results:
+- The period-end face, carrying and issuable lookups run only when the group has an instrument member and a document period end (1438, 1439, 1445). The facts must carry only instrument axes (1206).
+- When the 95% test fails, principal falls back to the tagged issue face, then to _PRINCIPAL_FALLBACK_CONCEPTS (1444), with the basis "face_amount" or "tagged_amount_fallback".
+- "In the money" compares the price with the implied conversion price. That is the tagged price, or else 1000 / usable ratio (1450, 1463). When neither exists, inTheMoney is null. incrementalShares is null when no share count can be found, and 0 only when a count exists but the note is out of the money (1490).
+
+Is P0 justified? Not through the compliance lens.
+- This code estimates if-converted dilution from XBRL facts for an information/analysis server. It does not move money or produce a regulated filing. The diluted figures that regulators and auditors act on are the issuer's own ASC 260 numbers, not this tool's estimate.
+- A silent change would hurt analytical accuracy and the project's Python/TS output parity. That makes it an important calculation rule (P1), not a regulatory or money-movement control.
+- The data-integrity argument is weak. The 95% threshold is a heuristic for picking which tagged figure to trust. It does not guard records against corruption. | P0 is justified. This rule sets the if-converted and incremental dilutive share counts reported for convertible notes. Those counts feed share-count and valuation figures that users rely on, so this is a data-integrity rule. The overall order of choices is right (capital_structure.py:1453-1461): first the tagged issuable count at the period end, then principal/1000 × usable ratio, then principal/conversion price. The 95% carrying-amount test at :1440 is also right. But the worked example is wrong, and the rule leaves out several behaviours.
+
+(1) Rounding mistake. 787,000 / 194.97 = 4,036.518. The code applies round_half_up (:451-453, floor(x+0.5)) at :1482 and :1490, which gives ifConvertedShares = incrementalShares = 4,037, not 4,036. The Then clause cuts the decimal off instead of rounding it.
+
+(2) The principal rule is incomplete. A face amount tagged at the period end (:1438) always wins. The carrying amount is checked only when no period-end face exists and the group has an instrument member (:1439). It is also used when no issue face is tagged at all, not only when it is below 95% of face (:1440). If neither applies, principal falls back to the issue face (principalBasis "face_amount") and then to the _PRINCIPAL_FALLBACK_CONCEPTS ("tagged_amount_fallback") (:1444, :1471). The rule leaves out both fallbacks. Period-end values only count when tagged on the instrument's own debt axes (:1205-1206). The issuable-count path likewise needs a member and a period-end date (:1445).
+
+(3) The ratio path is incomplete. The tagged ratio is first normalised to a per-$1,000 rate. It is dropped if it disagrees with the tagged conversion price (_RATIO_PRICE_TOLERANCE 0.02, :1197-1199, :1448-1449). This tolerance is a parameter the card leaves out.
+
+(4) The in-the-money edge cases are missing. The comparison is price >= implied conversion price, where implied = the tagged price, else 1000 / usable ratio (:1450, :1463). If neither exists, inTheMoney is None and incrementalShares is 0, not None, whenever a share count exists (:1490). Out of the money also gives 0. When there is no share count at all, incrementalShares is None.
+
+The direction and order of the rule are right, but the concrete Then value fails against the code. Corrected example: Principal 787,000, basis outstanding_at_period_end, ifConvertedShares 4,037, inTheMoney true at $250, incrementalShares 4,037. No instruction-shaped text or credentials in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-049 · Convertible preferred if-converted and liquidation preference
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/capital_structure.py:1588-1675`
+
+Convertible preferred counts its tagged issuable common shares when price >= conversion price. A ratio stated in text with no conversion price counts as converted at any price. The liquidation preference is the tagged aggregate, else per-share x preferred shares outstanding.
+
+- **Given** 2,000,000 preferred shares, 21,800,000 issuable common shares, conversion price $91.84, liquidation preference $500.00 per share
+- **When** the price is $95
+- **Then** incremental = 21,800,000; liquidation preference = 500 x 2,000,000 = $1,000,000,000; at $90 incremental = 0
+- **Parameters:** Preferred outstanding = the larger of PreferredStockSharesOutstanding and TemporaryEquitySharesOutstanding (never summed); dividend rate x 100, rounded to 4 dp
+- **Edge cases:**
+  - No conversion price and no text ratio: incremental null (unresolved)
+  - countBeforePeriodEnd flag when the issuable count predates the period end
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (I read yfmcp/capital_structure.py:1588-1675 and the rule card describes the code correctly.
+
+What matches:
+- Preferred shares outstanding is the larger of the PreferredStockSharesOutstanding and TemporaryEquitySharesOutstanding counts, never their sum (lines 1600-1605, concepts listed at line 1819).
+- The tagged count of common shares issuable comes first. Next is the ratio stated in the filing text times preferred shares outstanding, then the aggregate share count stated in the text (lines 1628-1635).
+- A ratio stated in text with no conversion price counts as converted at any stock price (lines 1638, 1642-1643).
+- Otherwise the shares count only when the price is at or above the conversion price, and count as 0 below it (lines 1639, 1645). With a $91.84 conversion price, $95 gives 21.8M shares and $90 gives 0.
+- The liquidation preference is the tagged aggregate amount. If that is missing, it is the per-share amount times preferred shares outstanding, rounded half-up to 2 decimal places (lines 1658-1660). $500 x 2,000,000 = $1,000,000,000 is correct.
+- The dividend rate is multiplied by 100 and rounded to 4 decimal places (line 1661).
+
+Small gaps, none of which make the card wrong: it leaves out the 'aggregate stated in text' fallback and the 2-decimal rounding of the liquidation amount. It also doesn't say that when the 'ratio stated in text' path has a conversion price, the price test still applies.
+
+Why it is not P0 under the compliance lens: this is analysis output from an MCP data server. It estimates a company's diluted share count and reports preferred-stock figures taken from SEC XBRL filings. It does not move money, it does not book or settle anything, and it does not produce a regulatory filing or EPS figure that a regulator or auditor relies on. The if-converted method looks like the diluted-EPS accounting standard (ASC 260), but here it only feeds a valuation view for the user. It is not a compliance control. The 'larger count, never the sum' step does guard against double-counting, which is a data-quality concern. It matters for the project's Python/TypeScript output parity (CLAUDE.md treats any output change as a decision for the planner), so it is a strong P1 behavior to keep, not a regulatory, financial-control or ledger-integrity rule. If it changed silently, a controller or regulator would not be exposed. Only the numbers shown to analysts would change.
+
+No instruction-shaped text or credentials appear in the cited lines. | I read yfmcp/capital_structure.py:1588-1675 and re-derived the behaviour myself. The rule matches the code, and its example checks out.
+
+What matches:
+- Incremental shares equal the tagged issuable count when price >= conversion price, otherwise 0 (lines 1639 and 1645). With a conversion price of $91.84, $95 gives 21,800,000 and $90 gives 0.
+- A ratio stated in text with no conversion price counts as converted at any price (lines 1638 and 1642-1643). This only applies when there is no issuable-shares tag, because the tag takes priority (line 1628).
+- The liquidation preference uses the tagged aggregate first. Otherwise it is per share x preferred shares outstanding, rounded half-up to 2 decimal places (lines 1658-1660). 500 x 2,000,000 = $1,000,000,000.
+- Preferred shares outstanding is the larger of the two concept totals, never their sum (lines 1600-1605).
+- The dividend rate is x100, rounded half-up to 4 decimal places (line 1661).
+
+What the rule leaves out (edge cases a rewrite should cover):
+1. Tagged issuable shares but no conversion price, and no text ratio: incremental is None (unresolved), not 0. That sets unresolvedInstruments=1 (lines 1639, 1645, 1671).
+2. Text fallbacks when there is no issuable tag. A stated ratio gives round_half_up(preferred shares x ratio) (line 1631). A stated aggregate count is used as-is (line 1633). The aggregate path is not treated as converted at any price: with no conversion price it stays unresolved.
+3. "Never summed" applies between the two concepts only. Within one concept, the facts are summed, using the facts without dimensions if any exist, otherwise the dimensional ones (line 1604). Facts on StatementEquityComponentsAxis are excluded (line 1597).
+4. Tagged facts dated after the period end are ignored, and the newest remaining fact is used (lines 1608-1609, 1615-1616). The output also flags countBeforePeriodEnd (line 1654).
+5. If none of the issuable tag, conversion price and text conversion is found, the component is not reported at all (line 1610).
+
+P0 rating: justified on the data-integrity ground. Nothing here moves money or enforces regulation, but it produces a reported financial figure: the dilution share count and liquidation preference. Its "larger, never summed" guard prevents double-counting the same shares (the LITE case). Under the project's strict Python/TS output-parity contract, this belongs in the behaviour contract.
+
+The cited lines contain no injection text.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-050 · Convertible preferred if-converted shares
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1588-1675`
+
+Convertible preferred outstanding at the period end counts the tagged common shares issuable when the price is at or above the conversion price. Without a tag, it uses a ratio or aggregate stated in text. A stated ratio with no conversion price counts as converted at any price.
+
+- **Given** MRVL Series A: 2.0M preferred, 21.8M issuable tagged, conversion price $91.84
+- **When** Price is $100 (or $80)
+- **Then** incrementalShares 21,800,000 at $100; 0 at $80
+- **Parameters:** Preferred count = larger of PreferredStockSharesOutstanding and TemporaryEquitySharesOutstanding, never their sum; liquidation preference aggregate, else per share × shares; dividend rate × 100 to 4 dp
+- **Edge cases:**
+  - LITE one-for-one with no conversion price: incremental = preferred shares × 1 (as_converted_no_conversion_price)
+  - No issuable count, no price and no text: component absent
+  - Issuable count dated before the period end flagged countBeforePeriodEnd
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (Faithful: yes. I read /home/user/yahoo-finance-mcp/yfmcp/capital_structure.py:1588-1675 and the card matches the code.
+- Preferred count is the larger of the per-concept sums, never their total (1600-1605).
+- The tagged issuable count is used first. Without it, the code takes a ratio stated in text (shares × ratio, rounded half-up), then an aggregate stated in text (1628-1635).
+- A text ratio with no conversion price counts as converted at any price (1638, 1642-1643).
+- Otherwise the shares count when price >= conversion price, and count as 0 below it (1639, 1645).
+- Liquidation preference uses the tagged aggregate, else per share × shares rounded to 2 dp (1658-1660). Dividend rate is × 100 to 4 dp (1661).
+- The MRVL example works: 21.8M at $100 (100 >= 91.84) and 0 at $80.
+
+Two edge cases are missing from the card but nothing it says is wrong. First, a tagged issuable count or a text aggregate with no conversion price gives incrementalShares = None, and unresolvedInstruments = 1 (1645, 1671). Second, the text fallback only runs when no issuable tag exists, and in that case statedConversion is added to the output (1627, 1662).
+
+P0 not justified under the compliance lens. This is a dilution estimate in a read-only market-data and analytics tool. The method mirrors ASC 260, but the system is not a reporting entity. It does not file EPS, move money, settle anything or enforce a regulatory requirement. No regulator or auditor relies on this output. Analysts using it for valuation would care if it changed silently, but that is analytical accuracy, not compliance. The never-sum guard (1598-1605) is a correctness check on a derived figure, not protection of stored or transactional data.
+
+Recommend P1 (core calculation). Keep it a strict Python/TS parity contract, as the project's CLAUDE.md already requires for every output change, with tests for both branches of the price >= conversion price check, the as-converted text-ratio path, the None/unresolved cases and the larger-count-not-sum rule. No instruction-shaped text or credentials in the cited lines. | I read _convertible_preferred_component in /home/user/yahoo-finance-mcp/yfmcp/capital_structure.py, lines 1588-1675. The legacy/ path in the citation was not on disk, but this function sits at exactly the cited lines. The Given/When/Then matches the code. If-converted shares come from the tagged issuable count first. The share counts are added in only when price >= conv_price, so the boundary is inclusive. With 21.8M issuable at $91.84, a price of $100 gives incrementalShares 21,800,000 and $80 gives 0. When no issuable count is tagged, the code uses a ratio stated in text first (round_half_up(preferred shares x ratio)), then an aggregate stated in text, in that order. A stated ratio with no conversion price counts as converted at any price (as_converted). The parameters also check out. The preferred count is the larger of the two outstanding-share tags, never their sum. Within each tag, facts with no dimensions are used if any exist, otherwise all facts, and facts on the StatementEquityComponentsAxis are excluded. Liquidation preference is the tagged aggregate, else per share x shares (rounded half-up to 2 dp, which the card leaves out). Dividend rate is x100 rounded half-up to 4 dp. Edge cases the card leaves out, which should be added to the contract: (1) if there is no conversion price and the basis is not a stated ratio (a tagged issuable count or a stated aggregate), incrementalShares is None and unresolvedInstruments is 1, not 0; (2) if there is no tagged issuable count, no conversion price and no stated terms, the component is absent; (3) countBeforePeriodEnd is set when the issuable count was tagged before the period end; (4) the conversion facts are the newest ones not dated after the period end. None of these contradicts the card. P0 is justified on data-integrity grounds: this rule sets the dilutive share count that feeds the capital-structure and valuation output, and the CLAUDE.md parity contract covers it. I found no instruction-shaped text in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-051 · Convertible rows vs balance-sheet convertible line
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2382-2392,2994-3020`
+
+The sum of convertible instrument carrying amounts must match the balance sheet's convertible line (the total, else current + noncurrent) within 0.5%. Otherwise the rows are marked as possibly principal.
+
+- **Given** An instrument row of $124.9M against a balance-sheet ConvertibleNotesPayable of $129,142,000
+- **When** Reconciliation runs
+- **Then** NOT_RECONCILED, difference $4.24M, carryingAmountBasis MAY_BE_PRINCIPAL, and a CARRYING_AMOUNT_MAY_BE_PRINCIPAL warning
+- **Parameters:** _AGGREGATE_TOLERANCE = 0.005
+
+#### BR-EXT-052 · Customer concentration latest-year, table-precedence and dedupe
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/extraction_rules.py:82-95,158-185`
+
+Only findings from the latest year are kept. A rounded prose share within 0.5 point of a significant-customer table row ('Customer A | 26.3%') is dropped in favour of the row. Aggregates, named customers and table labels are de-duplicated, and at most 12 findings are returned.
+
+- **Given** Prose 26% and table row Customer A 26.3% (title mentions revenue)
+- **When** findings are merged
+- **Then** only the Customer A 26.3% row is kept
+- **Parameters:** tolerance 0.5 pt; cap 12; table title must mention revenue/sales and not receivable
+
+#### BR-EXT-053 · Customer revenue concentration extraction
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/extraction_rules.py:98-185`
+
+Percent-of-revenue statements are kept for named customers, unnamed customers and aggregates ('top ten customers'), using the first period each sentence lists. Only the latest year is kept. Threshold wording ('more than 10%'), receivables bases and negations are excluded. A prose share within 0.5 points of a significant-customer table row is dropped as a duplicate of that row.
+
+- **Given** 'Three customers accounted for approximately 26%, 14% and 11% of revenue' plus table rows Customer A 26.3%, B 14.2%, C 10.9%
+- **When** Concentration is extracted
+- **Then** The three table rows are kept and the prose shares are dropped (each within 0.5pt); counted subjects split into per-customer shares
+- **Parameters:** pct range (0,100]; table de-dup tolerance 0.5 points; output cap 12 findings; count words two-ten
+- **Edge cases:**
+  - 'No single customer accounted for...' is recorded as a negation
+  - A lower-case subject without a customer word (a revenue category) is skipped
+  - A subject over 60 chars is treated as unnamed
+
+#### BR-EXT-054 · Customer revenue concentration extraction
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:31-185`
+
+Customer concentration is read only from statements that a named, unnamed or aggregate customer accounted for X% of revenue (never receivables), skipping thresholds like 'more than 10%', recording a 'no single customer' negation, keeping only the latest year, and preferring a significant-customer table row over prose within half a point.
+
+- **Given** Prose 'three customers accounted for approximately 26%, 14% and 11% of revenue' in 2025 and a table row 'Customer A | 26.3%'
+- **When** customer_concentration runs
+- **Then** Findings 'one of three customers' at 14% and 11% plus 'Customer A' 26.3%; the prose 26% is dropped as within 0.5 pt of the table row; 'more than 10% of revenue' produces nothing
+- **Parameters:** pct 0<p<=100; table dedupe tolerance 0.5 percentage points; max 12 findings; latest year only
+- **Edge cases:**
+  - Lower-case subjects without a customer word (e.g. 'EV revenues') are revenue categories, not customers
+  - Ranked subjects ('ten largest customers') stay one aggregate
+  - Aggregates deduped ignoring 'our/the/its'
+
+#### BR-EXT-055 · Debt maturity year ladder and coverage of total debt
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2685-2697,2804-2812,2878-2946,3021-3028`
+
+Each outstanding instrument adds its carrying amount (else face, else tagged amount) to its maturity year. Coverage % = laddered carrying amount / total debt x 100, and rows with no maturity are listed as not laddered.
+
+- **Given** Total debt $188.1M, and only one instrument dated (carrying $58.9M, 2030)
+- **When** The ladder is built
+- **Then** coveragePct 31.31, a MATURITY_LADDER_INCOMPLETE warning when the filing tags no ladder of its own, and gap.amount = 129.2M
+- **Parameters:** Rows matured before period end, issued after it, or marked as aggregates are excluded; a bucket with mixed bases shows amountBasis MIXED; rounded to 2 dp
+- **Edge cases:**
+  - Multiple tagged maturities: placed at the earliest
+  - Face-only ladders report the laddered amount on a FACE basis
+
+#### BR-EXT-056 · Diluted share count and dilution percentage at price
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/capital_structure.py:2280-2325`
+
+Diluted shares = basic shares + incremental options + unvested awards (gross) + warrants + convertibles + convertible preferred. Dilution % = (diluted - basic) / basic x 100.
+
+- **Given** Basic 100,000,000; options +600,000; awards +2,000,000; warrants +1,400,000; convertibles +4,000,000; preferred 0
+- **When** the bridge is computed
+- **Then** dilutedSharesAtPrice = 108,000,000; dilutionPctAtPrice = 8.00%. Gross dilution adds every outstanding instrument regardless of moneyness.
+- **Parameters:** Rounding half-up: shares to 0 dp, percentages to 2 dp. Variants: NetShareSettlement, NetOfCappedCalls, WithAtm
+- **Edge cases:**
+  - Basic shares come from the cover page (undimensioned, else sum of per-class counts at the latest date), else the balance-sheet CommonStockSharesOutstanding
+  - No basic shares gives status NOT_FOUND, bridge null
+  - Basic <= 0 gives a null percentage
+  - An unresolved component is treated as 0 in the sum but makes status PARTIAL
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (P0 is not justified. The rule is faithful to the code. The cited code (yfmcp/capital_structure.py:2280-2325) builds a mechanical, informational diluted-share bridge from inline XBRL counts and a price the caller supplies. Its own labels are basis "MECHANICAL_COMPANY_DISCLOSED" and decisionUse "MECHANICAL_NOT_CONSENSUS" (lines 2248-2249), and its methodology text (2326-2332) says it is not a consensus count. It does not move money, carry out a regulatory requirement, or guard data integrity. It is an analytics calculation in a read-only market-data MCP server. A regulator, auditor or finance controller would not be harmed if it changed silently. It does not produce reported EPS: the company's reported figure is passed through separately as reportedEpsDilution (line 2255). It matters for correctness and for the Python/Worker parity contract, so P1 fits better than P0.
+
+Why the rule is faithful:
+- Line 2286 adds basic shares to each component's incrementalShares (options, awards, warrants, convertibles, preferred). A missing or non-numeric component counts as 0 (lines 2283-2284).
+- Line 2301 rounds dilutedSharesAtPrice half-up to 0 decimal places.
+- Line 2302 computes dilutionPctAtPrice as (diluted - basic) / basic x 100, rounded half-up to 2 decimal places, or None when basic is 0 or less.
+- round_half_up (lines 451-453) is floor(x*10^d + 0.5) / 10^d, which is half-up for positive values.
+- The example checks out: 100M + 0.6M + 2M + 1.4M + 4M = 108,000,000, and the dilution is 8.00%.
+- The variant outputs exist: NetShareSettlement (2308-2310), NetOfCappedCalls (2313-2314), the combined net-share-settlement-plus-capped-calls output (2315-2318) and WithAtm (2320).
+
+Caveats:
+- "Unvested awards (gross)" comes from the formula string at 2321-2322. In the code, awards enter the diluted count through awards.incrementalShares like every other component; the gross treatment, if any, happens upstream.
+- The spec sentence "Gross dilution adds every outstanding instrument regardless of moneyness" describes a separate output (grossSharesAllInstruments and grossDilutionPct, lines 2287-2292 and 2303-2304), not dilutedSharesAtPrice. That output uses options.outstanding, awards.unvested, warrants.outstanding and ifConvertedShares. The spec should keep it as its own rule.
+- The rule leaves out status logic that also sits in the cited range. When no basic shares are found, status is NOT_FOUND and the bridge is None (2276-2279). Otherwise status is PARTIAL if anything is unresolved, partially resolved or an open claim, and COMPUTED if not (2325).
+- Lines 2305 and 2311 are ordinary comments that cite internal version numbers. The cited lines contain no text aimed at automated analysis and no credentials. | I checked the rule against yfmcp/capital_structure.py:2280-2325. The worked example is right, but the rule card mixes up two different outputs.
+
+What matches: at line 2286, diluted = basic + inc(options) + inc(awards) + inc(warrants) + inc(convertibles) + inc(preferred). inc() at lines 2283-2284 reads each component's incrementalShares, and uses 0 when the component is missing or the value isn't a number. At line 2302, dilutionPctAtPrice = round_half_up((diluted - basic) / basic * 100, 2). With the example inputs this gives 108,000,000 and 8.00%.
+
+What does not match:
+(1) The card ends with "Gross dilution adds every outstanding instrument regardless of moneyness", which describes a different calculation. That one is the separate gross figure at lines 2287-2292. It adds options.outstanding, awards.unvested, warrants.outstanding and convertibles/preferred.ifConvertedShares, and feeds grossSharesAllInstruments and grossDilutionPct (lines 2303-2304). dilutedSharesAtPrice uses the at-price incremental counts instead: treasury-stock for options and vested warrants, if-converted only when in the money (formula text at lines 2321-2322). Of the components, only unvested awards count gross in the diluted figure. Putting the two together would contaminate the behavior contract.
+(2) Missing edge cases. When basic <= 0, both percentages are None, not a number (lines 2302 and 2304). When no basic share count is found, the bridge is None and status is NOT_FOUND (lines 2276-2279). A missing component counts as 0 in the sum, but its bridge field is None (lines 2296-2300). The card doesn't state status = PARTIAL vs COMPUTED (line 2325) at all.
+(3) Rounding is described as "half-up", but round_half_up at line 451-453 is floor(x * 10^d + 0.5) / 10^d. That rounds a tie toward positive infinity, so a negative tie goes up rather than away from zero. It is also binary floating point, not decimal.
+(4) The three variants (NetShareSettlement, NetOfCappedCalls, WithAtm) are named but not specified. Their exact rules are at lines 2308-2320: replace inc(convertibles) with incrementalSharesNetShareSettlement, subtract cappedCallOffsetShares, or add atm potentialShares. Each is None unless its inputs are numbers.
+
+On P0: this is a mechanical, informational dilution estimate. The output labels itself MECHANICAL_NOT_CONSENSUS (line 2249) and is computed from a price the caller supplies. It does not move money, enforce a regulation, or act as a data-integrity guard. It is a core calculation that has to match between the Python server and the Worker, so it belongs at P1, not P0. The cited lines contain no injection-style text and no credentials.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-057 · Dilution bridge requires a caller price
+
+**P1** · Validation · Confidence **Medium** · P0 panel 2/2  
+Source: `server.py:10225-10239`
+
+The dilution bridge is always evaluated at a price the caller supplies, which must be a finite positive number.
+
+- **Given** price 0
+- **When** extract_dilution_bridge runs
+- **Then** Returns INPUT_VALIDATION_ERROR 'price is required and must be a positive number: the bridge is evaluated at the price you supply.'
+- **Parameters:** price > 0
+- **Edge cases:**
+  - Non-numeric input becomes NaN and is rejected
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (Faithful: yes. server.py:10234-10239 converts price with float(). If conversion fails, price becomes NaN. A non-finite price or one at or below 0 returns {"error": true, "code": "INPUT_VALIDATION_ERROR", "message": "price is required and must be a positive number: the bridge is evaluated at the price you supply."}, and this happens before any filing is fetched. Price 0 is rejected exactly as the card says. Negative, NaN, inf and non-numeric prices are rejected the same way. Two small notes: the response has no "ticker" field, and a numeric string such as "12.5" would be accepted because float() converts it.
+
+P0 not justified under the compliance lens. This is a basic input check on a read-only analytics tool that gives a mechanical estimate of diluted shares. It moves no money, places no trades, and enforces no regulatory requirement. The tool's own description says the output is not a consensus or official diluted share count, so no regulator, auditor or finance controller depends on it. It protects the treasury-stock and if-converted maths from a meaningless price, but that is ordinary validation, not a data-integrity control over records. It is a P1/P2 behaviour contract: worth a parity test between Python and TS so the error code and message stay the same, but not a P0 equivalence obligation. The cited lines contain no injection-style text and no credentials. | Fidelity: the rule matches the code. In /home/user/yahoo-finance-mcp/server.py:10234-10239, `price` is converted with float(). If that raises TypeError or ValueError, the value becomes NaN. The call is rejected when `not math.isfinite(price_value) or price_value <= 0`. It returns the JSON {"error": true, "code": "INPUT_VALIDATION_ERROR", "message": "price is required and must be a positive number: the bridge is evaluated at the price you supply."}, and the message text matches the rule exactly. With price 0, 0 <= 0 is true, so this error comes back, as the Given/When/Then says. The check runs before any SEC filing is resolved (line 10240), so an invalid price never triggers a fetch. Edge cases the card leaves out: (1) negative values, NaN, +/-inf, None and non-numeric strings are also rejected. (2) Numeric strings like "12.5" are accepted because float() coerces them, and Python booleans pass too (float(True) = 1.0), unless the MCP schema layer rejects them earlier. (3) Unlike the other error paths, which include the ticker, this error payload has no `ticker` field. (4) There is no upper limit and no rounding on price. Also, the cited range 10225-10239 is the function signature plus the guard, which is correct. P0: not justified. This is a required-input check on a read-only analysis tool that computes a mechanical basic-to-diluted share bridge and explicitly says it is not a consensus number. It doesn't move money, enforce a regulation, or protect stored or system-of-record data. It only stops the treasury-stock math from running on a meaningless price. P1/P2 fits better, as an input-validation contract to keep in sync with the Worker per the parity rules. No injection-style text or credentials appear in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-058 · Dilution bridge status
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `yfmcp/capital_structure.py:2095-2100,2276-2325`
+
+The bridge is COMPUTED only when every tagged component resolved and no unquantified share claim is open. Otherwise it is PARTIAL, and NOT_FOUND when there is no basic share count.
+
+- **Given** A filing where warrants have an untagged exercise price
+- **When** the bridge runs
+- **Then** warrants are listed in 'unresolved' and status = PARTIAL
+- **Parameters:** Open claim statuses: UNQUANTIFIED, REPORTED_NOT_MODELED
+- **Edge cases:**
+  - Partial means a component resolved with unresolvedClasses or unresolvedInstruments > 0
+  - COMPUTED never means a full claim inventory
+
+#### BR-EXT-059 · Funding amount range, qualifier and missing-scale rule
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:125-157`
+
+A sentence's first dollar amount is its amount. Two amounts joined by 'to', a dash or 'and' form a range only when they run low to high. A figure under $100,000 written with no scale word is not taken at face value (SCALE_NOT_STATED).
+
+- **Given** 'committed $1.2 billion and $300 million' and 'between $550.0 and $600.0'
+- **When** _amounts parses them
+- **Then** The first is a single $1,200,000,000 (high below low, so not a range). The second is SCALE_NOT_STATED with low and high null, keeping the as-written text
+- **Parameters:** Threshold 100,000; 'per share/unit/warrant/note' amounts excluded; qualifier up_to / approximately / range / stated read from the 24 characters before the amount
+- **Edge cases:**
+  - A range borrows the other amount's unit when one side has none
+  - Currency is always set to USD when an amount is stated
+- **Suspected defect:** The money regex `(?:US)?\$` also matches the '$' inside 'NT$' or 'A$', but currency is always written as USD, so non-US dollar amounts would be mislabelled.
+- **SME question:** Should foreign-dollar amounts (NT$, A$, C$) in funding text be excluded or tagged with their own currency instead of USD?
+
+#### BR-EXT-060 · Funding amount reading: range, qualifier and scale-not-stated
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:128-157`
+
+The first dollar amount in a sentence is read; two amounts joined by 'to/-/and' form a range only when low-to-high; an unscaled figure under $100,000 is treated as scale-not-stated rather than taken at face value.
+
+- **Given** Sentences: (a) 'between $1.2 billion and $1.5 billion', (b) 'committed $1.2 billion and $300 million', (c) 'capex of $550.0', (d) 'up to $6.1 billion in grants'
+- **When** The amount reader runs
+- **Then** (a) low 1.2e9, high 1.5e9, qualifier range; (b) single amount 1.2e9 qualifier stated (descending so not a range); (c) amountStatus SCALE_NOT_STATED with low/high null; (d) 6.1e9 qualifier up_to.
+- **Parameters:** Scale threshold 100,000 when no scale word; qualifier look-back window 24 chars; qualifiers: up_to, approximately (approximately/about/around/roughly/~), range, stated; per-share/unit/warrant/note amounts ignored
+- **Edge cases:**
+  - Scale words billion/million/thousand/bn/mm/m/k; the first amount borrows the second's scale in a range ('$1.2 to $1.5 billion')
+  - '$5.00 per share' is skipped as a per-unit figure
+
+#### BR-EXT-061 · Funding schedule status, liquidity sources and warnings
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:310-333`
+
+The schedule is COMPUTED when any contractual row or text item exists, else NOT_FOUND; liquidity sources (cash, short-term investments, undrawn facility, ATM capacity) are listed separately with their own classification and are never treated as commitments.
+
+- **Given** A filing with inline XBRL facts but no due-period tags, cash $1.2B, and ATM remaining capacity $300M
+- **When** The schedule is built
+- **Then** Warning NO_TAGGED_SCHEDULES (info); liquidity rows cash_and_equivalents COMPANY_DISCLOSED_BALANCE $1.2B and atm_remaining_capacity AVAILABLE_AT_COMPANY_DISCRETION $300M; status depends on whether any text items were found.
+- **Parameters:** Warning codes NO_INLINE_XBRL (warning, no facts at all), NO_TAGGED_SCHEDULES (info, facts but no contractual rows); undrawn facility concept LineOfCreditFacilityRemainingBorrowingCapacity
+- **Edge cases:**
+  - Boolean balance values are rejected as amounts
+  - ATM capacity has asOf null
+
+#### BR-EXT-062 · Funding text amount parsing and range rule
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/funding_schedule.py:107,122-157`
+
+The first dollar amount (or a low-to-high range) is read from a sentence. A figure under $100,000 with no scale word is SCALE_NOT_STATED rather than taken at face value, and two amounts form a range only when joined by to/-/and and ascending.
+
+- **Given** 'We expect capital expenditures of $1.2 billion to $1.5 billion in 2026'
+- **When** the sentence is parsed
+- **Then** low = 1,200,000,000; high = 1,500,000,000; qualifier 'range'. '$550.0' alone gives SCALE_NOT_STATED; 'committed $1.2 billion and $300 million' is not a range (descending)
+- **Parameters:** Scale threshold 100,000; qualifiers up_to / approximately / range / stated; per-share/unit amounts skipped
+- **Edge cases:**
+  - The scale word of either end applies to the other when one is missing
+
+#### BR-EXT-063 · Funding text item amount status and forced UNRESOLVED
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:128-157,212-253`
+
+Each funding sentence gets its first dollar amount or low-to-high range. A figure under $100,000 with no scale word is marked 'scale not stated'. A sentence with no amount is kept only if it names a strong obligation, and then it is marked UNRESOLVED.
+
+- **Given** Sentence 'We have committed $550.0 to the new facility' (no million/billion)
+- **When** Text items are built
+- **Then** amountStatus = SCALE_NOT_STATED, low/high null, classification stays COMPANY_DISCLOSED_COMMITTED. A sentence like 'We have non-cancellable purchase commitments' with no amount gets classification UNRESOLVED and unresolvedReason 'no amount stated'.
+- **Parameters:** Scale threshold $100,000; sentence length 40-1200 chars; sentences ending ';' skipped; up to 25 items; dedupe on first 200 chars lower-cased; qualifier 'up to' / 'approximately' read from up to 24 chars before the amount; two amounts count as a range only when joined by to/-/and AND low <= high
+- **Edge cases:**
+  - 'committed $1.2 billion and $300 million' is two amounts, not a range, because the second is smaller
+  - '$X per share' amounts are skipped
+  - Currency is always USD when an amount is found
+- **Suspected defect:** A SCALE_NOT_STATED item keeps its stated classification (for example COMMITTED) with null amounts. It is not moved to UNRESOLVED, even though no usable amount exists.
+- **SME question:** Should an item whose amount scale cannot be read (SCALE_NOT_STATED) be classified UNRESOLVED like an item with no amount, or keep its stated type?
+
+#### BR-EXT-064 · Funding text item eligibility and unresolved reason
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:212-253,309`
+
+Only sentences of 40-1,200 characters that are not list items are considered; sentences without an amount are kept only if they name a funding obligation outright, and then they are UNRESOLVED; at most 25 text items are returned with duplicates removed.
+
+- **Given** A 10-Q paragraph containing 'We have non-cancelable commitments to purchase equipment.' (no dollar amount) and a 30-character sentence 'Capex was $5 million.'
+- **When** Funding text items are extracted
+- **Then** The commitment sentence is kept with classification UNRESOLVED, statedType COMPANY_DISCLOSED_COMMITTED, currency null and unresolvedReason 'no amount stated'; the 30-character sentence is skipped as too short.
+- **Parameters:** Min length 40 chars; max length 1,200 chars; sentences ending in ';' skipped; item cap 25; dedupe key = first 200 chars lowercased; evidence sentence truncated to 600 chars; currency always USD when an amount is stated
+- **Edge cases:**
+  - A stated amount with classification UNRESOLVED gets reason 'type not stated'
+  - Currency is hard-coded USD for any stated amount, even in a non-USD filer's text
+- **Suspected defect:** Text amounts are always labelled USD (line 240) regardless of the '$' context (e.g. 'US$' vs other dollar currencies); a non-US filer's dollar figures could be mislabelled.
+- **SME question:** Should funding text amounts from 20-F/40-F filers (e.g. C$ or NT$ contexts) be labelled USD unconditionally?
+
+#### BR-EXT-065 · Funding/capex sentence classification precedence
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/funding_schedule.py:189-253`
+
+Sentences are classified in this order: reported-period spending (REPORTED_ACTUAL, unless also forward-looking), then grants/incentives (AWARDED_CONTINGENT), then commitments (COMPANY_DISCLOSED_COMMITTED), then expects/plans (COMPANY_GUIDED), else UNRESOLVED. A sentence with no amount is UNRESOLVED.
+
+- **Given** 'Purchase obligations of approximately $2.93 billion are expected to be paid within one year'
+- **When** the text is classified
+- **Then** COMPANY_DISCLOSED_COMMITTED (a commitment beats the forward-looking word), amount 2.93e9 approximately, timing UNSTATED
+- **Parameters:** Sentence length 40-1,200 chars; sentences ending ';' skipped; at most 25 items; 'net of government incentives' is not an award; equity-award wording is not contingent funding
+- **Edge cases:**
+  - No amount and no strong keyword: dropped
+  - Duplicate sentences (first 200 chars) are skipped
+
+#### BR-EXT-066 · Funding/capex sentence classification precedence
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:107-209`
+
+Each funding or capex sentence is classified from its wording, in this order: reported actual (past spend, with no forward word) > awarded/contingent (grants, incentives, milestones) > committed (even with a forward-looking word) > guided > unresolved.
+
+- **Given** The sentence 'We expect capital expenditures of approximately $3.0 billion, of which $1.2 billion is committed under non-cancelable purchase obligations.'
+- **When** classify_sentence runs
+- **Then** classification = COMPANY_DISCLOSED_COMMITTED and category capital_expenditure. 'For the first nine months of 2026, we spent $19.6 billion on capital expenditures' is REPORTED_ACTUAL
+- **Parameters:** 'Net of government incentives' wording does not make a sentence contingent. Equity-award wording (RSU, vesting, stock compensation) blocks the contingent class. A sentence needs capex, commitment or contingent wording plus funding wording or a $ amount
+- **Edge cases:**
+  - Sentences shorter than 40 or longer than 1,200 characters, or ending in ';', are skipped
+  - With no amount, a sentence is kept only if it names an obligation outright, and becomes UNRESOLVED 'no amount stated'
+  - At most 25 text items; deduplicated on the first 200 characters
+
+#### BR-EXT-067 · Geographic revenue share from filing tables
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/parsing/extractors.py:143-326`
+
+A region's revenue share is region amount / total amount, rounded to 4 decimals, from a revenue table that names the region. A table's own '% of total' must agree within 1 point, and a region may not exceed its total.
+
+- **Given** A 'Revenue by geographic area' table with China 1,200 and Total revenues 5,000 (in millions), and the table's own % of total 24%
+- **When** extract_geo_revenue_from_html runs for 'China'
+- **Then** pct 0.24, usd 1,200,000,000, denominator 5,000,000,000
+- **Parameters:** _STATED_PCT_TOLERANCE = 1.0 point; region <= total x 1.001; at most 800 tables scanned; tables introduced as geographic score 2, others 1; tables about square feet or assets without revenue words are excluded
+- **Edge cases:**
+  - Total row picked by label (total, net sales, ...) with amounts, else the last numeric row
+  - Dash cells read as 0; percent cells skipped
+  - Region aliases (PRC, srt:ChinaMember, etc.)
+
+#### BR-EXT-068 · Guidance basis (GAAP / non-GAAP) and alternates
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/extraction_rules.py:343-367,436-445`
+
+A range's basis comes from its own clause: 'GAAP and non-GAAP' gives both, 'non-GAAP' or 'adjusted' gives NON_GAAP, 'GAAP' alone gives GAAP, otherwise NOT_STATED. Ranges on another basis for the same target period are kept as alternates, one per basis.
+
+- **Given** 'GAAP EPS of $1.00 to $1.10; non-GAAP EPS of $1.85 to $2.05' for the same quarter
+- **When** guidance is read
+- **Then** primary basis GAAP, one NON_GAAP alternate
+
+#### BR-EXT-069 · Guidance pattern precedence and GAAP basis
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/extraction_rules.py:343-367,370-453`
+
+Guidance patterns are tried in a fixed order: keyword-first wording, then metric-first wording, then midpoint ± tolerance, then outlook-table rows under a guidance/outlook heading within 400 characters. The first match is primary, and ranges on another basis for the same target period are kept as alternates. Basis is read from the range's own clause: non-GAAP/adjusted, GAAP, both, or not stated.
+
+- **Given** 'GAAP diluted EPS of $5.82 to $5.92 and adjusted diluted EPS of $6.65 to $6.75 for fiscal 2026'
+- **When** EPS guidance is extracted
+- **Then** Primary EPS 5.82–5.92 with basis GAAP, plus alternate 6.65–6.75 with basis NON_GAAP
+- **Parameters:** heading look-back 400 chars; clause look-back 200 chars; table column header 'GAAP Non-GAAP' assigns column basis; 'N/A' first cell selects the second column
+- **Edge cases:**
+  - A sentence break between heading and row disqualifies the table row
+  - Rows for a different quarter are not alternates of a year range
+
+#### BR-EXT-070 · Guidance range pattern precedence and alternates
+
+**P1** · Policy · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:194-260,370-453`
+
+For revenue, gross margin and EPS, keyword-first wording wins, then metric-first 'is expected to be' wording, then midpoint ± tolerance, then outlook table rows under a guidance heading; ranges on another basis for the same period are kept as alternates.
+
+- **Given** A release with 'GAAP diluted EPS of $5.82 to $5.92 and adjusted diluted EPS of $6.65 to $6.75' for FY2026
+- **When** guidance_ranges runs
+- **Then** Primary EPS range 5.82-5.92 (GAAP), alternate 6.65-6.75 (NON_GAAP); a Q3 row is not an alternate for an FY primary
+- **Parameters:** Table rows only within 400 chars after a guidance/outlook heading with no sentence break; statedAs OUTLOOK_ROW / RANGE / POINT_ESTIMATE / MIDPOINT_PLUS_MINUS
+- **Edge cases:**
+  - 'N/A' first cell under a 'GAAP Non-GAAP' header puts the range in the second column
+  - Only one alternate per basis
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (I read /home/user/yahoo-finance-mcp/yfmcp/extraction_rules.py, lines 194-260 and 370-453. The cited legacy/ path is the same file.
+
+Faithfulness: the card mostly matches the code. In guidance_ranges, pick() runs the patterns in a fixed order, and the first match becomes the primary (lines 438, 447-452). The order is revenue-first / keyword-first, then metric-first "expected to be", then midpoint +/- tolerance, then table rows. Table rows only count within 400 characters after a guidance/outlook heading with no sentence break in between (_under_guidance_heading, 272-278). The statedAs values match line 411. Alternates are kept only if they have a different basis, are the first range found for that basis, and cover the same period. A period counts as the same when either period is unknown (period_of returns None, line 442).
+
+I traced the VRT example. If the sentence starts with "expects/guidance/outlook", _EPS_RE stops at the first range because [^.\n] cannot cross "$5.82". That range's clause ends at " and " (_CLAUSE_TAIL_RE), so it gets basis GAAP. _EPS_CONTINUATION_RE (246) then picks up 6.65-6.75. Its clause also contains "adjusted", so _NON_GAAP_RE matches first and it gets basis NON_GAAP. This matches the card's Then.
+
+Corrections the card needs:
+- The example's Given leaves out the keyword the EPS rule needs. Without "expects/guidance/outlook" within 120 characters before "EPS", _EPS_RE does not fire.
+- The first gross-margin pattern (_GROSS_MARGIN_RE, 201) needs no keyword at all, so "keyword-first wins" is wrong for gross margin.
+- Revenue has an extra first tier, _REVENUE_FIRST_RE ("revenue guidance of..."), which runs before keyword-first.
+- Midpoint/tolerance bounds are computed exactly with decimal arithmetic (_pm_bounds / _point_bounds).
+- Scale words from an outlook table ("in millions") are added to unscaled amounts.
+
+P0 (compliance lens): not justified. This is a heuristic that pulls company guidance out of press-release text for a read-only market-data tool. It does not move money or enforce a regulation, and it is not an integrity control on books of record. Regulation G binds the companies that publish non-GAAP measures, not this tool, so no regulator, auditor or finance controller would treat a change in pattern order as a compliance event. A silent change would change the tool's output: a different primary range, or a GAAP/non-GAAP label flip. That matters for output correctness and Python/TS parity; CLAUDE.md treats fallback order as a planner decision. So rate it P1: a behaviour-parity / output-contract rule with golden tests, not a P0 regulatory or money-movement rule.
+
+I found no instruction-shaped text aimed at automated analysis and no credentials in the cited lines. | P0 is justified. This logic decides which figure the tool reports as a company's revenue, gross-margin or EPS guidance. It also decides which basis (GAAP or non-GAAP) and which period that figure is labelled with. A wrong primary is wrong financial data, so this is a data-integrity rule. CLAUDE.md also treats fallback order as a decision only the planner may make.
+
+Fidelity fails on three counts. I re-derived the behaviour from /home/user/yahoo-finance-mcp/yfmcp/extraction_rules.py:370-453 and ran guidance_ranges, which only reads its input, on three versions of the example.
+
+(1) The Given/When/Then example only works with a keyword the card leaves out. _EPS_RE (line 203) matches only when "expects", "guidance" or "outlook" appears before the EPS label in the same sentence, within 120 characters with no period between them. Results for the three inputs:
+- With "the Company expects GAAP diluted EPS of $5.82 to $5.92 and adjusted diluted EPS of $6.65 to $6.75", the result matches the card: primary 5.82-5.92 GAAP RANGE, alternate 6.65-6.75 NON_GAAP.
+- With "Full year 2026: GAAP diluted EPS of $5.82 to $5.92 and adjusted diluted EPS of $6.65 to $6.75." (no keyword), _EPS_RE does not match. _EPS_CONTINUATION_RE (line 246), which is second in the EPS order, matches first. The primary becomes 6.65-6.75 NON_GAAP and there are no alternates. That is the opposite of the card's Then.
+- With a "Guidance" heading and no sentence break, the card's result holds again.
+The Given must state that the forward-looking keyword comes before the first range, or that the text sits under a guidance heading.
+
+(2) The precedence description is incomplete and partly wrong:
+- Revenue tries _REVENUE_FIRST_RE ("revenue guidance of $X to $Y") before the general keyword-first pattern.
+- EPS tries the "and adjusted/non-GAAP/GAAP EPS of" continuation pattern second, before the metric-first pattern.
+- Gross margin's table step also includes an "Approximately N%" point row (POINT_ESTIMATE).
+- Table midpoint ± rows come after table ranges and are labelled MIDPOINT_PLUS_MINUS, not OUTLOOK_ROW.
+- "Wins" only describes the primary. Every pattern runs every time (lines 379-435). The primary is found[0], meaning the first match of the highest-ranked pattern that matched, in text order. Matches from lower-ranked patterns can still become alternates.
+
+(3) The card leaves out how alternates are chosen (lines 441-444):
+- Only one alternate is kept per basis.
+- An alternate's basis must differ from the primary's.
+- A match counts as the same period when either period is unknown (period_of returns None, or period_of is not supplied). So the rule that "a Q3 row is not an alternate for an FY primary" applies only when period_of resolves both periods.
+
+Correct parts of the card:
+- The 400-character guidance/outlook heading window with no sentence break ([.!?] followed by whitespace and a capital letter) for table rows (lines 272-278).
+- The mapping of the statedAs labels.
+- The basis read from the clause, where a "." inside "$5.82" does not count as a clause break.
+
+No injection-style text was found in the cited lines (194-260, 370-453). No credentials were found.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-071 · Guidance range reading precedence and midpoint-plus-minus bounds
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/extraction_rules.py:281-330,370-453`
+
+Guidance is read in this order: keyword-first wording, then metric-first ('revenue … is expected to be between'), then midpoint ± tolerance, then outlook-table rows under a guidance or outlook heading within 400 characters. Midpoint ± bounds are calculated as exact decimals, with basis points converted to percentage points.
+
+- **Given** 'Net revenue is expected to be $3.150 billion +/- 5%'; 'gross margins are expected to be 74.0%, plus or minus 50 basis points'
+- **When** guidance_ranges runs
+- **Then** revenue 2.9925 billion – 3.3075 billion; gross margin 73.5 – 74.5 (statedAs MIDPOINT_PLUS_MINUS)
+- **Parameters:** heading lookback 400 chars; a bare tolerance with no $, % or unit is ignored
+- **Edge cases:**
+  - An unscaled table amount takes the outlook's '(in millions)' scale
+  - An 'N/A' first cell puts the range in the second column's basis
+
+#### BR-EXT-072 · Half-up rounding convention
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/capital_structure.py:451-453; yfmcp/share_scenarios.py:43-45`
+
+Monetary and share figures are rounded with floor(value x 10^d + 0.5) / 10^d, i.e. halves round toward positive infinity.
+
+- **Given** value 2.5 and -2.5 rounded to 0 dp
+- **When** round_half_up runs
+- **Then** Returns 3 and -2
+- **Parameters:** Formula floor(x*10^d+0.5)/10^d
+- **Edge cases:**
+  - Binary floating point: 1.005 to 2 dp gives 1.0
+  - Negative halves round toward zero, not away from it
+- **SME question:** Is the asymmetric rounding of negative halves (-2.5 to -2) acceptable for negative EV or capped-call offsets?
+
+#### BR-EXT-073 · Midpoint plus/minus tolerance bounds
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:281-330`
+
+A guidance stated as midpoint ± tolerance is converted to exact low/high bounds: a percent tolerance scales the midpoint, basis points are hundredths of a percentage point, and a bare tolerance without $, % or unit is not read.
+
+- **Given** 'Net revenue is expected to be $3.150 billion +/- 5%' and 'gross margin 74.0%, plus or minus 50 basis points'
+- **When** Bounds are computed
+- **Then** Revenue 2.9925 to 3.3075 billion; gross margin 73.5% to 74.5%; '$0.53 +/- $0.05' gives 0.48 to 0.58
+- **Parameters:** Exact decimal arithmetic, trailing zeros dropped
+- **Edge cases:**
+  - Tolerance in its own unit ('± $1.5 billion') converted to the midpoint's unit
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (The cited path legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py does not exist. I read the matching lines at /home/user/yahoo-finance-mcp/yfmcp/extraction_rules.py:281-330, which hold _dec, _dec_text, _point_bounds and _pm_bounds.
+
+Faithfulness: the rule matches the code, and I checked all three examples against it.
+- '$3.150 billion +/- 5%': the percent branch at lines 318-322 computes mid x (100 -/+ p) / 100 in exact integer-scaled decimals. 3150 x 95 at exponent -5 gives 2.9925, and 3150 x 105 gives 3.3075.
+- '74.0% plus or minus 50 basis points': _point_bounds (lines 299-307) shifts the tolerance exponent by -2 when the unit matches 'basis|bps'. That gives 7400 -/+ 50 at exponent -2, so 73.5 to 74.5.
+- '$0.53 +/- $0.05': a dollar sign with no tolerance unit falls back to the midpoint's unit (line 325), giving 0.48 to 0.58.
+- A tolerance with no dollar sign and no unit returns None (lines 323-324).
+- _dec_text drops trailing zeros (line 294).
+- One small imprecision: the card presents this as one rule, but the basis-point handling is in the separate _point_bounds function, not in _pm_bounds.
+
+P0 through the compliance lens: not justified. The code parses forward-looking guidance text from company filings into low/high numbers for an informational market-data tool. It does not move money, enforce a regulatory requirement, or act as a data-integrity control such as a validation or reconciliation. It produces derived numbers that users read. A regulator, auditor or finance controller would not care if this arithmetic changed silently; an end user would just see wrong guidance bounds. That makes it an important correctness and output-parity rule, worth P1 with parity tests between the Python and TypeScript versions, but not a P0 contract. No instruction-shaped text or credentials appear in the cited lines. | I worked through the cited code (/home/user/yahoo-finance-mcp/yfmcp/extraction_rules.py:281-330, functions _dec, _dec_text, _point_bounds and _pm_bounds) by hand. All three examples in the card come out exactly as stated.
+
+(1) "$3.150 billion +/- 5%". _dec gives the midpoint as (3150, -3) and the tolerance as (5, 0). The percent branch (lines 319-323) sets hundred=100 and exp=-5. That gives low = 3150*95 = 299250e-5 = "2.99250", which drops its trailing zero to "2.9925 billion". High = 3150*105 = 330750e-5 = "3.3075 billion".
+
+(2) "74.0%, plus or minus 50 basis points". _point_bounds gives the midpoint as (740, -1). Line 304 shifts the basis-point tolerance to (50, -2). Both are aligned to exp -2, so mn=7400 and tn=50. Low is 7350, which becomes "73.5", and high is "74.5".
+
+(3) "$0.53 +/- $0.05". Neither number names a unit, so the dollar sign keeps the tolerance from being rejected at line 324. The tolerance takes the midpoint's exponent (line 326), which gives 48 and 58 at exp -2: "0.48" and "0.58".
+
+The other claims also check out. A bare tolerance with no $, % or unit returns None (lines 324-325). The arithmetic is exact integer decimal math, with no floats and no rounding. Trailing zeros are stripped by the regex on line 294.
+
+Two small gaps to note, neither of which makes the card wrong:
+- "%" means different things in the two functions. In _pm_bounds a % tolerance scales the midpoint. But in _point_bounds (the margin path, whose regex at line 227 also accepts "%" and "percentage points") a % tolerance is added as flat points, not scaled. So "74.0% +/- 1%" gives 73.0 to 75.0. The card's plain-English line could be misread as applying the scaling to margins too.
+- The card leaves out some details. A tolerance can carry its own unit, for example "$61.5 billion ± $1.5 billion", where it is converted into the midpoint's unit. The midpoint's unit text is appended to both bounds. Margin bounds are returned without a % sign.
+
+P0 is justified on data integrity grounds. These functions produce the low/high guidance numbers the tool reports, and CLAUDE.md requires exact output parity with the Worker. A wrong bound would silently corrupt a reported financial figure. It does not move money or enforce regulation.
+
+No instruction-shaped text or credentials appear in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-074 · Midpoint ± tolerance guidance bounds
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/extraction_rules.py:281-330`
+
+Guidance stated as a midpoint plus or minus a tolerance is converted to exact low/high bounds. A % tolerance is a percentage of the midpoint, basis points are hundredths of a percentage point, and a currency tolerance is taken in its own unit or else the midpoint's unit. A bare number with no $, % or unit is not read.
+
+- **Given** 'Revenue is expected to be $3.150 billion +/- 5%' and 'gross margin 74.0%, plus or minus 50 basis points'
+- **When** Guidance ranges are extracted
+- **Then** Revenue low '2.9925 billion', high '3.3075 billion'; gross margin low 73.5, high 74.5
+- **Parameters:** bps = tolerance x 10^-2; exact decimal arithmetic, trailing zeros dropped
+- **Edge cases:**
+  - '$61.5 billion ± $1.5 billion' gives 60 and 63 billion
+  - A tolerance without $/%/unit is ignored
+
+#### BR-EXT-075 · Net cash formula
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:3029-3054`
+
+Net cash = cash and equivalents + short-term investments - total debt, at carrying amounts with leases excluded. It is reported only when both cash and debt are known.
+
+- **Given** Cash $800M, short-term investments $200M, total debt $1,300M
+- **When** capital_structure runs
+- **Then** netCash = -$300M and status COMPUTED
+- **Parameters:** Status: COMPUTED if cash and debt; PARTIAL if any of cash, debt or instruments; else NOT_FOUND
+- **Edge cases:**
+  - No borrowings tagged anywhere and cash present: debt taken as 0 (NO_BORROWINGS_TAGGED)
+  - Cash including restricted cash flagged CASH_INCLUDES_RESTRICTED
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (The card matches the code. In /home/user/yahoo-finance-mcp/yfmcp/capital_structure.py, line 3029 sets liquid = cash (or 0) + short_term (or 0). Line 3054 sets netCash = liquid - debt["value"] only when both cash and debt are present, and otherwise sets it to None. Line 3054 also holds the formula text, which says carrying amounts are used and leases are excluded. Line 3035 sets the status: COMPUTED when cash and debt are both present, PARTIAL when any of cash, debt or instrument_rows is present, and NOT_FOUND otherwise. The example also checks out: 800 + 200 - 1,300 = -300, with status COMPUTED.
+
+The card leaves out a few details:
+- If short-term investments are missing, they are counted as 0 and the status is still COMPUTED.
+- The currency field comes only from the cash fact. Nothing checks that debt is in the same currency.
+- Restricted cash only triggers an info-level warning (CASH_INCLUDES_RESTRICTED). It is not removed from the total.
+
+Through the compliance lens, this should not be P0. It is a read-only research figure taken from a company's SEC filing, and the output labels it COMPANY_DISCLOSED_NOT_FORECAST. It does not move money or meet any regulatory requirement, and it does not guard against bad data being stored or acted on. A regulator, auditor or finance controller would not depend on this tool's netCash. A silent change to the formula, for example adding long-term marketable securities or including leases, would mislead users of the analysis. That makes it a core calculation and output-contract rule that the Python/TS parity tests should hold equivalent, which fits P1, not P0. The cited lines contain no instruction-like text and no credentials. | The cited path points to legacy/yahoo-finance-mcp/yfmcp/capital_structure.py. The code is actually at /home/user/yahoo-finance-mcp/yfmcp/capital_structure.py, and lines 3029-3054 there contain the cited logic.
+
+Fidelity: the rule card matches the code.
+- Line 3029 sets liquid = (cash value or 0) + (short-term investments value or 0).
+- Line 3053 sets netCash = liquid - debt["value"], but only when both the cash and debt records exist. Otherwise netCash is None.
+- Line 3035 sets status: COMPUTED when cash and debt are both present, PARTIAL when any of cash, debt or instrument rows is present, and NOT_FOUND otherwise.
+- The example works out: 800 + 200 - 1,300 = -300, with status COMPUTED.
+- If short-term investments are missing, the code treats them as 0 and still computes net cash. The card says this correctly ("reported only when both cash and debt are known").
+
+Three points the card does not state:
+1. The code does no rounding. It returns raw sums.
+2. "Leases excluded" appears only in the netCashFormula label string (line 3054). The calculation at these lines does not exclude leases itself. That depends on how `debt` was chosen further up the file, which the cited lines do not show.
+3. The code does not check that cash, short-term investments and debt are in the same currency before combining them.
+
+P0: not justified. This is a derived metric that a read-only financial-data tool shows for information. The output is labelled COMPANY_DISCLOSED_NOT_FORECAST. It moves no money, enforces no regulation, and does not guard stored data. It is a real calculation rule and must stay the same in the Python and TS runtimes, so P1 fits better.
+
+No instruction-shaped or credential text was found in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-076 · Net share settlement when principal is stated as cash-settled
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1236-1284,1493-1506,1526-1528`
+
+If the filing says convertible principal must be settled in cash (not merely 'may'), conversion delivers only the value above principal. Net shares = max(0, if-converted shares − principal ÷ price), reported beside the if-converted EPS count.
+
+- **Given** Principal $100,000,000, if-converted 2,000,000 shares (conv $50), price $80, sentence 'The principal amounts of all of our outstanding convertible notes must be settled in cash'
+- **When** The convertibles component runs with settlement text
+- **Then** netShareSettlementShares = 2,000,000 − 1,250,000 = 750,000
+- **Parameters:** Sentence matching order: ALL_NOTES > NAMED_NOTES (by year in instrument name) > UNNAMED_NOTES (only when there is one note); option wording (may, can, at our option) disqualifies
+- **Edge cases:**
+  - Out of the money: 0
+  - Any cash-settled note unresolved makes the component's net-share total null
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (I read /home/user/yahoo-finance-mcp/yfmcp/capital_structure.py. The cited path starts with legacy/, but that file does not exist. The code is at the same path without the legacy/ prefix, and the cited line numbers match it.
+
+The rule card matches the code:
+- Lines 1243-1284: a sentence counts as cash settlement of principal only when its wording is mandatory ("must", "will", "shall", "is/are required to" ... "be settled/paid in cash"), or says the company pays cash up to the principal amount, or has elected to settle principal in cash. Any sentence containing "may", "can" or "at our/its option/election" is rejected (line 1244, applied at 1259). Each accepted sentence gets a scope: ALL_NOTES, NAMED_NOTES (with the years it names) or UNNAMED_NOTES.
+- Lines 1287-1294 (just past the cited range): the matching order is ALL_NOTES first, then NAMED_NOTES where a named year appears in the instrument name, then UNNAMED_NOTES, which is used only when there is exactly one instrument.
+- Lines 1493-1506: net shares = round_half_up(max(0, ifConvertedShares - principal / price)). The result is 0 when the note is out of the money, and None when no sentence covers the note, the if-converted count is missing, or the principal is missing.
+- Lines 1526-1528: incrementalSharesNetShareSettlement is reported beside the if-converted figure, and the if-converted figure stays the EPS basis.
+
+The example checks out. At price $80 against a $50 conversion price the note is in the money, and 2,000,000 - 100,000,000/80 = 750,000. The card leaves out the out-of-the-money result of 0 and the None cases, but nothing it states is wrong. I found no instruction-shaped text in the cited lines.
+
+P0 is justified, though the case is borderline under a compliance lens. The tool produces analysis, not a regulated filing, and no money moves here. But the rule produces an alternative diluted share count that sits beside the if-converted count used for EPS (the method ASU 2020-06 requires), and it uses net shares only when the filing clearly states cash settlement. It never assumes it. Without that gate, an "issuer may settle in cash" option would be treated as fact and dilution would be understated. That would mislead anyone using the per-share figures for valuation, and an auditor or controller would care about that kind of silent misstatement.
+
+The rule also contains an evidence threshold and an output field, both of which the project's CLAUDE.md says only the planner may change. They have to stay identical in the Python and Worker versions, which is why this rule belongs in the behavior contract. | I re-derived the rule from legacy/yahoo-finance-mcp/yfmcp/capital_structure.py and the worked example holds. The sample sentence matches _CASH_PRINCIPAL_RE (lines 1239-1242): "principal amounts ... must be settled in cash". It contains none of the option words checked by _SETTLEMENT_OPTION_RE (line 1244). It matches _ALL_NOTES_RE ("all of our outstanding convertible notes"), so its scope is ALL_NOTES. The note is in the money ($80 > $50), so line 1501 gives round_half_up(max(0, 2,000,000 - 100,000,000/80)) = 750,000. The matching order in _settlement_for (lines 1278-1284) is also right: ALL_NOTES first, then NAMED_NOTES where any year in the sentence appears in the instrument name, then UNNAMED_NOTES only when there is exactly one instrument.
+
+The card leaves out several things a parity contract needs:
+(a) The trigger is wider than 'must'. 'will', 'shall' and 'is/are required to' also count, and so do 'pay/deliver cash equal to/up to the principal amount' and 'elected to settle principal ... in cash'.
+(b) 'can' and 'at the company's election' disqualify a sentence as well as 'may'. The check covers the whole sentence and is a word-boundary match.
+(c) A note that is out of the money gets netShareSettlementShares = 0 directly, without the formula (line 1499).
+(d) The value is None when no settlement text matches, when ifConvertedShares is None, or when principal is None. The field is only set when settlement text was read at all (line 1494).
+(e) Each matching sentence is used once (later duplicates are skipped) and stored cut to 600 characters.
+(f) The result is rounded half-up to whole shares.
+(g) There is an aggregate, incrementalSharesNetShareSettlement (lines 1526-1528). It is None if no note is stated as cash-settled, if every instrument's if-converted count is unresolved, or if any cash-settled note's net-share count is None. Otherwise it adds each cash-settled note's net shares to the other notes' incrementalShares.
+None of these contradict the card, so it is faithful but incomplete.
+
+P0 is not justified. This is an analytic dilution estimate that the code reports beside the if-converted EPS count. The code says the EPS basis "stays the bridge's count" (lines 1233-1234). It moves no money and enforces no regulation. The output is informational and is not a data-integrity guard. P1 fits better.
+
+I found no instruction-shaped text in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-077 · Net-share settlement when convertible principal must be paid in cash
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1229-1284,1493-1528`
+
+When the filing says a note's principal is settled in cash, conversion delivers only the value above principal: max(0, if-converted shares - principal / price). This is reported beside the EPS if-converted count and does not replace it. A sentence where the issuer 'may' choose does not qualify.
+
+- **Given** A note with 10,000,000 if-converted shares and $1,000,000,000 principal, and the 10-K says 'The principal amounts of all of our outstanding convertible notes must be settled in cash'
+- **When** The bridge runs at a price of $150
+- **Then** netShareSettlementShares = 10,000,000 - 1,000,000,000/150 = 3,333,333; dilutedSharesAtPriceNetShareSettlement swaps this in for the if-converted count
+- **Parameters:** Sentence scope: ALL_NOTES > NAMED_NOTES (year match) > UNNAMED_NOTES (only when there is a single note); option words 'may', 'can', 'at our option' disqualify
+- **Edge cases:**
+  - Out of the money: 0
+  - Principal unknown: null, and the component's net total becomes null
+  - Settlement text not read: settlementText NOT_READ
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (Faithful. I checked the rule against /home/user/yahoo-finance-mcp/yfmcp/capital_structure.py. A sentence qualifies only if it matches _CASH_PRINCIPAL_RE and does not contain 'may', 'can' or 'at our/its/the company's option/election' (1240-1245). Scope is set at 1269 and resolved at 1278-1284 in this order: ALL_NOTES, then NAMED_NOTES when the note's year appears in the instrument name, then UNNAMED_NOTES only when there is one instrument. The net-share count is round_half_up(max(0, ifConvertedShares - principal/price)) (1501). At $150 that gives 10,000,000 - 6,666,666.67 = 3,333,333, matching the card. The if-converted EPS count stays as it is (1515), and dilutedSharesAtPriceNetShareSettlement swaps in the net count at 2308-2310. That second point holds, but it sits outside the cited ranges. The card leaves out some edge cases: the count is forced to 0 when the note is out of the money, it is None when principal or the if-converted count is missing, and the total is None if any cash-settled note can't be resolved (1497-1501, 1513, 1527-1528). The example implicitly assumes the note is in the money (conversion price $100 is below $150). Not P0 under the compliance lens: this is a supplementary economic dilution view shown beside the ASC 260 if-converted EPS count, which it explicitly does not replace (1233-1234, 2144-2145). It moves no money and enforces no regulatory requirement. The rule that the figure appears only when the filing states cash settlement, never assumed, does protect the integrity of the output, and CLAUDE.md treats it as a planner-level evidence-threshold decision. That supports P1, with Python/TS parity tests, not P0. No injection-style text was found in the cited lines. | I re-derived the rule from yfmcp/capital_structure.py:1229-1284, 1493-1528 and 2306-2317, and the card is correct. The main formula is right: when a note is in the money, its net shares are round_half_up(max(0, ifConvertedShares - principal/price)). With the card's numbers, 10,000,000 - 1,000,000,000/150 = 3,333,333.33, which rounds to 3,333,333. The note converts at $100 per share, so it is in the money at $150. The net figure is reported beside the if-converted count and does not replace it. The card's example sentence matches the pattern the code looks for and is tagged ALL_NOTES. The scope order is right: ALL_NOTES first, then NAMED_NOTES when a note year appears in the instrument name, then UNNAMED_NOTES only when there is a single note. Sentences containing 'may', 'can' or 'at our/its/the company's option/election' are thrown out.
+
+Things the card leaves out, which should be added to the behavior contract:
+(1) If a note is not in the money, its net shares are set to 0 before the formula runs.
+(2) If principal or the if-converted count is unknown, the net figure is None.
+(3) If any cash-settled note's net figure is None, or every note is unresolved, the whole incrementalSharesNetShareSettlement is None. Then dilutedSharesAtPriceNetShareSettlement is also None.
+(4) dilutedSharesAtPriceNetShareSettlement is diluted - (the convertibles' incremental shares) + the net-settlement sum, rounded half-up. So the swap replaces the incremental count. That count equals the if-converted count only when the note is in the money. Notes without a cash-settlement sentence keep their incremental count.
+(5) The option-word check is a plain word match anywhere in the sentence, not tied to settlement. A sentence that says the principal must be settled in cash but contains 'can' or 'may' for an unrelated reason is also thrown out.
+(6) Two more wordings also count as stated cash settlement: 'pay/deliver cash equal to/up to the (aggregate) principal amount' and 'elected to settle/pay principal ... in cash'.
+(7) Capped calls are not part of this figure.
+
+On P0: this rule does not move money. It does guard the integrity of the data: a cash-settlement treatment is only applied when the filing states it, never assumed, and that decides a reported diluted share count. CLAUDE.md treats this kind of evidence threshold as a decision that stays with the planner. No instruction-shaped text was found in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-078 · Operating statement basis: actual vs target
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/driver_ledger.py:262-281`
+
+A driver sentence is a REPORTED_ACTUAL if it uses only past-result verbs, TARGET_OR_PLAN if it uses only forward-looking words, and UNCLEAR if it uses both or neither.
+
+- **Given** Sentence 'We delivered 5 satellites in the quarter' and sentence 'We expect to launch 20 satellites by end of 2026'
+- **When** The driver basis is classified
+- **Then** First is REPORTED_ACTUAL; second is TARGET_OR_PLAN; 'We launched 5 and plan 20 more' is UNCLEAR
+- **Parameters:** Plan words: expects, plans, targets, anticipates, aims, intends, will, goal, guidance, outlook, forecasts, projects, on track to, scheduled to, by end of. Actual words: delivered, shipped, launched, deployed, produced, completed, reached, achieved, ended, added, installed, signed, totaled, grew, increased, decreased, declined, had, was, were, reported, recorded, generated
+- **Edge cases:**
+  - 'will' alone makes a sentence a plan
+
+#### BR-EXT-079 · Price input validation for bridge and snapshot
+
+**P1** · Validation · Confidence **High**  
+Source: `server.py:10234-10239,11054-11060,11068-11086`
+
+The dilution bridge needs a finite positive price. The snapshot price is optional but must be positive when supplied. SEC filings are read for the snapshot only when the listing's major currency is USD.
+
+- **Given** price = 0
+- **When** extract_dilution_bridge is called
+- **Then** INPUT_VALIDATION_ERROR
+- **Parameters:** Bridge currency default USD
+- **Edge cases:**
+  - Non-USD listings get a NON_USD_LISTING info warning and Yahoo figures
+
+#### BR-EXT-080 · Reporting period type from period length
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/driver_ledger.py:52-62`
+
+A reported figure's period is labelled by how many days it covers: about a quarter, about a year, year-to-date in between, a point-in-time balance when there is no start date, otherwise 'other'.
+
+- **Given** An XBRL fact with start 2025-01-01 and end 2025-06-30 (180 days)
+- **When** The operating-driver ledger labels the period
+- **Then** periodType is YEAR_TO_DATE; a 91-day fact is QUARTER, a 364-day fact is ANNUAL, a 70-day fact is OTHER, and a fact with no start is INSTANT
+- **Parameters:** QUARTER 80-100 days; ANNUAL 350-380 days; YEAR_TO_DATE 101-349 days
+- **Edge cases:**
+  - Exactly 100 days is QUARTER, 101 is YEAR_TO_DATE
+  - 381+ days is OTHER
+
+#### BR-EXT-081 · Scenario capped-call offset and ATM capacity shares
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:219-245`
+
+When the caller opts in, a stated capped call reduces shares by covered x (min(price, cap) - strike) / price. When the caller opts into the ATM program, it adds remaining capacity / price.
+
+- **Given** Capped call strike $50, cap $80, covered 10,000,000 shares, price $100; ATM remaining capacity $200,000,000
+- **When** capped_calls=offset_when_stated and atm=full_remaining_capacity
+- **Then** Capped-call line = -(10,000,000 x (80-50)/100) = -3,000,000 shares; ATM line = 200,000,000/100 = 2,000,000 shares
+- **Edge cases:**
+  - Any of strike, cap or covered missing -> unresolved, with the missing terms listed
+  - ATM remaining capacity not stated -> unresolved
+
+#### BR-EXT-082 · Scenario convertible treatment and in-the-money test
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:188-217`
+
+Convertible notes and convertible preferred add their if-converted shares only when the price is at or above the conversion price. if_converted_all adds them always. net_share_settlement_when_stated (for notes stating cash principal) adds only if-converted shares minus principal / price.
+
+- **Given** A note with 10,000,000 if-converted shares, conversion price $50, principal $500,000,000, principal stated as cash-settled, price $75
+- **When** convertibles=net_share_settlement_when_stated
+- **Then** Increment = max(0, 10,000,000 - 500,000,000/75) = 3,333,333. Under if_converted_when_in_the_money it would be 10,000,000; at price $45 both would be 0
+- **Parameters:** ITM test price >= conversion price (convertibles) vs price > strike (options/warrants)
+- **Edge cases:**
+  - Missing if-converted shares -> unresolved 'principal or conversion terms not tagged'
+  - Missing conversion price (non-all treatment) -> unresolved 'conversion price not tagged'
+  - Net-share settlement requested but the filing does not state cash principal -> plain if-converted with the method note '; cash settlement of principal not stated'
+- **Suspected defect:** The in-the-money test is inclusive (>=) for convertibles but strict (>) for options and warrants. This may be intentional; confirm with an SME.
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (I read /home/user/yahoo-finance-mcp/yfmcp/share_scenarios.py:188-217. The citation's "legacy/" prefix is wrong, but the line range is right.
+
+Faithful: yes.
+- The in-the-money test for convertibles is `price >= conv` (line 195). The capped-call test is `price > strike` (line 226), and options and warrants go through `_exercisable`. So the parameter note about >= versus > matches the code.
+- `if_converted_all` adds the full share count whether or not the note is in the money (lines 203-204).
+- `net_share_settlement_when_stated` adds `max(0, shares - principal/price)` only when the note is in the money, and only when `principalSettlement` is present (lines 207-213). Otherwise it falls back to plain if-converted when in the money, else 0 (lines 214-216).
+- The worked example checks out: 10,000,000 - 500,000,000/75 = 3,333,333. Under plain if-converted it is 10,000,000. At $45 against a $50 conversion price both give 0.
+- One caveat: the code only checks that `principalSettlement` is not None. It never checks that the value says "cash". The idea that it means cash settlement comes from the comment at line 208.
+- The rule card leaves out the paths where the scenario is "exclude" or a value is missing. Those return 0 or None with a reason string. This doesn't make the card wrong.
+
+P0 justified: no, not through the compliance lens.
+- This is an analysis tool. It builds what-if diluted share counts, and the caller picks the convertibles treatment for each scenario.
+- It moves no money and enforces no regulation. It produces no reported EPS or filing number. The nearby capped-call line even labels its own output "economic, not the EPS count".
+- A regulator or auditor would not see a silent change here. Users would get wrong valuation numbers, so it is a correctness problem.
+
+Recommendation: P1, a high-value calculation that must still match exactly in parity tests. Keep the >= versus > asymmetry and the principal/price net-share formula unchanged.
+
+No instruction-like text was found in the cited lines, and they contain no credentials. | The file is at /home/user/yahoo-finance-mcp/yfmcp/share_scenarios.py (the cited "legacy/" prefix does not exist). Lines 188-217 are exactly the convertible block, and the TS mirror is worker/src/share-scenarios.ts:215.
+
+Fidelity: I worked the behaviour out from the code myself, and the rule card matches it.
+- The in-the-money test is `price >= conv` (line 196). Options and warrants use the strict `price > strike` (line 132), as the card says.
+- `exclude` gives 0. Under `if_converted_all`, the round()ed share count is always added, even with no conversion price.
+- `net_share_settlement_when_stated` only applies when `principalSettlement` is not None (line 207). It returns `_round(max(0, shares - principal/price))` when in the money and 0 otherwise.
+- Every other case gets the shares when in the money and 0 when not. Under net_share_settlement_when_stated without a stated cash principal, the result notes that cash settlement of the principal was not stated.
+
+Example check: 500,000,000 / 75 = 6,666,666.67, and 10,000,000 minus that is 3,333,333.33. `_round` is floor(x + 0.5), half-up, which gives 3,333,333. That is correct. At $45 with a $50 conversion price, the note is out of the money, so both treatments give 0. Also correct.
+
+Gaps the card leaves out, none of which contradict it:
+- If shares, the conversion price or the principal is missing, the increment is None (unknown), not 0.
+- The net-share path is triggered by any non-null `principalSettlement`; in practice that is the PRINCIPAL_IN_CASH statement.
+- Convertible preferred gets the same treatment.
+- Rounding is half-up to whole shares.
+
+P0: this is a borderline call. The rule does not move money or enforce regulation. It does decide the diluted share count that feeds per-share values, and the project requires Python/TS output parity. A wrong in-the-money test (>= vs >) or a wrong net-share formula would silently corrupt a core financial output. I accept P0 on data-integrity grounds.
+
+No instruction-shaped text was found in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-083 · Scenario convertible treatment including net-share settlement
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/share_scenarios.py:188-217`
+
+Convertible notes and convertible preferred are counted at their if-converted shares when price is at or above the conversion price (or always under if_converted_all); under net_share_settlement_when_stated, notes whose principal the filing says is paid in cash count only (if-converted shares - principal / price).
+
+- **Given** Notes convertible into 10,000,000 shares, $500M principal, $50 conversion price, scenario price $60, filing states cash settlement of principal
+- **When** the net_share_settlement_when_stated treatment is applied
+- **Then** incremental = max(0, 10,000,000 - 500,000,000/60) = 1,666,667 shares; at price $45 the result is 0
+- **Parameters:** In-the-money test is price >= conversion price (options/warrants use strictly greater)
+- **Edge cases:**
+  - Net-share treatment on notes without stated cash settlement falls back to full if-converted with a '; cash settlement of principal not stated' note
+  - Missing principal gives unresolved 'principal not tagged'
+- **Suspected defect:** In-the-money convention differs: convertibles count at price equal to the conversion price (>=) while options/warrants need price strictly above the strike (>). Probably harmless at equality for treasury stock (yields 0) but should be confirmed for parity with the dilution bridge.
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (The card matches the code. I read yfmcp/share_scenarios.py:188-217 and the helpers _round at :43-45 and _exercisable at :131-142.
+
+What the code does:
+- Notes and preferred are in the money when price >= conversion price (:196). Options and warrants use strictly greater, price > strike (:132, :141). The capped call at :229 also uses strictly greater.
+- Under if_converted_all, every instrument counts its full if-converted shares, whatever the price (:203-204).
+- Under net_share_settlement_when_stated, when principalSettlement is present, the code computes _round(max(0, shares - principal/price)) if in the money, else 0 (:207-214).
+- Worked example: 10,000,000 - 500,000,000/60 = 1,666,666.67, and _round (floor(x+0.5)) gives 1,666,667. At $45, which is below $50, the result is 0. Both match the card.
+- One nuance: the branch runs when principalSettlement is any non-None value (:207). The code never checks that the value says "cash". That reading comes only from the comment at :208. A downstream contract should say "when principalSettlement is stated", not "when the filing states cash settlement".
+
+Why it is not P0 under the compliance lens:
+- This is a read-only analytics tool. It builds hypothetical diluted-share-count scenarios from public filing data, and the caller picks the treatment (exclude / if_converted / if_converted_all / net_share_settlement_when_stated).
+- It moves no money and fills no regulatory filing or reported EPS. The code itself labels related lines as economic rather than the EPS count (:233-234).
+- A regulator or auditor would not be affected by a silent change. A controller would not rely on it as a book of record.
+- It loosely follows ASC 260 if-converted and net-share methods, but only as an analysis aid. It does not enforce those rules.
+- It matters for output correctness and for the strict Python/TS parity this repo requires. That makes it a strong P1 (core calculation, needs parity tests), not P0.
+
+No instruction-shaped text found in the cited lines. | I checked this against yfmcp/share_scenarios.py:188-217, plus _round at lines 43-45 and _exercisable at lines 131-142. I found no instruction-shaped text in the cited lines.
+
+Fidelity: the Given/When/Then matches the code.
+- At line 196 a note counts as in the money when price >= conversion price. Options and warrants use a strict > (lines 132 and 141), so the parameter note is right.
+- When the treatment is net_share_settlement_when_stated and principalSettlement is present, line 214 computes _round(max(0, shares - principal / price)) if the note is in the money, and 0 if not.
+- $60 example: 10,000,000 - 500,000,000/60 = 1,666,666.67. _round is floor(x + 0.5), which rounds half up, so the result is 1,666,667.
+- $45 example: 45 < 50, so the note is out of the money and the result is 0. Both values check out.
+- Under if_converted_all, line 204 counts the full shares without testing the conversion price. That matches 'always under if_converted_all'.
+- If principalSettlement is missing, line 217 falls back to the full if-converted count when in the money, with a 'cash settlement of principal not stated' note. That matches 'only when the filing says'.
+
+Small gaps worth adding to the card (none of them is a mismatch):
+1. Line 207 only checks that principalSettlement is not None. Any value triggers net-share settlement; the code does not check that the value actually says 'cash'.
+2. Null and exclude paths are left out. 'exclude' gives 0. Missing ifConvertedShares gives null ('principal or conversion terms not tagged'). This check comes before if_converted_all, so null shares win even under if_converted_all. A missing conversion price gives null with in-the-money also null, but only for treatments other than if_converted_all. Missing principal under net-share gives null ('principal not tagged').
+3. The same logic covers convertible_preferred as well as convertible_debt, and rounding is applied after max(0, ...).
+
+P0: justified, though only just. This is an analytics tool and moves no money itself. But the result feeds the diluted share count behind per-share valuations, and CLAUDE.md requires strict Python/TS output parity for it. The 1-share rounding, the >= vs > in-the-money test and the null-vs-0 choices are exactly the kind of numbers an equivalence contract has to pin down, so I count it as data integrity. The equivalent TS code in worker/src/*.ts should be checked against this as well.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-084 · Scenario warrant vesting basis
+
+**P1** · Policy · Confidence **Medium**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:179-186`
+
+Under the default vested_only setting, a warrant class uses its exercisable count when one is tagged; a class with no exercisable figure falls back to outstanding. Under 'all' every outstanding warrant is used.
+
+- **Given** A warrant class with 5,000,000 outstanding and 2,000,000 exercisable at a $11.50 strike, price $20
+- **When** warrant_vesting=vested_only and warrants=treasury_stock
+- **Then** Count used = 2,000,000; increment = 2,000,000 x (1 - 11.5/20) = 850,000
+- **Edge cases:**
+  - exercisable key present but null -> count None -> 'count not tagged'
+- **Suspected defect:** When the 'exercisable' key is missing entirely, outstanding is used under vested_only. Only a key that is present but holds null gives an unresolved line, which seems to go against the stated intent.
+- **SME question:** The code comment says a class with untagged vesting conditions is never taken as all outstanding, but the code uses outstanding when the class has no 'exercisable' key at all. Should a class without an exercisable figure be unresolved under vested_only?
+
+#### BR-EXT-085 · Share claim status lifecycle
+
+**P1** · Lifecycle · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/capital_structure.py:1856-1902`
+
+Share claims found in filing text start UNQUANTIFIED; they become REPORTED_NOT_MODELED when the antidilutive table reports a count no bridge component models, MODELED_IN_BRIDGE when the convertible-preferred component resolves them, or TAGGED_NONE_OUTSTANDING when all preferred counts tagged at period end are zero; only UNQUANTIFIED and REPORTED_NOT_MODELED are open.
+
+- **Given** A text claim CONVERTIBLE_PREFERRED and tagged preferred shares outstanding 0 at period end
+- **When** The bridge is built
+- **Then** status TAGGED_NONE_OUTSTANDING (closed); with 5,000,000 tagged and an unresolved component it stays UNQUANTIFIED
+- **Parameters:** Open set (capital_structure.py:2065-2067); merge rule (capital_structure.py:2052-2062); antidilutive grouping (capital_structure.py:2015-2037)
+- **Edge cases:**
+  - open claims trigger UNQUANTIFIED_SHARE_CLAIMS in valuation (valuation.py:323-328) and EXCLUDES_UNQUANTIFIED_CLAIMS in scenarios
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (Faithful: the code matches the card. share_claim_signals creates each text claim group with status UNQUANTIFIED (capital_structure.py:1856-1872). _preferred_claims_with_tags (1880-1902) changes only CONVERTIBLE_PREFERRED claims, and only when preferred or temporary-equity share counts are tagged at the document period end. If every tagged count is 0, the status becomes TAGGED_NONE_OUTSTANDING. If a count is positive, it becomes MODELED_IN_BRIDGE when the convertible_preferred component has a non-null incrementalShares, and otherwise stays UNQUANTIFIED. So the card's example (5,000,000 tagged, component unresolved, status UNQUANTIFIED) is correct. The call order at 2201-2205 is: tag check, then the post-period warrant merge, then _merge_reported_claims (2052-2062), which moves only claims still UNQUANTIFIED to REPORTED_NOT_MODELED, then is_open_claim (2065-2067), which treats UNQUANTIFIED and REPORTED_NOT_MODELED as open. One nuance the card leaves out: a preferred claim closed as TAGGED_NONE_OUTSTANDING is not merged, so an antidilutive-table row of the same kind is added as a separate REPORTED_NOT_MODELED claim. Also, if nothing is tagged at period end, the claim is left unchanged. Not P0 under the compliance lens: this is an analysis tool that sorts share-claim disclosures from SEC filings into categories for a dilution bridge. It moves no money, enforces no regulatory requirement, and protects no system-of-record data. A silent change would make open dilution claims show up wrongly or disappear from the tool's output. That is a real output-correctness and cross-runtime parity concern (CLAUDE.md treats enum and status changes as planner decisions), so P1 fits better. No regulator, auditor or finance controller depends on this enum. No instruction-shaped text or credentials were found in the cited lines. | The Given/When/Then matches the code, but the plain-English summary leaves out conditions on when the transitions happen.
+
+What matches:
+- New text claims start as UNQUANTIFIED (yfmcp/capital_structure.py:1861).
+- In _preferred_claims_with_tags (1880-1902), a CONVERTIBLE_PREFERRED claim becomes TAGGED_NONE_OUTSTANDING when every tagged PreferredStockSharesOutstanding / TemporaryEquitySharesOutstanding fact at the period end is 0 (1899). It becomes MODELED_IN_BRIDGE only when some count is non-zero and the preferred component's incrementalShares is not None (1900). Otherwise it stays UNQUANTIFIED. So 5,000,000 tagged with an unresolved component gives UNQUANTIFIED, as the spec says.
+- Only UNQUANTIFIED and REPORTED_NOT_MODELED count as open (2065-2067).
+
+What the summary leaves out (edge cases verifiers need):
+1. The tagged counts come only from the first source that has matching facts at its own document_period_end (1885-1890). Other filings are ignored.
+2. If no such facts exist, the claim is left as it was (1893). MODELED_IN_BRIDGE cannot happen without a non-zero tagged count, so "resolved by the component" alone is not enough.
+3. Order matters: the preferred-tag step runs before _merge_reported_claims (2201-2204). The merge only upgrades claims that are still UNQUANTIFIED (2056). A preferred claim that is already TAGGED_NONE_OUTSTANDING or MODELED_IN_BRIDGE is not upgraded. Instead, an antidilutive-table row of the same kind is added as its own REPORTED_NOT_MODELED claim (2061), so a closed text claim and an open table claim of the same kind can both appear.
+4. Antidilutive rows count only if shares are greater than 0 (2003). They become claims only if no component present models them (2013, 2019-2023). Rows of the same kind are summed into reportedShares (2027).
+
+P0 is justified on data-integrity grounds, though it is borderline. The tool moves no money, but this status decides whether dilutive share claims are flagged as left out of the basic-to-diluted share bridge or quietly treated as closed. Getting it wrong would hide dilution from users.
+
+No instruction-shaped text or credentials were found in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-086 · Share count scenario completeness
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/share_scenarios.py:284-297`
+
+Each scenario's completeness is NO_BASIC_SHARES, EXCLUDES_UNRESOLVED_INSTRUMENTS, EXCLUDES_UNQUANTIFIED_CLAIMS, CLAIM_TEXT_NOT_READ or TAGGED_INSTRUMENTS_RESOLVED in that precedence; overall status is NOT_FOUND without basic shares, COMPUTED only if every scenario is fully resolved, else PARTIAL.
+
+- **Given** Basic 100,000,000 shares, all instruments resolved, one open REPORTED_NOT_MODELED claim
+- **When** Scenarios run
+- **Then** completeness EXCLUDES_UNQUANTIFIED_CLAIMS and status PARTIAL
+- **Parameters:** dilutionPct = (resulting - basic)/basic x 100, 2 dp
+- **Edge cases:**
+  - excluded-by-scenario lines are not unresolved
+
+#### BR-EXT-087 · Share scenario completeness and overall status
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:253-297`
+
+Each scenario's resulting shares = basic + included increments + known issuance. Its completeness is graded in a fixed order, and the overall status is NOT_FOUND without basic shares, PARTIAL if any scenario is less than fully resolved, else COMPUTED.
+
+- **Given** Basic shares 100,000,000, one unresolved warrant class, no open claims
+- **When** share_count_scenarios runs
+- **Then** completeness=EXCLUDES_UNRESOLVED_INSTRUMENTS and status=PARTIAL. With everything resolved but a claim in status UNQUANTIFIED or REPORTED_NOT_MODELED -> EXCLUDES_UNQUANTIFIED_CLAIMS. With no open claims but the claim text scan not READ -> CLAIM_TEXT_NOT_READ. Only then is it TAGGED_INSTRUMENTS_RESOLVED / COMPUTED. dilutionPct = (resulting-basic)/basic x 100, to 2 dp
+- **Parameters:** Completeness precedence: NO_BASIC_SHARES > EXCLUDES_UNRESOLVED_INSTRUMENTS > EXCLUDES_UNQUANTIFIED_CLAIMS > CLAIM_TEXT_NOT_READ > TAGGED_INSTRUMENTS_RESOLVED
+- **Edge cases:**
+  - Excluded instruments never count as unresolved
+  - selectedScenario and selectedDenominator are always null: no scenario is recommended
+
+#### BR-EXT-088 · Share scenario input validation
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/share_scenarios.py:19-40,61-104`
+
+Callers may submit 1 to 8 scenarios, each with a unique 1-60 character name, a positive price, treatments from fixed allowed lists (missing treatments take documented defaults and are listed as defaulted), and at most 10 known-issuance rows each needing a label and positive shares.
+
+- **Given** A request with 9 scenarios, or a scenario with price 0, or options treatment 'black_scholes'
+- **When** parse_share_scenarios runs
+- **Then** the call is refused with an error such as 'At most 8 scenarios per call.' or 'scenarios[0].price must be a positive number.'
+- **Parameters:** SHARE_SCENARIO_LIMIT=8; _KNOWN_ISSUANCE_LIMIT=10; name max 60 chars; issuance label truncated to 120 chars, source to 300; defaults options=treasury_stock, unvested_awards=gross, warrants=treasury_stock, warrant_vesting=vested_only, convertibles=if_converted_when_in_the_money, atm=exclude, capped_calls=ignore
+- **Edge cases:**
+  - Duplicate names after trimming are rejected
+  - known_issuance null is treated as empty
+
+#### BR-EXT-089 · Share scenario totals, completeness and status
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `yfmcp/share_scenarios.py:249-297`
+
+Resulting shares = basic + included incremental shares + caller known issuance, with dilution % = (resulting - basic)/basic x 100; completeness is graded NO_BASIC_SHARES, EXCLUDES_UNRESOLVED_INSTRUMENTS, EXCLUDES_UNQUANTIFIED_CLAIMS, CLAIM_TEXT_NOT_READ or TAGGED_INSTRUMENTS_RESOLVED in that order, and no scenario is ever selected.
+
+- **Given** Basic 100,000,000 shares, 600,000 option shares, 1,666,667 convertible shares, 500,000 known issuance, every instrument resolved, claim text read and no open claims
+- **When** the scenario is totalled
+- **Then** resultingShares = 102,766,667, dilutionPct = 2.77, completeness TAGGED_INSTRUMENTS_RESOLVED and overall status COMPUTED; any other completeness makes status PARTIAL, and no basic shares makes it NOT_FOUND
+- **Parameters:** Open claims are those with status UNQUANTIFIED or REPORTED_NOT_MODELED
+
+#### BR-EXT-090 · Share-count scenario input validation
+
+**P1** · Validation · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/share_scenarios.py:19-104`
+
+Callers may submit 1 to 8 uniquely named scenarios. Each has a positive price, treatments chosen from fixed lists (missing ones take documented defaults and are listed as defaulted), and at most 10 known-issuance rows, each with a label and positive shares.
+
+- **Given** 2 scenarios, both named 'Base'
+- **When** parse_share_scenarios runs
+- **Then** Error "Scenario name 'Base' is repeated." A name of 61 characters fails 'must be 1 to 60 characters'.
+- **Parameters:** SHARE_SCENARIO_LIMIT 8; name 1-60 chars; KNOWN_ISSUANCE_LIMIT 10; label truncated to 120 and source to 300 chars; defaults options=treasury_stock, unvested_awards=gross, warrants=treasury_stock, warrant_vesting=vested_only, convertibles=if_converted_when_in_the_money, atm=exclude, capped_calls=ignore
+- **Edge cases:**
+  - Booleans are not accepted as a price
+  - The Worker mirror is worker/src/share-scenarios.ts:78
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (Faithful: the card matches yfmcp/share_scenarios.py:19-104. It enforces 1 to 8 scenarios (SHARE_SCENARIO_LIMIT=8, lines 19 and 63-66). Names are trimmed and must be 1 to 60 characters (lines 72-74). A repeated name returns the exact error "Scenario name '<name>' is repeated." (lines 75-76). Price must be a finite positive non-bool number (lines 78-80). Treatments must come from the fixed TREATMENTS lists (lines 22-30). A missing treatment, or one passed as null, takes the DEFAULTS value (lines 32-40, which match the card exactly) and is added to the defaulted list (lines 83-91). known_issuance allows at most 10 rows, each needing a non-empty trimmed label and positive shares; label is cut to 120 characters and source to 300 (lines 92-102). The card leaves out some small details, all consistent with it: the name is trimmed before the length check, null counts as missing, and invalid treatment values fail with a 'must be one of' error. No instruction-shaped text or credentials appear in the cited lines.
+
+P0 not justified under the compliance lens: this is input validation for a read-only analytics tool that computes caller-defined share-count scenarios. It moves no money and enforces no regulation. The module docstring (lines 8-9) says scenarios are reported side by side and MCP never selects a denominator, so no reported or authoritative EPS figure depends on it. The limits (8 scenarios, 60-character names, 10 issuance rows, 120/300-character truncation) are product and resource limits, not rules a regulator or controller would care about. The one part with real business weight is the DEFAULTS map, because it decides which treasury-stock or if-converted treatment applies when the caller leaves one out. Even that is shown to the caller through the defaulted list, so a change would not be silent. Recommend P1 for the defaults and treatment lists, which belong in the parity contract with worker/src/share-scenarios.ts, and P2 for the count and length limits. | Fidelity: I read yfmcp/share_scenarios.py:19-104 and the card matches it. The limits are right: 8 scenarios (lines 19, 65), names of 1 to 60 characters (line 73), at most 10 known-issuance rows (lines 20, 93). The seven defaults match DEFAULTS (lines 32-40). Missing treatments are added to `defaulted` (lines 85-87), and a value outside the allowed list is an error (lines 88-91). The price check sits at lines 78-80 and the issuance-row check at lines 99-101. The label is cut to 120 characters and the source to 300 (line 102). Both examples hold. Two scenarios named 'Base' pass the first time and fail the second time with exactly "Scenario name 'Base' is repeated." (lines 75-76). A 61-character name fails at line 73. The card leaves out some details a rewrite would need to copy: (1) names and labels are trimmed of spaces before the empty, length and duplicate checks, so a name of only spaces fails and ' Base' repeats 'Base'; (2) duplicate names are case-sensitive; (3) a treatment set to null counts as missing and gets the default; (4) price and shares must be finite numbers, and true/false values are rejected (lines 48-51); (5) source is optional and becomes None when it is not text; (6) an over-long label is cut off silently, not rejected, and the cut happens after the check; (7) the first failure ends the call with one error, in this order: whole array, then each scenario's name, price, treatments in TREATMENTS order, then issuance. None of these contradict the card. P0: not justified. This is request checking for a read-only analysis tool that reports dilution scenarios side by side. Its own docstring says it never selects a denominator. It moves no money, enforces no regulation, and protects no stored record. The defaults do change what the tool computes, and the CLAUDE.md requires the Python and Worker versions to give the same output, so this belongs at P1 as an API and parity contract. If anything here is a candidate for P0, it is the default treatments, and they could be split into their own card. I found no instruction-like text aimed at automated tools and no credentials in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-091 · Share-count scenario input validation
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:19-104`
+
+A request carries 1-8 scenarios, each with a unique name of 1-60 characters, a positive price, treatments from allowed lists (unspecified ones defaulted and listed), and up to 10 known issuances each with a label and positive shares.
+
+- **Given** 9 scenarios supplied
+- **When** parse_share_scenarios runs
+- **Then** Error 'At most 8 scenarios per call.'
+- **Parameters:** SHARE_SCENARIO_LIMIT=8; _KNOWN_ISSUANCE_LIMIT=10; name max 60; label truncated to 120, source to 300; defaults options=treasury_stock, unvested_awards=gross, warrants=treasury_stock, warrant_vesting=vested_only, convertibles=if_converted_when_in_the_money, atm=exclude, capped_calls=ignore
+
+#### BR-EXT-092 · Share-count scenario input validation and defaults
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/share_scenarios.py:19-104`
+
+A call takes 1 to 8 scenarios, each with a unique name of 1-60 characters and a positive price. Each treatment must come from an allowed list and defaults when omitted. Each scenario takes at most 10 known-issuance rows with a label and positive shares.
+
+- **Given** A scenario {name:'Bull', price:40} with no treatments
+- **When** parse_share_scenarios runs
+- **Then** treatments default to options=treasury_stock, unvested_awards=gross, warrants=treasury_stock, warrant_vesting=vested_only, convertibles=if_converted_when_in_the_money, atm=exclude, capped_calls=ignore, and all 7 are listed as defaulted
+- **Parameters:** SHARE_SCENARIO_LIMIT = 8; name max 60; _KNOWN_ISSUANCE_LIMIT = 10; label truncated to 120, source to 300
+- **Edge cases:**
+  - A repeated name is an error
+  - Price <= 0 or non-numeric is an error
+
+#### BR-EXT-093 · Standard driver series status (read vs not reported)
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `yfmcp/driver_ledger.py:32-45,65-111`
+
+Each standard driver (revenue, gross profit, R&D, capex, RPO, contract liabilities) keeps the newest 10-K/10-Q filing per period, up to the last 16 points. It is REPORTED if tagged, NOT_REPORTED if companyfacts was read but the series is untagged, and NOT_READ if companyfacts could not be read.
+
+- **Given** companyfacts read, no RevenueRemainingPerformanceObligation facts
+- **When** the driver ledger is built
+- **Then** remaining_performance_obligation status NOT_REPORTED and listed in notReported
+- **Parameters:** SERIES_POINT_LIMIT 16; forms matching 10-K/10-Q only; instant vs duration must match the spec
+
+#### BR-EXT-094 · Standard driver series status (REPORTED / NOT_REPORTED / NOT_READ)
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/driver_ledger.py:65-111,333-366`
+
+Each standard operating driver (revenue, gross profit, R&D, capex, RPO, contract liabilities) is REPORTED when 10-K/10-Q facts exist, NOT_REPORTED when SEC data was read but the company does not tag it, and NOT_READ when SEC data could not be fetched; nothing is derived or filled.
+
+- **Given** SEC companyfacts was read and holds GrossProfit facts from two 10-Q filings for the same period (filed 2025-05-01 and an amendment filed 2025-06-01)
+- **When** The driver series is built
+- **Then** Only the 2025-06-01 filing's value is kept for that period, only the latest 16 periods are listed, status is REPORTED; a driver with no facts is NOT_REPORTED and listed in notReported; if companyfacts was null every driver is NOT_READ
+- **Parameters:** SERIES_POINT_LIMIT=16; forms accepted: 10-K*/10-Q*; units USD; instant vs duration must match the driver
+- **Edge cases:**
+  - A duration fact for an instant driver (RPO) is ignored
+  - 8-K or 20-F facts are ignored
+  - Year-to-date cash-flow periods are not converted to quarters
+
+#### BR-EXT-095 · Stock option dilution by treasury-stock method (tranches before weighted-average strike)
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:518-617`
+
+In-the-money options add shares equal to count x (1 - strike / price). Each exercise-price range is priced on its own when the filing tags ranges; otherwise one weighted-average strike is used; with no strike, nothing is computed.
+
+- **Given** A filing tags 1,000,000 options outstanding at a $20.00 weighted-average strike and tags no exercise-price ranges
+- **When** The dilution bridge runs at a caller-supplied price of $50.00
+- **Then** incrementalShares = 1,000,000 x (1 - 20/50) = 600,000 (method treasury_stock_on_weighted_average_strike). If ranges were tagged (for example 400,000 @ $10 and 600,000 @ $60), only the in-the-money range counts: 400,000 x 0.8 = 320,000 (method treasury_stock_by_exercise_price_range)
+- **Parameters:** In the money when price > strike (strict); results rounded half-up to whole shares. Options tagged only on award or plan axes: take the latest date, the fewest axes, and one entry per member (AEHR case)
+- **Edge cases:**
+  - No strike tagged for the same date: method not_computed, incrementalShares null
+  - Award-axis members that each have a strike are priced like ranges
+  - Exercisable count is summed only when every member has one
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (Faithful: I checked the rule against yfmcp/capital_structure.py:501-503 and 518-617 and it matches the code. _treasury_stock returns count x (1 - strike/price) only when price > strike, and 0 otherwise, so the strict in-the-money test is correct. If the filing has an undimensioned options total, exercise-price-range tranches (_option_tranches, lines 518-527) are used when tagged. Otherwise the code uses the weighted-average strike, and with no strike it sets method not_computed and incrementalShares None (lines 597-616). Both worked examples are correct: 1,000,000 x (1 - 20/50) = 600,000, and 400,000 x (1 - 10/50) = 320,000, with the $60 range out of the money at $50. round_half_up is floor(x + 0.5), which is half-up for these positive counts. The total is rounded once from the unrounded sum, while each tranche's incrementalShares is rounded separately. Small gaps in the card: it does not say that award-axis options with several members, each with its own strike, are also priced as tranches (lines 580-581). It also omits that when several members exist but not all have a strike, the code falls to not_computed. Neither gap contradicts the card. No instruction-like text was found in the cited lines; the AEHR docstring is an ordinary code comment.
+
+P0 not justified under the compliance lens: this is an analytics tool built on public SEC XBRL data. It calculates an estimated diluted share count at a price the caller supplies. It does not move money, enforce a regulation, or guard the integrity of records. The treasury-stock method comes from GAAP (ASC 260), but this system does not prepare reported EPS or any filing. A regulator or auditor would not depend on this number, and a finance controller would not book it. A silent change would make the analysis output wrong. That matters for the project's Python/Worker parity contract and for users, so this should be a high-priority (P1) core-calculation rule, not a P0 compliance or money-movement rule. | I read yfmcp/capital_structure.py lines 518-617 (_option_tranches, _award_axis_options, _options_component) and _treasury_stock at line 501, then worked through the rule's examples against the code. The Given/When/Then holds.
+
+What matches:
+- Formula: _treasury_stock returns count*(1-strike/price) only when price > strike (strict), otherwise 0.
+- Single strike: 1,000,000 x (1-20/50) = 600,000, with method treasury_stock_on_weighted_average_strike.
+- Ranges: 400,000@$10 gives 320,000 and 600,000@$60 gives 0, so 320,000 total, with method treasury_stock_by_exercise_price_range.
+- Order: tranches are tried first, then the weighted-average strike, then not_computed with incrementalShares=None.
+- Rounding: round_half_up (line 451) is floor(x+0.5), so it rounds half-up for positive values.
+- AEHR case: when options are tagged only on award or plan axes, the code takes the latest date, the fewest axes, and one entry per member.
+
+Gaps a modernization should capture:
+1. Range pricing only applies when an undimensioned options total exists. A range counts only if it has a strike fact for the same date and the same dimensions, and the ranges are not checked against the total outstanding.
+2. On the award-axis path, two or more members that each have a strike are also priced as tranches under the same method label, treasury_stock_by_exercise_price_range. Exactly one member uses that member's strike as the weighted-average strike, and two or more members missing any strike give not_computed.
+3. The total incrementalShares is round_half_up of the unrounded sum of tranches. Each tranche's figure is rounded separately, so the tranche figures may not add up exactly to the total.
+
+Why P0: the incremental share count feeds diluted share counts and per-share valuation output, so it guards the integrity of financial data.
+
+No instruction-shaped text was found in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-096 · Text operating driver selection and actual-vs-plan basis
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/driver_ledger.py:196-330`
+
+A sentence of 30–600 characters becomes a text driver if it names a driver category and has a real figure: a dollar amount or a number with a unit, but not a bare year or a model number like 'Block 2'. Plan wording alone is TARGET_OR_PLAN, result wording alone is REPORTED_ACTUAL, and both or neither is UNCLEAR.
+
+- **Given** 'We delivered 1,200 vehicles in the quarter.'
+- **When** text drivers are extracted
+- **Then** category deliveries, figure 1,200 vehicles, basis REPORTED_ACTUAL
+- **Parameters:** TEXT_DRIVER_LIMIT 40; ≤ 6 figures per sentence; dedupe on first 120 chars
+- **Edge cases:**
+  - 'New Glenn 3 will launch' gives no figure
+  - '2026 revenue' is a year, not a figure
+
+#### BR-EXT-097 · Treasury-stock incremental shares for options and warrants
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/capital_structure.py:501-502,555-617 (mirrored in yfmcp/share_scenarios.py:127-142)`
+
+In-the-money options and warrants add only the shares left after the exercise proceeds are assumed to buy back stock at the current price; out-of-the-money ones add zero.
+
+- **Given** 1,000,000 options outstanding with a weighted-average exercise price of $10.00 and a supplied price of $25.00
+- **When** the dilution bridge or a share-count scenario is computed
+- **Then** incremental shares = 1,000,000 x (1 - 10/25) = 600,000 (rounded half-up to whole shares). At a price of $9.00 the result is 0.
+- **Parameters:** Formula count x (1 - strike/price) when price > strike, else 0; rounding floor(x+0.5)
+- **Edge cases:**
+  - Strike equal to price gives 0 (strict >)
+  - When exercise-price-range tranches are tagged, each tranche is priced separately and summed; otherwise one weighted-average strike stands in, with a note
+  - No strike tagged: method not_computed, incrementalShares null (unresolved)
+  - Options tagged only on award/plan axes are summed across members; a single strike is used only when there is exactly one member
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (I read the cited code and the Given/When/Then matches it. The formula is at yfmcp/capital_structure.py:501-502 (`_treasury_stock`) and again at yfmcp/share_scenarios.py:127-128 (`_treasury`): count x (1 - strike/price) when price > strike, else 0. Results are rounded with floor(x+0.5): `round_half_up` at capital_structure.py:451-453 and `_round` at share_scenarios.py:43-45. Worked through, 1,000,000 x (1 - 10/25) = 600,000, and a $9.00 price gives 0. A price exactly equal to the strike also gives 0, which matches "out-of-the-money adds zero".
+
+Some edges the card leaves out (none of them contradict it):
+- When tranche data exists (capital_structure.py:595-605), the per-tranche results are added up unrounded and only the total is rounded. The card's example only covers the single weighted-average-strike path (606-610).
+- If no strike is tagged, the result is null with method "not_computed" (611-614). In the scenario module it is null with "exercise price not tagged" (share_scenarios.py:139-140).
+- The scenario module also has "exclude" (gives 0) and "gross" (counts every share) treatments that skip the formula (share_scenarios.py:133-138).
+These should be extra cases in the behavior contract.
+
+Why it isn't P0 under the compliance lens: the method copies the GAAP treasury-stock method (ASC 260) for diluted shares, but this system doesn't file or certify financial statements. It is an analytics/MCP tool that estimates dilution from XBRL facts and a price the caller supplies. It doesn't move money, doesn't enforce any regulatory requirement, and doesn't protect stored data. A regulator or auditor would not care if it changed silently. Analysts using the output would, and the project requires Python/TS output parity. So it is a core calculation that belongs in the parity contract at P1 (high-importance calculation), not P0.
+
+No instruction-like text or credentials appear in the cited lines. | FIDELITY: The card matches the code. yfmcp/capital_structure.py:501-502 and yfmcp/share_scenarios.py:127-128 both compute `count * (1 - strike / price) if price > strike else 0`. Rounding is floor(x + 0.5): round_half_up at capital_structure.py:451-453 and _round at share_scenarios.py:43-45. I worked the example through myself. 1,000,000 x (1 - 10/25) = 600,000, and at $9.00 (price <= strike) the result is 0. A price equal to the strike also gives 0, because the test is a strict `>`. The card leaves out some edge behaviour that the behaviour contract should state:
+(a) Options priced by exercise-price range or by award-axis member (capital_structure.py:597-607). The total is the rounded sum of the unrounded per-tranche values. Each tranche row is rounded on its own, so the rows may not add up to the total.
+(b) If no weighted-average strike is tagged, method='not_computed' and incrementalShares=None, not 0 (lines 613-616). In scenarios, a missing strike gives an unresolvedReason of 'exercise price not tagged' and a missing count gives 'count not tagged' (share_scenarios.py:135-140).
+(c) Scenario treatments change the result. 'exclude' gives 0, and 'gross' counts every share, rounded, with no treasury-stock buyback (share_scenarios.py:133-138).
+(d) The cited capital_structure lines only cover stock options. Warrants are handled at capital_structure.py:1072, which is outside the citation and applies the formula to the exercisable count. The card's 'options and warrants' wording is right overall, but that line should be cited.
+No instruction-like text appeared in the cited lines.
+
+P0: This is a core dilution calculation in an informational market-data/MCP tool. It produces analytic output: diluted share counts for valuation. It does not move money, enforce a regulatory requirement, or guard stored-data integrity. It deserves strong parity testing (P1, a key calculation) but does not meet the strict P0 definition.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-098 · Treasury-stock method for options and warrants in scenarios
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/share_scenarios.py:127-142,155-186`
+
+Incremental shares = count x (1 - exercise price / price) when price is strictly above the exercise price, else 0; 'gross' counts every share; warrants use the vested exercisable count unless 'all' is chosen.
+
+- **Given** 1,000,000 options at $10 exercise price, scenario price $25
+- **When** The scenario uses treasury_stock
+- **Then** Incremental shares = 1,000,000 x (1 - 0.4) = 600,000
+- **Parameters:** Rounding half-up to whole shares
+- **Edge cases:**
+  - Missing count -> unresolved 'count not tagged'
+  - Missing strike under treasury_stock -> unresolved
+  - A warrant class with an 'exercisable' key under vested_only uses that value even if null (unresolved), never all outstanding
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (Verdict: the rule card matches the code, but the P0 rating is not justified. I'd rate it P1.
+
+I checked it against /home/user/yahoo-finance-mcp/yfmcp/share_scenarios.py. The cited path starts with legacy/, which doesn't exist; the module is at the repo root.
+
+Is it faithful? Yes:
+- _treasury (lines 127-128) returns count x (1 - strike/price) only when price is strictly above strike, else 0.
+- _exercisable (lines 131-142) counts every share under 'gross' and uses the treasury-stock formula otherwise.
+- _round (lines 43-45) is floor(x + 0.5). That is half-up for the positive share counts used here.
+- Warrants (lines 179-186) use the 'exercisable' count unless warrant_vesting is 'all'.
+- The worked example checks out: 1,000,000 x (1 - 10/25) = 600,000.
+
+Small gaps the card leaves out:
+1. If a warrant class has no 'exercisable' key at all, the code falls back to 'outstanding' even when 'all' was not chosen (line 184). The card says warrants always use the vested exercisable count.
+2. Treasury-stock with no exercise price tagged gives an unresolved line ('exercise price not tagged'), not zero.
+3. With no count tagged, every treatment except 'exclude' gives 'count not tagged'.
+4. 'exclude' gives 0.
+None of these changes the core formula.
+
+Why it isn't P0 under the compliance lens: this is a read-only analysis tool. It builds what-if dilution scenarios from filing data at prices the user picks. It moves no money, posts nothing to books, and isn't what the company reports. The treasury-stock method does mirror the ASC 260 diluted-EPS convention. But here the output is hypothetical research, not a regulated figure. A regulator or auditor would not see a silent change. A user of the research would see different dilution numbers, which is a correctness and parity problem, not a compliance one.
+
+Keep it as a P1 calculation rule with parity tests between the Python and TypeScript runtimes. Those tests should cover:
+- the strict > boundary (price equal to exercise price gives 0);
+- half-up rounding;
+- the warrant fallback when 'exercisable' is missing.
+
+I found no instruction-shaped text or credentials in the cited lines. The comment at line 183 ('never taken as all outstanding (2.5.9)') only partly matches the code: a class with no 'exercisable' key does fall back to outstanding. An SME should say whether that fallback is intended. | I read the cited code myself in /home/user/yahoo-finance-mcp/yfmcp/share_scenarios.py. The rule's core matches it, but it leaves out some edge cases.
+
+What matches:
+- Lines 127-128 (`_treasury`) return count x (1 - strike/price) only when price is strictly above strike, and 0 otherwise.
+- `_exercisable` (lines 131-142) wraps the result in `_round`, defined at line 43-45 as floor(x + 0.5). For the non-negative counts used here, that is half-up rounding to whole shares, as the card says.
+- 'gross' returns the rounded count without applying the formula.
+- The worked example holds: 1,000,000 x (1 - 10/25) = 600,000.
+- For warrants (lines 179-186), choosing 'all' uses outstanding. Otherwise the exercisable count is used.
+
+What the card leaves out:
+1. A treatment of 'exclude' gives 0 incremental shares and marks the line as not included.
+2. When the count is untagged, the result is null with the reason "count not tagged". When the exercise price is untagged under treasury_stock, the result is null with "exercise price not tagged". These lines are excluded rather than counted as 0. Gross does not need an exercise price.
+3. Warrant fallback: if a warrant class has no 'exercisable' key at all, line 184 uses 'outstanding' even when 'all' was not chosen. The `countBasis` field still says "vested_exercisable". The comment at line 183 says an untagged vesting class is never treated as all outstanding. That only holds if such classes carry an 'exercisable' key set to null, so this needs an SME or data check.
+4. Options are evaluated separately for each tranche, using each tranche's weighted-average exercise price, when tranches are present (lines 158-163). If there are none, one aggregate line is used.
+5. At-the-money (price equal to strike) gives 0 for options and warrants, but convertibles use >= (line 196). The card should state this asymmetry.
+
+On P0: no. This is a valuation-scenario dilution estimate in an informational tool. It does not move money, enforce a regulation, or guard stored data. It is a core calculation that the Python and TypeScript versions must produce identically, so it belongs at P1, not P0.
+
+None of the cited lines contain text that looks like it is aimed at automated analysis.) — confirm criticality.
+
+</details>
+
+#### BR-EXT-099 · Warrant count vs company-reported antidilutive table
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/capital_structure.py:2214-2223`
+
+The bridge's warrant shares are flagged if they differ from the company's antidilutive-securities table by more than 5% or 100,000 shares, whichever is larger.
+
+- **Given** The bridge counts 10,000,000 warrant shares; the company's table reports 12,000,000
+- **When** the bridge runs
+- **Then** |12,000,000 - 10,000,000| = 2,000,000 > max(600,000, 100,000), so warning WARRANT_COUNT_DIFFERS_FROM_REPORTED
+- **Parameters:** Relative 5%; absolute floor 100,000 shares
+- **Edge cases:**
+  - The table may be a weighted average, so the result is a warning only
+
+#### BR-EXT-100 · Warrant count vs reported antidilutive count gap warning
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2214-2223`
+
+If the bridge's warrant count differs from the company's reported antidilutive warrant count by more than 5% of the reported count or 100,000 shares, whichever is larger, the bridge warns that a warrant class may be stale or untagged.
+
+- **Given** Reported warrants 10,000,000; bridge warrants 9,400,000
+- **When** dilution_bridge runs
+- **Then** Gap 600,000 > max(500,000, 100,000), so warning WARRANT_COUNT_DIFFERS_FROM_REPORTED
+- **Parameters:** Relative tolerance 5%; absolute floor 100,000 shares
+- **Edge cases:**
+  - The reported table may be a weighted average
+  - Only when reported warrants > 0 and a warrants component exists
+
+#### BR-EXT-101 · Warrant vesting treatment uses exercisable count
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/share_scenarios.py:179-186`
+
+With warrant_vesting vested_only, a warrant class that tags an exercisable count uses that count (never all outstanding); with 'all', the outstanding count is used.
+
+- **Given** A warrant class with 5,000,000 outstanding and 2,000,000 exercisable
+- **When** a scenario uses warrant_vesting vested_only
+- **Then** 2,000,000 warrants enter the treasury-stock calculation; under 'all' 5,000,000 do
+- **Edge cases:**
+  - A class with an 'exercisable' key whose value is null becomes 'count not tagged' rather than defaulting to outstanding
+
+#### BR-EXT-102 · Warrants tagged after the period end are quoted, not counted
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:1092-1125`
+
+Warrant counts the report tags after its period end (and that are not exercise or equity-movement events) are listed as UNQUANTIFIED WARRANT_AFTER_PERIOD_END claims, with their exercise price. They are never counted as outstanding.
+
+- **Given** MRVL 10-Q period end 2026-05-02 tags a 59.0M customer warrant at $206.58 dated after the quarter
+- **When** post_period_warrants runs
+- **Then** Claim kind WARRANT_AFTER_PERIOD_END, status UNQUANTIFIED, shares 59,000,000, exercisePrice 206.58. Not in dilutedSharesAtPrice.
+- **Parameters:** Latest fact per dimension set kept
+- **Edge cases:**
+  - The claim makes the bridge PARTIAL as an open claim
+
+#### BR-EXT-103 · Analyst price-target parsing from news text
+
+**P2** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:3085-3123,3209-3231`
+
+A price target is read in this order: 'from X to Y', 'to Y from X', '$Y price target', then 'price target ... Y'. A number followed by % is never a target. Currency comes from the symbol, or from a p/pence/kr suffix.
+
+- **Given** 'Cantor raises price target to $122 from $95'
+- **When** _price_target runs
+- **Then** target 122, prior 95, currency USD. 'PT 2,450p' gives GBp 2,450
+- **Edge cases:**
+  - GBX maps to GBp; NT$ maps to TWD
+  - Unrecognised symbol: currency null
+
+#### BR-EXT-104 · Analyst valuation method extraction and subject attribution
+
+**P2** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:3094-3098,3128-3206,3255-3406`
+
+Valuation methods named in headlines (for example '25x EV/EBITDA', DCF with WACC/terminal growth, SOTP, rNPV) are kept as context only. A target counts for the subject only when its own clause names the company, or when the item names the subject and no other company's target.
+
+- **Given** 'Rocket Lab climbs as Cantor reiterates $122 target; AST SpaceMobile rises' and subject ASTS
+- **When** analyst_valuation_methods runs
+- **Then** The target is rejected for the other company (rejectedForOtherCompany +1); status METHOD_NOT_DISCLOSED or NOT_FOUND
+- **Parameters:** Multiples 1-999 with x/times; DCF percentages 1-2 digits; windows with 'than/grew/growth/increase/faster/more' are not multiples; ticker alias needs 3+ characters; legal suffixes are stripped; evidence capped at 40
+- **Edge cases:**
+  - Status FOUND if any method is disclosed
+  - Rating changes with ptTo > 0 and no method are listed as methodNotDisclosed
+
+#### BR-EXT-105 · Analyst valuation method extraction status and subject attribution
+
+**P2** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:3265-3406`
+
+Valuation methods named in news are context only. Status is FOUND if any item names a method, METHOD_NOT_DISCLOSED if there are only targets or rating changes, otherwise NOT_FOUND. When issuer names are supplied, a sentence must be about the subject or it is rejected.
+
+- **Given** News 'Morgan Stanley raises target to $200, citing 25x 2027 EPS' about the subject, plus a rating change from Jefferies with ptTo 180
+- **When** analyst_valuation_methods runs
+- **Then** status FOUND. Jefferies is listed in methodNotDisclosed (source rating_changes).
+- **Parameters:** Aliases: ticker base if 3+ chars, name with and without legal suffix; subjectMatch CLAUSE / ITEM / NOT_CHECKED; evidence capped at 40
+- **Edge cases:**
+  - A sentence naming the subject but with the target in another company's clause makes the item 'conflicted', so ITEM matches are rejected
+  - Rating changes with ptTo <= 0 are ignored
+  - Duplicate URLs or titles are scanned once
+
+#### BR-EXT-106 · Companies House company match prefers active companies
+
+**P2** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:3457-3471`
+
+A Companies House search result matches an issuer only on an exact normalised name match (ignoring PLC, LIMITED, LTD, HOLDING(S), GROUP, THE, and '&' read as AND). Among exact matches an active company is preferred, otherwise the first exact match is used.
+
+- **Given** Issuer 'Arm Holdings plc'; results 'ARM HOLDINGS PLC' (dissolved) and 'ARM LIMITED HOLDINGS' (active)
+- **When** pick_companies_house_match runs
+- **Then** Both normalise to 'ARM', so the active one is chosen
+- **Parameters:** Stripped words: PUBLIC LIMITED COMPANY, PLC, LIMITED, LTD, HOLDING(S), GROUP, THE
+- **Edge cases:**
+  - A name that is empty after normalisation gives None
+  - No exact match gives None (no fuzzy fallback)
+- **SME question:** Removing HOLDINGS and GROUP can make a parent and its subsidiary normalise to the same name. Is preferring the active one acceptable, or should the issuer's company number be required?
+
+#### BR-EXT-107 · Companies House issuer match
+
+**P2** · Validation · Confidence **Medium**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:3457-3471`
+
+A Companies House search result matches the issuer only when the normalised names are identical (ignoring PLC/Limited/Holdings/Group/The, with & treated as AND). Active companies are preferred.
+
+- **Given** Issuer 'Arm Holdings plc' and results 'ARM LIMITED' (active) and 'ARM HOLDINGS PLC' (dissolved)
+- **When** pick_companies_house_match runs
+- **Then** Both normalise to 'ARM', so the active 'ARM LIMITED' is chosen
+- **SME question:** Removing 'Holdings', 'Group' and 'Limited' can merge distinct legal entities (a holding company and its operating subsidiary). Is matching on the active entity with the same stem acceptable?
+
+#### BR-EXT-108 · Company-specific operating series exclusions
+
+**P2** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/driver_ledger.py:114-193,337,352`
+
+Only the filer's own non-monetary custom XBRL concepts are listed as operating series; financing/equity/tax/lease-type concepts and monetary line items are counted but not shown, and custom units are listed first.
+
+- **Given** Inline facts asts:SatellitesInOrbit (unit 'satellite'), asts:WarrantLiability (USD) and asts:ProductRevenue (USD)
+- **When** The company-specific series are built
+- **Then** SatellitesInOrbit is listed; WarrantLiability counts as an excluded capital-structure concept; ProductRevenue counts as an excluded monetary concept
+- **Parameters:** COMPANY_SERIES_LIMIT=40; capital keyword list in CAPITAL_CONCEPT_RE (Stock, Share, Warrant, Debt, Loan, Lease, Tax, Dividend, Option, Compensation, etc.); standard prefixes us-gaap, dei, srt, ifrs-full ...; sort: custom units, then pure/no unit, then shares; undimensioned before dimensioned
+- **Edge cases:**
+  - A capital-axis dimension (ClassOfStock, Debt, Equity) excludes the fact even if the concept name is operational
+  - companySpecificStatus NOT_READ when the periodic filing could not be read
+
+#### BR-EXT-109 · Company-specific XBRL driver exclusion
+
+**P2** · Policy · Confidence **High**  
+Source: `yfmcp/driver_ledger.py:114-193`
+
+Only the filer's own non-monetary extension concepts are listed as operating drivers. Standard-taxonomy, monetary-unit and financing/equity/tax/lease concepts (or capital-structure axes) are counted but not listed. Custom units come first, then ratios, then share counts.
+
+- **Given** Extension facts asts:SatellitesInOrbit (unit 'satellites'), asts:WarrantLiability (USD), asts:ConvertibleNotesShares
+- **When** Company-specific series are built
+- **Then** SatellitesInOrbit is listed; WarrantLiability and ConvertibleNotesShares are counted as capital concepts
+- **Parameters:** monetary unit regex ^[A-Z]{3}(/|$); unit rank custom 0, pure/none 1, shares 2; cap 40
+- **Edge cases:**
+  - The first fact per concept/dims/period wins
+
+#### BR-EXT-110 · Contractual obligation bucket dates
+
+**P2** · Calculation · Confidence **High**  
+Source: `yfmcp/funding_schedule.py:40-97,258-307`
+
+Tagged debt, lease, purchase and contractual obligation buckets get a 'period through' date = period end + N years for buckets 1-5. Purchase commitments tagged with a min/max range axis are reported as a low-high range.
+
+- **Given** Period end 2025-12-31 and a tagged year_3 debt maturity
+- **When** the schedule is built
+- **Then** periodThrough = 2028-12-31; remainder_of_fiscal_year and after_year_5 get null
+- **Parameters:** Offsets 0..6; only undimensioned facts at the period end
+- **Edge cases:**
+  - The first concept per bucket wins (purchase vs unrecorded obligation)
+- **Suspected defect:** _add_years does string arithmetic on the year, so a 2024-02-29 period end produces the invalid date 2025-02-29 (same in worker addYears and capital_structure.py:2537-2538); server.py:11955-11960 handles Feb 29 correctly.
+- **SME question:** Should a Feb-29 period end roll to Feb-28 for bucket 'period through' dates?
+
+#### BR-EXT-111 · Event evidence ranking and word stemming
+
+**P2** · Policy · Confidence **High**  
+Source: `yfmcp/extraction_rules.py:621-653`
+
+Event evidence is ranked HIGH, MEDIUM, then LOW confidence, newest first within each, with ties kept in input order. Query words are matched after light suffix stemming.
+
+- **Given** Words 'launches', 'launched', 'launching'
+- **When** stemmed
+- **Then** all become 'launch'
+
+#### BR-EXT-112 · Evidence ranking order
+
+**P2** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py:642-668`
+
+Evidence is ordered HIGH, then MEDIUM, then LOW confidence (unknown last), newest first within each, original order otherwise.
+
+- **Given** Items LOW 2025-05-01, HIGH 2025-01-01, HIGH 2025-03-01
+- **When** rank_evidence runs
+- **Then** Order is HIGH 2025-03-01, HIGH 2025-01-01, LOW 2025-05-01
+- **Parameters:** Rank HIGH=0, MEDIUM=1, LOW=2, other=3
+
+#### BR-EXT-113 · Funding statement categories
+
+**P2** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2622-2662`
+
+Filing sentences are tagged as going concern, liquidity sufficiency (only with cash or funding context), ATM program, capital expenditure (only with a $ figure or a plan word), or financing activity, and quoted up to a limit.
+
+- **Given** 'We believe our cash will be sufficient to fund operations for the next 12 months.'
+- **When** funding_statements runs
+- **Then** Categories [liquidity_sufficiency]
+- **Parameters:** Minimum 40 characters; sentences ending in ';' skipped; default limit 10; deduplicated on the first 200 characters
+
+#### BR-EXT-114 · Funding statement timing extraction precedence
+
+**P2** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:163-186`
+
+The timing of a funding amount is read from the sentence's own wording in a fixed order: named quarter, Qn-year, next 12 months, remainder of year, year span, through-year, single year; otherwise UNSTATED.
+
+- **Given** Sentence 'We expect to spend $2 billion through 2028 and in 2027 ...'
+- **When** timing_of runs
+- **Then** timing = {basis TEXT, horizon through_year, year 2028} because 'through 2028' is checked before 'in 2027'.
+- **Parameters:** Order: quarter word > Qn FY > next 12 months > remainder of year > 'YYYY and/through/to YYYY' > 'through/by/until YYYY' > 'in/during/for YYYY' > UNSTATED
+- **Edge cases:**
+  - Only years 2000-2099 are recognised
+  - No timing is inferred from filing date
+
+#### BR-EXT-115 · Funding text timing horizon precedence
+
+**P2** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:163-186`
+
+The timing of a funding statement comes from the first matching pattern, in this order: a named quarter, Qn YYYY, next 12 months, remainder of the year, a year range, 'through/by YYYY', a single year. If none matches, timing is UNSTATED.
+
+- **Given** Sentence 'We expect to pay $400 million in the third quarter of fiscal 2027 and through 2028'
+- **When** timing_of runs
+- **Then** horizon=quarter, year=2027, quarter=3 (the quarter pattern wins over 'through 2028')
+- **Parameters:** Pattern order fixed as listed
+- **Edge cases:**
+  - No date wording gives basis UNSTATED
+
+#### BR-EXT-116 · Funding timing horizon from text
+
+**P2** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/funding_schedule.py:160-186`
+
+When an amount falls due is read from the first matching phrase, in priority order: a named quarter, Qn YYYY, next 12 months, remainder of year, a year range, 'through/by YYYY', then 'in/during YYYY'. Otherwise the timing is UNSTATED.
+
+- **Given** '...expected to be paid in the second quarter of fiscal 2027'
+- **When** timing_of runs
+- **Then** basis TEXT, horizon quarter, year 2027, quarter 2
+- **Edge cases:**
+  - '2026 through 2028' gives horizon years, 2026 to 2028
+
+#### BR-EXT-117 · Instrument maturity from text, then name
+
+**P2** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/capital_structure.py:2665-2682,2700-2742,2783-2801`
+
+An undated instrument takes the single 'will mature on <date>' date in the text for a year its name carries, using the coupon to break ties. Failing that, it takes the year or month after 'Due' or 'Maturing' in its name (spelled years included), but only when that is not before the period end.
+
+- **Given** 'Convertible Notes Maturing 2030' and the text 'The 2030 Notes will mature on January 15, 2030'
+- **When** Maturity filling runs
+- **Then** maturityDate 2030-01-15 with source FILING_TEXT. 'Senior Unsecured Debt Due Twenty Thirty Six' gives 2036 with source INSTRUMENT_NAME
+- **Edge cases:**
+  - Two dates in one year with no coupon match: left undated
+  - 'Twenty Five Percent' is not a year
+
+#### BR-EXT-118 · Operating driver ledger status
+
+**P2** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/server.py:10486-10499`
+
+The operating driver ledger is PARTIAL when the filing text, companyfacts or the earnings release could not be read; a truncated filing read or no resolved release alone keeps it OK.
+
+- **Given** Filing read but truncated; companyfacts read; release status RELEASE_NOT_RESOLVED
+- **When** The ledger status is set
+- **Then** status OK, warnings FILING_READ_TRUNCATED and RELEASE_NOT_RESOLVED, retryable false.
+- **Parameters:** Non-degrading warnings FILING_READ_TRUNCATED, RELEASE_NOT_RESOLVED
+- **Edge cases:**
+  - Release NOT_READ -> PARTIAL and retryable
+
+#### BR-EXT-119 · Operating driver period classification and text-driver basis
+
+**P2** · Calculation · Confidence **High**  
+Source: `yfmcp/driver_ledger.py:52-62,274-281`
+
+A driver fact's period is INSTANT without a start date, QUARTER for 80–100 days, ANNUAL for 350–380 days, YEAR_TO_DATE for 101–349 days, and OTHER otherwise. A driver sentence with plan words only is TARGET_OR_PLAN, with actual words only is REPORTED_ACTUAL, and with both or neither is UNCLEAR.
+
+- **Given** Fact 2026-01-01 to 2026-06-30 (180 days); sentence 'We expect to deliver 10 satellites'
+- **When** The driver ledger is built
+- **Then** periodType YEAR_TO_DATE (not converted to a quarter); basis TARGET_OR_PLAN
+- **Parameters:** QUARTER 80-100; ANNUAL 350-380; YTD 101-349; series cap 16 points; company series cap 40; text drivers cap 40; sentence 30-600 chars; max 6 figures per sentence
+- **Edge cases:**
+  - Bare years (2026) are not figures unless followed by %, MW or a scale
+  - Numbers in product names ('Block 2') are skipped
+  - Companyfacts not read gives NOT_READ, not NOT_REPORTED
+
+#### BR-EXT-120 · Operating driver period type
+
+**P2** · Calculation · Confidence **High**  
+Source: `yfmcp/driver_ledger.py:52-62`
+
+A driver period with no start is INSTANT. 80–100 days is QUARTER, 350–380 days ANNUAL, 101–349 days YEAR_TO_DATE, otherwise OTHER. Year-to-date periods are never turned into quarters.
+
+- **Given** Period 2026-01-01 to 2026-06-30 (180 days)
+- **When** period type is assigned
+- **Then** YEAR_TO_DATE
+
+#### BR-EXT-121 · Operating text driver eligibility and figure detection
+
+**P2** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/driver_ledger.py:196-259,284-330`
+
+A filing or release sentence becomes a text driver only if it is 30-600 characters, matches a driver category (capacity, production, deliveries, launches, customers, backlog, utilization, pricing, yield, headcount) and contains a real figure; bare years and numbers in product names are not figures.
+
+- **Given** Sentence 'Block 2 satellites launched in 2025 brought customers to 3.2 million'
+- **When** Text drivers are extracted
+- **Then** 'Block 2' and '2025' are not figures; '3.2 million' is a figure; the sentence is kept with categories launches_deployments and customers
+- **Parameters:** Sentence length 30-600 chars; max 6 figures per sentence; max 40 text drivers; dedupe on first 120 lowercase chars; a sentence-initial word like 'Reported'/'Approximately' may precede a number
+- **Edge cases:**
+  - '2025 MW' and '2025%' are still figures
+  - Cut-off first/last fragments of a search window are dropped
+  - Lines containing '.htm' (exhibit headers) are dropped
+
+### Valuation & reconciliation
+
+#### BR-VAL-001 · ADR ordinary-shares-per-quoted-share ratio
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/valuation.py:29-49,280-302`
+
+For foreign filers (20-F/40-F only), when SEC ordinary shares are within 2% of a whole multiple (2x or more) of Yahoo's quoted shares, SEC counts are divided by that multiple before the price is applied.
+
+- **Given** A 20-F filer with 25,930,380,000 SEC ordinary shares and 5,186,076,000 Yahoo shares
+- **When** the snapshot runs
+- **Then** ratio r = 5.000, which rounds to n = 5 with |r - 5| <= 0.10, so the ADR ratio is 5 (ADR_RATIO_APPLIED) and SEC shares are divided by 5
+- **Parameters:** _ADS_MIN_RATIO = 1.9; _ADS_RATIO_TOLERANCE = 0.02 x n; inverse ratios (r <= 1/1.9) give 1/k
+- **Edge cases:**
+  - Domestic (10-K) filers are never treated as ADRs, even near 2x
+  - No whole multiple and r > 1.5 or r < 1/1.5: SHARE_BASIS_MISMATCH, and Yahoo's count is used
+
+#### BR-VAL-002 · ADR ratio applied only for foreign filers when share counts are a whole multiple apart
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/valuation.py:29-49,280-298`
+
+If a 20-F/40-F filer's SEC ordinary share count is within 2% of a whole multiple (at least 2x) of Yahoo's quoted share count, the quote is treated as an ADS and SEC share counts are divided by that multiple before the price is applied.
+
+- **Given** A 20-F filer reports 25,932,000,000 ordinary shares and Yahoo quotes 5,186,400,000 shares
+- **When** the valuation snapshot is built
+- **Then** ratio = 25,932M / 5,186.4M = 5.00, rounded to 5, |5.00-5| <= 0.02x5, so 5 ordinary shares per ADS are assumed, SEC counts are divided by 5, and an ADR_RATIO_APPLIED info warning is added
+- **Parameters:** _ADS_MIN_RATIO=1.9; _ADS_RATIO_TOLERANCE=0.02 (relative to n); foreign form regex ^(20|40)-F; also handles inverse ratio when r <= 1/1.9
+- **Edge cases:**
+  - A domestic 10-K dual-class filer at exactly 2x is never read as an ADR
+  - Ratio 1.9 rounds to 2 but |1.9-2|=0.1 > 0.04, so no ADR ratio
+  - An inverse ratio (SEC count smaller) gives a fractional ratio 1/k
+
+#### BR-VAL-003 · ADR ratio between SEC ordinary shares and Yahoo quoted shares
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation.py:29-49,280-302`
+
+For foreign filers (20-F/40-F) only, if the SEC ordinary-share count is close to a whole multiple (2x or more) of Yahoo's quoted count, every SEC share count is divided by that multiple before the price is applied.
+
+- **Given** A 20-F filer with SEC basic shares 25,930,000,000 and Yahoo quoted shares 5,186,000,000
+- **When** The valuation snapshot is built
+- **Then** Ratio r = 5.00, nearest whole n = 5, |r-n| <= 2% x 5, so ADR ratio 5 applies; basic shares used = 5,186,000,000 and an ADR_RATIO_APPLIED info warning is added
+- **Parameters:** _ADS_MIN_RATIO=1.9; _ADS_RATIO_TOLERANCE=0.02 x n; foreign form regex ^(20|40)-F; inverse ratio (1/k) when r <= 1/1.9
+- **Edge cases:**
+  - Domestic dual-class filer near 2x is never treated as ADR
+  - Inverse case r <= 0.526 gives a fractional ratio 1/k
+  - Zero or negative counts return no ratio
+
+#### BR-VAL-004 · ADR ratio detection and share-basis mismatch
+
+**P0** · Validation · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/valuation.py:29-49,280-302`
+
+For foreign filers (20-F or 40-F), SEC ordinary shares within 2% of a whole multiple (at least 1.9x) of Yahoo's quoted shares are treated as ADRs and divided by that ratio. Otherwise, counts more than 1.5x apart mean the SEC count is dropped in favour of Yahoo's.
+
+- **Given** A 20-F filer with 25.9B ordinary shares and Yahoo's 5.186B quoted shares (ratio 4.994)
+- **When** valuation_snapshot runs
+- **Then** ADR ratio 5 is applied (ADR_RATIO_APPLIED) and SEC share counts are divided by 5. A domestic filer at 2.0x gets SHARE_BASIS_MISMATCH and Yahoo's count is used.
+- **Parameters:** ADS_MIN_RATIO 1.9; ADS_RATIO_TOLERANCE 2% of n; SHARE_BASIS_MAX_RATIO 1.5; foreign form regex ^(?:20|40)-F
+- **Edge cases:**
+  - The inverse ratio (<= 1/1.9) is also detected
+  - Yahoo's implied all-class shares replace listed shares when more than 2% larger (valuation.py:234-244)
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel doubts spec fidelity: I read yfmcp/valuation.py lines 29-49 and 280-302 myself. Both worked examples are correct. 25.9B / 5.186B = 4.9942. That rounds to n=5, and |4.9942-5| = 0.0058 is within the tolerance of 0.02*5 = 0.10 (line 45). So ADR_RATIO_APPLIED fires (line 292) and the SEC counts are divided by 5. A domestic filer is never given an ADR ratio (line 289), so at r=2.0 > 1.5 it gets SHARE_BASIS_MISMATCH and Yahoo's count is used (lines 293-295, 300). The parameters also match: 1.9, 0.02*n, 1.5, and the regex ^(?:20|40)-F.
+
+The card still does not describe the full behaviour:
+
+1. It leaves out the reverse case (lines 46-48). When the SEC-to-Yahoo ratio is at most 1/1.9 (about 0.526), i.e. Yahoo's count is a near-whole multiple k of the SEC count within 2% of k, ads_ratio returns 1/k. A foreign filer then gets ADR_RATIO_APPLIED, and dividing by 1/k multiplies the SEC counts by k. The card's 'Otherwise ... SEC count is dropped' sentence predicts SHARE_BASIS_MISMATCH for this case, which is wrong for foreign filers.
+
+2. It leaves out rounding. Shares are adjusted with round_half_up(shares / ratio) (line 298), so the result is a rounded whole number, not a plain division.
+
+3. It leaves out the knock-on effects of a mismatch (lines 294, 300-302). Diluted shares become None and value_shares falls back to Yahoo's basic count. share_basis switches from 'sec_cover_page' to Yahoo's quoted basis, and falls back to market sharesOutstanding when quotedShares is missing.
+
+4. Minor edge cases. The whole check is skipped when the SEC or Yahoo count is missing or zero. A foreign filer whose ratio is above 1.5 but not near a whole multiple (for example 2.5x, or anything between 1.5 and 1.9) gets the mismatch, which the 'Otherwise' sentence does cover.
+
+P0 is justified because this rule protects data integrity. It decides which share count, and at what ADR scale, sets market cap and every per-share multiple. A wrong ratio would misstate valuation by 5x or more.
+
+The cited lines contain nothing that looks like an attempt to manipulate automated analysis.
+
+</details>
+
+#### BR-VAL-005 · Filing balances vs Yahoo balances selection (currency and staleness)
+
+**P0** · Policy · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/valuation.py:25-26,305-339`
+
+The filing's period-end cash and debt are used unless they are in a different currency from the quote, or they are more than 45 days older than Yahoo's latest quarter and Yahoo has both cash and debt; otherwise Yahoo's totals are used with a warning.
+
+- **Given** Filing balances dated 2024-12-31 in USD and Yahoo mostRecentQuarter 2025-06-30, Yahoo cash and debt both present
+- **When** the snapshot selects balances
+- **Then** stale by 181 days > 45, so Yahoo cash and debt are used, SEC_BALANCES_STALE and YAHOO_BALANCES warnings are added; if Yahoo lacked cash or debt the stale filing balances would still be used with a warning
+- **Parameters:** _STALE_BALANCE_DAYS=45
+- **Edge cases:**
+  - SEC balances require both totalDebt and cashAndEquivalents to be numeric
+  - Currency mismatch adds SEC_BALANCES_CURRENCY and drops the filing balances
+  - Capital-structure warnings travel with SEC balances only
+
+#### BR-VAL-006 · Historical balances read at the cash date; no-borrowings means zero debt
+
+**P0** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/valuation_history.py:418-455,666-699`
+
+Balances are read at the latest tagged cash date only (nothing is carried forward); debt is the first fully tagged concept group plus short-term borrowings/commercial paper, and if the filing tags no borrowing concept at all, debt is zero. EV = market cap + (debt - cash - short-term investments) x FX.
+
+- **Given** Market cap $2,000M, cash $300M, untagged short-term investments, LongTermDebt $500M plus ShortTermBorrowings $50M, same currency
+- **When** EV is computed
+- **Then** EV = 2,000 + (550 - 300 - 0) = $2,250M with a SHORT_TERM_INVESTMENTS_NOT_TAGGED info warning
+- **Parameters:** US GAAP debt groups in order: LongTermDebt; LongTermDebtCurrent+Noncurrent; convertible notes; NotesPayable
+- **Edge cases:**
+  - No cash tagged: BALANCES_NOT_AVAILABLE
+  - Debt not tagged but the filing tags borrowings elsewhere: DEBT_NOT_TAGGED
+  - No borrowings tagged: NO_BORROWINGS_TAGGED info warning, leases excluded
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel doubts spec fidelity: P0 is justified. This rule decides which balance-sheet figures go into enterprise value (EV). It also decides when missing debt counts as zero rather than leaving EV null. Both feed every EV multiple (EV/Revenue, EV/EBITDA), so they guard the integrity of the valuation output.
+
+The worked example is right. Market cap 2,000 + (500 + 50 - 300 - 0) x 1 = 2,250, and the SHORT_TERM_INVESTMENTS_NOT_TAGGED info warning is added (lines 681-699). "Read at the cash date, nothing carried forward" is also right: tagged() only takes instant facts whose end equals the latest cash end (lines 419-427). But the rule card has a material error and leaves out several conditions:
+
+1. "First fully tagged concept group" is wrong. Line 433-434 uses the first group in which at least one concept is tagged at that date (`if not parts: continue`), not one where all concepts are tagged. Take a filer that tags only LongTermDebtCurrent at the cash date, with LongTermDebt untagged. The code picks group 2 and sums just that one part. A port that requires the whole group would fall through to the convertible-notes or notes groups, or to NOT_TAGGED, and give a different EV. Separately, ShortTermBorrowings and CommercialPaper (lines 436-437) are only added once some group has matched. If no group matches, they are never counted, even when they are tagged.
+
+2. "If the filing tags no borrowing concept at all, debt is zero" leaves out three conditions (lines 443-445). It only applies when (a) no debt group matched at the cash date, (b) the cash fact has an accession number, and (c) the mapping has borrowing concepts. Condition (c) holds for US GAAP only; for IFRS borrowingConcepts is [], so IFRS stays DEBT_NOT_TAGGED and EV is null. The check also looks at every date and every unit within the cash fact's accession, not just the balance date. It adds a NO_BORROWINGS_TAGGED info warning (lines 667-670), which the card doesn't mention.
+
+3. Parameters and edge cases:
+   - The card shortens the group list. The full US GAAP order is: [LongTermDebt]; [LongTermDebtCurrent, LongTermDebtNoncurrent]; [ConvertibleNotesPayableCurrent, ConvertibleNotesPayable, ConvertibleLongTermNotesPayable]; [NotesPayableCurrent, NotesPayable]. Additions are [ShortTermBorrowings, CommercialPaper]. Short-term investments use the first tagged of ShortTermInvestments, MarketableSecuritiesCurrent, AvailableForSaleSecuritiesDebtSecuritiesCurrent.
+   - The result goes through _round.
+   - EV is null with status BALANCES_STALE when the balance date is more than 200 days old (500 for annual filers). The SHORT_TERM_INVESTMENTS_NOT_TAGGED warning is still added in that case, and also when short-term investments are NOT_MAPPED (always the case for IFRS).
+   - The status checks run in this order: market cap, then balances, then debt, then FX.
+
+No instruction-shaped text was found in the cited lines. Code read: /home/user/yahoo-finance-mcp/yfmcp/valuation_history.py lines 41-67, 418-455 and 666-699.
+
+</details>
+
+#### BR-VAL-007 · Historical enterprise value and multiples
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:474-493,648-733`
+
+EV = market cap + (debt - cash - short-term investments) x FX; each multiple = numerator / (denominator x FX), rounded 2 decimals, null when the numerator or converted denominator is not positive.
+
+- **Given** Market cap $2,000M, debt 300M, cash 100M, STI 50M (USD, FX 1), LTM revenue 1,150M
+- **When** Valuing the date
+- **Then** EV = $2,150M; EV/Revenue LTM = 1.87
+- **Parameters:** Multiples: EV/Revenue, EV/EBITDA, P/E (market cap / net income), P/S on LTM and LFY
+- **Edge cases:**
+  - Negative EV -> NOT_MEANINGFUL_NONPOSITIVE_NUMERATOR
+  - No FX within 7 days -> FX_NOT_AVAILABLE
+  - DEBT_NOT_TAGGED
+
+#### BR-VAL-008 · Historical EV status precedence and no-borrowings rule
+
+**P0** · Lifecycle · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:418-455,666-702`
+
+Balances are read at the latest cash date, with no carry-forward. Debt is the first tagged debt group plus short-term borrowings/commercial paper. Debt is 0 when the filing that reported the cash tags no borrowing concept at all. EV = market cap + (debt - cash - STI) x FX.
+
+- **Given** Market cap $2,000M, cash $300M, STI untagged, filing tags no borrowing concept, FX 1
+- **When** EV is computed
+- **Then** Debt = 0 (NO_BORROWINGS_TAGGED info); EV = $1,700M, with a SHORT_TERM_INVESTMENTS_NOT_TAGGED info warning
+- **Parameters:** Status order: MARKET_CAP_NOT_AVAILABLE > BALANCES_NOT_AVAILABLE > DEBT_NOT_TAGGED > FX_NOT_AVAILABLE > BALANCES_STALE > OK
+- **Edge cases:**
+  - IFRS has no borrowingConcepts, so the zero-debt rule never applies
+  - An FX rate must be within 7 days on or before the date
+
+#### BR-VAL-009 · Historical market cap status precedence
+
+**P0** · Lifecycle · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:587-646`
+
+Price is the close within 7 days on or before the date, with later splits undone. Market cap is then OK only when a positive point-in-time share count exists, is not stale, and no split falls between the count date and the trading date.
+
+- **Given** Close $10 adjusted for a later 4-for-1 split, cover-page count 50,000,000 as of 90 days earlier, no split in between
+- **When** valuation_at_date runs
+- **Then** Unadjusted close = 40.00; market cap = $2,000,000,000 (status OK)
+- **Parameters:** Status order: PRICE_UNAVAILABLE (no close within 7 days) > SHARES_NOT_AVAILABLE > SHARE_COUNT_NOT_POSITIVE > POINT_IN_TIME_SHARES_UNRESOLVED (weighted-average only) > SPLIT_AFTER_SHARE_COUNT > SHARE_COUNT_STALE > OK
+- **Edge cases:**
+  - A count of 0 is shown but gives no market cap
+  - A weighted-average basic count is shown but never sets market cap
+  - An ADR count is divided by the ADS ratio
+
+#### BR-VAL-010 · Historical market cap, EV and multiples
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/valuation_history.py:474-493,600-733`
+
+Market cap = price x point-in-time shares (divided by the ADS ratio). EV = market cap + (debt - cash - short-term investments) x FX. Multiples need a positive numerator and FX-converted denominator, rounded to 2 dp.
+
+- **Given** Price $120, 50,000,000 shares, debt $800M, cash $300M, STI $100M, FX 1, LTM revenue $1,150M
+- **When** the point is computed
+- **Then** market cap = $6,000M; EV = 6,000 + 400 = $6,400M; EV/Revenue LTM = 5.57
+- **Parameters:** Weighted-average shares never set market cap; a share count <= 0 is rejected; EBITDA = operating income + D&A for the same period end
+- **Edge cases:**
+  - Negative EV: NOT_MEANINGFUL_NONPOSITIVE_NUMERATOR
+  - Net loss: NOT_MEANINGFUL_NONPOSITIVE_DENOMINATOR
+  - No borrowing concept tagged in the cash filing: debt = 0 (NO_BORROWINGS_TAGGED)
+
+#### BR-VAL-011 · Historical point-in-time share count selection
+
+**P0** · Policy · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:234-295,600-646`
+
+Shares are the cover-page count, else balance-sheet count, replaced by the latest periodic filing's per-class cover counts when newer; a weighted-average count is shown but never sets market cap; counts of zero or less are rejected.
+
+- **Given** Only WeightedAverageNumberOfSharesOutstandingBasic 50,000,000 is available
+- **When** Market cap is computed
+- **Then** Market cap status POINT_IN_TIME_SHARES_UNRESOLVED, value null, warning raised
+- **Parameters:** Market cap = major price x shares / ADS ratio
+- **Edge cases:**
+  - Count 0 -> SHARE_COUNT_NOT_POSITIVE
+  - Class sum -> SHARE_CLASSES_SUMMED info
+
+#### BR-VAL-012 · Historical price on or before date with later splits undone
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/valuation_history.py:219-224,587-598`
+
+For each valuation date the close used is the latest bar on or before the date within 7 days, multiplied by the ratio of every later split so it matches the share count reported at the time.
+
+- **Given** Valuation date 2023-06-30 with a split-adjusted close of $50 on 2023-06-30 and a 4-for-1 split on 2024-07-01
+- **When** the historical point is computed
+- **Then** close used = 50 x 4 = $200; if no bar exists within 7 days on or before the date the point is PRICE_UNAVAILABLE
+- **Parameters:** Max lookback 7 days; price rounded to 4 dp; minor-unit currencies converted to major
+
+#### BR-VAL-013 · Historical price: close within 7 days with later splits undone
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:219-224,587-598`
+
+The price for a date is the last close on or before it within 7 days, multiplied by every later split ratio so it matches the share count reported at the time.
+
+- **Given** Adjusted close $50 on 2020-06-30 and a 4:1 split on 2022-01-15
+- **When** Valuing 2020-06-30
+- **Then** Close = $200.0000 (4 decimals); FX rates use the same 7-day rule
+- **Parameters:** 7-day lookback; 4-decimal rounding
+- **Edge cases:**
+  - No close in 7 days -> PRICE_UNAVAILABLE
+  - Split between share-count date and bar date -> market cap SPLIT_AFTER_SHARE_COUNT (null)
+
+#### BR-VAL-014 · LTM = LFY + YTD - prior YTD
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:172-216`
+
+Last twelve months equals the last fiscal year plus the current year-to-date minus the prior-year year-to-date, or the fiscal year itself when it is the latest period.
+
+- **Given** FY2024 revenue 1,000 (2024-01-01..2024-12-31), YTD 2025-01-01..2025-06-30 = 600, prior YTD 2024-01-01..2024-06-30 = 450
+- **When** flow_bases runs
+- **Then** LTM = 1,000 + 600 - 450 = 1,150 (method LFY_PLUS_YTD_MINUS_PRIOR_YTD)
+- **Parameters:** YTD starts 0-4 days after LFY end; prior YTD starts within 4 days of LFY start, ends 358-372 days before YTD end, span within 7 days
+- **Edge cases:**
+  - NO_ANNUAL_PERIOD_FILED
+  - YEAR_TO_DATE_NOT_FILED
+  - PRIOR_YEAR_TO_DATE_NOT_FILED
+  - Longest YTD chosen when several end on latest date
+
+#### BR-VAL-015 · LTM and LFY flow figures
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/valuation_history.py:176-216`
+
+LFY is the latest 350-380 day period. LTM = LFY + current year-to-date - prior-year year-to-date, or LFY itself when nothing later is filed.
+
+- **Given** FY2025 revenue $1,000M, 9M-2026 YTD $900M, 9M-2025 YTD $750M
+- **When** historical valuation runs
+- **Then** LTM = 1,000 + 900 - 750 = $1,150M (method LFY_PLUS_YTD_MINUS_PRIOR_YTD)
+- **Parameters:** YTD must start 0-4 days after LFY end; prior YTD start within 4 days of LFY start, end 358-372 days before YTD end, span within 7 days
+- **Edge cases:**
+  - Missing YTD gives YEAR_TO_DATE_NOT_FILED
+  - Missing prior YTD gives PRIOR_YEAR_TO_DATE_NOT_FILED
+
+#### BR-VAL-016 · LTM flow derivation
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/valuation_history.py:176-216`
+
+LTM equals the last fiscal year when nothing later is filed, else LFY + current year-to-date - prior-year year-to-date; it is NOT_AVAILABLE when the YTD or prior YTD period is not filed.
+
+- **Given** FY2025 revenue 400; 6M 2026 YTD 230; 6M 2025 YTD 190
+- **When** Historical valuation context runs
+- **Then** LTM 440 with method LFY_PLUS_YTD_MINUS_PRIOR_YTD
+- **Parameters:** Annual 350-380 days; YTD start 0-4 days after LFY end; prior YTD end 358-372 days before; span within 7 days
+- **Edge cases:**
+  - no annual period -> NO_ANNUAL_PERIOD_FILED for both bases
+
+#### BR-VAL-017 · LTM flow metric = last fiscal year + YTD - prior YTD
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/valuation_history.py:172-216`
+
+LTM equals the last fiscal year (350-380-day period) when nothing later is filed, else LFY plus the current year-to-date period starting 0-4 days after LFY ends, minus the matching prior-year YTD.
+
+- **Given** FY2023 revenue $1,000M, 9M-2024 YTD $800M, 9M-2023 YTD $700M
+- **When** LTM revenue is computed
+- **Then** LTM = 1,000 + 800 - 700 = $1,100M, method LFY_PLUS_YTD_MINUS_PRIOR_YTD
+- **Parameters:** Annual period 350-380 days; YTD start 0-4 days after LFY end; prior YTD start within 4 days of LFY start, ending 358-372 days before YTD end, length within 7 days of YTD
+- **Edge cases:**
+  - No annual period: NO_ANNUAL_PERIOD_FILED
+  - No YTD: YEAR_TO_DATE_NOT_FILED
+  - No prior YTD: PRIOR_YEAR_TO_DATE_NOT_FILED
+  - Longest YTD at latest end preferred
+
+#### BR-VAL-018 · LTM flow metric = LFY + YTD - prior YTD
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:172-216`
+
+The last fiscal year is the latest 350-380 day period. LTM equals LFY when nothing later is filed. Otherwise LTM = LFY + the year-to-date starting 0-4 days after LFY ends - the prior-year YTD (starting within 4 days of LFY start, ending 358-372 days before the current YTD, length within 7 days of it).
+
+- **Given** LFY revenue to 2024-12-31 $1,000M, 9-month YTD to 2025-09-30 $900M, prior 9-month YTD to 2024-09-30 $700M
+- **When** flow_bases runs
+- **Then** LTM = 1,000 + 900 - 700 = $1,200M, method LFY_PLUS_YTD_MINUS_PRIOR_YTD
+- **Parameters:** Annual 350-380 days; YTD start gap 0-4 days; prior-year end gap 358-372 days; span tolerance 7 days
+- **Edge cases:**
+  - No annual period -> NOT_AVAILABLE NO_ANNUAL_PERIOD_FILED
+  - No matching YTD -> YEAR_TO_DATE_NOT_FILED
+  - No prior YTD -> PRIOR_YEAR_TO_DATE_NOT_FILED
+  - Several YTD candidates -> the longest wins
+
+#### BR-VAL-019 · Metric reconciliation agreement status
+
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/metric_reconciliation.py:518-555; server.py:10744-10755`
+
+Each source's value is compared with the latest SEC value. The tolerance is the larger of tolerance% of the SEC value and half the last stated digit of a release figure. AGREED needs SEC plus at least one other provider, all matching.
+
+- **Given** SEC latest revenue $31,500,000, a release stating '$31.5 million' (precision $50,000) and tolerance_pct 0.5
+- **When** reconcile_metric_sources runs
+- **Then** Tolerance = max(157,500, 50,000) = 157,500; the release matches and the status is AGREED. An SEC first-filed value that differs is marked RESTATED (not a conflict).
+- **Parameters:** DEFAULT_TOLERANCE_PCT 0.5; tolerance_pct clamped 0-10; metrics revenue, net_income, operating_income, eps_diluted, cash_and_equivalents
+- **Edge cases:**
+  - Without SEC, other sources are compared with each other; the status can be CONFLICT or PARTIAL but never AGREED
+  - SEC latest and as-first-filed count as one provider
+  - A non-finite tolerance_pct falls back to 0.5, but Python max(0.0, NaN) returns 0.0, so NaN becomes 0 rather than the default
+- **Suspected defect:** In Python, float('nan') clamps to 0.0 via min/max before the isfinite check, so a NaN tolerance becomes 0% instead of the documented 0.5% default.
+
+#### BR-VAL-020 · Metric reconciliation status
+
+**P0** · Lifecycle · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/metric_reconciliation.py:553-555,570-591`
+
+NOT_FOUND if no source found the value; CONFLICT if any non-SEC source mismatches; PARTIAL if there is no SEC baseline or only one provider; AGREED needs the latest SEC value plus at least one matching independent provider.
+
+- **Given** SEC and Yahoo both found revenue within tolerance; release not found
+- **When** status is computed
+- **Then** AGREED, providersAgreeingWithSec = ['YAHOO'], independentChecks = 1
+- **Parameters:** Providers read: SEC, ISSUER_RELEASE, YAHOO; Alpha Vantage never read
+- **Edge cases:**
+  - A restatement alone does not cause CONFLICT
+- **Suspected defect:** The worker tool description (worker/src/tools.ts:557) says 'AGREED (two or more providers agree)', while the Python description (server.py:10742) and both codepaths require a latest-SEC baseline. This breaks the documented parity.
+- **SME question:** Confirm AGREED always requires the SEC baseline, so the worker tool description should be corrected.
+
+#### BR-VAL-021 · Metric reconciliation tolerance and match
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/metric_reconciliation.py:45,479-486,518-555; server.py:10744-10753`
+
+Each source matches the latest SEC value if |difference| <= max(SEC value x tolerance%, half the last stated digit of a release figure). The default tolerance is 0.5%, clamped to 0-10%.
+
+- **Given** SEC revenue $31,512,000; release says '$31.5 million'
+- **When** reconcile_metric_sources runs
+- **Then** release precision = 0.5 x 10^-1 x 1,000,000 = $50,000; tolerance = max(157,560, 50,000) = $157,560; difference -12,000, so MATCH; differencePct = -0.0381
+- **Parameters:** DEFAULT_TOLERANCE_PCT = 0.5; clamp [0,10]; epsilon 1e-9 x max(1,|b|); difference rounded to 6 dp, pct to 4 dp
+- **Edge cases:**
+  - As-first-filed vs latest SEC mismatch gives RESTATED, not a conflict
+  - Without SEC, sources are compared with the first found and can never be AGREED
+
+#### BR-VAL-022 · Metric source reconciliation status
+
+**P0** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/metric_reconciliation.py:518-555`
+
+Each found value is compared with the latest SEC XBRL value within max(tolerance% of SEC value, stated release precision); a mismatch with SEC-as-first-filed is a restatement, any other mismatch is CONFLICT; AGREED needs SEC plus at least one other provider, otherwise PARTIAL; none found is NOT_FOUND.
+
+- **Given** SEC latest revenue 1,000,000,000; Yahoo 1,004,000,000; tolerance 0.5%
+- **When** reconcile_metric_sources runs
+- **Then** tolerance 5,000,000, difference 4,000,000 -> MATCH, status AGREED, independentChecks 1; Yahoo at 1,006,000,000 -> CONFLICT
+- **Parameters:** DEFAULT_TOLERANCE_PCT 0.5 (clamped 0-10); release precision 0.5 x 10^-decimals x scale (metric_reconciliation.py:483)
+- **Edge cases:**
+  - without an SEC baseline the first found source is the reference and status can never be AGREED
+  - restatement sets restated=true, not CONFLICT
+  - Alpha Vantage is never read
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel doubts spec fidelity: P0 is justified. This rule decides whether a reported financial figure is labelled AGREED, CONFLICT, PARTIAL or NOT_FOUND across SEC XBRL, the issuer release and Yahoo, and whether it is flagged as restated. That makes it a data-integrity guard on the numbers the tool returns.
+
+The headline example is correct. I re-derived it from /home/user/yahoo-finance-mcp/yfmcp/metric_reconciliation.py:518-555. SEC latest has precision 0 (line 291) and Yahoo has precision 0 (line 514), so the tolerance is max(1e9 x 0.5/100, 0, 0) = 5,000,000. A difference of 4,000,000 is a MATCH. The providers are {SEC, YAHOO}, so the status is AGREED. independentChecks is 1, computed at lines 573-589. With Yahoo at 1,006,000,000 the difference is 6,000,000, which is more than 5,000,000, so the result is CONFLICT. The 0-10 clamp is at server.py:10749, the default of 0.5 is at line 45, and the precision formula is at line 483.
+
+The rule still fails as a behaviour contract because of these gaps:
+
+1. **No SEC value (wrong as written).** The rule says each value is compared with the latest SEC value. When there is no SEC value, the code compares against the first found observation instead (line 524). A mismatch there still sets conflict (lines 550-551), and CONFLICT is checked before PARTIAL (line 554). So if the issuer release and Yahoo disagree with no SEC value, the status is CONFLICT, not PARTIAL. A rewrite that follows the card would return PARTIAL.
+2. **Tolerance formula incomplete.** The tolerance is max(|baseline| x pct/100, the observation's precision, the reference's precision) (line 535). The card leaves out the reference's precision. Matching also adds a relative slack of 1e-9 x max(1, |b|) (line 536).
+3. **Restatements don't block AGREED.** A restatement (as-first-filed differs from latest) sets restated=true but does not set conflict. The status can therefore be AGREED and restated at the same time.
+4. **Two SEC values don't count as agreement.** Both SEC sources have provider "SEC" (lines 291/293). SEC latest plus SEC as-first-filed is one provider, so the status is PARTIAL, not AGREED. The card's wording ("at least one other provider") is right, but this case should be stated.
+5. **Order of checks.** The status is decided in this order: NOT_FOUND, then CONFLICT, then PARTIAL (no SEC), then AGREED (2 or more providers), then PARTIAL.
+6. **Smaller points.** The differencePct is null when the baseline is 0, and is rounded to 4 decimal places. The difference and tolerance are rounded to 6 decimal places. Only values with status FOUND and a numeric value take part. The function at the cited lines is reconcile_observations; reconcile_metric_sources is the MCP tool wrapper at server.py:10744.
+
+No instruction-shaped text and no credentials appear in the cited lines.
+
+</details>
+
+#### BR-VAL-023 · Minor-unit quote conversion and currency comparability
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/valuation.py:170-177,261-264`
+
+Quotes in pence, cents or agorot are divided by 100 into the major currency. Financials are combined with the quote only when the financial currency equals the major quote currency (or either is unknown).
+
+- **Given** A quote of 1,250 GBp with financialCurrency GBP
+- **When** the snapshot or peer row is computed
+- **Then** major price = GBP 12.50 and currencies are comparable; a USD quote with TWD financials is not comparable, so multiples are 'not computed'
+- **Parameters:** GBp/GBX -> GBP /100; ZAc -> ZAR /100; ILA -> ILS /100
+- **Edge cases:**
+  - Unknown currency on either side is treated as comparable
+
+#### BR-VAL-024 · Minor-unit quote conversion and currency comparability for multiples
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/valuation.py:170-216,261-264`
+
+Prices quoted in pence, cents or agorot (GBp/GBX, ZAc, ILA) are divided by 100 into the major currency; multiples are not computed when the financial currency differs from the quote's major currency, or when the denominator is missing, zero or negative.
+
+- **Given** A London listing quoted at 250 GBp with financials in GBP, TTM EBITDA of -£10M
+- **When** multiples are built
+- **Then** the price used is £2.50; EV/EBITDA is null with the note 'Denominator is zero or negative'; with financials in USD every multiple is null with a currency note
+- **Parameters:** _MINOR_UNITS: GBp/GBX->GBP /100, ZAc->ZAR /100, ILA->ILS /100; multiples rounded half-up to 2 dp; periods 0y (current FY) and +1y (next FY)
+- **Edge cases:**
+  - A missing financial currency or quote currency is treated as comparable
+
+#### BR-VAL-025 · Parent net income derived from ProfitLoss less NCI
+
+**P0** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/metric_reconciliation.py:223-295`
+
+When a filer tags only ProfitLoss, parent net income = ProfitLoss - the noncontrolling-interest share tagged for the same period in the same filing. For revenue tagged under two concepts in one filing, the larger is the total.
+
+- **Given** ProfitLoss $120M and NetIncomeLossAttributableToNoncontrollingInterest $5M in the same accession
+- **When** sec_observations runs for net_income
+- **Then** value = $115M with basis PARENT_DERIVED_FROM_PROFITLOSS. For revenue, Revenues $2,023,994,000 beats contract revenue $2,001,614,000
+- **Parameters:** The concept chosen is the most recently filed; ties go to the earlier-listed concept (or the larger magnitude for revenue)
+- **Edge cases:**
+  - NCI missing for either the first or the latest filing: ProfitLoss reported as-is
+  - Reports both as-first-filed and latest values
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel doubts spec fidelity: P0 is justified. This rule decides which reported SEC figure counts as net income or revenue, and it takes the noncontrolling-interest share off consolidated profit. That makes it a data-integrity rule for the financial values the tool reconciles.
+
+The worked examples are right, but the rule card states the trigger wrongly and leaves out edge cases that matter for a P0 contract. I re-derived the behaviour from /home/user/yahoo-finance-mcp/legacy/yahoo-finance-mcp/yfmcp/metric_reconciliation.py:223-295.
+
+What the card gets right:
+- Example: $120M - $5M = $115M with basis PARENT_DERIVED_FROM_PROFITLOSS (lines 275-287).
+- Example: for revenue filed on the same date, the larger magnitude wins, so 2,023,994,000 beats 2,001,614,000 (lines 258-266).
+- Concept choice: the most recently filed concept wins, and on a tie the one listed first wins (lines 262-266; concept order at line 32 is NetIncomeLoss, then ProfitLoss).
+
+Where it does not match the code:
+1. **Wrong trigger.** The card says this applies "when a filer tags only ProfitLoss". The code applies it whenever ProfitLoss is the chosen concept (line 275). That includes filers that also tag NetIncomeLoss, if their ProfitLoss row was filed more recently. They do not have to tag ProfitLoss alone.
+2. **Missing fallback.** The NCI share must be found in both the first-filed row and the latest row (line 278). If either is missing, the code silently falls through to lines 288-295. It then reports raw ProfitLoss (which includes NCI) as net income, with no basis field and with ProfitLoss as the chosen concept. The card says nothing about this.
+3. **Stricter matching than stated.** The NCI fact must have the same accession, end date, start date and unit, and a numeric value (line 233). The first match wins. The rule also applies only to the us-gaap taxonomy, not IFRS (line 275).
+4. **Revenue detail left out.** The magnitude tie-break compares absolute values (abs) and looks only at rows from each concept's newest filing date (lines 258-260). It is also a separate rule bundled into this card.
+5. **Extra output not mentioned.** The derived result also shows the derivation for the as-first-filed row, using that row's own NCI share (line 285), and returns an empty otherConcepts list (line 284).
+
+No instruction-shaped text or credentials appear in the cited lines.
+
+</details>
+
+#### BR-VAL-026 · Point-in-time fact selection and concept precedence
+
+**P0** · Policy · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:143-164`
+
+Historical valuation uses only 10-K/10-Q/20-F/40-F facts filed on or before the date. For each period the earlier-listed concept wins. A later filing replaces an earlier one only for the same concept, never with a lower-priority alternate concept.
+
+- **Given** Revenue for FY2024 tagged as ...ExcludingAssessedTax in a 10-K filed 2025-02-15 and as Revenues in a 10-K/A filed 2025-04-01
+- **When** Valuation for 2025-05-01 is computed
+- **Then** The ...ExcludingAssessedTax value is kept, and facts filed after 2025-05-01 are ignored
+
+#### BR-VAL-027 · Point-in-time fact selection: concept priority beats newer filing
+
+**P0** · Policy · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/valuation_history.py:69,143-164`
+
+Only facts from 10-K/10-Q/20-F/40-F filed on or before the valuation date count; for each period the higher-priority concept wins, and within the same concept the latest filing wins.
+
+- **Given** For one period, NetIncomeLoss filed 2023-02-01 and ProfitLoss filed 2023-05-01
+- **When** net income is read
+- **Then** NetIncomeLoss is used because it is listed first, even though ProfitLoss is newer
+
+#### BR-VAL-028 · Point-in-time price with later splits undone
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/valuation_history.py:219-224,587-598`
+
+A date's price is the last close within 7 days on or before it, multiplied by all later split ratios so it matches the share count reported at the time.
+
+- **Given** An adjusted close of $30 on 2023-06-30 and a 4-for-1 split on 2024-06-10
+- **When** valuation is computed for 2023-06-30
+- **Then** close = 30 x 4 = $120.00 (4 dp)
+- **Parameters:** 7-day look-back; minor units converted to major
+- **Edge cases:**
+  - No close within 7 days: PRICE_UNAVAILABLE
+  - A split between the share-count date and the trading date gives SPLIT_AFTER_SHARE_COUNT and no market cap
+
+#### BR-VAL-029 · Point-in-time SEC fact precedence
+
+**P0** · Policy · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:69,143-164`
+
+Only 10-K/10-Q/20-F/40-F facts filed on or before the date count; for each period, a higher-priority concept always wins, and a later filing only replaces the same concept.
+
+- **Given** Revenue 2024 tagged as RevenueFromContractWithCustomerExcludingAssessedTax (filed 2025-02-01) and Revenues (filed 2025-05-01)
+- **When** Facts are read as of 2025-06-01
+- **Then** The first-listed concept value is used despite the later Revenues filing
+- **Parameters:** Concept order per US_GAAP/IFRS maps
+
+#### BR-VAL-030 · Point-in-time share count precedence for historical market cap
+
+**P0** · Policy · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/valuation_history.py:234-295,600-646`
+
+Historical market cap uses the undimensioned cover-page count, then the balance-sheet count, or the latest periodic filing's (summed per-class) cover-page count when newer; a weighted-average count is shown but never used, and a zero or negative count produces no market value.
+
+- **Given** Companyfacts holds only a weighted-average basic count of 50,000,000 for the period ending 2023-03-31
+- **When** market cap is computed for 2023-06-30
+- **Then** marketCap status POINT_IN_TIME_SHARES_UNRESOLVED, value null, with a warning; a cover-page count of 0 gives SHARE_COUNT_NOT_POSITIVE
+- **Parameters:** Split between share count date and trading date gives SPLIT_AFTER_SHARE_COUNT (no value); ADS ratio divides ordinary shares
+- **Edge cases:**
+  - Class-summed counts add SHARE_CLASSES_SUMMED info warning
+  - Count facts with any dimension besides ClassOfStockAxis are not summed (OTHER_DIMENSIONS)
+
+#### BR-VAL-031 · Quote vs financial currency comparability
+
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation.py:170-177,261-264,393-403`
+
+Minor-unit quotes (GBp, GBX, ZAc, ILA) are divided by 100 into their major currency; Yahoo cash/debt and multiples are only combined with the price when the financial currency equals the quote's major currency.
+
+- **Given** A London listing quoted at 250 GBp with financialCurrency GBP
+- **When** Valuation is computed
+- **Then** Major price = 2.50 GBP; currencies are comparable so EV and multiples are computed. If financials were USD, multiples show 'not computed' and EV is null with ENTERPRISE_VALUE_CURRENCY_MISMATCH (unless SEC balances in the quote currency are used)
+- **Parameters:** GBp/GBX->GBP /100; ZAc->ZAR /100; ILA->ILS /100
+- **Edge cases:**
+  - Missing financialCurrency or quote currency is treated as comparable
+  - SEC balances in a different currency from the major quote currency are dropped (SEC_BALANCES_CURRENCY)
+
+#### BR-VAL-032 · SEC balance usage guards (currency, staleness, cash cross-checks)
+
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/valuation.py:305-368`
+
+Filing balances are dropped if their currency differs from the quote's, or if they are more than 45 days older than Yahoo's latest quarter and Yahoo has cash and debt. Large gaps against Yahoo's cash are flagged.
+
+- **Given** SEC period end 2025-12-31 and Yahoo mostRecentQuarter 2026-03-31 (90 days), with Yahoo cash and debt present
+- **When** valuation_snapshot chooses balances
+- **Then** Yahoo balances are used, with warning SEC_BALANCES_STALE. SEC_YAHOO_CASH_MISMATCH fires when SEC cash is within 2% of Yahoo cash but cash plus short-term investments is more than 110% of it. SEC_YAHOO_CASH_SHORTFALL fires when, for the same quarter (within 7 days), Yahoo cash is more than 105% of SEC cash plus short-term investments.
+- **Parameters:** STALE_BALANCE_DAYS 45; SAME_QUARTER_DAYS 7; EXCESS 10%; CASH_MATCH 2%; SHORTFALL 5%
+- **Edge cases:**
+  - If stale but Yahoo lacks cash or debt, the older SEC balances are still used, with a warning
+  - The cash checks only warn and do not change the value
+
+#### BR-VAL-033 · SEC balances replaced by Yahoo when stale or in another currency
+
+**P0** · Policy · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation.py:305-340`
+
+The filing's period-end cash and debt are used unless they are in a different currency from the quote, or are more than 45 days older than Yahoo's most recent quarter while Yahoo has both cash and debt. In those cases Yahoo's totals are used and a warning is raised.
+
+- **Given** SEC balances dated 2024-12-31, Yahoo mostRecentQuarter 2025-06-30 (181 days later), Yahoo cash and debt present
+- **When** The valuation snapshot runs
+- **Then** SEC_BALANCES_STALE (warning) and YAHOO_BALANCES (info) are raised; Yahoo cash/debt are used and short-term investments become 0. If Yahoo lacked cash or debt, the stale SEC balances are kept, with a warning
+- **Parameters:** _STALE_BALANCE_DAYS=45
+- **Edge cases:**
+  - SEC balances require both totalDebt and cashAndEquivalents
+  - The capital-structure warnings travel only when SEC balances are used
+
+#### BR-VAL-034 · SEC vs Yahoo balance-sheet source selection and staleness
+
+**P0** · Policy · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/valuation.py:305-339`
+
+Filing period-end cash and debt are preferred. They give way to Yahoo when they are in another currency than the quote, or more than 45 days older than Yahoo's latest quarter while Yahoo has both cash and debt.
+
+- **Given** SEC balances as of 2025-12-31, Yahoo most recent quarter 2026-03-31, Yahoo cash and debt present
+- **When** the snapshot runs
+- **Then** 90 days > 45, so Yahoo's cash/debt are used (SEC_BALANCES_STALE warning, plus YAHOO_BALANCES info)
+- **Parameters:** _STALE_BALANCE_DAYS = 45
+- **Edge cases:**
+  - If Yahoo lacks cash or debt, the stale SEC balances are still used, with a warning
+  - SEC balances require both totalDebt and cashAndEquivalents
+  - Capital-structure warnings travel with SEC balances
+
+#### BR-VAL-035 · Share basis mismatch falls back to Yahoo count
+
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation.py:33,288-302`
+
+When SEC and Yahoo share counts differ by more than 1.5x and no ADR ratio explains it, the SEC count (and the diluted bridge count) is discarded and Yahoo's count is used.
+
+- **Given** SEC basic shares 400,000,000 (domestic filer) and Yahoo quoted shares 200,000,000
+- **When** The valuation snapshot is built
+- **Then** r = 2.0 > 1.5, SEC shares are not usable, basic = 200,000,000, diluted = null, share basis = yahoo_shares_outstanding, warning SHARE_BASIS_MISMATCH
+- **Parameters:** _SHARE_BASIS_MAX_RATIO=1.5
+- **Edge cases:**
+  - When SEC is unusable, diluted shares and dilutionPctAtPrice are null and preferred liquidation preference is not added to EV
+
+#### BR-VAL-036 · Share basis mismatch falls back to Yahoo share count
+
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/valuation.py:33,288-302`
+
+When the SEC and Yahoo share counts differ by more than 1.5x and no ADR ratio explains it, the SEC count (and the diluted bridge count) is discarded and Yahoo's count is used.
+
+- **Given** SEC basic shares 300M, Yahoo quoted shares 150M, domestic filer
+- **When** the valuation snapshot runs
+- **Then** r = 2.0 > 1.5, so sec_usable = false, basic = 150M (Yahoo), diluted = null, share basis = Yahoo, and a SHARE_BASIS_MISMATCH warning is raised
+- **Parameters:** _SHARE_BASIS_MAX_RATIO=1.5
+- **Edge cases:**
+  - A ratio of 1.4 keeps the SEC count with no warning
+  - When SEC is discarded, dilutionPctAtPrice is reported as null
+
+#### BR-VAL-037 · ADR ratio detection and share-basis mismatch
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation.py:29-49,280-302`
+
+For foreign filers (20-F/40-F) only, SEC ordinary shares that are within 2% of a whole multiple (at least 1.9x) of Yahoo's quoted shares are taken as ADR-quoted and divided by that ratio. Otherwise counts more than 1.5x apart are treated as different bases, and Yahoo's count is used instead of SEC's.
+
+- **Given** A 20-F filer with 25,930,000,000 SEC ordinary shares, Yahoo 5,186,000,000 quoted shares
+- **When** get_valuation_snapshot runs
+- **Then** ratio = 5 (|5.0-5| <= 0.02x5); the ADR_RATIO_APPLIED info warning is added; SEC counts are divided by 5. For a 10-K filer at 2.0x there is no ADR ratio; because 2.0 > 1.5, SHARE_BASIS_MISMATCH is raised and Yahoo's count is used
+- **Parameters:** _ADS_MIN_RATIO=1.9; _ADS_RATIO_TOLERANCE=0.02 x n; _SHARE_BASIS_MAX_RATIO=1.5; foreign forms ^(20|40)-F
+- **Edge cases:**
+  - SEC count smaller than Yahoo's by <= 1/1.9 gives a fractional ratio 1/k
+  - With a mismatch, diluted shares are null and value uses basic Yahoo shares
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (I checked the rule card against yfmcp/valuation.py:29-49 and 280-302. The legacy/ copy is laid out the same way. The card is accurate. The constants match: _ADS_MIN_RATIO=1.9, _ADS_RATIO_TOLERANCE=0.02 (scaled by n), _SHARE_BASIS_MAX_RATIO=1.5, and the ^(?:20|40)-F pattern. ads_ratio is only called when foreign_filer is true (line 289). The worked example also holds: 25.93e9/5.186e9 = 5.0 gives n=5, so the info-level ADR_RATIO_APPLIED warning fires and the basic and diluted SEC counts are divided by 5 and rounded half-up. A 10-K filer at 2.0x gets no ratio, falls into the r>1.5 branch, raises SHARE_BASIS_MISMATCH (severity warning), sets sec_usable=False and uses Yahoo's count. Two small gaps. First, ads_ratio also handles the reverse case: when SEC/Yahoo <= 1/1.9 it returns a fractional ratio 1/k. Second, the card doesn't mention that share_basis switches from sec_cover_page to Yahoo's basis. Neither changes what the card says, so I'm calling it faithful. I don't think it deserves P0 under the compliance lens. No money moves: the module says it gives 'Mechanical context only... No implied price, no forecast'. It also enforces no regulation. It is a heuristic that reconciles two outside data sources (SEC cover-page shares and Yahoo quoted shares) so a market-data tool shows a sensible market cap and EV. No regulator, auditor or finance controller treats this output as a record. The strongest case for P0 is data integrity: a silent change would scale EV and multiples by about 5x for ADRs such as TSM. But that is about whether an analytics display is correct, not about protecting books of record. It fits P1, a behaviour contract backed by Python/TS parity tests. The thresholds should still be kept as config and stay planner-owned decisions. No instruction-like text appeared in the cited lines. | I read the cited code and worked the behaviour out again from it: legacy/yahoo-finance-mcp/yfmcp/valuation.py:29-49 (constants and ads_ratio) and :280-302 (where valuation_snapshot uses it).
+
+The card's main claims match the code:
+- The ADR ratio is only checked for foreign filers. The form type must match ^(?:20|40)-F (line 34, lines 285-288). For any other filer the ratio is set to None (line 290).
+- When the SEC count is at least 1.9x Yahoo's count (r >= 1.9), the code rounds r to the nearest whole number n. It accepts n only if |r-n| <= 0.02*n (lines 41-43).
+- When a ratio is found, it adds an ADR_RATIO_APPLIED warning at info severity (lines 292-293). SEC basic and diluted counts are then divided by the ratio (lines 298-299, 301-302).
+- Otherwise, if r > 1.5 or r < 1/1.5, it adds SHARE_BASIS_MISMATCH at warning severity and sets sec_usable to False. Basic shares then fall back to Yahoo's quoted shares, or to sharesOutstanding if those are missing. Diluted shares become None, so the share count used for value is Yahoo's (lines 294-296, 301-304).
+
+Both worked examples hold:
+- 25,930,000,000 / 5,186,000,000 = 5.0 exactly, so n = 5 and |0| <= 0.1. The ratio is 5.
+- For a 10-K filer at 2.0x, the ratio is None and 2.0 > 1.5, so SHARE_BASIS_MISMATCH is raised and Yahoo's count is used.
+
+Gaps the contract should add (the card is not wrong, just incomplete):
+1. The reverse direction is missing. When r <= 1/1.9, the ratio is 1/k, with k = 1/r rounded to the nearest whole number and the same 2% tolerance (lines 45-47). Dividing by 1/k means SEC counts are multiplied by k.
+2. The division is not exact. The result goes through round_half_up (line 299).
+3. A ratio is only tried when both counts are positive and the SEC count is a usable finite number (lines 39, 289).
+4. A foreign filer whose ratio sits between 1.5 and 1.9, or is not close enough to a whole number, still gets SHARE_BASIS_MISMATCH.
+5. The function in this file is named valuation_snapshot. "get_valuation_snapshot" is presumably the MCP tool name.
+
+On P0: the rule decides which share count goes into market cap, EV and the per-share multiples. Picking the wrong basis would change valuation output by multiples such as 5x, so it guards data integrity and P0 is justified.
+
+The cited lines contain no instruction-shaped text and no credentials.) — confirm criticality.
+
+</details>
+
+#### BR-VAL-038 · Cash cross-check warnings (mismatch and shortfall)
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation.py:20-28,341-368`
+
+A warning is raised when the filing's cash alone matches Yahoo's total cash within 2% but cash plus short-term investments is more than 10% above it. A different warning is raised when Yahoo's cash is more than 5% above the filing's cash plus investments for the same quarter (within 7 days).
+
+- **Given** SEC cash $1,000M, SEC STI $500M, Yahoo total cash $1,010M
+- **When** The snapshot runs
+- **Then** SEC_YAHOO_CASH_MISMATCH: 1,500 > 1.1x1,010 and |1,000-1,010| <= 20.2. Separately, SEC cash $800M + STI $0 against Yahoo $900M with period ends within 7 days gives SEC_YAHOO_CASH_SHORTFALL (900 > 840)
+- **Parameters:** _SEC_YAHOO_EXCESS=0.10; _SEC_YAHOO_CASH_MATCH=0.02; _SEC_YAHOO_SHORTFALL=0.05; _SAME_QUARTER_DAYS=7
+- **Edge cases:**
+  - Both are flags only; values are not overridden
+  - Yahoo cash is ignored for the check when currencies are not comparable
+
+#### BR-VAL-039 · Cash vs Yahoo total-cash mismatch and shortfall checks
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/valuation.py:20-24,28,341-368`
+
+The tool warns when the filing's cash alone matches Yahoo's total cash but cash plus investments is more than 10% above it (investments may be double-counted), or when Yahoo's total cash is more than 5% above the filing's cash plus investments for the same quarter (an investment line may be missed).
+
+- **Given** Filing cash $500M, filing short-term investments $100M, Yahoo total cash $505M
+- **When** the snapshot compares balances
+- **Then** 600 > 1.1x505 = 555.5 and |500-505| = 5 <= 2% of 505 = 10.1, so SEC_YAHOO_CASH_MISMATCH is raised; separately, with Yahoo cash $700M and period ends within 7 days, 700 > 1.05x600 = 630 raises SEC_YAHOO_CASH_SHORTFALL
+- **Parameters:** _SEC_YAHOO_EXCESS=0.10; _SEC_YAHOO_CASH_MATCH=0.02; _SEC_YAHOO_SHORTFALL=0.05; _SAME_QUARTER_DAYS=7
+- **Edge cases:**
+  - These are flags only; the balances are not changed
+  - Skipped when the quote and financial currencies differ
+
+#### BR-VAL-040 · Computed EBITDA and D&A source precedence
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:496-554,707-711`
+
+EBITDA = operating income + depreciation and amortization for the same period end; D&A comes from the first concept group aligned with operating income's period, summing split parts only when all align, with depreciation alone used if amortization was never tagged.
+
+- **Given** LTM operating income 200 and D&A 50 both ending 2025-06-30
+- **When** EBITDA is computed
+- **Then** EBITDA = 250 (computed, not reported)
+- **Parameters:** US-GAAP groups: DepreciationDepletionAndAmortization; DepreciationAndAmortization; DepreciationAmortizationAndAccretionNet; Depreciation+AmortizationOfIntangibleAssets
+- **Edge cases:**
+  - PERIODS_DIFFER
+  - EBITDA_DEPRECIATION_ONLY info
+
+#### BR-VAL-041 · Computed EBITDA requires aligned periods; depreciation-only fallback
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/valuation_history.py:496-554,708-711`
+
+EBITDA is operating income plus D&A for the same period end; D&A comes from the first concept group aligned to operating income's period, separate parts are summed only when all align, and depreciation alone is used if amortization was never tagged.
+
+- **Given** Operating income LTM $120M ending 2024-09-30 and Depreciation $30M for the same period, AmortizationOfIntangibleAssets never tagged
+- **When** EBITDA is computed
+- **Then** EBITDA = $150M and an EBITDA_DEPRECIATION_ONLY info warning is added; differing period ends give PERIODS_DIFFER
+
+#### BR-VAL-042 · Cover page share count parsing
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:321-405`
+
+At the latest cover date, an undimensioned dei:EntityCommonStockSharesOutstanding is used, else per-class counts on the class-of-stock axis are summed; any unread context or unparsable value voids the result.
+
+- **Given** Class A 300,000,000 and Class B 50,000,000 at 2025-04-20
+- **When** cover_share_counts parses the filing
+- **Then** 350,000,000, basis COVER_PAGE_CLASS_SUM
+- **Parameters:** scale attribute multiplies by 10^scale; zero/dash format = 0; comma-decimal formats supported
+- **Edge cases:**
+  - CONTEXT_NOT_READ
+  - VALUE_NOT_PARSED
+  - OTHER_DIMENSIONS
+  - NOT_TAGGED
+
+#### BR-VAL-043 · Cover-page share count parsing statuses
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/valuation_history.py:337-405`
+
+A filing's cover-page share count is accepted only when every fact's context and value were read; the undimensioned count at the latest date wins, else per-class counts are summed, and other dimensions block the sum.
+
+- **Given** A 10-Q tags Class A 400,000,000 and Class B 50,000,000 under ClassOfStockAxis as of 2024-07-25
+- **When** cover counts are read
+- **Then** status OK, value 450,000,000, basis COVER_PAGE_CLASS_SUM; an unresolved context gives CONTEXT_NOT_READ and an unparseable value gives VALUE_NOT_PARSED
+- **Parameters:** Zero/dash formats read as 0; scale attribute applied as 10^scale
+
+#### BR-VAL-044 · Cover-page share count read status
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:337-405`
+
+Reading dei:EntityCommonStockSharesOutstanding from a filing fails as a whole if any context or value cannot be read. At the latest date an undimensioned count wins; otherwise per-class counts are summed only when each fact has exactly one dimension and it is the class-of-stock axis.
+
+- **Given** Class A 400,000,000 and Class B 100,000,000, each on ClassOfStockAxis only
+- **When** cover_share_counts runs
+- **Then** status OK, value 500,000,000, basis COVER_PAGE_CLASS_SUM (and the SHARE_CLASSES_SUMMED info warning downstream)
+- **Parameters:** Status precedence: CONTEXT_NOT_READ > VALUE_NOT_PARSED > NOT_TAGGED > OK / OTHER_DIMENSIONS
+- **Edge cases:**
+  - A zero/dash format or a dash text is read as 0
+  - A comma-decimal format is honoured
+
+#### BR-VAL-045 · Enterprise value formula
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/valuation.py:370-403`
+
+Enterprise value = price x diluted shares + total debt - in-the-money convertible principal (capped at debt) + liquidation preference of convertible preferred not counted as shares - cash - short-term investments. It is not computed when cash and debt are in a different currency from the quote.
+
+- **Given** Price $20, diluted shares 100M, debt $500M, ITM convertible principal $200M, cash $300M, short-term investments $50M
+- **When** valuation_snapshot runs
+- **Then** EV = 2,000M + 500M - 200M + 0 - 300M - 50M = $1,950,000,000. Status is COMPUTED.
+- **Parameters:** Rounded half-up to whole units
+- **Edge cases:**
+  - The convertible adjustment never exceeds debt
+  - Convertible preferred with no tagged liquidation preference is left out and flagged PREFERRED_NOT_IN_ENTERPRISE_VALUE
+  - Missing shares, cash or debt gives ENTERPRISE_VALUE_INCOMPLETE and status PARTIAL
+  - Short-term investments are counted only with SEC balances (Yahoo totalCash already includes them)
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (The rule card matches the code. In yfmcp/valuation.py:396-397, EV = equity_value + debt - convertible_adjustment + preferred_adjustment - cash - short_term. equity_value is the price in major units times value_shares (line 393), and value_shares is diluted shares, or basic shares when diluted is missing (line 303). The convertible adjustment adds up the principal of convertible instruments that have incrementalShares > 0, capped at debt (lines 371-377). The preferred adjustment adds the tagged liquidation preference of convertible preferred that is not counted as shares, and only when sec_usable (lines 380-391). EV is set to None when balances_comparable is false (lines 395-399), and status is COMPUTED vs PARTIAL (line 415). The example works out: 2,000M + 500M - 200M + 0 - 300M - 50M = 1,950M. The rounding is real but sits outside the cited range: round_half_up at line 451.
+
+Caveats on how faithful it is: (1) The currency guard is "sec_balances or comparable". When filing (SEC) balances are used, EV is computed even if the financial currency differs from the quote. Only Yahoo-sourced balances in a different currency block it, so "not computed when cash and debt are in a different currency" is approximate. (2) Short-term investments come only from the filing. With Yahoo balances they are 0, because Yahoo's cash already includes them. (3) If debt, cash or shares are missing, EV is None with ENTERPRISE_VALUE_INCOMPLETE. (4) Missing liquidation preferences are left out with a warning instead of blocking EV.
+
+Why it is not P0 under the compliance lens: this is an analytics calculation in an informational MCP tool. The output is explicitly labeled basis=MECHANICAL_VALUATION_CONTEXT and decisionUse=CONTEXT_ONLY_NOT_A_PRICE_TARGET (lines 416-417). It does not move money, book a figure, enforce a regulatory requirement, or feed a ledger, so a regulator, auditor or controller would not be affected by a silent change. It matters for output correctness and cross-runtime parity, and the currency guard and the no-double-count convertible cap are worth regression tests. That makes it a strong P1 calculation rule, not a P0 compliance or money-movement contract. No instruction-shaped text or credentials appear in the cited lines. | I re-derived the rule from yfmcp/valuation.py:370-403, plus the lines it depends on (303, 395-397, 415, 451). The formula and the worked example are right: line 396 computes equity_value + debt - convertible_adjustment + preferred_adjustment - cash - short_term. With the given inputs that is 2,000M + 500M - 200M + 0 - 300M - 50M = 1,950M. Status is COMPUTED when enterprise value is not None (line 415). The value is rounded half-up to whole units at line 451. That line is outside the cited range, but the claim is true.
+
+Five refinements are needed for a complete behaviour contract:
+
+(1) Currency gate. Enterprise value is skipped only when Yahoo balances are used and the financial currency differs from the quote currency (line 395: balances_comparable = sec_balances or comparable). Balances taken from the SEC filing always count as comparable, so EV is still computed when the currencies differ. The rule says EV is never computed when currencies differ, which is too broad. When it is skipped, the code emits ENTERPRISE_VALUE_CURRENCY_MISMATCH. If shares, cash or debt are missing, it emits ENTERPRISE_VALUE_INCOMPLETE instead and status becomes PARTIAL.
+
+(2) "In-the-money" convertibles. The code never compares against a conversion price. It counts an instrument's principal when its incrementalShares is above 0 (lines 374-375). It sums those principals, then caps the total at debt only when debt is known (lines 376-377).
+
+(3) Convertible preferred. The liquidation preference is added only when SEC share data is usable (sec_usable, line 382). It is added only for instruments with incrementalShares of 0 or less. If no preference amount is tagged, nothing is added and the code emits PREFERRED_NOT_IN_ENTERPRISE_VALUE.
+
+(4) Shares and price. The share count is diluted, falling back to basic when diluted is missing (line 303). The price is the major-unit price (`major`, so pence become pounds), not the raw quote.
+
+(5) Short-term investments. These come only from SEC balances. With Yahoo balances they are 0, because Yahoo's total cash already includes them (line 335).
+
+None of this contradicts the stated formula or the example, so I rate the rule faithful but incomplete on edge cases. On P0: the output is labelled context-only (CONTEXT_ONLY_NOT_A_PRICE_TARGET), so it does not move money directly. It is still the headline financial figure the Python and TS runtimes must match exactly, and it has integrity guards: no double-counting of convertibles, a cap at debt, and no mixing of currencies. That justifies P0 under data integrity. I found no instruction-like text or credentials in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-VAL-046 · Enterprise value in valuation snapshot
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/valuation.py:370-401,452-453`
+
+EV = price x diluted shares + total debt - convertible principal already counted as shares + preferred liquidation preference not counted as shares - cash - short-term investments.
+
+- **Given** Price $25, diluted shares 108,000,000, debt $500M, in-the-money convertible principal $300M, no preferred, cash $400M, short-term investments $100M
+- **When** get_valuation_snapshot runs
+- **Then** equity value = $2,700M; EV = 2,700 + 500 - 300 + 0 - 400 - 100 = $2,400M (rounded half-up to whole units). Status is COMPUTED when EV exists, else PARTIAL.
+- **Parameters:** The convertible adjustment is capped at total debt. Short-term investments are used only with SEC balances (Yahoo's cash already includes them)
+- **Edge cases:**
+  - Missing shares, cash or debt gives ENTERPRISE_VALUE_INCOMPLETE
+  - Balances in a different currency from the quote give ENTERPRISE_VALUE_CURRENCY_MISMATCH and no EV
+  - Preferred with no tagged liquidation preference is left out, with warning PREFERRED_NOT_IN_ENTERPRISE_VALUE
+- **Suspected defect:** The convertible-principal deduction (valuation.py:373-377) is not gated on sec_usable, unlike the preferred adjustment (line 382). When SHARE_BASIS_MISMATCH falls back to Yahoo basic shares (no convertible shares counted), debt is still reduced by convertible principal, which understates EV.
+- **SME question:** When the SEC share count is rejected (SHARE_BASIS_MISMATCH) and Yahoo's basic shares are used, should convertible principal still be removed from debt?
+
+#### BR-VAL-047 · Historical balances and zero debt when no borrowings tagged
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:34-67,418-455`
+
+All balances are read at the latest cash date; debt is the first debt concept group tagged at that date plus short-term borrowings and commercial paper; if the reporting filing tags no borrowing concept at any date, debt is zero.
+
+- **Given** US-GAAP filer with LongTermDebtCurrent 100 and LongTermDebtNoncurrent 400, ShortTermBorrowings 50 at the cash date, no LongTermDebt
+- **When** Balances are read
+- **Then** Debt = 550
+- **Parameters:** Debt groups: [LongTermDebt], [LongTermDebtCurrent+Noncurrent], [Convertible notes], [NotesPayable]; IFRS has no short-term investment mapping
+- **Edge cases:**
+  - Concept last tagged earlier is not carried forward
+  - NO_BORROWINGS_TAGGED info warning; leases excluded
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (Code checked: /home/user/yahoo-finance-mcp/yfmcp/valuation_history.py lines 34-67 (the US_GAAP and IFRS concept mappings) and lines 418-455 (_balances_at). The card matches the code. Every balance is read at the latest cash date (line 422), with no carry-forward from earlier dates. Debt is the first debt group that has any concept tagged at that date (lines 432-439). ShortTermBorrowings and CommercialPaper are added only once a group has matched. The example works out: the LongTermDebt group is not tagged, so the LongTermDebtCurrent+Noncurrent group matches (100+400), plus ShortTermBorrowings 50, giving 550. The zero-debt fallback (lines 443-445) applies when no group matched and the filing behind the cash fact tags none of the borrowing concepts at any date. The fallback records basis NO_BORROWINGS_TAGGED. Small gaps in the card: (1) The zero-debt fallback is US-GAAP only. IFRS borrowingConcepts is empty, so an IFRS filer stays NOT_TAGGED. (2) The fallback also needs the cash fact to carry an accession number. (3) The code comment says filings that tag debt only by dimension member are not seen, so they would wrongly get zero debt. None of these makes the card's main statement wrong. Whether this is P0 under the compliance lens: no. This is a read-only analytics tool that computes historical enterprise value and multiples for research. It moves no money and enforces no regulatory or reporting requirement. It is also not a data-integrity guard in the P0 sense. It is a valuation method choice: which XBRL concepts count as debt, in what order, and when to assume zero. A silent change would make enterprise-value outputs wrong, and the two runtimes must give the same output, which matters. But a regulator, auditor or finance controller would not treat it as a control. Rating it P1 would make it a parity and regression contract rather than a compliance contract. Its concept lists and fallback order should become configuration, and the project's CLAUDE.md says the planner owns any change to the fallback order. No instruction-shaped text found in the cited lines. | I re-derived the Given/When/Then from /home/user/yahoo-finance-mcp/yfmcp/valuation_history.py:418-439 and it is correct. Every balance is read at the latest undimensioned cash date (line 422). A balance tagged only at an earlier date is not carried forward (lines 425-427). The code walks the debt groups in order (lines 42-43). [LongTermDebt] has no fact at that date, so the code moves on to [LongTermDebtCurrent, LongTermDebtNoncurrent] and finds both. It then adds ShortTermBorrowings and CommercialPaper where they are tagged (lines 436-438). Result: 100 + 400 + 50 = 550. sum_values (lines 458-462) adds the raw values without rounding, so there is no rounding gap.
+
+P0 is justified. The debt figure feeds enterprise value and the EV multiples. The zero-debt fallback decides whether EV is computed (debt = 0) or reported as not tagged, so it guards the integrity of the reported financial data. The project's CLAUDE.md also treats fallback order as a decision only the planner can make.
+
+The Given/When/Then is right, but the plain-English text and parameter list overstate or leave out several edge cases. Fix these before the rule becomes a contract:
+
+(1) The zero-debt fallback applies to US-GAAP filers only. It runs only when debt is still NOT_TAGGED, the cash fact has an accession number, and mapping["borrowingConcepts"] is not empty (lines 443-445). IFRS sets borrowingConcepts = [] (line 63), so an IFRS filer with no borrowings stays NOT_TAGGED, not 0. As written, "debt is zero" is wrong for IFRS. The parameters should also say that IFRS has no debtAdditions (line 62) and no borrowing concepts, not just that it has no short-term investment mapping.
+
+(2) "The reporting filing" means the accession of the winning cash fact. That is the newest periodic filing (10-K/10-Q/20-F/40-F) for that period, filed on or before the as-of date (lines 143-164). The check looks for any undimensioned fact from that accession, at any date and in any unit, for any of the many concepts in capital_structure._BORROWING_CONCEPTS (capital_structure.py:2426-2430). That set is much wider than the four debt groups.
+
+(3) Short-term borrowings and commercial paper are added only once some debt group matches. If ShortTermBorrowings is the only debt concept tagged, debt stays NOT_TAGGED. It does not become 50, and it does not become 0, because ShortTermBorrowings is itself a borrowing concept.
+
+(4) A debt group matches as soon as any one of its members is tagged, so a partial sum counts. For example, LongTermDebtCurrent alone gives a value.
+
+(5) For a given period the concept order sets precedence. A later filing replaces an earlier one only for the same concept (lines 158-163).
+
+The cited lines contain nothing that looks like an attempt to instruct an AI tool.) — confirm criticality.
+
+</details>
+
+#### BR-VAL-048 · Historical multiple status and EBITDA construction
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:474-554,708-711`
+
+Each multiple is numerator / (denominator x FX), to 2 dp. It is null with a status when the numerator, denominator or FX is missing, or either side is non-positive. EBITDA = operating income + D&A for the same period end; depreciation alone is used when amortization was never tagged.
+
+- **Given** EV $5,000M, LTM operating income $300M and D&A $100M ending the same day, FX 1
+- **When** evToEbitda is computed
+- **Then** EBITDA $400M; EV/EBITDA = 12.50. A negative EV gives NOT_MEANINGFUL_NONPOSITIVE_NUMERATOR
+- **Parameters:** Status order: <NUMERATOR>_NOT_AVAILABLE > DENOMINATOR_NOT_AVAILABLE > FX_NOT_AVAILABLE > NOT_MEANINGFUL_NONPOSITIVE_NUMERATOR > NOT_MEANINGFUL_NONPOSITIVE_DENOMINATOR > OK
+- **Edge cases:**
+  - Different period ends -> EBITDA NOT_AVAILABLE PERIODS_DIFFER
+  - Separate D&A parts must all be OK for the same period (PARTS_NOT_ALIGNED)
+
+#### BR-VAL-049 · Historical multiple status ladder
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/valuation_history.py:474-493,749-758`
+
+Each multiple is null with a status when the numerator is missing, the denominator is missing, FX is missing, the numerator is zero/negative (e.g. negative EV) or the converted denominator is zero/negative; a date is OK only when market cap, EV and all eight multiples are usable.
+
+- **Given** EV of -$50M (net cash above market cap) and LTM revenue $400M
+- **When** EV/Revenue is computed
+- **Then** value null, status NOT_MEANINGFUL_NONPOSITIVE_NUMERATOR, and the point status is PARTIAL
+- **Parameters:** 8 multiples = {EV/Revenue, EV/EBITDA, P/E, P/S} x {LTM, LFY}; rounded 2 dp
+
+#### BR-VAL-050 · Historical staleness limits by filer cadence
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/valuation_history.py:557-571,628-636,685-715`
+
+Quarterly (10-K/10-Q) filers: share counts stale after 400 days, balances after 200, results after 500. Annual 20-F/40-F filers: 500 days for all, with an info flag when the share count is older than 183 days.
+
+- **Given** A 10-K filer whose latest balance sheet is 230 days before the date
+- **When** EV is computed
+- **Then** BALANCES_STALE, EV null
+- **Parameters:** QUARTERLY shareCount 400, balances 200, results 500; ANNUAL 500/500/500; SHARE_COUNT_AGED_DAYS = 183
+- **Edge cases:**
+  - Cadence is judged per date from the latest annual form filed by then
+
+#### BR-VAL-051 · Historical valuation point and run status
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:749-758,826-850`
+
+A date's status is OK only when market cap, EV and all eight multiples (4 multiples x LTM/LFY) are usable. coreStatus covers market cap and EV only. The run is OK only when every date is OK, and FUNDAMENTALS_NOT_AVAILABLE when there are no revenue facts.
+
+- **Given** A date with market cap and EV OK but P/E null because of negative net income
+- **When** The point is assembled
+- **Then** status PARTIAL, coreStatus OK, coverage 7 of 8 available, with the unavailable multiple listed
+- **Parameters:** _MULTIPLE_NAMES=evToRevenue, evToEbitda, priceToEarnings, priceToSales; cadence MIXED when dates differ
+
+#### BR-VAL-052 · Historical valuation point-in-time limits
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/valuation_history.py:557-597,801-823,219-224; server.py:10682-10690`
+
+Historical valuation accepts at most 12 valid YYYY-MM-DD dates and 5 peers. Each date uses the close within 7 days on or before it, with later splits undone. Staleness limits depend on whether the company files quarterly or only annually.
+
+- **Given** A quarterly filer and date 2024-06-15 with the last bar on 2024-06-07
+- **When** get_historical_valuation_context runs
+- **Then** The close is accepted (8 days fails, 7 days passes). Share count must be within 400 days, balances within 200, results within 500 (annual filers: 500/500/500).
+- **Parameters:** MAX_DATES 12; peers max 5; price lookback 7 days; SHARE_COUNT_AGED_DAYS 183; default dates = latest close plus 5 anniversaries (Feb 29 becomes Feb 28)
+- **Edge cases:**
+  - No close within 7 days gives PRICE_UNAVAILABLE for that date
+
+#### BR-VAL-053 · Historical valuation staleness limits by SEC filing cadence
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/valuation_history.py:557-571,628-646,685-702,713-726,739-745`
+
+Quarterly filers' share counts expire after 400 days, balances after 200 and results after 500; 20-F/40-F annual filers get 500 days for all three, and an annual filer's count older than 183 days is flagged as aged but still used.
+
+- **Given** A 10-Q filer whose latest balance sheet filed by 2024-12-31 is dated 2024-03-31 (275 days)
+- **When** enterprise value is computed for 2024-12-31
+- **Then** 275 > 200 so EV status BALANCES_STALE (value null) with a warning
+- **Parameters:** QUARTERLY: shareCount 400, balances 200, results 500; ANNUAL: 500/500/500; SHARE_COUNT_AGED_DAYS=183
+- **Edge cases:**
+  - A multiple whose denominator period ended more than resultsDays before the date becomes RESULTS_STALE
+  - Cadence is judged per date from the latest annual revenue fact's form
+
+#### BR-VAL-054 · Historical valuation status and default dates
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:70,749-758,801-823,826-850`
+
+A date is OK only when market cap, EV and all 8 multiples are usable; default dates are the latest close plus its five prior anniversaries (29 Feb becomes 28 Feb in non-leap years); at most 12 requested dates.
+
+- **Given** Latest trading date 2024-02-29 and no requested dates
+- **When** valuation_dates runs
+- **Then** 2019-02-28, 2020-02-29, 2021-02-28, 2022-02-28, 2023-02-28, 2024-02-29
+- **Parameters:** MAX_DATES=12; 5 anniversaries
+
+#### BR-VAL-055 · Multiples suppressed for currency mismatch or non-positive denominators
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation.py:170-216,261-264`
+
+EV/Revenue, EV/EBITDA and P/E are computed only when the financial currency matches the quote's major currency (GBp/GBX->GBP, ZAc->ZAR, ILA->ILS at 1/100) and the denominator is positive. Each multiple is rounded to 2 dp.
+
+- **Given** A UK listing quoted at 250 GBp with GBP financials and trailing EPS of 0.20
+- **When** P/E is computed
+- **Then** Major price 2.50 GBP; P/E = 12.50. For a TWD-financials / USD-quote listing every multiple is null with a 'different currency' note; a negative EBITDA gives a null multiple with a 'not meaningful' note
+- **Parameters:** Minor units: GBp,GBX,ZAc,ILA divisor 100; periods 0y=current FY, +1y=next FY
+
+#### BR-VAL-056 · Parent net income derived from ProfitLoss
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/metric_reconciliation.py:223-287`
+
+When a filer tags only ProfitLoss, net income = ProfitLoss - NetIncomeLossAttributableToNoncontrollingInterest from the same filing and period.
+
+- **Given** ProfitLoss $120M and NCI $8M in the same accession
+- **When** SEC net income is read
+- **Then** value = $112M, basis PARENT_DERIVED_FROM_PROFITLOSS
+- **Parameters:** Revenue tagged under two concepts in one filing: the larger magnitude wins
+- **Edge cases:**
+  - NCI missing for either filing: ProfitLoss used as is
+
+#### BR-VAL-057 · Peer median and subject premium
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation.py:473-552`
+
+Peer medians exclude the subject; the subject's premium = (own / median - 1) x 100 only for multiples (not percentage metrics) and only when the median is positive.
+
+- **Given** Peers EV/Revenue TTM 2, 4, 6, 10 and subject 6
+- **When** compare_peer_valuations runs
+- **Then** Median 5.00, subject premiumPct 20.00
+- **Parameters:** Even-count median = average of middle two; rounded 2 decimals
+- **Edge cases:**
+  - revenueGrowthNextFyPct and grossMarginPct get no premium
+  - Each peer uses Yahoo basis EV = price x Yahoo shares + debt - cash
+
+#### BR-VAL-058 · Peer medians and subject premium
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/valuation.py:473-552; server.py:11090-11111`
+
+Peer medians, min and max exclude the subject. The subject's premium = (own / median - 1) x 100, not computed for percentage metrics or a non-positive median. Requests need 2-10 distinct tickers including the subject.
+
+- **Given** Peer EV/Revenue TTM values 2.0, 4.0, 6.0, 8.0 and subject 7.5
+- **When** compare_peer_valuations runs
+- **Then** median = (4+6)/2 = 5.00; premiumPct = (7.5/5 - 1) x 100 = 50.00
+- **Parameters:** _PEER_VALUATION_MAX_TICKERS = 10; minimum 2; metrics: evToRevenueTtm/CurrentFy/NextFy, evToEbitdaTtm, peCurrentFy, peNextFy, revenueGrowthNextFyPct, grossMarginPct
+- **Edge cases:**
+  - Metrics ending in 'Pct' get no premium
+  - Every peer uses the Yahoo basis (price x Yahoo shares + debt - cash)
+
+#### BR-VAL-059 · Peer medians exclude the subject; premiums not computed for percentage metrics
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/valuation.py:473-478,512-538`
+
+Peer median, min and max per multiple exclude the subject ticker; the subject's premium vs the median is (own/median - 1) x 100 only when the median is positive and the metric is not itself a percentage.
+
+- **Given** Peers' EV/Revenue TTM 4.0, 6.0, 8.0, 10.0 and subject 9.0
+- **When** peer valuations are compared
+- **Then** median = 7.00 (average of the middle two), premiumPct = 28.57; for grossMarginPct and revenueGrowthNextFyPct premiumPct is null
+- **Parameters:** Metric list: evToRevenueTtm/CurrentFy/NextFy, evToEbitdaTtm, peCurrentFy, peNextFy, revenueGrowthNextFyPct, grossMarginPct
+
+#### BR-VAL-060 · Point-in-time share count source order
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:234-318`
+
+The share count is taken from the undimensioned cover page, then the balance sheet. The latest periodic filing's own cover-page count (or class sum) replaces it when that read is OK and newer. A weighted-average count is used only as unusable context.
+
+- **Given** Companyfacts cover count as of 2024-10-31 and a 10-K filed 2025-02-20 whose cover read is OK as of 2025-02-10
+- **When** Shares at 2025-03-01 are resolved
+- **Then** The 10-K cover count as of 2025-02-10 is used
+
+#### BR-VAL-061 · Reconciliation period resolution
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/metric_reconciliation.py:96-216`
+
+Quarters are 80-100 day periods and years are 350-380 days. 'Q<n> yyyy' is the calendar quarter of the period end. 'FY yyyy' prefers the issuer's SEC fy/fp. Without metadata the fiscal quarter is counted from the prior year end as round(days / 91.25), clamped 1-4.
+
+- **Given** spec 'Q3 2026' and a revenue quarter 2026-04-27 to 2026-07-26
+- **When** resolve_period runs
+- **Then** ceil(7/3) = 3, so it matches; fiscal quarter from first-filed fy/fp (e.g. FY2027 Q2)
+- **Parameters:** Quarter 80-100 days; annual 350-380 days; 91.25 days per quarter
+- **Edge cases:**
+  - A prior year end in Jan-Mar gives two candidate fiscal years, flagged fiscalYearAmbiguous
+  - 20-F/40-F filers have no quarters
+
+#### BR-VAL-062 · Reconciliation release-sentence scoping and scale
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/metric_reconciliation.py:398-487`
+
+A release figure is accepted only from a sentence that names the metric, is not guidance, backlog, non-GAAP or per-share (for money metrics), and matches the period scope. Unscaled figures take the release's table scale only if exactly one is declared.
+
+- **Given** A release with '(in thousands, except per share data)' and the sentence 'Revenue for the fourth quarter was $1,214,293'
+- **When** the release is read for the latest quarter
+- **Then** value = 1,214,293 x 1,000 = $1,214,293,000 with scaleBasis RELEASE_TABLE_IN_THOUSANDS; '(loss)' or parentheses make the value negative
+- **Parameters:** Sentence max 600 chars; scale words b/bn/billion, m/mm/mn/million, k/thousand
+- **Edge cases:**
+  - Several table scales declared: unscaled figure rejected
+  - Non-USD reporting unit: NOT_COMPARED_CURRENCY
+
+#### BR-VAL-063 · Reconciliation tolerance input clamp
+
+**P1** · Validation · Confidence **High**  
+Source: `server.py:10748-10753`
+
+The caller's reconciliation tolerance is clamped to 0-10%, defaulting to 0.5% when unusable.
+
+- **Given** tolerance_pct = Infinity
+- **When** reconcile_metric_sources runs
+- **Then** Python uses 10 (clamp before finiteness check); TS uses 0.5 (worker/src/yahoo-finance.ts:15750)
+- **Parameters:** Range 0-10; default 0.5
+- **Edge cases:**
+  - non-numeric string falls back to 0.5 in Python
+- **Suspected defect:** Python clamps before the isfinite check, so the check is dead: +inf -> 10, NaN -> 0 (max(0.0, nan) returns 0.0), while TS returns 0.5 for both; violates the runtime parity rule
+
+#### BR-VAL-064 · Release figure selection when multiple releases are read
+
+**P1** · Policy · Confidence **Medium**  
+Source: `yfmcp/metric_reconciliation.py:490-499 (worker/src/metric-reconciliation.ts:445-450)`
+
+Of the releases read for a period (oldest first), the chosen observation is the last one with a scoped figure. If none has one, the first release read is used.
+
+- **Given** Two releases: the original (FOUND $31.5M) and a later re-release (FOUND $31.6M)
+- **When** pick_release_observation runs
+- **Then** code selects the later one ($31.6M)
+- **Parameters:** _RELEASE_READ_MAX = 4 (server.py:10715)
+- **Edge cases:**
+  - All releases are listed in releasesConsidered
+- **Suspected defect:** The docstring says 'the first with a scoped figure' but the code takes found[-1] (the newest). Both runtimes match each other but contradict the documentation.
+- **SME question:** Should reconciliation use the earliest release figure (as originally reported) or the latest re-release?
+
+#### BR-VAL-065 · Reporting currency and taxonomy determination
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/valuation_history.py:81-130,772-784`
+
+us-gaap is used when it carries revenue facts, else ifrs-full; the reporting currency for a date is the currency of the newest annual revenue fact filed by then, with the filer's main currency winning ties (convenience translations).
+
+- **Given** An IFRS filer whose annual revenue filed by 2023-04-30 is tagged in both TWD and USD in the same filing, with TWD having the most facts overall
+- **When** the date's reporting currency is chosen
+- **Then** TWD is used; a 20-F/40-F as the latest annual form marks the filer foreign (ANNUAL cadence)
+
+#### BR-VAL-066 · Reporting currency and taxonomy per date
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:81-130`
+
+us-gaap is used when it carries revenue, else ifrs-full. The main currency is the revenue unit with the most facts. At each date the currency is that of the newest annual revenue fact filed by then, with the main currency preferred on ties.
+
+- **Given** An IFRS filer with 40 TWD and 4 USD revenue facts whose latest 20-F tags both
+- **When** The currency for a date is resolved
+- **Then** TWD
+
+#### BR-VAL-067 · Reporting taxonomy and currency per date
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:81-140`
+
+us-gaap is used when it carries revenue, else ifrs-full; the main currency is the revenue unit with the most facts, and a date's currency is that of the newest annual (350-380 day) revenue fact filed by then.
+
+- **Given** A filer whose newest annual revenue filed by 2023-06-01 is tagged in both TWD and USD, main currency TWD
+- **When** reporting_currency_at runs
+- **Then** TWD is used (main currency wins a tie)
+- **Parameters:** Annual = 350-380 days
+
+#### BR-VAL-068 · Reporting unit and period windows for metric reconciliation
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/metric_reconciliation.py:58-121,127-216`
+
+The SEC reporting currency is the unit with the most recent filing, then the most facts. A quarter is 80-100 days and a year 350-380 days. FY<yyyy> uses the issuer's own SEC fy where given. A quarter's fiscal number is counted as days since the prior year end / 91.25, clamped to 1-4.
+
+- **Given** NBIS reported in RUB to FY2023 and in USD from FY2024, and a quarter ending 91 days after the prior year end
+- **When** resolve_period('latest_quarter') runs
+- **Then** Unit USD; fiscalQuarter 1 (round(91/91.25) = 1); if the prior year ended Jan-Mar, two candidate fiscal years are given and fiscalYearAmbiguous is true
+- **Parameters:** Quarter 80-100 days; annual 350-380 days; 91.25 days per quarter; SEC fy accepted only if it is the end year or end year - 1 (annual)
+- **Edge cases:**
+  - Invalid spec: INVALID_PERIOD
+  - No FY match: lists up to 5 available fiscal years
+  - Revenue drives the period list; falls back to the metric or net income
+- **Suspected defect:** Q<n> <yyyy> selects by calendar quarter of the period end (ceil(month/3)), so a 52/53-week quarter ending Jan 1-3 is treated as Q1 of the next year, unlike the 7-day drift rule in fiscal_calendar.py.
+- **SME question:** Should 'Q4 2025' match a 52/53-week quarter that ends 2026-01-02?
+
+#### BR-VAL-069 · Reporting unit choice for a metric
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/metric_reconciliation.py:85-92; yfmcp/valuation_history.py:81-130`
+
+The reporting currency is the unit filed most recently, then the one with the most facts, then alphabetical. The historical engine uses the newest annual revenue unit filed by each date.
+
+- **Given** NBIS with RUB facts to FY2023 and USD from FY2024
+- **When** metric_facts runs
+- **Then** USD is chosen (newest filing), despite the longer RUB history
+- **Parameters:** Money unit regex [A-Z]{3}; per-share [A-Z]{3}/shares
+- **Edge cases:**
+  - Convenience translations: the main currency wins if present
+
+#### BR-VAL-070 · SEC balances older than 45 days give way to Yahoo
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation.py:25-26,305-321,338-339`
+
+If the filing's balance-sheet date is more than 45 days before Yahoo's most recent quarter and Yahoo has both cash and debt, Yahoo's balances are used instead.
+
+- **Given** SEC period end 2025-03-31 and Yahoo mostRecentQuarter 2025-06-30, Yahoo cash and debt present
+- **When** Balances are selected
+- **Then** 91 days > 45, so Yahoo cash and debt are used, warning SEC_BALANCES_STALE (severity warning)
+- **Parameters:** _STALE_BALANCE_DAYS=45
+- **Edge cases:**
+  - If Yahoo lacks cash or debt, older SEC balances are kept with a stale warning
+  - SEC balances require both totalDebt and cashAndEquivalents
+
+#### BR-VAL-071 · SEC filings read only for USD listings
+
+**P1** · Policy · Confidence **High**  
+Source: `server.py:11068-11086`
+
+The SEC dilution bridge and capital structure are read only when the quote (converted to its major currency) is in USD. Other listings use Yahoo figures and get a NON_USD_LISTING note.
+
+- **Given** A London listing quoted in GBp
+- **When** get_valuation_snapshot runs
+- **Then** No SEC read happens, and a NON_USD_LISTING info warning is added
+- **Parameters:** Eligible major currency: USD or unknown
+- **Edge cases:**
+  - A bridge or capital structure without the expected basis adds SEC_FILINGS_UNAVAILABLE
+
+#### BR-VAL-072 · SEC vs Yahoo cash mismatch and shortfall warnings
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation.py:20-28,341-368`
+
+Flag when SEC cash alone matches Yahoo's total cash (within 2%) but cash plus SEC short-term investments exceeds it by more than 10%, or when Yahoo's cash exceeds SEC cash plus investments by more than 5% for the same quarter.
+
+- **Given** SEC cash $1,000M, SEC short-term investments $500M, Yahoo total cash $1,010M
+- **When** The valuation snapshot is computed with SEC balances
+- **Then** 1,500 > 1,111 and |1,000-1,010| <= 20.2, so SEC_YAHOO_CASH_MISMATCH warning; EV not overridden
+- **Parameters:** _SEC_YAHOO_EXCESS=0.10; _SEC_YAHOO_CASH_MATCH=0.02; _SEC_YAHOO_SHORTFALL=0.05; _SAME_QUARTER_DAYS=7
+- **Edge cases:**
+  - Shortfall check needs period ends within 7 days
+  - Only when currencies are comparable
+
+#### BR-VAL-073 · SEC/Yahoo cash mismatch and shortfall checks
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/valuation.py:20-28,341-368`
+
+Two warnings. (1) SEC cash alone matches Yahoo's total cash within 2%, but cash plus short-term investments is more than 10% above it (possible double count). (2) Same quarter (within 7 days), Yahoo cash is more than 5% above SEC cash plus investments.
+
+- **Given** SEC cash $1,000M, SEC short-term investments $200M, Yahoo total cash $1,010M
+- **When** the snapshot runs
+- **Then** 1,200 > 1.10 x 1,010 = 1,111 and |1,000 - 1,010| = 10 <= 20.2, so SEC_YAHOO_CASH_MISMATCH. Separately, Yahoo $1,100M vs SEC $1,000M same quarter: 1,100 > 1,050, so SEC_YAHOO_CASH_SHORTFALL
+- **Parameters:** _SEC_YAHOO_EXCESS = 0.10; _SEC_YAHOO_CASH_MATCH = 0.02; _SEC_YAHOO_SHORTFALL = 0.05; _SAME_QUARTER_DAYS = 7
+- **Edge cases:**
+  - Flagged only, never overridden
+  - Skipped when currencies are not comparable
+
+#### BR-VAL-074 · Snapshot enterprise value formula with convertible and preferred adjustments
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/valuation.py:370-403,415`
+
+Enterprise value = price x diluted shares + total debt - principal of convertibles already counted as shares (capped at debt) + liquidation preference of convertible preferred not counted as shares - cash - short-term investments, and only when the balances are in the same currency as the quote.
+
+- **Given** Price $20, 100M diluted shares, debt $500M including a $300M convertible counted as shares, convertible preferred not in the money with $50M liquidation preference, cash $200M, short-term investments $100M
+- **When** the snapshot is computed
+- **Then** EV = 2,000 + 500 - 300 + 50 - 200 - 100 = $1,950M and status COMPUTED; if shares, cash or debt are missing status is PARTIAL with ENTERPRISE_VALUE_INCOMPLETE
+- **Parameters:** Convertible adjustment capped at total debt; preferred without tagged liquidation preference adds PREFERRED_NOT_IN_ENTERPRISE_VALUE warning
+- **Edge cases:**
+  - A currency mismatch adds ENTERPRISE_VALUE_CURRENCY_MISMATCH and leaves EV null
+  - Preferred adjustment applies only when SEC shares are usable
+- **Suspected defect:** The convertible principal is taken out of debt (lines 371-377) whenever the bridge shows incrementalShares > 0, even when the SEC count is unusable (sec_usable false) or the bridge has no dilutedSharesAtPrice, so the shares used are Yahoo/basic counts that do not include the conversion shares. In that case the convertible is in neither debt nor shares and EV is understated. The preferred adjustment is guarded by sec_usable but the convertible adjustment is not.
+- **SME question:** Should the convertible debt deduction apply only when the diluted SEC share count (which includes the if-converted shares) is actually used for equity value?
+
+#### BR-VAL-075 · Snapshot multiples and non-positive denominators
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation.py:184-216`
+
+EV/Revenue (TTM, current FY, next FY), EV/EBITDA TTM and P/E (TTM, current FY, next FY) are numerator / denominator rounded half-up to 2 decimals, left empty when the denominator is zero or negative.
+
+- **Given** EV $1,950M and Yahoo TTM revenue $650M
+- **When** Multiples are computed
+- **Then** EV/Revenue TTM = 3.00
+- **Parameters:** 2 decimals half-up; periods 0y=current_fiscal_year, +1y=next_fiscal_year
+- **Edge cases:**
+  - Negative EPS gives null P/E with note
+  - Non-comparable currency gives null with note
+
+#### BR-VAL-076 · Staleness limits by SEC companyfacts cadence
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:557-571,628-636,685-702,713-726,772-784`
+
+Quarterly filers: shares stale after 400 days, balances 200, results 500; 20-F/40-F filers: 500 for all, with an info flag when shares are older than 183 days.
+
+- **Given** Domestic filer valued on 2025-12-31 with latest balance sheet 2025-03-31
+- **When** EV is computed
+- **Then** 275 days > 200, EV status BALANCES_STALE (null) with warning
+- **Parameters:** QUARTERLY 400/200/500; ANNUAL 500/500/500; SHARE_COUNT_AGED_DAYS=183
+- **Edge cases:**
+  - Stale results null individual multiples with RESULTS_STALE
+  - Foreign filer judged per date from latest annual revenue form
+
+#### BR-VAL-077 · Staleness limits by SEC filing cadence
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:557-571,628-636,685-702,713-726`
+
+For a filer whose latest annual report by the date is a 20-F/40-F, share counts, balances and results go stale after 500 days. Otherwise share counts go stale after 400 days, balances after 200 and results after 500. An annual filer's count older than 183 days is still used but flagged.
+
+- **Given** A 10-Q filer whose latest balance sheet is 230 days before the valuation date
+- **When** Historical EV is computed
+- **Then** EV status BALANCES_STALE (value null) and a BALANCES_STALE warning. For a 20-F filer with a share count 300 days old, market cap is computed with a SHARE_COUNT_AGED info warning
+- **Parameters:** ANNUAL: 500/500/500; QUARTERLY: share 400, balances 200, results 500; SHARE_COUNT_AGED_DAYS=183
+- **Edge cases:**
+  - The cadence is judged per date, so a filer that changed regime keeps its earlier cadence
+  - A stale denominator sets the multiple status to RESULTS_STALE
+
+#### BR-VAL-078 · Valuation multiple status
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/valuation_history.py:474-493`
+
+A multiple is computed only with a numerator, an OK denominator and an FX rate, and only when both are positive; otherwise a status names the missing or non-meaningful part.
+
+- **Given** EV 5,000,000,000; revenue 1,000,000,000; FX 1.0
+- **When** EV/Revenue is computed
+- **Then** value 5.0, status OK; negative EV gives NOT_MEANINGFUL_NONPOSITIVE_NUMERATOR
+- **Parameters:** 2 dp half-up rounding
+
+#### BR-VAL-079 · Valuation multiples and denominators
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/valuation.py:184-216`
+
+EV/Revenue (TTM, current FY, next FY consensus), EV/EBITDA (TTM) and P/E (trailing EPS, current and next FY consensus EPS) are numerator / denominator, rounded half-up to 2 dp. They are blank when the denominator is zero or negative, or the currencies differ.
+
+- **Given** EV $2,400M and TTM revenue $800M; price $25 and trailing EPS -$0.40
+- **When** multiples are computed
+- **Then** EV/Revenue TTM = 3.00x; P/E TTM = null with note 'Denominator is zero or negative'
+- **Parameters:** Rounding 2 dp half-up; periods 0y = current_fiscal_year, +1y = next_fiscal_year
+- **Edge cases:**
+  - Analyst counts are carried for consensus denominators
+  - Not comparable currency: all multiples null
+
+#### BR-VAL-080 · Valuation multiples only on positive denominators and matching currency
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/valuation.py:184-229`
+
+EV/Revenue, EV/EBITDA and P/E (trailing, current FY, next FY) are computed only when financials share the quote currency and the denominator is positive. Otherwise the multiple is null with a reason.
+
+- **Given** EV $1,950M and TTM EBITDA -$40M
+- **When** Multiples are built
+- **Then** EV/EBITDA is null, note 'Denominator is zero or negative; a multiple is not meaningful.'
+- **Parameters:** Ratios rounded half-up to 2 dp; minor-unit currencies GBp/GBX/ZAc/ILA divided by 100
+- **Edge cases:**
+  - Revenue growth % is computed only when the base is positive
+
+#### BR-VAL-081 · Valuation snapshot balance source and status
+
+**P1** · Policy · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/valuation.py:305-339`
+
+SEC period-end cash and debt are used unless their currency differs from the quote, or the filing period end is more than 45 days older than Yahoo's latest quarter and Yahoo has both cash and debt; EV = equity + debt - counted convertibles + uncounted preferred liquidation preference - cash - short-term investments, status COMPUTED when EV is computed else PARTIAL.
+
+- **Given** SEC balances at 2025-12-31, Yahoo mostRecentQuarter 2026-06-30 with cash and debt
+- **When** Valuation snapshot runs
+- **Then** Yahoo balances used with warning SEC_BALANCES_STALE
+- **Parameters:** _STALE_BALANCE_DAYS 45; _SEC_YAHOO_EXCESS 0.10; _SEC_YAHOO_CASH_MATCH 0.02; _SEC_YAHOO_SHORTFALL 0.05; _SAME_QUARTER_DAYS 7; _SHARE_BASIS_MAX_RATIO 1.5 (valuation.py:21-35)
+- **Edge cases:**
+  - no price -> status PRICE_UNAVAILABLE (valuation.py:271-273)
+  - convertible adjustment capped at debt (valuation.py:376-377)
+  - non-comparable currency -> EV null
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (Through the compliance lens, this should not be P0. Lines 305-339 of /home/user/yahoo-finance-mcp/yfmcp/valuation.py decide which balance source to use, either SEC or Yahoo, inside an informational valuation snapshot. The module docstring (lines 4-7) describes it as "Mechanical context only", with no implied price and no forecast. The rule does not move money, book a transaction, or meet a filing, disclosure or retention requirement. Its integrity effect is real: stale or wrong-currency balances would distort EV, and the code adds warnings when it falls back. But the logic is an analytical heuristic built on a tunable 45-day threshold and a fallback order, not a control a regulator, auditor or finance controller depends on. Under the project's own CLAUDE.md, thresholds and fallback order are planner decisions that must match across the Python and TS runtimes. That makes it a strong P1 parity and behaviour contract, not a compliance P0.
+
+The rule card is accurate. Line 309 drops SEC balances when their currency differs from the major quote currency (SEC_BALANCES_CURRENCY). Lines 315-319 drop them when the SEC period end is more than 45 days (`_STALE_BALANCE_DAYS`) before Yahoo's mostRecentQuarter and Yahoo has both totalCash and totalDebt (SEC_BALANCES_STALE). If Yahoo lacks either figure, the SEC balances stay and a different SEC_BALANCES_STALE warning is raised (line 321). Short-term investments count only when SEC balances are used; otherwise they are 0 (line 335). The scenario checks out: 2025-12-31 to 2026-06-30 is 181 days, more than 45, so Yahoo's balances are used with SEC_BALANCES_STALE. The card leaves out that YAHOO_BALANCES (info) is also raised (line 339).
+
+Three citation gaps. First, the EV formula is at lines 396-397 and the COMPUTED/PARTIAL status at line 415, both outside the cited 305-339; the logic itself matches. Second, the parameter list includes constants this range does not use (_SEC_YAHOO_EXCESS, _SEC_YAHOO_CASH_MATCH, _SEC_YAHOO_SHORTFALL, _SAME_QUARTER_DAYS, _SHARE_BASIS_MAX_RATIO); only _STALE_BALANCE_DAYS=45 (line 26) applies. Third, the card does not say that SEC balances need both totalDebt and cashAndEquivalents to count (line 307). No instruction-shaped text or credentials were found in the cited lines. | I read the code myself (/home/user/yahoo-finance-mcp/yfmcp/valuation.py:305-339 and 341-415). The core rule and its example hold up. Several details are oversimplified or missing, and the citation does not cover the full rule.
+
+What the rule gets right:
+- Filing (SEC) balances are only used when both totalDebt and cashAndEquivalents are finite numbers (l.307).
+- If the filing's currency differs from the quote's main currency, the filing balances are dropped and SEC_BALANCES_CURRENCY is raised (l.309-311). Prices quoted in minor units are converted first, e.g. GBp is treated as GBP.
+- The staleness check uses a strict "more than 45 days" (l.316). It only runs if the filing balances survived the currency check and both periodEnd and Yahoo's mostRecentQuarter exist (l.315).
+- The example checks out: 2025-12-31 to 2026-06-30 is 181 days, which is over 45. With Yahoo's totalCash and totalDebt both present, sec_balances becomes False and SEC_BALANCES_STALE is raised (l.317-319).
+- The EV formula equity + debt - convertible adjustment + preferred adjustment - cash - short-term investments matches l.396.
+- Status is COMPUTED when EV is computed and PARTIAL otherwise (l.415).
+
+Gaps to fix on the card:
+(1) Citation. The EV formula and the status logic are at l.370-415, outside the cited 305-339.
+(2) Missing branch. When filing balances are stale but Yahoo lacks cash or debt, the system still emits SEC_BALANCES_STALE (different message, l.320-321) and keeps using the old filing balances.
+(3) Incomplete warnings in the example. Whenever Yahoo balances are used, a YAHOO_BALANCES info warning is also added (l.338-339). The capital-structure warnings that normally travel with filing balances are dropped (l.331-333).
+(4) Short-term investments are subtracted only when filing balances are used. They are 0 when Yahoo balances are used (l.335), because Yahoo's totalCash already includes them.
+(5) Unstated limits on the EV pieces:
+  - The convertible adjustment is capped at debt (l.376-377).
+  - Preferred liquidation preference is added only when the SEC share count is usable and the instrument adds no shares at this price (l.382-384).
+  - If no liquidation preference is tagged, the preferred is left out with a PREFERRED_NOT_IN_ENTERPRISE_VALUE warning (l.389-391).
+(6) Unstated currency gate. EV also requires balances_comparable (filing balances in use, or Yahoo's financial currency matches the quote, l.395-397). Without it the status is PARTIAL with ENTERPRISE_VALUE_CURRENCY_MISMATCH. Equity uses the main-currency price.
+
+None of these contradict the stated rule, so I rate it faithful, but the card should add them.
+
+Why P0 is justified: the rule decides which balance-sheet figures feed the computed enterprise value, the core output. It blocks figures in the wrong currency and replaces stale ones, which is a data-integrity guard. The project's CLAUDE.md also lists fallback orders and evidence thresholds as decisions reserved for the planner.
+
+Caveat: the output is labelled CONTEXT_ONLY_NOT_A_PRICE_TARGET, so it does not move money directly.
+
+No instruction-like text or credentials appear in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-VAL-082 · Valuation snapshot enterprise value and status
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation.py:370-415`
+
+Enterprise value = price x diluted shares + debt - principal of convertibles counted as shares (capped at debt) + liquidation preference of convertible preferred not counted as shares - cash - short-term investments. Status is COMPUTED when EV exists, else PARTIAL.
+
+- **Given** Price $20, diluted 110M shares, debt $600M including a $300M convertible counted as shares, cash $200M, STI $100M, no preferred
+- **When** The snapshot computes EV
+- **Then** EV = 2,200M + 600M - 300M - 200M - 100M = $2,200M; status COMPUTED
+- **Parameters:** Formula string at valuation.py:452-453
+- **Edge cases:**
+  - No price at all -> status PRICE_UNAVAILABLE
+  - Currency not comparable and Yahoo balances -> ENTERPRISE_VALUE_CURRENCY_MISMATCH, EV null
+  - Preferred with no liquidation preference -> PREFERRED_NOT_IN_ENTERPRISE_VALUE warning
+- **Suspected defect:** The convertible principal is taken out of debt whenever the bridge shows incrementalShares > 0, even when sec_usable is false. In that case diluted shares are null and Yahoo's basic count is used, so the convertible is removed from debt without being added to shares. The preferred adjustment does check sec_usable.
+- **SME question:** When the SEC share count is rejected (SHARE_BASIS_MISMATCH), should convertible principal still be removed from debt?
+
+#### BR-VAL-083 · Valuation snapshot enterprise value formula
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation.py:300-303,334-337,370-401,450-453`
+
+Enterprise value = price x diluted shares (else basic) + total debt - principal of convertibles counted as shares (capped at debt) + liquidation preference of convertible preferred not counted as shares - cash - short-term investments.
+
+- **Given** Price $20, diluted shares 100,000,000, debt $500M including a $300M convertible with incremental shares > 0, cash $200M, short-term investments $50M, no preferred
+- **When** The valuation snapshot is computed
+- **Then** Equity value $2,000M; EV = 2,000 + 500 - 300 - 200 - 50 = $1,950M; status COMPUTED
+- **Parameters:** Short-term investments only subtracted when SEC balances are used (else 0); rounding half-up to whole units
+- **Edge cases:**
+  - Preferred with no tagged liquidation preference is left out with PREFERRED_NOT_IN_ENTERPRISE_VALUE
+  - Status PARTIAL if any of shares, cash or debt is missing
+  - PRICE_UNAVAILABLE when no caller or Yahoo price
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (I read /home/user/yahoo-finance-mcp/yfmcp/valuation.py. The cited ranges line up with the logic described.
+
+Why the rule is faithful:
+- Lines 300-303 use the diluted share count when there is one, otherwise the basic count. The diluted count only exists when SEC share data is usable.
+- Lines 334-337 take cash, short-term investments and debt. Short-term investments come from the SEC balances when those are used, otherwise they are 0.
+- Lines 370-377 add up the principal of every convertible whose incrementalShares is above 0, and cap that sum at total debt.
+- Lines 379-391 add the liquidation preference of convertible preferred that is not counted as shares. This only happens when SEC share data is usable. If no preference is tagged, the code adds a PREFERRED_NOT_IN_ENTERPRISE_VALUE warning instead.
+- Lines 393-397 compute EV = equity + debt - convertible adjustment + preferred adjustment - cash - short-term investments. EV is only computed when every input is present and the balances are in a comparable currency.
+- Status is COMPUTED when EV is not None.
+- Lines 450-453 round equity value and EV half-up.
+
+The worked example checks out: 20 x 100M = 2,000M, and 2,000 + 500 - 300 - 200 - 50 = 1,950M. It implicitly assumes SEC balances and usable SEC shares. Two conditions are left unstated, and neither changes the formula: preferred is only counted when SEC share data is usable, and EV is set to null when the currencies do not match.
+
+Why P0 is not justified through the compliance lens: this is a read-only market-data analytics output. It does not move money, does not enforce any regulatory or reporting requirement, and does not guard records of truth. The output labels itself "MECHANICAL_VALUATION_CONTEXT" and "CONTEXT_ONLY_NOT_A_PRICE_TARGET". A regulator, auditor or finance controller would not have a compliance stake if it changed silently. It does matter for analytical correctness: avoiding double-counting convertibles, and the Python/TS parity the project requires. That makes it a strong P1 accuracy or parity rule, not P0.
+
+No instruction-shaped text or credentials were found in the cited lines. | I re-derived the rule from /home/user/yahoo-finance-mcp/yfmcp/valuation.py. The cited path legacy/yahoo-finance-mcp/... does not exist; the same line numbers match this file at the repo root.
+
+Fidelity: the formula and the worked example match the code.
+- Lines 393 and 396-397 compute EV = major price x shares + debt - convertible adjustment + preferred adjustment - cash - short-term investments.
+- Line 303 uses diluted shares if present, else basic.
+- Lines 373-377 add up the principal of convertibles with incrementalShares > 0 and cap the total at debt.
+- Lines 382-387 add the liquidation preference of convertible preferred with incrementalShares <= 0.
+- Line 335 sets short-term investments to 0 unless SEC balances are used.
+- Line 415 sets status COMPUTED when EV is non-null.
+- In the example, 20 x 100M = 2,000M and 2,000 + 500 - 300 - 200 - 50 = 1,950M. That is correct, assuming SEC balances are used, which the short-term-investment subtraction implies, and that sec_usable is true.
+
+Omissions a verifier should add to the contract (none contradicts the card):
+1. Diluted shares (line 301) and the preferred adjustment (line 382) only apply when the SEC share count is usable. If not, basic shares come from Yahoo and no preferred is added. The convertible deduction still applies even when debt is Yahoo's total.
+2. Price is first converted from minor units such as GBp to the major currency (line 274, _major_price at line 175).
+3. EV is null and status is PARTIAL when shares, cash or debt are missing. It is also null when Yahoo balances are in a different financial currency than the quote (lines 395-401).
+4. The ADR ratio divides SEC share counts by round_half_up(shares/ratio) before the price is applied (line 298).
+5. "Rounding half-up" is round_half_up in capital_structure.py:451-453, which is floor(x + 0.5). It rounds toward +infinity, so a negative EV of -2.5 becomes -2, not -3. Only the outputs are rounded (lines 450-451); the intermediate values are not.
+
+P0: justified as data integrity. Enterprise value is the main financial figure this tool outputs, and the multiples are built on it (line 455). The CLAUDE.md requires strict Python/TS output parity for it. It does not move money directly: the output is labeled CONTEXT_ONLY_NOT_A_PRICE_TARGET (line 417).
+
+No instruction-shaped text or credentials were found in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-VAL-084 · Valuation snapshot requires a price
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/valuation.py:267-273`
+
+A caller-supplied price takes precedence over Yahoo's; when neither exists the snapshot returns PRICE_UNAVAILABLE and nothing is computed.
+
+- **Given** No supplied price and Yahoo regularMarketPrice missing
+- **When** get_valuation_snapshot runs
+- **Then** status PRICE_UNAVAILABLE with any SEC warnings passed through
+
+#### BR-VAL-085 · Valuation: supplied price must be positive
+
+**P1** · Validation · Confidence **Medium** · P0 panel 2/2  
+Source: `server.py:11054-11060`
+
+If a caller supplies a price for a valuation snapshot, it must be a finite positive number. Without one, Yahoo's price is used. If neither exists, the result is PRICE_UNAVAILABLE.
+
+- **Given** price = -5 or 'abc'
+- **When** get_valuation_snapshot runs
+- **Then** Returns INPUT_VALIDATION_ERROR 'price must be a positive number when supplied.'
+- **Parameters:** price > 0 and finite
+- **Edge cases:**
+  - The Worker has the same rule (worker/src/yahoo-finance.ts:15993)
+  - No price and no Yahoo price gives status PRICE_UNAVAILABLE (yfmcp/valuation.py:271-273)
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (The rule card matches the code. In server.py:11054-11060, a supplied price is converted with float(). If that fails it becomes NaN. Anything not finite or <= 0 returns {"error": true, "code": "INPUT_VALIDATION_ERROR", "message": "price must be a positive number when supplied."}. So -5 and 'abc' are both rejected as the card says. The fallback is also accurate: line 11065 uses Yahoo's market["price"] when no price is supplied. The PRICE_UNAVAILABLE outcome is not in the cited lines. It comes from yfmcp/valuation.py:273 ("No price was supplied and Yahoo returned none."), so the card's citation should be widened to include that line. That is a gap in the citation, not an error in the rule.
+
+Under the compliance lens, P0 is not justified. This is ordinary input checking on a read-only analytics tool. The tool's own description calls its output "Mechanical context, not a price target". It does not move money, place orders, post to a ledger or meet any regulatory requirement. Its only data-integrity role is stopping meaningless valuations from a negative or non-numeric price. If the check changed without notice, the caller would get a strange snapshot or a different error, but no stored record or financial outcome would be corrupted. A regulator, auditor or finance controller would not track this. It is a solid P1 (keep it, and cover it with Python/TS parity tests as CLAUDE.md requires), but it should not be in the P0 behaviour contract. No instruction-shaped text or credentials appear in the cited lines. | The rule matches the code. server.py:11054-11060 only runs when a price is passed. It converts the value with float(); if that raises TypeError or ValueError, the value becomes NaN. NaN, plus or minus infinity, or any value <= 0 returns {"error": true, "code": "INPUT_VALIDATION_ERROR", "message": "price must be a positive number when supplied."}. So -5 and 'abc' both get that exact error, as the rule says. The check runs before the Yahoo fetch (line 11062), so a bad price is rejected even when the ticker is invalid. The fallback is also right: line 11065 and yfmcp/valuation.py:271 use Yahoo's market["price"] when no price is passed, and yfmcp/valuation.py:272-273 returns status/code PRICE_UNAVAILABLE when both are missing.
+
+Edge cases the card doesn't mention but should note for parity:
+- 0 is rejected.
+- Number-like strings such as "5" are converted and accepted.
+- "inf" and "nan" are rejected.
+- A boolean True becomes 1.0 and is accepted.
+- The error payload has no "status" field.
+
+P0 isn't justified. This is ordinary input checking on a read-only analytics tool; its own description says it gives context, not a price target. It doesn't move money, place trades or meet a compliance requirement. It only stops one caller's bad input from producing a meaningless snapshot, and nothing stored is protected. P1 (validation) fits better. I found no instruction-like text in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-VAL-086 · Yahoo implied all-class share count replaces listed count when 2% larger
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation.py:232-244`
+
+Yahoo's implied shares outstanding (all classes) is used instead of the listed-class count when it exceeds the listed count by more than 2%, or when no listed count exists.
+
+- **Given** Yahoo listed shares 200,000,000 and implied shares 210,000,000
+- **When** Yahoo shares are chosen for valuation or peer rows
+- **Then** 210,000,000 > 204,000,000, so implied shares are used with basis yahoo_implied_shares_outstanding
+- **Parameters:** _IMPLIED_SHARES_MIN_RATIO=1.02; fallback to Yahoo market cap when no share count
+- **Edge cases:**
+  - If neither share count exists, Yahoo marketCap is used directly (basis yahoo_market_cap)
+
+#### BR-VAL-087 · Yahoo implied all-class share count replaces listed count when materially larger
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/valuation.py:232-244`
+
+Yahoo's implied shares outstanding (covering every share class) is used instead of the listed-class count when it is more than 2% larger, or when no listed count exists; with neither, market cap comes from Yahoo's market cap figure.
+
+- **Given** Yahoo listed shares 100,000,000 and implied shares 103,000,000
+- **When** the Yahoo share basis is chosen
+- **Then** the implied count 103,000,000 is used (103M > 102M) with basis yahoo_implied_shares_outstanding; at 101,500,000 implied the listed 100M would be used
+- **Parameters:** _IMPLIED_SHARES_MIN_RATIO=1.02
+- **Edge cases:**
+  - Only marketCap available: shares null, basis yahoo_market_cap
+
+#### BR-VAL-088 · Yahoo implied all-class share count substitution
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/valuation.py:232-244`
+
+Yahoo's implied shares outstanding replaces the listed-class count when it is more than 2% larger (or the listed count is missing).
+
+- **Given** Listed shares 300,000,000; implied shares 310,000,000
+- **When** the Yahoo share basis is chosen
+- **Then** 310,000,000 > 306,000,000, so implied shares are used (shareBasis yahoo_implied_shares_outstanding); with implied 305,000,000 the listed count is used
+- **Parameters:** _IMPLIED_SHARES_MIN_RATIO = 1.02
+- **Edge cases:**
+  - No share count at all: market cap is taken from Yahoo marketCap
+
+#### BR-VAL-089 · Yahoo implied all-class shares preferred when materially larger
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation.py:232-244`
+
+Yahoo's implied shares outstanding replace the listed-class count when they are more than 2% larger, or when no listed count exists.
+
+- **Given** listed 300,000,000, implied 310,000,000
+- **When** The Yahoo share basis is chosen
+- **Then** 310,000,000 is used (310 > 306) with basis yahoo_implied_shares_outstanding. At implied 305,000,000, listed 300,000,000 is used
+- **Parameters:** _IMPLIED_SHARES_MIN_RATIO=1.02
+
+#### BR-VAL-090 · Consensus revenue growth percentages
+
+**P2** · Calculation · Confidence **High**  
+Source: `yfmcp/valuation.py:219-229`
+
+Current-FY consensus revenue vs TTM revenue, and next-FY vs current-FY consensus, as percentage growth.
+
+- **Given** TTM revenue $800M, FY0 consensus $1,000M, FY+1 consensus $1,250M
+- **When** growth is computed
+- **Then** currentFiscalYearVsTtmPct = 25.00; nextVsCurrentFiscalYearPct = 25.00
+- **Parameters:** (a/b - 1) x 100, 2 dp half-up; requires b > 0
+- **Edge cases:**
+  - Null when the base is missing or <= 0
+
+#### BR-VAL-091 · Consensus revenue growth percentages
+
+**P2** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation.py:219-229`
+
+Revenue growth = (current FY consensus / TTM - 1) x 100 and (next FY consensus / current FY consensus - 1) x 100, 2 decimals.
+
+- **Given** TTM revenue $1,000M, current FY consensus $1,100M, next FY $1,320M
+- **When** Growth is computed
+- **Then** currentFiscalYearVsTtmPct 10.00, nextVsCurrentFiscalYearPct 20.00
+- **Parameters:** base must be > 0
+
+#### BR-VAL-092 · Default historical valuation dates
+
+**P2** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:70,797-823`
+
+Callers may request up to 12 YYYY-MM-DD dates (deduplicated and sorted). Without a request, the latest close and its anniversaries over the previous five years are used, with 29 February falling back to the 28th.
+
+- **Given** Latest close 2024-02-29 and no dates requested
+- **When** Dates are resolved
+- **Then** 2019-02-28, 2020-02-29, 2021-02-28, 2022-02-28, 2023-02-28, 2024-02-29
+- **Parameters:** MAX_DATES=12; 5 anniversary years
+
+#### BR-VAL-093 · Historical peer medians
+
+**P2** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation_history.py:868-895`
+
+For each date and basis, the unweighted median of peers' OK multiples, rounded to 2 decimals, with the contributing tickers listed.
+
+- **Given** Three peers EV/EBITDA LTM 8, 10, 15 on a date
+- **When** peer_medians runs
+- **Then** Median 10.00, count 3
+
+#### BR-VAL-094 · Historical valuation date request rules
+
+**P2** · Validation · Confidence **High**  
+Source: `yfmcp/valuation_history.py:70,797-823`
+
+Callers may request up to 12 valid YYYY-MM-DD dates (deduplicated and sorted); by default the latest close plus its five prior anniversaries are used, with 29 February mapped to the 28th in non-leap years.
+
+- **Given** No dates supplied and latest trading date 2024-02-29
+- **When** default dates are built
+- **Then** 2019-02-28, 2020-02-29, 2021-02-28, 2022-02-28, 2023-02-28, 2024-02-29
+- **Parameters:** MAX_DATES=12
+- **Edge cases:**
+  - 13 dates: 'At most 12 dates.'
+  - Future dates are not rejected
+
+#### BR-VAL-095 · Historical valuation dates and peers
+
+**P2** · Validation · Confidence **High**  
+Source: `yfmcp/valuation_history.py:70,797-823,868-895; server.py:10682-10699`
+
+At most 12 requested dates in YYYY-MM-DD form. The default is the latest close and its 5 prior anniversaries (Feb 29 goes to Feb 28). At most 5 peers, whose medians are unweighted.
+
+- **Given** Latest close 2024-02-29 and no dates requested
+- **When** dates are built
+- **Then** 2019-02-28, 2020-02-29, 2021-02-28, 2022-02-28, 2023-02-28, 2024-02-29
+- **Parameters:** MAX_DATES = 12; max peers 5; peers fetched 3 at a time; median rounded to 2 dp
+- **Edge cases:**
+  - Duplicate dates are de-duplicated and sorted
+
+#### BR-VAL-096 · Peer median comparison excludes the subject
+
+**P2** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/valuation.py:473-538`
+
+Peer medians are taken over the peers only (the subject is excluded). The subject's premium is (own/median - 1) x 100, computed only for multiples (not percentage metrics) and only when the median is positive.
+
+- **Given** Peer EV/Revenue values 4, 6, 10 and subject 9
+- **When** compare_peer_valuations runs
+- **Then** Median 6; subject premium = 50.00%. For grossMarginPct no premium is computed
+
+#### BR-VAL-097 · Peer median of historical multiples
+
+**P2** · Calculation · Confidence **High**  
+Source: `yfmcp/valuation_history.py:868-895`
+
+For each date and basis, the unweighted median of peers' OK multiples is reported with the count and tickers that contributed.
+
+- **Given** Peers' LTM EV/Revenue on a date of 3.0, 5.0 and a stale (non-OK) value
+- **When** peer medians are computed
+- **Then** median 4.00 with count 2
+
+### Earnings intelligence & transcripts
+
+#### BR-ERN-001 · Earnings actual vs estimate period alignment and surprise
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:654-840`
+
+Revenue surprise is computed only when the official release period exactly matches Yahoo's estimate row period; EPS surprise percent is omitted when the absolute estimate is below $0.02 (delta still given).
+
+- **Given** Release period 'Q2 2025' equals Yahoo row 'Q2 2025'; revenue actual $1,100M vs estimate $1,000M; EPS actual 0.55 vs estimate 0.50
+- **When** compare_earnings_actual_vs_estimate runs
+- **Then** periodAlignmentStatus MATCHED, revenueSurprisePct 10.0, epsDelta 0.05, epsSurprisePct 10.0, confidence HIGH; Yahoo row identified by date -> UNVERIFIED; different label -> MISMATCH; missing either -> INCOMPLETE
+- **Parameters:** Near-zero EPS threshold |estimate| < 0.02; percentages rounded to 2 dp; epsDelta to 4 dp; latest row = newest dated row with non-null epsActual
+- **Edge cases:**
+  - No reported row -> warning NO_REPORTED_QUARTER
+  - EPS estimate 0 or missing -> EPS_ESTIMATE_UNAVAILABLE
+  - Near-zero base -> confidence MEDIUM
+  - EPS actual from Yahoo preferred over release text
+
+#### BR-ERN-002 · Guidance amount scaling
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/guidance_history.py:28-46; yfmcp/tools/earnings.py:548-551`
+
+A guidance amount is scaled by its unit word (billion/bn/b = 1e9, million/mn/m = 1e6, thousand/k = 1e3) and rounded half-up to whole units. If one end of a range has no unit, it takes the other end's unit.
+
+- **Given** Revenue guidance '$2.0 to $2.4 billion'
+- **When** The range is parsed
+- **Then** low = 2,000,000,000; high = 2,400,000,000; midpoint = 2,200,000,000
+- **Parameters:** scale map billion/bn/b=1e9, million/mn/m=1e6, thousand/k=1e3; rounding floor(x+0.5)
+- **Edge cases:**
+  - No unit on either end: the raw number is kept unscaled
+  - Outlook-table scale '(in millions)' applies to unscaled amounts (extraction_rules.py:396-400)
+
+#### BR-ERN-003 · Guidance amount scaling
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/guidance_history.py:28-46,214-231`
+
+A revenue guidance end without a scale word takes the other end's scale, and scaled amounts are rounded half-up to whole dollars; midpoint is the simple average.
+
+- **Given** Range '$2.0 to $2.4 billion'
+- **When** The revenue range is parsed
+- **Then** low 2,000,000,000, high 2,400,000,000, midpoint 2,200,000,000 USD; '2.05 billion' becomes 2,050,000,000 exactly
+- **Parameters:** billion/bn/b=1e9, million/mn/m=1e6, thousand/k=1e3; rounding floor(x+0.5)
+- **Edge cases:**
+  - EPS units USD/share and gross margin percent are not scaled
+  - Non-finite values are dropped
+
+#### BR-ERN-004 · Guidance extraction status (FOUND / NOT_DISCLOSED / NOT_READ)
+
+**P0** · Lifecycle · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:487-606`
+
+Guidance is FOUND when any revenue/margin/EPS range is read from the SEC release, NOT_DISCLOSED when the release was read and none found, and NOT_READ (with RELEASE_NOT_RESOLVED or retryable RELEASE_TEXT_NOT_AVAILABLE) when no SEC release was resolved or it could not be fetched.
+
+- **Given** The SEC release URL resolves but the fetch fails
+- **When** extract_guidance runs
+- **Then** status RELEASE_TEXT_NOT_AVAILABLE, retryable=true, each metric NOT_READ, confidence NOT_DECISION_GRADE; a non-SEC source gives RELEASE_NOT_RESOLVED, retryable=false
+- **Parameters:** Only https://www.sec.gov/Archives/ URLs are read
+- **Edge cases:**
+  - An unread release is never reported as 'no guidance'
+
+#### BR-ERN-005 · Reported actuals period labelling for guidance outcomes
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/guidance_history.py:343-413`
+
+Actual revenue and diluted EPS are labelled FY by the fiscal year the 10-K states (else the period end less a week); quarters are labelled by calendar for December year-ends, or counted back from a year end whose fiscal year a 10-K states; first halves only for calendar years; second halves are never derived.
+
+- **Given** A December-year-end company with a 91-day revenue fact ending 2025-06-30 and a 181-day fact ending 2025-06-30
+- **When** Actuals are labelled
+- **Then** Labels 'Q2 2025' and 'H1 2025'; a non-calendar filer with no 10-K-stated fiscal year gets mapping NONE and no quarter labels
+- **Parameters:** Annual 350-380 days; quarter 80-100 days; half 170-190 days; quarter-to-year-end window -7..280 days; projected next year end = latest + 364 days
+- **Edge cases:**
+  - Quarter after the latest annual end uses FY+1 only if the latest 10-K states its FY
+  - read=false when companyfacts not read
+
+#### BR-ERN-006 · Alpha Vantage transcript needs a stated fiscal quarter
+
+**P1** · Validation · Confidence **Medium**  
+Source: `yfmcp/tools/earnings.py:1483-1535`
+
+The Alpha Vantage transcript fallback runs only with a fiscal quarter that is either supplied explicitly or stated in the official release text. It is never derived from filing dates; otherwise the attempt is NOT_ELIGIBLE with FISCAL_QUARTER_UNRESOLVED.
+
+- **Given** No fiscal_quarter and the release text states no quarter
+- **When** the Alpha fallback is considered
+- **Then** attempt NOT_ELIGIBLE, reasonCode FISCAL_QUARTER_UNRESOLVED
+- **Parameters:** accepted text form 'YYYY Qn' / 'YYYYQn'
+- **SME question:** Release periods are extracted as labels such as 'Q3 2026' or 'Q3 FY2026'. Does _alpha_vantage_quarter (regex YYYY\s*Qn) ever match those, or is the OFFICIAL_RELEASE_RESOLVED path effectively dead?
+
+#### BR-ERN-007 · Company fiscal-year naming applied to end-date-named guidance
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/guidance_history.py:462-468`
+
+When guidance names a year only by its end date, the company's own fiscal-year naming offset is applied to the label.
+
+- **Given** Dollar General guidance for 'fiscal year ending January 29, 2027' and a naming offset of -1
+- **When** The entry is normalised
+- **Then** Target period becomes FY2026 with namingBasis recorded
+- **Parameters:** Offset from fiscal_year_naming(companyfacts)
+- **Edge cases:**
+  - No change when offset is 0 or basis is not TEXT_PERIOD_END
+
+#### BR-ERN-008 · Earnings actual-vs-estimate period alignment
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/tools/earnings.py:710-734`
+
+The newest Yahoo history row with an actual EPS is compared with the official release's fiscal period. Equal labels are MATCHED. A Yahoo row identified only by a date is UNVERIFIED, a different label is MISMATCH, and a missing side is INCOMPLETE.
+
+- **Given** Release period 'Q3 2026', Yahoo row period '2026-09-30'
+- **When** alignment is checked
+- **Then** periodAlignmentStatus UNVERIFIED with warning PERIOD_ALIGNMENT_UNVERIFIED
+
+#### BR-ERN-009 · Earnings call transcript source waterfall
+
+**P1** · Lifecycle · Confidence **Medium**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:1458-1480,1858-1934`
+
+Transcripts are sought in order: validated SEC 8-K exhibit, company IR (always skipped), Yahoo/Quartr, public URL (skipped), Alpha Vantage; if all fail, an incomplete Yahoo preview is reported as INCOMPLETE_TRANSCRIPT, otherwise the next untried source is recommended.
+
+- **Given** No SEC exhibit, Yahoo returns a preview, Alpha Vantage key missing
+- **When** get_earnings_call_transcript runs
+- **Then** Final status INCOMPLETE_TRANSCRIPT, contentCompleteness PARTIAL, decisionGrade=false, nextRecommendedFallback alternate_transcript_source
+- **Parameters:** Attempt statuses: SUCCESS, NOT_FOUND, FAILED, SKIPPED, NOT_ELIGIBLE, INCOMPLETE_TRANSCRIPT, PROVIDER_ERROR, YAHOO_METADATA_MISMATCH
+- **Edge cases:**
+  - Explicit Yahoo request skips the automatic Yahoo attempt
+- **Suspected defect:** _next_transcript_fallback treats SKIPPED as untried, and company_ir/public_transcript_url are always SKIPPED, so the recommendation is always company_ir regardless of what else failed.
+- **SME question:** Since company_ir is always recorded as SKIPPED, should the fallback recommendation still point users to company IR first every time?
+
+#### BR-ERN-010 · Earnings metrics extraction confidence
+
+**P1** · Policy · Confidence **Medium**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:380-486`
+
+Metrics read from 8-K EX-99 prose are LOW confidence with warning TEXT_METRIC_VERIFY_REQUIRED; overall confidence is HIGH if any metric is HIGH, else LOW if any is LOW, else the release's MEDIUM/LOW, else NOT_DISCLOSED.
+
+- **Given** An SEC release where revenue was read from text
+- **When** extract_earnings_metrics runs
+- **Then** revenue confidence LOW, extractionMethod EX99_TEXT_CONTEXT, overall LOW, warning TEXT_METRIC_VERIFY_REQUIRED; with no SEC URL the warning is PUBLIC_RELEASE_NOT_FOUND
+- **Parameters:** Release fetch cap 5,000,000 bytes; gross margin ratio = pct/100 to 6 decimals
+- **Edge cases:**
+  - Release source_preference argument is ignored
+- **Suspected defect:** No code path assigns HIGH to any metric, so the overall HIGH branch (lines 468-469) is unreachable.
+- **SME question:** Is any path meant to produce HIGH-confidence metrics here (e.g. XBRL table)? Currently none does.
+
+#### BR-ERN-011 · Earnings period alignment between release and Yahoo estimate row
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/tools/earnings.py:710-734`
+
+The estimate row used is the Yahoo history row with a non-null actual EPS and the latest date. Its period label is compared with the official release period: MATCHED if equal, UNVERIFIED if Yahoo only gives a date, MISMATCH otherwise, and INCOMPLETE if either side is missing.
+
+- **Given** Release period 'Q2 2026' and Yahoo row period '2026-06-30'
+- **When** Periods are aligned
+- **Then** periodAlignmentStatus = UNVERIFIED, PERIOD_ALIGNMENT_UNVERIFIED warning, revenue surprise omitted
+- **Parameters:** date pattern \d{4}-\d{2}-\d{2}; epoch values above 1e12 are treated as milliseconds
+- **Edge cases:**
+  - A release period of 'latest' is treated as missing, which gives INCOMPLETE
+  - Revenue estimate row matched by the same period label or the same date
+
+#### BR-ERN-012 · Earnings release fiscal period extraction
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/earnings_period.py:22-67`
+
+A release's fiscal period is read only from one phrase that joins a quarter to a year (e.g. 'fourth quarter of fiscal 2026', 'Q4 FY2026'). The earliest such phrase wins, and it is never inferred from the filing date.
+
+- **Given** Release text 'Micron Technology reports results for the fourth quarter and full year of fiscal 2026 ...'
+- **When** the period is extracted
+- **Then** period = 'FY2026 Q4', periodStatus EX99_TEXT_RESOLVED; no match gives UNRESOLVED
+- **Parameters:** Year-before-quarter pattern allows at most 40 characters without sentence/dash breaks
+- **Edge cases:**
+  - Comparative prior-year phrases later in the text are ignored
+
+#### BR-ERN-013 · Earnings release fiscal period from a single joined phrase
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/earnings_period.py:16-67`
+
+A release's fiscal period is read only from one phrase that joins a quarter and a year (for example 'fourth quarter and full year of fiscal 2026' or 'Q4 FY2026'), never across a sentence, dash or bullet. The earliest such phrase in the text wins, and the period is never inferred from the filing date.
+
+- **Given** Release text: 'Micron ... record fiscal 2027 ... results for its fourth quarter of fiscal 2026'
+- **When** extract_earnings_period_from_text runs
+- **Then** period 'FY2026 Q4', periodStatus EX99_TEXT_RESOLVED
+- **Parameters:** Year-first pattern allows up to 40 characters between year and quarter, excluding . ! ? ; : • – — |
+- **Edge cases:**
+  - No phrase: UNRESOLVED
+  - Evidence excerpt is capped at 220 characters
+
+#### BR-ERN-014 · Earnings release fiscal period from the release's own text
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/earnings_period.py:21-67`
+
+An earnings release's fiscal period is read only from a single phrase joining a quarter and a year; the earliest such phrase in the text wins, and the period is never inferred from the filing date.
+
+- **Given** Release text '...position Micron for a record fiscal 2027. Micron reports results for its fourth quarter of fiscal 2026'
+- **When** extract_earnings_period_from_text runs
+- **Then** period 'FY2026 Q4', periodStatus EX99_TEXT_RESOLVED; 'fiscal 2027' is not joined to 'fourth quarter' because the year-first pattern cannot cross '.', '!', '?', ';', ':', bullets, dashes or '|' and allows at most 40 characters between.
+- **Parameters:** Year-first join window 0-40 characters; evidence excerpt max 220 chars; years 2000-2099; patterns: '<ordinal> quarter [and full year] [of] [fiscal|FY] YYYY', 'fiscal|FY YYYY ... <ordinal> quarter', 'Qn [of] fiscal|FY YYYY', 'fiscal Qn YYYY'
+- **Edge cases:**
+  - No phrase -> period null, periodStatus UNRESOLVED
+  - 'Q4 2026' without 'fiscal' or 'FY' is not matched
+  - Comparative prior-year phrases later in the text are ignored because the first match wins
+
+#### BR-ERN-015 · Earnings release source selection
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/tools/earnings.py:191-286`
+
+The latest earnings release is the newest 8-K reporting Item 2.02 among the last 20 8-Ks, using its EX-99.1 exhibit if present. Any 8-K is the fallback. If there is no SEC source, the Yahoo calendar earnings date is used at MEDIUM confidence.
+
+- **Given** Recent 8-Ks: Item 5.02 (newest), Item 2.02 (older)
+- **When** The release is resolved
+- **Then** The Item 2.02 filing is chosen, with source type sec_8k_ex991 if an EX-99.1 is found
+- **Parameters:** 8-K look-back 20 filings; exhibit types EX-99.1/EX-99/99.1; archive path uses issuer CIK, not accession prefix
+- **Edge cases:**
+  - No SEC Archives URL: Yahoo fallback with SEC_8K_NOT_FOUND warning
+
+#### BR-ERN-016 · Earnings release source selection (Item 2.02 first, EX-99.1)
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/tools/earnings.py:191-286`
+
+Among the latest 20 8-Ks, one reporting Item 2.02 (results of operations) is preferred, using its EX-99.1 press-release exhibit under the issuer's CIK. Otherwise any 8-K is used. With no 8-K, the release falls back to Yahoo's calendar date at MEDIUM confidence, and failing that to NOT_FOUND.
+
+- **Given** Latest 8-K is Items 5.02/8.01; an older one in the list is Item 2.02
+- **When** the latest earnings release is resolved
+- **Then** the Item 2.02 8-K's EX-99.1 is used, sourceType sec_8k_ex991, confidence HIGH
+- **Parameters:** 8-K lookback limit 20; exhibit types EX-99.1, EX-99, 99.1
+- **Edge cases:**
+  - Archive paths use the issuer CIK, not the accession prefix (filing agent)
+  - Period always starts UNRESOLVED; never inferred from the filing date
+
+#### BR-ERN-017 · Earnings release source URL policy (paywall block)
+
+**P1** · Policy · Confidence **Medium**  
+Source: `yfmcp/tools/earnings.py:103-126`
+
+A caller-supplied earnings release URL must be https and not on a blocked paywalled site. SEC Archive URLs are classed sec_8k and every other https URL is classed company_ir.
+
+- **Given** source_url 'https://www.wsj.com/articles/x'
+- **When** index_earnings_release runs
+- **Then** Returns INPUT_VALIDATION_ERROR 'source_url appears paywalled and is not allowed'
+- **Parameters:** Blocked hosts: seekingalpha.com, wsj.com, bloomberg.com (and www. variants only)
+- **Edge cases:**
+  - Subdomains such as markets.wsj.com or on.wsj.com are not blocked (exact host match)
+  - Any https host that is not an SEC Archive URL is accepted as company_ir, with no check that it is the company's investor-relations site
+- **Suspected defect:** The paywall check matches exact hostnames only, so subdomains of blocked publishers pass. The tool description says 'must be SEC or company IR', but no IR check exists. Same in the Worker (worker/src/yahoo-finance.ts:16771-16799).
+- **SME question:** Should the paywall block cover all subdomains of the blocked publishers, and should company_ir URLs be restricted to a known IR-page registry?
+
+#### BR-ERN-018 · Earnings surprise percentages and near-zero EPS guard
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/tools/earnings.py:807-839`
+
+Revenue surprise % is (actual − estimate) ÷ |estimate| × 100, computed only when the official-release period matches the Yahoo estimate period. EPS delta is always actual − estimate (4 decimals). EPS surprise % is omitted when the absolute estimate is below $0.02.
+
+- **Given** Periods MATCHED, actual revenue $105M, estimate $100M, actual EPS $0.25, estimate $0.20
+- **When** compare_earnings_actual_vs_estimate runs
+- **Then** revenueSurprisePct = 5.0; epsDelta = 0.05; epsSurprisePct = 25.0; confidence = HIGH
+- **Parameters:** EPS near-zero threshold $0.02/share; rounding: pct 2dp, epsDelta 4dp; confidence HIGH only when revenue surprise exists, otherwise MEDIUM
+- **Edge cases:**
+  - Estimate 0 or missing: EPS_ESTIMATE_UNAVAILABLE, no delta
+  - |estimate| < 0.02: EPS_NEAR_ZERO_ESTIMATE_BASE, confidence MEDIUM, epsSurprisePct null
+  - Revenue estimate 0: no revenue surprise
+  - Period not MATCHED: no revenue surprise, but EPS surprise is still computed
+- **Suspected defect:** Actual EPS comes from Yahoo's epsActual first and falls back to the release only when Yahoo has none (lines 738-741). The 'actual' is therefore not the official figure, even though revenue is. Python round() is half-even while the Worker uses toFixed, which can differ on exact .5 ties.
+
+#### BR-ERN-019 · Guidance amount parsing with shared unit
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/guidance_history.py:33-46; yfmcp/tools/earnings.py:548-551`
+
+If only one end of a revenue range has a scale word, the other end uses it too. Scaled amounts are rounded half-up to whole dollars, and the midpoint is the simple average.
+
+- **Given** '$2.0 to $2.4 billion'
+- **When** amounts are parsed
+- **Then** low 2,000,000,000, high 2,400,000,000, midpoint 2,200,000,000
+- **Parameters:** billion/bn/b = 1e9, million/mn/m = 1e6, thousand/k = 1e3
+
+#### BR-ERN-020 · Guidance not read vs not disclosed
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `yfmcp/tools/earnings.py:503-520,598-606`
+
+If no SEC earnings release was found or its text could not be fetched, guidance is NOT_READ (not 'no guidance'), with a code and a retryable flag. Only a read release with no ranges is NOT_DISCLOSED.
+
+- **Given** The SEC release URL resolves but the fetch returns nothing
+- **When** extract_guidance runs
+- **Then** status RELEASE_TEXT_NOT_AVAILABLE, retryable true, every metric NOT_READ, confidence NOT_DECISION_GRADE
+- **Parameters:** RELEASE_NOT_RESOLVED retryable=false; RELEASE_TEXT_NOT_AVAILABLE retryable=true
+
+#### BR-ERN-021 · Guidance outcome evaluation status
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/guidance_history.py:416-459`
+
+Guidance is scored against reported GAAP actuals (BELOW/WITHIN/ABOVE) only when actuals were read, the metric has a table, the basis is not non-GAAP and the actual exists; otherwise the status explains why (ACTUALS_NOT_READ, NOT_EVALUATED_METRIC, NOT_EVALUATED_NON_GAAP_BASIS, NOT_EVALUATED_HALF_YEAR, NOT_EVALUATED_FISCAL_QUARTER_MAPPING, ACTUAL_NOT_YET_REPORTED).
+
+- **Given** FY2026 EPS guidance 4.10-4.30 (GAAP) and reported diluted EPS 4.35
+- **When** Outcomes are computed
+- **Then** status EVALUATED, positionVsLast ABOVE
+- **Parameters:** Annual 350-380 days, quarter 80-100 days, H1 170-190 days ending June for calendar fiscal years
+- **Edge cases:**
+  - grossMargin is never evaluated (NOT_EVALUATED_METRIC)
+  - any non-GAAP entry in the group blocks evaluation
+  - H2 is never evaluated
+
+#### BR-ERN-022 · Guidance period scope fallback order
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/guidance_history.py:144-180`
+
+A range's period is read from its own sentence first, then from the nearest 'outlook'/'guidance' heading up to 1,500 characters above, then from the 200 characters before it; the scope field records which.
+
+- **Given** A bullet '$1.85 to $2.05' with no period, under a heading 'Third quarter of fiscal 2027 outlook' 900 characters above
+- **When** period_for_excerpt runs
+- **Then** targetPeriod Q3 2027 with scope GUIDANCE_MENTION
+- **Parameters:** Heading lookback 1,500 chars; heading window ±100 chars; preceding window 200 chars; sentence window 300 chars back / 200 forward
+- **Edge cases:**
+  - A heading mention naming no period yields to the next older mention
+  - Nothing found -> scope null
+
+#### BR-ERN-023 · Guidance revision classification
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `yfmcp/guidance_history.py:254-298`
+
+For the same metric and target period, the first release is INITIATED; each later release is REAFFIRMED if both bounds are unchanged, RAISED/LOWERED if the midpoint moved, else NARROWED or WIDENED by range width; a release text stating withdrawal or suspension of guidance is WITHDRAWN.
+
+- **Given** Q4 2026 revenue guidance $10.0B-$10.4B, then $10.1B-$10.3B in the next release
+- **When** Guidance history is built
+- **Then** First entry INITIATED; second NARROWED (midpoint 10.2B unchanged, width 0.4B -> 0.2B); $10.2B-$10.6B would be RAISED
+- **Parameters:** Equality tolerance 1e-9 x max(1,|a|); withdrawal regex windows 60/40 chars (guidance_history.py:183-186)
+- **Edge cases:**
+  - entries without a target-period label or fiscal year are not grouped
+  - only releases with status READ are parsed
+  - a release with no guidance found is not a withdrawal
+  - statedAction REAFFIRMED_IN_TEXT is independent of the computed change
+
+#### BR-ERN-024 · Guidance target period from text
+
+**P1** · Calculation · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/guidance_history.py:50-136`
+
+The period a guidance range targets is the closest period phrase before the range (else the first after it); a named quarter or half wins over the fiscal year that contains it, and a year stated only by its end date takes the 52/53-week fiscal year of that date.
+
+- **Given** Text 'For the first quarter of fiscal 2026, revenue is expected to be $2.2 billion to $2.4 billion'
+- **When** The target period is resolved
+- **Then** label 'Q1 2026', basis TEXT; 'fiscal year ending June 25, 2027' gives FY2027 with basis TEXT_PERIOD_END; a quarter with no year gives basis TEXT_YEAR_NOT_STATED; nothing found gives NOT_STATED
+- **Parameters:** Two-digit years mapped to 20xx; recognised forms: full-year/fiscal/FY yy, 'yyyy full-year', ordinal quarter, Qn, first/second half, 1H25/H2
+- **Edge cases:**
+  - A fiscal-year match inside a quarter phrase is ignored
+  - Period end date after the phrase ('ended October 31, 2026') is captured as periodEnd
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (The card matches the code, but P0 is not justified.
+
+Faithful. I read /home/user/yahoo-finance-mcp/yfmcp/guidance_history.py:50-136, and the code does what the card says:
+- Lines 111-121: the closest period phrase before the range wins. If there is none, the first one after it wins.
+- Lines 106-108: a quarter or half drops any fiscal-year match inside its own text span.
+- Lines 87-91: "fiscal year ending <date>" takes its fiscal year from fiscal_year_of_period_end and gets basis TEXT_PERIOD_END (line 135).
+- Line 135: a quarter or half with no year gets TEXT_YEAR_NOT_STATED.
+- Line 110: no match gives NOT_STATED.
+- Line 66: two-digit years become 20xx.
+- I traced the example by hand. "first quarter of fiscal 2026" matches _ORDINAL_QUARTER_RE with year 2026. The FY_RE match on "fiscal 2026" falls inside that span and is dropped, so the result is Q1 2026 with basis TEXT.
+
+Minor details the card leaves out:
+- Two phrases at the same position: the later-found one wins (`>=` at line 115).
+- An end date written after a phrase ("ending June 25, 2027", lines 59 and 81) is stored as periodEnd. It does not change the year or the basis.
+- The recognised-forms list misses one pattern from line 51: "yyyy annual".
+
+P0 not justified. This is text parsing in a read-only market-data and analytics tool (an MCP server). It labels which period a company's own guidance range refers to. It does not move money or enforce any regulation, and no auditor or controller relies on it as a control. A wrong label would give wrong guidance-revision and outcome comparisons, so it does affect how correct the analysis is. But it is a parsing heuristic, not a guard on stored records. Under the project's CLAUDE.md, changes to its output fields or enum values (the basis values) are planner decisions that need Python/TS parity. That makes it an important behaviour-parity rule, which fits P1, not P0.
+
+No instruction-like text or credentials appear in the cited lines. | I read the code myself and ran all four examples through guidance_target_period. The rule card describes what the code does; the minor gaps are listed below. The cited path legacy/yahoo-finance-mcp/... does not exist. The code is at /home/user/yahoo-finance-mcp/yfmcp/guidance_history.py:50-136, and the mirror at worker/src/guidance-history.ts is not checked here.
+
+Fidelity: (1) 'For the first quarter of fiscal 2026, ... $2.2 billion to $2.4 billion' returns label 'Q1 2026', basis TEXT. The ordinal-quarter pattern (line 52) captures 2026. The separate 'fiscal 2026' match (line 50) starts inside the quarter phrase, so lines 106-108 drop it. (2) 'fiscal year ending June 25, 2027' returns FY2027, periodEnd 2027-06-25, basis TEXT_PERIOD_END. Lines 58 and 87-91 use fiscal_year_of_period_end, which takes the calendar year of the end date, except that a year ending in the first week of January counts as the year before. (3) A quarter with no year returns label 'Q1', basis TEXT_YEAR_NOT_STATED. (4) No match returns NOT_STATED. 'Closest before the anchor, else first after it' matches lines 111-121. The anchor defaults to the end of the text, and a phrase counts as 'before' when its start position is before the anchor.
+
+Gaps the card leaves out (none contradict it):
+- 'Quarter/half wins over the year inside it' is decided by text position: a year match is dropped only when it starts inside the quarter or half phrase. The code does not compare calendar periods.
+- When two matches start at the same position before the anchor, the one found later wins, because line 115 uses >=.
+- 'yyyy annual' is also recognised (line 51), not only 'yyyy full-year'.
+- Two-digit years are accepted only for FY/fiscal/full-year, 1H25 and H2 25. Ordinal quarters, Qn and 'first/second half' need a four-digit year.
+- A period phrase followed by 'ending/ended <date>' (lines 59 and 81-83) gets a periodEnd but keeps basis TEXT. Only 'fiscal year ending <date>' gives TEXT_PERIOD_END.
+
+P0: not justified. This is a text-parsing step in a read-only market-data/MCP analysis tool. It labels which period a company's guidance range refers to. It does not move money or enforce a regulatory requirement, and it does not guard stored data (it is pure parsing with no persistence). A wrong label would mislead the guidance-versus-actual comparison, so it is a strong P1 correctness/parity rule. Project CLAUDE.md requires strict Python/TS output parity, so it still belongs in the parity tests, but not in the P0 contract. No instruction-like text and no credentials appear in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-ERN-025 · Guidance target period resolution
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/guidance_history.py:69-136,155-180`
+
+A guidance range's target period is read from its own sentence first, picking the period mention closest before the range. Quarters and halves win over the fiscal year that contains them. If the sentence has none, the nearest 'outlook/guidance' mention within 1,500 characters above is used, and then the 200 characters before the range.
+
+- **Given** 'For the third quarter of fiscal 2027, revenue is expected to be between $2.2 billion and $2.4 billion.'
+- **When** The period is resolved
+- **Then** label 'Q3 2027', basis TEXT, scope SENTENCE
+- **Parameters:** heading look-back 1,500 chars; heading window ±100 chars; preceding window 200 chars; two-digit years +2000
+- **Edge cases:**
+  - 'fiscal year ending June 25, 2027' takes the fiscal year of that 52/53-week date (basis TEXT_PERIOD_END), then the company naming offset
+  - No year stated: basis TEXT_YEAR_NOT_STATED, so the range is not compared
+
+#### BR-ERN-026 · Guidance withdrawal and reaffirmation detection
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `yfmcp/guidance_history.py:183-251`
+
+A release that withdraws or suspends guidance or outlook is recorded as a WITHDRAWN event. A range whose sentence says reaffirm, reiterate or maintain guidance is tagged REAFFIRMED_IN_TEXT. Ranges with non-finite ends are dropped.
+
+- **Given** 'The Company is withdrawing its full-year 2026 outlook.'
+- **When** guidance entries are built
+- **Then** an entry metric 'any', event WITHDRAWN, target FY2026
+- **Parameters:** window 60 chars (withdraw), 40 chars (suspend), 30 chars (maintain)
+- **Edge cases:**
+  - Release status other than READ yields no entries; a release with none found is not a withdrawal
+
+#### BR-ERN-027 · Guidance withdrawal and reaffirmation detection
+
+**P1** · Lifecycle · Confidence **Medium** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/yfmcp/guidance_history.py:183-251,471-491`
+
+A release that says it withdrew or suspended guidance/outlook creates a WITHDRAWN event; a range whose sentence says reaffirm/reiterate/maintain guidance is tagged REAFFIRMED_IN_TEXT; only releases with status READ are read.
+
+- **Given** A READ release containing 'The Company is withdrawing its full-year 2026 outlook'
+- **When** Guidance entries are built
+- **Then** A WITHDRAWN entry for FY2026 is added to withdrawals; a release not READ yields no entries; a release with no ranges found is not a withdrawal
+- **Parameters:** Withdraw pattern: withdraw/withdrew/withdrawn within 60 chars of guidance/outlook, or suspend within 40 chars
+- **Edge cases:**
+  - Only the first withdrawal phrase in a release is recorded
+  - Guidance given only in tables not matched by the extraction rules is not read
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (I read the code at /home/user/yahoo-finance-mcp/yfmcp/guidance_history.py. The cited path has a legacy/yahoo-finance-mcp/ prefix that doesn't exist, but lines 183-251 and 471-491 in this file match the citation: the _WITHDRAWN_RE/_REAFFIRM_RE patterns, guidance_entries, and guidance_history.
+
+P0 not justified: This is a regex heuristic that labels sentences in SEC press releases for an informational market-data tool. It moves no money, books no transactions, and enforces no regulatory or compliance requirement. It also guards no stored data: it only produces a descriptive "withdrawals" list and a statedAction tag. A regulator, auditor or finance controller would not care if this changed silently. It does matter for Python/TS output parity, which makes it a P1/P2 behaviour rule, not a P0.
+
+Not faithful, mostly right but with one wrong claim and some loose wording:
+(1) The spec says "a release with no ranges found is not a withdrawal". That is wrong. The _WITHDRAWN_RE.search(text) check (~lines 236-246) runs on the whole release text whether or not any guidance ranges were found. A READ release with no ranges but with text like "withdrawing its outlook" still produces a WITHDRAWN entry.
+(2) The withdraw pattern is described as "within 60 chars". The code actually allows up to 60 characters with no period in between ([^.]{0,60}), so the match must stay in one sentence. It also has a reverse form, "guidance/outlook ... withdrawn" within 60 characters. And only the first match per release is recorded, so a release gives at most one WITHDRAWN entry.
+(3) Reaffirmation: the spec says the sentence must say "reaffirm/reiterate/maintain guidance". Only "maintain" has to appear within 30 characters of guidance/outlook. A bare "reaffirm" or "reiterate" anywhere in the range's sentence is enough for REAFFIRMED_IN_TEXT.
+(4) The parts that are correct: only READ releases with text are read (anything else returns []), and the given example would match.
+
+No instruction-shaped text or credentials were found in the cited lines. | I read the code at /home/user/yahoo-finance-mcp/yfmcp/guidance_history.py. The citation's legacy/ prefix does not exist in this repo. The cited lines contain no text that looks like instructions to an AI tool.
+
+FIDELITY: The Given/When/Then holds.
+- Lines 202-204: `guidance_entries` returns [] unless status == "READ" and the text is non-empty.
+- Line 183: `_WITHDRAWN_RE` matches "withdrawing its full-year 2026 outlook". `period_for_excerpt` reads the period from that sentence, and `_FY_RE` picks up "full-year 2026", so the label is FY2026.
+- Lines 239-250: withdrawal detection runs on the whole text and does not depend on any ranges being found. A release with no ranges and no withdrawal wording produces no WITHDRAWN entry, which matches the note at line 508.
+- Line 489: WITHDRAWN entries go into `withdrawals`.
+
+The rule card leaves out some details a re-implementer would need. None of them breaks the stated example.
+1. The pattern also matches the reverse order: "guidance/outlook" followed by "withdrawn" within 60 characters (line 184). The suspend pattern only matches forward.
+2. Every gap is `[^.]`, so no match can cross a period.
+3. Only the first match in a release counts (`re.search`), so a release produces at most one WITHDRAWN entry.
+4. The reaffirm check is looser than the plain-English text says. "reaffirm*" or "reiterat*" anywhere in the range's sentence is enough, with no need to mention guidance. Only "maintain*" has to be within 30 characters of guidance/outlook (line 189). The parameter list leaves out this 30-character window.
+5. `guidance_history` (line 473) passes each entry through `_with_naming`. A period named only by its end date (basis TEXT_PERIOD_END) can be relabelled by the company's fiscal-year naming offset, and that includes WITHDRAWN entries.
+6. The excerpt is cut to 300 characters.
+
+P0: Not justified; I'd rate it P1. This is a text-matching heuristic that labels guidance events in an informational analytics output. It moves no money, enforces no regulation, and does not guard stored data; a wrong match mislabels output but corrupts no records. It does matter for the project's Python/TS parity requirement, which makes it a strong parity-test candidate. That does not make it P0.) — confirm criticality.
+
+</details>
+
+#### BR-ERN-028 · Latest earnings release source resolution and confidence
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:234-304`
+
+The latest earnings release comes from an SEC 8-K first (HIGH confidence), else from Yahoo's earnings calendar date (MEDIUM, warning SEC_8K_NOT_FOUND), else nothing (NOT_FOUND); the fiscal period stays UNRESOLVED unless the official release text resolves it.
+
+- **Given** No SEC 8-K earnings exhibit but Yahoo calendar shows earnings on 2025-07-30
+- **When** get_latest_earnings_release runs
+- **Then** Source yahoo_estimate, confidence MEDIUM, periodStatus UNRESOLVED, warning SEC_8K_NOT_FOUND; period is never parsed from Yahoo sources
+- **Parameters:** reportedAt = 8-K acceptedAt, else filingDate
+- **Edge cases:**
+  - period argument is ignored (reserved)
+
+#### BR-ERN-029 · Reported actuals labelled by period for guidance outcomes
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/guidance_history.py:305-413`
+
+SEC revenue and diluted EPS facts (10-K/10-Q, newest filing per period) are labelled by duration: 350–380 days is FY, 80–100 days is a quarter, and 170–190 days ending in June is H1. Quarters are calendar quarters only when every annual period ends in December. Otherwise they are fiscal quarters counted back from a year end whose 10-K states the fiscal year.
+
+- **Given** Annual periods ending each December; a quarter 2026-04-01 to 2026-06-30 with revenue $50M
+- **When** Actuals are labelled
+- **Then** Label 'Q2 2026' maps to $50M; H1 2026 maps to the 6-month YTD fact
+- **Parameters:** FY 350-380 days; quarter 80-100; half 170-190 (June end, calendar FY only); year-end match window -7 to +280 days; in-progress year projected at latest year end + 364 days
+- **Edge cases:**
+  - Second halves are never labelled (not filed as a period)
+  - Non-calendar filer with no stated fiscal year: quarters unlabelled, so outcomes are NOT_EVALUATED_FISCAL_QUARTER_MAPPING
+
+#### BR-ERN-030 · Reported-actual period labels for guidance outcomes
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/guidance_history.py:305-413`
+
+Actuals come from 10-K/10-Q facts, newest filing per period. Annual periods (350–380 days) use the fiscal year the 10-K states. Quarters (80–100 days) use calendar quarters only if every annual period ends in December; otherwise they are fiscal quarters counted back from a year end the filer stated. H1 exists only for calendar filers; H2 is never derived.
+
+- **Given** Calendar filer, revenue fact 2025-03-30 to 2025-06-28
+- **When** actuals are labelled
+- **Then** label 'Q2 2025'
+- **Parameters:** annual 350–380 d; quarter 80–100 d; half 170–190 d; quarter-to-year-end window −7..280 d; projected next year end +364 d
+- **Edge cases:**
+  - No stated fiscal year for a non-calendar filer means mapping NONE and quarters are unlabelled
+
+#### BR-ERN-031 · Revenue and EPS surprise calculation
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/tools/earnings.py:797-839`
+
+Revenue surprise % is calculated only when periods are MATCHED and a non-zero estimate exists. EPS delta is actual − estimate. EPS surprise % is left out when |estimate| < $0.02, and confidence is HIGH only when the revenue surprise was also calculated.
+
+- **Given** Matched periods, revenue actual $1.05B vs estimate $1.00B; EPS actual 0.012 vs estimate 0.010
+- **When** surprise is computed
+- **Then** revenueSurprisePct 5.00; epsDelta 0.002; epsSurprisePct omitted with EPS_NEAR_ZERO_ESTIMATE_BASE; confidence MEDIUM
+- **Parameters:** near-zero EPS base $0.02; rounding 2 dp (pct), 4 dp (delta)
+- **Suspected defect:** An EPS estimate of exactly 0 goes down the EPS_ESTIMATE_UNAVAILABLE branch, so no epsDelta is calculated, although the near-zero rule exists to give a delta in that case. Also, the actual EPS used is Yahoo's epsActual, not the official release figure.
+
+#### BR-ERN-032 · SEC 8-K transcript exhibit validation
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:1109-1155,1758-1856`
+
+An 8-K exhibit (EX-99.2/99.3 or described as transcript/conference call) is certified as a decision-grade call transcript only if it has 300+ characters, a call marker, at least 3 speaker turns by at least 2 distinct speakers, and, if it looks like a presentation, at least 5 turns.
+
+- **Given** EX-99.2 with 'conference call' text, 'Operator:' and 'Jane Doe - CFO:' turns totalling 6 turns
+- **When** get_earnings_call_transcript checks candidates
+- **Then** Status VALIDATED, sourceType sec_8k_exhibit, decisionGrade=true, contentCompleteness FULL; otherwise REJECTED and status SEC_EXHIBIT_NOT_FOUND
+- **Parameters:** Min length 300; min 3 turns; min 2 speakers; presentation needs 5 turns; up to 4 candidates checked; content truncated at 50,000 chars
+- **Edge cases:**
+  - CIK from ticker, accession prefix as fallback; failure -> CIK_RESOLUTION_FAILED
+
+#### BR-ERN-033 · SEC exhibit transcript certification
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/tools/earnings.py:1109-1153`
+
+An 8-K exhibit counts as an earnings-call transcript only if it is EX-99.2/99.3 or its description says transcript/call/proceedings, AND its text is at least 300 characters, has a call marker, at least 3 speaker turns and at least 2 distinct speakers. Presentation-like text needs at least 5 turns.
+
+- **Given** EX-99.2 with 2,000 chars, 'conference call', 4 turns by Operator/CEO/Analyst, no slide markers
+- **When** the exhibit is validated
+- **Then** VALIDATED; sourced as decision-grade SEC_FILING, FULL completeness
+- **Parameters:** min length 300; ≥3 turns; ≥2 speakers; presentation needs ≥5 turns
+
+#### BR-ERN-034 · Text-extracted release metrics are low confidence
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/tools/earnings.py:434-473`
+
+Metrics read from EX-99 prose are always LOW confidence and carry TEXT_METRIC_VERIFY_REQUIRED. Overall confidence is HIGH only if some metric is HIGH, then LOW, otherwise the release's own confidence.
+
+- **Given** Revenue found in release prose
+- **When** extract_earnings_metrics returns
+- **Then** revenue.confidence LOW, extractionMethod EX99_TEXT_CONTEXT, warning TEXT_METRIC_VERIFY_REQUIRED
+- **Edge cases:**
+  - A non-SEC source gives PUBLIC_RELEASE_NOT_FOUND
+
+#### BR-ERN-035 · Transcript exhibit certification
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/tools/earnings.py:1124-1153`
+
+An SEC exhibit is accepted as an earnings-call transcript only if it has at least 300 characters, a call marker, at least 3 speaker turns and at least 2 distinct speakers. Exhibits that look like presentations also need at least 5 turns. Candidates are EX-99.2/99.3 or exhibits described as transcript/conference call/proceedings.
+
+- **Given** EX-99.2 with 2,000 chars, 'conference call', speakers Operator, Jane Doe and John Roe across 6 turns
+- **When** Transcript validation runs
+- **Then** valid = true
+- **Parameters:** min length 300; min turns 3; min distinct speakers 2; presentation min turns 5
+- **Edge cases:**
+  - Investor presentation with 4 turns: rejected
+
+#### BR-ERN-036 · Transcript fiscal quarter resolution for Alpha Vantage
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:1483-1537`
+
+Alpha Vantage transcripts need a fiscal quarter, taken from the caller (EXPLICIT) or from the official 8-K release text (OFFICIAL_RELEASE_RESOLVED); otherwise the attempt is NOT_ELIGIBLE with FISCAL_QUARTER_UNRESOLVED.
+
+- **Given** Caller passes fiscal_quarter '2025 q3'
+- **When** The quarter is resolved
+- **Then** fiscalQuarter '2025Q3', status EXPLICIT
+- **Parameters:** Pattern yyyy\s*Qn, case-insensitive
+- **Edge cases:**
+  - Missing key -> ALPHA_VANTAGE_API_KEY_MISSING
+
+#### BR-ERN-037 · Yahoo transcript completeness classification
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/clients/yahoo_transcripts.py:33-35,181-252; legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:1419-1437`
+
+A Yahoo transcript is PARTIAL (preview only) when full text is 256 characters or less, paragraphs come from at most one speaker, and there are very few paragraphs for the advertised speakers; UNKNOWN when there is no usable content; otherwise FULL. Only FULL is accepted.
+
+- **Given** Yahoo transcript with 1 paragraph, full text 180 chars, 6 advertised speakers
+- **When** Completeness is assessed
+- **Then** contentCompleteness PARTIAL, reasonCode YAHOO_PREVIEW_ONLY, attempt status INCOMPLETE_TRANSCRIPT, recommendedNextAction TRY_ALTERNATE_SOURCE
+- **Parameters:** Preview max text 256 chars; <=1 paragraph with >=2 speakers, or <=3 paragraphs with >=4 speakers; transcript cache 30 days
+- **Edge cases:**
+  - Missing transcript object -> UNKNOWN / TRANSCRIPT_SHAPE_INVALID -> PROVIDER_ERROR
+
+#### BR-ERN-038 · Yahoo transcript identity check
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/clients/yahoo_transcripts.py:143-178; legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:1401-1418`
+
+A Yahoo transcript is rejected if its event ID is missing or differs from the requested one, or if an expected fiscal quarter is known and the returned year+quarter does not match.
+
+- **Given** Request event 12345 for 2025Q2; Yahoo returns event 12345 with fiscalYear 2025, fiscalPeriod Q1
+- **When** The payload is validated
+- **Then** Attempt status YAHOO_METADATA_MISMATCH with reason 'Yahoo returned fiscal quarter 2025Q1; expected 2025Q2'
+- **Parameters:** Quarter format yyyyQn
+- **Edge cases:**
+  - Multiple distinct event IDs in one payload also rejected
+
+#### BR-ERN-039 · Management commentary confidence by source
+
+**P2** · Policy · Confidence **Medium**  
+Source: `yfmcp/tools/earnings.py:626-650`
+
+A topic's first matching sentence is HIGH confidence only from an SEC 8-K source, MEDIUM from other sources, and LOW with NOT_FOUND when there is no match.
+
+- **Given** Topic 'margin' found in a sec_8k_ex991 release
+- **When** commentary is extracted
+- **Then** confidence MEDIUM (sourceType is not exactly 'sec_8k')
+- **Suspected defect:** The resolver labels EX-99.1 sources 'sec_8k_ex991', which fails the != 'sec_8k' test. So the main SEC press-release path is reported MEDIUM, not HIGH.
+- **SME question:** Should sec_8k_ex991 sources get HIGH confidence like sec_8k?
+
+#### BR-ERN-040 · Management commentary topic status
+
+**P2** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/earnings.py:614-651`
+
+Each requested topic is FOUND with the first matching sentence (HIGH confidence from an SEC 8-K, MEDIUM otherwise) or NOT_FOUND with LOW confidence.
+
+- **Given** Topic 'pricing' found in an SEC 8-K release
+- **When** extract_management_commentary runs
+- **Then** status FOUND, confidence HIGH, excerpt capped at 240 chars
+- **Parameters:** Excerpt max 240 chars
+
+#### BR-ERN-041 · Transcript request input validation
+
+**P2** · Validation · Confidence **High**  
+Source: `yfmcp/tools/earnings.py:1664-1721`
+
+fiscal_quarter must be YYYYQ1–Q4 and event_id digits only. A source_url's event ID and quarter must match any explicit values. paragraph_limit is 1–50 and the cursor must be non-negative.
+
+- **Given** source_url for event 123 and event_id 456
+- **When** transcript is requested
+- **Then** INPUT_VALIDATION_ERROR 'event_id does not match source_url'
+- **Parameters:** paragraph_limit 1–50, default 20
+
+#### BR-ERN-042 · Transcript source fallback order
+
+**P2** · Policy · Confidence **High**  
+Source: `yfmcp/tools/earnings.py:1458-1515`
+
+When a transcript is not found, the next source suggested is company IR, then a public transcript URL, then Yahoo/Quartr, then Alpha Vantage. Alpha Vantage needs a fiscal quarter in YYYYQn form, taken from explicit input or the official release period.
+
+- **Given** Attempts: company_ir FAILED, public_transcript_url SKIPPED
+- **When** Next fallback is computed
+- **Then** next = public_transcript_url
+- **Parameters:** quarter regex (\d{4})\s*Q([1-4])
+- **Edge cases:**
+  - Unresolved quarter: fiscalQuarterStatus UNRESOLVED
+
+#### BR-ERN-043 · Yahoo transcript HTTP status mapping differs from market providers
+
+**P2** · Lifecycle · Confidence **Medium**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/clients/yahoo_transcripts.py:289-296`
+
+For Yahoo transcripts, 429 is RATE_LIMIT, 401 and 403 are AUTH_ERROR, 404 is NOT_FOUND, anything else PROVIDER_ERROR.
+
+- **Given** Yahoo transcript endpoint returns 403
+- **When** The status is mapped
+- **Then** AUTH_ERROR (market providers would check the message for ENTITLEMENT_REQUIRED)
+- **Parameters:** n/a
+- **SME question:** Should a Yahoo 403 be distinguished as entitlement/block vs auth, as Alpha/Finnhub 403s are?
+
+### News & public events
+
+#### BR-NWS-001 · Approved company IR page URL and revalidation
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/server.py:931-1008`
+
+Company IR page items are accepted only from HTTPS URLs on the registry's allowed hosts (ignoring www) and allowed path prefixes; an entry is fresh until its revalidateAfter date, and an unparseable date counts as stale.
+
+- **Given** Registry entry allowing host investors.example.com and prefix /news/; an item linking to http://investors.example.com/news/x
+- **When** _company_ir_page_item builds the item
+- **Then** Rejected (scheme not https). An https link under /news/ is accepted with confidence HIGH, approvalStatus approved.
+- **Parameters:** Scheme https only; www prefix stripped; revalidateAfter null -> always fresh
+- **Edge cases:**
+  - Malformed revalidateAfter -> treated as not fresh
+  - Relative links are resolved against the final fetched URL before checking
+
+#### BR-NWS-002 · Event verification query term threshold
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/server.py:3181-3235`
+
+An event query must be non-empty; its meaningful terms (3+ letters, not generic words like 'announced' or 'results') must all match when there are one or two, otherwise at least 67% (rounded up) must match by word stem, unless the whole phrase appears verbatim.
+
+- **Given** Query 'ASTS BlueBird satellite launch announced'
+- **When** verify_company_event matches evidence
+- **Then** Meaningful terms: asts, bluebird, satellite, launch (4); required = ceil(4 x 0.67) = 3 stem matches, or a PHRASE match of the full normalized query.
+- **Parameters:** Min term length 3; threshold 0.67; stopwords include announce(d/s/ment), company, corporate, latest, news, official, press, release, report(ed/s), result(s), today, update(d/s); lookback 365 days; collection cap 50 per source with keep_all
+- **Edge cases:**
+  - Empty query -> INPUT_VALIDATION_ERROR
+  - No meaningful terms -> EVENT_QUERY_TOO_GENERIC warning and only phrase match can succeed
+  - 3 terms: 3 x 0.67 = 2.01 so all 3 terms are required
+- **Suspected defect:** Using 0.67 rather than 2/3 means a 3-term query requires all 3 terms (ceil(2.01)=3) and a 6-term query requires 5, which is stricter than the apparent two-thirds intent.
+- **SME question:** Is the intended term threshold two-thirds (2 of 3, 4 of 6) or strictly 67% rounded up as coded?
+
+#### BR-NWS-003 · Event verification status lifecycle
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/server.py:3237-3277,3371-3394`
+
+A company event is CONFLICTING if conflicting evidence exists, CONFIRMED if an official source with a URL and high/medium confidence matched in range, PARTIAL if only other sources matched, STALE if all matches are older than 90 days, else NOT_FOUND; CONFIRMED is downgraded to PARTIAL when none of the top 5 evidence items names the company, and NOT_FOUND becomes SOURCE_LIMITED_NOT_FOUND when a source failed.
+
+- **Given** A press release matched in range with confidence HIGH and URL, but its title, tickers and issuer don't reference the ticker or company name
+- **When** verify_company_event finishes
+- **Then** Status starts CONFIRMED, all bestEvidence relevance LOW -> status PARTIAL with warning LOW_RELEASE... code LOW_RELEVANCE_EVIDENCE.
+- **Parameters:** Stale cutoff 90 days (_STALE_EVENT_DAYS); official source types sec_filing, company_ir, company_ir_page, press_release, newswire, yahoo_finance_press_releases; bestEvidence top 5; retryable failure modes WORKER_SUBREQUEST_LIMIT, RATE_LIMITED, PROVIDER_TIMEOUT
+- **Edge cases:**
+  - Without start/end dates every matched item counts as in range
+  - STALE is only reachable when a date window excludes all matches
+  - Matched items lacking publishedAt are ignored in the stale test; if every match lacks a date, stale_only is vacuously true
+  - SEC/company_ir source types count as HIGH relevance automatically
+
+#### BR-NWS-004 · Marketaux wire fallback eligibility
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/server.py:2024-2086,437-438`
+
+The quota-bounded Marketaux wire fallback runs only when the caller explicitly chose non-priority sources, or when Yahoo/Finnhub coverage was limited, or when they returned no item matching the query.
+
+- **Given** Default sources; Yahoo returned 4 items, none containing the query 'buyback'; Finnhub completed OK
+- **When** Fallback reason is computed
+- **Then** Reason HIGHER_PRIORITY_EMPTY so Marketaux runs (max 3 items, wire domains only).
+- **Parameters:** Priority sources yahoo_finance, yahoo_finance_news, yahoo_finance_press_releases, finnhub; Marketaux max items 3; wire domains businesswire.com, prnewswire.com, globenewswire.com
+- **Edge cases:**
+  - No priority source selected -> EXPLICIT_SOURCE_SELECTION
+  - A priority source not completed or in an error status -> HIGHER_PRIORITY_COVERAGE_LIMITED
+  - Matching items present and no limits -> no fallback
+
+#### BR-NWS-005 · News collection status when results are empty or limited
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/server.py:2130-2147`
+
+A news collection with items but an unavailable/ineligible/identity-unavailable source is PARTIAL; an empty one is SOURCE_LIMITED_NOT_FOUND if any source was limited or an IR-page problem occurred, NOT_FOUND if sources ran cleanly, and PROVIDER_ERROR if no source ran.
+
+- **Given** No items returned, warning SOURCE_UNAVAILABLE for Yahoo Finance
+- **When** Collection status is computed
+- **Then** SOURCE_LIMITED_NOT_FOUND, so an empty result is not read as genuine absence.
+- **Parameters:** Limiting codes SOURCE_UNAVAILABLE, SOURCE_NOT_ELIGIBLE, SOURCE_IDENTITY_UNAVAILABLE, any COMPANY_IR_PAGE_* warning
+- **Edge cases:**
+  - Items present and no limiting warning -> status None (normal)
+
+#### BR-NWS-006 · News item evidence class, ticker match and decision use
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/server.py:269-311,427-430`
+
+Each news item is graded by source: SEC EX-99 or an approved IR page is official evidence to use; other official/wire sources say 'check official releases'; Yahoo news on material topics (earnings, guidance, contract, financing, product, regulatory, litigation) also says check official releases; everything else is context only.
+
+- **Given** A Yahoo Finance news item with eventType 'analyst' and a Finnhub-hosted URL
+- **When** The item is enriched
+- **Then** evidenceClass CONTEXTUAL_NEWS, urlProvenance PROVIDER, decisionUse CONTEXT_ONLY.
+- **Parameters:** Evidence classes SEC_FILING, APPROVED_IR_PAGE, OFFICIAL_RSS_ATOM, WIRE_RELEASE, CONTEXTUAL_NEWS; provider hosts finance.yahoo.com, finnhub.io; tickerMatch EXPLICIT/SOURCE_SCOPED/UNVERIFIED
+- **Edge cases:**
+  - A plain sec_filing item is only CHECK_OFFICIAL_RELEASES, not USE_OFFICIAL_EVIDENCE
+  - Item with no URL -> urlProvenance UNKNOWN
+
+#### BR-NWS-007 · News source coverage state and recommended next action
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/server.py:314-353,2398-2408`
+
+Coverage is PARTIAL if any source is unconfigured, ineligible, errored, rate limited, timed out, changed, or an IR-page source is not registered/due for revalidation; the next action is retry (rate limit/timeout), check official releases (other failures or ineligible skips), retry the truncated source, or use the returned context.
+
+- **Given** Finnhub status NOT_ELIGIBLE (market not enabled) and Yahoo OK
+- **When** Coverage is built
+- **Then** state PARTIAL, skippedSources [finnhub], recommendedNextAction CHECK_OFFICIAL_RELEASES. NOT_NEEDED skips do not limit coverage.
+- **Parameters:** Action precedence RETRY_RETRYABLE_SOURCES > CHECK_OFFICIAL_RELEASES > RETRY_TRUNCATED_SOURCE > USE_RETURNED_CONTEXT
+- **Edge cases:**
+  - A resolved_action passed by the caller overrides the derived action
+- **Suspected defect:** failed_states in _build_coverage (lines 315-320) includes WEBSITE_NOT_AVAILABLE, DISCOVERY_NOT_FOUND, DISCOVERY_BUDGET_EXHAUSTED, FEED_NOT_FOUND and PARSE_ERROR, but _compute_source_coverage (2402-2406) does not, so a response can list failedSources while reporting coverage state FULL.
+- **SME question:** Should discovery/feed/parse failures make coverage PARTIAL, matching their inclusion in failedSources?
+
+#### BR-NWS-008 · Ticker mention compatible with listing exchange
+
+**P1** · Validation · Confidence **Medium**  
+Source: `legacy/yahoo-finance-mcp/server.py:1340-1389,414-424`
+
+A text matches a company if its ticker appears as a whole word and is not prefixed by a different exchange (e.g. 'TSXV:ABC' for a NASDAQ company); failing that, a company name alias (3+ chars) or a 3-6 letter acronym match is accepted.
+
+- **Given** Company ABC on NASDAQ; text 'TSXV: ABC announces drilling results'
+- **When** Yahoo news is matched
+- **Then** The ticker match is rejected (incompatible exchange prefix) and the item is kept only if the issuer name or acronym appears.
+- **Parameters:** Exchange normalization NASDAQ/NYSE/NYSEAMERICAN/TSXV/TSX; prefix look-back 20 chars; known incompatible raw prefixes include ASX, LSE, TSX-V; acronym length 3-6; alias min length 3
+- **Edge cases:**
+  - Unknown company exchange -> any whole-word ticker hit is accepted
+  - Unknown prefix like 'OTC:' is accepted
+- **Suspected defect:** _normalize_exchange checks 'NYSE' before 'NYSE AMERICAN'/'AMEX', so 'NYSE American' (and 'NYSEArca') normalize to NYSE; also 'GS' substring maps any exchange code containing GS to NASDAQ.
+- **SME question:** Should NYSE American listings be distinguished from NYSE when validating ticker prefixes?
+
+#### BR-NWS-009 · Verification coverage failure-mode precedence
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/server.py:2411-2439`
+
+When an event isn't found and sources were impaired, the reason is chosen in a fixed order: worker subrequest limit, rate limited, timeout, provider changed, Yahoo identity unavailable, unconfigured, not eligible, provider error.
+
+- **Given** Finnhub RATE_LIMITED and Yahoo PROVIDER_ERROR, no match
+- **When** verify_company_event computes failure mode
+- **Then** failureMode RATE_LIMITED, status SOURCE_LIMITED_NOT_FOUND, retryable true.
+- **Parameters:** Precedence: WORKER_SUBREQUEST_LIMIT ('too many subrequests' in SOURCE_UNAVAILABLE text) > RATE_LIMITED > PROVIDER_TIMEOUT > PROVIDER_CHANGED > YAHOO_IDENTITY_UNAVAILABLE > SOURCE_UNCONFIGURED > SOURCE_NOT_ELIGIBLE > PROVIDER_ERROR
+- **Edge cases:**
+  - AUTH_ERROR and IR-page states produce no failure mode, so status stays NOT_FOUND
+
+#### BR-NWS-010 · Event type from keywords (first matching category wins)
+
+**P2** · Validation · Confidence **Medium**  
+Source: `legacy/yahoo-finance-mcp/server.py:591-641`
+
+News events are typed by the first keyword family found in the text (earnings, guidance, contract, financing, product, analyst, macro, litigation, insider, regulatory, other); SEC forms map directly (10-Q/10-K earnings, S-1/S-3/424B financing, 8-K/proxy regulatory, Form 4 insider).
+
+- **Given** Headline 'Company raises $200 million in note offering'
+- **When** _event_type_from_keywords runs
+- **Then** eventType 'guidance' because 'raises' (guidance family) is checked before 'offering' (financing family).
+- **Parameters:** Keyword lists as coded at lines 593-612
+- **Edge cases:**
+  - Matching is plain substring: 'steps' contains 'eps' -> earnings; 'second' contains 'sec' -> regulatory; 'notable' contains 'note' -> financing
+  - 424B4 is not mapped to financing by _event_type_from_form (exact match only)
+- **Suspected defect:** Substring keyword matching misclassifies (e.g. 'takes steps' -> earnings, 'raises capital' -> guidance), which then drives decisionUse for Yahoo items.
+- **SME question:** Should event keywords match whole words, and should 'raises/lowers' count as guidance only when paired with guidance/outlook wording?
+
+### Evidence layer
+
+#### BR-EVD-001 · Consensus provider agreement
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/evidence.py:518-572`
+
+For each fiscal year and metric, provider means are compared. The relative diff = (high - low) / max(|high|, |low|) x 100. It is AGREED if within the tolerance (or EPS within $0.02), else CONFLICT.
+
+- **Given** Yahoo FY0 EPS mean 5.20 and Alpha Vantage 5.00
+- **When** agreement is computed
+- **Then** absolute 0.20 > 0.02; relative = 0.20/5.20 x 100 = 3.85% <= 10%, so AGREED
+- **Parameters:** Fiscal-year-end spread > 10 days gives PERIOD_IDENTITY_MISMATCH; differing currencies give CURRENCY_MISMATCH; identical at the coarsest published precision with equal analyst counts gives IDENTICAL (NOT_INDEPENDENT)
+- **Edge cases:**
+  - A single usable provider gives SINGLE_PROVIDER
+  - Inconsistent rows are excluded and named
+
+#### BR-EVD-002 · Consensus provider agreement classification
+
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/evidence.py:470-572,699-708`
+
+A provider row whose mean lies outside its own high-low range is excluded as PROVIDER_INCONSISTENT. Fewer than the minimum analysts gives INSUFFICIENT_ANALYST_COUNT. Two providers AGREE if their spread is within the tolerance % (or within $0.02 for EPS). Otherwise they CONFLICT, unless the EPS gap matches a recent split within 15% (NOT_SPLIT_ADJUSTED).
+
+- **Given** Yahoo EPS mean 5.20 and Alpha Vantage 5.21, same currency, fiscal year ends within 10 days
+- **When** Agreement is computed
+- **Then** Absolute gap 0.01 <= 0.02, so the status is AGREED. Fiscal year ends more than 10 days apart give PERIOD_IDENTITY_MISMATCH; different currencies give CURRENCY_MISMATCH.
+- **Parameters:** Fiscal year end tolerance 10 days; SPLIT_RATIO_TOLERANCE 0.15; split factor >= 1.5; range tolerance 1e-9 relative
+- **Edge cases:**
+  - Identical mean/high/low/analyst counts at the coarser published precision give IDENTICAL and NOT_INDEPENDENT
+  - Only one usable provider gives SINGLE_PROVIDER
+
+#### BR-EVD-003 · Cross-provider consensus agreement status
+
+**P0** · Calculation · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/evidence.py:518-572`
+
+Usable provider means for the same metric and year are compared: none -> NO_PROVIDER, one -> SINGLE_PROVIDER, fiscal-year ends more than 10 days apart -> PERIOD_IDENTITY_MISMATCH, different currencies -> CURRENCY_MISMATCH, identical at published precision -> IDENTICAL, otherwise AGREED if the spread is within the tolerance (default 10% of the larger magnitude, or EPS within $0.02) else CONFLICT; an EPS conflict explained by a recent split is NOT_SPLIT_ADJUSTED.
+
+- **Given** Yahoo FY0 EPS mean 5.20 and Alpha Vantage 5.75, both USD, fiscal year ends 2026-12-31, different analyst counts, conflictTolerancePct 10
+- **When** Agreement is evaluated
+- **Then** absoluteDiff 0.55, relativeDiffPct = 0.55/5.75x100 = 9.57, status AGREED; at 5.20 vs 5.90 relativeDiffPct 11.86 -> CONFLICT
+- **Parameters:** conflictTolerancePct 10 (caller 0-100); epsAbsoluteTolerance 0.02; fiscal-year-end identity window 10 days; SPLIT_RATIO_TOLERANCE 0.15; split factor must be >= 1.5; rounding floor(x*10^d+0.5)/10^d
+- **Edge cases:**
+  - PROVIDER_INCONSISTENT rows are excluded and listed in providersExcluded; if all usable rows are inconsistent the status is PROVIDER_INCONSISTENT
+  - IDENTICAL requires every provider to publish an analyst count and all counts to match
+  - split explanation only applies with exactly two same-sign non-zero EPS means
+  - relative spread uses max(|hi|,|lo|) as the denominator, not the mean
+
+#### BR-EVD-004 · Evidence cut integrity verification
+
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
+Source: `server.py:12327-12352`
+
+A stored evidence cut is VERIFIED only if the SHA-256 of the stored text equals the hash in its id and the text parses as JSON; otherwise MISMATCH.
+
+- **Given** evidenceCutId ec1_AAPL_20261014T120000Z_<64-hex> whose stored body hashes to the same 64 hex
+- **When** get_evidence_cut runs
+- **Then** integrity VERIFIED; any byte change gives MISMATCH
+- **Parameters:** Id regex ^ec1_([A-Z0-9.^=-]{1,20})_(\d{8}T\d{6}Z)_([0-9a-f]{64})$ (evidence.py:131)
+- **Edge cases:**
+  - no store -> error STORAGE_UNAVAILABLE
+  - absent key -> NOT_FOUND
+
+#### BR-EVD-005 · Evidence storage write-once lifecycle
+
+**P0** · Lifecycle · Confidence **High** · P0 panel 2/2  
+Source: `yfmcp/evidence_store.py:93-104`
+
+Evidence cuts and daily consensus observations are written once: no store -> UNAVAILABLE, key exists -> ALREADY_STORED (first write of the day wins), else STORED; a write error -> FAILED and never fails the research call; persist=false -> SKIPPED.
+
+- **Given** A consensus observation for AAPL already stored for 2026-10-14
+- **When** get_consensus_forecast_curve is called again the same day
+- **Then** observation status ALREADY_STORED and the stored file is unchanged
+- **Parameters:** Keys evidence-cuts/<TICKER>/<YYYYMMDDTHHMMSSZ>/<sha256>.json and consensus-history/<TICKER>/<YYYY-MM-DD>.json; mirror worker/src/evidence-store.ts:87-97
+- **Edge cases:**
+  - storageKey returned only for STORED or ALREADY_STORED (server.py:12314)
+  - SKIPPED when persist is false (server.py:12306-12307)
+
+#### BR-EVD-006 · Consensus cross-check status and metric coverage
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `yfmcp/evidence.py:630-680,699-708`
+
+The curve's cross-check is NO_PROVIDER, SINGLE_PROVIDER, NOT_COMPARED, NOT_INDEPENDENT (every compared cell identical) or CROSS_CHECKED; failed providers raise CROSS_CHECK_DEGRADED and stale fallbacks raise PROVIDER_DATA_STALE. A cell's coverage is PROVIDER_CONFLICT on conflict, period or currency mismatch, or split mismatch.
+
+- **Given** Yahoo and Alpha Vantage both answer and every compared cell is IDENTICAL
+- **When** the cross-check is summarised
+- **Then** status NOT_INDEPENDENT with a PROVIDERS_NOT_INDEPENDENT warning
+
+#### BR-EVD-007 · Consensus cross-check summary status
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `yfmcp/evidence.py:630-680`
+
+The curve as a whole is NO_PROVIDER, SINGLE_PROVIDER, NOT_COMPARED (no cell compared), NOT_INDEPENDENT (every compared cell identical) or CROSS_CHECKED; each failed provider raises CROSS_CHECK_DEGRADED, each stale fallback raises PROVIDER_DATA_STALE, and NOT_INDEPENDENT raises PROVIDERS_NOT_INDEPENDENT.
+
+- **Given** Yahoo OK, Alpha Vantage OK, 4 cells compared all IDENTICAL
+- **When** The cross-check summary is built
+- **Then** status NOT_INDEPENDENT with warning PROVIDERS_NOT_INDEPENDENT; if Alpha Vantage returned RATE_LIMIT instead, status SINGLE_PROVIDER plus CROSS_CHECK_DEGRADED
+- **Parameters:** Compared statuses: AGREED, CONFLICT, IDENTICAL, NOT_SPLIT_ADJUSTED; NO_DATA is not treated as a failure
+- **Edge cases:**
+  - a provider answering via stale snapshot counts as answered (status OK) but carries a stale warning
+
+#### BR-EVD-008 · Consensus metric coverage and cross-check status
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/evidence.py:630-680,699-708`
+
+Each cell's coverage is NOT_COVERED, INCONSISTENT, CONFLICT (conflict, period/currency mismatch or not split-adjusted), INSUFFICIENT_ANALYST_COUNT, or COVERED. The curve as a whole is NO_PROVIDER, SINGLE_PROVIDER, NOT_COMPARED, NOT_INDEPENDENT (every compared cell identical) or CROSS_CHECKED.
+
+- **Given** Yahoo and Alpha Vantage both OK, 4 cells compared, all IDENTICAL
+- **When** The cross-check summary is built
+- **Then** status NOT_INDEPENDENT with a PROVIDERS_NOT_INDEPENDENT warning. Each failed provider (status not OK and not NO_DATA) adds CROSS_CHECK_DEGRADED
+
+#### BR-EVD-009 · Consensus provider cell state
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/evidence.py:267-284,425,470-515`
+
+A provider's estimate is not covered when it has no mean (or 0 analysts). It is inconsistent when the mean is outside its own high-low or low > high. It has insufficient analysts below 3. Otherwise it is covered.
+
+- **Given** Alpha Vantage revenue mean 667.6M, high 652.7M, 12 analysts
+- **When** The provider entry is built
+- **Then** state PROVIDER_INCONSISTENT (MEAN_ABOVE_HIGH); the row is shown but left out of the agreement check, with a PROVIDER_ROW_INCONSISTENT warning
+- **Parameters:** minAnalystCount=3; tolerance 1e-9 x max(1,|v|)
+
+#### BR-EVD-010 · Consensus provider row coverage state
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/evidence.py:487-497`
+
+Each provider's estimate for a metric and fiscal year is classified, in this order, as not covered (no mean), inconsistent (mean outside its own high/low or low above high), too few analysts (below the minimum, default 3), or covered.
+
+- **Given** A provider row for FY+1 revenue with mean 100.0M, high 110.0M, low 95.0M and analystCount 2, policy minAnalystCount 3
+- **When** The consensus curve is built
+- **Then** The row state is INSUFFICIENT_ANALYST_COUNT; with analystCount 3 it would be PROVIDER_COVERED; with mean 112.0M it would be PROVIDER_INCONSISTENT (MEAN_ABOVE_HIGH) whatever the count
+- **Parameters:** minAnalystCount default 3 (DEFAULT_CONSENSUS_POLICY, evidence.py:425; caller range 1-50, server.py:12090-12093); inconsistency tolerance 1e-9 x max(1,|v|) (evidence.py:473-474)
+- **Edge cases:**
+  - analystCount null is treated as below the minimum
+  - inconsistency outranks the analyst-count check
+  - a null mean is PROVIDER_NOT_COVERED even if high/low exist
+
+#### BR-EVD-011 · Consensus provider row state (analyst count and range consistency)
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/evidence.py:425,470-515`
+
+A provider's consensus cell is not covered if it has no mean, inconsistent if the mean sits outside its own high-low range or low exceeds high, and insufficient if fewer than 3 analysts stand behind it.
+
+- **Given** A provider revenue row with mean 667.6M, high 652.7M and 12 analysts
+- **When** the row is classified
+- **Then** state PROVIDER_INCONSISTENT (MEAN_ABOVE_HIGH), it is excluded from the agreement check and a PROVIDER_ROW_INCONSISTENT warning is raised; a valid row with 2 analysts is INSUFFICIENT_ANALYST_COUNT
+- **Parameters:** minAnalystCount=3; tolerance 1e-9 x max(1,|v|)
+
+#### BR-EVD-012 · EPS gap explained by a recent stock split
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/evidence.py:428-431,448-467,575-597`
+
+An EPS conflict between exactly two same-sign providers is reclassified NOT_SPLIT_ADJUSTED when the gap ratio is within 15% of a split (or cumulative splits) of at least 1.5x within the last 400 days; the provider on the pre-split basis is named.
+
+- **Given** Provider A EPS 2.73, provider B EPS 0.73, a 4-for-1 split 120 days before as-of
+- **When** agreement shows CONFLICT
+- **Then** gap 3.74, |3.74/4 - 1| = 6.5% <= 15%, so NOT_SPLIT_ADJUSTED with provider A (larger magnitude, forward split) named as not adjusted
+- **Parameters:** SPLIT_LOOKBACK_DAYS=400; SPLIT_RATIO_TOLERANCE=0.15; minimum split factor 1.5
+
+#### BR-EVD-013 · EPS gap explained by an unadjusted split
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/evidence.py:428-431,448-467,557-597`
+
+A conflicting EPS pair is relabelled NOT_SPLIT_ADJUSTED when the ratio between the two means is within 15% of a split (or cumulative splits) of at least 1.5x in the prior 400 days. The provider on the pre-split basis is named.
+
+- **Given** EPS 2.92 vs 0.73 and a 4-for-1 split 100 days earlier
+- **When** Agreement is computed
+- **Then** gap 4.0 matches 4 -> NOT_SPLIT_ADJUSTED; the provider with 2.92 is named not adjusted
+- **Parameters:** SPLIT_LOOKBACK_DAYS=400; SPLIT_RATIO_TOLERANCE=0.15; minimum factor 1.5; exactly two providers; same sign
+
+#### BR-EVD-014 · EPS gap explained by an unadjusted stock split
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/evidence.py:428-431,575-597`
+
+When two same-sign EPS means conflict and their ratio is within 15% of a split factor (>= 1.5) from the last 400 days, the cell is NOT_SPLIT_ADJUSTED rather than CONFLICT.
+
+- **Given** Provider A EPS 2.73 and B 0.73, with a 4-for-1 split 120 days ago
+- **When** agreement is computed
+- **Then** gap 3.74; |3.74/4 - 1| = 6.5% <= 15%, so NOT_SPLIT_ADJUSTED, provider A (the larger value) flagged not adjusted
+- **Parameters:** SPLIT_LOOKBACK_DAYS = 400; SPLIT_RATIO_TOLERANCE = 0.15; min factor 1.5; cumulative product of multiple splits also tested
+- **Edge cases:**
+  - Reverse split: the smaller-magnitude provider is flagged
+  - Exactly two providers required
+
+#### BR-EVD-015 · EPS revision window state
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/evidence.py:855-913`
+
+For each 7/30/60/90-day window, an EPS change is computed only when both current and past means exist, the row is internally consistent, and no stock split falls within the window plus one day.
+
+- **Given** FY0 EPS current 2.80, 30 days ago 2.73, no split in the last 31 days
+- **When** EPS revisions are built
+- **Then** 30d state COMPARED, change 0.07, changePct 2.56; if a 4-for-1 split occurred 20 days ago, state SPLIT_IN_WINDOW and change null
+- **Parameters:** Windows 7, 30, 60, 90 days; split margin +1 day; split lookback 91 days
+- **Edge cases:**
+  - changePct null when past mean is 0
+  - state precedence: NOT_REPORTED > PROVIDER_INCONSISTENT > SPLIT_IN_WINDOW > COMPARED
+
+#### BR-EVD-016 · EPS revision window state
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/evidence.py:855-936`
+
+For each 7/30/60/90-day window the state is NOT_REPORTED (missing past or current), then PROVIDER_INCONSISTENT, then SPLIT_IN_WINDOW (a split within days+1), else COMPARED with change and change%.
+
+- **Given** Current EPS 3.00 and 30-day-ago 2.50, no split
+- **When** Windows are computed
+- **Then** 30d change 0.50, changePct 20.00, state COMPARED. A 4-for-1 split 20 days ago makes the 30d/60d/90d windows SPLIT_IN_WINDOW with no change
+- **Parameters:** Windows 7,30,60,90 days; split lookback 91 days; one day of margin
+
+#### BR-EVD-017 · EPS revision window states
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/evidence.py:855-913`
+
+EPS revision changes over 7/30/60/90 days are computed only when both values exist, the row is consistent, and no split fell within the window plus one day; change % uses the absolute past mean and is null when the past mean is zero.
+
+- **Given** Current EPS 3.00 and 30-day-ago EPS 2.50, no split
+- **When** revisions are computed
+- **Then** change 0.50 and changePct 20.00, state COMPARED; with a split 25 days ago the 30d window is SPLIT_IN_WINDOW and no change is computed
+- **Parameters:** Windows 7, 30, 60, 90 days; +1 day split margin
+
+#### BR-EVD-018 · EPS revision windows
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/evidence.py:855-957`
+
+For the 7/30/60/90-day windows, change = current - past mean and change% = change / |past| x 100. A window containing a split (plus 1 day margin) or an inconsistent row carries no change.
+
+- **Given** Current EPS mean 5.20, 30-day-ago mean 5.00, no splits
+- **When** get_eps_revisions runs
+- **Then** 30d change = 0.20, changePct = 4.00, state COMPARED
+- **Parameters:** Windows 7, 30, 60, 90 days; split look-back 91 days
+- **Edge cases:**
+  - Past mean 0: changePct null
+  - Revenue revisions and analyst adds/drops are PROVIDER_NOT_COVERED
+
+#### BR-EVD-019 · Evidence cut component status and coverage state
+
+**P1** · Lifecycle · Confidence **Medium** · P0 panel 2/2  
+Source: `yfmcp/evidence.py:1123-1158`
+
+Each evidence-pack component is FAILED (error/non-JSON/no response), LIMITED (its own status contains words such as PARTIAL, STALE, NOT_FOUND, UNAVAILABLE) or OK; the receipt coverage is COMPLETE when all are OK, FAILED when none are, otherwise PARTIAL.
+
+- **Given** 8 components where currentDilution is NOT_APPLICABLE (non-USD listing) and the rest OK
+- **When** The receipt is built
+- **Then** coverage.state PARTIAL, okCount 7, failedOrLimited [currentDilution]
+- **Parameters:** _LIMITED_RE = PARTIAL|INCOMPLETE|STALE|NOT_AVAILABLE|NOT_FOUND|UNAVAILABLE|UNSUPPORTED|NO_DATA|NOT_DISCLOSED|UNCONFIGURED|FAILED (evidence.py:1191)
+- **Edge cases:**
+  - NOT_APPLICABLE and LIMITED count as not OK
+  - consensus forced to LIMITED when every provider returned no periods (server.py:12297-12298)
+  - substring match: any status containing NOT_FOUND etc. is LIMITED
+
+<details><summary>SME note (panel reasoning, verbatim)</summary>
+
+P0 panel split on whether this moves money / is regulatory (Faithful, with gaps. In yfmcp/evidence.py:1126-1127, build_receipt counts any component whose status is not exactly "OK" as a failure. Coverage is COMPLETE when nothing fails, FAILED when every component fails, otherwise PARTIAL (line 1154), and okCount = componentCount minus failures (line 1152). The Given/When/Then example holds: a component marked NOT_APPLICABLE is set straight from server.py:12242 (and worker/src/evidence-pack.ts:316). It never goes through _LIMITED_RE, which has no NOT_APPLICABLE token. So with 8 components it gives PARTIAL, okCount 7 and failedOrLimited ["currentDilution"]. The plain-English text is incomplete, though. It names three statuses (FAILED/LIMITED/OK) and leaves out NOT_APPLICABLE, which the test at scripts/test_evidence_tools.py:189 accepts. The FAILED/LIMITED classification and _LIMITED_RE live in component_from_tool_text/component_from_value (evidence.py:1178-1216), outside the cited range 1123-1158. Note also that a status of LIMITED counts against okCount exactly like FAILED. No instruction-shaped text appeared in the lines I read.
+
+Not P0 under the compliance lens. The rule only sets a descriptive coverage label on a research evidence-pack receipt. It moves no money and enforces no regulatory requirement. The receipt also says it makes no completeness claim: scope is "COMPONENT_WRAPPER_STATUS" and evidenceCompleteness is "NOT_ASSERTED" (lines 1155-1156). The real data-integrity parts of the receipt are the per-component sha256, componentsSha256 and canonicalization. Those are computed elsewhere, and this rule only copies them in. A silent change, such as treating NOT_APPLICABLE or LIMITED as OK, would mislead consumers of the provenance record. It should be kept as a P1 output-contract and parity rule (Python and TS must match), not a P0 behaviour contract. | The Given/When/Then is correct. The plain-English summary leaves some things out.
+
+What the code does. In build_receipt (yfmcp/evidence.py:1123-1158):
+- Component names are sorted alphabetically (line 1126).
+- Any component whose status is not exactly "OK" counts as a failure (line 1127).
+- okCount = componentCount - number of failures (line 1152).
+- failedOrLimited lists those names in sorted order (line 1153).
+- state is COMPLETE when there are no failures, FAILED when every component failed, and PARTIAL otherwise (line 1154).
+
+Checking the example. In server.py, the dilution() helper inside build_valuation_evidence_pack builds currentDilution with _not_applicable(..., "NON_USD_LISTING", ...) whenever the major-unit currency is not USD. That function (server.py:12241-12242) sets status "NOT_APPLICABLE". The pack has 8 components: quote, evidenceQuality, consensus, epsRevisions, currentCapitalStructure, currentDilution, latestGuidance, materialEvents. "NOT_APPLICABLE" is not "OK", so with the other seven OK the receipt shows componentCount 8, okCount 7, failedOrLimited ["currentDilution"] and state PARTIAL. That matches the example exactly.
+
+Gaps in the plain-English text and the parameters:
+1. The summary describes three statuses (FAILED, LIMITED, OK). There is a fourth, NOT_APPLICABLE, set in server.py. The example only works because of that fourth status, which the summary never mentions.
+2. The FAILED/LIMITED/OK classification is not in the cited lines. It lives in component_from_tool_text and component_from_value (evidence.py:1178-1216). The quote component is also built by hand in server.py, where it is OK if a price exists and FAILED otherwise. And server.py forces consensus to LIMITED when no provider returned any periods.
+3. FAILED also covers two cases the summary leaves out: wrappers with ok=false, and payloads with error=true or with ok=false plus an error (lines 1196-1207).
+4. _LIMITED_RE is an unanchored substring search on the component's own status. So "NOT_APPLICABLE" coming from a sub-tool's payload would not match and would be classed as OK. Only the wrapper built by _not_applicable makes it non-OK. The listed regex values do match line 1191.
+5. Smaller edge cases: with zero components the state comes out COMPLETE. The coverage scope is COMPONENT_WRAPPER_STATUS and evidenceCompleteness is always NOT_ASSERTED (lines 1155-1156), so this is a status-at-the-wrapper count, not a claim that the evidence is complete. The rule card should say so.
+
+P0 call. This doesn't move money, but it does guard data integrity. The receipt is the hashed provenance record of an immutable evidence cut. If this logic slipped, a degraded cut could be labelled COMPLETE, and that would misstate what evidence a valuation rests on. The project's CLAUDE.md also reserves coverage guards for the planner. P0 is justified, though only just.
+
+I found no instruction-like text in the cited lines.) — confirm criticality.
+
+</details>
+
+#### BR-EVD-020 · Evidence cut component status and receipt coverage
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/evidence.py:1123-1158,1178-1216`
+
+Each sub-tool result is FAILED (error, no response, non-JSON or ok=false), LIMITED (its status contains PARTIAL, INCOMPLETE, STALE, NOT_AVAILABLE, NOT_FOUND, UNAVAILABLE, UNSUPPORTED, NO_DATA, NOT_DISCLOSED, UNCONFIGURED or FAILED) or OK. The receipt is COMPLETE if all are OK, FAILED if none are, else PARTIAL.
+
+- **Given** Five components where one returns status PARTIAL
+- **When** The receipt is built
+- **Then** That component is LIMITED; coverage okCount 4, state PARTIAL, evidenceCompleteness NOT_ASSERTED
+- **Suspected defect:** The LIMITED regex is a substring match, so for example 'NOT_FOUND' also matches statuses like 'PERIOD_NOT_FOUND' (intended) but would also match any future status containing these fragments.
+
+#### BR-EVD-021 · Evidence family readiness states and blockers
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/evidence.py:960-1101`
+
+Preflight grades each evidence family. Quote: READY, or STALE after 4 days; UNAVAILABLE (retryable) on provider failure; MISSING otherwise. Periodic filing: STALE after 135 days, or 492 days for 20-F/40-F filers. Guidance: STALE 120 days after the latest Item 2.02 8-K. Consensus: READY/PARTIAL/MISSING by FY0/FY+1 cells covered, or UNAVAILABLE when every provider failed.
+
+- **Given** A 10-Q filer whose latest 10-Q covers a period 150 days ago, and a quote 2 days old
+- **When** evidence_quality runs
+- **Then** quote READY; secPeriodicFiling STALE with blocker SEC_PERIODIC_STALE; capitalStructure/dilution READY_TO_EXTRACT (PARTIAL if the filing is not inline XBRL)
+- **Parameters:** Quote 4 days; QUARTERLY_REPORT_STALE_DAYS=135; ANNUAL_REPORT_STALE_DAYS=492; guidance 120 days; material 8-K window 90 days; PROVIDER_FAILURE_STATUSES={PROVIDER_ERROR,RATE_LIMIT,PROVIDER_TIMEOUT,ERROR,TIMEOUT}
+- **Edge cases:**
+  - Filings list None -> UNAVAILABLE rather than MISSING
+  - Consensus failure gives one retryable CONSENSUS_PROVIDER_ERROR instead of per-cell blockers
+
+#### BR-EVD-022 · Evidence quality freshness thresholds
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/evidence.py:962-1101`
+
+A quote is STALE after 4 days. A periodic SEC filing is STALE after 135 days (quarterly filers) or 492 days (20-F/40-F). Earnings guidance is STALE more than 120 days after the last 8-K Item 2.02. Failed provider calls are UNAVAILABLE and retryable, not missing.
+
+- **Given** A 10-Q for period 2026-03-31 checked on 2026-08-20
+- **When** evidence_quality runs
+- **Then** age 142 days > 135, so secPeriodicFiling STALE, blocker SEC_PERIODIC_STALE
+- **Parameters:** QUARTERLY_REPORT_STALE_DAYS = 135; ANNUAL_REPORT_STALE_DAYS = 365+120+7 = 492; quote 4 days; guidance 120 days; 8-K window 90 days
+- **Edge cases:**
+  - Consensus READY only when every FY0/FY+1 cell is PROVIDER_COVERED
+  - All providers failed gives CONSENSUS_PROVIDER_ERROR
+
+#### BR-EVD-023 · Evidence quality preflight freshness thresholds
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/evidence.py:966-1101`
+
+Preflight marks a quote STALE after 4 days, the latest periodic SEC filing STALE after 135 days (492 days for 20-F/40-F filers), the latest Item 2.02 earnings 8-K STALE after 120 days, counts 8-Ks in the last 90 days, and treats an all-failed consensus fetch as UNAVAILABLE (retryable) rather than missing coverage.
+
+- **Given** A 10-Q filer whose latest periodic report covers a period ending 150 days before as-of
+- **When** evidence_quality runs
+- **Then** secPeriodicFiling state STALE with blocker SEC_PERIODIC_STALE; capital structure and dilution remain READY_TO_EXTRACT (PARTIAL if not inline XBRL)
+- **Parameters:** Quote stale >4 days; QUARTERLY_REPORT_STALE_DAYS=135; ANNUAL_REPORT_STALE_DAYS=492 (365+120+7); guidance stale >120 days; material events window 90 days; consensus checks first 2 periods x {eps, revenue}
+- **Edge cases:**
+  - A failed quote request gives QUOTE_UNAVAILABLE (retryable), a missing price gives QUOTE_MISSING
+  - Consensus READY only when all checked cells are PROVIDER_COVERED
+- **SME question:** The 120-day guidance staleness and 4-day quote staleness are hardcoded inline, not named constants. Are these the intended business thresholds, and should they be configurable?
+
+#### BR-EVD-024 · Evidence quality: guidance and consensus readiness
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `yfmcp/evidence.py:1040-1101`
+
+Guidance is READY_TO_EXTRACT if the latest 8-K with Item 2.02 is at most 120 days old, else STALE (MISSING if none); consensus is UNAVAILABLE when every provider failed (retryable), READY when all FY0/FY+1 cells are covered, PARTIAL when some are, else MISSING; storage is READY only when durable storage is configured.
+
+- **Given** Latest earnings 8-K filed 130 days ago; consensus FY0 eps/revenue covered, FY+1 revenue INSUFFICIENT_ANALYST_COUNT
+- **When** Preflight runs
+- **Then** guidance STALE; consensus PARTIAL with blocker INSUFFICIENT_ANALYST_COUNT for FY+1.revenue
+- **Parameters:** Guidance stale 120 days; material-event window 90 days; first two consensus periods only
+- **Edge cases:**
+  - readyFamilies includes only READY and READY_TO_EXTRACT
+  - guidance STALE does not add a blocker
+
+#### BR-EVD-025 · Evidence quality: quote freshness state
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `yfmcp/evidence.py:986-1001`
+
+A quote with a price is READY unless its price time is more than 4 days before as-of (STALE); with no price it is UNAVAILABLE (retryable blocker) when the request failed, else MISSING.
+
+- **Given** Quote price 41.20 with priceTime 2026-10-08 and as-of 2026-10-14
+- **When** Evidence quality preflight runs
+- **Then** quote state STALE (age 6 days > 4); with status RATE_LIMIT and no price, state UNAVAILABLE plus blocker QUOTE_UNAVAILABLE retryable=true
+- **Parameters:** Quote stale threshold 4 days; PROVIDER_FAILURE_STATUSES {PROVIDER_ERROR, RATE_LIMIT, PROVIDER_TIMEOUT, ERROR, TIMEOUT}
+- **Edge cases:**
+  - a STALE quote raises no blocker
+  - age counted in calendar days, so a long weekend plus holiday can exceed 4
+
+#### BR-EVD-026 · Evidence quality: SEC periodic filing staleness by cadence
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/evidence.py:966-1038`
+
+The latest 10-K/10-Q/20-F/40-F (incl. amendments) is READY until its period end is older than 135 days for quarterly filers or 492 days for annual (20-F/40-F) filers, then STALE; no filings list is UNAVAILABLE and no periodic form is MISSING; capital structure and dilution are extractable only when READY or STALE.
+
+- **Given** A 20-F with period end 2025-12-31 and as-of 2026-10-14 (287 days)
+- **When** Preflight runs
+- **Then** secPeriodicFiling READY with cadence ANNUAL, staleAfterDays 492; a 10-Q at the same age would be STALE with blocker SEC_PERIODIC_STALE
+- **Parameters:** QUARTERLY_REPORT_STALE_DAYS 135; ANNUAL_REPORT_STALE_DAYS 365+120+7 = 492
+- **Edge cases:**
+  - cadence is taken from the latest periodic form only
+  - non-inline-XBRL filing makes capitalStructure/dilution PARTIAL instead of READY_TO_EXTRACT
+  - any non-READY state, including STALE, adds a blocker
+
+#### BR-EVD-027 · Evidence write-once storage lifecycle
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/evidence_store.py:17,86-104`
+
+Evidence cuts and consensus observations are written once under fixed keys. The write returns UNAVAILABLE without a configured store, ALREADY_STORED if the key exists (never overwritten), STORED on success, FAILED on error, and never fails the research call.
+
+- **Given** An evidence cut key already present on disk
+- **When** put_once is called again
+- **Then** status ALREADY_STORED and the file is unchanged
+- **Parameters:** Keys must match ^(evidence-cuts|consensus-history)/[A-Za-z0-9._^=/-]+\.json$ with no '..'
+
+#### BR-EVD-028 · Evidence-family readiness and staleness thresholds
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/evidence.py:966-1101`
+
+Preflight marks a quote STALE after 4 days and a periodic SEC report STALE after 135 days (492 days for 20-F/40-F filers). The latest earnings-release 8-K (Item 2.02) is STALE after 120 days. Each family that is not ready adds a blocker.
+
+- **Given** Latest 10-Q period end 2026-05-31 and as_of 2026-10-14 (136 days)
+- **When** evidence_quality runs
+- **Then** secPeriodicFiling.state=STALE with blocker SEC_PERIODIC_STALE
+- **Parameters:** Quote 4 days; QUARTERLY_REPORT_STALE_DAYS 135; ANNUAL_REPORT_STALE_DAYS 492 (365+120+7); guidance 120 days; material-events window 90 days
+- **Edge cases:**
+  - A failed quote or consensus request is UNAVAILABLE with a retryable blocker, not MISSING
+  - Consensus is READY only when every FY0/FY1 cell is PROVIDER_COVERED
+
+#### BR-EVD-029 · FY0 resolution and fiscal-year offset
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/evidence.py:407-420; server.py:11977-11982`
+
+FY0 is Yahoo's '0y' fiscal year end, else the earliest provider year end on or after today. Other years are placed by round(days apart / 365.25).
+
+- **Given** FY0 end 2026-12-31 and an Alpha Vantage row ending 2028-12-31
+- **When** periods are aligned
+- **Then** offset = round(731/365.25) = 2, so FY+2
+- **Parameters:** 365.25 days per year; yfinance FY0 end = nextFiscalYearEnd, +1y = +1 calendar year (Feb 29 goes to Feb 28)
+- **Edge cases:**
+  - No year end stated: NO_PROVIDER_FISCAL_YEAR
+
+#### BR-EVD-030 · FY0 resolution and fiscal-year offset
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/evidence.py:403-420`
+
+FY0 is Yahoo's '0y' fiscal year when stated, else the earliest provider fiscal year ending on or after the as-of date. Later years are numbered by rounding (days between year ends)/365.25.
+
+- **Given** FY0 ending 2025-01-31 and a provider year ending 2026-01-30
+- **When** The offset is computed
+- **Then** 364/365.25 rounds to 1 -> FY+1
+
+#### BR-EVD-031 · FY0 resolution and fiscal-year offset for consensus periods
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/evidence.py:407-420,760-789`
+
+FY0 is Yahoo's '0y' fiscal year when stated, else the earliest provider fiscal year ending on or after the as-of date; other years are bucketed by round((end - FY0 end)/365.25).
+
+- **Given** FY0 end 2026-01-31 and a provider year ending 2027-01-29
+- **When** the period is bucketed
+- **Then** offset = round(363/365.25) = 1, so it is FY+1
+
+#### BR-EVD-032 · Metric coverage derived from agreement
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/evidence.py:699-708`
+
+The coverage label per metric and year is PROVIDER_NOT_COVERED with no numeric mean, PROVIDER_INCONSISTENT, PROVIDER_CONFLICT for conflict/period/currency/split mismatches, INSUFFICIENT_ANALYST_COUNT when no row is fully covered, otherwise PROVIDER_COVERED.
+
+- **Given** Two providers whose agreement status is CURRENCY_MISMATCH
+- **When** Coverage is assigned
+- **Then** Coverage is PROVIDER_CONFLICT
+- **Parameters:** Conflict set: CONFLICT, PERIOD_IDENTITY_MISMATCH, CURRENCY_MISMATCH, NOT_SPLIT_ADJUSTED
+- **Edge cases:**
+  - IDENTICAL agreement still yields PROVIDER_COVERED if a row is covered
+
+#### BR-EVD-033 · Provider agreement classification
+
+**P1** · Calculation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/evidence.py:425,518-572,604-627`
+
+Usable provider means are compared. Fiscal year ends more than 10 days apart are a period mismatch, and differing currencies a currency mismatch. Identical figures at the coarsest published precision with the same analyst counts are IDENTICAL (not independent). Otherwise the cell is AGREED within 10% relative (or $0.02 absolute for EPS), else CONFLICT.
+
+- **Given** EPS means 5.20 (Yahoo) and 5.30 (Alpha Vantage), same fiscal year end and currency, different analyst counts
+- **When** Agreement is computed
+- **Then** Absolute diff 0.10 > 0.02; relative = 0.10/5.30 = 1.89% <= 10%, so the cell is AGREED
+- **Parameters:** conflictTolerancePct=10; epsAbsoluteTolerance=0.02; period identity 10 days; horizon 1-5 years (default 5)
+- **Edge cases:**
+  - No usable rows but some inconsistent -> PROVIDER_INCONSISTENT
+  - One usable row -> SINGLE_PROVIDER
+
+#### BR-EVD-034 · Provider agreement test for consensus cells
+
+**P1** · Calculation · Confidence **High**  
+Source: `yfmcp/evidence.py:425,518-572,604-624`
+
+Two or more usable provider means are compared only if their fiscal year ends are within 10 days and currencies match; figures identical at the coarsest published precision with equal analyst counts are IDENTICAL (one feed), otherwise they AGREE when the relative gap (high-low)/max magnitude is at most 10%, or for EPS when the absolute gap is at most $0.02.
+
+- **Given** Two providers' FY0 EPS means of 5.00 and 5.40, same currency, year ends 3 days apart
+- **When** agreement is evaluated
+- **Then** relativeDiffPct = 0.40/5.40 = 7.41% <= 10, so AGREED with independence UNVERIFIED; means 5.00 vs 6.00 (16.67%) would be CONFLICT
+- **Parameters:** conflictTolerancePct=10; epsAbsoluteTolerance=0.02; fiscal year end tolerance 10 days; horizon clamp 1-5 years (default 5)
+
+#### BR-EVD-035 · Provider row consistency and coverage state
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/evidence.py:470-515,699-708`
+
+A row whose mean is above its high, below its low, or whose low exceeds its high is PROVIDER_INCONSISTENT. A row with fewer analysts than the minimum (default 3) is INSUFFICIENT_ANALYST_COUNT.
+
+- **Given** Alpha Vantage revenue mean 667.6M with high 652.7M
+- **When** the cell is built
+- **Then** state PROVIDER_INCONSISTENT (MEAN_ABOVE_HIGH), excluded from agreement, warning PROVIDER_ROW_INCONSISTENT
+- **Parameters:** Tolerance 1e-9 x max(1,|v|); highLowRangePctOfMean = (high - low)/|mean| x 100, 2 dp
+- **Edge cases:**
+  - An analyst count of 0 nulls out mean/high/low
+
+#### BR-EVD-036 · Stale provider snapshot fallback
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/evidence.py:163-219; server.py:11934-11935,12037-12059`
+
+When Alpha Vantage refuses a request for rate limit, timeout or provider error, the newest stored payload up to 7 days old stands in, marked stale with its age in hours. A good payload is stored at most once a day.
+
+- **Given** A live RATE_LIMIT at 2026-10-14T12:00Z and a snapshot fetched 2026-10-13T05:30Z
+- **When** the curve is built
+- **Then** the snapshot is used, ageHours = 30.5, warning PROVIDER_DATA_STALE
+- **Parameters:** STALE_FALLBACK_MAX_AGE_DAYS = 7; statuses RATE_LIMIT, TIMEOUT, PROVIDER_ERROR; Alpha Vantage cache TTL 86,400 s
+- **Edge cases:**
+  - Missing key or entitlement never falls back
+  - A future-dated snapshot is rejected
+
+#### BR-EVD-037 · Stale provider snapshot fallback
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/evidence.py:158-219`
+
+A provider's stored daily snapshot may stand in for a live request only when the live failure is RATE_LIMIT, TIMEOUT or PROVIDER_ERROR. It must match the provider, operation and ticker, and be no more than 7 days old and not later than as-of. It never stands in for a missing key or entitlement.
+
+- **Given** An Alpha Vantage RATE_LIMIT at 2025-06-10T12:00Z and a matching snapshot fetched 2025-06-09T05:30Z
+- **When** The fallback is evaluated
+- **Then** The snapshot is used with staleFallback ageHours 30.5. The PROVIDER_DATA_STALE warning is raised downstream
+- **Parameters:** STALE_FALLBACK_MAX_AGE_DAYS=7; statuses RATE_LIMIT, TIMEOUT, PROVIDER_ERROR
+- **Edge cases:**
+  - UNCONFIGURED/AUTH failures never fall back
+  - A snapshot dated in the future relative to as-of is rejected
+
+#### BR-EVD-038 · Stale provider snapshot fallback eligibility
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/evidence.py:158-219`
+
+When a live provider request is refused for a passing reason (rate limit, timeout, upstream error), the last stored daily snapshot for the same provider, operation and ticker may stand in if it was fetched no later than the as-of time and no more than 7 days before it.
+
+- **Given** Alpha Vantage returns RATE_LIMIT at 2026-10-14T12:00Z and a snapshot fetched 2026-10-13T05:30Z exists
+- **When** Consensus inputs are gathered
+- **Then** The snapshot stands in with staleFallback {liveStatus RATE_LIMIT, ageHours 30.5}; a snapshot fetched 2026-10-06T11:00Z (8 days) or a live status of a missing key would not stand in
+- **Parameters:** STALE_FALLBACK_MAX_AGE_DAYS 7; STALE_FALLBACK_STATUSES {RATE_LIMIT, TIMEOUT, PROVIDER_ERROR}; snapshot key per day provider-snapshots/<provider>/<op>/<TICKER>/<date>.json; candidates searched newest day first over 8 days
+- **Edge cases:**
+  - future-dated snapshots (negative age) are rejected
+  - schema, provider, operation and ticker must all match
+
+#### BR-EVD-039 · Stale provider snapshot fallback window
+
+**P1** · Policy · Confidence **High**  
+Source: `yfmcp/evidence.py:158-219`
+
+When a live provider request fails for a temporary reason (rate limit, timeout, provider error), that provider's own snapshot stored up to 7 days earlier can stand in. The data is marked stale, and the snapshot is never used for missing keys or entitlement errors.
+
+- **Given** Alpha Vantage returns RATE_LIMIT and a snapshot fetched 30.5 hours earlier exists
+- **When** The consensus curve is built
+- **Then** The snapshot is used with staleFallback.ageHours=30.5 and warning PROVIDER_DATA_STALE
+- **Parameters:** STALE_FALLBACK_MAX_AGE_DAYS 7; statuses RATE_LIMIT, TIMEOUT, PROVIDER_ERROR
+- **Edge cases:**
+  - A snapshot dated in the future (age < 0) is rejected
+  - Provider, operation, ticker and schema must all match
+
+#### BR-EVD-040 · Valuation evidence pack composition guards
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/server.py:12250-12298; legacy/yahoo-finance-mcp/worker/src/evidence-pack.ts:326-374`
+
+The evidence pack runs the dilution bridge only with a current price in a USD listing (minor-unit prices converted first), retries guidance once if the release text failed, and marks consensus LIMITED when every provider returned no periods.
+
+- **Given** A London listing quoted 250 GBp
+- **When** build_valuation_evidence_pack runs
+- **Then** Major price 2.50 GBP; dilution component NOT_APPLICABLE with code NON_USD_LISTING; quote component OK.
+- **Parameters:** Minor units GBp/GBX->GBP /100, ZAc->ZAR /100, ILA->ILS /100; horizon_years 1-5; material filings limit 10
+- **Edge cases:**
+  - No price -> dilution PRICE_UNAVAILABLE and quote FAILED
+  - Only one guidance retry, sequential
+
+#### BR-EVD-041 · Evidence cut listing order
+
+**P2** · Policy · Confidence **Medium**  
+Source: `server.py:12360-12376`
+
+Stored evidence cuts are listed newest first, capped at 1-100 (default 20).
+
+- **Given** A ticker with 1,200 stored cuts
+- **When** list_evidence_cuts runs with limit 20
+- **Then** Only the 1,000 lexically-first (oldest) keys are fetched before sorting, so the 200 newest cuts never appear
+- **Parameters:** Fetch cap 1000 keys; consensus history cap 400 dates (server.py:12122, 12183)
+- **Suspected defect:** LocalDirStore.list sorts ascending then truncates (evidence_store.py:53-54), so 'newest first' drops the newest beyond 1,000 cuts / 400 observation days
+- **SME question:** Should listing return the newest cuts when more than 1,000 exist (store.list returns sorted keys truncated from the oldest end)?
+
+### Thai SEC funds
+
+#### BR-THA-001 · Thai explicit-project NAV identity status
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/thai_funds.py:522-644`
+
+With an explicit project ID, NAV rows for the exact class confirm identity; a single source class (e.g. 'main') is accepted as an alias; several classes return AMBIGUOUS_SHARE_CLASS; no rows is unverified; the latest NAV is chosen by nav date, not row order.
+
+- **Given** proj_id M0001 returns rows only for class 'main' while 'ABC-A' was requested, no more pages
+- **When** NAV is fetched
+- **Then** identityResolution.status NAV_PROJECT_ID_CONFIRMED_CLASS_ALIAS, sourceFundClassName 'main', status OK with the newest nav_date row
+- **Parameters:** No rows in window -> NAV_NOT_FOUND_IN_WINDOW with recovery EXPAND_WINDOW_UP_TO_90_DAYS
+- **Edge cases:**
+  - Single class but more pages -> treated as ambiguous
+  - calendarDaysFromAsOf = as-of date minus nav date
+
+#### BR-THA-002 · Thai fund NAV request bounds
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/tools/thai_funds.py:33-39,661-689,740-742`
+
+A Thai fund NAV lookup needs a share-class name. It looks back 1-90 calendar days (default 45) ending on the as-of date (default today in Bangkok) and returns the latest NAV in that window. A batch holds at most 20 funds.
+
+- **Given** fund_class_name 'K-INDIA-A(A)' with lookback_days 120
+- **When** get_thai_fund_nav runs
+- **Then** Returns INPUT_VALIDATION_ERROR 'lookback_days must be an integer from 1 through 90.' With 45 days and as_of 2026-10-14 the window is 2026-08-31 to 2026-10-14. No NAV gives NAV_NOT_FOUND_IN_WINDOW with recovery EXPAND_WINDOW_UP_TO_90_DAYS.
+- **Parameters:** Default lookback 45; max 90; search page size 1-20; batch max 20; active statuses Registered, IPO; timezone Asia/Bangkok
+- **Edge cases:**
+  - Booleans are rejected as lookback_days
+  - Window start = end - (lookback - 1) days
+
+#### BR-THA-003 · Thai fund share-class resolution and NAV selection
+
+**P1** · Validation · Confidence **High**  
+Source: `yfmcp/tools/thai_funds.py:293-344,512-566,591-644`
+
+A Thai fund share class must match exactly one active (Registered, else IPO) profile. Otherwise the result is AMBIGUOUS_SHARE_CLASS, FUND_NOT_FOUND or FUND_IDENTITY_MISMATCH and no class is auto-selected. The NAV reported is the row with the latest nav_date in the window, and freshness is the calendar days from as-of date to that NAV date.
+
+- **Given** proj_id P1 returns NAV rows for classes 'main' only; as-of 2026-10-14, latest nav_date 2026-10-10
+- **When** get_thai_fund_nav runs
+- **Then** identity NAV_PROJECT_ID_CONFIRMED_CLASS_ALIAS; nav = 2026-10-10 row; calendarDaysFromAsOf = 4
+- **Parameters:** statuses Registered then IPO; candidate list cap 10; page size 100; timezone Asia/Bangkok
+- **Edge cases:**
+  - More than one class under the project with no exact match: AMBIGUOUS_SHARE_CLASS
+  - Further pages remaining (next_cursor) keep the result ambiguous even with one exact match
+  - No NAV in window: NAV_NOT_FOUND_IN_WINDOW, recovery EXPAND_WINDOW_UP_TO_90_DAYS
+
+#### BR-THA-004 · Thai NAV batch completeness
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/thai_funds.py:738-870`
+
+A NAV batch is PARTIAL if any item is not OK; a configuration or auth error aborts the whole batch; other per-item errors become item failures; the window starts lookback-1 days before the as-of date (Bangkok today by default).
+
+- **Given** 3 funds, lookback 45, as_of 2025-06-30; one fund returns no NAV
+- **When** get_thai_fund_nav_batch runs
+- **Then** Window 2025-05-17 to 2025-06-30, status PARTIAL, incompleteReferences lists that fund, recovery RETRY_INCOMPLETE_FUNDS, dataDate = latest item dataDate
+- **Parameters:** Each item requires fund_class_name and proj_id; max batch size _MAX_NAV_BATCH_FUNDS (20 per description); lookback 1-90
+- **Edge cases:**
+  - SOURCE_UNCONFIGURED/AUTH_ERROR -> whole-tool failure
+
+#### BR-THA-005 · Thai SEC fund share-class resolution
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/thai_funds.py:293-365`
+
+A Thai fund share class must match exactly among Registered profiles (then IPO profiles if none); a supplied project ID that does not match is FUND_IDENTITY_MISMATCH, no match is FUND_NOT_FOUND, and more than one match or more pages is AMBIGUOUS_SHARE_CLASS — no class is ever auto-selected.
+
+- **Given** fund_class_name 'K-USA-A(A)' matches two Registered profiles and no proj_id
+- **When** The fund is resolved
+- **Then** status AMBIGUOUS_SHARE_CLASS with up to 10 candidates and recovery PROVIDE_PROJ_ID
+- **Parameters:** Statuses searched: Registered, then IPO; max 10 candidates
+- **Edge cases:**
+  - IPO search only when Registered has no exact match and no further page
+
+#### BR-THA-006 · Thai factsheet section status
+
+**P2** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/thai_funds.py:873-1023`
+
+Each factsheet section (statistics, top holdings, URLs) has its own status; EMPTY_RESULT is not a failure; the response is PARTIAL only when a section hits a provider error.
+
+- **Given** statistics OK, top_holdings EMPTY_RESULT, urls RATE_LIMIT
+- **When** get_thai_fund_factsheet runs
+- **Then** status PARTIAL, partialSuccess true, recovery RETRY_FAILED_SECTIONS
+- **Parameters:** Top holdings capped at 5, project scoped; statistics share-class scoped
+- **Edge cases:**
+  - Unknown section names -> input validation error
+
+#### BR-THA-007 · Thai fund catalogue search
+
+**P2** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/yfmcp/tools/thai_funds.py:421-509`
+
+Fund search requires at least one of project, company or class name, searches Registered and IPO profiles with separate cursors, and returns FUND_NOT_FOUND when no candidate is found; candidates are never auto-selected.
+
+- **Given** project_info 'KFUSA', page_size 10
+- **When** search_thai_funds runs
+- **Then** status OK with candidates and nextCursors per status; recovery USE_CANDIDATE_PROJ_ID
+- **Parameters:** page_size 1-20 per status
+- **Edge cases:**
+  - A status whose cursor is explicitly null is skipped
+
+### Shared god-file helpers
+
+#### BR-SHR-001 · Decision-grade SEC XBRL fact
+
+**P0** · Validation · Confidence **High** · P0 panel 2/2  
+Source: `legacy/yahoo-finance-mcp/server.py:8533-8547`
+
+An extracted SEC fact is decision-grade only if it has a value, status FOUND, an XBRL extraction method, an XBRL context, and source evidence naming the source type, concept, accession number and period end.
+
+- **Given** A revenue value FOUND via XBRL whose evidence lacks an accession number
+- **When** Decision-grade is evaluated
+- **Then** Not decision-grade (false).
+- **Parameters:** Required evidence fields sourceType, concept, accessionNumber, periodEnd
+- **Edge cases:**
+  - HTML-table or text-extracted values are never decision-grade under this test
+
+#### BR-SHR-002 · Analyst change classification (upgrade/downgrade/initiation)
+
+**P1** · Policy · Confidence **High**  
+Source: `server.py:4364-4391`
+
+A rating action is INITIATED if the action starts with 'init' or is 'new coverage'. It is DOWNGRADE or UPGRADE if the action word says so. Otherwise it is classified by grade: moving into a sell-type grade is a DOWNGRADE and moving from a non-buy grade into a buy-type grade is an UPGRADE. A new grade with no prior grade is INITIATED, and anything else is MAINTAIN.
+
+- **Given** action 'main', from 'Hold', to 'Buy'
+- **When** The change is classified
+- **Then** UPGRADE
+- **Parameters:** buy set: buy, outperform, overweight, strong buy, positive, market outperform, top pick; sell set: sell, underperform, underweight, strong sell, negative, market underperform, reduce
+- **Edge cases:**
+  - Buy to Strong Buy with action 'main' is MAINTAIN (both in the buy set)
+  - to=Sell with an empty from-grade is a DOWNGRADE (checked before initiation)
+
+#### BR-SHR-003 · Analyst price-target direction, mixed signal and strength flag
+
+**P1** · Calculation · Confidence **High**  
+Source: `server.py:7351-7379,7443-7470`
+
+If both targets exist, the target direction comes from comparing them; otherwise it comes from the action wording. An upgrade with a lowered target, or a downgrade with a raised one, is MIXED. Net sentiment is upgrades minus downgrades.
+
+- **Given** Upgrade, priorPriceTarget 50, currentPriceTarget 45
+- **When** radar row is built
+- **Then** ptDirection LOWERED, mixedSignal true, strengthFlag MIXED; netSentiment counts it as +1 upgrade
+- **Parameters:** target 0 or NaN means no target
+- **Edge cases:**
+  - Downgrade is always BEARISH unless mixed; a mixed downgrade is checked after the DOWNGRADE branch so stays BEARISH
+- **Suspected defect:** strengthFlag checks signal == DOWNGRADE before mixed_signal, so a downgrade with a raised target is reported BEARISH, not MIXED, even though mixedSignal is true. Only upgrades can show MIXED.
+
+#### BR-SHR-004 · Analyst radar: price-target direction, mixed signal and net sentiment
+
+**P1** · Calculation · Confidence **High**  
+Source: `server.py:7351-7379,7443-7470`
+
+Target direction comes from the prior and current targets when both are positive, otherwise from the action wording. An upgrade with a lowered target, or a downgrade with a raised target, is MIXED. Net sentiment is upgrades minus downgrades in the window.
+
+- **Given** Window 30 days: 3 upgrades (one with target 120 to 110), 1 downgrade
+- **When** Upgrade radar runs
+- **Then** netSentiment = 2; the upgrade with the lowered target has mixedSignal = true and strengthFlag = MIXED
+- **Parameters:** target 0 means no target; default window 30 days; *30d fields populated only when days_back == 30
+- **Edge cases:**
+  - A downgrade with a raised target is still flagged BEARISH, because the DOWNGRADE branch precedes the mixed check
+- **Suspected defect:** strengthFlag precedence (server.py:7448-7455) makes a mixed downgrade BEARISH, while a mixed upgrade becomes MIXED, so the treatment is asymmetric.
+
+#### BR-SHR-005 · Analyst rating change classification
+
+**P1** · Calculation · Confidence **High**  
+Source: `server.py:4364-4391`
+
+A broker action is checked in this order. An initiation action means INITIATED; 'downgrade'/'down' means DOWNGRADE; 'upgrade'/'up' means UPGRADE. Next, a move into a sell-type grade from a non-sell grade is a DOWNGRADE, and a move into a buy-type grade from a stated non-buy grade is an UPGRADE. A new grade with no prior grade is INITIATED. Anything else is MAINTAIN.
+
+- **Given** Action 'main', from 'Hold' to 'Buy'
+- **When** the change is classified
+- **Then** UPGRADE; action 'main', 'Buy'→'Sell' is DOWNGRADE; action 'main', ''→'Buy' is INITIATED
+- **Parameters:** buy set {buy, outperform, overweight, strong buy, positive, market outperform, top pick}; sell set {sell, underperform, underweight, strong sell, negative, market underperform, reduce}
+- **Edge cases:**
+  - 'Hold'→'Neutral' is MAINTAIN
+  - A move to a sell grade with an empty from-grade is DOWNGRADE, not INITIATED
+
+#### BR-SHR-006 · Batch ticker cap of 5 (Worker only)
+
+**P1** · Policy · Confidence **High**  
+Source: `worker/src/yahoo-finance.ts:65,555-579`
+
+A batch request processes at most the first 5 tickers. The rest are listed in a _truncated notice so the caller can ask again.
+
+- **Given** get_price_slope is called with 7 tickers
+- **When** The Worker processes the batch
+- **Then** Only the first 5 are processed, and _truncated.remaining lists the other 2
+- **Parameters:** MAX_TICKERS = 5; concurrency 3
+- **Edge cases:**
+  - Python batches (yfmcp/tools/pricing.py:25-42, 1017-1019) have no cap and process every ticker
+- **Suspected defect:** Parity divergence. Python processes unlimited batches while the Worker truncates at 5.
+- **SME question:** Is the 5-ticker cap a business limit that Python should also enforce, or a Worker-only resource limit?
+
+#### BR-SHR-007 · Consensus curve policy inputs
+
+**P1** · Validation · Confidence **High**  
+Source: `server.py:12082-12095; yfmcp/evidence.py:425`
+
+horizon_years must be an integer 1-5, min_analyst_count an integer 1-50, and conflict_tolerance_pct 0-100. EPS also has a fixed absolute tolerance of $0.02.
+
+- **Given** horizon_years=7
+- **When** get_consensus_forecast_curve is called
+- **Then** INPUT_VALIDATION_ERROR 'horizon_years must be an integer from 1 to 5.'
+- **Parameters:** Defaults horizonYears 5, minAnalystCount 3, conflictTolerancePct 10, epsAbsoluteTolerance 0.02
+- **Edge cases:**
+  - Non-numeric input gives a single combined error
+
+#### BR-SHR-008 · Consensus forecast policy bounds
+
+**P1** · Validation · Confidence **High**  
+Source: `server.py:12082-12095`
+
+The consensus curve horizon must be a whole number of years from 1 to 5. The minimum analyst count must be a whole number from 1 to 50. The conflict tolerance must be 0-100%.
+
+- **Given** horizon_years 7
+- **When** get_consensus_forecast_curve runs
+- **Then** Returns INPUT_VALIDATION_ERROR 'horizon_years must be an integer from 1 to 5.'
+- **Parameters:** Defaults horizon 5, minAnalystCount 3, conflictTolerancePct 10, epsAbsoluteTolerance 0.02 (yfmcp/evidence.py:425)
+- **Edge cases:**
+  - observation_date must be YYYY-MM-DD (server.py:12111-12112)
+
+#### BR-SHR-009 · Consensus policy input validation
+
+**P1** · Validation · Confidence **High**  
+Source: `server.py:12082-12095`
+
+Consensus horizon must be an integer 1-5 years, minimum analyst count an integer 1-50, and conflict tolerance 0-100%.
+
+- **Given** horizon_years 6
+- **When** get_consensus_forecast_curve is called
+- **Then** INPUT_VALIDATION_ERROR 'horizon_years must be an integer from 1 to 5.'
+- **Parameters:** Defaults horizon 5, min analysts 3, tolerance 10, EPS abs tolerance 0.02
+- **Edge cases:**
+  - epsAbsoluteTolerance is not caller-adjustable
+
+#### BR-SHR-010 · Current beat streak counted in provider row order
+
+**P1** · Calculation · Confidence **Medium**  
+Source: `server.py:7010-7018`
+
+The beat streak counts consecutive beats starting from the first row of Yahoo's earnings history and stops at the first miss.
+
+- **Given** Yahoo rows ordered oldest to newest: beat, beat, miss, beat
+- **When** currentBeatStreak is computed
+- **Then** currentBeatStreak = 2 (counted from the oldest row), although the most recent quarter alone gives a streak of 1
+- **Parameters:** none
+- **Edge cases:**
+  - Rows missing actual or estimate are skipped without breaking the streak
+- **Suspected defect:** The code comment says 'consecutive from most recent', but the code iterates in provider order. Yahoo earningsHistory is normally oldest-first (-4q to -1q), so the streak may be measured from the wrong end. The Worker (worker/src/yahoo-finance.ts:4605-4611) does the same.
+- **SME question:** Is Yahoo earningsHistory delivered newest-first or oldest-first, and should the streak count back from the most recent reported quarter?
+
+#### BR-SHR-011 · Earnings beat rate, average surprise and historical surprise signal
+
+**P1** · Calculation · Confidence **High**  
+Source: `server.py:6985-7042`
+
+Beat rate is the share of history quarters where actual EPS beat the estimate. Average surprise is the mean of Yahoo surprisePercent × 100. The signal is STRONG at 75% or more, POSITIVE at 55% or more, NEUTRAL at 40% or more, and NEGATIVE otherwise.
+
+- **Given** 4 history quarters, 3 with actual > estimate; surprisePercent values 0.10, 0.05, −0.02, 0.08
+- **When** Momentum is computed
+- **Then** beatRate = 0.75, avgSurprisePct = 5.25, historicalSurpriseSignal = STRONG
+- **Parameters:** thresholds 0.75 / 0.55 / 0.40; surprisePercent is a decimal ratio at every size (x100, never conditionally); pre-revenue epsilon 1e-9 (server.py:434)
+- **Edge cases:**
+  - Equal actual and estimate is not a beat
+  - Pre-revenue (no history, or all |actual EPS| < 1e-9): avgSurprise null, PRE_REVENUE_NO_HISTORY warning
+
+#### BR-SHR-012 · Earnings beat rate, beat streak and pre-revenue rule
+
+**P1** · Calculation · Confidence **Medium**  
+Source: `server.py:6985-7031; worker/src/yahoo-finance.ts:4585-4619`
+
+Beat rate is the share of quarters with actual EPS strictly above the estimate. Average surprise is Yahoo's surprise ratio × 100. The beat streak counts consecutive beats from the first row. If there is no history, or every actual EPS is effectively zero, the company is treated as pre-revenue, with momentum NO_HISTORY and no average surprise.
+
+- **Given** 4 quarters with actual > estimate in 3, surprise ratios 0.05, 0.02, −0.01, 0.04
+- **When** momentum is computed
+- **Then** beatRate 0.75, avgSurprisePct 2.50
+- **Parameters:** pre-revenue epsilon 1e-9 (server.py:434)
+- **Suspected defect:** currentBeatStreak walks earningsHistory in provider order and stops at the first miss. If Yahoo/yfinance returns rows oldest first, which yfinance earnings_history usually does, this counts from the oldest quarter, not the most recent. Both runtimes do the same.
+- **SME question:** Is earningsHistory guaranteed newest-first in both the yfinance and Worker sources? If not, should the streak sort by quarter date descending first?
+
+#### BR-SHR-013 · Earnings momentum: EPS revision percentages and flags
+
+**P1** · Calculation · Confidence **High**  
+Source: `server.py:6927-6983`
+
+EPS revision over 7, 30 and 90 days is (current − prior) ÷ |prior| × 100 for the current-quarter (0q) estimate. A 30-day move under ±3% is STABLE. The momentum flag is STRONG above +10%, POSITIVE at 0 to 10%, NEGATIVE between 0 and −10%, and COLLAPSING at −10% or below.
+
+- **Given** 0q current EPS estimate −0.30, 30 days ago −0.50
+- **When** Earnings momentum is computed
+- **Then** revision30d = +40.0 (abs denominator), revisionDirection = UPGRADING, momentumFlag = STRONG
+- **Parameters:** stable band |rev30| < 3; STRONG > 10; POSITIVE >= 0; NEGATIVE > -10; COLLAPSING <= -10; rounding 2dp
+- **Edge cases:**
+  - Prior estimate 0 or missing: revision is None
+  - No 0q row: the first epsTrend row is used
+  - Pre-revenue: momentumFlag forced to NO_HISTORY
+
+#### BR-SHR-014 · EPS estimate revision percentages and momentum flags
+
+**P1** · Calculation · Confidence **High**  
+Source: `server.py:6950-6983`
+
+EPS revisions for the current quarter are (current − then) ÷ |then| × 100 over 7, 30 and 90 days. A 30-day revision under 3% either way is STABLE. Momentum is STRONG above 10%, POSITIVE from 0% to 10%, NEGATIVE above −10%, and COLLAPSING otherwise.
+
+- **Given** Current-quarter EPS estimate −0.30, 30 days ago −0.50
+- **When** momentum is computed
+- **Then** revision30d +40.00%, revisionDirection UPGRADING, momentumFlag STRONG
+- **Parameters:** stable band ±3%; momentum bands 10 / 0 / −10
+- **Edge cases:**
+  - A prior estimate of 0 gives a null revision
+  - If no '0q' row exists, the first row is used
+
+#### BR-SHR-015 · Event deduplication: same title stem, day and issuer, official source preferred
+
+**P1** · Policy · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/server.py:228,238-251,616-628,651-664,2089-2127`
+
+News/event items sharing a normalized title stem (first 80 characters, ticker and boilerplate words removed), publication day and issuer are merged; the higher-priority source is kept (SEC > company IR > press release > newswire > company news > Yahoo > Marketaux > other), with the newer timestamp breaking ties and the other kept as a source reference.
+
+- **Given** A SEC 8-K item and a Yahoo news item with the same normalized title on 2026-03-04 for the same issuer
+- **When** Items are deduplicated
+- **Then** The SEC item is kept with the Yahoo item in sourceRefs; if their timestamps differ a TIMESTAMP_VARIANCE warning (statusImpact false) is added; results sort newest first.
+- **Parameters:** Title stem max 80 chars; stop terms yahoo, finance, finnhub, globenewswire, press, release, inc, corp, corporation, company, plc, ltd, llc; group id = first 16 hex of SHA-256(stem|day|issuer); priorities 0-7
+- **Edge cases:**
+  - Items with neither title stem nor date get no group and pass through undeduplicated
+  - Different issuers on the same day/title are not merged
+
+#### BR-SHR-016 · Form 4 insider transaction value
+
+**P1** · Calculation · Confidence **High**  
+Source: `server.py:679-704,797-854`
+
+An insider transaction's value is shares × price per share (2dp), labelled by Form 4 transaction code. Parenthesised numbers are negative.
+
+- **Given** Form 4 non-derivative row: code S, 10,000 shares at $25.50
+- **When** The Form 4 is parsed
+- **Then** transactionLabel = Sale; value = 255,000.00
+- **Parameters:** codes P Purchase, S Sale, A Grant/Award, D Disposition, M Option exercise/conversion, F Tax withholding, G Gift; others Other/Unclassified
+- **Edge cases:**
+  - No price: value None
+  - XML parse failure falls back to HTML table parsing
+- **Suspected defect:** Only the first transaction is parsed (root.find / first matching row). A Form 4 with several lines (for example an M exercise followed by an S sale) reports only the first, so the reported value can misstate the filing.
+
+#### BR-SHR-017 · Forward revision signal and composite momentum
+
+**P1** · Policy · Confidence **High**  
+Source: `server.py:7044-7108`
+
+The forward signal uses the 30-day revision first (±3% bands). The 7-day revision applies when the 30-day one is neutral or missing, and the 90-day one only as a last fallback. The composite combines this with the historical surprise signal into STRONG_POSITIVE, MIXED_NEGATIVE_REVISION, MIXED_POSITIVE_REVISION, NEGATIVE, NEUTRAL or UNKNOWN.
+
+- **Given** revision30d = +1.0, revision7d = −4.0, beatRate = 0.80
+- **When** Composite momentum is classified
+- **Then** forwardRevisionSignal = NEGATIVE (driver 30d_neutral_7d); historical = STRONG; composite = MIXED_NEGATIVE_REVISION; MIXED_EARNINGS_SIGNAL warning
+- **Parameters:** revision band ±3%; LONGER_LOOKBACK_REVISION_DIVERGENCE when rev30 >= 3 and rev90 <= -3; MIXED_EARNINGS_SIGNAL when beatRate >= 0.75 and rev30 or rev7 <= -3
+- **Edge cases:**
+  - Both signals UNKNOWN gives UNKNOWN
+  - Forward POSITIVE with historical NEUTRAL gives NEUTRAL, not positive
+
+#### BR-SHR-018 · Forward revision signal precedence
+
+**P1** · Policy · Confidence **High**  
+Source: `server.py:7044-7094`
+
+The forward revision signal uses the 30-day revision (±3%) first. If the 30-day is neutral, the 7-day revision decides; if the 30-day is missing, the 7-day is used, and the 90-day only as a last fallback. A strong beat history (≥75%) with a 7- or 30-day cut of 3% or more raises MIXED_EARNINGS_SIGNAL.
+
+- **Given** revision30d +1.0%, revision7d −4.0%, beatRate 0.80
+- **When** signals are computed
+- **Then** forwardRevisionSignal NEGATIVE (driver 30d_neutral_7d) and warning MIXED_EARNINGS_SIGNAL
+- **Parameters:** threshold ±3%
+- **Edge cases:**
+  - revision30d ≥ +3 with revision90d ≤ −3 adds LONGER_LOOKBACK_REVISION_DIVERGENCE without overriding
+
+#### BR-SHR-019 · Guidance history run status and retryability
+
+**P1** · Lifecycle · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/server.py:10394-10414,10508-10543`
+
+Guidance history reads up to 12 (default 8) recent 8-K Item 2.02 earnings releases; its status is NO_EARNINGS_RELEASES_FOUND, RELEASE_TEXT_NOT_AVAILABLE (all unread), PARTIAL (some unread or actuals unread) or OK, and unread releases are never treated as withdrawn guidance.
+
+- **Given** 8 releases picked, 2 unreadable, companyfacts readable
+- **When** get_guidance_history runs
+- **Then** status PARTIAL, retryable true, warning RELEASE_TEXT_NOT_AVAILABLE '2 of 8 ... missing, not withdrawn'.
+- **Parameters:** max_releases clamp 1-12, default 8; read batch size 4; only form 8-K with '2.02' in items (8-K/A only on request)
+- **Edge cases:**
+  - No CIK and ticker index readable -> NO_SEC_REGISTRANT (not retryable); index unreadable -> SEC_LOOKUP_UNAVAILABLE (retryable)
+  - Companyfacts unreadable -> ACTUALS_NOT_READ warning, outcomes not evaluated
+
+#### BR-SHR-020 · Historical surprise signal from beat rate
+
+**P1** · Policy · Confidence **High**  
+Source: `server.py:7033-7042`
+
+A beat rate of at least 75% is STRONG, at least 55% POSITIVE, at least 40% NEUTRAL, otherwise NEGATIVE. With no beat rate the signal is UNKNOWN.
+
+- **Given** beatRate 0.50
+- **When** historical surprise signal is set
+- **Then** NEUTRAL
+- **Parameters:** 0.75 / 0.55 / 0.40
+
+#### BR-SHR-021 · Material SEC filings filter and limit cap
+
+**P1** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/server.py:8960-9070`
+
+Material filings are those whose form equals or starts with an allowed form (default 10-K, 10-Q, 8-K, S-1, 424B, DEF 14A, 20-F, 6-K) and is not a noisy form; at most 20 are returned and the response says when more exist.
+
+- **Given** limit=120 for a filer with 35 material filings
+- **When** list_sec_material_filings runs
+- **Then** 20 filings returned, moreAvailable true, warning LIMIT_CAPPED stating the 20 maximum and that more filings exist.
+- **Parameters:** Max 20; default limit 5; noisy forms 3, 4, 5, SC 13G(/A), SC 13D(/A), 144, SD, CORRESP, UPLOAD, CT ORDER; xbrl_available if isXBRL or isInlineXBRL = 1
+- **Edge cases:**
+  - Prefix match includes amendments and variants (10-K/A, 10-KT, 8-K/A, 424B4)
+  - limit < 1 clamps to 1
+
+#### BR-SHR-022 · Peer valuation set size and median premium
+
+**P1** · Validation · Confidence **High**  
+Source: `server.py:11090-11111; yfmcp/valuation.py:515-538`
+
+A peer comparison needs 2 to 10 distinct tickers, including the subject. Peer medians exclude the subject, and the subject's premium is (own / median - 1) x 100, only for multiples with a positive median.
+
+- **Given** subject 'NVDA' with tickers ['AMD','nvda']
+- **When** compare_peer_valuations runs
+- **Then** After de-duplication there are 2 names (valid). Twelve distinct names returns INPUT_VALIDATION_ERROR 'tickers must name 2 to 10 distinct symbols, including the subject.'
+- **Parameters:** Min 2, max 10; median of an even count = mean of the two middle values
+- **Edge cases:**
+  - No premium is computed for *Pct metrics (growth, gross margin)
+  - The Worker has the same limit (worker/src/yahoo-finance.ts:16029-16038)
+
+#### BR-SHR-023 · Event request input clamps and source allow-list
+
+**P2** · Validation · Confidence **High**  
+Source: `legacy/yahoo-finance-mcp/server.py:230-236,560-588`
+
+Event/news requests clamp max results to 1-100 and lookback to 1-3,650 days; unsupported source names are dropped with a warning and, if none remain, defaults are used.
+
+- **Given** max_results=500, lookback_days=0, sources=['twitter','sec','sec']
+- **When** The request is normalized
+- **Then** max_results 100, lookback default value used (0 is falsy) then clamped >=1, sources ['sec'] with warning SOURCE_UNSUPPORTED for 'twitter'.
+- **Parameters:** max_results 1-100; lookback 1-3650 days; supported sources sec, company_ir, company_ir_page, newswire, yahoo_finance, yahoo_finance_news, yahoo_finance_press_releases, finnhub, marketaux
+- **Edge cases:**
+  - Duplicates removed preserving order
+  - 0 is treated as 'not given' and replaced by the default
+
+## Appendix A — Rules needing SME confirmation
+
+61 rules have confidence below High. Each one's card states the question to answer.
+
+| ID | Pri | Rule | Why |
+|---|---|---|---|
+| BR-ENV-001 | P1 | Default fact confidence and decision-grade tagging | Should a value with no stated confidence and no evidence default to HIGH, or to NOT_DECISION_GRADE? |
+| BR-ENV-008 | P2 | Data cache freshness tiers | Is a stale-while-revalidate window (serve up to 2x TTL) intended for any tool, or is is_stale dead code? |
+| BR-PRC-002 | P0 | Daily price freshness classification (CURRENT / STALE / UNKNOWN) | Should exchange holidays be considered when proving the previous session (the weekday-only fallback reports UNKNOWN after holidays)? |
+| BR-PRC-012 | P1 | Liquidity gate: $10M average daily traded value | P0 panel split on whether this moves money / is regulatory (Faithful: yes. In yfmcp/tools/pricing.py, line 1441 sets LIQUIDITY_GATE_MIN_ADV_USD = 10_000_000. Lines 1458-1462 (_average_traded_value) return the mean of vo… |
+| BR-PRC-021 | P1 | Price stats: percent distances and CAGR | Should CAGR be null when the price history does not span the full horizon, or should the exponent use actual elapsed years? |
+| BR-PRC-022 | P1 | Price target bracket and tag | Is emitting STRONG_BUY/AVOID buy-sell language intended given every other valuation tool enforces decisionUse EVIDENCE_ONLY with action null, and should classification use the rounded or raw percentage (75.04 rounds to … |
+| BR-PRC-023 | P1 | Put hedge contract eligibility and ask-based cost | P0 panel split on whether this moves money / is regulatory (I read /home/user/yahoo-finance-mcp/server.py lines 7238-7251. The eligibility and cost logic matches the rule. A put is dropped if bid <= 0 or ask <= 0, and t… |
+| BR-FND-004 | P1 | Credit health operational EBITDA, net debt and coverage | P0 panel split on whether this moves money / is regulatory (I read server.py:6686-6747 and the helpers above it (_safe_get, and _ttm_sum at 6649-6665). Faithful: yes. - Total debt is taken from the latest balance-sheet … |
+| BR-FND-006 | P1 | Credit health: net debt, operational EBITDA and leverage ratios | P0 panel split on whether this moves money / is regulatory (The rule card matches the code, but I don't think this should be P0 when judged for compliance. Faithful: yes. I read /home/user/yahoo-finance-mcp/server.py li… |
+| BR-PRV-003 | P1 | Finnhub market eligibility (fails open) | Should a missing or corrupt policy file block Finnhub calls (fail closed) rather than treat all tickers as eligible? |
+| BR-EXT-015 | P0 | Release figure scale and loss sign | P0 panel doubts spec fidelity: I read yfmcp/extraction_rules.py:590-613 and its helpers: _RELEASE_MONEY_BASE/_RELEASE_SCALE/_RELEASE_TABLE_SCALE_RE at 494-499, _RELEASE_NEGATIVE_RE/_RELEASE_LOSS_RE/_RELEASE_INCOME_RE/_R… |
+| BR-EXT-035 | P1 | Automatic 20-F fallback for geographic and segment revenue | Should a 20-F fallback value with no stated confidence default to HIGH? |
+| BR-EXT-041 | P1 | Capped call economic offset in scenarios | P0 panel split on whether this moves money / is regulatory (The rule card matches the code. In yfmcp/share_scenarios.py:219-234 the offset is only computed when t["capped_calls"] == "offset_when_stated". It reads only c… |
+| BR-EXT-046 | P1 | Contractual obligation schedule by due bucket | P0 panel split on whether this moves money / is regulatory (I read the cited code in /home/user/yahoo-finance-mcp/yfmcp/funding_schedule.py at lines 40-102 and 258-307. The citation's legacy/ prefix does not exist; the … |
+| BR-EXT-048 | P1 | Convertible note principal basis and if-converted shares | P0 panel split on whether this moves money / is regulatory (I read /home/user/yahoo-finance-mcp/yfmcp/capital_structure.py lines 1184-1199 and 1436-1491. The cited lines contain no instruction-shaped text. Is it faithfu… |
+| BR-EXT-049 | P1 | Convertible preferred if-converted and liquidation preference | P0 panel split on whether this moves money / is regulatory (I read yfmcp/capital_structure.py:1588-1675 and the rule card describes the code correctly. What matches: - Preferred shares outstanding is the larger of the P… |
+| BR-EXT-050 | P1 | Convertible preferred if-converted shares | P0 panel split on whether this moves money / is regulatory (Faithful: yes. I read /home/user/yahoo-finance-mcp/yfmcp/capital_structure.py:1588-1675 and the card matches the code. - Preferred count is the larger of the p… |
+| BR-EXT-056 | P1 | Diluted share count and dilution percentage at price | P0 panel split on whether this moves money / is regulatory (P0 is not justified. The rule is faithful to the code. The cited code (yfmcp/capital_structure.py:2280-2325) builds a mechanical, informational diluted-share b… |
+| BR-EXT-057 | P1 | Dilution bridge requires a caller price | P0 panel split on whether this moves money / is regulatory (Faithful: yes. server.py:10234-10239 converts price with float(). If conversion fails, price becomes NaN. A non-finite price or one at or below 0 returns {"err… |
+| BR-EXT-070 | P1 | Guidance range pattern precedence and alternates | P0 panel split on whether this moves money / is regulatory (I read /home/user/yahoo-finance-mcp/yfmcp/extraction_rules.py, lines 194-260 and 370-453. The cited legacy/ path is the same file. Faithfulness: the card mostl… |
+| BR-EXT-073 | P1 | Midpoint plus/minus tolerance bounds | P0 panel split on whether this moves money / is regulatory (The cited path legacy/yahoo-finance-mcp/yfmcp/extraction_rules.py does not exist. I read the matching lines at /home/user/yahoo-finance-mcp/yfmcp/extraction_ru… |
+| BR-EXT-075 | P1 | Net cash formula | P0 panel split on whether this moves money / is regulatory (The card matches the code. In /home/user/yahoo-finance-mcp/yfmcp/capital_structure.py, line 3029 sets liquid = cash (or 0) + short_term (or 0). Line 3054 sets … |
+| BR-EXT-076 | P1 | Net share settlement when principal is stated as cash-settled | P0 panel split on whether this moves money / is regulatory (I read /home/user/yahoo-finance-mcp/yfmcp/capital_structure.py. The cited path starts with legacy/, but that file does not exist. The code is at the same path … |
+| BR-EXT-077 | P1 | Net-share settlement when convertible principal must be paid in cash | P0 panel split on whether this moves money / is regulatory (Faithful. I checked the rule against /home/user/yahoo-finance-mcp/yfmcp/capital_structure.py. A sentence qualifies only if it matches _CASH_PRINCIPAL_RE and do… |
+| BR-EXT-082 | P1 | Scenario convertible treatment and in-the-money test | P0 panel split on whether this moves money / is regulatory (I read /home/user/yahoo-finance-mcp/yfmcp/share_scenarios.py:188-217. The citation's "legacy/" prefix is wrong, but the line range is right. Faithful: yes. - T… |
+| BR-EXT-083 | P1 | Scenario convertible treatment including net-share settlement | P0 panel split on whether this moves money / is regulatory (The card matches the code. I read yfmcp/share_scenarios.py:188-217 and the helpers _round at :43-45 and _exercisable at :131-142. What the code does: - Notes a… |
+| BR-EXT-084 | P1 | Scenario warrant vesting basis | The code comment says a class with untagged vesting conditions is never taken as all outstanding, but the code uses outstanding when the class has no 'exercisable' key at all. Should a class without an exercisable figur… |
+| BR-EXT-085 | P1 | Share claim status lifecycle | P0 panel split on whether this moves money / is regulatory (Faithful: the code matches the card. share_claim_signals creates each text claim group with status UNQUANTIFIED (capital_structure.py:1856-1872). _preferred_cl… |
+| BR-EXT-090 | P1 | Share-count scenario input validation | P0 panel split on whether this moves money / is regulatory (Faithful: the card matches yfmcp/share_scenarios.py:19-104. It enforces 1 to 8 scenarios (SHARE_SCENARIO_LIMIT=8, lines 19 and 63-66). Names are trimmed and mu… |
+| BR-EXT-095 | P1 | Stock option dilution by treasury-stock method (tranches before weighted-average strike) | P0 panel split on whether this moves money / is regulatory (Faithful: I checked the rule against yfmcp/capital_structure.py:501-503 and 518-617 and it matches the code. _treasury_stock returns count x (1 - strike/price)… |
+| BR-EXT-097 | P1 | Treasury-stock incremental shares for options and warrants | P0 panel split on whether this moves money / is regulatory (I read the cited code and the Given/When/Then matches it. The formula is at yfmcp/capital_structure.py:501-502 (`_treasury_stock`) and again at yfmcp/share_sce… |
+| BR-EXT-098 | P1 | Treasury-stock method for options and warrants in scenarios | P0 panel split on whether this moves money / is regulatory (Verdict: the rule card matches the code, but the P0 rating is not justified. I'd rate it P1. I checked it against /home/user/yahoo-finance-mcp/yfmcp/share_scen… |
+| BR-EXT-107 | P2 | Companies House issuer match | Removing 'Holdings', 'Group' and 'Limited' can merge distinct legal entities (a holding company and its operating subsidiary). Is matching on the active entity with the same stem acceptable? |
+| BR-VAL-004 | P0 | ADR ratio detection and share-basis mismatch | P0 panel doubts spec fidelity: I read yfmcp/valuation.py lines 29-49 and 280-302 myself. Both worked examples are correct. 25.9B / 5.186B = 4.9942. That rounds to n=5, and \|4.9942-5\| = 0.0058 is within the tolerance o… |
+| BR-VAL-006 | P0 | Historical balances read at the cash date; no-borrowings means zero debt | P0 panel doubts spec fidelity: P0 is justified. This rule decides which balance-sheet figures go into enterprise value (EV). It also decides when missing debt counts as zero rather than leaving EV null. Both feed every … |
+| BR-VAL-022 | P0 | Metric source reconciliation status | P0 panel doubts spec fidelity: P0 is justified. This rule decides whether a reported financial figure is labelled AGREED, CONFLICT, PARTIAL or NOT_FOUND across SEC XBRL, the issuer release and Yahoo, and whether it is f… |
+| BR-VAL-025 | P0 | Parent net income derived from ProfitLoss less NCI | P0 panel doubts spec fidelity: P0 is justified. This rule decides which reported SEC figure counts as net income or revenue, and it takes the noncontrolling-interest share off consolidated profit. That makes it a data-i… |
+| BR-VAL-037 | P1 | ADR ratio detection and share-basis mismatch | P0 panel split on whether this moves money / is regulatory (I checked the rule card against yfmcp/valuation.py:29-49 and 280-302. The legacy/ copy is laid out the same way. The card is accurate. The constants match: _AD… |
+| BR-VAL-045 | P1 | Enterprise value formula | P0 panel split on whether this moves money / is regulatory (The rule card matches the code. In yfmcp/valuation.py:396-397, EV = equity_value + debt - convertible_adjustment + preferred_adjustment - cash - short_term. eq… |
+| BR-VAL-046 | P1 | Enterprise value in valuation snapshot | When the SEC share count is rejected (SHARE_BASIS_MISMATCH) and Yahoo's basic shares are used, should convertible principal still be removed from debt? |
+| BR-VAL-047 | P1 | Historical balances and zero debt when no borrowings tagged | P0 panel split on whether this moves money / is regulatory (Code checked: /home/user/yahoo-finance-mcp/yfmcp/valuation_history.py lines 34-67 (the US_GAAP and IFRS concept mappings) and lines 418-455 (_balances_at). The… |
+| BR-VAL-064 | P1 | Release figure selection when multiple releases are read | Should reconciliation use the earliest release figure (as originally reported) or the latest re-release? |
+| BR-VAL-074 | P1 | Snapshot enterprise value formula with convertible and preferred adjustments | Should the convertible debt deduction apply only when the diluted SEC share count (which includes the if-converted shares) is actually used for equity value? |
+| BR-VAL-081 | P1 | Valuation snapshot balance source and status | P0 panel split on whether this moves money / is regulatory (Through the compliance lens, this should not be P0. Lines 305-339 of /home/user/yahoo-finance-mcp/yfmcp/valuation.py decide which balance source to use, either… |
+| BR-VAL-082 | P1 | Valuation snapshot enterprise value and status | When the SEC share count is rejected (SHARE_BASIS_MISMATCH), should convertible principal still be removed from debt? |
+| BR-VAL-083 | P1 | Valuation snapshot enterprise value formula | P0 panel split on whether this moves money / is regulatory (I read /home/user/yahoo-finance-mcp/yfmcp/valuation.py. The cited ranges line up with the logic described. Why the rule is faithful: - Lines 300-303 use the di… |
+| BR-VAL-085 | P1 | Valuation: supplied price must be positive | P0 panel split on whether this moves money / is regulatory (The rule card matches the code. In server.py:11054-11060, a supplied price is converted with float(). If that fails it becomes NaN. Anything not finite or <= 0… |
+| BR-ERN-006 | P1 | Alpha Vantage transcript needs a stated fiscal quarter | Release periods are extracted as labels such as 'Q3 2026' or 'Q3 FY2026'. Does _alpha_vantage_quarter (regex YYYY\s*Qn) ever match those, or is the OFFICIAL_RELEASE_RESOLVED path effectively dead? |
+| BR-ERN-009 | P1 | Earnings call transcript source waterfall | Since company_ir is always recorded as SKIPPED, should the fallback recommendation still point users to company IR first every time? |
+| BR-ERN-010 | P1 | Earnings metrics extraction confidence | Is any path meant to produce HIGH-confidence metrics here (e.g. XBRL table)? Currently none does. |
+| BR-ERN-017 | P1 | Earnings release source URL policy (paywall block) | Should the paywall block cover all subdomains of the blocked publishers, and should company_ir URLs be restricted to a known IR-page registry? |
+| BR-ERN-024 | P1 | Guidance target period from text | P0 panel split on whether this moves money / is regulatory (The card matches the code, but P0 is not justified. Faithful. I read /home/user/yahoo-finance-mcp/yfmcp/guidance_history.py:50-136, and the code does what the … |
+| BR-ERN-027 | P1 | Guidance withdrawal and reaffirmation detection | P0 panel split on whether this moves money / is regulatory (I read the code at /home/user/yahoo-finance-mcp/yfmcp/guidance_history.py. The cited path has a legacy/yahoo-finance-mcp/ prefix that doesn't exist, but lines … |
+| BR-ERN-039 | P2 | Management commentary confidence by source | Should sec_8k_ex991 sources get HIGH confidence like sec_8k? |
+| BR-ERN-043 | P2 | Yahoo transcript HTTP status mapping differs from market providers | Should a Yahoo 403 be distinguished as entitlement/block vs auth, as Alpha/Finnhub 403s are? |
+| BR-NWS-008 | P1 | Ticker mention compatible with listing exchange | Should NYSE American listings be distinguished from NYSE when validating ticker prefixes? |
+| BR-NWS-010 | P2 | Event type from keywords (first matching category wins) | Should event keywords match whole words, and should 'raises/lowers' count as guidance only when paired with guidance/outlook wording? |
+| BR-EVD-019 | P1 | Evidence cut component status and coverage state | P0 panel split on whether this moves money / is regulatory (Faithful, with gaps. In yfmcp/evidence.py:1126-1127, build_receipt counts any component whose status is not exactly "OK" as a failure. Coverage is COMPLETE whe… |
+| BR-EVD-041 | P2 | Evidence cut listing order | Should listing return the newest cuts when more than 1,000 exist (store.list returns sorted keys truncated from the oldest end)? |
+| BR-SHR-010 | P1 | Current beat streak counted in provider row order | Is Yahoo earningsHistory delivered newest-first or oldest-first, and should the streak count back from the most recent reported quarter? |
+| BR-SHR-012 | P1 | Earnings beat rate, beat streak and pre-revenue rule | Is earningsHistory guaranteed newest-first in both the yfinance and Worker sources? If not, should the streak sort by quarter date descending first? |
+
+## Appendix B — Rules refuted by the referee
+
+- **Options max-pain strike** (`server.py:3904-3924`): refuted: The formula in the rule and the suppression guard both match the code. The worked example does not: the code gives a different max-pain strike from the same inputs. What matches, in /home/user/yahoo-finance-mcp/server.py: - Line 3904 builds the candidate strikes from the call and put strikes combined. - Lines 3918-3924 add up (S - call strike) clipped at zero times call OI, plus (put strike - S) clipped at zero times put OI, for each strike S. They keep the first strike with the strictly smallest total, so ties go to the lower strike. - Lines 3907-3915 skip the calculation and add warning MAX_PAIN_UNAVAILABLE_ZERO_OI when total OI is zero or less, or when more than half of the cont…
+- **Expanded institutional ownership provider fallback** (`yfmcp/tools/provider_gaps.py:217-226,297-421`): refuted: Most of the rule matches the code, but the one scenario it gives as its specification produces a different result than the rule says. What matches: - The eligibility check lowercases nothing and compares in upper case: it looks up the ticker in the ineligible list and checks the suffix list from worker/src/news-source-capabilities.json (provider_gaps.py:217-226; the path is set at line 27). - If the policy file fails to load, the ticker is treated as eligible (line 221). - Finnhub is called only for eligible tickers (lines 310-316). - Alpha Vantage is called only when no usable rows came back and allow_scarce_fallback is true (line 341). - max_holders must be 1 to 100, default 50 (…
+
