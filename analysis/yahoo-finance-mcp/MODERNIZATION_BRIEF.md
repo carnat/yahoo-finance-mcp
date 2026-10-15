@@ -184,7 +184,8 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
   - **S-13:** restrict CORS once auth exists.
 - **Entry criteria:**
   - [x] §7 Q12 decided 2026-10-15: stay on Free; per-tool caps; JSON-RPC batch = 1 tool call.
-  - [ ] §7 V1 is verified: every client in use (the claude.ai connector, Claude Desktop, deploy canaries, the live verifier) can send a static `Authorization` header, or a fallback is recorded here.
+  - [ ] §7 V1: owner confirms the **Request headers** section is available in claude.ai's Add custom connector dialog, **or** Q13 is decided.
+  - [ ] Scripts send `Authorization` from an `MCP_TOKEN` secret (all 9 scripts that post to `MCP_URL`).
   - [x] §7 Q11 names confirmed (2026-10-15): `AUTH_REQUIRED`, `BATCH_LIMIT_EXCEEDED`, `PROVIDER_BUDGET_EXHAUSTED`, `PROVIDER_OPT_IN_REQUIRED`.
   - [ ] The owner acknowledges §7 V2: with **0 approved IR entries** today, company-IR URL fetches are refused until entries are approved.
   - [ ] `main` CI is green.
@@ -465,7 +466,17 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
 
 ### Verification notes (planner checked the decisions against the code, 2026-10-15)
 
-- **V1 (gates Phase 1).** A required static bearer token breaks any client that can't send a fixed `Authorization` header. Verify the claude.ai connector, Claude Desktop, the deploy canaries and the live verifier before enforcement.
+- **V1 (gates Phase 1): checked 2026-10-15 against claude.com/docs/connectors (raw pages).**
+
+  | Client | Can it send a static `Authorization: Bearer …`? | Evidence / action |
+  |---|---|---|
+  | **claude.ai custom connector**: also how Claude Desktop, mobile, this repo's `Yahoo_Finance_MCP` connector and the `live-verifier` agent reach the Worker | **Only if the "Request headers" section appears in the Add custom connector dialog.** That feature is "in beta and available to a limited set of organizations". Supported by default: OAuth (DCR, CIMD) and no authentication | Owner opens *Customize → Connectors → Add custom connector* and checks for **Request headers**. If present, enter the full value `Bearer <token>` (Claude adds no prefix). Auth settings can't be edited later, so remove and re-add the existing connector |
+  | Claude Desktop, local server | Not affected | Uses the local Python server over stdio (README); `/mcp` auth does not apply |
+  | Claude Code / Agent SDK | Yes | `headers` in the MCP server config |
+  | Deploy canaries, smoke and audit scripts | Yes, with a small code change | 9 scripts post to `MCP_URL`. Four go through `scripts/live_smoke_utils.rpc`; `test_deployed_extractors`, `test_geographic_revenue_schema`, `test_triangulation`, `test_universal_aliases` post directly. Add an `MCP_TOKEN` GitHub secret and header in Phase 1 |
+  | Messages API MCP connector | Yes | `authorization_token` |
+
+  **Result: V1 PASSES only if the owner's claude.ai account shows Request headers.** If it doesn't, a static bearer locks out every claude.ai-based client (connector, Desktop/mobile remote use, the live verifier), and Q13 applies.
 - **V2 (acknowledge before Phase 1).** `worker/src/company-ir-page-registry.json` has **0 `approved` entries** (2 `candidate`). Under Q2a, company-IR URL fetches are refused until entries are approved; `raw_text` is the only route meanwhile.
 - **V3 (gates the Q3c cap in R4): measured 2026-10-15; see `v3/V3_SUBREQUESTS.md`. Plan = Workers FREE (owner-confirmed).**
   - **Limits, checked against the raw Cloudflare docs:**
@@ -505,7 +516,18 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
   | Defaults substituted | `defaultSourcesApplied` | field (boolean) | new |
 
   Every name lands as a deliberate frozen-contract change: `public_tool_contract.py`, canaries and docs are updated in the release that introduces it, with a minor version bump.
-- [ ] **Doctrine refinement.** Refine the Sniper Doctrine MCP contract against these decisions; then re-tag R2's operative set and regenerate this brief.
+- [ ] **Doctrine refinement (owner; gates §8 per `OWNER_DECISIONS_20261015.md`).** The Sniper Doctrine is the caller's decision framework and is **not in this repository**, so the planner cannot refine it. What the repo shows about the interface it consumes:
+  - **Authority boundary (2.5.0):** evidence payloads carry `decisionUse: EVIDENCE_ONLY`, and `selectedMethod`, `selectedMultiple`, `scenarioWeights`, `priceTarget`, `g2`, `opportunity` and `action` are always null. Valuation method, targets and capital action "belong to the caller's doctrine".
+  - **Per-tool `doctrineUse`** (`ALLOWED` / `VERIFY_ONLY` / `DIAGNOSTICS_ONLY` / `BLOCKED`) in `worker/src/tools.ts:1730–1776`. **Parity gap: the Python runtime emits no `doctrineUse` at all.** Under Q6, add it to R4 (shared envelope) unless the Doctrine says the local runtime is out of its scope.
+  - **Decision-grade gates:** `decisionGrade`, `decisionUse=CHECK_OFFICIAL_RELEASES`, coverage states, and "doctrine-relevant evidence families" (`evidence.ts:934`).
+  - Doctrine-internal terms are kept out of tool names (`docs/tool-naming.md`: TPS, EQF, ADV gate, DC-*).
+  - **What the refinement must settle for this brief:**
+    1. Define "Doctrine-critical", so R2's interim operative repair set can be re-tagged.
+    2. Accept the new non-evidence states the Doctrine will start seeing: `PROVIDER_BUDGET_EXHAUSTED`, `PROVIDER_OPT_IN_REQUIRED`, `TTM_PARTIAL`, `NEGATIVE_EARNINGS_BASE` as a tier, `NCI_NOT_TAGGED`, `INSUFFICIENT_HISTORY`, `SESSION_CALENDAR_UNKNOWN`, `ACCESSION_NOT_FOUND`.
+    3. Confirm the changed semantics it relies on: inclusive ITM, `sources=[]` means none, unrounded bracket thresholds, official-release-first surprise actuals, and capped batches with explicit rejection.
+    4. Decide whether `doctrineUse` is required in the local runtime.
+
+  Then regenerate this brief.
 - [x] **Q12. Cloudflare plan strategy: STAY ON WORKERS FREE WITH PER-TOOL CAPS (owner decision 2026-10-15).** Q3c's single cap of 10 is superseded by the measured constraint (V3). Caps are advertised in each tool's schema as `maxItems`, enforced identically in **both runtimes** (Python too, for parity, although it has no subrequest limit), and an oversize request is rejected with `BATCH_LIMIT_EXCEEDED` instead of being truncated:
 
   | Public action(s) | Ticker cap | Measured at that cap (cold) |
@@ -526,7 +548,12 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
   - The 10 ms CPU limit stays a live risk: Q10 telemetry must record `exceededCpu`/`exceededResources` per action.
   - The 100,000 requests/day cap makes Phase 1 auth an availability control. Also choose the route's fail mode for Error 1027 (fail-closed recommended, so no request bypasses auth).
   - Re-open this decision if the telemetry shows sustained 1102 errors or daily-cap exhaustion.
-- [ ] **V1:** answer before Phase 1.
+- [ ] **V1:** owner checks claude.ai for the **Request headers** section (see V1).
+- [ ] **Q13 (only if V1 fails; gates Phase 1).** How the static credential reaches the Worker when claude.ai can't send headers. The auth abstraction from Q2b stays; only the transport differs:
+  - **(a) Secret path segment** (`/mcp/<token>`), accepted alongside the bearer header. It works with no-auth connectors, needs no OAuth, and is replaceable later. The cost is that the token is in the URL, so it must be redacted from Workers logs and the Q10 telemetry, and rotation means re-adding the connector.
+  - **(b) OAuth (DCR/CIMD).** The only per-user option claude.ai supports by default, but the owner ruled OAuth out of this program (Q2b).
+  - **(c) Request-header beta access.** Ask Anthropic for the feature and keep the bearer as decided.
+  - Recommendation: **(a) now, (c) when available**, both behind the same abstraction.
 
 ## 8. Approval Block
 
