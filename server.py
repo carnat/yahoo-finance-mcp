@@ -567,9 +567,7 @@ def _coerce_lookback_days(value: int, default_value: int) -> int:
 
 def _normalize_event_sources(sources: list[str] | None, default_sources: list[str]) -> tuple[list[str], list[dict]]:
     warnings: list[dict] = []
-    source_list = [str(s).strip().lower() for s in (sources or default_sources) if str(s).strip()]
-    if not source_list:
-        source_list = list(default_sources)
+    source_list = [str(s).strip().lower() for s in (default_sources if sources is None else sources) if str(s).strip()]
     normalized: list[str] = []
     seen: set[str] = set()
     for src in source_list:
@@ -583,9 +581,53 @@ def _normalize_event_sources(sources: list[str] | None, default_sources: list[st
         if src not in seen:
             seen.add(src)
             normalized.append(src)
-    if not normalized:
-        normalized = [s for s in default_sources if s in _PHASE6B_SUPPORTED_SOURCES]
+    # An explicit list is used as given (Q3h): [] or only unsupported names selects no source.
     return normalized, warnings
+
+
+# Default source sets the news tools apply when ``sources`` is omitted or None (Q3h).
+# An explicit list, including [], is used as given: [] attempts no source.
+_DEFAULT_NEWS_SOURCES = ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"]
+_DEFAULT_PRESS_RELEASE_SOURCES = ["sec", "company_ir_page", "yahoo_finance_press_releases"]
+_DEFAULT_EVENT_SOURCES = [
+    "sec", "company_ir_page", "company_ir", "yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux",
+]
+_GET_COMPANY_NEWS_SOURCES_DESCRIPTION = (
+    "Allowed sources: yahoo_finance_news, yahoo_finance_press_releases, finnhub, marketaux, sec, newswire, company_ir, company_ir_page, or legacy yahoo_finance. Marketaux is quota-aware fallback by default; explicit sources=['marketaux'] forces one bounded request. Omit for the default set; an explicit list is used as given, and [] attempts no source. requestedSources, defaultSourcesApplied and attemptedSources report what was asked for and tried."
+)
+_SOURCES_DEFAULT_DESCRIPTION = (
+    'Omit for the default set; an explicit list is used as given, and [] attempts no source. requestedSources, defaultSourcesApplied and attemptedSources report what was asked for and tried.'
+)
+_NOT_ATTEMPTED_SOURCE_STATUSES = frozenset({"NOT_ELIGIBLE", "NOT_NEEDED", "UNCONFIGURED"})
+
+
+def _source_request_fields(requested_sources: list[str] | None, source_status: dict) -> dict:
+    """What the caller asked for and what was actually tried (Q3h); mirrors Worker sourceRequestFields."""
+    attempted: list[dict] = []
+    for source, info in source_status.items():
+        if not isinstance(info, dict):
+            continue
+        status = str(info.get("status") or "")
+        if info.get("attempted") is False or status in _NOT_ATTEMPTED_SOURCE_STATUSES:
+            continue
+        attempted.append({"sourceType": source, "status": status})
+    requested = None if requested_sources is None else [str(s) for s in requested_sources]
+    return {
+        "requestedSources": requested,
+        "defaultSourcesApplied": requested is None,
+        "attemptedSources": attempted,
+    }
+
+
+def _mark_no_source_selected(payload: dict, requested_sources: list[str] | None) -> dict:
+    """An explicit sources list selecting no supported source attempts nothing; reads as source-limited (Q3h)."""
+    if requested_sources is None or _normalize_event_sources(requested_sources, [])[0]:
+        return payload
+    payload["status"] = "SOURCE_LIMITED_NOT_FOUND"
+    payload["sourceCoverage"] = "PARTIAL"
+    if isinstance(payload.get("coverage"), dict):
+        payload["coverage"] = {**payload["coverage"], "state": "PARTIAL", "recommendedNextAction": "CHECK_OFFICIAL_RELEASES"}
+    return payload
 
 
 def _event_type_from_keywords(text: str) -> str:
@@ -2163,7 +2205,11 @@ def _compute_source_status(
     warning_msgs = [w.get("message", "") for w in warnings if isinstance(w, dict) and w.get("code") == "SOURCE_UNAVAILABLE"]
     warning_codes = {w.get("code") for w in warnings if isinstance(w, dict)}
     sec_items = [it for it in items if "sec" in str(it.get("sourceType", "")).lower()]
-    sources = selected_sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"]
+    sources = (
+        ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"]
+        if selected_sources is None
+        else selected_sources
+    )
 
     def _item_source(it: dict) -> str:
         return str(it.get("source") or "")
@@ -2402,6 +2448,7 @@ def _compute_source_coverage(source_status: dict) -> str:
         if s in (
             "UNCONFIGURED", "NOT_ELIGIBLE", "PROVIDER_ERROR", "AUTH_ERROR", "RATE_LIMITED", "TIMEOUT", "PROVIDER_CHANGED",
             "IDENTITY_UNAVAILABLE",
+            "WEBSITE_NOT_AVAILABLE", "DISCOVERY_NOT_FOUND", "DISCOVERY_BUDGET_EXHAUSTED", "FEED_NOT_FOUND", "PARSE_ERROR",
             "CANDIDATE_AVAILABLE", "NOT_REGISTERED", "DISABLED", "REVALIDATION_DUE", "SOURCE_VALIDATION_FAILED",
         ):
             return "PARTIAL"
@@ -2737,7 +2784,7 @@ async def search_company_news(
     query: str,
     start_date: str = "",
     end_date: str = "",
-    sources: list[str] | None = None,
+    sources: Annotated[list[str] | None, Field(description=_SOURCES_DEFAULT_DESCRIPTION)] = None,
     max_results: int = 10,
 ) -> str:
     err = _validate_ticker(ticker)
@@ -2745,7 +2792,7 @@ async def search_company_news(
         return _mcp_failure("search_company_news", ErrorCode.INPUT_VALIDATION_ERROR, err)
     if not str(query or "").strip():
         return _mcp_failure("search_company_news", ErrorCode.INPUT_VALIDATION_ERROR, "query is required")
-    effective_sources = sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"]
+    effective_sources = _DEFAULT_NEWS_SOURCES if sources is None else sources
     items, sources_used, warnings, retrieved_at, source_diagnostics = _unpack_company_event_result(
         # The query filters the full collected pool, as the Worker does.
         await _collect_company_events(
@@ -2789,10 +2836,11 @@ async def search_company_news(
         "sourceCoverage": source_coverage,
         "coverage": _build_coverage(source_status),
         "sourceStatus": source_status,
+        **_source_request_fields(sources, source_status),
     }
     if status:
         payload["status"] = status
-    return json.dumps(payload)
+    return json.dumps(_mark_no_source_selected(payload, sources))
 
 
 @yfinance_server.tool(
@@ -2815,14 +2863,12 @@ async def get_company_press_releases(
     ticker: str,
     lookback_days: int = 90,
     max_results: int = 20,
-    sources: list[str] | None = None,
+    sources: Annotated[list[str] | None, Field(description=_SOURCES_DEFAULT_DESCRIPTION)] = None,
 ) -> str:
     err = _validate_ticker(ticker)
     if err:
         return _mcp_failure("get_company_press_releases", ErrorCode.INPUT_VALIDATION_ERROR, err)
-    selected_sources, source_warnings = _normalize_event_sources(
-        sources, ["sec", "company_ir_page", "yahoo_finance_press_releases"]
-    )
+    selected_sources, source_warnings = _normalize_event_sources(sources, _DEFAULT_PRESS_RELEASE_SOURCES)
     primary_sources = [src for src in selected_sources if src in ("sec", "company_ir_page")]
     optional_sources = [src for src in selected_sources if src not in ("sec", "company_ir_page")]
     safe_max = _coerce_max_results(max_results, 20)
@@ -3010,6 +3056,7 @@ async def get_company_press_releases(
         "sourceCoverage": source_coverage,
         "coverage": coverage,
         "sourceStatus": source_status,
+        **_source_request_fields(sources, source_status),
         "coverageStatus": coverage_status,
         "decisionGrade": decision_grade,
         "decisionGradeBasis": decision_grade_basis,
@@ -3024,7 +3071,7 @@ async def get_company_press_releases(
         payload["candidateSources"] = candidate_sources
     if status:
         payload["status"] = status
-    return json.dumps(payload)
+    return json.dumps(_mark_no_source_selected(payload, sources))
 
 
 @yfinance_server.tool(
@@ -3096,13 +3143,14 @@ async def get_public_event_timeline(
     ticker: str,
     start_date: str = "",
     end_date: str = "",
-    sources: list[str] | None = None,
+    sources: Annotated[list[str] | None, Field(description=_SOURCES_DEFAULT_DESCRIPTION)] = None,
     max_results: int = 50,
     newest_first: bool = False,
 ) -> str:
     err = _validate_ticker(ticker)
     if err:
         return _mcp_failure("get_public_event_timeline", ErrorCode.INPUT_VALIDATION_ERROR, err)
+    effective_sources = _DEFAULT_EVENT_SOURCES if sources is None else sources
     items, sources_used, warnings, retrieved_at, source_diagnostics = _unpack_company_event_result(
         await _collect_company_events(
             ticker,
@@ -3110,7 +3158,7 @@ async def get_public_event_timeline(
             lookback_days=365,
             start_date=start_date,
             end_date=end_date,
-            sources=sources,
+            sources=effective_sources,
             include_diagnostics=True,
         )
     )
@@ -3133,7 +3181,7 @@ async def get_public_event_timeline(
     timeline.sort(key=lambda ev: str(ev.get("timestamp") or ""), reverse=bool(newest_first))
     timeline = timeline[:_coerce_max_results(max_results, 50)]
     status = _build_collection_status(items, sources_used, warnings)
-    source_status = _compute_source_status(sources_used, warnings, items, sources, source_diagnostics)
+    source_status = _compute_source_status(sources_used, warnings, items, effective_sources, source_diagnostics)
     source_coverage = _compute_source_coverage(source_status)
     payload = {
         "ticker": ticker.upper(),
@@ -3147,10 +3195,11 @@ async def get_public_event_timeline(
         "sourceCoverage": source_coverage,
         "coverage": _build_coverage(source_status),
         "sourceStatus": source_status,
+        **_source_request_fields(sources, source_status),
     }
     if status:
         payload["status"] = status
-    return json.dumps(payload)
+    return json.dumps(_mark_no_source_selected(payload, sources))
 
 
 @yfinance_server.tool(
@@ -3173,13 +3222,14 @@ async def verify_company_event(
     event_query: str,
     start_date: str = "",
     end_date: str = "",
-    sources: list[str] | None = None,
+    sources: Annotated[list[str] | None, Field(description=_SOURCES_DEFAULT_DESCRIPTION)] = None,
 ) -> str:
     err = _validate_ticker(ticker)
     if err:
         return _mcp_failure("verify_company_event", ErrorCode.INPUT_VALIDATION_ERROR, err)
     if not str(event_query or "").strip():
         return _mcp_failure("verify_company_event", ErrorCode.INPUT_VALIDATION_ERROR, "event_query is required")
+    effective_sources = _DEFAULT_EVENT_SOURCES if sources is None else sources
     items, sources_used, warnings, retrieved_at, source_diagnostics = _unpack_company_event_result(
         # Match against everything collected: a cap of the newest 50 let a flood
         # of aggregator items push the official release out before matching
@@ -3188,7 +3238,7 @@ async def verify_company_event(
             ticker,
             max_results=50,
             lookback_days=365,
-            sources=sources,
+            sources=effective_sources,
             include_diagnostics=True,
             keep_all=True,
         )
@@ -3286,7 +3336,9 @@ async def verify_company_event(
     ticker_upper = ticker.upper()
     ticker_pattern = _re.compile(r'\b' + _re.escape(ticker_upper) + r'\b', _re.IGNORECASE)
 
-    cik_padded, submissions = await _get_submissions_for_ticker(ticker)
+    # The company name only scores bestEvidence relevance, so no evidence means no SEC lookup
+    # (sources=[] must make no request).
+    cik_padded, submissions = await _get_submissions_for_ticker(ticker) if best else (None, None)
     company_name = ""
     if submissions and isinstance(submissions, dict):
         company_name = str(submissions.get("name") or "").strip()
@@ -3378,7 +3430,7 @@ async def verify_company_event(
                 "severity": "warning",
             })
 
-    source_status = _compute_source_status(sources_used, warnings, items, sources, source_diagnostics)
+    source_status = _compute_source_status(sources_used, warnings, items, effective_sources, source_diagnostics)
     source_coverage = _compute_source_coverage(source_status)
     coverage = _build_coverage(source_status)
     coverage_failure_mode = _verify_coverage_failure_mode(source_status, warnings)
@@ -3393,7 +3445,7 @@ async def verify_company_event(
     failure_mode = coverage_failure_mode if status == "SOURCE_LIMITED_NOT_FOUND" else None
     retryable = failure_mode in ("WORKER_SUBREQUEST_LIMIT", "RATE_LIMITED", "PROVIDER_TIMEOUT")
 
-    return json.dumps({
+    payload = {
         "ticker": ticker_upper,
         "query": event_query,
         "queryPolicy": {
@@ -3412,13 +3464,15 @@ async def verify_company_event(
         "sourceCoverage": source_coverage,
         "coverage": coverage,
         "sourceStatus": source_status,
+        **_source_request_fields(sources, source_status),
         "failureMode": failure_mode,
         "retryable": retryable,
         "recommendedAction": (
             "Inspect sourceStatus and retry with a narrower sources list that excludes failed providers; do not treat this result as confirmed absence."
             if failure_mode else None
         ),
-    })
+    }
+    return json.dumps(_mark_no_source_selected(payload, sources))
 
 
 async def get_stock_actions(ticker: str, start_date: str = "", limit: int = 40) -> str:
@@ -8256,7 +8310,7 @@ async def get_company_news(
     ticker: str | list[str],
     max_results: int = 10,
     lookback_days: int = 14,
-    sources: list[str] | None = None,
+    sources: Annotated[list[str] | None, Field(description=_GET_COMPANY_NEWS_SOURCES_DESCRIPTION)] = None,
 ) -> str:
     if isinstance(ticker, list) and (
         not ticker
@@ -8279,7 +8333,7 @@ async def get_company_news(
     err = _validate_ticker(ticker)
     if err:
         return _mcp_failure("get_company_news", ErrorCode.INPUT_VALIDATION_ERROR, err)
-    effective_sources = sources or ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub", "marketaux"]
+    effective_sources = _DEFAULT_NEWS_SOURCES if sources is None else sources
     # Collect a wider pool and keep the most relevant items, as the Worker does.
     safe_max = _coerce_max_results(max_results, 10)
     items, sources_used, warnings, retrieved_at, source_diagnostics = _unpack_company_event_result(
@@ -8308,10 +8362,11 @@ async def get_company_news(
         "sourceCoverage": source_coverage,
         "coverage": coverage,
         "sourceStatus": source_status,
+        **_source_request_fields(sources, source_status),
     }
     if status:
         payload["status"] = status
-    return json.dumps(payload)
+    return json.dumps(_mark_no_source_selected(payload, sources))
 
 
 @yfinance_server.tool(name="summarize_options_flow", output_schema=_TOOL_OUTPUT_SCHEMAS["get_options_summary"], description="Canonical alias for get_options_summary/get_options_flow_summary.")

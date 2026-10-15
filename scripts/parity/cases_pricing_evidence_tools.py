@@ -929,15 +929,6 @@ def _coverage_view(v):
             "action": cov["recommendedNextAction"]}
 
 
-def _python_news_sources_empty():
-    """get_company_news(sources=[]) with the collector stubbed to find nothing; the sources it was asked for are recorded."""
-    collector = AsyncMock(return_value=([], [], [], "2026-10-15T00:00:00Z", {}))
-    with patch.object(server, "_collect_company_events", collector):
-        payload = json.loads(asyncio.run(server.get_company_news("TEST", 5, 14, [])))
-    return {"sourceStatusKeys": sorted(payload["sourceStatus"]), "coverageState": payload["coverage"]["state"],
-            "sourcesUsed": payload["meta"]["sourcesUsed"]}
-
-
 CASES += [
     # Unconfigured Finnhub is a failed source: coverage PARTIAL, next action CHECK_OFFICIAL_RELEASES.
     Case(name="tool.nws.coverage_unconfigured_source_is_partial_with_check_official_releases", ids=["BR-NWS-007"],
@@ -948,32 +939,74 @@ return r.coverage;
 """, "isolate": True},
          routes=NEWS_ROUTES, select=_coverage_view,
          expect={"state": "PARTIAL", "failed": [["finnhub", "UNCONFIGURED"]], "skipped": [], "action": "CHECK_OFFICIAL_RELEASES"}),
+    # Q3i: the PARTIAL status set is the same in both runtimes, so a failed source never sits beside FULL.
     Case(name="tool.nws.coverage_website_not_available_failed_source", ids=["BR-NWS-007"],
          py=lambda: server._build_coverage({"company_ir": {"status": "WEBSITE_NOT_AVAILABLE"}}),
          ts={"js": """
 const r = JSON.parse(await m.yahooFinance.getCompanyNews("TEST", 5, 14, ["company_ir"]));
 return r.coverage;
 """, "isolate": True},
-         routes=NEWS_ROUTES, select=_coverage_view, mode="pinned", decision="Q3i",
-         # Finding (Phase 2, for Q3i triage): Python's _compute_source_coverage (server.py:2402-2406) omits the
-         # WEBSITE_NOT_AVAILABLE / DISCOVERY_* / FEED_NOT_FOUND / PARSE_ERROR states that its own _build_coverage
-         # (server.py:315-320) lists as failed, so a failed source sits beside coverage FULL. The Worker's
-         # computeSourceCoverage (yahoo-finance.ts:10992) includes them and reports PARTIAL.
-         expect_py={"state": "FULL", "failed": [["company_ir", "WEBSITE_NOT_AVAILABLE"]], "skipped": [], "action": "CHECK_OFFICIAL_RELEASES"},
-         expect_ts={"state": "PARTIAL", "failed": [["company_ir", "WEBSITE_NOT_AVAILABLE"]], "skipped": [], "action": "CHECK_OFFICIAL_RELEASES"}),
+         routes=NEWS_ROUTES, select=_coverage_view,
+         expect={"state": "PARTIAL", "failed": [["company_ir", "WEBSITE_NOT_AVAILABLE"]], "skipped": [], "action": "CHECK_OFFICIAL_RELEASES"}),
 
-    # Q3h: sources=[] -- Python substitutes the four default sources, the Worker passes [] through (no source attempted).
-    Case(name="tool.q3h.empty_sources_python_substitutes_defaults_worker_attempts_none", ids=["Q3h"],
-         py=lambda: _python_news_sources_empty(),
-         ts={"js": """
-const r = JSON.parse(await m.yahooFinance.getCompanyNews("TEST", 5, 14, []));
-return { sourceStatusKeys: Object.keys(r.sourceStatus).sort(), coverageState: r.coverage.state, sourcesUsed: r.meta.sourcesUsed };
-""", "isolate": True},
-         routes=NEWS_ROUTES, mode="pinned", decision="Q3h",
-         expect_py={"sourceStatusKeys": ["finnhub", "marketaux", "yahoo_finance_news", "yahoo_finance_press_releases"],
-                    "coverageState": "FULL", "sourcesUsed": []},
-         expect_ts={"sourceStatusKeys": [], "coverageState": "FULL", "sourcesUsed": []}),
+    # Q3h: an explicit sources list is used as given; [] (or only unsupported names) attempts no source.
 ]
+
+
+def _q3h_view(payload):
+    """The fields Q3h pins, identical in both runtimes."""
+    return {
+        "requestedSources": payload["requestedSources"],
+        "defaultSourcesApplied": payload["defaultSourcesApplied"],
+        "attemptedSources": payload["attemptedSources"],
+        "sourceStatus": payload["sourceStatus"],
+        "status": payload.get("status"),
+        "sourceCoverage": payload["sourceCoverage"],
+        "coverageState": payload["coverage"]["state"],
+        "recommendedNextAction": payload["coverage"]["recommendedNextAction"],
+        "warningCodes": [w["code"] for w in payload["warnings"]],
+    }
+
+
+# (name suffix, Python call, Worker call) for the five tools that take `sources`; %s is the sources argument.
+_Q3H_TOOLS = [
+    ("get_company_news", 'server.get_company_news("TEST", 5, 14, {src})',
+     'm.yahooFinance.getCompanyNews("TEST", 5, 14, {src})'),
+    ("search_company_news", 'server.search_company_news("TEST", "earnings", "", "", {src}, 5)',
+     'm.yahooFinance.searchCompanyNews("TEST", "earnings", "", "", {src}, 5)'),
+    ("get_company_press_releases", 'server.get_company_press_releases("TEST", 90, 20, {src})',
+     'm.yahooFinance.getCompanyPressReleases("TEST", 90, 20, {src})'),
+    ("get_public_event_timeline", 'server.get_public_event_timeline("TEST", "", "", {src}, 50, False)',
+     'm.yahooFinance.getPublicEventTimeline("TEST", "", "", {src}, 50, false)'),
+    ("verify_company_event", 'server.verify_company_event("TEST", "acquisition", "", "", {src})',
+     'm.yahooFinance.verifyCompanyEvent("TEST", "acquisition", "", "", {src})'),
+]
+
+
+def _q3h_case(tool: str, py_call: str, ts_call: str, label: str, sources, expect: dict, ids: list[str], routes: dict | None = None) -> Case:
+    src_py = repr(sources)
+    src_ts = json.dumps(sources)
+    return Case(
+        name=f"tool.q3h.{tool}_{label}", ids=ids,
+        py=lambda: json.loads(asyncio.run(eval(py_call.format(src=src_py), {"server": server}))),
+        ts={"js": f"m.response.setWorkerEnv({{}}); return JSON.parse(await {ts_call.format(src=src_ts)});", "isolate": True},
+        routes=routes or {}, select=_q3h_view, expect=expect)
+
+
+def _q3h_none_selected(requested: list, warning_codes: list) -> dict:
+    return {
+        "requestedSources": requested, "defaultSourcesApplied": False, "attemptedSources": [], "sourceStatus": {},
+        "status": "SOURCE_LIMITED_NOT_FOUND", "sourceCoverage": "PARTIAL", "coverageState": "PARTIAL",
+        "recommendedNextAction": "CHECK_OFFICIAL_RELEASES", "warningCodes": warning_codes,
+    }
+
+
+for _tool, _py, _ts in _Q3H_TOOLS:
+    # get_company_press_releases also reports that it found no official release source.
+    _extra = ["NO_OFFICIAL_RELEASE_SOURCE"] if _tool == "get_company_press_releases" else []
+    CASES.append(_q3h_case(_tool, _py, _ts, "empty_sources_attempts_none", [], _q3h_none_selected([], _extra), ["Q3h"]))
+    CASES.append(_q3h_case(_tool, _py, _ts, "unsupported_sources_attempt_none", ["bogus"],
+                           _q3h_none_selected(["bogus"], ["SOURCE_UNSUPPORTED"] + _extra), ["Q3h"]))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1730,4 +1763,61 @@ CASES += [
                {"storageStatus": "SKIPPED", "storageKey": None, "consensusObservation": {"status": "SKIPPED", "key": None}, "keys": []}),
     _pack_case("evd.store.pack_without_store_is_unavailable_but_returns_the_cut", ["BR-EVD-005"], True, False,
                {"storageStatus": "UNAVAILABLE", "storageKey": None, "consensusObservation": {"status": "UNAVAILABLE", "key": None}, "keys": None}),
+]
+
+
+# Q3h (c): sources omitted -> the tool's default set, reported as defaultSourcesApplied with requestedSources null.
+# The stubbed Yahoo path differs between the runtimes below the source level (see the helper case that follows
+# for attemptedSources), so only the request fields are compared here.
+def _q3h_omitted_view(payload):
+    return {
+        "requestedSources": payload["requestedSources"],
+        "defaultSourcesApplied": payload["defaultSourcesApplied"],
+        "attemptedSourcesAreSourceStatusKeys": all(a["sourceType"] in payload["sourceStatus"] for a in payload["attemptedSources"]),
+    }
+
+
+_Q3H_STATUS_FIXTURE = {
+    "yahoo_finance_news": {"status": "OK"},
+    "yahoo_finance_press_releases": {"status": "EMPTY_RESULT", "attempted": True},
+    "finnhub": {"status": "UNCONFIGURED"},
+    "sec": {"status": "PROVIDER_ERROR"},
+    "company_ir_page": {"status": "NOT_NEEDED"},
+    "newswire": {"status": "NOT_ELIGIBLE"},
+    "marketaux": {"status": "EMPTY_RESULT", "attempted": False},
+    "company_ir": {"status": "WEBSITE_NOT_AVAILABLE"},
+}
+
+
+def _python_news_sources_omitted():
+    with patch.object(server, "_collect_company_events", AsyncMock(return_value=([], [], [], "2026-10-15T00:00:00Z", {}))):
+        return json.loads(asyncio.run(server.get_company_news("TEST", 5, 14)))
+
+
+CASES += [
+    Case(name="tool.q3h.get_company_news_omitted_sources_applies_defaults", ids=["Q3h", "BR-NWS-007"],
+         py=_python_news_sources_omitted,
+         ts={"js": 'm.response.setWorkerEnv({}); return JSON.parse(await m.yahooFinance.getCompanyNews("TEST", 5, 14));',
+             "isolate": True},
+         routes=NEWS_ROUTES, select=_q3h_omitted_view,
+         expect={"requestedSources": None, "defaultSourcesApplied": True, "attemptedSourcesAreSourceStatusKeys": True}),
+    # attemptedSources leaves out sources that were not tried: attempted false, NOT_ELIGIBLE, NOT_NEEDED, UNCONFIGURED.
+    Case(name="tool.q3h.attempted_sources_exclude_not_eligible_not_needed_unconfigured", ids=["Q3h", "BR-NWS-007"],
+         py=lambda: server._source_request_fields(None, _Q3H_STATUS_FIXTURE),
+         ts={"js": "return m.yahooFinance.sourceRequestFields(null, args[0]);", "args": [_Q3H_STATUS_FIXTURE]},
+         expect={"requestedSources": None, "defaultSourcesApplied": True,
+                 "attemptedSources": [{"sourceType": "yahoo_finance_news", "status": "OK"},
+                                      {"sourceType": "yahoo_finance_press_releases", "status": "EMPTY_RESULT"},
+                                      {"sourceType": "sec", "status": "PROVIDER_ERROR"},
+                                      {"sourceType": "company_ir", "status": "WEBSITE_NOT_AVAILABLE"}]}),
+    Case(name="tool.q3h.requested_sources_are_reported_as_strings", ids=["Q3h"],
+         py=lambda: server._source_request_fields(["finnhub", 7], {}),
+         ts={"js": "return m.yahooFinance.sourceRequestFields(args[0], {});", "args": [["finnhub", "7"]]},
+         expect={"requestedSources": ["finnhub", "7"], "defaultSourcesApplied": False, "attemptedSources": []}),
+    Case(name="tool.q3h.get_company_news_batch_empty_sources_attempts_none", ids=["Q3h"],
+         py=lambda: json.loads(asyncio.run(server.get_company_news(["AAPL", "MSFT"], 5, 14, []))),
+         ts={"js": 'm.response.setWorkerEnv({}); return JSON.parse(await m.yahooFinance.getCompanyNews(["AAPL", "MSFT"], 5, 14, []));',
+             "isolate": True},
+         select=lambda batch: {t: _q3h_view(batch[t]) for t in ("AAPL", "MSFT")},
+         expect={t: _q3h_none_selected([], []) for t in ("AAPL", "MSFT")}),
 ]
