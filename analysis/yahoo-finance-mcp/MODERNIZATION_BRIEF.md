@@ -464,7 +464,15 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
 
 - **V1 (gates Phase 1).** A required static bearer token breaks any client that can't send a fixed `Authorization` header. Verify the claude.ai connector, Claude Desktop, the deploy canaries and the live verifier before enforcement.
 - **V2 (acknowledge before Phase 1).** `worker/src/company-ir-page-registry.json` has **0 `approved` entries** (2 `candidate`). Under Q2a, company-IR URL fetches are refused until entries are approved; `raw_text` is the only route meanwhile.
-- **V3 (gates the Q3c cap in R4).** The Worker caps batches at 5 because of Cloudflare's subrequest limit (50 free / 1,000 paid; comment at `yahoo-finance.ts:60`). Confirm the plan tier and per-ticker subrequest count before raising to 10. Together with the Phase 1 JSON-RPC cap of 10, one POST could reach 100 tickers. Rejecting more than 10 is also new behaviour for Python, which has no limit today.
+- **V3 (gates the Q3c cap in R4): measured 2026-10-15; see `v3/V3_SUBREQUESTS.md`.**
+  - **Plan tier:** not readable from here (no Cloudflare access); it must be confirmed in the dashboard. It is very likely **Workers Paid**: Free allows 10 ms of CPU per request, which the SEC-parsing tools cannot fit in.
+  - **Current limits:** Paid defaults to **10,000 subrequests per invocation** (configurable); Free allows 50. Cache API `match`/`put` calls and redirect hops count too. The code comment at `yahoo-finance.ts:58–64` ("1000 on paid", "1–3 per ticker") is out of date.
+  - **Measured per extra ticker:** 1–4 for most batch tools; `getCreditHealth` 6; `getPositionScoreInputs` 11; `getCompanyNews` about 6 with default sources and about 45 with all sources including company IR. The worst 10-ticker call is about 440 subrequests.
+  - **Verdict:** on Paid, a cap of 10 is safe. On Free, three tools already exceed 50 at today's cap of 5.
+  - **Follow-ups:**
+    - [ ] Owner confirms the plan tier in the Cloudflare dashboard (Workers & Pages → Plans).
+    - [ ] Phase 1: set the JSON-RPC batch cap to 5, or add a per-invocation subrequest budget guard returning `PROVIDER_BUDGET_EXHAUSTED`. Ten 10-ticker all-sources calls would come to about 4,400 subrequests in one invocation.
+    - [ ] R4: set `limits` explicitly in `wrangler.toml` and correct the stale comment with the Q3c change.
 - **V4 (informs R5-extractors).** Q3f changes the published `inTheMoney` flag for options and warrants at exactly the strike (`capital_structure.py:604, 610, 1069`). Incremental shares stay 0. Q3d similarly moves boundary cases between brackets, because today's thresholds compare the rounded value (`server.py:7945–7954`).
 - **V5 (informs R5-pricing).** Exchange-session freshness needs holiday data in both runtimes. The Worker has no calendar library, so this needs a shared calendar file in the data dir and a maintenance owner.
 - **V6 (informs Phase 4).** Q3g needs Python to read Yahoo quoteSummary directly; yfinance `.info` does not expose the raw response.
@@ -494,7 +502,7 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
 
   Every name lands as a deliberate frozen-contract change: `public_tool_contract.py`, canaries and docs are updated in the release that introduces it, with a minor version bump.
 - [ ] **Doctrine refinement.** Refine the Sniper Doctrine MCP contract against these decisions; then re-tag R2's operative set and regenerate this brief.
-- [ ] **V1, V3:** answer before their gates.
+- [ ] **V1:** answer before Phase 1. **V3:** measured; only the plan-tier confirmation and the two follow-ups above remain.
 
 ## 8. Approval Block
 
