@@ -40,6 +40,7 @@ import { coverReadsNeeded, coverShareCounts, foreignFiler, historicalValuation, 
 import { annualFilingsFromSubmissions, latestAnnualCoverageWarning, latestAnnualFiling } from "./companyfacts-coverage.js";
 import { DEFAULT_TOLERANCE_PCT, METRICS as RECONCILE_METRICS, metricReconciliation, resolvePeriod } from "./metric-reconciliation.js";
 import { AUTHORITY_BOUNDARY, EPS_BASIS } from "./evidence.js";
+import { meetsMinimum, reliabilityClassFor } from "./deprecations.js";
 import { documentFiscalYearFocus, filingFiscalYearLabel, fiscalYearNaming, type FiscalYearNaming } from "./fiscal-calendar.js";
 import registryManifest from "./company-ir-page-registry.json";
 import newsSourceCapabilities from "./news-source-capabilities.json";
@@ -7896,6 +7897,8 @@ export async function getPriceTargetBracket(ticker: string, ioPt: number): Promi
       tag: inferredTag,
       tagNote: "Deprecated: tag is inferred from currentPrice/referenceTargetPrice distance. Use inferredTag.",
       invertedFlag: referenceTargetPct >= 100,
+      // From the raw prices, not the rounded referenceTargetPct (2.8.0).
+      priceAtOrAboveTarget: currentPrice > 0 && ioPt > 0 ? currentPrice >= ioPt : null,
       dataDate: (fi.lastTradeDate as string | null) ?? new Date().toISOString().slice(0, 10),
       recommendedNextAction: "NONE",
     });
@@ -7988,6 +7991,11 @@ export async function getPositionScoreInputs(ticker: string | string[]): Promise
       t2_inputs: t2,
       t4_inputs: t4,
       t5_inputs: t5,
+      // Plain-named twins of the t*_inputs groups (2.8.0), same contents.
+      analystInputs: t1,
+      pricePositionInputs: t2,
+      earningsInputs: t4,
+      technicalInputs: t5,
       recommendedNextAction: limitedComponents.length > 0 ? "RETRY" : "NONE",
     });
   } catch (e) {
@@ -8083,7 +8091,7 @@ function usdCompact(value: number): string {
   return value >= 1e9 ? `$${(value / 1e9).toFixed(2)}B` : `$${(value / 1e6).toFixed(1)}M`;
 }
 
-export async function getVolumeGate(ticker: string, foreignExchange: boolean): Promise<string> {
+export async function getVolumeGate(ticker: string, foreignExchange: boolean, minAdvUsd: number | null = null): Promise<string> {
   try {
     const fi = JSON.parse(await getFastInfo(ticker)) as Record<string, unknown>;
     const currency = fi.currency as string | null;
@@ -8141,6 +8149,8 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
         fxPriceTimestamp: null,
         notionalUsd: null,
         gatePass: null,
+        meetsMinimum: null,
+        minAdvUsd,
         observationType: "COMPLETED_DAILY_VOLUME_NOTIONAL",
         barStatus: "STALE",
         freshnessStatus: "STALE",
@@ -8172,6 +8182,8 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
         fxPriceTimestamp: null,
         notionalUsd: null,
         gatePass: null,
+        meetsMinimum: null,
+        minAdvUsd,
         observationType: "COMPLETED_DAILY_VOLUME_NOTIONAL",
         barStatus: "INCOMPLETE",
         freshnessStatus: prepared.freshnessStatus,
@@ -8243,6 +8255,8 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
       gateBasis: "ADV20_TRADED_VALUE_USD",
       gateThresholdUsd: LIQUIDITY_GATE_MIN_ADV_USD,
       gatePass,
+      meetsMinimum: meetsMinimum(adv20dTradedValueUsd, minAdvUsd),
+      minAdvUsd,
       observationType: "COMPLETED_DAILY_VOLUME_NOTIONAL",
       barStatus: "COMPLETE",
       freshnessStatus: prepared.freshnessStatus,
@@ -8264,14 +8278,15 @@ export async function getVolumeGate(ticker: string, foreignExchange: boolean): P
 export async function getMarketSnapshot(
   ticker: string | string[],
   mode: "compact" | "full",
-  foreignExchange: boolean
+  foreignExchange: boolean,
+  minAdvUsd: number | null = null,
 ): Promise<string> {
   if (Array.isArray(ticker)) {
     const cap = mode === "full" ? 2 : 5;
     const limited = ticker.slice(0, cap);
     const snapshots = await mapWithConcurrency(limited, BATCH_TICKER_CONCURRENCY, async (t) => {
       try {
-        return JSON.parse(await getMarketSnapshot(t, mode, foreignExchange)) as unknown;
+        return JSON.parse(await getMarketSnapshot(t, mode, foreignExchange, minAdvUsd)) as unknown;
       } catch (e) {
         return { error: true, message: e instanceof Error ? e.message : String(e) };
       }
@@ -8292,7 +8307,7 @@ export async function getMarketSnapshot(
       getPriceStats(ticker).then((r) => JSON.parse(r) as Record<string, unknown>),
       getMaPosition(ticker).then((r) => JSON.parse(r) as Record<string, unknown>),
       getVolumeRatio(ticker, 10).then((r) => JSON.parse(r) as Record<string, unknown>),
-      getVolumeGate(ticker, foreignExchange).then((r) => JSON.parse(r) as Record<string, unknown>),
+      getVolumeGate(ticker, foreignExchange, minAdvUsd).then((r) => JSON.parse(r) as Record<string, unknown>),
       getTechnicalIndicators(ticker, INDICATOR_MIN_LOOKBACK).then((r) => JSON.parse(r) as Record<string, unknown>),
     ]);
 
@@ -8405,6 +8420,8 @@ export async function getMarketSnapshot(
       ratio90d: (volumeRatio?.ratio90d as number | null) ?? null,
       volumeFlag: (volumeRatio?.volumeFlag as string | null) ?? null,
       liquidityGatePass: (volumeGate?.gatePass as boolean | null) ?? null,
+      meetsMinimum: meetsMinimum(volumeGate?.adv20dTradedValueUsd as number | null | undefined, minAdvUsd),
+      minAdvUsd,
     },
     risk: {
       annualizedVolatility30d: (priceStats?.annualizedVolatility30d as number | null) ?? null,
@@ -12228,6 +12245,7 @@ export async function getCompanyPressReleases(
     decisionGradeBasis,
     capabilityStatus: "ACTIVE",
     doctrineUse: "ALLOWED",
+    reliabilityClass: reliabilityClassFor("ALLOWED"),
     failureMode: payloadDecisionGrade ? null : coverageStatus,
   };
   if (sec8kEvidence.length > 0) payload.secEvidence = sec8kEvidence.slice(0, 10);
@@ -13163,6 +13181,7 @@ export async function getSecFilingSectionMarkdown(
     confidence: "NOT_DECISION_GRADE",
     decisionGrade: false,
     doctrineUse: "BLOCKED",
+    reliabilityClass: reliabilityClassFor("BLOCKED"),
     warnings,
     source: "html_parser_fallback",
     truncated,

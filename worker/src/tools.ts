@@ -1,4 +1,4 @@
-import { mcpSuccessFromValue, mcpSuccessResult, mcpFailure, mcpFailureResult, type ToolResult, ErrorCode, envelopeV2Enabled, getBuildVersion, getServerVersion, getWorkerVar } from "./response.js";
+import { mcpSuccessFromValue, mcpSuccessResult, mcpFailure, mcpFailureResult, type McpSuccessOptions, type ToolResult, ErrorCode, envelopeV2Enabled, getBuildVersion, getServerVersion, getWorkerVar } from "./response.js";
 import { FILING_PERIOD_HELP, parseFilingPeriod } from "./sec-facts.js";
 import { GROUPED_TOOL_DEFS } from "./tool-catalog.js";
 import { withCacheScope, currentRequestFacts } from "./request-context.js";
@@ -107,7 +107,8 @@ import {
 } from "./sec-thailand.js";
 import { validateTicker } from "./validate.js";
 import { buildValuationEvidencePack, getConsensusForecastCurve, getEpsRevisions, getEvidenceCut, getEvidenceQuality, listEvidenceCuts } from "./evidence-pack.js";
-import { withAuthorityBoundary } from "./evidence.js";
+import { EVIDENCE_ONLY_ACTIONS, withAuthorityBoundary } from "./evidence.js";
+import { deprecationWarningsFor, parseMinAdvUsd, reliabilityClassFor } from "./deprecations.js";
 
 export interface Tool {
   name: string;
@@ -499,7 +500,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "analyze_price_performance", description: "Analyze price performance metrics.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
   { name: "analyze_moving_average_position", description: "Analyze moving-average position.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] } }, required: ["ticker"] } },
   { name: "analyze_volume_ratio", description: "Analyze the latest completed-session volume ratio. PARTIAL/INCOMPLETE means retry; do not use a volume signal.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, period: { type: "number", default: 10 } }, required: ["ticker"] } },
-  { name: "check_volume_liquidity_threshold", description: "Check completed-session traded value against public liquidity thresholds: passes when the average daily traded value (volume x close) of the 20 sessions before the latest completed one is at least $10M, converted to USD for non-USD listings. ratio20d compares the latest session with that average. PARTIAL/INCOMPLETE means retry; gatePass is unknown.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, foreign_exchange: { type: "boolean", default: false, description: "Accepted for compatibility; non-USD listings are always converted to USD." } }, required: ["ticker"] } },
+  { name: "check_volume_liquidity_threshold", description: "Check completed-session traded value against public liquidity thresholds: passes when the average daily traded value (volume x close) of the 20 sessions before the latest completed one is at least $10M, converted to USD for non-USD listings. ratio20d compares the latest session with that average. PARTIAL/INCOMPLETE means retry; gatePass is unknown.", inputSchema: { type: "object", properties: { ticker: { type: "string" }, foreign_exchange: { type: "boolean", default: false, description: "Accepted for compatibility; non-USD listings are always converted to USD." }, min_adv_usd: { type: "number", exclusiveMinimum: 0, description: "Optional caller-chosen minimum 20-day average traded value in USD; sets meetsMinimum." } }, required: ["ticker"] } },
   { name: "get_company_profile", description: "Get company profile/fundamentals.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, include_all: { type: "boolean" } }, required: ["ticker"] } },
   { name: "get_fund_profile", description: "Get ETF/fund profile with per-section status and as-of-date limitations. Valuation characteristics are conventional multiples; provider inverse yields are retained separately. Request overview, holdings, allocation, operations, or fixed-income sections.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, sections: { type: "array", items: { type: "string", enum: ["overview", "holdings", "allocation", "operations", "fixed_income"] }, uniqueItems: true } }, required: ["ticker"] } },
   { name: "analyze_financial_ratios", description: "Analyze current financial ratios with explicit unitSemantics and optional historical Yahoo valuation measures.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, history_periods: { type: "integer", minimum: 0, maximum: 20, default: 0 }, frequency: { type: "string", enum: ["quarterly", "monthly", "yearly", "trailing"], default: "quarterly" } }, required: ["ticker"] } },
@@ -573,7 +574,7 @@ const CANONICAL_ADDITIONS: Tool[] = [
   { name: "get_sec_filing_exhibit_content", description: "Fetch and return the text content of a specific exhibit from an SEC filing. Supports topic-based paragraph filtering to reduce token usage.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, accessionNumber: { type: "string", description: "SEC filing accession number" }, fileName: { type: "string", description: "Exhibit filename from the filing index" }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" } }, required: ["ticker", "accessionNumber", "fileName"] } },
   { name: "parse_public_transcript", description: "Fetch and parse a public transcript page (Motley Fool, company IR, etc.). Supports topic-based paragraph filtering to reduce token usage. Provide raw_text to skip URL fetching.", inputSchema: { type: "object", properties: { url: { type: "string", description: "Public https URL of the transcript page" }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter paragraphs by" }, raw_text: { type: "string", description: "Raw HTML or text content to parse directly (bypasses URL fetching)" } } } },
   { name: "get_earnings_call_transcript", description: "Retrieve an earnings-call transcript from a content-validated SEC exhibit, then Yahoo/Quartr, then optional Alpha Vantage. Yahoo results are structured and paragraph-paginated for LLM use and include the human-readable sourceUrl. Preview-only Yahoo payloads are reported as INCOMPLETE_TRANSCRIPT and continue to the alternate-source fallback. Inspect contentCompleteness rather than treating cursor exhaustion as proof of a full call. Yahoo contentSha256 identifies the canonical transcript text and speaker projection declared by contentHashBasis, so it remains stable across pages and runtimes. Provide source_url or event_id to target a known Yahoo call. Yahoo and Alpha transcripts are contextual and never decision-grade; filing dates are never treated as fiscal periods.", inputSchema: { type: "object", properties: { ticker: { type: "string", description: "Stock ticker symbol" }, period: { type: "string", enum: ["latest"], default: "latest", description: "Event selector. Only the latest release is supported; this is not a fiscal-quarter value." }, fiscal_quarter: { type: "string", pattern: "^[0-9]{4}Q[1-4]$", description: "Optional issuer fiscal quarter, e.g. 2026Q4. Do not derive this from the filing or publication date." }, event_id: { type: "string", pattern: "^[0-9]+$", description: "Optional Yahoo earnings-event ID. Use only to continue a previously returned Yahoo transcript." }, source_url: { type: "string", format: "uri", description: "Optional canonical finance.yahoo.com transcript URL returned by this tool. Other hosts and ticker mismatches are rejected." }, paragraph_limit: { type: "integer", minimum: 1, maximum: 50, default: 20, description: "Maximum structured Yahoo transcript paragraphs to return." }, paragraph_cursor: { type: "string", pattern: "^[0-9]+$", description: "Opaque nextCursor from a prior Yahoo transcript response." }, topics: { type: "array", items: { type: "string" }, description: "Optional list of keywords/topics to filter transcript paragraphs by" } }, required: ["ticker"] } },
-  { name: "get_market_snapshot", description: "Compact market-state packet composing quote, price performance, moving-average trend, volume ratios, liquidity gate, and technical indicators in one call. Supports compact (default) and full modes, and optional batch of tickers.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, mode: { type: "string", enum: ["compact", "full"], default: "compact" }, foreign_exchange: { type: "boolean", default: false } }, required: ["ticker"] } },
+  { name: "get_market_snapshot", description: "Compact market-state packet composing quote, price performance, moving-average trend, volume ratios, liquidity gate, and technical indicators in one call. Supports compact (default) and full modes, and optional batch of tickers.", inputSchema: { type: "object", properties: { ticker: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 5 }] }, mode: { type: "string", enum: ["compact", "full"], default: "compact" }, foreign_exchange: { type: "boolean", default: false }, min_adv_usd: { type: "number", exclusiveMinimum: 0, description: "Optional caller-chosen minimum 20-day average traded value in USD; sets meetsMinimum." } }, required: ["ticker"] } },
   { name: "health_check", description: "Return public-safe MCP availability, release/build identity, schema identity, tool mode, and connector-freshness metadata. authorizationHeaderPresent reports whether the request carried an Authorization header (never its value).", inputSchema: { type: "object", properties: {} } },
 ];
 
@@ -1163,11 +1164,12 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       distanceConvention: { type: "string" },
       ioPt: { type: ["number", "null"] },
       eqfPct: { type: ["number", "null"] },
-      bracket: { type: ["string", "null"] },
-      inferredTag: { type: ["string", "null"] },
-      tag: { type: ["string", "null"] },
-      tagNote: { type: ["string", "null"] },
+      bracket: { type: ["string", "null"], description: "Deprecated: use priceAtOrAboveTarget and referenceTargetPct; removed in the next major version." },
+      inferredTag: { type: ["string", "null"], description: "Deprecated: use priceAtOrAboveTarget and referenceTargetPct; removed in the next major version." },
+      tag: { type: ["string", "null"], description: "Deprecated: use priceAtOrAboveTarget and referenceTargetPct; removed in the next major version." },
+      tagNote: { type: ["string", "null"], description: "Deprecated: use priceAtOrAboveTarget and referenceTargetPct; removed in the next major version." },
       invertedFlag: { type: ["boolean", "null"] },
+      priceAtOrAboveTarget: { type: ["boolean", "null"], description: "currentPrice >= referenceTargetPrice on the unrounded prices; null when either price is missing or not positive." },
       recommendedNextAction: { type: "string", enum: ["NONE"] },
       dataDate: { type: ["string", "null"] },
     },
@@ -1178,10 +1180,14 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
     properties: {
       ticker: { type: "string" },
       status: { type: "string", enum: ["OK", "PARTIAL"] },
-      t1_inputs: { type: "object" },
-      t2_inputs: { type: "object" },
-      t4_inputs: { type: "object" },
-      t5_inputs: { type: "object" },
+      t1_inputs: { type: "object", description: "Deprecated: use analystInputs; removed in the next major version." },
+      t2_inputs: { type: "object", description: "Deprecated: use pricePositionInputs; removed in the next major version." },
+      t4_inputs: { type: "object", description: "Deprecated: use earningsInputs; removed in the next major version." },
+      t5_inputs: { type: "object", description: "Deprecated: use technicalInputs; removed in the next major version." },
+      analystInputs: { type: "object", description: "Analyst sentiment, rating-change counts, dominant rating and analyst count." },
+      pricePositionInputs: { type: "object", description: "Current price and its position in the 52-week range." },
+      earningsInputs: { type: "object", description: "Earnings beat rate, beat streak, average surprise and momentum." },
+      technicalInputs: { type: "object", description: "RSI, MACD histogram, moving-average position and last close." },
       componentStatus: { type: "object" },
       failedComponents: { type: "array" },
       limitedComponents: { type: "array" },
@@ -1208,9 +1214,11 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       notionalUsd: { type: ["number", "null"] },
       adv20dTradedValueUsd: { type: ["number", "null"] },
       gateBasis: { type: "string", enum: ["ADV20_TRADED_VALUE_USD"] },
-      gateThresholdUsd: { type: "number" },
+      gateThresholdUsd: { type: "number", description: "Deprecated: pass min_adv_usd and read meetsMinimum; removed in the next major version." },
       fxCurrency: { type: ["string", "null"] },
-      gatePass: { type: ["boolean", "null"] },
+      gatePass: { type: ["boolean", "null"], description: "Deprecated: pass min_adv_usd and read meetsMinimum; removed in the next major version." },
+      meetsMinimum: { type: ["boolean", "null"], description: "adv20dTradedValueUsd >= min_adv_usd; null when min_adv_usd is not given or the average is unknown." },
+      minAdvUsd: { type: ["number", "null"], description: "The caller's min_adv_usd, or null." },
       observationType: { type: "string", enum: ["COMPLETED_DAILY_VOLUME_NOTIONAL"] },
       barStatus: { type: "string", enum: ["COMPLETE", "STALE", "INCOMPLETE"] },
       freshnessStatus: { type: "string", enum: ["CURRENT", "STALE", "UNKNOWN"] },
@@ -1230,7 +1238,14 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
       price: { type: "object" },
       range: { type: "object" },
       trend: { type: "object" },
-      volume: { type: "object" },
+      volume: {
+        type: "object",
+        properties: {
+          liquidityGatePass: { type: ["boolean", "null"], description: "Deprecated: pass min_adv_usd and read volume.meetsMinimum; removed in the next major version." },
+          meetsMinimum: { type: ["boolean", "null"], description: "20-day average traded value (USD) >= min_adv_usd; null when min_adv_usd is not given or the average is unknown." },
+          minAdvUsd: { type: ["number", "null"], description: "The caller's min_adv_usd, or null." },
+        },
+      },
       risk: { type: "object" },
       freshness: { type: "object" },
       componentStatus: { type: "object" },
@@ -1403,6 +1418,8 @@ const OUTPUT_SCHEMAS: Record<string, Tool["outputSchema"]> = {
 
 OUTPUT_SCHEMAS.analyze_volume_ratio = OUTPUT_SCHEMAS.get_volume_ratio;
 OUTPUT_SCHEMAS.check_volume_liquidity_threshold = OUTPUT_SCHEMAS.get_volume_gate;
+OUTPUT_SCHEMAS.calculate_price_target_distance = OUTPUT_SCHEMAS.get_price_target_bracket;
+OUTPUT_SCHEMAS.analyze_position_signals = OUTPUT_SCHEMAS.get_position_score_inputs;
 OUTPUT_SCHEMAS.get_sec_filing_section = OUTPUT_SCHEMAS.get_filing_section;
 OUTPUT_SCHEMAS.list_sec_filing_tables = OUTPUT_SCHEMAS.list_filing_tables;
 OUTPUT_SCHEMAS.get_sec_filing_table = OUTPUT_SCHEMAS.get_filing_table;
@@ -1773,8 +1790,26 @@ const TOOL_DOCTRINE_STATUS: Record<string, DoctrineToolStatus> = {
   },
 };
 
-function doctrineStatusFor(tool: string): DoctrineToolStatus | undefined {
-  return TOOL_DOCTRINE_STATUS[tool];
+/** A tool's status for envelope meta, with reliabilityClass beside the deprecated doctrineUse (2.8.0). */
+function doctrineStatusFor(tool: string): (DoctrineToolStatus & { reliabilityClass: string }) | undefined {
+  const status = TOOL_DOCTRINE_STATUS[tool];
+  if (!status) return undefined;
+  const { capabilityStatus, decisionGrade, doctrineUse, ...rest } = status;
+  return { capabilityStatus, decisionGrade, doctrineUse, reliabilityClass: reliabilityClassFor(doctrineUse), ...rest };
+}
+
+/**
+ * Success-envelope options for a tool: its status table entry in meta, and
+ * the DEPRECATED_FIELD notices its payload calls for (2.8.0).
+ */
+function successOptions(name: string): McpSuccessOptions {
+  const status = doctrineStatusFor(name);
+  const metaFields = status ? Object.keys(status) : [];
+  const evidenceOnly = EVIDENCE_ONLY_ACTIONS.has(name);
+  return {
+    ...(status ? { metaExtra: status } : {}),
+    successWarnings: (data) => deprecationWarningsFor(name, data, { evidenceOnly, metaFields }),
+  };
 }
 
 async function computeHash(data: string): Promise<string> {
@@ -1931,13 +1966,11 @@ async function callToolResultInScope(name: string, args: Record<string, unknown>
       delete parsed.__batchMeta;
       return mcpSuccessFromValue(name, parsed, JSON.stringify(parsed), {
         ...batchMeta,
-        ...(doctrineStatusFor(name) ? { metaExtra: doctrineStatusFor(name) } : {}),
+        ...successOptions(name),
       });
     }
   }
-  return mcpSuccessResult(name, raw, {
-    ...(doctrineStatusFor(name) ? { metaExtra: doctrineStatusFor(name) } : {}),
-  });
+  return mcpSuccessResult(name, raw, successOptions(name));
 }
 
 export async function callVisibleTool(name: string, args: Record<string, unknown>): Promise<string> {
@@ -2514,8 +2547,13 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       );
     case "analyze_position_signals":
       return getPositionScoreInputs(tickerArg(args.ticker));
-    case "check_volume_liquidity_threshold":
-      return getVolumeGate(str(args.ticker), args.foreign_exchange === true);
+    case "check_volume_liquidity_threshold": {
+      const minAdvUsd = parseMinAdvUsd(args.min_adv_usd);
+      if (minAdvUsd != null && typeof minAdvUsd === "object") {
+        return mcpFailure("check_volume_liquidity_threshold", ErrorCode.INPUT_VALIDATION_ERROR, minAdvUsd.error);
+      }
+      return getVolumeGate(str(args.ticker), args.foreign_exchange === true, minAdvUsd);
+    }
     case "search_company_news":
       if (str(args.query).trim() === "") {
         return mcpFailure("search_company_news", ErrorCode.INPUT_VALIDATION_ERROR, "query is required");
@@ -2598,7 +2636,11 @@ async function _dispatchTool(name: string, args: Record<string, unknown>): Promi
       const ticker = Array.isArray(t) ? (t as string[]) : str(t);
       const mode = str(args.mode, "compact") === "full" ? "full" : "compact";
       const foreignExchange = args.foreign_exchange === true;
-      return getMarketSnapshot(ticker, mode, foreignExchange);
+      const minAdvUsd = parseMinAdvUsd(args.min_adv_usd);
+      if (minAdvUsd != null && typeof minAdvUsd === "object") {
+        return mcpFailure("get_market_snapshot", ErrorCode.INPUT_VALIDATION_ERROR, minAdvUsd.error);
+      }
+      return getMarketSnapshot(ticker, mode, foreignExchange, minAdvUsd);
     }
     default:
       throw new Error(`Unknown tool: ${name}`);
