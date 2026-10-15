@@ -500,6 +500,10 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
   - The Worker has no OAuth endpoints and `/mcp` ignores credentials, so either a request header is already configured (the beta is available, so V1 passes) or the flag is registration metadata. This is not decidable from inside a session.
   - Confirm either in claude.ai (connector settings show a Request header) or in Cloudflare Workers logs (Claude's requests carry `Authorization`).
 
+  **Measured 2026-10-15 after release 2.6.0 (build `c2dd5e4`, Worker version `6fd44cd9…`):** `system/health_check` called through this session's claude.ai `Yahoo Finance MCP` connector returned **`authorizationHeaderPresent: false`**. The connector currently sends no `Authorization` header, so `isAuthless: false` was registration metadata and not a configured header.
+  - **Consequence:** enforcing a static bearer token today would lock this connector out. **Q13 must be decided before Phase 1.**
+  - **Escape hatch:** if the owner later finds Request headers in the Add custom connector dialog and re-adds the connector with `Bearer <token>`, re-run the same call. `true` restores the header-only path.
+
   **Result: V1 PASSES only if the owner's claude.ai account shows Request headers.** If it doesn't, a static bearer locks out every claude.ai-based client (connector, Desktop/mobile remote use, the live verifier), and Q13 applies.
 - **V2 (acknowledge before Phase 1).** `worker/src/company-ir-page-registry.json` has **0 `approved` entries** (2 `candidate`). Under Q2a, company-IR URL fetches are refused until entries are approved; `raw_text` is the only route meanwhile.
 - **V3 (gates the Q3c cap in R4): measured 2026-10-15; see `v3/V3_SUBREQUESTS.md`. Plan = Workers FREE (owner-confirmed).**
