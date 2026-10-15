@@ -764,8 +764,412 @@ CASES += [
 ]
 
 CASES += [
-    _grade_case("shr.probe.whitespace", ["BR-SHR-001"], GOOD_PAYLOAD, {**GOOD_EVIDENCE, "concept": "   "}, "FOUND", False),
-    _grade_case("shr.probe.ctxlist", ["BR-SHR-001"], {**GOOD_PAYLOAD, "xbrlContext": []}, GOOD_EVIDENCE, "FOUND", False),
-    _grade_case("shr.probe.ctxempty", ["BR-SHR-001"], {**GOOD_PAYLOAD, "xbrlContext": {}}, GOOD_EVIDENCE, "FOUND", False),
-    _grade_case("shr.probe.evidence_num", ["BR-SHR-001"], GOOD_PAYLOAD, {**GOOD_EVIDENCE, "periodEnd": 0}, "FOUND", False),
+    # Finding (Phase 2, for Q3i triage): an empty xbrlContext object ({}) and a numeric 0 in an evidence field both
+    # count as present in both runtimes, so a context with no content can make a fact decision-grade.
+    _grade_case("shr.decision_grade.empty_xbrl_context_object_still_passes", ["BR-SHR-001"], {**GOOD_PAYLOAD, "xbrlContext": {}},
+                GOOD_EVIDENCE, "FOUND", True),
+    _grade_case("shr.decision_grade.numeric_zero_evidence_field_counts_as_present", ["BR-SHR-001"], GOOD_PAYLOAD,
+                {**GOOD_EVIDENCE, "periodEnd": 0}, "FOUND", True),
+    # Python/Worker divergences with no owner decision (FINDING): Python requires xbrlContext to be a dict while the
+    # Worker accepts any object (an array passes); Python accepts a whitespace-only evidence field, the Worker trims.
+    _grade_case("shr.decision_grade.array_xbrl_context_diverges", ["BR-SHR-001"], {**GOOD_PAYLOAD, "xbrlContext": []},
+                GOOD_EVIDENCE, "FOUND", mode="pinned",
+                decision="FINDING: Worker accepts an array xbrlContext as decision-grade, Python requires a dict",
+                expect_py=False, expect_ts=True),
+    _grade_case("shr.decision_grade.whitespace_only_evidence_field_diverges", ["BR-SHR-001"], GOOD_PAYLOAD,
+                {**GOOD_EVIDENCE, "concept": "   "}, "FOUND", mode="pinned",
+                decision="FINDING: Python accepts a whitespace-only evidence field, the Worker trims it and rejects",
+                expect_py=True, expect_ts=False),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# BR-ENV-005 / BR-ENV-007 (Q3b) and Q3a: ticker / accession validation and accession resolution
+# in get_filing_outline. Python validates the ticker and accession and resolves an accession to a filing
+# index; the Worker validates neither (it validates tickers only in get_historical_prices) and ignores the
+# accession (Q3a). Both are scheduled to change; today's behaviour is pinned.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+from yfmcp.validation import _validate_ticker  # noqa: E402
+
+OUTLINE_HTML = "<html><body><h2>Item 1. Business</h2><h2>Item 1A. Risk Factors</h2></body></html>"
+AAPL_DOC = "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/aapl-20240928.htm"
+AAPL_INDEX = "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/0000320193-24-000123-index.htm"
+OUTLINE_ROUTES = {
+    "https://www.sec.gov/files/company_tickers.json": {"json": {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}}},
+    AAPL_DOC: {"body": OUTLINE_HTML},
+    AAPL_INDEX: {"body": OUTLINE_HTML},
+}
+VALID_ACCESSION = "0000320193-24-000123"
+OUTLINE_OK = {"outline": ["Item 1. Business", "Item 1A. Risk Factors"]}
+
+
+def _outline_view(v):
+    """Success -> the outline titles; failure -> code / message (Python envelope or the Worker's error text)."""
+    if not isinstance(v, dict):
+        return v
+    if v.get("outline") is not None and not v.get("error"):
+        return {"outline": [h["title"] for h in v["outline"]]}
+    err = v.get("error")
+    if isinstance(err, dict):
+        return {"error": True, "code": err.get("code"), "message": err.get("message")}
+    return {"error": True, "code": None, "message": v.get("message")}
+
+
+def _outline_case(name: str, ids: list[str], ticker: str, accession, document_url, **kw) -> Case:
+    return Case(
+        name=name, ids=ids,
+        py=lambda: asyncio.run(server.get_filing_outline(ticker, accession, document_url)),
+        ts={"module": "yahooFinance", "fn": "getFilingOutline", "args": [ticker, accession, document_url], "isolate": True},
+        routes=OUTLINE_ROUTES, select=_outline_view, **kw)
+
+
+CASES += [
+    # Function level: the shared format check (BR-ENV-007) is identical where both runtimes run it.
+    Case(name="tool.ticker_format.trimmed_lowercase_symbol_passes", ids=["BR-ENV-007"],
+         py=lambda: _validate_ticker(" brk-b "), ts={"module": "validate", "fn": "validateTicker", "args": [" brk-b "]}, expect=None),
+    Case(name="tool.ticker_format.symbol_with_dollar_is_rejected", ids=["BR-ENV-007"],
+         py=lambda: _validate_ticker("AAPL$"), ts={"module": "validate", "fn": "validateTicker", "args": ["AAPL$"]},
+         expect="Invalid ticker symbol: 'AAPL$'. Must be 1-20 characters: uppercase letters, digits, or . - ^ ="),
+    Case(name="tool.ticker_format.empty_and_21_char_symbols_are_rejected", ids=["BR-ENV-007"],
+         py=lambda: [_validate_ticker(""), _validate_ticker("A" * 21), _validate_ticker("A" * 20)],
+         ts={"js": 'return [m.validate.validateTicker(""), m.validate.validateTicker("A".repeat(21)), m.validate.validateTicker("A".repeat(20))]'},
+         expect=["Invalid ticker symbol: ''. Must be 1-20 characters: uppercase letters, digits, or . - ^ =",
+                 "Invalid ticker symbol: '" + "A" * 21 + "'. Must be 1-20 characters: uppercase letters, digits, or . - ^ =", None]),
+
+    # Q3b: the Worker's get_filing_outline never validates the ticker or the accession.
+    _outline_case("tool.q3b.outline_invalid_ticker_python_rejects_worker_proceeds", ["BR-ENV-007"], "AAPL$", None, AAPL_DOC,
+                  mode="pinned", decision="Q3b",
+                  expect_py={"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "Invalid ticker symbol: 'AAPL$'. Must be 1-20 characters: uppercase letters, digits, or . - ^ ="},
+                  expect_ts=OUTLINE_OK),
+    _outline_case("tool.q3b.outline_invalid_accession_python_rejects_worker_proceeds", ["BR-ENV-005"], "AAPL", "320193-24-123", AAPL_DOC,
+                  mode="pinned", decision="Q3b",
+                  expect_py={"error": True, "code": "INPUT_VALIDATION_ERROR", "message": "Invalid accession number: '320193-24-123'. Expected format: XXXXXXXXXX-YY-ZZZZZZ."},
+                  expect_ts=OUTLINE_OK),
+    _outline_case("tool.q3b.outline_valid_accession_and_ticker_with_document_url_agree", ["BR-ENV-005", "BR-ENV-007"],
+                  "AAPL", VALID_ACCESSION, AAPL_DOC, expect=OUTLINE_OK),
+    # Q3a: Python resolves the accession to the filing index; the Worker ignores accession_number.
+    _outline_case("tool.q3a.outline_accession_only_python_resolves_worker_ignores", ["Q3a"], "AAPL", VALID_ACCESSION, None,
+                  mode="pinned", decision="Q3a", expect_py=OUTLINE_OK,
+                  expect_ts={"error": True, "code": None, "message": "document_url is required"}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# Q4: SMOKE_TICKER_CIK_FALLBACKS resolves a listed ticker's CIK when the Yahoo and SEC lookups fail.
+# Python: edgar._resolve_cik_for_ticker with yfinance failing. Worker: getSubmissionsForTicker (cikPadded).
+# The repair removes the table from production lookup; today both runtimes still use it.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+from yfmcp.clients import edgar  # noqa: E402
+
+
+def _resolve_cik_py(ticker: str):
+    saved = (edgar._EDGAR_TICKERS, edgar._EDGAR_TICKERS_LOADED_AT, dict(edgar._FILING_CIK_CACHE))
+    edgar._EDGAR_TICKERS, edgar._EDGAR_TICKERS_LOADED_AT = None, 0.0
+    edgar._FILING_CIK_CACHE.clear()
+    try:
+        with patch.object(edgar.yf, "Ticker", side_effect=RuntimeError("yahoo unavailable")):
+            return asyncio.run(edgar._resolve_cik_for_ticker(ticker))
+    finally:
+        edgar._EDGAR_TICKERS, edgar._EDGAR_TICKERS_LOADED_AT = saved[0], saved[1]
+        edgar._FILING_CIK_CACHE.clear()
+        edgar._FILING_CIK_CACHE.update(saved[2])
+
+
+def _cik_case(name: str, ids: list[str], ticker: str, expect, routes: dict | None = None, **kw) -> Case:
+    return Case(
+        name=name, ids=ids, py=lambda: _resolve_cik_py(ticker),
+        ts={"js": "return (await m.yahooFinance.getSubmissionsForTicker(args[0])).cikPadded", "args": [ticker], "isolate": True},
+        routes=routes or {}, expect=expect, **kw)
+
+
+CASES += [
+    _cik_case("tool.q4.smoke_table_resolves_listed_ticker_when_yahoo_and_sec_fail", ["Q4"], "AAPL", "0000320193",
+              mode="pinned", decision="Q4"),
+    _cik_case("tool.q4.smoke_table_covers_aaoi", ["Q4"], "AAOI", "0001158114", mode="pinned", decision="Q4"),
+    _cik_case("tool.q4.unlisted_ticker_with_all_lookups_failing_is_unresolved", ["Q4"], "ZZZZ", None),
+    _cik_case("tool.q4.sec_ticker_index_wins_over_the_smoke_table", ["Q4"], "AAPL", "0000999999",
+              routes={"https://www.sec.gov/files/company_tickers.json": {"json": {"0": {"cik_str": 999999, "ticker": "AAPL", "title": "Fake Co"}}}}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# BR-NWS-007 (Q3i) news coverage state, and Q3h sources=[] in get_company_news
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+COMPANY_PROFILE_NO_WEBSITE = {"quoteSummary": {"result": [{"assetProfile": {}, "price": {"shortName": "Test Co", "longName": "Test Co"}}], "error": None}}
+NEWS_ROUTES = {**YAHOO_AUTH_ROUTES, "https://query1.finance.yahoo.com/v10/finance/quoteSummary/*": {"json": COMPANY_PROFILE_NO_WEBSITE}}
+
+
+def _coverage_view(v):
+    cov = v["coverage"] if "coverage" in v else v
+    return {"state": cov["state"], "failed": [(f["source"], f["status"]) for f in cov["failedSources"]],
+            "skipped": [(f["source"], f["status"]) for f in cov["skippedSources"]],
+            "action": cov["recommendedNextAction"]}
+
+
+def _python_news_sources_empty():
+    """get_company_news(sources=[]) with the collector stubbed to find nothing; the sources it was asked for are recorded."""
+    collector = AsyncMock(return_value=([], [], [], "2026-10-15T00:00:00Z", {}))
+    with patch.object(server, "_collect_company_events", collector):
+        payload = json.loads(asyncio.run(server.get_company_news("TEST", 5, 14, [])))
+    return {"sourceStatusKeys": sorted(payload["sourceStatus"]), "coverageState": payload["coverage"]["state"],
+            "sourcesUsed": payload["meta"]["sourcesUsed"]}
+
+
+CASES += [
+    # Unconfigured Finnhub is a failed source: coverage PARTIAL, next action CHECK_OFFICIAL_RELEASES.
+    Case(name="tool.nws.coverage_unconfigured_source_is_partial_with_check_official_releases", ids=["BR-NWS-007"],
+         py=lambda: server._build_coverage({"finnhub": {"status": "UNCONFIGURED"}}),
+         ts={"js": """
+const r = JSON.parse(await m.yahooFinance.getCompanyNews("TEST", 5, 14, ["finnhub"]));
+return r.coverage;
+""", "isolate": True},
+         routes=NEWS_ROUTES, select=_coverage_view,
+         expect={"state": "PARTIAL", "failed": [["finnhub", "UNCONFIGURED"]], "skipped": [], "action": "CHECK_OFFICIAL_RELEASES"}),
+    Case(name="tool.nws.coverage_website_not_available_failed_source", ids=["BR-NWS-007"],
+         py=lambda: server._build_coverage({"company_ir": {"status": "WEBSITE_NOT_AVAILABLE"}}),
+         ts={"js": """
+const r = JSON.parse(await m.yahooFinance.getCompanyNews("TEST", 5, 14, ["company_ir"]));
+return r.coverage;
+""", "isolate": True},
+         routes=NEWS_ROUTES, select=_coverage_view, mode="pinned", decision="Q3i",
+         # Finding (Phase 2, for Q3i triage): Python's _compute_source_coverage (server.py:2402-2406) omits the
+         # WEBSITE_NOT_AVAILABLE / DISCOVERY_* / FEED_NOT_FOUND / PARSE_ERROR states that its own _build_coverage
+         # (server.py:315-320) lists as failed, so a failed source sits beside coverage FULL. The Worker's
+         # computeSourceCoverage (yahoo-finance.ts:10992) includes them and reports PARTIAL.
+         expect_py={"state": "FULL", "failed": [["company_ir", "WEBSITE_NOT_AVAILABLE"]], "skipped": [], "action": "CHECK_OFFICIAL_RELEASES"},
+         expect_ts={"state": "PARTIAL", "failed": [["company_ir", "WEBSITE_NOT_AVAILABLE"]], "skipped": [], "action": "CHECK_OFFICIAL_RELEASES"}),
+
+    # Q3h: sources=[] -- Python substitutes the four default sources, the Worker passes [] through (no source attempted).
+    Case(name="tool.q3h.empty_sources_python_substitutes_defaults_worker_attempts_none", ids=["Q3h"],
+         py=lambda: _python_news_sources_empty(),
+         ts={"js": """
+const r = JSON.parse(await m.yahooFinance.getCompanyNews("TEST", 5, 14, []));
+return { sourceStatusKeys: Object.keys(r.sourceStatus).sort(), coverageState: r.coverage.state, sourcesUsed: r.meta.sourcesUsed };
+""", "isolate": True},
+         routes=NEWS_ROUTES, mode="pinned", decision="Q3h",
+         expect_py={"sourceStatusKeys": ["finnhub", "marketaux", "yahoo_finance_news", "yahoo_finance_press_releases"],
+                    "coverageState": "FULL", "sourcesUsed": []},
+         expect_ts={"sourceStatusKeys": [], "coverageState": "FULL", "sourcesUsed": []}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# BR-PRC-014 (slope), BR-PRC-033 (volume ratio), BR-SHR-006 (batch cap): daily-series tools
+# Python: pricing tool with yfinance and the completed-history loader stubbed (a CURRENT, fully completed series).
+# Worker: the same tool on a canned Yahoo chart with the clock fixed after the last session.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+SERIES_END = "2026-10-09"
+SERIES_NOW = _epoch(SERIES_END, "22:00", "UTC")
+
+
+def _series_prepared(closes: list, volumes: list, adj: list | None = None) -> dict:
+    days = _weekdays(SERIES_END, len(closes))
+    index = pd.DatetimeIndex([pd.Timestamp(d) for d in days])
+    adj_closes = closes if adj is None else adj
+    frame = pd.DataFrame({
+        "Close": [float("nan") if c is None else c for c in closes],
+        "Adj Close": [float("nan") if c is None else c for c in adj_closes],
+        "Volume": volumes}, index=index)
+    return {"completed": frame, "timezoneName": "UTC", "freshnessStatus": "CURRENT", "expectedCompletedDate": days[-1],
+            "excludedIncompleteBar": False, "retryAttempted": False}
+
+
+def _series_chart(closes: list, volumes: list, adj: list | None = None) -> dict:
+    days = _weekdays(SERIES_END, len(closes))
+    stamps = [_epoch(d, "20:00", "UTC") for d in days]
+    return {"chart": {"result": [{
+        "meta": {"exchangeTimezoneName": "UTC", "regularMarketTime": stamps[-1], "currency": "USD"},
+        "timestamp": stamps,
+        "indicators": {"quote": [{"close": closes, "volume": volumes}],
+                       "adjclose": [{"adjclose": closes if adj is None else adj}]}}]}}
+
+
+def _series_case(name: str, ids: list[str], tool: str, args: list, closes: list, volumes: list | None = None,
+                 adj: list | None = None, **kw) -> Case:
+    volumes = volumes if volumes is not None else [1000] * len(closes)
+    py_fn, ts_fn = {"slope": (pricing.get_price_slope, "getPriceSlope"),
+                    "volume_ratio": (pricing.get_volume_ratio, "getVolumeRatio")}[tool]
+
+    def py():
+        with patch.object(pricing.yf, "Ticker", MagicMock()), \
+                patch.object(pricing, "_load_completed_daily_history", AsyncMock(return_value=_series_prepared(closes, volumes, adj))):
+            return asyncio.run(py_fn(*args))
+
+    body = f"return JSON.parse(await m.yahooFinance.{ts_fn}(...args));"
+    return Case(
+        name=name, ids=ids, py=py, ts={"js": _ts_with_clock(SERIES_NOW, body), "args": args, "isolate": True},
+        routes={"https://query1.finance.yahoo.com/v8/finance/chart/*": {"json": _series_chart(closes, volumes, adj)}}, **kw)
+
+
+def _pick(*keys):
+    return lambda v: {k: v.get(k) for k in keys}
+
+
+SLOPE_KEYS = ("status", "slopePct", "direction", "observationCount", "priceBasis", "startClose", "endClose", "fallbackUsed")
+FLAT_SIX = [100.0, 100.0, 100.0, 100.0, 100.0]
+
+CASES += [
+    # ── BR-PRC-014 ───────────────────────────────────────────────────────────────────────────
+    _series_case("prc.slope.card_example_up", ["BR-PRC-014"], "slope", ["TST", 5], [100.00] + FLAT_SIX[:4] + [103.25],
+                 select=_pick(*SLOPE_KEYS),
+                 expect={"status": "OK", "slopePct": 3.25, "direction": "UP", "observationCount": 6,
+                         "priceBasis": "ADJUSTED_CLOSE", "startClose": 100.0, "endClose": 103.25, "fallbackUsed": False}),
+    _series_case("prc.slope.move_under_half_percent_is_flat", ["BR-PRC-014"], "slope", ["TST", 5], [100.00] + FLAT_SIX[:4] + [100.40],
+                 select=_pick("slopePct", "direction"), expect={"slopePct": 0.4, "direction": "FLAT"}),
+    _series_case("prc.slope.exactly_half_percent_is_up", ["BR-PRC-014"], "slope", ["TST", 5], [100.00] + FLAT_SIX[:4] + [100.50],
+                 select=_pick("slopePct", "direction"), expect={"slopePct": 0.5, "direction": "UP"}),
+    _series_case("prc.slope.down", ["BR-PRC-014"], "slope", ["TST", 5], [100.00] + FLAT_SIX[:4] + [90.00],
+                 select=_pick("slopePct", "direction"), expect={"slopePct": -10.0, "direction": "DOWN"}),
+    _series_case("prc.slope.uses_unadjusted_closes_when_an_adjusted_one_is_missing", ["BR-PRC-014"], "slope", ["TST", 5],
+                 [100.00, 100.0, 100.0, 100.0, 100.0, 105.0], adj=[100.0, 100.0, None, 100.0, 100.0, 105.0],
+                 select=_pick("priceBasis", "fallbackUsed", "slopePct"),
+                 expect={"priceBasis": "UNADJUSTED_CLOSE", "fallbackUsed": True, "slopePct": 5.0}),
+    _series_case("prc.slope.too_few_completed_bars_is_an_error", ["BR-PRC-014"], "slope", ["TST", 5], [100.0, 101.0, 102.0, 103.0],
+                 select=_pick("error", "message"),
+                 expect={"error": True, "message": "Insufficient completed price data for TST: need 6 bars"}),
+    _series_case("prc.slope.days_below_one_is_clamped_to_one", ["BR-PRC-014"], "slope", ["TST", 0], [100.0, 110.0],
+                 select=_pick("observationCount", "slopePct"), expect={"observationCount": 2, "slopePct": 10.0}),
+    # Q3b: Python does not validate the ticker in the single-ticker path and int(days) raises on a non-number;
+    # the Worker also skips ticker validation here and falls back to 5 days.
+    _series_case("prc.slope.q3b_invalid_ticker_is_not_rejected_by_either_runtime", ["BR-PRC-014", "BR-ENV-007"], "slope",
+                 ["AAPL$", 5], [100.00] + FLAT_SIX[:4] + [103.25], select=_pick("status", "ticker", "slopePct"),
+                 mode="pinned", decision="Q3b", expect={"status": "OK", "ticker": "AAPL$", "slopePct": 3.25}),
+    _series_case("prc.slope.q3b_non_numeric_days_python_raises_worker_defaults_to_five", ["BR-PRC-014"], "slope",
+                 ["TST", "abc"], [100.00] + FLAT_SIX[:4] + [103.25], select=_pick("status", "days", "slopePct", "__error__"),
+                 mode="pinned", decision="Q3b",
+                 expect_py={"__error__": "ValueError: invalid literal for int() with base 10: 'abc'"},
+                 expect_ts={"status": "OK", "days": 5, "slopePct": 3.25, "__error__": None}),
+]
+
+VR_KEYS = ("status", "lastVolume", "avgVolume10d", "avgVolume90d", "ratio10d", "ratio90d", "volumeFlag")
+PRIOR10 = [1_800_000] * 10
+
+CASES += [
+    # ── BR-PRC-033 ───────────────────────────────────────────────────────────────────────────
+    _series_case("prc.volume_ratio.card_example_high", ["BR-PRC-033"], "volume_ratio", ["TST", 10], [50.0] * 11,
+                 volumes=PRIOR10 + [3_000_000], select=_pick(*VR_KEYS),
+                 expect={"status": "OK", "lastVolume": 3000000, "avgVolume10d": 1800000, "avgVolume90d": None,
+                         "ratio10d": 1.667, "ratio90d": None, "volumeFlag": "HIGH"}),
+    _series_case("prc.volume_ratio.below_point_seven_is_low", ["BR-PRC-033"], "volume_ratio", ["TST", 10], [50.0] * 11,
+                 volumes=[2_000_000] * 10 + [1_000_000], select=_pick("ratio10d", "volumeFlag"),
+                 expect={"ratio10d": 0.5, "volumeFlag": "LOW"}),
+    _series_case("prc.volume_ratio.exactly_one_point_five_is_normal", ["BR-PRC-033"], "volume_ratio", ["TST", 10], [50.0] * 11,
+                 volumes=[2_000_000] * 10 + [3_000_000], select=_pick("ratio10d", "volumeFlag"),
+                 expect={"ratio10d": 1.5, "volumeFlag": "NORMAL"}),
+    _series_case("prc.volume_ratio.exactly_point_seven_is_normal", ["BR-PRC-033"], "volume_ratio", ["TST", 10], [50.0] * 11,
+                 volumes=[2_000_000] * 10 + [1_400_000], select=_pick("ratio10d", "volumeFlag"),
+                 expect={"ratio10d": 0.7, "volumeFlag": "NORMAL"}),
+    _series_case("prc.volume_ratio.fewer_than_ten_prior_sessions_gives_no_ratio", ["BR-PRC-033"], "volume_ratio", ["TST", 10], [50.0] * 10,
+                 volumes=[2_000_000] * 9 + [3_000_000], select=_pick("status", "avgVolume10d", "ratio10d", "volumeFlag"),
+                 expect={"status": "OK", "avgVolume10d": None, "ratio10d": None, "volumeFlag": None}),
+    _series_case("prc.volume_ratio.ninety_day_window_when_enough_history", ["BR-PRC-033"], "volume_ratio", ["TST", 10], [50.0] * 101,
+                 volumes=[1_000_000] * 100 + [2_000_000], select=_pick("avgVolume90d", "ratio90d", "ratio10d", "volumeFlag"),
+                 expect={"avgVolume90d": 1000000, "ratio90d": 2.0, "ratio10d": 2.0, "volumeFlag": "HIGH"}),
+    # Q3c: a zero-volume completed session. Python's `if last_vol and avg` gives null ratio and flag; the Worker
+    # divides and reports ratio 0 with flag LOW.
+    _series_case("prc.volume_ratio.q3c_zero_volume_session_python_null_worker_zero_low", ["BR-PRC-033"], "volume_ratio", ["TST", 10], [50.0] * 11,
+                 volumes=PRIOR10 + [0], select=_pick("status", "lastVolume", "ratio10d", "volumeFlag"),
+                 mode="pinned", decision="Q3c",
+                 expect_py={"status": "OK", "lastVolume": 0, "ratio10d": None, "volumeFlag": None},
+                 expect_ts={"status": "OK", "lastVolume": 0, "ratio10d": 0, "volumeFlag": "LOW"}),
+    # Q3c (card, second defect): the Worker divides by the integer-rounded average, Python by the unrounded one;
+    # Python round() is half-even (1000.5 -> 1000) and JS Math.round half-up (1000.5 -> 1001).
+    _series_case("prc.volume_ratio.q3c_average_rounding_differs_between_runtimes", ["BR-PRC-033"], "volume_ratio", ["TST", 10], [50.0] * 11,
+                 volumes=[1000] * 5 + [1001] * 5 + [1000], select=_pick("avgVolume10d", "ratio10d", "volumeFlag"),
+                 mode="pinned", decision="Q3c",
+                 expect_py={"avgVolume10d": 1000, "ratio10d": 1.0, "volumeFlag": "NORMAL"},
+                 expect_ts={"avgVolume10d": 1001, "ratio10d": 0.999, "volumeFlag": "NORMAL"}),
+
+    # ── BR-SHR-006 (Q3c): Worker batch truncation at 5, Python unlimited ───────────────────────
+    _series_case("prc.batch.q3c_seven_tickers_python_processes_all_worker_truncates_to_five", ["BR-SHR-006"], "slope",
+                 [["T1", "T2", "T3", "T4", "T5", "T6", "T7"], 5], [100.00] + FLAT_SIX[:4] + [103.25],
+                 select=lambda v: {"tickers": sorted(k for k in v if not k.startswith("_")),
+                                   "remaining": (v.get("_truncated") or {}).get("remaining")},
+                 mode="pinned", decision="Q3c",
+                 expect_py={"tickers": ["T1", "T2", "T3", "T4", "T5", "T6", "T7"], "remaining": None},
+                 expect_ts={"tickers": ["T1", "T2", "T3", "T4", "T5"], "remaining": ["T6", "T7"]}),
+    _series_case("prc.batch.five_tickers_are_processed_by_both", ["BR-SHR-006"], "slope",
+                 [["T1", "T2", "T3", "T4", "T5"], 5], [100.00] + FLAT_SIX[:4] + [103.25],
+                 select=lambda v: {"tickers": sorted(k for k in v if not k.startswith("_")),
+                                   "slopes": sorted({v[k]["slopePct"] for k in v if not k.startswith("_")}),
+                                   "truncated": "_truncated" in v},
+                 expect={"tickers": ["T1", "T2", "T3", "T4", "T5"], "slopes": [3.25], "truncated": False}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# BR-PRC-019 / BR-PRC-021: price CAGR over 1, 3 and 5 years (get_price_stats)
+# A sparse completed-close series is enough: only the first bar on or after the horizon start and the last bar
+# matter. Python: pricing.get_price_stats with yfinance and the history loader stubbed. Worker: getPriceStats on
+# canned quoteSummary + chart responses.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+from types import SimpleNamespace  # noqa: E402
+
+STATS_END = "2026-10-09"
+STATS_NOW = _epoch(STATS_END, "22:00", "UTC")
+
+
+def _stats_case(name: str, ids: list[str], ticker: str, bars: list[tuple[str, float]], keys: tuple, **kw) -> Case:
+    days = [d for d, _ in bars]
+    closes = [c for _, c in bars]
+
+    def py():
+        index = pd.DatetimeIndex([pd.Timestamp(d) for d in days])
+        frame = pd.DataFrame({"Close": closes, "Adj Close": closes, "Volume": [1000] * len(days)}, index=index)
+        prepared = {"completed": frame, "timezoneName": "UTC", "freshnessStatus": "CURRENT", "expectedCompletedDate": days[-1],
+                    "excludedIncompleteBar": False, "retryAttempted": False}
+        fast = SimpleNamespace(last_price=closes[-1], previous_close=closes[-1], currency="USD", year_high=closes[-1],
+                               year_low=closes[0], fifty_day_average=closes[-1], two_hundred_day_average=closes[-1])
+        company = SimpleNamespace(fast_info=fast, info={"regularMarketTime": _epoch(days[-1], "20:00", "UTC"), "marketState": "CLOSED"})
+        with patch.object(pricing.yf, "Ticker", lambda _t: company), \
+                patch.object(pricing, "_load_completed_daily_history", AsyncMock(return_value=prepared)):
+            return asyncio.run(pricing.get_price_stats(ticker))
+
+    stamps = [_epoch(d, "20:00", "UTC") for d in days]
+    chart = {"chart": {"result": [{
+        "meta": {"exchangeTimezoneName": "UTC", "regularMarketTime": stamps[-1], "currency": "USD"},
+        "timestamp": stamps,
+        "indicators": {"quote": [{"close": closes, "volume": [1000] * len(days)}], "adjclose": [{"adjclose": closes}]}}]}}
+    summary = {"quoteSummary": {"result": [{
+        "price": {"currency": "USD", "regularMarketPrice": {"raw": closes[-1]}, "regularMarketPreviousClose": {"raw": closes[-1]},
+                  "regularMarketTime": {"raw": stamps[-1]}, "marketState": "CLOSED"},
+        "summaryDetail": {}}]}}
+    return Case(
+        name=name, ids=ids, py=py,
+        ts={"js": _ts_with_clock(STATS_NOW, f'return JSON.parse(await m.yahooFinance.getPriceStats("{ticker}"));'), "isolate": True},
+        routes={**YAHOO_AUTH_ROUTES,
+                f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?*": {"json": summary},
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?*": {"json": chart}},
+        select=_pick(*keys), **kw)
+
+
+CAGR_KEYS = ("cagr1y", "cagr3y", "cagr5y")
+
+CASES += [
+    # Card BR-PRC-021: 5 years ago $50, latest $100 -> (100/50)^(1/5) - 1 = 14.8698%. Shorter horizons have no
+    # earlier bar than the last one, so they are null.
+    _stats_case("prc.cagr.five_year_card_example", ["BR-PRC-021"], "CGA", [("2021-10-11", 50.0), (STATS_END, 100.0)], CAGR_KEYS,
+                expect={"cagr1y": None, "cagr3y": None, "cagr5y": 14.8698}),
+    # Card BR-PRC-019: close 100 three years ago and 133.10 now -> cagr3y = 10.0000.
+    _stats_case("prc.cagr.three_year_card_example", ["BR-PRC-019"], "CGB", [("2023-10-11", 100.0), (STATS_END, 133.10)], ("cagr3y",),
+                expect={"cagr3y": 10.0}),
+    _stats_case("prc.cagr.start_close_not_positive_is_null", ["BR-PRC-019", "BR-PRC-021"], "CGC", [("2023-10-11", 0.0), (STATS_END, 133.10)], ("cagr3y",),
+                expect={"cagr3y": None}),
+    # Q3i: with only ~3 years of history the whole series is the "5 year" window, but the exponent is still 1/5,
+    # so a 33.1% total gain reports as a 5.9% five-year CAGR instead of null (BR-PRC-019 / BR-PRC-021 suspected defect).
+    _stats_case("prc.cagr.q3i_short_history_five_year_cagr_uses_nominal_five_years", ["BR-PRC-019", "BR-PRC-021"], "CGD",
+                [("2023-10-11", 100.0), (STATS_END, 133.10)], ("cagr3y", "cagr5y"),
+                mode="pinned", decision="Q3i", expect={"cagr3y": 10.0, "cagr5y": 5.8853}),
+    # Finding (Phase 2, for Q3i triage): the horizon start differs. Python uses a calendar offset
+    # (2026-10-09 - 3y = 2023-10-09, bar included); the Worker uses 3 x 365.25 days (cutoff 2023-10-10 ~06:00Z, the
+    # 2023-10-09 20:00Z bar excluded), so the two pick different start bars (yahoo-finance.ts:2764-2774).
+    _stats_case("prc.cagr.start_bar_selection_differs_on_the_horizon_boundary", ["BR-PRC-021"], "CGE",
+                [("2023-10-09", 75.0), ("2025-10-09", 90.0), (STATS_END, 100.0)], ("cagr3y",),
+                mode="pinned", decision="FINDING: Python (calendar DateOffset) and Worker (365.25-day years) pick different CAGR start bars at the horizon boundary",
+                expect_py={"cagr3y": 10.0642}, expect_ts={"cagr3y": 3.5744}),
 ]

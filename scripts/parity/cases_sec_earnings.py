@@ -561,3 +561,412 @@ CASES += [
                            "fy2026End": v["revenue"]["FY2026"]["periodEnd"], "q3_2026": v["revenue"]["Q3 2026"]["value"]},
          expect={"fy2020End": "2021-06-30", "fy2021": False, "fy2026": 7_118_181_000, "fy2026End": "2026-06-30", "q3_2026": 1_805_641_000}),
 ]
+
+# ═══ BR-ERN-012 / 013 / 014: fiscal period an earnings release states for itself ═════════════════════
+def _period_text(name, text, expect):
+    return Case(name=f"ern.release_period.{name}", ids=["BR-ERN-012", "BR-ERN-013", "BR-ERN-014"],
+                py=lambda: ep.extract_earnings_period_from_text(text), ts=_ts("earningsPeriod", "extractEarningsPeriodFromText", text),
+                select=lambda v: v["period"], expect=expect)
+
+
+CASES += [
+    _period_text("mu_fourth_quarter_and_full_year_of_fiscal_2026",
+                 "AI-driven demand position Micron for a record fiscal 2027 BOISE, Idaho, September 30, 2026 - Micron Technology, Inc. today announced results "
+                 "for its fourth quarter and full year of fiscal 2026, which ended September 3, 2026.", "FY2026 Q4"),
+    _period_text("quarter_of_fiscal_year", "Marvell Reports Second Quarter of Fiscal Year 2027 Financial Results", "FY2027 Q2"),
+    _period_text("hyphenated_headline", "REPORTS THIRD-QUARTER 2026 RESULTS", "FY2026 Q3"),
+    _period_text("numeric_quarter_fy", "Q4 FY2026 revenue was a record.", "FY2026 Q4"),
+    _period_text("year_first_phrase_first_wins_over_comparative",
+                 "Aehr Reports Fiscal 2026 Fourth Quarter Results. Net revenue was $18.8 million, compared to $14.1 million in the fourth quarter of fiscal 2025.", "FY2026 Q4"),
+    _period_text("forward_year_across_sentence_not_joined", "We expect an even stronger fiscal 2027. Fourth quarter revenue was $54 billion.", None),
+    _period_text("period_end_date_only_unresolved", "Results for the fourth quarter ended January 30, 2026.", None),
+    _period_text("empty_text_unresolved", "", None),
+    Case(name="ern.release_period.unresolved_shape", ids=["BR-ERN-012"], py=lambda: ep.extract_earnings_period_from_text(""),
+         ts=_ts("earningsPeriod", "extractEarningsPeriodFromText", ""), expect={"period": None, "periodStatus": "UNRESOLVED", "periodEvidence": None}),
+]
+
+# ═══ BR-ERN-007: end-date-named guidance takes the company's own fiscal-year naming ════════════════════
+_DG_RELEASE = {"filingDate": "2026-03-20", "accessionNumber": "0001-26-000900", "url": "https://www.sec.gov/dg.htm", "status": "READ", "text":
+               "For the fiscal year ending January 29, 2027, the company expects revenue between $41.0 billion and $42.0 billion."}
+
+
+def _history_target(facts):
+    return lambda v: {k: v["guidance"][0]["targetPeriod"].get(k) for k in ("label", "fiscalYear", "basis", "namingBasis")}
+
+
+CASES += [
+    Case(name="ern.guidance_history.end_date_year_takes_company_naming_offset", ids=["BR-ERN-007"],
+         py=lambda: gh.guidance_history("DG", [_DG_RELEASE], DG_FACTS), ts=_ts("guidanceHistory", "guidanceHistory", "DG", [_DG_RELEASE], DG_FACTS),
+         select=_history_target(DG_FACTS),
+         expect={"label": "FY2026", "fiscalYear": 2026, "basis": "TEXT_PERIOD_END", "namingBasis": "SEC_STATED_FISCAL_YEAR"}),
+    Case(name="ern.guidance_history.end_date_year_without_companyfacts_uses_period_end_rule", ids=["BR-ERN-007"],
+         py=lambda: gh.guidance_history("DG", [_DG_RELEASE], None), ts=_ts("guidanceHistory", "guidanceHistory", "DG", [_DG_RELEASE], None),
+         select=_history_target(None), expect={"label": "FY2027", "fiscalYear": 2027, "basis": "TEXT_PERIOD_END", "namingBasis": None}),
+]
+
+# ═══ Tool level: shared scaffolding ═══════════════════════════════════════════════════════════════════
+_UA_NOTE = "SEC / Yahoo HTTP is served from `routes`; each case uses its own ticker, CIK and accession so neither runtime's caches carry over."
+
+
+class _NoInfoTicker:
+    """yfinance.Ticker stand-in: no network, `info` unavailable (CIK falls back to SEC's ticker index)."""
+
+    def __init__(self, *a, **k):
+        pass
+
+    @property
+    def info(self):
+        raise RuntimeError("no yahoo in parity harness")
+
+
+def _reset_python_caches() -> None:
+    from yfmcp.clients import edgar
+    edgar._EDGAR_TICKERS = None
+    for cache in (edgar._FILING_CIK_CACHE, edgar._EDGAR_SUBS_CACHE, edgar._EDGAR_FACTS_CACHE, edgar._EDGAR_HTML_CACHE):
+        cache.clear()
+    srv = _srv()
+    with contextlib.suppress(Exception):
+        srv._tool_cache._store.clear()
+
+
+@contextlib.contextmanager
+def _python_env(fake_ticker=_NoInfoTicker, calendar="{}"):
+    _reset_python_caches()
+    with patch("yfinance.Ticker", fake_ticker), patch("server.get_calendar", new=AsyncMock(return_value=calendar)):
+        yield
+
+
+def _run(coro_fn):
+    """Run an async Python tool call under the reset environment."""
+    def go(fake_ticker=_NoInfoTicker):
+        with _python_env(fake_ticker):
+            return asyncio.run(coro_fn())
+    return go
+
+
+_YAHOO_NO_RESULT = {"json": {"quoteSummary": {"result": [], "error": None}}}
+
+
+def _sec_routes(tkr: str, cik: int, filings: list[dict], docs: dict | None = None, index_rows: str | None = None) -> dict:
+    """SEC routes for one issuer: ticker index, submissions (8-K rows), the 8-K filing index and its documents.
+
+    filings: {"accession", "date", "primary", "items"}; docs: {url: html} (a missing document is a 404).
+    """
+    recent = {"form": ["8-K"] * len(filings), "accessionNumber": [f["accession"] for f in filings], "filingDate": [f["date"] for f in filings],
+              "primaryDocument": [f["primary"] for f in filings], "acceptanceDateTime": [f["date"] + "T21:05:00.000Z" for f in filings],
+              "items": [f.get("items", "2.02,9.01") for f in filings], "isInlineXBRL": [0] * len(filings)}
+    routes = {
+        "https://www.sec.gov/files/company_tickers.json": {"json": {"0": {"cik_str": cik, "ticker": tkr, "title": f"{tkr} Corp"}}},
+        f"https://data.sec.gov/submissions/CIK{cik:010d}.json": {"json": {"cik": str(cik), "filings": {"recent": recent}}},
+        f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{tkr}*": _YAHOO_NO_RESULT,
+        "https://fc.yahoo.com*": {"status": 404},
+        "https://query1.finance.yahoo.com/v1/test/getcrumb*": {"body": "crumb"},
+        "https://query2.finance.yahoo.com/v1/test/getcrumb*": {"body": "crumb"},
+    }
+    for f in filings:
+        nodash = f["accession"].replace("-", "")
+        routes[f"https://www.sec.gov/Archives/edgar/data/{cik}/{nodash}/{f['accession']}-index.htm"] = (
+            {"body": index_rows} if index_rows else {"status": 404})
+    for url, html in (docs or {}).items():
+        routes[url] = {"body": html}
+    return routes
+
+
+def _doc_url(cik: int, accession: str, name: str) -> str:
+    return f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession.replace('-', '')}/{name}"
+
+
+# ═══ BR-ERN-017: earnings release source URL policy ═══════════════════════════════════════════════════
+def _index_call(url: str, tkr: str = "ZQI"):
+    return (lambda: _run(lambda: _srv().index_earnings_release(tkr, "latest", url))()), \
+        {"js": "m.response.setWorkerEnv({}); return m.yahooFinance.indexEarningsRelease(args[0], 'latest', args[1]);", "args": [tkr, url]}
+
+
+def _err(v):
+    e = v.get("error")
+    return {"ok": v.get("ok"), "code": e.get("code") if isinstance(e, dict) else e, "message": e.get("message") if isinstance(e, dict) else None}
+
+
+def _source_case(name, url, expect, ids=("BR-ERN-017",), routes=None, **kw):
+    py, ts = _index_call(url)
+    return Case(name=name, ids=list(ids), py=py, ts=ts, select=_err, routes=routes, expect=expect, **kw)
+
+
+_VALID = lambda msg: {"ok": False, "code": "INPUT_VALIDATION_ERROR", "message": msg}  # noqa: E731
+_NOFETCH = lambda url: {"ok": False, "code": "PROVIDER_ERROR", "message": f"Failed to fetch source: {url}"}  # noqa: E731
+CASES += [
+    _source_case("ern.source_url.paywalled_wsj_refused", "https://www.wsj.com/articles/x", _VALID("source_url appears paywalled and is not allowed")),
+    _source_case("ern.source_url.paywalled_bloomberg_bare_host_refused", "https://bloomberg.com/news/x", _VALID("source_url appears paywalled and is not allowed")),
+    _source_case("ern.source_url.paywalled_seekingalpha_refused", "https://seekingalpha.com/article/1", _VALID("source_url appears paywalled and is not allowed")),
+    _source_case("ern.source_url.http_scheme_refused", "http://example.com/release", _VALID("source_url must use https")),
+    # Scheduled repair (Q2a): the host match is exact, so subdomains of blocked publishers pass the paywall check and
+    # are fetched as company_ir (here the stubbed fetch answers 404, so the visible result is the fetch failure).
+    _source_case("ern.source_url.paywalled_subdomain_markets_wsj_not_blocked", "https://markets.wsj.com/a",
+                 _NOFETCH("https://markets.wsj.com/a"), ids=("BR-ERN-017",), routes={"https://markets.wsj.com/a": {"status": 404}},
+                 mode="pinned", decision="Q2a", note="repair: block subdomains of paywalled publishers"),
+    _source_case("ern.source_url.paywalled_subdomain_on_wsj_not_blocked", "https://on.wsj.com/b", _NOFETCH("https://on.wsj.com/b"),
+                 routes={"https://on.wsj.com/b": {"status": 404}}, mode="pinned", decision="Q2a", note="repair: block subdomains of paywalled publishers"),
+    # Any non-SEC https host is accepted as company_ir without an IR-site check (also a Q2a topic).
+    _source_case("ern.source_url.any_https_host_accepted_as_company_ir", "https://example.com/ir/release", _NOFETCH("https://example.com/ir/release"),
+                 routes={"https://example.com/ir/release": {"status": 404}}, mode="pinned", decision="Q2a", note="repair: restrict company_ir to a known IR registry"),
+    _source_case("ern.source_url.sec_archive_url_accepted", "https://www.sec.gov/Archives/edgar/data/1/2/r.htm", _NOFETCH("https://www.sec.gov/Archives/edgar/data/1/2/r.htm"),
+                 routes={"https://www.sec.gov/Archives/edgar/data/1/2/r.htm": {"status": 404}}),
+]
+
+# Finding (Phase 2, for Q3i triage): an unparseable source_url ("not a url") gets a different message in each runtime:
+# Python's urlparse reports "must use https" (earnings.py:116-121), the Worker's URL constructor reports "must be a
+# valid URL" (yahoo-finance.ts:16787-16794). Both refuse it with INPUT_VALIDATION_ERROR; only the text differs.
+_py_nu, _ts_nu = _index_call("not a url")
+CASES.append(Case(name="ern.source_url.unparseable_url_message_differs", ids=["BR-ERN-017"], py=_py_nu, ts=_ts_nu, select=_err, mode="pinned",
+                  decision="FINDING: unparseable source_url message differs (Python 'must use https', Worker 'must be a valid URL')",
+                  expect_py=_VALID("source_url must use https"), expect_ts=_VALID("source_url must be a valid URL")))
+
+
+# ═══ Tool level: extract_guidance (BR-ERN-004 status, BR-ERN-002/003 amounts, BR-ERN-020 not read vs not disclosed) ═══
+def _unwrap(v):
+    return v["data"] if isinstance(v, dict) and "meta" in v and isinstance(v.get("data"), dict) else v
+
+
+def _guidance_view(v):
+    d = _unwrap(v)
+    g = d.get("guidance") or {}
+    out = {"status": d.get("status"), "confidence": d.get("confidence"), "retryable": d.get("retryable"), "code": d.get("code"),
+           "sourceUrl": d.get("sourceUrl"), "warningCodes": [w.get("code") for w in d.get("warnings") or []]}
+    for k in ("revenue", "grossMargin", "eps"):
+        r = g.get(k) or {}
+        out[k] = {f: r.get(f) for f in ("status", "low", "high", "midpoint", "lowPct", "highPct", "midpointPct", "basis", "statedAs", "targetPeriod")}
+    return out
+
+
+def _guidance_case(name, ids, tkr, cik, html, expect, filings=True, **kw):
+    accn = f"0000{cik:06d}-26-000001"
+    primary = "r8k.htm"
+    doc = _doc_url(cik, accn, primary)
+    fl = [{"accession": accn, "date": "2026-07-14", "primary": primary}] if filings else []
+    routes = _sec_routes(tkr, cik, fl, {doc: html} if html is not None else None)
+    return Case(name=name, ids=ids, py=_run(lambda: _srv().extract_guidance(tkr)),
+                ts={"js": "m.response.setWorkerEnv({}); return m.yahooFinance.extractGuidance(args[0]);", "args": [tkr], "isolate": True},
+                routes=routes, select=_guidance_view, expect=expect(doc) if callable(expect) else expect, **kw)
+
+
+def _g(status, **kw):
+    """A guidance metric as _guidance_view reports it: every field present, unset ones None."""
+    out = dict.fromkeys(("status", "low", "high", "midpoint", "lowPct", "highPct", "midpointPct", "basis", "statedAs", "targetPeriod"))
+    return {**out, "status": status, **kw}
+
+
+_ND = _g("NOT_DISCLOSED")
+_NR = _g("NOT_READ")
+CASES += [
+    _guidance_case("ern.extract_guidance.found_revenue_range_shared_billion_unit", ["BR-ERN-004", "BR-ERN-002", "BR-ERN-003"], "ZGA", 810001,
+                   "<html><body><p>The company expects revenue guidance of $2.0 to $2.4 billion for the third quarter of 2026.</p></body></html>",
+                   lambda doc: {"status": "FOUND", "confidence": "HIGH", "retryable": None, "code": None, "sourceUrl": doc, "warningCodes": [],
+                                "revenue": _g("FOUND", low=2_000_000_000, high=2_400_000_000, midpoint=2_200_000_000, basis="NOT_STATED", statedAs="RANGE", targetPeriod="Q3 2026"), "grossMargin": _ND, "eps": _ND}),
+    _guidance_case("ern.extract_guidance.found_millions_and_eps_and_margin", ["BR-ERN-004", "BR-ERN-002"], "ZGB", 810002,
+                   "<html><body><p>For the third quarter of 2026 the company expects revenue between $150.0 million and $200.0 million.</p>"
+                   "<p>The company expects EPS of $0.10 to $0.20 for the third quarter of 2026.</p>"
+                   "<p>For the third quarter of 2026, the company expects gross margin of 41% to 43%.</p></body></html>",
+                   lambda doc: {"status": "FOUND", "confidence": "HIGH", "retryable": None, "code": None, "sourceUrl": doc, "warningCodes": [],
+                                "revenue": _g("FOUND", low=150_000_000, high=200_000_000, midpoint=175_000_000, basis="NOT_STATED", statedAs="RANGE", targetPeriod="Q3 2026"),
+                                "grossMargin": _g("FOUND", lowPct=41, highPct=43, midpointPct=42, basis="NOT_STATED", statedAs="RANGE", targetPeriod="Q3 2026"),
+                                "eps": _g("FOUND", low=0.1, high=0.2, midpoint=0.15000000000000002, basis="NOT_STATED", statedAs="RANGE", targetPeriod="Q3 2026")}),
+    _guidance_case("ern.extract_guidance.release_read_without_guidance_is_not_disclosed", ["BR-ERN-004", "BR-ERN-020"], "ZGC", 810003,
+                   "<html><body><p>No guidance provided in this release.</p></body></html>",
+                   lambda doc: {"status": "NOT_DISCLOSED", "confidence": "NOT_DISCLOSED", "retryable": None, "code": None, "sourceUrl": doc, "warningCodes": [],
+                                "revenue": _ND, "grossMargin": _ND, "eps": _ND}),
+    _guidance_case("ern.extract_guidance.unreadable_release_is_not_read_and_retryable", ["BR-ERN-004", "BR-ERN-020"], "ZGD", 810004, None,
+                   lambda doc: {"status": "RELEASE_TEXT_NOT_AVAILABLE", "confidence": "NOT_DECISION_GRADE", "retryable": True, "code": "RELEASE_TEXT_NOT_AVAILABLE",
+                                "sourceUrl": doc, "warningCodes": ["RELEASE_TEXT_NOT_AVAILABLE"], "revenue": _NR, "grossMargin": _NR, "eps": _NR}),
+    _guidance_case("ern.extract_guidance.no_sec_release_resolved_is_not_read_not_retryable", ["BR-ERN-004", "BR-ERN-020"], "ZGE", 810005, None,
+                   {"status": "RELEASE_NOT_RESOLVED", "confidence": "NOT_DECISION_GRADE", "retryable": False, "code": "RELEASE_NOT_RESOLVED", "sourceUrl": None,
+                    "warningCodes": ["RELEASE_NOT_RESOLVED"], "revenue": _NR, "grossMargin": _NR, "eps": _NR}, filings=False),
+]
+
+# ═══ Tool level: compare_earnings_actual_vs_estimate (BR-ERN-001 / 018 / 031) ══════════════════════════════
+# Both runtimes read the same SEC 8-K release text (period and revenue come from it) and the same Yahoo rows. Yahoo
+# rows are served to the Worker as quoteSummary JSON and to Python as a stand-in yfinance Ticker (DataFrames). The
+# estimate rows are labelled with the release's own period label so that label alignment can be exercised in both
+# runtimes; production Yahoo rows are dated (see the findings near the date-row cases).
+def _compare_view(v):
+    d = _unwrap(v)
+    warns = d.get("warnings")
+    if warns is None and isinstance(v, dict):
+        warns = (v.get("meta") or {}).get("warnings")
+    s = d.get("surprise") or {}
+    return {
+        "period": d.get("period"), "reportedPeriod": d.get("reportedPeriod"), "reportedDate": d.get("reportedDate"),
+        "estimatePeriod": d.get("estimatePeriod"), "periodAlignmentStatus": d.get("periodAlignmentStatus"),
+        "actualRevenue": ((d.get("actual") or {}).get("revenue") or {}).get("value"),
+        "actualEps": ((d.get("actual") or {}).get("eps") or {}).get("value"),
+        "estimateRevenue": ((d.get("estimate") or {}).get("revenue") or {}).get("value"),
+        "estimateEps": ((d.get("estimate") or {}).get("eps") or {}).get("value"),
+        "revenueSurprisePct": s.get("revenueSurprisePct"), "epsSurprisePct": s.get("epsSurprisePct"), "epsDelta": s.get("epsDelta"),
+        "confidence": d.get("confidence"), "warningCodes": [w.get("code") for w in warns or []],
+    }
+
+
+def _is_date(text) -> bool:
+    return isinstance(text, str) and len(text) == 10 and text[4] == "-" and text[7] == "-"
+
+
+def _fake_yahoo_ticker(history: list[dict], revenue_estimates: list[dict]):
+    import pandas as pd
+
+    class _FastInfo:
+        currency = "USD"
+
+    class _T:
+        fast_info = _FastInfo()
+        earnings_estimate = revenue_estimate_ = None
+        eps_trend = eps_revisions = growth_estimates = None
+
+        def __init__(self, *a, **k):
+            pass
+
+        @property
+        def info(self):
+            raise RuntimeError("no yahoo in parity harness")
+
+        @property
+        def earnings_history(self):
+            if not history:
+                return None
+            idx = [pd.Timestamp(h["quarter"]) if _is_date(h["quarter"]) else h["quarter"] for h in history]   # yfinance dates its quarters
+            return pd.DataFrame(history).drop(columns="quarter").set_index(pd.Index(idx, name="quarter"))
+
+        @property
+        def revenue_estimate(self):
+            if not revenue_estimates:
+                return None
+            return pd.DataFrame(revenue_estimates).drop(columns="period").set_index(pd.Index([r["period"] for r in revenue_estimates], name="period"))
+
+    return _T
+
+
+def _yahoo_analysis_json(history: list[dict], revenue_estimates: list[dict]) -> dict:
+    raw = lambda x: None if x is None else {"raw": x}  # noqa: E731
+    return {"quoteSummary": {"error": None, "result": [{
+        "earningsTrend": {"trend": [{"period": r["period"], "revenueEstimate": {"avg": raw(r["avg"])}} for r in revenue_estimates]},
+        "earningsHistory": {"history": [{"quarter": ({"raw": 1, "fmt": h["quarter"]} if _is_date(h["quarter"]) else h["quarter"]), "epsActual": raw(h["epsActual"]), "epsEstimate": raw(h["epsEstimate"])} for h in history]},
+    }]}}
+
+
+def _compare_case(name, ids, tkr, cik, release_text, history, revenue_estimates, expect, **kw):
+    accn = f"0000{cik:06d}-26-000001"
+    primary = "r8k.htm"
+    doc = _doc_url(cik, accn, primary)
+    routes = _sec_routes(tkr, cik, [{"accession": accn, "date": "2026-07-14", "primary": primary}], {doc: f"<html><body><p>{release_text}</p></body></html>"})
+    routes["https://data.sec.gov/api/xbrl/companyconcept/*"] = {"status": 404}
+    routes[f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{tkr}?modules=earningsTrend,earningsHistory*"] = {"json": _yahoo_analysis_json(history, revenue_estimates)}
+    return Case(name=name, ids=ids, py=lambda: _run(lambda: _srv().compare_earnings_actual_vs_estimate(tkr))(_fake_yahoo_ticker(history, revenue_estimates)),
+                ts={"js": "m.response.setWorkerEnv({}); return m.yahooFinance.compareEarningsActualVsEstimate(args[0]);", "args": [tkr], "isolate": True},
+                routes=routes, select=_compare_view, expect=expect, **kw)
+
+
+_REL_Q2 = ("Acme Reports Second Quarter Fiscal 2026 Results. Revenue was $1.1 billion for the quarter.")
+_LBL = "FY2026 Q2"
+
+
+def _cmp(**kw):
+    base = {"period": _LBL, "reportedPeriod": _LBL, "reportedDate": _LBL, "estimatePeriod": _LBL, "periodAlignmentStatus": "MATCHED", "actualRevenue": 1_100_000_000,
+            "actualEps": 0.55, "estimateRevenue": 1_000_000_000, "estimateEps": 0.5, "revenueSurprisePct": 10.0, "epsSurprisePct": 10.0, "epsDelta": 0.05,
+            "confidence": "HIGH", "warningCodes": []}
+    return {**base, **kw}
+
+
+_ROW = lambda eps, est, q=_LBL: [{"quarter": q, "epsActual": eps, "epsEstimate": est}]  # noqa: E731
+_REVEST = [{"period": _LBL, "avg": 1_000_000_000}]
+CASES += [
+    # Card worked example (BR-ERN-001): release 'Q2' == Yahoo row, revenue $1.1B vs $1.0B, EPS 0.55 vs 0.50.
+    _compare_case("ern.compare.matched_period_gives_revenue_and_eps_surprise", ["BR-ERN-001", "BR-ERN-018", "BR-ERN-031"], "ZCA", 820001, _REL_Q2,
+                  _ROW(0.55, 0.50), _REVEST, _cmp()),
+    _compare_case("ern.compare.revenue_surprise_uses_absolute_estimate_and_two_decimals", ["BR-ERN-018"], "ZCB", 820002,
+                  "Acme Reports Second Quarter Fiscal 2026 Results. Revenue was $105 million for the quarter.", _ROW(0.25, 0.20),
+                  [{"period": _LBL, "avg": 100_000_000}],
+                  _cmp(actualRevenue=105_000_000, estimateRevenue=100_000_000, revenueSurprisePct=5.0, epsSurprisePct=25.0, epsDelta=0.05, actualEps=0.25, estimateEps=0.2)),
+    # Card BR-ERN-031: EPS 0.012 vs 0.010 -> delta 0.002, percent omitted, near-zero warning, confidence MEDIUM.
+    _compare_case("ern.compare.near_zero_eps_estimate_gives_delta_without_percent", ["BR-ERN-031", "BR-ERN-018"], "ZCC", 820003, _REL_Q2,
+                  _ROW(0.012, 0.010), _REVEST,
+                  _cmp(actualEps=0.012, estimateEps=0.01, epsSurprisePct=None, epsDelta=0.002, confidence="MEDIUM", warningCodes=["EPS_NEAR_ZERO_ESTIMATE_BASE"])),
+    _compare_case("ern.compare.eps_estimate_at_threshold_0_02_gets_percent", ["BR-ERN-018"], "ZCD", 820004, _REL_Q2, _ROW(0.03, 0.02), _REVEST,
+                  _cmp(actualEps=0.03, estimateEps=0.02, epsSurprisePct=50.0, epsDelta=0.01)),
+    _compare_case("ern.compare.negative_eps_estimate_uses_absolute_base", ["BR-ERN-018"], "ZCE", 820005, _REL_Q2, _ROW(-0.10, -0.20), _REVEST,
+                  _cmp(actualEps=-0.1, estimateEps=-0.2, epsSurprisePct=50.0, epsDelta=0.1)),
+    _compare_case("ern.compare.revenue_estimate_zero_gives_no_revenue_surprise", ["BR-ERN-018"], "ZCF", 820006, _REL_Q2, _ROW(0.55, 0.50),
+                  [{"period": _LBL, "avg": 0}], _cmp(estimateRevenue=0, revenueSurprisePct=None, confidence="MEDIUM", warningCodes=["REVENUE_ESTIMATE_UNAVAILABLE"])),
+    _compare_case("ern.compare.no_matching_revenue_estimate_row_warns", ["BR-ERN-018"], "ZCG", 820007, _REL_Q2, _ROW(0.55, 0.50),
+                  [{"period": "FY2026 Q3", "avg": 1_300_000_000}],
+                  _cmp(estimateRevenue=None, revenueSurprisePct=None, confidence="MEDIUM", warningCodes=["REVENUE_ESTIMATE_UNAVAILABLE"])),
+    # Different labels: MISMATCH; revenue surprise omitted but EPS surprise still computed.
+    _compare_case("ern.compare.different_labels_mismatch_omits_revenue_surprise_keeps_eps", ["BR-ERN-001", "BR-ERN-018"], "ZCH", 820008, _REL_Q2,
+                  _ROW(0.55, 0.50, "FY2026 Q1"), [{"period": "FY2026 Q1", "avg": 900_000_000}],
+                  _cmp(reportedDate="FY2026 Q1", estimatePeriod="FY2026 Q1", periodAlignmentStatus="MISMATCH", estimateRevenue=900_000_000, revenueSurprisePct=None,
+                       confidence="MEDIUM", warningCodes=["PERIOD_ALIGNMENT_MISMATCH"])),
+    _compare_case("ern.compare.no_reported_quarter_warns_and_stops", ["BR-ERN-001"], "ZCJ", 820010, _REL_Q2, _ROW(None, 0.50), _REVEST,
+                  _cmp(reportedPeriod=_LBL, reportedDate=None, estimatePeriod=None, periodAlignmentStatus="INCOMPLETE", actualEps=None, estimateEps=None,
+                       estimateRevenue=None, revenueSurprisePct=None, epsSurprisePct=None, epsDelta=None, confidence="NOT_DISCLOSED", warningCodes=["NO_REPORTED_QUARTER"])),
+    # Repair Q3i (BR-ERN-031 suspected defect): an EPS estimate of exactly 0 takes the EPS_ESTIMATE_UNAVAILABLE branch, so
+    # no epsDelta is given although the near-zero rule exists to give one.
+    _compare_case("ern.compare.zero_eps_estimate_gives_no_delta", ["BR-ERN-031", "BR-ERN-018"], "ZCK", 820011, _REL_Q2, _ROW(0.10, 0.0), _REVEST,
+                  _cmp(actualEps=0.1, estimateEps=0.0, epsSurprisePct=None, epsDelta=None, confidence="NOT_DISCLOSED", warningCodes=["EPS_ESTIMATE_UNAVAILABLE"]),
+                  mode="pinned", decision="Q3i", note="repair: a zero EPS estimate should still give epsDelta"),
+]
+
+
+# Finding (Phase 2, for Q3i triage): when Yahoo dates its earningsHistory row (production shape; yfinance gives a Timestamp, the
+# Worker gets {raw, fmt}), the runtimes disagree on estimatePeriod: Python str(Timestamp) is "2026-06-30T00:00:00"
+# (earnings.py:681-684 via get_earnings_analysis' isoformat), the Worker's is "2026-06-30" (yahoo-finance.ts:2943
+# unwrapYahooValues). A revenue-estimate row labelled with the same date then matches in the Worker (candidatePeriod ===
+# estimatePeriod, yahoo-finance.ts:17701-17706) but not in Python (earnings.py:746-756 compares against the longer text), so
+# the Worker returns estimate.revenue.value and Python null. Both report UNVERIFIED and omit the revenue surprise.
+_DATED = _compare_case("ern.compare.date_identified_row_is_unverified_runtimes_differ", ["BR-ERN-001", "BR-ERN-018"], "ZCI", 820009, _REL_Q2,
+                       _ROW(0.55, 0.50, "2026-06-30"), [{"period": "2026-06-30", "avg": 1_000_000_000}], None)
+_dated_py = _cmp(reportedDate="2026-06-30", estimatePeriod="2026-06-30T00:00:00", periodAlignmentStatus="UNVERIFIED", estimateRevenue=None, revenueSurprisePct=None,
+                 confidence="MEDIUM", warningCodes=["PERIOD_ALIGNMENT_UNVERIFIED"])
+CASES.append(Case(name=_DATED.name, ids=_DATED.ids, py=_DATED.py, ts=_DATED.ts, routes=_DATED.routes, select=_compare_view, mode="pinned",
+                  decision="FINDING: dated Yahoo row gives estimatePeriod '2026-06-30T00:00:00' in Python, '2026-06-30' in the Worker, and only the Worker finds the revenue estimate",
+                  expect_py=_dated_py, expect_ts={**_dated_py, "estimatePeriod": "2026-06-30", "estimateRevenue": 1_000_000_000}))
+
+# Repair Q3i (BR-ERN-018 suspected defect): actual EPS is Yahoo's epsActual, not the figure in the official release, even
+# though revenue comes from the release. The release below states diluted EPS of $0.60; the result still carries Yahoo's 0.55.
+CASES.append(_compare_case(
+    "ern.compare.actual_eps_comes_from_yahoo_not_the_release", ["BR-ERN-018", "BR-ERN-031", "BR-ERN-001"], "ZCL", 820012,
+    _REL_Q2 + " Diluted net income per share was $0.60 for the quarter.", _ROW(0.55, 0.50), _REVEST, _cmp(), mode="pinned", decision="Q3i",
+    note="repair: actual EPS should be the official release figure"))
+
+
+# ═══ Tool level: transcript source waterfall (BR-ERN-009, repair Q3i) ════════════════════════════════════
+def _waterfall_view(v):
+    d = _unwrap(v)
+    nxt = d.get("nextRecommendedFallback")
+    return {"status": d.get("status"), "fiscalQuarterStatus": d.get("fiscalQuarterStatus"),
+            "attempts": {a["sourceType"]: a["status"] for a in d.get("attemptedSources") or []},
+            "attemptOrder": [a["sourceType"] for a in d.get("attemptedSources") or []],
+            "nextRecommendedFallback": nxt.get("sourceType") if isinstance(nxt, dict) else nxt}
+
+
+def _waterfall_case(name, tkr, cik, fiscal_quarter, expect):
+    routes = _sec_routes(tkr, cik, [])
+    routes[f"https://finance.yahoo.com/quote/{tkr}*"] = {"status": 404}
+    return Case(name=name, ids=["BR-ERN-009"], routes=routes, select=_waterfall_view, mode="pinned", decision="Q3i", expect=expect,
+                py=_run(lambda: _srv().get_earnings_call_transcript(tkr, "latest", None, fiscal_quarter)),
+                ts={"js": "m.response.setWorkerEnv({}); return m.yahooFinance.getEarningsCallTranscript(args[0], 'latest', null, args[1]);",
+                    "args": [tkr, fiscal_quarter], "isolate": True},
+                note="repair: _next_transcript_fallback treats SKIPPED as untried, so company_ir is always recommended")
+
+
+# company_ir is recorded as SKIPPED in every run, so the recommendation is always company_ir, whatever else was tried and failed.
+CASES += [
+    _waterfall_case("ern.transcript_waterfall.next_fallback_is_company_ir_when_nothing_found", "ZTA", 830001, None,
+                    {"status": "SEC_8K_NOT_FOUND", "fiscalQuarterStatus": "UNRESOLVED",
+                     "attempts": {"sec_8k_exhibit": "NOT_FOUND", "company_ir": "SKIPPED", "yahoo_quartr": "NOT_FOUND", "public_transcript_url": "SKIPPED",
+                                  "alpha_vantage": "NOT_ELIGIBLE"},
+                     "attemptOrder": ["sec_8k_exhibit", "company_ir", "yahoo_quartr", "public_transcript_url", "alpha_vantage"],
+                     "nextRecommendedFallback": "company_ir"}),
+]
+CASES.append(_waterfall_case("ern.transcript_waterfall.next_fallback_is_company_ir_even_with_fiscal_quarter_and_alpha_vantage_tried", "ZTB", 830002, "2026Q2",
+                             {"status": "SEC_8K_NOT_FOUND", "fiscalQuarterStatus": "EXPLICIT",
+                              "attempts": {"sec_8k_exhibit": "NOT_FOUND", "company_ir": "SKIPPED", "yahoo_quartr": "NOT_FOUND", "public_transcript_url": "SKIPPED",
+                                           "alpha_vantage": "SOURCE_UNCONFIGURED"},   # no ALPHA_VANTAGE_API_KEY in the harness environment
+                              "attemptOrder": ["sec_8k_exhibit", "company_ir", "yahoo_quartr", "public_transcript_url", "alpha_vantage"],
+                              "nextRecommendedFallback": "company_ir"}))
