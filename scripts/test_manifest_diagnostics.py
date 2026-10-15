@@ -70,9 +70,13 @@ class TestHealthMetadata(unittest.TestCase):
             "status", "serverVersion", "buildVersion", "buildSha", "deployedAt",
             "toolCount", "manifestVersion", "manifestHash",
             "schemaHash", "runtimeHash", "toolMode", "envelopeSchemaVersion",
-            "generatedAt", "privacyScope",
+            "generatedAt", "privacyScope", "authorizationHeaderPresent",
         }
         self.assertEqual(set(result), expected)
+
+    def test_authorization_header_present_is_null_over_stdio(self):
+        result = json.loads(_run(self.srv.health_check()))
+        self.assertIsNone(result["authorizationHeaderPresent"])
 
     def test_privacy_scope_value(self):
         result = json.loads(_run(self.srv.health_check()))

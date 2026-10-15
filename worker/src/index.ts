@@ -24,7 +24,7 @@ import { handleMcp } from "./mcp.js";
 import { setEvidenceBucket } from "./evidence-store.js";
 import { getBuildVersion, getServerVersion, setCacheSummaryProvider, setWorkerEnv, getWorkerVar } from "./response.js";
 import { TOOLS, callTool } from "./tools.js";
-import { currentCacheSummary, formatCacheUsage, withCacheScope } from "./request-context.js";
+import { currentCacheSummary, formatCacheUsage, withCacheScope, withRequestFacts } from "./request-context.js";
 import { markYahooCacheActivity, secDocumentCacheStats, yahooCacheStats } from "./yahoo-finance.js";
 
 export interface Env {
@@ -124,7 +124,11 @@ export default {
       }
 
       try {
-        const { result, scope } = await withCacheScope(() => handleMcp(body));
+        const authorizationHeaderPresent = (request.headers.get("Authorization") ?? "").trim() !== "";
+        const { result, scope } = await withRequestFacts(
+          { authorizationHeaderPresent },
+          () => withCacheScope(() => handleMcp(body)),
+        );
 
         // Null means the request was notification-only — no response body needed
         if (result === null) {
