@@ -1,6 +1,6 @@
 # Modernization Brief — yahoo-finance-mcp
 
-**Status: DRAFT v2, owner decisions applied, NOT YET APPROVED (§8).** This document is the executable plan. The execution commands read it, and they treat each phase's scope, entry criteria and exit criteria as binding gates. **To steer execution, edit this file.** An edited entry criterion is honoured; a note in chat is not.
+**Status: v2 APPROVED 2026-10-15 for Phase 2, R3, RN and Phase 3 (§8). Later phases await the post-pilot brief.** This document is the executable plan. The execution commands read it, and they treat each phase's scope, entry criteria and exit criteria as binding gates. **To steer execution, edit this file.** An edited entry criterion is honoured; a note in chat is not.
 
 v2 (2026-10-15) folds in the owner's answers to every v1 open question. The source is `OWNER_DECISIONS_20261015.md`; my verification of its claims against the code is summarised in §7.
 
@@ -615,8 +615,11 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
 ## 8. Approval Block
 
 ```
-Approved by: ________________  Date: __________
-Approval covers: Phases 2–3 (incl. R3, RN) | Phases 2–3 then Phase 1 | Full plan
+Approved by: repository owner (carnat), in session  Date: 2026-10-15
+Approval covers: Phase 2, R3, RN and Phase 3 (pilot)
+Owner's words, verbatim: "approve Phase 2, R3, RN and Phase 3"
 ```
+
+**Not approved yet:** Phase 1 (deferred, Q16), R4, Phases 4–6 and R5. They are approved against the brief regenerated after the Phase 3 pilot.
 
 The Doctrine no longer gates approval (Q14/N4). **All open questions are resolved** (V1 and Q13 on 2026-10-15; naming Q11/Q15/Q15a closed). The brief is ready to sign. Recommended scope under Q16: **Phase 2, R3, RN and Phase 3 (pilot)**; Phase 1 then follows. Phase 3 is the pilot, and the brief will be regenerated afterwards for Phase 1, R4 and onward. Q16 records the security exposure accepted in the meantime.
