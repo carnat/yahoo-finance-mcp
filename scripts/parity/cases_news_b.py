@@ -40,6 +40,7 @@ import server  # noqa: F401,E402
 from yfmcp import capital_structure as cs  # noqa: E402
 from yfmcp import cache as pycache  # noqa: E402
 from yfmcp.clients import edgar  # noqa: E402
+from yfmcp.tools import provider_gaps  # noqa: E402
 
 CASES: list[Case] = []
 
@@ -1102,7 +1103,7 @@ def _mx_failed(status, action, message, attempted=True):
 CASES += [
     # Card 229: an article on a wire domain tagged AAPL / NASDAQ for a NASDAQ (NMS) company: provider entity symbol match,
     # confidence LOW, tickerRelevance HIGH. The fallback runs because Yahoo returned nothing.
-    _marketaux_case("news.marketaux.entity_on_matching_exchange_is_accepted_with_low_confidence", ["BR-NWS-229", "BR-NWS-230", "BR-NWS-184"],
+    _marketaux_case("news.marketaux.entity_on_matching_exchange_is_accepted_with_low_confidence", ["BR-NWS-229", "BR-NWS-230"],
                     {"data": [_mrow(1)]}, expect=_MX_OK),
     # Card 229 / 230: the same article with an NYSE entity is ENTITY_EXCHANGE_MISMATCH; a blank exchange skips the check.
     _marketaux_case("news.marketaux.entity_on_other_exchange_is_rejected", ["BR-NWS-229", "BR-NWS-230"],
@@ -1133,7 +1134,7 @@ CASES += [
                                                      "ENTITY_SYMBOL_MISMATCH": 1, "ENTITY_EXCHANGE_MISMATCH": 1, "DATE_OUTSIDE_WINDOW": 1},
                                  "fallbackReason": "HIGHER_PRIORITY_EMPTY", "attempted": True, "allowedAction": "check_official_releases"},
                    "status": None, "warnings": []}),
-    _marketaux_case("news.marketaux.missing_token_is_unconfigured_and_not_attempted", ["BR-NWS-230", "BR-NWS-184"], {"data": [_mrow(1)]}, env={},
+    _marketaux_case("news.marketaux.missing_token_is_unconfigured_and_not_attempted", ["BR-NWS-230"], {"data": [_mrow(1)]}, env={},
                     expect=_mx_failed("UNCONFIGURED", "configure_marketaux_api_token",
                                       "Marketaux wire fallback is not configured; set MARKETAUX_API_TOKEN to enable it.", attempted=False)),
     _marketaux_case("news.marketaux.non_list_data_is_provider_changed", ["BR-NWS-230"], {"x": 1},
@@ -1151,4 +1152,1226 @@ CASES += [
                     mode="pinned", decision="FINDING: Marketaux HTTP-error warning text differs (Python 'returned HTTP 500 (PROVIDER_ERROR)', Worker 'unavailable (PROVIDER_ERROR)')",
                     expect_py=_mx_failed("PROVIDER_ERROR", "retry_or_use_official_sources", "Marketaux wire fallback returned HTTP 500 (PROVIDER_ERROR)."),
                     expect_ts=_mx_failed("PROVIDER_ERROR", "retry_or_use_official_sources", "Marketaux wire fallback unavailable (PROVIDER_ERROR).")),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# Coverage, source reporting, warning de-duplication, source list normalisation, verification
+# BR-NWS-196 / 197 / 238 / 242 / 269 / 270
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+_VOD_INFO = {"shortName": "Vodafone Group", "longName": "Vodafone Group Plc", "exchange": "LSE"}
+_VOD_FEED = [_yn("VOD.L rallies on results", when=_days_ago(1))]
+
+
+def _coverage_report(v):
+    return {"sourceCoverage": v["sourceCoverage"], "state": v["coverage"]["state"], "action": v["coverage"]["recommendedNextAction"],
+            "sourceStatus": {k: s.get("status") for k, s in v["sourceStatus"].items()}, "status": v.get("status"),
+            "skipped": [[s["source"], s["status"], s["reasonCode"]] for s in v["coverage"]["skippedSources"]],
+            "failed": [[s["source"], s["status"]] for s in v["coverage"]["failedSources"]]}
+
+
+CASES += [
+    # Card 196: Yahoo OK + Finnhub NOT_ELIGIBLE -> PARTIAL (NOT_ELIGIBLE limits coverage); the next action is CHECK_OFFICIAL_RELEASES.
+    _scenario(
+        "news.coverage.not_eligible_source_makes_coverage_partial", ["BR-NWS-196", "BR-NWS-192"],
+        lambda: server.get_company_news("VOD.L", 10, 14, ["yahoo_finance_news", "finnhub"]),
+        'm.yahooFinance.getCompanyNews("VOD.L", 10, 14, ["yahoo_finance_news", "finnhub"])',
+        news=_VOD_FEED, info=_VOD_INFO, env=FINNHUB_ENV, select=_coverage_report,
+        expect={"sourceCoverage": "PARTIAL", "state": "PARTIAL", "action": "CHECK_OFFICIAL_RELEASES",
+                "sourceStatus": {"yahoo_finance_news": "OK", "finnhub": "NOT_ELIGIBLE"}, "status": "PARTIAL",
+                "skipped": [["finnhub", "NOT_ELIGIBLE", "MARKET_NOT_ENABLED_BY_DEPLOYED_ENTITLEMENT"]], "failed": []}),
+    # Card 196 edge: NOT_NEEDED (Marketaux skipped because Yahoo found items) keeps coverage FULL.
+    _scenario(
+        "news.coverage.not_needed_marketaux_keeps_coverage_full", ["BR-NWS-196", "BR-NWS-192"],
+        lambda: server.get_company_news("VOD.L", 10, 14, ["yahoo_finance_news", "marketaux"]),
+        'm.yahooFinance.getCompanyNews("VOD.L", 10, 14, ["yahoo_finance_news", "marketaux"])',
+        news=_VOD_FEED, info=_VOD_INFO, env=MARKETAUX_ENV, select=_coverage_report,
+        expect={"sourceCoverage": "FULL", "state": "FULL", "action": "USE_RETURNED_CONTEXT",
+                "sourceStatus": {"yahoo_finance_news": "OK", "marketaux": "NOT_NEEDED"}, "status": None,
+                "skipped": [["marketaux", "NOT_NEEDED", "HIGHER_PRIORITY_EVIDENCE_FOUND"]], "failed": []}),
+    # Card 196 edge: EMPTY_RESULT keeps coverage FULL (and the collection status is NOT_FOUND).
+    _scenario(
+        "news.coverage.empty_result_keeps_coverage_full", ["BR-NWS-196", "BR-NWS-214"],
+        lambda: server.get_company_news("VOD.L", 10, 14, ["yahoo_finance_news"]),
+        'm.yahooFinance.getCompanyNews("VOD.L", 10, 14, ["yahoo_finance_news"])',
+        news=[], info=_VOD_INFO, select=_coverage_report,
+        expect={"sourceCoverage": "FULL", "state": "FULL", "action": "USE_RETURNED_CONTEXT",
+                "sourceStatus": {"yahoo_finance_news": "EMPTY_RESULT"}, "status": "NOT_FOUND", "skipped": [], "failed": []}),
+    # Card 269: sources omitted -> requestedSources null, defaultSourcesApplied true; attemptedSources lists only the sources that
+    # were tried (Finnhub NOT_ELIGIBLE and an unconfigured Marketaux are left out).
+    _scenario(
+        "news.sources.omitted_sources_report_defaults_and_only_attempted_sources", ["BR-NWS-269", "BR-NWS-196"],
+        lambda: server.get_company_news("VOD.L", 10, 14),
+        'm.yahooFinance.getCompanyNews("VOD.L", 10, 14)',
+        news=_VOD_FEED, info=_VOD_INFO,
+        select=lambda v: {"requested": v["requestedSources"], "defaultApplied": v["defaultSourcesApplied"], "attempted": v["attemptedSources"],
+                          "sourceStatus": {k: s.get("status") for k, s in v["sourceStatus"].items()}},
+        expect={"requested": None, "defaultApplied": True,
+                "attempted": [{"sourceType": "yahoo_finance_news", "status": "OK"}, {"sourceType": "yahoo_finance_press_releases", "status": "EMPTY_RESULT"}],
+                "sourceStatus": {"yahoo_finance_news": "OK", "yahoo_finance_press_releases": "EMPTY_RESULT", "finnhub": "NOT_ELIGIBLE",
+                                 "marketaux": "UNCONFIGURED"}}),
+    # Card 238: names are trimmed and lower-cased, duplicates dropped, unsupported names warned once. ['bloomberg'] alone selects
+    # nothing (the defaults are NOT applied: an explicit list is used as given), so the result is source-limited.
+    _scenario(
+        "news.sources.names_are_normalised_and_unsupported_names_warned_once", ["BR-NWS-238", "BR-NWS-270"],
+        lambda: server.get_company_news("AAPL", 10, 14, ["Finnhub", "bloomberg", "finnhub"]),
+        'm.yahooFinance.getCompanyNews("AAPL", 10, 14, ["Finnhub", "bloomberg", "finnhub"])',
+        select=lambda v: {"requested": v["requestedSources"], "sourceStatus": {k: s.get("status") for k, s in v["sourceStatus"].items()},
+                          "warnings": _warning_rows(v), "status": v.get("status")},
+        expect={"requested": ["Finnhub", "bloomberg", "finnhub"], "sourceStatus": {"finnhub": "UNCONFIGURED"},
+                "warnings": [["SOURCE_UNSUPPORTED", "Source 'bloomberg' is not supported."],
+                             ["SOURCE_UNAVAILABLE", "Finnhub company-news source is not configured; skipped."]],
+                "status": "SOURCE_LIMITED_NOT_FOUND"}),
+    _scenario(
+        "news.sources.only_unsupported_names_attempt_nothing", ["BR-NWS-238"],
+        lambda: server.get_company_news("AAPL", 10, 14, ["bloomberg"]),
+        'm.yahooFinance.getCompanyNews("AAPL", 10, 14, ["bloomberg"])',
+        select=lambda v: {"sourceStatus": v["sourceStatus"], "warnings": _warning_rows(v), "status": v.get("status"), "attempted": v["attemptedSources"]},
+        expect={"sourceStatus": {}, "warnings": [["SOURCE_UNSUPPORTED", "Source 'bloomberg' is not supported."]],
+                "status": "SOURCE_LIMITED_NOT_FOUND", "attempted": []}),
+    # Card 270: warnings are de-duplicated on code|message: the repeated SOURCE_UNSUPPORTED name and three identical weak-dedupe-key
+    # warnings (rows whose headline is only a stop word and which have no date) are kept once; a different message is kept.
+    _scenario(
+        "news.warnings.identical_code_and_message_pairs_are_kept_once", ["BR-NWS-270", "BR-NWS-238"],
+        lambda: server.get_company_news("AAPL", 10, 14, ["bogus", "bogus", "other", "finnhub"]),
+        'm.yahooFinance.getCompanyNews("AAPL", 10, 14, ["bogus", "bogus", "other", "finnhub"])',
+        env=FINNHUB_ENV, routes=_finnhub([{"headline": t, "datetime": None} for t in ("Inc", "Corp", "Company")]),
+        select=lambda v: {"warnings": _warning_rows(v), "finnhub": _status_rows(v, "finnhub", keys=("status", "rawCount", "acceptedCount", "rejectedCount"))},
+        expect={"warnings": [["SOURCE_UNSUPPORTED", "Source 'bogus' is not supported."], ["SOURCE_UNSUPPORTED", "Source 'other' is not supported."],
+                             ["DEDUPE_WEAK_KEY", "Weak dedupe key for at least one item."]],
+                "finnhub": {"status": "EMPTY_RESULT", "rawCount": 3, "acceptedCount": 0, "rejectedCount": 3}}),
+]
+
+# --- verification (BR-NWS-197, BR-NWS-242) -------------------------------------------------------------------------------
+_VERIFY_ACTION = ("Inspect sourceStatus and retry with a narrower sources list that excludes failed providers; "
+                  "do not treat this result as confirmed absence.")
+_VERIFY_LIMITED = ["SOURCE_LIMITED_NOT_FOUND", "One or more selected sources were unavailable; this is not confirmed evidence that the event did not occur."]
+
+
+def _verify_view(v):
+    return {"status": v["status"], "failureMode": v["failureMode"], "retryable": v["retryable"], "action": v["recommendedAction"],
+            "sourceStatus": {k: s.get("status") for k, s in v["sourceStatus"].items()}, "warnings": _warning_rows(v),
+            "next": v["coverage"]["recommendedNextAction"], "best": len(v["bestEvidence"])}
+
+
+def _verify_case(name, ids, sources, *, ticker="ACME", env=None, routes=None, query="acquisition", **kw) -> Case:
+    return _scenario(name, ids, lambda: server.verify_company_event(ticker, query, "", "", sources),
+                     f'm.yahooFinance.verifyCompanyEvent({json.dumps(ticker)}, {json.dumps(query)}, "", "", {json.dumps(sources)})',
+                     env=env, routes=routes or {}, select=_verify_view, **kw)
+
+
+CASES += [
+    # Card 197: NOT_FOUND + Finnhub RATE_LIMITED + Marketaux UNCONFIGURED -> SOURCE_LIMITED_NOT_FOUND, failureMode RATE_LIMITED
+    # (it outranks SOURCE_UNCONFIGURED), retryable true, with the 'exclude failed providers' recommended action.
+    _verify_case(
+        "news.verify.rate_limited_provider_gives_retryable_source_limited_not_found", ["BR-NWS-197", "BR-NWS-192"], ["finnhub", "marketaux"],
+        env=FINNHUB_ENV, routes=_finnhub(None, 429, "slow down"),
+        expect={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "RATE_LIMITED", "retryable": True, "action": _VERIFY_ACTION,
+                "sourceStatus": {"finnhub": "RATE_LIMITED", "marketaux": "UNCONFIGURED"},
+                "warnings": [["SOURCE_UNAVAILABLE", "Finnhub rate limited: HTTP 429"],
+                             ["SOURCE_UNAVAILABLE", "Marketaux wire fallback is not configured; set MARKETAUX_API_TOKEN to enable it."], _VERIFY_LIMITED],
+                "next": "RETRY_RETRYABLE_SOURCES", "best": 0}),
+    # Card 197 precedence: AUTH_ERROR is not a failure-mode input, so with Marketaux unconfigured the mode is SOURCE_UNCONFIGURED.
+    # The warning text for the Finnhub auth error differs between runtimes.
+    _verify_case(
+        "news.verify.auth_error_alone_is_not_a_failure_mode", ["BR-NWS-197"], ["finnhub", "marketaux"], env=FINNHUB_ENV, routes=_finnhub(None, 401, "bad token"),
+        mode="pinned", decision="FINDING: Finnhub auth-error warning text differs (Python 'HTTP 401', Worker 'FINNHUB_AUTH_ERROR:401')",
+        expect_py={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "SOURCE_UNCONFIGURED", "retryable": False, "action": _VERIFY_ACTION,
+                   "sourceStatus": {"finnhub": "AUTH_ERROR", "marketaux": "UNCONFIGURED"},
+                   "warnings": [["SOURCE_UNAVAILABLE", "Finnhub auth error: HTTP 401"],
+                                ["SOURCE_UNAVAILABLE", "Marketaux wire fallback is not configured; set MARKETAUX_API_TOKEN to enable it."], _VERIFY_LIMITED],
+                   "next": "CHECK_OFFICIAL_RELEASES", "best": 0},
+        expect_ts={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "SOURCE_UNCONFIGURED", "retryable": False, "action": _VERIFY_ACTION,
+                   "sourceStatus": {"finnhub": "AUTH_ERROR", "marketaux": "UNCONFIGURED"},
+                   "warnings": [["SOURCE_UNAVAILABLE", "Finnhub auth error: FINNHUB_AUTH_ERROR:401"],
+                                ["SOURCE_UNAVAILABLE", "Marketaux wire fallback is not configured; set MARKETAUX_API_TOKEN to enable it."], _VERIFY_LIMITED],
+                   "next": "CHECK_OFFICIAL_RELEASES", "best": 0}),
+    _verify_case(
+        "news.verify.unconfigured_finnhub_is_source_unconfigured", ["BR-NWS-197"], ["finnhub"],
+        expect={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "SOURCE_UNCONFIGURED", "retryable": False, "action": _VERIFY_ACTION,
+                "sourceStatus": {"finnhub": "UNCONFIGURED"},
+                "warnings": [["SOURCE_UNAVAILABLE", "Finnhub company-news source is not configured; skipped."], _VERIFY_LIMITED],
+                "next": "CHECK_OFFICIAL_RELEASES", "best": 0}),
+    _verify_case(
+        "news.verify.ineligible_ticker_is_source_not_eligible", ["BR-NWS-197", "BR-NWS-196"], ["finnhub"], ticker="VOD.L", env=FINNHUB_ENV,
+        expect={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "SOURCE_NOT_ELIGIBLE", "retryable": False, "action": _VERIFY_ACTION,
+                "sourceStatus": {"finnhub": "NOT_ELIGIBLE"},
+                "warnings": [["SOURCE_NOT_ELIGIBLE", "Finnhub company-news is intentionally skipped for VOD.L under the deployed market capability policy."],
+                             _VERIFY_LIMITED],
+                "next": "CHECK_OFFICIAL_RELEASES", "best": 0}),
+    _verify_case(
+        "news.verify.changed_payload_is_provider_changed", ["BR-NWS-197"], ["finnhub"], env=FINNHUB_ENV, routes=_finnhub({"x": 1}),
+        mode="pinned", decision="FINDING: Finnhub provider-changed warning text differs (Python 'unexpected response format', Worker 'FINNHUB_PROVIDER_CHANGED: expected array, got object')",
+        expect_py={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "PROVIDER_CHANGED", "retryable": False, "action": _VERIFY_ACTION,
+                   "sourceStatus": {"finnhub": "PROVIDER_CHANGED"},
+                   "warnings": [["SOURCE_UNAVAILABLE", "Finnhub provider changed: unexpected response format"], _VERIFY_LIMITED],
+                   "next": "CHECK_OFFICIAL_RELEASES", "best": 0},
+        expect_ts={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "PROVIDER_CHANGED", "retryable": False, "action": _VERIFY_ACTION,
+                   "sourceStatus": {"finnhub": "PROVIDER_CHANGED"},
+                   "warnings": [["SOURCE_UNAVAILABLE", "Finnhub provider changed: FINNHUB_PROVIDER_CHANGED: expected array, got object"], _VERIFY_LIMITED],
+                   "next": "CHECK_OFFICIAL_RELEASES", "best": 0}),
+    # Card 197 edge: a company_ir verification with no website. The Worker reports WEBSITE_NOT_AVAILABLE and the result stays
+    # NOT_FOUND (that status is not a failure mode); Python serves company_ir from the Yahoo feed, whose profile lookup failed, so it is
+    # IDENTITY_UNAVAILABLE and the result is source limited.
+    _verify_case(
+        "news.verify.company_ir_without_a_website_stays_not_found_in_the_worker", ["BR-NWS-197"], ["company_ir"], news=[], info=RuntimeError("profile unavailable"),
+        identity_fails=True, mode="pinned",
+        decision="FINDING: company_ir verification: the Worker (official-site RSS discovery) stays NOT_FOUND on WEBSITE_NOT_AVAILABLE; Python (Yahoo passthrough) is SOURCE_LIMITED_NOT_FOUND / YAHOO_IDENTITY_UNAVAILABLE",
+        expect_py={"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": "YAHOO_IDENTITY_UNAVAILABLE", "retryable": False, "action": _VERIFY_ACTION,
+                   "sourceStatus": {"yahoo_finance_identity": "IDENTITY_UNAVAILABLE", "company_ir": "EMPTY_RESULT"},
+                   "warnings": [["SOURCE_IDENTITY_UNAVAILABLE", "Yahoo company identity lookup was unavailable; only exact ticker-token matches were retained."],
+                                _VERIFY_LIMITED],
+                   "next": "CHECK_OFFICIAL_RELEASES", "best": 0},
+        expect_ts={"status": "NOT_FOUND", "failureMode": None, "retryable": False, "action": None,
+                   "sourceStatus": {"company_ir": "WEBSITE_NOT_AVAILABLE"},
+                   "warnings": [["COMPANY_IDENTITY_PROVIDER_ERROR",
+                                 "Yahoo profile identity lookup failed: Yahoo Finance API error 500 for: "
+                                 "https://query1.finance.yahoo.com/v10/finance/quoteSummary/ACME?modules=price,summaryProfile,assetProfile,secFilings"],
+                                ["COMPANY_WEBSITE_NOT_AVAILABLE", "No company website was available from public profile data."]],
+                   "next": "CHECK_OFFICIAL_RELEASES", "best": 0}),
+    # Card 242 (Finding Q7, for triage): every collected item carries tickers=[ticker], so the relevance score is HIGH at its first
+    # test and the low-relevance downgrade can never fire: a CONFIRMED result stays CONFIRMED even though the evidence text names
+    # neither the ticker (ZZTP) nor, as written, anything but the company.
+    _scenario(
+        "news.verify.low_relevance_downgrade_never_fires", ["BR-NWS-242"],
+        lambda: server.verify_company_event("ZZTP", "acquisition", "", "", ["yahoo_finance_press_releases"]),
+        'm.yahooFinance.verifyCompanyEvent("ZZTP", "acquisition", "", "", ["yahoo_finance_press_releases"])',
+        news=[_yn("Zeta Platforms announces acquisition of Beta Corp", publisher="Business Wire", when=_days_ago(2))],
+        info={"shortName": "Zeta Platforms", "longName": "Zeta Platforms, Inc.", "exchange": "NMS"}, submissions=(None, None),
+        select=lambda v: {"status": v["status"], "warnings": _warning_codes(v),
+                          "best": [[e["sourceType"], e["confidence"], e["relevance"], e["entityRelevance"], e["queryMatch"]] for e in v["bestEvidence"]]},
+        expect={"status": "CONFIRMED", "warnings": [],
+                "best": [["yahoo_finance_press_releases", "MEDIUM", "HIGH", "HIGH",
+                          {"method": "PHRASE", "matchedTerms": ["acquisition"], "requiredTermMatches": 1}]]}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# Input validation at the tool boundary (Worker: m.tools.callTool, Python: the server tool function)
+# BR-NWS-204 / 205 / 234 / 240 / 241 / 271 / 275 / 279
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+def _call_tool(tool, args):
+    return f"m.tools.callTool({json.dumps(tool)}, {json.dumps(args)})"
+
+
+def _tool_outcome(v):
+    """['error', message] for a validation failure, ['ran', ticker] for a single result, {'batch': {ticker: status}} for a batch."""
+    d = _unwrap(v)
+    if "error" in d and "ticker" not in d:
+        return [d["error"], d["message"]]
+    if "ticker" in d:
+        return ["ran", d["ticker"]]
+    return {"batch": {k: [x.get("ticker"), x.get("status")] for k, x in d.items()}}
+
+
+_INVALID_TICKER_MSG = "Invalid ticker symbol: '{}'. Must be 1-20 characters: uppercase letters, digits, or . - ^ ="
+_NO_NEWS_STATUS = "SOURCE_LIMITED_NOT_FOUND"
+_SIX_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOG"]
+_VALIDATION_ROUTES = {SEC_TICKERS_URL: {"json": {}}}
+
+
+def _alias_py():
+    with _py_news_env(news=[], info={}):
+        return json.loads(asyncio.run(server.get_yahoo_finance_news("AAPL")))
+
+
+CASES += [
+    # Cards 205 / 234 / 279 / 241 / 275: an empty batch or an empty symbol, and a blank query, fail with the same message in both
+    # runtimes; a valid batch runs per ticker; a lower-case ticker passes the format check (upper-cased in the result).
+    _multi_scenario(
+        "news.validation.empty_symbols_blank_queries_and_valid_batches_agree", ["BR-NWS-205", "BR-NWS-234", "BR-NWS-279", "BR-NWS-241", "BR-NWS-275"],
+        [("empty_symbol", lambda: server.get_company_news(["AAPL", ""], 10, 14, []), _call_tool("get_company_news", {"ticker": ["AAPL", ""], "sources": []})),
+         ("empty_list", lambda: server.get_company_news([], 10, 14, []), _call_tool("get_company_news", {"ticker": [], "sources": []})),
+         ("valid_batch", lambda: server.get_company_news(["AAPL", "MSFT"], 10, 14, []), _call_tool("get_company_news", {"ticker": ["AAPL", "MSFT"], "sources": []})),
+         ("lower_case_ticker", lambda: server.get_company_news("brk.b", 10, 14, []), _call_tool("get_company_news", {"ticker": "brk.b", "sources": []})),
+         ("blank_search_query", lambda: server.search_company_news("AAPL", "   ", "", "", []),
+          _call_tool("search_company_news", {"ticker": "AAPL", "query": "   ", "sources": []})),
+         ("blank_verify_query", lambda: server.verify_company_event("AAPL", " ", "", "", []),
+          _call_tool("verify_company_event", {"ticker": "AAPL", "event_query": " ", "sources": []}))],
+        news=[], info={}, routes=_VALIDATION_ROUTES, select=_tool_outcome,
+        expect={"empty_symbol": ["INPUT_VALIDATION_ERROR", "ticker is required and must not contain empty symbols."],
+                "empty_list": ["INPUT_VALIDATION_ERROR", "ticker is required and must not contain empty symbols."],
+                "valid_batch": {"batch": {"AAPL": ["AAPL", _NO_NEWS_STATUS], "MSFT": ["MSFT", _NO_NEWS_STATUS]}},
+                "lower_case_ticker": ["ran", "BRK.B"],
+                "blank_search_query": ["INPUT_VALIDATION_ERROR", "query is required"],
+                "blank_verify_query": ["INPUT_VALIDATION_ERROR", "event_query is required"]}),
+    # Cards 240 / 241: the ticker format is checked in Python only (after trim and upper-case; 1-20 characters of A-Z 0-9 . - ^ =),
+    # for all six news and event tools, in the batch path per symbol. The Worker runs the collection and returns a (limited) result.
+    _multi_scenario(
+        "news.validation.ticker_format_is_checked_in_python_only", ["BR-NWS-240", "BR-NWS-241"],
+        [("get_company_news_dollar", lambda: server.get_company_news("AAPL$", 10, 14, []), _call_tool("get_company_news", {"ticker": "AAPL$", "sources": []})),
+         ("get_company_news_21_chars", lambda: server.get_company_news("A" * 21, 10, 14, []), _call_tool("get_company_news", {"ticker": "A" * 21, "sources": []})),
+         ("search_company_news_space", lambda: server.search_company_news("AAPL US!", "dividend", "", "", []),
+          _call_tool("search_company_news", {"ticker": "AAPL US!", "query": "dividend", "sources": []})),
+         ("verify_company_event_dollar", lambda: server.verify_company_event("AAPL$", "dividend", "", "", []),
+          _call_tool("verify_company_event", {"ticker": "AAPL$", "event_query": "dividend", "sources": []})),
+         ("get_company_press_releases_dollar", lambda: server.get_company_press_releases("AAPL$", 90, 20, []),
+          _call_tool("get_company_press_releases", {"ticker": "AAPL$", "sources": []})),
+         ("get_public_event_timeline_dollar", lambda: server.get_public_event_timeline("AAPL$", "", "", [], 50, False),
+          _call_tool("get_public_event_timeline", {"ticker": "AAPL$", "sources": []})),
+         ("get_sec_recent_events_dollar", lambda: server.get_sec_recent_events("AAPL$", ["8-K"], 90, 20),
+          _call_tool("get_sec_recent_events", {"ticker": "AAPL$", "filing_types": ["8-K"]}))],
+        news=[], info={}, routes=_VALIDATION_ROUTES, select=_tool_outcome, mode="pinned",
+        decision="FINDING: malformed tickers ('AAPL$', 21 characters, 'AAPL US!') are INPUT_VALIDATION_ERROR in Python and run the collection in the Worker",
+        expect_py={"get_company_news_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")],
+                   "get_company_news_21_chars": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("A" * 21)],
+                   "search_company_news_space": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL US!")],
+                   "verify_company_event_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")],
+                   "get_company_press_releases_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")],
+                   "get_public_event_timeline_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")],
+                   "get_sec_recent_events_dollar": ["INPUT_VALIDATION_ERROR", _INVALID_TICKER_MSG.format("AAPL$")]},
+        expect_ts={"get_company_news_dollar": ["ran", "AAPL$"], "get_company_news_21_chars": ["ran", "A" * 21],
+                   "search_company_news_space": ["ran", "AAPL US!"], "verify_company_event_dollar": ["ran", "AAPL$"],
+                   "get_company_press_releases_dollar": ["ran", "AAPL$"], "get_public_event_timeline_dollar": ["ran", "AAPL$"],
+                   "get_sec_recent_events_dollar": ["ran", "AAPL$"]}),
+    # Card 204: six tickers. Python fetches all six (three at a time); the Worker refuses with 'Too many tickers: 6. Maximum is 5 per call.'
+    _multi_scenario(
+        "news.validation.batch_of_six_tickers_runs_in_python_and_fails_in_the_worker", ["BR-NWS-204", "BR-NWS-275"],
+        [("six", lambda: server.get_company_news(_SIX_TICKERS, 10, 14, []), _call_tool("get_company_news", {"ticker": _SIX_TICKERS, "sources": []})),
+         ("five", lambda: server.get_company_news(_SIX_TICKERS[:5], 10, 14, []), _call_tool("get_company_news", {"ticker": _SIX_TICKERS[:5], "sources": []}))],
+        news=[], info={}, select=_tool_outcome, mode="pinned",
+        decision="FINDING: more than 5 tickers is INPUT_VALIDATION_ERROR in the Worker (and the tool description says only the first 5 are processed) but Python fetches all of them",
+        expect_py={"six": {"batch": {t: [t, _NO_NEWS_STATUS] for t in _SIX_TICKERS}},
+                   "five": {"batch": {t: [t, _NO_NEWS_STATUS] for t in _SIX_TICKERS[:5]}}},
+        expect_ts={"six": ["INPUT_VALIDATION_ERROR", "Too many tickers: 6. Maximum is 5 per call."],
+                   "five": {"batch": {t: [t, _NO_NEWS_STATUS] for t in _SIX_TICKERS[:5]}}}),
+    # Card 271: get_yahoo_finance_news is a Python alias of get_company_news with a fixed source list (no Marketaux); the Worker has no such tool.
+    Case(name="news.validation.get_yahoo_finance_news_alias_exists_in_python_only", ids=["BR-NWS-271"],
+         py=lambda: _alias_py(),
+         ts={"js": _worker_js(f"return JSON.parse(await {_call_tool('get_yahoo_finance_news', {'ticker': 'AAPL'})});"), "isolate": True},
+         routes=_yahoo_routes([], {}), mode="pinned",
+         decision="FINDING: get_yahoo_finance_news (fixed source list without Marketaux) exists in Python only; the Worker answers 'Unknown tool name.'",
+         select=lambda v: ({"requested": v["requestedSources"], "defaultApplied": v["defaultSourcesApplied"]} if "requestedSources" in v else _unwrap(v)),
+         expect_py={"requested": ["yahoo_finance_news", "yahoo_finance_press_releases", "finnhub"], "defaultApplied": False},
+         expect_ts={"error": "INPUT_VALIDATION_ERROR", "message": "Unknown tool name."}),
+]
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# Provider failure -> recommended action, entitlement classification, remembered denials (ownership tool)
+# BR-NWS-191 / 193 / 233
+# The expanded-ownership tool shares the provider client (fetch_finnhub_json / fetch_alpha_vantage_json) with the news providers.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+FINNHUB_OWNERSHIP = "https://finnhub.io/api/v1/stock/ownership?symbol="
+ALPHA_QUERY = "https://www.alphavantage.co/query?*"
+ALPHA_ENV = {"ALPHA_VANTAGE_API_KEY": FAKE_ALPHA_KEY}
+
+
+def _ownership_view(v):
+    d = v.get("data") if isinstance(v.get("data"), dict) else v
+    out = []
+    for a in d.get("providerAttempts", []):
+        remembered = re.search(r"remembered until (\S+?);", str(a.get("message") or ""))
+        out.append([a.get("provider"), a.get("status"), a.get("attempted"), a.get("cacheStatus"), a.get("httpStatus"),
+                    _norm_ts(remembered.group(1)) if remembered else None])
+    return {"status": d.get("status"), "action": d.get("recommendedNextAction"), "alphaFallbackAllowed": d.get("alphaFallbackAllowed"), "attempts": out}
+
+
+def _ownership_calls_case(name, ids, tickers, routes, env, *, allow=False, hours=None, **kw) -> Case:
+    """Sequential ownership calls (Worker clock set to `hours[i]` o'clock, 2026-10-15 UTC, before call i)."""
+    def py():
+        out = []
+        with _py_news_env(env=env):
+            for ticker in tickers:
+                out.append(json.loads(asyncio.run(provider_gaps.get_expanded_institutional_ownership(ticker, allow, 50))))
+        return out
+
+    hours = hours or [12] * len(tickers)
+    body = "const out = [];\n" + "\n".join(
+        f"__now = Date.UTC(2026, 9, 15, {h}, 0, 0);\n"
+        f"out.push(JSON.parse(await m.yahooFinance.getExpandedInstitutionalOwnership({json.dumps(t)}, {json.dumps(allow)}, 50)));"
+        for t, h in zip(tickers, hours)) + "\nreturn out;"
+    return Case(name=name, ids=ids, py=py, ts={"js": _worker_js(body, env), "isolate": True}, routes=routes,
+                select=lambda v: [_ownership_view(x) for x in v], **kw)
+
+
+_PREMIUM_BODY = json.dumps({"error": "You don't have access to this resource."})
+
+CASES += [
+    # Card 191 / 233: HTTP 403 whose body says the caller has no access to the resource is ENTITLEMENT_REQUIRED; with the scarce
+    # fallback off the recommended action is USE_ALPHA_VANTAGE_EXPLICITLY.
+    _ownership_calls_case(
+        "news.provider.entitlement_required_recommends_alpha_when_fallback_is_off", ["BR-NWS-191", "BR-NWS-233"], ["AAA1"],
+        {FINNHUB_OWNERSHIP + "*": {"status": 403, "body": _PREMIUM_BODY}}, FINNHUB_ENV,
+        expect=[{"status": "ENTITLEMENT_REQUIRED", "action": "USE_ALPHA_VANTAGE_EXPLICITLY", "alphaFallbackAllowed": False,
+                 "attempts": [["finnhub", "ENTITLEMENT_REQUIRED", True, "MISS", 403, None]]}]),
+    # Card 191: with the fallback on, Alpha's own status drives the action; ENTITLEMENT_REQUIRED there is CHECK_PROVIDER_ENTITLEMENT.
+    _ownership_calls_case(
+        "news.provider.alpha_entitlement_with_fallback_on_recommends_checking_the_plan", ["BR-NWS-191"], ["AAA1"],
+        {FINNHUB_OWNERSHIP + "*": {"status": 403, "body": _PREMIUM_BODY},
+         ALPHA_QUERY: {"json": {"Information": "This is a premium endpoint; subscribe"}}}, {**FINNHUB_ENV, **ALPHA_ENV}, allow=True,
+        expect=[{"status": "ENTITLEMENT_REQUIRED", "action": "CHECK_PROVIDER_ENTITLEMENT", "alphaFallbackAllowed": True,
+                 "attempts": [["finnhub", "ENTITLEMENT_REQUIRED", True, "MISS", 403, None],
+                              ["alpha_vantage", "ENTITLEMENT_REQUIRED", True, "MISS", None, None]]}]),
+    # Card 191 parameter table: one status per ticker (AUTH_ERROR last, since the Worker remembers it for the endpoint).
+    _ownership_calls_case(
+        "news.provider.failure_status_to_recommended_action_table", ["BR-NWS-191", "BR-NWS-233"], ["RATE1", "NF1", "SRV1", "EMPTY1", "AUTH1"],
+        {FINNHUB_OWNERSHIP + "RATE1*": {"status": 429, "body": json.dumps({"error": "slow down"})},
+         FINNHUB_OWNERSHIP + "NF1*": {"status": 404, "body": json.dumps({"error": "nope"})},
+         FINNHUB_OWNERSHIP + "SRV1*": {"status": 500, "body": json.dumps({"error": "boom"})},
+         FINNHUB_OWNERSHIP + "EMPTY1*": {"json": {"data": [], "symbol": "EMPTY1"}},
+         FINNHUB_OWNERSHIP + "AUTH1*": {"status": 403, "body": json.dumps({"error": "forbidden"})}}, FINNHUB_ENV,
+        expect=[{"status": "RATE_LIMIT", "action": "RETRY_AFTER_PROVIDER_RESET", "alphaFallbackAllowed": False,
+                 "attempts": [["finnhub", "RATE_LIMIT", True, "MISS", 429, None]]},
+                {"status": "NOT_FOUND", "action": "VERIFY_SEC_13F_OR_ENABLE_SCARCE_FALLBACK", "alphaFallbackAllowed": False,
+                 "attempts": [["finnhub", "NOT_FOUND", True, "MISS", 404, None]]},
+                {"status": "PROVIDER_ERROR", "action": "RETRY_OR_USE_PRIMARY_PROVIDER", "alphaFallbackAllowed": False,
+                 "attempts": [["finnhub", "PROVIDER_ERROR", True, "MISS", 500, None]]},
+                {"status": "NOT_FOUND", "action": "VERIFY_SEC_13F_OR_ENABLE_SCARCE_FALLBACK", "alphaFallbackAllowed": False,
+                 "attempts": [["finnhub", "OK", True, "MISS", None, None]]},
+                {"status": "AUTH_ERROR", "action": "CHECK_PROVIDER_CREDENTIALS", "alphaFallbackAllowed": False,
+                 "attempts": [["finnhub", "AUTH_ERROR", True, "MISS", 403, None]]}]),
+    _ownership_calls_case(
+        "news.provider.missing_key_is_unconfigured_and_not_attempted", ["BR-NWS-191"], ["AAA1"], {}, {},
+        expect=[{"status": "SOURCE_UNCONFIGURED", "action": "CONFIGURE_PROVIDER", "alphaFallbackAllowed": False,
+                 "attempts": [["finnhub", "SOURCE_UNCONFIGURED", False, "MISS", None, None]]}]),
+    # Card 233: the entitlement pattern differs. A body that only says 'current plan' is ENTITLEMENT_REQUIRED in the Worker but
+    # AUTH_ERROR in Python (whose pattern is 'not available under your current plan').
+    _ownership_calls_case(
+        "news.provider.current_plan_body_is_entitlement_in_the_worker_only", ["BR-NWS-233", "BR-NWS-191"], ["AAA1"],
+        {FINNHUB_OWNERSHIP + "*": {"status": 403, "body": json.dumps({"error": "Your current plan does not include this."})}}, FINNHUB_ENV,
+        mode="pinned",
+        decision="FINDING: the entitlement pattern differs (Worker 'current plan', Python 'not available under your current plan'), so the same 403 is ENTITLEMENT_REQUIRED / USE_ALPHA_VANTAGE_EXPLICITLY in the Worker and AUTH_ERROR / CHECK_PROVIDER_CREDENTIALS in Python",
+        expect_py=[{"status": "AUTH_ERROR", "action": "CHECK_PROVIDER_CREDENTIALS", "alphaFallbackAllowed": False,
+                    "attempts": [["finnhub", "AUTH_ERROR", True, "MISS", 403, None]]}],
+        expect_ts=[{"status": "ENTITLEMENT_REQUIRED", "action": "USE_ALPHA_VANTAGE_EXPLICITLY", "alphaFallbackAllowed": False,
+                    "attempts": [["finnhub", "ENTITLEMENT_REQUIRED", True, "MISS", 403, None]]}]),
+    # Card 193: the Worker remembers an entitlement denial per endpoint for 6 hours: the second call (a different ticker, two
+    # hours later) is not sent; it reports attempted false, cacheStatus HIT_PROCESS and 'remembered until 16:00Z'. Python
+    # keeps no denial memory and tries Finnhub again.
+    _ownership_calls_case(
+        "news.provider.entitlement_denial_is_remembered_for_six_hours_in_the_worker_only", ["BR-NWS-193", "BR-NWS-233"], ["AAA1", "AAA2"],
+        {FINNHUB_OWNERSHIP + "*": {"status": 403, "body": _PREMIUM_BODY}}, FINNHUB_ENV, hours=[10, 12], mode="pinned",
+        decision="FINDING: Worker remembers a Finnhub entitlement denial (HIT_PROCESS, attempted false, deniedUntil +6h); Python retries the provider on every call",
+        expect_py=[{"status": "ENTITLEMENT_REQUIRED", "action": "USE_ALPHA_VANTAGE_EXPLICITLY", "alphaFallbackAllowed": False,
+                    "attempts": [["finnhub", "ENTITLEMENT_REQUIRED", True, "MISS", 403, None]]}] * 2,
+        expect_ts=[{"status": "ENTITLEMENT_REQUIRED", "action": "USE_ALPHA_VANTAGE_EXPLICITLY", "alphaFallbackAllowed": False,
+                    "attempts": [["finnhub", "ENTITLEMENT_REQUIRED", True, "MISS", 403, None]]},
+                   {"status": "ENTITLEMENT_REQUIRED", "action": "USE_ALPHA_VANTAGE_EXPLICITLY", "alphaFallbackAllowed": False,
+                    "attempts": [["finnhub", "ENTITLEMENT_REQUIRED", False, "HIT_PROCESS", 403, "2026-10-15T16:00:00Z"]]}]),
+    # Card 193: a 'per day' rate-limit message from Alpha (sent with HTTP 200) is remembered until the next UTC midnight.
+    _ownership_calls_case(
+        "news.provider.alpha_daily_limit_is_remembered_until_utc_midnight_in_the_worker_only", ["BR-NWS-193"], ["AAA1", "AAA2"],
+        {ALPHA_QUERY: {"json": {"Note": "Our standard API rate limit is 25 requests per day."}}}, ALPHA_ENV, allow=True, hours=[10, 12], mode="pinned",
+        decision="FINDING: Worker remembers Alpha's daily rate limit until 00:00Z (HIT_PROCESS, attempted false); Python retries Alpha on every call",
+        expect_py=[{"status": "RATE_LIMIT", "action": "RETRY_AFTER_PROVIDER_RESET", "alphaFallbackAllowed": True,
+                    "attempts": [["finnhub", "SOURCE_UNCONFIGURED", False, "MISS", None, None],
+                                 ["alpha_vantage", "RATE_LIMIT", True, "MISS", None, None]]}] * 2,
+        expect_ts=[{"status": "RATE_LIMIT", "action": "RETRY_AFTER_PROVIDER_RESET", "alphaFallbackAllowed": True,
+                    "attempts": [["finnhub", "SOURCE_UNCONFIGURED", False, "MISS", None, None],
+                                 ["alpha_vantage", "RATE_LIMIT", True, "MISS", None, None]]},
+                   {"status": "RATE_LIMIT", "action": "RETRY_AFTER_PROVIDER_RESET", "alphaFallbackAllowed": True,
+                    "attempts": [["finnhub", "SOURCE_UNCONFIGURED", False, "MISS", None, None],
+                                 ["alpha_vantage", "RATE_LIMIT", False, "HIT_PROCESS", None, "2026-10-16T00:00:00Z"]]}]),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# Analyst valuation evidence from news: broker attribution, subject attribution, methods, de-duplication, tool inputs
+# BR-NWS-200 / 201 / 206 / 226 / 232 / 239 / 259 / 274
+# Python yfmcp.capital_structure.analyst_valuation_methods; Worker capital-structure.ts analystValuationMethods.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+def _news_item(title, summary="", url=None, **kw):
+    return {"title": title, "summary": summary, "url": url, "publishedAt": "2026-10-10T10:00:00Z", "originalSource": "Wire", **kw}
+
+
+def _avm_case(name, ids, ticker, items, changes, names, *, view, **kw) -> Case:
+    return Case(
+        name=name, ids=ids,
+        py=lambda: cs.analyst_valuation_methods(ticker, copy.deepcopy(items), copy.deepcopy(changes), copy.deepcopy(names)),
+        ts={"js": "return m.capitalStructure.analystValuationMethods(args[0], args[1], args[2], args[3]);",
+            "args": [ticker, items, changes, names]},
+        select=view, **kw)
+
+
+def _avm_view(d):
+    return {"attribution": d["attribution"], "status": d["status"], "scanned": d["itemsScanned"], "methodCounts": d["methodCounts"],
+            "evidence": [[e["firm"], e["subjectMatch"], e["priceTarget"], [m["method"] for m in e["methods"]], e["sentence"]] for e in d["evidence"]],
+            "methodNotDisclosed": [[m["firm"], m["source"]] for m in d["methodNotDisclosed"]]}
+
+
+_NO_CHECK = {"checked": False, "rejectedForOtherCompany": 0, "subjectAliases": []}
+
+CASES += [
+    # Card 206: rating-change firms are tried first; the earliest firm in the text wins ('Cantor Fitzgerald', not 'Benchmark');
+    # firm names are case-sensitive, so a lower-case 'benchmark' names no firm and yields no evidence.
+    _avm_case(
+        "news.valuation.firm_is_the_earliest_match_and_matching_is_case_sensitive", ["BR-NWS-206"], "RKLB",
+        [_news_item("Cantor Fitzgerald and Benchmark lift price target to $60 from $50", url="https://e.com/1"),
+         _news_item("Analyst benchmark raises price target to $70", url="https://e.com/2")],
+        [{"firm": "Cantor Fitzgerald", "ptTo": 60, "ptFrom": 50, "date": "2026-10-10"}], None, view=_avm_view,
+        expect={"attribution": _NO_CHECK, "status": "METHOD_NOT_DISCLOSED", "scanned": 2, "methodCounts": {},
+                "evidence": [["Cantor Fitzgerald", "NOT_CHECKED", {"target": 60, "prior": 50, "currency": "USD"}, [],
+                              "Cantor Fitzgerald and Benchmark lift price target to $60 from $50"]],
+                "methodNotDisclosed": [["Cantor Fitzgerald", "news"], ["Cantor Fitzgerald", "rating_changes"]]}),
+    # Cards 232 / 239: the sentence names the subject (Rocket Lab) but the clause holding the target names another company, so
+    # the item is conflicted and the target is rejected (rejectedForOtherCompany +1).
+    _avm_case(
+        "news.valuation.target_in_another_companys_clause_is_rejected", ["BR-NWS-232", "BR-NWS-239"], "RKLB",
+        [_news_item("Rocket Lab climbs; AST SpaceMobile rises as Cantor Fitzgerald reiterates $60 price target", url="https://e.com/3")],
+        [], ["Rocket Lab"], view=_avm_view,
+        expect={"attribution": {"checked": True, "rejectedForOtherCompany": 1, "subjectAliases": ["rklb", "rocket lab"]},
+                "status": "NOT_FOUND", "scanned": 1, "methodCounts": {}, "evidence": [], "methodNotDisclosed": []}),
+    _avm_case(
+        "news.valuation.target_clause_names_the_other_company_when_the_subject_is_asts", ["BR-NWS-239"], "ASTS",
+        [_news_item("Rocket Lab climbs as Cantor Fitzgerald reiterates $122 price target; AST SpaceMobile rises", url="https://e.com/4")],
+        [], ["AST SpaceMobile, Inc."], view=_avm_view,
+        expect={"attribution": {"checked": True, "rejectedForOtherCompany": 1, "subjectAliases": ["ast spacemobile", "ast spacemobile inc", "asts"]},
+                "status": "NOT_FOUND", "scanned": 1, "methodCounts": {}, "evidence": [], "methodNotDisclosed": []}),
+    # Cards 232 / 239: CLAUSE vs ITEM vs rejected. A sentence that names the subject outside the target clause is rejected;
+    # a sentence naming nobody is accepted as ITEM when the item names the subject elsewhere and is not conflicted.
+    _avm_case(
+        "news.valuation.subject_match_clause_item_or_rejected", ["BR-NWS-232", "BR-NWS-239"], "RKLB",
+        [_news_item("Rocket Lab climbs; Cantor Fitzgerald reiterates $60 price target", url="https://e.com/5"),
+         _news_item("Rocket Lab USA, Inc. report", "Cantor Fitzgerald lifts price target to $30. Other sentence DCF with 8% WACC.", url="https://e.com/6"),
+         _news_item("Cantor Fitzgerald sets price target at $40", url="https://e.com/7")],
+        [], ["Rocket Lab USA, Inc.", "Rocket Lab"], view=_avm_view,
+        expect={"attribution": {"checked": True, "rejectedForOtherCompany": 2, "subjectAliases": ["rklb", "rocket lab", "rocket lab usa", "rocket lab usa inc"]},
+                "status": "FOUND", "scanned": 3, "methodCounts": {"DCF": 1},
+                "evidence": [["Cantor Fitzgerald", "ITEM", {"target": 30, "prior": None, "currency": "USD"}, [], "Cantor Fitzgerald lifts price target to $30."],
+                             ["Cantor Fitzgerald", "ITEM", None, ["DCF"], "Other sentence DCF with 8% WACC."]],
+                "methodNotDisclosed": []}),
+    # Card 232 edge: the short name 'Rocket Lab' is an alias only when it is given as a name; 'Rocket Lab USA, Inc.' alone keeps
+    # 'rocket lab usa' (USA is not a legal suffix).
+    _avm_case(
+        "news.valuation.aliases_drop_legal_suffixes_and_ticker_base_only", ["BR-NWS-232", "BR-NWS-226"], "RKLB",
+        [], [], ["Rocket Lab USA, Inc."], view=lambda d: d["attribution"],
+        expect={"checked": True, "rejectedForOtherCompany": 0, "subjectAliases": ["rklb", "rocket lab usa", "rocket lab usa inc"]}),
+    _avm_case(
+        "news.valuation.one_and_two_letter_tickers_are_not_aliases", ["BR-NWS-232"], "GM",
+        [], [], ["General Motors Company"], view=lambda d: d["attribution"],
+        expect={"checked": True, "rejectedForOtherCompany": 0, "subjectAliases": ["general motors", "general motors company"]}),
+    # Card 259: qualitative method keywords.
+    _avm_case(
+        "news.valuation.qualitative_method_keywords", ["BR-NWS-259"], "XYZ",
+        [_news_item("Valuation is a SOTP with peer multiple cross-check", url="https://e.com/8"),
+         _news_item("rNPV and scenario-weighted valuation, comps and comparable companies", url="https://e.com/9")],
+        [], None, view=lambda d: [[e["sentence"], [m["method"] for m in e["methods"]]] for e in d["evidence"]],
+        expect=[["Valuation is a SOTP with peer multiple cross-check", ["sum_of_the_parts", "peer_comparison"]],
+                ["rNPV and scenario-weighted valuation, comps and comparable companies",
+                 ["risk_adjusted_npv", "probability_weighted_scenarios", "peer_comparison"]]]),
+    # Card 274: an item with the same URL as an earlier one is skipped; when the summary does not start with the title the text
+    # is 'title. summary', otherwise just the summary; an item with no URL is keyed by its title.
+    _avm_case(
+        "news.valuation.duplicate_urls_are_skipped_and_text_assembly", ["BR-NWS-274"], "XYZ",
+        [_news_item("Cantor Fitzgerald sets price target at $40", url="https://e.com/7"),
+         _news_item("Cantor Fitzgerald sets price target at $40", url="https://e.com/7"),
+         _news_item("Title text here", "Title text here and Morgan Stanley sets price target to $50"),
+         _news_item("No url one", "Cantor Fitzgerald sets price target to $20")],
+        [], None, view=_avm_view,
+        expect={"attribution": _NO_CHECK, "status": "METHOD_NOT_DISCLOSED", "scanned": 3, "methodCounts": {},
+                "evidence": [["Cantor Fitzgerald", "NOT_CHECKED", {"target": 40, "prior": None, "currency": "USD"}, [], "Cantor Fitzgerald sets price target at $40"],
+                             ["Morgan Stanley", "NOT_CHECKED", {"target": 50, "prior": None, "currency": "USD"}, [],
+                              "Title text here and Morgan Stanley sets price target to $50"],
+                             ["Cantor Fitzgerald", "NOT_CHECKED", {"target": 20, "prior": None, "currency": "USD"}, [], "Cantor Fitzgerald sets price target to $20"]],
+                "methodNotDisclosed": [["Cantor Fitzgerald", "news"], ["Morgan Stanley", "news"]]}),
+]
+
+# --- the tool: window clamp, issuer names, warnings (BR-NWS-200, 201, 226) ---------------------------------------------------
+_RKLB_INFO = {"shortName": "Rocket Lab", "longName": "Rocket Lab USA, Inc.", "exchange": "NMS"}
+_UPGRADE_HISTORY_ROUTE = {"https://query1.finance.yahoo.com/v10/finance/quoteSummary/RKLB?modules=upgradeDowngradeHistory*": {
+    "json": {"quoteSummary": {"result": [{"upgradeDowngradeHistory": {"history": []}}], "error": None}}}}
+
+
+def _valuation_tool_case(name, ids, days, *, ticker="RKLB", news=None, info=None, identity_fails=False, env=None, routes=None, **kw) -> Case:
+    """extract_analyst_valuation_methods with no rating changes; also records the Finnhub URLs requested."""
+    def py():
+        import urllib.request as ur
+        urls = []
+        with _py_news_env(news=news, info=info, env=env), \
+                patch.object(server, "get_analyst_upgrade_radar", AsyncMock(return_value=json.dumps({"changes": []}))):
+            real = ur.urlopen
+
+            def record(req, *a, **k):
+                urls.append(req if isinstance(req, str) else req.full_url)
+                return real(req, *a, **k)
+
+            with patch.object(ur, "urlopen", record):
+                out = json.loads(asyncio.run(server.extract_analyst_valuation_methods(ticker, days)))
+        out["_finnhub"] = [u for u in urls if "finnhub" in u]
+        return out
+
+    js = _worker_js(f"""
+const urls = []; const realFetch = globalThis.fetch;
+globalThis.fetch = async (i, n) => {{ urls.push(typeof i === "string" ? i : i.url); return realFetch(i, n); }};
+try {{
+  const out = JSON.parse(await m.yahooFinance.extractAnalystValuationMethods({json.dumps(ticker)}, {days}));
+  out._finnhub = urls.filter(u => u.includes("finnhub"));
+  return out;
+}} finally {{ globalThis.fetch = realFetch; }}""", env)
+    return Case(name=name, ids=ids, py=py, ts={"js": js, "isolate": True},
+                routes={**_yahoo_routes(news, info, None, identity_fails), **_UPGRADE_HISTORY_ROUTE, **(routes or {})}, **kw)
+
+
+def _valuation_tool_view(d):
+    return {"windowDays": d["windowDays"], "warnings": [w["code"] for w in d["warnings"]], "status": d["status"],
+            "attribution": d["attribution"], "finnhub": d["_finnhub"],
+            "evidence": [[e["firm"], e["subjectMatch"], e["priceTarget"] and e["priceTarget"]["target"], e["title"]] for e in d["evidence"]]}
+
+
+_RKLB_NEWS = [_yn("Rocket Lab price target raised to $30 by Cantor Fitzgerald", when=_days_ago(2), link="https://example.com/rklb1"),
+              _yn("Rocket Lab USA, Inc. gets DCF price target of $25 from Morgan Stanley", when=_days_ago(3), link="https://example.com/rklb2")]
+_FINNHUB_365 = ["https://finnhub.io/api/v1/company-news?symbol=RKLB&from=2025-10-15&to=2026-10-15"]
+
+CASES += [
+    # Cards 200 / 201: days_back above 365 is clamped to 365 (windowDays 365) and the news request spans 365 days.
+    _valuation_tool_case(
+        "news.valuation_tool.days_back_is_clamped_to_365_and_news_spans_the_window", ["BR-NWS-200", "BR-NWS-201"], 900,
+        news=[], info=_RKLB_INFO, env=FINNHUB_ENV, routes=_finnhub([]),
+        select=lambda d: {k: _valuation_tool_view(d)[k] for k in ("windowDays", "warnings", "status", "finnhub")},
+        expect={"windowDays": 365, "warnings": [], "status": "NOT_FOUND", "finnhub": _FINNHUB_365}),
+    # Card 200: no issuer name -> attribution unchecked and ATTRIBUTION_UNCHECKED.
+    _valuation_tool_case(
+        "news.valuation_tool.unresolved_issuer_name_leaves_attribution_unchecked", ["BR-NWS-200", "BR-NWS-201"], 500,
+        news=[], info={}, identity_fails=True, env=FINNHUB_ENV, routes=_finnhub([]), select=_valuation_tool_view,
+        expect={"windowDays": 365, "warnings": ["ATTRIBUTION_UNCHECKED"], "status": "NOT_FOUND", "attribution": _NO_CHECK,
+                "finnhub": _FINNHUB_365, "evidence": []}),
+    # Card 226 / 200: longName 'Rocket Lab USA, Inc.', shortName 'Rocket Lab'. The Worker builds aliases from long, short and company
+    # names, so 'Rocket Lab target raised ... by Cantor' is accepted (CLAUSE); Python uses longName only, so the same headline is
+    # rejected as another company's target.
+    _valuation_tool_case(
+        "news.valuation_tool.short_name_alias_exists_in_the_worker_only", ["BR-NWS-226", "BR-NWS-200", "BR-NWS-201"], 30,
+        news=_RKLB_NEWS, info=_RKLB_INFO, select=_valuation_tool_view, mode="pinned",
+        decision="FINDING: Python attributes targets with one issuer name (longName, else shortName); the Worker uses longName, shortName and companyName, so the same headline is CLAUSE-accepted in the Worker and rejected in Python",
+        expect_py={"windowDays": 30, "warnings": [], "status": "NOT_FOUND",
+                   "attribution": {"checked": True, "rejectedForOtherCompany": 2, "subjectAliases": ["rklb", "rocket lab usa", "rocket lab usa inc"]},
+                   "finnhub": [], "evidence": []},
+        expect_ts={"windowDays": 30, "warnings": [], "status": "METHOD_NOT_DISCLOSED",
+                   "attribution": {"checked": True, "rejectedForOtherCompany": 1,
+                                   "subjectAliases": ["rklb", "rocket lab", "rocket lab usa", "rocket lab usa inc"]},
+                   "finnhub": [], "evidence": [["Cantor Fitzgerald", "CLAUSE", 30, "Rocket Lab price target raised to $30 by Cantor Fitzgerald"]]}),
+    # Card 201 / 226: an invalid ticker makes Python's get_company_news return an error payload (NEWS_UNAVAILABLE); the Worker's news
+    # call does not validate the ticker, so there is no news error.
+    _valuation_tool_case(
+        "news.valuation_tool.news_error_payload_raises_news_unavailable_in_python_only", ["BR-NWS-201", "BR-NWS-226", "BR-NWS-240"], 30,
+        ticker="BAD TKR!", news=[], info={}, select=lambda d: {"warnings": [w["code"] for w in d["warnings"]], "status": d["status"], "windowDays": d["windowDays"]},
+        mode="pinned", decision="FINDING: a news error payload (invalid ticker) raises NEWS_UNAVAILABLE in Python; the Worker does not validate the ticker so it raises nothing",
+        expect_py={"warnings": ["ATTRIBUTION_UNCHECKED", "NEWS_UNAVAILABLE"], "status": "NOT_FOUND", "windowDays": 30},
+        expect_ts={"warnings": ["ATTRIBUTION_UNCHECKED"], "status": "NOT_FOUND", "windowDays": 30}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# GlobeNewswire RSS (explicit `newswire` source): stock-category relevance, XML guard, cache; duplicate merge
+# BR-NWS-222 / 223 / 224 / 225 / 251 / 252 / 264 / 265 / 272 / 273
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+GNW_FEEDS = "https://www.globenewswire.com/RssFeed/*"
+_NVDA_INFO = {"shortName": "NVIDIA", "longName": "NVIDIA Corporation", "exchange": "NMS"}
+
+
+def _rss(items):
+    return ('<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>'
+            '<title>GlobeNewswire</title>' + "".join(items) + "</channel></rss>")
+
+
+def _gitem(i, title, categories, *, pub="Wed, 14 Oct 2026 12:58:00 GMT", contributor="", desc="Description text"):
+    cats = "".join(f'<category domain="https://www.globenewswire.com/rss/stock">{c}</category>' for c in categories)
+    return (f"<item><title>{title}</title><link>https://www.globenewswire.com/news-release/2026/10/14/{i}/x.html</link>"
+            f"<guid>https://www.globenewswire.com/news-release/2026/10/14/{i}/g.html</guid><description>{desc}</description>"
+            + (f"<pubDate>{pub}</pubDate>" if pub else "")
+            + (f"<dc:contributor>{contributor}</dc:contributor>" if contributor else "")
+            + f"<dc:subject>Earnings</dc:subject><dc:language>en</dc:language><dc:identifier>id{i}</dc:identifier>{cats}<dc:keyword>kw{i}</dc:keyword></item>")
+
+
+def _gnw_case(name, ids, ticker, info, items, *, select, body=None, status=200, **kw) -> Case:
+    xml = body if body is not None else _rss(items)
+    return _scenario(name, ids, lambda: server.get_company_news(ticker, 10, 14, ["newswire"]),
+                     f'm.yahooFinance.getCompanyNews({json.dumps(ticker)}, 10, 14, ["newswire"])', news=[], info=info,
+                     routes={GNW_FEEDS: {"body": xml, "headers": {"content-type": "application/rss+xml"}, "status": status}}, select=select, **kw)
+
+
+def _gnw_view(v):
+    return {"items": [[i["title"], i["confidence"], i["tickerRelevance"], i["stockCategories"], _norm_ts(i["publishedAt"]), i["globenewswireId"]]
+                      for i in v["items"]],
+            "newswire": _status_rows(v, "newswire", keys=("status", "rawCount", "filteredCount")), "warnings": _warning_rows(v),
+            "sourcesUsed": v["meta"]["sourcesUsed"], "status": v.get("status")}
+
+
+def _gnw_row(title, categories, ident):
+    return [title, "HIGH", "HIGH", categories, "2026-10-14T12:58:00Z", ident]
+
+
+def _gnw_failed(messages, *, count=10):
+    return {"items": [], "newswire": {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}, "warnings": messages, "sourcesUsed": [],
+            "status": "SOURCE_LIMITED_NOT_FOUND"}
+
+
+_GNW_FEED_NAMES = ["public_companies", "press_releases", "earnings", "stock_market_news", "technology", "semiconductors", "telecommunications",
+                   "mobile_telecommunications", "telecommunications_equipment", "electronic_equipment"]
+
+CASES += [
+    # Card 222 / 273: only items whose stock category names the ticker are kept (a headline that merely mentions NVIDIA is ignored); the
+    # category may be one of several in one tag, or a bare symbol; items without a pubDate or older than the window are dropped
+    # silently, with no PUBLISHED_AT_UNAVAILABLE warning.
+    _gnw_case(
+        "news.gnw.only_stock_category_tags_naming_the_ticker_are_kept", ["BR-NWS-222", "BR-NWS-225", "BR-NWS-273"], "NVDA", _NVDA_INFO,
+        [_gitem(1, "NVIDIA reports results", ["Nasdaq:NVDA"], contributor="NVIDIA Corp"), _gitem(2, "Partner mentions NVIDIA tech", ["Nasdaq:AMD"]),
+         _gitem(5, "Multi", ["Nasdaq:AMD, Nasdaq:NVDA"]), _gitem(6, "Bare symbol", ["NVDA"]),
+         _gitem(7, "Undated", ["Nasdaq:NVDA"], pub=""), _gitem(8, "Old", ["Nasdaq:NVDA"], pub="Mon, 01 Jun 2026 12:00:00 GMT")],
+        select=_gnw_view,
+        expect={"items": [_gnw_row("NVIDIA reports results", ["Nasdaq:NVDA"], "id1"), _gnw_row("Multi", ["Nasdaq:AMD", "Nasdaq:NVDA"], "id5"),
+                          _gnw_row("Bare symbol", ["NVDA"], "id6")],
+                "newswire": {"status": "OK", "rawCount": 3, "filteredCount": 3}, "warnings": [], "sourcesUsed": ["newswire"], "status": None}),
+    # Cards 224 / 225: a stock-category prefix naming another exchange ('NYSE:NVDA', 'TSX:NVDA') for a NASDAQ company is rejected by
+    # the Worker (exchange compatibility) and accepted by Python (symbol only).
+    _gnw_case(
+        "news.gnw.other_exchange_prefix_is_rejected_in_the_worker_only", ["BR-NWS-224", "BR-NWS-225", "BR-NWS-222"], "NVDA", _NVDA_INFO,
+        [_gitem(1, "NASDAQ tagged", ["Nasdaq:NVDA"]), _gitem(3, "TSX tagged", ["TSX:NVDA"]), _gitem(4, "NYSE tagged", ["NYSE:NVDA"])],
+        select=_gnw_view, mode="pinned",
+        decision="FINDING: GlobeNewswire stock-category exchange compatibility is checked in the Worker only (NYSE:/TSX: tags for a NASDAQ company are dropped there, kept in Python)",
+        expect_py={"items": [_gnw_row("NASDAQ tagged", ["Nasdaq:NVDA"], "id1"), _gnw_row("TSX tagged", ["TSX:NVDA"], "id3"),
+                             _gnw_row("NYSE tagged", ["NYSE:NVDA"], "id4")],
+                   "newswire": {"status": "OK", "rawCount": 3, "filteredCount": 3}, "warnings": [], "sourcesUsed": ["newswire"], "status": None},
+        expect_ts={"items": [_gnw_row("NASDAQ tagged", ["Nasdaq:NVDA"], "id1")],
+                   "newswire": {"status": "OK", "rawCount": 1, "filteredCount": 1}, "warnings": [], "sourcesUsed": ["newswire"], "status": None}),
+    # Card 223: an NYSE American company whose Yahoo exchange reads 'NYSE American' normalises to NYSE, so the Worker rejects its own
+    # 'NYSE American:UUUU' tag (and any other); Python accepts all three.
+    _gnw_case(
+        "news.gnw.nyse_american_company_loses_its_own_releases_in_the_worker", ["BR-NWS-223", "BR-NWS-224"], "UUUU",
+        {"shortName": "Energy Fuels", "longName": "Energy Fuels Inc.", "exchange": "NYSE American"},
+        [_gitem(1, "Energy Fuels news", ["NYSE American:UUUU"]), _gitem(2, "Energy Fuels nasdaq", ["NASDAQ:UUUU"]), _gitem(3, "Energy Fuels amex", ["AMEX:UUUU"])],
+        select=_gnw_view, mode="pinned",
+        decision="FINDING: an issuer whose exchangeName is 'NYSE American' normalises to NYSE in the Worker, which then rejects its own 'NYSE American:' GlobeNewswire tag; Python does not check the exchange",
+        expect_py={"items": [_gnw_row("Energy Fuels news", ["NYSE American:UUUU"], "id1"), _gnw_row("Energy Fuels nasdaq", ["NASDAQ:UUUU"], "id2"),
+                             _gnw_row("Energy Fuels amex", ["AMEX:UUUU"], "id3")],
+                   "newswire": {"status": "OK", "rawCount": 3, "filteredCount": 3}, "warnings": [], "sourcesUsed": ["newswire"], "status": None},
+        expect_ts={"items": [], "newswire": {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}, "warnings": [], "sourcesUsed": ["newswire"],
+                   "status": "NOT_FOUND"}),
+    # Card 223 edge: an exchange name 'ASE' maps to NYSEAMERICAN in the Worker, which then accepts 'NYSE American:' and 'AMEX:' tags.
+    _gnw_case(
+        "news.gnw.ase_exchange_name_maps_to_nyse_american_in_the_worker", ["BR-NWS-223"], "UUUU",
+        {"shortName": "Energy Fuels", "longName": "Energy Fuels Inc.", "exchange": "ASE"},
+        [_gitem(1, "Energy Fuels news", ["NYSE American:UUUU"]), _gitem(2, "Energy Fuels nasdaq", ["NASDAQ:UUUU"]), _gitem(3, "Energy Fuels amex", ["AMEX:UUUU"])],
+        select=_gnw_view, mode="pinned",
+        decision="FINDING: with exchange 'ASE' the Worker accepts the 'NYSE American:' and 'AMEX:' tags and rejects 'NASDAQ:'; Python accepts all three",
+        expect_py={"items": [_gnw_row("Energy Fuels news", ["NYSE American:UUUU"], "id1"), _gnw_row("Energy Fuels nasdaq", ["NASDAQ:UUUU"], "id2"),
+                             _gnw_row("Energy Fuels amex", ["AMEX:UUUU"], "id3")],
+                   "newswire": {"status": "OK", "rawCount": 3, "filteredCount": 3}, "warnings": [], "sourcesUsed": ["newswire"], "status": None},
+        expect_ts={"items": [_gnw_row("Energy Fuels news", ["NYSE American:UUUU"], "id1"), _gnw_row("Energy Fuels amex", ["AMEX:UUUU"], "id3")],
+                   "newswire": {"status": "OK", "rawCount": 2, "filteredCount": 2}, "warnings": [], "sourcesUsed": ["newswire"], "status": None}),
+    # Card 272: a feed larger than 2 MiB is rejected in both runtimes (same text).
+    _gnw_case(
+        "news.gnw.feed_over_2_mib_is_rejected", ["BR-NWS-272"], "NVDA", _NVDA_INFO, None, body="x" * (2 * 1024 * 1024 + 5), select=_gnw_view,
+        expect=_gnw_failed([["SOURCE_UNAVAILABLE", f"GlobeNewswire RSS feed '{n}' unavailable: GlobeNewswire RSS response exceeded size limit"]
+                            for n in _GNW_FEED_NAMES])),
+    # Card 272: a DOCTYPE is blocked in Python only; an ENTITY declaration is blocked in both, with different text.
+    _gnw_case(
+        "news.gnw.doctype_feed_is_rejected_in_python_only", ["BR-NWS-272"], "NVDA", _NVDA_INFO, None,
+        body=_rss([_gitem(1, "NVIDIA reports results", ["Nasdaq:NVDA"])]).replace("<rss", "<!DOCTYPE rss [<!ELEMENT rss ANY>]><rss", 1),
+        select=_gnw_view, mode="pinned",
+        decision="FINDING: Python rejects any feed containing <!DOCTYPE; the Worker rejects only <!ENTITY",
+        expect_py=_gnw_failed([["SOURCE_UNAVAILABLE", f"GlobeNewswire RSS feed '{n}' parse error: unsupported XML declaration in GlobeNewswire RSS"]
+                               for n in _GNW_FEED_NAMES]),
+        expect_ts={"items": [_gnw_row("NVIDIA reports results", ["Nasdaq:NVDA"], "id1")],
+                   "newswire": {"status": "OK", "rawCount": 1, "filteredCount": 1}, "warnings": [], "sourcesUsed": ["newswire"], "status": None}),
+    _gnw_case(
+        "news.gnw.entity_feed_is_rejected_with_runtime_specific_text", ["BR-NWS-272"], "NVDA", _NVDA_INFO, None,
+        body=_rss([_gitem(1, "NVIDIA reports results", ["Nasdaq:NVDA"])]).replace("<rss", '<!DOCTYPE rss [<!ENTITY x "y">]><rss', 1),
+        select=_gnw_view, mode="pinned",
+        decision="FINDING: the parse-error text for a blocked XML declaration differs (Python 'unsupported XML declaration', Worker 'unsupported XML entity declaration')",
+        expect_py=_gnw_failed([["SOURCE_UNAVAILABLE", f"GlobeNewswire RSS feed '{n}' parse error: unsupported XML declaration in GlobeNewswire RSS"]
+                               for n in _GNW_FEED_NAMES]),
+        expect_ts=_gnw_failed([["SOURCE_UNAVAILABLE", f"GlobeNewswire RSS feed '{n}' parse error: unsupported XML entity declaration in GlobeNewswire RSS"]
+                               for n in _GNW_FEED_NAMES])),
+]
+
+
+def _gnw_cache_py():
+    """Fetch counts for the same ticker at +0, +14 and +16 minutes (Python: the cache entries are aged by rewinding their stored time)."""
+    import urllib.request as ur
+    urls = []
+    counts = []
+    with _py_news_env(news=[], info=_NVDA_INFO):
+        real = ur.urlopen
+
+        def record(req, *a, **k):
+            urls.append(req if isinstance(req, str) else req.full_url)
+            return real(req, *a, **k)
+
+        with patch.object(ur, "urlopen", record):
+            original = {}
+            for minutes in (0, 14, 16):
+                store = pycache._tool_cache._store
+                if minutes == 14:
+                    original = {k: v for k, v in store.items() if k.startswith("gnw_rss:")}
+                if minutes:
+                    for key, (stored_at, value, ttl) in original.items():
+                        store[key] = (stored_at - minutes * 60, value, ttl)
+                before = sum("globenewswire" in u for u in urls)
+                asyncio.run(server.get_company_news("NVDA", 10, 14, ["newswire"]))
+                counts.append(sum("globenewswire" in u for u in urls) - before)
+    return counts
+
+
+_GNW_CACHE_JS = """
+let n = 0; const realFetch = globalThis.fetch;
+globalThis.fetch = async (i, o) => { const u = typeof i === "string" ? i : i.url; if (u.includes("globenewswire.com/RssFeed")) n++; return realFetch(i, o); };
+const counts = [];
+try {
+  for (const minutes of [0, 14, 16]) {
+    __now = Date.UTC(2026, 9, 15, 12, 0, 0) + minutes * 60000;
+    const before = n;
+    await m.yahooFinance.getCompanyNews("NVDA", 10, 14, ["newswire"]);
+    counts.push(n - before);
+  }
+} finally { globalThis.fetch = realFetch; }
+return counts;"""
+
+CASES += [
+    # Cards 264 / 265: a feed fetched at 12:00 is reused at +14 minutes (no request) and fetched again at +16 minutes (TTL 15 minutes);
+    # ten feeds are fetched on the first and third call.
+    Case(name="news.gnw.feed_cache_is_reused_for_14_minutes_and_refetched_at_16", ids=["BR-NWS-264", "BR-NWS-265"],
+         py=_gnw_cache_py, ts={"js": _worker_js(_GNW_CACHE_JS), "isolate": True},
+         routes={**_yahoo_routes([], _NVDA_INFO), GNW_FEEDS: {"body": _rss([_gitem(1, "NVIDIA reports results", ["Nasdaq:NVDA"])])}},
+         expect=[10, 0, 10]),
+]
+
+# --- duplicate merge and group ids (BR-NWS-251, BR-NWS-252) ---------------------------------------------------------------
+def _merge_view(v):
+    return {"items": [[i["title"], i["source"], i["sourceType"], _norm_ts(i["publishedAt"]),
+                       [[r["source"], r["sourceType"], _norm_ts(r["publishedAt"]), r["url"]] for r in i.get("sourceRefs", [])]] for i in v["items"]],
+            "warnings": [[w["code"], w.get("statusImpact")] for w in v["warnings"]], "status": v.get("status")}
+
+
+def _fin_dup_row(hour, text, url):
+    return {"headline": text, "summary": "s", "source": "W", "url": url, "datetime": _epoch(_days_ago(1, hour=hour))}
+
+
+CASES += [
+    # Card 252: the same story from Yahoo (13:00Z) and GlobeNewswire (12:58Z) is one duplicate group: the newswire item (priority 3)
+    # is kept, the Yahoo item (priority 5) is appended to its sourceRefs, and TIMESTAMP_VARIANCE is emitted with statusImpact false
+    # (so the status stays unset).
+    _scenario(
+        "news.dedupe.higher_priority_source_is_kept_and_timestamp_variance_does_not_affect_status", ["BR-NWS-252"],
+        lambda: server.get_company_news("NVDA", 10, 14, ["yahoo_finance_news", "newswire"]),
+        'm.yahooFinance.getCompanyNews("NVDA", 10, 14, ["yahoo_finance_news", "newswire"])',
+        news=[_yn("NVIDIA reports record results", publisher="Reuters", link="https://finance.yahoo.com/news/nv", when="2026-10-14T13:00:00Z")],
+        info=_NVDA_INFO, routes={GNW_FEEDS: {"body": _rss([_gitem(1, "NVIDIA reports record results", ["Nasdaq:NVDA"])])}}, select=_merge_view,
+        expect={"items": [["NVIDIA reports record results", "newswire", "newswire", "2026-10-14T12:58:00Z",
+                           [["yahoo_finance_news", "yahoo_finance_news", "2026-10-14T13:00:00Z", "https://finance.yahoo.com/news/nv"]]]],
+                "warnings": [["TIMESTAMP_VARIANCE", False]], "status": None}),
+    # Card 252 edge: equal priority -> the lexically later publishedAt wins.
+    _scenario(
+        "news.dedupe.equal_priority_keeps_the_later_timestamp", ["BR-NWS-252"],
+        lambda: server.get_company_news("NVDA", 10, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("NVDA", 10, 14, ["finnhub"])',
+        env=FINNHUB_ENV,
+        routes=_finnhub([_fin_dup_row(8, "NVDA Acme sets deal", "https://a.com/1"), _fin_dup_row(10, "NVDA Acme sets deal", "https://b.com/2")]),
+        select=_merge_view,
+        expect={"items": [["NVDA Acme sets deal", "finnhub", "company_news", "2026-10-14T10:00:00Z",
+                           [["finnhub", "company_news", "2026-10-14T08:00:00Z", "https://a.com/1"]]]],
+                "warnings": [["TIMESTAMP_VARIANCE", False]], "status": None}),
+    # Card 251: Python decodes HTML entities before building the title stem, the Worker does not ('amp' stays in one stem), so
+    # 'Acme &amp; Beta sign deal' and 'Acme & Beta sign deal' are one item in Python and two in the Worker.
+    _scenario(
+        "news.dedupe.html_entities_are_decoded_in_python_only", ["BR-NWS-251"],
+        lambda: server.get_company_news("NVDA", 10, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("NVDA", 10, 14, ["finnhub"])',
+        env=FINNHUB_ENV,
+        routes=_finnhub([_fin_dup_row(8, "NVDA Acme &amp; Beta sign deal", "https://a.com/1"), _fin_dup_row(10, "NVDA Acme & Beta sign deal", "https://b.com/2")]),
+        select=lambda v: [i["title"] for i in v["items"]], mode="pinned",
+        decision="FINDING: Python un-escapes HTML entities in the dedupe title stem (one item); the Worker does not (two items)",
+        expect_py=["NVDA Acme & Beta sign deal"], expect_ts=["NVDA Acme & Beta sign deal", "NVDA Acme &amp; Beta sign deal"]),
+    # The group id itself: Python is the first 16 hex characters of a SHA-256, the Worker a 32-bit rolling hash (8 hex characters),
+    # for the same title, day and entity. (Related to BR-NWS-251: the key is built from the same stem.)
+    _scenario(
+        "news.dedupe.duplicate_group_id_algorithms_differ", ["BR-NWS-251", "BR-NWS-252"],
+        lambda: server.get_company_news("AAPL", 10, 14, ["finnhub"]), 'm.yahooFinance.getCompanyNews("AAPL", 10, 14, ["finnhub"])',
+        env=FINNHUB_ENV, routes=_finnhub([_frow(1, text="AAPL big news", days=1), _frow(2, text="Sector moves", days=1), _frow(3, text="Sector moves again", days=1)]),
+        select=lambda v: sorted(i["duplicateGroupId"] for i in v["items"]), mode="pinned",
+        decision="FINDING: duplicateGroupId is a 16-hex SHA-256 prefix in Python and an 8-hex 32-bit hash in the Worker for the same item",
+        expect_py=["129406048579cefe", "63592e348f7895dc", "9fba966b8551c339"], expect_ts=["bd521049", "c5902dde", "c8bfaf1e"]),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# Approved company IR page (registry-backed `company_ir_page`): extraction rules, content type, size, candidates
+# BR-NWS-202 / 203 / 208 / 249 / 263
+# The shipped registry holds only candidates, so an approved entry is injected: Python reads a temporary registry file through
+# `server._COMPANY_IR_PAGE_REGISTRY_PATH`; the Worker's registry is a bundled JSON constant that is not reachable, so the case body
+# briefly wraps Array.prototype.find to upgrade the IQE.L entry in place (isolated bundle copy, restored in `finally`).
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+IR_URL = "https://www.iqep.com/investors/regulatory-news/"
+IR_ENTRY = {"ticker": "IQE.L", "issuerName": "IQE plc", "status": "approved", "adapter": "html_article", "canonicalUrl": IR_URL,
+            "allowedHosts": ["www.iqep.com"], "allowedPathPrefixes": ["/investors/"], "candidateReason": None,
+            "discoveredAt": "2026-09-25T12:00:00Z", "reviewedBy": "reviewer", "reviewedAt": "2026-10-01T00:00:00Z", "revalidateAfter": None}
+_IR_WORKER_FIELDS = ("status", "adapter", "canonicalUrl", "allowedHosts", "allowedPathPrefixes", "revalidateAfter", "issuerName")
+_IR_HOOK = """
+const __realFind = Array.prototype.find;
+Array.prototype.find = function (fn, thisArg) {
+  const r = __realFind.call(this, fn, thisArg);
+  if (r && typeof r === "object" && r.ticker === "IQE.L" && r.canonicalUrl) { for (const k of Object.keys(args[0])) { if (args[0][k] === null) delete r[k]; else r[k] = args[0][k]; } }
+  return r;
+};
+"""
+
+
+def _ir_page_case(name, ids, body, *, entry=None, content_type="text/html; charset=utf-8", max_results=100, lookback=365, select, **kw) -> Case:
+    entry = entry or IR_ENTRY
+
+    def py():
+        with tempfile.TemporaryDirectory(prefix="ir-registry-") as tmp:
+            path = Path(tmp) / "registry.json"
+            path.write_text(json.dumps({"schemaVersion": "2026-07-10", "registryVersion": "2026-09-25.1200", "sources": [entry]}), encoding="utf-8")
+            with _py_news_env(news=[], info={}), patch.object(server, "_COMPANY_IR_PAGE_REGISTRY_PATH", path):
+                return json.loads(asyncio.run(server.get_company_news("IQE.L", max_results, lookback, ["company_ir_page"])))
+
+    worker_entry = {k: entry.get(k) for k in _IR_WORKER_FIELDS}
+    js = _worker_js(_IR_HOOK + f"""
+try {{ return JSON.parse(await m.yahooFinance.getCompanyNews("IQE.L", {max_results}, {lookback}, ["company_ir_page"])); }}
+finally {{ Array.prototype.find = __realFind; }}""")
+    headers = {"content-type": content_type} if content_type else {}
+    return Case(name=name, ids=ids, py=py, ts={"js": js, "isolate": True, "args": [worker_entry]},
+                routes={**_yahoo_routes([], {}), IR_URL: {"body": body, "headers": headers}}, select=select, **kw)
+
+
+def _ir_article(i, title, *, href=None, date=None, extra=""):
+    link = href or f"/investors/regulatory-news/item-{i}"
+    stamp = f'<time datetime="{date}">{date}</time>' if date else ""
+    return f'<article><h2>{title}</h2><a href="{link}">read</a>{stamp}<p>Summary text {i} {extra}</p></article>'
+
+
+def _ir_day(n):
+    return _days_ago(n)[:10]
+
+
+def _ir_view(v):
+    page = v["sourceStatus"]["company_ir_page"]
+    return {"count": len(v["items"]), "status": page["status"], "warnings": _warning_rows(v), "collection": v.get("status"),
+            "sourcesUsed": v["meta"]["sourcesUsed"]}
+
+
+# 'Q3' (title under 6 characters) and an off-allow-list link are within the first 50 blocks; 10 more articles follow the 50th.
+_IR_BLOCKS = ([_ir_article(0, "Q3", date=_ir_day(1)), _ir_article(1, "Offsite headline here", href="https://othersite.com/x", date=_ir_day(1)),
+               _ir_article(2, "Article headline without a date")]
+              + [_ir_article(i, f"Article headline number {i}", date=_ir_day(1 + i % 5)) for i in range(3, 60)])
+_IR_LI_PAGE = "<ul>" + "".join(
+    f'<li><a href="/investors/regulatory-news/l{i}">{t}</a> <time datetime="{_ir_day(2)}">x</time></li>'
+    for i, t in enumerate(["Company announces new CFO appointment", "Contact the investor team", "Q3 results published today"])) + "</ul>"
+_IR_RSS = ('<rss version="2.0"><channel><title>t</title><item><title>RSS headline one here</title>'
+           '<link>https://www.iqep.com/investors/regulatory-news/r1</link><pubDate>Wed, 14 Oct 2026 12:00:00 GMT</pubDate>'
+           '<description>desc</description></item></channel></rss>')
+
+CASES += [
+    # Card 202: only the first 50 <article> blocks are read; the 'Q3' block (title under 6 characters), the off-allow-list link and the
+    # undated block are dropped (undated items never pass the window); the rest are returned: 50 blocks - 3 = 47 items.
+    _ir_page_case(
+        "news.ir_page.html_block_cap_short_titles_off_list_links_and_undated_items", ["BR-NWS-202", "BR-NWS-249"], "<html>" + "".join(_IR_BLOCKS) + "</html>",
+        select=lambda v: {**_ir_view(v), "titles_first_last": [v["items"][0]["title"], v["items"][-1]["title"]],
+                          "item": {k: v["items"][0][k] for k in ("confidence", "tickerRelevance", "approvalStatus", "issuer", "originalSource", "sourceType",
+                                                                 "url", "decisionUse", "eventType")}},
+        expect={"count": 47, "status": "APPROVED_SOURCE_OK", "warnings": [], "collection": None, "sourcesUsed": ["company_ir_page"],
+                "titles_first_last": ["Article headline number 5", "Article headline number 49"],
+                "item": {"confidence": "HIGH", "tickerRelevance": "HIGH", "approvalStatus": "approved", "issuer": "IQE plc", "originalSource": "IQE plc",
+                         "sourceType": "company_ir_page", "url": "https://www.iqep.com/investors/regulatory-news/item-5",
+                         "decisionUse": "USE_OFFICIAL_EVIDENCE", "eventType": "other"}}),
+    # Card 202: with no <article> blocks, <li> blocks are used when their text has a release keyword.
+    _ir_page_case(
+        "news.ir_page.li_fallback_requires_a_release_keyword", ["BR-NWS-202"], _IR_LI_PAGE,
+        select=lambda v: {**_ir_view(v), "titles": sorted(i["title"] for i in v["items"])},
+        expect={"count": 2, "status": "APPROVED_SOURCE_OK", "warnings": [], "collection": None, "sourcesUsed": ["company_ir_page"],
+                "titles": ["Company announces new CFO appointment", "Q3 results published today"]}),
+    # Card 249: item typing and summary lengths; the issuer is the registry issuerName.
+    _ir_page_case(
+        "news.ir_page.item_event_type_summary_and_evidence_lengths", ["BR-NWS-249", "BR-NWS-256"],
+        "<html>" + _ir_article(1, "Acme announces Q3 earnings", date=_ir_day(1), extra="x" * 400) + "</html>",
+        select=lambda v: [[i["eventType"], i["confidence"], i["tickerRelevance"], i["approvalStatus"], i["issuer"], len(i["summary"]), len(i["evidenceText"])]
+                          for i in v["items"]],
+        expect=[["earnings", "HIGH", "HIGH", "approved", "IQE plc", 240, 180]]),
+    # Card 249: with no issuerName in the entry the issuer is the upper-cased ticker in Python and the (missing) name in the Worker.
+    _ir_page_case(
+        "news.ir_page.issuer_without_a_registry_name", ["BR-NWS-249"],
+        "<html>" + _ir_article(1, "Acme announces Q3 earnings", date=_ir_day(1)) + "</html>", entry={k: v for k, v in IR_ENTRY.items() if k != "issuerName"},
+        select=lambda v: [[i.get("issuer"), i.get("originalSource")] for i in v["items"]], mode="pinned",
+        decision="FINDING: an IR-page entry without issuerName gives issuer / originalSource 'IQE.L' (upper-cased ticker) in Python and null in the Worker",
+        expect_py=[["IQE.L", "IQE.L"]], expect_ts=[[None, None]]),
+    _ir_page_case(
+        "news.ir_page.structured_json_summary_reads_content_text_in_the_worker_only", ["BR-NWS-202"],
+        json.dumps({"items": [{"title": "Json headline one", "content_text": "summary via content_text", "url": "/investors/regulatory-news/j1", "date": _ir_day(2)}]}),
+        entry={**IR_ENTRY, "adapter": "structured"}, content_type="application/json",
+        select=lambda v: [[i["title"], i["summary"]] for i in v["items"]], mode="pinned",
+        decision="FINDING: the Worker reads content_text as the summary of a structured JSON item; Python does not (summary falls back to the title)",
+        expect_py=[["Json headline one", "Json headline one"]], expect_ts=[["Json headline one", "summary via content_text"]]),
+    # Card 202 edge: a feed-shaped body is parsed as RSS/Atom by the Worker whatever the adapter; Python parses it as HTML and finds nothing.
+    _ir_page_case(
+        "news.ir_page.feed_shaped_body_is_parsed_as_rss_in_the_worker_only", ["BR-NWS-202"], _IR_RSS,
+        select=lambda v: {"titles": [i["title"] for i in v["items"]], "status": v["sourceStatus"]["company_ir_page"]["status"]}, mode="pinned",
+        decision="FINDING: an RSS body served to an html_article IR page yields items in the Worker (feed parser) and none in Python (HTML parser)",
+        expect_py={"titles": [], "status": "EMPTY_RESULT"}, expect_ts={"titles": ["RSS headline one here"], "status": "APPROVED_SOURCE_OK"}),
+    # Card 203: an html_article entry answered with application/json: the Worker rejects the content type (SOURCE_VALIDATION_FAILED);
+    # Python parses the body as JSON, finds no records and reports an empty (approved) source.
+    _ir_page_case(
+        "news.ir_page.html_adapter_with_json_content_type_fails_validation_in_the_worker_only", ["BR-NWS-203"], "<html>" + _ir_article(1, "Article headline one", date=_ir_day(1)) + "</html>",
+        content_type="application/json", select=_ir_view, mode="pinned",
+        decision="FINDING: Content-Type is validated against the adapter in the Worker only (SOURCE_VALIDATION_FAILED); Python accepts it (EMPTY_RESULT)",
+        expect_py={"count": 0, "status": "EMPTY_RESULT", "warnings": [], "collection": "NOT_FOUND", "sourcesUsed": ["company_ir_page"]},
+        expect_ts={"count": 0, "status": "SOURCE_VALIDATION_FAILED",
+                   "warnings": [["COMPANY_IR_PAGE_VALIDATION_FAILED", "Approved company IR page validation failed: unexpected HTML content type: application/json"]],
+                   "collection": "SOURCE_LIMITED_NOT_FOUND", "sourcesUsed": []}),
+    # Card 208: exactly 768,000 bytes (750 KiB) is accepted; 768,001 is rejected with COMPANY_IR_PAGE_VALIDATION_FAILED and the source is
+    # SOURCE_VALIDATION_FAILED. (A redirect to an off-list host cannot be driven here: both stubs answer with the requested URL.)
+    _ir_page_case(
+        "news.ir_page.page_of_exactly_768000_bytes_is_accepted", ["BR-NWS-208"],
+        (lambda b: b + " " * (768000 - len(b.encode())))(_ir_article(1, "Article headline one", date=_ir_day(1))), select=_ir_view,
+        expect={"count": 1, "status": "APPROVED_SOURCE_OK", "warnings": [], "collection": None, "sourcesUsed": ["company_ir_page"]}),
+    _ir_page_case(
+        "news.ir_page.page_of_768001_bytes_is_rejected", ["BR-NWS-208"],
+        (lambda b: b + " " * (768001 - len(b.encode())))(_ir_article(1, "Article headline one", date=_ir_day(1))), select=_ir_view,
+        expect={"count": 0, "status": "SOURCE_VALIDATION_FAILED",
+                "warnings": [["COMPANY_IR_PAGE_VALIDATION_FAILED", "Approved company IR page validation failed: response exceeded size limit"]],
+                "collection": "SOURCE_LIMITED_NOT_FOUND", "sourcesUsed": []}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# Official-site RSS discovery for `company_ir` (Worker only): website normalisation, identity grade, feed acceptance
+# BR-NWS-207 / 209 / 210 / 211 / 228 / 258
+# Python serves `company_ir` from the Yahoo feed (no website, no discovery), so each case pins the Worker value and the (constant)
+# Python value for the same scenario.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+def _company_ir_case(name, ids, website, info, *, ticker="ACME", routes=None, hosts=False, decision, expect_ts, expect_py=None, **kw) -> Case:
+    def py():
+        with _py_news_env(news=[], info=info):
+            return json.loads(asyncio.run(server.get_company_news(ticker, 10, 14, ["company_ir"])))
+
+    js = _worker_js(f"""
+const urls = []; const realFetch = globalThis.fetch;
+globalThis.fetch = async (i, o) => {{ urls.push(typeof i === "string" ? i : i.url); return realFetch(i, o); }};
+try {{
+  const out = JSON.parse(await m.yahooFinance.getCompanyNews({json.dumps(ticker)}, 10, 14, ["company_ir"]));
+  out._urls = urls.filter(u => !u.includes("yahoo.com") && !u.includes("sec.gov"));
+  return out;
+}} finally {{ globalThis.fetch = realFetch; }}""")
+
+    def view(v):
+        ci = v["sourceStatus"]["company_ir"]
+        seen = []
+        for url in v.get("_urls") or []:
+            host = url.split("/")[2]
+            if host not in seen:
+                seen.append(host)
+        return {"status": ci.get("status"), "website": ci.get("companyWebsite"), "identityConfidence": ci.get("identityConfidence"),
+                "warnings": _warning_rows(v), "collection": v.get("status"),
+                "items": [[i["title"], i["confidence"], i["tickerRelevance"]] for i in v["items"]],
+                **({"probedHosts": seen} if hosts else {})}
+
+    py_default = {"status": "EMPTY_RESULT", "website": None, "identityConfidence": None, "warnings": [], "collection": "NOT_FOUND", "items": []}
+    if hosts:
+        py_default["probedHosts"] = []
+    return Case(name=name, ids=ids, py=py, ts={"js": js, "isolate": True}, routes={**_yahoo_routes([], info, website), **(routes or {})},
+                select=view, mode="pinned", decision=decision, expect_py=expect_py if expect_py is not None else py_default, expect_ts=expect_ts, **kw)
+
+
+_ACME = {"shortName": "Acme", "longName": "Acme Inc.", "exchange": "NMS"}
+_NO_SITE_TS = {"status": "WEBSITE_NOT_AVAILABLE", "website": None, "identityConfidence": "MEDIUM", "collection": "SOURCE_LIMITED_NOT_FOUND", "items": []}
+_BUDGET = ["COMPANY_IR_DISCOVERY_BUDGET_EXHAUSTED", "RSS/Atom discovery reached its 24-page Worker probe budget before all bounded company/IR paths were checked."]
+_NO_FEED = ["COMPANY_IR_FEED_NOT_FOUND", "No RSS/Atom feed was discovered from the verified company website or common IR/news paths."]
+_WORKER_ONLY = "FINDING: company_ir is official-site RSS/Atom discovery in the Worker and a Yahoo-feed passthrough in Python"
+
+CASES += [
+    # Cards 209 / 210 / 258: an aggregator host (linkedin.com, including subdomains) is not an official domain: the website is null,
+    # COMPANY_WEBSITE_NOT_AVAILABLE names the host, company_ir is WEBSITE_NOT_AVAILABLE; a blocked host counts as no website, so with a name the
+    # identity grade is MEDIUM.
+    _company_ir_case(
+        "news.company_ir.aggregator_website_is_not_an_official_domain", ["BR-NWS-209", "BR-NWS-210", "BR-NWS-258"], "linkedin.com/company/acme", _ACME,
+        decision=_WORKER_ONLY, expect_ts={**_NO_SITE_TS, "warnings": [["COMPANY_WEBSITE_NOT_AVAILABLE", "Company website host is not an official company domain: linkedin.com"]]}),
+    _company_ir_case(
+        "news.company_ir.empty_website_is_not_available", ["BR-NWS-209", "BR-NWS-210"], None, _ACME,
+        decision=_WORKER_ONLY, expect_ts={**_NO_SITE_TS, "warnings": [["COMPANY_WEBSITE_NOT_AVAILABLE", "No company website was available from public profile data."]]}),
+    # Cards 209 / 210 (Finding Q7): 'ftp://acme.com' is not rejected as an unsupported scheme: 'https://' is prepended, so it becomes
+    # 'https://ftp://acme.com', whose host is 'ftp'; discovery then runs against https://ftp/.
+    _company_ir_case(
+        "news.company_ir.ftp_scheme_is_prefixed_with_https_not_rejected", ["BR-NWS-209", "BR-NWS-210"], "ftp://acme.com", _ACME,
+        decision=_WORKER_ONLY,
+        expect_ts={"status": "DISCOVERY_BUDGET_EXHAUSTED", "website": "https://ftp/", "identityConfidence": "HIGH", "warnings": [_BUDGET, _NO_FEED],
+                   "collection": "SOURCE_LIMITED_NOT_FOUND", "items": []}),
+    # Cards 209 / 210: a bare domain gets https:// and is reduced to its root URL; discovery probes that host, then investor., investors.
+    # and ir. of its root domain.
+    _company_ir_case(
+        "news.company_ir.bare_domain_gets_https_and_is_reduced_to_its_root", ["BR-NWS-209", "BR-NWS-210"], "acme.com", _ACME, hosts=True,
+        decision=_WORKER_ONLY,
+        expect_ts={"status": "DISCOVERY_BUDGET_EXHAUSTED", "website": "https://acme.com/", "identityConfidence": "HIGH", "warnings": [_BUDGET, _NO_FEED],
+                   "collection": "SOURCE_LIMITED_NOT_FOUND", "items": [], "probedHosts": ["acme.com", "investor.acme.com"]},
+        expect_py={"status": "EMPTY_RESULT", "website": None, "identityConfidence": None, "warnings": [], "collection": "NOT_FOUND", "items": [], "probedHosts": []}),
+    # Card 209: path, query and fragment are dropped; the root domain strips a leading investors. so investor. / ir. variants are
+    # probed after the site's own host.
+    _company_ir_case(
+        "news.company_ir.path_and_query_are_dropped_and_investors_prefix_is_stripped_for_the_root", ["BR-NWS-209"], "investors.acme.com/x?y", _ACME, hosts=True,
+        decision=_WORKER_ONLY,
+        expect_ts={"status": "DISCOVERY_BUDGET_EXHAUSTED", "website": "https://investors.acme.com/", "identityConfidence": "HIGH", "warnings": [_BUDGET, _NO_FEED],
+                   "collection": "SOURCE_LIMITED_NOT_FOUND", "items": [], "probedHosts": ["investors.acme.com", "investor.acme.com"]},
+        expect_py={"status": "EMPTY_RESULT", "website": None, "identityConfidence": None, "warnings": [], "collection": "NOT_FOUND", "items": [], "probedHosts": []}),
+]
+
+
+def _rss_feed(title, items):
+    body = "".join(f"<item><title>{t}</title>" + (f"<link>{link}</link>" if link else "")
+                   + f"<pubDate>Wed, 14 Oct 2026 12:00:00 GMT</pubDate><description>{t} details</description></item>" for t, link in items)
+    return f'<?xml version="1.0"?><rss version="2.0"><channel><title>{title}</title>{body}</channel></rss>'
+
+
+_ACMEINC = {"shortName": "Acmeinc", "longName": "Acmeinc Holdings Inc", "exchange": "NMS"}
+_FEED_ROUTES = {
+    "https://www.acmeinc.com/": {"body": '<html><head><link rel="alternate" type="application/rss+xml" href="https://news.acmeinc.com/feed.xml"></head><body>'
+                                         '<a href="https://feeds.example-wire.com/digest.xml">RSS digest</a> <a href="https://feeds.example-wire.com/acme.xml">feed</a></body></html>'},
+    "https://news.acmeinc.com/feed.xml": {"body": _rss_feed("Acmeinc News", [("Acmeinc reports third quarter results", "https://news.acmeinc.com/q3"),
+                                                                              ("Acmeinc undated link", None)])},
+    "https://feeds.example-wire.com/digest.xml": {"body": _rss_feed("Industry Digest", [("Other firm results", "https://feeds.example-wire.com/o1")])},
+    "https://feeds.example-wire.com/acme.xml": {"body": _rss_feed("Acmeinc Newsroom wire", [("Acmeinc signs contract", "https://feeds.example-wire.com/a1"),
+                                                                                          ("Acmeinc quiet item without link", None)])},
+}
+_NV_INFO = {"shortName": "NVIDIA", "longName": "NVIDIA Corporation", "exchange": "NMS"}
+_TOKEN_ROUTES = {
+    "https://www.nvidia.com/": {"body": '<html><body><a href="https://f.example-wire.com/a.xml">RSS a</a> <a href="https://f.example-wire.com/b.xml">RSS b</a> '
+                                        '<a href="https://f.example-wire.com/c.xml">RSS c</a> <a href="https://f.example-wire.com/d.xml">RSS d</a></body></html>'},
+    "https://f.example-wire.com/a.xml": {"body": _rss_feed("Weekly", [("Nvidia unveils new GPU", "https://f.example-wire.com/a1")])},
+    "https://f.example-wire.com/b.xml": {"body": _rss_feed("Corporation digest", [("Corporation news", "https://f.example-wire.com/b1")])},
+    "https://f.example-wire.com/c.xml": {"body": _rss_feed("Technologies weekly", [("Technologies news", "https://f.example-wire.com/c1")])},
+    "https://f.example-wire.com/d.xml": {"body": _rss_feed("Market wrap", [("NVDA moves", "https://f.example-wire.com/d1")])},
+}
+_FEED_REJECTED = ["COMPANY_IR_RSS_HOST_REJECTED", "Linked external RSS/Atom feed did not match the company identity."]
+
+CASES += [
+    # Cards 207 / 228: a feed on the company's own domain (news.acmeinc.com) is accepted; its items are HIGH with a URL, LOW without,
+    # tickerRelevance HIGH. An external feed titled 'Industry Digest' that names neither the ticker nor a name token is rejected
+    # (COMPANY_IR_RSS_HOST_REJECTED); an external feed whose title carries the name token 'acmeinc' is accepted with MEDIUM (URL) / LOW (no URL).
+    _company_ir_case(
+        "news.company_ir.same_domain_feed_accepted_unrelated_external_feed_rejected", ["BR-NWS-207", "BR-NWS-228"], "https://www.acmeinc.com", _ACMEINC, routes=_FEED_ROUTES,
+        decision=_WORKER_ONLY,
+        expect_ts={"status": "OK", "website": "https://www.acmeinc.com/", "identityConfidence": "HIGH", "warnings": [_FEED_REJECTED], "collection": None,
+                   "items": [["Acmeinc reports third quarter results", "HIGH", "HIGH"], ["Acmeinc undated link", "LOW", "HIGH"],
+                             ["Acmeinc signs contract", "MEDIUM", "HIGH"], ["Acmeinc quiet item without link", "LOW", "HIGH"]]}),
+    # Card 211: name tokens (4+ letters, not corp/inc/group/technology ...): 'Nvidia' matches; text with only 'Corporation' or
+    # 'Technologies' does not; the ticker in the first 2,000 characters of the feed also matches.
+    _company_ir_case(
+        "news.company_ir.external_feed_matches_on_name_token_or_ticker_but_not_stopwords", ["BR-NWS-211", "BR-NWS-207", "BR-NWS-228"], "https://www.nvidia.com", _NV_INFO,
+        ticker="NVDA", routes={**_TOKEN_ROUTES, SEC_TICKERS_URL: {"json": {"0": {"cik_str": 1045810, "ticker": "NVDA", "title": "NVIDIA CORP"}}}},
+        decision=_WORKER_ONLY,
+        expect_ts={"status": "OK", "website": "https://www.nvidia.com/", "identityConfidence": "HIGH", "warnings": [_FEED_REJECTED], "collection": None,
+                   "items": [["Nvidia unveils new GPU", "MEDIUM", "HIGH"], ["NVDA moves", "MEDIUM", "HIGH"]]}),
+    # Card 258: identity grade. A name or a CIK without a usable website is MEDIUM; neither is LOW.
+    _company_ir_case(
+        "news.company_ir.identity_confidence_low_without_name_cik_or_website", ["BR-NWS-258"], None, {}, routes={SEC_TICKERS_URL: {"json": {}}},
+        decision=_WORKER_ONLY,
+        expect_py={"status": "EMPTY_RESULT", "website": None, "identityConfidence": None,
+                   "warnings": [["SOURCE_IDENTITY_UNAVAILABLE", "Yahoo company identity lookup was unavailable; only exact ticker-token matches were retained."]],
+                   "collection": "SOURCE_LIMITED_NOT_FOUND", "items": []},
+        expect_ts={"status": "WEBSITE_NOT_AVAILABLE", "website": None, "identityConfidence": "LOW",
+                   "warnings": [["COMPANY_WEBSITE_NOT_AVAILABLE", "No company website was available from public profile data."]],
+                   "collection": "SOURCE_LIMITED_NOT_FOUND", "items": []}),
+    _company_ir_case(
+        "news.company_ir.identity_confidence_medium_with_cik_only", ["BR-NWS-258"], None, {},
+        routes={SEC_TICKERS_URL: {"json": {"0": {"cik_str": 123, "ticker": "ACME", "title": "Acme"}}}},
+        decision=_WORKER_ONLY,
+        expect_py={"status": "EMPTY_RESULT", "website": None, "identityConfidence": None,
+                   "warnings": [["SOURCE_IDENTITY_UNAVAILABLE", "Yahoo company identity lookup was unavailable; only exact ticker-token matches were retained."]],
+                   "collection": "SOURCE_LIMITED_NOT_FOUND", "items": []},
+        expect_ts={"status": "WEBSITE_NOT_AVAILABLE", "website": None, "identityConfidence": "MEDIUM",
+                   "warnings": [["COMPANY_WEBSITE_NOT_AVAILABLE", "No company website was available from public profile data."]],
+                   "collection": "SOURCE_LIMITED_NOT_FOUND", "items": []}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# get_company_press_releases: release-type allow-list and payload differences (BR-NWS-231, BR-NWS-267)
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+_ACME_CORP = {"shortName": "Acme", "longName": "Acme Corp", "exchange": "NMS"}
+_PR_SEC = _sec_recent(["8-K", "10-Q"], [3, 5])
+_PR_NEWS = [_yn("Acme beats estimates", when=_days_ago(1))]
+
+
+def _press_view(d):
+    return {"items": [[i["title"], i["sourceType"], i.get("filingType")] for i in d["items"]], "status": d.get("status"),
+            "coverageStatus": d["coverageStatus"], "decisionGrade": d["decisionGrade"], "failureMode": d["failureMode"],
+            "sourceStatus": {k: s.get("status") for k, s in d["sourceStatus"].items()}, "sourcesUsed": d["meta"]["sourcesUsed"],
+            "warnings": _warning_rows(d), "next": d["coverage"]["recommendedNextAction"]}
+
+
+CASES += [
+    # Card 231: sec and company_ir_page run as primary sources with SEC types fixed to ['8-K'] (the 10-Q is not collected); the
+    # yahoo_finance_news item is collected but is not a release type, so it is dropped from the items. The 8-K has no EX-99.1 here.
+    _sec_scenario(
+        "news.press_releases.only_release_type_items_and_8k_filings_are_returned", ["BR-NWS-231"],
+        lambda: server.get_company_press_releases("ACME", 90, 20, ["sec", "yahoo_finance_news", "company_ir_page"]),
+        'm.yahooFinance.getCompanyPressReleases("ACME", 90, 20, ["sec", "yahoo_finance_news", "company_ir_page"])',
+        _PR_SEC, news=_PR_NEWS, info=_ACME_CORP, select=_press_view,
+        expect={"items": [["8-K filed", "sec_filing", "8-K"]], "status": "SEC_8K_FOUND_EX99_NOT_FOUND", "coverageStatus": "SEC_8K_FOUND_EX99_NOT_FOUND",
+                "decisionGrade": False, "failureMode": "SEC_8K_FOUND_EX99_NOT_FOUND",
+                "sourceStatus": {"sec": "OK", "yahoo_finance_news": "OK", "company_ir_page": "NOT_REGISTERED"},
+                "sourcesUsed": ["sec", "yahoo_finance_news"],
+                "warnings": [["SEC_8K_FOUND_EX99_NOT_FOUND", "SEC 8-K filing(s) were found, but no EX-99.1 press-release exhibit was resolved."]],
+                "next": "CHECK_OFFICIAL_RELEASES"}),
+    # Card 231 edge: sources=['yahoo_finance_news'] alone returns no items and NO_OFFICIAL_RELEASE_SOURCE.
+    _scenario(
+        "news.press_releases.news_only_selection_has_no_official_release_source", ["BR-NWS-231"],
+        lambda: server.get_company_press_releases("ACME", 90, 20, ["yahoo_finance_news"]),
+        'm.yahooFinance.getCompanyPressReleases("ACME", 90, 20, ["yahoo_finance_news"])',
+        news=_PR_NEWS, info=_ACME_CORP, select=_press_view,
+        expect={"items": [], "status": "NOT_FOUND", "coverageStatus": "NO_OFFICIAL_RELEASE_SOURCE", "decisionGrade": False,
+                "failureMode": "NO_OFFICIAL_RELEASE_SOURCE", "sourceStatus": {"yahoo_finance_news": "OK"}, "sourcesUsed": ["yahoo_finance_news"],
+                "warnings": [["NO_OFFICIAL_RELEASE_SOURCE", "No company-originated or official release source found in requested window."]],
+                "next": "USE_RETURNED_CONTEXT"}),
+    # Card 267: the payload fields that differ: the Worker adds doctrineUse 'ALLOWED' and the SEC evidence cikInt, and words
+    # decisionGradeBasis differently ('SEC EX-99 press-release exhibit' vs 'SEC EX-99 or approved IR-page evidence').
+    _sec_scenario(
+        "news.press_releases.payload_has_doctrine_use_and_different_basis_text_in_the_worker", ["BR-NWS-267"],
+        lambda: server.get_company_press_releases("ACME", 90, 20, ["sec"]),
+        'm.yahooFinance.getCompanyPressReleases("ACME", 90, 20, ["sec"])',
+        _PR_SEC, news=[], info=_ACME_CORP,
+        select=lambda d: {"doctrineUse": d.get("doctrineUse"), "basis": d["decisionGradeBasis"], "capabilityStatus": d["capabilityStatus"],
+                          "secEvidenceKeys": sorted(d["secEvidence"][0].keys()), "failureMode": d["failureMode"]},
+        mode="pinned",
+        decision="FINDING: get_company_press_releases adds doctrineUse='ALLOWED' and secEvidence[].cikInt in the Worker only and words decisionGradeBasis differently",
+        expect_py={"doctrineUse": None, "basis": "No resolved SEC EX-99 or approved IR-page evidence in this call; use for verification/context only.",
+                   "capabilityStatus": "ACTIVE", "secEvidenceKeys": ["acceptedAt", "accessionNumber", "documentUrl", "filingDate", "filingType"],
+                   "failureMode": "SEC_8K_FOUND_EX99_NOT_FOUND"},
+        expect_ts={"doctrineUse": "ALLOWED", "basis": "No resolved SEC EX-99 press-release exhibit in this call; use for verification/context only.",
+                   "capabilityStatus": "ACTIVE", "secEvidenceKeys": ["acceptedAt", "accessionNumber", "cikInt", "documentUrl", "filingDate", "filingType"],
+                   "failureMode": "SEC_8K_FOUND_EX99_NOT_FOUND"}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# Declared output schema vs runtime statuses (BR-NWS-214)
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+_NEWS_TOOL_NAMES = ["get_company_news", "search_company_news", "get_public_event_timeline", "verify_company_event",
+                    "get_company_press_releases", "get_sec_recent_events"]
+
+
+def _declared_status_py():
+    out = {}
+    for tool in _NEWS_TOOL_NAMES:
+        schema = server._TOOL_OUTPUT_SCHEMAS.get("get_yahoo_finance_news" if tool == "get_company_news" else tool) or {}
+        out[tool] = (schema.get("properties") or {}).get("status", {}).get("enum")
+    with _py_news_env(news=[], info=_VOD_INFO):
+        payload = json.loads(asyncio.run(server.get_company_news("VOD.L", 10, 14, ["yahoo_finance_news"])))
+    return {"declared": out, "runtimeStatus": payload.get("status")}
+
+
+CASES += [
+    # Card 214: every source succeeds and returns nothing -> status NOT_FOUND, which is outside the enum [OK, PARTIAL] that Python's
+    # output schemas declare for the news and event tools. The Worker declares no status property (an open object schema).
+    Case(name="news.schema.python_declares_a_status_enum_that_runtime_statuses_leave", ids=["BR-NWS-214"],
+         py=_declared_status_py,
+         ts={"js": _worker_js(f"""
+const out = {{}};
+for (const t of {json.dumps(_NEWS_TOOL_NAMES)}) {{
+  const tool = m.tools.TOOLS.find(x => x.name === t);
+  const props = (tool && tool.outputSchema && tool.outputSchema.properties) || {{}};
+  out[t] = props.status && props.status.enum ? props.status.enum : null;
+}}
+const payload = JSON.parse(await m.yahooFinance.getCompanyNews("VOD.L", 10, 14, ["yahoo_finance_news"]));
+return {{declared: out, runtimeStatus: payload.status ?? null}};"""), "isolate": True},
+         routes=_yahoo_routes([], _VOD_INFO), mode="pinned",
+         decision="FINDING: the declared output schema allows status OK/PARTIAL in Python only; both runtimes emit NOT_FOUND (and other values) at runtime",
+         expect_py={"declared": {t: ["OK", "PARTIAL"] for t in _NEWS_TOOL_NAMES}, "runtimeStatus": "NOT_FOUND"},
+         expect_ts={"declared": {t: None for t in _NEWS_TOOL_NAMES}, "runtimeStatus": "NOT_FOUND"}),
 ]

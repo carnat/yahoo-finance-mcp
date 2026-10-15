@@ -23,6 +23,15 @@ How the two runtimes are driven (nothing reaches the network)
   (production code is unchanged; only the data file differs). The shipped registry (two candidate entries) is used
   as is for the candidate cases.
 
+Not driven (no tool path, or the stubs cannot express it)
+- A redirect to an off-list host for an IR page (BR-NWS-108, second half): neither stub can set the final URL of a response.
+- Failure modes that need a thrown timeout or a Cloudflare subrequest error: WORKER_SUBREQUEST_LIMIT, PROVIDER_TIMEOUT, Finnhub/Marketaux
+  TIMEOUT (BR-NWS-106, 155, 163); the stubs only return responses.
+- computeSourceStatus / _compute_source_status branches that run without collector diagnostics (BR-NWS-156 "no diagnostics",
+  BR-NWS-159 company_ir via a "yahoo finance" warning): every collector supplies diagnostics, so no tool call reaches them.
+- The documentUrl / primaryDocumentUrl branch of SEC event URL building (BR-NWS-133): the collectors never pass those fields.
+- Host-local interpretation of naive timestamps (BR-NWS-136, 171): the result depends on the machine time zone.
+
 Conventions: provider keys are fake literals (`fake-...`); duplicateGroupId, retrievedAt and watermark are never
 compared because the runtimes hash differently (BR-NWS-119) or stamp the clock in different formats (BR-NWS-136);
 timestamps are compared with the Worker's ".000Z" milliseconds removed unless the case is about that difference.
@@ -42,9 +51,8 @@ import types
 from typing import Any
 from unittest.mock import patch
 
-from scripts.parity.harness import WORKER, Case
-
 import server
+from scripts.parity.harness import WORKER, Case
 from yfmcp import capital_structure as cs
 from yfmcp.clients import edgar
 
@@ -74,11 +82,11 @@ GNW_FEEDS = [(name, url) for name, url in server._GLOBENEWSWIRE_RSS_FEEDS]
 
 def _frozen_datetime_module(now: str):
     """A stand-in for the `datetime` module whose datetime.now() is fixed (everything else is the real module)."""
-    frozen = datetime.datetime.fromisoformat(now.replace("Z", "+00:00"))
+    frozen = datetime.datetime.fromisoformat(now)
 
     class FrozenDateTime(datetime.datetime):
         @classmethod
-        def now(cls, tz=None):  # noqa: D401 - mirrors datetime.datetime.now
+        def now(cls, tz=None):
             return frozen.astimezone(tz) if tz is not None else frozen.replace(tzinfo=None)
 
     shim = types.SimpleNamespace(**{k: getattr(datetime, k) for k in dir(datetime) if not k.startswith("__")})
@@ -249,7 +257,6 @@ def ts_norm(value: Any) -> Any:
 
 
 ITEM_BASE = ("title", "source", "sourceType", "eventType", "confidence", "tickerRelevance", "url")
-ITEM_LABELS = ("evidenceClass", "tickerMatch", "urlProvenance", "decisionUse", "matchBasis")
 
 
 def item_rows(v: dict, fields: tuple = ITEM_BASE, key: str = "items") -> list[dict]:
@@ -295,7 +302,7 @@ def news_view(v: dict, *, items: tuple = ITEM_BASE, sources: tuple[str, ...] = (
 # ── scenario data builders ────────────────────────────────────────────────────────────────────
 
 def epoch(day_iso: str) -> int:
-    return int(datetime.datetime.fromisoformat(day_iso.replace("Z", "+00:00")).timestamp())
+    return int(datetime.datetime.fromisoformat(day_iso).timestamp())
 
 
 def yahoo_row(title: str, when: str, *, publisher: str = "Reuters", link: str | None = "auto") -> dict:
@@ -372,7 +379,6 @@ CASES += [
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 ACME_INFO = {"shortName": "Acme", "longName": "Acme Corporation Inc."}
-FINNHUB_VIEW_FIELDS = ("status", "rawCount", "filteredCount")
 
 
 def finnhub_state_view(v: dict) -> dict:
@@ -766,7 +772,7 @@ CASES += [
 # The exact request URL is the route key, so a changed limit, page, domain list or window is an UNSTUBBED request.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-from urllib.parse import urlencode  # noqa: E402
+from urllib.parse import urlencode
 
 MX_TOKEN = "fake-marketaux-token"
 MX_DOMAINS = "businesswire.com,prnewswire.com,globenewswire.com"
@@ -1141,4 +1147,857 @@ CASES += [
                mode="pinned", decision="FINDING: Python falls back to the HTML Form 4 parser only when XML parsing raises; the Worker whenever no XML transaction node exists",
                expect_py={"parsed": [False], "warnings": ["FORM4_PARSE_UNAVAILABLE"], "titles": ["4 filed"]},
                expect_ts={"parsed": [True], "warnings": [], "titles": ["Form 4: Sale by Doe Jane"]}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# get_company_press_releases: BR-NWS-105 (P0 status / decisionGrade precedence), 109 (P0 EX-99.1 identification),
+# 147 (empty status wording), 148 (candidate-only IR page)
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+def index_page(cik: int, accession: str, exhibits: list[tuple[str, str, str]]) -> str:
+    """An EDGAR filing index page: (type, description, document) rows after the primary 8-K document."""
+    nodash = accession.replace("-", "")
+    rows = [f"<tr><td>1</td><td>8-K</td><td><a href=\"/Archives/edgar/data/{cik}/{nodash}/a8k.htm\">a8k.htm</a></td><td>8-K</td><td>10</td></tr>"]
+    for n, (typ, desc, doc) in enumerate(exhibits, start=2):
+        link = f'<a href="/Archives/edgar/data/{cik}/{nodash}/{doc}">{doc}</a>' if doc else ""
+        rows.append(f"<tr><td>{n}</td><td>{desc}</td><td>{link}</td><td>{typ}</td><td>5</td></tr>")
+    return ("<html><body><table><tr><th>Seq</th><th>Description</th><th>Document</th><th>Type</th><th>Size</th></tr>"
+            + "".join(rows) + "</table></body></html>")
+
+
+def press_scn(cik: int, exhibits: list[tuple[str, str, str]] | None, **extra) -> dict:
+    acc = f"{cik:010d}-26-000001"
+    filings = [sec_filing("8-K", acc, "a8k.htm")]
+    index_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc.replace('-', '')}/{acc}-index.htm"
+    docs = {} if exhibits is None else {index_url: index_page(cik, acc, exhibits)}
+    return sec_scn(cik, filings, docs, info=extra.pop("info", ACME_INFO), **extra)
+
+
+def press_view(v: dict) -> dict:
+    return {"status": v.get("status"), "coverageStatus": v.get("coverageStatus"), "decisionGrade": v.get("decisionGrade"),
+            "failureMode": v.get("failureMode"), "coverageAction": v["coverage"]["recommendedNextAction"],
+            "items": [{"sourceType": it["sourceType"], "title": it["title"], "url": it["url"], "decisionUse": it.get("decisionUse")}
+                      for it in v.get("items") or []],
+            "warnings": [(w["code"], w.get("filingsSearched")) for w in v.get("warnings") or []]}
+
+
+def _press_case(name: str, ids: list[str], cik: int, exhibits, **kw) -> Case:
+    kw.setdefault("select", press_view)
+    return tool_case(name, ids, "press", [f"PR{cik}", 90, 20, ["sec"]], press_scn(cik, exhibits), **kw)
+
+
+_NOT_FOUND_EXPECT = {"status": "SEC_8K_FOUND_EX99_NOT_FOUND", "coverageStatus": "SEC_8K_FOUND_EX99_NOT_FOUND", "decisionGrade": False,
+                     "failureMode": "SEC_8K_FOUND_EX99_NOT_FOUND", "coverageAction": "USE_RETURNED_CONTEXT"}
+CASES += [
+    # Card 105: one 8-K, no resolvable EX-99.1, no approved IR page -> not decision grade; warning counts the filing.
+    _press_case("press.status.8k_without_ex99_is_not_decision_grade", ["BR-NWS-105"], 910301, [("EX-101", "XBRL", "x.xml")],
+                expect={**_NOT_FOUND_EXPECT,
+                        "items": [{"sourceType": "sec_filing", "title": "8-K filed",
+                                   "url": "https://www.sec.gov/Archives/edgar/data/910301/000091030126000001/a8k.htm", "decisionUse": "CHECK_OFFICIAL_RELEASES"}],
+                        "warnings": [("SEC_8K_FOUND_EX99_NOT_FOUND", 1)]}),
+    # A resolved EX-99.1 rewrites the item (sec_ex99_found, HIGH) and makes the payload decision grade.
+    _press_case("press.status.resolved_ex99_1_is_decision_grade", ["BR-NWS-105", "BR-NWS-109"], 910302, [("EX-99.1", "Press Release", "ex99.htm")],
+                expect={"status": "SEC_EX99_FOUND", "coverageStatus": "SEC_EX99_RESOLVED", "decisionGrade": True, "failureMode": None,
+                        "coverageAction": "USE_OFFICIAL_EVIDENCE",
+                        "items": [{"sourceType": "sec_ex99_found", "title": "EX-99.1 exhibit found in 8-K",
+                                   "url": "https://www.sec.gov/Archives/edgar/data/910302/000091030226000001/ex99.htm",
+                                   "decisionUse": "USE_OFFICIAL_EVIDENCE"}],
+                        "warnings": []}),
+    # Card 109: a bare 'EX-99' typed exhibit described as a press release resolves in both runtimes (Python accepts EX-99 outright,
+    # the Worker needs release wording) - the card's claim that Python rejects it does not hold.
+    _press_case("press.ex99.bare_ex99_with_press_release_description_resolves_in_both", ["BR-NWS-109"], 910303,
+                [("EX-99", "Press Release", "ex99.htm")],
+                select=lambda v: {"status": v.get("status"), "decisionGrade": v.get("decisionGrade")},
+                expect={"status": "SEC_EX99_FOUND", "decisionGrade": True}),
+    # Card 109 divergences on the same 8-K: a bare 'EX-99' with a non-release description (Python resolves, Worker does not);
+    # 'EX-99.01' and a file name like ex99_1.htm with no type (Worker resolves, Python does not).
+    _press_case("press.ex99.bare_ex99_with_other_description_resolves_only_in_python", ["BR-NWS-109"], 910304,
+                [("EX-99", "Exhibit", "ex99.htm")], select=lambda v: {"status": v.get("status"), "decisionGrade": v.get("decisionGrade")},
+                mode="pinned", decision="FINDING: Python resolves any bare 'EX-99' exhibit as the press release; the Worker requires release wording in the description",
+                expect_py={"status": "SEC_EX99_FOUND", "decisionGrade": True},
+                expect_ts={"status": "SEC_8K_FOUND_EX99_NOT_FOUND", "decisionGrade": False}),
+    _press_case("press.ex99.zero_padded_type_resolves_only_in_worker", ["BR-NWS-109"], 910305,
+                [("EX-99.01", "Press Release", "ex99.htm")], select=lambda v: {"status": v.get("status"), "decisionGrade": v.get("decisionGrade")},
+                mode="pinned", decision="FINDING: the Worker accepts type EX-99.01 as the press release exhibit; Python accepts only EX-99.1, EX-99 and 99.1",
+                expect_py={"status": "SEC_8K_FOUND_EX99_NOT_FOUND", "decisionGrade": False},
+                expect_ts={"status": "SEC_EX99_FOUND", "decisionGrade": True}),
+    _press_case("press.ex99.file_name_match_without_a_type_resolves_only_in_worker", ["BR-NWS-109"], 910306,
+                [("", "Exhibit", "ex99_1.htm")], select=lambda v: {"status": v.get("status"), "decisionGrade": v.get("decisionGrade")},
+                mode="pinned", decision="FINDING: the Worker also resolves an exhibit by its file name (ex99_1); Python needs the type column",
+                expect_py={"status": "SEC_8K_FOUND_EX99_NOT_FOUND", "decisionGrade": False},
+                expect_ts={"status": "SEC_EX99_FOUND", "decisionGrade": True}),
+]
+
+
+def _empty_press_view(v: dict) -> dict:
+    return {"status": v.get("status"), "coverageStatus": v.get("coverageStatus"), "decisionGrade": v.get("decisionGrade"),
+            "warnings": codes(v), "candidateSources": v.get("candidateSources"),
+            "sec": (v.get("sourceStatus") or {}).get("sec", {}).get("status")}
+
+
+IQE_CANDIDATE = {
+    "ticker": "IQE.L", "issuerName": "IQE plc", "canonicalUrl": "https://www.iqep.com/investors/regulatory-news/", "adapter": "html_article",
+    "candidateReason": ("Proposed for 2.3.0 non-US coverage; not fetched during review because the build sandbox cannot reach the host. "
+                        "Confirm the page lists the issuer's regulatory announcements, then set status approved with reviewer metadata."),
+    "discoveredAt": "2026-09-25T12:00:00Z", "decisionGrade": False}
+_IQE_PRESS = {"coverageStatus": "NO_OFFICIAL_RELEASE_SOURCE", "decisionGrade": False, "candidateSources": [IQE_CANDIDATE],
+              "company_ir_page": {"status": "CANDIDATE_AVAILABLE", "allowedAction": "review_and_promote", "candidates": [IQE_CANDIDATE]}}
+
+# Card 147: nothing found because SEC is unavailable, yet the status reads as plain absence (NO_YAHOO_PRESS_RELEASE) and the
+# coverage status is NO_OFFICIAL_RELEASE_SOURCE; the outage shows only in sourceStatus.sec.
+# Finding (Q7, for triage): a provider outage on an empty press-release result is labelled like genuine absence.
+CASES += [
+    tool_case("press.empty.sec_outage_with_yahoo_selected_reads_as_no_yahoo_press_release", ["BR-NWS-147"], "press",
+              ["ZZPR", 90, 20, None], {"info": ACME_INFO, "news": []}, select=_empty_press_view,
+              expect={"status": "NO_YAHOO_PRESS_RELEASE", "coverageStatus": "NO_OFFICIAL_RELEASE_SOURCE", "decisionGrade": False,
+                      "warnings": ["SOURCE_UNAVAILABLE", "NO_OFFICIAL_RELEASE_SOURCE"], "candidateSources": None, "sec": "PROVIDER_ERROR"}),
+    # Precedence of the empty-result status: Yahoo press releases > IR page > company_ir RSS > NOT_FOUND.
+    tool_case("press.empty.status_for_unregistered_ir_page_only", ["BR-NWS-147", "BR-NWS-148"], "press",
+              ["ZZPR", 90, 20, ["company_ir_page"]], {"info": {}}, select=_empty_press_view,
+              expect={"status": "COMPANY_IR_PAGE_NOT_APPROVED", "coverageStatus": "NO_OFFICIAL_RELEASE_SOURCE", "decisionGrade": False,
+                      "warnings": ["NO_OFFICIAL_RELEASE_SOURCE"], "candidateSources": None, "sec": None}),
+    # Card 148: only an unapproved candidate exists (IQE.L is a shipped candidate). Python says NOT_APPROVED, the Worker CANDIDATE_ONLY;
+    # both list the candidate in candidateSources, built from different inputs.
+    tool_case("press.empty.candidate_only_ir_page_status_differs", ["BR-NWS-148", "BR-NWS-146", "BR-NWS-101"], "press",
+              ["IQE.L", 90, 20, ["company_ir_page"]], {"info": {}},
+              select=lambda v: {"status": v.get("status"), "coverageStatus": v.get("coverageStatus"), "decisionGrade": v.get("decisionGrade"),
+                                "candidateSources": v.get("candidateSources"),
+                                "company_ir_page": status_row(v["sourceStatus"].get("company_ir_page"), "status", "allowedAction", "candidates")},
+              mode="pinned", decision="FINDING: with only an unapproved IR-page candidate the empty press-release status is COMPANY_IR_PAGE_NOT_APPROVED in Python and COMPANY_IR_PAGE_CANDIDATE_ONLY in the Worker",
+              expect_py={**_IQE_PRESS, "status": "COMPANY_IR_PAGE_NOT_APPROVED"}, expect_ts={**_IQE_PRESS, "status": "COMPANY_IR_PAGE_CANDIDATE_ONLY"}),
+    tool_case("press.empty.yahoo_press_release_selection_outranks_the_ir_page_status", ["BR-NWS-148"], "press",
+              ["IQE.L", 90, 20, ["company_ir_page", "yahoo_finance_press_releases"]], {"info": {}, "news": []},
+              select=lambda v: v.get("status"), expect="NO_YAHOO_PRESS_RELEASE"),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# verify_company_event: BR-NWS-106 (P0 NOT_FOUND upgrade), 163 (failure-mode order, retryable), 164 (status precedence),
+# 138 (query term threshold)
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+VERIFY_ACTION = ("Inspect sourceStatus and retry with a narrower sources list that excludes failed providers; "
+                 "do not treat this result as confirmed absence.")
+
+
+def verify_view(v: dict) -> dict:
+    return {"status": v.get("status"), "failureMode": v.get("failureMode"), "retryable": v.get("retryable"),
+            "recommendedAction": v.get("recommendedAction"), "warnings": codes(v), "sourceCoverage": v.get("sourceCoverage"),
+            "bestEvidence": [{"sourceType": e["sourceType"], "confidence": e["confidence"], "method": e["queryMatch"]["method"],
+                              "relevance": e["relevance"]} for e in v.get("bestEvidence") or []],
+            "matched": v["queryPolicy"]["matchedEvidenceCount"]}
+
+
+def _limited(mode: str | None, retryable: bool, **over) -> dict:
+    out = {"status": "SOURCE_LIMITED_NOT_FOUND", "failureMode": mode, "retryable": retryable,
+           "recommendedAction": VERIFY_ACTION, "warnings": ["SOURCE_UNAVAILABLE", "SOURCE_LIMITED_NOT_FOUND"],
+           "sourceCoverage": "PARTIAL", "bestEvidence": [], "matched": 0}
+    out.update(over)
+    return out
+
+
+def _verify_case(name: str, ids: list[str], sources: list[str], env: dict, routes: dict, expect: dict, ticker: str = "ACME", **scn) -> Case:
+    return tool_case(name, ids, "verify", [ticker, "buyback announcement", "", "", sources],
+                     {"env": env, "info": scn.pop("info", ACME_INFO), "news": scn.pop("news", []), "routes": routes, **scn},
+                     select=verify_view, expect=expect)
+
+
+CASES += [
+    # Card 106 (P0): nothing matched and Finnhub rate-limited -> not "NOT_FOUND" but SOURCE_LIMITED_NOT_FOUND, retryable.
+    _verify_case("verify.not_found_with_rate_limited_source_is_source_limited_and_retryable", ["BR-NWS-106", "BR-NWS-163"], ["finnhub"],
+                 FAKE_FINNHUB, {FINNHUB_NEWS: {"status": 429, "body": "{}"}}, _limited("RATE_LIMITED", True)),
+    # Card 163: RATE_LIMITED outranks UNCONFIGURED; UNCONFIGURED alone is not retryable.
+    _verify_case("verify.rate_limited_outranks_unconfigured", ["BR-NWS-163"], ["finnhub", "marketaux"], FAKE_FINNHUB,
+                 {FINNHUB_NEWS: {"status": 429, "body": "{}"}},
+                 _limited("RATE_LIMITED", True, warnings=["SOURCE_UNAVAILABLE", "SOURCE_UNAVAILABLE", "SOURCE_LIMITED_NOT_FOUND"])),
+    _verify_case("verify.unconfigured_alone_is_not_retryable", ["BR-NWS-163", "BR-NWS-106"], ["finnhub"], {}, {}, _limited("SOURCE_UNCONFIGURED", False)),
+    _verify_case("verify.not_eligible_source_gives_source_not_eligible", ["BR-NWS-163"], ["finnhub"], FAKE_FINNHUB, {},
+                 _limited("SOURCE_NOT_ELIGIBLE", False, warnings=["SOURCE_NOT_ELIGIBLE", "SOURCE_LIMITED_NOT_FOUND"]), ticker="ERIC-B.ST"),
+    _verify_case("verify.provider_error_is_not_retryable", ["BR-NWS-163"], ["finnhub"], FAKE_FINNHUB,
+                 {FINNHUB_NEWS: {"status": 500, "body": "{}"}}, _limited("PROVIDER_ERROR", False)),
+    _verify_case("verify.provider_changed_is_not_retryable", ["BR-NWS-163"], ["finnhub"], FAKE_FINNHUB,
+                 {FINNHUB_NEWS: {"json": {"oops": 1}}}, _limited("PROVIDER_CHANGED", False)),
+    _verify_case("verify.identity_unavailable_gives_yahoo_identity_failure_mode", ["BR-NWS-163"], ["yahoo_finance_news"], {}, {},
+                 _limited("YAHOO_IDENTITY_UNAVAILABLE", False, warnings=["SOURCE_IDENTITY_UNAVAILABLE", "SOURCE_LIMITED_NOT_FOUND"]), info={}),
+    # Finding (Q7, for triage): AUTH_ERROR is a real outage but yields no failure mode, so NOT_FOUND is not upgraded.
+    _verify_case("verify.auth_error_does_not_upgrade_not_found", ["BR-NWS-163", "BR-NWS-106"], ["finnhub"], FAKE_FINNHUB,
+                 {FINNHUB_NEWS: {"status": 401, "body": "{}"}},
+                 {"status": "NOT_FOUND", "failureMode": None, "retryable": False, "recommendedAction": None, "warnings": ["SOURCE_UNAVAILABLE"],
+                  "sourceCoverage": "PARTIAL", "bestEvidence": [], "matched": 0}),
+    # Card 138: the term threshold. 'announced' is a stop word; 4 meaningful terms need ceil(4 * 0.67) = 3 of them.
+    tool_case("verify.query_policy.four_meaningful_terms_require_three_matches", ["BR-NWS-138"], "verify",
+              ["ACME", "BlueBird satellite launch contract announced", "", "", []],
+              {"info": ACME_INFO}, select=lambda v: v["queryPolicy"],
+              expect={"meaningfulTerms": ["bluebird", "satellite", "launch", "contract"], "requiredTermMatches": 3, "matchedEvidenceCount": 0}),
+    tool_case("verify.query_policy.up_to_two_terms_must_all_match", ["BR-NWS-138"], "verify", ["ACME", "dividend cut", "", "", []],
+              {"info": ACME_INFO}, select=lambda v: v["queryPolicy"],
+              expect={"meaningfulTerms": ["dividend", "cut"], "requiredTermMatches": 2, "matchedEvidenceCount": 0}),
+    tool_case("verify.query_policy.generic_query_has_no_terms_and_warns", ["BR-NWS-138"], "verify", ["ACME", "announced results", "", "", []],
+              {"info": ACME_INFO}, select=lambda v: {"policy": v["queryPolicy"], "warnings": codes(v)},
+              expect={"policy": {"meaningfulTerms": [], "requiredTermMatches": 0, "matchedEvidenceCount": 0},
+                      "warnings": ["EVENT_QUERY_TOO_GENERIC"]}),
+]
+
+# Card 164: status precedence CONFLICTING > CONFIRMED (official, in range) > PARTIAL (matched in range) > STALE > NOT_FOUND.
+_PR_ROW = yahoo_row("Acme announces supply contract", "2026-10-05T09:00:00Z", publisher="Business Wire")
+_NEWS_ROW = yahoo_row("Acme supply contract talks", "2026-10-05T09:00:00Z")
+
+
+def _status_case(name: str, ids: list[str], news: list[dict], sources: list[str], start: str, end: str, expect: dict,
+                 query: str = "supply contract", **kw) -> Case:
+    if expect:
+        kw["expect"] = expect
+    return tool_case(name, ids, "verify", ["ACME", query, start, end, sources], {"info": ACME_INFO, "news": news},
+                     select=lambda v: {"status": v["status"], "matched": v["queryPolicy"]["matchedEvidenceCount"],
+                                       "best": [(e["sourceType"], e["queryMatch"]["method"]) for e in v["bestEvidence"]]}, **kw)
+
+
+CASES += [
+    _status_case("verify.status.official_yahoo_press_release_in_range_is_confirmed", ["BR-NWS-164"], [_PR_ROW], ["yahoo_finance_press_releases"],
+                 "2026-10-01", "", {"status": "CONFIRMED", "matched": 1, "best": [("yahoo_finance_press_releases", "PHRASE")]}),
+    _status_case("verify.status.contextual_news_only_is_partial", ["BR-NWS-164"], [_NEWS_ROW], ["yahoo_finance_news"], "2026-10-01", "",
+                 {"status": "PARTIAL", "matched": 1, "best": [("yahoo_finance_news", "PHRASE")]}),
+    # Card 164: STALE needs a match outside the requested range that is also older than 90 days. The Worker passes the range into
+    # the collection window, so such an item is never collected and its status stays NOT_FOUND (STALE is unreachable there).
+    _status_case("verify.status.match_outside_the_date_range_and_older_than_90_days_is_stale_only_in_python", ["BR-NWS-164"],
+                 [yahoo_row("Acme supply contract talks", "2026-03-01T09:00:00Z")], ["yahoo_finance_news"], "2026-10-01", "",
+                 {}, mode="pinned", decision="FINDING: verify_company_event can return STALE in Python but not in the Worker, which applies start_date/end_date while collecting",
+                 expect_py={"status": "STALE", "matched": 1, "best": [("yahoo_finance_news", "PHRASE")]},
+                 expect_ts={"status": "NOT_FOUND", "matched": 0, "best": []}),
+    _status_case("verify.status.no_match_is_not_found", ["BR-NWS-164"], [yahoo_row("Acme opens a plant", "2026-10-05T09:00:00Z")],
+                 ["yahoo_finance_news"], "2026-10-01", "", {"status": "NOT_FOUND", "matched": 0, "best": []}),
+    # Finding (Q7, for triage): without a date range every match counts as in range, so a 200-day-old official release is
+    # CONFIRMED and STALE cannot occur.
+    _status_case("verify.status.old_official_release_without_dates_is_still_confirmed", ["BR-NWS-164"],
+                 [yahoo_row("Acme announces supply contract", "2026-03-28T09:00:00Z", publisher="Business Wire")], ["yahoo_finance_press_releases"], "", "",
+                 {"status": "CONFIRMED", "matched": 1, "best": [("yahoo_finance_press_releases", "PHRASE")]}),
+    # Card 164: bestEvidence.confidence. The Worker derives it from the source type (contextual Yahoo news is always LOW); Python
+    # reports the item's own confidence (MEDIUM when it has a URL).
+    tool_case("verify.best_evidence_confidence_for_contextual_news_differs", ["BR-NWS-164"], "verify",
+              ["ACME", "supply contract", "2026-10-01", "", ["yahoo_finance_news"]], {"info": ACME_INFO, "news": [_NEWS_ROW]},
+              select=lambda v: [(e["sourceType"], e["confidence"]) for e in v["bestEvidence"]],
+              mode="pinned", decision="FINDING: verify bestEvidence confidence is the item's own in Python and source-type based in the Worker",
+              expect_py=[("yahoo_finance_news", "MEDIUM")], expect_ts=[("yahoo_finance_news", "LOW")]),
+    tool_case("verify.best_evidence_confidence_for_official_press_release_agrees", ["BR-NWS-164"], "verify",
+              ["ACME", "supply contract", "2026-10-01", "", ["yahoo_finance_press_releases"]], {"info": ACME_INFO, "news": [_PR_ROW]},
+              select=lambda v: [(e["sourceType"], e["confidence"]) for e in v["bestEvidence"]],
+              expect=[("yahoo_finance_press_releases", "MEDIUM")]),
+    # Finding (Q7, for triage, card 138): an exact PHRASE match is accepted even when the query is all stop words, so a too-generic
+    # query can still produce a match beside the EVENT_QUERY_TOO_GENERIC warning.
+    tool_case("verify.query_policy.generic_phrase_still_matches_despite_the_warning", ["BR-NWS-138"], "verify",
+              ["ACME", "announced results", "", "", ["yahoo_finance_news"]],
+              {"info": ACME_INFO, "news": [yahoo_row("Acme announced results", "2026-10-05T09:00:00Z")]},
+              select=lambda v: {"status": v["status"], "warnings": codes(v), "policy": v["queryPolicy"],
+                                "methods": [e["queryMatch"]["method"] for e in v["bestEvidence"]]},
+              expect={"status": "PARTIAL", "warnings": ["EVENT_QUERY_TOO_GENERIC"],
+                      "policy": {"meaningfulTerms": [], "requiredTermMatches": 0, "matchedEvidenceCount": 1}, "methods": ["PHRASE"]}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# company_ir_page registry: BR-NWS-101, 102 (P0 lifecycle), 108 (P0 allow-list), 113 (record extraction), 142 (allowedAction),
+# 146 (candidate), 149 (empty-result status), 171 (revalidation deadline), 263 (shipped entries)
+# The test registry below replaces the shipped file in BOTH runtimes (see the module docstring); the shipped candidate
+# entries (IQE.L) are exercised as they are.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+def ir_entry(ticker: str, status: str = "approved", adapter: str = "html_article", revalidate: str | None = None,
+             canonical: str | None = None) -> dict:
+    host = f"ir.{ticker.lower()}.example"
+    return {"ticker": ticker, "issuerName": f"{ticker} Corp", "status": status, "adapter": adapter,
+            "canonicalUrl": canonical or f"https://{host}/investors/news/", "allowedHosts": [host], "allowedPathPrefixes": ["/investors/"],
+            "candidateReason": "test registry entry", "discoveredAt": "2026-09-01T00:00:00Z", "reviewedBy": "reviewer",
+            "reviewedAt": "2026-09-02T00:00:00Z", "revalidateAfter": revalidate}
+
+
+def ir_page_url(ticker: str) -> str:
+    return f"https://ir.{ticker.lower()}.example/investors/news/"
+
+
+IR_REGISTRY = {"schemaVersion": "2026-07-10", "registryVersion": "2026-10-15.0900", "sources": [
+    ir_entry("IRDIS", "disabled"),
+    ir_entry("IRCAND", "candidate"),
+    ir_entry("IRSTALE", revalidate="2026-10-14T00:00:00Z"),
+    ir_entry("IREDGE", revalidate="2026-10-15T12:00:00Z"),
+    ir_entry("IRGARB", revalidate="not-a-date"),
+    ir_entry("IRFUT", revalidate="2027-01-01T00:00:00Z"),
+    ir_entry("IROKH"),
+    ir_entry("IROKJ", adapter="structured"),
+    ir_entry("IRREJ", "rejected"),
+    ir_entry("IRBADC", canonical="https://evil.example/investors/news/"),
+    ir_entry("IRFAIL"),
+    ir_entry("IR50"),
+    ir_entry("IRLINKS"),
+    ir_entry("IRPR"),
+]}
+
+
+def _article(title: str, href: str, when: str | None, heading: bool = True) -> str:
+    head = f"<h2>{title}</h2><a href=\"{href}\">Read more</a>" if heading else f"<a href=\"{href}\">{title}</a>"
+    time_tag = f'<time datetime="{when}">{when}</time>' if when else ""
+    return f"<article>{head}{time_tag}</article>"
+
+
+_OKH_PAGE = "<html><body>" + "".join([
+    _article("IROKH reports quarterly earnings", "/investors/news/q3", "2026-10-12"),
+    _article("IROKH announces new product launch", "/investors/news/product", "2026-10-10T09:00:00Z", heading=False),
+    _article("IROKH old release from August", "/investors/news/old", "2026-08-01"),
+    _article("IROKH release without a date", "/investors/news/nodate", None),
+    _article("Tiny", "/investors/news/tiny", "2026-10-11"),
+]) + "</body></html>"
+_HTML = {"headers": {"content-type": "text/html; charset=utf-8"}}
+_JSON = {"headers": {"content-type": "application/json"}}
+
+
+def ir_routes(ticker: str, body: str, kind: dict = _HTML) -> dict:
+    return {ir_page_url(ticker): {**kind, "body": body}}
+
+
+def ir_news_case(name: str, ids: list[str], ticker: str, routes: dict, select, tool: str = "news", args: list | None = None, **kw) -> Case:
+    return tool_case(name, ids, tool, args or [ticker, 100, 14, ["company_ir_page"]],
+                     {"registry": IR_REGISTRY, "info": {}, "routes": routes}, select=select, **kw)
+
+
+IR_ITEM_FIELDS = ("title", "url", "sourceType", "approvalStatus", "decisionUse", "evidenceClass", "urlProvenance", "eventType",
+                  "confidence", "tickerRelevance", "issuer", "publishedAt")
+
+
+def ir_items(v: dict) -> list[dict]:
+    return item_rows(v, IR_ITEM_FIELDS)
+
+
+def ir_row(v: dict, *fields: str) -> dict | None:
+    return status_row((v.get("sourceStatus") or {}).get("company_ir_page"), *fields)
+
+
+def ir_item(ticker: str, title: str, path: str, when: str, event: str) -> dict:
+    return {"title": title, "url": f"https://ir.{ticker.lower()}.example{path}", "sourceType": "company_ir_page", "approvalStatus": "approved",
+            "decisionUse": "USE_OFFICIAL_EVIDENCE", "evidenceClass": "APPROVED_IR_PAGE", "urlProvenance": "OFFICIAL", "eventType": event,
+            "confidence": "HIGH", "tickerRelevance": "HIGH", "issuer": f"{ticker} Corp", "publishedAt": when}
+
+
+CASES += [
+    # Cards 101/102/113: approved + fresh -> fetched; HTML block title from the first h1-h4 else the first anchor; the date from
+    # <time datetime>; titles under 6 characters, undated items and items outside the window are dropped.
+    ir_news_case("ir_page.approved_html_page_is_fetched_and_parsed", ["BR-NWS-101", "BR-NWS-102", "BR-NWS-113"], "IROKH",
+                 ir_routes("IROKH", _OKH_PAGE),
+                 lambda v: {"items": ir_items(v), "row": ir_row(v, "status", "allowedAction", "rawCount", "filteredCount"), "status": v.get("status"),
+                            "warnings": codes(v), "coverage": coverage_view(v)},
+                 expect={"items": [ir_item("IROKH", "IROKH reports quarterly earnings", "/investors/news/q3", "2026-10-12T00:00:00Z", "earnings"),
+                                   ir_item("IROKH", "IROKH announces new product launch", "/investors/news/product", "2026-10-10T09:00:00Z", "product")],
+                         "row": {"status": "APPROVED_SOURCE_OK", "allowedAction": "fetch_configured_source", "rawCount": 2, "filteredCount": 2},
+                         "status": None, "warnings": [],
+                         "coverage": {"sourceCoverage": "FULL", "state": "FULL", "failed": [], "skipped": [], "truncated": [], "action": "USE_RETURNED_CONTEXT"}}),
+    # Card 113: JSON list keys are tried in order (an empty 'items' falls through to 'releases'); title keys title/headline/name;
+    # date keys publishedAt/datePublished/...; a record without a title is skipped.
+    ir_news_case("ir_page.structured_json_page_uses_first_non_empty_list_and_key_aliases", ["BR-NWS-113"], "IROKJ",
+                 ir_routes("IROKJ", json.dumps({"items": [], "releases": [
+                     {"headline": "IROKJ announces financing", "url": "https://ir.irokj.example/investors/news/fin", "datePublished": "2026-10-13T10:00:00Z"},
+                     {"name": "IROKJ contract award", "link": "/investors/news/award", "date": "2026-10-11"},
+                     {"url": "https://ir.irokj.example/investors/news/untitled", "date": "2026-10-11"},
+                     {"title": "IROKJ off host item", "url": "https://elsewhere.example/investors/news/x", "date": "2026-10-11"}]}), _JSON),
+                 lambda v: {"items": [(it["title"], it["url"], it["publishedAt"], it["eventType"]) for it in ir_items(v)],
+                            "row": ir_row(v, "status", "rawCount")},
+                 expect={"items": [("IROKJ announces financing", "https://ir.irokj.example/investors/news/fin", "2026-10-13T10:00:00Z", "financing"),
+                                   ("IROKJ contract award", "https://ir.irokj.example/investors/news/award", "2026-10-11T00:00:00Z", "contract")],
+                         "row": {"status": "APPROVED_SOURCE_OK", "rawCount": 2}}),
+    # Card 108 (P0): item URLs must be https on an allowed host and path prefix; a relative link resolves against the page.
+    ir_news_case("ir_page.item_urls_outside_the_allow_list_are_dropped", ["BR-NWS-108"], "IRLINKS",
+                 ir_routes("IRLINKS", "<html><body>" + "".join([
+                     _article("IRLINKS good absolute link", "https://ir.irlinks.example/investors/news/a", "2026-10-12"),
+                     _article("IRLINKS good relative link", "b", "2026-10-11"),
+                     _article("IRLINKS insecure http link", "http://ir.irlinks.example/investors/news/c", "2026-10-10"),
+                     _article("IRLINKS other host link", "https://evil.example/investors/news/d", "2026-10-09"),
+                     _article("IRLINKS path outside prefix", "https://ir.irlinks.example/careers/e", "2026-10-08"),
+                     _article("IRLINKS www host variant", "https://www.ir.irlinks.example/investors/news/f", "2026-10-07")]) + "</body></html>"),
+                 lambda v: [(it["title"], it["url"]) for it in ir_items(v)],
+                 expect=[("IRLINKS good absolute link", "https://ir.irlinks.example/investors/news/a"),
+                         ("IRLINKS good relative link", "https://ir.irlinks.example/investors/news/b"),
+                         ("IRLINKS www host variant", "https://www.ir.irlinks.example/investors/news/f")]),
+    # A registry canonical URL outside its own allow-list fails the whole source with COMPANY_IR_PAGE_VALIDATION_FAILED (same text in
+    # both runtimes). Only the allowedAction wording differs (see the FINDING case below).
+    ir_news_case("ir_page.canonical_url_outside_allow_list_fails_validation", ["BR-NWS-108", "BR-NWS-101"], "IRBADC", {},
+                 lambda v: {"warnings": [(w["code"], w["message"]) for w in v["warnings"]], "status": v.get("status"),
+                            "row": ir_row(v, "status", "rawCount")},
+                 expect={"warnings": [("COMPANY_IR_PAGE_VALIDATION_FAILED",
+                                       "Approved company IR page validation failed: registry canonical URL is outside its allow-list")],
+                         "status": "SOURCE_LIMITED_NOT_FOUND", "row": {"status": "SOURCE_VALIDATION_FAILED", "rawCount": 0}}),
+    ir_news_case("ir_page.fetch_failure_fails_validation", ["BR-NWS-101", "BR-NWS-102"], "IRFAIL", {ir_page_url("IRFAIL"): {"status": 500, "body": "oops"}},
+                 lambda v: {"codes": codes(v), "status": v.get("status"), "row": ir_row(v, "status", "rawCount")},
+                 expect={"codes": ["COMPANY_IR_PAGE_VALIDATION_FAILED"], "status": "SOURCE_LIMITED_NOT_FOUND",
+                         "row": {"status": "SOURCE_VALIDATION_FAILED", "rawCount": 0}}),
+]
+
+# Card 113: only the first 50 qualifying <li> blocks are examined when a page has no <article> tags.
+_LI_PAGE = ("<html><body><ul>" + "".join(f"<li><a href=\"/investors/other/{n}\">Contact page {n}</a></li>" for n in range(20))
+            + "".join(f'<li><a href="/investors/news/{n}">IR50 announces item {n:02d}</a> <time datetime="2026-10-{2 + n % 12:02d}">d</time></li>'
+                      for n in range(1, 61)) + "</ul></body></html>")
+CASES += [
+    ir_news_case("ir_page.list_items_are_capped_at_the_first_50_qualifying_blocks", ["BR-NWS-113"], "IR50", ir_routes("IR50", _LI_PAGE),
+                 lambda v: {"count": len(v["items"]), "has_50": any(it["title"].endswith("item 50") for it in v["items"]),
+                            "has_51": any(it["title"].endswith("item 51") for it in v["items"])},
+                 expect={"count": 50, "has_50": True, "has_51": False}),
+    # Finding (Q7, for triage; card 101): any status other than disabled/candidate (here 'rejected') is fetched and its items are
+    # stamped approvalStatus 'approved' / decisionUse USE_OFFICIAL_EVIDENCE, in both runtimes.
+    ir_news_case("ir_page.unknown_status_is_fetched_and_stamped_approved", ["BR-NWS-101", "BR-NWS-102"], "IRREJ",
+                 ir_routes("IRREJ", _article("IRREJ reports quarterly earnings", "/investors/news/q3", "2026-10-12")),
+                 lambda v: [(it["title"], it["approvalStatus"], it["decisionUse"]) for it in ir_items(v)],
+                 expect=[("IRREJ reports quarterly earnings", "approved", "USE_OFFICIAL_EVIDENCE")]),
+    # Card 171: the revalidation deadline. An absent deadline (IROKH) and a future one (IRFUT) are fresh; so is a deadline equal to
+    # now; a past one and an unparseable one are stale and the source is skipped.
+    *[ir_news_case(f"ir_page.revalidation_deadline_{label}", ["BR-NWS-171", "BR-NWS-102"], ticker,
+                   ir_routes(ticker, _article(f"{ticker} reports quarterly earnings", "/investors/news/q3", "2026-10-12")),
+                   lambda v: {"row": ir_row(v, "status"), "codes": codes(v), "items": len(v["items"])}, expect=expect)
+      for label, ticker, expect in (
+          ("in_the_future_is_fresh", "IRFUT", {"row": {"status": "APPROVED_SOURCE_OK"}, "codes": [], "items": 1}),
+          ("equal_to_now_is_fresh", "IREDGE", {"row": {"status": "APPROVED_SOURCE_OK"}, "codes": [], "items": 1}),
+          ("in_the_past_is_stale", "IRSTALE", {"row": {"status": "REVALIDATION_DUE"}, "codes": ["COMPANY_IR_PAGE_REVALIDATION_DUE"], "items": 0}),
+          ("unparseable_is_stale", "IRGARB", {"row": {"status": "REVALIDATION_DUE"}, "codes": ["COMPANY_IR_PAGE_REVALIDATION_DUE"], "items": 0}))],
+]
+
+# Cards 101/102/146: a shipped candidate entry is never fetched (no route exists for its page); the source reports
+# CANDIDATE_AVAILABLE / review_and_promote and lists the candidate with decisionGrade false. Both runtimes agree on that.
+CASES += [
+    tool_case("ir_page.candidate_entry_is_not_fetched_and_reports_review_and_promote", ["BR-NWS-101", "BR-NWS-102", "BR-NWS-146", "BR-NWS-263"], "news",
+              ["IQE.L", 10, 14, ["company_ir_page"]], {"info": {}},
+              select=lambda v: {"row": ir_row(v, "status", "allowedAction", "candidates", "rawCount", "filteredCount"), "items": v["items"],
+                                "coverage": coverage_view(v)},
+              expect={"row": {"status": "CANDIDATE_AVAILABLE", "allowedAction": "review_and_promote", "candidates": [IQE_CANDIDATE],
+                              "rawCount": 0, "filteredCount": 0},
+                      "items": [],
+                      "coverage": {"sourceCoverage": "PARTIAL", "state": "PARTIAL", "failed": [["company_ir_page", "CANDIDATE_AVAILABLE"]],
+                                   "skipped": [], "truncated": [], "action": "CHECK_OFFICIAL_RELEASES"}}),
+    # Card 149: Python raises an info warning COMPANY_IR_PAGE_CANDIDATE_AVAILABLE, which makes the empty result source-limited;
+    # the Worker raises no warning for a candidate, so nothing marks the source as used or limited (PROVIDER_ERROR).
+    tool_case("ir_page.candidate_empty_result_status_differs", ["BR-NWS-149", "BR-NWS-144"], "news",
+              ["IQE.L", 10, 14, ["sec", "company_ir_page"]], {"info": {}},
+              select=lambda v: {"status": v.get("status"), "warnings": codes(v)},
+              mode="pinned", decision="FINDING: an unreviewed IR-page candidate makes the empty collection status SOURCE_LIMITED_NOT_FOUND in Python (info warning) and not in the Worker",
+              expect_py={"status": "SOURCE_LIMITED_NOT_FOUND", "warnings": ["SOURCE_UNAVAILABLE", "COMPANY_IR_PAGE_CANDIDATE_AVAILABLE"]},
+              expect_ts={"status": "SOURCE_LIMITED_NOT_FOUND", "warnings": ["SOURCE_UNAVAILABLE"]}),
+    tool_case("ir_page.candidate_alone_empty_result_status_differs", ["BR-NWS-149"], "news",
+              ["IQE.L", 10, 14, ["company_ir_page"]], {"info": {}},
+              select=lambda v: {"status": v.get("status"), "warnings": codes(v)},
+              mode="pinned", decision="FINDING: an unreviewed IR-page candidate makes the empty collection status SOURCE_LIMITED_NOT_FOUND in Python (info warning) and PROVIDER_ERROR in the Worker",
+              expect_py={"status": "SOURCE_LIMITED_NOT_FOUND", "warnings": ["COMPANY_IR_PAGE_CANDIDATE_AVAILABLE"]},
+              expect_ts={"status": "PROVIDER_ERROR", "warnings": []}),
+    # Card 142 / 149: a disabled entry. Python warns (info) and says registry_review_required; the Worker is silent and says 'none'.
+    ir_news_case("ir_page.disabled_entry_status_and_allowed_action_differ", ["BR-NWS-142", "BR-NWS-149", "BR-NWS-102", "BR-NWS-101"], "IRDIS", {},
+                 lambda v: {"row": ir_row(v, "status", "allowedAction"), "status": v.get("status"), "warnings": codes(v), "items": len(v["items"])},
+                 mode="pinned", decision="FINDING: DISABLED IR page entry: allowedAction registry_review_required + info warning + SOURCE_LIMITED_NOT_FOUND in Python; none + no warning + PROVIDER_ERROR in the Worker",
+                 expect_py={"row": {"status": "DISABLED", "allowedAction": "registry_review_required"}, "status": "SOURCE_LIMITED_NOT_FOUND",
+                            "warnings": ["COMPANY_IR_PAGE_DISABLED"], "items": 0},
+                 expect_ts={"row": {"status": "DISABLED", "allowedAction": "none"}, "status": "PROVIDER_ERROR", "warnings": [], "items": 0}),
+    ir_news_case("ir_page.stale_entry_allowed_action_differs", ["BR-NWS-142", "BR-NWS-171"], "IRSTALE", {},
+                 lambda v: {"row": ir_row(v, "status", "allowedAction"), "status": v.get("status"), "warnings": codes(v)},
+                 mode="pinned", decision="FINDING: REVALIDATION_DUE allowedAction is registry_review_required in Python and revalidate in the Worker",
+                 expect_py={"row": {"status": "REVALIDATION_DUE", "allowedAction": "registry_review_required"}, "status": "SOURCE_LIMITED_NOT_FOUND",
+                            "warnings": ["COMPANY_IR_PAGE_REVALIDATION_DUE"]},
+                 expect_ts={"row": {"status": "REVALIDATION_DUE", "allowedAction": "revalidate"}, "status": "SOURCE_LIMITED_NOT_FOUND",
+                            "warnings": ["COMPANY_IR_PAGE_REVALIDATION_DUE"]}),
+    ir_news_case("ir_page.validation_failure_allowed_action_differs", ["BR-NWS-142", "BR-NWS-101"], "IRBADC", {},
+                 lambda v: {"row": ir_row(v, "status", "allowedAction")},
+                 mode="pinned", decision="FINDING: SOURCE_VALIDATION_FAILED allowedAction is registry_review_required in Python and review_registry_entry in the Worker",
+                 expect_py={"row": {"status": "SOURCE_VALIDATION_FAILED", "allowedAction": "registry_review_required"}},
+                 expect_ts={"row": {"status": "SOURCE_VALIDATION_FAILED", "allowedAction": "review_registry_entry"}}),
+    # Card 142: an approved source that returned nothing in the window is EMPTY_RESULT with registry_review_required in Python; the
+    # Worker's diagnostic keeps fetch_configured_source (its status flips to EMPTY_RESULT but not the action).
+    ir_news_case("ir_page.approved_page_with_nothing_in_window_allowed_action_differs", ["BR-NWS-142", "BR-NWS-146"], "IRPR",
+                 ir_routes("IRPR", _article("IRPR old release from August", "/investors/news/old", "2026-08-01")),
+                 lambda v: {"row": ir_row(v, "status", "allowedAction", "rawCount"), "status": v.get("status")},
+                 mode="pinned", decision="FINDING: an approved IR page with an empty window has allowedAction registry_review_required in Python and fetch_configured_source in the Worker",
+                 expect_py={"row": {"status": "EMPTY_RESULT", "allowedAction": "registry_review_required", "rawCount": 0}, "status": "NOT_FOUND"},
+                 expect_ts={"row": {"status": "EMPTY_RESULT", "allowedAction": "fetch_configured_source", "rawCount": 0}, "status": "NOT_FOUND"}),
+    # Registry metadata on the status row: Python copies it from IR-page warnings only (so a clean approved fetch has none).
+    ir_news_case("ir_page.approved_fetch_status_row_registry_metadata_differs", ["BR-NWS-101"], "IROKH", ir_routes("IROKH", _OKH_PAGE),
+                 lambda v: ir_row(v, "registryVersion", "canonicalUrl", "approvalStatus"),
+                 mode="pinned", decision="FINDING: the Worker status row always carries registryVersion/canonicalUrl/approvalStatus; Python only when an IR-page warning exists",
+                 expect_py={"registryVersion": None, "canonicalUrl": None, "approvalStatus": None},
+                 expect_ts={"registryVersion": "2026-10-15.0900", "canonicalUrl": "https://ir.irokh.example/investors/news/", "approvalStatus": "approved"}),
+    # get_company_press_releases with an approved, fresh IR page: decision grade without any SEC exhibit (cards 101, 105).
+    ir_news_case("ir_page.press_release_from_approved_page_is_decision_grade", ["BR-NWS-101", "BR-NWS-105"], "IRPR",
+                 ir_routes("IRPR", _article("IRPR reports quarterly earnings", "/investors/news/q3", "2026-10-12")),
+                 lambda v: {"status": v.get("status"), "coverageStatus": v.get("coverageStatus"), "decisionGrade": v.get("decisionGrade"),
+                            "failureMode": v.get("failureMode"), "action": v["coverage"]["recommendedNextAction"],
+                            "evidence": [{k: e.get(k) for k in ("title", "url", "adapter", "basis")} for e in v.get("irPageEvidence") or []]},
+                 tool="press", args=["IRPR", 90, 20, ["company_ir_page"]],
+                 expect={"status": "APPROVED_IR_PAGE_FOUND", "coverageStatus": "APPROVED_IR_PAGE_RESOLVED", "decisionGrade": True, "failureMode": None,
+                         "action": "USE_OFFICIAL_EVIDENCE",
+                         "evidence": [{"title": "IRPR reports quarterly earnings", "url": "https://ir.irpr.example/investors/news/q3",
+                                       "adapter": "html_article", "basis": "approved_company_ir_page_registry"}]}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# company_ir source: BR-NWS-103, 107 (P0: what "company_ir" means), 145, 165, 167 (status precedence), 170, 183 (discovery)
+# Python serves company_ir from the Yahoo news feed (items keep their yahoo_finance_news type; the source is marked used and,
+# having no company_ir/press_release items, reads EMPTY_RESULT). The Worker discovers the company website's RSS/Atom feed.
+# Every case is pinned: the Python values are what the same request returns there today.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+ACME_SITE = "https://www.acme.example"
+ACME_WEB_INFO = {**ACME_INFO, "website": ACME_SITE}
+RSS_DECISION = "FINDING: company_ir means Yahoo-feed passthrough in Python and website RSS/Atom autodiscovery in the Worker"
+_ROOT_WITH_FEED = '<html><head><link rel="alternate" type="application/rss+xml" href="/rss/news.xml"></head><body>Acme</body></html>'
+_ACME_FEED = rss([{"title": "Acme official RSS release", "link": f"{ACME_SITE}/news/1", "pubDate": "Tue, 13 Oct 2026 10:00:00 GMT",
+                   "description": "Acme announces results"}], title="Acme News")
+_PY_EMPTY = {"row": "EMPTY_RESULT", "collection": "NOT_FOUND", "warnings": []}
+
+
+def ir_rss_view(v: dict) -> dict:
+    row = (v.get("sourceStatus") or {}).get("company_ir") or {}
+    return {"row": row.get("status"), "collection": v.get("status"), "warnings": codes(v)}
+
+
+def _ir_rss_case(name: str, ids: list[str], routes: dict, expect_py: dict, expect_ts: dict, info: dict | None = None, news: list | None = None,
+                 select=ir_rss_view) -> Case:
+    return tool_case(name, ids, "news", ["ACME", 10, 14, ["company_ir"]], {"info": info if info is not None else ACME_WEB_INFO,
+                                                                         "news": news or [], "routes": routes},
+                     select=select, mode="pinned", decision=RSS_DECISION, expect_py=expect_py, expect_ts=expect_ts)
+
+
+CASES += [
+    # Cards 103/107: with Yahoo news available, Python returns it under the company_ir source; the Worker returns the feed's own item.
+    tool_case("company_ir.passthrough_in_python_vs_rss_discovery_in_worker", ["BR-NWS-103", "BR-NWS-107"], "news",
+              ["ACME", 10, 14, ["company_ir"]],
+              {"info": ACME_WEB_INFO, "news": [yahoo_row("Acme wins big order", "2026-10-14T09:00:00Z")],
+               "routes": {f"{ACME_SITE}/": {"body": _ROOT_WITH_FEED}, f"{ACME_SITE}/rss/news.xml": {"body": _ACME_FEED}}},
+              select=lambda v: {"sourcesUsed": v["meta"]["sourcesUsed"], "row": (v["sourceStatus"].get("company_ir") or {}).get("status"),
+                                "items": [(it["title"], it["sourceType"], it["evidenceClass"], it["decisionUse"]) for it in v["items"]]},
+              mode="pinned", decision=RSS_DECISION,
+              expect_py={"sourcesUsed": ["company_ir"], "row": "EMPTY_RESULT",
+                         "items": [("Acme wins big order", "yahoo_finance_news", "CONTEXTUAL_NEWS", "CONTEXT_ONLY")]},
+              expect_ts={"sourcesUsed": ["company_ir"], "row": "OK",
+                         "items": [("Acme official RSS release", "company_ir", "OFFICIAL_RSS_ATOM", "CHECK_OFFICIAL_RELEASES")]}),
+    # Card 170: probe order, rel=alternate link discovery, same-domain acceptance (HIGH confidence). Diagnostics exist only in the Worker.
+    tool_case("company_ir.discovery_finds_alternate_link_feed_on_the_company_domain", ["BR-NWS-170", "BR-NWS-145"], "news",
+              ["ACME", 10, 14, ["company_ir"]],
+              {"info": ACME_WEB_INFO, "news": [],
+               "routes": {f"{ACME_SITE}/": {"body": _ROOT_WITH_FEED}, f"{ACME_SITE}/rss/news.xml": {"body": _ACME_FEED}}},
+              select=lambda v: {k: (v["sourceStatus"].get("company_ir") or {}).get(k)
+                                for k in ("status", "rssDiscovery", "discoveredFeedCount", "discoveryPageProbeCount", "discoveryProbeBudget",
+                                          "acceptedFeedCount", "acceptedFeeds", "discoveryProbeBudgetExhausted")}
+              | {"item": [(it["discoveryMethod"], it["feedUrl"], it["confidence"], it["tickerRelevance"], it["publishedAt"][:10])
+                          for it in v["items"]] if v["items"] and "discoveryMethod" in v["items"][0] else []},
+              mode="pinned", decision=RSS_DECISION,
+              expect_py={"status": "EMPTY_RESULT", "rssDiscovery": None, "discoveredFeedCount": None, "discoveryPageProbeCount": None,
+                         "discoveryProbeBudget": None, "acceptedFeedCount": None, "acceptedFeeds": None, "discoveryProbeBudgetExhausted": None, "item": []},
+              expect_ts={"status": "OK", "rssDiscovery": "feeds_accepted", "discoveredFeedCount": 1, "discoveryPageProbeCount": 14,
+                         "discoveryProbeBudget": 24, "acceptedFeedCount": 1, "acceptedFeeds": [f"{ACME_SITE}/rss/news.xml"],
+                         "discoveryProbeBudgetExhausted": False,
+                         "item": [("html_alternate_link", f"{ACME_SITE}/rss/news.xml", "HIGH", "HIGH", "2026-10-13")]}),
+    # Cards 183/165: no feed on any candidate host -> the 24-page probe budget runs out before all paths are tried;
+    # FEED_NOT_FOUND is also raised and the status takes the earlier-checked DISCOVERY_BUDGET_EXHAUSTED.
+    _ir_rss_case("company_ir.no_feed_anywhere_exhausts_the_probe_budget", ["BR-NWS-183", "BR-NWS-165", "BR-NWS-170"], {},
+                 _PY_EMPTY,
+                 {"row": "DISCOVERY_BUDGET_EXHAUSTED", "collection": "SOURCE_LIMITED_NOT_FOUND",
+                  "warnings": ["COMPANY_IR_DISCOVERY_BUDGET_EXHAUSTED", "COMPANY_IR_FEED_NOT_FOUND"]}),
+    _ir_rss_case("company_ir.no_company_website_gives_website_not_available", ["BR-NWS-145", "BR-NWS-165"], {},
+                 _PY_EMPTY, {"row": "WEBSITE_NOT_AVAILABLE", "collection": "SOURCE_LIMITED_NOT_FOUND", "warnings": ["COMPANY_WEBSITE_NOT_AVAILABLE"]},
+                 info=ACME_INFO),
+    # Card 145: two linked external feeds that do not mention the company are rejected -> feed_not_accepted, source not used.
+    _ir_rss_case("company_ir.external_feeds_not_matching_the_company_are_rejected", ["BR-NWS-145", "BR-NWS-228", "BR-NWS-165"],
+                 {f"{ACME_SITE}/": {"body": '<html><body><a href="https://feeds.example-wire.com/a.xml">RSS</a>'
+                                             '<a href="https://feeds.example-wire.com/b.xml">More</a></body></html>'},
+                  "https://feeds.example-wire.com/a.xml": {"body": rss([{"title": "Other firm", "link": "https://x.example/1", "pubDate": "Tue, 13 Oct 2026 10:00:00 GMT"}], "Business Wire Top Stories")},
+                  "https://feeds.example-wire.com/b.xml": {"body": rss([{"title": "Another firm", "link": "https://x.example/2", "pubDate": "Tue, 13 Oct 2026 10:00:00 GMT"}], "Business Wire Top Stories")}},
+                 _PY_EMPTY, {"row": "DISCOVERY_NOT_FOUND", "collection": "SOURCE_LIMITED_NOT_FOUND",
+                             "warnings": ["COMPANY_IR_RSS_HOST_REJECTED"]}),   # two feeds rejected; the identical warnings merge into one
+    # Card 167: discovery found a feed link but the feed itself could not be downloaded -> PROVIDER_ERROR (RSS unavailable).
+    _ir_rss_case("company_ir.feed_that_fails_to_download_is_provider_error", ["BR-NWS-167", "BR-NWS-165"],
+                 {f"{ACME_SITE}/": {"body": _ROOT_WITH_FEED}, f"{ACME_SITE}/rss/news.xml": {"status": 503, "body": "down"}},
+                 _PY_EMPTY, {"row": "PROVIDER_ERROR", "collection": "SOURCE_LIMITED_NOT_FOUND", "warnings": ["COMPANY_IR_RSS_UNAVAILABLE"]}),
+    _ir_rss_case("company_ir.feed_that_is_not_xml_is_parse_error", ["BR-NWS-165", "BR-NWS-167"],
+                 {f"{ACME_SITE}/": {"body": _ROOT_WITH_FEED}, f"{ACME_SITE}/rss/news.xml": {"body": "<html>not a feed</html>"}},
+                 _PY_EMPTY, {"row": "PARSE_ERROR", "collection": "SOURCE_LIMITED_NOT_FOUND", "warnings": ["COMPANY_IR_RSS_PARSE_ERROR"]}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# GlobeNewswire (newswire) source: BR-NWS-182 (feed order, early stop), 154 (used / failed determination)
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+GNW_ALL = "https://www.globenewswire.com/RssFeed/*"
+_GNW_PUBLIC = rss([gnw_item("Acme public companies story one", "Wed, 14 Oct 2026 10:00:00 +0000", "Nasdaq:ACME"),
+                   gnw_item("Acme public companies story two", "Tue, 13 Oct 2026 10:00:00 +0000", "Nasdaq:ACME"),
+                   gnw_item("Unrelated issuer story", "Tue, 13 Oct 2026 11:00:00 +0000", "Nasdaq:OTHR")])
+_GNW_EARNINGS = rss([gnw_item(f"Acme earnings story {c}", f"{day}, 1{n} Oct 2026 09:00:00 +0000", "Nasdaq:ACME")
+                     for n, (c, day) in enumerate((("A", "Mon"), ("B", "Tue"), ("C", "Wed"), ("D", "Thu")), start=1)])
+
+CASES += [
+    # Card 182: max 3 -> both public_companies matches then the first earnings match in feed order; later feeds are not read
+    # (they have no route here, so reading one would raise SOURCE_UNAVAILABLE).
+    tool_case("newswire.collection_stops_at_max_results_in_feed_order", ["BR-NWS-182"], "timeline",
+              ["ACME", "", "", ["newswire"], 3, False],
+              {"info": ACME_INFO, "routes": {GNW_FEEDS[0][1]: {"body": _GNW_PUBLIC}, GNW_FEEDS[1][1]: {"body": rss([])},
+                                             GNW_FEEDS[2][1]: {"body": _GNW_EARNINGS}}},
+              select=lambda v: {"titles": [e["title"] for e in v["timeline"]], "warnings": codes(v), "used": v["meta"]["sourcesUsed"],
+                                "feeds": None},
+              expect={"titles": ["Acme earnings story A", "Acme public companies story two", "Acme public companies story one"],
+                      "warnings": [], "used": ["newswire"], "feeds": None}),
+    tool_case("newswire.items_carry_feed_source_stock_categories_and_high_confidence", ["BR-NWS-182"], "news",
+              ["ACME", 10, 14, ["newswire"]],
+              {"info": ACME_INFO, "routes": {GNW_FEEDS[0][1]: {"body": _GNW_PUBLIC}, GNW_ALL: {"body": rss([])}}},
+              select=lambda v: [{k: it.get(k) for k in ("title", "feedSource", "stockCategories", "confidence", "sourceType", "originalSource", "tickerRelevance")}
+                                for it in v["items"]],
+              expect=[{"title": "Acme public companies story one", "feedSource": "public_companies", "stockCategories": ["Nasdaq:ACME"],
+                       "confidence": "HIGH", "sourceType": "newswire", "originalSource": "GlobeNewswire", "tickerRelevance": "HIGH"},
+                      {"title": "Acme public companies story two", "feedSource": "public_companies", "stockCategories": ["Nasdaq:ACME"],
+                       "confidence": "HIGH", "sourceType": "newswire", "originalSource": "GlobeNewswire", "tickerRelevance": "HIGH"}]),
+    # Card 154: 9 of 10 feeds parse with nothing matching and one fails -> the source counts as failed, not "nothing found".
+    tool_case("newswire.one_failing_feed_out_of_ten_marks_the_source_provider_error", ["BR-NWS-154", "BR-NWS-159"], "news",
+              ["ACME", 10, 14, ["newswire"]],
+              {"info": ACME_INFO, "routes": {GNW_ALL: {"body": rss([gnw_item("Other issuer", "Wed, 14 Oct 2026 10:00:00 +0000", "Nasdaq:OTHR")])},
+                                             GNW_FEEDS[9][1]: {"status": 500, "body": "down"}}},
+              select=lambda v: {"row": v["sourceStatus"]["newswire"], "status": v.get("status"), "sourcesUsed": v["meta"]["sourcesUsed"],
+                                "coverage": coverage_view(v), "codes": codes(v)},
+              expect={"row": {"status": "PROVIDER_ERROR", "rawCount": 0, "filteredCount": 0}, "status": "SOURCE_LIMITED_NOT_FOUND", "sourcesUsed": [],
+                      "coverage": {"sourceCoverage": "PARTIAL", "state": "PARTIAL", "failed": [["newswire", "PROVIDER_ERROR"]], "skipped": [],
+                                   "truncated": [], "action": "CHECK_OFFICIAL_RELEASES"},
+                      "codes": ["SOURCE_UNAVAILABLE"]}),
+    tool_case("newswire.all_feeds_parsed_with_nothing_matching_is_empty_result", ["BR-NWS-154"], "news",
+              ["ACME", 10, 14, ["newswire"]],
+              {"info": ACME_INFO, "routes": {GNW_ALL: {"body": rss([gnw_item("Other issuer", "Wed, 14 Oct 2026 10:00:00 +0000", "Nasdaq:OTHR")])}}},
+              select=lambda v: {"row": v["sourceStatus"]["newswire"], "status": v.get("status"), "sourcesUsed": v["meta"]["sourcesUsed"], "codes": codes(v)},
+              expect={"row": {"status": "EMPTY_RESULT", "rawCount": 0, "filteredCount": 0}, "status": "NOT_FOUND", "sourcesUsed": ["newswire"], "codes": []}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# Explicit sources that select nothing: BR-NWS-151, 152 (and the batch result shape, BR-NWS-143)
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+def _no_source_view(v: dict) -> dict:
+    return {"status": v.get("status"), "sourceCoverage": v.get("sourceCoverage"), "state": v["coverage"]["state"],
+            "action": v["coverage"]["recommendedNextAction"], "warnings": codes(v), "attempted": v["attemptedSources"],
+            "requested": v["requestedSources"], "defaultApplied": v["defaultSourcesApplied"]}
+
+
+_NO_SOURCE_EXPECT = {"status": "SOURCE_LIMITED_NOT_FOUND", "sourceCoverage": "PARTIAL", "state": "PARTIAL", "action": "CHECK_OFFICIAL_RELEASES",
+                     "attempted": [], "requested": ["bloomberg"], "defaultApplied": False}
+_BLOOMBERG_ARGS = {"news": ["ACME", 5, 14, ["bloomberg"]], "search": ["ACME", "earnings", "", "", ["bloomberg"], 5],
+                   "press": ["ACME", 90, 20, ["bloomberg"]], "timeline": ["ACME", "", "", ["bloomberg"], 50, False],
+                   "verify": ["ACME", "acquisition", "", "", ["bloomberg"]]}
+CASES += [
+    tool_case(f"sources.explicit_unsupported_list_reads_as_source_limited_in_{tool}", ["BR-NWS-151", "BR-NWS-152"] if tool == "news" else ["BR-NWS-152"],
+              tool, args, {"info": ACME_INFO}, select=_no_source_view,
+              expect={**_NO_SOURCE_EXPECT, "warnings": ["SOURCE_UNSUPPORTED"] + (["NO_OFFICIAL_RELEASE_SOURCE"] if tool == "press" else [])})
+    for tool, args in _BLOOMBERG_ARGS.items()
+]
+
+# Card 143: a batch. The Worker adds __batchMeta; Python returns only the per-ticker results. A symbol that fails Python's ticker
+# format check is an error entry there, while the Worker (which only rejects blanks) runs it like any other.
+CASES += [
+    tool_case("batch.per_ticker_results_and_batch_meta_differ", ["BR-NWS-143"], "news",
+              [["AAPL", "MSFT"], 5, 14, []], {"info": {}},
+              select=lambda v: {"keys": sorted(v), "errors": sorted(k for k, x in v.items() if isinstance(x, dict) and x.get("error")),
+                                "meta": v.get("__batchMeta")},
+              mode="pinned", decision="FINDING: batch get_company_news adds __batchMeta (partialSuccess/successCount/errorCount) in the Worker only",
+              expect_py={"keys": ["AAPL", "MSFT"], "errors": [], "meta": None},
+              expect_ts={"keys": ["AAPL", "MSFT", "__batchMeta"], "errors": [], "meta": {"partialSuccess": False, "successCount": 2, "errorCount": 0}}),
+    tool_case("batch.symbol_failing_python_ticker_validation_is_an_error_entry_only_in_python", ["BR-NWS-143"], "news",
+              [["AAPL", "BAD TICKER!"], 5, 14, []], {"info": {}},
+              select=lambda v: {"keys": sorted(v), "errors": sorted(k for k, x in v.items() if isinstance(x, dict) and x.get("error")),
+                                "meta": v.get("__batchMeta")},
+              mode="pinned", decision="FINDING: batch news validates each ticker's format in Python (error entry) but not in the Worker",
+              expect_py={"keys": ["AAPL", "BAD TICKER!"], "errors": ["BAD TICKER!"], "meta": None},
+              expect_ts={"keys": ["AAPL", "BAD TICKER!", "__batchMeta"], "errors": [], "meta": {"partialSuccess": False, "successCount": 2, "errorCount": 0}}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# Analyst valuation text extraction (news text -> price targets, firms, multiples): BR-NWS-110, 111, 112, 122, 131, 135, 137, 141, 162
+# yfmcp/capital_structure.py <-> worker/src/capital-structure.ts; both exported, so called directly.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+def _avm_case(name: str, ids: list[str], titles: list[str], select, changes: list | None = None, issuer_names: list | None = None,
+              ticker: str = "TEST", **kw) -> Case:
+    items = [{"title": t, "summary": "", "url": f"https://news.example/{n}", "publishedAt": f"2026-10-{n + 1:02d}T10:00:00Z", "source": "Wire"}
+             for n, t in enumerate(titles)]
+    changes = changes or []
+    args = [ticker, items, changes, issuer_names]
+    return Case(name=name, ids=ids,
+                py=lambda: cs.analyst_valuation_methods(ticker, copy.deepcopy(items), copy.deepcopy(changes), copy.deepcopy(issuer_names)),
+                ts={"js": "return m.capitalStructure.analystValuationMethods(args[0], args[1], args[2], args[3]);", "args": args},
+                select=select, **kw)
+
+
+def _targets(v: dict) -> list[tuple]:
+    return [(e["firm"], e["priceTarget"]) for e in v["evidence"]]
+
+
+def _pt(target, prior=None, currency=None) -> dict:
+    return {"target": target, "prior": prior, "currency": currency}
+
+
+CASES += [
+    # Cards 110/111: the four target patterns in fixed precedence; thousands separators are removed; a percent is never a target.
+    _avm_case("valuation_text.price_target_patterns_and_precedence", ["BR-NWS-110", "BR-NWS-111"],
+              ["Needham raises its price target from $80 to $95", "Cantor Fitzgerald PT to 120p from 100p", "Cantor Fitzgerald reiterates $122 target",
+               "Jefferies sets price target to $1,250", "Needham says price target implies 25% upside", "Danske lifts price target to SEK 92"],
+              _targets,
+              expect=[("Needham", _pt(95, 80, "USD")), ("Cantor Fitzgerald", _pt(120, 100, "GBp")), ("Cantor Fitzgerald", _pt(122, None, "USD")),
+                      ("Jefferies", _pt(1250, None, "USD")), ("Danske", _pt(92, None, "SEK"))]),
+    # Card 131: currency tokens; the lookup is exact-case, so a lower-case 'usd' (matched by the case-insensitive regex) maps to null.
+    _avm_case("valuation_text.price_target_currency_codes", ["BR-NWS-131", "BR-NWS-111"],
+              [f"Needham sets price target to {tok}" for tok in ("$95", "US$95", "GBP 4", "GBX 120", "120p", "45 kr", "NT$900", "EUR 30", "usd 95")],
+              lambda v: [(e["priceTarget"]["target"], e["priceTarget"]["currency"]) for e in v["evidence"]],
+              expect=[(95, "USD"), (95, "USD"), (4, "GBP"), (120, "GBp"), (120, "GBp"), (45, "SEK"), (900, "TWD"), (30, "EUR"), (95, None)]),
+    # Card 112: the firm is the earliest-named broker (ties go to the longer name); matching is case-sensitive.
+    _avm_case("valuation_text.firm_attribution_earliest_name_longest_on_tie_case_sensitive", ["BR-NWS-112"],
+              ["Morgan Stanley and Cantor Fitzgerald lift price target to $90", "Bernstein SocGen cuts price target to $50",
+               "benchmark raises price target to $10", "Piper Sandler and Needham see price target of $70"],
+              _targets, changes=[{"firm": "Cantor Fitzgerald", "ptTo": 90, "ptFrom": 80}],
+              expect=[("Morgan Stanley", _pt(90, None, "USD")), ("Bernstein SocGen", _pt(50, None, "USD")), ("Piper Sandler", _pt(70, None, "USD"))]),
+    # Cards 122/141/162: firms with targets and no method; the same firm can be listed twice (news and rating changes).
+    _avm_case("valuation_text.method_not_disclosed_lists_news_and_rating_change_firms", ["BR-NWS-141", "BR-NWS-162", "BR-NWS-122"],
+              ["Jefferies PT $50", "Needham reiterates $95 target"],
+              lambda v: {"status": v["status"], "basis": v["basis"], "decisionUse": v["decisionUse"], "counts": v["methodCounts"],
+                         "notDisclosed": [(m["firm"], m["source"], m["priceTarget"]) for m in v["methodNotDisclosed"]]},
+              changes=[{"firm": "Baird", "ptTo": 45, "ptFrom": 0}, {"firm": "Needham", "ptTo": 95, "ptFrom": 0}],
+              expect={"status": "METHOD_NOT_DISCLOSED", "basis": "NEWS_TEXT_EXTRACTION", "decisionUse": "CONTEXT_ONLY", "counts": {},
+                      "notDisclosed": [("Jefferies", "news", _pt(50, None, "USD")), ("Needham", "news", _pt(95, None, "USD")),
+                                       ("Baird", "rating_changes", _pt(45, None, None)), ("Needham", "rating_changes", _pt(95, None, None))]}),
+    _avm_case("valuation_text.rating_change_alone_gives_method_not_disclosed", ["BR-NWS-162"], [],
+              lambda v: {"status": v["status"], "evidence": len(v["evidence"]), "notDisclosed": [(m["firm"], m["source"], m["priceTarget"]) for m in v["methodNotDisclosed"]]},
+              changes=[{"firm": "Needham", "ptTo": 95, "ptFrom": 80}],
+              expect={"status": "METHOD_NOT_DISCLOSED", "evidence": 0, "notDisclosed": [("Needham", "rating_changes", _pt(95, 80, None))]}),
+    _avm_case("valuation_text.nothing_found", ["BR-NWS-162"], ["Needham shares rise"], lambda v: {"status": v["status"], "scanned": v["itemsScanned"]},
+              expect={"status": "NOT_FOUND", "scanned": 1}),
+    # Card 137: multiples (multiple-first, metric-first), EV flag, periods; growth wording is not a multiple.
+    _avm_case("valuation_text.multiples_metric_ev_flag_and_periods", ["BR-NWS-137"],
+              ["Target based on 41x 2H27 EV/EBITDA", "Valuation at 25 times FY 26E P/E on next twelve months", "revenue grew 3x faster than peers",
+               "EBITDA multiple of about 12x for 2028", "Cantor Fitzgerald uses a SOTP with peer multiple cross-check",
+               "Target at 18x next twelve months EV/sales"],
+              lambda v: [(e["methods"]) for e in v["evidence"]],
+              expect=[[{"method": "multiple", "multiple": 41, "metric": "EBITDA", "enterpriseValue": True, "periods": ["2H27"]}],
+                      [{"method": "multiple", "multiple": 25, "metric": "earnings", "enterpriseValue": False, "periods": ["FY26E"]}],   # the window ends at the metric, so the trailing period is not read
+                      [{"method": "multiple", "multiple": 12, "metric": "EBITDA", "enterpriseValue": False, "periods": ["2028"]}],
+                      [{"method": "sum_of_the_parts"}, {"method": "peer_comparison"}],
+                      [{"method": "multiple", "multiple": 18, "metric": "sales", "enterpriseValue": True, "periods": ["NTM"]}]]),
+    # Card 135: subject aliases (ticker root >= 3 letters, full name, name without legal suffixes).
+    Case(name="valuation_text.subject_aliases", ids=["BR-NWS-135"],
+         py=lambda: [cs.subject_aliases("ASTS", ["AST SpaceMobile, Inc."]), cs.subject_aliases("GE.L", []), cs.subject_aliases("BRK.B", ["XYZ Holdings Group"]),
+                     cs.subject_aliases("ZZ", ["Group"])],
+         ts={"js": "return [m.capitalStructure.subjectAliases('ASTS', ['AST SpaceMobile, Inc.']), m.capitalStructure.subjectAliases('GE.L', []),"
+                   " m.capitalStructure.subjectAliases('BRK.B', ['XYZ Holdings Group']), m.capitalStructure.subjectAliases('ZZ', ['Group'])];"},
+         expect=[["ast spacemobile", "ast spacemobile inc", "asts"], [], ["brk", "xyz", "xyz holdings group"], ["group"]]),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# Expanded institutional ownership: BR-NWS-150 (provider state machine), 177 and 180 (it reuses the news Finnhub market policy)
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+from pathlib import Path
+
+from yfmcp.tools import provider_gaps
+
+FAKE_ALPHA = {"ALPHA_VANTAGE_API_KEY": "fake-alpha-key"}
+FINNHUB_OWNERSHIP = "https://finnhub.io/api/v1/stock/ownership*"
+ALPHA_QUERY = "https://www.alphavantage.co/query*"
+
+
+def ownership_view(v: dict) -> dict:
+    data = v.get("data") if isinstance(v.get("data"), dict) else v
+    return {"status": data.get("status"), "source": data.get("source"), "action": data.get("recommendedNextAction"),
+            "attempts": [[a.get("provider"), a.get("status"), a.get("attempted"), a.get("reasonCode"), a.get("validationStatus")]
+                         for a in data.get("providerAttempts") or []],
+            "holders": [h.get("holderName") for h in data.get("holders") or []], "returned": data.get("returnedCount"),
+            "providerRows": data.get("providerRowCount"), "truncated": data.get("truncated"), "dataDate": data.get("dataDate"),
+            "freshness": data.get("freshnessStatus"), "decisionGrade": data.get("decisionGrade"), "aggregate": data.get("aggregate"),
+            "alphaAllowed": data.get("alphaFallbackAllowed")}
+
+
+def ownership_case(name: str, ids: list[str], ticker: str, *, allow: bool = False, max_holders: int = 50, env: dict | None = None,
+                   routes: dict | None = None, policy_missing: bool = False, **kw) -> Case:
+    scn = {"env": env or {}, "routes": routes or {}, "info": {}, "news": []}
+
+    def py():
+        with _python_world(scn), contextlib.ExitStack() as stack:
+            if policy_missing:
+                stack.enter_context(patch.object(provider_gaps, "_SOURCE_POLICY_PATH", Path("/nonexistent/news-source-capabilities.json")))
+            return json.loads(asyncio.run(provider_gaps.get_expanded_institutional_ownership(ticker, allow, max_holders)))
+
+    fx = {"now": NOW, "env": env or {}, "fn": "getExpandedInstitutionalOwnership"}
+    kw.setdefault("select", ownership_view)
+    return Case(name=name, ids=ids, py=py, ts={"js": _TOOL_JS, "args": [ticker, allow, max_holders], "fx": fx, "isolate": True},
+                routes=_routes_for(scn), **kw)
+
+
+_OWN_ROWS = [{"name": "Vanguard Group", "share": 900, "change": 10, "filingDate": "2026-06-30"},
+             {"name": "BlackRock", "share": 800, "change": -5, "filingDate": "2026-06-30"},
+             {"name": "State Street", "share": 400, "change": 0, "filingDate": "2026-03-31"}]
+_NOT_ELIGIBLE_OWN = {"status": "NOT_ELIGIBLE", "source": None, "action": "USE_YAHOO_OR_OFFICIAL_FILINGS",
+                     "attempts": [["finnhub", "NOT_ELIGIBLE", False, "MARKET_NOT_ENABLED_BY_DEPLOYED_ENTITLEMENT", None]]}
+CASES += [
+    # Card 150: a Finnhub answer for another symbol is discarded (PROVIDER_IDENTITY_MISMATCH); with the scarce fallback allowed
+    # Alpha Vantage is tried, and an OK-but-empty Alpha answer is NOT_FOUND.
+    ownership_case("ownership.finnhub_symbol_mismatch_falls_back_to_alpha_and_empty_alpha_is_not_found", ["BR-NWS-150"], "AAPL", allow=True,
+                   env={**FAKE_FINNHUB, **FAKE_ALPHA},
+                   routes={FINNHUB_OWNERSHIP: {"json": {"symbol": "MSFT", "ownership": _OWN_ROWS}}, ALPHA_QUERY: {"json": {"symbol": "AAPL", "data": []}}},
+                   select=lambda v: {k: ownership_view(v)[k] for k in ("status", "source", "action", "attempts", "alphaAllowed")},
+                   expect={"status": "NOT_FOUND", "source": None, "action": "VERIFY_TICKER_AND_DATE", "alphaAllowed": True,
+                           "attempts": [["finnhub", "OK", True, None, "PROVIDER_IDENTITY_MISMATCH"], ["alpha_vantage", "OK", True, None, None]]}),
+    ownership_case("ownership.finnhub_success_reports_truncation_date_and_next_action", ["BR-NWS-150"], "AAPL", max_holders=2, env=FAKE_FINNHUB,
+                   routes={FINNHUB_OWNERSHIP: {"json": {"symbol": "AAPL", "ownership": _OWN_ROWS}}},
+                   expect={"status": "OK", "source": "finnhub", "action": "VERIFY_SEC_13F_FOR_MATERIAL_USE",
+                           "attempts": [["finnhub", "OK", True, None, None]], "holders": ["Vanguard Group", "BlackRock"], "returned": 2,
+                           "providerRows": 3, "truncated": True, "dataDate": "2026-06-30", "freshness": "DATED", "decisionGrade": False,
+                           "aggregate": {}, "alphaAllowed": None}),
+    ownership_case("ownership.empty_finnhub_without_fallback_points_to_sec_13f", ["BR-NWS-150"], "AAPL", env=FAKE_FINNHUB,
+                   routes={FINNHUB_OWNERSHIP: {"json": {"symbol": "AAPL", "ownership": []}}},
+                   select=lambda v: {k: ownership_view(v)[k] for k in ("status", "action", "attempts", "alphaAllowed")},
+                   expect={"status": "NOT_FOUND", "action": "VERIFY_SEC_13F_OR_ENABLE_SCARCE_FALLBACK",
+                           "attempts": [["finnhub", "OK", True, None, None]], "alphaAllowed": False}),
+    # Cards 177/180: the news Finnhub market policy gates this tool too; IQE.L (.L suffix) never reaches Finnhub.
+    ownership_case("ownership.ineligible_suffix_never_reaches_finnhub", ["BR-NWS-177", "BR-NWS-180"], "IQE.L",
+                   select=lambda v: {k: ownership_view(v)[k] for k in ("status", "source", "action", "attempts")}, expect={k: _NOT_ELIGIBLE_OWN[k] for k in ("status", "source", "action", "attempts")}),
+    # Card 180: Python reads the policy file at call time and fails open on any read error (IQE.L is then sent to Finnhub, which has
+    # no key here); the Worker's copy is compiled in.
+    ownership_case("ownership.unreadable_policy_fails_open_in_python", ["BR-NWS-180", "BR-NWS-177"], "IQE.L", policy_missing=True,
+                   select=lambda v: {k: ownership_view(v)[k] for k in ("status", "action", "attempts")},
+                   mode="pinned", decision="FINDING: Python fails open (calls Finnhub) when the news-source policy file is unreadable; the Worker's bundled policy cannot fail",
+                   expect_py={"status": "SOURCE_UNCONFIGURED", "action": "CONFIGURE_PROVIDER", "attempts": [["finnhub", "SOURCE_UNCONFIGURED", False, None, None]]},
+                   expect_ts={"status": "NOT_ELIGIBLE", "action": "USE_YAHOO_OR_OFFICIAL_FILINGS",
+                              "attempts": [["finnhub", "NOT_ELIGIBLE", False, "MARKET_NOT_ENABLED_BY_DEPLOYED_ENTITLEMENT", None]]}),
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# Further coverage for cards 161 (coverage with a healthy source beside a limited one), 170 (direct feed path), 182 (XML guard)
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+CASES += [
+    # Card 161: Finnhub rate-limited beside a healthy Yahoo source: partial coverage, retry advice, and the Yahoo item is still returned.
+    tool_case("news.coverage.rate_limited_source_beside_ok_source_is_partial_with_retry_action", ["BR-NWS-161", "BR-NWS-176"], "news",
+              ["ACME", 10, 14, ["yahoo_finance_news", "finnhub"]],
+              {"env": FAKE_FINNHUB, "info": ACME_INFO, "news": [yahoo_row("Acme wins supply contract", "2026-10-10T13:00:00Z")],
+               "routes": {FINNHUB_NEWS: {"status": 429, "body": "{}"}}},
+              select=lambda v: {"status": v.get("status"), "coverage": coverage_view(v), "titles": [it["title"] for it in v["items"]],
+                                "rows": {s: v["sourceStatus"][s]["status"] for s in ("yahoo_finance_news", "finnhub")}},
+              expect={"status": "PARTIAL",
+                      "coverage": {"sourceCoverage": "PARTIAL", "state": "PARTIAL", "failed": [["finnhub", "RATE_LIMITED"]], "skipped": [],
+                                   "truncated": [], "action": "RETRY_RETRYABLE_SOURCES"},
+                      "titles": ["Acme wins supply contract"], "rows": {"yahoo_finance_news": "OK", "finnhub": "RATE_LIMITED"}}),
+    # Card 170: a probed page that is itself an RSS document on the company domain is a direct feed (discoveryMethod direct_feed_path).
+    tool_case("company_ir.discovery_accepts_a_probed_path_that_is_itself_a_feed", ["BR-NWS-170"], "news",
+              ["ACME", 10, 14, ["company_ir"]],
+              {"info": ACME_WEB_INFO, "news": [], "routes": {f"{ACME_SITE}/rss.cfm": {"body": _ACME_FEED}}},
+              select=lambda v: {"row": (v["sourceStatus"].get("company_ir") or {}).get("status"),
+                                "items": [(it.get("discoveryMethod"), it.get("feedUrl"), it.get("confidence"), it.get("sourceType")) for it in v["items"]]},
+              mode="pinned", decision=RSS_DECISION,
+              expect_py={"row": "EMPTY_RESULT", "items": []},
+              expect_ts={"row": "OK", "items": [("direct_feed_path", f"{ACME_SITE}/rss.cfm", "HIGH", "company_ir")]}),
+    # Card 182: Python refuses any feed containing a DOCTYPE; the Worker refuses only <!ENTITY and checks the RSS structure instead.
+    tool_case("newswire.doctype_in_a_feed_is_refused_only_by_python", ["BR-NWS-182", "BR-NWS-154"], "news",
+              ["ACME", 10, 14, ["newswire"]],
+              {"info": ACME_INFO,
+               "routes": {GNW_FEEDS[0][1]: {"body": "<!DOCTYPE rss>" + _GNW_PUBLIC}, GNW_ALL: {"body": rss([])}}},
+              select=lambda v: {"titles": [it["title"] for it in v["items"]], "row": v["sourceStatus"]["newswire"]["status"], "codes": codes(v),
+                                "sourcesUsed": v["meta"]["sourcesUsed"]},
+              mode="pinned", decision="FINDING: Python rejects a feed with a DOCTYPE (parse error); the Worker rejects only <!ENTITY, so the same feed yields items there",
+              expect_py={"titles": [], "row": "PROVIDER_ERROR", "codes": ["SOURCE_UNAVAILABLE"], "sourcesUsed": []},
+              expect_ts={"titles": ["Acme public companies story one", "Acme public companies story two"], "row": "OK", "codes": [], "sourcesUsed": ["newswire"]}),
 ]
