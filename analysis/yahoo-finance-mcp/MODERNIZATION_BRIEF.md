@@ -135,11 +135,11 @@ C4Container
 
 ## 3. Phased Sequence
 
-**Ordering principle.** Leaf-first by coupling:
-1. Secure the public surface.
-2. Build the safety net.
-3. Repair what the next move would otherwise fossilise.
-4. Prove the move recipe on the least-coupled domain.
+**Ordering principle.** Leaf-first by coupling, with the security phase deferred by owner decision (Q16):
+1. Build the safety net.
+2. Repair what the next move would otherwise fossilise.
+3. Prove the move recipe on the least-coupled domain.
+4. Secure the public surface (Phase 1, deferred until after the pilot).
 5. Extract the shared hub.
 6. Extract the remaining domains.
 7. Clean up.
@@ -158,7 +158,7 @@ C4Container
 
 ```mermaid
 flowchart LR
-  P1["Phase 1<br/>Harden public surface<br/>/modernize-harden · S"]
+  P1["Phase 1 (deferred, Q16)<br/>Harden public surface<br/>/modernize-harden · S"]
   P2["Phase 2<br/>Behaviour-contract harness<br/>/modernize-transform (characterisation) · M"]
   R3["R3 · repairs before news move<br/>BR-NWS-007 · Q3h · Q7 news extraction<br/>+ RN neutrality deprecation release · S"]
   P3["Phase 3 · PILOT<br/>Extract News & events · M"]
@@ -167,32 +167,35 @@ flowchart LR
   R5["R5-‹unit› · repairs before each domain move<br/>Q1 repairs · Q3c-f · Q3i · Q5 · Q7 extraction · M"]
   P5["Phase 5<br/>Extract remaining domains · XL"]
   P6["Phase 6<br/>Cleanup & docs · S"]
-  P1 --> R3
   P2 --> R3
   R3 --> P3
-  P3 -->|"PLAYBOOK.md + brief regenerated"| R4
+  P3 -->|"PLAYBOOK.md + brief regenerated"| P1
+  P1 --> R4
   R4 --> P4
   P4 --> R5
   R5 --> P5
   P5 --> P6
 ```
 
-Phases 1 and 2 are independent and may run in parallel. Sizes are relative shares of the production-code COCOMO-II index (≈ 261 over 59.1 KSLOC, from `ASSESSMENT.md`). **They rank phases against each other and are not durations.**
+**Execution order (Q16): Phase 2 → R3 + RN → Phase 3 (pilot) → Phase 1 → R4 → Phase 4 → R5 → Phase 5 → Phase 6.** Phase numbers are kept as identifiers. Sizes are relative shares of the production-code COCOMO-II index (≈ 261 over 59.1 KSLOC, from `ASSESSMENT.md`). **They rank phases against each other and are not durations.**
 
 Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port, then parity tests, then a section in `docs/provider-runtime-guidance.md`, then `release-clerk`, then `live-verifier` after deploy.
 
-### Phase 1 — Harden the public surface
+### Phase 1 — Harden the public surface (DEFERRED: runs after Phase 3, before R4; Q16)
 - **Command:** `/modernize-harden yahoo-finance-mcp`.
 - **Scope:**
   - **Q2a:** strict HTTPS allow-list. SEC Archives and approved SEC endpoints, the exact Yahoo hosts needed by the transcript and news workflows, and the exact hosts of IR-registry entries with status `approved`. Every redirect hop is re-validated. Private, loopback, link-local and IP-literal destinations are rejected. No wildcards. `raw_text` is caller content only and never auto-fetches. This also covers the earnings-release URL policy (BR-ERN-017).
   - **Q2b + Q13:** `/mcp` requires the static credential behind a replaceable auth abstraction, supplied as `Authorization: Bearer <token>` or the secret path `/mcp/<token>`. The path segment is redacted from every log, export and error. The claude.ai connector is re-added with the secret-path URL in the same release window. Rate limits and provider budgets are keyed by credential, not IP. An unauthenticated `/health` may exist only if it makes no provider calls. Paid providers need auth **and** explicit caller opt-in, and default waterfalls never force them. Budget exhaustion returns a typed non-evidence state, never `NOT_FOUND`.
   - **S-03:** JSON-RPC batch cap of **1 tool call per HTTP request** (Q12) and a body cap.
+  - **News budget follow-through (moved from R3, Q16):** sources starved by the subrequest budget are reported `PROVIDER_BUDGET_EXHAUSTED` and coverage states the budget cause (today's live MSFT 0-item case).
   - **Per-invocation subrequest budget guard (V3, required on any plan):** count `fetch()` and Cache API calls in the request scope against the **50-per-invocation Free limit** (leave a reserve for the response path), stop starting new upstream work before the limit, and mark the affected sources `PROVIDER_BUDGET_EXHAUSTED`, never `PROVIDER_ERROR` or clean absence. Production already exceeds Free's 50 (V3).
   - **S-05:** evidence-store `list()` guard.
   - **S-07/S-09:** workflow permissions, `--ignore-scripts`, actions pinned to SHAs.
   - **S-10/S-11:** dependency upgrades, `uv sync --frozen`, audit gates.
   - **S-13:** restrict CORS once auth exists.
 - **Entry criteria:**
+  - [ ] Phase 3 exit criteria are met (Q16: Phase 1 runs after the pilot).
+  - [ ] Phase 2 harness cases that touch `/mcp` transport, canaries or the two fetching tools are updated in the same release, because they characterised the unauthenticated behaviour.
   - [x] §7 Q12 decided 2026-10-15: stay on Free; per-tool caps; JSON-RPC batch = 1 tool call.
   - [x] §7 V1 / Q13 resolved 2026-10-15: no Request headers in claude.ai, so the credential is accepted as a bearer header **or** the secret path `/mcp/<token>`.
   - [ ] Scripts send `Authorization` from an `MCP_TOKEN` secret (all 9 scripts that post to `MCP_URL`).
@@ -239,7 +242,7 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - **Release mechanics:** additive, so a minor version bump. Frozen-contract tests and canaries are updated in the same release. The harness pins both old and new fields.
 - **R3 (before Phase 3):**
   - BR-NWS-007: news coverage must not report `FULL` while required sources have failed (Q3i).
-  - V3 news follow-through: sources starved by the subrequest budget are reported `PROVIDER_BUDGET_EXHAUSTED` and coverage states the budget cause. This is today's live MSFT 0-item case.
+  - *(V3 news budget follow-through moved to Phase 1 with the budget guard it depends on; Q16.)*
   - Q3h: `sources` omitted or null means the defaults; `sources=[]` means attempt none; requested, attempted, skipped and defaulted metadata kept separate; `sourceStatus` describes what actually happened.
   - **Q7:** targeted rule extraction for News (`/modernize-extract-rules` with a news `modulePattern`), with the new rules folded into Phase 2's harness.
 - **R4 (before Phase 4):**
@@ -281,7 +284,7 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - The tools are `get_company_news`, `search_company_news`, `get_company_press_releases`, `get_public_event_timeline`, `get_sec_recent_events` and `verify_company_event`. `get_uk_company_filings` moves with providers.
   - Output must be byte-identical. Imports back into the god files are allowed and recorded.
 - **Entry criteria:**
-  - [ ] Phase 1 and Phase 2 exit criteria are met.
+  - [ ] Phase 2 exit criteria are met. (Phase 1 is no longer a prerequisite: Q16.)
   - [ ] R3 is released and live-verified.
   - [ ] The Q7 news rules are in the harness.
 - **Exit criteria:**
@@ -567,6 +570,13 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
   | `t2_inputs` | `pricePositionInputs` | current price, 52-week high/low, % from high/low |
   | `t4_inputs` | `earningsInputs` | beat rate, beat streak, average surprise, momentum flag, pre-revenue |
   | `t5_inputs` | `technicalInputs` | MACD, MACD histogram, moving-average trend, last close |
+- [x] **Q16. Phase ordering: DEFER ALL OF PHASE 1 (owner decision 2026-10-15).** Owner, verbatim: "defer all phase 1". Phase 1 now runs after the Phase 3 pilot and before R4. Its scope is unchanged, plus the R3 news budget follow-through that depends on its budget guard. Phase 3 no longer requires Phase 1.
+  - **Risk accepted by the owner until Phase 1 ships** (production 2.6.0 verified unauthenticated on 2026-10-15):
+    - **S-01:** an open fetch proxy through `parse_public_transcript` / `index_earnings_release`. Abuse originates from Cloudflare under the owner's account.
+    - **S-02:** anonymous callers can spend Finnhub, Alpha Vantage and Marketaux quota and trigger the 6-hour provider-denial memo for everyone.
+    - **Free-plan daily cap:** anonymous traffic can exhaust 100,000 requests per day (Error 1027 until midnight UTC).
+    - **Subrequest overflow** keeps mislabelling starved news sources as `PROVIDER_ERROR` (V3).
+  - The split alternative (a minimal 1a with auth plus the allow-list first) was offered and declined.
 - [ ] **Downstream notice (not a gate).** The Sniper Doctrine, and any other consumer, should move to the universal fields within the RN window. The deprecation notices in payloads and docs carry the mapping.
 - [x] **Q12. Cloudflare plan strategy: STAY ON WORKERS FREE WITH PER-TOOL CAPS (owner decision 2026-10-15).** Q3c's single cap of 10 is superseded by the measured constraint (V3). Caps are advertised in each tool's schema as `maxItems`, enforced identically in **both runtimes** (Python too, for parity, although it has no subrequest limit), and an oversize request is rejected with `BATCH_LIMIT_EXCEEDED` instead of being truncated:
 
@@ -606,7 +616,7 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
 
 ```
 Approved by: ________________  Date: __________
-Approval covers: Phase 1 only | Phases 1–3 (incl. R3, RN) | Full plan
+Approval covers: Phases 2–3 (incl. R3, RN) | Phases 2–3 then Phase 1 | Full plan
 ```
 
-The Doctrine no longer gates approval (Q14/N4). **All open questions are resolved** (V1 and Q13 on 2026-10-15; naming Q11/Q15/Q15a closed). The brief is ready to sign. Recommended scope: **Phases 1–3 including R3 and RN**. Phase 3 is the pilot, and the brief will be regenerated for R4 onward.
+The Doctrine no longer gates approval (Q14/N4). **All open questions are resolved** (V1 and Q13 on 2026-10-15; naming Q11/Q15/Q15a closed). The brief is ready to sign. Recommended scope under Q16: **Phase 2, R3, RN and Phase 3 (pilot)**; Phase 1 then follows. Phase 3 is the pilot, and the brief will be regenerated afterwards for Phase 1, R4 and onward. Q16 records the security exposure accepted in the meantime.
