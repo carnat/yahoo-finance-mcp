@@ -66,6 +66,7 @@ from yfmcp import driver_ledger as _dl
 from yfmcp import guidance_history as _gh
 from yfmcp import metric_reconciliation as _mr
 from yfmcp.evidence import AUTHORITY_BOUNDARY as _AUTHORITY_BOUNDARY, EPS_BASIS as _EPS_BASIS
+from yfmcp.deprecations import MIN_ADV_USD_DESCRIPTION, TOOL_RELIABILITY_CLASS as _TOOL_RELIABILITY_CLASS, parse_min_adv_usd
 from yfmcp.fiscal_calendar import document_fiscal_year_focus, filing_fiscal_year_label, fiscal_year_naming
 from yfmcp import valuation_history as _vh
 from yfmcp.clients.edgar import (
@@ -3061,6 +3062,7 @@ async def get_company_press_releases(
         "decisionGrade": decision_grade,
         "decisionGradeBasis": decision_grade_basis,
         "capabilityStatus": "ACTIVE",
+        "reliabilityClass": _TOOL_RELIABILITY_CLASS["get_company_press_releases"],
         "failureMode": None if decision_grade else coverage_status,
     }
     if sec_8k_evidence:
@@ -8058,6 +8060,8 @@ async def get_price_target_bracket(
         "tag": inferred_tag,
         "tagNote": "Deprecated: tag is inferred from currentPrice/referenceTargetPrice distance. Use inferredTag.",
         "invertedFlag": inverted_flag,
+        # From the raw prices, not the rounded referenceTargetPct (2.8.0).
+        "priceAtOrAboveTarget": current_price >= target_price if current_price > 0 and target_price > 0 else None,
         "dataDate": data_date,
         "recommendedNextAction": "NONE",
     })
@@ -8171,6 +8175,11 @@ async def get_position_score_inputs(ticker: str) -> str:
         "t2_inputs": t2,
         "t4_inputs": t4,
         "t5_inputs": t5,
+        # Plain-named twins of the t*_inputs groups (2.8.0), same contents.
+        "analystInputs": t1,
+        "pricePositionInputs": t2,
+        "earningsInputs": t4,
+        "technicalInputs": t5,
         "componentStatus": component_status,
         "failedComponents": failed_components,
         "limitedComponents": limited_components,
@@ -8216,9 +8225,16 @@ async def analyze_volume_ratio(ticker: str | list[str], period: int = 10) -> str
     return await get_volume_ratio(ticker, period)
 
 
-@yfinance_server.tool(name="check_volume_liquidity_threshold", output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_gate"], description="Canonical alias for get_volume_gate.")
-async def check_volume_liquidity_threshold(ticker: str, foreign_exchange: bool = False) -> str:
-    return await get_volume_gate(ticker, foreign_exchange)
+@yfinance_server.tool(name="check_volume_liquidity_threshold", output_schema=_TOOL_OUTPUT_SCHEMAS["get_volume_gate"], description="Canonical alias for get_volume_gate. Pass min_adv_usd for a caller-chosen threshold; meetsMinimum reports adv20dTradedValueUsd >= min_adv_usd.")
+async def check_volume_liquidity_threshold(
+    ticker: str,
+    foreign_exchange: bool = False,
+    min_adv_usd: Annotated[float | None, Field(description=MIN_ADV_USD_DESCRIPTION)] = None,
+) -> str:
+    min_adv_usd, min_adv_error = parse_min_adv_usd(min_adv_usd)
+    if min_adv_error:
+        return _mcp_failure("check_volume_liquidity_threshold", ErrorCode.INPUT_VALIDATION_ERROR, min_adv_error)
+    return await get_volume_gate(ticker, foreign_exchange, min_adv_usd)
 
 
 @yfinance_server.tool(name="get_company_profile", output_schema=_TOOL_OUTPUT_SCHEMAS["get_stock_info"], description="Canonical alias for get_stock_info.")
@@ -9501,6 +9517,7 @@ async def get_sec_filing_section_markdown(
         "tables_in_section": tables_in_section,
         "word_count": word_count,
         "confidence": "MEDIUM",
+        "reliabilityClass": _TOOL_RELIABILITY_CLASS["get_sec_filing_section_markdown"],
         "source": parser_source,
         "truncated": truncated,
         "sectionStartOffset": start_idx,

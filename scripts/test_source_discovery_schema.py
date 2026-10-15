@@ -174,6 +174,22 @@ class TestPublicConnectorSurfaceSource(unittest.TestCase):
                 self.assertIsNone(re.search(pattern, py_win, re.IGNORECASE), f"{name} server.py hit /{pattern}/")
                 self.assertIsNone(re.search(pattern, ts_win, re.IGNORECASE), f"{name} tools.ts hit /{pattern}/")
 
+    def test_min_adv_usd_is_described_in_both_runtimes(self) -> None:
+        sentence = "Pass min_adv_usd for a caller-chosen threshold; meetsMinimum reports adv20dTradedValueUsd >= min_adv_usd."
+        prop = ("Optional caller-chosen minimum 20-day average daily traded value in USD; "
+                "when supplied, meetsMinimum compares adv20dTradedValueUsd against it.")
+        deprecations_py = (ROOT / "yfmcp" / "deprecations.py").read_text(encoding="utf-8")
+        # The Python input property description lives in one constant, as one string literal split over two lines.
+        self.assertIn('"Optional caller-chosen minimum 20-day average daily traded value in USD; "', deprecations_py)
+        self.assertIn('"when supplied, meetsMinimum compares adv20dTradedValueUsd against it."', deprecations_py)
+        for name in ("check_volume_liquidity_threshold", "get_market_snapshot"):
+            ts_win = self._window(self.ts, f'name: "{name}"', span=1800)
+            py_win = self._window(self.py, f'name="{name}"', span=1500)
+            self.assertIn(sentence, ts_win, f"{name} tools.ts description")
+            self.assertIn(sentence, py_win, f"{name} Python description")
+            self.assertIn(f'min_adv_usd: {{ type: "number", exclusiveMinimum: 0, description: "{prop}" }}', ts_win)
+            self.assertIn("min_adv_usd: Annotated[float | None, Field(description=MIN_ADV_USD_DESCRIPTION)]", py_win)
+
     def test_reference_target_parameter_is_exposed(self) -> None:
         ts_win = self._window(self.ts, 'name: "calculate_price_target_distance"', span=900)
         self.assertIn("reference_target_price", ts_win)

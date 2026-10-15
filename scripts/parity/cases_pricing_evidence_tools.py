@@ -269,7 +269,7 @@ CASES += [
 
 GATE_DAYS = _weekdays("2026-10-09", 30)
 GATE_NOW = _epoch("2026-10-09", "22:00", "UTC")
-GATE_FIELDS = ("status", "gatePass", "adv20dTradedValueUsd", "notionalUsd", "fxRate", "fxCurrency", "gateBasis",
+GATE_FIELDS = ("status", "gatePass", "meetsMinimum", "minAdvUsd", "adv20dTradedValueUsd", "notionalUsd", "fxRate", "fxCurrency", "gateBasis",
                "recommendedNextAction", "note")
 
 
@@ -294,9 +294,61 @@ def _quote_summary(symbol: str, currency: str, price: float | None) -> dict:
         "summaryDetail": {}, "defaultKeyStatistics": {}}]}}
 
 
+def _python_gate_call(via: str | None, symbol: str, min_adv):
+    """Python side of a gate scenario: the function itself, the tool through the V2 envelope, or the grouped route."""
+    from yfmcp.app import build_handler_registry
+    from yfmcp.envelope import _envelope_tool_result
+    import tool_groups
+
+    if via is None:
+        return pricing.get_volume_gate(symbol, False, min_adv)
+    if via in ("snapshot", "snapshot_envelope"):
+        # Only the volume component is real; the others fail, which leaves volume.* untouched.
+        async def snapshot():
+            failed = AsyncMock(return_value=json.dumps({"error": True, "message": "stubbed component"}))
+            with patch.multiple(pricing, get_fast_info=failed, get_price_stats=failed, get_ma_position=failed,
+                                get_volume_ratio=failed, get_technical_indicators=failed):
+                raw = await pricing.get_market_snapshot(symbol, "compact", False, min_adv)
+            return _envelope_tool_result("get_market_snapshot", raw) if via == "snapshot_envelope" else raw
+        return snapshot()
+    if via == "envelope":
+        async def call():
+            return _envelope_tool_result("check_volume_liquidity_threshold",
+                                         await server.check_volume_liquidity_threshold(symbol, False, min_adv))
+        return call()
+    params = {"ticker": symbol, **({} if min_adv is None else {"min_adv_usd": min_adv})}
+    return tool_groups._route_grouped_call("stock_pricing", "check_volume_liquidity_threshold", params,
+                                           build_handler_registry(server.yfinance_server))
+
+
+def _worker_gate_call(via: str | None, symbol: str, min_adv) -> str:
+    """Worker side of the same scenario (a JS function body, to be wrapped by _ts_with_clock)."""
+    args = {"ticker": symbol, **({} if min_adv is None else {"min_adv_usd": min_adv})}
+    min_js = "null" if min_adv is None else json.dumps(min_adv)
+    if via is None:
+        return f'return JSON.parse(await m.yahooFinance.getVolumeGate("{symbol}", false, {min_js}));'
+    if via == "snapshot":
+        return f'return JSON.parse(await m.yahooFinance.getMarketSnapshot("{symbol}", "compact", false, {min_js}));'
+    if via == "snapshot_envelope":
+        return (f'm.response.setWorkerEnv({{}}); '
+                f'return (await m.tools.callToolResult("get_market_snapshot", {json.dumps(args)})).value;')
+    if via == "envelope":
+        return (f'm.response.setWorkerEnv({{}}); '
+                f'return (await m.tools.callToolResult("check_volume_liquidity_threshold", {json.dumps(args)})).value;')
+    return (f'm.response.setWorkerEnv({{}}); const r = await m.tools.callVisibleToolResult("stock_pricing", '
+            f'{{action: "check_volume_liquidity_threshold", params: {json.dumps(args)}}}); return r.value ?? JSON.parse(r.text);')
+
+
 def _gate_case(name: str, ids: list[str], *, symbol: str, currency: str, close: float, volume: int,
-               fx: tuple[str, float | None] | None, expect: dict, **kw) -> Case:
-    """One get_volume_gate scenario: `volume` shares a day at `close` (listing units) for 30 sessions."""
+               fx: tuple[str, float | None] | None, expect: dict, min_adv=None, via: str | None = None,
+               select=None, **kw) -> Case:
+    """One get_volume_gate scenario: `volume` shares a day at `close` (listing units) for 30 sessions.
+
+    `min_adv` is the caller's min_adv_usd. `via` None calls the gate function in each runtime; "envelope" calls the
+    tool through the V2 envelope (Python `_envelope_tool_result`, Worker `callToolResult`); "grouped" calls it as an
+    action of the stock_pricing group (Python `_route_grouped_call`, Worker `callVisibleToolResult`); "snapshot" and
+    "snapshot_envelope" do the same for get_market_snapshot, whose volume block carries the gate fields.
+    """
     fx_symbol, fx_rate = fx if fx else (None, None)
 
     def py():
@@ -308,7 +360,7 @@ def _gate_case(name: str, ids: list[str], *, symbol: str, currency: str, close: 
                     "expectedCompletedDate": GATE_DAYS[-1], "excludedIncompleteBar": False, "retryAttempted": False}
         with patch.object(pricing.yf, "Ticker", listing), \
                 patch.object(pricing, "_load_completed_daily_history", AsyncMock(return_value=prepared)):
-            return asyncio.run(pricing.get_volume_gate(symbol, False))
+            return asyncio.run(_python_gate_call(via, symbol, min_adv))
 
     stamps = [_epoch(d, "20:00", "UTC") for d in GATE_DAYS]
     chart = {"chart": {"result": [{
@@ -327,9 +379,8 @@ def _gate_case(name: str, ids: list[str], *, symbol: str, currency: str, close: 
             "json": _quote_summary(fx_symbol, fx_symbol[:3], fx_rate)}
     return Case(
         name=name, ids=ids, py=py,
-        ts={"js": _ts_with_clock(GATE_NOW, f'return JSON.parse(await m.yahooFinance.getVolumeGate("{symbol}", false));'),
-            "isolate": True},
-        routes=routes, select=lambda v: {k: v.get(k) for k in GATE_FIELDS}, expect=expect, **kw)
+        ts={"js": _ts_with_clock(GATE_NOW, _worker_gate_call(via, symbol, min_adv)), "isolate": True},
+        routes=routes, select=select or (lambda v: {k: v.get(k) for k in GATE_FIELDS}), expect=expect, **kw)
 
 
 CASES += [
@@ -337,14 +388,14 @@ CASES += [
     # 500,000,000 GBp / 79 = $6.33M, gate FAIL.
     _gate_case("prc.currency.gbp_pence_listing_card_example", ["BR-PRC-003"], symbol="CARD.L", currency="GBp",
                close=250.0, volume=2_000_000, fx=("GBP=X", 0.79),
-               expect={"status": "OK", "gatePass": False, "adv20dTradedValueUsd": 6329113.92,
+               expect={"status": "OK", "gatePass": False, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 6329113.92,
                        "notionalUsd": 6329113.92, "fxRate": 0.79, "fxCurrency": "GBP",
                        "gateBasis": "ADV20_TRADED_VALUE_USD", "recommendedNextAction": "NONE",
                        "note": "Volume gate FAIL — 20d average traded value $6.3M (< $10M); latest session 1.00x 20d ADV"
                                " [GBp→USD at 0.7900 GBP/USD, 100 GBp per GBP]"}),
     _gate_case("prc.currency.gbx_alias_behaves_like_gbp_pence", ["BR-PRC-003"], symbol="CARX.L", currency="GBX",
                close=250.0, volume=2_000_000, fx=("GBP=X", 0.79),
-               expect={"status": "OK", "gatePass": False, "adv20dTradedValueUsd": 6329113.92,
+               expect={"status": "OK", "gatePass": False, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 6329113.92,
                        "notionalUsd": 6329113.92, "fxRate": 0.79, "fxCurrency": "GBP",
                        "gateBasis": "ADV20_TRADED_VALUE_USD", "recommendedNextAction": "NONE",
                        "note": "Volume gate FAIL — 20d average traded value $6.3M (< $10M); latest session 1.00x 20d ADV"
@@ -352,7 +403,7 @@ CASES += [
     _gate_case("prc.currency.south_african_cents_zac", ["BR-PRC-003"], symbol="ZAC.JO", currency="ZAc",
                close=5000.0, volume=1_000_000, fx=("ZAR=X", 18.0),
                # 5,000 ZAc x 1,000,000 = 5e9 ZAc; 18 ZAR/USD x 100 = 1,800 ZAc per USD -> $2,777,777.78.
-               expect={"status": "OK", "gatePass": False, "adv20dTradedValueUsd": 2777777.78,
+               expect={"status": "OK", "gatePass": False, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 2777777.78,
                        "notionalUsd": 2777777.78, "fxRate": 18, "fxCurrency": "ZAR",
                        "gateBasis": "ADV20_TRADED_VALUE_USD", "recommendedNextAction": "NONE",
                        "note": "Volume gate FAIL — 20d average traded value $2.8M (< $10M); latest session 1.00x 20d ADV"
@@ -360,7 +411,7 @@ CASES += [
     _gate_case("prc.currency.israeli_agorot_ila", ["BR-PRC-003"], symbol="ILA.TA", currency="ILA",
                close=10000.0, volume=1_000_000, fx=("ILS=X", 4.0),
                # 1e10 ILA / (4 x 100) = $25,000,000 -> PASS.
-               expect={"status": "OK", "gatePass": True, "adv20dTradedValueUsd": 25000000,
+               expect={"status": "OK", "gatePass": True, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 25000000,
                        "notionalUsd": 25000000, "fxRate": 4, "fxCurrency": "ILS",
                        "gateBasis": "ADV20_TRADED_VALUE_USD", "recommendedNextAction": "NONE",
                        "note": "Volume gate PASS — 20d average traded value $25.0M (≥ $10M); latest session 1.00x 20d ADV"
@@ -368,30 +419,30 @@ CASES += [
     _gate_case("prc.currency.major_unit_currency_uses_rate_without_scaling", ["BR-PRC-003"], symbol="EURX.PA",
                currency="EUR", close=100.0, volume=1_000_000, fx=("EUR=X", 0.5),
                # 1e8 EUR / 0.5 EUR per USD = $200,000,000.
-               expect={"status": "OK", "gatePass": True, "adv20dTradedValueUsd": 200000000,
+               expect={"status": "OK", "gatePass": True, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 200000000,
                        "notionalUsd": 200000000, "fxRate": 0.5, "fxCurrency": "EUR",
                        "gateBasis": "ADV20_TRADED_VALUE_USD", "recommendedNextAction": "NONE",
                        "note": "Volume gate PASS — 20d average traded value $200.0M (≥ $10M); latest session 1.00x 20d ADV"
                                " [EUR→USD at 0.5000 EUR/USD]"}),
     _gate_case("prc.currency.usd_listing_needs_no_rate", ["BR-PRC-003"], symbol="USDX", currency="USD",
                close=5.0, volume=100_000, fx=None,
-               expect={"status": "OK", "gatePass": False, "adv20dTradedValueUsd": 500000, "notionalUsd": 500000,
+               expect={"status": "OK", "gatePass": False, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": 500000, "notionalUsd": 500000,
                        "fxRate": 1, "fxCurrency": "USD", "gateBasis": "ADV20_TRADED_VALUE_USD",
                        "recommendedNextAction": "NONE",
                        "note": "Volume gate FAIL — 20d average traded value $0.5M (< $10M); latest session 1.00x 20d ADV"}),
     _gate_case("prc.currency.missing_rate_makes_the_gate_unknown", ["BR-PRC-003"], symbol="NORATE.L", currency="GBp",
                close=250.0, volume=2_000_000, fx=("GBP=X", None),
-               expect={"status": "OK", "gatePass": None, "adv20dTradedValueUsd": None, "notionalUsd": None,
+               expect={"status": "OK", "gatePass": None, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": None, "notionalUsd": None,
                        "fxRate": None, "fxCurrency": None, "gateBasis": "ADV20_TRADED_VALUE_USD",
                        "recommendedNextAction": "RETRY", "note": "Volume gate UNKNOWN — GBP=X rate unavailable"}),
     _gate_case("prc.currency.zero_rate_makes_the_gate_unknown", ["BR-PRC-003"], symbol="ZERORATE.L", currency="GBp",
                close=250.0, volume=2_000_000, fx=("GBP=X", 0.0),
-               expect={"status": "OK", "gatePass": None, "adv20dTradedValueUsd": None, "notionalUsd": None,
+               expect={"status": "OK", "gatePass": None, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": None, "notionalUsd": None,
                        "fxRate": None, "fxCurrency": None, "gateBasis": "ADV20_TRADED_VALUE_USD",
                        "recommendedNextAction": "RETRY", "note": "Volume gate UNKNOWN — GBP=X rate unavailable"}),
     _gate_case("prc.currency.negative_rate_makes_the_gate_unknown", ["BR-PRC-003"], symbol="NEGRATE.L", currency="GBp",
                close=250.0, volume=2_000_000, fx=("GBP=X", -0.79),
-               expect={"status": "OK", "gatePass": None, "adv20dTradedValueUsd": None, "notionalUsd": None,
+               expect={"status": "OK", "gatePass": None, "meetsMinimum": None, "minAdvUsd": None, "adv20dTradedValueUsd": None, "notionalUsd": None,
                        "fxRate": None, "fxCurrency": None, "gateBasis": "ADV20_TRADED_VALUE_USD",
                        "recommendedNextAction": "RETRY", "note": "Volume gate UNKNOWN — GBP=X rate unavailable"}),
 ]
@@ -1233,25 +1284,43 @@ CASES += [
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 BRACKET_NOW = _epoch("2026-10-09", "12:00", "UTC")
-BRACKET_KEYS = ("referenceTargetPct", "bracket", "inferredTag", "distanceToTargetPct", "invertedFlag", "dataDate", "error", "message")
+BRACKET_KEYS = ("referenceTargetPct", "bracket", "inferredTag", "distanceToTargetPct", "invertedFlag", "priceAtOrAboveTarget",
+                "dataDate", "error", "message")
 
 
-def _bracket_case(name: str, ids: list[str], price: float, target: float, keys=BRACKET_KEYS, market_time: int | None = None,
-                  post=None, **kw) -> Case:
+def _bracket_case(name: str, ids: list[str], price: float | None, target: float, keys=BRACKET_KEYS, market_time: int | None = None,
+                  post=None, via: str | None = None, select=None, **kw) -> Case:
+    """One get_price_target_bracket scenario. `via` "envelope" calls calculate_price_target_distance through the V2 envelope
+    (Python `_envelope_tool_result`, Worker `callToolResult`); None calls the bracket function in each runtime."""
     def py():
+        from yfmcp.envelope import _envelope_tool_result
+
         info = {"regularMarketTime": market_time, "marketState": "CLOSED"} if market_time else {"marketState": "CLOSED"}
         company = SimpleNamespace(fast_info={"lastPrice": price}, info=info)
+
+        async def call():
+            if via == "envelope":
+                return _envelope_tool_result("calculate_price_target_distance",
+                                             await server.calculate_price_target_distance("TST", reference_target_price=target))
+            return await server.get_price_target_bracket("TST", target)
+
         with patch.object(server.yf, "Ticker", lambda _t: company):
-            return asyncio.run(server.get_price_target_bracket("TST", target))
+            return asyncio.run(call())
 
     summary = {"quoteSummary": {"result": [{"price": {
-        "currency": "USD", "quoteType": "EQUITY", "regularMarketPrice": {"raw": price}, "marketState": "CLOSED",
+        "currency": "USD", "quoteType": "EQUITY", "marketState": "CLOSED",
+        **({"regularMarketPrice": {"raw": price}} if price is not None else {}),
         **({"regularMarketTime": {"raw": market_time}} if market_time else {})}, "summaryDetail": {}, "defaultKeyStatistics": {}}]}}
+    if via == "envelope":
+        body = (f'm.response.setWorkerEnv({{}}); return (await m.tools.callToolResult("calculate_price_target_distance", '
+                f'{{ticker: "TST", reference_target_price: {target}}})).value;')
+    else:
+        body = f'return JSON.parse(await m.yahooFinance.getPriceTargetBracket("TST", {target}));'
     return Case(
         name=name, ids=ids, py=py,
-        ts={"js": _ts_with_clock(BRACKET_NOW, f'return JSON.parse(await m.yahooFinance.getPriceTargetBracket("TST", {target}));'), "isolate": True},
+        ts={"js": _ts_with_clock(BRACKET_NOW, body), "isolate": True},
         routes={**YAHOO_AUTH_ROUTES, "https://query1.finance.yahoo.com/v10/finance/quoteSummary/TST?*": {"json": summary}},
-        select=(lambda v: post(_pick(*keys)(v))) if post else _pick(*keys), **kw)
+        select=select or ((lambda v: post(_pick(*keys)(v))) if post else _pick(*keys)), **kw)
 
 
 QUOTE_TIME = _epoch("2026-10-08", "20:00", "UTC")
@@ -1259,7 +1328,7 @@ CASES += [
     # Card: price $70, reference target $100 -> 70.0, STRONG_BUY, LONG, distance 42.9.
     _bracket_case("prc.bracket.card_example_strong_buy_long", ["BR-PRC-022"], 70.0, 100.0, market_time=QUOTE_TIME,
                   expect={"referenceTargetPct": 70.0, "bracket": "STRONG_BUY", "inferredTag": "LONG", "distanceToTargetPct": 42.9,
-                          "invertedFlag": False, "dataDate": "2026-10-08", "error": None, "message": None}),
+                          "invertedFlag": False, "priceAtOrAboveTarget": False, "dataDate": "2026-10-08", "error": None, "message": None}),
     _bracket_case("prc.bracket.eighty_five_pct_is_acceptable_long_boundary", ["BR-PRC-022"], 85.0, 100.0, market_time=QUOTE_TIME,
                   keys=("referenceTargetPct", "bracket", "inferredTag"),
                   expect={"referenceTargetPct": 85.0, "bracket": "ACCEPTABLE", "inferredTag": "NEAR"}),
@@ -1269,6 +1338,31 @@ CASES += [
     _bracket_case("prc.bracket.exactly_100_is_caution_and_inverted", ["BR-PRC-022"], 100.0, 100.0, market_time=QUOTE_TIME,
                   keys=("referenceTargetPct", "bracket", "inferredTag", "invertedFlag"),
                   expect={"referenceTargetPct": 100.0, "bracket": "CAUTION", "inferredTag": "INVERTED", "invertedFlag": True}),
+    # 2.8.0 (Q14-N3): priceAtOrAboveTarget = currentPrice >= referenceTargetPrice on the raw prices.
+    _bracket_case("prc.bracket.price_at_or_above_target_false_below_the_target", ["BR-PRC-022", "Q14-N3"], 99.0, 100.0,
+                  market_time=QUOTE_TIME, keys=("referenceTargetPct", "priceAtOrAboveTarget"),
+                  expect={"referenceTargetPct": 99.0, "priceAtOrAboveTarget": False}),
+    _bracket_case("prc.bracket.price_at_or_above_target_true_when_equal", ["BR-PRC-022", "Q14-N3"], 100.0, 100.0,
+                  market_time=QUOTE_TIME, keys=("referenceTargetPct", "priceAtOrAboveTarget"),
+                  expect={"referenceTargetPct": 100.0, "priceAtOrAboveTarget": True}),
+    _bracket_case("prc.bracket.price_at_or_above_target_true_above_the_target", ["BR-PRC-022", "Q14-N3"], 120.0, 100.0,
+                  market_time=QUOTE_TIME, keys=("referenceTargetPct", "priceAtOrAboveTarget"),
+                  expect={"referenceTargetPct": 120.0, "priceAtOrAboveTarget": True}),
+    # The flag reads the raw prices: 99.96 rounds to 100.0% (invertedFlag true) but is still below the target.
+    _bracket_case("prc.bracket.price_at_or_above_target_uses_raw_prices_not_the_rounded_pct_below", ["BR-PRC-022", "Q14-N3"], 99.96, 100.0,
+                  market_time=QUOTE_TIME, keys=("referenceTargetPct", "invertedFlag", "priceAtOrAboveTarget"),
+                  expect={"referenceTargetPct": 100.0, "invertedFlag": True, "priceAtOrAboveTarget": False}),
+    _bracket_case("prc.bracket.price_at_or_above_target_uses_raw_prices_not_the_rounded_pct_above", ["BR-PRC-022", "Q14-N3"], 100.04, 100.0,
+                  market_time=QUOTE_TIME, keys=("referenceTargetPct", "invertedFlag", "priceAtOrAboveTarget"),
+                  expect={"referenceTargetPct": 100.0, "invertedFlag": True, "priceAtOrAboveTarget": True}),
+    # A price that is not positive gives null (the target is validated positive before this point).
+    _bracket_case("prc.bracket.price_at_or_above_target_null_for_a_non_positive_price", ["BR-PRC-022", "Q14-N3"], -5.0, 100.0,
+                  market_time=QUOTE_TIME, keys=("referenceTargetPct", "priceAtOrAboveTarget"),
+                  expect={"referenceTargetPct": -5.0, "priceAtOrAboveTarget": None}),
+    # No price at all is an error payload in both runtimes, so there is no flag to read.
+    _bracket_case("prc.bracket.price_at_or_above_target_missing_price_is_an_error_without_the_flag", ["BR-PRC-022", "Q14-N3"], None, 100.0,
+                  market_time=QUOTE_TIME, keys=("error", "message", "priceAtOrAboveTarget"),
+                  expect={"error": True, "message": "No price data for TST", "priceAtOrAboveTarget": None}),
     _bracket_case("prc.bracket.above_target_is_avoid", ["BR-PRC-022"], 120.0, 100.0, market_time=QUOTE_TIME,
                   keys=("referenceTargetPct", "bracket", "inferredTag", "distanceToTargetPct"),
                   expect={"referenceTargetPct": 120.0, "bracket": "AVOID", "inferredTag": "INVERTED", "distanceToTargetPct": -16.7}),

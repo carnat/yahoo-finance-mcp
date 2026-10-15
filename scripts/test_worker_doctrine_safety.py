@@ -6,12 +6,16 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
+import sys
 import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 TOOLS_TS = ROOT / "worker" / "src" / "tools.ts"
 YAHOO_FINANCE_TS = ROOT / "worker" / "src" / "yahoo-finance.ts"
 DEPLOYED_DISCOVERY = ROOT / "scripts" / "test_deployed_discovery.py"
@@ -278,6 +282,55 @@ class TestWorkerDoctrineSafety(unittest.TestCase):
         tools = TOOLS_TS.read_text(encoding="utf-8")
         self.assertIn("unverified Markdown from a degraded Worker HTML fallback", tools)
         self.assertIn("Gate use is payload-level", tools)
+
+    def test_reliability_class_replaces_doctrine_use_with_the_same_mapping_in_both_runtimes(self) -> None:
+        """2.8.0: doctrineUse stays (Worker only) and reliabilityClass sits beside it; the mapping is shared."""
+        from yfmcp.deprecations import RELIABILITY_CLASS_BY_DOCTRINE_USE, TOOL_RELIABILITY_CLASS
+
+        deprecations = (ROOT / "worker" / "src" / "deprecations.ts").read_text(encoding="utf-8")
+        block = deprecations.split("RELIABILITY_CLASS_BY_DOCTRINE_USE = {", 1)[1].split("} as const", 1)[0]
+        self.assertEqual(dict(re.findall(r'(\w+): "(\w+)"', block)), RELIABILITY_CLASS_BY_DOCTRINE_USE)
+        self.assertEqual(
+            RELIABILITY_CLASS_BY_DOCTRINE_USE,
+            {"ALLOWED": "RELIABLE", "VERIFY_ONLY": "VERIFY_BEFORE_USE", "DIAGNOSTICS_ONLY": "DIAGNOSTIC", "BLOCKED": "UNRELIABLE"},
+        )
+        # The three tools of the Worker's status table, with the class their doctrineUse maps to.
+        tools = TOOLS_TS.read_text(encoding="utf-8")
+        table = tools.split("const TOOL_DOCTRINE_STATUS", 1)[1].split("\n};", 1)[0]
+        worker_status = {
+            name: RELIABILITY_CLASS_BY_DOCTRINE_USE[use]
+            for name, use in re.findall(r'(\w+): \{[^{}]*?doctrineUse: "(\w+)"', table)
+        }
+        self.assertEqual(worker_status, TOOL_RELIABILITY_CLASS)
+        worker = YAHOO_FINANCE_TS.read_text(encoding="utf-8")
+        self.assertIn('doctrineUse: "ALLOWED",\n    reliabilityClass: reliabilityClassFor("ALLOWED")', worker)
+        self.assertIn('doctrineUse: "BLOCKED",\n    reliabilityClass: reliabilityClassFor("BLOCKED")', worker)
+        self.assertIn("reliabilityClass: reliabilityClassFor(doctrineUse)", tools)
+        python = (ROOT / "server.py").read_text(encoding="utf-8")
+        self.assertIn('"reliabilityClass": _TOOL_RELIABILITY_CLASS["get_company_press_releases"]', python)
+        self.assertIn('"reliabilityClass": _TOOL_RELIABILITY_CLASS["get_sec_filing_section_markdown"]', python)
+        self.assertNotIn("doctrineUse", python)  # Python never emitted it and still does not
+
+    def test_deprecated_field_notices_stay_out_of_data_and_the_legacy_envelope(self) -> None:
+        payload = _node_json(
+            """
+            import assert from "node:assert/strict";
+            import { mcpSuccess, setWorkerEnv } from "./worker/src/response.ts";
+
+            const notice = { code: "DEPRECATED_FIELD", message: "m", severity: "info", fields: ["gatePass"], replacement: "meetsMinimum" };
+            const data = { gatePass: true };
+            setWorkerEnv({ MCP_ENVELOPE_V2: "true" });
+            const v2 = JSON.parse(mcpSuccess("check_volume_liquidity_threshold", JSON.stringify(data), { successWarnings: () => [notice] }));
+            const failure = JSON.parse(mcpSuccess("check_volume_liquidity_threshold", JSON.stringify({ ok: false, data: null, error: { code: "X", message: "x" } }), { successWarnings: () => [notice] }));
+            setWorkerEnv({ MCP_ENVELOPE_V2: "false" });
+            const legacy = mcpSuccess("check_volume_liquidity_threshold", JSON.stringify(data), { successWarnings: () => [notice] });
+            console.log(JSON.stringify({ v2, failure, legacy }));
+            """
+        )
+        self.assertEqual(payload["v2"]["data"], {"gatePass": True})
+        self.assertEqual(payload["v2"]["meta"]["warnings"][0]["code"], "DEPRECATED_FIELD")
+        self.assertEqual(payload["failure"]["meta"]["warnings"], [])
+        self.assertEqual(json.loads(payload["legacy"]), {"gatePass": True})
 
 
 if __name__ == "__main__":
