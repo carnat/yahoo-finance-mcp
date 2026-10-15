@@ -2,7 +2,12 @@
 
 **Status: DRAFT v2, owner decisions applied, NOT YET APPROVED (§8).** This document is the executable plan. The execution commands read it, and they treat each phase's scope, entry criteria and exit criteria as binding gates. **To steer execution, edit this file.** An edited entry criterion is honoured; a note in chat is not.
 
-v2 (2026-10-15) folds in the owner's answers to every v1 open question. The source is `OWNER_DECISIONS_20261015.md`; my verification of its claims against the code is summarised in §7. Per that document, the next governance step is **refining the Sniper Doctrine MCP contract** against these decisions, before any execution phase is approved. The Doctrine is not in this repository, and nothing here has been checked against it.
+v2 (2026-10-15) folds in the owner's answers to every v1 open question. The source is `OWNER_DECISIONS_20261015.md`; my verification of its claims against the code is summarised in §7.
+
+**Universal information outlet (owner direction, 2026-10-15; §7 Q14).** The MCP is a doctrine-neutral information outlet. It publishes facts, provenance and evidence quality in universal language, so any caller can use the data whatever decision framework they follow. It does not carry any one doctrine's vocabulary, permissions or strategy thresholds. Consequences:
+- Doctrine-specific fields are replaced with universal equivalents, through a deprecation window (N1–N3).
+- The Sniper Doctrine no longer gates this plan. It is one downstream consumer, notified through deprecation notices like any other (N4).
+- "Free" means free of doctrine-specific content. **It does not mean unauthenticated**: Q2b auth stands.
 
 | Input | Produced by | Modified (UTC) |
 |---|---|---|
@@ -36,10 +41,12 @@ Move yahoo-finance-mcp from **two parallel god files** (`server.py`, 12.5k lines
 **Controlling principle (owner decision, verbatim):**
 > Pure restructuring preserves behavior. A confirmed Doctrine-critical correctness defect is repaired before, or in the same governed release as, the phase that would otherwise preserve/fossilize it.
 
+*Read under Q14/N4:* "Doctrine-critical" means **data-integrity critical**, as this repository defines it: the P0 class in `BUSINESS_RULES.md`, plus the confirmed semantic/data-integrity defects of Q3i.
+
 **How this brief applies it:**
 - Every move PR is byte-identical.
 - Every decided repair ships as its **own release, before the phase that moves its domain**, so moves and behaviour changes never share a diff.
-- Until the Doctrine defines its "Doctrine-critical" class, the operative repair set is Q1's scheduled repairs plus Q2–Q5 and Q3a–Q3i (§7, resolution R2).
+- The repair set is Q1's scheduled repairs plus Q2–Q5, Q3a–Q3i and the neutrality changes N1–N3 (§7). It is defined by this repository's data-integrity criteria, not by any consumer's framework (N4).
 
 **Why now:**
 - Two High security findings on the public Worker: an open SSRF fetch proxy, and an unauthenticated `/mcp` spending paid quota.
@@ -122,6 +129,9 @@ C4Container
 | Domain regions left in both god files; `_dispatchTool` switch; inline TS schemas; Python evidence-pack orchestration; `earnings.py` `_server_attr` cycle | Domain modules, table router, `schemas.ts`, `evidence_pack.py`, direct imports | Phase 5 |
 | `extract_china_exposure` with hardcoded issuer aliases | Governed preset over `extract_exposure`; aliases in the shared data dir; public action kept (Q5) | R5-extractors, then moved in Phase 5 |
 | Python reading `worker/src/*.json` | Shared data dir | Phase 6 |
+| `doctrineUse` (ALLOWED / VERIFY_ONLY / DIAGNOSTICS_ONLY / BLOCKED), Worker only; `DoctrineToolStatus` type | Universal `reliabilityClass` (`RELIABLE` / `VERIFY_BEFORE_USE` / `DIAGNOSTIC` / `UNRELIABLE`) in **both** runtimes; old field deprecated, then removed (N1) | RN deprecate → Phase 6 remove |
+| Always-null boundary fields `g2`, `opportunity`, `action`, `priceTarget`, `scenarioWeights`, `selectedMethod`, `selectedMultiple` | `decisionUse: EVIDENCE_ONLY` as the single universal marker; null fields deprecated, then removed (N2) | RN deprecate → Phase 6 remove |
+| Strategy labels and thresholds: price-target `bracket` (STRONG_BUY / ACCEPTABLE / CAUTION / AVOID at 75/90/100%), `inferredTag` (SPECULATIVE / LONG / NEAR / INVERTED); liquidity gate (fixed $10M average daily value traded); `t1_inputs` | Raw measures plus neutral, caller-parameterised comparisons: `priceAtOrAboveTarget`; optional caller `min_adv_usd` → `meetsMinimum`; `t1_inputs` → `inputs`. Labels deprecated, then removed (N3) | RN deprecate → Phase 6 remove |
 
 ## 3. Phased Sequence
 
@@ -150,7 +160,7 @@ C4Container
 flowchart LR
   P1["Phase 1<br/>Harden public surface<br/>/modernize-harden · S"]
   P2["Phase 2<br/>Behaviour-contract harness<br/>/modernize-transform (characterisation) · M"]
-  R3["R3 · repairs before news move<br/>BR-NWS-007 · Q3h · Q7 news extraction · S"]
+  R3["R3 · repairs before news move<br/>BR-NWS-007 · Q3h · Q7 news extraction<br/>+ RN neutrality deprecation release · S"]
   P3["Phase 3 · PILOT<br/>Extract News & events · M"]
   R4["R4 · repairs before hub move<br/>Q3a · Q3b · Q3c cap · Q4 · Q8 pin · Q10 telemetry · Q3i shared · M"]
   P4["Phase 4<br/>Extract shared clients (+ Q3g MarketInputs release) · L"]
@@ -222,6 +232,11 @@ Every PR follows `CLAUDE.md`: the TS change first, then the `python-mirror` port
 ### Stream R — Correctness repair releases
 Each R-release is a set of **separately released** behaviour changes that must be live before the move it precedes. All follow the TS → Python mirror → parity flip → docs → version bump → live-verify order.
 
+- **RN: neutrality deprecation release (Q14, N1–N3); ships with or right after R3, before Phase 3.** One cross-cutting release in both runtimes:
+  - **Add the universal fields:** `reliabilityClass` on every tool status (Python gains it too, which also closes the Worker-only parity gap), `priceAtOrAboveTarget`, the optional `min_adv_usd` input with `meetsMinimum`, and `inputs`.
+  - **Keep the old fields for the window:** `doctrineUse`, the seven null boundary fields, `bracket`, `inferredTag`, the fixed liquidity-gate fields and `t1_inputs` are still emitted with **identical values**, marked deprecated in the schema descriptions and `docs/provider-runtime-guidance.md`, with a `DEPRECATED_FIELD` notice naming each field's replacement.
+  - **Window:** at least **one minor version**. The removal release is in Phase 6.
+  - **Release mechanics:** additive, so a minor version bump. Frozen-contract tests and canaries are updated in the same release. The harness pins both old and new fields.
 - **R3 (before Phase 3):**
   - BR-NWS-007: news coverage must not report `FULL` while required sources have failed (Q3i).
   - V3 news follow-through: sources starved by the subrequest budget are reported `PROVIDER_BUDGET_EXHAUSTED` and coverage states the budget cause. This is today's live MSFT 0-item case.
@@ -340,11 +355,14 @@ Each R-release is a set of **separately released** behaviour changes that must b
   - Stale comments and the "79 tools" text (Debt #10).
   - `docs/architecture.md` with the module map.
   - Q3i items triaged as "preserve" get documented as intentional.
+  - **Neutrality removal release (N1–N3):** after at least one minor version since RN, remove `doctrineUse`, the seven null boundary fields, `bracket`, `inferredTag`, the fixed liquidity-gate fields and `t1_inputs` from both runtimes. This is a breaking public-contract change, so it needs a **major version bump** under the README's semver policy (or the owner records an exception). Rename the internal `DoctrineToolStatus` type and `TOOL_DOCTRINE_STATUS` table to neutral names.
+  - **Neutrality audit:** every label-producing field in the contract must be either a factual classification or derived from documented thresholds the caller can override. Doctrine or strategy vocabulary stays out of names, enums and descriptions (extends `docs/tool-naming.md`). Generic market terms (bullish/bearish, credit tiers) are reviewed against that rule.
 - **Entry criteria:**
   - [ ] Phase 5 exit criteria are met.
 - **Exit criteria:**
   - [ ] Python reads nothing under `worker/src`.
   - [ ] `docs/architecture.md` is merged.
+  - [ ] Neutrality: a repo-wide check (CI test) finds no `doctrine` term in any public schema, field, enum or description, and the deprecated fields are gone.
   - [ ] No pinned "expected difference" remains in the harness except documented intentional ones.
   - [ ] Acceptance suite, canaries and live verification are green.
 - **Relative size: S.**
@@ -444,7 +462,7 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
 - [x] **Q3a.** CHANGE: Worker must honor exact `accession_number` with Python-equivalent fail-closed semantics before Phase 4.
 - [x] **Q3b.** CHANGE: centralize ticker/accession validation and apply it consistently across both runtimes/public actions.
 - [x] **Q3c.** CHANGE: zero-volume ratio/flag = null/UNKNOWN with explicit warning. Remove silent Worker truncation; one advertised cross-runtime batch cap, initially 10, with explicit oversize rejection. — *Cap value superseded by Q12 (per-tool caps on the Free plan); the zero-volume rule and explicit rejection stand.*
-- [x] **Q3d.** CHANGE: thresholds use unrounded raw values; display rounding is deterministic and cross-runtime; missing `dataDate` stays null and never falls back to today.
+- [x] **Q3d.** CHANGE: thresholds use unrounded raw values; display rounding is deterministic and cross-runtime; missing `dataDate` stays null and never falls back to today. — *Amended by Q14/N3: the fixed STRONG_BUY…AVOID brackets and SPECULATIVE…INVERTED tags are deprecated and then removed, so the threshold question disappears; deterministic display rounding and the `dataDate` rule stand.*
 - [x] **Q3e.** CHANGE: NaN/inf tolerance -> documented 0.5% default before finite clamp; align AGREED definition to latest SEC + >=1 independent matching provider.
 - [x] **Q3f.** CHANGE: use inclusive `>=` ITM boundary consistently across instrument classes; treasury-stock math still yields zero incremental option/warrant shares at exact strike.
 - [x] **Q3g.** CHANGE: replace `.info` vs raw quoteSummary divergence with one normalized shared-client `MarketInputs` contract consumed by both runtimes.
@@ -461,7 +479,7 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
 ### Resolutions of inconsistencies (proposed by the planner, accepted by the owner 2026-10-15)
 
 - [x] **R1. Q4 timing.** The smoke-ticker table lives in the EDGAR client (`edgar.py:56`, `yahoo-finance.ts:535`), which moves first in Phase 4. Under the controlling principle, Q4 ships in **R4, before Phase 4**.
-- [x] **R2. "Doctrine-critical" is not yet defined.** Until the Doctrine refinement defines the class, the operative repair set is the scheduled repairs from Q1 plus every Q2–Q5 and Q3a–Q3i item, each placed in the R-release before its domain moves. When the Doctrine definition lands, re-tag items and regenerate this brief.
+- [x] **R2. Repair set definition (superseded by Q14/N4).** The repair set is defined by this repository's data-integrity criteria (P0 plus Q3i confirmed defects), not by the Doctrine. There is nothing to re-tag later.
 - [x] **R3. "Governed source policy" for earnings-surprise actuals.** Use the **official issuer release figure first** (as revenue already does); Yahoo `epsActual` only as a labelled fallback when the release has no figure, never silently presented as official.
 
 ### Verification notes (planner checked the decisions against the code, 2026-10-15)
@@ -516,18 +534,22 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
   | Defaults substituted | `defaultSourcesApplied` | field (boolean) | new |
 
   Every name lands as a deliberate frozen-contract change: `public_tool_contract.py`, canaries and docs are updated in the release that introduces it, with a minor version bump.
-- [ ] **Doctrine refinement (owner; gates §8 per `OWNER_DECISIONS_20261015.md`).** The Sniper Doctrine is the caller's decision framework and is **not in this repository**, so the planner cannot refine it. What the repo shows about the interface it consumes:
-  - **Authority boundary (2.5.0):** evidence payloads carry `decisionUse: EVIDENCE_ONLY`, and `selectedMethod`, `selectedMultiple`, `scenarioWeights`, `priceTarget`, `g2`, `opportunity` and `action` are always null. Valuation method, targets and capital action "belong to the caller's doctrine".
-  - **Per-tool `doctrineUse`** (`ALLOWED` / `VERIFY_ONLY` / `DIAGNOSTICS_ONLY` / `BLOCKED`) in `worker/src/tools.ts:1730–1776`. **Parity gap: the Python runtime emits no `doctrineUse` at all.** Under Q6, add it to R4 (shared envelope) unless the Doctrine says the local runtime is out of its scope.
-  - **Decision-grade gates:** `decisionGrade`, `decisionUse=CHECK_OFFICIAL_RELEASES`, coverage states, and "doctrine-relevant evidence families" (`evidence.ts:934`).
-  - Doctrine-internal terms are kept out of tool names (`docs/tool-naming.md`: TPS, EQF, ADV gate, DC-*).
-  - **What the refinement must settle for this brief:**
-    1. Define "Doctrine-critical", so R2's interim operative repair set can be re-tagged.
-    2. Accept the new non-evidence states the Doctrine will start seeing: `PROVIDER_BUDGET_EXHAUSTED`, `PROVIDER_OPT_IN_REQUIRED`, `TTM_PARTIAL`, `NEGATIVE_EARNINGS_BASE` as a tier, `NCI_NOT_TAGGED`, `INSUFFICIENT_HISTORY`, `SESSION_CALENDAR_UNKNOWN`, `ACCESSION_NOT_FOUND`.
-    3. Confirm the changed semantics it relies on: inclusive ITM, `sources=[]` means none, unrounded bracket thresholds, official-release-first surprise actuals, and capped batches with explicit rejection.
-    4. Decide whether `doctrineUse` is required in the local runtime.
+- [x] **Q14. Universal information outlet (owner decision 2026-10-15): apply N1–N4 with deprecation.** Owner, verbatim: "apply N1–N4 with deprecation, free means mcp as information outlet ,not telling doctrine specific data. We should replace them with universal language instead of doctrine specific. So if others who doesn't use the doctrine and connect to the mcp can use any data universally"
+  - **N1:** `doctrineUse` → universal `reliabilityClass`, in both runtimes.
+  - **N2:** drop the seven always-null doctrine-shaped boundary fields; `decisionUse: EVIDENCE_ONLY` stays as the universal boundary marker. `decisionGrade`, coverage and source fields describe evidence quality and stay.
+  - **N3:** strategy labels and fixed thresholds become raw measures plus caller-parameterised neutral comparisons.
+  - **N4:** the Doctrine no longer gates this plan; it adapts to versioned contract changes like any consumer.
+  - **Mechanics:** deprecate in RN (at least one minor version), remove in Phase 6 (major version).
+- [ ] **Q15 (gates RN; `CLAUDE.md` naming decision). Proposed universal names:**
 
-  Then regenerate this brief.
+  | Replaces | Proposed | Values / meaning |
+  |---|---|---|
+  | `doctrineUse` | `reliabilityClass` | `RELIABLE` (was ALLOWED) · `VERIFY_BEFORE_USE` (VERIFY_ONLY) · `DIAGNOSTIC` (DIAGNOSTICS_ONLY) · `UNRELIABLE` (BLOCKED, e.g. unverified section markdown) |
+  | `bracket`, `inferredTag`, `invertedFlag` | `priceAtOrAboveTarget` (boolean); raw `referenceTargetPct` and `distanceToTargetPct` already exist | no labels |
+  | fixed $10M liquidity gate fields | optional input `min_adv_usd`; output `meetsMinimum` (null when no minimum is supplied); raw ADV value already exists | caller-defined threshold |
+  | `t1_inputs` | `inputs` | same content |
+  | deprecation notice | warning code `DEPRECATED_FIELD` (names the field and its replacement) | — |
+- [ ] **Downstream notice (not a gate).** The Sniper Doctrine, and any other consumer, should move to the universal fields within the RN window. The deprecation notices in payloads and docs carry the mapping.
 - [x] **Q12. Cloudflare plan strategy: STAY ON WORKERS FREE WITH PER-TOOL CAPS (owner decision 2026-10-15).** Q3c's single cap of 10 is superseded by the measured constraint (V3). Caps are advertised in each tool's schema as `maxItems`, enforced identically in **both runtimes** (Python too, for parity, although it has no subrequest limit), and an oversize request is rejected with `BATCH_LIMIT_EXCEEDED` instead of being truncated:
 
   | Public action(s) | Ticker cap | Measured at that cap (cold) |
@@ -559,7 +581,7 @@ These are the **84 P0 rules** in `BUSINESS_RULES.md` §2 (data integrity of publ
 
 ```
 Approved by: ________________  Date: __________
-Approval covers: Phase 1 only | Phases 1–3 (incl. R3) | Full plan
+Approval covers: Phase 1 only | Phases 1–3 (incl. R3, RN) | Full plan
 ```
 
-Not yet approvable: `OWNER_DECISIONS_20261015.md` places the Doctrine refinement before execution approval. When approving, the recommended scope is **Phases 1–3 including R3**. Phase 3 is the pilot, and the brief will be regenerated for R4 onward.
+The Doctrine no longer gates approval (Q14/N4). Before signing, settle **V1** (claude.ai Request headers; otherwise Q13) and **Q15** names. Recommended scope: **Phases 1–3 including R3 and RN**. Phase 3 is the pilot, and the brief will be regenerated for R4 onward.
